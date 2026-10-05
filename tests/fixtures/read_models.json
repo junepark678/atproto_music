@@ -1,0 +1,223 @@
+{
+  "schemaVersion": 1,
+  "asOf": "2026-01-15T12:00:00Z",
+  "users": {
+    "Alice": {
+      "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "handle": "alice.test"
+    },
+    "Bob": {
+      "did": "did:plc:bbbbbbbbbbbbbbbbbbbbbbbb",
+      "handle": "bob.test"
+    },
+    "Carol": {
+      "did": "did:plc:cccccccccccccccccccccccc",
+      "handle": "carol.test"
+    }
+  },
+  "scrobbles": [
+    {
+      "rkey": "r01",
+      "owner": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r01",
+      "state": "confirmed",
+      "source": "local",
+      "record": {
+        "$type": "com.example.atmusic.scrobble",
+        "artist": "Björk",
+        "track": "Jóga",
+        "listenedAt": "2026-01-15T11:00:00Z",
+        "createdAt": "2026-01-15T11:00:00Z",
+        "album": "Homogenic"
+      }
+    },
+    {
+      "rkey": "r02",
+      "owner": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r02",
+      "state": "confirmed",
+      "source": "local",
+      "record": {
+        "$type": "com.example.atmusic.scrobble",
+        "artist": "  BJÖRK  ",
+        "track": "jóga",
+        "listenedAt": "2026-01-14T11:00:00Z",
+        "createdAt": "2026-01-14T11:00:00Z",
+        "album": " HOMOGENIC "
+      }
+    },
+    {
+      "rkey": "r03",
+      "owner": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r03",
+      "state": "confirmed",
+      "source": "local",
+      "record": {
+        "$type": "com.example.atmusic.scrobble",
+        "artist": "Radiohead",
+        "track": "Weird Fishes",
+        "listenedAt": "2026-01-08T12:00:00Z",
+        "createdAt": "2026-01-08T12:00:00Z",
+        "album": "In Rainbows"
+      }
+    },
+    {
+      "rkey": "r04",
+      "owner": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r04",
+      "state": "confirmed",
+      "source": "local",
+      "record": {
+        "$type": "com.example.atmusic.scrobble",
+        "artist": "Radiohead",
+        "track": "Karma Police",
+        "listenedAt": "2025-12-16T12:00:00Z",
+        "createdAt": "2025-12-16T12:00:00Z",
+        "album": "OK Computer"
+      }
+    },
+    {
+      "rkey": "r05",
+      "owner": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r05",
+      "state": "confirmed",
+      "source": "local",
+      "record": {
+        "$type": "com.example.atmusic.scrobble",
+        "artist": "Kate Bush",
+        "track": "Running Up That Hill",
+        "listenedAt": "2025-01-15T12:00:00Z",
+        "createdAt": "2025-01-15T12:00:00Z"
+      }
+    },
+    {
+      "rkey": "r06",
+      "owner": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r06",
+      "state": "confirmed",
+      "source": "local",
+      "record": {
+        "$type": "com.example.atmusic.scrobble",
+        "artist": "Kate Bush",
+        "track": "Cloudbusting",
+        "listenedAt": "2025-01-14T11:00:00Z",
+        "createdAt": "2025-01-14T11:00:00Z",
+        "album": "Hounds of Love"
+      }
+    },
+    {
+      "rkey": "r07",
+      "owner": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r07",
+      "state": "confirmed",
+      "source": "local",
+      "record": {
+        "$type": "com.example.atmusic.scrobble",
+        "artist": "Radiohead",
+        "track": "No Surprises",
+        "listenedAt": "2026-01-15T11:00:00Z",
+        "createdAt": "2026-01-15T11:00:00Z",
+        "album": "OK Computer"
+      }
+    },
+    {
+      "rkey": "r08",
+      "owner": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r08",
+      "state": "deleted",
+      "source": "local",
+      "record": {
+        "$type": "com.example.atmusic.scrobble",
+        "artist": "Radiohead",
+        "track": "Paranoid Android",
+        "listenedAt": "2026-01-15T11:45:00Z",
+        "createdAt": "2026-01-15T11:45:00Z",
+        "album": "OK Computer"
+      }
+    },
+    {
+      "rkey": "r09",
+      "owner": "did:plc:bbbbbbbbbbbbbbbbbbbbbbbb",
+      "uri": "at://did:plc:bbbbbbbbbbbbbbbbbbbbbbbb/com.example.atmusic.scrobble/r09",
+      "state": "confirmed",
+      "source": "local",
+      "record": {
+        "$type": "com.example.atmusic.scrobble",
+        "artist": "Massive Attack",
+        "track": "Teardrop",
+        "listenedAt": "2026-01-15T11:30:00Z",
+        "createdAt": "2026-01-15T11:30:00Z",
+        "album": "Mezzanine"
+      }
+    },
+    {
+      "rkey": "r10",
+      "owner": "did:plc:cccccccccccccccccccccccc",
+      "uri": "at://did:plc:cccccccccccccccccccccccc/com.example.atmusic.scrobble/r10",
+      "state": "confirmed",
+      "source": "external",
+      "record": {
+        "$type": "com.example.atmusic.scrobble",
+        "artist": "Portishead",
+        "track": "Roads",
+        "listenedAt": "2026-01-15T11:15:00Z",
+        "createdAt": "2026-01-15T11:15:00Z",
+        "album": "Dummy"
+      }
+    }
+  ],
+  "follows": [
+    {
+      "actor": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "subject": "did:plc:bbbbbbbbbbbbbbbbbbbbbbbb",
+      "state": "confirmed"
+    }
+  ],
+  "expected": {
+    "aliceHistory": [
+      "r07",
+      "r01",
+      "r02",
+      "r03",
+      "r04",
+      "r05",
+      "r06"
+    ],
+    "globalFeed": [
+      "r09",
+      "r10",
+      "r07",
+      "r01",
+      "r02",
+      "r03",
+      "r04",
+      "r05",
+      "r06"
+    ],
+    "aliceFollowingFeed": [
+      "r09"
+    ],
+    "aliceStats": {
+      "all": {
+        "totalScrobbles": 7,
+        "distinctArtists": 3,
+        "distinctTracks": 6
+      },
+      "7d": {
+        "distinctArtists": 2,
+        "distinctTracks": 3,
+        "totalScrobbles": 4
+      },
+      "30d": {
+        "totalScrobbles": 5,
+        "distinctArtists": 2,
+        "distinctTracks": 4
+      },
+      "365d": {
+        "totalScrobbles": 6,
+        "distinctArtists": 3,
+        "distinctTracks": 5
+      }
+    }
+  }
+}

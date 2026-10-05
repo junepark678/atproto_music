@@ -1,0 +1,42 @@
+name: Rust scaffold
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Install pinned Rust
+        run: rustup show
+      - name: Check workspace
+        run: bash scripts/check.sh
+      - name: Build and smoke-test host executable
+        run: |
+          cargo build --locked -p atmusic-server
+          python3 scripts/smoke.py target/debug/atmusic
+  static-linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Install musl build tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Install pinned Rust
+        run: rustup show
+      - name: Build static executable
+        run: cargo build --locked --release --target x86_64-unknown-linux-musl -p atmusic-server
+      - name: Verify static packaging and HTTP
+        run: |
+          binary=target/x86_64-unknown-linux-musl/release/atmusic
+          if readelf -l "$binary" | grep -q INTERP; then exit 1; fi
+          if readelf -d "$binary" | grep -q NEEDED; then exit 1; fi
+          python3 scripts/smoke.py "$binary"
+          (cd "$(dirname "$binary")" && sha256sum atmusic > atmusic.sha256)
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: atmusic-linux-x86_64-musl
+          path: |
+            target/x86_64-unknown-linux-musl/release/atmusic
+            target/x86_64-unknown-linux-musl/release/atmusic.sha256
