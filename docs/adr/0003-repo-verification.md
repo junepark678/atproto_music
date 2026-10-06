@@ -187,6 +187,26 @@ deactivation. Ordinary recovery rescheduling preserves pending reactivation inte
 only explicit account deactivation clears it. Local suppression prevents admission
 and restoration.
 
+First matching stream discovery is bounded and provisional. A decoded commit
+with at least one valid configured music path/action/CID can atomically admit an
+unknown, unsuppressed DID as an inactive owner plus a recovery job. Too-big and
+rebased commits retain this operation hint; bare sync/too-big events and nonmusic
+operations cannot discover an actor. Queue exhaustion rolls back the owner and
+job together. Repeated hints preserve the existing generation and cannot change
+reactivation intent. Existing inactive owners are left unchanged.
+
+The discovery frame supplies no accepted records or checkpoint, even when its
+signature is invalid. Production activation requires fresh authenticated account
+status before and after fetching the full CAR, current-head signing-key proof,
+signature/CID/MST/schema verification, and the durable generation check. A failed
+proof, inactive account, disconnect or suppression keeps the actor hidden from
+profiles, feeds, history and counts. The seven `relay_discovery` cases exercise an
+independent writer's actual PDS `putRecord`, exact verified URI/CID/revision,
+duplicate and nonmusic hints, malformed too-big/rebase operations, bad signatures,
+inactive accounts and disconnect during snapshot fetch. Storage's seven
+`discovery` cases cover the admission transaction, capacity rollback and ordered
+OAuth races. These controlled cases do not enable the production relay.
+
 `BackfillCoordinator` allows four concurrent jobs and 1,024 durable queued DIDs.
 Excess admission returns `backfill_busy` before changing recovery state. Running
 jobs remain durable on cancellation/restart. Relay sessions supply the persisted

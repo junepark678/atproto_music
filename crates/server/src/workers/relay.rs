@@ -11,7 +11,7 @@ use atmusic_atproto::sync::{
     verify::SigningKeyResolver,
 };
 use atmusic_core::namespace::Namespace;
-use atmusic_storage::{RelayRecovery, Repository, StorageError};
+use atmusic_storage::{DiscoveryAdmission, RelayRecovery, Repository, StorageError};
 use std::{
     sync::{
         Arc,
@@ -118,6 +118,19 @@ impl RelayWorker {
     pub async fn mark_disconnected(&self) -> Result<(), RelayWorkerError> {
         self.recovery("worker_stopped", false).await
     }
+    async fn discover_hint(&self, did: &str) -> Result<bool, RelayWorkerError> {
+        match self.backfills.discover(did).await {
+            Ok(DiscoveryAdmission::Queued(_)) => {
+                self.recovery("repository_discovery_pending", true).await?;
+                Ok(true)
+            }
+            Ok(DiscoveryAdmission::Known | DiscoveryAdmission::Suppressed) => Ok(false),
+            Err(error) => {
+                self.recovery("repository_discovery_failed", false).await?;
+                Err(RelayWorkerError::Protocol(error.to_string()))
+            }
+        }
+    }
     /// Connect with the durable checkpoint, decode bounded frames, and apply verified mutations.
     /// Runtime must await `wait_to_reconnect` after every session/error before retrying.
     pub async fn run_session(&self) -> Result<SessionOutcome, RelayWorkerError> {
@@ -187,8 +200,17 @@ impl RelayWorker {
             match event {
                 RelayEvent::Commit(event) => {
                     let user = self.repository.user(&event.did).await?;
-                    // Known DIDs only; no unbounded relay-wide discovery or implicit user admission.
                     if user.is_none() {
+                        // Only configured music operations justify bounded discovery. The frame
+                        // is an untrusted hint: neither its records nor sequence are admitted.
+                        if !event.operations.is_empty() {
+                            outcome.recovery_requested |= self.discover_hint(&event.did).await?;
+                        }
+                        continue;
+                    }
+                    // A duplicate hint must not publish provisional records or reactivate an
+                    // inactive account. Activation belongs to authenticated snapshot recovery.
+                    if user.as_ref().is_some_and(|user| !user.active) {
                         continue;
                     }
                     let gap = user.and_then(|v| v.revision).is_some_and(|revision| {
@@ -272,7 +294,21 @@ impl RelayWorker {
                     self.recovery(&code, false).await?;
                     return Err(RelayWorkerError::Protocol(code));
                 }
-                RelayEvent::Backfill { did, .. } => {
+                RelayEvent::Backfill {
+                    did,
+                    matching_music_operations,
+                    ..
+                } => {
+                    let user = self.repository.user(&did).await?;
+                    if user.is_none() {
+                        if matching_music_operations {
+                            outcome.recovery_requested |= self.discover_hint(&did).await?;
+                        }
+                        continue;
+                    }
+                    if user.as_ref().is_some_and(|user| !user.active) {
+                        continue;
+                    }
                     self.recovery("repository_backfill_required", true).await?;
                     self.backfills
                         .schedule(&did, false)

@@ -10,6 +10,8 @@ With an owned configured publication namespace, production `serve` initializes t
 
 Backfills check authenticated current account status and PDS location before and after fetching the CAR. Head advancement, identity migration or changed account observations retain durable retry work. Account mutations use the backfill generation captured before upstream waits and check it transactionally. Generations come from a persistent global allocator, so disconnect/re-authorize cannot reuse an old generation. An interrupted or stale response cannot unsuppress an account, replace fresh OAuth recovery, or make an unverified snapshot visible.
 
+An injected relay session can discover a previously unknown writer when a decoded commit contains a configured music operation. The operation is only a hint: one writer transaction admits an inactive owner and a bounded snapshot job, without applying the frame or advancing its checkpoint. Duplicate hints preserve the original generation, suppressed owners remain absent, and queue-full admission rolls back the provisional owner. Only a complete authenticated current-head snapshot can activate a new writer. Existing inactive owners retain their account policy; a commit hint cannot reactivate them. Nonmusic frames do not admit new owners. This bounded discovery path does not enable the production relay or establish its coverage.
+
 `serve_application_until` stops API and metrics listeners together, then runs worker cleanup before stopping writer admission. Its one absolute 30-second deadline covers workers, both HTTP servers and storage closure. The production WSS adapter enforces shared public DNS/IP authorization, pinned destinations, validated Rustls hostname TLS, bounded messages/control reads and deadlines. Relay ingestion remains disabled pending a safe covered-event progress and recovery-barrier policy. Global indexing therefore remains recovering with `caughtUp=false`, even after a current-head backfill completes. These components do not execute the full packaged or external interoperability acceptance gates.
 
 Focused validation:
@@ -19,6 +21,8 @@ cargo test --locked -p atmusic-server --test worker_runtime
 cargo test --locked -p atmusic-server --test startup --test shutdown_runtime
 cargo clippy --locked -p atmusic-server --lib --bin atmusic --test worker_runtime --test startup --test shutdown_runtime -- -D warnings
 cargo test --locked -p atmusic-atproto --test relay_websocket
+cargo test --locked -p atmusic-server --test relay_discovery
+cargo test --locked -p atmusic-storage --test discovery
 ```
 
 Runtime targets cover actual workers and signed PDS fixtures: notification/polling, cancellation after remote commit/restart, interrupted backfill recovery, relay checkpoint/socket cleanup, reconnect cancellation, account/PDS/head races, disconnect/re-authorization ordering, conditional startup and both listeners sharing the shutdown deadline. The WSS target uses controlled TLS fixtures. Executed command results belong in the final validation evidence; these fixtures do not constitute a packaged or live acceptance run.

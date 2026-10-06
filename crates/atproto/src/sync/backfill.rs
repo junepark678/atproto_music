@@ -9,7 +9,9 @@ use crate::{
 };
 use async_trait::async_trait;
 use atmusic_core::namespace::Namespace;
-use atmusic_storage::{BackfillJob, Repository, RepositorySnapshot, SnapshotOutcome, StorageError};
+use atmusic_storage::{
+    BackfillJob, DiscoveryAdmission, Repository, RepositorySnapshot, SnapshotOutcome, StorageError,
+};
 use chrono::{DateTime, Utc};
 use std::sync::{
     Arc,
@@ -144,6 +146,17 @@ impl BackfillCoordinator {
     }
     pub fn active(&self) -> usize {
         self.active.load(Ordering::Acquire)
+    }
+    /// A matching stream operation is an admission hint, never authoritative repository data.
+    /// New actors remain inactive until the account-checked, signed snapshot completes.
+    pub async fn discover(&self, did: &str) -> Result<DiscoveryAdmission, BackfillError> {
+        self.repository
+            .discover_repository(did.into(), self.clock.now().to_rfc3339())
+            .await
+            .map_err(|error| match error {
+                StorageError::ServiceBusy => BackfillError::Busy,
+                error => BackfillError::Storage(error),
+            })
     }
     pub async fn schedule(
         &self,

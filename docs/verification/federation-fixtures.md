@@ -39,6 +39,22 @@ cargo test --locked -p atmusic-server --test federation_faults -- --nocapture
 Result: six passed, zero failed. Focused clippy for `federation_faults`,
 `relay_recovery` and `backfill_recovery` also passed with `-D warnings`.
 
+The separate `relay_discovery` target covers an actor that has never authorized
+the application. Its independent client makes one actual PDS `putRecord` request;
+a matching normal, too-big or rebased commit hint queues an inactive owner without
+accepting records or a relay checkpoint. Fresh DID/PDS account checks, a signed
+full CAR and exact current-head witness must then activate the verified record.
+Seven cases check the exact URI/CID/revision and public counts, nonmusic/bare sync
+and malformed hint rejection, duplicate coalescing, suppression, known inactive
+actors, invalid signatures and disconnect during fetch. No OAuth tokens, sessions,
+operations or outbox entries are created by discovery. Storage's seven `discovery`
+cases separately prove bounded atomic admission and ordered OAuth races.
+
+```sh
+cargo test --locked -p atmusic-server --test relay_discovery
+cargo test --locked -p atmusic-storage --test discovery
+```
+
 The production WSS adapter is implemented with exactly pinned
 `tokio-tungstenite = 0.30.0` and validated Rustls certificates and hostnames. Its
 separate deterministic transport target ran on 2026-10-05:
@@ -62,8 +78,9 @@ transport details and the remaining trust prerequisite are in
 
 `python3 scripts/live/federation_check.py --fixture` runs the six-case federation
 target above. `--live` returns exit code 2 and lists missing prerequisite names.
-The authenticated revision-key history resolver, production federation activation
-and live acceptance runner remain blocked or unimplemented, so the script cannot
+Current-head trust supports production outbox and snapshot workers. Production
+federation activation, the safe progress/recovery policy for older relay events,
+and the live acceptance runner remain blocked or unimplemented, so the script cannot
 produce live success even when environment variables are present. An owned
 namespace, dedicated real identities, public HTTPS callback, two independently
 operated PDSs and verified configured relay coverage also remain necessary. These

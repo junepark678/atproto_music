@@ -85,6 +85,8 @@ pub enum RelayEvent {
         did: String,
         revision: Option<String>,
         reason: BackfillReason,
+        /// A bounded, structurally valid configured operation is only a discovery hint.
+        matching_music_operations: bool,
     },
     Ignored {
         event_type: Option<String>,
@@ -210,6 +212,7 @@ pub fn decode_frame(frame: &[u8], namespace: &Namespace) -> Result<RelayEvent, F
             if let Some(since) = &body.since {
                 validate_revision(since)?;
             }
+            let operations = music_operations(body.ops, namespace)?;
             if body.too_big || body.rebase {
                 RelayEvent::Backfill {
                     sequence: body.seq,
@@ -220,6 +223,7 @@ pub fn decode_frame(frame: &[u8], namespace: &Namespace) -> Result<RelayEvent, F
                     } else {
                         BackfillReason::Rebase
                     },
+                    matching_music_operations: !operations.is_empty(),
                 }
             } else {
                 let commit = cid_link(&body.commit)?;
@@ -228,41 +232,6 @@ pub fn decode_frame(frame: &[u8], namespace: &Namespace) -> Result<RelayEvent, F
                 };
                 if blocks.len() > MAX_CAR_BYTES {
                     return Err(FrameError::CarTooLarge);
-                }
-                let mut paths = HashSet::new();
-                let mut operations = Vec::new();
-                for operation in body.ops.0 {
-                    let (collection, rkey) = operation
-                        .path
-                        .split_once('/')
-                        .ok_or(FrameError::InvalidField("ops.path"))?;
-                    if !valid_rkey(rkey) || collection.is_empty() {
-                        return Err(FrameError::InvalidField("ops.path"));
-                    }
-                    if !paths.insert(operation.path.clone()) {
-                        return Err(FrameError::InvalidField("ops.path"));
-                    }
-                    // Avoid record decoding, CAR lookups, and indexing for unrelated collections.
-                    if collection != namespace.scrobble_collection()
-                        && collection != namespace.follow_collection()
-                    {
-                        continue;
-                    }
-                    let action = match operation.action.as_str() {
-                        "create" => Action::Create,
-                        "update" => Action::Update,
-                        "delete" => Action::Delete,
-                        _ => return Err(FrameError::InvalidField("ops.action")),
-                    };
-                    let cid = operation.cid.as_ref().map(cid_link).transpose()?;
-                    if (action == Action::Delete) != cid.is_none() {
-                        return Err(FrameError::InvalidField("ops.cid"));
-                    }
-                    operations.push(Operation {
-                        action,
-                        path: operation.path,
-                        cid,
-                    });
                 }
                 RelayEvent::Commit(CommitEvent {
                     sequence: body.seq,
@@ -312,6 +281,7 @@ pub fn decode_frame(frame: &[u8], namespace: &Namespace) -> Result<RelayEvent, F
                 } else {
                     BackfillReason::TooBig
                 },
+                matching_music_operations: false,
             }
         }
         (1, None) => return Err(FrameError::InvalidField("header.t")),
@@ -339,6 +309,45 @@ fn decode<T: de::DeserializeOwned>(reader: &mut Cursor<&[u8]>) -> Result<T, Fram
             FrameError::InvalidCbor
         }
     })
+}
+
+fn music_operations(
+    bounded: BoundedOperations,
+    namespace: &Namespace,
+) -> Result<Vec<Operation>, FrameError> {
+    let mut paths = HashSet::new();
+    let mut operations = Vec::new();
+    for operation in bounded.0 {
+        let (collection, rkey) = operation
+            .path
+            .split_once('/')
+            .ok_or(FrameError::InvalidField("ops.path"))?;
+        if !valid_rkey(rkey) || collection.is_empty() || !paths.insert(operation.path.clone()) {
+            return Err(FrameError::InvalidField("ops.path"));
+        }
+        // Avoid record decoding, CAR lookups, and indexing for unrelated collections.
+        if collection != namespace.scrobble_collection()
+            && collection != namespace.follow_collection()
+        {
+            continue;
+        }
+        let action = match operation.action.as_str() {
+            "create" => Action::Create,
+            "update" => Action::Update,
+            "delete" => Action::Delete,
+            _ => return Err(FrameError::InvalidField("ops.action")),
+        };
+        let cid = operation.cid.as_ref().map(cid_link).transpose()?;
+        if (action == Action::Delete) != cid.is_none() {
+            return Err(FrameError::InvalidField("ops.cid"));
+        }
+        operations.push(Operation {
+            action,
+            path: operation.path,
+            cid,
+        });
+    }
+    Ok(operations)
 }
 
 pub(crate) fn cid_link(value: &Value) -> Result<Cid, FrameError> {

@@ -17,6 +17,12 @@ pub struct BackfillJob {
     pub failure_code: Option<String>,
 }
 #[derive(Clone, Debug)]
+pub enum DiscoveryAdmission {
+    Queued(BackfillJob),
+    Known,
+    Suppressed,
+}
+#[derive(Clone, Debug)]
 pub struct RepositorySnapshot {
     pub did: String,
     pub revision: String,
@@ -44,6 +50,45 @@ pub struct RelayRecovery {
 }
 
 impl Repository {
+    /// A relay hint admits only an inactive owner and bounded recovery job, never public records.
+    /// Repeated hints cannot supersede a job, change account policy, or lift suppression.
+    pub async fn discover_repository(
+        &self,
+        did: String,
+        now: String,
+    ) -> Result<DiscoveryAdmission, StorageError> {
+        atmusic_core::follow::validate_did_syntax(&did)
+            .map_err(|_| StorageError::Invariant("invalid discovery DID"))?;
+        self.writer
+            .execute(move |c| {
+                Box::pin(async move {
+                    let suppressed: bool =
+                        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM suppression WHERE did=?)")
+                            .bind(&did)
+                            .fetch_one(&mut *c)
+                            .await?;
+                    if suppressed {
+                        return Ok(DiscoveryAdmission::Suppressed);
+                    }
+                    let known: bool =
+                        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE did=?)")
+                            .bind(&did)
+                            .fetch_one(&mut *c)
+                            .await?;
+                    if known {
+                        return Ok(DiscoveryAdmission::Known);
+                    }
+                    let mut user = User::new(&did, &now);
+                    user.active = false;
+                    super::public::upsert_user(c, &user).await?;
+                    let job = request_backfill(c, &did, true, &now)
+                        .await?
+                        .ok_or(StorageError::Invariant("discovery admission lost owner"))?;
+                    Ok(DiscoveryAdmission::Queued(job))
+                })
+            })
+            .await
+    }
     pub async fn request_backfill(
         &self,
         did: String,
