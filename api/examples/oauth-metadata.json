@@ -1,0 +1,19 @@
+{
+  "client_id": "https://music.example/oauth/client-metadata.json",
+  "client_name": "AT Protocol Music",
+  "client_uri": "https://music.example",
+  "redirect_uris": [
+    "https://music.example/api/v1/auth/callback"
+  ],
+  "scope": "atproto repo:com.example.atmusic.scrobble repo:com.example.atmusic.follow",
+  "grant_types": [
+    "authorization_code",
+    "refresh_token"
+  ],
+  "response_types": [
+    "code"
+  ],
+  "token_endpoint_auth_method": "none",
+  "application_type": "web",
+  "dpop_bound_access_tokens": true
+}

@@ -1,4 +1,10 @@
-//! Shared API types. Domain validation is tracked by M1.1 and M3.1.
+//! Shared API types and schema-v1 domain validation.
+
+pub mod cursor;
+pub mod follow;
+pub mod music_key;
+pub mod namespace;
+pub mod scrobble;
 
 use serde::Serialize;
 

@@ -1,0 +1,10 @@
+{
+  "error": {
+    "code": "validation_failed",
+    "message": "A request field is invalid.",
+    "requestId": "a858325e-7dd0-4b1b-baaa-3b65af37f963",
+    "fields": {
+      "limit": "Must be an integer between 1 and 100."
+    }
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "not_ready",
+    "message": "Storage and the write worker are not initialized.",
+    "requestId": "a858325e-7dd0-4b1b-baaa-3b65af37f963"
+  }
+}

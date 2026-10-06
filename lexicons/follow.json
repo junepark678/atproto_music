@@ -1,0 +1,20 @@
+{
+  "lexicon": 1,
+  "id": "com.example.atmusic.follow",
+  "description": "Schema-v1 music follow, separate from app.bsky.graph.follow. This ID is fixture-only.",
+  "defs": {
+    "main": {
+      "type": "record",
+      "key": "any",
+      "description": "Local record key is f followed by lowercase hexadecimal SHA-256(subject DID). Duplicate external records represent one effective actor/subject edge.",
+      "record": {
+        "type": "object",
+        "required": ["subject", "createdAt"],
+        "properties": {
+          "subject": {"type": "string", "format": "did"},
+          "createdAt": {"type": "string", "format": "datetime", "description": "Explicit UTC RFC3339, from 1970-01-01 through event receipt time plus 300 seconds inclusive."}
+        }
+      }
+    }
+  }
+}

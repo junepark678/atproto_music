@@ -1,6 +1,6 @@
 # Deterministic MVP test protocol
 
-The issue manifest contains 258 named regression cases. These are requirements for future implementation, **not tests claimed to pass today**. The current executable only has four scaffold router tests plus the packaged HTTP/shutdown smoke test.
+The issue manifest contains 258 named regression cases. They remain the acceptance requirements; an aggregate test count does not prove every case passed. The working backend now has core, storage, OAuth, signed repository, API, recovery and operational integration suites. [Validation evidence](../VALIDATION.md) records the executed checks, artifact results and blocked live gates. The Preact and browser suites remain unstarted behind the backend live acceptance gate.
 
 ## How every implementation leaf must report tests
 

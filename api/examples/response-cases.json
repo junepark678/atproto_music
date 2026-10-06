@@ -1,0 +1,648 @@
+[
+  {
+    "method": "GET",
+    "path": "/health/live",
+    "status": 200,
+    "example": "live"
+  },
+  {
+    "method": "GET",
+    "path": "/health/ready",
+    "status": 200,
+    "example": "ready"
+  },
+  {
+    "method": "GET",
+    "path": "/health/ready",
+    "status": 503,
+    "example": "error-503"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/meta",
+    "status": 200,
+    "example": "meta"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/meta",
+    "status": 429,
+    "example": "error-429"
+  },
+  {
+    "method": "GET",
+    "path": "/oauth/client-metadata.json",
+    "status": 200,
+    "example": "oauth-metadata"
+  },
+  {
+    "method": "GET",
+    "path": "/oauth/client-metadata.json",
+    "status": 429,
+    "example": "error-429"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/auth/start",
+    "status": 200,
+    "example": "auth-start"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/auth/start",
+    "status": 400,
+    "example": "error-400"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/auth/start",
+    "status": 403,
+    "example": "error-403"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/auth/start",
+    "status": 404,
+    "example": "error-404"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/auth/start",
+    "status": 413,
+    "example": "error-413"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/auth/start",
+    "status": 422,
+    "example": "error-422"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/auth/start",
+    "status": 429,
+    "example": "error-429"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/auth/start",
+    "status": 502,
+    "example": "error-502"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/auth/callback",
+    "status": 303,
+    "body": null,
+    "headers": {
+      "Location": "https://music.example/feed",
+      "Set-Cookie": "atmusic_session=fixture-session; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=604800"
+    }
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/auth/callback",
+    "status": 400,
+    "example": "error-400"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/auth/callback",
+    "status": 401,
+    "example": "error-401"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/auth/session",
+    "status": 200,
+    "example": "session"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/auth/session",
+    "status": 401,
+    "example": "error-401"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/auth/session",
+    "status": 429,
+    "example": "error-429"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/auth/logout",
+    "status": 204,
+    "body": null,
+    "headers": {
+      "Set-Cookie": "atmusic_session=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0"
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/auth/logout",
+    "status": 401,
+    "example": "error-401"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/auth/logout",
+    "status": 403,
+    "example": "error-403"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/auth/logout",
+    "status": 429,
+    "example": "error-429"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/resolve",
+    "status": 200,
+    "example": "resolve"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/resolve",
+    "status": 404,
+    "example": "error-404"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/resolve",
+    "status": 422,
+    "example": "error-422"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/resolve",
+    "status": 429,
+    "example": "error-429"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/resolve",
+    "status": 502,
+    "example": "error-502"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/scrobbles",
+    "status": 201,
+    "example": "scrobble"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/scrobbles",
+    "status": 202,
+    "example": "accepted"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/scrobbles",
+    "status": 400,
+    "example": "error-400"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/scrobbles",
+    "status": 401,
+    "example": "error-401"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/scrobbles",
+    "status": 403,
+    "example": "error-403"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/scrobbles",
+    "status": 409,
+    "example": "error-409",
+    "alternatives": [
+      {
+        "example": "idempotency-result-unavailable",
+        "headers": {
+          "Location": "/api/v1/operations/fixture-operation-1"
+        }
+      }
+    ]
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/scrobbles",
+    "status": 413,
+    "example": "error-413"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/scrobbles",
+    "status": 422,
+    "example": "error-422"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/scrobbles",
+    "status": 429,
+    "example": "error-429"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/scrobbles",
+    "status": 502,
+    "example": "error-502"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/scrobbles/{id}",
+    "status": 200,
+    "example": "scrobble"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/scrobbles/{id}",
+    "status": 404,
+    "example": "error-404"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/scrobbles/{id}",
+    "status": 422,
+    "example": "error-422"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/scrobbles/{id}",
+    "status": 429,
+    "example": "error-429"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/scrobbles/{id}",
+    "status": 202,
+    "example": "accepted"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/scrobbles/{id}",
+    "status": 204,
+    "body": null
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/scrobbles/{id}",
+    "status": 401,
+    "example": "error-401"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/scrobbles/{id}",
+    "status": 403,
+    "example": "error-403"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/scrobbles/{id}",
+    "status": 422,
+    "example": "error-422"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/scrobbles/{id}",
+    "status": 429,
+    "example": "error-429"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/scrobbles/{id}",
+    "status": 502,
+    "example": "error-502",
+    "alternatives": [
+      {
+        "example": "deletion-failed",
+        "headers": {
+          "Location": "/api/v1/operations/123e4567-e89b-12d3-a456-426614174000"
+        }
+      }
+    ]
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/operations/{id}",
+    "status": 200,
+    "example": "operation"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/operations/{id}",
+    "status": 401,
+    "example": "error-401"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/operations/{id}",
+    "status": 403,
+    "example": "error-403"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/operations/{id}",
+    "status": 404,
+    "example": "error-404"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/operations/{id}",
+    "status": 429,
+    "example": "error-429"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/users/{did}/scrobbles",
+    "status": 200,
+    "example": "scrobble-page"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/users/{did}/scrobbles",
+    "status": 400,
+    "example": "error-400"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/users/{did}/scrobbles",
+    "status": 422,
+    "example": "error-422"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/users/{did}/scrobbles",
+    "status": 429,
+    "example": "error-429"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/feed",
+    "status": 200,
+    "example": "scrobble-page"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/feed",
+    "status": 400,
+    "example": "error-400"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/feed",
+    "status": 401,
+    "example": "error-401"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/feed",
+    "status": 422,
+    "example": "error-422"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/feed",
+    "status": 429,
+    "example": "error-429"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/users/{did}/profile",
+    "status": 200,
+    "example": "profile"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/users/{did}/profile",
+    "status": 404,
+    "example": "error-404"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/users/{did}/profile",
+    "status": 422,
+    "example": "error-422"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/users/{did}/profile",
+    "status": 429,
+    "example": "error-429"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/users/{did}/stats",
+    "status": 200,
+    "example": "stats"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/users/{did}/stats",
+    "status": 422,
+    "example": "error-422"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/users/{did}/stats",
+    "status": 429,
+    "example": "error-429"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/v1/follows/{did}",
+    "status": 201,
+    "example": "follow"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/v1/follows/{did}",
+    "status": 202,
+    "example": "accepted"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/v1/follows/{did}",
+    "status": 200,
+    "example": "follow"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/v1/follows/{did}",
+    "status": 401,
+    "example": "error-401"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/v1/follows/{did}",
+    "status": 403,
+    "example": "error-403"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/v1/follows/{did}",
+    "status": 422,
+    "example": "error-422"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/v1/follows/{did}",
+    "status": 429,
+    "example": "error-429"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/v1/follows/{did}",
+    "status": 502,
+    "example": "error-502"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/follows/{did}",
+    "status": 202,
+    "example": "accepted"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/follows/{did}",
+    "status": 204,
+    "body": null
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/follows/{did}",
+    "status": 401,
+    "example": "error-401"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/follows/{did}",
+    "status": 403,
+    "example": "error-403"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/follows/{did}",
+    "status": 422,
+    "example": "error-422"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/follows/{did}",
+    "status": 429,
+    "example": "error-429"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/follows/{did}",
+    "status": 502,
+    "example": "error-502",
+    "alternatives": [
+      {
+        "example": "deletion-failed",
+        "headers": {
+          "Location": "/api/v1/operations/123e4567-e89b-12d3-a456-426614174000"
+        }
+      }
+    ]
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/users/{did}/following",
+    "status": 200,
+    "example": "follow-page"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/users/{did}/following",
+    "status": 400,
+    "example": "error-400"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/users/{did}/following",
+    "status": 422,
+    "example": "error-422"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/users/{did}/following",
+    "status": 429,
+    "example": "error-429"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/users/{did}/followers",
+    "status": 200,
+    "example": "follow-page"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/users/{did}/followers",
+    "status": 400,
+    "example": "error-400"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/users/{did}/followers",
+    "status": 422,
+    "example": "error-422"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/users/{did}/followers",
+    "status": 429,
+    "example": "error-429"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/account/export",
+    "status": 200,
+    "example": "export",
+    "headers": {
+      "Content-Disposition": "attachment; filename=\"music-export.json\""
+    }
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/account/export",
+    "status": 401,
+    "example": "error-401"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/account/export",
+    "status": 429,
+    "example": "error-429"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/account/local-data",
+    "status": 204,
+    "body": null
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/account/local-data",
+    "status": 401,
+    "example": "error-401"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/account/local-data",
+    "status": 403,
+    "example": "error-403"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/account/local-data",
+    "status": 429,
+    "example": "error-429"
+  }
+]

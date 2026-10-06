@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "deletion_failed",
+    "message": "Remote removal failed; inspect the original operation.",
+    "requestId": "a858325e-7dd0-4b1b-baaa-3b65af37f963"
+  }
+}

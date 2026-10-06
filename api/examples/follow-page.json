@@ -1,0 +1,19 @@
+{
+  "items": [
+    {
+      "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.follow/f9a71cc1369cb0ae7a6fa16d2b9ecdc8d3ba62a9c519fe9af11a322c90e9ef6f2",
+      "cid": "bafyreieogjytekr7rpqty3rtkfjjglj35ub2ipqjh6ftn7rbxwqe5242jq",
+      "actor": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "subject": "did:plc:bbbbbbbbbbbbbbbbbbbbbbbb",
+      "createdAt": "2026-01-15T12:00:00Z"
+    }
+  ],
+  "nextCursor": null,
+  "asOf": "2026-01-15T12:00:00Z",
+  "indexing": {
+    "state": "current",
+    "caughtUp": true,
+    "lastIndexedAt": "2026-01-15T12:00:00Z",
+    "lagSeconds": 0
+  }
+}

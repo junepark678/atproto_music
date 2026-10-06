@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "idempotency_conflict",
+    "message": "The same key was used with different canonical input.",
+    "requestId": "a858325e-7dd0-4b1b-baaa-3b65af37f963"
+  }
+}

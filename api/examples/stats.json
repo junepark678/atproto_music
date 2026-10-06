@@ -1,0 +1,28 @@
+{
+  "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+  "window": "all",
+  "asOf": "2026-01-15T12:00:00Z",
+  "totalScrobbles": 1,
+  "distinctArtists": 1,
+  "distinctTracks": 1,
+  "topArtists": [
+    {
+      "artist": "Björk",
+      "scrobbleCount": 1
+    }
+  ],
+  "topTracks": [
+    {
+      "artist": "Björk",
+      "track": "Jóga",
+      "scrobbleCount": 1
+    }
+  ],
+  "topAlbums": [
+    {
+      "artist": "Björk",
+      "album": "Homogenic",
+      "scrobbleCount": 1
+    }
+  ]
+}

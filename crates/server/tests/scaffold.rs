@@ -30,7 +30,7 @@ async fn liveness_does_not_claim_readiness() {
 
     let (status, _, body) = get("/health/ready").await;
     assert_eq!(status, 503);
-    assert_eq!(body["error"]["code"], "not_initialized");
+    assert_eq!(body["error"]["code"], "storage_not_ready");
     uuid::Uuid::parse_str(body["error"]["requestId"].as_str().unwrap()).unwrap();
 }
 
@@ -43,8 +43,8 @@ async fn metadata_advertises_no_implemented_music_capabilities() {
 }
 
 #[tokio::test]
-async fn unimplemented_api_and_deep_links_return_json_404() {
-    for path in ["/api/v1/scrobbles", "/users/example", "/assets/missing.js"] {
+async fn unimplemented_api_and_missing_assets_return_json_404() {
+    for path in ["/api/v1/unimplemented", "/assets/missing.js"] {
         let (status, content_type, body) = get(path).await;
         assert_eq!(status, 404, "{path}");
         assert_eq!(content_type, "application/json");
@@ -65,5 +65,5 @@ async fn root_serves_embedded_placeholder_html() {
     );
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     let text = std::str::from_utf8(&bytes).unwrap();
-    assert!(text.contains("Music features are not implemented yet."));
+    assert!(text.contains("The music interface is not available yet."));
 }
