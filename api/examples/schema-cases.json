@@ -1,0 +1,737 @@
+[
+  {
+    "name": "minimal_scrobble_input",
+    "schema": "ScrobbleInput",
+    "valid": true,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z"
+    },
+    "reason": ""
+  },
+  {
+    "name": "raw_oversize_before_trim",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  ",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z"
+    },
+    "reason": ""
+  },
+  {
+    "name": "unicode_scalar_utf8_boundary",
+    "schema": "ScrobbleInput",
+    "valid": true,
+    "value": {
+      "artist": "𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z"
+    },
+    "reason": ""
+  },
+  {
+    "name": "unicode_scalar_oversize",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z"
+    },
+    "reason": ""
+  },
+  {
+    "name": "whitespace_artist",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": " \t\n",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z"
+    },
+    "reason": ""
+  },
+  {
+    "name": "omitted_optional_album",
+    "schema": "ScrobbleInput",
+    "valid": true,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z"
+    },
+    "reason": ""
+  },
+  {
+    "name": "empty_album",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z",
+      "album": ""
+    },
+    "reason": ""
+  },
+  {
+    "name": "null_album",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z",
+      "album": null
+    },
+    "reason": ""
+  },
+  {
+    "name": "wrong_artist_type",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": 42,
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z"
+    },
+    "reason": ""
+  },
+  {
+    "name": "duration_min",
+    "schema": "ScrobbleInput",
+    "valid": true,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z",
+      "durationSeconds": 1
+    },
+    "reason": ""
+  },
+  {
+    "name": "duration_max",
+    "schema": "ScrobbleInput",
+    "valid": true,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z",
+      "durationSeconds": 86400
+    },
+    "reason": ""
+  },
+  {
+    "name": "duration_zero",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z",
+      "durationSeconds": 0
+    },
+    "reason": ""
+  },
+  {
+    "name": "duration_over_max",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z",
+      "durationSeconds": 86401
+    },
+    "reason": ""
+  },
+  {
+    "name": "duration_fraction",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z",
+      "durationSeconds": 1.5
+    },
+    "reason": ""
+  },
+  {
+    "name": "duration_boolean",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z",
+      "durationSeconds": true
+    },
+    "reason": ""
+  },
+  {
+    "name": "invalid_mbid",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z",
+      "recordingMbid": "music-id"
+    },
+    "reason": ""
+  },
+  {
+    "name": "historical_lower_boundary",
+    "schema": "ScrobbleInput",
+    "valid": true,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "1970-01-01T00:00:00Z"
+    },
+    "reason": ""
+  },
+  {
+    "name": "historical_below_boundary",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "1969-12-31T23:59:59Z"
+    },
+    "reason": ""
+  },
+  {
+    "name": "future_boundary_300",
+    "schema": "ScrobbleInput",
+    "valid": true,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T12:05:00Z"
+    },
+    "reason": ""
+  },
+  {
+    "name": "future_rejected_301",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T12:05:01Z"
+    },
+    "reason": ""
+  },
+  {
+    "name": "utc_zero_offset",
+    "schema": "ScrobbleInput",
+    "valid": true,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00+00:00"
+    },
+    "reason": ""
+  },
+  {
+    "name": "non_utc_offset",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T12:00:00+01:00"
+    },
+    "reason": ""
+  },
+  {
+    "name": "unknown_offset",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00-00:00"
+    },
+    "reason": ""
+  },
+  {
+    "name": "timestamp_missing_offset",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00"
+    },
+    "reason": ""
+  },
+  {
+    "name": "invalid_calendar_date",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-02-30T11:00:00Z"
+    },
+    "reason": ""
+  },
+  {
+    "name": "valid_did_web",
+    "schema": "Did",
+    "valid": true,
+    "value": "did:web:music.example:users:alice",
+    "reason": ""
+  },
+  {
+    "name": "valid_did_plc",
+    "schema": "Did",
+    "valid": true,
+    "value": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+    "reason": ""
+  },
+  {
+    "name": "invalid_did_url",
+    "schema": "Did",
+    "valid": false,
+    "value": "https://music.example/alice",
+    "reason": ""
+  },
+  {
+    "name": "invalid_did_handle",
+    "schema": "Did",
+    "valid": false,
+    "value": "alice.test",
+    "reason": ""
+  },
+  {
+    "name": "invalid_uri_bare_rkey",
+    "schema": "AtUri",
+    "valid": false,
+    "value": "r01",
+    "reason": ""
+  },
+  {
+    "name": "invalid_uri_handle_authority",
+    "schema": "AtUri",
+    "valid": false,
+    "value": "at://alice.test/com.example.atmusic.scrobble/r01",
+    "reason": ""
+  },
+  {
+    "name": "invalid_uri_missing_key",
+    "schema": "AtUri",
+    "valid": false,
+    "value": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble",
+    "reason": ""
+  },
+  {
+    "name": "wrong_scrobble_count_type",
+    "schema": "Profile",
+    "valid": false,
+    "value": {
+      "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "handle": "alice.test",
+      "joinedAt": "2026-01-15T12:00:00Z",
+      "indexedAt": "2026-01-15T12:00:00Z",
+      "totalScrobbles": "1",
+      "followerCount": 0,
+      "followingCount": 1,
+      "indexing": {
+        "state": "current",
+        "caughtUp": true,
+        "lastIndexedAt": "2026-01-15T12:00:00Z",
+        "lagSeconds": 0
+      }
+    },
+    "reason": ""
+  },
+  {
+    "name": "negative_profile_count",
+    "schema": "Profile",
+    "valid": false,
+    "value": {
+      "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "handle": "alice.test",
+      "joinedAt": "2026-01-15T12:00:00Z",
+      "indexedAt": "2026-01-15T12:00:00Z",
+      "totalScrobbles": -1,
+      "followerCount": 0,
+      "followingCount": 1,
+      "indexing": {
+        "state": "current",
+        "caughtUp": true,
+        "lastIndexedAt": "2026-01-15T12:00:00Z",
+        "lagSeconds": 0
+      }
+    },
+    "reason": ""
+  },
+  {
+    "name": "closed_response_object",
+    "schema": "ScrobbleResult",
+    "valid": false,
+    "value": {
+      "scrobble": {
+        "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r01",
+        "cid": "bafyreieogjytekr7rpqty3rtkfjjglj35ub2ipqjh6ftn7rbxwqe5242jq",
+        "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+        "revision": "3mfixture",
+        "artist": "Björk",
+        "track": "Jóga",
+        "album": "Homogenic",
+        "listenedAt": "2026-01-15T11:00:00Z",
+        "createdAt": "2026-01-15T12:00:00Z",
+        "durationSeconds": 305,
+        "recordingMbid": "13f12616-51d7-4023-a70b-a288ced4693a",
+        "indexedAt": "2026-01-15T12:00:00Z"
+      },
+      "accessToken": "not-real"
+    },
+    "reason": ""
+  },
+  {
+    "name": "invalid_cid",
+    "schema": "Cid",
+    "valid": false,
+    "value": "not-a-content-id",
+    "reason": ""
+  },
+  {
+    "name": "accepted_only_pending",
+    "schema": "Accepted",
+    "valid": false,
+    "value": {
+      "operationId": "fixture-operation-1",
+      "state": "succeeded"
+    },
+    "reason": ""
+  },
+  {
+    "name": "failed_operation",
+    "schema": "Operation",
+    "valid": true,
+    "value": {
+      "operationId": "fixture-operation-1",
+      "kind": "scrobble_create",
+      "state": "failed",
+      "attempts": 10,
+      "createdAt": "2026-01-15T12:00:00Z",
+      "updatedAt": "2026-01-15T12:00:00Z",
+      "recordUri": null,
+      "failureCode": "upstream_rejected"
+    },
+    "reason": ""
+  },
+  {
+    "name": "succeeded_operation",
+    "schema": "Operation",
+    "valid": true,
+    "value": {
+      "operationId": "fixture-operation-1",
+      "kind": "scrobble_create",
+      "state": "succeeded",
+      "attempts": 1,
+      "createdAt": "2026-01-15T12:00:00Z",
+      "updatedAt": "2026-01-15T12:00:00Z",
+      "recordUri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r01",
+      "failureCode": null
+    },
+    "reason": ""
+  },
+  {
+    "name": "empty_page",
+    "schema": "ScrobblePage",
+    "valid": true,
+    "value": {
+      "items": [],
+      "nextCursor": null,
+      "asOf": "2026-01-15T12:00:00Z",
+      "indexing": {
+        "state": "current",
+        "caughtUp": true,
+        "lastIndexedAt": "2026-01-15T12:00:00Z",
+        "lagSeconds": 0
+      }
+    },
+    "reason": ""
+  },
+  {
+    "name": "missing_page_indexing",
+    "schema": "ScrobblePage",
+    "valid": false,
+    "value": {
+      "items": [
+        {
+          "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r01",
+          "cid": "bafyreieogjytekr7rpqty3rtkfjjglj35ub2ipqjh6ftn7rbxwqe5242jq",
+          "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+          "revision": "3mfixture",
+          "artist": "Björk",
+          "track": "Jóga",
+          "album": "Homogenic",
+          "listenedAt": "2026-01-15T11:00:00Z",
+          "createdAt": "2026-01-15T12:00:00Z",
+          "durationSeconds": 305,
+          "recordingMbid": "13f12616-51d7-4023-a70b-a288ced4693a",
+          "indexedAt": "2026-01-15T12:00:00Z"
+        }
+      ],
+      "nextCursor": null,
+      "asOf": "2026-01-15T12:00:00Z"
+    },
+    "reason": ""
+  },
+  {
+    "name": "missing_artist",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z"
+    },
+    "reason": ""
+  },
+  {
+    "name": "missing_track",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "listenedAt": "2026-01-15T11:00:00Z"
+    },
+    "reason": ""
+  },
+  {
+    "name": "missing_listenedAt",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga"
+    },
+    "reason": ""
+  },
+  {
+    "name": "reject_client_type",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z",
+      "$type": "com.example.atmusic.scrobble"
+    },
+    "reason": ""
+  },
+  {
+    "name": "reject_client_did",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z",
+      "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "reason": ""
+  },
+  {
+    "name": "reject_client_owner",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z",
+      "owner": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "reason": ""
+  },
+  {
+    "name": "reject_client_createdAt",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z",
+      "createdAt": "2026-01-15T12:00:00Z"
+    },
+    "reason": ""
+  },
+  {
+    "name": "reject_client_uri",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z",
+      "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r01"
+    },
+    "reason": ""
+  },
+  {
+    "name": "reject_client_cid",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z",
+      "cid": "bafyreieogjytekr7rpqty3rtkfjjglj35ub2ipqjh6ftn7rbxwqe5242jq"
+    },
+    "reason": ""
+  },
+  {
+    "name": "reject_client_arbitrary",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z",
+      "arbitrary": true
+    },
+    "reason": ""
+  },
+  {
+    "name": "unicode_white_space_trim",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "  　",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z"
+    }
+  },
+  {
+    "name": "control_is_not_unicode_white_space",
+    "schema": "ScrobbleInput",
+    "valid": true,
+    "value": {
+      "artist": "\u001c",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z"
+    }
+  },
+  {
+    "name": "future_rejected_300_plus_nanosecond",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T12:05:00.000000001Z"
+    }
+  },
+  {
+    "name": "future_exact_fractional_boundary",
+    "schema": "ScrobbleInput",
+    "valid": true,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T12:05:00.000000000Z"
+    }
+  },
+  {
+    "name": "valid_generic_did_syntax",
+    "schema": "Did",
+    "valid": true,
+    "value": "did:example:fixture-identifier"
+  },
+  {
+    "name": "valid_percent_encoded_did_web",
+    "schema": "Did",
+    "valid": true,
+    "value": "did:web:music.example%3A8443:users:alice"
+  },
+  {
+    "name": "invalid_percent_encoded_did",
+    "schema": "Did",
+    "valid": false,
+    "value": "did:web:music%GGexample"
+  },
+  {
+    "name": "invalid_did_method_case",
+    "schema": "Did",
+    "valid": false,
+    "value": "did:Web:music.example"
+  },
+  {
+    "name": "valid_numeric_nsid_segment",
+    "schema": "AtUri",
+    "valid": true,
+    "value": "at://did:web:music.example/net.123.music.scrobble/r01"
+  },
+  {
+    "name": "duration_integral_decimal_rejected",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z",
+      "durationSeconds": 1.0
+    }
+  },
+  {
+    "name": "timestamp_lowercase_t_rejected",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15t11:00:00Z"
+    }
+  },
+  {
+    "name": "timestamp_lowercase_z_rejected",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00z"
+    }
+  },
+  {
+    "name": "timestamp_leap_second_rejected",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:60Z"
+    }
+  },
+  {
+    "name": "timestamp_arbitrary_fractional_precision",
+    "schema": "ScrobbleInput",
+    "valid": true,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00.12345678912345Z"
+    }
+  },
+  {
+    "name": "raw_boundary_with_trimming",
+    "schema": "ScrobbleInput",
+    "valid": true,
+    "value": {
+      "artist": "  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  ",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z"
+    }
+  }
+]

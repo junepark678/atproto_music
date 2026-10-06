@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "idempotency_result_unavailable",
+    "message": "The original operation has no currently public result; inspect its terminal operation state.",
+    "requestId": "a858325e-7dd0-4b1b-baaa-3b65af37f963"
+  }
+}

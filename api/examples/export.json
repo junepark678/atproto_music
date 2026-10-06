@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+  "exportedAt": "2026-01-15T12:00:00Z",
+  "indexing": {
+    "state": "current",
+    "caughtUp": true,
+    "lastIndexedAt": "2026-01-15T12:00:00Z",
+    "lagSeconds": 0
+  },
+  "scrobbles": [
+    {
+      "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r01",
+      "cid": "bafyreieogjytekr7rpqty3rtkfjjglj35ub2ipqjh6ftn7rbxwqe5242jq",
+      "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "revision": "3mfixture",
+      "artist": "Björk",
+      "track": "Jóga",
+      "album": "Homogenic",
+      "listenedAt": "2026-01-15T11:00:00Z",
+      "createdAt": "2026-01-15T12:00:00Z",
+      "durationSeconds": 305,
+      "recordingMbid": "13f12616-51d7-4023-a70b-a288ced4693a",
+      "indexedAt": "2026-01-15T12:00:00Z"
+    }
+  ],
+  "follows": [
+    {
+      "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.follow/f9a71cc1369cb0ae7a6fa16d2b9ecdc8d3ba62a9c519fe9af11a322c90e9ef6f2",
+      "cid": "bafyreieogjytekr7rpqty3rtkfjjglj35ub2ipqjh6ftn7rbxwqe5242jq",
+      "actor": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "subject": "did:plc:bbbbbbbbbbbbbbbbbbbbbbbb",
+      "createdAt": "2026-01-15T12:00:00Z"
+    }
+  ]
+}

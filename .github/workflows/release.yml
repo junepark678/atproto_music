@@ -1,0 +1,89 @@
+name: Static backend release
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Matching version tag for a candidate build'
+        required: true
+        default: v0.1.0
+permissions:
+  contents: read
+jobs:
+  package:
+    runs-on: ubuntu-24.04
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_PROFILE_DEV_INCREMENTAL: "false"
+      CARGO_PROFILE_TEST_INCREMENTAL: "false"
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Reject tag/version mismatch before packaging
+        run: python3 scripts/check_release.py "$RELEASE_TAG"
+      - name: Install pinned toolchain and validators
+        run: |
+          rustup show
+          sudo apt-get update && sudo apt-get install -y musl-tools
+          python3 -m venv work/contracts-venv
+          work/contracts-venv/bin/python -m pip install -r api/requirements-contracts.txt
+          echo "$PWD/work/contracts-venv/bin" >> "$GITHUB_PATH"
+          cargo install --locked --version 0.22.2 cargo-audit --root work/audit-tools
+      - name: Run locked workspace checks
+        run: bash scripts/check.sh
+      - name: Check RustSec advisories (failures require documented triage)
+        run: python3 scripts/audit_release.py --audit-bin work/audit-tools/bin/cargo-audit
+      - name: Retain full and target-scoped security reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: atmusic-security-${{ env.RELEASE_TAG }}
+          path: work/security/
+          if-no-files-found: ignore
+      - name: Build and inspect static executable with embedded assets
+        run: |
+          cargo build --locked --release --target x86_64-unknown-linux-musl -p atmusic-server
+          python3 scripts/smoke.py --static target/x86_64-unknown-linux-musl/release/atmusic
+      - name: Package and test checksums
+        run: |
+          python3 scripts/package_release.py target/x86_64-unknown-linux-musl/release/atmusic --tag "$RELEASE_TAG" --output work/release
+          python3 scripts/test_release.py target/x86_64-unknown-linux-musl/release/atmusic
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: atmusic-${{ env.RELEASE_TAG }}-linux-x86_64-musl-candidate
+          path: work/release/*
+          if-no-files-found: error
+      - name: Require complete live inventory for tagged publication
+        if: github.event_name == 'push'
+        run: python3 scripts/verify_live_evidence.py --artifact work/release/atmusic
+      - name: Require full packaged backend acceptance for tagged publication
+        if: github.event_name == 'push'
+        run: python3 scripts/acceptance/backend.py work/release/atmusic --output work/acceptance/backend
+      - name: Retain backend acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: atmusic-backend-acceptance-${{ env.RELEASE_TAG }}
+          path: work/acceptance/backend/
+          if-no-files-found: ignore
+  publish:
+    if: github.event_name == 'push'
+    needs: package
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: atmusic-${{ github.ref_name }}-linux-x86_64-musl-candidate
+          path: release
+      - name: Publish verified tagged backend
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          cd release
+          sha256sum -c SHA256SUMS
+          gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --generate-notes ./*

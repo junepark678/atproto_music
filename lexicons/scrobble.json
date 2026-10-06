@@ -1,0 +1,25 @@
+{
+  "lexicon": 1,
+  "id": "com.example.atmusic.scrobble",
+  "description": "Schema-v1 scrobble. This ID is fixture-only; production requires an owner-controlled prefix.",
+  "defs": {
+    "main": {
+      "type": "record",
+      "key": "tid",
+      "description": "A completed listen asserted by its author. Each record counts once; repeated tracks at equal times are valid.",
+      "record": {
+        "type": "object",
+        "required": ["artist", "track", "listenedAt", "createdAt"],
+        "properties": {
+          "artist": {"type": "string", "minLength": 1, "maxLength": 1024, "description": "One credited display string; raw 1–256 Unicode scalar values, and nonempty after trimming. The scalar limit is enforced by the validator."},
+          "track": {"type": "string", "minLength": 1, "maxLength": 1024, "description": "Raw 1–256 Unicode scalar values, and nonempty after trimming; enforced by the validator."},
+          "album": {"type": "string", "minLength": 1, "maxLength": 1024, "description": "If present, raw 1–256 Unicode scalar values, and nonempty after trimming; enforced by the validator."},
+          "listenedAt": {"type": "string", "format": "datetime", "description": "Explicit UTC RFC3339, from 1970-01-01 through event receipt time plus 300 seconds inclusive."},
+          "createdAt": {"type": "string", "format": "datetime", "description": "Explicit UTC RFC3339, from 1970-01-01 through event receipt time plus 300 seconds inclusive."},
+          "durationSeconds": {"type": "integer", "minimum": 1, "maximum": 86400},
+          "recordingMbid": {"type": "string", "description": "Optional unverified recording UUID; runtime validates UUID syntax. Not a grouping key."}
+        }
+      }
+    }
+  }
+}

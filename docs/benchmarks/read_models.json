@@ -1,0 +1,30 @@
+{
+  "artifactSha256": "34e351ad18658732cddd13668af3ae969ea6e4a85dcb80d0f6cccfd86083b666",
+  "datasetSeed": 7,
+  "rows": 100000,
+  "users": 100,
+  "rowsPerUser": 1000,
+  "cpuLimit": 2,
+  "memoryLimitBytes": 2147483648,
+  "warmupSeconds": 30,
+  "measurementSeconds": 60,
+  "requestsPerSecond": 10,
+  "measuredRequests": 600,
+  "warmupErrors": 0,
+  "errors": 0,
+  "p95Milliseconds": 6.442776000767481,
+  "medianMilliseconds": 2.6573979994282126,
+  "targetMilliseconds": 300,
+  "queryPlans": {
+    "history": [
+      "SEARCH scrobbles USING INDEX scrobbles_owner_time (did=? AND listened_at<?)"
+    ],
+    "feed": [
+      "SCAN scrobbles USING INDEX scrobbles_global_time"
+    ],
+    "statistics": [
+      "SEARCH scrobbles USING INDEX scrobbles_owner_time (did=? AND listened_at>? AND listened_at<?)"
+    ]
+  },
+  "passed": true
+}

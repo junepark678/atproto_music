@@ -9,3 +9,4 @@
 *.sqlite-wal
 
 __pycache__/
+/work/

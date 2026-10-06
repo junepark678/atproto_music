@@ -1,0 +1,11 @@
+# Statistics mutation and query-plan acceptance
+
+Run `cargo test --locked -p atmusic-server --test stats_mutations`. The target executes the three M5.1.3 named cases against isolated temporary SQLite databases and real port-0 application servers.
+
+`delete_effect` and `update_artist` use the shared deterministic signed repository fixture and production verifier. Their expected totals and complete artist, track, and album rankings are fixed from `docs/planning/TESTING.md`, rather than computed through the implementation being tested. Deleting r01 also checks the exact remaining history. Its Björk display becomes the raw newer surviving r02 spelling, including `  BJÖRK  ` and ` HOMOGENIC `. Updating r03 changes its CID and artist at the same URI and preserves exactly seven confirmed listens.
+
+`query_plan` creates 100 controlled DIDs with 1,000 records each. Every record belongs to a genuine CAR with a real signed version-3 commit, CID hashes, and MST membership, and reaches SQLite only through production `apply_commit`. The dataset generator is shared with `crates/server/examples/benchmark_seed.rs`; the test creates its own fresh database and does not read `work/benchmark-data`.
+
+After seeding exactly 100,000 confirmed rows, the test captures SQLx's `db.statement` for actual production statistics calls in all, 7d, 30d, and 365d windows. It runs `EXPLAIN QUERY PLAN` on those captured statements with their DID and time bounds, requires indexed DID/time searches, and rejects a global scrobble table scan. An additional negative control removes the three scrobble indexes only in that owned temporary database, uses a fresh read-only connection to avoid pooled SQLite schema/statement caches, re-prepares the same query, and verifies that the resulting global scan fails the indexed-plan check.
+
+These integration tests live in the server crate because it can depend on both storage and the AT Protocol verifier. Placing the signed acceptance fixture in storage tests would introduce a storage-to-atproto dependency cycle. No production query or behavior changes are required for this test placement. Automated controlled fixtures remain separate from external live milestone evidence.
