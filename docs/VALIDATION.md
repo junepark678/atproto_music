@@ -20,6 +20,8 @@ The fresh workspace check completed successfully on 2026-10-06 UTC: **331 execut
 
 The rebuilt static executable passed ELF, required-configuration, real HTTP/read/assets and clean-SIGTERM smoke checks. Packaging checks passed version mismatch rejection, original checksums, repeat-archive equality and one-byte tamper rejection. Host smoke and both startup-exit/invalid-ELF negative controls passed. The constrained benchmark completed 600 measured requests with zero errors and **p95 6.443 ms**, below the 300 ms target; [exact artifact-bound benchmark evidence](benchmarks/read_models.md) records the dataset and limits.
 
+The final explicit fixture acceptance run passed **190 Rust tests across 35 owning-crate targets**, including all 148 required named cases, with zero filtered cases and one excluded child-helper entrypoint. Its three independent validators and smoke against the supplied static executable also passed. These 190 tests are a selected rerun of workspace tests, not additional distinct tests. The runner records `fixtureOnly=true`, `fullPackagedGate=blocked` and `liveGate=blocked`; it does not certify M6 acceptance. The [machine-readable candidate receipt](verification/backend-candidate.json) binds this evidence to implementation commit `b34af377e3d7f5815104f305022c73bf44f17567` and the exact packaged checksum. All [103 production input digests](verification/backend-production-inputs.json) match that commit and the current source.
+
 ## Reproduce the checks
 
 ```sh

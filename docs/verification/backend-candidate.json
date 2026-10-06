@@ -1,0 +1,89 @@
+{
+  "schemaVersion": 1,
+  "recordedUtc": "2026-10-06",
+  "status": "backend_candidate_mvp_incomplete",
+  "implementationCommit": "b34af377e3d7f5815104f305022c73bf44f17567",
+  "artifact": {
+    "filename": "atmusic",
+    "target": "x86_64-unknown-linux-musl",
+    "sha256": "34e351ad18658732cddd13668af3ae969ea6e4a85dcb80d0f6cccfd86083b666",
+    "bytes": 14273152
+  },
+  "releaseArchive": {
+    "filename": "atmusic-0.1.0-linux-x86_64-musl.tar.gz",
+    "sha256": "a46506a69d4e0a264693f6ef3a67b82d3432df269222def8eb56b2755473ba27"
+  },
+  "productionInputs": {
+    "file": "backend-production-inputs.json",
+    "count": 103,
+    "unchangedAgainstImplementationCommit": true
+  },
+  "workspaceCheck": {
+    "result": "passed",
+    "rustExecuted": 331,
+    "rustFailed": 0,
+    "rustIgnoredHelper": 1,
+    "rustFiltered": 0,
+    "pythonRegressions": 21,
+    "independentFixtureValidators": 3,
+    "formatting": "passed",
+    "lockedBuild": "passed",
+    "crateBoundaries": "passed",
+    "allTargetsClippy": "passed"
+  },
+  "fixtureAcceptance": {
+    "result": "passed",
+    "fixtureOnly": true,
+    "owningRustTargets": 35,
+    "requiredNamedCases": 148,
+    "rustExecuted": 190,
+    "rustIgnoredHelper": 1,
+    "rustFiltered": 0,
+    "independentFixtureValidators": [
+      "fixture_integrity",
+      "manual_expectations",
+      "time_reproducibility"
+    ],
+    "packagedSmokeSubset": "passed",
+    "reportSha256": "eb6a84fa2dcf5b67ef8ddcdf821ed05090403e0d6959d91cdc2ca67263540e80",
+    "execution": "Host Rust protocol/worker fixtures plus smoke on supplied static executable; not complete packaged or live journeys"
+  },
+  "packaging": {
+    "staticElfSmoke": "passed",
+    "versionAndChecksumControls": "passed",
+    "hostSmokeAndNegativeControls": "passed",
+    "ownedNamespaceStaticStartup": "passed_empty_queue_no_external_calls"
+  },
+  "security": {
+    "selectedLinuxMuslAndGnuHostGraphs": "passed_no_active_findings",
+    "unfilteredLockAudit": "nonzero_disabled_optional_RSA_and_Wasm_only_LRU",
+    "advisoryAllowlist": false
+  },
+  "benchmark": {
+    "result": "passed",
+    "artifactSha256": "34e351ad18658732cddd13668af3ae969ea6e4a85dcb80d0f6cccfd86083b666",
+    "rows": 100000,
+    "cpuLimit": 2,
+    "memoryLimitBytes": 2147483648,
+    "measuredRequests": 600,
+    "errors": 0,
+    "p95Milliseconds": 6.442776000767481,
+    "targetMilliseconds": 300,
+    "scope": "Fixture read-model load; excludes external protocol/browser/active write load"
+  },
+  "remainingGates": {
+    "productionRelay": "disabled_safe_historical_progress_and_subscription_coverage_unfinished",
+    "fullPackagedAcceptance": "blocked_complete_flow_and_recovery_harness_unimplemented",
+    "liveAcceptance": "blocked_operator_infrastructure_and_dedicated_accounts_missing",
+    "liveTestsExecuted": 0,
+    "frontend": "unstarted_explicit_M6_acceptance_start_gate",
+    "milestonesClosed": 0
+  },
+  "operatorInputs": [
+    "owned NSID and ownership evidence",
+    "public HTTPS OAuth callback",
+    "dedicated identities on two independently operated external PDSs",
+    "supported relay with independently verified coverage",
+    "privately configured operator credentials"
+  ]
+}
