@@ -2,16 +2,16 @@
   "schemaVersion": 1,
   "recordedUtc": "2026-10-06",
   "status": "backend_candidate_mvp_incomplete",
-  "implementationCommit": "b34af377e3d7f5815104f305022c73bf44f17567",
+  "implementationCommit": "8e158427716087b12e03cde41aaf225bb66ca0b8",
   "artifact": {
     "filename": "atmusic",
     "target": "x86_64-unknown-linux-musl",
-    "sha256": "34e351ad18658732cddd13668af3ae969ea6e4a85dcb80d0f6cccfd86083b666",
-    "bytes": 14273152
+    "sha256": "89ec2297963533f98b8fefde4e300b9f196e6e22ea5c5148133c75b2190f0777",
+    "bytes": 14289536
   },
   "releaseArchive": {
     "filename": "atmusic-0.1.0-linux-x86_64-musl.tar.gz",
-    "sha256": "a46506a69d4e0a264693f6ef3a67b82d3432df269222def8eb56b2755473ba27"
+    "sha256": "70af0f4258cd125753af090ec6199984c2e47f482e0304f4d3e28127ae6f7b75"
   },
   "productionInputs": {
     "file": "backend-production-inputs.json",
@@ -20,7 +20,7 @@
   },
   "workspaceCheck": {
     "result": "passed",
-    "rustExecuted": 331,
+    "rustExecuted": 345,
     "rustFailed": 0,
     "rustIgnoredHelper": 1,
     "rustFiltered": 0,
@@ -34,9 +34,9 @@
   "fixtureAcceptance": {
     "result": "passed",
     "fixtureOnly": true,
-    "owningRustTargets": 35,
-    "requiredNamedCases": 148,
-    "rustExecuted": 190,
+    "owningRustTargets": 37,
+    "requiredNamedCases": 162,
+    "rustExecuted": 204,
     "rustIgnoredHelper": 1,
     "rustFiltered": 0,
     "independentFixtureValidators": [
@@ -45,45 +45,63 @@
       "time_reproducibility"
     ],
     "packagedSmokeSubset": "passed",
-    "reportSha256": "eb6a84fa2dcf5b67ef8ddcdf821ed05090403e0d6959d91cdc2ca67263540e80",
+    "reportSha256": "720dace880f8ad18cd1e54ff04217ff1c7d64154fae43419c45b1c618460dc8d",
     "execution": "Host Rust protocol/worker fixtures plus smoke on supplied static executable; not complete packaged or live journeys"
   },
   "packaging": {
     "staticElfSmoke": "passed",
     "versionAndChecksumControls": "passed",
     "hostSmokeAndNegativeControls": "passed",
-    "ownedNamespaceStaticStartup": "passed_empty_queue_no_external_calls"
+    "ownedNamespaceStaticStartup": "passed_empty_queue_no_external_calls",
+    "freshSourceBoundBuildReceiptSha256": "ad82f6eaaeee0cb5a307e6fba8dfc95007ea5d055bb70504c60ac1b0a6a286cc"
   },
   "security": {
     "selectedLinuxMuslAndGnuHostGraphs": "passed_no_active_findings",
     "unfilteredLockAudit": "nonzero_disabled_optional_RSA_and_Wasm_only_LRU",
-    "advisoryAllowlist": false
+    "advisoryAllowlist": false,
+    "unchangedDependencyGraphBindingSha256": "43083da364fc20c5e988912e6d6b2507505ad7e2a8d75038360e966a0d793438"
   },
   "benchmark": {
     "result": "passed",
-    "artifactSha256": "34e351ad18658732cddd13668af3ae969ea6e4a85dcb80d0f6cccfd86083b666",
+    "artifactSha256": "89ec2297963533f98b8fefde4e300b9f196e6e22ea5c5148133c75b2190f0777",
     "rows": 100000,
     "cpuLimit": 2,
     "memoryLimitBytes": 2147483648,
     "measuredRequests": 600,
     "errors": 0,
-    "p95Milliseconds": 6.442776000767481,
+    "p95Milliseconds": 9.56763999965915,
     "targetMilliseconds": 300,
     "scope": "Fixture read-model load; excludes external protocol/browser/active write load"
   },
   "remainingGates": {
     "productionRelay": "disabled_safe_historical_progress_and_subscription_coverage_unfinished",
     "fullPackagedAcceptance": "blocked_complete_flow_and_recovery_harness_unimplemented",
-    "liveAcceptance": "blocked_operator_infrastructure_and_dedicated_accounts_missing",
+    "liveAcceptance": "blocked_live_driver_unimplemented_and_operator_infrastructure_missing",
     "liveTestsExecuted": 0,
     "frontend": "unstarted_explicit_M6_acceptance_start_gate",
-    "milestonesClosed": 0
+    "milestonesClosed": 0,
+    "packagedFixtureControlContract": "not_defined_or_deployed"
   },
   "operatorInputs": [
     "owned NSID and ownership evidence",
     "public HTTPS OAuth callback",
     "dedicated identities on two independently operated external PDSs",
     "supported relay with independently verified coverage",
-    "privately configured operator credentials"
-  ]
+    "privately configured operator credentials",
+    "controlled public HTTPS fixture endpoints and commit-before-response fault interface"
+  ],
+  "discovery": {
+    "result": "passed",
+    "requiredCases": 14,
+    "unknownWriterVisibility": "inactive_until_account_checked_signed_current_head_snapshot",
+    "hintTypes": [
+      "normal configured music commit",
+      "tooBig configured music operation",
+      "rebase configured music operation"
+    ],
+    "hintRecordsApplied": false,
+    "hintCheckpointAdvanced": false,
+    "suppressionGenerationAndCapacityGuards": "passed",
+    "productionRelayEnabled": false
+  }
 }

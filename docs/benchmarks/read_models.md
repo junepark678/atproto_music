@@ -1,6 +1,6 @@
 # Packaged read-model latency evidence
 
-The final Linux x86_64 musl backend candidate was measured on 2026-10-06 UTC. Artifact SHA256: `34e351ad18658732cddd13668af3ae969ea6e4a85dcb80d0f6cccfd86083b666`. This is controlled fixture performance evidence for M6.2.3, not live federation or full packaged acceptance.
+The final Linux x86_64 musl backend candidate was measured on 2026-10-06 UTC. Artifact SHA256: `89ec2297963533f98b8fefde4e300b9f196e6e22ea5c5148133c75b2190f0777`. This is controlled fixture performance evidence for M6.2.3, not live federation or full packaged acceptance.
 
 | Measurement | Actual result |
 | --- | --- |
@@ -9,8 +9,8 @@ The final Linux x86_64 musl backend candidate was measured on 2026-10-06 UTC. Ar
 | Warmup | 30 seconds, nominal 10 requests/second; 0 errors |
 | Measurement | 600 requests, 60-second phase, nominal 10 requests/second |
 | Errors | 0 |
-| p95 | 6.443 ms; target below 300 ms |
-| Median | 2.657 ms |
+| p95 | 9.568 ms; target below 300 ms |
+| Median | 2.846 ms |
 | Result | Passed |
 
 The runner builds an owned scratch image containing the actual static executable, applies Docker resource limits, mounts the controlled dataset, and alternates real HTTP history and global-feed requests with `limit=20`. Every response must be 200 with twenty items. An owner session uses the ordinary authentication path so the independent anonymous quota does not reject the specified load. The 30-second warmup is excluded from the measured 600 latencies. p95 uses the nearest-rank observation at index 569 of the sorted 600 observations. The shared Linux build host was also compiling the workspace; the container's resource limits remained in effect. This measures the backend HTTP/SQLite read path with fixture authentication and publication workers disabled; it excludes a public reverse proxy, external network, browser rendering and active upstream write traffic.

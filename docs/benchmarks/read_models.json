@@ -1,5 +1,5 @@
 {
-  "artifactSha256": "34e351ad18658732cddd13668af3ae969ea6e4a85dcb80d0f6cccfd86083b666",
+  "artifactSha256": "89ec2297963533f98b8fefde4e300b9f196e6e22ea5c5148133c75b2190f0777",
   "datasetSeed": 7,
   "rows": 100000,
   "users": 100,
@@ -12,8 +12,8 @@
   "measuredRequests": 600,
   "warmupErrors": 0,
   "errors": 0,
-  "p95Milliseconds": 6.442776000767481,
-  "medianMilliseconds": 2.6573979994282126,
+  "p95Milliseconds": 9.56763999965915,
+  "medianMilliseconds": 2.8464845008784323,
   "targetMilliseconds": 300,
   "queryPlans": {
     "history": [
