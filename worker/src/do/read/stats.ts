@@ -101,6 +101,8 @@ export function statsStatements(did: string, bounds: StatsBounds, limit: number)
   // read once through scrobbles_owner_time's (did, listened_at) range, so the
   // rows read stay proportional to the window. `all` has no lower bound, so
   // the inlined form already reads exactly the DID's rows and stays inlined.
+  // Accepted by ADR 0004 §15 Q10; the per-statement rows-read bounds are
+  // asserted by worker/test/bench/read-models.bench.test.ts.
   const totalsW = bounds.lower === null ? w : windowCte(bounds, { materialized: true });
   return {
     totals: {
