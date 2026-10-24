@@ -344,7 +344,12 @@ def synthetic(target, cmd, ok):
 
 
 # validate_contracts.py (run inside check-ts): one "PASS <name>: ..." line per check.
-contracts_lines = [l[5:] for l in log['check-ts'].splitlines() if l.startswith('PASS ')]
+contracts_lines, in_contracts = [], False
+for l in log['check-ts'].splitlines():
+    if l.startswith('==> '):
+        in_contracts = l.startswith('==> contracts')
+    elif in_contracts and l.startswith('PASS '):
+        contracts_lines.append(l[5:])
 
 # Live gates with no environment: exit 2 and a blocked document listing missing names.
 noenv = {}
@@ -367,7 +372,8 @@ def resolve(test_id):
     if prefix == 'python3 scripts/validate_contracts.py':
         if status['check-ts'] in ('skipped', 'missing'):
             return []
-        hit = any(l == name or l.startswith(name + ':') for l in contracts_lines)
+        # "PASS <name>" then end, ':' or ' (' details; the name may itself hold a colon.
+        hit = any(l == name or l.startswith(name + ':') or l.startswith(name + ' (') for l in contracts_lines)
         return [synthetic(test_id, prefix, True)] if hit else []
     if prefix == 'npx tsx scripts/check-bundle.ts':
         if status['check-bundle'] in ('skipped', 'missing'):
