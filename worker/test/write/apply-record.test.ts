@@ -157,10 +157,12 @@ describe('applyRecordProof', () => {
         collection: SCROBBLE,
       });
 
-      // The older present proof (rev above the per-DID floor) is a no-op.
+      // The snapshot raised the per-DID floor to its verified head, so the
+      // older present proof is refused (stale_head) and changes nothing.
+      expect(userRow(db, ALICE)?.max_rev).toBe(head.rev);
       const before = dump(db);
       expect(p08.commit.rev < head.rev).toBe(true);
-      expect(apply(db, p08)).toEqual(NOOP);
+      expect(apply(db, p08)).toEqual(STALE);
       expect(dump(db)).toEqual(before);
       expect(visibleHistory(db, ALICE)).toEqual([uriOf(ALICE, SCROBBLE, 'r07')]);
     });
@@ -170,12 +172,13 @@ describe('applyRecordProof', () => {
     await runInDurableObject(stub, (i: HarnessDO) => {
       const db = i.db;
       const before = dump(db);
-      expect(apply(db, p08)).toEqual(NOOP);
+      expect(apply(db, p08)).toEqual(STALE);
       expect(dump(db)).toEqual(before);
       expect(db.all('SELECT uri FROM scrobbles WHERE uri = ?', uri08)).toEqual([]);
       expect(recordState(db, uri08)).toMatchObject({ state: 'absent', revision: head.rev });
 
-      // The live exclusion proof at the deleting head is a no-op too.
+      // The live exclusion proof at the deleting head passes the floor and is
+      // stopped by the per-URI guard: noop_older.
       expect(p08gone.commit.rev).toBe(head.rev);
       expect(apply(db, p08gone)).toEqual(NOOP);
       expect(dump(db)).toEqual(before);

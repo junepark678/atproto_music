@@ -223,6 +223,100 @@ describe('applySnapshotChunk', () => {
     });
   });
 
+  it('a stale live proof below an in-progress snapshot head is stale_head and changes nothing', async () => {
+    const STALE = { outcome: 'stale_head', admit: false, suppressed: false };
+    const u = (rkey: string) => uriOf(ALICE, SCROBBLE, rkey);
+
+    // Case 1: a1 put (rev1), deleted (rev2), put again with the same body
+    // (rev3 = head, same CID as rev1). The index holds a1 from rev1, so the
+    // chunk leaves it unchanged; the stale rev2 exclusion proof must not delete it.
+    const repo1 = await repoFor('alice');
+    const body = scrobble({ artist: 'Björk', track: 'a1' });
+    const p1 = await putProof(repo1, SCROBBLE, 'a1', body);
+    const p2 = await deleteProof(repo1, SCROBBLE, 'a1');
+    const p3 = await putProof(repo1, SCROBBLE, 'a1', body);
+    expect(p2.state).toBe('absent');
+    expect(cidOf(p3)).toBe(cidOf(p1));
+    const head1 = repo1.head!;
+    const entries1 = await entriesAt(repo1, head1.cid, () => false);
+
+    await runInDurableObject(stubFor('apply-snapshot-stale-floor-1'), (i: HarnessDO) => {
+      const db = i.db;
+      const generation = seedUser(db, ALICE, { active: false });
+      expect(db.tx(() => applyRecordProof(db, p1, OPTS))).toEqual(APPLIED);
+      expect(chunk(db, generation, head1.rev, RANGE_LO, RANGE_HI, entries1)).toEqual({
+        outcome: 'applied',
+        written: 0,
+        unchanged: 1,
+        deleted: 0,
+      });
+      expect(userRow(db, ALICE)?.max_rev).toBe(head1.rev);
+
+      const before = dump(db);
+      expect(db.tx(() => applyRecordProof(db, p2, OPTS))).toEqual(STALE);
+      expect(dump(db)).toEqual(before);
+
+      expect(
+        db.tx(() =>
+          completeSnapshot(db, { did: ALICE, generation, headRev: head1.rev, accountActive: true, nowNs: NOW_NS }),
+        ),
+      ).toEqual({ outcome: 'complete', active: true });
+      // The projection equals the head: a1 present.
+      expect(db.all('SELECT uri, cid FROM scrobbles ORDER BY uri')).toEqual([{ uri: u('a1'), cid: cidOf(p3) }]);
+      expect(db.all(`SELECT s.uri FROM ${visibleScrobblesFrom()} WHERE s.did = ?`, ALICE)).toEqual([{ uri: u('a1') }]);
+    });
+
+    // Case 2: a0 (rev1), a1 (rev2), a1 deleted (rev3 = head). The index holds
+    // a0 only; the stale rev2 proof of a1, applied between the chunks, must not
+    // resurrect a1. A live proof newer than the head still applies.
+    const repo2 = await repoFor('alice');
+    const q0 = await putProof(repo2, SCROBBLE, 'a0', scrobble({ artist: 'Björk', track: 'a0' }));
+    const q1 = await putProof(repo2, SCROBBLE, 'a1', scrobble({ artist: 'Björk', track: 'a1' }));
+    await repo2.delete(SCROBBLE, 'a1');
+    const head2 = repo2.head!;
+    const entries2 = await entriesAt(repo2, head2.cid, () => false);
+    expect(entries2.map((e) => e.key)).toEqual([`${SCROBBLE}/a0`]);
+    const q2 = await putProof(repo2, SCROBBLE, 'a2', scrobble({ artist: 'Björk', track: 'a2' }));
+    expect(q1.commit.rev < head2.rev && head2.rev < q2.commit.rev).toBe(true);
+
+    await runInDurableObject(stubFor('apply-snapshot-stale-floor-2'), (i: HarnessDO) => {
+      const db = i.db;
+      const generation = seedUser(db, ALICE, { active: false });
+      expect(db.tx(() => applyRecordProof(db, q0, OPTS))).toEqual(APPLIED);
+      expect(userRow(db, ALICE)?.max_rev).toBe(q0.commit.rev);
+      expect(chunk(db, generation, head2.rev, RANGE_LO, `${SCROBBLE}/a0`, entries2)).toEqual({
+        outcome: 'applied',
+        written: 0,
+        unchanged: 1,
+        deleted: 0,
+      });
+      expect(userRow(db, ALICE)?.max_rev).toBe(head2.rev);
+
+      const before = dump(db);
+      expect(db.tx(() => applyRecordProof(db, q1, OPTS))).toEqual(STALE);
+      expect(dump(db)).toEqual(before);
+
+      expect(chunk(db, generation, head2.rev, `${SCROBBLE}/a0`, RANGE_HI, entries2)).toEqual({
+        outcome: 'applied',
+        written: 0,
+        unchanged: 0,
+        deleted: 0,
+      });
+      expect(db.tx(() => applyRecordProof(db, q2, OPTS))).toEqual(APPLIED);
+      expect(
+        db.tx(() =>
+          completeSnapshot(db, { did: ALICE, generation, headRev: head2.rev, accountActive: true, nowNs: NOW_NS }),
+        ),
+      ).toEqual({ outcome: 'complete', active: true });
+      expect(userRow(db, ALICE)).toMatchObject({ active: 1, indexing_state: 'current', max_rev: q2.commit.rev });
+      expect(db.all('SELECT uri, revision FROM scrobbles ORDER BY uri')).toEqual([
+        { uri: u('a0'), revision: q0.commit.rev },
+        { uri: u('a2'), revision: q2.commit.rev },
+      ]);
+      expect(recordState(db, u('a1'))).toBeNull();
+    });
+  });
+
   it('completeSnapshot is superseded when generation changed (deactivation during snapshot)', async () => {
     const repo = await repoFor('alice');
     await repo.put(FOLLOW, 'fbob', follow(BOB));

@@ -17,17 +17,24 @@
 // - Sweep: rows of the DID whose URI is in `(at://did/lo, at://did/hi]`, whose
 //   key is absent from the chunk and whose revision is < headRev are deleted
 //   and recorded `absent` at headRev.
-// - `users.max_rev` is not advanced per chunk; `completeSnapshot` does that.
-//   Until then the per-URI guard alone protects the URIs the chunk wrote.
+// - Per-DID floor: once the guards pass, `users.max_rev = max(max_rev,
+//   headRev)` in the same transaction as the chunk's writes. The chunk's
+//   unchanged-CID entries keep their older record_state revisions, and URIs
+//   absent at headRev may have no record_state at all, so the per-URI guard
+//   alone does not cover the verified head: without the floor a stale-PDS
+//   proof at max_rev <= rev < headRev, applied between chunks or before
+//   completion, could delete a record present at headRev or resurrect one
+//   deleted before it. With the floor such a proof is `stale_head`.
 //
 // Completion (`completeSnapshot`): if `users.generation == generation` and the
 // DID is not suppressed, `active` follows the fresh account status,
-// `indexing_state='current'`, `last_snapshot_at_ms`, and
-// `max_rev = max(max_rev, headRev)`. Otherwise nothing changes: `superseded`.
+// `indexing_state='current'`, `last_snapshot_at_ms`, and (again, for a
+// snapshot with no chunks) `max_rev = max(max_rev, headRev)`. Otherwise nothing
+// changes: `superseded`.
 
 import { toMs, toStorage } from '@atmusic/core/timestamp';
 import type { Db } from '../db';
-import { isSuppressed, loadUser } from './account-state';
+import { isSuppressed, loadUser, raiseMaxRev } from './account-state';
 import { type ApplyOptions, applyRecordTarget } from './apply-record';
 import {
   collectionKind,
@@ -110,6 +117,8 @@ export function applySnapshotChunk(db: Db, c: SnapshotChunk): ChunkResult {
   if (isSuppressed(db, c.did)) return superseded();
   const user = loadUser(db, c.did);
   if (user === null || user.generation !== c.generation) return superseded();
+  // The verified head becomes the per-DID floor for live proofs (see above).
+  raiseMaxRev(db, c.did, c.headRev);
 
   const o: ApplyOptions = { receiptNs: c.receiptNs, prefix: c.prefix, nowNs: c.nowNs };
   const res: ChunkResult = { outcome: 'applied', written: 0, unchanged: 0, deleted: 0 };
@@ -208,16 +217,14 @@ export function completeSnapshot(db: Db, c: CompleteSnapshotInput): CompleteResu
   if (user === null || user.generation !== c.generation) return { outcome: 'superseded' };
   db.run(
     `UPDATE users SET active = ?, account_status = CASE WHEN ? = 1 THEN 'active' ELSE account_status END,
-       indexing_state = 'current', last_snapshot_at_ms = ?, indexed_at = ?,
-       max_rev = CASE WHEN max_rev IS NULL OR max_rev < ? THEN ? ELSE max_rev END
+       indexing_state = 'current', last_snapshot_at_ms = ?, indexed_at = ?
      WHERE did = ?`,
     c.accountActive ? 1 : 0,
     c.accountActive ? 1 : 0,
     toMs(c.nowNs),
     toStorage(c.nowNs),
-    c.headRev,
-    c.headRev,
     c.did,
   );
+  raiseMaxRev(db, c.did, c.headRev);
   return { outcome: 'complete', active: c.accountActive };
 }

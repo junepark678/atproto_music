@@ -54,6 +54,21 @@ export function advanceUser(db: Db, did: string, rev: string, nowNs: bigint): vo
   );
 }
 
+/**
+ * A verified head at `rev` was (or is being) applied by a snapshot:
+ * `max_rev = max(max_rev, rev)`. Live proofs older than that head are then
+ * `stale_head`, so they can neither delete a record present at the head nor
+ * resurrect one deleted before it while the snapshot is in progress.
+ */
+export function raiseMaxRev(db: Db, did: string, rev: string): void {
+  db.run(
+    'UPDATE users SET max_rev = CASE WHEN max_rev IS NULL OR max_rev < ? THEN ? ELSE max_rev END WHERE did = ?',
+    rev,
+    rev,
+    did,
+  );
+}
+
 /** Invalidate the exact statistics cache of `did` (ADR 0004 §5.8). */
 export function bumpStatsVersion(db: Db, did: string): void {
   db.run('UPDATE users SET stats_version = stats_version + 1 WHERE did = ?', did);
