@@ -363,7 +363,8 @@ describe('notify', () => {
     // Other DIDs are unaffected.
     expectQueued(await h.postJson({ uri: uriOf(BOB, SCROBBLE, 'r01') }, '192.0.2.202'));
     expect(h.limits.sizes).toEqual({ ip: 13, did: 2 });
-  });
+    // 600 sequential requests: wall time grows under full-suite parallel load (the clock is injected).
+  }, 60_000);
 
   it('did notify for unknown DID admits snapshot; busy → 503 queue_full', async () => {
     const h = harness('notify-did');
