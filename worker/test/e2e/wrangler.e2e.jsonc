@@ -1,0 +1,47 @@
+// Test-only Worker for the browser end-to-end stack (W6-03). Never deployed:
+// scripts/e2e/start-stack.ts runs it with
+//   wrangler dev --config worker/test/e2e/wrangler.e2e.jsonc --ip 127.0.0.1 --port 8787
+// and passes E2E_NETWORK (the dev-env hosts) with --var.
+//
+// It is the production Worker (`assets` exactly as worker/wrangler.jsonc:
+// single-page-application fallback, Worker-first only for /api/*, /health/*
+// and /internal/*) with INDEX bound to E2eIndexDO (entry.ts). The assets are
+// the SPA built for this stack into work/e2e/dist (gitignored).
+//
+// LEXICON_PREFIX is the e2e prefix of scripts/e2e/dev-env.ts (authority
+// e2e.atmusic.test under the reserved .test TLD, never publishable), with a
+// test-only NAMESPACE_OWNERSHIP_REF so the SPA's write path is live. It is
+// neither the production prefix nor the fixture prefix (which never enables
+// publication).
+{
+  "$schema": "../../../node_modules/wrangler/config-schema.json",
+  "name": "atmusic-e2e",
+  "main": "./entry.ts",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "../../../work/e2e/dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*", "/health/*", "/internal/*"]
+  },
+  "durable_objects": {
+    "bindings": [{ "name": "INDEX", "class_name": "E2eIndexDO" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["E2eIndexDO"] }],
+  "vars": {
+    // Never used for OAuth (the SPA on http://127.0.0.1:8787 uses the loopback
+    // client id); parseConfig requires an https origin.
+    "PUBLIC_ORIGIN": "https://music.e2e.test",
+    "LEXICON_PREFIX": "test.atmusic.e2e",
+    "NAMESPACE_OWNERSHIP_REF": "e2e-only: reserved .test authority e2e.atmusic.test, local dev-env PDSs",
+    "INGEST_MODE": "off",
+    "JETSTREAM_URLS": "",
+    "JETSTREAM_LOOKBACK_HOURS": "24",
+    "RELAY_URL": "https://relay.test",
+    "PLAN": "paid",
+    "DO_LOCATION_HINT": "",
+    // Test-only key material (32 bytes); never a production secret.
+    "CURSOR_KEY": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f"
+  }
+}
