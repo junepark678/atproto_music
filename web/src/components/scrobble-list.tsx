@@ -12,7 +12,8 @@ import { OperationStatus } from './operation-status';
 
 export interface ListItem {
   scrobble: Scrobble;
-  local?: LocalState;
+  /** With the row's dueAt (see `withDueAt`) so a stopped publication is described as such. */
+  local?: LocalState & { dueAt?: number | null };
 }
 
 export interface ScrobbleListProps {

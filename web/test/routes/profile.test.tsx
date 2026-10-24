@@ -9,8 +9,9 @@ import type { Did, Follow, Profile, Scrobble, Statistics, StatsWindow } from '@a
 import { followRkey } from '@atmusic/core/record-key';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { PdsSession } from '../../src/oauth/types';
+import { MAX_POLLS } from '../../src/outbox/runner';
 import { createAppState } from '../../src/state/store';
-import { FOLLOW } from '../support/fake-pds-browser';
+import { FOLLOW, runUntilIdle, SCROBBLE_INPUT } from '../support/fake-pds-browser';
 import {
   ALICE,
   ALICE_HISTORY,
@@ -387,6 +388,140 @@ describe('web/test/routes/profile.test.tsx', () => {
     expect(afterUnfollow.some((s) => /^Not following|Unfollowed/.test(s))).toBe(false);
     expect(main.textContent).not.toMatch(/Not following|unfollow confirmed/);
     expect(buttonByText(main, 'Unfollow')).not.toBeNull();
+  });
+
+  it('a follow or unfollow whose index confirmation stopped offers Follow or Unfollow again', async () => {
+    const world = await outboxWorld();
+    const { fx, api } = world;
+    const rkey = await followRkey(BOB);
+    const followUri = `at://${ALICE}/${FOLLOW}/${rkey}`;
+    serveUser(api, BOB, { profile: () => profileOf(BOB, 'bob.test'), history: BOBS });
+    serveUser(api, ALICE, { profile: () => profileOf(ALICE, 'alice.test'), history: [] });
+    // The AppView's following list is set by the test, independently of records/status.
+    let listed: string | null = null; // the listed follow's CID, or not listed
+    api.on(`GET /api/v1/users/${ALICE}/following`, () =>
+      json(200, {
+        items:
+          listed !== null
+            ? [{ uri: followUri, cid: listed, actor: ALICE, subject: BOB, createdAt: '2026-01-15T12:00:00Z' }]
+            : [],
+        nextCursor: null,
+        asOf: '2026-01-15T12:00:00Z',
+        indexing: profileOf(ALICE, null).indexing,
+      }),
+    );
+    // records/status never confirms: every poll answers pending.
+    fx.appView.pendingPolls = Number.MAX_SAFE_INTEGER;
+    const drain = () => runUntilIdle(world.outbox.runner, world.clock);
+
+    mounted = mount(`/u/${BOB}`, world.state, world.services);
+    const main = mounted.main();
+    const status = () => text(main.querySelector('.follow-status'));
+    await until(() => expect(status()).toBe('Not following'));
+    const followingReads = api.count(`GET /api/v1/users/${ALICE}/following`);
+
+    // Follow: published, then the poll budget runs out with the row still published.
+    click(buttonByText(main, 'Follow'));
+    await until(() => expect(status()).toBe('Follow queued'));
+    await drain();
+    const [follow] = await fx.ops();
+    expect(follow).toMatchObject({ kind: 'follow_create', state: 'published', dueAt: null, polls: MAX_POLLS + 1 });
+    expect(fx.appView.statusPolls.filter((u) => u === followUri)).toHaveLength(MAX_POLLS);
+    expect(fx.pds.count('com.atproto.repo.createRecord')).toBe(1);
+    // The control is not stuck busy: the edge is re-read and, as the index does
+    // not list the follow, Follow is offered again with the not-confirmed text.
+    await until(() =>
+      expect(status()).toBe(
+        'Follow published to your PDS; the index has not confirmed it yet. The index does not list you as following this account.',
+      ),
+    );
+    await until(() => expect(api.count(`GET /api/v1/users/${ALICE}/following`)).toBe(followingReads + 1));
+    // ...and the profile counts are re-read too (the initial read plus this one).
+    await until(() => expect(api.count(`GET /api/v1/users/${BOB}/profile`)).toBe(2));
+    expect(buttonByText(main, 'Follow')).not.toBeNull();
+    expect(buttonByText(main, 'Unfollow')).toBeNull();
+    expect(main.textContent).not.toMatch(/waiting for the index|confirmed by the index|Following \(confirmed\)/);
+
+    // The index later lists the follow: a fresh view of the profile offers Unfollow.
+    listed = String((await fx.repo.getRecord(FOLLOW, rkey))?.cid);
+    mounted.unmount();
+    mounted = mount(`/u/${BOB}`, world.state, world.services);
+    let view = mounted.main();
+    await until(() =>
+      expect(text(view.querySelector('.follow-status'))).toBe(
+        'Follow published to your PDS; the index has not confirmed it yet. The index lists you as following this account.',
+      ),
+    );
+    expect(buttonByText(view, 'Unfollow')).not.toBeNull();
+    expect(buttonByText(view, 'Follow')).toBeNull();
+
+    // Unfollow: the PDS delete succeeds, but the index keeps listing the follow
+    // until the poll budget is spent; Unfollow is offered again, no removal claimed.
+    click(buttonByText(view, 'Unfollow'));
+    await until(() => expect(text(view.querySelector('.follow-status'))).toBe('Unfollow queued'));
+    await drain();
+    const ops = await fx.ops();
+    expect(ops.map((o) => [o.kind, o.state, o.dueAt])).toEqual([
+      ['follow_create', 'published', null],
+      ['follow_delete', 'published', null],
+    ]);
+    expect(fx.pds.count('com.atproto.repo.deleteRecord')).toBe(1);
+    expect(await fx.repo.getRecord(FOLLOW, rkey)).toBeNull();
+    await until(() =>
+      expect(text(view.querySelector('.follow-status'))).toBe(
+        'Unfollow published to your PDS; the index has not confirmed it yet. The index still lists you as following this account.',
+      ),
+    );
+    expect(buttonByText(view, 'Unfollow')).not.toBeNull();
+    expect(buttonByText(view, 'Follow')).toBeNull();
+    expect(view.textContent).not.toMatch(/Unfollowed|unfollow confirmed|Not following/);
+
+    // Once the index drops it, the stopped unfollow offers Follow.
+    listed = null;
+    mounted.unmount();
+    mounted = mount(`/u/${BOB}`, world.state, world.services);
+    view = mounted.main();
+    await until(() =>
+      expect(text(view.querySelector('.follow-status'))).toBe(
+        'Unfollow published to your PDS; the index has not confirmed it yet. The index does not list you as following this account.',
+      ),
+    );
+    expect(buttonByText(view, 'Follow')).not.toBeNull();
+    expect(buttonByText(view, 'Unfollow')).toBeNull();
+  });
+
+  it("a scrobble whose index confirmation stopped reads as not confirmed in the owner's history, not as waiting", async () => {
+    const world = await outboxWorld();
+    const { fx, api } = world;
+    fx.appView.pendingPolls = Number.MAX_SAFE_INTEGER;
+    const onPage = await world.outbox.scrobble(SCROBBLE_INPUT);
+    const offPage = await world.outbox.scrobble({ ...SCROBBLE_INPUT, listenedAt: '2026-01-15T11:50:00Z' });
+    if (!onPage.ok || !offPage.ok) throw new Error('fixture scrobble rejected');
+    await runUntilIdle(world.outbox.runner, world.clock);
+    expect((await fx.ops()).map((o) => [o.kind, o.state, o.dueAt])).toEqual([
+      ['scrobble_create', 'published', null],
+      ['scrobble_create', 'published', null],
+    ]);
+    // The history page already carries one of them (the other is not on it).
+    const listed: Scrobble = { ...ALICE_HISTORY[0]!, uri: onPage.op.uri };
+    serveUser(api, ALICE, {
+      profile: () => profileOf(ALICE, 'alice.test'),
+      history: [listed, ...ALICE_HISTORY.slice(1)],
+    });
+    mounted = mount(`/u/${ALICE}`, world.state, world.services);
+    const main = mounted.main();
+    const notConfirmed = 'Scrobble published to your PDS; the index has not confirmed it yet';
+    await until(() => expect(main.querySelectorAll('ol.scrobble-list > li')).toHaveLength(7));
+    await until(() =>
+      expect(text(main.querySelector(`ol.scrobble-list > li[data-uri="${onPage.op.uri}"] .op-status`))).toBe(
+        notConfirmed,
+      ),
+    );
+    expect(text(main.querySelector(`ul.scrobble-list > li[data-uri="${offPage.op.uri}"] .op-status`))).toBe(
+      notConfirmed,
+    );
+    expect(main.querySelectorAll('.op-status')).toHaveLength(2);
+    expect(main.textContent).not.toMatch(/waiting for the index|Indexed: visible/);
   });
 
   it('own profile has no follow control and an anonymous viewer gets a sign-in action', async () => {

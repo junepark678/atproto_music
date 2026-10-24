@@ -7,7 +7,8 @@
 // failed operation always shows its code, and a failed delete or unfollow
 // never says the record is gone.
 
-import type { OperationKind, OperationState } from '../outbox/store';
+import type { LocalState } from '../outbox/overlay';
+import type { OperationKind, OperationState, OutboxOperation } from '../outbox/store';
 
 export interface StatusInput {
   kind: OperationKind;
@@ -39,6 +40,26 @@ const INDEXED: Record<OperationKind, string> = {
   settings_put: 'Saved: verified by the index',
   settings_delete: 'Saved: verified by the index',
 };
+
+/** True while the runner will still move this row (not settled, not stopped). */
+export function isPending(op: Pick<StatusInput, 'state' | 'dueAt'>): boolean {
+  if (op.state === 'queued' || op.state === 'running') return true;
+  // A published row whose polling stopped (verdict 'stop', poll budget spent,
+  // or superseded) keeps `published` with dueAt null: nothing more will happen.
+  return op.state === 'published' && op.dueAt !== null;
+}
+
+/**
+ * An overlay's `LocalState` with the row's `dueAt`, so a stopped publication
+ * reads "not confirmed yet" instead of "waiting for the index".
+ */
+export function withDueAt<T extends LocalState>(
+  local: T,
+  ops: readonly OutboxOperation[],
+): T & { dueAt?: number | null } {
+  const row = ops.find((op) => op.id === local.opId);
+  return row === undefined ? local : { ...local, dueAt: row.dueAt };
+}
 
 export function describeOperation(op: StatusInput): { text: string; tone: Tone } {
   const noun = NOUN[op.kind];

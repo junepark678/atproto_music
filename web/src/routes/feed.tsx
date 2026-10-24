@@ -13,6 +13,7 @@
 import type { Did, FeedScope, Scrobble } from '@atmusic/core/api-types';
 import { useCallback, useState } from 'preact/hooks';
 import { useLocation } from 'preact-iso';
+import { withDueAt } from '../components/operation-status';
 import { usePaged } from '../components/paged';
 import { type ListItem, ScrobbleList } from '../components/scrobble-list';
 import { useSessionHandle } from '../components/session-identity';
@@ -89,7 +90,9 @@ function FeedList({ scope, viewer }: { scope: FeedScope; viewer: Did | null }) {
 
   const items: ListItem[] =
     session !== null && ops !== null
-      ? overlayScrobbles(paged.items, ops, session.did, { includePending: false }).items
+      ? overlayScrobbles(paged.items, ops, session.did, { includePending: false }).items.map((item) =>
+          item.local === undefined ? item : { ...item, local: withDueAt(item.local, ops) },
+        )
       : paged.items.map((scrobble) => ({ scrobble }));
 
   return (

@@ -19,7 +19,7 @@ import { useRoute } from 'preact-iso';
 import { isDid } from '../api/client';
 import { FollowButton } from '../components/follow-button';
 import { formatUtc, isNotFound } from '../components/format';
-import { OperationStatus } from '../components/operation-status';
+import { isPending, OperationStatus, withDueAt } from '../components/operation-status';
 import type { OutboxService } from '../components/outbox-service';
 import { usePaged } from '../components/paged';
 import { type ListItem, ScrobbleList, ScrobbleText } from '../components/scrobble-list';
@@ -262,12 +262,13 @@ function ProfileFollow({
     return () => abort.abort();
   }, [state, viewer, subject, check]);
 
-  // When the newest intent reaches a terminal state, re-read the edge and the counts.
+  // When the newest intent settles or stops being polled, re-read the edge and the counts.
   const newest = ops
     ?.filter((op) => op.subject === subject && (op.kind === 'follow_create' || op.kind === 'follow_delete'))
     .at(-1);
-  const settledKey =
-    newest !== undefined && (newest.state === 'indexed' || newest.state === 'failed') ? newest.id : null;
+  // Settled includes a published row whose polling stopped (dueAt null): the
+  // edge is then what decides the offered action, so it is read again.
+  const settledKey = newest !== undefined && !isPending(newest) ? newest.id : null;
   // undefined until the rows are first read: an intent settled before this view opened triggers nothing.
   const seen = useRef<string | null | undefined>(undefined);
   const settledRef = useRef(onSettled);
@@ -311,7 +312,10 @@ function History({ did, outbox, ops }: { did: Did; outbox: OutboxService | null;
     return <ErrorState title="The history could not be loaded." error={paged.error} onRetry={paged.retry} />;
   }
   const overlay = outbox !== null && ops !== null ? overlayScrobbles(paged.items, ops, did) : null;
-  const items: ListItem[] = overlay?.items ?? paged.items.map((scrobble) => ({ scrobble }));
+  const items: ListItem[] =
+    overlay !== null && ops !== null
+      ? overlay.items.map((item) => (item.local === undefined ? item : { ...item, local: withDueAt(item.local, ops) }))
+      : paged.items.map((scrobble) => ({ scrobble }));
   const pending = overlay?.pending ?? [];
 
   return (
@@ -324,7 +328,7 @@ function History({ did, outbox, ops }: { did: Did; outbox: OutboxService | null;
             {pending.map((p) => (
               <li key={p.uri} data-uri={p.uri}>
                 <ScrobbleText scrobble={pendingText(p.record, did)} />
-                <OperationStatus op={p.local} />
+                <OperationStatus op={ops !== null ? withDueAt(p.local, ops) : p.local} />
               </li>
             ))}
           </ul>

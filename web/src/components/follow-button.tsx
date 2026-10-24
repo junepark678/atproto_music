@@ -10,7 +10,7 @@ import type { Did } from '@atmusic/core/api-types';
 import { useState } from 'preact/hooks';
 import { followIntent } from '../outbox/overlay';
 import type { OutboxOperation } from '../outbox/store';
-import { describeOperation } from './operation-status';
+import { describeOperation, isPending, withDueAt } from './operation-status';
 
 export interface FollowButtonProps {
   viewer: Did;
@@ -37,23 +37,36 @@ export function followView(props: Pick<FollowButtonProps, 'viewer' | 'subject' |
       : props.edge
         ? { status: 'Following', action: 'unfollow', busy: false }
         : { status: 'Not following', action: 'follow', busy: false };
-  if (intent === null) return fromEdge();
-  const { local } = intent;
-  const pending = local.state === 'queued' || local.state === 'running' || local.state === 'published';
+  if (intent === null || props.ops === null) return fromEdge();
+  const local = withDueAt(intent.local, props.ops);
+  const text = describeOperation(local).text;
+  if (isPending(local)) return { status: text, action: null, busy: true };
+  if (local.state === 'published') {
+    // Polling stopped before the index confirmed it (dueAt null): nothing more
+    // will happen on its own, so the AppView's edge decides what is offered.
+    if (props.edge === true) {
+      const still = intent.intent === 'unfollow' ? ' still' : '';
+      return {
+        status: `${text}. The index${still} lists you as following this account.`,
+        action: 'unfollow',
+        busy: false,
+      };
+    }
+    const listed = props.edge === false ? ' The index does not list you as following this account.' : '';
+    return { status: `${text}.${listed}`, action: 'follow', busy: false };
+  }
   if (intent.intent === 'follow') {
-    if (pending) return { status: describeOperation(local).text, action: null, busy: true };
     if (local.state === 'indexed') return { status: 'Following (confirmed)', action: 'unfollow', busy: false };
     const base = fromEdge();
     return {
-      status: `${describeOperation(local).text}. ${props.edge ? 'You still follow this account.' : 'You do not follow this account.'}`,
+      status: `${text}. ${props.edge ? 'You still follow this account.' : 'You do not follow this account.'}`,
       action: base.action ?? 'follow',
       busy: false,
     };
   }
-  if (pending) return { status: describeOperation(local).text, action: null, busy: true };
   if (local.state === 'indexed') return { status: 'Not following (unfollow confirmed)', action: 'follow', busy: false };
   return {
-    status: `${describeOperation(local).text}. Your follow record was not removed; you still follow this account.`,
+    status: `${text}. Your follow record was not removed; you still follow this account.`,
     action: 'unfollow',
     busy: false,
   };
