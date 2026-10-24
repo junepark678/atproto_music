@@ -651,6 +651,40 @@ test('GET /u/<did> and /feed serve index.html 200 and POST /feed never returns S
   await expectNotFoundEnvelope(await request.delete(`/u/${bob.did}`, { maxRedirects: 0 }), `DELETE /u/${bob.did}`);
 });
 
+test('platform exception: non-GET/HEAD to an existing file (/, a hashed asset) is a bare Static Assets 405, never SPA HTML', async ({
+  request,
+}) => {
+  // ADR §15 Q9 has the Worker answer asset misses only. A path that is an
+  // existing file never misses, so Static Assets answers a non-GET/HEAD to it
+  // with its own bare 405 before the Worker runs: no JSON envelope and no
+  // x-request-id (the platform exception in docs/deploy/routing.md). This
+  // pins that answer, so a platform or config change that alters it fails.
+  const html = builtIndexHtml();
+  const scripts = [...html.matchAll(/src="(\/assets\/[\w.-]+-[\w-]{8,}\.js)"/g)].map((m) => m[1] as string);
+  expect(scripts.length).toBeGreaterThan(0);
+  const cases: Array<[string, string]> = [
+    ['POST', '/'],
+    ['PUT', '/'],
+    ['DELETE', '/'],
+    ['POST', scripts[0] as string],
+    ['POST', '/robots.txt'],
+  ];
+  for (const [method, path] of cases) {
+    const label = `${method} ${path}`;
+    const res = await request.fetch(path, { method, data: { x: 1 }, maxRedirects: 0 });
+    const body = await res.text();
+    expect([label, res.status()]).toEqual([label, 405]);
+    expect(res.headers()['x-request-id'], label).toBeUndefined();
+    expect(res.headers()['content-type'] ?? '', label).not.toContain('application/json');
+    expect(res.headers().location, label).toBeUndefined();
+    expect(res.headers().allow, label).toBeUndefined();
+    expect(isSpaHtml(body), label).toBe(false);
+    expect(body, label).toBe('');
+  }
+  // A non-GET/HEAD to an SPA route with no file behind it does reach the Worker.
+  await expectNotFoundEnvelope(await request.post('/feed', { data: { x: 1 }, maxRedirects: 0 }), 'POST /feed');
+});
+
 test('non-navigation GET /assets/missing.js and encoded ../ traversal return 404, never index.html', async ({
   request,
 }) => {

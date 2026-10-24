@@ -39,6 +39,9 @@
 //     `/u/<did>` raw or percent-encoded, ...) gets index.html, fetched from
 //     ASSETS at `/` with the same method, as a 200 with no redirect; every
 //     other miss (`/assets/*`, unknown paths) is the JSON not_found envelope;
+//   - platform exception: a non-GET/HEAD to an existing file (`/` itself, a
+//     hashed asset) is not a miss, so Static Assets answers it with its own
+//     bare 405 and the Worker never runs (docs/deploy/routing.md);
 // - every Worker response carries a v4 UUID request id (`x-request-id`) drawn
 //   from the injected Random, the same id every error envelope carries;
 // - `GET /health/live` is answered here, without the IndexDO or the key;

@@ -35,9 +35,11 @@ const APP_JS = '"use strict";\n';
 
 /**
  * A Static Assets stand-in with `not_found_handling: "none"`: the files it
- * holds are 200 (GET with body, HEAD without), anything else a bare 404, as
- * the platform's ASSETS binding answers. `/` is index.html unless `index`
- * says otherwise (missing, or a redirect, to prove neither is passed on).
+ * holds are 200 (GET with body, HEAD without) and a bare 405 for any other
+ * method, anything else a bare 404, as the platform's ASSETS binding answers
+ * (miniflare assets.worker.js `getResponseOrAssetIntent`). `/` is index.html
+ * unless `index` says otherwise (missing, or a redirect, to prove neither is
+ * passed on).
  */
 function staticAssets(index: 'ok' | 'missing' | 'redirect' = 'ok'): Fetcher & { calls: AssetCall[] } {
   const calls: AssetCall[] = [];
@@ -65,8 +67,8 @@ function staticAssets(index: 'ok' | 'missing' | 'redirect' = 'ok'): Fetcher & { 
         return new Response(null, { status: 307, headers: { location: '/index.html' } });
       }
       const file = files.get(pathname);
-      if (file === undefined || (req.method !== 'GET' && req.method !== 'HEAD'))
-        return new Response(null, { status: 404 });
+      if (file === undefined) return new Response(null, { status: 404 });
+      if (req.method !== 'GET' && req.method !== 'HEAD') return new Response(null, { status: 405 });
       return new Response(req.method === 'HEAD' ? null : file.body, { status: 200, headers: file.headers });
     },
     connect() {
@@ -433,17 +435,10 @@ describe('worker/src/router.ts', () => {
       if ((rejected as readonly string[]).includes(path)) expect([path, r.seen]).toEqual([path, []]);
     }
 
-    // A non-GET/HEAD to an SPA path: the envelope, never 405 and never index.html.
-    for (const [method, path] of [
-      ['POST', '/feed'],
-      ['POST', `/u/${PLC}`],
-      ['POST', `/u/${encodeURIComponent(PLC)}`],
-      ['PUT', '/oauth/callback'],
-      ['DELETE', '/settings'],
-      ['PATCH', '/'],
-      ['OPTIONS', '/feed'],
-      ['POST', '/assets/app-3f9a1c2e.js'],
-    ] as const) {
+    // A non-GET/HEAD to an SPA path with no file behind it (every SPA route
+    // but `/`): in production Static Assets finds no file and the Worker gets
+    // the request. The envelope, never 405 and never index.html.
+    const nonGet = async (method: string, path: string) => {
       const r = await viaAssets(h, assets, path, {
         method,
         ...(method === 'OPTIONS' ? {} : { body: '{"x":1}', headers: { 'content-type': 'application/json' } }),
@@ -451,6 +446,32 @@ describe('worker/src/router.ts', () => {
       expectEnvelope(r, 404, 'not_found');
       expect(r.headers.get('allow'), `${method} ${path}`).toBeNull();
       expect([method, path, r.seen]).toEqual([method, path, []]);
+    };
+    for (const [method, path] of [
+      ['POST', '/feed'],
+      ['POST', `/u/${PLC}`],
+      ['POST', `/u/${encodeURIComponent(PLC)}`],
+      ['PUT', '/oauth/callback'],
+      ['DELETE', '/settings'],
+      ['OPTIONS', '/feed'],
+    ] as const) {
+      await nonGet(method, path);
+    }
+    // Worker-only behaviour, not what production sends. A non-GET/HEAD to a
+    // path that is an existing file (`/` is index.html, a hashed asset) never
+    // reaches the Worker: Static Assets answers it with a bare 405, no JSON
+    // and no x-request-id (the platform exception in docs/deploy/routing.md;
+    // web/tests/mvp.spec.ts pins it under wrangler dev). These cases pin only
+    // what the Worker would send were such a request routed to it, e.g. if
+    // the owner put `/` into run_worker_first.
+    for (const [method, path] of [
+      ['PATCH', '/'],
+      ['POST', '/assets/app-3f9a1c2e.js'],
+    ] as const) {
+      await nonGet(method, path);
+      // The stand-in is the platform's answer the Worker never sees for these.
+      const platform = await assets.fetch(`https://music.example.test${path}`, { method, body: '{"x":1}' });
+      expect([method, path, platform.status, platform.headers.get('x-request-id')]).toEqual([method, path, 405, null]);
     }
 
     // Spoofed internal headers never reach ASSETS on either fetch; others pass through.
