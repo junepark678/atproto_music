@@ -2,15 +2,22 @@
 """Validate the 258-case TypeScript case map (ADR 0004 §10.4).
 
 docs/verification/ts-case-map.json must map every named regression case in
-docs/planning/github-plan.json, exactly once, either to a TypeScript test id
-(`<file> › <name>`) declared in docs/planning/workers-waves.json or to
-`retired:<A#|D>` with a reason. A retirement must cite an ADR 0004 §9
-amendment (A1–A20) or the §9.3 dropped list (D), and the leaf's issue amendment
-in docs/planning/AMENDMENTS-workers.md must list that id.
+docs/planning/github-plan.json, exactly once, either to TypeScript test ids
+(`<file> › <name>`: a primary `target` plus optional `also` ids that together
+assert the case outcome) or to `retired:<A#|D>` with a reason. Every referenced
+test id is declared in docs/planning/workers-waves.json or listed, under its
+owning package, in the "Required wave amendments" section of
+docs/planning/AMENDMENTS-workers.md. A retirement must cite an ADR 0004 §9
+amendment (A1–A20) or the §9.3 dropped list (D), the leaf's issue amendment
+must list that id, and its reason may not claim coverage by a test (a covered
+case is mapped, not retired). A `note` is informational: one that states an
+obligation ("must", "should", ...) is rejected, because nothing enforces it;
+an obligation is a test id instead.
 
-With --check-tests, every mapped test file must also exist and contain the
-mapped test name. That final existence check is enforced by W7-01; until the
-TypeScript suites exist it fails by design.
+With --check-tests, every required wave amendment must have been applied to
+workers-waves.json, and every referenced test file must exist and contain the
+test name. That final check is enforced by W7-01; until the TypeScript suites
+exist it fails by design.
 """
 
 from __future__ import annotations
@@ -26,8 +33,13 @@ EXPECTED_CASES = 258
 SEPARATOR = ' › '
 ALLOWED_RETIREMENTS = {f'A{number}' for number in range(1, 21)} | {'D'}
 RETIRED = re.compile(r'retired:(A(?:[1-9]|1[0-9]|20)|D)')
-ENTRY_KEYS = {'case', 'target', 'reason', 'note'}
+ENTRY_KEYS = {'case', 'target', 'also', 'reason', 'note'}
 AMENDMENT_IDS = re.compile(r'\b(A(?:[1-9]|1[0-9]|20)|N[1-4]|D)\b')
+WAVE_SECTION = '## Required wave amendments'
+WAVE_PACKAGE = re.compile(r'^\*\*(W\d-\d\d)\*\*')
+WAVE_TEST = re.compile(r'^- `([^`]+)`')
+OBLIGATION = re.compile(r'\b(must|shall|should|needs? to|has to|have to|required to|obligat\w*)\b', re.IGNORECASE)
+COVERAGE_CLAIM = re.compile(r'covered by|' + SEPARATOR + r'|\.(test|spec)\.tsx?\b', re.IGNORECASE)
 
 
 class CaseMapError(Exception):
@@ -70,7 +82,35 @@ def plan_case_ids(plan):
 
 
 def wave_test_ids(waves):
-    return {test for wave in waves for package in wave['packages'] for test in package['tests']}
+    """Map every declared wave test id to its owning package id."""
+    return {test: package['id'] for wave in waves for package in wave['packages'] for test in package['tests']}
+
+
+def wave_amendments(text):
+    """Parse `## Required wave amendments`: `**W#-##**` package lines, then `- `<test id>`` items."""
+    tests, problems = {}, []
+    inside = False
+    package = None
+    for line in text.splitlines():
+        if line.startswith('## '):
+            inside = line.strip() == WAVE_SECTION
+            package = None
+            continue
+        if not inside:
+            continue
+        heading = WAVE_PACKAGE.match(line)
+        if heading:
+            package = heading.group(1)
+            continue
+        item = WAVE_TEST.match(line)
+        if item:
+            if package is None:
+                problems.append(f'required wave amendment {item.group(1)!r} is not under a **W#-##** package line')
+            elif item.group(1) in tests:
+                problems.append(f'required wave amendment {item.group(1)!r} is listed twice')
+            else:
+                tests[item.group(1)] = package
+    return tests, problems
 
 
 def amendment_sections(text):
@@ -124,12 +164,21 @@ def validate(case_map, plan, waves, amendments_text, root=ROOT, check_tests=Fals
     """Validate a parsed case map; return a summary or raise CaseMapError listing every problem."""
     expected = plan_case_ids(plan)
     known_tests = wave_test_ids(waves)
+    packages = {package['id'] for wave in waves for package in wave['packages']}
     sections = amendment_sections(amendments_text)
-    problems = []
+    pending_tests, problems = wave_amendments(amendments_text)
+    for test, package in sorted(pending_tests.items()):
+        if package not in packages:
+            problems.append(f'required wave amendment {test!r}: unknown package {package}')
+        elif test in known_tests and known_tests[test] != package:
+            problems.append(f'required wave amendment {test!r} is listed under {package} but declared by {known_tests[test]}')
+        elif check_tests and test not in known_tests:
+            problems.append(f'required wave amendment not applied: {package} does not declare {test!r} in workers-waves.json')
     if not isinstance(case_map, dict) or case_map.get('schemaVersion') != 1 or not isinstance(case_map.get('cases'), list):
         raise CaseMapError(['case map must be an object with schemaVersion 1 and a cases list'])
     seen = set()
-    retired = mapped = 0
+    referenced = set()
+    retired = mapped = awaiting = 0
     for index, entry in enumerate(case_map['cases']):
         if not isinstance(entry, dict) or not isinstance(entry.get('case'), str) or not isinstance(entry.get('target'), str):
             problems.append(f'entry {index}: needs string case and target')
@@ -138,8 +187,12 @@ def validate(case_map, plan, waves, amendments_text, root=ROOT, check_tests=Fals
         unknown_keys = sorted(set(entry) - ENTRY_KEYS)
         if unknown_keys:
             problems.append(f'{case}: unknown keys {unknown_keys}')
-        if 'note' in entry and not (isinstance(entry['note'], str) and entry['note'].strip()):
-            problems.append(f'{case}: note must be a nonempty string')
+        if 'note' in entry:
+            if not (isinstance(entry['note'], str) and entry['note'].strip()):
+                problems.append(f'{case}: note must be a nonempty string')
+            elif OBLIGATION.search(entry['note']):
+                problems.append(f'{case}: note states an obligation ({OBLIGATION.search(entry["note"]).group(0)!r}); '
+                                'map the obligation to a declared or required-amendment test id instead')
         if case in seen:
             problems.append(f'duplicate case id {case}')
             continue
@@ -154,27 +207,51 @@ def validate(case_map, plan, waves, amendments_text, root=ROOT, check_tests=Fals
                 continue
             if not (isinstance(entry.get('reason'), str) and entry['reason'].strip()):
                 problems.append(f'{case}: retired entry needs a nonempty reason')
+            elif COVERAGE_CLAIM.search(entry['reason']):
+                problems.append(f'{case}: retired reason claims test coverage; a covered case is mapped, not retired')
+            if 'also' in entry:
+                problems.append(f'{case}: also is only for mapped entries')
             leaf = case.split('/', 1)[0]
             if match.group(1) not in sections.get(leaf, set()):
                 problems.append(f'{case}: AMENDMENTS-workers.md section {leaf} does not list amendment id {match.group(1)}')
         else:
-            mapped += 1
             if 'reason' in entry:
                 problems.append(f'{case}: reason is only for retired entries')
-            if target not in known_tests:
-                problems.append(f'{case}: {target!r} is not a test id declared in workers-waves.json')
-            elif check_tests:
-                missing = check_test_exists(Path(root), target)
-                if missing:
-                    problems.append(f'{case}: {missing}')
+            also = entry.get('also', [])
+            if not (isinstance(also, list) and also and all(isinstance(test, str) for test in also)) and 'also' in entry:
+                problems.append(f'{case}: also must be a nonempty list of test ids')
+                also = []
+            refs = [target, *also]
+            if len(set(refs)) != len(refs):
+                problems.append(f'{case}: target and also repeat a test id')
+            waiting = False
+            for test in refs:
+                referenced.add(test)
+                if SEPARATOR not in test:
+                    problems.append(f'{case}: {test!r} is not a test id (<file> › <name>)')
+                elif test not in known_tests and test not in pending_tests:
+                    problems.append(f'{case}: {test!r} is neither declared in workers-waves.json '
+                                    'nor listed under Required wave amendments')
+                elif check_tests:
+                    missing = check_test_exists(Path(root), test)
+                    if missing:
+                        problems.append(f'{case}: {missing}')
+                waiting |= test in pending_tests and test not in known_tests
+            if waiting:
+                awaiting += 1
+            else:
+                mapped += 1
     for case in expected:
         if case not in seen:
             problems.append(f'missing case id {case}')
+    for test in sorted(set(pending_tests) - referenced):
+        problems.append(f'required wave amendment {test!r} is referenced by no case')
     if not problems and len(seen) != EXPECTED_CASES:
         problems.append(f'expected exactly {EXPECTED_CASES} cases, found {len(seen)}')
     if problems:
         raise CaseMapError(problems)
-    return {'cases': len(seen), 'mapped': mapped, 'retired': retired}
+    return {'cases': len(seen), 'mapped': mapped, 'awaiting': awaiting, 'retired': retired,
+            'amendments': sum(1 for test in pending_tests if test not in known_tests)}
 
 
 def main(argv=None):
@@ -198,8 +275,9 @@ def main(argv=None):
         for problem in error.problems:
             print(f'FAIL case map: {problem}', file=sys.stderr)
         return 1
-    suffix = '; every mapped test file and name exists' if args.check_tests else ''
-    print(f"PASS case map: {summary['cases']} unique cases ({summary['mapped']} mapped to wave test ids, "
+    suffix = '; every referenced test file and name exists' if args.check_tests else ''
+    print(f"PASS case map: {summary['cases']} unique cases ({summary['mapped']} mapped to declared wave test ids, "
+          f"{summary['awaiting']} awaiting {summary['amendments']} required wave amendment tests, "
           f"{summary['retired']} retired with amendment ids){suffix}")
     return 0
 

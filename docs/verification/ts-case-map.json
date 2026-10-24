@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "description": "Maps every named case in docs/planning/github-plan.json to a TypeScript test id from docs/planning/workers-waves.json (`<file> › <name>`) or to `retired:<A#|D>` with a reason. Drafted by W0-02; W7-01 finalises it. Notes record coverage obligations on the owning wave package.",
+  "description": "Maps every named case in docs/planning/github-plan.json to TypeScript test ids (`<file> › <name>`): a primary `target` plus optional `also` ids that together assert the case outcome, each declared in docs/planning/workers-waves.json or listed under \"Required wave amendments\" in docs/planning/AMENDMENTS-workers.md; or to `retired:<A#|D>` with a reason. Notes are informational only and carry no obligation. Drafted by W0-02; W7-01 finalises it.",
   "plan": "docs/planning/github-plan.json",
   "waves": "docs/planning/workers-waves.json",
   "amendments": "docs/planning/AMENDMENTS-workers.md",
@@ -11,26 +11,35 @@
     },
     {
       "case": "M1.1.1/invalid_namespace",
-      "target": "packages/core/test/syntax.test.ts › DID/handle/NSID/AT-URI/TID accept and reject spec vectors",
-      "note": "Configuration-level rejection with the field name is W0-01 parseConfig behaviour; the NSID vectors must include empty, one-segment, uppercase and embedded-slash prefixes."
+      "target": "worker/test/config.test.ts › one-segment, uppercase and embedded-slash LEXICON_PREFIX values are rejected naming LEXICON_PREFIX; empty yields prefix null",
+      "also": [
+        "packages/core/test/syntax.test.ts › DID/handle/NSID/AT-URI/TID accept and reject spec vectors"
+      ]
     },
     {
       "case": "M1.1.1/version_policy",
       "target": "worker/test/ingest/jetstream-socket.test.ts › subscribe URL has kinds=commit and the three collections only",
-      "note": "A10 adds `<prefix>.settings`: a valid prefix derives exactly scrobble, follow and settings."
+      "note": "A10 adds `<prefix>.settings`, so a valid prefix derives exactly the scrobble, follow and settings collections."
     },
     {
       "case": "M1.1.2/unicode_limits",
-      "target": "packages/core/test/scrobble.test.ts › validation.json vectors match Rust verdicts and reasons"
+      "target": "packages/core/test/scrobble.test.ts › validation.json vectors match Rust verdicts and reasons",
+      "note": "The W0-03 description of validation.json lists the 256/257-scalar, 1,024-byte and trim-to-empty vectors."
     },
     {
       "case": "M1.1.2/time_bounds",
-      "target": "packages/core/test/scrobble.test.ts › now+300s accepted and now+301s rejected at 2026-01-15T12:00:00Z receipt"
+      "target": "packages/core/test/scrobble.test.ts › now+300s accepted and now+301s rejected at 2026-01-15T12:00:00Z receipt",
+      "also": [
+        "packages/core/test/scrobble.test.ts › validation.json vectors match Rust verdicts and reasons"
+      ],
+      "note": "The W0-03 description of validation.json lists the 1970 bounds vectors."
     },
     {
       "case": "M1.1.2/optional_values",
-      "target": "packages/core/test/scrobble.test.ts › validation.json vectors match Rust verdicts and reasons",
-      "note": "validation.json (W0-03) must contain the duration 1/86400/0/86401/1.5, MBID and omitted-album vectors."
+      "target": "packages/core/test/scrobble.test.ts › duration 1 and 86400 accepted; 0, 86401 and 1.5 rejected; invalid MBID rejected; omitted album accepted",
+      "also": [
+        "packages/core/test/scrobble.test.ts › validation.json vectors match Rust verdicts and reasons"
+      ]
     },
     {
       "case": "M1.1.3/follow_schema",
@@ -42,12 +51,14 @@
     },
     {
       "case": "M1.1.3/follow_time",
-      "target": "packages/core/test/follow.test.ts › follow validation and self-follow rejection",
-      "note": "Must assert createdAt=now+300s accepted and now+301s rejected."
+      "target": "packages/core/test/follow.test.ts › follow createdAt now+300s accepted and now+301s rejected at 2026-01-15T12:00:00Z receipt"
     },
     {
       "case": "M1.1.4/route_inventory",
-      "target": "python3 scripts/validate_contracts.py › dropped paths (/api/v1/auth/*, POST /api/v1/scrobbles, /api/v1/operations/{id}, /api/v1/account/*) are absent"
+      "target": "python3 scripts/validate_contracts.py › route_inventory: exact MVP/API route and status matrices",
+      "also": [
+        "python3 scripts/validate_contracts.py › dropped paths (/api/v1/auth/*, POST /api/v1/scrobbles, /api/v1/operations/{id}, /api/v1/account/*) are absent"
+      ]
     },
     {
       "case": "M1.1.4/response_examples",
@@ -79,13 +90,12 @@
     },
     {
       "case": "M1.2.2/ci_format_failure",
-      "target": "retired:A18",
-      "reason": "The gate commands become npm test, npm run test:e2e and bash scripts/check-ts.sh; formatting is the biome lint step in check-ts.sh (W0-01). rustfmt applies only to the frozen oracle."
+      "target": "scripts/test/check-ts.test.ts › a misformatted file in a disposable copy fails the biome step and leaves the repository unchanged",
+      "note": "A18: formatting is the biome step of scripts/check-ts.sh; rustfmt applies only to the frozen oracle."
     },
     {
       "case": "M1.2.2/ci_assertion_failure",
-      "target": "bash scripts/acceptance/workers-backend.sh › exits 0 with all deterministic suites passing and lists live gates as blocked when prerequisites absent",
-      "note": "The runner exits nonzero on any failure and report-tests.ts fails a zero-test run (W0-01)."
+      "target": "scripts/test/check-ts.test.ts › an inverted assertion in a disposable copy makes check-ts.sh exit nonzero"
     },
     {
       "case": "M1.2.3/static_elf",
@@ -95,7 +105,10 @@
     {
       "case": "M1.2.3/packaged_http",
       "target": "worker/test/composition/routing.test.ts › every API.md v1.1 route dispatches; unknown /api/x → JSON 404; non-API path → ASSETS",
-      "note": "Liveness and readiness are additionally covered by worker/test/http/health-meta.test.ts (W1-07)."
+      "also": [
+        "worker/test/http/health-meta.test.ts › live 200; ready 503 when index reports too_new; meta capabilities omit publication without owned prefix"
+      ],
+      "note": "The musl smoke harness is dropped (ADR 0004 §9.3); live, ready, root asset and unknown-API behaviour are asserted on the Worker."
     },
     {
       "case": "M1.2.3/packaged_shutdown",
@@ -104,8 +117,7 @@
     },
     {
       "case": "M1.3.1/unique_record",
-      "target": "worker/test/storage/sql-conformance.test.ts › RETURNING and ON CONFLICT DO UPDATE ... WHERE behave as SQLite",
-      "note": "Must also show that a second plain INSERT of one AT URI fails and the row count stays one."
+      "target": "worker/test/storage/sql-conformance.test.ts › second plain INSERT of one scrobbles.uri fails with a constraint error and the row count stays one"
     },
     {
       "case": "M1.3.1/idempotency_scope",
@@ -114,8 +126,11 @@
     },
     {
       "case": "M1.3.1/foreign_key",
-      "target": "worker/test/storage/sql-conformance.test.ts › FK ON DELETE CASCADE is enforced for scrobbles.did and follows.actor",
-      "note": "Private operations no longer exist (A12); FK enforcement is asserted for scrobbles.did and follows.actor."
+      "target": "worker/test/storage/sql-conformance.test.ts › INSERT of a scrobble or follow whose users row is missing is rejected and leaves no row",
+      "also": [
+        "worker/test/storage/sql-conformance.test.ts › FK ON DELETE CASCADE is enforced for scrobbles.did and follows.actor"
+      ],
+      "note": "Private operations no longer exist (A12); the owner foreign key is on scrobbles.did and follows.actor."
     },
     {
       "case": "M1.3.2/fresh_and_reopen",
@@ -123,8 +138,10 @@
     },
     {
       "case": "M1.3.2/migration_rollback",
-      "target": "worker/test/storage/db.test.ts › tx rolls back all writes when the callback throws",
-      "note": "Migrations run inside one transactionSync, so a throwing migration leaves no partial statement."
+      "target": "worker/test/storage/migrate.test.ts › a migration whose second statement is invalid persists neither statement and keeps the previous schema version",
+      "also": [
+        "worker/test/storage/db.test.ts › tx rolls back all writes when the callback throws"
+      ]
     },
     {
       "case": "M1.3.2/future_schema",
@@ -141,16 +158,26 @@
     },
     {
       "case": "M1.3.3/record_revision",
-      "target": "worker/test/write/apply-record.test.ts › r03 artist change updates keys without inserting a second listen"
+      "target": "worker/test/write/apply-record.test.ts › applying the same revision twice changes nothing and a newer revision replaces the payload with one listen",
+      "also": [
+        "worker/test/write/apply-record.test.ts › r03 artist change updates keys without inserting a second listen"
+      ]
     },
     {
       "case": "M1.3.4/concurrent_writes",
-      "target": "worker/test/ingest/verify-drain.test.ts › two concurrent proofs for one URI arriving out of order end with newest revision"
+      "target": "worker/test/ingest/verify-drain.test.ts › 100 hints for distinct URIs from interleaved alarm and RPC calls yield exactly 100 rows",
+      "also": [
+        "worker/test/ingest/verify-drain.test.ts › two concurrent proofs for one URI arriving out of order end with newest revision"
+      ],
+      "note": "A1: every write is a synchronous transactionSync call in the single DO."
     },
     {
       "case": "M1.3.4/queue_full",
-      "target": "worker/test/ingest/notify.test.ts › did notify for unknown DID admits snapshot; busy → 503 queue_full",
-      "note": "The bounded writer queue becomes synchronous transactionSync in the single DO (A1); the bounded resource is admission (1,024 jobs)."
+      "target": "worker/test/ingest/admission.test.ts › 1,024 pending jobs → next admission busy and writes nothing",
+      "also": [
+        "worker/test/ingest/notify.test.ts › did notify for unknown DID admits snapshot; busy → 503 queue_full"
+      ],
+      "note": "A1: the bounded writer queue becomes bounded admission (1,024 jobs) in the single DO."
     },
     {
       "case": "M1.3.4/locked_database",
@@ -164,13 +191,19 @@
     },
     {
       "case": "M1.4.1/migrate_only",
-      "target": "retired:A1",
-      "reason": "There is no CLI; migrations run in the DO constructor under blockConcurrencyWhile (covered by worker/test/storage/migrate.test.ts)."
+      "target": "worker/test/storage/migrate.test.ts › re-running migrate is a no-op",
+      "also": [
+        "worker/test/storage/migrate.test.ts › fresh DO applies migration 1 and seeds indexing_status/backfill_generation/ingest_checkpoint"
+      ],
+      "note": "A1: there is no CLI or listener; the DO constructor runs migrate under blockConcurrencyWhile."
     },
     {
       "case": "M1.4.1/invalid_config",
-      "target": "bash scripts/deploy.sh --dry-run › refuses empty/fixture prefix and missing secret with nonzero exit",
-      "note": "Var validation with field names is W0-01 parseConfig; the cursor key length rule is packages/core/test/cursor.test.ts."
+      "target": "worker/test/config.test.ts › http PUBLIC_ORIGIN and invalid LEXICON_PREFIX fail parseConfig naming each field without echoing any secret value",
+      "also": [
+        "bash scripts/deploy.sh --dry-run › refuses empty/fixture prefix and missing secret with nonzero exit",
+        "packages/core/test/cursor.test.ts › key shorter than 32 bytes is rejected"
+      ]
     },
     {
       "case": "M1.4.2/ready_before_storage",
@@ -178,20 +211,28 @@
     },
     {
       "case": "M1.4.2/upstream_outage",
-      "target": "worker/test/storage/status.test.ts › socket disconnected >5min reports stale"
+      "target": "worker/test/http/health-meta.test.ts › ready 200 and meta indexing stale while the index reports the socket disconnected",
+      "also": [
+        "worker/test/storage/status.test.ts › socket disconnected >5min reports stale"
+      ]
     },
     {
       "case": "M1.4.2/safe_errors",
-      "target": "worker/test/http/error.test.ts › envelope matches openapi Error schema with requestId UUID"
+      "target": "worker/test/http/error.test.ts › envelope matches openapi Error schema with requestId UUID",
+      "also": [
+        "worker/test/composition/routing.test.ts › forced storage error → 500 envelope with UUID requestId and no stack trace or file path",
+        "worker/test/composition/routing.test.ts › every API.md v1.1 route dispatches; unknown /api/x → JSON 404; non-API path → ASSETS"
+      ]
     },
     {
       "case": "M1.4.3/harness_isolation",
-      "target": "retired:A18",
-      "reason": "Per-file isolated workerd storage and a unique DO name per test replace the port-0 server harness."
+      "target": "worker/test/harness › rows written under one DO name are absent under another DO name and in another test file",
+      "note": "A18: isolated workerd storage per test file and a unique DO name per test replace the port-0 harness."
     },
     {
       "case": "M1.4.3/drain_success",
-      "target": "worker/test/composition/index-do.test.ts › restart (eviction) preserves state and resumes alarm"
+      "target": "worker/test/composition/index-do.test.ts › restart (eviction) preserves state and resumes alarm",
+      "note": "The SIGTERM drain is dropped (ADR 0004 §9.3); durability across restart is DO eviction (A18)."
     },
     {
       "case": "M1.4.3/drain_timeout",
@@ -208,8 +249,11 @@
     },
     {
       "case": "M2.1.1/cache_expiry",
-      "target": "packages/atproto/test/identity.test.ts › fresh:true bypasses cache after key rotation",
-      "note": "identity_cache TTL is 5 min (ADR 0004 §5.4); W2-02/W3-04 must assert cached at 299 s and refreshed at 301 s with the injected clock."
+      "target": "worker/test/ingest/identity-cache.test.ts › cached identity served at 299 s and refreshed at 301 s with the injected clock",
+      "also": [
+        "packages/atproto/test/identity.test.ts › fresh:true bypasses cache after key rotation"
+      ],
+      "note": "identity_cache TTL is 5 min (ADR 0004 §5.4)."
     },
     {
       "case": "M2.1.2/ssrf_destinations",
@@ -218,12 +262,19 @@
     {
       "case": "M2.1.2/redirect_rebinding",
       "target": "packages/atproto/test/safe-fetch.test.ts › 3xx response is refused and Location is not followed",
-      "note": "DNS pinning is impossible on Workers (A5); the private-answer DoH pre-check is packages/atproto/test/doh.test.ts and the rebinding TOCTOU residual is probed live (W6-05)."
+      "also": [
+        "packages/atproto/test/doh.test.ts › mixed public+private answer set is rejected"
+      ],
+      "note": "DNS pinning is impossible on Workers (A5); the rebinding TOCTOU residual is probed live (W6-05)."
     },
     {
       "case": "M2.1.2/fetch_bounds",
       "target": "packages/atproto/test/safe-fetch.test.ts › body over cap aborts with body_too_large and does not buffer the rest",
-      "note": "The 10 s deadline is the sibling safe-fetch test; any 3xx is an error, so the four-redirect case becomes the 3xx refusal."
+      "also": [
+        "packages/atproto/test/safe-fetch.test.ts › 10s deadline yields timeout",
+        "packages/atproto/test/safe-fetch.test.ts › 3xx response is refused and Location is not followed"
+      ],
+      "note": "Any 3xx is an error (A5), so the four-redirect input becomes the 3xx refusal."
     },
     {
       "case": "M2.1.3/valid_chain",
@@ -246,7 +297,7 @@
     {
       "case": "M2.2.1/metadata_contract",
       "target": "scripts/test/gen-config.test.ts › production metadata equals expected JSON for https://music.example.org with prefix org.example.music",
-      "note": "Metadata is a build-time static asset; validate_contracts.py also fixes application_type web and the /oauth/callback redirect."
+      "note": "Metadata is a build-time static asset (A3); validate_contracts.py also fixes application_type web and the /oauth/callback redirect."
     },
     {
       "case": "M2.2.1/scope_inventory",
@@ -303,8 +354,8 @@
     },
     {
       "case": "M2.3.2/session_expiry",
-      "target": "retired:A3",
-      "reason": "Sessions follow library and spec limits (at most 14 days for public clients) instead of the 7-day app cookie; the re-auth state is covered by web/test/oauth/session.test.ts."
+      "target": "web/test/oauth/session.test.ts › expired/refresh-failed session surfaces re-auth state",
+      "note": "A3: sessions follow library and spec limits (at most 14 days for public clients) instead of the 7-day app cookie."
     },
     {
       "case": "M2.3.2/csrf_matrix",
@@ -317,8 +368,10 @@
     },
     {
       "case": "M2.3.3/revocation_outage",
-      "target": "web/test/oauth/session.test.ts › signOut calls revoke and clears IndexedDB stores",
-      "note": "W2-06 must also show that a failing revoke still clears the IndexedDB stores."
+      "target": "web/test/oauth/session.test.ts › signOut clears IndexedDB stores when revoke fails with 500",
+      "also": [
+        "web/test/oauth/session.test.ts › signOut calls revoke and clears IndexedDB stores"
+      ]
     },
     {
       "case": "M2.3.3/unsupported_revocation",
@@ -327,8 +380,8 @@
     },
     {
       "case": "M2.4.1/fixture_isolation",
-      "target": "packages/atproto/test/fixture-kit.test.ts › inclusion proof CAR verifies with @atproto/crypto cross-check for both curves",
-      "note": "Records verify only under the issuing fixture key; token isolation is retired with server OAuth (A3)."
+      "target": "packages/atproto/test/fixture-kit.test.ts › a record signed by one fixture account fails verification under another account's key",
+      "note": "Token isolation is retired with server OAuth (A3)."
     },
     {
       "case": "M2.4.1/fault_controls",
@@ -337,7 +390,10 @@
     },
     {
       "case": "M2.4.1/no_prod_bypass",
-      "target": "scripts/test/check-bundle.test.ts › fails when a test-support import is injected into a temp copy of the entry"
+      "target": "scripts/test/check-bundle.test.ts › fails when a test-support import is injected into a temp copy of the entry",
+      "also": [
+        "npx tsx scripts/check-bundle.ts › production bundle passes guard"
+      ]
     },
     {
       "case": "M2.4.2/security_matrix",
@@ -357,7 +413,7 @@
     {
       "case": "M2.4.3/live_round_trip",
       "target": "npx tsx scripts/live/pds_compat_check.ts (no env) › exits nonzero with blocked and lists missing names",
-      "note": "Live OAuth sign-in on two PDSs is a W6-05 live gate; until prerequisites exist the gate reports blocked."
+      "note": "Live OAuth sign-in on two PDSs is a W6-05 live gate; without its prerequisites the gate reports blocked."
     },
     {
       "case": "M2.4.3/live_disposable_record",
@@ -376,12 +432,18 @@
     {
       "case": "M3.1.1/retry_collision",
       "target": "web/test/outbox/recovery.test.ts › remote record with different payload at rkey → remote_record_conflict, never overwritten",
-      "note": "A11: the same rkey with a changed payload is the client-side terminal remote_record_conflict instead of 409."
+      "also": [
+        "web/test/outbox/recovery.test.ts › crash after PDS commit before local ack: ambiguous create reconciles to success via digest"
+      ],
+      "note": "A11: a changed payload at the same rkey is the client-side terminal remote_record_conflict instead of 409."
     },
     {
       "case": "M3.1.1/owner_and_validation",
       "target": "web/test/routes/scrobble.test.tsx › invalid input shows field errors and creates no outbox operation",
-      "note": "The owner is the authenticated PDS repository; buildScrobbleRecord rejects owner/unknown fields (packages/core/test/scrobble.test.ts)."
+      "also": [
+        "packages/core/test/scrobble.test.ts › buildScrobbleRecord rejects unknown input fields"
+      ],
+      "note": "The owner is the authenticated PDS repository (A2)."
     },
     {
       "case": "M3.1.2/history_exact_order",
@@ -389,15 +451,23 @@
     },
     {
       "case": "M3.1.2/visibility",
-      "target": "worker/test/read/history.test.ts › r08 deleted never appears; lookup of r08 is 404"
+      "target": "worker/test/read/history.test.ts › r08 deleted never appears; lookup of r08 is 404",
+      "note": "A12: a pending record exists only in the SPA outbox, so the index never holds it."
     },
     {
       "case": "M3.1.2/lookup_and_limits",
-      "target": "worker/test/http/params.test.ts › limit 0, -1, 1.5, 101 → 422 fields.limit; default 20; stats default 10"
+      "target": "worker/test/http/params.test.ts › limit 0, -1, 1.5, 101 → 422 fields.limit; default 20; stats default 10",
+      "also": [
+        "worker/test/read/history.test.ts › lookup of encoded r01 AT URI returns the exact Scrobble; unknown URI → 404",
+        "worker/test/read/history.test.ts › r08 deleted never appears; lookup of r08 is 404"
+      ]
     },
     {
       "case": "M3.1.3/equal_timestamp",
-      "target": "worker/test/read/history.test.ts › Alice history r07,r01,r02,r03,r04,r05,r06 (equal timestamps by URI desc)"
+      "target": "worker/test/read/history.test.ts › Alice history r07,r01,r02,r03,r04,r05,r06 (equal timestamps by URI desc)",
+      "also": [
+        "worker/test/acceptance/read-model-acceptance.test.ts › union of all pages equals hardcoded URI list with no duplicates"
+      ]
     },
     {
       "case": "M3.1.3/between_pages",
@@ -431,8 +501,10 @@
     },
     {
       "case": "M3.2.2/permanent_error",
-      "target": "packages/core/test/write-policy.test.ts › classify maps 429/5xx/network to transient and RecordAlreadyExists to ambiguous_create",
-      "note": "W2-07 must also assert that a nonrecoverable PDS error ends the operation after one fetch."
+      "target": "web/test/outbox/retry.test.ts › nonrecoverable PDS error fails the operation after exactly one request",
+      "also": [
+        "packages/core/test/write-policy.test.ts › classify maps 429/5xx/network to transient and RecordAlreadyExists to ambiguous_create"
+      ]
     },
     {
       "case": "M3.2.3/crash_after_remote",
@@ -459,18 +531,20 @@
     },
     {
       "case": "M3.3.1/pending_create_delete",
-      "target": "web/test/outbox/delete.test.ts › pending deletion hidden in owner overlay; failure visible",
-      "note": "A12: a delete behind a pending create waits for it through predecessorIds; W2-07 must assert no public record remains."
+      "target": "web/test/outbox/delete.test.ts › delete behind an unsent or in-flight create runs after it and leaves no record on the fake PDS",
+      "note": "A12: predecessor ordering through predecessorIds."
     },
     {
       "case": "M3.3.2/already_absent",
-      "target": "web/test/outbox/recovery.test.ts › crash during delete resumes with swapRecord and verifies absence",
-      "note": "W2-07 must assert that RecordNotFound on delete completes the operation as success."
+      "target": "web/test/outbox/recovery.test.ts › RecordNotFound on first and repeated delete completes the operation as success"
     },
     {
       "case": "M3.3.2/create_in_flight",
-      "target": "web/test/outbox/delete.test.ts › pending deletion hidden in owner overlay; failure visible",
-      "note": "A12 predecessor ordering; W2-07 must assert eventual PDS absence."
+      "target": "web/test/outbox/delete.test.ts › delete behind an unsent or in-flight create runs after it and leaves no record on the fake PDS",
+      "also": [
+        "web/test/outbox/delete.test.ts › pending deletion hidden in owner overlay; failure visible"
+      ],
+      "note": "A12 predecessor ordering; the A13 owner overlay keeps the record hidden meanwhile."
     },
     {
       "case": "M3.3.2/delete_restart",
@@ -498,8 +572,10 @@
     },
     {
       "case": "M3.4.1/same_time_distinct",
-      "target": "worker/test/read/history.test.ts › Alice history r07,r01,r02,r03,r04,r05,r06 (equal timestamps by URI desc)",
-      "note": "r01 and r07 share listenedAt and both count; distinct rkeys come from packages/core/test/record-key.test.ts."
+      "target": "worker/test/write/apply-record.test.ts › two records with identical track and listenedAt under different rkeys are two rows and two listens",
+      "also": [
+        "packages/core/test/record-key.test.ts › TIDs are monotonic and valid for fixed clock and seeded random"
+      ]
     },
     {
       "case": "M3.4.2/kill_after_create",
@@ -530,7 +606,10 @@
     },
     {
       "case": "M4.1.1/collection_filter",
-      "target": "packages/atproto/test/jetstream-events.test.ts › identity/account/sync kinds and foreign collections are ignored"
+      "target": "packages/atproto/test/jetstream-events.test.ts › identity/account/sync kinds and foreign collections are ignored",
+      "also": [
+        "packages/atproto/test/jetstream-events.test.ts › commit create/update/delete for configured collection yields hint with seq and time_us"
+      ]
     },
     {
       "case": "M4.1.1/frame_limits",
@@ -538,8 +617,12 @@
     },
     {
       "case": "M4.1.1/event_types",
-      "target": "worker/test/ingest/accounts.test.ts › deactivated status hides Alice immediately; Bob and Carol unaffected",
-      "note": "A17: identity/account events are not subscribed (kinds=commit); account changes are detected by errors and the getRepoStatus sweep."
+      "target": "packages/atproto/test/jetstream-events.test.ts › buildSubscribeUrl always contains kinds=commit and every collection, never identity/account",
+      "also": [
+        "packages/atproto/test/jetstream-events.test.ts › identity/account/sync kinds and foreign collections are ignored",
+        "worker/test/ingest/accounts.test.ts › deactivated status hides Alice immediately; Bob and Carol unaffected"
+      ],
+      "note": "A17: identity and account events are not subscribed (kinds=commit); account changes come from errors and the getRepoStatus sweep."
     },
     {
       "case": "M4.1.2/valid_signed_repo",
@@ -564,7 +647,9 @@
     {
       "case": "M4.1.3/update_delete",
       "target": "worker/test/ingest/verify-drain.test.ts › deleted record with exclusion proof → absent and removed from views",
-      "note": "The update step is worker/test/write/apply-record.test.ts (r03 artist change)."
+      "also": [
+        "worker/test/write/apply-record.test.ts › r03 artist change updates keys without inserting a second listen"
+      ]
     },
     {
       "case": "M4.2.1/resume",
@@ -572,7 +657,10 @@
     },
     {
       "case": "M4.2.1/expired_cursor",
-      "target": "worker/test/ingest/jetstream-socket.test.ts › cursor older than lookback sets pending_gap and resumes from live tail"
+      "target": "worker/test/ingest/jetstream-socket.test.ts › cursor older than lookback sets pending_gap and resumes from live tail",
+      "also": [
+        "worker/test/ingest/gap-recovery.test.ts › gap schedules all known DIDs within 1,024 bound and clears pending_gap only after all complete"
+      ]
     },
     {
       "case": "M4.2.1/bounded_reconnect",
@@ -589,7 +677,7 @@
     {
       "case": "M4.2.2/backfill_limits",
       "target": "worker/test/ingest/admission.test.ts › 1,024 pending jobs → next admission busy and writes nothing",
-      "note": "The single DO runs one snapshot slice per alarm, so the four-active bound becomes one active slice (A7)."
+      "note": "A7: the single DO runs one snapshot slice per alarm, so the four-active bound becomes one active slice."
     },
     {
       "case": "M4.2.3/pds_migration",
@@ -610,11 +698,18 @@
     {
       "case": "M4.3.1/feed_visibility",
       "target": "worker/test/write/apply-record.test.ts › invalid remote record is excluded with reason and not visible",
-      "note": "The external Carol record is worker/test/acceptance/federation.test.ts; inactive owners are worker/test/write/account-state.test.ts."
+      "also": [
+        "worker/test/acceptance/federation.test.ts › Carol r10 appears only through external ingestion with zero app write calls",
+        "worker/test/write/account-state.test.ts › deactivation hides profile/content/follow edge immediately and bumps generation"
+      ],
+      "note": "A12: pending records never reach the index."
     },
     {
       "case": "M4.3.1/feed_limits",
-      "target": "worker/test/http/params.test.ts › invalid window/scope → 422 with field name"
+      "target": "worker/test/http/params.test.ts › invalid window/scope → 422 with field name",
+      "also": [
+        "worker/test/http/params.test.ts › limit 0, -1, 1.5, 101 → 422 fields.limit; default 20; stats default 10"
+      ]
     },
     {
       "case": "M4.3.2/following_membership",
@@ -623,7 +718,10 @@
     {
       "case": "M4.3.2/scope_security",
       "target": "worker/test/read/feed.test.ts › missing viewer for following → 422 fields.viewer",
-      "note": "A8: anonymous 401 becomes 422 fields.viewer; the viewer-mismatch 400 is worker/test/read/cursor-http.test.ts."
+      "also": [
+        "worker/test/read/cursor-http.test.ts › cursor from history used on feed or with different viewer → 400 invalid_cursor"
+      ],
+      "note": "A8: the anonymous 401 becomes 422 fields.viewer."
     },
     {
       "case": "M4.3.2/follow_change",
@@ -640,7 +738,9 @@
     {
       "case": "M4.3.3/external_delete_update",
       "target": "worker/test/read/cursor-http.test.ts › arrival above anchor absent until fresh traversal; deleted unreturned record disappears",
-      "note": "W3-01 must also assert and document the moved-row (updated listenedAt) behaviour."
+      "also": [
+        "worker/test/read/cursor-http.test.ts › record whose listenedAt moves across the anchor between pages follows the documented moved-row rule"
+      ]
     },
     {
       "case": "M4.4.1/independent_write",
@@ -648,7 +748,12 @@
     },
     {
       "case": "M4.4.1/independent_mutation",
-      "target": "worker/test/acceptance/mutations.test.ts › Carol→Bob duplicates 2, then 2, then 1"
+      "target": "worker/test/acceptance/mutations.test.ts › r03 artist→Björk → Björk 3, Kate Bush 2, Radiohead 2, total 7",
+      "also": [
+        "worker/test/acceptance/mutations.test.ts › delete r01 → 6/6/3, Homogenic 1, history r07,r02,…",
+        "worker/test/acceptance/mutations.test.ts › Carol→Bob duplicates 2, then 2, then 1"
+      ],
+      "note": "A2: every write, the SPA's included, reaches the index only through verified ingestion."
     },
     {
       "case": "M4.4.1/coverage_failure",
@@ -657,7 +762,10 @@
     },
     {
       "case": "M4.4.2/convergence",
-      "target": "worker/test/ingest/gap-recovery.test.ts › gap schedules all known DIDs within 1,024 bound and clears pending_gap only after all complete"
+      "target": "worker/test/acceptance/federation.test.ts › duplicate events, socket drop and expired cursor converge to the exact URI/CID/payload set with no double-counted stats",
+      "also": [
+        "worker/test/ingest/gap-recovery.test.ts › gap schedules all known DIDs within 1,024 bound and clears pending_gap only after all complete"
+      ]
     },
     {
       "case": "M4.4.2/signature_failure",
@@ -688,12 +796,18 @@
     },
     {
       "case": "M5.1.1/tuple_collision",
-      "target": "packages/core/test/music-key.test.ts › every music_keys.json vector equals the Rust key",
-      "note": "music_keys.json (W0-03) must contain the a|b / c versus a / b|c collision pair."
+      "target": "packages/core/test/music-key.test.ts › artist a|b with title c and artist a with title b|c yield distinct track keys",
+      "also": [
+        "packages/core/test/music-key.test.ts › every music_keys.json vector equals the Rust key"
+      ]
     },
     {
       "case": "M5.1.1/album_absence",
-      "target": "packages/core/test/music-key.test.ts › missing album yields null album key"
+      "target": "packages/core/test/music-key.test.ts › missing album yields null album key",
+      "also": [
+        "worker/test/read/stats.test.ts › top tracks and top albums for every window equal TESTING.md exactly; r05 creates no album bucket",
+        "packages/core/test/scrobble.test.ts › validation.json vectors match Rust verdicts and reasons"
+      ]
     },
     {
       "case": "M5.1.2/window_totals",
@@ -701,12 +815,18 @@
     },
     {
       "case": "M5.1.2/boundary_seconds",
-      "target": "worker/test/read/stats-boundaries.test.ts › records at lower bound −1s/0s/+1s for 7d/30d/365d have exact membership"
+      "target": "worker/test/read/stats-boundaries.test.ts › records at lower bound −1s/0s/+1s for 7d/30d/365d have exact membership",
+      "also": [
+        "worker/test/read/stats-boundaries.test.ts › record at asOf+300s excluded until asOf passes it"
+      ]
     },
     {
       "case": "M5.1.2/ranking_ties",
       "target": "worker/test/read/stats.test.ts › 7d: 4/2/3; artists (björk,2),(radiohead,2); tracks Björk/Jóga:2, Radiohead/No Surprises:1, Radiohead/Weird Fishes:1",
-      "note": "Invalid window/limit 422 is worker/test/http/params.test.ts."
+      "also": [
+        "worker/test/http/params.test.ts › invalid window/scope → 422 with field name",
+        "worker/test/http/params.test.ts › limit 0, -1, 1.5, 101 → 422 fields.limit; default 20; stats default 10"
+      ]
     },
     {
       "case": "M5.1.3/delete_effect",
@@ -722,8 +842,11 @@
     },
     {
       "case": "M5.2.1/handle_rename",
-      "target": "worker/test/ingest/sweeps.test.ts › handle that no longer verifies becomes null; history retained",
-      "note": "A17 identity sweep; W4-03 must also show the new verified handle resolves to the same DID."
+      "target": "worker/test/ingest/sweeps.test.ts › renamed handle verifies on the next identity sweep and resolves to the same DID with unchanged history",
+      "also": [
+        "worker/test/ingest/sweeps.test.ts › handle that no longer verifies becomes null; history retained"
+      ],
+      "note": "A17 identity sweep."
     },
     {
       "case": "M5.2.1/unverified_alias",
@@ -736,7 +859,9 @@
     {
       "case": "M5.2.2/unknown_empty",
       "target": "worker/test/read/profile.test.ts › unknown/inactive DID → 404 with zero identity transport calls",
-      "note": "W3-03 must also cover a known recordless user (200, zero totals)."
+      "also": [
+        "worker/test/read/profile.test.ts › known recordless user → 200 with zero totals and empty history"
+      ]
     },
     {
       "case": "M5.2.2/backfill_state",
@@ -749,7 +874,7 @@
     {
       "case": "M5.2.3/sensitive_fields",
       "target": "retired:A3",
-      "reason": "The server stores no tokens, cookies or private payloads (ADR 0004 §8); every HTTP test validates the closed Profile schema with AJV."
+      "reason": "The server receives and stores no tokens, cookies or private payloads (A3, ADR 0004 §8), so there is no seeded secret that a profile response could expose."
     },
     {
       "case": "M5.2.3/owner_equality",
@@ -758,20 +883,31 @@
     },
     {
       "case": "M5.2.3/cache_invalidation",
-      "target": "worker/test/read/stats-cache.test.ts › cache hit only when version unchanged and no row crossed either bound; result equals uncached"
+      "target": "worker/test/read/stats-cache.test.ts › cache hit only when version unchanged and no row crossed either bound; result equals uncached",
+      "also": [
+        "worker/test/read/stats-cache.test.ts › delete r01 invalidates: all → 6 listens, Homogenic 1"
+      ]
     },
     {
       "case": "M5.3.1/self_and_duplicate",
-      "target": "packages/core/test/follow.test.ts › follow validation and self-follow rejection"
+      "target": "packages/core/test/follow.test.ts › follow validation and self-follow rejection",
+      "also": [
+        "packages/core/test/record-key.test.ts › followRkey equals follow_rkeys.json"
+      ]
     },
     {
       "case": "M5.3.1/restart_follow",
-      "target": "web/test/outbox/recovery.test.ts › crash after PDS commit before local ack: ambiguous create reconciles to success via digest",
-      "note": "W2-07 must include the deterministic follow rkey in the crash-after-commit case."
+      "target": "web/test/outbox/recovery.test.ts › crash after follow createRecord before local ack reconciles to one record at the deterministic rkey",
+      "also": [
+        "packages/core/test/record-key.test.ts › followRkey equals follow_rkeys.json"
+      ]
     },
     {
       "case": "M5.3.1/unfollow_absent",
-      "target": "web/test/outbox/follows.test.ts › unfollow deletes all duplicate matching records and keeps unrelated subject"
+      "target": "web/test/outbox/follows.test.ts › unfollow deletes all duplicate matching records and keeps unrelated subject",
+      "also": [
+        "web/test/outbox/follows.test.ts › unfollow with no matching record succeeds with zero deleteRecord calls"
+      ]
     },
     {
       "case": "M5.3.2/external_duplicates",
@@ -779,16 +915,22 @@
     },
     {
       "case": "M5.3.2/public_lists",
-      "target": "worker/test/read/profile.test.ts › Alice followers 0 following 1; Bob followers 1 following 0; Carol 0/0"
+      "target": "worker/test/read/profile.test.ts › Alice followers 0 following 1; Bob followers 1 following 0; Carol 0/0",
+      "also": [
+        "worker/test/acceptance/read-model-acceptance.test.ts › follower/following counts Alice 0/1, Bob 1/0, Carol 0/0"
+      ],
+      "note": "A12: a pending follow exists only in the SPA outbox."
     },
     {
       "case": "M5.3.2/list_pagination",
-      "target": "worker/test/read/follows.test.ts › two active Carol→Bob records count Bob followers 2 not 3; representative is min URI",
-      "note": "W3-03 must add equal-createdAt limit-1 traversal and the invalid-cursor 400."
+      "target": "worker/test/read/follows.test.ts › three edges with equal createdAt traverse completely at limit 1; tampered cursor → 400 invalid_cursor"
     },
     {
       "case": "M5.3.3/pending_confirmed",
       "target": "worker/test/ingest/verify-drain.test.ts › known active DID hint → one getRecord call → row applied with receipt-time validation",
+      "also": [
+        "worker/test/ingest/admission.test.ts › unknown DID admitted inactive with snapshot job; hint itself not projected"
+      ],
       "note": "A2/A12: the queued follow lives in the SPA outbox; the edge appears only after its proof applies."
     },
     {
@@ -814,7 +956,10 @@
     },
     {
       "case": "M5.4.2/read_acceptance",
-      "target": "worker/test/acceptance/read-model-acceptance.test.ts › statistics tables for all/7d/30d/365d equal TESTING.md exactly (totals, artists, tracks, albums)"
+      "target": "worker/test/acceptance/read-model-acceptance.test.ts › statistics tables for all/7d/30d/365d equal TESTING.md exactly (totals, artists, tracks, albums)",
+      "also": [
+        "worker/test/acceptance/read-model-acceptance.test.ts › global feed r09,r10,r07,r01,r02,r03,r04,r05,r06 and Alice following r09 only"
+      ]
     },
     {
       "case": "M5.4.2/social_acceptance",
@@ -822,7 +967,11 @@
     },
     {
       "case": "M5.4.2/mutation_acceptance",
-      "target": "worker/test/acceptance/mutations.test.ts › delete r01 → 6/6/3, Homogenic 1, history r07,r02,…"
+      "target": "worker/test/acceptance/mutations.test.ts › delete r01 → 6/6/3, Homogenic 1, history r07,r02,…",
+      "also": [
+        "worker/test/acceptance/mutations.test.ts › r03 artist→Björk → Björk 3, Kate Bush 2, Radiohead 2, total 7",
+        "worker/test/ingest/sweeps.test.ts › renamed handle verifies on the next identity sweep and resolves to the same DID with unchanged history"
+      ]
     },
     {
       "case": "M5.4.3/durable_views",
@@ -834,25 +983,39 @@
     },
     {
       "case": "M5.4.3/durable_delete",
-      "target": "worker/test/write/apply-record.test.ts › older revision proof after newer delete is noop (no resurrection)"
+      "target": "worker/test/write/apply-record.test.ts › older revision proof after newer delete is noop (no resurrection)",
+      "also": [
+        "worker/test/acceptance/restart.test.ts › eviction preserves byte-identical tables, pre-restart cursor continues, alarm resumes",
+        "web/test/outbox/recovery.test.ts › crash during delete resumes with swapRecord and verifies absence"
+      ]
     },
     {
       "case": "M6.1.1/asset_missing_traversal",
-      "target": "worker/test/composition/routing.test.ts › every API.md v1.1 route dispatches; unknown /api/x → JSON 404; non-API path → ASSETS",
-      "note": "Asset lookup and traversal are Workers Static Assets behaviour (ADR 0004 §9.3)."
+      "target": "web/tests/mvp.spec.ts › non-navigation GET /assets/missing.js and encoded ../ traversal return 404, never index.html",
+      "also": [
+        "worker/test/composition/routing.test.ts › every API.md v1.1 route dispatches; unknown /api/x → JSON 404; non-API path → ASSETS"
+      ],
+      "note": "Asset lookup is Workers Static Assets behaviour (ADR 0004 §9.3 drops build.rs embedding)."
     },
     {
       "case": "M6.1.1/spa_deep_link",
-      "target": "web/tests/mvp.spec.ts › OAuth callback navigation is served by SPA (/oauth/callback not intercepted by Worker)"
+      "target": "web/tests/mvp.spec.ts › GET /u/<did> and /feed serve index.html 200 and POST /feed never returns SPA HTML"
     },
     {
       "case": "M6.1.1/asset_cache",
-      "target": "scripts/test/gen-config.test.ts › _headers contains require-trusted-types-for and frame-ancestors 'none'",
-      "note": "The cache policy is not dropped with build.rs embedding: Workers Static Assets do not mark hashed files immutable by default, so W1-09 gen-config must also write it to web/public/_headers, and this test must assert hashed /assets/* files get Cache-Control public, max-age=31536000, immutable while /index.html and /oauth/client-metadata.json get no-cache."
+      "target": "scripts/test/gen-config.test.ts › _headers marks /assets/* public, max-age=31536000, immutable and /index.html and /oauth/client-metadata.json no-cache",
+      "also": [
+        "web/tests/mvp.spec.ts › hashed /assets/*.js returns 200 with a JavaScript content type and immutable Cache-Control"
+      ],
+      "note": "Workers Static Assets do not mark hashed files immutable by default, so the policy moves to the generated _headers file."
     },
     {
       "case": "M6.1.2/untrusted_forwarded",
-      "target": "worker/test/composition/routing.test.ts › inbound x-atmusic-client-ip is stripped and CF-Connecting-IP used"
+      "target": "worker/test/composition/routing.test.ts › inbound x-atmusic-client-ip is stripped and CF-Connecting-IP used",
+      "also": [
+        "scripts/test/gen-config.test.ts › production metadata equals expected JSON for https://music.example.org with prefix org.example.music"
+      ],
+      "note": "Metadata is generated at build time from PUBLIC_ORIGIN, so no forwarded header reaches it."
     },
     {
       "case": "M6.1.2/trusted_proxy",
@@ -866,54 +1029,73 @@
     },
     {
       "case": "M6.1.3/fresh_install",
-      "target": "bash scripts/deploy.sh --dry-run › refuses empty/fixture prefix and missing secret with nonzero exit",
-      "note": "W6-04 owns the documented install flow."
+      "target": "bash scripts/deploy.sh --dry-run › valid owned prefix and CURSOR_KEY run gen-config, the web build and wrangler deploy --dry-run with exit 0",
+      "also": [
+        "worker/test/storage/migrate.test.ts › fresh DO applies migration 1 and seeds indexing_status/backfill_generation/ingest_checkpoint",
+        "worker/test/http/health-meta.test.ts › live 200; ready 503 when index reports too_new; meta capabilities omit publication without owned prefix"
+      ]
     },
     {
       "case": "M6.1.3/upgrade_failure",
-      "target": "npx tsx scripts/admin/pitr-restore.ts --help › prints usage and requires ADMIN_TOKEN",
-      "note": "A15: recovery is DO point-in-time recovery; a failing migration rolls back in one transactionSync."
+      "target": "worker/test/storage/migrate.test.ts › a migration whose second statement is invalid persists neither statement and keeps the previous schema version",
+      "note": "A15: recovery after a bad deploy is DO point-in-time recovery, an operator action outside the deterministic suite."
     },
     {
       "case": "M6.1.3/secret_example_scan",
-      "target": "bash scripts/deploy.sh --dry-run › refuses empty/fixture prefix and missing secret with nonzero exit",
-      "note": "W6-04 must also scan worker/.dev.vars.example and the docs for real secrets."
+      "target": "scripts/test/secret-scan.test.ts › worker/.dev.vars.example, .env.example and docs contain no credential-shaped values"
     },
     {
       "case": "M6.2.1/body_boundary",
-      "target": "worker/test/http/params.test.ts › body over cap → 413; malformed JSON → 400",
-      "note": "N1: the only JSON body is notify, capped at 2 KiB, so the boundary becomes 2,048/2,049 bytes."
+      "target": "worker/test/ingest/notify.test.ts › 2,048-byte body reaches the parser and 2,049-byte body → 413 with no DB change",
+      "also": [
+        "worker/test/http/params.test.ts › body over cap → 413; malformed JSON → 400",
+        "worker/test/ingest/notify.test.ts › foreign collection or bad URI → 422; oversize → 413; unknown field → 422"
+      ],
+      "note": "N1: the only JSON body is notify, capped at 2 KiB."
     },
     {
       "case": "M6.2.1/rate_boundary",
-      "target": "worker/test/http/limits.test.ts › bucket refills exactly with injected clock; 61st request in a minute is limited"
+      "target": "worker/test/ingest/notify.test.ts › 61st request per IP per minute → 429 and no DB change",
+      "also": [
+        "worker/test/http/limits.test.ts › bucket refills exactly with injected clock; 61st request in a minute is limited"
+      ],
+      "note": "Only notify is rate-limited (M6.2.1 amendment, ADR 0004 §8)."
     },
     {
       "case": "M6.2.1/bounded_state",
-      "target": "worker/test/http/limits.test.ts › bucket refills exactly with injected clock; 61st request in a minute is limited",
-      "note": "W1-07 must assert bounded bucket memory and eviction; buckets fail open after a DO restart (ADR 0004 §8)."
+      "target": "worker/test/http/limits.test.ts › 10,001 distinct IP keys keep BucketSet at its cap and expired buckets are evicted",
+      "also": [
+        "worker/test/composition/routing.test.ts › inbound x-atmusic-client-ip is stripped and CF-Connecting-IP used"
+      ],
+      "note": "Buckets fail open after a DO restart (ADR 0004 §8)."
     },
     {
       "case": "M6.2.2/metrics_auth",
       "target": "worker/test/composition/admin.test.ts › admin routes 404 without ADMIN_TOKEN; wrong token 401 constant-time; status JSON shape",
-      "note": "Token never logged (ADR 0004 §8): the test must capture the injected Logger output across the 404, wrong-token 401 and valid 200 requests and assert the configured and presented ADMIN_TOKEN values appear in no log line and no response body."
+      "also": [
+        "worker/test/composition/logging.test.ts › captured logs and error bodies contain no CURSOR_KEY, ADMIN_TOKEN or bearer marker and logs contain no track-title marker"
+      ],
+      "note": "A16: metrics become /internal/admin/status."
     },
     {
       "case": "M6.2.2/upstream_offline",
-      "target": "worker/test/storage/status.test.ts › socket disconnected >5min reports stale"
+      "target": "worker/test/storage/status.test.ts › socket disconnected >5min reports stale",
+      "also": [
+        "worker/test/http/health-meta.test.ts › ready 200 and meta indexing stale while the index reports the socket disconnected"
+      ]
     },
     {
       "case": "M6.2.2/log_redaction",
-      "target": "worker/test/composition/admin.test.ts › admin routes 404 without ADMIN_TOKEN; wrong token 401 constant-time; status JSON shape",
-      "note": "Carries forward ADR 0004 §8 (CURSOR_KEY and ADMIN_TOKEN never logged or serialised): W5-01 must inject a capturing Logger, configure marked dummy CURSOR_KEY and ADMIN_TOKEN values, send a valid and a wrong marked bearer token to /internal/admin/* and a marked track title through an applied record, and assert that none of the secret or bearer markers appears in captured logs or error envelopes and that the track marker is absent from logs. There are no OAuth codes or cookies to mark (A3)."
+      "target": "worker/test/composition/logging.test.ts › captured logs and error bodies contain no CURSOR_KEY, ADMIN_TOKEN or bearer marker and logs contain no track-title marker",
+      "note": "There are no OAuth codes or cookies to mark (A3)."
     },
     {
       "case": "M6.2.3/benchmark_dataset",
-      "target": "worker/test/bench/read-models.bench.test.ts › benchmark JSON is produced and schema-valid"
+      "target": "worker/test/bench/read-models.bench.test.ts › seeded generator yields exactly 100,000 valid active rows with the documented per-user distribution"
     },
     {
       "case": "M6.2.3/benchmark_results",
-      "target": "worker/test/bench/read-models.bench.test.ts › history/feed rows read ≤ limit+2"
+      "target": "worker/test/bench/read-models.bench.test.ts › 600 measured requests with zero errors report p95 and check it against the target"
     },
     {
       "case": "M6.2.3/slow_query_detection",
@@ -966,8 +1148,11 @@
     },
     {
       "case": "M6.4.1/checksum",
-      "target": "retired:A19",
-      "reason": "The release evidence is the bundle SHA-256 printed by scripts/check-bundle.ts, not a downloadable artifact checksum."
+      "target": "npx tsx scripts/check-bundle.ts › production bundle passes guard",
+      "also": [
+        "scripts/test_live_evidence.py › evidence missing version id or bundle hash is rejected"
+      ],
+      "note": "A19: the release checksum is the bundle SHA-256 that check-bundle prints and the live evidence records with the Worker version id."
     },
     {
       "case": "M6.4.1/static_release",
@@ -984,7 +1169,10 @@
     },
     {
       "case": "M6.4.2/unrun_gate",
-      "target": "python3 scripts/validate_case_map.py --check-tests › every mapped test file and name exists; 258 cases covered"
+      "target": "scripts/test_validate_case_map.py › --check-tests reports a missing test file or name",
+      "also": [
+        "python3 scripts/validate_case_map.py --check-tests › every mapped test file and name exists; 258 cases covered"
+      ]
     },
     {
       "case": "M6.4.3/live_inventory",
@@ -996,17 +1184,18 @@
     },
     {
       "case": "M6.4.3/privacy_consistency",
-      "target": "web/test/routes/settings.test.tsx › disconnect requires confirmation and enqueues settings op",
-      "note": "W6-04 docs must state that the settings opt-out record is public and claims no erasure."
+      "target": "web/test/routes/settings.test.tsx › disconnect confirmation states that public PDS records and the opt-out record remain and claims no erasure",
+      "also": [
+        "web/test/routes/settings.test.tsx › disconnect requires confirmation and enqueues settings op"
+      ]
     },
     {
       "case": "M7.1.1/web_build",
-      "target": "bash scripts/acceptance/workers-backend.sh › exits 0 with all deterministic suites passing and lists live gates as blocked when prerequisites absent"
+      "target": "scripts/test/check-ts.test.ts › npm ci, tsc -b and the web production build pass and leave package-lock.json unchanged"
     },
     {
       "case": "M7.1.1/strict_type_failure",
-      "target": "bash scripts/acceptance/workers-backend.sh › exits 0 with all deterministic suites passing and lists live gates as blocked when prerequisites absent",
-      "note": "tsc -b in check-ts.sh fails the gate; a disposable-copy demonstration is not named in the waves."
+      "target": "scripts/test/check-ts.test.ts › a wrong API field type in a disposable copy fails tsc -b"
     },
     {
       "case": "M7.1.1/gate_enforcement",
@@ -1015,7 +1204,10 @@
     },
     {
       "case": "M7.1.2/contract_drift",
-      "target": "web/test/api-client.test.ts › decodes Page<Scrobble> and passes nextCursor unchanged"
+      "target": "web/test/api-client.test.ts › every api/examples response decodes and a changed field type is rejected",
+      "also": [
+        "web/test/api-client.test.ts › decodes Page<Scrobble> and passes nextCursor unchanged"
+      ]
     },
     {
       "case": "M7.1.2/csrf_client",
@@ -1028,28 +1220,39 @@
     },
     {
       "case": "M7.1.3/route_deep_links",
-      "target": "web/tests/mvp.spec.ts › OAuth callback navigation is served by SPA (/oauth/callback not intercepted by Worker)"
+      "target": "web/tests/mvp.spec.ts › GET /u/<did> and /feed serve index.html 200 and POST /feed never returns SPA HTML",
+      "also": [
+        "web/test/routes/shell.test.tsx › unknown route renders the not-found view"
+      ]
     },
     {
       "case": "M7.1.3/keyboard_shell",
-      "target": "web/tests/accessibility.spec.ts › no serious/critical axe violations on all routes"
+      "target": "web/tests/accessibility.spec.ts › Tab and Enter reach every navigation destination with visible focus"
     },
     {
       "case": "M7.1.3/state_components",
-      "target": "web/test/routes/feed.test.tsx › renders items and loads next page via nextCursor",
-      "note": "W3-06 must render loading, empty, error and stale states without an indefinite spinner."
+      "target": "web/test/routes/feed.test.tsx › loading, empty, error and stale states render labelled text and no spinner remains after an error"
     },
     {
       "case": "M7.2.1/signin_success",
-      "target": "web/test/oauth/session.test.ts › successful callback stores session and posts notify {did}"
+      "target": "web/test/routes/shell.test.tsx › signed-in shell shows the verified handle and DID and the authenticated navigation",
+      "also": [
+        "web/test/oauth/session.test.ts › successful callback stores session and posts notify {did}"
+      ]
     },
     {
       "case": "M7.2.1/signin_failures",
-      "target": "web/test/oauth/session.test.ts › expired/refresh-failed session surfaces re-auth state"
+      "target": "web/test/routes/signin.test.tsx › cancelled authorization, expired callback and unknown handle show specific recovery text with retry and no code or token in the DOM",
+      "also": [
+        "web/test/oauth/session.test.ts › expired/refresh-failed session surfaces re-auth state"
+      ]
     },
     {
       "case": "M7.2.1/logout_ui",
-      "target": "web/test/oauth/session.test.ts › signOut calls revoke and clears IndexedDB stores"
+      "target": "web/test/oauth/session.test.ts › signOut calls revoke and clears IndexedDB stores",
+      "also": [
+        "web/test/routes/shell.test.tsx › after sign-out the shell shows anonymous navigation and the settings route shows a sign-in prompt"
+      ]
     },
     {
       "case": "M7.2.2/form_validation",
@@ -1057,24 +1260,40 @@
     },
     {
       "case": "M7.2.2/submit_retry",
-      "target": "web/test/outbox/recovery.test.ts › crash after PDS commit before local ack: ambiguous create reconciles to success via digest"
+      "target": "web/test/outbox/recovery.test.ts › crash after PDS commit before local ack: ambiguous create reconciles to success via digest",
+      "also": [
+        "web/test/routes/scrobble.test.tsx › status progresses queued→published→indexed from mocked records/status"
+      ]
     },
     {
       "case": "M7.2.2/poll_terminal",
-      "target": "web/test/routes/scrobble.test.tsx › status progresses queued→published→indexed from mocked records/status"
+      "target": "web/test/routes/scrobble.test.tsx › status progresses queued→published→indexed from mocked records/status",
+      "also": [
+        "web/test/routes/scrobble.test.tsx › excluded or failed status shows the failure code, stops polling and never shows published success"
+      ]
     },
     {
       "case": "M7.2.3/delete_owner",
-      "target": "web/test/outbox/delete.test.ts › pending deletion hidden in owner overlay; failure visible",
-      "note": "The forced Bob call is dropped with the server delete route (D); a user can delete only in their own repository."
+      "target": "web/test/routes/profile.test.tsx › delete control appears only on the signed-in owner's own records",
+      "also": [
+        "web/test/outbox/delete.test.ts › pending deletion hidden in owner overlay; failure visible"
+      ],
+      "note": "The forced Bob call is dropped with the server delete route (D)."
     },
     {
       "case": "M7.2.3/export_download",
-      "target": "worker/test/read/export.test.ts › export contains only indexed public records, attachment header, 404 for inactive"
+      "target": "web/test/routes/settings.test.tsx › export action downloads /api/v1/users/<did>/export as music-export.json",
+      "also": [
+        "worker/test/read/export.test.ts › export contains only indexed public records, attachment header, 404 for inactive"
+      ]
     },
     {
       "case": "M7.2.3/disconnect_text",
-      "target": "web/test/routes/settings.test.tsx › disconnect requires confirmation and enqueues settings op"
+      "target": "web/test/routes/settings.test.tsx › disconnect confirmation states that public PDS records and the opt-out record remain and claims no erasure",
+      "also": [
+        "web/test/routes/settings.test.tsx › disconnect requires confirmation and enqueues settings op",
+        "web/test/outbox/settings.test.ts › disconnect writes settings/self disabled and notifies"
+      ]
     },
     {
       "case": "M7.3.1/feed_order",
@@ -1082,13 +1301,12 @@
     },
     {
       "case": "M7.3.1/anonymous_following",
-      "target": "retired:A8",
-      "reason": "The following feed is public with `viewer=<did>`, so there is no anonymous sign-in prompt to show."
+      "target": "web/test/routes/feed.test.tsx › anonymous user selecting following sees a sign-in prompt and no scope=following request is sent",
+      "note": "A8: the following feed needs viewer=<did>, and the SPA takes the viewer from the session."
     },
     {
       "case": "M7.3.1/feed_failure",
-      "target": "web/test/routes/feed.test.tsx › renders items and loads next page via nextCursor",
-      "note": "W3-06 must keep page 1 on a page-2 503 and append the retried page once."
+      "target": "web/test/routes/feed.test.tsx › page-2 503 keeps page 1, shows retry, and a successful retry appends page 2 once"
     },
     {
       "case": "M7.3.2/profile_stats",
@@ -1096,26 +1314,29 @@
     },
     {
       "case": "M7.3.2/handle_change",
-      "target": "web/test/routes/profile.test.tsx › stats window switch fetches window and renders exact top lists",
-      "note": "W3-06 must show the updated handle on the same /u/:did route."
+      "target": "web/test/routes/profile.test.tsx › new verified handle for the same DID updates the display on the same /u/:did route"
     },
     {
       "case": "M7.3.2/empty_states",
-      "target": "web/test/routes/profile.test.tsx › stats window switch fetches window and renders exact top lists",
-      "note": "W3-06 must render the recordless, no-album and unknown-DID 404 states."
+      "target": "web/test/routes/profile.test.tsx › recordless user, no-album stats and unknown DID 404 render explicit empty and not-found states"
     },
     {
       "case": "M7.3.3/follow_state",
-      "target": "web/test/outbox/follows.test.ts › PUT, DELETE, PUT for one subject execute in order with separate ids"
+      "target": "web/test/routes/profile.test.tsx › follow button shows pending then confirmed, and a permanently failed unfollow shows failed without claiming removal",
+      "also": [
+        "web/test/outbox/follows.test.ts › PUT, DELETE, PUT for one subject execute in order with separate ids"
+      ]
     },
     {
       "case": "M7.3.3/unfollow_failure",
-      "target": "web/test/outbox/delete.test.ts › pending deletion hidden in owner overlay; failure visible"
+      "target": "web/test/routes/profile.test.tsx › follow button shows pending then confirmed, and a permanently failed unfollow shows failed without claiming removal"
     },
     {
       "case": "M7.3.3/self_and_auth",
-      "target": "packages/core/test/follow.test.ts › follow validation and self-follow rejection",
-      "note": "The anonymous sign-in action is web/test/routes/shell.test.tsx."
+      "target": "web/test/routes/profile.test.tsx › own profile has no follow control and an anonymous viewer gets a sign-in action",
+      "also": [
+        "packages/core/test/follow.test.ts › follow validation and self-follow rejection"
+      ]
     },
     {
       "case": "M7.4.1/embedded_dist",
@@ -1129,7 +1350,10 @@
     },
     {
       "case": "M7.4.1/asset_links",
-      "target": "web/tests/mvp.spec.ts › OAuth callback navigation is served by SPA (/oauth/callback not intercepted by Worker)"
+      "target": "web/tests/mvp.spec.ts › hashed /assets/*.js returns 200 with a JavaScript content type and immutable Cache-Control",
+      "also": [
+        "web/tests/mvp.spec.ts › GET /u/<did> and /feed serve index.html 200 and POST /feed never returns SPA HTML"
+      ]
     },
     {
       "case": "M7.4.2/browser_journey",
@@ -1138,11 +1362,18 @@
     {
       "case": "M7.4.2/browser_restart",
       "target": "worker/test/acceptance/restart.test.ts › eviction preserves byte-identical tables, pre-restart cursor continues, alarm resumes",
+      "also": [
+        "web/test/outbox/recovery.test.ts › crash after PDS commit before local ack: ambiguous create reconciles to success via digest"
+      ],
       "note": "A18: restart is DO eviction; the browser journey runs against wrangler dev."
     },
     {
       "case": "M7.4.2/browser_network",
-      "target": "web/test/oauth/session.test.ts › expired/refresh-failed session surfaces re-auth state"
+      "target": "web/test/oauth/session.test.ts › expired/refresh-failed session surfaces re-auth state",
+      "also": [
+        "web/test/routes/feed.test.tsx › page-2 503 keeps page 1, shows retry, and a successful retry appends page 2 once",
+        "web/test/routes/feed.test.tsx › loading, empty, error and stale states render labelled text and no spinner remains after an error"
+      ]
     },
     {
       "case": "M7.4.3/a11y_screens",
@@ -1150,8 +1381,7 @@
     },
     {
       "case": "M7.4.3/keyboard_journey",
-      "target": "web/tests/accessibility.spec.ts › no serious/critical axe violations on all routes",
-      "note": "W6-03 must add the keyboard-only journey assertions."
+      "target": "web/tests/accessibility.spec.ts › keyboard-only journey reaches sign-in, scrobble submit, window tabs, follow and sign-out with visible focus"
     },
     {
       "case": "M7.4.3/live_product",

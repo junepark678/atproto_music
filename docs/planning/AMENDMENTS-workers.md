@@ -2,7 +2,7 @@
 
 Status: **draft, not published.** W0-02 drafted these texts from [ADR 0004 §9](../adr/0004-cloudflare-workers.md#9-amended-mvp--api--adr-rules), as MVP.md "Completion and execution rules" requires: a library or rule change needs an issue amendment that explains the demonstrated gap. Publishing them to the GitHub issues is an owner action; nothing here claims an issue was edited or closed.
 
-Each section below is the amendment text for one `github-plan.json` leaf key. It names the amendment ids, the demonstrated gap, the amended requirement, and the disposition of the leaf's three named cases. The dispositions come from [`docs/verification/ts-case-map.json`](../verification/ts-case-map.json), which `scripts/validate_case_map.py` checks against this file: every `retired:<id>` case must have its id on its leaf's **Amendment ids** line.
+Each section below is the amendment text for one `github-plan.json` leaf key. It names the amendment ids, the demonstrated gap, the amended requirement, and the disposition of the leaf's three named cases. The dispositions come from [`docs/verification/ts-case-map.json`](../verification/ts-case-map.json), which `scripts/validate_case_map.py` checks against this file: every `retired:<id>` case must have its id on its leaf's **Amendment ids** line, and every test id a case references must be declared in `workers-waves.json` or listed under [Required wave amendments](#required-wave-amendments).
 
 Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.3 dropped list.
 
@@ -27,8 +27,8 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 | Case | Disposition |
 | --- | --- |
 | `fixture_namespace` | `packages/core/test/namespace.test.ts › fixture prefix blocks publication; owned prefix with ownership ref allows it` |
-| `invalid_namespace` | `packages/core/test/syntax.test.ts › DID/handle/NSID/AT-URI/TID accept and reject spec vectors` (Configuration-level rejection with the field name is W0-01 parseConfig behaviour; the NSID vectors must include empty, one-segment, uppercase and embedded-slash prefixes.) |
-| `version_policy` | `worker/test/ingest/jetstream-socket.test.ts › subscribe URL has kinds=commit and the three collections only` (A10 adds `<prefix>.settings`: a valid prefix derives exactly scrobble, follow and settings.) |
+| `invalid_namespace` | `worker/test/config.test.ts › one-segment, uppercase and embedded-slash LEXICON_PREFIX values are rejected naming LEXICON_PREFIX; empty yields prefix null` (required wave amendment, W0-01); also `packages/core/test/syntax.test.ts › DID/handle/NSID/AT-URI/TID accept and reject spec vectors` |
+| `version_policy` | `worker/test/ingest/jetstream-socket.test.ts › subscribe URL has kinds=commit and the three collections only` (A10 adds `<prefix>.settings`, so a valid prefix derives exactly the scrobble, follow and settings collections.) |
 
 ### M1.1.4 Freeze OpenAPI v1 schemas and endpoint status matrices
 
@@ -40,7 +40,7 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 
 | Case | Disposition |
 | --- | --- |
-| `route_inventory` | `python3 scripts/validate_contracts.py › dropped paths (/api/v1/auth/*, POST /api/v1/scrobbles, /api/v1/operations/{id}, /api/v1/account/*) are absent` |
+| `route_inventory` | `python3 scripts/validate_contracts.py › route_inventory: exact MVP/API route and status matrices` (required wave amendment, W0-02); also `python3 scripts/validate_contracts.py › dropped paths (/api/v1/auth/*, POST /api/v1/scrobbles, /api/v1/operations/{id}, /api/v1/account/*) are absent` |
 | `response_examples` | `python3 scripts/validate_contracts.py › all api/examples validate against openapi 1.1.0 components` |
 | `required_auth` | `retired:D`: Session cookies, CSRF, Origin rules and the private-access matrix are dropped (ADR 0004 §9.3); every v1.1 route is public and validate_contracts.py asserts that no route declares a security requirement. |
 
@@ -64,13 +64,13 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 
 **Demonstrated gap:** (A18) Workers tests run in workerd through `@cloudflare/vitest-plugin`; there is no process, port or `LD_PRELOAD` to control, and restart is DO eviction.
 
-**Amendment text:** The CI gate is `npm ci` and `bash scripts/check-ts.sh` (typecheck, biome lint, vitest through `scripts/report-tests.ts`, contract and case-map validators, bundle guard). A zero-test run fails. The Rust `check` job stays for the oracle until W7-02.
+**Amendment text:** The CI gate is `npm ci` and `bash scripts/check-ts.sh` (typecheck, biome lint, vitest through `scripts/report-tests.ts`, contract and case-map validators, bundle guard). A zero-test run fails. The Rust `check` job stays for the oracle until W7-02. The disposable-copy negative controls are kept: a misformatted file fails the biome step and an inverted assertion fails the gate, each without changing the repository.
 
 | Case | Disposition |
 | --- | --- |
 | `ci_green` | `bash scripts/acceptance/workers-backend.sh › exits 0 with all deterministic suites passing and lists live gates as blocked when prerequisites absent` |
-| `ci_format_failure` | `retired:A18`: The gate commands become npm test, npm run test:e2e and bash scripts/check-ts.sh; formatting is the biome lint step in check-ts.sh (W0-01). rustfmt applies only to the frozen oracle. |
-| `ci_assertion_failure` | `bash scripts/acceptance/workers-backend.sh › exits 0 with all deterministic suites passing and lists live gates as blocked when prerequisites absent` (The runner exits nonzero on any failure and report-tests.ts fails a zero-test run (W0-01).) |
+| `ci_format_failure` | `scripts/test/check-ts.test.ts › a misformatted file in a disposable copy fails the biome step and leaves the repository unchanged` (required wave amendment, W0-01) (A18: formatting is the biome step of scripts/check-ts.sh; rustfmt applies only to the frozen oracle.) |
+| `ci_assertion_failure` | `scripts/test/check-ts.test.ts › an inverted assertion in a disposable copy makes check-ts.sh exit nonzero` (required wave amendment, W0-01) |
 
 ### M1.2.3 Build and smoke-test a self-contained musl artifact
 
@@ -83,7 +83,7 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 | Case | Disposition |
 | --- | --- |
 | `static_elf` | `retired:A19`: No musl executable exists; a release is a Worker version id plus a bundle SHA-256 (wrangler versions upload). |
-| `packaged_http` | `worker/test/composition/routing.test.ts › every API.md v1.1 route dispatches; unknown /api/x → JSON 404; non-API path → ASSETS` (Liveness and readiness are additionally covered by worker/test/http/health-meta.test.ts (W1-07).) |
+| `packaged_http` | `worker/test/composition/routing.test.ts › every API.md v1.1 route dispatches; unknown /api/x → JSON 404; non-API path → ASSETS`; also `worker/test/http/health-meta.test.ts › live 200; ready 503 when index reports too_new; meta capabilities omit publication without owned prefix` (The musl smoke harness is dropped (ADR 0004 §9.3); live, ready, root asset and unknown-API behaviour are asserted on the Worker.) |
 | `packaged_shutdown` | `retired:D`: The SIGTERM drain is dropped (ADR 0004 §9.3): Workers have no shutdown hook and every DO step is durable before it acknowledges. |
 
 ### M1.3.1 Define SQLite schema and invariant constraints
@@ -96,9 +96,9 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 
 | Case | Disposition |
 | --- | --- |
-| `unique_record` | `worker/test/storage/sql-conformance.test.ts › RETURNING and ON CONFLICT DO UPDATE ... WHERE behave as SQLite` (Must also show that a second plain INSERT of one AT URI fails and the row count stays one.) |
+| `unique_record` | `worker/test/storage/sql-conformance.test.ts › second plain INSERT of one scrobbles.uri fails with a constraint error and the row count stays one` (required wave amendment, W0-01) |
 | `idempotency_scope` | `retired:A11`: The server Idempotency-Key table is dropped; the SPA allocates a TID rkey once and uses PDS existence plus a digest comparison. |
-| `foreign_key` | `worker/test/storage/sql-conformance.test.ts › FK ON DELETE CASCADE is enforced for scrobbles.did and follows.actor` (Private operations no longer exist (A12); FK enforcement is asserted for scrobbles.did and follows.actor.) |
+| `foreign_key` | `worker/test/storage/sql-conformance.test.ts › INSERT of a scrobble or follow whose users row is missing is rejected and leaves no row` (required wave amendment, W0-01); also `worker/test/storage/sql-conformance.test.ts › FK ON DELETE CASCADE is enforced for scrobbles.did and follows.actor` (Private operations no longer exist (A12); the owner foreign key is on scrobbles.did and follows.actor.) |
 
 ### M1.3.2 Implement embedded forward migrations and database open
 
@@ -111,7 +111,7 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 | Case | Disposition |
 | --- | --- |
 | `fresh_and_reopen` | `worker/test/storage/migrate.test.ts › re-running migrate is a no-op` |
-| `migration_rollback` | `worker/test/storage/db.test.ts › tx rolls back all writes when the callback throws` (Migrations run inside one transactionSync, so a throwing migration leaves no partial statement.) |
+| `migration_rollback` | `worker/test/storage/migrate.test.ts › a migration whose second statement is invalid persists neither statement and keeps the previous schema version` (required wave amendment, W0-01); also `worker/test/storage/db.test.ts › tx rolls back all writes when the callback throws` |
 | `future_schema` | `worker/test/storage/migrate.test.ts › schema newer than code reports too_new` |
 
 ### M1.3.3 Implement typed repository operations and transactions
@@ -126,7 +126,7 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 | --- | --- |
 | `event_atomicity` | `worker/test/ingest/hints.test.ts › enqueue and checkpoint advance commit atomically (throw rolls back both)` |
 | `owner_private_read` | `retired:A12`: Operations live in the SPA IndexedDB outbox; the server has no private operation rows to read. |
-| `record_revision` | `worker/test/write/apply-record.test.ts › r03 artist change updates keys without inserting a second listen` |
+| `record_revision` | `worker/test/write/apply-record.test.ts › applying the same revision twice changes nothing and a newer revision replaces the payload with one listen` (required wave amendment, W2-04); also `worker/test/write/apply-record.test.ts › r03 artist change updates keys without inserting a second listen` |
 
 ### M1.3.4 Serialize writes and bound database contention
 
@@ -138,8 +138,8 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 
 | Case | Disposition |
 | --- | --- |
-| `concurrent_writes` | `worker/test/ingest/verify-drain.test.ts › two concurrent proofs for one URI arriving out of order end with newest revision` |
-| `queue_full` | `worker/test/ingest/notify.test.ts › did notify for unknown DID admits snapshot; busy → 503 queue_full` (The bounded writer queue becomes synchronous transactionSync in the single DO (A1); the bounded resource is admission (1,024 jobs).) |
+| `concurrent_writes` | `worker/test/ingest/verify-drain.test.ts › 100 hints for distinct URIs from interleaved alarm and RPC calls yield exactly 100 rows` (required wave amendment, W3-04); also `worker/test/ingest/verify-drain.test.ts › two concurrent proofs for one URI arriving out of order end with newest revision` (A1: every write is a synchronous transactionSync call in the single DO.) |
+| `queue_full` | `worker/test/ingest/admission.test.ts › 1,024 pending jobs → next admission busy and writes nothing`; also `worker/test/ingest/notify.test.ts › did notify for unknown DID admits snapshot; busy → 503 queue_full` (A1: the bounded writer queue becomes bounded admission (1,024 jobs) in the single DO.) |
 | `locked_database` | `retired:A1`: DO SQLite has no external file lock and transactionSync is synchronous; there is no storage_busy wait to bound. |
 
 ### M1.4.1 Implement typed environment configuration and migrate CLI
@@ -148,13 +148,13 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 
 **Demonstrated gap:** (A1) A Worker binds no address or port and has no command-line entry point: configuration arrives as Worker vars and secrets in `env`, and the single SQLite Durable Object migrates itself in its constructor, so there is no listener precedence to resolve and no separate migrate command to run (ADR 0004 §1.2, §6).
 
-**Amendment text:** Configuration is Worker vars and secrets parsed by `parseConfig(env)` (W0-01) and refused by `scripts/deploy.sh --dry-run` (W6-04). There is no listener, port or migrate CLI.
+**Amendment text:** Configuration is Worker vars and secrets parsed by `parseConfig(env)` (W0-01) and refused by `scripts/deploy.sh --dry-run` (W6-04). There is no listener, port or migrate CLI; `migrate_only` becomes the DO constructor migration, which is current on first run and a no-op on rerun.
 
 | Case | Disposition |
 | --- | --- |
 | `bind_precedence` | `retired:A1`: A Worker binds no address or port. |
-| `migrate_only` | `retired:A1`: There is no CLI; migrations run in the DO constructor under blockConcurrencyWhile (covered by worker/test/storage/migrate.test.ts). |
-| `invalid_config` | `bash scripts/deploy.sh --dry-run › refuses empty/fixture prefix and missing secret with nonzero exit` (Var validation with field names is W0-01 parseConfig; the cursor key length rule is packages/core/test/cursor.test.ts.) |
+| `migrate_only` | `worker/test/storage/migrate.test.ts › re-running migrate is a no-op`; also `worker/test/storage/migrate.test.ts › fresh DO applies migration 1 and seeds indexing_status/backfill_generation/ingest_checkpoint` (A1: there is no CLI or listener; the DO constructor runs migrate under blockConcurrencyWhile.) |
+| `invalid_config` | `worker/test/config.test.ts › http PUBLIC_ORIGIN and invalid LEXICON_PREFIX fail parseConfig naming each field without echoing any secret value` (required wave amendment, W0-01); also `bash scripts/deploy.sh --dry-run › refuses empty/fixture prefix and missing secret with nonzero exit`, `packages/core/test/cursor.test.ts › key shorter than 32 bytes is rejected` |
 
 ### M1.4.2 Implement health, metadata, and uniform HTTP errors
 
@@ -167,8 +167,8 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 | Case | Disposition |
 | --- | --- |
 | `ready_before_storage` | `worker/test/http/health-meta.test.ts › live 200; ready 503 when index reports too_new; meta capabilities omit publication without owned prefix` |
-| `upstream_outage` | `worker/test/storage/status.test.ts › socket disconnected >5min reports stale` |
-| `safe_errors` | `worker/test/http/error.test.ts › envelope matches openapi Error schema with requestId UUID` |
+| `upstream_outage` | `worker/test/http/health-meta.test.ts › ready 200 and meta indexing stale while the index reports the socket disconnected` (required wave amendment, W1-07); also `worker/test/storage/status.test.ts › socket disconnected >5min reports stale` |
+| `safe_errors` | `worker/test/http/error.test.ts › envelope matches openapi Error schema with requestId UUID`; also `worker/test/composition/routing.test.ts › forced storage error → 500 envelope with UUID requestId and no stack trace or file path` (required wave amendment, W5-01), `worker/test/composition/routing.test.ts › every API.md v1.1 route dispatches; unknown /api/x → JSON 404; non-API path → ASSETS` |
 
 ### M1.4.3 Add server harness and bounded shutdown
 
@@ -176,12 +176,12 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 
 **Demonstrated gap:** (A18) Workers tests run in workerd through `@cloudflare/vitest-plugin`; there is no process, port or `LD_PRELOAD` to control, and restart is DO eviction. (D) ADR 0004 §9.3 drops the SIGTERM drain because neither a Worker nor a Durable Object receives a signal or has a shutdown hook, and every DO step is durable before it acknowledges, so there is no in-flight work to drain. The drop follows from the runtime, not from Q1, so the §15 BFF fallback would not restore it.
 
-**Amendment text:** Superseded. The server harness becomes isolated workerd storage per test file and a unique DO name per test; the SIGTERM drain is dropped. Durability across restart is asserted by DO eviction tests.
+**Amendment text:** Superseded. The server harness becomes isolated workerd storage per test file and a unique DO name per test, and isolation stays a tested property: rows written under one DO name never appear under another. The SIGTERM drain is dropped. Durability across restart is asserted by DO eviction tests.
 
 | Case | Disposition |
 | --- | --- |
-| `harness_isolation` | `retired:A18`: Per-file isolated workerd storage and a unique DO name per test replace the port-0 server harness. |
-| `drain_success` | `worker/test/composition/index-do.test.ts › restart (eviction) preserves state and resumes alarm` |
+| `harness_isolation` | `worker/test/harness › rows written under one DO name are absent under another DO name and in another test file` (required wave amendment, W0-01) (A18: isolated workerd storage per test file and a unique DO name per test replace the port-0 harness.) |
+| `drain_success` | `worker/test/composition/index-do.test.ts › restart (eviction) preserves state and resumes alarm` (The SIGTERM drain is dropped (ADR 0004 §9.3); durability across restart is DO eviction (A18).) |
 | `drain_timeout` | `retired:D`: The SIGTERM drain is dropped (ADR 0004 §9.3); there is no process to drain. |
 
 ### M2.1.1 Resolve handles and validate DID identity
@@ -196,7 +196,7 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 | --- | --- |
 | `round_trip` | `worker/test/read/resolve.test.ts › verified handle 200; unresolved 404; mismatch 422` |
 | `spoofed_handle` | `packages/atproto/test/identity.test.ts › handle verified only when TXT/well-known and alsoKnownAs agree; mismatch yields null` |
-| `cache_expiry` | `packages/atproto/test/identity.test.ts › fresh:true bypasses cache after key rotation` (identity_cache TTL is 5 min (ADR 0004 §5.4); W2-02/W3-04 must assert cached at 299 s and refreshed at 301 s with the injected clock.) |
+| `cache_expiry` | `worker/test/ingest/identity-cache.test.ts › cached identity served at 299 s and refreshed at 301 s with the injected clock` (required wave amendment, W3-04); also `packages/atproto/test/identity.test.ts › fresh:true bypasses cache after key rotation` (identity_cache TTL is 5 min (ADR 0004 §5.4).) |
 
 ### M2.1.2 Harden all metadata/PDS fetch destinations
 
@@ -209,8 +209,8 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 | Case | Disposition |
 | --- | --- |
 | `ssrf_destinations` | `packages/atproto/test/url-policy.test.ts › rejects http, non-default port, credentials, fragment, IP literals (v4/v6/mapped/decimal), localhost, .internal, single label` |
-| `redirect_rebinding` | `packages/atproto/test/safe-fetch.test.ts › 3xx response is refused and Location is not followed` (DNS pinning is impossible on Workers (A5); the private-answer DoH pre-check is packages/atproto/test/doh.test.ts and the rebinding TOCTOU residual is probed live (W6-05).) |
-| `fetch_bounds` | `packages/atproto/test/safe-fetch.test.ts › body over cap aborts with body_too_large and does not buffer the rest` (The 10 s deadline is the sibling safe-fetch test; any 3xx is an error, so the four-redirect case becomes the 3xx refusal.) |
+| `redirect_rebinding` | `packages/atproto/test/safe-fetch.test.ts › 3xx response is refused and Location is not followed`; also `packages/atproto/test/doh.test.ts › mixed public+private answer set is rejected` (DNS pinning is impossible on Workers (A5); the rebinding TOCTOU residual is probed live (W6-05).) |
+| `fetch_bounds` | `packages/atproto/test/safe-fetch.test.ts › body over cap aborts with body_too_large and does not buffer the rest`; also `packages/atproto/test/safe-fetch.test.ts › 10s deadline yields timeout`, `packages/atproto/test/safe-fetch.test.ts › 3xx response is refused and Location is not followed` (Any 3xx is an error (A5), so the four-redirect input becomes the 3xx refusal.) |
 
 ### M2.1.3 Discover PDS and OAuth issuer metadata
 
@@ -237,7 +237,7 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 | Case | Disposition |
 | --- | --- |
 | `metadata_origin` | `scripts/test/gen-config.test.ts › production metadata equals expected JSON for https://music.example.org with prefix org.example.music` |
-| `metadata_contract` | `scripts/test/gen-config.test.ts › production metadata equals expected JSON for https://music.example.org with prefix org.example.music` (Metadata is a build-time static asset; validate_contracts.py also fixes application_type web and the /oauth/callback redirect.) |
+| `metadata_contract` | `scripts/test/gen-config.test.ts › production metadata equals expected JSON for https://music.example.org with prefix org.example.music` (Metadata is a build-time static asset (A3); validate_contracts.py also fixes application_type web and the /oauth/callback redirect.) |
 | `scope_inventory` | `web/test/oauth/session.test.ts › signIn requests scope 'atproto repo:<p>.scrobble repo:<p>.follow repo:<p>.settings'` |
 
 ### M2.2.2 Implement auth start, PKCE, state, and PAR
@@ -293,7 +293,7 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 | Case | Disposition |
 | --- | --- |
 | `cookie_and_hash` | `retired:D`: Application session cookies are dropped (ADR 0004 §9.3). |
-| `session_expiry` | `retired:A3`: Sessions follow library and spec limits (at most 14 days for public clients) instead of the 7-day app cookie; the re-auth state is covered by web/test/oauth/session.test.ts. |
+| `session_expiry` | `web/test/oauth/session.test.ts › expired/refresh-failed session surfaces re-auth state` (A3: sessions follow library and spec limits (at most 14 days for public clients) instead of the 7-day app cookie.) |
 | `csrf_matrix` | `retired:D`: CSRF and Origin rules are dropped with the server mutation routes (ADR 0004 §9.3). |
 
 ### M2.3.3 Implement logout and upstream revocation behavior
@@ -307,7 +307,7 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 | Case | Disposition |
 | --- | --- |
 | `logout_local` | `web/test/oauth/session.test.ts › signOut calls revoke and clears IndexedDB stores` |
-| `revocation_outage` | `web/test/oauth/session.test.ts › signOut calls revoke and clears IndexedDB stores` (W2-06 must also show that a failing revoke still clears the IndexedDB stores.) |
+| `revocation_outage` | `web/test/oauth/session.test.ts › signOut clears IndexedDB stores when revoke fails with 500` (required wave amendment, W2-06); also `web/test/oauth/session.test.ts › signOut calls revoke and clears IndexedDB stores` |
 | `unsupported_revocation` | `retired:A3`: The revocation endpoint is chosen from authorization-server metadata by @atproto/oauth-client-browser. |
 
 ### M2.4.1 Build deterministic OAuth/PDS fixture servers
@@ -320,9 +320,9 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 
 | Case | Disposition |
 | --- | --- |
-| `fixture_isolation` | `packages/atproto/test/fixture-kit.test.ts › inclusion proof CAR verifies with @atproto/crypto cross-check for both curves` (Records verify only under the issuing fixture key; token isolation is retired with server OAuth (A3).) |
+| `fixture_isolation` | `packages/atproto/test/fixture-kit.test.ts › a record signed by one fixture account fails verification under another account's key` (required wave amendment, W1-05) (Token isolation is retired with server OAuth (A3).) |
 | `fault_controls` | `packages/atproto/test/fixture-kit.test.ts › fake PDS createRecord with existing rkey returns RecordAlreadyExists; deleteRecord with stale swap returns InvalidSwap` (Nonce, wrong-issuer and refresh-rotation modes belong to the browser OAuth library (A3).) |
-| `no_prod_bypass` | `scripts/test/check-bundle.test.ts › fails when a test-support import is injected into a temp copy of the entry` |
+| `no_prod_bypass` | `scripts/test/check-bundle.test.ts › fails when a test-support import is injected into a temp copy of the entry`; also `npx tsx scripts/check-bundle.ts › production bundle passes guard` |
 
 ### M2.4.2 Add OAuth/session negative integration matrix
 
@@ -330,7 +330,7 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 
 **Demonstrated gap:** (A3) Q1 (ADR 0004 §15) places the OAuth client in the browser so the Worker holds no user credential; `@atproto/oauth-client-browser` performs discovery, PAR, PKCE, DPoP nonces, the issuer check and refresh, and stores the session in IndexedDB. (D) ADR 0004 §9.3 drops the server OAuth state, callback, sessions, cookies and the private-access 401/403/404 matrix that this negative matrix exercised, because under Q1 none of them exists on the Worker; the §15 BFF fallback would restore them.
 
-**Amendment text:** The server OAuth/session negative matrix is retired with the routes it exercised. Browser OAuth behaviour is covered by `web/test/oauth/session.test.ts` and the live gate.
+**Amendment text:** The server OAuth/session negative matrix is retired with the routes it exercised. Token rotation and persistence belong to `@atproto/oauth-client-browser`, and live OAuth interoperability is a W6-05 gate.
 
 | Case | Disposition |
 | --- | --- |
@@ -348,7 +348,7 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 
 | Case | Disposition |
 | --- | --- |
-| `live_round_trip` | `npx tsx scripts/live/pds_compat_check.ts (no env) › exits nonzero with blocked and lists missing names` (Live OAuth sign-in on two PDSs is a W6-05 live gate; until prerequisites exist the gate reports blocked.) |
+| `live_round_trip` | `npx tsx scripts/live/pds_compat_check.ts (no env) › exits nonzero with blocked and lists missing names` (Live OAuth sign-in on two PDSs is a W6-05 live gate; without its prerequisites the gate reports blocked.) |
 | `live_disposable_record` | `npx tsx scripts/live/pds_compat_check.ts (no env) › exits nonzero with blocked and lists missing names` (Live create/get/delete evidence is recorded per Worker version id (W6-05).) |
 | `live_credentials_missing` | `npx tsx scripts/live/pds_compat_check.ts (no env) › exits nonzero with blocked and lists missing names` |
 
@@ -363,8 +363,8 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 | Case | Disposition |
 | --- | --- |
 | `key_validation` | `retired:A11`: The Idempotency-Key header and its 400 invalid_idempotency_key are dropped with POST /api/v1/scrobbles. |
-| `retry_collision` | `web/test/outbox/recovery.test.ts › remote record with different payload at rkey → remote_record_conflict, never overwritten` (A11: the same rkey with a changed payload is the client-side terminal remote_record_conflict instead of 409.) |
-| `owner_and_validation` | `web/test/routes/scrobble.test.tsx › invalid input shows field errors and creates no outbox operation` (The owner is the authenticated PDS repository; buildScrobbleRecord rejects owner/unknown fields (packages/core/test/scrobble.test.ts).) |
+| `retry_collision` | `web/test/outbox/recovery.test.ts › remote record with different payload at rkey → remote_record_conflict, never overwritten`; also `web/test/outbox/recovery.test.ts › crash after PDS commit before local ack: ambiguous create reconciles to success via digest` (A11: a changed payload at the same rkey is the client-side terminal remote_record_conflict instead of 409.) |
+| `owner_and_validation` | `web/test/routes/scrobble.test.tsx › invalid input shows field errors and creates no outbox operation`; also `packages/core/test/scrobble.test.ts › buildScrobbleRecord rejects unknown input fields` (The owner is the authenticated PDS repository (A2).) |
 
 ### M3.2.1 Persist outbox state and expose owner-bound operation status
 
@@ -392,7 +392,7 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 | --- | --- |
 | `transient_schedule` | `web/test/outbox/retry.test.ts › Retry-After 20 raises next delay to 20s` |
 | `terminal_attempt` | `web/test/outbox/retry.test.ts › zero jitter delays 1,2,4,…,256,300 and exactly 10 attempts with no 11th request` |
-| `permanent_error` | `packages/core/test/write-policy.test.ts › classify maps 429/5xx/network to transient and RecordAlreadyExists to ambiguous_create` (W2-07 must also assert that a nonrecoverable PDS error ends the operation after one fetch.) |
+| `permanent_error` | `web/test/outbox/retry.test.ts › nonrecoverable PDS error fails the operation after exactly one request` (required wave amendment, W2-07); also `packages/core/test/write-policy.test.ts › classify maps 429/5xx/network to transient and RecordAlreadyExists to ambiguous_create` |
 
 ### M3.2.3 Reconcile ambiguous creates and prevent duplicates after crashes
 
@@ -420,7 +420,7 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 | --- | --- |
 | `wrong_owner` | `retired:D`: DELETE /api/v1/scrobbles/{id} is dropped (ADR 0004 §9.3); a user can delete only from their own PDS repository. |
 | `hide_immediately` | `web/test/outbox/delete.test.ts › pending deletion hidden in owner overlay; failure visible` (A13: owner-side optimistic overlay; public views change after verified absence.) |
-| `pending_create_delete` | `web/test/outbox/delete.test.ts › pending deletion hidden in owner overlay; failure visible` (A12: a delete behind a pending create waits for it through predecessorIds; W2-07 must assert no public record remains.) |
+| `pending_create_delete` | `web/test/outbox/delete.test.ts › delete behind an unsent or in-flight create runs after it and leaves no record on the fake PDS` (required wave amendment, W2-07) (A12: predecessor ordering through predecessorIds.) |
 
 ### M3.3.2 Handle remote delete idempotency and create/delete races
 
@@ -432,8 +432,8 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 
 | Case | Disposition |
 | --- | --- |
-| `already_absent` | `web/test/outbox/recovery.test.ts › crash during delete resumes with swapRecord and verifies absence` (W2-07 must assert that RecordNotFound on delete completes the operation as success.) |
-| `create_in_flight` | `web/test/outbox/delete.test.ts › pending deletion hidden in owner overlay; failure visible` (A12 predecessor ordering; W2-07 must assert eventual PDS absence.) |
+| `already_absent` | `web/test/outbox/recovery.test.ts › RecordNotFound on first and repeated delete completes the operation as success` (required wave amendment, W2-07) |
+| `create_in_flight` | `web/test/outbox/delete.test.ts › delete behind an unsent or in-flight create runs after it and leaves no record on the fake PDS` (required wave amendment, W2-07); also `web/test/outbox/delete.test.ts › pending deletion hidden in owner overlay; failure visible` (A12 predecessor ordering; the A13 owner overlay keeps the record hidden meanwhile.) |
 | `delete_restart` | `web/test/outbox/recovery.test.ts › crash during delete resumes with swapRecord and verifies absence` |
 
 ### M3.3.3 Propagate deletion to every read model and owner status
@@ -462,7 +462,7 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 | --- | --- |
 | `lifecycle` | `web/tests/mvp.spec.ts › full journey sign-in → scrobble indexed → stats → follow/unfollow → delete → export → disconnect/reconnect → sign-out` |
 | `validation_matrix` | `web/test/routes/scrobble.test.tsx › invalid input shows field errors and creates no outbox operation` |
-| `same_time_distinct` | `worker/test/read/history.test.ts › Alice history r07,r01,r02,r03,r04,r05,r06 (equal timestamps by URI desc)` (r01 and r07 share listenedAt and both count; distinct rkeys come from packages/core/test/record-key.test.ts.) |
+| `same_time_distinct` | `worker/test/write/apply-record.test.ts › two records with identical track and listenedAt under different rkeys are two rows and two listens` (required wave amendment, W2-04); also `packages/core/test/record-key.test.ts › TIDs are monotonic and valid for fixed clock and seeded random` |
 
 ### M3.4.2 Add fault-injected restart and pagination acceptance tests
 
@@ -502,9 +502,9 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 
 | Case | Disposition |
 | --- | --- |
-| `collection_filter` | `packages/atproto/test/jetstream-events.test.ts › identity/account/sync kinds and foreign collections are ignored` |
+| `collection_filter` | `packages/atproto/test/jetstream-events.test.ts › identity/account/sync kinds and foreign collections are ignored`; also `packages/atproto/test/jetstream-events.test.ts › commit create/update/delete for configured collection yields hint with seq and time_us` |
 | `frame_limits` | `packages/atproto/test/jetstream-events.test.ts › oversize, malformed JSON, bad DID, unsafe integer are invalid` |
-| `event_types` | `worker/test/ingest/accounts.test.ts › deactivated status hides Alice immediately; Bob and Carol unaffected` (A17: identity/account events are not subscribed (kinds=commit); account changes are detected by errors and the getRepoStatus sweep.) |
+| `event_types` | `packages/atproto/test/jetstream-events.test.ts › buildSubscribeUrl always contains kinds=commit and every collection, never identity/account`; also `packages/atproto/test/jetstream-events.test.ts › identity/account/sync kinds and foreign collections are ignored`, `worker/test/ingest/accounts.test.ts › deactivated status hides Alice immediately; Bob and Carol unaffected` (A17: identity and account events are not subscribed (kinds=commit); account changes come from errors and the getRepoStatus sweep.) |
 
 ### M4.1.2 Verify commit signatures, CIDs, and MST membership
 
@@ -532,7 +532,7 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 | --- | --- |
 | `duplicate_commit` | `worker/test/ingest/jetstream.test.ts › hint durable before cursor advance; replay of inclusive cursor creates no duplicate rows` |
 | `atomic_fault` | `worker/test/ingest/hints.test.ts › enqueue and checkpoint advance commit atomically (throw rolls back both)` |
-| `update_delete` | `worker/test/ingest/verify-drain.test.ts › deleted record with exclusion proof → absent and removed from views` (The update step is worker/test/write/apply-record.test.ts (r03 artist change).) |
+| `update_delete` | `worker/test/ingest/verify-drain.test.ts › deleted record with exclusion proof → absent and removed from views`; also `worker/test/write/apply-record.test.ts › r03 artist change updates keys without inserting a second listen` |
 
 ### M4.2.1 Implement cursor reconnect and gap detection
 
@@ -545,7 +545,7 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 | Case | Disposition |
 | --- | --- |
 | `resume` | `worker/test/ingest/jetstream.test.ts › hint durable before cursor advance; replay of inclusive cursor creates no duplicate rows` |
-| `expired_cursor` | `worker/test/ingest/jetstream-socket.test.ts › cursor older than lookback sets pending_gap and resumes from live tail` |
+| `expired_cursor` | `worker/test/ingest/jetstream-socket.test.ts › cursor older than lookback sets pending_gap and resumes from live tail`; also `worker/test/ingest/gap-recovery.test.ts › gap schedules all known DIDs within 1,024 bound and clears pending_gap only after all complete` |
 | `bounded_reconnect` | `worker/test/ingest/jetstream-socket.test.ts › close triggers reconnect delays 1,2,4,…,60s and rotates us-east→us-west` |
 
 ### M4.2.2 Implement verified repository backfill and revision convergence
@@ -560,7 +560,7 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 | --- | --- |
 | `historical_seed` | `worker/test/ingest/snapshot-job.test.ts › new DID snapshot imports r01–r07 and activates; r08 absent` |
 | `snapshot_live_race` | `worker/test/write/apply-snapshot.test.ts › live hint with newer revision survives snapshot sweep` |
-| `backfill_limits` | `worker/test/ingest/admission.test.ts › 1,024 pending jobs → next admission busy and writes nothing` (The single DO runs one snapshot slice per alarm, so the four-active bound becomes one active slice (A7).) |
+| `backfill_limits` | `worker/test/ingest/admission.test.ts › 1,024 pending jobs → next admission busy and writes nothing` (A7: the single DO runs one snapshot slice per alarm, so the four-active bound becomes one active slice.) |
 
 ### M4.2.3 Reconcile account state, identity changes, and status
 
@@ -587,7 +587,7 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 | Case | Disposition |
 | --- | --- |
 | `following_membership` | `worker/test/read/feed.test.ts › Alice following feed is r09 only and excludes self` |
-| `scope_security` | `worker/test/read/feed.test.ts › missing viewer for following → 422 fields.viewer` (A8: anonymous 401 becomes 422 fields.viewer; the viewer-mismatch 400 is worker/test/read/cursor-http.test.ts.) |
+| `scope_security` | `worker/test/read/feed.test.ts › missing viewer for following → 422 fields.viewer`; also `worker/test/read/cursor-http.test.ts › cursor from history used on feed or with different viewer → 400 invalid_cursor` (A8: the anonymous 401 becomes 422 fields.viewer.) |
 | `follow_change` | `worker/test/acceptance/mutations.test.ts › remove Alice→Bob → following feed empty; global unchanged` |
 
 ### M4.4.1 Create independent-writer federation harness
@@ -601,7 +601,7 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 | Case | Disposition |
 | --- | --- |
 | `independent_write` | `worker/test/acceptance/federation.test.ts › Carol r10 appears only through external ingestion with zero app write calls` |
-| `independent_mutation` | `worker/test/acceptance/mutations.test.ts › Carol→Bob duplicates 2, then 2, then 1` |
+| `independent_mutation` | `worker/test/acceptance/mutations.test.ts › r03 artist→Björk → Björk 3, Kate Bush 2, Radiohead 2, total 7`; also `worker/test/acceptance/mutations.test.ts › delete r01 → 6/6/3, Homogenic 1, history r07,r02,…`, `worker/test/acceptance/mutations.test.ts › Carol→Bob duplicates 2, then 2, then 1` (A2: every write, the SPA's included, reaches the index only through verified ingestion.) |
 | `coverage_failure` | `npx tsx scripts/live/pds_compat_check.ts (no env) › exits nonzero with blocked and lists missing names` (A6: Jetstream coverage is a live prerequisite; missing coverage is reported blocked, never a federation pass.) |
 
 ### M4.4.2 Add federation fault and convergence suite
@@ -614,7 +614,7 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 
 | Case | Disposition |
 | --- | --- |
-| `convergence` | `worker/test/ingest/gap-recovery.test.ts › gap schedules all known DIDs within 1,024 bound and clears pending_gap only after all complete` |
+| `convergence` | `worker/test/acceptance/federation.test.ts › duplicate events, socket drop and expired cursor converge to the exact URI/CID/payload set with no double-counted stats` (required wave amendment, W6-01); also `worker/test/ingest/gap-recovery.test.ts › gap schedules all known DIDs within 1,024 bound and clears pending_gap only after all complete` |
 | `signature_failure` | `worker/test/acceptance/federation.test.ts › bad signature / changed block / wrong MST path leave projection and cursor byte-identical` |
 | `worker_restart` | `worker/test/acceptance/restart.test.ts › eviction preserves byte-identical tables, pre-restart cursor continues, alarm resumes` |
 
@@ -642,7 +642,7 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 
 | Case | Disposition |
 | --- | --- |
-| `handle_rename` | `worker/test/ingest/sweeps.test.ts › handle that no longer verifies becomes null; history retained` (A17 identity sweep; W4-03 must also show the new verified handle resolves to the same DID.) |
+| `handle_rename` | `worker/test/ingest/sweeps.test.ts › renamed handle verifies on the next identity sweep and resolves to the same DID with unchanged history` (required wave amendment, W4-03); also `worker/test/ingest/sweeps.test.ts › handle that no longer verifies becomes null; history retained` (A17 identity sweep.) |
 | `unverified_alias` | `worker/test/read/resolve.test.ts › verified handle 200; unresolved 404; mismatch 422` |
 | `profile_fields` | `worker/test/read/profile.test.ts › Alice followers 0 following 1; Bob followers 1 following 0; Carol 0/0` |
 
@@ -656,9 +656,9 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 
 | Case | Disposition |
 | --- | --- |
-| `sensitive_fields` | `retired:A3`: The server stores no tokens, cookies or private payloads (ADR 0004 §8); every HTTP test validates the closed Profile schema with AJV. |
+| `sensitive_fields` | `retired:A3`: The server receives and stores no tokens, cookies or private payloads (A3, ADR 0004 §8), so there is no seeded secret that a profile response could expose. |
 | `owner_equality` | `retired:D`: Sessions are dropped (ADR 0004 §9.3), so no request carries a caller identity that could change a public payload. |
-| `cache_invalidation` | `worker/test/read/stats-cache.test.ts › cache hit only when version unchanged and no row crossed either bound; result equals uncached` |
+| `cache_invalidation` | `worker/test/read/stats-cache.test.ts › cache hit only when version unchanged and no row crossed either bound; result equals uncached`; also `worker/test/read/stats-cache.test.ts › delete r01 invalidates: all → 6 listens, Homogenic 1` |
 
 ### M5.3.1 Publish and delete idempotent music-follow records
 
@@ -670,9 +670,9 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 
 | Case | Disposition |
 | --- | --- |
-| `self_and_duplicate` | `packages/core/test/follow.test.ts › follow validation and self-follow rejection` |
-| `restart_follow` | `web/test/outbox/recovery.test.ts › crash after PDS commit before local ack: ambiguous create reconciles to success via digest` (W2-07 must include the deterministic follow rkey in the crash-after-commit case.) |
-| `unfollow_absent` | `web/test/outbox/follows.test.ts › unfollow deletes all duplicate matching records and keeps unrelated subject` |
+| `self_and_duplicate` | `packages/core/test/follow.test.ts › follow validation and self-follow rejection`; also `packages/core/test/record-key.test.ts › followRkey equals follow_rkeys.json` |
+| `restart_follow` | `web/test/outbox/recovery.test.ts › crash after follow createRecord before local ack reconciles to one record at the deterministic rkey` (required wave amendment, W2-07); also `packages/core/test/record-key.test.ts › followRkey equals follow_rkeys.json` |
+| `unfollow_absent` | `web/test/outbox/follows.test.ts › unfollow deletes all duplicate matching records and keeps unrelated subject`; also `web/test/outbox/follows.test.ts › unfollow with no matching record succeeds with zero deleteRecord calls` (required wave amendment, W2-07) |
 
 ### M5.3.3 Integrate follow/account state into feed membership
 
@@ -684,7 +684,7 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 
 | Case | Disposition |
 | --- | --- |
-| `pending_confirmed` | `worker/test/ingest/verify-drain.test.ts › known active DID hint → one getRecord call → row applied with receipt-time validation` (A2/A12: the queued follow lives in the SPA outbox; the edge appears only after its proof applies.) |
+| `pending_confirmed` | `worker/test/ingest/verify-drain.test.ts › known active DID hint → one getRecord call → row applied with receipt-time validation`; also `worker/test/ingest/admission.test.ts › unknown DID admitted inactive with snapshot job; hint itself not projected` (A2/A12: the queued follow lives in the SPA outbox; the edge appears only after its proof applies.) |
 | `unfollow_target` | `worker/test/acceptance/mutations.test.ts › remove Alice→Bob → following feed empty; global unchanged` |
 | `account_state` | `worker/test/ingest/accounts.test.ts › reactivated status schedules snapshot and keeps hidden until completion` |
 
@@ -700,7 +700,7 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 | --- | --- |
 | `durable_views` | `worker/test/acceptance/restart.test.ts › eviction preserves byte-identical tables, pre-restart cursor continues, alarm resumes` |
 | `durable_cursor` | `worker/test/acceptance/restart.test.ts › eviction preserves byte-identical tables, pre-restart cursor continues, alarm resumes` |
-| `durable_delete` | `worker/test/write/apply-record.test.ts › older revision proof after newer delete is noop (no resurrection)` |
+| `durable_delete` | `worker/test/write/apply-record.test.ts › older revision proof after newer delete is noop (no resurrection)`; also `worker/test/acceptance/restart.test.ts › eviction preserves byte-identical tables, pre-restart cursor continues, alarm resumes`, `web/test/outbox/recovery.test.ts › crash during delete resumes with swapRecord and verifies absence` |
 
 ### M6.1.1 Embed compile-time assets and implement safe SPA routing
 
@@ -712,9 +712,9 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 
 | Case | Disposition |
 | --- | --- |
-| `asset_missing_traversal` | `worker/test/composition/routing.test.ts › every API.md v1.1 route dispatches; unknown /api/x → JSON 404; non-API path → ASSETS` (Asset lookup and traversal are Workers Static Assets behaviour (ADR 0004 §9.3).) |
-| `spa_deep_link` | `web/tests/mvp.spec.ts › OAuth callback navigation is served by SPA (/oauth/callback not intercepted by Worker)` |
-| `asset_cache` | `scripts/test/gen-config.test.ts › _headers contains require-trusted-types-for and frame-ancestors 'none'` (The cache policy is not dropped with build.rs embedding: Workers Static Assets do not mark hashed files immutable by default, so W1-09 gen-config must also write it to web/public/_headers, and this test must assert hashed /assets/* files get Cache-Control public, max-age=31536000, immutable while /index.html and /oauth/client-metadata.json get no-cache.) |
+| `asset_missing_traversal` | `web/tests/mvp.spec.ts › non-navigation GET /assets/missing.js and encoded ../ traversal return 404, never index.html` (required wave amendment, W6-03); also `worker/test/composition/routing.test.ts › every API.md v1.1 route dispatches; unknown /api/x → JSON 404; non-API path → ASSETS` (Asset lookup is Workers Static Assets behaviour (ADR 0004 §9.3 drops build.rs embedding).) |
+| `spa_deep_link` | `web/tests/mvp.spec.ts › GET /u/<did> and /feed serve index.html 200 and POST /feed never returns SPA HTML` (required wave amendment, W6-03) |
+| `asset_cache` | `scripts/test/gen-config.test.ts › _headers marks /assets/* public, max-age=31536000, immutable and /index.html and /oauth/client-metadata.json no-cache` (required wave amendment, W1-09); also `web/tests/mvp.spec.ts › hashed /assets/*.js returns 200 with a JavaScript content type and immutable Cache-Control` (required wave amendment, W6-03) (Workers Static Assets do not mark hashed files immutable by default, so the policy moves to the generated _headers file.) |
 
 ### M6.1.2 Validate public-origin and trusted-proxy deployment settings
 
@@ -726,7 +726,7 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 
 | Case | Disposition |
 | --- | --- |
-| `untrusted_forwarded` | `worker/test/composition/routing.test.ts › inbound x-atmusic-client-ip is stripped and CF-Connecting-IP used` |
+| `untrusted_forwarded` | `worker/test/composition/routing.test.ts › inbound x-atmusic-client-ip is stripped and CF-Connecting-IP used`; also `scripts/test/gen-config.test.ts › production metadata equals expected JSON for https://music.example.org with prefix org.example.music` (Metadata is generated at build time from PUBLIC_ORIGIN, so no forwarded header reaches it.) |
 | `trusted_proxy` | `retired:D`: The trusted reverse proxy is dropped; Cloudflare terminates TLS and supplies CF-Connecting-IP (ADR 0004 §9.3). |
 | `origin_mismatch` | `scripts/test/gen-config.test.ts › production metadata equals expected JSON for https://music.example.org with prefix org.example.music` (Metadata is generated at build time from PUBLIC_ORIGIN, so no Host header is read; wrong-Origin mutations are dropped (D).) |
 
@@ -740,9 +740,9 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 
 | Case | Disposition |
 | --- | --- |
-| `fresh_install` | `bash scripts/deploy.sh --dry-run › refuses empty/fixture prefix and missing secret with nonzero exit` (W6-04 owns the documented install flow.) |
-| `upgrade_failure` | `npx tsx scripts/admin/pitr-restore.ts --help › prints usage and requires ADMIN_TOKEN` (A15: recovery is DO point-in-time recovery; a failing migration rolls back in one transactionSync.) |
-| `secret_example_scan` | `bash scripts/deploy.sh --dry-run › refuses empty/fixture prefix and missing secret with nonzero exit` (W6-04 must also scan worker/.dev.vars.example and the docs for real secrets.) |
+| `fresh_install` | `bash scripts/deploy.sh --dry-run › valid owned prefix and CURSOR_KEY run gen-config, the web build and wrangler deploy --dry-run with exit 0` (required wave amendment, W6-04); also `worker/test/storage/migrate.test.ts › fresh DO applies migration 1 and seeds indexing_status/backfill_generation/ingest_checkpoint`, `worker/test/http/health-meta.test.ts › live 200; ready 503 when index reports too_new; meta capabilities omit publication without owned prefix` |
+| `upgrade_failure` | `worker/test/storage/migrate.test.ts › a migration whose second statement is invalid persists neither statement and keeps the previous schema version` (required wave amendment, W0-01) (A15: recovery after a bad deploy is DO point-in-time recovery, an operator action outside the deterministic suite.) |
+| `secret_example_scan` | `scripts/test/secret-scan.test.ts › worker/.dev.vars.example, .env.example and docs contain no credential-shaped values` (required wave amendment, W6-04) |
 
 ### M6.2.1 Enforce body limits and bounded per-user/IP rates
 
@@ -754,9 +754,9 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 
 | Case | Disposition |
 | --- | --- |
-| `body_boundary` | `worker/test/http/params.test.ts › body over cap → 413; malformed JSON → 400` (N1: the only JSON body is notify, capped at 2 KiB, so the boundary becomes 2,048/2,049 bytes.) |
-| `rate_boundary` | `worker/test/http/limits.test.ts › bucket refills exactly with injected clock; 61st request in a minute is limited` |
-| `bounded_state` | `worker/test/http/limits.test.ts › bucket refills exactly with injected clock; 61st request in a minute is limited` (W1-07 must assert bounded bucket memory and eviction; buckets fail open after a DO restart (ADR 0004 §8).) |
+| `body_boundary` | `worker/test/ingest/notify.test.ts › 2,048-byte body reaches the parser and 2,049-byte body → 413 with no DB change` (required wave amendment, W4-04); also `worker/test/http/params.test.ts › body over cap → 413; malformed JSON → 400`, `worker/test/ingest/notify.test.ts › foreign collection or bad URI → 422; oversize → 413; unknown field → 422` (N1: the only JSON body is notify, capped at 2 KiB.) |
+| `rate_boundary` | `worker/test/ingest/notify.test.ts › 61st request per IP per minute → 429 and no DB change`; also `worker/test/http/limits.test.ts › bucket refills exactly with injected clock; 61st request in a minute is limited` (Only notify is rate-limited (M6.2.1 amendment, ADR 0004 §8).) |
+| `bounded_state` | `worker/test/http/limits.test.ts › 10,001 distinct IP keys keep BucketSet at its cap and expired buckets are evicted` (required wave amendment, W1-07); also `worker/test/composition/routing.test.ts › inbound x-atmusic-client-ip is stripped and CF-Connecting-IP used` (Buckets fail open after a DO restart (ADR 0004 §8).) |
 
 ### M6.2.2 Expose safe metrics and degrade on upstream outages
 
@@ -764,13 +764,13 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 
 **Demonstrated gap:** (A16) A Worker cannot run a Prometheus listener; Workers Logs, the `counters` table and `/internal/admin/status` replace it.
 
-**Amendment text:** Superseded. Metrics are Workers Logs, the `counters` table and `/internal/admin/status`, which exists only when `ADMIN_TOKEN` is set and compares the bearer token in constant time. Log redaction is kept: ADR 0004 §8 requires that `CURSOR_KEY` and `ADMIN_TOKEN` are never logged or serialised, and the Worker has an injected `Logger` and receives the admin bearer token, so the redaction case maps to the admin test instead of being retired.
+**Amendment text:** Superseded. Metrics are Workers Logs, the `counters` table and `/internal/admin/status`, which exists only when `ADMIN_TOKEN` is set and compares the bearer token in constant time. Log redaction is kept: ADR 0004 §8 requires that `CURSOR_KEY` and `ADMIN_TOKEN` are never logged or serialised, and the Worker has an injected `Logger` and receives the admin bearer token, so the redaction case maps to a W5-01 captured-log test instead of being retired.
 
 | Case | Disposition |
 | --- | --- |
-| `metrics_auth` | `worker/test/composition/admin.test.ts › admin routes 404 without ADMIN_TOKEN; wrong token 401 constant-time; status JSON shape` (Token never logged (ADR 0004 §8): the test must capture the injected Logger output across the 404, wrong-token 401 and valid 200 requests and assert the configured and presented ADMIN_TOKEN values appear in no log line and no response body.) |
-| `upstream_offline` | `worker/test/storage/status.test.ts › socket disconnected >5min reports stale` |
-| `log_redaction` | `worker/test/composition/admin.test.ts › admin routes 404 without ADMIN_TOKEN; wrong token 401 constant-time; status JSON shape` (Carries forward ADR 0004 §8 (CURSOR_KEY and ADMIN_TOKEN never logged or serialised): W5-01 must inject a capturing Logger, configure marked dummy CURSOR_KEY and ADMIN_TOKEN values, send a valid and a wrong marked bearer token to /internal/admin/* and a marked track title through an applied record, and assert that none of the secret or bearer markers appears in captured logs or error envelopes and that the track marker is absent from logs. There are no OAuth codes or cookies to mark (A3).) |
+| `metrics_auth` | `worker/test/composition/admin.test.ts › admin routes 404 without ADMIN_TOKEN; wrong token 401 constant-time; status JSON shape`; also `worker/test/composition/logging.test.ts › captured logs and error bodies contain no CURSOR_KEY, ADMIN_TOKEN or bearer marker and logs contain no track-title marker` (required wave amendment, W5-01) (A16: metrics become /internal/admin/status.) |
+| `upstream_offline` | `worker/test/storage/status.test.ts › socket disconnected >5min reports stale`; also `worker/test/http/health-meta.test.ts › ready 200 and meta indexing stale while the index reports the socket disconnected` (required wave amendment, W1-07) |
+| `log_redaction` | `worker/test/composition/logging.test.ts › captured logs and error bodies contain no CURSOR_KEY, ADMIN_TOKEN or bearer marker and logs contain no track-title marker` (required wave amendment, W5-01) (There are no OAuth codes or cookies to mark (A3).) |
 
 ### M6.2.3 Add reproducible query latency benchmark
 
@@ -782,8 +782,8 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 
 | Case | Disposition |
 | --- | --- |
-| `benchmark_dataset` | `worker/test/bench/read-models.bench.test.ts › benchmark JSON is produced and schema-valid` |
-| `benchmark_results` | `worker/test/bench/read-models.bench.test.ts › history/feed rows read ≤ limit+2` |
+| `benchmark_dataset` | `worker/test/bench/read-models.bench.test.ts › seeded generator yields exactly 100,000 valid active rows with the documented per-user distribution` (required wave amendment, W6-02) |
+| `benchmark_results` | `worker/test/bench/read-models.bench.test.ts › 600 measured requests with zero errors report p95 and check it against the target` (required wave amendment, W6-02) |
 | `slow_query_detection` | `worker/test/acceptance/query-plans.test.ts › 100×1,000 seeded records: history/feed/stats plans use indexes; negative control scans` |
 
 ### M6.3.1 Implement consistent SQLite backup and verified restore
@@ -834,12 +834,12 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 
 **Demonstrated gap:** (A19) A Worker has no executable artifact; a release is a Worker version id and the bundle SHA-256.
 
-**Amendment text:** Superseded. The release is a Worker version uploaded with `wrangler versions upload`, identified by its version id and bundle SHA-256.
+**Amendment text:** Superseded. The release is a Worker version uploaded with `wrangler versions upload`, identified by its version id and bundle SHA-256. The checksum obligation is kept in that form: `scripts/check-bundle.ts` prints the bundle SHA-256, and live evidence without the version id or bundle hash is rejected.
 
 | Case | Disposition |
 | --- | --- |
 | `tag_version` | `retired:A19`: Releases are Worker versions (wrangler versions upload), not tagged musl artifacts. |
-| `checksum` | `retired:A19`: The release evidence is the bundle SHA-256 printed by scripts/check-bundle.ts, not a downloadable artifact checksum. |
+| `checksum` | `npx tsx scripts/check-bundle.ts › production bundle passes guard`; also `scripts/test_live_evidence.py › evidence missing version id or bundle hash is rejected` (A19: the release checksum is the bundle SHA-256 that check-bundle prints and the live evidence records with the Worker version id.) |
 | `static_release` | `retired:A19`: There is no ELF executable to inspect. |
 
 ### M6.4.2 Run packaged backend fault/recovery acceptance
@@ -854,7 +854,7 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 | --- | --- |
 | `packaged_flow` | `bash scripts/acceptance/workers-backend.sh › exits 0 with all deterministic suites passing and lists live gates as blocked when prerequisites absent` |
 | `packaged_recovery` | `worker/test/acceptance/restart.test.ts › eviction preserves byte-identical tables, pre-restart cursor continues, alarm resumes` |
-| `unrun_gate` | `python3 scripts/validate_case_map.py --check-tests › every mapped test file and name exists; 258 cases covered` |
+| `unrun_gate` | `scripts/test_validate_case_map.py › --check-tests reports a missing test file or name` (required wave amendment, W0-02); also `python3 scripts/validate_case_map.py --check-tests › every mapped test file and name exists; 258 cases covered` |
 
 ### M6.4.3 Record live backend MVP gate and operational limits
 
@@ -868,7 +868,7 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 | --- | --- |
 | `live_inventory` | `scripts/test_live_evidence.py › evidence missing version id or bundle hash is rejected` |
 | `blocked_gate` | `scripts/test_live_evidence.py › blocked result is distinguished from pass and fail` |
-| `privacy_consistency` | `web/test/routes/settings.test.tsx › disconnect requires confirmation and enqueues settings op` (W6-04 docs must state that the settings opt-out record is public and claims no erasure.) |
+| `privacy_consistency` | `web/test/routes/settings.test.tsx › disconnect confirmation states that public PDS records and the opt-out record remain and claims no erasure` (required wave amendment, W3-06); also `web/test/routes/settings.test.tsx › disconnect requires confirmation and enqueues settings op` |
 
 ### M7.1.1 Scaffold Preact/TypeScript/Vite only after backend gate
 
@@ -880,8 +880,8 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 
 | Case | Disposition |
 | --- | --- |
-| `web_build` | `bash scripts/acceptance/workers-backend.sh › exits 0 with all deterministic suites passing and lists live gates as blocked when prerequisites absent` |
-| `strict_type_failure` | `bash scripts/acceptance/workers-backend.sh › exits 0 with all deterministic suites passing and lists live gates as blocked when prerequisites absent` (tsc -b in check-ts.sh fails the gate; a disposable-copy demonstration is not named in the waves.) |
+| `web_build` | `scripts/test/check-ts.test.ts › npm ci, tsc -b and the web production build pass and leave package-lock.json unchanged` (required wave amendment, W0-01) |
+| `strict_type_failure` | `scripts/test/check-ts.test.ts › a wrong API field type in a disposable copy fails tsc -b` (required wave amendment, W0-01) |
 | `gate_enforcement` | `retired:A14`: "No frontend before M6.4" is dropped; the SPA write path is core and starts in Wave 1. |
 
 ### M7.1.2 Generate typed API client and session/CSRF state
@@ -894,7 +894,7 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 
 | Case | Disposition |
 | --- | --- |
-| `contract_drift` | `web/test/api-client.test.ts › decodes Page<Scrobble> and passes nextCursor unchanged` |
+| `contract_drift` | `web/test/api-client.test.ts › every api/examples response decodes and a changed field type is rejected` (required wave amendment, W1-10); also `web/test/api-client.test.ts › decodes Page<Scrobble> and passes nextCursor unchanged` |
 | `csrf_client` | `retired:D`: CSRF and Origin rules are dropped (ADR 0004 §9.3); the SPA sends no server mutation. |
 | `session_loss` | `web/test/oauth/session.test.ts › expired/refresh-failed session surfaces re-auth state` |
 
@@ -908,9 +908,9 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 
 | Case | Disposition |
 | --- | --- |
-| `route_deep_links` | `web/tests/mvp.spec.ts › OAuth callback navigation is served by SPA (/oauth/callback not intercepted by Worker)` |
-| `keyboard_shell` | `web/tests/accessibility.spec.ts › no serious/critical axe violations on all routes` |
-| `state_components` | `web/test/routes/feed.test.tsx › renders items and loads next page via nextCursor` (W3-06 must render loading, empty, error and stale states without an indefinite spinner.) |
+| `route_deep_links` | `web/tests/mvp.spec.ts › GET /u/<did> and /feed serve index.html 200 and POST /feed never returns SPA HTML` (required wave amendment, W6-03); also `web/test/routes/shell.test.tsx › unknown route renders the not-found view` (required wave amendment, W3-06) |
+| `keyboard_shell` | `web/tests/accessibility.spec.ts › Tab and Enter reach every navigation destination with visible focus` (required wave amendment, W6-03) |
+| `state_components` | `web/test/routes/feed.test.tsx › loading, empty, error and stale states render labelled text and no spinner remains after an error` (required wave amendment, W3-06) |
 
 ### M7.2.1 Implement handle sign-in and secure sign-out screens
 
@@ -922,9 +922,9 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 
 | Case | Disposition |
 | --- | --- |
-| `signin_success` | `web/test/oauth/session.test.ts › successful callback stores session and posts notify {did}` |
-| `signin_failures` | `web/test/oauth/session.test.ts › expired/refresh-failed session surfaces re-auth state` |
-| `logout_ui` | `web/test/oauth/session.test.ts › signOut calls revoke and clears IndexedDB stores` |
+| `signin_success` | `web/test/routes/shell.test.tsx › signed-in shell shows the verified handle and DID and the authenticated navigation` (required wave amendment, W3-06); also `web/test/oauth/session.test.ts › successful callback stores session and posts notify {did}` |
+| `signin_failures` | `web/test/routes/signin.test.tsx › cancelled authorization, expired callback and unknown handle show specific recovery text with retry and no code or token in the DOM` (required wave amendment, W3-06); also `web/test/oauth/session.test.ts › expired/refresh-failed session surfaces re-auth state` |
+| `logout_ui` | `web/test/oauth/session.test.ts › signOut calls revoke and clears IndexedDB stores`; also `web/test/routes/shell.test.tsx › after sign-out the shell shows anonymous navigation and the settings route shows a sign-in prompt` (required wave amendment, W3-06) |
 
 ### M7.2.2 Implement manual scrobble form and publication states
 
@@ -937,8 +937,8 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 | Case | Disposition |
 | --- | --- |
 | `form_validation` | `web/test/routes/scrobble.test.tsx › invalid input shows field errors and creates no outbox operation` |
-| `submit_retry` | `web/test/outbox/recovery.test.ts › crash after PDS commit before local ack: ambiguous create reconciles to success via digest` |
-| `poll_terminal` | `web/test/routes/scrobble.test.tsx › status progresses queued→published→indexed from mocked records/status` |
+| `submit_retry` | `web/test/outbox/recovery.test.ts › crash after PDS commit before local ack: ambiguous create reconciles to success via digest`; also `web/test/routes/scrobble.test.tsx › status progresses queued→published→indexed from mocked records/status` |
+| `poll_terminal` | `web/test/routes/scrobble.test.tsx › status progresses queued→published→indexed from mocked records/status`; also `web/test/routes/scrobble.test.tsx › excluded or failed status shows the failure code, stops polling and never shows published success` (required wave amendment, W3-06) |
 
 ### M7.2.3 Implement owner delete, export, and local disconnect UI
 
@@ -950,9 +950,9 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 
 | Case | Disposition |
 | --- | --- |
-| `delete_owner` | `web/test/outbox/delete.test.ts › pending deletion hidden in owner overlay; failure visible` (The forced Bob call is dropped with the server delete route (D); a user can delete only in their own repository.) |
-| `export_download` | `worker/test/read/export.test.ts › export contains only indexed public records, attachment header, 404 for inactive` |
-| `disconnect_text` | `web/test/routes/settings.test.tsx › disconnect requires confirmation and enqueues settings op` |
+| `delete_owner` | `web/test/routes/profile.test.tsx › delete control appears only on the signed-in owner's own records` (required wave amendment, W3-06); also `web/test/outbox/delete.test.ts › pending deletion hidden in owner overlay; failure visible` (The forced Bob call is dropped with the server delete route (D).) |
+| `export_download` | `web/test/routes/settings.test.tsx › export action downloads /api/v1/users/<did>/export as music-export.json` (required wave amendment, W3-06); also `worker/test/read/export.test.ts › export contains only indexed public records, attachment header, 404 for inactive` |
+| `disconnect_text` | `web/test/routes/settings.test.tsx › disconnect confirmation states that public PDS records and the opt-out record remain and claims no erasure` (required wave amendment, W3-06); also `web/test/routes/settings.test.tsx › disconnect requires confirmation and enqueues settings op`, `web/test/outbox/settings.test.ts › disconnect writes settings/self disabled and notifies` |
 
 ### M7.3.1 Render global/following feeds with cursor pagination
 
@@ -960,13 +960,13 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 
 **Demonstrated gap:** (A8) There is no server session to identify the viewer (A3); follow records are already public (Q7).
 
-**Amendment text:** The following feed is public with `viewer=<did>`; the signed-in DID is the default viewer.
+**Amendment text:** The following feed is public with `viewer=<did>`; the signed-in DID is the default viewer. An anonymous user has no viewer, so selecting following shows a sign-in prompt and sends no `scope=following` request.
 
 | Case | Disposition |
 | --- | --- |
 | `feed_order` | `web/test/routes/feed.test.tsx › renders items and loads next page via nextCursor` |
-| `anonymous_following` | `retired:A8`: The following feed is public with `viewer=<did>`, so there is no anonymous sign-in prompt to show. |
-| `feed_failure` | `web/test/routes/feed.test.tsx › renders items and loads next page via nextCursor` (W3-06 must keep page 1 on a page-2 503 and append the retried page once.) |
+| `anonymous_following` | `web/test/routes/feed.test.tsx › anonymous user selecting following sees a sign-in prompt and no scope=following request is sent` (required wave amendment, W3-06) (A8: the following feed needs viewer=<did>, and the SPA takes the viewer from the session.) |
+| `feed_failure` | `web/test/routes/feed.test.tsx › page-2 503 keeps page 1, shows retry, and a successful retry appends page 2 once` (required wave amendment, W3-06) |
 
 ### M7.3.3 Implement follow/unfollow controls and index refresh
 
@@ -978,9 +978,9 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 
 | Case | Disposition |
 | --- | --- |
-| `follow_state` | `web/test/outbox/follows.test.ts › PUT, DELETE, PUT for one subject execute in order with separate ids` |
-| `unfollow_failure` | `web/test/outbox/delete.test.ts › pending deletion hidden in owner overlay; failure visible` |
-| `self_and_auth` | `packages/core/test/follow.test.ts › follow validation and self-follow rejection` (The anonymous sign-in action is web/test/routes/shell.test.tsx.) |
+| `follow_state` | `web/test/routes/profile.test.tsx › follow button shows pending then confirmed, and a permanently failed unfollow shows failed without claiming removal` (required wave amendment, W3-06); also `web/test/outbox/follows.test.ts › PUT, DELETE, PUT for one subject execute in order with separate ids` |
+| `unfollow_failure` | `web/test/routes/profile.test.tsx › follow button shows pending then confirmed, and a permanently failed unfollow shows failed without claiming removal` (required wave amendment, W3-06) |
+| `self_and_auth` | `web/test/routes/profile.test.tsx › own profile has no follow control and an anonymous viewer gets a sign-in action` (required wave amendment, W3-06); also `packages/core/test/follow.test.ts › follow validation and self-follow rejection` |
 
 ### M7.4.1 Build and embed production SPA in release executable
 
@@ -994,7 +994,7 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 | --- | --- |
 | `embedded_dist` | `retired:A1`: The SPA is served by Workers Static Assets, not embedded in an executable. |
 | `missing_build` | `retired:A1`: There is no product executable; wrangler deploys the asset directory with the Worker. |
-| `asset_links` | `web/tests/mvp.spec.ts › OAuth callback navigation is served by SPA (/oauth/callback not intercepted by Worker)` |
+| `asset_links` | `web/tests/mvp.spec.ts › hashed /assets/*.js returns 200 with a JavaScript content type and immutable Cache-Control` (required wave amendment, W6-03); also `web/tests/mvp.spec.ts › GET /u/<did> and /feed serve index.html 200 and POST /feed never returns SPA HTML` (required wave amendment, W6-03) |
 
 ### M7.4.2 Run complete browser journey against packaged executable
 
@@ -1007,8 +1007,8 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 | Case | Disposition |
 | --- | --- |
 | `browser_journey` | `web/tests/mvp.spec.ts › full journey sign-in → scrobble indexed → stats → follow/unfollow → delete → export → disconnect/reconnect → sign-out` |
-| `browser_restart` | `worker/test/acceptance/restart.test.ts › eviction preserves byte-identical tables, pre-restart cursor continues, alarm resumes` (A18: restart is DO eviction; the browser journey runs against wrangler dev.) |
-| `browser_network` | `web/test/oauth/session.test.ts › expired/refresh-failed session surfaces re-auth state` |
+| `browser_restart` | `worker/test/acceptance/restart.test.ts › eviction preserves byte-identical tables, pre-restart cursor continues, alarm resumes`; also `web/test/outbox/recovery.test.ts › crash after PDS commit before local ack: ambiguous create reconciles to success via digest` (A18: restart is DO eviction; the browser journey runs against wrangler dev.) |
+| `browser_network` | `web/test/oauth/session.test.ts › expired/refresh-failed session surfaces re-auth state`; also `web/test/routes/feed.test.tsx › page-2 503 keeps page 1, shows retry, and a successful retry appends page 2 once` (required wave amendment, W3-06), `web/test/routes/feed.test.tsx › loading, empty, error and stale states render labelled text and no spinner remains after an error` (required wave amendment, W3-06) |
 
 ### M7.4.3 Run accessibility and live product release gate
 
@@ -1021,7 +1021,7 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 | Case | Disposition |
 | --- | --- |
 | `a11y_screens` | `web/tests/accessibility.spec.ts › no serious/critical axe violations on all routes` |
-| `keyboard_journey` | `web/tests/accessibility.spec.ts › no serious/critical axe violations on all routes` (W6-03 must add the keyboard-only journey assertions.) |
+| `keyboard_journey` | `web/tests/accessibility.spec.ts › keyboard-only journey reaches sign-in, scrobble submit, window tabs, follow and sign-out with visible focus` (required wave amendment, W6-03) |
 | `live_product` | `npx tsx scripts/live/pds_compat_check.ts (no env) › exits nonzero with blocked and lists missing names` |
 
 ## Leaves with no rule change
@@ -1030,18 +1030,184 @@ These leaves keep every rule and case unchanged; only the global implementation-
 
 `M1.1.2`, `M1.1.3`, `M3.1.2`, `M3.1.3`, `M4.3.1`, `M4.3.3`, `M5.1.1`, `M5.1.2`, `M5.1.3`, `M5.2.2`, `M5.3.2`, `M5.4.1`, `M5.4.2`, `M7.3.2`.
 
-## Coverage obligations for the owning packages
+## Dispositions for leaves with no rule change
 
-Where a mapped wave test title does not name every assertion of the original case, the case map carries a `note`. The owning package must cover that assertion inside the mapped test, and W7-01 checks it when it finalises the map. The notes are listed in the case-disposition tables above and, for leaves without a section, here:
+The rule is unchanged for these leaves, but their cases still need TypeScript tests. Each disposition below comes from the case map.
 
-- `M1.1.2/optional_values` → `packages/core/test/scrobble.test.ts › validation.json vectors match Rust verdicts and reasons`: validation.json (W0-03) must contain the duration 1/86400/0/86401/1.5, MBID and omitted-album vectors.
-- `M1.1.3/follow_time` → `packages/core/test/follow.test.ts › follow validation and self-follow rejection`: Must assert createdAt=now+300s accepted and now+301s rejected.
-- `M4.3.1/feed_visibility` → `worker/test/write/apply-record.test.ts › invalid remote record is excluded with reason and not visible`: The external Carol record is worker/test/acceptance/federation.test.ts; inactive owners are worker/test/write/account-state.test.ts.
-- `M4.3.3/external_delete_update` → `worker/test/read/cursor-http.test.ts › arrival above anchor absent until fresh traversal; deleted unreturned record disappears`: W3-01 must also assert and document the moved-row (updated listenedAt) behaviour.
-- `M5.1.1/tuple_collision` → `packages/core/test/music-key.test.ts › every music_keys.json vector equals the Rust key`: music_keys.json (W0-03) must contain the a|b / c versus a / b|c collision pair.
-- `M5.1.2/ranking_ties` → `worker/test/read/stats.test.ts › 7d: 4/2/3; artists (björk,2),(radiohead,2); tracks Björk/Jóga:2, Radiohead/No Surprises:1, Radiohead/Weird Fishes:1`: Invalid window/limit 422 is worker/test/http/params.test.ts.
-- `M5.2.2/unknown_empty` → `worker/test/read/profile.test.ts › unknown/inactive DID → 404 with zero identity transport calls`: W3-03 must also cover a known recordless user (200, zero totals).
-- `M5.3.2/list_pagination` → `worker/test/read/follows.test.ts › two active Carol→Bob records count Bob followers 2 not 3; representative is min URI`: W3-03 must add equal-createdAt limit-1 traversal and the invalid-cursor 400.
-- `M5.4.1/manual_expectations` → `worker/test/acceptance/read-model-acceptance.test.ts › statistics tables for all/7d/30d/365d equal TESTING.md exactly (totals, artists, tracks, albums)`: Expectations stay hardcoded from TESTING.md; scripts/validate_plan.py remains the independent calculator.
-- `M7.3.2/handle_change` → `web/test/routes/profile.test.tsx › stats window switch fetches window and renders exact top lists`: W3-06 must show the updated handle on the same /u/:did route.
-- `M7.3.2/empty_states` → `web/test/routes/profile.test.tsx › stats window switch fetches window and renders exact top lists`: W3-06 must render the recordless, no-album and unknown-DID 404 states.
+| Case | Disposition |
+| --- | --- |
+| `M1.1.2/unicode_limits` | `packages/core/test/scrobble.test.ts › validation.json vectors match Rust verdicts and reasons` (The W0-03 description of validation.json lists the 256/257-scalar, 1,024-byte and trim-to-empty vectors.) |
+| `M1.1.2/time_bounds` | `packages/core/test/scrobble.test.ts › now+300s accepted and now+301s rejected at 2026-01-15T12:00:00Z receipt`; also `packages/core/test/scrobble.test.ts › validation.json vectors match Rust verdicts and reasons` (The W0-03 description of validation.json lists the 1970 bounds vectors.) |
+| `M1.1.2/optional_values` | `packages/core/test/scrobble.test.ts › duration 1 and 86400 accepted; 0, 86401 and 1.5 rejected; invalid MBID rejected; omitted album accepted` (required wave amendment, W1-01); also `packages/core/test/scrobble.test.ts › validation.json vectors match Rust verdicts and reasons` |
+| `M1.1.3/follow_schema` | `packages/core/test/follow.test.ts › follow validation and self-follow rejection` |
+| `M1.1.3/follow_rkey` | `packages/core/test/record-key.test.ts › followRkey equals follow_rkeys.json` |
+| `M1.1.3/follow_time` | `packages/core/test/follow.test.ts › follow createdAt now+300s accepted and now+301s rejected at 2026-01-15T12:00:00Z receipt` (required wave amendment, W1-01) |
+| `M3.1.2/history_exact_order` | `worker/test/read/history.test.ts › limit 2 pages [r07,r01],[r02,r03],[r04,r05],[r06] then nextCursor null` |
+| `M3.1.2/visibility` | `worker/test/read/history.test.ts › r08 deleted never appears; lookup of r08 is 404` (A12: a pending record exists only in the SPA outbox, so the index never holds it.) |
+| `M3.1.2/lookup_and_limits` | `worker/test/http/params.test.ts › limit 0, -1, 1.5, 101 → 422 fields.limit; default 20; stats default 10`; also `worker/test/read/history.test.ts › lookup of encoded r01 AT URI returns the exact Scrobble; unknown URI → 404` (required wave amendment, W3-01), `worker/test/read/history.test.ts › r08 deleted never appears; lookup of r08 is 404` |
+| `M3.1.3/equal_timestamp` | `worker/test/read/history.test.ts › Alice history r07,r01,r02,r03,r04,r05,r06 (equal timestamps by URI desc)`; also `worker/test/acceptance/read-model-acceptance.test.ts › union of all pages equals hardcoded URI list with no duplicates` |
+| `M3.1.3/between_pages` | `worker/test/read/cursor-http.test.ts › arrival above anchor absent until fresh traversal; deleted unreturned record disappears` |
+| `M3.1.3/cursor_binding` | `packages/core/test/cursor.test.ts › one-bit tamper, wrong did/scope/viewer, version 2, malformed base64 → invalid_cursor` |
+| `M4.3.1/global_order` | `worker/test/read/feed.test.ts › global feed r09,r10,r07,r01,r02,r03,r04,r05,r06` |
+| `M4.3.1/feed_visibility` | `worker/test/write/apply-record.test.ts › invalid remote record is excluded with reason and not visible`; also `worker/test/acceptance/federation.test.ts › Carol r10 appears only through external ingestion with zero app write calls`, `worker/test/write/account-state.test.ts › deactivation hides profile/content/follow edge immediately and bumps generation` (A12: pending records never reach the index.) |
+| `M4.3.1/feed_limits` | `worker/test/http/params.test.ts › invalid window/scope → 422 with field name`; also `worker/test/http/params.test.ts › limit 0, -1, 1.5, 101 → 422 fields.limit; default 20; stats default 10` |
+| `M4.3.3/page_union` | `worker/test/acceptance/read-model-acceptance.test.ts › union of all pages equals hardcoded URI list with no duplicates` |
+| `M4.3.3/arrival_boundary` | `worker/test/read/cursor-http.test.ts › arrival above anchor absent until fresh traversal; deleted unreturned record disappears` |
+| `M4.3.3/external_delete_update` | `worker/test/read/cursor-http.test.ts › arrival above anchor absent until fresh traversal; deleted unreturned record disappears`; also `worker/test/read/cursor-http.test.ts › record whose listenedAt moves across the anchor between pages follows the documented moved-row rule` (required wave amendment, W3-01) |
+| `M5.1.1/unicode_grouping` | `packages/core/test/music-key.test.ts › Björk / '  BJÖRK  ' / 'jóga' group together; Homogenic/' HOMOGENIC ' group together` |
+| `M5.1.1/tuple_collision` | `packages/core/test/music-key.test.ts › artist a\|b with title c and artist a with title b\|c yield distinct track keys` (required wave amendment, W1-02); also `packages/core/test/music-key.test.ts › every music_keys.json vector equals the Rust key` |
+| `M5.1.1/album_absence` | `packages/core/test/music-key.test.ts › missing album yields null album key`; also `worker/test/read/stats.test.ts › top tracks and top albums for every window equal TESTING.md exactly; r05 creates no album bucket`, `packages/core/test/scrobble.test.ts › validation.json vectors match Rust verdicts and reasons` |
+| `M5.1.2/window_totals` | `worker/test/acceptance/read-model-acceptance.test.ts › statistics tables for all/7d/30d/365d equal TESTING.md exactly (totals, artists, tracks, albums)` |
+| `M5.1.2/boundary_seconds` | `worker/test/read/stats-boundaries.test.ts › records at lower bound −1s/0s/+1s for 7d/30d/365d have exact membership`; also `worker/test/read/stats-boundaries.test.ts › record at asOf+300s excluded until asOf passes it` |
+| `M5.1.2/ranking_ties` | `worker/test/read/stats.test.ts › 7d: 4/2/3; artists (björk,2),(radiohead,2); tracks Björk/Jóga:2, Radiohead/No Surprises:1, Radiohead/Weird Fishes:1`; also `worker/test/http/params.test.ts › invalid window/scope → 422 with field name`, `worker/test/http/params.test.ts › limit 0, -1, 1.5, 101 → 422 fields.limit; default 20; stats default 10` |
+| `M5.1.3/delete_effect` | `worker/test/read/stats-cache.test.ts › delete r01 invalidates: all → 6 listens, Homogenic 1` |
+| `M5.1.3/update_artist` | `worker/test/acceptance/mutations.test.ts › r03 artist→Björk → Björk 3, Kate Bush 2, Radiohead 2, total 7` |
+| `M5.1.3/query_plan` | `worker/test/read/stats-plan.test.ts › EXPLAIN QUERY PLAN uses scrobbles_owner_time/scrobbles_stats; negative control without indexes shows SCAN` |
+| `M5.2.2/unknown_empty` | `worker/test/read/profile.test.ts › unknown/inactive DID → 404 with zero identity transport calls`; also `worker/test/read/profile.test.ts › known recordless user → 200 with zero totals and empty history` (required wave amendment, W3-03) |
+| `M5.2.2/backfill_state` | `worker/test/storage/status.test.ts › user with pending reactivation snapshot reports recovering` |
+| `M5.2.2/inactive_state` | `worker/test/write/account-state.test.ts › deactivation hides profile/content/follow edge immediately and bumps generation` |
+| `M5.3.2/external_duplicates` | `worker/test/read/follows.test.ts › deleting one duplicate keeps 2; deleting both returns 1` |
+| `M5.3.2/public_lists` | `worker/test/read/profile.test.ts › Alice followers 0 following 1; Bob followers 1 following 0; Carol 0/0`; also `worker/test/acceptance/read-model-acceptance.test.ts › follower/following counts Alice 0/1, Bob 1/0, Carol 0/0` (A12: a pending follow exists only in the SPA outbox.) |
+| `M5.3.2/list_pagination` | `worker/test/read/follows.test.ts › three edges with equal createdAt traverse completely at limit 1; tampered cursor → 400 invalid_cursor` (required wave amendment, W3-03) |
+| `M5.4.1/fixture_integrity` | `packages/atproto/test/fixture-kit.test.ts › seedReadModels publishes r01–r10 with r08 deleted and the Alice→Bob follow` |
+| `M5.4.1/manual_expectations` | `worker/test/acceptance/read-model-acceptance.test.ts › statistics tables for all/7d/30d/365d equal TESTING.md exactly (totals, artists, tracks, albums)` (Expectations stay hardcoded from TESTING.md; scripts/validate_plan.py remains the independent calculator.) |
+| `M5.4.1/time_reproducibility` | `packages/core/test/scaffold.test.ts › fixedClock starts at 2026-01-15T12:00:00Z and advance/set are exact` |
+| `M5.4.2/read_acceptance` | `worker/test/acceptance/read-model-acceptance.test.ts › statistics tables for all/7d/30d/365d equal TESTING.md exactly (totals, artists, tracks, albums)`; also `worker/test/acceptance/read-model-acceptance.test.ts › global feed r09,r10,r07,r01,r02,r03,r04,r05,r06 and Alice following r09 only` |
+| `M5.4.2/social_acceptance` | `worker/test/acceptance/mutations.test.ts › remove Alice→Bob → following feed empty; global unchanged` |
+| `M5.4.2/mutation_acceptance` | `worker/test/acceptance/mutations.test.ts › delete r01 → 6/6/3, Homogenic 1, history r07,r02,…`; also `worker/test/acceptance/mutations.test.ts › r03 artist→Björk → Björk 3, Kate Bush 2, Radiohead 2, total 7`, `worker/test/ingest/sweeps.test.ts › renamed handle verifies on the next identity sweep and resolves to the same DID with unchanged history` (required wave amendment, W4-03) |
+| `M7.3.2/profile_stats` | `web/test/routes/profile.test.tsx › stats window switch fetches window and renders exact top lists` |
+| `M7.3.2/handle_change` | `web/test/routes/profile.test.tsx › new verified handle for the same DID updates the display on the same /u/:did route` (required wave amendment, W3-06) |
+| `M7.3.2/empty_states` | `web/test/routes/profile.test.tsx › recordless user, no-album stats and unknown DID 404 render explicit empty and not-found states` (required wave amendment, W3-06) |
+
+## Required wave amendments
+
+Some cases have no wave test whose title asserts their outcome. For each one, the owning package needs one more test in its `tests` list in [`docs/planning/workers-waves.json`](workers-waves.json), plus a new test file in its `files` list where one is named. W0-02 does not own workers-waves.json, so applying these additions is an owner action, like publishing the issue amendments. The case map refers to these test ids exactly as listed. `scripts/validate_case_map.py` accepts an id only if it is declared in workers-waves.json or listed here under its owning package. With `--check-tests` (enforced by W7-01) it fails until every addition below is declared in workers-waves.json and every referenced test file contains its test name. A case-map `note` is informational only, and the validator rejects a note that states an obligation.
+
+**W0-01** (new files: `worker/test/config.test.ts`, `scripts/test/check-ts.test.ts`)
+
+- `worker/test/config.test.ts › one-segment, uppercase and embedded-slash LEXICON_PREFIX values are rejected naming LEXICON_PREFIX; empty yields prefix null` — covers `M1.1.1/invalid_namespace`
+- `worker/test/config.test.ts › http PUBLIC_ORIGIN and invalid LEXICON_PREFIX fail parseConfig naming each field without echoing any secret value` — covers `M1.4.1/invalid_config`
+- `worker/test/storage/sql-conformance.test.ts › second plain INSERT of one scrobbles.uri fails with a constraint error and the row count stays one` — covers `M1.3.1/unique_record`
+- `worker/test/storage/sql-conformance.test.ts › INSERT of a scrobble or follow whose users row is missing is rejected and leaves no row` — covers `M1.3.1/foreign_key`
+- `worker/test/storage/migrate.test.ts › a migration whose second statement is invalid persists neither statement and keeps the previous schema version` — covers `M1.3.2/migration_rollback`, `M6.1.3/upgrade_failure`
+- `worker/test/harness › rows written under one DO name are absent under another DO name and in another test file` — covers `M1.4.3/harness_isolation`
+- `scripts/test/check-ts.test.ts › a misformatted file in a disposable copy fails the biome step and leaves the repository unchanged` — covers `M1.2.2/ci_format_failure`
+- `scripts/test/check-ts.test.ts › an inverted assertion in a disposable copy makes check-ts.sh exit nonzero` — covers `M1.2.2/ci_assertion_failure`
+- `scripts/test/check-ts.test.ts › a wrong API field type in a disposable copy fails tsc -b` — covers `M7.1.1/strict_type_failure`
+- `scripts/test/check-ts.test.ts › npm ci, tsc -b and the web production build pass and leave package-lock.json unchanged` — covers `M7.1.1/web_build`
+
+**W0-02**
+
+- `python3 scripts/validate_contracts.py › route_inventory: exact MVP/API route and status matrices` — covers `M1.1.4/route_inventory`
+- `scripts/test_validate_case_map.py › --check-tests reports a missing test file or name` — covers `M6.4.2/unrun_gate`
+
+**W1-01**
+
+- `packages/core/test/follow.test.ts › follow createdAt now+300s accepted and now+301s rejected at 2026-01-15T12:00:00Z receipt` — covers `M1.1.3/follow_time`
+- `packages/core/test/scrobble.test.ts › duration 1 and 86400 accepted; 0, 86401 and 1.5 rejected; invalid MBID rejected; omitted album accepted` — covers `M1.1.2/optional_values`
+
+**W1-02**
+
+- `packages/core/test/music-key.test.ts › artist a|b with title c and artist a with title b|c yield distinct track keys` — covers `M5.1.1/tuple_collision`
+
+**W1-05**
+
+- `packages/atproto/test/fixture-kit.test.ts › a record signed by one fixture account fails verification under another account's key` — covers `M2.4.1/fixture_isolation`
+
+**W1-07**
+
+- `worker/test/http/health-meta.test.ts › ready 200 and meta indexing stale while the index reports the socket disconnected` — covers `M1.4.2/upstream_outage`, `M6.2.2/upstream_offline`
+- `worker/test/http/limits.test.ts › 10,001 distinct IP keys keep BucketSet at its cap and expired buckets are evicted` — covers `M6.2.1/bounded_state`
+
+**W1-09**
+
+- `scripts/test/gen-config.test.ts › _headers marks /assets/* public, max-age=31536000, immutable and /index.html and /oauth/client-metadata.json no-cache` — covers `M6.1.1/asset_cache`
+
+**W1-10**
+
+- `web/test/api-client.test.ts › every api/examples response decodes and a changed field type is rejected` — covers `M7.1.2/contract_drift`
+
+**W2-04**
+
+- `worker/test/write/apply-record.test.ts › applying the same revision twice changes nothing and a newer revision replaces the payload with one listen` — covers `M1.3.3/record_revision`
+- `worker/test/write/apply-record.test.ts › two records with identical track and listenedAt under different rkeys are two rows and two listens` — covers `M3.4.1/same_time_distinct`
+
+**W2-06**
+
+- `web/test/oauth/session.test.ts › signOut clears IndexedDB stores when revoke fails with 500` — covers `M2.3.3/revocation_outage`
+
+**W2-07**
+
+- `web/test/outbox/retry.test.ts › nonrecoverable PDS error fails the operation after exactly one request` — covers `M3.2.2/permanent_error`
+- `web/test/outbox/delete.test.ts › delete behind an unsent or in-flight create runs after it and leaves no record on the fake PDS` — covers `M3.3.1/pending_create_delete`, `M3.3.2/create_in_flight`
+- `web/test/outbox/recovery.test.ts › RecordNotFound on first and repeated delete completes the operation as success` — covers `M3.3.2/already_absent`
+- `web/test/outbox/recovery.test.ts › crash after follow createRecord before local ack reconciles to one record at the deterministic rkey` — covers `M5.3.1/restart_follow`
+- `web/test/outbox/follows.test.ts › unfollow with no matching record succeeds with zero deleteRecord calls` — covers `M5.3.1/unfollow_absent`
+
+**W3-01**
+
+- `worker/test/read/history.test.ts › lookup of encoded r01 AT URI returns the exact Scrobble; unknown URI → 404` — covers `M3.1.2/lookup_and_limits`
+- `worker/test/read/cursor-http.test.ts › record whose listenedAt moves across the anchor between pages follows the documented moved-row rule` — covers `M4.3.3/external_delete_update`
+
+**W3-03**
+
+- `worker/test/read/profile.test.ts › known recordless user → 200 with zero totals and empty history` — covers `M5.2.2/unknown_empty`
+- `worker/test/read/follows.test.ts › three edges with equal createdAt traverse completely at limit 1; tampered cursor → 400 invalid_cursor` — covers `M5.3.2/list_pagination`
+
+**W3-04** (new files: `worker/test/ingest/identity-cache.test.ts`)
+
+- `worker/test/ingest/identity-cache.test.ts › cached identity served at 299 s and refreshed at 301 s with the injected clock` — covers `M2.1.1/cache_expiry`
+- `worker/test/ingest/verify-drain.test.ts › 100 hints for distinct URIs from interleaved alarm and RPC calls yield exactly 100 rows` — covers `M1.3.4/concurrent_writes`
+
+**W3-06**
+
+- `web/test/routes/feed.test.tsx › anonymous user selecting following sees a sign-in prompt and no scope=following request is sent` — covers `M7.3.1/anonymous_following`
+- `web/test/routes/feed.test.tsx › page-2 503 keeps page 1, shows retry, and a successful retry appends page 2 once` — covers `M7.3.1/feed_failure`, `M7.4.2/browser_network`
+- `web/test/routes/feed.test.tsx › loading, empty, error and stale states render labelled text and no spinner remains after an error` — covers `M7.1.3/state_components`, `M7.4.2/browser_network`
+- `web/test/routes/profile.test.tsx › new verified handle for the same DID updates the display on the same /u/:did route` — covers `M7.3.2/handle_change`
+- `web/test/routes/profile.test.tsx › recordless user, no-album stats and unknown DID 404 render explicit empty and not-found states` — covers `M7.3.2/empty_states`
+- `web/test/routes/profile.test.tsx › follow button shows pending then confirmed, and a permanently failed unfollow shows failed without claiming removal` — covers `M7.3.3/follow_state`, `M7.3.3/unfollow_failure`
+- `web/test/routes/profile.test.tsx › own profile has no follow control and an anonymous viewer gets a sign-in action` — covers `M7.3.3/self_and_auth`
+- `web/test/routes/profile.test.tsx › delete control appears only on the signed-in owner's own records` — covers `M7.2.3/delete_owner`
+- `web/test/routes/settings.test.tsx › disconnect confirmation states that public PDS records and the opt-out record remain and claims no erasure` — covers `M6.4.3/privacy_consistency`, `M7.2.3/disconnect_text`
+- `web/test/routes/settings.test.tsx › export action downloads /api/v1/users/<did>/export as music-export.json` — covers `M7.2.3/export_download`
+- `web/test/routes/scrobble.test.tsx › excluded or failed status shows the failure code, stops polling and never shows published success` — covers `M7.2.2/poll_terminal`
+- `web/test/routes/shell.test.tsx › unknown route renders the not-found view` — covers `M7.1.3/route_deep_links`
+- `web/test/routes/shell.test.tsx › signed-in shell shows the verified handle and DID and the authenticated navigation` — covers `M7.2.1/signin_success`
+- `web/test/routes/shell.test.tsx › after sign-out the shell shows anonymous navigation and the settings route shows a sign-in prompt` — covers `M7.2.1/logout_ui`
+- `web/test/routes/signin.test.tsx › cancelled authorization, expired callback and unknown handle show specific recovery text with retry and no code or token in the DOM` — covers `M7.2.1/signin_failures`
+
+**W4-03**
+
+- `worker/test/ingest/sweeps.test.ts › renamed handle verifies on the next identity sweep and resolves to the same DID with unchanged history` — covers `M5.2.1/handle_rename`, `M5.4.2/mutation_acceptance`
+
+**W4-04**
+
+- `worker/test/ingest/notify.test.ts › 2,048-byte body reaches the parser and 2,049-byte body → 413 with no DB change` — covers `M6.2.1/body_boundary`
+
+**W5-01** (new files: `worker/test/composition/logging.test.ts`)
+
+- `worker/test/composition/logging.test.ts › captured logs and error bodies contain no CURSOR_KEY, ADMIN_TOKEN or bearer marker and logs contain no track-title marker` — covers `M6.2.2/metrics_auth`, `M6.2.2/log_redaction`
+- `worker/test/composition/routing.test.ts › forced storage error → 500 envelope with UUID requestId and no stack trace or file path` — covers `M1.4.2/safe_errors`
+
+**W6-01**
+
+- `worker/test/acceptance/federation.test.ts › duplicate events, socket drop and expired cursor converge to the exact URI/CID/payload set with no double-counted stats` — covers `M4.4.2/convergence`
+
+**W6-02**
+
+- `worker/test/bench/read-models.bench.test.ts › seeded generator yields exactly 100,000 valid active rows with the documented per-user distribution` — covers `M6.2.3/benchmark_dataset`
+- `worker/test/bench/read-models.bench.test.ts › 600 measured requests with zero errors report p95 and check it against the target` — covers `M6.2.3/benchmark_results`
+
+**W6-03**
+
+- `web/tests/mvp.spec.ts › GET /u/<did> and /feed serve index.html 200 and POST /feed never returns SPA HTML` — covers `M6.1.1/spa_deep_link`, `M7.1.3/route_deep_links`, `M7.4.1/asset_links`
+- `web/tests/mvp.spec.ts › non-navigation GET /assets/missing.js and encoded ../ traversal return 404, never index.html` — covers `M6.1.1/asset_missing_traversal`
+- `web/tests/mvp.spec.ts › hashed /assets/*.js returns 200 with a JavaScript content type and immutable Cache-Control` — covers `M6.1.1/asset_cache`, `M7.4.1/asset_links`
+- `web/tests/accessibility.spec.ts › Tab and Enter reach every navigation destination with visible focus` — covers `M7.1.3/keyboard_shell`
+- `web/tests/accessibility.spec.ts › keyboard-only journey reaches sign-in, scrobble submit, window tabs, follow and sign-out with visible focus` — covers `M7.4.3/keyboard_journey`
+
+**W6-04** (new files: `scripts/test/secret-scan.test.ts`)
+
+- `bash scripts/deploy.sh --dry-run › valid owned prefix and CURSOR_KEY run gen-config, the web build and wrangler deploy --dry-run with exit 0` — covers `M6.1.3/fresh_install`
+- `scripts/test/secret-scan.test.ts › worker/.dev.vars.example, .env.example and docs contain no credential-shaped values` — covers `M6.1.3/secret_example_scan`

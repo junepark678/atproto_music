@@ -2,7 +2,7 @@
 
 The issue manifest contains 258 named regression cases. They remain the acceptance requirements; an aggregate test count does not prove every case passed. The working backend now has core, storage, OAuth, signed repository, API, recovery and operational integration suites. [Validation evidence](../VALIDATION.md) records the executed checks, artifact results and blocked live gates. The Preact and browser suites remain unstarted behind the backend live acceptance gate.
 
-Amended by [ADR 0004](../adr/0004-cloudflare-workers.md) §9 and §10 (Workers only). The harness wording follows A18; every exact fixture assertion below is unchanged (§9.1). [`docs/verification/ts-case-map.json`](../verification/ts-case-map.json) maps each of the 258 named cases to a TypeScript test id or to a retirement with its amendment id, and `python3 scripts/validate_case_map.py` checks it.
+Amended by [ADR 0004](../adr/0004-cloudflare-workers.md) §9 and §10 (Workers only). The harness wording follows A18; every exact fixture assertion below is unchanged (§9.1). [`docs/verification/ts-case-map.json`](../verification/ts-case-map.json) maps each of the 258 named cases to TypeScript test ids (declared in `docs/planning/workers-waves.json` or listed under "Required wave amendments" in `docs/planning/AMENDMENTS-workers.md`) or to a retirement with its amendment id, and `python3 scripts/validate_case_map.py` checks it.
 
 ## How every implementation leaf must report tests
 
@@ -140,7 +140,7 @@ python3 scripts/validate_contracts.py
 python3 scripts/validate_case_map.py
 ```
 
-`bash scripts/check-ts.sh` runs typecheck, lint, the vitest workspace through `scripts/report-tests.ts` (which fails a zero-test run), the contract and case-map validators and the production bundle guard. `python3 scripts/validate_case_map.py --check-tests` additionally requires every mapped test file and name to exist; it fails until the wave packages land, and W7-01 enforces it.
+`bash scripts/check-ts.sh` runs typecheck, lint, the vitest workspace through `scripts/report-tests.ts` (which fails a zero-test run), the contract and case-map validators and the production bundle guard. `python3 scripts/validate_case_map.py --check-tests` additionally requires every required wave amendment to be declared in workers-waves.json and every referenced test file and name to exist; it fails until the wave packages land, and W7-01 enforces it.
 
 The Rust candidate is the frozen golden-vector oracle (ADR 0004 §12). Until W7-02 retires it, its commands still validate the oracle only:
 
