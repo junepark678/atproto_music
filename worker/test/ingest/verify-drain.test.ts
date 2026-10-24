@@ -1,7 +1,8 @@
 // W3-04 verify-drain.ts: hints → identity → getRecord proof → verify → apply,
 // against real DO SQLite and the fixture network (real signed repositories on
 // fake PDSs, fake PLC and DoH, the production SafeFetch policy). Proves
-// M5.3.3/pending_confirmed, M3.3.3/external_delete, M4.1.3/update_delete,
+// M5.3.3/pending_confirmed (a confirmed follow becomes an edge only once its
+// proof applies), M3.3.3/external_delete, M4.1.3/update_delete,
 // M4.1.2/key_rotation and M1.3.4/concurrent_writes. Every expectation is
 // hardcoded or comes from the fixture signer, never from the code under test.
 
@@ -9,14 +10,14 @@ import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import type { FakePds } from '@atmusic/atproto/test-support/fake-pds';
 import { testKey } from '@atmusic/atproto/test-support/keys';
-import type { FixtureKit } from '@atmusic/atproto/test-support/read-models';
+import { type FixtureKit, followRkey } from '@atmusic/atproto/test-support/read-models';
 import { carResponse, type FixtureTransport } from '@atmusic/atproto/test-support/router-transport';
 import { SignedRepo } from '@atmusic/atproto/test-support/signed-repo';
 import { describe, expect, it } from 'vitest';
 import type { Db } from '../../src/do/db';
 import { resolveIdentity } from '../../src/do/ingest/identity-cache';
 import { drain, drainState } from '../../src/do/ingest/verify-drain';
-import { visibleScrobblesFrom } from '../../src/do/read/visibility';
+import { visibleFollowEdge, visibleScrobblesFrom } from '../../src/do/read/visibility';
 import { runDue, type TimerHandlers } from '../../src/do/timers';
 import type { HarnessDO } from '../harness/harness-do';
 import { seedUser } from '../write/support';
@@ -64,6 +65,30 @@ function visible(db: Db, did: string): string[] {
   return db
     .all<{ uri: string }>(`SELECT s.uri FROM ${visibleScrobblesFrom()} WHERE s.did = ? ORDER BY s.uri`, did)
     .map((r) => r.uri);
+}
+
+function follows(db: Db) {
+  return db.all('SELECT uri, cid, actor, subject, revision, created_at, indexed_at FROM follows ORDER BY uri');
+}
+
+/** Subjects of `actor`'s visible follow edges (the following list). */
+function following(db: Db, actor: string): string[] {
+  return db
+    .all<{ subject: string }>(
+      `SELECT f.subject FROM follows f WHERE f.actor = ? AND ${visibleFollowEdge('f')} ORDER BY f.subject`,
+      actor,
+    )
+    .map((r) => r.subject);
+}
+
+/** Actors of the visible follow edges to `subject` (the followers list). */
+function followers(db: Db, subject: string): string[] {
+  return db
+    .all<{ actor: string }>(
+      `SELECT f.actor FROM follows f WHERE f.subject = ? AND ${visibleFollowEdge('f')} ORDER BY f.actor`,
+      subject,
+    )
+    .map((r) => r.actor);
 }
 
 const getRecordCalls = (pds: FakePds, rkey?: string) =>
@@ -140,6 +165,53 @@ describe('verify drain', () => {
       expect(counterValue(db, 'excluded', FUTURE_REASON)).toBe(1);
       // The identity was resolved once and then served from identity_cache.
       expect(k.plc.count(alice)).toBe(1);
+
+      // M5.3.3/pending_confirmed: a follow of Bob confirmed on Alice's PDS (the SPA's
+      // queued write) is not an edge until its proof applies.
+      const bob = k.users.Bob.did;
+      const F = k.collections.follow;
+      seedUser(db, bob);
+      const rkey = await followRkey(bob);
+      const followUri = `at://${alice}/${F}/${rkey}`;
+      const followed = await k.externalPut('Alice', F, rkey, {
+        $type: F,
+        subject: bob,
+        createdAt: '2026-01-15T12:09:00Z',
+      });
+      const followCid = followed.ops[0]!.cid!;
+      expect(follows(db)).toEqual([]);
+      expect(following(db, alice)).toEqual([]);
+      expect(followers(db, bob)).toEqual([]);
+      expect(state(db, followUri)).toBeNull();
+
+      enqueue(db, [hint(k, alice, F, rkey, { hintRev: followed.rev })]);
+      const third = await drain(m, now);
+      expect(third.outcomes).toEqual([{ uri: followUri, outcome: 'applied' }]);
+      expect(getRecordCalls(k.pds.Alice)).toBe(3);
+      expect(getRecordCalls(k.pds.Alice, rkey)).toBe(1);
+      expect(k.pds.Alice.calls.filter({ nsid: GET_RECORD })[2]!.params).toEqual({
+        did: [alice],
+        collection: [F],
+        rkey: [rkey],
+      });
+      expect(follows(db)).toEqual([
+        {
+          uri: followUri,
+          cid: followCid,
+          actor: alice,
+          subject: bob,
+          revision: followed.rev,
+          created_at: '2026-01-15T12:09:00.000000000Z',
+          indexed_at: '2026-01-15T12:10:00.000000000Z',
+        },
+      ]);
+      expect(state(db, followUri)).toEqual({ revision: followed.rev, cid: followCid, state: 'present', reason: null });
+      expect(following(db, alice)).toEqual([bob]);
+      expect(followers(db, bob)).toEqual([alice]);
+      expect(db.one('SELECT max_rev FROM users WHERE did = ?', alice)).toEqual({ max_rev: followed.rev });
+      expect(hintRows(db)).toEqual([]);
+      // The scrobble projection is unchanged by the follow.
+      expect(rows(db, alice).map((r) => r.uri)).toEqual([`at://${alice}/${S}/r1`]);
     });
   });
 
@@ -263,6 +335,90 @@ describe('verify drain', () => {
         n: 24,
       });
       expect(hintRows(db)).toEqual([]);
+    });
+  });
+
+  it('coalescing during a walk at an older head restarts it: frontier and head dropped, epoch bumped', async () => {
+    const k = await kit();
+    const alice = k.users.Alice.did;
+    const S = k.collections.scrobble;
+    const H0 = k.repos.Alice.head!.cid; // the head the walk started from
+    // 25 records written after H0; their hints are what coalescing deletes.
+    const ops = Array.from({ length: 25 }, (_, j) => ({
+      action: 'put' as const,
+      collection: S,
+      rkey: `n${String(j).padStart(2, '0')}`,
+      record: scrobble(k, '2026-01-15T11:00:00Z', { track: `New ${j}` }),
+    }));
+    await k.repos.Alice.writes(ops);
+    expect(k.repos.Alice.head!.cid).not.toBe(H0);
+    k.resetCalls();
+
+    await runInDurableObject(stubFor('drain-coalesce-restart'), async (i: HarnessDO) => {
+      const db = i.db;
+      const m = depsFor(db, k);
+      const generation = seedUser(db, alice);
+      // A 30-slice walk paused between slices at H0, and one with a slice in flight.
+      db.run(
+        `INSERT INTO repo_jobs(did, kind, state, generation, reason, head_cid, frontier_json, restarts, due_at, updated_at_ms)
+         VALUES (?, 'snapshot', 'pending', ?, 'admission', ?, '{"lastKey":"x"}', 0, ?, ?)`,
+        alice,
+        generation,
+        H0,
+        T0 + 2_000,
+        T0,
+      );
+      const users = db.all('SELECT * FROM users');
+      enqueue(
+        db,
+        ops.map((o) => hint(k, alice, S, o.rkey)),
+      );
+      const report = await drain(m, k.clock.nowMs());
+      expect(report.outcomes.filter((o) => o.outcome === 'coalesced')).toHaveLength(1);
+      expect(getRecordCalls(k.pds.Alice)).toBe(0);
+      expect(hintRows(db)).toEqual([]);
+      // The next slice cannot resume H0's frontier: it walks from getLatestCommit.
+      const job = () =>
+        db.one(
+          `SELECT state, generation, reason, head_cid, frontier_json, restarts, due_at FROM repo_jobs
+           WHERE did = ? AND kind = 'snapshot'`,
+          alice,
+        );
+      expect(job()).toEqual({
+        state: 'pending',
+        generation,
+        reason: 'admission',
+        head_cid: null,
+        frontier_json: null,
+        restarts: 1,
+        due_at: T0,
+      });
+
+      // The same with a slice in flight at H0: the row leaves `running`, so that slice's
+      // compare-and-set on (running, generation, restarts 1, H0) misses.
+      db.run(
+        `UPDATE repo_jobs SET state = 'running', head_cid = ?, frontier_json = '{"lastKey":"y"}' WHERE did = ?`,
+        H0,
+        alice,
+      );
+      enqueue(
+        db,
+        ops.map((o) => hint(k, alice, S, o.rkey)),
+      );
+      const second = await drain(m, k.clock.nowMs());
+      expect(second.outcomes.filter((o) => o.outcome === 'coalesced')).toHaveLength(1);
+      expect(job()).toEqual({
+        state: 'pending',
+        generation,
+        reason: 'admission',
+        head_cid: null,
+        frontier_json: null,
+        restarts: 2,
+        due_at: T0,
+      });
+      expect(getRecordCalls(k.pds.Alice)).toBe(0);
+      expect(hintRows(db)).toEqual([]);
+      expect(db.all('SELECT * FROM users')).toEqual(users);
     });
   });
 
@@ -670,6 +826,70 @@ describe('verify drain', () => {
       expect(hintRows(db)).toEqual([]);
       // None of it touched the projection.
       expect(protectedTables(db)).toEqual(before);
+    });
+  });
+
+  it('Paid drain works 200 cached-identity hints in one slice: 200 getRecord calls', async () => {
+    const k = await kit();
+    const S = k.collections.scrobble;
+    // Ten writers (20 hints each, below the coalescing threshold) on the kit's three hosts.
+    const repos = [k.repos.Alice, k.repos.Bob, k.repos.Carol];
+    const hosts = [k.pds.Alice, k.pds.Bob, k.pds.Carol];
+    for (let n = 0; n < 7; n++) {
+      const did = `did:plc:${'fghijkl'[n]!.repeat(24)}`;
+      const key = await testKey(n % 2 === 0 ? 'secp256k1' : 'p256', 0x30 + n);
+      const pds = hosts[n % 3]!;
+      const repo = new SignedRepo(did, key, { clock: k.clock });
+      await pds.addAccount(repo);
+      k.plc.register(did, { signingKey: key, pds: pds.origin, handle: null });
+      repos.push(repo);
+    }
+    const all: string[] = [];
+    for (const repo of repos) {
+      const ops = Array.from({ length: 20 }, (_, j) => {
+        const rkey = `p${String(j).padStart(2, '0')}`;
+        all.push(`at://${repo.did}/${S}/${rkey}`);
+        return {
+          action: 'put' as const,
+          collection: S,
+          rkey,
+          record: scrobble(k, '2026-01-15T11:00:00Z', { track: `Track ${j}` }),
+        };
+      });
+      await repo.writes(ops);
+    }
+    expect(all).toHaveLength(200);
+
+    await runInDurableObject(stubFor('drain-paid-200'), async (i: HarnessDO) => {
+      const db = i.db;
+      const m = depsFor(db, k, { plan: 'paid' });
+      expect(m.config.budget).toMatchObject({ drainHints: 200, concurrentFetches: 4, perHostConcurrency: 2 });
+      for (const repo of repos) {
+        seedUser(db, repo.did);
+        // Warm identity_cache: every identity in this slice is a cache hit.
+        expect((await resolveIdentity(m, repo.did)).ok).toBe(true);
+      }
+      expect(db.one('SELECT count(*) AS n FROM identity_cache')).toEqual({ n: 10 });
+      k.resetCalls();
+      enqueue(
+        db,
+        all.map((uri) => {
+          const [, , did, , rkey] = uri.split('/');
+          return hint(k, did!, S, rkey!);
+        }),
+      );
+
+      const report = await drain(m, k.clock.nowMs());
+      expect(report.claimed).toBe(200);
+      expect(report.outcomes.filter((o) => o.outcome === 'applied')).toHaveLength(200);
+      expect(report.outcomes.filter((o) => o.outcome === 'budget')).toEqual([]);
+      // One getRecord per hint, all in this one slice; no identity was fetched.
+      expect(hosts.reduce((n, pds) => n + getRecordCalls(pds), 0)).toBe(200);
+      expect(k.plc.calls.count()).toBe(0);
+      expect(report.subrequests).toBe(600);
+      expect(db.one('SELECT count(*) AS n FROM scrobbles')).toEqual({ n: 200 });
+      expect(rows(db).map((r) => r.uri)).toEqual([...all].sort());
+      expect(hintRows(db)).toEqual([]);
     });
   });
 

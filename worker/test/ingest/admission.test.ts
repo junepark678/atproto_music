@@ -193,6 +193,113 @@ describe('admission', () => {
     });
   });
 
+  it('scheduleSnapshot restarts an open walk at the newest head and bumps the walk epoch', async () => {
+    await runInDurableObject(stubFor('admission-restart'), (i: HarnessDO) => {
+      const db = i.db;
+      const H0 = 'bafyreih0h0h0h0h0h0h0h0h0h0h0h0h0h0h0h0h0h0h0h0h0h0h0h0h0';
+      const FRONTIER = '{"stack":[],"lastKey":"com.example.atmusic.scrobble/r10"}';
+      const jobs = [
+        // [did, state, restarts, frontier, head, failure]
+        [did(1), 'pending', 0, null, null, null], // queued, walk not started
+        [did(2), 'pending', 1, FRONTIER, H0, null], // between slices / after a backoff, at H0
+        [did(3), 'running', 2, FRONTIER, H0, null], // a slice in flight at H0
+        [did(4), 'failed', 6, FRONTIER, H0, 'repository_changed'],
+        [did(5), 'complete', 3, null, H0, null],
+      ] as const;
+      for (const [d, state, restarts, frontier, head, failure] of jobs) {
+        db.run('INSERT INTO users(did, joined_at, generation) VALUES (?, ?, 9)', d, T0_STORAGE);
+        db.run(
+          `INSERT INTO repo_jobs(did, kind, state, generation, reason, head_rev, head_cid, frontier_json, restarts,
+             reactivate, due_at, failure_code, updated_at_ms)
+           VALUES (?, 'snapshot', ?, 9, 'gap', '3l2aaaaaaaa22', ?, ?, ?, 1, ?, ?, ?)`,
+          d,
+          state,
+          head,
+          frontier,
+          restarts,
+          T0 + 60_000,
+          failure,
+          T0 - 1_000,
+        );
+      }
+      const users = db.all('SELECT * FROM users ORDER BY did');
+
+      const results = jobs.map(([d]) => scheduleSnapshot(db, d, 'coalesced', T0));
+      expect(results).toEqual([
+        { status: 'already', generation: 9, state: 'pending' },
+        { status: 'already', generation: 9, state: 'pending' },
+        { status: 'scheduled', generation: 9 },
+        { status: 'scheduled', generation: 9 },
+        { status: 'scheduled', generation: 9 },
+      ]);
+      const after = db.all(
+        `SELECT did, state, generation, reason, head_rev, head_cid, frontier_json, restarts, reactivate, due_at,
+           failure_code, updated_at_ms FROM repo_jobs WHERE kind = 'snapshot' ORDER BY did`,
+      );
+      const open = { generation: 9, head_rev: '3l2aaaaaaaa22', head_cid: null, frontier_json: null, reactivate: 1 };
+      expect(after).toEqual([
+        // Not started: nothing to restart, the epoch is unchanged; only pulled forward.
+        {
+          did: did(1),
+          state: 'pending',
+          reason: 'gap',
+          restarts: 0,
+          due_at: T0,
+          failure_code: null,
+          updated_at_ms: T0,
+          ...open,
+        },
+        // A persisted walk at H0 is dropped: the next slice walks from getLatestCommit, epoch 1 → 2.
+        {
+          did: did(2),
+          state: 'pending',
+          reason: 'gap',
+          restarts: 2,
+          due_at: T0,
+          failure_code: null,
+          updated_at_ms: T0,
+          ...open,
+        },
+        // The in-flight slice's (running, generation 9, restarts 2, H0) no longer matches.
+        {
+          did: did(3),
+          state: 'pending',
+          reason: 'gap',
+          restarts: 3,
+          due_at: T0,
+          failure_code: null,
+          updated_at_ms: T0,
+          ...open,
+        },
+        // A failed job (nothing in flight) is a fresh attempt.
+        {
+          did: did(4),
+          state: 'pending',
+          reason: 'gap',
+          restarts: 0,
+          due_at: T0,
+          failure_code: null,
+          updated_at_ms: T0,
+          ...open,
+        },
+        // A complete job is re-created with the new reason.
+        {
+          did: did(5),
+          state: 'pending',
+          reason: 'coalesced',
+          restarts: 0,
+          due_at: T0,
+          failure_code: null,
+          updated_at_ms: T0,
+          ...open,
+        },
+      ]);
+      // The users rows are never written (a deactivation still supersedes the job).
+      expect(db.all('SELECT * FROM users ORDER BY did')).toEqual(users);
+      expect(counterValue(db, 'snapshot_scheduled', 'coalesced')).toBe(3);
+    });
+  });
+
   it('hourly budget enforced with injected clock', async () => {
     await runInDurableObject(stubFor('admission-hourly'), (i: HarnessDO) => {
       const db = i.db;

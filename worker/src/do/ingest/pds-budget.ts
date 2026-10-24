@@ -15,10 +15,11 @@
 //   PDS host (2). Waiters are served FIFO. It holds no durable state, so an
 //   eviction simply starts empty.
 // - Subrequest budget (`SubrequestMeter`): an alarm slice may start outbound
-//   work only while its reserved upper bound fits the plan's
-//   `subrequestsPerSlice` (Paid 200, Free 40 — under the Free plan's 50
-//   subrequests per invocation). Costs are reserved before the work starts and
-//   never refunded, so the slice can never exceed the budget.
+//   work only while its reserved upper bound fits its limit (Free: the plan's
+//   `subrequestsPerSlice`, 40, under the Free plan's 50 subrequests per
+//   invocation; the Paid drain is bounded by hints instead, see
+//   verify-drain.ts `drainSubrequestLimit`). Costs are reserved before the
+//   work starts and never refunded, so the slice can never exceed the limit.
 
 import type { SafeFetchError } from '@atmusic/atproto/net/safe-fetch';
 import type { Db } from '../db';

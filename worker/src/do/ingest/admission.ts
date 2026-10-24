@@ -32,14 +32,24 @@
 // - no job, or a complete one: (re)created `pending`, due now, with `reason`,
 //   a cleared frontier, restarts, attempts and failure; subject to the 1,024
 //   pending cap (`busy`, nothing written);
-// - a failed job: retried now (`pending`, failure cleared) keeping its reason;
-// - a pending job: due time pulled forward to now (`already`), reason kept;
-// - a running job: restarted at the newest head (`state='pending'`, frontier
-//   cleared), reason kept. Its walk began at an older head, so records changed
-//   after it (e.g. the coalesced hints just deleted) would otherwise be missed.
-//   W4-01 must persist a slice's frontier only while its row is still
-//   `running` at its generation (compare-and-set), and treat a `pending` row
-//   as a fresh walk from getLatestCommit.
+// - an open job (pending, running or failed) is restarted at the newest head:
+//   `state='pending'`, due now, `frontier_json` and `head_cid` cleared, reason
+//   kept (a failed job also has its failure cleared). Every caller replaces
+//   hints by this snapshot (coalescing deletes them; give-up, record_not_found,
+//   stale_head, no_proof, missing_block delete the one hint), so the snapshot
+//   must cover records written after any head an earlier walk started from: a
+//   walk that resumed its old frontier (pending between slices or after a
+//   backoff) or a running slice that kept going would finish at that older
+//   head and never apply those records or deletes.
+// - Walk epoch: when the job's walk had started (running, or a frontier or
+//   head is persisted) the restart increments `restarts`, the walk epoch W4-01
+//   compare-and-sets on (the W4-01 entry of docs/planning/workers-waves.json
+//   holds the contract): every write of an in-flight slice (frontier, head,
+//   state, applySnapshotChunk, completion) requires the row to still be
+//   `running` with the generation, `restarts` and `head_cid` that slice
+//   claimed, so a slice in flight across this restart writes nothing. A job
+//   whose walk has not started keeps its `restarts`; a failed job (no slice
+//   can be in flight) starts a fresh attempt at `restarts = 0`.
 // - In every case `reactivate` is preserved (OR-ed with `o.reactivate`, never
 //   cleared) and `head_rev`, the snapshot floor (apply-snapshot.ts), is kept.
 //   The reason of an open job is kept so a gap-recovery job (`GAP_REASON`)
@@ -205,14 +215,17 @@ export function scheduleSnapshot(
     const generation = user.generation;
 
     if (job !== null && job.state !== 'complete') {
-      // Open job: keep its reason; pending stays pending (due now), failed is retried
-      // now, running restarts at the newest head.
+      // Open job: keep its reason and restart it at the newest head (see the header).
+      // SQLite evaluates every SET expression on the old row.
       db.run(
         `UPDATE repo_jobs SET state = 'pending', generation = ?, reactivate = max(reactivate, ?),
            due_at = min(due_at, ?), updated_at_ms = ?,
            failure_code = CASE WHEN state = 'failed' THEN NULL ELSE failure_code END,
-           frontier_json = CASE WHEN state = 'pending' THEN frontier_json ELSE NULL END,
-           head_cid = CASE WHEN state = 'pending' THEN head_cid ELSE NULL END
+           restarts = CASE
+             WHEN state = 'failed' THEN 0
+             WHEN state = 'running' OR frontier_json IS NOT NULL OR head_cid IS NOT NULL THEN restarts + 1
+             ELSE restarts END,
+           frontier_json = NULL, head_cid = NULL
          WHERE did = ? AND kind = 'snapshot'`,
         generation,
         reactivate,
