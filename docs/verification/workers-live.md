@@ -10,7 +10,7 @@ This page covers the live gates of the Workers deployment (ADR 0004 §10.4, §13
 - **Secrets are redacted** from everything a gate prints: `ADMIN_TOKEN`, passwords, app passwords and the Cloudflare API token. The OAuth gate reads only the `scope` and `sub` of the token response. Access tokens, refresh tokens and codes never enter the evidence.
 - **Missing prerequisites block the gate.** If any is missing or invalid, the gate prints a `blocked` evidence document that lists each name, and exits **2** before it makes a network request or launches a browser. A blocked gate is never a skipped success.
 - **Fixture values are rejected as prerequisites.** These include the fixture prefix `com.example.atmusic`, `*.example.*`/`.test`/`.internal` hosts, the reserved fixture DIDs `did:plc:aaaa…`–`eeee…`, and IP literals.
-- **Verification is the production verifier.** Records are fetched independently with `com.atproto.sync.getRecord` through SafeFetch (with the DoH pre-check), under a fresh identity resolution and the current `#atproto` key. They are checked with `@atmusic/atproto` `verify/record-proof`: CAR bounds, commit signature and MST inclusion or exclusion. No gate weakens or bypasses it.
+- **Verification is the production verifier.** Records are fetched independently with `com.atproto.sync.getRecord` through SafeFetch (with the DoH pre-check), under a fresh identity resolution and the current `#atproto` key. They are checked with `@atmusic/atproto` `verify/record-proof`: CAR bounds, commit signature and MST inclusion or exclusion. Where a PDS offers no exclusion proof, absence is checked with the production snapshot verifier instead (see [Ingest](#ingest)). No gate weakens or bypasses either.
 - **Every gate cleans up after itself.** Records a gate creates are deleted, and the evidence says what, if anything, was left behind.
 - **These scripts never deploy and never change DNS or Cloudflare configuration.** The operator deploys with their own credentials.
 
@@ -30,7 +30,7 @@ Exit codes: **0** passed, **1** failed (a live check ran and did not hold), **2*
 | `ATMUSIC_LIVE_PDS_INDEPENDENCE_REF` | Reference to reviewable evidence that the two PDSs are independently operated. |
 | `ATMUSIC_LIVE_JETSTREAM_COVERAGE_REF` | Reference to evidence that the configured Jetstream hosts carry commits from both PDSs (A6). |
 | `ATMUSIC_LIVE_ADMIN_TOKEN` | The deployment's `ADMIN_TOKEN` (at least 32 characters), used for `/internal/admin/status`. |
-| `ATMUSIC_LIVE_PDS_{A,B}_IMPLEMENTATION` | Optional. The PDS implementation name. The version is read from `/xrpc/_health`. Both are recorded as `unreported` when unknown. |
+| `ATMUSIC_LIVE_PDS_{A,B}_IMPLEMENTATION` | Required by `oauth`, `ingest` and `pdsCompat`. The implementation name of each PDS, such as `@atproto/pds`. A placeholder such as `unreported` or `unknown` is invalid. The version is read from `/xrpc/_health`. If no version can be read there, the gate fails; it never records `unreported`. |
 | `ATMUSIC_LIVE_EVIDENCE_OUT` | Optional. A file path that receives a copy of the evidence document, written with mode 0600. |
 
 ## The gates
@@ -68,7 +68,11 @@ Then, for each PDS, the sign-in must satisfy all of these:
 1. **Jetstream path.** The app publishes on PDS A. The SPA's notify call is answered with 202 inside the browser, so the Worker learns of the record only through Jetstream. The evidence records the lag from the PDS commit to `indexed`.
 2. **External writer.** A record is created directly on PDS B with its app password.
 3. **Independent verification.** Both records are verified independently. The indexed CID, the written CID and the verified CID must all be equal, and the verified revision is recorded.
-4. **Delete and reconcile.** A's record is deleted through the app. B's is deleted externally. Each must reach `absent`, and absence is verified with an MST exclusion proof.
+4. **Delete and reconcile.** A's record is deleted through the app. B's is deleted externally. Each must reach `absent` in `records/status`. Absence is then verified independently, at a signed head newer than the one where the record was verified present (a stale head from before the write lacks the key too). There are two methods, following ADR 0004 F4 and §13.8:
+   - **`exclusionProof`.** `getRecord` returns an MST exclusion proof.
+   - **`snapshot`.** The PDS offers no exclusion proof: it answers `RecordNotFound`, `MethodNotImplemented`, 404 or 501, or returns no usable CAR (`no_proof`, `missing_block`, `car_malformed`). The production snapshot verifier then streams the repository through SafeFetch `getRepo` (every block CID-checked), verifies the root commit under the current key, and walks the collection's whole key range with `walker.step`. The key must be missing from that complete, verified enumeration.
+
+   Any other error, such as a bad signature, a CID mismatch or a server error, fails the gate; it never falls back to a snapshot. Each `deleteReconcile` entry records its `method`, and `exclusionProofUnavailable` when the method is `snapshot`.
 5. **Admin status.** `/internal/admin/status` is sampled before and after the run (mode, socket, cursor lag).
 
 ### PDS compatibility
@@ -82,6 +86,8 @@ These are recorded, but neither is required:
 
 - an exclusion proof for a never-written rkey (the fallback is a snapshot);
 - getBlocks for the current commit block (the fallback is `getRepo`).
+
+A PDS without exclusion proofs must pass the snapshot fallback instead: the snapshot verifier must prove the never-written rkey absent (`snapshotAbsence`). Otherwise deletes on that PDS could never reconcile, and the gate fails.
 
 Nothing is written.
 
@@ -163,6 +169,9 @@ The operator assembles the inventory by placing each document under `gates.<name
   - an inventory that is not bound to the release under review (see FAIL), even when it records a failed gate: that failure is listed but says nothing about the bundle under review;
   - per-identity results that do not cover both prerequisite identities and PDS hosts. OAuth needs one sign-in per prerequisite DID, pdsCompat one result per prerequisite PDS host, and ingest needs `localPublish` to be a record of identity A and `externalPublish` a different record of identity B;
   - a soak whose analytics lack billed DO requests (at least 1), alarm invocations (at least 1) or DO CPU time, or that lists a missing field;
+  - a passed or failed gate document whose own `lexiconPrefix` is the fixture prefix or another example namespace, or whose `origin` is not a public HTTPS origin, such as `http://127.0.0.1:8787`. This holds for `--gate FILE` too, where there are no prerequisites to compare against;
+  - a PDS `implementation` or `version` that is empty or a placeholder (`unreported`, `unknown` and similar);
+  - a `deleteReconcile` entry without a `method`, or verified at a head no newer than the one that proved the record present. In an inventory, each entry's method must also match the pdsCompat result for that identity's PDS: `exclusionProof` where `getRecordExclusion` is true, `snapshot` where it is false. A pdsCompat result for a PDS with neither an exclusion proof nor `snapshotAbsence` is rejected as well;
   - a "passed" document whose required results are absent. For example, the CIDs differ, absence was not verified, SafeFetch fetched a target, or the soak ran for less than 24 h.
 
 `--gate FILE` classifies a single gate document. The verifier checks recorded fields and their consistency. It cannot establish that the cited external evidence is authentic, so reviewers must inspect it. `python3 scripts/test_live_evidence.py` holds its regression tests. Those tests run every gate script with no prerequisites and with a fetch trap preloaded, so they make no network request.

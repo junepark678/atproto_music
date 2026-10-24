@@ -19,8 +19,13 @@
 // 4. Delete and reconcile: A's record is deleted through the app (profile
 //    page "Delete" → "Confirm delete", notify again intercepted) and B's
 //    record externally (repo.deleteRecord). Each must become `absent` in
-//    records/status, and absence is independently verified with an MST
-//    exclusion proof at the current signed head.
+//    records/status, and absence is independently verified at a signed head
+//    newer than the one that proved the record present: with an MST
+//    exclusion proof from getRecord when the PDS offers one, otherwise (F4,
+//    ADR §13.8) with the production snapshot verifier, a verified getRepo
+//    enumeration of the collection that lacks the key. Each entry records the
+//    method (`exclusionProof` or `snapshot`); the evidence verifier requires
+//    it to match the pdsCompat exclusion-proof result for that PDS.
 // 5. /internal/admin/status (ADMIN_TOKEN) is sampled before and after for the
 //    ingest mode, socket state and Jetstream cursor lag.
 //
@@ -52,11 +57,13 @@ import {
   JETSTREAM_REQ,
   main,
   PartialResult,
+  PDS_IMPLEMENTATION_REQS,
   type PdsInfo,
   pdsInfo,
   pollUntil,
   RELEASE_REQS,
   type Requirement,
+  verifyAbsent,
   verifyRecordAt,
   xrpcUrl,
 } from './live-gate.ts';
@@ -149,7 +156,18 @@ async function awaitIndexed(ctx: GateContext, written: Written, timeoutMs: numbe
   };
 }
 
-async function awaitAbsent(ctx: GateContext, uri: string, deletedAtMs: number, timeoutMs: number) {
+/**
+ * Wait for `absent`, then verify absence independently at a signed head newer
+ * than `presentRev`, the head at which the record was verified present (a
+ * stale head from before the write would lack the key as well).
+ */
+async function awaitAbsent(
+  ctx: GateContext,
+  uri: string,
+  presentRev: string,
+  deleted: { atMs: number; rev: string | null },
+  timeoutMs: number,
+) {
   const done = await pollUntil(
     async () => {
       const status = await recordStatus(ctx, uri);
@@ -158,12 +176,28 @@ async function awaitAbsent(ctx: GateContext, uri: string, deletedAtMs: number, t
     { timeoutMs, intervalMs: 1000 },
   );
   expect(done !== null, `${uri} was not reconciled to absent within ${timeoutMs / 1000} s`);
-  const lagMs = Date.now() - deletedAtMs;
+  const lagMs = Date.now() - deleted.atMs;
   const parsed = parseRecordUri(uri);
   expect(parsed !== null, `malformed URI ${uri}`);
-  const proof = await verifyRecordAt(parsed.did, parsed.collection, parsed.rkey);
-  expect(proof.state === 'absent', `${uri} is reported absent but its PDS still proves it present`);
-  return { uri, absentVerified: true, statusRevision: done.value.revision ?? null, verifiedRev: proof.rev, lagMs };
+  const absence = await verifyAbsent(parsed.did, parsed.collection, parsed.rkey, { after: presentRev });
+  expect(
+    deleted.rev === null || absence.rev >= deleted.rev,
+    `${uri}: absence verified at rev ${absence.rev}, older than the delete commit ${deleted.rev}`,
+  );
+  return {
+    uri,
+    absentVerified: true,
+    method: absence.method,
+    ...(absence.exclusionProofUnavailable === undefined
+      ? {}
+      : { exclusionProofUnavailable: absence.exclusionProofUnavailable, keysEnumerated: absence.keysEnumerated }),
+    statusRevision: done.value.revision ?? null,
+    presentRev,
+    deleteRev: deleted.rev,
+    verifiedRev: absence.rev,
+    verifiedCommitCid: absence.commitCid,
+    lagMs,
+  };
 }
 
 function scrobbleRecord(collection: string, runId: string, who: string) {
@@ -211,7 +245,11 @@ async function externalCreate(pds: string, session: PdsSession, collection: stri
   return { uri, cid, rev: field<string>(field(res.json, 'commit'), 'rev') ?? null, committedAtMs };
 }
 
-async function externalDelete(pds: string, session: PdsSession, uri: string): Promise<number> {
+async function externalDelete(
+  pds: string,
+  session: PdsSession,
+  uri: string,
+): Promise<{ atMs: number; rev: string | null }> {
   const parsed = parseRecordUri(uri);
   expect(parsed !== null, `malformed URI ${uri}`);
   const res = await httpJson(xrpcUrl(pds, 'com.atproto.repo.deleteRecord'), {
@@ -219,8 +257,9 @@ async function externalDelete(pds: string, session: PdsSession, uri: string): Pr
     headers: { authorization: `Bearer ${session.accessJwt}` },
     body: { repo: session.did, collection: parsed.collection, rkey: parsed.rkey },
   });
+  const atMs = Date.now();
   expect(res.status === 200, `deleteRecord ${uri}: HTTP ${res.status}`);
-  return Date.now();
+  return { atMs, rev: field<string>(field(res.json, 'commit'), 'rev') ?? null };
 }
 
 /** Answer the SPA's notify in the browser so only Jetstream can deliver the record. */
@@ -262,19 +301,33 @@ async function appPublish(page: Page, ctx: GateContext, runId: string, timeoutMs
   return { uri, cid, rev: field<string>(field(json, 'commit'), 'rev') ?? null, committedAtMs: atMs };
 }
 
-async function appDelete(page: Page, ctx: GateContext, did: string, uri: string, timeoutMs: number): Promise<number> {
+async function appDelete(
+  page: Page,
+  ctx: GateContext,
+  did: string,
+  uri: string,
+  timeoutMs: number,
+): Promise<{ atMs: number; rev: string | null }> {
   await page.goto(new URL(`/u/${did}`, ctx.origin).href);
   const item = page.locator(`li[data-uri="${uri}"]`);
   await item.getByRole('button', { name: /^Delete / }).click({ timeout: 30_000 });
   const answer = nextPdsAnswer(page, ctx.origin, 'com.atproto.repo.deleteRecord', timeoutMs);
   await item.getByRole('button', { name: 'Confirm delete', exact: true }).click();
-  return (await answer).atMs;
+  const { json, atMs } = await answer;
+  return { atMs, rev: field<string>(field(json, 'commit'), 'rev') ?? null };
 }
 
 export const spec: GateSpec = {
   gate: 'ingest',
   script: 'scripts/live/workers_ingest_check.ts',
-  requirements: [...RELEASE_REQS, ...IDENTITY_REQS, JETSTREAM_REQ, ADMIN_REQ, ...INGEST_REQS],
+  requirements: [
+    ...RELEASE_REQS,
+    ...IDENTITY_REQS,
+    ...PDS_IMPLEMENTATION_REQS,
+    JETSTREAM_REQ,
+    ADMIN_REQ,
+    ...INGEST_REQS,
+  ],
   extraChecks: (env) => signInChecks(env, OAUTH_ENV.passwordA, 'A'),
   async run(ctx) {
     const timeoutMs = Number(ctx.env[INGEST_ENV.timeoutSeconds] || 300) * 1000;
@@ -284,8 +337,8 @@ export const spec: GateSpec = {
     const didA = ctx.get(ENV.didA);
     const didB = ctx.get(ENV.didB);
     const pds: PdsInfo[] = [
-      await pdsInfo(ctx.get(ENV.pdsA), ctx.env.ATMUSIC_LIVE_PDS_A_IMPLEMENTATION),
-      await pdsInfo(ctx.get(ENV.pdsB), ctx.env.ATMUSIC_LIVE_PDS_B_IMPLEMENTATION),
+      await pdsInfo(ctx.get(ENV.pdsA), ctx.get(ENV.pdsAImplementation)),
+      await pdsInfo(ctx.get(ENV.pdsB), ctx.get(ENV.pdsBImplementation)),
     ];
     await checkIdentityPds(didA, pds[0]!.endpoint);
     await checkIdentityPds(didB, pds[1]!.endpoint);
@@ -316,7 +369,8 @@ export const spec: GateSpec = {
       const local = await appPublish(page, ctx, runId, timeoutMs);
       created.push({ uri: local.uri, via: 'app', deleted: false });
       expect(parseRecordUri(local.uri)?.did === didA, `the app wrote ${local.uri}, not into ${didA}`);
-      results.localPublish = await awaitIndexed(ctx, local, timeoutMs);
+      const localIndexed = await awaitIndexed(ctx, local, timeoutMs);
+      results.localPublish = localIndexed;
 
       // 2. External writer on B.
       session = await createSession(pds[1]!.endpoint, ctx.get(OAUTH_ENV.handleB), ctx.get(INGEST_ENV.appPasswordB));
@@ -328,16 +382,23 @@ export const spec: GateSpec = {
         scrobbleRecord(collection, runId, 'external'),
       );
       created.push({ uri: external.uri, via: 'external', deleted: false });
-      results.externalPublish = await awaitIndexed(ctx, external, timeoutMs);
+      const externalIndexed = await awaitIndexed(ctx, external, timeoutMs);
+      results.externalPublish = externalIndexed;
 
       // 3. Delete and reconcile, both paths.
       const deleteReconcile: unknown[] = [];
-      const appDeletedAt = await appDelete(page, ctx, didA, local.uri, timeoutMs);
+      const appDeleted = await appDelete(page, ctx, didA, local.uri, timeoutMs);
       created[0]!.deleted = true;
-      deleteReconcile.push({ via: 'app', ...(await awaitAbsent(ctx, local.uri, appDeletedAt, timeoutMs)) });
-      const extDeletedAt = await externalDelete(pds[1]!.endpoint, session, external.uri);
+      deleteReconcile.push({
+        via: 'app',
+        ...(await awaitAbsent(ctx, local.uri, localIndexed.verifiedRev, appDeleted, timeoutMs)),
+      });
+      const extDeleted = await externalDelete(pds[1]!.endpoint, session, external.uri);
       created[1]!.deleted = true;
-      deleteReconcile.push({ via: 'external', ...(await awaitAbsent(ctx, external.uri, extDeletedAt, timeoutMs)) });
+      deleteReconcile.push({
+        via: 'external',
+        ...(await awaitAbsent(ctx, external.uri, externalIndexed.verifiedRev, extDeleted, timeoutMs)),
+      });
       results.deleteReconcile = deleteReconcile;
       results.notifyIntercepted = notify.count;
       results.ingestAfter = ingestSnapshot(await adminStatus(ctx));

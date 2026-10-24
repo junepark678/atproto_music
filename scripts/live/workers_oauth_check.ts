@@ -41,6 +41,7 @@ import {
   main,
   normalizedOrigin,
   oneOf,
+  PDS_IMPLEMENTATION_REQS,
   type PdsInfo,
   pdsInfo,
   RELEASE_REQS,
@@ -222,7 +223,7 @@ export function signInTimeoutMs(env: EnvMap): number {
 export const spec: GateSpec = {
   gate: 'oauth',
   script: 'scripts/live/workers_oauth_check.ts',
-  requirements: [...RELEASE_REQS, ...IDENTITY_REQS, ...OAUTH_REQS],
+  requirements: [...RELEASE_REQS, ...IDENTITY_REQS, ...PDS_IMPLEMENTATION_REQS, ...OAUTH_REQS],
   extraChecks: (env) => [
     ...signInChecks(env, OAUTH_ENV.passwordA, 'A'),
     ...signInChecks(env, OAUTH_ENV.passwordB, 'B'),
@@ -236,11 +237,11 @@ export const spec: GateSpec = {
     const browser = await launchBrowser(ctx.env);
     try {
       for (const [didName, pdsName, handleName, passwordName, implName] of [
-        [ENV.didA, ENV.pdsA, OAUTH_ENV.handleA, OAUTH_ENV.passwordA, 'ATMUSIC_LIVE_PDS_A_IMPLEMENTATION'],
-        [ENV.didB, ENV.pdsB, OAUTH_ENV.handleB, OAUTH_ENV.passwordB, 'ATMUSIC_LIVE_PDS_B_IMPLEMENTATION'],
+        [ENV.didA, ENV.pdsA, OAUTH_ENV.handleA, OAUTH_ENV.passwordA, ENV.pdsAImplementation],
+        [ENV.didB, ENV.pdsB, OAUTH_ENV.handleB, OAUTH_ENV.passwordB, ENV.pdsBImplementation],
       ] as const) {
         const expectedDid = ctx.get(didName);
-        const info = await pdsInfo(ctx.get(pdsName), ctx.env[implName]);
+        const info = await pdsInfo(ctx.get(pdsName), ctx.get(implName));
         pds.push(info);
         subjects.push({ did: expectedDid, uri: null });
         await checkIdentityPds(expectedDid, info.endpoint);

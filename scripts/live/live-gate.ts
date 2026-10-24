@@ -30,6 +30,7 @@ import { execFileSync } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import type { Transport } from '@atmusic/atproto/transport';
 import { isFixturePrefix, isValidPrefix } from '@atmusic/core/namespace';
 import { isSupportedDid } from '@atmusic/core/syntax';
 
@@ -55,6 +56,8 @@ export const ENV = {
   pdsA: 'ATMUSIC_LIVE_PDS_A',
   didB: 'ATMUSIC_LIVE_DID_B',
   pdsB: 'ATMUSIC_LIVE_PDS_B',
+  pdsAImplementation: 'ATMUSIC_LIVE_PDS_A_IMPLEMENTATION',
+  pdsBImplementation: 'ATMUSIC_LIVE_PDS_B_IMPLEMENTATION',
   pdsIndependenceRef: 'ATMUSIC_LIVE_PDS_INDEPENDENCE_REF',
   jetstreamCoverageRef: 'ATMUSIC_LIVE_JETSTREAM_COVERAGE_REF',
   adminToken: 'ATMUSIC_LIVE_ADMIN_TOKEN',
@@ -185,6 +188,51 @@ export const IDENTITY_REQS: readonly Requirement[] = [
     name: ENV.pdsIndependenceRef,
     what: 'reference to evidence that PDS A and PDS B are independently operated',
     check: reference,
+  },
+];
+
+/** Values that say "not known" rather than name an implementation or version. */
+export const PLACEHOLDER_VALUES: ReadonlySet<string> = new Set([
+  'unreported',
+  'unknown',
+  'none',
+  'null',
+  'undefined',
+  'n/a',
+  'na',
+  'tbd',
+  'todo',
+  '?',
+  '-',
+]);
+
+export function isPlaceholder(value: string): boolean {
+  return PLACEHOLDER_VALUES.has(value.trim().toLowerCase());
+}
+
+function implementationName(value: string): string | null {
+  if (isPlaceholder(value)) return 'a placeholder, not an implementation name';
+  if (value.length > 64 || !/^@?[A-Za-z0-9][A-Za-z0-9 ._@/+-]*$/.test(value)) {
+    return 'must be a short implementation name (letters, digits, space, ._@/+-; at most 64)';
+  }
+  return null;
+}
+
+/**
+ * The implementation of each PDS, as the operator knows it (e.g. the reference
+ * `@atproto/pds`, or another server's name). Required by every gate that
+ * talks to the PDSs, so the evidence never records an unknown implementation.
+ */
+export const PDS_IMPLEMENTATION_REQS: readonly Requirement[] = [
+  {
+    name: ENV.pdsAImplementation,
+    what: 'implementation name of PDS A (e.g. @atproto/pds); the version is read from /xrpc/_health',
+    check: implementationName,
+  },
+  {
+    name: ENV.pdsBImplementation,
+    what: 'implementation name of PDS B; the version is read from /xrpc/_health',
+    check: implementationName,
   },
 ];
 
@@ -501,17 +549,32 @@ export function field<T = unknown>(value: unknown, key: string): T | undefined {
   return value !== null && typeof value === 'object' ? ((value as Record<string, unknown>)[key] as T) : undefined;
 }
 
-/** `_health` version of a PDS; the implementation is operator-declared when known. */
-export async function pdsInfo(endpoint: string, implementation: string | undefined): Promise<PdsInfo> {
-  let version = 'unreported';
+/**
+ * The PDS's operator-declared implementation and its `/xrpc/_health` version.
+ * A version that cannot be read (no answer, no `version`, a placeholder) fails
+ * the gate: the evidence never records an unknown version.
+ */
+export async function pdsInfo(endpoint: string, implementation: string): Promise<PdsInfo> {
+  expect(
+    implementation.trim() !== '' && !isPlaceholder(implementation),
+    `${endpoint}: no implementation name declared`,
+  );
+  let health: JsonResponse;
   try {
-    const health = await httpJson(xrpcUrl(endpoint, '_health'));
-    const v = field<string>(health.json, 'version');
-    if (health.status === 200 && typeof v === 'string' && v.length > 0 && v.length <= 64) version = v;
-  } catch {
-    // Recorded as unreported.
+    health = await httpJson(xrpcUrl(endpoint, '_health'));
+  } catch (error) {
+    throw new GateFailure(`${endpoint}: /xrpc/_health unavailable, PDS version unknown (${message(error)})`);
   }
-  return { endpoint: normalizedOrigin(endpoint), implementation: implementation || 'unreported', version };
+  const version = field<unknown>(health.json, 'version');
+  expect(
+    health.status === 200 &&
+      typeof version === 'string' &&
+      version.trim().length > 0 &&
+      version.length <= 64 &&
+      !isPlaceholder(version),
+    `${endpoint}: /xrpc/_health (HTTP ${health.status}) reports no version, PDS version unknown`,
+  );
+  return { endpoint: normalizedOrigin(endpoint), implementation, version };
 }
 
 /** GET /api/v1/meta: the deployment must index and publish exactly the configured prefix. */
@@ -546,20 +609,35 @@ export interface VerifiedRecord {
 }
 
 /**
+ * Where the independent verifiers send their requests. The gates never pass
+ * one, so they use globalThis.fetch (`fetchTransport`) under the production
+ * SafeFetch policy. Tests inject the fixture network here, and only here.
+ */
+export interface VerifierNetwork {
+  transport?: Transport;
+}
+
+/**
  * Independently fetch and verify `did/collection/rkey` at the repository's
  * current signed head: fresh identity resolution, SafeFetch getRecord, CAR
  * bounds, commit signature under the current #atproto key, and an MST
  * inclusion or exclusion proof. Throws on anything short of a proof.
  */
-export async function verifyRecordAt(did: string, collection: string, rkey: string): Promise<VerifiedRecord> {
+export async function verifyRecordAt(
+  did: string,
+  collection: string,
+  rkey: string,
+  network: VerifierNetwork = {},
+): Promise<VerifiedRecord> {
   const [{ systemClock }, { createIdentityResolver }, { createSafeFetch }, { verifyRecordProof }] = await Promise.all([
     import('@atmusic/core/deps'),
     import('@atmusic/atproto/identity/resolver'),
     import('@atmusic/atproto/net/safe-fetch'),
     import('@atmusic/atproto/verify/record-proof'),
   ]);
-  const identity = await createIdentityResolver({ clock: systemClock }).resolveDid(did, { fresh: true });
-  const safeFetch = createSafeFetch({ clock: systemClock });
+  const { transport } = network;
+  const identity = await createIdentityResolver({ clock: systemClock, transport }).resolveDid(did, { fresh: true });
+  const safeFetch = createSafeFetch({ clock: systemClock, transport });
   const { body } = await safeFetch(xrpcUrl(identity.pds, 'com.atproto.sync.getRecord', { did, collection, rkey }), {
     kind: 'getRecord',
   });
@@ -571,6 +649,163 @@ export async function verifyRecordAt(did: string, collection: string, rkey: stri
     commitCid: proof.commit.cid,
     pds: identity.pds,
   };
+}
+
+export type AbsenceMethod = 'exclusionProof' | 'snapshot';
+
+export interface VerifiedAbsence {
+  method: AbsenceMethod;
+  /** Revision of the verified signed head at which the key is absent. */
+  rev: string;
+  commitCid: string;
+  pds: string;
+  /** Why the exclusion proof was not usable (snapshot method only). */
+  exclusionProofUnavailable?: string;
+  /** Keys of the collection enumerated by the verified walk (snapshot method only). */
+  keysEnumerated?: number;
+}
+
+/** Verifier codes that mean "no usable proof here" (the production hint drain then snapshots, F4). */
+const SNAPSHOT_VERIFY_CODES = new Set(['no_proof', 'missing_block', 'car_malformed']);
+
+/**
+ * Whether a getRecord failure means the PDS offers no exclusion proof (the
+ * production drain answers these with a snapshot, ADR §5.4 and F4): no CAR,
+ * an unparseable CAR, a path with missing blocks, RecordNotFound or an
+ * unimplemented method. Anything else (a bad signature, a CID mismatch, an
+ * invalid MST, a server error) is a failure, never a reason to fall back.
+ */
+export function exclusionProofUnavailable(error: unknown): string | null {
+  const code = (error as { code?: unknown } | null)?.code;
+  const name = (error as { name?: unknown } | null)?.name;
+  if (name === 'VerifyError' && typeof code === 'string' && SNAPSHOT_VERIFY_CODES.has(code)) return code;
+  if (name === 'SafeFetchError' && code === 'http_status') {
+    const e = error as { status?: number | null; xrpcError?: string | null };
+    if (e.xrpcError === 'RecordNotFound' || e.xrpcError === 'MethodNotImplemented') return e.xrpcError;
+    if (e.status === 404 || e.status === 501) return `HTTP ${e.status}`;
+  }
+  return null;
+}
+
+/** Most `walker.step` calls one snapshot verification may make before it gives up. */
+const MAX_SNAPSHOT_STEPS = 10_000;
+
+/**
+ * Independently verify that `did/collection/rkey` is absent with the
+ * production snapshot verifier: fresh identity resolution, the repository CAR
+ * streamed through SafeFetch kind `getRepo` (every block CID-checked), the
+ * root commit verified under the current #atproto key, then a complete
+ * range walk (`walker.step`, every node hash-checked, layers and key order
+ * enforced) of the collection's key range under that commit. Absence is
+ * returned only when the walk finished and enumerated no such key; a missing
+ * block, an invalid node or a present key throws.
+ */
+export async function verifyAbsentBySnapshot(
+  did: string,
+  collection: string,
+  rkey: string,
+  network: VerifierNetwork = {},
+): Promise<VerifiedAbsence & { state: 'absent' | 'present' }> {
+  const [
+    { systemClock },
+    { createIdentityResolver },
+    { createSafeFetch },
+    { MemoryBlockCache, cacheOnlySource },
+    { streamRepoIntoCache },
+    { initialState, step },
+    { verifyCommit },
+  ] = await Promise.all([
+    import('@atmusic/core/deps'),
+    import('@atmusic/atproto/identity/resolver'),
+    import('@atmusic/atproto/net/safe-fetch'),
+    import('@atmusic/atproto/snapshot/block-source'),
+    import('@atmusic/atproto/snapshot/getrepo-source'),
+    import('@atmusic/atproto/snapshot/walker'),
+    import('@atmusic/atproto/verify/commit'),
+  ]);
+  const { transport } = network;
+  const identity = await createIdentityResolver({ clock: systemClock, transport }).resolveDid(did, { fresh: true });
+  const safeFetch = createSafeFetch({ clock: systemClock, transport });
+  const cache = new MemoryBlockCache();
+  const streamed = await streamRepoIntoCache({ safeFetch, pds: identity.pds, did, cache });
+  const root = cache.get(streamed.root);
+  expect(root !== null, `getRepo CAR for ${did} lacks its root commit ${streamed.root}`);
+  const commit = await verifyCommit(new Map([[streamed.root, root]]), streamed.root, {
+    did,
+    signingKey: identity.signingKey,
+  });
+  // Every key of `collection` is `collection/<rkey>`; '/' (0x2F) and '0' (0x30)
+  // are adjacent, so [collection/, collection0) holds exactly those keys.
+  const key = `${collection}/${rkey}`;
+  let state = initialState(commit, [`${collection}/`, `${collection}0`]);
+  let keysEnumerated = 0;
+  let found: string | null = null;
+  for (let steps = 0; ; steps++) {
+    expect(steps < MAX_SNAPSHOT_STEPS, `snapshot walk of ${did} did not finish in ${MAX_SNAPSHOT_STEPS} steps`);
+    const result = await step(state, cacheOnlySource(cache), cache, {
+      maxFetches: 50,
+      maxEntries: 1000,
+      // Unknown CIDs make the walker fetch and hash-check the record block of the key.
+      knownCid: () => null,
+    });
+    keysEnumerated += result.entries.length;
+    for (const entry of result.entries) if (entry.key === key) found = entry.cid;
+    state = result.state;
+    if (result.done) break;
+  }
+  return {
+    state: found === null ? 'absent' : 'present',
+    method: 'snapshot',
+    rev: commit.rev,
+    commitCid: commit.cid,
+    pds: identity.pds,
+    keysEnumerated,
+  };
+}
+
+export interface AbsenceOptions extends VerifierNetwork {
+  /**
+   * The revision at which the record was verified present. Absence counts
+   * only at a signed head after it: a stale head from before the write lacks
+   * the key as well.
+   */
+  after: string;
+}
+
+/**
+ * Verify that a deleted record is absent: an MST exclusion proof from
+ * getRecord when the PDS offers one, otherwise (F4, ADR §13.8) a verified
+ * snapshot enumeration that lacks the key. The method is recorded. Either
+ * way the verified head must be newer than `after`.
+ */
+export async function verifyAbsent(
+  did: string,
+  collection: string,
+  rkey: string,
+  options: AbsenceOptions,
+): Promise<VerifiedAbsence> {
+  const uri = `at://${did}/${collection}/${rkey}`;
+  const newer = (absence: VerifiedAbsence): VerifiedAbsence => {
+    expect(
+      absence.rev > options.after,
+      `${uri}: absence verified at rev ${absence.rev}, not after rev ${options.after} where it was present`,
+    );
+    return absence;
+  };
+  let unavailable: string;
+  try {
+    const proof = await verifyRecordAt(did, collection, rkey, options);
+    expect(proof.state === 'absent', `${uri}: its PDS still proves it present`);
+    return newer({ method: 'exclusionProof', rev: proof.rev, commitCid: proof.commitCid, pds: proof.pds });
+  } catch (error) {
+    const reason = exclusionProofUnavailable(error);
+    if (reason === null) throw error;
+    unavailable = reason;
+  }
+  const snapshot = await verifyAbsentBySnapshot(did, collection, rkey, options);
+  expect(snapshot.state === 'absent', `${uri}: the verified snapshot at rev ${snapshot.rev} still holds it`);
+  const { state: _state, ...absence } = snapshot;
+  return newer({ ...absence, exclusionProofUnavailable: unavailable });
 }
 
 /** The DID document's PDS must be the endpoint the operator declared. */

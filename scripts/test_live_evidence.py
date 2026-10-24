@@ -35,9 +35,12 @@ DID_A = "did:plc:q6gjnaw2blty4crticxkmujt"
 DID_B = "did:plc:ewvi7nxzyoun6zhxrhs64oiz"
 PDS_A = "https://pds-alpha.operator-one.net"
 PDS_B = "https://pds-beta.operator-two.org"
+IMPLEMENTATIONS = {"ATMUSIC_LIVE_PDS_A_IMPLEMENTATION": "@atproto/pds",
+                   "ATMUSIC_LIVE_PDS_B_IMPLEMENTATION": "independent-pds"}
 CID = "bafyreib2rxk3rybk3aobmv5cjuql3bm2twh4jo5uxgf5djpkzwuevr6cqe"
 CID2 = "bafyreie5737gdxlw5i64vzichcalba3z2v5n6icifvx5xytvske7mr3hpm"
 REV = "3lbqzf4u2zs2k"
+DELETE_REV = "3lbqzf4u2zt2k"  # a later head than REV, where both records were verified present
 URI_A = f"at://{DID_A}/{PREFIX}.scrobble/3lbqzf4u2zs2a"
 URI_B = f"at://{DID_B}/{PREFIX}.scrobble/3lbqzf4u2zs2b"
 LIVE_SCRIPTS = {
@@ -45,11 +48,12 @@ LIVE_SCRIPTS = {
                                        "ATMUSIC_LIVE_WORKER_VERSION_ID", "ATMUSIC_LIVE_BUNDLE_SHA256",
                                        "ATMUSIC_LIVE_DID_A", "ATMUSIC_LIVE_PDS_A", "ATMUSIC_LIVE_DID_B",
                                        "ATMUSIC_LIVE_PDS_B", "ATMUSIC_LIVE_PDS_INDEPENDENCE_REF",
-                                       "ATMUSIC_LIVE_JETSTREAM_COVERAGE_REF"]),
+                                       "ATMUSIC_LIVE_JETSTREAM_COVERAGE_REF", *IMPLEMENTATIONS]),
     "workers_oauth_check": ("oauth", ["ATMUSIC_LIVE_ORIGIN", "ATMUSIC_LIVE_DID_A", "ATMUSIC_LIVE_PDS_B",
-                                      "ATMUSIC_LIVE_HANDLE_A", "ATMUSIC_LIVE_PASSWORD_B"]),
+                                      "ATMUSIC_LIVE_HANDLE_A", "ATMUSIC_LIVE_PASSWORD_B", *IMPLEMENTATIONS]),
     "workers_ingest_check": ("ingest", ["ATMUSIC_LIVE_ORIGIN", "ATMUSIC_LIVE_DID_B", "ATMUSIC_LIVE_ADMIN_TOKEN",
-                                        "ATMUSIC_LIVE_JETSTREAM_COVERAGE_REF", "ATMUSIC_LIVE_APP_PASSWORD_B"]),
+                                        "ATMUSIC_LIVE_JETSTREAM_COVERAGE_REF", "ATMUSIC_LIVE_APP_PASSWORD_B",
+                                        *IMPLEMENTATIONS]),
     "ssrf_probe": ("ssrfProbe", ["ATMUSIC_LIVE_ORIGIN", "ATMUSIC_LIVE_ADMIN_TOKEN", "ATMUSIC_LIVE_SSRF_PROBE_URL",
                                  "ATMUSIC_LIVE_SSRF_HOSTS"]),
     "workers_socket_soak": ("socketSoak", ["ATMUSIC_LIVE_ORIGIN", "ATMUSIC_LIVE_ADMIN_TOKEN",
@@ -104,11 +108,62 @@ globalThis.fetch = async (url, init = {}) => {
 };
 }
 """
+# Preloaded into pds_compat_check for the PDS version test: a fake deployment whose PDS answers
+# /xrpc/_health without a version. Every request is logged as `FAKE-FETCH <method> <url>`.
+FAKE_HEALTH_RUNTIME = """if (/pds_compat_check\\.ts$/.test(process.argv[1] ?? '')) {
+const json = (value) => new Response(JSON.stringify(value), { status: 200, headers: { 'content-type': 'application/json' } });
+globalThis.fetch = async (url, init = {}) => {
+  const href = String(url);
+  process.stderr.write(`FAKE-FETCH ${init.method ?? 'GET'} ${href}\\n`);
+  const path = new URL(href).pathname;
+  if (path === '/api/v1/meta')
+    return json({ lexiconPrefix: process.env.ATMUSIC_LIVE_LEXICON_PREFIX, capabilities: ['publication'], version: 'v', stage: 'production' });
+  if (path === '/xrpc/_health') return json({});
+  throw new Error(`unexpected request ${href}`);
+};
+}
+"""
+# Runs the production absence verifier (live-gate.ts verifyAbsent) against the fixture network
+# (@atmusic/atproto test-support: fake PDS, PLC and DoH, injected as the verifier's Transport).
+# ABSENCE_CASE: exclusion | snapshot | snapshotStillHolds | stale | serverError.
+ABSENCE_HARNESS = """(async () => {
+  const { createFixtureKit } = await import('@atmusic/atproto/test-support/read-models');
+  const gate = await import('./scripts/live/live-gate.ts');
+  const kit = await createFixtureKit();
+  const mode = process.env.ABSENCE_CASE;
+  const did = kit.users.Alice.did;
+  const pds = kit.pds.Alice;
+  const collection = kit.collections.scrobble;
+  const rkey = '3lbqzf4u2zs2a';
+  const before = kit.repos.Alice.head.cid;
+  await kit.createRecord('Alice', collection, rkey, { $type: collection, artist: 'a', track: 't',
+    listenedAt: '2026-01-15T11:59:00Z', createdAt: '2026-01-15T12:00:00Z' });
+  const present = await gate.verifyRecordAt(did, collection, rkey, { transport: kit.transport });
+  const deleted = mode === 'snapshotStillHolds' ? null : await kit.deleteRecord('Alice', collection, rkey);
+  pds.noExclusionProof = mode === 'snapshot' || mode === 'stale';
+  if (mode === 'stale') pds.serveStaleHead(did, before);
+  if (mode === 'snapshotStillHolds')
+    pds.faults.add({ nsid: 'com.atproto.sync.getRecord' }, { kind: 'status', status: 400, error: 'RecordNotFound' });
+  if (mode === 'serverError')
+    pds.faults.add({ nsid: 'com.atproto.sync.getRecord' }, { kind: 'status', status: 500, error: 'InternalServerError' }, Infinity);
+  pds.calls.reset();
+  const out = { presentRev: present.rev, presentState: present.state, deleteRev: deleted?.commit?.rev ?? null };
+  try {
+    out.absence = await gate.verifyAbsent(did, collection, rkey, { after: present.rev, transport: kit.transport });
+  } catch (e) {
+    out.error = { name: e.name, code: e.code ?? null, message: e.message };
+  }
+  out.calls = pds.calls.entries.map((c) => `${c.nsid} ${c.status}`);
+  console.log(JSON.stringify(out));
+})();
+"""
 _TRAP_DIR = tempfile.TemporaryDirectory(prefix="atmusic-fetch-trap-")
 TRAP_PATH = Path(_TRAP_DIR.name) / "fetch-trap.mjs"
 TRAP_PATH.write_text(FETCH_TRAP)
 SOAK_RUNTIME_PATH = Path(_TRAP_DIR.name) / "fake-soak-runtime.mjs"
 SOAK_RUNTIME_PATH.write_text(FAKE_SOAK_RUNTIME)
+HEALTH_RUNTIME_PATH = Path(_TRAP_DIR.name) / "fake-health-runtime.mjs"
+HEALTH_RUNTIME_PATH.write_text(FAKE_HEALTH_RUNTIME)
 
 
 def gate(name, results, **extra):
@@ -120,10 +175,10 @@ def gate(name, results, **extra):
         "cleanup": "every created record deleted and verified absent",
     }
     entry.update(extra)
-    return entry
+    return copy.deepcopy(entry)  # each gate gets its own pds/subjects lists
 
 
-PDS = [{"endpoint": PDS_A, "implementation": "reference", "version": "0.4.200"},
+PDS = [{"endpoint": PDS_A, "implementation": "@atproto/pds", "version": "0.4.200"},
        {"endpoint": PDS_B, "implementation": "independent", "version": "1.2.3"}]
 
 
@@ -145,12 +200,15 @@ def passing_inventory():
             "ingest": gate("ingest", {
                 "localPublish": dict(published, uri=URI_A),
                 "externalPublish": dict(published, uri=URI_B, cid=CID2, verifiedCid=CID2, indexedCid=CID2),
-                "deleteReconcile": [{"uri": u, "absentVerified": True, "verifiedRev": REV, "lagMs": 900}
-                                    for u in (URI_A, URI_B)],
+                # PDS A offers exclusion proofs, PDS B does not (pdsCompat below): B's absence is a snapshot.
+                "deleteReconcile": [{"uri": u, "absentVerified": True, "method": method, "verifiedRev": DELETE_REV,
+                                     "lagMs": 900}
+                                    for u, method in ((URI_A, "exclusionProof"), (URI_B, "snapshot"))],
             }, pds=PDS, subjects=[{"did": DID_A, "uri": URI_A}, {"did": DID_B, "uri": URI_B}]),
             "pdsCompat": gate("pdsCompat", {"perPds": [
                 {"endpoint": p["endpoint"], "getRecordInclusion": True, "getRecordExclusion": i == 0,
-                 "getBlocks": True, "getRepoStatus": True} for i, p in enumerate(PDS)]},
+                 "snapshotAbsence": None if i == 0 else True, "getBlocks": True, "getRepoStatus": True}
+                for i, p in enumerate(PDS)]},
                 pds=PDS, subjects=[{"did": DID_A, "uri": URI_A}, {"did": DID_B, "uri": URI_B}]),
             "ssrfProbe": gate("ssrfProbe", {"targets": [
                 {"target": {"label": label, "host": f"{label}.probe.operator-one.net", "kind": "controlledName"},
@@ -202,6 +260,29 @@ def run_fake_soak(analytics):
     env["NODE_OPTIONS"] = f"--import={SOAK_RUNTIME_PATH.as_uri()}"
     return subprocess.run(["npx", "tsx", "scripts/live/workers_socket_soak.ts"], cwd=ROOT, text=True,
                           capture_output=True, env=env, timeout=120)
+
+
+def run_gate_file(entry):
+    """`verify_live_evidence.py --gate FILE` for one gate document."""
+    with tempfile.TemporaryDirectory(prefix="atmusic-live-gate-") as directory:
+        path = Path(directory) / "gate.json"
+        path.write_text(json.dumps(entry))
+        return subprocess.run([sys.executable, str(ROOT / "scripts/verify_live_evidence.py"), "--gate", str(path)],
+                              text=True, capture_output=True)
+
+
+def run_absence_case(case):
+    """The production absence verifier against the fixture network; fetch is trapped, so nothing leaves."""
+    return subprocess.run(["npx", "tsx", "--eval", ABSENCE_HARNESS], cwd=ROOT, text=True, capture_output=True,
+                          env=script_env(ABSENCE_CASE=case), timeout=120)
+
+
+PDS_COMPAT_ENV = {"ATMUSIC_LIVE_ORIGIN": ORIGIN, "ATMUSIC_LIVE_LEXICON_PREFIX": PREFIX,
+                  "ATMUSIC_LIVE_WORKER_VERSION_ID": VERSION, "ATMUSIC_LIVE_BUNDLE_SHA256": BUNDLE,
+                  "ATMUSIC_LIVE_COMMIT": COMMIT, "ATMUSIC_LIVE_DID_A": DID_A, "ATMUSIC_LIVE_PDS_A": PDS_A,
+                  "ATMUSIC_LIVE_DID_B": DID_B, "ATMUSIC_LIVE_PDS_B": PDS_B,
+                  "ATMUSIC_LIVE_PDS_INDEPENDENCE_REF": "operator attestation ticket OPS-1",
+                  "ATMUSIC_LIVE_JETSTREAM_COVERAGE_REF": "jetstream coverage log OPS-2"}
 
 
 def fake_fetches(result):
@@ -324,7 +405,7 @@ class LiveEvidenceTests(unittest.TestCase):
                "ATMUSIC_LIVE_COMMIT": COMMIT, "ATMUSIC_LIVE_DID_A": DID_A, "ATMUSIC_LIVE_PDS_A": PDS_A,
                "ATMUSIC_LIVE_DID_B": DID_B, "ATMUSIC_LIVE_PDS_B": PDS_B,
                "ATMUSIC_LIVE_PDS_INDEPENDENCE_REF": "operator attestation ticket OPS-1",
-               "ATMUSIC_LIVE_JETSTREAM_COVERAGE_REF": "jetstream coverage log OPS-2"}
+               "ATMUSIC_LIVE_JETSTREAM_COVERAGE_REF": "jetstream coverage log OPS-2", **IMPLEMENTATIONS}
         result = run_script("pds_compat_check", **env)
         self.assertEqual(result.returncode, 1, result.stderr)
         attempts = [line for line in result.stderr.splitlines() if line.startswith("NETWORK-ATTEMPT")]
@@ -482,6 +563,157 @@ class LiveEvidenceTests(unittest.TestCase):
             verdict = evaluate(manifest, BUNDLE, VERSION)
             self.assertEqual((verdict.status, verdict.gates["socketSoak"]), ("blocked", "blocked"), (key, value))
             self.assertIn(expected, verdict.problems)
+
+    def test_gate_document_with_fixture_prefix_or_local_origin_never_passes(self):
+        """--gate checks a document's own prefix and origin: the fixture prefix or a local origin is BLOCKED."""
+        for name in ("pdsCompat", "socketSoak", "ssrfProbe", "ingest", "oauth"):
+            with self.subTest(gate=name):
+                control = run_gate_file(passing_inventory()["gates"][name])
+                self.assertEqual(control.returncode, 0, control.stdout)
+                self.assertTrue(control.stdout.startswith("PASS:"), control.stdout)
+                entry = passing_inventory()["gates"][name]
+                entry.update(lexiconPrefix="com.example.atmusic", origin="http://127.0.0.1:8787")
+                result = run_gate_file(entry)
+                self.assertEqual(result.returncode, 2, result.stdout)
+                self.assertTrue(result.stdout.startswith("BLOCKED:"), result.stdout)
+                self.assertIn(f"gates.{name}.lexiconPrefix (owned production namespace, never the fixture prefix)",
+                              result.stdout)
+                self.assertIn(f"gates.{name}.origin (deployed public HTTPS origin)", result.stdout)
+                status, issues = gate_status(name, entry, passing_inventory()["release"], {})
+                self.assertEqual(status, "blocked")
+        # Each field on its own blocks, and so do other local or reserved origins.
+        for key, value, expected in (
+                ("lexiconPrefix", "com.example.atmusic", "lexiconPrefix (owned production namespace"),
+                ("lexiconPrefix", "org.example.music", "lexiconPrefix (owned production namespace"),
+                ("lexiconPrefix", None, "lexiconPrefix (owned production namespace"),
+                ("origin", "http://127.0.0.1:8787", "origin (deployed public HTTPS origin)"),
+                ("origin", "https://localhost:8787", "origin (deployed public HTTPS origin)"),
+                ("origin", "http://music.214510.xyz", "origin (deployed public HTTPS origin)"),
+                ("origin", "https://music.example.com", "origin (deployed public HTTPS origin)")):
+            entry = passing_inventory()["gates"]["socketSoak"]
+            entry[key] = value
+            status, issues = gate_status("socketSoak", entry, passing_inventory()["release"], {})
+            self.assertEqual(status, "blocked", (key, value))
+            self.assertIn(f"gates.socketSoak.{expected}", "\n".join(issues), (key, value))
+        # A failure recorded against the fixture deployment is not a FAIL of the release either.
+        entry = passing_inventory()["gates"]["socketSoak"]
+        entry.update(result="failed", failures=["socket dropped"], lexiconPrefix="com.example.atmusic",
+                     origin="http://127.0.0.1:8787")
+        self.assertEqual(gate_status("socketSoak", entry, passing_inventory()["release"], {})[0], "blocked")
+        self.assertEqual(run_gate_file(entry).returncode, 2)
+
+    def test_pds_implementation_and_version_must_be_reported(self):
+        """'unreported' (or any placeholder) PDS implementation or version never passes; the gates require both."""
+        for name in ("oauth", "ingest", "pdsCompat"):
+            for key in ("implementation", "version"):
+                for value in ("unreported", "Unknown", " ", None):
+                    manifest = passing_inventory()
+                    manifest["gates"][name]["pds"][1][key] = value
+                    verdict = evaluate(manifest, BUNDLE, VERSION)
+                    self.assertEqual((verdict.status, verdict.gates[name]), ("blocked", "blocked"), (name, key, value))
+                    self.assertIn(f"gates.{name}.pds (endpoint, implementation and version for both PDSs; "
+                                  "'unreported' is not a value)", verdict.problems)
+                    self.assertEqual({g for g, s in verdict.gates.items() if s != "passed"}, {name})
+        # The PDS gates require the implementation names: without them, blocked and offline.
+        result = run_script("pds_compat_check", **PDS_COMPAT_ENV)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertNotIn("NETWORK-ATTEMPT", result.stderr)
+        document = json.loads(result.stdout)
+        self.assertEqual(document["result"], "blocked")
+        self.assertEqual([m.split(":")[0] for m in document["missing"]], list(IMPLEMENTATIONS))
+        result = run_script("pds_compat_check", **PDS_COMPAT_ENV, ATMUSIC_LIVE_PDS_A_IMPLEMENTATION="unreported",
+                            ATMUSIC_LIVE_PDS_B_IMPLEMENTATION="independent-pds")
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertNotIn("NETWORK-ATTEMPT", result.stderr)
+        self.assertEqual(json.loads(result.stdout)["missing"], [
+            "ATMUSIC_LIVE_PDS_A_IMPLEMENTATION: invalid — a placeholder, not an implementation name"])
+        # A PDS whose /xrpc/_health reports no version fails the gate rather than recording 'unreported'.
+        env = script_env(**PDS_COMPAT_ENV, **IMPLEMENTATIONS)
+        env["NODE_OPTIONS"] = f"--import={HEALTH_RUNTIME_PATH.as_uri()}"
+        result = subprocess.run(["npx", "tsx", "scripts/live/pds_compat_check.ts"], cwd=ROOT, text=True,
+                                capture_output=True, env=env, timeout=120)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(fake_fetches(result), [["GET", f"{ORIGIN}/api/v1/meta"], ["GET", f"{PDS_A}/xrpc/_health"]])
+        document = json.loads(result.stdout)
+        self.assertEqual(document["result"], "failed")
+        self.assertEqual(document["failures"],
+                         [f"{PDS_A}: /xrpc/_health (HTTP 200) reports no version, PDS version unknown"])
+        self.assertNotIn("unreported", result.stdout)
+        self.assertEqual(gate_status("pdsCompat", document, passing_inventory()["release"],
+                                     passing_inventory()["prerequisites"])[0], "failed")
+
+    def test_delete_reconcile_absence_method_matches_pds_compat(self):
+        """Absence is an exclusion proof or a verified snapshot, matching the PDS's measured support."""
+        verdict = evaluate(passing_inventory(), BUNDLE, VERSION)
+        self.assertEqual(verdict.status, "passed", verdict.problems)
+        cases = []
+        manifest = passing_inventory()
+        del manifest["gates"]["ingest"]["results"]["deleteReconcile"][1]["method"]
+        cases.append((manifest, "ingest", f"gates.ingest.results.deleteReconcile ({URI_B}: method, exclusionProof "
+                                          "or snapshot)"))
+        manifest = passing_inventory()
+        for item, method in zip(manifest["gates"]["ingest"]["results"]["deleteReconcile"],
+                                ("snapshot", "exclusionProof")):
+            item["method"] = method
+        cases.append((manifest, "ingest", f"gates.ingest.results.deleteReconcile ({URI_B}: method 'exclusionProof', "
+                                          "but pdsCompat for pds-beta.operator-two.org requires 'snapshot')"))
+        cases.append((manifest, "ingest", f"gates.ingest.results.deleteReconcile ({URI_A}: method 'snapshot', "
+                                          "but pdsCompat for pds-alpha.operator-one.net requires 'exclusionProof')"))
+        manifest = passing_inventory()
+        manifest["gates"]["ingest"]["results"]["deleteReconcile"][0]["verifiedRev"] = REV
+        cases.append((manifest, "ingest", f"gates.ingest.results.deleteReconcile ({URI_A}: absence verified at a "
+                                          "head no newer than the one that proved it present)"))
+        manifest = passing_inventory()
+        manifest["gates"]["pdsCompat"]["results"]["perPds"][1]["snapshotAbsence"] = False
+        cases.append((manifest, "pdsCompat", f"gates.pdsCompat.results.perPds ({PDS_B}: neither an exclusion proof "
+                                             "nor a verified snapshot absence)"))
+        for manifest, name, expected in cases:
+            with self.subTest(expected=expected):
+                verdict = evaluate(manifest, BUNDLE, VERSION)
+                self.assertEqual(verdict.status, "blocked")
+                self.assertIn(expected, verdict.problems)
+                self.assertEqual({g for g, s in verdict.gates.items() if s != "passed"}, {name})
+                result = run_cli(manifest, "--bundle-sha256", BUNDLE)
+                self.assertEqual(result.returncode, 2, result.stdout)
+                self.assertIn(expected, result.stdout)
+        entry = passing_inventory()["gates"]["ingest"]
+        del entry["results"]["deleteReconcile"][0]["method"]
+        self.assertEqual(run_gate_file(entry).returncode, 2)
+
+        # The production verifier behind the ingest gate, over the fixture network.
+        exclusion = run_absence_case("exclusion")
+        self.assertEqual(exclusion.returncode, 0, exclusion.stderr)
+        out = json.loads(exclusion.stdout)
+        self.assertEqual(out["presentState"], "present")
+        self.assertEqual(out["absence"]["method"], "exclusionProof")
+        self.assertEqual(out["absence"]["rev"], out["deleteRev"])
+        self.assertGreater(out["absence"]["rev"], out["presentRev"])
+        self.assertEqual(out["calls"], ["com.atproto.sync.getRecord 200"])
+        # A PDS that answers RecordNotFound instead of an exclusion proof: a verified getRepo snapshot.
+        snapshot = run_absence_case("snapshot")
+        self.assertEqual(snapshot.returncode, 0, snapshot.stderr)
+        out = json.loads(snapshot.stdout)
+        self.assertEqual((out["absence"]["method"], out["absence"]["exclusionProofUnavailable"]),
+                         ("snapshot", "RecordNotFound"))
+        self.assertEqual(out["absence"]["rev"], out["deleteRev"])
+        self.assertEqual(out["absence"]["keysEnumerated"], 0)
+        self.assertEqual(out["calls"], ["com.atproto.sync.getRecord 400", "com.atproto.sync.getRepo 200"])
+        # The snapshot still holding the key is never absence.
+        holds = json.loads(run_absence_case("snapshotStillHolds").stdout)
+        self.assertNotIn("absence", holds)
+        self.assertEqual(holds["error"]["name"], "GateFailure")
+        self.assertIn(f"the verified snapshot at rev {holds['presentRev']} still holds it", holds["error"]["message"])
+        self.assertEqual(holds["calls"], ["com.atproto.sync.getRecord 400", "com.atproto.sync.getRepo 200"])
+        # A stale head from before the write lacks the key too; it is refused.
+        stale = json.loads(run_absence_case("stale").stdout)
+        self.assertNotIn("absence", stale)
+        self.assertIn(f"not after rev {stale['presentRev']} where it was present", stale["error"]["message"])
+        # A server error is a failure, not a reason to fall back to a snapshot.
+        error = json.loads(run_absence_case("serverError").stdout)
+        self.assertNotIn("absence", error)
+        self.assertEqual((error["error"]["name"], error["error"]["code"]), ("SafeFetchError", "http_status"))
+        self.assertNotIn("com.atproto.sync.getRepo 200", error["calls"])
+        self.assertTrue(error["calls"] and all(c == "com.atproto.sync.getRecord 500" for c in error["calls"]))
 
     def test_live_gate_scripts_without_env_exit_blocked_and_list_missing_names(self):
         """npx tsx scripts/live/pds_compat_check.ts (no env) › exits nonzero with blocked and lists missing names"""

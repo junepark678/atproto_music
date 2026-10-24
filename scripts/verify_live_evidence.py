@@ -34,6 +34,13 @@ recordedAt, testCommand, workerVersionId, bundleSha256, commit, origin,
 lexiconPrefix, pds [{endpoint, implementation, version}], subjects [{did,
 uri}], results, cleanup, and `missing` (blocked) or `failures` (failed).
 
+Every passed or failed gate document must name an owned prefix (never the
+fixture prefix) and a public HTTPS origin of its own, with or without
+prerequisites. PDS implementation and version must be reported (no
+placeholder such as 'unreported'). Each ingest deleteReconcile entry names its
+absence method (exclusionProof or snapshot, F4); in an inventory the method
+must match pdsCompat's getRecordExclusion result for that identity's PDS.
+
 `--gate FILE` classifies one gate document on its own. The verifier checks
 recorded fields and their consistency only; it cannot establish that cited
 external evidence is authentic.
@@ -67,6 +74,9 @@ CID_RE = re.compile(r"b[a-z2-7]{20,}")
 PREFIX_RE = re.compile(r"[a-z][a-z0-9-]*(?:\.[a-z][a-z0-9-]*){1,}")
 FIXTURE_DIDS = {f"did:plc:{letter * 24}" for letter in "abcde"}
 FIXTURE_PREFIX = "com.example.atmusic"
+# Values that say "not known" instead of naming a PDS implementation or version.
+PLACEHOLDERS = {"unreported", "unknown", "none", "null", "undefined", "n/a", "na", "tbd", "todo", "?", "-"}
+ABSENCE_METHODS = ("exclusionProof", "snapshot")
 
 
 class Verdict(NamedTuple):
@@ -131,6 +141,11 @@ def _timestamp(value):
 
 def _nonempty(value):
     return isinstance(value, str) and value.strip() != ""
+
+
+def _reported(value):
+    """A non-empty string that is not a placeholder such as 'unreported'."""
+    return _nonempty(value) and value.strip().lower() not in PLACEHOLDERS
 
 
 def _int(value, minimum=0):
@@ -212,8 +227,8 @@ def _pds_problems(where, entry, prereq):
     pds = entry.get("pds")
     if not isinstance(pds, list) or len(pds) < 2 or not all(
             isinstance(p, dict) and secure_url(p.get("endpoint"), {"https"}, origin=True)
-            and _nonempty(p.get("implementation")) and _nonempty(p.get("version")) for p in pds):
-        return [f"{where}.pds (endpoint, implementation and version for both PDSs)"]
+            and _reported(p.get("implementation")) and _reported(p.get("version")) for p in pds):
+        return [f"{where}.pds (endpoint, implementation and version for both PDSs; 'unreported' is not a value)"]
     if len({_host(p["endpoint"]) for p in pds}) < 2:
         return [f"{where}.pds (both PDSs on one host)"]
     expected = {_host(i.get("pds")) for i in prereq.get("identities", []) if isinstance(i, dict)}
@@ -317,15 +332,22 @@ def _results_problems(name, entry, prefix, prereq):
             if item and prefix and (not match or not match.group(1).startswith(prefix + ".")):
                 problems.append(f"{where}.{key}.uri (outside the owned namespace)")
         deletes = results.get("deleteReconcile")
+        present_revs = {item.get("uri"): item.get("verifiedRev") for item in (local, external)}
         if not isinstance(deletes, list) or len(deletes) < 2:
             problems.append(f"{where}.deleteReconcile (both records deleted and reconciled)")
         else:
             for item in deletes:
                 if not isinstance(item, dict) or item.get("absentVerified") is not True:
                     problems.append(f"{where}.deleteReconcile (absence not independently verified)")
+                elif item.get("method") not in ABSENCE_METHODS:
+                    problems.append(f"{where}.deleteReconcile ({item.get('uri')}: method, exclusionProof or snapshot)")
                 elif not isinstance(item.get("verifiedRev"), str) or not TID_RE.fullmatch(item["verifiedRev"]) \
                         or not _int(item.get("lagMs")):
                     problems.append(f"{where}.deleteReconcile ({item.get('uri')}: verifiedRev and lagMs)")
+                elif isinstance(present_revs.get(item.get("uri")), str) \
+                        and item["verifiedRev"] <= present_revs[item["uri"]]:
+                    problems.append(f"{where}.deleteReconcile ({item['uri']}: absence verified at a head no newer "
+                                    "than the one that proved it present)")
             if sorted(str(d.get("uri")) for d in deletes if isinstance(d, dict)) != sorted(str(u) for u in published):
                 problems.append(f"{where}.deleteReconcile (does not cover the published records)")
     elif name == "pdsCompat":
@@ -338,6 +360,9 @@ def _results_problems(name, entry, prefix, prereq):
                 problems.append(f"{where}.perPds (four capability results)")
             elif item["getRecordInclusion"] is not True or item["getRepoStatus"] is not True:
                 problems.append(f"{where}.perPds ({item.get('endpoint')}: mandatory getRecord/getRepoStatus missing)")
+            elif item["getRecordExclusion"] is not True and item.get("snapshotAbsence") is not True:
+                problems.append(f"{where}.perPds ({item.get('endpoint')}: neither an exclusion proof nor a verified "
+                                "snapshot absence)")
         hosts = sorted(_host(item.get("endpoint")) for item in per_pds if isinstance(item, dict))
         if identities is not None:
             if hosts != sorted(host for _, host in identities):
@@ -398,6 +423,12 @@ def gate_status(name, entry, release, prereq):
         if not isinstance(missing, list) or not missing or not all(_nonempty(m) for m in missing):
             return "blocked", problems + [f"{where}.missing (a blocked result lists its missing prerequisites)"]
         return "blocked", problems + [f"{where}: blocked — {m}" for m in missing]
+    # The document's own deployment, whatever the prerequisites say: never the fixture prefix or a
+    # local/reserved origin (a single document classified with --gate has no prerequisites).
+    if not owned_prefix(entry.get("lexiconPrefix")):
+        problems.append(f"{where}.lexiconPrefix (owned production namespace, never the fixture prefix)")
+    if not secure_url(entry.get("origin"), {"https"}, origin=True):
+        problems.append(f"{where}.origin (deployed public HTTPS origin)")
     if isinstance(prereq, dict) and prereq:
         if _origin(entry.get("origin")) != _origin(prereq.get("publicHttpsOrigin")):
             problems.append(f"{where}.origin (not the prerequisite origin)")
@@ -424,6 +455,34 @@ def gate_status(name, entry, release, prereq):
         problems += _subject_problems(where, entry, prereq, need_uri=name == "ingest", prefix=prefix)
     problems += _results_problems(name, entry, prefix, prereq)
     return ("blocked", problems) if problems else ("passed", [])
+
+
+def absence_method_problems(ingest, pds_compat, prereq):
+    """Each delete's absence method must match its PDS's measured exclusion-proof support.
+
+    A PDS whose pdsCompat result has getRecordExclusion true reconciles with an exclusion proof;
+    one without it, with a verified snapshot (F4, ADR 0004 §13.8).
+    """
+    identities = _identities(prereq)
+    if identities is None:
+        return []
+    host_of = dict(identities)
+    per_pds = (pds_compat.get("results") or {}).get("perPds") or []
+    exclusion = {_host(item.get("endpoint")): item.get("getRecordExclusion") is True
+                 for item in per_pds if isinstance(item, dict)}
+    problems = []
+    for item in (ingest.get("results") or {}).get("deleteReconcile") or []:
+        if not isinstance(item, dict):
+            continue
+        host = host_of.get(_record_did(item.get("uri")))
+        if host not in exclusion:
+            problems.append(f"gates.ingest.results.deleteReconcile ({item.get('uri')}: no pdsCompat result for its PDS)")
+            continue
+        expected = "exclusionProof" if exclusion[host] else "snapshot"
+        if item.get("method") != expected:
+            problems.append(f"gates.ingest.results.deleteReconcile ({item.get('uri')}: method "
+                            f"{item.get('method')!r}, but pdsCompat for {host} requires {expected!r})")
+    return problems
 
 
 def evaluate(manifest, bundle_sha256=None, worker_version_id=None):
@@ -459,6 +518,12 @@ def evaluate(manifest, bundle_sha256=None, worker_version_id=None):
                                             prereq if isinstance(prereq, dict) else {})
         statuses[name] = status
         problems += gate_problems
+    if statuses.get("ingest") == "passed" and statuses.get("pdsCompat") == "passed":
+        mismatch = absence_method_problems(gates["ingest"], gates["pdsCompat"],
+                                           prereq if isinstance(prereq, dict) else {})
+        if mismatch:
+            statuses["ingest"] = "blocked"
+            problems += mismatch
     for name in sorted(set(gates) - set(REQUIRED_GATES)):
         problems.append(f"gates.{name} (unknown gate)")
     if binding:
