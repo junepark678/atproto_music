@@ -73,10 +73,14 @@ export interface Statement {
   params: SqlParam[];
 }
 
-/** `w`: the visible rows of the DID inside the window. */
-function windowCte(bounds: StatsBounds): string {
+/**
+ * `w`: the visible rows of the DID inside the window. `materialized` makes
+ * SQLite evaluate it once (through the `(did, listened_at)` range) into a
+ * temporary table; see the totals statement.
+ */
+function windowCte(bounds: StatsBounds, o: { materialized?: boolean } = {}): string {
   const lower = bounds.lower === null ? '' : ' AND s.listened_at >= ?';
-  return `w AS (SELECT s.uri, s.listened_at, s.artist_key, s.track_key, s.album_key FROM ${visibleScrobblesFrom('s', 'u')}
+  return `w AS ${o.materialized === true ? 'MATERIALIZED ' : ''}(SELECT s.uri, s.listened_at, s.artist_key, s.track_key, s.album_key FROM ${visibleScrobblesFrom('s', 'u')}
     WHERE s.did = ? AND s.listened_at <= ?${lower})`;
 }
 
@@ -89,9 +93,18 @@ export function statsStatements(did: string, bounds: StatsBounds, limit: number)
   checkStatsLimit(limit);
   const w = windowCte(bounds);
   const p = windowParams(did, bounds);
+  // The totals statement reads `w` three times. Inlined, SQLite answers the
+  // DISTINCT/GROUP BY subqueries from the covering scrobbles_stats index,
+  // which is searched by DID only: a windowed request then read every row of
+  // the DID twice, not just the window (W6-02 benchmark: 20,965 rows read for
+  // a 959-row 7d window of a 10,000-row user). Materialized, the window is
+  // read once through scrobbles_owner_time's (did, listened_at) range, so the
+  // rows read stay proportional to the window. `all` has no lower bound, so
+  // the inlined form already reads exactly the DID's rows and stays inlined.
+  const totalsW = bounds.lower === null ? w : windowCte(bounds, { materialized: true });
   return {
     totals: {
-      sql: `WITH ${w}
+      sql: `WITH ${totalsW}
         SELECT (SELECT count(*) FROM w) AS listens,
                (SELECT count(DISTINCT artist_key) FROM w) AS artists,
                (SELECT count(*) FROM (SELECT 1 FROM w GROUP BY artist_key, track_key)) AS tracks`,
