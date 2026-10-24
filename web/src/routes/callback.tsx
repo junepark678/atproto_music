@@ -49,7 +49,9 @@ export default function Callback({ controller }: CallbackProps) {
       (result: InitResult) => {
         if (!live) return;
         if (result.kind === 'signed-in' || result.kind === 'restored') {
-          setSession(state, ctl.current());
+          // main.tsx's connect() may already have recorded this session (and a handle).
+          const pds = ctl.current();
+          if (state.session.value !== pds) setSession(state, pds);
           routeRef.current(AFTER_SIGN_IN, true);
         } else if (result.kind === 'reauth-required') {
           setSession(state, null);

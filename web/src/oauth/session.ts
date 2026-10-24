@@ -26,8 +26,11 @@
 // rejects after refresh, an expired stored session) moves the state to
 // `reauth-required`; any `PdsSession` handed out earlier then refuses to send.
 //
-// This module does not know `AppState`; main.tsx and the routes record
-// `current()` with `setSession` (web/src/state/store.ts).
+// `connect(state)` binds the session to an `AppState` (web/src/state/store.ts):
+// it runs `init()` and keeps `state.session` and `state.reauthRequired` equal
+// to the session status from then on, so a restore that needs re-auth and a
+// refresh that fails mid-session both show the shell's "Your session has
+// ended" banner and the anonymous navigation. main.tsx boots through it.
 
 import type { Did } from '@atmusic/core/api-types';
 import { type Clock, systemClock } from '@atmusic/core/deps';
@@ -41,6 +44,7 @@ import {
   TokenRevokedError,
 } from '@atproto/oauth-client-browser';
 import { type ApiClient, createApiClient, isApiFailure } from '../api/client';
+import { type AppState, setSession } from '../state/store';
 import {
   createOAuthClient,
   LIBRARY_DATABASE,
@@ -281,6 +285,37 @@ export async function clearIndexedDb(idb: IDBFactory): Promise<string[]> {
 // Controller
 // ---------------------------------------------------------------------------
 
+/** Placeholder origin a `PdsSession` path is resolved against to prove it stays on the PDS. */
+const PATH_CHECK_BASE = 'https://pds.invalid';
+
+/**
+ * Validates a `PdsSession.fetchHandler` path and returns its canonical form
+ * (pathname and query). The library resolves the path with
+ * `new URL(path, tokenSet.aud)`, so anything that URL parsing would turn into
+ * another host (a full URL, `//host`, and the WHATWG equivalents `/\host`
+ * and `/<tab>/host`, since backslash counts as a slash and tab, CR and LF are
+ * stripped) would send the DPoP-bound token and proof there. Refused: any
+ * backslash, ASCII control character or space, and any path that does not
+ * resolve to the placeholder origin. The canonical form is what is sent, so
+ * the library receives exactly the path that was checked.
+ */
+export function pdsPath(path: string): string {
+  const refuse = (): never => {
+    throw new TypeError('PdsSession.fetchHandler takes a path on the PDS such as /xrpc/…, never a URL');
+  };
+  if (typeof path !== 'string' || !path.startsWith('/') || path.startsWith('//')) refuse();
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: control characters are what is refused.
+  if (/[\\\u0000-\u0020\u007f]/.test(path)) refuse();
+  let url: URL;
+  try {
+    url = new URL(path, PATH_CHECK_BASE);
+  } catch {
+    return refuse();
+  }
+  if (url.origin !== PATH_CHECK_BASE || url.username !== '' || url.password !== '') refuse();
+  return `${url.pathname}${url.search}`;
+}
+
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_, reject) => {
@@ -507,17 +542,13 @@ export class SessionController {
     const pds: PdsSession = {
       did,
       fetchHandler: async (path: string, init?: RequestInit): Promise<Response> => {
-        // A full URL would make the library send the DPoP-bound token to that
-        // host instead of the user's PDS.
-        if (!path.startsWith('/') || path.startsWith('//')) {
-          throw new TypeError('PdsSession.fetchHandler takes a path on the PDS such as /xrpc/…, never a URL');
-        }
+        const target = pdsPath(path);
         if (this.#session !== session) {
           const status = this.#status;
           throw new ReauthRequiredError(did, status.state === 'reauth-required' ? status.reason : 'signed_out');
         }
         try {
-          return await session.fetchHandler(path, init);
+          return await session.fetchHandler(target, init);
         } catch (error) {
           if (this.#handleEnded(did, error)) {
             const status = this.#status;
@@ -636,6 +667,38 @@ function defaultStorage(): Pick<Storage, 'getItem' | 'setItem' | 'removeItem'> |
 
 export function createSession(deps: SessionDeps = {}): SessionController {
   return new SessionController(deps);
+}
+
+/**
+ * Binds `controller` (the page's session by default) to `state` for the
+ * page's lifetime and runs `init()`. main.tsx boots through it.
+ *
+ * - signed-in: `state.session` is the adapted session (recorded once per
+ *   session, so a verified handle set later is kept), `reauthRequired` false;
+ * - reauth-required: no session, `reauthRequired` true (the shell's banner);
+ * - anonymous (signed out here or in another tab): no session, no banner.
+ *
+ * The state is applied after `init()` settles, whatever its outcome, and on
+ * every later status change (a refresh that fails while the outbox writes, a
+ * sign-out). A rejected callback is rethrown after the state is applied.
+ */
+export async function connect(state: AppState, controller: SessionController = session()): Promise<InitResult> {
+  const apply = (status: SessionStatus): void => {
+    if (status.state === 'signed-in') {
+      const pds = controller.current();
+      if (state.session.value !== pds) setSession(state, pds);
+      state.reauthRequired.value = false;
+      return;
+    }
+    if (state.session.value !== null || state.handle.value !== null) setSession(state, null);
+    state.reauthRequired.value = status.state === 'reauth-required';
+  };
+  controller.subscribe(apply);
+  try {
+    return await controller.init();
+  } finally {
+    apply(controller.status());
+  }
 }
 
 // ---------------------------------------------------------------------------

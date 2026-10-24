@@ -21,8 +21,10 @@ import { h, render } from 'preact';
 import { LocationProvider } from 'preact-iso';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiClient, type FetchLike } from '../../src/api/client';
+import { App } from '../../src/app';
 import { LIBRARY_DATABASE, LIBRARY_SUB_KEY } from '../../src/oauth/client';
 import {
+  connect,
   createSession,
   PUBLIC_CLIENT_MAX_SESSION_MS,
   ReauthRequiredError,
@@ -429,7 +431,7 @@ function fakeAppView() {
     }
   };
   const count = (method: string, path: string) => requests.filter((r) => r.method === method && r.path === path).length;
-  return { api: new ApiClient({ baseUrl: ORIGIN, fetch }), requests, config, count };
+  return { api: new ApiClient({ baseUrl: ORIGIN, fetch }), fetch, requests, config, count };
 }
 
 class MemoryStorage {
@@ -499,12 +501,26 @@ function setUrl(url: string): void {
 
 const allLibraryStores = (n: number) => Object.fromEntries(lib.STORES.map((s) => [s, n]));
 
+/** The shell's observable session UI: primary navigation labels, identity line and re-auth banner. */
+function shellView(root: ParentNode) {
+  const header = root.querySelector('header');
+  return {
+    nav: Array.from(header?.querySelectorAll('nav a') ?? []).map((a) => a.textContent),
+    identity: header?.querySelector('.session-identity code.did')?.textContent ?? null,
+    banner: header?.querySelector('[role="alert"]')?.textContent ?? null,
+  };
+}
+
+const BANNER = 'Your session has ended. Sign in again to keep publishing.';
+const ANONYMOUS_NAV = ['Feed', 'Sign in'];
+const SIGNED_IN_NAV = ['Feed', 'My profile', 'Add scrobble', 'Settings'];
+
 let idb: IDBFactory;
-let storage: MemoryStorage;
+let storage: Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
 let clock: ReturnType<typeof fixedClock>;
 let appView: ReturnType<typeof fakeAppView>;
 
-function newController(origin = ORIGIN) {
+function newController(origin = ORIGIN): ReturnType<typeof createSession> {
   return createSession({ api: appView.api, origin, clock, storage, indexedDB: idb });
 }
 
@@ -626,10 +642,32 @@ describe('web/test/oauth/session.test.ts', () => {
     expect(lib.world.pdsRequests).toEqual([
       { url: `${lib.PDS_ORIGIN}/xrpc/com.atproto.repo.createRecord`, authorization: 'DPoP at-1' },
     ]);
-    // A full URL would send the token elsewhere: refused before the library is called.
-    await expect(pds?.fetchHandler('https://evil.example.net/xrpc/x')).rejects.toBeInstanceOf(TypeError);
-    await expect(pds?.fetchHandler('//evil.example.net/xrpc/x')).rejects.toBeInstanceOf(TypeError);
+    // Anything URL parsing would resolve to another host sends the token
+    // elsewhere: a full URL, `//host`, and the WHATWG equivalents (backslash is
+    // a slash; tab, CR and LF are stripped). Refused before the library is called.
+    const escaping = [
+      'https://evil.example.net/xrpc/x',
+      '//evil.example.net/xrpc/x',
+      '/\\evil.example.net/xrpc/x',
+      '/\\/evil.example.net/xrpc/x',
+      '\\\\evil.example.net/xrpc/x',
+      '/\t/evil.example.net/xrpc/x',
+      '/\n/evil.example.net/xrpc/x',
+      '/\r/evil.example.net/xrpc/x',
+      ' //evil.example.net/xrpc/x',
+    ];
+    // Each of these really does leave the PDS when resolved the library's way.
+    expect(escaping.map((p) => new URL(p, lib.PDS_ORIGIN).host)).toEqual(escaping.map(() => 'evil.example.net'));
+    for (const hostile of [...escaping, 'xrpc/x', '/xrpc/a b', '/xrpc/\u0000x']) {
+      await expect(pds?.fetchHandler(hostile), JSON.stringify(hostile)).rejects.toBeInstanceOf(TypeError);
+    }
     expect(lib.world.pdsRequests).toHaveLength(1);
+    // A path with a query reaches the PDS unchanged.
+    await pds?.fetchHandler('/xrpc/com.atproto.repo.getRecord?repo=did%3Aplc%3Ax&rkey=self');
+    expect(lib.world.pdsRequests.at(-1)?.url).toBe(
+      `${lib.PDS_ORIGIN}/xrpc/com.atproto.repo.getRecord?repo=did%3Aplc%3Ax&rkey=self`,
+    );
+    expect(lib.world.pdsRequests).toHaveLength(2);
 
     // init() is memoized: a second call (the callback route) shares the run.
     expect(await controller.init()).toBe(result);
@@ -689,12 +727,30 @@ describe('web/test/oauth/session.test.ts', () => {
   it('expired/refresh-failed session surfaces re-auth state', async () => {
     await signInThroughCallback();
 
-    // 1. Restore of a stored session whose token expired and whose refresh is rejected.
+    // 1. Restore of a stored session whose token expired and whose refresh is
+    // rejected, booted the way main.tsx boots: connect() binds the controller
+    // to the shell's AppState and runs init().
+    setUrl(`${ORIGIN}/feed`);
     clock.advance(lib.TOKEN_LIFETIME_MS + 1);
     lib.world.refreshStatus = 400;
     const restoring = newController();
     const restoreStatuses: SessionStatus[] = [];
     restoring.subscribe((s) => restoreStatuses.push(s));
+    const bootState = createAppState({ api: appView.api });
+    const shellHost = document.createElement('div');
+    render(h(App, { state: bootState, loadMetaOnMount: false }), shellHost);
+    expect(await connect(bootState, restoring)).toEqual({
+      kind: 'reauth-required',
+      did: ALICE,
+      reason: 'refresh_failed',
+    });
+    // The shell shows the banner and the anonymous navigation.
+    expect(bootState.reauthRequired.value).toBe(true);
+    expect(bootState.session.value).toBeNull();
+    await vi.waitFor(() => expect(shellView(shellHost).banner).toBe(BANNER));
+    expect(shellView(shellHost)).toEqual({ nav: ANONYMOUS_NAV, identity: null, banner: BANNER });
+    expect(shellHost.querySelector('header a[href="/signin"]')).not.toBeNull();
+    render(null, shellHost);
     expect(await restoring.init()).toEqual({ kind: 'reauth-required', did: ALICE, reason: 'refresh_failed' });
     expect(restoring.status()).toEqual({ state: 'reauth-required', did: ALICE, reason: 'refresh_failed' });
     expect(restoreStatuses).toEqual([{ state: 'reauth-required', did: ALICE, reason: 'refresh_failed' }]);
@@ -720,7 +776,7 @@ describe('web/test/oauth/session.test.ts', () => {
     expect(state.session.value).toBeNull();
     render(null, host);
 
-    // 2. A live session whose refresh fails when the outbox next writes.
+    // 2. A live session, bound to a mounted shell, whose refresh fails when the outbox next writes.
     lib.world.refreshStatus = 200;
     clock.advance(1000);
     const { controller } = await signInThroughCallback();
@@ -728,6 +784,13 @@ describe('web/test/oauth/session.test.ts', () => {
     expect(pds).not.toBeNull();
     const statuses: SessionStatus[] = [];
     controller.subscribe((s) => statuses.push(s));
+    const live = createAppState({ api: appView.api });
+    render(h(App, { state: live, loadMetaOnMount: false }), shellHost);
+    live.meta.value = META as unknown as NonNullable<typeof live.meta.value>;
+    expect(await connect(live, controller)).toEqual({ kind: 'signed-in', did: ALICE, notified: true });
+    expect(live.session.value).toBe(pds);
+    await vi.waitFor(() => expect(shellView(shellHost).identity).toBe(ALICE));
+    expect(shellView(shellHost)).toEqual({ nav: SIGNED_IN_NAV, identity: ALICE, banner: null });
     clock.advance(lib.TOKEN_LIFETIME_MS + 1);
     lib.world.refreshStatus = 400;
     const pdsBefore = lib.world.pdsRequests.length;
@@ -738,6 +801,12 @@ describe('web/test/oauth/session.test.ts', () => {
     expect(controller.status()).toEqual({ state: 'reauth-required', did: ALICE, reason: 'refresh_failed' });
     expect(statuses).toEqual([{ state: 'reauth-required', did: ALICE, reason: 'refresh_failed' }]);
     expect(controller.current()).toBeNull();
+    // The shell follows: no session, the banner, the anonymous navigation.
+    expect(live.session.value).toBeNull();
+    expect(live.reauthRequired.value).toBe(true);
+    await vi.waitFor(() => expect(shellView(shellHost).banner).toBe(BANNER));
+    expect(shellView(shellHost)).toEqual({ nav: ANONYMOUS_NAV, identity: null, banner: BANNER });
+    render(null, shellHost);
     // The held session keeps refusing, without another refresh attempt.
     const refreshes = lib.world.asRequests.length;
     await expect(pds?.fetchHandler('/xrpc/com.atproto.repo.deleteRecord')).rejects.toBeInstanceOf(ReauthRequiredError);
@@ -821,6 +890,68 @@ describe('session support', () => {
     const result = await pending;
     expect(result.revocation).toBe('failed');
     expect(await storeCounts(idb, LIBRARY_DATABASE)).toEqual(allLibraryStores(0));
+  });
+
+  it('main.tsx boot: an expired stored session shows the re-auth banner; a mid-session refresh failure signs the shell out', async () => {
+    // The real entry point with the page's own session controller: same
+    // origin, globalThis.fetch (the fake AppView), localStorage and indexedDB.
+    setUrl(`${ORIGIN}/feed`);
+    window.localStorage.clear();
+    storage = window.localStorage;
+    lib.world.storage = storage;
+    vi.stubGlobal('indexedDB', idb);
+    vi.stubGlobal('fetch', (input: RequestInfo | URL, init?: RequestInit) =>
+      appView.fetch(new URL(String(input), ORIGIN).href, init ?? {}),
+    );
+    const boot = async () => {
+      vi.resetModules();
+      document.body.innerHTML = '<div id="app"></div>';
+      await import('../../src/main');
+      const root = document.getElementById('app');
+      if (!root) throw new Error('no #app');
+      // The same module instances main.tsx loaded (one registry after the reset).
+      const preact = await import('preact');
+      const mod = await import('../../src/oauth/session');
+      return { root, unmount: () => preact.render(null, root), mod };
+    };
+
+    // 1. A stored session whose token expired and whose refresh is rejected.
+    await signInThroughCallback();
+    clock.advance(lib.TOKEN_LIFETIME_MS + 1);
+    lib.world.refreshStatus = 400;
+    const first = await boot();
+    await vi.waitFor(() => expect(shellView(first.root).banner).toBe(BANNER));
+    expect(shellView(first.root)).toEqual({ nav: ANONYMOUS_NAV, identity: null, banner: BANNER });
+    expect(first.mod.status()).toEqual({ state: 'reauth-required', did: ALICE, reason: 'refresh_failed' });
+    expect(first.mod.current()).toBeNull();
+    expect(lib.world.asRequests.filter((r) => r.endpoint === 'token:refresh')).toEqual([
+      { endpoint: 'token:refresh', status: 400 },
+    ]);
+    expect(storage.getItem(LIBRARY_SUB_KEY)).toBeNull();
+    expect(lib.world.pdsRequests).toHaveLength(0);
+    first.unmount();
+
+    // 2. A fresh sign-in restores signed in; then the refresh fails on a write.
+    lib.world.refreshStatus = 200;
+    await signInThroughCallback();
+    const second = await boot();
+    await vi.waitFor(() => expect(shellView(second.root).identity).toBe(ALICE));
+    await vi.waitFor(() => expect(shellView(second.root).nav).toEqual(SIGNED_IN_NAV));
+    expect(shellView(second.root).banner).toBeNull();
+    expect(appView.count('POST', '/api/v1/notify')).toBe(2); // the two callbacks; boots send none
+    const pds = second.mod.current();
+    expect(pds?.did).toBe(ALICE);
+
+    clock.advance(lib.TOKEN_LIFETIME_MS + 1);
+    lib.world.refreshStatus = 400;
+    const failure = await pds?.fetchHandler('/xrpc/com.atproto.repo.createRecord', { method: 'POST' }).catch((e) => e);
+    expect(failure).toMatchObject({ name: 'ReauthRequiredError', did: ALICE, reason: 'refresh_failed' });
+    expect(lib.world.pdsRequests).toHaveLength(0);
+    await vi.waitFor(() => expect(shellView(second.root).banner).toBe(BANNER));
+    expect(shellView(second.root)).toEqual({ nav: ANONYMOUS_NAV, identity: null, banner: BANNER });
+    expect(second.mod.current()).toBeNull();
+    second.unmount();
+    window.localStorage.clear();
   });
 
   it('the callback route records the session and replaces the entry with /feed; failures show fixed text only', async () => {

@@ -6,6 +6,7 @@
 // `fetchHandler` and `signOut` already have these shapes.
 
 import type { Did } from '@atmusic/core/api-types';
+import type { AppState } from '../state/store';
 
 export interface PdsSession {
   /** The signed-in account's DID; every write goes to this DID's own PDS. */
@@ -24,10 +25,16 @@ export interface PdsSession {
  * The surface web/src/main.tsx uses from web/src/oauth/session.ts (W2-06, per
  * docs/planning/workers-waves.json): `init()` restores a stored session or
  * completes an OAuth callback, then `current()` returns the adapted session
- * (or null). session.ts does not know about `AppState`; main.tsx records the
- * result with `setSession` (web/src/state/store.ts).
+ * (or null), which main.tsx records with `setSession`
+ * (web/src/state/store.ts).
+ *
+ * `connect(state)`, when present, replaces that pair: it runs `init()` and
+ * keeps `state.session` and `state.reauthRequired` in step with the session
+ * from then on (a restore that needs re-auth, a refresh that fails
+ * mid-session, a sign-out), which a one-shot `current()` cannot.
  */
 export interface SessionModule {
   init?: () => Promise<unknown>;
   current?: () => PdsSession | null;
+  connect?: (state: AppState) => Promise<unknown>;
 }
