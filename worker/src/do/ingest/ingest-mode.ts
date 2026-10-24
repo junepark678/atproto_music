@@ -7,7 +7,10 @@
 //   connect time arrives (the live tail) or PULSE_DRAIN_MAX_MS (20 s) pass,
 //   then closes. The watchdog runs every PULSE_INTERVAL_MS (5 min); cron
 //   (W5-01 scheduled.ts) may start one too, and a pulse already in progress is
-//   joined, never doubled. A pulse whose connect fails writes no connection
+//   joined, never doubled. A pulse that drains its full 20 s without any
+//   event, from a recent cursor, moves the resume point to its connect
+//   instant minus 60 s (jetstream-socket.ts "Quiet links", ADR §15 Q11), so a
+//   quiet stream never ages into a gap. A pulse whose connect fails writes no connection
 //   evidence (the last successful pulse start stays the stale reference) and
 //   rotates the host.
 // - `off`: no socket. An open one is closed (marked disconnected); nothing
@@ -94,7 +97,8 @@ async function runPulse(m: ModuleDeps, d: IngestDeps, now: number): Promise<Puls
   const finish = (reason: PulseEnd) => {
     if (endedBy !== null) return;
     endedBy = reason;
-    if (reason !== 'closed') closeSocket(m, m.clock.nowMs());
+    // A full drain without a single event may confirm the quiet link healthy (ADR §15 Q11).
+    if (reason !== 'closed') closeSocket(m, m.clock.nowMs(), { pulseDrained: reason === 'timeout' });
     resolveEnd();
   };
 

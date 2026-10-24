@@ -53,7 +53,8 @@
 //     unchanged instead of clearing it; a definite answer (another DID, no
 //     DID published, an ambiguous TXT) clears it;
 //   - a `#atproto_pds` endpoint different from the known one (`users.pds`, or
-//     before the first sweep the identity_cache entry the drain left) schedules
+//     before the first sweep the identity_cache entry the drain left, while it
+//     is still fresh: inside its TTL and not negative) schedules
 //     a snapshot `reason='pds_migration'` (admission.ts `scheduleSnapshot`), and
 //     `users.pds` records the new endpoint. If the snapshot queue is full, the
 //     old endpoint is kept, so the next sweep detects the change again;
@@ -86,7 +87,7 @@ import {
   statusMeter,
 } from './accounts';
 import { scheduleSnapshot } from './admission';
-import { readIdentityRow, resolveIdentity } from './identity-cache';
+import { cachedIdentity, readIdentityRow, resolveIdentity } from './identity-cache';
 import { hostOf, hostPausedUntil, IDENTITY_RESOLVE_COST, SubrequestMeter } from './pds-budget';
 import { drainState } from './verify-drain';
 
@@ -425,8 +426,11 @@ export async function checkIdentity(
   const db = m.db;
   if (isSuppressed(db, did) || loadUser(db, did) === null) return { outcome: 'unknown' };
   if (!meter.tryReserve(IDENTITY_RESOLVE_COST)) return { outcome: 'budget' };
-  // Read before the fresh resolution rewrites identity_cache.
-  const cachedPds = readIdentityRow(db, did)?.pds ?? null;
+  // Read before the fresh resolution rewrites identity_cache. Only a fresh
+  // entry (inside its 5-minute TTL, not negative) is evidence of where the
+  // account was: an expired one says nothing about the PDS now, so before the
+  // first sweep it must not turn into a migration snapshot.
+  const cachedPds = cachedIdentity(db, did, now)?.pds ?? null;
   const id = await resolveIdentity(m, did, { fresh: true });
 
   if (!id.ok) {

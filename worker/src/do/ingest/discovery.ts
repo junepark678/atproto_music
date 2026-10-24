@@ -42,6 +42,17 @@
 //   the position kept; the next run is due after the larger of
 //   DISCOVERY_RETRY_MS and the relay's Retry-After / RateLimit-Reset (capped at
 //   one day), or the normal day for a daily pass.
+// - a malformed page is a permanent fault of that listing position, not of
+//   the relay's availability: the consecutive malformed answers at one
+//   position are counted in the position row (`failures`), and the
+//   DISCOVERY_MAX_MALFORMED_PAGES-th gives the rest of that collection's
+//   listing up (counter `discovery_abandoned`, label the collection, and a
+//   warning log): the pass goes on with the next collection, or ends. So a
+//   relay that keeps serving one bad page can delay a gap pass by a few retry
+//   intervals but never wedge it (and with it `pending_gap`); what the
+//   abandoned rest of the listing would have named is lost to this pass,
+//   which ADR §9.1 allows (relay discovery is coverage, not completeness).
+//   Transport and HTTP failures are retried without such a bound.
 //
 // Concurrency (ADR F3: no read-check-write across an await): a run reads the
 // position, awaits the relay, then acts on the page. While it awaits, the DO's
@@ -78,12 +89,15 @@ export const DISCOVERY_INTERVAL_MS = 24 * 3_600_000;
 export const DISCOVERY_GAP_CONTINUE_MS = 60_000;
 export const DISCOVERY_RETRY_MS = 3_600_000;
 export const DISCOVERY_MAX_CURSOR_CHARS = 1024;
+/** Consecutive malformed answers at one position after which the rest of that listing is given up. */
+export const DISCOVERY_MAX_MALFORMED_PAGES = 3;
 
 export const DISCOVERY_STATE_COUNTER = 'discovery_state';
 export const DISCOVERY_PAGES_COUNTER = 'discovery_pages';
 export const DISCOVERY_INVALID_COUNTER = 'discovery_invalid';
 export const DISCOVERY_FAILED_COUNTER = 'discovery_failed';
 export const DISCOVERY_PASSES_COUNTER = 'discovery_passes';
+export const DISCOVERY_ABANDONED_COUNTER = 'discovery_abandoned';
 
 export type DiscoveryPass = 'daily' | 'gap';
 
@@ -95,6 +109,8 @@ export interface DiscoveryState {
   cursor: string | null;
   /** Pages read in this pass. */
   pages: number;
+  /** Consecutive malformed answers at this position (absent: none). */
+  failures?: number;
 }
 
 /** The pass in progress, or null. A malformed row reads as no pass. */
@@ -110,7 +126,8 @@ export function readDiscoveryState(db: Db): DiscoveryState | null {
     const collection = v.collection === 0 || v.collection === 1 ? v.collection : null;
     const cursor = v.cursor === null || typeof v.cursor === 'string' ? v.cursor : undefined;
     if (pass === null || collection === null || cursor === undefined) return null;
-    return { pass, collection, cursor, pages: row.value };
+    const failures = Number.isSafeInteger(v.failures) && (v.failures as number) > 0 ? (v.failures as number) : 0;
+    return { pass, collection, cursor, pages: row.value, ...(failures > 0 ? { failures } : {}) };
   } catch {
     return null;
   }
@@ -123,7 +140,12 @@ function writeDiscoveryState(db: Db, s: DiscoveryState | null): void {
     db.run(
       'INSERT INTO counters(name, label, value) VALUES (?, ?, ?)',
       DISCOVERY_STATE_COUNTER,
-      JSON.stringify({ pass: s.pass, collection: s.collection, cursor: s.cursor }),
+      JSON.stringify({
+        pass: s.pass,
+        collection: s.collection,
+        cursor: s.cursor,
+        ...(s.failures !== undefined && s.failures > 0 ? { failures: s.failures } : {}),
+      }),
       s.pages,
     );
   });
@@ -170,6 +192,8 @@ export interface DiscoveryReport {
   invalid: number;
   stop: DiscoveryStop;
   detail?: string;
+  /** Collections whose remaining listing this run gave up after repeated malformed pages. */
+  abandoned?: string[];
   /** The `discovery` timer's next due time. */
   nextDueAt: number;
 }
@@ -282,14 +306,58 @@ export async function discover(m: ModuleDeps, now: number, o: DiscoveryOptions =
       break;
     }
     report.pages++;
+    const collection = names[state.collection];
+    const fetched = state;
+    let next: DiscoveryState | null;
     if (page === null) {
-      db.tx(() => {
-        incrementCounter(db, DISCOVERY_PAGES_COUNTER, names[state.collection]);
-        incrementCounter(db, DISCOVERY_FAILED_COUNTER, 'malformed_page');
+      const failures = (state.failures ?? 0) + 1;
+      if (failures < DISCOVERY_MAX_MALFORMED_PAGES) {
+        // Retried at the same position, with the count of this run's failure kept.
+        const kept = db.tx((): boolean => {
+          if (!samePosition(db, fetched, stored)) return false;
+          writeDiscoveryState(db, { ...fetched, failures });
+          incrementCounter(db, DISCOVERY_PAGES_COUNTER, collection);
+          incrementCounter(db, DISCOVERY_FAILED_COUNTER, 'malformed_page');
+          return true;
+        });
+        if (!kept) {
+          report.stop = 'superseded';
+          break;
+        }
+        state = { ...fetched, failures };
+        report.stop = 'relay_error';
+        report.detail = 'malformed_page';
+        break;
+      }
+      // Permanently malformed: give the rest of this listing up (see the header).
+      m.log.log('warn', 'discovery.listing_abandoned', {
+        pass: fetched.pass,
+        collection,
+        failures,
+        error: 'malformed_page',
       });
-      report.stop = 'relay_error';
-      report.detail = 'malformed_page';
-      break;
+      next = state.collection === 0 ? { pass: state.pass, collection: 1, cursor: null, pages: state.pages + 1 } : null;
+      const advanced = db.tx((): boolean => {
+        if (!samePosition(db, fetched, stored)) return false;
+        writeDiscoveryState(db, next);
+        incrementCounter(db, DISCOVERY_PAGES_COUNTER, collection);
+        incrementCounter(db, DISCOVERY_FAILED_COUNTER, 'malformed_page');
+        incrementCounter(db, DISCOVERY_ABANDONED_COUNTER, collection);
+        if (next === null) incrementCounter(db, DISCOVERY_PASSES_COUNTER, fetched.pass);
+        return true;
+      });
+      if (!advanced) {
+        report.stop = 'superseded';
+        break;
+      }
+      report.abandoned = [...(report.abandoned ?? []), collection];
+      if (next === null) {
+        report.stop = 'complete';
+        break;
+      }
+      state = next;
+      stored = true;
+      continue;
     }
 
     for (const did of page.dids) {
@@ -311,15 +379,14 @@ export async function discover(m: ModuleDeps, now: number, o: DiscoveryOptions =
       }
     }
 
-    // The page is done: advance the durable position in one transaction.
-    const next: DiscoveryState | null =
+    // The page is done: advance the durable position in one transaction (a good
+    // page also ends a run of malformed ones).
+    next =
       page.cursor !== null && page.cursor !== state.cursor
-        ? { ...state, cursor: page.cursor, pages: state.pages + 1 }
+        ? { pass: state.pass, collection: state.collection, cursor: page.cursor, pages: state.pages + 1 }
         : state.collection === 0
-          ? { ...state, collection: 1, cursor: null, pages: state.pages + 1 }
+          ? { pass: state.pass, collection: 1, cursor: null, pages: state.pages + 1 }
           : null;
-    const collection = names[state.collection];
-    const fetched = state;
     const advanced = db.tx((): boolean => {
       if (!samePosition(db, fetched, stored)) return false;
       writeDiscoveryState(db, next);

@@ -23,8 +23,10 @@
 // Gap detection on (re)connect (ADR §5.5): no cursor (first start), a cursor
 // older than JETSTREAM_LOOKBACK_HOURS (its event time, or an upper bound of it
 // after a quiet connection; see `cursorTimeUs`), or a cursor Jetstream
-// rejects. A gap sets `pending_gap=1`, moves the stored resume point to the
-// live tail (so the same gap is not re-detected on every reconnect) and calls
+// rejects. A quiet but healthy link moves the resume point forward before it
+// closes (`noteHealthyResume`, ADR §15 Q11), so silence alone never ages the
+// cursor into a gap. A gap sets `pending_gap=1`, moves the stored resume point
+// to the live tail (so the same gap is not re-detected on every reconnect) and calls
 // the gap-recovery scheduler, then the stream resumes from the live tail. The scheduler is W4-01's `scheduleGapRecovery`
 // (worker/src/do/ingest/snapshot-job.ts). W4-01 is not merged into this
 // package's base, so it is injected through the `ScheduleGapRecovery`
@@ -206,6 +208,99 @@ export function noteDisconnected(db: Db, nowMs: number, o: { hostIndex?: number 
 /** IndexDO start-up after an eviction or deploy: no socket survives (W5-01 constructor). */
 export function noteRestart(db: Db, nowMs: number): boolean {
   return noteDisconnected(db, nowMs);
+}
+
+// ---------------------------------------------------------------------------
+// Quiet links (ADR §15 Q11)
+//
+// A cursor ages when no wanted-collection event arrives, not only when the
+// stream is down. While a link was continuously open and healthy, the resume
+// point of the next connect (planned refresh, pulse, or a reconnect after a
+// drop) is `max(last event time_us, last confirmed-healthy instant −
+// RESUME_SAFETY_MARGIN_MS)`, so a quiet stream never ages into a false gap;
+// gap recovery runs only when continuity is lost (a disconnect longer than
+// the lookback, a rejected cursor, no cursor).
+//
+// The confirmed-healthy instant of a link is the instant its upgrade was
+// accepted (`connected_at_ms`): Jetstream accepted the cursor then, and the
+// link then stayed open, without a close or an error and without a message
+// (beyond the inclusive re-delivery of the event its cursor already named),
+// for its whole confirmation window (jetstream-socket.ts decides
+// that: a socket link that reached its 15-minute planned refresh, or a pulse
+// that drained its full 20 s from a recent cursor). Its replay of everything
+// before that instant had that window to arrive and nothing did, so nothing
+// before (instant − margin) is owed. The margin covers events still in flight
+// at the instant of acceptance.
+//
+// `noteHealthyResume` stores that resume point while the link is still
+// connected, just before it is closed, through the W2-05 connect writer
+// `markConnected` re-asserting the link's own connection evidence: it runs
+// only when `connected = 1`, `connected_at_ms = updated_at_ms = openedAtMs`
+// and the cursor is still the one the link opened with, so no event of this
+// link moved it. markConnected(db, openedAtMs) then rewrites `connected`,
+// `connected_at_ms` and `updated_at_ms` with the values they already hold;
+// `cursor` moves forward; and `last_event_time_us` is NULL again, as at the
+// link's open (it is set only when Jetstream's inclusive cursor re-delivered
+// the event the cursor already named, which is no news). Being durable before
+// the close, the resume point survives a failed reconnect and an eviction alike.
+
+/** Events within this much of the confirmed-healthy instant are replayed again. */
+export const RESUME_SAFETY_MARGIN_MS = 60_000;
+
+/**
+ * The exact event time of the stored cursor, or null when only an upper
+ * bound is known: a time cursor is its own time; a sequence cursor's time is
+ * `last_event_time_us` while that is set (the event of the current, or at
+ * connect time the previous, connection).
+ */
+export function exactCursorTimeUs(cp: Pick<IngestCheckpoint, 'cursor' | 'lastEventTimeUs'>): number | null {
+  if (cp.cursor === null) return null;
+  if (cp.cursor >= TIME_CURSOR_MIN) return cp.cursor;
+  return cp.lastEventTimeUs;
+}
+
+/**
+ * The resume cursor after a link confirmed healthy at `healthyAtMs`: the
+ * `time_us` cursor at `healthyAtMs − RESUME_SAFETY_MARGIN_MS`, or null when the
+ * stored cursor is already at least that new (or there is none: a link always
+ * opens with one, and without one the next connect is a gap anyway). A
+ * sequence cursor whose event time is not known exactly predates the link
+ * (it came from an earlier connection), so it is replaced.
+ */
+export function healthyResumeCursor(
+  cp: Pick<IngestCheckpoint, 'cursor' | 'lastEventTimeUs'>,
+  healthyAtMs: number,
+): number | null {
+  if (cp.cursor === null) return null;
+  const floor = tailCursor(healthyAtMs - RESUME_SAFETY_MARGIN_MS);
+  const known = exactCursorTimeUs(cp);
+  if (known !== null && known >= floor) return null;
+  return floor;
+}
+
+/**
+ * The link opened at `openedAtMs` with resume point `openedWithCursor` is
+ * still connected, received nothing new, and is confirmed healthy (see
+ * above): move the stored resume point forward to `healthyResumeCursor`.
+ * Returns the cursor written, or null when nothing changed (the preconditions
+ * do not hold, or the cursor is already newer).
+ */
+export function noteHealthyResume(db: Db, openedAtMs: number, openedWithCursor: number): number | null {
+  return db.tx((): number | null => {
+    const cp = readIngestCheckpoint(db);
+    if (
+      !cp.connected ||
+      cp.connectedAtMs !== openedAtMs ||
+      cp.updatedAtMs !== openedAtMs ||
+      cp.cursor !== openedWithCursor
+    ) {
+      return null;
+    }
+    const resume = healthyResumeCursor(cp, openedAtMs);
+    if (resume === null) return null;
+    markConnected(db, openedAtMs, { tailCursor: resume });
+    return resume;
+  });
 }
 
 /** Host rotation without a connection change (a failed connect). */

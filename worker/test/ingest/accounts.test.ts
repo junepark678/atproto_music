@@ -23,6 +23,7 @@ import {
   GET_REPO_STATUS,
   nextStatusJobDue,
   reclaimStatusLeases,
+  runStatusJob,
   scheduleStatusJobsTimer,
 } from '../../src/do/ingest/accounts';
 import { scheduleStatusCheck } from '../../src/do/ingest/admission';
@@ -535,6 +536,101 @@ describe('account status answers', () => {
         { label: 'deleted', value: 2 },
       ]);
       expect(db.all("SELECT label, value FROM counters WHERE name = 'status_check_failed'")).toEqual([]);
+    });
+  });
+});
+
+describe('status jobs', () => {
+  it('a status job requested again while its check runs is pending again; a failed check backs off 1 s, 2 s, 4 s', async () => {
+    const k = await kit();
+    const alice = k.users.Alice.did;
+    const OTHER = 'did:plc:zzzzzzzzzzzzzzzzzzzzzzzz';
+
+    await runInDurableObject(stubFor('accounts-status-job-token'), async (i: HarnessDO) => {
+      const db = i.db;
+      const m = depsFor(db, k);
+      await seedIndexed(db, m, k);
+      const jobRow = () =>
+        db.one<{ state: string; attempts: number; due_at: number; failure_code: string | null; updated_at_ms: number }>(
+          "SELECT state, attempts, due_at, failure_code, updated_at_ms FROM repo_jobs WHERE did = ? AND kind = 'status'",
+          alice,
+        );
+
+      // 1. The drain asks again (a new RepoDeactivated proof error) while the check is in flight:
+      //    the claim's lease token moved, so the answered job is pending again, not complete.
+      expect(scheduleStatusCheck(db, alice, 'RepoDeactivated', T0)).toEqual({ status: 'scheduled' });
+      let requested = 0;
+      k.pds.Alice.fail(
+        { nsid: GET_REPO_STATUS },
+        {
+          kind: 'respond',
+          respond: () => {
+            requested++;
+            expect(scheduleStatusCheck(db, alice, 'RepoDeactivated', T0 + 5)).toEqual({ status: 'scheduled' });
+            return Response.json({ did: alice, active: true });
+          },
+        },
+      );
+      expect(await runStatusJob(m, alice, T0)).toEqual({ outcome: 'active' });
+      expect(requested).toBe(1);
+      expect(jobRow()).toMatchObject({ state: 'pending', attempts: 0, due_at: T0, failure_code: null });
+      expect(nextStatusJobDue(db)).toBe(T0);
+      // The next run answers it for good.
+      expect(await runStatusJob(m, alice, T0 + 10)).toEqual({ outcome: 'active' });
+      expect(jobRow()).toMatchObject({ state: 'complete', attempts: 0, failure_code: null });
+      expect(statusCalls(k, 'Alice')).toBe(2);
+      expect(nextStatusJobDue(db)).toBeNull();
+
+      // 2. Failed checks (an answer about another DID is no answer) back off 1 s, 2 s, 4 s.
+      const T1 = T0 + HOUR;
+      scheduleStatusCheck(db, alice, 'RepoDeactivated', T1);
+      k.pds.Alice.fail(
+        { nsid: GET_REPO_STATUS },
+        { kind: 'respond', respond: () => Response.json({ did: OTHER, active: false }) },
+        3,
+      );
+      expect(await runStatusJob(m, alice, T1)).toEqual({ outcome: 'failed', error: 'response:invalid' });
+      expect(jobRow()).toMatchObject({
+        state: 'failed',
+        attempts: 1,
+        due_at: T1 + 1_000,
+        failure_code: 'response:invalid',
+      });
+      // Not due inside the backoff: nothing is claimed or fetched.
+      expect(await runStatusJob(m, alice, T1 + 999)).toBeNull();
+      expect(statusCalls(k, 'Alice')).toBe(3);
+      expect(nextStatusJobDue(db)).toBe(T1 + 1_000);
+      expect(await runStatusJob(m, alice, T1 + 1_000)).toMatchObject({ outcome: 'failed' });
+      expect(jobRow()).toMatchObject({ state: 'failed', attempts: 2, due_at: T1 + 3_000 });
+      expect(await runStatusJob(m, alice, T1 + 3_000)).toMatchObject({ outcome: 'failed' });
+      expect(jobRow()).toMatchObject({ state: 'failed', attempts: 3, due_at: T1 + 7_000 });
+      expect(statusCalls(k, 'Alice')).toBe(5);
+      // The PDS answers again: complete, the failure cleared.
+      expect(await runStatusJob(m, alice, T1 + 7_000)).toEqual({ outcome: 'active' });
+      expect(jobRow()).toMatchObject({ state: 'complete', attempts: 0, failure_code: null });
+      expect(db.all("SELECT label, value FROM counters WHERE name = 'status_check_failed'")).toEqual([
+        { label: 'response', value: 3 },
+      ]);
+      // No failed check changed the account.
+      expect(user(db, alice)).toMatchObject({ active: 1, account_status: 'active' });
+      expect(historyOf(m, alice)).toEqual(ALICE_HISTORY);
+
+      // 3. A failed check that was requested again meanwhile is due at once, not backed off.
+      const T2 = T1 + HOUR;
+      scheduleStatusCheck(db, alice, 'RepoDeactivated', T2);
+      k.pds.Alice.fail(
+        { nsid: GET_REPO_STATUS },
+        {
+          kind: 'respond',
+          respond: () => {
+            scheduleStatusCheck(db, alice, 'RepoTakendown', T2 + 5);
+            return Response.json({ did: OTHER, active: true });
+          },
+        },
+      );
+      expect(await runStatusJob(m, alice, T2)).toMatchObject({ outcome: 'failed' });
+      expect(jobRow()).toMatchObject({ state: 'failed', attempts: 1, due_at: T2, failure_code: 'response:invalid' });
+      expect(nextStatusJobDue(db)).toBe(T2);
     });
   });
 });

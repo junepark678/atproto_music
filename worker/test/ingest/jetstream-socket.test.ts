@@ -207,6 +207,90 @@ describe('jetstream socket', () => {
     });
   });
 
+  it('quiet link longer than lookback does not trigger gap recovery on planned refresh; real disconnect gap still does', async () => {
+    const clock = fixedClock();
+    // The fake keeps exactly our 24 h lookback, so it refuses any cursor that aged past it.
+    const server = jetstreamServer({ clock, lookbackHours: 24 });
+    const stub = stubFor('socket-quiet-lookback');
+    const gapCalls: number[] = [];
+    const gap: ScheduleGapRecovery = (_db, now) => {
+      gapCalls.push(now);
+    };
+    let e1Seq = 0;
+    let lastOpen = 0;
+    await runInDurableObject(stub, async (i: HarnessDO, state) => {
+      const m = ingestDeps(i.db, clock, { mode: 'socket' });
+      // First start (a gap by definition), then one wanted event at T0 and silence for 26 hours.
+      expect(await connect(m, server.connect, T0, { scheduleGapRecovery: gap })).toMatchObject({ gap: 'no_cursor' });
+      updateCheckpointBookkeeping(i.db, { pendingGap: false });
+      e1Seq = server.append(commit('r1')).seq;
+      await flush();
+      expect(checkpointRow(i.db)).toMatchObject({ cursor: e1Seq, last_event_time_us: T0 * 1000 });
+
+      // 104 planned refreshes, one every 15 minutes, over a socket that never delivers a new event.
+      for (let n = 1; n <= 104; n++) {
+        const at = T0 + n * 15 * MINUTE;
+        clock.set(new Date(at).toISOString());
+        await step(state.storage, m, server, { gap });
+        const attempt = server.attempts.at(-1)!;
+        expect([n, attempt.status]).toEqual([n, 101]);
+        // Refresh 1 resumes from e1 (the first link saw a new event: nothing is confirmed). The
+        // links after it see only the inclusive re-delivery of e1 or nothing, so every later
+        // refresh resumes 60 s before the previous link opened.
+        const expected = n === 1 ? e1Seq : (at - 15 * MINUTE - MINUTE) * 1000;
+        expect([n, attempt.cursor]).toEqual([n, expected]);
+        expect(checkpointRow(i.db)).toMatchObject({ connected: 1, connected_at_ms: at, pending_gap: 0 });
+      }
+      lastOpen = T0 + 104 * 15 * MINUTE;
+      expect(lastOpen - T0).toBe(26 * HOUR);
+      // No gap recovery beyond the first start: no cursor was ever refused or abandoned.
+      expect(gapCalls).toEqual([T0]);
+      expect(server.attempts.slice(1).every((a) => a.status === 101 && a.cursor !== null)).toBe(true);
+      expect(server.attempts).toHaveLength(105);
+      // Only e1 (and its inclusive re-delivery on refresh 1, coalesced) reached the queue.
+      expect(hintUris(i.db)).toEqual([`at://${ALICE}/${S}/r1`]);
+      expect(status(i.db, clock.nowMs())).toMatchObject({ state: 'current' });
+      expect(i.db.one("SELECT count(*) AS n FROM counters WHERE name = 'jetstream_invalid'")).toEqual({ n: 0 });
+
+      // The advanced resume point is durable: the instance dies with the link open.
+      server.sever();
+      await flush();
+    });
+
+    await evictDurableObject(stub);
+    await runInDurableObject(stub, async (i: HarnessDO, state) => {
+      const m = ingestDeps(i.db, clock, { mode: 'socket' });
+      // Two minutes later the new instance records the drop and reconnects: still no gap.
+      clock.set(new Date(lastOpen + 2 * MINUTE).toISOString());
+      expect(noteRestart(i.db, clock.nowMs())).toBe(true);
+      expect(checkpointRow(i.db)).toMatchObject({ cursor: (lastOpen - 16 * MINUTE) * 1000, pending_gap: 0 });
+      await step(state.storage, m, server, { gap });
+      expect(server.attempts.at(-1)).toMatchObject({ cursor: (lastOpen - 16 * MINUTE) * 1000, status: 101 });
+      expect(gapCalls).toEqual([T0]);
+      expect(checkpointRow(i.db)).toMatchObject({ connected: 1, pending_gap: 0 });
+
+      // A real disconnect: the server drops the link 5 minutes in (no planned refresh, nothing
+      // confirmed), and the instance stays cut off for 25 hours.
+      const dropAt = lastOpen + 7 * MINUTE;
+      clock.set(new Date(dropAt).toISOString());
+      server.last().close(1001, 'going away');
+      await flush();
+      expect(checkpointRow(i.db)).toMatchObject({ connected: 0, updated_at_ms: dropAt });
+      // The drop confirmed nothing: the resume point is still the one the link opened with.
+      expect(checkpointRow(i.db).cursor).toBe((lastOpen - 16 * MINUTE) * 1000);
+
+      const back = dropAt + 25 * HOUR;
+      clock.set(new Date(back).toISOString());
+      await step(state.storage, m, server, { gap });
+      // Continuity was lost for longer than the lookback: gap recovery, from the live tail.
+      expect(server.attempts.at(-1)).toMatchObject({ cursor: null, status: 101 });
+      expect(gapCalls).toEqual([T0, back]);
+      expect(checkpointRow(i.db)).toMatchObject({ pending_gap: 1, connected: 1, cursor: back * 1000 });
+      expect(status(i.db, back)).toMatchObject({ state: 'recovering', caughtUp: false });
+      closeSocket(m, clock.nowMs());
+    });
+  });
+
   it('close triggers reconnect delays 1,2,4,…,60s and rotates us-east→us-west', async () => {
     const clock = fixedClock();
     const server = jetstreamServer({ clock, hosts: [EAST, WEST] });
@@ -357,22 +441,25 @@ describe('jetstream socket', () => {
       // refreshes (15 and 30 min) resume from the stored tail cursor, which the
       // fake accepts: no new gap, no second recovery, pending_gap stays clear.
       updateCheckpointBookkeeping(i.db, { pendingGap: false });
+      // (Each link is quiet, so from the second refresh on the resume point is the previous
+      // link's open instant minus 60 s, ADR §15 Q11: the first link opened at the tail itself.)
+      const resumeAt = (minutes: number) => (minutes === 15 ? rejectedAt : rejectedAt + (minutes - 16) * MINUTE) * 1000;
       for (const minutes of [15, 30]) {
         clock.set(new Date(rejectedAt + minutes * MINUTE).toISOString());
         await step(state.storage, m, server, { gap });
-        expect(server.attempts.at(-1)).toMatchObject({ cursor: rejectedAt * 1000, status: 101 });
+        expect(server.attempts.at(-1)).toMatchObject({ cursor: resumeAt(minutes), status: 101 });
         expect(checkpointRow(i.db)).toMatchObject({
           pending_gap: 0,
           connected: 1,
           connected_at_ms: rejectedAt + minutes * MINUTE,
-          cursor: rejectedAt * 1000,
+          cursor: resumeAt(minutes),
         });
         // Not recovering again (caughtUp stays false only because the r1/r3 hints are undrained here).
         expect(status(i.db, clock.nowMs())).toMatchObject({ state: 'current', caughtUp: false, lagSeconds: null });
       }
       expect(server.attempts.slice(4).map((a) => [a.cursor, a.status])).toEqual([
         [rejectedAt * 1000, 101],
-        [rejectedAt * 1000, 101],
+        [(rejectedAt + 14 * MINUTE) * 1000, 101],
       ]);
       expect(gapCalls).toEqual([T0, at, rejectedAt]);
       expect(gapsScheduled()).toBe(3);
