@@ -1,0 +1,82 @@
+{
+  "description": "Rust follow_rkey: 'f' + lowercase hex SHA-256 of the exact subject DID bytes (no normalization), after DID syntax validation.",
+  "entries": [
+    {
+      "error": null,
+      "rkey": "f693c5d2d2f93d8419c4274771bd9ec786fe45ccba9198a73ba11f0edabbf32d0",
+      "subject": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "error": null,
+      "rkey": "f9a71cc1369cb0ae7a6fa16d2b9ecdc8d3ba62a9c519fe9af11a322c90e9ef6f2",
+      "subject": "did:plc:bbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    {
+      "error": null,
+      "rkey": "f4639029033a3228c83cd8b403e5b6d742058eba59c35ddc0aee08c9def772648",
+      "subject": "did:plc:cccccccccccccccccccccccc"
+    },
+    {
+      "error": null,
+      "rkey": "f3e234cd33525135d5cdc8898cc23eda320958b88dee89666bc65b89506a9a684",
+      "subject": "did:web:example.com"
+    },
+    {
+      "error": null,
+      "rkey": "f8d8b4a2638ef7bd8fe8dedadb3ad3b0bd9cb98fdf8828f37bf50cb2905efc63d",
+      "subject": "did:web:localhost%3A8080"
+    },
+    {
+      "error": null,
+      "rkey": "ff5b57a549b7ad681ee5b2049deb9b73a022e504f1ca22c45b74ad7da6f6a02b1",
+      "subject": "did:plc:z72i7hdynmk6r22z27h6tvur"
+    },
+    {
+      "error": null,
+      "rkey": "fc840ec5bd1664030b679d0434aa1b5c69cdc9fcc0b52c5ba96f2a0d926097bdc",
+      "subject": "did:example:abc:def"
+    },
+    {
+      "error": null,
+      "rkey": "f1da3dd04e11b52eaae30366f158860d5866e9ace71730389e0ffff3f83c9653e",
+      "subject": "did:plc:BBBBBBBBBBBBBBBBBBBBBBBB"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "subject",
+        "message": "expected a DID"
+      },
+      "rkey": null,
+      "subject": "did:plc:bbbbbbbbbbbbbbbbbbbbbbbb "
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "subject",
+        "message": "expected a DID"
+      },
+      "rkey": null,
+      "subject": "did:plc:"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "subject",
+        "message": "expected a DID"
+      },
+      "rkey": null,
+      "subject": "bob.test"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "subject",
+        "message": "expected a DID"
+      },
+      "rkey": null,
+      "subject": ""
+    }
+  ],
+  "source": "crates/core/examples/export_goldens.rs"
+}
