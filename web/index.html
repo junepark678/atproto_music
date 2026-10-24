@@ -1,20 +1,27 @@
 <!doctype html>
 <!--
-  Vite build entry for the SPA (ADR 0004 §4.3). Wave 0 placeholder so that
-  `npm run build:web` emits web/dist (the Worker's ASSETS directory). W1-10
-  owns this file and replaces the body with the app shell and the
-  /src/main.tsx module entry. No inline script: the CSP (ADR §8) forbids it.
+  Vite build entry for the SPA (ADR 0004 §4.3). Static Assets serve the built
+  copy for every navigation (single-page-application fallback). The only
+  script is the /src/main.tsx module: the CSP (ADR §8) forbids inline script
+  and inline style.
 -->
 <html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="Music listening history on the AT Protocol." />
+    <meta name="color-scheme" content="light dark" />
+    <link rel="icon" href="data:," />
     <title>atmusic</title>
+    <script type="module" src="/src/main.tsx"></script>
   </head>
   <body>
-    <main id="app">
-      <h1>atmusic</h1>
-      <p>The application is not built yet.</p>
-    </main>
+    <div id="app"></div>
+    <noscript>
+      <main>
+        <h1>atmusic</h1>
+        <p>This application needs JavaScript. Your listens remain public records in your own repository.</p>
+      </main>
+    </noscript>
   </body>
 </html>
