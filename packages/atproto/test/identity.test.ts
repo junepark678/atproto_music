@@ -25,6 +25,7 @@ const ALICE = 'did:plc:aaaaaaaaaaaaaaaaaaaaaaaa';
 const BOB = 'did:plc:bbbbbbbbbbbbbbbbbbbbbbbb';
 const CAROL = 'did:plc:cccccccccccccccccccccccc';
 const MALLORY = 'did:plc:mmmmmmmmmmmmmmmmmmmmmmmm';
+const DAVE = 'did:plc:dddddddddddddddddddddddd';
 const WEB = 'did:web:web.example.test';
 const NOW_MS = Date.parse(FIXTURE_NOW_ISO);
 
@@ -167,10 +168,9 @@ describe('identity resolution', () => {
     // Handle for did:web came from the HTTPS well-known (no TXT published).
     expect(net.transport.calls.count({ service: 'handle', host: 'web.example.test' })).toBe(1);
 
-    // First VALID #atproto key wins, in document order. @atcute's schema
-    // forbids duplicate method ids, so a document holds at most `#atproto`
-    // and `<did>#atproto`: each unusable first entry is skipped in favour of
-    // the second, and with two valid entries the first is taken.
+    // First VALID #atproto key wins, in document order: each unusable first
+    // entry is skipped in favour of the second, and with two valid entries the
+    // first is taken.
     net.plc.register(CAROL, { signingKey: keys.carol, pds: 'https://pds-carol.example.test', handle: null });
     const carolKey = { id: `${CAROL}#atproto`, publicKeyMultibase: keys.carol.multikey };
     const skipped: Array<{ id: string; type?: string; controller?: string; publicKeyMultibase: string }> = [
@@ -220,6 +220,72 @@ describe('identity resolution', () => {
     );
     expect((await net.resolver.resolveDid(MALLORY, { fresh: true })).signingKey).toBe(`did:key:${p256OnCurve}`);
 
+    // Only the fields atproto reads are validated (the oracle's serde
+    // DidDocument): DID-Core-legal or foreign content elsewhere in the
+    // document never hides a valid #atproto key or #atproto_pds.
+    net.doh.setTxt('_atproto.dave.test', [`did=${DAVE}`]);
+    const daveKey = { id: '#atproto', type: 'Multikey', controller: DAVE, publicKeyMultibase: keys.carol.multikey };
+    const davePds = {
+      id: '#atproto_pds',
+      type: 'AtprotoPersonalDataServer',
+      serviceEndpoint: 'https://pds-dave.example.test',
+    };
+    const daveDoc = (extra: Record<string, unknown>) => ({
+      '@context': ['https://www.w3.org/ns/did/v1'],
+      id: DAVE,
+      alsoKnownAs: ['at://dave.test'],
+      verificationMethod: [daveKey],
+      service: [davePds],
+      ...extra,
+    });
+    const tolerated: Array<[string, Record<string, unknown>]> = [
+      ['string @context', daveDoc({ '@context': 'https://www.w3.org/ns/did/v1' })],
+      ['no @context', (({ '@context': _, ...rest }) => rest)(daveDoc({}))],
+      ['duplicate alsoKnownAs', daveDoc({ alsoKnownAs: ['at://dave.test', 'at://dave.test', 'https://dave.test'] })],
+      [
+        'unrelated non-base58 / JWK / null-key methods',
+        daveDoc({
+          verificationMethod: [
+            { id: '#other', type: 'Multikey', controller: DAVE, publicKeyMultibase: 'zQ3sh0OIl' },
+            { id: '#jwk', type: 'JsonWebKey2020', controller: DAVE, publicKeyJwk: { kty: 'EC' } },
+            { id: '#nokey', type: 'Multikey', controller: DAVE, publicKeyMultibase: null },
+            daveKey,
+          ],
+        }),
+      ],
+      [
+        'unrelated services with non-URL / map endpoints',
+        daveDoc({
+          service: [
+            { id: '#notes', type: 'Notes', serviceEndpoint: 'not a url' },
+            { id: '#hub', type: 'Hub', serviceEndpoint: { origins: ['https://hub.example.test'] } },
+            davePds,
+          ],
+        }),
+      ],
+      [
+        'duplicate #atproto ids: first invalid, second valid',
+        daveDoc({
+          verificationMethod: [{ ...daveKey, publicKeyMultibase: 'zQ3sh0OIl' }, daveKey],
+        }),
+      ],
+      ['unknown properties, 40 KiB document', daveDoc({ controller: DAVE, padding: 'x'.repeat(40 * 1024) })],
+    ];
+    for (const [label, doc] of tolerated) {
+      net.plc.setRawDocument(DAVE, doc);
+      expect(await net.resolver.resolveDid(DAVE, { fresh: true }), label).toEqual({
+        did: DAVE,
+        pds: 'https://pds-dave.example.test',
+        signingKey: keys.carol.didKey,
+        handle: 'dave.test',
+        fetchedAtMs: NOW_MS,
+      });
+    }
+    // The cached JSON is the whole document, foreign content included.
+    const daveStored = JSON.parse(net.memo.store.get(DAVE)!.docJson) as { padding: string };
+    expect(daveStored.padding).toHaveLength(40 * 1024);
+    expect(net.transport.calls.count({ service: 'plc', path: `/${DAVE}`, status: 200 })).toBe(tolerated.length);
+
     // Each successful resolution was written to the cache hook exactly once.
     expect(net.memo.log.puts.map((i) => i.did)).toEqual([
       ALICE,
@@ -228,6 +294,7 @@ describe('identity resolution', () => {
       CAROL,
       MALLORY,
       MALLORY,
+      ...tolerated.map(() => DAVE),
     ]);
     const stored = JSON.parse(net.memo.store.get(ALICE)!.docJson) as { id: string };
     expect(stored.id).toBe(ALICE);
@@ -271,6 +338,9 @@ describe('identity resolution', () => {
         rawDoc(ALICE, { methods: [{ id: '#atproto', publicKeyMultibase: syntheticMultikey('p256', 'max') }] }),
       ],
       ['too long', rawDoc(ALICE, { methods: [{ id: '#atproto', publicKeyMultibase: `z${'2'.repeat(128)}` }] })],
+      // Not base58btc: the method is well-formed, only its key is unusable.
+      ['non-base58 key', rawDoc(ALICE, { methods: [{ id: '#atproto', publicKeyMultibase: 'zQ3sh0OIl' }] })],
+      ['base32 multibase', rawDoc(ALICE, { methods: [{ id: '#atproto', publicKeyMultibase: 'bafkqaaa' }] })],
       [
         'unsupported multicodec (ed25519)',
         rawDoc(ALICE, {
@@ -284,12 +354,27 @@ describe('identity resolution', () => {
       expect(error.message, label).toContain(ALICE);
     }
 
-    // A structurally malformed document (a key that is not base58btc, a
-    // non-array verificationMethod, no id) and a tombstone are definite failures too.
-    net.plc.setRawDocument(ALICE, rawDoc(ALICE, { methods: [{ id: '#atproto', publicKeyMultibase: 'zQ3sh0OIl' }] }));
-    await identityFailure(net.resolver.resolveDid(ALICE), 'invalid_did_document');
-    net.plc.setRawDocument(ALICE, { id: ALICE, verificationMethod: 'nope' });
-    await identityFailure(net.resolver.resolveDid(ALICE), 'invalid_did_document');
+    // A document whose atproto fields are malformed (the oracle's serde
+    // shape) and a tombstone are definite failures too.
+    const good = rawDoc(ALICE, { methods: [{ id: '#atproto', publicKeyMultibase: keys.alice.multikey }] });
+    const goodMethod = good.verificationMethod[0]!;
+    const goodService = good.service[0]!;
+    const malformed: Array<[string, unknown]> = [
+      ['non-array verificationMethod', { id: ALICE, verificationMethod: 'nope' }],
+      ['null verificationMethod', { ...good, verificationMethod: null }],
+      ['method without controller', { ...good, verificationMethod: [{ ...goodMethod, controller: undefined }] }],
+      ['numeric publicKeyMultibase', { ...good, verificationMethod: [{ ...goodMethod, publicKeyMultibase: 5 }] }],
+      ['non-string alsoKnownAs entry', { ...good, alsoKnownAs: ['at://alice.test', 42] }],
+      ['service without endpoint', { ...good, service: [{ id: goodService.id, type: goodService.type }] }],
+      ['service type array', { ...good, service: [{ ...goodService, type: ['AtprotoPersonalDataServer'] }] }],
+      ['numeric id', { ...good, id: 7 }],
+      ['top-level array', [good]],
+    ];
+    for (const [label, doc] of malformed) {
+      net.plc.setRawDocument(ALICE, doc);
+      const error = await identityFailure(net.resolver.resolveDid(ALICE), 'invalid_did_document');
+      expect(error.message, label).toContain(ALICE);
+    }
     net.plc.setRawDocument(MALLORY, { not: 'a document' });
     await identityFailure(net.resolver.resolveDid(MALLORY), 'invalid_did_document');
     net.plc.register(BOB, { signingKey: keys.bob, pds: 'https://pds-bob.example.test' });
@@ -297,7 +382,9 @@ describe('identity resolution', () => {
     await identityFailure(net.resolver.resolveDid(BOB), 'did_not_found');
 
     // Every attempt fetched the document exactly once and nothing was cached.
-    expect(net.transport.calls.count({ service: 'plc', path: `/${ALICE}` })).toBe(1 + unusable.length + 2);
+    expect(net.transport.calls.count({ service: 'plc', path: `/${ALICE}`, status: 200 })).toBe(
+      1 + unusable.length + malformed.length,
+    );
     expect(net.transport.calls.count({ service: 'plc', path: `/${BOB}`, status: 410 })).toBe(1);
     expect(net.memo.log.puts).toEqual([]);
     // A rejected document never leads to a handle lookup or a PDS request: the
@@ -318,6 +405,49 @@ describe('identity resolution', () => {
     }
     expect(net.transport.calls.entries.length).toBe(before);
     expect(net.memo.log.gets).not.toContain('did:plc:short');
+
+    // Byte-level: the body must be UTF-8 JSON within SafeFetch's 64 KiB
+    // didDoc cap (ADR §8); the content-type is not consulted (as the oracle).
+    const RAW = 'did:web:raw.example.test';
+    const rawBody = (doc: unknown) => new TextEncoder().encode(JSON.stringify(doc));
+    let served: { body: Uint8Array; type: string } = { body: new Uint8Array(), type: 'application/json' };
+    const raw = network({
+      hosts: {
+        'raw.example.test': () =>
+          new Response(served.body as Uint8Array<ArrayBuffer>, { headers: { 'content-type': served.type } }),
+      },
+    });
+    const rawGood = rawDoc(RAW, { methods: [{ id: '#atproto', publicKeyMultibase: keys.bob.multikey }] });
+    served = { body: rawBody({ ...rawGood, padding: 'x'.repeat(60 * 1024) }), type: 'text/plain' };
+    expect(served.body.byteLength).toBeLessThan(64 * 1024);
+    expect(await raw.resolver.resolveDid(RAW)).toEqual({
+      did: RAW,
+      pds: 'https://pds-raw.example.test',
+      signingKey: keys.bob.didKey,
+      handle: null,
+      fetchedAtMs: NOW_MS,
+    });
+    const badBodies: Array<[string, Uint8Array]> = [
+      ['not JSON', new TextEncoder().encode('<html>hi</html>')],
+      ['empty body', new Uint8Array()],
+      ['BOM-prefixed JSON', new Uint8Array([0xef, 0xbb, 0xbf, ...rawBody(rawGood)])],
+      // A lossy decoder would read `{"id":"\uFFFD"}` (did_mismatch); a fatal one refuses it.
+      [
+        'invalid UTF-8',
+        new Uint8Array([...new TextEncoder().encode('{"id":"'), 0xff, ...new TextEncoder().encode('"}')]),
+      ],
+    ];
+    for (const [label, body] of badBodies) {
+      served = { body, type: 'application/json' };
+      const error = await identityFailure(raw.resolver.resolveDid(RAW, { fresh: true }), 'invalid_did_document');
+      expect(error.message, label).toContain(RAW);
+    }
+    served = { body: rawBody({ ...rawGood, padding: 'x'.repeat(64 * 1024) }), type: 'application/json' };
+    const oversized = await rejection(raw.resolver.resolveDid(RAW, { fresh: true }));
+    expect(oversized).toBeInstanceOf(SafeFetchError);
+    expect((oversized as SafeFetchError).code).toBe('body_too_large');
+    expect(raw.transport.calls.count({ service: 'host', host: 'raw.example.test' })).toBe(2 + badBodies.length);
+    expect(raw.memo.log.puts.map((i) => i.did)).toEqual([RAW]);
   });
 
   it('handle verified only when TXT/well-known and alsoKnownAs agree; mismatch yields null', async () => {

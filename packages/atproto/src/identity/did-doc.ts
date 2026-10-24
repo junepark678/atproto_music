@@ -1,14 +1,28 @@
 // DID documents: fetch, validate and extract the atproto identity fields
 // (https://atproto.com/specs/did; ADR 0004 §5.6, §8; W2-02).
 //
-// Fetching uses @atcute/identity-resolver's PLC and atproto did:web document
-// resolvers, whose `fetch` is injectable: we hand them an adapter over
-// SafeFetch, so every document request runs the production URL policy, the
-// DoH pre-check, `redirect: 'manual'` with every 3xx refused, the 10 s
-// deadline and the 64 KiB `didDoc` body cap. @atcute then checks the
-// content-type, applies its own (smaller, 20 KiB) size bound and validates the
-// document shape. Extraction follows the Rust oracle exactly
-// (crates/atproto/src/identity.rs, crates/atproto/src/sync/current_head.rs):
+// The document is fetched with SafeFetch (kind `didDoc`): the production URL
+// policy, the DoH pre-check, `redirect: 'manual'` with every 3xx refused, the
+// 10 s deadline and the 64 KiB body cap (ADR §8). The body is then parsed and
+// shape-checked exactly as the Rust oracle's serde `DidDocument`
+// (crates/atproto/src/identity.rs): only the fields atproto reads are looked
+// at, and everything else (`@context`, unknown properties, the content of
+// unrelated entries) is ignored, so a document DID Core or a foreign method
+// family considers odd still yields its `#atproto` key and `#atproto_pds`.
+// A definite structural failure is `invalid_did_document`:
+//
+// - the body is not UTF-8 JSON, or not an object;
+// - `id` is not a string;
+// - `alsoKnownAs`, `service`, `verificationMethod`, when present, are not
+//   arrays (absent means empty; `null` is malformed, as with serde);
+// - an `alsoKnownAs` entry is not a string;
+// - a `service` entry is not an object with string `id` and `type` and some
+//   `serviceEndpoint` value (any JSON; only `#atproto_pds`'s is interpreted);
+// - a `verificationMethod` entry is not an object with string `id`,
+//   `controller` and `type`; `publicKeyMultibase` is optional (string or null)
+//   and is decoded only for an `#atproto` candidate.
+//
+// Extraction follows the oracle exactly (identity.rs, sync/current_head.rs):
 //
 // - `id` must equal the requested DID (`did_mismatch`);
 // - signing key: the FIRST VALID verification method whose id is `#atproto`
@@ -25,17 +39,35 @@
 //   handle, lowercased. It is only a claim; handle.ts verifies it.
 
 import { parsePublicMultikey } from '@atcute/crypto';
-import type { DidDocument } from '@atcute/identity';
-import {
-  AtprotoWebDidDocumentResolver,
-  type DidDocumentResolver,
-  PlcDidDocumentResolver,
-} from '@atcute/identity-resolver';
 import { isDidPlc, isHandle, MAX_DID_LENGTH, MAX_HANDLE_LENGTH } from '@atmusic/core/syntax';
 import { isSafeFetchError, type SafeFetch } from '../net/safe-fetch';
 import { checkUrl } from '../net/url-policy';
 
-export type { DidDocument } from '@atcute/identity';
+/** A verification method, as far as atproto reads it. */
+export interface VerificationMethod {
+  id: string;
+  controller: string;
+  type: string;
+  publicKeyMultibase?: string | null;
+}
+
+/** A service entry; `serviceEndpoint` is any JSON value. */
+export interface DidService {
+  id: string;
+  type: string;
+  serviceEndpoint: unknown;
+}
+
+/**
+ * The atproto view of a DID document (the oracle's serde struct). The parsed
+ * object keeps every other property, so `json` round-trips the document.
+ */
+export interface DidDocument {
+  id: string;
+  alsoKnownAs?: string[];
+  service?: DidService[];
+  verificationMethod?: VerificationMethod[];
+}
 
 export const PLC_DIRECTORY = 'https://plc.directory';
 
@@ -43,7 +75,7 @@ export const IDENTITY_ERROR_CODES = [
   'invalid_did', // not a did:plc / hostname-level did:web DID
   'invalid_handle', // not a syntactically valid handle
   'did_not_found', // the document host answered 404 / 410 (tombstoned)
-  'invalid_did_document', // wrong content-type, oversized for @atcute, or malformed shape
+  'invalid_did_document', // not JSON, or the atproto fields are malformed
   'did_mismatch', // document `id` differs from the requested DID
   'no_signing_key', // no valid `#atproto` Multikey verification method
   'invalid_pds', // missing `#atproto_pds` service, or its endpoint fails the URL policy
@@ -93,21 +125,51 @@ export function didDocumentUrl(did: string): string {
   return `${PLC_DIRECTORY}/${did}`;
 }
 
-/** A `fetch` for @atcute resolvers that goes through SafeFetch (kind `didDoc`). */
-function safeDocFetch(safeFetch: SafeFetch): typeof fetch {
-  return (async (input: RequestInfo | URL) => {
-    const url = new URL(input instanceof Request ? input.url : input);
-    // @atcute percent-encodes the DID's colons (`/did%3Aplc%3A…`); request the
-    // canonical `https://plc.directory/<did>` form the oracle and spec use.
-    // A did:plc path holds only [a-z2-7:], so decoding it is lossless.
-    if (/^\/did%3Aplc%3A[a-z2-7]{24}$/i.test(url.pathname)) url.pathname = decodeURIComponent(url.pathname);
-    const res = await safeFetch(url, { kind: 'didDoc' });
-    // Only 2xx reaches here (SafeFetch throws on 3xx and non-2xx).
-    return new Response(res.body.byteLength === 0 ? null : (res.body as Uint8Array<ArrayBuffer>), {
-      status: res.status,
-      headers: res.headers,
-    });
-  }) as typeof fetch;
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** An optional array property: absent → [], present → every entry passes `ok`. */
+function optionalArray(doc: Record<string, unknown>, key: string, ok: (entry: unknown) => boolean): boolean {
+  if (!Object.hasOwn(doc, key)) return true;
+  const value = doc[key];
+  return Array.isArray(value) && value.every(ok);
+}
+
+function isVerificationMethod(entry: unknown): boolean {
+  if (!isObject(entry)) return false;
+  const key = entry.publicKeyMultibase;
+  return (
+    typeof entry.id === 'string' &&
+    typeof entry.controller === 'string' &&
+    typeof entry.type === 'string' &&
+    (key === undefined || key === null || typeof key === 'string')
+  );
+}
+
+function isService(entry: unknown): boolean {
+  return (
+    isObject(entry) &&
+    typeof entry.id === 'string' &&
+    typeof entry.type === 'string' &&
+    Object.hasOwn(entry, 'serviceEndpoint')
+  );
+}
+
+/** Parse a document body with the oracle's shape rules; null when malformed. */
+export function parseDidDocument(body: Uint8Array): DidDocument | null {
+  let value: unknown;
+  try {
+    // fatal: invalid UTF-8 is malformed; ignoreBOM keeps a BOM, which JSON rejects.
+    value = JSON.parse(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(body));
+  } catch {
+    return null;
+  }
+  if (!isObject(value) || typeof value.id !== 'string') return null;
+  if (!optionalArray(value, 'alsoKnownAs', (alias) => typeof alias === 'string')) return null;
+  if (!optionalArray(value, 'service', isService)) return null;
+  if (!optionalArray(value, 'verificationMethod', isVerificationMethod)) return null;
+  return value as unknown as DidDocument;
 }
 
 export interface DidDocumentFetcher {
@@ -116,32 +178,25 @@ export interface DidDocumentFetcher {
 }
 
 export function createDidDocumentFetcher(safeFetch: SafeFetch): DidDocumentFetcher {
-  const fetchFn = safeDocFetch(safeFetch);
-  const plc: DidDocumentResolver<'plc'> = new PlcDidDocumentResolver({ apiUrl: PLC_DIRECTORY, fetch: fetchFn });
-  const web: DidDocumentResolver<'web'> = new AtprotoWebDidDocumentResolver({ fetch: fetchFn });
-
   return {
     async fetch(did) {
-      didDocumentUrl(did); // syntax gate before any request
-      let doc: DidDocument;
+      const url = didDocumentUrl(did); // syntax gate before any request
+      let body: Uint8Array;
       try {
-        doc = did.startsWith('did:plc:')
-          ? await plc.resolve(did as `did:plc:${string}`)
-          : await web.resolve(did as `did:web:${string}`);
+        // Only 2xx returns (SafeFetch throws on 3xx, non-2xx and an oversized body).
+        body = (await safeFetch(url, { kind: 'didDoc' })).body;
       } catch (error) {
-        const cause = error instanceof Error && error.cause !== undefined ? error.cause : error;
-        if (isSafeFetchError(cause)) {
-          if (cause.code === 'http_status' && (cause.status === 404 || cause.status === 410)) {
-            throw new IdentityError('did_not_found', `DID document not found (HTTP ${cause.status}): ${did}`, {
-              cause,
-            });
-          }
-          throw cause; // transport-level: the caller decides whether to retry
+        if (isSafeFetchError(error) && error.code === 'http_status' && (error.status === 404 || error.status === 410)) {
+          throw new IdentityError('did_not_found', `DID document not found (HTTP ${error.status}): ${did}`, {
+            cause: error,
+          });
         }
-        throw new IdentityError('invalid_did_document', `invalid DID document for ${did}`, { cause: error });
+        throw error; // transport-level: the caller decides whether to retry
       }
+      const doc = parseDidDocument(body);
+      if (doc === null) throw new IdentityError('invalid_did_document', `invalid DID document for ${did}`);
       if (doc.id !== did) {
-        throw new IdentityError('did_mismatch', `DID document id ${String(doc.id)} does not match ${did}`);
+        throw new IdentityError('did_mismatch', `DID document id ${doc.id} does not match ${did}`);
       }
       return { doc, json: JSON.stringify(doc) };
     },
