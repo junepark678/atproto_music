@@ -250,12 +250,19 @@ def section_routes(text):
     return {(method, path.split('?', 1)[0]) for method, path in re.findall(r'\b(GET|POST|PUT|DELETE)\s+(/[^\s;|`]+)', text)}
 
 
-def route_inventory(spec):
+def route_inventory(spec, mvp=None, api=None):
+    """The OpenAPI, MVP.md and API.md route sets each equal the v1.1 inventory, with the exact status matrix.
+
+    `mvp` and `api` override the document texts (the negative controls pass mutated copies).
+    """
     found = operations(spec)
-    mvp = (ROOT / 'docs/planning/MVP.md').read_text()
+    mvp = (ROOT / 'docs/planning/MVP.md').read_text() if mvp is None else mvp
+    api = (ROOT / 'docs/planning/API.md').read_text() if api is None else api
+    require('## API contract to freeze in M1' in mvp and '## Completion and execution rules' in mvp,
+            'route_inventory: MVP.md lost its API contract section')
     section = mvp.split('## API contract to freeze in M1', 1)[1].split('## Completion and execution rules', 1)[0]
     documented = section_routes(section)
-    fixed = {(method, path) for method, path in re.findall(r'\| (GET|POST|PUT|DELETE) `([^`]+)`', (ROOT / 'docs/planning/API.md').read_text())}
+    fixed = {(method, path) for method, path in re.findall(r'\| (GET|POST|PUT|DELETE) `([^`]+)`', api)}
     expected = set(EXPECTED_STATUSES)
     differences = {label: (sorted(routes - expected), sorted(expected - routes))
                    for label, routes in [('MVP.md', documented), ('API.md', fixed), ('openapi', set(found))] if routes != expected}
@@ -278,6 +285,141 @@ def route_inventory(spec):
     retry = found[('POST', '/api/v1/notify')]['responses']['429'].get('headers', {}).get('Retry-After', {})
     require(retry.get('required') is True, 'route_inventory: notify 429 must declare Retry-After')
     return len(found)
+
+
+def route_inventory_controls(spec):
+    """route_inventory must reject an omitted route, an undocumented method or route, and a changed status matrix.
+
+    Each control mutates an in-memory copy of openapi.yaml, MVP.md or API.md; repository files are never altered.
+    Returns the labels of the rejected mutations.
+    """
+    mvp = (ROOT / 'docs/planning/MVP.md').read_text()
+    api = (ROOT / 'docs/planning/API.md').read_text()
+
+    def spec_with(mutate):
+        mutated = deepcopy(spec)
+        mutate(mutated)
+        return mutated
+
+    def replaced(text, needle, replacement=''):
+        require(text.count(needle) == 1, f'route_inventory_controls: expected exactly one {needle!r}')
+        return text.replace(needle, replacement)
+
+    def add_status(mutated, path, method, status, like):
+        responses = mutated['paths'][path][method]['responses']
+        responses[status] = deepcopy(responses[like])
+
+    meta_get = spec['paths']['/api/v1/meta']['get']
+    controls = [
+        ('openapi omits GET /health/live',
+         spec_with(lambda m: m['paths'].pop('/health/live')), None, None,
+         "openapi extra=[] missing=[('GET', '/health/live')]"),
+        ('openapi omits POST /api/v1/notify',
+         spec_with(lambda m: m['paths'].pop('/api/v1/notify')), None, None,
+         "openapi extra=[] missing=[('POST', '/api/v1/notify')]"),
+        ('openapi adds undocumented DELETE /api/v1/meta',
+         spec_with(lambda m: m['paths']['/api/v1/meta'].update(delete={**deepcopy(meta_get), 'operationId': 'deleteMeta'})), None, None,
+         "openapi extra=[('DELETE', '/api/v1/meta')] missing=[]"),
+        ('openapi adds undocumented GET /api/v1/extra',
+         spec_with(lambda m: m['paths'].update({'/api/v1/extra': {'get': {**deepcopy(meta_get), 'operationId': 'getExtra'}}})), None, None,
+         "openapi extra=[('GET', '/api/v1/extra')] missing=[]"),
+        ('openapi adds status 500 to GET /health/ready',
+         spec_with(lambda m: add_status(m, '/health/ready', 'get', '500', '503')), None, None,
+         "incorrect status matrix for ('GET', '/health/ready')"),
+        ('openapi drops status 503 from GET /health/ready',
+         spec_with(lambda m: m['paths']['/health/ready']['get']['responses'].pop('503')), None, None,
+         "incorrect status matrix for ('GET', '/health/ready')"),
+        ('openapi drops status 413 from POST /api/v1/notify',
+         spec_with(lambda m: m['paths']['/api/v1/notify']['post']['responses'].pop('413')), None, None,
+         "incorrect status matrix for ('POST', '/api/v1/notify')"),
+        ('MVP.md omits GET /api/v1/records/status',
+         spec, replaced(mvp, '; GET /api/v1/records/status?uri=... (N2)'), None,
+         "MVP.md extra=[] missing=[('GET', '/api/v1/records/status')]"),
+        ('MVP.md adds undocumented POST /api/v1/scrobbles',
+         spec, replaced(mvp, '| Indexing | POST /api/v1/notify (N1);', '| Indexing | POST /api/v1/notify (N1); POST /api/v1/scrobbles;'), None,
+         "MVP.md extra=[('POST', '/api/v1/scrobbles')] missing=[]"),
+        ('API.md omits GET /api/v1/users/{did}/export',
+         spec, None, replaced(api, '| GET `/api/v1/users/{did}/export` |', '| `/api/v1/users/{did}/export` |'),
+         "API.md extra=[] missing=[('GET', '/api/v1/users/{did}/export')]"),
+        ('API.md adds undocumented GET /api/v1/extra',
+         spec, None, api + '\n| GET `/api/v1/extra` | none | 200 |\n',
+         "API.md extra=[('GET', '/api/v1/extra')] missing=[]"),
+    ]
+    rejected = []
+    for label, mutated_spec, mutated_mvp, mutated_api, expected in controls:
+        try:
+            route_inventory(mutated_spec, mvp=mutated_mvp, api=mutated_api)
+        except ContractError as error:
+            # Rejected for the mutation itself, not for an unrelated reason.
+            require(expected in str(error), f'route_inventory rejected {label} without reporting {expected!r}: {error}')
+            rejected.append(label)
+            continue
+        raise ContractError('route_inventory did not reject ' + label)
+    return rejected
+
+
+ERRORS_TS = ROOT / 'packages/core/src/errors.ts'
+
+
+def _example_names(case):
+    return [name for name in [case.get('example'), *(variant['example'] for variant in case.get('alternatives', []))] if name]
+
+
+def error_codes(cases=None, errors_ts=None):
+    """Every api/examples error envelope uses a code of packages/core/src/errors.ts, served with its DEFAULT_STATUS."""
+    text = ERRORS_TS.read_text() if errors_ts is None else errors_ts
+    union = re.search(r'export const ERROR_CODES = \[(.*?)\] as const;', text, re.S)
+    defaults = re.search(r'export const DEFAULT_STATUS[^=]*= \{(.*?)\};', text, re.S)
+    require(union is not None and defaults is not None, 'error_codes: errors.ts lost ERROR_CODES or DEFAULT_STATUS')
+    codes = re.findall(r"^\s*'([a-z_]+)',", union.group(1), re.M)
+    statuses = {code: int(status) for code, status in re.findall(r'^\s*([a-z_]+): (\d{3}),', defaults.group(1), re.M)}
+    require(codes and len(set(codes)) == len(codes), 'error_codes: ERROR_CODES is empty or repeats a code')
+    require(set(codes) == set(statuses), f'error_codes: ERROR_CODES and DEFAULT_STATUS differ: {sorted(set(codes) ^ set(statuses))}')
+    cases = load_json(API / 'examples/response-cases.json') if cases is None else cases
+    used = set()
+    for case in cases:
+        for name in _example_names(case):
+            if not name.startswith('error'):
+                continue
+            code = load_json(API / 'examples' / f'{name}.json')['error']['code']
+            require(code in statuses, f'error_codes: {name}.json uses {code!r}, which errors.ts does not define')
+            require(statuses[code] == case['status'],
+                    f'error_codes: {name}.json ({code}) is served as {case["status"]} but DEFAULT_STATUS says {statuses[code]}')
+            used.add(code)
+    bound = {name for case in cases for name in _example_names(case)}
+    unbound = sorted({p.stem for p in (API / 'examples').glob('error*.json')} - bound)
+    require(not unbound, f'error_codes: error examples bound to no response case: {unbound}')
+    return len(used), len(codes)
+
+
+def error_code_controls():
+    """error_codes must reject an example code missing from errors.ts and a status that disagrees with DEFAULT_STATUS."""
+    text = ERRORS_TS.read_text()
+    cases = load_json(API / 'examples/response-cases.json')
+
+    def replaced(needle, replacement):
+        require(text.count(needle) == 1, f'error_code_controls: expected exactly one {needle!r}')
+        return text.replace(needle, replacement)
+
+    removed = replaced("  'validation_failed', //", '  //')
+    removed = removed.replace('  validation_failed: 422,\n', '', 1)
+    controls = [
+        ('validation_failed removed from errors.ts', None, removed,
+         "error-422.json uses 'validation_failed', which errors.ts does not define"),
+        ('not_ready given DEFAULT_STATUS 500', None, replaced('  not_ready: 503,', '  not_ready: 500,'),
+         'error-503.json (not_ready) is served as 503 but DEFAULT_STATUS says 500'),
+        ('error-404 bound to a 422 response case',
+         [{**case, 'status': 422} if case.get('example') == 'error-404' else case for case in cases], None,
+         'error-404.json (not_found) is served as 422 but DEFAULT_STATUS says 404'),
+    ]
+    for label, mutated_cases, mutated_text, expected in controls:
+        try:
+            error_codes(cases=mutated_cases, errors_ts=mutated_text)
+        except ContractError as error:
+            require(expected in str(error), f'error_codes rejected {label} without reporting {expected!r}: {error}')
+            continue
+        raise ContractError('error_codes did not reject ' + label)
+    return len(controls)
 
 
 def dropped_routes(spec):
@@ -660,7 +802,9 @@ def main():
         Draft202012Validator.check_schema(schema)
     print(f'PASS openapi_schema: OpenAPI 3.1.0, info.version {CONTRACT_VERSION}, {len(spec["components"]["schemas"])} Draft 2020-12 schemas; pinned offline dependencies')
     count = route_inventory(spec)
-    print(f'PASS route_inventory: {count} methods on {len(spec["paths"])} paths; exact MVP/API route and status matrices')
+    rejected = route_inventory_controls(spec)
+    print(f'PASS route_inventory: exact MVP/API route and status matrices ({count} methods on {len(spec["paths"])} paths, '
+          f'equal in openapi.yaml, MVP.md and API.md; {len(rejected)} mutations rejected: {"; ".join(rejected)})')
     count = dropped_routes(spec)
     print(f'PASS dropped paths (/api/v1/auth/*, POST /api/v1/scrobbles, /api/v1/operations/{{id}}, /api/v1/account/*) are absent: '
           f'{count} ADR 0004 §9.3 routes, their schemas, parameters and security schemes')
@@ -677,6 +821,10 @@ def main():
           f'{negative} rejected wrong-type responses, {requests} request, {queries} query and {components} component fixtures')
     accepted, rejected = schema_cases(spec, validator_type, checker)
     print(f'PASS schema_cases: {accepted} accepted and {rejected} rejected UTF-8/scalar, timestamp, identifier, notify, record-status, export and client-metadata cases')
+    used, defined = error_codes()
+    controls = error_code_controls()
+    print(f'PASS error_codes: the {used} codes of api/examples error envelopes are defined in packages/core/src/errors.ts '
+          f'with the status each is served with ({defined} codes in all; {controls} mutations rejected)')
     documents, records = lexicons()
     print(f'PASS lexicons/settings.json is a valid lexicon with literal:self key: {documents} lexicons share {LEXICON_PREFIX}; {records} settings record cases')
     prove_failure_detection(spec, validator_type, checker)

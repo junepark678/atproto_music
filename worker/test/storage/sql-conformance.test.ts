@@ -228,6 +228,114 @@ describe('DO SQLite conformance', () => {
     });
   });
 
+  // M1.3.1/unique_record: inserting the same AT URI twice is a constraint
+  // failure and the row count stays one (a plain INSERT never upserts).
+  it('second plain INSERT of one scrobbles.uri fails with a constraint error and the row count stays one', async () => {
+    await inDb('conf-unique-uri', (db, storage) => {
+      addUser(db, 'did:plc:alice');
+      const uri = `at://did:plc:alice/${SCROBBLE}/r1`;
+      addScrobble(db, 'did:plc:alice', 'r1');
+      const first = db.all('SELECT * FROM scrobbles');
+      expect(first).toHaveLength(1);
+
+      // Same uri, different payload: refused by the primary key, through doDb and raw exec.
+      const insert = `INSERT INTO scrobbles(uri,cid,did,rkey,revision,artist,track,listened_at,created_at,indexed_at,artist_key,track_key)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`;
+      const params = [
+        uri,
+        'bafy-other',
+        'did:plc:alice',
+        'r1',
+        '3lb2zzzzzzz2z',
+        'Other',
+        'Other',
+        T0,
+        T0,
+        T0,
+        'o',
+        'o',
+      ];
+      expect(() => db.run(insert, ...params)).toThrow(/UNIQUE constraint failed: scrobbles\.uri/);
+      expect(() => storage.sql.exec(insert, ...params)).toThrow(/UNIQUE constraint failed: scrobbles\.uri/);
+      expect(() => addScrobble(db, 'did:plc:alice', 'r1')).toThrow(/UNIQUE constraint failed: scrobbles\.uri/);
+
+      // Inside a transaction the failure aborts the whole unit: an earlier write in it is gone.
+      expect(() =>
+        db.tx(() => {
+          db.run("INSERT INTO timers(name, due_at) VALUES ('drain', 1)");
+          db.run(insert, ...params);
+        }),
+      ).toThrow(/UNIQUE constraint failed: scrobbles\.uri/);
+      expect(db.all('SELECT * FROM timers')).toEqual([]);
+
+      // Still exactly one row, byte-identical to the first insert.
+      expect(db.one('SELECT count(*) AS n FROM scrobbles')).toEqual({ n: 1 });
+      expect(db.one('SELECT count(*) AS n FROM scrobbles WHERE uri = ?', uri)).toEqual({ n: 1 });
+      expect(db.all('SELECT * FROM scrobbles')).toEqual(first);
+      expect(db.one('SELECT cid, revision, artist FROM scrobbles')).toEqual({
+        cid: 'bafy-r1',
+        revision: '3lb2aaaaaaa2a',
+        artist: 'Artist',
+      });
+      // follows.uri is a primary key too.
+      addUser(db, 'did:plc:bob');
+      addFollow(db, 'did:plc:alice', 'did:plc:bob', 'f1');
+      expect(() => addFollow(db, 'did:plc:alice', 'did:plc:bob', 'f1')).toThrow(
+        /UNIQUE constraint failed: follows\.uri/,
+      );
+      expect(db.one('SELECT count(*) AS n FROM follows')).toEqual({ n: 1 });
+    });
+  });
+
+  // M1.3.1/foreign_key: a row for a missing owner is rejected with no dangling row.
+  it('INSERT of a scrobble or follow whose users row is missing is rejected and leaves no row', async () => {
+    await inDb('conf-fk-missing-owner', (db, storage) => {
+      expect(storage.sql.exec('PRAGMA foreign_keys').one()).toEqual({ foreign_keys: 1 });
+      addUser(db, 'did:plc:bob');
+      const before = { users: db.all('SELECT * FROM users'), timers: db.all('SELECT * FROM timers') };
+
+      // No users row for did:plc:nobody: both owner foreign keys refuse.
+      expect(() => addScrobble(db, 'did:plc:nobody', 's1')).toThrow(/FOREIGN KEY constraint failed/);
+      expect(() => addFollow(db, 'did:plc:nobody', 'did:plc:bob', 'f1')).toThrow(/FOREIGN KEY constraint failed/);
+      // INSERT OR IGNORE does not bypass a foreign key (SQLite ignores only
+      // UNIQUE/NOT NULL/CHECK conflicts).
+      expect(() =>
+        db.run(
+          'INSERT OR IGNORE INTO follows(uri,cid,actor,subject,revision,created_at,indexed_at) VALUES (?,?,?,?,?,?,?)',
+          `at://did:plc:nobody/${FOLLOW}/f2`,
+          'bafy-f2',
+          'did:plc:nobody',
+          'did:plc:bob',
+          '3lb2aaaaaaa2a',
+          T0,
+          T0,
+        ),
+      ).toThrow(/FOREIGN KEY constraint failed/);
+      // In a transaction, the failure rolls back the other writes of the unit.
+      expect(() =>
+        db.tx(() => {
+          db.run("INSERT INTO timers(name, due_at) VALUES ('drain', 1)");
+          addScrobble(db, 'did:plc:nobody', 's2');
+        }),
+      ).toThrow(/FOREIGN KEY constraint failed/);
+
+      // No dangling rows anywhere.
+      expect(db.one('SELECT count(*) AS n FROM scrobbles')).toEqual({ n: 0 });
+      expect(db.one('SELECT count(*) AS n FROM follows')).toEqual({ n: 0 });
+      expect(db.all('PRAGMA foreign_key_check')).toEqual([]);
+      expect({ users: db.all('SELECT * FROM users'), timers: db.all('SELECT * FROM timers') }).toEqual(before);
+
+      // Control: once the users row exists the same inserts succeed.
+      addUser(db, 'did:plc:nobody');
+      addScrobble(db, 'did:plc:nobody', 's1');
+      addFollow(db, 'did:plc:nobody', 'did:plc:bob', 'f1');
+      expect(db.all('SELECT did, rkey FROM scrobbles')).toEqual([{ did: 'did:plc:nobody', rkey: 's1' }]);
+      expect(db.all('SELECT actor, subject FROM follows')).toEqual([
+        { actor: 'did:plc:nobody', subject: 'did:plc:bob' },
+      ]);
+    });
+  });
+
   it('integers up to 2^53-1 round-trip exactly; documents precision loss above', async () => {
     await inDb('conf-int', (db, storage) => {
       const put = "INSERT INTO counters(name, label, value) VALUES ('n', ?, ?)";

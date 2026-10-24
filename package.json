@@ -16,7 +16,7 @@
   ],
   "scripts": {
     "test": "vitest run",
-    "typecheck": "tsc -b packages/core packages/atproto worker web",
+    "typecheck": "tsc -b",
     "lint": "biome check .",
     "build:web": "npm run build --workspace @atmusic/web",
     "dev": "wrangler dev --config worker/wrangler.jsonc",

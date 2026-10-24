@@ -1024,6 +1024,20 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 | `keyboard_journey` | `web/tests/accessibility.spec.ts › keyboard-only journey reaches sign-in, scrobble submit, window tabs, follow and sign-out with visible focus` (required wave amendment, W6-03) |
 | `live_product` | `npx tsx scripts/live/pds_compat_check.ts (no env) › exits nonzero with blocked and lists missing names` |
 
+## Error code vocabulary
+
+Recorded by W0-AMEND (a deferred Wave 0 review item). API.md fixes the envelope `{error: {code, message, requestId, fields?}}` and OpenAPI types `code` as a plain string; the codes themselves are fixed by `api/examples/error-*.json` and by `packages/core/src/errors.ts` (`ERROR_CODES`, `DEFAULT_STATUS`). For the kept routes, the TypeScript rebuild renames these codes of the frozen Rust oracle (`crates/server/src/http/*`). Statuses are unchanged.
+
+| Rust oracle code | TypeScript code | Status |
+| --- | --- | --- |
+| `invalid_query`, `invalid_path` | `validation_failed` (`fields` names the parameter) | 422 |
+| `body_too_large` | `payload_too_large` | 413 |
+| `invalid_body` | `bad_request` | 400 |
+| `upstream_unavailable` | `upstream_error` | 502 |
+| `storage_not_ready`, `storage_unavailable` | `not_ready` | 503 |
+
+`invalid_cursor`, `invalid_json`, `identity_mismatch`, `method_not_allowed`, `rate_limited` and `not_found` keep their names. `queue_full` (503) is new with N1. The OAuth, session, write and operation codes go with the routes ADR 0004 §9.3 drops. `scripts/validate_contracts.py` (`error_codes`) checks that every code in `api/examples` is defined in `errors.ts` and is served with its `DEFAULT_STATUS`.
+
 ## Leaves with no rule change
 
 These leaves keep every rule and case unchanged; only the global implementation-location amendment applies. Their case targets are in the case map.

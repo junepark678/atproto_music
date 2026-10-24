@@ -220,6 +220,145 @@ describe('parseConfig namespace gate', () => {
     expect(JSON.stringify(free)).not.toContain('a'.repeat(32));
   });
 
+  // M1.1.1/invalid_namespace: empty prefix, one segment, uppercase segment and
+  // embedded slash each reject the configuration naming exactly LEXICON_PREFIX.
+  it('one-segment, uppercase and embedded-slash LEXICON_PREFIX values are rejected naming LEXICON_PREFIX; empty yields prefix null', () => {
+    const rejected = [
+      // one segment
+      'music',
+      'atmusic',
+      // an uppercase segment, first, middle or last
+      'Org.example.music',
+      'org.Example.music',
+      'org.example.MUSIC',
+      'dev.pythonplayer123.Music',
+      // an embedded slash
+      'org.example/music',
+      'org/example.music',
+      'dev.pythonplayer123.music/scrobble',
+      'org.example.music/',
+    ];
+    for (const prefix of rejected) {
+      let error: unknown;
+      try {
+        parseConfig({ ...BASE, LEXICON_PREFIX: prefix }, { allowFixturePrefix: true });
+      } catch (err) {
+        error = err;
+      }
+      expect(error, prefix).toBeInstanceOf(ConfigError);
+      const issues = (error as ConfigError).issues;
+      // Exactly one issue, on exactly the invalid field.
+      expect(issues, prefix).toEqual([
+        { field: 'LEXICON_PREFIX', message: 'must be a lowercase reverse-domain NSID prefix' },
+      ]);
+      expect((error as ConfigError).message, prefix).toBe(
+        'invalid configuration: LEXICON_PREFIX: must be a lowercase reverse-domain NSID prefix',
+      );
+    }
+    // The same prefixes fail whether or not a test entry allows the fixture prefix.
+    for (const prefix of rejected) {
+      expect(
+        issuesOf(() => parseConfig({ ...BASE, LEXICON_PREFIX: prefix })),
+        prefix,
+      ).toEqual(['LEXICON_PREFIX']);
+    }
+
+    // Empty (and whitespace-only) is not an error: the namespace gate is closed.
+    for (const empty of ['', '   ']) {
+      const closed = parseConfig({ ...BASE, LEXICON_PREFIX: empty });
+      expect(closed, JSON.stringify(empty)).toMatchObject({
+        prefix: null,
+        collections: null,
+        fixturePrefix: false,
+        publication: false,
+        configuredIngestMode: 'socket',
+        ingestMode: 'off',
+      });
+    }
+    // Control: the valid neighbours of the rejected values are accepted.
+    for (const [prefix, scrobble] of [
+      ['org.example.music', 'org.example.music.scrobble'],
+      ['dev.pythonplayer123.music', 'dev.pythonplayer123.music.scrobble'],
+    ] as const) {
+      expect(parseConfig({ ...BASE, LEXICON_PREFIX: prefix }).collections?.scrobble).toBe(scrobble);
+    }
+  });
+
+  // M1.4.1/invalid_config: origin=http://..., an invalid namespace and a
+  // malformed key fail with the field names and no secret value anywhere in
+  // the error (message, issues or its serialization).
+  it('http PUBLIC_ORIGIN and invalid LEXICON_PREFIX fail parseConfig naming each field without echoing any secret value', () => {
+    const adminToken = 'S3cr3t-admin-token'; // set but shorter than 32 characters: invalid
+    const cursorKey = 'feedfacecafebeef'.repeat(3); // 24 bytes: below the 32-byte minimum
+    const env = {
+      ...BASE,
+      PUBLIC_ORIGIN: 'http://public.example',
+      LEXICON_PREFIX: 'Public.Example/music',
+      ADMIN_TOKEN: adminToken,
+    };
+
+    let error: unknown;
+    try {
+      parseConfig(env);
+    } catch (err) {
+      error = err;
+    }
+    expect(error).toBeInstanceOf(ConfigError);
+    const configError = error as ConfigError;
+    expect(configError.name).toBe('ConfigError');
+    // Every invalid field is named, in order, and nothing else is.
+    expect(configError.issues.map((i) => i.field)).toEqual(['PUBLIC_ORIGIN', 'LEXICON_PREFIX', 'ADMIN_TOKEN']);
+    expect(configError.message).toBe(
+      'invalid configuration: PUBLIC_ORIGIN: must be an https origin without path, port, query, fragment or credentials; ' +
+        'LEXICON_PREFIX: must be a lowercase reverse-domain NSID prefix; ' +
+        'ADMIN_TOKEN: must be at least 32 characters when set',
+    );
+
+    let keyError: unknown;
+    try {
+      parseCursorKey({ CURSOR_KEY: cursorKey });
+    } catch (err) {
+      keyError = err;
+    }
+    expect(keyError).toBeInstanceOf(ConfigError);
+    expect((keyError as ConfigError).issues).toEqual([
+      { field: 'CURSOR_KEY', message: 'must be at least 32 hex-encoded bytes' },
+    ]);
+
+    // No secret value (or a recognisable fragment of one) is echoed anywhere a
+    // log line or startup failure could carry it.
+    for (const err of [configError, keyError as ConfigError]) {
+      const surfaces = [err.message, String(err), JSON.stringify(err.issues), JSON.stringify(err), err.stack ?? ''];
+      for (const surface of surfaces) {
+        expect(surface).not.toContain(adminToken);
+        expect(surface).not.toContain('S3cr3t');
+        expect(surface).not.toContain(cursorKey);
+        expect(surface).not.toContain('feedfacecafebeef');
+      }
+    }
+
+    // Each failing field alone is reported alone.
+    expect(issuesOf(() => parseConfig({ ...BASE, PUBLIC_ORIGIN: 'http://public.example' }))).toEqual(['PUBLIC_ORIGIN']);
+    expect(issuesOf(() => parseConfig({ ...BASE, LEXICON_PREFIX: 'Public.Example/music' }))).toEqual([
+      'LEXICON_PREFIX',
+    ]);
+    // Control: the same env with valid values parses, and a valid token is
+    // reduced to a boolean rather than copied into AppConfig.
+    const validToken = 'v'.repeat(40);
+    const ok = parseConfig({
+      ...env,
+      PUBLIC_ORIGIN: 'https://public.example',
+      LEXICON_PREFIX: 'org.example.music',
+      ADMIN_TOKEN: validToken,
+    });
+    expect(ok).toMatchObject({
+      publicOrigin: 'https://public.example',
+      prefix: 'org.example.music',
+      adminEnabled: true,
+    });
+    expect(JSON.stringify(ok)).not.toContain(validToken);
+  });
+
   it('CURSOR_KEY is at least 32 hex-encoded bytes and not all zero', () => {
     const key = parseCursorKey({ CURSOR_KEY: '000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f' });
     expect(Array.from(key)).toEqual(Array.from({ length: 32 }, (_, i) => i));

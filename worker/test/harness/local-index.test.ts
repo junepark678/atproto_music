@@ -13,7 +13,7 @@ import { fixedClock } from '@atmusic/core/test-support/clock';
 import { describe, expect, it } from 'vitest';
 import type { HistoryQuery, ModuleDeps, RowsResult, ScrobbleRow } from '../../src/do/contracts';
 import { doDb } from '../../src/do/db';
-import { INDEX_RPC_METHODS, makeLocalIndex, NotWiredError } from './local-index';
+import { INDEX_RPC_METHODS, makeLocalIndex, NotWiredError, type RpcImpl } from './local-index';
 
 const T0 = '2026-01-15T12:00:00.000000000Z';
 const SCROBBLE = 'com.example.atmusic.scrobble';
@@ -115,6 +115,37 @@ describe('worker/test/harness', () => {
     await runInDurableObject(stub, (_instance, state) => {
       expect(doDb(state.storage).all('SELECT * FROM timers')).toEqual([]);
     });
+  });
+
+  it('local-index adapter also accepts the frozen Partial<IndexRpc> form', async () => {
+    const stub = env.HARNESS.get(env.HARNESS.idFromName('local-index-rpc'));
+    const ready = { status: 'ready', version: 1 } as const;
+    const impl: RpcImpl = {
+      // A canned answer.
+      ready: async () => ready,
+      // Delegation to a module function through `this` (the ModuleDeps inside the DO).
+      history(q) {
+        return Promise.resolve(historyModule(this, q));
+      },
+    };
+    const index = makeLocalIndex({ stub, clock: fixedClock() }, impl, { form: 'rpc' });
+
+    expect(await index.ready()).toEqual(ready);
+    const page = await index.history({ did: 'did:plc:bob', limit: 5 });
+    expect(page.rows.map((r) => [r.did, r.rkey])).toEqual([['did:plc:bob', 'r1768478400000']]);
+    // The delegated write went to the harness DO's storage.
+    await runInDurableObject(stub, (_instance, state) => {
+      expect(doDb(state.storage).all('SELECT did, rkey FROM scrobbles')).toEqual([
+        { did: 'did:plc:bob', rkey: 'r1768478400000' },
+      ]);
+    });
+    await expect(index.feed({ scope: 'global', limit: 1 })).rejects.toBeInstanceOf(NotWiredError);
+    expect(index.calls).toEqual([
+      { method: 'ready', args: [] },
+      { method: 'history', args: [{ did: 'did:plc:bob', limit: 5 }] },
+      { method: 'feed', args: [{ scope: 'global', limit: 1 }] },
+    ]);
+    expect(index.networkAttempts).toEqual([]);
   });
 
   it('pinned cloudflare:test exposes the DO, alarm, eviction and cron helpers', async () => {
