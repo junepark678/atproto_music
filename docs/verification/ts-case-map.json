@@ -847,8 +847,8 @@
     },
     {
       "case": "M6.1.1/asset_cache",
-      "target": "retired:D",
-      "reason": "build.rs embedding is dropped; Workers Static Assets set asset caching (ADR 0004 §9.3)."
+      "target": "scripts/test/gen-config.test.ts › _headers contains require-trusted-types-for and frame-ancestors 'none'",
+      "note": "The cache policy is not dropped with build.rs embedding: Workers Static Assets do not mark hashed files immutable by default, so W1-09 gen-config must also write it to web/public/_headers, and this test must assert hashed /assets/* files get Cache-Control public, max-age=31536000, immutable while /index.html and /oauth/client-metadata.json get no-cache."
     },
     {
       "case": "M6.1.2/untrusted_forwarded",
@@ -895,7 +895,8 @@
     },
     {
       "case": "M6.2.2/metrics_auth",
-      "target": "worker/test/composition/admin.test.ts › admin routes 404 without ADMIN_TOKEN; wrong token 401 constant-time; status JSON shape"
+      "target": "worker/test/composition/admin.test.ts › admin routes 404 without ADMIN_TOKEN; wrong token 401 constant-time; status JSON shape",
+      "note": "Token never logged (ADR 0004 §8): the test must capture the injected Logger output across the 404, wrong-token 401 and valid 200 requests and assert the configured and presented ADMIN_TOKEN values appear in no log line and no response body."
     },
     {
       "case": "M6.2.2/upstream_offline",
@@ -903,8 +904,8 @@
     },
     {
       "case": "M6.2.2/log_redaction",
-      "target": "retired:A16",
-      "reason": "The Prometheus listener and its log pipeline become Workers Logs and the counters table; the server receives no codes, tokens or cookies (A3)."
+      "target": "worker/test/composition/admin.test.ts › admin routes 404 without ADMIN_TOKEN; wrong token 401 constant-time; status JSON shape",
+      "note": "Carries forward ADR 0004 §8 (CURSOR_KEY and ADMIN_TOKEN never logged or serialised): W5-01 must inject a capturing Logger, configure marked dummy CURSOR_KEY and ADMIN_TOKEN values, send a valid and a wrong marked bearer token to /internal/admin/* and a marked track title through an applied record, and assert that none of the secret or bearer markers appears in captured logs or error envelopes and that the track marker is absent from logs. There are no OAuth codes or cookies to mark (A3)."
     },
     {
       "case": "M6.2.3/benchmark_dataset",

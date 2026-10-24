@@ -475,7 +475,7 @@
             "$ref": "#/components/parameters/Cursor"
           }
         ],
-        "description": "Chronological music feed. scope=global is every active owner, including the viewer. scope=following requires viewer=<did> (A8, public because follow records are public): it returns the owners the viewer follows through active music-follow edges, excluding the viewer, and the cursor binds the viewer. A missing or invalid viewer for following is 422 fields.viewer; an unknown viewer gets 200 with an empty page.",
+        "description": "Chronological music feed. scope=global is every active owner, including the viewer. scope=following requires viewer=<did> (A8, public because follow records are public): it returns the owners the viewer follows through active music-follow edges, excluding the viewer, and only the following cursor binds the viewer (the global cursor binding keeps viewer=null). A missing or invalid viewer for following is 422 fields.viewer; an unknown viewer gets 200 with an empty page.",
         "x-query-examples": {
           "following": {
             "$ref": "#/components/examples/feed-following-input"
@@ -2014,7 +2014,7 @@
         "x-required-when": {
           "scope": "following"
         },
-        "description": "DID whose music follows define scope=following (A8). Required for following; missing or invalid is 422 fields.viewer. A supplied viewer must be a valid DID for either scope; it is bound into the cursor. The viewer is public input, not authentication."
+        "description": "DID whose music follows define scope=following (A8). Required for following; missing or invalid is 422 fields.viewer, and the following cursor binds the viewer. For scope=global the viewer does not filter and is not bound into the cursor: the global binding carries viewer=null (crates/core/src/cursor.rs global_feed), so a global cursor is the same token with or without a viewer, and a global binding that carries a viewer is 400 invalid_cursor. A supplied viewer that is not a valid DID is still 422 fields.viewer because the parameter schema is Did. The viewer is public input, not authentication."
       },
       "RecordUriQuery": {
         "name": "uri",

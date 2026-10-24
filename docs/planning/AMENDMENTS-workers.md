@@ -34,7 +34,7 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 
 **Amendment ids:** A3, A8, A9, A10, N1, N2, N3, D
 
-**Demonstrated gap:** (A3) Q1 (ADR 0004 §15) places the OAuth client in the browser so the Worker holds no user credential; `@atproto/oauth-client-browser` performs discovery, PAR, PKCE, DPoP nonces, the issuer check and refresh, and stores the session in IndexedDB. (A8) There is no server session to identify the viewer (A3); follow records are already public (Q7). (A9) Owner-only export needs a server session, which no longer exists (A3); the exported records are all public. (A10) A server-side disconnect needs an authenticated owner request; with no session (A3) the owner proves intent with a repo-signed `<prefix>.settings/self` record (ADR 0004 F10, §5.3). (N1) Without server writes the AppView needs an untrusted, rate-limited way to learn about a new record promptly (ADR 0004 §5.2 step 4). (N2) The SPA needs to see when its record is indexed or excluded, which the dropped operation status used to report. (N3) A9 moves export to a public per-DID route. (D) ADR 0004 §9.3 drops the item outright under Q1 (browser public client); the BFF fallback in §15 would restore it.
+**Demonstrated gap:** (A3) Q1 (ADR 0004 §15) places the OAuth client in the browser so the Worker holds no user credential; `@atproto/oauth-client-browser` performs discovery, PAR, PKCE, DPoP nonces, the issuer check and refresh, and stores the session in IndexedDB. (A8) There is no server session to identify the viewer (A3); follow records are already public (Q7). (A9) Owner-only export needs a server session, which no longer exists (A3); the exported records are all public. (A10) A server-side disconnect needs an authenticated owner request; with no session (A3) the owner proves intent with a repo-signed `<prefix>.settings/self` record (ADR 0004 F10, §5.3). (N1) Without server writes the AppView needs an untrusted, rate-limited way to learn about a new record promptly (ADR 0004 §5.2 step 4). (N2) The SPA needs to see when its record is indexed or excluded, which the dropped operation status used to report. (N3) A9 moves export to a public per-DID route. (D) ADR 0004 §9.3 drops the server auth, write, operation and account routes with the session, CSRF and Origin rules and the private-access matrix, because under Q1 (browser public client) the Worker has no session and no write path; the §15 BFF fallback would restore the nine routes, sessions and CSRF.
 
 **Amendment text:** `api/openapi.yaml` moves to `info.version` 1.1.0. The auth, server write, operation and account routes are removed with the `Accepted`, `Operation` and `Session` schemas. `POST /api/v1/notify`, `GET /api/v1/records/status` and `GET /api/v1/users/{did}/export` are added. `GET /api/v1/feed` takes `viewer`. `/oauth/client-metadata.json` is a static asset with `application_type: "web"` and the `/oauth/callback` redirect. Every remaining route is public; `required_auth` becomes the check that no route declares a security requirement, and `scripts/validate_contracts.py` still rejects the dropped paths.
 
@@ -76,7 +76,7 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 
 **Amendment ids:** A19, D
 
-**Demonstrated gap:** (A19) A Worker has no executable artifact; a release is a Worker version id and the bundle SHA-256. (D) ADR 0004 §9.3 drops the item outright under Q1 (browser public client); the BFF fallback in §15 would restore it.
+**Demonstrated gap:** (A19) A Worker has no executable artifact; a release is a Worker version id and the bundle SHA-256. (D) ADR 0004 §9.3 drops the musl artifact and its smoke tests because the Workers runtime runs no process of ours: there is no ELF to link statically, no port to probe from a child process and no SIGTERM to deliver; `wrangler versions upload` ships a bundled script instead. The drop follows from the runtime, not from Q1, so the §15 BFF fallback would not restore it.
 
 **Amendment text:** Superseded. The musl artifact and its smoke test are dropped. Release evidence is the Worker version id and bundle SHA-256; HTTP liveness, readiness and the unknown-API 404 are covered by the composition routing tests.
 
@@ -146,7 +146,7 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 
 **Amendment ids:** A1
 
-**Demonstrated gap:** (A1) tokio, sqlx and a bound TCP listener do not run on Cloudflare Workers; the single SQLite Durable Object is the only Workers store with synchronous transactions (`transactionSync`), and D1 rejects `BEGIN`/`SAVEPOINT` (ADR 0004 §1.2).
+**Demonstrated gap:** (A1) A Worker binds no address or port and has no command-line entry point: configuration arrives as Worker vars and secrets in `env`, and the single SQLite Durable Object migrates itself in its constructor, so there is no listener precedence to resolve and no separate migrate command to run (ADR 0004 §1.2, §6).
 
 **Amendment text:** Configuration is Worker vars and secrets parsed by `parseConfig(env)` (W0-01) and refused by `scripts/deploy.sh --dry-run` (W6-04). There is no listener, port or migrate CLI.
 
@@ -160,7 +160,7 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 
 **Amendment ids:** A1
 
-**Demonstrated gap:** (A1) tokio, sqlx and a bound TCP listener do not run on Cloudflare Workers; the single SQLite Durable Object is the only Workers store with synchronous transactions (`transactionSync`), and D1 rejects `BEGIN`/`SAVEPOINT` (ADR 0004 §1.2).
+**Demonstrated gap:** (A1) The embedded SQLite pool opened at process start is replaced by the single SQLite Durable Object, so readiness is the DO schema state reported over RPC (`too_new` gives 503) rather than a database open; with Jetstream as the upstream, an outage is the socket disconnect time reported through `Indexing`.
 
 **Amendment text:** Health and the error envelope are unchanged in shape. Readiness reports 503 when the DO schema is `too_new`; upstream degradation is reported through `Indexing` (`stale` when the socket has been disconnected for more than 5 minutes).
 
@@ -174,7 +174,7 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 
 **Amendment ids:** A18, D
 
-**Demonstrated gap:** (A18) Workers tests run in workerd through `@cloudflare/vitest-plugin`; there is no process, port or `LD_PRELOAD` to control, and restart is DO eviction. (D) ADR 0004 §9.3 drops the item outright under Q1 (browser public client); the BFF fallback in §15 would restore it.
+**Demonstrated gap:** (A18) Workers tests run in workerd through `@cloudflare/vitest-plugin`; there is no process, port or `LD_PRELOAD` to control, and restart is DO eviction. (D) ADR 0004 §9.3 drops the SIGTERM drain because neither a Worker nor a Durable Object receives a signal or has a shutdown hook, and every DO step is durable before it acknowledges, so there is no in-flight work to drain. The drop follows from the runtime, not from Q1, so the §15 BFF fallback would not restore it.
 
 **Amendment text:** Superseded. The server harness becomes isolated workerd storage per test file and a unique DO name per test; the SIGTERM drain is dropped. Durability across restart is asserted by DO eviction tests.
 
@@ -244,7 +244,7 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 
 **Amendment ids:** A3, D
 
-**Demonstrated gap:** (A3) Q1 (ADR 0004 §15) places the OAuth client in the browser so the Worker holds no user credential; `@atproto/oauth-client-browser` performs discovery, PAR, PKCE, DPoP nonces, the issuer check and refresh, and stores the session in IndexedDB. (D) ADR 0004 §9.3 drops the item outright under Q1 (browser public client); the BFF fallback in §15 would restore it.
+**Demonstrated gap:** (A3) Q1 (ADR 0004 §15) places the OAuth client in the browser so the Worker holds no user credential; `@atproto/oauth-client-browser` performs discovery, PAR, PKCE, DPoP nonces, the issuer check and refresh, and stores the session in IndexedDB. (D) ADR 0004 §9.3 drops `POST /api/v1/auth/start` and its Origin check because under Q1 the authorization request starts in the browser; the §15 BFF fallback would restore the route.
 
 **Amendment text:** `POST /api/v1/auth/start` is dropped. PAR and PKCE S256 are performed by `@atproto/oauth-client-browser`; no verifier or key reaches the server.
 
@@ -258,7 +258,7 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 
 **Amendment ids:** A3, D
 
-**Demonstrated gap:** (A3) Q1 (ADR 0004 §15) places the OAuth client in the browser so the Worker holds no user credential; `@atproto/oauth-client-browser` performs discovery, PAR, PKCE, DPoP nonces, the issuer check and refresh, and stores the session in IndexedDB. (D) ADR 0004 §9.3 drops the item outright under Q1 (browser public client); the BFF fallback in §15 would restore it.
+**Demonstrated gap:** (A3) Q1 (ADR 0004 §15) places the OAuth client in the browser so the Worker holds no user credential; `@atproto/oauth-client-browser` performs discovery, PAR, PKCE, DPoP nonces, the issuer check and refresh, and stores the session in IndexedDB. (D) ADR 0004 §9.3 drops `GET /api/v1/auth/callback` and the 300 s server OAuth state because under Q1 the code exchange completes in the browser at `/oauth/callback`; the §15 BFF fallback would restore the callback route and its state.
 
 **Amendment text:** `GET /api/v1/auth/callback` and server OAuth state are dropped. `/oauth/callback` is an SPA route served through the asset fallback; the library completes the exchange, the issuer check and DPoP nonce retries.
 
@@ -272,7 +272,7 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 
 **Amendment ids:** A3, D
 
-**Demonstrated gap:** (A3) Q1 (ADR 0004 §15) places the OAuth client in the browser so the Worker holds no user credential; `@atproto/oauth-client-browser` performs discovery, PAR, PKCE, DPoP nonces, the issuer check and refresh, and stores the session in IndexedDB. (D) ADR 0004 §9.3 drops the item outright under Q1 (browser public client); the BFF fallback in §15 would restore it.
+**Demonstrated gap:** (A3) Q1 (ADR 0004 §15) places the OAuth client in the browser so the Worker holds no user credential; `@atproto/oauth-client-browser` performs discovery, PAR, PKCE, DPoP nonces, the issuer check and refresh, and stores the session in IndexedDB. (D) ADR 0004 §9.3 drops encrypted server token storage and the operator encryption key because under Q1 no token reaches the Worker; the §15 BFF fallback would restore both (it adds `ENCRYPTION_KEY`).
 
 **Amendment text:** Encrypted server token storage and the operator encryption key are dropped. Tokens and the non-extractable DPoP key live in the browser; the library serialises refresh across tabs with Web Locks. A failed refresh surfaces the re-auth state.
 
@@ -286,7 +286,7 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 
 **Amendment ids:** A3, D
 
-**Demonstrated gap:** (A3) Q1 (ADR 0004 §15) places the OAuth client in the browser so the Worker holds no user credential; `@atproto/oauth-client-browser` performs discovery, PAR, PKCE, DPoP nonces, the issuer check and refresh, and stores the session in IndexedDB. (D) ADR 0004 §9.3 drops the item outright under Q1 (browser public client); the BFF fallback in §15 would restore it.
+**Demonstrated gap:** (A3) Q1 (ADR 0004 §15) places the OAuth client in the browser so the Worker holds no user credential; `@atproto/oauth-client-browser` performs discovery, PAR, PKCE, DPoP nonces, the issuer check and refresh, and stores the session in IndexedDB. (D) ADR 0004 §9.3 drops application session cookies, the CSRF token and the Origin rules because under Q1 the Worker has no session and no mutation route; the §15 BFF fallback would restore sessions and CSRF.
 
 **Amendment text:** Application sessions, cookies and CSRF are dropped. Sessions follow library and spec limits (at most 14 days for public clients) instead of the 7-day cookie; the SPA shows the expiry and re-prompts.
 
@@ -328,7 +328,7 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 
 **Amendment ids:** A3, D
 
-**Demonstrated gap:** (A3) Q1 (ADR 0004 §15) places the OAuth client in the browser so the Worker holds no user credential; `@atproto/oauth-client-browser` performs discovery, PAR, PKCE, DPoP nonces, the issuer check and refresh, and stores the session in IndexedDB. (D) ADR 0004 §9.3 drops the item outright under Q1 (browser public client); the BFF fallback in §15 would restore it.
+**Demonstrated gap:** (A3) Q1 (ADR 0004 §15) places the OAuth client in the browser so the Worker holds no user credential; `@atproto/oauth-client-browser` performs discovery, PAR, PKCE, DPoP nonces, the issuer check and refresh, and stores the session in IndexedDB. (D) ADR 0004 §9.3 drops the server OAuth state, callback, sessions, cookies and the private-access 401/403/404 matrix that this negative matrix exercised, because under Q1 none of them exists on the Worker; the §15 BFF fallback would restore them.
 
 **Amendment text:** The server OAuth/session negative matrix is retired with the routes it exercised. Browser OAuth behaviour is covered by `web/test/oauth/session.test.ts` and the live gate.
 
@@ -412,7 +412,7 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 
 **Amendment ids:** A13, A12, D
 
-**Demonstrated gap:** (A13) The AppView only reflects verified repository state; an unverified local delete cannot change public views without weakening "verified repository records are the public source of truth". (A12) Writes go from the browser to the owner's PDS (A2), so the outbox moves to the SPA IndexedDB store with the same retry formula, cap and crash barriers. (D) ADR 0004 §9.3 drops the item outright under Q1 (browser public client); the BFF fallback in §15 would restore it.
+**Demonstrated gap:** (A13) The AppView only reflects verified repository state; an unverified local delete cannot change public views without weakening "verified repository records are the public source of truth". (A12) Writes go from the browser to the owner's PDS (A2), so the outbox moves to the SPA IndexedDB store with the same retry formula, cap and crash barriers. (D) ADR 0004 §9.3 drops `DELETE /api/v1/scrobbles/{id}` with the other server write routes because under Q1 the SPA deletes from the owner's own PDS; the §15 BFF fallback would restore the route and its owner check.
 
 **Amendment text:** `DELETE /api/v1/scrobbles/{id}` is dropped. The owner's view hides the record immediately through the outbox overlay; public views change once signed absence is verified. A delete queued behind a pending create waits for it (`predecessorIds`).
 
@@ -650,7 +650,7 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 
 **Amendment ids:** A3, D
 
-**Demonstrated gap:** (A3) Q1 (ADR 0004 §15) places the OAuth client in the browser so the Worker holds no user credential; `@atproto/oauth-client-browser` performs discovery, PAR, PKCE, DPoP nonces, the issuer check and refresh, and stores the session in IndexedDB. (D) ADR 0004 §9.3 drops the item outright under Q1 (browser public client); the BFF fallback in §15 would restore it.
+**Demonstrated gap:** (A3) Q1 (ADR 0004 §15) places the OAuth client in the browser so the Worker holds no user credential, cookie or private payload to leak into a profile. (D) ADR 0004 §9.3 drops application sessions under Q1, so no request carries a caller identity that could make the owner's view of a public profile differ from anyone else's; the §15 BFF fallback would restore sessions and with them the owner-equality case.
 
 **Amendment text:** The server holds no tokens, cookies or private payloads, and no request carries a caller identity, so the sensitive-field and owner-equality cases are retired. Profile caching stays `no-store`.
 
@@ -706,21 +706,21 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 
 **Amendment ids:** A1, D
 
-**Demonstrated gap:** (A1) tokio, sqlx and a bound TCP listener do not run on Cloudflare Workers; the single SQLite Durable Object is the only Workers store with synchronous transactions (`transactionSync`), and D1 rejects `BEGIN`/`SAVEPOINT` (ADR 0004 §1.2). (D) ADR 0004 §9.3 drops the item outright under Q1 (browser public client); the BFF fallback in §15 would restore it.
+**Demonstrated gap:** (A1) The SPA ships as Workers Static Assets uploaded with the Worker version, not as files compiled into a Rust executable, so asset lookup, traversal rejection and the SPA fallback are the Static Assets router's (`not_found_handling: single-page-application`, with `run_worker_first` only for `/api/*`, `/health/*` and `/internal/*`). (D) ADR 0004 §9.3 drops build.rs embedding because Static Assets replace it; the drop follows from the runtime, not from Q1. The cache policy is not dropped: Static Assets do not mark hashed files immutable by default, so the policy moves to the generated `_headers` file (W1-09).
 
-**Amendment text:** Superseded. build.rs embedding is replaced by Workers Static Assets with SPA fallback; `run_worker_first` covers only `/api/*`, `/health/*` and `/internal/*`. An unknown `/api/*` path is a JSON 404 from the Worker.
+**Amendment text:** Superseded. build.rs embedding is replaced by Workers Static Assets with SPA fallback; `run_worker_first` covers only `/api/*`, `/health/*` and `/internal/*`. An unknown `/api/*` path is a JSON 404 from the Worker. The cache policy is kept and moves to the generated `web/public/_headers` (W1-09): hashed `/assets/*` files are `public, max-age=31536000, immutable`, and `index.html` and `/oauth/client-metadata.json` are `no-cache`.
 
 | Case | Disposition |
 | --- | --- |
 | `asset_missing_traversal` | `worker/test/composition/routing.test.ts › every API.md v1.1 route dispatches; unknown /api/x → JSON 404; non-API path → ASSETS` (Asset lookup and traversal are Workers Static Assets behaviour (ADR 0004 §9.3).) |
 | `spa_deep_link` | `web/tests/mvp.spec.ts › OAuth callback navigation is served by SPA (/oauth/callback not intercepted by Worker)` |
-| `asset_cache` | `retired:D`: build.rs embedding is dropped; Workers Static Assets set asset caching (ADR 0004 §9.3). |
+| `asset_cache` | `scripts/test/gen-config.test.ts › _headers contains require-trusted-types-for and frame-ancestors 'none'` (The cache policy is not dropped with build.rs embedding: Workers Static Assets do not mark hashed files immutable by default, so W1-09 gen-config must also write it to web/public/_headers, and this test must assert hashed /assets/* files get Cache-Control public, max-age=31536000, immutable while /index.html and /oauth/client-metadata.json get no-cache.) |
 
 ### M6.1.2 Validate public-origin and trusted-proxy deployment settings
 
 **Amendment ids:** D
 
-**Demonstrated gap:** (D) ADR 0004 §9.3 drops the item outright under Q1 (browser public client); the BFF fallback in §15 would restore it.
+**Demonstrated gap:** (D) ADR 0004 §9.3 drops the trusted-proxy settings because Cloudflare terminates TLS in front of every Worker and supplies the client address in `CF-Connecting-IP`; there is no operator reverse proxy whose `Forwarded` or `X-Forwarded-For` headers could be trusted, and the Worker reads no Host header because OAuth metadata is generated at build time from `PUBLIC_ORIGIN`. The drop follows from the runtime, not from Q1, so the §15 BFF fallback would not restore it.
 
 **Amendment text:** Superseded. The trusted reverse proxy is replaced by Cloudflare: the Worker strips inbound `x-atmusic-*` headers and copies `CF-Connecting-IP`. OAuth metadata is generated at build time from `PUBLIC_ORIGIN`, so no Host header is read.
 
@@ -734,7 +734,7 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 
 **Amendment ids:** A1, A15
 
-**Demonstrated gap:** (A1) tokio, sqlx and a bound TCP listener do not run on Cloudflare Workers; the single SQLite Durable Object is the only Workers store with synchronous transactions (`transactionSync`), and D1 rejects `BEGIN`/`SAVEPOINT` (ADR 0004 §1.2). (A15) A Durable Object has no file to copy; DO point-in-time recovery covers 30 days and the index is re-derivable from public repositories.
+**Demonstrated gap:** (A1) There is no binary to install, database file to migrate or service to restart: a deploy is `wrangler` uploading a Worker version bound to one SQLite Durable Object, a custom domain and the `CURSOR_KEY` secret, and the DO migrates itself on first use. (A15) A Durable Object has no file to copy; DO point-in-time recovery covers 30 days and the index is re-derivable from public repositories.
 
 **Amendment text:** The install flow is `wrangler` deploy with a custom domain, `CURSOR_KEY` and an owned prefix; `scripts/deploy.sh --dry-run` refuses an empty or fixture prefix and a missing secret. Recovery from a bad upgrade is DO point-in-time recovery.
 
@@ -748,7 +748,7 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 
 **Amendment ids:** A1, N1
 
-**Demonstrated gap:** (A1) tokio, sqlx and a bound TCP listener do not run on Cloudflare Workers; the single SQLite Durable Object is the only Workers store with synchronous transactions (`transactionSync`), and D1 rejects `BEGIN`/`SAVEPOINT` (ADR 0004 §1.2). (N1) Without server writes the AppView needs an untrusted, rate-limited way to learn about a new record promptly (ADR 0004 §5.2 step 4).
+**Demonstrated gap:** (A1) There is no per-process rate limiter in front of a server: the single Worker runs in many isolates, so the only shared place for buckets is the singleton SQLite Durable Object, and the client IP comes from `CF-Connecting-IP`. (N1) Without server writes the AppView needs an untrusted, rate-limited way to learn about a new record promptly (ADR 0004 §5.2 step 4); notify is therefore the only JSON body left to cap.
 
 **Amendment text:** The only JSON body is notify, capped at 2 KiB (413 above). Notify is limited to 60/min per IP (`CF-Connecting-IP`) and 600/h per DID with 429 and `Retry-After`; buckets live in the singleton DO and fail open after a restart.
 
@@ -764,19 +764,19 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 
 **Demonstrated gap:** (A16) A Worker cannot run a Prometheus listener; Workers Logs, the `counters` table and `/internal/admin/status` replace it.
 
-**Amendment text:** Superseded. Metrics are Workers Logs, the `counters` table and `/internal/admin/status`, which exists only when `ADMIN_TOKEN` is set and compares the bearer token in constant time.
+**Amendment text:** Superseded. Metrics are Workers Logs, the `counters` table and `/internal/admin/status`, which exists only when `ADMIN_TOKEN` is set and compares the bearer token in constant time. Log redaction is kept: ADR 0004 §8 requires that `CURSOR_KEY` and `ADMIN_TOKEN` are never logged or serialised, and the Worker has an injected `Logger` and receives the admin bearer token, so the redaction case maps to the admin test instead of being retired.
 
 | Case | Disposition |
 | --- | --- |
-| `metrics_auth` | `worker/test/composition/admin.test.ts › admin routes 404 without ADMIN_TOKEN; wrong token 401 constant-time; status JSON shape` |
+| `metrics_auth` | `worker/test/composition/admin.test.ts › admin routes 404 without ADMIN_TOKEN; wrong token 401 constant-time; status JSON shape` (Token never logged (ADR 0004 §8): the test must capture the injected Logger output across the 404, wrong-token 401 and valid 200 requests and assert the configured and presented ADMIN_TOKEN values appear in no log line and no response body.) |
 | `upstream_offline` | `worker/test/storage/status.test.ts › socket disconnected >5min reports stale` |
-| `log_redaction` | `retired:A16`: The Prometheus listener and its log pipeline become Workers Logs and the counters table; the server receives no codes, tokens or cookies (A3). |
+| `log_redaction` | `worker/test/composition/admin.test.ts › admin routes 404 without ADMIN_TOKEN; wrong token 401 constant-time; status JSON shape` (Carries forward ADR 0004 §8 (CURSOR_KEY and ADMIN_TOKEN never logged or serialised): W5-01 must inject a capturing Logger, configure marked dummy CURSOR_KEY and ADMIN_TOKEN values, send a valid and a wrong marked bearer token to /internal/admin/* and a marked track title through an applied record, and assert that none of the secret or bearer markers appears in captured logs or error envelopes and that the track marker is absent from logs. There are no OAuth codes or cookies to mark (A3).) |
 
 ### M6.2.3 Add reproducible query latency benchmark
 
 **Amendment ids:** A1
 
-**Demonstrated gap:** (A1) tokio, sqlx and a bound TCP listener do not run on Cloudflare Workers; the single SQLite Durable Object is the only Workers store with synchronous transactions (`transactionSync`), and D1 rejects `BEGIN`/`SAVEPOINT` (ADR 0004 §1.2).
+**Demonstrated gap:** (A1) Queries run on DO SQLite inside workerd rather than through an sqlx pool in a native process, so the Rust wall-clock numbers do not transfer; Workers bill and bound rows read, so rows read per query and the index plan are the reproducible quantities, with workerd latency recorded beside them.
 
 **Amendment text:** The benchmark runs on DO SQLite in workerd and reports rows read, CPU and latency; the slow-query check is the `EXPLAIN QUERY PLAN` negative control.
 
@@ -888,7 +888,7 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 
 **Amendment ids:** A3, D
 
-**Demonstrated gap:** (A3) Q1 (ADR 0004 §15) places the OAuth client in the browser so the Worker holds no user credential; `@atproto/oauth-client-browser` performs discovery, PAR, PKCE, DPoP nonces, the issuer check and refresh, and stores the session in IndexedDB. (D) ADR 0004 §9.3 drops the item outright under Q1 (browser public client); the BFF fallback in §15 would restore it.
+**Demonstrated gap:** (A3) Q1 (ADR 0004 §15) places the OAuth client in the browser so the Worker holds no user credential; `@atproto/oauth-client-browser` performs discovery, PAR, PKCE, DPoP nonces, the issuer check and refresh, and stores the session in IndexedDB. (D) ADR 0004 §9.3 drops the CSRF token and Origin rules with the server mutation routes because under Q1 the SPA sends no mutation to the Worker; the §15 BFF fallback would restore CSRF and the client's CSRF state.
 
 **Amendment text:** The typed client covers every v1.1 route including notify and records/status. CSRF state is dropped; session loss is the OAuth library's re-auth state.
 
@@ -902,7 +902,7 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 
 **Amendment ids:** A1
 
-**Demonstrated gap:** (A1) tokio, sqlx and a bound TCP listener do not run on Cloudflare Workers; the single SQLite Durable Object is the only Workers store with synchronous transactions (`transactionSync`), and D1 rejects `BEGIN`/`SAVEPOINT` (ADR 0004 §1.2).
+**Demonstrated gap:** (A1) The SPA is served by Workers Static Assets rather than by a fallback route in the Rust process, so deep links resolve through the Static Assets single-page-application fallback before the Worker runs.
 
 **Amendment text:** Deep links are served by the Static Assets SPA fallback.
 
@@ -986,7 +986,7 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 
 **Amendment ids:** A1
 
-**Demonstrated gap:** (A1) tokio, sqlx and a bound TCP listener do not run on Cloudflare Workers; the single SQLite Durable Object is the only Workers store with synchronous transactions (`transactionSync`), and D1 rejects `BEGIN`/`SAVEPOINT` (ADR 0004 §1.2).
+**Demonstrated gap:** (A1) There is no release executable to embed the SPA in: the Vite `dist/` directory is uploaded as Workers Static Assets with each Worker version, so an embedded-dist or missing-build check has nothing to inspect.
 
 **Amendment text:** Superseded deliverable: the SPA is served by Workers Static Assets, not embedded in an executable.
 
@@ -1000,7 +1000,7 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 
 **Amendment ids:** A1, A18
 
-**Demonstrated gap:** (A1) tokio, sqlx and a bound TCP listener do not run on Cloudflare Workers; the single SQLite Durable Object is the only Workers store with synchronous transactions (`transactionSync`), and D1 rejects `BEGIN`/`SAVEPOINT` (ADR 0004 §1.2). (A18) Workers tests run in workerd through `@cloudflare/vitest-plugin`; there is no process, port or `LD_PRELOAD` to control, and restart is DO eviction.
+**Demonstrated gap:** (A1) There is no packaged executable to run the journey against; the deployable unit is the Worker plus its Static Assets and Durable Object, which `wrangler dev` runs locally in workerd. (A18) Workers tests run in workerd through `@cloudflare/vitest-plugin`; there is no process, port or `LD_PRELOAD` to control, and restart is DO eviction.
 
 **Amendment text:** The browser journey runs with Playwright against `wrangler dev` and a local PDS (`@atproto/dev-env`).
 

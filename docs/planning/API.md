@@ -41,7 +41,7 @@ No v1.1 route reads a session, cookie, CSRF token or Origin header, so no route 
 | GET `/api/v1/resolve` | `handle` | 200 `{did:DID,handle:string,verified:true}`; unresolved 404, mismatch 422 |
 | GET `/api/v1/scrobbles/{id}` | URL-encoded full AT URI | 200 `{scrobble:Scrobble}`; inactive/tombstoned/unconfirmed/absent record 404 |
 | GET `/api/v1/users/{did}/scrobbles` | `limit`, `cursor` | 200 Page<Scrobble> |
-| GET `/api/v1/feed` | `scope=global\|following`, `viewer`, `limit`, `cursor` | 200 Page<Scrobble>; following requires `viewer=<did>`: 422 `fields.viewer` if missing or invalid, the cursor binds the viewer, an unknown viewer gets an empty page (A8) |
+| GET `/api/v1/feed` | `scope=global\|following`, `viewer`, `limit`, `cursor` | 200 Page<Scrobble>; following requires `viewer=<did>`: 422 `fields.viewer` if missing or invalid, the following cursor binds the viewer (the global binding keeps `viewer` null), an unknown viewer gets an empty page (A8) |
 | GET `/api/v1/users/{did}/profile` | DID | 200 Profile below; unknown/inactive 404 |
 | GET `/api/v1/users/{did}/stats` | `window=all\|7d\|30d\|365d`, `limit` | 200 Statistics below; default window all |
 | GET `/api/v1/users/{did}/following` | `limit`, `cursor` | 200 Page<Follow> |
