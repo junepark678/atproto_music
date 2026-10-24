@@ -291,7 +291,8 @@ describe('jetstream socket', () => {
         gap: 'no_cursor',
       });
       expect(gapCalls).toEqual([T0]);
-      expect(checkpointRow(i.db)).toMatchObject({ pending_gap: 1, connected: 1 });
+      // The resume point is the live tail (a time_us cursor at the attempt instant), not "no cursor".
+      expect(checkpointRow(i.db)).toMatchObject({ pending_gap: 1, connected: 1, cursor: T0 * 1000 });
       // The gap recovery finished (W4-01 maybeClearGap's bookkeeping write).
       updateCheckpointBookkeeping(i.db, { pendingGap: false });
       const e1 = server.append(commit('r1'));
@@ -321,7 +322,8 @@ describe('jetstream socket', () => {
         pending_gap: 1,
         connected: 1,
         connected_at_ms: at,
-        cursor: e1.seq,
+        // The 24 h old cursor is abandoned to gap recovery; the resume point is the tail.
+        cursor: at * 1000,
         last_event_time_us: null,
       });
       expect(status(i.db, at)).toMatchObject({ state: 'recovering', caughtUp: false });
@@ -346,9 +348,94 @@ describe('jetstream socket', () => {
         [e3.seq, 400],
         [null, 101],
       ]);
-      expect(gapCalls).toEqual([T0, at, clock.nowMs()]);
+      const rejectedAt = clock.nowMs();
+      expect(gapCalls).toEqual([T0, at, rejectedAt]);
       expect(gapsScheduled()).toBe(3);
-      expect(checkpointRow(i.db)).toMatchObject({ pending_gap: 1, connected: 1, cursor: e3.seq });
+      expect(checkpointRow(i.db)).toMatchObject({ pending_gap: 1, connected: 1, cursor: rejectedAt * 1000 });
+
+      // The gap is handled once. W4-01 finishes the recovery; two quiet planned
+      // refreshes (15 and 30 min) resume from the stored tail cursor, which the
+      // fake accepts: no new gap, no second recovery, pending_gap stays clear.
+      updateCheckpointBookkeeping(i.db, { pendingGap: false });
+      for (const minutes of [15, 30]) {
+        clock.set(new Date(rejectedAt + minutes * MINUTE).toISOString());
+        await step(state.storage, m, server, { gap });
+        expect(server.attempts.at(-1)).toMatchObject({ cursor: rejectedAt * 1000, status: 101 });
+        expect(checkpointRow(i.db)).toMatchObject({
+          pending_gap: 0,
+          connected: 1,
+          connected_at_ms: rejectedAt + minutes * MINUTE,
+          cursor: rejectedAt * 1000,
+        });
+        // Not recovering again (caughtUp stays false only because the r1/r3 hints are undrained here).
+        expect(status(i.db, clock.nowMs())).toMatchObject({ state: 'current', caughtUp: false, lagSeconds: null });
+      }
+      expect(server.attempts.slice(4).map((a) => [a.cursor, a.status])).toEqual([
+        [rejectedAt * 1000, 101],
+        [rejectedAt * 1000, 101],
+      ]);
+      expect(gapCalls).toEqual([T0, at, rejectedAt]);
+      expect(gapsScheduled()).toBe(3);
+      // A live event after the tail cursor is still delivered from it and moves the cursor on.
+      const e4 = server.append(commit('r4'));
+      await flush();
+      expect(seqsSent(server)).toEqual([e4.seq]);
+      expect(checkpointRow(i.db)).toMatchObject({ cursor: e4.seq, last_event_time_us: e4.timeUs });
+      closeSocket(m, clock.nowMs());
+    });
+  });
+
+  it('a quiet reconnect does not hide a cursor older than lookback: its connect instant bounds the cursor time', async () => {
+    const clock = fixedClock();
+    // The fake retains 96 h and silently serves the old cursor: only our 24 h check can see the gap.
+    const server = jetstreamServer({ clock, lookbackHours: 96 });
+    await runInDurableObject(stubFor('socket-quiet-age'), async (i: HarnessDO) => {
+      const m = ingestDeps(i.db, clock, { mode: 'socket' });
+      const gapCalls: number[] = [];
+      const gap: ScheduleGapRecovery = (_db, now) => {
+        gapCalls.push(now);
+      };
+      expect(await connect(m, server.connect, T0, { scheduleGapRecovery: gap })).toMatchObject({ gap: 'no_cursor' });
+      updateCheckpointBookkeeping(i.db, { pendingGap: false });
+      const e1 = server.append(commit('r1'));
+      await flush();
+      closeSocket(m, clock.nowMs());
+
+      // A quiet reconnect (it ends before any event, the inclusive replay included).
+      clock.advance(MINUTE);
+      const quietAt = clock.nowMs();
+      expect(await connect(m, server.connect, quietAt, { scheduleGapRecovery: gap })).toMatchObject({
+        ok: true,
+        gap: null,
+      });
+      closeSocket(m, clock.nowMs());
+      expect(checkpointRow(i.db)).toMatchObject({
+        cursor: e1.seq,
+        last_event_time_us: null,
+        connected: 0,
+        connected_at_ms: quietAt,
+        pending_gap: 0,
+      });
+      // The sequence cursor's event predates the quiet connect, so quietAt bounds its time.
+      const cp = { cursor: e1.seq, lastEventTimeUs: null, connectedAtMs: quietAt, updatedAtMs: quietAt };
+      expect(gapOnConnect(cp, quietAt + 24 * HOUR, 24)).toBeNull();
+      expect(gapOnConnect(cp, quietAt + 24 * HOUR + 1, 24)).toBe('cursor_too_old');
+
+      // Down 72 h (more than the 24 h lookback), then reconnect: a gap, from the live tail.
+      clock.advance(72 * HOUR);
+      const back = clock.nowMs();
+      expect(await connect(m, server.connect, back, { scheduleGapRecovery: gap })).toMatchObject({
+        ok: true,
+        gap: 'cursor_too_old',
+      });
+      expect(server.attempts.map((a) => [a.cursor, a.status])).toEqual([
+        [null, 101],
+        [e1.seq, 101],
+        [null, 101],
+      ]);
+      expect(gapCalls).toEqual([T0, back]);
+      expect(checkpointRow(i.db)).toMatchObject({ pending_gap: 1, connected: 1, cursor: back * 1000 });
+      expect(status(i.db, back)).toMatchObject({ state: 'recovering', caughtUp: false });
       closeSocket(m, clock.nowMs());
     });
   });
@@ -434,10 +521,12 @@ describe('jetstream socket', () => {
       const m = ingestDeps(i.db, clock, { mode: 'socket', hosts: [EAST, WEST] });
       expect(await connect(m, server.connect, T0)).toMatchObject({ ok: true, hostIndex: 0, gap: 'no_cursor' });
       expect(status(i.db, T0)).toEqual({ state: 'recovering', caughtUp: false, lastIndexedAt: null, lagSeconds: null });
-      // The first-start gap recovery finished (W4-01's bookkeeping write); with no
-      // cursor yet the index is still recovering (first start), and no lag is known.
+      // The first-start gap recovery finished (W4-01's bookkeeping write). The
+      // resume point is the live tail the gap connect stored, so the index is
+      // current, but no event of this connection is known: no lag.
       updateCheckpointBookkeeping(i.db, { pendingGap: false });
-      expect(status(i.db, T0)).toEqual({ state: 'recovering', caughtUp: false, lastIndexedAt: null, lagSeconds: null });
+      expect(checkpointRow(i.db)).toMatchObject({ cursor: T0 * 1000, last_event_time_us: null });
+      expect(status(i.db, T0)).toEqual({ state: 'current', caughtUp: true, lastIndexedAt: null, lagSeconds: null });
 
       // Events flow on us-east: lag is now minus the newest event time, in whole seconds.
       clock.set(new Date(T0 + 10 * SECOND).toISOString());

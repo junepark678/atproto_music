@@ -17,8 +17,10 @@
 //   `JETSTREAM_URLS[host_index]`, with the checkpoint cursor;
 // - gap detection: no cursor, a cursor older than JETSTREAM_LOOKBACK_HOURS, or
 //   a rejected cursor (then retried once without one) → connect from the live
-//   tail, and on success `pending_gap=1` plus gap recovery in the connect
-//   transaction (checkpoint.ts);
+//   tail, and on success `pending_gap=1`, the stored cursor moved to the tail
+//   (a `time_us` cursor at the attempt instant) and gap recovery in the
+//   connect transaction (checkpoint.ts), so the next reconnect resumes from
+//   the tail and the gap is handled once;
 // - success → `markConnected` (checkpoint.ts `noteConnected`); a failed connect
 //   writes no connection evidence, rotates `host_index` and, in socket mode,
 //   schedules the watchdog with backoff.
@@ -239,7 +241,11 @@ interface SocketState {
   streak: number;
   /** No reconnect before this instant (backoff). */
   nextAttemptAtMs: number;
-  /** An OutdatedCursor notice: the next connect starts from the live tail with a gap. */
+  /**
+   * An OutdatedCursor notice: the next connect starts from the live tail with
+   * a gap. In memory only; if the instance dies first, the reconnect offers the
+   * stored cursor again and Jetstream refuses it again.
+   */
   forceTail: boolean;
 }
 
@@ -393,6 +399,7 @@ async function doConnect(
     mode,
     hostIndex,
     gap,
+    attemptMs: now,
     ...(s.options.scheduleGapRecovery === undefined ? {} : { scheduleGapRecovery: s.options.scheduleGapRecovery }),
   });
   s.forceTail = false;

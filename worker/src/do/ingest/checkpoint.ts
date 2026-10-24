@@ -21,9 +21,11 @@
 //   `last_event_time_us` (it may rotate `host_index`, which is bookkeeping).
 //
 // Gap detection on (re)connect (ADR §5.5): no cursor (first start), a cursor
-// older than JETSTREAM_LOOKBACK_HOURS, or a cursor Jetstream rejects. A gap
-// sets `pending_gap=1` and calls the gap-recovery scheduler, then the stream
-// resumes from the live tail. The scheduler is W4-01's `scheduleGapRecovery`
+// older than JETSTREAM_LOOKBACK_HOURS (its event time, or an upper bound of it
+// after a quiet connection; see `cursorTimeUs`), or a cursor Jetstream
+// rejects. A gap sets `pending_gap=1`, moves the stored resume point to the
+// live tail (so the same gap is not re-detected on every reconnect) and calls
+// the gap-recovery scheduler, then the stream resumes from the live tail. The scheduler is W4-01's `scheduleGapRecovery`
 // (worker/src/do/ingest/snapshot-job.ts). W4-01 is not merged into this
 // package's base, so it is injected through the `ScheduleGapRecovery`
 // interface below, and W5-01 wires the real one into IndexDO. Without it only
@@ -108,21 +110,36 @@ export function readIngestCheckpoint(db: Db): IngestCheckpoint {
 }
 
 /**
- * The event time of the stored cursor in unix microseconds, or null when it
- * is not known. A time cursor (production Jetstream: `seq` is `time_us`) is
- * its own time. A sequence cursor's time is `last_event_time_us`, the event
- * that wrote it, until a later connect clears that; then it is unknown and
- * only Jetstream's own refusal of the cursor can reveal a gap.
+ * The event time of the stored cursor in unix microseconds, or an upper bound
+ * of it, or null when neither is known.
+ * - A time cursor (production Jetstream: `seq` is `time_us`; also the tail
+ *   cursor a gap connect stores) is its own time.
+ * - A sequence cursor's time is `last_event_time_us` while the most recent
+ *   connection is the one whose event wrote it.
+ * - Once a later connection opened without receiving an event
+ *   (`markConnected` cleared `last_event_time_us`), the cursor's event came
+ *   from an earlier connection, so it predates the most recent connect:
+ *   `connected_at_ms` (or, if that was never written, the disconnect instant
+ *   `updated_at_ms`) bounds it from above. The bound never reports a gap that
+ *   is not there, and keeps the age check working after quiet connections
+ *   instead of leaving it to Jetstream to refuse the cursor.
  */
-export function cursorTimeUs(cp: Pick<IngestCheckpoint, 'cursor' | 'lastEventTimeUs'>): number | null {
+export function cursorTimeUs(
+  cp: Pick<IngestCheckpoint, 'cursor' | 'lastEventTimeUs'> &
+    Partial<Pick<IngestCheckpoint, 'connectedAtMs' | 'updatedAtMs'>>,
+): number | null {
   if (cp.cursor === null) return null;
   if (cp.cursor >= TIME_CURSOR_MIN) return cp.cursor;
-  return cp.lastEventTimeUs;
+  if (cp.lastEventTimeUs !== null) return cp.lastEventTimeUs;
+  if (cp.connectedAtMs !== undefined && cp.connectedAtMs !== null) return cp.connectedAtMs * 1000;
+  if (cp.updatedAtMs !== undefined && cp.updatedAtMs > 0) return cp.updatedAtMs * 1000;
+  return null;
 }
 
 /** Whether connecting from the stored checkpoint at `nowMs` would leave a gap, and why. */
 export function gapOnConnect(
-  cp: Pick<IngestCheckpoint, 'cursor' | 'lastEventTimeUs'>,
+  cp: Pick<IngestCheckpoint, 'cursor' | 'lastEventTimeUs'> &
+    Partial<Pick<IngestCheckpoint, 'connectedAtMs' | 'updatedAtMs'>>,
   nowMs: number,
   lookbackHours: number,
 ): GapReason | null {
@@ -132,22 +149,38 @@ export function gapOnConnect(
   return null;
 }
 
+/**
+ * The resume point a gap connect stores: the live tail as a `time_us` cursor
+ * at the instant the tail subscription was requested (`attemptMs`, taken
+ * before the upgrade). Every event the tail can deliver is at or after it, and
+ * everything before it belongs to the gap recovery scheduled in the same
+ * transaction. At or above TIME_CURSOR_MIN for any instant after 2001-09-09.
+ */
+export function tailCursor(attemptMs: number): number {
+  return Math.max(Math.floor(attemptMs) * 1000, TIME_CURSOR_MIN);
+}
+
 export interface ConnectedNote {
   mode: Exclude<IngestMode, 'off'>;
   hostIndex: number;
   gap: GapReason | null;
+  /** When the connect attempt began (before the upgrade); the tail cursor of a gap connect. Default: `nowMs`. */
+  attemptMs?: number;
   scheduleGapRecovery?: ScheduleGapRecovery;
 }
 
 /**
  * A connection opened at `nowMs`: `markConnected` (clears the lag evidence),
- * the mode and host index, and, on a gap, `pending_gap=1` plus gap recovery,
- * all in one transaction, so a gap is durable before the first live event can
- * move the cursor past the evidence of it.
+ * the mode and host index, and, on a gap, `pending_gap=1`, the resume point
+ * moved to the live tail (`tailCursor`) and gap recovery, all in one
+ * transaction. So the gap is durable before the first live event can move the
+ * cursor past the evidence of it, and it is handled once: a later reconnect
+ * (planned refresh, pulse, drop) resumes from the tail instead of re-reading
+ * the abandoned cursor, re-detecting the gap and scheduling recovery again.
  */
 export function noteConnected(db: Db, nowMs: number, note: ConnectedNote): void {
   db.tx(() => {
-    markConnected(db, nowMs);
+    markConnected(db, nowMs, note.gap === null ? {} : { tailCursor: tailCursor(note.attemptMs ?? nowMs) });
     updateCheckpointBookkeeping(db, {
       mode: note.mode,
       hostIndex: note.hostIndex,

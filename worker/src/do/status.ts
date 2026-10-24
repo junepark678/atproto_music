@@ -45,7 +45,7 @@
 // null after that connection closes without an event (a quiet pulse, or a
 // reconnect that drops before its first event), instead of falling back to an
 // older connection's event. The resume point is `cursor`, which is never
-// cleared.
+// cleared (a gap connect moves it to the live tail, see markConnected).
 //
 // Per-user state (`did` given):
 // - a `suppression` row or `users.indexing_state='suppressed'` → `suppressed`
@@ -83,7 +83,9 @@
 // `ingest_checkpoint` or `indexing_status`, sets `users.indexed_at`, or
 // inserts projection rows without calling noteIndexed:
 // - markConnected: `connected=1, connected_at_ms=now, updated_at_ms=now,
-//   last_event_time_us=NULL` (no event of this connection yet);
+//   last_event_time_us=NULL` (no event of this connection yet), and, only for
+//   a gap connect that subscribed at the live tail, `cursor=<tail time_us>`
+//   (the abandoned cursor is gap recovery's, so the resume point moves);
 // - recordEvent: `cursor, last_event_time_us` only;
 // - markDisconnected: `connected=0, updated_at_ms=now`, written on the 1→0
 //   transition only, so `updated_at_ms` is the instant the disconnection
@@ -158,13 +160,21 @@ export function noteIndexed(db: Db, did: string | null, indexedAtNs: bigint): vo
 /**
  * The upstream connection opened (socket connect, or a pulse whose connect
  * succeeded). Clears `last_event_time_us`: no event of this connection yet.
+ *
+ * `tailCursor` is given only when the connect found a gap and subscribed at
+ * the live tail (ADR §5.5): the resume point moves to the tail (a `time_us`
+ * cursor at or before the instant the tail subscription was requested), so
+ * the next reconnect resumes there instead of re-reading the abandoned cursor
+ * and re-detecting the same gap. Everything before it is gap recovery's.
  */
-export function markConnected(db: Db, nowMs: number): void {
+export function markConnected(db: Db, nowMs: number, o: { tailCursor?: number } = {}): void {
   db.run(
-    `UPDATE ingest_checkpoint SET connected = 1, connected_at_ms = ?, updated_at_ms = ?, last_event_time_us = NULL
+    `UPDATE ingest_checkpoint SET connected = 1, connected_at_ms = ?, updated_at_ms = ?, last_event_time_us = NULL,
+            cursor = COALESCE(?, cursor)
      WHERE stream = ?`,
     nowMs,
     nowMs,
+    o.tailCursor ?? null,
     JETSTREAM_STREAM,
   );
 }
