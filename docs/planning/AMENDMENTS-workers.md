@@ -1,0 +1,1047 @@
+# Issue amendments for the Workers-only rebuild (ADR 0004)
+
+Status: **draft, not published.** W0-02 drafted these texts from [ADR 0004 §9](../adr/0004-cloudflare-workers.md#9-amended-mvp--api--adr-rules), as MVP.md "Completion and execution rules" requires: a library or rule change needs an issue amendment that explains the demonstrated gap. Publishing them to the GitHub issues is an owner action; nothing here claims an issue was edited or closed.
+
+Each section below is the amendment text for one `github-plan.json` leaf key. It names the amendment ids, the demonstrated gap, the amended requirement, and the disposition of the leaf's three named cases. The dispositions come from [`docs/verification/ts-case-map.json`](../verification/ts-case-map.json), which `scripts/validate_case_map.py` checks against this file: every `retired:<id>` case must have its id on its leaf's **Amendment ids** line.
+
+Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.3 dropped list.
+
+## Amendment applying to every leaf: implementation location
+
+**Amendment ids:** A1, A4, A18
+
+**Demonstrated gap:** tokio, sqlx and a bound TCP listener do not run on Cloudflare Workers; the single SQLite Durable Object is the only Workers store with synchronous transactions (`transactionSync`), and D1 rejects `BEGIN`/`SAVEPOINT` (ADR 0004 §1.2). The Rust crates cannot run on Workers, and `@atproto/repo`, `@atproto/identity` and `oauth-client-node` are Node-bound (pino, Node streams, undici); ADR 0004 §4.5 pins the replacements.
+
+**Amendment text:** The "File ownership" paths that name `crates/*` now name the TypeScript files listed for the corresponding package in [`docs/planning/workers-waves.json`](workers-waves.json). The Rust crates stay frozen as the golden-vector oracle (Q6). The test execution contract becomes: implement executable tests in the owning workspace package (`packages/*/test`, `worker/test`, `web/test`, `web/tests`), run them with `npm test` or `npm run test:e2e`, then `bash scripts/check-ts.sh`. Every other part of each issue body, including "do not weaken verification" and "report passed, failed, skipped and blocked separately", is unchanged.
+
+## Leaf amendments
+
+### M1.1.1 Gate production namespace and freeze schema version
+
+**Amendment ids:** A10
+
+**Demonstrated gap:** (A10) A server-side disconnect needs an authenticated owner request; with no session (A3) the owner proves intent with a repo-signed `<prefix>.settings/self` record (ADR 0004 F10, §5.3).
+
+**Amendment text:** Collections derived from a valid owned prefix are exactly `<prefix>.scrobble`, `<prefix>.follow` and `<prefix>.settings`. Schema version 1 and the fixture-only rule for `com.example.atmusic` are unchanged. Implementation: `packages/core/src/namespace.ts` (W1-01) and `worker/src/config.ts` (W0-01).
+
+| Case | Disposition |
+| --- | --- |
+| `fixture_namespace` | `packages/core/test/namespace.test.ts › fixture prefix blocks publication; owned prefix with ownership ref allows it` |
+| `invalid_namespace` | `packages/core/test/syntax.test.ts › DID/handle/NSID/AT-URI/TID accept and reject spec vectors` (Configuration-level rejection with the field name is W0-01 parseConfig behaviour; the NSID vectors must include empty, one-segment, uppercase and embedded-slash prefixes.) |
+| `version_policy` | `worker/test/ingest/jetstream-socket.test.ts › subscribe URL has kinds=commit and the three collections only` (A10 adds `<prefix>.settings`: a valid prefix derives exactly scrobble, follow and settings.) |
+
+### M1.1.4 Freeze OpenAPI v1 schemas and endpoint status matrices
+
+**Amendment ids:** A3, A8, A9, A10, N1, N2, N3, D
+
+**Demonstrated gap:** (A3) Q1 (ADR 0004 §15) places the OAuth client in the browser so the Worker holds no user credential; `@atproto/oauth-client-browser` performs discovery, PAR, PKCE, DPoP nonces, the issuer check and refresh, and stores the session in IndexedDB. (A8) There is no server session to identify the viewer (A3); follow records are already public (Q7). (A9) Owner-only export needs a server session, which no longer exists (A3); the exported records are all public. (A10) A server-side disconnect needs an authenticated owner request; with no session (A3) the owner proves intent with a repo-signed `<prefix>.settings/self` record (ADR 0004 F10, §5.3). (N1) Without server writes the AppView needs an untrusted, rate-limited way to learn about a new record promptly (ADR 0004 §5.2 step 4). (N2) The SPA needs to see when its record is indexed or excluded, which the dropped operation status used to report. (N3) A9 moves export to a public per-DID route. (D) ADR 0004 §9.3 drops the item outright under Q1 (browser public client); the BFF fallback in §15 would restore it.
+
+**Amendment text:** `api/openapi.yaml` moves to `info.version` 1.1.0. The auth, server write, operation and account routes are removed with the `Accepted`, `Operation` and `Session` schemas. `POST /api/v1/notify`, `GET /api/v1/records/status` and `GET /api/v1/users/{did}/export` are added. `GET /api/v1/feed` takes `viewer`. `/oauth/client-metadata.json` is a static asset with `application_type: "web"` and the `/oauth/callback` redirect. Every remaining route is public; `required_auth` becomes the check that no route declares a security requirement, and `scripts/validate_contracts.py` still rejects the dropped paths.
+
+| Case | Disposition |
+| --- | --- |
+| `route_inventory` | `python3 scripts/validate_contracts.py › dropped paths (/api/v1/auth/*, POST /api/v1/scrobbles, /api/v1/operations/{id}, /api/v1/account/*) are absent` |
+| `response_examples` | `python3 scripts/validate_contracts.py › all api/examples validate against openapi 1.1.0 components` |
+| `required_auth` | `retired:D`: Session cookies, CSRF, Origin rules and the private-access matrix are dropped (ADR 0004 §9.3); every v1.1 route is public and validate_contracts.py asserts that no route declares a security requirement. |
+
+### M1.2.1 Pin the Rust workspace, dependencies, and crate boundaries
+
+**Amendment ids:** A4
+
+**Demonstrated gap:** (A4) The Rust crates cannot run on Workers, and `@atproto/repo`, `@atproto/identity` and `oauth-client-node` are Node-bound (pino, Node streams, undici); ADR 0004 §4.5 pins the replacements.
+
+**Amendment text:** The locked-build, layering and TLS/SQLite feature checks apply to the frozen Rust oracle only. The TypeScript workspace pins every dependency exactly, W0-01 alone regenerates `package-lock.json`, and `@atmusic/core` has no I/O dependency.
+
+| Case | Disposition |
+| --- | --- |
+| `locked_build` | `retired:A4`: The Rust workspace is a frozen oracle; the TypeScript workspace pins every dependency exactly and only W0-01 regenerates package-lock.json (ADR 0004 §4.5); CI runs npm ci. |
+| `dependency_direction` | `retired:A4`: Crate layering is replaced by npm workspaces with no barrel files (ADR 0004 §4.3); @atmusic/core is pure and has no I/O dependency. |
+| `sqlite_tls_features` | `retired:A4`: sqlx, reqwest/rustls and OpenSSL do not exist on Workers; storage is DO SQLite and TLS is Workers fetch. |
+
+### M1.2.2 Wire formatting, lint, and meaningful-test CI
+
+**Amendment ids:** A18
+
+**Demonstrated gap:** (A18) Workers tests run in workerd through `@cloudflare/vitest-plugin`; there is no process, port or `LD_PRELOAD` to control, and restart is DO eviction.
+
+**Amendment text:** The CI gate is `npm ci` and `bash scripts/check-ts.sh` (typecheck, biome lint, vitest through `scripts/report-tests.ts`, contract and case-map validators, bundle guard). A zero-test run fails. The Rust `check` job stays for the oracle until W7-02.
+
+| Case | Disposition |
+| --- | --- |
+| `ci_green` | `bash scripts/acceptance/workers-backend.sh › exits 0 with all deterministic suites passing and lists live gates as blocked when prerequisites absent` |
+| `ci_format_failure` | `retired:A18`: The gate commands become npm test, npm run test:e2e and bash scripts/check-ts.sh; formatting is the biome lint step in check-ts.sh (W0-01). rustfmt applies only to the frozen oracle. |
+| `ci_assertion_failure` | `bash scripts/acceptance/workers-backend.sh › exits 0 with all deterministic suites passing and lists live gates as blocked when prerequisites absent` (The runner exits nonzero on any failure and report-tests.ts fails a zero-test run (W0-01).) |
+
+### M1.2.3 Build and smoke-test a self-contained musl artifact
+
+**Amendment ids:** A19, D
+
+**Demonstrated gap:** (A19) A Worker has no executable artifact; a release is a Worker version id and the bundle SHA-256. (D) ADR 0004 §9.3 drops the item outright under Q1 (browser public client); the BFF fallback in §15 would restore it.
+
+**Amendment text:** Superseded. The musl artifact and its smoke test are dropped. Release evidence is the Worker version id and bundle SHA-256; HTTP liveness, readiness and the unknown-API 404 are covered by the composition routing tests.
+
+| Case | Disposition |
+| --- | --- |
+| `static_elf` | `retired:A19`: No musl executable exists; a release is a Worker version id plus a bundle SHA-256 (wrangler versions upload). |
+| `packaged_http` | `worker/test/composition/routing.test.ts › every API.md v1.1 route dispatches; unknown /api/x → JSON 404; non-API path → ASSETS` (Liveness and readiness are additionally covered by worker/test/http/health-meta.test.ts (W1-07).) |
+| `packaged_shutdown` | `retired:D`: The SIGTERM drain is dropped (ADR 0004 §9.3): Workers have no shutdown hook and every DO step is durable before it acknowledges. |
+
+### M1.3.1 Define SQLite schema and invariant constraints
+
+**Amendment ids:** A1, A11, A12
+
+**Demonstrated gap:** (A1) tokio, sqlx and a bound TCP listener do not run on Cloudflare Workers; the single SQLite Durable Object is the only Workers store with synchronous transactions (`transactionSync`), and D1 rejects `BEGIN`/`SAVEPOINT` (ADR 0004 §1.2). (A11) The server no longer receives writes (A2), so it cannot hold an `Idempotency-Key` table; the PDS rejects a reused rkey, which preserves "same key, changed payload" detection. (A12) Writes go from the browser to the owner's PDS (A2), so the outbox moves to the SPA IndexedDB store with the same retry formula, cap and crash barriers.
+
+**Amendment text:** The schema is the DO SQLite migration 1 of ADR 0004 §6. The `operations`, `outbox`, `idempotency` and `operation_dependencies` tables are dropped, so the idempotency-scope case is retired and foreign-key enforcement is asserted on `scrobbles.did` and `follows.actor`.
+
+| Case | Disposition |
+| --- | --- |
+| `unique_record` | `worker/test/storage/sql-conformance.test.ts › RETURNING and ON CONFLICT DO UPDATE ... WHERE behave as SQLite` (Must also show that a second plain INSERT of one AT URI fails and the row count stays one.) |
+| `idempotency_scope` | `retired:A11`: The server Idempotency-Key table is dropped; the SPA allocates a TID rkey once and uses PDS existence plus a digest comparison. |
+| `foreign_key` | `worker/test/storage/sql-conformance.test.ts › FK ON DELETE CASCADE is enforced for scrobbles.did and follows.actor` (Private operations no longer exist (A12); FK enforcement is asserted for scrobbles.did and follows.actor.) |
+
+### M1.3.2 Implement embedded forward migrations and database open
+
+**Amendment ids:** A1
+
+**Demonstrated gap:** (A1) tokio, sqlx and a bound TCP listener do not run on Cloudflare Workers; the single SQLite Durable Object is the only Workers store with synchronous transactions (`transactionSync`), and D1 rejects `BEGIN`/`SAVEPOINT` (ADR 0004 §1.2).
+
+**Amendment text:** Migrations are an ordered array in `worker/src/do/schema.ts`, applied in the DO constructor under `blockConcurrencyWhile` inside one `transactionSync` and recorded in `schema_migrations`. A schema newer than the code reports `too_new` and `/health/ready` returns 503.
+
+| Case | Disposition |
+| --- | --- |
+| `fresh_and_reopen` | `worker/test/storage/migrate.test.ts › re-running migrate is a no-op` |
+| `migration_rollback` | `worker/test/storage/db.test.ts › tx rolls back all writes when the callback throws` (Migrations run inside one transactionSync, so a throwing migration leaves no partial statement.) |
+| `future_schema` | `worker/test/storage/migrate.test.ts › schema newer than code reports too_new` |
+
+### M1.3.3 Implement typed repository operations and transactions
+
+**Amendment ids:** A1, A12
+
+**Demonstrated gap:** (A1) tokio, sqlx and a bound TCP listener do not run on Cloudflare Workers; the single SQLite Durable Object is the only Workers store with synchronous transactions (`transactionSync`), and D1 rejects `BEGIN`/`SAVEPOINT` (ADR 0004 §1.2). (A12) Writes go from the browser to the owner's PDS (A2), so the outbox moves to the SPA IndexedDB store with the same retry formula, cap and crash barriers.
+
+**Amendment text:** Repository operations are DO module functions over `Db.tx`; no read-check-write may span an `await`. Owner-private operation reads are retired because operations live in the SPA outbox.
+
+| Case | Disposition |
+| --- | --- |
+| `event_atomicity` | `worker/test/ingest/hints.test.ts › enqueue and checkpoint advance commit atomically (throw rolls back both)` |
+| `owner_private_read` | `retired:A12`: Operations live in the SPA IndexedDB outbox; the server has no private operation rows to read. |
+| `record_revision` | `worker/test/write/apply-record.test.ts › r03 artist change updates keys without inserting a second listen` |
+
+### M1.3.4 Serialize writes and bound database contention
+
+**Amendment ids:** A1
+
+**Demonstrated gap:** (A1) tokio, sqlx and a bound TCP listener do not run on Cloudflare Workers; the single SQLite Durable Object is the only Workers store with synchronous transactions (`transactionSync`), and D1 rejects `BEGIN`/`SAVEPOINT` (ADR 0004 §1.2).
+
+**Amendment text:** The single DO serialises every transition through synchronous `transactionSync`, so the writer queue and the SQLite lock wait are replaced. The bounded resource is admission: 1,024 pending snapshot jobs, then 503 `queue_full`.
+
+| Case | Disposition |
+| --- | --- |
+| `concurrent_writes` | `worker/test/ingest/verify-drain.test.ts › two concurrent proofs for one URI arriving out of order end with newest revision` |
+| `queue_full` | `worker/test/ingest/notify.test.ts › did notify for unknown DID admits snapshot; busy → 503 queue_full` (The bounded writer queue becomes synchronous transactionSync in the single DO (A1); the bounded resource is admission (1,024 jobs).) |
+| `locked_database` | `retired:A1`: DO SQLite has no external file lock and transactionSync is synchronous; there is no storage_busy wait to bound. |
+
+### M1.4.1 Implement typed environment configuration and migrate CLI
+
+**Amendment ids:** A1
+
+**Demonstrated gap:** (A1) tokio, sqlx and a bound TCP listener do not run on Cloudflare Workers; the single SQLite Durable Object is the only Workers store with synchronous transactions (`transactionSync`), and D1 rejects `BEGIN`/`SAVEPOINT` (ADR 0004 §1.2).
+
+**Amendment text:** Configuration is Worker vars and secrets parsed by `parseConfig(env)` (W0-01) and refused by `scripts/deploy.sh --dry-run` (W6-04). There is no listener, port or migrate CLI.
+
+| Case | Disposition |
+| --- | --- |
+| `bind_precedence` | `retired:A1`: A Worker binds no address or port. |
+| `migrate_only` | `retired:A1`: There is no CLI; migrations run in the DO constructor under blockConcurrencyWhile (covered by worker/test/storage/migrate.test.ts). |
+| `invalid_config` | `bash scripts/deploy.sh --dry-run › refuses empty/fixture prefix and missing secret with nonzero exit` (Var validation with field names is W0-01 parseConfig; the cursor key length rule is packages/core/test/cursor.test.ts.) |
+
+### M1.4.2 Implement health, metadata, and uniform HTTP errors
+
+**Amendment ids:** A1
+
+**Demonstrated gap:** (A1) tokio, sqlx and a bound TCP listener do not run on Cloudflare Workers; the single SQLite Durable Object is the only Workers store with synchronous transactions (`transactionSync`), and D1 rejects `BEGIN`/`SAVEPOINT` (ADR 0004 §1.2).
+
+**Amendment text:** Health and the error envelope are unchanged in shape. Readiness reports 503 when the DO schema is `too_new`; upstream degradation is reported through `Indexing` (`stale` when the socket has been disconnected for more than 5 minutes).
+
+| Case | Disposition |
+| --- | --- |
+| `ready_before_storage` | `worker/test/http/health-meta.test.ts › live 200; ready 503 when index reports too_new; meta capabilities omit publication without owned prefix` |
+| `upstream_outage` | `worker/test/storage/status.test.ts › socket disconnected >5min reports stale` |
+| `safe_errors` | `worker/test/http/error.test.ts › envelope matches openapi Error schema with requestId UUID` |
+
+### M1.4.3 Add server harness and bounded shutdown
+
+**Amendment ids:** A18, D
+
+**Demonstrated gap:** (A18) Workers tests run in workerd through `@cloudflare/vitest-plugin`; there is no process, port or `LD_PRELOAD` to control, and restart is DO eviction. (D) ADR 0004 §9.3 drops the item outright under Q1 (browser public client); the BFF fallback in §15 would restore it.
+
+**Amendment text:** Superseded. The server harness becomes isolated workerd storage per test file and a unique DO name per test; the SIGTERM drain is dropped. Durability across restart is asserted by DO eviction tests.
+
+| Case | Disposition |
+| --- | --- |
+| `harness_isolation` | `retired:A18`: Per-file isolated workerd storage and a unique DO name per test replace the port-0 server harness. |
+| `drain_success` | `worker/test/composition/index-do.test.ts › restart (eviction) preserves state and resumes alarm` |
+| `drain_timeout` | `retired:D`: The SIGTERM drain is dropped (ADR 0004 §9.3); there is no process to drain. |
+
+### M2.1.1 Resolve handles and validate DID identity
+
+**Amendment ids:** A4
+
+**Demonstrated gap:** (A4) The Rust crates cannot run on Workers, and `@atproto/repo`, `@atproto/identity` and `oauth-client-node` are Node-bound (pino, Node streams, undici); ADR 0004 §4.5 pins the replacements.
+
+**Amendment text:** Identity resolution is `@atmusic/atproto/identity` over `@atcute/identity-resolver` with an `identity_cache` TTL of 5 minutes and a 1-hour negative TTL. The round-trip and spoofed-handle rules are unchanged.
+
+| Case | Disposition |
+| --- | --- |
+| `round_trip` | `worker/test/read/resolve.test.ts › verified handle 200; unresolved 404; mismatch 422` |
+| `spoofed_handle` | `packages/atproto/test/identity.test.ts › handle verified only when TXT/well-known and alsoKnownAs agree; mismatch yields null` |
+| `cache_expiry` | `packages/atproto/test/identity.test.ts › fresh:true bypasses cache after key rotation` (identity_cache TTL is 5 min (ADR 0004 §5.4); W2-02/W3-04 must assert cached at 299 s and refreshed at 301 s with the injected clock.) |
+
+### M2.1.2 Harden all metadata/PDS fetch destinations
+
+**Amendment ids:** A5
+
+**Demonstrated gap:** (A5) Workers `fetch` resolves DNS itself, so the pinned-address client of ADR 0002 cannot be built (ADR 0004 §8, §13.1).
+
+**Amendment text:** DNS pinning becomes the SafeFetch host policy plus a DoH A/AAAA pre-check that rejects private, loopback, link-local, CGNAT, ULA, multicast and reserved answers; `redirect: "manual"` with every 3xx an error; a 10 s deadline; streamed body caps. The DNS-rebinding TOCTOU residual is documented and probed live (W6-05).
+
+| Case | Disposition |
+| --- | --- |
+| `ssrf_destinations` | `packages/atproto/test/url-policy.test.ts › rejects http, non-default port, credentials, fragment, IP literals (v4/v6/mapped/decimal), localhost, .internal, single label` |
+| `redirect_rebinding` | `packages/atproto/test/safe-fetch.test.ts › 3xx response is refused and Location is not followed` (DNS pinning is impossible on Workers (A5); the private-answer DoH pre-check is packages/atproto/test/doh.test.ts and the rebinding TOCTOU residual is probed live (W6-05).) |
+| `fetch_bounds` | `packages/atproto/test/safe-fetch.test.ts › body over cap aborts with body_too_large and does not buffer the rest` (The 10 s deadline is the sibling safe-fetch test; any 3xx is an error, so the four-redirect case becomes the 3xx refusal.) |
+
+### M2.1.3 Discover PDS and OAuth issuer metadata
+
+**Amendment ids:** A3
+
+**Demonstrated gap:** (A3) Q1 (ADR 0004 §15) places the OAuth client in the browser so the Worker holds no user credential; `@atproto/oauth-client-browser` performs discovery, PAR, PKCE, DPoP nonces, the issuer check and refresh, and stores the session in IndexedDB.
+
+**Amendment text:** PDS discovery from the DID document stays in `@atmusic/atproto/identity`. Authorization-server metadata, PAR/PKCE support and the issuer check are performed by the browser OAuth library; the server never initiates OAuth.
+
+| Case | Disposition |
+| --- | --- |
+| `valid_chain` | `packages/atproto/test/identity.test.ts › plc and did:web documents resolve signing key and PDS` |
+| `issuer_mismatch` | `retired:A3`: Authorization-server discovery and the issuer check are performed by @atproto/oauth-client-browser in the browser; the live OAuth gate (W6-05) covers interoperability. |
+| `unsupported_server` | `retired:A3`: PAR/PKCE S256 capability checks are performed by @atproto/oauth-client-browser; the server never initiates OAuth. |
+
+### M2.2.1 Choose maintained OAuth dependencies and serve client metadata
+
+**Amendment ids:** A3, A10
+
+**Demonstrated gap:** (A3) Q1 (ADR 0004 §15) places the OAuth client in the browser so the Worker holds no user credential; `@atproto/oauth-client-browser` performs discovery, PAR, PKCE, DPoP nonces, the issuer check and refresh, and stores the session in IndexedDB. (A10) A server-side disconnect needs an authenticated owner request; with no session (A3) the owner proves intent with a repo-signed `<prefix>.settings/self` record (ADR 0004 F10, §5.3).
+
+**Amendment text:** `/oauth/client-metadata.json` is a build-time static asset at the same path, generated by `scripts/gen-config.ts` with `application_type: "web"`, `token_endpoint_auth_method: "none"`, `dpop_bound_access_tokens: true` and `redirect_uris: ["https://<host>/oauth/callback"]`. The scope is `atproto repo:<p>.scrobble repo:<p>.follow repo:<p>.settings`.
+
+| Case | Disposition |
+| --- | --- |
+| `metadata_origin` | `scripts/test/gen-config.test.ts › production metadata equals expected JSON for https://music.example.org with prefix org.example.music` |
+| `metadata_contract` | `scripts/test/gen-config.test.ts › production metadata equals expected JSON for https://music.example.org with prefix org.example.music` (Metadata is a build-time static asset; validate_contracts.py also fixes application_type web and the /oauth/callback redirect.) |
+| `scope_inventory` | `web/test/oauth/session.test.ts › signIn requests scope 'atproto repo:<p>.scrobble repo:<p>.follow repo:<p>.settings'` |
+
+### M2.2.2 Implement auth start, PKCE, state, and PAR
+
+**Amendment ids:** A3, D
+
+**Demonstrated gap:** (A3) Q1 (ADR 0004 §15) places the OAuth client in the browser so the Worker holds no user credential; `@atproto/oauth-client-browser` performs discovery, PAR, PKCE, DPoP nonces, the issuer check and refresh, and stores the session in IndexedDB. (D) ADR 0004 §9.3 drops the item outright under Q1 (browser public client); the BFF fallback in §15 would restore it.
+
+**Amendment text:** `POST /api/v1/auth/start` is dropped. PAR and PKCE S256 are performed by `@atproto/oauth-client-browser`; no verifier or key reaches the server.
+
+| Case | Disposition |
+| --- | --- |
+| `par_pkce` | `retired:A3`: PAR and PKCE are performed by @atproto/oauth-client-browser; no verifier or key reaches the server. |
+| `wrong_origin` | `retired:D`: POST /api/v1/auth/start is dropped (ADR 0004 §9.3). |
+| `par_failure` | `retired:A3`: PAR failure handling belongs to the browser library; the server stores no OAuth state to clean up. |
+
+### M2.2.3 Implement callback verification and DPoP nonce retry
+
+**Amendment ids:** A3, D
+
+**Demonstrated gap:** (A3) Q1 (ADR 0004 §15) places the OAuth client in the browser so the Worker holds no user credential; `@atproto/oauth-client-browser` performs discovery, PAR, PKCE, DPoP nonces, the issuer check and refresh, and stores the session in IndexedDB. (D) ADR 0004 §9.3 drops the item outright under Q1 (browser public client); the BFF fallback in §15 would restore it.
+
+**Amendment text:** `GET /api/v1/auth/callback` and server OAuth state are dropped. `/oauth/callback` is an SPA route served through the asset fallback; the library completes the exchange, the issuer check and DPoP nonce retries.
+
+| Case | Disposition |
+| --- | --- |
+| `expired_and_replay` | `retired:D`: Server OAuth state (300 s) and GET /api/v1/auth/callback are dropped (ADR 0004 §9.3). |
+| `issuer_subject` | `retired:A3`: Issuer and subject binding are enforced by @atproto/oauth-client-browser; the server creates no session. |
+| `nonce_retry` | `retired:A3`: DPoP nonce retry is performed by @atproto/oauth-client-browser. |
+
+### M2.3.1 Encrypt OAuth material and serialize token refresh
+
+**Amendment ids:** A3, D
+
+**Demonstrated gap:** (A3) Q1 (ADR 0004 §15) places the OAuth client in the browser so the Worker holds no user credential; `@atproto/oauth-client-browser` performs discovery, PAR, PKCE, DPoP nonces, the issuer check and refresh, and stores the session in IndexedDB. (D) ADR 0004 §9.3 drops the item outright under Q1 (browser public client); the BFF fallback in §15 would restore it.
+
+**Amendment text:** Encrypted server token storage and the operator encryption key are dropped. Tokens and the non-extractable DPoP key live in the browser; the library serialises refresh across tabs with Web Locks. A failed refresh surfaces the re-auth state.
+
+| Case | Disposition |
+| --- | --- |
+| `encrypted_persistence` | `retired:D`: Encrypted server token storage and the operator encryption key are dropped (ADR 0004 §9.3); no token reaches the server. |
+| `refresh_race` | `retired:A3`: Refresh is serialised across tabs with Web Locks inside @atproto/oauth-client-browser. |
+| `refresh_restart` | `web/test/oauth/session.test.ts › expired/refresh-failed session surfaces re-auth state` |
+
+### M2.3.2 Issue hashed sessions and enforce CSRF
+
+**Amendment ids:** A3, D
+
+**Demonstrated gap:** (A3) Q1 (ADR 0004 §15) places the OAuth client in the browser so the Worker holds no user credential; `@atproto/oauth-client-browser` performs discovery, PAR, PKCE, DPoP nonces, the issuer check and refresh, and stores the session in IndexedDB. (D) ADR 0004 §9.3 drops the item outright under Q1 (browser public client); the BFF fallback in §15 would restore it.
+
+**Amendment text:** Application sessions, cookies and CSRF are dropped. Sessions follow library and spec limits (at most 14 days for public clients) instead of the 7-day cookie; the SPA shows the expiry and re-prompts.
+
+| Case | Disposition |
+| --- | --- |
+| `cookie_and_hash` | `retired:D`: Application session cookies are dropped (ADR 0004 §9.3). |
+| `session_expiry` | `retired:A3`: Sessions follow library and spec limits (at most 14 days for public clients) instead of the 7-day app cookie; the re-auth state is covered by web/test/oauth/session.test.ts. |
+| `csrf_matrix` | `retired:D`: CSRF and Origin rules are dropped with the server mutation routes (ADR 0004 §9.3). |
+
+### M2.3.3 Implement logout and upstream revocation behavior
+
+**Amendment ids:** A3
+
+**Demonstrated gap:** (A3) Q1 (ADR 0004 §15) places the OAuth client in the browser so the Worker holds no user credential; `@atproto/oauth-client-browser` performs discovery, PAR, PKCE, DPoP nonces, the issuer check and refresh, and stores the session in IndexedDB.
+
+**Amendment text:** Sign-out calls `session.signOut()`, which revokes upstream, and clears IndexedDB whether or not revocation succeeds. The revocation endpoint is chosen by the library from authorization-server metadata.
+
+| Case | Disposition |
+| --- | --- |
+| `logout_local` | `web/test/oauth/session.test.ts › signOut calls revoke and clears IndexedDB stores` |
+| `revocation_outage` | `web/test/oauth/session.test.ts › signOut calls revoke and clears IndexedDB stores` (W2-06 must also show that a failing revoke still clears the IndexedDB stores.) |
+| `unsupported_revocation` | `retired:A3`: The revocation endpoint is chosen from authorization-server metadata by @atproto/oauth-client-browser. |
+
+### M2.4.1 Build deterministic OAuth/PDS fixture servers
+
+**Amendment ids:** A3, A18
+
+**Demonstrated gap:** (A3) Q1 (ADR 0004 §15) places the OAuth client in the browser so the Worker holds no user credential; `@atproto/oauth-client-browser` performs discovery, PAR, PKCE, DPoP nonces, the issuer check and refresh, and stores the session in IndexedDB. (A18) Workers tests run in workerd through `@cloudflare/vitest-plugin`; there is no process, port or `LD_PRELOAD` to control, and restart is DO eviction.
+
+**Amendment text:** The fixture kit (W1-05) builds real signed repositories for two curves and fake PDS, PLC, DoH, relay and Jetstream endpoints behind the injected `Transport`. OAuth fault modes belong to the browser library. The production bundle guard proves no test seam ships.
+
+| Case | Disposition |
+| --- | --- |
+| `fixture_isolation` | `packages/atproto/test/fixture-kit.test.ts › inclusion proof CAR verifies with @atproto/crypto cross-check for both curves` (Records verify only under the issuing fixture key; token isolation is retired with server OAuth (A3).) |
+| `fault_controls` | `packages/atproto/test/fixture-kit.test.ts › fake PDS createRecord with existing rkey returns RecordAlreadyExists; deleteRecord with stale swap returns InvalidSwap` (Nonce, wrong-issuer and refresh-rotation modes belong to the browser OAuth library (A3).) |
+| `no_prod_bypass` | `scripts/test/check-bundle.test.ts › fails when a test-support import is injected into a temp copy of the entry` |
+
+### M2.4.2 Add OAuth/session negative integration matrix
+
+**Amendment ids:** A3, D
+
+**Demonstrated gap:** (A3) Q1 (ADR 0004 §15) places the OAuth client in the browser so the Worker holds no user credential; `@atproto/oauth-client-browser` performs discovery, PAR, PKCE, DPoP nonces, the issuer check and refresh, and stores the session in IndexedDB. (D) ADR 0004 §9.3 drops the item outright under Q1 (browser public client); the BFF fallback in §15 would restore it.
+
+**Amendment text:** The server OAuth/session negative matrix is retired with the routes it exercised. Browser OAuth behaviour is covered by `web/test/oauth/session.test.ts` and the live gate.
+
+| Case | Disposition |
+| --- | --- |
+| `security_matrix` | `retired:D`: Server OAuth state, callback and sessions are dropped (ADR 0004 §9.3). |
+| `refresh_persistence` | `retired:A3`: Token rotation and persistence are owned by @atproto/oauth-client-browser in IndexedDB. |
+| `cross_owner` | `retired:D`: Cookies and private operations are dropped (ADR 0004 §9.3); writes go to the owner's own PDS. |
+
+### M2.4.3 Run and record live external-PDS OAuth interoperability
+
+**Amendment ids:** A3, A19
+
+**Demonstrated gap:** (A3) Q1 (ADR 0004 §15) places the OAuth client in the browser so the Worker holds no user credential; `@atproto/oauth-client-browser` performs discovery, PAR, PKCE, DPoP nonces, the issuer check and refresh, and stores the session in IndexedDB. (A19) A Worker has no executable artifact; a release is a Worker version id and the bundle SHA-256.
+
+**Amendment text:** The live OAuth gate signs in through the browser public client on two independent PDSs and records evidence per Worker version id (W6-05). Missing prerequisites report blocked with a nonzero exit.
+
+| Case | Disposition |
+| --- | --- |
+| `live_round_trip` | `npx tsx scripts/live/pds_compat_check.ts (no env) › exits nonzero with blocked and lists missing names` (Live OAuth sign-in on two PDSs is a W6-05 live gate; until prerequisites exist the gate reports blocked.) |
+| `live_disposable_record` | `npx tsx scripts/live/pds_compat_check.ts (no env) › exits nonzero with blocked and lists missing names` (Live create/get/delete evidence is recorded per Worker version id (W6-05).) |
+| `live_credentials_missing` | `npx tsx scripts/live/pds_compat_check.ts (no env) › exits nonzero with blocked and lists missing names` |
+
+### M3.1.1 Implement authenticated scrobble input and idempotency admission
+
+**Amendment ids:** A2, A11, A12
+
+**Demonstrated gap:** (A2) Under Q1 (ADR 0004 §15) the browser SPA writes directly to the user's PDS through the atproto OAuth session; the server holds no credential to write with. (A11) The server no longer receives writes (A2), so it cannot hold an `Idempotency-Key` table; the PDS rejects a reused rkey, which preserves "same key, changed payload" detection. (A12) Writes go from the browser to the owner's PDS (A2), so the outbox moves to the SPA IndexedDB store with the same retry formula, cap and crash barriers.
+
+**Amendment text:** `POST /api/v1/scrobbles` and the `Idempotency-Key` header are dropped. The SPA validates with `@atmusic/core/scrobble`, allocates the TID rkey once, persists the operation and digest in IndexedDB before the first attempt, and treats a reused rkey with a different digest as the terminal `remote_record_conflict`. Ownership is the authenticated PDS repository.
+
+| Case | Disposition |
+| --- | --- |
+| `key_validation` | `retired:A11`: The Idempotency-Key header and its 400 invalid_idempotency_key are dropped with POST /api/v1/scrobbles. |
+| `retry_collision` | `web/test/outbox/recovery.test.ts › remote record with different payload at rkey → remote_record_conflict, never overwritten` (A11: the same rkey with a changed payload is the client-side terminal remote_record_conflict instead of 409.) |
+| `owner_and_validation` | `web/test/routes/scrobble.test.tsx › invalid input shows field errors and creates no outbox operation` (The owner is the authenticated PDS repository; buildScrobbleRecord rejects owner/unknown fields (packages/core/test/scrobble.test.ts).) |
+
+### M3.2.1 Persist outbox state and expose owner-bound operation status
+
+**Amendment ids:** A12, N2
+
+**Demonstrated gap:** (A12) Writes go from the browser to the owner's PDS (A2), so the outbox moves to the SPA IndexedDB store with the same retry formula, cap and crash barriers. (N2) The SPA needs to see when its record is indexed or excluded, which the dropped operation status used to report.
+
+**Amendment text:** Operation persistence moves to the SPA outbox (`web/src/outbox/store.ts`). `GET /api/v1/operations/{id}` is replaced for public indexing status by `GET /api/v1/records/status`.
+
+| Case | Disposition |
+| --- | --- |
+| `admission_atomic` | `retired:A12`: The server operation/outbox rows are dropped; the SPA persists one IndexedDB operation before the first attempt. |
+| `status_contract` | `worker/test/http/record-status.test.ts › states indexed/pending/absent/excluded/unknown with cid and revision` (GET /api/v1/operations/{id} is dropped; public indexing status is GET /api/v1/records/status (N2).) |
+| `rkey_persistence` | `web/test/outbox/recovery.test.ts › crash before send: operation resumes with same rkey` |
+
+### M3.2.2 Execute bounded retry and DPoP-authorized PDS writes
+
+**Amendment ids:** A12
+
+**Demonstrated gap:** (A12) Writes go from the browser to the owner's PDS (A2), so the outbox moves to the SPA IndexedDB store with the same retry formula, cap and crash barriers.
+
+**Amendment text:** The retry formula `min(300 s, base + U[0, base/4])`, the capped `Retry-After` raise and exactly 10 attempts are unchanged in the SPA runner (`web/src/outbox`). Retries run only while a tab is open.
+
+| Case | Disposition |
+| --- | --- |
+| `transient_schedule` | `web/test/outbox/retry.test.ts › Retry-After 20 raises next delay to 20s` |
+| `terminal_attempt` | `web/test/outbox/retry.test.ts › zero jitter delays 1,2,4,…,256,300 and exactly 10 attempts with no 11th request` |
+| `permanent_error` | `packages/core/test/write-policy.test.ts › classify maps 429/5xx/network to transient and RecordAlreadyExists to ambiguous_create` (W2-07 must also assert that a nonrecoverable PDS error ends the operation after one fetch.) |
+
+### M3.2.3 Reconcile ambiguous creates and prevent duplicates after crashes
+
+**Amendment ids:** A11, A12
+
+**Demonstrated gap:** (A11) The server no longer receives writes (A2), so it cannot hold an `Idempotency-Key` table; the PDS rejects a reused rkey, which preserves "same key, changed payload" detection. (A12) Writes go from the browser to the owner's PDS (A2), so the outbox moves to the SPA IndexedDB store with the same retry formula, cap and crash barriers.
+
+**Amendment text:** Ambiguous creates reconcile with `getRecord` and a canonical digest comparison: equal is success, different is `remote_record_conflict`, and the record is never overwritten. There is no server request to replay five times.
+
+| Case | Disposition |
+| --- | --- |
+| `crash_after_remote` | `web/test/outbox/recovery.test.ts › crash after PDS commit before local ack: ambiguous create reconciles to success via digest` |
+| `conflicting_rkey` | `web/test/outbox/recovery.test.ts › remote record with different payload at rkey → remote_record_conflict, never overwritten` |
+| `five_retries` | `retired:A11`: There is no server request to resubmit; the SPA allocates the rkey once per operation and replays only that operation. |
+
+### M3.3.1 Authorize deletion and atomically mark tombstones
+
+**Amendment ids:** A13, A12, D
+
+**Demonstrated gap:** (A13) The AppView only reflects verified repository state; an unverified local delete cannot change public views without weakening "verified repository records are the public source of truth". (A12) Writes go from the browser to the owner's PDS (A2), so the outbox moves to the SPA IndexedDB store with the same retry formula, cap and crash barriers. (D) ADR 0004 §9.3 drops the item outright under Q1 (browser public client); the BFF fallback in §15 would restore it.
+
+**Amendment text:** `DELETE /api/v1/scrobbles/{id}` is dropped. The owner's view hides the record immediately through the outbox overlay; public views change once signed absence is verified. A delete queued behind a pending create waits for it (`predecessorIds`).
+
+| Case | Disposition |
+| --- | --- |
+| `wrong_owner` | `retired:D`: DELETE /api/v1/scrobbles/{id} is dropped (ADR 0004 §9.3); a user can delete only from their own PDS repository. |
+| `hide_immediately` | `web/test/outbox/delete.test.ts › pending deletion hidden in owner overlay; failure visible` (A13: owner-side optimistic overlay; public views change after verified absence.) |
+| `pending_create_delete` | `web/test/outbox/delete.test.ts › pending deletion hidden in owner overlay; failure visible` (A12: a delete behind a pending create waits for it through predecessorIds; W2-07 must assert no public record remains.) |
+
+### M3.3.2 Handle remote delete idempotency and create/delete races
+
+**Amendment ids:** A12
+
+**Demonstrated gap:** (A12) Writes go from the browser to the owner's PDS (A2), so the outbox moves to the SPA IndexedDB store with the same retry formula, cap and crash barriers.
+
+**Amendment text:** The SPA deletes with `swapRecord` set to the CID from `records/status`. `InvalidSwap` re-fetches and reconciles; `RecordNotFound` is success; the runner verifies absence after a crash during delete.
+
+| Case | Disposition |
+| --- | --- |
+| `already_absent` | `web/test/outbox/recovery.test.ts › crash during delete resumes with swapRecord and verifies absence` (W2-07 must assert that RecordNotFound on delete completes the operation as success.) |
+| `create_in_flight` | `web/test/outbox/delete.test.ts › pending deletion hidden in owner overlay; failure visible` (A12 predecessor ordering; W2-07 must assert eventual PDS absence.) |
+| `delete_restart` | `web/test/outbox/recovery.test.ts › crash during delete resumes with swapRecord and verifies absence` |
+
+### M3.3.3 Propagate deletion to every read model and owner status
+
+**Amendment ids:** A13
+
+**Demonstrated gap:** (A13) The AppView only reflects verified repository state; an unverified local delete cannot change public views without weakening "verified repository records are the public source of truth".
+
+**Amendment text:** Deletion propagates to every read model when a verified exclusion proof or a snapshot applies. A permanent remote failure stays visible to the owner and is never presented as a PDS delete.
+
+| Case | Disposition |
+| --- | --- |
+| `read_model_removal` | `worker/test/acceptance/mutations.test.ts › delete r01 → 6/6/3, Homogenic 1, history r07,r02,…` |
+| `remote_failure_status` | `web/test/outbox/delete.test.ts › pending deletion hidden in owner overlay; failure visible` |
+| `external_delete` | `worker/test/ingest/verify-drain.test.ts › deleted record with exclusion proof → absent and removed from views` |
+
+### M3.4.1 Add deterministic scrobble HTTP lifecycle tests
+
+**Amendment ids:** A2, A12
+
+**Demonstrated gap:** (A2) Under Q1 (ADR 0004 §15) the browser SPA writes directly to the user's PDS through the atproto OAuth session; the server holds no credential to write with. (A12) Writes go from the browser to the owner's PDS (A2), so the outbox moves to the SPA IndexedDB store with the same retry formula, cap and crash barriers.
+
+**Amendment text:** The lifecycle runs through the SPA outbox, the owner's PDS, notify and the verified drain, ending with `records/status` reporting `indexed` and then `absent`.
+
+| Case | Disposition |
+| --- | --- |
+| `lifecycle` | `web/tests/mvp.spec.ts › full journey sign-in → scrobble indexed → stats → follow/unfollow → delete → export → disconnect/reconnect → sign-out` |
+| `validation_matrix` | `web/test/routes/scrobble.test.tsx › invalid input shows field errors and creates no outbox operation` |
+| `same_time_distinct` | `worker/test/read/history.test.ts › Alice history r07,r01,r02,r03,r04,r05,r06 (equal timestamps by URI desc)` (r01 and r07 share listenedAt and both count; distinct rkeys come from packages/core/test/record-key.test.ts.) |
+
+### M3.4.2 Add fault-injected restart and pagination acceptance tests
+
+**Amendment ids:** A12, A18
+
+**Demonstrated gap:** (A12) Writes go from the browser to the owner's PDS (A2), so the outbox moves to the SPA IndexedDB store with the same retry formula, cap and crash barriers. (A18) Workers tests run in workerd through `@cloudflare/vitest-plugin`; there is no process, port or `LD_PRELOAD` to control, and restart is DO eviction.
+
+**Amendment text:** Crash barriers are simulated by re-instantiating the SPA runner over the same IndexedDB; server restart is DO eviction with storage kept.
+
+| Case | Disposition |
+| --- | --- |
+| `kill_after_create` | `web/test/outbox/recovery.test.ts › crash after PDS commit before local ack: ambiguous create reconciles to success via digest` |
+| `kill_after_delete` | `web/test/outbox/recovery.test.ts › crash during delete resumes with swapRecord and verifies absence` |
+| `cursor_faults` | `worker/test/read/cursor-http.test.ts › arrival above anchor absent until fresh traversal; deleted unreturned record disappears` |
+
+### M3.4.3 Record live external-PDS scrobble lifecycle evidence
+
+**Amendment ids:** A11, A19
+
+**Demonstrated gap:** (A11) The server no longer receives writes (A2), so it cannot hold an `Idempotency-Key` table; the PDS rejects a reused rkey, which preserves "same key, changed payload" detection. (A19) A Worker has no executable artifact; a release is a Worker version id and the bundle SHA-256.
+
+**Amendment text:** Live evidence is recorded per Worker version id. The five-request replay case is retired with server idempotency.
+
+| Case | Disposition |
+| --- | --- |
+| `live_create_read` | `npx tsx scripts/live/pds_compat_check.ts (no env) › exits nonzero with blocked and lists missing names` (Live publish-and-index evidence is a W6-05 gate.) |
+| `live_retries` | `retired:A11`: Server idempotency keys are dropped; there is no five-request replay to observe live. |
+| `live_delete` | `npx tsx scripts/live/pds_compat_check.ts (no env) › exits nonzero with blocked and lists missing names` (Live delete-and-reconcile evidence is a W6-05 gate.) |
+
+### M4.1.1 Parse bounded relay frames and select music operations
+
+**Amendment ids:** A6, A17
+
+**Demonstrated gap:** (A6) Full relay `subscribeRepos` verification is about 2k events/s, too much for one DO (ADR 0004 §2); Jetstream carries unsigned events, so every event is a hint and authority comes from a signed proof. (A17) Jetstream does not narrow identity/account events by collection, so subscribing would deliver the whole network's stream to one DO (ADR 0004 F1).
+
+**Amendment text:** Relay frames are replaced by bounded Jetstream JSON events (`kinds=commit`, messages over 64 KiB dropped and counted). Identity and account events are not subscribed; they are detected by errors and sweeps.
+
+| Case | Disposition |
+| --- | --- |
+| `collection_filter` | `packages/atproto/test/jetstream-events.test.ts › identity/account/sync kinds and foreign collections are ignored` |
+| `frame_limits` | `packages/atproto/test/jetstream-events.test.ts › oversize, malformed JSON, bad DID, unsafe integer are invalid` |
+| `event_types` | `worker/test/ingest/accounts.test.ts › deactivated status hides Alice immediately; Bob and Carol unaffected` (A17: identity/account events are not subscribed (kinds=commit); account changes are detected by errors and the getRepoStatus sweep.) |
+
+### M4.1.2 Verify commit signatures, CIDs, and MST membership
+
+**Amendment ids:** A6, A7
+
+**Demonstrated gap:** (A6) Full relay `subscribeRepos` verification is about 2k events/s, too much for one DO (ADR 0004 §2); Jetstream carries unsigned events, so every event is a hint and authority comes from a signed proof. (A7) The full-CAR snapshot is capped at 8 MiB / 10,000 records, so heavy scrobblers never finish (`crates/atproto/src/sync/frames.rs:16`, ADR 0004 F5); a `getBlocks` walk over our key range has no record ceiling.
+
+**Amendment text:** Verification is the `getRecord` inclusion/exclusion proof or the range walk at the current signed head under the current DID key. The tampering matrix extends to the rejection-matrix rule: projection and checkpoint tables byte-identical, then a valid hint applies.
+
+| Case | Disposition |
+| --- | --- |
+| `valid_signed_repo` | `packages/atproto/test/rust-golden-cars.test.ts › every tests/goldens/signed_cars manifest entry yields the expected verdict and error code` |
+| `tampering_matrix` | `worker/test/ingest/rejection-matrix.test.ts › each single-invariant corruption leaves scrobbles/follows/record_state/users/ingest_checkpoint byte-identical, then a valid hint applies` |
+| `key_rotation` | `worker/test/ingest/verify-drain.test.ts › key rotation: first verify fails, fresh resolve succeeds` |
+
+### M4.1.3 Apply verified mutations and checkpoint atomically
+
+**Amendment ids:** A6
+
+**Demonstrated gap:** (A6) Full relay `subscribeRepos` verification is about 2k events/s, too much for one DO (ADR 0004 §2); Jetstream carries unsigned events, so every event is a hint and authority comes from a signed proof.
+
+**Amendment text:** A hint and the checkpoint advance commit in one `transactionSync`; the cursor can never run ahead of a durable hint. Applying a proof is idempotent under the per-URI revision guard.
+
+| Case | Disposition |
+| --- | --- |
+| `duplicate_commit` | `worker/test/ingest/jetstream.test.ts › hint durable before cursor advance; replay of inclusive cursor creates no duplicate rows` |
+| `atomic_fault` | `worker/test/ingest/hints.test.ts › enqueue and checkpoint advance commit atomically (throw rolls back both)` |
+| `update_delete` | `worker/test/ingest/verify-drain.test.ts › deleted record with exclusion proof → absent and removed from views` (The update step is worker/test/write/apply-record.test.ts (r03 artist change).) |
+
+### M4.2.1 Implement cursor reconnect and gap detection
+
+**Amendment ids:** A6
+
+**Demonstrated gap:** (A6) Full relay `subscribeRepos` verification is about 2k events/s, too much for one DO (ADR 0004 §2); Jetstream carries unsigned events, so every event is a hint and authority comes from a signed proof.
+
+**Amendment text:** The relay sequence cursor becomes the Jetstream `time_us` cursor. Reconnect only on close or error plus a planned refresh every 15 minutes; backoff 1 s base, 60 s cap, injected jitter; a cursor older than `JETSTREAM_LOOKBACK_HOURS` enters gap recovery.
+
+| Case | Disposition |
+| --- | --- |
+| `resume` | `worker/test/ingest/jetstream.test.ts › hint durable before cursor advance; replay of inclusive cursor creates no duplicate rows` |
+| `expired_cursor` | `worker/test/ingest/jetstream-socket.test.ts › cursor older than lookback sets pending_gap and resumes from live tail` |
+| `bounded_reconnect` | `worker/test/ingest/jetstream-socket.test.ts › close triggers reconnect delays 1,2,4,…,60s and rotates us-east→us-west` |
+
+### M4.2.2 Implement verified repository backfill and revision convergence
+
+**Amendment ids:** A7
+
+**Demonstrated gap:** (A7) The full-CAR snapshot is capped at 8 MiB / 10,000 records, so heavy scrobblers never finish (`crates/atproto/src/sync/frames.rs:16`, ADR 0004 F5); a `getBlocks` walk over our key range has no record ceiling.
+
+**Amendment text:** Backfill is a resumable `getBlocks` range walk with a 32 MiB streamed `getRepo` fallback and no record ceiling. Admission keeps the 1,024 pending-job bound; the DO runs one job slice per alarm.
+
+| Case | Disposition |
+| --- | --- |
+| `historical_seed` | `worker/test/ingest/snapshot-job.test.ts › new DID snapshot imports r01–r07 and activates; r08 absent` |
+| `snapshot_live_race` | `worker/test/write/apply-snapshot.test.ts › live hint with newer revision survives snapshot sweep` |
+| `backfill_limits` | `worker/test/ingest/admission.test.ts › 1,024 pending jobs → next admission busy and writes nothing` (The single DO runs one snapshot slice per alarm, so the four-active bound becomes one active slice (A7).) |
+
+### M4.2.3 Reconcile account state, identity changes, and status
+
+**Amendment ids:** A17
+
+**Demonstrated gap:** (A17) Jetstream does not narrow identity/account events by collection, so subscribing would deliver the whole network's stream to one DO (ADR 0004 F1).
+
+**Amendment text:** Account state comes from error-driven detection and the `getRepoStatus` sweep (at most 1 h for DIDs active in the last 30 days, 24 h for others). Reactivation stays hidden until a complete snapshot commits under the generation guard.
+
+| Case | Disposition |
+| --- | --- |
+| `pds_migration` | `worker/test/ingest/snapshot-job.test.ts › PDS migration A→B fetches from B and preserves URIs/CIDs` |
+| `deactivate_reactivate` | `worker/test/ingest/reactivation.test.ts › deactivate Alice hides her; reactivation stays hidden until snapshot completes, then current` |
+| `status_truth` | `worker/test/storage/status.test.ts › pending_gap overrides a stored current flag` |
+
+### M4.3.2 Implement following scope and viewer-bound cursors
+
+**Amendment ids:** A8
+
+**Demonstrated gap:** (A8) There is no server session to identify the viewer (A3); follow records are already public (Q7).
+
+**Amendment text:** `scope=following` requires `viewer=<did>` instead of a session: public, 422 `fields.viewer` when missing or invalid, and the cursor binds the viewer. An unknown viewer gets an empty page.
+
+| Case | Disposition |
+| --- | --- |
+| `following_membership` | `worker/test/read/feed.test.ts › Alice following feed is r09 only and excludes self` |
+| `scope_security` | `worker/test/read/feed.test.ts › missing viewer for following → 422 fields.viewer` (A8: anonymous 401 becomes 422 fields.viewer; the viewer-mismatch 400 is worker/test/read/cursor-http.test.ts.) |
+| `follow_change` | `worker/test/acceptance/mutations.test.ts › remove Alice→Bob → following feed empty; global unchanged` |
+
+### M4.4.1 Create independent-writer federation harness
+
+**Amendment ids:** A6
+
+**Demonstrated gap:** (A6) Full relay `subscribeRepos` verification is about 2k events/s, too much for one DO (ADR 0004 §2); Jetstream carries unsigned events, so every event is a hint and authority comes from a signed proof.
+
+**Amendment text:** Federation evidence is an external writer published through its own PDS and ingested through Jetstream hints or notify plus signed proofs. Missing Jetstream coverage is reported blocked, never a pass.
+
+| Case | Disposition |
+| --- | --- |
+| `independent_write` | `worker/test/acceptance/federation.test.ts › Carol r10 appears only through external ingestion with zero app write calls` |
+| `independent_mutation` | `worker/test/acceptance/mutations.test.ts › Carol→Bob duplicates 2, then 2, then 1` |
+| `coverage_failure` | `npx tsx scripts/live/pds_compat_check.ts (no env) › exits nonzero with blocked and lists missing names` (A6: Jetstream coverage is a live prerequisite; missing coverage is reported blocked, never a federation pass.) |
+
+### M4.4.2 Add federation fault and convergence suite
+
+**Amendment ids:** A6, A18
+
+**Demonstrated gap:** (A6) Full relay `subscribeRepos` verification is about 2k events/s, too much for one DO (ADR 0004 §2); Jetstream carries unsigned events, so every event is a hint and authority comes from a signed proof. (A18) Workers tests run in workerd through `@cloudflare/vitest-plugin`; there is no process, port or `LD_PRELOAD` to control, and restart is DO eviction.
+
+**Amendment text:** Convergence runs through gap recovery and snapshots; restart is DO eviction with byte-identical tables and a continuing cursor.
+
+| Case | Disposition |
+| --- | --- |
+| `convergence` | `worker/test/ingest/gap-recovery.test.ts › gap schedules all known DIDs within 1,024 bound and clears pending_gap only after all complete` |
+| `signature_failure` | `worker/test/acceptance/federation.test.ts › bad signature / changed block / wrong MST path leave projection and cursor byte-identical` |
+| `worker_restart` | `worker/test/acceptance/restart.test.ts › eviction preserves byte-identical tables, pre-restart cursor continues, alarm resumes` |
+
+### M4.4.3 Run two-external-PDS live federation acceptance
+
+**Amendment ids:** A6, A19
+
+**Demonstrated gap:** (A6) Full relay `subscribeRepos` verification is about 2k events/s, too much for one DO (ADR 0004 §2); Jetstream carries unsigned events, so every event is a hint and authority comes from a signed proof. (A19) A Worker has no executable artifact; a release is a Worker version id and the bundle SHA-256.
+
+**Amendment text:** The live federation gate uses Jetstream coverage instead of a configured relay and records evidence per Worker version id.
+
+| Case | Disposition |
+| --- | --- |
+| `live_remote_arrival` | `npx tsx scripts/live/pds_compat_check.ts (no env) › exits nonzero with blocked and lists missing names` (External-writer arrival is a W6-05 live gate.) |
+| `live_remote_mutation` | `npx tsx scripts/live/pds_compat_check.ts (no env) › exits nonzero with blocked and lists missing names` (External update/delete is a W6-05 live gate.) |
+| `live_recovery` | `npx tsx scripts/live/pds_compat_check.ts (no env) › exits nonzero with blocked and lists missing names` (Socket reconnect convergence is the W6-05 24 h soak.) |
+
+### M5.2.1 Serve verified handle resolution and stable DID profiles
+
+**Amendment ids:** A17
+
+**Demonstrated gap:** (A17) Jetstream does not narrow identity/account events by collection, so subscribing would deliver the whole network's stream to one DO (ADR 0004 F1).
+
+**Amendment text:** Handle changes are picked up by the daily identity sweep, verified in both directions; the DID and its URLs are unchanged.
+
+| Case | Disposition |
+| --- | --- |
+| `handle_rename` | `worker/test/ingest/sweeps.test.ts › handle that no longer verifies becomes null; history retained` (A17 identity sweep; W4-03 must also show the new verified handle resolves to the same DID.) |
+| `unverified_alias` | `worker/test/read/resolve.test.ts › verified handle 200; unresolved 404; mismatch 422` |
+| `profile_fields` | `worker/test/read/profile.test.ts › Alice followers 0 following 1; Bob followers 1 following 0; Carol 0/0` |
+
+### M5.2.3 Assert public profile privacy and caching rules
+
+**Amendment ids:** A3, D
+
+**Demonstrated gap:** (A3) Q1 (ADR 0004 §15) places the OAuth client in the browser so the Worker holds no user credential; `@atproto/oauth-client-browser` performs discovery, PAR, PKCE, DPoP nonces, the issuer check and refresh, and stores the session in IndexedDB. (D) ADR 0004 §9.3 drops the item outright under Q1 (browser public client); the BFF fallback in §15 would restore it.
+
+**Amendment text:** The server holds no tokens, cookies or private payloads, and no request carries a caller identity, so the sensitive-field and owner-equality cases are retired. Profile caching stays `no-store`.
+
+| Case | Disposition |
+| --- | --- |
+| `sensitive_fields` | `retired:A3`: The server stores no tokens, cookies or private payloads (ADR 0004 §8); every HTTP test validates the closed Profile schema with AJV. |
+| `owner_equality` | `retired:D`: Sessions are dropped (ADR 0004 §9.3), so no request carries a caller identity that could change a public payload. |
+| `cache_invalidation` | `worker/test/read/stats-cache.test.ts › cache hit only when version unchanged and no row crossed either bound; result equals uncached` |
+
+### M5.3.1 Publish and delete idempotent music-follow records
+
+**Amendment ids:** A2, A12
+
+**Demonstrated gap:** (A2) Under Q1 (ADR 0004 §15) the browser SPA writes directly to the user's PDS through the atproto OAuth session; the server holds no credential to write with. (A12) Writes go from the browser to the owner's PDS (A2), so the outbox moves to the SPA IndexedDB store with the same retry formula, cap and crash barriers.
+
+**Amendment text:** `PUT/DELETE /api/v1/follows/{did}` are dropped. The SPA writes the deterministic follow rkey; an existing record with the same subject is success and keeps its `createdAt`. Unfollow lists the owner's follow records with `listRecords` and deletes every matching record with `swapRecord`.
+
+| Case | Disposition |
+| --- | --- |
+| `self_and_duplicate` | `packages/core/test/follow.test.ts › follow validation and self-follow rejection` |
+| `restart_follow` | `web/test/outbox/recovery.test.ts › crash after PDS commit before local ack: ambiguous create reconciles to success via digest` (W2-07 must include the deterministic follow rkey in the crash-after-commit case.) |
+| `unfollow_absent` | `web/test/outbox/follows.test.ts › unfollow deletes all duplicate matching records and keeps unrelated subject` |
+
+### M5.3.3 Integrate follow/account state into feed membership
+
+**Amendment ids:** A2, A12
+
+**Demonstrated gap:** (A2) Under Q1 (ADR 0004 §15) the browser SPA writes directly to the user's PDS through the atproto OAuth session; the server holds no credential to write with. (A12) Writes go from the browser to the owner's PDS (A2), so the outbox moves to the SPA IndexedDB store with the same retry formula, cap and crash barriers.
+
+**Amendment text:** A queued follow lives in the SPA outbox; the following feed changes only after the follow record's proof applies.
+
+| Case | Disposition |
+| --- | --- |
+| `pending_confirmed` | `worker/test/ingest/verify-drain.test.ts › known active DID hint → one getRecord call → row applied with receipt-time validation` (A2/A12: the queued follow lives in the SPA outbox; the edge appears only after its proof applies.) |
+| `unfollow_target` | `worker/test/acceptance/mutations.test.ts › remove Alice→Bob → following feed empty; global unchanged` |
+| `account_state` | `worker/test/ingest/accounts.test.ts › reactivated status schedules snapshot and keeps hidden until completion` |
+
+### M5.4.3 Verify persistence with packaged process restart
+
+**Amendment ids:** A18
+
+**Demonstrated gap:** (A18) Workers tests run in workerd through `@cloudflare/vitest-plugin`; there is no process, port or `LD_PRELOAD` to control, and restart is DO eviction.
+
+**Amendment text:** Restart is DO eviction with storage kept: byte-compare every projection table, continue a pre-restart cursor and assert the alarm resumes.
+
+| Case | Disposition |
+| --- | --- |
+| `durable_views` | `worker/test/acceptance/restart.test.ts › eviction preserves byte-identical tables, pre-restart cursor continues, alarm resumes` |
+| `durable_cursor` | `worker/test/acceptance/restart.test.ts › eviction preserves byte-identical tables, pre-restart cursor continues, alarm resumes` |
+| `durable_delete` | `worker/test/write/apply-record.test.ts › older revision proof after newer delete is noop (no resurrection)` |
+
+### M6.1.1 Embed compile-time assets and implement safe SPA routing
+
+**Amendment ids:** A1, D
+
+**Demonstrated gap:** (A1) tokio, sqlx and a bound TCP listener do not run on Cloudflare Workers; the single SQLite Durable Object is the only Workers store with synchronous transactions (`transactionSync`), and D1 rejects `BEGIN`/`SAVEPOINT` (ADR 0004 §1.2). (D) ADR 0004 §9.3 drops the item outright under Q1 (browser public client); the BFF fallback in §15 would restore it.
+
+**Amendment text:** Superseded. build.rs embedding is replaced by Workers Static Assets with SPA fallback; `run_worker_first` covers only `/api/*`, `/health/*` and `/internal/*`. An unknown `/api/*` path is a JSON 404 from the Worker.
+
+| Case | Disposition |
+| --- | --- |
+| `asset_missing_traversal` | `worker/test/composition/routing.test.ts › every API.md v1.1 route dispatches; unknown /api/x → JSON 404; non-API path → ASSETS` (Asset lookup and traversal are Workers Static Assets behaviour (ADR 0004 §9.3).) |
+| `spa_deep_link` | `web/tests/mvp.spec.ts › OAuth callback navigation is served by SPA (/oauth/callback not intercepted by Worker)` |
+| `asset_cache` | `retired:D`: build.rs embedding is dropped; Workers Static Assets set asset caching (ADR 0004 §9.3). |
+
+### M6.1.2 Validate public-origin and trusted-proxy deployment settings
+
+**Amendment ids:** D
+
+**Demonstrated gap:** (D) ADR 0004 §9.3 drops the item outright under Q1 (browser public client); the BFF fallback in §15 would restore it.
+
+**Amendment text:** Superseded. The trusted reverse proxy is replaced by Cloudflare: the Worker strips inbound `x-atmusic-*` headers and copies `CF-Connecting-IP`. OAuth metadata is generated at build time from `PUBLIC_ORIGIN`, so no Host header is read.
+
+| Case | Disposition |
+| --- | --- |
+| `untrusted_forwarded` | `worker/test/composition/routing.test.ts › inbound x-atmusic-client-ip is stripped and CF-Connecting-IP used` |
+| `trusted_proxy` | `retired:D`: The trusted reverse proxy is dropped; Cloudflare terminates TLS and supplies CF-Connecting-IP (ADR 0004 §9.3). |
+| `origin_mismatch` | `scripts/test/gen-config.test.ts › production metadata equals expected JSON for https://music.example.org with prefix org.example.music` (Metadata is generated at build time from PUBLIC_ORIGIN, so no Host header is read; wrong-Origin mutations are dropped (D).) |
+
+### M6.1.3 Document fresh install, upgrade, and restart workflow
+
+**Amendment ids:** A1, A15
+
+**Demonstrated gap:** (A1) tokio, sqlx and a bound TCP listener do not run on Cloudflare Workers; the single SQLite Durable Object is the only Workers store with synchronous transactions (`transactionSync`), and D1 rejects `BEGIN`/`SAVEPOINT` (ADR 0004 §1.2). (A15) A Durable Object has no file to copy; DO point-in-time recovery covers 30 days and the index is re-derivable from public repositories.
+
+**Amendment text:** The install flow is `wrangler` deploy with a custom domain, `CURSOR_KEY` and an owned prefix; `scripts/deploy.sh --dry-run` refuses an empty or fixture prefix and a missing secret. Recovery from a bad upgrade is DO point-in-time recovery.
+
+| Case | Disposition |
+| --- | --- |
+| `fresh_install` | `bash scripts/deploy.sh --dry-run › refuses empty/fixture prefix and missing secret with nonzero exit` (W6-04 owns the documented install flow.) |
+| `upgrade_failure` | `npx tsx scripts/admin/pitr-restore.ts --help › prints usage and requires ADMIN_TOKEN` (A15: recovery is DO point-in-time recovery; a failing migration rolls back in one transactionSync.) |
+| `secret_example_scan` | `bash scripts/deploy.sh --dry-run › refuses empty/fixture prefix and missing secret with nonzero exit` (W6-04 must also scan worker/.dev.vars.example and the docs for real secrets.) |
+
+### M6.2.1 Enforce body limits and bounded per-user/IP rates
+
+**Amendment ids:** A1, N1
+
+**Demonstrated gap:** (A1) tokio, sqlx and a bound TCP listener do not run on Cloudflare Workers; the single SQLite Durable Object is the only Workers store with synchronous transactions (`transactionSync`), and D1 rejects `BEGIN`/`SAVEPOINT` (ADR 0004 §1.2). (N1) Without server writes the AppView needs an untrusted, rate-limited way to learn about a new record promptly (ADR 0004 §5.2 step 4).
+
+**Amendment text:** The only JSON body is notify, capped at 2 KiB (413 above). Notify is limited to 60/min per IP (`CF-Connecting-IP`) and 600/h per DID with 429 and `Retry-After`; buckets live in the singleton DO and fail open after a restart.
+
+| Case | Disposition |
+| --- | --- |
+| `body_boundary` | `worker/test/http/params.test.ts › body over cap → 413; malformed JSON → 400` (N1: the only JSON body is notify, capped at 2 KiB, so the boundary becomes 2,048/2,049 bytes.) |
+| `rate_boundary` | `worker/test/http/limits.test.ts › bucket refills exactly with injected clock; 61st request in a minute is limited` |
+| `bounded_state` | `worker/test/http/limits.test.ts › bucket refills exactly with injected clock; 61st request in a minute is limited` (W1-07 must assert bounded bucket memory and eviction; buckets fail open after a DO restart (ADR 0004 §8).) |
+
+### M6.2.2 Expose safe metrics and degrade on upstream outages
+
+**Amendment ids:** A16
+
+**Demonstrated gap:** (A16) A Worker cannot run a Prometheus listener; Workers Logs, the `counters` table and `/internal/admin/status` replace it.
+
+**Amendment text:** Superseded. Metrics are Workers Logs, the `counters` table and `/internal/admin/status`, which exists only when `ADMIN_TOKEN` is set and compares the bearer token in constant time.
+
+| Case | Disposition |
+| --- | --- |
+| `metrics_auth` | `worker/test/composition/admin.test.ts › admin routes 404 without ADMIN_TOKEN; wrong token 401 constant-time; status JSON shape` |
+| `upstream_offline` | `worker/test/storage/status.test.ts › socket disconnected >5min reports stale` |
+| `log_redaction` | `retired:A16`: The Prometheus listener and its log pipeline become Workers Logs and the counters table; the server receives no codes, tokens or cookies (A3). |
+
+### M6.2.3 Add reproducible query latency benchmark
+
+**Amendment ids:** A1
+
+**Demonstrated gap:** (A1) tokio, sqlx and a bound TCP listener do not run on Cloudflare Workers; the single SQLite Durable Object is the only Workers store with synchronous transactions (`transactionSync`), and D1 rejects `BEGIN`/`SAVEPOINT` (ADR 0004 §1.2).
+
+**Amendment text:** The benchmark runs on DO SQLite in workerd and reports rows read, CPU and latency; the slow-query check is the `EXPLAIN QUERY PLAN` negative control.
+
+| Case | Disposition |
+| --- | --- |
+| `benchmark_dataset` | `worker/test/bench/read-models.bench.test.ts › benchmark JSON is produced and schema-valid` |
+| `benchmark_results` | `worker/test/bench/read-models.bench.test.ts › history/feed rows read ≤ limit+2` |
+| `slow_query_detection` | `worker/test/acceptance/query-plans.test.ts › 100×1,000 seeded records: history/feed/stats plans use indexes; negative control scans` |
+
+### M6.3.1 Implement consistent SQLite backup and verified restore
+
+**Amendment ids:** A15
+
+**Demonstrated gap:** (A15) A Durable Object has no file to copy; DO point-in-time recovery covers 30 days and the index is re-derivable from public repositories.
+
+**Amendment text:** Superseded. File backup and verified restore are replaced by DO point-in-time recovery (`getBookmarkForTime` / `onNextSessionRestoreBookmark` behind admin) plus a full rebuild from public repositories.
+
+| Case | Disposition |
+| --- | --- |
+| `backup_during_write` | `retired:A15`: File backup becomes DO point-in-time recovery plus a full rebuild from public repositories. |
+| `restore_state` | `retired:A15`: PITR restores the whole DO; there is no encrypted auth to decrypt (A3). |
+| `wrong_key` | `retired:A15`: There is no operator encryption key to restore with (ADR 0004 §9.3). |
+
+### M6.3.2 Implement owner-only JSON account export
+
+**Amendment ids:** A9, N3
+
+**Demonstrated gap:** (A9) Owner-only export needs a server session, which no longer exists (A3); the exported records are all public. (N3) A9 moves export to a public per-DID route.
+
+**Amendment text:** `GET /api/v1/account/export` becomes `GET /api/v1/users/{did}/export`: public, the same payload, attachment `music-export.json`, `no-store`, 404 for unknown or inactive users.
+
+| Case | Disposition |
+| --- | --- |
+| `export_owner` | `worker/test/read/export.test.ts › export contains only indexed public records, attachment header, 404 for inactive` |
+| `export_auth` | `retired:A9`: Export becomes the public GET /api/v1/users/{did}/export with the same payload; there is no owner check to reject. |
+| `export_secret_scan` | `worker/test/read/export.test.ts › export contains only indexed public records, attachment header, 404 for inactive` |
+
+### M6.3.3 Implement local-data disconnect and indexing suppression
+
+**Amendment ids:** A10
+
+**Demonstrated gap:** (A10) A server-side disconnect needs an authenticated owner request; with no session (A3) the owner proves intent with a repo-signed `<prefix>.settings/self` record (ADR 0004 F10, §5.3).
+
+**Amendment text:** `DELETE /api/v1/account/local-data` becomes the signed `<prefix>.settings/self` record with `indexing: "disabled"` (`lexicons/settings.json`). Once verified, one transaction deletes the DID's local data and keeps only the suppression marker. Deleting the record, or `enabled` at a newer revision, reconnects through a fresh snapshot.
+
+| Case | Disposition |
+| --- | --- |
+| `disconnect_effect` | `worker/test/write/suppression.test.ts › disabled settings deletes local data and keeps only suppression marker; other owners' follows to DID hidden` |
+| `suppression` | `worker/test/acceptance/federation.test.ts › settings disabled disconnects Carol; settings deleted reconnects after snapshot` |
+| `explicit_reconnect` | `worker/test/write/suppression.test.ts › enabled/absent settings with newer rev clears suppression and requests admission` |
+
+### M6.4.1 Create versioned static release pipeline with checksums
+
+**Amendment ids:** A19
+
+**Demonstrated gap:** (A19) A Worker has no executable artifact; a release is a Worker version id and the bundle SHA-256.
+
+**Amendment text:** Superseded. The release is a Worker version uploaded with `wrangler versions upload`, identified by its version id and bundle SHA-256.
+
+| Case | Disposition |
+| --- | --- |
+| `tag_version` | `retired:A19`: Releases are Worker versions (wrangler versions upload), not tagged musl artifacts. |
+| `checksum` | `retired:A19`: The release evidence is the bundle SHA-256 printed by scripts/check-bundle.ts, not a downloadable artifact checksum. |
+| `static_release` | `retired:A19`: There is no ELF executable to inspect. |
+
+### M6.4.2 Run packaged backend fault/recovery acceptance
+
+**Amendment ids:** A18, A19
+
+**Demonstrated gap:** (A18) Workers tests run in workerd through `@cloudflare/vitest-plugin`; there is no process, port or `LD_PRELOAD` to control, and restart is DO eviction. (A19) A Worker has no executable artifact; a release is a Worker version id and the bundle SHA-256.
+
+**Amendment text:** The acceptance run is `scripts/acceptance/workers-backend.sh` (W7-01) and the case map closure; an unmapped case or a missing test fails it.
+
+| Case | Disposition |
+| --- | --- |
+| `packaged_flow` | `bash scripts/acceptance/workers-backend.sh › exits 0 with all deterministic suites passing and lists live gates as blocked when prerequisites absent` |
+| `packaged_recovery` | `worker/test/acceptance/restart.test.ts › eviction preserves byte-identical tables, pre-restart cursor continues, alarm resumes` |
+| `unrun_gate` | `python3 scripts/validate_case_map.py --check-tests › every mapped test file and name exists; 258 cases covered` |
+
+### M6.4.3 Record live backend MVP gate and operational limits
+
+**Amendment ids:** A6, A19
+
+**Demonstrated gap:** (A6) Full relay `subscribeRepos` verification is about 2k events/s, too much for one DO (ADR 0004 §2); Jetstream carries unsigned events, so every event is a hint and authority comes from a signed proof. (A19) A Worker has no executable artifact; a release is a Worker version id and the bundle SHA-256.
+
+**Amendment text:** Live evidence is keyed by Worker version id and bundle hash; Jetstream coverage replaces relay coverage as a prerequisite.
+
+| Case | Disposition |
+| --- | --- |
+| `live_inventory` | `scripts/test_live_evidence.py › evidence missing version id or bundle hash is rejected` |
+| `blocked_gate` | `scripts/test_live_evidence.py › blocked result is distinguished from pass and fail` |
+| `privacy_consistency` | `web/test/routes/settings.test.tsx › disconnect requires confirmation and enqueues settings op` (W6-04 docs must state that the settings opt-out record is public and claims no erasure.) |
+
+### M7.1.1 Scaffold Preact/TypeScript/Vite only after backend gate
+
+**Amendment ids:** A14
+
+**Demonstrated gap:** (A14) The SPA is now the only write client (A2), so the write path cannot wait for M6.4.
+
+**Amendment text:** The SPA scaffold starts in Wave 1 (W1-10) with npm workspaces; there is no backend-gate precondition. Browser end-to-end tests still follow backend composition.
+
+| Case | Disposition |
+| --- | --- |
+| `web_build` | `bash scripts/acceptance/workers-backend.sh › exits 0 with all deterministic suites passing and lists live gates as blocked when prerequisites absent` |
+| `strict_type_failure` | `bash scripts/acceptance/workers-backend.sh › exits 0 with all deterministic suites passing and lists live gates as blocked when prerequisites absent` (tsc -b in check-ts.sh fails the gate; a disposable-copy demonstration is not named in the waves.) |
+| `gate_enforcement` | `retired:A14`: "No frontend before M6.4" is dropped; the SPA write path is core and starts in Wave 1. |
+
+### M7.1.2 Generate typed API client and session/CSRF state
+
+**Amendment ids:** A3, D
+
+**Demonstrated gap:** (A3) Q1 (ADR 0004 §15) places the OAuth client in the browser so the Worker holds no user credential; `@atproto/oauth-client-browser` performs discovery, PAR, PKCE, DPoP nonces, the issuer check and refresh, and stores the session in IndexedDB. (D) ADR 0004 §9.3 drops the item outright under Q1 (browser public client); the BFF fallback in §15 would restore it.
+
+**Amendment text:** The typed client covers every v1.1 route including notify and records/status. CSRF state is dropped; session loss is the OAuth library's re-auth state.
+
+| Case | Disposition |
+| --- | --- |
+| `contract_drift` | `web/test/api-client.test.ts › decodes Page<Scrobble> and passes nextCursor unchanged` |
+| `csrf_client` | `retired:D`: CSRF and Origin rules are dropped (ADR 0004 §9.3); the SPA sends no server mutation. |
+| `session_loss` | `web/test/oauth/session.test.ts › expired/refresh-failed session surfaces re-auth state` |
+
+### M7.1.3 Implement accessible route shell and state primitives
+
+**Amendment ids:** A1
+
+**Demonstrated gap:** (A1) tokio, sqlx and a bound TCP listener do not run on Cloudflare Workers; the single SQLite Durable Object is the only Workers store with synchronous transactions (`transactionSync`), and D1 rejects `BEGIN`/`SAVEPOINT` (ADR 0004 §1.2).
+
+**Amendment text:** Deep links are served by the Static Assets SPA fallback.
+
+| Case | Disposition |
+| --- | --- |
+| `route_deep_links` | `web/tests/mvp.spec.ts › OAuth callback navigation is served by SPA (/oauth/callback not intercepted by Worker)` |
+| `keyboard_shell` | `web/tests/accessibility.spec.ts › no serious/critical axe violations on all routes` |
+| `state_components` | `web/test/routes/feed.test.tsx › renders items and loads next page via nextCursor` (W3-06 must render loading, empty, error and stale states without an indefinite spinner.) |
+
+### M7.2.1 Implement handle sign-in and secure sign-out screens
+
+**Amendment ids:** A3
+
+**Demonstrated gap:** (A3) Q1 (ADR 0004 §15) places the OAuth client in the browser so the Worker holds no user credential; `@atproto/oauth-client-browser` performs discovery, PAR, PKCE, DPoP nonces, the issuer check and refresh, and stores the session in IndexedDB.
+
+**Amendment text:** Sign-in uses `BrowserOAuthClient`; after the callback the SPA posts `notify {did}`. Sign-out revokes and clears IndexedDB.
+
+| Case | Disposition |
+| --- | --- |
+| `signin_success` | `web/test/oauth/session.test.ts › successful callback stores session and posts notify {did}` |
+| `signin_failures` | `web/test/oauth/session.test.ts › expired/refresh-failed session surfaces re-auth state` |
+| `logout_ui` | `web/test/oauth/session.test.ts › signOut calls revoke and clears IndexedDB stores` |
+
+### M7.2.2 Implement manual scrobble form and publication states
+
+**Amendment ids:** A12, N2
+
+**Demonstrated gap:** (A12) Writes go from the browser to the owner's PDS (A2), so the outbox moves to the SPA IndexedDB store with the same retry formula, cap and crash barriers. (N2) The SPA needs to see when its record is indexed or excluded, which the dropped operation status used to report.
+
+**Amendment text:** Publication states are *queued → published → indexed* or *excluded (reason)*, read from the outbox and `GET /api/v1/records/status`.
+
+| Case | Disposition |
+| --- | --- |
+| `form_validation` | `web/test/routes/scrobble.test.tsx › invalid input shows field errors and creates no outbox operation` |
+| `submit_retry` | `web/test/outbox/recovery.test.ts › crash after PDS commit before local ack: ambiguous create reconciles to success via digest` |
+| `poll_terminal` | `web/test/routes/scrobble.test.tsx › status progresses queued→published→indexed from mocked records/status` |
+
+### M7.2.3 Implement owner delete, export, and local disconnect UI
+
+**Amendment ids:** A9, A10, A13
+
+**Demonstrated gap:** (A9) Owner-only export needs a server session, which no longer exists (A3); the exported records are all public. (A10) A server-side disconnect needs an authenticated owner request; with no session (A3) the owner proves intent with a repo-signed `<prefix>.settings/self` record (ADR 0004 F10, §5.3). (A13) The AppView only reflects verified repository state; an unverified local delete cannot change public views without weakening "verified repository records are the public source of truth".
+
+**Amendment text:** Delete uses the outbox overlay; export downloads the public `users/{did}/export`; disconnect writes `settings/self` with `indexing: "disabled"` after offering an export and states that the opt-out record is public.
+
+| Case | Disposition |
+| --- | --- |
+| `delete_owner` | `web/test/outbox/delete.test.ts › pending deletion hidden in owner overlay; failure visible` (The forced Bob call is dropped with the server delete route (D); a user can delete only in their own repository.) |
+| `export_download` | `worker/test/read/export.test.ts › export contains only indexed public records, attachment header, 404 for inactive` |
+| `disconnect_text` | `web/test/routes/settings.test.tsx › disconnect requires confirmation and enqueues settings op` |
+
+### M7.3.1 Render global/following feeds with cursor pagination
+
+**Amendment ids:** A8
+
+**Demonstrated gap:** (A8) There is no server session to identify the viewer (A3); follow records are already public (Q7).
+
+**Amendment text:** The following feed is public with `viewer=<did>`; the signed-in DID is the default viewer.
+
+| Case | Disposition |
+| --- | --- |
+| `feed_order` | `web/test/routes/feed.test.tsx › renders items and loads next page via nextCursor` |
+| `anonymous_following` | `retired:A8`: The following feed is public with `viewer=<did>`, so there is no anonymous sign-in prompt to show. |
+| `feed_failure` | `web/test/routes/feed.test.tsx › renders items and loads next page via nextCursor` (W3-06 must keep page 1 on a page-2 503 and append the retried page once.) |
+
+### M7.3.3 Implement follow/unfollow controls and index refresh
+
+**Amendment ids:** A12
+
+**Demonstrated gap:** (A12) Writes go from the browser to the owner's PDS (A2), so the outbox moves to the SPA IndexedDB store with the same retry formula, cap and crash barriers.
+
+**Amendment text:** Follow and unfollow run through the SPA outbox; a permanent remote failure is shown as failed.
+
+| Case | Disposition |
+| --- | --- |
+| `follow_state` | `web/test/outbox/follows.test.ts › PUT, DELETE, PUT for one subject execute in order with separate ids` |
+| `unfollow_failure` | `web/test/outbox/delete.test.ts › pending deletion hidden in owner overlay; failure visible` |
+| `self_and_auth` | `packages/core/test/follow.test.ts › follow validation and self-follow rejection` (The anonymous sign-in action is web/test/routes/shell.test.tsx.) |
+
+### M7.4.1 Build and embed production SPA in release executable
+
+**Amendment ids:** A1
+
+**Demonstrated gap:** (A1) tokio, sqlx and a bound TCP listener do not run on Cloudflare Workers; the single SQLite Durable Object is the only Workers store with synchronous transactions (`transactionSync`), and D1 rejects `BEGIN`/`SAVEPOINT` (ADR 0004 §1.2).
+
+**Amendment text:** Superseded deliverable: the SPA is served by Workers Static Assets, not embedded in an executable.
+
+| Case | Disposition |
+| --- | --- |
+| `embedded_dist` | `retired:A1`: The SPA is served by Workers Static Assets, not embedded in an executable. |
+| `missing_build` | `retired:A1`: There is no product executable; wrangler deploys the asset directory with the Worker. |
+| `asset_links` | `web/tests/mvp.spec.ts › OAuth callback navigation is served by SPA (/oauth/callback not intercepted by Worker)` |
+
+### M7.4.2 Run complete browser journey against packaged executable
+
+**Amendment ids:** A1, A18
+
+**Demonstrated gap:** (A1) tokio, sqlx and a bound TCP listener do not run on Cloudflare Workers; the single SQLite Durable Object is the only Workers store with synchronous transactions (`transactionSync`), and D1 rejects `BEGIN`/`SAVEPOINT` (ADR 0004 §1.2). (A18) Workers tests run in workerd through `@cloudflare/vitest-plugin`; there is no process, port or `LD_PRELOAD` to control, and restart is DO eviction.
+
+**Amendment text:** The browser journey runs with Playwright against `wrangler dev` and a local PDS (`@atproto/dev-env`).
+
+| Case | Disposition |
+| --- | --- |
+| `browser_journey` | `web/tests/mvp.spec.ts › full journey sign-in → scrobble indexed → stats → follow/unfollow → delete → export → disconnect/reconnect → sign-out` |
+| `browser_restart` | `worker/test/acceptance/restart.test.ts › eviction preserves byte-identical tables, pre-restart cursor continues, alarm resumes` (A18: restart is DO eviction; the browser journey runs against wrangler dev.) |
+| `browser_network` | `web/test/oauth/session.test.ts › expired/refresh-failed session surfaces re-auth state` |
+
+### M7.4.3 Run accessibility and live product release gate
+
+**Amendment ids:** A6, A19
+
+**Demonstrated gap:** (A6) Full relay `subscribeRepos` verification is about 2k events/s, too much for one DO (ADR 0004 §2); Jetstream carries unsigned events, so every event is a hint and authority comes from a signed proof. (A19) A Worker has no executable artifact; a release is a Worker version id and the bundle SHA-256.
+
+**Amendment text:** The live product gate uses Jetstream coverage and records evidence per Worker version id.
+
+| Case | Disposition |
+| --- | --- |
+| `a11y_screens` | `web/tests/accessibility.spec.ts › no serious/critical axe violations on all routes` |
+| `keyboard_journey` | `web/tests/accessibility.spec.ts › no serious/critical axe violations on all routes` (W6-03 must add the keyboard-only journey assertions.) |
+| `live_product` | `npx tsx scripts/live/pds_compat_check.ts (no env) › exits nonzero with blocked and lists missing names` |
+
+## Leaves with no rule change
+
+These leaves keep every rule and case unchanged; only the global implementation-location amendment applies. Their case targets are in the case map.
+
+`M1.1.2`, `M1.1.3`, `M3.1.2`, `M3.1.3`, `M4.3.1`, `M4.3.3`, `M5.1.1`, `M5.1.2`, `M5.1.3`, `M5.2.2`, `M5.3.2`, `M5.4.1`, `M5.4.2`, `M7.3.2`.
+
+## Coverage obligations for the owning packages
+
+Where a mapped wave test title does not name every assertion of the original case, the case map carries a `note`. The owning package must cover that assertion inside the mapped test, and W7-01 checks it when it finalises the map. The notes are listed in the case-disposition tables above and, for leaves without a section, here:
+
+- `M1.1.2/optional_values` → `packages/core/test/scrobble.test.ts › validation.json vectors match Rust verdicts and reasons`: validation.json (W0-03) must contain the duration 1/86400/0/86401/1.5, MBID and omitted-album vectors.
+- `M1.1.3/follow_time` → `packages/core/test/follow.test.ts › follow validation and self-follow rejection`: Must assert createdAt=now+300s accepted and now+301s rejected.
+- `M4.3.1/feed_visibility` → `worker/test/write/apply-record.test.ts › invalid remote record is excluded with reason and not visible`: The external Carol record is worker/test/acceptance/federation.test.ts; inactive owners are worker/test/write/account-state.test.ts.
+- `M4.3.3/external_delete_update` → `worker/test/read/cursor-http.test.ts › arrival above anchor absent until fresh traversal; deleted unreturned record disappears`: W3-01 must also assert and document the moved-row (updated listenedAt) behaviour.
+- `M5.1.1/tuple_collision` → `packages/core/test/music-key.test.ts › every music_keys.json vector equals the Rust key`: music_keys.json (W0-03) must contain the a|b / c versus a / b|c collision pair.
+- `M5.1.2/ranking_ties` → `worker/test/read/stats.test.ts › 7d: 4/2/3; artists (björk,2),(radiohead,2); tracks Björk/Jóga:2, Radiohead/No Surprises:1, Radiohead/Weird Fishes:1`: Invalid window/limit 422 is worker/test/http/params.test.ts.
+- `M5.2.2/unknown_empty` → `worker/test/read/profile.test.ts › unknown/inactive DID → 404 with zero identity transport calls`: W3-03 must also cover a known recordless user (200, zero totals).
+- `M5.3.2/list_pagination` → `worker/test/read/follows.test.ts › two active Carol→Bob records count Bob followers 2 not 3; representative is min URI`: W3-03 must add equal-createdAt limit-1 traversal and the invalid-cursor 400.
+- `M5.4.1/manual_expectations` → `worker/test/acceptance/read-model-acceptance.test.ts › statistics tables for all/7d/30d/365d equal TESTING.md exactly (totals, artists, tracks, albums)`: Expectations stay hardcoded from TESTING.md; scripts/validate_plan.py remains the independent calculator.
+- `M7.3.2/handle_change` → `web/test/routes/profile.test.tsx › stats window switch fetches window and renders exact top lists`: W3-06 must show the updated handle on the same /u/:did route.
+- `M7.3.2/empty_states` → `web/test/routes/profile.test.tsx › stats window switch fetches window and renders exact top lists`: W3-06 must render the recordless, no-album and unknown-DID 404 states.
