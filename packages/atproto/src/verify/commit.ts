@@ -3,7 +3,13 @@
 //
 // Checks, in order, each with its own VerifyErrorCode:
 //   - the commit block is present (missing_block) and hashes to the root CID
-//     as dag-cbor (cid_mismatch), and decodes to a dag-cbor map (car_malformed);
+//     as dag-cbor (cid_mismatch), and decodes to a dag-cbor map whose
+//     canonical re-encoding is byte-identical to the block (car_malformed).
+//     The signature is checked over a re-encoding, so a non-canonical block
+//     (e.g. version written as float64 3.0, which decodes to the number 3)
+//     would otherwise get a second CID that verifies under the same
+//     signature; the Rust oracle rejects it too (version must be
+//     Ipld::Integer(3));
 //   - version === 3 (bad_version), did === the requested DID (did_mismatch),
 //     rev a TID (bad_rev), data a dag-cbor CID link (mst_invalid);
 //   - the signing key is a parseable did:key of a supported curve
@@ -49,6 +55,12 @@ function isPlainMap(value: unknown): value is Record<string, unknown> {
   );
 }
 
+function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
 function parseKey(signingKey: string): FoundPublicKey {
   if (typeof signingKey !== 'string' || !signingKey.startsWith('did:key:')) {
     throw new VerifyError('key_unavailable', 'signing key is not a did:key');
@@ -91,6 +103,19 @@ export async function verifyCommit(
     throw new VerifyError('car_malformed', `commit is not dag-cbor: ${e instanceof Error ? e.message : String(e)}`);
   }
   if (!isPlainMap(commit)) throw new VerifyError('car_malformed', 'commit is not a map');
+  // Canonical round trip: what is signed below (a re-encoding) must be
+  // exactly what the CID names. Rejects float-encoded integers, non-minimal
+  // lengths, unsorted keys, indefinite lengths and any other non-canonical
+  // form that decodes to the same value.
+  let canonical: Uint8Array;
+  try {
+    canonical = encode(commit);
+  } catch (e) {
+    throw new VerifyError('car_malformed', `commit does not re-encode: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  if (!bytesEqual(canonical, bytes)) {
+    throw new VerifyError('car_malformed', 'commit block is not canonical dag-cbor');
+  }
 
   if (commit.version !== 3) throw new VerifyError('bad_version', `commit version ${String(commit.version)}`);
   if (typeof commit.did !== 'string' || commit.did !== opts.did) {

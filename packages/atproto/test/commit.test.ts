@@ -9,12 +9,14 @@ import { parseDidKey, verifySig } from '@atcute/crypto';
 import { type Curve, type TestKey, testKey } from '@atmusic/atproto/test-support/keys';
 import {
   carCommit,
+  cborCid,
   corruptDid,
   corruptRev,
   corruptRoot,
   corruptSignature,
   corruptSignatureHighS,
   corruptVersion,
+  encodeCar,
   parseCar,
   SignedRepo,
   unsignedCommitBytes,
@@ -56,6 +58,34 @@ async function verifyCar(car: Uint8Array, opts: { did: string; signingKey: strin
   const { root, blocks } = readBoundedCar(car, BOUNDS);
   return verifyCommit(blocks, root, opts);
 }
+
+/**
+ * Rewrite the root commit block's raw bytes, replacing the single occurrence
+ * of `from` with `to`, keeping the original signature; re-hash and re-root.
+ * The result is a CID-valid CAR whose commit decodes to the same value.
+ */
+function rewriteCommitBytes(car: Uint8Array, from: number[], to: number[]) {
+  const parsed = parseCar(car);
+  const root = parsed.roots[0]!;
+  const block = parsed.sections.find((s) => s.cid === root)!.bytes;
+  let at = -1;
+  for (let i = 0; i + from.length <= block.length; i++) {
+    if (from.every((b, j) => block[i + j] === b)) {
+      expect(at).toBe(-1); // exactly one occurrence
+      at = i;
+    }
+  }
+  expect(at).toBeGreaterThanOrEqual(0);
+  const bytes = new Uint8Array([...block.subarray(0, at), ...to, ...block.subarray(at + from.length)]);
+  const cid = cborCid(bytes);
+  const rebuilt = encodeCar(
+    [cid],
+    parsed.sections.map((s): [string, Uint8Array] => (s.cid === root ? [cid, bytes] : [s.cid, s.bytes])),
+  );
+  return { car: rebuilt, cid, bytes };
+}
+
+const utf8 = (s: string) => [...new TextEncoder().encode(s)];
 
 async function codeOf(p: Promise<unknown>): Promise<VerifyErrorCode> {
   try {
@@ -145,6 +175,30 @@ describe('verifyCommit', () => {
       expect((decode(parseCar(v2).sections[0]!.bytes) as { version: number }).version).toBe(2);
       expect(await codeOf(verifyCar(v2, ok))).toBe('bad_version');
       expect(await codeOf(verifyCar(await corruptVersion(car, key, 4), ok))).toBe('bad_version');
+
+      // Non-canonical commit, original signature kept: version written as
+      // float64 3.0. It decodes to the honest commit value (version === 3),
+      // so the signature still verifies over the re-encoded unsigned commit;
+      // only the canonical round-trip check stops this second commit CID
+      // from being accepted (the Rust oracle requires Ipld::Integer(3)).
+      const floatVersion = rewriteCommitBytes(
+        car,
+        [0x67, ...utf8('version'), 0x03],
+        [0x67, ...utf8('version'), 0xfb, 0x40, 0x08, 0, 0, 0, 0, 0, 0],
+      );
+      expect(floatVersion.cid).not.toBe(repo.head!.cid);
+      const floatTwin = carCommit(floatVersion.car);
+      expect(floatTwin).toEqual(carCommit(car));
+      expect(floatTwin.version).toBe(3);
+      expect(
+        await verifySig(
+          parseDidKey(key.didKey),
+          new Uint8Array(fromBytes(floatTwin.sig)),
+          unsignedCommitBytes(floatTwin),
+          { allowMalleableSig: false },
+        ),
+      ).toBe(true);
+      expect(await codeOf(verifyCar(floatVersion.car, ok))).toBe('car_malformed');
 
       // Non-TID revs (re-signed): outside the alphabet, first char out of range, wrong length.
       for (const rev of ['1111111111111', 'z222222222222', '3m4zm2ufr222']) {
