@@ -1,61 +1,34 @@
 # Public identity and music profiles
 
-`GET /api/v1/resolve?handle=alice.test` explicitly resolves a handle through the
-bounded AT Protocol resolver. A successful round trip returns exactly
-`{did,handle,verified:true}`. Invalid queries and mismatched aliases return 422
-with a sanitized `handle` field; absent identities return 404; unavailable or
-unsafe upstream destinations return 502. The endpoint creates no user, OAuth
-state, token, operation, or background repository crawl.
+Profiles are keyed by DID. A handle is shown only when it is verified in both directions. Both routes are public, answered by the Worker with one IndexDO RPC each, and served with `Cache-Control: no-store` ([ADR 0004](adr/0004-cloudflare-workers.md) §5.8, §9.1).
 
-Profiles use the DID as their stable key. Only an existing active, unsuppressed
-music user can be read. Unknown and inactive profiles return 404 before any
-identity HTTP request. A known recordless user returns 200 with zero counts;
-unfinished indexing remains `recovering` with `caughtUp:false`. A display handle
-is returned only after the DID document and handle lookup agree. Stored aliases
-alone do not establish verification, and unavailable or unverified identity data
-produces `handle:null` while preserving the known user's music history.
+## `GET /api/v1/users/{did}/profile`
 
-Identity results expire after at most 300 seconds. Profile and resolve HTTP
-responses use `Cache-Control: no-store`, so confirmed listens, deletions and
-account deactivation are visible on the next read without a 60-second cache
-delay. Public profile serialization includes only the documented eight fields;
-authentication does not add private fields or change the public payload.
+- The path must hold a syntactic DID; anything else is 422 `fields.did`, with no IndexDO call.
+- **Visibility is decided first, in one synchronous read**: an unknown, inactive (deactivated, taken down, suspended, deleted, or reactivating without a complete snapshot yet) or opted-out DID is 404 *before any identity request is made*. So a profile lookup can never be used to make the server contact an arbitrary DID's PDS or PLC entry.
+- The same transaction reads the counts and the indexing state: `totalScrobbles` (visible scrobbles), `followerCount` and `followingCount` (distinct visible edges, uncapped; [follows.md](follows.md)), `joinedAt`, `indexedAt` and `indexing`. A known user with no records is 200 with zero counts; a user whose indexing has not finished reports `recovering` with `caughtUp: false`.
+- Only then is the identity resolved, through the IndexDO's cached resolver (`identity_cache`: 5-minute TTL, 1-hour negative TTL). `handle` is set only when the DID document's alias resolves back to the same DID (DNS TXT `_atproto.<handle>` over DoH, or `https://<handle>/.well-known/atproto-did`). A stored alias alone, a mismatch, or an unavailable resolver or upstream gives `handle: null`, and never hides the user's music data.
+- The payload is exactly the eight public `Profile` fields; there is no private variant, because the server has no sessions.
 
-The executable regression targets are:
+`no-store` means a newly verified listen, a deletion or a deactivation shows on the next read; identity results are at most 300 seconds old.
 
-```sh
-cargo test --locked -p atmusic-server --test profile -- --nocapture
-cargo test --locked -p atmusic-server --test profile_states -- --nocapture
-cargo test --locked -p atmusic-server --test profile_privacy -- --nocapture
-cargo test --locked -p atmusic-server --test read_model_acceptance -- --nocapture
-cargo test --locked -p atmusic-server --test read_model_restart -- --nocapture
-```
+## `GET /api/v1/resolve?handle=`
 
-The test-only controlled identity fixture serves actual HTTP responses behind
-the injected transport. Real signed repository fixtures pass the production
-signature/CID/MST verifier before projection mutations. Test clocks cover the
-299/300-second identity cache boundary without sleeping or disabling production
-network verification. These deterministic tests do not establish the separate
-live interoperability completion gates.
+Explicit handle resolution for clients such as the SPA. Exactly one `handle` parameter, a syntactic handle outside the reserved TLDs, is accepted (otherwise 422 `fields.handle`). The handle is lowercased, resolved to a DID, the DID's document fetched, and the document's verified handle must be the requested one.
 
-The implementation checkpoint executed 4 profile, 3 profile-state, 3 privacy,
-3 read-acceptance and 3 host-restart cases successfully. Focused Clippy for these
-five targets passed with `-D warnings`. This records working-tree evidence;
-merge evidence and the complete workspace check belong to the shared checkpoint.
+| Outcome | Response |
+| --- | --- |
+| verified round trip | 200 `{did, handle, verified: true}` |
+| no DID for the handle, or the document is gone | 404 `not_found` |
+| the two directions disagree | 422 `identity_mismatch`, `fields.handle` |
+| timeout, 5xx, a blocked or unsafe destination, a malformed document | 502 `upstream_error` |
 
-The read acceptance target compares the hardcoded initial history/feed order,
-full record payload arrays, statistics rankings, pagination, profile/resolve,
-follow removal/restoration and verified remote mutation consequences. The
-restart target runs the packaged host CLI twice against the same temporary
-SQLite database, retaining encrypted tokens, sessions, checkpoints and pending
-operations. It compares read responses byte for byte and continues a cursor
-created before restart; final and pending deletions remain hidden.
+Resolution creates no user, hint or job and starts no crawl. Every outbound request goes through SafeFetch: https only on the default port, hostnames only (no IP literals, `localhost`, `.local`, `.internal`, `.arpa` or single-label names), a DoH pre-check that refuses private, loopback, link-local, CGNAT, ULA, multicast and reserved answers, no redirects, a 10 s deadline and body caps (64 KiB for DID documents). DNS pinning is impossible on Workers; the residual DNS-rebinding window is documented and probed live (A5, W6-05).
 
-On Linux, the restart test compiles a test-only `LD_PRELOAD` clock shim in its
-temporary directory. It freezes realtime at the specified fixture instant and
-leaves monotonic timers unchanged. It does not add a production clock flag or
-alter networking or signature checks. Restart reads cover history, follow
-lists, statistics and following feed without asking the production resolver to
-contact reserved fixture DIDs. Profile and resolve integration are covered by
-the separately injected identity transport. This dynamic host-binary test does
-not establish fixed-clock restart evidence for the static musl artifact.
+## Account state
+
+The account-status sweep (hourly for users active in the last 30 days, daily for the rest) and error-driven detection hide a deactivated account from profiles, history, feeds, statistics, follow lists and counts as soon as it is observed. Reactivation stays hidden until a complete verified snapshot commits ([workers.md](workers.md)). The daily identity sweep clears a handle that no longer verifies, and a PDS change re-snapshots the account.
+
+## Tests
+
+`worker/test/read/profile.test.ts` covers 404 for unknown and inactive DIDs with zero identity transport calls, `no-store` with an unverified handle, recordless users and the fixture's follow counts, each response validated against `api/openapi.yaml`; `worker/test/read/resolve.test.ts` covers verified 200, unresolved 404 and mismatch 422; `worker/test/ingest/identity-cache.test.ts` covers the 299/301-second TTL boundary with the frozen clock. All run with `npm test`, in workerd, with no network.
