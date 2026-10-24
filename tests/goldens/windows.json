@@ -1,0 +1,159 @@
+{
+  "asOf": "2026-01-15T12:00:00Z",
+  "description": "Statistics window bounds for asOf 2026-01-15T12:00:00Z: listenedAt in [asOf - days*86400 s, asOf], both inclusive, nanosecond precision; 'all' has no lower bound but still excludes listens after asOf. Each probe is a single signed scrobble projected through verify_commit + atmusic-storage, and `included` is whether the frozen Repository::statistics query counted it.",
+  "source": "crates/atproto/examples/export_signed_cars.rs",
+  "windows": [
+    {
+      "days": null,
+      "inclusive": true,
+      "lowerBound": null,
+      "lowerBoundRfc3339": null,
+      "probes": [
+        {
+          "included": true,
+          "listenedAt": "1970-01-01T00:00:00.000000000Z"
+        },
+        {
+          "included": true,
+          "listenedAt": "2026-01-15T12:00:00.000000000Z"
+        },
+        {
+          "included": false,
+          "listenedAt": "2026-01-15T12:00:00.000000001Z"
+        },
+        {
+          "included": false,
+          "listenedAt": "2026-01-15T12:00:01.000000000Z"
+        }
+      ],
+      "upperBound": "2026-01-15T12:00:00.000000000Z",
+      "window": "all"
+    },
+    {
+      "days": 7,
+      "inclusive": true,
+      "lowerBound": "2026-01-08T12:00:00.000000000Z",
+      "lowerBoundRfc3339": "2026-01-08T12:00:00Z",
+      "probes": [
+        {
+          "included": false,
+          "listenedAt": "2026-01-08T11:59:59.000000000Z"
+        },
+        {
+          "included": false,
+          "listenedAt": "2026-01-08T11:59:59.999999999Z"
+        },
+        {
+          "included": true,
+          "listenedAt": "2026-01-08T12:00:00.000000000Z"
+        },
+        {
+          "included": true,
+          "listenedAt": "2026-01-08T12:00:00.000000001Z"
+        },
+        {
+          "included": true,
+          "listenedAt": "2026-01-08T12:00:01.000000000Z"
+        },
+        {
+          "included": true,
+          "listenedAt": "2026-01-15T12:00:00.000000000Z"
+        },
+        {
+          "included": false,
+          "listenedAt": "2026-01-15T12:00:00.000000001Z"
+        },
+        {
+          "included": false,
+          "listenedAt": "2026-01-15T12:00:01.000000000Z"
+        }
+      ],
+      "upperBound": "2026-01-15T12:00:00.000000000Z",
+      "window": "7d"
+    },
+    {
+      "days": 30,
+      "inclusive": true,
+      "lowerBound": "2025-12-16T12:00:00.000000000Z",
+      "lowerBoundRfc3339": "2025-12-16T12:00:00Z",
+      "probes": [
+        {
+          "included": false,
+          "listenedAt": "2025-12-16T11:59:59.000000000Z"
+        },
+        {
+          "included": false,
+          "listenedAt": "2025-12-16T11:59:59.999999999Z"
+        },
+        {
+          "included": true,
+          "listenedAt": "2025-12-16T12:00:00.000000000Z"
+        },
+        {
+          "included": true,
+          "listenedAt": "2025-12-16T12:00:00.000000001Z"
+        },
+        {
+          "included": true,
+          "listenedAt": "2025-12-16T12:00:01.000000000Z"
+        },
+        {
+          "included": true,
+          "listenedAt": "2026-01-15T12:00:00.000000000Z"
+        },
+        {
+          "included": false,
+          "listenedAt": "2026-01-15T12:00:00.000000001Z"
+        },
+        {
+          "included": false,
+          "listenedAt": "2026-01-15T12:00:01.000000000Z"
+        }
+      ],
+      "upperBound": "2026-01-15T12:00:00.000000000Z",
+      "window": "30d"
+    },
+    {
+      "days": 365,
+      "inclusive": true,
+      "lowerBound": "2025-01-15T12:00:00.000000000Z",
+      "lowerBoundRfc3339": "2025-01-15T12:00:00Z",
+      "probes": [
+        {
+          "included": false,
+          "listenedAt": "2025-01-15T11:59:59.000000000Z"
+        },
+        {
+          "included": false,
+          "listenedAt": "2025-01-15T11:59:59.999999999Z"
+        },
+        {
+          "included": true,
+          "listenedAt": "2025-01-15T12:00:00.000000000Z"
+        },
+        {
+          "included": true,
+          "listenedAt": "2025-01-15T12:00:00.000000001Z"
+        },
+        {
+          "included": true,
+          "listenedAt": "2025-01-15T12:00:01.000000000Z"
+        },
+        {
+          "included": true,
+          "listenedAt": "2026-01-15T12:00:00.000000000Z"
+        },
+        {
+          "included": false,
+          "listenedAt": "2026-01-15T12:00:00.000000001Z"
+        },
+        {
+          "included": false,
+          "listenedAt": "2026-01-15T12:00:01.000000000Z"
+        }
+      ],
+      "upperBound": "2026-01-15T12:00:00.000000000Z",
+      "window": "365d"
+    }
+  ]
+}

@@ -1,0 +1,160 @@
+{
+  "description": "Record set returned by the frozen Rust verify_snapshot for each valid full-repo CAR, in MST key order: only the configured music collections (<prefix>.scrobble, <prefix>.follow); non-music records, including look-alike collections just outside the namespace range, are skipped. verdict put = proven and schema-valid; exclude = proven but rejected by schema validation (still part of the enumerated set; Rust's Exclude mutation carries no CID, so cid is the signed MST leaf, asserted equal to it for every entry).",
+  "namespacePrefix": "com.example.atmusic",
+  "receiptTime": "2026-01-15T12:00:00Z",
+  "snapshots": [
+    {
+      "car": "signed_cars/secp256k1_full_repo.car",
+      "commitCid": "bafyreiaogsmc2pthv25ccwkud6iti6shyuy4222223olqlzrsufe4nbzom",
+      "curve": "secp256k1",
+      "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "entries": [
+        {
+          "cid": "bafyreigw3nmdy57hn2vt74hrpb2ypmlhat2ygcqp73pzo5x6todzrdfuqu",
+          "error": null,
+          "key": "com.example.atmusic.follow/f9a71cc1369cb0ae7a6fa16d2b9ecdc8d3ba62a9c519fe9af11a322c90e9ef6f2",
+          "recordType": "follow",
+          "verdict": "put"
+        },
+        {
+          "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
+          "error": null,
+          "key": "com.example.atmusic.scrobble/r01",
+          "recordType": "scrobble",
+          "verdict": "put"
+        },
+        {
+          "cid": "bafyreic76xlxzcd7e7ttpeosypcanxkemjta3lk4kwcswj4gap3mvbhyye",
+          "error": null,
+          "key": "com.example.atmusic.scrobble/r02",
+          "recordType": "scrobble",
+          "verdict": "put"
+        },
+        {
+          "cid": "bafyreifol3yrb7zmq7bdpqfdtmwrptgj6255ibeqqwfm4u6nnkyneyn7qq",
+          "error": null,
+          "key": "com.example.atmusic.scrobble/r03",
+          "recordType": "scrobble",
+          "verdict": "put"
+        },
+        {
+          "cid": "bafyreials5vhdtp27ucromo5wuycf2hu2ehiglyc6ygqx7hbalafaitt4y",
+          "error": null,
+          "key": "com.example.atmusic.scrobble/r04",
+          "recordType": "scrobble",
+          "verdict": "put"
+        },
+        {
+          "cid": "bafyreiaa4ka5defk3ra2p6zyrgajcjcjtaljgv4ay4vbi23bfdvckhrvxi",
+          "error": null,
+          "key": "com.example.atmusic.scrobble/r05",
+          "recordType": "scrobble",
+          "verdict": "put"
+        },
+        {
+          "cid": "bafyreibzfqnw7lebotnodcnzjsxsgcvii3lbhlqox3glzufkr3ldv6w764",
+          "error": null,
+          "key": "com.example.atmusic.scrobble/r06",
+          "recordType": "scrobble",
+          "verdict": "put"
+        },
+        {
+          "cid": "bafyreibrfkgrvrky65s5zsqzmhyga6sgzood7sbp5o6pwrhwdjdgina3e4",
+          "error": null,
+          "key": "com.example.atmusic.scrobble/r07",
+          "recordType": "scrobble",
+          "verdict": "put"
+        },
+        {
+          "cid": "bafyreib7w7bquoodm3un6sy3irvzk4jv4amp3a5ecwt6m5x4ddru7awfea",
+          "error": {
+            "code": "invalid_field",
+            "field": "artist",
+            "message": "expected 1–256 Unicode scalars and at most 1024 UTF-8 bytes, with nonempty trimmed text"
+          },
+          "key": "com.example.atmusic.scrobble/r99",
+          "recordType": null,
+          "verdict": "exclude"
+        }
+      ],
+      "rev": "3m4zm2ufr2222"
+    },
+    {
+      "car": "signed_cars/p256_full_repo.car",
+      "commitCid": "bafyreid26teomp223kn67jwnvot2n7efxokubazv2s5bmrwglnmi3auesi",
+      "curve": "p256",
+      "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "entries": [
+        {
+          "cid": "bafyreigw3nmdy57hn2vt74hrpb2ypmlhat2ygcqp73pzo5x6todzrdfuqu",
+          "error": null,
+          "key": "com.example.atmusic.follow/f9a71cc1369cb0ae7a6fa16d2b9ecdc8d3ba62a9c519fe9af11a322c90e9ef6f2",
+          "recordType": "follow",
+          "verdict": "put"
+        },
+        {
+          "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
+          "error": null,
+          "key": "com.example.atmusic.scrobble/r01",
+          "recordType": "scrobble",
+          "verdict": "put"
+        },
+        {
+          "cid": "bafyreic76xlxzcd7e7ttpeosypcanxkemjta3lk4kwcswj4gap3mvbhyye",
+          "error": null,
+          "key": "com.example.atmusic.scrobble/r02",
+          "recordType": "scrobble",
+          "verdict": "put"
+        },
+        {
+          "cid": "bafyreifol3yrb7zmq7bdpqfdtmwrptgj6255ibeqqwfm4u6nnkyneyn7qq",
+          "error": null,
+          "key": "com.example.atmusic.scrobble/r03",
+          "recordType": "scrobble",
+          "verdict": "put"
+        },
+        {
+          "cid": "bafyreials5vhdtp27ucromo5wuycf2hu2ehiglyc6ygqx7hbalafaitt4y",
+          "error": null,
+          "key": "com.example.atmusic.scrobble/r04",
+          "recordType": "scrobble",
+          "verdict": "put"
+        },
+        {
+          "cid": "bafyreiaa4ka5defk3ra2p6zyrgajcjcjtaljgv4ay4vbi23bfdvckhrvxi",
+          "error": null,
+          "key": "com.example.atmusic.scrobble/r05",
+          "recordType": "scrobble",
+          "verdict": "put"
+        },
+        {
+          "cid": "bafyreibzfqnw7lebotnodcnzjsxsgcvii3lbhlqox3glzufkr3ldv6w764",
+          "error": null,
+          "key": "com.example.atmusic.scrobble/r06",
+          "recordType": "scrobble",
+          "verdict": "put"
+        },
+        {
+          "cid": "bafyreibrfkgrvrky65s5zsqzmhyga6sgzood7sbp5o6pwrhwdjdgina3e4",
+          "error": null,
+          "key": "com.example.atmusic.scrobble/r07",
+          "recordType": "scrobble",
+          "verdict": "put"
+        },
+        {
+          "cid": "bafyreib7w7bquoodm3un6sy3irvzk4jv4amp3a5ecwt6m5x4ddru7awfea",
+          "error": {
+            "code": "invalid_field",
+            "field": "artist",
+            "message": "expected 1–256 Unicode scalars and at most 1024 UTF-8 bytes, with nonempty trimmed text"
+          },
+          "key": "com.example.atmusic.scrobble/r99",
+          "recordType": null,
+          "verdict": "exclude"
+        }
+      ],
+      "rev": "3m4zm2ufr2222"
+    }
+  ],
+  "source": "crates/atproto/examples/export_signed_cars.rs"
+}

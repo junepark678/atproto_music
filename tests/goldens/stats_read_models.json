@@ -1,0 +1,724 @@
+{
+  "asOf": "2026-01-15T12:00:00Z",
+  "description": "CROSS-CHECK ONLY. The shared fixture tests/fixtures/read_models.json projected through the frozen Rust path (signed repo -> verify_commit -> atmusic-storage apply_event) and read back with Repository::statistics (limit 10, asOf 2026-01-15T12:00:00Z), history and feed (unpaginated). Acceptance tests must keep hardcoding the TESTING.md values; CIDs/revisions depend on the Rust fixture signing and are not a contract.",
+  "orders": {
+    "aliceFollowingFeed": [
+      "r09"
+    ],
+    "aliceHistory": [
+      "r07",
+      "r01",
+      "r02",
+      "r03",
+      "r04",
+      "r05",
+      "r06"
+    ],
+    "globalFeed": [
+      "r09",
+      "r10",
+      "r07",
+      "r01",
+      "r02",
+      "r03",
+      "r04",
+      "r05",
+      "r06"
+    ]
+  },
+  "rows": {
+    "aliceFollowingFeed": [
+      {
+        "album": "Mezzanine",
+        "artist": "Massive Attack",
+        "cid": "bafyreibs2pkpy5m7ftvqf2xndwi46fsg7itzb7d4idddajzsazjrhiroxq",
+        "createdAt": "2026-01-15T11:30:00.000000000Z",
+        "did": "did:plc:bbbbbbbbbbbbbbbbbbbbbbbb",
+        "indexedAt": "2026-01-15T12:00:00.000000000Z",
+        "listenedAt": "2026-01-15T11:30:00.000000000Z",
+        "revision": "3m4zm2ufr2222",
+        "track": "Teardrop",
+        "uri": "at://did:plc:bbbbbbbbbbbbbbbbbbbbbbbb/com.example.atmusic.scrobble/r09"
+      }
+    ],
+    "aliceHistory": [
+      {
+        "album": "OK Computer",
+        "artist": "Radiohead",
+        "cid": "bafyreibrfkgrvrky65s5zsqzmhyga6sgzood7sbp5o6pwrhwdjdgina3e4",
+        "createdAt": "2026-01-15T11:00:00.000000000Z",
+        "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+        "indexedAt": "2026-01-15T12:00:00.000000000Z",
+        "listenedAt": "2026-01-15T11:00:00.000000000Z",
+        "revision": "3m4zm2ufr2222",
+        "track": "No Surprises",
+        "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r07"
+      },
+      {
+        "album": "Homogenic",
+        "artist": "Björk",
+        "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
+        "createdAt": "2026-01-15T11:00:00.000000000Z",
+        "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+        "indexedAt": "2026-01-15T12:00:00.000000000Z",
+        "listenedAt": "2026-01-15T11:00:00.000000000Z",
+        "revision": "3m4zm2ufr2222",
+        "track": "Jóga",
+        "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r01"
+      },
+      {
+        "album": " HOMOGENIC ",
+        "artist": "  BJÖRK  ",
+        "cid": "bafyreic76xlxzcd7e7ttpeosypcanxkemjta3lk4kwcswj4gap3mvbhyye",
+        "createdAt": "2026-01-14T11:00:00.000000000Z",
+        "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+        "indexedAt": "2026-01-15T12:00:00.000000000Z",
+        "listenedAt": "2026-01-14T11:00:00.000000000Z",
+        "revision": "3m4zm2ufr2222",
+        "track": "jóga",
+        "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r02"
+      },
+      {
+        "album": "In Rainbows",
+        "artist": "Radiohead",
+        "cid": "bafyreifol3yrb7zmq7bdpqfdtmwrptgj6255ibeqqwfm4u6nnkyneyn7qq",
+        "createdAt": "2026-01-08T12:00:00.000000000Z",
+        "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+        "indexedAt": "2026-01-15T12:00:00.000000000Z",
+        "listenedAt": "2026-01-08T12:00:00.000000000Z",
+        "revision": "3m4zm2ufr2222",
+        "track": "Weird Fishes",
+        "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r03"
+      },
+      {
+        "album": "OK Computer",
+        "artist": "Radiohead",
+        "cid": "bafyreials5vhdtp27ucromo5wuycf2hu2ehiglyc6ygqx7hbalafaitt4y",
+        "createdAt": "2025-12-16T12:00:00.000000000Z",
+        "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+        "indexedAt": "2026-01-15T12:00:00.000000000Z",
+        "listenedAt": "2025-12-16T12:00:00.000000000Z",
+        "revision": "3m4zm2ufr2222",
+        "track": "Karma Police",
+        "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r04"
+      },
+      {
+        "artist": "Kate Bush",
+        "cid": "bafyreiaa4ka5defk3ra2p6zyrgajcjcjtaljgv4ay4vbi23bfdvckhrvxi",
+        "createdAt": "2025-01-15T12:00:00.000000000Z",
+        "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+        "indexedAt": "2026-01-15T12:00:00.000000000Z",
+        "listenedAt": "2025-01-15T12:00:00.000000000Z",
+        "revision": "3m4zm2ufr2222",
+        "track": "Running Up That Hill",
+        "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r05"
+      },
+      {
+        "album": "Hounds of Love",
+        "artist": "Kate Bush",
+        "cid": "bafyreibzfqnw7lebotnodcnzjsxsgcvii3lbhlqox3glzufkr3ldv6w764",
+        "createdAt": "2025-01-14T11:00:00.000000000Z",
+        "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+        "indexedAt": "2026-01-15T12:00:00.000000000Z",
+        "listenedAt": "2025-01-14T11:00:00.000000000Z",
+        "revision": "3m4zm2ufr2222",
+        "track": "Cloudbusting",
+        "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r06"
+      }
+    ],
+    "globalFeed": [
+      {
+        "album": "Mezzanine",
+        "artist": "Massive Attack",
+        "cid": "bafyreibs2pkpy5m7ftvqf2xndwi46fsg7itzb7d4idddajzsazjrhiroxq",
+        "createdAt": "2026-01-15T11:30:00.000000000Z",
+        "did": "did:plc:bbbbbbbbbbbbbbbbbbbbbbbb",
+        "indexedAt": "2026-01-15T12:00:00.000000000Z",
+        "listenedAt": "2026-01-15T11:30:00.000000000Z",
+        "revision": "3m4zm2ufr2222",
+        "track": "Teardrop",
+        "uri": "at://did:plc:bbbbbbbbbbbbbbbbbbbbbbbb/com.example.atmusic.scrobble/r09"
+      },
+      {
+        "album": "Dummy",
+        "artist": "Portishead",
+        "cid": "bafyreid5k3hfh42jql72dajfbv4lto43lv6hjk5ylv3j26yshq5dox6vfa",
+        "createdAt": "2026-01-15T11:15:00.000000000Z",
+        "did": "did:plc:cccccccccccccccccccccccc",
+        "indexedAt": "2026-01-15T12:00:00.000000000Z",
+        "listenedAt": "2026-01-15T11:15:00.000000000Z",
+        "revision": "3m4zm2ufr2222",
+        "track": "Roads",
+        "uri": "at://did:plc:cccccccccccccccccccccccc/com.example.atmusic.scrobble/r10"
+      },
+      {
+        "album": "OK Computer",
+        "artist": "Radiohead",
+        "cid": "bafyreibrfkgrvrky65s5zsqzmhyga6sgzood7sbp5o6pwrhwdjdgina3e4",
+        "createdAt": "2026-01-15T11:00:00.000000000Z",
+        "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+        "indexedAt": "2026-01-15T12:00:00.000000000Z",
+        "listenedAt": "2026-01-15T11:00:00.000000000Z",
+        "revision": "3m4zm2ufr2222",
+        "track": "No Surprises",
+        "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r07"
+      },
+      {
+        "album": "Homogenic",
+        "artist": "Björk",
+        "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
+        "createdAt": "2026-01-15T11:00:00.000000000Z",
+        "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+        "indexedAt": "2026-01-15T12:00:00.000000000Z",
+        "listenedAt": "2026-01-15T11:00:00.000000000Z",
+        "revision": "3m4zm2ufr2222",
+        "track": "Jóga",
+        "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r01"
+      },
+      {
+        "album": " HOMOGENIC ",
+        "artist": "  BJÖRK  ",
+        "cid": "bafyreic76xlxzcd7e7ttpeosypcanxkemjta3lk4kwcswj4gap3mvbhyye",
+        "createdAt": "2026-01-14T11:00:00.000000000Z",
+        "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+        "indexedAt": "2026-01-15T12:00:00.000000000Z",
+        "listenedAt": "2026-01-14T11:00:00.000000000Z",
+        "revision": "3m4zm2ufr2222",
+        "track": "jóga",
+        "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r02"
+      },
+      {
+        "album": "In Rainbows",
+        "artist": "Radiohead",
+        "cid": "bafyreifol3yrb7zmq7bdpqfdtmwrptgj6255ibeqqwfm4u6nnkyneyn7qq",
+        "createdAt": "2026-01-08T12:00:00.000000000Z",
+        "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+        "indexedAt": "2026-01-15T12:00:00.000000000Z",
+        "listenedAt": "2026-01-08T12:00:00.000000000Z",
+        "revision": "3m4zm2ufr2222",
+        "track": "Weird Fishes",
+        "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r03"
+      },
+      {
+        "album": "OK Computer",
+        "artist": "Radiohead",
+        "cid": "bafyreials5vhdtp27ucromo5wuycf2hu2ehiglyc6ygqx7hbalafaitt4y",
+        "createdAt": "2025-12-16T12:00:00.000000000Z",
+        "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+        "indexedAt": "2026-01-15T12:00:00.000000000Z",
+        "listenedAt": "2025-12-16T12:00:00.000000000Z",
+        "revision": "3m4zm2ufr2222",
+        "track": "Karma Police",
+        "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r04"
+      },
+      {
+        "artist": "Kate Bush",
+        "cid": "bafyreiaa4ka5defk3ra2p6zyrgajcjcjtaljgv4ay4vbi23bfdvckhrvxi",
+        "createdAt": "2025-01-15T12:00:00.000000000Z",
+        "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+        "indexedAt": "2026-01-15T12:00:00.000000000Z",
+        "listenedAt": "2025-01-15T12:00:00.000000000Z",
+        "revision": "3m4zm2ufr2222",
+        "track": "Running Up That Hill",
+        "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r05"
+      },
+      {
+        "album": "Hounds of Love",
+        "artist": "Kate Bush",
+        "cid": "bafyreibzfqnw7lebotnodcnzjsxsgcvii3lbhlqox3glzufkr3ldv6w764",
+        "createdAt": "2025-01-14T11:00:00.000000000Z",
+        "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+        "indexedAt": "2026-01-15T12:00:00.000000000Z",
+        "listenedAt": "2025-01-14T11:00:00.000000000Z",
+        "revision": "3m4zm2ufr2222",
+        "track": "Cloudbusting",
+        "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r06"
+      }
+    ]
+  },
+  "source": "crates/atproto/examples/export_signed_cars.rs",
+  "statistics": {
+    "Alice": {
+      "30d": {
+        "asOf": "2026-01-15T12:00:00.000000000Z",
+        "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+        "distinctArtists": 2,
+        "distinctTracks": 4,
+        "topAlbums": [
+          {
+            "album": "Homogenic",
+            "artist": "Björk",
+            "scrobbleCount": 2
+          },
+          {
+            "album": "OK Computer",
+            "artist": "Radiohead",
+            "scrobbleCount": 2
+          },
+          {
+            "album": "In Rainbows",
+            "artist": "Radiohead",
+            "scrobbleCount": 1
+          }
+        ],
+        "topArtists": [
+          {
+            "artist": "Radiohead",
+            "scrobbleCount": 3
+          },
+          {
+            "artist": "Björk",
+            "scrobbleCount": 2
+          }
+        ],
+        "topTracks": [
+          {
+            "artist": "Björk",
+            "scrobbleCount": 2,
+            "track": "Jóga"
+          },
+          {
+            "artist": "Radiohead",
+            "scrobbleCount": 1,
+            "track": "Karma Police"
+          },
+          {
+            "artist": "Radiohead",
+            "scrobbleCount": 1,
+            "track": "No Surprises"
+          },
+          {
+            "artist": "Radiohead",
+            "scrobbleCount": 1,
+            "track": "Weird Fishes"
+          }
+        ],
+        "totalScrobbles": 5,
+        "window": "30d"
+      },
+      "365d": {
+        "asOf": "2026-01-15T12:00:00.000000000Z",
+        "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+        "distinctArtists": 3,
+        "distinctTracks": 5,
+        "topAlbums": [
+          {
+            "album": "Homogenic",
+            "artist": "Björk",
+            "scrobbleCount": 2
+          },
+          {
+            "album": "OK Computer",
+            "artist": "Radiohead",
+            "scrobbleCount": 2
+          },
+          {
+            "album": "In Rainbows",
+            "artist": "Radiohead",
+            "scrobbleCount": 1
+          }
+        ],
+        "topArtists": [
+          {
+            "artist": "Radiohead",
+            "scrobbleCount": 3
+          },
+          {
+            "artist": "Björk",
+            "scrobbleCount": 2
+          },
+          {
+            "artist": "Kate Bush",
+            "scrobbleCount": 1
+          }
+        ],
+        "topTracks": [
+          {
+            "artist": "Björk",
+            "scrobbleCount": 2,
+            "track": "Jóga"
+          },
+          {
+            "artist": "Kate Bush",
+            "scrobbleCount": 1,
+            "track": "Running Up That Hill"
+          },
+          {
+            "artist": "Radiohead",
+            "scrobbleCount": 1,
+            "track": "Karma Police"
+          },
+          {
+            "artist": "Radiohead",
+            "scrobbleCount": 1,
+            "track": "No Surprises"
+          },
+          {
+            "artist": "Radiohead",
+            "scrobbleCount": 1,
+            "track": "Weird Fishes"
+          }
+        ],
+        "totalScrobbles": 6,
+        "window": "365d"
+      },
+      "7d": {
+        "asOf": "2026-01-15T12:00:00.000000000Z",
+        "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+        "distinctArtists": 2,
+        "distinctTracks": 3,
+        "topAlbums": [
+          {
+            "album": "Homogenic",
+            "artist": "Björk",
+            "scrobbleCount": 2
+          },
+          {
+            "album": "In Rainbows",
+            "artist": "Radiohead",
+            "scrobbleCount": 1
+          },
+          {
+            "album": "OK Computer",
+            "artist": "Radiohead",
+            "scrobbleCount": 1
+          }
+        ],
+        "topArtists": [
+          {
+            "artist": "Björk",
+            "scrobbleCount": 2
+          },
+          {
+            "artist": "Radiohead",
+            "scrobbleCount": 2
+          }
+        ],
+        "topTracks": [
+          {
+            "artist": "Björk",
+            "scrobbleCount": 2,
+            "track": "Jóga"
+          },
+          {
+            "artist": "Radiohead",
+            "scrobbleCount": 1,
+            "track": "No Surprises"
+          },
+          {
+            "artist": "Radiohead",
+            "scrobbleCount": 1,
+            "track": "Weird Fishes"
+          }
+        ],
+        "totalScrobbles": 4,
+        "window": "7d"
+      },
+      "all": {
+        "asOf": "2026-01-15T12:00:00.000000000Z",
+        "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+        "distinctArtists": 3,
+        "distinctTracks": 6,
+        "topAlbums": [
+          {
+            "album": "Homogenic",
+            "artist": "Björk",
+            "scrobbleCount": 2
+          },
+          {
+            "album": "OK Computer",
+            "artist": "Radiohead",
+            "scrobbleCount": 2
+          },
+          {
+            "album": "Hounds of Love",
+            "artist": "Kate Bush",
+            "scrobbleCount": 1
+          },
+          {
+            "album": "In Rainbows",
+            "artist": "Radiohead",
+            "scrobbleCount": 1
+          }
+        ],
+        "topArtists": [
+          {
+            "artist": "Radiohead",
+            "scrobbleCount": 3
+          },
+          {
+            "artist": "Björk",
+            "scrobbleCount": 2
+          },
+          {
+            "artist": "Kate Bush",
+            "scrobbleCount": 2
+          }
+        ],
+        "topTracks": [
+          {
+            "artist": "Björk",
+            "scrobbleCount": 2,
+            "track": "Jóga"
+          },
+          {
+            "artist": "Kate Bush",
+            "scrobbleCount": 1,
+            "track": "Cloudbusting"
+          },
+          {
+            "artist": "Kate Bush",
+            "scrobbleCount": 1,
+            "track": "Running Up That Hill"
+          },
+          {
+            "artist": "Radiohead",
+            "scrobbleCount": 1,
+            "track": "Karma Police"
+          },
+          {
+            "artist": "Radiohead",
+            "scrobbleCount": 1,
+            "track": "No Surprises"
+          },
+          {
+            "artist": "Radiohead",
+            "scrobbleCount": 1,
+            "track": "Weird Fishes"
+          }
+        ],
+        "totalScrobbles": 7,
+        "window": "all"
+      }
+    },
+    "Bob": {
+      "30d": {
+        "asOf": "2026-01-15T12:00:00.000000000Z",
+        "did": "did:plc:bbbbbbbbbbbbbbbbbbbbbbbb",
+        "distinctArtists": 1,
+        "distinctTracks": 1,
+        "topAlbums": [
+          {
+            "album": "Mezzanine",
+            "artist": "Massive Attack",
+            "scrobbleCount": 1
+          }
+        ],
+        "topArtists": [
+          {
+            "artist": "Massive Attack",
+            "scrobbleCount": 1
+          }
+        ],
+        "topTracks": [
+          {
+            "artist": "Massive Attack",
+            "scrobbleCount": 1,
+            "track": "Teardrop"
+          }
+        ],
+        "totalScrobbles": 1,
+        "window": "30d"
+      },
+      "365d": {
+        "asOf": "2026-01-15T12:00:00.000000000Z",
+        "did": "did:plc:bbbbbbbbbbbbbbbbbbbbbbbb",
+        "distinctArtists": 1,
+        "distinctTracks": 1,
+        "topAlbums": [
+          {
+            "album": "Mezzanine",
+            "artist": "Massive Attack",
+            "scrobbleCount": 1
+          }
+        ],
+        "topArtists": [
+          {
+            "artist": "Massive Attack",
+            "scrobbleCount": 1
+          }
+        ],
+        "topTracks": [
+          {
+            "artist": "Massive Attack",
+            "scrobbleCount": 1,
+            "track": "Teardrop"
+          }
+        ],
+        "totalScrobbles": 1,
+        "window": "365d"
+      },
+      "7d": {
+        "asOf": "2026-01-15T12:00:00.000000000Z",
+        "did": "did:plc:bbbbbbbbbbbbbbbbbbbbbbbb",
+        "distinctArtists": 1,
+        "distinctTracks": 1,
+        "topAlbums": [
+          {
+            "album": "Mezzanine",
+            "artist": "Massive Attack",
+            "scrobbleCount": 1
+          }
+        ],
+        "topArtists": [
+          {
+            "artist": "Massive Attack",
+            "scrobbleCount": 1
+          }
+        ],
+        "topTracks": [
+          {
+            "artist": "Massive Attack",
+            "scrobbleCount": 1,
+            "track": "Teardrop"
+          }
+        ],
+        "totalScrobbles": 1,
+        "window": "7d"
+      },
+      "all": {
+        "asOf": "2026-01-15T12:00:00.000000000Z",
+        "did": "did:plc:bbbbbbbbbbbbbbbbbbbbbbbb",
+        "distinctArtists": 1,
+        "distinctTracks": 1,
+        "topAlbums": [
+          {
+            "album": "Mezzanine",
+            "artist": "Massive Attack",
+            "scrobbleCount": 1
+          }
+        ],
+        "topArtists": [
+          {
+            "artist": "Massive Attack",
+            "scrobbleCount": 1
+          }
+        ],
+        "topTracks": [
+          {
+            "artist": "Massive Attack",
+            "scrobbleCount": 1,
+            "track": "Teardrop"
+          }
+        ],
+        "totalScrobbles": 1,
+        "window": "all"
+      }
+    },
+    "Carol": {
+      "30d": {
+        "asOf": "2026-01-15T12:00:00.000000000Z",
+        "did": "did:plc:cccccccccccccccccccccccc",
+        "distinctArtists": 1,
+        "distinctTracks": 1,
+        "topAlbums": [
+          {
+            "album": "Dummy",
+            "artist": "Portishead",
+            "scrobbleCount": 1
+          }
+        ],
+        "topArtists": [
+          {
+            "artist": "Portishead",
+            "scrobbleCount": 1
+          }
+        ],
+        "topTracks": [
+          {
+            "artist": "Portishead",
+            "scrobbleCount": 1,
+            "track": "Roads"
+          }
+        ],
+        "totalScrobbles": 1,
+        "window": "30d"
+      },
+      "365d": {
+        "asOf": "2026-01-15T12:00:00.000000000Z",
+        "did": "did:plc:cccccccccccccccccccccccc",
+        "distinctArtists": 1,
+        "distinctTracks": 1,
+        "topAlbums": [
+          {
+            "album": "Dummy",
+            "artist": "Portishead",
+            "scrobbleCount": 1
+          }
+        ],
+        "topArtists": [
+          {
+            "artist": "Portishead",
+            "scrobbleCount": 1
+          }
+        ],
+        "topTracks": [
+          {
+            "artist": "Portishead",
+            "scrobbleCount": 1,
+            "track": "Roads"
+          }
+        ],
+        "totalScrobbles": 1,
+        "window": "365d"
+      },
+      "7d": {
+        "asOf": "2026-01-15T12:00:00.000000000Z",
+        "did": "did:plc:cccccccccccccccccccccccc",
+        "distinctArtists": 1,
+        "distinctTracks": 1,
+        "topAlbums": [
+          {
+            "album": "Dummy",
+            "artist": "Portishead",
+            "scrobbleCount": 1
+          }
+        ],
+        "topArtists": [
+          {
+            "artist": "Portishead",
+            "scrobbleCount": 1
+          }
+        ],
+        "topTracks": [
+          {
+            "artist": "Portishead",
+            "scrobbleCount": 1,
+            "track": "Roads"
+          }
+        ],
+        "totalScrobbles": 1,
+        "window": "7d"
+      },
+      "all": {
+        "asOf": "2026-01-15T12:00:00.000000000Z",
+        "did": "did:plc:cccccccccccccccccccccccc",
+        "distinctArtists": 1,
+        "distinctTracks": 1,
+        "topAlbums": [
+          {
+            "album": "Dummy",
+            "artist": "Portishead",
+            "scrobbleCount": 1
+          }
+        ],
+        "topArtists": [
+          {
+            "artist": "Portishead",
+            "scrobbleCount": 1
+          }
+        ],
+        "topTracks": [
+          {
+            "artist": "Portishead",
+            "scrobbleCount": 1,
+            "track": "Roads"
+          }
+        ],
+        "totalScrobbles": 1,
+        "window": "all"
+      }
+    }
+  },
+  "statisticsLimit": 10
+}
