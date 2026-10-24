@@ -1,0 +1,12 @@
+{
+  // Workers- and browser-safe I/O: web platform APIs only (fetch, Request,
+  // WebCrypto, streams); no Node built-ins and no Workers-only globals.
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "outDir": ".tsbuild",
+    "lib": ["es2024", "dom", "dom.iterable"]
+  },
+  "include": ["src/**/*.ts", "test-support/**/*.ts", "test/**/*.ts"],
+  "references": [{ "path": "../core" }]
+}

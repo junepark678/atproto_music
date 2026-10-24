@@ -1,0 +1,28 @@
+// Test-only Worker for worker/vitest.modules.config.ts: a HarnessDO with the
+// migrations applied, used by module tests through runInDurableObject.
+// Never deployed. The fixture prefix is enabled here only because test
+// entries pass `allowFixturePrefix` to parseConfig.
+{
+  "$schema": "../../../node_modules/wrangler/config-schema.json",
+  "name": "atmusic-harness",
+  "main": "./entry.ts",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [{ "name": "HARNESS", "class_name": "HarnessDO" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["HarnessDO"] }],
+  "vars": {
+    "PUBLIC_ORIGIN": "https://music.example.test",
+    "LEXICON_PREFIX": "com.example.atmusic",
+    "NAMESPACE_OWNERSHIP_REF": "",
+    "INGEST_MODE": "off",
+    "JETSTREAM_URLS": "wss://jetstream.example.test",
+    "JETSTREAM_LOOKBACK_HOURS": "24",
+    "RELAY_URL": "https://relay.example.test",
+    "PLAN": "paid",
+    "DO_LOCATION_HINT": "",
+    // Test-only key material (32 bytes); never a production secret.
+    "CURSOR_KEY": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+  }
+}

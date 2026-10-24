@@ -1,0 +1,14 @@
+{
+  // Preact SPA (browser only). Sources arrive with W1-10.
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "outDir": ".tsbuild",
+    "lib": ["es2024", "dom", "dom.iterable"],
+    "jsx": "react-jsx",
+    "jsxImportSource": "preact",
+    "types": ["vite/client"]
+  },
+  "include": ["src/**/*.ts", "src/**/*.tsx", "test/**/*.ts", "test/**/*.tsx"],
+  "references": [{ "path": "../packages/core" }]
+}
