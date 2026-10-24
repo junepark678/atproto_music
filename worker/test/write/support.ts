@@ -106,6 +106,22 @@ export function seedUser(db: Db, did: string, o: { active?: boolean } = {}): num
   return row.last_generation;
 }
 
+/**
+ * Test setup only: the `repo_jobs(did,'snapshot')` row W4-01 holds while a
+ * snapshot runs (running, at `generation`, head not yet recorded).
+ */
+export function seedSnapshotJob(db: Db, did: string, generation: number, o: { reactivate?: boolean } = {}): void {
+  db.run(
+    `INSERT INTO repo_jobs(did, kind, state, generation, reactivate, due_at, updated_at_ms)
+     VALUES (?, 'snapshot', 'running', ?, ?, ?, ?)`,
+    did,
+    generation,
+    o.reactivate ? 1 : 0,
+    NOW_MS,
+    NOW_MS,
+  );
+}
+
 export const PROJECTION_TABLES = [
   'users',
   'scrobbles',

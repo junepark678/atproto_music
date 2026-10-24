@@ -30,6 +30,7 @@ import {
   SCROBBLE,
   SETTINGS,
   scrobble,
+  seedSnapshotJob,
   seedUser,
   settings,
   stubFor,
@@ -106,6 +107,7 @@ describe('applySnapshotChunk', () => {
     await runInDurableObject(stubFor('apply-snapshot-sweep'), (i: HarnessDO) => {
       const db = i.db;
       const generation = seedUser(db, ALICE, { active: false });
+      seedSnapshotJob(db, ALICE, generation);
       for (const p of [...live, a7]) expect(db.tx(() => applyRecordProof(db, p, OPTS))).toEqual(APPLIED);
       expect(userRow(db, ALICE)?.stats_version).toBe(6);
 
@@ -141,8 +143,13 @@ describe('applySnapshotChunk', () => {
       expect([...byUri.keys()]).toEqual([u('a1'), u('a3'), u('a4'), u('a5'), u('a6'), u('a7')]);
       expect(byUri.get(u('a6'))).toEqual({ uri: u('a6'), cid: entries[4]!.cid, revision: head.rev });
       expect(byUri.get(u('a7'))).toEqual({ uri: u('a7'), cid: cidOf(a7), revision: a7.commit.rev });
-      // Unchanged rows keep their own revisions (no rewrite of unchanged records).
+      // Unchanged rows keep their projection rows and revisions, but their
+      // record_state is reaffirmed at the verified head (per-URI guard).
       expect(byUri.get(u('a1'))?.revision).toBe(live[1]!.commit.rev);
+      for (const r of ['a1', 'a3', 'a4', 'a5']) {
+        expect(recordState(db, u(r))).toMatchObject({ state: 'present', revision: head.rev });
+      }
+      expect(recordState(db, u('a7'))).toMatchObject({ state: 'present', revision: a7.commit.rev });
       expect(byUri.get(u('a4'))).toEqual({ uri: u('a4'), cid: cidOf(live[4]!), revision: live[4]!.commit.rev });
       expect(byUri.get(u('a5'))).toEqual({ uri: u('a5'), cid: cidOf(live[5]!), revision: live[5]!.commit.rev });
       expect(userRow(db, ALICE)?.stats_version).toBe(8);
@@ -175,6 +182,7 @@ describe('applySnapshotChunk', () => {
     await runInDurableObject(stubFor('apply-snapshot-live-race'), (i: HarnessDO) => {
       const db = i.db;
       const generation = seedUser(db, ALICE, { active: false });
+      seedSnapshotJob(db, ALICE, generation);
       expect(db.tx(() => applyRecordProof(db, upd, OPTS))).toEqual(APPLIED);
       expect(db.tx(() => applyRecordProof(db, del, OPTS))).toEqual({
         outcome: 'absent',
@@ -243,6 +251,7 @@ describe('applySnapshotChunk', () => {
     await runInDurableObject(stubFor('apply-snapshot-stale-floor-1'), (i: HarnessDO) => {
       const db = i.db;
       const generation = seedUser(db, ALICE, { active: false });
+      seedSnapshotJob(db, ALICE, generation);
       expect(db.tx(() => applyRecordProof(db, p1, OPTS))).toEqual(APPLIED);
       expect(chunk(db, generation, head1.rev, RANGE_LO, RANGE_HI, entries1)).toEqual({
         outcome: 'applied',
@@ -282,6 +291,7 @@ describe('applySnapshotChunk', () => {
     await runInDurableObject(stubFor('apply-snapshot-stale-floor-2'), (i: HarnessDO) => {
       const db = i.db;
       const generation = seedUser(db, ALICE, { active: false });
+      seedSnapshotJob(db, ALICE, generation);
       expect(db.tx(() => applyRecordProof(db, q0, OPTS))).toEqual(APPLIED);
       expect(userRow(db, ALICE)?.max_rev).toBe(q0.commit.rev);
       expect(chunk(db, generation, head2.rev, RANGE_LO, `${SCROBBLE}/a0`, entries2)).toEqual({
@@ -314,6 +324,140 @@ describe('applySnapshotChunk', () => {
         { uri: u('a2'), revision: q2.commit.rev },
       ]);
       expect(recordState(db, u('a1'))).toBeNull();
+    });
+  });
+
+  it('a stale snapshot below a newer applied snapshot head cannot delete a record present at that head', async () => {
+    // x put (r1), deleted (h2), put again with the same body (h3: same CID).
+    const repo = await repoFor('alice');
+    const body = scrobble({ artist: 'Björk', track: 'x' });
+    const px = await putProof(repo, SCROBBLE, 'x', body);
+    await repo.delete(SCROBBLE, 'x');
+    const h2 = repo.head!;
+    await repo.put(SCROBBLE, 'x', body);
+    const h3 = repo.head!;
+    expect(px.commit.rev < h2.rev && h2.rev < h3.rev).toBe(true);
+    const at2 = await entriesAt(repo, h2.cid, () => true);
+    const at3 = await entriesAt(repo, h3.cid, () => false);
+    expect(at2).toEqual([]);
+    expect(at3).toEqual([{ key: `${SCROBBLE}/x`, cid: cidOf(px) }]);
+    const x = uriOf(ALICE, SCROBBLE, 'x');
+
+    await runInDurableObject(stubFor('apply-snapshot-stale-delete'), (i: HarnessDO) => {
+      const db = i.db;
+      const generation = seedUser(db, ALICE, { active: false });
+      seedSnapshotJob(db, ALICE, generation);
+      expect(db.tx(() => applyRecordProof(db, px, OPTS))).toEqual(APPLIED);
+
+      // S1 at h3: x unchanged (stored CID), reaffirmed at h3.
+      expect(chunk(db, generation, h3.rev, RANGE_LO, RANGE_HI, at3)).toEqual({
+        outcome: 'applied',
+        written: 0,
+        unchanged: 1,
+        deleted: 0,
+      });
+      expect(recordState(db, x)).toMatchObject({ state: 'present', revision: h3.rev, cid: cidOf(px) });
+      expect(db.one("SELECT head_rev FROM repo_jobs WHERE did = ? AND kind = 'snapshot'", ALICE)).toEqual({
+        head_rev: h3.rev,
+      });
+
+      // S2 at h2 (an older walk still in flight) would sweep x: refused, nothing changes.
+      const before = dump(db);
+      expect(chunk(db, generation, h2.rev, RANGE_LO, RANGE_HI, at2)).toEqual({
+        outcome: 'stale',
+        written: 0,
+        unchanged: 0,
+        deleted: 0,
+      });
+      expect(
+        db.tx(() =>
+          completeSnapshot(db, { did: ALICE, generation, headRev: h2.rev, accountActive: true, nowNs: NOW_NS }),
+        ),
+      ).toEqual({ outcome: 'stale' });
+      expect(dump(db)).toEqual(before);
+      expect(userRow(db, ALICE)).toMatchObject({ active: 0, indexing_state: 'recovering', last_snapshot_at_ms: null });
+
+      // S1 completes and activates with x visible.
+      expect(
+        db.tx(() =>
+          completeSnapshot(db, { did: ALICE, generation, headRev: h3.rev, accountActive: true, nowNs: NOW_NS }),
+        ),
+      ).toEqual({ outcome: 'complete', active: true });
+      expect(userRow(db, ALICE)).toMatchObject({ active: 1, indexing_state: 'current', max_rev: h3.rev });
+      expect(db.all(`SELECT s.uri FROM ${visibleScrobblesFrom()} WHERE s.did = ?`, ALICE)).toEqual([{ uri: x }]);
+
+      // Defence in depth: even with the job's recorded head cleared (a
+      // rescheduled job), the reaffirmed record_state keeps the h2 sweep off x.
+      db.run("UPDATE repo_jobs SET head_rev = NULL WHERE did = ? AND kind = 'snapshot'", ALICE);
+      expect(chunk(db, generation, h2.rev, RANGE_LO, RANGE_HI, at2)).toEqual({
+        outcome: 'applied',
+        written: 0,
+        unchanged: 0,
+        deleted: 0,
+      });
+      expect(db.all('SELECT uri, cid, revision FROM scrobbles')).toEqual([
+        { uri: x, cid: cidOf(px), revision: px.commit.rev },
+      ]);
+      expect(recordState(db, x)).toMatchObject({ state: 'present', revision: h3.rev });
+    });
+  });
+
+  it('a stale snapshot below a newer completed snapshot head cannot resurrect a record deleted before it', async () => {
+    // a0 (r0), y put (h1), y deleted (h2).
+    const repo = await repoFor('alice');
+    const p0 = await putProof(repo, SCROBBLE, 'a0', scrobble({ artist: 'Björk', track: 'a0' }));
+    await repo.put(SCROBBLE, 'y', scrobble({ artist: 'Björk', track: 'y' }));
+    const h1 = repo.head!;
+    await repo.delete(SCROBBLE, 'y');
+    const h2 = repo.head!;
+    const at1 = await entriesAt(repo, h1.cid, () => true);
+    const at2 = await entriesAt(repo, h2.cid, () => false);
+    expect(at1.map((e) => e.key)).toEqual([`${SCROBBLE}/a0`, `${SCROBBLE}/y`]);
+    expect(at2.map((e) => e.key)).toEqual([`${SCROBBLE}/a0`]);
+    const a0 = uriOf(ALICE, SCROBBLE, 'a0');
+    const y = uriOf(ALICE, SCROBBLE, 'y');
+
+    await runInDurableObject(stubFor('apply-snapshot-stale-resurrect'), (i: HarnessDO) => {
+      const db = i.db;
+      const generation = seedUser(db, ALICE, { active: false });
+      expect(db.tx(() => applyRecordProof(db, p0, OPTS))).toEqual(APPLIED);
+
+      // Without a snapshot job (as in the Rust oracle) a chunk is superseded.
+      const noJob = dump(db);
+      expect(chunk(db, generation, h2.rev, RANGE_LO, RANGE_HI, at2)).toMatchObject({ outcome: 'superseded' });
+      expect(dump(db)).toEqual(noJob);
+      seedSnapshotJob(db, ALICE, generation);
+
+      // S1 at h2 completes: a0 current, y never seen (no record_state).
+      expect(chunk(db, generation, h2.rev, RANGE_LO, RANGE_HI, at2)).toEqual({
+        outcome: 'applied',
+        written: 0,
+        unchanged: 1,
+        deleted: 0,
+      });
+      expect(
+        db.tx(() =>
+          completeSnapshot(db, { did: ALICE, generation, headRev: h2.rev, accountActive: true, nowNs: NOW_NS }),
+        ),
+      ).toEqual({ outcome: 'complete', active: true });
+      expect(recordState(db, y)).toBeNull();
+
+      // S2 at h1 carries y with its body: refused, nothing changes.
+      const before = dump(db);
+      expect(chunk(db, generation, h1.rev, RANGE_LO, RANGE_HI, at1)).toEqual({
+        outcome: 'stale',
+        written: 0,
+        unchanged: 0,
+        deleted: 0,
+      });
+      expect(
+        db.tx(() =>
+          completeSnapshot(db, { did: ALICE, generation, headRev: h1.rev, accountActive: true, nowNs: NOW_NS }),
+        ),
+      ).toEqual({ outcome: 'stale' });
+      expect(dump(db)).toEqual(before);
+      expect(db.all(`SELECT s.uri FROM ${visibleScrobblesFrom()} WHERE s.did = ?`, ALICE)).toEqual([{ uri: a0 }]);
+      expect(userRow(db, ALICE)).toMatchObject({ active: 1, indexing_state: 'current', max_rev: h2.rev });
     });
   });
 
@@ -400,6 +544,7 @@ describe('applySnapshotChunk', () => {
     await runInDurableObject(stubFor('apply-snapshot-settings'), (i: HarnessDO) => {
       const db = i.db;
       const generation = seedUser(db, ALICE, { active: false });
+      seedSnapshotJob(db, ALICE, generation);
       expect(chunk(db, generation, head.rev, RANGE_LO, RANGE_HI, entries)).toEqual({
         outcome: 'suppressed',
         written: 1,

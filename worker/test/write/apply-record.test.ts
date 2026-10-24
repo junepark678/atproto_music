@@ -24,6 +24,7 @@ import {
   repoFor,
   SCROBBLE,
   scrobble,
+  seedSnapshotJob,
   seedUser,
   stubFor,
   uriOf,
@@ -130,6 +131,7 @@ describe('applyRecordProof', () => {
     await runInDurableObject(stub, (i: HarnessDO) => {
       const db = i.db;
       const generation = seedUser(db, ALICE);
+      seedSnapshotJob(db, ALICE, generation);
       expect(apply(db, p07)).toEqual(APPLIED);
       expect(apply(db, p08)).toEqual(APPLIED);
       expect(visibleHistory(db, ALICE)).toEqual([uri08, uriOf(ALICE, SCROBBLE, 'r07')]);
