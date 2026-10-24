@@ -1,9 +1,9 @@
 // SPA entry (index.html loads it as the only script; the CSP forbids inline
 // script). Mounts the shell into #app and, once web/src/oauth/session.ts
-// (W2-06) exists, calls its `init()` to restore a stored session or finish an
-// OAuth callback, then records `current()` with `setSession`
-// (web/src/state/store.ts). The contract is `SessionModule` in
-// web/src/oauth/types.ts.
+// (W2-06) exists, calls its `connect(state)` (or, without one, `init()` then
+// `setSession(state, current())`) to restore a stored session or finish an
+// OAuth callback and keep the app state in step with the session. The
+// contract is `SessionModule` in web/src/oauth/types.ts.
 
 import { render } from 'preact';
 import { App } from './app';
@@ -17,6 +17,10 @@ async function bootSession(state: AppState): Promise<void> {
   const load = sessionModules['./oauth/session.ts'];
   if (!load) return;
   const mod = await load();
+  if (mod.connect) {
+    await mod.connect(state);
+    return;
+  }
   await mod.init?.();
   setSession(state, mod.current?.() ?? null);
 }
