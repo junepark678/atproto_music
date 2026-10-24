@@ -1,5 +1,5 @@
 {
-  "description": "Rust oracle validation verdicts. Parse `json` as the request/record body. kind scrobbleInput = ScrobbleInput::from_json then into_record (local SPA input; unknown fields rejected; output is the record that would be published, createdAt = receipt time); scrobbleRecord = ScrobbleRecord::from_json (remote record; unknown fields ignored; remote spelling kept); followRecord = FollowRecord::from_json; followSubject = FollowRecord::new(subject). Every Rust ValidationError has code invalid_field plus the field name; stage json means serde_json itself refused the document.",
+  "description": "Rust oracle validation verdicts. Parse `json` as the request/record body. kind scrobbleInput = the Rust POST /scrobbles path: ScrobbleInput::from_json, then listenedAt canonicalized to UTC with 9 fractional digits and Z (crates/server/src/http/scrobbles/create.rs, before the input digest), then into_record (local SPA input; unknown fields rejected; output is the record that path publishes, createdAt = receipt time); scrobbleRecord = ScrobbleRecord::from_json (remote record; unknown fields ignored; remote spelling kept); followRecord = FollowRecord::from_json; followSubject = FollowRecord::new(subject). Every Rust ValidationError has code invalid_field plus the field name; stage json means serde_json itself refused the document.",
   "namespacePrefix": "com.example.atmusic",
   "notes": [
     "Scalar (256) and byte (1024) limits are checked on the raw value before trimming; trimming uses Unicode White_Space (Rust str::trim): U+0085 is trimmed, U+FEFF/U+200B/U+001F/U+180E are not.",
@@ -18,7 +18,7 @@
         "$type": "com.example.atmusic.scrobble",
         "artist": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "createdAt": "2026-01-15T12:00:00Z",
-        "listenedAt": "2026-01-15T11:00:00Z",
+        "listenedAt": "2026-01-15T11:00:00.000000000Z",
         "track": "Jóga"
       },
       "receiptTime": "2026-01-15T12:00:00Z",
@@ -47,7 +47,7 @@
         "$type": "com.example.atmusic.scrobble",
         "artist": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé",
         "createdAt": "2026-01-15T12:00:00Z",
-        "listenedAt": "2026-01-15T11:00:00Z",
+        "listenedAt": "2026-01-15T11:00:00.000000000Z",
         "track": "Jóga"
       },
       "receiptTime": "2026-01-15T12:00:00Z",
@@ -62,7 +62,7 @@
         "$type": "com.example.atmusic.scrobble",
         "artist": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀",
         "createdAt": "2026-01-15T12:00:00Z",
-        "listenedAt": "2026-01-15T11:00:00Z",
+        "listenedAt": "2026-01-15T11:00:00.000000000Z",
         "track": "Jóga"
       },
       "receiptTime": "2026-01-15T12:00:00Z",
@@ -91,7 +91,7 @@
         "$type": "com.example.atmusic.scrobble",
         "artist": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀a",
         "createdAt": "2026-01-15T12:00:00Z",
-        "listenedAt": "2026-01-15T11:00:00Z",
+        "listenedAt": "2026-01-15T11:00:00.000000000Z",
         "track": "Jóga"
       },
       "receiptTime": "2026-01-15T12:00:00Z",
@@ -120,7 +120,7 @@
         "$type": "com.example.atmusic.scrobble",
         "artist": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "createdAt": "2026-01-15T12:00:00Z",
-        "listenedAt": "2026-01-15T11:00:00Z",
+        "listenedAt": "2026-01-15T11:00:00.000000000Z",
         "track": "Jóga"
       },
       "receiptTime": "2026-01-15T12:00:00Z",
@@ -135,7 +135,7 @@
         "$type": "com.example.atmusic.scrobble",
         "artist": "Björk",
         "createdAt": "2026-01-15T12:00:00Z",
-        "listenedAt": "2026-01-15T11:00:00Z",
+        "listenedAt": "2026-01-15T11:00:00.000000000Z",
         "track": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
       },
       "receiptTime": "2026-01-15T12:00:00Z",
@@ -165,7 +165,7 @@
         "album": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀",
         "artist": "Björk",
         "createdAt": "2026-01-15T12:00:00Z",
-        "listenedAt": "2026-01-15T11:00:00Z",
+        "listenedAt": "2026-01-15T11:00:00.000000000Z",
         "track": "Jóga"
       },
       "receiptTime": "2026-01-15T12:00:00Z",
@@ -320,7 +320,7 @@
         "$type": "com.example.atmusic.scrobble",
         "artist": "﻿",
         "createdAt": "2026-01-15T12:00:00Z",
-        "listenedAt": "2026-01-15T11:00:00Z",
+        "listenedAt": "2026-01-15T11:00:00.000000000Z",
         "track": "Jóga"
       },
       "receiptTime": "2026-01-15T12:00:00Z",
@@ -335,7 +335,7 @@
         "$type": "com.example.atmusic.scrobble",
         "artist": "​",
         "createdAt": "2026-01-15T12:00:00Z",
-        "listenedAt": "2026-01-15T11:00:00Z",
+        "listenedAt": "2026-01-15T11:00:00.000000000Z",
         "track": "Jóga"
       },
       "receiptTime": "2026-01-15T12:00:00Z",
@@ -350,7 +350,7 @@
         "$type": "com.example.atmusic.scrobble",
         "artist": "\u001f",
         "createdAt": "2026-01-15T12:00:00Z",
-        "listenedAt": "2026-01-15T11:00:00Z",
+        "listenedAt": "2026-01-15T11:00:00.000000000Z",
         "track": "Jóga"
       },
       "receiptTime": "2026-01-15T12:00:00Z",
@@ -365,7 +365,7 @@
         "$type": "com.example.atmusic.scrobble",
         "artist": "᠎",
         "createdAt": "2026-01-15T12:00:00Z",
-        "listenedAt": "2026-01-15T11:00:00Z",
+        "listenedAt": "2026-01-15T11:00:00.000000000Z",
         "track": "Jóga"
       },
       "receiptTime": "2026-01-15T12:00:00Z",
@@ -380,7 +380,7 @@
         "$type": "com.example.atmusic.scrobble",
         "artist": "Björk",
         "createdAt": "2026-01-15T12:00:00Z",
-        "listenedAt": "2026-01-15T11:00:00Z",
+        "listenedAt": "2026-01-15T11:00:00.000000000Z",
         "track": "Jóga"
       },
       "receiptTime": "2026-01-15T12:00:00Z",
@@ -395,7 +395,7 @@
         "$type": "com.example.atmusic.scrobble",
         "artist": "﻿Björk﻿",
         "createdAt": "2026-01-15T12:00:00Z",
-        "listenedAt": "2026-01-15T11:00:00Z",
+        "listenedAt": "2026-01-15T11:00:00.000000000Z",
         "track": "Jóga"
       },
       "receiptTime": "2026-01-15T12:00:00Z",
@@ -410,7 +410,7 @@
         "$type": "com.example.atmusic.scrobble",
         "artist": "Björk",
         "createdAt": "2026-01-15T12:00:00Z",
-        "listenedAt": "2026-01-15T11:00:00Z",
+        "listenedAt": "2026-01-15T11:00:00.000000000Z",
         "track": "Jóga"
       },
       "receiptTime": "2026-01-15T12:00:00Z",
@@ -495,7 +495,7 @@
         "$type": "com.example.atmusic.scrobble",
         "artist": "😀",
         "createdAt": "2026-01-15T12:00:00Z",
-        "listenedAt": "2026-01-15T11:00:00Z",
+        "listenedAt": "2026-01-15T11:00:00.000000000Z",
         "track": "Jóga"
       },
       "receiptTime": "2026-01-15T12:00:00Z",
@@ -510,7 +510,7 @@
         "$type": "com.example.atmusic.scrobble",
         "artist": "Björk",
         "createdAt": "2026-01-15T12:00:00Z",
-        "listenedAt": "2026-01-15T12:00:00Z",
+        "listenedAt": "2026-01-15T12:00:00.000000000Z",
         "track": "Jóga"
       },
       "receiptTime": "2026-01-15T12:00:00Z",
@@ -525,7 +525,7 @@
         "$type": "com.example.atmusic.scrobble",
         "artist": "Björk",
         "createdAt": "2026-01-15T12:00:00Z",
-        "listenedAt": "2026-01-15T12:05:00Z",
+        "listenedAt": "2026-01-15T12:05:00.000000000Z",
         "track": "Jóga"
       },
       "receiptTime": "2026-01-15T12:00:00Z",
@@ -555,7 +555,7 @@
         "$type": "com.example.atmusic.scrobble",
         "artist": "Björk",
         "createdAt": "2026-01-15T12:00:00Z",
-        "listenedAt": "2026-01-15T12:05:00.0000000000Z",
+        "listenedAt": "2026-01-15T12:05:00.000000000Z",
         "track": "Jóga"
       },
       "receiptTime": "2026-01-15T12:00:00Z",
@@ -627,7 +627,7 @@
         "$type": "com.example.atmusic.scrobble",
         "artist": "Björk",
         "createdAt": "2026-01-15T12:00:00Z",
-        "listenedAt": "1970-01-01T00:00:00Z",
+        "listenedAt": "1970-01-01T00:00:00.000000000Z",
         "track": "Jóga"
       },
       "receiptTime": "2026-01-15T12:00:00Z",
@@ -685,7 +685,7 @@
         "$type": "com.example.atmusic.scrobble",
         "artist": "Björk",
         "createdAt": "2026-01-15T12:00:00Z",
-        "listenedAt": "2026-01-15T11:00:00+00:00",
+        "listenedAt": "2026-01-15T11:00:00.000000000Z",
         "track": "Jóga"
       },
       "receiptTime": "2026-01-15T12:00:00Z",
@@ -812,7 +812,7 @@
         "$type": "com.example.atmusic.scrobble",
         "artist": "Björk",
         "createdAt": "2026-01-15T12:00:00Z",
-        "listenedAt": "2026-01-15T11:00:00.123Z",
+        "listenedAt": "2026-01-15T11:00:00.123000000Z",
         "track": "Jóga"
       },
       "receiptTime": "2026-01-15T12:00:00Z",
@@ -899,7 +899,7 @@
         "artist": "Björk",
         "createdAt": "2026-01-15T12:00:00Z",
         "durationSeconds": 1,
-        "listenedAt": "2026-01-15T11:00:00Z",
+        "listenedAt": "2026-01-15T11:00:00.000000000Z",
         "track": "Jóga"
       },
       "receiptTime": "2026-01-15T12:00:00Z",
@@ -915,7 +915,7 @@
         "artist": "Björk",
         "createdAt": "2026-01-15T12:00:00Z",
         "durationSeconds": 86400,
-        "listenedAt": "2026-01-15T11:00:00Z",
+        "listenedAt": "2026-01-15T11:00:00.000000000Z",
         "track": "Jóga"
       },
       "receiptTime": "2026-01-15T12:00:00Z",
@@ -1028,7 +1028,7 @@
         "$type": "com.example.atmusic.scrobble",
         "artist": "Björk",
         "createdAt": "2026-01-15T12:00:00Z",
-        "listenedAt": "2026-01-15T11:00:00Z",
+        "listenedAt": "2026-01-15T11:00:00.000000000Z",
         "recordingMbid": "3f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2d10",
         "track": "Jóga"
       },
@@ -1044,7 +1044,7 @@
         "$type": "com.example.atmusic.scrobble",
         "artist": "Björk",
         "createdAt": "2026-01-15T12:00:00Z",
-        "listenedAt": "2026-01-15T11:00:00Z",
+        "listenedAt": "2026-01-15T11:00:00.000000000Z",
         "recordingMbid": "3f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2d10",
         "track": "Jóga"
       },
@@ -1060,7 +1060,7 @@
         "$type": "com.example.atmusic.scrobble",
         "artist": "Björk",
         "createdAt": "2026-01-15T12:00:00Z",
-        "listenedAt": "2026-01-15T11:00:00Z",
+        "listenedAt": "2026-01-15T11:00:00.000000000Z",
         "recordingMbid": "00000000-0000-0000-0000-000000000000",
         "track": "Jóga"
       },
@@ -1202,7 +1202,7 @@
         "$type": "com.example.atmusic.scrobble",
         "artist": "Björk",
         "createdAt": "2026-01-15T12:00:00Z",
-        "listenedAt": "2026-01-15T11:00:00Z",
+        "listenedAt": "2026-01-15T11:00:00.000000000Z",
         "track": "Jóga"
       },
       "receiptTime": "2026-01-15T12:00:00Z",
@@ -1219,7 +1219,7 @@
         "artist": "BJÖRK",
         "createdAt": "2026-01-15T12:00:00Z",
         "durationSeconds": 305,
-        "listenedAt": "2026-01-14T11:00:00Z",
+        "listenedAt": "2026-01-14T11:00:00.000000000Z",
         "recordingMbid": "3f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2d10",
         "track": "jóga"
       },

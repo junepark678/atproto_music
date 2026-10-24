@@ -26,7 +26,7 @@ use atmusic_core::{
     scrobble::{ScrobbleInput, ScrobbleRecord, ValidationError, validate_timestamp},
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 use hmac::{Hmac, Mac};
 use serde_json::{Value, json};
 use sha2::Sha256;
@@ -864,6 +864,19 @@ fn validation_vectors() -> Vec<Vector> {
     v
 }
 
+/// The canonicalization `POST /scrobbles` applies between `ScrobbleInput::from_json` and
+/// `into_record` (crates/server/src/http/scrobbles/create.rs, the `input.listened_at =
+/// parse_from_rfc3339(..).with_timezone(&Utc).to_rfc3339_opts(Nanos, true)` step, which also
+/// precedes the input digest). Mirrored here because it lives in the server handler, not in
+/// atmusic-core; `from_json` has already validated the timestamp, so parsing cannot fail.
+fn canonicalize_listened_at(mut input: ScrobbleInput) -> ScrobbleInput {
+    input.listened_at = DateTime::parse_from_rfc3339(&input.listened_at)
+        .expect("from_json accepted an RFC 3339 listenedAt")
+        .with_timezone(&Utc)
+        .to_rfc3339_opts(SecondsFormat::Nanos, true);
+    input
+}
+
 fn validate_vector(vector: &Vector) -> Value {
     let receipt = receipt();
     let namespace = namespace();
@@ -875,6 +888,7 @@ fn validate_vector(vector: &Vector) -> Value {
     };
     let result: Result<Value, ValidationError> = match vector.kind {
         "scrobbleInput" => ScrobbleInput::from_json(&parsed, receipt)
+            .map(canonicalize_listened_at)
             .and_then(|input| input.into_record(&namespace, receipt))
             .map(|record| serde_json::to_value(record).unwrap()),
         "scrobbleRecord" => ScrobbleRecord::from_json(&parsed, &namespace, receipt)
@@ -952,7 +966,7 @@ fn validation() -> Value {
     }
 
     json!({
-        "description": "Rust oracle validation verdicts. Parse `json` as the request/record body. kind scrobbleInput = ScrobbleInput::from_json then into_record (local SPA input; unknown fields rejected; output is the record that would be published, createdAt = receipt time); scrobbleRecord = ScrobbleRecord::from_json (remote record; unknown fields ignored; remote spelling kept); followRecord = FollowRecord::from_json; followSubject = FollowRecord::new(subject). Every Rust ValidationError has code invalid_field plus the field name; stage json means serde_json itself refused the document.",
+        "description": "Rust oracle validation verdicts. Parse `json` as the request/record body. kind scrobbleInput = the Rust POST /scrobbles path: ScrobbleInput::from_json, then listenedAt canonicalized to UTC with 9 fractional digits and Z (crates/server/src/http/scrobbles/create.rs, before the input digest), then into_record (local SPA input; unknown fields rejected; output is the record that path publishes, createdAt = receipt time); scrobbleRecord = ScrobbleRecord::from_json (remote record; unknown fields ignored; remote spelling kept); followRecord = FollowRecord::from_json; followSubject = FollowRecord::new(subject). Every Rust ValidationError has code invalid_field plus the field name; stage json means serde_json itself refused the document.",
         "source": SOURCE,
         "namespacePrefix": FIXTURE_PREFIX,
         "receiptTime": RECEIPT,

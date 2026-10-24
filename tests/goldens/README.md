@@ -44,13 +44,13 @@ All keys here are **fixed, public and test-only**. Never use them outside fixtur
 | File | Generator | Content |
 |---|---|---|
 | `music_keys.json` | core | Unicode edge corpus → `normalize` / `ArtistKey::new`; track/album tuple keys; pairwise Rust `Ord` (code-point order) of artist keys and track tuples |
-| `validation.json` | core | JSON body + receipt 2026-01-15T12:00:00Z → accept (with the published/validated record) or reject (`field`, `code`, `message`) for local scrobble input, remote scrobble records, follow records and follow subjects |
+| `validation.json` | core | JSON body + receipt 2026-01-15T12:00:00Z → accept (for local `scrobbleInput`, the record the Rust `POST /scrobbles` path publishes, with `listenedAt` canonicalized to UTC `…nnnnnnnnnZ` as in `crates/server/src/http/scrobbles/create.rs`; for remote records, the validated record) or reject (`field`, `code`, `message`) for local scrobble input, remote scrobble records, follow records and follow subjects |
 | `timestamps.json` | core | RFC 3339 input → `validate_timestamp` verdict → 30-character storage form → DTO render (equal to storage); record `createdAt` renders |
 | `follow_rkeys.json` | core | subject DID → `'f' + sha256hex` or the syntax error |
 | `cursors.json` | core | key material, binding and tuples → token; canonicalization; advance; tampered tokens → `invalid_cursor`; short key → `invalid_key` |
 | `windows.json` | atproto | window → lower bound for asOf 2026-01-15T12:00:00Z, with inclusion probes run through the real statistics query |
 | `stats_read_models.json` | atproto | **Cross-check only.** The shared fixture is projected through signed repo → `verify_commit` → storage. It records `Statistics` for each user and window, the history and feed orders, and the rows |
-| `snapshot_enumeration.json` | atproto | the record set `verify_snapshot` returns for each valid full-repo CAR |
+| `snapshot_enumeration.json` | atproto | the record set `verify_snapshot` returns for each valid full-repo CAR, plus every signed MST leaf in the walker range `[<p>., <p>/)` (`rangeEntries`), the in-range non-music keys it skips (`skippedInRange`, e.g. `<p>.settings/self`, `<p>.scrobble-x`, `<p>.scrobbles`) and the keys outside the range (`outsideRange`, including look-alikes and keys exactly at `<p>/`) |
 | `signed_cars/*.car`, `signed_cars/manifest.json` | atproto | Rust-signed CARs for secp256k1 and P-256: inclusion, exclusion, full repo, and one CAR per corruption. Each manifest entry gives the expected verdict and TypeScript `VerifyErrorCode`, plus the Rust verifier error observed |
 
 ## Notes for consumers

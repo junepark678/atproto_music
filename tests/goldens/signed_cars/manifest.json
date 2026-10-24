@@ -4,8 +4,8 @@
   "entries": [
     {
       "base": null,
-      "bytes": 1585,
-      "carRoot": "bafyreiaogsmc2pthv25ccwkud6iti6shyuy4222223olqlzrsufe4nbzom",
+      "bytes": 1283,
+      "carRoot": "bafyreigigasu5a2vqmdqq4v7rwvy457bx37sjmurgqarvcd5bwj2w5lpri",
       "corruption": null,
       "curve": "secp256k1",
       "description": "sync.getRecord-style inclusion proof for r01: signed commit, MST path nodes root to leaf, record block.",
@@ -24,7 +24,7 @@
         "verdict": "valid",
         "verifier": "verify_snapshot_record"
       },
-      "sha256": "eafdbb478489727ae4c8e416780c4462277ccac6b632da1ee2d924d5b4c1b1d8",
+      "sha256": "fc8fa0d46eb3e65193d465b3004e78c7b3e6d375dad005969f00320dc99bc1ee",
       "signingKey": "did:key:zQ3shXgWjVsCJsv9mBm6kVqFSjAnErMg3zG9CcyvmUCCaFRCr",
       "target": {
         "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
@@ -34,8 +34,8 @@
     },
     {
       "base": null,
-      "bytes": 1871,
-      "carRoot": "bafyreiaogsmc2pthv25ccwkud6iti6shyuy4222223olqlzrsufe4nbzom",
+      "bytes": 1200,
+      "carRoot": "bafyreigigasu5a2vqmdqq4v7rwvy457bx37sjmurgqarvcd5bwj2w5lpri",
       "corruption": null,
       "curve": "secp256k1",
       "description": "sync.getRecord-style exclusion proof for r08 (absent): signed commit and the MST path nodes covering the key.",
@@ -54,7 +54,7 @@
         "verdict": "valid",
         "verifier": "verify_snapshot_record"
       },
-      "sha256": "41da1375c72698cefb363d864c78e50658ec02d76bbe0c9865f746b313e4a935",
+      "sha256": "eac5d0c4737ae98625f28a59299a3d39b1e24188c7bbafcaa01e41943da12a60",
       "signingKey": "did:key:zQ3shXgWjVsCJsv9mBm6kVqFSjAnErMg3zG9CcyvmUCCaFRCr",
       "target": {
         "cid": null,
@@ -64,11 +64,11 @@
     },
     {
       "base": null,
-      "bytes": 14183,
-      "carRoot": "bafyreiaogsmc2pthv25ccwkud6iti6shyuy4222223olqlzrsufe4nbzom",
+      "bytes": 14008,
+      "carRoot": "bafyreigigasu5a2vqmdqq4v7rwvy457bx37sjmurgqarvcd5bwj2w5lpri",
       "corruption": null,
       "curve": "secp256k1",
-      "description": "Complete signed repository: 7 fixture scrobbles, 1 follow, 1 schema-invalid scrobble (r99, excluded) and 50 non-music records.",
+      "description": "Complete signed repository: 7 fixture scrobbles, 1 follow, 1 schema-invalid scrobble (r99, excluded) and 50 non-music records (35 outside [<p>., <p>/), 13 inside it in non-music collections including <p>.settings/self, 2 at the exclusive upper bound <p>/).",
       "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
       "expected": {
         "code": null,
@@ -84,7 +84,7 @@
         "verdict": "valid",
         "verifier": "verify_snapshot"
       },
-      "sha256": "b78e8d1f5f389f89cc1da25483ce0cb8765227d8938cf01e162be2154bda016f",
+      "sha256": "3eed2f09b060d5edb3884facc92b849327907a54681ee53be6f641962dacfbf6",
       "signingKey": "did:key:zQ3shXgWjVsCJsv9mBm6kVqFSjAnErMg3zG9CcyvmUCCaFRCr",
       "target": {
         "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
@@ -94,8 +94,8 @@
     },
     {
       "base": "secp256k1_full_repo",
-      "bytes": 14183,
-      "carRoot": "bafyreifucr7elu54ni5ifhnfvnxw62xouex5jzvsei23uw6oafudbthliq",
+      "bytes": 14008,
+      "carRoot": "bafyreidg2pk5ijulaoyrjkgki3wrl7cadbxs4k6w7m7kwa5jzjj7dxu7ru",
       "corruption": "signature_byte",
       "curve": "secp256k1",
       "description": "Bit 0 of the first signature byte flipped; the commit block is re-hashed and the CAR root updated, so only the signature is wrong.",
@@ -114,7 +114,7 @@
         "verdict": "invalid",
         "verifier": "verify_snapshot"
       },
-      "sha256": "5b9cd6410b18af68f3b445d72e6e49a87bbf04dc200de2de10583dc372e2bb13",
+      "sha256": "44b0ba5b1f1813faf32b544463ce80d945411fcf2092aefd64e5206087dc332d",
       "signingKey": "did:key:zQ3shXgWjVsCJsv9mBm6kVqFSjAnErMg3zG9CcyvmUCCaFRCr",
       "target": {
         "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
@@ -124,8 +124,8 @@
     },
     {
       "base": "secp256k1_full_repo",
-      "bytes": 14183,
-      "carRoot": "bafyreicorzy7yfmvut2s4wgs73hgwsvjwmifygic6pqa3p6jvxfa32lo2i",
+      "bytes": 14008,
+      "carRoot": "bafyreidvxpnblffzxl7am67vzuf6gc624bkt47bsqlsipixvozq4whh7uq",
       "corruption": "signature_high_s",
       "curve": "secp256k1",
       "description": "Signature replaced by its malleable high-S twin (s -> n - s); mathematically valid ECDSA but forbidden by atproto. Commit re-hashed, root updated.",
@@ -144,7 +144,7 @@
         "verdict": "invalid",
         "verifier": "verify_snapshot"
       },
-      "sha256": "525dcf4a9930d9cafab616d640f84f52cf2932cea6cce3f65e232fc330b9ab75",
+      "sha256": "1000566af4359bedfa460dc45476cb424899ab3279d24d091803dd078e3a4e84",
       "signingKey": "did:key:zQ3shXgWjVsCJsv9mBm6kVqFSjAnErMg3zG9CcyvmUCCaFRCr",
       "target": {
         "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
@@ -154,8 +154,8 @@
     },
     {
       "base": "secp256k1_full_repo",
-      "bytes": 14183,
-      "carRoot": "bafyreiaogsmc2pthv25ccwkud6iti6shyuy4222223olqlzrsufe4nbzom",
+      "bytes": 14008,
+      "carRoot": "bafyreigigasu5a2vqmdqq4v7rwvy457bx37sjmurgqarvcd5bwj2w5lpri",
       "corruption": "record_block_byte",
       "curve": "secp256k1",
       "description": "Bit 0 of the last byte of the r01 record block flipped; its CID is unchanged.",
@@ -174,7 +174,7 @@
         "verdict": "invalid",
         "verifier": "verify_snapshot"
       },
-      "sha256": "5d0ce81daeefa14deafe4df297e6d22ad8f8deb9fb00921d11f5297e68ad8cc8",
+      "sha256": "1f5314d1933f07aa50854ef159b55c79051a1a9b95bb9331c7af821e325a0be8",
       "signingKey": "did:key:zQ3shXgWjVsCJsv9mBm6kVqFSjAnErMg3zG9CcyvmUCCaFRCr",
       "target": {
         "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
@@ -184,8 +184,8 @@
     },
     {
       "base": "secp256k1_full_repo",
-      "bytes": 14183,
-      "carRoot": "bafyreiaogsmc2pthv25ccwkud6iti6shyuy4222223olqlzrsufe4nbzom",
+      "bytes": 14008,
+      "carRoot": "bafyreigigasu5a2vqmdqq4v7rwvy457bx37sjmurgqarvcd5bwj2w5lpri",
       "corruption": "mst_node_byte",
       "curve": "secp256k1",
       "description": "Bit 0 of the last byte of the MST root node (commit.data, on every key's path) flipped; its CID is unchanged.",
@@ -204,7 +204,7 @@
         "verdict": "invalid",
         "verifier": "verify_snapshot"
       },
-      "sha256": "4bff306d4bc0c251e9c1538bb5e7256aa1bd981ddb6bff4324aa93d3297a760b",
+      "sha256": "957ba0ee4b3d42a168f1badb4d60e2dc3f941266aa9b1a0a09e7a55321028c05",
       "signingKey": "did:key:zQ3shXgWjVsCJsv9mBm6kVqFSjAnErMg3zG9CcyvmUCCaFRCr",
       "target": {
         "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
@@ -214,8 +214,8 @@
     },
     {
       "base": "secp256k1_full_repo",
-      "bytes": 14183,
-      "carRoot": "bafyreig5mfksa22sk6co2jo74ioaxvavqcsezmo6ikmde6imugbntvqgyq",
+      "bytes": 14008,
+      "carRoot": "bafyreihiteipys6bdsvjms6v5v7qy4w6hse4xnhgry4aqtmwh7vym43pgq",
       "corruption": "mst_structure",
       "curve": "secp256k1",
       "description": "MST root node's first entry claims prefix length 1 with no previous key; node re-hashed and commit.data re-signed, so hashes and signature are valid and only the MST invariant fails.",
@@ -234,7 +234,7 @@
         "verdict": "invalid",
         "verifier": "verify_snapshot"
       },
-      "sha256": "c1d7fd930e821f97fcddb9dbc376eef168027eab97939336a06ce240d7fe94f8",
+      "sha256": "9523452850e4d668638b83591f5073be4e5e9b17ed6e9f88827e4295c0964b69",
       "signingKey": "did:key:zQ3shXgWjVsCJsv9mBm6kVqFSjAnErMg3zG9CcyvmUCCaFRCr",
       "target": {
         "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
@@ -244,8 +244,8 @@
     },
     {
       "base": "secp256k1_full_repo",
-      "bytes": 14183,
-      "carRoot": "bafyreiblypse5phim7ymv46nigaty5gru2qf3ettmzafhuery3ihzek624",
+      "bytes": 14008,
+      "carRoot": "bafyreia3fdczymzqcwubmfltfi3ybcikgcf46qqmu3tyzhdb6pmh6cdchy",
       "corruption": "did",
       "curve": "secp256k1",
       "description": "Commit did replaced by did:plc:zzzzzzzzzzzzzzzzzzzzzzzz and re-signed with the same key; the expected DID is Alice's.",
@@ -264,7 +264,7 @@
         "verdict": "invalid",
         "verifier": "verify_snapshot"
       },
-      "sha256": "a7d6205deaf366818eb855f232982db3af4f96daa1575f9272b072016c780147",
+      "sha256": "6f3b17f033bab499ac85aa63156d06a6d06d43cc2f18d13430b132b84f0975ae",
       "signingKey": "did:key:zQ3shXgWjVsCJsv9mBm6kVqFSjAnErMg3zG9CcyvmUCCaFRCr",
       "target": {
         "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
@@ -274,8 +274,8 @@
     },
     {
       "base": "secp256k1_full_repo",
-      "bytes": 14183,
-      "carRoot": "bafyreigtthg2elrnwfd4qkjhrefpshow75o3rincpvwnzayx44sxndqcpa",
+      "bytes": 14008,
+      "carRoot": "bafyreibqwchih2ecojifa7eslkdf43ajups6n2ibm77hzyk6ydyrctpyvy",
       "corruption": "version",
       "curve": "secp256k1",
       "description": "Commit version 2 instead of 3, re-signed.",
@@ -294,7 +294,7 @@
         "verdict": "invalid",
         "verifier": "verify_snapshot"
       },
-      "sha256": "adad8cc55a76df1df01121d2be9f740aa5a3c627143e1aefc538609179658a84",
+      "sha256": "842a7196d13d7c5c4b3cffb26749a1144eacbe85d84407be59955ad814d5f270",
       "signingKey": "did:key:zQ3shXgWjVsCJsv9mBm6kVqFSjAnErMg3zG9CcyvmUCCaFRCr",
       "target": {
         "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
@@ -304,8 +304,8 @@
     },
     {
       "base": "secp256k1_full_repo",
-      "bytes": 14183,
-      "carRoot": "bafyreihmemzgnxwenckummetaapjhzqprw2ppuh5dzheqcw7sknuej7br4",
+      "bytes": 14008,
+      "carRoot": "bafyreiel2uuwcfibhya7qhuusutj3424woy55vv26qcsqtdr2ypl2br7ca",
       "corruption": "rev",
       "curve": "secp256k1",
       "description": "Commit rev '1111111111111' (13 characters, outside the TID base32 alphabet), re-signed.",
@@ -324,7 +324,7 @@
         "verdict": "invalid",
         "verifier": "verify_snapshot"
       },
-      "sha256": "f52f78bd85cd101b80f005ad724221782bef9e22e7fb6a549c809904d3c8addd",
+      "sha256": "3ae6d7c5e674041495938fd9d6b2cadba70f3347b976970d297bb6ab98707b86",
       "signingKey": "did:key:zQ3shXgWjVsCJsv9mBm6kVqFSjAnErMg3zG9CcyvmUCCaFRCr",
       "target": {
         "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
@@ -334,7 +334,7 @@
     },
     {
       "base": "secp256k1_full_repo",
-      "bytes": 14183,
+      "bytes": 14008,
       "carRoot": "bafyreihdo5eyb5bldm5tccnk4zxybnn6pczddqbw6qeqybh4xtmazukk2y",
       "corruption": "root",
       "curve": "secp256k1",
@@ -354,7 +354,7 @@
         "verdict": "invalid",
         "verifier": "verify_snapshot"
       },
-      "sha256": "130567124e456fbf6c7e1260df4420c1222d13b4089fe6abcb1ec5835b9ca32e",
+      "sha256": "02ecc06b25a0eac5d74d65f5be0e3df6822fe01caf44d540c21b8f5f1f31adcb",
       "signingKey": "did:key:zQ3shXgWjVsCJsv9mBm6kVqFSjAnErMg3zG9CcyvmUCCaFRCr",
       "target": {
         "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
@@ -364,7 +364,7 @@
     },
     {
       "base": "secp256k1_full_repo",
-      "bytes": 7091,
+      "bytes": 7004,
       "carRoot": null,
       "corruption": "truncation",
       "curve": "secp256k1",
@@ -384,7 +384,7 @@
         "verdict": "invalid",
         "verifier": "verify_snapshot"
       },
-      "sha256": "19eb2960b4b236103ef9153dfa90a3bfcc0f9de14e1941535e6854864fc1baee",
+      "sha256": "5d97f5866f2bb17b37a6482d0bcfe7367a54a86059e81fc162372ffb4c726b8e",
       "signingKey": "did:key:zQ3shXgWjVsCJsv9mBm6kVqFSjAnErMg3zG9CcyvmUCCaFRCr",
       "target": {
         "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
@@ -414,7 +414,7 @@
         "verdict": "invalid",
         "verifier": "verify_snapshot"
       },
-      "sha256": "24f59473fb4cdad25b07ad091424853fad156d2317a9a677dec1a228c410aebe",
+      "sha256": "3366784f6ddb0854dd77e71a0ec896d1a4e9a5beb6136f766a8efd352aadcbff",
       "signingKey": "did:key:zQ3shXgWjVsCJsv9mBm6kVqFSjAnErMg3zG9CcyvmUCCaFRCr",
       "target": {
         "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
@@ -424,8 +424,8 @@
     },
     {
       "base": "secp256k1_full_repo",
-      "bytes": 14193,
-      "carRoot": "bafyreiaogsmc2pthv25ccwkud6iti6shyuy4222223olqlzrsufe4nbzom",
+      "bytes": 14018,
+      "carRoot": "bafyreigigasu5a2vqmdqq4v7rwvy457bx37sjmurgqarvcd5bwj2w5lpri",
       "corruption": "record_cid_swap",
       "curve": "secp256k1",
       "description": "The r01 record block is replaced by a different, correctly hashed record block (track 'Jóga (swapped)'); the signed MST still commits to the original r01 CID, whose block is now absent. The swapped block is indistinguishable from an unreferenced extra block, so the verdict is missing_block (ADR 0004 §7.3 step 3: an incomplete path throws missing_block); record_cid_mismatch is not reachable from a CAR because only CID-verified blocks enter the store, so W2-03 covers it with its own unit case.",
@@ -444,7 +444,7 @@
         "verdict": "invalid",
         "verifier": "verify_snapshot"
       },
-      "sha256": "36f26f77ba0625f4bc680dbfd505a58d7203ab672e323a0ab1b488d7bd8f3961",
+      "sha256": "a3dc9f770bb55d9ac0c67cd021aa57b9bcbfd667246ca454c0ec55ec63aafc60",
       "signingKey": "did:key:zQ3shXgWjVsCJsv9mBm6kVqFSjAnErMg3zG9CcyvmUCCaFRCr",
       "target": {
         "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
@@ -454,8 +454,8 @@
     },
     {
       "base": "secp256k1_getrecord_inclusion",
-      "bytes": 1399,
-      "carRoot": "bafyreiaogsmc2pthv25ccwkud6iti6shyuy4222223olqlzrsufe4nbzom",
+      "bytes": 1097,
+      "carRoot": "bafyreigigasu5a2vqmdqq4v7rwvy457bx37sjmurgqarvcd5bwj2w5lpri",
       "corruption": "missing_path_node",
       "curve": "secp256k1",
       "description": "Inclusion proof for r01 with the deepest MST path node removed.",
@@ -474,7 +474,7 @@
         "verdict": "invalid",
         "verifier": "verify_snapshot_record"
       },
-      "sha256": "6286a8f05146c06fb56a04586e1b8bb5d22f996dfee1b20f43dbfec01a790391",
+      "sha256": "ae412d98c8ea3480779e9d5ddc1ed4f718954f1ba21d1e72fe47b78ae9cf3ebb",
       "signingKey": "did:key:zQ3shXgWjVsCJsv9mBm6kVqFSjAnErMg3zG9CcyvmUCCaFRCr",
       "target": {
         "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
@@ -484,8 +484,8 @@
     },
     {
       "base": "secp256k1_getrecord_exclusion",
-      "bytes": 1276,
-      "carRoot": "bafyreiaogsmc2pthv25ccwkud6iti6shyuy4222223olqlzrsufe4nbzom",
+      "bytes": 1069,
+      "carRoot": "bafyreigigasu5a2vqmdqq4v7rwvy457bx37sjmurgqarvcd5bwj2w5lpri",
       "corruption": "missing_path_node",
       "curve": "secp256k1",
       "description": "Exclusion proof for r08 with the deepest MST path node removed; must be missing_block, never absent.",
@@ -504,7 +504,7 @@
         "verdict": "invalid",
         "verifier": "verify_snapshot_record"
       },
-      "sha256": "89e5f2001b3ca5042d7a821a9fbafdee7ac7248d0d57689193c102936c6d7882",
+      "sha256": "779854d4c69764c4c885473c2f1f1cf55b3ae03c05aea41b886ccce6749c702a",
       "signingKey": "did:key:zQ3shXgWjVsCJsv9mBm6kVqFSjAnErMg3zG9CcyvmUCCaFRCr",
       "target": {
         "cid": null,
@@ -514,8 +514,8 @@
     },
     {
       "base": null,
-      "bytes": 1585,
-      "carRoot": "bafyreid26teomp223kn67jwnvot2n7efxokubazv2s5bmrwglnmi3auesi",
+      "bytes": 1283,
+      "carRoot": "bafyreia2iuqtnjc3qabygivqbge2map2dmtqqwdxytbzr6gw2bydb7ujle",
       "corruption": null,
       "curve": "p256",
       "description": "sync.getRecord-style inclusion proof for r01: signed commit, MST path nodes root to leaf, record block.",
@@ -534,7 +534,7 @@
         "verdict": "valid",
         "verifier": "verify_snapshot_record"
       },
-      "sha256": "eb68f30d6836c209fe7a6618d5c8f419e6d6a6589775889497009ed4319196db",
+      "sha256": "deec08c02e44dda585b586a71f847bb2c8ccee3005fac9121ced17bf3a9707f2",
       "signingKey": "did:key:zDnaejgmAHMLkBPMBWnkBxyGxpXx8LgE4WJAYDhwZzyoRAddF",
       "target": {
         "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
@@ -544,8 +544,8 @@
     },
     {
       "base": null,
-      "bytes": 1871,
-      "carRoot": "bafyreid26teomp223kn67jwnvot2n7efxokubazv2s5bmrwglnmi3auesi",
+      "bytes": 1200,
+      "carRoot": "bafyreia2iuqtnjc3qabygivqbge2map2dmtqqwdxytbzr6gw2bydb7ujle",
       "corruption": null,
       "curve": "p256",
       "description": "sync.getRecord-style exclusion proof for r08 (absent): signed commit and the MST path nodes covering the key.",
@@ -564,7 +564,7 @@
         "verdict": "valid",
         "verifier": "verify_snapshot_record"
       },
-      "sha256": "a4edf6a9a02574a78f962d6c1ab3269adc5ae220fe8defdbc46523807569c0f4",
+      "sha256": "a209640c04cd3feae717068d4277bfad313498fefc2f328c12e50f2681560430",
       "signingKey": "did:key:zDnaejgmAHMLkBPMBWnkBxyGxpXx8LgE4WJAYDhwZzyoRAddF",
       "target": {
         "cid": null,
@@ -574,11 +574,11 @@
     },
     {
       "base": null,
-      "bytes": 14183,
-      "carRoot": "bafyreid26teomp223kn67jwnvot2n7efxokubazv2s5bmrwglnmi3auesi",
+      "bytes": 14008,
+      "carRoot": "bafyreia2iuqtnjc3qabygivqbge2map2dmtqqwdxytbzr6gw2bydb7ujle",
       "corruption": null,
       "curve": "p256",
-      "description": "Complete signed repository: 7 fixture scrobbles, 1 follow, 1 schema-invalid scrobble (r99, excluded) and 50 non-music records.",
+      "description": "Complete signed repository: 7 fixture scrobbles, 1 follow, 1 schema-invalid scrobble (r99, excluded) and 50 non-music records (35 outside [<p>., <p>/), 13 inside it in non-music collections including <p>.settings/self, 2 at the exclusive upper bound <p>/).",
       "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
       "expected": {
         "code": null,
@@ -594,7 +594,7 @@
         "verdict": "valid",
         "verifier": "verify_snapshot"
       },
-      "sha256": "f65d5e63c21554b6c51995d11081c87160b2bb91b620d90b442437977b21f808",
+      "sha256": "3423169790d6374acb724a879f311a27f29ccd8820d41fec211ade2e7b1b99e4",
       "signingKey": "did:key:zDnaejgmAHMLkBPMBWnkBxyGxpXx8LgE4WJAYDhwZzyoRAddF",
       "target": {
         "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
@@ -604,8 +604,8 @@
     },
     {
       "base": "p256_full_repo",
-      "bytes": 14183,
-      "carRoot": "bafyreicilcf3fbqwt55fi4wy7s3gopk2wedbb2264xojafcglcmajr5wou",
+      "bytes": 14008,
+      "carRoot": "bafyreihzuiafb3x55ozmbfxchlv325egrf5oa5qrxcnjj7sqn4ae5l6yey",
       "corruption": "signature_byte",
       "curve": "p256",
       "description": "Bit 0 of the first signature byte flipped; the commit block is re-hashed and the CAR root updated, so only the signature is wrong.",
@@ -624,7 +624,7 @@
         "verdict": "invalid",
         "verifier": "verify_snapshot"
       },
-      "sha256": "fa5384c98fa6e792c2e8a7d022a1b86a8a191102ddcd149b87372c715582b145",
+      "sha256": "f93b52580aa2926d588f43fbb52124668fa013f68f910a416494304747f2b8a2",
       "signingKey": "did:key:zDnaejgmAHMLkBPMBWnkBxyGxpXx8LgE4WJAYDhwZzyoRAddF",
       "target": {
         "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
@@ -634,8 +634,8 @@
     },
     {
       "base": "p256_full_repo",
-      "bytes": 14183,
-      "carRoot": "bafyreibwx4jev73zgsit23umnpviudyj2dkas45c7mrfylgjr4emmjljb4",
+      "bytes": 14008,
+      "carRoot": "bafyreifg4mxh5qcmp4sqtknbi2gh42puexicgfkbry6ss4wtnsia4xza2u",
       "corruption": "signature_high_s",
       "curve": "p256",
       "description": "Signature replaced by its malleable high-S twin (s -> n - s); mathematically valid ECDSA but forbidden by atproto. Commit re-hashed, root updated.",
@@ -654,7 +654,7 @@
         "verdict": "invalid",
         "verifier": "verify_snapshot"
       },
-      "sha256": "4dd653798d27d0894246d7df44a533c56bcdc2e082526937f7955a700791fe55",
+      "sha256": "9945139470ba8a2fb3c84021cb5d94ce85add16754fa93c656ca762a447b9b3a",
       "signingKey": "did:key:zDnaejgmAHMLkBPMBWnkBxyGxpXx8LgE4WJAYDhwZzyoRAddF",
       "target": {
         "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
@@ -664,8 +664,8 @@
     },
     {
       "base": "p256_full_repo",
-      "bytes": 14183,
-      "carRoot": "bafyreid26teomp223kn67jwnvot2n7efxokubazv2s5bmrwglnmi3auesi",
+      "bytes": 14008,
+      "carRoot": "bafyreia2iuqtnjc3qabygivqbge2map2dmtqqwdxytbzr6gw2bydb7ujle",
       "corruption": "record_block_byte",
       "curve": "p256",
       "description": "Bit 0 of the last byte of the r01 record block flipped; its CID is unchanged.",
@@ -684,7 +684,7 @@
         "verdict": "invalid",
         "verifier": "verify_snapshot"
       },
-      "sha256": "04d316cd5c63705b57f31fc4469a77c8842d545a548a01919ab52eef4f033180",
+      "sha256": "354c3e1e6693732ef392039f51928206f0b44869e5f7b74c6af560827e1d487b",
       "signingKey": "did:key:zDnaejgmAHMLkBPMBWnkBxyGxpXx8LgE4WJAYDhwZzyoRAddF",
       "target": {
         "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
@@ -694,8 +694,8 @@
     },
     {
       "base": "p256_full_repo",
-      "bytes": 14183,
-      "carRoot": "bafyreid26teomp223kn67jwnvot2n7efxokubazv2s5bmrwglnmi3auesi",
+      "bytes": 14008,
+      "carRoot": "bafyreia2iuqtnjc3qabygivqbge2map2dmtqqwdxytbzr6gw2bydb7ujle",
       "corruption": "mst_node_byte",
       "curve": "p256",
       "description": "Bit 0 of the last byte of the MST root node (commit.data, on every key's path) flipped; its CID is unchanged.",
@@ -714,7 +714,7 @@
         "verdict": "invalid",
         "verifier": "verify_snapshot"
       },
-      "sha256": "03bd125c1e517aa5c2803756ade6d9a3603af070953255d313f782bd3bd96cb0",
+      "sha256": "9b75dab3ae18692982fa05fc12a1c3e52cf86d369cc010b809653940bd42eb8c",
       "signingKey": "did:key:zDnaejgmAHMLkBPMBWnkBxyGxpXx8LgE4WJAYDhwZzyoRAddF",
       "target": {
         "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
@@ -724,8 +724,8 @@
     },
     {
       "base": "p256_full_repo",
-      "bytes": 14183,
-      "carRoot": "bafyreibf4dtxwmyz63emukm5oqavpfovnowsrv2d5ib6s3xn5qeelfwwnq",
+      "bytes": 14008,
+      "carRoot": "bafyreihsk66xzcmb6gndxksgnfkvdbfv63fzp4mdfpobc3eici47vnqyvi",
       "corruption": "mst_structure",
       "curve": "p256",
       "description": "MST root node's first entry claims prefix length 1 with no previous key; node re-hashed and commit.data re-signed, so hashes and signature are valid and only the MST invariant fails.",
@@ -744,7 +744,7 @@
         "verdict": "invalid",
         "verifier": "verify_snapshot"
       },
-      "sha256": "7eabba75f5f14ac144edaca1fa58300ea4569c5c7253a395991fd98671dac170",
+      "sha256": "6d7bdab2d904c835e3ea8306caa7f3e70caf934487b3b0c57d799e9cbf204609",
       "signingKey": "did:key:zDnaejgmAHMLkBPMBWnkBxyGxpXx8LgE4WJAYDhwZzyoRAddF",
       "target": {
         "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
@@ -754,8 +754,8 @@
     },
     {
       "base": "p256_full_repo",
-      "bytes": 14183,
-      "carRoot": "bafyreih7ujyqmrdji642ledv2skahqbeqlwrylx6zipg7kym6ksgrgaxaa",
+      "bytes": 14008,
+      "carRoot": "bafyreihgmvtlq2yk7lr7znp2nwjvhot4kaxxlpjmx76fzcfbbfs7rmwenu",
       "corruption": "did",
       "curve": "p256",
       "description": "Commit did replaced by did:plc:zzzzzzzzzzzzzzzzzzzzzzzz and re-signed with the same key; the expected DID is Alice's.",
@@ -774,7 +774,7 @@
         "verdict": "invalid",
         "verifier": "verify_snapshot"
       },
-      "sha256": "b317187bc8b7e52c1ab1c93189a2d51960de02cce531de6ee086f00c2261ed5d",
+      "sha256": "bee9215677bba8e1cd3c733658c1d904cd9890ef43117304381f9fa2822467ed",
       "signingKey": "did:key:zDnaejgmAHMLkBPMBWnkBxyGxpXx8LgE4WJAYDhwZzyoRAddF",
       "target": {
         "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
@@ -784,8 +784,8 @@
     },
     {
       "base": "p256_full_repo",
-      "bytes": 14183,
-      "carRoot": "bafyreihbrzk2lps3gz73yioxaqihagdurmnp3lauhet76sui45oekmmuoa",
+      "bytes": 14008,
+      "carRoot": "bafyreicglhgw7nhovvpk2zbfpnpdsansl3qbotxezt4j2mlibymvpozjui",
       "corruption": "version",
       "curve": "p256",
       "description": "Commit version 2 instead of 3, re-signed.",
@@ -804,7 +804,7 @@
         "verdict": "invalid",
         "verifier": "verify_snapshot"
       },
-      "sha256": "6df3cfb790611b04f4297cc5f554ca82d6c9f3739b1913eb87e60a2978d48c90",
+      "sha256": "e87df0fcda6fb4256b3f02c3474a7710836e6dc16e0c5f612e584b407ba517c0",
       "signingKey": "did:key:zDnaejgmAHMLkBPMBWnkBxyGxpXx8LgE4WJAYDhwZzyoRAddF",
       "target": {
         "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
@@ -814,8 +814,8 @@
     },
     {
       "base": "p256_full_repo",
-      "bytes": 14183,
-      "carRoot": "bafyreifhgb6me6cxdmhjt5cgeffmcidixxuivk2g2v2ndbta7t6ivpj4qy",
+      "bytes": 14008,
+      "carRoot": "bafyreia4v52t2fxkqm67yibmdgaexxyqlyrgoyvopuylsgoem7kkvxuvbe",
       "corruption": "rev",
       "curve": "p256",
       "description": "Commit rev '1111111111111' (13 characters, outside the TID base32 alphabet), re-signed.",
@@ -834,7 +834,7 @@
         "verdict": "invalid",
         "verifier": "verify_snapshot"
       },
-      "sha256": "5b98153ca502723cd05064cedd8a4af7ce523dc04efd4a018928a4184f0d1254",
+      "sha256": "230c515ee8a1efff43a4f2aea7f93e2f412a6910bece974dc9beff47e907c292",
       "signingKey": "did:key:zDnaejgmAHMLkBPMBWnkBxyGxpXx8LgE4WJAYDhwZzyoRAddF",
       "target": {
         "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
@@ -844,7 +844,7 @@
     },
     {
       "base": "p256_full_repo",
-      "bytes": 14183,
+      "bytes": 14008,
       "carRoot": "bafyreihdo5eyb5bldm5tccnk4zxybnn6pczddqbw6qeqybh4xtmazukk2y",
       "corruption": "root",
       "curve": "p256",
@@ -864,7 +864,7 @@
         "verdict": "invalid",
         "verifier": "verify_snapshot"
       },
-      "sha256": "393f6eaaedb4706054592dda6c42a3636b010d9b9486a52ab5e39cbccb8278d7",
+      "sha256": "e91e11b3b9789f5deb2385f6027398f57580b1044d5672f514c323c650869cb3",
       "signingKey": "did:key:zDnaejgmAHMLkBPMBWnkBxyGxpXx8LgE4WJAYDhwZzyoRAddF",
       "target": {
         "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
@@ -874,7 +874,7 @@
     },
     {
       "base": "p256_full_repo",
-      "bytes": 7091,
+      "bytes": 7004,
       "carRoot": null,
       "corruption": "truncation",
       "curve": "p256",
@@ -894,7 +894,7 @@
         "verdict": "invalid",
         "verifier": "verify_snapshot"
       },
-      "sha256": "96dc415903e96eace63602d116c3b25f8a5776bf1564b30a786168dd6976e5cc",
+      "sha256": "585fe1bf142c86ec424291e322f6a533dff55656faee0856fd9f4373d6af89a9",
       "signingKey": "did:key:zDnaejgmAHMLkBPMBWnkBxyGxpXx8LgE4WJAYDhwZzyoRAddF",
       "target": {
         "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
@@ -924,7 +924,7 @@
         "verdict": "invalid",
         "verifier": "verify_snapshot"
       },
-      "sha256": "f13fc0e837c7d2f99db064f41c56f0e04fd188624dc03b3f2e3f15a8ca2c0564",
+      "sha256": "c4faa6ffad5021e2e8ccd186cb5456080d34cb6a3aa6ae731823acecd497f691",
       "signingKey": "did:key:zDnaejgmAHMLkBPMBWnkBxyGxpXx8LgE4WJAYDhwZzyoRAddF",
       "target": {
         "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
@@ -934,8 +934,8 @@
     },
     {
       "base": "p256_full_repo",
-      "bytes": 14193,
-      "carRoot": "bafyreid26teomp223kn67jwnvot2n7efxokubazv2s5bmrwglnmi3auesi",
+      "bytes": 14018,
+      "carRoot": "bafyreia2iuqtnjc3qabygivqbge2map2dmtqqwdxytbzr6gw2bydb7ujle",
       "corruption": "record_cid_swap",
       "curve": "p256",
       "description": "The r01 record block is replaced by a different, correctly hashed record block (track 'Jóga (swapped)'); the signed MST still commits to the original r01 CID, whose block is now absent. The swapped block is indistinguishable from an unreferenced extra block, so the verdict is missing_block (ADR 0004 §7.3 step 3: an incomplete path throws missing_block); record_cid_mismatch is not reachable from a CAR because only CID-verified blocks enter the store, so W2-03 covers it with its own unit case.",
@@ -954,7 +954,7 @@
         "verdict": "invalid",
         "verifier": "verify_snapshot"
       },
-      "sha256": "fd40a22ec3166f512c8cfa19df1d80ada50645ddbadc1df5fb02f034d74ccee4",
+      "sha256": "b597ebc13623a8259f046f842fa4b2bf5be5fde6be9d83a0ec5dce858f6494ad",
       "signingKey": "did:key:zDnaejgmAHMLkBPMBWnkBxyGxpXx8LgE4WJAYDhwZzyoRAddF",
       "target": {
         "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
@@ -964,8 +964,8 @@
     },
     {
       "base": "p256_getrecord_inclusion",
-      "bytes": 1399,
-      "carRoot": "bafyreid26teomp223kn67jwnvot2n7efxokubazv2s5bmrwglnmi3auesi",
+      "bytes": 1097,
+      "carRoot": "bafyreia2iuqtnjc3qabygivqbge2map2dmtqqwdxytbzr6gw2bydb7ujle",
       "corruption": "missing_path_node",
       "curve": "p256",
       "description": "Inclusion proof for r01 with the deepest MST path node removed.",
@@ -984,7 +984,7 @@
         "verdict": "invalid",
         "verifier": "verify_snapshot_record"
       },
-      "sha256": "13546f8565c2dedb1f7a8b362dab7bb44da675dbdb8dea5623ad6f14f06df996",
+      "sha256": "164c9d709360d8384ed016643995bfb01dee2d2746c4f8bc08eb1e64a7f8ca2c",
       "signingKey": "did:key:zDnaejgmAHMLkBPMBWnkBxyGxpXx8LgE4WJAYDhwZzyoRAddF",
       "target": {
         "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
@@ -994,8 +994,8 @@
     },
     {
       "base": "p256_getrecord_exclusion",
-      "bytes": 1276,
-      "carRoot": "bafyreid26teomp223kn67jwnvot2n7efxokubazv2s5bmrwglnmi3auesi",
+      "bytes": 1069,
+      "carRoot": "bafyreia2iuqtnjc3qabygivqbge2map2dmtqqwdxytbzr6gw2bydb7ujle",
       "corruption": "missing_path_node",
       "curve": "p256",
       "description": "Exclusion proof for r08 with the deepest MST path node removed; must be missing_block, never absent.",
@@ -1014,7 +1014,7 @@
         "verdict": "invalid",
         "verifier": "verify_snapshot_record"
       },
-      "sha256": "5e4c45aa60e6a75495a32b5c67d14587b04957639906768347df764794861239",
+      "sha256": "9f980e116b1a82c9975d478fb269446cf216bb7a33ddeac426fbfbab5714a15c",
       "signingKey": "did:key:zDnaejgmAHMLkBPMBWnkBxyGxpXx8LgE4WJAYDhwZzyoRAddF",
       "target": {
         "cid": null,

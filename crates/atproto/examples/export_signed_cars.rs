@@ -433,7 +433,9 @@ fn fixture() -> Value {
 }
 
 /// Alice's confirmed fixture scrobbles, her follow of Bob, one schema-invalid scrobble that
-/// the verifier must exclude, and 50 non-music records around the namespace range boundaries.
+/// the verifier must exclude, and 50 non-music records: 35 outside the walker range (including
+/// look-alikes just below and above it), 13 inside `[<p>., <p>/)` in non-music collections, and
+/// 2 exactly at the exclusive upper bound `<p>/`.
 fn repo_records() -> Vec<(String, Value)> {
     let fixture = fixture();
     let mut records: Vec<(String, Value)> = fixture["scrobbles"]
@@ -459,28 +461,78 @@ fn repo_records() -> Vec<(String, Value)> {
         format!("{FIXTURE_PREFIX}.scrobble/r99"),
         json!({"$type": format!("{FIXTURE_PREFIX}.scrobble"), "artist": "\u{3000}", "track": "Untitled", "listenedAt": "2026-01-15T10:00:00Z", "createdAt": "2026-01-15T10:00:00Z"}),
     ));
-    let non_music: [(&str, &str, usize); 6] = [
-        ("app.bsky.feed.post", "p", 20),
-        ("app.bsky.feed.like", "l", 10),
-        ("com.example.atmusia.post", "a", 5),
-        ("com.example.atmusic-x.post", "h", 5),
-        ("com.example.atmusicz.post", "z", 5),
-        ("zz.example.other", "o", 5),
+    // Outside the walker range [<p>., <p>/): ordinary collections and look-alikes just below
+    // (`atmusia`, `atmusic-x`: '-' is 0x2D < '.') and just above (`atmusicz`) the prefix.
+    let outside: [(&str, &str, usize); 6] = [
+        ("app.bsky.feed.post", "p", 15),
+        ("app.bsky.feed.like", "l", 8),
+        ("com.example.atmusia.post", "a", 3),
+        ("com.example.atmusic-x.post", "h", 3),
+        ("com.example.atmusicz.post", "z", 3),
+        ("zz.example.other", "o", 3),
     ];
-    for (collection, prefix, count) in non_music {
+    // Inside the walker range but not a music collection: the first and last keys of the
+    // range, the settings record, and siblings that share a textual prefix with the music
+    // collections (`scrobble-x` sorts before `scrobble/`, `scrobbles` and `followx` after).
+    let in_range: [(&str, &str, usize); 7] = [
+        ("com.example.atmusic.aaa", "a", 2),
+        ("com.example.atmusic.scrobble-x", "a", 2),
+        ("com.example.atmusic.scrobbles", "a", 2),
+        ("com.example.atmusic.followx", "a", 2),
+        ("com.example.atmusic.other", "a", 2),
+        ("com.example.atmusic.zzz", "z", 2),
+        ("com.example.atmusic.settings", "", 1),
+    ];
+    // Exactly at the exclusive upper bound <p>/ (collection == the bare prefix).
+    let upper_bound: [(&str, &str, usize); 1] = [("com.example.atmusic", "x", 2)];
+    for (collection, prefix, count) in outside.into_iter().chain(in_range).chain(upper_bound) {
         for i in 0..count {
+            let rkey = if prefix.is_empty() {
+                "self".to_string()
+            } else {
+                format!("{prefix}{i:02}")
+            };
             records.push((
-                format!("{collection}/{prefix}{i:02}"),
+                format!("{collection}/{rkey}"),
                 json!({"$type": collection, "text": format!("non-music {collection} {i}"), "createdAt": "2026-01-01T00:00:00Z"}),
             ));
         }
     }
-    let music = records
-        .iter()
-        .filter(|(path, _)| path.starts_with(&format!("{FIXTURE_PREFIX}.")))
-        .count();
+    let scrobble_prefix = format!("{FIXTURE_PREFIX}.scrobble/");
+    let follow_prefix = format!("{FIXTURE_PREFIX}.follow/");
+    let is_music =
+        |path: &str| path.starts_with(&scrobble_prefix) || path.starts_with(&follow_prefix);
+    let music = records.iter().filter(|(path, _)| is_music(path)).count();
     assert_eq!(records.len() - music, 50, "exactly 50 non-music records");
+    let in_range_non_music = records
+        .iter()
+        .filter(|(path, _)| in_walker_range(path) && !is_music(path))
+        .count();
+    assert_eq!(
+        in_range_non_music, 13,
+        "13 non-music keys inside [<p>., <p>/)"
+    );
+    assert_eq!(
+        records
+            .iter()
+            .filter(|(path, _)| path.starts_with(&format!("{FIXTURE_PREFIX}/")))
+            .count(),
+        2,
+        "2 keys at the exclusive upper bound <p>/"
+    );
+    assert!(
+        records
+            .iter()
+            .any(|(path, _)| path == &format!("{FIXTURE_PREFIX}.settings/self"))
+    );
     records
+}
+
+/// ADR 0004 §5.7 step 3: the range-snapshot walker key range is `[<p>., <p>/)`.
+fn in_walker_range(path: &str) -> bool {
+    let lower = format!("{FIXTURE_PREFIX}.");
+    let upper = format!("{FIXTURE_PREFIX}/");
+    path >= lower.as_str() && path < upper.as_str()
 }
 
 // ---------------------------------------------------------------------------------------
@@ -597,7 +649,7 @@ async fn curve_cases(curve: &'static str) -> Vec<Case> {
         "full_repo",
         None,
         None,
-        "Complete signed repository: 7 fixture scrobbles, 1 follow, 1 schema-invalid scrobble (r99, excluded) and 50 non-music records.",
+        "Complete signed repository: 7 fixture scrobbles, 1 follow, 1 schema-invalid scrobble (r99, excluded) and 50 non-music records (35 outside [<p>., <p>/), 13 inside it in non-music collections including <p>.settings/self, 2 at the exclusive upper bound <p>/).",
         "verify_snapshot",
         INCLUSION_PATH,
         Some(record_cid),
@@ -1034,6 +1086,31 @@ async fn signed_cars() -> (Vec<(String, Vec<u8>)>, Value) {
                     9,
                     "7 scrobbles + 1 follow + 1 excluded scrobble"
                 );
+                // Every signed MST leaf (asserted complete by assert_complete_and_canonical) in
+                // the walker range, in key order: the raw range-walk output, before the
+                // collection filter that verify_snapshot applies.
+                let ordered: BTreeMap<&String, &Cid> = case.mst_cids.iter().collect();
+                let range_entries: Vec<Value> = ordered
+                    .iter()
+                    .filter(|(key, _)| in_walker_range(key))
+                    .map(|(key, cid)| {
+                        let music = rendered.iter().any(|entry| entry["key"] == json!(key));
+                        json!({"key": key, "cid": cid.to_string(), "music": music})
+                    })
+                    .collect();
+                assert_eq!(range_entries.len(), 9 + 13, "music + in-range non-music");
+                let skipped_in_range: Vec<&Value> = range_entries
+                    .iter()
+                    .filter(|entry| entry["music"] == json!(false))
+                    .map(|entry| &entry["key"])
+                    .collect();
+                assert_eq!(skipped_in_range.len(), 13);
+                let outside_range: Vec<&String> = ordered
+                    .keys()
+                    .copied()
+                    .filter(|key| !in_walker_range(key))
+                    .collect();
+                assert_eq!(outside_range.len(), 37, "35 outside + 2 at <p>/");
                 enumerations.push(json!({
                     "car": format!("signed_cars/{}.car", case.name),
                     "curve": curve,
@@ -1041,6 +1118,9 @@ async fn signed_cars() -> (Vec<(String, Vec<u8>)>, Value) {
                     "commitCid": untrusted_root(&case.bytes),
                     "rev": REVISION,
                     "entries": rendered,
+                    "rangeEntries": range_entries,
+                    "skippedInRange": skipped_in_range,
+                    "outsideRange": outside_range,
                 }));
             }
             if let Ok(mutations) = &result
@@ -1117,7 +1197,7 @@ async fn signed_cars() -> (Vec<(String, Vec<u8>)>, Value) {
     });
     files.push(("signed_cars/manifest.json".into(), pretty(&manifest)));
     let enumeration = json!({
-        "description": "Record set returned by the frozen Rust verify_snapshot for each valid full-repo CAR, in MST key order: only the configured music collections (<prefix>.scrobble, <prefix>.follow); non-music records, including look-alike collections just outside the namespace range, are skipped. verdict put = proven and schema-valid; exclude = proven but rejected by schema validation (still part of the enumerated set; Rust's Exclude mutation carries no CID, so cid is the signed MST leaf, asserted equal to it for every entry).",
+        "description": "Record set returned by the frozen Rust verify_snapshot for each valid full-repo CAR, in MST key order: only the configured music collections (<prefix>.scrobble, <prefix>.follow); every other record is skipped, both inside the walker range [<prefix>., <prefix>/) (skippedInRange: <prefix>.settings/self, <prefix>.scrobble-x, <prefix>.scrobbles, <prefix>.followx and other in-range siblings) and outside it (outsideRange: look-alike collections just below and above the prefix, and keys exactly at the exclusive upper bound <prefix>/). rangeEntries lists every signed MST leaf with lower <= key < upper in key order (music = also in entries); it is derived by the exporter from the signed MST, which it asserts complete, not returned by verify_snapshot. verdict put = proven and schema-valid; exclude = proven but rejected by schema validation (still part of the enumerated set; Rust's Exclude mutation carries no CID, so cid is the signed MST leaf, asserted equal to it for every entry).",
         "source": SOURCE,
         "namespacePrefix": FIXTURE_PREFIX,
         "receiptTime": AS_OF,
