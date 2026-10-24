@@ -93,6 +93,8 @@ export class FakePds {
   private readonly listeners: CommitListener[] = [];
   private readonly clock: Clock;
   private lastTidMicros = 0;
+  /** Per-DID tail of the write chain: a write's swap/existence check and its commit are atomic. */
+  private readonly writeLocks = new Map<string, Promise<unknown>>();
 
   constructor(
     readonly host: string,
@@ -401,8 +403,22 @@ export class FakePds {
     return tidFromMicros(this.lastTidMicros);
   }
 
-  private async write(nsid: string, req: Request, body: Record<string, unknown> | null): Promise<Response> {
+  /** Run `fn` after every earlier write to `did` through this PDS has settled. */
+  private exclusive<T>(did: string, fn: () => Promise<T>): Promise<T> {
+    const run = (this.writeLocks.get(did) ?? Promise.resolve()).then(fn);
+    this.writeLocks.set(
+      did,
+      run.catch(() => {}),
+    );
+    return run;
+  }
+
+  private write(nsid: string, req: Request, body: Record<string, unknown> | null): Promise<Response> {
     const authed = this.authenticate(req);
+    return this.exclusive(authed, () => this.writeLocked(nsid, authed, body));
+  }
+
+  private async writeLocked(nsid: string, authed: string, body: Record<string, unknown> | null): Promise<Response> {
     if (!body) return fail(400, 'InvalidRequest', 'Request body must be a JSON object');
     const repoId = typeof body.repo === 'string' ? body.repo : fail(400, 'InvalidRequest', 'repo is required');
     const did = this.resolveRepo(repoId);

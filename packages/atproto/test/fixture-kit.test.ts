@@ -332,13 +332,11 @@ it('inclusion proof CAR verifies with @atproto/crypto cross-check for both curve
     expect(pds.count('com.atproto.sync.getRecord')).toBe(1);
     expect(transport.calls.count({ host: HOST, status: 200 })).toBe(1);
 
-    // The production-library signer on this curve also cross-verifies.
+    // The production-library (@atcute/crypto) signer on this curve also cross-verifies.
     const unsigned = unsignedCommitBytes(carCommit(car));
-    if (key.curve === 'p256') {
-      const webSig = await key.signWebCrypto!(unsigned);
-      expect(await atprotoVerify(key.didKey, unsigned, webSig)).toBe(true);
-      expect(await verifySigWithDidKey(key.didKey, webSig, unsigned)).toBe(true);
-    }
+    const atcuteSig = await key.signRandomized(unsigned);
+    expect(await atprotoVerify(key.didKey, unsigned, atcuteSig)).toBe(true);
+    expect(await verifySigWithDidKey(key.didKey, atcuteSig, unsigned)).toBe(true);
     // Deterministic signing: rebuilding gives the identical head.
     const again = await aliceRepo(key);
     expect(again.repo.head!.cid).toBe(repo.head!.cid);
@@ -821,6 +819,95 @@ it('fake PDS createRecord with existing rkey returns RecordAlreadyExists; delete
   // The aborted hang is logged too (status 0) by both the PDS and the router.
   expect(pds.calls.filter({ status: 0 }).map((c) => c.fault)).toEqual(['hang']);
   expect(pds.calls.count()).toBe(t.calls.count({ host: HOST }));
+});
+
+it('concurrent writes to one repo are serialized: one RecordAlreadyExists, no lost records, strictly increasing revs', async () => {
+  const keys = await fixtureKeys();
+  const clock = fixedClock();
+  const json = async (res: Response) => (await res.json()) as Record<string, unknown>;
+  const ascending = (revs: string[]) => revs.every((r, i) => i === 0 || revs[i - 1]! < r);
+
+  // SignedRepo directly: overlapping puts each build on the previous commit.
+  const repo = new SignedRepo(ALICE, keys.alice, { clock });
+  const results = await Promise.all(['r01', 'r02', 'r03'].map((rkey) => repo.put(SCROBBLE, rkey, recordOf(rkey))));
+  expect((await repo.entries()).map((e) => e.key)).toEqual(['r01', 'r02', 'r03'].map((r) => `${SCROBBLE}/${r}`));
+  expect(repo.history).toHaveLength(3);
+  expect(new Set(repo.history.map((c) => c.cid)).size).toBe(3);
+  expect(ascending(repo.history.map((c) => c.rev))).toBe(true);
+  expect(results.map((r) => r.since)).toEqual([null, results[0]!.rev, results[1]!.rev]);
+  expect(results.map((r) => r.ops.map((op) => [op.action, op.rkey]))).toEqual([
+    [['create', 'r01']],
+    [['create', 'r02']],
+    [['create', 'r03']],
+  ]);
+
+  // Fake PDS: two createRecord calls race for rkey x, alongside writes to other rkeys.
+  const repo2 = new SignedRepo(ALICE, keys.alice, { clock });
+  const pds = new FakePds(HOST, { clock });
+  await pds.addAccount(repo2);
+  const commits: string[] = [];
+  pds.onCommit((_did, c) => commits.push(c.rev));
+  const t = routerTransport({ pds: { [HOST]: pds } });
+  const token = fixtureToken(ALICE);
+  const create = (rkey: string, src: string) =>
+    t(
+      post(
+        HOST,
+        'com.atproto.repo.createRecord',
+        { repo: ALICE, collection: SCROBBLE, rkey, record: recordOf(src) },
+        token,
+      ),
+    );
+  const putIfAbsent = (src: string) =>
+    t(
+      post(
+        HOST,
+        'com.atproto.repo.putRecord',
+        { repo: ALICE, collection: SCROBBLE, rkey: 'p', record: recordOf(src), swapRecord: null },
+        token,
+      ),
+    );
+  const responses = await Promise.all([
+    create('x', 'r01'),
+    create('x', 'r02'),
+    create('y', 'r03'),
+    putIfAbsent('r04'),
+    putIfAbsent('r05'),
+    create('z', 'r06'),
+  ]);
+  const bodies = await Promise.all(responses.map(json));
+  const statuses = responses.map((r) => r.status);
+
+  // Exactly one of each racing pair wins; the loser gets the conflict error.
+  expect([statuses[0], statuses[1]].sort()).toEqual([200, 400]);
+  expect([bodies[0]!.error, bodies[1]!.error].filter(Boolean)).toEqual(['RecordAlreadyExists']);
+  expect([statuses[3], statuses[4]].sort()).toEqual([200, 400]);
+  expect([bodies[3]!.error, bodies[4]!.error].filter(Boolean)).toEqual(['InvalidSwap']);
+  expect([statuses[2], statuses[5]]).toEqual([200, 200]);
+
+  // No write was lost and the stored x / p are the winners' records.
+  const winnerX = statuses[0] === 200 ? 'r01' : 'r02';
+  const winnerP = statuses[3] === 200 ? 'r04' : 'r05';
+  const stored = await repo2.list(SCROBBLE);
+  expect(stored.map((r) => [r.rkey, r.cid])).toEqual([
+    ['p', cidOf(recordOf(winnerP))],
+    ['x', cidOf(recordOf(winnerX))],
+    ['y', cidOf(recordOf('r03'))],
+    ['z', cidOf(recordOf('r06'))],
+  ]);
+
+  // Four successful writes → four commits after the initial one, revs strictly increasing.
+  const okRevs = bodies.filter((_, i) => statuses[i] === 200).map((b) => (b.commit as { rev: string }).rev);
+  expect(okRevs).toHaveLength(4);
+  expect(new Set(okRevs).size).toBe(4);
+  expect(repo2.history).toHaveLength(5);
+  expect(ascending(repo2.history.map((c) => c.rev))).toBe(true);
+  expect(commits).toEqual(repo2.history.slice(1).map((c) => c.rev));
+  expect(new Set(commits)).toEqual(new Set(okRevs));
+  const latest = await json(await t(xrpc(HOST, 'com.atproto.sync.getLatestCommit', { did: ALICE })));
+  expect(latest).toEqual({ cid: repo2.head!.cid, rev: repo2.head!.rev });
+  expect(pds.count('com.atproto.repo.createRecord')).toBe(4);
+  expect(pds.count('com.atproto.repo.putRecord')).toBe(2);
 });
 
 it('fake Jetstream replays inclusively from cursor and refuses cursors older than lookback', async () => {

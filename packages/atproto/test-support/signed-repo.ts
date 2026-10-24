@@ -256,6 +256,12 @@ export class SignedRepo {
   private readonly clock: Clock;
   private readonly clockId: number;
   private root: string | null = null;
+  /**
+   * Tail of the per-repo write chain. Every mutation (writes, gc) runs after
+   * the previous one settles, so overlapping callers never start from the
+   * same root or reuse a rev.
+   */
+  private lock: Promise<unknown> = Promise.resolve();
 
   constructor(
     readonly did: string,
@@ -316,8 +322,23 @@ export class SignedRepo {
     return this.writes([], o);
   }
 
-  /** Apply `ops` in order and sign them as one commit. */
-  async writes(ops: readonly WriteOp[], o: CommitOptions = {}): Promise<CommitResult> {
+  /** Run `fn` after every earlier mutation of this repo has settled (a promise-chain mutex). */
+  private exclusive<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.lock.then(fn);
+    this.lock = run.catch(() => {});
+    return run;
+  }
+
+  /**
+   * Apply `ops` in order and sign them as one commit. Concurrent calls are
+   * serialized: each commit builds on the previous one's tree and gets a
+   * strictly greater rev.
+   */
+  writes(ops: readonly WriteOp[], o: CommitOptions = {}): Promise<CommitResult> {
+    return this.exclusive(() => this.applyWrites(ops, o));
+  }
+
+  private async applyWrites(ops: readonly WriteOp[], o: CommitOptions): Promise<CommitResult> {
     const prevHead = this.head;
     let root = this.root;
     const applied: RepoOp[] = [];
@@ -501,7 +522,11 @@ export class SignedRepo {
    * a write). Older commits can no longer be served; getBlocks for their nodes
    * then reports BlockNotFound.
    */
-  async gc(): Promise<string[]> {
+  gc(): Promise<string[]> {
+    return this.exclusive(() => this.collect());
+  }
+
+  private async collect(): Promise<string[]> {
     const head = this.requireHead();
     const keep = await this.reachable(head.data);
     keep.add(head.cid);

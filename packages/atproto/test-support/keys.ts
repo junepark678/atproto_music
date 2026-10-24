@@ -7,15 +7,18 @@
 //   fixture repository can be compared byte for byte with the Rust-signed goldens.
 // - Signatures are deterministic (RFC 6979) and low-S on both curves, so commit
 //   CIDs are stable across runs:
-//   - secp256k1 signs with @atcute/crypto (noble, RFC 6979, lowS);
-//   - P-256 signs with @atproto/crypto's noble P256Keypair (RFC 6979, lowS). The
-//     @atcute/crypto P-256 signer goes through WebCrypto, whose ECDSA nonce is
-//     random, which would make every commit CID differ between runs. It stays
-//     available as `signWebCrypto` for cross-checks.
-// - Public keys and did:keys come from @atcute/crypto, the production verifier.
+//   - both curves sign with @atproto/crypto's noble keypairs (Secp256k1Keypair,
+//     P256Keypair: RFC 6979, lowS) on every runtime.
+//   - @atcute/crypto is NOT used for signing: its secp256k1 signer resolves to a
+//     node:crypto build under the `node` export condition (random nonce), and
+//     its P-256 signer goes through WebCrypto (random nonce). Either would make
+//     commit CIDs differ between runs and runtimes. The @atcute/crypto signers
+//     stay available as `signRandomized` for cross-checks.
+// - Public keys and did:keys come from @atcute/crypto, the production verifier;
+//   key creation asserts both libraries derive the same did:key.
 
 import { type DidKeyString, P256PrivateKey, Secp256k1PrivateKey } from '@atcute/crypto';
-import { P256Keypair } from '@atproto/crypto';
+import { P256Keypair, Secp256k1Keypair } from '@atproto/crypto';
 
 export type Curve = 'secp256k1' | 'p256';
 
@@ -31,8 +34,12 @@ export interface TestKey {
   readonly multikey: string;
   /** Deterministic, low-S, 64-byte compact signature over `data` (SHA-256 prehash). */
   sign(data: Uint8Array): Promise<Uint8Array<ArrayBuffer>>;
-  /** P-256 only: the randomized WebCrypto signer of @atcute/crypto, for cross-checks. */
-  signWebCrypto?(data: Uint8Array): Promise<Uint8Array<ArrayBuffer>>;
+  /**
+   * The @atcute/crypto signer (WebCrypto for P-256; node:crypto or noble for
+   * secp256k1 depending on the runtime), whose nonce may be random. For
+   * cross-checks only; never used to build fixtures.
+   */
+  signRandomized(data: Uint8Array): Promise<Uint8Array<ArrayBuffer>>;
 }
 
 const cache = new Map<string, Promise<TestKey>>();
@@ -52,32 +59,21 @@ export function filledScalar(fill: number): Uint8Array<ArrayBuffer> {
 async function build(curve: Curve, scalar: Uint8Array<ArrayBuffer>, label: string): Promise<TestKey> {
   if (scalar.length !== 32) throw new RangeError('test scalar must be 32 bytes');
   const scalarHex = hex(scalar);
-  if (curve === 'secp256k1') {
-    const priv = await Secp256k1PrivateKey.importRaw(scalar);
-    const didKey = await priv.exportPublicKey('did');
-    return Object.freeze({
-      curve,
-      label,
-      scalarHex,
-      didKey,
-      multikey: await priv.exportPublicKey('multikey'),
-      sign: (data: Uint8Array) => priv.sign(data),
-    });
-  }
-  const webcrypto = await P256PrivateKey.importRaw(scalar);
-  const rfc6979 = await P256Keypair.import(scalar);
-  const didKey = await webcrypto.exportPublicKey('did');
+  const atcute =
+    curve === 'secp256k1' ? await Secp256k1PrivateKey.importRaw(scalar) : await P256PrivateKey.importRaw(scalar);
+  const rfc6979 = curve === 'secp256k1' ? await Secp256k1Keypair.import(scalar) : await P256Keypair.import(scalar);
+  const didKey = await atcute.exportPublicKey('did');
   if (rfc6979.did() !== didKey) {
-    throw new Error(`P-256 key derivation disagrees: ${rfc6979.did()} vs ${didKey}`);
+    throw new Error(`${curve} key derivation disagrees: ${rfc6979.did()} vs ${didKey}`);
   }
   return Object.freeze({
     curve,
     label,
     scalarHex,
     didKey,
-    multikey: await webcrypto.exportPublicKey('multikey'),
+    multikey: await atcute.exportPublicKey('multikey'),
     sign: async (data: Uint8Array) => new Uint8Array(await rfc6979.sign(data)),
-    signWebCrypto: (data: Uint8Array) => webcrypto.sign(data),
+    signRandomized: (data: Uint8Array) => atcute.sign(data),
   });
 }
 
