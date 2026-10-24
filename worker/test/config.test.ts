@@ -1,6 +1,40 @@
 import { describe, expect, it } from 'vitest';
 import { ConfigError, FIXTURE_PREFIX, parseConfig, parseCursorKey } from '../src/config';
 import type { EnvVars } from '../src/env';
+import wranglerJsonc from '../wrangler.jsonc?raw';
+
+/** Strips JSONC comments outside string literals (wrangler.jsonc has no trailing commas). */
+function parseJsonc(text: string): unknown {
+  let out = '';
+  let i = 0;
+  while (i < text.length) {
+    const c = text[i];
+    if (c === '"') {
+      let j = i + 1;
+      while (j < text.length && text[j] !== '"') j += text[j] === '\\' ? 2 : 1;
+      out += text.slice(i, j + 1);
+      i = j + 1;
+    } else if (c === '/' && text[i + 1] === '/') {
+      while (i < text.length && text[i] !== '\n') i++;
+    } else if (c === '/' && text[i + 1] === '*') {
+      i = text.indexOf('*/', i + 2) + 2;
+    } else {
+      out += c;
+      i++;
+    }
+  }
+  return JSON.parse(out);
+}
+
+interface WranglerEnv {
+  vars: EnvVars;
+  routes: { pattern: string; custom_domain: boolean }[];
+}
+type WranglerConfig = WranglerEnv & { env: Record<string, WranglerEnv> };
+
+/** The owner's decision, ADR 0004 §15 Q3. */
+const DECIDED_ORIGIN = 'https://music.214510.xyz';
+const DECIDED_PREFIX = 'dev.pythonplayer123.music';
 
 const BASE: EnvVars = {
   PUBLIC_ORIGIN: 'https://music.example.org',
@@ -88,6 +122,52 @@ describe('parseConfig namespace gate', () => {
     expect(issuesOf(() => parseConfig({ ...BASE, NAMESPACE_OWNERSHIP_REF: 'ref' }))).toEqual([
       'NAMESPACE_OWNERSHIP_REF',
     ]);
+  });
+
+  it('decided prefix dev.pythonplayer123.music is valid, non-fixture, and publishes only with NAMESPACE_OWNERSHIP_REF', () => {
+    const decided = { ...BASE, PUBLIC_ORIGIN: DECIDED_ORIGIN, LEXICON_PREFIX: DECIDED_PREFIX };
+    // Accepted without allowFixturePrefix: it is not the fixture prefix.
+    const gated = parseConfig(decided);
+    expect(gated).toMatchObject({
+      publicOrigin: DECIDED_ORIGIN,
+      prefix: DECIDED_PREFIX,
+      fixturePrefix: false,
+      namespaceOwnershipRef: null,
+      publication: false,
+      ingestMode: 'socket',
+      collections: {
+        scrobble: 'dev.pythonplayer123.music.scrobble',
+        follow: 'dev.pythonplayer123.music.follow',
+        settings: 'dev.pythonplayer123.music.settings',
+      },
+    });
+    const ref = 'dns:_lexicon.music.pythonplayer123.dev TXT';
+    const published = parseConfig({ ...decided, NAMESPACE_OWNERSHIP_REF: ref });
+    expect(published).toMatchObject({ prefix: DECIDED_PREFIX, namespaceOwnershipRef: ref, publication: true });
+    // Whitespace-only evidence is no evidence.
+    expect(parseConfig({ ...decided, NAMESPACE_OWNERSHIP_REF: '   ' }).publication).toBe(false);
+  });
+
+  it('shipped wrangler.jsonc carries the decided origin and prefix in every env and passes parseConfig', () => {
+    expect(wranglerJsonc).not.toContain('example.org');
+    const config = parseJsonc(wranglerJsonc) as WranglerConfig;
+    expect(Object.keys(config.env).sort()).toEqual(['free', 'staging']);
+    expect(config.vars.PUBLIC_ORIGIN).toBe(DECIDED_ORIGIN);
+    expect(config.routes).toEqual([{ pattern: 'music.214510.xyz', custom_domain: true }]);
+    const envs: [string, WranglerEnv][] = [['production', config], ...Object.entries(config.env)];
+    const origins = new Set<string>();
+    for (const [name, env] of envs) {
+      const parsed = parseConfig(env.vars);
+      expect(parsed, name).toMatchObject({ prefix: DECIDED_PREFIX, fixturePrefix: false, publication: false });
+      const host = new URL(parsed.publicOrigin).host;
+      expect(host === '214510.xyz' || host.endsWith('.214510.xyz'), name).toBe(true);
+      expect(env.routes, name).toEqual([{ pattern: host, custom_domain: true }]);
+      origins.add(parsed.publicOrigin);
+    }
+    // Each env has its own hostname, so its own OAuth client_id.
+    expect(origins.size).toBe(envs.length);
+    expect(parseConfig(config.vars)).toMatchObject({ plan: 'paid', ingestMode: 'socket' });
+    expect(parseConfig(config.env.staging?.vars ?? BASE)).toMatchObject({ plan: 'free', ingestMode: 'pulse' });
   });
 
   it('rejects malformed vars with the field names', () => {

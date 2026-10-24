@@ -6,9 +6,19 @@
 // `openssl rand -hex 32`) and optionally `wrangler secret put ADMIN_TOKEN`.
 // Local development reads them from worker/.dev.vars (see .dev.vars.example).
 //
-// The domain and prefix below are placeholders (ADR §15 Q3): LEXICON_PREFIX is
-// empty, so ingestion and publication stay disabled, and the production bundle
-// guard refuses to deploy until an owned domain and prefix are configured.
+// Origin and prefix are the owner's decision recorded in ADR §15 Q3
+// (2026-10-24): production serves https://music.214510.xyz (zone 214510.xyz),
+// so the OAuth client_id is https://music.214510.xyz/oauth/client-metadata.json
+// and must never change once users sign in. The lexicon prefix is
+// dev.pythonplayer123.music (NSID authority music.pythonplayer123.dev).
+//
+// NAMESPACE_OWNERSHIP_REF stays empty until the ownership-evidence step is
+// done: publish the `_lexicon.music.pythonplayer123.dev` TXT record in zone
+// pythonplayer123.dev and record a reviewable reference to it. Until then
+// parseConfig reports publication=false (no writes) while ingestion of the
+// decided collections runs. The free and staging hostnames are subdomains of
+// the owner's zone chosen here, not owner-decided values; change them before
+// first sign-in on those environments if the owner prefers others.
 {
   "$schema": "../node_modules/wrangler/config-schema.json",
   "name": "atmusic",
@@ -32,9 +42,11 @@
   "limits": { "cpu_ms": 30000 },
   "observability": { "enabled": true },
   "vars": {
-    "PUBLIC_ORIGIN": "https://music.example.org",
-    // Empty: publication and ingestion disabled (namespace gate).
-    "LEXICON_PREFIX": "",
+    "PUBLIC_ORIGIN": "https://music.214510.xyz",
+    // Owned, non-fixture prefix (ADR §15 Q3). Empty would close the namespace
+    // gate (ingestion and publication disabled).
+    "LEXICON_PREFIX": "dev.pythonplayer123.music",
+    // Empty until the _lexicon TXT ownership evidence exists: no publication.
     "NAMESPACE_OWNERSHIP_REF": "",
     // socket | pulse | off
     "INGEST_MODE": "socket",
@@ -48,7 +60,7 @@
   },
   // A custom domain on an owned zone is mandatory: the OAuth client_id
   // (https://<host>/oauth/client-metadata.json) must never change.
-  "routes": [{ "pattern": "music.example.org", "custom_domain": true }],
+  "routes": [{ "pattern": "music.214510.xyz", "custom_domain": true }],
   "env": {
     // Free plan: dev and private hobby use. durable_objects and vars are not
     // inheritable, so both are re-declared; no CPU limit override.
@@ -58,8 +70,8 @@
       },
       "limits": {},
       "vars": {
-        "PUBLIC_ORIGIN": "https://music-free.example.org",
-        "LEXICON_PREFIX": "",
+        "PUBLIC_ORIGIN": "https://music-free.214510.xyz",
+        "LEXICON_PREFIX": "dev.pythonplayer123.music",
         "NAMESPACE_OWNERSHIP_REF": "",
         "INGEST_MODE": "pulse",
         "JETSTREAM_URLS": "wss://jetstream.us-east.bsky.network,wss://jetstream.us-west.bsky.network",
@@ -68,7 +80,7 @@
         "PLAN": "free",
         "DO_LOCATION_HINT": "enam"
       },
-      "routes": [{ "pattern": "music-free.example.org", "custom_domain": true }]
+      "routes": [{ "pattern": "music-free.214510.xyz", "custom_domain": true }]
     },
     // Staging: its own hostname (so its own OAuth client_id) and, as a
     // separate Worker (atmusic-staging), its own DO namespace.
@@ -78,8 +90,8 @@
       },
       "limits": {},
       "vars": {
-        "PUBLIC_ORIGIN": "https://staging.music.example.org",
-        "LEXICON_PREFIX": "",
+        "PUBLIC_ORIGIN": "https://music-staging.214510.xyz",
+        "LEXICON_PREFIX": "dev.pythonplayer123.music",
         "NAMESPACE_OWNERSHIP_REF": "",
         "INGEST_MODE": "pulse",
         "JETSTREAM_URLS": "wss://jetstream.us-east.bsky.network,wss://jetstream.us-west.bsky.network",
@@ -88,7 +100,7 @@
         "PLAN": "free",
         "DO_LOCATION_HINT": "enam"
       },
-      "routes": [{ "pattern": "staging.music.example.org", "custom_domain": true }]
+      "routes": [{ "pattern": "music-staging.214510.xyz", "custom_domain": true }]
     }
   }
 }
