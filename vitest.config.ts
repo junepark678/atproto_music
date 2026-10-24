@@ -5,7 +5,13 @@ import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
   test: {
-    projects: ['packages/*', 'worker/vitest.*.config.ts', 'web'],
+    projects: [
+      'packages/*',
+      'worker/vitest.*.config.ts',
+      'web',
+      // Node-side build tooling tests (scripts/test/**, W1-09): they spawn tsx and wrangler.
+      { test: { name: 'scripts', include: ['scripts/test/**/*.test.ts'], environment: 'node', testTimeout: 180_000 } },
+    ],
     passWithNoTests: false,
   },
 });

@@ -23,3 +23,4 @@ worker/dist/
 worker/.dev.vars
 web/public/oauth/client-metadata.json
 web/public/_headers
+web/public/oauth/loopback-client.json
