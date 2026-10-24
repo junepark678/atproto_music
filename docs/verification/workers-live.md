@@ -111,7 +111,7 @@ The soak runs for at least 24 h against a deployment with `INGEST_MODE=socket`, 
 - **Samples.** It samples `/internal/admin/status` every `ATMUSIC_LIVE_SOAK_POLL_S` seconds (default 60).
 - **Reconnects.** A host-index change or a disconnected→connected transition counts as one. Sampling can miss a fast reconnect, so this is a lower bound.
 - **Lag.** Lag is now minus `lastEventTimeUs`; the soak reports p50, p95 and max.
-- **Cloudflare GraphQL Analytics.** Billed DO requests come from `durableObjectsInvocationsAdaptiveGroups`. DO CPU time and WebSocket message counts come from `durableObjectsPeriodicGroups`. The fields are discovered by introspection, so a field Cloudflare does not expose is reported as missing (the gate then fails) rather than guessed.
+- **Cloudflare GraphQL Analytics.** Billed DO requests come from `durableObjectsInvocationsAdaptiveGroups`. DO CPU time and WebSocket message counts come from `durableObjectsPeriodicGroups`. The fields are discovered by introspection, so a field Cloudflare does not expose is reported as missing (the gate then fails) rather than guessed. A measurement the data query does not return is missing as well and fails the gate: no account row, no invocation rows, no periodic rows or no alarm invocations in the window. Missing values are recorded as `null`, never as 0.
 - **Alarm invocations** come from the invocations dataset's invocation-type dimension.
 - **CPU per alarm** is total DO CPU divided by alarm invocations. This is an upper bound, because it includes socket and RPC work.
 
@@ -156,10 +156,13 @@ The operator assembles the inventory by placing each document under `gates.<name
 `python3 scripts/verify_live_evidence.py [inventory] [--bundle-sha256 H] [--worker-version-id V]` classifies the inventory:
 
 - **PASS** (exit 0): all five gates `passed` for that one version and bundle.
-- **FAIL** (exit 1): any gate recorded `failed` with valid provenance.
+- **FAIL** (exit 1): the inventory is bound to the release under review, and a gate recorded `failed` for that release. Bound means: a valid `release` that matches `--bundle-sha256`/`--worker-version-id`, `fixtureOnly: false`, complete prerequisites, and a gate document with the same version id, bundle hash, commit, origin and prefix.
 - **BLOCKED** (exit 2): anything else. This includes:
   - a blocked gate, a gate with no evidence, or fixture-only evidence;
   - a gate document whose version id, bundle hash or commit is missing or differs from `release`;
+  - an inventory that is not bound to the release under review (see FAIL), even when it records a failed gate: that failure is listed but says nothing about the bundle under review;
+  - per-identity results that do not cover both prerequisite identities and PDS hosts. OAuth needs one sign-in per prerequisite DID, pdsCompat one result per prerequisite PDS host, and ingest needs `localPublish` to be a record of identity A and `externalPublish` a different record of identity B;
+  - a soak whose analytics lack billed DO requests (at least 1), alarm invocations (at least 1) or DO CPU time, or that lists a missing field;
   - a "passed" document whose required results are absent. For example, the CIDs differ, absence was not verified, SafeFetch fetched a target, or the soak ran for less than 24 h.
 
 `--gate FILE` classifies a single gate document. The verifier checks recorded fields and their consistency. It cannot establish that the cited external evidence is authentic, so reviewers must inspect it. `python3 scripts/test_live_evidence.py` holds its regression tests. Those tests run every gate script with no prerequisites and with a fetch trap preloaded, so they make no network request.

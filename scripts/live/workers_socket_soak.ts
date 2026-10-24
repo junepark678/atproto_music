@@ -17,7 +17,10 @@
 //    requests (durableObjectsInvocationsAdaptiveGroups), and DO CPU time and
 //    WebSocket message counts (durableObjectsPeriodicGroups). The datasets'
 //    fields are discovered by introspection first, so a field Cloudflare does
-//    not expose is reported missing instead of being guessed. Alarm
+//    not expose is reported missing instead of being guessed. A measurement
+//    the data query does not return (no account row, no invocation rows, no
+//    periodic rows, no alarm invocations) is missing too: it is never
+//    defaulted to 0, and any missing measurement fails the gate. Alarm
 //    invocations come from the invocations dataset's invocation-type
 //    dimension; CPU per alarm is total DO CPU over alarm invocations, an
 //    upper bound (it includes socket and RPC work).
@@ -141,7 +144,7 @@ export function summarize(samples: readonly Sample[]) {
 }
 
 export interface Analytics {
-  doRequests: number;
+  doRequests: number | null;
   alarmInvocations: number | null;
   cpuTimeUs: number | null;
   activeTimeUs: number | null;
@@ -158,7 +161,8 @@ export function decide(
 ) {
   const perDay = (n: number) => (n * 24) / hours;
   const reconnectsPerDay = perDay(summary.reconnectsLowerBound);
-  const projectedMonthlyDoRequests = Math.round(perDay(analytics.doRequests) * 30);
+  const projectedMonthlyDoRequests =
+    analytics.doRequests === null ? null : Math.round(perDay(analytics.doRequests) * 30);
   const cpuMsPerAlarm =
     analytics.cpuTimeUs !== null && analytics.alarmInvocations
       ? analytics.cpuTimeUs / 1000 / analytics.alarmInvocations
@@ -166,7 +170,8 @@ export function decide(
   const failed: string[] = [];
   if (reconnectsPerDay > t.maxReconnectsPerDay) failed.push('reconnectsPerDay');
   if (summary.lagMs.p95 === null || summary.lagMs.p95 > t.maxLagP95Ms) failed.push('lagP95Ms');
-  if (projectedMonthlyDoRequests > t.maxMonthlyDoRequests) failed.push('projectedMonthlyDoRequests');
+  if (projectedMonthlyDoRequests === null || projectedMonthlyDoRequests > t.maxMonthlyDoRequests)
+    failed.push('projectedMonthlyDoRequests');
   if (cpuMsPerAlarm === null || cpuMsPerAlarm > t.maxCpuMsPerAlarm) failed.push('cpuMsPerAlarm');
   return {
     decision: failed.length === 0 ? ('socket' as const) : ('pulse' as const),
@@ -187,7 +192,7 @@ async function graphql(ctx: GateContext, query: string, variables: Record<string
   });
   const errors = field<unknown[]>(res.json, 'errors');
   expect(res.status === 200, `GraphQL analytics: HTTP ${res.status}`);
-  expect(!errors || errors.length === 0, `GraphQL analytics: ${JSON.stringify(errors).slice(0, 500)}`);
+  expect(!errors || errors.length === 0, `GraphQL analytics: ${String(JSON.stringify(errors ?? null)).slice(0, 500)}`);
   return field(res.json, 'data');
 }
 
@@ -244,19 +249,41 @@ export async function fetchAnalytics(ctx: GateContext, startIso: string, endIso:
     start: startIso,
     end: endIso,
   });
-  const account = field<unknown[]>(field(data, 'viewer'), 'accounts')?.[0];
+  const accounts = field<unknown[]>(field(data, 'viewer'), 'accounts');
+  const account = Array.isArray(accounts) ? accounts[0] : undefined;
+  if (account === undefined || account === null)
+    missingFields.push('viewer.accounts (no analytics row for the account in the soak window)');
   const invocations = field<unknown[]>(account, 'invocations');
   const periodic = field<unknown[]>(account, 'periodic');
-  const alarmRows = typeDim
-    ? (invocations ?? []).filter((row) => /alarm/i.test(String(field(field(row, 'dimensions'), typeDim) ?? '')))
-    : null;
+  const doRequests = sum(invocations, 'requests');
+  if (doRequests === null || doRequests < 1)
+    missingFields.push('durableObjectsInvocationsAdaptiveGroups.sum.requests (no invocation rows in the soak window)');
+  let alarmInvocations: number | null = null;
+  if (typeDim) {
+    const alarmRows = (invocations ?? []).filter((row) =>
+      /alarm/i.test(String(field(field(row, 'dimensions'), typeDim) ?? '')),
+    );
+    alarmInvocations = sum(alarmRows, 'requests');
+    if (alarmInvocations === null || alarmInvocations < 1) {
+      alarmInvocations = null;
+      missingFields.push(
+        `durableObjectsInvocationsAdaptiveGroups.${typeDim} (no alarm invocations in the soak window)`,
+      );
+    }
+  }
+  const periodicSums: Record<string, number | null> = {};
+  for (const f of wanted) {
+    periodicSums[f] = periodicFields.includes(f) ? sum(periodic, f) : null;
+    if (periodicFields.includes(f) && periodicSums[f] === null)
+      missingFields.push(`durableObjectsPeriodicGroups.sum.${f} (no rows in the soak window)`);
+  }
   return {
-    doRequests: sum(invocations, 'requests') ?? 0,
-    alarmInvocations: alarmRows ? (sum(alarmRows, 'requests') ?? 0) : null,
-    cpuTimeUs: sum(periodic, 'cpuTime'),
-    activeTimeUs: sum(periodic, 'activeTime'),
-    inboundWebsocketMsgCount: sum(periodic, 'inboundWebsocketMsgCount'),
-    outboundWebsocketMsgCount: sum(periodic, 'outboundWebsocketMsgCount'),
+    doRequests: doRequests !== null && doRequests >= 1 ? doRequests : null,
+    alarmInvocations,
+    cpuTimeUs: periodicSums.cpuTime ?? null,
+    activeTimeUs: periodicSums.activeTime ?? null,
+    inboundWebsocketMsgCount: periodicSums.inboundWebsocketMsgCount ?? null,
+    outboundWebsocketMsgCount: periodicSums.outboundWebsocketMsgCount ?? null,
     missingFields,
   };
 }

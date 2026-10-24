@@ -62,9 +62,53 @@ FETCH_TRAP = """globalThis.fetch = async (url) => {
   throw new Error('network disabled in tests');
 };
 """
+# Preloaded into the soak gate for the analytics tests: a frozen clock that sleep() advances
+# instantly, and a fake deployment plus Cloudflare GraphQL API. Every request is logged on stderr
+# as `FAKE-FETCH <method> <url>`; anything else is refused. FAKE_ANALYTICS selects the data
+# query's answer: "empty" (no account row) or "full".
+FAKE_SOAK_RUNTIME = """// Only the gate process itself (argv[1] is the script), never npx or the tsx launcher.
+if (/workers_socket_soak\\.ts$/.test(process.argv[1] ?? '')) {
+const RealDate = Date;
+let now = RealDate.parse('2026-01-15T12:00:00Z');
+globalThis.Date = class extends RealDate {
+  constructor(...args) { if (args.length === 0) super(now); else super(...args); }
+  static now() { return now; }
+};
+const handle = { ref() { return handle; }, unref() { return handle; }, hasRef() { return false; } };
+globalThis.setTimeout = (fn, ms = 0, ...args) => { now += Number(ms) || 0; queueMicrotask(() => fn(...args)); return handle; };
+const json = (value) => new Response(JSON.stringify(value), { status: 200, headers: { 'content-type': 'application/json' } });
+const TYPES = {
+  AccountDurableObjectsPeriodicGroupsSum: ['cpuTime', 'activeTime', 'inboundWebsocketMsgCount', 'outboundWebsocketMsgCount'],
+  AccountDurableObjectsInvocationsAdaptiveGroupsDimensions: ['datetime', 'eventType', 'namespaceId'],
+};
+globalThis.fetch = async (url, init = {}) => {
+  const href = String(url);
+  process.stderr.write(`FAKE-FETCH ${init.method ?? 'GET'} ${href}\\n`);
+  const path = new URL(href).pathname;
+  if (path === '/api/v1/meta')
+    return json({ lexiconPrefix: process.env.ATMUSIC_LIVE_LEXICON_PREFIX, capabilities: ['publication'], version: 'v', stage: 'production' });
+  if (path === '/internal/admin/status')
+    return json({ ingest: { mode: 'socket', connected: true, hostIndex: 0, lastEventTimeUs: (now - 2000) * 1000, pendingGap: false } });
+  if (href === 'https://api.cloudflare.com/client/v4/graphql') {
+    const body = JSON.parse(init.body);
+    if (body.query.includes('__type'))
+      return json({ data: { __type: { fields: (TYPES[body.variables.n] ?? []).map((name) => ({ name })) } } });
+    if (process.env.FAKE_ANALYTICS === 'empty') return json({ data: { viewer: { accounts: [] } } });
+    return json({ data: { viewer: { accounts: [{
+      invocations: [{ sum: { requests: 200000 }, dimensions: { eventType: 'fetch' } },
+                    { sum: { requests: 1440 }, dimensions: { eventType: 'alarm' } }],
+      periodic: [{ sum: { cpuTime: 72000000, activeTime: 90000000, inboundWebsocketMsgCount: 500000, outboundWebsocketMsgCount: 20 } }],
+    }] } } });
+  }
+  throw new Error(`unexpected request ${href}`);
+};
+}
+"""
 _TRAP_DIR = tempfile.TemporaryDirectory(prefix="atmusic-fetch-trap-")
 TRAP_PATH = Path(_TRAP_DIR.name) / "fetch-trap.mjs"
 TRAP_PATH.write_text(FETCH_TRAP)
+SOAK_RUNTIME_PATH = Path(_TRAP_DIR.name) / "fake-soak-runtime.mjs"
+SOAK_RUNTIME_PATH.write_text(FAKE_SOAK_RUNTIME)
 
 
 def gate(name, results, **extra):
@@ -114,7 +158,10 @@ def passing_inventory():
                 for label in ("rfc1918", "loopback", "metadata")]}),
             "socketSoak": gate("socketSoak", {
                 "durationHours": 24, "decision": "socket", "reconnectsLowerBound": 7,
-                "lagMs": {"p50": 900, "p95": 4000, "max": 61000}, "analytics": {"doRequests": 812345},
+                "lagMs": {"p50": 900, "p95": 4000, "max": 61000},
+                "analytics": {"doRequests": 812345, "alarmInvocations": 1440, "cpuTimeUs": 59760000,
+                              "activeTimeUs": 90000000, "inboundWebsocketMsgCount": 500000,
+                              "outboundWebsocketMsgCount": 20, "missingFields": []},
                 "cpuMsPerAlarmUpperBound": 41.5}),
         },
     }
@@ -139,6 +186,26 @@ def script_env(**extra):
 def run_script(name, **extra):
     return subprocess.run(["npx", "tsx", f"scripts/live/{name}.ts"], cwd=ROOT, text=True, capture_output=True,
                           env=script_env(**extra), timeout=120)
+
+
+SOAK_ENV = {"ATMUSIC_LIVE_ORIGIN": ORIGIN, "ATMUSIC_LIVE_LEXICON_PREFIX": PREFIX,
+            "ATMUSIC_LIVE_WORKER_VERSION_ID": VERSION, "ATMUSIC_LIVE_BUNDLE_SHA256": BUNDLE,
+            "ATMUSIC_LIVE_COMMIT": COMMIT, "ATMUSIC_LIVE_JETSTREAM_COVERAGE_REF": "jetstream coverage log OPS-2",
+            "ATMUSIC_LIVE_ADMIN_TOKEN": "a" * 40, "ATMUSIC_LIVE_CF_API_TOKEN": "cf-analytics-read-token",
+            "ATMUSIC_LIVE_CF_ACCOUNT_ID": "1" * 32, "ATMUSIC_LIVE_CF_DO_NAMESPACE_ID": "2" * 32,
+            "ATMUSIC_LIVE_SOAK_POLL_S": "3600"}
+
+
+def run_fake_soak(analytics):
+    """The whole soak gate against the fake deployment and analytics API (frozen, instantly advancing clock)."""
+    env = script_env(**SOAK_ENV, FAKE_ANALYTICS=analytics)
+    env["NODE_OPTIONS"] = f"--import={SOAK_RUNTIME_PATH.as_uri()}"
+    return subprocess.run(["npx", "tsx", "scripts/live/workers_socket_soak.ts"], cwd=ROOT, text=True,
+                          capture_output=True, env=env, timeout=120)
+
+
+def fake_fetches(result):
+    return [line.split(" ", 2)[1:] for line in result.stderr.splitlines() if line.startswith("FAKE-FETCH ")]
 
 
 class LiveEvidenceTests(unittest.TestCase):
@@ -271,6 +338,150 @@ class LiveEvidenceTests(unittest.TestCase):
                                                              "commit": COMMIT}, {})
         self.assertEqual(status, "failed")
         self.assertTrue(any("network disabled in tests" in issue for issue in issues), issues)
+
+    def test_results_must_cover_both_prerequisite_identities_and_pds_hosts(self):
+        """Per-identity results that name one identity or one PDS twice never pass."""
+        cases = []
+        manifest = passing_inventory()
+        manifest["gates"]["oauth"]["results"]["signIns"][1]["did"] = DID_A
+        cases.append((manifest, "oauth", "gates.oauth.results.signIns (must be exactly one sign-in per "
+                                         "prerequisite identity)"))
+        manifest = passing_inventory()
+        manifest["gates"]["pdsCompat"]["results"]["perPds"][1]["endpoint"] = PDS_A
+        cases.append((manifest, "pdsCompat", "gates.pdsCompat.results.perPds (must be exactly one result per "
+                                             "prerequisite PDS host)"))
+        manifest = passing_inventory()
+        manifest["gates"]["ingest"]["results"]["externalPublish"]["uri"] = URI_A
+        manifest["gates"]["ingest"]["results"]["deleteReconcile"][1]["uri"] = URI_A
+        cases.append((manifest, "ingest", f"gates.ingest.results.externalPublish.uri (not a record of identity B "
+                                          f"{DID_B})"))
+        manifest = passing_inventory()
+        results = manifest["gates"]["ingest"]["results"]
+        results["localPublish"]["uri"], results["externalPublish"]["uri"] = URI_B, URI_A
+        cases.append((manifest, "ingest", f"gates.ingest.results.localPublish.uri (not a record of identity A "
+                                          f"{DID_A})"))
+        for manifest, name, expected in cases:
+            with self.subTest(gate=name, expected=expected):
+                verdict = evaluate(manifest, BUNDLE, VERSION)
+                self.assertEqual(verdict.status, "blocked")
+                self.assertEqual(verdict.gates[name], "blocked")
+                self.assertIn(expected, verdict.problems)
+                self.assertEqual({g for g, s in verdict.gates.items() if s != "passed"}, {name})
+                result = run_cli(manifest, "--bundle-sha256", BUNDLE)
+                self.assertEqual(result.returncode, 2, result.stdout)
+                self.assertIn(expected, result.stdout)
+        # A single gate document classified on its own (no prerequisites) still needs two distinct ones.
+        with tempfile.TemporaryDirectory(prefix="atmusic-live-gate-") as directory:
+            for name, mutate, expected in (
+                    ("oauth", lambda r: r["signIns"][1].update(did=DID_A),
+                     "gates.oauth.results.signIns (one identity signed in twice)"),
+                    ("pdsCompat", lambda r: r["perPds"][1].update(endpoint=PDS_A),
+                     "gates.pdsCompat.results.perPds (one result per distinct PDS host)"),
+                    ("ingest", lambda r: (r["externalPublish"].update(uri=URI_A),
+                                          r["deleteReconcile"][1].update(uri=URI_A)),
+                     "gates.ingest.results.localPublish/externalPublish (records of two different identities)")):
+                entry = passing_inventory()["gates"][name]
+                path = Path(directory) / f"{name}.json"
+                path.write_text(json.dumps(entry))
+                ok = subprocess.run([sys.executable, str(ROOT / "scripts/verify_live_evidence.py"), "--gate", str(path)],
+                                    text=True, capture_output=True)
+                self.assertEqual(ok.returncode, 0, ok.stdout)
+                mutate(entry["results"])
+                path.write_text(json.dumps(entry))
+                bad = subprocess.run([sys.executable, str(ROOT / "scripts/verify_live_evidence.py"), "--gate", str(path)],
+                                     text=True, capture_output=True)
+                self.assertEqual(bad.returncode, 2, bad.stdout)
+                self.assertIn(expected, bad.stdout)
+
+    def test_failure_in_an_unbound_inventory_is_blocked_not_failed(self):
+        """A recorded failure is a FAIL only for the release under review; unbound inventories stay BLOCKED."""
+        def failed_inventory():
+            manifest = passing_inventory()
+            manifest["gates"]["ingest"].update(result="failed", failures=["record was not indexed within 300 s"])
+            return manifest
+        bound = run_cli(failed_inventory(), "--bundle-sha256", BUNDLE, "--worker-version-id", VERSION)
+        self.assertEqual(bound.returncode, 1, bound.stdout)
+        self.assertTrue(bound.stdout.startswith("FAIL:"), bound.stdout)
+        result = run_cli(failed_inventory(), "--bundle-sha256", "7" * 64)
+        self.assertEqual(result.returncode, 2, result.stdout)
+        self.assertTrue(result.stdout.startswith("BLOCKED:"), result.stdout)
+        self.assertIn("release.bundleSha256 (does not match the bundle under review)", result.stdout)
+        self.assertIn("gates.ingest: failed — record was not indexed within 300 s", result.stdout)
+        verdict = evaluate(failed_inventory(), worker_version_id="11111111-2222-4333-8444-555555555555")
+        self.assertEqual(verdict.status, "blocked")
+        self.assertEqual(verdict.gates["ingest"], "failed")
+        fixture = failed_inventory()
+        fixture["fixtureOnly"] = True
+        no_prereq = failed_inventory()
+        no_prereq["prerequisites"] = {}
+        no_release = failed_inventory()
+        del no_release["release"]["bundleSha256"]
+        for manifest, expected in (
+                (fixture, "fixtureOnly (fixture-only inventories cannot satisfy acceptance)"),
+                (no_prereq, "prerequisites.identities (two dedicated live DIDs, each with its public HTTPS PDS)"),
+                (no_release, "release.bundleSha256 (bundle SHA-256 from check-bundle.ts --release)")):
+            verdict = evaluate(manifest)
+            self.assertEqual(verdict.status, "blocked", expected)
+            self.assertIn(expected, verdict.problems)
+            self.assertEqual(run_cli(manifest).returncode, 2, expected)
+        # A failed gate document recorded against another origin is not bound either.
+        other_origin = failed_inventory()
+        other_origin["gates"]["ingest"]["origin"] = "https://staging.music.214510.xyz"
+        verdict = evaluate(other_origin)
+        self.assertEqual((verdict.status, verdict.gates["ingest"]), ("blocked", "blocked"))
+        self.assertIn("gates.ingest.origin (not the prerequisite origin)", verdict.problems)
+
+    def test_soak_without_analytics_measurements_fails_and_never_passes(self):
+        """An empty analytics answer fails the soak gate; evidence without DO requests, alarms or CPU never passes."""
+        empty = run_fake_soak("empty")
+        self.assertEqual(empty.returncode, 1, empty.stderr)
+        self.assertIn("\nFAIL: socketSoak live gate failed\n", empty.stderr)
+        document = json.loads(empty.stdout)
+        self.assertEqual(document["result"], "failed")
+        analytics = document["results"]["analytics"]
+        self.assertIsNone(analytics["doRequests"])
+        self.assertIsNone(analytics["alarmInvocations"])
+        self.assertIsNone(analytics["cpuTimeUs"])
+        self.assertIn("viewer.accounts (no analytics row for the account in the soak window)", analytics["missingFields"])
+        self.assertIn("durableObjectsPeriodicGroups.sum.cpuTime (no rows in the soak window)", analytics["missingFields"])
+        for missing in analytics["missingFields"]:
+            self.assertIn(f"analytics field unavailable: {missing}", document["failures"])
+        self.assertEqual(document["results"]["decision"], "pulse")
+        self.assertIn("projectedMonthlyDoRequests", document["results"]["failedThresholds"])
+        self.assertIsNone(document["results"]["projectedMonthlyDoRequests"])
+        calls = fake_fetches(empty)
+        self.assertEqual(sum(1 for _, url in calls if url.endswith("/internal/admin/status")), 24)
+        self.assertEqual(sum(1 for _, url in calls if url == "https://api.cloudflare.com/client/v4/graphql"), 3)
+        self.assertEqual(gate_status("socketSoak", document, passing_inventory()["release"],
+                                     passing_inventory()["prerequisites"])[0], "failed")
+        # Control: the same run with analytics rows passes, and its document passes the verifier.
+        full = run_fake_soak("full")
+        self.assertEqual(full.returncode, 0, full.stderr)
+        document = json.loads(full.stdout)
+        self.assertEqual(document["result"], "passed")
+        self.assertEqual(document["results"]["analytics"], {
+            "doRequests": 201440, "alarmInvocations": 1440, "cpuTimeUs": 72000000, "activeTimeUs": 90000000,
+            "inboundWebsocketMsgCount": 500000, "outboundWebsocketMsgCount": 20, "missingFields": []})
+        self.assertEqual((document["results"]["durationHours"], document["results"]["samples"]), (24, 24))
+        self.assertEqual((document["results"]["decision"], document["results"]["failedThresholds"]), ("socket", []))
+        self.assertEqual(document["results"]["projectedMonthlyDoRequests"], 201440 * 30)
+        self.assertEqual(document["results"]["cpuMsPerAlarmUpperBound"], 50)
+        self.assertEqual(gate_status("socketSoak", document, passing_inventory()["release"],
+                                     passing_inventory()["prerequisites"]), ("passed", []))
+        # The verifier rejects a "passed" soak whose analytics are absent or zero.
+        for key, value, expected in (
+                ("doRequests", 0, "gates.socketSoak.results.analytics.doRequests (billed DO requests, at least 1)"),
+                ("doRequests", None, "gates.socketSoak.results.analytics.doRequests (billed DO requests, at least 1)"),
+                ("alarmInvocations", 0, "gates.socketSoak.results.analytics.alarmInvocations (measured alarm "
+                                        "invocations, at least 1)"),
+                ("cpuTimeUs", None, "gates.socketSoak.results.analytics.cpuTimeUs (measured DO CPU time)"),
+                ("missingFields", ["durableObjectsPeriodicGroups.sum.cpuTime"],
+                 "gates.socketSoak.results.analytics.missingFields (every analytics measurement obtained)")):
+            manifest = passing_inventory()
+            manifest["gates"]["socketSoak"]["results"]["analytics"][key] = value
+            verdict = evaluate(manifest, BUNDLE, VERSION)
+            self.assertEqual((verdict.status, verdict.gates["socketSoak"]), ("blocked", "blocked"), (key, value))
+            self.assertIn(expected, verdict.problems)
 
     def test_live_gate_scripts_without_env_exit_blocked_and_list_missing_names(self):
         """npx tsx scripts/live/pds_compat_check.ts (no env) › exits nonzero with blocked and lists missing names"""

@@ -7,12 +7,17 @@ PASS (exit 0), FAIL (exit 1) or BLOCKED (exit 2):
 - PASS: every required gate (oauth, ingest, pdsCompat, ssrfProbe, socketSoak)
   has a `passed` result for one Worker version id and one bundle SHA-256, with
   complete provenance and the gate's required results.
-- FAIL: at least one gate recorded a `failed` result with valid provenance. A
-  failure is definitive for that version, whatever else is missing.
+- FAIL: the inventory is bound to the release under review (valid release,
+  matching --bundle-sha256/--worker-version-id, fixtureOnly false, complete
+  prerequisites) and at least one gate recorded a `failed` result with valid
+  provenance for that release, origin and prefix. Such a failure is
+  definitive for that version, whatever else is missing.
 - BLOCKED: anything else. A gate whose script reported `blocked` (missing
   prerequisites), a gate with no evidence, and evidence that is malformed,
   fixture-only, or not bound to the release under review (a missing or
-  different version id or bundle hash) all leave the gate open.
+  different version id or bundle hash, or missing prerequisites) all leave the
+  gate open. A failure recorded in an unbound inventory is reported but stays
+  BLOCKED: it says nothing about the bundle under review.
 
 Schema (schemaVersion 2; docs/verification/workers-live.md):
 
@@ -221,6 +226,20 @@ def _identity_dids(prereq):
     return {i.get("did") for i in prereq.get("identities", []) if isinstance(i, dict)}
 
 
+def _identities(prereq):
+    """The two prerequisite identities (A, B) as (did, pds host) pairs, or None when not recorded."""
+    identities = prereq.get("identities") if isinstance(prereq, dict) else None
+    if not isinstance(identities, list) or len(identities) != 2 or not all(isinstance(i, dict) for i in identities):
+        return None
+    return [(i.get("did"), _host(i.get("pds"))) for i in identities]
+
+
+def _record_did(uri):
+    match = re.fullmatch(r"at://(did:[a-z]+:[A-Za-z0-9._:%-]+)/([a-zA-Z0-9.-]+)/([A-Za-z0-9._~:-]+)",
+                         uri if isinstance(uri, str) else "")
+    return match.group(1) if match else None
+
+
 def _subject_problems(where, entry, prereq, need_uri, prefix):
     subjects = entry.get("subjects")
     if not isinstance(subjects, list) or not subjects or not all(
@@ -243,11 +262,12 @@ def _subject_problems(where, entry, prereq, need_uri, prefix):
     return problems
 
 
-def _results_problems(name, entry, prefix):
+def _results_problems(name, entry, prefix, prereq):
     where = f"gates.{name}.results"
     results = entry.get("results")
     if not isinstance(results, dict) or not results:
         return [where]
+    identities = _identities(prereq)
     problems = []
     if name == "oauth":
         sign_ins = results.get("signIns")
@@ -260,6 +280,12 @@ def _results_problems(name, entry, prefix):
                 problems.append(f"{where}.signIns ({item['did']}: granular repo: scopes not granted)")
             elif not _nonempty(item.get("grantedScope")) or f"repo:{prefix}.scrobble" not in item["grantedScope"]:
                 problems.append(f"{where}.signIns ({item['did']}: grantedScope lacks repo:{prefix}.scrobble)")
+        dids = sorted(str(item.get("did")) for item in sign_ins if isinstance(item, dict))
+        if identities is not None:
+            if dids != sorted(str(did) for did, _ in identities):
+                problems.append(f"{where}.signIns (must be exactly one sign-in per prerequisite identity)")
+        elif len(set(dids)) != len(dids):
+            problems.append(f"{where}.signIns (one identity signed in twice)")
     elif name == "ingest":
         published = []
         for key in ("localPublish", "externalPublish"):
@@ -274,6 +300,22 @@ def _results_problems(name, entry, prefix):
             if not _int(item.get("lagMs")):
                 problems.append(f"{where}.{key}.lagMs")
             published.append(item.get("uri"))
+        local = results.get("localPublish") if isinstance(results.get("localPublish"), dict) else {}
+        external = results.get("externalPublish") if isinstance(results.get("externalPublish"), dict) else {}
+        local_did, external_did = _record_did(local.get("uri")), _record_did(external.get("uri"))
+        if identities is not None:
+            if local_did != identities[0][0]:
+                problems.append(f"{where}.localPublish.uri (not a record of identity A {identities[0][0]})")
+            if external_did != identities[1][0]:
+                problems.append(f"{where}.externalPublish.uri (not a record of identity B {identities[1][0]})")
+        elif local_did is None or external_did is None or local_did == external_did:
+            problems.append(f"{where}.localPublish/externalPublish (records of two different identities)")
+        if local.get("uri") is not None and local.get("uri") == external.get("uri"):
+            problems.append(f"{where}.externalPublish.uri (the same record as localPublish)")
+        for key, item in (("localPublish", local), ("externalPublish", external)):
+            match = re.fullmatch(r"at://[^/]+/([a-zA-Z0-9.-]+)/[^/]+", str(item.get("uri")))
+            if item and prefix and (not match or not match.group(1).startswith(prefix + ".")):
+                problems.append(f"{where}.{key}.uri (outside the owned namespace)")
         deletes = results.get("deleteReconcile")
         if not isinstance(deletes, list) or len(deletes) < 2:
             problems.append(f"{where}.deleteReconcile (both records deleted and reconciled)")
@@ -296,6 +338,12 @@ def _results_problems(name, entry, prefix):
                 problems.append(f"{where}.perPds (four capability results)")
             elif item["getRecordInclusion"] is not True or item["getRepoStatus"] is not True:
                 problems.append(f"{where}.perPds ({item.get('endpoint')}: mandatory getRecord/getRepoStatus missing)")
+        hosts = sorted(_host(item.get("endpoint")) for item in per_pds if isinstance(item, dict))
+        if identities is not None:
+            if hosts != sorted(host for _, host in identities):
+                problems.append(f"{where}.perPds (must be exactly one result per prerequisite PDS host)")
+        elif "" in hosts or len(set(hosts)) != len(hosts):
+            problems.append(f"{where}.perPds (one result per distinct PDS host)")
     elif name == "ssrfProbe":
         targets = results.get("targets")
         if not isinstance(targets, list) or not targets:
@@ -322,8 +370,15 @@ def _results_problems(name, entry, prefix):
             problems.append(f"{where}.reconnectsLowerBound")
         if not _number((results.get("lagMs") or {}).get("p95")):
             problems.append(f"{where}.lagMs.p95")
-        if not _int((results.get("analytics") or {}).get("doRequests")):
-            problems.append(f"{where}.analytics.doRequests (billed DO requests)")
+        analytics = results.get("analytics") if isinstance(results.get("analytics"), dict) else {}
+        if not _int(analytics.get("doRequests"), 1):
+            problems.append(f"{where}.analytics.doRequests (billed DO requests, at least 1)")
+        if not _int(analytics.get("alarmInvocations"), 1):
+            problems.append(f"{where}.analytics.alarmInvocations (measured alarm invocations, at least 1)")
+        if not _number(analytics.get("cpuTimeUs")):
+            problems.append(f"{where}.analytics.cpuTimeUs (measured DO CPU time)")
+        if analytics.get("missingFields") != []:
+            problems.append(f"{where}.analytics.missingFields (every analytics measurement obtained)")
         if not _number(results.get("cpuMsPerAlarmUpperBound")):
             problems.append(f"{where}.cpuMsPerAlarmUpperBound")
     return problems
@@ -343,6 +398,13 @@ def gate_status(name, entry, release, prereq):
         if not isinstance(missing, list) or not missing or not all(_nonempty(m) for m in missing):
             return "blocked", problems + [f"{where}.missing (a blocked result lists its missing prerequisites)"]
         return "blocked", problems + [f"{where}: blocked — {m}" for m in missing]
+    if isinstance(prereq, dict) and prereq:
+        if _origin(entry.get("origin")) != _origin(prereq.get("publicHttpsOrigin")):
+            problems.append(f"{where}.origin (not the prerequisite origin)")
+        if entry.get("lexiconPrefix") != prereq.get("ownedLexiconPrefix"):
+            problems.append(f"{where}.lexiconPrefix (not the owned prefix)")
+    else:
+        prereq = {}
     if problems:
         # Evidence that is not bound to this release is rejected, failed or passed alike.
         return "blocked", problems
@@ -357,17 +419,10 @@ def gate_status(name, entry, release, prereq):
     prefix = prefix if isinstance(prefix, str) else entry.get("lexiconPrefix")
     if not _nonempty(entry.get("cleanup")):
         problems.append(f"{where}.cleanup (cleanup outcome)")
-    if isinstance(prereq, dict) and prereq:
-        if _origin(entry.get("origin")) != _origin(prereq.get("publicHttpsOrigin")):
-            problems.append(f"{where}.origin (not the prerequisite origin)")
-        if entry.get("lexiconPrefix") != prereq.get("ownedLexiconPrefix"):
-            problems.append(f"{where}.lexiconPrefix (not the owned prefix)")
-    else:
-        prereq = {}
     if name in PDS_GATES:
         problems += _pds_problems(where, entry, prereq)
         problems += _subject_problems(where, entry, prereq, need_uri=name == "ingest", prefix=prefix)
-    problems += _results_problems(name, entry, prefix)
+    problems += _results_problems(name, entry, prefix, prereq)
     return ("blocked", problems) if problems else ("passed", [])
 
 
@@ -379,18 +434,22 @@ def evaluate(manifest, bundle_sha256=None, worker_version_id=None):
         return Verdict("blocked", [
             f"schemaVersion (expected {SCHEMA_VERSION}; the schemaVersion 1 musl-artifact inventory "
             "cannot record Worker version evidence)"], {})
-    problems = []
+    # Binding: without a valid release that matches the one under review, a live
+    # (non-fixture) inventory and complete prerequisites, no gate outcome -- not
+    # even a recorded failure -- says anything about the bundle under review.
+    binding = []
     if manifest.get("fixtureOnly") is not False:
-        problems.append("fixtureOnly (fixture-only inventories cannot satisfy acceptance)")
+        binding.append("fixtureOnly (fixture-only inventories cannot satisfy acceptance)")
     release = manifest.get("release")
-    problems += release_problems(release)
+    binding += release_problems(release)
     if isinstance(release, dict):
         if bundle_sha256 is not None and release.get("bundleSha256") != bundle_sha256:
-            problems.append("release.bundleSha256 (does not match the bundle under review)")
+            binding.append("release.bundleSha256 (does not match the bundle under review)")
         if worker_version_id is not None and release.get("workerVersionId") != worker_version_id:
-            problems.append("release.workerVersionId (does not match the version under review)")
+            binding.append("release.workerVersionId (does not match the version under review)")
     prereq = manifest.get("prerequisites")
-    problems += prerequisite_problems(prereq)
+    binding += prerequisite_problems(prereq)
+    problems = list(binding)
     gates = manifest.get("gates")
     if not isinstance(gates, dict):
         gates = {}
@@ -402,7 +461,9 @@ def evaluate(manifest, bundle_sha256=None, worker_version_id=None):
         problems += gate_problems
     for name in sorted(set(gates) - set(REQUIRED_GATES)):
         problems.append(f"gates.{name} (unknown gate)")
-    if "failed" in statuses.values():
+    if binding:
+        status = "blocked"
+    elif "failed" in statuses.values():
         status = "failed"
     elif problems:
         status = "blocked"
