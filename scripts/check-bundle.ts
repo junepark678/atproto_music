@@ -7,7 +7,9 @@
 //
 // 1. Checks the env's deploy values in the wrangler config: PUBLIC_ORIGIN is an
 //    https origin, every route is on its host, and LEXICON_PREFIX is a valid,
-//    owned (non-empty, non-fixture) prefix.
+//    owned (non-empty, non-fixture) prefix. assets.not_found_handling, when
+//    set, must be "none" (ADR §15 Q9: the Worker answers every asset miss;
+//    the platform SPA fallback is refused).
 // 2. If the assets directory holds generated client metadata or _headers, they
 //    must equal what scripts/gen-config.ts generates for exactly these values,
 //    so a build whose origin or prefix differs from the configured ones is
@@ -242,6 +244,11 @@ export function main(argv: readonly string[]): number {
   const prefix = (section.vars.LEXICON_PREFIX ?? '').trim();
   console.log(`check-bundle: config ${args.config} env ${args.env} origin ${origin} prefix ${prefix || '(empty)'}`);
   const configIssues = deployedValueIssues(origin, prefix, section.routeHosts);
+  if (section.assetsNotFoundHandling !== null && section.assetsNotFoundHandling !== 'none') {
+    configIssues.push(
+      `assets.not_found_handling is ${JSON.stringify(section.assetsNotFoundHandling)}; ADR 0004 §15 Q9 requires "none" so the Worker answers every asset miss`,
+    );
+  }
   if (configIssues.length > 0) return fail(configIssues);
 
   const configDir = dirname(args.config);

@@ -244,6 +244,53 @@ test('refuses a wrangler config with a fixture or empty prefix or a route off th
   }
 });
 
+test('refuses assets.not_found_handling other than "none" (ADR §15 Q9) and accepts the example config', () => {
+  const copy = workerCopy();
+  const base = readFileSync(copy.config, 'utf8');
+  interface AssetsConfig {
+    assets: Record<string, unknown>;
+    env: Record<string, Record<string, unknown>>;
+  }
+  const cases: { label: string; edit: (c: AssetsConfig) => void }[] = [
+    {
+      label: 'top level',
+      edit: (c) => {
+        c.assets.not_found_handling = 'single-page-application';
+      },
+    },
+    {
+      label: 'staging re-declares assets',
+      edit: (c) => {
+        c.env.staging!.assets = { ...c.assets, not_found_handling: '404-page' };
+      },
+    },
+  ];
+  for (const { label, edit } of cases) {
+    const config = JSON.parse(base) as AssetsConfig;
+    edit(config);
+    writeFileSync(copy.config, JSON.stringify(config));
+    const env = label.startsWith('staging') ? ['--env', 'staging'] : [];
+    const res = checkBundle(['--config', copy.config, '--outdir', copy.outDir, ...env]);
+    expect(res.status, label).toBe(1);
+    expect(res.stderr, label).toMatch(
+      /FAIL check-bundle: assets\.not_found_handling is "(single-page-application|404-page)"; ADR 0004 §15 Q9 requires "none"/,
+    );
+    expect(existsSync(copy.outDir), label).toBe(false);
+  }
+
+  // The self-hosting example ships "none": its config checks pass (its entry
+  // path resolves under config/, so the run stops at the SKIP line).
+  const example = join(REPO, 'config', 'atmusic.workers.example.jsonc');
+  const exampleConfig = parseJsonc(readFileSync(example, 'utf8')) as AssetsConfig;
+  expect(exampleConfig.assets.not_found_handling).toBe('none');
+  const exampleOut = join(tempDir('example-out'), 'dist');
+  const res = checkBundle(['--config', example, '--outdir', exampleOut]);
+  expect(res.status, res.stderr).toBe(0);
+  expect(res.stderr).not.toContain('FAIL check-bundle');
+  expect(res.stdout).toMatch(/^SKIP check-bundle: Worker entry .*index\.ts does not exist/m);
+  expect(existsSync(exampleOut)).toBe(false);
+});
+
 test('missing Worker entry skips after config checks, and fails with --release', () => {
   const copy = workerCopy();
   rmSync(copy.entry);

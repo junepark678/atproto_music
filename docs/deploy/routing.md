@@ -17,6 +17,8 @@ This note covers how a request reaches Static Assets or the Worker ([ADR 0004](.
 
 `env.free` and `env.staging` inherit `assets`. If an env ever re-declares `assets`, it must keep `not_found_handling: "none"`.
 
+The same applies to `config/atmusic.workers.example.jsonc`, the self-hosting template that operators copy over `worker/wrangler.jsonc`. `scripts/check-bundle.ts` refuses any config whose resolved `assets.not_found_handling` (top level, or a named env that re-declares `assets`) is set to anything other than `"none"`, so a deploy never runs with the platform SPA fallback.
+
 ## Which code answers which request
 
 | Request | Answered by |
