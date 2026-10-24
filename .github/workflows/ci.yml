@@ -47,5 +47,10 @@ jobs:
           .venv/bin/python -m pip install -r api/requirements-contracts.txt
       - name: Install locked dependencies
         run: npm ci
+      - name: Install pinned actionlint (checked by the TypeScript gate)
+        run: |
+          # go install verifies the module against sum.golang.org.
+          GOBIN="$RUNNER_TEMP/bin" go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - name: TypeScript gate
         run: bash scripts/check-ts.sh

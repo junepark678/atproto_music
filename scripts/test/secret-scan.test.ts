@@ -6,9 +6,14 @@
 // file under docs/ must contain no credential-shaped value: no PEM private
 // key, JWT or provider token, no long random value assigned to a key, token,
 // secret or password name, no literal piped into `wrangler secret put` and no
-// literal bearer token. Placeholders (empty values, `<…>`, `$VAR`,
-// `$(openssl rand -hex 32)`) are allowed. The scanner itself is proven by
-// negative controls built at runtime, so this file holds no such literal.
+// literal bearer token. As in the Rust oracle (crates/server/tests/
+// deployment.rs `secret_example_scan`), any word of exactly 64 hex digits
+// (a line split on non-hex characters) is a literal 32-byte secret, whatever
+// surrounds it. The only exception is DIGEST_RECORDS: historical
+// verification records that are not operator examples, where a 64-hex word is
+// allowed only as a labelled digest. Placeholders (empty values, `<…>`,
+// `$VAR`, `$(openssl rand -hex 32)`) are allowed. The scanner itself is proven
+// by negative controls built at runtime, so this file holds no such literal.
 
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
@@ -48,6 +53,41 @@ const RULES: readonly { rule: string; pattern: RegExp }[] = [
   },
 ];
 
+/**
+ * Files whose 64-hex words are documented non-secret SHA-256 digests (release
+ * and verification evidence of the Rust candidate, retrieved-spec digests).
+ * None is an operator example or a doc that tells anyone to set a secret. In
+ * them a 64-hex word is still flagged unless it is labelled: `manifest` files
+ * map repository paths to digests (`"path.ext": "<hex>"`), and `labelled`
+ * files name the digest (SHA-256, sha256, artifact) on the same or the
+ * previous line.
+ */
+const DIGEST_RECORDS: Readonly<Record<string, 'manifest' | 'labelled'>> = {
+  'docs/VALIDATION.md': 'labelled',
+  'docs/adr/0002-oauth.md': 'labelled',
+  'docs/benchmarks/read_models.json': 'labelled',
+  'docs/benchmarks/read_models.md': 'labelled',
+  'docs/verification/backend-candidate.json': 'labelled',
+  'docs/verification/backend-production-inputs.json': 'manifest',
+  'docs/verification/backend.md': 'labelled',
+  'docs/verification/live-evidence.json': 'labelled',
+};
+const DIGEST_LABEL = /sha-?256|artifact/i;
+const MANIFEST_LINE = /^\s*"[A-Za-z0-9_./-]+\.[A-Za-z]+": "[0-9a-f]{64}",?$/;
+
+/** Words of exactly 64 hex digits, split on non-hex characters as the oracle does. */
+function hex64Words(line: string): string[] {
+  return (line.match(/[0-9A-Fa-f]+/g) ?? []).filter((word) => word.length === 64);
+}
+
+function allowedDigest(file: string, lines: readonly string[], index: number): boolean {
+  const kind = DIGEST_RECORDS[file];
+  const line = lines[index] ?? '';
+  if (kind === 'manifest') return MANIFEST_LINE.test(line);
+  if (kind === 'labelled') return DIGEST_LABEL.test(line) || DIGEST_LABEL.test(lines[index - 1] ?? '');
+  return false;
+}
+
 /** A value that looks like key material rather than a placeholder, word, path or URL. */
 function credentialShaped(value: string): boolean {
   const v = value.replace(/^["']|["']$/g, '');
@@ -68,6 +108,9 @@ function scanText(file: string, text: string): Finding[] {
   lines.forEach((line, index) => {
     for (const { rule, pattern } of RULES) {
       if (pattern.test(line)) findings.push({ file, line: index + 1, rule });
+    }
+    if (hex64Words(line).length > 0 && !allowedDigest(file, lines, index)) {
+      findings.push({ file, line: index + 1, rule: 'hex-64' });
     }
     for (const match of line.matchAll(ASSIGNMENT)) {
       const value = match[2] ?? '';
@@ -128,6 +171,44 @@ describe('scripts/test/secret-scan.test.ts', () => {
       const rules = scanText('sample', sample).map((f) => f.rule);
       expect(rules, `${rule} sample: ${sample.slice(0, 20)}…`).toContain(rule);
     }
+    // The oracle's rule: a 64-hex word is a literal secret wherever it sits,
+    // with or without a secret-shaped name, in either case, and even when a
+    // line calls it a digest outside the digest records.
+    const bareHex = [
+      hex,
+      hex.toUpperCase(),
+      `CURSOR_KEY value ${hex}`,
+      `wrangler secret put CURSOR_KEY <<< ${hex}`,
+      `bundle sha256 ${hex}`,
+      `\`${hex}\``,
+      `x${hex}`, // x is not a hex digit, so the word is still 64 long
+    ];
+    for (const sample of bareHex) {
+      expect(
+        scanText('docs/deployment.md', sample).map((f) => f.rule),
+        sample.slice(0, 24),
+      ).toContain('hex-64');
+    }
+    // Exactly 64, as the oracle: 63 or 65 digits are not this rule's match.
+    expect(scanText('docs/deployment.md', hex.slice(1))).toEqual([]);
+    expect(scanText('docs/deployment.md', `a${hex}`)).toEqual([]);
+    // The digest records allow only labelled digests: an unlabelled 64-hex
+    // word in one of them is still flagged.
+    expect(scanText('docs/VALIDATION.md', `- Archive SHA256: \`${hex}\``)).toEqual([]);
+    expect(scanText('docs/adr/0002-oauth.md', `The text has SHA-256\n\`${hex}\`.`)).toEqual([]);
+    expect(
+      scanText('docs/verification/backend-production-inputs.json', `  "crates/core/src/lib.rs": "${hex}",`),
+    ).toEqual([]);
+    for (const [file, sample] of [
+      ['docs/VALIDATION.md', `CURSOR_KEY ${hex}`],
+      ['docs/adr/0002-oauth.md', `Some text\n${hex}`],
+      ['docs/verification/backend-production-inputs.json', `  "CURSOR_KEY": "${hex}",`],
+    ] as const) {
+      expect(
+        scanText(file, sample).map((f) => f.rule),
+        `${file}: ${sample.slice(0, 12)}`,
+      ).toContain('hex-64');
+    }
     const placeholders = [
       'CURSOR_KEY=',
       'CURSOR_KEY=<64 hex characters from openssl rand -hex 32>',
@@ -137,7 +218,7 @@ describe('scripts/test/secret-scan.test.ts', () => {
       'Authorization: Bearer <ADMIN_TOKEN>',
       'cursorKey: CryptoKey',
       'signingKey: did:key:zQ3shokFTS3brHcDQrn82RUDfCZESWL1ZdCEJwekUDPQiYBme',
-      `bundle sha256 ${hex}`,
+      'bundle sha256 <64 hex digits printed by check-bundle>',
       'commit 8e158427716087b12e03cde41aaf225bb66ca0b8',
       'CURSOR_KEY (required, at least 32 bytes) and ADMIN_TOKEN (optional)',
     ];
@@ -150,6 +231,22 @@ describe('scripts/test/secret-scan.test.ts', () => {
     expect(files.length).toBeGreaterThan(20);
     const findings = files.flatMap((file) => scanText(file, readFileSync(join(ROOT, file), 'utf8')));
     expect(findings).toEqual([]);
+    // Every digest record is a scanned file, and none is an operator example
+    // or a doc this package rewrote for operators.
+    for (const record of Object.keys(DIGEST_RECORDS)) expect(files).toContain(record);
+    for (const operatorFile of [
+      'worker/.dev.vars.example',
+      '.env.example',
+      'config/atmusic.env.example',
+      'README.md',
+      'docs/deployment.md',
+      'docs/backup.md',
+      'docs/operations.md',
+      'docs/workers.md',
+      'docs/releases.md',
+    ]) {
+      expect(DIGEST_RECORDS[operatorFile], operatorFile).toBeUndefined();
+    }
 
     // worker/.dev.vars.example names the secrets with empty values only.
     const devVars = readFileSync(join(ROOT, 'worker/.dev.vars.example'), 'utf8');

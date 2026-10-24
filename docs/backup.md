@@ -21,7 +21,7 @@ npx tsx scripts/admin/pitr-restore.ts --at 2026-01-15T11:00:00Z --yes          #
 npx tsx scripts/admin/pitr-restore.ts --at 2026-01-15T11:00:00Z --env staging --yes
 ```
 
-`--at` takes ISO-8601 with a timezone or epoch milliseconds; it must be within the last 30 days and not in the future (the Worker re-checks: 422 `fields.atMs`). The origin is `--origin`, else `PUBLIC_ORIGIN`, else the env's `PUBLIC_ORIGIN` in `worker/wrangler.jsonc`. Exit status 0 means scheduled (202 with the bookmark), 1 means the Worker refused (404: no `ADMIN_TOKEN` on that Worker; 401: wrong token; 422: out of range), 2 means a usage or configuration error and nothing was sent.
+`--at` takes ISO-8601 with a timezone or epoch milliseconds; it must be within the last 30 days and not in the future (the Worker re-checks: 422 `fields.atMs`). An explicit `--env` always targets that env's `PUBLIC_ORIGIN` in `worker/wrangler.jsonc`, and the tool refuses (status 2, nothing sent) when an ambient `PUBLIC_ORIGIN` or an `--origin` names a different origin. Without `--env` the origin is `--origin`, else `PUBLIC_ORIGIN`, else production's `PUBLIC_ORIGIN`. The resolved env and origin are printed before anything is sent. Exit status 0 means scheduled (202 with the bookmark), 1 means the Worker refused (404: no `ADMIN_TOKEN` on that Worker; 401: wrong token; 422: out of range), 2 means a usage or configuration error and nothing was sent.
 
 After a restore:
 

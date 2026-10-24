@@ -9,8 +9,10 @@
 //   override deploy.sh documents); every stub call is logged, so the tests
 //   assert which wrangler commands ran. Nothing touches the network.
 // - `actionlint .github/workflows/deploy.yml` uses an installed actionlint
-//   (ACTIONLINT, PATH or $GOPATH/bin); without one that test is reported as
-//   skipped, never as passed.
+//   (ACTIONLINT, PATH or $GOPATH/bin), pinned at ACTIONLINT_VERSION. The test
+//   fails when it is missing or a different version, so the gate can never
+//   report it as passed without running it (the CI ts job and deploy.yml
+//   install it with `go install …@v1.7.7`, checksum-verified by sum.golang.org).
 // - `npx tsx scripts/admin/pitr-restore.ts` runs as a CLI and through `main`
 //   with a counting fake fetch and the frozen clock 2026-01-15T12:00:00Z.
 
@@ -368,13 +370,24 @@ function findActionlint(): string | null {
 }
 
 const ACTIONLINT = findActionlint();
+/** The pinned actionlint, as installed by the ts job in ci.yml and by deploy.yml. */
+const ACTIONLINT_VERSION = 'v1.7.7';
 
 /** A GitHub Actions expression, `${{ expr }}`. */
 const gh = (expr: string): string => `\${{ ${expr} }}`;
 
 describe('actionlint .github/workflows/deploy.yml', () => {
-  it.skipIf(ACTIONLINT === null)('workflow is valid', () => {
+  it('workflow is valid', () => {
+    // A missing actionlint is a failure, never a skip.
+    expect(
+      ACTIONLINT,
+      `actionlint not found (ACTIONLINT, PATH, $GOBIN or $GOPATH/bin); install it with: go install github.com/rhysd/actionlint/cmd/actionlint@${ACTIONLINT_VERSION}`,
+    ).not.toBeNull();
     const actionlint = ACTIONLINT as string;
+    const version = run(actionlint, ['-version'], ROOT, {});
+    expect(version.status, version.stderr).toBe(0);
+    // `go install` builds print v1.7.7; release binaries print 1.7.7.
+    expect(version.stdout.split('\n')[0]?.replace(/^v/, '')).toBe(ACTIONLINT_VERSION.slice(1));
     const workflow = join(ROOT, '.github', 'workflows', 'deploy.yml');
     const ok = run(actionlint, ['-no-color', workflow], ROOT, {});
     expect(ok.status, ok.stdout + ok.stderr).toBe(0);
@@ -574,5 +587,70 @@ describe('npx tsx scripts/admin/pitr-restore.ts --help', () => {
       expect(h.err.join('\n')).toContain(text);
       expect(h.err.join('\n')).not.toContain(TOKEN);
     }
+  });
+
+  it('an explicit --env is never overridden by an ambient PUBLIC_ORIGIN', async () => {
+    const STAGING = 'https://music-staging.214510.xyz';
+    const accepted = () => new Response(JSON.stringify({ bookmark: 'bm-s', atMs: 0, restart: true }), { status: 202 });
+    const at = ['--at', '2026-01-15T11:00:00Z'];
+
+    // The CLI: PUBLIC_ORIGIN=production with --env staging refuses with
+    // status 2 and prints no request line (the reviewer's reproduction, which
+    // previously printed `POST https://music.214510.xyz/internal/admin/pitr`).
+    const cli = run(
+      process.execPath,
+      [TSX_CLI, 'scripts/admin/pitr-restore.ts', ...at, '--env', 'staging', '--dry-run'],
+      ROOT,
+      { ADMIN_TOKEN: TOKEN, PUBLIC_ORIGIN: ORIGIN },
+    );
+    expect(cli.status, cli.stdout + cli.stderr).toBe(2);
+    expect(cli.stdout).not.toContain('POST');
+    expect(cli.stderr).toContain(`PUBLIC_ORIGIN ${ORIGIN} in the environment disagrees with --env staging`);
+
+    // In process with --yes: the same conflict sends nothing.
+    const conflict = pitrHarness(accepted);
+    expect(
+      await pitrMain(
+        [...at, '--env', 'staging', '--yes'],
+        { ADMIN_TOKEN: TOKEN, PUBLIC_ORIGIN: ORIGIN },
+        conflict.deps,
+      ),
+    ).toBe(2);
+    expect(conflict.calls).toHaveLength(0);
+    expect(conflict.out.join('\n')).not.toContain('POST');
+
+    // --origin naming another origin than --env is refused too.
+    const flagConflict = pitrHarness(accepted);
+    expect(
+      await pitrMain(
+        [...at, '--env', 'staging', '--origin', ORIGIN, '--yes'],
+        { ADMIN_TOKEN: TOKEN },
+        flagConflict.deps,
+      ),
+    ).toBe(2);
+    expect(flagConflict.calls).toHaveLength(0);
+    expect(flagConflict.err.join('\n')).toContain(`--origin ${ORIGIN} disagrees with --env staging`);
+
+    // --env staging alone, or with an agreeing PUBLIC_ORIGIN (trailing slash
+    // ignored), resolves to staging: the target is printed, then one POST.
+    for (const env of [{ ADMIN_TOKEN: TOKEN }, { ADMIN_TOKEN: TOKEN, PUBLIC_ORIGIN: `${STAGING}/` }]) {
+      const h = pitrHarness(accepted);
+      expect(await pitrMain([...at, '--env', 'staging', '--yes'], env, h.deps)).toBe(0);
+      expect(h.calls.map((c) => c.url)).toEqual([`${STAGING}/internal/admin/pitr`]);
+      expect(h.out[0]).toBe(`pitr-restore: target env staging origin ${STAGING}`);
+    }
+
+    // Without --env, PUBLIC_ORIGIN is still the default, and the printed
+    // target says so.
+    const ambient = pitrHarness(accepted);
+    expect(await pitrMain([...at, '--yes'], { ADMIN_TOKEN: TOKEN, PUBLIC_ORIGIN: `${STAGING}` }, ambient.deps)).toBe(0);
+    expect(ambient.calls.map((c) => c.url)).toEqual([`${STAGING}/internal/admin/pitr`]);
+    expect(ambient.out[0]).toBe(`pitr-restore: target env (PUBLIC_ORIGIN) origin ${STAGING}`);
+
+    // Without either, production's configured origin.
+    const dflt = pitrHarness(accepted);
+    expect(await pitrMain([...at, '--yes'], { ADMIN_TOKEN: TOKEN }, dflt.deps)).toBe(0);
+    expect(dflt.calls.map((c) => c.url)).toEqual([`${ORIGIN}/internal/admin/pitr`]);
+    expect(dflt.out[0]).toBe(`pitr-restore: target env production origin ${ORIGIN}`);
   });
 });

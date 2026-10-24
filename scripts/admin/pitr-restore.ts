@@ -10,9 +10,14 @@
 //   of shell history and process listings). It must be the Worker's
 //   ADMIN_TOKEN secret: the admin routes exist only while it is set, and are a
 //   404 otherwise. The token is never printed.
-// - The origin is --origin, else PUBLIC_ORIGIN, else the env's PUBLIC_ORIGIN in
-//   worker/wrangler.jsonc. It must be an https origin, or an http loopback
-//   origin for a local `wrangler dev`.
+// - The origin: an explicit --env always resolves to that env's PUBLIC_ORIGIN
+//   in worker/wrangler.jsonc, and an ambient PUBLIC_ORIGIN or an --origin that
+//   names a different origin is refused (status 2), so a stray variable can
+//   never redirect a restore meant for staging to production. Without --env
+//   the origin is --origin, else PUBLIC_ORIGIN, else production's
+//   PUBLIC_ORIGIN. It must be an https origin, or an http loopback origin for
+//   a local `wrangler dev`. The resolved env and origin are printed before
+//   anything is sent.
 // - --at must lie within the last 30 days (the DO PITR window) and not in the
 //   future; the Worker re-checks this (422 `fields.atMs`).
 // - The restore replaces the whole index with its state at that instant and
@@ -50,8 +55,9 @@ POST /internal/admin/pitr. The IndexDO restarts into its state at --at.
 
   --at <time>     restore point: ISO-8601 with a timezone (2026-01-15T11:00:00Z)
                   or epoch milliseconds; within the last 30 days, not in the future
-  --env <env>     wrangler env whose PUBLIC_ORIGIN is used (default production)
-  --origin <url>  explicit origin (overrides PUBLIC_ORIGIN and --env)
+  --env <env>     wrangler env whose PUBLIC_ORIGIN is used (default production);
+                  refused when PUBLIC_ORIGIN or --origin names another origin
+  --origin <url>  explicit origin (without --env: overrides PUBLIC_ORIGIN)
   --dry-run       print the request without sending it
   --yes           send it (required: the restore replaces the whole index)
   --help          this text
@@ -59,7 +65,7 @@ POST /internal/admin/pitr. The IndexDO restarts into its state at --at.
 Environment:
   ADMIN_TOKEN     required; the Worker's ADMIN_TOKEN secret (at least ${MIN_ADMIN_TOKEN_CHARS} characters).
                   The admin routes exist only while that secret is set.
-  PUBLIC_ORIGIN   optional default origin
+  PUBLIC_ORIGIN   optional default origin when --env is not given
 `;
 
 export interface PitrDeps {
@@ -77,6 +83,8 @@ interface Args {
   help: boolean;
   at: string | null;
   env: 'production' | 'staging' | 'free';
+  /** --env was given on the command line. */
+  envExplicit: boolean;
   origin: string | null;
   config: string;
   dryRun: boolean;
@@ -88,6 +96,7 @@ function parseArgs(argv: readonly string[]): Args {
     help: false,
     at: null,
     env: 'production',
+    envExplicit: false,
     origin: null,
     config: DEFAULT_WRANGLER_CONFIG,
     dryRun: false,
@@ -115,8 +124,11 @@ function parseArgs(argv: readonly string[]): Args {
         if (flag === '--at') args.at = value;
         else if (flag === '--origin') args.origin = value;
         else if (flag === '--config') args.config = resolve(value);
-        else if (value === 'production' || value === 'staging' || value === 'free') args.env = value;
-        else throw new UsageError(`--env must be production, staging or free (got ${value})`);
+        else if (value === 'production' || value === 'staging' || value === 'free') {
+          if (args.envExplicit && args.env !== value) throw new UsageError('--env given twice with different values');
+          args.env = value;
+          args.envExplicit = true;
+        } else throw new UsageError(`--env must be production, staging or free (got ${value})`);
         i++;
         break;
       default:
@@ -137,17 +149,53 @@ export function parseAt(value: string): number {
   return ms;
 }
 
-function originFor(args: Args, env: NodeJS.ProcessEnv, deps: PitrDeps): string {
-  let origin = args.origin ?? env.PUBLIC_ORIGIN ?? '';
-  if (origin === '') {
-    const config = (deps.readConfig ?? readJsonc)(args.config);
-    origin = wranglerEnvSection(config, args.env).vars.PUBLIC_ORIGIN ?? '';
+const trimOrigin = (value: string): string => value.replace(/\/+$/, '');
+
+interface Target {
+  /** The wrangler env the origin came from, or null for an --origin/PUBLIC_ORIGIN override. */
+  env: Args['env'] | null;
+  origin: string;
+}
+
+function configOrigin(args: Args, deps: PitrDeps): string {
+  const config = (deps.readConfig ?? readJsonc)(args.config);
+  return trimOrigin(wranglerEnvSection(config, args.env).vars.PUBLIC_ORIGIN ?? '');
+}
+
+/**
+ * The restore target. An explicit --env is authoritative: its configured
+ * origin is used, and a PUBLIC_ORIGIN or --origin naming another origin is a
+ * usage error rather than silently winning.
+ */
+function targetFor(args: Args, env: NodeJS.ProcessEnv, deps: PitrDeps): Target {
+  const ambient = trimOrigin(env.PUBLIC_ORIGIN ?? '');
+  const flag = args.origin === null ? null : trimOrigin(args.origin);
+  let target: Target;
+  if (args.envExplicit) {
+    const origin = configOrigin(args, deps);
+    if (origin === '') throw new UsageError(`wrangler env ${args.env} has no PUBLIC_ORIGIN`);
+    if (flag !== null && flag !== origin) {
+      throw new UsageError(`--origin ${flag} disagrees with --env ${args.env} (PUBLIC_ORIGIN ${origin}); refusing`);
+    }
+    if (ambient !== '' && ambient !== origin) {
+      throw new UsageError(
+        `PUBLIC_ORIGIN ${ambient} in the environment disagrees with --env ${args.env} (PUBLIC_ORIGIN ${origin}); unset it or drop --env`,
+      );
+    }
+    target = { env: args.env, origin };
+  } else if (flag !== null) {
+    target = { env: null, origin: flag };
+  } else if (ambient !== '') {
+    target = { env: null, origin: ambient };
+  } else {
+    target = { env: args.env, origin: configOrigin(args, deps) };
   }
-  origin = origin.replace(/\/+$/, '');
-  if (!isHttpsOrigin(origin) && !isLoopbackOrigin(origin)) {
-    throw new UsageError(`origin ${origin || '(empty)'} must be an https origin (or http loopback for wrangler dev)`);
+  if (!isHttpsOrigin(target.origin) && !isLoopbackOrigin(target.origin)) {
+    throw new UsageError(
+      `origin ${target.origin || '(empty)'} must be an https origin (or http loopback for wrangler dev)`,
+    );
   }
-  return origin;
+  return target;
 }
 
 async function errorSummary(res: Response): Promise<string> {
@@ -189,14 +237,18 @@ export async function main(argv: readonly string[], env: NodeJS.ProcessEnv, deps
     if (args.at === null) throw new UsageError('--at is required');
     if (args.dryRun && args.yes) throw new UsageError('--dry-run and --yes are exclusive');
     const atMs = parseAt(args.at);
+    // The target first: a conflicting env/origin is refused whatever --at is.
+    const target = targetFor(args, env, deps);
     const now = deps.nowMs();
     if (!Number.isSafeInteger(atMs) || atMs > now || atMs < now - PITR_WINDOW_MS) {
       throw new UsageError(
         `--at ${new Date(atMs).toISOString()} is outside the restore window [${new Date(now - PITR_WINDOW_MS).toISOString()}, ${new Date(now).toISOString()}]`,
       );
     }
-    const origin = originFor(args, env, deps);
-    const url = `${origin}${PITR_PATH}`;
+    const source =
+      target.env !== null ? `env ${target.env}` : args.origin !== null ? 'env (--origin)' : 'env (PUBLIC_ORIGIN)';
+    deps.out(`pitr-restore: target ${source} origin ${target.origin}`);
+    const url = `${target.origin}${PITR_PATH}`;
     const body = JSON.stringify({ atMs });
     deps.out(`pitr-restore: POST ${url} ${body} (restore point ${new Date(atMs).toISOString()})`);
     if (args.dryRun) {
