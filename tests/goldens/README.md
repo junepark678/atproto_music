@@ -64,8 +64,12 @@ All keys here are **fixed, public and test-only**. Never use them outside fixtur
 - **CommitMismatch.** Rust has a single `CommitMismatch` error. The manifest's `corruption`
   field tells `did_mismatch`, `bad_version` and `bad_rev` apart.
 - **`record_cid_swap`.** The CAR carries a correctly hashed but different record block in place
-  of the CID that the signed MST commits to. Rust reports this as `MissingProof`, and the
-  TypeScript code is `record_cid_mismatch`.
+  of the CID that the signed MST commits to. The proven CID therefore has no block in the CAR,
+  which a verifier cannot tell apart from a missing record block plus an unreferenced extra
+  block. Rust reports `MissingProof`, and the TypeScript code is `missing_block` (ADR 0004 §7.3
+  step 3: an incomplete path throws `missing_block`). `record_cid_mismatch` cannot be produced
+  from a CAR, because only CID-verified blocks enter the proof store. W2-03 covers it with its
+  own unit case (`record-proof.test.ts`), not with a golden CAR.
 - **Rev syntax.** Rust checks TID syntax only in `verify_snapshot`, so the corruptions are applied
   to the full-repo CAR. They all touch the commit, the MST root node or the r01 record, which
   keeps them on the r01 proof path.

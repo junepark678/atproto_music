@@ -865,12 +865,12 @@ async fn curve_cases(curve: &'static str) -> Vec<Case> {
         "corruption",
         base,
         Some("record_cid_swap"),
-        "The r01 record block is replaced by a different, correctly hashed record block (track 'Jóga (swapped)'); the signed MST still commits to the original r01 CID, whose block is now absent.",
+        "The r01 record block is replaced by a different, correctly hashed record block (track 'Jóga (swapped)'); the signed MST still commits to the original r01 CID, whose block is now absent. The swapped block is indistinguishable from an unreferenced extra block, so the verdict is missing_block (ADR 0004 §7.3 step 3: an incomplete path throws missing_block); record_cid_mismatch is not reachable from a CAR because only CID-verified blocks enter the store, so W2-03 covers it with its own unit case.",
         "verify_snapshot",
         INCLUSION_PATH,
         Some(record_cid),
         corrupt(swap),
-        (Some("record_cid_mismatch"), None),
+        (Some("missing_block"), None),
         Some("MissingProof"),
     );
 
@@ -1105,7 +1105,7 @@ async fn signed_cars() -> (Vec<(String, Vec<u8>)>, Value) {
             "InvalidMst": "mst_invalid",
             "InvalidCar": "car_malformed",
             "CarTooLarge": "car_too_large",
-            "MissingProof": "missing_block (record_cid_mismatch when the CAR carries a different record block in place of the proven CID)",
+            "MissingProof": "missing_block (including record_cid_swap: the proven CID has no block in the CAR)",
             "CommitMismatch": "did_mismatch | bad_version | bad_rev (Rust has one variant; the corruption field disambiguates)",
         },
         "notes": [

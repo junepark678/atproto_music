@@ -428,10 +428,10 @@
       "carRoot": "bafyreiaogsmc2pthv25ccwkud6iti6shyuy4222223olqlzrsufe4nbzom",
       "corruption": "record_cid_swap",
       "curve": "secp256k1",
-      "description": "The r01 record block is replaced by a different, correctly hashed record block (track 'Jóga (swapped)'); the signed MST still commits to the original r01 CID, whose block is now absent.",
+      "description": "The r01 record block is replaced by a different, correctly hashed record block (track 'Jóga (swapped)'); the signed MST still commits to the original r01 CID, whose block is now absent. The swapped block is indistinguishable from an unreferenced extra block, so the verdict is missing_block (ADR 0004 §7.3 step 3: an incomplete path throws missing_block); record_cid_mismatch is not reachable from a CAR because only CID-verified blocks enter the store, so W2-03 covers it with its own unit case.",
       "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
       "expected": {
-        "code": "record_cid_mismatch",
+        "code": "missing_block",
         "state": null,
         "verdict": "invalid"
       },
@@ -938,10 +938,10 @@
       "carRoot": "bafyreid26teomp223kn67jwnvot2n7efxokubazv2s5bmrwglnmi3auesi",
       "corruption": "record_cid_swap",
       "curve": "p256",
-      "description": "The r01 record block is replaced by a different, correctly hashed record block (track 'Jóga (swapped)'); the signed MST still commits to the original r01 CID, whose block is now absent.",
+      "description": "The r01 record block is replaced by a different, correctly hashed record block (track 'Jóga (swapped)'); the signed MST still commits to the original r01 CID, whose block is now absent. The swapped block is indistinguishable from an unreferenced extra block, so the verdict is missing_block (ADR 0004 §7.3 step 3: an incomplete path throws missing_block); record_cid_mismatch is not reachable from a CAR because only CID-verified blocks enter the store, so W2-03 covers it with its own unit case.",
       "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
       "expected": {
-        "code": "record_cid_mismatch",
+        "code": "missing_block",
         "state": null,
         "verdict": "invalid"
       },
@@ -1050,7 +1050,7 @@
     "InvalidCar": "car_malformed",
     "InvalidMst": "mst_invalid",
     "InvalidSignature": "bad_signature",
-    "MissingProof": "missing_block (record_cid_mismatch when the CAR carries a different record block in place of the proven CID)"
+    "MissingProof": "missing_block (including record_cid_swap: the proven CID has no block in the CAR)"
   },
   "source": "crates/atproto/examples/export_signed_cars.rs"
 }
