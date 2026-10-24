@@ -1,141 +1,116 @@
-# Run the implemented backend
+# Deploying atmusic on Cloudflare Workers
 
-The executable provides the SQLite-backed backend, embedded migrations and placeholder HTML. Backend modules have deterministic tests as recorded in [validation evidence](VALIDATION.md). This deployment guide does not close the M6 backend acceptance gate: live external-PDS sign-in, publication, independently verified relay ingestion and the full packaged journey remain pending. The Preact product is not packaged yet.
+atmusic is one Worker (`atmusic`) with one SQLite-backed Durable Object (`IndexDO`, a single instance), Workers Static Assets for the SPA, one cron trigger (`*/5 * * * *`) and one required secret (`CURSOR_KEY`). There is no server, database service, reverse proxy, encryption key or OAuth credential to operate: the browser SPA is the OAuth client and writes to each user's own PDS ([ADR 0004](adr/0004-cloudflare-workers.md) §1, §9.2 A1–A3).
 
-Production `serve` starts outbox delivery and durable complete-repository backfills when an owned publication namespace is configured. The verifier authenticates an exact current revision and commit CID through fresh DID/PDS discovery and `getLatestCommit`, followed by signature/CAR/CID/MST verification. Account status and PDS location are checked around snapshot fetching; races retain retryable durable work. Missing ownership evidence keeps publication disabled (`503 outbox_not_ready`). Historical relay ingestion remains disabled until a covered-event progress/recovery policy is safe. Run this build as a backend candidate until the packaged and external acceptance gates are executed.
-
-## Build and inspect
-
-Use the pinned Rust 1.90.0 toolchain, a C compiler and `musl-tools` on Linux x86_64. The resulting executable needs neither a database service nor a Node runtime. Outbound HTTPS uses rustls with bundled public CA roots and requires working DNS; the reverse proxy manages the inbound HTTPS certificate.
-
-```sh
-bash scripts/check.sh
-cargo build --locked --release --target x86_64-unknown-linux-musl -p atmusic-server
-python3 scripts/smoke.py --static target/x86_64-unknown-linux-musl/release/atmusic
-python3 scripts/test_smoke.py
-```
-
-CI uploads `atmusic` and `atmusic.sha256`. Verify the checksum from the directory containing both files with `sha256sum -c atmusic.sha256`, then restore executable permissions with `chmod 755 atmusic` after extracting the CI artifact. `smoke.py --static` rejects an ELF interpreter or shared-library dependency, starts its own child from a temporary directory, checks initialized SQLite/HTTP and terminates that child. Its pass establishes packaging and startup; it does not establish live music interoperability.
-
-## Configure storage and origin
-
-Copy [`config/atmusic.env.example`](../config/atmusic.env.example) to a file accessible only to the service operator. The executable reads process environment variables and CLI flags; it does not automatically load `.env`.
-
-| Variable | Meaning |
+| Piece | Where it is configured |
 | --- | --- |
-| `ATMUSIC_TRUSTED_PROXY_CIDRS` | Optional comma-separated CIDRs for controlled reverse-proxy peers. Unset ignores all forwarded identity headers. Never trust all Internet addresses. |
-| `ATMUSIC_BIND` | Listener address; default `127.0.0.1:3000`. |
-| `ATMUSIC_DATABASE_PATH` | Persistent SQLite file; default `data/music.sqlite`. Parent directories are created during initialization. |
-| `ATMUSIC_PUBLIC_ORIGIN` | Required HTTPS origin, such as your public hostname, without credentials, path, query or fragment. OAuth callback and Origin checks use this exact origin. |
-| `ATMUSIC_TRUSTED_PROXY_CIDRS` | Optional comma-separated explicit IPv4/IPv6 proxy CIDRs. Disabled by default; only those socket peers may provide client forwarding information. |
-| `ATMUSIC_ENCRYPTION_KEY` | Required stable 32-byte key encoded as 64 hexadecimal characters; all-zero keys are rejected. Protect it separately from the database backup. |
-| `ATMUSIC_LEXICON_PREFIX` | Optional owned production NSID prefix. Keep unset until namespace ownership is recorded; reserved fixture namespaces never authorize real publication. |
-| `ATMUSIC_NAMESPACE_OWNER_DOMAIN` / `ATMUSIC_NAMESPACE_OWNERSHIP_REFERENCE` | Set both to the controlled reverse-domain and reviewable ownership evidence before production publication. |
-| `ATMUSIC_METRICS_BIND` | Separate metrics listener; default `127.0.0.1:0` selects a loopback port. Set `127.0.0.1:9091` for a stable local scrape port. |
-| `ATMUSIC_METRICS_TOKEN` | Required 64 hexadecimal characters when metrics binds outside loopback; send as a Bearer credential. Never expose the listener through the public proxy. |
-| `ATMUSIC_RELAY_URL` | Optional WSS or HTTPS relay URL without credentials or fragment. |
-| `RUST_LOG` | Tracing filter; `info` is suitable for normal startup and request diagnostics. |
+| Worker, DO binding and migration, cron, routes, vars | [`worker/wrangler.jsonc`](../worker/wrangler.jsonc) |
+| Secrets `CURSOR_KEY` (required), `ADMIN_TOKEN` (optional) | `wrangler secret put`, per environment |
+| OAuth client metadata and `_headers` (CSP) | generated at build time by `scripts/gen-config.ts` into `web/public`, copied into `web/dist` |
+| Deploy | [`scripts/deploy.sh`](../scripts/deploy.sh) locally, [`.github/workflows/deploy.yml`](../.github/workflows/deploy.yml) in CI |
 
-Generate the application key once with a secure random generator, for example `python3 -c 'import secrets; print(secrets.token_hex(32))'`, and place the result in the protected environment file. Preserve it when moving or restoring the instance. Replacing it invalidates derived session/CSRF material and prevents decryption of existing OAuth secrets. The database also contains private account/session state, so restrict access to its directory.
+This guide deploys the code. It does not close the live acceptance gates (OAuth on two independent PDSs, Jetstream coverage, the 24 h socket soak; W6-05), which are recorded per Worker version id.
 
-Run migrations without opening a listener:
+## Deployment values
 
-```sh
-./atmusic migrate --database-path /var/lib/atmusic/music.sqlite
-```
+The owner decided these on 2026-10-24 (ADR §15 Q3). They are build- and deploy-time configuration in `worker/wrangler.jsonc`, not code:
 
-Migrations are embedded in the executable and can be repeated. A database with a newer unsupported schema fails startup. `migrate` needs the database path only; `serve` validates the required origin/key before creating the database or binding HTTP.
+| Value | Production |
+| --- | --- |
+| `PUBLIC_ORIGIN` | `https://music.214510.xyz`, a custom domain on the owner's zone `214510.xyz` |
+| OAuth `client_id` | `https://music.214510.xyz/oauth/client-metadata.json`; it must never change once anyone has signed in |
+| `LEXICON_PREFIX` | `dev.pythonplayer123.music`: collections `dev.pythonplayer123.music.scrobble`, `.follow` and `.settings` |
+| NSID authority | `music.pythonplayer123.dev`, in the owner's zone `pythonplayer123.dev` |
+| Plan | Workers Paid (`PLAN=paid`, `INGEST_MODE=socket`) |
 
-For an interactive local run with a prepared `.env`:
+`com.example.atmusic` is the test fixture prefix. It must never be published: `gen-config.ts`, `check-bundle.ts` and `deploy.sh` all refuse it, as well as an empty prefix and any origin or prefix that differs from the env's vars in `worker/wrangler.jsonc`. Another operator copies [`config/atmusic.workers.example.jsonc`](../config/atmusic.workers.example.jsonc) over `worker/wrangler.jsonc` and replaces every example value with a domain and NSID prefix they own.
 
-```sh
-set -a
-. ./.env
-set +a
-./atmusic serve
-```
+## Environments
 
-CLI values such as `--bind` and `--database-path` override corresponding environment variables. The public origin remains HTTPS even when a local reverse proxy forwards to the loopback HTTP listener.
+`env.free` and `env.staging` are wrangler named environments. Each one deploys as its own Worker (`atmusic-free`, `atmusic-staging`), so each has its own Durable Object namespace (its own index), its own secrets, and, because the hostname differs, its own OAuth `client_id`.
 
-## Process supervision and HTTPS
+| Env | Worker | Origin | `PLAN` | `INGEST_MODE` | Use |
+| --- | --- | --- | --- | --- | --- |
+| production (top level) | `atmusic` | `https://music.214510.xyz` | `paid` | `socket` | the public service; Workers Paid |
+| `staging` | `atmusic-staging` | `https://music-staging.214510.xyz` | `free` | `pulse` | pre-release checks against the real network |
+| `free` | `atmusic-free` | `https://music-free.214510.xyz` | `free` | `pulse` | development and private hobby use on the Free plan |
 
-Run one process for each database; the bounded writer serializes SQLite mutations inside that process. A minimal systemd unit, after installing the binary and creating the `atmusic` service user and writable data directory, is:
+The staging and free hostnames are subdomains chosen for this deployment, not owner decisions; change them in `worker/wrangler.jsonc` before anyone signs in on those environments if the owner prefers others. `durable_objects` and `vars` are not inheritable in wrangler, so both named envs re-declare them; `limits` is cleared (`cpu_ms` is a Paid-only setting).
 
-```ini
-[Unit]
-Description=AT Protocol music backend
-After=network-online.target
-Wants=network-online.target
+## One-time setup
 
-[Service]
-User=atmusic
-Group=atmusic
-WorkingDirectory=/var/lib/atmusic
-EnvironmentFile=/etc/atmusic/atmusic.env
-ExecStart=/opt/atmusic/atmusic serve --bind 127.0.0.1:3000 --database-path /var/lib/atmusic/music.sqlite
-Restart=on-failure
-KillSignal=SIGTERM
-TimeoutStopSec=35
+1. **Account and plan.** Use the owner's Cloudflare account, which holds both zones. Subscribe it to Workers Paid before the first production deploy (see [Plan tier](#plan-tier)).
+2. **Custom domain.** Nothing is created by hand: the `routes` entry `{ "pattern": "music.214510.xyz", "custom_domain": true }` makes the first deploy attach the hostname to the Worker, create its DNS record and issue its certificate. A `*.workers.dev` URL or a route on a zone the owner does not control is not acceptable, because the `client_id` is derived from the origin and must never change.
+3. **NSID ownership.** Publish the `_lexicon.music.pythonplayer123.dev` TXT record that atproto lexicon resolution reads (`did=<the DID that publishes the lexicon schema records>`) in zone `pythonplayer123.dev`. Then set `NAMESPACE_OWNERSHIP_REF` in each env's vars to a reviewable reference to that record. Until it is set, `parseConfig` reports `publication: false`: ingestion of the decided collections runs, `/api/v1/meta` omits the `publication` capability and the SPA hides its write UI.
+4. **Secrets**, once per environment (add `--env staging` or `--env free` for those). Run them before the first deploy; `wrangler secret put` offers to create the Worker if it does not exist yet.
 
-[Install]
-WantedBy=multi-user.target
-```
+   ```sh
+   openssl rand -hex 32 | npx wrangler secret put CURSOR_KEY --config worker/wrangler.jsonc
+   # Optional: enables /internal/admin/{status,pitr,resnapshot}; at least 32 characters.
+   openssl rand -hex 32 | npx wrangler secret put ADMIN_TOKEN --config worker/wrangler.jsonc
+   npx wrangler secret list --config worker/wrangler.jsonc
+   ```
 
-Terminate HTTPS at your reverse proxy using a certificate for the configured public origin. For example, the relevant nginx server block is:
+   `CURSOR_KEY` is the HMAC application key for pagination cursors (at least 32 bytes, hex; derived exactly as `crates/core/src/cursor.rs`). Rotating it invalidates every outstanding cursor (clients get 400 `invalid_cursor` and restart their traversal) and nothing else. `ADMIN_TOKEN` is compared in constant time; keep it in a password manager, because `pitr-restore.ts` needs its value. Neither value is ever logged, and neither belongs in a file in the repository.
+5. **GitHub environments** (only for the workflow). Create environments named `production`, `staging` and `free`, each with required reviewers, the secret `CLOUDFLARE_API_TOKEN` and the variable `CLOUDFLARE_ACCOUNT_ID`. Create the token from the "Edit Cloudflare Workers" template, restricted to the owner's account and the `214510.xyz` zone.
+6. **First deploy.** A pending Durable Object migration (the v1 `IndexDO` class) cannot go through `wrangler versions upload`, so the first deploy of each environment uses `wrangler deploy`:
 
-```nginx
-server {
-    listen 443 ssl;
-    server_name music.example;
-    ssl_certificate /etc/letsencrypt/live/music.example/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/music.example/privkey.pem;
-    location / {
-        proxy_pass http://127.0.0.1:3000;
-        proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header X-Forwarded-Host $host;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Host $host;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    }
-}
-```
+   ```sh
+   bash scripts/deploy.sh --dry-run          # everything except the upload
+   bash scripts/deploy.sh --initial          # wrangler deploy; applies migration v1
+   ```
 
-Replace the example hostname and certificate paths with yours. Preserve request cookies, Origin and CSRF headers. Do not place private API responses in a proxy cache. Browser sessions use `Secure`, `HttpOnly`, `SameSite=Lax` cookies, so browser authentication must reach the public HTTPS origin.
+   or dispatch the workflow with `initial: true`. The IndexDO runs its schema migration in its constructor on first use, so there is no migrate step. The smoke test then expects `/health/ready` 200 and `/api/v1/meta` with the configured `lexiconPrefix` and a non-`scaffold` stage. Indexing starts `recovering`: the first Jetstream connection has no cursor, so gap recovery and relay discovery run (see [workers.md](workers.md)).
 
-Logout invalidates local sessions and stored OAuth tokens even if upstream revocation fails or the issuer offers no revocation endpoint. A DPoP nonce challenge permits one immediate retry; HTTP 500 and unsupported revocation do not schedule background retries or invent another endpoint. Local logout does not establish that the upstream issuer revoked the credential.
-
-`/health/live` reports process liveness. `/health/ready` reports 200 only while local storage/writer initialization is usable; a PDS/relay outage does not itself make local storage unready. `/api/v1/meta` reports the full API shape and begins with `indexing.state=recovering`, `caughtUp=false`; inspect it separately when evaluating federation progress. The root page continues to identify unimplemented music product features.
-
-With a configured relay, startup marks its durable connection as disconnected and its gap unresolved while relay delivery is disabled, preserving the prior sequence and event time. A restored `connected=true` row cannot establish that this process has a live stream. Completed current-head backfills do not make global relay indexing caught up.
-
-SIGINT or SIGTERM stops both API and metrics listeners, cancels owned workers while storage admission remains open for cleanup, then stops writer admission and drains requests/storage. One absolute 30-second deadline covers the complete sequence. An ordinary idle shutdown exits zero. A timeout or worker cleanup failure exits nonzero and reports unfinished writes, servers and workers. Committed outbox rows survive restart; an uncommitted in-memory closure is not a durable acknowledgement. Delivery and live recovery gates must be verified before claiming production backend acceptance.
-
-## Backup and acceptance status
-
-Use the [SQLite snapshot and restore commands](backup.md); preserve the encryption key separately. Back up before every upgrade, stop the service before changing the executable or migrating, and run migrations against the existing database. A failed migration must stop the upgrade: keep the original database and restore the pre-upgrade snapshot into a new directory with the previous executable. Never reset or delete the existing database automatically.
-
-M6 completion also requires dedicated test identities, an owned lexicon namespace, a public HTTPS callback and a configured relay covering independently operated PDS endpoints. Fixture passes and the packaged smoke cannot substitute for those gates. Record artifact checksum, test date, independently fetched record evidence and cleanup outcomes according to [TESTING.md](planning/TESTING.md).
-
-## Fresh install and upgrade
-
-Create a dedicated unprivileged service account. Install the verified executable under `/opt/atmusic/atmusic` with mode 755; create `/var/lib/atmusic` and `/etc/atmusic` owned by that account with mode 700. Copy `config/atmusic.env.example` to `/etc/atmusic/atmusic.env`, fill the required origin and newly generated key, and set mode 600. Keep a protected copy of the key outside the data directory. Run the migration command above as the service account, then start the supervisor and check `/health/ready` plus `/api/v1/meta`.
-
-For an upgrade, preserve the previous executable and run:
+## Routine deploys
 
 ```sh
-/opt/atmusic/atmusic backup --database-path /var/lib/atmusic/music.sqlite --output /secure-backups/before-upgrade.sqlite
-systemctl stop atmusic
-# Install the verified candidate executable, retaining the previous executable.
-/opt/atmusic/atmusic migrate --database-path /var/lib/atmusic/music.sqlite
-# Continue only if migration exits zero.
-systemctl start atmusic
-curl --fail http://127.0.0.1:3000/health/ready
-curl --fail http://127.0.0.1:3000/api/v1/meta
+bash scripts/deploy.sh --dry-run                 # preflight, gen-config, vite build, wrangler deploy --dry-run
+bash scripts/deploy.sh                           # the full deploy (production)
+bash scripts/deploy.sh --env staging             # a named env
 ```
 
-The snapshot output must be new and its parent directory must exist with restricted access. On a migration failure, leave the service stopped and preserve the failed database for diagnosis. Use `restore` to create a separate recovery directory from the snapshot, retain the original key, and point the previous executable at that restored file. A restart with the same data and key preserves persisted history, operation queue and sessions.
+`deploy.sh` runs, in order:
 
-The configured public HTTPS origin always controls OAuth URLs, Origin/CSRF checks and secure cookies. Forwarding is disabled by default. To separate anonymous client quotas behind the nginx example, explicitly set `ATMUSIC_TRUSTED_PROXY_CIDRS=127.0.0.1/32` (or `--trusted-proxy-cidrs`); add only the actual proxy addresses, including `::1/128` if it connects over IPv6. The configuration accepts at most 32 IPv4/IPv6 CIDRs and fails before storage/listeners on invalid values.
+0. **Preflight**, before anything is written or uploaded. It refuses (exit 1, every problem listed):
+   - an empty, invalid or fixture `LEXICON_PREFIX`, a non-https `PUBLIC_ORIGIN`, a route off the origin's host, or `PUBLIC_ORIGIN`/`LEXICON_PREFIX` environment overrides that differ from the env's vars;
+   - a Worker without the `CURSOR_KEY` secret, as `wrangler secret list` reports it (names only; secret values are never read), or secrets that cannot be listed.
+1. `bash scripts/check-ts.sh`, the repository gate (skipped by `--dry-run` and `--skip-checks`).
+2. `npx tsx scripts/gen-config.ts --env <env>`: `web/public/oauth/client-metadata.json` and `web/public/_headers`.
+3. `npm run build:web` (`vite build` into `web/dist`).
+4. `npx tsx scripts/check-bundle.ts --env <env> --release`: runs `wrangler deploy --dry-run --outdir worker/dist`, refuses a bundle that contains test seams (`test-support`, `fixedClock`, the fixture transport, `node:crypto`) or exceeds 3 MiB gzip, refuses built assets whose metadata or headers differ from the configured origin and prefix, and prints the bundle SHA-256.
+5. `wrangler versions upload`, recording the Worker version id (with `--initial`: `wrangler deploy`).
+6. `wrangler versions deploy <id>@100% --yes`.
+7. The smoke test: `GET /health/live`, `/health/ready` and `/api/v1/meta` on the origin, with retries.
 
-Only a socket peer in those CIDRs may supply `X-Forwarded-*`. The proxy must replace proto/host and append the actual connecting client to `X-Forwarded-For`. The server requires one `https` proto header and one host matching the configured public origin, then walks at most 16 IP hops from right to left and selects the first untrusted address. This prevents a client-supplied leftmost address from defeating the quota. Invalid, duplicate, oversized or inconsistent headers fall back to the socket peer. RFC `Forwarded` headers do not override this policy. Without trusted CIDRs, anonymous requests through a proxy share its 120-read/minute quota. Authenticated mutations are limited to 60 per user/minute and request bodies to 64 KiB. Do not publish the separate metrics listener in the public nginx location.
+Every wrangler command takes `--config worker/wrangler.jsonc` and, for a named env, `--env <env>`. `WRANGLER` may name another wrangler executable; it authenticates with `CLOUDFLARE_API_TOKEN` or a prior `wrangler login`. A real deploy writes `work/deploy/<env>-<version id>.json` with the env, origin, prefix, version id, bundle SHA-256 and commit: the release evidence of A19, which replaces the old musl artifact checksum. `bash scripts/deploy.sh --preflight` and `--smoke-only` run those steps alone.
+
+The workflow (`Deploy Worker`, manual dispatch only) runs the same steps in the environment-protected job, with the version id and bundle SHA-256 in the job summary. It never sets Worker secrets.
+
+## Rollback and failed upgrades
+
+- **Code.** `npx wrangler rollback --config worker/wrangler.jsonc [--env <env>]`, or `wrangler versions deploy <previous id>@100%`. The version ids are in the deploy evidence and `wrangler versions list`.
+- **Storage is not rolled back with code.** Schema migrations are forward-only. A version older than the stored schema keeps answering `/health/ready` with 503 (`too_new`) and `meta.stage: scaffold` instead of reading a schema it does not know. A migration that fails rolls back completely inside its `transactionSync`, leaving the previous schema version.
+- **Bad data after a bad version.** Restore the IndexDO to a point before it with Durable Object point-in-time recovery, or rebuild from the network; see [backup.md](backup.md).
+
+## Plan tier
+
+Workers Paid ($5/month minimum) is required for production (ADR §11, §15 Q4):
+
+- the always-on Jetstream socket (`INGEST_MODE=socket`) keeps the one DO resident at about 332k GB-s/month, inside Paid's 400k included, but close to the Free plan's 13k GB-s/day;
+- `PLAN=paid` sets the alarm slice budgets to 200 hints and 200 subrequests per slice; Free's 50-subrequest limit forces 40 (`PLAN=free`);
+- `limits.cpu_ms: 30000` exists only on Paid.
+
+The estimate for 1,000 users, 30k scrobbles/day and 300k API calls/day is about $6–8/month plus the domain; hobby scale (100 users, 1k scrobbles/day) is the $5 minimum. The Free plan (staging, free) runs `pulse` mode, which keeps DO duration well under the daily allowance and holds about 8k ingested records/day and 90k API calls/day. Free quotas fail hard: `/api/*` errors while the static SPA keeps serving. One DO holds 10 GB, about 10M scrobbles. [operations.md](operations.md) covers cost monitoring.
+
+## Local development
+
+```sh
+npm ci
+cp worker/.dev.vars.example worker/.dev.vars     # then set CURSOR_KEY=$(openssl rand -hex 32)
+npx tsx scripts/gen-config.ts --env local        # loopback OAuth client hint, no CSP
+npm run build:web
+npx wrangler dev --config worker/wrangler.jsonc --var INGEST_MODE:off   # http://127.0.0.1:8787
+```
+
+`--var INGEST_MODE:off` keeps a local Worker from opening a socket to the public Jetstream; notify, snapshots and sweeps still run. The SPA's own dev server (`npm run dev --workspace @atmusic/web`, http://127.0.0.1:5173) proxies `/api` and `/health` to it. Local sign-in uses the atproto loopback `client_id` (`http://localhost?redirect_uri=…`, ADR §5.1). End-to-end tests run against a local `@atproto/dev-env` PDS (`npm run test:e2e`); the deterministic suites never touch the network (`npm test`, `bash scripts/check-ts.sh`).
