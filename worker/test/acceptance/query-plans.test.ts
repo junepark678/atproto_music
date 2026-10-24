@@ -14,7 +14,9 @@
 //   scrobbles_global_time in order, and nothing scans scrobbles or sorts it
 //   in a temporary B-tree;
 // - negative control: with those indexes dropped, the same statements plan a
-//   full SCAN of scrobbles, and the routes still answer identically.
+//   full SCAN of scrobbles, and the routes still answer identically; the
+//   statistics cache is invalidated first (production stats_version bump),
+//   so the unindexed statistics are recomputed, not replayed from the cache.
 
 import { runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
 import { FakeDoh } from '@atmusic/atproto/test-support/fake-doh';
@@ -29,6 +31,7 @@ import { seededRandom } from '@atmusic/core/test-support/random';
 import { describe, expect, it } from 'vitest';
 import type { Db } from '../../src/do/db';
 import { doDb } from '../../src/do/db';
+import { bumpStatsVersion } from '../../src/do/write/account-state';
 import type { Env } from '../../src/env';
 import { createWorker } from '../../src/router';
 import { ACCEPTANCE, type RecordedStatement, resetControl, type TestIndexDO } from './entry';
@@ -308,8 +311,26 @@ describe('query plans', () => {
       expect([label, all.some((d) => FULL_SCAN.test(d))]).toEqual([label, true]);
       expect([label, all.some((d) => INDEXED_SEARCH.test(d) || GLOBAL_ORDERED.test(d))]).toEqual([label, false]);
     }
-    // Same answers without the indexes (only slower): plans change, results do not.
+    // Same answers without the indexes (only slower): plans change, results do
+    // not. The first serve stored every statistics body in the exact cache,
+    // so the second serve would replay those bodies; the production
+    // stats_version bump (what every scrobble insert, change or delete runs)
+    // invalidates them first, so the unindexed serve recomputes statistics
+    // from the scrobble rows and compares fresh computations.
+    const statsComputed = (statements: RecordedStatement[]) =>
+      statements.some((s) => /count\(DISTINCT artist_key\)/.test(s.sql)) &&
+      statements.some((s) => /INSERT INTO stats_cache/.test(s.sql));
+    expect(
+      indexed.filter((o) => o.label.startsWith('stats')).map((o) => [o.label, statsComputed(o.statements)]),
+    ).toEqual(ROUTES.filter(([l]) => l.startsWith('stats')).map(([l]) => [l, true]));
+    const version = (db: Db) => db.one<{ v: number }>('SELECT stats_version AS v FROM users WHERE did = ?', target)?.v;
+    const before = await inDo(version);
+    await inDo((db) => db.tx(() => bumpStatsVersion(db, target)));
+    expect(await inDo(version)).toBe((before ?? Number.NaN) + 1);
     const unindexed = await serve();
+    expect(
+      unindexed.filter((o) => o.label.startsWith('stats')).map((o) => [o.label, statsComputed(o.statements)]),
+    ).toEqual(ROUTES.filter(([l]) => l.startsWith('stats')).map(([l]) => [l, true]));
     expect(unindexed.map((o) => [o.label, o.text])).toEqual(indexed.map((o) => [o.label, o.text]));
     expect(validated).toBe(DIDS + 2 * indexed.length);
   });

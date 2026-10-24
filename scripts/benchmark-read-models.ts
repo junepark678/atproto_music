@@ -37,14 +37,14 @@ export const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 export const DEFAULT_REPORT_PATH = join(REPO_ROOT, 'work', 'bench', 'read-models.json');
 export const READ_MODELS_DOC = join(REPO_ROOT, 'docs', 'benchmarks', 'read_models.md');
 export const STATS_DOC = join(REPO_ROOT, 'docs', 'benchmarks', 'stats.md');
-export const REPORT_SCHEMA_ID = 'atmusic/read-models-benchmark@1';
+export const REPORT_SCHEMA_ID = 'atmusic/read-models-benchmark@2';
 /** The interval of `--paced` runs: 10 requests per second. */
 export const PACED_INTERVAL_MS = 100;
 
-/** The suite's named tests (docs/planning/workers-waves.json W6-02). */
+/** The suite's named tests (docs/planning/workers-waves.json W6-02, budgets per ADR 0004 §15 Q10). */
 export const NAMED_TESTS: readonly string[] = [
-  'history/feed rows read ≤ limit+2',
-  'stats cache hit uses ≤3 probes and equals uncached result',
+  'history/feed page statement rows read within ADR Q10 budgets',
+  'stats cache hit within ADR Q10 probe budget and equals uncached result',
   'benchmark JSON is produced and schema-valid',
   'seeded generator yields exactly 100,000 valid active rows with the documented per-user distribution',
   '600 measured requests with zero errors report p95 and check it against the target',
@@ -57,6 +57,7 @@ const int = { type: 'integer', minimum: 0 } as const;
 const num = { type: 'number', minimum: 0 } as const;
 const str = { type: 'string', minLength: 1 } as const;
 const nullableStr = { type: ['string', 'null'] } as const;
+const counts = { type: 'array', items: { type: 'integer', minimum: 1 } } as const;
 const WINDOWS = ['all', '7d', '30d', '365d'] as const;
 
 const timing = {
@@ -77,10 +78,12 @@ export const BENCH_REPORT_SCHEMA = {
     'frozenClock',
     'environment',
     'limit',
+    'budgets',
     'dataset',
     'scales',
     'reads',
     'stats',
+    'worstCases',
     'http',
     'followUps',
     'passed',
@@ -126,6 +129,30 @@ export const BENCH_REPORT_SCHEMA = {
       },
     },
     limit: { const: 20 },
+    budgets: {
+      type: 'object',
+      additionalProperties: false,
+      required: [
+        'source',
+        'scope',
+        'history',
+        'global',
+        'following',
+        'followingVisibleEdges',
+        'statsProbesAll',
+        'statsProbesWindowed',
+      ],
+      properties: {
+        source: { const: 'ADR 0004 §15 Q10' },
+        scope: str,
+        history: { const: 23 },
+        global: { const: 43 },
+        following: { const: 89 },
+        followingVisibleEdges: { const: 4 },
+        statsProbesAll: { const: 3 },
+        statsProbesWindowed: { const: 4 },
+      },
+    },
     dataset: {
       type: 'object',
       additionalProperties: false,
@@ -221,6 +248,7 @@ export const BENCH_REPORT_SCHEMA = {
           'indexRowsRead',
           'visibilityRowsRead',
           'budget',
+          'budgetRule',
           'statements',
           'allStatementsRowsRead',
           'coldMs',
@@ -238,6 +266,7 @@ export const BENCH_REPORT_SCHEMA = {
           indexRowsRead: int,
           visibilityRowsRead: int,
           budget: int,
+          budgetRule: { enum: ['L+3', '2(L+1)+1', '4(L+1)+1+edges'] },
           statements: int,
           allStatementsRowsRead: int,
           coldMs: num,
@@ -257,8 +286,11 @@ export const BENCH_REPORT_SCHEMA = {
           'scale',
           'window',
           'windowRows',
+          'expected',
+          'observed',
           'uncached',
           'cached',
+          'afterVersionBump',
           'rowsReadBudget',
           'equalsUncached',
           'withinBudget',
@@ -267,10 +299,58 @@ export const BENCH_REPORT_SCHEMA = {
           scale: { enum: [1000, 10000, 50000, 100000] },
           window: { enum: WINDOWS },
           windowRows: int,
+          expected: {
+            type: 'object',
+            additionalProperties: false,
+            required: [
+              'windowRows',
+              'artistGroups',
+              'trackGroups',
+              'albumGroups',
+              'topArtistCounts',
+              'topTrackCounts',
+              'topAlbumCounts',
+            ],
+            properties: {
+              windowRows: int,
+              artistGroups: int,
+              trackGroups: int,
+              albumGroups: int,
+              topArtistCounts: counts,
+              topTrackCounts: counts,
+              topAlbumCounts: counts,
+            },
+          },
+          observed: {
+            type: 'object',
+            additionalProperties: false,
+            required: [
+              'windowRows',
+              'totalScrobbles',
+              'distinctArtists',
+              'distinctTracks',
+              'topArtistCounts',
+              'topTrackCounts',
+              'topAlbumCounts',
+            ],
+            properties: {
+              windowRows: int,
+              totalScrobbles: int,
+              distinctArtists: int,
+              distinctTracks: int,
+              topArtistCounts: counts,
+              topTrackCounts: counts,
+              topAlbumCounts: counts,
+            },
+          },
           uncached: {
             ...timing,
-            required: [...timing.required, 'perStatement'],
-            properties: { ...timing.properties, perStatement: { type: 'array', items: int } },
+            required: [...timing.required, 'perStatement', 'statementBudgets'],
+            properties: {
+              ...timing.properties,
+              perStatement: { type: 'array', items: int },
+              statementBudgets: { type: 'array', items: int },
+            },
           },
           cached: {
             type: 'object',
@@ -285,14 +365,71 @@ export const BENCH_REPORT_SCHEMA = {
                 items: { enum: ['users', 'cache', 'exists', 'other'] },
               },
               probesIndexed: { type: 'boolean' },
-              probeBudget: { const: 3 },
+              probeBudget: { enum: [3, 4] },
               withinProbeBudget: { type: 'boolean' },
               ms: num,
             },
           },
+          afterVersionBump: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['cache', 'equalsUncached'],
+            properties: { cache: { enum: ['hit', 'miss', null] }, equalsUncached: { type: 'boolean' } },
+          },
           rowsReadBudget: int,
-          equalsUncached: { const: true },
+          equalsUncached: { type: 'boolean' },
           withinBudget: { type: 'boolean' },
+        },
+      },
+    },
+    worstCases: {
+      type: 'array',
+      minItems: 3,
+      maxItems: 3,
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: [
+          'id',
+          'scenario',
+          'name',
+          'kind',
+          'scale',
+          'page',
+          'depth',
+          'rowsReturned',
+          'rowsRead',
+          'indexRowsRead',
+          'visibilityRowsRead',
+          'statements',
+          'allStatementsRowsRead',
+          'coldMs',
+          'warmMs',
+          'plan',
+          'denseBudget',
+          'asserted',
+        ],
+        properties: {
+          id: {
+            enum: ['following-sparse-followees-first', 'following-sparse-followees-deep', 'global-hidden-newest-first'],
+          },
+          scenario: str,
+          name: str,
+          kind: { enum: ['global', 'following'] },
+          scale: { type: 'null' },
+          page: { enum: ['first', 'deep'] },
+          depth: int,
+          rowsReturned: int,
+          rowsRead: int,
+          indexRowsRead: int,
+          visibilityRowsRead: int,
+          statements: int,
+          allStatementsRowsRead: int,
+          coldMs: num,
+          warmMs: num,
+          plan: { type: 'array', minItems: 1, items: str },
+          denseBudget: int,
+          asserted: { const: false },
         },
       },
     },
@@ -364,8 +501,10 @@ export interface ReadMeasurement {
   indexRowsRead: number;
   /** Diagnostic: rowsRead - indexRowsRead. */
   visibilityRowsRead: number;
-  /** The W6-02 plan budget, limit + 2, on the page statement's rowsRead. */
+  /** The ADR 0004 §15 Q10 budget of the page statement's rowsRead. */
   budget: number;
+  budgetRule: 'L+3' | '2(L+1)+1' | '4(L+1)+1+edges';
+  /** Every statement of the call (page statement plus indexing truth); not budgeted. */
   statements: number;
   allStatementsRowsRead: number;
   coldMs: number;
@@ -373,11 +512,31 @@ export interface ReadMeasurement {
   withinBudget: boolean;
 }
 
+interface WindowCounts {
+  topArtistCounts: number[];
+  topTrackCounts: number[];
+  topAlbumCounts: number[];
+}
+
 export interface StatsMeasurement {
   scale: number;
   window: (typeof WINDOWS)[number];
   windowRows: number;
-  uncached: { rowsRead: number; statements: number; coldMs: number; warmMs: number; perStatement: number[] };
+  expected: WindowCounts & { windowRows: number; artistGroups: number; trackGroups: number; albumGroups: number };
+  observed: WindowCounts & {
+    windowRows: number;
+    totalScrobbles: number;
+    distinctArtists: number;
+    distinctTracks: number;
+  };
+  uncached: {
+    rowsRead: number;
+    statements: number;
+    coldMs: number;
+    warmMs: number;
+    perStatement: number[];
+    statementBudgets: number[];
+  };
   cached: {
     rowsRead: number;
     probes: number;
@@ -387,9 +546,31 @@ export interface StatsMeasurement {
     withinProbeBudget: boolean;
     ms: number;
   };
+  afterVersionBump: { cache: 'hit' | 'miss' | null; equalsUncached: boolean };
   rowsReadBudget: number;
-  equalsUncached: true;
+  equalsUncached: boolean;
   withinBudget: boolean;
+}
+
+export interface WorstCase {
+  id: 'following-sparse-followees-first' | 'following-sparse-followees-deep' | 'global-hidden-newest-first';
+  scenario: string;
+  name: string;
+  kind: 'global' | 'following';
+  scale: null;
+  page: 'first' | 'deep';
+  depth: number;
+  rowsReturned: number;
+  rowsRead: number;
+  indexRowsRead: number;
+  visibilityRowsRead: number;
+  statements: number;
+  allStatementsRowsRead: number;
+  coldMs: number;
+  warmMs: number;
+  plan: string[];
+  denseBudget: number;
+  asserted: false;
 }
 
 export interface BenchReport {
@@ -413,6 +594,16 @@ export interface BenchReport {
     timerIntegerMs: boolean;
   };
   limit: number;
+  budgets: {
+    source: string;
+    scope: string;
+    history: number;
+    global: number;
+    following: number;
+    followingVisibleEdges: number;
+    statsProbesAll: number;
+    statsProbesWindowed: number;
+  };
   dataset: {
     seed: number;
     users: number;
@@ -446,6 +637,7 @@ export interface BenchReport {
   }>;
   reads: ReadMeasurement[];
   stats: StatsMeasurement[];
+  worstCases: WorstCase[];
   http: {
     endpoints: string[];
     warmupRequests: number;
@@ -497,33 +689,44 @@ function environmentRows(r: BenchReport): string[] {
   ];
 }
 
-const FINDINGS = `## Regressions this benchmark found, and production edits outside W6-02's files
+const FINDINGS = `## Regressions this benchmark found (production fixes accepted by ADR 0004 §15 Q10)
 
-The two fixes below change \`worker/src/do/read/history.ts\` (owned by W3-01) and \`worker/src/do/read/stats.ts\` (owned by W3-02). Neither file is in W6-02's file list in \`docs/planning/workers-waves.json\`, and no amendment covers the edits: they are **pending an owner decision**, either an amendment adding both files to W6-02's scope or W3-01/W3-02 follow-ups that take the changes over. Without them the numbers above change: deep pages read O(depth) rows and windowed statistics exceed their rows-read budget. The \`keysetWhere\` fallback (anchor clause kept when \`last > upper\` or a key is non-ASCII) is covered by \`worker/test/read/keyset.test.ts\`.
+W6-02 found two regressions and fixed them in \`worker/src/do/read/history.ts\` (W3-01) and \`worker/src/do/read/stats.ts\` (W3-02). ADR 0004 §15 Q10 (2026-10-25) **accepted** both fixes into W3-01/W3-02 ownership. Without them, deep pages read O(depth) rows and windowed statistics exceed their rows-read bounds. \`worker/test/read/keyset.test.ts\` covers the \`keysetWhere\` fallback, which keeps the anchor clause when \`last > upper\` or a key is non-ASCII.
 
-- **Deep pages read O(depth) rows.** A cursor carries the traversal anchor (\`upper\`) and the last returned row (\`last\`). With both row-value bounds in the WHERE clause SQLite uses only one of them, the anchor, as the index range start, so it walked and filtered every row between the anchor and \`last\`: 5,023 rows read for a 20-row history page at depth 5,000. With the edit, \`worker/src/do/read/history.ts\` \`keysetWhere\` omits the anchor bound when \`last <= upper\` (every cursor the server issues), which selects the same rows; history and both feeds share it.
-- **Windowed statistics read the whole user.** The totals statement referenced the window CTE three times; inlined, SQLite answered its DISTINCT/GROUP BY subqueries from the covering \`scrobbles_stats\` index searched by DID only, so a 7-day window of a 10,000-row user read 20,965 rows. With the edit, \`worker/src/do/read/stats.ts\` materializes the window for the totals statement of bounded windows, so rows read are proportional to the window (\`all\` keeps the inlined form, which already reads exactly the user's rows).`;
+- **Deep pages read O(depth) rows.** A cursor carries the traversal anchor (\`upper\`) and the last returned row (\`last\`). With both row-value bounds in the WHERE clause, SQLite used only the anchor as the index range start. It walked and filtered every row between the anchor and \`last\`: 5,023 rows read for a 20-row history page at depth 5,000. The fix: \`keysetWhere\` omits the anchor bound when \`last <= upper\`, which is true of every cursor the server issues. It selects the same rows, and history and both feeds share it.
+- **Windowed statistics read the whole user.** The totals statement referenced the window CTE three times. Inlined, SQLite answered its DISTINCT/GROUP BY subqueries from the covering \`scrobbles_stats\` index searched by DID only, so a 7-day window of a 10,000-row user read 20,965 rows. The fix: \`statsStatements\` materializes the window for the totals statement of bounded windows, so rows read are proportional to the window. \`all\` keeps the inlined form, which already reads exactly the user's rows.`;
 
-/** Why each kind of read exceeds limit + 2, from the measured split (index walk vs visibility). */
-const BREACH_CAUSE = {
+/** Where each kind of page statement's rows go (the Q10 budget terms), from the measured split. */
+const BUDGET_TERMS = {
   history:
-    'the keyset walk reads limit + 1 rows plus, on a deep page, the cursor boundary row that the row-value seek on the DESC index steps over, and the visibility join reads the owner row once',
+    "L + 1 probe rows from `scrobbles_owner_time`, the owner's `users` row once (the visibility join), and on a deep page 1 keyset boundary row that the row-value seek on the DESC index steps over",
   global:
-    'the visibility join reads one `users` row per candidate scrobble (a correlated owner lookup by primary key) on top of the `scrobbles_global_time` walk',
+    'L + 1 probe rows from `scrobbles_global_time`, each with one owner-visibility probe (a `users` row by primary key), plus 1 boundary row',
   following:
-    "the IN walk reads up to limit + 1 rows from each followed account's `scrobbles_owner_time` range before the merge, plus the owner and follow-edge lookups; with per-account indexes a merged page over k followed accounts reads at least k + limit index rows, so limit + 2 cannot hold for k > 2",
+    "the IN walk reads up to L + 1 rows from each followed account's `scrobbles_owner_time` range before the merge (4 dense followed accounts: 4(L + 1)), plus 1, plus the viewer's visible follow edges",
 } as const;
 
 function budgetSection(r: BenchReport): string[] {
+  const b = r.budgets;
   const over = r.reads.filter((x) => !x.withinBudget);
-  const head = ['## Rows-read budget (W6-02: history and feed at most limit + 2)', ''];
+  const head = [
+    `## Rows-read budgets (${b.source}), page statement only`,
+    '',
+    `The budgets bound the production **page statement**'s cursor \`rowsRead\` at the default limit L = ${r.limit}. They are hard assertions in \`history/feed page statement rows read within ADR Q10 budgets\`, derived from named constants in the suite. The rest of the call (the indexing-truth reads) is outside the budget. It appears only in the "Whole call" column, and the suite checks that it reads the same number of rows at every scale and depth.`,
+    '',
+    '| Read | Rule | Budget | Terms |',
+    '| --- | --- | --- | --- |',
+    `| History | L + 3 | ${b.history} | ${BUDGET_TERMS.history} |`,
+    `| Global feed | 2(L + 1) + 1 | ${b.global} | ${BUDGET_TERMS.global} |`,
+    `| Following feed (dense data) | 4(L + 1) + 1 + edges | ${b.following} (${b.followingVisibleEdges} visible edges) | ${BUDGET_TERMS.following} |`,
+    '',
+  ];
   if (over.length === 0) {
-    return [...head, `Met: every history and feed page statement read at most ${r.limit + 2} rows.`];
+    return [...head, `Met: all ${r.reads.length} history and feed page statements are within their budgets.`];
   }
-  const kinds = [...new Set(over.map((x) => x.kind))];
   return [
     ...head,
-    `**Not met** for ${over.length} of ${r.reads.length} reads. The budget is the plan's, applied to the production page statement's \`rowsRead\`; it is not redefined here, so these reads fail the suite (\`history/feed rows read ≤ limit+2\`) and this report's verdict.`,
+    `**Not met** for ${over.length} of ${r.reads.length} reads. These reads fail the suite and this report's verdict:`,
     '',
     '| Read | Page | Rows read | Budget | Index walk | Visibility |',
     '| --- | --- | --- | --- | --- | --- |',
@@ -531,26 +734,43 @@ function budgetSection(r: BenchReport): string[] {
       (x) =>
         `| ${KIND_LABEL[x.kind]}${x.scale === null ? '' : ` ${fmt(x.scale)}`} | ${x.page} | ${x.rowsRead} | ${x.budget} | ${x.indexRowsRead} | ${x.visibilityRowsRead} |`,
     ),
+  ];
+}
+
+function worstCaseSection(r: BenchReport): string[] {
+  return [
+    '## Worst cases (measured and reported, not asserted)',
     '',
-    ...kinds.map((k) => `- ${KIND_LABEL[k]}: ${BREACH_CAUSE[k]}.`),
+    `ADR 0004 §15 Q10 names two worst cases outside the dense-data budgets. The suite measures them in their own DO, so they cannot change the asserted reads. Every page is checked against an independent \`OFFSET\` query over the visible rows before it is measured. The budget shown is the dense-data Q10 budget of the same kind of read, for comparison only; the worst cases do not count toward the verdict. Each one is listed under Follow-ups.`,
     '',
-    'Meeting the budget as written needs an owner decision: either amend the W6-02 budget in `docs/planning/workers-waves.json` (for example, index walk at most limit + 2 per walked account plus one visibility row per candidate), or amend the W0-01 schema so visibility costs no rows for visible owners (for example, a partial index of hidden users probed with NOT EXISTS) and the following feed reads a per-viewer timeline. Neither change is made by W6-02.',
+    '| Case | Scenario | Page | Rows read (page statement) | Dense budget | Index walk | Visibility | Whole call | Page statement plan (scrobbles steps; the full plan is in the JSON) |',
+    '| --- | --- | --- | --- | --- | --- | --- | --- | --- |',
+    ...r.worstCases.map(
+      (w) =>
+        `| \`${w.id}\` | ${w.scenario} | ${w.page}${w.page === 'deep' ? ` (${fmt(w.depth)})` : ''} | ${fmt(w.rowsRead)} | ${w.denseBudget} | ${fmt(w.indexRowsRead)} | ${fmt(w.visibilityRowsRead)} | ${w.statements} statements, ${fmt(w.allStatementsRowsRead)} rows | ${w.plan
+          .filter((d) => /\bs USING\b|TEMP B-TREE/.test(d))
+          .map((d) => `\`${d}\``)
+          .join('; ')} |`,
+    ),
   ];
 }
 
 function probeBudgetSection(r: BenchReport): string[] {
+  const b = r.budgets;
   const over = r.stats.filter((x) => !x.cached.withinProbeBudget);
-  const head = ['## Cache-hit probe budget (W6-02: cached stats hit at most 3 index probes)', ''];
+  const head = [
+    `## Cache-hit probe budget (${b.source}): at most ${b.statsProbesWindowed} statements for a window, ${b.statsProbesAll} for \`all\``,
+    '',
+    `The budget counts **every statement of the hit**, and each one must plan as an indexed SEARCH. A windowed hit reads the users row (\`stats_version\` and \`generation\`), the cache row and two EXISTS probes, one per moved window bound: ${b.statsProbesWindowed}. \`all\` has no lower bound, so it needs one EXISTS probe: ${b.statsProbesAll}. The suite asserts this budget as a hard check in \`stats cache hit within ADR Q10 probe budget and equals uncached result\`.`,
+    '',
+  ];
   if (over.length === 0) {
-    return [...head, 'Met: every cached hit ran at most 3 statements, each an indexed SEARCH.'];
+    return [...head, `Met: all ${r.stats.length} cached hits are within the budget.`];
   }
   const windows = [...new Set(over.map((x) => x.window))];
   return [
     ...head,
-    `**Not met** for ${over.length} of ${r.stats.length} cached hits (windows: ${windows.join(', ')}). Every statement of the hit is counted, so these hits fail the suite (\`stats cache hit uses ≤3 probes and equals uncached result\`) and this report's verdict.`,
-    '',
-    '- A windowed hit runs the users row (stats_version and generation), the cache row and two EXISTS probes (one per window bound): 4 indexed statements reading at most 4 rows. `all` has no lower bound, so it runs 3.',
-    '- Meeting the budget as written needs an owner decision: either amend the W6-02 budget (for example, cache row plus at most two EXISTS probes, with the users-row lookup that every statistics request makes counted separately), or change `worker/src/do/read/stats.ts` (W3-02) so the users row and the cache row are read by one statement. Neither change is made by W6-02.',
+    `**Not met** for ${over.length} of ${r.stats.length} cached hits (windows: ${windows.join(', ')}). These hits fail the suite and this report's verdict.`,
   ];
 }
 
@@ -603,18 +823,20 @@ export function renderReadModelsDoc(r: BenchReport): string {
     '',
     '## Rows read per page (limit 20)',
     '',
-    `A second user set in its own DO holds one user each with ${r.scales.map((s) => fmt(s.scrobbles)).join(', ')} scrobbles spread over two years, plus a viewer following all four (${fmt(r.scales.reduce((a, s) => a + s.scrobbles, 0))} rows). Deep pages continue a cursor whose anchor is the newest row and whose last row is halfway down. "Rows read" is the production page statement's cursor \`rowsRead\`, the quantity the W6-02 budget (limit + 2 = ${r.limit + 2}) bounds. "Index" and "visibility" are diagnostics only: the rows the same keyset walk reads without the visibility join (summed per followed account for the following feed), and the rest (owner lookups, follow edges). Cold is the first call on a freshly constructed DO instance (after \`evictDurableObject\`); warm is the mean of 20 repeated calls. Times are the synchronous DO call (CPU-bound: no I/O happens inside it).`,
+    `A second user set in its own DO holds one user each with ${r.scales.map((s) => fmt(s.scrobbles)).join(', ')} scrobbles spread over two years, plus a viewer following all four (${fmt(r.scales.reduce((a, s) => a + s.scrobbles, 0))} rows). Deep pages continue a cursor whose anchor is the newest row and whose last row is halfway down. "Rows read" is the production page statement's cursor \`rowsRead\`: the only quantity the ${r.budgets.source} budget bounds (next section). "Whole call" is every statement of the call, the page statement plus the indexing-truth reads. It is reported separately and is not budgeted. "Index" and "visibility" are diagnostics only: the rows the same keyset walk reads without the visibility join (summed per followed account for the following feed), and the rest (owner lookups, follow edges). Cold is the first call on a freshly constructed DO instance (after \`evictDurableObject\`); warm is the mean of 20 repeated calls. Times are the synchronous DO call (CPU-bound: no I/O happens inside it).`,
     '',
-    '| Read | Scale | Page | Rows read | Budget | Index | Visibility | Statements (rows read incl. indexing truth) | Cold ms | Warm ms | Within |',
+    '| Read | Scale | Page | Rows read (page statement) | Budget (rule) | Index | Visibility | Whole call: statements, rows read (not budgeted) | Cold ms | Warm ms | Within |',
     '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |',
     ...r.reads.map(
       (x) =>
-        `| ${KIND_LABEL[x.kind]} | ${x.scale === null ? 'all users' : fmt(x.scale)} | ${x.page}${x.page === 'deep' ? ` (${fmt(x.depth)})` : ''} | ${x.rowsRead} | ${x.budget} | ${x.indexRowsRead} | ${x.visibilityRowsRead} | ${x.statements} (${x.allStatementsRowsRead}) | ${ms(x.coldMs)} | ${ms(x.warmMs)} | ${x.withinBudget ? 'yes' : 'no'} |`,
+        `| ${KIND_LABEL[x.kind]} | ${x.scale === null ? 'all users' : fmt(x.scale)} | ${x.page}${x.page === 'deep' ? ` (${fmt(x.depth)})` : ''} | ${x.rowsRead} | ${x.budget} (${x.budgetRule}) | ${x.indexRowsRead} | ${x.visibilityRowsRead} | ${x.statements}, ${x.allStatementsRowsRead} | ${ms(x.coldMs)} | ${ms(x.warmMs)} | ${x.withinBudget ? 'yes' : 'no'} |`,
     ),
     '',
     'Statistics are in [stats.md](stats.md).',
     '',
     ...budgetSection(r),
+    '',
+    ...worstCaseSection(r),
     '',
     FINDINGS,
     '',
@@ -640,17 +862,22 @@ export function renderStatsDoc(r: BenchReport): string {
   const lines = [
     '# Statistics benchmark and cache (DO SQLite in workerd)',
     '',
-    `Generated by \`scripts/benchmark-read-models.ts\` from the report of \`${r.generatedBy}\` (environment in [read_models.md](read_models.md)). Each user's statistics (limit 10) are computed uncached at asOf = ${r.frozenClock} through the production \`statsWithCache\` (a miss, which stores the body), then requested again 250 ms later: the exact cache may reuse the body only after its indexed EXISTS probes show that no row crossed either window bound (ADR 0004 §5.8). Every listen sits at a half-second, so the 250 ms shift is provably empty and the second request is a hit; the hit must equal a fresh uncached computation at the later asOf.`,
+    `Generated by \`scripts/benchmark-read-models.ts\` from the report of \`${r.generatedBy}\` (environment in [read_models.md](read_models.md)). Each user's statistics (limit 10) are computed uncached at asOf = ${r.frozenClock} through the production \`statsWithCache\` (a miss, which stores the body), then requested again 250 ms later: the exact cache may reuse the body only after its indexed EXISTS probes show that no row crossed either window bound (ADR 0004 §5.8). Every listen sits at a half-second, so the 250 ms shift is provably empty and the second request is a hit; the hit must equal a fresh uncached computation at the later asOf. Then the production \`bumpStatsVersion\` (what every scrobble insert, change or delete runs) invalidates the body, and the next request must be a miss that again equals that computation. The miss is checked against an oracle computed in JavaScript from the generated records, not from SQL: window rows, distinct artists and tracks, and the top-10 counts of artists, tracks and albums.`,
     '',
-    '- **Uncached rows read** must stay within the budget `17 × window rows + 4 × limit + 16`, i.e. proportional to the rows in the window, not to the user. Derivation: the totals statement reads the window once through `scrobbles_owner_time` (index entry and table row) into a temporary table that its three aggregates read (5 per window row); each ranking statement reads the window (2), sorts it into its GROUP BY b-tree (at most 2) and fetches at most `limit` display rows by primary key; plus the user row, the cache row and the cache write.',
-    '- **Cached**: the W6-02 budget "cached stats hit ≤ 3 index probes" is applied to **every statement of the hit**, each of which must plan as an indexed SEARCH: the users row by primary key (it supplies `stats_version` and `generation`, the cache-validity inputs of ADR 0004 §5.8, and is the 404 check), the cache row by primary key, and one EXISTS probe on `scrobbles_owner_time` for `all` (no lower bound) or two for a window. The users-row lookup is not excluded: that would redefine the budget, which is an owner decision, as for history and feed. "Cached rows read" is the sum over those statements.',
+    "- **Uncached rows read**: each statement of the miss has its own bound, computed from the window rows W and the window's group counts G. The generator supplies both, not SQL. The bound per statement, in order:",
+    '  - users row by primary key: 1. Cache row by primary key: at most 1.',
+    "  - totals: at most 5W + 6. A bounded window is read once through `scrobbles_owner_time` (index entry and table row, 2W) into a materialized temporary table that the three aggregates read (3W), with one visibility join (the owner's `users` row and the suppression probe, 2 rows). `all` inlines the window three times through the covering `scrobbles_stats` index (3W) with three visibility joins (6 rows).",
+    '  - each ranking (artists, tracks, albums): at most 2W + 2G + 2. The window walk reads an index entry and a table row per row, each group fetches one display row by primary key, and the visibility join adds 2.',
+    '  - the cache store: at most 2.',
+    '  Every term is linear in the window, so a miss never reads the user\'s rows outside the window. "Budget" in the table is the sum of the per-statement bounds.',
+    `- **Cached**: the ${r.budgets.source} budget counts every statement of the hit: at most ${r.budgets.statsProbesWindowed} for a window and ${r.budgets.statsProbesAll} for \`all\` (next section). "Cached rows read" is the sum over those statements.`,
     '- Cold is the first call on a freshly constructed DO instance; warm is the mean of 3 further uncached computations; cached is the mean of 20 hits.',
     '',
-    '| Scale | Window | Window rows | Uncached rows read | Per statement (user, cache, totals, artists, tracks, albums, store) | Budget | Uncached cold / warm ms | Cached rows read | Probes (budget 3) | Cached ms | Equal | Within |',
-    '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |',
+    '| Scale | Window | Window rows | Uncached rows read | Per statement (user, cache, totals, artists, tracks, albums, store) | Per-statement bounds | Budget | Uncached cold / warm ms | Cached rows read | Probes (budget) | Cached ms | Hit equal | After version bump | Within |',
+    '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |',
     ...r.stats.map(
       (s) =>
-        `| ${fmt(s.scale)} | ${s.window} | ${fmt(s.windowRows)} | ${fmt(s.uncached.rowsRead)} | ${s.uncached.perStatement.join(', ')} | ${fmt(s.rowsReadBudget)} | ${ms(s.uncached.coldMs)} / ${ms(s.uncached.warmMs)} | ${s.cached.rowsRead} | ${s.cached.probes} (${s.cached.probeKinds.join(', ')})${s.cached.probesIndexed ? '' : ' (not indexed)'}${s.cached.withinProbeBudget ? '' : ' **over**'} | ${ms(s.cached.ms)} | ${s.equalsUncached ? 'yes' : 'no'} | ${s.withinBudget ? 'yes' : 'no'} |`,
+        `| ${fmt(s.scale)} | ${s.window} | ${fmt(s.windowRows)} | ${fmt(s.uncached.rowsRead)} | ${s.uncached.perStatement.join(', ')} | ${s.uncached.statementBudgets.join(', ')} | ${fmt(s.rowsReadBudget)} | ${ms(s.uncached.coldMs)} / ${ms(s.uncached.warmMs)} | ${s.cached.rowsRead} | ${s.cached.probes} of ${s.cached.probeBudget} (${s.cached.probeKinds.join(', ')})${s.cached.probesIndexed ? '' : ' (not indexed)'}${s.cached.withinProbeBudget ? '' : ' **over**'} | ${ms(s.cached.ms)} | ${s.equalsUncached ? 'yes' : 'no'} | ${s.afterVersionBump.cache ?? 'none'}, ${s.afterVersionBump.equalsUncached ? 'equal' : 'not equal'} | ${s.withinBudget ? 'yes' : 'no'} |`,
     ),
     '',
     ...probeBudgetSection(r),

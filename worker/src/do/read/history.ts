@@ -90,7 +90,10 @@ function tupleAtMost(a: TimeKey, b: TimeKey): boolean | null {
  * range start: with both present it seeks from the anchor and filters every
  * row down to `last`, so a page at depth d read O(d) rows (W6-02 benchmark:
  * 5,023 rows read for a 20-row history page at depth 5,000). With the one
- * clause the seek starts strictly below `last`.
+ * clause the seek starts strictly below `last`. ADR 0004 §15 Q10 accepted
+ * this single-clause seek; its page-statement budgets (history ≤ limit + 3,
+ * which includes this 1 keyset boundary row) are asserted by
+ * worker/test/bench/read-models.bench.test.ts.
  */
 export function keysetWhere(
   q: KeysetQuery,

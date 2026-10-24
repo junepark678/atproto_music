@@ -1099,7 +1099,12 @@
     },
     {
       "case": "M6.2.3/slow_query_detection",
-      "target": "worker/test/acceptance/query-plans.test.ts › 100×1,000 seeded records: history/feed/stats plans use indexes; negative control scans"
+      "target": "worker/test/acceptance/query-plans.test.ts › 100×1,000 seeded records: history/feed/stats plans use indexes; negative control scans",
+      "also": [
+        "worker/test/bench/read-models.bench.test.ts › history/feed page statement rows read within ADR Q10 budgets",
+        "worker/test/bench/read-models.bench.test.ts › stats cache hit within ADR Q10 probe budget and equals uncached result"
+      ],
+      "note": "The ADR 0004 §15 Q10 rows-read and probe budgets flag read-path regressions that still plan as indexed searches, such as the O(depth) keyset seek W6-02 found."
     },
     {
       "case": "M6.3.1/backup_during_write",
