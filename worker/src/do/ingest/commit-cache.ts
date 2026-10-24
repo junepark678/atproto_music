@@ -10,10 +10,15 @@
 // - the root block is decoded and must still be a v3 commit of `did` whose
 //   `rev` equals the cached rev and whose `data` is a dag-cbor link;
 // - proveRecord: the MST inclusion or exclusion proof and the record CID.
-// On a miss the full verifyCommit runs (signature under the current key) and
+// On a miss the full verifyCommit runs (signature under `opts.signingKey`) and
 // the commit is remembered. A row is only ever written after verifyCommit
-// succeeded. putIdentity (identity-cache.ts) forgets a DID's rows when its
-// signing key changes, so a cached check never outlives the key it was made
+// succeeded, and only while `opts.signingKey` is still the DID's current key:
+// the remember step is one INSERT ... SELECT ... WHERE EXISTS over a positive
+// identity_cache entry of that DID with that key, run synchronously after the
+// await. putIdentity (identity-cache.ts) forgets a DID's rows when its signing
+// key changes; a check that was in flight across that change (the key was
+// read before the getRecord fetch and verifyCommit awaited) finds the new key
+// and writes nothing. So a cached check never outlives the key it was made
 // under. Rows older than 7 days are pruned by gc (`pruneVerifiedCommits`).
 
 import { CidLinkWrapper, decode } from '@atcute/cbor';
@@ -34,15 +39,26 @@ export function lookupVerifiedCommit(db: Db, did: string, commitCid: string): { 
   return db.one<{ rev: string }>('SELECT rev FROM verified_commits WHERE did = ? AND commit_cid = ?', did, commitCid);
 }
 
-export function rememberVerifiedCommit(db: Db, commit: VerifiedCommit, now: number): void {
-  db.run(
-    `INSERT INTO verified_commits(did, commit_cid, rev, verified_at_ms) VALUES (?, ?, ?, ?)
-     ON CONFLICT(did, commit_cid) DO UPDATE SET verified_at_ms = excluded.verified_at_ms`,
+/**
+ * Remember a commit verified under `signingKey`, only if that is still the
+ * DID's current key in identity_cache (one statement, so nothing can change
+ * between the check and the write). Returns whether a row was written.
+ */
+export function rememberVerifiedCommit(db: Db, commit: VerifiedCommit, signingKey: string, now: number): boolean {
+  const written = db.all(
+    `INSERT INTO verified_commits(did, commit_cid, rev, verified_at_ms)
+     SELECT ?, ?, ?, ? WHERE EXISTS (
+       SELECT 1 FROM identity_cache WHERE did = ? AND signing_key = ? AND neg_until_ms IS NULL)
+     ON CONFLICT(did, commit_cid) DO UPDATE SET verified_at_ms = excluded.verified_at_ms
+     RETURNING commit_cid`,
     commit.did,
     commit.cid,
     commit.rev,
     now,
+    commit.did,
+    signingKey,
   );
+  return written.length > 0;
 }
 
 /** Forget every cached signature check of `did` (its signing key changed, or it disconnected). */
@@ -125,7 +141,9 @@ export async function verifyProof(
   const cached = commit !== null;
   if (commit === null) {
     commit = await verifyCommit(blocks, root, { did: opts.did, signingKey: opts.signingKey });
-    rememberVerifiedCommit(db, commit, now);
+    if (commit.did !== opts.did) throw new VerifyError('did_mismatch', `commit is for ${commit.did}`);
+    // After the await: written only if opts.signingKey is still the current key.
+    rememberVerifiedCommit(db, commit, opts.signingKey, now);
   }
   if (commit.did !== opts.did) throw new VerifyError('did_mismatch', `commit is for ${commit.did}`);
   const proof = await proveRecord(memoryStore(blocks), commit, opts.collection, opts.rkey);

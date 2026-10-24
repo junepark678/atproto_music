@@ -17,7 +17,9 @@
 //  4. Coalescing: 25 or more pending hints for one known DID → one snapshot
 //     job (`reason='coalesced'`) and every hint of that DID is deleted, in one
 //     transaction, before any fetch. When the snapshot cap is full the hints
-//     are worked individually instead.
+//     are worked individually instead. A walk already in progress is not
+//     restarted (hints are untrusted): scheduleSnapshot records one rescan
+//     request, and the walk re-walks the newest head when it completes.
 //  5. Identity: `resolveIdentity` (identity-cache.ts: identity_cache, 5 min
 //     TTL, 1 h negative TTL). A definite failure or a transport failure backs
 //     the hint off (no earlier than the negative entry's expiry).

@@ -338,7 +338,7 @@ describe('verify drain', () => {
     });
   });
 
-  it('coalescing during a walk at an older head restarts it: frontier and head dropped, epoch bumped', async () => {
+  it('coalescing during a walk keeps its frontier and lease and records one rescan; a hint flood never restarts it', async () => {
     const k = await kit();
     const alice = k.users.Alice.did;
     const S = k.collections.scrobble;
@@ -354,11 +354,11 @@ describe('verify drain', () => {
     expect(k.repos.Alice.head!.cid).not.toBe(H0);
     k.resetCalls();
 
-    await runInDurableObject(stubFor('drain-coalesce-restart'), async (i: HarnessDO) => {
+    await runInDurableObject(stubFor('drain-coalesce-rescan'), async (i: HarnessDO) => {
       const db = i.db;
       const m = depsFor(db, k);
       const generation = seedUser(db, alice);
-      // A 30-slice walk paused between slices at H0, and one with a slice in flight.
+      // A many-slice walk paused between slices at H0 (resumes its frontier when due).
       db.run(
         `INSERT INTO repo_jobs(did, kind, state, generation, reason, head_cid, frontier_json, restarts, due_at, updated_at_ms)
          VALUES (?, 'snapshot', 'pending', ?, 'admission', ?, '{"lastKey":"x"}', 0, ?, ?)`,
@@ -366,59 +366,177 @@ describe('verify drain', () => {
         generation,
         H0,
         T0 + 2_000,
-        T0,
+        T0 - 7,
       );
       const users = db.all('SELECT * FROM users');
-      enqueue(
-        db,
-        ops.map((o) => hint(k, alice, S, o.rkey)),
-      );
-      const report = await drain(m, k.clock.nowMs());
-      expect(report.outcomes.filter((o) => o.outcome === 'coalesced')).toHaveLength(1);
-      expect(getRecordCalls(k.pds.Alice)).toBe(0);
-      expect(hintRows(db)).toEqual([]);
-      // The next slice cannot resume H0's frontier: it walks from getLatestCommit.
       const job = () =>
         db.one(
-          `SELECT state, generation, reason, head_cid, frontier_json, restarts, due_at FROM repo_jobs
-           WHERE did = ? AND kind = 'snapshot'`,
+          `SELECT state, generation, reason, head_cid, frontier_json, restarts, due_at, attempts, updated_at_ms
+           FROM repo_jobs WHERE did = ? AND kind = 'snapshot'`,
           alice,
         );
+      const flood = async () => {
+        enqueue(
+          db,
+          ops.map((o) => hint(k, alice, S, o.rkey, { source: 'notify' })),
+        );
+        const report = await drain(m, k.clock.nowMs());
+        expect(report.outcomes.filter((o) => o.outcome === 'coalesced')).toEqual([
+          { uri: expect.any(String), outcome: 'coalesced', detail: '25' },
+        ]);
+        expect(hintRows(db)).toEqual([]);
+      };
+
+      await flood();
+      expect(getRecordCalls(k.pds.Alice)).toBe(0);
+      // The paused walk keeps its frontier, head, epoch, due time and lease; one rescan request.
       expect(job()).toEqual({
         state: 'pending',
         generation,
         reason: 'admission',
-        head_cid: null,
-        frontier_json: null,
-        restarts: 1,
-        due_at: T0,
+        head_cid: H0,
+        frontier_json: '{"lastKey":"x"}',
+        restarts: 0,
+        due_at: T0 + 2_000,
+        attempts: 1,
+        updated_at_ms: T0 - 7,
       });
 
-      // The same with a slice in flight at H0: the row leaves `running`, so that slice's
-      // compare-and-set on (running, generation, restarts 1, H0) misses.
-      db.run(
-        `UPDATE repo_jobs SET state = 'running', head_cid = ?, frontier_json = '{"lastKey":"y"}' WHERE did = ?`,
-        H0,
-        alice,
-      );
-      enqueue(
-        db,
-        ops.map((o) => hint(k, alice, S, o.rkey)),
-      );
-      const second = await drain(m, k.clock.nowMs());
-      expect(second.outcomes.filter((o) => o.outcome === 'coalesced')).toHaveLength(1);
+      // A slice in flight at H0 (lease token T0 - 7): a flood every few seconds, as an
+      // unauthenticated notify sender could, never takes the row from it.
+      db.run(`UPDATE repo_jobs SET state = 'running' WHERE did = ?`, alice);
+      for (let n = 0; n < 5; n++) {
+        k.clock.advance(3_000);
+        await flood();
+      }
       expect(job()).toEqual({
-        state: 'pending',
+        state: 'running',
         generation,
         reason: 'admission',
-        head_cid: null,
-        frontier_json: null,
-        restarts: 2,
-        due_at: T0,
+        head_cid: H0,
+        frontier_json: '{"lastKey":"x"}',
+        restarts: 0,
+        due_at: T0 + 2_000,
+        attempts: 6,
+        updated_at_ms: T0 - 7,
       });
+      // So that slice's guarded frontier write (W4-01 contract) still lands.
+      expect(
+        db.all(
+          `UPDATE repo_jobs SET frontier_json = '{"lastKey":"y"}', updated_at_ms = max(updated_at_ms + 1, ?)
+           WHERE did = ? AND kind = 'snapshot' AND state = 'running' AND generation = ? AND updated_at_ms = ?
+           RETURNING did`,
+          k.clock.nowMs(),
+          alice,
+          generation,
+          T0 - 7,
+        ),
+      ).toEqual([{ did: alice }]);
       expect(getRecordCalls(k.pds.Alice)).toBe(0);
-      expect(hintRows(db)).toEqual([]);
+      expect(counterValue(db, 'coalesced')).toBe(6);
+      expect(counterValue(db, 'snapshot_rescan', 'coalesced')).toBe(6);
+      expect(counterValue(db, 'snapshot_scheduled', 'coalesced')).toBe(0);
+
+      // A failed walk (repository_changed, in backoff): floods keep its backoff and restarts.
+      db.run(
+        `UPDATE repo_jobs SET state = 'failed', restarts = 6, failure_code = 'repository_changed', due_at = ?,
+           frontier_json = NULL, head_cid = NULL, attempts = 0 WHERE did = ?`,
+        T0 + 3_600_000,
+        alice,
+      );
+      k.clock.advance(3_000);
+      await flood();
+      expect(
+        db.one(
+          `SELECT state, restarts, failure_code, due_at, attempts FROM repo_jobs WHERE did = ? AND kind = 'snapshot'`,
+          alice,
+        ),
+      ).toEqual({
+        state: 'failed',
+        restarts: 6,
+        failure_code: 'repository_changed',
+        due_at: T0 + 3_600_000,
+        attempts: 0,
+      });
       expect(db.all('SELECT * FROM users')).toEqual(users);
+    });
+  });
+
+  it('a key change while a fetched proof verifies under the old key leaves verified_commits empty', async () => {
+    const k = await kit();
+    const alice = k.users.Alice.did;
+    const S = k.collections.scrobble;
+    const uri = `at://${alice}/${S}/r1`;
+    const put = await k.externalPut('Alice', S, 'r1', scrobble(k, '2026-01-15T11:30:00Z'));
+    expect(k.repos.Alice.head!.signedBy).toBe(k.keys.alice.didKey);
+    k.resetCalls();
+
+    await runInDurableObject(stubFor('drain-key-race'), async (i: HarnessDO) => {
+      const db = i.db;
+      const m = depsFor(db, k);
+      seedUser(db, alice);
+      // The drain reads the cached key K1, then its getRecord is held at the gate.
+      let open!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        open = resolve;
+      });
+      const car = await k.repos.Alice.getRecordCar(S, 'r1'); // signed by K1
+      k.pds.Alice.fail(
+        { nsid: GET_RECORD },
+        {
+          kind: 'respond',
+          respond: async () => {
+            await gate;
+            return carResponse(car);
+          },
+        },
+      );
+      enqueue(db, [hint(k, alice, S, 'r1')]);
+      const alarm = drain(m, k.clock.nowMs());
+      while (k.pds.Alice.faults.pending > 0) await tick();
+      expect(db.one('SELECT signing_key FROM identity_cache WHERE did = ?', alice)).toEqual({
+        signing_key: k.keys.alice.didKey,
+      });
+
+      // Meanwhile the DID rotates to K2 and another worker's fresh resolution stores it
+      // (putIdentity forgets the DID's verified commits, of which there are none yet).
+      k.plc.rotateKey(alice, k.keys.aliceRotated);
+      const fresh = await resolveIdentity(m, alice, { fresh: true });
+      expect(fresh.ok && fresh.identity.signingKey).toBe(k.keys.aliceRotated.didKey);
+
+      // The held proof verifies under K1 after the change: it is not remembered, so no
+      // later K1-signed CAR rooted at that commit can skip its signature check.
+      open();
+      expect((await alarm).outcomes).toEqual([{ uri, outcome: 'applied' }]);
+      expect(rows(db)).toEqual([
+        { uri, revision: put.rev, cid: put.ops[0]!.cid, artist: 'Björk', track: 'Hyperballad' },
+      ]);
+      expect(db.all('SELECT * FROM verified_commits')).toEqual([]);
+      expect(getRecordCalls(k.pds.Alice)).toBe(1);
+
+      // The same commit served again is verified in full under the current key K2: it fails closed.
+      k.pds.Alice.fail({ nsid: GET_RECORD }, { kind: 'respond', respond: () => carResponse(car) });
+      k.clock.advance(1_000);
+      enqueue(db, [hint(k, alice, S, 'r1')]);
+      const again = await drain(m, k.clock.nowMs());
+      expect(again.outcomes).toEqual([{ uri, outcome: 'verify_failed', detail: 'bad_signature' }]);
+      expect(counterValue(db, 'verify_failed', 'bad_signature')).toBe(1);
+      expect(db.all('SELECT * FROM verified_commits')).toEqual([]);
+
+      // With the key unchanged, a verified commit is remembered as before (under K2): the PDS
+      // re-signs with K2, and the backed-off r1 hint and a new r2 hint both prove at that head.
+      k.pds.Alice.faults.clear();
+      await k.rotateKey('Alice', k.keys.aliceRotated);
+      const put2 = await k.externalPut('Alice', S, 'r2', scrobble(k, '2026-01-15T11:31:00Z'));
+      k.clock.advance(1_000);
+      enqueue(db, [hint(k, alice, S, 'r2')]);
+      const last = await drain(m, k.clock.nowMs());
+      expect(last.outcomes.map((o) => `${o.uri} ${o.outcome}`).sort()).toEqual([
+        `${uri} applied`,
+        `at://${alice}/${S}/r2 applied`,
+      ]);
+      expect(db.all('SELECT did, rev FROM verified_commits')).toEqual([{ did: alice, rev: put2.rev }]);
+      expect(hintRows(db)).toEqual([]);
     });
   });
 

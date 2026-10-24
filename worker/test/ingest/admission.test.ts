@@ -10,7 +10,13 @@ import { env } from 'cloudflare:workers';
 import { fixedClock } from '@atmusic/core/test-support/clock';
 import { describe, expect, it } from 'vitest';
 import type { Db } from '../../src/do/db';
-import { admit, MAX_PENDING_SNAPSHOT_JOBS, scheduleSnapshot } from '../../src/do/ingest/admission';
+import {
+  admit,
+  MAX_PENDING_SNAPSHOT_JOBS,
+  reclaimSnapshotLeases,
+  SNAPSHOT_LEASE_MS,
+  scheduleSnapshot,
+} from '../../src/do/ingest/admission';
 import { drain } from '../../src/do/ingest/verify-drain';
 import { indexing } from '../../src/do/status';
 import type { HarnessDO } from '../harness/harness-do';
@@ -193,110 +199,222 @@ describe('admission', () => {
     });
   });
 
-  it('scheduleSnapshot restarts an open walk at the newest head and bumps the walk epoch', async () => {
-    await runInDurableObject(stubFor('admission-restart'), (i: HarnessDO) => {
+  it('scheduleSnapshot never discards or delays a walk: a started walk records one rescan request', async () => {
+    await runInDurableObject(stubFor('admission-rescan'), (i: HarnessDO) => {
       const db = i.db;
       const H0 = 'bafyreih0h0h0h0h0h0h0h0h0h0h0h0h0h0h0h0h0h0h0h0h0h0h0h0h0';
       const FRONTIER = '{"stack":[],"lastKey":"com.example.atmusic.scrobble/r10"}';
       const jobs = [
-        // [did, state, restarts, frontier, head, failure]
-        [did(1), 'pending', 0, null, null, null], // queued, walk not started
-        [did(2), 'pending', 1, FRONTIER, H0, null], // between slices / after a backoff, at H0
-        [did(3), 'running', 2, FRONTIER, H0, null], // a slice in flight at H0
-        [did(4), 'failed', 6, FRONTIER, H0, 'repository_changed'],
-        [did(5), 'complete', 3, null, H0, null],
+        // [did, state, job generation, restarts, frontier, head, due_at, failure]
+        [did(1), 'pending', 9, 0, null, null, T0 + 60_000, null], // queued, walk not started
+        [did(2), 'pending', 9, 1, FRONTIER, H0, T0 + 60_000, null], // between slices at H0
+        [did(3), 'running', 9, 2, FRONTIER, H0, T0 + 60_000, null], // a slice in flight at H0
+        [did(4), 'failed', 9, 6, FRONTIER, H0, T0 + 3_600_000, 'repository_changed'], // in backoff
+        [did(5), 'complete', 9, 3, null, H0, T0 + 60_000, null],
+        [did(6), 'running', 8, 2, FRONTIER, H0, T0 + 60_000, null], // superseded by a deactivation
       ] as const;
-      for (const [d, state, restarts, frontier, head, failure] of jobs) {
+      for (const [d, state, generation, restarts, frontier, head, due, failure] of jobs) {
         db.run('INSERT INTO users(did, joined_at, generation) VALUES (?, ?, 9)', d, T0_STORAGE);
         db.run(
           `INSERT INTO repo_jobs(did, kind, state, generation, reason, head_rev, head_cid, frontier_json, restarts,
-             reactivate, due_at, failure_code, updated_at_ms)
-           VALUES (?, 'snapshot', ?, 9, 'gap', '3l2aaaaaaaa22', ?, ?, ?, 1, ?, ?, ?)`,
+             reactivate, due_at, attempts, failure_code, updated_at_ms)
+           VALUES (?, 'snapshot', ?, ?, 'gap', '3l2aaaaaaaa22', ?, ?, ?, 1, ?, 0, ?, ?)`,
           d,
           state,
+          generation,
           head,
           frontier,
           restarts,
-          T0 + 60_000,
+          due,
           failure,
           T0 - 1_000,
         );
       }
       const users = db.all('SELECT * FROM users ORDER BY did');
+      const jobRows = () =>
+        db.all(
+          `SELECT did, state, generation, reason, head_rev, head_cid, frontier_json, restarts, reactivate, due_at,
+             attempts, failure_code, updated_at_ms FROM repo_jobs WHERE kind = 'snapshot' ORDER BY did`,
+        );
 
-      const results = jobs.map(([d]) => scheduleSnapshot(db, d, 'coalesced', T0));
-      expect(results).toEqual([
-        { status: 'already', generation: 9, state: 'pending' },
-        { status: 'already', generation: 9, state: 'pending' },
-        { status: 'scheduled', generation: 9 },
-        { status: 'scheduled', generation: 9 },
-        { status: 'scheduled', generation: 9 },
-      ]);
-      const after = db.all(
-        `SELECT did, state, generation, reason, head_rev, head_cid, frontier_json, restarts, reactivate, due_at,
-           failure_code, updated_at_ms FROM repo_jobs WHERE kind = 'snapshot' ORDER BY did`,
-      );
-      const open = { generation: 9, head_rev: '3l2aaaaaaaa22', head_cid: null, frontier_json: null, reactivate: 1 };
-      expect(after).toEqual([
-        // Not started: nothing to restart, the epoch is unchanged; only pulled forward.
+      // Three requests in a row (an attacker's notify flood is many more): the
+      // walks in progress keep their frontier, head, epoch, due time and lease.
+      for (let n = 1; n <= 3; n++) {
+        const results = jobs.map(([d]) => scheduleSnapshot(db, d, 'coalesced', T0 + n));
+        expect(results).toEqual([
+          { status: 'already', generation: 9, state: 'pending' },
+          { status: 'already', generation: 9, state: 'pending' },
+          { status: 'already', generation: 9, state: 'running' },
+          { status: 'already', generation: 9, state: 'failed' },
+          // The complete job (and then the superseded walk) is (re)created once,
+          // after which it is a pending walk not yet started.
+          n === 1 ? { status: 'scheduled', generation: 9 } : { status: 'already', generation: 9, state: 'pending' },
+          n === 1 ? { status: 'scheduled', generation: 9 } : { status: 'already', generation: 9, state: 'pending' },
+        ]);
+      }
+      const kept = { generation: 9, head_rev: '3l2aaaaaaaa22', reactivate: 1 };
+      expect(jobRows()).toEqual([
+        // Not started: its later claim covers every request; only pulled forward.
         {
           did: did(1),
           state: 'pending',
           reason: 'gap',
+          head_cid: null,
+          frontier_json: null,
           restarts: 0,
-          due_at: T0,
+          due_at: T0 + 1,
+          attempts: 0,
           failure_code: null,
-          updated_at_ms: T0,
-          ...open,
+          updated_at_ms: T0 + 3,
+          ...kept,
         },
-        // A persisted walk at H0 is dropped: the next slice walks from getLatestCommit, epoch 1 → 2.
+        // Paused between slices: it resumes its frontier at H0 when due, epoch unchanged;
+        // three requests, one rescan when it completes.
         {
           did: did(2),
           state: 'pending',
           reason: 'gap',
-          restarts: 2,
-          due_at: T0,
+          head_cid: H0,
+          frontier_json: FRONTIER,
+          restarts: 1,
+          due_at: T0 + 60_000,
+          attempts: 3,
           failure_code: null,
-          updated_at_ms: T0,
-          ...open,
+          updated_at_ms: T0 - 1_000,
+          ...kept,
         },
-        // The in-flight slice's (running, generation 9, restarts 2, H0) no longer matches.
+        // In flight: still running with the lease token it claimed (T0 - 1000), so its
+        // guarded writes still land.
         {
           did: did(3),
-          state: 'pending',
+          state: 'running',
           reason: 'gap',
-          restarts: 3,
-          due_at: T0,
+          head_cid: H0,
+          frontier_json: FRONTIER,
+          restarts: 2,
+          due_at: T0 + 60_000,
+          attempts: 3,
           failure_code: null,
-          updated_at_ms: T0,
-          ...open,
+          updated_at_ms: T0 - 1_000,
+          ...kept,
         },
-        // A failed job (nothing in flight) is a fresh attempt.
+        // Failed: its backoff, failure and restarts are not reset by requests.
         {
           did: did(4),
-          state: 'pending',
+          state: 'failed',
           reason: 'gap',
-          restarts: 0,
-          due_at: T0,
-          failure_code: null,
-          updated_at_ms: T0,
-          ...open,
+          head_cid: H0,
+          frontier_json: FRONTIER,
+          restarts: 6,
+          due_at: T0 + 3_600_000,
+          attempts: 0,
+          failure_code: 'repository_changed',
+          updated_at_ms: T0 - 1_000,
+          ...kept,
         },
-        // A complete job is re-created with the new reason.
+        // Complete: re-created fresh with the new reason.
         {
           did: did(5),
           state: 'pending',
           reason: 'coalesced',
+          head_cid: null,
+          frontier_json: null,
           restarts: 0,
-          due_at: T0,
+          due_at: T0 + 1,
+          attempts: 0,
           failure_code: null,
-          updated_at_ms: T0,
-          ...open,
+          updated_at_ms: T0 + 3,
+          ...kept,
+        },
+        // A walk of generation 8: restarted fresh at generation 9 (its slice misses the
+        // generation guard), then an ordinary not-started walk.
+        {
+          did: did(6),
+          state: 'pending',
+          reason: 'gap',
+          head_cid: null,
+          frontier_json: null,
+          restarts: 0,
+          due_at: T0 + 1,
+          attempts: 0,
+          failure_code: null,
+          updated_at_ms: T0 + 3,
+          ...kept,
         },
       ]);
       // The users rows are never written (a deactivation still supersedes the job).
       expect(db.all('SELECT * FROM users ORDER BY did')).toEqual(users);
-      expect(counterValue(db, 'snapshot_scheduled', 'coalesced')).toBe(3);
+      expect(counterValue(db, 'snapshot_scheduled', 'coalesced')).toBe(2);
+      expect(counterValue(db, 'snapshot_rescan', 'coalesced')).toBe(6);
+    });
+  });
+
+  it('reclaimSnapshotLeases returns orphaned running rows to pending with frontier, head and restarts kept', async () => {
+    await runInDurableObject(stubFor('admission-reclaim'), (i: HarnessDO) => {
+      const db = i.db;
+      const H0 = 'bafyreih0h0h0h0h0h0h0h0h0h0h0h0h0h0h0h0h0h0h0h0h0h0h0h0h0';
+      const FRONTIER = '{"stack":[],"lastKey":"com.example.atmusic.scrobble/r10"}';
+      const jobs = [
+        // [did, state, lease token updated_at_ms]
+        [did(1), 'running', T0 - SNAPSHOT_LEASE_MS], // lease expired
+        [did(2), 'running', T0 - SNAPSHOT_LEASE_MS + 1], // a live slice
+        [did(3), 'pending', T0 - 2 * SNAPSHOT_LEASE_MS], // between slices: not running, untouched
+        [did(4), 'running', T0 + 5_000], // a token ahead of the clock
+      ] as const;
+      for (const [d, state, token] of jobs) {
+        db.run('INSERT INTO users(did, joined_at, generation) VALUES (?, ?, 4)', d, T0_STORAGE);
+        db.run(
+          `INSERT INTO repo_jobs(did, kind, state, generation, reason, head_rev, head_cid, frontier_json, restarts,
+             due_at, attempts, updated_at_ms)
+           VALUES (?, 'snapshot', ?, 4, 'admission', '3l2aaaaaaaa22', ?, ?, 2, ?, 1, ?)`,
+          d,
+          state,
+          H0,
+          FRONTIER,
+          T0 + 60_000,
+          token,
+        );
+      }
+      const jobRows = () =>
+        db.all(
+          `SELECT did, state, head_cid, frontier_json, restarts, due_at, attempts, updated_at_ms FROM repo_jobs
+           ORDER BY did`,
+        );
+      const walk = { head_cid: H0, frontier_json: FRONTIER, restarts: 2, attempts: 1 };
+      expect(SNAPSHOT_LEASE_MS).toBe(900_000);
+
+      // In a live instance: only the expired lease, fenced by a new token.
+      expect(reclaimSnapshotLeases(db, T0)).toEqual([did(1)]);
+      expect(jobRows()).toEqual([
+        { did: did(1), state: 'pending', due_at: T0, updated_at_ms: T0, ...walk },
+        { did: did(2), state: 'running', due_at: T0 + 60_000, updated_at_ms: T0 - SNAPSHOT_LEASE_MS + 1, ...walk },
+        { did: did(3), state: 'pending', due_at: T0 + 60_000, updated_at_ms: T0 - 2 * SNAPSHOT_LEASE_MS, ...walk },
+        { did: did(4), state: 'running', due_at: T0 + 60_000, updated_at_ms: T0 + 5_000, ...walk },
+      ]);
+      // A slice that held did(1)'s old lease misses its guard and writes nothing.
+      expect(
+        db.run(
+          `UPDATE repo_jobs SET frontier_json = 'late' WHERE did = ? AND kind = 'snapshot'
+             AND state = 'running' AND generation = 4 AND updated_at_ms = ?`,
+          did(1),
+          T0 - SNAPSHOT_LEASE_MS,
+        ),
+      ).toMatchObject({ rowsWritten: 0 });
+      expect(db.one('SELECT frontier_json FROM repo_jobs WHERE did = ?', did(1))).toEqual({ frontier_json: FRONTIER });
+
+      // At IndexDO start-up every running row is orphaned (after eviction no slice survives),
+      // and each new token is strictly newer than the one its slice held, even ahead of the clock.
+      expect(reclaimSnapshotLeases(db, T0, { all: true })).toEqual([did(2), did(4)]);
+      expect(jobRows()).toEqual([
+        { did: did(1), state: 'pending', due_at: T0, updated_at_ms: T0, ...walk },
+        { did: did(2), state: 'pending', due_at: T0, updated_at_ms: T0, ...walk },
+        { did: did(3), state: 'pending', due_at: T0 + 60_000, updated_at_ms: T0 - 2 * SNAPSHOT_LEASE_MS, ...walk },
+        { did: did(4), state: 'pending', due_at: T0, updated_at_ms: T0 + 5_001, ...walk },
+      ]);
+      expect(counterValue(db, 'snapshot_reclaimed', 'lease')).toBe(1);
+      expect(counterValue(db, 'snapshot_reclaimed', 'startup')).toBe(2);
+      // Nothing left to reclaim.
+      expect(reclaimSnapshotLeases(db, T0, { all: true })).toEqual([]);
     });
   });
 

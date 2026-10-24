@@ -30,30 +30,48 @@
 //   it, and a proof rejection that schedules a snapshot leaves `users`
 //   byte-identical (ADR §7.6);
 // - no job, or a complete one: (re)created `pending`, due now, with `reason`,
-//   a cleared frontier, restarts, attempts and failure; subject to the 1,024
-//   pending cap (`busy`, nothing written);
-// - an open job (pending, running or failed) is restarted at the newest head:
-//   `state='pending'`, due now, `frontier_json` and `head_cid` cleared, reason
-//   kept (a failed job also has its failure cleared). Every caller replaces
-//   hints by this snapshot (coalescing deletes them; give-up, record_not_found,
-//   stale_head, no_proof, missing_block delete the one hint), so the snapshot
-//   must cover records written after any head an earlier walk started from: a
-//   walk that resumed its old frontier (pending between slices or after a
-//   backoff) or a running slice that kept going would finish at that older
-//   head and never apply those records or deletes.
-// - Walk epoch: when the job's walk had started (running, or a frontier or
-//   head is persisted) the restart increments `restarts`, the walk epoch W4-01
-//   compare-and-sets on (the W4-01 entry of docs/planning/workers-waves.json
-//   holds the contract): every write of an in-flight slice (frontier, head,
-//   state, applySnapshotChunk, completion) requires the row to still be
-//   `running` with the generation, `restarts` and `head_cid` that slice
-//   claimed, so a slice in flight across this restart writes nothing. A job
-//   whose walk has not started keeps its `restarts`; a failed job (no slice
-//   can be in flight) starts a fresh attempt at `restarts = 0`.
+//   a cleared frontier and head, restarts, attempts and failure; subject to
+//   the 1,024 pending cap (`busy`, nothing written);
+// - an open job is never discarded or slowed down by a request, because the
+//   requests are driven by untrusted hints (notify is unauthenticated, API.md
+//   N1) and a restart per request would let anyone keep a walk from ever
+//   finishing. Every caller has just deleted the hints this snapshot replaces,
+//   so the job must still end at a head newer than the request:
+//   - walk not started (`pending`, frontier and head NULL): its claim and
+//     getLatestCommit come later, so it covers the request; it is only pulled
+//     forward (`due_at = min(due_at, now)`);
+//   - walk started (`running`, or `pending` with a frontier or head) at the
+//     current generation: `attempts = attempts + 1`, nothing else. For a
+//     snapshot row `attempts` is the rescan request count: the claim of a
+//     fresh walk resets it to 0, and W4-01's completion re-walks the newest
+//     head (fresh, keeping the CID cache, so it is incremental) when it is
+//     above 0. state, frontier_json, head_cid, restarts, due_at and the lease
+//     token `updated_at_ms` are untouched, so the slice in flight keeps its
+//     lease and the walk resumes its frontier; many requests during one walk
+//     cost one rescan (counter `snapshot_rescan`);
+//   - walk started at an older generation (a deactivation superseded it):
+//     restarted fresh at the current generation (frontier, head, restarts and
+//     attempts cleared, due now); the old walk's slices miss the generation
+//     guard;
+//   - `failed`: its failure, backoff (`due_at`) and `restarts` are kept; its
+//     retry is a fresh walk from getLatestCommit, so it covers the request.
+//   Only a missing_block restart (W4-01) ever increments `restarts`, the ADR
+//   §5.7(8) bound.
 // - In every case `reactivate` is preserved (OR-ed with `o.reactivate`, never
 //   cleared) and `head_rev`, the snapshot floor (apply-snapshot.ts), is kept.
 //   The reason of an open job is kept so a gap-recovery job (`GAP_REASON`)
 //   stays one until it completes (indexing() reads it).
+// The full claim / lease / completion contract is the W4-01 entry of
+// docs/planning/workers-waves.json.
+//
+// reclaimSnapshotLeases(db, now, o) — orphaned `running` rows (W4-01 calls it
+// at IndexDO start-up with `all: true`, when no slice of an earlier instance
+// can be in flight, and before each snapshot step with the default lease):
+// a row whose lease token `updated_at_ms` is older than SNAPSHOT_LEASE_MS (or
+// every running row with `all`) goes back to `pending`, due now, with its
+// frontier, head and restarts kept, so the walk resumes where it stopped, and
+// with a new token (`max(updated_at_ms + 1, now)`), so a slice that outlived
+// its lease misses its guard and writes nothing.
 //
 // scheduleStatusCheck(db, did, reason, now) — a `status` repo job (the drain
 // creates it on RepoDeactivated / RepoTakendown / RepoSuspended / RepoNotFound;
@@ -71,6 +89,16 @@ export const ADMISSION_WINDOW_MS = 3_600_000;
 export const ADMISSION_REASON = 'admission';
 export const ADMITTED_COUNTER = 'admitted';
 export const SNAPSHOT_SCHEDULED_COUNTER = 'snapshot_scheduled';
+/** A request absorbed by a walk in progress (one rescan at its completion). */
+export const SNAPSHOT_RESCAN_COUNTER = 'snapshot_rescan';
+/** Orphaned `running` snapshot rows reclaimed (label `startup` or `lease`). */
+export const SNAPSHOT_RECLAIMED_COUNTER = 'snapshot_reclaimed';
+/**
+ * A running snapshot slice renews its lease token with every guarded write; a
+ * token this old means the slice is gone (one slice is bounded by its
+ * subrequest budget and SafeFetch deadlines, far below the 15 min alarm limit).
+ */
+export const SNAPSHOT_LEASE_MS = 15 * 60_000;
 
 export type AdmissionSource = 'jetstream' | 'notify' | 'reconcile' | 'discovery' | 'settings';
 
@@ -154,8 +182,9 @@ export function admit(
       `INSERT INTO repo_jobs(did, kind, state, generation, reason, due_at, updated_at_ms)
        VALUES (?, 'snapshot', 'pending', ?, ?, ?, ?)
        ON CONFLICT(did, kind) DO UPDATE SET state = 'pending', generation = excluded.generation,
-         reason = excluded.reason, frontier_json = NULL, restarts = 0, attempts = 0, failure_code = NULL,
-         due_at = excluded.due_at, updated_at_ms = excluded.updated_at_ms`,
+         reason = excluded.reason, frontier_json = NULL, head_cid = NULL, restarts = 0, attempts = 0,
+         failure_code = NULL, due_at = excluded.due_at,
+         updated_at_ms = max(repo_jobs.updated_at_ms + 1, excluded.updated_at_ms)`,
       did,
       generation,
       ADMISSION_REASON,
@@ -189,7 +218,8 @@ export interface ScheduleOptions {
 interface JobRow {
   state: RepoJobState;
   generation: number;
-  reactivate: number;
+  frontier_json: string | null;
+  head_cid: string | null;
 }
 
 /** Schedule (or pull forward) the snapshot job of a known DID. */
@@ -209,31 +239,58 @@ export function scheduleSnapshot(
     const user = loadUser(db, did);
     if (user === null) return { status: 'unknown' };
     const job = db.one<JobRow>(
-      `SELECT state, generation, reactivate FROM repo_jobs WHERE did = ? AND kind = 'snapshot'`,
+      `SELECT state, generation, frontier_json, head_cid FROM repo_jobs WHERE did = ? AND kind = 'snapshot'`,
       did,
     );
     const generation = user.generation;
 
     if (job !== null && job.state !== 'complete') {
-      // Open job: keep its reason and restart it at the newest head (see the header).
-      // SQLite evaluates every SET expression on the old row.
+      // Open job (see the header): never discarded or delayed by a request.
+      const where = `WHERE did = ? AND kind = 'snapshot'`;
+      const started = job.state === 'running' || job.frontier_json !== null || job.head_cid !== null;
+      if (job.state === 'failed') {
+        // Backoff, failure and restarts kept; the retry is a fresh walk.
+        db.run(
+          `UPDATE repo_jobs SET generation = ?, reactivate = max(reactivate, ?) ${where}`,
+          generation,
+          reactivate,
+          did,
+        );
+        return { status: 'already', generation, state: job.state };
+      }
+      if (!started) {
+        db.run(
+          `UPDATE repo_jobs SET generation = ?, reactivate = max(reactivate, ?), due_at = min(due_at, ?),
+             updated_at_ms = max(updated_at_ms + 1, ?) ${where}`,
+          generation,
+          reactivate,
+          now,
+          now,
+          did,
+        );
+        return { status: 'already', generation, state: job.state };
+      }
+      if (job.generation === generation) {
+        // A walk in progress: one rescan request; the slice in flight keeps its lease.
+        db.run(
+          `UPDATE repo_jobs SET attempts = attempts + 1, reactivate = max(reactivate, ?) ${where}`,
+          reactivate,
+          did,
+        );
+        incrementCounter(db, SNAPSHOT_RESCAN_COUNTER, reason);
+        return { status: 'already', generation, state: job.state };
+      }
+      // A walk of an older generation: superseded, so it restarts fresh at this one.
       db.run(
         `UPDATE repo_jobs SET state = 'pending', generation = ?, reactivate = max(reactivate, ?),
-           due_at = min(due_at, ?), updated_at_ms = ?,
-           failure_code = CASE WHEN state = 'failed' THEN NULL ELSE failure_code END,
-           restarts = CASE
-             WHEN state = 'failed' THEN 0
-             WHEN state = 'running' OR frontier_json IS NOT NULL OR head_cid IS NOT NULL THEN restarts + 1
-             ELSE restarts END,
-           frontier_json = NULL, head_cid = NULL
-         WHERE did = ? AND kind = 'snapshot'`,
+           frontier_json = NULL, head_cid = NULL, restarts = 0, attempts = 0, failure_code = NULL,
+           due_at = min(due_at, ?), updated_at_ms = max(updated_at_ms + 1, ?) ${where}`,
         generation,
         reactivate,
         now,
         now,
         did,
       );
-      if (job.state === 'pending') return { status: 'already', generation, state: job.state };
       incrementCounter(db, SNAPSHOT_SCHEDULED_COUNTER, reason);
       return { status: 'scheduled', generation };
     }
@@ -245,7 +302,7 @@ export function scheduleSnapshot(
        ON CONFLICT(did, kind) DO UPDATE SET state = 'pending', generation = excluded.generation,
          reason = excluded.reason, reactivate = max(repo_jobs.reactivate, excluded.reactivate),
          frontier_json = NULL, head_cid = NULL, restarts = 0, attempts = 0, failure_code = NULL,
-         due_at = excluded.due_at, updated_at_ms = excluded.updated_at_ms`,
+         due_at = excluded.due_at, updated_at_ms = max(repo_jobs.updated_at_ms + 1, excluded.updated_at_ms)`,
       did,
       generation,
       reason,
@@ -255,6 +312,41 @@ export function scheduleSnapshot(
     );
     incrementCounter(db, SNAPSHOT_SCHEDULED_COUNTER, reason);
     return { status: 'scheduled', generation };
+  });
+}
+
+export interface ReclaimOptions {
+  /** Every running row (IndexDO start-up: no slice of an earlier instance survives). */
+  all?: boolean;
+  leaseMs?: number;
+}
+
+/**
+ * Return orphaned `running` snapshot rows to `pending` with their frontier,
+ * head and restarts kept and a new lease token (see the header). Returns the
+ * reclaimed DIDs.
+ */
+export function reclaimSnapshotLeases(db: Db, now: number, o: ReclaimOptions = {}): string[] {
+  assertEpochMs('now', now);
+  const all = o.all === true;
+  const leaseMs = limitOf(o.leaseMs, SNAPSHOT_LEASE_MS, 'leaseMs');
+  return db.tx((): string[] => {
+    const reclaimed = db
+      .all<{ did: string }>(
+        `UPDATE repo_jobs SET state = 'pending', due_at = min(due_at, ?), updated_at_ms = max(updated_at_ms + 1, ?)
+         WHERE kind = 'snapshot' AND state = 'running' AND (? = 1 OR updated_at_ms <= ?)
+         RETURNING did`,
+        now,
+        now,
+        all ? 1 : 0,
+        now - leaseMs,
+      )
+      .map((r) => r.did)
+      .sort();
+    for (let n = 0; n < reclaimed.length; n++) {
+      incrementCounter(db, SNAPSHOT_RECLAIMED_COUNTER, all ? 'startup' : 'lease');
+    }
+    return reclaimed;
   });
 }
 
