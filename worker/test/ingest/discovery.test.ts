@@ -8,17 +8,19 @@
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { type FixtureKit, seedReadModels } from '@atmusic/atproto/test-support/read-models';
+import type { FixtureTransport } from '@atmusic/atproto/test-support/router-transport';
 import { describe, expect, it } from 'vitest';
 import type { Db } from '../../src/do/db';
 import {
   DISCOVERY_STATE_COUNTER,
+  type DiscoveryReport,
   discover,
   gapDiscoveryPending,
   LIST_REPOS_BY_COLLECTION,
   readDiscoveryState,
   requestGapDiscovery,
 } from '../../src/do/ingest/discovery';
-import { dueAt } from '../../src/do/timers';
+import { dueAt, runDue, type TimerHandlers } from '../../src/do/timers';
 import type { HarnessDO } from '../harness/harness-do';
 import { NOW_STORAGE, seedUser } from '../write/support';
 import { depsFor, kit } from './drain-support';
@@ -201,6 +203,95 @@ describe('relay discovery', () => {
         [S, s[9]],
         [k.collections.follow, null],
       ]);
+      expect(snapshotJobs(db).map((j) => j.did)).toEqual(s);
+      expect(projection(db)).toEqual(EMPTY);
+      expect(recordCalls(k)).toBe(0);
+    });
+  });
+
+  it('a gap request that lands while a relay page is in flight survives the run', async () => {
+    const k = await kit();
+    const S = k.collections.scrobble;
+    const F = k.collections.follow;
+    const s = Array.from({ length: 12 }, (_, i) => syntheticDid('s', i));
+    k.relay.add(S, ...s);
+
+    await runInDurableObject(stubFor('discovery-gap-race'), async (i: HarnessDO, ctx: DurableObjectState) => {
+      const db = i.db;
+      const base = depsFor(db, k);
+      // A daily pass is one page into the scrobble listing; the next run is due tomorrow.
+      await discover(base, T0, { pageLimit: 5, pages: 1 });
+      expect(readDiscoveryState(db)).toEqual({ pass: 'daily', collection: 0, cursor: s[4], pages: 1 });
+      expect(dueAt(db, 'discovery')).toBe(T0 + DAY);
+
+      // The injected transport lets gap recovery start (the DO input gate is open
+      // during outbound I/O) after the relay answered and before the run sees the page.
+      const T1 = T0 + DAY;
+      let gapRequests = 0;
+      let armed = true;
+      const inner = k.transport;
+      const transport = Object.assign(
+        async (req: Request) => {
+          const res = await inner(req);
+          if (armed && new URL(req.url).pathname.endsWith(LIST_REPOS_BY_COLLECTION)) {
+            armed = false;
+            gapRequests++;
+            requestGapDiscovery(db, T1);
+          }
+          return res;
+        },
+        { fixture: true as const, calls: inner.calls, hostnames: inner.hostnames },
+      ) satisfies FixtureTransport;
+      const m = { ...base, transport };
+      const reports: DiscoveryReport[] = [];
+      const noop = async () => {};
+      const handlers: TimerHandlers = {
+        drain: noop,
+        snapshot: noop,
+        'jetstream-watchdog': noop,
+        'status-sweep': noop,
+        'identity-sweep': noop,
+        discovery: async (at) => {
+          reports.push(await discover(m, at, { pageLimit: 5, pages: 1 }));
+        },
+        gc: noop,
+      };
+      k.resetCalls();
+
+      // The alarm claims the daily run. Its page (s5..s9) arrives after the gap request
+      // reset the position: the run admits nothing from it, writes no position, and
+      // leaves the gap pass due now instead of pushing the timer to tomorrow.
+      const first = await runDue(ctx.storage, db, T1, handlers, { maxRuns: 7 });
+      // (`snapshot` is the one-shot timer the first daily run armed for its admissions.)
+      expect(first.ran).toEqual(['snapshot', 'discovery']);
+      expect(gapRequests).toBe(1);
+      expect(reports[0]).toMatchObject({ pass: 'daily', pages: 0, admitted: [], stop: 'superseded' });
+      expect(readDiscoveryState(db)).toEqual({ pass: 'gap', collection: 0, cursor: null, pages: 0 });
+      expect(gapDiscoveryPending(db)).toBe(true);
+      expect(dueAt(db, 'discovery')).toBe(T1);
+      expect(snapshotJobs(db).map((j) => j.did)).toEqual(s.slice(0, 5));
+
+      // The next alarms run the gap pass from the start of the listing to its end, a
+      // minute apart (one page per run here), and only then is the pass over.
+      for (let n = 0, at = T1; n < 10 && gapDiscoveryPending(db); n++, at += 60_000) {
+        expect(dueAt(db, 'discovery')).toBe(at);
+        await runDue(ctx.storage, db, at, handlers, { maxRuns: 7 });
+      }
+      expect(gapDiscoveryPending(db)).toBe(false);
+      expect(reports.slice(1).map((r) => [r.pass, r.stop])).toEqual([
+        ['gap', 'page_budget'],
+        ['gap', 'page_budget'],
+        ['gap', 'page_budget'],
+        ['gap', 'complete'],
+      ]);
+      expect(relayPages(k).map((p) => [p.collection, p.cursor])).toEqual([
+        [S, s[4]], // the superseded daily page
+        [S, null],
+        [S, s[4]],
+        [S, s[9]],
+        [F, null],
+      ]);
+      expect(dueAt(db, 'discovery')).toBe(T1 + 3 * 60_000 + DAY);
       expect(snapshotJobs(db).map((j) => j.did)).toEqual(s);
       expect(projection(db)).toEqual(EMPTY);
       expect(recordCalls(k)).toBe(0);

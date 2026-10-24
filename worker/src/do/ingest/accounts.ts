@@ -52,6 +52,21 @@
 // sweeps.ts runs them at the start of every `status-sweep` slice, within the
 // slice's 200 checks and subrequest budget, and `scheduleStatusJobsTimer` pulls
 // that timer forward to the earliest due job (W5-01 calls it after a drain).
+// A claim also sets `due_at = now`, so a running row's `due_at` is its claim
+// time (a re-request while it runs keeps `min(due_at, now)`, never moving it).
+//
+// reclaimStatusLeases(db, now, o): a `running` status row whose check never
+// finished (the IndexDO was evicted between claim and finish) would otherwise
+// stay `running` forever, invisible to every due query, so error-driven
+// detection (ADR F1 path (a)) would be off for that DID. A running row claimed
+// at least STATUS_JOB_LEASE_MS ago (or every running row with `all`, at IndexDO
+// start-up, when no check of an earlier instance can be in flight) goes back to
+// `pending`, due now, with a new token (`max(updated_at_ms + 1, now)`), so a
+// check that outlived its lease finishes as "requested again" and the job runs
+// once more. sweeps.ts calls it (default lease) at the start of every
+// `status-sweep` slice; W5-01 calls it with `all: true` at start-up. One check
+// is bounded by its SafeFetch deadlines (identity plus one 10 s fetch), far
+// below the lease.
 //
 // Nothing here holds a transaction across an await: every `db.tx` opens after
 // the fetch it depends on completed (ADR F3).
@@ -89,11 +104,15 @@ export const STATUS_JOB_BACKOFF_BASE_MS = 1_000;
 export const STATUS_JOB_BACKOFF_CAP_MS = 3_600_000;
 /** A status job pulls the `status-sweep` timer no closer than this to now. */
 export const STATUS_JOB_MIN_INTERVAL_MS = 60_000;
+/** A `running` status job claimed this long ago is orphaned (see reclaimStatusLeases). */
+export const STATUS_JOB_LEASE_MS = 15 * 60_000;
 
 export const STATUS_CHECKED_COUNTER = 'status_checked';
 export const STATUS_FAILED_COUNTER = 'status_check_failed';
 export const ACCOUNT_HIDDEN_COUNTER = 'account_hidden';
 export const ACCOUNT_REACTIVATING_COUNTER = 'account_reactivating';
+/** Orphaned `running` status jobs reclaimed (label `startup` or `lease`). */
+export const STATUS_RECLAIMED_COUNTER = 'status_reclaimed';
 
 /** XRPC errors that are an answer about the account, not a failure. */
 const XRPC_STATUS: Readonly<Record<string, InactiveStatus>> = {
@@ -331,14 +350,50 @@ export function dueStatusJobs(db: Db, now: number, limit: number): StatusJobRow[
 export function claimStatusJob(db: Db, did: string, now: number): number | null {
   return (
     db.one<{ updated_at_ms: number }>(
-      `UPDATE repo_jobs SET state = 'running', updated_at_ms = max(updated_at_ms + 1, ?)
+      `UPDATE repo_jobs SET state = 'running', due_at = ?, updated_at_ms = max(updated_at_ms + 1, ?)
        WHERE did = ? AND kind = 'status' AND state IN ('pending','failed') AND due_at <= ?
        RETURNING updated_at_ms`,
+      now,
       now,
       did,
       now,
     )?.updated_at_ms ?? null
   );
+}
+
+export interface StatusReclaimOptions {
+  /** Every running row (IndexDO start-up: no check of an earlier instance survives). */
+  all?: boolean;
+  leaseMs?: number;
+}
+
+/**
+ * Return orphaned `running` status jobs to `pending`, due now, with a new
+ * lease token (see the header). Returns the reclaimed DIDs, sorted.
+ */
+export function reclaimStatusLeases(db: Db, now: number, o: StatusReclaimOptions = {}): string[] {
+  assertEpochMs('now', now);
+  const all = o.all === true;
+  const leaseMs = o.leaseMs ?? STATUS_JOB_LEASE_MS;
+  if (!Number.isSafeInteger(leaseMs) || leaseMs < 0) throw new RangeError('leaseMs must be a non-negative integer');
+  return db.tx((): string[] => {
+    const reclaimed = db
+      .all<{ did: string }>(
+        `UPDATE repo_jobs SET state = 'pending', due_at = min(due_at, ?), updated_at_ms = max(updated_at_ms + 1, ?)
+         WHERE kind = 'status' AND state = 'running' AND (? = 1 OR due_at <= ?)
+         RETURNING did`,
+        now,
+        now,
+        all ? 1 : 0,
+        now - leaseMs,
+      )
+      .map((r) => r.did)
+      .sort();
+    for (let n = 0; n < reclaimed.length; n++) {
+      counter(db, STATUS_RECLAIMED_COUNTER, all ? 'startup' : 'lease');
+    }
+    return reclaimed;
+  });
 }
 
 /** Finish a claimed status job after the check (see the header). */

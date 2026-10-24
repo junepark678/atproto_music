@@ -2,7 +2,8 @@
 // (com.atproto.sync.getRepoStatus), never from relay events (A17), against
 // real DO SQLite and the fixture network. Proves M4.1.1/event_types (account
 // changes come from a proof-fetch error and the getRepoStatus sweep) and
-// M5.3.3/account_state (deactivation hides at once; reactivation stays hidden
+// M5.3.3/account_state (a followed account that is taken down leaves its
+// followers' following feed at once and stays out of it, while reactivating,
 // until a complete snapshot commits under the current generation).
 //
 // The index is seeded through the real ingestion path: the shared fixture is
@@ -16,7 +17,14 @@ import { env } from 'cloudflare:workers';
 import { FIXTURE_USERS, type FixtureKit, seedReadModels } from '@atmusic/atproto/test-support/read-models';
 import { describe, expect, it } from 'vitest';
 import type { Db } from '../../src/do/db';
-import { GET_REPO_STATUS, scheduleStatusJobsTimer } from '../../src/do/ingest/accounts';
+import {
+  claimStatusJob,
+  GET_REPO_STATUS,
+  nextStatusJobDue,
+  reclaimStatusLeases,
+  scheduleStatusJobsTimer,
+} from '../../src/do/ingest/accounts';
+import { scheduleStatusCheck } from '../../src/do/ingest/admission';
 import { statusSweep } from '../../src/do/ingest/sweeps';
 import { drain } from '../../src/do/ingest/verify-drain';
 import { feed } from '../../src/do/read/feed';
@@ -42,6 +50,10 @@ function historyOf(m: Deps, did: string): string[] {
 
 function globalFeed(m: Deps): string[] {
   return feed(m, { scope: 'global', limit: 100 }).rows.map((r) => rkey(r.uri));
+}
+
+function followingFeed(m: Deps, viewer: string): string[] {
+  return feed(m, { scope: 'following', viewer, limit: 100 }).rows.map((r) => rkey(r.uri));
 }
 
 function user(db: Db, did: string) {
@@ -181,92 +193,181 @@ describe('account status', () => {
   });
 
   it('reactivated status schedules snapshot and keeps hidden until completion', async () => {
+    // M5.3.3/account_state: Bob, whom Alice follows, is taken down and comes back.
+    // His scrobble leaves Alice's following feed (and the global feed) while he is
+    // inactive and while his reactivation snapshot is pending, and returns only
+    // after that snapshot completes under the current generation.
     const k = await kit();
     const alice = k.users.Alice.did;
     const bob = k.users.Bob.did;
+    const carol = k.users.Carol.did;
 
     await runInDurableObject(stubFor('accounts-reactivate'), async (i: HarnessDO) => {
       const db = i.db;
       const m = depsFor(db, k);
       await seedIndexed(db, m, k);
-      const genBefore = user(db, alice)!.generation as number;
+      const genBefore = user(db, bob)!.generation as number;
+      expect(followingFeed(m, alice)).toEqual(['r09']);
+      expect(globalFeed(m)).toEqual(['r09', 'r10', 'r07', 'r01', 'r02', 'r03', 'r04', 'r05', 'r06']);
+      expect(await profile(m, alice)).toMatchObject({ followingCount: 1 });
 
       // Takedown, seen by the hourly sweep.
-      k.pds.Alice.takedown(alice);
+      k.pds.Bob.takedown(bob);
       const first = await statusSweep(m, T0);
-      expect(first.checked.find((c) => c.did === alice)).toEqual({
-        did: alice,
-        source: 'sweep',
-        outcome: 'inactive',
-        detail: 'takendown',
-      });
-      const hidden = user(db, alice)!;
+      expect([...first.checked].sort((a, b) => a.did.localeCompare(b.did))).toEqual([
+        { did: alice, source: 'sweep', outcome: 'active' },
+        { did: bob, source: 'sweep', outcome: 'inactive', detail: 'takendown' },
+        { did: carol, source: 'sweep', outcome: 'active' },
+      ]);
+      const hidden = user(db, bob)!;
       expect(hidden).toMatchObject({ active: 0, account_status: 'takendown', indexing_state: 'recovering' });
       const genHidden = hidden.generation as number;
       expect(genHidden).toBeGreaterThan(genBefore);
-      expect(historyOf(m, alice)).toEqual([]);
+      // Hidden from every read at once: the follower's following feed, the global feed,
+      // his history and his profile. The follower herself is unaffected.
+      expect(followingFeed(m, alice)).toEqual([]);
+      expect(globalFeed(m)).toEqual(['r10', 'r07', 'r01', 'r02', 'r03', 'r04', 'r05', 'r06']);
+      expect(historyOf(m, bob)).toEqual([]);
+      expect(await profile(m, bob)).toBeNull();
+      expect(historyOf(m, alice)).toEqual(ALICE_HISTORY);
+      // The Alice→Bob edge stays stored (hidden with its subject), so it comes back unchanged.
+      expect(db.all('SELECT actor, subject FROM follows')).toEqual([{ actor: alice, subject: bob }]);
 
       // Active again on the PDS: the next hourly check schedules the reactivation snapshot,
-      // and Alice stays hidden.
-      k.pds.Alice.reactivate(alice);
+      // and Bob stays hidden.
+      k.pds.Bob.reactivate(bob);
       k.resetCalls();
       const t1 = T0 + HOUR;
       const second = await statusSweep(m, t1);
-      expect(second.checked.find((c) => c.did === alice)).toEqual({
-        did: alice,
+      expect(second.checked.find((c) => c.did === bob)).toEqual({
+        did: bob,
         source: 'sweep',
         outcome: 'reactivating',
         detail: 'scheduled',
       });
-      expect(statusCalls(k, 'Alice')).toBe(1);
-      expect(user(db, alice)).toEqual({
+      expect(statusCalls(k, 'Bob')).toBe(1);
+      expect(user(db, bob)).toEqual({
         ...hidden,
         account_status: 'active',
         indexing_state: 'recovering',
         last_status_check_ms: t1,
       });
-      expect(jobs(db, alice)).toEqual([
+      expect(jobs(db, bob)).toEqual([
         { kind: 'snapshot', state: 'pending', reason: 'reactivation', reactivate: 1, generation: genHidden },
       ]);
-      expect(db.one("SELECT due_at FROM repo_jobs WHERE did = ? AND kind = 'snapshot'", alice)).toEqual({ due_at: t1 });
+      expect(db.one("SELECT due_at FROM repo_jobs WHERE did = ? AND kind = 'snapshot'", bob)).toEqual({ due_at: t1 });
       expect(dueAt(db, 'snapshot')).toBe(t1);
-      expect(historyOf(m, alice)).toEqual([]);
-      expect(await profile(m, alice)).toBeNull();
+      expect(followingFeed(m, alice)).toEqual([]);
+      expect(historyOf(m, bob)).toEqual([]);
+      expect(await profile(m, bob)).toBeNull();
 
       // Still active an hour later and the snapshot not finished: nothing new, still hidden.
       const t2 = T0 + 2 * HOUR;
       const third = await statusSweep(m, t2);
-      expect(third.checked.find((c) => c.did === alice)?.outcome).toBe('active');
-      expect(jobs(db, alice)).toEqual([
+      expect(third.checked.find((c) => c.did === bob)?.outcome).toBe('active');
+      expect(jobs(db, bob)).toEqual([
         { kind: 'snapshot', state: 'pending', reason: 'reactivation', reactivate: 1, generation: genHidden },
       ]);
-      expect(user(db, alice)).toMatchObject({ active: 0, generation: genHidden, last_status_check_ms: t2 });
-      expect(historyOf(m, alice)).toEqual([]);
+      expect(user(db, bob)).toMatchObject({ active: 0, generation: genHidden, last_status_check_ms: t2 });
+      expect(followingFeed(m, alice)).toEqual([]);
+      expect(historyOf(m, bob)).toEqual([]);
 
-      // A snapshot of the generation before the takedown can no longer activate her.
-      const head = k.repos.Alice.head!;
+      // A snapshot of the generation before the takedown can no longer activate him.
+      const head = k.repos.Bob.head!;
       const nowNs = BigInt(t2) * 1_000_000n;
       const stale = db.tx(() =>
-        completeSnapshot(db, { did: alice, generation: genBefore, headRev: head.rev, accountActive: true, nowNs }),
+        completeSnapshot(db, { did: bob, generation: genBefore, headRev: head.rev, accountActive: true, nowNs }),
       );
       expect(stale).toEqual({ outcome: 'superseded' });
-      expect(user(db, alice)).toMatchObject({ active: 0, indexing_state: 'recovering' });
-      expect(historyOf(m, alice)).toEqual([]);
+      expect(user(db, bob)).toMatchObject({ active: 0, indexing_state: 'recovering' });
+      expect(followingFeed(m, alice)).toEqual([]);
+      expect(globalFeed(m)).toEqual(['r10', 'r07', 'r01', 'r02', 'r03', 'r04', 'r05', 'r06']);
 
       // The reactivation snapshot completes under the current generation: visible again,
-      // with her history exactly as before.
+      // in the follower's following feed too, with his history exactly as before.
       const done = db.tx(() =>
-        completeSnapshot(db, { did: alice, generation: genHidden, headRev: head.rev, accountActive: true, nowNs }),
+        completeSnapshot(db, { did: bob, generation: genHidden, headRev: head.rev, accountActive: true, nowNs }),
       );
       expect(done).toEqual({ outcome: 'complete', active: true });
-      expect(user(db, alice)).toMatchObject({
+      expect(user(db, bob)).toMatchObject({
         active: 1,
         account_status: 'active',
         indexing_state: 'current',
         last_snapshot_at_ms: t2,
       });
+      expect(followingFeed(m, alice)).toEqual(['r09']);
+      expect(globalFeed(m)).toEqual(['r09', 'r10', 'r07', 'r01', 'r02', 'r03', 'r04', 'r05', 'r06']);
+      expect(historyOf(m, bob)).toEqual(['r09']);
+      expect(await profile(m, bob)).toMatchObject({ did: bob, totalScrobbles: 1, followerCount: 1 });
+    });
+  });
+
+  it('a status job orphaned in running by an eviction is reclaimed and run by a later sweep', async () => {
+    const k = await kit();
+    const alice = k.users.Alice.did;
+    const bob = k.users.Bob.did;
+    const carol = k.users.Carol.did;
+
+    await runInDurableObject(stubFor('accounts-status-lease'), async (i: HarnessDO) => {
+      const db = i.db;
+      const m = depsFor(db, k);
+      await seedIndexed(db, m, k);
+      // Every account was just swept, so no sweep check is due: only the job can see Alice.
+      db.run('UPDATE users SET last_status_check_ms = ?', T0);
+      k.pds.Alice.deactivate(alice);
+      enqueue(db, [hint(k, alice, k.collections.scrobble, 'r01', { source: 'notify' })]);
+      expect((await drain(m, T0)).outcomes.map((o) => o.outcome)).toEqual(['status_job']);
+      k.resetCalls();
+
+      // An instance claims the job, then is evicted before finishing it.
+      const claimedAt = T0 + 60_000;
+      expect(db.tx(() => claimStatusJob(db, alice, claimedAt))).not.toBeNull();
+      const jobRow = () =>
+        db.one("SELECT state, due_at, attempts FROM repo_jobs WHERE did = ? AND kind = 'status'", alice);
+      expect(jobRow()).toEqual({ state: 'running', due_at: claimedAt, attempts: 0 });
+      // A running row is invisible to the due queries: without a reclaim it would stay forever.
+      expect(nextStatusJobDue(db)).toBeNull();
+      expect(scheduleStatusJobsTimer(db, claimedAt)).toBeNull();
+
+      // The drain asks again while it is "running": the claim time (lease start) does not move.
+      expect(scheduleStatusCheck(db, alice, 'RepoDeactivated', claimedAt + 10 * 60_000)).toEqual({
+        status: 'scheduled',
+      });
+      expect(jobRow()).toEqual({ state: 'running', due_at: claimedAt, attempts: 0 });
+
+      // A sweep inside the lease leaves the claim alone: nothing checked, Alice still visible.
+      const early = await statusSweep(m, claimedAt + 14 * 60_000);
+      expect(early).toMatchObject({ checked: [], reclaimed: [], passedOver: 0 });
+      expect(statusCalls(k, 'Alice')).toBe(0);
+      expect(jobRow()).toMatchObject({ state: 'running' });
       expect(historyOf(m, alice)).toEqual(ALICE_HISTORY);
-      expect(await profile(m, bob)).toMatchObject({ followerCount: 1 });
+
+      // The first sweep past the 15 min lease reclaims it and runs it in the same slice.
+      const late = claimedAt + 15 * 60_000;
+      const report = await statusSweep(m, late);
+      expect(report.reclaimed).toEqual([alice]);
+      expect(report.checked).toEqual([{ did: alice, source: 'job', outcome: 'inactive', detail: 'deactivated' }]);
+      expect(statusCalls(k, 'Alice')).toBe(1);
+      expect([statusCalls(k, 'Bob'), statusCalls(k, 'Carol')]).toEqual([0, 0]);
+      expect(jobRow()).toEqual({ state: 'complete', due_at: late, attempts: 0 });
+      expect(user(db, alice)).toMatchObject({ active: 0, account_status: 'deactivated', last_status_check_ms: late });
+      expect(historyOf(m, alice)).toEqual([]);
+      expect(historyOf(m, bob)).toEqual(['r09']);
+      expect(historyOf(m, carol)).toEqual(['r10']);
+      expect(db.all("SELECT label, value FROM counters WHERE name = 'status_reclaimed'")).toEqual([
+        { label: 'lease', value: 1 },
+      ]);
+
+      // At IndexDO start-up every running row is orphaned, whatever its age.
+      scheduleStatusCheck(db, bob, 'RepoTakendown', late);
+      expect(db.tx(() => claimStatusJob(db, bob, late))).not.toBeNull();
+      expect(reclaimStatusLeases(db, late + 1)).toEqual([]);
+      expect(reclaimStatusLeases(db, late + 1, { all: true })).toEqual([bob]);
+      expect(db.one("SELECT state, due_at FROM repo_jobs WHERE did = ? AND kind = 'status'", bob)).toEqual({
+        state: 'pending',
+        due_at: late,
+      });
+      expect(nextStatusJobDue(db)).toBe(late);
     });
   });
 });

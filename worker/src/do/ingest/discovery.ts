@@ -43,6 +43,18 @@
 //   DISCOVERY_RETRY_MS and the relay's Retry-After / RateLimit-Reset (capped at
 //   one day), or the normal day for a daily pass.
 //
+// Concurrency (ADR F3: no read-check-write across an await): a run reads the
+// position, awaits the relay, then acts on the page. While it awaits, the DO's
+// input gate is open, so `requestGapDiscovery` (or another writer) may replace
+// the position and schedule the timer. So after every fetch the run re-reads
+// the position and, unless it still equals the one it fetched (pass,
+// collection, cursor), admits nothing from that page, writes no position and
+// stops (`superseded`), leaving the newer position and its timer alone; the
+// position write itself re-checks inside its transaction. The run's own
+// reschedule replaces only the due time it saw when it started (the row the
+// alarm claimed, or none): a `discovery` due time set by someone else during
+// the run is kept when it is earlier (`schedule` without force).
+//
 // Every relay request goes through SafeFetch (`json` kind, 1 MiB cap, 10 s
 // deadline, URL / DoH / redirect policy). A page is validated before use: an
 // object whose `repos` is an array of `{did: string}` and whose optional
@@ -147,7 +159,7 @@ export interface DiscoveryOptions {
   pageLimit?: number;
 }
 
-export type DiscoveryStop = 'complete' | 'page_budget' | 'admission_busy' | 'relay_error' | 'disabled';
+export type DiscoveryStop = 'complete' | 'page_budget' | 'admission_busy' | 'relay_error' | 'disabled' | 'superseded';
 
 export interface DiscoveryReport {
   pass: DiscoveryPass | null;
@@ -188,6 +200,13 @@ function parsePage(body: Uint8Array): Page | null {
   return { dids, cursor: typeof cursor === 'string' && cursor !== '' ? cursor : null };
 }
 
+/** The stored position (or the default when none is stored) still equals `s`. */
+function samePosition(db: Db, s: DiscoveryState, stored: boolean): boolean {
+  const cur = readDiscoveryState(db);
+  if (cur === null) return !stored;
+  return stored && cur.pass === s.pass && cur.collection === s.collection && cur.cursor === s.cursor;
+}
+
 function positiveInt(value: number | undefined, fallback: number, label: string): number {
   const v = value ?? fallback;
   if (!Number.isSafeInteger(v) || v < 1) throw new RangeError(`${label} must be a positive integer`);
@@ -217,7 +236,12 @@ export async function discover(m: ModuleDeps, now: number, o: DiscoveryOptions =
     return report;
   }
   const names = [collections.scrobble, collections.follow] as const;
-  let state: DiscoveryState = readDiscoveryState(db) ?? { pass: 'daily', collection: 0, cursor: null, pages: 0 };
+  // The due time this run may replace: the claimed row is renamed by runDue, so
+  // inside an alarm this is null unless someone scheduled during the run.
+  const dueAtStart = dueAt(db, 'discovery');
+  const initial = readDiscoveryState(db);
+  let stored = initial !== null;
+  let state: DiscoveryState = initial ?? { pass: 'daily', collection: 0, cursor: null, pages: 0 };
   report.pass = state.pass;
   const safeFetch = createSafeFetch({ transport: m.transport, clock: m.clock });
   let retryAfterMs = 0;
@@ -236,6 +260,10 @@ export async function discover(m: ModuleDeps, now: number, o: DiscoveryOptions =
     try {
       page = parsePage((await safeFetch(url, { kind: 'json' })).body);
     } catch (error) {
+      if (!samePosition(db, state, stored)) {
+        report.stop = 'superseded';
+        break;
+      }
       const code = isSafeFetchError(error) ? (error.status === null ? error.code : `http_${error.status}`) : 'error';
       if (isSafeFetchError(error)) {
         retryAfterMs = Math.max(error.retryAfterMs ?? 0, error.rateLimitResetMs ?? 0);
@@ -245,6 +273,12 @@ export async function discover(m: ModuleDeps, now: number, o: DiscoveryOptions =
       db.tx(() => incrementCounter(db, DISCOVERY_FAILED_COUNTER, code));
       report.stop = 'relay_error';
       report.detail = code;
+      break;
+    }
+    if (!samePosition(db, state, stored)) {
+      // The position moved while the relay answered (a gap request): this page
+      // belongs to a pass that no longer exists.
+      report.stop = 'superseded';
       break;
     }
     report.pages++;
@@ -285,25 +319,40 @@ export async function discover(m: ModuleDeps, now: number, o: DiscoveryOptions =
           ? { ...state, collection: 1, cursor: null, pages: state.pages + 1 }
           : null;
     const collection = names[state.collection];
-    db.tx(() => {
+    const fetched = state;
+    const advanced = db.tx((): boolean => {
+      if (!samePosition(db, fetched, stored)) return false;
       writeDiscoveryState(db, next);
       incrementCounter(db, DISCOVERY_PAGES_COUNTER, collection);
-      if (next === null) incrementCounter(db, DISCOVERY_PASSES_COUNTER, state.pass);
+      if (next === null) incrementCounter(db, DISCOVERY_PASSES_COUNTER, fetched.pass);
+      return true;
     });
+    if (!advanced) {
+      report.stop = 'superseded';
+      break;
+    }
     if (next === null) {
       report.stop = 'complete';
       break;
     }
     state = next;
+    stored = true;
   }
 
   if (report.admitted.length > 0) {
     // The admitted snapshot jobs are due now (W4-01's snapshot timer runs them).
     db.tx(() => schedule(db, 'snapshot', now));
   }
-  report.nextDueAt = db.tx(() =>
-    schedule(db, 'discovery', nextRun(report, state.pass, now, retryAfterMs), { force: true }),
-  );
+  report.nextDueAt = db.tx(() => {
+    const current = dueAt(db, 'discovery');
+    if (report.stop === 'superseded' && current !== null) {
+      // The newer position came with its own timer: leave both alone.
+      return current;
+    }
+    const at = report.stop === 'superseded' ? now : nextRun(report, state.pass, now, retryAfterMs);
+    // Replace only the due time this run started with; keep an earlier one set since.
+    return schedule(db, 'discovery', at, { force: current === dueAtStart });
+  });
   return report;
 }
 

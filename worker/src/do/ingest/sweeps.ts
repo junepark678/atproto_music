@@ -4,7 +4,10 @@
 // reschedules its own timer.
 //
 // statusSweep(m, now): one bounded slice of at most STATUS_SWEEP_BATCH (200)
-// checks (accounts.ts `checkStatus`):
+// attempted checks (accounts.ts `checkStatus`):
+//   0. orphaned `running` status jobs past their lease go back to pending
+//      (accounts.ts `reclaimStatusLeases`), so an eviction mid-check never
+//      parks a job;
 //   1. first the due `status` repo jobs the verify drain created (accounts.ts
 //      `runStatusJob`), oldest first;
 //   2. then the known DIDs whose check is due, round-robin by
@@ -14,12 +17,20 @@
 //      every other DID (no activity, or older activity) one day after. So
 //      deactivation shows within 1 h for active users and 24 h for the rest,
 //      unless a proof fetch reports it sooner.
-//   The swept DIDs are checked with `concurrentFetches` workers under the
-//   shared per-host limiter. A check that the host pause or the subrequest
-//   budget skipped keeps its `last_status_check_ms`, so it stays first in line.
-//   Every check that reached an answer or failed moves it, so a host that keeps
-//   failing cannot starve the others. An answered check also completes an open
-//   `status` job of that DID (the sweep answer supersedes it).
+//   The work is pulled lazily by `concurrentFetches` workers under the shared
+//   per-host limiter, so the batch is spent on checks that are attempted:
+//   - a swept DID whose last known PDS host (identity_cache, else `users.pds`)
+//     is paused at `now` is passed over when it is pulled, without a fetch;
+//   - a check that comes back `host_paused` (its identity was not known, or a
+//     concurrent check paused the host first) or `unknown` gives its slot back;
+//   so a host that keeps failing costs one or two failed fetches per slice, and
+//   the DIDs on healthy hosts behind it in the round-robin are still checked.
+//   Due DIDs are read in keyset pages until the batch is full, the subrequest
+//   budget refuses a check (the slice stops pulling), or none is left.
+//   A DID passed over or skipped keeps its `last_status_check_ms`, so it stays
+//   first in line once its host resumes. Every check that reached an answer or
+//   failed moves it. An answered check also completes an open `status` job of
+//   that DID (the sweep answer supersedes it).
 //   Then `status-sweep` is due again in one hour, or sooner when a status job
 //   falls due earlier (`scheduleStatusJobsTimer`).
 //
@@ -68,6 +79,7 @@ import { incrementCounter } from '../write/keys';
 import {
   checkStatus,
   dueStatusJobs,
+  reclaimStatusLeases,
   runStatusJob,
   type StatusCheckOutcome,
   scheduleStatusJobsTimer,
@@ -75,10 +87,12 @@ import {
 } from './accounts';
 import { scheduleSnapshot } from './admission';
 import { readIdentityRow, resolveIdentity } from './identity-cache';
-import { IDENTITY_RESOLVE_COST, SubrequestMeter } from './pds-budget';
+import { hostOf, hostPausedUntil, IDENTITY_RESOLVE_COST, SubrequestMeter } from './pds-budget';
 import { drainState } from './verify-drain';
 
 export const STATUS_SWEEP_BATCH = 200;
+/** Due DIDs read per keyset page while the status-sweep batch fills. */
+export const STATUS_SWEEP_PAGE = 200;
 export const IDENTITY_SWEEP_BATCH = 200;
 export const HOUR_MS = 3_600_000;
 export const DAY_MS = 24 * HOUR_MS;
@@ -122,26 +136,90 @@ async function pool<T, R>(items: readonly T[], n: number, work: (item: T) => Pro
 // ---------------------------------------------------------------------------
 // status-sweep
 
-/** Known DIDs whose status check is due at `now`, in round-robin order. */
-export function dueStatusDids(db: Db, now: number, limit: number, exclude: ReadonlySet<string> = new Set()): string[] {
-  if (limit <= 0) return [];
-  const rows = db.all<{ did: string }>(
-    `SELECT did FROM users
-     WHERE last_status_check_ms IS NULL
-        OR last_status_check_ms <= ? - CASE WHEN last_activity_ms IS NOT NULL AND last_activity_ms >= ?
-                                            THEN ? ELSE ? END
-     ORDER BY last_status_check_ms IS NOT NULL, last_status_check_ms, did
-     LIMIT ?`,
+const DUE_STATUS_SQL = `SELECT u.did AS did, coalesce(u.last_status_check_ms, -1) AS k, coalesce(c.pds, u.pds) AS pds
+   FROM users u LEFT JOIN identity_cache c ON c.did = u.did
+   WHERE (u.last_status_check_ms IS NULL
+          OR u.last_status_check_ms <= ? - CASE WHEN u.last_activity_ms IS NOT NULL AND u.last_activity_ms >= ?
+                                                THEN ? ELSE ? END)
+     AND (coalesce(u.last_status_check_ms, -1) > ? OR (coalesce(u.last_status_check_ms, -1) = ? AND u.did > ?))
+   ORDER BY k, u.did
+   LIMIT ?`;
+
+interface DueRow {
+  did: string;
+  k: number;
+  pds: string | null;
+}
+
+/** One keyset page of due DIDs after `(afterKey, afterDid)`, in round-robin order. */
+function dueStatusPage(db: Db, now: number, after: { k: number; did: string }, limit: number): DueRow[] {
+  return db.all<DueRow>(
+    DUE_STATUS_SQL,
     now,
     now - RECENT_ACTIVITY_MS,
     ACTIVE_STATUS_INTERVAL_MS,
     IDLE_STATUS_INTERVAL_MS,
-    limit + exclude.size,
+    after.k,
+    after.k,
+    after.did,
+    limit,
   );
-  return rows
+}
+
+/** Known DIDs whose status check is due at `now`, in round-robin order. */
+export function dueStatusDids(db: Db, now: number, limit: number, exclude: ReadonlySet<string> = new Set()): string[] {
+  if (limit <= 0) return [];
+  return dueStatusPage(db, now, { k: -2, did: '' }, limit + exclude.size)
     .map((r) => r.did)
     .filter((did) => !exclude.has(did))
     .slice(0, limit);
+}
+
+/** Is the last known PDS host of a due row paused at `now`? (Unknown or unparsable: no.) */
+function lastKnownHostPaused(db: Db, pds: string | null, now: number): boolean {
+  if (pds === null) return false;
+  let host: string;
+  try {
+    host = hostOf(pds);
+  } catch {
+    return false;
+  }
+  return hostPausedUntil(db, host, now) !== null;
+}
+
+/**
+ * A lazy round-robin source of due DIDs: keyset pages, skipping `exclude` and
+ * any DID whose last known PDS host is paused when it is pulled.
+ */
+function dueStatusSource(db: Db, now: number, exclude: ReadonlySet<string>) {
+  let after = { k: -2, did: '' };
+  let page: DueRow[] = [];
+  let exhausted = false;
+  let passedOver = 0;
+  return {
+    get passedOver() {
+      return passedOver;
+    },
+    next(): string | undefined {
+      for (;;) {
+        if (page.length === 0) {
+          if (exhausted) return undefined;
+          page = dueStatusPage(db, now, after, STATUS_SWEEP_PAGE);
+          if (page.length < STATUS_SWEEP_PAGE) exhausted = true;
+          if (page.length === 0) return undefined;
+          const last = page[page.length - 1]!;
+          after = { k: last.k, did: last.did };
+        }
+        const row = page.shift()!;
+        if (exclude.has(row.did)) continue;
+        if (lastKnownHostPaused(db, row.pds, now)) {
+          passedOver++;
+          continue;
+        }
+        return row.did;
+      }
+    },
+  };
 }
 
 export interface SweepEntry {
@@ -153,6 +231,10 @@ export interface SweepEntry {
 
 export interface StatusSweepReport {
   checked: SweepEntry[];
+  /** Swept DIDs passed over without a check because their last known PDS host is paused. */
+  passedOver: number;
+  /** Orphaned running status jobs returned to pending at the start of the slice. */
+  reclaimed: string[];
   subrequests: number;
   /** The `status-sweep` timer's next due time. */
   nextDueAt: number;
@@ -171,6 +253,11 @@ function detailOf(o: StatusCheckOutcome): string | undefined {
   }
 }
 
+/** Outcomes that did not attempt a check and so do not use up a batch slot. */
+function attempted(o: StatusCheckOutcome | null): boolean {
+  return o !== null && o.outcome !== 'host_paused' && o.outcome !== 'unknown' && o.outcome !== 'budget';
+}
+
 /** One status-sweep slice (see the header). */
 export async function statusSweep(m: ModuleDeps, now: number): Promise<StatusSweepReport> {
   assertEpochMs('now', now);
@@ -181,40 +268,58 @@ export async function statusSweep(m: ModuleDeps, now: number): Promise<StatusSwe
   const safeFetch = createSafeFetch({ transport: m.transport, clock: m.clock });
   const checked: SweepEntry[] = [];
 
+  const reclaimed = reclaimStatusLeases(db, now);
   const jobs = dueStatusJobs(db, now, STATUS_SWEEP_BATCH);
   const jobDids = new Set(jobs.map((j) => j.did));
-  const sweepDids = dueStatusDids(db, now, STATUS_SWEEP_BATCH - jobs.length, jobDids);
-  const work: Array<{ did: string; source: 'job' | 'sweep' }> = [
-    ...jobs.map((j) => ({ did: j.did, source: 'job' as const })),
-    ...sweepDids.map((did) => ({ did, source: 'sweep' as const })),
-  ];
+  const jobQueue = jobs.map((j) => j.did);
+  const source = dueStatusSource(db, now, jobDids);
+  // Slots in use: checks in flight plus checks that were attempted.
+  let used = 0;
+  let budgetSpent = false;
 
-  await pool(work, m.config.budget.concurrentFetches, async ({ did, source }) => {
-    let outcome: StatusCheckOutcome | null;
-    try {
-      outcome =
-        source === 'job'
-          ? await runStatusJob(m, did, now, { meter, limiter, safeFetch })
-          : await checkStatus(m, did, { now, meter, limiter, safeFetch });
-    } catch (error) {
-      m.log.log('error', 'status_sweep.error', { did, error: String(error) });
-      outcome = { outcome: 'failed', error: 'internal' };
+  const next = (): { did: string; source: 'job' | 'sweep' } | undefined => {
+    if (budgetSpent || used >= STATUS_SWEEP_BATCH) return undefined;
+    const job = jobQueue.shift();
+    if (job !== undefined) return { did: job, source: 'job' };
+    const did = source.next();
+    return did === undefined ? undefined : { did, source: 'sweep' };
+  };
+
+  const worker = async () => {
+    for (;;) {
+      const item = next();
+      if (item === undefined) return;
+      used++;
+      const { did } = item;
+      let outcome: StatusCheckOutcome | null;
+      try {
+        outcome =
+          item.source === 'job'
+            ? await runStatusJob(m, did, now, { meter, limiter, safeFetch })
+            : await checkStatus(m, did, { now, meter, limiter, safeFetch });
+      } catch (error) {
+        m.log.log('error', 'status_sweep.error', { did, error: String(error) });
+        outcome = { outcome: 'failed', error: 'internal' };
+      }
+      if (!attempted(outcome)) used--;
+      if (outcome === null) continue;
+      if (outcome.outcome === 'budget') budgetSpent = true;
+      if (item.source === 'sweep') afterSweepCheck(db, did, outcome, now);
+      const detail = detailOf(outcome);
+      checked.push(
+        detail === undefined
+          ? { did, source: item.source, outcome: outcome.outcome }
+          : { did, source: item.source, outcome: outcome.outcome, detail },
+      );
     }
-    if (outcome === null) return;
-    if (source === 'sweep') afterSweepCheck(db, did, outcome, now);
-    const detail = detailOf(outcome);
-    checked.push(
-      detail === undefined
-        ? { did, source, outcome: outcome.outcome }
-        : { did, source, outcome: outcome.outcome, detail },
-    );
-  });
+  };
+  await Promise.all(Array.from({ length: Math.max(1, m.config.budget.concurrentFetches) }, worker));
 
   const nextDueAt = db.tx(() => {
     const hourly = schedule(db, 'status-sweep', now + STATUS_SWEEP_INTERVAL_MS, { force: true });
     return scheduleStatusJobsTimer(db, now) ?? hourly;
   });
-  return { checked, subrequests: meter.reserved, nextDueAt };
+  return { checked, passedOver: source.passedOver, reclaimed, subrequests: meter.reserved, nextDueAt };
 }
 
 /** Bookkeeping after a swept (not job-driven) check (see the header). */

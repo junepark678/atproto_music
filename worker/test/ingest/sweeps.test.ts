@@ -184,6 +184,94 @@ describe('status sweep', () => {
   });
 });
 
+describe('status sweep fairness', () => {
+  it('a failing PDS host does not starve DIDs on healthy hosts behind it in the round-robin', async () => {
+    const k = await kit();
+    const failing = k.pds.Bob; // every O account: getRepoStatus answers 503
+    const healthy = k.pds.Carol; // every R account
+    const key = await testKey('secp256k1', 0x22, 'sweep-fair-secp256k1');
+    const O = Array.from({ length: 200 }, (_, i) => syntheticDid('o', i));
+    const R = Array.from({ length: 5 }, (_, i) => syntheticDid('r', i));
+    for (const [server, dids] of [
+      [failing, O],
+      [healthy, R],
+    ] as const) {
+      for (const did of dids) {
+        await server.addAccount(new SignedRepo(did, key, { clock: k.clock }));
+        k.plc.register(did, { signingKey: key, pds: server.origin, handle: null });
+      }
+    }
+    failing.serverError(GET_REPO_STATUS, 503, Infinity);
+
+    await runInDurableObject(stubFor('sweep-fair'), async (i: HarnessDO) => {
+      const db = i.db;
+      const m = depsFor(db, k);
+      // Never checked: round-robin order is DID order, so all 200 O come before any R.
+      for (const did of [...O, ...R]) seedUser(db, did);
+      k.resetCalls();
+      const lastChecks = () =>
+        Object.fromEntries(
+          db
+            .all<{ did: string; t: number | null }>('SELECT did, last_status_check_ms AS t FROM users')
+            .map((r) => [r.did, r.t]),
+        );
+      const perHost = m.config.budget.perHostConcurrency;
+
+      // Slice 1: the first 503s pause the failing host; the O behind them come back
+      // host_paused without a fetch and give their slots back, so the R are checked.
+      const r1 = await statusSweep(m, T0);
+      const failedFetches = failing.calls.count({ nsid: GET_REPO_STATUS });
+      expect(failedFetches).toBeGreaterThanOrEqual(1);
+      expect(failedFetches).toBeLessThanOrEqual(perHost);
+      expect(
+        healthy.calls
+          .filter({ nsid: GET_REPO_STATUS })
+          .map((c) => c.params.did![0]!)
+          .sort(),
+      ).toEqual(R);
+      expect(
+        r1.checked
+          .filter((c) => c.outcome === 'active')
+          .map((c) => c.did)
+          .sort(),
+      ).toEqual(R);
+      expect(r1.checked.filter((c) => c.outcome === 'failed').length).toBe(failedFetches);
+      expect(r1.checked.filter((c) => c.outcome === 'host_paused').length).toBe(200 - failedFetches);
+      let t = lastChecks();
+      expect(R.every((d) => t[d] === T0)).toBe(true);
+      // The O that were attempted moved back in line; the skipped ones stay first.
+      expect(O.filter((d) => t[d] === T0).length).toBe(failedFetches);
+      expect(O.filter((d) => t[d] === null).length).toBe(200 - failedFetches);
+      expect(db.one('SELECT until_ms FROM host_backoff WHERE host = ?', k.users.Bob.host)).toEqual({
+        until_ms: T0 + 5_000,
+      });
+
+      // Slice 2, an hour later: the pause has expired. Every O identity is now known, so
+      // once the first 503 pauses the host again the rest are passed over at selection,
+      // without an identity resolution or a fetch. The R are not due yet (daily).
+      failing.calls.reset();
+      healthy.calls.reset();
+      k.plc.calls.reset();
+      const r2 = await statusSweep(m, T0 + HOUR);
+      const failed2 = failing.calls.count({ nsid: GET_REPO_STATUS });
+      expect(failed2).toBeGreaterThanOrEqual(1);
+      expect(failed2).toBeLessThanOrEqual(perHost);
+      expect(healthy.calls.count()).toBe(0);
+      expect(r2.passedOver).toBeGreaterThan(0);
+      // Due: the O skipped in slice 1 (the attempted ones are idle, so daily).
+      expect(r2.checked.length + r2.passedOver).toBe(200 - failedFetches);
+      expect(k.plc.count()).toBeLessThanOrEqual(m.config.budget.concurrentFetches);
+      t = lastChecks();
+      expect(R.every((d) => t[d] === T0)).toBe(true);
+      // Account state never changed: a host failure is no answer.
+      expect(db.all('SELECT DISTINCT active, account_status FROM users')).toEqual([
+        { active: 1, account_status: 'active' },
+      ]);
+      expect(db.all('SELECT * FROM repo_jobs')).toEqual([]);
+    });
+  });
+});
+
 describe('identity sweep', () => {
   it('handle that no longer verifies becomes null; history retained', async () => {
     const k = await kit();
