@@ -16,7 +16,7 @@ import { type MigrateResult, migrate } from '../../src/do/migrate';
 import { MIGRATIONS } from '../../src/do/schema';
 import type { Env, EnvVars } from '../../src/env';
 import { routes as healthRoutes } from '../../src/http/health';
-import { APP_VERSION, createMetaRoutes, routes as metaRoutes } from '../../src/http/meta';
+import { APP_VERSION, routes as metaRoutes, namespaceView } from '../../src/http/meta';
 import type { RequestCtx, RouteDef } from '../../src/http/types';
 import type { HarnessDO } from '../harness/harness-do';
 import { makeLocalIndex } from '../harness/local-index';
@@ -86,6 +86,13 @@ function route(list: RouteDef[], pattern: string): RouteDef {
   if (found === undefined) throw new Error(`no route ${pattern}`);
   expect(found.method).toBe('GET');
   return found;
+}
+
+/** Dispatch a GET through a routes export by its pattern, as worker/src/router.ts will. */
+async function dispatch(list: RouteDef[], path: string, ctx: RequestCtx) {
+  const def = list.find((r) => r.method === 'GET' && r.pattern === path);
+  if (def === undefined) throw new Error(`no route for GET ${path}`);
+  return call(def, ctx);
 }
 
 async function call(def: RouteDef, ctx: RequestCtx): Promise<{ status: number; body: unknown; res: Response }> {
@@ -237,20 +244,31 @@ it('live 200; ready 503 when index reports too_new; meta capabilities omit publi
   expect(unproven.lexiconPrefix).toBe(OWNED);
   expect(unproven.stage).toBe('backend');
 
-  // The fixture prefix never enables publication, even with test-entry config and evidence
-  // (which parseConfig refuses for the fixture prefix).
-  const testEntryMeta = route(
-    createMetaRoutes((e) => parseConfig(e, { allowFixturePrefix: true })),
-    '/api/v1/meta',
-  );
-  const fixture = await metaFor(testEntryMeta, { LEXICON_PREFIX: FIXTURE_PREFIX, NAMESPACE_OWNERSHIP_REF: '' });
+  // The harness env exactly as wrangler.harness.jsonc binds it (fixture prefix, no evidence),
+  // dispatched through the exported `routes` the router concatenates: 200, the fixture prefix
+  // reported, and never publication.
+  expect(env.LEXICON_PREFIX).toBe(FIXTURE_PREFIX);
+  const harnessRes = await dispatch(metaRoutes, '/api/v1/meta', {
+    ...ctxFor(fresh.index),
+    env: env as unknown as Env,
+  });
+  expect(harnessRes.status).toBe(200);
+  expect(harnessRes.res.headers.get('cache-control')).toBe('no-store');
+  expect(schemas.Meta(harnessRes.body)).toBe('valid');
+  expect(harnessRes.body).toEqual({
+    name: 'atproto_music',
+    version: APP_VERSION,
+    stage: 'backend',
+    capabilities: BASE_CAPS,
+    lexiconPrefix: FIXTURE_PREFIX,
+    indexing: seeded,
+  });
+  // Even with ownership evidence beside it (which parseConfig refuses), the fixture prefix never publishes.
+  const fixture = await metaFor(meta, { LEXICON_PREFIX: FIXTURE_PREFIX, NAMESPACE_OWNERSHIP_REF: 'dns:txt' });
   expect(fixture.capabilities).toEqual(BASE_CAPS);
   expect(fixture.capabilities).not.toContain('publication');
   expect(fixture.lexiconPrefix).toBe(FIXTURE_PREFIX);
-  // The production routes refuse the fixture prefix outright.
-  await expect(
-    meta.handler(new Request('https://music.example.test/api/v1/meta'), ctxFor(fresh.index), {}),
-  ).rejects.toBeInstanceOf(ConfigError);
+  expect(fixture.stage).toBe('backend');
 
   // Positive control: an owned prefix plus evidence is the only way publication appears.
   const owned = await metaFor(meta, {
@@ -262,7 +280,7 @@ it('live 200; ready 503 when index reports too_new; meta capabilities omit publi
   expect(owned.stage).toBe('product');
 
   // Each ready meta read the DO's global indexing exactly once.
-  expect(fresh.local.calls.map((c) => c.method)).toEqual(['indexing', 'indexing', 'indexing', 'indexing']);
+  expect(fresh.local.calls.map((c) => c.method)).toEqual(['indexing', 'indexing', 'indexing', 'indexing', 'indexing']);
 });
 
 it('ready 200 and meta indexing stale while the index reports the socket disconnected', async () => {
@@ -313,4 +331,64 @@ it('ready 200 and meta indexing stale while the index reports the socket disconn
   expect(outage.state.readyCalls).toBe(2);
   expect(outage.local.calls.map((c) => c.method)).toEqual(['indexing']);
   expect(outage.local.networkAttempts).toEqual([]);
+});
+
+it('meta namespace equals the prefix and publication of every config parseConfig accepts for the env', async () => {
+  // The route never parses config itself (the composition's IndexDO does, strictly in production),
+  // so for every env either parse mode accepts, the route must report exactly that config's namespace.
+  const prefixes = ['', '  ', OWNED, ` ${OWNED} `, FIXTURE_PREFIX, 'Org.Example.Music', 'nodots', 'org..music'];
+  const refs = ['', ' ', 'dns:_lexicon.music.example.org'];
+  let accepted = 0;
+  let refused = 0;
+  for (const LEXICON_PREFIX of prefixes) {
+    for (const NAMESPACE_OWNERSHIP_REF of refs) {
+      const vars = { ...VARS, LEXICON_PREFIX, NAMESPACE_OWNERSHIP_REF };
+      for (const allowFixturePrefix of [false, true]) {
+        let config: ReturnType<typeof parseConfig>;
+        try {
+          config = parseConfig(vars, { allowFixturePrefix });
+        } catch (e) {
+          expect(e).toBeInstanceOf(ConfigError);
+          refused++;
+          continue;
+        }
+        accepted++;
+        expect(namespaceView(vars), `${LEXICON_PREFIX}|${NAMESPACE_OWNERSHIP_REF}|${allowFixturePrefix}`).toEqual({
+          prefix: config.prefix,
+          publication: config.publication,
+        });
+      }
+      // The fixture prefix never publishes, whatever sits beside it.
+      if (LEXICON_PREFIX.trim() === FIXTURE_PREFIX) expect(namespaceView(vars).publication).toBe(false);
+    }
+  }
+  expect(accepted).toBe(22);
+  expect(refused).toBe(26);
+  // An invalid prefix fails every parse (so the DO cannot answer and meta is scaffold) and is never reported.
+  for (const bad of ['Org.Example.Music', 'nodots', 'org..music']) {
+    expect(namespaceView({ LEXICON_PREFIX: bad, NAMESPACE_OWNERSHIP_REF: 'dns:txt' })).toEqual({
+      prefix: null,
+      publication: false,
+    });
+  }
+
+  // Over the HTTP route against real storage: the same envs give the same lexiconPrefix and capabilities.
+  const store = harnessIndex('meta-namespace');
+  const expectations: Array<[Partial<EnvVars>, string | null, boolean]> = [
+    [{ LEXICON_PREFIX: '' }, null, false],
+    [{ LEXICON_PREFIX: FIXTURE_PREFIX, NAMESPACE_OWNERSHIP_REF: '' }, FIXTURE_PREFIX, false],
+    [{ LEXICON_PREFIX: OWNED, NAMESPACE_OWNERSHIP_REF: '' }, OWNED, false],
+    [{ LEXICON_PREFIX: ` ${OWNED} `, NAMESPACE_OWNERSHIP_REF: 'dns:txt' }, OWNED, true],
+  ];
+  for (const [vars, prefix, publication] of expectations) {
+    const res = await dispatch(metaRoutes, '/api/v1/meta', ctxFor(store.index, vars));
+    expect(res.status).toBe(200);
+    expect(schemas.Meta(res.body)).toBe('valid');
+    const body = res.body as { lexiconPrefix: string | null; capabilities: string[]; stage: string };
+    expect(body.lexiconPrefix).toBe(prefix);
+    expect(body.capabilities).toEqual(publication ? [...BASE_CAPS, 'publication'] : BASE_CAPS);
+    expect(body.stage).toBe(publication ? 'product' : 'backend');
+  }
+  expect(store.state.readyCalls).toBe(expectations.length);
+  expect(store.local.calls.map((c) => c.method)).toEqual(expectations.map(() => 'indexing'));
 });

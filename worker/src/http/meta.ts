@@ -8,16 +8,26 @@
 //   database; no indexing read is attempted against unmigrated storage.
 // - With storage ready the Workers composition serves read, stats, follows,
 //   notify and indexing (stage `backend`, api/examples/meta.json).
-//   `publication` is added only when the config has an owned, non-fixture
-//   prefix plus ownership evidence (AppConfig.publication, namespace.rs
+//   `publication` is added only for an owned, non-fixture prefix plus
+//   ownership evidence (AppConfig.publication, namespace.rs
 //   require_publication); the SPA write path is then live, so the stage is
 //   `product`.
 // - `lexiconPrefix` is the configured prefix, or null with the gate closed.
 // - `indexing` is the DO's global Indexing truth.
+//
+// Which config applies is the composition's choice, not this route's: the
+// IndexDO parses AppConfig once in buildDeps (strict in production; the test
+// entries' TestIndexDO passes allowFixturePrefix), and a DO whose parse fails
+// cannot answer ready(), so meta is then `scaffold`. The Worker fetch path is
+// shared by the production and test entries, so this route never re-parses or
+// refuses config; it reads only the two namespace vars the DO's parse reads.
+// namespaceView(env) equals `{prefix, publication}` of every AppConfig that
+// parseConfig accepts for that env (health-meta.test.ts proves this), and the
+// fixture prefix never yields publication.
 
 import type { Capability, Indexing, Meta, MetaStage } from '@atmusic/core/api-types';
-import { type AppConfig, parseConfig } from '../config';
-import type { Env } from '../env';
+import { type AppConfig, FIXTURE_PREFIX, isValidPrefix } from '../config';
+import type { EnvVars } from '../env';
 import { json } from './json';
 import type { RequestCtx, RouteDef } from './types';
 
@@ -33,60 +43,55 @@ export const RECOVERING: Readonly<Indexing> = {
   lagSeconds: null,
 };
 
-export type ConfigSource = (env: Env) => AppConfig;
+/** The namespace fields of AppConfig that meta reports. */
+export type NamespaceView = Pick<AppConfig, 'prefix' | 'publication'>;
 
-const parsed = new WeakMap<Env, AppConfig>();
+/**
+ * The namespace exactly as parseConfig derives it, without refusing anything:
+ * an empty or invalid prefix gives null (an invalid one also fails the DO's
+ * parse, so meta is `scaffold`), and publication needs an owned, non-fixture
+ * prefix plus ownership evidence.
+ */
+export function namespaceView(env: Pick<EnvVars, 'LEXICON_PREFIX' | 'NAMESPACE_OWNERSHIP_REF'>): NamespaceView {
+  const raw = (env.LEXICON_PREFIX ?? '').trim();
+  const prefix = raw !== '' && isValidPrefix(raw) ? raw : null;
+  const evidence = (env.NAMESPACE_OWNERSHIP_REF ?? '').trim() !== '';
+  return { prefix, publication: prefix !== null && prefix !== FIXTURE_PREFIX && evidence };
+}
 
-/** Production config source: the strict parseConfig (fixture prefix refused), once per env object. */
-export const strictConfig: ConfigSource = (env) => {
-  let config = parsed.get(env);
-  if (config === undefined) {
-    config = parseConfig(env);
-    parsed.set(env, config);
-  }
-  return config;
-};
-
-export function buildMeta(config: AppConfig, storageReady: boolean, indexing: Indexing): Meta {
+export function buildMeta(namespace: NamespaceView, storageReady: boolean, indexing: Indexing): Meta {
   if (!storageReady) {
     return {
       name: 'atproto_music',
       version: APP_VERSION,
       stage: 'scaffold',
       capabilities: [],
-      lexiconPrefix: config.prefix,
+      lexiconPrefix: namespace.prefix,
       indexing: { ...RECOVERING },
     };
   }
   const capabilities: Capability[] = [...BASE_CAPABILITIES];
-  if (config.publication) capabilities.push('publication');
-  const stage: MetaStage = config.publication ? 'product' : 'backend';
-  return { name: 'atproto_music', version: APP_VERSION, stage, capabilities, lexiconPrefix: config.prefix, indexing };
+  if (namespace.publication) capabilities.push('publication');
+  const stage: MetaStage = namespace.publication ? 'product' : 'backend';
+  return {
+    name: 'atproto_music',
+    version: APP_VERSION,
+    stage,
+    capabilities,
+    lexiconPrefix: namespace.prefix,
+    indexing,
+  };
 }
 
-/**
- * The meta routes over a config source. RequestCtx carries no AppConfig, so
- * the config is derived from `ctx.env`; `routes` uses the strict production
- * parse, and only test entries build their own with `allowFixturePrefix`.
- */
-export function createMetaRoutes(configFor: ConfigSource = strictConfig): RouteDef[] {
-  return [
-    {
-      method: 'GET',
-      pattern: '/api/v1/meta',
-      async handler(_req: Request, ctx: RequestCtx): Promise<Response> {
-        const config = configFor(ctx.env);
-        let storageReady = false;
-        try {
-          storageReady = (await ctx.index.ready()).status === 'ready';
-        } catch {
-          storageReady = false;
-        }
-        const indexing = storageReady ? await ctx.index.indexing() : RECOVERING;
-        return json(buildMeta(config, storageReady, indexing), 200);
-      },
-    },
-  ];
+export async function meta(_req: Request, ctx: RequestCtx): Promise<Response> {
+  let storageReady = false;
+  try {
+    storageReady = (await ctx.index.ready()).status === 'ready';
+  } catch {
+    storageReady = false;
+  }
+  const indexing = storageReady ? await ctx.index.indexing() : RECOVERING;
+  return json(buildMeta(namespaceView(ctx.env), storageReady, indexing), 200);
 }
 
-export const routes: RouteDef[] = createMetaRoutes();
+export const routes: RouteDef[] = [{ method: 'GET', pattern: '/api/v1/meta', handler: meta }];
