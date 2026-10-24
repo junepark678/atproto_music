@@ -1,0 +1,8 @@
+// Test-only workerd configuration for packages/atproto (no bindings, no main).
+// Never deployed.
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "atmusic-atproto-test",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat"]
+}

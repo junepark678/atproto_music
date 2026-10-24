@@ -15,3 +15,11 @@ __pycache__/
 **/node_modules/
 .wrangler/
 /.claude/
+
+# TypeScript workspace (ADR 0004); node_modules, web/dist and .wrangler are above.
+worker/dist/
+**/.tsbuild/
+*.tsbuildinfo
+worker/.dev.vars
+web/public/oauth/client-metadata.json
+web/public/_headers

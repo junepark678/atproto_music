@@ -1,0 +1,13 @@
+{
+  // The Worker and IndexDO: Workers runtime types, plus cloudflare:test and
+  // Vite's import.meta.glob for the workerd test suites.
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "outDir": ".tsbuild",
+    "lib": ["es2024"],
+    "types": ["@cloudflare/workers-types", "@cloudflare/vitest-plugin/types", "vite/client"]
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts"],
+  "references": [{ "path": "../packages/core" }, { "path": "../packages/atproto" }]
+}

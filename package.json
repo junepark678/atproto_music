@@ -1,0 +1,45 @@
+{
+  "name": "atmusic",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "AT Protocol music AppView on Cloudflare Workers (ADR 0004).",
+  "license": "MIT",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "workspaces": [
+    "packages/core",
+    "packages/atproto",
+    "worker",
+    "web"
+  ],
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc -b packages/core packages/atproto worker web",
+    "lint": "biome check .",
+    "build:web": "npm run build --workspace @atmusic/web",
+    "dev": "wrangler dev --config worker/wrangler.jsonc",
+    "test:e2e": "playwright test",
+    "check": "bash scripts/check-ts.sh"
+  },
+  "devDependencies": {
+    "@atproto/dev-env": "0.6.17",
+    "@axe-core/playwright": "4.13.0",
+    "@biomejs/biome": "2.5.15",
+    "@playwright/test": "1.64.1",
+    "@types/node": "24.19.2",
+    "tsx": "4.23.15",
+    "typescript": "7.0.2",
+    "vitest": "5.0.5"
+  },
+  "allowScripts": {
+    "workerd@1.20261012.1": true,
+    "esbuild@0.28.2": true,
+    "sharp@0.35.5": true,
+    "sharp@0.33.5": true,
+    "better-sqlite3@12.11.1": true,
+    "core-js": false,
+    "protobufjs": false
+  }
+}

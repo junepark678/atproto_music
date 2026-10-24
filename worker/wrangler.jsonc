@@ -1,0 +1,94 @@
+// atmusic production Worker (ADR 0004 §4.2). One Worker, one SQLite Durable
+// Object (IndexDO, a single instance from idFromName("index-v1")), Static
+// Assets for the SPA, one cron, one required secret.
+//
+// Secrets (never in this file): `wrangler secret put CURSOR_KEY` (required,
+// `openssl rand -hex 32`) and optionally `wrangler secret put ADMIN_TOKEN`.
+// Local development reads them from worker/.dev.vars (see .dev.vars.example).
+//
+// The domain and prefix below are placeholders (ADR §15 Q3): LEXICON_PREFIX is
+// empty, so ingestion and publication stay disabled, and the production bundle
+// guard refuses to deploy until an owned domain and prefix are configured.
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "atmusic",
+  "main": "src/index.ts",
+  // >= 2025-04-01 so navigation requests prefer assets.
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "../web/dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    // /oauth/* is deliberately absent: /oauth/callback is an SPA route.
+    "run_worker_first": ["/api/*", "/health/*", "/internal/*"]
+  },
+  "durable_objects": {
+    "bindings": [{ "name": "INDEX", "class_name": "IndexDO" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["IndexDO"] }],
+  "triggers": { "crons": ["*/5 * * * *"] },
+  // Workers Paid only; env.free and env.staging clear it.
+  "limits": { "cpu_ms": 30000 },
+  "observability": { "enabled": true },
+  "vars": {
+    "PUBLIC_ORIGIN": "https://music.example.org",
+    // Empty: publication and ingestion disabled (namespace gate).
+    "LEXICON_PREFIX": "",
+    "NAMESPACE_OWNERSHIP_REF": "",
+    // socket | pulse | off
+    "INGEST_MODE": "socket",
+    "JETSTREAM_URLS": "wss://jetstream.us-east.bsky.network,wss://jetstream.us-west.bsky.network",
+    // Conservative; Jetstream documents its lookback only as "bounded".
+    "JETSTREAM_LOOKBACK_HOURS": "24",
+    "RELAY_URL": "https://relay1.us-east.bsky.network",
+    // paid | free: selects the per-alarm slice budgets.
+    "PLAN": "paid",
+    "DO_LOCATION_HINT": "enam"
+  },
+  // A custom domain on an owned zone is mandatory: the OAuth client_id
+  // (https://<host>/oauth/client-metadata.json) must never change.
+  "routes": [{ "pattern": "music.example.org", "custom_domain": true }],
+  "env": {
+    // Free plan: dev and private hobby use. durable_objects and vars are not
+    // inheritable, so both are re-declared; no CPU limit override.
+    "free": {
+      "durable_objects": {
+        "bindings": [{ "name": "INDEX", "class_name": "IndexDO" }]
+      },
+      "limits": {},
+      "vars": {
+        "PUBLIC_ORIGIN": "https://music-free.example.org",
+        "LEXICON_PREFIX": "",
+        "NAMESPACE_OWNERSHIP_REF": "",
+        "INGEST_MODE": "pulse",
+        "JETSTREAM_URLS": "wss://jetstream.us-east.bsky.network,wss://jetstream.us-west.bsky.network",
+        "JETSTREAM_LOOKBACK_HOURS": "24",
+        "RELAY_URL": "https://relay1.us-east.bsky.network",
+        "PLAN": "free",
+        "DO_LOCATION_HINT": "enam"
+      },
+      "routes": [{ "pattern": "music-free.example.org", "custom_domain": true }]
+    },
+    // Staging: its own hostname (so its own OAuth client_id) and, as a
+    // separate Worker (atmusic-staging), its own DO namespace.
+    "staging": {
+      "durable_objects": {
+        "bindings": [{ "name": "INDEX", "class_name": "IndexDO" }]
+      },
+      "limits": {},
+      "vars": {
+        "PUBLIC_ORIGIN": "https://staging.music.example.org",
+        "LEXICON_PREFIX": "",
+        "NAMESPACE_OWNERSHIP_REF": "",
+        "INGEST_MODE": "pulse",
+        "JETSTREAM_URLS": "wss://jetstream.us-east.bsky.network,wss://jetstream.us-west.bsky.network",
+        "JETSTREAM_LOOKBACK_HOURS": "24",
+        "RELAY_URL": "https://relay1.us-east.bsky.network",
+        "PLAN": "free",
+        "DO_LOCATION_HINT": "enam"
+      },
+      "routes": [{ "pattern": "staging.music.example.org", "custom_domain": true }]
+    }
+  }
+}
