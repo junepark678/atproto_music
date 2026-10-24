@@ -18,6 +18,7 @@ import { FIXTURE_USERS, type FixtureKit, seedReadModels } from '@atmusic/atproto
 import { describe, expect, it } from 'vitest';
 import type { Db } from '../../src/do/db';
 import {
+  checkStatus,
   claimStatusJob,
   GET_REPO_STATUS,
   nextStatusJobDue,
@@ -368,6 +369,172 @@ describe('account status', () => {
         due_at: late,
       });
       expect(nextStatusJobDue(db)).toBe(late);
+    });
+  });
+});
+
+// How a PDS / PLC answer is read (Rust oracle crates/atproto/src/sync/accounts.rs
+// `PdsAccountSource`): an answer about another DID is not an answer; an XRPC
+// RepoNotFound is an inactive account; a gone DID document is a deleted account.
+describe('account status answers', () => {
+  it('a getRepoStatus answer naming another DID is rejected and changes no account', async () => {
+    const k = await kit();
+    const alice = k.users.Alice.did;
+    const bob = k.users.Bob.did;
+
+    await runInDurableObject(stubFor('accounts-answer-other-did'), async (i: HarnessDO) => {
+      const db = i.db;
+      const m = depsFor(db, k);
+      await seedIndexed(db, m, k);
+      const usersBefore = db.all('SELECT * FROM users ORDER BY did');
+      const lastGeneration = db.one<{ g: number }>('SELECT last_generation AS g FROM backfill_generation')!.g;
+
+      // Alice's PDS answers with an inactive status about Bob.
+      k.pds.Alice.fail(
+        { nsid: GET_REPO_STATUS },
+        {
+          kind: 'respond',
+          respond: () =>
+            new Response(JSON.stringify({ did: bob, active: false, status: 'takendown' }), {
+              status: 200,
+              headers: { 'content-type': 'application/json' },
+            }),
+        },
+      );
+      expect(await checkStatus(m, alice, { now: T0 })).toEqual({ outcome: 'failed', error: 'response:invalid' });
+      expect(k.pds.Alice.calls.filter({ nsid: GET_REPO_STATUS }).map((c) => [c.did, c.status, c.fault])).toEqual([
+        [alice, 200, 'respond'],
+      ]);
+
+      // Neither Alice nor Bob changed: no row, generation, check time or visibility moved.
+      expect(db.all('SELECT * FROM users ORDER BY did')).toEqual(usersBefore);
+      expect(db.one<{ g: number }>('SELECT last_generation AS g FROM backfill_generation')!.g).toBe(lastGeneration);
+      expect(historyOf(m, alice)).toEqual(ALICE_HISTORY);
+      expect(historyOf(m, bob)).toEqual(['r09']);
+      expect(followingFeed(m, alice)).toEqual(['r09']);
+      expect(globalFeed(m)).toEqual(['r09', 'r10', 'r07', 'r01', 'r02', 'r03', 'r04', 'r05', 'r06']);
+      expect(db.all("SELECT label, value FROM counters WHERE name = 'account_hidden'")).toEqual([]);
+      expect(db.all("SELECT label, value FROM counters WHERE name = 'status_check_failed'")).toEqual([
+        { label: 'response', value: 1 },
+      ]);
+      expect(db.all('SELECT * FROM host_backoff')).toEqual([]);
+
+      // The PDS's own answer about Alice (active) is then accepted: only the check time moves.
+      expect(await checkStatus(m, alice, { now: T0 + 1 })).toEqual({ outcome: 'active' });
+      expect(user(db, alice)).toEqual({
+        ...(usersBefore.find((u) => (u as { did: string }).did === alice) as Record<string, unknown>),
+        last_status_check_ms: T0 + 1,
+      });
+    });
+  });
+
+  it('getRepoStatus RepoNotFound hides the account as not_found and moves its generation', async () => {
+    const k = await kit();
+    const alice = k.users.Alice.did;
+    const bob = k.users.Bob.did;
+    const carol = k.users.Carol.did;
+
+    await runInDurableObject(stubFor('accounts-repo-not-found'), async (i: HarnessDO) => {
+      const db = i.db;
+      const m = depsFor(db, k);
+      await seedIndexed(db, m, k);
+      const aliceBefore = user(db, alice)!;
+      const lastGeneration = db.one<{ g: number }>('SELECT last_generation AS g FROM backfill_generation')!.g;
+
+      // The repo is gone from Alice's PDS: getRepoStatus answers 400 RepoNotFound.
+      k.pds.Alice.removeAccount(alice);
+      const report = await statusSweep(m, T0);
+      expect([...report.checked].sort((a, b) => a.did.localeCompare(b.did))).toEqual([
+        { did: alice, source: 'sweep', outcome: 'inactive', detail: 'not_found' },
+        { did: bob, source: 'sweep', outcome: 'active' },
+        { did: carol, source: 'sweep', outcome: 'active' },
+      ]);
+      expect(k.pds.Alice.calls.filter({ nsid: GET_REPO_STATUS }).map((c) => [c.did, c.status])).toEqual([[alice, 400]]);
+
+      expect(user(db, alice)).toEqual({
+        ...aliceBefore,
+        active: 0,
+        account_status: 'not_found',
+        indexing_state: 'recovering',
+        generation: lastGeneration + 1,
+        last_status_check_ms: T0,
+      });
+      expect(historyOf(m, alice)).toEqual([]);
+      expect(await profile(m, alice)).toBeNull();
+      expect(globalFeed(m)).toEqual(['r09', 'r10']);
+      expect(historyOf(m, bob)).toEqual(['r09']);
+      expect(db.all("SELECT label, value FROM counters WHERE name = 'account_hidden'")).toEqual([
+        { label: 'not_found', value: 1 },
+      ]);
+      // An account answer, not a host failure: the host is not paused.
+      expect(db.all('SELECT * FROM host_backoff')).toEqual([]);
+      expect(db.all("SELECT label, value FROM counters WHERE name = 'status_check_failed'")).toEqual([]);
+    });
+  });
+
+  it('a DID document gone from PLC (410 tombstone, 404) hides the account as deleted', async () => {
+    const k = await kit();
+    const alice = k.users.Alice.did;
+    const bob = k.users.Bob.did;
+    const carol = k.users.Carol.did;
+
+    await runInDurableObject(stubFor('accounts-did-not-found'), async (i: HarnessDO) => {
+      const db = i.db;
+      const m = depsFor(db, k);
+      await seedIndexed(db, m, k);
+      const aliceBefore = user(db, alice)!;
+      const bobBefore = user(db, bob)!;
+      const carolBefore = user(db, carol)!;
+      const lastGeneration = db.one<{ g: number }>('SELECT last_generation AS g FROM backfill_generation')!.g;
+
+      // Alice's DID is tombstoned (410); Bob's document answers 404. The cached
+      // identities expire (5 min TTL), so the sweep resolves every DID again.
+      k.plc.tombstone(alice);
+      k.plc.fail({ did: bob }, { kind: 'status', status: 404 });
+      k.clock.advance(6 * 60_000);
+      const now = k.clock.nowMs();
+      const report = await statusSweep(m, now);
+      expect([...report.checked].sort((a, b) => a.did.localeCompare(b.did))).toEqual(
+        [
+          { did: alice, source: 'sweep', outcome: 'inactive', detail: 'deleted' },
+          { did: bob, source: 'sweep', outcome: 'inactive', detail: 'deleted' },
+          { did: carol, source: 'sweep', outcome: 'active' },
+        ].sort((a, b) => a.did.localeCompare(b.did)),
+      );
+      expect(k.plc.calls.filter({ did: alice }).map((c) => c.status)).toEqual([410]);
+      expect(k.plc.calls.filter({ did: bob }).map((c) => c.status)).toEqual([404]);
+      // A deleted account's PDS is never asked.
+      expect([statusCalls(k, 'Alice'), statusCalls(k, 'Bob'), statusCalls(k, 'Carol')]).toEqual([0, 0, 1]);
+
+      const gens = [user(db, alice)!.generation as number, user(db, bob)!.generation as number].sort((a, b) => a - b);
+      expect(gens).toEqual([lastGeneration + 1, lastGeneration + 2]);
+      expect(user(db, alice)).toEqual({
+        ...aliceBefore,
+        active: 0,
+        account_status: 'deleted',
+        indexing_state: 'recovering',
+        generation: user(db, alice)!.generation,
+        last_status_check_ms: now,
+      });
+      expect(user(db, bob)).toEqual({
+        ...bobBefore,
+        active: 0,
+        account_status: 'deleted',
+        indexing_state: 'recovering',
+        generation: user(db, bob)!.generation,
+        last_status_check_ms: now,
+      });
+      expect(user(db, carol)).toEqual({ ...carolBefore, last_status_check_ms: now });
+      expect(historyOf(m, alice)).toEqual([]);
+      expect(historyOf(m, bob)).toEqual([]);
+      expect(await profile(m, alice)).toBeNull();
+      expect(await profile(m, bob)).toBeNull();
+      expect(globalFeed(m)).toEqual(['r10']);
+      expect(historyOf(m, carol)).toEqual(['r10']);
+      expect(db.all("SELECT label, value FROM counters WHERE name = 'account_hidden'")).toEqual([
+        { label: 'deleted', value: 2 },
+      ]);
+      expect(db.all("SELECT label, value FROM counters WHERE name = 'status_check_failed'")).toEqual([]);
     });
   });
 });
