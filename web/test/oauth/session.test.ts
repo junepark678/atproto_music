@@ -658,7 +658,22 @@ describe('web/test/oauth/session.test.ts', () => {
     ];
     // Each of these really does leave the PDS when resolved the library's way.
     expect(escaping.map((p) => new URL(p, lib.PDS_ORIGIN).host)).toEqual(escaping.map(() => 'evil.example.net'));
-    for (const hostile of [...escaping, 'xrpc/x', '/xrpc/a b', '/xrpc/\u0000x']) {
+    // Dot segments: canonicalizing removes them and leaves `//evil.example.net/…`,
+    // which the library then resolves to that host.
+    const viaDotSegments = [
+      '/.//evil.example.net/xrpc/com.atproto.repo.createRecord',
+      '/xrpc/../..//evil.example.net/x',
+      '/%2e//evil.example.net/x',
+      '/%2E%2E//evil.example.net/x',
+      '/xrpc/.%2e//evil.example.net/x',
+    ];
+    const canonicalThenLibrary = (p: string) => {
+      const canonical = new URL(p, lib.PDS_ORIGIN);
+      return new URL(`${canonical.pathname}${canonical.search}`, lib.PDS_ORIGIN).host;
+    };
+    expect(viaDotSegments.map(canonicalThenLibrary)).toEqual(viaDotSegments.map(() => 'evil.example.net'));
+    const otherHostile = ['xrpc/x', '/xrpc/a b', '/xrpc/\u0000x', '/xrpc/./x', '/xrpc/%2e%2e/x', '/xrpc//x'];
+    for (const hostile of [...escaping, ...viaDotSegments, ...otherHostile]) {
       await expect(pds?.fetchHandler(hostile), JSON.stringify(hostile)).rejects.toBeInstanceOf(TypeError);
     }
     expect(lib.world.pdsRequests).toHaveLength(1);

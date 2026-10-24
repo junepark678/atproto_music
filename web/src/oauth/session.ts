@@ -294,10 +294,14 @@ const PATH_CHECK_BASE = 'https://pds.invalid';
  * `new URL(path, tokenSet.aud)`, so anything that URL parsing would turn into
  * another host (a full URL, `//host`, and the WHATWG equivalents `/\host`
  * and `/<tab>/host`, since backslash counts as a slash and tab, CR and LF are
- * stripped) would send the DPoP-bound token and proof there. Refused: any
- * backslash, ASCII control character or space, and any path that does not
- * resolve to the placeholder origin. The canonical form is what is sent, so
- * the library receives exactly the path that was checked.
+ * stripped) would send the DPoP-bound token and proof there. Dot segments
+ * are just as dangerous: canonicalizing `/.//host/x` or `/a/..//host/x`
+ * (also with `%2e`) removes the dot segment and leaves `//host/x`, which the
+ * library then resolves to `host`. Refused: any backslash, ASCII control
+ * character or space; any `.` or `..` segment, literal or percent-encoded;
+ * any empty segment; and any path, raw or canonical, that does not resolve
+ * to the placeholder origin. The canonical form is what is sent, so the
+ * library receives exactly the path that was checked.
  */
 export function pdsPath(path: string): string {
   const refuse = (): never => {
@@ -306,6 +310,10 @@ export function pdsPath(path: string): string {
   if (typeof path !== 'string' || !path.startsWith('/') || path.startsWith('//')) refuse();
   // biome-ignore lint/suspicious/noControlCharactersInRegex: control characters are what is refused.
   if (/[\\\u0000-\u0020\u007f]/.test(path)) refuse();
+  const end = path.search(/[?#]/);
+  const segments = (end === -1 ? path : path.slice(0, end)).slice(1).split('/');
+  // An empty segment (`//`) or a dot segment (`.`, `..`, `%2e`, `.%2E`, …).
+  if (segments.some((segment) => segment === '' || /^(?:\.|%2e){1,2}$/i.test(segment))) refuse();
   let url: URL;
   try {
     url = new URL(path, PATH_CHECK_BASE);
@@ -313,7 +321,12 @@ export function pdsPath(path: string): string {
     return refuse();
   }
   if (url.origin !== PATH_CHECK_BASE || url.username !== '' || url.password !== '') refuse();
-  return `${url.pathname}${url.search}`;
+  const canonical = `${url.pathname}${url.search}`;
+  // The canonical form is what the library resolves, so it is checked too.
+  if (!canonical.startsWith('/') || canonical.startsWith('//')) refuse();
+  const resolved = new URL(canonical, PATH_CHECK_BASE);
+  if (resolved.origin !== PATH_CHECK_BASE || `${resolved.pathname}${resolved.search}` !== canonical) refuse();
+  return canonical;
 }
 
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
