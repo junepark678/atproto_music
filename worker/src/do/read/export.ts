@@ -11,7 +11,9 @@
 //   public Scrobble DTO (stored columns verbatim; absent optionals omitted;
 //   music grouping keys never serialised);
 // - follows: the DID's representative visible edges (follows.ts), newest
-//   first, as the public Follow DTO;
+//   first, as the public Follow DTO; an edge to a subject DID this index has
+//   never seen is kept (Rust export.rs hides only suppressed or inactive
+//   subjects);
 // - indexing: the per-DID truth (status.ts);
 // - exportedAt: the injected clock, rendered as every response timestamp.
 // Only `scrobbles`, `follows` and `users` are read: no record_state reasons,

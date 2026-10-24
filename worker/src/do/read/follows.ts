@@ -3,9 +3,11 @@
 // records"). Ports crates/storage/src/repositories/{follows,public}.rs
 // `follow_page` / `public_counts` onto the Workers schema.
 //
-// - An edge `(actor, subject)` is visible when both its actor and its subject
-//   are visible users (visibility.ts visibleFollowEdge: active and not
-//   suppressed). Only verified present, valid follow records exist in
+// - An edge `(actor, subject)` is visible when its actor is a visible user
+//   (active and not suppressed) and its subject is not hidden: not suppressed
+//   and not a users row with active = 0 (visibility.ts visibleFollowEdge, the
+//   Rust VISIBLE fragment). A subject DID unknown to this index stays
+//   visible, as in Rust. Only verified present, valid follow records exist in
 //   `follows` (absent and excluded ones live in record_state), so "active
 //   record" is simply "a row of `follows`".
 // - Duplicate records of one edge (an external writer may publish several

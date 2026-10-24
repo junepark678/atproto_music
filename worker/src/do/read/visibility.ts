@@ -10,9 +10,14 @@
 // - A scrobble is visible when its owner is visible. Only verified present,
 //   valid rows exist in `scrobbles` (excluded and absent records are deleted
 //   and live in record_state), so no per-row state filter is needed.
-// - A follow edge is visible when both its actor and its subject are visible
-//   users. Other owners' follows of a disconnected or inactive DID stay
-//   stored but hidden.
+// - A follow edge is visible when its actor is a visible user and its subject
+//   is not hidden: the subject has no suppression row and no users row with
+//   active = 0 (the Rust oracle, crates/storage/src/repositories/follows.rs
+//   VISIBLE, public.rs public_counts and export.rs). A subject DID with no
+//   users row at all (an account never indexed here) stays visible, so
+//   counts, follow lists and the export keep the owner's indexed follow
+//   records. Other owners' follows of a disconnected (suppressed) or inactive
+//   DID stay stored but hidden.
 //
 // Fragments interpolate only aliases and column names checked against a
 // strict identifier pattern; values are always bound parameters.
@@ -49,8 +54,17 @@ export function visibleScrobblesFrom(s = 's', u = 'u'): string {
   return `scrobbles ${sa} JOIN users ${ua} ON ${ua}.did = ${sa}.did AND ${activeUser(ua)}`;
 }
 
-/** The follows row aliased `f` is a visible edge: actor and subject are both visible users. */
+/**
+ * The follows row aliased `f` is a visible edge: the actor is a visible user and
+ * the subject is neither suppressed nor a known inactive user (an unknown
+ * subject DID stays visible, as in the Rust oracle).
+ */
 export function visibleFollowEdge(f = 'f'): string {
   const a = ident(f);
-  return `(${visibleDid(`${a}.actor`, `${a}_actor`)} AND ${visibleDid(`${a}.subject`, `${a}_subject`)})`;
+  const sub = `${a}_subject`;
+  return (
+    `(${visibleDid(`${a}.actor`, `${a}_actor`)}` +
+    ` AND NOT EXISTS (SELECT 1 FROM suppression ${sub}_x WHERE ${sub}_x.did = ${a}.subject)` +
+    ` AND NOT EXISTS (SELECT 1 FROM users ${sub} WHERE ${sub}.did = ${a}.subject AND ${sub}.active = 0))`
+  );
 }

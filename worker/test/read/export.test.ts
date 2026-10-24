@@ -5,8 +5,11 @@
 // The shared fixture is published as real signed commits; every record is
 // verified by the W2-03 verifier and applied with W2-04 applyRecordProof. On
 // top of it the test plants records and rows that must never reach an export:
-// an excluded (invalid) record, an edge to an unknown account, another
-// owner's records, and marker strings in every non-projection table.
+// an excluded (invalid) record, edges to an inactive and to a suppressed
+// account, another owner's records, and marker strings in every
+// non-projection table. An edge to a DID this index has never seen is kept,
+// as in the Rust oracle (export.rs hides only suppressed or inactive
+// subjects).
 // Expectations are hardcoded from TESTING.md.
 
 import { runInDurableObject } from 'cloudflare:test';
@@ -29,6 +32,7 @@ import openapiText from '../../../api/openapi.yaml?raw';
 import { parseConfig, parseCursorKey } from '../../src/config';
 import { type Db, doDb } from '../../src/do/db';
 import { exportUser } from '../../src/do/read/export';
+import { followCounts } from '../../src/do/read/follows';
 import { markConnected, recordEvent, updateCheckpointBookkeeping } from '../../src/do/status';
 import { markInactive } from '../../src/do/write/account-state';
 import { applyRecordProof } from '../../src/do/write/apply-record';
@@ -63,6 +67,10 @@ const BOB = 'did:plc:bbbbbbbbbbbbbbbbbbbbbbbb';
 const CAROL = 'did:plc:cccccccccccccccccccccccc';
 /** A syntactically valid DID that is not a known account. */
 const DAVE = 'did:plc:dddddddddddddddddddddddd';
+/** A known account whose users row is inactive (active = 0). */
+const ERIN = 'did:plc:eeeeeeeeeeeeeeeeeeeeeeee';
+/** A DID with a suppression marker (opted out; no users row). */
+const FRANK = 'did:plc:ffffffffffffffffffffffff';
 const NOW_MS = Date.parse('2026-01-15T12:00:00Z');
 const NOW = '2026-01-15T12:00:00.000000000Z';
 const MARKER = 'SECRET-MARKER';
@@ -100,8 +108,9 @@ it('export contains only indexed public records, attachment header, 404 for inac
   const kit = await createFixtureKit();
   const seed = await seedReadModels(kit);
   // Records that exist in repositories but must not be exported for Alice:
-  // an invalid scrobble (excluded at apply), an edge to an unknown account,
-  // and Bob's own (other-owner) listen.
+  // an invalid scrobble (excluded at apply), edges to an inactive (Erin) and
+  // a suppressed (Frank) account, and Bob's own (other-owner) listen. Her
+  // edge to the never-indexed Dave is a valid indexed record and IS exported.
   await kit.externalPut('Alice', SCROBBLE, 'rx1', {
     $type: SCROBBLE,
     artist: `${MARKER}-excluded`,
@@ -111,6 +120,10 @@ it('export contains only indexed public records, attachment header, 404 for inac
   });
   const daveRkey = await followRkey(DAVE);
   await kit.externalPut('Alice', FOLLOW, daveRkey, { $type: FOLLOW, subject: DAVE, createdAt: FOLLOW_CREATED_AT });
+  const erinRkey = await followRkey(ERIN);
+  await kit.externalPut('Alice', FOLLOW, erinRkey, { $type: FOLLOW, subject: ERIN, createdAt: FOLLOW_CREATED_AT });
+  const frankRkey = await followRkey(FRANK);
+  await kit.externalPut('Alice', FOLLOW, frankRkey, { $type: FOLLOW, subject: FRANK, createdAt: FOLLOW_CREATED_AT });
   await kit.externalPut('Bob', SCROBBLE, 'rb2', {
     $type: SCROBBLE,
     artist: `${MARKER}-bob`,
@@ -126,12 +139,16 @@ it('export contains only indexed public records, attachment header, 404 for inac
       recordEvent(db, { cursor: 1, timeUs: NOW_MS * 1000 });
       updateCheckpointBookkeeping(db, { pendingGap: false });
       for (const did of [ALICE, BOB, CAROL]) seedUser(db, did);
+      seedUser(db, ERIN, { active: false });
+      db.run(`INSERT INTO suppression(did, suppressed_at) VALUES (?, ?)`, FRANK, NOW);
     }),
   );
   const targets: Array<{ did: string; collection: string; rkey: string }> = [
     ...seed.records.values(),
     { did: ALICE, collection: SCROBBLE, rkey: 'rx1' },
     { did: ALICE, collection: FOLLOW, rkey: daveRkey },
+    { did: ALICE, collection: FOLLOW, rkey: erinRkey },
+    { did: ALICE, collection: FOLLOW, rkey: frankRkey },
     { did: BOB, collection: SCROBBLE, rkey: 'rb2' },
   ];
   const proofs: RecordProof[] = [];
@@ -140,7 +157,8 @@ it('export contains only indexed public records, attachment header, 404 for inac
     proofs.push(await verifiedProof(kit.repos[u.name], u.key.didKey, t.collection, t.rkey));
   }
   const outcomes = await inDo(stub, (db) => proofs.map((p) => db.tx(() => applyRecordProof(db, p, OPTS)).outcome));
-  // r01–r07, r08 (proven absent), r09, r10, Alice→Bob, then rx1 (invalid), Alice→Dave, Bob's rb2.
+  // r01–r07, r08 (proven absent), r09, r10, Alice→Bob, then rx1 (invalid), Alice→Dave, Alice→Erin,
+  // Alice→Frank, Bob's rb2.
   expect(outcomes).toEqual([
     ...Array<string>(7).fill('applied'),
     'absent',
@@ -148,6 +166,8 @@ it('export contains only indexed public records, attachment header, 404 for inac
     'applied',
     'applied',
     'excluded',
+    'applied',
+    'applied',
     'applied',
     'applied',
   ]);
@@ -239,17 +259,21 @@ it('export contains only indexed public records, attachment header, 404 for inac
     expect(s.revision).toBe(aliceRev);
     expect(Object.keys(s)).not.toContain('artistKey');
   }
-  // Only the visible Alice→Bob edge; the edge to the unknown DID is hidden.
+  // The visible edges Alice→Bob and Alice→Dave (a subject never indexed here
+  // stays visible, as in Rust); the edges to the inactive Erin and the
+  // suppressed Frank are hidden. Equal createdAt: URI DESC.
   const aliceBob = `at://${ALICE}/${FOLLOW}/${await followRkey(BOB)}`;
-  expect(res.body.follows).toEqual([
-    {
-      uri: aliceBob,
-      cid: seed.records.get(aliceBob)?.cid,
-      actor: ALICE,
-      subject: BOB,
-      createdAt: '2025-01-01T00:00:00.000000000Z',
-    },
-  ]);
+  const aliceDave = `at://${ALICE}/${FOLLOW}/${daveRkey}`;
+  const daveProof = proofs[targets.findIndex((t) => t.rkey === daveRkey)];
+  const daveCid = daveProof?.state === 'present' ? daveProof.cid : undefined;
+  expect(daveCid).toMatch(/^b/);
+  const visibleEdges = [
+    { uri: aliceBob, cid: seed.records.get(aliceBob)?.cid, actor: ALICE, subject: BOB },
+    { uri: aliceDave, cid: daveCid, actor: ALICE, subject: DAVE },
+  ]
+    .sort((a, b) => (a.uri < b.uri ? 1 : a.uri > b.uri ? -1 : 0))
+    .map((e) => ({ ...e, createdAt: '2025-01-01T00:00:00.000000000Z' }));
+  expect(res.body.follows).toEqual(visibleEdges);
 
   // Secret scan: nothing from other tables, other owners, credentials or config.
   expect(res.text).not.toContain(MARKER);
@@ -258,17 +282,21 @@ it('export contains only indexed public records, attachment header, 404 for inac
   expect(res.text).not.toContain(env.CURSOR_KEY);
   expect(res.text).not.toContain(r('r08'));
   expect(res.text).not.toContain(r('rx1'));
-  expect(res.text).not.toContain(DAVE);
+  expect(res.text).not.toContain(ERIN);
+  expect(res.text).not.toContain(FRANK);
   expect(res.text).not.toContain(`at://${BOB}/${SCROBBLE}`);
   // The excluded and hidden rows are really stored; the export left them alone.
   const stored = await inDo(stub, (db) => ({
     excluded: db.one('SELECT state FROM record_state WHERE uri = ?', r('rx1')),
-    hiddenEdge: db.one('SELECT subject FROM follows WHERE subject = ?', DAVE),
+    hiddenEdges: db.all('SELECT subject FROM follows WHERE subject IN (?, ?) ORDER BY subject', ERIN, FRANK),
+    // The profile counts agree with the export: Bob and Dave, not Erin or Frank.
+    aliceCounts: followCounts(db, ALICE),
     bob: db.all('SELECT uri FROM scrobbles WHERE did = ? ORDER BY uri', BOB),
   }));
   expect(stored).toEqual({
     excluded: { state: 'excluded' },
-    hiddenEdge: { subject: DAVE },
+    hiddenEdges: [{ subject: ERIN }, { subject: FRANK }],
+    aliceCounts: { followerCount: 0, followingCount: 2 },
     bob: [{ uri: `at://${BOB}/${SCROBBLE}/r09` }, { uri: `at://${BOB}/${SCROBBLE}/rb2` }],
   });
 
