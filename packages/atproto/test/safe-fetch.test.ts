@@ -384,6 +384,52 @@ describe('SafeFetch', () => {
     // Each attempt is exactly one request: no hidden retries.
     expect(net.requests).toHaveLength(5);
     expect(net.requests[0]?.headers.get('accept')).toBe('application/vnd.ipld.car');
+
+    // Headers already arrived, then the (optional) error body stalls until the
+    // deadline fires: the status and backoff headers still classify it; only
+    // the body-derived XRPC fields are lost, and the stalled body is cancelled.
+    const stalledBody = { pulled: false, cancelled: false };
+    let bodyPulled!: () => void;
+    const pulled = new Promise<void>((r) => {
+      bodyPulled = r;
+    });
+    const stallNet = fakeNet({
+      'stall429.example.com': () =>
+        new Response(
+          new ReadableStream<Uint8Array>(
+            {
+              pull() {
+                stalledBody.pulled = true;
+                bodyPulled();
+                return new Promise<void>(() => {});
+              },
+              cancel() {
+                stalledBody.cancelled = true;
+              },
+            },
+            { highWaterMark: 0 },
+          ),
+          { status: 429, headers: { 'retry-after': '120', 'ratelimit-reset': String(nowSec + 30) } },
+        ),
+    });
+    const timer = manualTimer();
+    const stallFetch = createSafeFetch({ transport: stallNet.transport, clock, timer });
+    const pending = stallFetch('https://stall429.example.com/xrpc/x', { kind: 'json' });
+    await pulled;
+    timer.fire();
+    const stalled = await failure(pending);
+    expect({ ...shape(stalled), xrpcMessage: stalled.xrpcMessage }).toEqual({
+      code: 'http_status',
+      status: 429,
+      retryAfterMs: 120_000,
+      rateLimitResetMs: 30_000,
+      xrpcError: null,
+      xrpcMessage: null,
+    });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(stalledBody).toEqual({ pulled: true, cancelled: true });
+    expect(stallNet.requests).toHaveLength(1);
+    expect(timer.requested).toEqual([SAFE_FETCH_DEADLINE_MS]);
   });
 
   it('mid-body connection reset is a typed network_error, not a raw TypeError', async () => {

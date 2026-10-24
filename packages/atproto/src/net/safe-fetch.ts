@@ -203,12 +203,16 @@ export function createSafeFetch(options: CreateSafeFetchOptions): SafeFetch {
       });
     }
     if (status < 200 || status >= 300) {
+      // The status line and headers have arrived, so they classify the failure.
+      // The error body is optional (it only names the XRPC error): if it is
+      // oversized, broken, or still stalled when the deadline fires, readCapped
+      // cancels it and we drop just the body-derived fields, never the status or
+      // the parsed Retry-After / RateLimit-Reset the caller's backoff needs.
       let errorBody: Uint8Array | null = null;
       try {
         errorBody = await readCapped(response, Math.min(cap, ERROR_BODY_MAX_BYTES), signal);
-      } catch (error) {
-        if (error instanceof SafeFetchError && error.code === 'timeout') throw error;
-        // An oversized or broken error body does not change the classification.
+      } catch {
+        errorBody = null;
       }
       const now = clock.nowMs();
       throw new SafeFetchError('http_status', `upstream HTTP ${status}`, {
