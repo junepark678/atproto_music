@@ -19,3 +19,15 @@ export interface PdsSession {
   /** Revokes the tokens (best effort) and forgets the session locally. */
   signOut(): Promise<void>;
 }
+
+/**
+ * The surface web/src/main.tsx uses from web/src/oauth/session.ts (W2-06, per
+ * docs/planning/workers-waves.json): `init()` restores a stored session or
+ * completes an OAuth callback, then `current()` returns the adapted session
+ * (or null). session.ts does not know about `AppState`; main.tsx records the
+ * result with `setSession` (web/src/state/store.ts).
+ */
+export interface SessionModule {
+  init?: () => Promise<unknown>;
+  current?: () => PdsSession | null;
+}
