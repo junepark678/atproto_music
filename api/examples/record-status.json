@@ -1,0 +1,12 @@
+{
+  "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r01",
+  "state": "indexed",
+  "cid": "bafyreieogjytekr7rpqty3rtkfjjglj35ub2ipqjh6ftn7rbxwqe5242jq",
+  "revision": "3mfixture",
+  "indexing": {
+    "state": "current",
+    "caughtUp": true,
+    "lastIndexedAt": "2026-01-15T12:00:00Z",
+    "lagSeconds": 0
+  }
+}

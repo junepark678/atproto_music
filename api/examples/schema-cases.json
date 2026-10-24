@@ -405,48 +405,6 @@
     "reason": ""
   },
   {
-    "name": "accepted_only_pending",
-    "schema": "Accepted",
-    "valid": false,
-    "value": {
-      "operationId": "fixture-operation-1",
-      "state": "succeeded"
-    },
-    "reason": ""
-  },
-  {
-    "name": "failed_operation",
-    "schema": "Operation",
-    "valid": true,
-    "value": {
-      "operationId": "fixture-operation-1",
-      "kind": "scrobble_create",
-      "state": "failed",
-      "attempts": 10,
-      "createdAt": "2026-01-15T12:00:00Z",
-      "updatedAt": "2026-01-15T12:00:00Z",
-      "recordUri": null,
-      "failureCode": "upstream_rejected"
-    },
-    "reason": ""
-  },
-  {
-    "name": "succeeded_operation",
-    "schema": "Operation",
-    "valid": true,
-    "value": {
-      "operationId": "fixture-operation-1",
-      "kind": "scrobble_create",
-      "state": "succeeded",
-      "attempts": 1,
-      "createdAt": "2026-01-15T12:00:00Z",
-      "updatedAt": "2026-01-15T12:00:00Z",
-      "recordUri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r01",
-      "failureCode": null
-    },
-    "reason": ""
-  },
-  {
     "name": "empty_page",
     "schema": "ScrobblePage",
     "valid": true,
@@ -732,6 +690,560 @@
       "artist": "  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  ",
       "track": "Jóga",
       "listenedAt": "2026-01-15T11:00:00Z"
+    }
+  },
+  {
+    "name": "notify_uri",
+    "schema": "NotifyInput",
+    "valid": true,
+    "value": {
+      "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r01"
+    }
+  },
+  {
+    "name": "notify_did",
+    "schema": "NotifyInput",
+    "valid": true,
+    "value": {
+      "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  },
+  {
+    "name": "notify_uri_and_did_rejected",
+    "schema": "NotifyInput",
+    "valid": false,
+    "value": {
+      "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r01",
+      "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  },
+  {
+    "name": "notify_empty_rejected",
+    "schema": "NotifyInput",
+    "valid": false,
+    "value": {}
+  },
+  {
+    "name": "notify_unknown_field_rejected",
+    "schema": "NotifyInput",
+    "valid": false,
+    "value": {
+      "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r01",
+      "priority": 1
+    }
+  },
+  {
+    "name": "notify_handle_authority_rejected",
+    "schema": "NotifyInput",
+    "valid": false,
+    "value": {
+      "uri": "at://alice.test/com.example.atmusic.scrobble/r01"
+    }
+  },
+  {
+    "name": "notify_handle_as_did_rejected",
+    "schema": "NotifyInput",
+    "valid": false,
+    "value": {
+      "did": "alice.test"
+    }
+  },
+  {
+    "name": "notify_accepted_queued",
+    "schema": "NotifyAccepted",
+    "valid": true,
+    "value": {
+      "state": "queued"
+    }
+  },
+  {
+    "name": "notify_accepted_only_queued",
+    "schema": "NotifyAccepted",
+    "valid": false,
+    "value": {
+      "state": "pending"
+    }
+  },
+  {
+    "name": "record_status_indexed",
+    "schema": "RecordStatus",
+    "valid": true,
+    "value": {
+      "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r01",
+      "state": "indexed",
+      "cid": "bafyreieogjytekr7rpqty3rtkfjjglj35ub2ipqjh6ftn7rbxwqe5242jq",
+      "revision": "3mfixture",
+      "indexing": {
+        "state": "current",
+        "caughtUp": true,
+        "lastIndexedAt": "2026-01-15T12:00:00Z",
+        "lagSeconds": 0
+      }
+    }
+  },
+  {
+    "name": "record_status_indexed_needs_cid",
+    "schema": "RecordStatus",
+    "valid": false,
+    "value": {
+      "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r01",
+      "state": "indexed",
+      "revision": "3mfixture",
+      "indexing": {
+        "state": "current",
+        "caughtUp": true,
+        "lastIndexedAt": "2026-01-15T12:00:00Z",
+        "lagSeconds": 0
+      }
+    }
+  },
+  {
+    "name": "record_status_pending",
+    "schema": "RecordStatus",
+    "valid": true,
+    "value": {
+      "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r01",
+      "state": "pending",
+      "indexing": {
+        "state": "current",
+        "caughtUp": true,
+        "lastIndexedAt": "2026-01-15T12:00:00Z",
+        "lagSeconds": 0
+      }
+    }
+  },
+  {
+    "name": "record_status_absent",
+    "schema": "RecordStatus",
+    "valid": true,
+    "value": {
+      "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r01",
+      "state": "absent",
+      "revision": "3mfixture",
+      "indexing": {
+        "state": "current",
+        "caughtUp": true,
+        "lastIndexedAt": "2026-01-15T12:00:00Z",
+        "lagSeconds": 0
+      }
+    }
+  },
+  {
+    "name": "record_status_excluded_with_reason",
+    "schema": "RecordStatus",
+    "valid": true,
+    "value": {
+      "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r01",
+      "state": "excluded",
+      "cid": "bafyreieogjytekr7rpqty3rtkfjjglj35ub2ipqjh6ftn7rbxwqe5242jq",
+      "revision": "3mfixture",
+      "reason": "future_listened_at",
+      "indexing": {
+        "state": "current",
+        "caughtUp": true,
+        "lastIndexedAt": "2026-01-15T12:00:00Z",
+        "lagSeconds": 0
+      }
+    }
+  },
+  {
+    "name": "record_status_excluded_needs_reason",
+    "schema": "RecordStatus",
+    "valid": false,
+    "value": {
+      "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r01",
+      "state": "excluded",
+      "revision": "3mfixture",
+      "indexing": {
+        "state": "current",
+        "caughtUp": true,
+        "lastIndexedAt": "2026-01-15T12:00:00Z",
+        "lagSeconds": 0
+      }
+    }
+  },
+  {
+    "name": "record_status_reason_only_when_excluded",
+    "schema": "RecordStatus",
+    "valid": false,
+    "value": {
+      "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r01",
+      "state": "absent",
+      "reason": "deleted",
+      "indexing": {
+        "state": "current",
+        "caughtUp": true,
+        "lastIndexedAt": "2026-01-15T12:00:00Z",
+        "lagSeconds": 0
+      }
+    }
+  },
+  {
+    "name": "record_status_unknown",
+    "schema": "RecordStatus",
+    "valid": true,
+    "value": {
+      "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r01",
+      "state": "unknown",
+      "indexing": {
+        "state": "current",
+        "caughtUp": true,
+        "lastIndexedAt": "2026-01-15T12:00:00Z",
+        "lagSeconds": 0
+      }
+    }
+  },
+  {
+    "name": "record_status_unknown_has_no_cid",
+    "schema": "RecordStatus",
+    "valid": false,
+    "value": {
+      "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r01",
+      "state": "unknown",
+      "cid": "bafyreieogjytekr7rpqty3rtkfjjglj35ub2ipqjh6ftn7rbxwqe5242jq",
+      "indexing": {
+        "state": "current",
+        "caughtUp": true,
+        "lastIndexedAt": "2026-01-15T12:00:00Z",
+        "lagSeconds": 0
+      }
+    }
+  },
+  {
+    "name": "record_status_invalid_state",
+    "schema": "RecordStatus",
+    "valid": false,
+    "value": {
+      "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r01",
+      "state": "queued",
+      "indexing": {
+        "state": "current",
+        "caughtUp": true,
+        "lastIndexedAt": "2026-01-15T12:00:00Z",
+        "lagSeconds": 0
+      }
+    }
+  },
+  {
+    "name": "record_status_missing_indexing",
+    "schema": "RecordStatus",
+    "valid": false,
+    "value": {
+      "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r01",
+      "state": "unknown"
+    }
+  },
+  {
+    "name": "record_status_closed_object",
+    "schema": "RecordStatus",
+    "valid": false,
+    "value": {
+      "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r01",
+      "state": "unknown",
+      "indexing": {
+        "state": "current",
+        "caughtUp": true,
+        "lastIndexedAt": "2026-01-15T12:00:00Z",
+        "lagSeconds": 0
+      },
+      "operationId": "x"
+    }
+  },
+  {
+    "name": "export_payload",
+    "schema": "Export",
+    "valid": true,
+    "value": {
+      "schemaVersion": 1,
+      "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "exportedAt": "2026-01-15T12:00:00Z",
+      "indexing": {
+        "state": "current",
+        "caughtUp": true,
+        "lastIndexedAt": "2026-01-15T12:00:00Z",
+        "lagSeconds": 0
+      },
+      "scrobbles": [
+        {
+          "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r07",
+          "cid": "bafyreieogjytekr7rpqty3rtkfjjglj35ub2ipqjh6ftn7rbxwqe5242jq",
+          "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+          "revision": "3mfixture",
+          "artist": "Radiohead",
+          "track": "No Surprises",
+          "album": "OK Computer",
+          "listenedAt": "2026-01-15T11:00:00Z",
+          "createdAt": "2026-01-15T11:00:00Z",
+          "indexedAt": "2026-01-15T12:00:00Z"
+        },
+        {
+          "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r01",
+          "cid": "bafyreieogjytekr7rpqty3rtkfjjglj35ub2ipqjh6ftn7rbxwqe5242jq",
+          "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+          "revision": "3mfixture",
+          "artist": "Björk",
+          "track": "Jóga",
+          "album": "Homogenic",
+          "listenedAt": "2026-01-15T11:00:00Z",
+          "createdAt": "2026-01-15T11:00:00Z",
+          "indexedAt": "2026-01-15T12:00:00Z"
+        }
+      ],
+      "follows": [
+        {
+          "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.follow/f9a71cc1369cb0ae7a6fa16d2b9ecdc8d3ba62a9c519fe9af11a322c90e9ef6f2",
+          "cid": "bafyreieogjytekr7rpqty3rtkfjjglj35ub2ipqjh6ftn7rbxwqe5242jq",
+          "actor": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+          "subject": "did:plc:bbbbbbbbbbbbbbbbbbbbbbbb",
+          "createdAt": "2026-01-15T12:00:00Z"
+        }
+      ]
+    }
+  },
+  {
+    "name": "export_schema_version_fixed",
+    "schema": "Export",
+    "valid": false,
+    "value": {
+      "schemaVersion": 2,
+      "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "exportedAt": "2026-01-15T12:00:00Z",
+      "indexing": {
+        "state": "current",
+        "caughtUp": true,
+        "lastIndexedAt": "2026-01-15T12:00:00Z",
+        "lagSeconds": 0
+      },
+      "scrobbles": [
+        {
+          "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r07",
+          "cid": "bafyreieogjytekr7rpqty3rtkfjjglj35ub2ipqjh6ftn7rbxwqe5242jq",
+          "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+          "revision": "3mfixture",
+          "artist": "Radiohead",
+          "track": "No Surprises",
+          "album": "OK Computer",
+          "listenedAt": "2026-01-15T11:00:00Z",
+          "createdAt": "2026-01-15T11:00:00Z",
+          "indexedAt": "2026-01-15T12:00:00Z"
+        },
+        {
+          "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r01",
+          "cid": "bafyreieogjytekr7rpqty3rtkfjjglj35ub2ipqjh6ftn7rbxwqe5242jq",
+          "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+          "revision": "3mfixture",
+          "artist": "Björk",
+          "track": "Jóga",
+          "album": "Homogenic",
+          "listenedAt": "2026-01-15T11:00:00Z",
+          "createdAt": "2026-01-15T11:00:00Z",
+          "indexedAt": "2026-01-15T12:00:00Z"
+        }
+      ],
+      "follows": [
+        {
+          "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.follow/f9a71cc1369cb0ae7a6fa16d2b9ecdc8d3ba62a9c519fe9af11a322c90e9ef6f2",
+          "cid": "bafyreieogjytekr7rpqty3rtkfjjglj35ub2ipqjh6ftn7rbxwqe5242jq",
+          "actor": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+          "subject": "did:plc:bbbbbbbbbbbbbbbbbbbbbbbb",
+          "createdAt": "2026-01-15T12:00:00Z"
+        }
+      ]
+    }
+  },
+  {
+    "name": "export_closed_object",
+    "schema": "Export",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "exportedAt": "2026-01-15T12:00:00Z",
+      "indexing": {
+        "state": "current",
+        "caughtUp": true,
+        "lastIndexedAt": "2026-01-15T12:00:00Z",
+        "lagSeconds": 0
+      },
+      "scrobbles": [
+        {
+          "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r07",
+          "cid": "bafyreieogjytekr7rpqty3rtkfjjglj35ub2ipqjh6ftn7rbxwqe5242jq",
+          "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+          "revision": "3mfixture",
+          "artist": "Radiohead",
+          "track": "No Surprises",
+          "album": "OK Computer",
+          "listenedAt": "2026-01-15T11:00:00Z",
+          "createdAt": "2026-01-15T11:00:00Z",
+          "indexedAt": "2026-01-15T12:00:00Z"
+        },
+        {
+          "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r01",
+          "cid": "bafyreieogjytekr7rpqty3rtkfjjglj35ub2ipqjh6ftn7rbxwqe5242jq",
+          "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+          "revision": "3mfixture",
+          "artist": "Björk",
+          "track": "Jóga",
+          "album": "Homogenic",
+          "listenedAt": "2026-01-15T11:00:00Z",
+          "createdAt": "2026-01-15T11:00:00Z",
+          "indexedAt": "2026-01-15T12:00:00Z"
+        }
+      ],
+      "follows": [
+        {
+          "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.follow/f9a71cc1369cb0ae7a6fa16d2b9ecdc8d3ba62a9c519fe9af11a322c90e9ef6f2",
+          "cid": "bafyreieogjytekr7rpqty3rtkfjjglj35ub2ipqjh6ftn7rbxwqe5242jq",
+          "actor": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+          "subject": "did:plc:bbbbbbbbbbbbbbbbbbbbbbbb",
+          "createdAt": "2026-01-15T12:00:00Z"
+        }
+      ],
+      "sessions": []
+    }
+  },
+  {
+    "name": "oauth_metadata_web_client",
+    "schema": "OAuthClientMetadata",
+    "valid": true,
+    "value": {
+      "client_id": "https://music.example/oauth/client-metadata.json",
+      "client_name": "AT Protocol Music",
+      "client_uri": "https://music.example",
+      "redirect_uris": [
+        "https://music.example/oauth/callback"
+      ],
+      "scope": "atproto repo:com.example.atmusic.scrobble repo:com.example.atmusic.follow repo:com.example.atmusic.settings",
+      "grant_types": [
+        "authorization_code",
+        "refresh_token"
+      ],
+      "response_types": [
+        "code"
+      ],
+      "token_endpoint_auth_method": "none",
+      "application_type": "web",
+      "dpop_bound_access_tokens": true
+    }
+  },
+  {
+    "name": "oauth_metadata_legacy_callback_rejected",
+    "schema": "OAuthClientMetadata",
+    "valid": false,
+    "value": {
+      "client_id": "https://music.example/oauth/client-metadata.json",
+      "client_name": "AT Protocol Music",
+      "client_uri": "https://music.example",
+      "redirect_uris": [
+        "https://music.example/api/v1/auth/callback"
+      ],
+      "scope": "atproto repo:com.example.atmusic.scrobble repo:com.example.atmusic.follow repo:com.example.atmusic.settings",
+      "grant_types": [
+        "authorization_code",
+        "refresh_token"
+      ],
+      "response_types": [
+        "code"
+      ],
+      "token_endpoint_auth_method": "none",
+      "application_type": "web",
+      "dpop_bound_access_tokens": true
+    }
+  },
+  {
+    "name": "oauth_metadata_native_rejected",
+    "schema": "OAuthClientMetadata",
+    "valid": false,
+    "value": {
+      "client_id": "https://music.example/oauth/client-metadata.json",
+      "client_name": "AT Protocol Music",
+      "client_uri": "https://music.example",
+      "redirect_uris": [
+        "https://music.example/oauth/callback"
+      ],
+      "scope": "atproto repo:com.example.atmusic.scrobble repo:com.example.atmusic.follow repo:com.example.atmusic.settings",
+      "grant_types": [
+        "authorization_code",
+        "refresh_token"
+      ],
+      "response_types": [
+        "code"
+      ],
+      "token_endpoint_auth_method": "none",
+      "application_type": "native",
+      "dpop_bound_access_tokens": true
+    }
+  },
+  {
+    "name": "oauth_metadata_confidential_rejected",
+    "schema": "OAuthClientMetadata",
+    "valid": false,
+    "value": {
+      "client_id": "https://music.example/oauth/client-metadata.json",
+      "client_name": "AT Protocol Music",
+      "client_uri": "https://music.example",
+      "redirect_uris": [
+        "https://music.example/oauth/callback"
+      ],
+      "scope": "atproto repo:com.example.atmusic.scrobble repo:com.example.atmusic.follow repo:com.example.atmusic.settings",
+      "grant_types": [
+        "authorization_code",
+        "refresh_token"
+      ],
+      "response_types": [
+        "code"
+      ],
+      "token_endpoint_auth_method": "private_key_jwt",
+      "application_type": "web",
+      "dpop_bound_access_tokens": true
+    }
+  },
+  {
+    "name": "oauth_metadata_missing_application_type",
+    "schema": "OAuthClientMetadata",
+    "valid": false,
+    "value": {
+      "client_id": "https://music.example/oauth/client-metadata.json",
+      "client_name": "AT Protocol Music",
+      "client_uri": "https://music.example",
+      "redirect_uris": [
+        "https://music.example/oauth/callback"
+      ],
+      "scope": "atproto repo:com.example.atmusic.scrobble repo:com.example.atmusic.follow repo:com.example.atmusic.settings",
+      "grant_types": [
+        "authorization_code",
+        "refresh_token"
+      ],
+      "response_types": [
+        "code"
+      ],
+      "token_endpoint_auth_method": "none",
+      "dpop_bound_access_tokens": true
+    }
+  },
+  {
+    "name": "oauth_metadata_generic_scope_rejected",
+    "schema": "OAuthClientMetadata",
+    "valid": false,
+    "value": {
+      "client_id": "https://music.example/oauth/client-metadata.json",
+      "client_name": "AT Protocol Music",
+      "client_uri": "https://music.example",
+      "redirect_uris": [
+        "https://music.example/oauth/callback"
+      ],
+      "scope": "atproto transition:generic",
+      "grant_types": [
+        "authorization_code",
+        "refresh_token"
+      ],
+      "response_types": [
+        "code"
+      ],
+      "token_endpoint_auth_method": "none",
+      "application_type": "web",
+      "dpop_bound_access_tokens": true
     }
   }
 ]

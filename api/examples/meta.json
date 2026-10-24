@@ -3,8 +3,11 @@
   "version": "0.1.0",
   "stage": "backend",
   "capabilities": [
-    "scrobbles",
-    "follows"
+    "read",
+    "stats",
+    "follows",
+    "notify",
+    "indexing"
   ],
   "lexiconPrefix": null,
   "indexing": {

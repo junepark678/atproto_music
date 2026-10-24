@@ -292,3 +292,72 @@ Commands executed:
 failure before completion, newer deactivation during reactivation, and
 unavailable trust leaving projections/checkpoints unchanged. These are generated
 signed CAR integration fixtures through real SQLite and controlled transports.
+
+## Amended by ADR 0004
+
+[ADR 0004](0004-cloudflare-workers.md) §9.2 (accepted 2026-10-24) amends this
+decision for the Cloudflare Workers deployment. Everything above remains the
+record of the Rust candidate and its executed evidence; that code is now a
+frozen oracle (ADR 0004 §12), whose Rust-signed CARs and `verify_snapshot`
+enumerations are exported as golden vectors the TypeScript verifier must match.
+
+**A6: relay events are hints.** The relay `subscribeRepos` frame path is no
+longer the production path; full firehose verification is about 2k events/s,
+too much for one Durable Object. Jetstream commit events (`kinds=commit`,
+filtered to `<prefix>.scrobble`, `<prefix>.follow` and `<prefix>.settings`),
+`POST /api/v1/notify`, relay `listReposByCollection` and coalescing are
+untrusted hints naming only `(did, collection, rkey)`. Authority comes from:
+
+- a `getRecord` proof at the current signed head, verified under a fresh DID
+  resolution: a present record whose block matches the MST path CID, or a
+  **proven** absence from a complete exclusion path; or
+- a verified range snapshot at the current signed head (A7).
+
+A missing CAR, an unparseable CAR, `RecordNotFound` without a proof, or a path
+with missing blocks is never treated as absence: it schedules a snapshot. Gap
+recovery (stored cursor older than the lookback, rejected cursor, or no cursor)
+and discovery remain required; `pending_gap` clears only once every scheduled
+snapshot and one discovery pass complete.
+
+**A7: range snapshots.** The full `getRepo` CAR capped at 8 MiB and 10,000
+records becomes an iterative `getBlocks` walk of the key range
+`[<prefix>., <prefix>/)` from the signed commit's `data` root:
+
+- it descends only through CID-verified blocks into subtrees that overlap the
+  range, in batches of at most 100 CIDs (8 MiB response cap);
+- it checks strictly ascending keys, key-prefix compression, layer and depth
+  consistency, depth ≤ 256, and no repeated node CID within one walk;
+- a missing block is a typed error, never absence; when the PDS has collected
+  the old head the walk restarts at the new head, at most 5 times, then fails
+  with `repository_changed`;
+- there is no per-repository record ceiling: each alarm slice is bounded and
+  the frontier persists in `repo_jobs.frontier_json`;
+- chunks apply in one transaction each and delete only rows of that DID inside
+  the chunk's key interval whose revision is below the snapshot head, so a newer
+  live hint always wins.
+
+If `getBlocks` is unsupported, `com.atproto.sync.getRepo` is streamed with a
+32 MiB cap, each block CID-checked into the block cache, and the same walker
+runs over that cache. `listRecords` and `listReposByCollection` never
+authenticate a snapshot.
+
+**A17: account and identity events.** Relay account and identity events are not
+subscribed, because Jetstream does not narrow them by collection. Account state
+comes from error-driven detection (`RepoDeactivated`, `RepoTakendown`,
+`RepoSuspended` and `RepoNotFound` from `getRecord` or `getBlocks`), a fresh DID
+resolution on every proof (cache TTL 5 minutes), an hourly `getRepoStatus` sweep
+for DIDs active in the last 30 days, a daily sweep for all known DIDs, and a
+daily identity and handle sweep. Deactivation therefore takes effect within
+1 hour for recently active users and within 24 hours for others, unless a proof
+fetch reports it sooner. The deterministic fixture drives this by stepping the
+timer.
+
+**Unchanged.** All repository trust is current-head trust under the current
+DID key; historical key validity is still not claimed. Repository format
+version 3, signature, CID and MST membership checks, and low-S signatures are
+required. A complete verified snapshot is required before activation and
+reactivation, and the generation guard still prevents an in-flight snapshot from
+undoing a newer deactivation. Per-DID (`commit.rev ≥ users.max_rev`) and per-URI
+revision monotonicity hold. A rejection leaves the projection and checkpoint
+tables byte-identical; only hint attempt and error fields and counters may
+change.

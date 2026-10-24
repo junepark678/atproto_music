@@ -3,13 +3,13 @@
   "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
   "info": {
     "title": "AT Protocol Music API",
-    "version": "1.0.0",
-    "description": "Frozen MVP API contract from docs/planning/API.md and MVP.md. A route in this specification is not a claim that the current executable implements it. Schema and transport fixtures use reserved identities and a fixture-only namespace; production publication requires an owner-controlled prefix. All application JSON objects are closed; absent optional fields are omitted, not null/empty. No upstream access/refresh tokens or private signing keys are returned."
+    "version": "1.1.0",
+    "description": "API contract v1.1 from docs/planning/API.md as amended by ADR 0004 §9 (docs/adr/0004-cloudflare-workers.md). A route in this specification is not a claim that the current executable implements it. The Worker is a read-only AppView: every route is public, and there is no session, cookie, CSRF token or server write route. The browser SPA is the atproto OAuth client and writes to the user's own PDS (A2, A3). Schema and transport fixtures use reserved identities and a fixture-only namespace; production publication requires an owner-controlled prefix. All application JSON objects are closed; absent optional fields are omitted, not null/empty. No upstream access/refresh tokens or private signing keys are returned or held by the server."
   },
   "servers": [
     {
       "url": "/",
-      "description": "Configured application origin; never derive OAuth callback from Host headers."
+      "description": "Configured application origin (PUBLIC_ORIGIN); OAuth client metadata is generated from it at build time, never from Host headers."
     }
   ],
   "paths": {
@@ -138,392 +138,11 @@
                 }
               }
             }
-          },
-          "429": {
-            "description": "The request rate limit was exceeded.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                },
-                "examples": {
-                  "fixture": {
-                    "$ref": "#/components/examples/error-429"
-                  }
-                }
-              }
-            }
           }
         },
-        "x-auth-mode": "public"
-      }
-    },
-    "/api/v1/auth/start": {
-      "post": {
-        "operationId": "auth_start",
-        "summary": "Auth start",
-        "security": [],
-        "responses": {
-          "200": {
-            "description": "Success",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AuthStart"
-                },
-                "examples": {
-                  "fixture": {
-                    "$ref": "#/components/examples/auth-start"
-                  }
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Malformed JSON, cursor, or request header.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                },
-                "examples": {
-                  "fixture": {
-                    "$ref": "#/components/examples/error-400"
-                  }
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Ownership, Origin or CSRF check failed.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                },
-                "examples": {
-                  "fixture": {
-                    "$ref": "#/components/examples/error-403"
-                  }
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "The resource is absent or inactive.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                },
-                "examples": {
-                  "fixture": {
-                    "$ref": "#/components/examples/error-404"
-                  }
-                }
-              }
-            }
-          },
-          "413": {
-            "description": "The request body exceeds the configured size limit.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                },
-                "examples": {
-                  "fixture": {
-                    "$ref": "#/components/examples/error-413"
-                  }
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "A request field is invalid.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                },
-                "examples": {
-                  "fixture": {
-                    "$ref": "#/components/examples/error-422"
-                  }
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "The request rate limit was exceeded.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                },
-                "examples": {
-                  "fixture": {
-                    "$ref": "#/components/examples/error-429"
-                  }
-                }
-              }
-            }
-          },
-          "502": {
-            "description": "The upstream request permanently failed.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                },
-                "examples": {
-                  "fixture": {
-                    "$ref": "#/components/examples/error-502"
-                  }
-                }
-              }
-            }
-          }
-        },
-        "x-auth-mode": "origin",
-        "description": "Validate Origin; generate one-time OAuth state and PKCE S256, then use PAR. No token-based CSRF is required for auth/start.",
-        "x-csrf-required": false,
-        "parameters": [
-          {
-            "$ref": "#/components/parameters/Origin"
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/AuthStartInput"
-              },
-              "examples": {
-                "fixture": {
-                  "$ref": "#/components/examples/auth-start-input"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/auth/callback": {
-      "get": {
-        "operationId": "auth_callback",
-        "summary": "Auth callback",
-        "security": [],
-        "responses": {
-          "303": {
-            "description": "Redirect to configured application origin /feed after issuing Secure HttpOnly SameSite=Lax session cookie.",
-            "headers": {
-              "Location": {
-                "required": true,
-                "schema": {
-                  "type": "string",
-                  "format": "uri",
-                  "pattern": "^https://[^/?#]+/feed$"
-                }
-              },
-              "Set-Cookie": {
-                "required": true,
-                "schema": {
-                  "type": "string"
-                },
-                "description": "Seven-day absolute session lifetime; no upstream tokens."
-              }
-            }
-          },
-          "400": {
-            "description": "Malformed JSON, cursor, or request header.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                },
-                "examples": {
-                  "fixture": {
-                    "$ref": "#/components/examples/error-400"
-                  }
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "A valid session or OAuth authentication is required.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                },
-                "examples": {
-                  "fixture": {
-                    "$ref": "#/components/examples/error-401"
-                  }
-                }
-              }
-            }
-          }
-        },
-        "x-auth-mode": "oauth-state",
-        "description": "Validate OAuth state, issuer, code and subject; consume state once. OAuth query errors return the standard Error with 400 or 401 according to cause. Never accept an arbitrary redirect destination.",
-        "x-oauth-state-required": true,
-        "parameters": [
-          {
-            "$ref": "#/components/parameters/OAuthState"
-          },
-          {
-            "$ref": "#/components/parameters/OAuthCode"
-          },
-          {
-            "$ref": "#/components/parameters/OAuthIssuer"
-          },
-          {
-            "$ref": "#/components/parameters/OAuthError"
-          },
-          {
-            "$ref": "#/components/parameters/OAuthErrorDescription"
-          }
-        ]
-      }
-    },
-    "/api/v1/auth/session": {
-      "get": {
-        "operationId": "auth_session",
-        "summary": "Auth session",
-        "security": [
-          {
-            "SessionCookie": []
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Success",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Session"
-                },
-                "examples": {
-                  "fixture": {
-                    "$ref": "#/components/examples/session"
-                  }
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "A valid session or OAuth authentication is required.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                },
-                "examples": {
-                  "fixture": {
-                    "$ref": "#/components/examples/error-401"
-                  }
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "The request rate limit was exceeded.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                },
-                "examples": {
-                  "fixture": {
-                    "$ref": "#/components/examples/error-429"
-                  }
-                }
-              }
-            }
-          }
-        },
-        "x-auth-mode": "session"
-      }
-    },
-    "/api/v1/auth/logout": {
-      "post": {
-        "operationId": "auth_logout",
-        "summary": "Auth logout",
-        "security": [
-          {
-            "SessionCookie": [],
-            "CsrfToken": []
-          }
-        ],
-        "responses": {
-          "204": {
-            "description": "No response body; action confirmed or already absent for authenticated owner.",
-            "headers": {
-              "Set-Cookie": {
-                "required": true,
-                "schema": {
-                  "type": "string"
-                },
-                "description": "Clears the application session cookie."
-              }
-            }
-          },
-          "401": {
-            "description": "A valid session or OAuth authentication is required.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                },
-                "examples": {
-                  "fixture": {
-                    "$ref": "#/components/examples/error-401"
-                  }
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Ownership, Origin or CSRF check failed.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                },
-                "examples": {
-                  "fixture": {
-                    "$ref": "#/components/examples/error-403"
-                  }
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "The request rate limit was exceeded.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                },
-                "examples": {
-                  "fixture": {
-                    "$ref": "#/components/examples/error-429"
-                  }
-                }
-              }
-            }
-          }
-        },
-        "x-auth-mode": "mutation",
-        "x-csrf-required": true,
-        "parameters": [
-          {
-            "$ref": "#/components/parameters/Origin"
-          }
-        ]
+        "x-auth-mode": "public",
+        "description": "Build-time Workers Static Asset generated by scripts/gen-config.ts from PUBLIC_ORIGIN and LEXICON_PREFIX (A3). It is the client_id of the browser public OAuth client, so its URL never changes. The Worker does not run for this path (run_worker_first covers only /api/*, /health/* and /internal/*). application_type is web, token_endpoint_auth_method none, and the only redirect is https://<host>/oauth/callback, an SPA route.",
+        "x-served-by": "static-assets"
       }
     },
     "/api/v1/resolve": {
@@ -617,211 +236,6 @@
         ]
       }
     },
-    "/api/v1/scrobbles": {
-      "post": {
-        "operationId": "scrobble_create",
-        "summary": "Scrobble create",
-        "security": [
-          {
-            "SessionCookie": [],
-            "CsrfToken": []
-          }
-        ],
-        "responses": {
-          "201": {
-            "description": "Success",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ScrobbleResult"
-                },
-                "examples": {
-                  "fixture": {
-                    "$ref": "#/components/examples/scrobble"
-                  }
-                }
-              }
-            }
-          },
-          "202": {
-            "description": "Success",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Accepted"
-                },
-                "examples": {
-                  "fixture": {
-                    "$ref": "#/components/examples/accepted"
-                  }
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Malformed JSON, cursor, or request header.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                },
-                "examples": {
-                  "fixture": {
-                    "$ref": "#/components/examples/error-400"
-                  }
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "A valid session or OAuth authentication is required.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                },
-                "examples": {
-                  "fixture": {
-                    "$ref": "#/components/examples/error-401"
-                  }
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Ownership, Origin or CSRF check failed.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                },
-                "examples": {
-                  "fixture": {
-                    "$ref": "#/components/examples/error-403"
-                  }
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "Changed canonical input for the same owner/key: idempotency_conflict. Explicit M3.1.1/M1.1.4 amendment: terminal failed original operation or succeeded original whose record is no longer public: idempotency_result_unavailable; preserve original terminal state and never enqueue a replay.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                },
-                "examples": {
-                  "fixture": {
-                    "$ref": "#/components/examples/error-409"
-                  },
-                  "terminalUnavailable": {
-                    "$ref": "#/components/examples/idempotency-result-unavailable"
-                  }
-                }
-              }
-            },
-            "headers": {
-              "Location": {
-                "description": "Required for idempotency_result_unavailable; identifies the original operation for owner-only lookup. Optional for idempotency_conflict.",
-                "schema": {
-                  "type": "string",
-                  "pattern": "^/api/v1/operations/[^/?#\\s]+$"
-                },
-                "x-required-for-error-codes": [
-                  "idempotency_result_unavailable"
-                ]
-              }
-            }
-          },
-          "413": {
-            "description": "The request body exceeds the configured size limit.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                },
-                "examples": {
-                  "fixture": {
-                    "$ref": "#/components/examples/error-413"
-                  }
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "A request field is invalid.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                },
-                "examples": {
-                  "fixture": {
-                    "$ref": "#/components/examples/error-422"
-                  }
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "The request rate limit was exceeded.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                },
-                "examples": {
-                  "fixture": {
-                    "$ref": "#/components/examples/error-429"
-                  }
-                }
-              }
-            }
-          },
-          "502": {
-            "description": "The upstream request permanently failed.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                },
-                "examples": {
-                  "fixture": {
-                    "$ref": "#/components/examples/error-502"
-                  }
-                }
-              }
-            }
-          }
-        },
-        "x-auth-mode": "mutation",
-        "description": "Derive owner from session and createdAt on server; reject every unknown field with 422, including $type/did/owner/createdAt/uri/cid. The server chooses configured production lexicon type and a persisted rkey. Queue acknowledgement is 202 pending; 201 requires confirmed public PDS publication. Safe terminal async failure is visible in operation status.",
-        "x-csrf-required": true,
-        "parameters": [
-          {
-            "$ref": "#/components/parameters/IdempotencyKey"
-          },
-          {
-            "$ref": "#/components/parameters/Origin"
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ScrobbleInput"
-              },
-              "examples": {
-                "fixture": {
-                  "$ref": "#/components/examples/scrobble-input"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/api/v1/scrobbles/{id}": {
       "get": {
         "operationId": "scrobble_get",
@@ -894,232 +308,6 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/ScrobbleIdPath"
-          }
-        ]
-      },
-      "delete": {
-        "operationId": "scrobble_delete",
-        "summary": "Scrobble delete",
-        "security": [
-          {
-            "SessionCookie": [],
-            "CsrfToken": []
-          }
-        ],
-        "responses": {
-          "202": {
-            "description": "Success",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Accepted"
-                },
-                "examples": {
-                  "fixture": {
-                    "$ref": "#/components/examples/accepted"
-                  }
-                }
-              }
-            }
-          },
-          "204": {
-            "description": "No response body; action confirmed or already absent for authenticated owner."
-          },
-          "401": {
-            "description": "A valid session or OAuth authentication is required.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                },
-                "examples": {
-                  "fixture": {
-                    "$ref": "#/components/examples/error-401"
-                  }
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Ownership, Origin or CSRF check failed.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                },
-                "examples": {
-                  "fixture": {
-                    "$ref": "#/components/examples/error-403"
-                  }
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "A request field is invalid.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                },
-                "examples": {
-                  "fixture": {
-                    "$ref": "#/components/examples/error-422"
-                  }
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "The request rate limit was exceeded.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                },
-                "examples": {
-                  "fixture": {
-                    "$ref": "#/components/examples/error-429"
-                  }
-                }
-              }
-            }
-          },
-          "502": {
-            "description": "Error, including a repeated terminal failed removal. deletion_failed includes the original operation Location; no new operation is enqueued.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                },
-                "examples": {
-                  "fixture": {
-                    "$ref": "#/components/examples/error-502"
-                  },
-                  "terminalDeletionFailed": {
-                    "$ref": "#/components/examples/deletion-failed"
-                  }
-                }
-              }
-            },
-            "headers": {
-              "Location": {
-                "description": "Original owner-visible terminal operation; required when error.code is deletion_failed.",
-                "schema": {
-                  "type": "string",
-                  "pattern": "^/api/v1/operations/[^/?#\\s]+$"
-                },
-                "x-required-for-error-codes": [
-                  "deletion_failed"
-                ]
-              }
-            }
-          }
-        },
-        "x-auth-mode": "mutation",
-        "description": "Cross-owner requests are 403. Authenticated URI owner can repeat a confirmed deletion with 204. Pending deletion hides the public record immediately; unresolved remote deletion remains 202.",
-        "x-csrf-required": true,
-        "parameters": [
-          {
-            "$ref": "#/components/parameters/ScrobbleIdPath"
-          },
-          {
-            "$ref": "#/components/parameters/Origin"
-          }
-        ]
-      }
-    },
-    "/api/v1/operations/{id}": {
-      "get": {
-        "operationId": "operation_get",
-        "summary": "Operation get",
-        "security": [
-          {
-            "SessionCookie": []
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Success",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Operation"
-                },
-                "examples": {
-                  "fixture": {
-                    "$ref": "#/components/examples/operation"
-                  }
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "A valid session or OAuth authentication is required.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                },
-                "examples": {
-                  "fixture": {
-                    "$ref": "#/components/examples/error-401"
-                  }
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Ownership, Origin or CSRF check failed.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                },
-                "examples": {
-                  "fixture": {
-                    "$ref": "#/components/examples/error-403"
-                  }
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "The resource is absent or inactive.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                },
-                "examples": {
-                  "fixture": {
-                    "$ref": "#/components/examples/error-404"
-                  }
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "The request rate limit was exceeded.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                },
-                "examples": {
-                  "fixture": {
-                    "$ref": "#/components/examples/error-429"
-                  }
-                }
-              }
-            }
-          }
-        },
-        "x-auth-mode": "owner",
-        "description": "Anonymous/malformed session: 401. Known operation owned by another signed-in DID: 403. Absent operation: 404. Never expose upstream tokens or private keys.",
-        "parameters": [
-          {
-            "$ref": "#/components/parameters/OperationIdPath"
           }
         ]
       }
@@ -1209,12 +397,7 @@
       "get": {
         "operationId": "feed",
         "summary": "Feed",
-        "security": [
-          {},
-          {
-            "SessionCookie": []
-          }
-        ],
+        "security": [],
         "responses": {
           "200": {
             "description": "Success",
@@ -1241,21 +424,6 @@
                 "examples": {
                   "fixture": {
                     "$ref": "#/components/examples/error-400"
-                  }
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "A valid session or OAuth authentication is required.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                },
-                "examples": {
-                  "fixture": {
-                    "$ref": "#/components/examples/error-401"
                   }
                 }
               }
@@ -1292,13 +460,13 @@
             }
           }
         },
-        "x-auth-mode": "conditional-session",
-        "x-session-required-when": {
-          "scope": "following"
-        },
+        "x-auth-mode": "public",
         "parameters": [
           {
             "$ref": "#/components/parameters/Scope"
+          },
+          {
+            "$ref": "#/components/parameters/Viewer"
           },
           {
             "$ref": "#/components/parameters/ListLimit"
@@ -1306,7 +474,13 @@
           {
             "$ref": "#/components/parameters/Cursor"
           }
-        ]
+        ],
+        "description": "Chronological music feed. scope=global is every active owner, including the viewer. scope=following requires viewer=<did> (A8, public because follow records are public): it returns the owners the viewer follows through active music-follow edges, excluding the viewer, and only the following cursor binds the viewer (the global cursor binding keeps viewer=null). A missing or invalid viewer for following is 422 fields.viewer; an unknown viewer gets 200 with an empty page.",
+        "x-query-examples": {
+          "following": {
+            "$ref": "#/components/examples/feed-following-input"
+          }
+        }
       }
     },
     "/api/v1/users/{did}/profile": {
@@ -1448,281 +622,6 @@
           },
           {
             "$ref": "#/components/parameters/TopLimit"
-          }
-        ]
-      }
-    },
-    "/api/v1/follows/{did}": {
-      "put": {
-        "operationId": "follow_create",
-        "summary": "Follow create",
-        "security": [
-          {
-            "SessionCookie": [],
-            "CsrfToken": []
-          }
-        ],
-        "responses": {
-          "201": {
-            "description": "Success",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/FollowResult"
-                },
-                "examples": {
-                  "fixture": {
-                    "$ref": "#/components/examples/follow"
-                  }
-                }
-              }
-            }
-          },
-          "202": {
-            "description": "Success",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Accepted"
-                },
-                "examples": {
-                  "fixture": {
-                    "$ref": "#/components/examples/accepted"
-                  }
-                }
-              }
-            }
-          },
-          "200": {
-            "description": "Success",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/FollowResult"
-                },
-                "examples": {
-                  "fixture": {
-                    "$ref": "#/components/examples/follow"
-                  }
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "A valid session or OAuth authentication is required.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                },
-                "examples": {
-                  "fixture": {
-                    "$ref": "#/components/examples/error-401"
-                  }
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Ownership, Origin or CSRF check failed.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                },
-                "examples": {
-                  "fixture": {
-                    "$ref": "#/components/examples/error-403"
-                  }
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "A request field is invalid.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                },
-                "examples": {
-                  "fixture": {
-                    "$ref": "#/components/examples/error-422"
-                  }
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "The request rate limit was exceeded.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                },
-                "examples": {
-                  "fixture": {
-                    "$ref": "#/components/examples/error-429"
-                  }
-                }
-              }
-            }
-          },
-          "502": {
-            "description": "The upstream request permanently failed.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                },
-                "examples": {
-                  "fixture": {
-                    "$ref": "#/components/examples/error-502"
-                  }
-                }
-              }
-            }
-          }
-        },
-        "x-auth-mode": "mutation",
-        "description": "201 confirmed new edge, 202 pending, 200 existing confirmed edge. Music collection is separate from app.bsky.graph.follow. Deterministic rkey is f + lowercase SHA-256(subject DID).",
-        "x-csrf-required": true,
-        "parameters": [
-          {
-            "$ref": "#/components/parameters/DidPath"
-          },
-          {
-            "$ref": "#/components/parameters/Origin"
-          }
-        ]
-      },
-      "delete": {
-        "operationId": "follow_delete",
-        "summary": "Follow delete",
-        "security": [
-          {
-            "SessionCookie": [],
-            "CsrfToken": []
-          }
-        ],
-        "responses": {
-          "202": {
-            "description": "Success",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Accepted"
-                },
-                "examples": {
-                  "fixture": {
-                    "$ref": "#/components/examples/accepted"
-                  }
-                }
-              }
-            }
-          },
-          "204": {
-            "description": "No response body; action confirmed or already absent for authenticated owner."
-          },
-          "401": {
-            "description": "A valid session or OAuth authentication is required.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                },
-                "examples": {
-                  "fixture": {
-                    "$ref": "#/components/examples/error-401"
-                  }
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Ownership, Origin or CSRF check failed.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                },
-                "examples": {
-                  "fixture": {
-                    "$ref": "#/components/examples/error-403"
-                  }
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "A request field is invalid.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                },
-                "examples": {
-                  "fixture": {
-                    "$ref": "#/components/examples/error-422"
-                  }
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "The request rate limit was exceeded.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                },
-                "examples": {
-                  "fixture": {
-                    "$ref": "#/components/examples/error-429"
-                  }
-                }
-              }
-            }
-          },
-          "502": {
-            "description": "Error, including a repeated terminal failed removal. deletion_failed includes the original operation Location; no new operation is enqueued.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                },
-                "examples": {
-                  "fixture": {
-                    "$ref": "#/components/examples/error-502"
-                  },
-                  "terminalDeletionFailed": {
-                    "$ref": "#/components/examples/deletion-failed"
-                  }
-                }
-              }
-            },
-            "headers": {
-              "Location": {
-                "description": "Original owner-visible terminal operation; required when error.code is deletion_failed.",
-                "schema": {
-                  "type": "string",
-                  "pattern": "^/api/v1/operations/[^/?#\\s]+$"
-                },
-                "x-required-for-error-codes": [
-                  "deletion_failed"
-                ]
-              }
-            }
-          }
-        },
-        "x-auth-mode": "mutation",
-        "x-csrf-required": true,
-        "parameters": [
-          {
-            "$ref": "#/components/parameters/DidPath"
-          },
-          {
-            "$ref": "#/components/parameters/Origin"
           }
         ]
       }
@@ -1891,22 +790,18 @@
         ]
       }
     },
-    "/api/v1/account/export": {
+    "/api/v1/users/{did}/export": {
       "get": {
-        "operationId": "account_export",
-        "summary": "Account export",
-        "security": [
-          {
-            "SessionCookie": []
-          }
-        ],
+        "operationId": "user_export",
+        "summary": "User export",
+        "security": [],
         "responses": {
           "200": {
             "description": "Success",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/AccountExport"
+                  "$ref": "#/components/schemas/Export"
                 },
                 "examples": {
                   "fixture": {
@@ -1921,11 +816,18 @@
                 "schema": {
                   "const": "attachment; filename=\"music-export.json\""
                 }
+              },
+              "Cache-Control": {
+                "required": true,
+                "description": "Never cached.",
+                "schema": {
+                  "const": "no-store"
+                }
               }
             }
           },
-          "401": {
-            "description": "A valid session or OAuth authentication is required.",
+          "404": {
+            "description": "The resource is absent or inactive.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1933,7 +835,22 @@
                 },
                 "examples": {
                   "fixture": {
-                    "$ref": "#/components/examples/error-401"
+                    "$ref": "#/components/examples/error-404"
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "A request field is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "fixture": {
+                    "$ref": "#/components/examples/error-422"
                   }
                 }
               }
@@ -1955,76 +872,208 @@
             }
           }
         },
-        "x-auth-mode": "owner",
-        "description": "Owner-only JSON attachment music-export.json, confirmed active public data; no sessions/tokens/private keys."
-      }
-    },
-    "/api/v1/account/local-data": {
-      "delete": {
-        "operationId": "account_local_data_delete",
-        "summary": "Account local data delete",
-        "security": [
-          {
-            "SessionCookie": [],
-            "CsrfToken": []
-          }
-        ],
-        "responses": {
-          "204": {
-            "description": "No response body; action confirmed or already absent for authenticated owner."
-          },
-          "401": {
-            "description": "A valid session or OAuth authentication is required.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                },
-                "examples": {
-                  "fixture": {
-                    "$ref": "#/components/examples/error-401"
-                  }
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Ownership, Origin or CSRF check failed.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                },
-                "examples": {
-                  "fixture": {
-                    "$ref": "#/components/examples/error-403"
-                  }
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "The request rate limit was exceeded.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                },
-                "examples": {
-                  "fixture": {
-                    "$ref": "#/components/examples/error-429"
-                  }
-                }
-              }
-            }
-          }
-        },
-        "x-auth-mode": "mutation",
-        "description": "Atomic local disconnect deletes local sessions, tokens, pending writes, keys/digests, music rows and follow edges; suppress reindexing until fresh authenticated reconciliation. Public PDS records are retained.",
-        "x-csrf-required": true,
+        "x-auth-mode": "public",
+        "description": "Public JSON attachment music-export.json of the DID's indexed public records (A9, N3), read in one synchronous snapshot. Unknown or inactive users return 404. Cache-Control no-store. No sessions, tokens or private keys exist to include.",
         "parameters": [
           {
-            "$ref": "#/components/parameters/Origin"
+            "$ref": "#/components/parameters/DidPath"
+          }
+        ]
+      }
+    },
+    "/api/v1/notify": {
+      "post": {
+        "operationId": "notify",
+        "summary": "Notify",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "x-maxBodyBytes": 2048,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NotifyInput"
+              },
+              "examples": {
+                "fixture": {
+                  "$ref": "#/components/examples/notify-input"
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "The hint is queued.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotifyAccepted"
+                },
+                "examples": {
+                  "fixture": {
+                    "$ref": "#/components/examples/notify"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed JSON, cursor, or request header.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "fixture": {
+                    "$ref": "#/components/examples/error-400"
+                  }
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The request body exceeds 2 KiB.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "fixture": {
+                    "$ref": "#/components/examples/error-413"
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "A request field is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "fixture": {
+                    "$ref": "#/components/examples/error-422"
+                  }
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The request rate limit was exceeded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "fixture": {
+                    "$ref": "#/components/examples/error-429"
+                  }
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "required": true,
+                "description": "Seconds until the bucket admits another request.",
+                "schema": {
+                  "type": "string",
+                  "pattern": "^[0-9]+$"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "New-DID admission is exhausted (50 per hour or 1,024 pending snapshot jobs).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "fixture": {
+                    "$ref": "#/components/examples/error-queue-full"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-auth-mode": "public",
+        "description": "Untrusted hint (N1, ADR 0004 §5.4). Body {uri} for a record in a configured collection, or {did}; strict JSON, at most 2 KiB, unknown fields 422. {uri} queues a proof fetch; {did} admits an unknown DID or schedules a snapshot when the last one is over 24 h old. Rate limits: 60/min per client IP (CF-Connecting-IP) and 600/h per DID, 429 with Retry-After. A suppressed DID is accepted only for the settings collection; its other hints are accepted with 202 and ignored."
+      }
+    },
+    "/api/v1/records/status": {
+      "get": {
+        "operationId": "record_status",
+        "summary": "Record status",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecordStatus"
+                },
+                "examples": {
+                  "fixture": {
+                    "$ref": "#/components/examples/record-status"
+                  }
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "required": true,
+                "description": "Never cached; the state changes as proofs apply.",
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "A request field is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "fixture": {
+                    "$ref": "#/components/examples/error-422"
+                  }
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The request rate limit was exceeded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "fixture": {
+                    "$ref": "#/components/examples/error-429"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-auth-mode": "public",
+        "description": "Indexing state of one record for the SPA publication states queued → published → indexed or excluded (N2). Cache-Control no-store.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RecordUriQuery"
           }
         ]
       }
@@ -2213,64 +1262,6 @@
           }
         }
       },
-      "AuthStartInput": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": [
-          "handle"
-        ],
-        "properties": {
-          "handle": {
-            "$ref": "#/components/schemas/Handle"
-          }
-        }
-      },
-      "AuthStart": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": [
-          "authorizationUrl"
-        ],
-        "properties": {
-          "authorizationUrl": {
-            "type": "string",
-            "format": "uri",
-            "pattern": "^https://"
-          }
-        }
-      },
-      "Session": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": [
-          "did",
-          "handle",
-          "csrfToken",
-          "expiresAt"
-        ],
-        "properties": {
-          "did": {
-            "$ref": "#/components/schemas/Did"
-          },
-          "handle": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/Handle"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "csrfToken": {
-            "type": "string",
-            "minLength": 1
-          },
-          "expiresAt": {
-            "$ref": "#/components/schemas/Timestamp"
-          }
-        }
-      },
       "ResolvedIdentity": {
         "type": "object",
         "additionalProperties": false,
@@ -2326,7 +1317,8 @@
           "recordingMbid": {
             "$ref": "#/components/schemas/Uuid"
           }
-        }
+        },
+        "description": "Manual scrobble form input validated in the browser by @atmusic/core/scrobble before an outbox operation is created (A2, A12). No HTTP route accepts it: the SPA builds the <prefix>.scrobble record itself, sets createdAt and $type, and writes it to the owner's PDS. Unknown fields, including $type, did, owner, createdAt, uri and cid, are rejected."
       },
       "Scrobble": {
         "type": "object",
@@ -2409,82 +1401,6 @@
           },
           "createdAt": {
             "$ref": "#/components/schemas/Timestamp"
-          }
-        }
-      },
-      "Accepted": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": [
-          "operationId",
-          "state"
-        ],
-        "properties": {
-          "operationId": {
-            "type": "string"
-          },
-          "state": {
-            "const": "pending"
-          }
-        }
-      },
-      "Operation": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": [
-          "operationId",
-          "kind",
-          "state",
-          "attempts",
-          "createdAt",
-          "updatedAt",
-          "recordUri",
-          "failureCode"
-        ],
-        "properties": {
-          "operationId": {
-            "type": "string"
-          },
-          "kind": {
-            "enum": [
-              "scrobble_create",
-              "scrobble_delete",
-              "follow_create",
-              "follow_delete"
-            ]
-          },
-          "state": {
-            "enum": [
-              "pending",
-              "succeeded",
-              "failed"
-            ]
-          },
-          "attempts": {
-            "type": "integer",
-            "minimum": 0
-          },
-          "createdAt": {
-            "$ref": "#/components/schemas/Timestamp"
-          },
-          "updatedAt": {
-            "$ref": "#/components/schemas/Timestamp"
-          },
-          "recordUri": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/AtUri"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "failureCode": {
-            "type": [
-              "string",
-              "null"
-            ]
           }
         }
       },
@@ -2656,47 +1572,9 @@
           }
         }
       },
-      "AccountExport": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": [
-          "schemaVersion",
-          "did",
-          "exportedAt",
-          "indexing",
-          "scrobbles",
-          "follows"
-        ],
-        "properties": {
-          "schemaVersion": {
-            "const": 1
-          },
-          "did": {
-            "$ref": "#/components/schemas/Did"
-          },
-          "exportedAt": {
-            "$ref": "#/components/schemas/Timestamp"
-          },
-          "indexing": {
-            "$ref": "#/components/schemas/Indexing"
-          },
-          "scrobbles": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/Scrobble"
-            }
-          },
-          "follows": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/Follow"
-            }
-          }
-        }
-      },
       "OAuthClientMetadata": {
         "type": "object",
-        "description": "Protocol metadata, without an application envelope. These standard OAuth/AT profile fields are explicit; protocol extension fields remain permitted. M2.2.1 must pin and test the actual AT OAuth revision, library and supported granular scope syntax before release. This schema does not replace that compatibility gate.",
+        "description": "AT Protocol OAuth client metadata for the browser public client, without an application envelope (A3). Standard fields are explicit; protocol extension fields remain permitted. The live OAuth gate (W6-05), not this schema, establishes interoperability.",
         "required": [
           "client_id",
           "redirect_uris",
@@ -2704,13 +1582,15 @@
           "grant_types",
           "response_types",
           "token_endpoint_auth_method",
+          "application_type",
           "dpop_bound_access_tokens"
         ],
         "properties": {
           "client_id": {
             "type": "string",
             "format": "uri",
-            "pattern": "^https://"
+            "pattern": "^https://[^/?#]+/oauth/client-metadata\\.json$",
+            "description": "The metadata document's own URL on the configured origin."
           },
           "client_name": {
             "type": "string"
@@ -2734,16 +1614,18 @@
           "redirect_uris": {
             "type": "array",
             "minItems": 1,
+            "maxItems": 1,
             "uniqueItems": true,
             "items": {
               "type": "string",
               "format": "uri",
-              "pattern": "^https://"
+              "pattern": "^https://[^/?#]+/oauth/callback$"
             }
           },
           "scope": {
             "type": "string",
-            "minLength": 1
+            "pattern": "^atproto( repo:[A-Za-z0-9.-]+)*$",
+            "description": "atproto plus granular repo:<prefix>.scrobble, repo:<prefix>.follow and repo:<prefix>.settings; transition:generic is never requested by default (ADR 0004 Q5)."
           },
           "grant_types": {
             "const": [
@@ -2757,40 +1639,13 @@
             ]
           },
           "token_endpoint_auth_method": {
-            "enum": [
-              "none",
-              "private_key_jwt"
-            ]
-          },
-          "token_endpoint_auth_signing_alg": {
-            "type": "string"
+            "const": "none"
           },
           "application_type": {
-            "enum": [
-              "web",
-              "native"
-            ]
+            "const": "web"
           },
           "dpop_bound_access_tokens": {
             "const": true
-          },
-          "jwks_uri": {
-            "type": "string",
-            "format": "uri"
-          },
-          "jwks": {
-            "type": "object",
-            "required": [
-              "keys"
-            ],
-            "properties": {
-              "keys": {
-                "type": "array",
-                "items": {
-                  "type": "object"
-                }
-              }
-            }
           },
           "contacts": {
             "type": "array",
@@ -2873,17 +1728,200 @@
           }
         }
       },
-      "FollowResult": {
+      "Export": {
         "type": "object",
         "additionalProperties": false,
         "required": [
-          "follow"
+          "schemaVersion",
+          "did",
+          "exportedAt",
+          "indexing",
+          "scrobbles",
+          "follows"
         ],
         "properties": {
-          "follow": {
-            "$ref": "#/components/schemas/Follow"
+          "schemaVersion": {
+            "const": 1
+          },
+          "did": {
+            "$ref": "#/components/schemas/Did"
+          },
+          "exportedAt": {
+            "$ref": "#/components/schemas/Timestamp"
+          },
+          "indexing": {
+            "$ref": "#/components/schemas/Indexing"
+          },
+          "scrobbles": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Scrobble"
+            }
+          },
+          "follows": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Follow"
+            }
+          }
+        },
+        "description": "Public export of one DID's indexed public records and indexing metadata (A9). No credentials exist to include."
+      },
+      "NotifyInput": {
+        "description": "Untrusted hint naming one record or one DID (N1). It can only make the AppView check public signed truth; it cannot inject data.",
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "uri"
+            ],
+            "properties": {
+              "uri": {
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/AtUri"
+                  }
+                ],
+                "description": "A record in a configured collection (<prefix>.scrobble, .follow or .settings); other collections are 422."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "did"
+            ],
+            "properties": {
+              "did": {
+                "$ref": "#/components/schemas/Did"
+              }
+            }
+          }
+        ]
+      },
+      "NotifyAccepted": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "state"
+        ],
+        "properties": {
+          "state": {
+            "const": "queued"
           }
         }
+      },
+      "RecordStatus": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "uri",
+          "state",
+          "indexing"
+        ],
+        "description": "Indexing state of one record (N2). indexed: a visible row with its verified cid and revision. pending: a hint or job exists. absent: verified absence. excluded: a verified record failed validation, with reason. unknown: nothing is known.",
+        "properties": {
+          "uri": {
+            "$ref": "#/components/schemas/AtUri"
+          },
+          "state": {
+            "enum": [
+              "indexed",
+              "pending",
+              "absent",
+              "excluded",
+              "unknown"
+            ]
+          },
+          "cid": {
+            "$ref": "#/components/schemas/Cid"
+          },
+          "revision": {
+            "type": "string",
+            "minLength": 1
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          },
+          "indexing": {
+            "$ref": "#/components/schemas/Indexing"
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "state": {
+                  "const": "indexed"
+                }
+              },
+              "required": [
+                "state"
+              ]
+            },
+            "then": {
+              "required": [
+                "cid",
+                "revision"
+              ]
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "state": {
+                  "const": "excluded"
+                }
+              },
+              "required": [
+                "state"
+              ]
+            },
+            "then": {
+              "required": [
+                "reason"
+              ]
+            },
+            "else": {
+              "not": {
+                "required": [
+                  "reason"
+                ]
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "state": {
+                  "const": "unknown"
+                }
+              },
+              "required": [
+                "state"
+              ]
+            },
+            "then": {
+              "not": {
+                "anyOf": [
+                  {
+                    "required": [
+                      "cid"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "revision"
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        ]
       }
     },
     "parameters": {
@@ -2903,40 +1941,6 @@
           "$ref": "#/components/schemas/AtUri"
         },
         "description": "URL-encoded full AT URI; not a bare record key or operation ID."
-      },
-      "OperationIdPath": {
-        "name": "id",
-        "in": "path",
-        "required": true,
-        "schema": {
-          "type": "string"
-        },
-        "description": "Opaque local operation identifier, distinct from an AT URI."
-      },
-      "Origin": {
-        "name": "Origin",
-        "in": "header",
-        "required": true,
-        "schema": {
-          "type": "string",
-          "format": "uri"
-        },
-        "description": "Must equal the configured allowed application origin. Missing or invalid Origin is 403 before mutation or any outbound write."
-      },
-      "IdempotencyKey": {
-        "name": "Idempotency-Key",
-        "in": "header",
-        "required": true,
-        "schema": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 128,
-          "pattern": "^[ -~]+$",
-          "not": {
-            "pattern": "[^ -~]"
-          }
-        },
-        "description": "1–128 printable ASCII characters. Invalid/missing header: 400 invalid_idempotency_key. Owner-scoped digest/key retained until local-data disconnect; changed canonical input: 409 idempotency_conflict; replay returns the current valid original result. Explicit amendment: replay of a terminal failed original operation, or succeeded original with no currently public record, returns 409 idempotency_result_unavailable; original operation remains in its real terminal state."
       },
       "ListLimit": {
         "name": "limit",
@@ -2986,7 +1990,7 @@
           ],
           "default": "global"
         },
-        "description": "following requires a valid session (401 otherwise); excludes implicit self. global is public."
+        "description": "following requires viewer=<did> (422 fields.viewer otherwise); excludes implicit self. global is public."
       },
       "Window": {
         "name": "window",
@@ -3001,48 +2005,25 @@
           "default": "all"
         }
       },
-      "OAuthState": {
-        "name": "state",
+      "Viewer": {
+        "name": "viewer",
+        "in": "query",
+        "schema": {
+          "$ref": "#/components/schemas/Did"
+        },
+        "x-required-when": {
+          "scope": "following"
+        },
+        "description": "DID whose music follows define scope=following (A8). Required for following; missing or invalid is 422 fields.viewer, and the following cursor binds the viewer. For scope=global the viewer does not filter and is not bound into the cursor: the global binding carries viewer=null (crates/core/src/cursor.rs global_feed), so a global cursor is the same token with or without a viewer, and a global binding that carries a viewer is 400 invalid_cursor. A supplied viewer that is not a valid DID is still 422 fields.viewer because the parameter schema is Did. The viewer is public input, not authentication."
+      },
+      "RecordUriQuery": {
+        "name": "uri",
         "in": "query",
         "required": true,
         "schema": {
-          "type": "string",
-          "minLength": 1
+          "$ref": "#/components/schemas/AtUri"
         },
-        "description": "Original random single-use state. Eligible before 300 seconds and invalid at exactly 300 seconds; validation precedes token redemption."
-      },
-      "OAuthCode": {
-        "name": "code",
-        "in": "query",
-        "schema": {
-          "type": "string",
-          "minLength": 1
-        },
-        "description": "Required for successful authorization; alternatively error indicates cancellation/failure."
-      },
-      "OAuthIssuer": {
-        "name": "iss",
-        "in": "query",
-        "schema": {
-          "type": "string",
-          "format": "uri"
-        },
-        "description": "Authorization issuer; verify against the issuer persisted for this state according to the pinned OAuth profile.",
-        "required": true
-      },
-      "OAuthError": {
-        "name": "error",
-        "in": "query",
-        "schema": {
-          "type": "string"
-        }
-      },
-      "OAuthErrorDescription": {
-        "name": "error_description",
-        "in": "query",
-        "schema": {
-          "type": "string"
-        }
+        "description": "Full AT URI of a record in a configured collection; invalid is 422 fields.uri."
       }
     },
     "examples": {
@@ -3058,14 +2039,6 @@
         "summary": "Reserved offline schema fixture; not public publication evidence.",
         "externalValue": "examples/meta.json"
       },
-      "auth-start": {
-        "summary": "Reserved offline schema fixture; not public publication evidence.",
-        "externalValue": "examples/auth-start.json"
-      },
-      "session": {
-        "summary": "Reserved offline schema fixture; not public publication evidence.",
-        "externalValue": "examples/session.json"
-      },
       "resolve": {
         "summary": "Reserved offline schema fixture; not public publication evidence.",
         "externalValue": "examples/resolve.json"
@@ -3073,18 +2046,6 @@
       "scrobble": {
         "summary": "Reserved offline schema fixture; not public publication evidence.",
         "externalValue": "examples/scrobble.json"
-      },
-      "follow": {
-        "summary": "Reserved offline schema fixture; not public publication evidence.",
-        "externalValue": "examples/follow.json"
-      },
-      "accepted": {
-        "summary": "Reserved offline schema fixture; not public publication evidence.",
-        "externalValue": "examples/accepted.json"
-      },
-      "operation": {
-        "summary": "Reserved offline schema fixture; not public publication evidence.",
-        "externalValue": "examples/operation.json"
       },
       "scrobble-page": {
         "summary": "Reserved offline schema fixture; not public publication evidence.",
@@ -3111,32 +2072,17 @@
         "externalValue": "examples/oauth-metadata.json"
       },
       "scrobble-input": {
-        "summary": "Reserved offline schema fixture; not public publication evidence.",
-        "externalValue": "examples/scrobble-input.json"
-      },
-      "auth-start-input": {
-        "summary": "Reserved offline schema fixture; not public publication evidence.",
-        "externalValue": "examples/auth-start-input.json"
+        "summary": "SPA form input fixture (no HTTP route accepts it).",
+        "externalValue": "examples/scrobble-input.json",
+        "x-schema": "ScrobbleInput"
       },
       "error-400": {
         "summary": "Reserved offline schema fixture; not public publication evidence.",
         "externalValue": "examples/error-400.json"
       },
-      "error-401": {
-        "summary": "Reserved offline schema fixture; not public publication evidence.",
-        "externalValue": "examples/error-401.json"
-      },
-      "error-403": {
-        "summary": "Reserved offline schema fixture; not public publication evidence.",
-        "externalValue": "examples/error-403.json"
-      },
       "error-404": {
         "summary": "Reserved offline schema fixture; not public publication evidence.",
         "externalValue": "examples/error-404.json"
-      },
-      "error-409": {
-        "summary": "Reserved offline schema fixture; not public publication evidence.",
-        "externalValue": "examples/error-409.json"
       },
       "error-413": {
         "summary": "Reserved offline schema fixture; not public publication evidence.",
@@ -3158,27 +2104,25 @@
         "summary": "Reserved offline schema fixture; not public publication evidence.",
         "externalValue": "examples/error-503.json"
       },
-      "idempotency-result-unavailable": {
-        "summary": "Terminal original operation has no current public result; no new operation is created.",
-        "externalValue": "examples/error-idempotency-result-unavailable.json"
+      "notify-input": {
+        "summary": "Reserved offline schema fixture; not public publication evidence.",
+        "externalValue": "examples/notify-input.json"
       },
-      "deletion-failed": {
-        "summary": "Repeat of a terminal failed deletion",
-        "externalValue": "./examples/error-deletion-failed.json"
-      }
-    },
-    "securitySchemes": {
-      "SessionCookie": {
-        "type": "apiKey",
-        "in": "cookie",
-        "name": "atmusic_session",
-        "description": "Secure HttpOnly SameSite=Lax, seven-day absolute lifetime; invalid at exactly seven days. Missing/malformed/expired session is 401."
+      "notify": {
+        "summary": "Reserved offline schema fixture; not public publication evidence.",
+        "externalValue": "examples/notify.json"
       },
-      "CsrfToken": {
-        "type": "apiKey",
-        "in": "header",
-        "name": "X-CSRF-Token",
-        "description": "Required on every state-changing cookie-authenticated request along with allowed Origin. Retrieve through authenticated GET auth/session. Invalid/missing state is 403 before mutation/outbound write."
+      "record-status": {
+        "summary": "Reserved offline schema fixture; not public publication evidence.",
+        "externalValue": "examples/record-status.json"
+      },
+      "feed-following-input": {
+        "summary": "Query parameters for a following feed (A8); validated against the feed operation parameters.",
+        "externalValue": "examples/feed-following-input.json"
+      },
+      "error-queue-full": {
+        "summary": "New-DID admission budget exhausted.",
+        "externalValue": "examples/error-queue-full.json"
       }
     }
   },
