@@ -18,6 +18,14 @@
 //   claimed row behind. The next `runDue` on a fresh instance treats such an
 //   orphan as a failure: it is rescheduled with backoff, never dropped.
 //   Alarms are at-least-once, and every step is idempotent (ADR §5.9).
+// - One `runDue` at a time per Db. A second call on the same instance while a
+//   handler is in flight throws TimerReentryError, until the in-flight run is
+//   TIMER_RUN_TIMEOUT_MS old (by the callers' `now`; the platform's alarm
+//   wall-time limit). Then the in-flight run counts as hung: the later call
+//   takes over, its claim is treated as a failure (rescheduled with backoff)
+//   and the hung run, if it ever settles, changes nothing further. While a run
+//   is in flight, `nextDue` reports its claim at the takeover time, not at its
+//   past due time, so the alarm is never armed into a run it cannot start.
 // - Counters: `timer_failures/<name>` counts failures (monotonic) and
 //   `timer_failure_streak/<name>` holds the consecutive failures (deleted on
 //   success); both appear in adminStatus.
@@ -72,10 +80,17 @@ export interface RunReport {
   failed: TimerFailure[];
   /** Due timers left for the next alarm because the budget ran out. */
   deferred: TimerName[];
-  /** Claimed rows left by an instance that died mid-handler, now rescheduled. */
+  /**
+   * Claimed rows left by an instance that died mid-handler, or by a hung run
+   * on this instance that this call took over, now rescheduled.
+   */
   recovered: TimerFailure[];
+  /** True when a later call took over this run while a handler was hung. */
+  superseded: boolean;
 }
 
+/** Age (by `now`) after which an in-flight run is hung and may be taken over. */
+export const TIMER_RUN_TIMEOUT_MS = 15 * 60_000;
 export const TIMER_BACKOFF_BASE_MS = 2_000;
 export const TIMER_BACKOFF_CAP_MS = 300_000;
 export const TIMER_FAILURES_COUNTER = 'timer_failures';
@@ -86,8 +101,15 @@ const PRIORITY = new Map<string, number>(TIMER_NAMES.map((name, i) => [name, i])
 const RUNNING_NAMES = TIMER_NAMES.map((name) => RUNNING_PREFIX + name);
 const KNOWN_PLACEHOLDERS = [...TIMER_NAMES, ...RUNNING_NAMES].map(() => '?').join(',');
 
-/** Calls in progress, per Db, so a re-entrant runDue cannot steal claimed rows. */
-const active = new WeakSet<Db>();
+interface ActiveRun {
+  /** The timer whose handler is awaited, if any. */
+  claimed: TimerName | null;
+  /** From this `now` on, a later runDue may take the run over. */
+  takeoverAtMs: number;
+}
+
+/** The run in progress, per Db, so a re-entrant runDue cannot steal claimed rows. */
+const active = new WeakMap<Db, ActiveRun>();
 
 export class TimerReentryError extends Error {
   constructor() {
@@ -148,16 +170,25 @@ export function dueAt(db: Db, name: TimerName): number | null {
 
 /**
  * `min(due_at)` over the known timers, including a claimed row an earlier
- * instance left behind (it still needs a run to be recovered). Rows with
+ * instance left behind (it still needs a run to be recovered). The claim of a
+ * run in flight on this instance counts at the time it may be taken over
+ * (`now + TIMER_RUN_TIMEOUT_MS` of that run) when that is later. Rows with
  * other names are ignored. Null when nothing is scheduled.
  */
 export function nextDue(db: Db): number | null {
-  const row = db.one<{ next: number | null }>(
-    `SELECT MIN(due_at) AS next FROM timers WHERE name IN (${KNOWN_PLACEHOLDERS})`,
+  const run = active.get(db);
+  const inFlight = run?.claimed ? RUNNING_PREFIX + run.claimed : null;
+  const rows = db.all<{ name: string; due_at: number }>(
+    `SELECT name, due_at FROM timers WHERE name IN (${KNOWN_PLACEHOLDERS})`,
     ...TIMER_NAMES,
     ...RUNNING_NAMES,
   );
-  return row?.next ?? null;
+  let next: number | null = null;
+  for (const row of rows) {
+    const at = row.name === inFlight ? Math.max(row.due_at, run!.takeoverAtMs) : row.due_at;
+    if (next === null || at < next) next = at;
+  }
+  return next;
 }
 
 export type AlarmStorage = Pick<DurableObjectStorage, 'setAlarm' | 'deleteAlarm'>;
@@ -225,7 +256,7 @@ function fail(db: Db, name: TimerName, now: number, error: unknown): TimerFailur
   });
 }
 
-function recoverOrphans(db: Db, now: number): TimerFailure[] {
+function recoverOrphans(db: Db, now: number, reason: string): TimerFailure[] {
   const orphans = db.all<{ name: string }>(
     `SELECT name FROM timers WHERE name IN (${RUNNING_NAMES.map(() => '?').join(',')})`,
     ...RUNNING_NAMES,
@@ -233,29 +264,39 @@ function recoverOrphans(db: Db, now: number): TimerFailure[] {
   return orphans
     .map((row) => row.name.slice(RUNNING_PREFIX.length) as TimerName)
     .sort((a, b) => PRIORITY.get(a)! - PRIORITY.get(b)!)
-    .map((name) => fail(db, name, now, new Error('timer handler did not complete (instance lost mid-run)')));
+    .map((name) => fail(db, name, now, new Error(reason)));
 }
 
 /**
  * Runs every timer with `due_at <= now` once, in priority order, until the
  * budget runs out. The caller re-arms the alarm afterwards (`armAlarm`).
+ * Throws TimerReentryError while another run on this Db is in flight and
+ * younger than TIMER_RUN_TIMEOUT_MS; takes an older one over.
  */
 export async function runDue(db: Db, now: number, handlers: TimerHandlers, budget: RunBudget): Promise<RunReport> {
   assertEpochMs('now', now);
   if (!Number.isSafeInteger(budget.maxRuns) || budget.maxRuns < 0) {
     throw new RangeError(`budget.maxRuns must be a non-negative safe integer, got ${budget.maxRuns}`);
   }
-  if (active.has(db)) throw new TimerReentryError();
-  active.add(db);
+  const previous = active.get(db);
+  if (previous !== undefined && now < previous.takeoverAtMs) throw new TimerReentryError();
+  const run: ActiveRun = { claimed: null, takeoverAtMs: now + TIMER_RUN_TIMEOUT_MS };
+  active.set(db, run);
   try {
-    const recovered = recoverOrphans(db, now);
+    const recovered = recoverOrphans(
+      db,
+      now,
+      previous === undefined
+        ? 'timer handler did not complete (instance lost mid-run)'
+        : `timer handler did not complete within ${TIMER_RUN_TIMEOUT_MS} ms (hung run taken over)`,
+    );
     const due = db
       .all<{ name: string }>('SELECT name FROM timers WHERE due_at <= ?', now)
       .map((row) => row.name)
       .filter(isTimerName)
       .sort((a, b) => PRIORITY.get(a)! - PRIORITY.get(b)!);
 
-    const report: RunReport = { ran: [], failed: [], deferred: [], recovered };
+    const report: RunReport = { ran: [], failed: [], deferred: [], recovered, superseded: false };
     let started = 0;
     for (const name of due) {
       const outOfTime = budget.deadline !== undefined && budget.deadline.clock.nowMs() >= budget.deadline.atMs;
@@ -267,10 +308,22 @@ export async function runDue(db: Db, now: number, handlers: TimerHandlers, budge
       // An earlier handler may have cancelled or postponed this one.
       if (!claim(db, name, now)) continue;
       started++;
+      run.claimed = name;
+      let failure: { error: unknown } | null = null;
       try {
         await handlers[name](now);
       } catch (error) {
-        report.failed.push(fail(db, name, now, error));
+        failure = { error };
+      }
+      // Taken over while hung: the claim was already rescheduled (and may
+      // have been claimed again by the newer run), so touch nothing.
+      if (active.get(db) !== run) {
+        report.superseded = true;
+        return report;
+      }
+      run.claimed = null;
+      if (failure !== null) {
+        report.failed.push(fail(db, name, now, failure.error));
         continue;
       }
       succeed(db, name);
@@ -278,6 +331,6 @@ export async function runDue(db: Db, now: number, handlers: TimerHandlers, budge
     }
     return report;
   } finally {
-    active.delete(db);
+    if (active.get(db) === run) active.delete(db);
   }
 }
