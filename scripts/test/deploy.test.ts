@@ -184,6 +184,15 @@ class DisposableCopy {
         '  for n in $STUB_SECRETS; do printf \'%s{"name":"%s","type":"secret_text"}\' "$sep" "$n"; sep=","; done',
         '  printf "]\\n"; exit 0',
         'fi',
+        // `secret put` (only run by the test that executes deploy.sh's suggested
+        // command): succeeds only when its --config resolves from the cwd.
+        'if [[ "$1 $2" == "secret put" ]]; then',
+        '  cfg=""; prev=""',
+        '  for a in "$@"; do if [[ "$prev" == "--config" ]]; then cfg="$a"; fi; prev="$a"; done',
+        '  if [[ -n "$cfg" && -f "$cfg" ]]; then exit 0; fi',
+        '  if [[ -z "$cfg" ]]; then cfg="(none)"; fi',
+        '  echo "stub wrangler: config $cfg not found from $PWD" >&2; exit 98',
+        'fi',
         'echo "stub wrangler: unexpected command: $*" >&2',
         'exit 97',
         '',
@@ -202,6 +211,20 @@ class DisposableCopy {
     });
     const calls = readFileSync(log, 'utf8').split('\n').filter(Boolean);
     return { ...result, calls };
+  }
+
+  /**
+   * Runs the `npx wrangler secret put …` command a refusal suggests, exactly as
+   * printed, from the copy's root with the stub as wrangler (stdin closed).
+   */
+  runSuggestedPut(stderr: string): Result & { calls: string[] } {
+    const suggested = /`(npx wrangler secret put [^`]+)`/.exec(stderr)?.[1];
+    expect(suggested, stderr).toBeDefined();
+    const argv = (suggested as string).split(' ').slice(2); // drop `npx wrangler`
+    const log = join(this.stubDir, `put-${Date.now()}-${Math.random().toString(16).slice(2)}.log`);
+    writeFileSync(log, '');
+    const result = run(this.stub, argv, this.dir, { STUB_LOG: log });
+    return { ...result, calls: readFileSync(log, 'utf8').split('\n').filter(Boolean) };
   }
 
   path(file: string): string {
@@ -278,18 +301,33 @@ describe('bash scripts/deploy.sh --dry-run', () => {
     const missing = copy.deploy(['--dry-run'], { STUB_SECRETS: 'ADMIN_TOKEN' });
     expect(missing.status).toBe(1);
     expect(missing.stderr).toContain('deploy: refused: the CURSOR_KEY secret is missing for env production');
-    expect(missing.stderr).toContain('wrangler secret put CURSOR_KEY');
+    expect(missing.stderr).toContain(
+      'set it with `npx wrangler secret put CURSOR_KEY --config worker/wrangler.jsonc` (value: openssl rand -hex 32)',
+    );
     expect(missing.stderr).not.toContain('LEXICON_PREFIX');
     expect(missing.calls).toEqual([SECRET_LIST_CALL]);
     expectNoOutputs();
+    // The suggested command works from the repository root as printed: run
+    // with the stub as wrangler, its --config resolves from the root.
+    expect(copy.runSuggestedPut(missing.stderr).status).toBe(0);
 
     // A named env checks that env's secrets.
     const staging = copy.deploy(['--dry-run', '--env', 'staging'], { STUB_SECRETS: '' });
     expect(staging.status).toBe(1);
     expect(staging.stderr).toContain('the CURSOR_KEY secret is missing for env staging');
-    expect(staging.stderr).toContain('wrangler secret put CURSOR_KEY --env staging');
+    expect(staging.stderr).toContain(
+      'set it with `npx wrangler secret put CURSOR_KEY --config worker/wrangler.jsonc --env staging`',
+    );
     expect(staging.calls).toEqual([`${SECRET_LIST_CALL.replace(' --format', ' --env staging --format')}`]);
     expectNoOutputs();
+    const put = copy.runSuggestedPut(staging.stderr);
+    expect(put.status, put.stderr).toBe(0);
+    expect(put.calls).toEqual(['secret put CURSOR_KEY --config worker/wrangler.jsonc --env staging']);
+    // Negative control: the previous suggestion (no --config) cannot find the
+    // config from the repository root.
+    const withoutConfig = copy.runSuggestedPut('`npx wrangler secret put CURSOR_KEY --env staging`');
+    expect(withoutConfig.status).toBe(98);
+    expect(withoutConfig.stderr).toContain('config (none) not found');
 
     // Secrets that cannot be listed are not assumed present.
     const unlisted = copy.deploy(['--dry-run'], { STUB_FAIL: '1' });
@@ -376,6 +414,126 @@ const ACTIONLINT_VERSION = 'v1.7.7';
 /** A GitHub Actions expression, `${{ expr }}`. */
 const gh = (expr: string): string => `\${{ ${expr} }}`;
 
+interface WorkflowStep {
+  name: string;
+  /** The step's `env:` keys and values. */
+  env: Record<string, string>;
+  /** The step's whole text (its `run`, `uses` and `with`). */
+  text: string;
+}
+
+interface DeployJob {
+  /** Workflow-level `env:` entries (column 0). */
+  workflowEnv: Record<string, string>;
+  /** The deploy job's own `env:` entries. */
+  jobEnv: Record<string, string>;
+  steps: WorkflowStep[];
+}
+
+/** `KEY: value` entries of the mapping indented by `indent` spaces after `header` at line `at`. */
+function envBlock(lines: readonly string[], at: number, indent: number): Record<string, string> {
+  const out: Record<string, string> = {};
+  const entry = new RegExp(`^ {${indent}}([A-Za-z_][A-Za-z0-9_]*): (.*)$`);
+  for (let i = at + 1; i < lines.length; i++) {
+    const line = lines[i] ?? '';
+    if (/^\s*(#.*)?$/.test(line)) continue;
+    const m = entry.exec(line);
+    if (m === null) break;
+    out[m[1] as string] = (m[2] as string).trim();
+  }
+  return out;
+}
+
+/**
+ * The deploy job of deploy.yml as plain text structure: workflow- and
+ * job-level env and each step's name, env and text. It reads this file's
+ * layout (job keys at 4 spaces, step items at 6, step keys at 8, step env at
+ * 10); actionlint above proves the layout is the workflow GitHub runs.
+ */
+function parseDeployJob(text: string): DeployJob {
+  const lines = text.split('\n');
+  const workflowAt = lines.indexOf('env:');
+  const jobAt = lines.indexOf('  deploy:');
+  expect(jobAt, 'jobs.deploy').toBeGreaterThan(0);
+  let jobEnvAt = -1;
+  let stepsAt = -1;
+  for (let i = jobAt + 1; i < lines.length; i++) {
+    const line = lines[i] ?? '';
+    if (/^ {2}[A-Za-z]/.test(line)) break; // next job
+    if (line === '    env:') jobEnvAt = i;
+    if (line === '    steps:') stepsAt = i;
+  }
+  expect(stepsAt, 'jobs.deploy.steps').toBeGreaterThan(jobAt);
+  const steps: WorkflowStep[] = [];
+  let current: { start: number; lines: string[] } | null = null;
+  const flush = () => {
+    if (current === null) return;
+    const block = current.lines;
+    const name = block.map((l) => /^ {6}- name: (.*)$|^ {8}name: (.*)$/.exec(l)).find((m) => m !== null);
+    const envAt = block.indexOf('        env:');
+    steps.push({
+      name: (name?.[1] ?? name?.[2] ?? block[0] ?? '').trim(),
+      env: envAt === -1 ? {} : envBlock(block, envAt, 10),
+      text: block.join('\n'),
+    });
+  };
+  for (let i = stepsAt + 1; i < lines.length; i++) {
+    const line = lines[i] ?? '';
+    if (/^ {0,5}\S/.test(line)) break; // left the steps list
+    if (line.startsWith('      - ')) {
+      flush();
+      current = { start: i, lines: [line] };
+    } else current?.lines.push(line);
+  }
+  flush();
+  return {
+    workflowEnv: workflowAt === -1 ? {} : envBlock(lines, workflowAt, 2),
+    jobEnv: jobEnvAt === -1 ? {} : envBlock(lines, jobEnvAt, 6),
+    steps,
+  };
+}
+
+/** The steps that call the Cloudflare API through wrangler, and so need the credentials. */
+const CREDENTIAL_STEPS = [
+  'Preflight (owned prefix and origin, CURSOR_KEY secret present)',
+  'Upload Worker version',
+  'Deploy the version to 100%',
+  'Initial deploy (applies Durable Object migrations)',
+];
+const CREDENTIALS: Record<string, string> = {
+  CLOUDFLARE_API_TOKEN: gh('secrets.CLOUDFLARE_API_TOKEN'),
+  CLOUDFLARE_ACCOUNT_ID: gh('vars.CLOUDFLARE_ACCOUNT_ID'),
+};
+
+/** Every way the workflow text exposes a Cloudflare credential beyond CREDENTIAL_STEPS. */
+function credentialScopeProblems(text: string): string[] {
+  const job = parseDeployJob(text);
+  const problems: string[] = [];
+  for (const [scope, env] of [
+    ['workflow', job.workflowEnv],
+    ['job', job.jobEnv],
+  ] as const) {
+    for (const key of Object.keys(env)) if (/^CLOUDFLARE_/.test(key)) problems.push(`${scope}-level env ${key}`);
+  }
+  for (const step of job.steps) {
+    const wanted = CREDENTIAL_STEPS.includes(step.name);
+    for (const [key, value] of Object.entries(CREDENTIALS)) {
+      if (wanted && step.env[key] !== value) problems.push(`step "${step.name}" lacks ${key}: ${value}`);
+      if (!wanted && key in step.env) problems.push(`step "${step.name}" sees ${key}`);
+    }
+    if (!wanted && /secrets\.CLOUDFLARE|CLOUDFLARE_API_TOKEN/.test(step.text)) {
+      problems.push(`step "${step.name}" references the Cloudflare token`);
+    }
+  }
+  for (const name of CREDENTIAL_STEPS) {
+    if (!job.steps.some((s) => s.name === name)) problems.push(`no step "${name}"`);
+  }
+  // The token reaches the runner only through those step env entries.
+  const tokenRefs = text.split(gh('secrets.CLOUDFLARE_API_TOKEN')).length - 1;
+  if (tokenRefs !== CREDENTIAL_STEPS.length) problems.push(`${tokenRefs} token references`);
+  return problems;
+}
+
 describe('actionlint .github/workflows/deploy.yml', () => {
   it('workflow is valid', () => {
     // A missing actionlint is a failure, never a skip.
@@ -434,6 +592,70 @@ describe('actionlint .github/workflows/deploy.yml', () => {
       expect(next, step).toBeGreaterThan(at);
       at = next;
     }
+    // The credentials are scoped to the Cloudflare-calling steps (detailed below).
+    expect(credentialScopeProblems(text)).toEqual([]);
+  });
+
+  it('deploy credentials are scoped to the deploy step', () => {
+    const workflow = join(ROOT, '.github', 'workflows', 'deploy.yml');
+    const text = readFileSync(workflow, 'utf8');
+    const job = parseDeployJob(text);
+
+    // No workflow- or job-level credential, so the install, test and build
+    // steps run without the token in their environment.
+    expect(job.jobEnv).toEqual({ ATMUSIC_ENV: gh('inputs.environment'), WRANGLER_SEND_METRICS: "'false'" });
+    expect(Object.keys(job.workflowEnv).filter((k) => k.startsWith('CLOUDFLARE_'))).toEqual([]);
+    const byName = new Map(job.steps.map((step) => [step.name, step]));
+    for (const name of [
+      'Install pinned contract validator',
+      'Install locked dependencies',
+      'Install pinned actionlint (checked by the TypeScript gate)',
+      'TypeScript gate',
+      'Generate client metadata and _headers',
+      'Build the SPA (vite build)',
+      'Bundle guard and bundle SHA-256',
+      'Smoke test /health/live, /health/ready and /api/v1/meta',
+      'Record release evidence',
+    ]) {
+      const step = byName.get(name);
+      expect(step, name).toBeDefined();
+      expect(
+        Object.keys(step?.env ?? {}).filter((k) => k.startsWith('CLOUDFLARE_')),
+        name,
+      ).toEqual([]);
+    }
+    expect(byName.get('Install locked dependencies')?.text).toContain('run: npm ci');
+    expect(byName.get('Install pinned contract validator')?.text).toContain('pip install');
+    expect(byName.get('TypeScript gate')?.text).toContain('run: bash scripts/check-ts.sh');
+
+    // Exactly the steps that call the Cloudflare API get both values, and
+    // each of them is a step that runs wrangler against the account.
+    const withToken = job.steps.filter((s) => 'CLOUDFLARE_API_TOKEN' in s.env).map((s) => s.name);
+    expect(withToken).toEqual(CREDENTIAL_STEPS);
+    for (const name of CREDENTIAL_STEPS) {
+      const step = byName.get(name) as WorkflowStep;
+      expect(step.env.CLOUDFLARE_API_TOKEN, name).toBe(gh('secrets.CLOUDFLARE_API_TOKEN'));
+      expect(step.env.CLOUDFLARE_ACCOUNT_ID, name).toBe(gh('vars.CLOUDFLARE_ACCOUNT_ID'));
+      expect(step.text, name).toMatch(
+        /deploy\.sh --env "\$ATMUSIC_ENV" --preflight|npx wrangler (versions upload|versions deploy|deploy) /,
+      );
+    }
+    expect(credentialScopeProblems(text)).toEqual([]);
+
+    // Negative controls: the previous job-level layout, and a credential
+    // added to the test-suite step, are both reported.
+    const jobLevel = text.replace(
+      `      ATMUSIC_ENV: ${gh('inputs.environment')}\n`,
+      `      ATMUSIC_ENV: ${gh('inputs.environment')}\n      CLOUDFLARE_API_TOKEN: ${gh('secrets.CLOUDFLARE_API_TOKEN')}\n`,
+    );
+    expect(jobLevel).not.toBe(text);
+    expect(credentialScopeProblems(jobLevel)).toContain('job-level env CLOUDFLARE_API_TOKEN');
+    const gate = text.replace(
+      '      - name: TypeScript gate\n        run: bash scripts/check-ts.sh\n',
+      `      - name: TypeScript gate\n        env:\n          CLOUDFLARE_API_TOKEN: ${gh('secrets.CLOUDFLARE_API_TOKEN')}\n        run: bash scripts/check-ts.sh\n`,
+    );
+    expect(gate).not.toBe(text);
+    expect(credentialScopeProblems(gate)).toContain('step "TypeScript gate" sees CLOUDFLARE_API_TOKEN');
   });
 });
 

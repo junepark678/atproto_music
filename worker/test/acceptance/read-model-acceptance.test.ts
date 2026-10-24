@@ -684,4 +684,69 @@ describe('read-model acceptance', () => {
     const fresh = await pages(a, `/api/v1/users/${ALICE}/scrobbles`, 2);
     expect(fresh.pages).toEqual([['r11', 'r07'], ['r01', 'r02'], ['r03', 'r04'], ['r06']]);
   });
+
+  it('following cursor replayed with a different viewer is 400 invalid_cursor', async () => {
+    const a = await seedAcceptance('following-viewer');
+    // A second scrobble by Bob (through Jetstream and the production drain),
+    // so Alice's following feed has two items and a limit-1 page a cursor.
+    const r12 = uriOf(BOB, 'r12');
+    const commit = await inSocket(a, () =>
+      a.kit.createRecord('Bob', SCROBBLE, 'r12', {
+        $type: SCROBBLE,
+        artist: 'Kate Bush',
+        track: 'Running Up That Hill',
+        listenedAt: '2026-01-15T11:58:00Z',
+        createdAt: '2026-01-15T11:58:00Z',
+      }),
+    );
+    expect(await a.alarm()).toBe(true);
+    expect(await a.inDo((db) => db.one('SELECT cid FROM scrobbles WHERE uri = ?', r12))).toEqual({
+      cid: commit.cid,
+    });
+
+    const base = (viewer: string) => `/api/v1/feed?scope=following&viewer=${enc(viewer)}&limit=1`;
+    const first = await a.request(base(ALICE));
+    expect([first.status, rkeys(first.body)]).toEqual([200, ['r12']]);
+    const cursor = (first.body as Json).nextCursor as string;
+    expect(typeof cursor).toBe('string');
+
+    // Nothing a refusal does may touch the index or the network.
+    a.kit.resetCalls();
+    const tables = await a.inDo((db) => JSON.stringify(db.all('SELECT * FROM scrobbles ORDER BY uri')));
+    const validatedBefore = a.validated;
+    const refused: Array<[string, string]> = [
+      ['viewer Bob', `${base(BOB)}&cursor=${enc(cursor)}`],
+      ['viewer Carol', `${base(CAROL)}&cursor=${enc(cursor)}`],
+      ['unknown viewer', `${base('did:plc:dddddddddddddddddddddddd')}&cursor=${enc(cursor)}`],
+      ['did:web viewer', `${base('did:web:alice.example.test')}&cursor=${enc(cursor)}`],
+      ['global scope', `/api/v1/feed?scope=global&limit=1&cursor=${enc(cursor)}`],
+      [
+        'global scope with the same viewer',
+        `/api/v1/feed?scope=global&viewer=${enc(ALICE)}&limit=1&cursor=${enc(cursor)}`,
+      ],
+      ['Alice history', `/api/v1/users/${ALICE}/scrobbles?limit=1&cursor=${enc(cursor)}`],
+    ];
+    for (const [label, path] of refused) {
+      const r = await a.request(path);
+      expect([label, r.status, r.schema, (r.body as Json).error.code, (r.body as Json).error.fields]).toEqual([
+        label,
+        400,
+        'valid',
+        'invalid_cursor',
+        undefined,
+      ]);
+      expect(r.headers.get('cache-control')).toBe('no-store');
+    }
+    // Every refusal was validated against api/openapi.yaml (the 400 Error schema).
+    expect(a.validated - validatedBefore).toBe(refused.length);
+    expect(a.kit.transport.calls.entries).toEqual([]);
+    expect(await a.inDo((db) => JSON.stringify(db.all('SELECT * FROM scrobbles ORDER BY uri')))).toBe(tables);
+
+    // Control: the same cursor with its own viewer continues to the last item.
+    const next = await a.request(`${base(ALICE)}&cursor=${enc(cursor)}`);
+    expect([next.status, rkeys(next.body), (next.body as Json).nextCursor]).toEqual([200, ['r09'], null]);
+    // And Bob's own following feed (he follows nobody) is still an empty page.
+    const bob = await a.request(base(BOB));
+    expect([bob.status, rkeys(bob.body)]).toEqual([200, []]);
+  });
 });

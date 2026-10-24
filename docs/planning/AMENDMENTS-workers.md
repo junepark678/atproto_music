@@ -64,7 +64,7 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 
 **Demonstrated gap:** (A18) Workers tests run in workerd through `@cloudflare/vitest-plugin`; there is no process, port or `LD_PRELOAD` to control, and restart is DO eviction.
 
-**Amendment text:** The CI gate is `npm ci` and `bash scripts/check-ts.sh` (typecheck, biome lint, vitest through `scripts/report-tests.ts`, contract and case-map validators, bundle guard). A zero-test run fails. The Rust `check` job stays for the oracle until W7-02. The disposable-copy negative controls are kept: a misformatted file fails the biome step and an inverted assertion fails the gate, each without changing the repository.
+**Amendment text:** The CI gate is `npm ci` and `bash scripts/check-ts.sh` (typecheck, biome lint, vitest through `scripts/report-tests.ts`, contract and case-map validators, bundle guard). A zero-test run fails. Integration note (W6-04, recorded by W6R-04): between those two steps the `ts` job in `.github/workflows/ci.yml` also installs actionlint v1.7.7 (`go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7`, checksum-verified by sum.golang.org, onto `PATH`), because the gate's `scripts/test/deploy.test.ts › workflow is valid` runs it on `deploy.yml` and fails when it is missing or another version; `deploy.yml` installs it the same way before its own gate step. The Rust `check` job stays for the oracle until W7-02. The disposable-copy negative controls are kept: a misformatted file fails the biome step and an inverted assertion fails the gate, each without changing the repository.
 
 | Case | Disposition |
 | --- | --- |

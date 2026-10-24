@@ -829,11 +829,12 @@ export async function pollUntil<T>(
   probe: () => Promise<T | null>,
   { timeoutMs, intervalMs }: { timeoutMs: number; intervalMs: number },
 ): Promise<{ value: T; elapsedMs: number } | null> {
-  const start = Date.now();
+  // Monotonic, so a wall-clock step cannot cut a wait short or stretch it.
+  const start = performance.now();
   for (;;) {
     const value = await probe();
-    if (value !== null) return { value, elapsedMs: Date.now() - start };
-    if (Date.now() - start >= timeoutMs) return null;
+    if (value !== null) return { value, elapsedMs: Math.round(performance.now() - start) };
+    if (performance.now() - start >= timeoutMs) return null;
     await sleep(intervalMs);
   }
 }

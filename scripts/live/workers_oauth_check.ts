@@ -15,10 +15,13 @@
 //    browser opens and the operator signs in by hand.
 // 3. The token endpoint's response is observed in the browser for its `scope`
 //    and `sub` only (the tokens themselves are never read into the evidence):
-//    `sub` must be the expected DID, every `repo:<p>.*` scope must be granted
-//    and `transition:generic` must not be (Q5).
+//    `sub` must be present and be the expected DID, every `repo:<p>.*` scope
+//    must be granted for all of create, update and delete (a create-only
+//    `repo:<nsid>?action=create` is not a full grant), and
+//    `transition:generic` must not be (Q5).
 // 4. /signin then shows the signed-in DID, and /settings "Sign out" revokes
-//    the session; the ephemeral browser context is discarded.
+//    the session; a sign-out that does not complete fails the gate. The
+//    ephemeral browser context is discarded.
 //
 // Without the prerequisites it prints a `blocked` result listing each missing
 // variable and exits 2 before launching a browser or making any request.
@@ -85,13 +88,49 @@ export const OAUTH_REQS: readonly Requirement[] = [
   handleReq(OAUTH_ENV.handleB, 'B'),
 ];
 
+/** The repo actions a granular scope can grant (atproto permission spec: no `action` = all of them). */
+export const REPO_ACTIONS = ['create', 'update', 'delete'] as const;
+
+/**
+ * The collections and actions one `repo` scope token grants, or null when the
+ * token is not a repo scope. Both spellings are read: `repo:<nsid>?action=…`
+ * and `repo?collection=<nsid>&action=…`; a token without `action` grants
+ * every action.
+ */
+export function repoGrant(token: string): { collections: string[]; actions: Set<string> } | null {
+  if (!token.startsWith('repo:') && !token.startsWith('repo?')) return null;
+  const q = token.indexOf('?');
+  const head = q === -1 ? token : token.slice(0, q);
+  const params = new URLSearchParams(q === -1 ? '' : token.slice(q + 1));
+  let positional: string;
+  try {
+    positional = head.startsWith('repo:') ? decodeURIComponent(head.slice('repo:'.length)) : '';
+  } catch {
+    return null;
+  }
+  const collections = [...(positional === '' ? [] : [positional]), ...params.getAll('collection')];
+  const listed = params.getAll('action');
+  return { collections, actions: new Set<string>(listed.length === 0 ? REPO_ACTIONS : listed) };
+}
+
+/**
+ * Whether `scope` grants the app's full granular scope: `atproto`, and every
+ * repo action (create, update, delete) on each of its three collections. A
+ * create-only grant such as `repo:<nsid>?action=create` is not a full grant:
+ * the app also updates settings and deletes scrobbles and follows.
+ */
 export function grantedScopes(
   prefix: string,
   scope: string,
 ): { repoScopesGranted: boolean; transitionGeneric: boolean } {
   const tokens = scope.split(/\s+/).filter(Boolean);
+  const grants = tokens.map(repoGrant).filter((g): g is NonNullable<typeof g> => g !== null);
   const c = collectionsFor(prefix);
-  const granted = (nsid: string) => tokens.some((t) => t === `repo:${nsid}` || t.startsWith(`repo:${nsid}?`));
+  const granted = (nsid: string) => {
+    const actions = new Set<string>();
+    for (const g of grants) if (g.collections.includes(nsid)) for (const a of g.actions) actions.add(a);
+    return REPO_ACTIONS.every((a) => actions.has(a));
+  };
   return {
     repoScopesGranted: tokens.includes('atproto') && [c.scrobble, c.follow, c.settings].every(granted),
     transitionGeneric: tokens.some((t) => t.startsWith('transition:')),
@@ -194,16 +233,49 @@ export async function signInThroughApp(page: Page, o: SignInOptions): Promise<Si
   return { did, grantedScope: observed.scope, tokenSub: observed.sub };
 }
 
+export interface SignOutResult {
+  signedOut: boolean;
+  /** Why the sign-out did not complete. */
+  error: string | null;
+}
+
 /** /settings → Sign out (revokes the session at the authorization server). */
-export async function signOutOfApp(page: Page, origin: string): Promise<boolean> {
+export async function signOutOfApp(page: Page, origin: string): Promise<SignOutResult> {
   try {
     await page.goto(new URL('/settings', origin).href);
     await page.getByRole('button', { name: 'Sign out', exact: true }).click({ timeout: 15_000 });
     await page.waitForFunction("!document.body.innerText.includes('Signing out…')", undefined, { timeout: 30_000 });
-    return true;
-  } catch {
-    return false;
+    return { signedOut: true, error: null };
+  } catch (error) {
+    const detail = error instanceof Error ? (error.message.split('\n')[0] ?? error.name) : String(error);
+    return { signedOut: false, error: detail };
   }
+}
+
+/**
+ * The failures of one observed sign-in: the app's DID and the token `sub`
+ * must both be the expected DID (a missing `sub` proves nothing), the full
+ * granular scope must be granted without `transition:*`, and the sign-out
+ * through /settings must have completed.
+ */
+export function signInFailures(
+  endpoint: string,
+  expectedDid: string,
+  result: SignInResult,
+  scopes: { repoScopesGranted: boolean; transitionGeneric: boolean },
+  signOut: SignOutResult,
+): string[] {
+  const failures: string[] = [];
+  if (result.did !== expectedDid) failures.push(`${endpoint}: the app signed in as ${result.did}, not ${expectedDid}`);
+  if (result.tokenSub === null) failures.push(`${endpoint}: the token response has no sub`);
+  else if (result.tokenSub !== expectedDid)
+    failures.push(`${endpoint}: token sub ${result.tokenSub} is not ${expectedDid}`);
+  if (!scopes.repoScopesGranted)
+    failures.push(`${endpoint}: granular repo scopes not granted (${result.grantedScope})`);
+  if (scopes.transitionGeneric) failures.push(`${endpoint}: a transition:* scope was granted`);
+  if (!signOut.signedOut)
+    failures.push(`${endpoint}: sign-out through /settings did not complete (${signOut.error ?? 'unknown error'})`);
+  return failures;
 }
 
 export async function launchBrowser(env: EnvMap) {
@@ -256,24 +328,18 @@ export const spec: GateSpec = {
             timeoutMs: signInTimeoutMs(ctx.env),
           });
           const scopes = grantedScopes(ctx.prefix, result.grantedScope);
-          const signedOut = await signOutOfApp(page, ctx.origin);
+          const signOut = await signOutOfApp(page, ctx.origin);
           signIns.push({
             did: result.did,
+            tokenSub: result.tokenSub,
             pds: info.endpoint,
             grantedScope: result.grantedScope,
             ...scopes,
-            signedOut,
+            signedOut: signOut.signedOut,
           });
-          if (result.did !== expectedDid)
-            ctx.fail(`${info.endpoint}: the app signed in as ${result.did}, not ${expectedDid}`);
-          if (result.tokenSub !== null && result.tokenSub !== expectedDid) {
-            ctx.fail(`${info.endpoint}: token sub ${result.tokenSub} is not ${expectedDid}`);
-          }
-          if (!scopes.repoScopesGranted)
-            ctx.fail(`${info.endpoint}: granular repo scopes not granted (${result.grantedScope})`);
-          if (scopes.transitionGeneric) ctx.fail(`${info.endpoint}: a transition:* scope was granted`);
+          for (const failure of signInFailures(info.endpoint, expectedDid, result, scopes, signOut)) ctx.fail(failure);
           ctx.cleanup(
-            signedOut
+            signOut.signedOut
               ? `${expectedDid}: signed out through /settings, browser context discarded`
               : `${expectedDid}: sign-out did not complete; browser context discarded, revoke the session on ${info.endpoint}`,
           );

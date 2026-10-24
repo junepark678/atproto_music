@@ -191,6 +191,102 @@ describe('federation acceptance', () => {
     );
   });
 
+  it('a valid hint still applies after each rejected case', async () => {
+    // TESTING.md "Rejection-matrix tables rule", ADR 0004 §10.4: each case
+    // changes one invariant, leaves the projection and checkpoint tables
+    // byte-identical, and is then followed by a valid hint that applies
+    // through the same production socket, drain and verifier.
+    const a = await seedAcceptance('rejections-then-valid');
+    const put = await inSocket(a, () =>
+      a.kit.externalPut('Alice', SCROBBLE, 'x01', scrobble('Teardrop', '2026-01-15T11:59:30Z', 'Massive Attack')),
+    );
+    const x01 = uriOf(ALICE, 'x01');
+    const recordCid = put.ops[0]?.cid as string;
+    const valid = await a.kit.repos.Alice.getRecordCar(SCROBBLE, 'x01');
+    const otherPath = await a.kit.repos.Alice.getRecordCar(SCROBBLE, 'r07');
+    const cases = [
+      { kind: 'bad signature', car: await corruptSignature(valid), counter: 'bad_signature' },
+      { kind: 'changed block', car: corruptBlockByte(valid, recordCid), counter: 'cid_mismatch' },
+      { kind: 'wrong MST path', car: otherPath, counter: 'missing_block' },
+    ];
+    const scrobbleUris = (t: Record<string, unknown[]>) => (t.scrobbles as Array<{ uri: string }>).map((r) => r.uri);
+    const appliedValid: string[] = [];
+
+    for (const [i, c] of cases.entries()) {
+      // The rejection. For the whole case Alice's PDS keeps serving the
+      // corrupted proof for her getRecord, and a 503 for her other sync
+      // reads (the range snapshot a wrong MST path hands her DID to), so
+      // x01's backed-off hint can never apply while the valid hint runs.
+      const before = await a.inDo(projectionTables);
+      a.kit.resetCalls();
+      a.kit.pds.Alice.faults.clear();
+      a.kit.pds.Alice.fail(
+        { nsid: GET_RECORD, did: ALICE },
+        { kind: 'respond', respond: () => carResponse(c.car) },
+        Number.POSITIVE_INFINITY,
+      );
+      a.kit.pds.Alice.fail({ did: ALICE }, { kind: 'status', status: 503 }, Number.POSITIVE_INFINITY);
+      const failedBefore = await a.inDo((db) => counter(db, 'verify_failed', c.counter));
+      await a.alarmsUntil((db) => counter(db, 'verify_failed', c.counter) === failedBefore + 1, { max: 10 });
+      const rejected = await a.inDo(projectionTables);
+      expect([c.kind, JSON.stringify(rejected)]).toEqual([c.kind, JSON.stringify(before)]);
+      expect([c.kind, a.kit.pds.Alice.calls.count({ nsid: GET_RECORD })]).toEqual([c.kind, 1]);
+      expect((await a.request(`/api/v1/scrobbles/${enc(x01)}`)).status).toBe(404);
+
+      // Then a valid hint: a new record by Bob, honestly served, arrives as a
+      // Jetstream event and applies through the same drain and verifier.
+      const rkey = `v0${i + 1}`;
+      const uri = uriOf(BOB, rkey);
+      const commit = await inSocket(a, () =>
+        a.kit.externalPut('Bob', SCROBBLE, rkey, scrobble(`Valid ${i + 1}`, `2026-01-15T11:5${i}:00Z`, 'Björk')),
+      );
+      expect([c.kind, await a.inDo((db) => db.one('SELECT uri FROM hints WHERE uri = ?', uri))]).toEqual([
+        c.kind,
+        { uri },
+      ]);
+      a.kit.resetCalls();
+      await a.alarmsUntil((db) => db.one('SELECT 1 AS x FROM scrobbles WHERE uri = ?', uri) !== null, { max: 10 });
+      appliedValid.push(uri);
+
+      // Applied with the signer's CID after exactly one proof of Bob's record.
+      const row = await a.inDo((db) => db.one('SELECT uri, cid, did, artist FROM scrobbles WHERE uri = ?', uri));
+      expect([c.kind, row]).toEqual([c.kind, { uri, cid: commit.ops[0]?.cid, did: BOB, artist: 'Björk' }]);
+      expect([c.kind, a.kit.pds.Bob.calls.filter({ nsid: GET_RECORD }).map((x) => x.status)]).toEqual([c.kind, [200]]);
+      // Whatever Alice's PDS was asked meanwhile was refused, and x01 is still absent.
+      expect([c.kind, a.kit.pds.Alice.calls.entries.filter((x) => x.nsid !== GET_RECORD && x.status !== 503)]).toEqual([
+        c.kind,
+        [],
+      ]);
+      expect(await a.inDo((db) => db.one('SELECT uri FROM scrobbles WHERE uri = ?', x01))).toBeNull();
+      // The projection differs from the rejected one by exactly the valid record.
+      const after = await a.inDo(projectionTables);
+      expect([c.kind, scrobbleUris(after).filter((u) => u !== uri)]).toEqual([c.kind, scrobbleUris(rejected)]);
+      const states = (t: Record<string, unknown[]>) =>
+        (t.record_state as Array<{ uri: string }>).filter((r) => r.uri !== uri);
+      expect([c.kind, states(after)]).toEqual([c.kind, states(rejected)]);
+      expect([c.kind, after.follows, after.suppression]).toEqual([c.kind, rejected.follows, rejected.suppression]);
+      // It is public: the lookup and records/status answer through the Worker (schema-checked).
+      const lookup = await a.request(`/api/v1/scrobbles/${enc(uri)}`);
+      expect([c.kind, lookup.status, (lookup.body as Json).scrobble.cid]).toEqual([c.kind, 200, commit.ops[0]?.cid]);
+      const status = await a.request(`/api/v1/records/status?uri=${enc(uri)}`);
+      expect([c.kind, (status.body as Json).state]).toEqual([c.kind, 'indexed']);
+    }
+
+    // Every valid record of the matrix is in the global feed; x01 is not.
+    const items = rkeys((await a.request('/api/v1/feed?scope=global&limit=100')).body);
+    expect(items.filter((k) => k.startsWith('v0')).sort()).toEqual(['v01', 'v02', 'v03']);
+    expect(items).not.toContain('x01');
+    expect(appliedValid).toEqual([uriOf(BOB, 'v01'), uriOf(BOB, 'v02'), uriOf(BOB, 'v03')]);
+
+    // With Alice's PDS honest again, x01 itself converges to the signer's CID.
+    a.kit.pds.Alice.faults.clear();
+    a.kit.resetCalls();
+    await a.alarmsUntil((db) => db.one('SELECT 1 AS x FROM scrobbles WHERE uri = ?', x01) !== null && settled(db), {
+      max: 200,
+    });
+    expect(await a.inDo((db) => db.one('SELECT cid FROM scrobbles WHERE uri = ?', x01))).toEqual({ cid: recordCid });
+  });
+
   it('settings disabled disconnects Carol; settings deleted reconnects after snapshot', async () => {
     const a = await seedAcceptance('settings');
     const settingsUri = uriOf(CAROL, 'self', SETTINGS);

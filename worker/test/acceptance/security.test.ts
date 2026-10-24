@@ -17,10 +17,11 @@
 //   environment (the fixture prefix) while production sources never read the
 //   acceptance flag or import test-support.
 
-import { SELF } from 'cloudflare:test';
+import { runInDurableObject, SELF } from 'cloudflare:test';
 import { seededRandom } from '@atmusic/core/test-support/random';
 import { describe, expect, it } from 'vitest';
 import { ConfigError, parseConfig } from '../../src/config';
+import { IndexDO } from '../../src/do/index-do';
 import type { Env } from '../../src/env';
 import { createWorker } from '../../src/router';
 import productionWrangler from '../../wrangler.jsonc?raw';
@@ -70,6 +71,38 @@ async function settle(
 
 function scrobble(track: string, at: string) {
   return { $type: SCROBBLE, artist: 'Kate Bush', track, listenedAt: at, createdAt: at };
+}
+
+/**
+ * The PROD_INDEX namespace with every stub method run on the real production
+ * IndexDO instance inside its isolate (runInDurableObject). The production
+ * class, its constructor and its refusal are unchanged; what changes is only
+ * how a deliberate rejection travels back. A JS RPC method that rejects is
+ * logged by workerd on the callee side as "Uncaught (in promise)" even when
+ * the caller awaits and catches it; through runInDurableObject the rejection
+ * reaches the caller (the Worker code under test) as a plain rejected promise,
+ * so the expected refusals here never add such a line and a real unhandled
+ * rejection stands out.
+ */
+function inIsolate(ns: Env['INDEX']): Env['INDEX'] {
+  return {
+    idFromName: (name: string) => ns.idFromName(name),
+    get: (id: DurableObjectId) => {
+      const stub = ns.get(id) as unknown as DurableObjectStub<IndexDO>;
+      return new Proxy(
+        {},
+        {
+          get: (_target, method) =>
+            typeof method !== 'string' || method === 'then'
+              ? undefined
+              : (...args: unknown[]) =>
+                  runInDurableObject(stub, (instance: IndexDO) =>
+                    (instance as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>)[method]?.(...args),
+                  ),
+        },
+      );
+    },
+  } as unknown as Env['INDEX'];
 }
 
 describe('security acceptance', () => {
@@ -179,6 +212,31 @@ describe('security acceptance', () => {
         'validation_failed',
         { body: expect.any(String) },
       ],
+      // A member given twice is the strict-body 422, as serde's duplicate-field
+      // error in the Rust oracle (JSON.parse alone would keep the last value).
+      ...(
+        [
+          ['duplicate uri', `{"uri":"${uriOf(ALICE, 'r01')}","uri":"${uriOf(BOB, 'r09')}"}`],
+          ['duplicate uri, escaped name', `{"uri":"${uriOf(ALICE, 'r01')}", "\\u0075ri" : "${uriOf(ALICE, 'r01')}"}`],
+          ['duplicate did', `{"did":"${ALICE}","did":"${ALICE}"}`],
+          ['duplicate invalid uri', `{"uri":"not-a-uri","uri":"${uriOf(ALICE, 'r01')}"}`],
+        ] as const
+      ).map(
+        ([label, body]) =>
+          [
+            label,
+            () =>
+              a.request('/api/v1/notify', {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body,
+                ip: '203.0.113.7',
+              }),
+            422,
+            'validation_failed',
+            { body: 'Expected one string uri or did field and no unknown fields.' },
+          ] as [string, () => Promise<{ status: number; body: unknown; headers: Headers }>, number, string, unknown],
+      ),
       [
         'foreign collection',
         () => notify({ uri: `at://${ALICE}/app.bsky.feed.post/3k` }),
@@ -272,6 +330,11 @@ describe('security acceptance', () => {
       ]);
     }
     // Over JS RPC: the control method has no string name, so a stub cannot reach it.
+    // These five probes must cross JS RPC (that is what they prove), and each
+    // refusal is awaited here; workerd still prints one callee-side
+    // "Uncaught (in promise) TypeError: The RPC receiver does not implement
+    // <name>" line per probe, which no caller can suppress. They are the only
+    // such lines this file produces.
     const stub = a.stub as unknown as Record<string | symbol, unknown>;
     expect(stub[ACCEPTANCE]).toBeUndefined();
     for (const name of ['atmusic.acceptance-control', 'control', 'resetControl', 'record', 'deps']) {
@@ -285,14 +348,18 @@ describe('security acceptance', () => {
     // The unmodified production IndexDO refuses this environment: the fixture
     // prefix needs allowFixturePrefix, which only test entries pass; the
     // acceptance flag is not read by worker/src.
-    const prodStub = acceptanceEnv.PROD_INDEX.get(acceptanceEnv.PROD_INDEX.idFromName('production-class'));
-    const prodReady = await settle(() => prodStub.ready());
+    // (Run in the DO's isolate, see inIsolate: the refusal is the production one.)
+    const prodStub = acceptanceEnv.PROD_INDEX.get(
+      acceptanceEnv.PROD_INDEX.idFromName('production-class'),
+    ) as unknown as DurableObjectStub<IndexDO>;
+    const prodReady = await settle(() => runInDurableObject(prodStub, (instance: IndexDO) => instance.ready()));
     expect(prodReady).toEqual({ ok: false, error: 'NotReadyError: index configuration is invalid (ConfigError)' });
+    expect(await runInDurableObject(prodStub, (instance: IndexDO) => instance instanceof IndexDO)).toBe(true);
     expect(() => parseConfig(acceptanceEnv)).toThrow(ConfigError);
     expect(() => parseConfig(acceptanceEnv)).toThrow(/com\.example\.atmusic is fixture-only/);
     expect((acceptanceEnv as unknown as Record<string, string>)[ALLOW_FIXTURE_VAR]).toBe('true');
     const prodWorker = createWorker({ clock: a.kit.clock, random: seededRandom(3), indexName: 'production-class' });
-    const prodEnv = { ...acceptanceEnv, INDEX: acceptanceEnv.PROD_INDEX } as unknown as Env;
+    const prodEnv = { ...acceptanceEnv, INDEX: inIsolate(acceptanceEnv.PROD_INDEX) } as unknown as Env;
     const prodFetch = async (method: 'GET' | 'POST', path: string, body?: string) => {
       const url = `https://music.example.test${path}`;
       const res = await prodWorker.fetch(
@@ -312,14 +379,15 @@ describe('security acceptance', () => {
     expect(
       checkResponse('GET', notReady.url, { status: 503, headers: notReady.res.headers, body: notReady.json }),
     ).toBe('valid');
-    // Any other route gets the generic error envelope, revealing nothing about why.
-    const refusedNotify = await prodFetch('POST', '/api/v1/notify', JSON.stringify({ did: ALICE }));
-    expect([refusedNotify.res.status, refusedNotify.json.error.code, schema('Error', refusedNotify.json)]).toEqual([
+    // A read route gets the generic error envelope, revealing nothing about why
+    // (notify's declared 503 is the next test).
+    const refusedFeed = await prodFetch('GET', '/api/v1/feed?scope=global');
+    expect([refusedFeed.res.status, refusedFeed.json.error.code, schema('Error', refusedFeed.json)]).toEqual([
       500,
       'internal_error',
       'valid',
     ]);
-    expect(refusedNotify.text).not.toMatch(/ConfigError|fixture|com\.example|LEXICON_PREFIX/);
+    expect(refusedFeed.text).not.toMatch(/ConfigError|fixture|com\.example|LEXICON_PREFIX/);
     // Production sources: no test-support import, no acceptance flag, no fixture-prefix opt-in.
     const sources = Object.entries(PRODUCTION_SOURCES);
     expect(sources.length).toBeGreaterThan(40);
@@ -338,5 +406,101 @@ describe('security acceptance', () => {
     // The scan is not vacuous: the one opt-in point exists and is a parameter.
     expect(PRODUCTION_SOURCES['../../src/config.ts']).toMatch(/allowFixturePrefix\?: boolean/);
     expect(productionWrangler).not.toMatch(/ACCEPTANCE_ALLOW_FIXTURE_PREFIX|TestIndexDO|com\.example\.atmusic/);
+  });
+
+  it('notify returns 503 when IndexDO is unavailable', async () => {
+    const a = await seedAcceptance('notify-unavailable');
+    const url = 'https://music.example.test/api/v1/notify';
+    const post = async (worker: ReturnType<typeof createWorker>, workerEnv: Env, body: unknown) => {
+      const res = await worker.fetch(
+        new Request(url, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', 'cf-connecting-ip': '203.0.113.9' },
+          body: JSON.stringify(body),
+        }),
+        workerEnv,
+        {} as ExecutionContext,
+      );
+      const text = await res.text();
+      const json = JSON.parse(text) as Json;
+      return {
+        res,
+        text,
+        json,
+        verdict: checkResponse('POST', url, { status: res.status, headers: res.headers, body: json }),
+      };
+    };
+    const expectUnavailable = (r: Awaited<ReturnType<typeof post>>, label: string) => {
+      // The OpenAPI-declared 503 with the Error schema, never an undeclared 500.
+      expect([label, r.res.status, r.verdict, schema('Error', r.json)]).toEqual([label, 503, 'valid', 'valid']);
+      expect([label, r.json.error.code, r.json.error.message]).toEqual([
+        label,
+        'not_ready',
+        'Index storage is not initialized.',
+      ]);
+      expect(r.json.error.fields).toBeUndefined();
+      expect(r.res.headers.get('cache-control')).toBe('no-store');
+      expect(r.json.error.requestId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+      expect(r.res.headers.get('x-request-id')).toBe(r.json.error.requestId);
+      // Nothing about the cause leaks.
+      expect(r.text).not.toMatch(/ConfigError|NotReadyError|fixture|com\.example|LEXICON_PREFIX|overloaded|stack/i);
+    };
+
+    const before = await a.inDo(allTables);
+    a.kit.resetCalls();
+
+    // 1. The real production IndexDO class, which refuses this (fixture-prefix)
+    //    environment: every call rejects with NotReadyError (run in its
+    //    isolate, see inIsolate).
+    const prodWorker = createWorker({
+      clock: a.kit.clock,
+      random: seededRandom(7),
+      indexName: 'production-unavailable',
+    });
+    const prodEnv = { ...acceptanceEnv, INDEX: inIsolate(acceptanceEnv.PROD_INDEX) } as unknown as Env;
+    for (const body of [{ did: ALICE }, { uri: uriOf(ALICE, 'r01') }]) {
+      expectUnavailable(await post(prodWorker, prodEnv, body), JSON.stringify(body));
+    }
+    // Admission still runs first: an invalid body is its own 4xx, not a 503.
+    const invalid = await post(prodWorker, prodEnv, { uri: uriOf(ALICE, 'r01'), extra: 1 });
+    expect([invalid.res.status, invalid.json.error.code, invalid.verdict]).toEqual([422, 'validation_failed', 'valid']);
+
+    // 2. An IndexDO whose RPC rejects as an overloaded or reset object does
+    //    (an injected namespace; the production Worker code is unchanged).
+    let notifyCalls = 0;
+    const failing = {
+      idFromName: (name: string) => acceptanceEnv.INDEX.idFromName(name),
+      get: () => ({
+        notify: async () => {
+          notifyCalls += 1;
+          throw new Error('Durable Object is overloaded. Requests queued for too long.');
+        },
+      }),
+    };
+    const failingWorker = createWorker({ clock: a.kit.clock, random: seededRandom(9), indexName: 'overloaded' });
+    const failingEnv = { ...acceptanceEnv, INDEX: failing } as unknown as Env;
+    expectUnavailable(await post(failingWorker, failingEnv, { did: ALICE }), 'overloaded');
+    expect(notifyCalls).toBe(1);
+
+    // Neither outage touched the healthy index or the network ...
+    expect(JSON.stringify(await a.inDo(allTables))).toBe(JSON.stringify(before));
+    expect(a.kit.transport.calls.entries).toEqual([]);
+    // ... and the same request against the healthy IndexDO is queued (202):
+    // one hint row, and only the hint, its counters and the drain timer change.
+    const ok = await a.postJson('/api/v1/notify', { uri: uriOf(BOB, 'r09') }, '198.51.100.250');
+    expect([ok.status, ok.schema, ok.body]).toEqual([202, 'valid', { state: 'queued' }]);
+    const afterOk = await a.inDo(allTables);
+    expect((afterOk.hints as Array<{ uri: string }>).map((h) => h.uri)).toEqual([uriOf(BOB, 'r09')]);
+    expect({ ...afterOk, hints: before.hints, counters: before.counters, timers: before.timers }).toEqual(before);
+    // The duplicate-member check has no false positive: one member spelled with
+    // an escape and spaced out is still one member (and coalesces with the hint).
+    const escaped = await a.request('/api/v1/notify', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: ` { "\\u0075ri" : "${uriOf(BOB, 'r09')}" } `,
+      ip: '198.51.100.251',
+    });
+    expect([escaped.status, escaped.body]).toEqual([202, { state: 'queued' }]);
+    expect(((await a.inDo(allTables)).hints ?? []).map((h) => (h as { uri: string }).uri)).toEqual([uriOf(BOB, 'r09')]);
   });
 });

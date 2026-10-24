@@ -310,6 +310,11 @@ describe('migrate', () => {
     const stub = stubFor('migrate-fresh');
 
     // Through the harness Worker's default fetch: the constructor migrated.
+    // Deterministic: a fresh DO name, no clock and no network. scripts/test/
+    // check-ts.test.ts deliberately inverts the next assertion in a disposable
+    // copy (its negative control), so "expected 200 not to be 200" at this line
+    // in a nested check-ts.sh run is that inversion working, not a flake here;
+    // that test fails only if the nested run has other failures besides it.
     const res = await exports.default.fetch('https://harness.test/harness/migrate-fresh');
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ migration: { status: 'ready', version: 1 } });
