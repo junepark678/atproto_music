@@ -85,7 +85,9 @@ bash scripts/deploy.sh --env staging             # a named env
 
 Every wrangler command takes `--config worker/wrangler.jsonc` and, for a named env, `--env <env>`. `WRANGLER` may name another wrangler executable; it authenticates with `CLOUDFLARE_API_TOKEN` or a prior `wrangler login`. A real deploy writes `work/deploy/<env>-<version id>.json` with the env, origin, prefix, version id, bundle SHA-256 and commit: the release evidence of A19, which replaces the old musl artifact checksum. `bash scripts/deploy.sh --preflight` and `--smoke-only` run those steps alone.
 
-The workflow (`Deploy Worker`, manual dispatch only) runs the same steps in the environment-protected job, with the version id and bundle SHA-256 in the job summary. It never sets Worker secrets.
+The workflow (`Deploy Worker`, manual dispatch only) runs the same steps in the environment-protected job, with the version id and bundle SHA-256 in the job summary. It never sets Worker secrets. `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` are passed only to the steps that call the Cloudflare API (preflight's `wrangler secret list`, the version upload and deploy, or the initial `wrangler deploy`), never as job-level environment, so `npm ci`, `pip`, the gate's test suite and the build never see the token; `scripts/test/deploy.test.ts › deploy credentials are scoped to the deploy step` checks that layout.
+
+A refusal for a missing `CURSOR_KEY` prints the command to fix it, runnable from the repository root as printed: `npx wrangler secret put CURSOR_KEY --config worker/wrangler.jsonc [--env <env>]`.
 
 ## Rollback and failed upgrades
 

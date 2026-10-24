@@ -113,11 +113,24 @@ function ingestSnapshot(status: Record<string, unknown>) {
   };
 }
 
+/**
+ * Lags are measured with the monotonic clock (performance.now), never wall
+ * time: an NTP step or a manual clock change during the run cannot make a lag
+ * negative or inflate it.
+ */
+export const monotonicMs = (): number => performance.now();
+
+/** Milliseconds elapsed since a monotonicMs() reading, as a non-negative integer. */
+export function lagSince(startMono: number, nowMono: number = monotonicMs()): number {
+  return Math.max(0, Math.round(nowMono - startMono));
+}
+
 interface Written {
   uri: string;
   cid: string;
   rev: string | null;
-  committedAtMs: number;
+  /** monotonicMs() when the PDS answered the write. */
+  committedAtMono: number;
 }
 
 /** Wait for `indexed` with the written CID, then verify the record independently at its PDS. */
@@ -130,7 +143,7 @@ async function awaitIndexed(ctx: GateContext, written: Written, timeoutMs: numbe
     { timeoutMs, intervalMs: 1000 },
   );
   expect(done !== null, `${written.uri} was not indexed within ${timeoutMs / 1000} s`);
-  const lagMs = Date.now() - written.committedAtMs;
+  const lagMs = lagSince(written.committedAtMono);
   const parsed = parseRecordUri(written.uri);
   expect(parsed !== null, `malformed URI ${written.uri}`);
   const proof = await verifyRecordAt(parsed.did, parsed.collection, parsed.rkey);
@@ -165,7 +178,7 @@ async function awaitAbsent(
   ctx: GateContext,
   uri: string,
   presentRev: string,
-  deleted: { atMs: number; rev: string | null },
+  deleted: { atMono: number; rev: string | null },
   timeoutMs: number,
 ) {
   const done = await pollUntil(
@@ -176,7 +189,7 @@ async function awaitAbsent(
     { timeoutMs, intervalMs: 1000 },
   );
   expect(done !== null, `${uri} was not reconciled to absent within ${timeoutMs / 1000} s`);
-  const lagMs = Date.now() - deleted.atMs;
+  const lagMs = lagSince(deleted.atMono);
   const parsed = parseRecordUri(uri);
   expect(parsed !== null, `malformed URI ${uri}`);
   const absence = await verifyAbsent(parsed.did, parsed.collection, parsed.rkey, { after: presentRev });
@@ -238,18 +251,18 @@ async function externalCreate(pds: string, session: PdsSession, collection: stri
     headers: { authorization: `Bearer ${session.accessJwt}` },
     body: { repo: session.did, collection, record, validate: false },
   });
-  const committedAtMs = Date.now();
+  const committedAtMono = monotonicMs();
   const uri = field<string>(res.json, 'uri');
   const cid = field<string>(res.json, 'cid');
   expect(res.status === 200 && typeof uri === 'string' && typeof cid === 'string', `createRecord: HTTP ${res.status}`);
-  return { uri, cid, rev: field<string>(field(res.json, 'commit'), 'rev') ?? null, committedAtMs };
+  return { uri, cid, rev: field<string>(field(res.json, 'commit'), 'rev') ?? null, committedAtMono };
 }
 
 async function externalDelete(
   pds: string,
   session: PdsSession,
   uri: string,
-): Promise<{ atMs: number; rev: string | null }> {
+): Promise<{ atMono: number; rev: string | null }> {
   const parsed = parseRecordUri(uri);
   expect(parsed !== null, `malformed URI ${uri}`);
   const res = await httpJson(xrpcUrl(pds, 'com.atproto.repo.deleteRecord'), {
@@ -257,9 +270,9 @@ async function externalDelete(
     headers: { authorization: `Bearer ${session.accessJwt}` },
     body: { repo: session.did, collection: parsed.collection, rkey: parsed.rkey },
   });
-  const atMs = Date.now();
+  const atMono = monotonicMs();
   expect(res.status === 200, `deleteRecord ${uri}: HTTP ${res.status}`);
-  return { atMs, rev: field<string>(field(res.json, 'commit'), 'rev') ?? null };
+  return { atMono, rev: field<string>(field(res.json, 'commit'), 'rev') ?? null };
 }
 
 /** Answer the SPA's notify in the browser so only Jetstream can deliver the record. */
@@ -283,7 +296,11 @@ function nextPdsAnswer(page: Page, origin: string, nsid: string, timeoutMs: numb
         r.status() === 200,
       { timeout: timeoutMs },
     )
-    .then(async (r) => ({ json: (await r.json()) as unknown, atMs: Date.now() }));
+    .then(async (r) => {
+      // Taken when the answer arrives, before its body is read.
+      const atMono = monotonicMs();
+      return { json: (await r.json()) as unknown, atMono };
+    });
 }
 
 async function appPublish(page: Page, ctx: GateContext, runId: string, timeoutMs: number): Promise<Written> {
@@ -294,11 +311,11 @@ async function appPublish(page: Page, ctx: GateContext, runId: string, timeoutMs
   await page.locator('[name="listenedAt"]').fill(listened);
   const answer = nextPdsAnswer(page, ctx.origin, 'com.atproto.repo.createRecord', timeoutMs);
   await page.getByRole('button', { name: 'Publish scrobble', exact: true }).click();
-  const { json, atMs } = await answer;
+  const { json, atMono } = await answer;
   const uri = field<string>(json, 'uri');
   const cid = field<string>(json, 'cid');
   expect(typeof uri === 'string' && typeof cid === 'string', 'the app createRecord answer has no uri/cid');
-  return { uri, cid, rev: field<string>(field(json, 'commit'), 'rev') ?? null, committedAtMs: atMs };
+  return { uri, cid, rev: field<string>(field(json, 'commit'), 'rev') ?? null, committedAtMono: atMono };
 }
 
 async function appDelete(
@@ -307,14 +324,14 @@ async function appDelete(
   did: string,
   uri: string,
   timeoutMs: number,
-): Promise<{ atMs: number; rev: string | null }> {
+): Promise<{ atMono: number; rev: string | null }> {
   await page.goto(new URL(`/u/${did}`, ctx.origin).href);
   const item = page.locator(`li[data-uri="${uri}"]`);
   await item.getByRole('button', { name: /^Delete / }).click({ timeout: 30_000 });
   const answer = nextPdsAnswer(page, ctx.origin, 'com.atproto.repo.deleteRecord', timeoutMs);
   await item.getByRole('button', { name: 'Confirm delete', exact: true }).click();
-  const { json, atMs } = await answer;
-  return { atMs, rev: field<string>(field(json, 'commit'), 'rev') ?? null };
+  const { json, atMono } = await answer;
+  return { atMono, rev: field<string>(field(json, 'commit'), 'rev') ?? null };
 }
 
 export const spec: GateSpec = {
@@ -423,7 +440,15 @@ export const spec: GateSpec = {
       for (const item of created) {
         ctx.cleanup(item.deleted ? `${item.uri} deleted (${item.via})` : `${item.uri} LEFT BEHIND: delete it by hand`);
       }
-      await signOutOfApp(page, ctx.origin);
+      const signOut = await signOutOfApp(page, ctx.origin);
+      if (!signOut.signedOut) {
+        ctx.fail(`sign-out through /settings did not complete (${signOut.error ?? 'unknown error'})`);
+      }
+      ctx.cleanup(
+        signOut.signedOut
+          ? `${didA}: signed out through /settings`
+          : `${didA}: sign-out did not complete; revoke the session on ${pds[0]!.endpoint}`,
+      );
       await context.close();
       await browser.close();
     }

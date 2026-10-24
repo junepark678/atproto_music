@@ -24,10 +24,11 @@ export default defineConfig({
     testTimeout: 600_000,
     hookTimeout: 600_000,
     // Isolation: these files are CPU-heavy (query-plans signs and indexes
-    // 100 × 1,000 records). Group 1 starts only after every default-group
-    // (0) project in the workspace run has finished, so the acceptance files
-    // never compete for CPU with the 5 s-timeout unit tests, nor with the
-    // nested gate scripts/test/check-ts.test.ts runs in the scripts project.
-    sequence: { groupOrder: 1 },
+    // 100 × 1,000 records). Group 2 starts only after the default group (0)
+    // and worker-modules (group 1, the 5 s-timeout unit tests) have finished,
+    // so the acceptance files never compete for CPU with the unit tests, nor
+    // with the nested gate scripts/test/check-ts.test.ts runs in the scripts
+    // project.
+    sequence: { groupOrder: 2 },
   },
 });

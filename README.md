@@ -8,12 +8,16 @@ It runs entirely on Cloudflare Workers ([ADR 0004](docs/adr/0004-cloudflare-work
 
 ## Quickstart
 
-Requires Node 24 LTS (`.nvmrc`) and, for the contract checks, Python 3 with `api/requirements-contracts.txt`.
+Requires Node 24 LTS (`.nvmrc`), Python 3 with `api/requirements-contracts.txt` for the contract checks, and actionlint v1.7.7 for the workflow-validity test (`scripts/test/deploy.test.ts › workflow is valid` fails, never skips, when actionlint is missing or another version). CI installs the same pinned actionlint with Go, verified against sum.golang.org:
 
 ```sh
 npm ci
+python3 -m venv .venv && .venv/bin/python -m pip install -r api/requirements-contracts.txt
+go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7   # into $GOBIN or $GOPATH/bin (default ~/go/bin)
 bash scripts/check-ts.sh                 # the repository gate: tsc -b, biome, vitest, contracts, case map, bundle guard
 ```
+
+The test finds actionlint through `ACTIONLINT`, then `PATH`, `$GOBIN` and `$GOPATH/bin`; set `ACTIONLINT=/path/to/actionlint` for any other location.
 
 Run it locally:
 

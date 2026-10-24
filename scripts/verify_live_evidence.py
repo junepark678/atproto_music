@@ -37,7 +37,12 @@ uri}], results, cleanup, and `missing` (blocked) or `failures` (failed).
 Every passed or failed gate document must name an owned prefix (never the
 fixture prefix) and a public HTTPS origin of its own, with or without
 prerequisites. PDS implementation and version must be reported (no
-placeholder such as 'unreported'). Each ingest deleteReconcile entry names its
+placeholder such as 'unreported'). Each oauth sign-in records the token `sub`
+(equal to its DID), a grantedScope with create, update and delete on every
+collection, and signedOut true. The socketSoak decision and failedThresholds
+must follow from its recorded thresholds and measurements (reconnectsPerDay,
+projectedMonthlyDoRequests and cpuMsPerAlarmUpperBound are recomputed from
+reconnectsLowerBound, analytics and durationHours). Each ingest deleteReconcile entry names its
 absence method (exclusionProof or snapshot, F4); in an inventory the method
 must match pdsCompat's getRecordExclusion result for that identity's PDS.
 
@@ -50,11 +55,12 @@ from datetime import datetime
 import hashlib
 import ipaddress
 import json
+import math
 from pathlib import Path
 import re
 import sys
 from typing import NamedTuple
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_VERSION = 2
@@ -63,6 +69,11 @@ OUTCOMES = ("passed", "failed", "blocked")
 PDS_GATES = ("oauth", "ingest", "pdsCompat")
 EXIT_CODES = {"passed": 0, "failed": 1, "blocked": 2}
 MIN_SOAK_HOURS = 24
+# scripts/live/workers_socket_soak.ts decide(): the four thresholds and the
+# order in which a failed one is listed in failedThresholds.
+SOAK_THRESHOLDS = ("maxReconnectsPerDay", "maxLagP95Ms", "maxMonthlyDoRequests", "maxCpuMsPerAlarm")
+SOAK_CHECKS = ("reconnectsPerDay", "lagP95Ms", "projectedMonthlyDoRequests", "cpuMsPerAlarm")
+REPO_ACTIONS = ("create", "update", "delete")
 SSRF_LABELS = ("rfc1918", "loopback", "metadata")
 
 UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
@@ -154,6 +165,87 @@ def _int(value, minimum=0):
 
 def _number(value):
     return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _repo_grant(token):
+    """(collections, actions) one `repo` scope token grants, or None (scripts/live/workers_oauth_check.ts repoGrant)."""
+    if not (token.startswith("repo:") or token.startswith("repo?")):
+        return None
+    head, _, query = token.partition("?")
+    params = parse_qs(query, keep_blank_values=True)
+    positional = unquote(head[len("repo:"):]) if head.startswith("repo:") else ""
+    collections = ([positional] if positional else []) + params.get("collection", [])
+    actions = set(params.get("action", [])) or set(REPO_ACTIONS)
+    return collections, actions
+
+
+def full_repo_grant(prefix, scope):
+    """`atproto` plus create, update and delete on each of the prefix's three collections."""
+    tokens = scope.split() if isinstance(scope, str) else []
+    grants = [g for g in map(_repo_grant, tokens) if g is not None]
+    if "atproto" not in tokens or not isinstance(prefix, str):
+        return False
+    for collection in (f"{prefix}.scrobble", f"{prefix}.follow", f"{prefix}.settings"):
+        actions = set()
+        for collections, granted in grants:
+            if collection in collections:
+                actions |= granted
+        if not set(REPO_ACTIONS) <= actions:
+            return False
+    return True
+
+
+def _close(a, b):
+    return _number(a) and _number(b) and abs(a - b) <= 1e-6 * max(1.0, abs(a), abs(b))
+
+
+def _js_round(value):
+    """Math.round: halves round up."""
+    return int(math.floor(value + 0.5))
+
+
+def soak_decision_problems(where, results):
+    """The soak decision must follow from its recorded thresholds and measurements (decide())."""
+    problems = []
+    thresholds = results.get("thresholds")
+    if not isinstance(thresholds, dict) or not all(
+            _number(thresholds.get(k)) and thresholds[k] > 0 for k in SOAK_THRESHOLDS):
+        return [f"{where}.thresholds (the four positive decision thresholds: {', '.join(SOAK_THRESHOLDS)})"]
+    hours = results.get("durationHours")
+    analytics = results.get("analytics") if isinstance(results.get("analytics"), dict) else {}
+    if not _number(hours) or hours <= 0:
+        return problems  # durationHours is reported on its own
+    per_day = lambda n: n * 24 / hours  # noqa: E731
+    reconnects = results.get("reconnectsLowerBound")
+    if _int(reconnects) and not _close(results.get("reconnectsPerDay"), per_day(reconnects)):
+        problems.append(f"{where}.reconnectsPerDay (is not reconnectsLowerBound × 24 / durationHours)")
+    requests = analytics.get("doRequests")
+    expected_monthly = _js_round(per_day(requests) * 30) if _int(requests, 1) else None
+    if expected_monthly is not None and results.get("projectedMonthlyDoRequests") != expected_monthly:
+        problems.append(f"{where}.projectedMonthlyDoRequests (is not analytics.doRequests projected to 30 days)")
+    cpu, alarms = analytics.get("cpuTimeUs"), analytics.get("alarmInvocations")
+    expected_cpu = cpu / 1000 / alarms if _number(cpu) and _int(alarms, 1) else None
+    if expected_cpu is not None and not _close(results.get("cpuMsPerAlarmUpperBound"), expected_cpu):
+        problems.append(f"{where}.cpuMsPerAlarmUpperBound (is not analytics.cpuTimeUs / 1000 / alarmInvocations)")
+    if problems or expected_monthly is None or expected_cpu is None or not _int(reconnects):
+        return problems
+    p95 = (results.get("lagMs") or {}).get("p95") if isinstance(results.get("lagMs"), dict) else None
+    measured = {
+        "reconnectsPerDay": per_day(reconnects),
+        "lagP95Ms": p95 if _number(p95) else None,
+        "projectedMonthlyDoRequests": expected_monthly,
+        "cpuMsPerAlarm": expected_cpu,
+    }
+    failed = [check for check, limit in zip(SOAK_CHECKS, SOAK_THRESHOLDS)
+              if measured[check] is None or measured[check] > thresholds[limit]]
+    if results.get("failedThresholds") != failed:
+        problems.append(f"{where}.failedThresholds (recorded {results.get('failedThresholds')!r}, but the measurements "
+                        f"and thresholds give {failed!r})")
+    expected_decision = "pulse" if failed else "socket"
+    if results.get("decision") in ("socket", "pulse") and results["decision"] != expected_decision:
+        problems.append(f"{where}.decision (recorded {results['decision']!r}, but the thresholds give "
+                        f"{expected_decision!r})")
+    return problems
 
 
 def release_problems(release):
@@ -295,6 +387,13 @@ def _results_problems(name, entry, prefix, prereq):
                 problems.append(f"{where}.signIns ({item['did']}: granular repo: scopes not granted)")
             elif not _nonempty(item.get("grantedScope")) or f"repo:{prefix}.scrobble" not in item["grantedScope"]:
                 problems.append(f"{where}.signIns ({item['did']}: grantedScope lacks repo:{prefix}.scrobble)")
+            elif not full_repo_grant(prefix, item["grantedScope"]):
+                problems.append(f"{where}.signIns ({item['did']}: grantedScope is not create, update and delete on "
+                                "every collection)")
+            elif item.get("tokenSub") != item["did"]:
+                problems.append(f"{where}.signIns ({item['did']}: token sub {item.get('tokenSub')!r} is not the DID)")
+            elif item.get("signedOut") is not True:
+                problems.append(f"{where}.signIns ({item['did']}: sign-out through /settings not completed)")
         dids = sorted(str(item.get("did")) for item in sign_ins if isinstance(item, dict))
         if identities is not None:
             if dids != sorted(str(did) for did, _ in identities):
@@ -406,6 +505,13 @@ def _results_problems(name, entry, prefix, prereq):
             problems.append(f"{where}.analytics.missingFields (every analytics measurement obtained)")
         if not _number(results.get("cpuMsPerAlarmUpperBound")):
             problems.append(f"{where}.cpuMsPerAlarmUpperBound")
+        if not _number(results.get("reconnectsPerDay")):
+            problems.append(f"{where}.reconnectsPerDay")
+        if not _int(results.get("projectedMonthlyDoRequests")):
+            problems.append(f"{where}.projectedMonthlyDoRequests")
+        if not isinstance(results.get("failedThresholds"), list):
+            problems.append(f"{where}.failedThresholds")
+        problems += soak_decision_problems(where, results)
     return problems
 
 

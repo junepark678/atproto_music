@@ -26,8 +26,11 @@
 //   state; index changes made after --at are recovered from the network by
 //   the normal hint, snapshot and gap-recovery paths (docs/backup.md).
 //
-// Exit status: 0 scheduled (or dry run), 1 the Worker refused or failed, 2
-// usage or configuration error. Nothing is sent for status 2.
+// Exit status: 0 scheduled (or dry run), 1 the Worker refused or failed, or
+// the request was sent and its outcome is unknown (for example a 202 whose
+// body is not JSON: the restore may have been accepted, so check
+// GET /internal/admin/status before retrying), 2 usage or configuration error.
+// Nothing is sent for status 2: any error after the POST left is status 1.
 
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -225,6 +228,8 @@ export async function main(argv: readonly string[], env: NodeJS.ProcessEnv, deps
   }
 
   const token = env.ADMIN_TOKEN ?? '';
+  /** The POST has left this process: from here on no outcome may be reported as "nothing sent". */
+  let sent = false;
   try {
     if (token === '') {
       throw new UsageError(
@@ -260,6 +265,7 @@ export async function main(argv: readonly string[], env: NodeJS.ProcessEnv, deps
     }
 
     let res: Response;
+    sent = true;
     try {
       res = await deps.fetch(url, {
         method: 'POST',
@@ -273,7 +279,19 @@ export async function main(argv: readonly string[], env: NodeJS.ProcessEnv, deps
       return 1;
     }
     if (res.status === 202) {
-      const accepted = (await res.json()) as { bookmark?: string; atMs?: number; restart?: boolean };
+      let accepted: { bookmark?: string; atMs?: number; restart?: boolean };
+      try {
+        const parsed: unknown = await res.json();
+        if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          throw new Error('the 202 body is not a JSON object');
+        }
+        accepted = parsed as typeof accepted;
+      } catch (error) {
+        deps.err(
+          `pitr-restore: the Worker answered 202 but its body could not be read (${(error as Error).message}): the restore may have been accepted; check GET /internal/admin/status before retrying`,
+        );
+        return 1;
+      }
       deps.out(`pitr-restore: scheduled: bookmark ${accepted.bookmark ?? '(none)'} atMs ${accepted.atMs ?? atMs}`);
       deps.out(
         'pitr-restore: the IndexDO restarts into the restored state; check GET /internal/admin/status and /api/v1/meta',
@@ -290,6 +308,13 @@ export async function main(argv: readonly string[], env: NodeJS.ProcessEnv, deps
     }
     return 1;
   } catch (error) {
+    if (sent) {
+      // Whatever failed, the request was already sent: never claim nothing was.
+      deps.err(
+        `pitr-restore: ${(error as Error).message}: the request was sent and the restore may have been accepted; check GET /internal/admin/status before retrying`,
+      );
+      return 1;
+    }
     if (error instanceof UsageError) {
       deps.err(`pitr-restore: ${error.message}`);
       return 2;

@@ -20,5 +20,16 @@ export default defineConfig({
     name: 'worker-modules',
     include: ['test/**/*.test.ts'],
     exclude: ['test/acceptance/**', 'test/bench/**', 'test/composition/**', 'test/e2e/**', 'test/fixtures/**'],
+    // Isolation, not a longer timeout: these files keep the 5 s default.
+    // Their flakes (notify.test.ts at 5,004 ms) came from CPU oversubscription
+    // in group 0, where the scripts project spawns whole toolchains outside
+    // vitest's worker budget (check-ts.test.ts runs a nested `check-ts.sh`
+    // with its own vitest workers; deploy.test.ts runs vite and wrangler) and
+    // worker-bench indexes 1,000-row fixtures. Group 1 starts only after all
+    // of group 0 has finished, so these files share the CPU only with each
+    // other, within the worker budget. Tests whose work is legitimately heavy
+    // set their own timeout (notify 600 requests: 60 s; stats-plan, snapshot-job).
+    // worker-acceptance runs after this, in group 2.
+    sequence: { groupOrder: 1 },
   },
 });

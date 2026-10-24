@@ -195,7 +195,8 @@ def passing_inventory():
         "gates": {
             "oauth": gate("oauth", {"signIns": [
                 {"did": d, "grantedScope": f"atproto repo:{PREFIX}.scrobble repo:{PREFIX}.follow repo:{PREFIX}.settings",
-                 "repoScopesGranted": True, "transitionGeneric": False} for d in (DID_A, DID_B)]},
+                 "repoScopesGranted": True, "transitionGeneric": False, "tokenSub": d, "signedOut": True}
+                for d in (DID_A, DID_B)]},
                 pds=PDS, subjects=[{"did": DID_A, "uri": None}, {"did": DID_B, "uri": None}]),
             "ingest": gate("ingest", {
                 "localPublish": dict(published, uri=URI_A),
@@ -217,12 +218,57 @@ def passing_inventory():
             "socketSoak": gate("socketSoak", {
                 "durationHours": 24, "decision": "socket", "reconnectsLowerBound": 7,
                 "lagMs": {"p50": 900, "p95": 4000, "max": 61000},
-                "analytics": {"doRequests": 812345, "alarmInvocations": 1440, "cpuTimeUs": 59760000,
+                "analytics": {"doRequests": 201440, "alarmInvocations": 1440, "cpuTimeUs": 59760000,
                               "activeTimeUs": 90000000, "inboundWebsocketMsgCount": 500000,
                               "outboundWebsocketMsgCount": 20, "missingFields": []},
-                "cpuMsPerAlarmUpperBound": 41.5}),
+                # decide(): 7 reconnects/day, 201440 × 30 projected requests, 59760000 µs / 1440 alarms.
+                "reconnectsPerDay": 7, "projectedMonthlyDoRequests": 6043200, "cpuMsPerAlarmUpperBound": 41.5,
+                "thresholds": dict(SOAK_THRESHOLDS), "failedThresholds": []}),
         },
     }
+
+
+SOAK_THRESHOLDS = {"maxReconnectsPerDay": 96, "maxLagP95Ms": 60000, "maxMonthlyDoRequests": 10000000,
+                   "maxCpuMsPerAlarm": 15000}
+# Runs the oauth gate's pure checks (scripts/live/workers_oauth_check.ts grantedScopes and
+# signInFailures) and the ingest gate's monotonic lag (workers_ingest_check.ts lagSince) on the
+# cases in OAUTH_CASES; fetch is trapped, and importing the modules starts no gate.
+OAUTH_HARNESS = """(async () => {
+  const oauth = await import('./scripts/live/workers_oauth_check.ts');
+  const ingest = await import('./scripts/live/workers_ingest_check.ts');
+  const prefix = process.env.CASE_PREFIX;
+  const did = process.env.CASE_DID;
+  const out = { scopes: {}, failures: {} };
+  for (const [name, scope] of Object.entries(JSON.parse(process.env.SCOPE_CASES)))
+    out.scopes[name] = oauth.grantedScopes(prefix, scope).repoScopesGranted;
+  const full = `atproto repo:${prefix}.scrobble repo:${prefix}.follow repo:${prefix}.settings`;
+  const ok = { signedOut: true, error: null };
+  const cases = {
+    control: [{ did, grantedScope: full, tokenSub: did }, ok],
+    nullSub: [{ did, grantedScope: full, tokenSub: null }, ok],
+    otherSub: [{ did, grantedScope: full, tokenSub: 'did:plc:zzzzzzzzzzzzzzzzzzzzzzzz' }, ok],
+    signOutFailed: [{ did, grantedScope: full, tokenSub: did }, { signedOut: false, error: 'Timeout 15000ms exceeded' }],
+  };
+  for (const [name, [result, signOut]] of Object.entries(cases))
+    out.failures[name] = oauth.signInFailures('https://pds.test', did, result,
+      oauth.grantedScopes(prefix, result.grantedScope), signOut);
+  // Lag across a wall-clock step backwards: the monotonic lag still counts the real 50 ms.
+  const start = ingest.monotonicMs();
+  const realNow = Date.now;
+  Date.now = () => realNow() - 3_600_000;
+  await new Promise((done) => setTimeout(done, 50));
+  out.lagAcrossClockStep = ingest.lagSince(start);
+  Date.now = realNow;
+  out.lagNeverNegative = ingest.lagSince(start + 10_000);
+  console.log(JSON.stringify(out));
+})();
+"""
+
+
+def run_oauth_harness(scope_cases):
+    env = script_env(CASE_PREFIX=PREFIX, CASE_DID=DID_A, SCOPE_CASES=json.dumps(scope_cases))
+    return subprocess.run(["npx", "tsx", "--eval", OAUTH_HARNESS], cwd=ROOT, text=True, capture_output=True,
+                          env=env, timeout=120)
 
 
 def run_cli(manifest, *flags):
@@ -511,6 +557,144 @@ class LiveEvidenceTests(unittest.TestCase):
         verdict = evaluate(other_origin)
         self.assertEqual((verdict.status, verdict.gates["ingest"]), ("blocked", "blocked"))
         self.assertIn("gates.ingest.origin (not the prerequisite origin)", verdict.problems)
+
+    def test_oauth_full_grant_token_sub_and_sign_out_are_required(self):
+        """A create-only repo grant, a missing or other token sub and an incomplete sign-out never pass."""
+        p = PREFIX
+        full = f"atproto repo:{p}.scrobble repo:{p}.follow repo:{p}.settings"
+        scopes = {
+            "full": full,
+            "allActionsListed": f"atproto repo:{p}.scrobble?action=create&action=update&action=delete "
+                                f"repo:{p}.follow repo:{p}.settings",
+            "actionsAcrossTokens": f"atproto repo:{p}.scrobble?action=create repo:{p}.scrobble?action=update "
+                                   f"repo:{p}.scrobble?action=delete repo:{p}.follow repo:{p}.settings",
+            "collectionParam": f"atproto repo?collection={p}.scrobble&collection={p}.follow&collection={p}.settings",
+            "createOnly": f"atproto repo:{p}.scrobble?action=create repo:{p}.follow repo:{p}.settings",
+            "createOnlyEverywhere": f"atproto repo:{p}.scrobble?action=create repo:{p}.follow?action=create "
+                                    f"repo:{p}.settings?action=create",
+            "noDelete": f"atproto repo:{p}.scrobble?action=create&action=update repo:{p}.follow repo:{p}.settings",
+            "noAtproto": f"repo:{p}.scrobble repo:{p}.follow repo:{p}.settings",
+            "missingSettings": f"atproto repo:{p}.scrobble repo:{p}.follow",
+        }
+        result = run_oauth_harness(scopes)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("NETWORK-ATTEMPT", result.stderr)
+        out = json.loads(result.stdout)
+        self.assertEqual(out["scopes"], {"full": True, "allActionsListed": True, "actionsAcrossTokens": True,
+                                         "collectionParam": True, "createOnly": False, "createOnlyEverywhere": False,
+                                         "noDelete": False, "noAtproto": False, "missingSettings": False})
+        # The gate's own checks: the control has no failure; each defect is exactly one named failure.
+        self.assertEqual(out["failures"]["control"], [])
+        self.assertEqual(out["failures"]["nullSub"], ["https://pds.test: the token response has no sub"])
+        self.assertEqual(out["failures"]["otherSub"],
+                         [f"https://pds.test: token sub did:plc:zzzzzzzzzzzzzzzzzzzzzzzz is not {DID_A}"])
+        self.assertEqual(out["failures"]["signOutFailed"],
+                         ["https://pds.test: sign-out through /settings did not complete (Timeout 15000ms exceeded)"])
+        # The ingest gate's lag uses the monotonic clock: a one-hour wall-clock step backwards
+        # during the wait changes nothing, and a lag is never negative.
+        self.assertGreaterEqual(out["lagAcrossClockStep"], 45)
+        self.assertLess(out["lagAcrossClockStep"], 60_000)
+        self.assertEqual(out["lagNeverNegative"], 0)
+        source = (ROOT / "scripts/live/workers_ingest_check.ts").read_text()
+        self.assertEqual(source.count("const lagMs = lagSince("), 2)
+        self.assertNotIn("committedAtMs", source)
+
+        # The verifier: each sign-in needs a full grant, its token sub and a completed sign-out.
+        control = passing_inventory()
+        self.assertEqual(evaluate(control, BUNDLE, VERSION).gates["oauth"], "passed")
+        for change, expected in (
+                ({"grantedScope": scopes["createOnly"]},
+                 f"gates.oauth.results.signIns ({DID_A}: grantedScope is not create, update and delete on every "
+                 "collection)"),
+                ({"grantedScope": scopes["noDelete"]},
+                 f"gates.oauth.results.signIns ({DID_A}: grantedScope is not create, update and delete on every "
+                 "collection)"),
+                ({"tokenSub": None}, f"gates.oauth.results.signIns ({DID_A}: token sub None is not the DID)"),
+                ({"tokenSub": DID_B}, f"gates.oauth.results.signIns ({DID_A}: token sub '{DID_B}' is not the DID)"),
+                ({"signedOut": False},
+                 f"gates.oauth.results.signIns ({DID_A}: sign-out through /settings not completed)"),
+                ({"signedOut": None},
+                 f"gates.oauth.results.signIns ({DID_A}: sign-out through /settings not completed)")):
+            manifest = passing_inventory()
+            manifest["gates"]["oauth"]["results"]["signIns"][0].update(change)
+            verdict = evaluate(manifest, BUNDLE, VERSION)
+            self.assertEqual((verdict.status, verdict.gates["oauth"]), ("blocked", "blocked"), change)
+            self.assertIn(expected, verdict.problems)
+        for key in ("tokenSub", "signedOut"):
+            manifest = passing_inventory()
+            del manifest["gates"]["oauth"]["results"]["signIns"][1][key]
+            self.assertEqual(evaluate(manifest, BUNDLE, VERSION).gates["oauth"], "blocked", key)
+        # Allowed spellings of the full grant pass the verifier too.
+        for name in ("allActionsListed", "actionsAcrossTokens"):
+            manifest = passing_inventory()
+            manifest["gates"]["oauth"]["results"]["signIns"][0]["grantedScope"] = scopes[name]
+            self.assertEqual(evaluate(manifest, BUNDLE, VERSION).gates["oauth"], "passed", name)
+
+    def test_soak_decision_must_follow_its_thresholds_and_measurements(self):
+        """A soak decision, failedThresholds or derived value that does not follow from the record is rejected."""
+        where = "gates.socketSoak.results"
+        # Control, and a consistent pulse decision, pass: the decision is a result, not a criterion.
+        self.assertEqual(evaluate(passing_inventory(), BUNDLE, VERSION).gates["socketSoak"], "passed")
+        pulse = passing_inventory()
+        pulse["gates"]["socketSoak"]["results"].update(
+            thresholds=dict(SOAK_THRESHOLDS, maxMonthlyDoRequests=5000000),
+            decision="pulse", failedThresholds=["projectedMonthlyDoRequests"])
+        self.assertEqual(evaluate(pulse, BUNDLE, VERSION).problems, [])
+
+        def soak(**changes):
+            manifest = passing_inventory()
+            manifest["gates"]["socketSoak"]["results"].update(changes)
+            return manifest
+
+        cases = (
+            # "socket" although the projected requests exceed the recorded threshold.
+            (soak(thresholds=dict(SOAK_THRESHOLDS, maxMonthlyDoRequests=5000000)),
+             [f"{where}.failedThresholds (recorded [], but the measurements and thresholds give "
+              "['projectedMonthlyDoRequests'])",
+              f"{where}.decision (recorded 'socket', but the thresholds give 'pulse')"]),
+            # The original fixture's 812345 requests (24.4M a month) cannot be a socket decision.
+            (soak(analytics=dict(passing_inventory()["gates"]["socketSoak"]["results"]["analytics"],
+                                 doRequests=812345), projectedMonthlyDoRequests=24370350),
+             [f"{where}.decision (recorded 'socket', but the thresholds give 'pulse')"]),
+            # "pulse" with nothing over a threshold.
+            (soak(decision="pulse", failedThresholds=[]),
+             [f"{where}.decision (recorded 'pulse', but the thresholds give 'socket')"]),
+            # p95 lag over the limit, reconnects over the limit, CPU per alarm over the limit.
+            (soak(lagMs={"p50": 900, "p95": 60001, "max": 90000}),
+             [f"{where}.failedThresholds (recorded [], but the measurements and thresholds give ['lagP95Ms'])"]),
+            (soak(reconnectsLowerBound=97, reconnectsPerDay=97),
+             [f"{where}.failedThresholds (recorded [], but the measurements and thresholds give "
+              "['reconnectsPerDay'])"]),
+            (soak(thresholds=dict(SOAK_THRESHOLDS, maxCpuMsPerAlarm=40)),
+             [f"{where}.failedThresholds (recorded [], but the measurements and thresholds give ['cpuMsPerAlarm'])"]),
+            # Derived values that do not follow from the measurements.
+            (soak(reconnectsPerDay=2), [f"{where}.reconnectsPerDay (is not reconnectsLowerBound × 24 / durationHours)"]),
+            (soak(projectedMonthlyDoRequests=1000),
+             [f"{where}.projectedMonthlyDoRequests (is not analytics.doRequests projected to 30 days)"]),
+            (soak(cpuMsPerAlarmUpperBound=1.5),
+             [f"{where}.cpuMsPerAlarmUpperBound (is not analytics.cpuTimeUs / 1000 / alarmInvocations)"]),
+            # Missing or invalid decision fields.
+            (soak(thresholds=None), [f"{where}.thresholds (the four positive decision thresholds: "
+                                     "maxReconnectsPerDay, maxLagP95Ms, maxMonthlyDoRequests, maxCpuMsPerAlarm)"]),
+            (soak(thresholds=dict(SOAK_THRESHOLDS, maxLagP95Ms=0)), [f"{where}.thresholds (the four positive"]),
+            (soak(failedThresholds=None), [f"{where}.failedThresholds"]),
+            (soak(reconnectsPerDay=None), [f"{where}.reconnectsPerDay"]),
+            (soak(projectedMonthlyDoRequests=None), [f"{where}.projectedMonthlyDoRequests"]),
+        )
+        for manifest, expected in cases:
+            verdict = evaluate(manifest, BUNDLE, VERSION)
+            self.assertEqual((verdict.status, verdict.gates["socketSoak"]), ("blocked", "blocked"), expected)
+            text = "\n".join(verdict.problems)
+            for line in expected:
+                self.assertIn(line, text)
+            # The other gates are unaffected.
+            self.assertEqual({k: v for k, v in verdict.gates.items() if k != "socketSoak"},
+                             {name: "passed" for name in REQUIRED_GATES if name != "socketSoak"})
+        # A single --gate document is checked the same way.
+        entry = soak(decision="pulse", failedThresholds=[])["gates"]["socketSoak"]
+        result = run_gate_file(entry)
+        self.assertEqual(result.returncode, 2, result.stdout)
+        self.assertIn(f"{where}.decision (recorded 'pulse', but the thresholds give 'socket')", result.stdout)
 
     def test_soak_without_analytics_measurements_fails_and_never_passes(self):
         """An empty analytics answer fails the soak gate; evidence without DO requests, alarms or CPU never passes."""

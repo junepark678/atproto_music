@@ -164,12 +164,35 @@ describe('scripts/test/secret-scan.test.ts', () => {
       'pem-private-key': ['-----BEGIN', 'EC PRIVATE KEY-----'].join(' '),
       jwt: `${['eyJhbGciOiJFUzI1NiJ9', 'eyJzdWIiOiJkaWQ6cGxjOnRlc3QifQ', 'c2lnbmF0dXJlYnl0ZXM'].join('.')}`,
       'github-token': `ghp_${'a1B2'.repeat(9)}`,
+      'aws-access-key': `aws_id = ${['AK', 'IA'].join('')}${'Q7X2'.repeat(4)}`,
+      'slack-token': `SLACK=${['xo', 'xb'].join('')}-${'1234567890'}-${'a1B2c3D4e5'}`,
+      'gitlab-token': `${['gl', 'pat'].join('')}-${'a1B2_c3D4-'.repeat(2)}`,
+      'api-key-sk': `${['s', 'k'].join('')}-${'a1B2c3D4'.repeat(3)}`,
       'secret-put-literal': `echo ${hex} | npx wrangler secret put CURSOR_KEY`,
       'bearer-literal': `Authorization: Bearer ${mixed}`,
     };
     for (const [rule, sample] of Object.entries(samples)) {
       const rules = scanText('sample', sample).map((f) => f.rule);
       expect(rules, `${rule} sample: ${sample.slice(0, 20)}…`).toContain(rule);
+    }
+    // Every pattern rule has a generated sample above, so none is unproven.
+    for (const { rule } of RULES) expect(Object.keys(samples), `no negative control for ${rule}`).toContain(rule);
+    // The prefixed sk- forms fire too, and near misses of the provider
+    // patterns (too short, or not at a word start) do not.
+    for (const variant of ['ant-', 'proj-']) {
+      const sample = `${['s', 'k'].join('')}-${variant}${'a1B2c3D4'.repeat(3)}`;
+      expect(
+        scanText('sample', sample).map((f) => f.rule),
+        variant,
+      ).toContain('api-key-sk');
+    }
+    for (const nearMiss of [
+      `${['AK', 'IA'].join('')}${'Q7X2'.repeat(3)}`, // 12 characters after the prefix, not 16
+      `${['xo', 'xb'].join('')}-short`,
+      `${['gl', 'pat'].join('')}-${'a1B2'.repeat(4)}`, // 16, not 20
+      `task-${'a1B2c3D4'.repeat(3)}`, // sk- not at a word start
+    ]) {
+      expect(scanText('sample', nearMiss), nearMiss).toEqual([]);
     }
     // The oracle's rule: a 64-hex word is a literal secret wherever it sits,
     // with or without a secret-shaped name, in either case, and even when a

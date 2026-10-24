@@ -62,7 +62,8 @@ Usage: bash scripts/deploy.sh [--env production|staging|free] [--dry-run] [--ini
   --smoke-only    only the smoke test of the deployed origin
 
 Refuses an empty or fixture LEXICON_PREFIX and a missing CURSOR_KEY secret
-(`wrangler secret list`). Set secrets with `wrangler secret put CURSOR_KEY [--env <env>]`.
+(`wrangler secret list`). Set secrets from the repository root with
+`npx wrangler secret put CURSOR_KEY --config worker/wrangler.jsonc [--env <env>]`.
 EOF
 }
 
@@ -184,7 +185,8 @@ preflight() {
   local names
   if names="$(secret_names)"; then
     if ! grep -qx 'CURSOR_KEY' <<<"$names"; then
-      local put="wrangler secret put CURSOR_KEY${env_args[*]+ ${env_args[*]}}"
+      # Runnable from the repository root, where this script's own commands run.
+      local put="npx wrangler secret put CURSOR_KEY --config $CONFIG${env_args[*]+ ${env_args[*]}}"
       problems+=("the CURSOR_KEY secret is missing for env $env_name (wrangler secret list); set it with \`$put\` (value: openssl rand -hex 32)")
     fi
     if grep -qx 'ADMIN_TOKEN' <<<"$names"; then
