@@ -4,11 +4,13 @@
 // levels. Assertions are on the returned RecordProof (state, exact CID, exact
 // JSON record, commit) or the exact VerifyErrorCode.
 
-import { encode } from '@atcute/cbor';
+import { decode, encode, toBytes } from '@atcute/cbor';
 import * as CID from '@atcute/cid';
 import { findRpathAndBuildProof, NodeStore, ReadonlyMemoryBlockStore } from '@atcute/mst';
 import { type TestKey, testKey } from '@atmusic/atproto/test-support/keys';
 import {
+  carCommit,
+  cborCid,
   cidOf,
   corruptBlockByte,
   corruptMstNodeByte,
@@ -20,6 +22,7 @@ import {
   encodeVarint,
   parseCar,
   SignedRepo,
+  unsignedCommitBytes,
 } from '@atmusic/atproto/test-support/signed-repo';
 import { readBoundedCar } from '@atmusic/atproto/verify/car-bounds';
 import { verifyCommit } from '@atmusic/atproto/verify/commit';
@@ -78,6 +81,66 @@ async function pathNodes(path: string): Promise<string[]> {
 function expectedCommit() {
   const h = repo.head!;
   return { did: ALICE, cid: h.cid, rev: h.rev, dataCid: h.data, version: 3 };
+}
+
+type MstNodeData = { l: unknown; e: Array<{ p: number; k: unknown; v: unknown; t: unknown }> };
+
+/** dag-cbor text string. */
+function cborText(text: string): Uint8Array {
+  const b = new TextEncoder().encode(text);
+  if (b.length >= 256) throw new Error('text too long for this helper');
+  return new Uint8Array([...(b.length < 24 ? [0x60 | b.length] : [0x78, b.length]), ...b]);
+}
+
+function indexOfBytes(haystack: Uint8Array, needle: Uint8Array): number {
+  outer: for (let i = 0; i + needle.length <= haystack.length; i++) {
+    for (let j = 0; j < needle.length; j++) if (haystack[i + j] !== needle[j]) continue outer;
+    return i;
+  }
+  return -1;
+}
+
+/**
+ * The MST root node with one link field (chosen by `pick`) re-encoded as the
+ * plain CBOR map {"$link": <cid>} instead of a tag-42 link, then re-hashed and
+ * `commit.data` re-signed with the repo key: every hash and the signature are
+ * valid, only the node's link typing is wrong. @atcute/cbor encodes a {$link}
+ * object as a tag-42 link, so the field is first set to a sentinel string whose
+ * encoding is then replaced byte for byte (map key order is unaffected).
+ */
+async function plainLinkRoot(
+  car: Uint8Array,
+  pick: (node: MstNodeData, sentinel: string) => void,
+): Promise<Uint8Array> {
+  const parsed = parseCar(car);
+  const commit = carCommit(car);
+  const dataCid = commit.data.$link;
+  const node = decode(parsed.sections.find((s) => s.cid === dataCid)!.bytes) as MstNodeData;
+  const sentinel = 'SENTINEL-plain-link-0123456789';
+  pick(node, sentinel);
+  const encoded = encode(node);
+  const needle = cborText(sentinel);
+  const at = indexOfBytes(encoded, needle);
+  expect(at).toBeGreaterThan(0);
+  // A real CID string: the shape a duck-typed `isCidLink` accepts.
+  const plain = new Uint8Array([0xa1, ...cborText('$link'), ...cborText(dataCid)]);
+  const bytes = new Uint8Array([...encoded.subarray(0, at), ...plain, ...encoded.subarray(at + needle.length)]);
+  const nodeCid = cborCid(bytes);
+  const unsigned = { ...commit, data: CID.toCidLink(CID.fromString(nodeCid)) } as Record<string, unknown>;
+  delete unsigned.sig;
+  const sig = await key.sign(unsignedCommitBytes(unsigned));
+  const commitBytes = encode({ ...unsigned, sig: toBytes(sig) });
+  const commitCid = cborCid(commitBytes);
+  return encodeCar(
+    [commitCid],
+    [
+      [commitCid, commitBytes],
+      [nodeCid, bytes],
+      ...parsed.sections
+        .filter((s) => s.cid !== dataCid && s.cid !== parsed.roots[0])
+        .map((s) => [s.cid, s.bytes] as const),
+    ],
+  );
 }
 
 beforeAll(async () => {
@@ -224,6 +287,54 @@ describe('verifyRecordProof', () => {
     // no block (tests/goldens/README.md, `record_cid_swap`).
     const carSwap = corruptRecordCidSwap(car, recordCid, recordOf('r02'));
     expect(await codeOf(verifyRecordProof(carSwap, opts('r01')))).toBe('missing_block');
+  });
+
+  it('MST link fields that are plain {$link} maps yield mst_invalid, never absent', async () => {
+    // Paths below the first key, above the last key, and present records.
+    const paths = [
+      [`${P}.aaa`, 'a'],
+      [SCROBBLE, 'a'],
+      [SCROBBLE, 'zzz'],
+      [`${P}.zzz`, 'z'],
+      [SCROBBLE, 'r01'],
+      [FILLER, 'k000'],
+    ] as const;
+    const corruptions: Record<string, (node: MstNodeData, s: string) => void> = {
+      l: (node, s) => {
+        node.l = s;
+      },
+      'first e[].v': (node, s) => {
+        node.e[0]!.v = s;
+      },
+      'last e[].t': (node, s) => {
+        node.e.at(-1)!.t = s;
+      },
+      'first e[].t': (node, s) => {
+        node.e[0]!.t = s;
+      },
+    };
+    for (const [collection, rkey] of paths) {
+      for (const source of ['record', 'full'] as const) {
+        const car = source === 'full' ? await repo.fullCar() : await repo.getRecordCar(collection, rkey);
+        const o = { ...opts(rkey, collection), maxBytes: 1 << 20, maxBlocks: 4096 };
+        // The honest CAR proves the path; the corrupt ones are signed and hash-valid.
+        const honest = await verifyRecordProof(car, o);
+        expect(honest.state).toBe(rkey === 'r01' || rkey === 'k000' ? 'present' : 'absent');
+        for (const [field, pick] of Object.entries(corruptions)) {
+          const bad = await plainLinkRoot(car, pick);
+          const { root, blocks } = readBoundedCar(bad, { maxBytes: 1 << 20, maxBlocks: 4096 });
+          const commit = await verifyCommit(blocks, root, { did: ALICE, signingKey: key.didKey });
+          expect(commit.rev).toBe(repo.head!.rev);
+          expect([source, collection, rkey, field, await codeOf(verifyRecordProof(bad, o))]).toEqual([
+            source,
+            collection,
+            rkey,
+            field,
+            'mst_invalid',
+          ]);
+        }
+      }
+    }
   });
 
   it('truncated and oversize CARs are rejected before decode', async () => {
