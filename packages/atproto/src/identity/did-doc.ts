@@ -22,15 +22,23 @@
 //   `controller` and `type`; `publicKeyMultibase` is optional (string or null)
 //   and is decoded only for an `#atproto` candidate.
 //
-// Extraction follows the oracle exactly (identity.rs, sync/current_head.rs):
+// Extraction follows the oracle (identity.rs, sync/current_head.rs
+// `signing_key` / `parse_key`; ADR 0003 "Key extraction"):
 //
 // - `id` must equal the requested DID (`did_mismatch`);
 // - signing key: the FIRST VALID verification method whose id is `#atproto`
-//   (or `<did>#atproto`) and whose controller is the DID. Valid means a
-//   `Multikey` whose `publicKeyMultibase` is a canonical base58btc multikey of
-//   at most 128 characters, encoding a 33-byte compressed secp256k1 or P-256
-//   point that lies on its curve. Later keys are never signature fallbacks;
-//   an invalid one is simply skipped. None → `no_signing_key`;
+//   (or `<did>#atproto`) and whose controller is the DID, as a canonical
+//   compressed did:key. `publicKeyMultibase` must be base58btc (`z…`) and at
+//   most 128 characters. Valid means one of:
+//   - a `Multikey` whose value is the canonical multikey of a 33-byte
+//     compressed secp256k1 or P-256 point that lies on its curve;
+//   - a legacy fragment-only 2019 suite (`EcdsaSecp256k1VerificationKey2019`
+//     or `EcdsaSecp256r1VerificationKey2019`, id exactly `#atproto`, never
+//     `<did>#atproto`) whose value is a raw 65-byte uncompressed SEC1 point
+//     (0x04 ‖ X ‖ Y) on that suite's curve; it is compressed and re-encoded
+//     as the canonical multikey.
+//   Later keys are never signature fallbacks; an invalid one is simply
+//   skipped. None → `no_signing_key`;
 // - PDS: the first service whose id is `#atproto_pds` (or `<did>#atproto_pds`)
 //   and whose type is `AtprotoPersonalDataServer`. Its endpoint must be a
 //   string, pass `checkUrl`, and be a bare origin (path `/`, no query, no
@@ -38,7 +46,7 @@
 // - handle candidate: the first `at://` alias that is a syntactically valid
 //   handle, lowercased. It is only a claim; handle.ts verifies it.
 
-import { parsePublicMultikey } from '@atcute/crypto';
+import { getPublicKeyFromDidController, parsePublicMultikey } from '@atcute/crypto';
 import { isDidPlc, isHandle, MAX_DID_LENGTH, MAX_HANDLE_LENGTH } from '@atmusic/core/syntax';
 import { isSafeFetchError, type SafeFetch } from '../net/safe-fetch';
 import { checkUrl } from '../net/url-policy';
@@ -73,11 +81,11 @@ export const PLC_DIRECTORY = 'https://plc.directory';
 
 export const IDENTITY_ERROR_CODES = [
   'invalid_did', // not a did:plc / hostname-level did:web DID
-  'invalid_handle', // not a syntactically valid handle
+  'invalid_handle', // not a syntactically valid handle, or under a reserved TLD
   'did_not_found', // the document host answered 404 / 410 (tombstoned)
   'invalid_did_document', // not JSON, or the atproto fields are malformed
   'did_mismatch', // document `id` differs from the requested DID
-  'no_signing_key', // no valid `#atproto` Multikey verification method
+  'no_signing_key', // no valid `#atproto` verification method (Multikey or legacy 2019 suite)
   'invalid_pds', // missing `#atproto_pds` service, or its endpoint fails the URL policy
   'handle_not_found', // neither DoH TXT nor /.well-known/atproto-did names a DID
   'ambiguous_handle', // DoH TXT names more than one distinct DID
@@ -225,17 +233,76 @@ function modPow(base: bigint, exp: bigint, mod: bigint): bigint {
   return result;
 }
 
-/** True when the compressed point's x has a y on the curve (Euler's criterion). */
-function compressedPointOnCurve(curve: 'secp256k1' | 'p256', point: Uint8Array): boolean {
-  if (point.length !== 33 || (point[0] !== 2 && point[0] !== 3)) return false;
-  let x = 0n;
-  for (let i = 1; i < 33; i++) x = (x << 8n) | BigInt(point[i] as number);
-  const p = curve === 'secp256k1' ? SECP256K1_P : P256_P;
-  if (x >= p) return false;
+type Curve = 'secp256k1' | 'p256';
+
+/** Multicodec varint prefixes of the two public key types. */
+const MULTICODEC: Readonly<Record<Curve, readonly [number, number]>> = {
+  secp256k1: [0xe7, 0x01],
+  p256: [0x80, 0x24],
+};
+
+/** The documented legacy fragment-only suites and the curve each names. */
+const LEGACY_SUITES: Readonly<Record<string, Curve>> = {
+  EcdsaSecp256k1VerificationKey2019: 'secp256k1',
+  EcdsaSecp256r1VerificationKey2019: 'p256',
+};
+
+function fieldPrime(curve: Curve): bigint {
+  return curve === 'secp256k1' ? SECP256K1_P : P256_P;
+}
+
+/** x³ + ax + b mod p (secp256k1: a = 0, b = 7; P-256: a = −3). */
+function curveRhs(curve: Curve, x: bigint): bigint {
+  const p = fieldPrime(curve);
   const x3 = (x * x * x) % p;
-  const rhs = curve === 'secp256k1' ? (x3 + 7n) % p : (((x3 - 3n * x + P256_B) % p) + p) % p;
+  return curve === 'secp256k1' ? (x3 + 7n) % p : (((x3 - 3n * x + P256_B) % p) + p) % p;
+}
+
+function bigintOf(bytes: Uint8Array): bigint {
+  let n = 0n;
+  for (const b of bytes) n = (n << 8n) | BigInt(b);
+  return n;
+}
+
+/** True when the compressed point's x has a y on the curve (Euler's criterion). */
+function compressedPointOnCurve(curve: Curve, point: Uint8Array): boolean {
+  if (point.length !== 33 || (point[0] !== 2 && point[0] !== 3)) return false;
+  const x = bigintOf(point.subarray(1));
+  const p = fieldPrime(curve);
+  if (x >= p) return false;
+  const rhs = curveRhs(curve, x);
   // Both curves have prime order, so no point has y = 0; rhs must be a nonzero square.
   return rhs !== 0n && modPow(rhs, (p - 1n) / 2n, p) === 1n;
+}
+
+/** The 33-byte compressed form of an on-curve 65-byte SEC1 point, else null. */
+function compressUncompressedPoint(curve: Curve, point: Uint8Array): Uint8Array | null {
+  if (point.length !== 65 || point[0] !== 4) return null;
+  const p = fieldPrime(curve);
+  const x = bigintOf(point.subarray(1, 33));
+  const y = bigintOf(point.subarray(33));
+  if (x >= p || y >= p || (y * y) % p !== curveRhs(curve, x)) return null;
+  const out = new Uint8Array(33);
+  out[0] = (point[64] as number) & 1 ? 3 : 2;
+  out.set(point.subarray(1, 33), 1);
+  return out;
+}
+
+const BASE58_ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+
+/** Multibase base58btc (`z…`) of `bytes`. */
+function base58btc(bytes: Uint8Array): string {
+  let n = bigintOf(bytes);
+  let out = '';
+  while (n > 0n) {
+    out = (BASE58_ALPHABET[Number(n % 58n)] as string) + out;
+    n /= 58n;
+  }
+  for (const b of bytes) {
+    if (b !== 0) break;
+    out = `1${out}`;
+  }
+  return `z${out}`;
 }
 
 /** `did:key:z…` for a valid public multikey, else null. */
@@ -257,12 +324,38 @@ function isFragmentRef(id: unknown, did: string, fragment: string): boolean {
   return id === `#${fragment}` || id === `${did}#${fragment}`;
 }
 
-/** The first valid `#atproto` Multikey as a did:key, or null. */
+/**
+ * A legacy 2019-suite key (the oracle's `parse_key` legacy arms) as the
+ * canonical compressed `did:key:z…`, else null. Only the fragment-only id
+ * `#atproto` is admitted, and the value must be a raw 65-byte uncompressed
+ * SEC1 point (0x04 ‖ X ‖ Y) on the suite's curve.
+ */
+export function validLegacyKey(method: Pick<VerificationMethod, 'id' | 'type' | 'publicKeyMultibase'>): string | null {
+  const curve = Object.hasOwn(LEGACY_SUITES, method.type) ? LEGACY_SUITES[method.type] : undefined;
+  const multibase = method.publicKeyMultibase;
+  if (curve === undefined || method.id !== '#atproto') return null;
+  if (typeof multibase !== 'string' || multibase.length > MAX_MULTIKEY_CHARS) return null;
+  let raw: Uint8Array;
+  try {
+    // Requires the `z` (base58btc) multibase prefix, as the oracle does.
+    raw = getPublicKeyFromDidController({ type: method.type, publicKeyMultibase: multibase }).publicKeyBytes;
+  } catch {
+    return null;
+  }
+  const compressed = compressUncompressedPoint(curve, raw);
+  if (compressed === null) return null;
+  const multikey = new Uint8Array(35);
+  multikey.set(MULTICODEC[curve]);
+  multikey.set(compressed, 2);
+  // Re-validate the canonical form through the Multikey path.
+  return validMultikey(base58btc(multikey));
+}
+
+/** The first valid `#atproto` key (Multikey or legacy 2019 suite) as a did:key, or null. */
 export function atprotoSigningKey(doc: DidDocument): string | null {
   for (const method of doc.verificationMethod ?? []) {
     if (method.controller !== doc.id || !isFragmentRef(method.id, doc.id, 'atproto')) continue;
-    if (method.type !== 'Multikey') continue;
-    const key = validMultikey(method.publicKeyMultibase);
+    const key = method.type === 'Multikey' ? validMultikey(method.publicKeyMultibase) : validLegacyKey(method);
     if (key !== null) return key;
   }
   return null;

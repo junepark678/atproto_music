@@ -9,6 +9,7 @@
 // production SafeFetch policy on, the frozen clock, and no real network. Each
 // test asserts the resolved values, the typed error codes, the cache-hook
 // writes and the exact remote calls made.
+import { parseDidKey } from '@atcute/crypto';
 import { didDocumentUrl, IdentityError } from '@atmusic/atproto/identity/did-doc';
 import { createHandleResolver } from '@atmusic/atproto/identity/handle';
 import { createIdentityResolver, type IdentityCache } from '@atmusic/atproto/identity/resolver';
@@ -16,9 +17,10 @@ import type { ResolvedIdentity } from '@atmusic/atproto/identity/types';
 import { SafeFetchError } from '@atmusic/atproto/net/safe-fetch';
 import { FakeDoh } from '@atmusic/atproto/test-support/fake-doh';
 import { didDocument, FakePlc } from '@atmusic/atproto/test-support/fake-plc';
-import { type FixtureKeys, fixtureKeys } from '@atmusic/atproto/test-support/keys';
+import { type FixtureKeys, fixtureKeys, type TestKey } from '@atmusic/atproto/test-support/keys';
 import { type Endpoint, routerTransport } from '@atmusic/atproto/test-support/router-transport';
 import { FIXTURE_NOW_ISO, fixedClock } from '@atmusic/core/test-support/clock';
+import { p256Plugin, secp256k1Plugin } from '@atproto/crypto';
 import { beforeAll, describe, expect, it } from 'vitest';
 
 const ALICE = 'did:plc:aaaaaaaaaaaaaaaaaaaaaaaa';
@@ -27,6 +29,7 @@ const CAROL = 'did:plc:cccccccccccccccccccccccc';
 const MALLORY = 'did:plc:mmmmmmmmmmmmmmmmmmmmmmmm';
 const DAVE = 'did:plc:dddddddddddddddddddddddd';
 const WEB = 'did:web:web.example.test';
+const LEGACY = 'did:plc:eeeeeeeeeeeeeeeeeeeeeeee';
 const NOW_MS = Date.parse(FIXTURE_NOW_ISO);
 
 let keys: FixtureKeys;
@@ -106,6 +109,25 @@ function syntheticMultikey(curve: 'secp256k1' | 'p256', x: number | 'max'): stri
   return base58btc(bytes);
 }
 
+/**
+ * The legacy 2019-suite `publicKeyMultibase` of `key`: base58btc of the raw
+ * 65-byte uncompressed SEC1 point (0x04 ‖ X ‖ Y), decompressed by
+ * @atproto/crypto (an implementation independent of the resolver's).
+ */
+function legacyMultibase(key: TestKey): string {
+  const compressed = parseDidKey(key.didKey).publicKeyBytes;
+  const uncompressed = (key.curve === 'secp256k1' ? secp256k1Plugin : p256Plugin).decompressPubkey(compressed);
+  expect([uncompressed.length, uncompressed[0]]).toEqual([65, 4]);
+  return base58btc(uncompressed);
+}
+/** The uncompressed point of `key` with `edit` applied to its 65 raw bytes. */
+function editedLegacyMultibase(key: TestKey, edit: (bytes: Uint8Array) => void): string {
+  const compressed = parseDidKey(key.didKey).publicKeyBytes;
+  const bytes = new Uint8Array((key.curve === 'secp256k1' ? secp256k1Plugin : p256Plugin).decompressPubkey(compressed));
+  edit(bytes);
+  return base58btc(bytes);
+}
+
 function rawDoc(
   did: string,
   o: {
@@ -178,6 +200,12 @@ describe('identity resolution', () => {
       { id: '#atproto', controller: BOB, publicKeyMultibase: keys.bob.multikey }, // foreign controller
       { id: '#atproto', type: 'EcdsaSecp256k1VerificationKey2019', publicKeyMultibase: keys.alice.multikey },
       { id: '#atproto_label', publicKeyMultibase: keys.aliceRotated.multikey }, // not #atproto
+      // A legacy suite is fragment-only: under the `<did>#atproto` id it is skipped.
+      {
+        id: `${CAROL}#atproto`,
+        type: 'EcdsaSecp256k1VerificationKey2019',
+        publicKeyMultibase: legacyMultibase(keys.alice),
+      },
     ];
     for (const first of skipped) {
       net.plc.setRawDocument(CAROL, rawDoc(CAROL, { methods: [first, carolKey] }));
@@ -219,6 +247,33 @@ describe('identity resolution', () => {
       }),
     );
     expect((await net.resolver.resolveDid(MALLORY, { fresh: true })).signingKey).toBe(`did:key:${p256OnCurve}`);
+
+    // Legacy fragment-only 2019 suites (ADR 0003 "Key extraction"; oracle
+    // parse_key, pinned by current_head.rs::modern_and_legacy_keys): a raw
+    // 65-byte uncompressed SEC1 key under id `#atproto` is accepted and
+    // returned as the canonical compressed did:key, for both curves.
+    const legacySuites = [
+      ['EcdsaSecp256k1VerificationKey2019', keys.alice, 'did:key:zQ3s'],
+      ['EcdsaSecp256r1VerificationKey2019', keys.bob, 'did:key:zDn'],
+    ] as const;
+    for (const [suite, key, prefix] of legacySuites) {
+      const legacy = legacyMultibase(key);
+      expect(legacy).not.toBe(key.multikey);
+      net.plc.setRawDocument(
+        LEGACY,
+        rawDoc(LEGACY, { methods: [{ id: '#atproto', type: suite, publicKeyMultibase: legacy }] }),
+      );
+      const resolved = await net.resolver.resolveDid(LEGACY, { fresh: true });
+      expect(resolved, suite).toEqual({
+        did: LEGACY,
+        pds: 'https://pds-raw.example.test',
+        signingKey: key.didKey,
+        handle: null,
+        fetchedAtMs: NOW_MS,
+      });
+      expect(resolved.signingKey.startsWith(prefix)).toBe(true);
+    }
+    expect(net.transport.calls.count({ service: 'plc', path: `/${LEGACY}`, status: 200 })).toBe(legacySuites.length);
 
     // Only the fields atproto reads are validated (the oracle's serde
     // DidDocument): DID-Core-legal or foreign content elsewhere in the
@@ -294,6 +349,7 @@ describe('identity resolution', () => {
       CAROL,
       MALLORY,
       MALLORY,
+      ...legacySuites.map(() => LEGACY),
       ...tolerated.map(() => DAVE),
     ]);
     const stored = JSON.parse(net.memo.store.get(ALICE)!.docJson) as { id: string };
@@ -322,10 +378,86 @@ describe('identity resolution', () => {
         rawDoc(ALICE, { methods: [{ id: '#atproto', controller: BOB, publicKeyMultibase: keys.alice.multikey }] }),
       ],
       [
-        'legacy key type',
+        'legacy suite with a compressed multikey value',
         rawDoc(ALICE, {
           methods: [
             { id: '#atproto', type: 'EcdsaSecp256k1VerificationKey2019', publicKeyMultibase: keys.alice.multikey },
+          ],
+        }),
+      ],
+      [
+        'legacy suite under the <did>#atproto id',
+        rawDoc(ALICE, {
+          methods: [
+            {
+              id: `${ALICE}#atproto`,
+              type: 'EcdsaSecp256k1VerificationKey2019',
+              publicKeyMultibase: legacyMultibase(keys.alice),
+            },
+          ],
+        }),
+      ],
+      [
+        'legacy P-256 suite under the <did>#atproto id',
+        rawDoc(ALICE, {
+          methods: [
+            {
+              id: `${ALICE}#atproto`,
+              type: 'EcdsaSecp256r1VerificationKey2019',
+              publicKeyMultibase: legacyMultibase(keys.bob),
+            },
+          ],
+        }),
+      ],
+      [
+        'legacy secp256k1 suite naming a P-256 point',
+        rawDoc(ALICE, {
+          methods: [
+            {
+              id: '#atproto',
+              type: 'EcdsaSecp256k1VerificationKey2019',
+              publicKeyMultibase: legacyMultibase(keys.bob),
+            },
+          ],
+        }),
+      ],
+      [
+        'legacy point off its curve (y + 1)',
+        rawDoc(ALICE, {
+          methods: [
+            {
+              id: '#atproto',
+              type: 'EcdsaSecp256k1VerificationKey2019',
+              publicKeyMultibase: editedLegacyMultibase(keys.alice, (b) => {
+                b[64] = (b[64] as number) ^ 1;
+              }),
+            },
+          ],
+        }),
+      ],
+      [
+        'legacy 65-byte hybrid (0x06) prefix',
+        rawDoc(ALICE, {
+          methods: [
+            {
+              id: '#atproto',
+              type: 'EcdsaSecp256r1VerificationKey2019',
+              publicKeyMultibase: editedLegacyMultibase(keys.bob, (b) => {
+                b[0] = 0x06;
+              }),
+            },
+          ],
+        }),
+      ],
+      [
+        'legacy key under a non-base58btc multibase',
+        rawDoc(ALICE, {
+          methods: [
+            {
+              id: '#atproto',
+              type: 'EcdsaSecp256k1VerificationKey2019',
+              publicKeyMultibase: `f${'04'.padEnd(130, '1')}`,
+            },
           ],
         }),
       ],
@@ -525,6 +657,48 @@ describe('identity resolution', () => {
     // (10) Nothing published anywhere → handle_not_found; malformed handle → invalid_handle.
     await identityFailure(net.resolver.resolveHandle('nobody.test'), 'handle_not_found');
     await identityFailure(net.resolver.resolveHandle('not a handle'), 'invalid_handle');
+
+    // (11) Reserved TLDs are refused before any lookup (the oracle's
+    // SafeClient::txt reject_reserved_domain): under a production (unmarked)
+    // transport, a published `_atproto` TXT — e.g. in a delegated reverse
+    // zone under .arpa — never makes such a handle resolve or verify, and no
+    // DoH or HTTPS request is made for it.
+    const productionTransport = (req: Request) => net.transport(req);
+    const production = createHandleResolver({ transport: productionTransport, clock: net.clock });
+    const reserved = [
+      '4.3.2.1.in-addr.arpa',
+      'alice.example',
+      'zed.test',
+      'alice.onion',
+      'alice.local',
+      'alice.localhost',
+      'alice.invalid',
+      'alice.internal',
+      'alice.alt',
+    ];
+    for (const handle of reserved) net.doh.setTxt(`_atproto.${handle}`, [`did=${ALICE}`]);
+    const callsBefore = net.transport.calls.entries.length;
+    for (const handle of reserved) {
+      const error = await identityFailure(production.resolveHandle(handle), 'invalid_handle');
+      expect(error.message, handle).toMatch(handle === 'alice.localhost' ? /: localhost$/ : /: reserved_tld$/);
+      expect(await production.verifyHandle(ALICE, { alsoKnownAs: [`at://${handle}`] }), handle).toBeNull();
+    }
+    // The fixture transport admits only the fixture TLDs (.test, .example).
+    for (const handle of ['4.3.2.1.in-addr.arpa', 'alice.onion', 'alice.internal']) {
+      await identityFailure(net.resolver.resolveHandle(handle), 'invalid_handle');
+    }
+    expect(net.transport.calls.entries.length).toBe(callsBefore);
+    for (const handle of reserved) {
+      expect(net.doh.count(`_atproto.${handle}`), handle).toBe(0);
+      expect(net.transport.calls.count({ host: handle }), handle).toBe(0);
+    }
+    // Control: the same production resolver resolves and verifies a public
+    // handle through one TXT lookup.
+    net.doh.setTxt('_atproto.alice.example.com', [`did=${ALICE}`]);
+    expect(await production.resolveHandle('alice.example.com')).toBe(ALICE);
+    expect(await production.verifyHandle(ALICE, { alsoKnownAs: ['at://alice.example.com'] })).toBe('alice.example.com');
+    expect(net.doh.count('_atproto.alice.example.com', 'TXT')).toBe(2);
+    expect(net.transport.calls.count({ service: 'handle', host: 'alice.example.com' })).toBe(0);
 
     // verifyHandle on its own: both directions or null.
     const handles = createHandleResolver({ transport: net.transport, clock: net.clock });

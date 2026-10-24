@@ -4,6 +4,13 @@
 // `resolveHandle(handle)` follows the Rust oracle's `handle_did`
 // (crates/atproto/src/identity.rs), sequentially:
 //
+//   0. Host policy before any lookup: a handle under a reserved TLD (the URL
+//      policy's set — arpa, example, invalid, local, localhost, onion, test,
+//      plus alt and internal) is `invalid_handle`, with no DoH or HTTPS
+//      request. The oracle refuses these in `SafeClient::txt` and in its
+//      address lookup (`reject_reserved_domain`); here the TXT path does not
+//      go through SafeFetch, so the gate is explicit. Only a fixture transport
+//      admits the fixture TLDs `.test` / `.example`, exactly as checkUrl does.
 //   1. DoH TXT `_atproto.<handle>` through the pinned dns-json endpoint
 //      (net/doh.ts), when the extra label still fits in 253 characters. The
 //      `did=` values that are resolvable DIDs are collected as a set: two or
@@ -31,6 +38,7 @@ import type { Clock } from '@atmusic/core/deps';
 import { isHandle, MAX_HANDLE_LENGTH } from '@atmusic/core/syntax';
 import { queryDoh, RR_TXT } from '../net/doh';
 import { createSafeFetch, type DeadlineTimer, isSafeFetchError, type SafeFetch, systemTimer } from '../net/safe-fetch';
+import { checkUrl, isFixtureTransport } from '../net/url-policy';
 import { fetchTransport, type Transport } from '../transport';
 import { claimedHandle, type DidDocument, IdentityError, isResolvableDid } from './did-doc';
 
@@ -88,6 +96,13 @@ export function createHandleResolver(options: HandleResolverOptions): HandleReso
   const transport = options.transport ?? fetchTransport;
   const timer = options.timer ?? systemTimer;
   const safeFetch = options.safeFetch ?? createSafeFetch({ transport, clock: options.clock, timer });
+  const fixture = isFixtureTransport(transport);
+
+  /** Refuse a handle whose host the URL policy refuses (reserved TLDs), before any lookup. */
+  function assertResolvableHost(handle: string): void {
+    const check = checkUrl(`https://${handle}/`, { fixture });
+    if (!check.ok) throw new IdentityError('invalid_handle', `handle host refused by URL policy: ${check.reason}`);
+  }
 
   async function txtDids(handle: string): Promise<Set<string> | null> {
     if (handle.length + TXT_LABEL.length > MAX_HANDLE_LENGTH) return null; // label would not fit: HTTPS only
@@ -143,6 +158,7 @@ export function createHandleResolver(options: HandleResolverOptions): HandleReso
 
   async function resolveHandle(input: string): Promise<string> {
     const handle = normalizeHandleInput(input);
+    assertResolvableHost(handle);
     const dids = await txtDids(handle);
     if (dids !== null && dids.size > 1) {
       throw new IdentityError('ambiguous_handle', `${handle} publishes ${dids.size} different DIDs`);
