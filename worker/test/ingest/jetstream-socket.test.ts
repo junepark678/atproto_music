@@ -440,6 +440,94 @@ describe('jetstream socket', () => {
     });
   });
 
+  it('a throw after the upgrade is accepted closes the socket with 1011, writes no connection evidence, and the watchdog reconnects once', async () => {
+    const clock = fixedClock();
+    const server = jetstreamServer({ clock, hosts: [EAST, WEST] });
+    await runInDurableObject(stubFor('socket-post-upgrade-throw'), async (i: HarnessDO, state) => {
+      const m = ingestDeps(i.db, clock, { mode: 'socket', hosts: [EAST, WEST] });
+      let failNext = true;
+      const gapCalls: number[] = [];
+      // The injected W4-01 scheduler: the first call writes, then throws (inside the connect transaction).
+      const gap: ScheduleGapRecovery = (db, now) => {
+        db.tx(() => incrementCounter(db, 'test_gap_scheduled', ''));
+        gapCalls.push(now);
+        if (failNext) {
+          failNext = false;
+          throw new Error('fixture: gap recovery failed');
+        }
+      };
+      const gapsScheduled = () =>
+        i.db.one<{ value: number }>("SELECT value FROM counters WHERE name = 'test_gap_scheduled'")?.value ?? 0;
+      const before = checkpointRow(i.db);
+      expect(before).toMatchObject({ connected: 0, pending_gap: 1, cursor: null, host_index: 0 });
+
+      // First start has no cursor (a gap), so the throwing scheduler runs after the upgrade.
+      expect(await connect(m, server.connect, T0, { scheduleGapRecovery: gap })).toEqual({
+        ok: false,
+        reason: 'failed',
+        url: subscribeUrl(m, 0, null),
+        status: null,
+        error: 'local_failure',
+        retryAtMs: T0 + SECOND,
+      });
+      await flush();
+      expect(server.attempts.map((a) => [a.host, a.status])).toEqual([[EAST, 101]]);
+      // The accepted socket is closed by us with 1011, not left open queuing frames.
+      const first = server.last();
+      expect(first.closed).toBe(true);
+      expect(first.closeCode).toBe(1011);
+      expect(server.live()).toEqual([]);
+      expect(socketStatus(m)).toEqual({ open: null, streak: 1, nextAttemptAtMs: T0 + SECOND });
+      // Nothing of the connect transaction is stored (the scheduler's own write rolled back too);
+      // only the failed-connect host rotation is.
+      expect(checkpointRow(i.db)).toEqual({ ...before, host_index: 1 });
+      expect(gapCalls).toEqual([T0]);
+      expect(gapsScheduled()).toBe(0);
+      expect(dueAt(i.db, 'jetstream-watchdog')).toBe(T0 + SECOND);
+      expect(m.log.entries.map((e) => e.event)).toEqual([
+        'jetstream_connect_bookkeeping_failed',
+        'jetstream_connect_failed',
+      ]);
+      // An event published now reaches no socket of ours.
+      server.append(commit('r0'));
+      await flush();
+      expect(first.sent).toEqual([]);
+      expect(hintUris(i.db)).toEqual([]);
+
+      // Before the backoff passes the watchdog opens nothing.
+      expect(await socketWatchdog(m, server.connect, T0 + SECOND - 1, { scheduleGapRecovery: gap })).toMatchObject({
+        action: 'backoff',
+      });
+      expect(server.attempts.length).toBe(1);
+
+      // The watchdog retries on the rotated host and opens exactly one new connection.
+      clock.set(new Date(T0 + SECOND).toISOString());
+      await step(state.storage, m, server, { gap });
+      expect(server.attempts.map((a) => [a.host, a.cursor, a.status])).toEqual([
+        [EAST, null, 101],
+        [WEST, null, 101],
+      ]);
+      expect(server.live().length).toBe(1);
+      expect(server.last()).not.toBe(first);
+      expect(gapCalls).toEqual([T0, T0 + SECOND]);
+      expect(gapsScheduled()).toBe(1);
+      expect(checkpointRow(i.db)).toMatchObject({
+        connected: 1,
+        connected_at_ms: T0 + SECOND,
+        pending_gap: 1,
+        host_index: 1,
+        cursor: (T0 + SECOND) * 1000,
+      });
+      expect(socketStatus(m).open).toMatchObject({ hostIndex: 1, mode: 'socket' });
+      expect(dueAt(i.db, 'jetstream-watchdog')).toBe(T0 + SECOND + MINUTE);
+      const e1 = server.append(commit('r1'));
+      await flush();
+      expect(seqsSent(server)).toEqual([e1.seq]);
+      expect(hintUris(i.db)).toEqual([`at://${ALICE}/${S}/r1`]);
+      closeSocket(m, clock.nowMs());
+    });
+  });
+
   it('DO eviction marks connected=false on restart and watchdog reconnects', async () => {
     const clock = fixedClock();
     const server = jetstreamServer({ clock });

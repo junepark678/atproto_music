@@ -21,9 +21,11 @@
 //   (a `time_us` cursor at the attempt instant) and gap recovery in the
 //   connect transaction (checkpoint.ts), so the next reconnect resumes from
 //   the tail and the gap is handled once;
-// - success → `markConnected` (checkpoint.ts `noteConnected`); a failed connect
-//   writes no connection evidence, rotates `host_index` and, in socket mode,
-//   schedules the watchdog with backoff.
+// - success → `markConnected` (checkpoint.ts `noteConnected`) and the watchdog,
+//   in one transaction; a failed connect writes no connection evidence,
+//   rotates `host_index` and, in socket mode, schedules the watchdog with
+//   backoff. If that post-upgrade transaction throws, the accepted socket is
+//   closed with 1011 and the attempt is handled as a failed connect.
 // - events: message → `onMessage` (jetstream.ts); close and error → mark
 //   disconnected, rotate `host_index` across JETSTREAM_URLS and schedule the
 //   watchdog at the reconnect backoff: 1 s base, exponential, 60 s cap, plus
@@ -368,40 +370,46 @@ async function doConnect(
     }
   } catch (error) {
     const e = error instanceof JetstreamConnectError ? error : null;
-    const next = (hostIndex + 1) % hostCount(m.config);
-    let retryAtMs: number | undefined;
-    m.db.tx(() => {
-      noteHostIndex(m.db, next);
-      if (mode === 'socket') {
-        retryAtMs = bump(m, s, now);
-        schedule(m.db, 'jetstream-watchdog', retryAtMs, { force: true });
-      }
-    });
-    m.log.log('warn', 'jetstream_connect_failed', {
-      host: new URL(url).host,
-      status: e?.status ?? null,
-      error: e?.error ?? (e === null ? String(error) : null),
-      nextHostIndex: next,
-      ...(retryAtMs === undefined ? {} : { retryAtMs }),
-    });
-    return {
-      ok: false,
-      reason: 'failed',
-      url,
+    return connectFailed(m, s, mode, hostIndex, now, url, {
       status: e?.status ?? null,
       error: e?.error ?? null,
-      ...(retryAtMs === undefined ? {} : { retryAtMs }),
-    };
+      detail: e === null ? String(error) : null,
+    });
   }
 
+  // The upgrade was accepted. The connection evidence and the watchdog are
+  // written in one transaction; if that throws (e.g. the injected
+  // scheduleGapRecovery), nothing of it is stored, the accepted socket is
+  // closed (it would otherwise queue frames and pin the instance), and the
+  // attempt counts as a failed connect: host rotated, backoff bumped.
   const openedAtMs = m.clock.nowMs();
-  noteConnected(m.db, openedAtMs, {
-    mode,
-    hostIndex,
-    gap,
-    attemptMs: now,
-    ...(s.options.scheduleGapRecovery === undefined ? {} : { scheduleGapRecovery: s.options.scheduleGapRecovery }),
-  });
+  try {
+    m.db.tx(() => {
+      noteConnected(m.db, openedAtMs, {
+        mode,
+        hostIndex,
+        gap,
+        attemptMs: now,
+        ...(s.options.scheduleGapRecovery === undefined ? {} : { scheduleGapRecovery: s.options.scheduleGapRecovery }),
+      });
+      if (mode === 'socket') {
+        schedule(
+          m.db,
+          'jetstream-watchdog',
+          Math.min(openedAtMs + WATCHDOG_INTERVAL_MS, openedAtMs + PLANNED_REFRESH_MS),
+          { force: true },
+        );
+      }
+    });
+  } catch (error) {
+    link.close(1011, 'local_failure');
+    m.log.log('error', 'jetstream_connect_bookkeeping_failed', { error: String(error) });
+    return connectFailed(m, s, mode, hostIndex, now, url, {
+      status: null,
+      error: 'local_failure',
+      detail: String(error),
+    });
+  }
   s.forceTail = false;
   const open: OpenLink = {
     link,
@@ -415,11 +423,6 @@ async function doConnect(
     messages: 0,
   };
   s.current = open;
-  if (mode === 'socket') {
-    schedule(m.db, 'jetstream-watchdog', Math.min(openedAtMs + WATCHDOG_INTERVAL_MS, open.refreshAtMs), {
-      force: true,
-    });
-  }
   m.log.log('info', 'jetstream_connected', {
     host: new URL(url).host,
     mode,
@@ -428,6 +431,46 @@ async function doConnect(
   });
   link.start((e) => onLinkEvent(m, s, open, e));
   return { ok: true, url, hostIndex, gap, reused: false };
+}
+
+/**
+ * A failed connect (refused or failed upgrade, or local bookkeeping that threw
+ * after the upgrade): writes no connection evidence, rotates `host_index` and,
+ * in socket mode, bumps the backoff and schedules the watchdog.
+ */
+function connectFailed(
+  m: ModuleDeps,
+  s: SocketState,
+  mode: LinkMode,
+  hostIndex: number,
+  now: number,
+  url: string,
+  f: { status: number | null; error: string | null; detail: string | null },
+): ConnectResult {
+  const next = (hostIndex + 1) % hostCount(m.config);
+  let retryAtMs: number | undefined;
+  m.db.tx(() => {
+    noteHostIndex(m.db, next);
+    if (mode === 'socket') {
+      retryAtMs = bump(m, s, now);
+      schedule(m.db, 'jetstream-watchdog', retryAtMs, { force: true });
+    }
+  });
+  m.log.log('warn', 'jetstream_connect_failed', {
+    host: new URL(url).host,
+    status: f.status,
+    error: f.error ?? f.detail,
+    nextHostIndex: next,
+    ...(retryAtMs === undefined ? {} : { retryAtMs }),
+  });
+  return {
+    ok: false,
+    reason: 'failed',
+    url,
+    status: f.status,
+    error: f.error,
+    ...(retryAtMs === undefined ? {} : { retryAtMs }),
+  };
 }
 
 // ---------------------------------------------------------------------------
