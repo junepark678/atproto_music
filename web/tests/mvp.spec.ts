@@ -1,6 +1,13 @@
-// The browser MVP journey and the Static Assets routing rules (W6-03;
+// The browser MVP journey and the Static Assets routing rules (W6-03, W6R-01;
 // M3.4.1 lifecycle, M7.4.2 browser_journey, M6.1.1 asset_missing_traversal /
 // spa_deep_link / asset_cache, M7.1.3 route_deep_links).
+//
+// Routing (ADR 0004 §15 Q9): Static Assets serves the files that exist
+// (`not_found_handling: "none"`); every miss reaches the Worker, which answers
+// a GET/HEAD of an SPA route with the built index.html (200, no redirect) and
+// everything else with the JSON not_found envelope. SPA responses are proved
+// by their body (byte-equal to the built work/e2e/dist/index.html), never by
+// the absence of a header.
 //
 // Runs against scripts/e2e/start-stack.ts (playwright.config.ts webServer):
 // the production Worker and SPA under `wrangler dev`, and @atproto/dev-env
@@ -184,6 +191,27 @@ async function expectNotFoundEnvelope(res: APIResponse, label: string): Promise<
   expect(json.error?.requestId, label).toBe(res.headers()['x-request-id']);
 }
 
+let builtIndex: string | null = null;
+/** The index.html this stack built (scripts/e2e/start-stack.ts, work/e2e/dist). */
+function builtIndexHtml(): string {
+  builtIndex ??= readFileSync(new URL('../../work/e2e/dist/index.html', import.meta.url), 'utf8');
+  expect(isSpaHtml(builtIndex), 'work/e2e/dist/index.html is the SPA').toBe(true);
+  return builtIndex;
+}
+
+/** A client-side navigation (the SPA router intercepts same-origin link clicks). */
+async function clientNavigate(page: Page, path: string): Promise<void> {
+  await page.evaluate((href) => {
+    const link = document.createElement('a');
+    link.href = href;
+    link.textContent = 'client-side navigation';
+    document.getElementById('main')?.append(link);
+    link.click();
+    link.remove();
+  }, path);
+  await page.waitForURL((u) => u.pathname === path);
+}
+
 const followRkey = (subject: string) => `f${createHash('sha256').update(subject).digest('hex')}`;
 
 // ---------------------------------------------------------------------------
@@ -212,7 +240,7 @@ test('full journey sign-in → scrobble indexed → stats → follow/unfollow �
     const cb = await callback;
     expect(cb.status()).toBe(200);
     expect(cb.headers()['content-type']).toContain('text/html');
-    expect(cb.headers()['x-request-id']).toBeUndefined(); // Static Assets answered, not the Worker
+    expect(await cb.text()).toBe(builtIndexHtml()); // the SPA's index.html, not a Worker JSON route
     await page.waitForURL((u) => u.pathname === '/feed');
     expect(new URL(page.url()).search).toBe(''); // code, state and iss are gone
     await expect(nav(page).getByRole('link', { name: 'My profile' })).toHaveAttribute('href', `/u/${alice.did}`);
@@ -518,22 +546,27 @@ test('OAuth callback navigation is served by SPA (/oauth/callback not intercepte
   page,
   request,
 }) => {
-  // A Worker response always carries x-request-id; the API proves it.
-  const meta = await request.get('/api/v1/meta');
-  expect(meta.status()).toBe(200);
-  expect(meta.headers()['x-request-id']).toMatch(/^[0-9a-f-]{36}$/);
-
+  // /oauth/* is not Worker-first: the callback (with its code, state and iss)
+  // is the SPA's index.html, byte for byte, with 200 and no redirect. Whether
+  // Static Assets or the Worker's asset-miss handling sent it is not what this
+  // proves (since ADR §15 Q9 it is the Worker); what it proves is that no
+  // Worker route consumed the callback.
   const res = await request.get('/oauth/callback?code=cod-x&state=st-x&iss=https%3A%2F%2Fpds1.test', {
     headers: { 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document', accept: 'text/html' },
     maxRedirects: 0,
   });
   expect(res.status()).toBe(200);
+  expect(res.headers().location).toBeUndefined();
   expect(res.headers()['content-type']).toContain('text/html');
-  expect(res.headers()['x-request-id']).toBeUndefined();
   expect(res.headers()['cache-control']).not.toContain('immutable');
   const html = await res.text();
-  expect(html).toContain('<div id="app"></div>');
+  expect(html).toBe(builtIndexHtml());
   expect(html).toMatch(/<script type="module" crossorigin src="\/assets\/index-[\w-]+\.js"><\/script>/);
+  // Its neighbours under /oauth/ are not SPA routes.
+  await expectNotFoundEnvelope(
+    await request.get('/oauth/missing', { headers: { 'sec-fetch-mode': 'navigate', accept: 'text/html' } }),
+    '/oauth/missing',
+  );
 
   // The SPA itself handles the route: without a pending sign-in it says so.
   await page.goto('/oauth/callback');
@@ -543,10 +576,10 @@ test('OAuth callback navigation is served by SPA (/oauth/callback not intercepte
 });
 
 test('GET /u/<did> and /feed serve index.html 200 and POST /feed never returns SPA HTML', async ({ page, request }) => {
+  const indexHtml = builtIndexHtml();
   const index = await request.get('/');
   expect(index.status()).toBe(200);
-  const indexHtml = await index.text();
-  expect(indexHtml).toContain('<div id="app"></div>');
+  expect(await index.text()).toBe(indexHtml);
 
   const navigate = { 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document', accept: 'text/html' };
   // Redirects are never followed here: each status is what the platform sends.
@@ -555,9 +588,22 @@ test('GET /u/<did> and /feed serve index.html 200 and POST /feed never returns S
   for (const path of [canonicalProfile, '/feed']) {
     const res = await request.get(path, { headers: navigate, maxRedirects: 0 });
     expect(res.status(), path).toBe(200);
+    expect(res.headers().location, path).toBeUndefined();
     expect(res.headers()['content-type'], path).toContain('text/html');
-    expect(res.headers()['x-request-id'], path).toBeUndefined();
     expect(await res.text(), path).toBe(indexHtml);
+    // HEAD is answered like GET, without a body.
+    const head = await request.head(path, { headers: navigate, maxRedirects: 0 });
+    expect([path, head.status(), head.headers()['content-type'] ?? ''], `HEAD ${path}`).toEqual([
+      path,
+      200,
+      expect.stringContaining('text/html'),
+    ]);
+  }
+  // A did:web profile (the route table has no DID-method special case).
+  const webDid = 'did:web:music.e2e.test';
+  for (const path of [`/u/${webDid}`, `/u/${enc(webDid)}`]) {
+    const res = await request.get(path, { headers: navigate, maxRedirects: 0 });
+    expect([path, res.status(), await res.text()]).toEqual([path, 200, indexHtml]);
   }
   // The raw DID form (`:` unencoded, as the SPA's own links emit it) is served
   // index.html 200 directly as well, with its query string; no redirect
@@ -582,31 +628,88 @@ test('GET /u/<did> and /feed serve index.html 200 and POST /feed never returns S
   await page.goto('/feed');
   await expect(heading(page)).toHaveText('Feed');
   await expect(page.getByRole('tab', { name: 'Global' })).toHaveAttribute('aria-selected', 'true');
-  await page.goto('/no-such-page');
+  // An unknown path is not an SPA route: a direct load is the JSON 404 …
+  const unknown = await page.goto('/no-such-page');
+  expect(unknown?.status()).toBe(404);
+  expect(unknown?.headers()['content-type']).toContain('application/json');
+  expect(isSpaHtml((await unknown?.text()) ?? '')).toBe(false);
+  // … while inside the app the router still shows its own not-found screen.
+  await page.goto('/feed');
+  await expect(heading(page)).toHaveText('Feed');
+  await clientNavigate(page, '/no-such-page');
   await expect(heading(page)).toHaveText('Page not found');
 
-  // A non-GET to an SPA path is the JSON 404 envelope (oracle spa_deep_link:
-  // POST /feed → 404 not_found), never a bare 405 and never index.html.
-  for (const path of ['/feed', canonicalProfile, `/u/${bob.did}`]) {
+  // A non-GET/HEAD to an SPA path is the JSON 404 envelope (oracle
+  // spa_deep_link: POST /feed → 404 not_found), never a bare 405 and never
+  // index.html.
+  for (const path of ['/feed', canonicalProfile, `/u/${bob.did}`, '/oauth/callback']) {
     const post = await request.post(path, { data: { x: 1 }, maxRedirects: 0 });
     await expectNotFoundEnvelope(post, `POST ${path}`);
+    expect(post.headers().allow, `POST ${path}`).toBeUndefined();
   }
+  await expectNotFoundEnvelope(await request.put('/feed', { data: { x: 1 }, maxRedirects: 0 }), 'PUT /feed');
+  await expectNotFoundEnvelope(await request.delete(`/u/${bob.did}`, { maxRedirects: 0 }), `DELETE /u/${bob.did}`);
+});
+
+test('platform exception: non-GET/HEAD to an existing file (/, a hashed asset) is a bare Static Assets 405, never SPA HTML', async ({
+  request,
+}) => {
+  // ADR §15 Q9 has the Worker answer asset misses only. A path that is an
+  // existing file never misses, so Static Assets answers a non-GET/HEAD to it
+  // with its own bare 405 before the Worker runs: no JSON envelope and no
+  // x-request-id (the platform exception in docs/deploy/routing.md). This
+  // pins that answer, so a platform or config change that alters it fails.
+  const html = builtIndexHtml();
+  const scripts = [...html.matchAll(/src="(\/assets\/[\w.-]+-[\w-]{8,}\.js)"/g)].map((m) => m[1] as string);
+  expect(scripts.length).toBeGreaterThan(0);
+  const cases: Array<[string, string]> = [
+    ['POST', '/'],
+    ['PUT', '/'],
+    ['DELETE', '/'],
+    ['POST', scripts[0] as string],
+    ['POST', '/robots.txt'],
+  ];
+  for (const [method, path] of cases) {
+    const label = `${method} ${path}`;
+    const res = await request.fetch(path, { method, data: { x: 1 }, maxRedirects: 0 });
+    const body = await res.text();
+    expect([label, res.status()]).toEqual([label, 405]);
+    expect(res.headers()['x-request-id'], label).toBeUndefined();
+    expect(res.headers()['content-type'] ?? '', label).not.toContain('application/json');
+    expect(res.headers().location, label).toBeUndefined();
+    expect(res.headers().allow, label).toBeUndefined();
+    expect(isSpaHtml(body), label).toBe(false);
+    expect(body, label).toBe('');
+  }
+  // A non-GET/HEAD to an SPA route with no file behind it does reach the Worker.
+  await expectNotFoundEnvelope(await request.post('/feed', { data: { x: 1 }, maxRedirects: 0 }), 'POST /feed');
 });
 
 test('non-navigation GET /assets/missing.js and encoded ../ traversal return 404, never index.html', async ({
   request,
 }) => {
   const subresource = { 'sec-fetch-mode': 'no-cors', 'sec-fetch-dest': 'script', accept: '*/*' };
-  // The Rust oracle's traversal inputs (crates/server/tests/assets.rs asset_missing_traversal).
+  const navigate = { 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document', accept: 'text/html' };
+  // The Rust oracle's inputs (crates/server/tests/assets.rs asset_missing_traversal).
+  // The decision is by path: a navigation to these is the envelope as well.
   for (const path of [
     '/assets/missing.js',
     '/%2e%2e/secret',
     '/assets/%2E%2E/secret',
     '/assets%2f..%2fsecret',
     '/assets/%252e%252e/secret',
+    '/unknown/api',
+    '/oauth/missing',
+    '/secret.txt',
+    '/u/did%3Aplc%3Aa%2F..%2Fb',
   ]) {
-    const res = await request.get(path, { headers: subresource, maxRedirects: 0 });
-    await expectNotFoundEnvelope(res, path);
+    for (const [mode, headers] of [
+      ['subresource', subresource],
+      ['navigation', navigate],
+    ] as const) {
+      const res = await request.get(path, { headers, maxRedirects: 0 });
+      await expectNotFoundEnvelope(res, `${mode} ${path}`);
+    }
   }
   // Unknown API paths are the Worker's JSON 404 envelope.
   await expectNotFoundEnvelope(await request.get('/api/unknown'), '/api/unknown');

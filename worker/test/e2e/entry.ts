@@ -9,9 +9,13 @@
 //   routes are the dev-env hosts of scripts/e2e/dev-env.ts and nothing else:
 //   each `https://<host>/…` request (pds1.test, pds2.test, plc.directory) is
 //   forwarded to that host's http loopback port on 127.0.0.1; a fake DoH
-//   answers the SafeFetch pre-check; handles resolve through the dev-env's
-//   `/.well-known/atproto-did` answers; the relay answers an empty discovery
-//   page. Any other host is refused (no route), so the IndexDO can never reach
+//   answers the SafeFetch pre-check (and has no `_atproto` TXT records, so
+//   the DNS method finds nothing); handles resolve through
+//   `https://<handle>/.well-known/atproto-did`, which the router itself
+//   answers from E2E_NETWORK's handle → DID map (the accounts the stack
+//   created on the dev-env PDSs, recorded by scripts/e2e/dev-env.ts
+//   `workerNetwork`), not the dev-env PDSs; the relay answers an empty
+//   discovery page. Any other host is refused (no route), so the IndexDO can never reach
 //   the real network. The production SafeFetch policy stays on (https only,
 //   default port, no redirects, caps, deadline); the fixture mark admits the
 //   reserved `.test` hosts, exactly as in every other fixture suite;

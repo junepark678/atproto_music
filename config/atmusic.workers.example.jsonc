@@ -33,7 +33,15 @@
   "assets": {
     "directory": "../web/dist",
     "binding": "ASSETS",
-    "not_found_handling": "single-page-application",
+    // ADR §15 Q9: no platform fallback. Files that exist are served by Static
+    // Assets without the Worker; every miss reaches the Worker, which serves
+    // index.html (200, no redirect) only for a GET/HEAD of an SPA route
+    // (@atmusic/core/spa-routes) and the JSON not_found envelope otherwise
+    // (worker/src/router.ts). "single-page-application" was rejected: it served
+    // index.html for missing /assets/* files, redirected raw /u/did:… paths
+    // with 307 and answered POST with 405. check-bundle refuses any other value.
+    "not_found_handling": "none",
+    // /oauth/* is deliberately absent: /oauth/callback is an SPA route.
     "run_worker_first": ["/api/*", "/health/*", "/internal/*"]
   },
   "durable_objects": {

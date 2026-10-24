@@ -226,6 +226,11 @@ export interface WranglerEnvSection {
   routeHosts: string[];
   main: string | null;
   assetsDirectory: string | null;
+  /**
+   * The resolved `assets.not_found_handling`: null when the env has no
+   * `assets` or leaves the key unset (wrangler's default, "none").
+   */
+  assetsNotFoundHandling: unknown;
 }
 
 /** The host of a route `pattern` (`host/path*`, optionally with a scheme). */
@@ -283,7 +288,8 @@ export function wranglerEnvSection(config: unknown, env: Exclude<EnvName, 'local
   const main = typeof section.main === 'string' ? section.main : typeof config.main === 'string' ? config.main : null;
   const assets = isRecord(section.assets) ? section.assets : isRecord(config.assets) ? config.assets : null;
   const assetsDirectory = assets !== null && typeof assets.directory === 'string' ? assets.directory : null;
-  return { wranglerEnv, vars, routeHosts, main, assetsDirectory };
+  const assetsNotFoundHandling = assets?.not_found_handling ?? null;
+  return { wranglerEnv, vars, routeHosts, main, assetsDirectory, assetsNotFoundHandling };
 }
 
 /** Problems with a deployed env's origin/prefix pair; empty when it may be published. */
