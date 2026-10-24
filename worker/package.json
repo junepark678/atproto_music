@@ -13,6 +13,7 @@
     "dev": "wrangler dev --config wrangler.jsonc"
   },
   "dependencies": {
+    "@atcute/cbor": "2.3.8",
     "@atmusic/atproto": "0.0.0",
     "@atmusic/core": "0.0.0"
   },
