@@ -5,7 +5,10 @@
 // (M1.4.2 upstream_outage, M6.2.2 upstream_offline).
 //
 // Every result is validated against the OpenAPI `Indexing` schema, and every
-// read is shown to leave the storage unchanged.
+// read is shown to leave the storage unchanged. The checkpoint writers and the
+// lastIndexedAt high-water mark are exercised through their DB effects, and the
+// reads are shown to be index lookups whose rows read do not grow with the
+// scrobbles/follows tables (ADR §10.4 query plans, with a negative control).
 
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
@@ -17,8 +20,17 @@ import addFormats from 'ajv-formats';
 import { describe, expect, it } from 'vitest';
 import openapiText from '../../../api/openapi.yaml?raw';
 import type { IngestMode } from '../../src/config';
-import { type Db, doDb } from '../../src/do/db';
-import { GAP_REASON, indexing, internalStatus } from '../../src/do/status';
+import { type Db, doDb, type SqlParam } from '../../src/do/db';
+import {
+  GAP_REASON,
+  indexing,
+  internalStatus,
+  markConnected,
+  markDisconnected,
+  noteIndexed,
+  recordEvent,
+  updateCheckpointBookkeeping,
+} from '../../src/do/status';
 import type { HarnessDO } from '../harness/harness-do';
 
 function openapiValidator(schema: string) {
@@ -44,6 +56,7 @@ const DAVE = 'did:plc:dave00000000000000000000';
 const P = 'com.example.atmusic';
 
 const ts = (ms: number) => toStorage(fromMs(ms));
+const ns = (iso: string) => fromMs(Date.parse(iso));
 
 /** Reads one Indexing and checks it against the OpenAPI schema and that the read wrote nothing. */
 function read(db: Db, nowMs: number, mode: IngestMode, did?: string): Indexing {
@@ -92,16 +105,12 @@ function healthySocket(db: Db, now: number) {
   });
 }
 
-function insertUser(
-  db: Db,
-  did: string,
-  o: { state?: Indexing['state']; active?: 0 | 1; indexedAt?: string | null } = {},
-) {
+function insertUser(db: Db, did: string, o: { state?: Indexing['state']; active?: 0 | 1 } = {}) {
   db.run(
     'INSERT INTO users(did, joined_at, indexed_at, active, account_status, indexing_state) VALUES (?, ?, ?, ?, ?, ?)',
     did,
     '2026-01-01T00:00:00.000000000Z',
-    o.indexedAt ?? null,
+    null,
     o.active ?? 1,
     'active',
     o.state ?? 'current',
@@ -171,6 +180,74 @@ function insertFollow(db: Db, actor: string, subject: string, indexedAt: string)
   );
 }
 
+function checkpointRow(db: Db) {
+  return db.one<Record<string, unknown>>(
+    `SELECT cursor, last_event_time_us, connected, pending_gap, gap_scan_after_did, mode, host_index,
+            connected_at_ms, updated_at_ms FROM ingest_checkpoint WHERE stream = 'jetstream'`,
+  );
+}
+
+interface Executed {
+  sql: string;
+  params: SqlParam[];
+  rowsRead: number;
+}
+
+/**
+ * A Db over the raw DO SQL cursor that records every statement and its
+ * `rowsRead` (the billed rows-read count), so a test can see what a read costs.
+ */
+function countingDb(storage: DurableObjectStorage): { db: Db; executed: Executed[] } {
+  const executed: Executed[] = [];
+  const exec = (sql: string, params: SqlParam[]) => {
+    const cursor = storage.sql.exec(sql, ...params);
+    const rows = cursor.toArray();
+    executed.push({ sql, params, rowsRead: cursor.rowsRead });
+    return { rows, rowsWritten: cursor.rowsWritten };
+  };
+  const db: Db = {
+    all: <T>(sql: string, ...p: SqlParam[]) => exec(sql, p).rows as T[],
+    one: <T>(sql: string, ...p: SqlParam[]) => (exec(sql, p).rows[0] as T | undefined) ?? null,
+    run: (sql: string, ...p: SqlParam[]) => ({ rowsWritten: exec(sql, p).rowsWritten }),
+    tx: () => {
+      throw new Error('countingDb is read-only');
+    },
+  };
+  return { db, executed };
+}
+
+function queryPlan(db: Db, sql: string, params: SqlParam[]): string[] {
+  return db.all<{ detail: string }>(`EXPLAIN QUERY PLAN ${sql}`, ...params).map((row) => row.detail);
+}
+
+/** Seeds `n` scrobbles and `n` follows for `did` in one statement each (row i indexed i seconds into 2026-01-14). */
+function seedRows(db: Db, did: string, n: number, offset: number) {
+  db.run(
+    `WITH RECURSIVE k(i) AS (SELECT ? UNION ALL SELECT i + 1 FROM k WHERE i < ?)
+     INSERT INTO scrobbles(uri, cid, did, rkey, revision, artist, track, listened_at, created_at, indexed_at, artist_key, track_key)
+     SELECT 'at://' || ? || '/${P}.scrobble/r' || i, 'bafy' || i, ?, 'r' || i, '3m4zm2ufr2223', 'A', 'T',
+            '2026-01-15T11:00:00.000000000Z', '2026-01-15T11:00:00.000Z',
+            printf('2026-01-14T%02d:%02d:%02d.000000000Z', (i / 3600) % 24, (i / 60) % 60, i % 60), 'a', 't'
+     FROM k`,
+    offset + 1,
+    offset + n,
+    did,
+    did,
+  );
+  db.run(
+    `WITH RECURSIVE k(i) AS (SELECT ? UNION ALL SELECT i + 1 FROM k WHERE i < ?)
+     INSERT INTO follows(uri, cid, actor, subject, revision, created_at, indexed_at)
+     SELECT 'at://' || ? || '/${P}.follow/f' || i, 'bafy' || i, ?, 'did:plc:subject' || i, '3m4zm2ufr2223',
+            '2026-01-15T11:00:00.000000000Z',
+            printf('2026-01-14T%02d:%02d:%02d.000000000Z', (i / 3600) % 24, (i / 60) % 60, i % 60)
+     FROM k`,
+    offset + 1,
+    offset + n,
+    did,
+    did,
+  );
+}
+
 describe('indexing status truth', () => {
   it('fresh DO reports recovering, caughtUp=false', async () => {
     await runInDurableObject(stubFor('status-fresh'), async (_i: HarnessDO, state) => {
@@ -236,11 +313,9 @@ describe('indexing status truth', () => {
         connected_at_ms: now - 30 * SECOND,
         updated_at_ms: now,
       });
-      // A stored flag claims the index is current and caught up.
-      db.run(
-        `UPDATE indexing_status SET state = 'current', caught_up = 1, last_indexed_at = ?, lag_seconds = 0 WHERE scope = 'global'`,
-        ts(now),
-      );
+      // A stored flag claims the index is current and caught up. (Its last_indexed_at
+      // column is the high-water mark noteIndexed maintains, and nothing was indexed.)
+      db.run(`UPDATE indexing_status SET state = 'current', caught_up = 1, lag_seconds = 0 WHERE scope = 'global'`);
       insertUser(db, ALICE, { state: 'current' });
 
       expect(read(db, now, 'socket')).toEqual({
@@ -297,7 +372,8 @@ describe('indexing status truth', () => {
       const now = clock.nowMs();
       const dropAt = now - 5 * MINUTE;
 
-      insertUser(db, ALICE, { state: 'current', indexedAt: ts(dropAt) });
+      insertUser(db, ALICE, { state: 'current' });
+      noteIndexed(db, ALICE, fromMs(dropAt));
       // The socket closed at dropAt, right after the last event; the gap is closed.
       setCheckpoint(db, {
         cursor: dropAt * 1000,
@@ -308,13 +384,23 @@ describe('indexing status truth', () => {
         updated_at_ms: dropAt,
       });
 
-      // Exactly five minutes is not "more than five minutes".
+      // Exactly five minutes is not "more than five minutes": not stale yet, but a
+      // dropped socket is a potential gap and is never caught up (Rust: !connected
+      // forces caught_up=false), globally or per user.
       expect(read(db, clock.nowMs(), 'socket')).toEqual({
         state: 'current',
-        caughtUp: true,
+        caughtUp: false,
         lastIndexedAt: '2026-01-15T11:55:00.000000000Z',
         lagSeconds: 300,
       });
+      expect(read(db, clock.nowMs(), 'socket', ALICE)).toEqual({
+        state: 'current',
+        caughtUp: false,
+        lastIndexedAt: '2026-01-15T11:55:00.000000000Z',
+        lagSeconds: 300,
+      });
+      // One second after the drop it is already not caught up.
+      expect(read(db, dropAt + SECOND, 'socket')).toMatchObject({ state: 'current', caughtUp: false });
 
       clock.advance(1);
       const stale = read(db, clock.nowMs(), 'socket');
@@ -340,7 +426,7 @@ describe('indexing status truth', () => {
       expect(read(db, clock.nowMs(), 'socket').state).toBe('stale');
       setCheckpoint(db, { pending_gap: 0 });
 
-      // Reconnect: no longer stale; no event since connect, so lag is unknown.
+      // Reconnect: no longer stale and caught up again; no event since connect, so lag is unknown.
       setCheckpoint(db, { connected: 1, connected_at_ms: clock.nowMs(), updated_at_ms: clock.nowMs() });
       expect(read(db, clock.nowMs(), 'socket')).toEqual({
         state: 'current',
@@ -348,6 +434,7 @@ describe('indexing status truth', () => {
         lastIndexedAt: '2026-01-15T11:55:00.000000000Z',
         lagSeconds: null,
       });
+      expect(read(db, clock.nowMs(), 'socket', ALICE)).toMatchObject({ state: 'current', caughtUp: true });
       expect(internalStatus(db, clock.nowMs(), { mode: 'socket' }).ingest.connected).toBe(true);
     });
   });
@@ -367,7 +454,8 @@ describe('indexing status truth', () => {
         connected_at_ms: pulseAt,
         updated_at_ms: pulseAt + 20 * SECOND,
       });
-      // Two intervals since the last successful pulse: still current.
+      // Two intervals since the last successful pulse: still current, and caught up
+      // (connected=0 between pulses is normal in pulse mode).
       expect(read(db, clock.nowMs(), 'pulse')).toMatchObject({ state: 'current', caughtUp: true, lagSeconds: 595 });
       clock.advance(1);
       expect(read(db, clock.nowMs(), 'pulse')).toMatchObject({ state: 'stale', caughtUp: false });
@@ -396,11 +484,19 @@ describe('indexing status truth', () => {
       healthySocket(db, now);
 
       // Alice was current before deactivation; reactivation keeps her hidden with a pending snapshot.
-      insertUser(db, ALICE, { state: 'current', active: 0, indexedAt: '2026-01-14T09:00:00.000000000Z' });
+      insertUser(db, ALICE, { state: 'current', active: 0 });
+      noteIndexed(db, ALICE, ns('2026-01-14T09:00:00Z'));
       insertJob(db, ALICE, { reason: 'reactivation', reactivate: 1, dueAt: now });
       insertUser(db, BOB, { state: 'current' });
-      insertScrobble(db, BOB, '3m4zm2ufr2222', '2026-01-15T11:30:00.000000000Z');
-      insertFollow(db, BOB, ALICE, '2026-01-15T11:40:00.000000000Z');
+      // Each projection write raises the high-water marks in its transaction.
+      db.tx(() => {
+        insertScrobble(db, BOB, '3m4zm2ufr2222', '2026-01-15T11:30:00.000000000Z');
+        noteIndexed(db, BOB, ns('2026-01-15T11:30:00Z'));
+      });
+      db.tx(() => {
+        insertFollow(db, BOB, ALICE, '2026-01-15T11:40:00.000000000Z');
+        noteIndexed(db, BOB, ns('2026-01-15T11:40:00Z'));
+      });
       insertUser(db, CAROL, { state: 'current' });
       db.run('INSERT INTO suppression(did, suppressed_at) VALUES (?, ?)', CAROL, ts(now - MINUTE));
 
@@ -443,14 +539,20 @@ describe('indexing status truth', () => {
 
       // completeSnapshot: active again, current; the job is complete.
       db.run(`UPDATE repo_jobs SET state = 'complete', reactivate = 0 WHERE did = ?`, ALICE);
-      db.run(`UPDATE users SET active = 1, indexed_at = ? WHERE did = ?`, ts(now), ALICE);
+      db.run(`UPDATE users SET active = 1 WHERE did = ?`, ALICE);
+      noteIndexed(db, ALICE, fromMs(now));
       expect(read(db, now, 'socket', ALICE)).toEqual({
         state: 'current',
         caughtUp: true,
         lastIndexedAt: '2026-01-15T12:00:00.000000000Z',
         lagSeconds: 2,
       });
-      expect(read(db, now, 'socket')).toMatchObject({ state: 'current', caughtUp: true });
+      expect(read(db, now, 'socket')).toEqual({
+        state: 'current',
+        caughtUp: true,
+        lastIndexedAt: '2026-01-15T12:00:00.000000000Z',
+        lagSeconds: 2,
+      });
 
       // A user stored as recovering (e.g. freshly admitted) stays recovering without a job.
       insertUser(db, 'did:plc:erin0000000000000000000', { state: 'recovering' });
@@ -547,8 +649,9 @@ describe('indexing status truth', () => {
       const now = fixedClock().nowMs();
       healthySocket(db, now);
       setCheckpoint(db, { host_index: 2 });
-      insertUser(db, ALICE, { indexedAt: '2026-01-15T11:59:00.000000000Z' });
+      insertUser(db, ALICE);
       insertUser(db, BOB);
+      noteIndexed(db, ALICE, ns('2026-01-15T11:59:00Z'));
       insertJob(db, ALICE, { dueAt: now });
       insertJob(db, BOB, { state: 'running', dueAt: now });
       insertJob(db, ALICE, { kind: 'status', state: 'complete', dueAt: now });
@@ -580,6 +683,196 @@ describe('indexing status truth', () => {
           { name: 'excluded', label: 'invalid_artist', value: 3 },
         ],
       });
+    });
+  });
+
+  it('checkpoint writers: host rotation, gap-scan progress and pending_gap clears leave updated_at_ms unchanged', async () => {
+    await runInDurableObject(stubFor('status-writers'), async (_i: HarnessDO, state) => {
+      const db = doDb(state.storage);
+      const clock = fixedClock();
+      const t0 = clock.nowMs();
+
+      // Constructor on first start: nothing was connected, so nothing is written and
+      // the fresh checkpoint keeps no reference instant (recovering, never stale).
+      expect(db.tx(() => markDisconnected(db, t0))).toBe(false);
+      expect(checkpointRow(db)).toMatchObject({ connected: 0, connected_at_ms: null, updated_at_ms: 0 });
+      expect(read(db, t0 + 60 * MINUTE, 'socket')).toMatchObject({ state: 'recovering', caughtUp: false });
+
+      // Connect; the first event arrives in the connect millisecond and still counts.
+      db.tx(() => markConnected(db, t0));
+      expect(checkpointRow(db)).toMatchObject({ connected: 1, connected_at_ms: t0, updated_at_ms: t0 });
+      expect(read(db, t0, 'socket').lagSeconds).toBeNull();
+      db.tx(() => {
+        recordEvent(db, { cursor: t0 * 1000 - 1_500_000, timeUs: t0 * 1000 - 1_500_000 }, t0);
+        updateCheckpointBookkeeping(db, { pendingGap: false, mode: 'socket' });
+      });
+      expect(checkpointRow(db)).toEqual({
+        cursor: t0 * 1000 - 1_500_000,
+        last_event_time_us: t0 * 1000 - 1_500_000,
+        connected: 1,
+        pending_gap: 0,
+        gap_scan_after_did: null,
+        mode: 'socket',
+        host_index: 0,
+        connected_at_ms: t0,
+        updated_at_ms: t0 + 1,
+      });
+      expect(read(db, t0, 'socket')).toEqual({ state: 'current', caughtUp: true, lastIndexedAt: null, lagSeconds: 1 });
+
+      // The socket closes at t1. A second disconnect write (failed reconnect,
+      // constructor after eviction) does not move the instant.
+      clock.advance(10 * SECOND);
+      const t1 = clock.nowMs();
+      expect(db.tx(() => markDisconnected(db, t1))).toBe(true);
+      expect(db.tx(() => markDisconnected(db, t1 + 30 * SECOND))).toBe(false);
+      expect(checkpointRow(db)).toMatchObject({ connected: 0, connected_at_ms: t0, updated_at_ms: t1 });
+
+      // During the outage: host rotation, a gap opened and scanned in batches, then cleared.
+      db.tx(() => updateCheckpointBookkeeping(db, { hostIndex: 1 }));
+      db.tx(() => updateCheckpointBookkeeping(db, { pendingGap: true, gapScanAfterDid: ALICE }));
+      db.tx(() => updateCheckpointBookkeeping(db, { gapScanAfterDid: BOB }));
+      db.tx(() => updateCheckpointBookkeeping(db, { pendingGap: false, gapScanAfterDid: null }));
+      db.tx(() => updateCheckpointBookkeeping(db, {}));
+      expect(checkpointRow(db)).toEqual({
+        cursor: t0 * 1000 - 1_500_000,
+        last_event_time_us: t0 * 1000 - 1_500_000,
+        connected: 0,
+        pending_gap: 0,
+        gap_scan_after_did: null,
+        mode: 'socket',
+        host_index: 1,
+        connected_at_ms: t0,
+        updated_at_ms: t1,
+      });
+      // So the permanent outage still turns stale exactly 5 min after the drop.
+      expect(read(db, t1 + 5 * MINUTE, 'socket')).toMatchObject({ state: 'current', caughtUp: false });
+      expect(read(db, t1 + 5 * MINUTE + 1, 'socket')).toMatchObject({ state: 'stale', caughtUp: false });
+      expect(read(db, t1 + 60 * MINUTE, 'socket')).toMatchObject({ state: 'stale', caughtUp: false, lagSeconds: 3611 });
+
+      // Reconnect at t2, then rotate back: no event since connect, lag stays unknown.
+      const t2 = t1 + 60 * MINUTE;
+      db.tx(() => markConnected(db, t2));
+      db.tx(() => updateCheckpointBookkeeping(db, { hostIndex: 0 }));
+      expect(checkpointRow(db)).toMatchObject({ connected: 1, connected_at_ms: t2, updated_at_ms: t2, host_index: 0 });
+      expect(read(db, t2 + MINUTE, 'socket')).toEqual({
+        state: 'current',
+        caughtUp: true,
+        lastIndexedAt: null,
+        lagSeconds: null,
+      });
+      // The first event after the reconnect makes the lag exact again.
+      db.tx(() => recordEvent(db, { cursor: (t2 - 4 * SECOND) * 1000, timeUs: (t2 - 4 * SECOND) * 1000 }, t2 + SECOND));
+      expect(checkpointRow(db)).toMatchObject({ updated_at_ms: t2 + SECOND, cursor: (t2 - 4 * SECOND) * 1000 });
+      expect(read(db, t2 + SECOND, 'socket').lagSeconds).toBe(5);
+    });
+  });
+
+  it('lastIndexedAt is a monotone high-water mark that deletions do not lower', async () => {
+    await runInDurableObject(stubFor('status-high-water'), async (_i: HarnessDO, state) => {
+      const db = doDb(state.storage);
+      const now = fixedClock().nowMs();
+      healthySocket(db, now);
+      insertUser(db, ALICE);
+      insertUser(db, BOB);
+
+      db.tx(() => {
+        insertScrobble(db, ALICE, '3m4zm2ufr2222', '2026-01-15T11:50:00.000000000Z');
+        noteIndexed(db, ALICE, ns('2026-01-15T11:50:00Z'));
+      });
+      // An older write (a slow snapshot chunk committing late) never lowers either mark.
+      db.tx(() => noteIndexed(db, ALICE, ns('2026-01-15T11:00:00Z')));
+      db.tx(() => noteIndexed(db, BOB, ns('2026-01-15T11:10:00Z')));
+      // A write for a DID without a users row raises only the global mark.
+      db.tx(() => noteIndexed(db, DAVE, ns('2026-01-15T11:20:00Z')));
+      expect(db.all('SELECT did, indexed_at FROM users ORDER BY did')).toEqual([
+        { did: ALICE, indexed_at: '2026-01-15T11:50:00.000000000Z' },
+        { did: BOB, indexed_at: '2026-01-15T11:10:00.000000000Z' },
+      ]);
+      expect(db.one('SELECT last_indexed_at FROM indexing_status WHERE scope = ?', 'global')).toEqual({
+        last_indexed_at: '2026-01-15T11:50:00.000000000Z',
+      });
+
+      // Deleting the newest row is indexing work too: the mark stays.
+      db.run('DELETE FROM scrobbles WHERE did = ?', ALICE);
+      expect(read(db, now, 'socket')).toEqual({
+        state: 'current',
+        caughtUp: true,
+        lastIndexedAt: '2026-01-15T11:50:00.000000000Z',
+        lagSeconds: 2,
+      });
+      expect(read(db, now, 'socket', ALICE).lastIndexedAt).toBe('2026-01-15T11:50:00.000000000Z');
+      expect(read(db, now, 'socket', BOB).lastIndexedAt).toBe('2026-01-15T11:10:00.000000000Z');
+      // Sub-millisecond precision survives the round trip.
+      db.tx(() => noteIndexed(db, BOB, ns('2026-01-15T11:59:00Z') + 123_456n));
+      expect(read(db, now, 'socket', BOB).lastIndexedAt).toBe('2026-01-15T11:59:00.000123456Z');
+      expect(read(db, now, 'socket').lastIndexedAt).toBe('2026-01-15T11:59:00.000123456Z');
+    });
+  });
+
+  it('status reads are index lookups: rows read do not grow with scrobbles/follows; negative control scans', async () => {
+    await runInDurableObject(stubFor('status-query-plan'), async (_i: HarnessDO, state) => {
+      const db = doDb(state.storage);
+      const now = fixedClock().nowMs();
+      healthySocket(db, now);
+      insertUser(db, ALICE);
+      insertUser(db, BOB);
+      noteIndexed(db, ALICE, ns('2026-01-15T11:58:00Z'));
+      insertJob(db, BOB, { reason: GAP_REASON, state: 'complete', dueAt: now });
+      insertHint(db, BOB, '3m4zm2ufr2221', now - SECOND, now);
+
+      const cost = () => {
+        const { db: counting, executed } = countingDb(state.storage);
+        const global = indexing(counting, now, { mode: 'socket' });
+        const user = indexing(counting, now, { mode: 'socket', did: ALICE });
+        return { global, user, executed, rowsRead: executed.reduce((sum, e) => sum + e.rowsRead, 0) };
+      };
+
+      seedRows(db, ALICE, 2_000, 0);
+      const small = cost();
+      expect(small.global).toEqual({
+        state: 'current',
+        caughtUp: true,
+        lastIndexedAt: '2026-01-15T11:58:00.000000000Z',
+        lagSeconds: 2,
+      });
+      expect(small.user).toEqual(small.global);
+      // Every statement is a primary-key or index seek: no table SCAN in any plan
+      // (`SCAN CONSTANT ROW` is the `SELECT EXISTS(...)` wrapper, not a table).
+      expect(small.executed.length).toBeGreaterThan(0);
+      for (const { sql, params } of small.executed) {
+        const plan = queryPlan(db, sql, params);
+        expect(
+          plan.filter((detail) => /\bSCAN\b/.test(detail) && detail !== 'SCAN CONSTANT ROW'),
+          `${sql}\n${plan.join('\n')}`,
+        ).toEqual([]);
+        for (const detail of plan.filter((d) => d.startsWith('SEARCH '))) expect(detail).toMatch(/ USING /);
+        expect(sql).not.toMatch(/\b(scrobbles|follows)\b/);
+      }
+      expect(small.rowsRead).toBeLessThan(40);
+
+      // Ten times the rows: the reads cost exactly the same.
+      seedRows(db, ALICE, 18_000, 2_000);
+      expect(db.one('SELECT count(*) AS n FROM scrobbles')).toEqual({ n: 20_000 });
+      const large = cost();
+      expect(large.global).toEqual(small.global);
+      expect(large.user).toEqual(small.user);
+      expect(large.rowsRead).toBe(small.rowsRead);
+
+      // Negative control: a max(indexed_at) read scans. Globally the plan uses no
+      // index (there is no indexed_at index); per owner it seeks the DID but then
+      // reads every row the owner has. Both costs grow with the table.
+      const { db: counting, executed } = countingDb(state.storage);
+      const globalMax = 'SELECT max(indexed_at) AS m FROM scrobbles';
+      const ownerMax = 'SELECT max(indexed_at) AS m FROM follows WHERE actor = ?';
+      expect(counting.one(globalMax)).toEqual({ m: '2026-01-14T05:33:20.000000000Z' });
+      expect(counting.one(ownerMax, ALICE)).toEqual({ m: '2026-01-14T05:33:20.000000000Z' });
+      // SQLite renders the unindexed min/max access as a bare `SEARCH scrobbles`
+      // (or `SCAN scrobbles`): neither names an index, unlike every status read above.
+      expect(queryPlan(db, globalMax, []).filter((detail) => /\b(SEARCH|SCAN) scrobbles\b/.test(detail))).toEqual([
+        expect.not.stringContaining('USING'),
+      ]);
+      expect(executed[0]?.rowsRead).toBeGreaterThanOrEqual(20_000);
+      expect(executed[1]?.rowsRead).toBeGreaterThanOrEqual(20_000);
     });
   });
 });
