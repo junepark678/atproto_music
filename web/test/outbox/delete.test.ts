@@ -215,30 +215,18 @@ it('delete of a create that lost its rkey to another writer completes locally an
   const theirCid = (await fx.repo.put(SCROBBLE, behind.rkey, theirs)).ops[0]!.cid;
   const del1 = await remove(fx, behind.uri);
   expect(del1.predecessorIds).toEqual([behind.id]);
-
-  // Enqueued after the create already failed: no predecessor, same rule.
-  const after = await create(fx, 'Bachelorette');
-  const theirs2 = { ...after.record, track: 'Isobel' };
-  const theirCid2 = (await fx.repo.put(SCROBBLE, after.rkey, theirs2)).ops[0]!.cid;
-  await runUntilIdle(runner, fx.clock);
-  expect(await fx.store.get(after.id)).toMatchObject({ state: 'failed', failureCode: 'remote_record_conflict' });
-  const del2 = await remove(fx, after.uri);
-  expect(del2.predecessorIds).toEqual([]);
   await runUntilIdle(runner, fx.clock);
 
   expect(await fx.store.get(behind.id)).toMatchObject({ state: 'failed', failureCode: 'remote_record_conflict' });
-  for (const del of [del1, del2]) {
-    const row = (await fx.store.get(del.id))!;
-    expect(row).toMatchObject({ state: 'indexed', localCompletion: 'record_not_ours', dueAt: null });
-    expect(row.swapCid).toBeUndefined();
-    expect(row.failureCode).toBeUndefined();
-  }
-  // Only the creates and their reconciling getRecords reached the PDS.
-  expect(fx.session.sent.map((r) => r.nsid)).toEqual([CREATE, GET, CREATE, GET]);
+  const row = (await fx.store.get(del1.id))!;
+  expect(row).toMatchObject({ state: 'indexed', localCompletion: 'record_not_ours', dueAt: null });
+  expect(row.swapCid).toBeUndefined();
+  expect(row.failureCode).toBeUndefined();
+  // Only the create and its reconciling getRecord reached the PDS.
+  expect(fx.session.sent.map((r) => r.nsid)).toEqual([CREATE, GET]);
   expect(fx.pds.count(DELETE)).toBe(0);
   expect(fx.pds.count('com.atproto.repo.putRecord')).toBe(0);
   expect(await remoteRecord(fx, SCROBBLE, behind.rkey)).toMatchObject({ cid: theirCid, value: theirs });
-  expect(await remoteRecord(fx, SCROBBLE, after.rkey)).toMatchObject({ cid: theirCid2, value: theirs2 });
   expect(fx.appView.notified).toEqual([]);
 
   // The owner's view keeps the other writer's record visible and drops the failed local create.
@@ -259,6 +247,92 @@ it('delete of a create that lost its rkey to another writer completes locally an
   expect(view.hidden).toEqual([]);
   expect(view.items).toEqual([{ scrobble: page[0] }]);
   expect(view.pending).toEqual([]);
+});
+
+it('delete enqueued after the create already ended remote_record_conflict deletes the record the owner saw, with swap', async () => {
+  const fx = await outboxFixture();
+  const runner = fx.runner();
+
+  // Our create lost the rkey to another writer; the conflict is known before the delete.
+  const after = await create(fx, 'Bachelorette');
+  const theirs = { ...after.record, track: 'Isobel' };
+  const theirCid = (await fx.repo.put(SCROBBLE, after.rkey, theirs)).ops[0]!.cid;
+  await runUntilIdle(runner, fx.clock);
+  expect(await fx.store.get(after.id)).toMatchObject({ state: 'failed', failureCode: 'remote_record_conflict' });
+  expect(fx.pds.count(DELETE)).toBe(0);
+
+  // The owner sees the record now at that URI (the AppView's copy) and deletes it.
+  const seen: Scrobble = {
+    uri: after.uri,
+    cid: theirCid!,
+    did: ALICE,
+    revision: fx.repo.head!.rev,
+    artist: SCROBBLE_INPUT.artist,
+    track: 'Isobel',
+    listenedAt: SCROBBLE_INPUT.listenedAt,
+    createdAt: '2026-01-15T12:00:00.000Z',
+    indexedAt: '2026-01-15T12:00:01.000000000Z',
+  };
+  const before = overlayScrobbles([seen], await fx.ops(), ALICE);
+  expect(before.items).toEqual([
+    {
+      scrobble: seen,
+      local: { opId: after.id, kind: 'scrobble_create', state: 'failed', failureCode: 'remote_record_conflict' },
+    },
+  ]);
+  const del = await remove(fx, after.uri);
+  expect(del.predecessorIds).toEqual([]);
+  expect(overlayScrobbles([seen], await fx.ops(), ALICE).hidden).toEqual([after.uri]);
+  await runUntilIdle(runner, fx.clock);
+
+  // Not completed locally: a real deleteRecord carrying the CID the owner saw.
+  const row = (await fx.store.get(del.id))!;
+  expect(row).toMatchObject({ state: 'indexed', attempts: 1, swapCid: theirCid, dueAt: null });
+  expect(row.localCompletion).toBeUndefined();
+  expect(row.failureCode).toBeUndefined();
+  expect(fx.session.sent.map((r) => r.nsid)).toEqual([CREATE, GET, DELETE]);
+  expect(fx.session.sentTo(DELETE).map((r) => [r.body?.rkey, r.body?.swapRecord])).toEqual([[after.rkey, theirCid]]);
+  expect(fx.pds.calls.filter({ nsid: DELETE }).map((c) => c.status)).toEqual([200]);
+  expect(await remoteRecord(fx, SCROBBLE, after.rkey)).toBeNull();
+  expect(fx.appView.notifiedUris()).toEqual([after.uri]);
+  expect((await fx.appView.truth(after.uri)).state).toBe('absent');
+  expect(overlayScrobbles([seen], await fx.ops(), ALICE).hidden).toEqual([after.uri]);
+});
+
+it('delete enqueued after a remote_record_conflict create shows its failure instead of completing silently', async () => {
+  const fx = await outboxFixture();
+  const runner = fx.runner();
+  const after = await create(fx, 'Bachelorette');
+  const theirs = { ...after.record, track: 'Isobel' };
+  const theirCid = (await fx.repo.put(SCROBBLE, after.rkey, theirs)).ops[0]!.cid;
+  await runUntilIdle(runner, fx.clock);
+
+  fx.pds.fail({ nsid: DELETE }, { kind: 'status', status: 403, error: 'Forbidden', message: 'scope' });
+  const del = await remove(fx, after.uri);
+  await runUntilIdle(runner, fx.clock);
+
+  expect(await fx.store.get(del.id)).toMatchObject({ state: 'failed', failureCode: 'forbidden_scope', attempts: 1 });
+  expect(fx.pds.count(DELETE)).toBe(1);
+  expect(await remoteRecord(fx, SCROBBLE, after.rkey)).toMatchObject({ cid: theirCid, value: theirs });
+  const seen: Scrobble = {
+    uri: after.uri,
+    cid: theirCid!,
+    did: ALICE,
+    revision: fx.repo.head!.rev,
+    artist: SCROBBLE_INPUT.artist,
+    track: 'Isobel',
+    listenedAt: SCROBBLE_INPUT.listenedAt,
+    createdAt: '2026-01-15T12:00:00.000Z',
+    indexedAt: '2026-01-15T12:00:01.000000000Z',
+  };
+  const view = overlayScrobbles([seen], await fx.ops(), ALICE);
+  expect(view.hidden).toEqual([]);
+  expect(view.items).toEqual([
+    {
+      scrobble: seen,
+      local: { opId: del.id, kind: 'scrobble_delete', state: 'failed', failureCode: 'forbidden_scope' },
+    },
+  ]);
 });
 
 it('InvalidSwap after another client changed the record re-fetches the CID and retries the delete', async () => {

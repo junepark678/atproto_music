@@ -4,9 +4,11 @@
 // - A scrobble with a pending or completed local delete is hidden immediately
 //   from its owner's pages, before the AppView has verified absence.
 // - A delete that failed does not claim removal: the record stays visible,
-//   marked with the failure code. A delete completed locally because our
-//   create lost the rkey to another writer (`remote_record_conflict`) hides
-//   nothing; that other record was never deleted.
+//   marked with the failure code. A delete completed locally because the
+//   create it was queued behind lost the rkey to another writer
+//   (`remote_record_conflict`) hides nothing; that other record was never
+//   deleted. (A delete enqueued after the conflict was known is sent normally,
+//   so it hides the record while pending and shows its failure if it fails.)
 // - Local creates the AppView has not indexed yet (queued, running, published,
 //   or failed) are listed separately so the screen can show them with their
 //   state; a failed create stays visible with its code.

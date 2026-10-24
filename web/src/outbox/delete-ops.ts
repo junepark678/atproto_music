@@ -12,11 +12,17 @@
 // - InvalidSwap: re-fetch from the PDS and reconcile. Absent → done; present
 //   with another CID → retry (a counted attempt) with that CID.
 // - RecordNotFound (or a 404): look it up; absence completes the delete.
-// - Never another writer's record: when our create of this URI ended
-//   `remote_record_conflict`, the record at the rkey is someone else's and
-//   ours never existed there. The delete then completes locally with no PDS
-//   request (`localCompletion: 'record_not_ours'`), so the conflict rule
+// - Never another writer's record behind our back: when a delete was enqueued
+//   behind our own create of this URI (the create is one of its
+//   predecessorIds) and that create ended `remote_record_conflict`, the
+//   owner asked to delete *our* listen, which never existed there; the record
+//   at the rkey is someone else's. The delete then completes locally with no
+//   PDS request (`localCompletion: 'record_not_ours'`), so the conflict rule
 //   (never overwrite, never delete the other record) holds for deletes too.
+// - A delete enqueued after the conflict was already known has no such
+//   predecessor: the owner asked to delete the record they now see at that
+//   URI, so it takes the normal path (swapRecord = the AppView's CID for that
+//   record) and any failure stays visible in the overlay.
 
 import type { AtUri, Did, RecordStatus } from '@atmusic/core/api-types';
 import type { Clock, Random } from '@atmusic/core/deps';
@@ -81,10 +87,17 @@ export async function enqueueScrobbleDelete(args: EnqueueDeleteArgs): Promise<En
 /** Failure codes of a create that prove the record at its URI is not ours. */
 const NOT_OURS_CODES: ReadonlySet<string> = new Set(['remote_record_conflict']);
 
-/** Our create of this URI ended with proof that another writer holds the rkey. */
+/**
+ * A create this delete was enqueued behind (one of its own predecessorIds)
+ * ended with proof that another writer holds the rkey. Earlier rows that are
+ * not predecessors do not count: a delete enqueued after the conflict was
+ * known targets the record the owner saw there and must really be sent.
+ */
 export function createLostRkey(op: OutboxOperation, earlier: readonly OutboxOperation[]): boolean {
+  const predecessors = new Set(op.predecessorIds);
   return earlier.some(
     (o) =>
+      predecessors.has(o.id) &&
       o.kind === 'scrobble_create' &&
       o.uri === op.uri &&
       o.state === 'failed' &&

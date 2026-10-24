@@ -72,7 +72,7 @@ export interface OutboxOperation {
   /**
    * Set when the operation finished without a PDS write because local state
    * already proved it (state `indexed`): `record_not_ours` for a delete whose
-   * create ended `remote_record_conflict`.
+   * predecessor create of the same URI ended `remote_record_conflict`.
    */
   localCompletion?: string;
   /** Code of the last transient failure, kept while retrying. */
