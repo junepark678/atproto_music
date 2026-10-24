@@ -31,20 +31,30 @@
 // `indexed_at` ever written, kept in `indexing_status('global').last_indexed_at`
 // (global) and `users.indexed_at` (per user) by `noteIndexed`, which every
 // projection write (W2-04 applyRecordProof, applySnapshotChunk,
-// completeSnapshot) must call in the same transaction as the row it indexes.
+// completeSnapshot) must call in the same transaction as the row it indexes,
+// instead of setting `users.indexed_at` itself (binding through the wave plan
+// and enforced by the source guard in worker/test/storage/status.test.ts).
 // Both reads are a primary-key lookup (O(log n)); a `max(indexed_at)` over
 // scrobbles/follows would scan the tables, which have no `indexed_at` index.
 //
-// `lagSeconds` is `floor((now − last_event_time_us) / 1e6)`, clamped at 0. It is
-// null when no event has been received since the current connection opened
-// (a quiet stream right after a connect is not "behind"), and null when no
-// event was ever received.
+// `lagSeconds` is `floor((now − last_event_time_us) / 1e6)`, clamped at 0, where
+// `last_event_time_us` is the newest event of the current (or, once closed, the
+// most recent) connection: `markConnected` clears it and only `recordEvent`
+// sets it. So it is null when no event has been received since the connection
+// opened (a quiet stream right after a connect is not "behind"), and it stays
+// null after that connection closes without an event (a quiet pulse, or a
+// reconnect that drops before its first event), instead of falling back to an
+// older connection's event. The resume point is `cursor`, which is never
+// cleared.
 //
 // Per-user state (`did` given):
 // - a `suppression` row or `users.indexing_state='suppressed'` → `suppressed`
 //   (caughtUp false, lastIndexedAt null, lagSeconds null);
-// - an unknown DID reports the global indexing (the index knows nothing more
-//   specific about it);
+// - an unknown DID (no users row, no suppression row) reports what Rust
+//   reports for an unknown scope: `recovering` (or `stale` when the global
+//   state is stale), caughtUp false, lastIndexedAt null; nothing of it is
+//   indexed, so the global caughtUp and lastIndexedAt (other DIDs' work) do
+//   not apply to it;
 // - otherwise `users.indexing_state`, raised to `recovering` while that DID has
 //   a snapshot job that is not complete (activation, reactivation, PDS
 //   migration, coalescing, gap recovery);
@@ -57,26 +67,31 @@
 // - lastIndexedAt is that DID's `users.indexed_at`; lagSeconds is the global
 //   ingest lag.
 //
-// Checkpoint write contract. The stale and lag rules read
+// Checkpoint write contract. The stale rule reads
 // `ingest_checkpoint.updated_at_ms` as "disconnected since" (when
-// `connected=0`) and "last event receipt" (when `connected=1`). That meaning
-// only holds if every writer of the `jetstream` checkpoint goes through the
-// writers exported here, which is binding on W3-04 (enqueueHints' checkpoint
-// advance → recordEvent), W4-01 (gap scan / maybeClearGap →
-// updateCheckpointBookkeeping), W4-02 (checkpoint.ts: connect → markConnected,
-// each message → recordEvent, close/error/pulse end → markDisconnected, host
-// rotation → updateCheckpointBookkeeping) and W5-01 (constructor "mark
-// disconnected" → markDisconnected):
-// - markConnected: `connected=1, connected_at_ms=now, updated_at_ms=now`;
-// - recordEvent: `cursor, last_event_time_us, updated_at_ms=receiptMs`, kept
-//   strictly after `connected_at_ms` so an event received in the connect
-//   millisecond still counts as "received since connect";
+// `connected=0`) and the lag rule reads `last_event_time_us` as "newest event
+// of the most recent connection". That meaning only holds if every writer of
+// the `jetstream` checkpoint goes through the writers exported here. The wave
+// plan (docs/planning/workers-waves.json) binds W3-04 (enqueueHints'
+// checkpoint advance → recordEvent), W4-01 (gap scan / maybeClearGap →
+// updateCheckpointBookkeeping), W4-02 (checkpoint.ts: connect →
+// markConnected, each message → recordEvent, close/error/pulse end →
+// markDisconnected, host rotation → updateCheckpointBookkeeping), W5-01
+// (constructor "mark disconnected" → markDisconnected) and W2-04 (every
+// `indexed_at` write → noteIndexed), and the source guard in
+// worker/test/storage/status.test.ts fails when any other module writes
+// `ingest_checkpoint` or `indexing_status`, sets `users.indexed_at`, or
+// inserts projection rows without calling noteIndexed:
+// - markConnected: `connected=1, connected_at_ms=now, updated_at_ms=now,
+//   last_event_time_us=NULL` (no event of this connection yet);
+// - recordEvent: `cursor, last_event_time_us` only;
 // - markDisconnected: `connected=0, updated_at_ms=now`, written on the 1→0
 //   transition only, so `updated_at_ms` is the instant the disconnection
 //   began and a repeated write (constructor after eviction, a failed
-//   reconnect) does not move it. A never-written checkpoint
-//   (`updated_at_ms=0`) has no reference instant and is not reported stale
-//   (it is first start).
+//   reconnect) does not move it. It never touches `last_event_time_us`, so a
+//   closed connection keeps whether (and when) it received an event. A
+//   never-written checkpoint (`updated_at_ms=0`) has no reference instant and
+//   is not reported stale (it is first start).
 // - updateCheckpointBookkeeping: `pending_gap`, `gap_scan_after_did`,
 //   `host_index` and `mode` only; it never touches `updated_at_ms`,
 //   `connected`, `connected_at_ms`, `cursor` or `last_event_time_us`.
@@ -126,9 +141,12 @@ export interface IndexingOptions {
  */
 export function noteIndexed(db: Db, did: string | null, indexedAtNs: bigint): void {
   const at = toStorage(indexedAtNs);
+  // Upsert: the mark survives even if the seeded global row were missing. Only
+  // `last_indexed_at` is consulted; `state` is a placeholder for the NOT NULL column.
   db.run(
-    'UPDATE indexing_status SET last_indexed_at = ? WHERE scope = ? AND (last_indexed_at IS NULL OR last_indexed_at < ?)',
-    at,
+    `INSERT INTO indexing_status(scope, state, caught_up, last_indexed_at) VALUES (?, 'recovering', 0, ?)
+     ON CONFLICT(scope) DO UPDATE SET last_indexed_at = excluded.last_indexed_at
+     WHERE last_indexed_at IS NULL OR last_indexed_at < excluded.last_indexed_at`,
     GLOBAL_SCOPE,
     at,
   );
@@ -137,10 +155,14 @@ export function noteIndexed(db: Db, did: string | null, indexedAtNs: bigint): vo
   }
 }
 
-/** The upstream connection opened (socket connect, or a pulse whose connect succeeded). */
+/**
+ * The upstream connection opened (socket connect, or a pulse whose connect
+ * succeeded). Clears `last_event_time_us`: no event of this connection yet.
+ */
 export function markConnected(db: Db, nowMs: number): void {
   db.run(
-    'UPDATE ingest_checkpoint SET connected = 1, connected_at_ms = ?, updated_at_ms = ? WHERE stream = ?',
+    `UPDATE ingest_checkpoint SET connected = 1, connected_at_ms = ?, updated_at_ms = ?, last_event_time_us = NULL
+     WHERE stream = ?`,
     nowMs,
     nowMs,
     JETSTREAM_STREAM,
@@ -148,18 +170,17 @@ export function markConnected(db: Db, nowMs: number): void {
 }
 
 /**
- * A Jetstream message was received at `receiptMs` (including ignored ones):
- * advance the cursor and record the event time and receipt instant. Call it
- * in the same transaction as the hint enqueue (ADR §5.4).
+ * A Jetstream message was received (including ignored ones): advance the
+ * cursor and record the event time (ADR §5.4: `SET cursor=?,
+ * last_event_time_us=?`). Call it in the same transaction as the hint enqueue.
+ * It never touches `updated_at_ms`, so an event can never move the stale
+ * reference instant.
  */
-export function recordEvent(db: Db, event: { cursor: number; timeUs: number }, receiptMs: number): void {
+export function recordEvent(db: Db, event: { cursor: number; timeUs: number }): void {
   db.run(
-    `UPDATE ingest_checkpoint SET cursor = ?, last_event_time_us = ?,
-       updated_at_ms = max(?, coalesce(connected_at_ms, -1) + 1)
-     WHERE stream = ?`,
+    'UPDATE ingest_checkpoint SET cursor = ?, last_event_time_us = ? WHERE stream = ?',
     event.cursor,
     event.timeUs,
-    receiptMs,
     JETSTREAM_STREAM,
   );
 }
@@ -272,16 +293,12 @@ function upstreamFollowed(cp: CheckpointRow, mode: IngestMode): boolean {
   return mode !== 'socket' || cp.connected === 1;
 }
 
-/** Ingest lag in whole seconds, or null when no event arrived since connect. */
-export function lagSeconds(
-  cp: Pick<CheckpointRow, 'last_event_time_us' | 'connected' | 'connected_at_ms' | 'updated_at_ms'>,
-  nowMs: number,
-): number | null {
+/**
+ * Ingest lag in whole seconds, or null when the most recent connection has
+ * received no event (`markConnected` cleared `last_event_time_us`).
+ */
+function lagSeconds(cp: Pick<CheckpointRow, 'last_event_time_us'>, nowMs: number): number | null {
   if (cp.last_event_time_us === null) return null;
-  if (cp.connected === 1) {
-    // Connected but no event write since the connect write: idle, lag unknown.
-    if (cp.connected_at_ms === null || cp.updated_at_ms <= cp.connected_at_ms) return null;
-  }
   const lag = Math.floor((nowMs * 1000 - cp.last_event_time_us) / 1_000_000);
   return lag > 0 ? lag : 0;
 }
@@ -358,7 +375,15 @@ export function indexing(db: Db, nowMs: number, opts: IndexingOptions): Indexing
   if (suppressed || user?.indexing_state === 'suppressed') {
     return { state: 'suppressed', caughtUp: false, lastIndexedAt: null, lagSeconds: null };
   }
-  if (user === null) return global;
+  if (user === null) {
+    // Unknown DID (Rust: a missing scope row is recovering, not caught up, never indexed).
+    return {
+      state: worse('recovering', global.state as Exclude<IndexingState, 'suppressed'>),
+      caughtUp: false,
+      lastIndexedAt: null,
+      lagSeconds: global.lagSeconds,
+    };
+  }
 
   let state = user.indexing_state as Exclude<IndexingState, 'suppressed'>;
   if (exists(db, `SELECT 1 FROM repo_jobs WHERE did = ? AND kind = 'snapshot' AND state IN ${OPEN_JOB_STATES}`, did)) {
@@ -388,6 +413,8 @@ export type InternalStatus = Omit<AdminStatus, 'schema'>;
  * Admin view (`/internal/admin/status`, W5-01 adds the migration result):
  * the global indexing truth, the ingest checkpoint, hint counts, snapshot,
  * status and identity job counts by state, and every counter.
+ * `ingest.cursor` is the resume point; `ingest.lastEventTimeUs` is the newest
+ * event of the most recent connection (null until that connection's first event).
  */
 export function internalStatus(db: Db, nowMs: number, opts: { mode: IngestMode }): InternalStatus {
   const cp = readCheckpoint(db);

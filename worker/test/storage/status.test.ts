@@ -9,6 +9,8 @@
 // lastIndexedAt high-water mark are exercised through their DB effects, and the
 // reads are shown to be index lookups whose rows read do not grow with the
 // scrobbles/follows tables (ADR §10.4 query plans, with a negative control).
+// A source guard keeps every other production module off the checkpoint and
+// high-water-mark columns, so the writer contract cannot be bypassed silently.
 
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
@@ -44,6 +46,73 @@ function openapiValidator(schema: string) {
   return (value: unknown) => ((validate(value) as boolean) ? 'valid' : ajv.errorsText(validate.errors));
 }
 const validIndexing = openapiValidator('Indexing');
+
+/** Production sources, keyed by repository path (workerd has no host filesystem). */
+const SOURCES: Record<string, string> = Object.fromEntries(
+  Object.entries(
+    import.meta.glob('../../src/**/*.ts', { query: '?raw', import: 'default', eager: true }) as Record<string, string>,
+  ).map(([key, source]) => [key.replace(/^\.\.\/\.\.\//, 'worker/'), source]),
+);
+/** The modules that own the checkpoint and high-water-mark writes. */
+const WRITER_OWNERS = new Set(['worker/src/do/status.ts', 'worker/src/do/schema.ts']);
+
+/**
+ * Splits a TS source into its string and template literals (with their line)
+ * and its code with comments and literal bodies removed.
+ */
+function scan(source: string): { literals: Array<{ line: number; text: string }>; code: string } {
+  const literals: Array<{ line: number; text: string }> = [];
+  let code = '';
+  let i = 0;
+  const lineAt = (index: number) => source.slice(0, index).split('\n').length;
+  while (i < source.length) {
+    const c = source[i];
+    if (c === '/' && source[i + 1] === '/') {
+      const nl = source.indexOf('\n', i);
+      i = nl === -1 ? source.length : nl;
+    } else if (c === '/' && source[i + 1] === '*') {
+      const close = source.indexOf('*/', i + 2);
+      i = close === -1 ? source.length : close + 2;
+    } else if (c === "'" || c === '"' || c === '`') {
+      let j = i + 1;
+      while (j < source.length && source[j] !== c) j += source[j] === '\\' ? 2 : 1;
+      literals.push({ line: lineAt(i), text: source.slice(i + 1, j) });
+      code += `${c}${c}`;
+      i = j + 1;
+    } else {
+      code += c;
+      i += 1;
+    }
+  }
+  return { literals, code };
+}
+
+const GUARDS: Array<{ rule: string; test: (sql: string) => boolean }> = [
+  {
+    rule: 'writes ingest_checkpoint',
+    test: (sql) =>
+      /\b(?:UPDATE|INSERT\s+(?:OR\s+\w+\s+)?INTO|REPLACE\s+INTO|DELETE\s+FROM)\s+ingest_checkpoint\b/i.test(sql),
+  },
+  {
+    // Deleting a per-DID scope row (disconnect) is allowed; setting a value is not.
+    rule: 'writes indexing_status',
+    test: (sql) => /\b(?:UPDATE|INSERT\s+(?:OR\s+\w+\s+)?INTO|REPLACE\s+INTO)\s+indexing_status\b/i.test(sql),
+  },
+  {
+    rule: 'sets users.indexed_at',
+    test: (sql) =>
+      (/\bUPDATE\s+users\s+SET\b/i.test(sql) ||
+        (/\bINTO\s+users\b/i.test(sql) && /\bDO\s+UPDATE\s+SET\b/i.test(sql))) &&
+      /\bindexed_at\s*=/i.test(sql),
+  },
+];
+const PROJECTION_INSERT = /\bINSERT\s+(?:OR\s+\w+\s+)?INTO\s+(?:scrobbles|follows)\b/i;
+
+function guardViolations(file: string, source: string): string[] {
+  return scan(source).literals.flatMap(({ line, text }) =>
+    GUARDS.filter((guard) => guard.test(text)).map((guard) => `${file}:${line} ${guard.rule}`),
+  );
+}
 
 const stubFor = (name: string) => env.HARNESS.get(env.HARNESS.idFromName(name));
 
@@ -101,7 +170,7 @@ function healthySocket(db: Db, now: number) {
     connected: 1,
     pending_gap: 0,
     connected_at_ms: now - 10 * MINUTE,
-    updated_at_ms: now - SECOND,
+    updated_at_ms: now - 10 * MINUTE,
   });
 }
 
@@ -427,7 +496,7 @@ describe('indexing status truth', () => {
       setCheckpoint(db, { pending_gap: 0 });
 
       // Reconnect: no longer stale and caught up again; no event since connect, so lag is unknown.
-      setCheckpoint(db, { connected: 1, connected_at_ms: clock.nowMs(), updated_at_ms: clock.nowMs() });
+      db.tx(() => markConnected(db, clock.nowMs()));
       expect(read(db, clock.nowMs(), 'socket')).toEqual({
         state: 'current',
         caughtUp: true,
@@ -462,8 +531,8 @@ describe('indexing status truth', () => {
       // The same checkpoint in socket mode is stale too (disconnected for ~9m40s).
       expect(read(db, clock.nowMs(), 'socket').state).toBe('stale');
 
-      // A pulse in progress is not stale.
-      setCheckpoint(db, { connected: 1, connected_at_ms: clock.nowMs(), updated_at_ms: clock.nowMs() });
+      // A pulse in progress is not stale (and has no event yet, so its lag is unknown).
+      db.tx(() => markConnected(db, clock.nowMs()));
       expect(read(db, clock.nowMs(), 'pulse')).toMatchObject({ state: 'current', caughtUp: true, lagSeconds: null });
 
       // Off mode is stale however healthy the checkpoint looks, and also during a gap.
@@ -565,47 +634,145 @@ describe('indexing status truth', () => {
       const db = doDb(state.storage);
       const clock = fixedClock();
       const now = clock.nowMs();
+      const event = (timeUs: number) => ({ cursor: timeUs, timeUs });
+      const idle: Indexing = { state: 'current', caughtUp: true, lastIndexedAt: null, lagSeconds: null };
 
-      // Connected 30 s ago from a cursor whose last event (previous connection) is 10 min old.
-      setCheckpoint(db, {
+      // A previous connection delivered an event 10 min ago and closed; the gap is closed.
+      db.tx(() => {
+        markConnected(db, now - 20 * MINUTE);
+        recordEvent(db, event((now - 10 * MINUTE) * 1000));
+        updateCheckpointBookkeeping(db, { pendingGap: false });
+      });
+      db.tx(() => markDisconnected(db, now - 10 * MINUTE + SECOND));
+
+      // Reconnected 30 s ago from that cursor: no event since connect, so the lag is unknown,
+      // not the previous connection's 600 s. The resume cursor is kept.
+      db.tx(() => markConnected(db, now - 30 * SECOND));
+      expect(read(db, now, 'socket')).toEqual(idle);
+      expect(internalStatus(db, now, { mode: 'socket' }).ingest).toMatchObject({
         cursor: (now - 10 * MINUTE) * 1000,
-        last_event_time_us: (now - 10 * MINUTE) * 1000,
-        connected: 1,
-        pending_gap: 0,
-        connected_at_ms: now - 30 * SECOND,
-        updated_at_ms: now - 30 * SECOND,
+        lastEventTimeUs: null,
+        connected: true,
       });
-      expect(read(db, now, 'socket')).toEqual({
-        state: 'current',
-        caughtUp: true,
-        lastIndexedAt: null,
-        lagSeconds: null,
-      });
+      // Silence is not lag: five quiet minutes later it is still unknown.
       clock.advance(5 * MINUTE);
-      expect(read(db, clock.nowMs(), 'socket').lagSeconds).toBeNull();
+      expect(read(db, clock.nowMs(), 'socket')).toEqual(idle);
 
-      // An event with time_us 2.999999 s before receipt arrives: floor gives 2.
+      // An event with time_us 2.999999 s before now arrives: floor gives 2.
       clock.set('2026-01-15T12:00:00Z');
-      setCheckpoint(db, { last_event_time_us: now * 1000 - 2_999_999, updated_at_ms: now - SECOND });
+      db.tx(() => recordEvent(db, event(now * 1000 - 2_999_999)));
       expect(read(db, now, 'socket')).toEqual({ state: 'current', caughtUp: true, lastIndexedAt: null, lagSeconds: 2 });
       expect(internalStatus(db, now, { mode: 'socket' }).indexing.lagSeconds).toBe(2);
       // Exactly 3 s behind.
-      setCheckpoint(db, { last_event_time_us: now * 1000 - 3_000_000 });
+      db.tx(() => recordEvent(db, event(now * 1000 - 3_000_000)));
       expect(read(db, now, 'socket').lagSeconds).toBe(3);
       // Ten seconds later with no newer event, the lag is exactly 13.
       clock.advance(10 * SECOND);
       expect(read(db, clock.nowMs(), 'socket').lagSeconds).toBe(13);
       // An event stamped in the future (clock skew) never reports negative lag.
-      setCheckpoint(db, { last_event_time_us: (clock.nowMs() + 5 * SECOND) * 1000, updated_at_ms: clock.nowMs() });
+      db.tx(() => recordEvent(db, event((clock.nowMs() + 5 * SECOND) * 1000)));
       expect(read(db, clock.nowMs(), 'socket').lagSeconds).toBe(0);
 
-      // A new connection resets to unknown until its first event.
-      clock.advance(MINUTE);
-      setCheckpoint(db, { connected_at_ms: clock.nowMs(), updated_at_ms: clock.nowMs() });
-      expect(read(db, clock.nowMs(), 'socket').lagSeconds).toBeNull();
-      // Never any event: null even though connected long ago.
-      setCheckpoint(db, { last_event_time_us: null, connected_at_ms: now - 60 * MINUTE });
-      expect(read(db, clock.nowMs(), 'socket').lagSeconds).toBeNull();
+      // The socket drops after events: the closed connection's lag keeps growing.
+      db.tx(() => recordEvent(db, event((clock.nowMs() - SECOND) * 1000)));
+      const dropAt = clock.nowMs();
+      db.tx(() => markDisconnected(db, dropAt));
+      expect(read(db, dropAt + 30 * SECOND, 'socket')).toEqual({
+        state: 'current',
+        caughtUp: false,
+        lastIndexedAt: null,
+        lagSeconds: 31,
+      });
+
+      // Reconnect, no event, then drop: lag is unknown during the quiet connection
+      // and stays unknown after it closes (never the older connection's event).
+      const t1 = dropAt + MINUTE;
+      db.tx(() => markConnected(db, t1));
+      expect(read(db, t1 + 10 * SECOND, 'socket')).toEqual(idle);
+      expect(db.tx(() => markDisconnected(db, t1 + 20 * SECOND))).toBe(true);
+      expect(read(db, t1 + 40 * SECOND, 'socket')).toEqual({ ...idle, caughtUp: false });
+      expect(read(db, t1 + 20 * SECOND + 5 * MINUTE + 1, 'socket')).toEqual({
+        state: 'stale',
+        caughtUp: false,
+        lastIndexedAt: null,
+        lagSeconds: null,
+      });
+      expect(checkpointRow(db)).toMatchObject({
+        connected: 0,
+        cursor: (dropAt - SECOND) * 1000,
+        last_event_time_us: null,
+        connected_at_ms: t1,
+        updated_at_ms: t1 + 20 * SECOND,
+      });
+
+      // Pulse mode (the Free default). Six hours ago a pulse delivered an event.
+      const T = now + 6 * 60 * MINUTE;
+      db.tx(() => markConnected(db, T - 6 * 60 * MINUTE));
+      db.tx(() => recordEvent(db, event((T - 6 * 60 * MINUTE) * 1000)));
+      db.tx(() => markDisconnected(db, T - 6 * 60 * MINUTE + 20 * SECOND));
+      // A quiet pulse (no event) runs and closes: unknown during it and after it.
+      db.tx(() => markConnected(db, T - MINUTE));
+      expect(read(db, T - 50 * SECOND, 'pulse')).toEqual(idle);
+      db.tx(() => markDisconnected(db, T - 40 * SECOND));
+      expect(read(db, T, 'pulse')).toEqual(idle);
+      expect(read(db, T, 'pulse').lagSeconds).not.toBe(6 * 60 * 60);
+      // The next pulse delivers an event 2 s old and closes after 20 s: between pulses the
+      // lag is measured from that pulse's newest event.
+      const pulse = T + 4 * MINUTE;
+      db.tx(() => markConnected(db, pulse));
+      db.tx(() => recordEvent(db, event((pulse - 2 * SECOND) * 1000)));
+      db.tx(() => markDisconnected(db, pulse + 20 * SECOND));
+      expect(read(db, pulse + MINUTE, 'pulse')).toEqual({
+        state: 'current',
+        caughtUp: true,
+        lastIndexedAt: null,
+        lagSeconds: 62,
+      });
+    });
+  });
+
+  it('an unknown DID reports recovering with no lastIndexedAt while the global index is current', async () => {
+    await runInDurableObject(stubFor('status-unknown-did'), async (_i: HarnessDO, state) => {
+      const db = doDb(state.storage);
+      const now = fixedClock().nowMs();
+      healthySocket(db, now);
+      insertUser(db, BOB, { state: 'current' });
+      db.tx(() => {
+        insertScrobble(db, BOB, '3m4zm2ufr2222', ts(now - SECOND));
+        noteIndexed(db, BOB, fromMs(now - SECOND));
+      });
+
+      // The global index is current, caught up and has indexed other DIDs' rows.
+      expect(read(db, now, 'socket')).toEqual({
+        state: 'current',
+        caughtUp: true,
+        lastIndexedAt: '2026-01-15T11:59:59.000000000Z',
+        lagSeconds: 2,
+      });
+      // Nothing of an unknown DID is indexed (Rust: a missing scope is recovering,
+      // caught_up=false, last_indexed_at=null); the ingest lag is still the global one.
+      const unknown = { state: 'recovering', caughtUp: false, lastIndexedAt: null, lagSeconds: 2 };
+      expect(read(db, now, 'socket', ALICE)).toEqual(unknown);
+      expect(read(db, now, 'pulse', ALICE)).toEqual(unknown);
+      // A stale global state still outranks recovering for it.
+      expect(read(db, now, 'off', ALICE)).toEqual({ ...unknown, state: 'stale' });
+
+      // Once admitted (users row recovering, snapshot pending) and snapshotted, it reports its own truth.
+      insertUser(db, ALICE, { state: 'recovering', active: 0 });
+      insertJob(db, ALICE, { reason: 'activation', dueAt: now });
+      expect(read(db, now, 'socket', ALICE)).toEqual(unknown);
+      db.tx(() => {
+        db.run(`UPDATE repo_jobs SET state = 'complete' WHERE did = ?`, ALICE);
+        db.run(`UPDATE users SET active = 1, indexing_state = 'current' WHERE did = ?`, ALICE);
+        noteIndexed(db, ALICE, fromMs(now));
+      });
+      expect(read(db, now, 'socket', ALICE)).toEqual({
+        state: 'current',
+        caughtUp: true,
+        lastIndexedAt: '2026-01-15T12:00:00.000000000Z',
+        lagSeconds: 2,
+      });
+      expect(read(db, now, 'socket', BOB).lastIndexedAt).toBe('2026-01-15T11:59:59.000000000Z');
     });
   });
 
@@ -700,10 +867,15 @@ describe('indexing status truth', () => {
 
       // Connect; the first event arrives in the connect millisecond and still counts.
       db.tx(() => markConnected(db, t0));
-      expect(checkpointRow(db)).toMatchObject({ connected: 1, connected_at_ms: t0, updated_at_ms: t0 });
+      expect(checkpointRow(db)).toMatchObject({
+        connected: 1,
+        connected_at_ms: t0,
+        updated_at_ms: t0,
+        last_event_time_us: null,
+      });
       expect(read(db, t0, 'socket').lagSeconds).toBeNull();
       db.tx(() => {
-        recordEvent(db, { cursor: t0 * 1000 - 1_500_000, timeUs: t0 * 1000 - 1_500_000 }, t0);
+        recordEvent(db, { cursor: t0 * 1000 - 1_500_000, timeUs: t0 * 1000 - 1_500_000 });
         updateCheckpointBookkeeping(db, { pendingGap: false, mode: 'socket' });
       });
       expect(checkpointRow(db)).toEqual({
@@ -715,7 +887,8 @@ describe('indexing status truth', () => {
         mode: 'socket',
         host_index: 0,
         connected_at_ms: t0,
-        updated_at_ms: t0 + 1,
+        // An event never moves the connection-state instant.
+        updated_at_ms: t0,
       });
       expect(read(db, t0, 'socket')).toEqual({ state: 'current', caughtUp: true, lastIndexedAt: null, lagSeconds: 1 });
 
@@ -750,10 +923,18 @@ describe('indexing status truth', () => {
       expect(read(db, t1 + 60 * MINUTE, 'socket')).toMatchObject({ state: 'stale', caughtUp: false, lagSeconds: 3611 });
 
       // Reconnect at t2, then rotate back: no event since connect, lag stays unknown.
+      // The resume cursor survives; only this connection's event time is cleared.
       const t2 = t1 + 60 * MINUTE;
       db.tx(() => markConnected(db, t2));
       db.tx(() => updateCheckpointBookkeeping(db, { hostIndex: 0 }));
-      expect(checkpointRow(db)).toMatchObject({ connected: 1, connected_at_ms: t2, updated_at_ms: t2, host_index: 0 });
+      expect(checkpointRow(db)).toMatchObject({
+        connected: 1,
+        connected_at_ms: t2,
+        updated_at_ms: t2,
+        host_index: 0,
+        cursor: t0 * 1000 - 1_500_000,
+        last_event_time_us: null,
+      });
       expect(read(db, t2 + MINUTE, 'socket')).toEqual({
         state: 'current',
         caughtUp: true,
@@ -761,8 +942,12 @@ describe('indexing status truth', () => {
         lagSeconds: null,
       });
       // The first event after the reconnect makes the lag exact again.
-      db.tx(() => recordEvent(db, { cursor: (t2 - 4 * SECOND) * 1000, timeUs: (t2 - 4 * SECOND) * 1000 }, t2 + SECOND));
-      expect(checkpointRow(db)).toMatchObject({ updated_at_ms: t2 + SECOND, cursor: (t2 - 4 * SECOND) * 1000 });
+      db.tx(() => recordEvent(db, { cursor: (t2 - 4 * SECOND) * 1000, timeUs: (t2 - 4 * SECOND) * 1000 }));
+      expect(checkpointRow(db)).toMatchObject({
+        updated_at_ms: t2,
+        cursor: (t2 - 4 * SECOND) * 1000,
+        last_event_time_us: (t2 - 4 * SECOND) * 1000,
+      });
       expect(read(db, t2 + SECOND, 'socket').lagSeconds).toBe(5);
     });
   });
@@ -874,5 +1059,70 @@ describe('indexing status truth', () => {
       expect(executed[0]?.rowsRead).toBeGreaterThanOrEqual(20_000);
       expect(executed[1]?.rowsRead).toBeGreaterThanOrEqual(20_000);
     });
+  });
+
+  it('source guard: only status.ts writes ingest_checkpoint, indexing_status and users.indexed_at, and projection inserts have a noteIndexed caller', () => {
+    const files = Object.keys(SOURCES).sort();
+    expect(files).toContain('worker/src/do/status.ts');
+    expect(files).toContain('worker/src/do/schema.ts');
+    expect(files).toContain('worker/src/do/db.ts');
+
+    // The patterns match the real writers (status.ts is the owner, so it is exempt below).
+    const own = guardViolations('worker/src/do/status.ts', SOURCES['worker/src/do/status.ts'] ?? '');
+    expect(own.filter((v) => v.endsWith('writes ingest_checkpoint')).length).toBe(4);
+    expect(own.filter((v) => v.endsWith('writes indexing_status')).length).toBe(1);
+    expect(own.filter((v) => v.endsWith('sets users.indexed_at')).length).toBe(1);
+    // Negative controls: direct writes in another module are flagged; reads and other columns are not.
+    expect(
+      guardViolations(
+        'x.ts',
+        [
+          "db.run('UPDATE ingest_checkpoint SET cursor = ?, last_event_time_us = ? WHERE stream = ?')",
+          'db.run(`INSERT OR REPLACE INTO indexing_status(scope, state) VALUES (?, ?)`)',
+          "db.run(`UPDATE users SET indexing_state = 'current',\n       indexed_at = ?, last_activity_ms = ? WHERE did = ?`)",
+          'db.run(`INSERT INTO users(did, joined_at) VALUES (?, ?) ON CONFLICT(did) DO UPDATE SET indexed_at = ?`)',
+          "db.run('DELETE FROM ingest_checkpoint')",
+        ].join('\n'),
+      ),
+    ).toEqual([
+      'x.ts:1 writes ingest_checkpoint',
+      'x.ts:2 writes indexing_status',
+      'x.ts:3 sets users.indexed_at',
+      'x.ts:5 sets users.indexed_at',
+      'x.ts:6 writes ingest_checkpoint',
+    ]);
+    expect(
+      guardViolations(
+        'y.ts',
+        [
+          "db.one('SELECT cursor, updated_at_ms FROM ingest_checkpoint WHERE stream = ?')",
+          "db.run('UPDATE users SET handle = ? WHERE did = ?', handle, did); // indexed_at = untouched",
+          "db.one('SELECT last_indexed_at FROM indexing_status')",
+          "db.run('DELETE FROM indexing_status WHERE scope = ?', did)",
+          '// a comment may say UPDATE ingest_checkpoint SET cursor = ? without being code',
+          "/* or UPDATE users SET indexed_at = ? */ const url = 'https://example.com/x'; // it's fine",
+        ].join('\n'),
+      ),
+    ).toEqual([]);
+
+    // No other production module bypasses the writers.
+    const violations = files
+      .filter((file) => !WRITER_OWNERS.has(file))
+      .flatMap((file) => guardViolations(file, SOURCES[file] ?? ''));
+    expect(violations).toEqual([]);
+
+    // Once any module projects rows, some module other than status.ts must raise the
+    // lastIndexedAt high-water marks (W2-04 applyRecordProof / applySnapshotChunk / completeSnapshot).
+    const callsNoteIndexed = (source: string) => /\bnoteIndexed\s*\(/.test(scan(source).code);
+    expect(callsNoteIndexed("// noteIndexed(db, did, at) in a comment\nconst s = 'noteIndexed(x)';")).toBe(false);
+    expect(callsNoteIndexed('db.tx(() => {\n  noteIndexed(db, did, nowNs);\n});')).toBe(true);
+    const projecting = files.filter((file) =>
+      scan(SOURCES[file] ?? '').literals.some(({ text }) => PROJECTION_INSERT.test(text)),
+    );
+    const noting = files.filter((file) => file !== 'worker/src/do/status.ts' && callsNoteIndexed(SOURCES[file] ?? ''));
+    expect(
+      projecting.length === 0 || noting.length > 0,
+      `${projecting.join(', ')} insert projection rows but no module calls noteIndexed`,
+    ).toBe(true);
   });
 });
