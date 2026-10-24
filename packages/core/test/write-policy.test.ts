@@ -274,10 +274,58 @@ describe('failure classification', () => {
       code: 'invalid_record',
       error: 'InvalidRecord',
     });
-    // An oversized error body is not buffered; the status alone decides.
+    // An oversized error body is not buffered and is not judged by status alone:
+    // like Rust's BodyTooLarge it is a transient transport error, so a 400
+    // RecordAlreadyExists is retried rather than ended as upstream_rejected.
     const big = await classifyResponse(
       new Response(`{"error":"RecordAlreadyExists","pad":"${'x'.repeat(70_000)}"}`, { status: 400 }),
     );
-    expect(big).toEqual({ kind: 'permanent', code: 'upstream_rejected' });
+    expect(big).toEqual({ kind: 'transient', code: 'upstream_transport_error' });
+    // Same when Content-Length alone declares it over the limit.
+    const declaredBig = new Response('{"error":"RecordAlreadyExists"}', {
+      status: 400,
+      headers: { 'content-length': '70000' },
+    });
+    expect(await classifyResponse(declaredBig)).toEqual({ kind: 'transient', code: 'upstream_transport_error' });
+
+    // A body stream that errors part-way (socket reset) is a transport error too,
+    // never a permanent verdict from the partial bytes or the status.
+    const encoder = new TextEncoder();
+    const erroring = (prefix: string): ReadableStream<Uint8Array> => {
+      let pulls = 0;
+      return new ReadableStream<Uint8Array>({
+        pull(controller) {
+          pulls += 1;
+          if (pulls === 1) controller.enqueue(encoder.encode(prefix));
+          else controller.error(new TypeError('terminated: other side closed'));
+        },
+      });
+    };
+    const partialCreate = erroring('{"error":"RecordAlr');
+    expect(await classifyResponse(new Response(partialCreate, { status: 400 }))).toEqual({
+      kind: 'transient',
+      code: 'upstream_transport_error',
+    });
+    const partialSwap = erroring('{"error":"InvalidSw');
+    expect(await classifyResponse(new Response(partialSwap, { status: 400 }), { operation: 'delete' })).toEqual({
+      kind: 'transient',
+      code: 'upstream_transport_error',
+    });
+    // A 429/5xx whose body fails to read still carries the requested wait.
+    const partial503 = erroring('{"error":"Unavail');
+    expect(await classifyResponse(new Response(partial503, { status: 503, headers: { 'retry-after': '7' } }))).toEqual({
+      kind: 'transient',
+      code: 'upstream_transport_error',
+      retryAfterMs: 7_000,
+    });
+    const big429 = await classifyResponse(
+      new Response('x'.repeat(70_000), { status: 429, headers: { 'retry-after': '20' } }),
+    );
+    expect(big429).toEqual({ kind: 'transient', code: 'upstream_transport_error', retryAfterMs: 20_000 });
+    // A 4xx never carries a wait, even if the server sent one.
+    const big400Wait = await classifyResponse(
+      new Response('x'.repeat(70_000), { status: 400, headers: { 'retry-after': '20' } }),
+    );
+    expect(big400Wait).toEqual({ kind: 'transient', code: 'upstream_transport_error' });
   });
 });

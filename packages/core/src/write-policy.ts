@@ -64,7 +64,7 @@ export type FailureKind = 'transient' | 'permanent' | 'ambiguous_create' | 'miss
 
 export type FailureCode =
   // transient
-  | 'upstream_transport_error' // fetch threw: offline, DNS, TLS, abort/timeout
+  | 'upstream_transport_error' // fetch threw (offline, DNS, TLS, abort/timeout) or the body failed to read / was over 64 KiB
   | 'upstream_rate_limited' // 429
   | 'upstream_unavailable' // 5xx
   | 'repository_changed' // InvalidSwap: re-fetch, reconcile, retry
@@ -297,10 +297,43 @@ export function classify(failure: unknown, options: ClassifyOptions = {}): Class
 /** XRPC error bodies are tiny; never buffer an unbounded body to classify it. */
 const MAX_ERROR_BODY_BYTES = 64 * 1024;
 
-/** Reads a fetch `Response` body (bounded) and classifies it. */
+/**
+ * The body could not be read in full (the stream errored, or it is over the
+ * limit). Like Rust safe_client.rs (`transport_error` / `BodyTooLarge`, which
+ * write.rs maps to transient `upstream_transport_error`), this is a transport
+ * failure, never a status-only verdict: a truncated 400 RecordAlreadyExists or
+ * InvalidSwap must be retried, not ended as a permanent rejection. A 429/5xx
+ * still carries the server's requested wait.
+ */
+function unreadableBody(response: Response, options: ClassifyOptions): Classification {
+  const status = response.status;
+  const retryAfterMs =
+    status === 429 || status >= 500 ? retryAfterFromHeaders(response.headers, options.clock) : undefined;
+  return {
+    kind: 'transient',
+    code: 'upstream_transport_error',
+    ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
+  };
+}
+
+/**
+ * Reads a fetch `Response` body (bounded) and classifies it. A body that fails
+ * to read or exceeds 64 KiB is a transient `upstream_transport_error`.
+ */
 export async function classifyResponse(response: Response, options: ClassifyOptions = {}): Promise<Classification> {
+  if (!Number.isInteger(response.status) || response.status < 100 || response.status > 599) {
+    throw new RangeError(`not an HTTP status: ${response.status}`);
+  }
+  if (response.status >= 200 && response.status < 300) {
+    throw new RangeError(`classify is for failed writes; got success status ${response.status}`);
+  }
   let body: Uint8Array | undefined;
   if (response.body !== null) {
+    const declared = response.headers.get('content-length');
+    if (declared !== null && /^\d+$/.test(declared.trim()) && Number(declared.trim()) > MAX_ERROR_BODY_BYTES) {
+      await response.body.cancel().catch(() => undefined);
+      return unreadableBody(response, options);
+    }
     const reader = response.body.getReader();
     const chunks: Uint8Array[] = [];
     let size = 0;
@@ -310,22 +343,20 @@ export async function classifyResponse(response: Response, options: ClassifyOpti
         if (done) break;
         size += value.byteLength;
         if (size > MAX_ERROR_BODY_BYTES) {
-          chunks.length = 0;
-          await reader.cancel();
-          break;
+          await reader.cancel().catch(() => undefined);
+          return unreadableBody(response, options);
         }
         chunks.push(value);
       }
     } catch {
-      chunks.length = 0;
+      await reader.cancel().catch(() => undefined);
+      return unreadableBody(response, options);
     }
-    if (chunks.length > 0) {
-      body = new Uint8Array(chunks.reduce((n, c) => n + c.byteLength, 0));
-      let offset = 0;
-      for (const chunk of chunks) {
-        body.set(chunk, offset);
-        offset += chunk.byteLength;
-      }
+    body = new Uint8Array(size);
+    let offset = 0;
+    for (const chunk of chunks) {
+      body.set(chunk, offset);
+      offset += chunk.byteLength;
     }
   }
   return classify({ status: response.status, headers: response.headers, body }, options);
