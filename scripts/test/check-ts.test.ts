@@ -136,6 +136,11 @@ class DisposableCopy {
       }
     }
     expect(existsSync(join(this.dir, SELF))).toBe(false);
+    // An empty git repository (no commit), so tests run by the copied gate
+    // that list files with `git ls-files --others --exclude-standard`
+    // (scripts/test/deploy.test.ts) see the copy's files as in a checkout.
+    const init = exec('git', ['init', '-q'], this.dir);
+    expect(init.status, init.stderr).toBe(0);
     if (options.linkNodeModules) this.linkNodeModules();
   }
 
