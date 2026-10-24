@@ -56,6 +56,54 @@ interface MusicKeysGolden {
 
 const golden = JSON.parse(musicKeysRaw) as MusicKeysGolden;
 
+// Display-string limit and field-order vectors. music_keys.json only holds short
+// inputs, so these pin Rust `validate_display_string` (1–256 scalars, at most 1024
+// UTF-8 bytes, measured on the raw input before trimming and before NFKC) and the
+// field order of `TrackKey::new` / `AlbumKey::optional`. Every expected outcome
+// below was produced by running the inputs through the Rust crate (review round 1).
+// `null` = rejected with the named field; a string = the accepted key.
+const A256 = 'a'.repeat(256);
+const A257 = 'a'.repeat(257);
+const B257 = 'b'.repeat(257);
+const C257 = 'c'.repeat(257);
+const SMILE = '\u{1F600}';
+const ARTIST_LIMIT_VECTORS: [id: string, input: string, key: string | null][] = [
+  ['256 ASCII scalars', A256, A256],
+  ['257 ASCII scalars', A257, null],
+  ['256 scalars folded', 'A'.repeat(256), A256],
+  ['256 astral scalars = 1024 bytes, 512 code units', SMILE.repeat(256), SMILE.repeat(256)],
+  ['257 astral scalars = 1028 bytes', SMILE.repeat(257), null],
+  ['257 scalars in 1022 bytes', `${SMILE.repeat(255)}ab`, null],
+  ['256 astral scalars folded', '\u{10400}'.repeat(256), '\u{10428}'.repeat(256)],
+  ['256 scalars of 3 bytes', `${'\u3000'.repeat(255)}a`, 'a'],
+  ['length measured before trimming: 301', `${' '.repeat(300)}a`, null],
+  ['length measured before trimming: 256', `${' '.repeat(255)}a`, 'a'],
+  ['length measured before trimming: 257', `${' '.repeat(255)}a `, null],
+  ['length measured before NFKC: 256 decomposed', 'e\u0301'.repeat(128), '\u00e9'.repeat(128)],
+  ['length measured before NFKC: 257 decomposed', `${'e\u0301'.repeat(128)}x`, null],
+  ['NFKC expansion past the limit is accepted', '\ufdfa'.repeat(256), '\ufdfa'.repeat(256).normalize('NFKC')],
+  ['case-fold expansion past the limit is accepted', '\u00df'.repeat(256), 'ss'.repeat(256)],
+  ['only White_Space at 256 scalars', '\u3000'.repeat(256), null],
+];
+type FieldOutcome = [string, string] | 'artist' | 'track' | 'album' | null;
+const FIELD_ORDER_VECTORS: [
+  artist: string,
+  track: string,
+  album: string | null,
+  track: FieldOutcome,
+  album: FieldOutcome,
+][] = [
+  ['', '', '', 'track', 'artist'],
+  [A257, B257, C257, 'track', 'artist'],
+  [A257, 'ok', null, 'artist', 'artist'],
+  ['', 'ok', null, 'artist', 'artist'],
+  ['ok', B257, C257, 'track', 'album'],
+  ['ok', '', '', 'track', 'album'],
+  ['ok', 'ok', C257, ['ok', 'ok'], 'album'],
+  ['ok', 'ok', null, ['ok', 'ok'], null],
+  [A256, 'B'.repeat(256), 'C'.repeat(256), [A256, 'b'.repeat(256)], [A256, 'c'.repeat(256)]],
+];
+
 function codePoints(s: string): string[] {
   return Array.from(s, (ch) => `U+${ch.codePointAt(0)!.toString(16).toUpperCase().padStart(4, '0')}`);
 }
@@ -128,6 +176,22 @@ it('every music_keys.json vector equals the Rust key', () => {
 
   // The error is the Rust ValidationError, byte-for-byte.
   expect(DISPLAY_STRING_MESSAGE).toBe(golden.entries.find((e) => e.id === 'empty')!.artistKeyError!.message);
+
+  // Display-string limits at the boundary, measured on the raw input in scalars.
+  const enc = new TextEncoder();
+  expect(enc.encode(SMILE.repeat(256))).toHaveLength(1024);
+  expect(SMILE.repeat(256)).toHaveLength(512);
+  for (const [id, input, key] of ARTIST_LIMIT_VECTORS) {
+    expect(
+      outcome(() => artistKey(input)),
+      id,
+    ).toEqual(
+      key === null
+        ? { ok: false, error: { code: 'invalid_field', field: 'artist', message: DISPLAY_STRING_MESSAGE } }
+        : { ok: true, value: key },
+    );
+  }
+  expect(ARTIST_LIMIT_VECTORS.filter(([, , key]) => key === null)).toHaveLength(7);
 });
 
 it("Björk / '  BJÖRK  ' / 'jóga' group together; Homogenic/' HOMOGENIC ' group together", () => {
@@ -278,6 +342,37 @@ it('missing album yields null album key', () => {
     ok: false,
     error: { code: 'invalid_field', field: 'artist', message: DISPLAY_STRING_MESSAGE },
   });
+  // An over-long album is rejected like an empty one; one at the limit is a key.
+  expect(outcome(() => albumKey('Björk', C257))).toEqual({
+    ok: false,
+    error: { code: 'invalid_field', field: 'album', message: DISPLAY_STRING_MESSAGE },
+  });
+
+  // Field order: trackKey checks the track before the artist; albumKey checks the
+  // artist before the album. The first invalid field is the one reported.
+  const expectField = (got: ReturnType<typeof outcome>, want: FieldOutcome, label: string): void => {
+    if (want === null || Array.isArray(want)) {
+      expect(got, label).toEqual({ ok: true, value: want });
+    } else {
+      expect(got, label).toEqual({
+        ok: false,
+        error: { code: 'invalid_field', field: want, message: DISPLAY_STRING_MESSAGE },
+      });
+    }
+  };
+  for (const [artist, track, album, wantTrack, wantAlbum] of FIELD_ORDER_VECTORS) {
+    const label = JSON.stringify([artist.slice(0, 8), artist.length, track.slice(0, 8), track.length, album?.length]);
+    expectField(
+      outcome(() => trackKey(artist, track)),
+      wantTrack,
+      `track ${label}`,
+    );
+    expectField(
+      outcome(() => albumKey(artist, album)),
+      wantAlbum,
+      `album ${label}`,
+    );
+  }
 
   // Album ranking over Alice's fixture listens: r05 (no album) creates no bucket.
   // TESTING.md all-window albums: Björk/Homogenic:2, Radiohead/OK Computer:2,
