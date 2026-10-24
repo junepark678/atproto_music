@@ -11,7 +11,17 @@ export default defineConfig({
       'packages/*',
       'worker/vitest.*.config.ts',
       'web',
-      { test: { name: 'scripts', root: './scripts', include: ['test/**/*.test.ts'], environment: 'node' } },
+      // Node-side tooling tests (scripts/test/**: W0-AMEND check-ts, W1-09 gen-config/check-bundle).
+      // They spawn npm, tsc, biome, tsx and wrangler, hence the long default timeout.
+      {
+        test: {
+          name: 'scripts',
+          root: './scripts',
+          include: ['test/**/*.test.ts'],
+          environment: 'node',
+          testTimeout: 180_000,
+        },
+      },
     ],
     passWithNoTests: false,
   },

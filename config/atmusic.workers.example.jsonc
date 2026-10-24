@@ -1,0 +1,82 @@
+// Example deploy configuration for a self-hosted atmusic Worker (ADR 0004
+// §4.2). This deployment's own values (origin https://music.214510.xyz,
+// prefix dev.pythonplayer123.music, ADR §15 Q3) live in worker/wrangler.jsonc;
+// this file shows the shape with placeholder values for another operator.
+//
+// To use it, copy it over worker/wrangler.jsonc and replace every
+// music.example.org / org.example.music value with a domain and NSID prefix
+// you own. The paths below are relative to worker/.
+//
+// The deploy-time values that matter for the build:
+// - PUBLIC_ORIGIN: the https origin of a custom domain on a zone you own. The
+//   OAuth client_id is <PUBLIC_ORIGIN>/oauth/client-metadata.json and must
+//   never change once users sign in. Every route must be on this host.
+// - LEXICON_PREFIX: an NSID prefix whose authority domain you control (for
+//   org.example.music that is music.example.org, which publishes
+//   _lexicon.music.example.org TXT records). com.example.atmusic is the test
+//   fixture prefix and is always refused for deployed envs.
+//
+// Build steps (scripts/deploy.sh, W6-04, runs them in this order):
+//   npx tsx scripts/gen-config.ts --env production   # web/public/oauth/client-metadata.json + _headers
+//   npm run build:web                                # copies them into web/dist
+//   npx tsx scripts/check-bundle.ts --release        # refuses a build whose origin/prefix differ from these vars
+// For staging use `--env staging` with both scripts.
+//
+// gen-config takes PUBLIC_ORIGIN and LEXICON_PREFIX from the environment when
+// they are set, and refuses them unless they equal the vars below.
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "atmusic",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "../web/dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*", "/health/*", "/internal/*"]
+  },
+  "durable_objects": {
+    "bindings": [{ "name": "INDEX", "class_name": "IndexDO" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["IndexDO"] }],
+  "triggers": { "crons": ["*/5 * * * *"] },
+  // Workers Paid only (production needs Paid, ADR §11).
+  "limits": { "cpu_ms": 30000 },
+  "observability": { "enabled": true },
+  "vars": {
+    "PUBLIC_ORIGIN": "https://music.example.org",
+    "LEXICON_PREFIX": "org.example.music",
+    // Set to a reviewable reference to your _lexicon TXT record to enable publication.
+    "NAMESPACE_OWNERSHIP_REF": "",
+    "INGEST_MODE": "socket",
+    "JETSTREAM_URLS": "wss://jetstream.us-east.bsky.network,wss://jetstream.us-west.bsky.network",
+    "JETSTREAM_LOOKBACK_HOURS": "24",
+    "RELAY_URL": "https://relay1.us-east.bsky.network",
+    "PLAN": "paid",
+    "DO_LOCATION_HINT": "enam"
+  },
+  "routes": [{ "pattern": "music.example.org", "custom_domain": true }],
+  "env": {
+    // Staging: its own hostname, so its own client_id, and its own DO namespace.
+    // durable_objects and vars are not inheritable, so both are re-declared.
+    "staging": {
+      "durable_objects": {
+        "bindings": [{ "name": "INDEX", "class_name": "IndexDO" }]
+      },
+      "limits": {},
+      "vars": {
+        "PUBLIC_ORIGIN": "https://music-staging.example.org",
+        "LEXICON_PREFIX": "org.example.music",
+        "NAMESPACE_OWNERSHIP_REF": "",
+        "INGEST_MODE": "pulse",
+        "JETSTREAM_URLS": "wss://jetstream.us-east.bsky.network,wss://jetstream.us-west.bsky.network",
+        "JETSTREAM_LOOKBACK_HOURS": "24",
+        "RELAY_URL": "https://relay1.us-east.bsky.network",
+        "PLAN": "free",
+        "DO_LOCATION_HINT": "enam"
+      },
+      "routes": [{ "pattern": "music-staging.example.org", "custom_domain": true }]
+    }
+  }
+}
