@@ -223,7 +223,7 @@ describe('timers', () => {
         // gc does not reschedule itself: it is one-shot.
       });
 
-      const report = await runDue(db, NOW, handlers, UNLIMITED);
+      const report = await runDue(state.storage, db, NOW, handlers, UNLIMITED);
 
       expect(calls).toEqual([
         { name: 'drain', now: NOW },
@@ -265,14 +265,14 @@ describe('timers', () => {
         'status-sweep': () => clock.advance(10 * SECOND),
       });
 
-      const first = await runDue(db, NOW, handlers, { maxRuns: 2 });
+      const first = await runDue(state.storage, db, NOW, handlers, { maxRuns: 2 });
       expect(calls.map((c) => c.name)).toEqual(['drain', 'snapshot']);
       expect(first.ran).toEqual(['drain', 'snapshot']);
       // jetstream-watchdog was cancelled by snapshot, so it is not deferred.
       expect(first.deferred).toEqual(['status-sweep', 'identity-sweep', 'discovery', 'gc']);
       expect(timerRows(db).map((r) => r.name)).toEqual(['discovery', 'gc', 'identity-sweep', 'status-sweep']);
 
-      const second = await runDue(db, NOW, handlers, {
+      const second = await runDue(state.storage, db, NOW, handlers, {
         maxRuns: 100,
         deadline: { clock, atMs: NOW + 5 * SECOND },
       });
@@ -286,17 +286,17 @@ describe('timers', () => {
         superseded: false,
       });
 
-      const third = await runDue(db, NOW, handlers, { maxRuns: 0 });
+      const third = await runDue(state.storage, db, NOW, handlers, { maxRuns: 0 });
       expect(third.ran).toEqual([]);
       expect(third.deferred).toEqual(['identity-sweep', 'discovery', 'gc']);
       expect(calls).toHaveLength(3);
 
       // Not due yet at an earlier now: nothing runs, nothing deferred.
-      const early = await runDue(db, NOW - 2 * MINUTE, handlers, UNLIMITED);
+      const early = await runDue(state.storage, db, NOW - 2 * MINUTE, handlers, UNLIMITED);
       expect(early).toEqual({ ran: [], failed: [], deferred: [], recovered: [], superseded: false });
       expect(calls).toHaveLength(3);
 
-      await runDue(db, NOW, handlers, UNLIMITED);
+      await runDue(state.storage, db, NOW, handlers, UNLIMITED);
       expect(calls.map((c) => c.name)).toEqual([
         'drain',
         'snapshot',
@@ -312,10 +312,10 @@ describe('timers', () => {
       let inner: unknown = null;
       const reentrant = recordingHandlers({
         gc: async () => {
-          inner = await runDue(db, NOW, handlers, UNLIMITED).catch((e: unknown) => e);
+          inner = await runDue(state.storage, db, NOW, handlers, UNLIMITED).catch((e: unknown) => e);
         },
       });
-      expect((await runDue(db, NOW, reentrant.handlers, UNLIMITED)).ran).toEqual(['gc']);
+      expect((await runDue(state.storage, db, NOW, reentrant.handlers, UNLIMITED)).ran).toEqual(['gc']);
       expect(inner).toBeInstanceOf(TimerReentryError);
       expect(calls).toHaveLength(6);
     });
@@ -346,7 +346,7 @@ describe('timers', () => {
         gc: (now) => void schedule(db, 'gc', now + DAY),
       });
 
-      const first = await runDue(db, clock.nowMs(), handlers, UNLIMITED);
+      const first = await runDue(state.storage, db, clock.nowMs(), handlers, UNLIMITED);
       expect(calls.map((c) => c.name)).toEqual(['drain', 'snapshot', 'status-sweep', 'gc']);
       expect(first.ran).toEqual(['drain', 'gc']);
       expect(first.failed.map(({ error, ...rest }) => ({ ...rest, message: (error as Error).message }))).toEqual([
@@ -368,7 +368,7 @@ describe('timers', () => {
 
       // Backoff doubles with the consecutive-failure streak.
       clock.advance(2 * SECOND);
-      const second = await runDue(db, clock.nowMs(), handlers, UNLIMITED);
+      const second = await runDue(state.storage, db, clock.nowMs(), handlers, UNLIMITED);
       expect(second.ran).toEqual(['drain']);
       expect(second.failed.map((f) => [f.name, f.streak, f.retryAtMs])).toEqual([
         ['snapshot', 2, NOW + 2 * SECOND + 4 * SECOND],
@@ -380,7 +380,7 @@ describe('timers', () => {
       // own reschedule applies again.
       snapshotFails = false;
       clock.advance(4 * SECOND);
-      const third = await runDue(db, clock.nowMs(), handlers, UNLIMITED);
+      const third = await runDue(state.storage, db, clock.nowMs(), handlers, UNLIMITED);
       expect(third.ran).toEqual(['drain', 'snapshot']);
       expect(third.failed.map((f) => [f.name, f.streak, f.retryAtMs])).toEqual([
         ['status-sweep', 3, NOW + 6 * SECOND + 8 * SECOND],
@@ -408,6 +408,11 @@ describe('timers', () => {
   it('hung handler is taken over and rescheduled on the same instance', async () => {
     await runInDurableObject(stubFor('timers-hung'), async (_i: HarnessDO, state) => {
       const db = doDb(state.storage);
+      // The recording fake stands in for the DO storage: runDue and armAlarm
+      // share its identity as the run guard, and no real alarm is armed at a
+      // (wall-clock past) fixture time.
+      const alarms = recordingAlarms();
+      const storage = alarms.storage;
       schedule(db, 'drain', NOW);
       schedule(db, 'gc', NOW + DAY);
 
@@ -419,7 +424,7 @@ describe('timers', () => {
             rejectHung = reject;
           }),
       });
-      const hungRun = runDue(db, NOW, hung.handlers, UNLIMITED);
+      const hungRun = runDue(storage, db, NOW, hung.handlers, UNLIMITED);
       expect(hung.calls).toEqual([{ name: 'drain', now: NOW }]);
       expect(timerRows(db)).toEqual([
         { name: 'gc', due_at: NOW + DAY },
@@ -427,22 +432,23 @@ describe('timers', () => {
       ]);
 
       // While it is in flight the alarm is armed at the takeover time, not at
-      // the claim's past due time.
+      // the claim's past due time (which nextDue still reports).
       const takeoverAt = NOW + TIMER_RUN_TIMEOUT_MS;
-      const alarms = recordingAlarms();
-      expect(nextDue(db)).toBe(takeoverAt);
-      expect(armAlarm(alarms.storage, db)).toBe(takeoverAt);
+      expect(nextDue(db)).toBe(NOW);
+      expect(armAlarm(storage, db)).toBe(takeoverAt);
       expect(alarms.calls).toEqual([{ op: 'set', at: takeoverAt }]);
 
       // Before the timeout a second call is refused and changes nothing.
       const next = recordingHandlers({ drain: (now) => void schedule(db, 'drain', now + 2 * SECOND) });
-      await expect(runDue(db, takeoverAt - 1, next.handlers, UNLIMITED)).rejects.toBeInstanceOf(TimerReentryError);
+      await expect(runDue(storage, db, takeoverAt - 1, next.handlers, UNLIMITED)).rejects.toBeInstanceOf(
+        TimerReentryError,
+      );
       expect(next.calls).toEqual([]);
       expect(timerCounters(db)).toEqual([{ name: TIMER_STREAK_COUNTER, label: 'drain', value: 1 }]);
 
       // At the timeout the second call on the same instance takes over: the
       // hung drain counts as a failure and is rescheduled with backoff.
-      const takeover = await runDue(db, takeoverAt, next.handlers, UNLIMITED);
+      const takeover = await runDue(storage, db, takeoverAt, next.handlers, UNLIMITED);
       expect(takeover.recovered.map(({ error, ...rest }) => ({ ...rest, message: (error as Error).message }))).toEqual([
         {
           name: 'drain',
@@ -461,7 +467,7 @@ describe('timers', () => {
         { name: TIMER_FAILURES_COUNTER, label: 'drain', value: 1 },
         { name: TIMER_STREAK_COUNTER, label: 'drain', value: 1 },
       ]);
-      expect(armAlarm(alarms.storage, db)).toBe(takeoverAt + 2 * SECOND);
+      expect(armAlarm(storage, db)).toBe(takeoverAt + 2 * SECOND);
       expect(alarms.calls.at(-1)).toEqual({ op: 'set', at: takeoverAt + 2 * SECOND });
 
       // The rescheduled drain runs again on the same instance. While its new
@@ -478,7 +484,7 @@ describe('timers', () => {
           schedule(db, 'drain', now + 2 * SECOND);
         },
       });
-      const retried = await runDue(db, retryAt, retry.handlers, UNLIMITED);
+      const retried = await runDue(storage, db, retryAt, retry.handlers, UNLIMITED);
       expect(staleReport).toEqual({ ran: [], failed: [], deferred: [], recovered: [], superseded: true });
       expect(duringNewClaim).toEqual([
         { name: 'gc', due_at: NOW + DAY },
@@ -495,7 +501,102 @@ describe('timers', () => {
       expect(nextDue(db)).toBe(retryAt + 2 * SECOND);
 
       // The guard is released: a normal call runs again.
-      expect((await runDue(db, retryAt + 2 * SECOND, retry.handlers, UNLIMITED)).ran).toEqual(['drain']);
+      expect((await runDue(storage, db, retryAt + 2 * SECOND, retry.handlers, UNLIMITED)).ran).toEqual(['drain']);
+    });
+
+    // Rows scheduled during the hang (a fresh drain, another due timer) do not
+    // pull the alarm before the takeover time, and a run at the armed time
+    // starts instead of throwing TimerReentryError.
+    await runInDurableObject(stubFor('timers-hung-fresh-rows'), async (_i: HarnessDO, state) => {
+      const db = doDb(state.storage);
+      const alarms = recordingAlarms();
+      const storage = alarms.storage;
+      schedule(db, 'drain', NOW);
+      const hung = recordingHandlers({ drain: () => new Promise<void>(() => {}) });
+      void runDue(storage, db, NOW, hung.handlers, UNLIMITED);
+      const takeoverAt = NOW + TIMER_RUN_TIMEOUT_MS;
+
+      expect(schedule(db, 'drain', NOW + SECOND)).toBe(NOW + SECOND);
+      expect(schedule(db, 'snapshot', NOW + 500)).toBe(NOW + 500);
+      expect(schedule(db, 'gc', takeoverAt + HOUR)).toBe(takeoverAt + HOUR);
+      expect(timerRows(db)).toEqual([
+        { name: 'drain', due_at: NOW + SECOND },
+        { name: 'gc', due_at: takeoverAt + HOUR },
+        { name: 'snapshot', due_at: NOW + 500 },
+        { name: '~running:drain', due_at: NOW },
+      ]);
+      expect(nextDue(db)).toBe(NOW);
+      expect(armAlarm(storage, db)).toBe(takeoverAt);
+      expect(alarms.calls).toEqual([{ op: 'set', at: takeoverAt }]);
+      // Any earlier run is refused and changes nothing.
+      const next = recordingHandlers();
+      for (const at of [NOW + 500, NOW + SECOND, takeoverAt - 1]) {
+        await expect(runDue(storage, db, at, next.handlers, UNLIMITED)).rejects.toBeInstanceOf(TimerReentryError);
+      }
+      expect(next.calls).toEqual([]);
+      expect(timerCounters(db)).toEqual([{ name: TIMER_STREAK_COUNTER, label: 'drain', value: 1 }]);
+
+      // The alarm firing at the armed time starts: it takes the hung run over
+      // and runs the other due timer.
+      const fired = await runDue(storage, db, takeoverAt, next.handlers, UNLIMITED);
+      expect(fired.recovered.map((f) => [f.name, f.retryAtMs])).toEqual([['drain', takeoverAt + 2 * SECOND]]);
+      expect(fired.ran).toEqual(['snapshot']);
+      expect(next.calls).toEqual([{ name: 'snapshot', now: takeoverAt }]);
+      expect(timerRows(db)).toEqual([
+        { name: 'drain', due_at: takeoverAt + 2 * SECOND },
+        { name: 'gc', due_at: takeoverAt + HOUR },
+      ]);
+      // With the guard released the alarm follows min(due_at) again.
+      expect(armAlarm(storage, db)).toBe(takeoverAt + 2 * SECOND);
+      expect(alarms.calls.at(-1)).toEqual({ op: 'set', at: takeoverAt + 2 * SECOND });
+    });
+  });
+
+  it('Db wrappers over one storage share the run guard', async () => {
+    await runInDurableObject(stubFor('timers-two-wrappers'), async (_i: HarnessDO, state) => {
+      const db1 = doDb(state.storage);
+      const db2 = doDb(state.storage);
+      expect(db1).not.toBe(db2);
+      schedule(db1, 'drain', NOW);
+
+      let release: () => void = () => {};
+      const first = recordingHandlers({
+        drain: (now) =>
+          new Promise<void>((resolve) => {
+            release = () => {
+              schedule(db1, 'drain', now + 2 * SECOND);
+              resolve();
+            };
+          }),
+      });
+      const run1 = runDue(state.storage, db1, NOW, first.handlers, UNLIMITED);
+      expect(first.calls).toEqual([{ name: 'drain', now: NOW }]);
+
+      // A second run through the other wrapper sees the live claim as live,
+      // not as an orphan: refused, nothing recovered or rescheduled.
+      const second = recordingHandlers();
+      await expect(runDue(state.storage, db2, NOW + 1, second.handlers, UNLIMITED)).rejects.toBeInstanceOf(
+        TimerReentryError,
+      );
+      expect(second.calls).toEqual([]);
+      expect(timerRows(db2)).toEqual([{ name: '~running:drain', due_at: NOW }]);
+      expect(timerCounters(db2)).toEqual([{ name: TIMER_STREAK_COUNTER, label: 'drain', value: 1 }]);
+
+      release();
+      expect(await run1).toEqual({ ran: ['drain'], failed: [], deferred: [], recovered: [], superseded: false });
+      expect(first.calls).toHaveLength(1);
+      expect(timerRows(db2)).toEqual([{ name: 'drain', due_at: NOW + 2 * SECOND }]);
+      // The successful run is not recorded as a failure.
+      expect(timerCounters(db2)).toEqual([]);
+
+      // Guard released: the other wrapper runs normally.
+      expect(await runDue(state.storage, db2, NOW + 2 * SECOND, second.handlers, UNLIMITED)).toEqual({
+        ran: ['drain'],
+        failed: [],
+        deferred: [],
+        recovered: [],
+        superseded: false,
+      });
     });
   });
 
@@ -504,7 +605,7 @@ describe('timers', () => {
     let pendingRun: Promise<unknown> | null = null;
     let before: HarnessDO | null = null;
 
-    await runInDurableObject(stub, async (instance: HarnessDO) => {
+    await runInDurableObject(stub, async (instance: HarnessDO, state) => {
       before = instance;
       const db = instance.db;
       schedule(db, 'drain', NOW - SECOND);
@@ -519,13 +620,13 @@ describe('timers', () => {
         },
         drain: (now) => void schedule(db, 'drain', now + 2 * SECOND),
       });
-      const report = await runDue(db, NOW, failing.handlers, UNLIMITED);
+      const report = await runDue(state.storage, db, NOW, failing.handlers, UNLIMITED);
       expect(report.ran).toEqual(['drain']);
       expect(report.failed.map((f) => [f.name, f.retryAtMs])).toEqual([['snapshot', NOW + 2 * SECOND]]);
 
       // Then a run that dies with the instance: drain never settles.
       const hanging = recordingHandlers({ drain: () => new Promise<void>(() => {}) });
-      pendingRun = runDue(db, NOW + 2 * SECOND, hanging.handlers, UNLIMITED);
+      pendingRun = runDue(state.storage, db, NOW + 2 * SECOND, hanging.handlers, UNLIMITED);
       expect(hanging.calls).toEqual([{ name: 'drain', now: NOW + 2 * SECOND }]);
     });
     expect(pendingRun).not.toBeNull();
@@ -548,7 +649,7 @@ describe('timers', () => {
 
     await evictDurableObject(stub);
 
-    await runInDurableObject(stub, async (instance: HarnessDO) => {
+    await runInDurableObject(stub, async (instance: HarnessDO, state) => {
       expect(instance).not.toBe(before);
       expect(instance.migration).toEqual({ status: 'ready', version: 1 });
       const db = instance.db;
@@ -567,7 +668,7 @@ describe('timers', () => {
         snapshot: (now) => void schedule(db, 'snapshot', now + MINUTE),
         drain: (now) => void schedule(db, 'drain', now + 2 * SECOND),
       });
-      const report = await runDue(db, after, handlers, UNLIMITED);
+      const report = await runDue(state.storage, db, after, handlers, UNLIMITED);
       expect(report.superseded).toBe(false);
       expect(report.recovered.map(({ error, ...rest }) => rest)).toEqual([
         { name: 'drain', retryAtMs: after + 2 * SECOND, streak: 1 },
@@ -587,7 +688,7 @@ describe('timers', () => {
       ]);
 
       // And the recovered timer runs normally afterwards.
-      const later = await runDue(db, after + 2 * SECOND, handlers, UNLIMITED);
+      const later = await runDue(state.storage, db, after + 2 * SECOND, handlers, UNLIMITED);
       expect(later.ran).toEqual(['drain']);
       expect(timerCounters(db)).toEqual([
         { name: TIMER_FAILURES_COUNTER, label: 'drain', value: 1 },

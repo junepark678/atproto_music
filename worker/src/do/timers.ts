@@ -18,14 +18,21 @@
 //   claimed row behind. The next `runDue` on a fresh instance treats such an
 //   orphan as a failure: it is rescheduled with backoff, never dropped.
 //   Alarms are at-least-once, and every step is idempotent (ADR §5.9).
-// - One `runDue` at a time per Db. A second call on the same instance while a
-//   handler is in flight throws TimerReentryError, until the in-flight run is
-//   TIMER_RUN_TIMEOUT_MS old (by the callers' `now`; the platform's alarm
-//   wall-time limit). Then the in-flight run counts as hung: the later call
-//   takes over, its claim is treated as a failure (rescheduled with backoff)
-//   and the hung run, if it ever settles, changes nothing further. While a run
-//   is in flight, `nextDue` reports its claim at the takeover time, not at its
-//   past due time, so the alarm is never armed into a run it cannot start.
+// - One `runDue` at a time per DO storage. The guard is keyed on the storage
+//   object passed to `runDue`/`armAlarm` (the instance's `ctx.storage`, which
+//   is one object for the instance's lifetime and a new one after eviction),
+//   not on the Db wrapper, so every `doDb(storage)` wrapper over it shares
+//   one guard. A second call while a handler is in flight throws
+//   TimerReentryError, until the in-flight run is TIMER_RUN_TIMEOUT_MS old (by
+//   the callers' `now`; the platform's alarm wall-time limit). Then the
+//   in-flight run counts as hung: the later call takes over, its claim is
+//   treated as a failure (rescheduled with backoff) and the hung run, if it
+//   ever settles, changes nothing further.
+// - While a run is in flight, `armAlarm` arms no earlier than that run's
+//   takeover time, whatever rows exist (the claim, a fresh row its handler or
+//   an RPC scheduled, any other due timer), because no `runDue` before then
+//   can start. So the alarm is never armed into a run it cannot start.
+//   `alarm()` re-arms after `runDue` returns, which restores `min(due_at)`.
 // - Counters: `timer_failures/<name>` counts failures (monotonic) and
 //   `timer_failure_streak/<name>` holds the consecutive failures (deleted on
 //   success); both appear in adminStatus.
@@ -102,18 +109,22 @@ const RUNNING_NAMES = TIMER_NAMES.map((name) => RUNNING_PREFIX + name);
 const KNOWN_PLACEHOLDERS = [...TIMER_NAMES, ...RUNNING_NAMES].map(() => '?').join(',');
 
 interface ActiveRun {
-  /** The timer whose handler is awaited, if any. */
-  claimed: TimerName | null;
   /** From this `now` on, a later runDue may take the run over. */
   takeoverAtMs: number;
 }
 
-/** The run in progress, per Db, so a re-entrant runDue cannot steal claimed rows. */
-const active = new WeakMap<Db, ActiveRun>();
+/**
+ * The run in progress, per DO storage object (never per Db wrapper), so a
+ * re-entrant runDue through any wrapper over that storage cannot steal claimed
+ * rows.
+ */
+const active = new WeakMap<object, ActiveRun>();
+
+export type AlarmStorage = Pick<DurableObjectStorage, 'setAlarm' | 'deleteAlarm'>;
 
 export class TimerReentryError extends Error {
   constructor() {
-    super('runDue is already running on this database');
+    super('runDue is already running on this Durable Object storage');
     this.name = 'TimerReentryError';
   }
 }
@@ -169,37 +180,30 @@ export function dueAt(db: Db, name: TimerName): number | null {
 }
 
 /**
- * `min(due_at)` over the known timers, including a claimed row an earlier
- * instance left behind (it still needs a run to be recovered). The claim of a
- * run in flight on this instance counts at the time it may be taken over
- * (`now + TIMER_RUN_TIMEOUT_MS` of that run) when that is later. Rows with
- * other names are ignored. Null when nothing is scheduled.
+ * `min(due_at)` over the known timers, including a claimed row (`~running:`)
+ * an earlier instance left behind (it still needs a run to be recovered). Rows
+ * with other names are ignored. Null when nothing is scheduled.
  */
 export function nextDue(db: Db): number | null {
-  const run = active.get(db);
-  const inFlight = run?.claimed ? RUNNING_PREFIX + run.claimed : null;
-  const rows = db.all<{ name: string; due_at: number }>(
-    `SELECT name, due_at FROM timers WHERE name IN (${KNOWN_PLACEHOLDERS})`,
+  const row = db.one<{ next: number | null }>(
+    `SELECT MIN(due_at) AS next FROM timers WHERE name IN (${KNOWN_PLACEHOLDERS})`,
     ...TIMER_NAMES,
     ...RUNNING_NAMES,
   );
-  let next: number | null = null;
-  for (const row of rows) {
-    const at = row.name === inFlight ? Math.max(row.due_at, run!.takeoverAtMs) : row.due_at;
-    if (next === null || at < next) next = at;
-  }
-  return next;
+  return row?.next ?? null;
 }
-
-export type AlarmStorage = Pick<DurableObjectStorage, 'setAlarm' | 'deleteAlarm'>;
 
 /**
  * Arms the DO alarm at `nextDue(db)`, or deletes it when nothing is due.
+ * While a `runDue` on this storage is in flight, the alarm is armed no earlier
+ * than that run's takeover time, since no `runDue` can start before it.
  * Returns the armed time. The storage write is queued synchronously; the DO
  * output gate holds outgoing messages until it is durable.
  */
 export function armAlarm(storage: AlarmStorage, db: Db): number | null {
-  const next = nextDue(db);
+  const min = nextDue(db);
+  const run = active.get(storage);
+  const next = min === null || run === undefined ? min : Math.max(min, run.takeoverAtMs);
   if (next === null) void storage.deleteAlarm();
   else void storage.setAlarm(next);
   return next;
@@ -270,18 +274,28 @@ function recoverOrphans(db: Db, now: number, reason: string): TimerFailure[] {
 /**
  * Runs every timer with `due_at <= now` once, in priority order, until the
  * budget runs out. The caller re-arms the alarm afterwards (`armAlarm`).
- * Throws TimerReentryError while another run on this Db is in flight and
- * younger than TIMER_RUN_TIMEOUT_MS; takes an older one over.
+ *
+ * `storage` is the DO storage that `db` wraps (pass the same object to
+ * `armAlarm`); it is used only as the identity of the run guard, so every Db
+ * wrapper over one storage shares it. Throws TimerReentryError while another
+ * run on this storage is in flight and younger than TIMER_RUN_TIMEOUT_MS;
+ * takes an older one over.
  */
-export async function runDue(db: Db, now: number, handlers: TimerHandlers, budget: RunBudget): Promise<RunReport> {
+export async function runDue(
+  storage: AlarmStorage,
+  db: Db,
+  now: number,
+  handlers: TimerHandlers,
+  budget: RunBudget,
+): Promise<RunReport> {
   assertEpochMs('now', now);
   if (!Number.isSafeInteger(budget.maxRuns) || budget.maxRuns < 0) {
     throw new RangeError(`budget.maxRuns must be a non-negative safe integer, got ${budget.maxRuns}`);
   }
-  const previous = active.get(db);
+  const previous = active.get(storage);
   if (previous !== undefined && now < previous.takeoverAtMs) throw new TimerReentryError();
-  const run: ActiveRun = { claimed: null, takeoverAtMs: now + TIMER_RUN_TIMEOUT_MS };
-  active.set(db, run);
+  const run: ActiveRun = { takeoverAtMs: now + TIMER_RUN_TIMEOUT_MS };
+  active.set(storage, run);
   try {
     const recovered = recoverOrphans(
       db,
@@ -308,7 +322,6 @@ export async function runDue(db: Db, now: number, handlers: TimerHandlers, budge
       // An earlier handler may have cancelled or postponed this one.
       if (!claim(db, name, now)) continue;
       started++;
-      run.claimed = name;
       let failure: { error: unknown } | null = null;
       try {
         await handlers[name](now);
@@ -317,11 +330,10 @@ export async function runDue(db: Db, now: number, handlers: TimerHandlers, budge
       }
       // Taken over while hung: the claim was already rescheduled (and may
       // have been claimed again by the newer run), so touch nothing.
-      if (active.get(db) !== run) {
+      if (active.get(storage) !== run) {
         report.superseded = true;
         return report;
       }
-      run.claimed = null;
       if (failure !== null) {
         report.failed.push(fail(db, name, now, failure.error));
         continue;
@@ -331,6 +343,6 @@ export async function runDue(db: Db, now: number, handlers: TimerHandlers, budge
     }
     return report;
   } finally {
-    if (active.get(db) === run) active.delete(db);
+    if (active.get(storage) === run) active.delete(storage);
   }
 }
