@@ -564,6 +564,15 @@ describe('snapshot jobs', () => {
   });
 
   it('PDS migration A→B fetches from B and preserves URIs/CIDs', async () => {
+    // Two forms of "A no longer serves Alice": A dropped the account (400
+    // RepoNotFound), or A keeps it deactivated, the standard migration end
+    // state (getRepoStatus 200 {active:false,status:'deactivated'}).
+    for (const variant of ['removed', 'deactivated'] as const) {
+      await migrateAliceToB(variant);
+    }
+  });
+
+  async function migrateAliceToB(variant: 'removed' | 'deactivated'): Promise<void> {
     const { k, alice, followUri, scrobbleRows, follow } = await seeded();
     const S = k.collections.scrobble;
     const pdsA = k.pds.Alice;
@@ -571,7 +580,7 @@ describe('snapshot jobs', () => {
     const transport = wrap(k.transport, { extra: [pdsB] });
     const r11: { cid?: string } = {};
 
-    await runInDurableObject(stubFor('snapshot-pds-migration'), async (i: HarnessDO) => {
+    await runInDurableObject(stubFor(`snapshot-pds-migration-${variant}`), async (i: HarnessDO) => {
       const db = i.db;
       admit(db, alice, 'jetstream', T0);
       expect((await runUntilIdle(deps(db, k, { transport }), T0)).map((r) => r.outcome)).toEqual(['complete']);
@@ -581,7 +590,8 @@ describe('snapshot jobs', () => {
 
       // Alice moves her repository to B; A no longer hosts it; a new record lands on B.
       await pdsB.addAccount(k.repos.Alice, { handle: k.users.Alice.handle });
-      pdsA.removeAccount(alice);
+      if (variant === 'removed') pdsA.removeAccount(alice);
+      else pdsA.deactivate(alice);
       k.plc.setPds(alice, pdsB.origin);
       const put = await k.repos.Alice.put(S, 'r11', {
         $type: S,
@@ -616,9 +626,10 @@ describe('snapshot jobs', () => {
       expect(follows(db, alice).map((f) => f.uri)).toEqual([followUri]);
     });
 
-    // A was asked once, by the stale cached identity, and answered RepoNotFound;
-    // one fresh PLC resolution moved every later request to B.
-    expect(pdsA.calls.entries.map((c) => [c.nsid, c.status])).toEqual([[STATUS, 400]]);
+    // A was asked once, by the stale cached identity, and answered RepoNotFound
+    // (or reported the account deactivated); one fresh PLC resolution moved
+    // every later request to B.
+    expect(pdsA.calls.entries.map((c) => [c.nsid, c.status])).toEqual([[STATUS, variant === 'removed' ? 400 : 200]]);
     expect(k.plc.count(alice)).toBe(1);
     expect(pdsB.count(STATUS, alice)).toBe(2);
     expect(pdsB.count(LATEST, alice)).toBe(1);
@@ -626,7 +637,7 @@ describe('snapshot jobs', () => {
     const requested = getBlocksCids(pdsB);
     expect(requested).toContain(r11.cid);
     for (const r of [follow, ...scrobbleRows]) expect(requested).not.toContain(r.cid);
-  });
+  }
 
   it('a slice in flight while 25 hints coalesce keeps its lease and its completion re-walks the newest head', async () => {
     const { k, seed, alice, follow, scrobbleRows } = await seeded();

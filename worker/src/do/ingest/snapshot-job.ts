@@ -68,10 +68,11 @@
 //    source is remembered in the frontier, so later slices stay cache-only.
 //  - `bad_signature` / `key_unavailable` on the head: one fresh identity
 //    resolution and a re-verification, then fail closed.
-//  - RepoNotFound (or another Repo* error) from a PDS chosen by a cached
-//    identity: one fresh resolution; a changed PDS (migration A→B) is retried
-//    at once. Otherwise, as for an inactive getRepoStatus at the start, the
-//    account is deactivated (generation.ts) and the job closed (`inactive`).
+//  - RepoNotFound (or another Repo* error), or a getRepoStatus `active:false`
+//    body, from a PDS chosen by a cached identity: one fresh resolution; a
+//    changed PDS (migration A→B, whether A answers RepoNotFound or reports the
+//    account deactivated) is retried at once. Otherwise the account is
+//    deactivated (generation.ts) and the job closed (`inactive`).
 //  - 429 / 5xx / timeout: the host is paused (pds-budget.ts) and the walk is
 //    paused with its frontier, backing off; after MAX_TRANSIENT_ERRORS in a
 //    row it fails (`pds_unavailable`).
@@ -90,7 +91,11 @@
 //    batch of GAP_SCAN_BATCH known DIDs after `gap_scan_after_did` with
 //    `reason = GAP_REASON`, within the 1,024 pending-job cap of
 //    `scheduleSnapshot`: a full queue stops the batch and the scan resumes
-//    there once jobs complete. A finished scan stores GAP_SCAN_DONE;
+//    there once jobs complete. An open job that absorbs the request (a walk in
+//    progress, an unstarted or a failed one: `scheduleSnapshot` 'already')
+//    is re-tagged `reason = GAP_REASON` too, since its completion (a rescan of
+//    the newest head when its walk had started) is what covers the gap. A
+//    finished scan stores GAP_SCAN_DONE;
 //  - `maybeClearGap(db)` clears `pending_gap` only when the scan is finished
 //    and no gap-sourced job (`reason = GAP_REASON`) remains open.
 //  The seeded first-start gap (`pending_gap = 1` with no scan) is left alone
@@ -607,8 +612,10 @@ class Slice {
   }
 
   /**
-   * Run `fn` against the resolved PDS. A Repo* account error from a PDS that
-   * a cached identity named gets one fresh resolution; a changed PDS or key
+   * Run `fn` against the resolved PDS. An account error from a PDS that a
+   * cached identity named (a Repo* XRPC error, or a getRepoStatus body with
+   * `active: false`, which is how a PDS answers for an account migrated away
+   * and deactivated there) gets one fresh resolution; a changed PDS
    * (migration) is retried at once, anything else is AccountUnavailable.
    */
   async sync<T>(fn: (pds: string) => Promise<T>): Promise<T> {
@@ -619,7 +626,9 @@ class Slice {
       try {
         return await fn(pds);
       } catch (e) {
-        const status = isSafeFetchError(e) && e.code === 'http_status' ? ACCOUNT_ERRORS[e.xrpcError ?? ''] : undefined;
+        let status: InactiveStatus | undefined;
+        if (e instanceof AccountUnavailable) status = e.status;
+        else if (isSafeFetchError(e) && e.code === 'http_status') status = ACCOUNT_ERRORS[e.xrpcError ?? ''];
         if (status === undefined) throw e;
         if (!this.identityFresh) {
           const before = this.identity!;
@@ -1123,6 +1132,18 @@ function scanBatch(db: Db, now: number, after: string | null, o: GapScanOptions)
     }
     if (s.status === 'scheduled') report.scheduled++;
     else if (s.status === 'already') report.already++;
+    if (s.status === 'scheduled' || s.status === 'already') {
+      // The open job now carries this gap's work, whether it was created here or
+      // absorbed the request (a walk in progress re-walks the newest head at its
+      // completion; a failed or unstarted one walks fresh): it becomes gap work,
+      // so maybeClearGap and indexing() wait for it. `reason` is not part of the
+      // slice lease, so a slice in flight keeps its job.
+      db.run(
+        `UPDATE repo_jobs SET reason = ? WHERE did = ? AND kind = 'snapshot' AND state IN ('pending','running','failed')`,
+        GAP_REASON,
+        did,
+      );
+    }
     last = did;
   }
   report.done = !report.busy && dids.length < batch;
