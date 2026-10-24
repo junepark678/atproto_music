@@ -15,7 +15,7 @@
 
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { type APIRequestContext, expect, type Locator, type Page, test } from '@playwright/test';
+import { type APIRequestContext, type APIResponse, expect, type Locator, type Page, test } from '@playwright/test';
 import Ajv2020 from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
 import {
@@ -166,6 +166,22 @@ async function uriList(list: Locator): Promise<string[]> {
 /** The SPA's index.html (not merely a text that mentions its mount point, as the bundle does). */
 function isSpaHtml(body: string): boolean {
   return /^\s*<!doctype html>/i.test(body) && body.includes('<div id="app"></div>');
+}
+
+/**
+ * The Worker's JSON 404 envelope (crates/server/tests/assets.rs): status 404,
+ * application/json, error code not_found, requestId equal to x-request-id,
+ * and never the SPA's index.html.
+ */
+async function expectNotFoundEnvelope(res: APIResponse, label: string): Promise<void> {
+  const body = await res.text();
+  expect(isSpaHtml(body), label).toBe(false);
+  expect(res.status(), label).toBe(404);
+  expect(res.headers()['content-type'] ?? '', label).toContain('application/json');
+  const json = JSON.parse(body) as { error?: { code?: string; requestId?: string } };
+  expect(schemaErrors('Error', json), label).toBe('valid');
+  expect(json.error?.code, label).toBe('not_found');
+  expect(json.error?.requestId, label).toBe(res.headers()['x-request-id']);
 }
 
 const followRkey = (subject: string) => `f${createHash('sha256').update(subject).digest('hex')}`;
@@ -543,25 +559,23 @@ test('GET /u/<did> and /feed serve index.html 200 and POST /feed never returns S
     expect(res.headers()['x-request-id'], path).toBeUndefined();
     expect(await res.text(), path).toBe(indexHtml);
   }
-  // Workers Static Assets canonicalises a path whose segments are not in
-  // encodeURIComponent form (the `:` of a raw DID) with a 307 to that form,
-  // before the Worker runs; the query string is kept. This differs from the
-  // Rust oracle's direct 200 (crates/server/tests/assets.rs spa_deep_link) and
-  // is recorded as a platform amendment to M6.1.1/spa_deep_link and
-  // M7.1.3/route_deep_links.
+  // The raw DID form (`:` unencoded, as the SPA's own links emit it) is served
+  // index.html 200 directly as well, with its query string; no redirect
+  // (crates/server/tests/assets.rs spa_deep_link, M6.1.1/spa_deep_link,
+  // M7.1.3/route_deep_links). No platform amendment to these cases exists.
   for (const search of ['', '?tab=history']) {
-    const raw = await request.get(`/u/${bob.did}${search}`, { headers: navigate, maxRedirects: 0 });
-    expect(raw.status(), `raw DID${search}`).toBe(307);
-    expect(raw.headers().location, `raw DID${search}`).toBe(`${canonicalProfile}${search}`);
-    expect(raw.headers()['x-request-id'], `raw DID${search}`).toBeUndefined();
-    expect(isSpaHtml(await raw.text()), `raw DID${search}`).toBe(false);
+    const path = `/u/${bob.did}${search}`;
+    const raw = await request.get(path, { headers: navigate, maxRedirects: 0 });
+    expect(raw.status(), path).toBe(200);
+    expect(raw.headers().location, path).toBeUndefined();
+    expect(raw.headers()['content-type'], path).toContain('text/html');
+    expect(await raw.text(), path).toBe(indexHtml);
   }
 
-  // The deep links render their screens in the browser, the raw form after the
-  // one canonicalising redirect.
+  // The deep links render their screens in the browser, at the URL navigated to.
   for (const path of [canonicalProfile, `/u/${bob.did}`]) {
     await page.goto(path);
-    expect(new URL(page.url()).pathname, path).toBe(canonicalProfile);
+    expect(new URL(page.url()).pathname, path).toBe(path);
     await expect(heading(page)).toHaveText(`@${bob.handle}`);
     await expect(page.locator('.profile-did code')).toHaveText(bob.did);
   }
@@ -571,11 +585,11 @@ test('GET /u/<did> and /feed serve index.html 200 and POST /feed never returns S
   await page.goto('/no-such-page');
   await expect(heading(page)).toHaveText('Page not found');
 
-  for (const path of ['/feed', `/u/${bob.did}`]) {
+  // A non-GET to an SPA path is the JSON 404 envelope (oracle spa_deep_link:
+  // POST /feed → 404 not_found), never a bare 405 and never index.html.
+  for (const path of ['/feed', canonicalProfile, `/u/${bob.did}`]) {
     const post = await request.post(path, { data: { x: 1 }, maxRedirects: 0 });
-    expect([404, 405], `POST ${path}`).toContain(post.status());
-    expect(isSpaHtml(await post.text()), `POST ${path}`).toBe(false);
-    expect(post.headers()['content-type'] ?? '', `POST ${path}`).not.toContain('text/html');
+    await expectNotFoundEnvelope(post, `POST ${path}`);
   }
 });
 
@@ -592,15 +606,10 @@ test('non-navigation GET /assets/missing.js and encoded ../ traversal return 404
     '/assets/%252e%252e/secret',
   ]) {
     const res = await request.get(path, { headers: subresource, maxRedirects: 0 });
-    const body = await res.text();
-    expect(isSpaHtml(body), path).toBe(false);
-    expect(res.headers()['content-type'] ?? '', path).not.toContain('text/html');
-    expect(res.status(), path).toBe(404);
+    await expectNotFoundEnvelope(res, path);
   }
   // Unknown API paths are the Worker's JSON 404 envelope.
-  const unknown = await request.get('/api/unknown');
-  expect(unknown.status()).toBe(404);
-  expect(schemaErrors('Error', await unknown.json())).toBe('valid');
+  await expectNotFoundEnvelope(await request.get('/api/unknown'), '/api/unknown');
 });
 
 test('hashed /assets/*.js returns 200 with a JavaScript content type and immutable Cache-Control', async ({
