@@ -21,6 +21,7 @@ import {
   CAROL,
   click,
   emptyStats,
+  envelope,
   type FakeApi,
   fakeApi,
   GLOBAL_FEED,
@@ -488,6 +489,100 @@ describe('web/test/routes/profile.test.tsx', () => {
     );
     expect(buttonByText(view, 'Follow')).not.toBeNull();
     expect(buttonByText(view, 'Unfollow')).toBeNull();
+  });
+
+  it('a failed or truncated following lookup shows the follow state as unknown with a re-check, never Not following', async () => {
+    const world = await outboxWorld();
+    const { fx, api } = world;
+    const rkey = await followRkey(BOB);
+    serveUser(api, BOB, { profile: () => profileOf(BOB, 'bob.test'), history: BOBS });
+    serveUser(api, ALICE, { profile: () => profileOf(ALICE, 'alice.test'), history: [] });
+    const FOLLOWING = `GET /api/v1/users/${ALICE}/following`;
+    const indexing = profileOf(ALICE, null).indexing;
+    // A following page that never contains Bob; `more` decides whether a next page exists.
+    const otherPage = (n: number, more: boolean) =>
+      json(200, {
+        items: [
+          {
+            uri: `at://${ALICE}/${FOLLOW}/other${n}`,
+            cid: 'bafyreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy',
+            actor: ALICE,
+            subject: CAROL,
+            createdAt: '2026-01-15T12:00:00Z',
+          },
+        ],
+        nextCursor: more ? `c${n + 1}` : null,
+        asOf: '2026-01-15T12:00:00Z',
+        indexing,
+      });
+    let mode: '503' | 'endless' | 'empty' = '503';
+    api.on(FOLLOWING, (req) => {
+      if (mode === '503') return envelope(503, 'not_ready', 'Index storage is not initialized.');
+      if (mode === 'empty') return json(200, { items: [], nextCursor: null, asOf: '2026-01-15T12:00:00Z', indexing });
+      return otherPage(Number((req.query.cursor ?? 'c0').slice(1)), true);
+    });
+    const unknownText = 'Could not check whether you follow this account.';
+    const noClaim = (root: ParentNode) => {
+      expect(root.textContent).not.toMatch(/Not following|does not list you|You do not follow|You still follow/);
+      expect(buttonByText(root, 'Follow')).toBeNull();
+      expect(buttonByText(root, 'Unfollow')).toBeNull();
+    };
+
+    // 1. /following answers 503: unknown, with a re-check, and no Follow offered.
+    mounted = mount(`/u/${BOB}`, world.state, world.services);
+    let main = mounted.main();
+    const status = () => text(main.querySelector('.follow-status'));
+    await until(() => expect(status()).toBe(unknownText));
+    expect(api.count(FOLLOWING)).toBe(1);
+    noClaim(main);
+    expect(buttonByText(main, 'Check again')).not.toBeNull();
+
+    // A re-check that now gets an answer resolves the state.
+    mode = 'empty';
+    click(buttonByText(main, 'Check again'));
+    await until(() => expect(status()).toBe('Not following'));
+    expect(api.count(FOLLOWING)).toBe(2);
+    expect(buttonByText(main, 'Follow')).not.toBeNull();
+    expect(buttonByText(main, 'Check again')).toBeNull();
+    mounted.unmount();
+
+    // 2. A following list longer than the 10-page scan: unknown after exactly 10 reads.
+    mode = 'endless';
+    mounted = mount(`/u/${BOB}`, world.state, world.services);
+    main = mounted.main();
+    await until(() => expect(status()).toBe(unknownText));
+    expect(api.count(FOLLOWING)).toBe(2 + 10);
+    expect(
+      api
+        .calls(FOLLOWING)
+        .slice(2)
+        .map((r) => [r.query.limit, r.query.cursor ?? null]),
+    ).toEqual([['100', null], ...Array.from({ length: 9 }, (_, i) => ['100', `c${i + 1}`])]);
+    noClaim(main);
+    expect(buttonByText(main, 'Check again')).not.toBeNull();
+    mounted.unmount();
+
+    // 3. A follow whose index confirmation stopped, while the lookup fails: the
+    //    published text plus "could not check", never "does not list", no Follow.
+    mode = 'empty';
+    fx.appView.pendingPolls = Number.MAX_SAFE_INTEGER;
+    mounted = mount(`/u/${BOB}`, world.state, world.services);
+    main = mounted.main();
+    await until(() => expect(status()).toBe('Not following'));
+    mode = '503';
+    click(buttonByText(main, 'Follow'));
+    await until(() => expect(status()).toBe('Follow queued'));
+    await runUntilIdle(world.outbox.runner, world.clock);
+    const [follow] = await fx.ops();
+    expect(follow).toMatchObject({ kind: 'follow_create', state: 'published', dueAt: null });
+    expect(await fx.repo.getRecord(FOLLOW, rkey)).not.toBeNull();
+    await until(() =>
+      expect(status()).toBe(`Follow published to your PDS; the index has not confirmed it yet. ${unknownText}`),
+    );
+    noClaim(main);
+    expect(buttonByText(main, 'Check again')).not.toBeNull();
+    expect(fx.pds.count('com.atproto.repo.createRecord')).toBe(1);
+    expect(await fx.store.count()).toBe(1);
   });
 
   it("a scrobble whose index confirmation stopped reads as not confirmed in the owner's history, not as waiting", async () => {

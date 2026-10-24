@@ -17,7 +17,7 @@ import type { Did, Profile, Scrobble } from '@atmusic/core/api-types';
 import { useCallback, useEffect, useRef, useState } from 'preact/hooks';
 import { useRoute } from 'preact-iso';
 import { isDid } from '../api/client';
-import { FollowButton } from '../components/follow-button';
+import { FollowButton, type FollowEdge } from '../components/follow-button';
 import { formatUtc, isNotFound } from '../components/format';
 import { isPending, OperationStatus, withDueAt } from '../components/operation-status';
 import type { OutboxService } from '../components/outbox-service';
@@ -218,16 +218,28 @@ function ProfileView({ profile, refreshing, refreshError, onRefresh }: ProfileVi
   );
 }
 
-/** Whether the viewer's indexed following list contains `subject` (bounded scan of pages of 100). */
-async function indexedEdge(state: ReturnType<typeof useAppState>, viewer: Did, subject: Did, signal: AbortSignal) {
+/** Pages of 100 scanned before the edge is reported unknown. */
+const EDGE_SCAN_PAGES = 10;
+
+/**
+ * Whether the viewer's indexed following list contains `subject` (bounded scan
+ * of pages of 100). Reaching the page cap with more pages left is 'unknown',
+ * not false: the subject may be on a page that was not read.
+ */
+async function indexedEdge(
+  state: ReturnType<typeof useAppState>,
+  viewer: Did,
+  subject: Did,
+  signal: AbortSignal,
+): Promise<true | false | 'unknown'> {
   let cursor: string | null = null;
-  for (let page = 0; page < 10; page++) {
+  for (let page = 0; page < EDGE_SCAN_PAGES; page++) {
     const result = await state.api.following(viewer, { limit: 100, cursor }, { signal });
     if (result.items.some((f) => f.subject === subject)) return true;
     if (result.nextCursor === null) return false;
     cursor = result.nextCursor;
   }
-  return false;
+  return 'unknown';
 }
 
 function ProfileFollow({
@@ -244,7 +256,7 @@ function ProfileFollow({
   onSettled(): void;
 }) {
   const state = useAppState();
-  const [edge, setEdge] = useState<boolean | null>(null);
+  const [edge, setEdge] = useState<FollowEdge>(null);
   const [check, setCheck] = useState(0);
 
   useEffect(() => {
@@ -255,8 +267,9 @@ function ProfileFollow({
         if (!abort.signal.aborted) setEdge(value);
       },
       () => {
-        // Unknown: the outbox intent (if any) still shows; otherwise "not following".
-        if (!abort.signal.aborted) setEdge(false);
+        // A failed lookup is unknown, never "not following": the control
+        // says it could not check and offers a re-check.
+        if (!abort.signal.aborted) setEdge('unknown');
       },
     );
     return () => abort.abort();
@@ -295,6 +308,7 @@ function ProfileFollow({
       edge={edge}
       onFollow={() => outbox.follow(subject)}
       onUnfollow={() => outbox.unfollow(subject)}
+      onRecheck={() => setCheck((n) => n + 1)}
     />
   );
 }
