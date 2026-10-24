@@ -6,8 +6,8 @@
 // - The RUST_*_PROBES tables below extend it. They were produced on 2026-10-25
 //   by running the unmodified crates/core cursor code from a scratch Cargo
 //   harness (PageCursor::new + CursorCodec::encode, CursorCodec::decode of
-//   payloads signed with the primary derived key, CursorPosition::compare) and
-//   are pasted verbatim: `sig` is the Rust token's HMAC segment (so equal
+//   payloads signed with the primary derived key, CursorPosition::compare,
+//   PageCursor::contains/advance) and are pasted verbatim: `sig` is the Rust token's HMAC segment (so equal
 //   signatures mean byte-identical payloads), `ok` the Rust-decoded cursor, and
 //   null means Rust returned invalid_cursor.
 
@@ -17,6 +17,7 @@ import {
   CursorKeyError,
   comparePositions,
   cursorBindings,
+  cursorContains,
   cursorPayloadJson,
   decodeCursor,
   deriveCursorKey,
@@ -119,6 +120,12 @@ interface DecodeProbe {
   payload?: string;
   payloadHex?: string;
   ok: PageCursor | null;
+}
+interface ContainsProbe {
+  position: [string, string];
+  contains: boolean;
+  /** HMAC segment of the Rust token for `advance(position)`; null: Rust refused the advance. */
+  advanceSig: string | null;
 }
 interface CompareProbe {
   a: [string, string];
@@ -917,6 +924,28 @@ const RUST_COMPARE_PROBES: readonly CompareProbe[] = [
   { a: ['x', 'at://a'], b: ['2026-01-15T11:00:00Z', 'at://a'], order: null },
 ];
 
+// PageCursor::contains / advance on history_alice_page1 (upper = T9 r07,
+// last = T9 r01): the row must be <= upper and strictly < last, so a tuple
+// equal to `last` (in any UTC spelling) is excluded and cannot be advanced to.
+const RUST_CONTAINS_PROBES: readonly ContainsProbe[] = [
+  { position: [T9, `${S}r01`], contains: false, advanceSig: null },
+  { position: ['2026-01-15t11:00:00z', `${S}r01`], contains: false, advanceSig: null },
+  { position: ['2026-01-15T11:00:00+00:00', `${S}r01`], contains: false, advanceSig: null },
+  { position: [T9, `${S}r00`], contains: true, advanceSig: 'vaM1zVDHGvfdA8qZZwafJpsbiypRqrHyT4cwkB020Vc' },
+  { position: [T9, `${S}r0`], contains: true, advanceSig: 'A7yCGkx72MUxcZf42ocrB1kJpTf17Zm5OMBEaw5YeA8' },
+  { position: [T9, `${S}r010`], contains: false, advanceSig: null },
+  { position: [T9, `${S}r02`], contains: false, advanceSig: null },
+  { position: [T9, `${S}r07`], contains: false, advanceSig: null },
+  { position: [T9, `${S}r08`], contains: false, advanceSig: null },
+  { position: ['2026-01-15T11:00:00.000000001Z', `${S}r00`], contains: false, advanceSig: null },
+  {
+    position: ['2026-01-15T10:59:59.999999999Z', `${S}r99`],
+    contains: true,
+    advanceSig: 'V_rKMrFq2KOC88om9MYALvSn00msIssRFBukd3vGD_E',
+  },
+  { position: ['2026-01-15T11:00:00.000000001Z', `${S}r07`], contains: false, advanceSig: null },
+];
+
 // --- helpers (independent of the module under test) -------------------------
 
 const utf8 = new TextEncoder();
@@ -1083,6 +1112,36 @@ it('TS-encoded token equals Rust token byte-for-byte for the same inputs', async
   expect(advanced).toEqual(golden.advance.decoded);
   expect(await encodeCursor(primary, advanced)).toBe(golden.advance.token);
   await expectInvalidCursor(() => advanceCursor(from, golden.advance.advanceToTupleNotBelowLast.newLast));
+
+  // The `< last` bound is strict: a row equal to `last` is never re-served and
+  // advancing to it (a non-advancing cursor) is refused; one URI code point
+  // below `last` is in range; `upper` itself is above `last`, so out of range.
+  expect(cursorContains(from, from.last)).toBe(false);
+  await expectInvalidCursor(() => advanceCursor(from, from.last));
+  expect(cursorContains(from, { timestamp: from.last.timestamp, uri: `${S}r00` })).toBe(true);
+  expect(cursorContains(from, from.upper)).toBe(false);
+  // Same verdicts as Rust PageCursor::contains/advance, including equal-instant
+  // spellings of `last`; accepted advances sign to Rust's exact token.
+  for (const probe of RUST_CONTAINS_PROBES) {
+    const position = { timestamp: probe.position[0], uri: probe.position[1] };
+    const label = JSON.stringify(probe.position);
+    expect(cursorContains(from, position), label).toBe(probe.contains);
+    if (probe.advanceSig === null) {
+      await expectInvalidCursor(() => advanceCursor(from, position));
+    } else {
+      const moved = advanceCursor(from, position);
+      expect(moved.upper, label).toEqual(from.upper);
+      expect(moved.binding, label).toEqual(from.binding);
+      expect(moved.asOf, label).toBe(from.asOf);
+      expect((await encodeCursor(primary, moved)).split('.')[1], label).toBe(probe.advanceSig);
+    }
+  }
+  expect(RUST_CONTAINS_PROBES.filter((probe) => probe.contains).length).toBe(3);
+  // A fresh first page (last == upper) excludes the anchor row itself.
+  const firstPage = pageCursor(HISTORY_ALICE, from.upper, from.upper, from.asOf);
+  expect(cursorContains(firstPage, from.upper)).toBe(false);
+  await expectInvalidCursor(() => advanceCursor(firstPage, from.upper));
+  expect(cursorContains(firstPage, { timestamp: T9, uri: `${S}r06` })).toBe(true);
 
   // Rust-observed encode verdicts for chrono spellings, leap seconds, field
   // limits, whitespace/control characters and binding rules.
