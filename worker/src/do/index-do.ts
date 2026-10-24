@@ -37,6 +37,16 @@
 // steady stream of hints is batched and can never starve it; the other queue
 // timers are only ever pulled forward.
 //
+// RPC rejections (ADR §5.9 logging): workerd reports every rejected RPC
+// promise in the DO's own log stream (Workers Logs) with the error's message
+// and stack, outside the redacting Logger. So no raw error leaves an RPC
+// method: NotReadyError, RangeError (argument validation) and ApiError keep
+// their name and message but lose their stack and cause; anything else (a
+// storage fault, a platform error, a module bug) is logged through deps.log by
+// method and error name only and rejects as a bare
+// `IndexError: index operation failed`. Callers map every rejection to a
+// generic envelope anyway (worker/src/http/error.ts).
+//
 // Gap recovery (ADR §5.5): the socket's gap handler schedules the snapshot
 // scan (W4-01 `scheduleGapRecovery`) and one discovery pass
 // (`requestGapDiscovery`), and `pending_gap` is held until that discovery
@@ -47,6 +57,7 @@ import { DurableObject } from 'cloudflare:workers';
 import { fetchTransport } from '@atmusic/atproto/transport';
 import type { Did, Export, Indexing, NotifyInput, Profile, RecordStatus, Statistics } from '@atmusic/core/api-types';
 import { cryptoRandom, systemClock } from '@atmusic/core/deps';
+import { ApiError } from '@atmusic/core/errors';
 import { fromMs, toStorage } from '@atmusic/core/timestamp';
 import { parseConfig } from '../config';
 import type { Env } from '../env';
@@ -207,6 +218,53 @@ export class NotReadyError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'NotReadyError';
+  }
+}
+
+export const INDEX_ERROR_NAME = 'IndexError';
+export const INDEX_ERROR_MESSAGE = 'index operation failed';
+
+/** The only rejection an RPC method gives for an unexpected failure: no detail, no stack. */
+export class IndexError extends Error {
+  constructor() {
+    super(INDEX_ERROR_MESSAGE);
+    this.name = INDEX_ERROR_NAME;
+  }
+}
+
+/**
+ * `error` (freshly built by `rpcRejection`) with its stack reduced to
+ * `name: message`, so no frame or file path crosses the RPC boundary.
+ */
+function bare<E extends Error>(error: E): E {
+  Object.defineProperty(error, 'stack', {
+    value: `${error.name}: ${error.message}`,
+    configurable: true,
+    writable: true,
+  });
+  return error;
+}
+
+/**
+ * What an RPC method rejects with for `error` (see "RPC rejections" above):
+ * always a new error, so neither the original stack nor a `cause` crosses.
+ */
+function rpcRejection(error: unknown, method: string, log: Logger | null): Error {
+  if (error instanceof NotReadyError) return bare(new NotReadyError(error.message));
+  if (error instanceof RangeError) return bare(new RangeError(error.message));
+  if (error instanceof ApiError) return bare(new ApiError(error.code, error.message, error.fields, error.status));
+  const fields = { method, error: errorName(error) };
+  if (log !== null) log.log('error', 'index.rpc_failed', fields);
+  else console.error(JSON.stringify({ level: 'error', event: 'index.rpc_failed', ...fields }));
+  return bare(new IndexError());
+}
+
+/** Runs one RPC method body; any rejection is replaced by `rpcRejection`. */
+async function guarded<T>(method: string, log: Logger | null, body: () => T | Promise<T>): Promise<T> {
+  try {
+    return await body();
+  } catch (error) {
+    throw rpcRejection(error, method, log);
   }
 }
 
@@ -426,82 +484,97 @@ export class IndexDO extends DurableObject<Env> implements IndexRpc, AdminRpc {
     return this.deps;
   }
 
+  /** Runs an RPC method body through `guarded` (no raw error leaves the DO). JS-private: not an RPC method. */
+  #rpc<T>(method: string, body: () => T | Promise<T>): Promise<T> {
+    return guarded(method, this.deps?.log ?? null, body);
+  }
+
   async ready(): Promise<MigrateResult> {
-    if (this.deps === null) throw new NotReadyError(`index configuration is invalid (${errorName(this.depsError)})`);
-    if (this.migrationError !== null || this.migration === null) {
-      throw new NotReadyError('index storage migration failed');
-    }
-    return this.migration;
+    return this.#rpc('ready', () => {
+      if (this.deps === null) throw new NotReadyError(`index configuration is invalid (${errorName(this.depsError)})`);
+      if (this.migrationError !== null || this.migration === null) {
+        throw new NotReadyError('index storage migration failed');
+      }
+      return this.migration;
+    });
   }
 
   async indexing(did?: Did): Promise<Indexing> {
-    const m = this.live();
-    const mode = m.config.ingestMode;
-    return indexing(m.db, m.clock.nowMs(), did === undefined ? { mode } : { did, mode });
+    return this.#rpc('indexing', () => {
+      const m = this.live();
+      const mode = m.config.ingestMode;
+      return indexing(m.db, m.clock.nowMs(), did === undefined ? { mode } : { did, mode });
+    });
   }
 
   async history(q: HistoryQuery): Promise<RowsResult<ScrobbleRow>> {
-    return history(this.live(), q);
+    return this.#rpc('history', () => history(this.live(), q));
   }
 
   async feed(q: FeedQuery): Promise<RowsResult<ScrobbleRow>> {
-    return feed(this.live(), q);
+    return this.#rpc('feed', () => feed(this.live(), q));
   }
 
   async lookup(uri: string): Promise<ScrobbleRow | null> {
-    return lookup(this.live(), uri);
+    return this.#rpc('lookup', () => lookup(this.live(), uri));
   }
 
   async recordStatus(uri: string): Promise<RecordStatus> {
-    return recordStatus(this.live(), uri);
+    return this.#rpc('recordStatus', () => recordStatus(this.live(), uri));
   }
 
   async stats(q: StatsQuery): Promise<Statistics | null> {
-    return stats(this.live(), q);
+    return this.#rpc('stats', () => stats(this.live(), q));
   }
 
   async profile(did: Did): Promise<Profile | null> {
-    return profile(this.live(), did);
+    return this.#rpc('profile', () => profile(this.live(), did));
   }
 
   async following(q: FollowListQuery): Promise<RowsResult<FollowRow>> {
-    return following(this.live(), q);
+    return this.#rpc('following', () => following(this.live(), q));
   }
 
   async followers(q: FollowListQuery): Promise<RowsResult<FollowRow>> {
-    return followers(this.live(), q);
+    return this.#rpc('followers', () => followers(this.live(), q));
   }
 
   async exportUser(did: Did): Promise<Export | null> {
-    return exportUser(this.live(), did);
+    return this.#rpc('exportUser', () => exportUser(this.live(), did));
   }
 
   async resolveHandle(handle: string): Promise<ResolveOutcome> {
-    return resolveHandle(this.live(), handle);
+    return this.#rpc('resolveHandle', () => resolveHandle(this.live(), handle));
   }
 
   async notify(input: NotifyInput, ip: string): Promise<NotifyOutcome> {
-    const m = this.live();
-    const outcome = notify(m, input, ip, m.clock.nowMs());
-    this.timersChanged();
-    return outcome;
+    return this.#rpc('notify', () => {
+      const m = this.live();
+      const outcome = notify(m, input, ip, m.clock.nowMs());
+      this.timersChanged();
+      return outcome;
+    });
   }
 
   /** Cron (scheduled.ts): the timers exist and the alarm is armed; in pulse mode a pulse is due now. */
   async ensureRunning(): Promise<void> {
-    const m = this.live();
-    const now = m.clock.nowMs();
-    if (m.config.ingestMode === 'pulse') m.db.tx(() => schedule(m.db, 'jetstream-watchdog', now));
-    this.ensureTimers(m, now);
-    armAlarm(m.alarms, m.db);
+    return this.#rpc('ensureRunning', () => {
+      const m = this.live();
+      const now = m.clock.nowMs();
+      if (m.config.ingestMode === 'pulse') m.db.tx(() => schedule(m.db, 'jetstream-watchdog', now));
+      this.ensureTimers(m, now);
+      armAlarm(m.alarms, m.db);
+    });
   }
 
   async adminStatus(): Promise<AdminStatus> {
-    const m = this.live();
-    return {
-      schema: this.migration as MigrateResult,
-      ...internalStatus(m.db, m.clock.nowMs(), { mode: m.config.ingestMode }),
-    };
+    return this.#rpc('adminStatus', () => {
+      const m = this.live();
+      return {
+        schema: this.migration as MigrateResult,
+        ...internalStatus(m.db, m.clock.nowMs(), { mode: m.config.ingestMode }),
+      };
+    });
   }
 
   /**
@@ -510,23 +583,27 @@ export class IndexDO extends DurableObject<Env> implements IndexRpc, AdminRpc {
    * then aborted, so the next request opens the restored storage.
    */
   async adminPitr(atMs: number): Promise<PitrResult> {
-    const m = this.live();
-    const now = m.clock.nowMs();
-    if (!Number.isSafeInteger(atMs) || atMs > now || atMs < now - PITR_WINDOW_MS) {
-      throw new RangeError('atMs must be integer epoch ms within the last 30 days');
-    }
-    const bookmark = await this.ctx.storage.getBookmarkForTime(atMs);
-    await this.ctx.storage.onNextSessionRestoreBookmark(bookmark);
-    m.log.log('warn', 'admin.pitr_scheduled', { atMs });
-    setTimeout(() => this.ctx.abort('point-in-time restore scheduled'), PITR_RESTART_DELAY_MS);
-    return { bookmark };
+    return this.#rpc('adminPitr', async () => {
+      const m = this.live();
+      const now = m.clock.nowMs();
+      if (!Number.isSafeInteger(atMs) || atMs > now || atMs < now - PITR_WINDOW_MS) {
+        throw new RangeError('atMs must be integer epoch ms within the last 30 days');
+      }
+      const bookmark = await this.ctx.storage.getBookmarkForTime(atMs);
+      await this.ctx.storage.onNextSessionRestoreBookmark(bookmark);
+      m.log.log('warn', 'admin.pitr_scheduled', { atMs });
+      setTimeout(() => this.ctx.abort('point-in-time restore scheduled'), PITR_RESTART_DELAY_MS);
+      return { bookmark };
+    });
   }
 
   async adminResnapshot(did: Did): Promise<ResnapshotOutcome> {
-    const m = this.live();
-    const result = scheduleSnapshot(m.db, did, ADMIN_RESNAPSHOT_REASON, m.clock.nowMs());
-    this.timersChanged();
-    return { status: result.status };
+    return this.#rpc('adminResnapshot', () => {
+      const m = this.live();
+      const result = scheduleSnapshot(m.db, did, ADMIN_RESNAPSHOT_REASON, m.clock.nowMs());
+      this.timersChanged();
+      return { status: result.status };
+    });
   }
 }
 

@@ -6,7 +6,7 @@
 // token, and record contents (a track title).
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { envLogger } from '../../src/do/index-do';
+import { envLogger, INDEX_ERROR_MESSAGE, INDEX_ERROR_NAME } from '../../src/do/index-do';
 import { flush, jetstreamServer } from '../fixtures/jetstream-server';
 import {
   ADMIN_TOKEN,
@@ -112,6 +112,33 @@ describe('log redaction', () => {
     // A storage failure (500), malformed input (400/422) and a socket drop.
     control.dbFault = { match: /FROM scrobbles/, message: `boom ${TRACK_MARKER}`, remaining: 1 };
     expect((await req(h.request(`/api/v1/users/${ALICE}/scrobbles`))).status).toBe(500);
+    // workerd reports a rejected RPC in the DO's own log stream (outside the
+    // console capture) with the error's message and stack, so what crosses the
+    // stub is itself checked: a bare IndexError with no fault text and no DO-side
+    // frame or path (workerd adds only the caller's own frames at the call site).
+    const leak = `SQLITE_IOERR ${TRACK_MARKER} for ${ALICE} at /srv/atmusic/worker/src/do/db.ts:71:20`;
+    control.dbFault = { match: /FROM scrobbles/, message: leak, remaining: 1 };
+    const rejected = await h.stub.history({ did: ALICE, limit: 5 }).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(control.dbFault.remaining).toBe(0);
+    expect(rejected).toBeInstanceOf(Error);
+    const { name, message, stack } = rejected as Error;
+    expect({ name, message }).toEqual({ name: INDEX_ERROR_NAME, message: INDEX_ERROR_MESSAGE });
+    for (const text of [message, String(stack), JSON.stringify(rejected)]) {
+      for (const needle of [TRACK_MARKER, ALICE, '/srv/', 'worker/src/', 'entry.ts', 'SQLITE']) {
+        expect([needle, text.includes(needle) ? text : false]).toEqual([needle, false]);
+      }
+    }
+    // Argument validation keeps its name and message, but still no frames.
+    const invalid = await h.stub.history({ did: ALICE, limit: 0 }).then(
+      () => null,
+      (error: unknown) => error as Error,
+    );
+    expect(invalid?.name).toBe('RangeError');
+    expect(invalid?.message).toMatch(/^page limit must be an integer/);
+    expect(String(invalid?.stack)).not.toContain('worker/src/');
     expect((await req(h.request(`/api/v1/users/${ALICE}/scrobbles?cursor=${BEARER_MARKER}`))).status).toBe(400);
     expect((await req(h.request(`/api/v1/feed?scope=following&viewer=${BEARER_MARKER}`))).status).toBe(422);
     await inDo(h.stub, () => js.last().close(1011, `server error ${BEARER_MARKER}`));
@@ -142,12 +169,18 @@ describe('log redaction', () => {
       'jetstream_disconnected',
       'snapshot.finished',
       'request.server_error',
+      'index.rpc_failed',
       'config.cursor_key_invalid',
       'gc.done',
       'careless',
     ]) {
       expect([event, events.has(event)]).toEqual([event, true]);
     }
+    const rpcFailed = lines.filter((l) => l.includes('"index.rpc_failed"')).map((l) => JSON.parse(l));
+    expect(rpcFailed).toEqual([
+      { method: 'history', error: 'Error', level: 'error', event: 'index.rpc_failed' },
+      { method: 'history', error: 'Error', level: 'error', event: 'index.rpc_failed' },
+    ]);
     const careless = lines.find((l) => l.includes('"careless"')) ?? '';
     expect(careless).toContain('[redacted]');
 
