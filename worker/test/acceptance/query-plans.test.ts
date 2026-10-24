@@ -115,7 +115,15 @@ describe('query plans', () => {
     const transport = routerTransport({ pds: hosts, plc, doh, relay, handles });
 
     // The real IndexDO on that network; ingestion is notify + snapshot only here.
-    resetControl({ clock, random: seededRandom(9), transport, env: { INGEST_MODE: 'off' } });
+    // Its info lines (one snapshot.finished per DID) are collected instead of
+    // printed; warnings and errors are collected and must stay empty.
+    const logged = { info: [] as string[], problems: [] as string[] };
+    const logSink = {
+      log: (line: string) => void logged.info.push(line),
+      warn: (line: string) => void logged.problems.push(line),
+      error: (line: string) => void logged.problems.push(line),
+    };
+    resetControl({ clock, random: seededRandom(9), transport, env: { INGEST_MODE: 'off' }, logSink });
     const name = freshName('query-plans');
     const stub = acceptanceEnv.INDEX.get(
       acceptanceEnv.INDEX.idFromName(name),
@@ -185,6 +193,13 @@ describe('query plans', () => {
       jobs: [{ n: DIDS, reason: 'admission', state: 'complete' }],
       perDid: { lo: PER_DID, hi: PER_DID },
     });
+    // The production logger saw one completed, active snapshot per DID and nothing worse.
+    const finished = logged.info.map((line) => JSON.parse(line) as Json).filter((e) => e.event === 'snapshot.finished');
+    expect(finished).toHaveLength(DIDS);
+    expect(new Set(finished.map((e) => `${e.did} ${e.outcome} ${e.active}`))).toEqual(
+      new Set(Array.from({ length: DIDS }, (_, d) => `${didOf(d)} complete true`)),
+    );
+    expect(logged.problems).toEqual([]);
     // Every record came from a verified getBlocks walk of its DID's signed head.
     const getBlocks = hosts.reduce((s, h) => s + h.calls.count({ nsid: 'com.atproto.sync.getBlocks' }), 0);
     const latest = hosts.reduce((s, h) => s + h.calls.count({ nsid: 'com.atproto.sync.getLatestCommit' }), 0);

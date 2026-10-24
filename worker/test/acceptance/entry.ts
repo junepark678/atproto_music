@@ -44,7 +44,7 @@ import { type FixedClock, fixedClock } from '@atmusic/core/test-support/clock';
 import { seededRandom } from '@atmusic/core/test-support/random';
 import { parseConfig } from '../../src/config';
 import { type Db, doDb, type SqlParam } from '../../src/do/db';
-import { envLogger, type IndexDeps, IndexDO } from '../../src/do/index-do';
+import { envLogger, type IndexDeps, IndexDO, type LogSink } from '../../src/do/index-do';
 import { cachedIdentityResolver } from '../../src/do/ingest/identity-cache';
 import type { ConnectJetstream } from '../../src/do/ingest/jetstream-socket';
 import type { AlarmStorage } from '../../src/do/timers';
@@ -74,6 +74,8 @@ export interface AcceptanceControl {
   connectJetstream: ConnectJetstream;
   /** Overrides of the wrangler vars and secrets the IndexDO parses. */
   env: Partial<EnvVars & EnvSecrets>;
+  /** Where the production Logger writes its (redacted) lines; default the console. */
+  logSink: LogSink;
 }
 
 function refusingTransport(): Transport {
@@ -93,6 +95,7 @@ function defaults(): AcceptanceControl {
     transport: refusingTransport(),
     connectJetstream: refuseJetstream,
     env: {},
+    logSink: console,
   };
 }
 
@@ -194,7 +197,7 @@ export class TestIndexDO extends IndexDO {
       transport,
       identity: cachedIdentityResolver(db, { transport, clock }),
       config,
-      log: envLogger(merged),
+      log: envLogger(merged, control.logSink),
       connectJetstream: (url) => connect(url),
       alarms: parkedAlarms(ctx.storage, log),
     };

@@ -9,6 +9,9 @@
 // reaches the index only through fake Jetstream events, the production drain,
 // admission and range snapshots, stepped with runDurableObjectAlarm. Every
 // HTTP response is validated against api/openapi.yaml with AJV.
+//
+// The project runs in its own sequence group, after all other projects (see
+// `sequence.groupOrder` below).
 
 import { cloudflareTest } from '@cloudflare/vitest-plugin';
 import { defineConfig } from 'vitest/config';
@@ -20,5 +23,11 @@ export default defineConfig({
     include: ['test/acceptance/**/*.test.ts'],
     testTimeout: 600_000,
     hookTimeout: 600_000,
+    // Isolation: these files are CPU-heavy (query-plans signs and indexes
+    // 100 × 1,000 records). Group 1 starts only after every default-group
+    // (0) project in the workspace run has finished, so the acceptance files
+    // never compete for CPU with the 5 s-timeout unit tests, nor with the
+    // nested gate scripts/test/check-ts.test.ts runs in the scripts project.
+    sequence: { groupOrder: 1 },
   },
 });
