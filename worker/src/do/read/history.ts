@@ -6,8 +6,24 @@
 // `scrobbles_owner_time` index:
 //
 //   SELECT s.* FROM scrobbles s JOIN users u ON u.did = s.did AND <visible u>
-//   WHERE s.did = ? [AND (s.listened_at, s.uri) <= (upper)] [AND (s.listened_at, s.uri) < (last)]
+//   WHERE s.did = ? <keyset>
 //   ORDER BY s.listened_at DESC, s.uri DESC LIMIT limit + 1
+//
+//   <keyset> (keysetWhere below), for the cursor's anchor `upper` and last
+//   returned row `last`:
+//   - neither:                    nothing (a first page);
+//   - only `upper`:               AND (s.listened_at, s.uri) <= (upper);
+//   - only `last`:                AND (s.listened_at, s.uri) < (last);
+//   - both, `last <= upper`
+//     decidable in JS (ASCII):    AND (s.listened_at, s.uri) < (last)
+//                                 (the anchor clause is implied; every
+//                                 cursor the server issues is this case);
+//   - both, otherwise (`last > upper`, or a non-ASCII key whose JS order
+//     may differ from SQLite's UTF-8 byte order):
+//                                 AND (s.listened_at, s.uri) <= (upper)
+//                                 AND (s.listened_at, s.uri) < (last).
+//   Every case selects the same rows as the two-clause form
+//   (worker/test/read/keyset.test.ts).
 //
 // - Visibility comes from ./visibility.ts (active, unsuppressed owner). Only
 //   verified present rows exist in `scrobbles`; excluded and absent records

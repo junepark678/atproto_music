@@ -34,9 +34,14 @@
 //   budget here; changing it is an owner amendment of workers-waves.json).
 // - statistics: uncached rows read ≤ 17 × window rows + 4 × limit + 16, i.e.
 //   proportional to the window, never to the user's total rows.
-// - a cached statistics hit runs at most 3 cache-check statements (cache row
-//   by primary key + ≤ 2 indexed EXISTS probes) and equals a fresh uncached
-//   computation.
+// - a cached statistics hit: the plan's "≤ 3 index probes", counted over
+//   every statement the hit runs, each planned as an indexed SEARCH. That
+//   includes the users-row lookup, which supplies stats_version and
+//   generation, the cache-validity inputs of ADR §5.8 (and the 404 check), so
+//   a windowed hit (users row + cache row + 2 EXISTS = 4) is reported as a
+//   breach; excluding that lookup would be a reinterpretation of the budget,
+//   which is the owner's call, as for history/feed. The hit must equal a
+//   fresh uncached computation.
 // - HTTP: 300 warmup + 600 measured requests, zero errors, nearest-rank p95
 //   below 300 ms.
 // 100k-scrobble all-time statistics above 50 ms are recorded as a follow-up,
@@ -109,6 +114,8 @@ const LIMIT = 20;
 /** W6-02: "history and feed at most limit+2 rows read" (the page statement's cursor rowsRead). */
 const READ_BUDGET = LIMIT + 2;
 const STATS_LIMIT = 10;
+/** W6-02: "cached stats hit ≤ 3 index probes" (every statement of the hit). */
+const PROBE_BUDGET = 3;
 const WINDOWS: StatsWindow[] = ['all', '7d', '30d', '365d'];
 const WINDOW_DAYS: Record<StatsWindow, number | null> = { all: null, '7d': 7, '30d': 30, '365d': 365 };
 const MAX_CHUNK_ENTRIES = 2_000;
@@ -561,7 +568,16 @@ interface StatsMeasurement {
   window: StatsWindow;
   windowRows: number;
   uncached: { rowsRead: number; statements: number; coldMs: number; warmMs: number; perStatement: number[] };
-  cached: { rowsRead: number; statements: number; cacheProbes: number; probesIndexed: boolean; ms: number };
+  cached: {
+    rowsRead: number;
+    /** Every statement of the hit; each is an index probe counted against the budget. */
+    probes: number;
+    probeKinds: string[];
+    probesIndexed: boolean;
+    probeBudget: number;
+    withinProbeBudget: boolean;
+    ms: number;
+  };
   rowsReadBudget: number;
   equalsUncached: true;
   withinBudget: boolean;
@@ -600,11 +616,19 @@ async function measureStats(stub: Stub, scale: number, did: string, window: Stat
     const later = { ...q, asOfNs: NOW_NS + HIT_SHIFT_NS };
     const hit = statsWithCache(db, later);
     expect(hit.cache, `${scale} ${window}`).toBe('hit');
-    const hitTrace = [...trace];
-    // The first statement is the user-row visibility check every request makes;
-    // the rest is the cache check: the cache row plus the EXISTS probes.
-    expect(hitTrace[0]!.sql).toContain('FROM users u');
-    const probes = hitTrace.slice(1);
+    const probes = [...trace];
+    // Every statement of the hit is counted: the users row (stats_version and
+    // generation, the cache-validity inputs, and the 404 check), the cache row
+    // by primary key, then the EXISTS probes on scrobbles_owner_time.
+    const probeKinds = probes.map((p) =>
+      /FROM users u/.test(p.sql)
+        ? 'users'
+        : /FROM stats_cache/.test(p.sql)
+          ? 'cache'
+          : /EXISTS/.test(p.sql)
+            ? 'exists'
+            : 'other',
+    );
     const probesIndexed = probes.every((p) => {
       const plan = plain.all<{ detail: string }>(`EXPLAIN QUERY PLAN ${p.sql}`, ...p.params).map((r) => r.detail);
       // `SELECT EXISTS (…)` itself plans as SCAN CONSTANT ROW; no table may be scanned.
@@ -622,15 +646,17 @@ async function measureStats(stub: Stub, scale: number, did: string, window: Stat
       windowRows,
       uncached: { rowsRead: uncachedRows, statements: uncachedStatements, coldMs, warmMs, perStatement },
       cached: {
-        rowsRead: hitTrace.reduce((a, t) => a + t.rowsRead, 0),
-        statements: hitTrace.length,
-        cacheProbes: probes.length,
+        rowsRead: probes.reduce((a, t) => a + t.rowsRead, 0),
+        probes: probes.length,
+        probeKinds,
         probesIndexed,
+        probeBudget: PROBE_BUDGET,
+        withinProbeBudget: probes.length <= PROBE_BUDGET && probesIndexed,
         ms: cachedMs,
       },
       rowsReadBudget,
       equalsUncached: true,
-      withinBudget: uncachedRows <= rowsReadBudget && probes.length <= 3 && probesIndexed,
+      withinBudget: uncachedRows <= rowsReadBudget && probes.length <= PROBE_BUDGET && probesIndexed,
     };
   });
 }
@@ -982,15 +1008,23 @@ describe('read-model benchmark', () => {
       const name = `${s.scale} ${s.window}`;
       // equalsUncached is only set after toEqual against a fresh computation (measureStats).
       expect(s.equalsUncached, name).toBe(true);
-      // `all` has no lower bound: cache row + one EXISTS probe; windows: cache row + two.
-      expect(s.cached.cacheProbes, name).toBe(s.window === 'all' ? 2 : 3);
-      expect(s.cached.cacheProbes, name).toBeLessThanOrEqual(3);
+      // What the hit runs: the users row, the cache row, then one EXISTS probe
+      // (`all` has no lower bound) or two (a window).
+      expect(s.cached.probeKinds, name).toEqual(
+        s.window === 'all' ? ['users', 'cache', 'exists'] : ['users', 'cache', 'exists', 'exists'],
+      );
+      expect(s.cached.probes, name).toBe(s.cached.probeKinds.length);
       expect(s.cached.probesIndexed, name).toBe(true);
       // The whole hit reads O(1) rows, whatever the window holds.
-      expect(s.cached.rowsRead, name).toBeLessThanOrEqual(4);
+      expect(s.cached.rowsRead, name).toBeLessThanOrEqual(s.cached.probes);
       // Uncached statistics are bounded by the window rows, not by the user's rows.
       expect(s.uncached.rowsRead, name).toBeLessThanOrEqual(s.rowsReadBudget);
-      expect(s.withinBudget, name).toBe(true);
+      expect(s.cached.probeBudget, name).toBe(PROBE_BUDGET);
+      expect(s.cached.withinProbeBudget, name).toBe(s.cached.probes <= PROBE_BUDGET && s.cached.probesIndexed);
+      expect(s.withinBudget, name).toBe(s.cached.withinProbeBudget && s.uncached.rowsRead <= s.rowsReadBudget);
+      // The plan's budget over every statement of the hit. Soft, so every
+      // breach is listed, not only the first.
+      expect.soft(s.cached.probes, `${name}: cache-hit index probes`).toBeLessThanOrEqual(PROBE_BUDGET);
     }
     // The windows are real ranges at every scale (all ⊋ 365d ⊋ 30d ⊋ 7d).
     for (const n of SCALES) {
