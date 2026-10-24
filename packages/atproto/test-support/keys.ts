@@ -1,0 +1,129 @@
+// Deterministic, TEST-ONLY signing keys (ADR 0004 §10.2, §10.3).
+//
+// Every scalar below is public. Never use these keys outside fixtures.
+//
+// - `[0x07; 32]` is the Rust oracle scalar (crates/atproto/tests/support/signed_repo.rs,
+//   tests/goldens/signed_cars/manifest.json `keys`) for both curves, so Alice's
+//   fixture repository can be compared byte for byte with the Rust-signed goldens.
+// - Signatures are deterministic (RFC 6979) and low-S on both curves, so commit
+//   CIDs are stable across runs:
+//   - secp256k1 signs with @atcute/crypto (noble, RFC 6979, lowS);
+//   - P-256 signs with @atproto/crypto's noble P256Keypair (RFC 6979, lowS). The
+//     @atcute/crypto P-256 signer goes through WebCrypto, whose ECDSA nonce is
+//     random, which would make every commit CID differ between runs. It stays
+//     available as `signWebCrypto` for cross-checks.
+// - Public keys and did:keys come from @atcute/crypto, the production verifier.
+
+import { type DidKeyString, P256PrivateKey, Secp256k1PrivateKey } from '@atcute/crypto';
+import { P256Keypair } from '@atproto/crypto';
+
+export type Curve = 'secp256k1' | 'p256';
+
+export interface TestKey {
+  readonly curve: Curve;
+  /** Human label for test output, e.g. `alice-secp256k1`. */
+  readonly label: string;
+  /** The private scalar, hex. Test-only by construction. */
+  readonly scalarHex: string;
+  /** `did:key:z…` for the public key. */
+  readonly didKey: DidKeyString;
+  /** `publicKeyMultibase` of the `#atproto` Multikey verification method (did:key without the prefix). */
+  readonly multikey: string;
+  /** Deterministic, low-S, 64-byte compact signature over `data` (SHA-256 prehash). */
+  sign(data: Uint8Array): Promise<Uint8Array<ArrayBuffer>>;
+  /** P-256 only: the randomized WebCrypto signer of @atcute/crypto, for cross-checks. */
+  signWebCrypto?(data: Uint8Array): Promise<Uint8Array<ArrayBuffer>>;
+}
+
+const cache = new Map<string, Promise<TestKey>>();
+
+function hex(bytes: Uint8Array): string {
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+/** A 32-byte scalar with every byte equal to `fill` (the Rust `[seed; 32]` convention). */
+export function filledScalar(fill: number): Uint8Array<ArrayBuffer> {
+  if (!Number.isInteger(fill) || fill < 1 || fill > 0x7f) {
+    throw new RangeError(`test scalar fill byte must be in 1..=0x7f, got ${fill}`);
+  }
+  return new Uint8Array(32).fill(fill);
+}
+
+async function build(curve: Curve, scalar: Uint8Array<ArrayBuffer>, label: string): Promise<TestKey> {
+  if (scalar.length !== 32) throw new RangeError('test scalar must be 32 bytes');
+  const scalarHex = hex(scalar);
+  if (curve === 'secp256k1') {
+    const priv = await Secp256k1PrivateKey.importRaw(scalar);
+    const didKey = await priv.exportPublicKey('did');
+    return Object.freeze({
+      curve,
+      label,
+      scalarHex,
+      didKey,
+      multikey: await priv.exportPublicKey('multikey'),
+      sign: (data: Uint8Array) => priv.sign(data),
+    });
+  }
+  const webcrypto = await P256PrivateKey.importRaw(scalar);
+  const rfc6979 = await P256Keypair.import(scalar);
+  const didKey = await webcrypto.exportPublicKey('did');
+  if (rfc6979.did() !== didKey) {
+    throw new Error(`P-256 key derivation disagrees: ${rfc6979.did()} vs ${didKey}`);
+  }
+  return Object.freeze({
+    curve,
+    label,
+    scalarHex,
+    didKey,
+    multikey: await webcrypto.exportPublicKey('multikey'),
+    sign: async (data: Uint8Array) => new Uint8Array(await rfc6979.sign(data)),
+    signWebCrypto: (data: Uint8Array) => webcrypto.sign(data),
+  });
+}
+
+/** A deterministic test key; equal arguments return the same (cached) key. */
+export function testKey(curve: Curve, fill: number, label = `${curve}-${fill.toString(16).padStart(2, '0')}`) {
+  const id = `${curve}:${fill}:${label}`;
+  let key = cache.get(id);
+  if (!key) {
+    key = build(curve, filledScalar(fill), label);
+    cache.set(id, key);
+  }
+  return key;
+}
+
+/** Scalar fill bytes of the named fixture keys. */
+export const KEY_FILLS = {
+  /** Rust oracle secp256k1 key `[0x07; 32]`. */
+  oracleSecp256k1: 0x07,
+  /** Rust oracle P-256 key `[0x07; 32]`. */
+  oracleP256: 0x07,
+  carol: 0x0c,
+  aliceRotated: 0x11,
+  bobRotated: 0x12,
+  carolRotated: 0x13,
+} as const;
+
+export interface FixtureKeys {
+  /** secp256k1, the Rust oracle scalar. */
+  alice: TestKey;
+  /** P-256, the Rust oracle scalar, so both curves are on the shared fixture path. */
+  bob: TestKey;
+  /** secp256k1, a different scalar from Alice's. */
+  carol: TestKey;
+  aliceRotated: TestKey;
+  bobRotated: TestKey;
+  carolRotated: TestKey;
+}
+
+export async function fixtureKeys(): Promise<FixtureKeys> {
+  const [alice, bob, carol, aliceRotated, bobRotated, carolRotated] = await Promise.all([
+    testKey('secp256k1', KEY_FILLS.oracleSecp256k1, 'alice-secp256k1'),
+    testKey('p256', KEY_FILLS.oracleP256, 'bob-p256'),
+    testKey('secp256k1', KEY_FILLS.carol, 'carol-secp256k1'),
+    testKey('p256', KEY_FILLS.aliceRotated, 'alice-rotated-p256'),
+    testKey('secp256k1', KEY_FILLS.bobRotated, 'bob-rotated-secp256k1'),
+    testKey('p256', KEY_FILLS.carolRotated, 'carol-rotated-p256'),
+  ]);
+  return { alice, bob, carol, aliceRotated, bobRotated, carolRotated };
+}
