@@ -22,6 +22,7 @@ import {
 
 const CREATE = 'com.atproto.repo.createRecord';
 const DELETE = 'com.atproto.repo.deleteRecord';
+const GET = 'com.atproto.repo.getRecord';
 
 async function create(fx: OutboxFixture, track: string) {
   const r = await enqueueScrobble({
@@ -168,6 +169,96 @@ it('delete behind an unsent or in-flight create runs after it and leaves no reco
   expect(await fx.repo.list(SCROBBLE)).toEqual([]);
   expect(await fx.store.get(del2.id)).toMatchObject({ state: 'indexed', attempts: 1 });
   expect((await fx.appView.truth(inflight.uri)).state).toBe('absent');
+
+  // In retry backoff: the create's first attempt got a 503, and the delete is
+  // enqueued while the create waits for its retry.
+  const backoff = await create(fx, 'Bachelorette');
+  fx.pds.serverError(CREATE, 503);
+  const mark = fx.session.sent.length;
+  await runner.runDue();
+  const waiting = (await fx.store.get(backoff.id))!;
+  expect(waiting).toMatchObject({ state: 'queued', attempts: 1, lastError: 'upstream_unavailable' });
+  expect(waiting.dueAt!).toBeGreaterThan(fx.clock.nowMs());
+  const del3 = await remove(fx, backoff.uri);
+  expect(del3.predecessorIds).toEqual([backoff.id]);
+  // The delete is due now, but its create is unsettled: no pass sends anything
+  // for it, and the store refuses to start its attempt.
+  expect(await runner.runDue()).toBe(waiting.dueAt);
+  expect(fx.session.sent.length).toBe(mark + 1);
+  expect(await fx.store.beginAttempt(del3.id, fx.clock.nowMs())).toBeNull();
+  expect(await fx.store.get(del3.id)).toMatchObject({ state: 'queued', attempts: 0 });
+  await runUntilIdle(runner, fx.clock);
+
+  // Nothing touched the rkey before the create's retry: no getRecord, no deleteRecord.
+  const order3 = fx.session.sent.slice(mark);
+  expect(order3.map((r) => [r.nsid, r.body?.rkey ?? r.params.rkey])).toEqual([
+    [CREATE, backoff.rkey],
+    [CREATE, backoff.rkey],
+    [DELETE, backoff.rkey],
+  ]);
+  expect(fx.pds.calls.filter({ nsid: CREATE }).map((c) => c.status)).toEqual([200, 200, 503, 200]);
+  const backoffCid = (await fx.store.get(backoff.id))!.cid;
+  expect(order3[2]!.body?.swapRecord).toBe(backoffCid);
+  expect(await remoteRecord(fx, SCROBBLE, backoff.rkey)).toBeNull();
+  expect(await fx.repo.list(SCROBBLE)).toEqual([]);
+  expect(await fx.store.get(backoff.id)).toMatchObject({ state: 'published', attempts: 2, dueAt: null });
+  expect(await fx.store.get(del3.id)).toMatchObject({ state: 'indexed', attempts: 1 });
+});
+
+it('delete of a create that lost its rkey to another writer completes locally and never deletes their record', async () => {
+  const fx = await outboxFixture();
+  const runner = fx.runner();
+
+  // Queued behind the create: another writer holds the rkey with another listen.
+  const behind = await create(fx, 'Jóga');
+  const theirs = { ...behind.record, track: 'Hunter' };
+  const theirCid = (await fx.repo.put(SCROBBLE, behind.rkey, theirs)).ops[0]!.cid;
+  const del1 = await remove(fx, behind.uri);
+  expect(del1.predecessorIds).toEqual([behind.id]);
+
+  // Enqueued after the create already failed: no predecessor, same rule.
+  const after = await create(fx, 'Bachelorette');
+  const theirs2 = { ...after.record, track: 'Isobel' };
+  const theirCid2 = (await fx.repo.put(SCROBBLE, after.rkey, theirs2)).ops[0]!.cid;
+  await runUntilIdle(runner, fx.clock);
+  expect(await fx.store.get(after.id)).toMatchObject({ state: 'failed', failureCode: 'remote_record_conflict' });
+  const del2 = await remove(fx, after.uri);
+  expect(del2.predecessorIds).toEqual([]);
+  await runUntilIdle(runner, fx.clock);
+
+  expect(await fx.store.get(behind.id)).toMatchObject({ state: 'failed', failureCode: 'remote_record_conflict' });
+  for (const del of [del1, del2]) {
+    const row = (await fx.store.get(del.id))!;
+    expect(row).toMatchObject({ state: 'indexed', localCompletion: 'record_not_ours', dueAt: null });
+    expect(row.swapCid).toBeUndefined();
+    expect(row.failureCode).toBeUndefined();
+  }
+  // Only the creates and their reconciling getRecords reached the PDS.
+  expect(fx.session.sent.map((r) => r.nsid)).toEqual([CREATE, GET, CREATE, GET]);
+  expect(fx.pds.count(DELETE)).toBe(0);
+  expect(fx.pds.count('com.atproto.repo.putRecord')).toBe(0);
+  expect(await remoteRecord(fx, SCROBBLE, behind.rkey)).toMatchObject({ cid: theirCid, value: theirs });
+  expect(await remoteRecord(fx, SCROBBLE, after.rkey)).toMatchObject({ cid: theirCid2, value: theirs2 });
+  expect(fx.appView.notified).toEqual([]);
+
+  // The owner's view keeps the other writer's record visible and drops the failed local create.
+  const page: Scrobble[] = [
+    {
+      uri: behind.uri,
+      cid: theirCid!,
+      did: ALICE,
+      revision: fx.repo.head!.rev,
+      artist: SCROBBLE_INPUT.artist,
+      track: 'Hunter',
+      listenedAt: SCROBBLE_INPUT.listenedAt,
+      createdAt: '2026-01-15T12:00:00.000Z',
+      indexedAt: '2026-01-15T12:00:01.000000000Z',
+    },
+  ];
+  const view = overlayScrobbles(page, await fx.ops(), ALICE);
+  expect(view.hidden).toEqual([]);
+  expect(view.items).toEqual([{ scrobble: page[0] }]);
+  expect(view.pending).toEqual([]);
 });
 
 it('InvalidSwap after another client changed the record re-fetches the CID and retries the delete', async () => {

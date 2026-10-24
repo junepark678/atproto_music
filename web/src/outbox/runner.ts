@@ -113,7 +113,14 @@ export function outboxLockName(did: Did): string {
 export type Outcome =
   | { kind: 'published'; patch?: Partial<OutboxOperation> }
   | { kind: 'transient'; code: string; retryAfterMs?: number; patch?: Partial<OutboxOperation> }
-  | { kind: 'permanent'; code: string; patch?: Partial<OutboxOperation> };
+  | { kind: 'permanent'; code: string; patch?: Partial<OutboxOperation> }
+  /**
+   * Done without any PDS write and with nothing to track: the intent is
+   * already true by local evidence (e.g. a delete whose create ended
+   * `remote_record_conflict`, so our record was never at the URI). The row
+   * becomes `indexed` with `localCompletion: code`.
+   */
+  | { kind: 'completed_locally'; code: string };
 
 export type RecordLookup =
   | { kind: 'present'; uri: string; cid: string; value: unknown }
@@ -264,6 +271,11 @@ export interface ExecContext {
   /** True when this attempt resumes a row a crashed runner left `running`. */
   resumed: boolean;
   /**
+   * The DID's rows enqueued before this one (lower `seq`), as read when the
+   * step was chosen. Every predecessor is among them and already settled.
+   */
+  earlier: readonly OutboxOperation[];
+  /**
    * Persists fields of the running row before a send (e.g. the delete's
    * `swapCid`), so a crash after this point resumes with them.
    */
@@ -383,7 +395,7 @@ export class OutboxRunner {
         return earliest;
       }
       if (next.state === 'published') await this.track(next, ops, now);
-      else if (!(await this.write(next, now))) skipped.add(next.id);
+      else if (!(await this.write(next, now, ops))) skipped.add(next.id);
     }
     return this.deps.clock.nowMs();
   }
@@ -395,7 +407,8 @@ export class OutboxRunner {
     });
   }
 
-  private context(id: string, resumed: boolean): ExecContext {
+  private context(op: OutboxOperation, resumed: boolean, ops: readonly OutboxOperation[]): ExecContext {
+    const id = op.id;
     return {
       pds: this.pds,
       api: this.deps.api,
@@ -403,6 +416,7 @@ export class OutboxRunner {
       prefix: this.deps.prefix,
       collections: this.collections,
       resumed,
+      earlier: ops.filter((other) => other.seq < op.seq),
       persist: async (patch) => {
         const updated = await this.deps.store.update(id, (row) => {
           if (row.state !== 'running') return null;
@@ -420,20 +434,21 @@ export class OutboxRunner {
   }
 
   /** One write step; false when the attempt could not start. */
-  private async write(op: OutboxOperation, now: number): Promise<boolean> {
+  private async write(op: OutboxOperation, now: number, ops: readonly OutboxOperation[]): Promise<boolean> {
     const executor = executorFor(op.kind);
     const resumed = op.state === 'running';
     if (op.attempts >= MAX_ATTEMPTS) {
       // Only a crash during the tenth attempt leaves this: that send may or may
       // not have reached the PDS, so look, and never send an eleventh.
-      const outcome = await this.safely(() => executor.reconcile(op, this.context(op.id, true)));
-      await this.finish(op.id, executor, outcome.kind === 'published' ? outcome : this.exhausted(outcome, op), now);
+      const outcome = await this.safely(() => executor.reconcile(op, this.context(op, true, ops)));
+      const settled = outcome.kind === 'published' || outcome.kind === 'completed_locally';
+      await this.finish(op.id, executor, settled ? outcome : this.exhausted(outcome, op), now);
       return true;
     }
     const started = await this.deps.store.beginAttempt(op.id, now);
     if (started === null) return false;
     this.changed(started);
-    const outcome = await this.safely(() => executor.execute(started, this.context(op.id, resumed)));
+    const outcome = await this.safely(() => executor.execute(started, this.context(started, resumed, ops)));
     await this.finish(op.id, executor, outcome, this.deps.clock.nowMs());
     return true;
   }
@@ -454,9 +469,16 @@ export class OutboxRunner {
 
   private async finish(id: string, executor: Executor, outcome: Outcome, now: number): Promise<void> {
     const updated = await this.deps.store.update(id, (op) => {
-      Object.assign(op, outcome.patch ?? {});
+      if (outcome.kind !== 'completed_locally') Object.assign(op, outcome.patch ?? {});
       op.updatedAt = now;
       switch (outcome.kind) {
+        case 'completed_locally':
+          op.state = 'indexed';
+          op.localCompletion = outcome.code;
+          op.dueAt = null;
+          delete op.failureCode;
+          delete op.lastError;
+          return op;
         case 'published':
           op.state = 'published';
           delete op.failureCode;

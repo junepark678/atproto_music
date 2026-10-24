@@ -12,6 +12,11 @@
 // - InvalidSwap: re-fetch from the PDS and reconcile. Absent → done; present
 //   with another CID → retry (a counted attempt) with that CID.
 // - RecordNotFound (or a 404): look it up; absence completes the delete.
+// - Never another writer's record: when our create of this URI ended
+//   `remote_record_conflict`, the record at the rkey is someone else's and
+//   ours never existed there. The delete then completes locally with no PDS
+//   request (`localCompletion: 'record_not_ours'`), so the conflict rule
+//   (never overwrite, never delete the other record) holds for deletes too.
 
 import type { AtUri, Did, RecordStatus } from '@atmusic/core/api-types';
 import type { Clock, Random } from '@atmusic/core/deps';
@@ -71,6 +76,21 @@ export async function enqueueScrobbleDelete(args: EnqueueDeleteArgs): Promise<En
     ),
   );
   return { ok: true, op };
+}
+
+/** Failure codes of a create that prove the record at its URI is not ours. */
+const NOT_OURS_CODES: ReadonlySet<string> = new Set(['remote_record_conflict']);
+
+/** Our create of this URI ended with proof that another writer holds the rkey. */
+export function createLostRkey(op: OutboxOperation, earlier: readonly OutboxOperation[]): boolean {
+  return earlier.some(
+    (o) =>
+      o.kind === 'scrobble_create' &&
+      o.uri === op.uri &&
+      o.state === 'failed' &&
+      o.failureCode !== undefined &&
+      NOT_OURS_CODES.has(o.failureCode),
+  );
 }
 
 /** The AppView's CID for the record, when it has it indexed. */
@@ -138,10 +158,12 @@ export function deleteVerdict(statuses: readonly (RecordStatus | null)[]): Track
 export const scrobbleDeleteExecutor: Executor = {
   async execute(op, ctx) {
     if (!hasIdentity(op, ctx, ctx.collections.scrobble)) return { kind: 'permanent', code: 'invalid_record_identity' };
+    if (createLostRkey(op, ctx.earlier)) return { kind: 'completed_locally', code: 'record_not_ours' };
     return deleteWithSwap(op, ctx);
   },
   async reconcile(op, ctx) {
     if (!hasIdentity(op, ctx, ctx.collections.scrobble)) return { kind: 'permanent', code: 'invalid_record_identity' };
+    if (createLostRkey(op, ctx.earlier)) return { kind: 'completed_locally', code: 'record_not_ours' };
     return lookupDeleted(op, ctx);
   },
   trackUris: (op) => [op.uri],

@@ -77,6 +77,45 @@ it('PUT, DELETE, PUT for one subject execute in order with separate ids', async 
     intent: 'follow',
     local: { opId: put2.id, state: 'indexed' },
   });
+
+  // Again for Carol, with the first PUT in retry backoff (429, Retry-After 20)
+  // while the DELETE and the second PUT are enqueued: neither may run before
+  // the retry, and the runner's next wake-up is the create's retry time.
+  const runner = fx.runner();
+  const carolRkey = await followRkey(CAROL);
+  const cPut1 = await intent(fx, true, CAROL);
+  fx.pds.rateLimit(CREATE, 20);
+  const mark = fx.session.sent.length;
+  await runner.runDue();
+  const waiting = (await fx.store.get(cPut1.id))!;
+  expect(waiting).toMatchObject({ state: 'queued', attempts: 1, lastError: 'upstream_rate_limited' });
+  expect(waiting.dueAt! - fx.clock.nowMs()).toBe(20_000);
+  fx.clock.advance(100);
+  const cDel = await intent(fx, false, CAROL);
+  const cPut2 = await intent(fx, true, CAROL);
+  expect(cDel.predecessorIds).toEqual([cPut1.id]);
+  expect(cPut2.predecessorIds).toEqual([cPut1.id, cDel.id]);
+  expect(await runner.runDue()).toBe(waiting.dueAt);
+  expect(fx.session.sent.length).toBe(mark + 1);
+  expect(await fx.store.beginAttempt(cDel.id, fx.clock.nowMs())).toBeNull();
+  expect(await fx.store.beginAttempt(cPut2.id, fx.clock.nowMs())).toBeNull();
+  expect([(await fx.store.get(cDel.id))!.attempts, (await fx.store.get(cPut2.id))!.attempts]).toEqual([0, 0]);
+  await runUntilIdle(runner, fx.clock);
+
+  const carolWrites = fx.session.sent.slice(mark);
+  expect(carolWrites.map((r) => r.nsid)).toEqual([CREATE, CREATE, LIST, DELETE, CREATE]);
+  expect(carolWrites[0]!.body?.record).toEqual(cPut1.record);
+  expect(carolWrites[1]!.body?.record).toEqual(cPut1.record);
+  const carolFirstCid = (await fx.store.get(cPut1.id))!.cid;
+  expect(carolWrites[3]!.body).toMatchObject({ rkey: carolRkey, swapRecord: carolFirstCid });
+  expect(carolWrites[4]!.body?.record).toEqual(cPut2.record);
+  const carolListed = (await fx.repo.list(FOLLOW)).filter((r) => r.rkey === carolRkey);
+  expect(carolListed).toHaveLength(1);
+  expect(carolListed[0]).toMatchObject({ value: cPut2.record });
+  expect(await fx.store.get(cPut1.id)).toMatchObject({ state: 'published', attempts: 2 });
+  expect(await fx.store.get(cDel.id)).toMatchObject({ state: 'published', attempts: 1 });
+  expect(await fx.store.get(cPut2.id)).toMatchObject({ state: 'indexed', attempts: 1, cid: carolListed[0]!.cid });
+  expect(await fx.repo.list(FOLLOW)).toHaveLength(2);
 });
 
 it('unfollow deletes all duplicate matching records and keeps unrelated subject', async () => {

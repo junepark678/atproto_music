@@ -4,7 +4,9 @@
 // - A scrobble with a pending or completed local delete is hidden immediately
 //   from its owner's pages, before the AppView has verified absence.
 // - A delete that failed does not claim removal: the record stays visible,
-//   marked with the failure code.
+//   marked with the failure code. A delete completed locally because our
+//   create lost the rkey to another writer (`remote_record_conflict`) hides
+//   nothing; that other record was never deleted.
 // - Local creates the AppView has not indexed yet (queued, running, published,
 //   or failed) are listed separately so the screen can show them with their
 //   state; a failed create stays visible with its code.
@@ -62,9 +64,13 @@ function latestByUri(ops: readonly OutboxOperation[], owner: Did): Map<string, O
   return latest;
 }
 
-/** A delete that has not failed hides the record from its owner. */
+/**
+ * A delete that has not failed hides the record from its owner. A delete that
+ * completed locally because our create never owned the URI (`localCompletion`)
+ * hides nothing: the record there is another writer's and was left in place.
+ */
 function hides(op: OutboxOperation): boolean {
-  return op.kind === 'scrobble_delete' && op.state !== 'failed';
+  return op.kind === 'scrobble_delete' && op.state !== 'failed' && op.localCompletion === undefined;
 }
 
 /**
