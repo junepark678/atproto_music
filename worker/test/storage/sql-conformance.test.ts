@@ -155,6 +155,16 @@ describe('DO SQLite conformance', () => {
 
   it('partial unique index users_verified_handle allows many NULLs and rejects duplicates', async () => {
     await inDb('conf-handle', (db) => {
+      // It is a partial index (WHERE handle IS NOT NULL), not a full UNIQUE
+      // index: SQLite's catalog says so, and the planner cannot use it to
+      // answer a handle IS NULL query, which a full index could.
+      expect(
+        db.one('SELECT "unique", partial FROM pragma_index_list(?) WHERE name = ?', 'users', 'users_verified_handle'),
+      ).toEqual({ unique: 1, partial: 1 });
+      expect(db.all('SELECT did FROM users INDEXED BY users_verified_handle WHERE handle = ?', 'x')).toEqual([]);
+      expect(() => db.all('SELECT did FROM users INDEXED BY users_verified_handle WHERE handle IS NULL')).toThrow(
+        /no query solution/,
+      );
       addUser(db, 'did:plc:a');
       addUser(db, 'did:plc:b');
       addUser(db, 'did:plc:c');

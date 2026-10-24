@@ -43,6 +43,239 @@ const EXPECTED_INDEXES = [
   'users_verified_handle',
 ];
 
+// Golden: the exact stored DDL of every table and index of migration 1,
+// whitespace-normalized. Hand-checked against ADR 0004 §6.1 and, for the
+// kept tables and their indexes, crates/storage/migrations/0001-0004 (the
+// oracle). Pins column order, types, NOT NULL, DEFAULTs, every CHECK, FKs,
+// primary keys, index columns, DESC order and the partial WHERE. Any schema
+// change must come as a new migration, never by editing this golden.
+const GOLDEN_DDL: ReadonlyArray<{ type: 'table' | 'index'; name: string; sql: string }> = [
+  {
+    type: 'index',
+    name: 'follows_actor_subject',
+    sql: 'CREATE INDEX follows_actor_subject ON follows(actor,subject,uri)',
+  },
+  {
+    type: 'index',
+    name: 'follows_subject_actor',
+    sql: 'CREATE INDEX follows_subject_actor ON follows(subject,actor,uri)',
+  },
+  {
+    type: 'index',
+    name: 'hints_did',
+    sql: 'CREATE INDEX hints_did ON hints(did)',
+  },
+  {
+    type: 'index',
+    name: 'hints_due',
+    sql: 'CREATE INDEX hints_due ON hints(due_at)',
+  },
+  {
+    type: 'index',
+    name: 'repo_jobs_due',
+    sql: 'CREATE INDEX repo_jobs_due ON repo_jobs(kind,state,due_at,did)',
+  },
+  {
+    type: 'index',
+    name: 'scrobbles_global_time',
+    sql: 'CREATE INDEX scrobbles_global_time ON scrobbles(listened_at DESC,uri DESC)',
+  },
+  {
+    type: 'index',
+    name: 'scrobbles_owner_time',
+    sql: 'CREATE INDEX scrobbles_owner_time ON scrobbles(did,listened_at DESC,uri DESC)',
+  },
+  {
+    type: 'index',
+    name: 'scrobbles_stats',
+    sql: 'CREATE INDEX scrobbles_stats ON scrobbles(did,artist_key,track_key,listened_at)',
+  },
+  {
+    type: 'index',
+    name: 'users_verified_handle',
+    sql: 'CREATE UNIQUE INDEX users_verified_handle ON users(handle) WHERE handle IS NOT NULL',
+  },
+  {
+    type: 'table',
+    name: 'admission',
+    sql: 'CREATE TABLE admission (window_start_ms INTEGER PRIMARY KEY NOT NULL, admitted INTEGER NOT NULL DEFAULT 0 CHECK(admitted >= 0))',
+  },
+  {
+    type: 'table',
+    name: 'backfill_generation',
+    sql: "CREATE TABLE backfill_generation (singleton INTEGER PRIMARY KEY NOT NULL CHECK(singleton = 1), last_generation INTEGER NOT NULL CHECK(typeof(last_generation) = 'integer' AND last_generation >= 0))",
+  },
+  {
+    type: 'table',
+    name: 'counters',
+    sql: "CREATE TABLE counters (name TEXT NOT NULL, label TEXT NOT NULL DEFAULT '', value INTEGER NOT NULL DEFAULT 0 CHECK(value >= 0), PRIMARY KEY(name,label))",
+  },
+  {
+    type: 'table',
+    name: 'follows',
+    sql: "CREATE TABLE follows (uri TEXT PRIMARY KEY NOT NULL, cid TEXT NOT NULL, actor TEXT NOT NULL REFERENCES users(did) ON DELETE CASCADE, subject TEXT NOT NULL, revision TEXT NOT NULL, created_at TEXT NOT NULL CHECK(length(created_at) = 30 AND substr(created_at, 30, 1) = 'Z'), indexed_at TEXT NOT NULL, CHECK(actor != subject))",
+  },
+  {
+    type: 'table',
+    name: 'hints',
+    sql: "CREATE TABLE hints (uri TEXT PRIMARY KEY NOT NULL, did TEXT NOT NULL, collection TEXT NOT NULL, rkey TEXT NOT NULL, source TEXT NOT NULL CHECK(source IN ('jetstream','notify','reconcile')), priority INTEGER NOT NULL, hint_rev TEXT, receipt_time TEXT NOT NULL CHECK(length(receipt_time) = 30 AND substr(receipt_time, 30, 1) = 'Z'), due_at INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts >= 0), last_error TEXT)",
+  },
+  {
+    type: 'table',
+    name: 'host_backoff',
+    sql: 'CREATE TABLE host_backoff (host TEXT PRIMARY KEY NOT NULL, until_ms INTEGER NOT NULL)',
+  },
+  {
+    type: 'table',
+    name: 'identity_cache',
+    sql: 'CREATE TABLE identity_cache (did TEXT PRIMARY KEY NOT NULL, doc_json TEXT, signing_key TEXT, pds TEXT, handle TEXT, fetched_at_ms INTEGER NOT NULL, neg_until_ms INTEGER)',
+  },
+  {
+    type: 'table',
+    name: 'indexing_status',
+    sql: "CREATE TABLE indexing_status (scope TEXT PRIMARY KEY NOT NULL, state TEXT NOT NULL CHECK(state IN ('current','recovering','stale','suppressed')), caught_up INTEGER NOT NULL DEFAULT 0 CHECK(caught_up IN (0,1)), last_indexed_at TEXT, lag_seconds INTEGER CHECK(lag_seconds >= 0))",
+  },
+  {
+    type: 'table',
+    name: 'ingest_checkpoint',
+    sql: "CREATE TABLE ingest_checkpoint (stream TEXT PRIMARY KEY NOT NULL, cursor INTEGER CHECK(cursor >= 0), last_event_time_us INTEGER CHECK(last_event_time_us >= 0), connected INTEGER NOT NULL DEFAULT 0 CHECK(connected IN (0,1)), pending_gap INTEGER NOT NULL DEFAULT 1 CHECK(pending_gap IN (0,1)), gap_scan_after_did TEXT, mode TEXT CHECK(mode IN ('socket','pulse','off')), host_index INTEGER NOT NULL DEFAULT 0 CHECK(host_index >= 0), connected_at_ms INTEGER, updated_at_ms INTEGER NOT NULL DEFAULT 0)",
+  },
+  {
+    type: 'table',
+    name: 'record_state',
+    sql: "CREATE TABLE record_state (uri TEXT PRIMARY KEY NOT NULL, did TEXT NOT NULL, collection TEXT NOT NULL, revision TEXT NOT NULL, cid TEXT, state TEXT NOT NULL CHECK(state IN ('present','absent','excluded')), reason TEXT, verified_at TEXT NOT NULL, CHECK(state = 'absent' OR cid IS NOT NULL), CHECK(state != 'excluded' OR reason IS NOT NULL))",
+  },
+  {
+    type: 'table',
+    name: 'repo_jobs',
+    sql: "CREATE TABLE repo_jobs (did TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('snapshot','status','identity')), state TEXT NOT NULL DEFAULT 'pending' CHECK(state IN ('pending','running','complete','failed')), generation INTEGER NOT NULL DEFAULT 0 CHECK(typeof(generation) = 'integer' AND generation >= 0), reason TEXT, head_rev TEXT, head_cid TEXT, frontier_json TEXT, restarts INTEGER NOT NULL DEFAULT 0 CHECK(restarts >= 0), reactivate INTEGER NOT NULL DEFAULT 0 CHECK(reactivate IN (0,1)), due_at INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts >= 0), failure_code TEXT, updated_at_ms INTEGER NOT NULL, PRIMARY KEY(did,kind))",
+  },
+  {
+    // The ledger (worker/src/do/migrate.ts); SQLite drops IF NOT EXISTS.
+    type: 'table',
+    name: 'schema_migrations',
+    sql: "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY NOT NULL CHECK(typeof(version) = 'integer' AND version >= 1), name TEXT NOT NULL)",
+  },
+  {
+    type: 'table',
+    name: 'scrobbles',
+    sql: "CREATE TABLE scrobbles (uri TEXT PRIMARY KEY NOT NULL, cid TEXT NOT NULL, did TEXT NOT NULL REFERENCES users(did) ON DELETE CASCADE, rkey TEXT NOT NULL, revision TEXT NOT NULL, artist TEXT NOT NULL, track TEXT NOT NULL, album TEXT, listened_at TEXT NOT NULL CHECK(length(listened_at) = 30 AND substr(listened_at, 30, 1) = 'Z'), created_at TEXT NOT NULL, duration_seconds INTEGER CHECK(duration_seconds BETWEEN 1 AND 86400), recording_mbid TEXT, indexed_at TEXT NOT NULL, artist_key TEXT NOT NULL, track_key TEXT NOT NULL, album_key TEXT)",
+  },
+  {
+    type: 'table',
+    name: 'snapshot_blocks',
+    sql: 'CREATE TABLE snapshot_blocks (did TEXT NOT NULL, cid TEXT NOT NULL, bytes BLOB NOT NULL, PRIMARY KEY(did,cid))',
+  },
+  {
+    type: 'table',
+    name: 'stats_cache',
+    sql: "CREATE TABLE stats_cache (did TEXT NOT NULL, win TEXT NOT NULL CHECK(win IN ('all','7d','30d','365d')), lim INTEGER NOT NULL CHECK(lim BETWEEN 1 AND 100), as_of TEXT NOT NULL, lower TEXT, version INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY(did,win,lim))",
+  },
+  {
+    type: 'table',
+    name: 'suppression',
+    sql: 'CREATE TABLE suppression (did TEXT PRIMARY KEY NOT NULL, suppressed_at TEXT NOT NULL, settings_uri TEXT, settings_rev TEXT)',
+  },
+  {
+    type: 'table',
+    name: 'timers',
+    sql: 'CREATE TABLE timers (name TEXT PRIMARY KEY NOT NULL, due_at INTEGER NOT NULL)',
+  },
+  {
+    type: 'table',
+    name: 'users',
+    sql: "CREATE TABLE users (did TEXT PRIMARY KEY NOT NULL, handle TEXT, handle_checked_at_ms INTEGER, pds TEXT, joined_at TEXT NOT NULL, indexed_at TEXT, active INTEGER NOT NULL DEFAULT 0 CHECK(active IN (0,1)), account_status TEXT NOT NULL DEFAULT 'unknown' CHECK(account_status IN ('unknown','active','deactivated','takendown','suspended','deleted','desynchronized','throttled','not_found')), max_rev TEXT, indexing_state TEXT NOT NULL DEFAULT 'recovering' CHECK(indexing_state IN ('current','recovering','stale','suppressed')), generation INTEGER NOT NULL DEFAULT 0 CHECK(typeof(generation) = 'integer' AND generation >= 0), stats_version INTEGER NOT NULL DEFAULT 0 CHECK(typeof(stats_version) = 'integer' AND stats_version >= 0), last_snapshot_at_ms INTEGER, last_status_check_ms INTEGER, last_activity_ms INTEGER)",
+  },
+  {
+    type: 'table',
+    name: 'verified_commits',
+    sql: 'CREATE TABLE verified_commits (did TEXT NOT NULL, commit_cid TEXT NOT NULL, rev TEXT NOT NULL, verified_at_ms INTEGER NOT NULL, PRIMARY KEY(did,commit_cid))',
+  },
+];
+
+// Index structure from SQLite's own catalog, independent of the DDL text:
+// [unique, partial, [[column, desc], ...]] for every key column.
+const EXPECTED_INDEX_SHAPE: Record<string, [number, number, Array<[string, number]>]> = {
+  follows_actor_subject: [
+    0,
+    0,
+    [
+      ['actor', 0],
+      ['subject', 0],
+      ['uri', 0],
+    ],
+  ],
+  follows_subject_actor: [
+    0,
+    0,
+    [
+      ['subject', 0],
+      ['actor', 0],
+      ['uri', 0],
+    ],
+  ],
+  hints_did: [0, 0, [['did', 0]]],
+  hints_due: [0, 0, [['due_at', 0]]],
+  repo_jobs_due: [
+    0,
+    0,
+    [
+      ['kind', 0],
+      ['state', 0],
+      ['due_at', 0],
+      ['did', 0],
+    ],
+  ],
+  scrobbles_global_time: [
+    0,
+    0,
+    [
+      ['listened_at', 1],
+      ['uri', 1],
+    ],
+  ],
+  scrobbles_owner_time: [
+    0,
+    0,
+    [
+      ['did', 0],
+      ['listened_at', 1],
+      ['uri', 1],
+    ],
+  ],
+  scrobbles_stats: [
+    0,
+    0,
+    [
+      ['did', 0],
+      ['artist_key', 0],
+      ['track_key', 0],
+      ['listened_at', 0],
+    ],
+  ],
+  users_verified_handle: [1, 1, [['handle', 0]]],
+};
+
+const normalizeDdl = (sql: string) => sql.replace(/\s+/g, ' ').replace(/\( /g, '(').replace(/ \)/g, ')').trim();
+
+function indexShape(storage: DurableObjectStorage, table: string, index: string) {
+  const list = storage.sql
+    .exec<{ unique: number; partial: number }>(
+      'SELECT "unique", partial FROM pragma_index_list(?) WHERE name = ?',
+      table,
+      index,
+    )
+    .one();
+  const cols = storage.sql
+    .exec<{ name: string; desc: number }>(
+      'SELECT name, "desc" FROM pragma_index_xinfo(?) WHERE key = 1 ORDER BY seqno',
+      index,
+    )
+    .toArray()
+    .map((c): [string, number] => [c.name, c.desc]);
+  return [list.unique, list.partial, cols];
+}
+
 interface MasterRow {
   type: string;
   name: string;
@@ -89,6 +322,17 @@ describe('migrate', () => {
       expect(objects.filter((o) => o.type === 'table').map((o) => o.name)).toEqual(EXPECTED_TABLES);
       expect(objects.filter((o) => o.type === 'index').map((o) => o.name)).toEqual(EXPECTED_INDEXES);
       expect(objects.some((o) => o.type === 'trigger' || o.type === 'view')).toBe(false);
+
+      // The full frozen DDL (also proves the golden lists exactly the
+      // expected tables and indexes, and that schema_migrations is pinned).
+      expect(
+        objects.map((o) => ({ type: o.type, name: o.name, sql: o.sql === null ? null : normalizeDdl(o.sql) })),
+      ).toEqual(GOLDEN_DDL);
+      expect(GOLDEN_DDL.filter((o) => o.type === 'table').map((o) => o.name)).toEqual(EXPECTED_TABLES);
+      for (const o of objects.filter((x) => x.type === 'index')) {
+        const table = GOLDEN_DDL.find((g) => g.name === o.name)?.sql.match(/ ON (\w+)\(/)?.[1] ?? '';
+        expect([o.name, indexShape(state.storage, table, o.name)]).toEqual([o.name, EXPECTED_INDEX_SHAPE[o.name]]);
+      }
 
       const db = doDb(state.storage);
       expect(db.all('SELECT * FROM schema_migrations')).toEqual([{ version: 1, name: 'initial_workers_schema' }]);
