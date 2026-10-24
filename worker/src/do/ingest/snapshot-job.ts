@@ -102,7 +102,9 @@
 //  until a scan is started, so nothing clears it before the first connect.
 //
 // Timer: `snapshotStep` re-arms the `snapshot` timer from the job table
-// (`scheduleSnapshotTimer`); writers that create jobs outside a slice
+// (`scheduleSnapshotTimer`): the earliest due job, or the next gap-scan batch
+// only while the queue has a free slot (a full queue waits for the next due
+// job, not SNAPSHOT_MIN_INTERVAL_MS polling); writers that create jobs outside a slice
 // (admission, the drain, sweeps) leave the arming to IndexDO (W5-01), which
 // can call `scheduleSnapshotTimer` after them.
 //
@@ -138,6 +140,7 @@ import { applySnapshotChunk, completeSnapshot, type SnapshotChunkEntry } from '.
 import { collectionKind, incrementCounter, recordUri, splitKey } from '../write/keys';
 import {
   MAX_PENDING_SNAPSHOT_JOBS,
+  pendingSnapshotJobs,
   reclaimSnapshotLeases,
   type ScheduleResult,
   scheduleSnapshot,
@@ -1046,22 +1049,26 @@ export async function snapshotStep(
 
 /**
  * Point the `snapshot` timer at the next due job (no sooner than
- * SNAPSHOT_MIN_INTERVAL_MS from now), or at the next gap-scan batch; cancel it
- * when there is neither. The job table is the source of truth, so this
- * replaces whatever was stored.
+ * SNAPSHOT_MIN_INTERVAL_MS from now), or at the next gap-scan batch while the
+ * scan can make progress; cancel it when there is neither. A scan blocked by
+ * a full queue (MAX_PENDING_SNAPSHOT_JOBS pending or failed jobs: its next
+ * batch would be `busy`) waits for the next due job like no scan at all, since
+ * only a slice that claims or closes a job frees a slot; the DO does not wake
+ * every SNAPSHOT_MIN_INTERVAL_MS through a backoff or host pause to do nothing.
+ * The job table is the source of truth, so this replaces whatever was stored.
  */
 export function scheduleSnapshotTimer(db: Db, now: number): number | null {
   const next =
     db.one<{ next: number | null }>(
       `SELECT min(due_at) AS next FROM repo_jobs WHERE kind = 'snapshot' AND state IN ('pending','failed')`,
     )?.next ?? null;
-  const scanning = gapScanActive(db);
-  if (next === null && !scanning) {
+  const scanCanProgress = gapScanActive(db) && pendingSnapshotJobs(db) < MAX_PENDING_SNAPSHOT_JOBS;
+  if (next === null && !scanCanProgress) {
     cancel(db, 'snapshot');
     return null;
   }
   const soonest = now + SNAPSHOT_MIN_INTERVAL_MS;
-  const due = scanning || next === null ? soonest : Math.max(next, soonest);
+  const due = scanCanProgress || next === null ? soonest : Math.max(next, soonest);
   return schedule(db, 'snapshot', due, { force: true });
 }
 

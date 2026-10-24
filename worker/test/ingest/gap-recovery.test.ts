@@ -21,11 +21,14 @@ import {
   GAP_SCAN_DONE,
   maybeClearGap,
   SNAPSHOT_FAILURE_BACKOFF_MS,
+  SNAPSHOT_MIN_INTERVAL_MS,
   type SnapshotStepReport,
   scheduleGapRecovery,
+  scheduleSnapshotTimer,
   snapshotStep,
 } from '../../src/do/ingest/snapshot-job';
 import { GAP_REASON, indexing, markConnected, recordEvent, updateCheckpointBookkeeping } from '../../src/do/status';
+import { dueAt } from '../../src/do/timers';
 import type { HarnessDO } from '../harness/harness-do';
 import { seedUser } from '../write/support';
 import { type Deps, depsFor, kit } from './drain-support';
@@ -439,5 +442,58 @@ describe('gap recovery', () => {
     expect(k.pds.Alice.count('com.atproto.sync.getLatestCommit')).toBe(2);
     expect(k.pds.Bob.count('com.atproto.sync.getLatestCommit')).toBe(2);
     expect(k.pds.Carol.count('com.atproto.sync.getLatestCommit')).toBe(1);
+  });
+
+  it('a gap scan blocked by a full queue of not-yet-due jobs arms the snapshot timer at the earliest job due_at, not every SNAPSHOT_MIN_INTERVAL_MS', async () => {
+    const k = await kit();
+    await runInDurableObject(stubFor('gap-recovery-busy-timer'), async (i: HarnessDO) => {
+      const db = i.db;
+      const m = deps(db, k);
+      db.tx(() => {
+        markConnected(db, T0);
+        recordEvent(db, { cursor: 7, timeUs: T0 * 1000 });
+        updateCheckpointBookkeeping(db, { pendingGap: false });
+      });
+      const synthetic = Array.from({ length: CAP + 6 }, (_, n) => syntheticDid(n));
+      db.tx(() => {
+        for (const did of synthetic) seedUser(db, did);
+      });
+
+      // The scan fills the queue to the bound and stops, busy, with six DIDs left.
+      let r = scheduleGapRecovery(db, T0);
+      while (!r.busy) r = continueGapRecovery(db, T0)!;
+      expect(openJobs(db)).toBe(CAP);
+      expect(checkpoint(db)).toMatchObject({ pending_gap: 1, gap_scan_after_did: synthetic[CAP - 1] });
+      // Every queued job is in failure backoff: nothing is due for ten minutes.
+      const retry = T0 + SNAPSHOT_FAILURE_BACKOFF_MS;
+      db.run(
+        `UPDATE repo_jobs SET state = 'failed', failure_code = 'internal', due_at = ? WHERE kind = 'snapshot'`,
+        retry,
+      );
+      k.resetCalls();
+
+      // A slice in the window does no work and points the timer at the retry, not now + 1 s.
+      const at = T0 + SNAPSHOT_MIN_INTERVAL_MS;
+      const idle = await snapshotStep(m, at);
+      expect(idle).toMatchObject({ did: null, outcome: 'idle', subrequests: 0 });
+      expect(idle.gap).toMatchObject({ scheduled: 0, busy: true, after: synthetic[CAP - 1] });
+      expect(dueAt(db, 'snapshot')).toBe(retry);
+      expect(scheduleSnapshotTimer(db, at + 1)).toBe(retry);
+      expect(dueAt(db, 'snapshot')).toBe(retry);
+      expect(k.transport.calls.count()).toBe(0);
+
+      // A freed slot lets the scan progress: the timer is armed for the next batch.
+      db.run(`UPDATE repo_jobs SET state = 'complete', due_at = ? WHERE did = ?`, at, synthetic[0]!);
+      expect(scheduleSnapshotTimer(db, at)).toBe(at + SNAPSHOT_MIN_INTERVAL_MS);
+      const later = at + SNAPSHOT_MIN_INTERVAL_MS;
+      expect(continueGapRecovery(db, later)).toMatchObject({ scheduled: 1, busy: true, after: synthetic[CAP] });
+      expect(openJobs(db)).toBe(CAP);
+      // Full again, so the timer follows the jobs: the new gap job is due now (no sooner than 1 s).
+      expect(scheduleSnapshotTimer(db, later)).toBe(later + SNAPSHOT_MIN_INTERVAL_MS);
+      // Were it in backoff too, the timer would wait for the retry.
+      db.run(`UPDATE repo_jobs SET due_at = ? WHERE did = ?`, retry, synthetic[CAP]!);
+      expect(scheduleSnapshotTimer(db, later)).toBe(retry);
+      expect(k.transport.calls.count()).toBe(0);
+    });
   });
 });
