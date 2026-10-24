@@ -81,7 +81,7 @@ export class ApiDecodeError extends Error {
   }
 }
 
-/** `fetch` itself rejected: offline, DNS, CORS, or an abort. */
+/** `fetch` or the body read rejected: offline, DNS, CORS, a dropped connection, or an abort. */
 export class ApiNetworkError extends Error {
   constructor(
     readonly endpoint: string,
@@ -538,9 +538,17 @@ export class ApiClient {
       throw new ApiNetworkError(endpoint, error);
     }
 
+    // Reading the body is still transport: an abort or a dropped connection
+    // mid-body is a (retryable) network failure, not contract drift.
+    let text: string;
+    try {
+      text = await response.text();
+    } catch (error) {
+      throw new ApiNetworkError(endpoint, error);
+    }
     let body: unknown;
     try {
-      body = JSON.parse(await response.text());
+      body = JSON.parse(text);
     } catch {
       throw new ApiDecodeError(endpoint, response.status, '$', 'is not JSON');
     }

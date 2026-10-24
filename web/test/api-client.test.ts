@@ -311,6 +311,53 @@ it('maps 422 envelope to ApiError with fields', async () => {
   const networkError = await rejection(offline.meta());
   expect(networkError).toBeInstanceOf(ApiNetworkError);
   expect((networkError as ApiNetworkError).cause).toBeInstanceOf(TypeError);
+
+  // A connection dropped mid-body (the body stream errors) is a network error, not drift.
+  let dropCalls = 0;
+  const dropped = new ApiClient({
+    baseUrl: BASE,
+    fetch: async () => {
+      dropCalls += 1;
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('{"error":'));
+          controller.error(new TypeError('network error'));
+        },
+      });
+      return new Response(stream, { status: 503, headers: { 'content-type': 'application/json' } });
+    },
+  });
+  const droppedError = await rejection(dropped.notify(example<NotifyInput>('notify-input')));
+  expect(dropCalls).toBe(1);
+  expect(droppedError).toBeInstanceOf(ApiNetworkError);
+  expect(droppedError).not.toBeInstanceOf(ApiDecodeError);
+  expect((droppedError as ApiNetworkError).endpoint).toBe('POST /api/v1/notify');
+  // The runtime decides how a stream error surfaces from text() (TypeError in
+  // undici, a wrapped DOMException in happy-dom); the client keeps it as cause.
+  expect((droppedError as ApiNetworkError).cause).toBeInstanceOf(Error);
+
+  // An abort while the body is being read keeps the AbortError as the cause.
+  const controller = new AbortController();
+  const aborting = new ApiClient({
+    baseUrl: BASE,
+    fetch: async (_input, init) => {
+      const stream = new ReadableStream<Uint8Array>({
+        start(body) {
+          body.enqueue(new TextEncoder().encode('{"items":'));
+          init?.signal?.addEventListener('abort', () =>
+            body.error(new DOMException('The operation was aborted.', 'AbortError')),
+          );
+        },
+      });
+      return new Response(stream, { status: 200, headers: { 'content-type': 'application/json' } });
+    },
+  });
+  const pending = rejection(aborting.feed({}, { signal: controller.signal }));
+  controller.abort();
+  const abortError = await pending;
+  expect(abortError).toBeInstanceOf(ApiNetworkError);
+  expect((abortError as ApiNetworkError).endpoint).toBe('GET /api/v1/feed');
+  expect(((abortError as ApiNetworkError).cause as DOMException).name).toBe('AbortError');
 });
 
 it('notify posts {uri} and returns queued', async () => {
