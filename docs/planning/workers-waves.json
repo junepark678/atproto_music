@@ -55,30 +55,42 @@
      "web/tsconfig.json",
      "scripts/check-ts.sh",
      "scripts/report-tests.ts",
-     ".github/workflows/ci.yml"
+     ".github/workflows/ci.yml",
+     "worker/test/config.test.ts",
+     "scripts/test/check-ts.test.ts"
     ],
     "dependsOn": [],
-    "description": "Create the npm-workspaces monorepo described in ADR 0004 \u00a74.3. Pin Node 24 LTS in .nvmrc. Pin every runtime and test dependency used by any later package to an exact version (the newest release at least 7 days old), and generate package-lock.json. Only this package may regenerate the lockfile.\n\nPackage exports: every package.json uses `exports {\"./*\":\"./src/*.ts\",\"./test-support/*\":\"./test-support/*.ts\"}`. There are no barrel files.\n\nRoot vitest.config.ts: `projects: ['packages/*','worker/vitest.*.config.ts','web']` with `passWithNoTests:false`. Root package.json scripts: `test`, `typecheck` (`tsc -b`), `lint` (biome), `build:web`, `dev`, `test:e2e`.\n\nShared interfaces, verbatim from ADR \u00a74.4:\n- `packages/core/src/deps.ts`: Clock, Random, systemClock, cryptoRandom.\n- `test-support/clock.ts`: `fixedClock` defaulting to 2026-01-15T12:00:00Z, with `set` and `advance`.\n- `test-support/random.ts`: seeded xorshift Random.\n- `api-types.ts`: TS types for every API payload in the amended API.md. Kept DTOs are Indexing, Scrobble, Follow, Page, Profile, Statistics, Meta, Resolve, Health and ErrorEnvelope. New types are NotifyInput, NotifyAccepted, RecordStatus and Export.\n- `errors.ts`: the error-code union, including invalid_cursor, queue_full, rate_limited, not_found, validation_failed and payload_too_large.\n- `packages/atproto/src/transport.ts`, `identity/types.ts`, `verify/types.ts`.\n- `worker/src/env.ts`: Env, including bindings INDEX and ASSETS, CURSOR_KEY, optional ADMIN_TOKEN, and every var.\n- `worker/src/config.ts`: `parseConfig(env): AppConfig`, which validates the vars and the namespace gate. An empty LEXICON_PREFIX gives `prefix=null`. The prefix com.example.atmusic is rejected unless `allowFixturePrefix` is true, and only test entries pass that flag.\n- `worker/src/http/types.ts`: RequestCtx and RouteDef.\n- `worker/src/do/contracts.ts`: ModuleDeps, IndexRpc, and the row types ScrobbleRow, FollowRow, UserRow and RepoJobRow.\n\nworker/src/do/schema.ts is migration 1, exactly the tables of ADR \u00a76.1 (every column, CHECK and index listed there). It seeds `indexing_status('global','recovering',0)`, `backfill_generation(1,0)` and `ingest_checkpoint('jetstream', pending_gap=1)`.\n\nworker/src/do/migrate.ts: `migrate(storage)` applies migrations in one `transactionSync` and records them in `schema_migrations`. It returns `{status:'ready'|'too_new', version}`.\n\nworker/src/do/db.ts: `doDb(storage): Db`.\n- `all` and `one` run `storage.sql.exec(...).toArray()`.\n- `run` returns `{rowsWritten}`.\n- `tx` wraps `transactionSync`, and its TS type rejects a callback that returns a Promise.\n- It throws a typed SqlParamError for more than 100 params or for unsafe integers.\n\nTest harness:\n- worker/test/harness/harness-do.ts: a HarnessDO that runs migrate in its constructor.\n- entry.ts exports HarnessDO plus a default fetch handler.\n- wrangler.harness.jsonc binds HARNESS.\n- local-index.ts: `makeLocalIndex(state, impl: Partial<IndexRpc>)` builds an IndexRpc for handler tests that runs module functions inside `runInDurableObject`.\n\nworker/wrangler.jsonc is the sketch in ADR \u00a74.2, including the free and staging envs. worker/.dev.vars.example lists the secrets.\n\nCI:\n- .github/workflows/ci.yml keeps the existing Rust `check` job unchanged (it is the oracle).\n- It removes the static-linux job.\n- It adds a `ts` job: `npm ci`, `bash scripts/check-ts.sh`.\n\nscripts/check-ts.sh runs typecheck, lint, `npm test -- --reporter=json` through scripts/report-tests.ts (which fails on zero executed tests), `python3 scripts/validate_contracts.py`, and, when present, `python3 scripts/validate_case_map.py` and `npx tsx scripts/check-bundle.ts`.\n\n.gitignore adds node_modules, web/dist, .wrangler, worker/dist, web/public/oauth/client-metadata.json and web/public/_headers.\n\nVerify that the pinned @cloudflare/vitest-plugin exports cloudflareTest and that `cloudflare:test` provides runInDurableObject, runDurableObjectAlarm, a DO eviction helper and createScheduledController. Record the exact helper names in a comment in worker/vitest.modules.config.ts.",
+    "description": "Create the npm-workspaces monorepo described in ADR 0004 §4.3. Pin Node 24 LTS in .nvmrc. Pin every runtime and test dependency used by any later package to an exact version (the newest release at least 7 days old), and generate package-lock.json. Only this package may regenerate the lockfile.\n\nPackage exports: every package.json uses `exports {\"./*\":\"./src/*.ts\",\"./test-support/*\":\"./test-support/*.ts\"}`. There are no barrel files.\n\nRoot vitest.config.ts: `projects: ['packages/*','worker/vitest.*.config.ts','web']` with `passWithNoTests:false`. Root package.json scripts: `test`, `typecheck` (`tsc -b`), `lint` (biome), `build:web`, `dev`, `test:e2e`.\n\nShared interfaces, verbatim from ADR §4.4:\n- `packages/core/src/deps.ts`: Clock, Random, systemClock, cryptoRandom.\n- `test-support/clock.ts`: `fixedClock` defaulting to 2026-01-15T12:00:00Z, with `set` and `advance`.\n- `test-support/random.ts`: seeded xorshift Random.\n- `api-types.ts`: TS types for every API payload in the amended API.md. Kept DTOs are Indexing, Scrobble, Follow, Page, Profile, Statistics, Meta, Resolve, Health and ErrorEnvelope. New types are NotifyInput, NotifyAccepted, RecordStatus and Export.\n- `errors.ts`: the error-code union, including invalid_cursor, queue_full, rate_limited, not_found, validation_failed and payload_too_large.\n- `packages/atproto/src/transport.ts`, `identity/types.ts`, `verify/types.ts`.\n- `worker/src/env.ts`: Env, including bindings INDEX and ASSETS, CURSOR_KEY, optional ADMIN_TOKEN, and every var.\n- `worker/src/config.ts`: `parseConfig(env): AppConfig`, which validates the vars and the namespace gate. An empty LEXICON_PREFIX gives `prefix=null`. The prefix com.example.atmusic is rejected unless `allowFixturePrefix` is true, and only test entries pass that flag.\n- `worker/src/http/types.ts`: RequestCtx and RouteDef.\n- `worker/src/do/contracts.ts`: ModuleDeps, IndexRpc, and the row types ScrobbleRow, FollowRow, UserRow and RepoJobRow.\n\nworker/src/do/schema.ts is migration 1, exactly the tables of ADR §6.1 (every column, CHECK and index listed there). It seeds `indexing_status('global','recovering',0)`, `backfill_generation(1,0)` and `ingest_checkpoint('jetstream', pending_gap=1)`.\n\nworker/src/do/migrate.ts: `migrate(storage)` applies migrations in one `transactionSync` and records them in `schema_migrations`. It returns `{status:'ready'|'too_new', version}`.\n\nworker/src/do/db.ts: `doDb(storage): Db`.\n- `all` and `one` run `storage.sql.exec(...).toArray()`.\n- `run` returns `{rowsWritten}`.\n- `tx` wraps `transactionSync`, and its TS type rejects a callback that returns a Promise.\n- It throws a typed SqlParamError for more than 100 params or for unsafe integers.\n\nTest harness:\n- worker/test/harness/harness-do.ts: a HarnessDO that runs migrate in its constructor.\n- entry.ts exports HarnessDO plus a default fetch handler.\n- wrangler.harness.jsonc binds HARNESS.\n- local-index.ts: `makeLocalIndex(state, impl: Partial<IndexRpc>)` builds an IndexRpc for handler tests that runs module functions inside `runInDurableObject`.\n\nworker/wrangler.jsonc is the sketch in ADR §4.2, including the free and staging envs. worker/.dev.vars.example lists the secrets.\n\nCI:\n- .github/workflows/ci.yml keeps the existing Rust `check` job unchanged (it is the oracle).\n- It removes the static-linux job.\n- It adds a `ts` job: `npm ci`, `bash scripts/check-ts.sh`.\n\nscripts/check-ts.sh runs typecheck, lint, `npm test -- --reporter=json` through scripts/report-tests.ts (which fails on zero executed tests), `python3 scripts/validate_contracts.py`, and, when present, `python3 scripts/validate_case_map.py` and `npx tsx scripts/check-bundle.ts`.\n\n.gitignore adds node_modules, web/dist, .wrangler, worker/dist, web/public/oauth/client-metadata.json and web/public/_headers.\n\nVerify that the pinned @cloudflare/vitest-plugin exports cloudflareTest and that `cloudflare:test` provides runInDurableObject, runDurableObjectAlarm, a DO eviction helper and createScheduledController. Record the exact helper names in a comment in worker/vitest.modules.config.ts.",
     "tests": [
-     "packages/core/test/scaffold.test.ts \u203a fixedClock starts at 2026-01-15T12:00:00Z and advance/set are exact",
-     "packages/core/test/scaffold.test.ts \u203a seeded Random is reproducible across runs",
-     "packages/atproto/test/scaffold.test.ts \u203a workerd runtime has WebCrypto ECDSA P-256 and String.prototype.normalize NFKC",
-     "worker/test/storage/migrate.test.ts \u203a fresh DO applies migration 1 and seeds indexing_status/backfill_generation/ingest_checkpoint",
-     "worker/test/storage/migrate.test.ts \u203a schema newer than code reports too_new",
-     "worker/test/storage/migrate.test.ts \u203a re-running migrate is a no-op",
-     "worker/test/storage/db.test.ts \u203a tx rolls back all writes when the callback throws",
-     "worker/test/storage/db.test.ts \u203a 101 bound parameters raise SqlParamError before execution",
-     "worker/test/storage/db.test.ts \u203a unsafe integer parameter is rejected",
-     "worker/test/storage/sql-conformance.test.ts \u203a BEGIN and SAVEPOINT are rejected by exec",
-     "worker/test/storage/sql-conformance.test.ts \u203a RETURNING and ON CONFLICT DO UPDATE ... WHERE behave as SQLite",
-     "worker/test/storage/sql-conformance.test.ts \u203a partial unique index users_verified_handle allows many NULLs and rejects duplicates",
-     "worker/test/storage/sql-conformance.test.ts \u203a FK ON DELETE CASCADE is enforced for scrobbles.did and follows.actor",
-     "worker/test/storage/sql-conformance.test.ts \u203a integers up to 2^53-1 round-trip exactly; documents precision loss above",
-     "worker/test/storage/sql-conformance.test.ts \u203a BLOB round-trip in snapshot_blocks",
-     "worker/test/storage/sql-conformance.test.ts \u203a multi-statement exec binds only the last statement",
-     "worker/test/storage/sql-conformance.test.ts \u203a row-value comparison (a,b) < (?,?) and BINARY collation order equals UTF-8 code point order",
-     "worker/test/storage/no-async-tx.test.ts \u203a no source file passes an async callback to db.tx",
-     "worker/test/harness \u203a local-index adapter executes a module function inside the harness DO"
+     "packages/core/test/scaffold.test.ts › fixedClock starts at 2026-01-15T12:00:00Z and advance/set are exact",
+     "packages/core/test/scaffold.test.ts › seeded Random is reproducible across runs",
+     "packages/atproto/test/scaffold.test.ts › workerd runtime has WebCrypto ECDSA P-256 and String.prototype.normalize NFKC",
+     "worker/test/storage/migrate.test.ts › fresh DO applies migration 1 and seeds indexing_status/backfill_generation/ingest_checkpoint",
+     "worker/test/storage/migrate.test.ts › schema newer than code reports too_new",
+     "worker/test/storage/migrate.test.ts › re-running migrate is a no-op",
+     "worker/test/storage/db.test.ts › tx rolls back all writes when the callback throws",
+     "worker/test/storage/db.test.ts › 101 bound parameters raise SqlParamError before execution",
+     "worker/test/storage/db.test.ts › unsafe integer parameter is rejected",
+     "worker/test/storage/sql-conformance.test.ts › BEGIN and SAVEPOINT are rejected by exec",
+     "worker/test/storage/sql-conformance.test.ts › RETURNING and ON CONFLICT DO UPDATE ... WHERE behave as SQLite",
+     "worker/test/storage/sql-conformance.test.ts › partial unique index users_verified_handle allows many NULLs and rejects duplicates",
+     "worker/test/storage/sql-conformance.test.ts › FK ON DELETE CASCADE is enforced for scrobbles.did and follows.actor",
+     "worker/test/storage/sql-conformance.test.ts › integers up to 2^53-1 round-trip exactly; documents precision loss above",
+     "worker/test/storage/sql-conformance.test.ts › BLOB round-trip in snapshot_blocks",
+     "worker/test/storage/sql-conformance.test.ts › multi-statement exec binds only the last statement",
+     "worker/test/storage/sql-conformance.test.ts › row-value comparison (a,b) < (?,?) and BINARY collation order equals UTF-8 code point order",
+     "worker/test/storage/no-async-tx.test.ts › no source file passes an async callback to db.tx",
+     "worker/test/harness › local-index adapter executes a module function inside the harness DO",
+     "worker/test/config.test.ts › one-segment, uppercase and embedded-slash LEXICON_PREFIX values are rejected naming LEXICON_PREFIX; empty yields prefix null",
+     "worker/test/config.test.ts › http PUBLIC_ORIGIN and invalid LEXICON_PREFIX fail parseConfig naming each field without echoing any secret value",
+     "worker/test/storage/sql-conformance.test.ts › second plain INSERT of one scrobbles.uri fails with a constraint error and the row count stays one",
+     "worker/test/storage/sql-conformance.test.ts › INSERT of a scrobble or follow whose users row is missing is rejected and leaves no row",
+     "worker/test/storage/migrate.test.ts › a migration whose second statement is invalid persists neither statement and keeps the previous schema version",
+     "worker/test/harness › rows written under one DO name are absent under another DO name and in another test file",
+     "scripts/test/check-ts.test.ts › a misformatted file in a disposable copy fails the biome step and leaves the repository unchanged",
+     "scripts/test/check-ts.test.ts › an inverted assertion in a disposable copy makes check-ts.sh exit nonzero",
+     "scripts/test/check-ts.test.ts › a wrong API field type in a disposable copy fails tsc -b",
+     "scripts/test/check-ts.test.ts › npm ci, tsc -b and the web production build pass and leave package-lock.json unchanged"
     ]
    },
    {
@@ -100,15 +112,17 @@
      "scripts/test_validate_case_map.py"
     ],
     "dependsOn": [],
-    "description": "Apply ADR 0004 \u00a79 to the planning documents. Edit only the passages each amendment changes, and keep all kept rules verbatim.\n\nMVP.md:\n- Scope paragraph: A1 and A2.\n- Protocol rule on relays: A6.\n- Pending deletion: A13.\n- Idempotency: A11.\n- M7 ordering: A14.\n- Mark the M1.2.3, M1.4.3, M6.1.1, M6.1.2, M6.2.2, M6.3.1 and M6.4.1 deliverables as superseded, with the amendment id.\n\nAPI.md:\n- Remove the dropped routes and the Accepted and Operation schemas.\n- Add N1 to N3.\n- Following feed: the viewer parameter (A8).\n- Export moves (A9).\n- Disconnect via settings (A10).\n- Keep every other shape and status byte for byte.\n\nTESTING.md:\n- Harness wording per A18: workerd isolation, DO eviction restart, fixture Transport, the npm commands.\n- Keep every exact fixture assertion unchanged.\n- Add the rejection-matrix tables rule (projection and checkpoint byte-identical).\n- Add the SPA outbox obligations.\n\nADR 0002 and ADR 0003: append an 'Amended by ADR 0004' section (A3, A5; A6, A7, A17) and do not rewrite the history.\n\nlexicons/settings.json: id `com.example.atmusic.settings` (fixture prefix, like the other lexicons), key `literal:self`, required `indexing` (enum enabled/disabled) and `createdAt` (datetime).\n\napi/openapi.yaml:\n- `info.version` 1.1.0.\n- Remove the dropped paths and schemas.\n- Add the notify, records/status and users/{did}/export paths and their schemas.\n- `feed` gets the `viewer` parameter.\n- Keep `/oauth/client-metadata.json` documented as a static asset, with web application_type and redirect `/oauth/callback`.\n\napi/examples: add notify-input.json, notify.json, record-status.json, feed-following-input.json and a new export.json. Delete accepted.json, operation.json, session.json, auth-start*.json, error-409.json and error-idempotency-result-unavailable.json. Update response-cases.json and schema-cases.json. scripts/validate_contracts.py must pass against the new set and still reject the old dropped paths.\n\nAMENDMENTS-workers.md: one issue-amendment text per affected github-plan.json leaf key, citing the demonstrated gap and the amendment id. The GitHub publication itself remains an owner action.\n\ndocs/verification/ts-case-map.json maps every named case in docs/planning/github-plan.json (258) to either a TS test id `<file> \u203a <name>` taken from this ADR's waves, or `retired:<A#|D>` with a reason.\n\nscripts/validate_case_map.py:\n- reads github-plan.json;\n- asserts there are exactly 258 unique case ids, none missing and none duplicated;\n- with `--check-tests`, asserts each referenced test file exists. The final existence check is enforced by W7-01.",
+    "description": "Apply ADR 0004 §9 to the planning documents. Edit only the passages each amendment changes, and keep all kept rules verbatim.\n\nMVP.md:\n- Scope paragraph: A1 and A2.\n- Protocol rule on relays: A6.\n- Pending deletion: A13.\n- Idempotency: A11.\n- M7 ordering: A14.\n- Mark the M1.2.3, M1.4.3, M6.1.1, M6.1.2, M6.2.2, M6.3.1 and M6.4.1 deliverables as superseded, with the amendment id.\n\nAPI.md:\n- Remove the dropped routes and the Accepted and Operation schemas.\n- Add N1 to N3.\n- Following feed: the viewer parameter (A8).\n- Export moves (A9).\n- Disconnect via settings (A10).\n- Keep every other shape and status byte for byte.\n\nTESTING.md:\n- Harness wording per A18: workerd isolation, DO eviction restart, fixture Transport, the npm commands.\n- Keep every exact fixture assertion unchanged.\n- Add the rejection-matrix tables rule (projection and checkpoint byte-identical).\n- Add the SPA outbox obligations.\n\nADR 0002 and ADR 0003: append an 'Amended by ADR 0004' section (A3, A5; A6, A7, A17) and do not rewrite the history.\n\nlexicons/settings.json: id `com.example.atmusic.settings` (fixture prefix, like the other lexicons), key `literal:self`, required `indexing` (enum enabled/disabled) and `createdAt` (datetime).\n\napi/openapi.yaml:\n- `info.version` 1.1.0.\n- Remove the dropped paths and schemas.\n- Add the notify, records/status and users/{did}/export paths and their schemas.\n- `feed` gets the `viewer` parameter.\n- Keep `/oauth/client-metadata.json` documented as a static asset, with web application_type and redirect `/oauth/callback`.\n\napi/examples: add notify-input.json, notify.json, record-status.json, feed-following-input.json and a new export.json. Delete accepted.json, operation.json, session.json, auth-start*.json, error-409.json and error-idempotency-result-unavailable.json. Update response-cases.json and schema-cases.json. scripts/validate_contracts.py must pass against the new set and still reject the old dropped paths.\n\nAMENDMENTS-workers.md: one issue-amendment text per affected github-plan.json leaf key, citing the demonstrated gap and the amendment id. The GitHub publication itself remains an owner action.\n\ndocs/verification/ts-case-map.json maps every named case in docs/planning/github-plan.json (258) to either a TS test id `<file> › <name>` taken from this ADR's waves, or `retired:<A#|D>` with a reason.\n\nscripts/validate_case_map.py:\n- reads github-plan.json;\n- asserts there are exactly 258 unique case ids, none missing and none duplicated;\n- with `--check-tests`, asserts each referenced test file exists. The final existence check is enforced by W7-01.",
     "tests": [
-     "scripts/test_validate_case_map.py \u203a rejects a missing case id",
-     "scripts/test_validate_case_map.py \u203a rejects a duplicate case id",
-     "scripts/test_validate_case_map.py \u203a rejects retired entry without amendment id",
-     "scripts/test_validate_case_map.py \u203a accepts the committed map with 258 cases",
-     "python3 scripts/validate_contracts.py \u203a all api/examples validate against openapi 1.1.0 components",
-     "python3 scripts/validate_contracts.py \u203a dropped paths (/api/v1/auth/*, POST /api/v1/scrobbles, /api/v1/operations/{id}, /api/v1/account/*) are absent",
-     "python3 scripts/validate_contracts.py \u203a lexicons/settings.json is a valid lexicon with literal:self key"
+     "scripts/test_validate_case_map.py › rejects a missing case id",
+     "scripts/test_validate_case_map.py › rejects a duplicate case id",
+     "scripts/test_validate_case_map.py › rejects retired entry without amendment id",
+     "scripts/test_validate_case_map.py › accepts the committed map with 258 cases",
+     "python3 scripts/validate_contracts.py › all api/examples validate against openapi 1.1.0 components",
+     "python3 scripts/validate_contracts.py › dropped paths (/api/v1/auth/*, POST /api/v1/scrobbles, /api/v1/operations/{id}, /api/v1/account/*) are absent",
+     "python3 scripts/validate_contracts.py › lexicons/settings.json is a valid lexicon with literal:self key",
+     "python3 scripts/validate_contracts.py › route_inventory: exact MVP/API route and status matrices",
+     "scripts/test_validate_case_map.py › --check-tests reports a missing test file or name"
     ]
    },
    {
@@ -130,11 +144,11 @@
      "scripts/check_goldens.sh"
     ],
     "dependsOn": [],
-    "description": "Write Rust examples that call the frozen production code and emit deterministic JSON into tests/goldens/. Do not change any crate src/ file.\n\ncrates/core/examples/export_goldens.rs emits:\n- **music_keys.json:** input string \u2192 normalized key, for artist and track/album tuples, over a Unicode edge corpus: \u00df, \u0130, \ufb01, K-sign, fullwidth, NEL, U+FEFF, ZWJ, astral characters, U+E000\u2013U+FFFF versus astral ordering, mixed whitespace, and the TESTING.md Bj\u00f6rk/BJ\u00d6RK/j\u00f3ga cases. Include the pairwise ordering of keys.\n- **validation.json:** scrobble and follow inputs, the receipt time, and accept/reject with a reason code. Cover: 256 versus 257 scalars, 1,024-byte limits, trim-to-empty, lone surrogates (as UTF-16 escapes), +300 s accepted and +301 s rejected at receipt 2026-01-15T12:00:00Z, 1970 bounds, duration 0/1/86400/86401, MBID syntax.\n- **timestamps.json:** RFC 3339 input, then the storage form (30-character ns form), then the DTO render.\n- **follow_rkeys.json:** subject DID \u2192 'f'+sha256 hex.\n- **windows.json:** each window \u2192 lower bound for asOf 2026-01-15T12:00:00Z.\n- **cursors.json:** key material, binding and tuple \u2192 token, plus the tampered variants and their expected error.\n- **stats_read_models.json:** for the shared fixture, the Rust `Statistics` for each window and the history and feed orders, as a cross-check only. Acceptance tests still hardcode the TESTING.md values.\n\ncrates/atproto/examples/export_signed_cars.rs uses the existing test signing helper via `#[path = \"../tests/support/signed_repo.rs\"] mod signed_repo;`, or the nearest existing support module, with fixed test keys. It writes, for secp256k1 and P-256:\n- a getRecord inclusion-proof CAR;\n- an exclusion-proof CAR;\n- a full repo CAR containing music plus 50 non-music records;\n- one CAR per single corruption: signature byte, record block byte, MST node byte, DID, version, rev, root, truncation, oversize, record CID swap.\n\nEach goes to tests/goldens/signed_cars/<name>.car, with a manifest entry giving the expected verdict and error code. snapshot_enumeration.json records the record set that `verify_snapshot` returns for each full-repo CAR.\n\nscripts/check_goldens.sh runs both examples into a temp dir and diffs the result against tests/goldens. It exits nonzero on drift and is wired into the Rust CI job by W7-01 or W0-01's ci.yml. Until then it is run manually.\n\ntests/goldens/README.md documents provenance (commit and command) and states that the fixed keys are test-only.",
+    "description": "Write Rust examples that call the frozen production code and emit deterministic JSON into tests/goldens/. Do not change any crate src/ file.\n\ncrates/core/examples/export_goldens.rs emits:\n- **music_keys.json:** input string → normalized key, for artist and track/album tuples, over a Unicode edge corpus: ß, İ, ﬁ, K-sign, fullwidth, NEL, U+FEFF, ZWJ, astral characters, U+E000–U+FFFF versus astral ordering, mixed whitespace, and the TESTING.md Björk/BJÖRK/jóga cases. Include the pairwise ordering of keys.\n- **validation.json:** scrobble and follow inputs, the receipt time, and accept/reject with a reason code. Cover: 256 versus 257 scalars, 1,024-byte limits, trim-to-empty, lone surrogates (as UTF-16 escapes), +300 s accepted and +301 s rejected at receipt 2026-01-15T12:00:00Z, 1970 bounds, duration 0/1/86400/86401, MBID syntax.\n- **timestamps.json:** RFC 3339 input, then the storage form (30-character ns form), then the DTO render.\n- **follow_rkeys.json:** subject DID → 'f'+sha256 hex.\n- **windows.json:** each window → lower bound for asOf 2026-01-15T12:00:00Z.\n- **cursors.json:** key material, binding and tuple → token, plus the tampered variants and their expected error.\n- **stats_read_models.json:** for the shared fixture, the Rust `Statistics` for each window and the history and feed orders, as a cross-check only. Acceptance tests still hardcode the TESTING.md values.\n\ncrates/atproto/examples/export_signed_cars.rs uses the existing test signing helper via `#[path = \"../tests/support/signed_repo.rs\"] mod signed_repo;`, or the nearest existing support module, with fixed test keys. It writes, for secp256k1 and P-256:\n- a getRecord inclusion-proof CAR;\n- an exclusion-proof CAR;\n- a full repo CAR containing music plus 50 non-music records;\n- one CAR per single corruption: signature byte, record block byte, MST node byte, DID, version, rev, root, truncation, oversize, record CID swap.\n\nEach goes to tests/goldens/signed_cars/<name>.car, with a manifest entry giving the expected verdict and error code. snapshot_enumeration.json records the record set that `verify_snapshot` returns for each full-repo CAR.\n\nscripts/check_goldens.sh runs both examples into a temp dir and diffs the result against tests/goldens. It exits nonzero on drift and is wired into the Rust CI job by W7-01 or W0-01's ci.yml. Until then it is run manually.\n\ntests/goldens/README.md documents provenance (commit and command) and states that the fixed keys are test-only.",
     "tests": [
-     "cargo run --locked -p atmusic-core --example export_goldens \u203a writes all core golden files deterministically (two runs byte-identical)",
-     "cargo run --locked -p atmusic-atproto --example export_signed_cars \u203a valid CARs verify with the Rust verifier and every corrupted CAR fails with its manifest error code",
-     "bash scripts/check_goldens.sh \u203a exits 0 on clean tree and nonzero after mutating one golden byte"
+     "cargo run --locked -p atmusic-core --example export_goldens › writes all core golden files deterministically (two runs byte-identical)",
+     "cargo run --locked -p atmusic-atproto --example export_signed_cars › valid CARs verify with the Rust verifier and every corrupted CAR fails with its manifest error code",
+     "bash scripts/check_goldens.sh › exits 0 on clean tree and nonzero after mutating one golden byte"
     ]
    }
   ]
@@ -142,6 +156,26 @@
  {
   "wave": 1,
   "packages": [
+   {
+    "id": "W0-AMEND",
+    "title": "Required wave amendment tests for already-merged Wave 0 packages (W0-01, W0-02)",
+    "files": [
+     "worker/test/config.test.ts",
+     "scripts/test/check-ts.test.ts",
+     "worker/test/storage/sql-conformance.test.ts",
+     "worker/test/storage/migrate.test.ts",
+     "worker/test/harness/",
+     "scripts/validate_contracts.py",
+     "scripts/test_validate_case_map.py",
+     "scripts/validate_case_map.py"
+    ],
+    "dependsOn": [
+     "W0-01",
+     "W0-02"
+    ],
+    "description": "Wave 0 merged before docs/planning/AMENDMENTS-workers.md listed its required wave amendments. Add exactly these tests to the W0-01 and W0-02 deliverables, fixing the product code (worker/src/config.ts, the migrate runner, check-ts.sh) only where a test exposes a real gap. Each test must assert the outcome the case map says it covers; read docs/verification/ts-case-map.json and AMENDMENTS-workers.md for the covered case ids. Disposable-copy tests in scripts/test/check-ts.test.ts must copy the repository to a temp dir and must never modify the real working tree. Also address these deferred Wave 0 review items if still true: errors.ts header comment versus api/examples error codes (record any renames in AMENDMENTS-workers.md); makeLocalIndex accepting the frozen Partial<IndexRpc> form as well as ModuleImpl; keeping the test-only Cloudflare.Env augmentation out of production typecheck; adding a root tsconfig.json so root-level TS tooling files are typechecked by tsc -b. The tests are declared under W0-01 and W0-02 in this file (the entries added after their original lists). W0-AMEND implements them.",
+    "tests": []
+   },
    {
     "id": "W1-01",
     "title": "core: timestamps, syntax, scrobble/follow/settings validation, namespace gate",
@@ -166,16 +200,18 @@
     ],
     "description": "Port the crates/core rules to TypeScript.\n\ntimestamp.ts:\n- `parseRfc3339(s)` gives a BigInt nanoseconds-since-epoch, UTC only, nanosecond precision.\n- `toStorage(ns)` produces the 30-character `YYYY-MM-DDTHH:MM:SS.nnnnnnnnnZ` form.\n- `toDto(ns)` must match timestamps.json.\n- `fromMs` and `addSeconds` helpers.\n\nsyntax.ts: DID (plc and web), handle, NSID, AT-URI parse and format, TID, and record-key validation, all per the atproto specs.\n\nscrobble.ts: `validateScrobbleRecord(json, prefix, receiptNs)` returns `{ok, row}` or `{ok:false, reason}`.\n- Applies the scalar and byte limits.\n- Trims using the Unicode White_Space set; never use JS trim or `\\s`.\n- Rejects lone surrogates.\n- Applies the +300 s / 1970 bounds against the receipt time.\n- Checks duration and MBID.\n- Rejects any `$type` other than `<prefix>.scrobble`.\n- Unknown fields in *remote* records are ignored as lexicon open objects, matching the Rust remote validation, and the golden file decides. Also export `buildScrobbleRecord(input, prefix, clock)` for the SPA, which rejects unknown input fields.\n\nfollow.ts: validation plus `buildFollowRecord`.\n\nsettings.ts: validation of `<prefix>.settings` with key `self`.\n\nnamespace.ts: `requirePublication(prefix, ownershipRef)` ports Namespace::require_publication, including that the fixture prefix is fixture-only.\n\nEvery verdict must equal tests/goldens/validation.json.",
     "tests": [
-     "packages/core/test/timestamp.test.ts \u203a storage form is fixed-width 30 chars and text order equals time order",
-     "packages/core/test/timestamp.test.ts \u203a every timestamps.json vector round-trips to the Rust storage and DTO forms",
-     "packages/core/test/syntax.test.ts \u203a DID/handle/NSID/AT-URI/TID accept and reject spec vectors",
-     "packages/core/test/scrobble.test.ts \u203a validation.json vectors match Rust verdicts and reasons",
-     "packages/core/test/scrobble.test.ts \u203a now+300s accepted and now+301s rejected at 2026-01-15T12:00:00Z receipt",
-     "packages/core/test/scrobble.test.ts \u203a White_Space trim (NEL, U+3000) differs from JS trim and matches Rust",
-     "packages/core/test/scrobble.test.ts \u203a buildScrobbleRecord rejects unknown input fields",
-     "packages/core/test/follow.test.ts \u203a follow validation and self-follow rejection",
-     "packages/core/test/settings.test.ts \u203a settings record requires key self and indexing enum",
-     "packages/core/test/namespace.test.ts \u203a fixture prefix blocks publication; owned prefix with ownership ref allows it"
+     "packages/core/test/timestamp.test.ts › storage form is fixed-width 30 chars and text order equals time order",
+     "packages/core/test/timestamp.test.ts › every timestamps.json vector round-trips to the Rust storage and DTO forms",
+     "packages/core/test/syntax.test.ts › DID/handle/NSID/AT-URI/TID accept and reject spec vectors",
+     "packages/core/test/scrobble.test.ts › validation.json vectors match Rust verdicts and reasons",
+     "packages/core/test/scrobble.test.ts › now+300s accepted and now+301s rejected at 2026-01-15T12:00:00Z receipt",
+     "packages/core/test/scrobble.test.ts › White_Space trim (NEL, U+3000) differs from JS trim and matches Rust",
+     "packages/core/test/scrobble.test.ts › buildScrobbleRecord rejects unknown input fields",
+     "packages/core/test/follow.test.ts › follow validation and self-follow rejection",
+     "packages/core/test/settings.test.ts › settings record requires key self and indexing enum",
+     "packages/core/test/namespace.test.ts › fixture prefix blocks publication; owned prefix with ownership ref allows it",
+     "packages/core/test/follow.test.ts › follow createdAt now+300s accepted and now+301s rejected at 2026-01-15T12:00:00Z receipt",
+     "packages/core/test/scrobble.test.ts › duration 1 and 86400 accepted; 0, 86401 and 1.5 rejected; invalid MBID rejected; omitted album accepted"
     ]
    },
    {
@@ -197,12 +233,13 @@
     ],
     "description": "`normalizeMusic(s)` = NFKC (`String.prototype.normalize`), then full case folding from the vendored CaseFolding-16.0.0 C+F mappings, then White_Space trim, then collapsing White_Space runs to a single U+0020. This must match the Rust music_key exactly.\n\nKey functions:\n- `artistKey(artist)`;\n- `trackKey(artist, track)` returns the tuple `[artistKey, trackKey]`;\n- `albumKey(artist, album?)` returns the tuple or null.\n\nStorage columns hold the normalized component strings.\n\n`compareCodePoints(a, b)` gives UTF-8 / code-point order, not UTF-16 order.\n\nscripts/gen-unicode.ts regenerates casefold-16.0.0.ts and white-space.ts from data/CaseFolding-16.0.0.txt and the PropList White_Space set. The test checks the generated files are up to date.\n\nunicode-runtime.test.ts runs inside workerd and asserts that ICU NFKC agrees with the golden for every corpus entry. It fails loudly on an ICU upgrade drift.",
     "tests": [
-     "packages/core/test/music-key.test.ts \u203a every music_keys.json vector equals the Rust key",
-     "packages/core/test/music-key.test.ts \u203a Bj\u00f6rk / '  BJ\u00d6RK  ' / 'j\u00f3ga' group together; Homogenic/' HOMOGENIC ' group together",
-     "packages/core/test/music-key.test.ts \u203a compareCodePoints orders astral above U+E000\u2013U+FFFF like Rust",
-     "packages/core/test/music-key.test.ts \u203a missing album yields null album key",
-     "packages/core/test/unicode-runtime.test.ts \u203a workerd ICU NFKC matches oracle corpus",
-     "packages/core/test/unicode-runtime.test.ts \u203a generated casefold/white-space tables are up to date with data file"
+     "packages/core/test/music-key.test.ts › every music_keys.json vector equals the Rust key",
+     "packages/core/test/music-key.test.ts › Björk / '  BJÖRK  ' / 'jóga' group together; Homogenic/' HOMOGENIC ' group together",
+     "packages/core/test/music-key.test.ts › compareCodePoints orders astral above U+E000–U+FFFF like Rust",
+     "packages/core/test/music-key.test.ts › missing album yields null album key",
+     "packages/core/test/unicode-runtime.test.ts › workerd ICU NFKC matches oracle corpus",
+     "packages/core/test/unicode-runtime.test.ts › generated casefold/white-space tables are up to date with data file",
+     "packages/core/test/music-key.test.ts › artist a|b with title c and artist a with title b|c yield distinct track keys"
     ]
    },
    {
@@ -220,15 +257,15 @@
      "W0-01",
      "W0-03"
     ],
-    "description": "write-policy.ts:\n- `nextDelayMs(attempt, random, retryAfterMs?)` = min(300 s, base + U[0, base/4]), with base = 1000\u00b72^(attempt\u22121). A capped Retry-After (\u2264300 s) can raise the delay.\n- `MAX_ATTEMPTS = 10`.\n- `classify(response|error)` returns transient (network, 5xx, 429), permanent, or ambiguous_create (the 'already exists' / RecordAlreadyExists shapes).\n\nrecord-key.ts:\n- `newTid(clock, random)`: a spec TID (53-bit \u00b5s timestamp plus a 10-bit clock id), base32-sortable.\n- `followRkey(subjectDid)` = 'f' + lowercase hex sha256, async through WebCrypto. It must equal follow_rkeys.json.\n\ncanonical.ts: `canonicalJson(value)`, with sorted keys and no insignificant whitespace, then `digest = hex(sha256)`. Used to compare a local outbox record with a remote getRecord value; `$type` is included.",
+    "description": "write-policy.ts:\n- `nextDelayMs(attempt, random, retryAfterMs?)` = min(300 s, base + U[0, base/4]), with base = 1000·2^(attempt−1). A capped Retry-After (≤300 s) can raise the delay.\n- `MAX_ATTEMPTS = 10`.\n- `classify(response|error)` returns transient (network, 5xx, 429), permanent, or ambiguous_create (the 'already exists' / RecordAlreadyExists shapes).\n\nrecord-key.ts:\n- `newTid(clock, random)`: a spec TID (53-bit µs timestamp plus a 10-bit clock id), base32-sortable.\n- `followRkey(subjectDid)` = 'f' + lowercase hex sha256, async through WebCrypto. It must equal follow_rkeys.json.\n\ncanonical.ts: `canonicalJson(value)`, with sorted keys and no insignificant whitespace, then `digest = hex(sha256)`. Used to compare a local outbox record with a remote getRecord value; `$type` is included.",
     "tests": [
-     "packages/core/test/write-policy.test.ts \u203a zero jitter yields 1s,2s,4s,8s,16s,32s,64s,128s,256s,300s",
-     "packages/core/test/write-policy.test.ts \u203a Retry-After 20 raises a 1s or 2s delay to 20s and is capped at 300s",
-     "packages/core/test/write-policy.test.ts \u203a jitter stays within [base, base*1.25] for seeded random",
-     "packages/core/test/write-policy.test.ts \u203a classify maps 429/5xx/network to transient and RecordAlreadyExists to ambiguous_create",
-     "packages/core/test/record-key.test.ts \u203a followRkey equals follow_rkeys.json",
-     "packages/core/test/record-key.test.ts \u203a TIDs are monotonic and valid for fixed clock and seeded random",
-     "packages/core/test/canonical.test.ts \u203a key order does not change the digest; any value change does"
+     "packages/core/test/write-policy.test.ts › zero jitter yields 1s,2s,4s,8s,16s,32s,64s,128s,256s,300s",
+     "packages/core/test/write-policy.test.ts › Retry-After 20 raises a 1s or 2s delay to 20s and is capped at 300s",
+     "packages/core/test/write-policy.test.ts › jitter stays within [base, base*1.25] for seeded random",
+     "packages/core/test/write-policy.test.ts › classify maps 429/5xx/network to transient and RecordAlreadyExists to ambiguous_create",
+     "packages/core/test/record-key.test.ts › followRkey equals follow_rkeys.json",
+     "packages/core/test/record-key.test.ts › TIDs are monotonic and valid for fixed clock and seeded random",
+     "packages/core/test/canonical.test.ts › key order does not change the digest; any value change does"
     ]
    },
    {
@@ -246,15 +283,15 @@
     "dependsOn": [
      "W0-01"
     ],
-    "description": "Implement the policy in ADR \u00a78.\n\nurl-policy.ts: `checkUrl(url)` allows https and the default port only, with no credentials or fragments. It rejects:\n- IP literals, including IPv6, mapped and decimal or octal IPv4 forms;\n- localhost, .local, .internal, .arpa and single-label hosts.\n\nThe `.test` and fixture TLDs are allowed only when the Transport is marked `fixture:true`.\n\ndoh.ts: `resolvePublic(host, transport, clock)` queries A and AAAA from https://cloudflare-dns.com/dns-query?name=&type= with `accept: application/dns-json`.\n- Reject if any answer is private, loopback, link-local, CGNAT 100.64/10, ULA fc00::/7, multicast, documentation or reserved, or 0.0.0.0.\n- Reject if there are no answers.\n- Cache per host for min(TTL, 300 s) using the injected clock.\n- The DoH host itself is a pinned constant and is exempt from the pre-check.\n\nbody.ts: `readCapped(response, maxBytes)` reads the stream and aborts on overflow with `body_too_large`.\n\nsafe-fetch.ts: `createSafeFetch({transport, clock, fixture?})` returns a `(url, {kind, accept, maxBytes})` function that:\n- runs checkUrl, then the DoH pre-check;\n- calls `transport(new Request(url, {redirect:'manual', signal: AbortSignal.timeout(10000)}))`;\n- treats any 3xx as an error;\n- enforces the default caps per kind: didDoc 64 KiB, json 1 MiB, getRecord 1 MiB, getBlocks 8 MiB, getRepo 32 MiB;\n- returns typed errors (`blocked_destination`, `redirect_refused`, `timeout`, `body_too_large`, `http_status`), with parsed Retry-After and RateLimit-Reset values.\n\nThe production transport is globalThis.fetch.",
+    "description": "Implement the policy in ADR §8.\n\nurl-policy.ts: `checkUrl(url)` allows https and the default port only, with no credentials or fragments. It rejects:\n- IP literals, including IPv6, mapped and decimal or octal IPv4 forms;\n- localhost, .local, .internal, .arpa and single-label hosts.\n\nThe `.test` and fixture TLDs are allowed only when the Transport is marked `fixture:true`.\n\ndoh.ts: `resolvePublic(host, transport, clock)` queries A and AAAA from https://cloudflare-dns.com/dns-query?name=&type= with `accept: application/dns-json`.\n- Reject if any answer is private, loopback, link-local, CGNAT 100.64/10, ULA fc00::/7, multicast, documentation or reserved, or 0.0.0.0.\n- Reject if there are no answers.\n- Cache per host for min(TTL, 300 s) using the injected clock.\n- The DoH host itself is a pinned constant and is exempt from the pre-check.\n\nbody.ts: `readCapped(response, maxBytes)` reads the stream and aborts on overflow with `body_too_large`.\n\nsafe-fetch.ts: `createSafeFetch({transport, clock, fixture?})` returns a `(url, {kind, accept, maxBytes})` function that:\n- runs checkUrl, then the DoH pre-check;\n- calls `transport(new Request(url, {redirect:'manual', signal: AbortSignal.timeout(10000)}))`;\n- treats any 3xx as an error;\n- enforces the default caps per kind: didDoc 64 KiB, json 1 MiB, getRecord 1 MiB, getBlocks 8 MiB, getRepo 32 MiB;\n- returns typed errors (`blocked_destination`, `redirect_refused`, `timeout`, `body_too_large`, `http_status`), with parsed Retry-After and RateLimit-Reset values.\n\nThe production transport is globalThis.fetch.",
     "tests": [
-     "packages/atproto/test/url-policy.test.ts \u203a rejects http, non-default port, credentials, fragment, IP literals (v4/v6/mapped/decimal), localhost, .internal, single label",
-     "packages/atproto/test/doh.test.ts \u203a mixed public+private answer set is rejected",
-     "packages/atproto/test/doh.test.ts \u203a empty answer is rejected; TTL cache honors injected clock",
-     "packages/atproto/test/safe-fetch.test.ts \u203a 3xx response is refused and Location is not followed",
-     "packages/atproto/test/safe-fetch.test.ts \u203a body over cap aborts with body_too_large and does not buffer the rest",
-     "packages/atproto/test/safe-fetch.test.ts \u203a 10s deadline yields timeout",
-     "packages/atproto/test/safe-fetch.test.ts \u203a Retry-After and RateLimit-Reset are parsed into typed error"
+     "packages/atproto/test/url-policy.test.ts › rejects http, non-default port, credentials, fragment, IP literals (v4/v6/mapped/decimal), localhost, .internal, single label",
+     "packages/atproto/test/doh.test.ts › mixed public+private answer set is rejected",
+     "packages/atproto/test/doh.test.ts › empty answer is rejected; TTL cache honors injected clock",
+     "packages/atproto/test/safe-fetch.test.ts › 3xx response is refused and Location is not followed",
+     "packages/atproto/test/safe-fetch.test.ts › body over cap aborts with body_too_large and does not buffer the rest",
+     "packages/atproto/test/safe-fetch.test.ts › 10s deadline yields timeout",
+     "packages/atproto/test/safe-fetch.test.ts › Retry-After and RateLimit-Reset are parsed into typed error"
     ]
    },
    {
@@ -275,14 +312,15 @@
     "dependsOn": [
      "W0-01"
     ],
-    "description": "keys.ts: deterministic secp256k1 and P-256 test keys (fixed scalars, test-only) and their did:key multikeys.\n\nsigned-repo.ts: `SignedRepo(did, key)` builds a real MST with @atcute/mst (NodeWrangler / MST APIs) and @atcute/cbor, and signs v3 commits with @atcute/crypto. It supports:\n- `put`, `delete` and `commit()`, which return `{cid, rev, blocks}`;\n- `getRecordCar(collection, rkey)` for inclusion or exclusion proofs;\n- `getBlocks(cids)`;\n- `fullCar()`;\n- corruption helpers that each alter exactly one invariant: signature, block byte, MST node, DID, version, rev, root, truncate, oversize, record-CID swap.\n\nfake-pds.ts: an XRPC handler (a Request\u2192Response function) per PDS host. It serves:\n- getRecord, getBlocks, getRepo, getLatestCommit, getRepoStatus and listRecords;\n- createRecord, putRecord and deleteRecord with swapRecord semantics and RecordAlreadyExists / InvalidSwap errors. Authentication is a fixture bearer token; DPoP is not validated.\n\nFault injection: deactivate/takedown, key rotation, 429 with Retry-After, 5xx, redirects, oversize, a stale head (serving an older commit), `getBlocks` unsupported (501), BlockNotFound after GC, and no-proof RecordNotFound.\n\nEvery call is logged so tests can count remote calls.\n\nOther fakes:\n- fake-plc.ts: a DID document per DID, with rotation.\n- fake-doh.ts: dns-json answers, with public test-net addresses by default and private-answer injection.\n- fake-relay.ts: listReposByCollection paging.\n- fake-jetstream.ts: an event log with seq, cursor-inclusive replay, a lookback bound, and a WebSocketPair driver that the test controls (send, close, error).\n\nrouter-transport.ts: `routerTransport({pds:{host\u2192fake}, plc, doh, relay})` is a Transport marked `fixture:true`.\n\nread-models.ts: `seedReadModels(kit)` publishes tests/fixtures/read_models.json exactly:\n- Alice, Bob and Carol on separate fake PDS hosts;\n- r08 created then deleted;\n- the Alice\u2192Bob follow;\n- Carol's r10 as an external writer.\n\nIt returns a map from URI to `{cid, rev}` and the Jetstream events. CIDs and revisions are produced by the signer and never fabricated.",
+    "description": "keys.ts: deterministic secp256k1 and P-256 test keys (fixed scalars, test-only) and their did:key multikeys.\n\nsigned-repo.ts: `SignedRepo(did, key)` builds a real MST with @atcute/mst (NodeWrangler / MST APIs) and @atcute/cbor, and signs v3 commits with @atcute/crypto. It supports:\n- `put`, `delete` and `commit()`, which return `{cid, rev, blocks}`;\n- `getRecordCar(collection, rkey)` for inclusion or exclusion proofs;\n- `getBlocks(cids)`;\n- `fullCar()`;\n- corruption helpers that each alter exactly one invariant: signature, block byte, MST node, DID, version, rev, root, truncate, oversize, record-CID swap.\n\nfake-pds.ts: an XRPC handler (a Request→Response function) per PDS host. It serves:\n- getRecord, getBlocks, getRepo, getLatestCommit, getRepoStatus and listRecords;\n- createRecord, putRecord and deleteRecord with swapRecord semantics and RecordAlreadyExists / InvalidSwap errors. Authentication is a fixture bearer token; DPoP is not validated.\n\nFault injection: deactivate/takedown, key rotation, 429 with Retry-After, 5xx, redirects, oversize, a stale head (serving an older commit), `getBlocks` unsupported (501), BlockNotFound after GC, and no-proof RecordNotFound.\n\nEvery call is logged so tests can count remote calls.\n\nOther fakes:\n- fake-plc.ts: a DID document per DID, with rotation.\n- fake-doh.ts: dns-json answers, with public test-net addresses by default and private-answer injection.\n- fake-relay.ts: listReposByCollection paging.\n- fake-jetstream.ts: an event log with seq, cursor-inclusive replay, a lookback bound, and a WebSocketPair driver that the test controls (send, close, error).\n\nrouter-transport.ts: `routerTransport({pds:{host→fake}, plc, doh, relay})` is a Transport marked `fixture:true`.\n\nread-models.ts: `seedReadModels(kit)` publishes tests/fixtures/read_models.json exactly:\n- Alice, Bob and Carol on separate fake PDS hosts;\n- r08 created then deleted;\n- the Alice→Bob follow;\n- Carol's r10 as an external writer.\n\nIt returns a map from URI to `{cid, rev}` and the Jetstream events. CIDs and revisions are produced by the signer and never fabricated.",
     "tests": [
-     "packages/atproto/test/fixture-kit.test.ts \u203a inclusion proof CAR verifies with @atproto/crypto cross-check for both curves",
-     "packages/atproto/test/fixture-kit.test.ts \u203a exclusion proof for deleted r08 contains a complete path",
-     "packages/atproto/test/fixture-kit.test.ts \u203a each corruption helper changes exactly one invariant",
-     "packages/atproto/test/fixture-kit.test.ts \u203a fake PDS createRecord with existing rkey returns RecordAlreadyExists; deleteRecord with stale swap returns InvalidSwap",
-     "packages/atproto/test/fixture-kit.test.ts \u203a fake Jetstream replays inclusively from cursor and refuses cursors older than lookback",
-     "packages/atproto/test/fixture-kit.test.ts \u203a seedReadModels publishes r01\u2013r10 with r08 deleted and the Alice\u2192Bob follow"
+     "packages/atproto/test/fixture-kit.test.ts › inclusion proof CAR verifies with @atproto/crypto cross-check for both curves",
+     "packages/atproto/test/fixture-kit.test.ts › exclusion proof for deleted r08 contains a complete path",
+     "packages/atproto/test/fixture-kit.test.ts › each corruption helper changes exactly one invariant",
+     "packages/atproto/test/fixture-kit.test.ts › fake PDS createRecord with existing rkey returns RecordAlreadyExists; deleteRecord with stale swap returns InvalidSwap",
+     "packages/atproto/test/fixture-kit.test.ts › fake Jetstream replays inclusively from cursor and refuses cursors older than lookback",
+     "packages/atproto/test/fixture-kit.test.ts › seedReadModels publishes r01–r10 with r08 deleted and the Alice→Bob follow",
+     "packages/atproto/test/fixture-kit.test.ts › a record signed by one fixture account fails verification under another account's key"
     ]
    },
    {
@@ -297,10 +335,10 @@
     ],
     "description": "`parseJetstreamMessage(text, allowedCollections)` returns `{kind:'hint', did, collection, rkey, operation, rev, cid?, seq, timeUs}`, or `{kind:'ignore', seq?, timeUs?}`, or `{kind:'invalid', reason}`.\n\n- Reject text over 64 KiB.\n- Strict JSON with a shape check.\n- Only `kind=commit` with create, update or delete, and only configured collections.\n- DID and rkey syntax validated through a minimal local validator. Do not import W1-01: keep a small regex copy and add a TODO for the W2 consolidation test.\n- `seq` and `time_us` must be safe integers.\n- The function never performs I/O.\n\nAlso export `buildSubscribeUrl(host, collections, cursor?)`, which always sets `kinds=commit`.",
     "tests": [
-     "packages/atproto/test/jetstream-events.test.ts \u203a commit create/update/delete for configured collection yields hint with seq and time_us",
-     "packages/atproto/test/jetstream-events.test.ts \u203a identity/account/sync kinds and foreign collections are ignored",
-     "packages/atproto/test/jetstream-events.test.ts \u203a oversize, malformed JSON, bad DID, unsafe integer are invalid",
-     "packages/atproto/test/jetstream-events.test.ts \u203a buildSubscribeUrl always contains kinds=commit and every collection, never identity/account"
+     "packages/atproto/test/jetstream-events.test.ts › commit create/update/delete for configured collection yields hint with seq and time_us",
+     "packages/atproto/test/jetstream-events.test.ts › identity/account/sync kinds and foreign collections are ignored",
+     "packages/atproto/test/jetstream-events.test.ts › oversize, malformed JSON, bad DID, unsafe integer are invalid",
+     "packages/atproto/test/jetstream-events.test.ts › buildSubscribeUrl always contains kinds=commit and every collection, never identity/account"
     ]
    },
    {
@@ -324,12 +362,14 @@
     ],
     "description": "error.ts: `errorResponse(code, status, requestId, fields?)` produces `{error:{code, message, requestId, fields?}}` with the API.md statuses.\n\njson.ts: `json(body, status, headers)` with the Cache-Control values copied from the Rust handlers in crates/server/src/http (`no-store` on profile, resolve, export and records/status).\n\nparams.ts:\n- `parseLimit(q, def, max)` gives 422 `fields.limit` for 0, negative, non-integer or above max. There is no clamping.\n- `parseWindow` gives 422 `fields.window`.\n- `parseScope` gives 422 `fields.scope`.\n- `readJsonBody(req, maxBytes)` returns 413 or 400 for invalid JSON.\n\nrequest-id.ts: a UUID from the injected random.\n\nlimits.ts: `TokenBucket` and `BucketSet` driven by the injected clock (60/min per IP and 600/h per DID defaults). These run in the DO.\n\nhealth.ts: routes `GET /health/live` (local, 200 `{status:'live'}`) and `GET /health/ready` (calls `ctx.index.ready()`; 200 `{status:'ready'}`, otherwise 503).\n\nmeta.ts: `GET /api/v1/meta` returns `{name, version, stage, capabilities, lexiconPrefix, indexing}` per A20.\n\nEach file that has routes exports `routes: RouteDef[]`.",
     "tests": [
-     "worker/test/http/error.test.ts \u203a envelope matches openapi Error schema with requestId UUID",
-     "worker/test/http/params.test.ts \u203a limit 0, -1, 1.5, 101 \u2192 422 fields.limit; default 20; stats default 10",
-     "worker/test/http/params.test.ts \u203a invalid window/scope \u2192 422 with field name",
-     "worker/test/http/params.test.ts \u203a body over cap \u2192 413; malformed JSON \u2192 400",
-     "worker/test/http/limits.test.ts \u203a bucket refills exactly with injected clock; 61st request in a minute is limited",
-     "worker/test/http/health-meta.test.ts \u203a live 200; ready 503 when index reports too_new; meta capabilities omit publication without owned prefix"
+     "worker/test/http/error.test.ts › envelope matches openapi Error schema with requestId UUID",
+     "worker/test/http/params.test.ts › limit 0, -1, 1.5, 101 → 422 fields.limit; default 20; stats default 10",
+     "worker/test/http/params.test.ts › invalid window/scope → 422 with field name",
+     "worker/test/http/params.test.ts › body over cap → 413; malformed JSON → 400",
+     "worker/test/http/limits.test.ts › bucket refills exactly with injected clock; 61st request in a minute is limited",
+     "worker/test/http/health-meta.test.ts › live 200; ready 503 when index reports too_new; meta capabilities omit publication without owned prefix",
+     "worker/test/http/health-meta.test.ts › ready 200 and meta indexing stale while the index reports the socket disconnected",
+     "worker/test/http/limits.test.ts › 10,001 distinct IP keys keep BucketSet at its cap and expired buckets are evicted"
     ]
    },
    {
@@ -344,11 +384,11 @@
     ],
     "description": "timers.ts:\n- `schedule(db, name, dueAtMs)` is an upsert that keeps the earlier due time unless `force` is set.\n- `cancel`.\n- `nextDue(db)` returns `min(due_at)`.\n- `armAlarm(storage, db)` sets `storage.setAlarm(nextDue)`, or deletes the alarm when nothing is due.\n- `runDue(db, now, handlers: Record<TimerName, (now)=>Promise<void>>, budget)` runs due timers in the priority order drain, snapshot, jetstream-watchdog, status-sweep, identity-sweep, discovery, gc. Each handler is responsible for rescheduling itself, and a thrown handler is rescheduled with a backoff.\n\nThe TimerName union is exported. All functions are synchronous except runDue.",
     "tests": [
-     "worker/test/storage/timers.test.ts \u203a nextDue is the minimum and alarm is armed to it",
-     "worker/test/storage/timers.test.ts \u203a schedule keeps earlier due unless forced",
-     "worker/test/storage/timers.test.ts \u203a runDue executes only due timers in priority order",
-     "worker/test/storage/timers.test.ts \u203a throwing handler is rescheduled with backoff and others still run",
-     "worker/test/storage/timers.test.ts \u203a state survives DO eviction (same storage)"
+     "worker/test/storage/timers.test.ts › nextDue is the minimum and alarm is armed to it",
+     "worker/test/storage/timers.test.ts › schedule keeps earlier due unless forced",
+     "worker/test/storage/timers.test.ts › runDue executes only due timers in priority order",
+     "worker/test/storage/timers.test.ts › throwing handler is rescheduled with backoff and others still run",
+     "worker/test/storage/timers.test.ts › state survives DO eviction (same storage)"
     ]
    },
    {
@@ -365,12 +405,13 @@
     "dependsOn": [
      "W0-01"
     ],
-    "description": "scripts/gen-config.ts reads PUBLIC_ORIGIN, LEXICON_PREFIX and the env name (production, staging or local). It writes:\n- web/public/oauth/client-metadata.json: client_id equal to its own URL; client_name; client_uri; `redirect_uris [origin+'/oauth/callback']`; `scope 'atproto repo:<p>.scrobble repo:<p>.follow repo:<p>.settings'`; `grant_types [authorization_code, refresh_token]`; `response_types [code]`; `application_type web`; `token_endpoint_auth_method none`; `dpop_bound_access_tokens true`.\n- web/public/_headers: the CSP and the other headers from ADR \u00a78.\n\nFor local env it emits only a loopback client-id hint file for the SPA, not metadata. It refuses to write production metadata when LEXICON_PREFIX is empty or the fixture prefix.\n\nscripts/check-bundle.ts runs `wrangler deploy --dry-run --outdir worker/dist`, then asserts:\n- the gzip size is \u2264 3 MiB;\n- there are no `test-support`, `fixedClock`, `routerTransport` or `node:crypto` strings or imports;\n- there is no `secp256k1-node` module;\n- the bundle SHA-256 is printed for release evidence.",
+    "description": "scripts/gen-config.ts reads PUBLIC_ORIGIN, LEXICON_PREFIX and the env name (production, staging or local). It writes:\n- web/public/oauth/client-metadata.json: client_id equal to its own URL; client_name; client_uri; `redirect_uris [origin+'/oauth/callback']`; `scope 'atproto repo:<p>.scrobble repo:<p>.follow repo:<p>.settings'`; `grant_types [authorization_code, refresh_token]`; `response_types [code]`; `application_type web`; `token_endpoint_auth_method none`; `dpop_bound_access_tokens true`.\n- web/public/_headers: the CSP and the other headers from ADR §8.\n\nFor local env it emits only a loopback client-id hint file for the SPA, not metadata. It refuses to write production metadata when LEXICON_PREFIX is empty or the fixture prefix.\n\nscripts/check-bundle.ts runs `wrangler deploy --dry-run --outdir worker/dist`, then asserts:\n- the gzip size is ≤ 3 MiB;\n- there are no `test-support`, `fixedClock`, `routerTransport` or `node:crypto` strings or imports;\n- there is no `secp256k1-node` module;\n- the bundle SHA-256 is printed for release evidence.",
     "tests": [
-     "scripts/test/gen-config.test.ts \u203a production metadata equals expected JSON for https://music.example.org with prefix org.example.music",
-     "scripts/test/gen-config.test.ts \u203a refuses empty or fixture prefix for production",
-     "scripts/test/gen-config.test.ts \u203a _headers contains require-trusted-types-for and frame-ancestors 'none'",
-     "scripts/test/check-bundle.test.ts \u203a fails when a test-support import is injected into a temp copy of the entry"
+     "scripts/test/gen-config.test.ts › production metadata equals expected JSON for https://music.example.org with prefix org.example.music",
+     "scripts/test/gen-config.test.ts › refuses empty or fixture prefix for production",
+     "scripts/test/gen-config.test.ts › _headers contains require-trusted-types-for and frame-ancestors 'none'",
+     "scripts/test/check-bundle.test.ts › fails when a test-support import is injected into a temp copy of the entry",
+     "scripts/test/gen-config.test.ts › _headers marks /assets/* public, max-age=31536000, immutable and /index.html and /oauth/client-metadata.json no-cache"
     ]
    },
    {
@@ -395,9 +436,10 @@
     ],
     "description": "Vite plus @preact/preset-vite. The router uses preact-iso with the routes /, /feed, /signin, /oauth/callback, /u/:did, /scrobble and /settings; route components are lazy placeholders owned by W2-06 and W3-06. An accessible shell provides landmarks and a skip link.\n\nweb/src/api/client.ts: a typed client over @atmusic/core/api-types for every remaining route, including notify and records/status. It parses the error envelope into a typed ApiError and passes cursors through opaquely.\n\nweb/src/oauth/types.ts: the `PdsSession` interface `{did, fetchHandler(path, init): Promise<Response>, signOut()}`, so the outbox does not depend on the OAuth implementation.\n\nstate/store.ts: minimal signals-based state.\n\nvite.config.ts proxies /api and /health to 127.0.0.1:8787 in dev.",
     "tests": [
-     "web/test/api-client.test.ts \u203a decodes Page<Scrobble> and passes nextCursor unchanged",
-     "web/test/api-client.test.ts \u203a maps 422 envelope to ApiError with fields",
-     "web/test/api-client.test.ts \u203a notify posts {uri} and returns queued"
+     "web/test/api-client.test.ts › decodes Page<Scrobble> and passes nextCursor unchanged",
+     "web/test/api-client.test.ts › maps 422 envelope to ApiError with fields",
+     "web/test/api-client.test.ts › notify posts {uri} and returns queued",
+     "web/test/api-client.test.ts › every api/examples response decodes and a changed field type is rejected"
     ]
    }
   ]
@@ -416,12 +458,12 @@
      "W1-01",
      "W0-03"
     ],
-    "description": "Port crates/core/src/cursor.ts semantics exactly.\n\n- Key derivation: `deriveCursorKey(appKeyBytes \u2265 32)` is HMAC-SHA256 with context `atmusic:cursor:hmac-sha256:v1`, exactly as in Rust.\n- The token is `base64url(JSON).base64url(HMAC)` with no padding. It carries version 1, the binding `{query: history|feed|following|followers, did?, scope?, viewer?}`, an upper tuple, a last tuple and asOf.\n- Size limits: token 32,768 bytes, payload 16,384, field 4,096.\n- Decoding verifies the HMAC first and compares in constant time, then checks deny-unknown-fields and the binding. Any failure is one `invalid_cursor` error.\n\nUses WebCrypto; it must run in both workerd and the browser.",
+    "description": "Port crates/core/src/cursor.ts semantics exactly.\n\n- Key derivation: `deriveCursorKey(appKeyBytes ≥ 32)` is HMAC-SHA256 with context `atmusic:cursor:hmac-sha256:v1`, exactly as in Rust.\n- The token is `base64url(JSON).base64url(HMAC)` with no padding. It carries version 1, the binding `{query: history|feed|following|followers, did?, scope?, viewer?}`, an upper tuple, a last tuple and asOf.\n- Size limits: token 32,768 bytes, payload 16,384, field 4,096.\n- Decoding verifies the HMAC first and compares in constant time, then checks deny-unknown-fields and the binding. Any failure is one `invalid_cursor` error.\n\nUses WebCrypto; it must run in both workerd and the browser.",
     "tests": [
-     "packages/core/test/cursor.test.ts \u203a every cursors.json Rust token decodes to the same payload",
-     "packages/core/test/cursor.test.ts \u203a TS-encoded token equals Rust token byte-for-byte for the same inputs",
-     "packages/core/test/cursor.test.ts \u203a one-bit tamper, wrong did/scope/viewer, version 2, malformed base64 \u2192 invalid_cursor",
-     "packages/core/test/cursor.test.ts \u203a key shorter than 32 bytes is rejected"
+     "packages/core/test/cursor.test.ts › every cursors.json Rust token decodes to the same payload",
+     "packages/core/test/cursor.test.ts › TS-encoded token equals Rust token byte-for-byte for the same inputs",
+     "packages/core/test/cursor.test.ts › one-bit tamper, wrong did/scope/viewer, version 2, malformed base64 → invalid_cursor",
+     "packages/core/test/cursor.test.ts › key shorter than 32 bytes is rejected"
     ]
    },
    {
@@ -440,11 +482,11 @@
     ],
     "description": "Implement IdentityResolver over SafeFetch, using @atcute/identity-resolver primitives where they accept an injected fetch; otherwise implement directly.\n\nDID documents:\n- did:plc comes from https://plc.directory/<did>; did:web from https://<host>/.well-known/did.json.\n- Validate that `id` equals the DID.\n- Take the first valid `#atproto` Multikey verification method (secp256k1 or P-256) as signingKey.\n- Take the `#atproto_pds` AtprotoPersonalDataServer endpoint as pds. It must pass checkUrl.\n- `alsoKnownAs` at:// gives the candidate handle.\n\nhandle.ts: `resolveHandle(handle)` uses DoH TXT `_atproto.<handle>` (dns-json) or `https://<handle>/.well-known/atproto-did` with no redirects. `verifyHandle(did, doc)` requires both directions to agree and otherwise returns null.\n\nAn optional cache hook `{get, put}` is injected; the worker supplies an identity_cache-backed implementation. `fresh:true` bypasses the cache.",
     "tests": [
-     "packages/atproto/test/identity.test.ts \u203a plc and did:web documents resolve signing key and PDS",
-     "packages/atproto/test/identity.test.ts \u203a document id mismatch and missing #atproto key are rejected",
-     "packages/atproto/test/identity.test.ts \u203a handle verified only when TXT/well-known and alsoKnownAs agree; mismatch yields null",
-     "packages/atproto/test/identity.test.ts \u203a PDS endpoint that fails URL policy is rejected",
-     "packages/atproto/test/identity.test.ts \u203a fresh:true bypasses cache after key rotation"
+     "packages/atproto/test/identity.test.ts › plc and did:web documents resolve signing key and PDS",
+     "packages/atproto/test/identity.test.ts › document id mismatch and missing #atproto key are rejected",
+     "packages/atproto/test/identity.test.ts › handle verified only when TXT/well-known and alsoKnownAs agree; mismatch yields null",
+     "packages/atproto/test/identity.test.ts › PDS endpoint that fails URL policy is rejected",
+     "packages/atproto/test/identity.test.ts › fresh:true bypasses cache after key rotation"
     ]
    },
    {
@@ -463,16 +505,16 @@
      "W0-03",
      "W1-01"
     ],
-    "description": "Implement ADR \u00a77 steps 1\u20133.\n\ncar-bounds.ts: `readBoundedCar(bytes, {maxBytes, maxBlocks})` checks:\n- varint header and section lengths before reading;\n- CIDv1 only, with codecs dag-cbor (0x71) and raw (0x55), sha2-256, 32-byte digests;\n- every block re-hashed;\n- the first root returned.\n\nIts output is a verified `Map<cidString, bytes>` plus the root.\n\ncommit.ts: `verifyCommit(blocks, rootCid, {did, signingKey})` returns a VerifiedCommit.\n- It requires version 3, a matching did, rev a TID, and data a CID.\n- Signature: @atcute/crypto verify over `dagCbor(commit without sig)`, rejecting high-S.\n\nrecord-proof.ts: `verifyRecordProof(carBytes, {did, collection, rkey, signingKey})` returns a RecordProof.\n- It uses @atcute/mst `findRpathAndBuildProof` over a ReadonlyMemoryBlockStore of the verified blocks.\n- `null` means absent. A thrown MissingBlockError maps to `missing_block`.\n- A present record must match its CID and decode as dag-cbor into JSON form.\n\nDo not use @atcute/repo verifyRecord.",
+    "description": "Implement ADR §7 steps 1–3.\n\ncar-bounds.ts: `readBoundedCar(bytes, {maxBytes, maxBlocks})` checks:\n- varint header and section lengths before reading;\n- CIDv1 only, with codecs dag-cbor (0x71) and raw (0x55), sha2-256, 32-byte digests;\n- every block re-hashed;\n- the first root returned.\n\nIts output is a verified `Map<cidString, bytes>` plus the root.\n\ncommit.ts: `verifyCommit(blocks, rootCid, {did, signingKey})` returns a VerifiedCommit.\n- It requires version 3, a matching did, rev a TID, and data a CID.\n- Signature: @atcute/crypto verify over `dagCbor(commit without sig)`, rejecting high-S.\n\nrecord-proof.ts: `verifyRecordProof(carBytes, {did, collection, rkey, signingKey})` returns a RecordProof.\n- It uses @atcute/mst `findRpathAndBuildProof` over a ReadonlyMemoryBlockStore of the verified blocks.\n- `null` means absent. A thrown MissingBlockError maps to `missing_block`.\n- A present record must match its CID and decode as dag-cbor into JSON form.\n\nDo not use @atcute/repo verifyRecord.",
     "tests": [
-     "packages/atproto/test/commit.test.ts \u203a valid secp256k1 and P-256 commits verify",
-     "packages/atproto/test/commit.test.ts \u203a high-S signature, wrong DID, version 2, non-TID rev are rejected with codes",
-     "packages/atproto/test/record-proof.test.ts \u203a inclusion proof yields present with exact cid and record",
-     "packages/atproto/test/record-proof.test.ts \u203a exclusion proof yields absent",
-     "packages/atproto/test/record-proof.test.ts \u203a removed path node yields missing_block, never absent",
-     "packages/atproto/test/record-proof.test.ts \u203a block byte change yields cid_mismatch; record CID swap yields record_cid_mismatch",
-     "packages/atproto/test/record-proof.test.ts \u203a truncated and oversize CARs are rejected before decode",
-     "packages/atproto/test/rust-golden-cars.test.ts \u203a every tests/goldens/signed_cars manifest entry yields the expected verdict and error code"
+     "packages/atproto/test/commit.test.ts › valid secp256k1 and P-256 commits verify",
+     "packages/atproto/test/commit.test.ts › high-S signature, wrong DID, version 2, non-TID rev are rejected with codes",
+     "packages/atproto/test/record-proof.test.ts › inclusion proof yields present with exact cid and record",
+     "packages/atproto/test/record-proof.test.ts › exclusion proof yields absent",
+     "packages/atproto/test/record-proof.test.ts › removed path node yields missing_block, never absent",
+     "packages/atproto/test/record-proof.test.ts › block byte change yields cid_mismatch; record CID swap yields record_cid_mismatch",
+     "packages/atproto/test/record-proof.test.ts › truncated and oversize CARs are rejected before decode",
+     "packages/atproto/test/rust-golden-cars.test.ts › every tests/goldens/signed_cars manifest entry yields the expected verdict and error code"
     ]
    },
    {
@@ -495,19 +537,21 @@
      "W1-02",
      "W0-01"
     ],
-    "description": "All functions are synchronous over a Db and are called inside `db.tx`.\n\n`applyRecordProof(db, proof: RecordProof, {receiptNs, prefix, nowNs})` returns `{outcome: 'applied'|'noop_older'|'excluded'|'absent'|'stale_head'}`. It enforces:\n- the per-DID floor: `proof.commit.rev < users.max_rev` gives stale_head;\n- the per-URI guard: `record_state.revision \u2265 rev` gives noop.\n\nFor `scrobble`:\n- validate with W1-01;\n- compute keys with W1-02 (keys.ts maps them to columns);\n- upsert the scrobbles row with revision = commit.rev;\n- set record_state to present;\n- on an invalid record, delete the row and set excluded with the reason;\n- on absent, delete the row and set absent;\n- bump `users.stats_version` when a scrobble row changed;\n- update `max_rev`.\n\n`follow` follows the same pattern. `settings` delegates to suppression.ts.\n\n`applySnapshotChunk(db, {did, generation, headRev, intervalLo, intervalHi, entries: Array<{key, cid, record?: unknown}>, receiptNs})`:\n- upserts the present entries that have record bodies, skipping those whose CID equals the stored CID;\n- deletes rows of the DID whose URI lies in `(at://did/lo, at://did/hi]`, whose key is absent from entries, and whose revision < headRev;\n- writes the record_state transitions.\n\n`completeSnapshot(db, {did, generation, headRev, accountActive})`: if `users.generation == generation` and the DID is not suppressed, set active per accountActive, `indexing_state='current'` and `last_snapshot_at_ms`. Otherwise it is a no-op returning `superseded`.\n\naccount-state.ts:\n- `markInactive(db, did, status)` sets active=0 and increments generation (ADR 0003 generation semantics).\n- `markReactivating(db, did)` keeps the account hidden and sets `reactivate=1` on the snapshot job.\n\nsuppression.ts: `applySettings(db, did, proof)`. Disabled leads to `disconnectLocalData` (deletes per ADR \u00a75.3, inserts suppression with settings_uri and settings_rev). Enabled, or an absent record with a higher revision, deletes suppression and returns `admit:true`.\n\nread/visibility.ts exports SQL fragments for active, unsuppressed users, used by all readers.",
+    "description": "All functions are synchronous over a Db and are called inside `db.tx`.\n\n`applyRecordProof(db, proof: RecordProof, {receiptNs, prefix, nowNs})` returns `{outcome: 'applied'|'noop_older'|'excluded'|'absent'|'stale_head'}`. It enforces:\n- the per-DID floor: `proof.commit.rev < users.max_rev` gives stale_head;\n- the per-URI guard: `record_state.revision ≥ rev` gives noop.\n\nFor `scrobble`:\n- validate with W1-01;\n- compute keys with W1-02 (keys.ts maps them to columns);\n- upsert the scrobbles row with revision = commit.rev;\n- set record_state to present;\n- on an invalid record, delete the row and set excluded with the reason;\n- on absent, delete the row and set absent;\n- bump `users.stats_version` when a scrobble row changed;\n- update `max_rev`.\n\n`follow` follows the same pattern. `settings` delegates to suppression.ts.\n\n`applySnapshotChunk(db, {did, generation, headRev, intervalLo, intervalHi, entries: Array<{key, cid, record?: unknown}>, receiptNs})`:\n- upserts the present entries that have record bodies, skipping those whose CID equals the stored CID;\n- deletes rows of the DID whose URI lies in `(at://did/lo, at://did/hi]`, whose key is absent from entries, and whose revision < headRev;\n- writes the record_state transitions.\n\n`completeSnapshot(db, {did, generation, headRev, accountActive})`: if `users.generation == generation` and the DID is not suppressed, set active per accountActive, `indexing_state='current'` and `last_snapshot_at_ms`. Otherwise it is a no-op returning `superseded`.\n\naccount-state.ts:\n- `markInactive(db, did, status)` sets active=0 and increments generation (ADR 0003 generation semantics).\n- `markReactivating(db, did)` keeps the account hidden and sets `reactivate=1` on the snapshot job.\n\nsuppression.ts: `applySettings(db, did, proof)`. Disabled leads to `disconnectLocalData` (deletes per ADR §5.3, inserts suppression with settings_uri and settings_rev). Enabled, or an absent record with a higher revision, deletes suppression and returns `admit:true`.\n\nread/visibility.ts exports SQL fragments for active, unsuppressed users, used by all readers.",
     "tests": [
-     "worker/test/write/apply-record.test.ts \u203a present valid scrobble inserts row with exact keys and record_state present",
-     "worker/test/write/apply-record.test.ts \u203a older revision proof after newer delete is noop (no resurrection)",
-     "worker/test/write/apply-record.test.ts \u203a proof rev below users.max_rev returns stale_head and changes nothing",
-     "worker/test/write/apply-record.test.ts \u203a invalid remote record is excluded with reason and not visible",
-     "worker/test/write/apply-record.test.ts \u203a r03 artist change updates keys without inserting a second listen",
-     "worker/test/write/apply-snapshot.test.ts \u203a chunk deletes rows absent from interval only when revision < headRev",
-     "worker/test/write/apply-snapshot.test.ts \u203a live hint with newer revision survives snapshot sweep",
-     "worker/test/write/apply-snapshot.test.ts \u203a completeSnapshot is superseded when generation changed (deactivation during snapshot)",
-     "worker/test/write/account-state.test.ts \u203a deactivation hides profile/content/follow edge immediately and bumps generation",
-     "worker/test/write/suppression.test.ts \u203a disabled settings deletes local data and keeps only suppression marker; other owners' follows to DID hidden",
-     "worker/test/write/suppression.test.ts \u203a enabled/absent settings with newer rev clears suppression and requests admission"
+     "worker/test/write/apply-record.test.ts › present valid scrobble inserts row with exact keys and record_state present",
+     "worker/test/write/apply-record.test.ts › older revision proof after newer delete is noop (no resurrection)",
+     "worker/test/write/apply-record.test.ts › proof rev below users.max_rev returns stale_head and changes nothing",
+     "worker/test/write/apply-record.test.ts › invalid remote record is excluded with reason and not visible",
+     "worker/test/write/apply-record.test.ts › r03 artist change updates keys without inserting a second listen",
+     "worker/test/write/apply-snapshot.test.ts › chunk deletes rows absent from interval only when revision < headRev",
+     "worker/test/write/apply-snapshot.test.ts › live hint with newer revision survives snapshot sweep",
+     "worker/test/write/apply-snapshot.test.ts › completeSnapshot is superseded when generation changed (deactivation during snapshot)",
+     "worker/test/write/account-state.test.ts › deactivation hides profile/content/follow edge immediately and bumps generation",
+     "worker/test/write/suppression.test.ts › disabled settings deletes local data and keeps only suppression marker; other owners' follows to DID hidden",
+     "worker/test/write/suppression.test.ts › enabled/absent settings with newer rev clears suppression and requests admission",
+     "worker/test/write/apply-record.test.ts › applying the same revision twice changes nothing and a newer revision replaces the payload with one listen",
+     "worker/test/write/apply-record.test.ts › two records with identical track and listenedAt under different rkeys are two rows and two listens"
     ]
    },
    {
@@ -521,13 +565,13 @@
      "W0-01",
      "W1-01"
     ],
-    "description": "`indexing(db, now, {did?, mode})` returns the Indexing DTO.\n\nGlobal state:\n- `recovering` when pending_gap=1, on first start, or while snapshot jobs are pending from gap recovery;\n- `stale` when mode is off, or the socket has been disconnected for more than 5 min (socket mode), or the last successful pulse was more than 2 intervals ago (pulse mode);\n- `current` otherwise.\n\n`caughtUp` is true only when current, with no due hints older than 60 s and no running snapshot jobs.\n\n`lastIndexedAt` is the max indexed_at.\n\n`lagSeconds` is floor((now \u2212 last_event_time_us)/1e6) while events are flowing in the current connection, and null when no event has been received since connect.\n\nPer-user state comes from `users.indexing_state` and the repo_jobs rows. A suppressed user reports 'suppressed'. A user state never reports better than the global state when the global state is recovering. This ports the Rust index_status `status_truth` semantics.\n\nAlso export `internalStatus(db)` for admin: cursor, lag, hint counts, job counts and counters.",
+    "description": "`indexing(db, now, {did?, mode})` returns the Indexing DTO.\n\nGlobal state:\n- `recovering` when pending_gap=1, on first start, or while snapshot jobs are pending from gap recovery;\n- `stale` when mode is off, or the socket has been disconnected for more than 5 min (socket mode), or the last successful pulse was more than 2 intervals ago (pulse mode);\n- `current` otherwise.\n\n`caughtUp` is true only when current, with no due hints older than 60 s and no running snapshot jobs.\n\n`lastIndexedAt` is the max indexed_at.\n\n`lagSeconds` is floor((now − last_event_time_us)/1e6) while events are flowing in the current connection, and null when no event has been received since connect.\n\nPer-user state comes from `users.indexing_state` and the repo_jobs rows. A suppressed user reports 'suppressed'. A user state never reports better than the global state when the global state is recovering. This ports the Rust index_status `status_truth` semantics.\n\nAlso export `internalStatus(db)` for admin: cursor, lag, hint counts, job counts and counters.",
     "tests": [
-     "worker/test/storage/status.test.ts \u203a fresh DO reports recovering, caughtUp=false",
-     "worker/test/storage/status.test.ts \u203a pending_gap overrides a stored current flag",
-     "worker/test/storage/status.test.ts \u203a socket disconnected >5min reports stale",
-     "worker/test/storage/status.test.ts \u203a user with pending reactivation snapshot reports recovering",
-     "worker/test/storage/status.test.ts \u203a lagSeconds null when idle and exact when events flowing"
+     "worker/test/storage/status.test.ts › fresh DO reports recovering, caughtUp=false",
+     "worker/test/storage/status.test.ts › pending_gap overrides a stored current flag",
+     "worker/test/storage/status.test.ts › socket disconnected >5min reports stale",
+     "worker/test/storage/status.test.ts › user with pending reactivation snapshot reports recovering",
+     "worker/test/storage/status.test.ts › lagSeconds null when idle and exact when events flowing"
     ]
    },
    {
@@ -545,10 +589,11 @@
     ],
     "description": "client.ts creates a `BrowserOAuthClient` from @atproto/oauth-client-browser.\n- clientMetadata: the URL `https://<origin>/oauth/client-metadata.json` in production, or the loopback client id in dev.\n- handleResolver: our `/api/v1/resolve`, falling back to the library default.\n- `responseMode` set to query.\n\nsession.ts exposes `signIn(handle)`, `init()` (restore the session or complete the callback), `signOut()` (revoke, then clear IndexedDB), and `current(): PdsSession|null` adapted to web/src/oauth/types.ts. After a successful sign-in it sends `notify({did})`. It also exposes the session expiry.\n\ncallback.tsx renders progress and errors and redirects to /feed.\n\nTests mock the library at the module boundary. The live OAuth behaviour is a W6-05 gate.",
     "tests": [
-     "web/test/oauth/session.test.ts \u203a signIn requests scope 'atproto repo:<p>.scrobble repo:<p>.follow repo:<p>.settings'",
-     "web/test/oauth/session.test.ts \u203a successful callback stores session and posts notify {did}",
-     "web/test/oauth/session.test.ts \u203a signOut calls revoke and clears IndexedDB stores",
-     "web/test/oauth/session.test.ts \u203a expired/refresh-failed session surfaces re-auth state"
+     "web/test/oauth/session.test.ts › signIn requests scope 'atproto repo:<p>.scrobble repo:<p>.follow repo:<p>.settings'",
+     "web/test/oauth/session.test.ts › successful callback stores session and posts notify {did}",
+     "web/test/oauth/session.test.ts › signOut calls revoke and clears IndexedDB stores",
+     "web/test/oauth/session.test.ts › expired/refresh-failed session surfaces re-auth state",
+     "web/test/oauth/session.test.ts › signOut clears IndexedDB stores when revoke fails with 500"
     ]
    },
    {
@@ -574,18 +619,23 @@
      "W1-03",
      "W1-01"
     ],
-    "description": "Implement ADR \u00a75.2\u20135.3 against the `PdsSession` interface.\n\nstore.ts: IndexedDB stores `operations` and `meta`. An operation is `{id, did, kind, collection, rkey, record?, digest?, swapCid?, predecessorIds, attempts, dueAt, state: queued|running|published|indexed|failed, failureCode?}` and is persisted **before the first attempt**.\n\nrunner.ts: a single runner per DID (`navigator.locks.request`) with injected clock, random and scheduler.\n- It picks due operations whose predecessors are terminal.\n- Retries use write-policy from W1-03: exactly 10 attempts.\n- On publish it sends notify, then polls records/status (backoff up to 60 s) until indexed, absent or excluded.\n\nscrobble-ops.ts: create with the persisted TID rkey. On ambiguous create: getRecord, then a digest comparison. Equal means success; different means failed `remote_record_conflict`. Never overwrite.\n\ndelete-ops.ts: deleteRecord with swapRecord set to the cid from records/status. On InvalidSwap: re-fetch and reconcile. A delete waits for a pending create of the same URI.\n\nfollow-ops.ts: create at the deterministic rkey, applying the existing-same-subject rule. Unfollow uses listRecords over the owner's follow collection and deletes every record whose subject matches, each with swap.\n\nsettings-ops.ts: write or delete `settings/self`.\n\noverlay.ts: merges pending local operations over AppView pages so the owner sees pending deletions hidden and failures visible.\n\nweb/test/support/fake-pds-browser.ts wraps a fake PDS as a PdsSession.",
+    "description": "Implement ADR §5.2–5.3 against the `PdsSession` interface.\n\nstore.ts: IndexedDB stores `operations` and `meta`. An operation is `{id, did, kind, collection, rkey, record?, digest?, swapCid?, predecessorIds, attempts, dueAt, state: queued|running|published|indexed|failed, failureCode?}` and is persisted **before the first attempt**.\n\nrunner.ts: a single runner per DID (`navigator.locks.request`) with injected clock, random and scheduler.\n- It picks due operations whose predecessors are terminal.\n- Retries use write-policy from W1-03: exactly 10 attempts.\n- On publish it sends notify, then polls records/status (backoff up to 60 s) until indexed, absent or excluded.\n\nscrobble-ops.ts: create with the persisted TID rkey. On ambiguous create: getRecord, then a digest comparison. Equal means success; different means failed `remote_record_conflict`. Never overwrite.\n\ndelete-ops.ts: deleteRecord with swapRecord set to the cid from records/status. On InvalidSwap: re-fetch and reconcile. A delete waits for a pending create of the same URI.\n\nfollow-ops.ts: create at the deterministic rkey, applying the existing-same-subject rule. Unfollow uses listRecords over the owner's follow collection and deletes every record whose subject matches, each with swap.\n\nsettings-ops.ts: write or delete `settings/self`.\n\noverlay.ts: merges pending local operations over AppView pages so the owner sees pending deletions hidden and failures visible.\n\nweb/test/support/fake-pds-browser.ts wraps a fake PDS as a PdsSession.",
     "tests": [
-     "web/test/outbox/retry.test.ts \u203a zero jitter delays 1,2,4,\u2026,256,300 and exactly 10 attempts with no 11th request",
-     "web/test/outbox/retry.test.ts \u203a Retry-After 20 raises next delay to 20s",
-     "web/test/outbox/recovery.test.ts \u203a crash before send: operation resumes with same rkey",
-     "web/test/outbox/recovery.test.ts \u203a crash after PDS commit before local ack: ambiguous create reconciles to success via digest",
-     "web/test/outbox/recovery.test.ts \u203a remote record with different payload at rkey \u2192 remote_record_conflict, never overwritten",
-     "web/test/outbox/recovery.test.ts \u203a crash during delete resumes with swapRecord and verifies absence",
-     "web/test/outbox/follows.test.ts \u203a PUT, DELETE, PUT for one subject execute in order with separate ids",
-     "web/test/outbox/follows.test.ts \u203a unfollow deletes all duplicate matching records and keeps unrelated subject",
-     "web/test/outbox/delete.test.ts \u203a pending deletion hidden in owner overlay; failure visible",
-     "web/test/outbox/settings.test.ts \u203a disconnect writes settings/self disabled and notifies"
+     "web/test/outbox/retry.test.ts › zero jitter delays 1,2,4,…,256,300 and exactly 10 attempts with no 11th request",
+     "web/test/outbox/retry.test.ts › Retry-After 20 raises next delay to 20s",
+     "web/test/outbox/recovery.test.ts › crash before send: operation resumes with same rkey",
+     "web/test/outbox/recovery.test.ts › crash after PDS commit before local ack: ambiguous create reconciles to success via digest",
+     "web/test/outbox/recovery.test.ts › remote record with different payload at rkey → remote_record_conflict, never overwritten",
+     "web/test/outbox/recovery.test.ts › crash during delete resumes with swapRecord and verifies absence",
+     "web/test/outbox/follows.test.ts › PUT, DELETE, PUT for one subject execute in order with separate ids",
+     "web/test/outbox/follows.test.ts › unfollow deletes all duplicate matching records and keeps unrelated subject",
+     "web/test/outbox/delete.test.ts › pending deletion hidden in owner overlay; failure visible",
+     "web/test/outbox/settings.test.ts › disconnect writes settings/self disabled and notifies",
+     "web/test/outbox/retry.test.ts › nonrecoverable PDS error fails the operation after exactly one request",
+     "web/test/outbox/delete.test.ts › delete behind an unsent or in-flight create runs after it and leaves no record on the fake PDS",
+     "web/test/outbox/recovery.test.ts › RecordNotFound on first and repeated delete completes the operation as success",
+     "web/test/outbox/recovery.test.ts › crash after follow createRecord before local ack reconciles to one record at the deterministic rkey",
+     "web/test/outbox/follows.test.ts › unfollow with no matching record succeeds with zero deleteRecord calls"
     ]
    }
   ]
@@ -613,16 +663,18 @@
      "W1-07",
      "W1-01"
     ],
-    "description": "DO modules: `history(m, {did, upper?, last?, limit})`, `feed(m, {scope, viewer?, upper?, last?, limit})` and `lookup(m, uri)`, using the SQL in ADR \u00a75.8 and visibility.ts. They return rows plus `hasMore`.\n\nHTTP routes:\n- GET /api/v1/users/{did}/scrobbles: DID syntax 422.\n- GET /api/v1/scrobbles/{id}: a URL-encoded AT URI; 404 when inactive, excluded, absent or unknown.\n- GET /api/v1/feed: scope global|following. Following requires `viewer` (422 `fields.viewer`). An unknown viewer gets an empty page.\n\nCursors:\n- The first page sets upper = the first row's tuple, or asOf when empty.\n- `nextCursor` encodes the binding, upper and last.\n- A cursor whose binding mismatches gives 400 invalid_cursor.\n\nResponses are Page<Scrobble> with indexing from W2-05.\n\nTests seed data through `applyRecordProof`, using fixture proofs from W1-05 and the W2-03 verifier.",
+    "description": "DO modules: `history(m, {did, upper?, last?, limit})`, `feed(m, {scope, viewer?, upper?, last?, limit})` and `lookup(m, uri)`, using the SQL in ADR §5.8 and visibility.ts. They return rows plus `hasMore`.\n\nHTTP routes:\n- GET /api/v1/users/{did}/scrobbles: DID syntax 422.\n- GET /api/v1/scrobbles/{id}: a URL-encoded AT URI; 404 when inactive, excluded, absent or unknown.\n- GET /api/v1/feed: scope global|following. Following requires `viewer` (422 `fields.viewer`). An unknown viewer gets an empty page.\n\nCursors:\n- The first page sets upper = the first row's tuple, or asOf when empty.\n- `nextCursor` encodes the binding, upper and last.\n- A cursor whose binding mismatches gives 400 invalid_cursor.\n\nResponses are Page<Scrobble> with indexing from W2-05.\n\nTests seed data through `applyRecordProof`, using fixture proofs from W1-05 and the W2-03 verifier.",
     "tests": [
-     "worker/test/read/history.test.ts \u203a Alice history r07,r01,r02,r03,r04,r05,r06 (equal timestamps by URI desc)",
-     "worker/test/read/history.test.ts \u203a limit 2 pages [r07,r01],[r02,r03],[r04,r05],[r06] then nextCursor null",
-     "worker/test/read/history.test.ts \u203a r08 deleted never appears; lookup of r08 is 404",
-     "worker/test/read/feed.test.ts \u203a global feed r09,r10,r07,r01,r02,r03,r04,r05,r06",
-     "worker/test/read/feed.test.ts \u203a Alice following feed is r09 only and excludes self",
-     "worker/test/read/feed.test.ts \u203a missing viewer for following \u2192 422 fields.viewer",
-     "worker/test/read/cursor-http.test.ts \u203a arrival above anchor absent until fresh traversal; deleted unreturned record disappears",
-     "worker/test/read/cursor-http.test.ts \u203a cursor from history used on feed or with different viewer \u2192 400 invalid_cursor"
+     "worker/test/read/history.test.ts › Alice history r07,r01,r02,r03,r04,r05,r06 (equal timestamps by URI desc)",
+     "worker/test/read/history.test.ts › limit 2 pages [r07,r01],[r02,r03],[r04,r05],[r06] then nextCursor null",
+     "worker/test/read/history.test.ts › r08 deleted never appears; lookup of r08 is 404",
+     "worker/test/read/feed.test.ts › global feed r09,r10,r07,r01,r02,r03,r04,r05,r06",
+     "worker/test/read/feed.test.ts › Alice following feed is r09 only and excludes self",
+     "worker/test/read/feed.test.ts › missing viewer for following → 422 fields.viewer",
+     "worker/test/read/cursor-http.test.ts › arrival above anchor absent until fresh traversal; deleted unreturned record disappears",
+     "worker/test/read/cursor-http.test.ts › cursor from history used on feed or with different viewer → 400 invalid_cursor",
+     "worker/test/read/history.test.ts › lookup of encoded r01 AT URI returns the exact Scrobble; unknown URI → 404",
+     "worker/test/read/cursor-http.test.ts › record whose listenedAt moves across the anchor between pages follows the documented moved-row rule"
     ]
    },
    {
@@ -643,18 +695,18 @@
      "W1-07",
      "W1-02"
     ],
-    "description": "`stats(m, {did, window, limit, asOfNs})` runs the SQL from ADR \u00a75.8: top artists, tracks (artist_key, track_key) and albums (non-null album_key), with display text from the newest `(listened_at, uri)` row. Totals are total listens, distinct artists and distinct track tuples. The window is `[asOf \u2212 N\u00b786400 s, asOf]`, both bounds inclusive; future rows are excluded.\n\nstats-cache.ts implements the exact validity check: same stats_version, plus two EXISTS probes. A hit returns the cached body with the *current* asOf. The cache is written in its own tx.\n\nRoute: GET /api/v1/users/{did}/stats. Window defaults to `all`; limit defaults to 10 with a max of 100; 404 for unknown or inactive users.",
+    "description": "`stats(m, {did, window, limit, asOfNs})` runs the SQL from ADR §5.8: top artists, tracks (artist_key, track_key) and albums (non-null album_key), with display text from the newest `(listened_at, uri)` row. Totals are total listens, distinct artists and distinct track tuples. The window is `[asOf − N·86400 s, asOf]`, both bounds inclusive; future rows are excluded.\n\nstats-cache.ts implements the exact validity check: same stats_version, plus two EXISTS probes. A hit returns the cached body with the *current* asOf. The cache is written in its own tx.\n\nRoute: GET /api/v1/users/{did}/stats. Window defaults to `all`; limit defaults to 10 with a max of 100; 404 for unknown or inactive users.",
     "tests": [
-     "worker/test/read/stats.test.ts \u203a all: 7 listens, 3 artists, 6 tracks; artists (radiohead,3),(bj\u00f6rk,2),(kate bush,2)",
-     "worker/test/read/stats.test.ts \u203a 7d: 4/2/3; artists (bj\u00f6rk,2),(radiohead,2); tracks Bj\u00f6rk/J\u00f3ga:2, Radiohead/No Surprises:1, Radiohead/Weird Fishes:1",
-     "worker/test/read/stats.test.ts \u203a 30d: 5/2/4 and 365d: 6/3/5 with Kate Bush 1 in 365d",
-     "worker/test/read/stats.test.ts \u203a top tracks and top albums for every window equal TESTING.md exactly; r05 creates no album bucket",
-     "worker/test/read/stats.test.ts \u203a display spelling is newest record (Bj\u00f6rk not BJ\u00d6RK) with URI tie-break",
-     "worker/test/read/stats-boundaries.test.ts \u203a records at lower bound \u22121s/0s/+1s for 7d/30d/365d have exact membership",
-     "worker/test/read/stats-boundaries.test.ts \u203a record at asOf+300s excluded until asOf passes it",
-     "worker/test/read/stats-cache.test.ts \u203a cache hit only when version unchanged and no row crossed either bound; result equals uncached",
-     "worker/test/read/stats-cache.test.ts \u203a delete r01 invalidates: all \u2192 6 listens, Homogenic 1",
-     "worker/test/read/stats-plan.test.ts \u203a EXPLAIN QUERY PLAN uses scrobbles_owner_time/scrobbles_stats; negative control without indexes shows SCAN"
+     "worker/test/read/stats.test.ts › all: 7 listens, 3 artists, 6 tracks; artists (radiohead,3),(björk,2),(kate bush,2)",
+     "worker/test/read/stats.test.ts › 7d: 4/2/3; artists (björk,2),(radiohead,2); tracks Björk/Jóga:2, Radiohead/No Surprises:1, Radiohead/Weird Fishes:1",
+     "worker/test/read/stats.test.ts › 30d: 5/2/4 and 365d: 6/3/5 with Kate Bush 1 in 365d",
+     "worker/test/read/stats.test.ts › top tracks and top albums for every window equal TESTING.md exactly; r05 creates no album bucket",
+     "worker/test/read/stats.test.ts › display spelling is newest record (Björk not BJÖRK) with URI tie-break",
+     "worker/test/read/stats-boundaries.test.ts › records at lower bound −1s/0s/+1s for 7d/30d/365d have exact membership",
+     "worker/test/read/stats-boundaries.test.ts › record at asOf+300s excluded until asOf passes it",
+     "worker/test/read/stats-cache.test.ts › cache hit only when version unchanged and no row crossed either bound; result equals uncached",
+     "worker/test/read/stats-cache.test.ts › delete r01 invalidates: all → 6 listens, Homogenic 1",
+     "worker/test/read/stats-plan.test.ts › EXPLAIN QUERY PLAN uses scrobbles_owner_time/scrobbles_stats; negative control without indexes shows SCAN"
     ]
    },
    {
@@ -682,13 +734,15 @@
     ],
     "description": "Profile (docs/profiles.md):\n- 404 for unknown, inactive or suppressed users before any identity request.\n- Counts are totalScrobbles, followerCount and followingCount over distinct active edges.\n- The handle appears only when verified.\n- `no-store`.\n\nFollow lists:\n- one representative per (actor, subject), the min active URI;\n- ordered by (created_at, uri) DESC of the representative;\n- both actor and subject must be active;\n- cursor binding following|followers.\n\nResolve: GET /api/v1/resolve?handle= goes through the DO, uses cached identity, verifies both directions, `no-store`. It returns 200 `{did, handle, verified:true}`, 404 when unresolved, 422 on mismatch.\n\nExport: GET /api/v1/users/{did}/export returns `{schemaVersion:1, did, exportedAt, indexing, scrobbles, follows}` read in one synchronous snapshot, with Content-Disposition attachment `music-export.json` and `no-store`.",
     "tests": [
-     "worker/test/read/profile.test.ts \u203a Alice followers 0 following 1; Bob followers 1 following 0; Carol 0/0",
-     "worker/test/read/profile.test.ts \u203a unknown/inactive DID \u2192 404 with zero identity transport calls",
-     "worker/test/read/profile.test.ts \u203a Cache-Control no-store and handle null when unverified",
-     "worker/test/read/follows.test.ts \u203a two active Carol\u2192Bob records count Bob followers 2 not 3; representative is min URI",
-     "worker/test/read/follows.test.ts \u203a deleting one duplicate keeps 2; deleting both returns 1",
-     "worker/test/read/resolve.test.ts \u203a verified handle 200; unresolved 404; mismatch 422",
-     "worker/test/read/export.test.ts \u203a export contains only indexed public records, attachment header, 404 for inactive"
+     "worker/test/read/profile.test.ts › Alice followers 0 following 1; Bob followers 1 following 0; Carol 0/0",
+     "worker/test/read/profile.test.ts › unknown/inactive DID → 404 with zero identity transport calls",
+     "worker/test/read/profile.test.ts › Cache-Control no-store and handle null when unverified",
+     "worker/test/read/follows.test.ts › two active Carol→Bob records count Bob followers 2 not 3; representative is min URI",
+     "worker/test/read/follows.test.ts › deleting one duplicate keeps 2; deleting both returns 1",
+     "worker/test/read/resolve.test.ts › verified handle 200; unresolved 404; mismatch 422",
+     "worker/test/read/export.test.ts › export contains only indexed public records, attachment header, 404 for inactive",
+     "worker/test/read/profile.test.ts › known recordless user → 200 with zero totals and empty history",
+     "worker/test/read/follows.test.ts › three edges with equal createdAt traverse completely at limit 1; tampered cursor → 400 invalid_cursor"
     ]
    },
    {
@@ -704,7 +758,8 @@
      "worker/test/ingest/hints.test.ts",
      "worker/test/ingest/admission.test.ts",
      "worker/test/ingest/verify-drain.test.ts",
-     "worker/test/ingest/rejection-matrix.test.ts"
+     "worker/test/ingest/rejection-matrix.test.ts",
+     "worker/test/ingest/identity-cache.test.ts"
     ],
     "dependsOn": [
      "W2-02",
@@ -713,21 +768,23 @@
      "W1-08",
      "W1-05"
     ],
-    "description": "hints.ts:\n- `enqueueHints(db, hints[], checkpoint?)` is a synchronous coalescing upsert. It optionally advances `ingest_checkpoint` in the same tx.\n- `takeDue(db, now, n, priority order)`.\n- backoff and delete helpers.\n- `countByDid` for coalescing.\n\nadmission.ts:\n- `admit(db, did, source, now)` enforces the hourly budget (default 50) and the 1,024 pending-snapshot cap.\n- On admission, insert `users(active=0)` and `repo_jobs(snapshot)` with a new global generation, atomically.\n- Return `{admitted}` or `{busy}`, with nothing written when busy.\n- Also `scheduleSnapshot(db, did, reason)`, used by sweeps and coalescing.\n\nverify-drain.ts: `drain(m, now, budget)` implements ADR \u00a75.4 exactly.\n- suppressed handling;\n- admission for unknown DIDs;\n- coalescing at \u226525 hints for one DID;\n- identity via identity-cache.ts (identity_cache table; TTL 5 min, negative 1 h);\n- skip a host while `host_backoff` is set;\n- fetch getRecord through SafeFetch;\n- the verified_commits cache;\n- verifyRecordProof;\n- one db.tx calling applyRecordProof, then delete the hint.\n\nError mapping: no_proof, missing_block or an unparseable CAR schedules a snapshot; RepoDeactivated and similar errors create a status job; bad_signature gets one fresh-resolve retry and then fails closed; transient errors back off; give up after 20 attempts and schedule a snapshot.\n\nConcurrency: at most 4 concurrent fetches and 2 per host. An in-flight URI set prevents double fetch. No db.tx may span an await.\n\npds-budget.ts: per-host concurrency and backoff from Retry-After / RateLimit-Reset.\n\nThe PLAN=free budget is 40 subrequests.",
+    "description": "hints.ts:\n- `enqueueHints(db, hints[], checkpoint?)` is a synchronous coalescing upsert. It optionally advances `ingest_checkpoint` in the same tx.\n- `takeDue(db, now, n, priority order)`.\n- backoff and delete helpers.\n- `countByDid` for coalescing.\n\nadmission.ts:\n- `admit(db, did, source, now)` enforces the hourly budget (default 50) and the 1,024 pending-snapshot cap.\n- On admission, insert `users(active=0)` and `repo_jobs(snapshot)` with a new global generation, atomically.\n- Return `{admitted}` or `{busy}`, with nothing written when busy.\n- Also `scheduleSnapshot(db, did, reason)`, used by sweeps and coalescing.\n\nverify-drain.ts: `drain(m, now, budget)` implements ADR §5.4 exactly.\n- suppressed handling;\n- admission for unknown DIDs;\n- coalescing at ≥25 hints for one DID;\n- identity via identity-cache.ts (identity_cache table; TTL 5 min, negative 1 h);\n- skip a host while `host_backoff` is set;\n- fetch getRecord through SafeFetch;\n- the verified_commits cache;\n- verifyRecordProof;\n- one db.tx calling applyRecordProof, then delete the hint.\n\nError mapping: no_proof, missing_block or an unparseable CAR schedules a snapshot; RepoDeactivated and similar errors create a status job; bad_signature gets one fresh-resolve retry and then fails closed; transient errors back off; give up after 20 attempts and schedule a snapshot.\n\nConcurrency: at most 4 concurrent fetches and 2 per host. An in-flight URI set prevents double fetch. No db.tx may span an await.\n\npds-budget.ts: per-host concurrency and backoff from Retry-After / RateLimit-Reset.\n\nThe PLAN=free budget is 40 subrequests.",
     "tests": [
-     "worker/test/ingest/hints.test.ts \u203a duplicate hints for a URI coalesce to one row with min due_at",
-     "worker/test/ingest/hints.test.ts \u203a enqueue and checkpoint advance commit atomically (throw rolls back both)",
-     "worker/test/ingest/admission.test.ts \u203a unknown DID admitted inactive with snapshot job; hint itself not projected",
-     "worker/test/ingest/admission.test.ts \u203a 1,024 pending jobs \u2192 next admission busy and writes nothing",
-     "worker/test/ingest/admission.test.ts \u203a hourly budget enforced with injected clock",
-     "worker/test/ingest/verify-drain.test.ts \u203a known active DID hint \u2192 one getRecord call \u2192 row applied with receipt-time validation",
-     "worker/test/ingest/verify-drain.test.ts \u203a deleted record with exclusion proof \u2192 absent and removed from views",
-     "worker/test/ingest/verify-drain.test.ts \u203a RecordNotFound without CAR schedules snapshot and does not delete",
-     "worker/test/ingest/verify-drain.test.ts \u203a 25 hints for one DID collapse into one snapshot job",
-     "worker/test/ingest/verify-drain.test.ts \u203a 429 with Retry-After pauses host and hint; other hosts proceed",
-     "worker/test/ingest/verify-drain.test.ts \u203a key rotation: first verify fails, fresh resolve succeeds",
-     "worker/test/ingest/verify-drain.test.ts \u203a two concurrent proofs for one URI arriving out of order end with newest revision",
-     "worker/test/ingest/rejection-matrix.test.ts \u203a each single-invariant corruption leaves scrobbles/follows/record_state/users/ingest_checkpoint byte-identical, then a valid hint applies"
+     "worker/test/ingest/hints.test.ts › duplicate hints for a URI coalesce to one row with min due_at",
+     "worker/test/ingest/hints.test.ts › enqueue and checkpoint advance commit atomically (throw rolls back both)",
+     "worker/test/ingest/admission.test.ts › unknown DID admitted inactive with snapshot job; hint itself not projected",
+     "worker/test/ingest/admission.test.ts › 1,024 pending jobs → next admission busy and writes nothing",
+     "worker/test/ingest/admission.test.ts › hourly budget enforced with injected clock",
+     "worker/test/ingest/verify-drain.test.ts › known active DID hint → one getRecord call → row applied with receipt-time validation",
+     "worker/test/ingest/verify-drain.test.ts › deleted record with exclusion proof → absent and removed from views",
+     "worker/test/ingest/verify-drain.test.ts › RecordNotFound without CAR schedules snapshot and does not delete",
+     "worker/test/ingest/verify-drain.test.ts › 25 hints for one DID collapse into one snapshot job",
+     "worker/test/ingest/verify-drain.test.ts › 429 with Retry-After pauses host and hint; other hosts proceed",
+     "worker/test/ingest/verify-drain.test.ts › key rotation: first verify fails, fresh resolve succeeds",
+     "worker/test/ingest/verify-drain.test.ts › two concurrent proofs for one URI arriving out of order end with newest revision",
+     "worker/test/ingest/rejection-matrix.test.ts › each single-invariant corruption leaves scrobbles/follows/record_state/users/ingest_checkpoint byte-identical, then a valid hint applies",
+     "worker/test/ingest/identity-cache.test.ts › cached identity served at 299 s and refreshed at 301 s with the injected clock",
+     "worker/test/ingest/verify-drain.test.ts › 100 hints for distinct URIs from interleaved alarm and RPC calls yield exactly 100 rows"
     ]
    },
    {
@@ -748,16 +805,16 @@
      "W1-05",
      "W0-03"
     ],
-    "description": "range.ts: `prefixRange(prefix)` returns `[prefix + '.', prefix + '/')`, with an overlap test for subtree key bounds.\n\nblock-source.ts: the `BlockSource { get(cids: string[]): Promise<Map<cid, bytes>> }` interface and the `BlockCache { get(cid): bytes|null; put(cid, bytes): void }` interface. The worker implements the cache over snapshot_blocks.\n\ngetblocks-source.ts: batches of at most 100 CIDs via SafeFetch `getBlocks` (8 MiB cap), with every block CID-checked through car-bounds. BlockNotFound maps to `missing_block`; 501/404/MethodNotImplemented maps to `unsupported`.\n\ngetrepo-source.ts: streams `getRepo` with a 32 MiB cap, parses CAR sections incrementally, verifies each block and writes it to the BlockCache. It then acts as a cache-only source.\n\nwalker.ts: a resumable in-order walk.\n- State `{headCid, headRev, stack, lastKey}` is JSON-serialisable.\n- `step(state, source, cache, {maxFetches, maxEntries, knownCid(key)\u2192cid|null})` returns `{entries: ordered (key, cid, recordBytes?)[], interval: [lo, hi], state, done}`.\n- It descends only into overlapping subtrees.\n- It validates MST structure: strictly ascending keys, prefix-length sanity, consistent layer per node, depth \u2264 256, no repeated node CID.\n- It fetches a record block only when `knownCid(key)` differs.\n- There is no record-count ceiling.",
+    "description": "range.ts: `prefixRange(prefix)` returns `[prefix + '.', prefix + '/')`, with an overlap test for subtree key bounds.\n\nblock-source.ts: the `BlockSource { get(cids: string[]): Promise<Map<cid, bytes>> }` interface and the `BlockCache { get(cid): bytes|null; put(cid, bytes): void }` interface. The worker implements the cache over snapshot_blocks.\n\ngetblocks-source.ts: batches of at most 100 CIDs via SafeFetch `getBlocks` (8 MiB cap), with every block CID-checked through car-bounds. BlockNotFound maps to `missing_block`; 501/404/MethodNotImplemented maps to `unsupported`.\n\ngetrepo-source.ts: streams `getRepo` with a 32 MiB cap, parses CAR sections incrementally, verifies each block and writes it to the BlockCache. It then acts as a cache-only source.\n\nwalker.ts: a resumable in-order walk.\n- State `{headCid, headRev, stack, lastKey}` is JSON-serialisable.\n- `step(state, source, cache, {maxFetches, maxEntries, knownCid(key)→cid|null})` returns `{entries: ordered (key, cid, recordBytes?)[], interval: [lo, hi], state, done}`.\n- It descends only into overlapping subtrees.\n- It validates MST structure: strictly ascending keys, prefix-length sanity, consistent layer per node, depth ≤ 256, no repeated node CID.\n- It fetches a record block only when `knownCid(key)` differs.\n- There is no record-count ceiling.",
     "tests": [
-     "packages/atproto/test/snapshot-walker.test.ts \u203a repo with 5,000 music records and 2,000 non-music records enumerates exactly the music set across resumable steps",
-     "packages/atproto/test/snapshot-walker.test.ts \u203a 25,000-record repo completes with bounded per-step fetches (no MAX_OPERATIONS ceiling)",
-     "packages/atproto/test/snapshot-walker.test.ts \u203a only subtrees overlapping the prefix range are fetched (call count bound)",
-     "packages/atproto/test/snapshot-walker.test.ts \u203a unchanged record CIDs are not fetched on re-snapshot",
-     "packages/atproto/test/snapshot-adversarial.test.ts \u203a missing subtree block \u2192 missing_block, never silent absence",
-     "packages/atproto/test/snapshot-adversarial.test.ts \u203a out-of-order keys, repeated node CID, depth >256, layer mismatch rejected",
-     "packages/atproto/test/snapshot-adversarial.test.ts \u203a getRepo stream over 32 MiB aborts; corrupted block rejected",
-     "packages/atproto/test/snapshot-rust-oracle.test.ts \u203a walker output equals tests/goldens/snapshot_enumeration.json for every Rust full-repo CAR"
+     "packages/atproto/test/snapshot-walker.test.ts › repo with 5,000 music records and 2,000 non-music records enumerates exactly the music set across resumable steps",
+     "packages/atproto/test/snapshot-walker.test.ts › 25,000-record repo completes with bounded per-step fetches (no MAX_OPERATIONS ceiling)",
+     "packages/atproto/test/snapshot-walker.test.ts › only subtrees overlapping the prefix range are fetched (call count bound)",
+     "packages/atproto/test/snapshot-walker.test.ts › unchanged record CIDs are not fetched on re-snapshot",
+     "packages/atproto/test/snapshot-adversarial.test.ts › missing subtree block → missing_block, never silent absence",
+     "packages/atproto/test/snapshot-adversarial.test.ts › out-of-order keys, repeated node CID, depth >256, layer mismatch rejected",
+     "packages/atproto/test/snapshot-adversarial.test.ts › getRepo stream over 32 MiB aborts; corrupted block rejected",
+     "packages/atproto/test/snapshot-rust-oracle.test.ts › walker output equals tests/goldens/snapshot_enumeration.json for every Rust full-repo CAR"
     ]
    },
    {
@@ -779,12 +836,27 @@
     ],
     "description": "Build accessible Preact screens over the typed client and the outbox. They render text only and never use `dangerouslySetInnerHTML`.\n\n- **signin:** handle form and error states.\n- **feed:** global and following (viewer = the session DID) with cursor pagination.\n- **profile:** profile header, history with pagination, stats with window tabs all/7d/30d/365d and top lists, a follow/unfollow button with outbox state.\n- **scrobble:** form validated with @atmusic/core, and operation status (queued, published, indexed, excluded or failed with code).\n- **settings:** export download (/users/{did}/export), disconnect and reconnect via settings-ops with an explanation that the opt-out record is public, and sign-out with the session expiry shown.\n\nThe write UI is hidden when meta.capabilities lacks `publication`.\n\nComponents go in web/src/components/ and tests in web/test/routes/.",
     "tests": [
-     "web/test/routes/feed.test.tsx \u203a renders items and loads next page via nextCursor",
-     "web/test/routes/profile.test.tsx \u203a stats window switch fetches window and renders exact top lists",
-     "web/test/routes/scrobble.test.tsx \u203a invalid input shows field errors and creates no outbox operation",
-     "web/test/routes/scrobble.test.tsx \u203a status progresses queued\u2192published\u2192indexed from mocked records/status",
-     "web/test/routes/settings.test.tsx \u203a disconnect requires confirmation and enqueues settings op",
-     "web/test/routes/shell.test.tsx \u203a write UI hidden without publication capability"
+     "web/test/routes/feed.test.tsx › renders items and loads next page via nextCursor",
+     "web/test/routes/profile.test.tsx › stats window switch fetches window and renders exact top lists",
+     "web/test/routes/scrobble.test.tsx › invalid input shows field errors and creates no outbox operation",
+     "web/test/routes/scrobble.test.tsx › status progresses queued→published→indexed from mocked records/status",
+     "web/test/routes/settings.test.tsx › disconnect requires confirmation and enqueues settings op",
+     "web/test/routes/shell.test.tsx › write UI hidden without publication capability",
+     "web/test/routes/feed.test.tsx › anonymous user selecting following sees a sign-in prompt and no scope=following request is sent",
+     "web/test/routes/feed.test.tsx › page-2 503 keeps page 1, shows retry, and a successful retry appends page 2 once",
+     "web/test/routes/feed.test.tsx › loading, empty, error and stale states render labelled text and no spinner remains after an error",
+     "web/test/routes/profile.test.tsx › new verified handle for the same DID updates the display on the same /u/:did route",
+     "web/test/routes/profile.test.tsx › recordless user, no-album stats and unknown DID 404 render explicit empty and not-found states",
+     "web/test/routes/profile.test.tsx › follow button shows pending then confirmed, and a permanently failed unfollow shows failed without claiming removal",
+     "web/test/routes/profile.test.tsx › own profile has no follow control and an anonymous viewer gets a sign-in action",
+     "web/test/routes/profile.test.tsx › delete control appears only on the signed-in owner's own records",
+     "web/test/routes/settings.test.tsx › disconnect confirmation states that public PDS records and the opt-out record remain and claims no erasure",
+     "web/test/routes/settings.test.tsx › export action downloads /api/v1/users/<did>/export as music-export.json",
+     "web/test/routes/scrobble.test.tsx › excluded or failed status shows the failure code, stops polling and never shows published success",
+     "web/test/routes/shell.test.tsx › unknown route renders the not-found view",
+     "web/test/routes/shell.test.tsx › signed-in shell shows the verified handle and DID and the authenticated navigation",
+     "web/test/routes/shell.test.tsx › after sign-out the shell shows anonymous navigation and the settings route shows a sign-in prompt",
+     "web/test/routes/signin.test.tsx › cancelled authorization, expired callback and unknown handle show specific recovery text with retry and no code or token in the DOM"
     ]
    }
   ]
@@ -809,16 +881,16 @@
      "W2-04",
      "W1-08"
     ],
-    "description": "`snapshotStep(m, now, budget)` takes the oldest due `repo_jobs(snapshot)` row and implements ADR \u00a75.7.\n\nIt starts with getRepoStatus and getLatestCommit, then fetches and verifies the commit (getBlocks), then calls `walker.step` with a BlockCache over snapshot_blocks (block-cache.ts) and `knownCid` from the scrobbles, follows and record_state CIDs. Each returned chunk is applied in one db.tx with applySnapshotChunk, guarded by generation. The frontier is persisted.\n\nOn missing_block: restart at the new head, at most 5 times, then `repository_changed` with backoff.\n\nOn unsupported getBlocks: switch to the getRepo-stream source.\n\nAt the end: getRepoStatus, then completeSnapshot (superseded if the generation changed), then clear the cache.\n\ngeneration.ts implements the ADR 0003 generation rules: deactivation increments the user generation, and reactivation intent is preserved by ordinary rescheduling.\n\nGap recovery: `scheduleGapRecovery(db)` batches snapshot jobs over known active DIDs via `gap_scan_after_did` within the 1,024 cap. `maybeClearGap(db)` clears pending_gap only when the scan is finished and no gap-sourced jobs remain.\n\nThe free plan uses 40 subrequests per step.",
+    "description": "`snapshotStep(m, now, budget)` takes the oldest due `repo_jobs(snapshot)` row and implements ADR §5.7.\n\nIt starts with getRepoStatus and getLatestCommit, then fetches and verifies the commit (getBlocks), then calls `walker.step` with a BlockCache over snapshot_blocks (block-cache.ts) and `knownCid` from the scrobbles, follows and record_state CIDs. Each returned chunk is applied in one db.tx with applySnapshotChunk, guarded by generation. The frontier is persisted.\n\nOn missing_block: restart at the new head, at most 5 times, then `repository_changed` with backoff.\n\nOn unsupported getBlocks: switch to the getRepo-stream source.\n\nAt the end: getRepoStatus, then completeSnapshot (superseded if the generation changed), then clear the cache.\n\ngeneration.ts implements the ADR 0003 generation rules: deactivation increments the user generation, and reactivation intent is preserved by ordinary rescheduling.\n\nGap recovery: `scheduleGapRecovery(db)` batches snapshot jobs over known active DIDs via `gap_scan_after_did` within the 1,024 cap. `maybeClearGap(db)` clears pending_gap only when the scan is finished and no gap-sourced jobs remain.\n\nThe free plan uses 40 subrequests per step.",
     "tests": [
-     "worker/test/ingest/snapshot-job.test.ts \u203a new DID snapshot imports r01\u2013r07 and activates; r08 absent",
-     "worker/test/ingest/snapshot-job.test.ts \u203a job resumes across alarms from persisted frontier after DO eviction",
-     "worker/test/ingest/snapshot-job.test.ts \u203a BlockNotFound mid-walk restarts at new head reusing cache; >5 restarts \u2192 repository_changed",
-     "worker/test/ingest/snapshot-job.test.ts \u203a getBlocks unsupported falls back to getRepo stream and converges identically",
-     "worker/test/ingest/snapshot-job.test.ts \u203a PDS migration A\u2192B fetches from B and preserves URIs/CIDs",
-     "worker/test/ingest/reactivation.test.ts \u203a deactivate Alice hides her; reactivation stays hidden until snapshot completes, then current",
-     "worker/test/ingest/reactivation.test.ts \u203a deactivation during in-flight snapshot makes completion superseded",
-     "worker/test/ingest/gap-recovery.test.ts \u203a gap schedules all known DIDs within 1,024 bound and clears pending_gap only after all complete"
+     "worker/test/ingest/snapshot-job.test.ts › new DID snapshot imports r01–r07 and activates; r08 absent",
+     "worker/test/ingest/snapshot-job.test.ts › job resumes across alarms from persisted frontier after DO eviction",
+     "worker/test/ingest/snapshot-job.test.ts › BlockNotFound mid-walk restarts at new head reusing cache; >5 restarts → repository_changed",
+     "worker/test/ingest/snapshot-job.test.ts › getBlocks unsupported falls back to getRepo stream and converges identically",
+     "worker/test/ingest/snapshot-job.test.ts › PDS migration A→B fetches from B and preserves URIs/CIDs",
+     "worker/test/ingest/reactivation.test.ts › deactivate Alice hides her; reactivation stays hidden until snapshot completes, then current",
+     "worker/test/ingest/reactivation.test.ts › deactivation during in-flight snapshot makes completion superseded",
+     "worker/test/ingest/gap-recovery.test.ts › gap schedules all known DIDs within 1,024 bound and clears pending_gap only after all complete"
     ]
    },
    {
@@ -840,15 +912,15 @@
      "W1-08",
      "W1-05"
     ],
-    "description": "jetstream.ts: `onMessage(m, text, receiptMs)` is synchronous. It parses with W1-06, then calls `enqueueHints` with the checkpoint advance in one tx. Ignored messages still advance the cursor.\n\njetstream-socket.ts: `connect(m, deps.connectJetstream, now)`.\n- Production `connectJetstream` does `fetch(httpsUrl, {headers:{Upgrade:'websocket'}})` and then `resp.webSocket.accept()`.\n- The cursor comes from the checkpoint, and the URL comes from `buildSubscribeUrl`, which always sets `kinds=commit`.\n- Event handlers: message calls onMessage; close and error mark disconnected and schedule the watchdog with backoff (1 s base, exponential, 60 s cap, injected jitter) and rotate `host_index` across JETSTREAM_URLS.\n\nWatchdog timer:\n- reconnect only if the socket is closed;\n- planned refresh at 15 min;\n- never reconnect because of silence.\n\nGap detection on connect: no cursor, a cursor older than JETSTREAM_LOOKBACK_HOURS, or a rejected cursor leads to scheduleGapRecovery (through a function imported from W4-01's module path, `worker/src/do/ingest/snapshot-job.ts`; if W4-01 is not merged, stub the import behind an interface in checkpoint.ts and wire it in W5-01) and starts from the live tail.\n\ningest-mode.ts:\n- `pulse`: connect, drain until an event time \u2265 the connect time or 20 s, then close.\n- `off`: no socket.\n\ncheckpoint.ts: read and write ingest_checkpoint fields, including connected and last_event_time_us.\n\nworker/test/fixtures/jetstream-server.ts adapts the W1-05 fake Jetstream to a WebSocketPair connector.",
+    "description": "jetstream.ts: `onMessage(m, text, receiptMs)` is synchronous. It parses with W1-06, then calls `enqueueHints` with the checkpoint advance in one tx. Ignored messages still advance the cursor.\n\njetstream-socket.ts: `connect(m, deps.connectJetstream, now)`.\n- Production `connectJetstream` does `fetch(httpsUrl, {headers:{Upgrade:'websocket'}})` and then `resp.webSocket.accept()`.\n- The cursor comes from the checkpoint, and the URL comes from `buildSubscribeUrl`, which always sets `kinds=commit`.\n- Event handlers: message calls onMessage; close and error mark disconnected and schedule the watchdog with backoff (1 s base, exponential, 60 s cap, injected jitter) and rotate `host_index` across JETSTREAM_URLS.\n\nWatchdog timer:\n- reconnect only if the socket is closed;\n- planned refresh at 15 min;\n- never reconnect because of silence.\n\nGap detection on connect: no cursor, a cursor older than JETSTREAM_LOOKBACK_HOURS, or a rejected cursor leads to scheduleGapRecovery (through a function imported from W4-01's module path, `worker/src/do/ingest/snapshot-job.ts`; if W4-01 is not merged, stub the import behind an interface in checkpoint.ts and wire it in W5-01) and starts from the live tail.\n\ningest-mode.ts:\n- `pulse`: connect, drain until an event time ≥ the connect time or 20 s, then close.\n- `off`: no socket.\n\ncheckpoint.ts: read and write ingest_checkpoint fields, including connected and last_event_time_us.\n\nworker/test/fixtures/jetstream-server.ts adapts the W1-05 fake Jetstream to a WebSocketPair connector.",
     "tests": [
-     "worker/test/ingest/jetstream.test.ts \u203a hint durable before cursor advance; replay of inclusive cursor creates no duplicate rows",
-     "worker/test/ingest/jetstream-socket.test.ts \u203a subscribe URL has kinds=commit and the three collections only",
-     "worker/test/ingest/jetstream-socket.test.ts \u203a silent socket is not reconnected; planned refresh happens at 15 min from stored cursor",
-     "worker/test/ingest/jetstream-socket.test.ts \u203a close triggers reconnect delays 1,2,4,\u2026,60s and rotates us-east\u2192us-west",
-     "worker/test/ingest/jetstream-socket.test.ts \u203a cursor older than lookback sets pending_gap and resumes from live tail",
-     "worker/test/ingest/ingest-mode.test.ts \u203a pulse mode drains to tail then closes; off mode never connects",
-     "worker/test/ingest/jetstream-socket.test.ts \u203a DO eviction marks connected=false on restart and watchdog reconnects"
+     "worker/test/ingest/jetstream.test.ts › hint durable before cursor advance; replay of inclusive cursor creates no duplicate rows",
+     "worker/test/ingest/jetstream-socket.test.ts › subscribe URL has kinds=commit and the three collections only",
+     "worker/test/ingest/jetstream-socket.test.ts › silent socket is not reconnected; planned refresh happens at 15 min from stored cursor",
+     "worker/test/ingest/jetstream-socket.test.ts › close triggers reconnect delays 1,2,4,…,60s and rotates us-east→us-west",
+     "worker/test/ingest/jetstream-socket.test.ts › cursor older than lookback sets pending_gap and resumes from live tail",
+     "worker/test/ingest/ingest-mode.test.ts › pulse mode drains to tail then closes; off mode never connects",
+     "worker/test/ingest/jetstream-socket.test.ts › DO eviction marks connected=false on restart and watchdog reconnects"
     ]
    },
    {
@@ -867,14 +939,15 @@
      "W2-02",
      "W1-08"
     ],
-    "description": "accounts.ts: `checkStatus(m, did)` calls `com.atproto.sync.getRepoStatus` on the resolved PDS.\n- inactive (deactivated, takendown, suspended or deleted, or RepoNotFound) \u2192 markInactive;\n- active after inactive \u2192 markReactivating plus scheduleSnapshot;\n- also handles `status` repo_jobs created by the drain.\n\nsweeps.ts:\n- `status-sweep`: hourly, 200 DIDs round-robin by last_status_check_ms. DIDs with last_activity in the last 30 d are due hourly, others daily.\n- `identity-sweep`: daily, 200 DIDs. Re-resolve fresh and verify the handle. Mismatch \u2192 handle NULL. A unique handle conflict clears the old holder. A PDS change \u2192 scheduleSnapshot.\n\ndiscovery.ts: the `discovery` timer pages relay `listReposByCollection` for the scrobble and follow collections (10 pages per run), with each DID going to admission. It runs once during gap recovery and daily otherwise.",
+    "description": "accounts.ts: `checkStatus(m, did)` calls `com.atproto.sync.getRepoStatus` on the resolved PDS.\n- inactive (deactivated, takendown, suspended or deleted, or RepoNotFound) → markInactive;\n- active after inactive → markReactivating plus scheduleSnapshot;\n- also handles `status` repo_jobs created by the drain.\n\nsweeps.ts:\n- `status-sweep`: hourly, 200 DIDs round-robin by last_status_check_ms. DIDs with last_activity in the last 30 d are due hourly, others daily.\n- `identity-sweep`: daily, 200 DIDs. Re-resolve fresh and verify the handle. Mismatch → handle NULL. A unique handle conflict clears the old holder. A PDS change → scheduleSnapshot.\n\ndiscovery.ts: the `discovery` timer pages relay `listReposByCollection` for the scrobble and follow collections (10 pages per run), with each DID going to admission. It runs once during gap recovery and daily otherwise.",
     "tests": [
-     "worker/test/ingest/accounts.test.ts \u203a deactivated status hides Alice immediately; Bob and Carol unaffected",
-     "worker/test/ingest/accounts.test.ts \u203a reactivated status schedules snapshot and keeps hidden until completion",
-     "worker/test/ingest/sweeps.test.ts \u203a active-in-30d DIDs are checked hourly, others daily, 200 per run",
-     "worker/test/ingest/sweeps.test.ts \u203a handle that no longer verifies becomes null; history retained",
-     "worker/test/ingest/sweeps.test.ts \u203a PDS change in DID doc schedules snapshot",
-     "worker/test/ingest/discovery.test.ts \u203a listReposByCollection pages admit DIDs within budget and never project records"
+     "worker/test/ingest/accounts.test.ts › deactivated status hides Alice immediately; Bob and Carol unaffected",
+     "worker/test/ingest/accounts.test.ts › reactivated status schedules snapshot and keeps hidden until completion",
+     "worker/test/ingest/sweeps.test.ts › active-in-30d DIDs are checked hourly, others daily, 200 per run",
+     "worker/test/ingest/sweeps.test.ts › handle that no longer verifies becomes null; history retained",
+     "worker/test/ingest/sweeps.test.ts › PDS change in DID doc schedules snapshot",
+     "worker/test/ingest/discovery.test.ts › listReposByCollection pages admit DIDs within budget and never project records",
+     "worker/test/ingest/sweeps.test.ts › renamed handle verifies on the next identity sweep and resolves to the same DID with unchanged history"
     ]
    },
    {
@@ -892,13 +965,14 @@
      "W1-07",
      "W1-01"
     ],
-    "description": "POST /api/v1/notify:\n- body \u2264 2 KiB (413);\n- strict JSON `{uri}` or `{did}`; unknown fields 422;\n- AT-URI with a configured collection, or a valid DID;\n- the Worker forwards clientIp.\n\nDO `notify(m, input, ip, now)`:\n- applies the per-IP bucket (60/min) and per-DID bucket (600/h), giving 429 with Retry-After;\n- a suppressed DID is accepted only for the settings collection, and silently ignored with 202 otherwise;\n- `{uri}` enqueues a hint with source notify at top priority;\n- `{did}` admits the DID if unknown, or schedules a refresh snapshot if the last snapshot was more than 24 h ago (at most once per 24 h);\n- busy gives 503 queue_full;\n- success gives 202 `{state:'queued'}`.\n\nGET /api/v1/records/status?uri= returns `{uri, state, cid?, revision?, reason?, indexing}`:\n- indexed: a visible row;\n- pending: a hint or job exists;\n- absent or excluded: from record_state;\n- unknown otherwise.\n\nIt is `no-store`.",
+    "description": "POST /api/v1/notify:\n- body ≤ 2 KiB (413);\n- strict JSON `{uri}` or `{did}`; unknown fields 422;\n- AT-URI with a configured collection, or a valid DID;\n- the Worker forwards clientIp.\n\nDO `notify(m, input, ip, now)`:\n- applies the per-IP bucket (60/min) and per-DID bucket (600/h), giving 429 with Retry-After;\n- a suppressed DID is accepted only for the settings collection, and silently ignored with 202 otherwise;\n- `{uri}` enqueues a hint with source notify at top priority;\n- `{did}` admits the DID if unknown, or schedules a refresh snapshot if the last snapshot was more than 24 h ago (at most once per 24 h);\n- busy gives 503 queue_full;\n- success gives 202 `{state:'queued'}`.\n\nGET /api/v1/records/status?uri= returns `{uri, state, cid?, revision?, reason?, indexing}`:\n- indexed: a visible row;\n- pending: a hint or job exists;\n- absent or excluded: from record_state;\n- unknown otherwise.\n\nIt is `no-store`.",
     "tests": [
-     "worker/test/ingest/notify.test.ts \u203a valid uri \u2192 202 queued and one hint row; repeat coalesces",
-     "worker/test/ingest/notify.test.ts \u203a foreign collection or bad URI \u2192 422; oversize \u2192 413; unknown field \u2192 422",
-     "worker/test/ingest/notify.test.ts \u203a 61st request per IP per minute \u2192 429 and no DB change",
-     "worker/test/ingest/notify.test.ts \u203a did notify for unknown DID admits snapshot; busy \u2192 503 queue_full",
-     "worker/test/http/record-status.test.ts \u203a states indexed/pending/absent/excluded/unknown with cid and revision"
+     "worker/test/ingest/notify.test.ts › valid uri → 202 queued and one hint row; repeat coalesces",
+     "worker/test/ingest/notify.test.ts › foreign collection or bad URI → 422; oversize → 413; unknown field → 422",
+     "worker/test/ingest/notify.test.ts › 61st request per IP per minute → 429 and no DB change",
+     "worker/test/ingest/notify.test.ts › did notify for unknown DID admits snapshot; busy → 503 queue_full",
+     "worker/test/http/record-status.test.ts › states indexed/pending/absent/excluded/unknown with cid and revision",
+     "worker/test/ingest/notify.test.ts › 2,048-byte body reaches the parser and 2,049-byte body → 413 with no DB change"
     ]
    }
   ]
@@ -918,7 +992,8 @@
      "worker/test/composition/routing.test.ts",
      "worker/test/composition/index-do.test.ts",
      "worker/test/composition/admin.test.ts",
-     "worker/test/composition/scheduled.test.ts"
+     "worker/test/composition/scheduled.test.ts",
+     "worker/test/composition/logging.test.ts"
     ],
     "dependsOn": [
      "W3-01",
@@ -931,15 +1006,17 @@
      "W2-05",
      "W1-09"
     ],
-    "description": "worker/src/do/index-do.ts: `class IndexDO extends DurableObject implements IndexRpc`.\n- **Constructor:** runs `blockConcurrencyWhile(migrate)`, `deps = this.buildDeps(env, ctx)` (protected; production uses systemClock, cryptoRandom, fetch, the identity resolver and connectJetstream), marks connected=false, and ensures the timers and alarm.\n- **`alarm()`:** calls `runDue` with handlers drain \u2192 verify-drain, snapshot \u2192 snapshotStep, jetstream-watchdog \u2192 socket or pulse, status-sweep, identity-sweep, discovery, and gc (prunes snapshot_blocks of finished jobs, verified_commits older than 7 d, stale identity_cache entries and old hint errors), then `armAlarm`.\n- **RPC methods** wrap the module functions and match IndexRpc. `ensureRunning` re-arms the alarm.\n- **`adminPitr(atMs)`:** `getBookmarkForTime`, then `onNextSessionRestoreBookmark`, then `ctx.abort()`.\n\nworker/src/router.ts concatenates the `routes` exports of every worker/src/http/*.ts module. An unknown /api/* path gets a JSON 404 envelope.\n\nworker/src/index.ts `fetch`:\n- strips inbound `x-atmusic-*` headers;\n- sets clientIp from CF-Connecting-IP and a requestId;\n- imports the cursor key once per isolate;\n- gets the stub with `env.INDEX.get(env.INDEX.idFromName('index-v1'), {locationHint})`;\n- dispatches through the router;\n- serves `/health/live` locally;\n- passes anything else to ASSETS.\n\nscheduled.ts: `ensureRunning()`, plus starting a pulse in pulse mode.\n\nhttp/admin.ts: /internal/admin/status, /internal/admin/pitr and /internal/admin/resnapshot, enabled only when ADMIN_TOKEN is set, with a constant-time bearer compare. Missing token or disabled gives 404.\n\nThe production entry never imports test-support, and `scripts/check-bundle.ts` must pass.",
+    "description": "worker/src/do/index-do.ts: `class IndexDO extends DurableObject implements IndexRpc`.\n- **Constructor:** runs `blockConcurrencyWhile(migrate)`, `deps = this.buildDeps(env, ctx)` (protected; production uses systemClock, cryptoRandom, fetch, the identity resolver and connectJetstream), marks connected=false, and ensures the timers and alarm.\n- **`alarm()`:** calls `runDue` with handlers drain → verify-drain, snapshot → snapshotStep, jetstream-watchdog → socket or pulse, status-sweep, identity-sweep, discovery, and gc (prunes snapshot_blocks of finished jobs, verified_commits older than 7 d, stale identity_cache entries and old hint errors), then `armAlarm`.\n- **RPC methods** wrap the module functions and match IndexRpc. `ensureRunning` re-arms the alarm.\n- **`adminPitr(atMs)`:** `getBookmarkForTime`, then `onNextSessionRestoreBookmark`, then `ctx.abort()`.\n\nworker/src/router.ts concatenates the `routes` exports of every worker/src/http/*.ts module. An unknown /api/* path gets a JSON 404 envelope.\n\nworker/src/index.ts `fetch`:\n- strips inbound `x-atmusic-*` headers;\n- sets clientIp from CF-Connecting-IP and a requestId;\n- imports the cursor key once per isolate;\n- gets the stub with `env.INDEX.get(env.INDEX.idFromName('index-v1'), {locationHint})`;\n- dispatches through the router;\n- serves `/health/live` locally;\n- passes anything else to ASSETS.\n\nscheduled.ts: `ensureRunning()`, plus starting a pulse in pulse mode.\n\nhttp/admin.ts: /internal/admin/status, /internal/admin/pitr and /internal/admin/resnapshot, enabled only when ADMIN_TOKEN is set, with a constant-time bearer compare. Missing token or disabled gives 404.\n\nThe production entry never imports test-support, and `scripts/check-bundle.ts` must pass.",
     "tests": [
-     "worker/test/composition/routing.test.ts \u203a every API.md v1.1 route dispatches; unknown /api/x \u2192 JSON 404; non-API path \u2192 ASSETS",
-     "worker/test/composition/routing.test.ts \u203a inbound x-atmusic-client-ip is stripped and CF-Connecting-IP used",
-     "worker/test/composition/index-do.test.ts \u203a constructor migrates, marks disconnected, arms alarm; alarm runs drain before snapshot",
-     "worker/test/composition/index-do.test.ts \u203a restart (eviction) preserves state and resumes alarm",
-     "worker/test/composition/admin.test.ts \u203a admin routes 404 without ADMIN_TOKEN; wrong token 401 constant-time; status JSON shape",
-     "worker/test/composition/scheduled.test.ts \u203a cron re-arms a deleted alarm",
-     "npx tsx scripts/check-bundle.ts \u203a production bundle passes guard"
+     "worker/test/composition/routing.test.ts › every API.md v1.1 route dispatches; unknown /api/x → JSON 404; non-API path → ASSETS",
+     "worker/test/composition/routing.test.ts › inbound x-atmusic-client-ip is stripped and CF-Connecting-IP used",
+     "worker/test/composition/index-do.test.ts › constructor migrates, marks disconnected, arms alarm; alarm runs drain before snapshot",
+     "worker/test/composition/index-do.test.ts › restart (eviction) preserves state and resumes alarm",
+     "worker/test/composition/admin.test.ts › admin routes 404 without ADMIN_TOKEN; wrong token 401 constant-time; status JSON shape",
+     "worker/test/composition/scheduled.test.ts › cron re-arms a deleted alarm",
+     "npx tsx scripts/check-bundle.ts › production bundle passes guard",
+     "worker/test/composition/logging.test.ts › captured logs and error bodies contain no CURSOR_KEY, ADMIN_TOKEN or bearer marker and logs contain no track-title marker",
+     "worker/test/composition/routing.test.ts › forced storage error → 500 envelope with UUID requestId and no stack trace or file path"
     ]
    }
   ]
@@ -969,23 +1046,24 @@
     ],
     "description": "entry.ts exports `TestIndexDO extends IndexDO`, overriding buildDeps with fixedClock('2026-01-15T12:00:00Z'), seeded Random, routerTransport and the WebSocketPair Jetstream connector. Test control goes through a Symbol-keyed method used only via runInDurableObject. It also re-exports the production Worker default fetch. wrangler.acceptance.jsonc sets `allowFixturePrefix` and prefix com.example.atmusic.\n\nsupport/seed.ts runs seedReadModels through **fake Jetstream events**, then steps alarms with runDurableObjectAlarm until no hints remain.\n\nsupport/openapi.ts compiles api/openapi.yaml components with AJV; every response in these suites is validated.\n\nAll expected values are hardcoded from TESTING.md, never computed by the code under test. Each test asserts status, schema, DO tables and transport call counts.",
     "tests": [
-     "worker/test/acceptance/read-model-acceptance.test.ts \u203a Alice history exact order and limit-2 pages over HTTP",
-     "worker/test/acceptance/read-model-acceptance.test.ts \u203a global feed r09,r10,r07,r01,r02,r03,r04,r05,r06 and Alice following r09 only",
-     "worker/test/acceptance/read-model-acceptance.test.ts \u203a follower/following counts Alice 0/1, Bob 1/0, Carol 0/0",
-     "worker/test/acceptance/read-model-acceptance.test.ts \u203a statistics tables for all/7d/30d/365d equal TESTING.md exactly (totals, artists, tracks, albums)",
-     "worker/test/acceptance/read-model-acceptance.test.ts \u203a boundary seconds and future exclusion",
-     "worker/test/acceptance/read-model-acceptance.test.ts \u203a union of all pages equals hardcoded URI list with no duplicates",
-     "worker/test/acceptance/mutations.test.ts \u203a delete r01 \u2192 6/6/3, Homogenic 1, history r07,r02,\u2026",
-     "worker/test/acceptance/mutations.test.ts \u203a r03 artist\u2192Bj\u00f6rk \u2192 Bj\u00f6rk 3, Kate Bush 2, Radiohead 2, total 7",
-     "worker/test/acceptance/mutations.test.ts \u203a remove Alice\u2192Bob \u2192 following feed empty; global unchanged",
-     "worker/test/acceptance/mutations.test.ts \u203a Carol\u2192Bob duplicates 2, then 2, then 1",
-     "worker/test/acceptance/mutations.test.ts \u203a deactivate Alice hides her; reactivation current only after snapshot",
-     "worker/test/acceptance/federation.test.ts \u203a Carol r10 appears only through external ingestion with zero app write calls",
-     "worker/test/acceptance/federation.test.ts \u203a bad signature / changed block / wrong MST path leave projection and cursor byte-identical",
-     "worker/test/acceptance/federation.test.ts \u203a settings disabled disconnects Carol; settings deleted reconnects after snapshot",
-     "worker/test/acceptance/restart.test.ts \u203a eviction preserves byte-identical tables, pre-restart cursor continues, alarm resumes",
-     "worker/test/acceptance/security.test.ts \u203a notify abuse limits, SSRF fixture private DoH answer refused, redirect refused, no test seam reachable",
-     "worker/test/acceptance/query-plans.test.ts \u203a 100\u00d71,000 seeded records: history/feed/stats plans use indexes; negative control scans"
+     "worker/test/acceptance/read-model-acceptance.test.ts › Alice history exact order and limit-2 pages over HTTP",
+     "worker/test/acceptance/read-model-acceptance.test.ts › global feed r09,r10,r07,r01,r02,r03,r04,r05,r06 and Alice following r09 only",
+     "worker/test/acceptance/read-model-acceptance.test.ts › follower/following counts Alice 0/1, Bob 1/0, Carol 0/0",
+     "worker/test/acceptance/read-model-acceptance.test.ts › statistics tables for all/7d/30d/365d equal TESTING.md exactly (totals, artists, tracks, albums)",
+     "worker/test/acceptance/read-model-acceptance.test.ts › boundary seconds and future exclusion",
+     "worker/test/acceptance/read-model-acceptance.test.ts › union of all pages equals hardcoded URI list with no duplicates",
+     "worker/test/acceptance/mutations.test.ts › delete r01 → 6/6/3, Homogenic 1, history r07,r02,…",
+     "worker/test/acceptance/mutations.test.ts › r03 artist→Björk → Björk 3, Kate Bush 2, Radiohead 2, total 7",
+     "worker/test/acceptance/mutations.test.ts › remove Alice→Bob → following feed empty; global unchanged",
+     "worker/test/acceptance/mutations.test.ts › Carol→Bob duplicates 2, then 2, then 1",
+     "worker/test/acceptance/mutations.test.ts › deactivate Alice hides her; reactivation current only after snapshot",
+     "worker/test/acceptance/federation.test.ts › Carol r10 appears only through external ingestion with zero app write calls",
+     "worker/test/acceptance/federation.test.ts › bad signature / changed block / wrong MST path leave projection and cursor byte-identical",
+     "worker/test/acceptance/federation.test.ts › settings disabled disconnects Carol; settings deleted reconnects after snapshot",
+     "worker/test/acceptance/restart.test.ts › eviction preserves byte-identical tables, pre-restart cursor continues, alarm resumes",
+     "worker/test/acceptance/security.test.ts › notify abuse limits, SSRF fixture private DoH answer refused, redirect refused, no test seam reachable",
+     "worker/test/acceptance/query-plans.test.ts › 100×1,000 seeded records: history/feed/stats plans use indexes; negative control scans",
+     "worker/test/acceptance/federation.test.ts › duplicate events, socket drop and expired cursor converge to the exact URI/CID/payload set with no double-counted stats"
     ]
    },
    {
@@ -1001,11 +1079,13 @@
     "dependsOn": [
      "W5-01"
     ],
-    "description": "Seed users with 1k, 10k, 50k and 100k scrobbles through apply functions (signed fixtures, chunked). Measure rows read (via the cursor's `rowsRead`), the wall time per call inside workerd for history, global feed, following feed and stats in all four windows, cold and cached.\n\nscripts/benchmark-read-models.ts writes the JSON and docs/benchmarks/*.md, superseding the Rust numbers (kept as history).\n\nBudget assertions: history and feed at most limit+2 rows read; stats bounded by the window rows; cached stats hit \u2264 3 index probes. If 100k-scrobble all-time stats exceed 50 ms in workerd, record it as a follow-up and do not fail.",
+    "description": "Seed users with 1k, 10k, 50k and 100k scrobbles through apply functions (signed fixtures, chunked). Measure rows read (via the cursor's `rowsRead`), the wall time per call inside workerd for history, global feed, following feed and stats in all four windows, cold and cached.\n\nscripts/benchmark-read-models.ts writes the JSON and docs/benchmarks/*.md, superseding the Rust numbers (kept as history).\n\nBudget assertions: history and feed at most limit+2 rows read; stats bounded by the window rows; cached stats hit ≤ 3 index probes. If 100k-scrobble all-time stats exceed 50 ms in workerd, record it as a follow-up and do not fail.",
     "tests": [
-     "worker/test/bench/read-models.bench.test.ts \u203a history/feed rows read \u2264 limit+2",
-     "worker/test/bench/read-models.bench.test.ts \u203a stats cache hit uses \u22643 probes and equals uncached result",
-     "worker/test/bench/read-models.bench.test.ts \u203a benchmark JSON is produced and schema-valid"
+     "worker/test/bench/read-models.bench.test.ts › history/feed rows read ≤ limit+2",
+     "worker/test/bench/read-models.bench.test.ts › stats cache hit uses ≤3 probes and equals uncached result",
+     "worker/test/bench/read-models.bench.test.ts › benchmark JSON is produced and schema-valid",
+     "worker/test/bench/read-models.bench.test.ts › seeded generator yields exactly 100,000 valid active rows with the documented per-user distribution",
+     "worker/test/bench/read-models.bench.test.ts › 600 measured requests with zero errors report p95 and check it against the target"
     ]
    },
    {
@@ -1026,9 +1106,14 @@
     ],
     "description": "scripts/e2e/dev-env.ts starts @atproto/dev-env (a local PDS and PLC; test-only Node infrastructure) with two accounts on separate PDS instances where supported.\n\nworker/test/e2e/entry.ts: an IndexDO subclass whose transport allows http loopback for the dev-env hosts only, with INGEST_MODE=off. Ingestion comes through notify and snapshots, and the fixture prefix is allowed.\n\nstart-stack.ts runs gen-config (local), vite build and `wrangler dev --config worker/test/e2e/wrangler.e2e.jsonc --ip 127.0.0.1 --port 8787`.\n\nThe journey:\n1. sign in with the loopback client;\n2. submit a scrobble and see it indexed;\n3. browse the feed, profile, history and stats windows;\n4. follow and unfollow the second account;\n5. delete the scrobble and see it absent;\n6. export;\n7. disconnect, then reconnect;\n8. sign out.\n\naccessibility.spec.ts runs axe on every route.",
     "tests": [
-     "web/tests/mvp.spec.ts \u203a full journey sign-in \u2192 scrobble indexed \u2192 stats \u2192 follow/unfollow \u2192 delete \u2192 export \u2192 disconnect/reconnect \u2192 sign-out",
-     "web/tests/mvp.spec.ts \u203a OAuth callback navigation is served by SPA (/oauth/callback not intercepted by Worker)",
-     "web/tests/accessibility.spec.ts \u203a no serious/critical axe violations on all routes"
+     "web/tests/mvp.spec.ts › full journey sign-in → scrobble indexed → stats → follow/unfollow → delete → export → disconnect/reconnect → sign-out",
+     "web/tests/mvp.spec.ts › OAuth callback navigation is served by SPA (/oauth/callback not intercepted by Worker)",
+     "web/tests/accessibility.spec.ts › no serious/critical axe violations on all routes",
+     "web/tests/mvp.spec.ts › GET /u/<did> and /feed serve index.html 200 and POST /feed never returns SPA HTML",
+     "web/tests/mvp.spec.ts › non-navigation GET /assets/missing.js and encoded ../ traversal return 404, never index.html",
+     "web/tests/mvp.spec.ts › hashed /assets/*.js returns 200 with a JavaScript content type and immutable Cache-Control",
+     "web/tests/accessibility.spec.ts › Tab and Enter reach every navigation destination with visible focus",
+     "web/tests/accessibility.spec.ts › keyboard-only journey reaches sign-in, scrobble submit, window tabs, follow and sign-out with visible focus"
     ]
    },
    {
@@ -1050,7 +1135,8 @@
      "docs/profiles.md",
      "README.md",
      ".env.example",
-     "config/atmusic.env.example"
+     "config/atmusic.env.example",
+     "scripts/test/secret-scan.test.ts"
     ],
     "dependsOn": [
      "W5-01",
@@ -1058,9 +1144,11 @@
     ],
     "description": ".github/workflows/deploy.yml: manual dispatch, run in an environment-protected job using CLOUDFLARE_API_TOKEN. Steps:\n1. `npm ci`;\n2. `bash scripts/check-ts.sh`;\n3. gen-config (production);\n4. `vite build`;\n5. `wrangler versions upload`, recording the version id and the bundle SHA-256 from check-bundle;\n6. `wrangler versions deploy <id>@100%`;\n7. a smoke test of /health/live, /health/ready and /api/v1/meta.\n\nscripts/deploy.sh does the same locally and refuses when LEXICON_PREFIX is empty or the fixture prefix, or the CURSOR_KEY secret is missing (checked with `wrangler secret list`).\n\nscripts/admin/pitr-restore.ts calls /internal/admin/pitr.\n\nDocs to rewrite:\n- deployment.md: one-time setup with an owned domain, custom-domain route, secrets, the free and staging envs, and the plan-tier guidance.\n- workers.md: the timers, ingest modes and budgets.\n- backup.md: PITR plus rebuild-from-network.\n- storage.md: the DO schema and its mapping.\n- operations.md: Workers Logs, counters, admin status, cost monitoring.\n- cursors.md: the following feed via viewer.\n- account-controls.md, deletion.md, follows.md, profiles.md: settings opt-out, browser outbox, public export.\n- README.md quickstart.\n\n.env.example and config/atmusic.env.example are replaced by pointers to worker/.dev.vars.example.",
     "tests": [
-     "bash scripts/deploy.sh --dry-run \u203a refuses empty/fixture prefix and missing secret with nonzero exit",
-     "actionlint .github/workflows/deploy.yml \u203a workflow is valid",
-     "npx tsx scripts/admin/pitr-restore.ts --help \u203a prints usage and requires ADMIN_TOKEN"
+     "bash scripts/deploy.sh --dry-run › refuses empty/fixture prefix and missing secret with nonzero exit",
+     "actionlint .github/workflows/deploy.yml › workflow is valid",
+     "npx tsx scripts/admin/pitr-restore.ts --help › prints usage and requires ADMIN_TOKEN",
+     "bash scripts/deploy.sh --dry-run › valid owned prefix and CURSOR_KEY run gen-config, the web build and wrangler deploy --dry-run with exit 0",
+     "scripts/test/secret-scan.test.ts › worker/.dev.vars.example, .env.example and docs contain no credential-shaped values"
     ]
    },
    {
@@ -1079,11 +1167,11 @@
     "dependsOn": [
      "W5-01"
     ],
-    "description": "Each script exits nonzero with a `blocked` result listing the missing prerequisites: owned NSID, deployed origin, two identities on independent PDSs, Jetstream coverage, ADMIN_TOKEN. Credentials come only from the environment.\n\n- **workers_oauth_check.ts:** an interactive or Playwright-driven browser sign-in on both PDSs, checking the granular `repo:` scope grant.\n- **workers_ingest_check.ts:** publish on PDS A through the app and measure Jetstream\u2192indexed lag; publish externally on PDS B; delete and reconcile; record the verified CID and revision independently fetched.\n- **pds_compat_check.ts:** per PDS, getRecord inclusion and exclusion proof availability, getBlocks support, getRepoStatus.\n- **ssrf_probe.ts:** deploy-time probe through an admin-only diagnostic, recording how Workers fetch behaves toward RFC 1918, loopback and metadata IPs via a controlled DNS name.\n- **workers_socket_soak.ts:** 24 h of reconnect counts, lag, DO requests and CPU per alarm from the Cloudflare GraphQL analytics API, deciding socket versus pulse.\n\nscripts/verify_live_evidence.py and its test are updated to the new evidence schema: Worker version id, bundle SHA-256, date, PDS implementation and version, DID and AT URI, results, cleanup.",
+    "description": "Each script exits nonzero with a `blocked` result listing the missing prerequisites: owned NSID, deployed origin, two identities on independent PDSs, Jetstream coverage, ADMIN_TOKEN. Credentials come only from the environment.\n\n- **workers_oauth_check.ts:** an interactive or Playwright-driven browser sign-in on both PDSs, checking the granular `repo:` scope grant.\n- **workers_ingest_check.ts:** publish on PDS A through the app and measure Jetstream→indexed lag; publish externally on PDS B; delete and reconcile; record the verified CID and revision independently fetched.\n- **pds_compat_check.ts:** per PDS, getRecord inclusion and exclusion proof availability, getBlocks support, getRepoStatus.\n- **ssrf_probe.ts:** deploy-time probe through an admin-only diagnostic, recording how Workers fetch behaves toward RFC 1918, loopback and metadata IPs via a controlled DNS name.\n- **workers_socket_soak.ts:** 24 h of reconnect counts, lag, DO requests and CPU per alarm from the Cloudflare GraphQL analytics API, deciding socket versus pulse.\n\nscripts/verify_live_evidence.py and its test are updated to the new evidence schema: Worker version id, bundle SHA-256, date, PDS implementation and version, DID and AT URI, results, cleanup.",
     "tests": [
-     "scripts/test_live_evidence.py \u203a evidence missing version id or bundle hash is rejected",
-     "scripts/test_live_evidence.py \u203a blocked result is distinguished from pass and fail",
-     "npx tsx scripts/live/pds_compat_check.ts (no env) \u203a exits nonzero with blocked and lists missing names"
+     "scripts/test_live_evidence.py › evidence missing version id or bundle hash is rejected",
+     "scripts/test_live_evidence.py › blocked result is distinguished from pass and fail",
+     "npx tsx scripts/live/pds_compat_check.ts (no env) › exits nonzero with blocked and lists missing names"
     ]
    }
   ]
@@ -1111,8 +1199,8 @@
     ],
     "description": "scripts/acceptance/workers-backend.sh runs:\n- `bash scripts/check-ts.sh`;\n- the acceptance project;\n- check-bundle;\n- `validate_case_map.py --check-tests`;\n- `check_goldens.sh`.\n\nIt prints per-case records (target, command, count, result, commit, Worker bundle hash) and exits nonzero on any failure. Missing live gates are reported as blocked.\n\nFinalise docs/verification/ts-case-map.json, taking ownership from W0-02, so every case maps to an existing test or a retirement.\n\nUpdate VALIDATION.md and MILESTONE_STATUS.md with the executed evidence, and report passed, failed, skipped and blocked separately.",
     "tests": [
-     "bash scripts/acceptance/workers-backend.sh \u203a exits 0 with all deterministic suites passing and lists live gates as blocked when prerequisites absent",
-     "python3 scripts/validate_case_map.py --check-tests \u203a every mapped test file and name exists; 258 cases covered"
+     "bash scripts/acceptance/workers-backend.sh › exits 0 with all deterministic suites passing and lists live gates as blocked when prerequisites absent",
+     "python3 scripts/validate_case_map.py --check-tests › every mapped test file and name exists; 258 cases covered"
     ]
    },
    {
@@ -1144,9 +1232,9 @@
     ],
     "description": "Run only after the owner answers Q6 yes and W7-01 passes.\n\n- Remove crates/storage, crates/server and the musl and release tooling. Also remove crates/core and crates/atproto unless the owner keeps them as the permanent oracle; in that case keep them, keep the Rust CI job limited to `check_goldens.sh`, and drop clippy and tests for the removed crates.\n- Freeze tests/goldens with provenance noted in the README (last oracle commit).\n- Remove the Rust job from ci.yml (ownership transfers from W0-01) or reduce it as above.\n- Delete release.yml.\n- Reduce scripts/check.sh to call scripts/check-ts.sh plus the python validators.\n- Update docs/releases.md to Worker versions.\n\nGit history retains the Rust code.",
     "tests": [
-     "bash scripts/check.sh \u203a passes without cargo",
-     "bash scripts/acceptance/workers-backend.sh \u203a still passes with frozen goldens",
-     "python3 scripts/validate_case_map.py --check-tests \u203a no mapping references removed Rust tests"
+     "bash scripts/check.sh › passes without cargo",
+     "bash scripts/acceptance/workers-backend.sh › still passes with frozen goldens",
+     "python3 scripts/validate_case_map.py --check-tests › no mapping references removed Rust tests"
     ]
    }
   ]
