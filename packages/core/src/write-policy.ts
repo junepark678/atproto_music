@@ -1,12 +1,15 @@
 // Retry policy for owner-authorised PDS writes (ADR 0004 §5.2 step 3, §9 A12).
 //
-// Ports crates/atproto/src/pds/write.rs `retry_delay` and
-// crates/atproto/src/pds/reconcile.rs `classify`:
+// Ports crates/atproto/src/pds/write.rs `retry_delay` and the response routing of
+// write.rs `send` (InvalidSwap, already-exists and reconcile.rs `missing`, then
+// reconcile.rs `classify` for everything else):
 // - transient failures (network, 5xx, 429) retry after
 //   min(300 s, max(base + U[0, base/4], Retry-After)), base = 1000 * 2^(attempt-1) ms;
 // - there are exactly MAX_ATTEMPTS sends, never an eleventh;
 // - an "already exists" create is ambiguous: the caller must getRecord and compare
-//   canonical digests (canonical.ts), and must never overwrite the remote record.
+//   canonical digests (canonical.ts), and must never overwrite the remote record;
+// - a 404 / 400 RecordNotFound is not a verdict either (`missing`): the caller must
+//   look the record up; absence completes a delete (Rust Lookup::Absent).
 //
 // Pure: time and randomness are injected (deps.ts), nothing here sleeps or fetches.
 
@@ -47,7 +50,17 @@ export function nextDelayMs(attempt: number, random: Random, retryAfterMs?: numb
 
 export type WriteOperation = 'create' | 'put' | 'delete';
 
-export type FailureKind = 'transient' | 'permanent' | 'ambiguous_create';
+/**
+ * - `transient`: retry with `nextDelayMs`, up to MAX_ATTEMPTS sends.
+ * - `permanent`: fail the operation now.
+ * - `ambiguous_create`: the create may have landed; getRecord and compare digests
+ *   (equal: success; different: remote_record_conflict; never overwrite).
+ * - `missing`: the PDS says the record is not there (404 / RecordNotFound). Like the
+ *   Rust `missing()` route to `lookup()`, the caller looks the record up instead of
+ *   failing: for a delete, absence is success; for a create/put, a present record
+ *   whose digest matches is success and absence is transient remote_write_unconfirmed.
+ */
+export type FailureKind = 'transient' | 'permanent' | 'ambiguous_create' | 'missing';
 
 export type FailureCode =
   // transient
@@ -57,11 +70,12 @@ export type FailureCode =
   | 'repository_changed' // InvalidSwap: re-fetch, reconcile, retry
   // ambiguous
   | 'record_already_exists' // create hit an existing rkey: getRecord + digest compare
+  // missing
+  | 'record_not_found' // 404 / RecordNotFound: look up; absent completes a delete
   // permanent
   | 'invalid_record'
   | 'forbidden_scope'
   | 'sign_in_required'
-  | 'record_not_found'
   | 'upstream_rejected';
 
 export interface Classification {
@@ -198,6 +212,11 @@ function classifyStatus(
   if (status === 400 && body.error === 'InvalidSwap') {
     return { kind: 'transient', code: 'repository_changed', ...named };
   }
+  // Rust reconcile.rs `missing`: any 404, or a 400 RecordNotFound, for every
+  // operation. write.rs routes these to lookup(), never to classify().
+  if (status === 404 || (status === 400 && body.error === 'RecordNotFound')) {
+    return { kind: 'missing', code: 'record_not_found', ...named };
+  }
   switch (body.error) {
     case 'InvalidRecord':
       return { kind: 'permanent', code: 'invalid_record', ...named };
@@ -207,13 +226,26 @@ function classifyStatus(
     case 'InvalidToken':
     case 'ExpiredToken':
       return { kind: 'permanent', code: 'sign_in_required', ...named };
-    case 'RecordNotFound':
-      return { kind: 'permanent', code: 'record_not_found', ...named };
   }
   if (status === 401) return { kind: 'permanent', code: 'sign_in_required', ...named };
   if (status === 403) return { kind: 'permanent', code: 'forbidden_scope', ...named };
-  if (status === 404) return { kind: 'permanent', code: 'record_not_found', ...named };
   return { kind: 'permanent', code: 'upstream_rejected', ...named };
+}
+
+/**
+ * A fetch `Response` (or anything with the Body mixin) or a streamed/Blob body
+ * cannot be read synchronously; classifying it by status alone would turn a 400
+ * RecordAlreadyExists into a permanent rejection and skip the digest reconcile.
+ */
+function hasUnreadBody(value: object): boolean {
+  if (typeof Response !== 'undefined' && value instanceof Response) return true;
+  const v = value as { arrayBuffer?: unknown; bodyUsed?: unknown; body?: unknown };
+  if (typeof v.arrayBuffer === 'function' || typeof v.bodyUsed === 'boolean') return true;
+  const body = v.body;
+  return (
+    (typeof ReadableStream !== 'undefined' && body instanceof ReadableStream) ||
+    (typeof Blob !== 'undefined' && body instanceof Blob)
+  );
 }
 
 function isResponseLike(value: unknown): value is ResponseLike {
@@ -234,10 +266,18 @@ function isResponseLike(value: unknown): value is ResponseLike {
  *   DOMException, a socket reset) is a transient network failure.
  * - 429 and 5xx are transient and carry the server's requested wait.
  * - A create answered with RecordAlreadyExists / "already exists" is ambiguous_create.
+ * - 400 InvalidSwap is transient (repository_changed).
+ * - 404 or 400 RecordNotFound is `missing` (look the record up; see FailureKind).
  * - Everything else is permanent.
+ *
+ * A fetch `Response`, or a response-like whose body is a stream or Blob, throws a
+ * TypeError: its body must be read first, so use `classifyResponse`.
  */
 export function classify(failure: unknown, options: ClassifyOptions = {}): Classification {
   if (isResponseLike(failure)) {
+    if (hasUnreadBody(failure)) {
+      throw new TypeError('classify() cannot read a Response or streamed body; use await classifyResponse(response)');
+    }
     return classifyStatus(failure.status, parseBody(failure.body), failure.headers, options);
   }
   if (failure !== null && typeof failure === 'object') {

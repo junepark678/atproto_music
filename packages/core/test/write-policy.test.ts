@@ -190,8 +190,7 @@ describe('failure classification', () => {
       [401, undefined, 'sign_in_required'],
       [403, { error: 'InsufficientScope' }, 'forbidden_scope'],
       [403, undefined, 'forbidden_scope'],
-      [400, { error: 'RecordNotFound' }, 'record_not_found'],
-      [404, undefined, 'record_not_found'],
+      [409, { error: 'RecordNotFound' }, 'upstream_rejected'],
       [413, undefined, 'upstream_rejected'],
       [302, undefined, 'upstream_rejected'],
     ];
@@ -201,6 +200,22 @@ describe('failure classification', () => {
       expect(result.code, `${status} ${JSON.stringify(body)}`).toBe(code);
       expect(result.retryAfterMs).toBeUndefined();
     }
+    // 404 / 400 RecordNotFound is never a verdict (Rust write.rs routes reconcile::missing
+    // to lookup()): the runner looks the record up, and absence completes a delete.
+    for (const operation of ['create', 'put', 'delete'] as const) {
+      expect(classify({ status: 404 }, { operation })).toEqual({ kind: 'missing', code: 'record_not_found' });
+      expect(classify({ status: 400, body: { error: 'RecordNotFound' } }, { operation })).toEqual({
+        kind: 'missing',
+        code: 'record_not_found',
+        error: 'RecordNotFound',
+      });
+      expect(classify({ status: 404, body: { error: 'InvalidRecord' } }, { operation }).kind).toBe('missing');
+    }
+    expect(
+      (await classifyResponse(new Response('{"error":"RecordNotFound"}', { status: 400 }), { operation: 'delete' }))
+        .kind,
+    ).toBe('missing');
+
     // InvalidSwap means the repo moved under a swap: re-fetch and retry (Rust: repository_changed).
     expect(classify({ status: 400, body: { error: 'InvalidSwap' } }, { operation: 'delete' })).toEqual({
       kind: 'transient',
@@ -211,6 +226,31 @@ describe('failure classification', () => {
     // classify is for failures only; a success or a non-status is a caller bug.
     expect(() => classify({ status: 200 })).toThrow(RangeError);
     expect(() => classify({ status: 0 })).toThrow(RangeError);
+
+    // A real fetch Response cannot be classified synchronously: its body is an unread
+    // stream, and status alone would turn RecordAlreadyExists into a permanent failure.
+    const unread = new Response('{"error":"RecordAlreadyExists","message":"Record already exists"}', { status: 400 });
+    expect(() => classify(unread)).toThrow(/classifyResponse/);
+    expect(() => classify(new Response(null, { status: 429 }))).toThrow(TypeError);
+    expect(() => classify({ status: 400, body: new Response('{"error":"InvalidSwap"}').body })).toThrow(TypeError);
+    expect(() => classify({ status: 400, body: new Blob(['{"error":"InvalidRecord"}']) })).toThrow(TypeError);
+    // The rejected Response is left unread, so classifyResponse still sees its body.
+    expect(unread.bodyUsed).toBe(false);
+    expect(await classifyResponse(unread)).toEqual({
+      kind: 'ambiguous_create',
+      code: 'record_already_exists',
+      error: 'RecordAlreadyExists',
+    });
+    expect(await classifyResponse(new Response('{"error":"InvalidSwap"}', { status: 400 }))).toEqual({
+      kind: 'transient',
+      code: 'repository_changed',
+      error: 'InvalidSwap',
+    });
+    expect(await classifyResponse(new Response('{"error":"ExpiredToken"}', { status: 400 }))).toEqual({
+      kind: 'permanent',
+      code: 'sign_in_required',
+      error: 'ExpiredToken',
+    });
 
     // Real fetch Responses, body read by classifyResponse.
     const fromResponse = await classifyResponse(
