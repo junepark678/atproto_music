@@ -15,7 +15,7 @@ import { Ajv2020 } from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
 import { afterEach, expect, test } from 'vitest';
 import { unstable_dev } from 'wrangler';
-import { CSP, FIXTURE_PREFIX, isValidPrefix, parseJsonc } from '../gen-config.ts';
+import { FIXTURE_PREFIX, isValidPrefix, parseJsonc } from '../gen-config.ts';
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const TSX_CLI = createRequire(join(REPO, 'package.json')).resolve('tsx/cli');
@@ -73,6 +73,10 @@ function wranglerWith(vars: { PUBLIC_ORIGIN?: string; LEXICON_PREFIX?: string })
   writeFileSync(path, JSON.stringify(config));
   return path;
 }
+
+/** ADR 0004 §8, verbatim: pinned here, never imported from the module under test. */
+const ADR_CSP =
+  "default-src 'self'; script-src 'self'; connect-src 'self' https:; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; require-trusted-types-for 'script'";
 
 const EXPECTED_METADATA = {
   client_id: 'https://music.example.org/oauth/client-metadata.json',
@@ -190,9 +194,15 @@ test('local env writes only the loopback client-id hint and removes stale metada
   const out = tempDir('public');
   mkdirSync(join(out, 'oauth'));
   writeFileSync(join(out, 'oauth', 'client-metadata.json'), '{"stale":true}\n');
+  // A deployed build's _headers would make wrangler dev apply the strict CSP,
+  // whose connect-src 'self' https: blocks the http:// loopback PDS/PLC.
+  writeFileSync(join(out, '_headers'), `/*\n  Content-Security-Policy: ${ADR_CSP}\n`);
   const res = genConfig(['--env', 'local', '--out', out], { LEXICON_PREFIX: FIXTURE_PREFIX });
+  expect(res.stderr).toBe('');
   expect(res.status).toBe(0);
-  expect(listTree(out)).toEqual(['_headers', 'oauth/loopback-client.json']);
+  expect(listTree(out)).toEqual(['oauth/loopback-client.json']);
+  expect(res.stdout).toContain(`wrote ${join(out, 'oauth', 'loopback-client.json')}`);
+  expect(res.stdout).not.toContain('_headers');
   const hint = JSON.parse(readFileSync(join(out, 'oauth', 'loopback-client.json'), 'utf8'));
   const scope = `atproto repo:${FIXTURE_PREFIX}.scrobble repo:${FIXTURE_PREFIX}.follow repo:${FIXTURE_PREFIX}.settings`;
   expect(hint).toStrictEqual({
@@ -209,6 +219,82 @@ test('local env writes only the loopback client-id hint and removes stale metada
   const bad = genConfig(['--env', 'local', '--out', tempDir('public')], { PUBLIC_ORIGIN: 'http://192.168.1.5:8787' });
   expect(bad.status).toBe(1);
   expect(bad.stderr).toContain('PUBLIC_ORIGIN for local must be http://127.0.0.1');
+});
+
+test('refuses a deployed env whose resolved routes are missing or off the PUBLIC_ORIGIN host', () => {
+  type Config = Record<string, unknown> & { env: Record<string, Record<string, unknown>> };
+  const base = parseJsonc(readFileSync(EXAMPLE_CONFIG, 'utf8')) as Config;
+  const run = (env: string, mutate: (config: Config) => void): CliResult & { out: string[] } => {
+    const config = structuredClone(base);
+    mutate(config);
+    const path = join(tempDir('wrangler'), 'wrangler.json');
+    writeFileSync(path, JSON.stringify(config));
+    const out = tempDir('public');
+    const res = genConfig(['--env', env, '--wrangler', path, '--out', out]);
+    return { ...res, out: listTree(out) };
+  };
+  const refused = (res: CliResult & { out: string[] }, message: string) => {
+    expect(res.status, message).toBe(1);
+    expect(res.stderr).toContain(`gen-config: refused: ${message}`);
+    expect(res.stdout).not.toContain('wrote');
+    expect(res.out).toEqual([]);
+  };
+
+  // Staging without its own routes inherits the production custom domain
+  // (wrangler deploys atmusic-staging there), so it is refused.
+  refused(
+    run('staging', (c) => {
+      delete c.env.staging!.routes;
+    }),
+    'route music.example.org is not on PUBLIC_ORIGIN host music-staging.example.org',
+  );
+  // A top-level singular `route` deploys like `routes`.
+  refused(
+    run('production', (c) => {
+      c.route = 'evil.example.net/*';
+    }),
+    'route evil.example.net is not on PUBLIC_ORIGIN host music.example.org',
+  );
+  refused(
+    run('production', (c) => {
+      delete c.routes;
+      c.route = { pattern: 'evil.example.net/*', zone_name: 'example.net' };
+    }),
+    'route evil.example.net is not on PUBLIC_ORIGIN host music.example.org',
+  );
+  // ...and is inherited by a named env next to its own `routes`.
+  refused(
+    run('staging', (c) => {
+      c.route = 'evil.example.net/*';
+    }),
+    'route evil.example.net is not on PUBLIC_ORIGIN host music-staging.example.org',
+  );
+  // No route at all, at the top level or in a named env with nothing to inherit.
+  refused(
+    run('production', (c) => {
+      delete c.routes;
+    }),
+    'no route: a deployed env must route its custom domain, the PUBLIC_ORIGIN host',
+  );
+  refused(
+    run('staging', (c) => {
+      delete c.routes;
+      c.env.staging!.routes = [];
+    }),
+    'no route: a deployed env must route its custom domain, the PUBLIC_ORIGIN host',
+  );
+
+  // Routes on the PUBLIC_ORIGIN host pass, in either spelling.
+  const singular = run('production', (c) => {
+    delete c.routes;
+    c.route = 'music.example.org/*';
+  });
+  expect(singular.stderr).toBe('');
+  expect(singular.status).toBe(0);
+  expect(singular.out).toEqual(['_headers', 'oauth/client-metadata.json']);
+  const own = run('staging', () => {});
+  expect(own.status).toBe(0);
+  expect(own.out).toEqual(['_headers', 'oauth/client-metadata.json']);
 });
 
 test('prefix rule and fixture prefix match worker/src/config.ts', async () => {
@@ -284,6 +370,7 @@ test("_headers contains require-trusted-types-for and frame-ancestors 'none'", a
   const text = readFileSync(join(out, '_headers'), 'utf8');
   expect(text).toContain("require-trusted-types-for 'script'");
   expect(text).toContain("frame-ancestors 'none'");
+  expect(text).toContain(`  Content-Security-Policy: ${ADR_CSP}\n`);
 
   const worker = await serveGenerated(out);
   try {
@@ -291,13 +378,18 @@ test("_headers contains require-trusted-types-for and frame-ancestors 'none'", a
       const res = await worker.fetch(path, { redirect: 'manual' });
       expect(res.status, path).toBe(200);
       const csp = res.headers.get('content-security-policy');
-      expect(csp, path).toBe(CSP);
+      expect(csp, path).toBe(ADR_CSP);
       const directives = (csp ?? '').split(';').map((d) => d.trim());
-      expect(directives).toContain("require-trusted-types-for 'script'");
-      expect(directives).toContain("frame-ancestors 'none'");
-      expect(directives).toContain("script-src 'self'");
-      expect(directives).toContain("object-src 'none'");
-      expect(directives).toContain("base-uri 'none'");
+      expect(directives).toEqual([
+        "default-src 'self'",
+        "script-src 'self'",
+        "connect-src 'self' https:",
+        "img-src 'self' data:",
+        "object-src 'none'",
+        "base-uri 'none'",
+        "frame-ancestors 'none'",
+        "require-trusted-types-for 'script'",
+      ]);
       expect(res.headers.get('referrer-policy'), path).toBe('no-referrer');
       expect(res.headers.get('x-content-type-options'), path).toBe('nosniff');
       await res.arrayBuffer();

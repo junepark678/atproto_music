@@ -17,15 +17,17 @@
 //   client_id document) and _headers (CSP, security and cache headers that
 //   Workers Static Assets apply to asset responses);
 // - local: oauth/loopback-client.json, a hint naming the loopback client_id
-//   (http://localhost?redirect_uri=…&scope=…) for the SPA, plus the same
-//   _headers. No client metadata is written for local, and a stale generated
-//   oauth/client-metadata.json in --out is removed.
+//   (http://localhost?redirect_uri=…&scope=…) for the SPA, and nothing else:
+//   stale generated oauth/client-metadata.json and _headers in --out are
+//   removed (the deployed CSP's connect-src 'self' https: would block the
+//   http:// loopback PDS/PLC of a local sign-in).
 //
 // Refusals (nothing is written): a deployed env with an empty, invalid or
 // fixture LEXICON_PREFIX (com.example.atmusic is fixture-only and must never
 // be published), a non-https or non-origin PUBLIC_ORIGIN, values that differ
-// from the wrangler config, a route on another host, or a local origin that
-// is not http loopback.
+// from the wrangler config, a deployed env with no route or with a route
+// (`route` or `routes`, own or inherited from the top level, as wrangler
+// resolves them) on another host, or a local origin that is not http loopback.
 
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -226,6 +228,41 @@ export interface WranglerEnvSection {
   assetsDirectory: string | null;
 }
 
+/** The host of a route `pattern` (`host/path*`, optionally with a scheme). */
+function routePatternHost(pattern: string): string {
+  return pattern.replace(/^https?:\/\//, '').split('/')[0] ?? '';
+}
+
+/** The host of one `route`/`routes` entry: a pattern string or `{ pattern, ... }`. */
+function routeEntryHost(entry: unknown): string {
+  const pattern = typeof entry === 'string' ? entry : isRecord(entry) ? entry.pattern : undefined;
+  // An entry wrangler would not accept still names no allowed host, so it is
+  // reported (as itself) instead of being skipped.
+  return typeof pattern === 'string' ? routePatternHost(pattern) : `<invalid route ${JSON.stringify(entry)}>`;
+}
+
+/**
+ * The hosts every route of the env resolves to, as wrangler resolves them:
+ * `route` and `routes` are both inheritable, so a named env that does not set
+ * one of them (to anything, including `[]`) takes the top-level value, and the
+ * singular `route` deploys like a one-entry `routes`.
+ */
+function resolvedRouteHosts(
+  config: Record<string, unknown>,
+  section: Record<string, unknown>,
+  named: boolean,
+): string[] {
+  const pick = (key: 'route' | 'routes'): unknown =>
+    section[key] !== undefined || !named ? section[key] : config[key];
+  const hosts: string[] = [];
+  const route = pick('route');
+  if (route !== undefined) hosts.push(routeEntryHost(route));
+  const routes = pick('routes');
+  if (Array.isArray(routes)) for (const entry of routes) hosts.push(routeEntryHost(entry));
+  else if (routes !== undefined) hosts.push(routeEntryHost(routes));
+  return hosts;
+}
+
 /** The production (top-level) or named env section of a wrangler config. */
 export function wranglerEnvSection(config: unknown, env: Exclude<EnvName, 'local'>): WranglerEnvSection {
   if (!isRecord(config)) throw new GenConfigError(['wrangler config is not an object']);
@@ -241,13 +278,7 @@ export function wranglerEnvSection(config: unknown, env: Exclude<EnvName, 'local
   if (isRecord(section.vars)) {
     for (const [k, v] of Object.entries(section.vars)) if (typeof v === 'string') vars[k] = v;
   }
-  const routeHosts: string[] = [];
-  if (Array.isArray(section.routes)) {
-    for (const route of section.routes) {
-      const pattern = typeof route === 'string' ? route : isRecord(route) ? route.pattern : undefined;
-      if (typeof pattern === 'string') routeHosts.push(pattern.replace(/^https?:\/\//, '').split('/')[0] ?? '');
-    }
-  }
+  const routeHosts = resolvedRouteHosts(config, section, wranglerEnv !== null);
   // `main` and `assets` are inheritable; a named env may override them.
   const main = typeof section.main === 'string' ? section.main : typeof config.main === 'string' ? config.main : null;
   const assets = isRecord(section.assets) ? section.assets : isRecord(config.assets) ? config.assets : null;
@@ -267,6 +298,9 @@ export function deployedValueIssues(origin: string, prefix: string, routeHosts: 
     issues.push(`LEXICON_PREFIX ${FIXTURE_PREFIX} is fixture-only and must never be published`);
   } else if (!isValidPrefix(prefix)) {
     issues.push('LEXICON_PREFIX must be a lowercase reverse-domain NSID prefix');
+  }
+  if (routeHosts.length === 0) {
+    issues.push('no route: a deployed env must route its custom domain, the PUBLIC_ORIGIN host');
   }
   if (isHttpsOrigin(origin)) {
     const host = new URL(origin).host;
@@ -329,11 +363,11 @@ export function planGenConfig(input: GenConfigInput): GenConfigPlan {
       env,
       origin,
       prefix,
-      write: [
-        { path: LOOPBACK_HINT_FILE, content: json(buildLoopbackHint(origin, prefix)) },
-        { path: HEADERS_FILE, content: buildHeaders() },
-      ],
-      remove: [METADATA_FILE],
+      write: [{ path: LOOPBACK_HINT_FILE, content: json(buildLoopbackHint(origin, prefix)) }],
+      // The deployed _headers would be applied by wrangler dev's Static Assets
+      // too, and its connect-src 'self' https: blocks the http:// loopback
+      // PDS/PLC a local sign-in talks to; a stale copy is therefore removed.
+      remove: [METADATA_FILE, HEADERS_FILE],
     };
   }
 
