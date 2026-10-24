@@ -532,18 +532,39 @@ test('GET /u/<did> and /feed serve index.html 200 and POST /feed never returns S
   const indexHtml = await index.text();
   expect(indexHtml).toContain('<div id="app"></div>');
 
-  for (const path of [`/u/${bob.did}`, '/feed']) {
-    const res = await request.get(path, { headers: { 'sec-fetch-mode': 'navigate', accept: 'text/html' } });
+  const navigate = { 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document', accept: 'text/html' };
+  // Redirects are never followed here: each status is what the platform sends.
+  // The canonical (per-segment percent-encoded) deep links are served directly.
+  const canonicalProfile = `/u/${enc(bob.did)}`;
+  for (const path of [canonicalProfile, '/feed']) {
+    const res = await request.get(path, { headers: navigate, maxRedirects: 0 });
     expect(res.status(), path).toBe(200);
     expect(res.headers()['content-type'], path).toContain('text/html');
     expect(res.headers()['x-request-id'], path).toBeUndefined();
     expect(await res.text(), path).toBe(indexHtml);
   }
+  // Workers Static Assets canonicalises a path whose segments are not in
+  // encodeURIComponent form (the `:` of a raw DID) with a 307 to that form,
+  // before the Worker runs; the query string is kept. This differs from the
+  // Rust oracle's direct 200 (crates/server/tests/assets.rs spa_deep_link) and
+  // is recorded as a platform amendment to M6.1.1/spa_deep_link and
+  // M7.1.3/route_deep_links.
+  for (const search of ['', '?tab=history']) {
+    const raw = await request.get(`/u/${bob.did}${search}`, { headers: navigate, maxRedirects: 0 });
+    expect(raw.status(), `raw DID${search}`).toBe(307);
+    expect(raw.headers().location, `raw DID${search}`).toBe(`${canonicalProfile}${search}`);
+    expect(raw.headers()['x-request-id'], `raw DID${search}`).toBeUndefined();
+    expect(isSpaHtml(await raw.text()), `raw DID${search}`).toBe(false);
+  }
 
-  // The deep links render their screens in the browser.
-  await page.goto(`/u/${bob.did}`);
-  await expect(heading(page)).toHaveText(`@${bob.handle}`);
-  await expect(page.locator('.profile-did code')).toHaveText(bob.did);
+  // The deep links render their screens in the browser, the raw form after the
+  // one canonicalising redirect.
+  for (const path of [canonicalProfile, `/u/${bob.did}`]) {
+    await page.goto(path);
+    expect(new URL(page.url()).pathname, path).toBe(canonicalProfile);
+    await expect(heading(page)).toHaveText(`@${bob.handle}`);
+    await expect(page.locator('.profile-did code')).toHaveText(bob.did);
+  }
   await page.goto('/feed');
   await expect(heading(page)).toHaveText('Feed');
   await expect(page.getByRole('tab', { name: 'Global' })).toHaveAttribute('aria-selected', 'true');
