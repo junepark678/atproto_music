@@ -50,7 +50,7 @@ import { createSecureContext, TLSSocket } from 'node:tls';
 import { fileURLToPath } from 'node:url';
 import { buildScrobbleRecord } from '@atmusic/core/scrobble';
 import type { TestPds } from '@atproto/dev-env';
-import type { Page } from '@playwright/test';
+import type { Locator, Page } from '@playwright/test';
 
 /** The e2e lexicon prefix (see the header comment). Never the fixture or the production prefix. */
 export const E2E_PREFIX = 'test.atmusic.e2e';
@@ -451,6 +451,16 @@ export async function pdsListRecords(
     .records;
 }
 
+/** Presses Tab until `target` has focus (it may already have it, e.g. autofocus); at most `max` presses. */
+async function tabUntilFocused(page: Page, target: Locator, label: string, max = 40): Promise<void> {
+  const focused = () => target.evaluate((el) => el.matches(':focus'));
+  for (let i = 0; i <= max; i++) {
+    if (await focused()) return;
+    if (i < max) await page.keyboard.press('Tab');
+  }
+  throw new Error(`${label}: not reached with ${max} Tab presses`);
+}
+
 /**
  * The dev-env PDS's own authorization pages (@atproto/oauth-provider UI),
  * after the SPA redirected there: the password, then consent. `keyboard`
@@ -467,12 +477,14 @@ export async function authorizeOnDevPds(
   const password = page.getByLabel('Password', { exact: true });
   await password.waitFor();
   if (options.keyboard === true) {
-    await password.focus();
+    // A real Tab loop (no programmatic focus): the provider's own pages must
+    // be operable from the keyboard as a user meets them.
+    await tabUntilFocused(page, password, 'PDS password field');
     await page.keyboard.type(acct.password);
     await page.keyboard.press('Enter');
     const authorize = page.getByRole('button', { name: 'Authorize' });
     await authorize.waitFor();
-    await authorize.focus();
+    await tabUntilFocused(page, authorize, 'PDS Authorize button');
     await page.keyboard.press('Enter');
   } else {
     await password.fill(acct.password);

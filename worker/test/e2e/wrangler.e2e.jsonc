@@ -4,9 +4,10 @@
 // and passes E2E_NETWORK (the dev-env hosts) with --var.
 //
 // It is the production Worker (`assets` exactly as worker/wrangler.jsonc:
-// single-page-application fallback, Worker-first only for /api/*, /health/*
-// and /internal/*) with INDEX bound to E2eIndexDO (entry.ts). The assets are
-// the SPA built for this stack into work/e2e/dist (gitignored).
+// not_found_handling "none", so every miss reaches the Worker's ADR §15 Q9
+// asset-miss handling, and Worker-first only for /api/*, /health/* and
+// /internal/*) with INDEX bound to E2eIndexDO (entry.ts). The assets are the
+// SPA built for this stack into work/e2e/dist (gitignored).
 //
 // LEXICON_PREFIX is the e2e prefix of scripts/e2e/dev-env.ts (authority
 // e2e.atmusic.test under the reserved .test TLD, never publishable), with a
@@ -22,7 +23,7 @@
   "assets": {
     "directory": "../../../work/e2e/dist",
     "binding": "ASSETS",
-    "not_found_handling": "single-page-application",
+    "not_found_handling": "none",
     "run_worker_first": ["/api/*", "/health/*", "/internal/*"]
   },
   "durable_objects": {

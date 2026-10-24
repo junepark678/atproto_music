@@ -2,12 +2,15 @@
 // Worker fetch over the real IndexDO (JS RPC, DO SQLite, alarm-driven
 // ingestion of read_models.json from real signed repositories).
 // Proves M1.2.3/packaged_http, M1.4.2/safe_errors (with error.test.ts),
-// M6.1.1/asset_missing_traversal (Worker side), M6.1.2/untrusted_forwarded and
+// M6.1.1/asset_missing_traversal and spa_deep_link (Worker side, ADR 0004
+// §15 Q9 asset-miss routing), M6.1.2/untrusted_forwarded and
 // M6.2.1/bounded_state (client-IP keying).
 
 import { beforeEach, describe, expect, it } from 'vitest';
+import type { Env } from '../../src/env';
 import {
   ALICE,
+  type AssetCall,
   BOB,
   CAROL,
   constructed,
@@ -25,6 +28,82 @@ import {
 
 const rkeysOf = (body: unknown) =>
   (body as { items: Array<{ uri: string }> }).items.map((s) => s.uri.slice(s.uri.lastIndexOf('/') + 1));
+
+const INDEX_HTML =
+  '<!doctype html>\n<html lang="en"><head><title>atmusic</title></head><body><div id="app"></div></body></html>\n';
+const APP_JS = '"use strict";\n';
+
+/**
+ * A Static Assets stand-in with `not_found_handling: "none"`: the files it
+ * holds are 200 (GET with body, HEAD without), anything else a bare 404, as
+ * the platform's ASSETS binding answers. `/` is index.html unless `index`
+ * says otherwise (missing, or a redirect, to prove neither is passed on).
+ */
+function staticAssets(index: 'ok' | 'missing' | 'redirect' = 'ok'): Fetcher & { calls: AssetCall[] } {
+  const calls: AssetCall[] = [];
+  const files = new Map<string, { body: string; headers: Record<string, string> }>([
+    [
+      '/assets/app-3f9a1c2e.js',
+      {
+        body: APP_JS,
+        headers: { 'content-type': 'text/javascript', 'cache-control': 'public, max-age=31536000, immutable' },
+      },
+    ],
+  ]);
+  if (index === 'ok')
+    files.set('/', {
+      body: INDEX_HTML,
+      headers: { 'content-type': 'text/html', 'cache-control': 'no-cache', etag: '"idx-1"' },
+    });
+  return {
+    calls,
+    async fetch(input: RequestInfo | URL, init?: RequestInit) {
+      const req = new Request(input as RequestInfo, init);
+      calls.push({ url: req.url, method: req.method, headers: Object.fromEntries(req.headers) });
+      const { pathname } = new URL(req.url);
+      if (index === 'redirect' && pathname === '/') {
+        return new Response(null, { status: 307, headers: { location: '/index.html' } });
+      }
+      const file = files.get(pathname);
+      if (file === undefined || (req.method !== 'GET' && req.method !== 'HEAD'))
+        return new Response(null, { status: 404 });
+      return new Response(req.method === 'HEAD' ? null : file.body, { status: 200, headers: file.headers });
+    },
+    connect() {
+      throw new Error('not used');
+    },
+  } as unknown as Fetcher & { calls: AssetCall[] };
+}
+
+/** The production Worker over `assets`; returns the response and the ASSETS calls it made. */
+async function viaAssets(
+  h: ReturnType<typeof harness>,
+  assets: ReturnType<typeof staticAssets>,
+  path: string,
+  init: RequestInit & { ip?: string } = {},
+) {
+  const { ip, ...rest } = init;
+  const headers = new Headers(rest.headers);
+  if (ip !== undefined) headers.set('cf-connecting-ip', ip);
+  const before = assets.calls.length;
+  const res = await h.worker.fetch(
+    new Request(`https://music.example.test${path}`, { ...rest, headers }),
+    { ...h.env, ASSETS: assets } as Env,
+    {} as ExecutionContext,
+  );
+  const text = await res.text();
+  let body: unknown = null;
+  if ((res.headers.get('content-type') ?? '').includes('json')) body = JSON.parse(text);
+  const calls = assets.calls.slice(before);
+  return {
+    status: res.status,
+    headers: res.headers,
+    text,
+    body,
+    calls,
+    seen: calls.map((c) => `${c.method} ${new URL(c.url).pathname}`),
+  };
+}
 
 function expectEnvelope(r: { status: number; headers: Headers; body: unknown }, status: number, code: string) {
   expect(r.status).toBe(status);
@@ -249,5 +328,159 @@ describe('worker/src/router.ts', () => {
     expect(again.status).toBe(200);
     expect(schema('ScrobblePage', again.body)).toBe('valid');
     expect(again.headers.get('x-request-id')).not.toBe(failed.headers.get('x-request-id'));
+  });
+
+  it('asset miss: SPA route GET/HEAD serves index.html 200, every other miss is JSON not_found with x-request-id', async () => {
+    const h = harness('asset-miss');
+    const assets = staticAssets();
+    const PLC = 'did:plc:aaaaaaaaaaaaaaaaaaaaaaaa';
+    const WEB = 'did:web:music.example.test';
+
+    // An existing file is Static Assets' answer, passed on unchanged (one ASSETS call).
+    const js = await viaAssets(h, assets, '/assets/app-3f9a1c2e.js');
+    expect([js.status, js.text, js.headers.get('cache-control')]).toEqual([
+      200,
+      APP_JS,
+      'public, max-age=31536000, immutable',
+    ]);
+    expect(js.seen).toEqual(['GET /assets/app-3f9a1c2e.js']);
+    const root = await viaAssets(h, assets, '/');
+    expect([root.status, root.text, root.seen]).toEqual([200, INDEX_HTML, ['GET /']]);
+
+    // Every SPA route of the shared table, raw and percent-encoded DIDs alike:
+    // the miss, then index.html fetched from ASSETS at `/` with the same method.
+    const spaPaths = [
+      ['/feed', '/feed'],
+      ['/feed/', '/feed/'],
+      ['/signin', '/signin'],
+      ['/scrobble', '/scrobble'],
+      ['/settings', '/settings'],
+      ['/oauth/callback?code=cod-x&state=st-x&iss=https%3A%2F%2Fpds.example.test', '/oauth/callback'],
+      [`/u/${PLC}`, `/u/${PLC}`],
+      [`/u/${PLC}?tab=history`, `/u/${PLC}`],
+      [`/u/${encodeURIComponent(PLC)}`, `/u/${encodeURIComponent(PLC)}`],
+      [`/u/${WEB}`, `/u/${WEB}`],
+      [`/u/${encodeURIComponent(WEB)}`, `/u/${encodeURIComponent(WEB)}`],
+    ] as const;
+    for (const [path, pathname] of spaPaths) {
+      for (const method of ['GET', 'HEAD'] as const) {
+        const r = await viaAssets(h, assets, path, { method, headers: { accept: 'text/html' } });
+        const label = `${method} ${path}`;
+        expect([label, r.status], label).toEqual([label, 200]);
+        expect(r.headers.get('content-type'), label).toBe('text/html');
+        expect(r.headers.get('cache-control'), label).toBe('no-cache');
+        expect(r.headers.get('location'), label).toBeNull();
+        expect(r.headers.get('x-request-id'), label).toMatch(UUID);
+        expect(r.text, label).toBe(method === 'GET' ? INDEX_HTML : '');
+        expect(r.seen, label).toEqual([`${method} ${pathname}`, `${method} /`]);
+        expect(r.calls[1]?.headers.accept, label).toBe('text/html');
+      }
+    }
+
+    // Every other miss: the JSON envelope, and index.html is never fetched.
+    const misses = [
+      '/assets/missing.js',
+      '/assets/app-3f9a1c2e.js.map',
+      '/unknown',
+      '/unknown/api',
+      '/oauth/missing',
+      '/oauth',
+      '/secret.txt',
+      '/index.htm',
+      '/metrics',
+      '/.well-known/atproto-did',
+      '/u',
+      '/u/',
+      `/u/${PLC}/extra`,
+      '/feed/extra',
+      '/settingsx',
+    ];
+    for (const path of misses) {
+      for (const method of ['GET', 'HEAD'] as const) {
+        const r = await viaAssets(h, assets, path, { method });
+        const label = `${method} ${path}`;
+        if (method === 'GET') {
+          expectEnvelope(r, 404, 'not_found');
+        } else {
+          expect([label, r.status, r.headers.get('content-type')]).toEqual([label, 404, 'application/json']);
+          expect(r.headers.get('x-request-id'), label).toMatch(UUID);
+        }
+        expect(r.text.includes('<div id="app">'), label).toBe(false);
+        expect(r.seen, label).toEqual([`${method} ${new URL(path, 'https://x.test').pathname}`]);
+      }
+    }
+
+    // Traversal and encoding tricks (the oracle's asset_missing_traversal inputs
+    // and safe_path rules): the envelope, and index.html is never fetched. The
+    // ones the oracle's safe_path rejects never reach ASSETS at all.
+    const rejected = [
+      '/assets%2f..%2fsecret',
+      '/assets/%252e%252e/secret',
+      '/u/did%3Aplc%3Aa%2Fb',
+      `/u/${encodeURIComponent(PLC)}%5C`,
+      '/u/%00',
+      '/u/%ff',
+      '/u/%zz',
+      '/feed%',
+      '/feed%2',
+    ];
+    // The URL parser itself resolves `%2e%2e` segments and turns `\` into `/`
+    // before the Worker sees the path; those land on non-SPA paths here.
+    for (const path of [...rejected, '/%2e%2e/secret', '/assets/%2E%2E/secret', '/u/%2e%2e/secret', '/u/a\\b']) {
+      const r = await viaAssets(h, assets, path);
+      expectEnvelope(r, 404, 'not_found');
+      expect([path, r.seen.includes('GET /')]).toEqual([path, false]);
+      if ((rejected as readonly string[]).includes(path)) expect([path, r.seen]).toEqual([path, []]);
+    }
+
+    // A non-GET/HEAD to an SPA path: the envelope, never 405 and never index.html.
+    for (const [method, path] of [
+      ['POST', '/feed'],
+      ['POST', `/u/${PLC}`],
+      ['POST', `/u/${encodeURIComponent(PLC)}`],
+      ['PUT', '/oauth/callback'],
+      ['DELETE', '/settings'],
+      ['PATCH', '/'],
+      ['OPTIONS', '/feed'],
+      ['POST', '/assets/app-3f9a1c2e.js'],
+    ] as const) {
+      const r = await viaAssets(h, assets, path, {
+        method,
+        ...(method === 'OPTIONS' ? {} : { body: '{"x":1}', headers: { 'content-type': 'application/json' } }),
+      });
+      expectEnvelope(r, 404, 'not_found');
+      expect(r.headers.get('allow'), `${method} ${path}`).toBeNull();
+      expect([method, path, r.seen]).toEqual([method, path, []]);
+    }
+
+    // Spoofed internal headers never reach ASSETS on either fetch; others pass through.
+    const spoofed = await viaAssets(h, assets, `/u/${PLC}`, {
+      ip: '203.0.113.9',
+      headers: { 'x-atmusic-client-ip': '10.0.0.1', 'X-Atmusic-Admin': 'yes', accept: 'text/html' },
+    });
+    expect(spoofed.status).toBe(200);
+    expect(spoofed.calls).toHaveLength(2);
+    for (const call of spoofed.calls) {
+      expect(Object.keys(call.headers).filter((k) => k.startsWith('x-atmusic-'))).toEqual([]);
+      expect(call.headers['cf-connecting-ip']).toBe('203.0.113.9');
+    }
+
+    // index.html missing or answered with a redirect: the envelope, never a 3xx.
+    for (const mode of ['missing', 'redirect'] as const) {
+      const broken = staticAssets(mode);
+      const r = await viaAssets(h, broken, '/feed');
+      expectEnvelope(r, 404, 'not_found');
+      expect(r.headers.get('location')).toBeNull();
+      expect([mode, r.seen]).toEqual([mode, ['GET /feed', 'GET /']]);
+    }
+
+    // The Worker-first prefixes are unchanged: the envelope, ASSETS untouched.
+    for (const path of ['/api/x', '/health/x', '/internal/x']) {
+      const r = await viaAssets(h, assets, path);
+      expectEnvelope(r, 404, 'not_found');
+      expect([path, r.seen]).toEqual([path, []]);
+    }
+    // Asset misses never create or touch the IndexDO.
+    expect(constructed(h.stub)).toBe(0);
   });
 });

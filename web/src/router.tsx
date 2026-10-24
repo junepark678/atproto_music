@@ -1,6 +1,7 @@
-// SPA route table (preact-iso). The Worker serves index.html for every
-// navigation that is not /api/*, /health/* or /internal/* (ADR 0004 §4.2), so
-// these paths are deep-linkable.
+// SPA route table (preact-iso). On a Static Assets miss the Worker serves
+// index.html (200, no redirect) for a GET or HEAD of exactly these paths and
+// the JSON not_found envelope for anything else (ADR 0004 §15 Q9), so these
+// paths are deep-linkable.
 //
 // Route screens are owned by later packages and load lazily:
 //   web/src/routes/feed.tsx, signin.tsx, profile.tsx, scrobble.tsx,
@@ -9,40 +10,23 @@
 // `import.meta.glob`, so adding a screen file needs no edit here; until a file
 // exists, its route renders a labelled placeholder.
 
+import {
+  SPA_ROUTES as ROUTES,
+  type SpaRoute as RouteEntry,
+  type SpaRouteModule as RouteModule,
+} from '@atmusic/core/spa-routes';
 import { type AnyComponent, Component, type ComponentChildren } from 'preact';
 import { lazy, Route, Router, useLocation } from 'preact-iso';
 
-export type RouteModule = 'feed' | 'signin' | 'callback' | 'profile' | 'scrobble' | 'settings';
-
-export interface RouteEntry {
-  path: string;
-  module: RouteModule;
-  /** Human title used by the placeholder and the document title. */
-  title: string;
-}
-
-/** Every SPA route. `/` is the global feed. */
-export const ROUTES: readonly RouteEntry[] = [
-  { path: '/', module: 'feed', title: 'Feed' },
-  { path: '/feed', module: 'feed', title: 'Feed' },
-  { path: '/signin', module: 'signin', title: 'Sign in' },
-  { path: '/oauth/callback', module: 'callback', title: 'Signing in' },
-  { path: '/u/:did', module: 'profile', title: 'Profile' },
-  { path: '/scrobble', module: 'scrobble', title: 'Add a scrobble' },
-  { path: '/settings', module: 'settings', title: 'Settings' },
-];
-
-/** The route entry a path renders (same segment rules as the preact-iso Router), if any. */
-export function matchRoute(path: string): RouteEntry | undefined {
-  const segments = path.split('/').filter(Boolean);
-  return ROUTES.find((entry) => {
-    const pattern = entry.path.split('/').filter(Boolean);
-    return (
-      pattern.length === segments.length &&
-      pattern.every((part, i) => (part.startsWith(':') ? segments[i] !== '' : part === segments[i]))
-    );
-  });
-}
+// The route table itself lives in @atmusic/core/spa-routes, so the Worker's
+// asset-miss handling (worker/src/router.ts, ADR 0004 §15 Q9) serves
+// index.html for exactly these paths without importing preact.
+export {
+  matchSpaRoute as matchRoute,
+  SPA_ROUTES as ROUTES,
+  type SpaRoute as RouteEntry,
+  type SpaRouteModule as RouteModule,
+} from '@atmusic/core/spa-routes';
 
 type ScreenModule = { default: AnyComponent<Record<string, unknown>> };
 

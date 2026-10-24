@@ -158,13 +158,27 @@ test('no serious/critical axe violations on all routes', async ({ page, request 
     ['/u/not-a-did', 'Profile not found'],
     ['/scrobble', 'Add a scrobble'],
     ['/settings', 'Settings'],
-    ['/no-such-page', 'Page not found'],
   ];
   for (const [path, title] of anonymous) {
     await page.goto(path);
     await settled(page, title);
     await expectAccessible(page, `anonymous ${path}`);
   }
+  // An unknown path is not an SPA route (a direct load is the Worker's JSON
+  // 404, ADR 0004 §15 Q9); the router's not-found screen is reached in-app.
+  await page.goto('/feed');
+  await settled(page, 'Feed');
+  await page.evaluate(() => {
+    const link = document.createElement('a');
+    link.href = '/no-such-page';
+    link.textContent = 'client-side navigation';
+    document.getElementById('main')?.append(link);
+    link.click();
+    link.remove();
+  });
+  await page.waitForURL((u) => u.pathname === '/no-such-page');
+  await settled(page, 'Page not found');
+  await expectAccessible(page, 'anonymous /no-such-page (client-side)');
   await page.goto('/feed');
   await page.getByRole('tab', { name: 'Following' }).click();
   await expect(page.locator('#feed-panel [data-state="signin-required"]')).toBeVisible();

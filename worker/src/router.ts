@@ -24,8 +24,21 @@
 //   request, and `x-atmusic-client-ip` is set from `CF-Connecting-IP` (the
 //   address Cloudflare saw, which a client cannot forge); that address is also
 //   RequestCtx.clientIp, the notify per-IP bucket key (ADR §8);
-// - paths outside the Worker-first prefixes go to ASSETS (the SPA), without
-//   any `x-atmusic-*` header;
+// - paths outside the Worker-first prefixes reach the Worker only on a Static
+//   Assets miss (wrangler.jsonc `not_found_handling: "none"`). They are
+//   answered by `assetMiss` (ADR 0004 §15 Q9), deciding by path as the Rust
+//   oracle's asset fallback does (crates/server/src/http/assets.rs):
+//   - a method other than GET/HEAD, or a path that fails the oracle's
+//     `safe_path` (an encoded `/`, `\` or `%`, a control character, a `.` or
+//     `..` segment, invalid UTF-8): the JSON not_found envelope, ASSETS
+//     untouched;
+//   - otherwise the request goes to ASSETS without any `x-atmusic-*` header;
+//     any answer but 404 is returned as is;
+//   - on a 404, a path of the SPA route table (@atmusic/core/spa-routes, the
+//     table web/src/router.tsx renders: `/`, `/feed`, `/oauth/callback`,
+//     `/u/<did>` raw or percent-encoded, ...) gets index.html, fetched from
+//     ASSETS at `/` with the same method, as a 200 with no redirect; every
+//     other miss (`/assets/*`, unknown paths) is the JSON not_found envelope;
 // - every Worker response carries a v4 UUID request id (`x-request-id`) drawn
 //   from the injected Random, the same id every error envelope carries;
 // - `GET /health/live` is answered here, without the IndexDO or the key;
@@ -40,6 +53,7 @@
 
 import { deriveCursorKey } from '@atmusic/core/cursor';
 import { type Clock, cryptoRandom, type Random, systemClock } from '@atmusic/core/deps';
+import { matchSpaRoute } from '@atmusic/core/spa-routes';
 import { LOCATION_HINTS, parseCursorKey } from './config';
 import type { IndexRpc, Logger } from './do/contracts';
 import { envLogger, INDEX_NAME } from './do/index-do';
@@ -269,14 +283,85 @@ function withRequestId(response: Response, requestId: string): Response {
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// Static Assets misses (ADR 0004 §15 Q9)
+
+const HEX = /^[0-9A-Fa-f]{2}$/;
+// fatal: invalid UTF-8 is rejected; ignoreBOM: a BOM is kept, as Rust's from_utf8 keeps it.
+const UTF8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
+
+/**
+ * The oracle's `safe_path` (crates/server/src/http/assets.rs): `rawPath`
+ * percent-decoded once, or null when it encodes `/`, `\` or `%`, holds a
+ * control character or `\`, has a malformed escape, does not decode to UTF-8,
+ * or has a `.` or `..` segment.
+ */
+export function safeAssetPath(rawPath: string): string | null {
+  const bytes: number[] = [];
+  for (let i = 0; i < rawPath.length; ) {
+    let byte: number;
+    if (rawPath[i] === '%') {
+      const hex = rawPath.slice(i + 1, i + 3);
+      if (!HEX.test(hex)) return null;
+      byte = Number.parseInt(hex, 16);
+      if (byte === 0x2f || byte === 0x5c || byte === 0x25) return null;
+      i += 3;
+    } else {
+      byte = rawPath.charCodeAt(i);
+      // A URL pathname is ASCII; anything else did not come from the URL parser.
+      if (byte > 0x7f) return null;
+      i += 1;
+    }
+    if (byte < 0x20 || byte === 0x7f || byte === 0x5c) return null;
+    bytes.push(byte);
+  }
+  let path: string;
+  try {
+    path = UTF8.decode(new Uint8Array(bytes));
+  } catch {
+    return null;
+  }
+  if (path.split('/').some((segment) => segment === '.' || segment === '..')) return null;
+  return path;
+}
+
+/** Whether a Static Assets miss of `method` `rawPath` is answered with index.html. */
+export function servesSpaIndex(method: string, rawPath: string): boolean {
+  if (method !== 'GET' && method !== 'HEAD') return false;
+  const path = safeAssetPath(rawPath);
+  return path !== null && matchSpaRoute(path) !== undefined;
+}
+
+function notFound(deps: WorkerDeps): Response {
+  const requestId = newRequestId(deps.random);
+  return withRequestId(errorResponse('not_found', undefined, requestId), requestId);
+}
+
+/** A request outside the Worker prefixes: what Static Assets did not serve (module comment). */
+async function assetMiss(req: Request, url: URL, env: Env, deps: WorkerDeps): Promise<Response> {
+  if ((req.method !== 'GET' && req.method !== 'HEAD') || safeAssetPath(url.pathname) === null) return notFound(deps);
+  const headers = new Headers(req.headers);
+  headers.delete(CLIENT_IP_HEADER);
+  const asset = await env.ASSETS.fetch(new Request(req, { headers }));
+  if (asset.status !== 404) return asset;
+  await asset.body?.cancel();
+  if (!servesSpaIndex(req.method, url.pathname)) return notFound(deps);
+  const index = await env.ASSETS.fetch(
+    new Request(new URL('/', url), { method: req.method, headers, redirect: 'manual' }),
+  );
+  // Never a redirect: only index.html itself (or its 304 revalidation) is the SPA.
+  if (index.status !== 200 && index.status !== 304) {
+    (deps.log ?? envLogger)(env).log('error', 'assets.index_unavailable', { status: index.status });
+    return notFound(deps);
+  }
+  const requestId = newRequestId(deps.random);
+  return withRequestId(index, requestId);
+}
+
 export async function handleFetch(request: Request, env: Env, deps: WorkerDeps): Promise<Response> {
   const { request: req, clientIp } = sanitizeRequest(request);
   const url = new URL(req.url);
-  if (!isWorkerPath(url.pathname)) {
-    const headers = new Headers(req.headers);
-    headers.delete(CLIENT_IP_HEADER);
-    return env.ASSETS.fetch(new Request(req, { headers }));
-  }
+  if (!isWorkerPath(url.pathname)) return assetMiss(req, url, env, deps);
 
   const requestId = newRequestId(deps.random);
   if (req.method === 'GET' && url.pathname === '/health/live') return withRequestId(await live(), requestId);
