@@ -9,13 +9,19 @@
 //   https://www.unicode.org/Public/16.0.0/ucd/CaseFolding.txt (identical to the
 //   CaseFolding.txt shipped in the `caseless` 0.2.2 crate the Rust oracle uses);
 // - the White_Space lines of PropList-16.0.0.txt, embedded verbatim below
-//   (https://www.unicode.org/Public/16.0.0/ucd/PropList.txt).
+//   (https://www.unicode.org/Public/16.0.0/ucd/PropList.txt);
+// - packages/core/data/DerivedAge-16.0.0.txt, vendored byte-for-byte from
+//   https://www.unicode.org/Public/16.0.0/ucd/DerivedAge.txt.
 //
 // Outputs:
 // - packages/core/src/unicode/casefold-16.0.0.ts: the status C and F mappings,
 //   that is full default (non-Turkic) case folding; S and T rows are dropped;
 // - packages/core/src/unicode/white-space.ts: the White_Space set plus the trim
-//   and collapse helpers built on it.
+//   and collapse helpers built on it;
+// - packages/core/src/unicode/assigned-16.0.0.ts: the code points assigned in
+//   Unicode 16.0.0 (every DerivedAge line, merged). The runtime's NFKC may be a
+//   newer Unicode version; music-key passes it only text assigned in 16.0.0, for
+//   which normalization stability guarantees the Unicode 16.0.0 result.
 //
 // The render functions are pure so packages/core/test/unicode-runtime.test.ts can
 // call them inside workerd and compare the result with the committed files.
@@ -23,6 +29,8 @@
 export const CASE_FOLDING_DATA_PATH = 'packages/core/data/CaseFolding-16.0.0.txt';
 export const CASE_FOLD_OUTPUT_PATH = 'packages/core/src/unicode/casefold-16.0.0.ts';
 export const WHITE_SPACE_OUTPUT_PATH = 'packages/core/src/unicode/white-space.ts';
+export const DERIVED_AGE_DATA_PATH = 'packages/core/data/DerivedAge-16.0.0.txt';
+export const ASSIGNED_OUTPUT_PATH = 'packages/core/src/unicode/assigned-16.0.0.ts';
 
 export const UNICODE_VERSION = '16.0.0';
 
@@ -230,15 +238,136 @@ export function collapseWhiteSpace(s: string): string {
 `;
 }
 
+export interface ParsedDerivedAge {
+  readonly fileName: string;
+  readonly date: string;
+  /** Inclusive [first, last] ranges of every listed line, in file order. */
+  readonly lines: readonly (readonly [number, number])[];
+}
+
+/**
+ * Strict parser for the UCD DerivedAge.txt format. Every section total must equal
+ * the sum of its lines, no age may exceed ${UNICODE_VERSION}, and no code point
+ * may be listed twice.
+ */
+export function parseDerivedAge(text: string): ParsedDerivedAge {
+  const lines = text.split('\n');
+  const fileName = /^# (DerivedAge-\d+\.\d+\.\d+\.txt)$/.exec(lines[0] ?? '')?.[1];
+  const date = /^# Date: (.+)$/.exec(lines[1] ?? '')?.[1];
+  if (fileName !== `DerivedAge-${UNICODE_VERSION}.txt` || date === undefined) {
+    throw new Error(`expected a DerivedAge-${UNICODE_VERSION}.txt header, got ${JSON.stringify(lines[0])}`);
+  }
+  const [major, minor] = UNICODE_VERSION.split('.').map(Number) as [number, number];
+  const out: [number, number][] = [];
+  let sectionAge: string | undefined;
+  let sectionTotal = 0;
+  let sections = 0;
+  lines.forEach((raw, index) => {
+    const line = index + 1;
+    const age = /^# Age=V(\d+)_(\d+)$/.exec(raw);
+    if (age !== null) {
+      if (sectionAge !== undefined) throw new Error(`line ${line}: Age section without a total`);
+      const [a, b] = [Number(age[1]), Number(age[2])];
+      if (a > major || (a === major && b > minor))
+        throw new Error(`line ${line}: age ${a}.${b} is newer than ${UNICODE_VERSION}`);
+      sectionAge = `${a}.${b}`;
+      sectionTotal = 0;
+      return;
+    }
+    const total = /^# Total code points: (\d+)$/.exec(raw);
+    if (total !== null) {
+      if (sectionAge === undefined || Number(total[1]) !== sectionTotal) {
+        throw new Error(`line ${line}: Age ${sectionAge} total ${total[1]} != parsed ${sectionTotal}`);
+      }
+      sectionAge = undefined;
+      sections++;
+      return;
+    }
+    if (raw === '' || raw.startsWith('#')) return;
+    const m = /^([0-9A-F]{4,6})(?:\.\.([0-9A-F]{4,6}))? *; (\d+\.\d+) +# .+$/.exec(raw);
+    if (m === null || sectionAge === undefined || m[3] !== sectionAge) {
+      throw new Error(`line ${line}: malformed or out-of-section ${JSON.stringify(raw)}`);
+    }
+    // Surrogates are listed (Age 2.0); they are code points, not scalar values.
+    const first = Number.parseInt(m[1]!, 16);
+    const last = m[2] === undefined ? first : Number.parseInt(m[2], 16);
+    if (last < first || last > 0x10ffff) throw new Error(`line ${line}: bad range ${raw}`);
+    out.push([first, last]);
+    sectionTotal += last - first + 1;
+  });
+  if (sectionAge !== undefined || sections === 0) throw new Error('DerivedAge: unterminated or missing Age section');
+  return { fileName, date, lines: out };
+}
+
+/** The listed ranges sorted and merged where adjacent; throws on any overlap. */
+export function assignedRanges(parsed: ParsedDerivedAge): [number, number][] {
+  const sorted = [...parsed.lines].sort((x, y) => x[0] - y[0]);
+  const merged: [number, number][] = [];
+  for (const [first, last] of sorted) {
+    const prev = merged.at(-1);
+    if (prev !== undefined && first <= prev[1]) throw new Error(`DerivedAge lists U+${hex(first)} twice`);
+    if (prev !== undefined && first === prev[1] + 1) prev[1] = last;
+    else merged.push([first, last]);
+  }
+  return merged;
+}
+
+export function renderAssigned(derivedAgeText: string): string {
+  const parsed = parseDerivedAge(derivedAgeText);
+  const ranges = assignedRanges(parsed);
+  const count = ranges.reduce((n, [a, b]) => n + b - a + 1, 0);
+  const body = ranges.map(([a, b]) => `  [${lit(a)}, ${lit(b)}],`).join('\n');
+  return `// GENERATED by scripts/gen-unicode.ts from ${DERIVED_AGE_DATA_PATH}. Do not edit.
+// Regenerate with \`npx tsx scripts/gen-unicode.ts\`; \`--check\` verifies it is current.
+//
+// Source: ${parsed.fileName} (Date: ${parsed.date}).
+// The ${count} code points assigned as of Unicode ${UNICODE_VERSION} (graphic, format,
+// control, private-use, noncharacter and surrogate), in ${ranges.length} merged ranges.
+//
+// A code point outside this set is unassigned in Unicode ${UNICODE_VERSION}: it has no
+// decomposition, canonical combining class 0 and takes part in no composition, so
+// in Unicode ${UNICODE_VERSION} NFKC it is left as is and is a normalization boundary.
+// A newer runtime may already assign it (Unicode 17 ICU in workerd maps U+A7F1 to "s"), so
+// music-key never hands such a code point to String.prototype.normalize.
+
+export const ASSIGNED_UNICODE_VERSION = '${UNICODE_VERSION}';
+
+/** Inclusive [first, last] ranges of assigned code points, ascending and disjoint. */
+// biome-ignore format: generated table
+export const ASSIGNED_RANGES: readonly (readonly [number, number])[] = [
+${body}
+];
+
+/** Every code point at or below this one is assigned (fast path for common text). */
+export const ASSIGNED_PREFIX_END = ${lit(ranges[0]![1])};
+
+/** True when the code point is assigned in Unicode ${UNICODE_VERSION}. */
+export function isAssigned(cp: number): boolean {
+  if (cp <= ASSIGNED_PREFIX_END) return cp >= 0;
+  let lo = 1;
+  let hi = ASSIGNED_RANGES.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >>> 1;
+    const [first, last] = ASSIGNED_RANGES[mid]!;
+    if (cp < first) hi = mid - 1;
+    else if (cp > last) lo = mid + 1;
+    else return true;
+  }
+  return false;
+}
+`;
+}
+
 export interface RenderedFile {
   readonly path: string;
   readonly content: string;
 }
 
-export function renderAll(caseFoldingText: string): RenderedFile[] {
+export function renderAll(caseFoldingText: string, derivedAgeText: string): RenderedFile[] {
   return [
     { path: CASE_FOLD_OUTPUT_PATH, content: renderCaseFold(caseFoldingText) },
     { path: WHITE_SPACE_OUTPUT_PATH, content: renderWhiteSpace() },
+    { path: ASSIGNED_OUTPUT_PATH, content: renderAssigned(derivedAgeText) },
   ];
 }
 
@@ -251,9 +380,10 @@ async function main(argv: readonly string[]): Promise<number> {
   }
   const { readFile, writeFile } = await import('node:fs/promises');
   const root = new URL('../', import.meta.url);
-  const data = await readFile(new URL(CASE_FOLDING_DATA_PATH, root), 'utf8');
+  const caseFolding = await readFile(new URL(CASE_FOLDING_DATA_PATH, root), 'utf8');
+  const derivedAge = await readFile(new URL(DERIVED_AGE_DATA_PATH, root), 'utf8');
   const stale: string[] = [];
-  for (const file of renderAll(data)) {
+  for (const file of renderAll(caseFolding, derivedAge)) {
     const target = new URL(file.path, root);
     const current = await readFile(target, 'utf8').catch(() => null);
     if (current === file.content) continue;

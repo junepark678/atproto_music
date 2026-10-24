@@ -2,8 +2,15 @@
 // ADR 0004 §9.1 "Grouping", TESTING.md "Normalize NFKC → full Unicode case-fold
 // → trim → collapse Unicode whitespace").
 //
-// - NFKC comes from the runtime's ICU (`String.prototype.normalize`); the workerd
-//   golden test (test/unicode-runtime.test.ts) catches an ICU drift (ADR §13.5).
+// - NFKC comes from the runtime's ICU (`String.prototype.normalize`), which may be
+//   a newer Unicode version than 16.0.0 (workerd's ICU is Unicode 17). Only runs of
+//   code points assigned in Unicode 16.0.0 (vendored DerivedAge-16.0.0) are handed
+//   to it: by the Unicode normalization stability policy their NFKC is the same in
+//   every version >= 16.0.0. A code point unassigned in 16.0.0 is copied verbatim
+//   and splits the runs, which is exactly how Unicode 16.0.0 NFKC treats it (no
+//   decomposition, combining class 0, no composition). The workerd test
+//   (test/unicode-runtime.test.ts) compares every scalar value in several contexts
+//   with the Rust oracle and catches any remaining ICU drift (ADR §13.5).
 // - Full default case folding uses the vendored CaseFolding-16.0.0 C+F table, the
 //   same data the Rust `caseless` crate applies.
 // - Trim and collapse use the Unicode White_Space set (Rust `split_whitespace`).
@@ -13,13 +20,20 @@
 // hold the normalized component strings; sorting must use `compareCodePoints`.
 // MBIDs are not keys and multi-artist credits are not split.
 
+import { isAssigned } from './unicode/assigned-16.0.0';
 import { CASE_FOLDING_C_F } from './unicode/casefold-16.0.0';
 import { compareCodePoints, compareCodePointTuples, type Ordering } from './unicode/compare';
 import { collapseWhiteSpace, trimWhiteSpace } from './unicode/white-space';
 
 export { compareCodePoints, compareCodePointTuples, type Ordering };
 
-/** Unicode version of the vendored case folding and White_Space data (Rust GROUPING_UNICODE_VERSION). */
+/**
+ * Unicode version of the whole grouping pipeline (Rust GROUPING_UNICODE_VERSION):
+ * vendored case folding, White_Space and assigned-code-point data, and NFKC as
+ * Unicode 16.0.0 defines it. NFKC uses the runtime, so this holds only where
+ * `nfkcRuntimeSupportsGroupingVersion()` is true (workerd: tested; a browser with
+ * an older ICU is not, and must not be trusted to produce storage keys).
+ */
 export const GROUPING_UNICODE_VERSION = '16.0.0';
 
 /** Rust `validate_display_string` message, byte-for-byte. */
@@ -66,6 +80,37 @@ export function caseFold(s: string): string {
 }
 
 /**
+ * True when the runtime's NFKC knows Unicode 16.0.0 additions, which the
+ * assigned-only guard in `nfkc16` relies on: a compatibility mapping (U+1CCD6
+ * OUTLINED LATIN CAPITAL LETTER A -> A) and a canonical composition (Kirat Rai
+ * U+16D63 U+16D67 -> U+16D69), both new in 16.0.0. A necessary check, not a proof;
+ * the exhaustive workerd test is the proof for the worker.
+ */
+export function nfkcRuntimeSupportsGroupingVersion(): boolean {
+  return '\u{1CCD6}'.normalize('NFKC') === 'A' && '\u{16D63}\u{16D67}'.normalize('NFKC') === '\u{16D69}';
+}
+
+/**
+ * Unicode 16.0.0 NFKC on a runtime whose ICU is Unicode 16.0.0 or newer: each
+ * maximal run of code points assigned in 16.0.0 is normalized by the runtime, and
+ * every code point unassigned in 16.0.0 is kept as is between the runs.
+ */
+function nfkc16(s: string): string {
+  let out = '';
+  let runStart = 0;
+  for (let i = 0; i < s.length; ) {
+    const cp = s.codePointAt(i)!;
+    const width = cp > 0xffff ? 2 : 1;
+    if (!isAssigned(cp)) {
+      out += s.slice(runStart, i).normalize('NFKC') + s.slice(i, i + width);
+      runStart = i + width;
+    }
+    i += width;
+  }
+  return runStart === 0 ? s.normalize('NFKC') : out + s.slice(runStart).normalize('NFKC');
+}
+
+/**
  * Rust `music_key::normalize`: NFKC, then full case folding, then White_Space trim
  * and collapse of inner runs to one U+0020. Has no length limit of its own.
  * Throws a RangeError for a string with lone surrogates, which no Rust string can
@@ -73,7 +118,7 @@ export function caseFold(s: string): string {
  */
 export function normalizeMusic(s: string): string {
   if (!s.isWellFormed()) throw new RangeError('music key input contains a lone surrogate');
-  return collapseWhiteSpace(caseFold(s.normalize('NFKC')));
+  return collapseWhiteSpace(caseFold(nfkc16(s)));
 }
 
 function utf8Length(s: string): number {
