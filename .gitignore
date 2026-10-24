@@ -10,3 +10,7 @@
 
 __pycache__/
 /work/
+/.venv/
+/node_modules/
+**/node_modules/
+.wrangler/
