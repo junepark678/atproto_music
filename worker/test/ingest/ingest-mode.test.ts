@@ -254,12 +254,14 @@ it('a pulse that receives no event leaves lagSeconds null and the last successfu
     await running;
     await flush();
     expect(server.last().closed).toBe(true);
+    // A full quiet drain from a 10 min old cursor confirms the link healthy at its connect
+    // instant: the resume point moves to 60 s before it (ADR §15 Q11).
     expect(checkpointRow(i.db)).toMatchObject({
       connected: 0,
       connected_at_ms: T0 + 10 * MINUTE,
       updated_at_ms: T0 + 10 * MINUTE + PULSE_DRAIN_MAX_MS,
       last_event_time_us: null,
-      cursor: r1.seq,
+      cursor: (T0 + 9 * MINUTE) * 1000,
     });
     expect(status(i.db, clock.nowMs())).toEqual({
       state: 'current',
@@ -299,5 +301,76 @@ it('a pulse that receives no event leaves lagSeconds null and the last successfu
       lastIndexedAt: null,
       lagSeconds: null,
     });
+  });
+});
+
+it('quiet pulses longer than lookback do not trigger gap recovery; a quiet pulse after an outage confirms nothing; a real disconnect gap still does', async () => {
+  const clock = fixedClock();
+  // The fake keeps exactly our 24 h lookback: an aged cursor is refused upstream too.
+  const server = jetstreamServer({ clock, lookbackHours: 24 });
+  await runInDurableObject(stubFor('mode-pulse-quiet-lookback'), async (i: HarnessDO, state) => {
+    const m = ingestDeps(i.db, clock, { mode: 'pulse' });
+    const timer = manualTimer();
+    const gapCalls: number[] = [];
+    const d: IngestDeps = {
+      connectJetstream: server.connect,
+      pulseTimer: timer,
+      scheduleGapRecovery: (_db, now) => {
+        gapCalls.push(now);
+      },
+    };
+    /** One alarm whose pulse drains its full 20 s. */
+    const quietPulse = async (at: number) => {
+      clock.set(new Date(at).toISOString());
+      const running = step(state.storage, m, d);
+      await flush();
+      clock.advance(PULSE_DRAIN_MAX_MS);
+      timer.fire();
+      await running;
+      await flush();
+    };
+
+    // First start: a gap by definition; r1 arrives at the connect time and ends the pulse at the tail.
+    const p1 = pulse(m, d, T0);
+    await flush();
+    const r1 = server.append(commit('r1'));
+    expect(await p1).toMatchObject({ endedBy: 'tail', connect: { ok: true, gap: 'no_cursor' } });
+    updateCheckpointBookkeeping(i.db, { pendingGap: false });
+    expect(gapCalls).toEqual([T0]);
+
+    // 25 hours of pulses every 5 minutes over a stream with no new wanted event.
+    const PULSES = 300;
+    for (let n = 1; n <= PULSES; n++) {
+      const at = T0 + n * 5 * MINUTE;
+      await quietPulse(at);
+      const attempt = server.attempts.at(-1)!;
+      // Pulse 1 resumes from r1 (re-delivered, inclusive); each later one 60 s before the previous pulse.
+      const expected = n === 1 ? r1.seq : (at - 6 * MINUTE) * 1000;
+      expect([n, attempt.cursor, attempt.status]).toEqual([n, expected, 101]);
+      expect([n, checkpointRow(i.db).cursor]).toEqual([n, (at - MINUTE) * 1000]);
+    }
+    const lastPulse = T0 + PULSES * 5 * MINUTE;
+    expect(lastPulse - T0).toBe(25 * 60 * MINUTE);
+    expect(gapCalls).toEqual([T0]);
+    expect(server.attempts).toHaveLength(PULSES + 1);
+    expect(checkpointRow(i.db)).toMatchObject({ pending_gap: 0, connected: 0 });
+    expect(hintUris(i.db)).toEqual([uri('r1')]);
+
+    // An outage of 2 h (within the lookback): the next pulse resumes from the stored point
+    // without a gap, but a 20 s drain proves nothing about a 2 h replay, so it confirms nothing.
+    const afterOutage = lastPulse + 2 * 60 * MINUTE;
+    const stored = (lastPulse - MINUTE) * 1000;
+    await quietPulse(afterOutage);
+    expect(server.attempts.at(-1)).toMatchObject({ cursor: stored, status: 101 });
+    expect(checkpointRow(i.db)).toMatchObject({ cursor: stored, pending_gap: 0, connected: 0 });
+    expect(gapCalls).toEqual([T0]);
+
+    // A real disconnect longer than the lookback is still a gap: recovery, from the live tail.
+    const back = afterOutage + 25 * 60 * MINUTE;
+    await quietPulse(back);
+    expect(server.attempts.at(-1)).toMatchObject({ cursor: null, status: 101 });
+    expect(gapCalls).toEqual([T0, back]);
+    expect(checkpointRow(i.db)).toMatchObject({ pending_gap: 1, cursor: back * 1000 });
+    expect(status(i.db, back + PULSE_DRAIN_MAX_MS)).toMatchObject({ state: 'recovering' });
   });
 });

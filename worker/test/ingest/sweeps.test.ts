@@ -9,10 +9,12 @@ import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { testKey } from '@atmusic/atproto/test-support/keys';
 import { FIXTURE_USERS, type FixtureKit, seedReadModels } from '@atmusic/atproto/test-support/read-models';
+import type { FixtureTransport } from '@atmusic/atproto/test-support/router-transport';
 import { SignedRepo } from '@atmusic/atproto/test-support/signed-repo';
 import { describe, expect, it } from 'vitest';
 import type { Db } from '../../src/do/db';
 import { GET_REPO_STATUS } from '../../src/do/ingest/accounts';
+import { cachedIdentityResolver, resolveIdentity } from '../../src/do/ingest/identity-cache';
 import { identitySweep, statusSweep } from '../../src/do/ingest/sweeps';
 import { drain } from '../../src/do/ingest/verify-drain';
 import { history } from '../../src/do/read/history';
@@ -476,6 +478,124 @@ describe('identity sweep', () => {
       ]);
       expect(historyOf(m, alice)).toEqual(ALICE_HISTORY);
       expect(historyOf(m, bob)).toEqual(['r09']);
+    });
+  });
+});
+
+describe('identity sweep edge cases', () => {
+  it('a handle re-verify transport failure (DoH TXT and well-known 503) keeps the stored handle', async () => {
+    const k = await kit();
+    const alice = k.users.Alice.did;
+    const bob = k.users.Bob.did;
+    const carol = k.users.Carol.did;
+    // alice.test's well-known endpoint fails with 503 while `wellKnownDown` is set.
+    let wellKnownDown = false;
+    let wellKnownCalls = 0;
+    const transport = Object.assign(
+      async (req: Request) => {
+        const url = new URL(req.url);
+        if (url.hostname === 'alice.test' && url.pathname === '/.well-known/atproto-did') {
+          wellKnownCalls++;
+          if (wellKnownDown) return new Response('unavailable', { status: 503 });
+        }
+        return k.transport(req);
+      },
+      { fixture: true as const, calls: k.transport.calls, hostnames: k.transport.hostnames },
+    ) satisfies FixtureTransport;
+
+    await runInDurableObject(stubFor('sweep-handle-transient'), async (i: HarnessDO) => {
+      const db = i.db;
+      const base = depsFor(db, k);
+      const m: Deps = { ...base, transport, identity: cachedIdentityResolver(db, { transport, clock: k.clock }) };
+      await seedIndexed(db, m, k);
+      expect((await identitySweep(m, T0)).checked.map((c) => [c.did, c.outcome]).sort()).toEqual([
+        [alice, 'verified'],
+        [bob, 'verified'],
+        [carol, 'verified'],
+      ]);
+      expect(handles(db)).toEqual({ [alice]: 'alice.test', [bob]: 'bob.test', [carol]: 'carol.test' });
+      const before = projection(db);
+
+      // Both handle transports for alice.test fail: DoH TXT answers 503, so does the well-known URL.
+      k.doh.fail({ path: '_atproto.alice.test' }, { kind: 'status', status: 503 }, Number.POSITIVE_INFINITY);
+      wellKnownDown = true;
+      k.resetCalls();
+      wellKnownCalls = 0;
+      const report = await identitySweep(m, T0 + DAY);
+      const aliceOutcome = report.checked.find((c) => c.did === alice);
+      expect(aliceOutcome).toMatchObject({ did: alice, outcome: 'kept' });
+      expect(report.checked.filter((c) => c.did !== alice).map((c) => c.outcome)).toEqual(['verified', 'verified']);
+      // Both transports were tried (and failed), yet the stored handle is unchanged.
+      expect(k.doh.count('_atproto.alice.test', 'TXT')).toBeGreaterThan(0);
+      expect(wellKnownCalls).toBeGreaterThan(0);
+      expect(handles(db)).toEqual({ [alice]: 'alice.test', [bob]: 'bob.test', [carol]: 'carol.test' });
+      expect(db.one('SELECT handle_checked_at_ms AS t, pds FROM users WHERE did = ?', alice)).toEqual({
+        t: T0 + DAY,
+        pds: k.users.Alice.origin,
+      });
+      expect(db.all("SELECT label, value FROM counters WHERE name = 'handle_cleared'")).toEqual([]);
+      expect(
+        db.one<{ n: number }>("SELECT sum(value) AS n FROM counters WHERE name = 'identity_sweep_failed'")!.n,
+      ).toBeGreaterThan(0);
+      expect(projection(db)).toEqual(before);
+      expect(snapshotJobs(db)).toEqual([]);
+
+      // The transports recover: the next sweep verifies the handle again.
+      k.doh.faults.clear();
+      wellKnownDown = false;
+      const again = await identitySweep(m, T0 + 2 * DAY);
+      expect(again.checked.find((c) => c.did === alice)).toMatchObject({ outcome: 'verified', handle: 'alice.test' });
+      expect(handles(db)[alice]).toBe('alice.test');
+      expect(await profile(m, alice)).toMatchObject({ did: alice, handle: 'alice.test' });
+    });
+  });
+
+  it('PDS-migration detection does not act on a non-fresh identity_cache entry before the first identity sweep', async () => {
+    const k = await kit();
+    const alice = k.users.Alice.did;
+    const bob = k.users.Bob.did;
+
+    await runInDurableObject(stubFor('sweep-pds-stale-cache'), async (i: HarnessDO) => {
+      const db = i.db;
+      const m = depsFor(db, k);
+      // Indexed through the drain at T0: identity_cache entries from T0, users.pds not yet known.
+      await seedIndexed(db, m, k);
+      expect(db.all('SELECT did, pds FROM users ORDER BY did').map((r) => (r as { pds: string | null }).pds)).toEqual([
+        null,
+        null,
+        null,
+      ]);
+      expect(db.one('SELECT pds, fetched_at_ms FROM identity_cache WHERE did = ?', alice)).toEqual({
+        pds: k.users.Alice.origin,
+        fetched_at_ms: T0,
+      });
+
+      // Ten minutes on (the 5-minute TTL has passed), Alice's document names another PDS.
+      k.clock.advance(10 * 60_000);
+      const t1 = k.clock.nowMs();
+      // Bob's entry is refreshed now (fresh) and his document then moves him too.
+      expect((await resolveIdentity(m, bob)).ok).toBe(true);
+      expect(db.one('SELECT fetched_at_ms FROM identity_cache WHERE did = ?', bob)).toEqual({ fetched_at_ms: t1 });
+      k.plc.setPds(alice, k.pds.Carol.origin);
+      k.plc.setPds(bob, k.pds.Carol.origin);
+
+      const report = await identitySweep(m, t1);
+      // Alice: the only evidence of a different PDS was an expired cache entry. No migration.
+      expect(report.checked.find((c) => c.did === alice)).toMatchObject({ outcome: 'verified', pdsChanged: false });
+      // Bob: a fresh entry named his previous PDS, so the change is acted on.
+      expect(report.checked.find((c) => c.did === bob)).toMatchObject({ outcome: 'verified', pdsChanged: true });
+      const generation = (did: string) =>
+        db.one<{ generation: number }>('SELECT generation FROM users WHERE did = ?', did)!.generation;
+      expect(snapshotJobs(db)).toEqual([
+        { did: bob, state: 'pending', reason: 'pds_migration', generation: generation(bob) },
+      ]);
+      expect(db.all("SELECT label, value FROM counters WHERE name = 'pds_changed'")).toEqual([
+        { label: 'scheduled', value: 1 },
+      ]);
+      // Both now record the endpoint their document names.
+      expect(db.one('SELECT pds FROM users WHERE did = ?', alice)).toEqual({ pds: k.pds.Carol.origin });
+      expect(db.one('SELECT pds FROM users WHERE did = ?', bob)).toEqual({ pds: k.pds.Carol.origin });
+      expect(historyOf(m, alice)).toEqual(ALICE_HISTORY);
     });
   });
 });

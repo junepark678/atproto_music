@@ -50,8 +50,10 @@
 // Gap recovery (ADR §5.5): the socket's gap handler schedules the snapshot
 // scan (W4-01 `scheduleGapRecovery`) and one discovery pass
 // (`requestGapDiscovery`), and `pending_gap` is held until that discovery
-// pass has finished too (discovery.ts: "W5-01 keeps pending_gap set until
-// then"), through the W2-05 bookkeeping writer only.
+// pass has finished too: `maybeClearGap` (snapshot-job.ts) reads the pass in
+// the same transaction that would clear the flag, so the hold and the clear
+// are one commit (no crash can land between them), through the W2-05
+// bookkeeping writer only.
 
 import { DurableObject } from 'cloudflare:workers';
 import { fetchTransport } from '@atmusic/atproto/transport';
@@ -85,20 +87,14 @@ import { reclaimSnapshotLeases, scheduleSnapshot } from './ingest/admission';
 import { clearBlockCache } from './ingest/block-cache';
 import { noteRestart, readIngestCheckpoint } from './ingest/checkpoint';
 import { pruneVerifiedCommits } from './ingest/commit-cache';
-import { discover, ensureDiscoveryTimer, gapDiscoveryPending, requestGapDiscovery } from './ingest/discovery';
+import { discover, ensureDiscoveryTimer, requestGapDiscovery } from './ingest/discovery';
 import { deleteHint, nextHintDue } from './ingest/hints';
 import { cachedIdentityResolver, pruneIdentityCache } from './ingest/identity-cache';
 import { type IngestDeps, jetstreamWatchdog, type PulseTimer } from './ingest/ingest-mode';
 import { type ConnectJetstream, connectJetstream } from './ingest/jetstream-socket';
 import { notify, recordStatus } from './ingest/notify';
 import { clearExpiredHostPauses } from './ingest/pds-budget';
-import {
-  GAP_SCAN_DONE,
-  maybeClearGap,
-  SNAPSHOT_MIN_INTERVAL_MS,
-  scheduleGapRecovery,
-  snapshotStep,
-} from './ingest/snapshot-job';
+import { maybeClearGap, SNAPSHOT_MIN_INTERVAL_MS, scheduleGapRecovery, snapshotStep } from './ingest/snapshot-job';
 import { identitySweep, statusSweep } from './ingest/sweeps';
 import { DRAIN_MIN_INTERVAL_MS, drain } from './ingest/verify-drain';
 import { type MigrateResult, migrate } from './migrate';
@@ -109,7 +105,7 @@ import { history } from './read/history';
 import { lookup } from './read/lookup';
 import { profile, resolveHandle } from './read/profile';
 import { stats } from './read/stats';
-import { indexing, internalStatus, updateCheckpointBookkeeping } from './status';
+import { indexing, internalStatus } from './status';
 import {
   type AlarmStorage,
   armAlarm,
@@ -421,8 +417,8 @@ export class IndexDO extends DurableObject<Env> implements IndexRpc, AdminRpc {
         await drain(m, now);
       },
       snapshot: async (now) => {
-        const report = await snapshotStep(m, now);
-        if (report.gapCleared) holdGapForDiscovery(m.db);
+        // maybeClearGap (in the slice) holds pending_gap while the gap's discovery pass runs.
+        await snapshotStep(m, now);
       },
       'jetstream-watchdog': async (now) => {
         await jetstreamWatchdog(m, ingest, now);
@@ -435,7 +431,8 @@ export class IndexDO extends DurableObject<Env> implements IndexRpc, AdminRpc {
       },
       discovery: async (now) => {
         await discover(m, now);
-        if (!gapDiscoveryPending(m.db)) maybeClearGap(m.db);
+        // The gap's pass may just have ended: clear pending_gap if nothing else holds it.
+        maybeClearGap(m.db);
       },
       gc: async (now) => {
         const report = runGc(m.db, now);
@@ -613,22 +610,20 @@ function timerRowExists(db: Db, name: 'jetstream-watchdog'): boolean {
 }
 
 /**
- * The snapshot slice cleared `pending_gap` (scan finished, no gap job open)
- * while the gap's discovery pass is still running: set it again until that
- * pass ends (the discovery handler then clears it with `maybeClearGap`).
- */
-function holdGapForDiscovery(db: Db): void {
-  if (!gapDiscoveryPending(db)) return;
-  db.tx(() => updateCheckpointBookkeeping(db, { pendingGap: true, gapScanAfterDid: GAP_SCAN_DONE }));
-}
-
-/**
  * gc (ADR §5.9): the snapshot block caches of walks that are no longer open,
  * verified-commit entries older than 7 days, identity_cache entries that can
  * no longer be served, expired host pauses, and hints that have kept failing
  * for HINT_ERROR_RETENTION_MS: such a hint is handed to a snapshot of its DID
  * (which covers the record at the signed head) and deleted; one whose DID
  * cannot be snapshotted (unknown, suppressed, queue full) is kept.
+ *
+ * Kept hints never block the others: hints of unknown or suppressed DIDs are
+ * excluded from the selection itself, and once a new snapshot job is refused
+ * (`busy`: the pending-job cap) the rest of the run selects only hints whose
+ * DID already has an open snapshot job (those are `already`, never busy). The
+ * selection pages by `(receipt_time, uri)` past every hint it examined, so up
+ * to GC_HINTS_PER_RUN expired hints that can be handed over are handled per
+ * run however many kept ones sort before them.
  */
 export function runGc(db: Db, now: number): GcReport {
   const report: GcReport = {
@@ -654,20 +649,44 @@ export function runGc(db: Db, now: number): GcReport {
     report.identities = pruneIdentityCache(db, now);
     report.hostPauses = clearExpiredHostPauses(db, now);
   });
-  const expired = db.all<{ uri: string; did: string }>(
-    'SELECT uri, did FROM hints WHERE last_error IS NOT NULL AND receipt_time < ? ORDER BY receipt_time LIMIT ?',
-    toStorage(fromMs(now - HINT_ERROR_RETENTION_MS)),
-    GC_HINTS_PER_RUN,
-  );
-  for (const hint of expired) {
-    db.tx(() => {
-      const s = scheduleSnapshot(db, hint.did, HINT_EXPIRED_REASON, now);
-      if (s.status !== 'scheduled' && s.status !== 'already') return;
-      if (deleteHint(db, hint.uri)) {
-        incrementCounter(db, HINT_EXPIRED_COUNTER, '');
-        report.expiredHints += 1;
-      }
-    });
+  const cutoff = toStorage(fromMs(now - HINT_ERROR_RETENTION_MS));
+  let after: { receipt: string; uri: string } | null = null;
+  let newJobsRefused = false;
+  while (report.expiredHints < GC_HINTS_PER_RUN) {
+    const page: Array<{ uri: string; did: string; receipt_time: string }> = db.all<{
+      uri: string;
+      did: string;
+      receipt_time: string;
+    }>(
+      `SELECT h.uri, h.did, h.receipt_time FROM hints h
+       WHERE h.last_error IS NOT NULL AND h.receipt_time < ?
+         AND EXISTS (SELECT 1 FROM users u WHERE u.did = h.did)
+         AND NOT EXISTS (SELECT 1 FROM suppression x WHERE x.did = h.did)
+         AND (? = 0 OR EXISTS (SELECT 1 FROM repo_jobs j WHERE j.did = h.did AND j.kind = 'snapshot'
+                                AND j.state IN ('pending','running','failed')))
+         AND (? IS NULL OR h.receipt_time > ? OR (h.receipt_time = ? AND h.uri > ?))
+       ORDER BY h.receipt_time, h.uri LIMIT ?`,
+      cutoff,
+      newJobsRefused ? 1 : 0,
+      after?.receipt ?? null,
+      after?.receipt ?? null,
+      after?.receipt ?? null,
+      after?.uri ?? null,
+      GC_HINTS_PER_RUN - report.expiredHints,
+    );
+    if (page.length === 0) break;
+    for (const hint of page) {
+      after = { receipt: hint.receipt_time, uri: hint.uri };
+      db.tx(() => {
+        const s = scheduleSnapshot(db, hint.did, HINT_EXPIRED_REASON, now);
+        if (s.status === 'busy') newJobsRefused = true;
+        if (s.status !== 'scheduled' && s.status !== 'already') return;
+        if (deleteHint(db, hint.uri)) {
+          incrementCounter(db, HINT_EXPIRED_COUNTER, '');
+          report.expiredHints += 1;
+        }
+      });
+    }
   }
   return report;
 }

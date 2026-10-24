@@ -62,10 +62,16 @@
 //    range at the new head, reusing the CID cache. `restarts > 5` →
 //    `failed`, `failure_code='repository_changed'`, due after
 //    REPOSITORY_CHANGED_BACKOFF_MS. `restarts` counts only these.
-//  - getBlocks unsupported (MethodNotImplemented, 404, 501): the job switches
-//    to the getRepo stream (32 MiB cap); every block is CID-checked into
-//    snapshot_blocks and the same walker runs over a cache-only source. The
-//    source is remembered in the frontier, so later slices stay cache-only.
+//  - getBlocks unsupported (MethodNotImplemented, 404, 501), for the head or
+//    for any batch later in the walk: the job switches to the getRepo stream
+//    (32 MiB cap); every block is CID-checked into snapshot_blocks and the
+//    same walker runs over a cache-only source. Mid-walk, the frontier is kept
+//    when the streamed root is the walk's head, else the walk restarts at the
+//    streamed (verified) head. The source is remembered in the frontier, so
+//    later slices stay cache-only.
+//  - a record block that is not dag-cbor or nests deeper than 64 levels:
+//    `car_malformed`, failed closed like any verification error, as in the
+//    live proof path and the Rust oracle.
 //  - `bad_signature` / `key_unavailable` on the head: one fresh identity
 //    resolution and a re-verification, then fail closed.
 //  - RepoNotFound (or another Repo* error), or a getRepoStatus `active:false`
@@ -96,8 +102,10 @@
 //    is re-tagged `reason = GAP_REASON` too, since its completion (a rescan of
 //    the newest head when its walk had started) is what covers the gap. A
 //    finished scan stores GAP_SCAN_DONE;
-//  - `maybeClearGap(db)` clears `pending_gap` only when the scan is finished
-//    and no gap-sourced job (`reason = GAP_REASON`) remains open.
+//  - `maybeClearGap(db)` clears `pending_gap` only when the scan is finished,
+//    no gap-sourced job (`reason = GAP_REASON`) remains open and the gap's
+//    discovery pass (discovery.ts) has ended, all read in the clearing
+//    transaction.
 //  The seeded first-start gap (`pending_gap = 1` with no scan) is left alone
 //  until a scan is started, so nothing clears it before the first connect.
 //
@@ -126,6 +134,7 @@ import { streamRepoIntoCache } from '@atmusic/atproto/snapshot/getrepo-source';
 import { type KeyRange, prefixRange } from '@atmusic/atproto/snapshot/range';
 import { initialState, type StepResult, step, type WalkState } from '@atmusic/atproto/snapshot/walker';
 import { verifyCommit } from '@atmusic/atproto/verify/commit';
+import { MAX_RECORD_DEPTH } from '@atmusic/atproto/verify/record-proof';
 import { type VerifiedCommit, VerifyError } from '@atmusic/atproto/verify/types';
 import { isTid } from '@atmusic/core/syntax';
 import { fromMs } from '@atmusic/core/timestamp';
@@ -147,6 +156,7 @@ import {
   scheduleStatusCheck,
 } from './admission';
 import { clearBlockCache, SnapshotBlockCache } from './block-cache';
+import { gapDiscoveryPending } from './discovery';
 import { checkGeneration } from './generation';
 import { cachedIdentity, resolveIdentity } from './identity-cache';
 import { hostOf, hostPausedUntil, IDENTITY_RESOLVE_COST, pauseFor, pauseHost, SubrequestMeter } from './pds-budget';
@@ -346,30 +356,39 @@ function storedCid(db: Db, uri: string): string | null {
   return row?.cid ?? null;
 }
 
-const MAX_RECORD_DEPTH = 64;
-
-/** dag-cbor value → atproto JSON form (links `{$link}`, bytes `{$bytes}`). */
+/** dag-cbor value → atproto JSON form (links `{$link}`, bytes `{$bytes}`). Depth as in the live path. */
 function jsonForm(value: unknown, depth: number): unknown {
   if (value === null || typeof value !== 'object') return value;
   if (value instanceof CidLinkWrapper) return { $link: value.$link };
   if (value instanceof BytesWrapper) return { $bytes: value.$bytes };
-  if (depth > MAX_RECORD_DEPTH) throw new RangeError('record nests too deeply');
+  // `depth` counts enclosing containers, this one included (record-proof.ts toJsonForm).
+  if (depth > MAX_RECORD_DEPTH) throw new VerifyError('car_malformed', `record nests deeper than ${MAX_RECORD_DEPTH}`);
   if (Array.isArray(value)) return value.map((v) => jsonForm(v, depth + 1));
+  // Object.fromEntries defines own data properties, so a `__proto__` key stays a plain key.
   return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, jsonForm(v, depth + 1)]));
 }
 
 /**
- * A signed record block as the validator sees it. A block that is not
- * decodable dag-cbor (or nests too deeply) is still the signed record at that
- * key: it is handed over as `null`, which validation excludes with a reason,
- * rather than blocking the whole snapshot.
+ * A signed record block as the validator sees it. The walker has already
+ * CID-checked the block against the signed MST. A block that is not decodable
+ * dag-cbor, or nests deeper than MAX_RECORD_DEPTH, fails closed with
+ * `car_malformed`, exactly as the live proof path does (record-proof.ts
+ * `proveRecord`) and as the Rust oracle does (crates/atproto/src/sync/
+ * verify.rs: a record that does not decode is `InvalidCar`): the slice fails
+ * with that code and the projection is untouched, so a snapshot and a live
+ * proof of the same signed block can never disagree.
  */
-function recordValue(bytes: Uint8Array): unknown {
+function recordValue(key: string, bytes: Uint8Array): unknown {
+  let decoded: unknown;
   try {
-    return jsonForm(decode(bytes), 1);
-  } catch {
-    return null;
+    decoded = decode(bytes);
+  } catch (e) {
+    throw new VerifyError(
+      'car_malformed',
+      `record ${key} is not dag-cbor: ${e instanceof Error ? e.message : String(e)}`,
+    );
   }
+  return jsonForm(decoded, 1);
 }
 
 function transientPauseMs(errors: number): number {
@@ -780,7 +799,7 @@ class Slice {
     const entries: SnapshotChunkEntry[] = r.entries.map((e) =>
       e.recordBytes === undefined
         ? { key: e.key, cid: e.cid }
-        : { key: e.key, cid: e.cid, record: recordValue(e.recordBytes) },
+        : { key: e.key, cid: e.cid, record: recordValue(e.key, e.recordBytes) },
     );
     const nowNs = fromMs(this.now);
     const result = this.write(
@@ -842,9 +861,17 @@ class Slice {
       const opts = { maxFetches, maxEntries: this.entriesLeft, knownCid: this.knownCid, include: this.include };
       // After a getRepo stream the walk is local (no subrequests, no PDS); otherwise
       // every batch is a getBlocks request to the PDS the identity names now.
-      const r = local
-        ? await step(frontier.walk, cacheOnlySource(this.cache), this.cache, opts)
-        : await this.sync((pds) => step(frontier.walk, this.blockSource(pds), this.cache, opts));
+      let r: StepResult;
+      try {
+        r = local
+          ? await step(frontier.walk, cacheOnlySource(this.cache), this.cache, opts)
+          : await this.sync((pds) => step(frontier.walk, this.blockSource(pds), this.cache, opts));
+      } catch (e) {
+        if (local || !isBlockSourceError(e, 'unsupported')) throw e;
+        // getBlocks stopped being served after the head fetch (ADR §5.7(10)).
+        await this.switchToGetRepo();
+        continue;
+      }
       this.entriesLeft -= r.entries.length;
       const next: Frontier = { ...frontier, walk: r.state, errors: 0 };
       const applied = this.applyStep(r, next);
@@ -852,6 +879,32 @@ class Slice {
       if (applied !== 'ok') return applied;
       if (!r.done && r.fetches === 0 && r.interval === null) return this.pause(this.now);
     }
+  }
+
+  /**
+   * getBlocks became unsupported mid-walk (MethodNotImplemented, 404, 501
+   * after the head fetch): stream getRepo into the cache (every block
+   * CID-checked) and verify its root commit, then go on cache-only. When the
+   * stream's head is the walk's head, the walk keeps its frontier (the chunks
+   * already applied stand) and only its source changes; otherwise the
+   * repository moved on, and the walk starts over at the streamed head
+   * (`setHead`, the same floors as any head), reusing the CID cache. Either
+   * way the source is persisted, so later slices stay cache-only, and nothing
+   * of the projection is touched before the streamed commit verified.
+   */
+  private async switchToGetRepo(): Promise<void> {
+    this.db.tx(() => incrementCounter(this.db, SNAPSHOT_FALLBACK_COUNTER, 'mid_walk'));
+    const head = await this.verifiedHead('getRepo');
+    const frontier = this.frontier!;
+    if (head.commit.cid !== frontier.walk.headCid) {
+      this.setHead(head);
+      return;
+    }
+    const next: Frontier = { ...frontier, source: 'getRepo', errors: 0 };
+    const r = this.write('frontier_json = ?', [JSON.stringify(next)], () => true);
+    if (r === LOST) throw new LeaseLost();
+    this.frontier = next;
+    this.report.source = 'getRepo';
   }
 
   /** The walk covered the range: status check, then completeSnapshot under the lease. */
@@ -1184,13 +1237,19 @@ export function continueGapRecovery(db: Db, now: number, o: GapScanOptions = {})
 }
 
 /**
- * Clear `pending_gap` once the gap scan has finished and no gap-sourced
- * snapshot job (`reason = GAP_REASON`) is still open. Returns whether it cleared.
+ * Clear `pending_gap` once the gap scan has finished, no gap-sourced snapshot
+ * job (`reason = GAP_REASON`) is still open, and the gap's relay discovery
+ * pass has ended (discovery.ts `gapDiscoveryPending`; ADR §5.5: pending_gap
+ * clears only once all of that work completes). All three are read in the
+ * transaction that clears, so no state in which the discovery pass is still
+ * running can ever commit with `pending_gap = 0` (there is no separate
+ * "clear, then hold again" step a crash could split). Returns whether it cleared.
  */
 export function maybeClearGap(db: Db): boolean {
   return db.tx((): boolean => {
     const cp = readGap(db);
     if (cp === null || cp.pending_gap !== 1 || cp.gap_scan_after_did !== GAP_SCAN_DONE) return false;
+    if (gapDiscoveryPending(db)) return false;
     const open = db.one<{ e: number }>(
       `SELECT EXISTS(SELECT 1 FROM repo_jobs WHERE kind = 'snapshot' AND state IN ('pending','running','failed')
          AND reason = ?) AS e`,

@@ -12,6 +12,7 @@ import type { FixtureTransport } from '@atmusic/atproto/test-support/router-tran
 import { describe, expect, it } from 'vitest';
 import type { Db } from '../../src/do/db';
 import {
+  DISCOVERY_MAX_CURSOR_CHARS,
   DISCOVERY_STATE_COUNTER,
   type DiscoveryReport,
   discover,
@@ -20,6 +21,8 @@ import {
   readDiscoveryState,
   requestGapDiscovery,
 } from '../../src/do/ingest/discovery';
+import { GAP_SCAN_DONE, maybeClearGap } from '../../src/do/ingest/snapshot-job';
+import { updateCheckpointBookkeeping } from '../../src/do/status';
 import { dueAt, runDue, type TimerHandlers } from '../../src/do/timers';
 import type { HarnessDO } from '../harness/harness-do';
 import { NOW_STORAGE, seedUser } from '../write/support';
@@ -295,6 +298,108 @@ describe('relay discovery', () => {
       expect(snapshotJobs(db).map((j) => j.did)).toEqual(s);
       expect(projection(db)).toEqual(EMPTY);
       expect(recordCalls(k)).toBe(0);
+    });
+  });
+
+  it('permanently malformed relay page fails bounded and does not wedge gap discovery', async () => {
+    const k = await kit();
+    const S = k.collections.scrobble;
+    const F = k.collections.follow;
+    const s = Array.from({ length: 8 }, (_, i) => syntheticDid('s', i));
+    const f = syntheticDid('f', 0);
+    k.relay.add(S, ...s);
+    k.relay.add(F, f);
+
+    await runInDurableObject(stubFor('discovery-malformed'), async (i: HarnessDO) => {
+      const db = i.db;
+      const base = depsFor(db, k);
+      // The relay answers two positions with a permanently malformed page: the second
+      // scrobble page holds a non-object repos entry, the first follow page an over-long cursor.
+      const inner = k.transport;
+      const served: Array<[string | undefined, string | null, 'ok' | 'malformed']> = [];
+      const transport = Object.assign(
+        async (req: Request) => {
+          const url = new URL(req.url);
+          if (url.pathname.endsWith(LIST_REPOS_BY_COLLECTION)) {
+            const collection = url.searchParams.get('collection') ?? undefined;
+            const cursor = url.searchParams.get('cursor');
+            if (collection === S && cursor === s[4]) {
+              served.push([collection, cursor, 'malformed']);
+              return Response.json({ repos: [{ did: s[5] }, 42], cursor: s[7] });
+            }
+            if (collection === F && cursor === null) {
+              served.push([collection, cursor, 'malformed']);
+              return Response.json({ repos: [{ did: f }], cursor: 'c'.repeat(DISCOVERY_MAX_CURSOR_CHARS + 1) });
+            }
+            served.push([collection, cursor, 'ok']);
+          }
+          return inner(req);
+        },
+        { fixture: true as const, calls: inner.calls, hostnames: inner.hostnames },
+      ) satisfies FixtureTransport;
+      const m = { ...base, transport };
+
+      // Gap recovery is waiting for this pass (the snapshot scan itself is done).
+      updateCheckpointBookkeeping(db, { pendingGap: true, gapScanAfterDid: GAP_SCAN_DONE });
+      requestGapDiscovery(db, T0);
+      expect(gapDiscoveryPending(db)).toBe(true);
+
+      const runs: DiscoveryReport[] = [];
+      let at = T0;
+      for (let n = 0; n < 10 && gapDiscoveryPending(db); n++) {
+        expect(dueAt(db, 'discovery')).toBe(at);
+        runs.push(await discover(m, at, { pageLimit: 5 }));
+        // While the gap's pass runs, gap recovery cannot finish (the scan alone is done).
+        if (gapDiscoveryPending(db)) expect(maybeClearGap(db)).toBe(false);
+        at = dueAt(db, 'discovery')!;
+      }
+      // Bounded: three answers per bad position, then that listing is given up and the pass ends.
+      expect(gapDiscoveryPending(db)).toBe(false);
+      expect(runs.map((r) => [r.stop, r.detail ?? null, r.abandoned ?? []])).toEqual([
+        ['relay_error', 'malformed_page', []],
+        ['relay_error', 'malformed_page', []],
+        ['relay_error', 'malformed_page', [S]],
+        ['relay_error', 'malformed_page', []],
+        ['complete', null, [F]],
+      ]);
+      expect(served).toEqual([
+        [S, null, 'ok'],
+        [S, s[4], 'malformed'],
+        [S, s[4], 'malformed'],
+        [S, s[4], 'malformed'],
+        [F, null, 'malformed'],
+        [F, null, 'malformed'],
+        [F, null, 'malformed'],
+      ]);
+      // Each retry waited the gap pass's relay retry interval; the last run returned to the daily cadence.
+      expect(runs.map((r) => r.nextDueAt)).toEqual([
+        T0 + HOUR,
+        T0 + 2 * HOUR,
+        T0 + 3 * HOUR,
+        T0 + 4 * HOUR,
+        T0 + 4 * HOUR + DAY,
+      ]);
+      expect(readDiscoveryState(db)).toBeNull();
+      // The errors are recorded: every malformed answer, and each listing given up.
+      const counters = (name: string) =>
+        db.all<{ label: string; value: number }>(
+          'SELECT label, value FROM counters WHERE name = ? ORDER BY label',
+          name,
+        );
+      expect(counters('discovery_failed')).toEqual([{ label: 'malformed_page', value: 6 }]);
+      expect(counters('discovery_abandoned')).toEqual([
+        { label: F, value: 1 },
+        { label: S, value: 1 },
+      ]);
+      expect(counters('discovery_passes')).toEqual([{ label: 'gap', value: 1 }]);
+      // Only the good first page was admitted; nothing from a malformed page.
+      expect(snapshotJobs(db).map((j) => j.did)).toEqual(s.slice(0, 5));
+      expect(projection(db)).toEqual(EMPTY);
+      expect(recordCalls(k)).toBe(0);
+      // With its discovery pass over, gap recovery can finish: pending_gap clears.
+      expect(db.one('SELECT pending_gap FROM ingest_checkpoint')).toEqual({ pending_gap: 1 });
+      expect(maybeClearGap(db)).toBe(true);
+      expect(db.one('SELECT pending_gap FROM ingest_checkpoint')).toEqual({ pending_gap: 0 });
     });
   });
 });

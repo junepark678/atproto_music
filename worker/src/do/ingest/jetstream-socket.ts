@@ -38,6 +38,20 @@
 //   connect again from the stored cursor on the same host;
 // - never reconnects because the stream is silent.
 //
+// Quiet links (ADR §15 Q11). A link that received no message (other than the
+// inclusive re-delivery of the event its resume point names) is confirmed
+// healthy at its open instant when it ends by our own close after its whole
+// confirmation window: a socket link at its planned refresh (open
+// continuously for PLANNED_REFRESH_MS), or a pulse that drained its full 20 s
+// (ingest-mode.ts) from a cursor at most QUIET_PULSE_MAX_BACKLOG_MS older than
+// the pulse (a short drain proves nothing about a long replay). Then, before
+// the close, the resume point moves to `open instant − 60 s`
+// (checkpoint.ts `noteHealthyResume`), so a stream with no wanted events for
+// longer than JETSTREAM_LOOKBACK_HOURS never looks like a gap. A close or an
+// error from the server, a local failure, a superseding connect or a link
+// that saw any message confirms nothing: the cursor stays where its last event
+// put it, and a disconnect longer than the lookback is still a gap.
+//
 // In-memory state (the open link, the backoff streak) lives per Db wrapper,
 // which IndexDO creates once per instance; after an eviction the new instance
 // starts with no socket, and `noteRestart` (checkpoint.ts) records the drop.
@@ -50,13 +64,16 @@ import type { ModuleDeps } from '../contracts';
 import type { Db } from '../db';
 import { dueAt, schedule } from '../timers';
 import {
+  exactCursorTimeUs,
   type GapReason,
   gapOnConnect,
   noteConnected,
   noteDisconnected,
+  noteHealthyResume,
   noteHostIndex,
   readIngestCheckpoint,
   type ScheduleGapRecovery,
+  tailCursor,
 } from './checkpoint';
 import { configuredCollections, type MessageOutcome, onBinaryMessage, onMessage } from './jetstream';
 
@@ -68,6 +85,11 @@ export const RECONNECT_CAP_MS = 60_000;
 export const RECONNECT_JITTER = 0.2;
 /** A connection open at least this long resets the backoff streak. */
 export const STABLE_CONNECTION_MS = 60_000;
+/**
+ * A quiet pulse confirms its open instant healthy only when it started from a
+ * cursor at most this much older than the pulse (three pulse intervals).
+ */
+export const QUIET_PULSE_MAX_BACKLOG_MS = 15 * 60_000;
 /** Deadline for the upgrade request. */
 export const CONNECT_TIMEOUT_MS = 10_000;
 const ERROR_BODY_LIMIT = 4096;
@@ -229,10 +251,16 @@ export interface OpenLink {
   hostIndex: number;
   /** The cursor the URL carried; null for the live tail. */
   cursor: number | null;
+  /** The stored resume point when the link opened (the tail cursor of a gap connect). */
+  resumeCursor: number | null;
+  /** The exact event time of that resume point (µs), when known. */
+  startTimeUs: number | null;
   gap: GapReason | null;
   openedAtMs: number;
   refreshAtMs: number;
   messages: number;
+  /** Messages other than the inclusive re-delivery of `resumeCursor`'s event. */
+  activity: number;
 }
 
 interface SocketState {
@@ -417,10 +445,13 @@ async function doConnect(
     mode,
     hostIndex,
     cursor,
+    resumeCursor: gap === null ? cp.cursor : tailCursor(now),
+    startTimeUs: gap === null ? exactCursorTimeUs(cp) : tailCursor(now),
     gap,
     openedAtMs,
     refreshAtMs: openedAtMs + PLANNED_REFRESH_MS,
     messages: 0,
+    activity: 0,
   };
   s.current = open;
   m.log.log('info', 'jetstream_connected', {
@@ -491,6 +522,8 @@ function onLinkEvent(m: ModuleDeps, s: SocketState, open: OpenLink, e: LinkEvent
       return;
     }
     open.messages += 1;
+    const replay = (outcome.kind === 'hint' || outcome.kind === 'ignored') && outcome.seq === open.resumeCursor;
+    if (!replay) open.activity += 1;
     if (outcome.kind === 'hint') s.options.onTimersChanged?.();
     if (outcome.kind === 'notice' && outcome.notice.type === 'error' && /cursor/i.test(outcome.notice.name)) {
       s.forceTail = true;
@@ -509,10 +542,27 @@ function onLinkEvent(m: ModuleDeps, s: SocketState, open: OpenLink, e: LinkEvent
 }
 
 /**
+ * Is `open`, ended now by our own close, confirmed healthy at its open
+ * instant (see the header, "Quiet links")? Only a link that received no
+ * message beyond the re-delivery of its resume point's own event qualifies.
+ */
+function quietAndHealthy(open: OpenLink, now: number, end: 'planned_refresh' | 'pulse_drained'): boolean {
+  if (open.activity !== 0 || open.resumeCursor === null) return false;
+  if (end === 'planned_refresh') return open.mode === 'socket' && now - open.openedAtMs >= PLANNED_REFRESH_MS;
+  return (
+    open.mode === 'pulse' &&
+    open.startTimeUs !== null &&
+    open.startTimeUs >= (open.openedAtMs - QUIET_PULSE_MAX_BACKLOG_MS) * 1000
+  );
+}
+
+/**
  * End the current link: detach it, close it, mark disconnected and, for a
  * close or error, rotate the host and schedule the reconnect with backoff.
+ * `healthy`: the link is confirmed healthy at its open instant (quietAndHealthy),
+ * so the resume point moves forward first, in the same transaction.
  */
-function dropLink(m: ModuleDeps, s: SocketState, cause: EndCause, now: number): void {
+function dropLink(m: ModuleDeps, s: SocketState, cause: EndCause, now: number, o: { healthy?: boolean } = {}): void {
   const open = s.current;
   if (open === null) return;
   s.current = null;
@@ -521,6 +571,10 @@ function dropLink(m: ModuleDeps, s: SocketState, cause: EndCause, now: number): 
   const rotate = failed ? (open.hostIndex + 1) % hostCount(m.config) : undefined;
   if (now - open.openedAtMs >= STABLE_CONNECTION_MS) s.streak = 0;
   m.db.tx(() => {
+    if (o.healthy === true) {
+      const resume = noteHealthyResume(m.db, open.openedAtMs, open.resumeCursor!);
+      if (resume !== null) m.log.log('info', 'jetstream_quiet_resume', { mode: open.mode, cursor: resume });
+    }
     noteDisconnected(m.db, now, rotate === undefined ? {} : { hostIndex: rotate });
     if (open.mode !== 'socket' || cause === 'superseded') return;
     if (cause === 'cursor_rejected') {
@@ -534,11 +588,17 @@ function dropLink(m: ModuleDeps, s: SocketState, cause: EndCause, now: number): 
   s.options.onEnd?.(cause);
 }
 
-/** Close this instance's link, if any (off mode, mode change, shutdown). Marks disconnected. */
-export function closeSocket(m: ModuleDeps, now: number): boolean {
+/**
+ * Close this instance's link, if any (off mode, mode change, shutdown, pulse
+ * end). Marks disconnected. `pulseDrained`: a pulse closing after its full
+ * drain window (ingest-mode.ts), which may confirm a quiet link healthy.
+ */
+export function closeSocket(m: ModuleDeps, now: number, o: { pulseDrained?: boolean } = {}): boolean {
   const s = stateOf(m);
-  if (s.current === null) return false;
-  dropLink(m, s, 'superseded', now);
+  const open = s.current;
+  if (open === null) return false;
+  const healthy = o.pulseDrained === true && quietAndHealthy(open, now, 'pulse_drained');
+  dropLink(m, s, 'superseded', now, { healthy });
   return true;
 }
 
@@ -577,9 +637,10 @@ export async function socketWatchdog(
       schedule(m.db, 'jetstream-watchdog', next, { force: true });
       return { action: 'none', nextAtMs: next };
     }
-    // Planned refresh: the connection is healthy, so no backoff and no rotation.
+    // Planned refresh: the connection is healthy, so no backoff and no rotation;
+    // a quiet one also moves the resume point forward (Q11, see the header).
     m.log.log('info', 'jetstream_planned_refresh', { host: new URL(open.url).host });
-    dropLink(m, s, 'superseded', now);
+    dropLink(m, s, 'superseded', now, { healthy: quietAndHealthy(open, now, 'planned_refresh') });
     s.streak = 0;
     const result = await connect(m, connectJetstream, now, { ...options, mode: 'socket' });
     return { action: result.ok ? 'refreshed' : 'failed', connect: result, nextAtMs: nextWatchdog(m) };

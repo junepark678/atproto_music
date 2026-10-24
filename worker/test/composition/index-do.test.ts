@@ -6,11 +6,16 @@
 
 import { evictDurableObject } from 'cloudflare:test';
 import { SUBSCRIBE_NSID } from '@atmusic/atproto/test-support/fake-jetstream';
+import { fromMs, toStorage } from '@atmusic/core/timestamp';
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { AdminStatus } from '../../src/do/contracts';
 import type { Db } from '../../src/do/db';
-import { markConnected } from '../../src/do/status';
-import { nextDue } from '../../src/do/timers';
+import { GC_HINTS_PER_RUN } from '../../src/do/index-do';
+import { MAX_PENDING_SNAPSHOT_JOBS } from '../../src/do/ingest/admission';
+import { requestGapDiscovery } from '../../src/do/ingest/discovery';
+import { GAP_SCAN_DONE } from '../../src/do/ingest/snapshot-job';
+import { markConnected, updateCheckpointBookkeeping } from '../../src/do/status';
+import { nextDue, TIMER_NAMES } from '../../src/do/timers';
 import { flush, jetstreamServer } from '../fixtures/jetstream-server';
 import { seedUser } from '../write/support';
 import {
@@ -30,6 +35,7 @@ import {
   resetControl,
   runAlarm,
   SCROBBLE,
+  schema,
   uriOf,
 } from './support';
 
@@ -49,6 +55,26 @@ function scrobble(listenedAt: string, track = 'Hyperballad') {
 function checkpoint(db: Db) {
   return db.one<{ connected: number; updated_at_ms: number }>(
     "SELECT connected, updated_at_ms FROM ingest_checkpoint WHERE stream = 'jetstream'",
+  );
+}
+
+const DAY = 24 * 3_600_000;
+
+/** Make only the timers in `names` due now; every other timer waits a day. */
+function onlyDueNow(h: { stub: Parameters<typeof inDo>[0] }, names: readonly string[]) {
+  return inDo(h.stub, (_i, db) =>
+    db.tx(() => {
+      const now = control.clock.nowMs();
+      for (const name of TIMER_NAMES) {
+        const at = names.includes(name) ? now : now + DAY;
+        db.run(
+          'INSERT INTO timers(name, due_at) VALUES (?, ?) ON CONFLICT(name) DO UPDATE SET due_at = ?',
+          name,
+          at,
+          at,
+        );
+      }
+    }),
   );
 }
 
@@ -157,12 +183,19 @@ describe('worker/src/do/index-do.ts', () => {
         suppression: db.all('SELECT * FROM suppression ORDER BY did'),
         repo_jobs: db.all('SELECT * FROM repo_jobs ORDER BY did, kind'),
         hints: db.all('SELECT * FROM hints ORDER BY uri'),
+        indexing_status: db.all('SELECT * FROM indexing_status ORDER BY scope'),
+        backfill_generation: db.all('SELECT * FROM backfill_generation ORDER BY singleton'),
+        stats_cache: db.all('SELECT * FROM stats_cache ORDER BY did, win, lim'),
+        timers: db.all('SELECT * FROM timers ORDER BY name'),
       }));
 
     const page1 = await h.request(`/api/v1/users/${ALICE}/scrobbles?limit=2`);
     expect(rkeys(page1.body)).toEqual(['r07', 'r01']);
     const cursor = (page1.body as { nextCursor: string }).nextCursor;
     const all = await h.request(`/api/v1/users/${ALICE}/scrobbles?limit=100`);
+    // Statistics computed before the restart fill stats_cache.
+    const statsBefore = await h.request(`/api/v1/users/${ALICE}/stats`);
+    expect(statsBefore.status).toBe(200);
 
     // Work that is due when the instance dies: a new record announced through notify.
     const r11 = await kit.createRecord('Alice', SCROBBLE, 'r11', scrobble('2026-01-15T11:59:00Z'));
@@ -170,6 +203,10 @@ describe('worker/src/do/index-do.ts', () => {
       202,
     );
     const before = await tables();
+    expect(before.stats_cache.length).toBeGreaterThan(0);
+    expect(before.indexing_status.length).toBeGreaterThan(0);
+    expect(before.backfill_generation).toHaveLength(1);
+    expect(before.timers.length).toBeGreaterThan(0);
     const dueBefore = await inDo(h.stub, (_i, db) => nextDue(db));
     const constructions = constructed(h.stub);
 
@@ -182,6 +219,9 @@ describe('worker/src/do/index-do.ts', () => {
     // Responses are byte-identical and a cursor issued before the restart continues.
     const allAfter = await h.request(`/api/v1/users/${ALICE}/scrobbles?limit=100`);
     expect(allAfter.text).toBe(all.text);
+    const statsAfter = await h.request(`/api/v1/users/${ALICE}/stats`);
+    expect(statsAfter.status).toBe(200);
+    expect(statsAfter.text).toBe(statsBefore.text);
     const page2 = await h.request(`/api/v1/users/${ALICE}/scrobbles?limit=2&cursor=${encodeURIComponent(cursor)}`);
     expect(page2.status).toBe(200);
     expect(rkeys(page2.body)).toEqual(['r02', 'r03']);
@@ -331,5 +371,182 @@ describe('worker/src/do/index-do.ts', () => {
         { rkey: 'h4', attempts: 1 },
       ],
     });
+  });
+
+  it('gap hold and clear commit in one transaction', async () => {
+    await kitControl({ env: { ADMIN_TOKEN } });
+    const h = harness('gap-hold', { ADMIN_TOKEN });
+    const adminIngest = async () => {
+      const r = await h.request('/internal/admin/status', { headers: { authorization: `Bearer ${ADMIN_TOKEN}` } });
+      expect(r.status).toBe(200);
+      const body = r.body as AdminStatus;
+      expect(schema('Indexing', body.indexing)).toBe('valid');
+      return body;
+    };
+    const gapRow = () =>
+      inDo(h.stub, (_i, db) =>
+        db.one<{ pending_gap: number; gap_scan_after_did: string | null }>(
+          "SELECT pending_gap, gap_scan_after_did FROM ingest_checkpoint WHERE stream = 'jetstream'",
+        ),
+      );
+    const onlyDue = (names: string[]) => onlyDueNow(h, names);
+
+    // Gap recovery is under way: its snapshot scan is finished and no gap job is open,
+    // but its relay discovery pass has not run yet.
+    await inDo(h.stub, (_i, db) => {
+      updateCheckpointBookkeeping(db, { pendingGap: true, gapScanAfterDid: GAP_SCAN_DONE });
+      requestGapDiscovery(db, control.clock.nowMs());
+    });
+    expect((await adminIngest()).ingest.pendingGap).toBe(true);
+
+    // The snapshot slice sees "scan done, nothing open" and would clear pending_gap; the
+    // instance dies at its next storage read, which is where the discovery pass is consulted.
+    await onlyDue(['snapshot']);
+    control.dbFault = { match: /FROM counters WHERE name = \? LIMIT 1/, message: 'instance lost', remaining: 1 };
+    expect(await runAlarm(h.stub)).toBe(true);
+    const crashed = await inDo(h.stub, (instance) => instance.lastAlarm);
+    expect(control.dbFault.remaining).toBe(0);
+    expect(crashed?.failed.map((f) => f.name)).toEqual(['snapshot']);
+    // Nothing committed in between: the gap is still pending, as it must be while discovery runs.
+    expect(await gapRow()).toEqual({ pending_gap: 1, gap_scan_after_did: GAP_SCAN_DONE });
+
+    // A restart (eviction) keeps it, and the status still reports the gap.
+    control.dbFault = null;
+    await evictDurableObject(h.stub);
+    expect(await gapRow()).toEqual({ pending_gap: 1, gap_scan_after_did: GAP_SCAN_DONE });
+    // (INGEST_MODE=off here, so the global state is `stale` regardless; the gap flag is the evidence.)
+    let s = await adminIngest();
+    expect(s.ingest.pendingGap).toBe(true);
+    expect(s.indexing.caughtUp).toBe(false);
+
+    // A healthy snapshot slice holds the gap too (the discovery pass is still pending) ...
+    control.clock.advance(1_000);
+    await onlyDue(['snapshot']);
+    expect(await runAlarm(h.stub)).toBe(true);
+    expect(await inDo(h.stub, (instance) => instance.lastAlarm?.ran)).toContain('snapshot');
+    expect(await gapRow()).toEqual({ pending_gap: 1, gap_scan_after_did: GAP_SCAN_DONE });
+
+    // ... and the discovery pass's end clears it, in the discovery handler's own transaction.
+    control.clock.advance(1_000);
+    await onlyDue(['discovery']);
+    expect(await runAlarm(h.stub)).toBe(true);
+    const ran = await inDo(h.stub, (instance) => instance.lastAlarm);
+    expect(ran?.ran).toContain('discovery');
+    expect(ran?.failed).toEqual([]);
+    expect(await gapRow()).toEqual({ pending_gap: 0, gap_scan_after_did: null });
+    s = await adminIngest();
+    expect(s.ingest.pendingGap).toBe(false);
+  });
+
+  it('gc is not blocked by retained hints', async () => {
+    resetControl();
+    const h = harness('gc-retained');
+    const now = control.clock.nowMs();
+    const old = (minutes: number) => toStorage(fromMs(now - 8 * DAY - minutes * 60_000));
+    const unknown = (n: number) => `did:plc:u${String(n).padStart(23, '0')}`;
+    const SUPPRESSED = 'did:plc:ssssssssssssssssssssssss';
+    const NO_JOB = 'did:plc:nnnnnnnnnnnnnnnnnnnnnnnn';
+    const OPEN_JOB = 'did:plc:oooooooooooooooooooooooo';
+    const LATER = 'did:plc:llllllllllllllllllllllll';
+    const hintsOf = (db: Db) =>
+      db.all<{ did: string; n: number }>('SELECT did, count(*) AS n FROM hints GROUP BY did ORDER BY did');
+
+    await inDo(h.stub, (_i, db) =>
+      db.tx(() => {
+        let minutes = 10_000;
+        const failing = (did: string, rkey: string) =>
+          db.run(
+            `INSERT INTO hints(uri, did, collection, rkey, source, priority, receipt_time, due_at, attempts, last_error)
+             VALUES (?, ?, ?, ?, 'jetstream', 1, ?, ?, 20, 'fetch:http_503')`,
+            `at://${did}/${SCROBBLE}/${rkey}`,
+            did,
+            SCROBBLE,
+            rkey,
+            old(minutes--),
+            now + 30 * DAY,
+          );
+        // The oldest: GC_HINTS_PER_RUN expired hints of DIDs that are not known ...
+        for (let n = 0; n < GC_HINTS_PER_RUN; n++) failing(unknown(n), 'h1');
+        // ... then hints of a suppressed DID and of a known DID whose snapshot the full queue refuses ...
+        seedUser(db, SUPPRESSED);
+        db.run("INSERT INTO suppression(did, suppressed_at) VALUES (?, '2026-01-14T12:00:00.000000000Z')", SUPPRESSED);
+        for (const rkey of ['h1', 'h2']) failing(SUPPRESSED, rkey);
+        seedUser(db, NO_JOB);
+        for (const rkey of ['h1', 'h2', 'h3']) failing(NO_JOB, rkey);
+        // ... then, newest, a known DID with an open snapshot job and another one without.
+        const gen = seedUser(db, OPEN_JOB);
+        for (const rkey of ['h1', 'h2']) failing(OPEN_JOB, rkey);
+        seedUser(db, LATER);
+        failing(LATER, 'h1');
+        // The snapshot queue is full (the open job among them), so no new job can be created.
+        db.run(
+          `INSERT INTO repo_jobs(did, kind, state, generation, reason, due_at, updated_at_ms)
+           VALUES (?, 'snapshot', 'pending', ?, 'admission', ?, ?)`,
+          OPEN_JOB,
+          gen,
+          now + 30 * DAY,
+          now,
+        );
+        for (let n = 1; n < MAX_PENDING_SNAPSHOT_JOBS; n++) {
+          db.run(
+            `INSERT INTO repo_jobs(did, kind, state, generation, reason, due_at, updated_at_ms)
+             VALUES (?, 'snapshot', 'pending', 0, 'filler', ?, ?)`,
+            `did:plc:q${String(n).padStart(23, '0')}`,
+            now + 30 * DAY,
+            now,
+          );
+        }
+      }),
+    );
+    await onlyDueNow(h, ['gc']);
+
+    // The daily gc run, through the alarm (the only timer due).
+    expect(await runAlarm(h.stub)).toBe(true);
+    const first = await inDo(h.stub, (instance, db) => ({
+      ran: instance.lastAlarm?.ran,
+      failed: instance.lastAlarm?.failed,
+      hints: hintsOf(db),
+      job: db.one("SELECT state, reason FROM repo_jobs WHERE did = ? AND kind = 'snapshot'", OPEN_JOB),
+      expired: db.one<{ value: number }>("SELECT value FROM counters WHERE name = 'hint_expired'")?.value ?? 0,
+      gcDue: db.one<{ due_at: number }>("SELECT due_at FROM timers WHERE name = 'gc'")?.due_at,
+    }));
+    expect(first.ran).toEqual(['gc']);
+    expect(first.failed).toEqual([]);
+    // The open job's DID got past the 200 + 5 hints that cannot be handed over: its hints are gone.
+    expect(first.expired).toBe(2);
+    expect(first.job).toEqual({ state: 'pending', reason: 'admission' });
+    expect(first.hints.find((r) => r.did === OPEN_JOB)).toBeUndefined();
+    // The others are kept: unknown, suppressed, and refused by the full queue.
+    expect(first.hints.filter((r) => r.did.startsWith('did:plc:u'))).toHaveLength(GC_HINTS_PER_RUN);
+    expect(first.hints.filter((r) => !r.did.startsWith('did:plc:u'))).toEqual([
+      { did: LATER, n: 1 },
+      { did: NO_JOB, n: 3 },
+      { did: SUPPRESSED, n: 2 },
+    ]);
+    expect(first.gcDue).toBe(now + DAY);
+
+    // Once the queue has room, the next run hands the refused DIDs' hints over as well.
+    await inDo(h.stub, (_i, db) => db.run("DELETE FROM repo_jobs WHERE reason = 'filler'"));
+    control.clock.advance(DAY);
+    await onlyDueNow(h, ['gc']);
+    expect(await runAlarm(h.stub)).toBe(true);
+    const second = await inDo(h.stub, (instance, db) => ({
+      ran: instance.lastAlarm?.ran,
+      hints: hintsOf(db),
+      jobs: db.all(
+        "SELECT did, state, reason FROM repo_jobs WHERE kind = 'snapshot' AND did IN (?, ?) ORDER BY did",
+        LATER,
+        NO_JOB,
+      ),
+      expired: db.one<{ value: number }>("SELECT value FROM counters WHERE name = 'hint_expired'")?.value ?? 0,
+    }));
+    expect(second.ran).toEqual(['gc']);
+    expect(second.expired).toBe(2 + 4);
+    expect(second.jobs).toEqual([
+      { did: LATER, state: 'pending', reason: 'hint_expired' },
+      { did: NO_JOB, state: 'pending', reason: 'hint_expired' },
+    ]);
+    expect(second.hints.filter((r) => !r.did.startsWith('did:plc:u'))).toEqual([{ did: SUPPRESSED, n: 2 }]);
+    expect(second.hints.filter((r) => r.did.startsWith('did:plc:u'))).toHaveLength(GC_HINTS_PER_RUN);
   });
 });
