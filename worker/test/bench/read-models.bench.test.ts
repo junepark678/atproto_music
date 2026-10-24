@@ -25,10 +25,13 @@
 // docs/benchmarks/*.md from it.
 //
 // Budgets (asserted):
-// - history/feed: the keyset index walk reads at most limit + 2 rows (limit + 1
-//   probe rows plus the cursor boundary row), per followed account for the
-//   following feed, at every scale and depth; the visibility join adds one
-//   owner row for history and one per candidate row for the feeds.
+// - history/feed: the W6-02 budget as the plan states it: the production page
+//   statement's cursor `rowsRead` is at most limit + 2, for history, the
+//   global feed and the following feed, at every scale and depth. The index
+//   walk without the visibility join is measured beside it only to explain
+//   where the rows go; it is not a budget. Reads over limit + 2 fail this
+//   suite and are reported as budget breaches (no reinterpretation of the
+//   budget here; changing it is an owner amendment of workers-waves.json).
 // - statistics: uncached rows read ≤ 17 × window rows + 4 × limit + 16, i.e.
 //   proportional to the window, never to the user's total rows.
 // - a cached statistics hit runs at most 3 cache-check statements (cache row
@@ -103,6 +106,8 @@ const sinkEnv = env as unknown as { BENCH_SINK: Fetcher };
 type Stub = DurableObjectStub<TestIndexDO>;
 
 const LIMIT = 20;
+/** W6-02: "history and feed at most limit+2 rows read" (the page statement's cursor rowsRead). */
+const READ_BUDGET = LIMIT + 2;
 const STATS_LIMIT = 10;
 const WINDOWS: StatsWindow[] = ['all', '7d', '30d', '365d'];
 const WINDOW_DAYS: Record<StatsWindow, number | null> = { all: null, '7d': 7, '30d': 30, '365d': 365 };
@@ -404,10 +409,12 @@ interface ReadMeasurement {
   depth: number;
   rowsReturned: number;
   rowsRead: number;
+  /** Diagnostic: rows read by the same keyset walk without the visibility join (summed per followed account). */
   indexRowsRead: number;
+  /** Diagnostic: rowsRead - indexRowsRead (clamped at 0). */
   visibilityRowsRead: number;
-  indexBudget: number;
-  rowsReadBudget: number;
+  /** The plan's W6-02 budget: limit + 2 rows read by the page statement. */
+  budget: number;
   statements: number;
   allStatementsRowsRead: number;
   coldMs: number;
@@ -483,7 +490,9 @@ async function measureRead(stub: Stub, spec: ReadSpec): Promise<ReadMeasurement>
     ).toEqual(expected);
     expect(result.hasMore, spec.name).toBe(true);
 
-    // The same keyset walk without the visibility join: the index rows the page reads.
+    // Diagnostic only: the same keyset walk without the visibility join, to
+    // show how the page statement's rows split between the index walk and
+    // the visibility lookups. The budget below applies to the page statement.
     const k = keysetWhere(keyset, 'listened_at', 'uri');
     const walk = (where: string, params: SqlParam[]) =>
       rowsReadOf(state.storage, `SELECT uri FROM scrobbles WHERE ${where}${k.sql} ${ORDER} LIMIT ?`, [
@@ -494,13 +503,6 @@ async function measureRead(stub: Stub, spec: ReadSpec): Promise<ReadMeasurement>
     const indexRowsRead =
       spec.owners === null ? walk('1 = 1', []) : spec.owners.reduce((sum, did) => sum + walk('did = ?', [did]), 0);
 
-    const accounts = spec.owners?.length ?? 1;
-    const indexBudget = accounts * (LIMIT + 2);
-    // Visibility: history checks its one owner; a feed checks the owner of
-    // each candidate row (≤ limit + 1 per walked account), and the following
-    // feed reads the viewer's follow edges (≤ 4 rows per edge, plus one).
-    const visibilityBudget =
-      spec.kind === 'history' ? 1 : spec.kind === 'global' ? LIMIT + 1 : accounts * (LIMIT + 1) + 4 * accounts + 1;
     const warmMs = meanMs(WARM_REPEATS, run);
     const rowsRead = pageStatement.rowsRead;
     return {
@@ -515,13 +517,12 @@ async function measureRead(stub: Stub, spec: ReadSpec): Promise<ReadMeasurement>
       // Clamped: the following feed's single IN walk can read one boundary row
       // fewer than the per-account control walks together.
       visibilityRowsRead: Math.max(0, rowsRead - indexRowsRead),
-      indexBudget,
-      rowsReadBudget: indexBudget + visibilityBudget,
+      budget: READ_BUDGET,
       statements,
       allStatementsRowsRead,
       coldMs,
       warmMs,
-      withinBudget: indexRowsRead <= indexBudget && rowsRead <= indexBudget + visibilityBudget,
+      withinBudget: rowsRead <= READ_BUDGET,
     };
   });
 }
@@ -828,7 +829,7 @@ const datasetFacts = once(async () => {
 // ---------------------------------------------------------------------------
 // The report
 
-function buildFollowUps(reads: ReadMeasurement[], stats: StatsMeasurement[]) {
+function buildFollowUps(stats: StatsMeasurement[]) {
   const followUps: Array<{ id: string; summary: string; measured: number; threshold: number }> = [];
   // The plan names 100k all-time; every uncached statistics call over 50 ms is recorded the same way.
   for (const s of stats) {
@@ -839,15 +840,6 @@ function buildFollowUps(reads: ReadMeasurement[], stats: StatsMeasurement[]) {
       summary: `Uncached ${s.window} statistics of the ${s.scale.toLocaleString('en-US')}-scrobble user (${s.windowRows.toLocaleString('en-US')} window rows) took ${slowest.toFixed(1)} ms in workerd (cold ${s.uncached.coldMs.toFixed(1)} ms, warm ${s.uncached.warmMs.toFixed(1)} ms; a cached hit ${s.cached.ms.toFixed(2)} ms). Read-time aggregation is linear in the window rows; pre-aggregated per-user counters would bound it if such users appear.`,
       measured: slowest,
       threshold: STATS_FOLLOW_UP_MS,
-    });
-  }
-  const global = reads.find((r) => r.kind === 'global' && r.page === 'first')!;
-  if (global.rowsRead > LIMIT + 2) {
-    followUps.push({
-      id: 'feed-visibility-rows',
-      summary: `A ${LIMIT}-row global feed page reads ${global.rowsRead} rows: ${global.indexRowsRead} from the scrobbles_global_time walk (within limit + 2) and ${global.visibilityRowsRead} owner lookups, one users row per candidate scrobble (visibility.ts). Holding the total to limit + 2 would need visibility denormalised into the feed index, a schema change (W0-01).`,
-      measured: global.rowsRead,
-      threshold: LIMIT + 2,
     });
   }
   return followUps;
@@ -905,7 +897,7 @@ const report = once(async () => {
     reads,
     stats,
     http: http.summary,
-    followUps: buildFollowUps(reads, stats),
+    followUps: buildFollowUps(stats),
     passed: reads.every((r) => r.withinBudget) && stats.every((s) => s.withinBudget) && http.summary.passed,
   };
 });
@@ -972,16 +964,11 @@ describe('read-model benchmark', () => {
     ]);
     for (const r of reads) {
       expect(r.rowsReturned, r.name).toBe(LIMIT);
-      // The keyset walk: limit + 1 probe rows plus at most the cursor boundary row (per followed account).
-      expect(r.indexBudget, r.name).toBe((r.kind === 'following' ? SCALES.length : 1) * (LIMIT + 2));
-      expect(r.indexRowsRead, r.name).toBeLessThanOrEqual(r.indexBudget);
-      expect(r.visibilityRowsRead, r.name).toBeGreaterThanOrEqual(0);
-      expect(r.rowsRead, r.name).toBeLessThanOrEqual(r.rowsReadBudget);
-      expect(r.withinBudget, r.name).toBe(true);
-    }
-    // A first history page reads limit + 2 rows in total: limit + 1 rows and the owner row.
-    for (const r of reads.filter((x) => x.kind === 'history' && x.page === 'first')) {
-      expect(r.rowsRead, r.name).toBeLessThanOrEqual(LIMIT + 2);
+      expect(r.budget, r.name).toBe(LIMIT + 2);
+      expect(r.withinBudget, r.name).toBe(r.rowsRead <= LIMIT + 2);
+      // The plan's budget, on the production page statement's cursor rowsRead.
+      // Soft, so every read over budget is listed, not only the first.
+      expect.soft(r.rowsRead, `${r.name}: page statement rowsRead`).toBeLessThanOrEqual(LIMIT + 2);
     }
     // Rows read do not grow with the user's size or the cursor depth.
     const history = reads.filter((r) => r.kind === 'history').map((r) => r.rowsRead);
@@ -1037,7 +1024,14 @@ describe('read-model benchmark', () => {
     expect(validate({ ...value, http: { ...value.http, errors: -1 } })).toBe(false);
     const { passed: _passed, ...withoutVerdict } = value;
     expect(validate(withoutVerdict)).toBe(false);
-    expect(value.passed).toBe(true);
+    // The verdict is the conjunction of every asserted budget (a breach is
+    // reported as failed, never hidden), and every read carries the plan budget.
+    expect(value.passed).toBe(
+      value.reads.every((r) => r.withinBudget && r.rowsRead <= LIMIT + 2) &&
+        value.stats.every((st) => st.withinBudget) &&
+        value.http.passed,
+    );
+    expect(value.reads.every((r) => r.budget === LIMIT + 2 && r.withinBudget === r.rowsRead <= r.budget)).toBe(true);
     expect(value.dataset.rows).toBe(100_000);
     expect(value.reads).toHaveLength(12);
     expect(value.stats).toHaveLength(16);

@@ -18,15 +18,17 @@
 //    warmup of 300 requests, then 600 measured requests over 60 s), as M6.2.3
 //    specifies. Without it (the repository gate) the same requests run back
 //    to back and nothing sleeps.
-// 2. Requires every named test of the suite to have passed (vitest JSON
-//    reporter), re-validates the report and writes docs/benchmarks/
-//    read_models.md and docs/benchmarks/stats.md from it (unless --no-docs).
+// 2. Re-validates the report and writes docs/benchmarks/read_models.md and
+//    docs/benchmarks/stats.md from it (unless --no-docs), also when the run
+//    failed, so a budget breach is documented; exits 0 only when vitest
+//    passed, every named test of the suite passed (vitest JSON reporter) and
+//    the report's verdict is passed.
 //    `--render` only re-renders the docs from an existing report.
 //
 // Never contacts anything but the local workerd that vitest starts.
 
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import Ajv2020 from 'ajv/dist/2020.js';
@@ -218,8 +220,7 @@ export const BENCH_REPORT_SCHEMA = {
           'rowsRead',
           'indexRowsRead',
           'visibilityRowsRead',
-          'indexBudget',
-          'rowsReadBudget',
+          'budget',
           'statements',
           'allStatementsRowsRead',
           'coldMs',
@@ -236,8 +237,7 @@ export const BENCH_REPORT_SCHEMA = {
           rowsRead: int,
           indexRowsRead: int,
           visibilityRowsRead: int,
-          indexBudget: int,
-          rowsReadBudget: int,
+          budget: int,
           statements: int,
           allStatementsRowsRead: int,
           coldMs: num,
@@ -354,10 +354,12 @@ export interface ReadMeasurement {
   depth: number;
   rowsReturned: number;
   rowsRead: number;
+  /** Diagnostic: the same keyset walk without the visibility join. */
   indexRowsRead: number;
+  /** Diagnostic: rowsRead - indexRowsRead. */
   visibilityRowsRead: number;
-  indexBudget: number;
-  rowsReadBudget: number;
+  /** The W6-02 plan budget, limit + 2, on the page statement's rowsRead. */
+  budget: number;
   statements: number;
   allStatementsRowsRead: number;
   coldMs: number;
@@ -486,6 +488,40 @@ const FINDINGS = `## Regressions this benchmark found (fixed in W6-02)
 - **Deep pages read O(depth) rows.** A cursor carries the traversal anchor (\`upper\`) and the last returned row (\`last\`). With both row-value bounds in the WHERE clause SQLite uses only one of them, the anchor, as the index range start, so it walked and filtered every row between the anchor and \`last\`: 5,023 rows read for a 20-row history page at depth 5,000. \`worker/src/do/read/history.ts\` \`keysetWhere\` now omits the anchor bound when \`last <= upper\` (every cursor the server issues), which selects the same rows; history and both feeds share it.
 - **Windowed statistics read the whole user.** The totals statement referenced the window CTE three times; inlined, SQLite answered its DISTINCT/GROUP BY subqueries from the covering \`scrobbles_stats\` index searched by DID only, so a 7-day window of a 10,000-row user read 20,965 rows. \`worker/src/do/read/stats.ts\` now materializes the window for the totals statement of bounded windows, so rows read are proportional to the window (\`all\` keeps the inlined form, which already reads exactly the user's rows).`;
 
+/** Why each kind of read exceeds limit + 2, from the measured split (index walk vs visibility). */
+const BREACH_CAUSE = {
+  history:
+    'the keyset walk reads limit + 1 rows plus, on a deep page, the cursor boundary row that the row-value seek on the DESC index steps over, and the visibility join reads the owner row once',
+  global:
+    'the visibility join reads one `users` row per candidate scrobble (a correlated owner lookup by primary key) on top of the `scrobbles_global_time` walk',
+  following:
+    "the IN walk reads up to limit + 1 rows from each followed account's `scrobbles_owner_time` range before the merge, plus the owner and follow-edge lookups; with per-account indexes a merged page over k followed accounts reads at least k + limit index rows, so limit + 2 cannot hold for k > 2",
+} as const;
+
+function budgetSection(r: BenchReport): string[] {
+  const over = r.reads.filter((x) => !x.withinBudget);
+  const head = ['## Rows-read budget (W6-02: history and feed at most limit + 2)', ''];
+  if (over.length === 0) {
+    return [...head, `Met: every history and feed page statement read at most ${r.limit + 2} rows.`];
+  }
+  const kinds = [...new Set(over.map((x) => x.kind))];
+  return [
+    ...head,
+    `**Not met** for ${over.length} of ${r.reads.length} reads. The budget is the plan's, applied to the production page statement's \`rowsRead\`; it is not redefined here, so these reads fail the suite (\`history/feed rows read ≤ limit+2\`) and this report's verdict.`,
+    '',
+    '| Read | Page | Rows read | Budget | Index walk | Visibility |',
+    '| --- | --- | --- | --- | --- | --- |',
+    ...over.map(
+      (x) =>
+        `| ${KIND_LABEL[x.kind]}${x.scale === null ? '' : ` ${fmt(x.scale)}`} | ${x.page} | ${x.rowsRead} | ${x.budget} | ${x.indexRowsRead} | ${x.visibilityRowsRead} |`,
+    ),
+    '',
+    ...kinds.map((k) => `- ${KIND_LABEL[k]}: ${BREACH_CAUSE[k]}.`),
+    '',
+    'Meeting the budget as written needs an owner decision: either amend the W6-02 budget in `docs/planning/workers-waves.json` (for example, index walk at most limit + 2 per walked account plus one visibility row per candidate), or amend the W0-01 schema so visibility costs no rows for visible owners (for example, a partial index of hidden users probed with NOT EXISTS) and the following feed reads a per-viewer timeline. Neither change is made by W6-02.',
+  ];
+}
+
 const RUST_READ_MODELS_HISTORY = `## History: Rust candidate (superseded, kept for reference)
 
 The final Linux x86_64 musl backend candidate was measured on 2026-10-06 UTC. Artifact SHA256: \`89ec2297963533f98b8fefde4e300b9f196e6e22ea5c5148133c75b2190f0777\`. It ran 100 users × 1,000 records in a 2-CPU / 2 GiB container: 30 s warmup at a nominal 10 requests/s with 0 errors, then 600 measured requests (alternating history and global feed, \`limit=20\`) over 60 s with 0 errors, p95 9.568 ms and median 2.846 ms against the 300 ms target. History and feed plans used \`scrobbles_owner_time\` and \`scrobbles_global_time\`. The sanitized result is [read_models.json](read_models.json), produced by \`scripts/benchmark_read_models.py\` and checked by \`scripts/test_benchmark.py\`. Those wall-clock numbers measured an sqlx pool in a native process and do not transfer to DO SQLite in workerd (AMENDMENTS-workers.md A1).`;
@@ -535,16 +571,18 @@ export function renderReadModelsDoc(r: BenchReport): string {
     '',
     '## Rows read per page (limit 20)',
     '',
-    `A second user set in its own DO holds one user each with ${r.scales.map((s) => fmt(s.scrobbles)).join(', ')} scrobbles spread over two years, plus a viewer following all four (${fmt(r.scales.reduce((a, s) => a + s.scrobbles, 0))} rows). Deep pages continue a cursor whose anchor is the newest row and whose last row is halfway down. "Index" is the rows read by the same keyset walk without the visibility join (the budget the plan states, \`limit + 2\`, per followed account for the following feed); "visibility" is the rest: one owner lookup for history, one per candidate row for the feeds, plus the viewer's follow edges. Cold is the first call on a freshly constructed DO instance (after \`evictDurableObject\`); warm is the mean of 20 repeated calls. Times are the synchronous DO call (CPU-bound: no I/O happens inside it).`,
+    `A second user set in its own DO holds one user each with ${r.scales.map((s) => fmt(s.scrobbles)).join(', ')} scrobbles spread over two years, plus a viewer following all four (${fmt(r.scales.reduce((a, s) => a + s.scrobbles, 0))} rows). Deep pages continue a cursor whose anchor is the newest row and whose last row is halfway down. "Rows read" is the production page statement's cursor \`rowsRead\`, the quantity the W6-02 budget (limit + 2 = ${r.limit + 2}) bounds. "Index" and "visibility" are diagnostics only: the rows the same keyset walk reads without the visibility join (summed per followed account for the following feed), and the rest (owner lookups, follow edges). Cold is the first call on a freshly constructed DO instance (after \`evictDurableObject\`); warm is the mean of 20 repeated calls. Times are the synchronous DO call (CPU-bound: no I/O happens inside it).`,
     '',
-    '| Read | Scale | Page | Rows read | Index | Visibility | Budget (index / total) | Statements (rows read incl. indexing truth) | Cold ms | Warm ms | Within |',
+    '| Read | Scale | Page | Rows read | Budget | Index | Visibility | Statements (rows read incl. indexing truth) | Cold ms | Warm ms | Within |',
     '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |',
     ...r.reads.map(
       (x) =>
-        `| ${KIND_LABEL[x.kind]} | ${x.scale === null ? 'all users' : fmt(x.scale)} | ${x.page}${x.page === 'deep' ? ` (${fmt(x.depth)})` : ''} | ${x.rowsRead} | ${x.indexRowsRead} | ${x.visibilityRowsRead} | ${x.indexBudget} / ${x.rowsReadBudget} | ${x.statements} (${x.allStatementsRowsRead}) | ${ms(x.coldMs)} | ${ms(x.warmMs)} | ${x.withinBudget ? 'yes' : 'no'} |`,
+        `| ${KIND_LABEL[x.kind]} | ${x.scale === null ? 'all users' : fmt(x.scale)} | ${x.page}${x.page === 'deep' ? ` (${fmt(x.depth)})` : ''} | ${x.rowsRead} | ${x.budget} | ${x.indexRowsRead} | ${x.visibilityRowsRead} | ${x.statements} (${x.allStatementsRowsRead}) | ${ms(x.coldMs)} | ${ms(x.warmMs)} | ${x.withinBudget ? 'yes' : 'no'} |`,
     ),
     '',
     'Statistics are in [stats.md](stats.md).',
+    '',
+    ...budgetSection(r),
     '',
     FINDINGS,
     '',
@@ -680,21 +718,23 @@ export function main(argv: readonly string[]): number {
       env: { ...process.env, ATMUSIC_BENCH_OUT: args.out, ATMUSIC_BENCH_PACED: args.paced ? '1' : '0' },
     },
   );
-  if (run.status !== 0) {
-    console.error(`benchmark: vitest exited with status ${run.status ?? run.signal}`);
-    return 1;
+  const missing = existsSync(vitestJson)
+    ? missingNamedTests(JSON.parse(readFileSync(vitestJson, 'utf8')) as VitestJson)
+    : [...NAMED_TESTS];
+  // A failing run still documents what it measured: a valid report is
+  // rendered (its verdict says failed), and the exit status stays nonzero.
+  const report = existsSync(args.out) ? loadReport(args.out) : null;
+  if (report !== null) {
+    console.log(
+      `benchmark: ${relative(REPO_ROOT, args.out)} p95 ${report.http.p95Ms} ms (${report.http.errors} errors), passed=${report.passed}`,
+    );
+    if (args.docs) writeDocs(report);
+  } else {
+    console.error(`benchmark: no report at ${relative(REPO_ROOT, args.out)}`);
   }
-  const missing = missingNamedTests(JSON.parse(readFileSync(vitestJson, 'utf8')) as VitestJson);
-  if (missing.length > 0) {
-    console.error(`benchmark: named tests did not pass:\n${missing.join('\n')}`);
-    return 1;
-  }
-  const report = loadReport(args.out);
-  console.log(
-    `benchmark: ${relative(REPO_ROOT, args.out)} p95 ${report.http.p95Ms} ms (${report.http.errors} errors), passed=${report.passed}`,
-  );
-  if (args.docs) writeDocs(report);
-  return report.passed ? 0 : 1;
+  if (run.status !== 0) console.error(`benchmark: vitest exited with status ${run.status ?? run.signal}`);
+  if (missing.length > 0) console.error(`benchmark: named tests did not pass:\n${missing.join('\n')}`);
+  return run.status === 0 && missing.length === 0 && report?.passed === true ? 0 : 1;
 }
 
 if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
