@@ -229,7 +229,49 @@ export const meta: Meta = {
 };
 `;
 
+// Resolves the workspace's projects the way `npm test` does, in a child Node
+// process (a Vitest instance inside this test run would inherit its state).
+const RESOLVE_PROJECTS = `
+import { createVitest } from 'vitest/node';
+const vitest = await createVitest('test', { watch: false, run: true, root: process.cwd() });
+const files = {};
+for (const spec of await vitest.globTestSpecifications()) {
+  (files[spec.project.name] ||= []).push(spec.moduleId);
+}
+const projects = vitest.projects.map((p) => ({
+  name: p.name,
+  groupOrder: p.config.sequence.groupOrder,
+  files: (files[p.name] || []).map((f) => f.slice(process.cwd().length + 1)).sort(),
+}));
+await vitest.close();
+process.stdout.write(JSON.stringify(projects));
+`;
+
 describe('scripts/check-ts.sh', () => {
+  it('the nested gate runs alone in the last sequence group, after worker-modules', () => {
+    const r = exec('node', ['--input-type=module', '-e', RESOLVE_PROJECTS], ROOT);
+    expect(r.status, r.output).toBe(0);
+    const projects = JSON.parse(r.stdout) as { name: string; groupOrder: number; files: string[] }[];
+    const byName = new Map(projects.map((p) => [p.name, p]));
+    const gate = byName.get('scripts-gate');
+    const modules = byName.get('worker-modules');
+    expect(gate?.files).toEqual([SELF]);
+    expect(modules?.files.length).toBeGreaterThan(0);
+    for (const p of projects) {
+      if (p.name === 'scripts-gate') continue;
+      // No other project runs this file, and none shares or follows its group:
+      // the nested `check-ts.sh` (a full vitest run with 5 s default timeouts
+      // and its own workers) never competes with another project for CPU.
+      expect(p.files, p.name).not.toContain(SELF);
+      expect(p.groupOrder, p.name).toBeLessThan(gate?.groupOrder ?? Number.NEGATIVE_INFINITY);
+      // worker-modules (the 5 s-timeout unit tests) shares its group with no
+      // project that spawns toolchains or indexes bench fixtures.
+      if (p.name !== 'worker-modules') expect(p.groupOrder, p.name).not.toBe(modules?.groupOrder);
+    }
+    expect(byName.get('scripts')?.files).toContain('scripts/test/deploy.test.ts');
+    expect(byName.get('scripts')?.groupOrder).toBeLessThan(modules?.groupOrder ?? 0);
+  });
+
   it(
     'a misformatted file in a disposable copy fails the biome step and leaves the repository unchanged',
     () => {

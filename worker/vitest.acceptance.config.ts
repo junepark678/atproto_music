@@ -26,9 +26,9 @@ export default defineConfig({
     // Isolation: these files are CPU-heavy (query-plans signs and indexes
     // 100 × 1,000 records). Group 2 starts only after the default group (0)
     // and worker-modules (group 1, the 5 s-timeout unit tests) have finished,
-    // so the acceptance files never compete for CPU with the unit tests, nor
-    // with the nested gate scripts/test/check-ts.test.ts runs in the scripts
-    // project.
+    // so the acceptance files never compete for CPU with the unit tests. The
+    // nested gate (scripts-gate, group 3, root vitest.config.ts) starts only
+    // after this group has finished.
     sequence: { groupOrder: 2 },
   },
 });
