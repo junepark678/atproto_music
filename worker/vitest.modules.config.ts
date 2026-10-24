@@ -19,6 +19,6 @@ export default defineConfig({
   test: {
     name: 'worker-modules',
     include: ['test/**/*.test.ts'],
-    exclude: ['test/acceptance/**', 'test/bench/**', 'test/e2e/**', 'test/fixtures/**'],
+    exclude: ['test/acceptance/**', 'test/bench/**', 'test/composition/**', 'test/e2e/**', 'test/fixtures/**'],
   },
 });
