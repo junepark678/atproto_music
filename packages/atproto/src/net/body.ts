@@ -79,6 +79,19 @@ function timedOut(): SafeFetchError {
   return new SafeFetchError('timeout', 'deadline exceeded', { reason: 'deadline' });
 }
 
+/**
+ * Classify a rejected `reader.read()`: a SafeFetchError (from raceDeadline) or
+ * an abort is passed through / mapped to `timeout`; anything else (a mid-body
+ * connection reset, a stream errored by the transport) is `network_error`.
+ */
+function readFailure(error: unknown, signal: AbortSignal | undefined): SafeFetchError {
+  if (error instanceof SafeFetchError) return error;
+  if (signal?.aborted) return timedOut();
+  return new SafeFetchError('network_error', `response body stream failed: ${String(error)}`, {
+    reason: 'body_stream',
+  });
+}
+
 /** Fire-and-forget cancel: a hostile stream must not be able to hang us in cancel(). */
 function cancelQuietly(target: { cancel(reason?: unknown): Promise<void> }, reason: unknown): void {
   try {
@@ -126,7 +139,8 @@ export function declaredLength(headers: Headers): number | null {
  * Read `response.body` fully, but never more than `maxBytes`. On overflow the
  * upstream stream is cancelled and `body_too_large` is thrown; nothing past
  * the chunk that crossed the cap is pulled. With `signal`, an abort while
- * reading cancels the stream and throws `timeout`.
+ * reading cancels the stream and throws `timeout`. Any other stream failure
+ * (e.g. a mid-body connection reset) throws `network_error` (`body_stream`).
  */
 export async function readCapped(response: Response, maxBytes: number, signal?: AbortSignal): Promise<Uint8Array> {
   assertCap(maxBytes);
@@ -148,7 +162,7 @@ export async function readCapped(response: Response, maxBytes: number, signal?: 
         step = await raceDeadline(reader.read(), signal);
       } catch (error) {
         cancelQuietly(reader, 'aborted');
-        throw error;
+        throw readFailure(error, signal);
       }
       if (step.done) break;
       const chunk = step.value;
@@ -184,7 +198,8 @@ export async function readCapped(response: Response, maxBytes: number, signal?: 
 /**
  * A pull-through view of `source` that errors with `body_too_large` (and
  * cancels `source`) as soon as more than `maxBytes` have passed, and with
- * `timeout` when `signal` aborts. For incremental parsers (getRepo CAR stream).
+ * `timeout` when `signal` aborts, and `network_error` when `source` itself
+ * errors. For incremental parsers (getRepo CAR stream).
  */
 export function cappedStream(
   source: ReadableStream<Uint8Array> | null,
@@ -204,7 +219,7 @@ export function cappedStream(
         step = await raceDeadline(reader.read(), signal);
       } catch (error) {
         cancelQuietly(reader, 'aborted');
-        controller.error(error);
+        controller.error(readFailure(error, signal));
         return;
       }
       if (step.done) {
@@ -214,7 +229,9 @@ export function cappedStream(
       const chunk = step.value;
       if (!(chunk instanceof Uint8Array)) {
         cancelQuietly(reader, 'bad_chunk');
-        controller.error(new SafeFetchError('network_error', 'response stream yielded a non-byte chunk'));
+        controller.error(
+          new SafeFetchError('network_error', 'response stream yielded a non-byte chunk', { reason: 'bad_chunk' }),
+        );
         return;
       }
       total += chunk.byteLength;

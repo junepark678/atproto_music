@@ -92,6 +92,25 @@ function countingBody(chunks: number, chunkSize: number) {
   return { stream, stats };
 }
 
+/** A body that delivers `prefix` bytes, then errors as a mid-body connection reset would. */
+function resettingBody(prefix: number) {
+  const stats = { pulls: 0 };
+  const stream = new ReadableStream<Uint8Array>(
+    {
+      pull(controller) {
+        stats.pulls++;
+        if (stats.pulls === 1) {
+          controller.enqueue(new Uint8Array(prefix).fill(0x7b));
+          return;
+        }
+        controller.error(new TypeError('connection reset'));
+      },
+    },
+    { highWaterMark: 0 },
+  );
+  return { stream, stats };
+}
+
 describe('SafeFetch', () => {
   it('3xx response is refused and Location is not followed', async () => {
     for (const status of [300, 301, 302, 303, 304, 307, 308]) {
@@ -365,5 +384,67 @@ describe('SafeFetch', () => {
     // Each attempt is exactly one request: no hidden retries.
     expect(net.requests).toHaveLength(5);
     expect(net.requests[0]?.headers.get('accept')).toBe('application/vnd.ipld.car');
+  });
+
+  it('mid-body connection reset is a typed network_error, not a raw TypeError', async () => {
+    const bodies: Array<ReturnType<typeof resettingBody>> = [];
+    const net = fakeNet({
+      'reset.example.com': () => {
+        const body = resettingBody(10);
+        bodies.push(body);
+        return new Response(body.stream, { headers: { 'content-type': 'application/json' } });
+      },
+      // Same reset inside an error body: the status still classifies it.
+      'reset503.example.com': () => new Response(resettingBody(10).stream, { status: 503 }),
+    });
+    const timer = manualTimer();
+    const safeFetch = createSafeFetch({ transport: net.transport, clock: fixedClock(), timer });
+
+    const buffered = await failure(safeFetch('https://reset.example.com/xrpc/x', { kind: 'json' }));
+    expect({ code: buffered.code, reason: buffered.reason, maxBytes: buffered.maxBytes }).toEqual({
+      code: 'network_error',
+      reason: 'body_stream',
+      maxBytes: null,
+    });
+    expect(buffered.message).toContain('connection reset');
+    expect(bodies[0]?.stats.pulls).toBe(2);
+
+    // The streaming form surfaces the same typed error to its consumer, after the bytes that did arrive.
+    const streamed = await safeFetch.stream('https://reset.example.com/xrpc/x', { kind: 'getRepo' });
+    expect(streamed.status).toBe(200);
+    const reader = streamed.body.getReader();
+    let received = 0;
+    const streamError = await (async () => {
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) return null;
+          received += value.byteLength;
+        }
+      } catch (e) {
+        return e;
+      }
+    })();
+    expect(streamError).toBeInstanceOf(SafeFetchError);
+    expect({ code: (streamError as SafeFetchError).code, reason: (streamError as SafeFetchError).reason }).toEqual({
+      code: 'network_error',
+      reason: 'body_stream',
+    });
+    expect(received).toBe(10);
+
+    const status = await failure(safeFetch('https://reset503.example.com/xrpc/x', { kind: 'json' }));
+    expect({ code: status.code, status: status.status, xrpcError: status.xrpcError }).toEqual({
+      code: 'http_status',
+      status: 503,
+      xrpcError: null,
+    });
+
+    // One request per call (no retry), and the deadline never fired.
+    expect(net.requests.map((r) => new URL(r.url).hostname)).toEqual([
+      'reset.example.com',
+      'reset.example.com',
+      'reset503.example.com',
+    ]);
+    expect(timer.requested).toEqual([SAFE_FETCH_DEADLINE_MS, SAFE_FETCH_DEADLINE_MS, SAFE_FETCH_DEADLINE_MS]);
   });
 });

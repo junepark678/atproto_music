@@ -92,7 +92,18 @@ export async function queryDoh(
     if (response.body) response.body.cancel().catch(() => {});
     throw dnsFailed(`http_${response.status}`);
   }
-  const bytes = await readCapped(response, DOH_MAX_BYTES, signal);
+  // A failure reading the DoH body is a failed lookup, never a property of the
+  // target: only the deadline keeps its own code.
+  let bytes: Uint8Array;
+  try {
+    bytes = await readCapped(response, DOH_MAX_BYTES, signal);
+  } catch (error) {
+    if (error instanceof SafeFetchError && error.code === 'timeout') throw error;
+    if (error instanceof SafeFetchError && error.code === 'body_too_large') {
+      throw dnsFailed('doh_body_too_large', `DoH response exceeds ${DOH_MAX_BYTES} bytes`);
+    }
+    throw dnsFailed('doh_body', `DoH response body failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
 
   let doc: unknown;
   try {

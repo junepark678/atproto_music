@@ -171,4 +171,80 @@ describe('DoH pre-check', () => {
     expect(res.status).toBe(200);
     expect(net.doh).toEqual([{ name: 'short.example.com', type: 1, accept: 'application/json' }]);
   });
+
+  it('DoH body reset or oversized body is dns_failed and the target is never contacted', async () => {
+    const hits: string[] = [];
+    const dohNames: string[] = [];
+    const transport: Transport = async (req) => {
+      const url = new URL(req.url);
+      if (url.hostname !== DOH_HOST) {
+        hits.push(req.url);
+        return Response.json({ ok: true });
+      }
+      const name = url.searchParams.get('name') ?? '';
+      dohNames.push(name);
+      if (name === 'reset.example.com') {
+        // 10 bytes of JSON, then the connection resets mid-body.
+        let pulls = 0;
+        const body = new ReadableStream<Uint8Array>(
+          {
+            pull(controller) {
+              if (pulls++ === 0) controller.enqueue(new TextEncoder().encode('{"Status":0'));
+              else controller.error(new TypeError('connection reset'));
+            },
+          },
+          { highWaterMark: 0 },
+        );
+        return new Response(body, { headers: { 'content-type': 'application/dns-json' } });
+      }
+      if (name === 'huge.example.com') {
+        // A syntactically valid dns-json body padded past the 64 KiB DoH cap.
+        return Response.json({ Status: 0, Answer: [], pad: 'x'.repeat(70_000) });
+      }
+      if (name === 'stall.example.com') {
+        return new Response(new ReadableStream<Uint8Array>({ pull: () => new Promise(() => {}) }));
+      }
+      return Response.json({ Status: 0, Answer: [{ name, type: 1, TTL: 300, data: '93.184.215.14' }] });
+    };
+    const clock = fixedClock();
+
+    for (const [host, reason] of [
+      ['reset.example.com', 'doh_body'],
+      ['huge.example.com', 'doh_body_too_large'],
+    ] as const) {
+      const direct = await failure(resolvePublic(host, transport, clock));
+      expect({ host, code: direct.code, reason: direct.reason }).toEqual({ host, code: 'dns_failed', reason });
+
+      // Through SafeFetch the DoH failure is not mistaken for a target-body failure.
+      const safeFetch = createSafeFetch({ transport, clock });
+      const viaFetch = await failure(safeFetch(`https://${host}/xrpc/x`, { kind: 'json' }));
+      expect({ host, code: viaFetch.code, reason: viaFetch.reason, maxBytes: viaFetch.maxBytes }).toEqual({
+        host,
+        code: 'dns_failed',
+        reason,
+        maxBytes: null,
+      });
+    }
+    // Failed lookups are not cached: each attempt asked A and AAAA again.
+    expect(dohNames).toEqual([
+      'reset.example.com',
+      'reset.example.com',
+      'reset.example.com',
+      'reset.example.com',
+      'huge.example.com',
+      'huge.example.com',
+      'huge.example.com',
+      'huge.example.com',
+    ]);
+
+    // The deadline keeps its own code while the DoH body is being read.
+    const deadline = new AbortController();
+    const stalled = resolvePublic('stall.example.com', transport, clock, { signal: deadline.signal });
+    await new Promise((r) => setTimeout(r, 0));
+    deadline.abort(new DOMException('deadline', 'TimeoutError'));
+    const timeout = await failure(stalled);
+    expect({ code: timeout.code, reason: timeout.reason }).toEqual({ code: 'timeout', reason: 'deadline' });
+
+    expect(hits).toEqual([]);
+  });
 });
