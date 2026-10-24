@@ -1,7 +1,21 @@
 // Error codes carried in the API error envelope `{error:{code, ...}}`.
-// The vocabulary follows api/examples/error-*.json (the frozen contract
-// fixtures) plus the codes ADR 0004 §9.4 adds for notify. Frozen in Wave 0:
-// add a code here (and to DEFAULT_STATUS) rather than inventing one inline.
+// OpenAPI types `code` as a plain string; this union is the vocabulary.
+// Frozen in Wave 0: add a code here (and to DEFAULT_STATUS) rather than
+// inventing one inline.
+//
+// - The eight codes of api/examples/error-*.json are a subset: bad_request,
+//   not_found, payload_too_large, validation_failed, rate_limited,
+//   upstream_error, not_ready and queue_full (N1 notify admission).
+//   scripts/validate_contracts.py (error_codes) checks that every example code
+//   is defined here and served with its DEFAULT_STATUS.
+// - invalid_cursor, invalid_json, identity_mismatch, method_not_allowed,
+//   rate_limited and not_found keep the Rust oracle's names.
+// - The other Rust oracle codes are renamed (recorded in
+//   docs/planning/AMENDMENTS-workers.md, "Error code vocabulary"):
+//   invalid_query and invalid_path → validation_failed, body_too_large →
+//   payload_too_large, invalid_body → bad_request, upstream_unavailable →
+//   upstream_error, storage_not_ready and storage_unavailable → not_ready.
+// - unauthorized (admin bearer token) and internal_error have no example.
 
 export const ERROR_CODES = [
   'bad_request', // 400: malformed request that is not JSON- or cursor-specific

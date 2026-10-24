@@ -1,11 +1,19 @@
 // Test-only IndexRpc adapter for HTTP handler tests (ADR 0004 §10.1).
 //
-// `makeLocalIndex(state, impl)` returns an IndexRpc whose methods run the given
-// DO module functions inside the harness DO via runInDurableObject, against
-// real DO SQLite, with deterministic dependencies (frozen clock, seeded
-// random, a transport that refuses all network). Methods without an
-// implementation reject, so a handler test cannot silently call something it
-// did not wire.
+// `makeLocalIndex(state, impl)` returns an IndexRpc whose methods run inside
+// the harness DO via runInDurableObject, against real DO SQLite, with
+// deterministic dependencies (frozen clock, seeded random, a transport that
+// refuses all network). Methods without an implementation reject, so a handler
+// test cannot silently call something it did not wire. `impl` takes either form:
+//
+// - ModuleImpl (the default): DO module functions `(m: ModuleDeps, ...args)`,
+//   exactly the signature IndexDO's RPC methods delegate to.
+// - Partial<IndexRpc>, the frozen W0-01 form, selected with `{ form: 'rpc' }`:
+//   plain RPC methods `(...args) => Promise<result>`, for canned answers. Inside
+//   such a method `this` is the ModuleDeps (with the DO's `db`), so it can also
+//   delegate to a module function: `history(q) { return history(this, q); }`.
+//   The two forms are indistinguishable at runtime (objects of functions keyed
+//   by IndexRpc method names, whose arity is not reliable), hence the option.
 
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
@@ -86,7 +94,22 @@ export class NotWiredError extends Error {
   }
 }
 
-export function makeLocalIndex(state: LocalIndexState, impl: ModuleImpl): LocalIndex {
+/** The frozen form: plain IndexRpc methods; `this` is the ModuleDeps inside the harness DO. */
+export type RpcImpl = Partial<IndexRpc> & ThisType<ModuleDeps>;
+
+export interface LocalIndexOptions {
+  /** `module` (default): `impl` is a ModuleImpl. `rpc`: `impl` is a Partial<IndexRpc>. */
+  form?: 'module' | 'rpc';
+}
+
+export function makeLocalIndex(state: LocalIndexState, impl: ModuleImpl, options?: { form?: 'module' }): LocalIndex;
+export function makeLocalIndex(state: LocalIndexState, impl: RpcImpl, options: { form: 'rpc' }): LocalIndex;
+export function makeLocalIndex(
+  state: LocalIndexState,
+  impl: ModuleImpl | RpcImpl,
+  options: LocalIndexOptions = {},
+): LocalIndex {
+  const form = options.form ?? 'module';
   const calls: LocalIndexCall[] = [];
   const logs: LogEntry[] = [];
   const networkAttempts: string[] = [];
@@ -119,11 +142,12 @@ export function makeLocalIndex(state: LocalIndexState, impl: ModuleImpl): LocalI
   for (const method of INDEX_RPC_METHODS) {
     index[method] = async (...args: unknown[]) => {
       calls.push({ method, args });
-      const fn = impl[method] as ((m: ModuleDeps, ...a: unknown[]) => unknown) | undefined;
+      const fn = (impl as Record<string, ((...a: unknown[]) => unknown) | undefined>)[method];
       if (fn === undefined) throw new NotWiredError(method);
-      return runInDurableObject(state.stub, async (_instance: HarnessDO, doState: DurableObjectState) =>
-        fn({ ...deps, db: doDb(doState.storage) }, ...args),
-      );
+      return runInDurableObject(state.stub, async (_instance: HarnessDO, doState: DurableObjectState) => {
+        const m: ModuleDeps = { ...deps, db: doDb(doState.storage) };
+        return form === 'rpc' ? fn.apply(m, args) : fn(m, ...args);
+      });
     };
   }
   return index as unknown as LocalIndex;

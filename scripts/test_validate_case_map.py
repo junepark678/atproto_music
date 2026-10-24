@@ -29,28 +29,58 @@ def committed():
             json.loads(WAVES.read_text()), AMENDMENTS.read_text())
 
 
-def run_cli(case_map=None, plan=None, map_text=None, amendments=None, extra=()):
+def run_cli(case_map=None, plan=None, map_text=None, amendments=None, waves=None, extra=()):
     """Run the validator CLI on temporary inputs; return (exit code, stdout, stderr)."""
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
         map_path, plan_path, amend_path = tmp / 'map.json', tmp / 'plan.json', tmp / 'amend.md'
+        waves_path = tmp / 'waves.json'
         map_path.write_text(map_text if map_text is not None else json.dumps(case_map if case_map is not None else committed()[0]))
         plan_path.write_text(json.dumps(plan if plan is not None else committed()[1]))
         amend_path.write_text(amendments if amendments is not None else AMENDMENTS.read_text())
+        waves_path.write_text(json.dumps(waves if waves is not None else committed()[2]))
         result = subprocess.run(
             [sys.executable, str(SCRIPT), '--map', str(map_path), '--plan', str(plan_path),
-             '--waves', str(WAVES), '--amendments', str(amend_path), *extra],
+             '--waves', str(waves_path), '--amendments', str(amend_path), *extra],
             capture_output=True, text=True, check=False)
         return result.returncode, result.stdout, result.stderr
 
 
-def problems(case_map, plan=None, amendments=None, **kwargs):
-    base_map, base_plan, waves, base_amend = committed()
+def problems(case_map, plan=None, amendments=None, waves=None, **kwargs):
+    base_map, base_plan, base_waves, base_amend = committed()
     try:
-        vcm.validate(case_map, plan or base_plan, waves, base_amend if amendments is None else amendments, **kwargs)
+        vcm.validate(case_map, plan or base_plan, base_waves if waves is None else waves,
+                     base_amend if amendments is None else amendments, **kwargs)
     except vcm.CaseMapError as error:
         return error.problems
     return []
+
+
+def unapplied_waves():
+    """The committed wave plan with every required wave amendment test taken out again.
+
+    The owner has applied the amendments to workers-waves.json; this rebuilds
+    the state before that, so the tests below exercise both states whatever the
+    committed plan currently holds.
+    """
+    waves = committed()[2]
+    pending, _ = vcm.wave_amendments(AMENDMENTS.read_text())
+    for wave in waves:
+        for package in wave['packages']:
+            package['tests'] = [test for test in package['tests'] if test not in pending]
+    return waves
+
+
+def applied_waves():
+    """The committed wave plan with every required wave amendment declared by its owning package."""
+    waves = committed()[2]
+    pending, _ = vcm.wave_amendments(AMENDMENTS.read_text())
+    declared = vcm.wave_test_ids(waves)
+    packages = {package['id']: package for wave in waves for package in wave['packages']}
+    for test, package in sorted(pending.items()):
+        if test not in declared:
+            packages[package]['tests'].append(test)
+    return waves
 
 
 def vcm_problems(case_map, plan, waves, amendments, **kwargs):
@@ -144,21 +174,22 @@ class CaseMapTests(unittest.TestCase):
 
     def test_check_tests_requires_existing_files_and_names(self):
         """--check-tests reports a missing test file or name"""
-        case_map, plan, waves, amendments = committed()
+        case_map, plan, _, amendments = committed()
         pending, parse_problems = vcm.wave_amendments(amendments)
         self.assertEqual(parse_problems, [])
-        declared = vcm.wave_test_ids(waves)
-        unapplied = sorted(test for test in pending if test not in declared)
-        self.assertTrue(unapplied)
-        # Until the owner applies the required wave amendments, --check-tests fails once per unapplied test id.
-        found = problems(case_map, check_tests=True, root=Path('/nonexistent'))
+        self.assertTrue(pending)
+        # Before the owner applies the required wave amendments, --check-tests fails once per unapplied test id.
+        before = unapplied_waves()
+        self.assertFalse(set(pending) & set(vcm.wave_test_ids(before)))
+        found = problems(case_map, waves=before, check_tests=True, root=Path('/nonexistent'))
         not_applied = [p for p in found if p.startswith('required wave amendment not applied:')]
-        self.assertEqual(len(not_applied), len(unapplied))
-        # Apply them to a copy of the wave plan, then build every referenced test file in a temporary root.
-        applied = copy.deepcopy(waves)
-        packages = {package['id']: package for wave in applied for package in wave['packages']}
-        for test in unapplied:
-            packages[pending[test]]['tests'].append(test)
+        self.assertEqual(len(not_applied), len(pending))
+        self.assertIn("required wave amendment not applied: W0-01 does not declare 'worker/test/config.test.ts › "
+                      "one-segment, uppercase and embedded-slash LEXICON_PREFIX values are rejected naming "
+                      "LEXICON_PREFIX; empty yields prefix null' in workers-waves.json", not_applied)
+        # Once applied, build every referenced test file in a temporary root.
+        applied = applied_waves()
+        self.assertEqual(problems(case_map, waves=applied), [])
         mapped = [e for e in case_map['cases'] if not e['target'].startswith('retired')]
         refs = sorted({test for e in mapped for test in [e['target'], *e.get('also', [])]})
         with tempfile.TemporaryDirectory() as tmp:
@@ -184,6 +215,21 @@ class CaseMapTests(unittest.TestCase):
             feed.write_text("it('a different title', () => {});\n")
             self.assertTrue(any('M7.3.1/anonymous_following: test name missing from web/test/routes/feed.test.tsx' in p
                                 for p in vcm_problems(case_map, plan, applied, amendments, root=root, check_tests=True)))
+            # The CLI exits nonzero, prints no PASS line, and lists each omitted case.
+            code, stdout, stderr = run_cli(case_map, waves=applied, extra=('--check-tests', '--root', str(root)))
+            self.assertEqual((code, stdout), (1, ''))
+            for case, target in history:
+                self.assertIn(f'FAIL case map: {case}: test file missing for {target!r}: worker/test/read/history.test.ts', stderr)
+            self.assertIn('FAIL case map: M7.3.1/anonymous_following: test name missing from web/test/routes/feed.test.tsx', stderr)
+            # Restoring the file and the name makes the same CLI run pass again.
+            for test in refs:
+                path, name, _ = vcm.test_location(test)
+                if path in ('worker/test/read/history.test.ts', 'web/test/routes/feed.test.tsx'):
+                    with (root / path).open('a', encoding='utf-8') as handle:
+                        handle.write(f"it({json.dumps(name, ensure_ascii=False)}, () => {{}});\n")
+            code, stdout, stderr = run_cli(case_map, waves=applied, extra=('--check-tests', '--root', str(root)))
+            self.assertEqual((code, stderr), (0, ''))
+            self.assertIn('; every referenced test file and name exists', stdout)
 
     def test_rejects_a_note_that_states_an_obligation(self):
         """rejects a note that states an obligation instead of a test id"""
@@ -224,11 +270,14 @@ class CaseMapTests(unittest.TestCase):
         pending, _ = vcm.wave_amendments(amendments)
         test = 'web/test/routes/feed.test.tsx › anonymous user selecting following sees a sign-in prompt and no scope=following request is sent'
         self.assertEqual(pending[test], 'W3-06')
-        # Removing its registry line leaves the referencing case pointing at an unknown id.
+        # Before the amendment is applied, removing its registry line leaves the
+        # referencing case pointing at an unknown id ...
         line = next(l for l in amendments.splitlines() if l.startswith(f'- `{test}`'))
-        found = problems(case_map, amendments=amendments.replace(line + '\n', '', 1))
+        found = problems(case_map, amendments=amendments.replace(line + '\n', '', 1), waves=unapplied_waves())
         self.assertEqual(found, [f"M7.3.1/anonymous_following: {test!r} is neither declared in workers-waves.json "
                                  "nor listed under Required wave amendments"])
+        # ... and once W3-06 declares it, the declaration alone admits the id.
+        self.assertEqual(problems(case_map, amendments=amendments.replace(line + '\n', '', 1), waves=applied_waves()), [])
         # An unreferenced registry entry, an unknown package and a package mismatch are each rejected.
         extra = amendments.replace(line, line + '\n- `web/test/routes/feed.test.tsx › orphan`', 1)
         self.assertEqual(problems(case_map, amendments=extra),
@@ -252,12 +301,18 @@ class CaseMapTests(unittest.TestCase):
         self.assertEqual(summary['mapped'] + summary['awaiting'] + summary['retired'], 258)
         self.assertEqual(len({e['case'] for e in case_map['cases']}), 258)
         pending, _ = vcm.wave_amendments(amendments)
-        self.assertEqual(summary['amendments'], len(pending))
+        declared = vcm.wave_test_ids(waves)
+        self.assertEqual(summary['amendments'], len([test for test in pending if test not in declared]))
+        # The same map is accepted before the amendments are applied, with every one counted as awaiting.
+        before = vcm.validate(case_map, plan, unapplied_waves(), amendments)
+        self.assertEqual((before['cases'], before['amendments']), (258, len(pending)))
+        self.assertGreater(before['awaiting'], 0)
+        self.assertEqual(before['mapped'] + before['awaiting'] + before['retired'], 258)
         result = subprocess.run([sys.executable, str(SCRIPT)], capture_output=True, text=True, check=False)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stderr, '')
         self.assertIn(f"PASS case map: 258 unique cases ({summary['mapped']} mapped to declared wave test ids, "
-                      f"{summary['awaiting']} awaiting {len(pending)} required wave amendment tests, "
+                      f"{summary['awaiting']} awaiting {summary['amendments']} required wave amendment tests, "
                       f"{summary['retired']} retired with amendment ids)", result.stdout)
         entries = {e['case']: e for e in case_map['cases']}
         # Review round 2: cases whose coverage exists are mapped, not retired.

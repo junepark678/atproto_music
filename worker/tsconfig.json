@@ -1,13 +1,15 @@
 {
-  // The Worker and IndexDO: Workers runtime types, plus cloudflare:test and
-  // Vite's import.meta.glob for the workerd test suites.
+  // The Worker and IndexDO, production sources only: Workers runtime types.
+  // The test suites are a separate project (test/tsconfig.json), so test-only
+  // declarations (the harness's Cloudflare.Env augmentation, cloudflare:test
+  // and Vite's client types) never reach this typecheck.
   "extends": "../tsconfig.base.json",
   "compilerOptions": {
     "rootDir": ".",
     "outDir": ".tsbuild",
     "lib": ["es2024"],
-    "types": ["@cloudflare/workers-types", "@cloudflare/vitest-plugin/types", "vite/client"]
+    "types": ["@cloudflare/workers-types"]
   },
-  "include": ["src/**/*.ts", "test/**/*.ts"],
+  "include": ["src/**/*.ts"],
   "references": [{ "path": "../packages/core" }, { "path": "../packages/atproto" }]
 }

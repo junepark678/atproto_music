@@ -524,6 +524,78 @@ describe('migrate', () => {
     });
   });
 
+  // M1.3.2/migration_rollback and M6.1.3/upgrade_failure: a valid statement
+  // followed by invalid SQL persists neither; the version stays the previous
+  // one and the existing database (DDL and data) survives, also across a
+  // restart with the broken code.
+  it('a migration whose second statement is invalid persists neither statement and keeps the previous schema version', async () => {
+    const stub = stubFor('migrate-rollback');
+    const broken = [
+      ...MIGRATIONS,
+      {
+        version: 2,
+        name: 'second',
+        // A valid statement, then invalid SQL (incomplete input).
+        statements: ['ALTER TABLE users ADD COLUMN nickname TEXT', "INSERT INTO timers(name, due_at) VALUES ('v2', 1"],
+      },
+    ];
+    let before: { objects: MasterRow[]; data: Record<string, unknown[]> } | undefined;
+    await runInDurableObject(stub, (instance: HarnessDO, state) => {
+      expect(instance.migration).toEqual({ status: 'ready', version: 1 });
+      const db = doDb(state.storage);
+      // Existing data that the failed upgrade must not delete.
+      db.run("INSERT INTO users(did, joined_at) VALUES ('did:plc:alice', '2026-01-15T12:00:00.000000000Z')");
+      db.run("INSERT INTO timers(name, due_at) VALUES ('drain', 5)");
+      before = { objects: appObjects(state.storage), data: dumpAll(state.storage) };
+
+      expect(() => migrate(state.storage, broken)).toThrow(/syntax error|incomplete input/);
+
+      // Neither the valid first statements nor the invalid one persisted.
+      expect(columns(state.storage, 'users')).not.toContain('nickname');
+      expect(db.all("SELECT name FROM timers WHERE name = 'v2'")).toEqual([]);
+      // The ledger still says version 1, and nothing else changed.
+      expect(db.all('SELECT version, name FROM schema_migrations ORDER BY version')).toEqual([
+        { version: 1, name: 'initial_workers_schema' },
+      ]);
+      expect({ objects: appObjects(state.storage), data: dumpAll(state.storage) }).toEqual(before);
+      // The current code still sees a ready version-1 schema.
+      expect(migrate(state.storage)).toEqual({ status: 'ready', version: 1 });
+    });
+
+    // After a restart (eviction keeps storage) the database is the same and
+    // the old code reports ready at version 1.
+    await evictDurableObject(stub);
+    await runInDurableObject(stub, (instance: HarnessDO, state) => {
+      expect(instance.migration).toEqual({ status: 'ready', version: 1 });
+      expect({ objects: appObjects(state.storage), data: dumpAll(state.storage) }).toEqual(before);
+      // Retrying the broken upgrade fails the same way and still changes nothing.
+      expect(() => migrate(state.storage, broken)).toThrow(/syntax error|incomplete input/);
+      expect({ objects: appObjects(state.storage), data: dumpAll(state.storage) }).toEqual(before);
+    });
+    const res = await exports.default.fetch('https://harness.test/harness/migrate-rollback');
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ migration: { status: 'ready', version: 1 } });
+
+    // Control on a separate DO: with a valid second statement the same first
+    // statement does persist, so the rollback above is what removed it.
+    await runInDurableObject(stubFor('migrate-rollback-control'), (_instance: HarnessDO, state) => {
+      const fixed = [
+        ...MIGRATIONS,
+        {
+          version: 2,
+          name: 'second',
+          statements: [
+            'ALTER TABLE users ADD COLUMN nickname TEXT',
+            "INSERT INTO timers(name, due_at) VALUES ('v2', 1)",
+          ],
+        },
+      ];
+      expect(migrate(state.storage, fixed)).toEqual({ status: 'ready', version: 2 });
+      expect(columns(state.storage, 'users')).toContain('nickname');
+      expect(doDb(state.storage).all('SELECT name, due_at FROM timers')).toEqual([{ name: 'v2', due_at: 1 }]);
+    });
+  });
+
   it('a later migration applies once, atomically, after migration 1', async () => {
     const stub = stubFor('migrate-next');
     await runInDurableObject(stub, (_instance: HarnessDO, state) => {

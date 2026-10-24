@@ -51,6 +51,13 @@ if [[ -f scripts/validate_case_map.py ]]; then
   python3 scripts/validate_case_map.py
 fi
 
+# The case-map validator's own regression tests (W0-AMEND: they went stale
+# unnoticed while no gate step ran them).
+if [[ -f scripts/test_validate_case_map.py ]]; then
+  step 'case map validator tests (test_validate_case_map.py)'
+  python3 -m unittest discover -s scripts -p test_validate_case_map.py
+fi
+
 if [[ -f scripts/check-bundle.ts ]]; then
   step 'production bundle guard (check-bundle.ts)'
   npx tsx scripts/check-bundle.ts
