@@ -24,6 +24,7 @@ import {
 } from '@atmusic/atproto/test-support/read-models';
 import { routerTransport } from '@atmusic/atproto/test-support/router-transport';
 import {
+  type CommitResult,
   carCommit,
   cidOf,
   corruptBlockByte,
@@ -43,6 +44,7 @@ import {
   parseCar,
   SignedRepo,
   TID_RE,
+  tidFromMicros,
   unsignedCommitBytes,
 } from '@atmusic/atproto/test-support/signed-repo';
 import { fixedClock } from '@atmusic/core/test-support/clock';
@@ -908,6 +910,104 @@ it('concurrent writes to one repo are serialized: one RecordAlreadyExists, no lo
   expect(latest).toEqual({ cid: repo2.head!.cid, rev: repo2.head!.rev });
   expect(pds.count('com.atproto.repo.createRecord')).toBe(4);
   expect(pds.count('com.atproto.repo.putRecord')).toBe(2);
+
+  // A direct (external) writer whose commit is started inside createRecord's
+  // check-to-commit window (from the PDS clock read that mints the TID rkey,
+  // after the swapCommit check and before the existence check). It shares the
+  // repo's write chain, so it waits for createRecord and becomes an update;
+  // createRecord's own commit is a create and nothing is overwritten unseen.
+  const NOW_MS = Date.UTC(2026, 0, 15, 12, 0, 0);
+  const tidRkey = tidFromMicros(NOW_MS * 1000);
+  const repo3 = new SignedRepo(ALICE, keys.alice, { clock });
+  let external: Promise<CommitResult> | null = null;
+  const pds3 = new FakePds(HOST, {
+    clock: {
+      nowMs: () => {
+        external ??= repo3.put(SCROBBLE, tidRkey, recordOf('r01'));
+        return NOW_MS;
+      },
+    },
+  });
+  await pds3.addAccount(repo3);
+  const pdsOps: string[][] = [];
+  pds3.onCommit((_did, c) => pdsOps.push(c.ops.map((op) => `${op.action} ${op.rkey}`)));
+  const t3 = routerTransport({ pds: { [HOST]: pds3 } });
+  const res3 = await t3(
+    post(HOST, 'com.atproto.repo.createRecord', { repo: ALICE, collection: SCROBBLE, record: recordOf('r02') }, token),
+  );
+  const body3 = await json(res3);
+  expect(res3.status).toBe(200);
+  expect(body3).toMatchObject({ uri: `at://${ALICE}/${SCROBBLE}/${tidRkey}`, cid: cidOf(recordOf('r02')) });
+  expect(pdsOps).toEqual([[`create ${tidRkey}`]]);
+  const ext3 = await external!;
+  expect(ext3.ops.map((op) => [op.action, op.prev, op.cid])).toEqual([
+    ['update', cidOf(recordOf('r02')), cidOf(recordOf('r01'))],
+  ]);
+  expect(ext3.since).toBe((body3.commit as { rev: string }).rev);
+  expect((await repo3.list(SCROBBLE)).map((r) => [r.rkey, r.cid])).toEqual([[tidRkey, cidOf(recordOf('r01'))]]);
+  expect(repo3.history).toHaveLength(3);
+
+  // An external write queued before createRecord reaches the repo commits first: createRecord then conflicts.
+  const repo3b = new SignedRepo(ALICE, keys.alice, { clock });
+  const pds3b = new FakePds(HOST, { clock });
+  await pds3b.addAccount(repo3b);
+  const pds3bCommits: string[] = [];
+  pds3b.onCommit((_did, c) => pds3bCommits.push(c.cid));
+  const t3b = routerTransport({ pds: { [HOST]: pds3b } });
+  const queued = repo3b.put(SCROBBLE, 'e', recordOf('r01'));
+  const res3b = await t3b(
+    post(
+      HOST,
+      'com.atproto.repo.createRecord',
+      { repo: ALICE, collection: SCROBBLE, rkey: 'e', record: recordOf('r02') },
+      token,
+    ),
+  );
+  expect((await queued).ops.map((op) => op.action)).toEqual(['create']);
+  expect([res3b.status, (await json(res3b)).error]).toEqual([400, 'RecordAlreadyExists']);
+  expect(pds3bCommits).toEqual([]);
+  expect((await repo3b.list(SCROBBLE)).map((r) => [r.rkey, r.cid])).toEqual([['e', cidOf(recordOf('r01'))]]);
+  expect(repo3b.history).toHaveLength(2);
+
+  // The reverse order: once createRecord holds the repo, an external put waits and becomes an update.
+  const repo4 = new SignedRepo(ALICE, keys.alice, { clock });
+  const pds4 = new FakePds(HOST, { clock });
+  await pds4.addAccount(repo4);
+  const t4 = routerTransport({ pds: { [HOST]: pds4 } });
+  let externalAfter: Promise<CommitResult> | null = null;
+  pds4.onCommit(() => {
+    // Fired inside the PDS write, before its transaction releases the repo.
+    externalAfter ??= repo4.put(SCROBBLE, 'e', recordOf('r01'));
+  });
+  const created = await t4(
+    post(
+      HOST,
+      'com.atproto.repo.createRecord',
+      { repo: ALICE, collection: SCROBBLE, rkey: 'e', record: recordOf('r02') },
+      token,
+    ),
+  );
+  expect(created.status).toBe(200);
+  const ext4 = await externalAfter!;
+  expect(ext4.ops.map((op) => [op.action, op.prev, op.cid])).toEqual([
+    ['update', cidOf(recordOf('r02')), cidOf(recordOf('r01'))],
+  ]);
+  expect(ext4.since).toBe(((await json(created)).commit as { rev: string }).rev);
+  expect(repo4.history).toHaveLength(3);
+
+  // Key rotation through the PDS serializes with an in-flight external write: that write is signed by the old key.
+  const repo5 = new SignedRepo(ALICE, keys.alice, { clock });
+  const pds5 = new FakePds(HOST, { clock });
+  await pds5.addAccount(repo5);
+  const pending = repo5.put(SCROBBLE, 'e', recordOf('r01'));
+  const rotated = await pds5.rotateKey(ALICE, keys.aliceRotated);
+  expect((await pending).ops.map((op) => op.action)).toEqual(['create']);
+  expect(repo5.history.map((c) => c.signedBy)).toEqual([
+    keys.alice.didKey,
+    keys.alice.didKey,
+    keys.aliceRotated.didKey,
+  ]);
+  expect(rotated!.since).toBe((await pending).rev);
 });
 
 it('fake Jetstream replays inclusively from cursor and refuses cursors older than lookback', async () => {

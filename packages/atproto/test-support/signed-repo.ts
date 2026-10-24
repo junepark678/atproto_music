@@ -235,6 +235,17 @@ export interface CommitOptions {
   rev?: string;
 }
 
+/** A view of a SignedRepo inside `transact`: its writes run under the lock already held. */
+export interface RepoTransaction {
+  readonly head: CommitInfo | null;
+  getRecord(collection: string, rkey: string): ReturnType<SignedRepo['getRecord']>;
+  writes(ops: readonly WriteOp[], o?: CommitOptions): Promise<CommitResult>;
+  put(collection: string, rkey: string, record: unknown, o?: CommitOptions): Promise<CommitResult>;
+  delete(collection: string, rkey: string, o?: CommitOptions): Promise<CommitResult>;
+  commit(o?: CommitOptions): Promise<CommitResult>;
+  rotateKey(key: TestKey): void;
+}
+
 export interface SignedRepoOptions {
   /** Drives TID revs. Defaults to a fixed 2026-01-15T12:00:00Z. */
   clock?: Clock;
@@ -327,6 +338,51 @@ export class SignedRepo {
     const run = this.lock.then(fn);
     this.lock = run.catch(() => {});
     return run;
+  }
+
+  /**
+   * Run `fn` holding this repo's write lock, the same chain that `put`,
+   * `delete`, `commit`, `writes` and `gc` take. Reads and writes made through
+   * `tx` see no interleaved commit, so a check (swapCommit, swapRecord,
+   * existence) and the commit it guards are atomic against every other writer.
+   * `tx` is unusable once `fn` settles; calling the repo's own mutators from
+   * inside `fn` would wait for `fn` itself and never resolve.
+   */
+  transact<T>(fn: (tx: RepoTransaction) => Promise<T>): Promise<T> {
+    return this.exclusive(async () => {
+      let open = true;
+      const live = () => {
+        if (!open) throw new Error(`transaction on ${this.did} already finished`);
+      };
+      const writes = (ops: readonly WriteOp[], o: CommitOptions = {}) => {
+        live();
+        return this.applyWrites(ops, o);
+      };
+      const head = () => this.head;
+      const tx: RepoTransaction = {
+        get head() {
+          live();
+          return head();
+        },
+        getRecord: (collection, rkey) => {
+          live();
+          return this.getRecord(collection, rkey);
+        },
+        writes,
+        put: (collection, rkey, record, o) => writes([{ action: 'put', collection, rkey, record }], o),
+        delete: (collection, rkey, o) => writes([{ action: 'delete', collection, rkey }], o),
+        commit: (o) => writes([], o),
+        rotateKey: (key) => {
+          live();
+          this.rotateKey(key);
+        },
+      };
+      try {
+        return await fn(tx);
+      } finally {
+        open = false;
+      }
+    });
   }
 
   /**

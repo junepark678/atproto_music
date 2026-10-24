@@ -30,7 +30,7 @@ import {
   xrpcError,
   xrpcJson,
 } from './router-transport';
-import { type CommitResult, encodeCar, type SignedRepo, tidFromMicros } from './signed-repo';
+import { type CommitResult, encodeCar, type RepoTransaction, type SignedRepo, tidFromMicros } from './signed-repo';
 
 export type AccountStatus = 'active' | 'deactivated' | 'takendown' | 'suspended' | 'deleted';
 
@@ -93,8 +93,6 @@ export class FakePds {
   private readonly listeners: CommitListener[] = [];
   private readonly clock: Clock;
   private lastTidMicros = 0;
-  /** Per-DID tail of the write chain: a write's swap/existence check and its commit are atomic. */
-  private readonly writeLocks = new Map<string, Promise<unknown>>();
 
   constructor(
     readonly host: string,
@@ -173,12 +171,14 @@ export class FakePds {
 
   /**
    * Rotate the repo signing key. With `resign` (default) the PDS immediately
-   * re-signs the current tree with the new key as a new commit.
+   * re-signs the current tree with the new key as a new commit. Runs on the
+   * repo's write lock, so a write already in flight is signed by the old key.
    */
-  async rotateKey(did: string, key: TestKey, o: { resign?: boolean } = {}): Promise<CommitResult | null> {
-    const repo = this.account(did).repo;
-    repo.rotateKey(key);
-    return o.resign === false ? null : repo.commit();
+  rotateKey(did: string, key: TestKey, o: { resign?: boolean } = {}): Promise<CommitResult | null> {
+    return this.account(did).repo.transact(async (tx) => {
+      tx.rotateKey(key);
+      return o.resign === false ? null : tx.commit();
+    });
   }
 
   /** Inject a fault for the next `times` calls matching `match` (before processing). */
@@ -403,33 +403,36 @@ export class FakePds {
     return tidFromMicros(this.lastTidMicros);
   }
 
-  /** Run `fn` after every earlier write to `did` through this PDS has settled. */
-  private exclusive<T>(did: string, fn: () => Promise<T>): Promise<T> {
-    const run = (this.writeLocks.get(did) ?? Promise.resolve()).then(fn);
-    this.writeLocks.set(
-      did,
-      run.catch(() => {}),
-    );
-    return run;
-  }
-
+  /**
+   * The swap/existence checks and the commit run in one `SignedRepo.transact`,
+   * on the repo's own write lock. Every writer of the repo (this PDS, direct
+   * `repo.put`/`delete`, the kit's external writers, key rotation, gc) shares
+   * that one chain, so no commit can land between a check and its write.
+   */
   private write(nsid: string, req: Request, body: Record<string, unknown> | null): Promise<Response> {
     const authed = this.authenticate(req);
-    return this.exclusive(authed, () => this.writeLocked(nsid, authed, body));
+    const a = this.account(authed);
+    return a.repo.transact((tx) => this.writeLocked(nsid, authed, a, tx, body));
   }
 
-  private async writeLocked(nsid: string, authed: string, body: Record<string, unknown> | null): Promise<Response> {
+  private async writeLocked(
+    nsid: string,
+    authed: string,
+    a: PdsAccount,
+    tx: RepoTransaction,
+    body: Record<string, unknown> | null,
+  ): Promise<Response> {
     if (!body) return fail(400, 'InvalidRequest', 'Request body must be a JSON object');
     const repoId = typeof body.repo === 'string' ? body.repo : fail(400, 'InvalidRequest', 'repo is required');
     const did = this.resolveRepo(repoId);
     if (did !== authed) fail(403, 'Forbidden', 'repo does not belong to the authenticated account');
-    const a = this.account(authed);
+    if (this.accounts.get(authed) !== a) fail(400, 'RepoNotFound', `Could not find repo for DID: ${authed}`);
     if (a.status !== 'active') fail(400, 'AccountDeactivated', `Account is ${a.status}`);
     const collection =
       typeof body.collection === 'string' && body.collection.length > 0
         ? body.collection
         : fail(400, 'InvalidRequest', 'collection is required');
-    const head = a.repo.head!;
+    const head = tx.head!;
     if (body.swapCommit !== undefined && body.swapCommit !== head.cid) {
       fail(400, 'InvalidSwap', `Commit was at ${head.cid}`);
     }
@@ -444,14 +447,14 @@ export class FakePds {
       fail(400, 'InvalidRequest', `invalid rkey: ${String(body.rkey)}`);
     }
     const uri = `at://${authed}/${collection}/${rkey}`;
-    const current = await a.repo.getRecord(collection, rkey);
+    const current = await tx.getRecord(collection, rkey);
 
     if (nsid === 'com.atproto.repo.deleteRecord') {
       if (body.swapRecord !== undefined && body.swapRecord !== (current?.cid ?? null)) {
         fail(400, 'InvalidSwap', `Record was at ${current?.cid ?? 'null'}`);
       }
       if (!current) return xrpcJson({});
-      const result = await a.repo.delete(collection, rkey);
+      const result = await tx.delete(collection, rkey);
       this.emit(authed, result);
       return xrpcJson({ commit: { cid: result.cid, rev: result.rev } });
     }
@@ -469,7 +472,7 @@ export class FakePds {
     } else if (body.swapRecord !== undefined && body.swapRecord !== (current?.cid ?? null)) {
       fail(400, 'InvalidSwap', `Record was at ${current?.cid ?? 'null'}`);
     }
-    const result = await a.repo.put(collection, rkey, record);
+    const result = await tx.put(collection, rkey, record);
     this.emit(authed, result);
     const cid = result.ops[0]?.cid ?? current!.cid;
     return xrpcJson({ uri, cid, commit: { cid: result.cid, rev: result.rev }, validationStatus: 'unknown' });
