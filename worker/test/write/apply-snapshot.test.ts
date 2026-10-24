@@ -22,6 +22,7 @@ import {
   follow,
   NOW_MS,
   NOW_NS,
+  NOW_STORAGE,
   OPTS,
   PREFIX,
   putProof,
@@ -219,6 +220,13 @@ describe('applySnapshotChunk', () => {
         indexing_state: 'current',
         last_snapshot_at_ms: NOW_MS,
         max_rev: add.commit.rev,
+      });
+      // Completion raises the lastIndexedAt marks through the W2-05 writer.
+      expect(db.one('SELECT indexed_at FROM users WHERE did = ?', ALICE)).toEqual({
+        indexed_at: NOW_STORAGE,
+      });
+      expect(db.one("SELECT last_indexed_at FROM indexing_status WHERE scope = 'global'")).toEqual({
+        last_indexed_at: NOW_STORAGE,
       });
       // Final state equals the newest verified repository.
       expect(db.all('SELECT uri, cid FROM scrobbles ORDER BY uri')).toEqual(finalRepo);

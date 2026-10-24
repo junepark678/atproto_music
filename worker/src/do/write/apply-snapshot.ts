@@ -52,6 +52,7 @@
 
 import { toMs, toStorage } from '@atmusic/core/timestamp';
 import type { Db } from '../db';
+import { noteIndexed } from '../status';
 import { isSuppressed, loadUser, raiseMaxRev } from './account-state';
 import { type ApplyOptions, applyRecordTarget } from './apply-record';
 import {
@@ -235,6 +236,8 @@ export function applySnapshotChunk(db: Db, c: SnapshotChunk): ChunkResult {
     }
     res.written++;
   }
+  // Projection rows were stamped with indexed_at: raise the high-water marks (W2-05).
+  if (res.written > 0) noteIndexed(db, c.did, c.nowNs);
 
   // Sweep the interval: rows older than headRev whose key is not in the chunk.
   const lo = c.intervalLo === null ? `at://${c.did}/` : `at://${c.did}/${c.intervalLo}`;
@@ -294,14 +297,14 @@ export function completeSnapshot(db: Db, c: CompleteSnapshotInput): CompleteResu
   if (!admission.ok) return { outcome: admission.outcome };
   db.run(
     `UPDATE users SET active = ?, account_status = CASE WHEN ? = 1 THEN 'active' ELSE account_status END,
-       indexing_state = 'current', last_snapshot_at_ms = ?, indexed_at = ?
+       indexing_state = 'current', last_snapshot_at_ms = ?
      WHERE did = ?`,
     c.accountActive ? 1 : 0,
     c.accountActive ? 1 : 0,
     toMs(c.nowNs),
-    toStorage(c.nowNs),
     c.did,
   );
+  noteIndexed(db, c.did, c.nowNs);
   raiseFloors(db, c.did, c.headRev);
   return { outcome: 'complete', active: c.accountActive };
 }

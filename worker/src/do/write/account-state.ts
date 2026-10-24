@@ -15,9 +15,10 @@
 // - Suppressed (disconnected) DIDs have no users row; both transitions are
 //   no-ops for them and for unknown DIDs.
 
-import { toMs, toStorage } from '@atmusic/core/timestamp';
+import { toMs } from '@atmusic/core/timestamp';
 import type { AccountStatus, UserRow } from '../contracts';
 import type { Db } from '../db';
+import { noteIndexed } from '../status';
 
 export function loadUser(db: Db, did: string): UserRow | null {
   return db.one<UserRow>('SELECT * FROM users WHERE did = ?', did);
@@ -40,18 +41,19 @@ export function allocateGeneration(db: Db): number {
 
 /**
  * After a verified proof at `rev` was applied: `max_rev = max(max_rev, rev)`,
- * `indexed_at`, and `last_activity_ms`.
+ * `last_activity_ms`, and the `indexed_at` high-water marks through the W2-05
+ * writer `noteIndexed` (the only code that sets `users.indexed_at`).
  */
 export function advanceUser(db: Db, did: string, rev: string, nowNs: bigint): void {
   db.run(
     `UPDATE users SET max_rev = CASE WHEN max_rev IS NULL OR max_rev < ? THEN ? ELSE max_rev END,
-       indexed_at = ?, last_activity_ms = ? WHERE did = ?`,
+       last_activity_ms = ? WHERE did = ?`,
     rev,
     rev,
-    toStorage(nowNs),
     toMs(nowNs),
     did,
   );
+  noteIndexed(db, did, nowNs);
 }
 
 /**

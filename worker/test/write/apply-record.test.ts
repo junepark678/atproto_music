@@ -112,6 +112,11 @@ describe('applyRecordProof', () => {
         },
       ]);
       expect(userRow(db, ALICE)).toMatchObject({ max_rev: proof.commit.rev, stats_version: 1, active: 1 });
+      // The W2-05 writer raised both lastIndexedAt high-water marks in the same tx.
+      expect(db.one('SELECT indexed_at FROM users WHERE did = ?', ALICE)).toEqual({ indexed_at: NOW_STORAGE });
+      expect(db.one("SELECT last_indexed_at FROM indexing_status WHERE scope = 'global'")).toEqual({
+        last_indexed_at: NOW_STORAGE,
+      });
       expect(visibleHistory(db, ALICE)).toEqual([uri]);
       expect(db.all('SELECT * FROM counters')).toEqual([]);
     });
