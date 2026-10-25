@@ -1,0 +1,79 @@
+{
+  "scrobbles": {
+    "scrobble": [
+      {
+        "track": {
+          "corrected": "0",
+          "#text": "First Track"
+        },
+        "artist": {
+          "corrected": "0",
+          "#text": "First Artist"
+        },
+        "album": {
+          "corrected": "0",
+          "#text": "First Album"
+        },
+        "albumArtist": {
+          "corrected": "0",
+          "#text": ""
+        },
+        "timestamp": "1768471200",
+        "ignoredMessage": {
+          "code": "0",
+          "#text": ""
+        }
+      },
+      {
+        "track": {
+          "corrected": "0",
+          "#text": "Second Track"
+        },
+        "artist": {
+          "corrected": "0",
+          "#text": "Second Artist"
+        },
+        "album": {
+          "corrected": "0",
+          "#text": ""
+        },
+        "albumArtist": {
+          "corrected": "0",
+          "#text": ""
+        },
+        "timestamp": "1768474800",
+        "ignoredMessage": {
+          "code": "0",
+          "#text": ""
+        }
+      },
+      {
+        "track": {
+          "corrected": "0",
+          "#text": "Old Track"
+        },
+        "artist": {
+          "corrected": "0",
+          "#text": "Old Artist"
+        },
+        "album": {
+          "corrected": "0",
+          "#text": ""
+        },
+        "albumArtist": {
+          "corrected": "0",
+          "#text": ""
+        },
+        "timestamp": "1000000000",
+        "ignoredMessage": {
+          "code": "3",
+          "#text": "Timestamp too old"
+        }
+      }
+    ],
+    "@attr": {
+      "accepted": 2,
+      "ignored": 1
+    }
+  }
+}

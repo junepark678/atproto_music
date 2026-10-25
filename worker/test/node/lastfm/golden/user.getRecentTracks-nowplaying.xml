@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<lfm status="ok">
+  <recenttracks user="alice" page="1" perPage="50" totalPages="1" total="1">
+    <track nowplaying="true">
+      <artist mbid="">Now Artist</artist>
+      <streamable>0</streamable>
+      <image size="small"/>
+      <image size="medium"/>
+      <image size="large"/>
+      <image size="extralarge"/>
+      <mbid/>
+      <album mbid="">Now Album</album>
+      <name>Now Track</name>
+      <url>https://www.last.fm/music/Now+Artist/_/Now+Track</url>
+    </track>
+    <track>
+      <artist mbid="">Test Artist</artist>
+      <streamable>0</streamable>
+      <image size="small"/>
+      <image size="medium"/>
+      <image size="large"/>
+      <image size="extralarge"/>
+      <mbid>00000000-0000-4000-8000-000000000001</mbid>
+      <album mbid="">Test Album</album>
+      <name>Test Track</name>
+      <url>https://www.last.fm/music/Test+Artist/_/Test+Track</url>
+      <date uts="1768474800">15 Jan 2026, 11:00</date>
+    </track>
+  </recenttracks>
+</lfm>
