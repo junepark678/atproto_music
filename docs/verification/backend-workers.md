@@ -8,6 +8,8 @@ bash scripts/acceptance/workers-backend.sh --out DIR  # another output directory
 bash scripts/acceptance/workers-backend.sh --skip e2e # negative control: always exits 1
 ```
 
+`--out DIR` may be inside or outside the repository. A relative `DIR` is resolved against the caller's working directory. The gate writes a `.workers-backend-gate` marker into its output directory. It refuses (exit 2) a non-empty `DIR` that has no marker, so `--out .` or `--out docs/verification` deletes nothing. On each run it removes only the file names it writes itself, such as `<step>.log`, `<step>.status`, `cases.jsonl` and `summary.json`. Other files in the directory are left in place.
+
 The script never deploys and never runs a live gate body. It never contacts Cloudflare, a PDS, a relay or Jetstream. Everything it starts listens on 127.0.0.1: workerd under vitest, plus `wrangler dev` and `@atproto/dev-env` for Playwright.
 
 ## Steps

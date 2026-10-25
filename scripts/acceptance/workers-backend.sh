@@ -32,7 +32,9 @@
 # the operator (docs/verification/workers-live.md); their recorded evidence is
 # classified here.
 #
-# Output (default work/acceptance/workers-backend/): one log per step,
+# Output (default work/acceptance/workers-backend/; a relative --out is
+# relative to the caller's directory, and a non-empty --out without the gate's
+# .workers-backend-gate marker is refused with exit 2): one log per step,
 # tests.jsonl (every executed test record), cases.jsonl (one record per plan
 # case: case, result, targets, commands, count, commit, bundleSha256),
 # live.json and summary.json. stdout lists each case record and the summary,
@@ -46,11 +48,19 @@
 # never a pass); 2 on a usage error.
 set -uo pipefail
 
+# A relative --out is relative to the caller's directory, not the repo root.
+CALLER_PWD="$PWD"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT" || exit 2
 
 STEPS=(check-ts acceptance e2e python check-bundle case-map goldens live-noenv live)
-OUT="$ROOT/work/acceptance/workers-backend"
+LIVE_GATES=(workers_oauth_check workers_ingest_check pds_compat_check ssrf_probe workers_socket_soak)
+DEFAULT_OUT="$ROOT/work/acceptance/workers-backend"
+OUT="$DEFAULT_OUT"
+# Written into every output directory the gate owns. A non-empty --out
+# directory without it is refused, so the cleanup below never touches a
+# directory the gate did not create.
+MARKER=".workers-backend-gate"
 SKIP=()
 
 usage() {
@@ -63,6 +73,8 @@ while [[ $# -gt 0 ]]; do
     --out)
       [[ $# -ge 2 ]] || usage
       OUT="$2"
+      [[ -n "$OUT" ]] || usage
+      [[ "$OUT" == /* ]] || OUT="$CALLER_PWD/$OUT"
       shift 2
       ;;
     --skip)
@@ -78,9 +90,21 @@ while [[ $# -gt 0 ]]; do
 done
 
 mkdir -p "$OUT" || exit 2
-OUT="$(cd "$OUT" && pwd)"
-rm -f "$OUT"/*.log "$OUT"/*.jsonl "$OUT"/*.json "$OUT"/*.status "$OUT"/*.command "$OUT"/*.exit \
-  "$OUT"/*.stderr "$OUT"/*.txt "$OUT"/*.ts
+OUT="$(cd "$OUT" && pwd)" || exit 2
+if [[ "$OUT" != "$DEFAULT_OUT" && ! -f "$OUT/$MARKER" && -n "$(ls -A "$OUT" 2>/dev/null)" ]]; then
+  echo "workers-backend: refusing --out $OUT: it is not empty and was not created by this gate" \
+    "(no $MARKER); pass a new or empty directory" >&2
+  exit 2
+fi
+echo "output directory of scripts/acceptance/workers-backend.sh; its known files are replaced on each run" \
+  > "$OUT/$MARKER" || exit 2
+# Remove the previous run's records: only the file names this gate writes.
+stale=(check-ts.jsonl acceptance-report.json acceptance.jsonl e2e-report.json python.jsonl
+  live-prerequisites.ts live-prerequisites.mts live-prerequisites.json live-inventory.txt live-inventory.exit
+  tests.jsonl cases.jsonl live.json summary.json)
+for s in "${STEPS[@]}"; do stale+=("$s.log" "$s.status" "$s.command"); done
+for g in "${LIVE_GATES[@]}"; do stale+=("live-noenv-$g.json" "live-noenv-$g.stderr" "live-noenv-$g.exit"); done
+for f in "${stale[@]}"; do rm -f -- "${OUT:?}/$f"; done
 
 # Python contract deps (api/requirements-contracts.txt), as in check-ts.sh.
 if [[ -z "${VIRTUAL_ENV:-}" ]]; then
@@ -218,8 +242,6 @@ step_goldens() {
   bash scripts/check_goldens.sh
 }
 
-LIVE_GATES=(workers_oauth_check workers_ingest_check pds_compat_check ssrf_probe workers_socket_soak)
-
 step_live_noenv() {
   local gate unset_args=() name status all=0
   while IFS= read -r name; do unset_args+=(-u "$name"); done < <(compgen -e | grep '^ATMUSIC_LIVE_' || true)
@@ -238,7 +260,9 @@ step_live_noenv() {
 step_live() {
   # Prerequisites from the operator's environment, through each gate's own
   # requirement list and redaction; no gate body runs and nothing is fetched.
-  cat > "$OUT/live-prerequisites.ts" <<'TS'
+  # .mts: always an ES module (top-level await), wherever --out puts it; a .ts
+  # outside the repo has no "type": "module" package.json and compiles as CJS.
+  cat > "$OUT/live-prerequisites.mts" <<'TS'
 import { pathToFileURL } from 'node:url';
 const root = process.argv[2] as string;
 const harness = await import(pathToFileURL(`${root}/scripts/live/live-gate.ts`).href);
@@ -254,7 +278,7 @@ for (const script of gates) {
 }
 console.log(JSON.stringify(out));
 TS
-  npx tsx "$OUT/live-prerequisites.ts" "$ROOT" > "$OUT/live-prerequisites.json" || return 1
+  npx tsx "$OUT/live-prerequisites.mts" "$ROOT" > "$OUT/live-prerequisites.json" || return 1
   local bundle inventory="${ATMUSIC_LIVE_INVENTORY:-$ROOT/docs/verification/live-evidence.json}" status
   bundle="$(sed -n 's/^check-bundle: bundle sha256 \([0-9a-f]\{64\}\)$/\1/p' "$OUT/check-bundle.log" 2>/dev/null | tail -n 1)"
   if [[ -n "$bundle" ]]; then
