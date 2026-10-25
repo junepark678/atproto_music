@@ -14,6 +14,9 @@ import { describe, expect, it } from 'vitest';
 import type { HistoryQuery, ModuleDeps, RowsResult, ScrobbleRow } from '../../src/do/contracts';
 import { doDb } from '../../src/do/db';
 import { MIGRATIONS, SCHEMA_VERSION } from '../../src/do/schema';
+import * as testShim from '../node/support/cloudflare-test-shim';
+import { shimObject, shimStorageDir, stubId } from '../node/support/cloudflare-workers-shim';
+import { isFacade } from '../node/support/do-storage-facade';
 import type { HarnessDO } from './harness-do';
 import { INDEX_RPC_METHODS, makeLocalIndex, NotWiredError, type RpcImpl } from './local-index';
 
@@ -150,7 +153,19 @@ describe('worker/test/harness', () => {
     expect(index.networkAttempts).toEqual([]);
   });
 
+  // ADR 0005 §15.3 (N2-02): the workerd-helper existence check, replaced by
+  // checks of the Node shim that `cloudflare:test` resolves to.
   it('pinned cloudflare:test exposes the DO, alarm, eviction and cron helpers', async () => {
+    const shimHelpers = {
+      runInDurableObject: testShim.runInDurableObject,
+      runDurableObjectAlarm: testShim.runDurableObjectAlarm,
+      evictDurableObject: testShim.evictDurableObject,
+      evictAllDurableObjects: testShim.evictAllDurableObjects,
+      createScheduledController: testShim.createScheduledController,
+      createExecutionContext: testShim.createExecutionContext,
+      waitOnExecutionContext: testShim.waitOnExecutionContext,
+      listDurableObjectIds: testShim.listDurableObjectIds,
+    };
     const helpers = {
       runInDurableObject,
       runDurableObjectAlarm,
@@ -161,22 +176,48 @@ describe('worker/test/harness', () => {
       waitOnExecutionContext,
       listDurableObjectIds,
     };
-    for (const [name, helper] of Object.entries(helpers)) expect(typeof helper, name).toBe('function');
-    // They work against the harness DO: no alarm is armed after migration.
+    // `cloudflare:test` is the shim (worker/vitest.modules.config.ts alias), not workerd.
+    for (const [name, helper] of Object.entries(helpers)) {
+      expect(typeof helper, name).toBe('function');
+      expect(helper, name).toBe(shimHelpers[name as keyof typeof helpers]);
+    }
     const stub = env.HARNESS.get(env.HARNESS.idFromName('helpers'));
-    await runInDurableObject(stub, (_i, state) => {
+    const entry = shimObject(stubId(stub));
+    // The harness DO's storage is the DO-storage facade over this file's own SQLite file.
+    const first = await runInDurableObject(stub, (instance: HarnessDO, state) => {
+      expect(isFacade(state.storage)).toBe(true);
       expect(state.storage.sql.exec('SELECT count(*) AS n FROM schema_migrations').one()).toEqual({
         n: MIGRATIONS.length,
       });
+      return instance;
     });
+    expect(entry.path.startsWith(`${shimStorageDir()}/`)).toBe(true);
+    // No alarm is armed after migration, so none runs.
     expect(await runDurableObjectAlarm(stub)).toBe(false);
+    // An armed alarm is run (and removed) by runDurableObjectAlarm: the harness
+    // DO has no alarm() handler, so running it is an error, and the alarm is gone.
+    await runInDurableObject(stub, (_i, state) => state.storage.setAlarm(1_768_478_400_000));
+    await expect(runDurableObjectAlarm(stub)).rejects.toThrow(/no alarm\(\) handler/);
+    expect(await runInDurableObject(stub, (_i, state) => state.storage.getAlarm())).toBeNull();
+    expect(await runDurableObjectAlarm(stub)).toBe(false);
+
     const controller = createScheduledController({ scheduledTime: 1_768_478_400_000, cron: '*/5 * * * *' });
     expect(controller.cron).toBe('*/5 * * * *');
     expect(controller.scheduledTime).toBe(1_768_478_400_000);
+    const ctx = createExecutionContext();
+    let settled = false;
+    ctx.waitUntil(Promise.resolve().then(() => (settled = true)));
+    await waitOnExecutionContext(ctx);
+    expect(settled).toBe(true);
+
+    // Eviction reopens the same file with a new instance, which migrated again.
     await evictDurableObject(stub);
-    await runInDurableObject(stub, (instance) => {
+    await runInDurableObject(stub, (instance: HarnessDO) => {
+      expect(instance).not.toBe(first);
       expect(instance.migration).toEqual({ status: 'ready', version: SCHEMA_VERSION });
     });
+    expect(entry.constructions).toBe(2);
+    expect((await listDurableObjectIds(env.HARNESS)).map(String)).toContain(stubId(stub).toString());
   });
 
   // N1-10: suites that pinned schema version 1 derive it from the schema.

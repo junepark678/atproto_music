@@ -1,13 +1,27 @@
-// SQL conformance of real DO SQLite in the pinned workerd (ADR 0004 §3.2).
-// Every expectation is SQLite's documented behaviour or Cloudflare's documented
-// DO behaviour, hardcoded here; a runtime upgrade that changes one fails loudly.
+// SQL conformance of the Node host's SQLite (ADR 0005 §3.2): node:sqlite
+// (SQLite 3.54.1) through the production adapter (worker/src/node/sqlite-db.ts),
+// reached as DO storage through the `cloudflare:*` test shim (N2-02); before
+// the port it ran on DO SQLite in workerd (ADR 0004 §3.2). Every expectation is
+// SQLite's documented behaviour or the adapter's documented contract,
+// hardcoded here; a runtime upgrade that changes one fails loudly.
+//
+// Named expectation changes (ADR 0005 §15.3): BEGIN/SAVEPOINT and PRAGMA are
+// refused by the adapter's authorizer (SqlStatementRefusedError; the startup
+// pragmas are read back through `pragmas()`), multi-statement text is refused
+// instead of running every statement, and an integer above 2^53 on read
+// throws SqlRangeError instead of losing precision. Two DO-only tests
+// ("documents precision loss above", "multi-statement exec binds only the last
+// statement") are replaced by the Node test at the end of this file
+// (docs/verification/node-port-inventory.json).
 
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { seededRandom } from '@atmusic/core/test-support/random';
 import { describe, expect, it } from 'vitest';
-import { type Db, doDb } from '../../src/do/db';
+import { type Db, doDb, SqlParamError } from '../../src/do/db';
+import { SqlRangeError, SqlStatementRefusedError } from '../../src/node/sqlite-db';
 import type { HarnessDO } from '../harness/harness-do';
+import { sqliteDbOf } from '../node/support/do-storage-facade';
 
 const stubFor = (name: string) => env.HARNESS.get(env.HARNESS.idFromName(name));
 const T0 = '2026-01-15T12:00:00.000000000Z';
@@ -54,6 +68,26 @@ function addFollow(db: Db, actor: string, subject: string, rkey: string) {
   );
 }
 
+/** Runs `fn` and returns the reason of the SqlStatementRefusedError it throws. */
+function refusal(fn: () => unknown): string {
+  try {
+    fn();
+  } catch (error) {
+    if (error instanceof SqlStatementRefusedError) return error.reason;
+    throw error;
+  }
+  throw new Error('expected the statement to be refused');
+}
+
+/** Rows whose declared owner foreign key names no users row (what PRAGMA foreign_key_check reported). */
+function orphans(db: Db): unknown[] {
+  return db.all(
+    `SELECT 'scrobbles' AS t, s.uri AS uri FROM scrobbles s LEFT JOIN users u ON u.did = s.did WHERE u.did IS NULL
+     UNION ALL
+     SELECT 'follows', f.uri FROM follows f LEFT JOIN users u ON u.did = f.actor WHERE u.did IS NULL`,
+  );
+}
+
 /** Index of the first differing byte, the shorter length if one is a prefix, or -1 when equal. */
 function firstDifference(a: Uint8Array, b: Uint8Array): number {
   const n = Math.min(a.length, b.length);
@@ -83,8 +117,16 @@ describe('DO SQLite conformance', () => {
         'COMMIT',
         'ROLLBACK',
       ]) {
-        expect(() => storage.sql.exec(statement), statement).toThrow(/transactionSync\(\)/);
-        expect(() => db.run(statement), statement).toThrow(/transactionSync\(\)/);
+        // Node: the adapter's authorizer denies them (DO said "use transactionSync()").
+        const reason = /^(SAVEPOINT|RELEASE)/.test(statement) ? 'savepoint' : 'transaction';
+        expect(
+          refusal(() => storage.sql.exec(statement)),
+          statement,
+        ).toBe(reason);
+        expect(
+          refusal(() => db.run(statement)),
+          statement,
+        ).toBe(reason);
       }
       // Also refused inside a transactionSync, and the throw rolls it back.
       expect(() =>
@@ -92,7 +134,7 @@ describe('DO SQLite conformance', () => {
           storage.sql.exec("INSERT INTO timers(name, due_at) VALUES ('drain', 1)");
           storage.sql.exec('SAVEPOINT inner_sp');
         }),
-      ).toThrow(/BEGIN TRANSACTION or SAVEPOINT/);
+      ).toThrow(SqlStatementRefusedError);
       expect(tableDump(db)).toEqual(before);
     });
   });
@@ -192,7 +234,9 @@ describe('DO SQLite conformance', () => {
 
   it('FK ON DELETE CASCADE is enforced for scrobbles.did and follows.actor', async () => {
     await inDb('conf-fk', (db, storage) => {
-      expect(storage.sql.exec('PRAGMA foreign_keys').one()).toEqual({ foreign_keys: 1 });
+      // Node: the adapter sets and reads back foreign_keys=ON at open; a module PRAGMA is denied.
+      expect(sqliteDbOf(storage).pragmas().foreign_keys).toBe(1);
+      expect(refusal(() => storage.sql.exec('PRAGMA foreign_keys'))).toBe('pragma');
       addUser(db, 'did:plc:alice');
       addUser(db, 'did:plc:bob');
       addScrobble(db, 'did:plc:alice', 'a1');
@@ -212,9 +256,9 @@ describe('DO SQLite conformance', () => {
       expect(() => addFollow(db, 'did:plc:nobody', 'did:plc:bob', 'fx')).toThrow(/FOREIGN KEY constraint failed/);
       // follows.subject is not a foreign key: following an unknown DID is stored.
       addFollow(db, 'did:plc:bob', 'did:plc:unknown', 'fu');
-      // DO SQLite ignores attempts to switch enforcement off.
-      storage.sql.exec('PRAGMA foreign_keys = OFF');
-      expect(storage.sql.exec('PRAGMA foreign_keys').one()).toEqual({ foreign_keys: 1 });
+      // Module SQL cannot switch enforcement off (DO SQLite ignored it; Node denies it).
+      expect(refusal(() => storage.sql.exec('PRAGMA foreign_keys = OFF'))).toBe('pragma');
+      expect(sqliteDbOf(storage).pragmas().foreign_keys).toBe(1);
       expect(() => addScrobble(db, 'did:plc:nobody', 'x2')).toThrow(/FOREIGN KEY constraint failed/);
 
       db.run("DELETE FROM users WHERE did = 'did:plc:alice'");
@@ -290,7 +334,7 @@ describe('DO SQLite conformance', () => {
   // M1.3.1/foreign_key: a row for a missing owner is rejected with no dangling row.
   it('INSERT of a scrobble or follow whose users row is missing is rejected and leaves no row', async () => {
     await inDb('conf-fk-missing-owner', (db, storage) => {
-      expect(storage.sql.exec('PRAGMA foreign_keys').one()).toEqual({ foreign_keys: 1 });
+      expect(sqliteDbOf(storage).pragmas().foreign_keys).toBe(1);
       addUser(db, 'did:plc:bob');
       const before = { users: db.all('SELECT * FROM users'), timers: db.all('SELECT * FROM timers') };
 
@@ -322,7 +366,9 @@ describe('DO SQLite conformance', () => {
       // No dangling rows anywhere.
       expect(db.one('SELECT count(*) AS n FROM scrobbles')).toEqual({ n: 0 });
       expect(db.one('SELECT count(*) AS n FROM follows')).toEqual({ n: 0 });
-      expect(db.all('PRAGMA foreign_key_check')).toEqual([]);
+      // PRAGMA foreign_key_check is denied on Node; the same check as a join.
+      expect(refusal(() => db.all('PRAGMA foreign_key_check'))).toBe('pragma');
+      expect(orphans(db)).toEqual([]);
       expect({ users: db.all('SELECT * FROM users'), timers: db.all('SELECT * FROM timers') }).toEqual(before);
 
       // Control: once the users row exists the same inserts succeed.
@@ -333,61 +379,6 @@ describe('DO SQLite conformance', () => {
       expect(db.all('SELECT actor, subject FROM follows')).toEqual([
         { actor: 'did:plc:nobody', subject: 'did:plc:bob' },
       ]);
-    });
-  });
-
-  it('integers up to 2^53-1 round-trip exactly; documents precision loss above', async () => {
-    await inDb('conf-int', (db, storage) => {
-      const put = "INSERT INTO counters(name, label, value) VALUES ('n', ?, ?)";
-      const values: Array<[string, number]> = [
-        ['max_safe', Number.MAX_SAFE_INTEGER],
-        ['jetstream_time_us', 1_768_478_400_123_456],
-        ['jetstream_seq', 1_800_000_000_000_001],
-        ['epoch_ms', 1_768_478_400_000],
-        ['zero', 0],
-      ];
-      for (const [label, value] of values) db.run(put, label, value);
-      for (const [label, value] of values) {
-        expect(
-          db.one<{ value: number; t: string; ty: string }>(
-            'SELECT value, CAST(value AS TEXT) AS t, typeof(value) AS ty FROM counters WHERE label = ?',
-            label,
-          ),
-        ).toEqual({ value, t: String(value), ty: 'integer' });
-      }
-      db.run(
-        'UPDATE ingest_checkpoint SET cursor = ?, last_event_time_us = ?',
-        1_768_478_400_123_456,
-        1_768_478_400_123_457,
-      );
-      expect(db.one('SELECT cursor, last_event_time_us FROM ingest_checkpoint')).toEqual({
-        cursor: 1_768_478_400_123_456,
-        last_event_time_us: 1_768_478_400_123_457,
-      });
-
-      // Above 2^53 - 1: SQLite stores the exact 64-bit integer, but the DO
-      // binding converts it to a JS number on read and loses precision. Only
-      // CAST(... AS TEXT) recovers it. Hence doDb refuses unsafe integers and
-      // the schema keeps every integer (seq, time_us, ms) below 2^53.
-      storage.sql.exec("INSERT INTO counters(name, label, value) VALUES ('n', 'above', 9007199254740993)");
-      expect(
-        db.one('SELECT value, CAST(value AS TEXT) AS t, typeof(value) AS ty FROM counters WHERE label = ?', 'above'),
-      ).toEqual({ value: 9007199254740992, t: '9007199254740993', ty: 'integer' });
-      expect(db.one("SELECT CAST(value + 1 AS TEXT) AS t FROM counters WHERE label = 'above'")).toEqual({
-        t: '9007199254740994',
-      });
-      expect(db.one('SELECT 9223372036854775807 AS v, CAST(9223372036854775807 AS TEXT) AS t')).toEqual({
-        v: Number('9223372036854775807'), // 2^63 - 1 rounds to 9223372036854775808
-        t: '9223372036854775807',
-      });
-      // Raw exec accepts an unsafe JS number without complaint; doDb does not.
-      expect(storage.sql.exec('SELECT ? AS v', 2 ** 53 + 2).one()).toEqual({ v: 9007199254740994 });
-      expect(() => db.one('SELECT ? AS v', 2 ** 53 + 2)).toThrow(/not a safe integer/);
-      // Raw exec binds a boolean as TEXT 'true' (another reason for the guard).
-      expect(storage.sql.exec('SELECT ? AS v, typeof(?) AS ty', true as never, true as never).one()).toEqual({
-        v: 'true',
-        ty: 'text',
-      });
     });
   });
 
@@ -438,35 +429,6 @@ describe('DO SQLite conformance', () => {
       ).toEqual({
         n: 512,
       });
-    });
-  });
-
-  it('multi-statement exec binds only the last statement', async () => {
-    await inDb('conf-multi', (db, storage) => {
-      // Parameters bind into the last statement; earlier statements run too.
-      storage.sql.exec(
-        "INSERT INTO timers(name, due_at) VALUES ('first', 1); INSERT INTO timers(name, due_at) VALUES (?, ?)",
-        'second',
-        2,
-      );
-      expect(db.all('SELECT name, due_at FROM timers ORDER BY name')).toEqual([
-        { name: 'first', due_at: 1 },
-        { name: 'second', due_at: 2 },
-      ]);
-      // A placeholder in any earlier statement is refused up front: nothing runs.
-      expect(() =>
-        storage.sql.exec(
-          "INSERT INTO timers(name, due_at) VALUES (?, 3); INSERT INTO timers(name, due_at) VALUES ('fourth', 4)",
-          'third',
-        ),
-      ).toThrow(/only the last statement can have parameters/);
-      expect(() => db.run('INSERT INTO timers(name, due_at) VALUES (?, 5); SELECT 1', 'fifth')).toThrow(
-        /only the last statement can have parameters/,
-      );
-      expect(db.all('SELECT name FROM timers ORDER BY name')).toEqual([{ name: 'first' }, { name: 'second' }]);
-      // Only the last statement's rows are returned.
-      expect(db.all('SELECT 1 AS a; SELECT ? AS b', 7)).toEqual([{ b: 7 }]);
-      expect(db.all('SELECT name FROM timers; SELECT count(*) AS n FROM timers')).toEqual([{ n: 2 }]);
     });
   });
 
@@ -550,6 +512,143 @@ describe('DO SQLite conformance', () => {
         y: 0,
         z: 1,
       });
+    });
+  });
+
+  // ADR 0005 §3.2, §15.3 (N2-02): the Node replacement of the two DO-only
+  // tests above it in the workerd suite ("integers up to 2^53-1 round-trip
+  // exactly; documents precision loss above" and "multi-statement exec binds
+  // only the last statement"), plus the BEGIN/SAVEPOINT/PRAGMA denials.
+  it('on Node an integer above 2^53 is refused on read, multi-statement text is refused, and BEGIN, SAVEPOINT and PRAGMA are denied', async () => {
+    await inDb('conf-node-refusals', (db, storage) => {
+      // Integers up to 2^53 - 1 still round-trip exactly, through doDb and raw exec.
+      const put = "INSERT INTO counters(name, label, value) VALUES ('n', ?, ?)";
+      const values: Array<[string, number]> = [
+        ['max_safe', Number.MAX_SAFE_INTEGER],
+        ['jetstream_time_us', 1_768_478_400_123_456],
+        ['jetstream_seq', 1_800_000_000_000_001],
+        ['epoch_ms', 1_768_478_400_000],
+        ['zero', 0],
+      ];
+      for (const [label, value] of values) expect(db.run(put, label, value)).toEqual({ rowsWritten: 1 });
+      for (const [label, value] of values) {
+        expect(
+          db.one('SELECT value, CAST(value AS TEXT) AS t, typeof(value) AS ty FROM counters WHERE label = ?', label),
+        ).toEqual({ value, t: String(value), ty: 'integer' });
+        expect(storage.sql.exec('SELECT value FROM counters WHERE label = ?', label).one()).toEqual({ value });
+      }
+
+      // Above 2^53 - 1: SQLite stores the exact 64-bit integer (a literal in
+      // the SQL text; no unsafe JS number can be bound), and reading it as a
+      // number throws SqlRangeError (ERR_OUT_OF_RANGE) instead of returning
+      // 9007199254740992 as the DO binding did. CAST(... AS TEXT) still reads it.
+      storage.sql.exec("INSERT INTO counters(name, label, value) VALUES ('n', 'above', 9007199254740993)");
+      const above = "SELECT value FROM counters WHERE label = 'above'";
+      for (const read of [() => db.one(above), () => db.all(above), () => storage.sql.exec(above).toArray()]) {
+        let error: unknown;
+        try {
+          read();
+        } catch (e) {
+          error = e;
+        }
+        expect(error).toBeInstanceOf(SqlRangeError);
+        expect((error as SqlRangeError).code).toBe('ERR_OUT_OF_RANGE');
+      }
+      expect(
+        db.one("SELECT CAST(value AS TEXT) AS t, typeof(value) AS ty FROM counters WHERE label = 'above'"),
+      ).toEqual({ t: '9007199254740993', ty: 'integer' });
+      expect(db.one("SELECT CAST(value + 1 AS TEXT) AS t FROM counters WHERE label = 'above'")).toEqual({
+        t: '9007199254740994',
+      });
+      expect(() => db.one('SELECT 9223372036854775807 AS v')).toThrow(SqlRangeError);
+      expect(db.one('SELECT CAST(9223372036854775807 AS TEXT) AS t')).toEqual({ t: '9223372036854775807' });
+      // Binding is guarded on every path, raw exec included (DO raw exec took
+      // 2^53 + 2 and bound `true` as TEXT 'true').
+      for (const value of [2 ** 53 + 2, true]) {
+        expect(() => storage.sql.exec('SELECT ? AS v', value)).toThrow(SqlParamError);
+        expect(() => db.one('SELECT ? AS v', value as number)).toThrow(SqlParamError);
+      }
+
+      // Multi-statement text is refused before anything runs (DO ran every
+      // statement and bound parameters into the last one).
+      const timers = () => db.all('SELECT name, due_at FROM timers ORDER BY name');
+      expect(timers()).toEqual([]);
+      for (const text of [
+        "INSERT INTO timers(name, due_at) VALUES ('first', 1); INSERT INTO timers(name, due_at) VALUES ('second', 2)",
+        "INSERT INTO timers(name, due_at) VALUES ('first', 1); -- trailing comment\nSELECT 1",
+        'SELECT 1 AS a; SELECT 2 AS b',
+      ]) {
+        expect(
+          refusal(() => storage.sql.exec(text)),
+          text,
+        ).toBe('multiple_statements');
+        expect(
+          refusal(() => db.run(text)),
+          text,
+        ).toBe('multiple_statements');
+      }
+      expect(refusal(() => db.all('SELECT 1 AS a; SELECT ? AS b', 7))).toBe('multiple_statements');
+      expect(timers()).toEqual([]);
+      // One statement with a final `;`, or a `;` inside a literal or a comment, is one statement.
+      expect(db.run("INSERT INTO timers(name, due_at) VALUES ('semi;colon', 1);")).toEqual({ rowsWritten: 1 });
+      expect(db.all('SELECT name FROM timers /* ; */ ORDER BY name; ')).toEqual([{ name: 'semi;colon' }]);
+
+      // BEGIN, SAVEPOINT and PRAGMA are denied for module SQL, inside a
+      // transaction too, and the denial changes nothing.
+      const before = tableDump(db);
+      const denied: Array<[string, string]> = [
+        ['BEGIN', 'transaction'],
+        ['BEGIN IMMEDIATE', 'transaction'],
+        ['COMMIT', 'transaction'],
+        ['ROLLBACK', 'transaction'],
+        ['SAVEPOINT sp1', 'savepoint'],
+        ['RELEASE sp1', 'savepoint'],
+        ['ROLLBACK TO sp1', 'savepoint'],
+        ['PRAGMA foreign_keys', 'pragma'],
+        ['PRAGMA foreign_keys = OFF', 'pragma'],
+        ['PRAGMA journal_mode = DELETE', 'pragma'],
+        ['PRAGMA user_version = 7', 'pragma'],
+        ['SELECT * FROM pragma_foreign_key_check', 'pragma'],
+        ["ATTACH DATABASE ':memory:' AS other", 'attach'],
+      ];
+      for (const [text, reason] of denied) {
+        expect(
+          refusal(() => storage.sql.exec(text)),
+          text,
+        ).toBe(reason);
+        expect(
+          refusal(() => db.all(text)),
+          text,
+        ).toBe(reason);
+      }
+      expect(() =>
+        db.tx(() => {
+          db.run("INSERT INTO timers(name, due_at) VALUES ('inside', 2)");
+          db.run('PRAGMA foreign_keys = OFF');
+        }),
+      ).toThrow(SqlStatementRefusedError);
+      expect(tableDump(db)).toEqual(before);
+      // The startup pragmas are untouched, read back by the adapter itself.
+      expect(sqliteDbOf(storage).pragmas()).toMatchObject({
+        foreign_keys: 1,
+        journal_mode: 'wal',
+        synchronous: 2,
+        locking_mode: 'exclusive',
+      });
+      // Transactions are the adapter's: db.tx (and storage.transactionSync) nest and commit.
+      db.tx(() => {
+        db.run("INSERT INTO timers(name, due_at) VALUES ('outer', 3)");
+        expect(() =>
+          storage.transactionSync(() => {
+            db.run("INSERT INTO timers(name, due_at) VALUES ('inner', 4)");
+            throw new Error('inner rolls back alone');
+          }),
+        ).toThrow('inner rolls back alone');
+      });
+      expect(timers()).toEqual([
+        { name: 'outer', due_at: 3 },
+        { name: 'semi;colon', due_at: 1 },
+      ]);
     });
   });
 });

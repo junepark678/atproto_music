@@ -7,8 +7,10 @@
 // Every result is validated against the OpenAPI `Indexing` schema, and every
 // read is shown to leave the storage unchanged. The checkpoint writers and the
 // lastIndexedAt high-water mark are exercised through their DB effects, and the
-// reads are shown to be index lookups whose rows read do not grow with the
-// scrobbles/follows tables (ADR §10.4 query plans, with a negative control).
+// reads are shown to be index lookups that do not touch the scrobbles/follows
+// tables (ADR §10.4 query plans, with a negative control). On Node (ADR 0005
+// §15.3, N2-02) the DO rowsRead budget is re-derived as EXPLAIN QUERY PLAN
+// pins on SQLite 3.54.1: node:sqlite has no rows-read counter.
 // A source guard keeps every other production module off the checkpoint and
 // high-water-mark columns, so the writer contract cannot be bypassed silently.
 
@@ -259,19 +261,15 @@ function checkpointRow(db: Db) {
 interface Executed {
   sql: string;
   params: SqlParam[];
-  rowsRead: number;
 }
 
-/**
- * A Db over the raw DO SQL cursor that records every statement and its
- * `rowsRead` (the billed rows-read count), so a test can see what a read costs.
- */
+/** A read-only Db over the storage's SQL that records every statement it runs and its parameters. */
 function countingDb(storage: DurableObjectStorage): { db: Db; executed: Executed[] } {
   const executed: Executed[] = [];
   const exec = (sql: string, params: SqlParam[]) => {
     const cursor = storage.sql.exec(sql, ...params);
     const rows = cursor.toArray();
-    executed.push({ sql, params, rowsRead: cursor.rowsRead });
+    executed.push({ sql, params });
     return { rows, rowsWritten: cursor.rowsWritten };
   };
   const db: Db = {
@@ -283,6 +281,62 @@ function countingDb(storage: DurableObjectStorage): { db: Db; executed: Executed
     },
   };
   return { db, executed };
+}
+
+/** The SQLite the plan pins below were derived on (ADR 0005 §0 D1); a different one fails loudly. */
+const PINNED_SQLITE = '3.54.1';
+
+/**
+ * The index of every plan step of the status reads, statement by statement in
+ * execution order (`indexing` global, then per user), on SQLite 3.54.1. Each is
+ * a seek through a primary key, unique or secondary index: the plan's cost is
+ * bounded by the matching rows, never by the size of scrobbles or follows.
+ */
+const STATUS_PLAN_PINS: string[][] = [
+  // indexing(global): checkpoint, due jobs, due hints, gap jobs, status row
+  ['ingest_checkpoint search sqlite_autoindex_ingest_checkpoint_1'],
+  ['repo_jobs search repo_jobs_due'],
+  ['hints search hints_due'],
+  ['repo_jobs search repo_jobs_due'],
+  ['indexing_status search sqlite_autoindex_indexing_status_1'],
+  // indexing(user): the global reads, then the user's own rows
+  ['ingest_checkpoint search sqlite_autoindex_ingest_checkpoint_1'],
+  ['repo_jobs search repo_jobs_due'],
+  ['hints search hints_due'],
+  ['repo_jobs search repo_jobs_due'],
+  ['indexing_status search sqlite_autoindex_indexing_status_1'],
+  ['suppression search sqlite_autoindex_suppression_1'],
+  ['users search sqlite_autoindex_users_1'],
+  ['repo_jobs search sqlite_autoindex_repo_jobs_1'],
+  ['hints search hints_did'],
+  ['repo_jobs search sqlite_autoindex_repo_jobs_1'],
+];
+/**
+ * The negative control's plans: SQLite renders the unindexed global max() as a
+ * bare `SEARCH scrobbles` (no index: every row is visited), and the per-owner
+ * one seeks the owner through follows_actor_subject and then visits all of
+ * that owner's rows (indexed_at is in no index).
+ */
+const NEGATIVE_CONTROL_PINS = {
+  globalMax: ['scrobbles search'],
+  ownerMax: ['follows search follows_actor_subject'],
+};
+
+/**
+ * Each plan step as `<table> <access>`: `search <index>` for a seek through a
+ * named index (`pk` for the integer primary key), `scan <index>` for a full
+ * walk of one, `scan` for a table scan without an index, and `search` for a
+ * seek that names no index.
+ */
+function planAccess(plan: readonly string[]): string[] {
+  return plan.flatMap((detail) => {
+    const m = /^(SEARCH|SCAN) (\S+)(?: USING (?:COVERING )?INDEX (\S+)| USING (?:INTEGER )?PRIMARY KEY)?/.exec(detail);
+    if (m === null) return [];
+    if (m[2] === 'CONSTANT') return [];
+    const kind = m[1] === 'SEARCH' ? 'search' : 'scan';
+    const index = m[3] ?? (/ USING (?:INTEGER )?PRIMARY KEY/.test(detail) ? 'pk' : null);
+    return [index === null ? `${m[2]} ${kind}` : `${m[2]} ${kind} ${index}`];
+  });
 }
 
 function queryPlan(db: Db, sql: string, params: SqlParam[]): string[] {
@@ -994,7 +1048,13 @@ describe('indexing status truth', () => {
     });
   });
 
-  it('status reads are index lookups: rows read do not grow with scrobbles/follows; negative control scans', async () => {
+  // ADR 0005 §15.3 (N2-02): replaces "status reads are index lookups: rows
+  // read do not grow with scrobbles/follows; negative control scans", whose
+  // budget read the DO's billed rowsRead. The same reads are pinned here by
+  // the index each plan step uses on SQLite 3.54.1.
+  it('status statements use the indexes pinned by EXPLAIN QUERY PLAN (asserted by index name, SQLite version recorded) in place of the DO rowsRead budget', async () => {
+    // The version the pins below were derived on, recorded with the plans.
+    expect(process.versions.sqlite).toBe(PINNED_SQLITE);
     await runInDurableObject(stubFor('status-query-plan'), async (_i: HarnessDO, state) => {
       const db = doDb(state.storage);
       const now = fixedClock().nowMs();
@@ -1005,15 +1065,16 @@ describe('indexing status truth', () => {
       insertJob(db, BOB, { reason: GAP_REASON, state: 'complete', dueAt: now });
       insertHint(db, BOB, '3m4zm2ufr2221', now - SECOND, now);
 
-      const cost = () => {
+      const reads = () => {
         const { db: counting, executed } = countingDb(state.storage);
         const global = indexing(counting, now, { mode: 'socket' });
         const user = indexing(counting, now, { mode: 'socket', did: ALICE });
-        return { global, user, executed, rowsRead: executed.reduce((sum, e) => sum + e.rowsRead, 0) };
+        const plans = executed.map(({ sql, params }) => ({ sql, plan: queryPlan(db, sql, params) }));
+        return { global, user, executed, plans };
       };
 
       seedRows(db, ALICE, 2_000, 0);
-      const small = cost();
+      const small = reads();
       expect(small.global).toEqual({
         state: 'current',
         caughtUp: true,
@@ -1022,42 +1083,49 @@ describe('indexing status truth', () => {
       });
       expect(small.user).toEqual(small.global);
       // Every statement is a primary-key or index seek: no table SCAN in any plan
-      // (`SCAN CONSTANT ROW` is the `SELECT EXISTS(...)` wrapper, not a table).
+      // (`SCAN CONSTANT ROW` is the `SELECT EXISTS(...)` wrapper, not a table),
+      // every SEARCH names the index it uses, and no statement reads the
+      // scrobbles or follows tables.
       expect(small.executed.length).toBeGreaterThan(0);
-      for (const { sql, params } of small.executed) {
-        const plan = queryPlan(db, sql, params);
+      for (const { sql, plan } of small.plans) {
+        const context = `SQLite ${process.versions.sqlite}\n${sql}\n${plan.join('\n')}`;
         expect(
           plan.filter((detail) => /\bSCAN\b/.test(detail) && detail !== 'SCAN CONSTANT ROW'),
-          `${sql}\n${plan.join('\n')}`,
+          context,
         ).toEqual([]);
-        for (const detail of plan.filter((d) => d.startsWith('SEARCH '))) expect(detail).toMatch(/ USING /);
-        expect(sql).not.toMatch(/\b(scrobbles|follows)\b/);
+        for (const detail of plan.filter((d) => d.startsWith('SEARCH '))) {
+          expect(detail, context).toMatch(/ USING (COVERING INDEX \S+|INDEX \S+|INTEGER PRIMARY KEY|PRIMARY KEY)/);
+        }
+        expect(sql, context).not.toMatch(/\b(scrobbles|follows)\b/);
       }
-      expect(small.rowsRead).toBeLessThan(40);
+      // The pins: per statement, in execution order, each plan step's table,
+      // access and index name on SQLite 3.54.1.
+      expect(small.plans.map(({ plan }) => planAccess(plan))).toEqual(STATUS_PLAN_PINS);
 
-      // Ten times the rows: the reads cost exactly the same.
+      // Ten times the rows: the same statements, the same plans, the same answers.
       seedRows(db, ALICE, 18_000, 2_000);
       expect(db.one('SELECT count(*) AS n FROM scrobbles')).toEqual({ n: 20_000 });
-      const large = cost();
+      const large = reads();
       expect(large.global).toEqual(small.global);
       expect(large.user).toEqual(small.user);
-      expect(large.rowsRead).toBe(small.rowsRead);
+      expect(large.executed).toEqual(small.executed);
+      expect(large.plans).toEqual(small.plans);
 
-      // Negative control: a max(indexed_at) read scans. Globally the plan uses no
-      // index (there is no indexed_at index); per owner it seeks the DID but then
-      // reads every row the owner has. Both costs grow with the table.
-      const { db: counting, executed } = countingDb(state.storage);
+      // Negative control: a max(indexed_at) read is not an index lookup. Globally
+      // the plan scans scrobbles with no index (there is no indexed_at index);
+      // per owner it seeks the DID through follows_actor_subject and then walks
+      // every row the owner has. Unlike every status read above, neither step
+      // can stop early, so its cost grows with the table.
+      const { db: counting } = countingDb(state.storage);
       const globalMax = 'SELECT max(indexed_at) AS m FROM scrobbles';
       const ownerMax = 'SELECT max(indexed_at) AS m FROM follows WHERE actor = ?';
       expect(counting.one(globalMax)).toEqual({ m: '2026-01-14T05:33:20.000000000Z' });
       expect(counting.one(ownerMax, ALICE)).toEqual({ m: '2026-01-14T05:33:20.000000000Z' });
-      // SQLite renders the unindexed min/max access as a bare `SEARCH scrobbles`
-      // (or `SCAN scrobbles`): neither names an index, unlike every status read above.
+      expect(planAccess(queryPlan(db, globalMax, []))).toEqual(NEGATIVE_CONTROL_PINS.globalMax);
+      expect(planAccess(queryPlan(db, ownerMax, [ALICE]))).toEqual(NEGATIVE_CONTROL_PINS.ownerMax);
       expect(queryPlan(db, globalMax, []).filter((detail) => /\b(SEARCH|SCAN) scrobbles\b/.test(detail))).toEqual([
         expect.not.stringContaining('USING'),
       ]);
-      expect(executed[0]?.rowsRead).toBeGreaterThanOrEqual(20_000);
-      expect(executed[1]?.rowsRead).toBeGreaterThanOrEqual(20_000);
     });
   });
 

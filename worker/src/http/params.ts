@@ -76,6 +76,12 @@ function invalidJson(): ApiError {
  * (the stream is cancelled at the first byte over it), 400 `invalid_json` for
  * an empty body, invalid UTF-8, a byte-order mark or anything JSON.parse
  * refuses.
+ *
+ * The cancellation is started, never awaited: when the request was cloned
+ * (notify.ts reads the text from a clone), the body is one branch of a tee,
+ * and on Node (WHATWG streams) a branch's cancel() settles only once the other
+ * branch is cancelled too, which its caller does after this function returns.
+ * Awaiting it would hang the request forever (workerd settles it at once).
  */
 export async function readJsonBody(req: Request, maxBytes: number): Promise<unknown> {
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) {
@@ -83,7 +89,7 @@ export async function readJsonBody(req: Request, maxBytes: number): Promise<unkn
   }
   const declared = req.headers.get('content-length');
   if (declared !== null && /^[0-9]+$/.test(declared.trim()) && Number(declared.trim()) > maxBytes) {
-    if (req.body !== null) await req.body.cancel().catch(() => undefined);
+    if (req.body !== null) void req.body.cancel().catch(() => undefined);
     throw tooLarge(maxBytes);
   }
 
@@ -95,7 +101,7 @@ export async function readJsonBody(req: Request, maxBytes: number): Promise<unkn
       const { done, value } = await reader.read();
       if (done) break;
       if (length + value.byteLength > maxBytes) {
-        await reader.cancel().catch(() => undefined);
+        void reader.cancel().catch(() => undefined);
         throw tooLarge(maxBytes);
       }
       buffer.set(value, length);
