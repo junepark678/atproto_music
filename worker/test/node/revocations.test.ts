@@ -564,6 +564,104 @@ describe('revocation journal', () => {
     expect(ids(bare, 'web_sessions', 'token_hash')).toEqual([hashTokenHex('w')]);
   });
 
+  it('a truncateBefore that fails after the rename never appends to the replaced file: record() throws or lands in the journal at the path', () => {
+    const eio = (what: string): Error => Object.assign(new Error(`EIO ${what}`), { code: 'EIO' });
+    const kindsAt = (path: string): string[] => lines(path).map((l) => JSON.parse(l).id ?? JSON.parse(l).kind);
+
+    for (const fault of ['directory fsync', 'reopen'] as const) {
+      const dir = tempDir();
+      const path = revocationLogPath(dir);
+      const clock = fixedClock();
+      // Armed by the rename; while it is set, the chosen step after it fails.
+      let failing = false;
+      let renames = 0;
+      const { fs: faulty } = spyFs({
+        renameSync: (from: fs.PathLike, to: fs.PathLike) => {
+          fs.renameSync(from, to);
+          renames += 1;
+          failing = true;
+        },
+        openSync: ((p: fs.PathLike, flags: fs.OpenMode, m?: fs.Mode | null) => {
+          if (failing && fault === 'directory fsync' && p === dir) throw eio('dir');
+          if (failing && fault === 'reopen' && p === path) throw eio('reopen');
+          return fs.openSync(p, flags, m);
+        }) as typeof fs.openSync,
+      });
+      const journal = new FileRevocations({ path, clock, fs: faulty });
+      journal.record({ kind: 'app_password', id: 'a1', did: ALICE }); // T0
+      clock.advance(1000);
+      journal.record({ kind: 'app_password', id: 'a2', did: ALICE }); // T0 + 1000
+
+      let caught: unknown;
+      try {
+        journal.truncateBefore(T0 + 1000);
+      } catch (error) {
+        caught = error;
+      }
+      expect(renames).toBe(1);
+      expect(caught, fault).toBeInstanceOf(RevocationJournalError);
+      expect((caught as RevocationJournalError).reason).toBe('write_failed');
+      // The rename happened: the journal at the path holds the kept entry, no tmp is left.
+      expect(kindsAt(path)).toEqual(['a2']);
+      expect(fs.existsSync(`${path}.tmp`)).toBe(false);
+
+      // While the fault persists, record() fails closed: it throws before the caller commits.
+      clock.advance(1000);
+      expect(() => journal.record({ kind: 'lb_token', id: 'lb-REVOKED-AFTER', did: ALICE })).toThrow(
+        RevocationJournalError,
+      );
+      expect(kindsAt(path)).toEqual(['a2']);
+
+      // Once the fault clears, the next record() reopens the file at the path and lands there.
+      failing = false;
+      journal.record({ kind: 'lb_token', id: 'lb-REVOKED-AFTER', did: ALICE });
+      expect(kindsAt(path)).toEqual(['a2', 'lb-REVOKED-AFTER']);
+      expect(mode(path)).toBe(0o600);
+      expect(journal.entries().map((e) => ('id' in e ? e.id : e.kind))).toEqual(['a2', 'lb-REVOKED-AFTER']);
+      journal.close();
+      // A restart sees the revocation recorded after the failed truncation.
+      const fresh = new FileRevocations({ path, clock });
+      expect(fresh.entries().map((e) => ('id' in e ? e.id : e.kind))).toEqual(['a2', 'lb-REVOKED-AFTER']);
+      fresh.close();
+    }
+
+    // A rename that fails leaves the old journal open and in use, and removes the tmp file.
+    const dir = tempDir();
+    const path = revocationLogPath(dir);
+    const clock = fixedClock();
+    const { fs: noRename } = spyFs({
+      renameSync: () => {
+        throw eio('rename');
+      },
+    });
+    const journal = new FileRevocations({ path, clock, fs: noRename });
+    journal.record({ kind: 'app_password', id: 'a1', did: ALICE });
+    clock.advance(1000);
+    journal.record({ kind: 'app_password', id: 'a2', did: ALICE });
+    let caught: unknown;
+    try {
+      journal.truncateBefore(T0 + 1000);
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(RevocationJournalError);
+    expect((caught as RevocationJournalError).reason).toBe('write_failed');
+    expect(fs.existsSync(`${path}.tmp`)).toBe(false);
+    expect(kindsAt(path)).toEqual(['a1', 'a2']);
+    journal.record({ kind: 'lb_token', id: 'lb-after', did: ALICE });
+    expect(kindsAt(path)).toEqual(['a1', 'a2', 'lb-after']);
+    journal.close();
+    // After close(), record() reports `closed` and never reopens.
+    let closedError: unknown;
+    try {
+      journal.record({ kind: 'lb_token', id: 'lb-late', did: ALICE });
+    } catch (error) {
+      closedError = error;
+    }
+    expect((closedError as RevocationJournalError).reason).toBe('closed');
+    expect(kindsAt(path)).toEqual(['a1', 'a2', 'lb-after']);
+  });
+
   it('truncateBefore(t) keeps the events at or after t and a journal with a torn last line replays every complete line', () => {
     const dir = tempDir();
     const path = revocationLogPath(dir);

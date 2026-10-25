@@ -340,6 +340,8 @@ export class FileRevocations implements Revocations {
   private readonly clock: Clock;
   private fd: number | null;
   private size: number;
+  /** Set by close(); a null fd without it means a reopen is still owed (see requireFd). */
+  private closed = false;
 
   constructor(options: FileRevocationsOptions) {
     this.fs = options.fs ?? nodeFs;
@@ -381,9 +383,25 @@ export class FileRevocations implements Revocations {
     }
   }
 
+  /**
+   * The open journal fd. After close() this throws `closed`. After a
+   * truncation whose reopen failed (`fd` null, not closed), it reopens the file
+   * at the path, so an append lands in the current journal or throws; it never
+   * reaches a replaced inode.
+   */
   private requireFd(): number {
-    if (this.fd === null) throw new RevocationJournalError('closed', 'revocation journal is closed');
-    return this.fd;
+    if (this.fd !== null) return this.fd;
+    if (this.closed) throw new RevocationJournalError('closed', 'revocation journal is closed');
+    let opened: { fd: number; size: number };
+    try {
+      opened = this.openFile();
+    } catch (cause) {
+      if (cause instanceof RevocationJournalError) throw cause;
+      throw new RevocationJournalError('write_failed', 'revocation journal could not be reopened', { cause });
+    }
+    this.fd = opened.fd;
+    this.size = opened.size;
+    return opened.fd;
   }
 
   record(event: RevocationEvent): void {
@@ -426,39 +444,82 @@ export class FileRevocations implements Revocations {
     const kept = all.filter((e) => e.at >= ms);
     const text = kept.map(formatRevocationLine).join('');
     const tmp = `${this.path}.tmp`;
-    const { O_WRONLY, O_CREAT, O_TRUNC, O_NOFOLLOW } = this.fs.constants;
-    const tmpFd = this.fs.openSync(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, REVOCATION_LOG_MODE);
-    try {
-      this.fs.fchmodSync(tmpFd, REVOCATION_LOG_MODE);
-      const bytes = Buffer.from(text, 'utf8');
-      let written = 0;
-      while (written < bytes.length) {
-        const n = this.fs.writeSync(tmpFd, bytes, written, bytes.length - written, written);
-        if (n <= 0) throw new Error('short write');
-        written += n;
-      }
-      this.fs.fsyncSync(tmpFd);
-    } catch (cause) {
-      this.fs.closeSync(tmpFd);
+    const failed = (message: string, cause: unknown): RevocationJournalError =>
+      new RevocationJournalError('write_failed', message, { cause });
+    const removeTmp = (): void => {
       try {
         this.fs.unlinkSync(tmp);
       } catch {
         // nothing to clean up
       }
-      throw new RevocationJournalError('write_failed', 'revocation journal truncation failed', { cause });
+    };
+
+    // 1. Write the kept entries to the tmp file, durably. Any failure removes
+    //    it; the live journal is untouched and stays open.
+    const { O_WRONLY, O_CREAT, O_TRUNC, O_NOFOLLOW } = this.fs.constants;
+    let tmpFd: number;
+    try {
+      tmpFd = this.fs.openSync(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, REVOCATION_LOG_MODE);
+    } catch (cause) {
+      removeTmp();
+      throw failed('revocation journal truncation failed', cause);
     }
-    this.fs.closeSync(tmpFd);
-    this.fs.renameSync(tmp, this.path);
-    this.syncDirectory();
-    this.fs.closeSync(this.requireFd());
+    try {
+      try {
+        this.fs.fchmodSync(tmpFd, REVOCATION_LOG_MODE);
+        const bytes = Buffer.from(text, 'utf8');
+        let written = 0;
+        while (written < bytes.length) {
+          const n = this.fs.writeSync(tmpFd, bytes, written, bytes.length - written, written);
+          if (n <= 0) throw new Error('short write');
+          written += n;
+        }
+        this.fs.fsyncSync(tmpFd);
+      } finally {
+        this.fs.closeSync(tmpFd);
+      }
+    } catch (cause) {
+      removeTmp();
+      throw failed('revocation journal truncation failed', cause);
+    }
+
+    // 2. Replace the journal. A failed rename leaves the old file (and fd) in
+    //    place and removes the tmp file.
+    try {
+      this.fs.renameSync(tmp, this.path);
+    } catch (cause) {
+      removeTmp();
+      throw failed('revocation journal truncation failed', cause);
+    }
+
+    // 3. The old fd now refers to the replaced inode: drop it before anything
+    //    else can throw, so no later append can reach it.
+    const oldFd = this.fd;
     this.fd = null;
-    const reopened = this.openFile();
-    this.fd = reopened.fd;
-    this.size = reopened.size;
+    if (oldFd !== null) {
+      try {
+        this.fs.closeSync(oldFd);
+      } catch {
+        // The descriptor is released either way; it is never used again.
+      }
+    }
+
+    // 4. Make the rename durable and open the new file. If this fails the
+    //    journal is left with no fd, and the next record() reopens the file at
+    //    the path or throws.
+    try {
+      this.syncDirectory();
+      const reopened = this.openFile();
+      this.fd = reopened.fd;
+      this.size = reopened.size;
+    } catch (cause) {
+      throw failed('revocation journal was truncated but could not be reopened', cause);
+    }
     return all.length - kept.length;
   }
 
   close(): void {
+    this.closed = true;
     if (this.fd === null) return;
     this.fs.closeSync(this.fd);
     this.fd = null;
