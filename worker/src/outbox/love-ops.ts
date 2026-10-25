@@ -1,14 +1,26 @@
 // Loves (ADR 0005 §5.8 additions, §6.3, §7.8; N2-05).
 //
-// - Identity: one love per (artist_key, track_key) per DID, enforced here. A
-//   `love.put` first lists the owner's `<prefix>.love` records on their PDS;
-//   when one already matches the key (written by us earlier, by this very
-//   operation in an attempt whose answer was lost, or by another app) the
-//   operation succeeds with that record, writes nothing, and hints it.
-//   Otherwise it creates the record at its persisted TID rkey with
-//   ambiguous-create reconciliation (getRecord + digest), as a scrobble.
-// - `love.delete` (unlove) lists the same collection and deletes, with
-//   swapRecord, every record matching the key, mirroring unfollow. Its intent
+// - Identity: one love per (artist_key, track_key) per DID, enforced here
+//   from local state, never by listing the PDS collection (a listing per put
+//   would cost one listRecords per 100 loves on every attempt, quadratic in an
+//   import's size). A `love.put` decides from, in order:
+//   1. the DID's last succeeded love operation for the key (love intents of
+//      one key run FIFO, so it is the newest of our own decisions): a love.put
+//      whose record the index has not seen deleted means the love exists; a
+//      love.delete means ours are gone;
+//   2. with no such operation, the `loves` projection (loves by other apps,
+//      or ours from before this database).
+//   An existing love makes the operation succeed with that record, writing
+//   nothing, and hints it. Otherwise it creates the record at its persisted
+//   TID rkey with ambiguous-create reconciliation (getRecord at that rkey +
+//   digest), as a scrobble, so a create whose answer was lost is found
+//   without a listing. The operation index is read once per DID per outbox
+//   run (`ExecContext.memo`) and updated as love operations succeed in it.
+//   Best effort against other apps: a love another app wrote after our last
+//   unlove, not yet indexed, may be duplicated (unlove deletes every match).
+// - `love.delete` (unlove) lists the same collection, page by page, and
+//   deletes, with swapRecord, every record matching the key, mirroring
+//   unfollow; each confirmed delete is hinted at once. Its intent
 //   `{artist, track}` is stored as record_json (never sent); its rkey is NULL.
 // - Love intents for one key run FIFO behind their unsettled predecessors.
 // - Live loves and unloves (not imports) queue forward rows in the same
@@ -26,7 +38,6 @@ import { ownRecordKey } from './delete-ops';
 import { deleteMatching, type EnqueueResult, noneMatching } from './follow-ops';
 import { enqueueForwards } from './forward-enqueue';
 import { insertOperation, newOperationId, outboxCollections, prepare, recordOf, unsettledOfKinds } from './operations';
-import { failureOutcome } from './pds-writer';
 import type { ExecContext, Executor } from './runner';
 import { createWithReconcile, hasIdentity, lookupCreate, sameDigest } from './scrobble-ops';
 
@@ -162,25 +173,94 @@ function loveMatches(key: string): (value: unknown) => boolean {
   };
 }
 
+/** The last succeeded love operation of a DID for one key. */
+interface LoveDecision {
+  kind: 'love.put' | 'love.delete';
+  uri: string | null;
+  cid: string | null;
+}
+
+/** Key → last succeeded love operation of `did`, read once per run and kept current by `remember`. */
+function decisions(ctx: ExecContext, did: string): Map<string, LoveDecision> {
+  return ctx.memo(`love-decisions|${did}`, () => {
+    const map = new Map<string, LoveDecision>();
+    const rows = ctx.m.db.all<{
+      kind: 'love.put' | 'love.delete';
+      record_json: string | null;
+      result_uri: string | null;
+      result_cid: string | null;
+    }>(
+      `SELECT kind, record_json, result_uri, result_cid FROM operations
+       WHERE did = ? AND kind IN ('love.put','love.delete') AND state = 'succeeded' ORDER BY rowid`,
+      did,
+    );
+    for (const row of rows) {
+      const key = keyOfOperation(row);
+      if (key !== null) map.set(key, { kind: row.kind, uri: row.result_uri, cid: row.result_cid });
+    }
+    return map;
+  });
+}
+
+function remember(ctx: ExecContext, did: string, key: string, decision: LoveDecision): void {
+  decisions(ctx, did).set(key, decision);
+}
+
+interface ExistingLove {
+  uri: string;
+  cid: string;
+  rkey: string;
+}
+
+/** The love of `key` the DID already has, from local state only (see the header); null when none. */
+function existingLove(op: OperationRow, ctx: ExecContext, key: string): ExistingLove | null {
+  const db = ctx.m.db;
+  const last = decisions(ctx, op.did).get(key);
+  if (last !== undefined) {
+    if (last.kind === 'love.delete' || last.uri === null || last.cid === null) return null;
+    const rkey = ownRecordKey(last.uri, op.did, op.collection);
+    const gone =
+      db.one<{ x: number }>(`SELECT 1 AS x FROM record_state WHERE uri = ? AND state = 'absent'`, last.uri) !== null;
+    if (rkey !== null && !gone) return { uri: last.uri, cid: last.cid, rkey };
+    // Our love was deleted elsewhere (seen by the index): fall back to the projection.
+  }
+  const record = recordOf(op);
+  const [artistKey, trackKeyPart] = trackKey(record?.artist as string, record?.track as string);
+  const row = db.one<{ uri: string; cid: string }>(
+    `SELECT uri, cid FROM loves WHERE did = ? AND artist_key = ? AND track_key = ? ORDER BY created_at, uri LIMIT 1`,
+    op.did,
+    artistKey,
+    trackKeyPart,
+  );
+  if (row === null) return null;
+  const rkey = ownRecordKey(row.uri, op.did, op.collection);
+  return rkey === null ? null : { uri: row.uri, cid: row.cid, rkey };
+}
+
 export const lovePutExecutor: Executor = {
   async execute(op, ctx) {
     const key = keyOfOperation(op);
     if (!hasIdentity(op, ctx, ctx.collections.love) || op.digest === null || key === null) {
       return { kind: 'permanent', code: 'invalid_record_identity' };
     }
-    const listed = await ctx.xrpc.listAll(op.collection);
-    if (!listed.ok) return failureOutcome(listed.failure);
-    const matches = loveMatches(key);
-    for (const r of listed.records) {
-      const rkey = ownRecordKey(r.uri, op.did, op.collection);
-      if (rkey === null || !matches(r.value)) continue;
+    const existing = existingLove(op, ctx, key);
+    if (existing !== null) {
       // One love per key: an existing love is this love; nothing is written. It
-      // is hinted like a written one (it may be our own create from an attempt
-      // whose answer was lost, not indexed yet; hinting an indexed record is
-      // harmless), so an unknown DID is admitted too.
-      return { kind: 'succeeded', uri: r.uri, cid: r.cid, hints: [{ collection: op.collection, rkey }] };
+      // is hinted like a written one (hinting an indexed record is harmless),
+      // so an unknown DID is admitted too.
+      remember(ctx, op.did, key, { kind: 'love.put', uri: existing.uri, cid: existing.cid });
+      return {
+        kind: 'succeeded',
+        uri: existing.uri,
+        cid: existing.cid,
+        hints: [{ collection: op.collection, rkey: existing.rkey }],
+      };
     }
-    return createWithReconcile(op, ctx, (remote) => sameDigest(op, remote));
+    const outcome = await createWithReconcile(op, ctx, (remote) => sameDigest(op, remote));
+    if (outcome.kind === 'succeeded') {
+      remember(ctx, op.did, key, { kind: 'love.put', uri: outcome.uri ?? null, cid: outcome.cid ?? null });
+    }
+    return outcome;
   },
   async reconcile(op, ctx) {
     if (!hasIdentity(op, ctx, ctx.collections.love)) return { kind: 'permanent', code: 'invalid_record_identity' };
@@ -197,11 +277,15 @@ export const loveDeleteExecutor: Executor = {
   async execute(op, ctx) {
     const key = unloveIdentity(op, ctx);
     if (key === null) return { kind: 'permanent', code: 'invalid_record_identity' };
-    return deleteMatching(op, ctx, loveMatches(key));
+    const outcome = await deleteMatching(op, ctx, loveMatches(key));
+    if (outcome.kind === 'succeeded') remember(ctx, op.did, key, { kind: 'love.delete', uri: null, cid: null });
+    return outcome;
   },
   async reconcile(op, ctx) {
     const key = unloveIdentity(op, ctx);
     if (key === null) return { kind: 'permanent', code: 'invalid_record_identity' };
-    return noneMatching(op, ctx, loveMatches(key));
+    const outcome = await noneMatching(op, ctx, loveMatches(key));
+    if (outcome.kind === 'succeeded') remember(ctx, op.did, key, { kind: 'love.delete', uri: null, cid: null });
+    return outcome;
   },
 };

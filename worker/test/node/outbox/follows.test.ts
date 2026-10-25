@@ -82,3 +82,57 @@ it('unfollow with no matching record succeeds with zero deleteRecord calls', asy
     expect((await remoteRecords(h.kit, 'Alice', FOLLOW)).map((r) => r.rkey)).toEqual(['3kcarolcarol2']);
   });
 });
+
+it('an unfollow cut short after some deletes queues the hint of every record it deleted, across attempts', async () => {
+  await withHarness(async (h) => {
+    h.seedUser(h.alice);
+    const rkey = `f${createHash('sha256').update(h.bob, 'utf8').digest('hex')}`;
+    const put = await enqueueFollow(h.m, { did: h.alice, subject: h.bob, origin: 'web' });
+    if (!put.ok) throw new Error(JSON.stringify(put.reason));
+    await h.runUntilIdle();
+    // Two more follows of Bob by another client; the listing is newest rkey first: zz…, f…, 3k….
+    await h.kit.externalPut('Alice', FOLLOW, '3kdupdupdup22', follow(h.bob));
+    await h.kit.externalPut('Alice', FOLLOW, 'zzdupdupdup22', follow(h.bob));
+    h.db.run('DELETE FROM hints');
+
+    const del = await enqueueUnfollow(h.m, { did: h.alice, subject: h.bob, origin: 'web' });
+    if (!del.ok) throw new Error(JSON.stringify(del.reason));
+    const mark = h.writers.sent.length;
+    // Attempt 1: zz… is deleted (200), then the PDS answers 500 to the next delete.
+    const paused = h.writers.pauseOn(DELETE);
+    const first = h.run();
+    await paused.reached;
+    h.kit.pds.Alice.serverError(DELETE, 500, 1);
+    paused.release();
+    await first;
+    expect(h.writers.sent.slice(mark).map((s) => [s.nsid, s.body?.rkey ?? null, s.status])).toEqual([
+      [LIST, null, 200],
+      [DELETE, 'zzdupdupdup22', 200],
+      [DELETE, rkey, 500],
+    ]);
+    expect(h.op(del.operation.id)).toMatchObject({ state: 'queued', attempts: 1 });
+    // The deleted record is hinted already, though the operation has not succeeded.
+    expect(h.db.all('SELECT uri, source FROM hints ORDER BY uri')).toEqual([
+      { uri: `at://${h.alice}/${FOLLOW}/zzdupdupdup22`, source: 'notify' },
+    ]);
+
+    // Attempt 2 lists again (zz… is gone) and deletes the other two.
+    h.kit.clock.advance(2_000);
+    await h.runUntilIdle();
+    expect(h.writers.sent.slice(mark + 3).map((s) => [s.nsid, s.body?.rkey ?? null, s.status])).toEqual([
+      [LIST, null, 200],
+      [DELETE, rkey, 200],
+      [DELETE, '3kdupdupdup22', 200],
+    ]);
+    expect(h.op(del.operation.id)).toMatchObject({ state: 'succeeded', attempts: 2 });
+    expect(await remoteRecords(h.kit, 'Alice', FOLLOW)).toEqual([]);
+    expect(h.db.all<{ uri: string }>('SELECT uri FROM hints ORDER BY uri').map((r) => r.uri)).toEqual(
+      [
+        `at://${h.alice}/${FOLLOW}/3kdupdupdup22`,
+        `at://${h.alice}/${FOLLOW}/${rkey}`,
+        `at://${h.alice}/${FOLLOW}/zzdupdupdup22`,
+      ].sort(),
+    );
+    expect(h.db.all('SELECT DISTINCT source FROM hints')).toEqual([{ source: 'notify' }]);
+  });
+});

@@ -224,6 +224,30 @@ it('a due live operation always runs before an earlier-due import operation', as
   });
 });
 
+it("due live creates that overflow one applyWrites batch hold back the same DID's earlier-due import until they are all sent", async () => {
+  await withHarness(async (h) => {
+    const [imported] = await importCreates(h, 1);
+    h.kit.clock.advance(5_000);
+    await liveListens(h, 250);
+
+    const first = await h.run();
+    // One batch per DID per run: 200 live creates; the import does not go ahead of the other 50.
+    expect(h.writers.order()).toEqual([APPLY]);
+    expect(first.batches).toEqual([200]);
+    expect(first.nextDueMs).toBe(h.kit.clock.nowMs());
+    expect(states(h, 'lastfm')).toEqual({ succeeded: 200, queued: 50 });
+    expect(states(h, 'import')).toEqual({ queued: 1 });
+
+    const rest = await h.runUntilIdle();
+    expect(rest.flatMap((r) => r.batches)).toEqual([50]);
+    expect(h.writers.order()).toEqual([APPLY, APPLY, CREATE]);
+    expect(h.writers.sent[2]!.body?.rkey).toBe(imported!.rkey);
+    expect(states(h, 'lastfm')).toEqual({ succeeded: 250 });
+    expect(states(h, 'import')).toEqual({ succeeded: 1 });
+    expect((await remoteRecords(h.kit, 'Alice', SCROBBLE)).length).toBe(251);
+  });
+});
+
 it("a reauth_required DID's operations become blocked without spending attempts and complete after sign-in", async () => {
   await withHarness(async (h) => {
     h.account(h.alice);

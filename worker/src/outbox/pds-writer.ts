@@ -249,36 +249,70 @@ export class PdsXrpc {
     return { kind: 'present', uri: expected, cid: body.cid, value: body.value };
   }
 
-  /** Every record of one collection in the owner's repo (`listRecords`, 100 per page, bounded). */
-  async listAll(
+  /**
+   * One `listRecords` page (100 records, newest rkey first) of a collection in
+   * the owner's repo, and the cursor of the next page (null after the last).
+   * Callers walk the pages one at a time (`eachListedRecord`), so a large
+   * collection is never held in memory.
+   */
+  async listPage(
     collection: string,
-    maxPages = 100,
-  ): Promise<{ ok: true; records: ListedRecord[] } | { ok: false; failure: Failure }> {
+    cursor?: string,
+  ): Promise<{ ok: true; records: ListedRecord[]; cursor: string | null } | { ok: false; failure: Failure }> {
+    const params: Record<string, string> = { repo: this.did, collection, limit: '100' };
+    if (cursor !== undefined) params.cursor = cursor;
+    const result = await this.query('com.atproto.repo.listRecords', params);
+    if (!result.ok) return { ok: false, failure: result.failure };
+    const body = result.body as { records?: unknown; cursor?: unknown } | null;
+    if (body === null || typeof body !== 'object' || !Array.isArray(body.records)) {
+      return { ok: false, failure: { kind: 'transient', code: 'invalid_pds_response' } };
+    }
     const records: ListedRecord[] = [];
-    let cursor: string | undefined;
-    for (let page = 0; page < maxPages; page++) {
-      const params: Record<string, string> = { repo: this.did, collection, limit: '100' };
-      if (cursor !== undefined) params.cursor = cursor;
-      const result = await this.query('com.atproto.repo.listRecords', params);
-      if (!result.ok) return { ok: false, failure: result.failure };
-      const body = result.body as { records?: unknown; cursor?: unknown } | null;
-      if (body === null || typeof body !== 'object' || !Array.isArray(body.records)) {
+    for (const item of body.records as unknown[]) {
+      const r = item as { uri?: unknown; cid?: unknown; value?: unknown } | null;
+      if (r === null || typeof r !== 'object' || typeof r.uri !== 'string' || typeof r.cid !== 'string') {
         return { ok: false, failure: { kind: 'transient', code: 'invalid_pds_response' } };
       }
-      for (const item of body.records as unknown[]) {
-        const r = item as { uri?: unknown; cid?: unknown; value?: unknown } | null;
-        if (r === null || typeof r !== 'object' || typeof r.uri !== 'string' || typeof r.cid !== 'string') {
-          return { ok: false, failure: { kind: 'transient', code: 'invalid_pds_response' } };
-        }
-        records.push({ uri: r.uri, cid: r.cid, value: r.value });
-      }
-      if (typeof body.cursor !== 'string' || body.cursor === '' || body.records.length === 0) {
-        return { ok: true, records };
-      }
-      cursor = body.cursor;
+      records.push({ uri: r.uri, cid: r.cid, value: r.value });
     }
-    return { ok: false, failure: { kind: 'permanent', code: 'too_many_records' } };
+    const last = typeof body.cursor !== 'string' || body.cursor === '' || records.length === 0;
+    if (!last && body.cursor === cursor) {
+      // A cursor that does not advance would list the same page forever.
+      return { ok: false, failure: { kind: 'transient', code: 'invalid_pds_response' } };
+    }
+    return { ok: true, records, cursor: last ? null : (body.cursor as string) };
   }
+}
+
+/**
+ * Pages a listing walks at most: 1,000,000 records, far beyond any follow or
+ * love collection, only so that a PDS serving endless cursors cannot hold an
+ * attempt forever.
+ */
+export const MAX_LIST_PAGES = 10_000;
+
+/**
+ * Calls `visit` for every record of `collection`, page by page (each page is
+ * visited before the next is requested). `visit` returning an outcome stops
+ * the walk with it. Null when every record was visited.
+ */
+export async function eachListedRecord(
+  xrpc: PdsXrpc,
+  collection: string,
+  visit: (record: ListedRecord) => Promise<Outcome | null>,
+): Promise<Outcome | null> {
+  let cursor: string | undefined;
+  for (let page = 0; page < MAX_LIST_PAGES; page++) {
+    const listed = await xrpc.listPage(collection, cursor);
+    if (!listed.ok) return failureOutcome(listed.failure);
+    for (const record of listed.records) {
+      const stop = await visit(record);
+      if (stop !== null) return stop;
+    }
+    if (listed.cursor === null) return null;
+    cursor = listed.cursor;
+  }
+  return { kind: 'permanent', code: 'too_many_records' };
 }
 
 /** A record write that ended: what to hint, and what to persist. */

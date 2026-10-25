@@ -32,6 +32,10 @@
 //   reconcile (`beginReconcile`, attempts unchanged) whether a crash left it
 //   running or it was blocked and queued again after sign-in, so its outcome
 //   is always persisted.
+// - Within one DID, live work is never overtaken: a DID whose due, ready live
+//   operations are not all done in its live lane (more than one applyWrites
+//   batch holds, the per-DID bound, a budget deferral or park) does not run
+//   its import lane in that run; the import lane waits with it.
 // - After each success the record's hint is queued with `enqueueHints`
 //   (source `notify`) in the same transaction as the success, so the verify
 //   drain indexes it once proven. It does not go through the client notify
@@ -91,6 +95,15 @@ export interface ExecContext {
    * may be sent now, else the `deferred` outcome to return (nothing sent).
    */
   afford(points: number): Outcome | null;
+  /**
+   * Queues the hints of records this attempt has already written or deleted,
+   * now, before its next request (an unfollow's or unlove's deletes): a
+   * record deleted by an attempt that is cut short later is no longer listed
+   * by the next attempt, so its hint cannot wait for the operation's success.
+   */
+  hint(targets: readonly HintTarget[]): void;
+  /** A value shared by every attempt of this run, built by `build` on first use. */
+  memo<T>(key: string, build: () => T): T;
 }
 
 export interface Executor {
@@ -185,6 +198,7 @@ class Run {
   private deferred = false;
   private singles = 0;
   private hinted = false;
+  private readonly memos = new Map<string, unknown>();
   private readonly dids = new Map<string, DidState>();
   private readonly collections: OutboxCollections;
 
@@ -223,6 +237,12 @@ class Run {
           this.deferred = true;
           break lanes;
         }
+        if (this.earlierLaneLeft(did, priority)) {
+          // Its live work is not done (batch overflow, per-DID bound, deferral or a budget park):
+          // the import lane waits with it, parked so it adds no wake-up of its own.
+          this.parked.add(`${did}|${priority}`);
+          continue;
+        }
         const state = await this.didState(did);
         if (state.kind === 'blocked') continue;
         if (state.kind === 'error') {
@@ -235,6 +255,19 @@ class Run {
     if (this.hinted) this.m.onHintsQueued?.();
     this.report.nextDueMs = this.nextDue();
     return this.report;
+  }
+
+  /** True when `did` still has due, ready work at a more urgent priority than `priority`. */
+  private earlierLaneLeft(did: string, priority: number): boolean {
+    return (
+      this.db.one<{ x: number }>(
+        `SELECT 1 AS x FROM operations o WHERE o.did = ? AND o.priority < ? AND ${DUE} AND o.due_at <= ? AND ${READY}
+         LIMIT 1`,
+        did,
+        priority,
+        this.now,
+      ) !== null
+    );
   }
 
   /** `did` (at `priority`, or every priority) waits until `untilMs` (budget window, writer retry). */
@@ -373,6 +406,14 @@ class Run {
       afford: (points) => {
         const budget = checkBudget(db, state.did, op.priority, points, clock.nowMs());
         return budget.ok ? null : { kind: 'deferred', untilMs: budget.resumeAtMs };
+      },
+      hint: (targets) => {
+        if (targets.length === 0) return;
+        if (db.tx(() => queueHints(this.m, state.did, targets, clock.nowMs(), this.collections))) this.hinted = true;
+      },
+      memo: <T>(key: string, build: () => T): T => {
+        if (!this.memos.has(key)) this.memos.set(key, build());
+        return this.memos.get(key) as T;
       },
     };
   }

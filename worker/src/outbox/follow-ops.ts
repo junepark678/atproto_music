@@ -8,10 +8,11 @@
 //   `createdAt`; a different subject is terminal `remote_record_conflict` and
 //   is never overwritten.
 // - Unfollow (`follow.delete`): listRecords over the owner's own
-//   `<prefix>.follow` collection, then deleteRecord with swapRecord for every
-//   record whose subject matches, including duplicates written at other rkeys
-//   by other clients. Records with other subjects are kept. No matching record
-//   is success with no delete. The intent `{subject}` is stored as the
+//   `<prefix>.follow` collection, page by page, and deleteRecord with
+//   swapRecord for every record whose subject matches, including duplicates
+//   written at other rkeys by other clients. Records with other subjects are
+//   kept. No matching record is success with no delete. Each confirmed delete
+//   is hinted at once, so an attempt cut short never loses one. The intent `{subject}` is stored as the
 //   operation's record_json (never sent); its rkey is the deterministic one.
 // - Follow intents for one subject keep separate operation ids and run FIFO
 //   behind their unsettled predecessors.
@@ -24,7 +25,7 @@ import type { ModuleDeps } from '../do/contracts';
 import { WRITE_COST } from './budget';
 import { ownRecordKey } from './delete-ops';
 import { insertOperation, newOperationId, outboxCollections, prepare, recordOf, unsettledAt } from './operations';
-import { failureOutcome, type HintTarget, type Outcome } from './pds-writer';
+import { eachListedRecord, failureOutcome, type HintTarget, type Outcome } from './pds-writer';
 import type { ExecContext, Executor } from './runner';
 import { createWithReconcile, hasIdentity, lookupCreate } from './scrobble-ops';
 
@@ -124,14 +125,15 @@ export const followPutExecutor: Executor = {
   },
 };
 
-interface Target {
-  rkey: string;
-  cid: string;
-}
-
 /**
- * Lists the owner's records of `op.collection` and deletes (with swapRecord)
- * every one `matches` accepts. Shared by unfollow and unlove.
+ * Lists the owner's records of `op.collection`, page by page, and deletes
+ * (with swapRecord) every one `matches` accepts. Shared by unfollow and
+ * unlove. Each record the PDS confirms deleted (or already gone) has its hint
+ * queued at once (`ctx.hint`), before the next request: an attempt cut short
+ * later (5xx, InvalidSwap, 429, the budget, a sign-in) leaves it deleted, and
+ * the next attempt's listing no longer shows it, so its hint cannot wait for
+ * the operation's success. `alwaysHint` (unfollow's deterministic rkey) is
+ * hinted on every success.
  */
 export async function deleteMatching(
   op: OperationRow,
@@ -139,21 +141,15 @@ export async function deleteMatching(
   matches: (value: unknown) => boolean,
   alwaysHint: readonly HintTarget[] = [],
 ): Promise<Outcome> {
-  const listed = await ctx.xrpc.listAll(op.collection);
-  if (!listed.ok) return failureOutcome(listed.failure);
-  const targets: Target[] = [];
-  for (const r of listed.records) {
+  const stopped = await eachListedRecord(ctx.xrpc, op.collection, async (r) => {
     const rkey = ownRecordKey(r.uri, op.did, op.collection);
-    if (rkey !== null && matches(r.value)) targets.push({ rkey, cid: r.cid });
-  }
-  const hints: HintTarget[] = [...alwaysHint];
-  for (const target of targets) {
+    if (rkey === null || !matches(r.value)) return null;
     // Each delete is budget-checked; one the budget stops waits, and the next attempt lists again.
     const refused = ctx.afford(WRITE_COST.delete);
     if (refused !== null) return refused;
     const result = await ctx.xrpc.procedure(
       'com.atproto.repo.deleteRecord',
-      { repo: op.did, collection: op.collection, rkey: target.rkey, swapRecord: target.cid },
+      { repo: op.did, collection: op.collection, rkey, swapRecord: r.cid },
       'delete',
     );
     if (!result.ok) {
@@ -163,21 +159,24 @@ export async function deleteMatching(
       // Already gone is what we wanted.
       if (failure.kind !== 'missing') return failureOutcome(failure);
     }
-    if (!hints.some((h) => h.rkey === target.rkey)) hints.push({ collection: op.collection, rkey: target.rkey });
-  }
-  return { kind: 'succeeded', hints };
+    ctx.hint([{ collection: op.collection, rkey }]);
+    return null;
+  });
+  return stopped ?? { kind: 'succeeded', hints: [...alwaysHint] };
 }
 
-/** Read-only check: no matching record is left. */
+/** Read-only check: no matching record is left. Success hints `alwaysHint`, as `deleteMatching`. */
 export async function noneMatching(
   op: OperationRow,
   ctx: ExecContext,
   matches: (value: unknown) => boolean,
+  alwaysHint: readonly HintTarget[] = [],
 ): Promise<Outcome> {
-  const listed = await ctx.xrpc.listAll(op.collection);
-  if (!listed.ok) return failureOutcome(listed.failure);
-  const left = listed.records.some((r) => ownRecordKey(r.uri, op.did, op.collection) !== null && matches(r.value));
-  return left ? { kind: 'transient', code: 'remote_delete_unconfirmed' } : { kind: 'succeeded', hints: [] };
+  const left: Outcome = { kind: 'transient', code: 'remote_delete_unconfirmed' };
+  const stopped = await eachListedRecord(ctx.xrpc, op.collection, async (r) =>
+    ownRecordKey(r.uri, op.did, op.collection) !== null && matches(r.value) ? left : null,
+  );
+  return stopped ?? { kind: 'succeeded', hints: [...alwaysHint] };
 }
 
 function subjectMatches(op: OperationRow): (value: unknown) => boolean {
@@ -192,6 +191,6 @@ export const followDeleteExecutor: Executor = {
   },
   async reconcile(op, ctx) {
     if (!(await followIdentity(op, ctx))) return { kind: 'permanent', code: 'invalid_follow_identity' };
-    return noneMatching(op, ctx, subjectMatches(op));
+    return noneMatching(op, ctx, subjectMatches(op), [{ collection: op.collection, rkey: op.rkey as string }]);
   },
 };
