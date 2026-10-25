@@ -119,12 +119,20 @@ const intent = (op: OperationRow) => {
   return rest;
 };
 
-function seedLove(db: Db, rkey: string, artist: string, track: string, createdAt: string, mbid: string | null = null) {
+function seedLove(
+  db: Db,
+  rkey: string,
+  artist: string,
+  track: string,
+  createdAt: string,
+  mbid: string | null = null,
+  did: string = ALICE,
+) {
   db.run(
     `INSERT INTO loves(uri, did, rkey, cid, artist, track, album, artist_key, track_key, recording_mbid, created_at, indexed_at)
      VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)`,
-    `at://${ALICE}/${LOVE}/${rkey}`,
-    ALICE,
+    `at://${did}/${LOVE}/${rkey}`,
+    did,
     rkey,
     `bafyrei${rkey}`,
     artist,
@@ -343,10 +351,93 @@ describe('ListenBrainz feedback (ADR §8.6)', () => {
     expect(roadsOp.status).toBe('accepted');
     app.db.run("UPDATE operations SET state = 'failed' WHERE id = ?", (roadsOp as { operationId: string }).operationId);
     await ok(await rig.post({ recording_msid: await recordingMsid('Portishead', 'Roads'), score: 1 }));
+    // (Glory Box itself is loved by now, so an expired row is shown with a track nobody loved.)
+    upsertNowPlaying(deps, { did: ALICE, artist: 'Portishead', track: 'Sour Times', source: 'listenbrainz' });
     app.db.run('UPDATE now_playing SET expires_at_ms = ? WHERE did = ?', app.clock.nowMs(), ALICE);
-    await ok(await rig.post({ recording_msid: await recordingMsid('Portishead', 'Glory Box'), score: 0 }));
+    await ok(await rig.post({ recording_msid: await recordingMsid('Portishead', 'Sour Times'), score: 0 }));
     await ok(await rig.post({ recording_msid: await recordingMsid('Massive Attack', 'Teardrop'), score: 1 }));
     expect(snapshot()).toEqual({ ...before, operations: before.operations + 1 });
     expect(rig.ops()).toHaveLength(2);
+  });
+
+  it('every id get-feedback returns names its love again: a love with no listen, and a queued love.put, can be unloved', async () => {
+    const rig = await started();
+    const { app } = rig;
+    const deps = app.composed.core.deps;
+    const reckonerMbid = '2c5a7b2e-1f0d-4c55-9d6e-8a3b1e0f4d21';
+
+    // Loves with no indexed listen, no now playing and no pending scrobble.create; Bob's love is not Alice's.
+    seedLove(app.db, '3lbbbbbbbbbb1', 'Sigur Rós', 'Hoppípolla', '2026-01-11T09:00:00Z');
+    seedLove(app.db, '3lbbbbbbbbbb2', 'Radiohead', 'Reckoner', '2026-01-12T09:00:00Z', reckonerMbid);
+    seedLove(app.db, '3lbbbbbbbbbb3', 'Boards of Canada', 'Roygbiv', '2026-01-13T09:00:00Z', null, BOB);
+    for (const [artist, track] of [
+      ['Sigur Rós', 'Hoppípolla'],
+      ['Radiohead', 'Reckoner'],
+      ['Boards of Canada', 'Roygbiv'],
+    ] as const) {
+      expect(app.db.one('SELECT count(*) AS n FROM scrobbles WHERE artist = ? AND track = ?', artist, track)).toEqual({
+        n: 0,
+      });
+    }
+    const listed = (await (await app.fetch('/1/feedback/user/alice/get-feedback')).json()) as {
+      feedback: Array<{ recording_msid: string; recording_mbid: string | null }>;
+    };
+    expect(listed.feedback).toHaveLength(2);
+    const [reckoner, hoppipolla] = listed.feedback as [
+      { recording_msid: string; recording_mbid: string | null },
+      { recording_msid: string; recording_mbid: string | null },
+    ];
+    expect(hoppipolla.recording_msid).toBe(await recordingMsid('Sigur Rós', 'Hoppípolla'));
+    expect(reckoner.recording_mbid).toBe(reckonerMbid);
+
+    // The MSID get-feedback returned unloves (0) and clears (-1); its MBID does too; score 1 loves again.
+    await ok(await rig.post({ recording_msid: hoppipolla.recording_msid, score: 0 }));
+    await ok(await rig.post({ recording_mbid: reckoner.recording_mbid, score: -1 }));
+    await ok(await rig.post({ recording_msid: reckoner.recording_msid, score: 0 }));
+    await ok(await rig.post({ recording_msid: hoppipolla.recording_msid, score: 1 }));
+    // Bob's love is no candidate of Alice's: nothing stored.
+    await ok(await rig.post({ recording_msid: await recordingMsid('Boards of Canada', 'Roygbiv'), score: 0 }));
+    expect(rig.ops().map((o) => [o.kind, o.did, o.origin, intent(o)])).toEqual([
+      ['love.delete', ALICE, 'listenbrainz', { artist: 'Sigur Rós', track: 'Hoppípolla' }],
+      ['love.delete', ALICE, 'listenbrainz', { artist: 'Radiohead', track: 'Reckoner' }],
+      ['love.delete', ALICE, 'listenbrainz', { artist: 'Radiohead', track: 'Reckoner' }],
+      ['love.put', ALICE, 'listenbrainz', { $type: LOVE, artist: 'Sigur Rós', track: 'Hoppípolla' }],
+    ]);
+
+    // A love queued from now playing (not yet a record, nothing indexed) is unloved after the track stopped,
+    // by its MSID and by its recording MBID.
+    const gloryMbid = '7d1c3e5a-0b2f-4e8d-a6c4-5f9e2b1d3a70';
+    upsertNowPlaying(deps, {
+      did: ALICE,
+      artist: 'Portishead',
+      track: 'Glory Box',
+      album: 'Dummy',
+      recordingMbid: gloryMbid,
+      source: 'listenbrainz',
+    });
+    await ok(await rig.post({ recording_mbid: gloryMbid, score: 1 }));
+    app.db.run('UPDATE now_playing SET expires_at_ms = ? WHERE did = ?', app.clock.nowMs(), ALICE);
+    expect(app.db.one('SELECT count(*) AS n FROM loves WHERE track = ?', 'Glory Box')).toEqual({ n: 0 });
+    await ok(await rig.post({ recording_msid: await recordingMsid('Portishead', 'Glory Box'), score: 0 }));
+    await ok(await rig.post({ recording_mbid: gloryMbid, score: -1 }));
+    expect(
+      rig
+        .ops()
+        .slice(4)
+        .map((o) => [o.kind, o.state, intent(o)]),
+    ).toEqual([
+      [
+        'love.put',
+        'queued',
+        { $type: LOVE, artist: 'Portishead', track: 'Glory Box', album: 'Dummy', recordingMbid: gloryMbid },
+      ],
+      ['love.delete', 'queued', { artist: 'Portishead', track: 'Glory Box' }],
+      ['love.delete', 'queued', { artist: 'Portishead', track: 'Glory Box' }],
+    ]);
+    // A failed love.put is no candidate.
+    app.db.run("UPDATE operations SET state = 'failed' WHERE kind = 'love.put'");
+    const before = rig.ops().length;
+    await ok(await rig.post({ recording_msid: await recordingMsid('Portishead', 'Glory Box'), score: 0 }));
+    expect(rig.ops()).toHaveLength(before);
   });
 });

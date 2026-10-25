@@ -27,11 +27,19 @@
 // 3. The handler. An `LbHttpError` it throws is answered `{code, error}`; any
 //    other throw is logged by error name and answered 500 `{code: 500, error}`.
 // 4. Every answer gets the CORS set (errors.ts) and the X-RateLimit-* set of
-//    the bucket that was charged.
+//    the bucket that was charged, unless the handler's answer already carries
+//    an X-RateLimit-Limit of its own: then its whole set is kept (the daily
+//    listen cap's 429 describes the daily window, ADR §8.3, and its
+//    X-RateLimit-* must agree with its Retry-After).
 //
 // OPTIONS on a known /1/ path is 200 with the CORS set and Allow /
-// Access-Control-Allow-Methods (never limited, as ListenBrainz's
-// `crossdomain` answers it before `@ratelimit`). Any other /1/ path, up to
+// Access-Control-Allow-Methods listing the path's methods. It is never
+// authenticated or limited, as ListenBrainz's `crossdomain` answers it before
+// `@ratelimit`, so a browser's preflight never spends the budget of the
+// request it precedes. The router answers every preflight itself: an OPTIONS
+// route in `registry` (N3-05 lists one per path) is not mounted, and its path
+// gets the router's uncharged preflight with the methods of its other routes.
+// Any other /1/ path, up to
 // MAX_FALLBACK_DEPTH non-empty segments with or without a trailing slash, is
 // answered by fallback routes registered after every real route: 405 `{code,
 // error}` with Allow for a known path and another method, else 404 `{code,
@@ -40,8 +48,10 @@
 // (metadata, playlists, sitewide statistics, …) are such 404s.
 //
 // Registry routes are plain RouteDefs or LbRouteDefs: a RouteDef's handler
-// simply ignores the fourth argument. They must not charge the limiter
-// themselves: this router already has (`lb.limit` is the decision).
+// simply ignores the fourth argument. They must not authenticate or charge the
+// limiter themselves: this router already has (`lb.auth` is the token check,
+// `lb.limit` the decision), and a second guard would verify every token twice
+// and charge each request to two limiters.
 //
 // The limiter lives in memory, one per `listenBrainzRoutes` call (one per
 // process), created on the first request from the composition's clock unless
@@ -123,10 +133,13 @@ function tokenResultOf(auth: LbAuth): TokenResult {
   return { status: auth.status };
 }
 
-/** `response` with the CORS set and `rateHeaders` (a copy; bodies are streamed through). */
+/**
+ * `response` with the CORS set and `rateHeaders` (a copy; bodies are streamed
+ * through). A response with an X-RateLimit-Limit of its own keeps its set.
+ */
 function decorate(response: Response, rateHeaders: Readonly<Record<string, string>> | undefined): Response {
   const headers = applyLbCors(new Headers(response.headers));
-  if (rateHeaders !== undefined) applyRateLimitHeaders(headers, rateHeaders);
+  if (rateHeaders !== undefined && !headers.has('x-ratelimit-limit')) applyRateLimitHeaders(headers, rateHeaders);
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
 
@@ -195,7 +208,8 @@ export function listenBrainzRoutes(options: ListenBrainzRoutesOptions = {}): Rou
       }),
   });
 
-  // OPTIONS for every known path shape that has no OPTIONS route of its own.
+  // The router's own uncharged OPTIONS for every known path shape (module comment).
+  const mounted = all.filter((route) => route.method !== 'OPTIONS');
   const shapeOf = (pattern: string) =>
     pattern
       .split('/')
@@ -205,17 +219,16 @@ export function listenBrainzRoutes(options: ListenBrainzRoutesOptions = {}): Rou
   for (const route of all) {
     const shape = shapeOf(route.pattern);
     const entry = methodsByShape.get(shape) ?? { pattern: route.pattern, methods: new Set<string>() };
-    entry.methods.add(route.method);
+    if (route.method !== 'OPTIONS') entry.methods.add(route.method);
     methodsByShape.set(shape, entry);
   }
   const preflights: RouteDef[] = [];
   for (const { pattern, methods } of methodsByShape.values()) {
-    if (methods.has('OPTIONS')) continue;
     const allow = [...methods];
     preflights.push({ method: 'OPTIONS', pattern, handler: async () => lbPreflight(allow) });
   }
 
-  const routes: RouteDef[] = [...all.map(wrap), ...preflights];
+  const routes: RouteDef[] = [...mounted.map(wrap), ...preflights];
   const known: RouteTable = createRouteTable(routes);
   return [...routes, ...fallbackRoutes(known, guarded)];
 }

@@ -24,13 +24,18 @@
 //      it is the owner's own data);
 //   3. their not-yet-indexed `scrobble.create` operations (not failed or
 //      cancelled, and no indexed record at their result URI yet), newest
-//      first, at most PENDING_SCAN_LIMIT of them.
+//      first, at most PENDING_SCAN_LIMIT of them;
+//   4. their own loves (the `loves` projection; `loves.recording_mbid` on the
+//      MBID path), newest first;
+//   5. their not-yet-indexed `love.put` operations, filtered as in 3.
 //   An MSID is a pure function of the artist and track keys
 //   (packages/core/src/msid.ts), so each candidate is checked by recomputing
 //   it. A love right after a scrobble, or while a track plays, therefore
-//   works. The display names, album and recording MBID of the matching
-//   candidate become the love record's (the newest indexed listen of the key
-//   for case 1).
+//   works, and every id get-feedback returns (the MSID of a love's keys, its
+//   recording MBID) names that love again, so a love with no listen can still
+//   be unloved with it. The display names, album and recording MBID of the
+//   matching candidate become the love record's (the newest indexed listen of
+//   the key for case 1, the newest love of the key for case 4).
 // - An id with no candidate answers 200 `{"status":"ok"}` and stores nothing,
 //   as ListenBrainz does for an MSID it cannot use.
 // - Namespace gate closed (no lexicon prefix): 503, nothing stored.
@@ -142,7 +147,7 @@ async function readFeedbackBody(req: Request): Promise<unknown> {
 // ---------------------------------------------------------------------------
 // Resolving an id to a track
 
-export type FeedbackSource = 'indexed' | 'now_playing' | 'pending';
+export type FeedbackSource = 'indexed' | 'now_playing' | 'pending' | 'loved' | 'pending_love';
 
 export interface FeedbackTarget {
   source: FeedbackSource;
@@ -209,29 +214,53 @@ async function indexedByMsid(m: Pick<ModuleDeps, 'db'>, did: string, msid: strin
   return null;
 }
 
-interface PendingCreate {
+/** The caller's newest love of an MSID (recomputed per distinct key, as get-feedback computes it), or null. */
+async function lovedByMsid(m: Pick<ModuleDeps, 'db'>, did: string, msid: string): Promise<FeedbackTarget | null> {
+  const groups = m.db.all<{ artist_key: string; track_key: string; newest: string }>(
+    `SELECT artist_key, track_key, max(created_at || ' ' || uri) AS newest FROM loves
+     WHERE did = ? GROUP BY artist_key, track_key ORDER BY newest DESC`,
+    did,
+  );
+  for (const g of groups) {
+    if ((await recordingMsidOfKey([g.artist_key, g.track_key])) !== msid) continue;
+    const row = m.db.one<TrackRow>(`SELECT ${TRACK_COLUMNS} FROM loves WHERE uri = ?`, g.newest.slice(31));
+    if (row !== null) return targetOf('loved', row);
+  }
+  return null;
+}
+
+interface PendingRecord {
   artist: unknown;
   track: unknown;
   album?: unknown;
   recordingMbid?: unknown;
 }
 
-/** The caller's newest not-yet-indexed scrobble.create records. */
-function pendingCreates(m: Pick<ModuleDeps, 'db'>, did: string): PendingCreate[] {
+/** The pending kinds and the projection that indexes each one's result. */
+const PENDING_KINDS = {
+  'scrobble.create': { table: 'scrobbles', source: 'pending' },
+  'love.put': { table: 'loves', source: 'pending_love' },
+} as const;
+
+type PendingKind = keyof typeof PENDING_KINDS;
+
+/** The caller's newest not-yet-indexed records of `kind` (scrobble.create or love.put). */
+function pendingRecords(m: Pick<ModuleDeps, 'db'>, did: string, kind: PendingKind): PendingRecord[] {
   const rows = m.db.all<{ record_json: string }>(
     `SELECT o.record_json AS record_json FROM operations o
-     WHERE o.did = ? AND o.kind = 'scrobble.create' AND o.state NOT IN ('failed', 'cancelled')
+     WHERE o.did = ? AND o.kind = ? AND o.state NOT IN ('failed', 'cancelled')
        AND o.record_json IS NOT NULL
-       AND (o.result_uri IS NULL OR NOT EXISTS (SELECT 1 FROM scrobbles s WHERE s.uri = o.result_uri))
+       AND (o.result_uri IS NULL OR NOT EXISTS (SELECT 1 FROM ${PENDING_KINDS[kind].table} s WHERE s.uri = o.result_uri))
      ORDER BY o.created_at_ms DESC, o.rowid DESC LIMIT ?`,
     did,
+    kind,
     PENDING_SCAN_LIMIT,
   );
-  const out: PendingCreate[] = [];
+  const out: PendingRecord[] = [];
   for (const row of rows) {
     try {
       const record = JSON.parse(row.record_json) as unknown;
-      if (record !== null && typeof record === 'object' && !Array.isArray(record)) out.push(record as PendingCreate);
+      if (record !== null && typeof record === 'object' && !Array.isArray(record)) out.push(record as PendingRecord);
     } catch {
       // A malformed stored record matches nothing.
     }
@@ -239,9 +268,9 @@ function pendingCreates(m: Pick<ModuleDeps, 'db'>, did: string): PendingCreate[]
   return out;
 }
 
-function pendingTarget(record: PendingCreate): FeedbackTarget {
+function pendingTarget(kind: PendingKind, record: PendingRecord): FeedbackTarget {
   return {
-    source: 'pending',
+    source: PENDING_KINDS[kind].source,
     artist: String(record.artist),
     track: String(record.track),
     album: typeof record.album === 'string' ? record.album : null,
@@ -263,19 +292,12 @@ export async function resolveFeedbackTarget(
     if (playing !== null && (await msidOfNames(playing.artist, playing.track)) === msid) {
       return targetOf('now_playing', playing);
     }
-    // One MSID per distinct key, newest create first.
-    const seen = new Map<string, boolean>();
-    for (const record of pendingCreates(m, did)) {
-      const keys = keysOfNames(record.artist, record.track);
-      if (keys === null) continue;
-      const id = `${keys[0]}\u0000${keys[1]}`;
-      let match = seen.get(id);
-      if (match === undefined) {
-        match = (await recordingMsidOfKey(keys)) === msid;
-        seen.set(id, match);
-      }
-      if (match) return pendingTarget(record);
-    }
+    const pending = await pendingByMsid(m, did, 'scrobble.create', msid);
+    if (pending !== null) return pending;
+    const loved = await lovedByMsid(m, did, msid);
+    if (loved !== null) return loved;
+    const pendingLove = await pendingByMsid(m, did, 'love.put', msid);
+    if (pendingLove !== null) return pendingLove;
   }
   if (ids.mbid !== null) {
     const mbid = ids.mbid;
@@ -288,10 +310,48 @@ export async function resolveFeedbackTarget(
     if (indexed !== null) return targetOf('indexed', indexed);
     const playing = ownNowPlaying(m, did);
     if (playing !== null && playing.recording_mbid === mbid) return targetOf('now_playing', playing);
-    for (const record of pendingCreates(m, did)) {
-      if (record.recordingMbid === mbid && keysOfNames(record.artist, record.track) !== null) {
-        return pendingTarget(record);
-      }
+    const pending = pendingByMbid(m, did, 'scrobble.create', mbid);
+    if (pending !== null) return pending;
+    const loved = m.db.one<TrackRow>(
+      `SELECT ${TRACK_COLUMNS} FROM loves WHERE did = ? AND recording_mbid = ?
+       ORDER BY created_at DESC, uri DESC LIMIT 1`,
+      did,
+      mbid,
+    );
+    if (loved !== null) return targetOf('loved', loved);
+    const pendingLove = pendingByMbid(m, did, 'love.put', mbid);
+    if (pendingLove !== null) return pendingLove;
+  }
+  return null;
+}
+
+/** The newest pending record of `kind` whose recomputed MSID is `msid` (one MSID per distinct key). */
+async function pendingByMsid(
+  m: Pick<ModuleDeps, 'db'>,
+  did: string,
+  kind: PendingKind,
+  msid: string,
+): Promise<FeedbackTarget | null> {
+  const seen = new Map<string, boolean>();
+  for (const record of pendingRecords(m, did, kind)) {
+    const keys = keysOfNames(record.artist, record.track);
+    if (keys === null) continue;
+    const id = `${keys[0]}\u0000${keys[1]}`;
+    let match = seen.get(id);
+    if (match === undefined) {
+      match = (await recordingMsidOfKey(keys)) === msid;
+      seen.set(id, match);
+    }
+    if (match) return pendingTarget(kind, record);
+  }
+  return null;
+}
+
+/** The newest pending record of `kind` with recording MBID `mbid` and valid names. */
+function pendingByMbid(m: Pick<ModuleDeps, 'db'>, did: string, kind: PendingKind, mbid: string): FeedbackTarget | null {
+  for (const record of pendingRecords(m, did, kind)) {
+    if (record.recordingMbid === mbid && keysOfNames(record.artist, record.track) !== null) {
+      return pendingTarget(kind, record);
     }
   }
   return null;

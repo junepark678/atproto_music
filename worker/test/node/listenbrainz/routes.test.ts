@@ -25,7 +25,8 @@ import { ensureAccount, renameAccount } from '../../../src/credentials/accounts'
 import { createLbToken } from '../../../src/credentials/lb-tokens';
 import type { Db } from '../../../src/do/db';
 import { applyRecordProof } from '../../../src/do/write/apply-record';
-import { LB_RATE_LIMITED_MESSAGE } from '../../../src/listenbrainz/errors';
+import { LB_RATE_LIMITED_MESSAGE, lbPreflight, lbTooManyRequests } from '../../../src/listenbrainz/errors';
+import { rateLimitHeaders } from '../../../src/listenbrainz/rate-headers';
 import {
   LB_METHOD_NOT_ALLOWED_MESSAGE,
   LB_NOT_FOUND_MESSAGE,
@@ -78,7 +79,7 @@ interface Rig {
   registryCalls: LbRequest[];
 }
 
-async function started(): Promise<Rig> {
+async function started(extraRegistry: readonly LbRouteDef[] = []): Promise<Rig> {
   const clock = fixedClock(NOW_ISO);
   const registryCalls: LbRequest[] = [];
   // A stand-in for N3-05's POST /1/submit-listens, mounted through the registry argument.
@@ -91,7 +92,7 @@ async function started(): Promise<Rig> {
       return new Response(JSON.stringify({ status: 'ok' }), { headers: { 'content-type': 'application/json' } });
     },
   };
-  const app = await startApp({ clock, routes: listenBrainzRoutes({ registry: [submit] }) });
+  const app = await startApp({ clock, routes: listenBrainzRoutes({ registry: [submit, ...extraRegistry] }) });
   const db = app.db;
   seedUser(db, ALICE, fixture.users.Alice.handle);
   seedUser(db, BOB, fixture.users.Bob.handle);
@@ -252,6 +253,73 @@ describe('the /1/ dispatcher (ADR §8.1, §8.7)', () => {
     clock.advance(10_000);
     expect((await app.fetch('/1/user/alice/listen-count')).status).toBe(200);
     expect((await app.fetch('/1/user/alice/listen-count', auth)).status).toBe(200);
+  });
+
+  it('a registry OPTIONS route never authenticates or charges the per-IP bucket; a registry answer keeps its own X-RateLimit-* set', async () => {
+    let preflightCalls = 0;
+    const DAILY_RESET = 43_200;
+    const registry: LbRouteDef[] = [
+      // N3-05 lists an OPTIONS route next to each of its paths (submit.ts, token-routes.ts).
+      {
+        method: 'OPTIONS',
+        pattern: '/1/submit-listens',
+        async handler() {
+          preflightCalls++;
+          return lbPreflight(['POST']);
+        },
+      },
+      // A stand-in for N3-05's daily-cap 429 (ADR §8.3): its X-RateLimit-* describes the daily window.
+      {
+        method: 'GET',
+        pattern: '/1/daily-cap-probe',
+        async handler(_req, ctx) {
+          const daily = rateLimitHeaders({ limit: 3000, remaining: 0, resetInSeconds: DAILY_RESET }, ctx.clock.nowMs());
+          return lbTooManyRequests(daily, DAILY_RESET, 'Daily listen limit exceeded.');
+        },
+      },
+    ];
+    const { app, clock, token, registryCalls } = await started(registry);
+
+    // 31 preflights from one IP (one more than the per-IP budget): every one is the router's uncharged 200.
+    for (let i = 0; i < 31; i++) {
+      const res = await app.fetch('/1/submit-listens', { method: 'OPTIONS' });
+      expect([i, res.status]).toEqual([i, 200]);
+      expectCors(res);
+      expect(res.headers.get('allow')).toBe('OPTIONS, POST');
+      expect(res.headers.get('access-control-allow-methods')).toBe('OPTIONS, POST');
+      expect(res.headers.get('x-ratelimit-limit')).toBeNull();
+      expect(await res.text()).toBe('');
+    }
+    expect(preflightCalls).toBe(0);
+    // The per-IP bucket is untouched: the first charged request still sees 29 left.
+    const first = await app.fetch('/1/user/alice/listen-count');
+    expect([first.status, first.headers.get('x-ratelimit-limit'), first.headers.get('x-ratelimit-remaining')]).toEqual([
+      200,
+      '30',
+      '29',
+    ]);
+    // The token-authenticated POST the preflight precedes is admitted.
+    const posted = await app.fetch('/1/submit-listens', {
+      method: 'POST',
+      headers: { authorization: `Token ${token}` },
+      body: '{}',
+    });
+    expect([posted.status, await posted.json()]).toEqual([200, { status: 'ok' }]);
+    expect(registryCalls).toHaveLength(1);
+
+    // The handler's own 429 leaves with its daily-window headers, not the 10 s bucket's.
+    const capped = await app.fetch('/1/daily-cap-probe', { headers: { authorization: `Token ${token}` } });
+    expect([capped.status, await capped.json()]).toEqual([429, { code: 429, error: 'Daily listen limit exceeded.' }]);
+    expectCors(capped);
+    expect(capped.headers.get('retry-after')).toBe(String(DAILY_RESET));
+    expect(capped.headers.get('x-ratelimit-limit')).toBe('3000');
+    expect(capped.headers.get('x-ratelimit-remaining')).toBe('0');
+    expect(capped.headers.get('x-ratelimit-reset-in')).toBe(String(DAILY_RESET));
+    expect(Number(capped.headers.get('x-ratelimit-reset'))).toBe(clock.nowMs() / 1000 + DAILY_RESET);
+    expect(capped.headers.get('access-control-expose-headers')).toBe(EXPOSE);
+    // It was still charged to the token's bucket (the POST before it was the first of 100).
+    const next = await app.fetch('/1/user/alice/listen-count', { headers: { authorization: `Token ${token}` } });
+    expect([next.headers.get('x-ratelimit-limit'), next.headers.get('x-ratelimit-remaining')]).toEqual(['100', '97']);
   });
 
   it('following and followers for Alice and Bob map the follow records', async () => {
