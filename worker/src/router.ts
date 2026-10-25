@@ -1,12 +1,13 @@
 // The Worker's HTTP front (ADR 0004 §1.1, §4.1, §4.3 "Route self-registration",
 // §8; API.md v1.1). worker/src/index.ts exports `createWorker()` from here.
 //
-// Routes. Every worker/src/http/<name>.ts module exports `routes: RouteDef[]`;
-// this is the only file that concatenates them. A pattern is matched segment
-// by segment against the *raw* (still percent-encoded) path, so an encoded `/`
-// (`%2F`, the AT URI of `/api/v1/scrobbles/{id}`) stays inside its segment; a
-// `{name}` segment matches exactly one non-empty segment and is passed to the
-// handler percent-decoded once (the raw form when it does not decode).
+// The Workers entry only (ADR 0005 §3.1, N2-01). The host-neutral parts —
+// ROUTES, matchRoute and the route matching rules, invokeRoute, assetMiss,
+// safeAssetPath, servesSpaIndex and matchSpaRoute — live in
+// worker/src/http/routes.ts and are re-exported from here unchanged, so the
+// workerd suites and the Workers entry keep their imports until N7-01 deletes
+// this file. The Node composition (worker/src/node/compose.ts) never imports
+// this module.
 //
 // `dispatch` outcomes:
 // - a matching route: its handler. A handler that throws is answered with the
@@ -56,124 +57,41 @@
 
 import { deriveCursorKey } from '@atmusic/core/cursor';
 import { type Clock, cryptoRandom, type Random, systemClock } from '@atmusic/core/deps';
-import { matchSpaRoute } from '@atmusic/core/spa-routes';
 import { LOCATION_HINTS, parseCursorKey } from './config';
 import type { IndexRpc, Logger } from './do/contracts';
 import { envLogger, INDEX_NAME } from './do/index-do';
 import type { Env } from './env';
-import { routes as adminRoutes } from './http/admin';
-import { errorResponse, toErrorResponse } from './http/error';
-import { routes as exportRoutes } from './http/export';
-import { routes as feedRoutes } from './http/feed';
-import { routes as followsReadRoutes } from './http/follows-read';
-import { routes as healthRoutes, live } from './http/health';
-import { routes as metaRoutes } from './http/meta';
-import { routes as notifyRoutes } from './http/notify';
-import { routes as profileRoutes } from './http/profile';
-import { routes as recordStatusRoutes } from './http/record-status';
+import { errorResponse } from './http/error';
+import { live } from './http/health';
 import { newRequestId } from './http/request-id';
-import { routes as resolveRoutes } from './http/resolve';
-import { routes as scrobblesReadRoutes } from './http/scrobbles-read';
-import { routes as statsRoutes } from './http/stats';
-import type { RequestCtx, RouteDef } from './http/types';
+import { assetMiss, INTERNAL_HEADER_PREFIX, invokeRoute, matchRoute, withRequestId } from './http/routes';
+import type { RequestCtx } from './http/types';
 import { scheduled } from './scheduled';
 
-/** Every route the Worker serves, in registration order. */
-export const ROUTES: readonly RouteDef[] = [
-  ...healthRoutes,
-  ...metaRoutes,
-  ...resolveRoutes,
-  ...scrobblesReadRoutes,
-  ...feedRoutes,
-  ...profileRoutes,
-  ...statsRoutes,
-  ...followsReadRoutes,
-  ...exportRoutes,
-  ...notifyRoutes,
-  ...recordStatusRoutes,
-  ...adminRoutes,
-];
+export {
+  type AssetFetcher,
+  type AssetMissDeps,
+  assetMiss,
+  createRouteTable,
+  INTERNAL_HEADER_PREFIX,
+  invokeRoute,
+  matchRoute,
+  matchSpaRoute,
+  REQUEST_ID_HEADER,
+  ROUTES,
+  type RouteMatch,
+  type RouteTable,
+  safeAssetPath,
+  servesSpaIndex,
+  withRequestId,
+} from './http/routes';
 
 /** Path prefixes the Worker answers itself (wrangler.jsonc `run_worker_first`). */
 export const WORKER_PREFIXES: readonly string[] = ['/api/', '/health/', '/internal/'];
 
-/** Header prefix reserved for values the Worker itself sets. */
-export const INTERNAL_HEADER_PREFIX = 'x-atmusic-';
 export const CLIENT_IP_HEADER = 'x-atmusic-client-ip';
-export const REQUEST_ID_HEADER = 'x-request-id';
 /** RequestCtx.clientIp when CF-Connecting-IP is absent (never in production). */
 export const UNKNOWN_CLIENT_IP = 'unknown';
-
-// ---------------------------------------------------------------------------
-// Route matching
-
-interface CompiledRoute {
-  route: RouteDef;
-  segments: readonly string[];
-}
-
-function isParam(segment: string): boolean {
-  return segment.length > 2 && segment.startsWith('{') && segment.endsWith('}');
-}
-
-function compileRoutes(routes: readonly RouteDef[]): CompiledRoute[] {
-  const seen = new Set<string>();
-  return routes.map((route) => {
-    if (!route.pattern.startsWith('/')) throw new TypeError(`route pattern must start with '/': ${route.pattern}`);
-    const segments = route.pattern.split('/');
-    // Two routes of one method and shape would make dispatch order-dependent.
-    const shape = `${route.method} ${segments.map((s) => (isParam(s) ? '{}' : s)).join('/')}`;
-    if (seen.has(shape)) throw new Error(`duplicate route ${shape}`);
-    seen.add(shape);
-    return { route, segments };
-  });
-}
-
-const COMPILED: readonly CompiledRoute[] = compileRoutes(ROUTES);
-
-function decodeOnce(raw: string): string {
-  try {
-    return decodeURIComponent(raw);
-  } catch {
-    return raw;
-  }
-}
-
-/** Params of `compiled` for the raw path segments, or null when it does not match. */
-function matchSegments(compiled: CompiledRoute, path: readonly string[]): Record<string, string> | null {
-  if (compiled.segments.length !== path.length) return null;
-  const params: Record<string, string> = {};
-  for (let i = 0; i < path.length; i++) {
-    const want = compiled.segments[i] as string;
-    const got = path[i] as string;
-    if (isParam(want)) {
-      if (got === '') return null;
-      params[want.slice(1, -1)] = decodeOnce(got);
-    } else if (want !== got) {
-      return null;
-    }
-  }
-  return params;
-}
-
-export type RouteMatch =
-  | { kind: 'route'; route: RouteDef; params: Record<string, string> }
-  | { kind: 'method_not_allowed'; allow: string[] }
-  | { kind: 'none' };
-
-/** Resolve `method` + raw `pathname` against ROUTES. */
-export function matchRoute(method: string, pathname: string): RouteMatch {
-  const path = pathname.split('/');
-  const allow = new Set<string>();
-  for (const compiled of COMPILED) {
-    const params = matchSegments(compiled, path);
-    if (params === null) continue;
-    if (compiled.route.method === method) return { kind: 'route', route: compiled.route, params };
-    allow.add(compiled.route.method);
-  }
-  if (allow.size > 0) return { kind: 'method_not_allowed', allow: [...allow].sort() };
-  return { kind: 'none' };
-}
 
 /** Whether the Worker (not ASSETS) owns `pathname`. */
 export function isWorkerPath(pathname: string): boolean {
@@ -201,32 +119,7 @@ export async function dispatch(req: Request, ctx: RequestCtx, log: Logger): Prom
       headers: { allow: match.allow.join(', ') },
     });
   }
-  const { route, params } = match;
-  let response: Response;
-  try {
-    response = await route.handler(req, ctx, params);
-  } catch (error) {
-    response = toErrorResponse(error, ctx.requestId);
-    if (response.status >= 500) {
-      log.log('error', 'request.failed', {
-        requestId: ctx.requestId,
-        method: route.method,
-        route: route.pattern,
-        status: response.status,
-        error: errorName(error),
-      });
-    }
-    return response;
-  }
-  if (response.status >= 500) {
-    log.log('warn', 'request.server_error', {
-      requestId: ctx.requestId,
-      method: route.method,
-      route: route.pattern,
-      status: response.status,
-    });
-  }
-  return response;
+  return invokeRoute(match.route, match.params, req, ctx, log);
 }
 
 // ---------------------------------------------------------------------------
@@ -280,91 +173,12 @@ export function sanitizeRequest(request: Request): { request: Request; clientIp:
   return { request: new Request(request, { headers }), clientIp };
 }
 
-function withRequestId(response: Response, requestId: string): Response {
-  const out = new Response(response.body, response);
-  out.headers.set(REQUEST_ID_HEADER, requestId);
-  return out;
-}
-
-// ---------------------------------------------------------------------------
-// Static Assets misses (ADR 0004 §15 Q9)
-
-const HEX = /^[0-9A-Fa-f]{2}$/;
-// fatal: invalid UTF-8 is rejected; ignoreBOM: a BOM is kept, as Rust's from_utf8 keeps it.
-const UTF8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
-
-/**
- * The oracle's `safe_path` (crates/server/src/http/assets.rs): `rawPath`
- * percent-decoded once, or null when it encodes `/`, `\` or `%`, holds a
- * control character or `\`, has a malformed escape, does not decode to UTF-8,
- * or has a `.` or `..` segment.
- */
-export function safeAssetPath(rawPath: string): string | null {
-  const bytes: number[] = [];
-  for (let i = 0; i < rawPath.length; ) {
-    let byte: number;
-    if (rawPath[i] === '%') {
-      const hex = rawPath.slice(i + 1, i + 3);
-      if (!HEX.test(hex)) return null;
-      byte = Number.parseInt(hex, 16);
-      if (byte === 0x2f || byte === 0x5c || byte === 0x25) return null;
-      i += 3;
-    } else {
-      byte = rawPath.charCodeAt(i);
-      // A URL pathname is ASCII; anything else did not come from the URL parser.
-      if (byte > 0x7f) return null;
-      i += 1;
-    }
-    if (byte < 0x20 || byte === 0x7f || byte === 0x5c) return null;
-    bytes.push(byte);
-  }
-  let path: string;
-  try {
-    path = UTF8.decode(new Uint8Array(bytes));
-  } catch {
-    return null;
-  }
-  if (path.split('/').some((segment) => segment === '.' || segment === '..')) return null;
-  return path;
-}
-
-/** Whether a Static Assets miss of `method` `rawPath` is answered with index.html. */
-export function servesSpaIndex(method: string, rawPath: string): boolean {
-  if (method !== 'GET' && method !== 'HEAD') return false;
-  const path = safeAssetPath(rawPath);
-  return path !== null && matchSpaRoute(path) !== undefined;
-}
-
-function notFound(deps: WorkerDeps): Response {
-  const requestId = newRequestId(deps.random);
-  return withRequestId(errorResponse('not_found', undefined, requestId), requestId);
-}
-
-/** A request outside the Worker prefixes: what Static Assets did not serve (module comment). */
-async function assetMiss(req: Request, url: URL, env: Env, deps: WorkerDeps): Promise<Response> {
-  if ((req.method !== 'GET' && req.method !== 'HEAD') || safeAssetPath(url.pathname) === null) return notFound(deps);
-  const headers = new Headers(req.headers);
-  headers.delete(CLIENT_IP_HEADER);
-  const asset = await env.ASSETS.fetch(new Request(req, { headers }));
-  if (asset.status !== 404) return asset;
-  await asset.body?.cancel();
-  if (!servesSpaIndex(req.method, url.pathname)) return notFound(deps);
-  const index = await env.ASSETS.fetch(
-    new Request(new URL('/', url), { method: req.method, headers, redirect: 'manual' }),
-  );
-  // Never a redirect: only index.html itself (or its 304 revalidation) is the SPA.
-  if (index.status !== 200 && index.status !== 304) {
-    (deps.log ?? envLogger)(env).log('error', 'assets.index_unavailable', { status: index.status });
-    return notFound(deps);
-  }
-  const requestId = newRequestId(deps.random);
-  return withRequestId(index, requestId);
-}
-
 export async function handleFetch(request: Request, env: Env, deps: WorkerDeps): Promise<Response> {
   const { request: req, clientIp } = sanitizeRequest(request);
   const url = new URL(req.url);
-  if (!isWorkerPath(url.pathname)) return assetMiss(req, url, env, deps);
+  if (!isWorkerPath(url.pathname)) {
+    return assetMiss(req, url, env.ASSETS, { random: deps.random, log: () => (deps.log ?? envLogger)(env) });
+  }
 
   const requestId = newRequestId(deps.random);
   if (req.method === 'GET' && url.pathname === '/health/live') return withRequestId(await live(), requestId);

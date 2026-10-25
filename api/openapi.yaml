@@ -5525,6 +5525,18 @@
         "properties": {
           "status": {
             "const": "ready"
+          },
+          "warnings": {
+            "description": "v1.2 (ADR 0005 §3.10): present only while a readiness warning is raised; a warning never changes the status.",
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "enum": [
+                "low_disk",
+                "oauth_store_degraded"
+              ]
+            }
           }
         }
       },
