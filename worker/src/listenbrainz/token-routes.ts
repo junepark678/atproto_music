@@ -40,6 +40,11 @@
 // delete). No match at all answers 200 `{"status":"ok"}` and writes nothing, as
 // ListenBrainz does for a listen it does not hold. Only the token owner's rows
 // are ever looked at.
+// delete-listen queues a PDS write, so it is behind the publication gate
+// (§5.7, `lbPublicationOpen`): after the token guard and before any body byte
+// is read, a closed gate answers 503 `{"code":503,"error":"Cannot submit
+// listens to queue, please try again later."}` and writes nothing, as
+// submit-listens does.
 //
 // **playing-now/delete** (§8.6), in ListenBrainz's order: no current entry →
 // 200 `{"status":"ok","message":"Playing now already cleared"}`; an entry whose
@@ -53,6 +58,7 @@ import { recordingMsid, recordingMsidOfKey } from '@atmusic/core/msid';
 import { NS_PER_SECOND, parseRfc3339, toRecordDatetime, toStorage } from '@atmusic/core/timestamp';
 import { IndexCore } from '../app/index-core';
 import type { OperationRow } from '../app/rows';
+import type { AppConfig } from '../config';
 import { type VerifiedLbToken, verifyLbToken } from '../credentials/lb-tokens';
 import type { ModuleDeps } from '../do/contracts';
 import { clearNowPlaying } from '../do/read/now-playing';
@@ -60,7 +66,7 @@ import { need, type RequestCtx, type RouteDef } from '../http/types';
 import { enqueueScrobbleDelete, removeScrobbleCreate } from '../outbox/delete-ops';
 import { outboxCollections } from '../outbox/operations';
 import { LB_AUTH_MESSAGES, parseAuthorization, unauthorized, validateTokenCandidate } from './auth-header';
-import { lbError, lbJson, lbPreflight } from './errors';
+import { LB_UNAVAILABLE_MESSAGE, lbError, lbJson, lbPreflight } from './errors';
 import { type LimitDecision, ListenBrainzLimiter, refusal, type TokenResult } from './limiter';
 import { isPythonUuid, pyInt } from './validate';
 
@@ -123,6 +129,15 @@ export function lbGuard(req: Request, ctx: RequestCtx, options: LbRouteOptions =
   if (!header.ok) return { ok: false, response: unauthorized(header.failure, rateHeaders) };
   if (verified === null) return { ok: false, response: unauthorized('invalid_token', rateHeaders) };
   return { ok: true, token: verified, rateHeaders };
+}
+
+/**
+ * Whether /1/ writes may be queued for publication: exactly the namespace
+ * gate's `publication` capability (ADR §5.7; an owned, non-fixture prefix with
+ * NAMESPACE_OWNERSHIP_REF). Closed → 503 with LB_UNAVAILABLE_MESSAGE.
+ */
+export function lbPublicationOpen(config: Pick<AppConfig, 'prefix' | 'publication'>): boolean {
+  return config.prefix !== null && config.publication;
 }
 
 /** Kicks the outbox timer of the composition (a no-op where the outbox extension is not registered). */
@@ -275,6 +290,8 @@ async function deleteListen(req: Request, ctx: RequestCtx, options: LbRouteOptio
   if (!guard.ok) return guard.response;
   const headers = guard.rateHeaders;
   const m = need(ctx, 'deps');
+  // A delete is a PDS write: closed gate → 503 before any body byte is read (module comment).
+  if (!lbPublicationOpen(m.config)) return lbError(503, LB_UNAVAILABLE_MESSAGE, headers);
   const body = await objectBody(req, false);
   if (body === null) return lbError(400, LB_JSON_INVALID, headers);
   if (!Object.hasOwn(body, 'listened_at')) return lbError(400, LB_DELETE_MESSAGES.timestampMissing, headers);

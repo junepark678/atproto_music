@@ -56,7 +56,6 @@ import { recordingMsid } from '@atmusic/core/msid';
 import type { MappedTrack } from '@atmusic/core/protocol-map';
 import type { JsonObject } from '@atmusic/core/scrobble';
 import { NS_PER_SECOND, toStorage } from '@atmusic/core/timestamp';
-import type { AppConfig } from '../config';
 import type { ModuleDeps } from '../do/contracts';
 import { upsertNowPlaying } from '../do/read/now-playing';
 import { need, type RequestCtx, type RouteDef } from '../http/types';
@@ -64,7 +63,7 @@ import { enqueueForwards } from '../outbox/forward-enqueue';
 import { acceptListens, DAILY_CAP_WINDOW_MS, type IngressListen } from '../outbox/ingress';
 import { LB_UNAVAILABLE_MESSAGE, lbError, lbJson, lbPreflight, lbTooManyRequests } from './errors';
 import { rateLimitHeaders } from './rate-headers';
-import { kickOutbox, type LbRouteOptions, lbGuard } from './token-routes';
+import { kickOutbox, type LbRouteOptions, lbGuard, lbPublicationOpen } from './token-routes';
 import { LB_SUBMIT_MESSAGES, MAX_LISTEN_PAYLOAD_SIZE, type ValidatedListen, validateSubmission } from './validate';
 
 export const SUBMIT_LISTENS_PATH = '/1/submit-listens';
@@ -72,10 +71,8 @@ export const SUBMIT_LISTENS_PATH = '/1/submit-listens';
 /** The daily cap's 429 message (ADR §8.3). */
 export const LB_DAILY_CAP_MESSAGE = 'Daily listen limit exceeded.';
 
-/** Whether submissions may be queued for publication (step 2 of the module comment). */
-export function lbPublicationOpen(config: Pick<AppConfig, 'prefix' | 'publication'>): boolean {
-  return config.prefix !== null && config.publication;
-}
+/** Whether submissions may be queued for publication (step 2 of the module comment); shared with delete-listen. */
+export { lbPublicationOpen };
 
 // ---------------------------------------------------------------------------
 // Helpers

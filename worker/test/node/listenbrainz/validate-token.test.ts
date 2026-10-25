@@ -26,6 +26,8 @@ const BOB = 'did:plc:bob00000000000000000000';
 const OWNED = 'org.example.music';
 const SCROBBLE = `${OWNED}.scrobble`;
 const OPEN_GATE = { LEXICON_PREFIX: OWNED, NAMESPACE_OWNERSHIP_REF: 'dns:_lexicon.music.example.org TXT' };
+/** The fixture prefix without ownership evidence: no `publication` capability. */
+const FIXTURE_GATE = { LEXICON_PREFIX: 'com.example.atmusic', NAMESPACE_OWNERSHIP_REF: '' };
 
 afterEach(closeApps);
 
@@ -39,9 +41,9 @@ interface Rig {
   nowPlaying(did: string): NowPlayingRow | null;
 }
 
-async function rig(): Promise<Rig> {
+async function rig(env: Record<string, string> = OPEN_GATE): Promise<Rig> {
   const clock = fixedClock();
-  const app = await startApp({ routes: [...createSubmitRoutes(), ...createTokenRoutes()], clock, env: OPEN_GATE });
+  const app = await startApp({ routes: [...createSubmitRoutes(), ...createTokenRoutes()], clock, env });
   const random = seededRandom(0x70c);
   const revocations = new MemoryRevocations(clock);
   return {
@@ -241,6 +243,31 @@ describe('ListenBrainz token routes (ADR §8.2, §8.6)', () => {
     expect(cancel.status).toBe(200);
     expect(r.ops(ALICE)[1]).toMatchObject({ kind: 'scrobble.create', state: 'cancelled' });
     expect(r.app.db.one<{ n: number }>('SELECT count(*) AS n FROM listen_keys WHERE did = ?', ALICE)?.n).toBe(0);
+
+    // A closed publication gate (no lexicon prefix, or the fixture prefix
+    // without NAMESPACE_OWNERSHIP_REF, ADR §5.7): the token is still checked
+    // first, then 503 with ListenBrainz's queue-unavailable body and nothing
+    // queued, even with a matching indexed scrobble and a valid body.
+    for (const env of [{ LEXICON_PREFIX: '', NAMESPACE_OWNERSHIP_REF: '' }, FIXTURE_GATE]) {
+      const closed = await rig(env);
+      expect(closed.app.config.app.publication).toBe(false);
+      const aliceClosed = closed.user(ALICE, 'alice.example.com');
+      seedScrobble(closed.app, ALICE, '3lbqaaaaaaa2a', at('100000000'), 'Low', 'Lullaby');
+      const noToken = await post(closed.app, '/1/delete-listen', null, { listened_at: second, recording_msid: msid });
+      expect(noToken.status).toBe(401);
+      for (const payload of [{ listened_at: second, recording_msid: msid }, { recording_msid: msid }]) {
+        const refused = await post(closed.app, '/1/delete-listen', aliceClosed.token, payload);
+        expect(refused.status).toBe(503);
+        expect(await refused.json()).toEqual({
+          code: 503,
+          error: 'Cannot submit listens to queue, please try again later.',
+        });
+        expect(refused.headers.get('access-control-allow-origin')).toBe('*');
+        expect(refused.headers.get('x-ratelimit-limit')).toBe('100');
+      }
+      expect(closed.app.db.one<{ n: number }>('SELECT count(*) AS n FROM operations')?.n).toBe(0);
+      expect(closed.app.db.one<{ n: number }>('SELECT count(*) AS n FROM scrobbles')?.n).toBe(1);
+    }
 
     // playing-now/delete: a token is required.
     expect((await playingNow(r.app, alice.token, 'Navidrome')).status).toBe(200);
