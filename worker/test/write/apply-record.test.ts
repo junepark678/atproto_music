@@ -97,6 +97,17 @@ describe('applyRecordProof', () => {
           artist_key: 'björk',
           track_key: 'jóga',
           album_key: 'homogenic',
+          // Migration 2 columns (ADR 0005 §6.4): NULL until N3-11 projects them.
+          album_artist: null,
+          album_artist_key: null,
+          track_number: null,
+          artist_mbids: null,
+          release_mbid: null,
+          release_group_mbid: null,
+          isrc: null,
+          submission_client: null,
+          music_service: null,
+          recording_msid: null,
         },
       ]);
       expect(db.all('SELECT * FROM record_state')).toEqual([

@@ -112,7 +112,10 @@ function statementsFor(did: string, window: StatsWindow): Array<[string, Stateme
   ];
 }
 
-const INDEXED_SEARCH = /^SEARCH (s|scrobbles) USING (COVERING )?INDEX (scrobbles_owner_time|scrobbles_stats) \(did=\?/;
+// scrobbles_album_stats (ADR 0005 §6.4, migration 2) is the per-DID album
+// index; the planner may serve the album ranking from it.
+const INDEXED_SEARCH =
+  /^SEARCH (s|scrobbles) USING (COVERING )?INDEX (scrobbles_owner_time|scrobbles_stats|scrobbles_album_stats) \(did=\?/;
 const FULL_SCAN = /^SCAN (s|scrobbles)\b/;
 
 it('EXPLAIN QUERY PLAN uses scrobbles_owner_time/scrobbles_stats; negative control without indexes shows SCAN', async () => {
@@ -152,7 +155,7 @@ it('EXPLAIN QUERY PLAN uses scrobbles_owner_time/scrobbles_stats; negative contr
     expect(totals[0]! > totals[3]! && totals[3]! > totals[2]! && totals[2]! > totals[1]!).toBe(true);
 
     // Negative control: without the scrobbles indexes the same statements scan the table.
-    for (const idx of ['scrobbles_owner_time', 'scrobbles_stats', 'scrobbles_global_time']) {
+    for (const idx of ['scrobbles_owner_time', 'scrobbles_stats', 'scrobbles_global_time', 'scrobbles_album_stats']) {
       db.run(`DROP INDEX ${idx}`);
     }
     for (const w of WINDOWS) {

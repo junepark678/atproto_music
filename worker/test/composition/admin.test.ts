@@ -2,6 +2,7 @@
 // IndexDO. Proves M6.2.2/metrics_auth (A16: metrics are /internal/admin/status).
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { SCHEMA_VERSION } from '../../src/do/schema';
 import {
   ADMIN_TOKEN,
   BOB,
@@ -116,7 +117,7 @@ describe('worker/src/http/admin.ts', () => {
     expect(fresh.headers.get('cache-control')).toBe('no-store');
     expect(fresh.headers.get('x-request-id')).toMatch(UUID);
     expect(fresh.body).toEqual({
-      schema: { status: 'ready', version: 1 },
+      schema: { status: 'ready', version: SCHEMA_VERSION },
       indexing: { state: 'stale', caughtUp: false, lastIndexedAt: null, lagSeconds: null },
       ingest: {
         mode: 'off',
