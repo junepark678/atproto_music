@@ -373,4 +373,6 @@ it('quiet pulses longer than lookback do not trigger gap recovery; a quiet pulse
     expect(checkpointRow(i.db)).toMatchObject({ pending_gap: 1, cursor: back * 1000 });
     expect(status(i.db, back + PULSE_DRAIN_MAX_MS)).toMatchObject({ state: 'recovering' });
   });
-});
+  // 302 sequential pulses through workerd: about 4.5 s alone, past the 5 s default
+  // under full-suite parallel load (the clock is injected, so only wall time grows).
+}, 60_000);
