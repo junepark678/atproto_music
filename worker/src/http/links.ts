@@ -5,7 +5,7 @@
 // |-----------------------------------------|----------------|-----------------------------------------|
 // | GET    /api/v1/links                    | cookie         | 200 LinkList                            |
 // | POST   /api/v1/links/lastfm/start       | cookie + CSRF  | 200 LinkStart; 503 lastfm_not_configured|
-// | GET    /api/v1/links/lastfm/callback    | cookie         | 303 /settings/links                     |
+// | GET    /api/v1/links/lastfm/callback    | cookie         | 303 /settings/links; 400; 403; 502; 503 |
 // | POST   /api/v1/links/listenbrainz       | cookie + CSRF  | 201 Link; 422 fields.token              |
 // | PATCH  /api/v1/links/{id}               | cookie + CSRF  | 200 Link; 404                           |
 // | DELETE /api/v1/links/{id}               | cookie + CSRF  | 204; 404                                |
@@ -26,7 +26,8 @@
 // before the upstream call, so it can never be replayed, then signed
 // `auth.getSession` runs; the `sk` is stored sealed with `remote_user` =
 // session.name and the answer is 303 to /settings/links. An upstream failure
-// is 502 `upstream_error` and stores nothing.
+// is 502 `upstream_error` and stores nothing. These statuses (400, 403, 502,
+// 503) are the ones api/openapi.yaml declares for link_lastfm_callback.
 //
 // **ListenBrainz linking** validates `{token}` with `GET 1/validate-token` on
 // LISTENBRAINZ_API_ROOT: `valid: false` is 422 `fields.token`; otherwise the

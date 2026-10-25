@@ -44,8 +44,10 @@
 //
 // Now playing is sent once: any failure makes it `failed`, never retried
 // (a revocation or key rejection still applies to the link or globally).
-// ListenBrainz feedback goes by `recording_mbid`; a love or unlove without
-// one is `ignored` (`no_recording_mbid`) without a request.
+// ListenBrainz feedback goes by `recording_mbid`. An unlove carries only the
+// track; its MBID is the one the track was loved with, found locally
+// (`knownRecordingMbid`) and recorded on the row. A love, or an unlove whose
+// track has no known MBID, is `ignored` (`no_recording_mbid`) without a request.
 //
 // The Last.fm key pause (10/26) is the `lastfm_key_rejected` counter, shown
 // by adminStatus. While it is set no Last.fm request is sent, except one
@@ -69,6 +71,7 @@ import type { LinkedAccountRow } from '../app/rows';
 import type { Box } from '../crypto/box';
 import type { Logger } from '../do/contracts';
 import type { Db } from '../do/db';
+import { loveKeyOf } from '../outbox/love-ops';
 import {
   backoffRows,
   clearLastfmKeyRejected,
@@ -237,12 +240,103 @@ function loveJob(rt: ForwardRuntime, link: LinkRow, now: number): Job | null {
     const [entry] = parsed(rt, [head], lovePayload, now);
     if (entry === undefined) continue;
     if (link.service === 'listenbrainz' && entry[1].recordingMbid === undefined) {
-      // ListenBrainz feedback needs a recording MBID; without one it is not forwarded.
-      settleRows(rt.db, [head.id], 'ignored', now, 'no_recording_mbid', false);
-      continue;
+      // An unlove names only the track; the MBID its love was sent with is known locally.
+      const mbid = head.kind === 'unlove' ? knownRecordingMbid(rt.db, head, entry[1]) : null;
+      if (mbid === null) {
+        // ListenBrainz feedback needs a recording MBID; without one it is not forwarded.
+        settleRows(rt.db, [head.id], 'ignored', now, 'no_recording_mbid', false);
+        continue;
+      }
+      entry[1].recordingMbid = mbid;
+      withRecordingMbid(rt.db, head, mbid);
     }
     return { link, kind: head.kind as 'love' | 'unlove', rows: [head], track: entry[1] };
   }
+}
+
+/** `payload_json` with a `recordingMbid` (null when it is not a JSON object). */
+function payloadWithMbid(text: string, mbid: string): string | null {
+  let doc: unknown;
+  try {
+    doc = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (doc === null || typeof doc !== 'object' || Array.isArray(doc)) return null;
+  return JSON.stringify({ ...(doc as Record<string, unknown>), recordingMbid: mbid });
+}
+
+/** Records the resolved MBID on the row, so a retry sends the same feedback. Inside pickJob's transaction. */
+function withRecordingMbid(db: Db, row: QueuedRow, mbid: string): void {
+  const text = payloadWithMbid(row.payload_json, mbid);
+  if (text === null) return;
+  db.run(`UPDATE forward_outbox SET payload_json = ? WHERE id = ? AND state = 'queued'`, text, row.id);
+}
+
+/** The recording MBID in `text` when it is a payload or record of the love key `key`. */
+function mbidOfLove(text: string | null, key: string): string | null {
+  if (text === null) return null;
+  const track = lovePayload({ payload_json: text });
+  if (track === null || track.recordingMbid === undefined) return null;
+  return loveKeyOf(track.artist, track.track) === key ? track.recordingMbid : null;
+}
+
+/** `json_extract(<column>, '$.recordingMbid')`, NULL for a column that is not valid JSON. */
+const MBID_OF = (column: string): string =>
+  `CASE WHEN json_valid(${column}) THEN json_extract(${column}, '$.recordingMbid') END`;
+
+/**
+ * The recording MBID an unlove's track was loved with, or null when none is
+ * known. Live unloves carry only `{artist, track}` (outbox/love-ops.ts
+ * enqueueUnlove), so the MBID comes from local state, newest first:
+ * 1. this link's love rows queued before the unlove (what we sent upstream);
+ * 2. the DID's love intents before the unlove (`love.put` operations, which
+ *    include imported loves that queue no forward row);
+ * 3. the `loves` projection (loves by other apps). The unlove's own delete
+ *    may already have removed ours from it, hence it comes last.
+ * Matching is by the love key (outbox/love-ops.ts loveKeyOf), as unlove matches.
+ */
+function knownRecordingMbid(db: Db, unlove: QueuedRow, track: ForwardTrack): string | null {
+  const key = loveKeyOf(track.artist, track.track);
+  if (key === null) return null;
+  const rows = db.all<{ payload_json: string }>(
+    `SELECT payload_json FROM forward_outbox
+     WHERE link_id = ? AND kind = 'love' AND ${MBID_OF('payload_json')} IS NOT NULL
+       AND (created_at_ms < ? OR (created_at_ms = ? AND rowid < ?))
+     ORDER BY created_at_ms DESC, rowid DESC`,
+    unlove.link_id,
+    unlove.created_at_ms,
+    unlove.created_at_ms,
+    unlove.seq,
+  );
+  for (const row of rows) {
+    const mbid = mbidOfLove(row.payload_json, key);
+    if (mbid !== null) return mbid;
+  }
+  const intents = db.all<{ record_json: string | null }>(
+    `SELECT record_json FROM operations
+     WHERE did = ? AND kind = 'love.put' AND ${MBID_OF('record_json')} IS NOT NULL
+       AND rowid < coalesce((SELECT rowid FROM operations WHERE id = ? AND did = ?), 9223372036854775807)
+     ORDER BY created_at_ms DESC, rowid DESC`,
+    unlove.did,
+    unlove.dedupe_key,
+    unlove.did,
+  );
+  for (const row of intents) {
+    const mbid = mbidOfLove(row.record_json, key);
+    if (mbid !== null) return mbid;
+  }
+  const [artistKey, trackKeyPart] = key.split('\u0000') as [string, string];
+  return (
+    db.one<{ recording_mbid: string }>(
+      `SELECT recording_mbid FROM loves
+       WHERE did = ? AND artist_key = ? AND track_key = ? AND recording_mbid IS NOT NULL
+       ORDER BY created_at DESC, uri DESC LIMIT 1`,
+      unlove.did,
+      artistKey,
+      trackKeyPart,
+    )?.recording_mbid ?? null
+  );
 }
 
 const seqOf = (job: Job): [number, number] => [job.rows[0].created_at_ms, job.rows[0].seq];

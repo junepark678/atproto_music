@@ -270,7 +270,7 @@ V12_STATUSES = {
     ('POST', '/api/v1/lastfm/authorize'): {200, 400, 401, 403, 404, 413, 422},
     ('GET', '/api/v1/links'): {200, 401},
     ('POST', '/api/v1/links/lastfm/start'): {200, 401, 403, 503},
-    ('GET', '/api/v1/links/lastfm/callback'): {303, 401, 403, 502},
+    ('GET', '/api/v1/links/lastfm/callback'): {303, 400, 401, 403, 502, 503},
     ('POST', '/api/v1/links/listenbrainz'): {201, 400, 401, 403, 413, 422, 502},
     ('PATCH', '/api/v1/links/{id}'): {200, 400, 401, 403, 404, 413, 422},
     ('DELETE', '/api/v1/links/{id}'): {204, 401, 403, 404},

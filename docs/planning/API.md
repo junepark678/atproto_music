@@ -139,7 +139,7 @@ Credentials = {appPasswords: [{id, label, createdAt, lastUsedAt}], listenbrainzT
 | POST `/api/v1/lastfm/authorize` | session + CSRF | `{apiKey, token?}` | 200 `{token}`: the desktop token authorized, or a new authorized token for the web flow; unknown or expired 404 |
 | GET `/api/v1/links` | session | none | 200 `{items: Link[]}` |
 | POST `/api/v1/links/lastfm/start` | session + CSRF | none | 200 `{authorizeUrl}`; 503 `lastfm_not_configured` |
-| GET `/api/v1/links/lastfm/callback` | session | `state`, `token` | 303 to `/settings/links`; a state not bound to this session 403, nothing stored |
+| GET `/api/v1/links/lastfm/callback` | session | `state`, `token` | 303 to `/settings/links`; a state not bound to this session 403 `csrf_failed`; a malformed query or an unknown, used or expired state 400 `bad_request`; 503 `lastfm_not_configured`; nothing stored on any refusal |
 | POST `/api/v1/links/listenbrainz` | session + CSRF | `{token}` | 201 Link; an invalid token 422 `fields.token` |
 | PATCH `/api/v1/links/{id}` | session + CSRF | `{forwardScrobbles?, forwardNowPlaying?}` | 200 Link |
 | DELETE `/api/v1/links/{id}` | session + CSRF | id | 204 (credential and queued forward rows deleted) |

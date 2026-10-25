@@ -10,6 +10,7 @@
 // accepts a submission only with a registered `Token`.
 
 import { routerTransport } from '@atmusic/atproto/test-support/router-transport';
+import { trackKey } from '@atmusic/core/music-key';
 import { type FixedClock, fixedClock } from '@atmusic/core/test-support/clock';
 import { seededRandom } from '@atmusic/core/test-support/random';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -22,6 +23,7 @@ import { saveLink } from '../../../src/forward/links';
 import { type LinksService, linksFeature } from '../../../src/http/links';
 import { parseSecrets } from '../../../src/node/secrets';
 import { enqueueForwards, type ForwardItem } from '../../../src/outbox/forward-enqueue';
+import { enqueueLove, enqueueUnlove } from '../../../src/outbox/love-ops';
 import { closeApps, startApp, type TestApp, testSecretsDocument } from '../support/app';
 import { FakeLastfm } from '../support/fake-lastfm';
 import { FakeListenBrainz, type LbSubmission } from '../support/fake-listenbrainz';
@@ -227,30 +229,77 @@ describe('ListenBrainz forwarding', () => {
 
   it('love and unlove go as recording feedback by MBID, and without an MBID they are not forwarded', async () => {
     const w = await world();
-    w.link();
-    const toggle = (kind: 'love' | 'unlove', operationId: string, recordingMbid?: string): ForwardItem => ({
-      kind,
-      operationId,
-      payload: { artist: 'Band', track: 'Song', ...(recordingMbid ? { recordingMbid } : {}), origin: 'web' },
-    });
-    w.enqueue([toggle('love', 'op-1', MBID), toggle('love', 'op-2'), toggle('unlove', 'op-3', MBID)]);
-    for (let i = 0; i < 4; i++) {
+    const linkId = w.link();
+    const m = w.app.composed.core.deps;
+    const MBID_IMPORTED = '1b2c3d4e-5f60-4718-8a9b-0c1d2e3f4a5b';
+    const MBID_OTHER_APP = '9a8b7c6d-5e4f-4321-9fed-cba987654321';
+
+    const love = async (input: Record<string, string>, origin: 'listenbrainz' | 'import' = 'listenbrainz') =>
+      expect((await enqueueLove(m, { did: ALICE, input, origin })).ok).toBe(true);
+    const unlove = async (artist: string, track: string) =>
+      expect((await enqueueUnlove(m, { did: ALICE, artist, track, origin: 'listenbrainz' })).ok).toBe(true);
+
+    // Queued through the real pipeline (N2-05): a love carries its MBID, an unlove only the track.
+    // 1. A live love with an MBID, then a live unlove that spells the track differently (same love key).
+    await love({ artist: 'Band', track: 'Song', recordingMbid: MBID });
+    await unlove('BAND', ' song ');
+    // 2. An imported love queues no forward row; a later live unlove still finds its MBID.
+    await love({ artist: 'Imported', track: 'Tune', recordingMbid: MBID_IMPORTED }, 'import');
+    await unlove('Imported', 'Tune');
+    // 3. A love another app wrote is known only from the loves projection.
+    const [artistKey, trackKeyPart] = trackKey('Elsewhere', 'Piece');
+    w.app.db.run(`INSERT OR IGNORE INTO users(did, joined_at) VALUES (?, '2026-01-10T00:00:00.000000000Z')`, ALICE);
+    w.app.db.run(
+      `INSERT INTO loves(uri, did, rkey, cid, artist, track, album, artist_key, track_key, recording_mbid, created_at, indexed_at)
+       VALUES (?, ?, ?, ?, 'Elsewhere', 'Piece', NULL, ?, ?, ?, '2026-01-10T00:00:00.000000000Z', '2026-01-10T00:00:01.000Z')`,
+      `at://${ALICE}/fm.other.love/3kotherapp222`,
+      ALICE,
+      '3kotherapp222',
+      'bafyreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy',
+      artistKey,
+      trackKeyPart,
+      MBID_OTHER_APP,
+    );
+    await unlove('Elsewhere', 'Piece');
+    // 4. A love without an MBID, and its unlove: no MBID is known anywhere.
+    await love({ artist: 'Nobody', track: 'Knows' });
+    await unlove('Nobody', 'Knows');
+
+    const queued = w.rows();
+    expect(queued.map((r) => r.kind)).toEqual(['love', 'unlove', 'unlove', 'unlove', 'love', 'unlove']);
+    // The unloves as enqueueUnlove wrote them: no recordingMbid.
+    for (const r of queued.filter((q) => q.kind === 'unlove')) {
+      expect(JSON.parse(r.payload_json)).not.toHaveProperty('recordingMbid');
+    }
+
+    for (let i = 0; i < 10; i++) {
       await w.run();
       w.clock.advance(SECOND);
     }
     expect(w.lb.feedback.map((f) => f.json)).toEqual([
       { recording_mbid: MBID, score: 1 },
       { recording_mbid: MBID, score: 0 },
+      { recording_mbid: MBID_IMPORTED, score: 0 },
+      { recording_mbid: MBID_OTHER_APP, score: 0 },
     ]);
-    expect(w.rows().map((r) => [r.dedupe_key, r.state, r.last_error])).toEqual([
-      ['op-1', 'sent', null],
-      ['op-2', 'ignored', 'no_recording_mbid'],
-      ['op-3', 'sent', null],
+    expect(w.lb.feedback.every((f) => f.token === TOKEN)).toBe(true);
+    const settled = w.rows();
+    expect(settled.map((r) => [r.link_id, r.kind, r.state, r.last_error])).toEqual([
+      [linkId, 'love', 'sent', null],
+      [linkId, 'unlove', 'sent', null],
+      [linkId, 'unlove', 'sent', null],
+      [linkId, 'unlove', 'sent', null],
+      [linkId, 'love', 'ignored', 'no_recording_mbid'],
+      [linkId, 'unlove', 'ignored', 'no_recording_mbid'],
     ]);
-    expect(w.seen.map(([m, p]) => `${m} ${p}`)).toEqual([
-      'POST /1/feedback/recording-feedback',
-      'POST /1/feedback/recording-feedback',
+    // The resolved MBID is recorded on each sent unlove row.
+    expect(settled.filter((r) => r.kind === 'unlove').map((r) => JSON.parse(r.payload_json).recordingMbid)).toEqual([
+      MBID,
+      MBID_IMPORTED,
+      MBID_OTHER_APP,
+      undefined,
     ]);
+    expect(w.seen.map(([meth, p]) => `${meth} ${p}`)).toEqual(Array(4).fill('POST /1/feedback/recording-feedback'));
   });
 
   it('401 revokes the link; 429 waits X-RateLimit-Reset-In; 400 marks the row failed with the upstream error and does not retry', async () => {

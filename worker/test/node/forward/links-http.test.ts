@@ -24,7 +24,7 @@ import { LINK_STATE_TTL_MS, sweepExpiredLinkStates } from '../../../src/forward/
 import { linksFeature } from '../../../src/http/links';
 import { parseSecrets } from '../../../src/node/secrets';
 import { enqueueForwards } from '../../../src/outbox/forward-enqueue';
-import { checkResponse, schema } from '../../acceptance/support/openapi';
+import { checkResponse } from '../../acceptance/support/openapi';
 import { closeApps, startApp, TEST_PUBLIC_ORIGIN, type TestApp, testSecretsDocument } from '../support/app';
 import { FakeLastfm, md5Hex } from '../support/fake-lastfm';
 import { FakeListenBrainz } from '../support/fake-listenbrainz';
@@ -199,10 +199,19 @@ describe('link routes', () => {
     const again = await w.app.fetch(callback, { headers: w.headers(token) });
     expect(again.status).toBe(400);
     const againBody = (await again.json()) as { error: { code: string } };
-    expect(schema('Error', againBody)).toBe('valid');
+    expect(checkResponse('GET', callback, { status: 400, headers: again.headers, body: againBody })).toBe('valid');
     expect(againBody.error.code).toBe('bad_request');
     expect(w.lastfm.calls.count({ nsid: 'auth.getSession' })).toBe(1);
     expect(links(w)).toEqual([row]);
+    // A malformed query (a repeated state) is 400 as well, before any state is looked at.
+    const repeated = await w.app.fetch(`${callback}&state=${state}`, { headers: w.headers(token) });
+    expect(repeated.status).toBe(400);
+    const repeatedBody = (await repeated.json()) as { error: { code: string } };
+    expect(checkResponse('GET', callback, { status: 400, headers: repeated.headers, body: repeatedBody })).toBe(
+      'valid',
+    );
+    expect(repeatedBody.error.code).toBe('bad_request');
+    expect(w.lastfm.calls.count({ nsid: 'auth.getSession' })).toBe(1);
 
     // The list shows the link without its credential.
     const list = await call(w, 'GET', '/api/v1/links', { token });
@@ -371,7 +380,15 @@ describe('link routes', () => {
       },
     );
     expect(callback.status).toBe(503);
-    expect(((await callback.json()) as { error: { code: string } }).error.code).toBe('lastfm_not_configured');
+    const callbackBody = (await callback.json()) as { error: { code: string } };
+    expect(
+      checkResponse('GET', '/api/v1/links/lastfm/callback', {
+        status: 503,
+        headers: callback.headers,
+        body: callbackBody,
+      }),
+    ).toBe('valid');
+    expect(callbackBody.error.code).toBe('lastfm_not_configured');
     expect(bare.lastfm.calls.count()).toBe(0);
     expect(links(bare)).toEqual([]);
     // ListenBrainz linking does not need the Last.fm key.
@@ -408,6 +425,11 @@ describe('link routes', () => {
     // Without any session the callback is 401 and touches nothing either.
     const anonymous = await w.app.fetch(callback);
     expect(anonymous.status).toBe(401);
+    const anonymousBody = (await anonymous.json()) as { error: { code: string } };
+    expect(checkResponse('GET', callback, { status: 401, headers: anonymous.headers, body: anonymousBody })).toBe(
+      'valid',
+    );
+    expect(anonymousBody.error.code).toBe('unauthenticated');
     expect(linkStates(w)).toEqual(before);
 
     // The session that started the flow can still complete it.
@@ -422,6 +444,9 @@ describe('link routes', () => {
       headers: w.headers(owner),
     });
     expect(expired.status).toBe(400);
+    const expiredBody = (await expired.json()) as { error: { code: string } };
+    expect(checkResponse('GET', callback, { status: 400, headers: expired.headers, body: expiredBody })).toBe('valid');
+    expect(expiredBody.error.code).toBe('bad_request');
     expect(w.lastfm.calls.count({ nsid: 'auth.getSession' })).toBe(1);
     // Abandoned states are removed by the expiry sweep once they are past 600 s.
     await startLastfm(w, owner);

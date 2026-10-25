@@ -862,6 +862,12 @@
   {
     "method": "GET",
     "path": "/api/v1/links/lastfm/callback",
+    "status": 400,
+    "example": "error-400"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/links/lastfm/callback",
     "status": 401,
     "example": "v1.2-error-401"
   },
@@ -876,6 +882,12 @@
     "path": "/api/v1/links/lastfm/callback",
     "status": 502,
     "example": "error-502"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/links/lastfm/callback",
+    "status": 503,
+    "example": "v1.2-error-503-lastfm"
   },
   {
     "method": "POST",
