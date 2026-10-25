@@ -2,8 +2,9 @@
 //
 // - Identity: one love per (artist_key, track_key) per DID, enforced here. A
 //   `love.put` first lists the owner's `<prefix>.love` records on their PDS;
-//   when one already matches the key (written by us earlier or by another
-//   app) the operation succeeds with that record and writes nothing.
+//   when one already matches the key (written by us earlier, by this very
+//   operation in an attempt whose answer was lost, or by another app) the
+//   operation succeeds with that record, writes nothing, and hints it.
 //   Otherwise it creates the record at its persisted TID rkey with
 //   ambiguous-create reconciliation (getRecord + digest), as a scrobble.
 // - `love.delete` (unlove) lists the same collection and deletes, with
@@ -21,6 +22,7 @@ import type { ValidationFailure } from '@atmusic/core/scrobble';
 import { validateDisplayString } from '@atmusic/core/scrobble';
 import type { OperationRow, Origin } from '../app/rows';
 import type { ModuleDeps } from '../do/contracts';
+import { ownRecordKey } from './delete-ops';
 import { deleteMatching, type EnqueueResult, noneMatching } from './follow-ops';
 import { enqueueForwards } from './forward-enqueue';
 import { insertOperation, newOperationId, outboxCollections, prepare, recordOf, unsettledOfKinds } from './operations';
@@ -169,11 +171,15 @@ export const lovePutExecutor: Executor = {
     const listed = await ctx.xrpc.listAll(op.collection);
     if (!listed.ok) return failureOutcome(listed.failure);
     const matches = loveMatches(key);
-    const existing = listed.records.find(
-      (r) => r.uri.startsWith(`at://${op.did}/${op.collection}/`) && matches(r.value),
-    );
-    // One love per key: an existing love is this love; nothing is written.
-    if (existing !== undefined) return { kind: 'succeeded', uri: existing.uri, cid: existing.cid, hints: [] };
+    for (const r of listed.records) {
+      const rkey = ownRecordKey(r.uri, op.did, op.collection);
+      if (rkey === null || !matches(r.value)) continue;
+      // One love per key: an existing love is this love; nothing is written. It
+      // is hinted like a written one (it may be our own create from an attempt
+      // whose answer was lost, not indexed yet; hinting an indexed record is
+      // harmless), so an unknown DID is admitted too.
+      return { kind: 'succeeded', uri: r.uri, cid: r.cid, hints: [{ collection: op.collection, rkey }] };
+    }
     return createWithReconcile(op, ctx, (remote) => sameDigest(op, remote));
   },
   async reconcile(op, ctx) {

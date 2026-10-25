@@ -124,6 +124,65 @@ it('a batch failing because one rkey exists is bisected; the other 199 are writt
   });
 });
 
+it('a 200-write batch whose answer was lost after the PDS committed is reconciled with getRecord reads, spending no write points; a batch refused with 500 is read back and written once', async () => {
+  await withHarness(async (h) => {
+    h.seedUser(h.alice);
+    const ops = await importCreates(h, 200);
+    const writes = commitCounter(h, 'Alice');
+    const crashed = h.writers.crashOn(APPLY, 'after_commit');
+    void h.run();
+    await crashed;
+    expect(h.kit.pds.Alice.pointsRemaining(h.alice)).toBe(5000 - 600);
+    h.restart();
+
+    const mark = h.writers.sent.length;
+    const reports = await h.runUntilIdle();
+    const after = h.writers.sent.slice(mark);
+    // Every member is looked up, none is written again.
+    expect(after.map((s) => s.nsid)).toEqual(Array(200).fill(GET));
+    expect(after.every((s) => s.status === 200)).toBe(true);
+    expect(reports.flatMap((r) => r.batches)).toEqual([200]);
+    expect(reports.at(-1)!.nextDueMs).toBeNull();
+    // Each record was committed once, by the batch whose answer was lost.
+    for (const op of ops) expect(writes.get(op.rkey!)).toBe(1);
+    expect([...writes.values()].reduce((a, b) => a + b, 0)).toBe(200);
+    expect(h.kit.pds.Alice.pointsRemaining(h.alice)).toBe(5000 - 600);
+    expect(h.db.all(`SELECT window, points FROM pds_budget WHERE did = ? ORDER BY window`, h.alice)).toEqual([
+      { window: 'day', points: 600 },
+      { window: 'hour', points: 600 },
+    ]);
+    const remote = new Map((await remoteRecords(h.kit, 'Alice', SCROBBLE)).map((r) => [r.rkey, r.cid]));
+    for (const op of ops) {
+      expect(h.op(op.id)).toMatchObject({ state: 'succeeded', attempts: 2, result_cid: remote.get(op.rkey!) });
+    }
+    // Each reconciled record is hinted like a written one.
+    expect(h.db.one<{ n: number }>(`SELECT count(*) AS n FROM hints WHERE source = 'notify'`)!.n).toBe(200);
+  });
+
+  await withHarness(
+    async (h) => {
+      const ops = await importCreates(h, 200);
+      const writes = commitCounter(h, 'Alice');
+      h.kit.pds.Alice.serverError(APPLY, 500, 1);
+      await h.run();
+      expect(h.ops().every((o) => o.state === 'queued' && o.attempts === 1)).toBe(true);
+      h.kit.clock.advance(1_000);
+      const mark = h.writers.sent.length;
+      await h.runUntilIdle();
+      // The 500 may have committed: every member is read (absent), then the batch is written once.
+      expect(h.writers.sent.slice(mark).map((s) => [s.nsid, s.status])).toEqual([
+        ...Array(200).fill([GET, 400]),
+        [APPLY, 200],
+      ]);
+      for (const op of ops) {
+        expect(writes.get(op.rkey!)).toBe(1);
+        expect(h.op(op.id)).toMatchObject({ state: 'succeeded', attempts: 2 });
+      }
+    },
+    { random: zeroJitter() },
+  );
+});
+
 it('PdsWriter requests reach the fake PDS through policyFetch, and a 3xx from the PDS is a retryable TransportError redirect, never followed', async () => {
   await withHarness(
     async (h) => {

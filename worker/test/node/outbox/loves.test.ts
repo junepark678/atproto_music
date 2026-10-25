@@ -61,3 +61,45 @@ it('a second love for the same (artist_key, track_key) succeeds without a new re
     expect((await remoteRecords(h.kit, 'Alice', LOVE)).map((r) => r.rkey)).toEqual(['3kunrelated22']);
   });
 });
+
+it('a love whose create committed before its answer was lost succeeds from the listing and queues its notify hint; an unknown DID is admitted instead', async () => {
+  await withHarness(async (h) => {
+    h.seedUser(h.alice);
+    const r = await enqueueLove(h.m, { did: h.alice, input: { artist: 'A', track: 'B' }, origin: 'web' });
+    if (!r.ok) throw new Error(JSON.stringify(r.reason));
+    const crashed = h.writers.crashOn(CREATE, 'after_commit');
+    void h.run();
+    await crashed;
+    h.restart();
+    await h.runUntilIdle();
+    expect(h.writers.order()).toEqual([LIST, CREATE, LIST]);
+    const uri = `at://${h.alice}/${LOVE}/${r.operation.rkey}`;
+    const remote = await remoteRecords(h.kit, 'Alice', LOVE);
+    expect(remote.map((x) => x.rkey)).toEqual([r.operation.rkey]);
+    expect(h.op(r.operation.id)).toMatchObject({
+      state: 'succeeded',
+      attempts: 2,
+      result_uri: uri,
+      result_cid: remote[0]!.cid,
+    });
+    expect(h.db.all('SELECT uri, source FROM hints')).toEqual([{ uri, source: 'notify' }]);
+  });
+
+  await withHarness(async (h) => {
+    expect(h.db.all('SELECT did FROM users')).toEqual([]);
+    const r = await enqueueLove(h.m, { did: h.bob, input: { artist: 'A', track: 'B' }, origin: 'web' });
+    if (!r.ok) throw new Error(JSON.stringify(r.reason));
+    const crashed = h.writers.crashOn(CREATE, 'after_commit');
+    void h.run();
+    await crashed;
+    h.restart();
+    await h.runUntilIdle();
+    expect(h.op(r.operation.id)).toMatchObject({ state: 'succeeded', attempts: 2 });
+    // The DID is not indexed yet: admitted, so its snapshot indexes the love.
+    expect(h.db.all('SELECT did, active FROM users')).toEqual([{ did: h.bob, active: 0 }]);
+    expect(h.db.all('SELECT did, kind, state FROM repo_jobs')).toEqual([
+      { did: h.bob, kind: 'snapshot', state: 'pending' },
+    ]);
+    expect(h.db.all('SELECT uri FROM hints')).toEqual([]);
+  });
+});

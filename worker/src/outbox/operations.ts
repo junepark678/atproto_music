@@ -275,6 +275,23 @@ export function beginAttempts(db: Db, ids: readonly string[], now: number): Oper
   });
 }
 
+/**
+ * Marks a row whose tenth attempt was interrupted `running` for its read-only
+ * reconcile (attempts unchanged), whether it was left running by a crashed
+ * process or queued again after being blocked. Null when it is in neither
+ * state or still has attempts left (it then takes a normal attempt).
+ */
+export function beginReconcile(db: Db, id: string, now: number): OperationRow | null {
+  const rows = db.all<OperationRow>(
+    `UPDATE operations SET state = 'running', updated_at_ms = ?
+     WHERE id = ? AND state IN ('queued','running') AND attempts >= ${MAX_ATTEMPTS}
+     RETURNING *`,
+    now,
+    id,
+  );
+  return rows[0] ?? null;
+}
+
 /** Fields of the running row persisted before a send (the delete's `swapRecord`). */
 export function persistRunning(db: Db, id: string, patch: { swapCid?: string }, now: number): void {
   if (patch.swapCid === undefined) return;

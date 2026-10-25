@@ -15,7 +15,10 @@
 //   counted — until `resumeAfterSignIn` queues them again.
 // - Per DID and priority, the point budget (budget.ts) decides how much may
 //   be sent; what does not fit waits for the binding window to end, without
-//   spending an attempt.
+//   spending an attempt. Every write request an attempt sends is checked
+//   (`ExecContext.afford`), bisection halves, singles and each delete of an
+//   unfollow included, so the ledger is never overspent; an attempt the
+//   budget stops is `deferred` (queued again, attempt not counted).
 // - Several due creates of a DID go as one applyWrites batch (apply-writes.ts,
 //   at most one batch per DID per run); everything else runs singly, at most
 //   MAX_SINGLES_PER_RUN per run.
@@ -25,7 +28,10 @@
 //   Retry-After); there are exactly MAX_ATTEMPTS (10) sends and never an
 //   eleventh. A row left `running` by a crashed process is resumed with the
 //   same rkey and payload, and a row whose tenth attempt was interrupted gets
-//   a read-only reconcile, never a send.
+//   a read-only reconcile, never a send. That row is marked `running` for the
+//   reconcile (`beginReconcile`, attempts unchanged) whether a crash left it
+//   running or it was blocked and queued again after sign-in, so its outcome
+//   is always persisted.
 // - After each success the record's hint is queued with `enqueueHints`
 //   (source `notify`) in the same transaction as the success, so the verify
 //   drain indexes it once proven. It does not go through the client notify
@@ -59,6 +65,7 @@ import { loveDeleteExecutor, lovePutExecutor } from './love-ops';
 import {
   accountNeedsSignIn,
   beginAttempts,
+  beginReconcile,
   blockOperations,
   MAX_ATTEMPTS,
   type OutboxCollections,
@@ -79,6 +86,11 @@ export interface ExecContext {
   readonly collections: OutboxCollections;
   /** Persists fields of the running row before a send, so a crash after this point resumes with them. */
   persist(patch: { swapCid?: string }): void;
+  /**
+   * Checks the point budget before a write request of `points`: null when it
+   * may be sent now, else the `deferred` outcome to return (nothing sent).
+   */
+  afford(points: number): Outcome | null;
 }
 
 export interface Executor {
@@ -358,6 +370,10 @@ class Run {
       xrpc: state.xrpc,
       collections: this.collections,
       persist: (patch) => persistRunning(db, op.id, patch, clock.nowMs()),
+      afford: (points) => {
+        const budget = checkBudget(db, state.did, op.priority, points, clock.nowMs());
+        return budget.ok ? null : { kind: 'deferred', untilMs: budget.resumeAtMs };
+      },
     };
   }
 
@@ -374,14 +390,18 @@ class Run {
     const executor = executorFor(op.kind);
     this.report.attempted += 1;
     if (op.attempts >= MAX_ATTEMPTS) {
-      // Only a crash during the tenth attempt leaves this: that send may or may
-      // not have reached the PDS, so look, and never send an eleventh.
-      const outcome = await this.safely(() => executor.reconcile(op, this.context(state, op)));
+      // Only an interrupted tenth attempt leaves this (a crash, possibly then
+      // blocked and queued again): that send may or may not have reached the
+      // PDS, so look, and never send an eleventh. The row is running for the
+      // look, so its outcome is persisted whatever state it came from.
+      const reconciling = beginReconcile(this.db, op.id, this.m.clock.nowMs());
+      if (reconciling === null) return;
+      const outcome = await this.safely(() => executor.reconcile(reconciling, this.context(state, reconciling)));
       const final: Outcome =
         outcome.kind === 'succeeded' || outcome.kind === 'permanent' || outcome.kind === 'reauth'
           ? outcome
-          : { kind: 'permanent', code: op.last_error ?? 'attempts_exhausted' };
-      this.settle(state, [[op, final]], false);
+          : { kind: 'permanent', code: reconciling.last_error ?? 'attempts_exhausted' };
+      this.settle(state, [[reconciling, final]], false);
       return;
     }
     const [started] = beginAttempts(this.db, [op.id], this.m.clock.nowMs());
@@ -429,6 +449,12 @@ class Run {
       for (const [op, outcome] of results) {
         finish(this.m, op, outcome, now, begun);
         if (outcome.kind === 'succeeded') hints.push(...outcome.hints);
+        if (outcome.kind === 'deferred') {
+          // A smaller request may still fit (the next run sizes its batch by what is left);
+          // otherwise the DID and priority wait for the binding window.
+          if (checkBudget(db, state.did, op.priority, estimatedCost(op.kind), now).ok) this.deferred = true;
+          else this.park(state.did, op.priority, outcome.untilMs);
+        }
         if (outcome.kind === 'reauth') reauth = true;
       }
       if (hints.length > 0 && queueHints(this.m, state.did, hints, now, this.collections)) this.hinted = true;
@@ -486,6 +512,17 @@ function finish(m: ModuleDeps, op: OperationRow, outcome: Outcome, now: number, 
       db.run(
         `UPDATE operations SET state = 'failed', last_error = ?, updated_at_ms = ? WHERE id = ? AND state = 'running'`,
         outcome.code,
+        now,
+        op.id,
+      );
+      return;
+    case 'deferred':
+      // The budget stopped the attempt before anything of it was left unconfirmed:
+      // queued again at its due time, the attempt not counted; the run parks the DID.
+      db.run(
+        `UPDATE operations SET state = 'queued', attempts = attempts - ?, updated_at_ms = ?
+         WHERE id = ? AND state = 'running'`,
+        begun ? 1 : 0,
         now,
         op.id,
       );

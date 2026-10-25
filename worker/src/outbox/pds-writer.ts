@@ -294,7 +294,13 @@ export type Outcome =
   | { kind: 'transient'; code: string; retryAfterMs?: number; swapCid?: string }
   | { kind: 'permanent'; code: string }
   /** The session needs a new sign-in: the operation becomes `blocked` and the attempt is not counted. */
-  | { kind: 'reauth' };
+  | { kind: 'reauth' }
+  /**
+   * The point budget cannot afford the next write of this attempt now, and
+   * nothing of the operation is left unconfirmed: it waits until `untilMs`
+   * (the binding window's end) and the attempt is not counted.
+   */
+  | { kind: 'deferred'; untilMs: number };
 
 /** A classified failure as an outcome (`ambiguous_create`/`missing` must be handled by the caller first). */
 export function failureOutcome(failure: Failure): Outcome {

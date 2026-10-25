@@ -10,7 +10,7 @@ import { drain } from '../../../src/do/ingest/verify-drain';
 import { acceptListens } from '../../../src/outbox/ingress';
 import { resumeAfterSignIn } from '../../../src/outbox/runner';
 import { enqueueScrobbleCreates } from '../../../src/outbox/scrobble-ops';
-import { APPLY, CREATE, type Harness, listenInput, remoteRecords, SCROBBLE, T0, withHarness } from './support';
+import { APPLY, CREATE, GET, type Harness, listenInput, remoteRecords, SCROBBLE, T0, withHarness } from './support';
 
 const HOUR = 3_600_000;
 
@@ -112,8 +112,8 @@ it('with 5,000 points per hour, import creates stop at 833 while live creates co
     h.account(h.alice, { import_share_pct: 50 });
     await otherAppWrites(h, 4); // 2,400 points this hour, unknown to the ledger
     await importCreates(h, 400);
-    const first = await h.run();
-    expect(first.batches).toEqual([200]);
+    const reports = await h.runUntilIdle();
+    expect(reports[0]!.batches).toEqual([200]);
     // RateLimit-Remaining is now 2,000, below the reserve (1 − 50 %) × 5,000: imports pause.
     expect(h.kit.pds.Alice.pointsRemaining(h.alice)).toBe(2000);
     expect(
@@ -142,6 +142,62 @@ it('with 5,000 points per hour, import creates stop at 833 while live creates co
     const resumed = await h.runUntilIdle();
     expect(resumed.flatMap((r) => r.batches)).toEqual([200]);
     expect(states(h, 'import')).toEqual({ succeeded: 400 });
+  });
+});
+
+it('bisection halves and singles are budget-checked: a bisected import never spends past its share, and what the budget stops waits for the window without spending attempts', async () => {
+  await withHarness(async (h) => {
+    h.account(h.alice, { import_share_pct: 50 });
+    await otherAppWrites(h, 2); // 1,200 points this hour; the import share leaves 1,300
+    const ops = await importCreates(h, 200);
+    // The same records already sit at four rkeys, so the batch and its halves are refused.
+    const existing = [0, 60, 137, 190].map((i) => ops[i]!);
+    const prior = new Map<string, string | null>();
+    for (const op of existing) {
+      const commit = await h.kit.externalPut('Alice', SCROBBLE, op.rkey!, JSON.parse(op.record_json!));
+      prior.set(op.id, commit.ops[0]!.cid);
+    }
+    const written = new Map<string, number>();
+    h.kit.pds.Alice.onCommit((_did, commit) => {
+      for (const op of commit.ops) if (op.action !== 'delete') written.set(op.rkey, (written.get(op.rkey) ?? 0) + 1);
+    });
+
+    const reports = await h.runUntilIdle();
+    expect(reports[0]!.batches).toEqual([200]);
+    // Points charged for every request the runner sent, as the PDS counts them.
+    const charged = h.writers.sent.reduce(
+      (sum, s) => sum + (s.nsid === APPLY ? 3 * (s.body!.writes as unknown[]).length : s.nsid === CREATE ? 3 : 0),
+      0,
+    );
+    expect(charged).toBeGreaterThan(600);
+    // The other apps' 1,200 points and ours stay within the 2,500-point import share.
+    expect(1200 + charged).toBeLessThanOrEqual(2500);
+    expect(5000 - h.kit.pds.Alice.pointsRemaining(h.alice)).toBe(1200 + charged);
+    expect(hourPoints(h)!).toBeLessThanOrEqual(2500);
+    expect(h.kit.pds.Alice.calls.filter({ status: 429 })).toEqual([]);
+    // What the budget stopped is queued again with its attempt refunded, and the DID waits for the window.
+    const waiting = h.ops(`state = 'queued'`);
+    expect(waiting.length).toBeGreaterThan(0);
+    expect(waiting.every((o) => o.attempts === 0)).toBe(true);
+    expect(h.ops(`state NOT IN ('queued','succeeded')`)).toEqual([]);
+    // The share is used up to what one more create cannot fit, then the DID waits for the window.
+    expect(2500 - (1200 + charged)).toBeLessThan(3);
+    expect(reports.at(-1)!.nextDueMs).toBe(T0 + HOUR);
+    const sentBefore = h.writers.sent.length;
+    expect(await h.run()).toMatchObject({ attempted: 0, nextDueMs: T0 + HOUR });
+    expect(h.writers.sent.length).toBe(sentBefore);
+
+    // A new window: the rest completes; the existing records are reconciled by digest, never overwritten.
+    h.kit.clock.set(new Date(T0 + HOUR).toISOString());
+    await h.runUntilIdle();
+    for (const op of ops) expect(h.op(op.id).state).toBe('succeeded');
+    for (const op of existing) {
+      expect(h.op(op.id).result_cid).toBe(prior.get(op.id));
+      expect(written.get(op.rkey!) ?? 0).toBe(0);
+    }
+    for (const op of ops) if (!prior.has(op.id)) expect(written.get(op.rkey!)).toBe(1);
+    expect(h.writers.sent.filter((s) => s.nsid === GET).map((s) => s.status)).toEqual(Array(4).fill(200));
+    expect(await remoteRecords(h.kit, 'Alice', SCROBBLE)).toHaveLength(200);
   });
 });
 

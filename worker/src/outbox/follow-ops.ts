@@ -21,6 +21,7 @@ import { followRkey } from '@atmusic/core/record-key';
 import type { ValidationFailure } from '@atmusic/core/scrobble';
 import type { OperationRow, Origin } from '../app/rows';
 import type { ModuleDeps } from '../do/contracts';
+import { WRITE_COST } from './budget';
 import { ownRecordKey } from './delete-ops';
 import { insertOperation, newOperationId, outboxCollections, prepare, recordOf, unsettledAt } from './operations';
 import { failureOutcome, type HintTarget, type Outcome } from './pds-writer';
@@ -147,6 +148,9 @@ export async function deleteMatching(
   }
   const hints: HintTarget[] = [...alwaysHint];
   for (const target of targets) {
+    // Each delete is budget-checked; one the budget stops waits, and the next attempt lists again.
+    const refused = ctx.afford(WRITE_COST.delete);
+    if (refused !== null) return refused;
     const result = await ctx.xrpc.procedure(
       'com.atproto.repo.deleteRecord',
       { repo: op.did, collection: op.collection, rkey: target.rkey, swapRecord: target.cid },

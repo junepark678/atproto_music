@@ -6,7 +6,7 @@
 import { MAX_ATTEMPTS, nextDelayMs } from '@atmusic/core/write-policy';
 import { expect, it } from 'vitest';
 import { acceptListens } from '../../../src/outbox/ingress';
-import { outboxExtension } from '../../../src/outbox/runner';
+import { outboxExtension, resumeAfterSignIn } from '../../../src/outbox/runner';
 import { CREATE, GET, type Harness, listenInput, remoteRecord, SCROBBLE, T0, withHarness, zeroJitter } from './support';
 
 async function enqueueOne(h: Harness, i = 0) {
@@ -152,6 +152,58 @@ it('a crash during the tenth attempt is reconciled read-only, never with an elev
       expect(h.kit.pds.Alice.count(CREATE)).toBe(10);
       const remote = await remoteRecord(h.kit, 'Alice', SCROBBLE, op.rkey!);
       expect(h.op(op.id)).toMatchObject({ state: 'succeeded', attempts: 10, result_cid: remote!.cid });
+    },
+    { random: zeroJitter() },
+  );
+});
+
+it('a tenth attempt interrupted and then blocked is reconciled after sign-in with exactly one getRecord and settles, also when that look first answers 401', async () => {
+  await withHarness(
+    async (h) => {
+      h.kit.pds.Alice.serverError(CREATE, 500, 9);
+      const op = await enqueueOne(h);
+      for (let attempt = 1; attempt < MAX_ATTEMPTS; attempt++) {
+        await h.run();
+        h.kit.clock.advance(h.op(op.id).due_at - h.kit.clock.nowMs());
+      }
+      const crashed = h.writers.crashOn(CREATE, 'after_commit');
+      void h.run();
+      await crashed;
+      h.restart();
+
+      // The restarted process finds the session gone: the row is blocked with its ten attempts.
+      h.writers.signedOut.add(h.alice);
+      expect(await h.run()).toMatchObject({ attempted: 0, blocked: 1, nextDueMs: null });
+      expect(h.op(op.id)).toMatchObject({ state: 'blocked', attempts: 10, last_error: 'reauth_required' });
+
+      // After sign-in, the look itself answers 401: blocked again, nothing counted, nothing written.
+      h.writers.signedOut.delete(h.alice);
+      h.kit.pds.Alice.fail({ nsid: GET }, { kind: 'status', status: 401, error: 'InvalidToken', message: 'expired' });
+      expect(resumeAfterSignIn(h.m, h.alice)).toBe(1);
+      const mark = h.writers.sent.length;
+      expect(await h.run()).toMatchObject({ attempted: 1, blocked: 1, nextDueMs: null });
+      expect(h.writers.sent.slice(mark).map((s) => [s.nsid, s.status])).toEqual([[GET, 401]]);
+      expect(h.op(op.id)).toMatchObject({ state: 'blocked', attempts: 10, last_error: 'reauth_required' });
+
+      // The next sign-in: exactly one more getRecord, the row settles, and nothing is left due.
+      expect(resumeAfterSignIn(h.m, h.alice)).toBe(1);
+      const reports = await h.runUntilIdle(5);
+      expect(reports).toHaveLength(1);
+      expect(reports[0]).toMatchObject({ attempted: 1, blocked: 0, nextDueMs: null });
+      expect(h.writers.sent.slice(mark).map((s) => [s.nsid, s.status])).toEqual([
+        [GET, 401],
+        [GET, 200],
+      ]);
+      expect(h.kit.pds.Alice.count(CREATE)).toBe(10);
+      const remote = await remoteRecord(h.kit, 'Alice', SCROBBLE, op.rkey!);
+      expect(h.op(op.id)).toMatchObject({
+        state: 'succeeded',
+        attempts: 10,
+        result_cid: remote!.cid,
+        result_uri: `at://${h.alice}/${SCROBBLE}/${op.rkey}`,
+      });
+      expect(await h.run()).toMatchObject({ attempted: 0, nextDueMs: null });
+      expect(h.writers.sent.length).toBe(mark + 2);
     },
     { random: zeroJitter() },
   );
