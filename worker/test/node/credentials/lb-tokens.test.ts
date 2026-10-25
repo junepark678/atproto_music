@@ -28,6 +28,11 @@ describe('ListenBrainz tokens (ADR §8.2)', () => {
         ALICE,
       );
       ensureAccount(deps, { did: ALICE, verifiedHandle: 'alice.bsky.social' });
+      // The sign-in that verified bob.example.com also recorded it in users (the OAuth callback does).
+      db.run(
+        "INSERT INTO users (did, handle, joined_at) VALUES (?, 'bob.example.com', '2026-01-15T12:00:00.000000000Z')",
+        BOB,
+      );
       ensureAccount(deps, { did: BOB, verifiedHandle: 'bob.example.com' });
 
       const created = createLbToken(deps, { did: ALICE, label: 'Navidrome' });

@@ -6,14 +6,21 @@
 
 import { createHash } from 'node:crypto';
 import { fixedClock } from '@atmusic/core/test-support/clock';
+import { seededRandom } from '@atmusic/core/test-support/random';
 import { describe, expect, it } from 'vitest';
+import { MemoryRevocations } from '../../../src/app/revocations';
 import {
+  type CredentialDeps,
+  displayName,
   ensureAccount,
   RENAME_ERROR_STATUS,
   renameAccount,
   resolveUserDid,
   touchLastUsed,
 } from '../../../src/credentials/accounts';
+import { createAppPassword } from '../../../src/credentials/app-passwords';
+import { createSession, getMobileSession, verifySessionKey } from '../../../src/credentials/lastfm-auth';
+import { createLbToken, verifyLbToken } from '../../../src/credentials/lb-tokens';
 import type { Db } from '../../../src/do/db';
 import { withMigratedDb } from '../support/node-db';
 
@@ -21,6 +28,9 @@ const ALICE = 'did:plc:alice000000000000000000';
 const ALICE2 = 'did:plc:alicenew0000000000000000';
 const CAROL = 'did:plc:carol000000000000000000';
 const BOB = 'did:plc:bob00000000000000000000';
+const LONG = 'did:plc:long0000000000000000000';
+const DAVE = 'did:web:dave.example.com';
+const KEY = 'a'.repeat(32);
 const JOINED = '2026-01-15T12:00:00.000000000Z';
 
 function setHandle(db: Db, did: string, handle: string | null): void {
@@ -154,6 +164,76 @@ describe('accounts and usernames (ADR §9)', () => {
       });
       expect(username(db, ALICE)).toBe('alice.example.net');
       expect(renameAccount(deps, { did: CAROL, username: 'carol' })).toEqual({ ok: false, error: 'no_account' });
+    });
+  });
+
+  it('the session <name> and the ListenBrainz user_name always resolve back to the same DID, including for collision, truncated and stale dotted usernames', async () => {
+    await withMigratedDb((db) => {
+      const clock = fixedClock();
+      const deps: CredentialDeps = { db, clock, random: seededRandom(9), revocations: new MemoryRevocations(clock) };
+
+      // ALICE signs in as alice.bsky.social, then moves to alice.example.com; ALICE2
+      // takes alice.bsky.social and gets the collision name alice.bsky.social-2.
+      setHandle(db, ALICE, 'alice.bsky.social');
+      ensureAccount(deps, { did: ALICE, verifiedHandle: 'alice.bsky.social' });
+      setHandle(db, ALICE, 'alice.example.com');
+      setHandle(db, ALICE2, 'alice.bsky.social');
+      ensureAccount(deps, { did: ALICE2, verifiedHandle: 'alice.bsky.social' });
+      // A handle longer than 64 characters is cut to a dotted 64-character prefix.
+      const longHandle = `${'a'.repeat(40)}.${'b'.repeat(30)}.example.com`;
+      setHandle(db, LONG, longHandle);
+      ensureAccount(deps, { did: LONG, verifiedHandle: longHandle });
+      // A DID without a verified handle gets a dotless name; BOB renames to a dotless one.
+      ensureAccount(deps, { did: DAVE, verifiedHandle: null });
+      setHandle(db, BOB, 'bob.example.com');
+      ensureAccount(deps, { did: BOB, verifiedHandle: 'bob.example.com' });
+      expect(renameAccount(deps, { did: BOB, username: 'bob' })).toMatchObject({ ok: true, changed: true });
+
+      expect(username(db, ALICE)).toBe('alice.bsky.social'); // stale: no longer ALICE's handle
+      expect(username(db, ALICE2)).toBe('alice.bsky.social-2'); // collision name, not a handle
+      expect(username(db, LONG)).toBe(longHandle.slice(0, 64)); // truncated, not a handle
+      expect(username(db, DAVE)).toBe('didwebdave-example-com');
+      // None of the three dotted usernames names its owner (§9 step 3).
+      expect(resolveUserDid(db, 'alice.bsky.social')).toBe(ALICE2);
+      expect(resolveUserDid(db, 'alice.bsky.social-2')).toBe(null);
+      expect(resolveUserDid(db, longHandle.slice(0, 64))).toBe(null);
+
+      // Responses fall back to the verified handle for them; resolvable usernames are kept.
+      const expected: Array<[string, string]> = [
+        [ALICE, 'alice.example.com'],
+        [ALICE2, 'alice.bsky.social'],
+        [LONG, longHandle],
+        [DAVE, 'didwebdave-example-com'],
+        [BOB, 'bob'],
+      ];
+      for (const [did, name] of expected) {
+        expect(displayName(db, did), did).toBe(name);
+        const session = createSession(deps, { did, apiKey: KEY });
+        expect(session.name, did).toBe(name);
+        expect(verifySessionKey(deps, session.key)).toMatchObject({ ok: true, value: { did, name } });
+        const lb = createLbToken(deps, { did, label: null });
+        expect(verifyLbToken(deps, lb.token)).toEqual({ id: lb.id, did, username: name });
+        expect(resolveUserDid(db, name), name).toBe(did);
+        // Echoing the session name back as getMobileSession `username` reaches the same account.
+        const { password } = createAppPassword(deps, { did, label: null });
+        const mobile = getMobileSession(deps, { apiKey: KEY, username: name, password });
+        expect(mobile, name).toMatchObject({ ok: true, value: { name } });
+        expect(mobile.ok && verifySessionKey(deps, mobile.value.key)).toMatchObject({ ok: true, value: { did } });
+      }
+
+      // With no verified handle left, a dotted username that does not resolve gives way to the DID.
+      setHandle(db, ALICE2, null);
+      expect(displayName(db, ALICE2)).toBe(ALICE2);
+      expect(resolveUserDid(db, displayName(db, ALICE2))).toBe(ALICE2);
+      // The collision name becoming another DID's real handle never redirects ALICE2's name to it.
+      setHandle(db, CAROL, 'alice.bsky.social-2');
+      expect(resolveUserDid(db, 'alice.bsky.social-2')).toBe(CAROL);
+      expect(displayName(db, ALICE2)).toBe(ALICE2);
+      // Once the owner's handle again equals the dotted username, the username is the name.
+      setHandle(db, ALICE, 'alice.bsky.social');
+      expect(displayName(db, ALICE)).toBe('alice.bsky.social');
+      expect(db.one<{ n: number }>('SELECT count(*) AS n FROM lastfm_sessions')?.n).toBe(10);
+      expect(db.one<{ n: number }>('SELECT count(*) AS n FROM lb_tokens')?.n).toBe(5);
     });
   });
 

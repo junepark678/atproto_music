@@ -18,6 +18,11 @@
 //   value is that DID; a dotless value is an `accounts.username`; a dotted
 //   value is an `accounts.username` only while its owner's verified handle
 //   still equals it, otherwise it falls through to the verified handle.
+// - **Display** (`displayName`): username, else verified handle, else DID —
+//   the first that resolves back to the same DID. A dotted username that is
+//   not its owner's current handle (a `-2` collision name, a truncated long
+//   handle, a stale name) does not resolve, so it is never handed out as the
+//   protocol name.
 //
 // "Verified handle" means `users.handle` (the column the identity sweeps keep
 // bidirectionally verified, unique where not NULL), unless the caller passes
@@ -234,7 +239,18 @@ export function resolveUserDid(db: Db, name: string): string | null {
   return db.one<{ did: string }>('SELECT did FROM users WHERE handle = ?', lower)?.did ?? null;
 }
 
-/** The name responses use for a DID (ADR §9): username, else verified handle, else the DID. */
+/**
+ * The name responses use for a DID (ADR §9): username, else verified handle,
+ * else the DID, taking the first that `resolveUserDid` resolves back to `did`.
+ *
+ * A dotted username resolves only while it equals its owner's verified handle
+ * (§9 step 3), so a collision name (`alice.bsky.social-2`), a handle truncated
+ * to 64 characters, or a username left stale by a handle change does not name
+ * its owner. Responses then fall back to the verified handle, else the DID, so
+ * a client that echoes the session `<name>` or the ListenBrainz `user_name`
+ * back (as `user`, `{user}` or getMobileSession `username`) always reaches the
+ * same account, never not-found and never another account.
+ */
 export function displayName(db: Db, did: string): string {
   const row = db.one<{ username: string | null; handle: string | null }>(
     `SELECT (SELECT username FROM accounts WHERE did = ?) AS username,
@@ -242,7 +258,10 @@ export function displayName(db: Db, did: string): string {
     did,
     did,
   );
-  return row?.username ?? row?.handle ?? did;
+  for (const candidate of [row?.username, row?.handle]) {
+    if (typeof candidate === 'string' && resolveUserDid(db, candidate) === did) return candidate;
+  }
+  return did;
 }
 
 /** Throws `no_account` unless `did` has an account: only signed-in DIDs hold protocol credentials (ADR §13). */
