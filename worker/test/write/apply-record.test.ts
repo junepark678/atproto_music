@@ -97,7 +97,10 @@ describe('applyRecordProof', () => {
           artist_key: 'björk',
           track_key: 'jóga',
           album_key: 'homogenic',
-          // Migration 2 columns (ADR 0005 §6.4): NULL until N3-11 projects them.
+          // Migration 2 columns (ADR 0005 §6.4): r02 has none of the §6.2
+          // fields, so they stay NULL; recording_msid is derived from the keys
+          // for every scrobble (§6.5, §8.4: UUIDv5 of 'björk' ‖ U+0000 ‖ 'jóga',
+          // equal to core's recordingMsid, worker/test/node/write/apply-fields.test.ts).
           album_artist: null,
           album_artist_key: null,
           track_number: null,
@@ -107,7 +110,7 @@ describe('applyRecordProof', () => {
           isrc: null,
           submission_client: null,
           music_service: null,
-          recording_msid: null,
+          recording_msid: 'c323db7c-fb8f-548b-a5bb-570fa7e22e48',
         },
       ]);
       expect(db.all('SELECT * FROM record_state')).toEqual([

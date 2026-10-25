@@ -124,6 +124,36 @@ describe('parseConfig namespace gate', () => {
     ]);
   });
 
+  // ADR 0005 §6.3, B12 (N3-11): a valid prefix derives exactly four
+  // collections, love included, and nothing else; a closed gate derives none.
+  it('collections for an owned prefix are exactly scrobble, follow, settings and love', () => {
+    for (const [prefix, options] of [
+      ['org.example.music', {}],
+      [DECIDED_PREFIX, {}],
+      [FIXTURE_PREFIX, { allowFixturePrefix: true }],
+    ] as const) {
+      const collections = parseConfig({ ...BASE, LEXICON_PREFIX: prefix }, options).collections;
+      // Exact equality: no fifth key, each value the prefix plus one segment.
+      expect(collections, prefix).toEqual({
+        scrobble: `${prefix}.scrobble`,
+        follow: `${prefix}.follow`,
+        settings: `${prefix}.settings`,
+        love: `${prefix}.love`,
+      });
+      expect(Object.keys(collections ?? {}), prefix).toEqual(['scrobble', 'follow', 'settings', 'love']);
+    }
+    // Publication evidence does not change the set.
+    const owned = parseConfig({
+      ...BASE,
+      LEXICON_PREFIX: DECIDED_PREFIX,
+      NAMESPACE_OWNERSHIP_REF: 'dns:_lexicon.music.pythonplayer123.dev TXT',
+    });
+    expect(owned.publication).toBe(true);
+    expect(owned.collections?.love).toBe('dev.pythonplayer123.music.love');
+    // The closed gate has no collections at all.
+    expect(parseConfig(BASE).collections).toBeNull();
+  });
+
   it('decided prefix dev.pythonplayer123.music is valid, non-fixture, and publishes only with NAMESPACE_OWNERSHIP_REF', () => {
     const decided = { ...BASE, PUBLIC_ORIGIN: DECIDED_ORIGIN, LEXICON_PREFIX: DECIDED_PREFIX };
     // Accepted without allowFixturePrefix: it is not the fixture prefix.

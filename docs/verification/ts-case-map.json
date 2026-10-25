@@ -20,8 +20,8 @@
     },
     {
       "case": "M1.1.1/version_policy",
-      "target": "worker/test/ingest/jetstream-socket.test.ts › subscribe URL has kinds=commit and the three collections only",
-      "note": "A10 adds `<prefix>.settings`, so a valid prefix derives exactly the scrobble, follow and settings collections."
+      "target": "worker/test/ingest/jetstream-socket.test.ts › subscribe URL has kinds=commit and the four collections only",
+      "note": "A10 adds `<prefix>.settings` and B12 `<prefix>.love` (N3-11 renamed the target from \"the three collections only\"), so a valid prefix derives exactly the scrobble, follow, settings and love collections."
     },
     {
       "case": "M1.1.2/unicode_limits",

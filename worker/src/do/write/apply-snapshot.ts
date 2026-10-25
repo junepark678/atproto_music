@@ -41,6 +41,13 @@
 //   could resurrect a record deleted before headRev. With the floor such a
 //   proof is `stale_head`.
 //
+// - ADR 0005 §6.5 (N3-11): `<p>.love` entries are in the snapshot key range
+//   `[<p>., <p>/)` and are applied like scrobbles and follows (validated and
+//   upserted into `loves`, excluded when invalid, swept to absent when the
+//   chunk no longer holds them); scrobble entries project the §6.2 columns,
+//   album_artist_key and recording_msid through apply-record. `loves` has no
+//   revision column: its record_state row is the per-URI guard.
+//
 // Completion (`completeSnapshot`): if `users.generation == generation`, the
 // DID is not suppressed and its snapshot job exists, then a `headRev` below
 // the snapshot floor is `stale` and changes nothing (it neither declares the
@@ -174,7 +181,9 @@ function storedCid(db: Db, uri: string): string | null {
   const state = readRecordState(db, uri);
   if (state !== null) return state.cid;
   const row = db.one<{ cid: string }>(
-    'SELECT cid FROM scrobbles WHERE uri = ? UNION ALL SELECT cid FROM follows WHERE uri = ? LIMIT 1',
+    `SELECT cid FROM scrobbles WHERE uri = ? UNION ALL SELECT cid FROM follows WHERE uri = ?
+     UNION ALL SELECT cid FROM loves WHERE uri = ? LIMIT 1`,
+    uri,
     uri,
     uri,
   );
@@ -246,10 +255,12 @@ export function applySnapshotChunk(db: Db, c: SnapshotChunk): ChunkResult {
     `SELECT uri FROM record_state WHERE did = ? AND uri > ? AND uri <= ? AND revision < ? AND state != 'absent'
      UNION SELECT uri FROM scrobbles WHERE did = ? AND uri > ? AND uri <= ? AND revision < ?
      UNION SELECT uri FROM follows WHERE actor = ? AND uri > ? AND uri <= ? AND revision < ?
+     UNION SELECT uri FROM loves WHERE did = ? AND uri > ? AND uri <= ?
      ORDER BY uri`,
     ...[c.did, lo, hi, c.headRev],
     ...[c.did, lo, hi, c.headRev],
     ...[c.did, lo, hi, c.headRev],
+    ...[c.did, lo, hi],
   );
   for (const { uri } of candidates) {
     if (present.has(uri)) continue;
@@ -258,7 +269,7 @@ export function applySnapshotChunk(db: Db, c: SnapshotChunk): ChunkResult {
     const collection = uriCollection(c.did, uri);
     const kind = collectionKind(c.prefix, collection);
     const rkey = uri.slice(`at://${c.did}/${collection}/`.length);
-    if (kind === 'scrobble' || kind === 'follow') {
+    if (kind === 'scrobble' || kind === 'follow' || kind === 'love') {
       applyRecordTarget(db, { did: c.did, kind, collection, rkey, uri, rev: c.headRev, present: null }, o);
     } else {
       // A settings record (or a row of a collection no longer configured):

@@ -54,10 +54,25 @@ export const BUDGETS: Readonly<Record<Plan, SliceBudget>> = {
   },
 };
 
+/**
+ * The collections a valid prefix derives: exactly `<p>.scrobble`,
+ * `<p>.follow`, `<p>.settings` (A10) and `<p>.love` (ADR 0005 §6.3, B12).
+ */
 export interface Collections {
   scrobble: string;
   follow: string;
   settings: string;
+  love: string;
+}
+
+/** The four collections of a valid prefix. */
+export function collectionsOf(prefix: string): Collections {
+  return {
+    scrobble: `${prefix}.scrobble`,
+    follow: `${prefix}.follow`,
+    settings: `${prefix}.settings`,
+    love: `${prefix}.love`,
+  };
 }
 
 export interface AppConfig {
@@ -236,10 +251,7 @@ export function parseConfig(
     publicOrigin,
     prefix,
     fixturePrefix,
-    collections:
-      prefix === null
-        ? null
-        : { scrobble: `${prefix}.scrobble`, follow: `${prefix}.follow`, settings: `${prefix}.settings` },
+    collections: prefix === null ? null : collectionsOf(prefix),
     namespaceOwnershipRef,
     publication: prefix !== null && !fixturePrefix && namespaceOwnershipRef !== null,
     configuredIngestMode,

@@ -2177,7 +2177,9 @@
         "jetstream socket"
       ],
       "title": "subscribe URL has kinds=commit and the three collections only",
-      "kept": true
+      "replaced": "worker/test/ingest/jetstream-socket.test.ts › jetstream socket › subscribe URL has kinds=commit and the four collections only",
+      "reason": "ADR 0005 §6.3, B12 (N3-11): a valid prefix derives a fourth collection, `<p>.love`, which config.collections and the Jetstream subscription gain, so \"the three collections only\" no longer holds; the same test, in the same file, now asserts the four collections scrobble, follow, settings and love in that order (and that a love commit is hinted).",
+      "package": "N3-11"
     },
     {
       "id": "worker/test/ingest/jetstream-socket.test.ts › jetstream socket › silent socket is not reconnected; planned refresh happens at 15 min from stored cursor",
@@ -3312,7 +3314,9 @@
         "applyRecordProof"
       ],
       "title": "present valid scrobble inserts row with exact keys and record_state present",
-      "kept": true
+      "kept": true,
+      "change": "ADR 0005 §6.5, §8.4 (N3-11): the projection derives scrobbles.recording_msid from the music keys for every scrobble, so the expected row's recording_msid is the UUIDv5 of 'björk' U+0000 'jóga' instead of NULL; the other migration-2 columns stay NULL (r02 has no §6.2 field); title kept.",
+      "package": "N3-11"
     },
     {
       "id": "worker/test/write/apply-record.test.ts › applyRecordProof › older revision proof after newer delete is noop (no resurrection)",
