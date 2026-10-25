@@ -120,6 +120,13 @@ The common release inputs are missing for all five gates: `ATMUSIC_LIVE_ORIGIN`,
 - **A dropped test record.** The closure was replayed over a copy of the commit `fa6aaca` records with one test removed: `namespace.test.ts › fixture prefix blocks publication…`. The gate exited 1 with `case M1.1.1/fixture_namespace: not executed`. M1.2.2/ci_green and M6.4.2/packaged_flow turned failed.
 - **Disabled steps.** A run with `--skip check-ts --skip acceptance --skip goldens` exited 1. It named each disabled step and every case left unexecuted. That run used the uncommitted working tree that later became `fa6aaca`.
 - **A broken matcher.** The first full run, at `fa6aaca`, exited 1. Its matcher did not recognise the `route_inventory` contract line, so the gate reported M1.1.4/route_inventory as not executed instead of passing it. Commit `6f95c53` fixed the matcher.
+- **`--out` outside the repository (review round 1).** At `1210d61` the live step wrote its helper as a `.ts` file into `DIR`. Outside the repository no `package.json` with `"type": "module"` applied, so tsx compiled the helper as CJS. Top-level await failed, the live step exited 1, and the gate exited 1. Commit `3f547ec` writes the helper as `.mts`. A full run at `3f547ec` (clean tree) with `--out` in a scratch directory outside the repository **exited 0**: 461 records passed, and the cases came out at 204 passed, 0 failed, 9 blocked and 45 retired, with the same bundle SHA-256 `e796e5a5…7ab36`. A second full run at `3f547ec` with the default `--out` also exited 0, with identical counts.
+- **A foreign `--out` directory (review round 1).** At `1210d61` the startup cleanup globbed `*.json`, `*.ts`, `*.txt` and other patterns in `DIR`. Each of the following runs, at `3f547ec`, exited 2 and deleted nothing:
+  - `--out .` from the repository root;
+  - `--out docs/verification`;
+  - `--out` naming a scratch directory that held `package.json`, `vitest.config.ts`, `notes.txt` and `keep.md`.
+
+  A relative `--out relgate`, run from another directory, created `relgate` there and not in the repository. After `package.json` and `notes.txt` were added to that marked directory, a rerun left both files in place.
 
 This is deterministic evidence only. It does not establish:
 
