@@ -101,7 +101,7 @@ The Workers adapter is **retired** (wave 7, N7-01). Everything runs on Node 26. 
   | `ws` | 8.22.0 | 2026-09-26 | `@atmusic/worker` dependency | §3.4 |
   | `@types/ws` | 8.18.2 | 2026-09-29 | `@atmusic/worker` devDependency | |
   | `undici` | 8.12.2 | 2026-10-15 | `@atmusic/worker` dependency | §3.5; equals `process.versions.undici` of Node 26.12.1 (8.12.3 is newer than Node's copy); asserted by `worker/test/node/scaffold.test.ts` |
-  | `fflate` | 0.7.5 | 2026-07-20 | `@atmusic/worker` dependency | §11.1 |
+  | `fflate` | 0.8.3 | 2026-05-16 | `@atmusic/worker` dependency | §11.1 |
   | `esbuild` | 0.28.2 | 2026-08-08 | root devDependency (direct) | §3.9, `scripts/build-server.ts` |
   | `lastfm-ts-api` | 2.6.2 | 2026-04-02 | root devDependency only | §15.2, the real-client e2e (N8-01) |
   | `@types/node` | 26.6.5 | 2026-10-09 | root devDependency | newest 26.x; it does not yet declare `node:sqlite`'s `Database` export (only the `DatabaseSync` alias), so code reads `Database` structurally until the types catch up |

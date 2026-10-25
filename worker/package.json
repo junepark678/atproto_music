@@ -17,7 +17,7 @@
     "@atmusic/atproto": "0.0.0",
     "@atmusic/core": "0.0.0",
     "@atproto/oauth-client-node": "0.5.10",
-    "fflate": "0.7.5",
+    "fflate": "0.8.3",
     "undici": "8.12.2",
     "ws": "8.22.0"
   },
