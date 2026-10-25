@@ -19,6 +19,15 @@
 //     write tables and the §7.5 signed list; missing or unknown is 3. The
 //     method a form body carried is reported to the request log with
 //     `noteLastfmMethod` (only allowlisted names are ever logged).
+//  2a. Read methods only: the §13 per-IP read limit, 60 per minute per
+//     client address (`rateKeyOf(ctx.clientIp)`: the IPv4 address or the IPv6
+//     /64), in a BucketSet with `onFull: 'evict-lru'` so a flood of fresh
+//     addresses never locks other clients out. A refusal is 29 "Rate Limit
+//     Exceeded" (HTTP 429, Retry-After, CORS) before api_key or any handler
+//     work. The buckets live in memory per composition (one set per
+//     ModuleDeps), driven by the injected clock, and fail open after a
+//     restart (ADR 0004 §8). Write and auth methods are limited per `sk` by
+//     N3-03's runner, not here.
 //  3. POST-only methods (track.scrobble, track.updateNowPlaying, track.love,
 //     track.unlove, library.removeScrobble, auth.getMobileSession) called
 //     with GET: 3 "Invalid Method - this method must be called with POST",
@@ -62,8 +71,10 @@
 
 import { verifySessionKey } from '../credentials/lastfm-auth';
 import type { Logger, ModuleDeps } from '../do/contracts';
+import { BucketSet, type RateRule } from '../http/limits';
 import { noteLastfmMethod } from '../http/routes';
 import { need, type RequestCtx, type RouteDef } from '../http/types';
+import { rateKeyOf } from '../node/client-ip';
 import { type LfmDocument, lastfmResponse } from './encode';
 import { LastfmError, POST_REQUIRED_MESSAGE } from './errors';
 import { type LastfmFormat, type LastfmParams, negotiateFormat, readLastfmParams, wantsRawXml } from './params';
@@ -98,6 +109,9 @@ export const MAX_API_KEY_CHARS = 64;
 export const READ_CORS_HEADERS: Readonly<Record<string, string>> = Object.freeze({
   'access-control-allow-origin': '*',
 });
+
+/** ADR 0005 §13: /2.0 read methods, 60 requests per minute per client IP. */
+export const LASTFM_READ_IP_RATE: Readonly<RateRule> = Object.freeze({ capacity: 60, windowMs: 60_000 });
 
 export const UNKNOWN_METHOD_MESSAGE = 'Invalid Method - No method with that name in this package';
 
@@ -164,6 +178,8 @@ export interface LastfmRegistry<T extends DelegatedTable = DelegatedTable> {
   readonly signature?: SignaturePolicyDeps | ((call: Omit<LastfmCall, 'signature' | 'caller'>) => SignaturePolicyDeps);
   /** Default: `verifySessionCaller`. */
   readonly resolveCaller?: CallerResolver;
+  /** The per-IP read limit (step 2a); default LASTFM_READ_IP_RATE. */
+  readonly readRate?: Readonly<RateRule>;
 }
 
 /** Every read method of §7.5, canonical name → handler. */
@@ -287,6 +303,18 @@ export function createLastfmHandler<T extends DelegatedTable = DelegatedTable>(
 ): RouteDef['handler'] {
   const table = buildTable(registry, SIGNED_METHODS);
   const delegated = registry.delegated;
+  const readRate = registry.readRate ?? LASTFM_READ_IP_RATE;
+  // One per-IP read bucket set per composition (its ModuleDeps and clock).
+  const readBuckets = new WeakMap<ModuleDeps, BucketSet>();
+  const chargeRead = (deps: ModuleDeps, ctx: RequestCtx): void => {
+    let set = readBuckets.get(deps);
+    if (set === undefined) {
+      set = new BucketSet(readRate, deps.clock, { onFull: 'evict-lru' });
+      readBuckets.set(deps, set);
+    }
+    const decision = set.take(rateKeyOf(ctx.clientIp));
+    if (!decision.allowed) throw new LastfmError(29, undefined, { retryAfterSeconds: decision.retryAfterSeconds });
+  };
 
   return async (request, ctx) => {
     const deps = need(ctx, 'deps');
@@ -311,6 +339,7 @@ export function createLastfmHandler<T extends DelegatedTable = DelegatedTable>(
         return await delegated.run(found.delegatedTable as T, forward, ctx);
       }
 
+      if (found.kind === 'read') chargeRead(deps, ctx);
       if (isPostOnly(found.name) && request.method !== 'POST') throw new LastfmError(3, POST_REQUIRED_MESSAGE);
 
       const apiKey = params.get('api_key');

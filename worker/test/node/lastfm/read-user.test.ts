@@ -28,9 +28,11 @@ import { SignedRepo } from '@atmusic/atproto/test-support/signed-repo';
 import { verifyRecordProof } from '@atmusic/atproto/verify/record-proof';
 import { artistKey, trackKey } from '@atmusic/core/music-key';
 import { fixedClock } from '@atmusic/core/test-support/clock';
+import { seededRandom } from '@atmusic/core/test-support/random';
 import { fromMs, toStorage } from '@atmusic/core/timestamp';
 import { afterEach, describe, expect, it } from 'vitest';
 import fixture from '../../../../tests/fixtures/read_models.json' with { type: 'json' };
+import { createSession } from '../../../src/credentials/lastfm-auth';
 import type { Db } from '../../../src/do/db';
 import { upsertNowPlaying } from '../../../src/do/read/now-playing';
 import { type ApplyOptions, applyRecordProof } from '../../../src/do/write/apply-record';
@@ -261,6 +263,38 @@ describe('Last.fm user read methods', () => {
       mbid: '',
     });
     expect(tracks.map((t) => t.loved)).toEqual(['1', '0', '0']);
+
+    // §7.3: a valid sk names the caller, and the loved flags are the caller's.
+    // Bob loves Jóga, which both of Alice's spellings (r01, r02) match by music key.
+    seedLove(app.db, BOB, '3lbbbbbbbbbb1', 'Björk', 'Jóga', '2026-01-15T11:10:00Z');
+    const bobSk = createSession(
+      { db: app.db, clock: app.clock, random: seededRandom(11) },
+      { did: BOB, apiKey: API_KEY },
+    ).key;
+    const extended = { method: 'user.getRecentTracks', user: 'alice', limit: '3', extended: '1' };
+    const asBob = await get(app, { ...extended, sk: bobSk });
+    expect(asBob.status).toBe(200);
+    expect(asBob.body.recenttracks['@attr'].user).toBe('alice');
+    const bobView = asBob.body.recenttracks.track as Json[];
+    expect(names(bobView)).toEqual(['No Surprises', 'Jóga', 'jóga']);
+    expect(bobView.map((t) => t.loved)).toEqual(['0', '1', '1']);
+    // No sk, or an unknown one (ignored, never 9): the listed user's loves.
+    const anon = await get(app, extended);
+    expect((anon.body.recenttracks.track as Json[]).map((t) => t.loved)).toEqual(['1', '0', '0']);
+    const stale = await get(app, { ...extended, sk: '0'.repeat(32) });
+    expect(stale.status).toBe(200);
+    expect((stale.body.recenttracks.track as Json[]).map((t) => t.loved)).toEqual(['1', '0', '0']);
+    // The now-playing row follows the same rule.
+    upsertNowPlaying(
+      { db: app.db, clock: app.clock },
+      { did: ALICE, artist: 'björk', track: 'JÓGA', album: null, durationSeconds: 300, source: 'lastfm' },
+    );
+    const npBob = (await get(app, { ...extended, sk: bobSk })).body.recenttracks.track as Json[];
+    expect([npBob[0]!['@attr'], npBob[0]!.loved]).toEqual([{ nowplaying: 'true' }, '1']);
+    const npAnon = (await get(app, extended)).body.recenttracks.track as Json[];
+    expect([npAnon[0]!['@attr'], npAnon[0]!.loved]).toEqual([{ nowplaying: 'true' }, '0']);
+    // Back to Alice's view for the plain-listing checks below.
+    app.db.run('DELETE FROM now_playing');
 
     const plain = await get(app, { method: 'user.getRecentTracks', user: 'alice', limit: '3' });
     const p = plain.body.recenttracks.track as [Json, ...Json[]];

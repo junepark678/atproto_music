@@ -11,6 +11,7 @@
 import { fixtureKeys } from '@atmusic/atproto/test-support/keys';
 import { SignedRepo } from '@atmusic/atproto/test-support/signed-repo';
 import { verifyRecordProof } from '@atmusic/atproto/verify/record-proof';
+import { artistKey, trackKey } from '@atmusic/core/music-key';
 import { fixedClock } from '@atmusic/core/test-support/clock';
 import { seededRandom } from '@atmusic/core/test-support/random';
 import { fromMs, toStorage } from '@atmusic/core/timestamp';
@@ -22,7 +23,14 @@ import { createSession, issueToken } from '../../../src/credentials/lastfm-auth'
 import type { Db } from '../../../src/do/db';
 import { type ApplyOptions, applyRecordProof } from '../../../src/do/write/apply-record';
 import { lfmOk } from '../../../src/lastfm/encode';
-import { type LastfmCall, type LastfmRegistry, lastfmRoutes, READ_METHOD_TABLE } from '../../../src/lastfm/routes';
+import {
+  LASTFM_READ_IP_RATE,
+  type LastfmCall,
+  type LastfmRegistry,
+  lastfmRoutes,
+  READ_METHOD_TABLE,
+  verifySessionCaller,
+} from '../../../src/lastfm/routes';
 import { computeSignature, READ_METHODS } from '../../../src/lastfm/signature';
 import { closeApps, startApp, TEST_PUBLIC_ORIGIN, type TestApp } from '../support/app';
 
@@ -321,17 +329,31 @@ describe('Last.fm /2.0 dispatcher', () => {
     const a = await app();
     const deps = { db: a.db, clock: a.clock, random: seededRandom(7) };
     const bobSk = createSession(deps, { did: BOB, apiKey: 'pano-key' }).key;
+    // Bob (the sk owner) loves Jóga; Alice (the listed user) loves nothing.
+    a.db.run(
+      `INSERT INTO loves(uri, did, rkey, cid, artist, track, album, artist_key, track_key, recording_mbid, created_at, indexed_at)
+       VALUES (?, ?, '3lbbbbbbbbbb1', 'bafyreilove', 'Björk', 'Jóga', NULL, ?, ?, NULL, ?, ?)`,
+      `at://${BOB}/${PREFIX}.love/3lbbbbbbbbbb1`,
+      BOB,
+      artistKey('Björk'),
+      trackKey('Björk', 'Jóga')[1],
+      toStorage(NOW_NS),
+      toStorage(NOW_NS),
+    );
 
     // Pano (GNU FM account type): its root plus /2.0/, unsigned, sk and api_key, JSON.
-    const pano = await a.fetch(
-      `/2.0/?${qs({ method: 'user.getRecentTracks', user: 'alice', limit: '50', page: '1', extended: '1', api_key: 'pano-key', sk: bobSk, format: 'json' })}`,
-    );
+    const panoQuery = { method: 'user.getRecentTracks', user: 'alice', limit: '50', page: '1', extended: '1' };
+    const pano = await a.fetch(`/2.0/?${qs({ ...panoQuery, api_key: 'pano-key', sk: bobSk, format: 'json' })}`);
     expect(pano.status).toBe(200);
-    const panoBody = (await pano.json()) as {
-      recenttracks: { track: Array<{ name: string }>; '@attr': { user: string } };
-    };
+    type RecentBody = { recenttracks: { track: Array<{ name: string; loved: string }>; '@attr': { user: string } } };
+    const panoBody = (await pano.json()) as RecentBody;
     expect(panoBody.recenttracks['@attr'].user).toBe('alice');
-    expect(panoBody.recenttracks.track.map((t) => t.name)).toEqual(['Jóga']);
+    // Alice's listens, with the caller's (Bob's) loved flags (§7.3).
+    expect(panoBody.recenttracks.track.map((t) => [t.name, t.loved])).toEqual([['Jóga', '1']]);
+    const anonymous = (await (
+      await a.fetch(`/2.0/?${qs({ ...panoQuery, api_key: 'pano-key', format: 'json' })}`)
+    ).json()) as RecentBody;
+    expect(anonymous.recenttracks.track.map((t) => [t.name, t.loved])).toEqual([['Jóga', '0']]);
 
     // lastfm-ts-api: path /2.0, `format=json` first, then the method's params, api_key, method, sk.
     const tsApi = await a.fetch(
@@ -435,5 +457,96 @@ describe('Last.fm /2.0 dispatcher', () => {
       lastfmRoutes({ delegated: { tables: [{ 'user.getInfo': def('user.getInfo', false) }], run } }),
     ).toThrow(TypeError);
     expect(() => lastfmRoutes({ delegated: { tables: [writeTable, writeTable], run } })).toThrow(TypeError);
+  });
+
+  it('reads are limited to 60 per minute per client IP (IPv6 by /64) with 29, Retry-After and CORS before any handler work; writes and unknown methods are not charged', async () => {
+    const writes = fakeWrites();
+    let resolved = 0;
+    const clock = fixedClock();
+    const a = await startApp({
+      clock,
+      routes: lastfmRoutes({
+        ...writes.registry,
+        resolveCaller: (deps, sk) => {
+          resolved += 1;
+          return verifySessionCaller(deps, sk);
+        },
+      }),
+      // The harness peer (127.0.0.1) is a trusted proxy, so X-Forwarded-For names the client.
+      env: { ATMUSIC_CLIENT_IP_HEADER: 'x-forwarded-for' },
+    });
+    await seed(a.db);
+    const bobSk = createSession(
+      { db: a.db, clock: a.clock, random: seededRandom(3) },
+      { did: BOB, apiKey: API_KEY },
+    ).key;
+    // user.getInfo with sk and no user: the handler resolves the caller, so `resolved` counts handler runs.
+    const read = (ip: string) =>
+      a.fetch(`/2.0/?${qs({ method: 'user.getInfo', api_key: API_KEY, sk: bobSk, format: 'json' })}`, {
+        headers: { 'x-forwarded-for': ip },
+      });
+
+    expect(LASTFM_READ_IP_RATE).toEqual({ capacity: 60, windowMs: 60_000 });
+    for (let i = 0; i < 60; i++) {
+      const res = await read('203.0.113.7');
+      expect(res.status, `read ${i + 1}`).toBe(200);
+      expect(((await res.json()) as { user: { name: string } }).user.name).toBe('bob');
+    }
+    expect(resolved).toBe(60);
+
+    const refused = await read('203.0.113.7');
+    expect(refused.status).toBe(429);
+    expect(refused.headers.get('retry-after')).toBe('1');
+    expect(refused.headers.get('access-control-allow-origin')).toBe('*');
+    expect(await refused.json()).toEqual({ error: 29, message: 'Rate Limit Exceeded' });
+    // The refusal came before the handler: no caller lookup, no session use recorded after the 60th.
+    expect(resolved).toBe(60);
+    const xml = await a.fetch(`/2.0/?${qs({ method: 'user.getInfo', user: 'alice', api_key: API_KEY })}`, {
+      headers: { 'x-forwarded-for': '203.0.113.7' },
+    });
+    expect(xml.status).toBe(429);
+    expect(await xml.text()).toBe(
+      '<?xml version="1.0" encoding="UTF-8"?>\n<lfm status="failed"><error code="29">Rate Limit Exceeded</error></lfm>\n',
+    );
+    // A missing api_key is not checked first: the limit runs before it.
+    const noKey = await a.fetch(`/2.0/?${qs({ method: 'user.getInfo', user: 'alice', format: 'json' })}`, {
+      headers: { 'x-forwarded-for': '203.0.113.7' },
+    });
+    expect(((await noKey.json()) as { error: number }).error).toBe(29);
+
+    // Writes (limited per sk elsewhere) and unknown methods are not charged to the read bucket.
+    const love = await a.fetch('/2.0/', {
+      ...form({
+        method: 'track.love',
+        artist: 'A',
+        track: 'T',
+        api_key: 'known-key',
+        sk: bobSk,
+        api_sig: 'a'.repeat(32),
+        format: 'json',
+      }),
+      headers: { 'content-type': 'application/x-www-form-urlencoded', 'x-forwarded-for': '203.0.113.7' },
+    });
+    // It reaches the signature policy (13 for a wrong api_sig), not the read limit.
+    expect([love.status, ((await love.json()) as { error: number }).error]).toEqual([403, 13]);
+    const unknown = await a.fetch(`/2.0/?${qs({ method: 'user.nope', api_key: API_KEY, format: 'json' })}`, {
+      headers: { 'x-forwarded-for': '203.0.113.7' },
+    });
+    expect(((await unknown.json()) as { error: number }).error).toBe(3);
+
+    // Another IPv4 client has its own bucket.
+    expect((await read('198.51.100.20')).status).toBe(200);
+    // IPv6 is keyed by /64: two hosts of one /64 share a bucket, another /64 does not.
+    for (let i = 0; i < 60; i++) expect((await read('2001:db8:1:2::1')).status).toBe(200);
+    expect((await read('2001:db8:1:2::ffff')).status).toBe(429);
+    expect((await read('2001:db8:1:3::1')).status).toBe(200);
+
+    // One token returns every second (60/min, injected clock).
+    clock.advance(1_000);
+    expect((await read('203.0.113.7')).status).toBe(200);
+    expect((await read('203.0.113.7')).status).toBe(429);
+    clock.advance(60_000);
+    for (let i = 0; i < 60; i++) expect((await read('203.0.113.7')).status).toBe(200);
+    expect(resolved).toBe(60 + 1 + 60 + 1 + 1 + 60);
   });
 });

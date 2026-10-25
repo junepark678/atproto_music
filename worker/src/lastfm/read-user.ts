@@ -28,8 +28,10 @@
 // (listened_at, uri), `date {uts, #text "DD Mon YYYY, HH:MM"}`. A current,
 // shared now-playing entry is prepended on page 1 only, in addition to
 // `limit`, with @attr nowplaying="true" and no date. `extended=1` turns
-// `artist` into `{url, name, image, mbid}` and adds `loved` "0"/"1" (the
-// listed user's loves, by music key).
+// `artist` into `{url, name, image, mbid}` and adds `loved` "0"/"1" by music
+// key: the caller's loves when a valid `sk` names one (§7.3: a supplied `sk`
+// identifies the caller for `extended=1` loved flags), else the listed
+// user's. An unknown `sk` is ignored, so it falls back to the listed user.
 // user.getTrackScrobbles: the same engine with an `artist` + `track` filter
 // (music-key match, so spelling variants count), root `trackscrobbles`, no
 // now-playing row.
@@ -265,10 +267,12 @@ function recentTracksDoc(call: LastfmCall, root: 'recenttracks' | 'trackscrobble
   const result = recentPage(deps, { did: user.did, after: from, before: to, limit, page, ...filter });
   if (result === null) throw new LastfmError(6, USER_NOT_FOUND);
 
+  // Whose loves the flags show (module comment): the caller, else the listed user.
+  const lovesOf = extended ? (call.caller()?.did ?? user.did) : user.did;
   const loved = extended
     ? lovedKeyIds(
         deps,
-        user.did,
+        lovesOf,
         result.rows.map((r) => ({ artistKey: r.artist_key, trackKey: r.track_key })),
       )
     : new Set<string>();
@@ -295,7 +299,7 @@ function recentTracksDoc(call: LastfmCall, root: 'recenttracks' | 'trackscrobble
           },
           {
             extended,
-            loved: extended && isLoved(deps, { did: user.did, artist: np.artist, track: np.track }),
+            loved: extended && isLoved(deps, { did: lovesOf, artist: np.artist, track: np.track }),
             nowPlaying: true,
           },
         ),
