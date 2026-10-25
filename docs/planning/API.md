@@ -40,7 +40,7 @@ No v1.1 read route reads a session, cookie, CSRF token or Origin header, so no v
 | Route | Request | Success payload / status |
 | --- | --- | --- |
 | GET `/health/live` | none | 200 `{status:"live"}` |
-| GET `/health/ready` | none | 200 `{status:"ready"}` when storage/writer initialized; otherwise 503 Error |
+| GET `/health/ready` | none | 200 `{status:"ready"}` when storage/writer initialized (v1.2: plus `warnings`, a non-empty set of `"low_disk"` and `"oauth_store_degraded"`, only while one is raised; ADR 0005 §3.10); otherwise 503 Error |
 | GET `/api/v1/meta` | none | 200 `{name:"atproto_music",version,stage:"scaffold"\|"backend"\|"product",capabilities:string[],lexiconPrefix:string\|null,indexing:Indexing}` |
 | GET `/oauth/client-metadata.json` | none | 200 AT Protocol OAuth client metadata, not an application JSON envelope: the dynamic confidential-client document of ADR 0005 §5.3, served by the router with `Cache-Control: public, max-age=300` and no cookie: `application_type: "web"`, `token_endpoint_auth_method: "private_key_jwt"` with ES256, `jwks_uri` `https://<host>/oauth/jwks.json`, DPoP-bound tokens, the single redirect `https://<host>/oauth/callback`, and the scopes `atproto repo:<p>.scrobble repo:<p>.follow repo:<p>.settings repo:<p>.love` (B3, B14) |
 | GET `/api/v1/resolve` | `handle` | 200 `{did:DID,handle:string,verified:true}`; unresolved 404, mismatch 422 |

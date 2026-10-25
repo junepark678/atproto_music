@@ -50,8 +50,8 @@
 // change the status, so a tunnel keeps routing live scrobbles: `low_disk`
 // (free space on the database's filesystem below ATMUSIC_MIN_FREE_BYTES) and
 // whatever features report (`oauth_store_degraded`, N2-03). /health/ready
-// answers 200 `{status: 'ready'}`, with `warnings` only while one is raised,
-// or 503 `not_ready` with the envelope; the failed probe names are logged,
+// answers 200 `{status: 'ready'}`, with `warnings` (the contract's v1.2
+// optional Ready property) only while one is raised, or 503 `not_ready` with the envelope; the failed probe names are logged,
 // never returned.
 //
 // Fault injection is only through these inputs (a wrapping Db, the secrets,
@@ -83,8 +83,18 @@ import type { BridgeHandler } from './http-bridge';
 import type { PrivateEs256Jwk, PublicEs256Jwk, Secrets } from './secrets';
 import { loadStaticAssets, type StaticAssets } from './static-assets';
 
-/** The readiness warnings compose itself raises; features may add others (ADR §3.10). */
-export type ReadinessWarning = 'low_disk' | 'oauth_store_degraded' | (string & {});
+/**
+ * The readiness warnings (ADR §3.10): compose raises `low_disk`, the OAuth
+ * store feature `oauth_store_degraded` (N2-03). The set is closed because the
+ * contract's Ready schema (api/openapi.yaml, v1.2) enumerates it; a new
+ * warning needs a contract amendment first.
+ */
+export const READINESS_WARNINGS = ['low_disk', 'oauth_store_degraded'] as const;
+export type ReadinessWarning = (typeof READINESS_WARNINGS)[number];
+
+function isReadinessWarning(value: unknown): value is ReadinessWarning {
+  return (READINESS_WARNINGS as readonly unknown[]).includes(value);
+}
 
 /** What a feature adds to readiness. */
 export interface FeatureReadiness {
@@ -399,7 +409,14 @@ export async function compose(config: NodeConfig, secrets: Secrets, options: Com
           continue;
         }
         for (const failure of part?.failures ?? []) failures.push(failure);
-        for (const warning of part?.warnings ?? []) if (!warnings.includes(warning)) warnings.push(warning);
+        for (const warning of part?.warnings ?? []) {
+          // A warning outside the contract's enum is logged, never returned.
+          if (!isReadinessWarning(warning)) {
+            log.log('warn', 'ready.unknown_warning', { feature: feature.name });
+            continue;
+          }
+          if (!warnings.includes(warning)) warnings.push(warning);
+        }
       }
       return { ready: failures.length === 0, checks, failures, warnings };
     };

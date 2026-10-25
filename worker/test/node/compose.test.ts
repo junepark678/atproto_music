@@ -18,7 +18,7 @@ import { IndexCore } from '../../src/app/index-core';
 import type { Db } from '../../src/do/db';
 import { UUID_PATTERN } from '../../src/http/request-id';
 import { CtxWiringError, need, type RequestCtx, type RouteDef } from '../../src/http/types';
-import { WRITE_PROBE_COUNTER } from '../../src/node/compose';
+import { type ReadinessWarning, WRITE_PROBE_COUNTER } from '../../src/node/compose';
 import { createDispatcher } from '../../src/node/dispatch';
 import type { Secrets } from '../../src/node/secrets';
 import { checkResponse } from '../acceptance/support/openapi';
@@ -283,15 +283,49 @@ describe('compose', () => {
     const lowDisk = await startApp({ diskLow: () => true });
     const warned = await lowDisk.fetch('/health/ready');
     expect(warned.status).toBe(200);
-    expect(await jsonOf(warned)).toEqual({ status: 'ready', warnings: ['low_disk'] });
-    // A feature's warning (oauth_store_degraded, N2-03) is merged the same way.
+    const warnedBody = await jsonOf(warned);
+    expect(warnedBody).toEqual({ status: 'ready', warnings: ['low_disk'] });
+    expect(checkResponse('GET', '/health/ready', { status: 200, headers: warned.headers, body: warnedBody })).toBe(
+      'valid',
+    );
+    // A feature's warning (oauth_store_degraded, N2-03) is merged the same way,
+    // deduplicated, and still matches the contract's Ready schema.
     const degraded = await startApp({
-      features: [{ name: 'oauth-store', readiness: () => ({ warnings: ['oauth_store_degraded'] }) }],
+      diskLow: () => true,
+      features: [
+        { name: 'oauth-store', readiness: () => ({ warnings: ['oauth_store_degraded', 'low_disk'] }) },
+        { name: 'other', readiness: () => ({ warnings: ['oauth_store_degraded'] }) },
+      ],
     });
-    expect(await jsonOf(await degraded.fetch('/health/ready'))).toEqual({
-      status: 'ready',
-      warnings: ['oauth_store_degraded'],
+    const degradedRes = await degraded.fetch('/health/ready');
+    const degradedBody = await jsonOf(degradedRes);
+    expect(degradedRes.status).toBe(200);
+    expect(degradedBody).toEqual({ status: 'ready', warnings: ['low_disk', 'oauth_store_degraded'] });
+    expect(
+      checkResponse('GET', '/health/ready', { status: 200, headers: degradedRes.headers, body: degradedBody }),
+    ).toBe('valid');
+    // The contract's warnings enum is closed: a value outside it fails the schema,
+    // so compose logs an unknown feature warning and never returns it.
+    expect(
+      checkResponse('GET', '/health/ready', {
+        status: 200,
+        headers: degradedRes.headers,
+        body: { status: 'ready', warnings: ['disk_on_fire'] },
+      }),
+    ).not.toBe('valid');
+    const unknown = await startApp({
+      features: [{ name: 'rogue', readiness: () => ({ warnings: ['disk_on_fire' as ReadinessWarning] }) }],
     });
+    const unknownRes = await unknown.fetch('/health/ready');
+    const unknownBody = await jsonOf(unknownRes);
+    expect(unknownRes.status).toBe(200);
+    expect(unknownBody).toEqual({ status: 'ready' });
+    expect(checkResponse('GET', '/health/ready', { status: 200, headers: unknownRes.headers, body: unknownBody })).toBe(
+      'valid',
+    );
+    expect(unknown.log.logs.filter((l) => l.event === 'ready.unknown_warning').map((l) => l.feature)).toEqual([
+      'rogue',
+    ]);
   });
 
   it("every ctx built by compose carries deps, app and peer, and need(ctx, 'app') on a ctx without app answers 500 CtxWiringError", async () => {
