@@ -13,7 +13,11 @@
 // A DID that is not in use is revoked upstream instead and marked
 // `signed_out`; its protocol credentials stay, and a later scrobble is
 // accepted and waits as `blocked` until the user signs in again (§5.8).
-// Revocations count toward the per-run bound of 20 upstream actions.
+// Revocations count toward the per-run bound of 20 upstream actions. The
+// "not in use" decision is re-evaluated under the DID's lock immediately before
+// the revocation (`revoke(did, {unless})`), so a DID that came into use while
+// the run awaited earlier DIDs is refreshed instead, and a session a concurrent
+// sign-in stored is never deleted (revoke() answers `superseded`).
 //
 // Each run first retries the session store's held writes (§5.5), then pauses —
 // refreshing and revoking nothing and reporting `low_disk` — while the
@@ -101,9 +105,18 @@ export async function runOAuthKeepalive(deps: KeepaliveDeps): Promise<KeepaliveR
     }
     actions += 1;
     if (!didInUse(deps.db, did, now)) {
-      await deps.oauth.revoke(did);
-      report.signedOut.push(did);
-      continue;
+      // The check is repeated under the DID's lock right before the revocation (no await in
+      // between), and revoke() keeps a session a concurrent sign-in stored meanwhile.
+      const outcome = await deps.oauth.revoke(did, { unless: () => didInUse(deps.db, did, deps.clock.nowMs()) });
+      if (outcome === 'revoked') {
+        report.signedOut.push(did);
+        continue;
+      }
+      if (outcome === 'superseded') {
+        deps.log.log('info', 'oauth_keepalive_superseded', { did });
+        continue;
+      }
+      // 'skipped': the DID came into use while the run awaited; it is due, so refresh it.
     }
     try {
       await deps.oauth.restore(did, true);

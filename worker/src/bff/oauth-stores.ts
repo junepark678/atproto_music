@@ -40,6 +40,16 @@
 // of N1-08) in the same transaction, except while the callback replaces the
 // previous session of the DID that is signing in again (the `quiet` predicate),
 // which the new session supersedes at once.
+//
+// **Conditional deletion (review round 1 of N2-03).** The library's own
+// `revoke(sub)` deletes whatever session the DID has once its upstream request
+// returns, which may be a session a concurrent sign-in stored meanwhile. Our
+// `revoke()` therefore takes a `snapshot(did)` before its upstream request and
+// afterwards calls `delIfUnchanged(snapshot)`, which deletes (and journals, in
+// one transaction) only when no set() or del() of that DID happened since and
+// the row still holds the snapshot's ciphertext. Every set() and del() bumps an
+// in-memory per-DID version for this check; `generation` cannot serve, since
+// a row deleted and inserted again starts at 1 again.
 
 import { createHash } from 'node:crypto';
 import type { Clock } from '@atmusic/core/deps';
@@ -72,6 +82,10 @@ function hex(bytes: Uint8Array): string {
 /** A standalone ArrayBuffer copy, the BLOB form the Db facade binds. */
 function blob(bytes: Uint8Array): ArrayBuffer {
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+}
+
+function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
+  return a.length === b.length && Buffer.from(a.buffer, a.byteOffset, a.byteLength).equals(b);
 }
 
 function errorClass(error: unknown): { error: string; code?: string } {
@@ -273,14 +287,32 @@ export interface OAuthSessionRowInfo {
   updated_at_ms: number;
 }
 
-interface Held {
+export interface Held {
   session: NodeSavedSession;
   /** When set() was called: the refresh time the row records once the write succeeds. */
   atMs: number;
 }
 
+/** What `snapshot(did)` saw: the session `revoke()` sets out to revoke. */
+export interface OAuthSessionSnapshot {
+  readonly did: string;
+  /** The session (held or stored), or undefined when the DID has none. */
+  readonly session: NodeSavedSession | undefined;
+  /** @internal the store's per-DID version when the snapshot was taken. */
+  readonly version: number;
+  /** @internal the held entry, if the session was only in memory. */
+  readonly held: Held | undefined;
+  /** @internal the stored ciphertext, or null when there was no row. */
+  readonly ciphertext: Uint8Array | null;
+}
+
+/** `delIfUnchanged`: deleted the snapshot's session, found none, or found a newer one and kept it. */
+export type ConditionalDeleteOutcome = 'deleted' | 'absent' | 'superseded';
+
 export class OAuthSessionStore implements NodeSavedSessionStore {
   private readonly held = new Map<string, Held>();
+  /** Bumped by every set() and del() of a DID (the conditional-delete check). */
+  private readonly versions = new Map<string, number>();
   /** DIDs whose deletions are not journaled right now (the callback's replacement of the old session). */
   quiet: (did: string) => boolean = () => false;
 
@@ -339,8 +371,21 @@ export class OAuthSessionStore implements NodeSavedSessionStore {
     return this.held.size === 0;
   }
 
+  private bump(did: string): void {
+    this.versions.set(did, (this.versions.get(did) ?? 0) + 1);
+  }
+
+  private storedCiphertext(did: string): Uint8Array | null {
+    const row = this.deps.db.one<{ ciphertext: ArrayBuffer }>(
+      'SELECT ciphertext FROM oauth_sessions WHERE did = ?',
+      did,
+    );
+    return row === null ? null : new Uint8Array(row.ciphertext);
+  }
+
   /** Writes unconditionally; on a storage failure keeps the session in memory. Never throws. */
   set(did: string, session: NodeSavedSession): void {
+    this.bump(did);
     const atMs = this.deps.clock.nowMs();
     this.flush();
     try {
@@ -380,6 +425,7 @@ export class OAuthSessionStore implements NodeSavedSessionStore {
 
   /** Delete the session (held and stored); the deletion is journaled unless `quiet(did)`. */
   del(did: string): void {
+    this.bump(did);
     this.held.delete(did);
     const journal = !this.quiet(did);
     this.deps.db.tx(() => {
@@ -389,6 +435,71 @@ export class OAuthSessionStore implements NodeSavedSessionStore {
       ).length;
       if (deleted > 0 && journal) this.deps.revocations.record({ kind: 'oauth_session', did });
     });
+  }
+
+  /** Whether the DID has a session, held or stored. */
+  has(did: string): boolean {
+    return this.held.has(did) || this.storedCiphertext(did) !== null;
+  }
+
+  /** The DID's current session and the version it is at (see the header). Never throws for a storage read of a held session. */
+  snapshot(did: string): OAuthSessionSnapshot {
+    const session = this.get(did); // flushes first
+    return {
+      did,
+      session,
+      version: this.versions.get(did) ?? 0,
+      held: this.held.get(did),
+      ciphertext: this.storedCiphertext(did),
+    };
+  }
+
+  /**
+   * Delete the snapshot's session only if it is still the DID's session: no
+   * set() or del() since the snapshot, the held entry is the same one, and
+   * the row holds the same ciphertext (a held session that was flushed since
+   * counts as the same). Synchronous, so nothing interleaves with the check.
+   * The deletion is always journaled in the same transaction: it is a
+   * revocation (sign-out, keepalive, reconciliation, a failed binding check),
+   * never the callback's replacement of the previous session.
+   */
+  delIfUnchanged(snap: OAuthSessionSnapshot): ConditionalDeleteOutcome {
+    const { did } = snap;
+    this.flush();
+    if ((this.versions.get(did) ?? 0) !== snap.version) return 'superseded';
+    const held = this.held.get(did);
+    if (held !== undefined && held !== snap.held) return 'superseded';
+    let outcome = 'absent' as ConditionalDeleteOutcome;
+    this.deps.db.tx(() => {
+      const current = this.storedCiphertext(did);
+      // A held snapshot may have been flushed since (a new ciphertext of the same session).
+      if (
+        snap.held === undefined &&
+        current !== null &&
+        (snap.ciphertext === null || !sameBytes(current, snap.ciphertext))
+      ) {
+        outcome = 'superseded';
+        return;
+      }
+      const deleted =
+        current === null
+          ? 0
+          : this.deps.db.all<{ one: number }>(
+              'DELETE FROM oauth_sessions WHERE did = ? AND ciphertext = ? RETURNING 1 AS one',
+              did,
+              blob(current),
+            ).length;
+      const droppedHeld = held !== undefined;
+      if (deleted > 0 || droppedHeld) {
+        outcome = 'deleted';
+        this.deps.revocations.record({ kind: 'oauth_session', did });
+      }
+    });
+    if (outcome === 'deleted') {
+      this.held.delete(did);
+      this.bump(did);
+    }
+    return outcome;
   }
 
   /** Row metadata (no ciphertext), for keepalive, reconcile and adminStatus. */

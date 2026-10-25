@@ -33,9 +33,17 @@
 // check** of §5.5: the session's `sub` must be the DID sign-in started for (the
 // handle-resolved DID), and `identity.resolveDid(sub, {fresh: true})` must name
 // a PDS whose authorization server is the session's issuer.
+//
+// **Callback failures use the v1.2 contract codes** (api/openapi.yaml
+// /oauth/callback, API.md, ADR §5.5/§5.6): a missing, replayed, expired or
+// unknown state, a cookie mismatch, a malformed authorization response, an
+// issuer or subject mismatch and an identity our rules reject are all 403
+// `oauth_binding_mismatch`; a transient failure is 502 `oauth_upstream`. The
+// finer cause is `OAuthFlowError.reason`, for logs only. `oauth_denied` (an
+// AS-reported error such as access_denied) is the signal for N3-01's 303 to
+// `/signin?error=denied`, not a response body.
 //   - A definite mismatch (another DID, another issuer, or a document our rules
-//     reject) revokes the new session and is 403 `oauth_binding_mismatch` (or
-//     `oauth_identity_rejected`).
+//     reject) revokes the new session and is 403 `oauth_binding_mismatch`.
 //   - A resolution error (PLC or DNS timeout, 5xx, TransportError) revokes
 //     nothing: the new session stays stored (the library has already checked
 //     the issuer through our resolver), and the caller sets no cookie and
@@ -50,8 +58,20 @@
 // before storing the new one (oauth-client.js:196-205), and that deletion only
 // removes the old row. A user who signs in again with queued and blocked
 // operations therefore ends `active` with them runnable, never
-// `reauth_required`. `revoke(did)` (sign-out, keepalive, reconciliation)
-// suppresses the hook too and sets `signed_out` itself.
+// `reauth_required`.
+//
+// **revoke(did)** (sign-out, keepalive, reconciliation) does not use the
+// library's `revoke(sub)`, whose `finally` deletes whatever session the DID has
+// once the upstream request returns — possibly one a concurrent sign-in stored
+// meanwhile, which would then stay live at the AS with no local record
+// (review round 1). Instead, under the library's per-DID request lock (so a
+// refresh cannot rotate the tokens under it), it snapshots the session,
+// revokes that session's token upstream, and then, synchronously, deletes the
+// row only if it is still that session (`delIfUnchanged`, journaled in the
+// same transaction). It writes `signed_out` and blocks queued operations only
+// when the DID then has no session at all; while a callback of the DID is in
+// flight that decision waits until the callback ends, so a sign-in that
+// completes wins and one that fails still leaves the account `signed_out`.
 
 import { createECDH, createHash } from 'node:crypto';
 import { isResolvableDid } from '@atmusic/atproto/identity/did-doc';
@@ -75,7 +95,13 @@ import { bindPolicyFetch, type PolicyCaps, type PolicyFetch } from '../node/poli
 import type { ClientMetadataDocument } from './client-metadata';
 import { createOAuthIdentityResolver } from './identity-adapter';
 import type { OAuthKeyset } from './keyset';
-import { ClockTtlStore, encodeAppState, OAuthSessionStore, OAuthStateStore } from './oauth-stores';
+import {
+  ClockTtlStore,
+  type ConditionalDeleteOutcome,
+  encodeAppState,
+  OAuthSessionStore,
+  OAuthStateStore,
+} from './oauth-stores';
 
 /**
  * policyFetch caps for the OAuth client. The same fetch carries PDS writes made
@@ -91,39 +117,69 @@ export const OAUTH_NONCE_CACHE_TTL_MS = 60_000;
 // Errors
 // ---------------------------------------------------------------------------
 
+/** Every code is a v1.2 contract code of /api/v1/auth/start or /oauth/callback, with its HTTP status. */
 export const OAUTH_ERROR_STATUS = {
-  /** AS or PDS discovery, PAR or the token request failed, the AS lacks PAR or S256, or the binding check could not resolve the identity. */
+  /** AS or PDS discovery, PAR or the token request failed, the AS lacks PAR or S256, or the binding check could not resolve the identity (transient). */
   oauth_upstream: 502,
-  /** The login-binding cookie does not match the state, or the session's DID or issuer is not the one sign-in started for. */
+  /**
+   * The callback cannot be bound to this sign-in: a missing, replayed, expired
+   * or unknown state, a login-binding cookie mismatch, a malformed
+   * authorization response, an issuer or subject mismatch, or a DID document
+   * our identity rules reject. No session is kept.
+   */
   oauth_binding_mismatch: 403,
-  /** Missing, unknown, replayed or expired state. */
-  oauth_state_invalid: 400,
-  /** The authorization response was malformed (issuer mismatch, no code). */
-  oauth_callback_invalid: 400,
-  /** The AS redirected with an error (e.g. access_denied). */
-  oauth_denied: 400,
-  /** Our identity rules reject the DID's document. */
-  oauth_identity_rejected: 403,
+  /** The AS redirected with an error (e.g. access_denied): N3-01 answers 303 to /signin?error=denied. */
+  oauth_denied: 303,
   /** The sign-in policy refuses the DID (§5.7). */
   signin_not_allowed: 403,
-  /** The handle is not a valid handle. */
+  /** authorize: the handle is not a valid handle (422 fields.handle). */
   invalid_handle: 422,
-  /** The handle does not resolve to a DID. */
+  /** authorize: the handle does not resolve to an acceptable DID (422 fields.handle). */
   handle_unresolved: 422,
 } as const;
 
 export type OAuthErrorCode = keyof typeof OAUTH_ERROR_STATUS;
 
+/** The finer cause of an OAuthFlowError, for logs only (never a response code). */
+export type OAuthFailureReason =
+  | 'state_missing'
+  | 'state_unknown'
+  | 'state_expired'
+  | 'cookie_mismatch'
+  | 'response_invalid'
+  | 'issuer_mismatch'
+  | 'subject_mismatch'
+  | 'identity_rejected'
+  | 'identity_unavailable'
+  | 'as_capabilities'
+  | 'upstream'
+  | 'denied'
+  | 'policy'
+  | 'invalid_handle'
+  | 'handle_unresolved';
+
+const DEFAULT_REASON: Record<OAuthErrorCode, OAuthFailureReason> = {
+  oauth_upstream: 'upstream',
+  oauth_binding_mismatch: 'state_unknown',
+  oauth_denied: 'denied',
+  signin_not_allowed: 'policy',
+  invalid_handle: 'invalid_handle',
+  handle_unresolved: 'handle_unresolved',
+};
+
 export class OAuthFlowError extends Error {
   readonly status: number;
+  /** The finer cause (logs only). */
+  readonly reason: OAuthFailureReason;
   constructor(
     readonly code: OAuthErrorCode,
     message: string = code,
-    options?: ErrorOptions & { upstreamError?: string },
+    options?: ErrorOptions & { upstreamError?: string; reason?: OAuthFailureReason },
   ) {
     super(message, options);
     this.name = 'OAuthFlowError';
     this.status = OAUTH_ERROR_STATUS[code];
+    this.reason = options?.reason ?? DEFAULT_REASON[code];
     this.upstreamError = options?.upstreamError ?? null;
   }
   /** The AS's `error` parameter, for oauth_denied. */
@@ -155,19 +211,28 @@ function isIssuerMismatch(e: unknown): boolean {
   return e instanceof TypeError && e.message === 'Issuer mismatch';
 }
 
-function classify(error: unknown, what: string): OAuthFlowError {
+/**
+ * Map a library failure to a contract code. In the callback, an issuer
+ * mismatch or an identity our rules reject is `oauth_binding_mismatch`; at
+ * authorize, an identity our rules reject is `handle_unresolved` (/auth/start
+ * answers 422 fields.handle). Anything else is a transient `oauth_upstream`.
+ */
+function classify(error: unknown, what: 'authorize' | 'callback'): OAuthFlowError {
   if (error instanceof OAuthFlowError) return error;
   if (findCause(error, isIssuerMismatch) !== undefined) {
     return new OAuthFlowError('oauth_binding_mismatch', `${what}: the DID's PDS names another authorization server`, {
       cause: error,
+      reason: 'issuer_mismatch',
     });
   }
   if (findCause(error, (e) => isIdentityError(e)) !== undefined) {
-    return new OAuthFlowError('oauth_identity_rejected', `${what}: the DID's identity is not acceptable`, {
-      cause: error,
-    });
+    return new OAuthFlowError(
+      what === 'callback' ? 'oauth_binding_mismatch' : 'handle_unresolved',
+      `${what}: the DID's identity is not acceptable`,
+      { cause: error, reason: 'identity_rejected' },
+    );
   }
-  return new OAuthFlowError('oauth_upstream', `${what} failed upstream`, { cause: error });
+  return new OAuthFlowError('oauth_upstream', `${what} failed upstream`, { cause: error, reason: 'upstream' });
 }
 
 function errorClass(error: unknown): string {
@@ -258,6 +323,13 @@ export interface CallbackResult {
   session: OAuthSession;
 }
 
+export interface RevokeOptions {
+  /** Evaluated under the DID's lock right before anything is revoked; true skips the revoke. */
+  unless?: () => boolean;
+}
+
+export type RevokeOutcome = 'revoked' | 'superseded' | 'skipped';
+
 export interface OAuthService {
   readonly client: NodeOAuthClient;
   readonly stateStore: OAuthStateStore;
@@ -266,8 +338,14 @@ export interface OAuthService {
   callback(params: URLSearchParams, options: CallbackOptions): Promise<CallbackResult>;
   /** The DID's session, refreshed when stale (`refresh: true` forces it, `false` never refreshes). */
   restore(did: string, refresh?: boolean | 'auto'): Promise<OAuthSession>;
-  /** Revoke upstream (best effort), delete locally (journaled), set `signed_out`, block queued operations. */
-  revoke(did: string): Promise<void>;
+  /**
+   * Revoke the DID's current session upstream (best effort), delete it locally
+   * (journaled) if it is still the current session, then set `signed_out` and
+   * block queued operations unless a newer session exists. `superseded`: a
+   * concurrent sign-in stored a newer session, which is kept; `skipped`:
+   * `unless()` was true and nothing was done.
+   */
+  revoke(did: string, options?: RevokeOptions): Promise<RevokeOutcome>;
   /** `oauth_store_degraded` (§5.5). */
   degraded(): boolean;
   /** Retry the held session writes; true when none is left. */
@@ -303,8 +381,8 @@ export function createOAuthService(deps: OAuthServiceDeps): OAuthService {
 
   /** DIDs whose callback is running: the library's revoke of their previous session only deletes the old row. */
   const inCallback = new Map<string, number>();
-  /** DIDs being revoked by revoke(): the caller sets the account status. */
-  const revoking = new Map<string, number>();
+  /** DIDs whose revoke() found no session left while a callback of theirs was running (settled when it ends). */
+  const pendingSignOut = new Set<string>();
   const enter = (m: Map<string, number>, did: string) => m.set(did, (m.get(did) ?? 0) + 1);
   const leave = (m: Map<string, number>, did: string) => {
     const n = (m.get(did) ?? 1) - 1;
@@ -336,12 +414,7 @@ export function createOAuthService(deps: OAuthServiceDeps): OAuthService {
     }
   };
 
-  const onSessionDeleted = (sub: string, cause: unknown): void => {
-    if (inCallback.has(sub)) {
-      log.log('info', 'oauth_session_replaced', { did: sub });
-      return;
-    }
-    if (revoking.has(sub)) return;
+  const markSessionLost = (sub: string, cause: unknown): void => {
     try {
       const now = clock.nowMs();
       db.tx(() => {
@@ -360,6 +433,22 @@ export function createOAuthService(deps: OAuthServiceDeps): OAuthService {
     } catch (error) {
       log.log('error', 'oauth_session_hook_failed', { did: sub, hook: 'deleted', error: errorClass(error) });
     }
+  };
+
+  const onSessionDeleted = (sub: string, cause: unknown): void => {
+    if (inCallback.has(sub)) {
+      log.log('info', 'oauth_session_replaced', { did: sub });
+      return;
+    }
+    markSessionLost(sub, cause);
+  };
+
+  const markSignedOut = (did: string): void => {
+    const now = clock.nowMs();
+    db.tx(() => {
+      db.run("UPDATE accounts SET oauth_status = 'signed_out', updated_at_ms = ? WHERE did = ?", now, did);
+      db.run("UPDATE operations SET state = 'blocked', updated_at_ms = ? WHERE did = ? AND state = 'queued'", now, did);
+    });
   };
 
   const options: NodeOAuthClientOptions = {
@@ -386,13 +475,41 @@ export function createOAuthService(deps: OAuthServiceDeps): OAuthService {
   };
   const client = new NodeOAuthClient(options);
 
-  async function revokeQuietly(did: string): Promise<void> {
-    try {
-      await client.revoke(did);
-    } catch (error) {
-      log.log('warn', 'oauth_revoke_failed', { did, error: errorClass(error) });
+  /**
+   * The library's per-DID request lock (session-getter.js: every getSession,
+   * so every refresh and the callback's revoke of the previous session, runs
+   * under `@atproto-oauth-client-${sub}`). Holding it keeps a refresh from
+   * rotating the tokens between our snapshot and our conditional delete.
+   */
+  const withDidLock = <T>(did: string, fn: () => Promise<T>): Promise<T> =>
+    Promise.resolve(requestLocalLock(`@atproto-oauth-client-${did}`, fn));
+
+  /**
+   * Revoke the DID's current session upstream (best effort) and delete it
+   * locally only if it is still the current session afterwards. Call under
+   * withDidLock.
+   */
+  async function revokeCurrent(did: string): Promise<ConditionalDeleteOutcome> {
+    const snap = sessionStore.snapshot(did);
+    const saved = snap.session;
+    if (saved !== undefined) {
+      try {
+        const dpopKey = await JoseKey.fromJWK(saved.dpopJwk);
+        const server = await client.serverFactory.fromIssuer(saved.tokenSet.iss, saved.authMethod, dpopKey);
+        await server.revoke(saved.tokenSet.access_token);
+      } catch (error) {
+        log.log('warn', 'oauth_revoke_failed', { did, error: errorClass(error) });
+      }
     }
-    sessionStore.del(did);
+    const outcome = sessionStore.delIfUnchanged(snap);
+    if (outcome === 'superseded') log.log('info', 'oauth_revoke_superseded', { did });
+    return outcome;
+  }
+
+  /** The binding check's revocation of the session this callback just stored. */
+  async function revokeNewSession(did: string): Promise<void> {
+    const outcome = await withDidLock(did, () => revokeCurrent(did));
+    if (outcome === 'deleted') markSessionLost(did, new Error('binding check'));
   }
 
   async function authorize(input: string, o: AuthorizeOptions): Promise<AuthorizeResult> {
@@ -424,13 +541,17 @@ export function createOAuthService(deps: OAuthServiceDeps): OAuthService {
     try {
       ({ metadata } = await client.oauthResolver.resolveFromIdentity(did, { signal: o.signal }));
     } catch (error) {
-      throw classify(error, 'authorization server discovery');
+      throw classify(error, 'authorize');
     }
     if (!metadata.pushed_authorization_request_endpoint) {
-      throw new OAuthFlowError('oauth_upstream', 'the authorization server does not support PAR');
+      throw new OAuthFlowError('oauth_upstream', 'the authorization server does not support PAR', {
+        reason: 'as_capabilities',
+      });
     }
     if (!(metadata.code_challenge_methods_supported ?? []).includes('S256')) {
-      throw new OAuthFlowError('oauth_upstream', 'the authorization server does not support S256 PKCE');
+      throw new OAuthFlowError('oauth_upstream', 'the authorization server does not support S256 PKCE', {
+        reason: 'as_capabilities',
+      });
     }
 
     const flow = b64url(random.bytes(16));
@@ -449,14 +570,20 @@ export function createOAuthService(deps: OAuthServiceDeps): OAuthService {
 
   async function callback(params: URLSearchParams, o: CallbackOptions): Promise<CallbackResult> {
     const stateKey = params.get('state');
-    if (stateKey === null || stateKey === '') throw new OAuthFlowError('oauth_state_invalid', 'missing state');
+    if (stateKey === null || stateKey === '') {
+      throw new OAuthFlowError('oauth_binding_mismatch', 'missing state', { reason: 'state_missing' });
+    }
     const seen = stateStore.inspect(stateKey);
     if (seen.status !== 'ok') {
-      throw new OAuthFlowError('oauth_state_invalid', seen.status === 'expired' ? 'expired state' : 'unknown state');
+      throw seen.status === 'expired'
+        ? new OAuthFlowError('oauth_binding_mismatch', 'expired state', { reason: 'state_expired' })
+        : new OAuthFlowError('oauth_binding_mismatch', 'unknown state', { reason: 'state_unknown' });
     }
     if (o.bindingHash === null || !(o.bindingHash instanceof Uint8Array) || !sameBytes(seen.binding, o.bindingHash)) {
       stateStore.del(stateKey); // consumed: the flow cannot be completed by anyone else either
-      throw new OAuthFlowError('oauth_binding_mismatch', 'the login-binding cookie does not match this sign-in');
+      throw new OAuthFlowError('oauth_binding_mismatch', 'the login-binding cookie does not match this sign-in', {
+        reason: 'cookie_mismatch',
+      });
     }
     const expected = seen.app;
 
@@ -473,11 +600,16 @@ export function createOAuthService(deps: OAuthServiceDeps): OAuthService {
         });
       }
       if (error instanceof OAuthCallbackError && error.cause === undefined) {
-        throw new OAuthFlowError('oauth_callback_invalid', error.message, { cause: error });
+        // A malformed authorization response (no code, `iss` naming another issuer, JARM).
+        throw new OAuthFlowError('oauth_binding_mismatch', error.message, {
+          cause: error,
+          reason: error.message === 'Issuer mismatch' ? 'issuer_mismatch' : 'response_invalid',
+        });
       }
       throw classify(error, 'callback');
     } finally {
       leave(inCallback, expected.did);
+      settlePendingSignOut(expected.did);
     }
     const session = result.session;
     const sub = session.did;
@@ -485,10 +617,13 @@ export function createOAuthService(deps: OAuthServiceDeps): OAuthService {
     // Binding check (§5.5).
     if (sub !== expected.did) {
       log.log('warn', 'oauth_binding_mismatch', { did: sub, reason: 'subject' });
-      await revokeQuietly(sub);
+      await revokeNewSession(sub);
       throw new OAuthFlowError(
         'oauth_binding_mismatch',
         'the session is for another DID than the one sign-in started for',
+        {
+          reason: 'subject_mismatch',
+        },
       );
     }
     let identity: ResolvedIdentity;
@@ -497,12 +632,16 @@ export function createOAuthService(deps: OAuthServiceDeps): OAuthService {
     } catch (error) {
       if (isIdentityError(error)) {
         log.log('warn', 'oauth_binding_mismatch', { did: sub, reason: 'identity' });
-        await revokeQuietly(sub);
-        throw new OAuthFlowError('oauth_identity_rejected', "the DID's identity is not acceptable", { cause: error });
+        await revokeNewSession(sub);
+        throw new OAuthFlowError('oauth_binding_mismatch', "the DID's identity is not acceptable", {
+          cause: error,
+          reason: 'identity_rejected',
+        });
       }
       log.log('warn', 'oauth_binding_check_unavailable', { did: sub, error: errorClass(error) });
       throw new OAuthFlowError('oauth_upstream', 'the identity could not be resolved; the new session is kept', {
         cause: error,
+        reason: 'identity_unavailable',
       });
     }
     let issuer: string;
@@ -512,30 +651,43 @@ export function createOAuthService(deps: OAuthServiceDeps): OAuthService {
       log.log('warn', 'oauth_binding_check_unavailable', { did: sub, error: errorClass(error) });
       throw new OAuthFlowError('oauth_upstream', "the PDS's authorization server could not be resolved", {
         cause: error,
+        reason: 'identity_unavailable',
       });
     }
     if (issuer !== session.serverMetadata.issuer) {
       log.log('warn', 'oauth_binding_mismatch', { did: sub, reason: 'issuer' });
-      await revokeQuietly(sub);
-      throw new OAuthFlowError('oauth_binding_mismatch', "the DID's PDS names another authorization server");
+      await revokeNewSession(sub);
+      throw new OAuthFlowError('oauth_binding_mismatch', "the DID's PDS names another authorization server", {
+        reason: 'issuer_mismatch',
+      });
     }
     log.log('info', 'oauth_signed_in', { did: sub });
     return { did: sub, handle: identity.handle, startedFrom: expected.handle, session };
   }
 
-  async function revoke(did: string): Promise<void> {
-    enter(revoking, did);
-    try {
-      await revokeQuietly(did);
-    } finally {
-      leave(revoking, did);
-    }
-    const now = clock.nowMs();
-    db.tx(() => {
-      db.run("UPDATE accounts SET oauth_status = 'signed_out', updated_at_ms = ? WHERE did = ?", now, did);
-      db.run("UPDATE operations SET state = 'blocked', updated_at_ms = ? WHERE did = ? AND state = 'queued'", now, did);
+  /** A callback of `did` ended: apply the sign-out a revoke() deferred, unless a session exists now. */
+  function settlePendingSignOut(did: string): void {
+    if (inCallback.has(did) || !pendingSignOut.delete(did)) return;
+    if (sessionStore.has(did)) return;
+    markSignedOut(did);
+    log.log('info', 'oauth_revoked', { did, deferred: true });
+  }
+
+  async function revoke(did: string, o: RevokeOptions = {}): Promise<RevokeOutcome> {
+    return withDidLock(did, async () => {
+      // Checked synchronously right before the snapshot (keepalive: the DID may have come into use).
+      if (o.unless?.() === true) return 'skipped';
+      const outcome = await revokeCurrent(did);
+      if (outcome === 'superseded' || sessionStore.has(did)) return 'superseded';
+      if (inCallback.has(did)) {
+        // A sign-in of this DID is in flight: it decides (settlePendingSignOut).
+        pendingSignOut.add(did);
+        return 'revoked';
+      }
+      markSignedOut(did);
+      log.log('info', 'oauth_revoked', { did });
+      return 'revoked';
     });
-    log.log('info', 'oauth_revoked', { did });
   }
 
   return {

@@ -432,3 +432,50 @@ export function containsBytes(haystack: Buffer, needle: string | Uint8Array): bo
   const n = typeof needle === 'string' ? Buffer.from(needle, 'utf8') : Buffer.from(needle);
   return n.length > 0 && haystack.indexOf(n) !== -1;
 }
+
+/** Wait (real event-loop turns, no timers) until `cond()` holds. */
+export async function until(cond: () => boolean): Promise<void> {
+  for (let i = 0; i < 20_000; i++) {
+    if (cond()) return;
+    await new Promise((r) => setImmediate(r));
+  }
+  throw new Error('the condition never held');
+}
+
+export interface Hold {
+  reached: boolean;
+  release(): void;
+}
+
+/**
+ * A service whose OAuth transport can hold the next request to an AS path open
+ * until the test releases it (fault injection through the injected
+ * policyFetch transport only).
+ */
+export function gatedService(w: World) {
+  const holds = new Map<string, Hold & { promise: Promise<void> }>();
+  const transport = Object.assign(
+    async (req: Request) => {
+      const path = new URL(req.url).pathname;
+      const h = holds.get(path);
+      if (h !== undefined) {
+        holds.delete(path);
+        h.reached = true;
+        await h.promise;
+      }
+      return w.oauthTransport(req);
+    },
+    { fixture: true as const, calls: w.oauthTransport.calls, hostnames: w.oauthTransport.hostnames },
+  );
+  const svc = w.service({ policyFetch: createPolicyFetch({ transport, timer: w.timer }) });
+  const hold = (path: string): Hold => {
+    let release!: () => void;
+    const promise = new Promise<void>((r) => {
+      release = r;
+    });
+    const h = { reached: false, release, promise };
+    holds.set(path, h);
+    return h;
+  };
+  return { svc, hold };
+}

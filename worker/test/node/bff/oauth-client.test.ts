@@ -6,6 +6,8 @@
 // the accounts / operations rows.
 
 import { createPublicKey } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import {
   CLIENT_ASSERTION_TYPE_JWT_BEARER,
   decodeJwt,
@@ -14,7 +16,7 @@ import {
   verifyEs256,
 } from '@atmusic/atproto/test-support/fake-oauth-as';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { findCause, OAuthFlowError } from '../../../src/bff/oauth-client';
+import { findCause, OAUTH_ERROR_STATUS, OAuthFlowError } from '../../../src/bff/oauth-client';
 import type { Db } from '../../../src/do/db';
 import { withMigratedDb } from '../support/node-db';
 import {
@@ -23,9 +25,11 @@ import {
   createWorld,
   DAY_MS,
   freezeDate,
+  gatedService,
   hex,
   rawDbBytes,
   sha256,
+  until,
   type World,
 } from './oauth-world';
 
@@ -137,8 +141,10 @@ describe('the confidential OAuth client', () => {
       const tokenCalls = w.as.count('/oauth/token');
       const rows = w.sessionRows();
       const replay = await flowError(svc.callback(params, { bindingHash: b.hash }));
-      expect(replay.code).toBe('oauth_state_invalid');
-      expect(replay.status).toBe(400);
+      // The v1.2 contract: a replayed state is 403 oauth_binding_mismatch (the finer reason is for logs).
+      expect(replay.code).toBe('oauth_binding_mismatch');
+      expect(replay.status).toBe(403);
+      expect(replay.reason).toBe('state_unknown');
       expect(w.as.count('/oauth/token')).toBe(tokenCalls);
       expect(w.sessionRows()).toEqual(rows);
 
@@ -149,7 +155,9 @@ describe('the confidential OAuth client', () => {
       expect(w.stateRows()).toBe(1);
       w.advance(600_001);
       const expired = await flowError(svc.callback(lateParams, { bindingHash: b2.hash }));
-      expect(expired.code).toBe('oauth_state_invalid');
+      expect(expired.code).toBe('oauth_binding_mismatch');
+      expect(expired.status).toBe(403);
+      expect(expired.reason).toBe('state_expired');
       expect(expired.message).toBe('expired state');
       expect(w.stateRows()).toBe(0);
       expect(w.as.count('/oauth/token')).toBe(tokenCalls);
@@ -277,13 +285,16 @@ describe('the confidential OAuth client', () => {
       const mismatch = await flowError(svc.callback(params, { bindingHash: victim.hash }));
       expect(mismatch.code).toBe('oauth_binding_mismatch');
       expect(mismatch.status).toBe(403);
+      expect(mismatch.reason).toBe('cookie_mismatch');
       expect(w.as.count('/oauth/token')).toBe(0);
       expect(w.stateRows()).toBe(0);
       expect(w.sessionRows()).toEqual([]);
 
       // The state is consumed: even the right cookie cannot complete it now.
       const consumed = await flowError(svc.callback(params, { bindingHash: attacker.hash }));
-      expect(consumed.code).toBe('oauth_state_invalid');
+      expect(consumed.code).toBe('oauth_binding_mismatch');
+      expect(consumed.status).toBe(403);
+      expect(consumed.reason).toBe('state_unknown');
       expect(w.as.count('/oauth/token')).toBe(0);
 
       // No cookie at all is the same refusal.
@@ -426,7 +437,9 @@ describe('the confidential OAuth client', () => {
       const p1 = await w.browse((await svc.authorize(alice.handle, { bindingHash: b1.hash })).url);
       expect(p1.get('iss')).toBe('https://evil.test');
       const issErr = await flowError(svc.callback(p1, { bindingHash: b1.hash }));
-      expect(issErr.code).toBe('oauth_callback_invalid');
+      expect(issErr.code).toBe('oauth_binding_mismatch');
+      expect(issErr.status).toBe(403);
+      expect(issErr.reason).toBe('issuer_mismatch');
       expect(w.as.count('/oauth/token')).toBe(0);
       expect(w.sessionRows()).toEqual([]);
 
@@ -436,6 +449,8 @@ describe('the confidential OAuth client', () => {
       const p2 = await w.browse((await svc.authorize(alice.handle, { bindingHash: b2.hash })).url);
       const subErr = await flowError(svc.callback(p2, { bindingHash: b2.hash }));
       expect(subErr.code).toBe('oauth_binding_mismatch');
+      expect(subErr.status).toBe(403);
+      expect(subErr.reason).toBe('subject_mismatch');
       expect(w.as.calls.count({ path: '/oauth/token', status: 200 })).toBe(1);
       expect(w.sessionRows()).toEqual([]);
       // The tokens issued for the wrong subject were revoked.
@@ -565,8 +580,9 @@ describe('the confidential OAuth client', () => {
       const doc = w.plc.document(alice.did);
       w.plc.setRawDocument(alice.did, { ...doc, verificationMethod: [] });
       const err = await flowError(svc.callback(params, { bindingHash: b.hash }));
-      expect(err.code).toBe('oauth_identity_rejected');
+      expect(err.code).toBe('oauth_binding_mismatch');
       expect(err.status).toBe(403);
+      expect(err.reason).toBe('identity_rejected');
       expect(findCause(err, (e) => (e as { code?: string })?.code === 'no_signing_key')).toBeDefined();
       expect(w.sessionRows()).toEqual([]);
       // The tokens of the failed exchange were revoked.
@@ -642,6 +658,7 @@ describe('the confidential OAuth client', () => {
       expect(plcCalls).toBe(2);
       expect(err.code).toBe('oauth_upstream');
       expect(err.status).toBe(502);
+      expect(err.reason).toBe('identity_unavailable');
       expect(findCause(err, (e) => (e as { code?: string })?.code === 'timeout')).toBeDefined();
       // The new session stays stored, nothing was revoked, and no browser session exists.
       expect(w.sessionRows().map((r) => r.did)).toEqual([alice.did]);
@@ -653,6 +670,128 @@ describe('the confidential OAuth client', () => {
       const session = await svc.restore(alice.did);
       expect((await w.writeScrobble(session, 1)).status).toBe(200);
     });
+  });
+  it('a revoke held open while the same DID signs in again keeps the new session, revokes only the old one and leaves the account active', async () => {
+    await withMigratedDb(async (db) => {
+      const { w, alice } = await world(db);
+      const { svc, hold } = gatedService(w);
+      await w.signIn(svc, alice);
+      w.seedAccount(alice.did, 'alice');
+      w.seedOperation('op-1', alice.did, 'queued');
+      const oldAs = w.as.sessions(alice.did)[0]!;
+
+      // Sign-out reaches the AS's revocation endpoint and is held there.
+      const revokeHold = hold('/oauth/revoke');
+      const revoking = svc.revoke(alice.did);
+      await until(() => revokeHold.reached);
+      // Meanwhile the user signs in again; the new code exchange completes during the hold.
+      const tokens = w.tokenSuccesses();
+      const signingIn = w.signIn(svc, alice);
+      await until(() => w.tokenSuccesses() === tokens + 1);
+      revokeHold.release();
+      const [outcome, result] = await Promise.all([revoking, signingIn]);
+
+      expect(outcome).toBe('revoked'); // the old session was revoked
+      expect(result.did).toBe(alice.did);
+      // The new session survives, locally and at the AS; only the old one is revoked.
+      const asSessions = w.as.sessions(alice.did);
+      expect(asSessions).toHaveLength(2);
+      expect(oldAs.revoked?.source).toBe('endpoint');
+      const live = asSessions.filter((x) => x.revoked === null);
+      expect(live).toHaveLength(1);
+      expect(w.sessionRows().map((r) => r.did)).toEqual([alice.did]);
+      expect(w.storedSession(alice.did)?.tokenSet.access_token).toBe(live[0]?.accessToken);
+      expect(revokedSubs(w)).toEqual([alice.did]);
+      // The account is active, not signed_out, and its operation runnable.
+      expect(w.accountStatus(alice.did)).toBe('active');
+      expect(w.operationStates(alice.did)).toEqual(['queued']);
+      // The old session's deletion was a revocation and is journaled once.
+      expect(w.revocations.entries()).toEqual([{ kind: 'oauth_session', did: alice.did, at: w.clock.nowMs() }]);
+      // The kept session works.
+      expect((await w.writeScrobble(await svc.restore(alice.did), 1)).status).toBe(200);
+    });
+  });
+
+  it('a revoke that completes while a callback of the same DID is in flight defers signed_out to the callback: a completed sign-in stays active, a failed one ends signed_out', async () => {
+    await withMigratedDb(async (db) => {
+      const { w, alice } = await world(db);
+      const { svc, hold } = gatedService(w);
+      await w.signIn(svc, alice);
+      w.seedAccount(alice.did, 'alice');
+      w.seedOperation('op-1', alice.did, 'queued');
+
+      // 1. The callback's token request is held; the whole revoke runs meanwhile.
+      const b = w.binding();
+      const params = await w.browse((await svc.authorize(alice.handle, { bindingHash: b.hash })).url);
+      const tokenHold = hold('/oauth/token');
+      const completing = svc.callback(params, { bindingHash: b.hash });
+      await until(() => tokenHold.reached);
+      expect(await svc.revoke(alice.did)).toBe('revoked');
+      expect(w.sessionRows()).toEqual([]);
+      // Not yet signed_out: the in-flight sign-in decides.
+      expect(w.accountStatus(alice.did)).toBe('active');
+      expect(w.operationStates(alice.did)).toEqual(['queued']);
+      tokenHold.release();
+      await completing;
+      expect(w.sessionRows().map((r) => r.did)).toEqual([alice.did]);
+      expect(w.accountStatus(alice.did)).toBe('active');
+      expect(w.operationStates(alice.did)).toEqual(['queued']);
+      expect(w.as.sessions(alice.did).filter((x) => x.revoked === null)).toHaveLength(1);
+
+      // 2. Same, but the held token request then fails: the sign-out applies when the callback ends.
+      const b2 = w.binding();
+      const p2 = await w.browse((await svc.authorize(alice.handle, { bindingHash: b2.hash })).url);
+      const hold2 = hold('/oauth/token');
+      const failing = svc.callback(p2, { bindingHash: b2.hash });
+      await until(() => hold2.reached);
+      expect(await svc.revoke(alice.did)).toBe('revoked');
+      expect(w.accountStatus(alice.did)).toBe('active');
+      w.as.fail({ path: '/oauth/token' }, { kind: 'status', status: 503 });
+      hold2.release();
+      const err = await flowError(failing);
+      expect(err.code).toBe('oauth_upstream');
+      expect(err.status).toBe(502);
+      expect(w.sessionRows()).toEqual([]);
+      expect(w.accountStatus(alice.did)).toBe('signed_out');
+      expect(w.operationStates(alice.did)).toEqual(['blocked']);
+      expect(w.as.sessions(alice.did).filter((x) => x.revoked === null)).toHaveLength(0);
+    });
+  });
+
+  it('every OAuthFlowError code and status is a v1.2 contract code of /api/v1/auth/start or /oauth/callback', () => {
+    const spec = JSON.parse(
+      readFileSync(fileURLToPath(new URL('../../../../api/openapi.yaml', import.meta.url).href), 'utf8'),
+    ) as {
+      paths: Record<string, { get?: unknown; post?: unknown }>;
+    };
+    const codes = new Map<string, Set<number>>();
+    for (const [path, method] of [
+      ['/oauth/callback', 'get'],
+      ['/api/v1/auth/start', 'post'],
+    ] as const) {
+      const op = spec.paths[path]?.[method] as { responses: Record<string, { 'x-error-codes'?: string[] }> };
+      for (const [status, r] of Object.entries(op.responses)) {
+        for (const c of r['x-error-codes'] ?? []) {
+          if (!codes.has(c)) codes.set(c, new Set());
+          codes.get(c)!.add(Number(status));
+        }
+      }
+    }
+    expect(codes.get('oauth_binding_mismatch')).toEqual(new Set([403]));
+    for (const [code, status] of Object.entries(OAUTH_ERROR_STATUS)) {
+      if (code === 'oauth_denied') {
+        // Not an error body: the AS's error is a 303 to /signin?error=denied.
+        expect(status).toBe(303);
+        continue;
+      }
+      if (code === 'invalid_handle' || code === 'handle_unresolved') {
+        // /auth/start answers these as 422 validation_failed with fields.handle.
+        expect(status).toBe(422);
+        expect(codes.get('validation_failed')?.has(422)).toBe(true);
+        continue;
+      }
+      expect([code, codes.get(code)?.has(status)]).toEqual([code, true]);
+    }
   });
 });
 

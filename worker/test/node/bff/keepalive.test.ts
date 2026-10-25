@@ -8,7 +8,7 @@ import type { OAuthService } from '../../../src/bff/oauth-client';
 import { DEFAULT_MIN_FREE_BYTES } from '../../../src/node/config';
 import { diskLowProbe, type StatfsFn } from '../../../src/node/disk';
 import { withMigratedDb } from '../support/node-db';
-import { createWorld, DAY_MS, freezeDate, type World, type WorldUser } from './oauth-world';
+import { createWorld, DAY_MS, freezeDate, gatedService, until, type World, type WorldUser } from './oauth-world';
 
 beforeEach(freezeDate);
 afterEach(() => vi.useRealTimers());
@@ -216,6 +216,49 @@ describe('oauth-keepalive', () => {
         // The busy DID was refreshed and stays active.
         expect(refreshCount(w, busy!.did)).toBe(1);
         expect(w.accountStatus(busy!.did)).toBe('active');
+      });
+    },
+    TIMEOUT,
+  );
+
+  it(
+    'a DID that comes into use while its revocation waits for the DID lock is refreshed, not revoked or signed out',
+    async () => {
+      await withMigratedDb(async (db) => {
+        const w = await createWorld(db);
+        const { svc, hold } = gatedService(w);
+        const [u] = await signInMany(w, svc, 1, 'u');
+        w.advance(60 * DAY_MS);
+        // A refresh of the DID is on the wire (holding the library's per-DID lock) when the run starts.
+        const tokenHold = hold('/oauth/token');
+        const refreshing = svc.restore(u!.did, true);
+        await until(() => tokenHold.reached);
+        let revokeCalls = 0;
+        const oauth = {
+          restore: svc.restore,
+          flush: svc.flush,
+          revoke: (did: string, o?: Parameters<OAuthService['revoke']>[1]) => {
+            revokeCalls += 1;
+            return svc.revoke(did, o);
+          },
+        };
+        // The run finds the DID idle and its revoke waits for the lock ...
+        const running = runOAuthKeepalive({ db, clock: w.clock, log: w.log, oauth, diskLow: () => false });
+        await until(() => revokeCalls === 1);
+        // ... while the user signs in to the web UI.
+        seed(w, u!.did, 'web_session', w.clock.nowMs());
+        tokenHold.release();
+        await refreshing;
+        const report = await running;
+
+        expect(report.signedOut).toEqual([]);
+        expect(report.refreshed).toEqual([u!.did]);
+        expect(w.as.revocations).toEqual([]);
+        expect(w.as.calls.count({ path: '/oauth/revoke' })).toBe(0);
+        expect(refreshCount(w, u!.did)).toBe(2); // the concurrent refresh and the keepalive's
+        expect(w.sessionRows().map((r) => r.did)).toEqual([u!.did]);
+        expect(w.accountStatus(u!.did)).toBe('active');
+        expect(w.revocations.entries()).toEqual([]);
       });
     },
     TIMEOUT,
