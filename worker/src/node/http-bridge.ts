@@ -123,6 +123,29 @@ function noStore(contentType: string, requestId: string): Headers {
   return new Headers({ 'content-type': contentType, 'cache-control': 'no-store', 'x-request-id': requestId });
 }
 
+/**
+ * ADR 0005 §8.1: every /1/ response carries this set. The bridge's over-cap
+ * answers bypass the routes' CORS layer, so they add it themselves.
+ */
+export const LISTENBRAINZ_CORS_HEADERS = {
+  'access-control-allow-origin': '*',
+  'access-control-allow-headers': 'Authorization, Content-Type',
+  'access-control-max-age': '21600',
+} as const;
+
+/**
+ * ADR 0005 §7.1: /2.0 read methods (which may be POSTed) get
+ * `Access-Control-Allow-Origin: *`. An over-cap answer is sent before the
+ * method is parsed from the unread body, so it always carries it; it carries no
+ * credentials, so the header exposes nothing.
+ */
+export const LASTFM_TOO_LARGE_CORS_HEADERS = { 'access-control-allow-origin': '*' } as const;
+
+function withHeaders(headers: Headers, extra: Readonly<Record<string, string>>): Headers {
+  for (const [name, value] of Object.entries(extra)) headers.set(name, value);
+  return headers;
+}
+
 /** The API error envelope 413 (`payload_too_large`). */
 export function envelopeTooLarge({ requestId }: TooLargeContext): Response {
   const response = errorResponse('payload_too_large', 413, requestId);
@@ -135,7 +158,7 @@ export function listenBrainzTooLarge(status: 400 | 413, message: string): BodyPo
   return ({ requestId }) =>
     new Response(JSON.stringify({ code: status, error: message }), {
       status,
-      headers: noStore('application/json', requestId),
+      headers: withHeaders(noStore('application/json', requestId), LISTENBRAINZ_CORS_HEADERS),
     });
 }
 
@@ -147,11 +170,14 @@ export function lastfmTooLarge({ requestId, url, headers }: TooLargeContext): Re
   if (json) {
     return new Response(JSON.stringify({ error: 6, message: LASTFM_BODY_TOO_LARGE }), {
       status: 413,
-      headers: noStore('application/json; charset=utf-8', requestId),
+      headers: withHeaders(noStore('application/json; charset=utf-8', requestId), LASTFM_TOO_LARGE_CORS_HEADERS),
     });
   }
   const xml = `<?xml version="1.0" encoding="UTF-8"?>\n<lfm status="failed"><error code="6">${LASTFM_BODY_TOO_LARGE}</error></lfm>`;
-  return new Response(xml, { status: 413, headers: noStore('text/xml; charset=utf-8', requestId) });
+  return new Response(xml, {
+    status: 413,
+    headers: withHeaders(noStore('text/xml; charset=utf-8', requestId), LASTFM_TOO_LARGE_CORS_HEADERS),
+  });
 }
 
 /** The /api/v1-style policy for a cap: pre-check, envelope 413. */

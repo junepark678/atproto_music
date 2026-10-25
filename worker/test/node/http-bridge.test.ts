@@ -404,6 +404,10 @@ describe('HTTP bridge', () => {
     expect(overflow.status).toBe(400);
     expect(overflow.headers['content-type']).toBe('application/json');
     expect(overflow.headers['x-request-id']).toMatch(UUID_PATTERN);
+    // ADR 0005 §8.1: the bridge's own /1/ answer carries the full CORS set.
+    expect(overflow.headers['access-control-allow-origin']).toBe('*');
+    expect(overflow.headers['access-control-allow-headers']).toBe('Authorization, Content-Type');
+    expect(overflow.headers['access-control-max-age']).toBe('21600');
     expect(JSON.parse(overflow.body)).toEqual({
       code: 400,
       error: 'Payload too large. Payload cannot exceed 10240000 bytes',
@@ -432,6 +436,7 @@ describe('HTTP bridge', () => {
     const lfmXml = await declared('/2.0/', 1_048_577);
     expect(lfmXml.status).toBe(413);
     expect(lfmXml.headers['content-type']).toBe('text/xml; charset=utf-8');
+    expect(lfmXml.headers['access-control-allow-origin']).toBe('*');
     expect(lfmXml.body).toBe(
       `<?xml version="1.0" encoding="UTF-8"?>\n<lfm status="failed"><error code="6">${LASTFM_BODY_TOO_LARGE}</error></lfm>`,
     );
@@ -442,16 +447,23 @@ describe('HTTP bridge', () => {
       const lfmJson = await declared(target, 1_048_577, extra);
       expect(lfmJson.status, target).toBe(413);
       expect(lfmJson.headers['content-type']).toBe('application/json; charset=utf-8');
+      expect(lfmJson.headers['access-control-allow-origin'], target).toBe('*');
       expect(JSON.parse(lfmJson.body)).toEqual({ error: 6, message: LASTFM_BODY_TOO_LARGE });
     }
     const lbOther = await declared('/1/delete-listen', 65_537);
     expect(lbOther.status).toBe(413);
     expect(JSON.parse(lbOther.body)).toEqual({ code: 413, error: 'The request body is too large.' });
+    expect(lbOther.headers['content-type']).toBe('application/json');
+    expect(lbOther.headers['access-control-allow-origin']).toBe('*');
+    expect(lbOther.headers['access-control-allow-headers']).toBe('Authorization, Content-Type');
+    expect(lbOther.headers['access-control-max-age']).toBe('21600');
     const api = await declared('/api/v1/notify', 65_537);
     expect(api.status).toBe(413);
     const envelope = JSON.parse(api.body) as { error: { code: string; requestId: string } };
     expect(envelope.error.code).toBe('payload_too_large');
     expect(api.headers['x-request-id']).toBe(envelope.error.requestId);
+    // /api/v1 is not a CORS surface: its envelope gains no CORS headers.
+    expect(api.headers['access-control-allow-origin']).toBeUndefined();
     expect(calls).toHaveLength(3);
   });
 
