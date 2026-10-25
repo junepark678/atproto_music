@@ -32,17 +32,29 @@
 //     retry after success gets the same operation and writes nothing); the
 //     same key with another hash is 409 `idempotency_conflict`; the same key
 //     from another DID is a new operation;
-//   - the same listen re-sent under a new key is the listen key's existing
-//     operation (an idempotent client resend, ADR §7.7); over the daily cap
-//     is 429 `rate_limited` with `Retry-After` until the oldest listen of the
-//     rolling 24 h window leaves it.
+//   - a listen whose listen key is already recorded under another key (an
+//     earlier web scrobble under another Idempotency-Key, a protocol listen
+//     or an import) is 422 `validation_failed` (`fields.listenedAt`) and
+//     writes nothing. The key is answered only with an operation it is
+//     stored on (`operations.idempotency_key`), so it stays bound: returning
+//     the other key's operation would leave this key unstored, free to be
+//     reused for another body (202 instead of §5.8's 409) while its own
+//     retry could later conflict. The refusal is stable across retries and
+//     binds nothing, so the key may still be used for a listen not yet
+//     recorded;
+//   - over the daily cap is 429 `rate_limited` with `Retry-After` until the
+//     oldest listen of the rolling 24 h window leaves it.
 // - `DELETE /api/v1/scrobbles/{id}` with the URL-encoded AT URI: not an
 //   `at://<did>/<collection>/<rkey>` URI → 422 `validation_failed`
-//   (`fields.id`); another DID's record, another collection, or an own URI
-//   the server knows nothing of (no present or excluded `record_state` row
-//   and no live `scrobble.create` of ours) → 404 `not_found`, with no
-//   operation and no PDS request. Otherwise a `scrobble.delete` behind every
-//   unsettled operation on the URI (outbox/delete-ops.ts).
+//   (`fields.id`); another DID's record or another collection → 404
+//   `not_found`, with no operation and no PDS request. Any well-formed own
+//   scrobble URI gets a `scrobble.delete` behind every unsettled operation on
+//   the URI (outbox/delete-ops.ts), whether or not the server has indexed
+//   the record (not indexed yet, indexing disabled, or never ours to know):
+//   the runner takes swapRecord from the index, our own create or the PDS,
+//   and a record absent from the PDS settles the delete as succeeded with no
+//   deleteRecord (the Rust oracle crates/server/src/http/scrobbles/delete.rs
+//   has no existence check either).
 // - `PUT /api/v1/follows/{did}` / `DELETE /api/v1/follows/{did}`: a
 //   `follow.put` / `follow.delete` (FIFO per subject); an invalid subject or
 //   a self-follow is 422 with `fields.did`.
@@ -201,8 +213,12 @@ export const postScrobble: CookieHandler = async (req, ctx, _params, session) =>
       return rateLimitedResponse(ctx.requestId, capRetryAfterSeconds(m, session.did, receiptMs));
     case 'accepted': {
       const op = result.operationId === null ? null : loadOperation(m.db, result.operationId);
-      // A listen key without an operation (an imported listen already on the PDS): nothing to queue.
-      if (op === null) return validationFailed(ctx, 'listenedAt', 'This listen is already recorded.');
+      // Answer only with an operation this key is stored on (header). Otherwise the listen key is
+      // already recorded without this key: by an import (no operation), by protocol ingress, or by a
+      // web scrobble under another key. Nothing was written and the key stays unbound.
+      if (op === null || op.idempotency_key !== key.key) {
+        return validationFailed(ctx, 'listenedAt', 'This listen is already recorded.');
+      }
       return accepted(op);
     }
   }
@@ -221,25 +237,6 @@ export function splitRecordUri(uri: string): { did: string; collection: string; 
   return { did, collection, rkey };
 }
 
-/** True when the server knows `uri` as one of `did`'s records: verified on the PDS, or our own live create. */
-function knownOwnRecord(m: ModuleDeps, did: string, uri: string, collection: string, rkey: string): boolean {
-  const state = m.db.one<{ one: number }>(
-    `SELECT 1 AS one FROM record_state WHERE uri = ? AND did = ? AND state IN ('present','excluded')`,
-    uri,
-    did,
-  );
-  if (state !== null) return true;
-  return (
-    m.db.one<{ one: number }>(
-      `SELECT 1 AS one FROM operations WHERE did = ? AND kind = 'scrobble.create' AND collection = ? AND rkey = ?
-         AND state NOT IN ('failed','cancelled') LIMIT 1`,
-      did,
-      collection,
-      rkey,
-    ) !== null
-  );
-}
-
 export const deleteScrobble: CookieHandler = async (_req, ctx, params, session) => {
   const uri = params.id ?? '';
   const parts = splitRecordUri(uri);
@@ -248,9 +245,6 @@ export const deleteScrobble: CookieHandler = async (_req, ctx, params, session) 
   const collection = outboxCollections(m.config.prefix).scrobble;
   // Another DID's record, or not a scrobble, is not found for this caller.
   if (parts.did !== session.did || parts.collection !== collection) {
-    return errorResponse('not_found', 404, ctx.requestId);
-  }
-  if (!knownOwnRecord(m, session.did, uri, collection, parts.rkey)) {
     return errorResponse('not_found', 404, ctx.requestId);
   }
   const op = enqueueScrobbleDelete(m, { did: session.did, uri, origin: 'web', kick: kick(ctx) });

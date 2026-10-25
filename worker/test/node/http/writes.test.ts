@@ -382,6 +382,66 @@ describe('POST /api/v1/scrobbles', () => {
     expect(w.count('listen_keys', 'did = ?', BOB)).toBe(1);
   });
 
+  it('a listen already accepted under one Idempotency-Key and re-sent under another is 422 and leaves the second key unbound', async () => {
+    const w = await world();
+    const alice = w.signIn(ALICE, 'alice.test');
+    const L2 = { ...LISTEN, track: 'Hunter' };
+    const post = (key: string, body: unknown) => w.send('POST', '/api/v1/scrobbles', { as: alice, key, body });
+
+    // K1/L: the listen is accepted under K1.
+    const first = await post('K1', LISTEN);
+    expect(first.status).toBe(202);
+    const opA = opOf(first).id;
+
+    // K2/L, twice: the listen is already recorded under K1. Not K1's operation (K2 would stay
+    // unstored), a stable 422 that writes nothing.
+    for (let i = 0; i < 2; i++) {
+      const dup = await post('K2', LISTEN);
+      expect([dup.status, errorCode(dup), fieldsOf(dup)]).toEqual([
+        422,
+        'validation_failed',
+        { listenedAt: 'This listen is already recorded.' },
+      ]);
+      expect(contract('POST', '/api/v1/scrobbles', dup)).toBe('valid');
+    }
+    expect(w.ops().map((r) => [r.id, r.idempotency_key])).toEqual([[opA, 'K1']]);
+    expect(w.count('listen_keys', 'did = ?', ALICE)).toBe(1);
+    expect(w.count('forward_outbox')).toBe(0);
+
+    // K2/L2: K2 was never answered with an operation, so it binds now to L2.
+    const second = await post('K2', L2);
+    expect(second.status).toBe(202);
+    expect(contract('POST', '/api/v1/scrobbles', second)).toBe('valid');
+    const opB = opOf(second).id;
+    expect(opB).not.toBe(opA);
+    expect(w.ops().map((r) => [r.id, r.idempotency_key])).toEqual([
+      [opA, 'K1'],
+      [opB, 'K2'],
+    ]);
+
+    // From now on K2 means L2: K2/L is 409, a real retry K2/L2 is opB, K1/L is still opA.
+    const reused = await post('K2', LISTEN);
+    expect([reused.status, errorCode(reused)]).toEqual([409, 'idempotency_conflict']);
+    expect(contract('POST', '/api/v1/scrobbles', reused)).toBe('valid');
+    const retryB = await post('K2', L2);
+    expect([retryB.status, opOf(retryB).id]).toEqual([202, opB]);
+    const retryA = await post('K1', LISTEN);
+    expect([retryA.status, opOf(retryA).id]).toEqual([202, opA]);
+
+    // Two operations, two listen keys, and after the drain two records on the PDS.
+    expect(w.count('operations')).toBe(2);
+    expect(w.count('listen_keys', 'did = ?', ALICE)).toBe(2);
+    await w.drain();
+    expect(w.ops().map((r) => [r.id, r.state])).toEqual([
+      [opA, 'succeeded'],
+      [opB, 'succeeded'],
+    ]);
+    expect((await w.kit.repos.Alice.list(SCROBBLE)).map((r) => (r.value as { track: string }).track).sort()).toEqual([
+      'Hunter',
+      'Jóga',
+    ]);
+  });
+
   it('an Idempotency-Key of 129 characters or containing a character outside [A-Za-z0-9._~-] is 400 invalid_idempotency_key', async () => {
     const w = await world();
     const alice = w.signIn(ALICE, 'alice.test');
@@ -461,12 +521,8 @@ describe('DELETE /api/v1/scrobbles/{id}', () => {
     w.kit.resetCalls();
 
     const path = (uri: string) => `/api/v1/scrobbles/${encodeURIComponent(uri)}`;
-    // Bob's record, an unknown own rkey and another collection of Alice's are not found for Alice.
-    for (const uri of [
-      bobUri,
-      `at://${ALICE}/${SCROBBLE}/3zzzzzzzzzzzz`,
-      `at://${ALICE}/${FOLLOW}/${aliceUri.split('/').pop()}`,
-    ]) {
+    // Bob's record and another collection of Alice's are not found for Alice.
+    for (const uri of [bobUri, `at://${ALICE}/${FOLLOW}/${aliceUri.split('/').pop()}`]) {
       const res = await w.send('DELETE', path(uri), { as: alice });
       expect([uri, res.status, errorCode(res)]).toEqual([uri, 404, 'not_found']);
       expect(contract('DELETE', path(uri), res)).toBe('valid');
@@ -482,12 +538,30 @@ describe('DELETE /api/v1/scrobbles/{id}', () => {
     expect(w.kit.pds.Bob.count('com.atproto.repo.deleteRecord')).toBe(0);
     expect((await w.kit.repos.Bob.list(SCROBBLE)).length).toBe(1);
 
-    // Alice's own record.
+    // An own scrobble URI the server has not indexed (no record_state row, no create of ours) is still
+    // Alice's to delete: queued, and settled as succeeded when her PDS has nothing at the key.
+    const unknownUri = `at://${ALICE}/${SCROBBLE}/3zzzzzzzzzzzz`;
+    expect(w.count('record_state', 'uri = ?', unknownUri)).toBe(0);
+    const unknown = await w.send('DELETE', path(unknownUri), { as: alice });
+    expect(unknown.status).toBe(202);
+    expect(contract('DELETE', path(unknownUri), unknown)).toBe('valid');
+    expect(opOf(unknown)).toMatchObject({ kind: 'scrobble.delete', origin: 'web', state: 'queued', attempts: 0 });
+    await w.drain();
+    expect(w.ops('id = ?', opOf(unknown).id).map((r) => [r.state, r.rkey, r.last_error])).toEqual([
+      ['succeeded', '3zzzzzzzzzzzz', null],
+    ]);
+    expect(w.kit.pds.Alice.count('com.atproto.repo.getRecord')).toBe(1);
+    expect(w.kit.pds.Alice.count('com.atproto.repo.deleteRecord')).toBe(0);
+    expect((await w.kit.repos.Alice.list(SCROBBLE)).length).toBe(1);
+    w.kit.resetCalls();
+
+    // Alice's own indexed record.
     const del = await w.send('DELETE', path(aliceUri), { as: alice });
     expect(del.status).toBe(202);
     expect(contract('DELETE', path(aliceUri), del)).toBe('valid');
     expect(opOf(del)).toMatchObject({ kind: 'scrobble.delete', origin: 'web', state: 'queued', attempts: 0 });
     expect(w.ops("kind = 'scrobble.delete'").map((r) => [r.did, r.collection, r.rkey])).toEqual([
+      [ALICE, SCROBBLE, '3zzzzzzzzzzzz'],
       [ALICE, SCROBBLE, aliceUri.split('/').pop()],
     ]);
     await w.drain();
