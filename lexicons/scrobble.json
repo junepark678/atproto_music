@@ -6,7 +6,7 @@
     "main": {
       "type": "record",
       "key": "tid",
-      "description": "A completed listen asserted by its author. Each record counts once; repeated tracks at equal times are valid.",
+      "description": "A completed listen asserted by its author. Each record counts once; repeated tracks at equal times are valid. The fields after recordingMbid are additive optional fields (ADR 0005 §6.2, B13): a validator drops an invalid optional field and never rejects a record for one; remote records stay open and unknown fields are ignored.",
       "record": {
         "type": "object",
         "required": ["artist", "track", "listenedAt", "createdAt"],
@@ -17,7 +17,15 @@
           "listenedAt": {"type": "string", "format": "datetime", "description": "Explicit UTC RFC3339, from 1970-01-01 through event receipt time plus 300 seconds inclusive."},
           "createdAt": {"type": "string", "format": "datetime", "description": "Explicit UTC RFC3339, from 1970-01-01 through event receipt time plus 300 seconds inclusive."},
           "durationSeconds": {"type": "integer", "minimum": 1, "maximum": 86400},
-          "recordingMbid": {"type": "string", "description": "Optional unverified recording UUID; runtime validates UUID syntax. Not a grouping key."}
+          "recordingMbid": {"type": "string", "description": "Optional unverified recording UUID; runtime validates UUID syntax. Not a grouping key."},
+          "albumArtist": {"type": "string", "minLength": 1, "maxLength": 1024, "description": "Optional album artist (Last.fm albumArtist, ListenBrainz release_artist_name); raw 1–256 Unicode scalar values, and nonempty after trimming; enforced by the validator."},
+          "trackNumber": {"type": "integer", "minimum": 1, "maximum": 9999, "description": "Optional position of the track on its release."},
+          "artistMbids": {"type": "array", "maxLength": 10, "items": {"type": "string", "maxLength": 36}, "description": "Optional unverified MusicBrainz artist UUIDs, at most 10 and distinct; runtime validates UUID syntax."},
+          "releaseMbid": {"type": "string", "maxLength": 36, "description": "Optional unverified MusicBrainz release UUID; runtime validates UUID syntax."},
+          "releaseGroupMbid": {"type": "string", "maxLength": 36, "description": "Optional unverified MusicBrainz release-group UUID; runtime validates UUID syntax."},
+          "isrc": {"type": "string", "minLength": 12, "maxLength": 12, "description": "Optional ISRC, uppercase, matching ^[A-Z]{2}[A-Z0-9]{3}[0-9]{7}$; enforced by the validator."},
+          "submissionClient": {"type": "string", "minLength": 1, "maxLength": 256, "description": "Optional name (and version) of the submitting client; raw 1–64 Unicode scalar values and at most 256 UTF-8 bytes; enforced by the validator."},
+          "musicService": {"type": "string", "minLength": 1, "maxLength": 253, "description": "Optional lowercase DNS name of the music service the listen came from (ListenBrainz music_service); enforced by the validator."}
         }
       }
     }

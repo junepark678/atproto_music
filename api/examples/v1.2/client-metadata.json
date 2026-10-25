@@ -1,0 +1,21 @@
+{
+  "client_id": "https://music.example/oauth/client-metadata.json",
+  "client_name": "AT Protocol Music",
+  "client_uri": "https://music.example",
+  "application_type": "web",
+  "redirect_uris": [
+    "https://music.example/oauth/callback"
+  ],
+  "grant_types": [
+    "authorization_code",
+    "refresh_token"
+  ],
+  "response_types": [
+    "code"
+  ],
+  "scope": "atproto repo:com.example.atmusic.scrobble repo:com.example.atmusic.follow repo:com.example.atmusic.settings repo:com.example.atmusic.love",
+  "token_endpoint_auth_method": "private_key_jwt",
+  "token_endpoint_auth_signing_alg": "ES256",
+  "jwks_uri": "https://music.example/oauth/jwks.json",
+  "dpop_bound_access_tokens": true
+}

@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "oauth_binding_mismatch",
+    "message": "The sign-in could not be bound to this browser or identity.",
+    "requestId": "a858325e-7dd0-4b1b-baaa-3b65af37f963"
+  }
+}

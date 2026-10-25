@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Offline, dependency-pinned OpenAPI 1.1.0/schema, lexicon and frozen contract regression checks (ADR 0004 §9)."""
+"""Offline, dependency-pinned OpenAPI 1.2.0/schema, lexicon and frozen contract regression checks.
+
+Contract v1.1 (ADR 0004 §9) is frozen inside v1.2 (ADR 0005 B14, B13): every v1.1 route, status matrix and
+payload shape is unchanged except the additive optional Scrobble fields, the v1.2 cookie routes are additive, and
+the lexicons only gain optional fields and the new love collection.
+"""
 
 from __future__ import annotations
 
@@ -151,7 +156,19 @@ def build_validator():
         if required and not (isinstance(instance, int) and not isinstance(instance, bool)):
             yield ValidationError('expected a JSON integer representation, not a decimal or boolean')
 
-    return validators.extend(Draft202012Validator, {'x-maxFutureSeconds': maximum_future, 'x-jsonIntegerRepresentation': json_integer_representation}), checker
+    def maximum_utf8_bytes(validator, limit, instance, schema):
+        if isinstance(instance, str):
+            try:
+                size = len(instance.encode('utf-8'))
+            except UnicodeError:
+                yield ValidationError('string is not valid Unicode scalar text')
+                return
+            if size > limit:
+                yield ValidationError(f'string exceeds {limit} UTF-8 bytes')
+
+    return validators.extend(Draft202012Validator, {'x-maxFutureSeconds': maximum_future,
+                                                    'x-jsonIntegerRepresentation': json_integer_representation,
+                                                    'x-maxUtf8Bytes': maximum_utf8_bytes}), checker
 
 
 def dereference(spec, value):
@@ -197,16 +214,16 @@ def operations(spec):
             for method, operation in item.items() if method in METHODS}
 
 
-CONTRACT_VERSION = '1.1.0'
+CONTRACT_VERSION = '1.2.0'
 
 # This status matrix is independent of the document and its fixture inventory.
-# The success entries and route-specific rules are frozen in API.md as amended
-# by ADR 0004 §9 (A3, A8, A9, A10, N1–N3).
-EXPECTED_STATUSES = {
+# The v1.1 entries are frozen in MVP.md and API.md as amended by ADR 0004 §9
+# (A3, A8, A9, A10, N1–N3); ADR 0005 B14 keeps every one of them.
+V11_STATUSES = {
     ('GET', '/health/live'): {200},
     ('GET', '/health/ready'): {200, 503},
     ('GET', '/api/v1/meta'): {200, 429},
-    # A3: a build-time Workers Static Asset; the Worker never runs for it.
+    # B14: the dynamic confidential-client document (ADR 0005 §5.3); same path, same status.
     ('GET', '/oauth/client-metadata.json'): {200},
     ('GET', '/api/v1/resolve'): {200, 404, 422, 429, 502},
     ('GET', '/api/v1/scrobbles/{id}'): {200, 404, 422, 429},
@@ -222,36 +239,230 @@ EXPECTED_STATUSES = {
     ('GET', '/api/v1/records/status'): {200, 422, 429},
 }
 
-# ADR 0004 §9.3. None of these may reappear in the document.
-DROPPED_ROUTES = {
-    ('POST', '/api/v1/auth/start'), ('GET', '/api/v1/auth/callback'), ('GET', '/api/v1/auth/session'),
-    ('POST', '/api/v1/auth/logout'), ('POST', '/api/v1/scrobbles'), ('DELETE', '/api/v1/scrobbles/{id}'),
-    ('PUT', '/api/v1/follows/{did}'), ('DELETE', '/api/v1/follows/{did}'), ('GET', '/api/v1/operations/{id}'),
-    ('GET', '/api/v1/account/export'), ('DELETE', '/api/v1/account/local-data'),
+# ADR 0005 §5.7, §11.4, §12.1 and B14: the v1.2 cookie, write, account,
+# credential, link and import routes, and the JWKS document.
+V12_STATUSES = {
+    ('GET', '/oauth/jwks.json'): {200},
+    ('POST', '/api/v1/auth/start'): {200, 400, 403, 413, 422, 429, 502},
+    ('GET', '/oauth/callback'): {303, 403, 502},
+    ('GET', '/api/v1/auth/session'): {200, 401},
+    ('POST', '/api/v1/auth/logout'): {204, 400, 401, 403, 413},
+    ('DELETE', '/api/v1/account/connection'): {204, 401, 403},
+    ('POST', '/api/v1/scrobbles'): {202, 400, 401, 403, 409, 413, 422, 503},
+    ('DELETE', '/api/v1/scrobbles/{id}'): {202, 401, 403, 404, 422, 503},
+    ('PUT', '/api/v1/follows/{did}'): {202, 401, 403, 422, 503},
+    ('DELETE', '/api/v1/follows/{did}'): {202, 401, 403, 422, 503},
+    ('PUT', '/api/v1/loves'): {202, 400, 401, 403, 413, 422, 503},
+    ('DELETE', '/api/v1/loves'): {202, 401, 403, 422, 503},
+    ('PUT', '/api/v1/account/indexing'): {202, 400, 401, 403, 413, 422, 503},
+    ('GET', '/api/v1/operations/{id}'): {200, 401, 404},
+    ('GET', '/api/v1/account'): {200, 401},
+    ('PATCH', '/api/v1/account'): {200, 400, 401, 403, 409, 413, 422},
+    ('GET', '/api/v1/account/ignored-listens'): {200, 400, 401, 422},
+    ('GET', '/api/v1/account/credentials'): {200, 401},
+    ('POST', '/api/v1/account/app-passwords'): {201, 400, 401, 403, 413, 422},
+    ('DELETE', '/api/v1/account/app-passwords/{id}'): {204, 401, 403, 404},
+    ('POST', '/api/v1/account/listenbrainz-tokens'): {201, 400, 401, 403, 413, 422},
+    ('DELETE', '/api/v1/account/listenbrainz-tokens/{id}'): {204, 401, 403, 404},
+    ('POST', '/api/v1/account/lastfm-apps'): {201, 400, 401, 403, 413, 422},
+    ('DELETE', '/api/v1/account/lastfm-apps/{apiKey}'): {204, 401, 403, 404},
+    ('DELETE', '/api/v1/account/lastfm-sessions/{id}'): {204, 401, 403, 404},
+    ('POST', '/api/v1/lastfm/authorize'): {200, 400, 401, 403, 404, 413, 422},
+    ('GET', '/api/v1/links'): {200, 401},
+    ('POST', '/api/v1/links/lastfm/start'): {200, 401, 403, 503},
+    ('GET', '/api/v1/links/lastfm/callback'): {303, 401, 403, 502},
+    ('POST', '/api/v1/links/listenbrainz'): {201, 400, 401, 403, 413, 422, 502},
+    ('PATCH', '/api/v1/links/{id}'): {200, 400, 401, 403, 404, 413, 422},
+    ('DELETE', '/api/v1/links/{id}'): {204, 401, 403, 404},
+    ('GET', '/api/v1/imports'): {200, 401},
+    ('POST', '/api/v1/imports'): {202, 400, 401, 403, 409, 413, 422, 503},
+    ('POST', '/api/v1/imports/upload'): {202, 401, 403, 409, 413, 422, 429, 503, 507},
+    ('GET', '/api/v1/imports/{id}'): {200, 401, 404},
+    ('POST', '/api/v1/imports/{id}/cancel'): {200, 401, 403, 404},
+    ('POST', '/api/v1/imports/{id}/resume'): {200, 401, 403, 404},
 }
-DROPPED_PREFIXES = ('/api/v1/auth/', '/api/v1/account/', '/api/v1/operations/', '/api/v1/follows/')
-DROPPED_SCHEMAS = {'Accepted', 'Operation', 'Session', 'AuthStart', 'AuthStartInput', 'AccountExport', 'FollowResult'}
-DROPPED_PARAMETERS = {'Origin', 'IdempotencyKey', 'OperationIdPath', 'OAuthState', 'OAuthCode', 'OAuthIssuer',
-                      'OAuthError', 'OAuthErrorDescription'}
-SESSION_EXTENSIONS = {'x-csrf-required', 'x-oauth-state-required', 'x-session-required-when'}
+EXPECTED_STATUSES = {**V11_STATUSES, **V12_STATUSES}
+
+# ADR 0005 §5.7 "Not restored": these v1.0 routes stay dropped, with their schema.
+NOT_RESTORED_ROUTES = {('GET', '/api/v1/account/export'), ('DELETE', '/api/v1/account/local-data')}
+NOT_RESTORED_SCHEMAS = {'AccountExport'}
+# The §5.7 "Writes": publication-gated (503 publication_disabled) and answered 202 Accepted.
+WRITE_ROUTES = {
+    ('POST', '/api/v1/scrobbles'), ('DELETE', '/api/v1/scrobbles/{id}'), ('PUT', '/api/v1/follows/{did}'),
+    ('DELETE', '/api/v1/follows/{did}'), ('PUT', '/api/v1/loves'), ('DELETE', '/api/v1/loves'),
+    ('PUT', '/api/v1/account/indexing'),
+}
+# Each named v1.2 error response must declare these codes (x-error-codes) and bind a fixture for each.
+REQUIRED_ERROR_CODES = {
+    ('POST', '/api/v1/scrobbles', 400): {'idempotency_key_required', 'invalid_idempotency_key'},
+    ('POST', '/api/v1/scrobbles', 409): {'idempotency_conflict'},
+    ('POST', '/api/v1/auth/start', 403): {'csrf_failed', 'signin_not_allowed'},
+    ('POST', '/api/v1/auth/start', 502): {'oauth_upstream'},
+    ('GET', '/oauth/callback', 403): {'oauth_binding_mismatch', 'signin_not_allowed'},
+    ('GET', '/oauth/callback', 502): {'oauth_upstream'},
+    ('PATCH', '/api/v1/account', 409): {'username_taken'},
+    ('PATCH', '/api/v1/account', 422): {'username_invalid', 'validation_failed'},
+    ('POST', '/api/v1/imports', 409): {'import_active'},
+    ('POST', '/api/v1/imports', 503): {'publication_disabled', 'lastfm_not_configured'},
+    ('POST', '/api/v1/imports/upload', 507): {'insufficient_storage'},
+    ('POST', '/api/v1/links/lastfm/start', 503): {'lastfm_not_configured'},
+}
+# The v1.2 error vocabulary with the status each is served with (ADR 0005 §5.6–§5.8, §11). A code
+# that packages/core/src/errors.ts does not define yet is reported pending: the implementing
+# packages add it (no wave-0 package owns errors.ts), and once defined its DEFAULT_STATUS must agree.
+V12_ERROR_CODES = {
+    'unauthenticated': 401, 'csrf_failed': 403, 'signin_not_allowed': 403, 'oauth_binding_mismatch': 403,
+    'idempotency_key_required': 400, 'invalid_idempotency_key': 400, 'idempotency_conflict': 409,
+    'username_taken': 409, 'import_active': 409, 'username_invalid': 422, 'oauth_upstream': 502,
+    'publication_disabled': 503, 'lastfm_not_configured': 503, 'insufficient_storage': 507,
+}
+SESSION_SCHEMES = {
+    'SessionCookie': {'type': 'apiKey', 'in': 'cookie', 'name': '__Host-atmusic_session'},
+    'CsrfToken': {'type': 'apiKey', 'in': 'header', 'name': 'X-CSRF-Token'},
+}
 LIST_ROUTES = {
     ('GET', '/api/v1/users/{did}/scrobbles'), ('GET', '/api/v1/feed'),
     ('GET', '/api/v1/users/{did}/following'), ('GET', '/api/v1/users/{did}/followers'),
 }
-NO_STORE_ROUTES = {('GET', '/api/v1/users/{did}/export'), ('GET', '/api/v1/records/status')}
+NO_STORE_RESPONSES = {
+    ('GET', '/api/v1/users/{did}/export', 200), ('GET', '/api/v1/records/status', 200),
+    ('GET', '/api/v1/auth/session', 200), ('GET', '/api/v1/operations/{id}', 200), ('GET', '/api/v1/account', 200),
+    ('GET', '/api/v1/account/ignored-listens', 200), ('GET', '/api/v1/account/credentials', 200),
+    ('POST', '/api/v1/account/app-passwords', 201), ('POST', '/api/v1/account/listenbrainz-tokens', 201),
+    ('POST', '/api/v1/account/lastfm-apps', 201), ('POST', '/api/v1/lastfm/authorize', 200),
+    ('GET', '/api/v1/links', 200), ('POST', '/api/v1/links/lastfm/start', 200), ('GET', '/api/v1/imports', 200),
+    ('GET', '/api/v1/imports/{id}', 200),
+}
 NOTIFY_MAX_BODY_BYTES = 2048
-# Example files that are inventories rather than payload fixtures.
-INVENTORY_FILES = {'response-cases.json', 'schema-cases.json'}
+V12_MAX_BODY_BYTES = 65536
+UPLOAD_MAX_BODY_BYTES = 64 * 1024 * 1024
+# The v1.1 response-case inventory (api/examples/response-cases.json) is what the SPA's contract
+# test consumes until N5-01; the v1.2 inventory lives beside the v1.2 fixtures. The one v1.1 route
+# whose payload B14 changed is re-bound there; its v1.1 case keeps the legacy static-asset fixture,
+# validated against the retained OAuthClientMetadata schema that scripts/gen-config.ts still emits.
+V11_CASES = 'response-cases.json'
+V12_CASES = 'v1.2/response-cases.json'
+INVENTORY_FILES = {V11_CASES, 'schema-cases.json', V12_CASES}
+LEGACY_CASES = {('GET', '/oauth/client-metadata.json', 200): 'OAuthClientMetadata'}
 LEXICON_PREFIX = 'com.example.atmusic'
-LEXICON_COLLECTIONS = {'scrobble', 'follow', 'settings'}
+LEXICON_COLLECTIONS = {'scrobble', 'follow', 'settings', 'love'}
+
+# Inline object shapes of every v1.1 component schema, recorded from the 1.1.0 document:
+# {schema: {path: (properties, required)}}. v1.2 may add optional properties but never drops a
+# property or changes a required set (B14).
+V11_SHAPES = {
+    'Indexing': {
+        '': (['caughtUp', 'lagSeconds', 'lastIndexedAt', 'state'], ['caughtUp', 'lagSeconds', 'lastIndexedAt', 'state']),
+    },
+    'Error': {
+        '': (['error'], ['error']),
+        '.error': (['code', 'fields', 'message', 'requestId'], ['code', 'message', 'requestId']),
+    },
+    'Live': {'': (['status'], ['status'])},
+    'Ready': {'': (['status'], ['status'])},
+    'Meta': {
+        '': (['capabilities', 'indexing', 'lexiconPrefix', 'name', 'stage', 'version'],
+             ['capabilities', 'indexing', 'lexiconPrefix', 'name', 'stage', 'version']),
+    },
+    'ResolvedIdentity': {'': (['did', 'handle', 'verified'], ['did', 'handle', 'verified'])},
+    'ScrobbleInput': {
+        '': (['album', 'artist', 'durationSeconds', 'listenedAt', 'recordingMbid', 'track'], ['artist', 'listenedAt', 'track']),
+    },
+    'Scrobble': {
+        '': (['album', 'artist', 'cid', 'createdAt', 'did', 'durationSeconds', 'indexedAt', 'listenedAt', 'recordingMbid',
+              'revision', 'track', 'uri'],
+             ['artist', 'cid', 'createdAt', 'did', 'indexedAt', 'listenedAt', 'revision', 'track', 'uri']),
+    },
+    'Follow': {'': (['actor', 'cid', 'createdAt', 'subject', 'uri'], ['actor', 'cid', 'createdAt', 'subject', 'uri'])},
+    'Profile': {
+        '': (['did', 'followerCount', 'followingCount', 'handle', 'indexedAt', 'indexing', 'joinedAt', 'totalScrobbles'],
+             ['did', 'followerCount', 'followingCount', 'handle', 'indexedAt', 'indexing', 'joinedAt', 'totalScrobbles']),
+    },
+    'Statistics': {
+        '': (['asOf', 'did', 'distinctArtists', 'distinctTracks', 'topAlbums', 'topArtists', 'topTracks', 'totalScrobbles', 'window'],
+             ['asOf', 'did', 'distinctArtists', 'distinctTracks', 'topAlbums', 'topArtists', 'topTracks', 'totalScrobbles', 'window']),
+        '.topArtists[]': (['artist', 'scrobbleCount'], ['artist', 'scrobbleCount']),
+        '.topTracks[]': (['artist', 'scrobbleCount', 'track'], ['artist', 'scrobbleCount', 'track']),
+        '.topAlbums[]': (['album', 'artist', 'scrobbleCount'], ['album', 'artist', 'scrobbleCount']),
+    },
+    'OAuthClientMetadata': {
+        '': (['application_type', 'client_id', 'client_name', 'client_uri', 'contacts', 'dpop_bound_access_tokens', 'grant_types',
+              'logo_uri', 'policy_uri', 'redirect_uris', 'response_types', 'scope', 'token_endpoint_auth_method', 'tos_uri'],
+             ['application_type', 'client_id', 'dpop_bound_access_tokens', 'grant_types', 'redirect_uris', 'response_types', 'scope',
+              'token_endpoint_auth_method']),
+    },
+    'ScrobblePage': {'': (['asOf', 'indexing', 'items', 'nextCursor'], ['asOf', 'indexing', 'items', 'nextCursor'])},
+    'ScrobbleResult': {'': (['scrobble'], ['scrobble'])},
+    'FollowPage': {'': (['asOf', 'indexing', 'items', 'nextCursor'], ['asOf', 'indexing', 'items', 'nextCursor'])},
+    'Export': {
+        '': (['did', 'exportedAt', 'follows', 'indexing', 'schemaVersion', 'scrobbles'],
+             ['did', 'exportedAt', 'follows', 'indexing', 'schemaVersion', 'scrobbles']),
+    },
+    'NotifyInput': {'<oneOf0>': (['uri'], ['uri']), '<oneOf1>': (['did'], ['did'])},
+    'NotifyAccepted': {'': (['state'], ['state'])},
+    'RecordStatus': {'': (['cid', 'indexing', 'reason', 'revision', 'state', 'uri'], ['indexing', 'state', 'uri'])},
+}
+# The response schema of every v1.1 operation status, from the 1.1.0 document. B14 re-binds only
+# the client metadata document (static public client -> dynamic confidential client).
+V11_REBOUND = {('GET', '/oauth/client-metadata.json', 200): 'ConfidentialClientMetadata'}
+
+
+def object_shapes(schema, path=''):
+    """Inline object shapes of one schema: {path: (properties, required)}; $ref children are separate schemas."""
+    out = {}
+    if not isinstance(schema, dict) or '$ref' in schema:
+        return out
+    if 'properties' in schema:
+        out[path] = (sorted(schema['properties']), sorted(schema.get('required', [])))
+        for name, child in schema['properties'].items():
+            out.update(object_shapes(child, f'{path}.{name}'))
+    if 'items' in schema:
+        out.update(object_shapes(schema['items'], f'{path}[]'))
+    for key in ('oneOf', 'anyOf', 'allOf'):
+        for index, child in enumerate(schema.get(key, [])):
+            if isinstance(child, dict) and 'properties' in child:
+                out.update(object_shapes(child, f'{path}<{key}{index}>'))
+    return out
+
+
+def v11_compatibility(spec):
+    """Every v1.1 schema keeps every property and its required set; v1.1 routes keep their response schemas (B14)."""
+    schemas = spec['components']['schemas']
+    for name, frozen in V11_SHAPES.items():
+        require(name in schemas, f'v1.1 compatibility: schema {name} was removed')
+        current = object_shapes(schemas[name])
+        for path, (properties, required) in frozen.items():
+            label = f'{name}{path}'
+            require(path in current, f'v1.1 compatibility: {label} is no longer an object with properties')
+            lost = sorted(set(properties) - set(current[path][0]))
+            require(not lost, f'v1.1 compatibility: {label} lost properties {lost}')
+            require(current[path][1] == required,
+                    f'v1.1 compatibility: {label} changed its required set from {required} to {current[path][1]}')
+            if path == '' and name != 'NotifyInput':
+                # Every v1.1 object stays closed; only the legacy client metadata admits extension fields.
+                require(schemas[name].get('additionalProperties') is (name == 'OAuthClientMetadata'),
+                        f'v1.1 compatibility: {name} changed additionalProperties')
+    found = operations(spec)
+    checked = 0
+    for (method, path), statuses in V11_STATUSES.items():
+        for status in statuses:
+            response = found[(method, path)]['responses'][str(status)]
+            schema = response.get('content', {}).get('application/json', {}).get('schema', {}).get('$ref', '').rsplit('/', 1)[-1]
+            expected = V11_REBOUND.get((method, path, status))
+            if expected:
+                require(schema == expected, f'v1.1 compatibility: {method} {path} {status} must respond with {expected}')
+            elif status >= 400:
+                require(schema == 'Error', f'v1.1 compatibility: {method} {path} {status} must respond with Error')
+            checked += 1
+    return len(V11_SHAPES), checked
 
 
 def section_routes(text):
-    return {(method, path.split('?', 1)[0]) for method, path in re.findall(r'\b(GET|POST|PUT|DELETE)\s+(/[^\s;|`]+)', text)}
+    return {(method, path.split('?', 1)[0]) for method, path in re.findall(r'\b(GET|POST|PUT|PATCH|DELETE)\s+(/[^\s;|`]+)', text)}
 
 
 def route_inventory(spec, mvp=None, api=None):
-    """The OpenAPI, MVP.md and API.md route sets each equal the v1.1 inventory, with the exact status matrix.
+    """MVP.md lists exactly the frozen v1.1 routes; API.md and openapi.yaml list exactly v1.1 plus v1.2, with exact status matrices.
 
     `mvp` and `api` override the document texts (the negative controls pass mutated copies).
     """
@@ -262,11 +473,12 @@ def route_inventory(spec, mvp=None, api=None):
             'route_inventory: MVP.md lost its API contract section')
     section = mvp.split('## API contract to freeze in M1', 1)[1].split('## Completion and execution rules', 1)[0]
     documented = section_routes(section)
-    fixed = {(method, path) for method, path in re.findall(r'\| (GET|POST|PUT|DELETE) `([^`]+)`', api)}
-    expected = set(EXPECTED_STATUSES)
+    fixed = {(method, path) for method, path in re.findall(r'\| (GET|POST|PUT|PATCH|DELETE) `([^`]+)`', api)}
     differences = {label: (sorted(routes - expected), sorted(expected - routes))
-                   for label, routes in [('MVP.md', documented), ('API.md', fixed), ('openapi', set(found))] if routes != expected}
-    require(not differences, 'route_inventory: route sets differ from the v1.1 inventory; ' +
+                   for label, routes, expected in [('MVP.md', documented, set(V11_STATUSES)),
+                                                   ('API.md', fixed, set(EXPECTED_STATUSES)),
+                                                   ('openapi', set(found), set(EXPECTED_STATUSES))] if routes != expected}
+    require(not differences, 'route_inventory: route sets differ from the inventory (MVP.md: v1.1; API.md and openapi: v1.1 + v1.2); ' +
             '; '.join(f'{label} extra={extra} missing={missing}' for label, (extra, missing) in differences.items()))
     ids = [operation.get('operationId') for operation in found.values()]
     require(all(ids) and len(set(ids)) == len(ids), 'route_inventory: duplicate or missing operationId')
@@ -276,14 +488,21 @@ def route_inventory(spec, mvp=None, api=None):
         expected_path_fields = set(re.findall(r'\{([^}]+)\}', key[1]))
         actual_path_fields = {p['name'] for p in params if p['in'] == 'path' and p.get('required')}
         require(expected_path_fields == actual_path_fields, f'route_inventory: missing required path field for {key}')
-    for key in NO_STORE_ROUTES:
-        header = found[key]['responses']['200'].get('headers', {}).get('Cache-Control', {})
-        require(header.get('required') is True and header.get('schema') == {'const': 'no-store'}, f'route_inventory: {key} must declare Cache-Control: no-store')
+        require((key in V12_STATUSES) == (operation.get('x-contract') == '1.2'), f'route_inventory: {key} must carry x-contract 1.2 exactly when it is a v1.2 route')
+    for method, path, status in NO_STORE_RESPONSES:
+        header = found[(method, path)]['responses'][str(status)].get('headers', {}).get('Cache-Control', {})
+        require(header.get('required') is True and header.get('schema') == {'const': 'no-store'},
+                f'route_inventory: {method} {path} {status} must declare Cache-Control: no-store')
     disposition = found[('GET', '/api/v1/users/{did}/export')]['responses']['200']['headers'].get('Content-Disposition', {})
     require(disposition.get('required') is True and disposition.get('schema') == {'const': 'attachment; filename="music-export.json"'},
             'route_inventory: export must be the music-export.json attachment (A9)')
-    retry = found[('POST', '/api/v1/notify')]['responses']['429'].get('headers', {}).get('Retry-After', {})
-    require(retry.get('required') is True, 'route_inventory: notify 429 must declare Retry-After')
+    for key in [('POST', '/api/v1/notify'), ('POST', '/api/v1/auth/start'), ('POST', '/api/v1/imports/upload')]:
+        retry = found[key]['responses']['429'].get('headers', {}).get('Retry-After', {})
+        require(retry.get('required') is True, f'route_inventory: {key} 429 must declare Retry-After')
+    for key in [('GET', '/oauth/callback'), ('GET', '/api/v1/links/lastfm/callback')]:
+        location = found[key]['responses']['303'].get('headers', {}).get('Location', {})
+        require(location.get('required') is True and 'content' not in found[key]['responses']['303'],
+                f'route_inventory: {key} 303 must declare a Location header and no body')
     return len(found)
 
 
@@ -317,6 +536,9 @@ def route_inventory_controls(spec):
         ('openapi omits POST /api/v1/notify',
          spec_with(lambda m: m['paths'].pop('/api/v1/notify')), None, None,
          "openapi extra=[] missing=[('POST', '/api/v1/notify')]"),
+        ('openapi omits v1.2 POST /api/v1/scrobbles',
+         spec_with(lambda m: m['paths'].pop('/api/v1/scrobbles')), None, None,
+         "openapi extra=[] missing=[('POST', '/api/v1/scrobbles')]"),
         ('openapi adds undocumented DELETE /api/v1/meta',
          spec_with(lambda m: m['paths']['/api/v1/meta'].update(delete={**deepcopy(meta_get), 'operationId': 'deleteMeta'})), None, None,
          "openapi extra=[('DELETE', '/api/v1/meta')] missing=[]"),
@@ -332,6 +554,9 @@ def route_inventory_controls(spec):
         ('openapi drops status 413 from POST /api/v1/notify',
          spec_with(lambda m: m['paths']['/api/v1/notify']['post']['responses'].pop('413')), None, None,
          "incorrect status matrix for ('POST', '/api/v1/notify')"),
+        ('openapi drops status 409 from POST /api/v1/scrobbles',
+         spec_with(lambda m: m['paths']['/api/v1/scrobbles']['post']['responses'].pop('409')), None, None,
+         "incorrect status matrix for ('POST', '/api/v1/scrobbles')"),
         ('MVP.md omits GET /api/v1/records/status',
          spec, replaced(mvp, '; GET /api/v1/records/status?uri=... (N2)'), None,
          "MVP.md extra=[] missing=[('GET', '/api/v1/records/status')]"),
@@ -341,6 +566,9 @@ def route_inventory_controls(spec):
         ('API.md omits GET /api/v1/users/{did}/export',
          spec, None, replaced(api, '| GET `/api/v1/users/{did}/export` |', '| `/api/v1/users/{did}/export` |'),
          "API.md extra=[] missing=[('GET', '/api/v1/users/{did}/export')]"),
+        ('API.md omits v1.2 DELETE /api/v1/account/connection',
+         spec, None, replaced(api, '| DELETE `/api/v1/account/connection` |', '| `/api/v1/account/connection` |'),
+         "API.md extra=[] missing=[('DELETE', '/api/v1/account/connection')]"),
         ('API.md adds undocumented GET /api/v1/extra',
          spec, None, api + '\n| GET `/api/v1/extra` | none | 200 |\n',
          "API.md extra=[('GET', '/api/v1/extra')] missing=[]"),
@@ -365,9 +593,22 @@ def _example_names(case):
     return [name for name in [case.get('example'), *(variant['example'] for variant in case.get('alternatives', []))] if name]
 
 
-def error_codes(cases=None, errors_ts=None):
-    """Every api/examples error envelope uses a code of packages/core/src/errors.ts, served with its DEFAULT_STATUS."""
+def _example_file(spec, name):
+    """The api/examples-relative file of a component example name."""
+    return spec['components']['examples'][name]['externalValue'][len('examples/'):]
+
+
+def load_cases():
+    return {V11_CASES: load_json(API / 'examples' / V11_CASES), V12_CASES: load_json(API / 'examples' / V12_CASES)}
+
+
+def error_codes(spec, cases=None, errors_ts=None, vocabulary=None):
+    """Every error envelope fixture uses a code errors.ts defines with its DEFAULT_STATUS, or a v1.2 code still pending there.
+
+    Returns (codes used, codes defined in errors.ts, sorted v1.2 codes errors.ts does not define yet).
+    """
     text = ERRORS_TS.read_text() if errors_ts is None else errors_ts
+    vocabulary = V12_ERROR_CODES if vocabulary is None else vocabulary
     union = re.search(r'export const ERROR_CODES = \[(.*?)\] as const;', text, re.S)
     defaults = re.search(r'export const DEFAULT_STATUS[^=]*= \{(.*?)\};', text, re.S)
     require(union is not None and defaults is not None, 'error_codes: errors.ts lost ERROR_CODES or DEFAULT_STATUS')
@@ -375,27 +616,37 @@ def error_codes(cases=None, errors_ts=None):
     statuses = {code: int(status) for code, status in re.findall(r'^\s*([a-z_]+): (\d{3}),', defaults.group(1), re.M)}
     require(codes and len(set(codes)) == len(codes), 'error_codes: ERROR_CODES is empty or repeats a code')
     require(set(codes) == set(statuses), f'error_codes: ERROR_CODES and DEFAULT_STATUS differ: {sorted(set(codes) ^ set(statuses))}')
-    cases = load_json(API / 'examples/response-cases.json') if cases is None else cases
-    used = set()
-    for case in cases:
-        for name in _example_names(case):
-            if not name.startswith('error'):
-                continue
-            code = load_json(API / 'examples' / f'{name}.json')['error']['code']
-            require(code in statuses, f'error_codes: {name}.json uses {code!r}, which errors.ts does not define')
-            require(statuses[code] == case['status'],
-                    f'error_codes: {name}.json ({code}) is served as {case["status"]} but DEFAULT_STATUS says {statuses[code]}')
-            used.add(code)
-    bound = {name for case in cases for name in _example_names(case)}
-    unbound = sorted({p.stem for p in (API / 'examples').glob('error*.json')} - bound)
+    for code, status in vocabulary.items():
+        require(code not in statuses or statuses[code] == status,
+                f'error_codes: errors.ts serves the v1.2 code {code} as {statuses.get(code)}, but the contract says {status}')
+    cases = load_cases() if cases is None else cases
+    used, pending = set(), set()
+    for inventory, entries in cases.items():
+        for case in entries:
+            for name in _example_names(case):
+                path = _example_file(spec, name) if name in spec['components']['examples'] else f'{name}.json'
+                if not Path(path).name.startswith('error'):
+                    continue
+                code = load_json(API / 'examples' / path)['error']['code']
+                expected = statuses.get(code, vocabulary.get(code))
+                require(expected is not None, f'error_codes: {path} uses {code!r}, which neither errors.ts nor the v1.2 vocabulary defines')
+                require(expected == case['status'],
+                        f'error_codes: {path} ({code}) is served as {case["status"]} but its status is {expected}')
+                used.add(code)
+                if code not in statuses:
+                    pending.add(code)
+    bound = {(_example_file(spec, name) if name in spec['components']['examples'] else f'{name}.json')
+             for entries in cases.values() for case in entries for name in _example_names(case)}
+    on_disk = {str(p.relative_to(API / 'examples')) for p in (API / 'examples').rglob('error*.json')}
+    unbound = sorted(on_disk - bound)
     require(not unbound, f'error_codes: error examples bound to no response case: {unbound}')
-    return len(used), len(codes)
+    return len(used), len(codes), sorted(pending)
 
 
-def error_code_controls():
-    """error_codes must reject an example code missing from errors.ts and a status that disagrees with DEFAULT_STATUS."""
+def error_code_controls(spec):
+    """error_codes must reject an example code nobody defines and a status that disagrees with DEFAULT_STATUS or the v1.2 table."""
     text = ERRORS_TS.read_text()
-    cases = load_json(API / 'examples/response-cases.json')
+    cases = load_cases()
 
     def replaced(needle, replacement):
         require(text.count(needle) == 1, f'error_code_controls: expected exactly one {needle!r}')
@@ -403,18 +654,26 @@ def error_code_controls():
 
     removed = replaced("  'validation_failed', //", '  //')
     removed = removed.replace('  validation_failed: 422,\n', '', 1)
+    v11 = cases[V11_CASES]
+    v12 = cases[V12_CASES]
     controls = [
-        ('validation_failed removed from errors.ts', None, removed,
-         "error-422.json uses 'validation_failed', which errors.ts does not define"),
-        ('not_ready given DEFAULT_STATUS 500', None, replaced('  not_ready: 503,', '  not_ready: 500,'),
-         'error-503.json (not_ready) is served as 503 but DEFAULT_STATUS says 500'),
+        ('validation_failed removed from errors.ts', None, removed, None,
+         "error-422.json uses 'validation_failed', which neither errors.ts nor the v1.2 vocabulary defines"),
+        ('not_ready given DEFAULT_STATUS 500', None, replaced('  not_ready: 503,', '  not_ready: 500,'), None,
+         'error-503.json (not_ready) is served as 503 but its status is 500'),
         ('error-404 bound to a 422 response case',
-         [{**case, 'status': 422} if case.get('example') == 'error-404' else case for case in cases], None,
-         'error-404.json (not_found) is served as 422 but DEFAULT_STATUS says 404'),
+         {V11_CASES: [{**case, 'status': 422} if case.get('example') == 'error-404' else case for case in v11], V12_CASES: v12}, None, None,
+         'error-404.json (not_found) is served as 422 but its status is 404'),
+        ('idempotency_conflict missing from the v1.2 vocabulary', None, None,
+         {code: status for code, status in V12_ERROR_CODES.items() if code != 'idempotency_conflict'},
+         "v1.2/error-409-idempotency.json uses 'idempotency_conflict', which neither errors.ts nor the v1.2 vocabulary defines"),
+        ('csrf_failed defined in errors.ts with status 400', None,
+         replaced("  'bad_request', //", "  'csrf_failed', //\n  'bad_request', //").replace('  bad_request: 400,\n', '  csrf_failed: 400,\n  bad_request: 400,\n', 1),
+         None, 'errors.ts serves the v1.2 code csrf_failed as 400, but the contract says 403'),
     ]
-    for label, mutated_cases, mutated_text, expected in controls:
+    for label, mutated_cases, mutated_text, vocabulary, expected in controls:
         try:
-            error_codes(cases=mutated_cases, errors_ts=mutated_text)
+            error_codes(spec, cases=mutated_cases, errors_ts=mutated_text, vocabulary=vocabulary)
         except ContractError as error:
             require(expected in str(error), f'error_codes rejected {label} without reporting {expected!r}: {error}')
             continue
@@ -422,45 +681,112 @@ def error_code_controls():
     return len(controls)
 
 
-def dropped_routes(spec):
-    """ADR 0004 §9.3: the auth, server write, operation and account routes and their schemas are absent."""
+def not_restored(spec):
+    """ADR 0005 §5.7: v1.0's GET /api/v1/account/export and DELETE /api/v1/account/local-data stay dropped (A9, A10 stay)."""
     found = operations(spec)
-    present = sorted(DROPPED_ROUTES & set(found))
-    require(not present, f'dropped_routes: dropped routes present: {present}')
-    stale = sorted(path for path in spec['paths'] if path.startswith(DROPPED_PREFIXES))
-    require(not stale, f'dropped_routes: dropped path prefixes present: {stale}')
-    writes = sorted(key for key in found if key[0] != 'GET' and key != ('POST', '/api/v1/notify'))
-    require(not writes, f'dropped_routes: unexpected non-GET routes (the server receives no writes, A2): {writes}')
-    schemas = sorted(DROPPED_SCHEMAS & set(spec['components']['schemas']))
-    require(not schemas, f'dropped_routes: dropped schemas present: {schemas}')
-    parameters = sorted(DROPPED_PARAMETERS & set(spec['components'].get('parameters', {})))
-    require(not parameters, f'dropped_routes: dropped parameters present: {parameters}')
-    require(not spec['components'].get('securitySchemes'), 'dropped_routes: session/CSRF security schemes must be removed')
+    present = sorted(NOT_RESTORED_ROUTES & set(found))
+    require(not present, f'not_restored: dropped v1.0 routes present: {present}')
+    schemas = sorted(NOT_RESTORED_SCHEMAS & set(spec['components']['schemas']))
+    require(not schemas, f'not_restored: dropped schemas present: {schemas}')
     text = json.dumps(spec)
-    for marker in ['#/components/schemas/Accepted"', '#/components/schemas/Operation"', 'atmusic_session', 'X-CSRF-Token', 'Idempotency-Key']:
-        require(marker not in text, f'dropped_routes: stale reference {marker!r}')
-    return len(DROPPED_ROUTES)
+    for marker in ['/api/v1/account/export', '/api/v1/account/local-data', '#/components/schemas/AccountExport"']:
+        require(marker not in text, f'not_restored: stale reference {marker!r}')
+    return len(NOT_RESTORED_ROUTES)
 
 
 def public_access(spec):
-    """Every v1.1 route is public; no route reads a session, cookie, CSRF token or Origin header."""
+    """No v1.1 read route reads a session, cookie, CSRF token or Origin header; the OAuth documents are the confidential client."""
     found = operations(spec)
-    for key, operation in found.items():
+    for key in V11_STATUSES:
+        operation = found[key]
         require(operation.get('security') == [], f'public_access: {key} must declare security: []')
         require(operation.get('x-auth-mode') == 'public', f'public_access: {key} must be x-auth-mode public')
-        stale = sorted(SESSION_EXTENSIONS & set(operation))
-        require(not stale, f'public_access: {key} keeps session extensions {stale}')
         headers = [p['name'] for p in [dereference(spec, p) for p in operation.get('parameters', [])] if p['in'] in ('header', 'cookie')]
         require(not headers, f'public_access: {key} reads header/cookie parameters {headers}')
+        require(not any(status in (401, 403) for status in V11_STATUSES[key]), f'public_access: {key} must never answer 401 or 403')
     metadata = found[('GET', '/oauth/client-metadata.json')]
-    require(metadata.get('x-served-by') == 'static-assets', 'public_access: client metadata must be documented as a static asset (A3)')
-    schema = spec['components']['schemas']['OAuthClientMetadata']
-    require('application_type' in schema['required'] and schema['properties']['application_type'] == {'const': 'web'},
-            'public_access: client metadata must require application_type web')
-    require(schema['properties']['token_endpoint_auth_method'] == {'const': 'none'}, 'public_access: browser public client uses token_endpoint_auth_method none')
-    require(schema['properties']['redirect_uris']['items'].get('pattern') == '^https://[^/?#]+/oauth/callback$',
-            'public_access: the only redirect is https://<host>/oauth/callback')
-    return len(found)
+    require('x-served-by' not in metadata, 'public_access: client metadata is served by the router, not as a static asset (ADR 0005 §5.3)')
+    cache = metadata['responses']['200'].get('headers', {}).get('Cache-Control', {})
+    require(cache.get('required') is True and cache.get('schema') == {'const': 'public, max-age=300'},
+            'public_access: client metadata must declare Cache-Control: public, max-age=300')
+    schema = spec['components']['schemas']['ConfidentialClientMetadata']
+    properties = schema['properties']
+    require(schema.get('additionalProperties') is False and set(schema['required']) == set(properties),
+            'public_access: the confidential metadata document is exact: closed, every field required')
+    require(properties['application_type'] == {'const': 'web'} and properties['token_endpoint_auth_method'] == {'const': 'private_key_jwt'}
+            and properties['token_endpoint_auth_signing_alg'] == {'const': 'ES256'} and properties['dpop_bound_access_tokens'] == {'const': True},
+            'public_access: client metadata must be the web confidential client: private_key_jwt with ES256 and DPoP-bound tokens')
+    require(properties['redirect_uris']['items'].get('pattern') == '^https://[^/?#]+/oauth/callback$'
+            and properties['redirect_uris'].get('maxItems') == 1, 'public_access: the only redirect is https://<host>/oauth/callback')
+    require(properties['jwks_uri'].get('pattern') == '^https://[^/?#]+/oauth/jwks\\.json$', 'public_access: jwks_uri is https://<host>/oauth/jwks.json')
+    jwks = found[('GET', '/oauth/jwks.json')]
+    require(jwks.get('security') == [] and jwks['responses']['200']['content']['application/json']['schema'] == {'$ref': '#/components/schemas/Jwks'},
+            'public_access: /oauth/jwks.json is public and serves Jwks')
+    jwk = spec['components']['schemas']['Jwk']
+    require(jwk.get('additionalProperties') is False and 'd' not in jwk['properties'] and jwk['properties']['alg'] == {'const': 'ES256'},
+            'public_access: a published JWK is closed, ES256 and never carries d')
+    legacy = spec['components']['schemas']['OAuthClientMetadata']
+    require(legacy['properties']['token_endpoint_auth_method'] == {'const': 'none'} and
+            not any(dereference(spec, r.get('content', {}).get('application/json', {}).get('schema', {})) is legacy
+                    for op in found.values() for r in op['responses'].values()),
+            'public_access: the legacy public-client schema is bound to no operation')
+    return len(V11_STATUSES)
+
+
+def session_access(spec):
+    """Every v1.2 cookie route declares the session cookie; unsafe ones also CSRF and Origin, with 401/403; writes are gated."""
+    found = operations(spec)
+    require(spec['components'].get('securitySchemes', {}).keys() == SESSION_SCHEMES.keys() and
+            all({k: v for k, v in spec['components']['securitySchemes'][name].items() if k != 'description'} == scheme
+                for name, scheme in SESSION_SCHEMES.items()),
+            'session_access: securitySchemes must be exactly SessionCookie (__Host-atmusic_session) and CsrfToken (X-CSRF-Token)')
+    counts = {}
+    for key in V12_STATUSES:
+        operation = found[key]
+        mode = operation.get('x-auth-mode')
+        statuses = V12_STATUSES[key]
+        params = {(p['in'], p['name']): p for p in [dereference(spec, p) for p in operation.get('parameters', [])]}
+        responses = operation['responses']
+
+        def codes(status):
+            return set(responses.get(str(status), {}).get('x-error-codes', []))
+
+        if mode == 'session':
+            require(operation.get('security') == [{'SessionCookie': []}] and key[0] == 'GET',
+                    f'session_access: {key} must be a GET with security [SessionCookie]')
+            require(401 in statuses and 'unauthenticated' in codes(401), f'session_access: {key} must answer 401 unauthenticated')
+        elif mode == 'session+csrf':
+            require(operation.get('security') == [{'SessionCookie': [], 'CsrfToken': []}] and key[0] != 'GET',
+                    f'session_access: {key} must be an unsafe method with security [SessionCookie + CsrfToken]')
+            require(params.get(('header', 'Origin'), {}).get('required') is True, f'session_access: {key} must require the Origin header')
+            require('unauthenticated' in codes(401) and 'csrf_failed' in codes(403), f'session_access: {key} must answer 401 unauthenticated and 403 csrf_failed')
+        elif mode == 'origin':
+            require(key == ('POST', '/api/v1/auth/start') and operation.get('security') == [] and
+                    params.get(('header', 'Origin'), {}).get('required') is True and 'csrf_failed' in codes(403),
+                    f'session_access: only auth/start is Origin-checked without a session, with 403 csrf_failed')
+        elif mode == 'oauth-binding':
+            require(key == ('GET', '/oauth/callback') and params.get(('cookie', '__Host-atmusic_oauth'), {}).get('required') is True,
+                    'session_access: only /oauth/callback is bound to the __Host-atmusic_oauth cookie')
+        elif mode == 'public':
+            require(key == ('GET', '/oauth/jwks.json') and operation.get('security') == [], f'session_access: {key} may not be public')
+        else:
+            raise ContractError(f'session_access: {key} has unknown x-auth-mode {mode!r}')
+        counts[mode] = counts.get(mode, 0) + 1
+        if key in WRITE_ROUTES:
+            require(202 in statuses and responses['202']['content']['application/json']['schema'] == {'$ref': '#/components/schemas/Accepted'}
+                    and 'publication_disabled' in codes(503), f'session_access: write {key} must answer 202 Accepted and 503 publication_disabled')
+    for (method, path, status), required in REQUIRED_ERROR_CODES.items():
+        declared = set(found[(method, path)]['responses'][str(status)].get('x-error-codes', []))
+        require(required <= declared, f'session_access: {method} {path} {status} must declare error codes {sorted(required - declared)}')
+    scrobble = found[('POST', '/api/v1/scrobbles')]
+    key_param = [dereference(spec, p) for p in scrobble['parameters'] if dereference(spec, p)['name'] == 'Idempotency-Key']
+    require(key_param and key_param[0]['in'] == 'header' and key_param[0]['required'] is True and
+            key_param[0]['schema'] == {'$ref': '#/components/schemas/IdempotencyKey'},
+            'session_access: POST /api/v1/scrobbles must require the Idempotency-Key header')
+    states = spec['components']['schemas']['Operation']['properties']['state']['enum']
+    require(states == ['queued', 'running', 'succeeded', 'failed', 'blocked', 'cancelled'],
+            'session_access: Operation.state must be queued, running, succeeded, failed, blocked or cancelled')
+    return counts
 
 
 def query_bounds(spec, validator_type, checker):
@@ -494,6 +820,29 @@ def query_bounds(spec, validator_type, checker):
             'query_bounds: records/status requires an AT URI')
     body = found[('POST', '/api/v1/notify')]['requestBody']
     require(body.get('required') is True and body.get('x-maxBodyBytes') == NOTIFY_MAX_BODY_BYTES, 'query_bounds: notify body must be required and capped at 2 KiB (N1)')
+    # v1.2: body caps (ADR 0005 §3.6), the Idempotency-Key syntax and the required query fields.
+    for key in V12_STATUSES:
+        body = found[key].get('requestBody')
+        if body is None:
+            continue
+        cap = UPLOAD_MAX_BODY_BYTES if key == ('POST', '/api/v1/imports/upload') else V12_MAX_BODY_BYTES
+        require(body.get('x-maxBodyBytes') == cap, f'query_bounds: {key} body must be capped at {cap} bytes')
+        require(413 in V12_STATUSES[key], f'query_bounds: {key} takes a body and must answer 413')
+        count += 1
+    upload = found[('POST', '/api/v1/imports/upload')]['requestBody']
+    require(upload.get('x-rawBody') is True and set(upload['content']) == {'application/octet-stream'},
+            'query_bounds: the import upload is a raw application/octet-stream body')
+    key_schema = {'$ref': '#/components/schemas/IdempotencyKey'}
+    for value, valid in [('k' * 128, True), ('k' * 129, False), ('', False), ('a b', False), ('a/b', False), ('Az09._~-', True)]:
+        errors = list(schema_validator(spec, key_schema, validator_type, checker).iter_errors(value))
+        require(not bool(errors) == valid, f'query_bounds: wrong Idempotency-Key acceptance {value!r}')
+        count += 1
+    love = {dereference(spec, p)['name']: dereference(spec, p) for p in found[('DELETE', '/api/v1/loves')]['parameters']}
+    require(love['artist'].get('required') is True and love['track'].get('required') is True,
+            'query_bounds: DELETE /api/v1/loves requires artist and track')
+    source = {dereference(spec, p)['name']: dereference(spec, p) for p in found[('POST', '/api/v1/imports/upload')]['parameters']}['source']
+    require(source.get('required') is True and source['schema'] == {'enum': ['lastfm_json', 'listenbrainz_zip']},
+            'query_bounds: an upload names source lastfm_json or listenbrainz_zip')
     return count
 
 
@@ -505,74 +854,111 @@ def fixture_value(spec, name):
     return load_json(path)
 
 
-def response_examples(spec, validator_type, checker, validated):
+def response_examples(spec, validator_type, checker, validated, cases=None):
+    """Every documented (method, path, status) has one case across the v1.1 and v1.2 inventories, bound to its fixture."""
     found = operations(spec)
-    cases = load_json(API / 'examples/response-cases.json')
+    cases = load_cases() if cases is None else cases
     expected = {(method, path, int(status)) for (method, path), operation in found.items() for status in operation['responses']}
+    inventories = {V11_CASES: {(m, p, s) for (m, p), statuses in V11_STATUSES.items() for s in statuses},
+                   V12_CASES: {(m, p, s) for (m, p), statuses in V12_STATUSES.items() for s in statuses} | set(LEGACY_CASES)}
     seen = set()
-    negative_count = 0
-    for case in cases:
-        key = (case['method'], case['path'], case['status'])
-        require(key not in seen, f'response_examples: duplicate case {key}')
-        require(key in expected, f'response_examples: undocumented response case {key}')
-        seen.add(key)
-        response = dereference(spec, found[key[:2]]['responses'][str(key[2])])
-        headers = case.get('headers', {})
-        for name, header in response.get('headers', {}).items():
-            header = dereference(spec, header)
-            require(not header.get('required') or name in headers, f'response_examples: missing {name} for {key}')
-            if name in headers:
-                validate(headers[name], header['schema'], spec, validator_type, checker, f'{key} {name}')
-        if 'content' not in response:
-            require(case.get('body', 'missing') is None and 'example' not in case, f'response_examples: {key} must have no response body')
-            continue
-        media = response['content']['application/json']
-        declared_example = media['examples']['fixture']['$ref'].rsplit('/', 1)[1]
-        require(case.get('example') == declared_example, f'response_examples: fixture not bound to OpenAPI example for {key}')
-        value = fixture_value(spec, case['example'])
-        validate(value, media['schema'], spec, validator_type, checker, str(key))
-        validated.add(case['example'])
-        for name, header in response.get('headers', {}).items():
-            required_codes = header.get('x-required-for-error-codes', [])
-            if value.get('error', {}).get('code') in required_codes:
-                require(name in headers, f'response_examples: missing conditional {name} for {key}')
-        # Deliberately replace a required field with a boolean. Every response
-        # must reject this type change, including nested error envelopes.
-        corrupt = deepcopy(value)
-        first = next(iter(dereference(spec, media['schema'])['required']))
-        corrupt[first] = False
-        require(bool(list(schema_validator(spec, media['schema'], validator_type, checker).iter_errors(corrupt))), f'response_examples: wrong field type accepted for {key}')
-        negative_count += 1
-        # Alternative outcomes can share a status and envelope. Check every
-        # declared variant, not just the inventory's primary case.
-        for example_label, example_ref in media['examples'].items():
-            alternative = example_ref['$ref'].rsplit('/', 1)[1]
-            if alternative == case['example']:
+    negative_count = total = 0
+    for inventory, entries in cases.items():
+        keys = set()
+        for case in entries:
+            key = (case['method'], case['path'], case['status'])
+            require(key not in keys, f'response_examples: duplicate case {key} in {inventory}')
+            keys.add(key)
+            total += 1
+            if inventory == V11_CASES and key in LEGACY_CASES:
+                # The SPA still decodes the static asset until N5-01; it is not this route's 1.2 payload.
+                validate(fixture_value(spec, case['example']), {'$ref': '#/components/schemas/' + LEGACY_CASES[key]},
+                         spec, validator_type, checker, f'{key} legacy')
+                validated.add(case['example'])
                 continue
-            value = fixture_value(spec, alternative)
-            validate(value, media['schema'], spec, validator_type, checker, f'{key} {example_label}')
-            validated.add(alternative)
-            variant = next((variant for variant in case.get('alternatives', []) if variant['example'] == alternative), None)
-            require(variant is not None, f'response_examples: alternative fixture inventory missing for {key} {alternative}')
-            corrupt = deepcopy(value)
-            corrupt[first] = False
-            require(bool(list(schema_validator(spec, media['schema'], validator_type, checker).iter_errors(corrupt))), f'response_examples: alternative wrong field type accepted for {key}')
-            negative_count += 1
+            require(key in expected, f'response_examples: undocumented response case {key}')
+            seen.add(key)
+            negative_count += _check_case(spec, validator_type, checker, validated, found, case, key)
+        require(keys == inventories[inventory],
+                f'response_examples: {inventory} must hold exactly its contract\'s cases; extra={sorted(keys - inventories[inventory])} '
+                f'missing={sorted(inventories[inventory] - keys)}')
     require(seen == expected, f'response_examples: missing statuses {sorted(expected - seen)}')
     # Also validate the declared request examples, rather than assuming success
-    # response coverage makes POST bodies valid, and prove the request schema is closed.
+    # response coverage makes request bodies valid, and prove the request schema is closed.
     request_count = 0
     for key, operation in found.items():
-        if 'requestBody' in operation:
-            media = operation['requestBody']['content']['application/json']
-            name = media['examples']['fixture']['$ref'].rsplit('/', 1)[1]
-            value = fixture_value(spec, name)
-            validate(value, media['schema'], spec, validator_type, checker, f'{key} request')
-            validated.add(name)
-            corrupt = {**value, 'unexpectedField': True}
-            require(bool(list(schema_validator(spec, media['schema'], validator_type, checker).iter_errors(corrupt))), f'response_examples: unknown request field accepted for {key}')
-            request_count += 1
-    return len(cases), negative_count, request_count
+        if 'requestBody' not in operation:
+            continue
+        if operation['requestBody'].get('x-rawBody'):
+            continue  # a raw upload has no JSON request schema (query_bounds checks its cap and media type)
+        media = operation['requestBody']['content']['application/json']
+        name = media['examples']['fixture']['$ref'].rsplit('/', 1)[1]
+        value = fixture_value(spec, name)
+        validate(value, media['schema'], spec, validator_type, checker, f'{key} request')
+        validated.add(name)
+        corrupt = {**value, 'unexpectedField': True}
+        require(bool(list(schema_validator(spec, media['schema'], validator_type, checker).iter_errors(corrupt))), f'response_examples: unknown request field accepted for {key}')
+        request_count += 1
+    return total, negative_count, request_count
+
+
+def _check_case(spec, validator_type, checker, validated, found, case, key):
+    response = dereference(spec, found[key[:2]]['responses'][str(key[2])])
+    headers = case.get('headers', {})
+    for name, header in response.get('headers', {}).items():
+        header = dereference(spec, header)
+        require(not header.get('required') or name in headers, f'response_examples: missing {name} for {key}')
+        if name in headers:
+            validate(headers[name], header['schema'], spec, validator_type, checker, f'{key} {name}')
+    if 'content' not in response:
+        require(case.get('body', 'missing') is None and 'example' not in case, f'response_examples: {key} must have no response body')
+        return 0
+    media = response['content']['application/json']
+    declared_example = media['examples']['fixture']['$ref'].rsplit('/', 1)[1]
+    require(case.get('example') == declared_example, f'response_examples: fixture not bound to OpenAPI example for {key}')
+    allowed = response.get('x-error-codes')
+    require(key[2] < 400 or key[:2] not in V12_STATUSES or allowed, f'response_examples: v1.2 error response {key} must declare x-error-codes')
+    value = fixture_value(spec, case['example'])
+    validate(value, media['schema'], spec, validator_type, checker, str(key))
+    validated.add(case['example'])
+    fixture_codes = set()
+    if allowed is not None:
+        require(value['error']['code'] in allowed, f'response_examples: {key} fixture code {value["error"]["code"]} is not in x-error-codes {allowed}')
+        fixture_codes.add(value['error']['code'])
+    envelope = value.get('error') if isinstance(value.get('error'), dict) else {}
+    for name, header in response.get('headers', {}).items():
+        required_codes = header.get('x-required-for-error-codes', [])
+        if envelope.get('code') in required_codes:
+            require(name in headers, f'response_examples: missing conditional {name} for {key}')
+    # Deliberately replace a required field with a boolean. Every response
+    # must reject this type change, including nested error envelopes.
+    corrupt = deepcopy(value)
+    first = next(iter(dereference(spec, media['schema'])['required']))
+    corrupt[first] = False
+    require(bool(list(schema_validator(spec, media['schema'], validator_type, checker).iter_errors(corrupt))), f'response_examples: wrong field type accepted for {key}')
+    negative = 1
+    # Alternative outcomes can share a status and envelope. Check every
+    # declared variant, not just the inventory's primary case.
+    for example_label, example_ref in media['examples'].items():
+        alternative = example_ref['$ref'].rsplit('/', 1)[1]
+        if alternative == case['example']:
+            continue
+        value = fixture_value(spec, alternative)
+        validate(value, media['schema'], spec, validator_type, checker, f'{key} {example_label}')
+        validated.add(alternative)
+        variant = next((variant for variant in case.get('alternatives', []) if variant['example'] == alternative), None)
+        require(variant is not None, f'response_examples: alternative fixture inventory missing for {key} {alternative}')
+        if allowed is not None:
+            require(value['error']['code'] in allowed, f'response_examples: {key} {example_label} code {value["error"]["code"]} is not in x-error-codes {allowed}')
+            fixture_codes.add(value['error']['code'])
+        corrupt = deepcopy(value)
+        corrupt[first] = False
+        require(bool(list(schema_validator(spec, media['schema'], validator_type, checker).iter_errors(corrupt))), f'response_examples: alternative wrong field type accepted for {key}')
+        negative += 1
+    if allowed is not None:
+        unbound = sorted(code for code in allowed if code in V12_ERROR_CODES and code not in fixture_codes)
+        require(not unbound, f'response_examples: {key} declares v1.2 error codes without a fixture: {unbound}')
+    return negative
 
 
 def query_examples(spec, validator_type, checker, validated, override=None):
@@ -599,7 +985,7 @@ def query_examples(spec, validator_type, checker, validated, override=None):
 
 
 def component_examples(spec, validator_type, checker, validated):
-    """Validate examples that no operation references through their declared x-schema (the SPA form input)."""
+    """Validate examples that no operation response references through their declared x-schema (for example the legacy metadata)."""
     count = 0
     for name, example in spec['components']['examples'].items():
         if 'x-schema' in example:
@@ -610,14 +996,18 @@ def component_examples(spec, validator_type, checker, validated):
 
 
 def example_inventory(spec, validated, files=None):
-    """Every api/examples payload is a declared component example, and every component example was validated."""
+    """Every api/examples payload (top level and v1.2/) is a declared component example, and every component example was validated."""
     declared = {}
     for name, example in spec['components']['examples'].items():
         external = example.get('externalValue', '')
-        require(external.startswith('examples/') and '/' not in external[len('examples/'):], f'example_inventory: {name} must live directly in api/examples')
-        declared[external[len('examples/'):]] = name
-    files = set(files) if files is not None else {p.name for p in (API / 'examples').iterdir() if p.is_file()}
-    payloads = files - INVENTORY_FILES
+        relative = external[len('examples/'):]
+        require(external.startswith('examples/') and (relative.count('/') == 0 or (relative.startswith('v1.2/') and relative.count('/') == 1)),
+                f'example_inventory: {name} must live directly in api/examples or api/examples/v1.2')
+        require(relative.startswith('v1.2/') == name.startswith('v1.2-'), f'example_inventory: {name} and its file {relative} disagree on v1.2')
+        declared[relative] = name
+    if files is None:
+        files = {str(p.relative_to(API / 'examples')) for p in (API / 'examples').rglob('*') if p.is_file()}
+    payloads = set(files) - INVENTORY_FILES
     require(payloads == set(declared), f'example_inventory: undeclared files {sorted(payloads - set(declared))}, missing files {sorted(set(declared) - payloads)}')
     unvalidated = sorted(set(declared.values()) - validated)
     require(not unvalidated, f'example_inventory: examples never validated against a component schema: {unvalidated}')
@@ -638,11 +1028,26 @@ def schema_cases(spec, validator_type, checker):
         accepted += case['valid']
         rejected += not case['valid']
     require(accepted > 0 and rejected > 0, 'schema_cases: positive and negative coverage required')
+    v12 = [case for case in cases if case['name'].startswith('v12_')]
+    require(any(c['valid'] for c in v12) and any(not c['valid'] for c in v12), 'schema_cases: v1.2 positive and negative coverage required')
     return accepted, rejected
 
 
-LEXICON_TYPES = {'string', 'integer', 'boolean'}
+LEXICON_TYPES = {'string', 'integer', 'boolean', 'array'}
 LEXICON_STRING_FORMATS = {'datetime', 'did', 'at-uri', 'handle', 'nsid', 'cid', 'uri', 'language', 'tid', 'record-key', 'at-identifier'}
+# The four required v1 scrobble fields and the frozen v1 property definitions (ADR 0005 §6.1, §6.2, B13).
+SCROBBLE_REQUIRED = ['artist', 'track', 'listenedAt', 'createdAt']
+SCROBBLE_V1_PROPERTIES = {
+    'artist': {'type': 'string', 'minLength': 1, 'maxLength': 1024},
+    'track': {'type': 'string', 'minLength': 1, 'maxLength': 1024},
+    'album': {'type': 'string', 'minLength': 1, 'maxLength': 1024},
+    'listenedAt': {'type': 'string', 'format': 'datetime'},
+    'createdAt': {'type': 'string', 'format': 'datetime'},
+    'durationSeconds': {'type': 'integer', 'minimum': 1, 'maximum': 86400},
+    'recordingMbid': {'type': 'string'},
+}
+SCROBBLE_V12_OPTIONAL = {'albumArtist', 'trackNumber', 'artistMbids', 'releaseMbid', 'releaseGroupMbid', 'isrc', 'submissionClient', 'musicService'}
+CONSTRAINTS = ('type', 'format', 'minLength', 'maxLength', 'minimum', 'maximum', 'enum', 'const', 'items')
 
 
 def check_lexicon(document, label):
@@ -661,6 +1066,11 @@ def check_lexicon(document, label):
     require(len(set(required)) == len(required) and set(required) <= set(record['properties']), f'{label}: required fields must be declared once')
     for name, field in record['properties'].items():
         require(field.get('type') in LEXICON_TYPES, f'{label}: {name} has unsupported type {field.get("type")!r}')
+        if field['type'] == 'array':
+            items = field.get('items', {})
+            require(isinstance(items, dict) and items.get('type') in LEXICON_TYPES - {'array'},
+                    f'{label}: {name} must be an array of scalars')
+            require(isinstance(field.get('maxLength'), int), f'{label}: {name} must bound its length')
         if 'format' in field:
             require(field['type'] == 'string' and field['format'] in LEXICON_STRING_FORMATS, f'{label}: {name} has invalid format')
         if 'enum' in field:
@@ -684,6 +1094,15 @@ def validate_record(main, value):
             return f'{name} is not a string'
         if field['type'] == 'integer' and not (isinstance(item, int) and not isinstance(item, bool)):
             return f'{name} is not an integer'
+        if field['type'] == 'integer' and not (field.get('minimum', item) <= item <= field.get('maximum', item)):
+            return f'{name} is out of range'
+        if field['type'] == 'array':
+            if not isinstance(item, list) or not all(isinstance(v, str) for v in item):
+                return f'{name} is not an array of strings'
+            if len(item) > field['maxLength']:
+                return f'{name} has more than {field["maxLength"]} items'
+        if field['type'] == 'string' and len(item.encode('utf-8')) > field.get('maxLength', len(item.encode('utf-8'))):
+            return f'{name} is too long'
         if 'enum' in field and item not in field['enum']:
             return f'{name} is not one of {field["enum"]}'
         if field.get('format') == 'datetime':
@@ -696,8 +1115,30 @@ def validate_record(main, value):
     return None
 
 
-def lexicons(override=None):
-    """All lexicons share the fixture prefix; settings is `<prefix>.settings` with key literal:self (A10)."""
+def additive_lexicon(published, current, label):
+    """B13 after the freeze point: same id and key, same required set, and every published field kept with no tighter constraint."""
+    require(current['id'] == published['id'], f'{label}: id changed from the published {published["id"]}')
+    old, new = published['defs']['main'], current['defs']['main']
+    require(new['key'] == old['key'], f'{label}: record key changed from the published {old["key"]}')
+    require(sorted(new['record'].get('required', [])) == sorted(old['record'].get('required', [])),
+            f'{label}: required fields changed from the published {sorted(old["record"].get("required", []))}')
+    for name, field in old['record']['properties'].items():
+        require(name in new['record']['properties'], f'{label}: published field {name} was removed')
+        now = new['record']['properties'][name]
+        for constraint in ('type', 'format', 'enum', 'const', 'items'):
+            require(now.get(constraint) == field.get(constraint), f'{label}: {name}.{constraint} changed from the published value')
+        for constraint in ('maxLength', 'maximum'):
+            if constraint in field:
+                require(now.get(constraint, float('inf')) >= field[constraint], f'{label}: {name}.{constraint} tightened')
+        for constraint in ('minLength', 'minimum'):
+            if constraint in field:
+                require(now.get(constraint, float('-inf')) <= field[constraint], f'{label}: {name}.{constraint} tightened')
+            else:
+                require(constraint not in now, f'{label}: {name}.{constraint} added')
+
+
+def lexicons(override=None, published=None):
+    """All lexicons share the fixture prefix: settings (literal:self), love (tid) and an additive-only scrobble."""
     documents = override or {path.stem: load_json(path) for path in sorted((ROOT / 'lexicons').glob('*.json'))}
     require(set(documents) == LEXICON_COLLECTIONS, f'lexicons: expected {sorted(LEXICON_COLLECTIONS)}, found {sorted(documents)}')
     mains = {}
@@ -713,67 +1154,191 @@ def lexicons(override=None):
             'lexicons/settings.json: indexing must be the enum enabled/disabled')
     require(record['properties']['createdAt'] == {**record['properties']['createdAt'], 'type': 'string', 'format': 'datetime'},
             'lexicons/settings.json: createdAt must be a datetime string')
+    # scrobble: the four v1 fields stay the only required ones, v1 definitions are frozen, the §6.2 fields are optional.
+    scrobble = mains['scrobble']['record']
+    require(mains['scrobble']['key'] == 'tid', 'lexicons/scrobble.json: key must be tid')
+    require(scrobble.get('required') == SCROBBLE_REQUIRED,
+            f'lexicons/scrobble.json: required must stay exactly {SCROBBLE_REQUIRED}; every other field is optional (B13)')
+    for name, frozen in SCROBBLE_V1_PROPERTIES.items():
+        field = scrobble['properties'].get(name, {})
+        require({k: field[k] for k in CONSTRAINTS if k in field} == frozen, f'lexicons/scrobble.json: v1 field {name} changed (B13)')
+    require(set(scrobble['properties']) == set(SCROBBLE_V1_PROPERTIES) | SCROBBLE_V12_OPTIONAL,
+            f'lexicons/scrobble.json: properties must be the v1 fields plus {sorted(SCROBBLE_V12_OPTIONAL)}')
+    # love (§6.3): key tid; artist, track and createdAt required; album and recordingMbid optional; scrobble limits.
+    love = mains['love']
+    require(love['key'] == 'tid', 'lexicons/love.json: key must be tid')
+    require(sorted(love['record'].get('required', [])) == ['artist', 'createdAt', 'track'] and
+            set(love['record']['properties']) == {'artist', 'track', 'album', 'recordingMbid', 'createdAt'},
+            'lexicons/love.json: artist, track and createdAt required; album and recordingMbid optional; nothing else')
+    for name in ('artist', 'track', 'album', 'recordingMbid', 'createdAt'):
+        field = love['record']['properties'][name]
+        require({k: field[k] for k in CONSTRAINTS if k in field} == SCROBBLE_V1_PROPERTIES[name],
+                f'lexicons/love.json: {name} must use the scrobble limits')
+    # After the freeze point (first production record) the last published copies bind (B13).
+    published_dir = ROOT / 'lexicons/published'
+    published = published if published is not None else (
+        {path.stem: load_json(path) for path in sorted(published_dir.glob('*.json'))} if published_dir.is_dir() else {})
+    for name, document in published.items():
+        require(name in documents, f'lexicons: published lexicon {name} was removed')
+        additive_lexicon(document, documents[name], f'lexicons/{name}.json')
     count = 0
-    for value, valid in [
-        ({'$type': f'{LEXICON_PREFIX}.settings', 'indexing': 'disabled', 'createdAt': '2026-01-15T12:00:00Z'}, True),
-        ({'$type': f'{LEXICON_PREFIX}.settings', 'indexing': 'enabled', 'createdAt': '2026-01-15T12:00:00.123Z'}, True),
-        ({'$type': f'{LEXICON_PREFIX}.settings', 'indexing': 'paused', 'createdAt': '2026-01-15T12:00:00Z'}, False),
-        ({'$type': f'{LEXICON_PREFIX}.settings', 'indexing': 'disabled'}, False),
-        ({'$type': f'{LEXICON_PREFIX}.settings', 'createdAt': '2026-01-15T12:00:00Z'}, False),
-        ({'$type': f'{LEXICON_PREFIX}.settings', 'indexing': 'disabled', 'createdAt': '2026-01-15 12:00:00'}, False),
-        ({'$type': f'{LEXICON_PREFIX}.settings', 'indexing': False, 'createdAt': '2026-01-15T12:00:00Z'}, False),
+    t = '2026-01-15T12:00:00Z'
+    for main, value, valid in [
+        (settings, {'$type': f'{LEXICON_PREFIX}.settings', 'indexing': 'disabled', 'createdAt': t}, True),
+        (settings, {'$type': f'{LEXICON_PREFIX}.settings', 'indexing': 'enabled', 'createdAt': '2026-01-15T12:00:00.123Z'}, True),
+        (settings, {'$type': f'{LEXICON_PREFIX}.settings', 'indexing': 'paused', 'createdAt': t}, False),
+        (settings, {'$type': f'{LEXICON_PREFIX}.settings', 'indexing': 'disabled'}, False),
+        (settings, {'$type': f'{LEXICON_PREFIX}.settings', 'createdAt': t}, False),
+        (settings, {'$type': f'{LEXICON_PREFIX}.settings', 'indexing': 'disabled', 'createdAt': '2026-01-15 12:00:00'}, False),
+        (settings, {'$type': f'{LEXICON_PREFIX}.settings', 'indexing': False, 'createdAt': t}, False),
+        (love, {'$type': f'{LEXICON_PREFIX}.love', 'artist': 'Björk', 'track': 'Jóga', 'createdAt': t}, True),
+        (love, {'$type': f'{LEXICON_PREFIX}.love', 'artist': 'Björk', 'track': 'Jóga', 'album': 'Homogenic',
+                'recordingMbid': '13f12616-51d7-4023-a70b-a288ced4693a', 'createdAt': t}, True),
+        (love, {'$type': f'{LEXICON_PREFIX}.love', 'track': 'Jóga', 'createdAt': t}, False),
+        (love, {'$type': f'{LEXICON_PREFIX}.love', 'artist': 'Björk', 'track': 'Jóga'}, False),
+        (mains['scrobble'], {'artist': 'Björk', 'track': 'Jóga', 'listenedAt': t, 'createdAt': t}, True),
+        (mains['scrobble'], {'artist': 'Björk', 'track': 'Jóga', 'listenedAt': t, 'createdAt': t, 'albumArtist': 'Björk',
+                             'trackNumber': 4, 'artistMbids': ['13f12616-51d7-4023-a70b-a288ced4693a'], 'isrc': 'GBAYE9700245'}, True),
+        (mains['scrobble'], {'artist': 'Björk', 'track': 'Jóga', 'listenedAt': t, 'createdAt': t, 'trackNumber': 10000}, False),
+        (mains['scrobble'], {'artist': 'Björk', 'track': 'Jóga', 'listenedAt': t, 'createdAt': t, 'artistMbids': ['x'] * 11}, False),
+        (mains['scrobble'], {'artist': 'Björk', 'track': 'Jóga', 'listenedAt': t}, False),
     ]:
-        problem = validate_record(settings, value)
-        require((problem is None) == valid, f'lexicons/settings.json: record {value} expected valid={valid}, got {problem}')
+        problem = validate_record(main, value)
+        require((problem is None) == valid, f'lexicons: record {value} expected valid={valid}, got {problem}')
         count += 1
-    return len(documents), count
+    return len(documents), count, len(published)
+
+
+def _lexicon_documents():
+    return {p.stem: load_json(p) for p in (ROOT / 'lexicons').glob('*.json')}
+
+
+def compatibility_controls(spec):
+    """A lexicon that adds a required scrobble field, or a v1.1 response schema that loses a property, is rejected."""
+    documents = _lexicon_documents()
+
+    def scrobble_with(mutate):
+        mutated = deepcopy(documents)
+        mutate(mutated['scrobble']['defs']['main']['record'])
+        return mutated
+
+    def spec_with(mutate):
+        mutated = deepcopy(spec)
+        mutate(mutated['components']['schemas'])
+        return mutated
+
+    published_scrobble = deepcopy(documents['scrobble'])
+    controls = [
+        ('scrobble lexicon requires albumArtist', lambda: lexicons(scrobble_with(lambda r: r['required'].append('albumArtist'))),
+         "lexicons/scrobble.json: required must stay exactly ['artist', 'track', 'listenedAt', 'createdAt']"),
+        ('scrobble lexicon requires a new field isrc2', lambda: lexicons(scrobble_with(
+            lambda r: (r['properties'].update(isrc2={'type': 'string'}), r['required'].append('isrc2')))),
+         "lexicons/scrobble.json: required must stay exactly"),
+        ('scrobble lexicon tightens artist', lambda: lexicons(scrobble_with(lambda r: r['properties']['artist'].update(maxLength=512))),
+         'lexicons/scrobble.json: v1 field artist changed (B13)'),
+        ('published scrobble gains a required field',
+         lambda: additive_lexicon(published_scrobble, scrobble_with(lambda r: r['required'].append('albumArtist'))['scrobble'],
+                                  'lexicons/scrobble.json'),
+         'lexicons/scrobble.json: required fields changed from the published'),
+        ('published scrobble tightens trackNumber',
+         lambda: additive_lexicon(published_scrobble, scrobble_with(lambda r: r['properties']['trackNumber'].update(maximum=999))['scrobble'],
+                                  'lexicons/scrobble.json'),
+         'lexicons/scrobble.json: trackNumber.maximum tightened'),
+        ('love lexicon with optional artist', lambda: lexicons({**documents, 'love': _mutated_love()}),
+         'lexicons/love.json: artist, track and createdAt required'),
+        ('Scrobble loses album', lambda: v11_compatibility(spec_with(lambda s: s['Scrobble']['properties'].pop('album'))),
+         "v1.1 compatibility: Scrobble lost properties ['album']"),
+        ('Profile loses followerCount', lambda: v11_compatibility(spec_with(
+            lambda s: (s['Profile']['properties'].pop('followerCount'), s['Profile']['required'].remove('followerCount')))),
+         "v1.1 compatibility: Profile lost properties ['followerCount']"),
+        ('Statistics.topAlbums loses album', lambda: v11_compatibility(spec_with(
+            lambda s: s['Statistics']['properties']['topAlbums']['items']['properties'].pop('album'))),
+         "v1.1 compatibility: Statistics.topAlbums[] lost properties ['album']"),
+        ('Scrobble makes albumArtist required', lambda: v11_compatibility(spec_with(lambda s: s['Scrobble']['required'].append('albumArtist'))),
+         'v1.1 compatibility: Scrobble changed its required set'),
+        ('Error envelope loses requestId', lambda: v11_compatibility(spec_with(
+            lambda s: (s['Error']['properties']['error']['properties'].pop('requestId'),
+                       s['Error']['properties']['error']['required'].remove('requestId')))),
+         "v1.1 compatibility: Error.error lost properties ['requestId']"),
+    ]
+    for label, run, expected in controls:
+        try:
+            run()
+        except ContractError as error:
+            require(expected in str(error), f'compatibility control {label} was rejected without reporting {expected!r}: {error}')
+            continue
+        raise ContractError('compatibility control did not reject ' + label)
+    return [label for label, _, _ in controls]
 
 
 def prove_failure_detection(spec, validator_type, checker):
     """Each check must reject a deliberately broken copy; repository files are never altered."""
     missing_route = deepcopy(spec)
     del missing_route['paths']['/health/live']
-    readded_auth = deepcopy(spec)
-    readded_auth['paths']['/api/v1/auth/session'] = {'get': deepcopy(spec['paths']['/api/v1/meta']['get'])}
-    readded_post = deepcopy(spec)
-    readded_post['paths']['/api/v1/scrobbles'] = {'post': deepcopy(spec['paths']['/api/v1/notify']['post'])}
-    readded_operation = deepcopy(spec)
-    readded_operation['paths']['/api/v1/operations/{id}'] = {'get': deepcopy(spec['paths']['/api/v1/meta']['get'])}
-    readded_account = deepcopy(spec)
-    readded_account['paths']['/api/v1/account/export'] = {'get': deepcopy(spec['paths']['/api/v1/users/{did}/export']['get'])}
+    readded_export = deepcopy(spec)
+    readded_export['paths']['/api/v1/account/export'] = {'get': deepcopy(spec['paths']['/api/v1/users/{did}/export']['get'])}
     readded_schema = deepcopy(spec)
-    readded_schema['components']['schemas']['Accepted'] = {'type': 'object'}
+    readded_schema['components']['schemas']['AccountExport'] = {'type': 'object'}
     session_feed = deepcopy(spec)
     session_feed['paths']['/api/v1/feed']['get']['security'] = [{}, {'SessionCookie': []}]
     legacy_callback = deepcopy(spec)
-    legacy_callback['components']['schemas']['OAuthClientMetadata']['properties']['redirect_uris']['items']['pattern'] = '^https://'
+    legacy_callback['components']['schemas']['ConfidentialClientMetadata']['properties']['redirect_uris']['items']['pattern'] = '^https://'
+    public_metadata = deepcopy(spec)
+    public_metadata['components']['schemas']['ConfidentialClientMetadata']['properties']['token_endpoint_auth_method'] = {'const': 'none'}
+    private_jwk = deepcopy(spec)
+    private_jwk['components']['schemas']['Jwk']['properties']['d'] = {'type': 'string'}
+    no_csrf = deepcopy(spec)
+    no_csrf['paths']['/api/v1/loves']['put']['security'] = [{'SessionCookie': []}]
+    no_key = deepcopy(spec)
+    no_key['paths']['/api/v1/scrobbles']['post']['parameters'] = [p for p in no_key['paths']['/api/v1/scrobbles']['post']['parameters']
+                                                                  if p != {'$ref': '#/components/parameters/IdempotencyKey'}]
+    ungated = deepcopy(spec)
+    ungated['paths']['/api/v1/follows/{did}']['put']['responses']['503']['x-error-codes'] = ['not_ready']
+    no_cancelled = deepcopy(spec)
+    no_cancelled['components']['schemas']['Operation']['properties']['state']['enum'].remove('cancelled')
     for label, mutated, check in [
             ('removed route', missing_route, route_inventory),
-            ('re-added /api/v1/auth/session', readded_auth, dropped_routes),
-            ('re-added POST /api/v1/scrobbles', readded_post, dropped_routes),
-            ('re-added /api/v1/operations/{id}', readded_operation, dropped_routes),
-            ('re-added /api/v1/account/export', readded_account, dropped_routes),
-            ('re-added Accepted schema', readded_schema, dropped_routes),
+            ('re-added /api/v1/account/export', readded_export, not_restored),
+            ('re-added AccountExport schema', readded_schema, not_restored),
             ('session-protected following feed', session_feed, public_access),
-            ('non-callback OAuth redirect', legacy_callback, public_access)]:
+            ('non-callback OAuth redirect', legacy_callback, public_access),
+            ('public-client metadata', public_metadata, public_access),
+            ('JWK with a private member', private_jwk, public_access),
+            ('PUT /api/v1/loves without CSRF', no_csrf, session_access),
+            ('POST /api/v1/scrobbles without Idempotency-Key', no_key, session_access),
+            ('ungated follow write', ungated, session_access),
+            ('Operation without cancelled', no_cancelled, session_access)]:
         try:
             check(mutated)
         except ContractError:
             continue
         raise ContractError('Failure detection did not reject ' + label)
+    cases = load_cases()
     for label, run in [
             ('following feed without viewer', lambda: query_examples(spec, validator_type, checker, set(), override={'scope': 'following', 'limit': 20})),
-            ('stale accepted.json example', lambda: example_inventory(spec, set(spec['components']['examples']),
-                                                                    files={p.name for p in (API / 'examples').iterdir()} | {'accepted.json'})),
-            ('settings lexicon with tid key', lambda: lexicons({**{p.stem: load_json(p) for p in (ROOT / 'lexicons').glob('*.json')},
-                                                                'settings': _mutated_settings('key', 'tid')})),
-            ('settings lexicon with open indexing value', lambda: lexicons({**{p.stem: load_json(p) for p in (ROOT / 'lexicons').glob('*.json')},
-                                                                           'settings': _mutated_settings('enum', None)}))]:
+            ('stale top-level example file', lambda: example_inventory(spec, set(spec['components']['examples']),
+                                                                     files={str(p.relative_to(API / 'examples')) for p in (API / 'examples').rglob('*') if p.is_file()} | {'stale.json'})),
+            ('stale v1.2 example file', lambda: example_inventory(spec, set(spec['components']['examples']),
+                                                                files={str(p.relative_to(API / 'examples')) for p in (API / 'examples').rglob('*') if p.is_file()} | {'v1.2/stale.json'})),
+            ('v1.2 case moved into the v1.1 inventory', lambda: response_examples(spec, validator_type, checker, set(), cases={
+                V11_CASES: cases[V11_CASES] + [cases[V12_CASES][-1]], V12_CASES: cases[V12_CASES][:-1]})),
+            ('missing v1.2 case', lambda: response_examples(spec, validator_type, checker, set(), cases={
+                V11_CASES: cases[V11_CASES], V12_CASES: [c for c in cases[V12_CASES] if (c['method'], c['path'], c['status']) != ('POST', '/api/v1/imports/upload', 507)]})),
+            ('signin_not_allowed fixture dropped', lambda: response_examples(spec_without_alternative(spec, '/api/v1/auth/start', 'post', '403', 'signin'),
+                                                                             validator_type, checker, set(), cases=cases)),
+            ('settings lexicon with tid key', lambda: lexicons({**_lexicon_documents(), 'settings': _mutated_settings('key', 'tid')})),
+            ('settings lexicon with open indexing value', lambda: lexicons({**_lexicon_documents(), 'settings': _mutated_settings('enum', None)}))]:
         try:
             run()
         except ContractError:
             continue
         raise ContractError('Failure detection did not reject ' + label)
+
+
+def spec_without_alternative(spec, path, method, status, label):
+    mutated = deepcopy(spec)
+    mutated['paths'][path][method]['responses'][status]['content']['application/json']['examples'].pop(label)
+    return mutated
 
 
 def _mutated_settings(field, value):
@@ -782,6 +1347,12 @@ def _mutated_settings(field, value):
         document['defs']['main']['key'] = value
     else:
         del document['defs']['main']['record']['properties']['indexing']['enum']
+    return document
+
+
+def _mutated_love():
+    document = load_json(ROOT / 'lexicons/love.json')
+    document['defs']['main']['record']['required'].remove('artist')
     return document
 
 
@@ -803,33 +1374,49 @@ def main():
     print(f'PASS openapi_schema: OpenAPI 3.1.0, info.version {CONTRACT_VERSION}, {len(spec["components"]["schemas"])} Draft 2020-12 schemas; pinned offline dependencies')
     count = route_inventory(spec)
     rejected = route_inventory_controls(spec)
-    print(f'PASS route_inventory: exact MVP/API route and status matrices ({count} methods on {len(spec["paths"])} paths, '
-          f'equal in openapi.yaml, MVP.md and API.md; {len(rejected)} mutations rejected: {"; ".join(rejected)})')
-    count = dropped_routes(spec)
-    print(f'PASS dropped paths (/api/v1/auth/*, POST /api/v1/scrobbles, /api/v1/operations/{{id}}, /api/v1/account/*) are absent: '
-          f'{count} ADR 0004 §9.3 routes, their schemas, parameters and security schemes')
+    print(f'PASS route_inventory: exact MVP/API route and status matrices ({count} methods on {len(spec["paths"])} paths: '
+          f'{len(V11_STATUSES)} v1.1 in MVP.md, API.md and openapi.yaml, {len(V12_STATUSES)} v1.2 in API.md and openapi.yaml; '
+          f'{len(rejected)} mutations rejected: {"; ".join(rejected)})')
+    count = not_restored(spec)
+    print(f'PASS not_restored: the {count} v1.0 account export and local-data routes and the AccountExport schema stay absent (ADR 0005 §5.7)')
     count = public_access(spec)
-    print(f'PASS public_access: {count} routes declare no security; client metadata is a static asset with application_type web and /oauth/callback')
+    print(f'PASS public_access: {count} v1.1 routes declare no security and never answer 401/403; client metadata is the dynamic '
+          'private_key_jwt document with /oauth/callback and /oauth/jwks.json, and published JWKs never carry d')
+    modes = session_access(spec)
+    print(f'PASS session_access: {sum(modes.values())} v1.2 routes ({", ".join(f"{n} {m}" for m, n in sorted(modes.items()))}); '
+          f'{len(WRITE_ROUTES)} writes answer 202 Accepted and 503 publication_disabled; {len(REQUIRED_ERROR_CODES)} named error responses declared')
     count = query_bounds(spec, validator_type, checker)
-    print(f'PASS query_bounds: {count} limit/viewer boundaries; defaults, cursor, window, scope, viewer, record URI and 2 KiB notify body')
+    print(f'PASS query_bounds: {count} limit/viewer/body/Idempotency-Key boundaries; defaults, cursor, window, scope, viewer, record URI, '
+          '2 KiB notify body, 64 KiB v1.2 bodies and the 64 MiB raw upload')
     validated = set()
     count, negative, requests = response_examples(spec, validator_type, checker, validated)
     queries = query_examples(spec, validator_type, checker, validated)
     components = component_examples(spec, validator_type, checker, validated)
     files = example_inventory(spec, validated)
-    print(f'PASS all api/examples validate against openapi {CONTRACT_VERSION} components: {files} fixtures; {count} response/status cases, '
-          f'{negative} rejected wrong-type responses, {requests} request, {queries} query and {components} component fixtures')
-    accepted, rejected = schema_cases(spec, validator_type, checker)
-    print(f'PASS schema_cases: {accepted} accepted and {rejected} rejected UTF-8/scalar, timestamp, identifier, notify, record-status, export and client-metadata cases')
-    used, defined = error_codes()
-    controls = error_code_controls()
-    print(f'PASS error_codes: the {used} codes of api/examples error envelopes are defined in packages/core/src/errors.ts '
-          f'with the status each is served with ({defined} codes in all; {controls} mutations rejected)')
-    documents, records = lexicons()
-    print(f'PASS lexicons/settings.json is a valid lexicon with literal:self key: {documents} lexicons share {LEXICON_PREFIX}; {records} settings record cases')
+    print(f'PASS all api/examples validate against openapi {CONTRACT_VERSION} components: {files} fixtures; {count} response/status cases '
+          f'({V11_CASES} and {V12_CASES}), {negative} rejected wrong-type responses, {requests} request, {queries} query and {components} component fixtures')
+    accepted, rejected_cases = schema_cases(spec, validator_type, checker)
+    print(f'PASS schema_cases: {accepted} accepted and {rejected_cases} rejected UTF-8/scalar, timestamp, identifier, notify, record-status, export, '
+          'client-metadata and v1.2 (optional scrobble fields, operations, sessions, accounts, credentials, links, imports, JWKS) cases')
+    used, defined, pending = error_codes(spec)
+    controls = error_code_controls(spec)
+    print(f'PASS error_codes: the {used} codes of api/examples error envelopes are defined in packages/core/src/errors.ts or the v1.2 '
+          f'vocabulary with the status each is served with ({defined} codes in errors.ts; {len(pending)} v1.2 codes pending there: '
+          f'{", ".join(pending) or "none"}; {controls} mutations rejected)')
+    documents, records, published = lexicons()
+    print(f'PASS lexicons: {documents} lexicons share {LEXICON_PREFIX}; settings literal:self, love tid with artist, track and createdAt '
+          f'required, scrobble requires exactly the four v1 fields with the §6.2 fields optional; {records} record cases; '
+          f'{published or "no"} published copies (freeze point {"reached" if published else "not reached"})')
+    shapes, statuses = v11_compatibility(spec)
+    print(f'PASS v1.1 compatibility: {shapes} v1.1 schemas keep every property and required set; {statuses} v1.1 route statuses keep their response schemas')
     prove_failure_detection(spec, validator_type, checker)
-    print('PASS failure_detection: removed route, re-added dropped routes/schema, session feed, non-callback redirect, viewerless following query, '
-          'stale example file and broken settings lexicon rejected without changing repository files')
+    print('PASS failure_detection: removed route, re-added v1.0 export, session feed, non-callback redirect, public-client metadata, private JWK, '
+          'CSRF-less write, keyless scrobble POST, ungated write, missing cancelled state, viewerless following query, stale example files, '
+          'misfiled or missing v1.2 cases, unbound error code and broken settings lexicon rejected without changing repository files')
+    labels = compatibility_controls(spec)
+    print(f'PASS fails when a lexicon adds a required scrobble field or a v1.1 response schema loses a property: {len(labels)} mutations rejected: '
+          f'{"; ".join(labels)}')
+    print(f'PASS passes with openapi {CONTRACT_VERSION}, the new examples and lexicons/love.json: every check above passed')
     return 0
 
 

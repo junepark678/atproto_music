@@ -1,0 +1,20 @@
+{
+  "items": [
+    {
+      "id": "im1",
+      "source": "listenbrainz_api",
+      "remoteUser": "alice",
+      "state": "done",
+      "fetched": 3,
+      "staged": 3,
+      "duplicates": 0,
+      "invalid": 0,
+      "written": 3,
+      "failed": 0,
+      "etaSeconds": null,
+      "error": null,
+      "createdAt": "2026-01-15T12:00:00Z",
+      "updatedAt": "2026-01-15T12:00:00Z"
+    }
+  ]
+}

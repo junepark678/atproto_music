@@ -1,23 +1,32 @@
 #!/usr/bin/env python3
-"""Validate the 258-case TypeScript case map (ADR 0004 §10.4).
+"""Validate the 258-case TypeScript case map (ADR 0004 §10.4, ADR 0005 §15.3 and B19).
 
 docs/verification/ts-case-map.json must map every named regression case in
 docs/planning/github-plan.json, exactly once, either to TypeScript test ids
 (`<file> › <name>`: a primary `target` plus optional `also` ids that together
-assert the case outcome) or to `retired:<A#|D>` with a reason. Every referenced
-test id is declared in docs/planning/workers-waves.json or listed, under its
-owning package, in the "Required wave amendments" section of
-docs/planning/AMENDMENTS-workers.md. A retirement must cite an ADR 0004 §9
-amendment (A1–A20) or the §9.3 dropped list (D), the leaf's issue amendment
-must list that id, and its reason may not claim coverage by a test (a covered
-case is mapped, not retired). A `note` is informational: one that states an
-obligation ("must", "should", ...) is rejected, because nothing enforces it;
-an obligation is a test id instead.
+assert the case outcome) or to `retired:<id>` with a reason. Every referenced
+test id is declared in docs/planning/workers-waves.json or
+docs/planning/node-waves.json, or listed, under its owning package, in the
+"Required wave amendments" section of docs/planning/AMENDMENTS-workers.md.
+
+A retirement cites an ADR 0004 §9 amendment (A1–A20), the §9.3 dropped list
+(D) or an ADR 0005 B amendment (B1–B20). An id that
+docs/planning/AMENDMENTS-node.md lists under "Superseded ADR 0004 amendments"
+is rejected with the superseding B id; any other A or D id must be listed on
+the leaf's AMENDMENTS-workers.md section; `retired:B<n>` is accepted only when
+the `### B<n>` section of AMENDMENTS-node.md names the case in its list of
+retired cases. A reason may not claim coverage by a test (a covered case is
+mapped, not retired). A `note` is informational: one that states an obligation
+("must", "should", ...) is rejected, because nothing enforces it; an
+obligation is a test id instead.
 
 With --check-tests, every required wave amendment must have been applied to
 workers-waves.json, and every referenced test file must exist and contain the
-test name. That final check is enforced by W7-01; until the TypeScript suites
-exist it fails by design.
+test name. With --check-tests --node-wave <n> (the per-wave interim gate,
+ADR 0005 §15.3), a target declared only by a node-waves package of a wave later
+than n is reported as `pending (wave <m>, <package>)` and does not fail; every
+other target must exist. Without --node-wave every target must exist
+(node-backend.sh, N8-01).
 """
 
 from __future__ import annotations
@@ -31,8 +40,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_CASES = 258
 SEPARATOR = ' › '
-ALLOWED_RETIREMENTS = {f'A{number}' for number in range(1, 21)} | {'D'}
-RETIRED = re.compile(r'retired:(A(?:[1-9]|1[0-9]|20)|D)')
+RETIRED = re.compile(r'retired:(A(?:[1-9]|1[0-9]|20)|D|B(?:[1-9]|1[0-9]|20))')
 ENTRY_KEYS = {'case', 'target', 'also', 'reason', 'note'}
 AMENDMENT_IDS = re.compile(r'\b(A(?:[1-9]|1[0-9]|20)|N[1-4]|D)\b')
 WAVE_SECTION = '## Required wave amendments'
@@ -40,6 +48,12 @@ WAVE_PACKAGE = re.compile(r'^\*\*(W\d-\d\d)\*\*')
 WAVE_TEST = re.compile(r'^- `([^`]+)`')
 OBLIGATION = re.compile(r'\b(must|shall|should|needs? to|has to|have to|required to|obligat\w*)\b', re.IGNORECASE)
 COVERAGE_CLAIM = re.compile(r'covered by|' + SEPARATOR + r'|\.(test|spec)\.tsx?\b', re.IGNORECASE)
+# ADR 0005 §15.3: the ADR 0004 ids that ADR 0005 supersedes. AMENDMENTS-node.md must list each one.
+REQUIRED_SUPERSEDED = ('A1', 'A2', 'A3', 'A4', 'A5', 'A11', 'A12', 'A15', 'A16', 'A18', 'A19', 'D')
+SUPERSEDED_SECTION = '## Superseded ADR 0004 amendments'
+SUPERSEDED_ROW = re.compile(r'^\| `(A(?:[1-9]|1[0-9]|20)|D)` \| `(B(?:[1-9]|1[0-9]|20))` \|')
+B_HEADING = re.compile(r'^### (B(?:[1-9]|1[0-9]|20)) ')
+B_RETIRED_CASE = re.compile(r'^- `(M\d+\.\d+\.\d+/[A-Za-z0-9_]+)`')
 
 
 class CaseMapError(Exception):
@@ -86,6 +100,16 @@ def wave_test_ids(waves):
     return {test: package['id'] for wave in waves for package in wave['packages'] for test in package['tests']}
 
 
+def node_wave_test_ids(node_waves):
+    """Map every test id declared in node-waves.json to (wave number, owning package id)."""
+    declared = {}
+    for wave in node_waves:
+        for package in wave['packages']:
+            for test in package['tests']:
+                declared.setdefault(test, (int(wave['wave']), package['id']))
+    return declared
+
+
 def wave_amendments(text):
     """Parse `## Required wave amendments`: `**W#-##**` package lines, then `- `<test id>`` items."""
     tests, problems = {}, []
@@ -128,6 +152,40 @@ def amendment_sections(text):
     return sections
 
 
+def node_amendments(text):
+    """Parse AMENDMENTS-node.md: ({superseded ADR 0004 id: B id}, {B id: cases its section retires}, problems)."""
+    superseded, sections, problems = {}, {}, []
+    in_superseded = False
+    current = None
+    for line in text.splitlines():
+        if line.startswith('## '):
+            in_superseded = line.strip() == SUPERSEDED_SECTION
+            current = None
+            continue
+        if line.startswith('### '):
+            heading = B_HEADING.match(line)
+            current = heading.group(1) if heading else None
+            if current is not None:
+                if current in sections:
+                    problems.append(f'AMENDMENTS-node.md: {current} has two sections')
+                sections.setdefault(current, set())
+            continue
+        if in_superseded:
+            row = SUPERSEDED_ROW.match(line)
+            if row:
+                if row.group(1) in superseded:
+                    problems.append(f'AMENDMENTS-node.md: superseded id {row.group(1)} is listed twice')
+                superseded[row.group(1)] = row.group(2)
+        elif current is not None:
+            item = B_RETIRED_CASE.match(line)
+            if item:
+                sections[current].add(item.group(1))
+    for amendment in REQUIRED_SUPERSEDED:
+        if amendment not in superseded:
+            problems.append(f'AMENDMENTS-node.md: the superseded list lacks {amendment} (ADR 0005 §15.3)')
+    return superseded, sections, problems
+
+
 def test_location(target):
     """Return (path, name, is_test_file) for a mapped test id."""
     prefix, name = target.split(SEPARATOR, 1)
@@ -160,13 +218,25 @@ def check_test_exists(root, target):
     return None
 
 
-def validate(case_map, plan, waves, amendments_text, root=ROOT, check_tests=False):
-    """Validate a parsed case map; return a summary or raise CaseMapError listing every problem."""
+def validate(case_map, plan, waves, amendments_text, root=ROOT, check_tests=False,
+             node_waves=None, node_amendments_text=None, node_wave=None):
+    """Validate a parsed case map; return a summary or raise CaseMapError listing every problem.
+
+    `node_waves` and `node_amendments_text` default to the committed node-waves.json and
+    AMENDMENTS-node.md. `node_wave` (with `check_tests`) makes later-wave node targets pending.
+    """
+    if node_waves is None:
+        node_waves = load_json(ROOT / 'docs/planning/node-waves.json')
+    if node_amendments_text is None:
+        node_amendments_text = (ROOT / 'docs/planning/AMENDMENTS-node.md').read_text(encoding='utf-8')
     expected = plan_case_ids(plan)
     known_tests = wave_test_ids(waves)
+    node_tests = node_wave_test_ids(node_waves)
     packages = {package['id'] for wave in waves for package in wave['packages']}
     sections = amendment_sections(amendments_text)
-    pending_tests, problems = wave_amendments(amendments_text)
+    superseded, b_sections, problems = node_amendments(node_amendments_text)
+    pending_tests, amendment_problems = wave_amendments(amendments_text)
+    problems += amendment_problems
     for test, package in sorted(pending_tests.items()):
         if package not in packages:
             problems.append(f'required wave amendment {test!r}: unknown package {package}')
@@ -179,6 +249,7 @@ def validate(case_map, plan, waves, amendments_text, root=ROOT, check_tests=Fals
     seen = set()
     referenced = set()
     retired = mapped = awaiting = 0
+    pending_targets = []
     for index, entry in enumerate(case_map['cases']):
         if not isinstance(entry, dict) or not isinstance(entry.get('case'), str) or not isinstance(entry.get('target'), str):
             problems.append(f'entry {index}: needs string case and target')
@@ -203,7 +274,7 @@ def validate(case_map, plan, waves, amendments_text, root=ROOT, check_tests=Fals
             retired += 1
             match = RETIRED.fullmatch(target)
             if not match:
-                problems.append(f'{case}: retired entry without amendment id ({target!r}); use retired:<A1–A20|D>')
+                problems.append(f'{case}: retired entry without amendment id ({target!r}); use retired:<A1–A20|D|B1–B20>')
                 continue
             if not (isinstance(entry.get('reason'), str) and entry['reason'].strip()):
                 problems.append(f'{case}: retired entry needs a nonempty reason')
@@ -211,9 +282,18 @@ def validate(case_map, plan, waves, amendments_text, root=ROOT, check_tests=Fals
                 problems.append(f'{case}: retired reason claims test coverage; a covered case is mapped, not retired')
             if 'also' in entry:
                 problems.append(f'{case}: also is only for mapped entries')
+            amendment = match.group(1)
             leaf = case.split('/', 1)[0]
-            if match.group(1) not in sections.get(leaf, set()):
-                problems.append(f'{case}: AMENDMENTS-workers.md section {leaf} does not list amendment id {match.group(1)}')
+            if amendment in superseded:
+                problems.append(f'{case}: {target} cites ADR 0004 amendment {amendment}, superseded by {superseded[amendment]} '
+                                '(ADR 0005 B19); map the case to a declared test or retire it under a B amendment that names it')
+            elif amendment.startswith('B'):
+                if amendment not in b_sections:
+                    problems.append(f'{case}: {target} but AMENDMENTS-node.md has no {amendment} section')
+                elif case not in b_sections[amendment]:
+                    problems.append(f'{case}: {target} but the {amendment} section of AMENDMENTS-node.md does not name {case}')
+            elif amendment not in sections.get(leaf, set()):
+                problems.append(f'{case}: AMENDMENTS-workers.md section {leaf} does not list amendment id {amendment}')
         else:
             if 'reason' in entry:
                 problems.append(f'{case}: reason is only for retired entries')
@@ -229,10 +309,17 @@ def validate(case_map, plan, waves, amendments_text, root=ROOT, check_tests=Fals
                 referenced.add(test)
                 if SEPARATOR not in test:
                     problems.append(f'{case}: {test!r} is not a test id (<file> › <name>)')
-                elif test not in known_tests and test not in pending_tests:
-                    problems.append(f'{case}: {test!r} is neither declared in workers-waves.json '
-                                    'nor listed under Required wave amendments')
-                elif check_tests:
+                    continue
+                if test not in known_tests and test not in node_tests and test not in pending_tests:
+                    problems.append(f'{case}: {test!r} is declared in neither workers-waves.json nor node-waves.json '
+                                    'and is not listed under Required wave amendments')
+                    continue
+                if check_tests:
+                    later = (node_wave is not None and test in node_tests and test not in known_tests
+                             and test not in pending_tests and node_tests[test][0] > node_wave)
+                    if later:
+                        pending_targets.append((case, test, *node_tests[test]))
+                        continue
                     missing = check_test_exists(Path(root), test)
                     if missing:
                         problems.append(f'{case}: {missing}')
@@ -251,31 +338,49 @@ def validate(case_map, plan, waves, amendments_text, root=ROOT, check_tests=Fals
     if problems:
         raise CaseMapError(problems)
     return {'cases': len(seen), 'mapped': mapped, 'awaiting': awaiting, 'retired': retired,
-            'amendments': sum(1 for test in pending_tests if test not in known_tests)}
+            'amendments': sum(1 for test in pending_tests if test not in known_tests),
+            'pending': [{'case': case, 'target': test, 'wave': wave, 'package': package}
+                        for case, test, wave, package in pending_targets]}
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split('\n\n', 1)[0])
     parser.add_argument('--check-tests', action='store_true', help='also require every mapped test file and name to exist')
+    parser.add_argument('--node-wave', type=int, metavar='N',
+                        help='with --check-tests: report targets of node-waves packages in waves after N as pending')
     parser.add_argument('--root', type=Path, default=ROOT, help='repository root for --check-tests')
     parser.add_argument('--map', type=Path, default=ROOT / 'docs/verification/ts-case-map.json')
     parser.add_argument('--plan', type=Path, default=ROOT / 'docs/planning/github-plan.json')
     parser.add_argument('--waves', type=Path, default=ROOT / 'docs/planning/workers-waves.json')
+    parser.add_argument('--node-waves', type=Path, default=ROOT / 'docs/planning/node-waves.json')
     parser.add_argument('--amendments', type=Path, default=ROOT / 'docs/planning/AMENDMENTS-workers.md')
+    parser.add_argument('--node-amendments', type=Path, default=ROOT / 'docs/planning/AMENDMENTS-node.md')
     args = parser.parse_args(argv)
+    if args.node_wave is not None and (not args.check_tests or args.node_wave < 0):
+        parser.error('--node-wave takes a wave number >= 0 and requires --check-tests')
     try:
         amendments = args.amendments.read_text(encoding='utf-8')
+        node_amendments_text = args.node_amendments.read_text(encoding='utf-8')
     except OSError as error:
         print(f'FAIL case map: {error}', file=sys.stderr)
         return 1
     try:
         summary = validate(load_json(args.map), load_json(args.plan), load_json(args.waves), amendments,
-                           root=args.root, check_tests=args.check_tests)
+                           root=args.root, check_tests=args.check_tests, node_waves=load_json(args.node_waves),
+                           node_amendments_text=node_amendments_text, node_wave=args.node_wave)
     except CaseMapError as error:
         for problem in error.problems:
             print(f'FAIL case map: {problem}', file=sys.stderr)
         return 1
-    suffix = '; every referenced test file and name exists' if args.check_tests else ''
+    for item in summary['pending']:
+        print(f"PENDING case map: {item['case']}: {item['target']!r} pending (wave {item['wave']}, {item['package']})")
+    if args.check_tests and args.node_wave is not None:
+        suffix = (f"; every referenced test file and name of node waves <= {args.node_wave} exists; "
+                  f"{len(summary['pending'])} targets of later node waves pending")
+    elif args.check_tests:
+        suffix = '; every referenced test file and name exists'
+    else:
+        suffix = ''
     print(f"PASS case map: {summary['cases']} unique cases ({summary['mapped']} mapped to declared wave test ids, "
           f"{summary['awaiting']} awaiting {summary['amendments']} required wave amendment tests, "
           f"{summary['retired']} retired with amendment ids){suffix}")
