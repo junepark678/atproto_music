@@ -136,13 +136,14 @@ describe('now playing', () => {
       });
       expect(count(db)).toBe(1);
 
-      // Last.fm uses the duration only within 30–5,400 s; ListenBrainz uses any stored duration.
+      // Last.fm uses the duration only within 30–5,400 s; ListenBrainz uses any duration (§8.3),
+      // rounded half-up to whole seconds, and not capped at the column CHECK.
       expect([20, 30, 5400, 6000, null].map((d) => nowPlayingTtlSeconds('lastfm', d))).toEqual([
         600, 30, 5400, 600, 600,
       ]);
-      expect([20, 6000, null, 0, 90_000].map((d) => nowPlayingTtlSeconds('listenbrainz', d))).toEqual([
-        20, 6000, 600, 600, 600,
-      ]);
+      expect(
+        [20, 6000, null, 0, -5, 90_000, 215.347, 215.5, 0.2].map((d) => nowPlayingTtlSeconds('listenbrainz', d)),
+      ).toEqual([20, 6000, 600, 600, 600, 90_000, 215, 216, 1]);
 
       // share_now_playing = 0 hides the entry from others; the owner still sees it.
       db.run('UPDATE accounts SET share_now_playing = 0 WHERE did = ?', ALICE);
@@ -153,6 +154,94 @@ describe('now playing', () => {
       // An inactive owner shows nothing either.
       db.run('UPDATE users SET active = 0 WHERE did = ?', ALICE);
       expect(currentNowPlaying(m, ALICE)).toBeNull();
+    });
+  });
+
+  it('a ListenBrainz duration_ms-only or over-a-day duration sets the TTL; a refresh moves duration_seconds with the expiry', async () => {
+    await withMigratedDb((db) => {
+      seedAccount(db, ALICE, 'alice');
+      const clock = fixedClock();
+      const m = { db, clock };
+
+      // duration_ms 215,347 arrives as 215.347 s: 215 s, stored and used for the expiry.
+      const fractional = upsertNowPlaying(m, {
+        did: ALICE,
+        artist: 'Radiohead',
+        track: 'Reckoner',
+        durationSeconds: 215_347 / 1000,
+        source: 'listenbrainz',
+      });
+      expect(fractional.outcome).toBe('stored');
+      expect(rowOf(db, ALICE)).toMatchObject({ duration_seconds: 215, started_at_ms: T0, expires_at_ms: T0 + 215_000 });
+      expect(fractional.row).toEqual(rowOf(db, ALICE));
+
+      // Longer than the column CHECK allows: the TTL is still the duration, the column stays NULL.
+      clock.advance(1_000);
+      const long = upsertNowPlaying(m, {
+        did: ALICE,
+        artist: 'Björk',
+        track: 'Jóga',
+        durationSeconds: 90_000,
+        source: 'listenbrainz',
+      });
+      expect(long.outcome).toBe('stored');
+      expect(rowOf(db, ALICE)).toMatchObject({
+        duration_seconds: null,
+        started_at_ms: T0 + 1_000,
+        expires_at_ms: T0 + 1_000 + 90_000_000,
+      });
+      clock.set(new Date(T0 + 1_000 + 90_000_000 - 1).toISOString());
+      expect(currentNowPlaying(m, ALICE)?.track).toBe('Jóga');
+      clock.set(new Date(T0 + 1_000 + 90_000_000).toISOString());
+      expect(currentNowPlaying(m, ALICE)).toBeNull();
+
+      // Last.fm refresh: duration_seconds follows the new submission together with the expiry.
+      clock.set(new Date(T0).toISOString());
+      db.run('DELETE FROM now_playing');
+      upsertNowPlaying(m, {
+        did: ALICE,
+        artist: 'Radiohead',
+        track: 'Reckoner',
+        durationSeconds: 290,
+        source: 'lastfm',
+      });
+      clock.advance(10_000);
+      const shorter = upsertNowPlaying(m, {
+        did: ALICE,
+        artist: 'Radiohead',
+        track: 'Reckoner',
+        durationSeconds: 120,
+        source: 'lastfm',
+      });
+      expect(shorter.outcome).toBe('refreshed');
+      expect(rowOf(db, ALICE)).toMatchObject({
+        duration_seconds: 120,
+        started_at_ms: T0,
+        expires_at_ms: T0 + 10_000 + 120_000,
+      });
+      expect(shorter.row).toEqual(rowOf(db, ALICE));
+      clock.advance(10_000);
+      const none = upsertNowPlaying(m, { did: ALICE, artist: 'Radiohead', track: 'Reckoner', source: 'lastfm' });
+      expect(none.outcome).toBe('refreshed');
+      expect(rowOf(db, ALICE)).toMatchObject({
+        duration_seconds: null,
+        started_at_ms: T0,
+        expires_at_ms: T0 + 20_000 + 600_000,
+      });
+
+      // A non-finite duration is refused and leaves the row untouched.
+      const before = rowOf(db, ALICE);
+      expect(() =>
+        upsertNowPlaying(m, {
+          did: ALICE,
+          artist: 'Radiohead',
+          track: 'Reckoner',
+          durationSeconds: Number.POSITIVE_INFINITY,
+          source: 'listenbrainz',
+        }),
+      ).toThrow(RangeError);
+      expect(rowOf(db, ALICE)).toEqual(before);
+      expect(count(db)).toBe(1);
     });
   });
 

@@ -2,15 +2,24 @@
 // playing_now, §8.4 playing-now, §8.6 playing-now/delete; N2-06).
 //
 // - One `now_playing` row per DID; ephemeral local state, never a PDS record.
+// - Durations: a given duration is a finite positive number of seconds, rounded
+//   half-up to whole seconds with a minimum of 1 (the §7.6 rule, so a
+//   ListenBrainz `duration_ms` of 215,347 passed as 215.347 s counts as 215 s).
+//   Anything else (absent, null, 0, negative, NaN) means "no duration"; an
+//   infinite value or one that would overflow the expiry is a RangeError.
 // - Expiry: `started + duration` when the duration is usable, otherwise
 //   `started + 600 s`. Usable means 30–5,400 s for the Last.fm API and the web
-//   form (§7.8), and any stored duration (1–86,400 s, the column CHECK) for
-//   ListenBrainz, whose layer has already turned `duration_ms` into seconds
-//   (§8.3). An entry is current while `now < expires_at_ms`.
+//   form (§7.8), and any duration at all for ListenBrainz ("the TTL is
+//   `duration`, else `duration_ms`/1000, else 600 s", §8.3). The column CHECK
+//   (1–86,400 s) limits only what is stored in `duration_seconds`, never the
+//   TTL: a longer duration is used for the expiry and stored as NULL. An entry
+//   is current while `now < expires_at_ms`.
 // - The same track (equal music keys, so spelling variants count) while the
 //   entry is still current is not a new entry: `refresh` (Last.fm, §7.8) keeps
-//   the row and its `started_at_ms` and moves the expiry to `now + ttl`; `keep`
-//   (ListenBrainz "an identical current track is ignored") changes nothing.
+//   the row and its `started_at_ms` and moves the expiry to `now + ttl` and
+//   `duration_seconds` to the new submission's duration, so the stored
+//   duration is always the basis of the stored expiry; `keep` (ListenBrainz
+//   "an identical current track is ignored") changes nothing.
 //   Anything else replaces the row, starting now.
 // - Reads (`currentNowPlaying`) show an entry only when it is current, its
 //   owner is a visible user, and the owner's account shares now playing
@@ -58,13 +67,22 @@ export interface NowPlayingResult {
   row: NowPlayingRow;
 }
 
+/** A submitted duration in whole seconds (half-up, minimum 1), or null when there is none. */
+function wholeSeconds(d: number | null | undefined): number | null {
+  if (typeof d !== 'number' || Number.isNaN(d) || d <= 0) return null;
+  if (!Number.isFinite(d)) throw new RangeError('now-playing duration must be finite');
+  return Math.max(1, Math.round(d));
+}
+
+/** What `duration_seconds` stores: the whole-second duration when it fits the column CHECK. */
 function storedDuration(d: number | null | undefined): number | null {
-  return typeof d === 'number' && Number.isSafeInteger(d) && d >= 1 && d <= MAX_STORED_DURATION_SECONDS ? d : null;
+  const s = wholeSeconds(d);
+  return s !== null && s <= MAX_STORED_DURATION_SECONDS ? s : null;
 }
 
 /** The entry's lifetime in seconds for a submission from `source`. */
 export function nowPlayingTtlSeconds(source: NowPlayingSource, durationSeconds: number | null | undefined): number {
-  const d = storedDuration(durationSeconds);
+  const d = wholeSeconds(durationSeconds);
   if (d === null) return NOW_PLAYING_DEFAULT_TTL_SECONDS;
   if (source === 'listenbrainz') return d;
   return d >= LASTFM_MIN_DURATION_SECONDS && d <= LASTFM_MAX_DURATION_SECONDS ? d : NOW_PLAYING_DEFAULT_TTL_SECONDS;
@@ -86,13 +104,23 @@ export function upsertNowPlaying(m: Pick<ModuleDeps, 'db' | 'clock'>, input: Now
   const db = m.db;
   const now = m.clock.nowMs();
   const ttlMs = nowPlayingTtlSeconds(input.source, input.durationSeconds) * 1000;
+  if (!Number.isSafeInteger(now + ttlMs)) throw new RangeError('now-playing duration overflows the expiry');
+  const durationSeconds = storedDuration(input.durationSeconds);
   return db.tx(() => {
     const existing = db.one<NowPlayingRow>('SELECT * FROM now_playing WHERE did = ?', input.did);
     if (existing !== null && existing.expires_at_ms > now && sameTrack(existing, input.artist, input.track)) {
       if (input.sameTrack === 'keep') return { outcome: 'unchanged' as const, row: existing };
       const expires = now + ttlMs;
-      db.run('UPDATE now_playing SET expires_at_ms = ? WHERE did = ?', expires, input.did);
-      return { outcome: 'refreshed' as const, row: { ...existing, expires_at_ms: expires } };
+      db.run(
+        'UPDATE now_playing SET duration_seconds = ?, expires_at_ms = ? WHERE did = ?',
+        durationSeconds,
+        expires,
+        input.did,
+      );
+      return {
+        outcome: 'refreshed' as const,
+        row: { ...existing, duration_seconds: durationSeconds, expires_at_ms: expires },
+      };
     }
     const row: NowPlayingRow = {
       did: input.did,
@@ -100,7 +128,7 @@ export function upsertNowPlaying(m: Pick<ModuleDeps, 'db' | 'clock'>, input: Now
       track: input.track,
       album: input.album ?? null,
       album_artist: input.albumArtist ?? null,
-      duration_seconds: storedDuration(input.durationSeconds),
+      duration_seconds: durationSeconds,
       recording_mbid: input.recordingMbid ?? null,
       client: input.client ?? null,
       source: input.source,
