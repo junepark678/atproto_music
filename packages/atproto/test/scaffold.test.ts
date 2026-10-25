@@ -5,8 +5,43 @@ const utf8 = new TextEncoder();
 
 describe('workerd runtime', () => {
   it('workerd runtime has WebCrypto ECDSA P-256 and String.prototype.normalize NFKC', async () => {
-    // Running inside workerd, not Node: navigator.userAgent identifies the runtime.
-    expect(navigator.userAgent).toBe('Cloudflare-Workers');
+    // Runtime-neutral (ADR 0005 §15.3, N1-04): this suite runs on the
+    // production host (Node 26) and once ran in workerd; it checks the web
+    // platform capabilities the package relies on, never the runtime's name.
+    expect(crypto.subtle).toBeInstanceOf(SubtleCrypto);
+
+    // ECDSA P-256 known answer: RFC 6979 §A.2.5, SHA-256, message "sample".
+    // The fixed public key verifies the fixed r||s, and rejects it for another
+    // message, so verification is checked against an external vector, not only
+    // against this runtime's own signer.
+    const hex = (h: string) => Uint8Array.from(h.match(/../g)!, (b) => Number.parseInt(b, 16));
+    const b64url = (u: Uint8Array) =>
+      btoa(String.fromCharCode(...u))
+        .replace(/\+/g, '-')
+        .replace(/\//g, '_')
+        .replace(/=+$/, '');
+    const rfcKey = await crypto.subtle.importKey(
+      'jwk',
+      {
+        kty: 'EC',
+        crv: 'P-256',
+        x: b64url(hex('60FED4BA255A9D31C961EB74C6356D68C049B8923B61FA6CE669622E60F29FB6')),
+        y: b64url(hex('7903FE1008B8BC99A41AE9E95628BC64F2F1B20C2D7E9F5177A3C294D4462299')),
+      },
+      { name: 'ECDSA', namedCurve: 'P-256' },
+      false,
+      ['verify'],
+    );
+    const rfcSig = hex(
+      'EFD48B2AACB6A8FD1140DD9CD45E81D69D2C877B56AAF991C34D0EA84EAF3716' +
+        'F7CB1C942D657C41D436C7A1B6E29F65F3E900DBB9AFF4064DC4AB2F843ACDA8',
+    );
+    expect(await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, rfcKey, rfcSig, utf8.encode('sample'))).toBe(
+      true,
+    );
+    expect(await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, rfcKey, rfcSig, utf8.encode('test'))).toBe(
+      false,
+    );
 
     // ECDSA P-256 sign/verify round trip through WebCrypto (the path
     // @atcute/crypto uses for P-256 keys).
