@@ -9,7 +9,10 @@
 // Every migration after 2 is additive (only CREATE TABLE, CREATE INDEX and
 // ALTER TABLE ... ADD COLUMN; ADR 0005 §3.2), which
 // worker/test/storage/schema-v2.test.ts enforces statically, and it leaves
-// `schema_compat.min_compatible_version` unchanged.
+// `schema_compat.min_compatible_version` unchanged. In every migration, an
+// ADD COLUMN is a plain nullable (or NOT NULL DEFAULT) column with no CHECK,
+// UNIQUE, PRIMARY KEY, REFERENCES or generated clause: those make SQLite run
+// an internal check pass that the node:sqlite PRAGMA authorizer refuses.
 //
 // Conventions (ADR 0004 §6):
 // - Ordering timestamps are TEXT in the fixed-width 30-character UTC storage
@@ -307,9 +310,15 @@ const MIGRATION_2: Migration = {
     // -- scrobbles: the optional record fields of ADR 0005 §6.2 and the
     //    ListenBrainz recording MSID (§8.4). NULL until a record is applied by
     //    the N3-11 projection; every v1 row is left byte-identical.
+    //    ADD COLUMN carries no CHECK, NOT NULL, UNIQUE, PRIMARY KEY, REFERENCES
+    //    or generated clause: SQLite verifies a CHECK on an added column with
+    //    an internal pragma_quick_check, which the node:sqlite authorizer
+    //    (N1-01) refuses, so the migration would roll back at startup. Value
+    //    bounds (track_number 1..9999) are enforced by the §6.2 validator and
+    //    the N3-11 projection instead.
     'ALTER TABLE scrobbles ADD COLUMN album_artist TEXT',
     'ALTER TABLE scrobbles ADD COLUMN album_artist_key TEXT',
-    'ALTER TABLE scrobbles ADD COLUMN track_number INTEGER CHECK(track_number BETWEEN 1 AND 9999)',
+    'ALTER TABLE scrobbles ADD COLUMN track_number INTEGER',
     'ALTER TABLE scrobbles ADD COLUMN artist_mbids TEXT',
     'ALTER TABLE scrobbles ADD COLUMN release_mbid TEXT',
     'ALTER TABLE scrobbles ADD COLUMN release_group_mbid TEXT',

@@ -1174,6 +1174,14 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
   it('every migration after 2 contains only CREATE TABLE, CREATE INDEX and ALTER TABLE ADD COLUMN statements', () => {
     const later = MIGRATIONS.filter((m) => m.version > 2);
     expect(later.flatMap(nonAdditiveStatements)).toEqual([]);
+    // No ADD COLUMN in any migration, migration 2 included, carries a clause
+    // that makes SQLite run its internal quick_check (or fail on existing
+    // rows): the node:sqlite PRAGMA authorizer refuses that check, so such a
+    // statement rolls back migrate() at startup on the Node host.
+    expect(MIGRATIONS.flatMap((m) => m.statements.filter(isUnsafeAddColumn))).toEqual([]);
+    expect(
+      MIGRATIONS.flatMap((m) => m.statements).filter((s) => /^\s*ALTER TABLE \w+ ADD (COLUMN )?/i.test(s)).length,
+    ).toBeGreaterThan(0);
 
     // The checker is not vacuous: on migration 2 it flags exactly the one
     // statement that is not additive (the schema_compat seed row) ...
@@ -1190,6 +1198,9 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       'CREATE INDEX IF NOT EXISTS extra_x ON extra(x) WHERE x IS NOT NULL',
       'ALTER TABLE scrobbles ADD COLUMN mood TEXT',
       'ALTER TABLE scrobbles ADD mood TEXT',
+      "ALTER TABLE scrobbles ADD COLUMN mood TEXT NOT NULL DEFAULT ''",
+      'ALTER TABLE scrobbles ADD COLUMN plays INTEGER NOT NULL DEFAULT 0',
+      "ALTER TABLE scrobbles ADD COLUMN note TEXT DEFAULT 'CHECK(x) UNIQUE'",
       `CREATE TABLE extra2 (
         y TEXT NOT NULL DEFAULT ''
       )`,
@@ -1211,6 +1222,18 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       'DELETE FROM hints',
       'CREATE TABLE a (x); DROP TABLE scrobbles',
       'PRAGMA foreign_keys = OFF',
+      // ADD COLUMN forms SQLite verifies with pragma_quick_check or that fail
+      // on existing rows.
+      'ALTER TABLE scrobbles ADD COLUMN track_no INTEGER CHECK(track_no BETWEEN 1 AND 9999)',
+      'ALTER TABLE scrobbles ADD COLUMN n INTEGER CONSTRAINT n_pos check (n > 0)',
+      'ALTER TABLE scrobbles ADD COLUMN mood TEXT NOT NULL',
+      'ALTER TABLE scrobbles ADD COLUMN mood TEXT UNIQUE',
+      'ALTER TABLE scrobbles ADD COLUMN pk INTEGER PRIMARY KEY',
+      'ALTER TABLE scrobbles ADD COLUMN owner TEXT REFERENCES users(did)',
+      'ALTER TABLE scrobbles ADD COLUMN k TEXT GENERATED ALWAYS AS (artist_key) VIRTUAL',
+      'ALTER TABLE scrobbles ADD COLUMN k TEXT AS (artist_key)',
+      'ALTER TABLE scrobbles ADD COLUMN t TEXT DEFAULT CURRENT_TIMESTAMP',
+      'ALTER TABLE scrobbles ADD COLUMN t INTEGER DEFAULT (1 + 1)',
     ];
     expect(nonAdditiveStatements({ version: 3, name: 'bad', statements: nonAdditive })).toEqual(nonAdditive);
   });
@@ -1337,8 +1360,30 @@ function nonAdditiveStatements(m: Migration): string[] {
     const body = s.endsWith(';') ? s.slice(0, -1) : s;
     // More than one statement in one string is never additive.
     if (body.includes(';')) return true;
+    if (isUnsafeAddColumn(body)) return true;
     return !allowed.some((re) => re.test(body));
   });
+}
+
+/**
+ * An ALTER TABLE ... ADD [COLUMN] whose column definition SQLite cannot add
+ * as a plain metadata change. A CHECK (or a NOT NULL generated column) makes
+ * SQLite verify existing rows with an internal `pragma_quick_check`, which the
+ * node:sqlite authorizer (N1-01) refuses; NOT NULL without DEFAULT, UNIQUE,
+ * PRIMARY KEY, a non-constant DEFAULT and REFERENCES fail or need a check on
+ * a table with rows. Bounds on such a column belong in the validator.
+ */
+function isUnsafeAddColumn(statement: string): boolean {
+  const s = statement.replace(/\s+/g, ' ').trim();
+  const m = /^ALTER TABLE \w+ ADD (?:COLUMN )?\w+(.*)$/i.exec(s);
+  if (!m) return false;
+  // Ignore keywords inside string literals (e.g. a DEFAULT text value).
+  const def = (m[1] ?? '').replace(/'(?:[^']|'')*'/g, "''").toUpperCase();
+  if (/\b(CHECK|UNIQUE|PRIMARY KEY|REFERENCES|GENERATED)\b/.test(def)) return true;
+  if (/\bAS ?\(/.test(def)) return true;
+  if (/\bDEFAULT ?(\(|CURRENT_)/.test(def)) return true;
+  if (/\bNOT NULL\b/.test(def) && !/\bDEFAULT\b/.test(def)) return true;
+  return false;
 }
 
 function unclassified(tables: readonly string[]): string[] {

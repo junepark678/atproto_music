@@ -55,7 +55,7 @@ export type BackupKind = (typeof BACKUP_KINDS)[number];
 export interface ScrobbleV2Columns {
   album_artist: string | null;
   album_artist_key: string | null;
-  /** 1–9999. */
+  /** 1–9999, bounded by the §6.2 validator and the N3-11 projection (no column CHECK). */
   track_number: number | null;
   /** JSON array text of distinct UUID strings. */
   artist_mbids: string | null;
