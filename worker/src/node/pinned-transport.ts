@@ -30,9 +30,15 @@
 // `redirect_refused`, policyFetch's TransportError `redirect`); a 3xx to any
 // other request is TransportError `redirect`.
 //
-// The transport's response cap is a backstop only: DEFAULT_PINNED_CAPS keeps it
-// strictly larger than every SafeFetch kind cap, so SafeFetch's own
-// `body_too_large` (and policyFetch's `too_large`) trips first.
+// The transport's response cap is a streamed backstop only. It never looks at
+// a declared Content-Length: every response (status, headers and a lazily
+// read body) is handed back to the caller, which applies its own declared and
+// streamed caps with its own error codes (SafeFetch's `body_too_large` or
+// `http_status`, policyFetch's `too_large`). Only when the bytes actually read
+// pass `maxResponseBytes` does the body stream error with TransportError
+// `too_large` (reason `streamed`). DEFAULT_PINNED_CAPS keeps the cap strictly
+// larger than every SafeFetch kind cap, so for SafeFetch even a streamed
+// overflow is SafeFetch's own `body_too_large`.
 //
 // `unpinnedFetchStub` is what run() installs as globalThis.fetch (N3-07), so a
 // consumer that forgot its transport fails loudly instead of bypassing pinning.
@@ -223,12 +229,13 @@ const KiB = 1024;
 const MiB = 1024 * KiB;
 
 /**
- * Production caps. The response cap is a backstop strictly larger than the
- * largest SafeFetch kind (getRepo, 32 MiB; policyFetch callers must keep their
- * caps below it too), so the caller's own cap (and its error code: SafeFetch `body_too_large`, which
- * getRepo turns into the permanent `car_too_large`) always trips first, for a
- * declared Content-Length and for streamed bytes alike. The deadline is
- * SafeFetch's and policyFetch's 10 s.
+ * Production caps. The response cap applies to streamed bytes only (never to
+ * a declared Content-Length, which the caller judges itself) and is strictly
+ * larger than the largest SafeFetch kind (getRepo, 32 MiB; policyFetch callers
+ * should keep their caps below it too), so a streamed overflow trips the
+ * caller's own cap first (SafeFetch `body_too_large`, which getRepo turns into
+ * the permanent `car_too_large`). The deadline is SafeFetch's and
+ * policyFetch's 10 s.
  */
 export const DEFAULT_PINNED_CAPS: Readonly<PinnedTransportCaps> = Object.freeze({
   maxResponseBytes: 64 * MiB,
@@ -542,14 +549,11 @@ export function pinnedTransport(options: PinnedTransportOptions): PinnedTranspor
       dropBody(answer.body);
       return new Response(null, { status, headers });
     }
-    const declared = headers.get('content-length');
-    if (declared !== null && /^\s*\d+\s*$/.test(declared) && Number(declared.trim()) > caps.maxResponseBytes) {
-      dropBody(answer.body);
-      throw new TransportError('too_large', `response body exceeds ${caps.maxResponseBytes} bytes`, {
-        reason: 'content_length',
-        maxBytes: caps.maxResponseBytes,
-      });
-    }
+    // No declared Content-Length check here: the caller must see the status
+    // and headers first, so SafeFetch can classify a 503/429 as http_status
+    // (with Retry-After) and refuse an oversized declared body with its own
+    // permanent body_too_large, and policyFetch with its too_large. The
+    // transport's cap is enforced on the bytes actually streamed.
     if (status < 200 || status > 599) {
       dropBody(answer.body);
       throw new TransportError('connect', `unusable HTTP status ${status}`, { reason: 'bad_status', status });

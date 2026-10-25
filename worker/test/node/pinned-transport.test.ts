@@ -397,8 +397,14 @@ describe('pinned transport', () => {
             },
     );
     const t3 = track(pinnedTransport({ lookup: big.lookup, connector: big.connector, caps: CAPS }));
-    const e3 = expectTransportError(await rejection(t3(new Request('https://pds.example.com/declared'))), 'too_large');
-    expect(e3.reason).toBe('content_length');
+    // The transport never judges a declared Content-Length (the caller sees
+    // status and headers first); the bytes it streams past its cap are refused.
+    const declaredResponse = await t3(new Request('https://pds.example.com/declared'));
+    expect(declaredResponse.status).toBe(200);
+    expect(declaredResponse.headers.get('content-length')).toBe(String(CAPS.maxResponseBytes + 1));
+    const e3 = expectTransportError(await rejection(declaredResponse.arrayBuffer()), 'too_large');
+    expect(e3.reason).toBe('streamed');
+    expect(e3.maxBytes).toBe(CAPS.maxResponseBytes);
     const streamed = await t3(new Request('https://pds.example.com/streamed'));
     expect(streamed.status).toBe(200);
     const e4 = expectTransportError(await rejection(streamed.arrayBuffer()), 'too_large');
@@ -687,6 +693,77 @@ describe('pinned transport', () => {
     const exact = await exactFetch(url, { kind: 'getRepo' });
     expect(exact.status).toBe(200);
     expect(exact.body.byteLength).toBe(getRepoCap);
+  });
+
+  it('a getRepo 200 declaring more than DEFAULT_PINNED_CAPS.maxResponseBytes is SafeFetch body_too_large (content_length), never network_error', async () => {
+    const getRepoCap = KIND_CAPS.getRepo;
+    const declaredBytes = DEFAULT_PINNED_CAPS.maxResponseBytes + 1;
+    const url = 'https://pds.example.com/xrpc/com.atproto.sync.getRepo?did=did:plc:abc';
+    const net = safeFetchNet(() => ({
+      raw: (socket) => {
+        socket.write(
+          `HTTP/1.1 200 X\r\ncontent-type: application/vnd.ipld.car\r\ncontent-length: ${declaredBytes}\r\n\r\n`,
+        );
+        socket.write(Buffer.alloc(1024, 0x61));
+      },
+    }));
+    const transport = track(
+      pinnedTransport({ lookup: net.lookup, connector: net.connector, caps: DEFAULT_PINNED_CAPS }),
+    );
+
+    // The transport itself hands the response back with its declared length.
+    const direct = await transport(new Request(url, { redirect: 'manual' }));
+    expect(direct.status).toBe(200);
+    expect(direct.headers.get('content-length')).toBe(String(declaredBytes));
+    await direct.body?.cancel();
+
+    const safeFetch = createSafeFetch({ transport, clock: fixedClock(), timer: manualTimer() });
+    for (const read of [() => safeFetch.stream(url, { kind: 'getRepo' }), () => safeFetch(url, { kind: 'getRepo' })]) {
+      const error = await rejection(read());
+      expect(isSafeFetchError(error, 'network_error')).toBe(false);
+      expect(isSafeFetchError(error, 'body_too_large')).toBe(true);
+      expect((error as SafeFetchError).reason).toBe('content_length');
+      expect((error as SafeFetchError).maxBytes).toBe(getRepoCap);
+    }
+    expect(pdsRequests(net)).toHaveLength(3);
+  });
+
+  it('a 503 with Retry-After declaring more than DEFAULT_PINNED_CAPS.maxResponseBytes is SafeFetch http_status with retryAfterMs', async () => {
+    const declaredBytes = DEFAULT_PINNED_CAPS.maxResponseBytes + 1;
+    const url = 'https://pds.example.com/xrpc/com.atproto.sync.getRepo?did=did:plc:abc';
+    const net = safeFetchNet((req) =>
+      req.path.includes('small')
+        ? { status: 429, headers: { 'retry-after': '30' }, body: '{"error":"RateLimitExceeded"}' }
+        : {
+            raw: (socket) => {
+              socket.write(
+                `HTTP/1.1 503 X\r\nretry-after: 120\r\ncontent-type: text/plain\r\ncontent-length: ${declaredBytes}\r\n\r\n`,
+              );
+              socket.write(Buffer.alloc(1024, 0x62));
+            },
+          },
+    );
+    const transport = track(
+      pinnedTransport({ lookup: net.lookup, connector: net.connector, caps: DEFAULT_PINNED_CAPS }),
+    );
+    const safeFetch = createSafeFetch({ transport, clock: fixedClock(), timer: manualTimer() });
+
+    for (const read of [() => safeFetch.stream(url, { kind: 'getRepo' }), () => safeFetch(url, { kind: 'getRepo' })]) {
+      const error = await rejection(read());
+      expect(isSafeFetchError(error, 'http_status')).toBe(true);
+      expect((error as SafeFetchError).status).toBe(503);
+      expect((error as SafeFetchError).reason).toBe('http_503');
+      expect((error as SafeFetchError).retryAfterMs).toBe(120_000);
+    }
+
+    // Control: a small 429 keeps its status, Retry-After and XRPC error name.
+    const limited = await rejection(
+      safeFetch('https://pds.example.com/xrpc/com.atproto.repo.getRecord?small=1', { kind: 'getRecord' }),
+    );
+    expect(isSafeFetchError(limited, 'http_status')).toBe(true);
+    expect((limited as SafeFetchError).status).toBe(429);
+    expect((limited as SafeFetchError).retryAfterMs).toBe(30_000);
+    expect(pdsRequests(net)).toHaveLength(3);
   });
 });
 
