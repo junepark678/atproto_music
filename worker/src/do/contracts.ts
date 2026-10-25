@@ -205,6 +205,19 @@ export interface PitrResult {
   bookmark: string;
 }
 
+/** Why a backup ran (ADR 0005 §6.4 `backup_runs.kind`, §14.5). */
+export type BackupKind = 'daily' | 'manual' | 'pre_migration' | 'pre_restore';
+
+/**
+ * `adminBackup()` (ADR 0005 §3.11 `POST /admin/backup`, §14.5). A host
+ * without a backup port (the Workers host) answers `not_supported` and
+ * changes nothing.
+ */
+export type BackupOutcome =
+  | { status: 'ok'; kind: BackupKind; path: string; bytes: number; startedAtMs: number; finishedAtMs: number }
+  | { status: 'failed'; kind: BackupKind; error: string }
+  | { status: 'not_supported' };
+
 export interface IndexRpc {
   ready(): Promise<MigrateResult>;
   indexing(did?: Did): Promise<Indexing>;
@@ -225,5 +238,8 @@ export interface IndexRpc {
   notify(input: NotifyInput, ip: string): Promise<NotifyOutcome>;
   ensureRunning(): Promise<void>;
   adminStatus(): Promise<AdminStatus>;
+  /** ADR 0004 A15; stays until N7-01. A host without a PITR port rejects with NotSupportedError. */
   adminPitr(atMs: number): Promise<PitrResult>;
+  /** One manual backup through the host's backup port (ADR 0005 §14.5). */
+  adminBackup(): Promise<BackupOutcome>;
 }

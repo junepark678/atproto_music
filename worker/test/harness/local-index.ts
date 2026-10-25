@@ -83,6 +83,7 @@ const METHODS: Record<keyof IndexRpc, true> = {
   ensureRunning: true,
   adminStatus: true,
   adminPitr: true,
+  adminBackup: true,
 };
 
 export const INDEX_RPC_METHODS = Object.keys(METHODS) as (keyof IndexRpc)[];

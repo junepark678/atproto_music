@@ -97,7 +97,7 @@ describe('worker/test/harness', () => {
     // An unwired method rejects instead of silently returning.
     await expect(index.profile('did:plc:alice')).rejects.toBeInstanceOf(NotWiredError);
     expect(index.calls.map((c) => c.method)).toEqual(['history', 'history', 'profile']);
-    expect(INDEX_RPC_METHODS).toHaveLength(16);
+    expect(INDEX_RPC_METHODS).toHaveLength(17);
     for (const method of INDEX_RPC_METHODS) expect(typeof index[method]).toBe('function');
 
     // A module error inside the DO rolls its transaction back and surfaces to the caller.

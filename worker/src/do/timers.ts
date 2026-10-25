@@ -39,6 +39,19 @@
 //
 // Everything is synchronous except `runDue`, so no read-check-write spans an
 // await. Time comes from the caller (`now`), never from Date.now().
+//
+// Lanes (ADR 0005 §3.3, N1-02). A DO has one alarm, so every timer shared one
+// guard. The Node host drives two lanes from two alarm storages: the core
+// lane (TIMER_NAMES) and the extension lane (EXTENSION_TIMER_NAMES, whose
+// handlers come from CoreExtensions). `runDue`, `armAlarm`, `nextDue`, the
+// orphan recovery and the claim take a lane `{names}` (default: CORE_LANE)
+// and read and write only that lane's rows and `~running:` rows, so a core
+// run never treats a live extension claim as an orphan and neither lane
+// waits for the other. The guard is still keyed on the storage object, so
+// two lanes over two storage objects run independently, and two runs over one
+// storage still exclude each other. A due name in the lane without a handler
+// is skipped (never claimed); IndexCore passes only the extension names that
+// have a handler, so such a name is never armed either.
 
 import type { Clock } from '@atmusic/core/deps';
 import type { Db } from './db';
@@ -56,8 +69,39 @@ export const TIMER_NAMES = [
 
 export type TimerName = (typeof TIMER_NAMES)[number];
 
+/**
+ * The extension timers (ADR 0005 §3.3), in their fixed run order. Their
+ * handlers come from the CoreExtensions passed to IndexCore; a name without a
+ * handler is never written or armed by IndexCore.
+ */
+export const EXTENSION_TIMER_NAMES = [
+  'outbox',
+  'forward',
+  'import',
+  'oauth-keepalive',
+  'expiry-sweep',
+  'backup',
+] as const;
+
+export type ExtensionTimerName = (typeof EXTENSION_TIMER_NAMES)[number];
+
+/** Any timer this code knows: a core or an extension timer. */
+export type AnyTimerName = TimerName | ExtensionTimerName;
+
+/** A set of timers run by one `runDue` and armed on one alarm storage. */
+export interface TimerLane {
+  readonly names: readonly AnyTimerName[];
+}
+
+/** The core lane: the seven core timers (the default of every lane-scoped function). */
+export const CORE_LANE: TimerLane = Object.freeze({ names: TIMER_NAMES });
+/** The extension lane with every extension name (IndexCore narrows it to the registered ones). */
+export const EXTENSION_LANE: TimerLane = Object.freeze({ names: EXTENSION_TIMER_NAMES });
+
 export type TimerHandler = (now: number) => Promise<void>;
 export type TimerHandlers = Record<TimerName, TimerHandler>;
+/** Handlers for a lane; a due name without one is skipped (never claimed). */
+export type LaneHandlers = Partial<Record<AnyTimerName, TimerHandler>>;
 
 export interface ScheduleOptions {
   /** Replace the stored due time even when it is earlier. */
@@ -72,7 +116,7 @@ export interface RunBudget {
 }
 
 export interface TimerFailure {
-  name: TimerName;
+  name: AnyTimerName;
   error: unknown;
   /** The due time it was rescheduled to. */
   retryAtMs: number;
@@ -82,11 +126,11 @@ export interface TimerFailure {
 
 export interface RunReport {
   /** Handlers that resolved, in the order they ran. */
-  ran: TimerName[];
+  ran: AnyTimerName[];
   /** Handlers that threw or rejected, in the order they ran. */
   failed: TimerFailure[];
   /** Due timers left for the next alarm because the budget ran out. */
-  deferred: TimerName[];
+  deferred: AnyTimerName[];
   /**
    * Claimed rows left by an instance that died mid-handler, or by a hung run
    * on this instance that this call took over, now rescheduled.
@@ -104,9 +148,29 @@ export const TIMER_FAILURES_COUNTER = 'timer_failures';
 export const TIMER_STREAK_COUNTER = 'timer_failure_streak';
 
 const RUNNING_PREFIX = '~running:';
-const PRIORITY = new Map<string, number>(TIMER_NAMES.map((name, i) => [name, i]));
-const RUNNING_NAMES = TIMER_NAMES.map((name) => RUNNING_PREFIX + name);
-const KNOWN_PLACEHOLDERS = [...TIMER_NAMES, ...RUNNING_NAMES].map(() => '?').join(',');
+/** Run order: the core names, then the extension names. */
+const PRIORITY = new Map<string, number>([...TIMER_NAMES, ...EXTENSION_TIMER_NAMES].map((name, i) => [name, i]));
+const CORE_NAMES = new Set<string>(TIMER_NAMES);
+
+/** A lane's names (validated, deduplicated, in priority order) and their claimed-row names. */
+interface LaneRows {
+  names: AnyTimerName[];
+  running: string[];
+}
+
+function laneRows(lane: TimerLane): LaneRows {
+  for (const name of lane.names) assertKnownTimerName(name);
+  const names = [...new Set(lane.names)].sort(byPriority);
+  return { names, running: names.map((name) => RUNNING_PREFIX + name) };
+}
+
+function byPriority(a: string, b: string): number {
+  return PRIORITY.get(a)! - PRIORITY.get(b)!;
+}
+
+function placeholders(values: readonly unknown[]): string {
+  return values.map(() => '?').join(',');
+}
 
 interface ActiveRun {
   /** From this `now` on, a later runDue may take the run over. */
@@ -120,21 +184,36 @@ interface ActiveRun {
  */
 const active = new WeakMap<object, ActiveRun>();
 
-export type AlarmStorage = Pick<DurableObjectStorage, 'setAlarm' | 'deleteAlarm'>;
+/**
+ * Where a lane's alarm is armed: the DO storage on Workers, a NodeAlarm on
+ * Node (ADR 0005 §3.3). Structural, so this module needs no Workers types.
+ * `setAlarm` also accepts a Date, as DurableObjectStorage does; this module
+ * only ever passes epoch ms.
+ */
+export interface AlarmStorage {
+  setAlarm(scheduledTime: number | Date): void | Promise<void>;
+  deleteAlarm(): void | Promise<void>;
+}
 
 export class TimerReentryError extends Error {
   constructor() {
-    super('runDue is already running on this Durable Object storage');
+    super('runDue is already running on this alarm storage');
     this.name = 'TimerReentryError';
   }
 }
 
+/** A core timer name (TIMER_NAMES). */
 export function isTimerName(value: unknown): value is TimerName {
+  return typeof value === 'string' && CORE_NAMES.has(value);
+}
+
+/** A core or an extension timer name. */
+export function isKnownTimerName(value: unknown): value is AnyTimerName {
   return typeof value === 'string' && PRIORITY.has(value);
 }
 
-function assertTimerName(name: unknown): asserts name is TimerName {
-  if (!isTimerName(name)) throw new TypeError(`unknown timer name: ${String(name)}`);
+function assertKnownTimerName(name: unknown): asserts name is AnyTimerName {
+  if (!isKnownTimerName(name)) throw new TypeError(`unknown timer name: ${String(name)}`);
 }
 
 function assertEpochMs(label: string, value: number): void {
@@ -153,8 +232,8 @@ export function timerBackoffMs(streak: number): number {
  * Upserts timer `name` at `dueAtMs`. An existing earlier due time is kept
  * unless `force`. Returns the stored due time.
  */
-export function schedule(db: Db, name: TimerName, dueAtMs: number, options: ScheduleOptions = {}): number {
-  assertTimerName(name);
+export function schedule(db: Db, name: AnyTimerName, dueAtMs: number, options: ScheduleOptions = {}): number {
+  assertKnownTimerName(name);
   assertEpochMs('dueAtMs', dueAtMs);
   const update = options.force ? 'excluded.due_at' : 'MIN(timers.due_at, excluded.due_at)';
   const row = db.one<{ due_at: number }>(
@@ -168,40 +247,43 @@ export function schedule(db: Db, name: TimerName, dueAtMs: number, options: Sche
 }
 
 /** Removes timer `name`. Returns whether it was scheduled. */
-export function cancel(db: Db, name: TimerName): boolean {
-  assertTimerName(name);
+export function cancel(db: Db, name: AnyTimerName): boolean {
+  assertKnownTimerName(name);
   return db.all('DELETE FROM timers WHERE name = ? RETURNING name', name).length > 0;
 }
 
 /** The stored due time of `name`, or null when it is not scheduled. */
-export function dueAt(db: Db, name: TimerName): number | null {
-  assertTimerName(name);
+export function dueAt(db: Db, name: AnyTimerName): number | null {
+  assertKnownTimerName(name);
   return db.one<{ due_at: number }>('SELECT due_at FROM timers WHERE name = ?', name)?.due_at ?? null;
 }
 
 /**
- * `min(due_at)` over the known timers, including a claimed row (`~running:`)
+ * `min(due_at)` over the lane's timers, including a claimed row (`~running:`)
  * an earlier instance left behind (it still needs a run to be recovered). Rows
- * with other names are ignored. Null when nothing is scheduled.
+ * of other lanes and with other names are ignored. Null when nothing is
+ * scheduled.
  */
-export function nextDue(db: Db): number | null {
+export function nextDue(db: Db, lane: TimerLane = CORE_LANE): number | null {
+  const { names, running } = laneRows(lane);
+  if (names.length === 0) return null;
   const row = db.one<{ next: number | null }>(
-    `SELECT MIN(due_at) AS next FROM timers WHERE name IN (${KNOWN_PLACEHOLDERS})`,
-    ...TIMER_NAMES,
-    ...RUNNING_NAMES,
+    `SELECT MIN(due_at) AS next FROM timers WHERE name IN (${placeholders([...names, ...running])})`,
+    ...names,
+    ...running,
   );
   return row?.next ?? null;
 }
 
 /**
- * Arms the DO alarm at `nextDue(db)`, or deletes it when nothing is due.
+ * Arms the lane's alarm at `nextDue(db, lane)`, or deletes it when nothing is due.
  * While a `runDue` on this storage is in flight, the alarm is armed no earlier
  * than that run's takeover time, since no `runDue` can start before it.
  * Returns the armed time. The storage write is queued synchronously; the DO
  * output gate holds outgoing messages until it is durable.
  */
-export function armAlarm(storage: AlarmStorage, db: Db): number | null {
-  const min = nextDue(db);
+export function armAlarm(storage: AlarmStorage, db: Db, lane: TimerLane = CORE_LANE): number | null {
+  const min = nextDue(db, lane);
   const run = active.get(storage);
   const next = min === null || run === undefined ? min : Math.max(min, run.takeoverAtMs);
   if (next === null) void storage.deleteAlarm();
@@ -209,7 +291,7 @@ export function armAlarm(storage: AlarmStorage, db: Db): number | null {
   return next;
 }
 
-function bumpCounter(db: Db, counter: string, name: TimerName): number {
+function bumpCounter(db: Db, counter: string, name: AnyTimerName): number {
   const row = db.one<{ value: number }>(
     `INSERT INTO counters(name, label, value) VALUES (?, ?, 1)
      ON CONFLICT(name, label) DO UPDATE SET value = counters.value + 1
@@ -220,7 +302,7 @@ function bumpCounter(db: Db, counter: string, name: TimerName): number {
   return row!.value;
 }
 
-function streakOf(db: Db, name: TimerName): number {
+function streakOf(db: Db, name: AnyTimerName): number {
   return (
     db.one<{ value: number }>('SELECT value FROM counters WHERE name = ? AND label = ?', TIMER_STREAK_COUNTER, name)
       ?.value ?? 0
@@ -228,7 +310,7 @@ function streakOf(db: Db, name: TimerName): number {
 }
 
 /** Moves a due row to its claimed name and bumps its streak. False when it is no longer due. */
-function claim(db: Db, name: TimerName, now: number): boolean {
+function claim(db: Db, name: AnyTimerName, now: number): boolean {
   return db.tx(() => {
     const claimed = db.all(
       'UPDATE timers SET name = ? WHERE name = ? AND due_at <= ? RETURNING due_at',
@@ -242,7 +324,7 @@ function claim(db: Db, name: TimerName, now: number): boolean {
   });
 }
 
-function succeed(db: Db, name: TimerName): void {
+function succeed(db: Db, name: AnyTimerName): void {
   db.tx(() => {
     db.run('DELETE FROM timers WHERE name = ?', RUNNING_PREFIX + name);
     db.run('DELETE FROM counters WHERE name = ? AND label = ?', TIMER_STREAK_COUNTER, name);
@@ -250,7 +332,7 @@ function succeed(db: Db, name: TimerName): void {
 }
 
 /** Drops the claimed row and force-reschedules with backoff from the current streak. */
-function fail(db: Db, name: TimerName, now: number, error: unknown): TimerFailure {
+function fail(db: Db, name: AnyTimerName, now: number, error: unknown): TimerFailure {
   return db.tx(() => {
     db.run('DELETE FROM timers WHERE name = ?', RUNNING_PREFIX + name);
     const streak = Math.max(streakOf(db, name), 1);
@@ -260,38 +342,44 @@ function fail(db: Db, name: TimerName, now: number, error: unknown): TimerFailur
   });
 }
 
-function recoverOrphans(db: Db, now: number, reason: string): TimerFailure[] {
+/** Reschedules the lane's claimed rows (and only the lane's) as failures. */
+function recoverOrphans(db: Db, now: number, reason: string, running: readonly string[]): TimerFailure[] {
+  if (running.length === 0) return [];
   const orphans = db.all<{ name: string }>(
-    `SELECT name FROM timers WHERE name IN (${RUNNING_NAMES.map(() => '?').join(',')})`,
-    ...RUNNING_NAMES,
+    `SELECT name FROM timers WHERE name IN (${placeholders(running)})`,
+    ...running,
   );
   return orphans
-    .map((row) => row.name.slice(RUNNING_PREFIX.length) as TimerName)
-    .sort((a, b) => PRIORITY.get(a)! - PRIORITY.get(b)!)
+    .map((row) => row.name.slice(RUNNING_PREFIX.length) as AnyTimerName)
+    .sort(byPriority)
     .map((name) => fail(db, name, now, new Error(reason)));
 }
 
 /**
- * Runs every timer with `due_at <= now` once, in priority order, until the
- * budget runs out. The caller re-arms the alarm afterwards (`armAlarm`).
+ * Runs every timer of `lane` with `due_at <= now` once, in priority order,
+ * until the budget runs out. The caller re-arms the alarm afterwards
+ * (`armAlarm` with the same lane). A due name without a handler is skipped.
  *
- * `storage` is the DO storage that `db` wraps (pass the same object to
- * `armAlarm`); it is used only as the identity of the run guard, so every Db
- * wrapper over one storage shares it. Throws TimerReentryError while another
- * run on this storage is in flight and younger than TIMER_RUN_TIMEOUT_MS;
- * takes an older one over.
+ * `storage` is the lane's alarm storage (on Workers the DO storage that `db`
+ * wraps; pass the same object to `armAlarm`); it is used only as the identity
+ * of the run guard, so every Db wrapper over one storage shares it. Throws
+ * TimerReentryError while another run on this storage is in flight and
+ * younger than TIMER_RUN_TIMEOUT_MS; takes an older one over. Rows of other
+ * lanes, their claimed `~running:` rows included, are never read or written.
  */
 export async function runDue(
   storage: AlarmStorage,
   db: Db,
   now: number,
-  handlers: TimerHandlers,
+  handlers: LaneHandlers,
   budget: RunBudget,
+  lane: TimerLane = CORE_LANE,
 ): Promise<RunReport> {
   assertEpochMs('now', now);
   if (!Number.isSafeInteger(budget.maxRuns) || budget.maxRuns < 0) {
     throw new RangeError(`budget.maxRuns must be a non-negative safe integer, got ${budget.maxRuns}`);
   }
+  const { names, running } = laneRows(lane);
   const previous = active.get(storage);
   if (previous !== undefined && now < previous.takeoverAtMs) throw new TimerReentryError();
   const run: ActiveRun = { takeoverAtMs: now + TIMER_RUN_TIMEOUT_MS };
@@ -303,12 +391,20 @@ export async function runDue(
       previous === undefined
         ? 'timer handler did not complete (instance lost mid-run)'
         : `timer handler did not complete within ${TIMER_RUN_TIMEOUT_MS} ms (hung run taken over)`,
+      running,
     );
-    const due = db
-      .all<{ name: string }>('SELECT name FROM timers WHERE due_at <= ?', now)
-      .map((row) => row.name)
-      .filter(isTimerName)
-      .sort((a, b) => PRIORITY.get(a)! - PRIORITY.get(b)!);
+    const due =
+      names.length === 0
+        ? []
+        : db
+            .all<{ name: string }>(
+              `SELECT name FROM timers WHERE due_at <= ? AND name IN (${placeholders(names)})`,
+              now,
+              ...names,
+            )
+            .map((row) => row.name as AnyTimerName)
+            .filter((name) => handlers[name] !== undefined)
+            .sort(byPriority);
 
     const report: RunReport = { ran: [], failed: [], deferred: [], recovered, superseded: false };
     let started = 0;
@@ -324,7 +420,7 @@ export async function runDue(
       started++;
       let failure: { error: unknown } | null = null;
       try {
-        await handlers[name](now);
+        await handlers[name]!(now);
       } catch (error) {
         failure = { error };
       }
