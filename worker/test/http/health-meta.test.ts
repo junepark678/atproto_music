@@ -175,11 +175,14 @@ it('live 200; ready 503 when index reports too_new; meta capabilities omit publi
   expect(schemas.Ready(readyRes.body)).toBe('valid');
   expect(fresh.state.readyCalls).toBe(1);
 
-  // Storage written by newer code: migrate() reports too_new and leaves it untouched; ready is 503.
+  // Storage written by newer, incompatible code (ADR 0005 §3.2: its
+  // schema_compat.min_compatible_version is above this code's latest):
+  // migrate() reports too_new and leaves it untouched; ready is 503.
   const latest = MIGRATIONS[MIGRATIONS.length - 1]?.version ?? 0;
   const future = harnessIndex('health-too-new');
   await runInDurableObject(future.stub, (_i: HarnessDO, s: DurableObjectState) => {
     s.storage.sql.exec('INSERT INTO schema_migrations(version, name) VALUES (?, ?)', latest + 1, 'from-newer-code');
+    s.storage.sql.exec('UPDATE schema_compat SET min_compatible_version = ?', latest + 1);
   });
   const tooNew = await call(ready, ctxFor(future.index));
   expect(tooNew.status).toBe(503);
