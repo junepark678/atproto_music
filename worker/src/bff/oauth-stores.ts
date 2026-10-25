@@ -502,6 +502,18 @@ export class OAuthSessionStore implements NodeSavedSessionStore {
     return outcome;
   }
 
+  /**
+   * When the DID's current session was last refreshed (stored), counting a
+   * session held in memory by its set() time; null when the DID has none.
+   * Keepalive checks it under the DID's lock so a session stored after the run
+   * selected the DID (a re-sign-in) is never mistaken for the due one.
+   */
+  lastRefreshMs(did: string): number | null {
+    const held = this.held.get(did);
+    if (held !== undefined) return held.atMs;
+    return this.info(did)?.last_refresh_ms ?? null;
+  }
+
   /** Row metadata (no ciphertext), for keepalive, reconcile and adminStatus. */
   info(did: string): OAuthSessionRowInfo | null {
     return this.deps.db.one<OAuthSessionRowInfo>(

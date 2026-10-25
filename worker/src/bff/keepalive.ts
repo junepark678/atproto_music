@@ -13,11 +13,22 @@
 // A DID that is not in use is revoked upstream instead and marked
 // `signed_out`; its protocol credentials stay, and a later scrobble is
 // accepted and waits as `blocked` until the user signs in again (§5.8).
-// Revocations count toward the per-run bound of 20 upstream actions. The
-// "not in use" decision is re-evaluated under the DID's lock immediately before
-// the revocation (`revoke(did, {unless})`), so a DID that came into use while
-// the run awaited earlier DIDs is refreshed instead, and a session a concurrent
-// sign-in stored is never deleted (revoke() answers `superseded`).
+// Revocations count toward the per-run bound of 20 upstream actions.
+//
+// The due list is read once at the start of the run, so every decision is
+// re-checked when the run reaches the DID, and the revocation's again under the
+// DID's lock immediately before revoke() snapshots the session
+// (`revoke(did, {unless})`, no await in between):
+//   - the session must still be the due one, i.e. last refreshed before the
+//     run's cutoff (`sessionStore.lastRefreshMs`, which counts a session held in
+//     memory). A session a re-sign-in stored after the run selected the DID —
+//     possibly while that callback's binding check is still running, before any
+//     web session exists — is fresh, so it is left alone: neither refreshed nor
+//     revoked (review round 2);
+//   - the DID must still not be in use; one that came into use while the run
+//     awaited earlier DIDs is refreshed instead.
+// A session stored between the snapshot and the deletion is kept as well
+// (revoke() answers `superseded`).
 //
 // Each run first retries the session store's held writes (§5.5), then pauses —
 // refreshing and revoking nothing and reporting `low_disk` — while the
@@ -47,7 +58,9 @@ export interface KeepaliveDeps {
   db: Db;
   clock: Clock;
   log: Logger;
-  oauth: Pick<OAuthService, 'restore' | 'revoke' | 'flush'>;
+  oauth: Pick<OAuthService, 'restore' | 'revoke' | 'flush'> & {
+    sessionStore: Pick<OAuthService['sessionStore'], 'lastRefreshMs'>;
+  };
   /** worker/src/node/disk.ts diskLowProbe(stateDir, ATMUSIC_MIN_FREE_BYTES). */
   diskLow: () => boolean;
 }
@@ -93,26 +106,46 @@ export async function runOAuthKeepalive(deps: KeepaliveDeps): Promise<KeepaliveR
     return { ...report, status: 'low_disk' };
   }
   const now = deps.clock.nowMs();
+  const cutoff = now - KEEPALIVE_REFRESH_AGE_MS;
   const due = deps.db.all<{ did: string }>(
     "SELECT did FROM oauth_sessions WHERE status = 'active' AND last_refresh_ms < ? ORDER BY last_refresh_ms, did",
-    now - KEEPALIVE_REFRESH_AGE_MS,
+    cutoff,
   );
+  /** The DID's current session is still the one the run selected: last refreshed before the cutoff. */
+  const stillDue = (did: string): boolean => {
+    const at = deps.oauth.sessionStore.lastRefreshMs(did);
+    return at !== null && at < cutoff;
+  };
   let actions = 0;
   for (const { did } of due) {
+    if (!stillDue(did)) {
+      // Refreshed, replaced by a re-sign-in or deleted since the run started.
+      deps.log.log('info', 'oauth_keepalive_superseded', { did });
+      continue;
+    }
     if (actions >= KEEPALIVE_MAX_PER_RUN) {
       report.deferred += 1;
       continue;
     }
     actions += 1;
     if (!didInUse(deps.db, did, now)) {
-      // The check is repeated under the DID's lock right before the revocation (no await in
-      // between), and revoke() keeps a session a concurrent sign-in stored meanwhile.
-      const outcome = await deps.oauth.revoke(did, { unless: () => didInUse(deps.db, did, deps.clock.nowMs()) });
+      // Both checks are repeated under the DID's lock right before the snapshot (no await in
+      // between), and revoke() keeps a session stored after the snapshot.
+      let replaced = false;
+      const outcome = await deps.oauth.revoke(did, {
+        unless: () => {
+          if (!stillDue(did)) {
+            replaced = true;
+            return true;
+          }
+          return didInUse(deps.db, did, deps.clock.nowMs());
+        },
+      });
       if (outcome === 'revoked') {
         report.signedOut.push(did);
         continue;
       }
-      if (outcome === 'superseded') {
+      if (outcome === 'superseded' || replaced) {
         deps.log.log('info', 'oauth_keepalive_superseded', { did });
         continue;
       }

@@ -2,6 +2,7 @@
 // are real library sessions at the fake AS; "in use" is seeded as rows of the
 // migration-2 tables; free space comes from an injected statfs.
 
+import { requestLocalLock } from '@atproto/oauth-client-node';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { KEEPALIVE_MAX_PER_RUN, runOAuthKeepalive } from '../../../src/bff/keepalive';
 import type { OAuthService } from '../../../src/bff/oauth-client';
@@ -226,17 +227,24 @@ describe('oauth-keepalive', () => {
     async () => {
       await withMigratedDb(async (db) => {
         const w = await createWorld(db);
-        const { svc, hold } = gatedService(w);
+        const svc = w.service();
         const [u] = await signInMany(w, svc, 1, 'u');
         w.advance(60 * DAY_MS);
-        // A refresh of the DID is on the wire (holding the library's per-DID lock) when the run starts.
-        const tokenHold = hold('/oauth/token');
-        const refreshing = svc.restore(u!.did, true);
-        await until(() => tokenHold.reached);
+        // Another request of the DID (a PDS write's getSession, say) holds the library's per-DID
+        // lock when the run starts; it does not touch the session.
+        let releaseLock: (() => void) | undefined;
+        const lockHeld = requestLocalLock(
+          `@atproto-oauth-client-${u!.did}`,
+          () =>
+            new Promise<void>((r) => {
+              releaseLock = r;
+            }),
+        );
         let revokeCalls = 0;
         const oauth = {
           restore: svc.restore,
           flush: svc.flush,
+          sessionStore: svc.sessionStore,
           revoke: (did: string, o?: Parameters<OAuthService['revoke']>[1]) => {
             revokeCalls += 1;
             return svc.revoke(did, o);
@@ -244,20 +252,84 @@ describe('oauth-keepalive', () => {
         };
         // The run finds the DID idle and its revoke waits for the lock ...
         const running = runOAuthKeepalive({ db, clock: w.clock, log: w.log, oauth, diskLow: () => false });
-        await until(() => revokeCalls === 1);
+        await until(() => revokeCalls === 1 && releaseLock !== undefined);
         // ... while the user signs in to the web UI.
         seed(w, u!.did, 'web_session', w.clock.nowMs());
-        tokenHold.release();
-        await refreshing;
+        releaseLock!();
+        await lockHeld;
         const report = await running;
 
         expect(report.signedOut).toEqual([]);
         expect(report.refreshed).toEqual([u!.did]);
         expect(w.as.revocations).toEqual([]);
         expect(w.as.calls.count({ path: '/oauth/revoke' })).toBe(0);
-        expect(refreshCount(w, u!.did)).toBe(2); // the concurrent refresh and the keepalive's
+        expect(refreshCount(w, u!.did)).toBe(1); // the keepalive's refresh
         expect(w.sessionRows().map((r) => r.did)).toEqual([u!.did]);
+        expect(w.sessionRows()[0]?.last_refresh_ms).toBe(w.clock.nowMs());
         expect(w.accountStatus(u!.did)).toBe('active');
+        expect(w.revocations.entries()).toEqual([]);
+      });
+    },
+    TIMEOUT,
+  );
+
+  it(
+    'a DID that signs in again after the run selected it keeps its new session: the run neither revokes nor refreshes it and the sign-in ends active',
+    async () => {
+      await withMigratedDb(async (db) => {
+        const w = await createWorld(db);
+        const { svc, hold } = gatedService(w);
+        const [busy, idle] = await signInMany(w, svc, 2, 'u');
+        w.advance(60 * DAY_MS);
+        const runAt = w.clock.nowMs();
+        seed(w, busy!.did, 'web_session', runAt); // in use: refreshed first
+        // The run selects both (both due); its refresh of `busy` is held at the token endpoint.
+        const refreshHold = hold('/oauth/token');
+        const running = runOAuthKeepalive({ db, clock: w.clock, log: w.log, oauth: svc, diskLow: () => false });
+        await until(() => refreshHold.reached);
+
+        // Meanwhile `idle` signs in again. The library stores the new session, then our binding
+        // check (the second identity fetch for the DID in this callback) is held: no web session yet.
+        const b = w.binding();
+        const params = await w.browse((await svc.authorize(idle!.handle, { bindingHash: b.hash })).url);
+        let fetches = 0;
+        let bindingReached = false;
+        let releaseBinding!: () => void;
+        w.identityIntercept = (req) => {
+          if (!req.url.includes(idle!.did)) return null;
+          fetches += 1;
+          if (fetches !== 2) return null;
+          bindingReached = true;
+          return new Promise<void>((r) => {
+            releaseBinding = r;
+          }).then(() => w.identityRouter(req));
+        };
+        const signingIn = svc.callback(params, { bindingHash: b.hash });
+        await until(() => bindingReached);
+        const [oldSession, newSession] = w.as.sessions(idle!.did);
+        expect(oldSession?.revoked).not.toBeNull(); // the library revoked the previous session
+        expect(newSession?.revoked).toBeNull();
+        const revokeCalls = w.as.count('/oauth/revoke');
+
+        refreshHold.release();
+        const report = await running;
+        releaseBinding();
+        const result = await signingIn;
+
+        // The run left the re-signed-in DID alone.
+        expect(report).toEqual({ status: 'ok', refreshed: [busy!.did], signedOut: [], failed: [], deferred: 0 });
+        expect(w.as.count('/oauth/revoke')).toBe(revokeCalls);
+        expect(w.as.sessions(idle!.did)).toHaveLength(2);
+        expect(w.as.sessions(idle!.did)[1]?.revoked).toBeNull();
+        expect(w.as.sessions(idle!.did)[1]?.refreshCount).toBe(0);
+        expect(w.logs.some((l) => l.event === 'oauth_keepalive_superseded' && l.fields.did === idle!.did)).toBe(true);
+        // The sign-in completes with its session stored and the account active.
+        expect(result.did).toBe(idle!.did);
+        const stored = w.sessionRows().map((r) => r.did);
+        expect(stored.sort()).toEqual([busy!.did, idle!.did].sort());
+        expect(w.accountStatus(idle!.did)).toBe('active');
+        expect(w.accountStatus(busy!.did)).toBe('active');
+        expect(refreshCount(w, busy!.did)).toBe(1);
         expect(w.revocations.entries()).toEqual([]);
       });
     },
