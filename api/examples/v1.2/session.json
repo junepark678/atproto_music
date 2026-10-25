@@ -1,0 +1,8 @@
+{
+  "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+  "handle": "alice.test",
+  "username": "alice.test",
+  "csrfToken": "3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f",
+  "status": "active",
+  "expiresAt": "2026-02-14T12:00:00Z"
+}

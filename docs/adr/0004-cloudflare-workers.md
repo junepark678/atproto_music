@@ -1,7 +1,7 @@
 
 # ADR 0004: Cloudflare Workers-only deployment
 
-- **Status:** Accepted with interim owner decisions (§15), 2026-10-24.
+- **Status:** Accepted with interim owner decisions (§15), 2026-10-24. **Superseded in part by [ADR 0005](0005-local-node-host-and-compat-apis.md)** (accepted 2026-10-25): its deployment, OAuth and write-path parts, namely §1, §4.1, §4.2, §5.1, §5.2, §5.5 (pulse mode), §8 (the user-credential and SSRF rows), §11, §13 items 1, 2, 4 and 7, amendments A1, A2, A3, A4, A5, A11, A12, A15, A16, A18 and A19, and the §9.3 dropped list (D) as far as ADR 0005 B16 restores it. Everything ADR 0005 §2 keeps (core and atproto packages, verification, the DO modules over the Node `Db`, the timers, the read models, the goldens and the case map) stays governed by this ADR. The B-series issue amendments are in [AMENDMENTS-node.md](../planning/AMENDMENTS-node.md).
 - **Branch:** `feat/mvp-complete`. It supersedes the deployment parts of MVP.md, ADR 0002 and ADR 0003; see §9.
 - **Driving requirement (the user's words):** "use as little infrastructure as possible, especially just cf workers if possible."
 - **Decision in one sentence:** a **TypeScript**, read-only AppView runs in **one Worker plus one SQLite-backed Durable Object** with Static Assets, one Cron Trigger and one secret. The **browser SPA** is the atproto OAuth client and writes to the user's own PDS. Every record is indexed only after a **signed current-head proof** (`getRecord`) or a **verified range snapshot** (`getBlocks` MST walk).

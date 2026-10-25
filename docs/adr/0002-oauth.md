@@ -1,5 +1,7 @@
 # AT OAuth profile and maintained cryptographic dependencies
 
+Status: accepted 2026-10-06 for the Rust candidate; amended by [ADR 0004](0004-cloudflare-workers.md) §9.2 (A3 browser public client, A5 SSRF policy; see "Amended by ADR 0004" below); **superseded in part by [ADR 0005](0005-local-node-host-and-compat-apis.md) §5 and §3.5** (accepted 2026-10-25): ADR 0005 replaces the A3 browser public client of "Amended by ADR 0004" with one confidential client (B3) and the A5 SSRF paragraph with pinned connections plus `policyFetch` (B5); see "Amended by ADR 0005" below. The Rust profile and dependency sections stay the record of the frozen oracle.
+
 Decision: implement the AT profile over the shared bounded `SafeClient`, using
 `oauth2 = 5.0.0` for PKCE S256, `jwt-compact = 0.8.0` with its `std,p256,k256`
 features for ES256 JWT signing/verification, `p256 = 0.13.2` for P-256 key
@@ -188,3 +190,18 @@ browser library. No production flag may skip TLS, signature, CID, MST, DNS or IP
 policy, or the issuer check. Deterministic tests remain separate from the live
 OAuth gate, which still needs public HTTPS and dedicated accounts on two
 independent PDSs (W6-05).
+
+## Amended by ADR 0005
+
+[ADR 0005](0005-local-node-host-and-compat-apis.md) §5 (accepted 2026-10-25) amends this decision again for the local Node host. It supersedes the **A3** and **A5** paragraphs above; the Rust sections remain the record of the frozen oracle.
+
+**B3: one confidential client (BFF).** The server is the only OAuth client, at the unchanged client_id `https://<origin>/oauth/client-metadata.json`, with `@atproto/oauth-client-node` 0.5.10.
+
+- `client-metadata.json` is served dynamically by the server (no longer a static asset): `application_type: "web"`, `token_endpoint_auth_method: "private_key_jwt"` with `token_endpoint_auth_signing_alg: "ES256"`, `jwks_uri: "https://<origin>/oauth/jwks.json"`, `dpop_bound_access_tokens: true`, `redirect_uris: ["https://<origin>/oauth/callback"]`, and the scopes `atproto repo:<p>.scrobble repo:<p>.follow repo:<p>.settings repo:<p>.love` (`transition:generic` only behind the off-by-default flag, ADR 0004 Q5). Client ID, callback and JWKS URL still derive only from the configured public HTTPS origin.
+- `/oauth/callback` is a server route. It requires the `__Host-atmusic_oauth` login-CSRF cookie bound to the state, then checks the session's `sub` with our identity resolver (the library is given our resolver, never its default PLC resolver).
+- Client signing keys are private ES256 JWKs delivered as a systemd credential, never stored in the database or in backups; rotation announces a key in `jwks.json` before it signs (ADR 0005 §5.4).
+- OAuth states (600 s, single use) and sessions are sealed with AES-256-GCM, keyed by HKDF (`atmusic/oauth/encryption/v1`, info `state` or `tokens`, as in the Rust `token_store.rs`) and bound by AAD to their row. The browser holds only an HttpOnly `__Host-atmusic_session` cookie and a CSRF token, never a token or a DPoP key.
+
+**B5: SSRF policy.** Pinned connections return: every production transport connects only to the address that `isAllowedAddress` checked, SafeFetch keeps its DoH pre-check for reads, and every OAuth, PDS-write, Last.fm and ListenBrainz request goes through `policyFetch` with the same URL, redirect, deadline and size rules (ADR 0005 §3.5).
+
+**Unchanged.** PAR, PKCE S256, server nonces, ES256 DPoP, issuer verification and metadata-document support are still required, now enforced by the server library. No production flag may skip TLS, signature, CID, MST, DNS or IP policy, or the issuer check.

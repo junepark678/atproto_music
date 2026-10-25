@@ -1,0 +1,1182 @@
+[
+  {
+    "method": "GET",
+    "path": "/oauth/client-metadata.json",
+    "status": 200,
+    "example": "v1.2-client-metadata",
+    "headers": {
+      "Cache-Control": "public, max-age=300"
+    }
+  },
+  {
+    "method": "GET",
+    "path": "/oauth/jwks.json",
+    "status": 200,
+    "example": "v1.2-jwks",
+    "headers": {
+      "Cache-Control": "public, max-age=300"
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/auth/start",
+    "status": 200,
+    "example": "v1.2-auth-start",
+    "headers": {
+      "Set-Cookie": "__Host-atmusic_oauth=0000000000000000000000000000000000000000000000000000000000000000; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=600"
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/auth/start",
+    "status": 400,
+    "example": "error-400"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/auth/start",
+    "status": 403,
+    "example": "v1.2-error-403-csrf",
+    "alternatives": [
+      {
+        "example": "v1.2-error-403-signin"
+      }
+    ]
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/auth/start",
+    "status": 413,
+    "example": "error-413"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/auth/start",
+    "status": 422,
+    "example": "error-422"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/auth/start",
+    "status": 429,
+    "example": "error-429",
+    "headers": {
+      "Retry-After": "60"
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/auth/start",
+    "status": 502,
+    "example": "v1.2-error-502-oauth"
+  },
+  {
+    "method": "GET",
+    "path": "/oauth/callback",
+    "status": 303,
+    "headers": {
+      "Location": "/"
+    },
+    "body": null
+  },
+  {
+    "method": "GET",
+    "path": "/oauth/callback",
+    "status": 403,
+    "example": "v1.2-error-403-binding",
+    "alternatives": [
+      {
+        "example": "v1.2-error-403-signin"
+      }
+    ]
+  },
+  {
+    "method": "GET",
+    "path": "/oauth/callback",
+    "status": 502,
+    "example": "v1.2-error-502-oauth"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/auth/session",
+    "status": 200,
+    "example": "v1.2-session",
+    "headers": {
+      "Cache-Control": "no-store"
+    }
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/auth/session",
+    "status": 401,
+    "example": "v1.2-error-401"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/auth/logout",
+    "status": 204,
+    "body": null
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/auth/logout",
+    "status": 400,
+    "example": "error-400"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/auth/logout",
+    "status": 401,
+    "example": "v1.2-error-401"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/auth/logout",
+    "status": 403,
+    "example": "v1.2-error-403-csrf"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/auth/logout",
+    "status": 413,
+    "example": "error-413"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/account/connection",
+    "status": 204,
+    "body": null
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/account/connection",
+    "status": 401,
+    "example": "v1.2-error-401"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/account/connection",
+    "status": 403,
+    "example": "v1.2-error-403-csrf"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/scrobbles",
+    "status": 202,
+    "example": "v1.2-accepted"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/scrobbles",
+    "status": 400,
+    "example": "error-400",
+    "alternatives": [
+      {
+        "example": "v1.2-error-400-idempotency-required"
+      },
+      {
+        "example": "v1.2-error-400-idempotency-invalid"
+      }
+    ]
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/scrobbles",
+    "status": 401,
+    "example": "v1.2-error-401"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/scrobbles",
+    "status": 403,
+    "example": "v1.2-error-403-csrf"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/scrobbles",
+    "status": 409,
+    "example": "v1.2-error-409-idempotency"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/scrobbles",
+    "status": 413,
+    "example": "error-413"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/scrobbles",
+    "status": 422,
+    "example": "error-422"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/scrobbles",
+    "status": 503,
+    "example": "v1.2-error-503-publication"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/scrobbles/{id}",
+    "status": 202,
+    "example": "v1.2-accepted"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/scrobbles/{id}",
+    "status": 401,
+    "example": "v1.2-error-401"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/scrobbles/{id}",
+    "status": 403,
+    "example": "v1.2-error-403-csrf"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/scrobbles/{id}",
+    "status": 404,
+    "example": "error-404"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/scrobbles/{id}",
+    "status": 422,
+    "example": "error-422"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/scrobbles/{id}",
+    "status": 503,
+    "example": "v1.2-error-503-publication"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/v1/follows/{did}",
+    "status": 202,
+    "example": "v1.2-accepted"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/v1/follows/{did}",
+    "status": 401,
+    "example": "v1.2-error-401"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/v1/follows/{did}",
+    "status": 403,
+    "example": "v1.2-error-403-csrf"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/v1/follows/{did}",
+    "status": 422,
+    "example": "error-422"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/v1/follows/{did}",
+    "status": 503,
+    "example": "v1.2-error-503-publication"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/follows/{did}",
+    "status": 202,
+    "example": "v1.2-accepted"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/follows/{did}",
+    "status": 401,
+    "example": "v1.2-error-401"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/follows/{did}",
+    "status": 403,
+    "example": "v1.2-error-403-csrf"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/follows/{did}",
+    "status": 422,
+    "example": "error-422"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/follows/{did}",
+    "status": 503,
+    "example": "v1.2-error-503-publication"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/v1/loves",
+    "status": 202,
+    "example": "v1.2-accepted"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/v1/loves",
+    "status": 400,
+    "example": "error-400"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/v1/loves",
+    "status": 401,
+    "example": "v1.2-error-401"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/v1/loves",
+    "status": 403,
+    "example": "v1.2-error-403-csrf"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/v1/loves",
+    "status": 413,
+    "example": "error-413"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/v1/loves",
+    "status": 422,
+    "example": "error-422"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/v1/loves",
+    "status": 503,
+    "example": "v1.2-error-503-publication"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/loves",
+    "status": 202,
+    "example": "v1.2-accepted"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/loves",
+    "status": 401,
+    "example": "v1.2-error-401"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/loves",
+    "status": 403,
+    "example": "v1.2-error-403-csrf"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/loves",
+    "status": 422,
+    "example": "error-422"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/loves",
+    "status": 503,
+    "example": "v1.2-error-503-publication"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/v1/account/indexing",
+    "status": 202,
+    "example": "v1.2-accepted"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/v1/account/indexing",
+    "status": 400,
+    "example": "error-400"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/v1/account/indexing",
+    "status": 401,
+    "example": "v1.2-error-401"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/v1/account/indexing",
+    "status": 403,
+    "example": "v1.2-error-403-csrf"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/v1/account/indexing",
+    "status": 413,
+    "example": "error-413"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/v1/account/indexing",
+    "status": 422,
+    "example": "error-422"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/v1/account/indexing",
+    "status": 503,
+    "example": "v1.2-error-503-publication"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/operations/{id}",
+    "status": 200,
+    "example": "v1.2-operation",
+    "headers": {
+      "Cache-Control": "no-store"
+    }
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/operations/{id}",
+    "status": 401,
+    "example": "v1.2-error-401"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/operations/{id}",
+    "status": 404,
+    "example": "error-404"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/account",
+    "status": 200,
+    "example": "v1.2-account",
+    "headers": {
+      "Cache-Control": "no-store"
+    }
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/account",
+    "status": 401,
+    "example": "v1.2-error-401"
+  },
+  {
+    "method": "PATCH",
+    "path": "/api/v1/account",
+    "status": 200,
+    "example": "v1.2-account"
+  },
+  {
+    "method": "PATCH",
+    "path": "/api/v1/account",
+    "status": 400,
+    "example": "error-400"
+  },
+  {
+    "method": "PATCH",
+    "path": "/api/v1/account",
+    "status": 401,
+    "example": "v1.2-error-401"
+  },
+  {
+    "method": "PATCH",
+    "path": "/api/v1/account",
+    "status": 403,
+    "example": "v1.2-error-403-csrf"
+  },
+  {
+    "method": "PATCH",
+    "path": "/api/v1/account",
+    "status": 409,
+    "example": "v1.2-error-409-username"
+  },
+  {
+    "method": "PATCH",
+    "path": "/api/v1/account",
+    "status": 413,
+    "example": "error-413"
+  },
+  {
+    "method": "PATCH",
+    "path": "/api/v1/account",
+    "status": 422,
+    "example": "error-422",
+    "alternatives": [
+      {
+        "example": "v1.2-error-422-username"
+      }
+    ]
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/account/ignored-listens",
+    "status": 200,
+    "example": "v1.2-ignored-listens",
+    "headers": {
+      "Cache-Control": "no-store"
+    }
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/account/ignored-listens",
+    "status": 400,
+    "example": "error-400"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/account/ignored-listens",
+    "status": 401,
+    "example": "v1.2-error-401"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/account/ignored-listens",
+    "status": 422,
+    "example": "error-422"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/account/credentials",
+    "status": 200,
+    "example": "v1.2-credentials",
+    "headers": {
+      "Cache-Control": "no-store"
+    }
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/account/credentials",
+    "status": 401,
+    "example": "v1.2-error-401"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/account/app-passwords",
+    "status": 201,
+    "example": "v1.2-app-password",
+    "headers": {
+      "Cache-Control": "no-store"
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/account/app-passwords",
+    "status": 400,
+    "example": "error-400"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/account/app-passwords",
+    "status": 401,
+    "example": "v1.2-error-401"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/account/app-passwords",
+    "status": 403,
+    "example": "v1.2-error-403-csrf"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/account/app-passwords",
+    "status": 413,
+    "example": "error-413"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/account/app-passwords",
+    "status": 422,
+    "example": "error-422"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/account/listenbrainz-tokens",
+    "status": 201,
+    "example": "v1.2-listenbrainz-token",
+    "headers": {
+      "Cache-Control": "no-store"
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/account/listenbrainz-tokens",
+    "status": 400,
+    "example": "error-400"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/account/listenbrainz-tokens",
+    "status": 401,
+    "example": "v1.2-error-401"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/account/listenbrainz-tokens",
+    "status": 403,
+    "example": "v1.2-error-403-csrf"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/account/listenbrainz-tokens",
+    "status": 413,
+    "example": "error-413"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/account/listenbrainz-tokens",
+    "status": 422,
+    "example": "error-422"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/account/lastfm-apps",
+    "status": 201,
+    "example": "v1.2-lastfm-app",
+    "headers": {
+      "Cache-Control": "no-store"
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/account/lastfm-apps",
+    "status": 400,
+    "example": "error-400"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/account/lastfm-apps",
+    "status": 401,
+    "example": "v1.2-error-401"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/account/lastfm-apps",
+    "status": 403,
+    "example": "v1.2-error-403-csrf"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/account/lastfm-apps",
+    "status": 413,
+    "example": "error-413"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/account/lastfm-apps",
+    "status": 422,
+    "example": "error-422"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/account/app-passwords/{id}",
+    "status": 204,
+    "body": null
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/account/app-passwords/{id}",
+    "status": 401,
+    "example": "v1.2-error-401"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/account/app-passwords/{id}",
+    "status": 403,
+    "example": "v1.2-error-403-csrf"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/account/app-passwords/{id}",
+    "status": 404,
+    "example": "error-404"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/account/listenbrainz-tokens/{id}",
+    "status": 204,
+    "body": null
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/account/listenbrainz-tokens/{id}",
+    "status": 401,
+    "example": "v1.2-error-401"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/account/listenbrainz-tokens/{id}",
+    "status": 403,
+    "example": "v1.2-error-403-csrf"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/account/listenbrainz-tokens/{id}",
+    "status": 404,
+    "example": "error-404"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/account/lastfm-apps/{apiKey}",
+    "status": 204,
+    "body": null
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/account/lastfm-apps/{apiKey}",
+    "status": 401,
+    "example": "v1.2-error-401"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/account/lastfm-apps/{apiKey}",
+    "status": 403,
+    "example": "v1.2-error-403-csrf"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/account/lastfm-apps/{apiKey}",
+    "status": 404,
+    "example": "error-404"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/account/lastfm-sessions/{id}",
+    "status": 204,
+    "body": null
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/account/lastfm-sessions/{id}",
+    "status": 401,
+    "example": "v1.2-error-401"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/account/lastfm-sessions/{id}",
+    "status": 403,
+    "example": "v1.2-error-403-csrf"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/account/lastfm-sessions/{id}",
+    "status": 404,
+    "example": "error-404"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/lastfm/authorize",
+    "status": 200,
+    "example": "v1.2-lastfm-authorized",
+    "headers": {
+      "Cache-Control": "no-store"
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/lastfm/authorize",
+    "status": 400,
+    "example": "error-400"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/lastfm/authorize",
+    "status": 401,
+    "example": "v1.2-error-401"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/lastfm/authorize",
+    "status": 403,
+    "example": "v1.2-error-403-csrf"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/lastfm/authorize",
+    "status": 404,
+    "example": "error-404"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/lastfm/authorize",
+    "status": 413,
+    "example": "error-413"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/lastfm/authorize",
+    "status": 422,
+    "example": "error-422"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/links",
+    "status": 200,
+    "example": "v1.2-links",
+    "headers": {
+      "Cache-Control": "no-store"
+    }
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/links",
+    "status": 401,
+    "example": "v1.2-error-401"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/links/lastfm/start",
+    "status": 200,
+    "example": "v1.2-link-start",
+    "headers": {
+      "Cache-Control": "no-store"
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/links/lastfm/start",
+    "status": 401,
+    "example": "v1.2-error-401"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/links/lastfm/start",
+    "status": 403,
+    "example": "v1.2-error-403-csrf"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/links/lastfm/start",
+    "status": 503,
+    "example": "v1.2-error-503-lastfm"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/links/lastfm/callback",
+    "status": 303,
+    "headers": {
+      "Location": "/"
+    },
+    "body": null
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/links/lastfm/callback",
+    "status": 401,
+    "example": "v1.2-error-401"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/links/lastfm/callback",
+    "status": 403,
+    "example": "v1.2-error-403-csrf"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/links/lastfm/callback",
+    "status": 502,
+    "example": "error-502"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/links/listenbrainz",
+    "status": 201,
+    "example": "v1.2-link"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/links/listenbrainz",
+    "status": 400,
+    "example": "error-400"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/links/listenbrainz",
+    "status": 401,
+    "example": "v1.2-error-401"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/links/listenbrainz",
+    "status": 403,
+    "example": "v1.2-error-403-csrf"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/links/listenbrainz",
+    "status": 413,
+    "example": "error-413"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/links/listenbrainz",
+    "status": 422,
+    "example": "error-422"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/links/listenbrainz",
+    "status": 502,
+    "example": "error-502"
+  },
+  {
+    "method": "PATCH",
+    "path": "/api/v1/links/{id}",
+    "status": 200,
+    "example": "v1.2-link"
+  },
+  {
+    "method": "PATCH",
+    "path": "/api/v1/links/{id}",
+    "status": 400,
+    "example": "error-400"
+  },
+  {
+    "method": "PATCH",
+    "path": "/api/v1/links/{id}",
+    "status": 401,
+    "example": "v1.2-error-401"
+  },
+  {
+    "method": "PATCH",
+    "path": "/api/v1/links/{id}",
+    "status": 403,
+    "example": "v1.2-error-403-csrf"
+  },
+  {
+    "method": "PATCH",
+    "path": "/api/v1/links/{id}",
+    "status": 404,
+    "example": "error-404"
+  },
+  {
+    "method": "PATCH",
+    "path": "/api/v1/links/{id}",
+    "status": 413,
+    "example": "error-413"
+  },
+  {
+    "method": "PATCH",
+    "path": "/api/v1/links/{id}",
+    "status": 422,
+    "example": "error-422"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/links/{id}",
+    "status": 204,
+    "body": null
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/links/{id}",
+    "status": 401,
+    "example": "v1.2-error-401"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/links/{id}",
+    "status": 403,
+    "example": "v1.2-error-403-csrf"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/links/{id}",
+    "status": 404,
+    "example": "error-404"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/imports",
+    "status": 200,
+    "example": "v1.2-imports",
+    "headers": {
+      "Cache-Control": "no-store"
+    }
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/imports",
+    "status": 401,
+    "example": "v1.2-error-401"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/imports",
+    "status": 202,
+    "example": "v1.2-import-job"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/imports",
+    "status": 400,
+    "example": "error-400"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/imports",
+    "status": 401,
+    "example": "v1.2-error-401"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/imports",
+    "status": 403,
+    "example": "v1.2-error-403-csrf"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/imports",
+    "status": 409,
+    "example": "v1.2-error-409-import"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/imports",
+    "status": 413,
+    "example": "error-413"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/imports",
+    "status": 422,
+    "example": "error-422"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/imports",
+    "status": 503,
+    "example": "v1.2-error-503-publication",
+    "alternatives": [
+      {
+        "example": "v1.2-error-503-lastfm"
+      }
+    ]
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/imports/upload",
+    "status": 202,
+    "example": "v1.2-import-job"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/imports/upload",
+    "status": 401,
+    "example": "v1.2-error-401"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/imports/upload",
+    "status": 403,
+    "example": "v1.2-error-403-csrf"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/imports/upload",
+    "status": 409,
+    "example": "v1.2-error-409-import"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/imports/upload",
+    "status": 413,
+    "example": "error-413"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/imports/upload",
+    "status": 422,
+    "example": "error-422"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/imports/upload",
+    "status": 429,
+    "example": "error-429",
+    "headers": {
+      "Retry-After": "60"
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/imports/upload",
+    "status": 503,
+    "example": "v1.2-error-503-publication"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/imports/upload",
+    "status": 507,
+    "example": "v1.2-error-507"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/imports/{id}",
+    "status": 200,
+    "example": "v1.2-import-job",
+    "headers": {
+      "Cache-Control": "no-store"
+    }
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/imports/{id}",
+    "status": 401,
+    "example": "v1.2-error-401"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/imports/{id}",
+    "status": 404,
+    "example": "error-404"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/imports/{id}/cancel",
+    "status": 200,
+    "example": "v1.2-import-job"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/imports/{id}/cancel",
+    "status": 401,
+    "example": "v1.2-error-401"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/imports/{id}/cancel",
+    "status": 403,
+    "example": "v1.2-error-403-csrf"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/imports/{id}/cancel",
+    "status": 404,
+    "example": "error-404"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/imports/{id}/resume",
+    "status": 200,
+    "example": "v1.2-import-job"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/imports/{id}/resume",
+    "status": 401,
+    "example": "v1.2-error-401"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/imports/{id}/resume",
+    "status": 403,
+    "example": "v1.2-error-403-csrf"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/imports/{id}/resume",
+    "status": 404,
+    "example": "error-404"
+  }
+]
