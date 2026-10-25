@@ -609,16 +609,13 @@ class NodeWavesTests(unittest.TestCase):
         declared = vcm.node_wave_test_ids(node_waves())
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            # The real files of every target wave 0 requires. A target that a sibling wave-0 package (N0-01)
-            # adds and that is not merged into this checkout yet is the only thing simulated.
+            # The real files of every target wave 0 requires, N0-01's included: a missing wave-0 target fails.
             absent = copy_targets(root, [t for t in refs if t not in later])
-            for test in absent:
-                if test.startswith(f'{CHECK_TS_TEST} › ') and not (ROOT / CHECK_TS_TEST).exists():
-                    continue  # running inside check-ts.test.ts's disposable copy, which omits that file by design
-                self.assertIn(test, declared, test)
-                self.assertEqual(declared[test][0], 0, test)
-                self.assertNotEqual(declared[test][1], 'N0-02', test)
-            build_tree(root, absent)
+            # Only inside check-ts.test.ts's disposable copy, which omits that file by design (so its nested
+            # gate never recurses), are that file's titles restored; nothing else may be absent.
+            omitted = [t for t in absent if t.startswith(f'{CHECK_TS_TEST} › ') and not (ROOT / CHECK_TS_TEST).exists()]
+            self.assertEqual([t for t in absent if t not in omitted], [])
+            build_tree(root, omitted)
             code, stdout, stderr = run_cli(case_map, extra=('--check-tests', '--node-wave', '0', '--root', str(root)))
         self.assertEqual((code, stderr), (0, ''))
         pending = dict(re.findall(r"^PENDING case map: (\S+): .* pending \(wave \d, (N\d-\d\d)\)$", stdout, re.M))

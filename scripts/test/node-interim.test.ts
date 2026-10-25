@@ -35,7 +35,6 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const TIMEOUT = 10 * 60_000;
-const SCAFFOLD = 'worker/test/node/scaffold.test.ts';
 const CHECK_TS_TEST = 'scripts/test/check-ts.test.ts';
 
 interface Result {
@@ -120,19 +119,6 @@ class DisposableCopy {
     symlinkSync(join(ROOT, 'node_modules'), join(this.dir, 'node_modules'));
     writeStub(join(this.dir, 'scripts/check-ts.sh'), 'check-ts', 0);
     writeStub(join(this.dir, 'scripts/check_goldens.sh'), 'goldens', 0);
-    // The end of wave 0: a wave-0 target that the sibling package N0-01 adds is simulated only
-    // when that package is not merged into this checkout yet. N0-02's own targets are real.
-    if (!existsSync(join(ROOT, SCAFFOLD))) {
-      const waves = JSON.parse(readFileSync(join(ROOT, 'docs/planning/node-waves.json'), 'utf8')) as {
-        wave: number;
-        packages: { id: string; tests: string[] }[];
-      }[];
-      const n001 = waves[0]!.packages.find((p) => p.id === 'N0-01')!;
-      const titles = n001.tests.filter((t) => t.startsWith(`${SCAFFOLD} › `)).map((t) => t.slice(SCAFFOLD.length + 3));
-      expect(titles.length).toBeGreaterThan(0);
-      mkdirSync(join(this.dir, dirname(SCAFFOLD)), { recursive: true });
-      writeFileSync(join(this.dir, SCAFFOLD), titles.map((t) => `it(${JSON.stringify(t)}, () => {});\n`).join(''));
-    }
     // Inside scripts/test/check-ts.test.ts's disposable copy, which omits that file by design (so its
     // nested gate never recurses), the case map's targets in it are restored as titles only.
     if (!existsSync(join(ROOT, CHECK_TS_TEST))) {

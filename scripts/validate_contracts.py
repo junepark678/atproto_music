@@ -1047,7 +1047,7 @@ SCROBBLE_V1_PROPERTIES = {
     'recordingMbid': {'type': 'string'},
 }
 SCROBBLE_V12_OPTIONAL = {'albumArtist', 'trackNumber', 'artistMbids', 'releaseMbid', 'releaseGroupMbid', 'isrc', 'submissionClient', 'musicService'}
-CONSTRAINTS = ('type', 'format', 'minLength', 'maxLength', 'minimum', 'maximum', 'enum', 'const', 'items')
+CONSTRAINTS = ('type', 'format', 'minLength', 'maxLength', 'minGraphemes', 'maxGraphemes', 'minimum', 'maximum', 'enum', 'const', 'items')
 
 
 def check_lexicon(document, label):
@@ -1127,10 +1127,13 @@ def additive_lexicon(published, current, label):
         now = new['record']['properties'][name]
         for constraint in ('type', 'format', 'enum', 'const', 'items'):
             require(now.get(constraint) == field.get(constraint), f'{label}: {name}.{constraint} changed from the published value')
-        for constraint in ('maxLength', 'maximum'):
+        # Any bound the published field lacked is a tightening when added; an existing bound may only loosen.
+        for constraint in ('maxLength', 'maximum', 'maxGraphemes'):
             if constraint in field:
                 require(now.get(constraint, float('inf')) >= field[constraint], f'{label}: {name}.{constraint} tightened')
-        for constraint in ('minLength', 'minimum'):
+            else:
+                require(constraint not in now, f'{label}: {name}.{constraint} added')
+        for constraint in ('minLength', 'minimum', 'minGraphemes'):
             if constraint in field:
                 require(now.get(constraint, float('-inf')) <= field[constraint], f'{label}: {name}.{constraint} tightened')
             else:
@@ -1244,6 +1247,19 @@ def compatibility_controls(spec):
          lambda: additive_lexicon(published_scrobble, scrobble_with(lambda r: r['properties']['trackNumber'].update(maximum=999))['scrobble'],
                                   'lexicons/scrobble.json'),
          'lexicons/scrobble.json: trackNumber.maximum tightened'),
+        ('published scrobble adds maxGraphemes to albumArtist',
+         lambda: lexicons(scrobble_with(lambda r: r['properties']['albumArtist'].update(maxGraphemes=5)), {'scrobble': published_scrobble}),
+         'lexicons/scrobble.json: albumArtist.maxGraphemes added'),
+        ('published scrobble adds minGraphemes to submissionClient',
+         lambda: additive_lexicon(published_scrobble, scrobble_with(lambda r: r['properties']['submissionClient'].update(minGraphemes=2))['scrobble'],
+                                  'lexicons/scrobble.json'),
+         'lexicons/scrobble.json: submissionClient.minGraphemes added'),
+        ('published scrobble adds maxLength to recordingMbid',
+         lambda: additive_lexicon(published_scrobble, scrobble_with(lambda r: r['properties']['recordingMbid'].update(maxLength=10))['scrobble'],
+                                  'lexicons/scrobble.json'),
+         'lexicons/scrobble.json: recordingMbid.maxLength added'),
+        ('scrobble lexicon adds maxGraphemes to artist', lambda: lexicons(scrobble_with(lambda r: r['properties']['artist'].update(maxGraphemes=5))),
+         'lexicons/scrobble.json: v1 field artist changed (B13)'),
         ('love lexicon with optional artist', lambda: lexicons({**documents, 'love': _mutated_love()}),
          'lexicons/love.json: artist, track and createdAt required'),
         ('Scrobble loses album', lambda: v11_compatibility(spec_with(lambda s: s['Scrobble']['properties'].pop('album'))),
