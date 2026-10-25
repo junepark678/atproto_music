@@ -8,11 +8,11 @@
 //    bridge streams the body only as the handler reads it (http-bridge.ts,
 //    `bodyBytesRead()`), and its 10,240,000-byte cap is the backstop.
 // 2. **Publication gate.** Closed → 503 `{"code":503,"error":"Cannot submit
-//    listens to queue, please try again later."}`. Open means the namespace
-//    gate allows publication (`AppConfig.publication`: an owned prefix with
-//    ownership evidence), or the fixture prefix, which only test entries can
-//    configure (`allowFixturePrefix`); production refuses the fixture prefix
-//    at parse time, so it never writes there.
+//    listens to queue, please try again later."}`. Open means exactly the
+//    namespace gate's `publication` capability (ADR §5.7, `AppConfig.publication`:
+//    an owned, non-fixture prefix with NAMESPACE_OWNERSHIP_REF, mirroring
+//    `Namespace::require_publication`). The fixture prefix never opens it, so
+//    /1/ agrees with /api/v1/meta and with the Last.fm write methods.
 // 3. A declared Content-Length over 10,240,000 bytes is ListenBrainz's
 //    "Payload too large" 400 without reading the body.
 // 4. `validateSubmission` (validate.ts, N2-08): the envelope and per-listen
@@ -73,8 +73,8 @@ export const SUBMIT_LISTENS_PATH = '/1/submit-listens';
 export const LB_DAILY_CAP_MESSAGE = 'Daily listen limit exceeded.';
 
 /** Whether submissions may be queued for publication (step 2 of the module comment). */
-export function lbPublicationOpen(config: Pick<AppConfig, 'prefix' | 'publication' | 'fixturePrefix'>): boolean {
-  return config.prefix !== null && (config.publication || config.fixturePrefix);
+export function lbPublicationOpen(config: Pick<AppConfig, 'prefix' | 'publication'>): boolean {
+  return config.prefix !== null && config.publication;
 }
 
 // ---------------------------------------------------------------------------

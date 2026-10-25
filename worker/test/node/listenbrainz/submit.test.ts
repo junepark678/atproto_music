@@ -54,6 +54,12 @@ const NOW_MS = Date.parse('2026-01-15T12:00:00Z');
 const NOW_S = NOW_MS / 1000;
 const ALICE = 'did:plc:alice000000000000000000';
 const BOB = 'did:plc:bob00000000000000000000';
+/** An owned test prefix with ownership evidence: the namespace gate allows publication (ADR §5.7). */
+const OWNED = 'org.example.music';
+const SCROBBLE = `${OWNED}.scrobble`;
+const OPEN_GATE = { LEXICON_PREFIX: OWNED, NAMESPACE_OWNERSHIP_REF: 'dns:_lexicon.music.example.org TXT' };
+/** The fixture prefix without ownership evidence: no `publication` capability. */
+const FIXTURE_GATE = { LEXICON_PREFIX: 'com.example.atmusic', NAMESPACE_OWNERSHIP_REF: '' };
 
 const LB_ROUTES: readonly RouteDef[] = [...createSubmitRoutes(), ...createTokenRoutes()];
 
@@ -79,7 +85,7 @@ async function rig(o: { env?: Record<string, string | undefined>; clock?: FixedC
     routes: LB_ROUTES,
     clock,
     ...(kit === null ? {} : { transport: kit.transport }),
-    ...(o.env === undefined ? {} : { env: o.env }),
+    env: o.env ?? OPEN_GATE,
   });
   const random = seededRandom(0xb0b);
   const revocations = new MemoryRevocations(clock);
@@ -258,10 +264,10 @@ describe('POST /1/submit-listens (ADR §8.3)', () => {
       priority: 0,
       state: 'queued',
       due_at: NOW_MS,
-      collection: 'com.example.atmusic.scrobble',
+      collection: SCROBBLE,
     });
     expect(record(ops[0]!)).toMatchObject({
-      $type: 'com.example.atmusic.scrobble',
+      $type: SCROBBLE,
       artist: 'Boards of Canada',
       track: 'Roygbiv',
     });
@@ -372,18 +378,26 @@ describe('POST /1/submit-listens (ADR §8.3)', () => {
     expect(nextDay.status).toBe(200);
     expect(r.count('SELECT count(*) AS n FROM operations WHERE did = ?', ALICE)).toBe(3001);
 
-    // A closed publication gate (no lexicon prefix): 503, nothing written.
-    const closed = await rig({ env: { LEXICON_PREFIX: '' } });
-    const bobToken = closed.user(BOB, 'bob.example.com');
-    const refused = await submit(closed.app, bobToken, body('single', [listen(0)]));
-    expect(refused.status).toBe(503);
-    expect(await refused.json()).toEqual({
-      code: 503,
-      error: 'Cannot submit listens to queue, please try again later.',
-    });
-    expect(refused.headers.get('access-control-allow-origin')).toBe('*');
-    expect(closed.count('SELECT count(*) AS n FROM operations')).toBe(0);
-    expect(closed.count('SELECT count(*) AS n FROM listen_keys')).toBe(0);
+    // A closed publication gate is 503 with nothing written: no lexicon
+    // prefix at all, and the fixture prefix, which never carries the
+    // `publication` capability (ADR §5.7).
+    for (const env of [{ LEXICON_PREFIX: '', NAMESPACE_OWNERSHIP_REF: '' }, FIXTURE_GATE]) {
+      const closed = await rig({ env });
+      expect(closed.app.config.app.publication).toBe(false);
+      const bobToken = closed.user(BOB, 'bob.example.com');
+      const refused = await submit(closed.app, bobToken, body('single', [listen(0)]));
+      expect(refused.status).toBe(503);
+      expect(await refused.json()).toEqual({
+        code: 503,
+        error: 'Cannot submit listens to queue, please try again later.',
+      });
+      expect(refused.headers.get('access-control-allow-origin')).toBe('*');
+      const imported = await submit(closed.app, bobToken, importOf(0, 3));
+      expect(imported.status).toBe(503);
+      expect(closed.count('SELECT count(*) AS n FROM operations')).toBe(0);
+      expect(closed.count('SELECT count(*) AS n FROM listen_keys')).toBe(0);
+      expect(closed.count('SELECT count(*) AS n FROM ignored_listens')).toBe(0);
+    }
   }, 60_000);
 
   it('recorded Web Scrobbler (scrobble and now playing), Navidrome (int tracknumber, artist_names) and Pano request bodies are accepted unchanged', async () => {
@@ -585,7 +599,7 @@ describe('POST /1/submit-listens (ADR §8.3)', () => {
     expect(writers.sent.length).toBeGreaterThanOrEqual(1);
     const sent = r.ops(did)[0]!;
     expect(sent.state).toBe('succeeded');
-    const remote = await kit.repos.Alice.getRecord('com.example.atmusic.scrobble', sent.rkey!);
+    const remote = await kit.repos.Alice.getRecord(SCROBBLE, sent.rkey!);
     expect(remote).not.toBeNull();
     expect(Date.parse((remote!.value as { createdAt: string }).createdAt)).toBe(dueMs);
   }, 30_000);

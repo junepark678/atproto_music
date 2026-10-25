@@ -22,7 +22,10 @@ const NOW_MS = Date.parse('2026-01-15T12:00:00Z');
 const NOW_S = NOW_MS / 1000;
 const ALICE = 'did:plc:alice000000000000000000';
 const BOB = 'did:plc:bob00000000000000000000';
-const SCROBBLE = 'com.example.atmusic.scrobble';
+/** An owned test prefix with ownership evidence: the namespace gate allows publication (ADR §5.7). */
+const OWNED = 'org.example.music';
+const SCROBBLE = `${OWNED}.scrobble`;
+const OPEN_GATE = { LEXICON_PREFIX: OWNED, NAMESPACE_OWNERSHIP_REF: 'dns:_lexicon.music.example.org TXT' };
 
 afterEach(closeApps);
 
@@ -38,7 +41,7 @@ interface Rig {
 
 async function rig(): Promise<Rig> {
   const clock = fixedClock();
-  const app = await startApp({ routes: [...createSubmitRoutes(), ...createTokenRoutes()], clock });
+  const app = await startApp({ routes: [...createSubmitRoutes(), ...createTokenRoutes()], clock, env: OPEN_GATE });
   const random = seededRandom(0x70c);
   const revocations = new MemoryRevocations(clock);
   return {
