@@ -27,8 +27,8 @@
 import type { Did } from '@atmusic/core/api-types';
 import { ApiError, DEFAULT_STATUS } from '@atmusic/core/errors';
 import { isSupportedDid } from '@atmusic/core/syntax';
+import { PITR_WINDOW_MS } from '../app/index-core';
 import type { AdminStatus, PitrResult } from '../do/contracts';
-import { PITR_WINDOW_MS } from '../do/index-do';
 import { errorResponse, toErrorResponse } from './error';
 import { json } from './json';
 import { invalidField, readJsonBody } from './params';
