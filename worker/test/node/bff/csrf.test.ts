@@ -46,10 +46,11 @@ function guardCtx(db: SqliteDb): { ctx: SessionGuardCtx; sessions: WebSessions; 
   });
   let calls = 0;
   const counted: SessionGuardCtx['sessions'] = {
-    resolveCookieHeader(header) {
+    lookupCookieHeader(header) {
       calls += 1;
-      return sessions.resolveCookieHeader(header);
+      return sessions.lookupCookieHeader(header);
     },
+    renew: (session) => sessions.renew(session),
   };
   const box = createBox([{ id: 'e1', key: Uint8Array.from({ length: 32 }, (_, i) => i + 1) }], seededRandom(4));
   return {
@@ -72,6 +73,8 @@ async function expectEnvelope(result: SessionGuardResult, status: 401 | 403): Pr
   expect(res.status).toBe(status);
   expect(res.headers.get('content-type')).toBe('application/json');
   expect(res.headers.get('cache-control')).toBe('no-store');
+  // A refused request never (re)installs the session cookie.
+  expect(res.headers.getSetCookie()).toEqual([]);
   const body = (await res.json()) as { error: Record<string, unknown> };
   // The v1.2 fixture is the schema: same keys, code and message.
   expect(body).toEqual(example(status === 401 ? 'error-401.json' : 'error-403-csrf.json'));
@@ -99,6 +102,12 @@ describe('csrf', () => {
       const origin: [string, string] = ['origin', ORIGIN];
       const token: [string, string] = ['x-csrf-token', good];
       expect(good).toMatch(/^[0-9a-f]{64}$/);
+      const sessionRows = () =>
+        db.all<Record<string, unknown>>(
+          'SELECT hex(token_hash) AS h, did, created_at_ms, expires_at_ms, last_seen_ms FROM web_sessions ORDER BY h',
+        );
+      const initialRows = sessionRows();
+      expect(initialRows).toHaveLength(2);
 
       // 401: no cookie, an unknown cookie, a repeated cookie, the pre-__Host- name.
       const unauthenticated: [string, string][][] = [
@@ -139,6 +148,45 @@ describe('csrf', () => {
           expect(result.ok ? null : result.failure).toEqual({ reason: 'csrf', csrf: reason });
         }
       }
+      // Every 401 and 403 above wrote nothing.
+      expect(sessionRows()).toEqual(initialRows);
+
+      // The same matrix on a session whose term began more than 24 h ago
+      // (renewal due): still 401/403 with no Set-Cookie, and still no write.
+      const lateClock = fixedClock('2026-01-16T12:00:00.001Z');
+      const lateNow = Date.parse('2026-01-16T12:00:00.001Z');
+      const lateSessions = createWebSessions({
+        db,
+        clock: lateClock,
+        random: seededRandom(6),
+        revocations: new MemoryRevocations(lateClock),
+      });
+      const lateCtx: SessionGuardCtx = { ...ctx, sessions: lateSessions };
+      for (const headers of unauthenticated) {
+        await expectEnvelope(requireSession(request('/api/v1/scrobbles', 'POST', headers), lateCtx), 401);
+      }
+      for (const [reason, headers] of forbidden) {
+        const result = requireSession(request('/api/v1/scrobbles', 'POST', headers), lateCtx);
+        await expectEnvelope(result, 403);
+        expect(result.ok ? null : result.failure).toEqual({ reason: 'csrf', csrf: reason });
+      }
+      await expectEnvelope(requireSession(request('/api/v1/account', 'GET', [cookie]), lateCtx, { unsafe: true }), 403);
+      expect(sessionRows()).toEqual(initialRows);
+      // Only the admitted request renews: the row moves, the cookie is re-sent.
+      const admitted = requireSession(request('/api/v1/scrobbles', 'POST', [cookie, origin, token]), lateCtx);
+      expect(admitted.ok ? admitted.session : null).toMatchObject({
+        did: ALICE,
+        token: alice.token,
+        expiresAtMs: lateNow + 30 * 24 * 60 * 60 * 1000,
+        lastSeenMs: lateNow,
+        renewCookie: `${SESSION_COOKIE}=${alice.token}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=2592000`,
+      });
+      const aliceHash = alice.tokenHash.toUpperCase();
+      expect(sessionRows().find((r) => r.h === aliceHash)).toMatchObject({
+        expires_at_ms: lateNow + 30 * 24 * 60 * 60 * 1000,
+        last_seen_ms: lateNow,
+      });
+      expect(sessionRows().find((r) => r.h !== aliceHash)).toEqual(initialRows.find((r) => r.h !== aliceHash));
 
       // The correct pair passes for every unsafe method (hex case is not significant).
       for (const method of ['POST', 'PUT', 'PATCH', 'DELETE']) {

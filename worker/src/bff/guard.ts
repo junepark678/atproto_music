@@ -25,8 +25,12 @@
 //   no-store`, with the fixed messages of api/examples/v1.2/error-401.json and
 //   error-403-csrf.json. Those two v1.2 codes are not in the frozen v1.1
 //   ErrorCode union (@atmusic/core/errors), so they are built here.
-// - **Renewal.** When resolving renewed the session, `session.renewCookie` is
-//   set; `withSessionCookie(response, session)` appends it.
+// - **Renewal only once admitted.** The cookie is looked up without writing,
+//   the CSRF check runs, and only a request that passes it renews the session
+//   (`sessions.renew`). A 401 or 403 answer therefore writes nothing to
+//   web_sessions and carries no Set-Cookie. When the admitted request renewed
+//   the session, `session.renewCookie` is set; `withSessionCookie(response,
+//   session)` appends it.
 
 import type { CsrfFailureReason } from './csrf';
 import { checkCsrf } from './csrf';
@@ -47,7 +51,7 @@ const SESSION_ERROR_STATUS: Readonly<Record<SessionErrorCode, number>> = {
 /** What the guard needs from the request context. */
 export interface SessionGuardCtx {
   requestId: string;
-  sessions: Pick<WebSessions, 'resolveCookieHeader'>;
+  sessions: Pick<WebSessions, 'lookupCookieHeader' | 'renew'>;
   /** ATMUSIC_PUBLIC_ORIGIN. */
   publicOrigin: string;
   /** The 32-byte CSRF HMAC key (crypto/box.ts csrfKey()). */
@@ -100,7 +104,8 @@ export function sessionErrorResponse(code: SessionErrorCode, requestId: string):
  */
 export function resolveRequestSession(req: Request, ctx: Pick<SessionGuardCtx, 'sessions'>): WebSession | null {
   if (isProtocolPath(new URL(req.url).pathname)) return null;
-  return ctx.sessions.resolveCookieHeader(req.headers.get('cookie'));
+  const found = ctx.sessions.lookupCookieHeader(req.headers.get('cookie'));
+  return found === null ? null : ctx.sessions.renew(found);
 }
 
 export function requireSession(
@@ -115,8 +120,9 @@ export function requireSession(
       failure: { reason: 'protocol_path' },
     };
   }
-  const session = ctx.sessions.resolveCookieHeader(req.headers.get('cookie'));
-  if (session === null) {
+  // Look up without renewing: a refused request must write nothing.
+  const found = ctx.sessions.lookupCookieHeader(req.headers.get('cookie'));
+  if (found === null) {
     return {
       ok: false,
       response: sessionErrorResponse('unauthenticated', ctx.requestId),
@@ -127,16 +133,24 @@ export function requireSession(
     const check = checkCsrf(req.headers, {
       publicOrigin: ctx.publicOrigin,
       key: ctx.csrfKey,
-      sessionToken: session.token,
+      sessionToken: found.token,
     });
     if (!check.ok) {
-      // A renewal already written by the resolve still reaches the browser.
       return {
         ok: false,
-        response: withSessionCookie(sessionErrorResponse('csrf_failed', ctx.requestId), session),
+        response: sessionErrorResponse('csrf_failed', ctx.requestId),
         failure: { reason: 'csrf', csrf: check.reason },
       };
     }
+  }
+  // Admitted: renew now (synchronously, so nothing ran between lookup and renew).
+  const session = ctx.sessions.renew(found);
+  if (session === null) {
+    return {
+      ok: false,
+      response: sessionErrorResponse('unauthenticated', ctx.requestId),
+      failure: { reason: 'no_session' },
+    };
   }
   return { ok: true, session };
 }

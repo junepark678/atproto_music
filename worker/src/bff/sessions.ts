@@ -14,6 +14,12 @@
 //   and a fresh Set-Cookie for the caller to send. `created_at_ms` keeps the
 //   original sign-in time (the revocation replay compares it, §14.5). Between
 //   renewals a resolve writes nothing, so a read costs no database write.
+//   `resolve` is `lookup` (never writes) followed by `renew` (writes only
+//   when due); the cookie guard calls the two separately so that a request it
+//   refuses (403 csrf_failed) writes nothing and sets no cookie.
+// - **DID.** create() accepts only a DID with the generic syntax of
+//   @atmusic/core/syntax isDid, which is contained in what the revocation
+//   journal accepts, so every stored session can be journaled and logged out.
 // - **Expiry.** A session with `expires_at_ms <= now` resolves to nothing.
 //   `sweepExpiredWebSessions` (the expiry-sweep timer, N4-01) deletes such
 //   rows; expiry is not journaled (§14.5).
@@ -28,6 +34,7 @@
 // touching the database, like the Rust `authenticate`.
 
 import type { Clock, Random } from '@atmusic/core/deps';
+import { isDid } from '@atmusic/core/syntax';
 import type { Revocations } from '../app/revocations';
 import type { WebSessionRow } from '../app/rows';
 import { bytesToHex, hashTokenBlob, newSessionToken } from '../crypto/tokens';
@@ -110,8 +117,18 @@ export interface WebSessions {
   create(did: string): IssuedWebSession;
   /** The live session of a raw token, renewing it when due; null when unknown, expired or malformed. */
   resolve(token: string | null): WebSession | null;
-  /** The live session a Cookie header carries (see sessionTokenFromCookies). */
+  /** The live session a Cookie header carries (see sessionTokenFromCookies), renewing it when due. */
   resolveCookieHeader(cookieHeader: string | null): WebSession | null;
+  /** Like resolve, but never renews and never writes (`renewCookie` is always null). */
+  lookup(token: string | null): WebSession | null;
+  /** Like resolveCookieHeader, but never renews and never writes. */
+  lookupCookieHeader(cookieHeader: string | null): WebSession | null;
+  /**
+   * Renew a looked-up session when its term is more than 24 h old. Returns the
+   * session (with `renewCookie` set when it was renewed), or null when it was
+   * deleted or expired since the lookup.
+   */
+  renew(session: WebSession): WebSession | null;
   /** Delete the session of `token`, journaling it first. True when a row was deleted. */
   logout(token: string): boolean;
   /** Delete every session of `did`, journaling each first. Returns how many were deleted. */
@@ -125,11 +142,30 @@ function blobHex(blob: ArrayBuffer | Uint8Array): string {
 export function createWebSessions(deps: WebSessionsDeps): WebSessions {
   const { db, clock, random, revocations } = deps;
 
-  const resolve = (token: string | null): WebSession | null => {
+  const lookup = (token: string | null): WebSession | null => {
     if (token === null || !TOKEN_RE.test(token)) return null;
-    const hash = hashTokenBlob(token);
+    const row = db.one<WebSessionRow>(
+      'SELECT token_hash, did, created_at_ms, expires_at_ms, last_seen_ms FROM web_sessions WHERE token_hash = ?',
+      hashTokenBlob(token),
+    );
+    if (row === null || row.expires_at_ms <= clock.nowMs()) return null;
+    return {
+      did: row.did,
+      token,
+      tokenHash: blobHex(row.token_hash),
+      createdAtMs: row.created_at_ms,
+      expiresAtMs: row.expires_at_ms,
+      lastSeenMs: row.last_seen_ms,
+      renewCookie: null,
+    };
+  };
+
+  const renew = (session: WebSession): WebSession | null => {
+    if (!TOKEN_RE.test(session.token)) return null;
+    const hash = hashTokenBlob(session.token);
     const now = clock.nowMs();
     return db.tx(() => {
+      // Re-read inside the transaction: the row is the authority, not the argument.
       const row = db.one<WebSessionRow>(
         'SELECT token_hash, did, created_at_ms, expires_at_ms, last_seen_ms FROM web_sessions WHERE token_hash = ?',
         hash,
@@ -148,11 +184,11 @@ export function createWebSessions(deps: WebSessionsDeps): WebSessions {
           now,
           hash,
         );
-        renewCookie = sessionCookie(token);
+        renewCookie = sessionCookie(session.token);
       }
       return {
         did: row.did,
-        token,
+        token: session.token,
         tokenHash: blobHex(row.token_hash),
         createdAtMs: row.created_at_ms,
         expiresAtMs,
@@ -162,9 +198,16 @@ export function createWebSessions(deps: WebSessionsDeps): WebSessions {
     });
   };
 
+  const resolve = (token: string | null): WebSession | null => {
+    const found = lookup(token);
+    return found === null ? null : renew(found);
+  };
+
   return {
     create(did) {
-      if (typeof did !== 'string' || !did.startsWith('did:')) throw new TypeError('create() needs a DID');
+      // The same DID the revocation journal will accept on logout (isDid is
+      // contained in its rule), so no stored session is unrevocable.
+      if (typeof did !== 'string' || !isDid(did)) throw new TypeError('create() needs a DID');
       const token = newSessionToken(random);
       const now = clock.nowMs();
       const expiresAtMs = now + SESSION_TTL_MS;
@@ -185,6 +228,14 @@ export function createWebSessions(deps: WebSessionsDeps): WebSessions {
     resolveCookieHeader(cookieHeader) {
       return resolve(sessionTokenFromCookies(cookieHeader));
     },
+
+    lookup,
+
+    lookupCookieHeader(cookieHeader) {
+      return lookup(sessionTokenFromCookies(cookieHeader));
+    },
+
+    renew,
 
     logout(token) {
       if (!TOKEN_RE.test(token)) return false;

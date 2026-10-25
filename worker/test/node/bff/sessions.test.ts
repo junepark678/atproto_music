@@ -118,6 +118,13 @@ describe('web sessions', () => {
       expect(second.token).not.toBe(issued.token);
       expect(rows(db)).toHaveLength(2);
       expect(sessions.resolveCookieHeader(`theme=dark; ${SESSION_COOKIE}=${issued.token}`)?.did).toBe(ALICE);
+
+      // A DID the revocation journal would refuse is refused here too, so no
+      // stored session is ever unrevocable; nothing is written.
+      for (const bad of ['did:Web:Example', 'did:plc:', 'did:plc:a%zz', 'did:plc:a b', 'notadid', '']) {
+        expect(() => sessions.create(bad)).toThrow(TypeError);
+      }
+      expect(rows(db)).toHaveLength(2);
       expect(clearSessionCookie()).toBe('__Host-atmusic_session=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0');
     });
   });
@@ -147,8 +154,18 @@ describe('web sessions', () => {
       expect(sessions.resolve(issued.token)?.renewCookie).toBeNull();
       expect(rows(db)[0]?.expires_at_ms).toBe(T0 + 30 * DAY);
 
-      // Older than 24 h: renewed in place with the same token and row.
+      // Older than 24 h: lookup() alone neither renews nor writes ...
       clock.advance(1);
+      const beforeLookup = rows(db);
+      expect(sessions.lookup(issued.token)).toMatchObject({
+        did: ALICE,
+        token: issued.token,
+        expiresAtMs: T0 + 30 * DAY,
+        renewCookie: null,
+      });
+      expect(sessions.lookupCookieHeader(`${SESSION_COOKIE}=${issued.token}`)?.renewCookie).toBeNull();
+      expect(rows(db)).toEqual(beforeLookup);
+      // ... and resolve() (lookup then renew) renews in place with the same token and row.
       const renewed = sessions.resolve(issued.token);
       const now = T0 + DAY + 1;
       expect(renewed).toMatchObject({ did: ALICE, token: issued.token, expiresAtMs: now + 30 * DAY, lastSeenMs: now });
@@ -282,6 +299,16 @@ describe('web sessions', () => {
       for (const e of aliceEntries) expect(e).toMatchObject({ kind: 'web_session', did: ALICE, at: T0 + 10_000 });
       expect(presentAtRecord).toEqual([true, true, true]);
       expect(rows(db)).toEqual([]);
+
+      // Every DID create() accepts can be journaled and logged out.
+      for (const did of ['did:web:example.com', 'did:plc:ewvi7nxzyoun6zhxrhs64oiz', 'did:web:localhost%3A8443']) {
+        const s = sessions.create(did);
+        expect(sessions.logout(s.token)).toBe(true);
+        expect(sessions.resolve(s.token)).toBeNull();
+        expect(inner.entries().at(-1)).toMatchObject({ kind: 'web_session', hash: sha256Hex(s.token), did });
+      }
+      expect(rows(db)).toEqual([]);
+      expect(presentAtRecord).toEqual([true, true, true, true, true, true]);
 
       // A journal that cannot append: the transaction rolls back, every
       // session stays valid and nothing is deleted.
