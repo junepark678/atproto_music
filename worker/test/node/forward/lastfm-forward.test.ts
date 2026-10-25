@@ -340,6 +340,57 @@ describe('Last.fm forwarding', () => {
     ]);
   });
 
+  it('a code 9 for a request sent before a relink leaves the relinked account active with its rows queued', async () => {
+    // The request is held in flight until `release`; it then reaches the fake,
+    // which answers 9 because the old sk was revoked in the meantime.
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let arrived!: () => void;
+    const inFlight = new Promise<void>((resolve) => {
+      arrived = resolve;
+    });
+    const w = await world({
+      transportWrap: (fake) => async (req) => {
+        arrived();
+        await gate;
+        return fake.fetch(req);
+      },
+    });
+    const alice = w.linkLastfm(ALICE, 'alice_fm');
+    w.scrobbles(ALICE, 2);
+
+    const running = w.run();
+    await inFlight;
+    // While the scrobble is in flight the owner relinks with a new sk; the old one stops working.
+    const sk2 = w.lastfm.addSession('alice_fm');
+    const relinked = saveLink(
+      { db: w.app.db, clock: w.clock, random: w.rt.random, box: w.rt.box },
+      { did: ALICE, service: 'lastfm', remoteUser: 'alice_fm', credential: sk2 },
+    );
+    expect(relinked).toMatchObject({ created: false, link: { id: alice.id, status: 'active' } });
+    w.lastfm.revokeSession(alice.sk);
+    release();
+    const report = await running;
+
+    expect(report.requests).toBe(1);
+    expect(w.lastfm.calls.filter({ nsid: 'track.scrobble' }).map((c) => c.status)).toEqual([403]);
+    // The refusal was of the old sk: the fresh link is not revoked and its rows are not held.
+    expect(w.app.db.one('SELECT status, last_error FROM linked_accounts WHERE id = ?', alice.id)).toEqual({
+      status: 'active',
+      last_error: null,
+    });
+    expect(statesOf(w.rows(ALICE))).toEqual(['queued', 'queued']);
+
+    // They go with the new sk once the backoff has passed.
+    w.clock.advance(10 * MINUTE);
+    await w.run();
+    expect(w.lastfm.scrobbles.at(-1)).toMatchObject({ sk: sk2 });
+    expect(w.lastfm.scrobbles.at(-1)?.items).toHaveLength(2);
+    expect(statesOf(w.rows(ALICE))).toEqual(['sent', 'sent']);
+  });
+
   it('now playing is forwarded once without retry and skipped when older than 60 s', async () => {
     const w = await world();
     const { sk } = w.linkLastfm(ALICE, 'alice_fm');

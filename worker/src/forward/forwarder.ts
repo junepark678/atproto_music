@@ -56,9 +56,12 @@
 //
 // Every request goes through the clients (lastfm-client.ts,
 // listenbrainz-client.ts), and so through policyFetch. No transaction spans
-// an await. Runs over one database never overlap: a second call while one is
-// in flight returns at once (`skipped`); the `forward` extension timer
-// serializes them in production.
+// an await, and a write after one is conditional on what was read before it:
+// a revocation applies only while the link still has the refused credential
+// (a relink during the request is kept, with its rows queued). Runs over one
+// database never overlap: a second call while one is in flight returns at
+// once (`skipped`); the `forward` extension timer serializes them in
+// production.
 
 import type { Clock, Random } from '@atmusic/core/deps';
 import type { CoreExtension } from '../app/host';
@@ -146,6 +149,17 @@ const lbKey = (link: Pick<LinkRow, 'id'>): string => `link:${link.id}`;
 
 function ids(rows: readonly QueuedRow[]): string[] {
   return rows.map((r) => r.id);
+}
+
+/**
+ * Revokes `link` and holds its queued rows, inside the caller's transaction.
+ * `link` is the row read before the request was sent, so this is
+ * conditional on that state: when the owner relinked while the request was
+ * in flight (a new credential, status active again), the refusal was of the
+ * old credential and the fresh link and its rows are left as they are.
+ */
+function revokeAndHold(db: Db, link: LinkRow, error: string, now: number): void {
+  if (revokeLink(db, link, error, now)) holdLinkRows(db, link.id, now);
 }
 
 // ---------------------------------------------------------------------------
@@ -294,8 +308,7 @@ function lastfmFailed(rt: ForwardRuntime, job: Job, out: LastfmFailure, now: num
   db.tx(() => {
     if (out.kind === 'error' && REVOKING_LASTFM_CODES.has(out.code)) {
       if (once) settleRows(db, ids(job.rows), 'failed', now, error);
-      revokeLink(db, job.link.id, 'session_revoked', now);
-      holdLinkRows(db, job.link.id, now);
+      revokeAndHold(db, job.link, 'session_revoked', now);
       return;
     }
     if (out.kind === 'error' && KEY_LASTFM_CODES.has(out.code)) {
@@ -412,8 +425,7 @@ async function sendListenbrainz(rt: ForwardRuntime, job: Job, token: string): Pr
   db.tx(() => {
     if (out.status === 401) {
       if (once) settleRows(db, ids(job.rows), 'failed', at, error);
-      revokeLink(db, job.link.id, 'token_revoked', at);
-      holdLinkRows(db, job.link.id, at);
+      revokeAndHold(db, job.link, 'token_revoked', at);
       return;
     }
     if (out.status === 429) {
@@ -451,10 +463,7 @@ async function execute(rt: ForwardRuntime, job: Job, now: number): Promise<boole
     credential = openLinkCredential(rt.box, job.link);
   } catch (error) {
     // A credential that no longer opens (a dropped encryption key): the link needs relinking.
-    rt.db.tx(() => {
-      revokeLink(rt.db, job.link.id, 'credential_unreadable', now);
-      holdLinkRows(rt.db, job.link.id, now);
-    });
+    rt.db.tx(() => revokeAndHold(rt.db, job.link, 'credential_unreadable', now));
     rt.log.log('error', 'forward.credential_unreadable', { link: job.link.id, error: (error as Error).name });
     return false;
   }

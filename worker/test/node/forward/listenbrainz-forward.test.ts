@@ -43,8 +43,8 @@ interface World {
   rt: ForwardRuntime;
   /** Every request to listenbrainz.test: [method, path, clock ms]. */
   seen: Array<[string, string, number]>;
-  /** Answers the next ListenBrainz request with this response instead of the fake. */
-  intercept(res: () => Response): void;
+  /** Answers the next ListenBrainz request with this response instead of the fake (which `res` may still call). */
+  intercept(res: (req: Request) => Response | Promise<Response>): void;
   link(credential?: string): string;
   scrobbles(n: number, tag?: string): void;
   enqueue(items: ForwardItem[]): number;
@@ -58,12 +58,12 @@ async function world(): Promise<World> {
   const lastfm = new FakeLastfm({ clock, apiKey: API_KEY, secret: SECRET });
   lb.addToken('alice_lb', TOKEN);
   const seen: Array<[string, string, number]> = [];
-  const intercepts: Array<() => Response> = [];
+  const intercepts: Array<(req: Request) => Response | Promise<Response>> = [];
   const lbEndpoint = async (req: Request) => {
     const url = new URL(req.url);
     seen.push([req.method, url.pathname, clock.nowMs()]);
     const next = intercepts.shift();
-    return next === undefined ? lb.fetch(req) : next();
+    return next === undefined ? lb.fetch(req) : next(req);
   };
   const app = await startApp({
     clock,
@@ -331,6 +331,51 @@ describe('ListenBrainz forwarding', () => {
     expect(batch.map((r) => r.state)).toEqual(['failed', 'sent', 'sent']);
     expect(w.seen.slice(seenAfter400).map(([m, p]) => `${m} ${p}`)).toEqual(Array(4).fill('POST /1/submit-listens'));
     expect(w.lb.submissions.slice(-2).map((s) => s.listenType)).toEqual(['single', 'single']);
+  });
+
+  it('a 401 for a request sent before a relink leaves the relinked account active with its rows queued', async () => {
+    const w = await world();
+    const id = w.link();
+    w.scrobbles(2);
+    // The import is held in flight until `release`; it then reaches the fake,
+    // which answers 401 because the old token was reset in the meantime.
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let arrived!: () => void;
+    const inFlight = new Promise<void>((resolve) => {
+      arrived = resolve;
+    });
+    w.intercept(async (req) => {
+      arrived();
+      await gate;
+      return w.lb.fetch(req);
+    });
+
+    const running = w.run();
+    await inFlight;
+    w.lb.addToken('alice_lb', 'new-token');
+    expect(w.link('new-token')).toBe(id);
+    w.lb.revokeToken(TOKEN);
+    release();
+    const report = await running;
+
+    expect(report.requests).toBe(1);
+    expect(w.lb.submissions).toHaveLength(0);
+    // The refusal was of the old token: the fresh link is not revoked and its rows are not held.
+    expect(w.app.db.one('SELECT status, last_error FROM linked_accounts WHERE id = ?', id)).toEqual({
+      status: 'active',
+      last_error: null,
+    });
+    expect(w.rows().map((r) => r.state)).toEqual(['queued', 'queued']);
+
+    // The next run sends them with the new token.
+    w.clock.advance(MINUTE);
+    await w.run();
+    expect(w.lb.submissions).toHaveLength(1);
+    expect(w.lb.submissions[0]).toMatchObject({ token: 'new-token', listenType: 'import' });
+    expect(w.rows().map((r) => r.state)).toEqual(['sent', 'sent']);
   });
 
   it('ListenBrainz rows expire after 30 days, not 13', async () => {

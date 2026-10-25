@@ -266,13 +266,29 @@ export function deleteLink(deps: { db: Db; revocations: Revocations }, did: stri
   });
 }
 
-/** Marks a link revoked by its upstream (`error` is a Link.lastError slug). */
-export function revokeLink(db: Db, linkId: string, error: string, now: number): void {
-  db.run(
-    `UPDATE linked_accounts SET status = 'revoked', last_error = ?, updated_at_ms = ? WHERE id = ?`,
-    error,
-    now,
-    linkId,
+/**
+ * Marks a link revoked by its upstream (`error` is a Link.lastError slug),
+ * but only while it is still the active link with the credential that was
+ * refused: `link` is the row as read before the request, and a relink that
+ * replaced the credential while the request was in flight (saveLink sets a
+ * fresh ciphertext) is left alone. True when the link was revoked; the caller
+ * holds its rows only then.
+ */
+export function revokeLink(
+  db: Db,
+  link: Pick<LinkedAccountRow, 'id' | 'credential_ciphertext'>,
+  error: string,
+  now: number,
+): boolean {
+  return (
+    db.run(
+      `UPDATE linked_accounts SET status = 'revoked', last_error = ?, updated_at_ms = ?
+       WHERE id = ? AND status = 'active' AND credential_ciphertext = ?`,
+      error,
+      now,
+      link.id,
+      toBlob(blobBytes(link.credential_ciphertext)),
+    ).rowsWritten === 1
   );
 }
 
