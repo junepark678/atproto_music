@@ -13,6 +13,8 @@ import { fixedClock } from '@atmusic/core/test-support/clock';
 import { describe, expect, it } from 'vitest';
 import type { HistoryQuery, ModuleDeps, RowsResult, ScrobbleRow } from '../../src/do/contracts';
 import { doDb } from '../../src/do/db';
+import { MIGRATIONS, SCHEMA_VERSION } from '../../src/do/schema';
+import type { HarnessDO } from './harness-do';
 import { INDEX_RPC_METHODS, makeLocalIndex, NotWiredError, type RpcImpl } from './local-index';
 
 const T0 = '2026-01-15T12:00:00.000000000Z';
@@ -119,7 +121,7 @@ describe('worker/test/harness', () => {
 
   it('local-index adapter also accepts the frozen Partial<IndexRpc> form', async () => {
     const stub = env.HARNESS.get(env.HARNESS.idFromName('local-index-rpc'));
-    const ready = { status: 'ready', version: 1 } as const;
+    const ready = { status: 'ready', version: SCHEMA_VERSION } as const;
     const impl: RpcImpl = {
       // A canned answer.
       ready: async () => ready,
@@ -163,7 +165,9 @@ describe('worker/test/harness', () => {
     // They work against the harness DO: no alarm is armed after migration.
     const stub = env.HARNESS.get(env.HARNESS.idFromName('helpers'));
     await runInDurableObject(stub, (_i, state) => {
-      expect(state.storage.sql.exec('SELECT count(*) AS n FROM schema_migrations').one()).toEqual({ n: 1 });
+      expect(state.storage.sql.exec('SELECT count(*) AS n FROM schema_migrations').one()).toEqual({
+        n: MIGRATIONS.length,
+      });
     });
     expect(await runDurableObjectAlarm(stub)).toBe(false);
     const controller = createScheduledController({ scheduledTime: 1_768_478_400_000, cron: '*/5 * * * *' });
@@ -171,7 +175,32 @@ describe('worker/test/harness', () => {
     expect(controller.scheduledTime).toBe(1_768_478_400_000);
     await evictDurableObject(stub);
     await runInDurableObject(stub, (instance) => {
-      expect(instance.migration).toEqual({ status: 'ready', version: 1 });
+      expect(instance.migration).toEqual({ status: 'ready', version: SCHEMA_VERSION });
     });
+  });
+
+  // N1-10: suites that pinned schema version 1 derive it from the schema.
+  it('the ready status and the schema_migrations ledger equal SCHEMA_VERSION and one row per entry of MIGRATIONS', async () => {
+    // The schema itself: contiguous versions from 1, the last is SCHEMA_VERSION.
+    expect(MIGRATIONS.map((m) => m.version)).toEqual(MIGRATIONS.map((_m, i) => i + 1));
+    expect(SCHEMA_VERSION).toBe(MIGRATIONS[MIGRATIONS.length - 1]?.version);
+    expect(MIGRATIONS.length).toBeGreaterThanOrEqual(2);
+
+    const stub = env.HARNESS.get(env.HARNESS.idFromName('local-index-ledger'));
+    const expectedLedger = MIGRATIONS.map((m) => ({ version: m.version, name: m.name }));
+    // The status the harness DO's constructor migration reports over fetch.
+    const res = await stub.fetch('https://harness.test/');
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ migration: { status: 'ready', version: SCHEMA_VERSION } });
+    const inDo = () =>
+      runInDurableObject(stub, (instance: HarnessDO, state) => ({
+        migration: instance.migration,
+        ledger: doDb(state.storage).all('SELECT version, name FROM schema_migrations ORDER BY version'),
+      }));
+    expect(await inDo()).toEqual({ migration: { status: 'ready', version: SCHEMA_VERSION }, ledger: expectedLedger });
+
+    // A restarted instance re-runs migrate on the same storage: same status, no extra ledger row.
+    await evictDurableObject(stub);
+    expect(await inDo()).toEqual({ migration: { status: 'ready', version: SCHEMA_VERSION }, ledger: expectedLedger });
   });
 });

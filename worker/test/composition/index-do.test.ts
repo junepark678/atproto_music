@@ -14,6 +14,7 @@ import { GC_HINTS_PER_RUN } from '../../src/do/index-do';
 import { MAX_PENDING_SNAPSHOT_JOBS } from '../../src/do/ingest/admission';
 import { requestGapDiscovery } from '../../src/do/ingest/discovery';
 import { GAP_SCAN_DONE } from '../../src/do/ingest/snapshot-job';
+import { MIGRATIONS, SCHEMA_VERSION } from '../../src/do/schema';
 import { markConnected, updateCheckpointBookkeeping } from '../../src/do/status';
 import { nextDue, TIMER_NAMES } from '../../src/do/timers';
 import { flush, jetstreamServer } from '../fixtures/jetstream-server';
@@ -98,8 +99,8 @@ describe('worker/src/do/index-do.ts', () => {
     }));
     expect(constructed(h.stub)).toBe(1);
     expect(first).toEqual({
-      ready: { status: 'ready', version: 1 },
-      ledger: [{ version: 1, name: 'initial_workers_schema' }],
+      ready: { status: 'ready', version: SCHEMA_VERSION },
+      ledger: MIGRATIONS.map((m) => ({ version: m.version, name: m.name })),
       // INGEST_MODE=off: the watchdog runs once to close any socket and record the mode.
       timers: ['discovery', 'gc', 'identity-sweep', 'jetstream-watchdog', 'status-sweep'],
     });
@@ -120,7 +121,7 @@ describe('worker/src/do/index-do.ts', () => {
     }));
     expect(constructed(h.stub)).toBe(2);
     expect(restarted.checkpoint).toEqual({ connected: 0, updated_at_ms: T0 + 30_000 });
-    expect(restarted.ledger).toEqual([{ version: 1 }]);
+    expect(restarted.ledger).toEqual(MIGRATIONS.map((m) => ({ version: m.version })));
     expect(restarted.realAlarm).not.toBeNull();
     expect(restarted.next).toBe(T0);
     expect(armed(h.stub).at(-1)).toBe(T0);

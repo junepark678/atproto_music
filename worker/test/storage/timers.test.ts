@@ -12,6 +12,7 @@ import { env } from 'cloudflare:workers';
 import { fixedClock } from '@atmusic/core/test-support/clock';
 import { describe, expect, it } from 'vitest';
 import { type Db, doDb } from '../../src/do/db';
+import { SCHEMA_VERSION } from '../../src/do/schema';
 import {
   type AlarmStorage,
   armAlarm,
@@ -651,7 +652,7 @@ describe('timers', () => {
 
     await runInDurableObject(stub, async (instance: HarnessDO, state) => {
       expect(instance).not.toBe(before);
-      expect(instance.migration).toEqual({ status: 'ready', version: 1 });
+      expect(instance.migration).toEqual({ status: 'ready', version: SCHEMA_VERSION });
       const db = instance.db;
       // Same rows, same counters, same next due (the orphaned claim included).
       expect(timerRows(db)).toEqual(persisted);

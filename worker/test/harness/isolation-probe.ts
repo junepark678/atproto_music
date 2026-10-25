@@ -9,6 +9,7 @@ import { listDurableObjectIds, runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { expect } from 'vitest';
 import { doDb } from '../../src/do/db';
+import { SCHEMA_VERSION } from '../../src/do/schema';
 import type { HarnessDO } from './harness-do';
 
 /** The DO name both files write under. */
@@ -25,7 +26,7 @@ export const stubFor = (name: string) => env.HARNESS.get(env.HARNESS.idFromName(
 /** Users and timers rows of the named DO, after asserting its migration is applied. */
 export async function rowsUnder(name: string): Promise<{ users: unknown[]; timers: unknown[] }> {
   return runInDurableObject(stubFor(name), (instance: HarnessDO, state) => {
-    expect(instance.migration).toEqual({ status: 'ready', version: 1 });
+    expect(instance.migration).toEqual({ status: 'ready', version: SCHEMA_VERSION });
     const db = doDb(state.storage);
     return {
       users: db.all('SELECT did, joined_at FROM users ORDER BY did'),
