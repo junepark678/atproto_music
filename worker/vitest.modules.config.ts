@@ -1,24 +1,36 @@
-// Worker module tests in real workerd against the harness DO (ADR 0004 §10.1).
+// Worker module tests on Node 26 against the harness DO through the
+// `cloudflare:*` test shim (ADR 0005 §15.1, N2-02).
 //
-// Pinned @cloudflare/vitest-plugin 1.4.4 (W0-01 verified the exports):
-// - `cloudflareTest` is exported by the package root (used below).
-// - `cloudflare:test` provides `runInDurableObject`, `runDurableObjectAlarm`,
-//   `evictDurableObject` (DO eviction keeping storage; also
-//   `evictAllDurableObjects`), `createScheduledController`,
-//   `createExecutionContext`, `waitOnExecutionContext`, `listDurableObjectIds`
-//   and `reset`. The bindings come from `import { env } from "cloudflare:workers"`.
-// worker/test/harness/local-index.test.ts asserts these helpers at runtime.
+// The suites under test/{harness,storage,ingest,read,write,http} were written
+// for workerd (ADR 0004 §10.1). They run here unchanged apart from the named
+// expectation changes of ADR 0005 §15.3: `cloudflare:test` and
+// `cloudflare:workers` resolve to the shim under test/node/support/, whose
+// Durable Objects keep their storage in one SQLite file each (node:sqlite,
+// opened by the production adapter) in a temporary directory of the test file.
+// test/node/support/workerd-globals.ts defines the in-memory `WebSocketPair`
+// and removes that directory after the file. N4-04 to N4-06 de-shim the
+// suites by directory; N7-01 deletes the shim and these aliases.
 //
+// worker/test/harness/local-index.test.ts asserts the shim's helpers at runtime.
 // worker/vitest.acceptance.config.ts (W6-01) runs the real IndexDO instead.
 
-import { cloudflareTest } from '@cloudflare/vitest-plugin';
+import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vitest/config';
 
+const support = (file: string) => fileURLToPath(new URL(`./test/node/support/${file}`, import.meta.url));
+
 export default defineConfig({
-  plugins: [cloudflareTest({ wrangler: { configPath: './test/harness/wrangler.harness.jsonc' } })],
+  resolve: {
+    alias: {
+      'cloudflare:test': support('cloudflare-test-shim.ts'),
+      'cloudflare:workers': support('cloudflare-workers-shim.ts'),
+    },
+  },
   test: {
     name: 'worker-modules',
+    environment: 'node',
     include: ['test/**/*.test.ts'],
+    setupFiles: [support('workerd-globals.ts')],
     // test/node/** is the worker-node project (vitest.node.config.ts, plain Node).
     exclude: [
       'test/acceptance/**',

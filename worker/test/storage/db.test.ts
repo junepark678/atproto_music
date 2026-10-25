@@ -1,35 +1,29 @@
-import { runInDurableObject } from 'cloudflare:test';
-import { env } from 'cloudflare:workers';
-import { describe, expect, it } from 'vitest';
-import { AsyncTransactionError, type Db, doDb, MAX_SQL_PARAMS, SqlParamError } from '../../src/do/db';
-import type { HarnessDO } from '../harness/harness-do';
+// The frozen `Db` facade contract (worker/src/do/db.ts), on the Node host's
+// adapter: `openSqliteDb` over a migrated temporary-file database
+// (worker/test/node/support/node-db.ts). ADR 0005 §15.3 (N2-02) ports this file
+// from `doDb` over DO storage; the titles are kept. The one named expectation
+// change: `run().rowsWritten` is SQLite's changes() (1 for one inserted row, 3
+// for three), where DO SQLite billed index entries too (2 and 6).
+//
+// "Never reached SQLite" is observed through `exec_probe()`, a function
+// registered on the test's own connection that counts every evaluation: a
+// statement refused before execution never calls it.
 
-const stubFor = (name: string) => env.HARNESS.get(env.HARNESS.idFromName(name));
+import { describe, expect, it } from 'vitest';
+import { AsyncTransactionError, type Db, MAX_SQL_PARAMS, SqlParamError } from '../../src/do/db';
+import type { SqliteDb } from '../../src/node/sqlite-db';
+import { withMigratedDb } from '../node/support/node-db';
+
 const T0 = '2026-01-15T12:00:00.000000000Z';
 
-/** Real DO storage whose sql.exec calls are counted (injected, test-only). */
-function countingStorage(storage: DurableObjectStorage): { storage: DurableObjectStorage; execCalls: () => number } {
+/** Counts evaluations of `exec_probe()` in SQL run on `db` (test-only, on the test's connection). */
+function execProbe(db: SqliteDb): () => number {
   let calls = 0;
-  const sql = new Proxy(storage.sql, {
-    get(target, prop, receiver) {
-      if (prop === 'exec') {
-        return (query: string, ...bindings: unknown[]) => {
-          calls++;
-          return target.exec(query, ...bindings);
-        };
-      }
-      const value = Reflect.get(target, prop, receiver);
-      return typeof value === 'function' ? value.bind(target) : value;
-    },
+  db.raw.function('exec_probe', { deterministic: false }, () => {
+    calls++;
+    return 1;
   });
-  const wrapped = new Proxy(storage, {
-    get(target, prop) {
-      if (prop === 'sql') return sql;
-      const value = Reflect.get(target, prop, target);
-      return typeof value === 'function' ? value.bind(target) : value;
-    },
-  });
-  return { storage: wrapped, execCalls: () => calls };
+  return () => calls;
 }
 
 function counts(db: Db) {
@@ -61,8 +55,7 @@ function insertUserAndScrobble(db: Db, did: string, rkey: string) {
 
 describe('doDb', () => {
   it('tx rolls back all writes when the callback throws', async () => {
-    await runInDurableObject(stubFor('db-tx-rollback'), (_i: HarnessDO, state) => {
-      const db = doDb(state.storage);
+    await withMigratedDb((db) => {
       const boom = new Error('fail after writes');
 
       let thrown: unknown;
@@ -107,8 +100,8 @@ describe('doDb', () => {
         insertUserAndScrobble(db, 'did:plc:carol', '3lb2ddddddd2a');
         return db.run("INSERT INTO timers(name, due_at) VALUES ('snapshot', 9)").rowsWritten;
       });
-      // rowsWritten is DO's billed count: the table row plus its PK index entry.
-      expect(value).toBe(2);
+      // rowsWritten is SQLite's changes(): the one inserted row (DO billed 2, row + PK index entry).
+      expect(value).toBe(1);
       expect(counts(db)).toEqual({ users: 1, scrobbles: 1, counters: 0, timers: 1 });
 
       // Compile-time contract, checked by `npm run typecheck` (never invoked).
@@ -125,24 +118,24 @@ describe('doDb', () => {
   });
 
   it('101 bound parameters raise SqlParamError before execution', async () => {
-    await runInDurableObject(stubFor('db-param-limit'), (_i: HarnessDO, state) => {
-      const { storage, execCalls } = countingStorage(state.storage);
-      const db = doDb(storage);
+    await withMigratedDb((db) => {
+      const probes = execProbe(db);
       const placeholders = (n: number) => Array.from({ length: n }, () => '?').join(',');
-      const sql = (n: number) => `INSERT INTO counters(name, label, value) SELECT 'p', 'n', max(${placeholders(n)})`;
+      const sql = (n: number) =>
+        `INSERT INTO counters(name, label, value) SELECT 'p', 'n', max(${placeholders(n)}) WHERE exec_probe()`;
 
       // 100 is the limit and is accepted (max() over 100 arguments).
       expect(MAX_SQL_PARAMS).toBe(100);
       const ok = Array.from({ length: 100 }, (_, i) => i + 1);
-      expect(db.run(sql(100), ...ok)).toEqual({ rowsWritten: 2 }); // row + PK index entry
+      expect(db.run(sql(100), ...ok)).toEqual({ rowsWritten: 1 }); // changes(): one row (DO billed 2)
       expect(db.one('SELECT value FROM counters')).toEqual({ value: 100 });
-      expect(execCalls()).toBe(2);
+      expect(probes()).toBe(1);
 
       const tooMany = Array.from({ length: 101 }, (_, i) => i + 1);
       for (const call of [
         () => db.run(sql(101), ...tooMany),
-        () => db.all(`SELECT ${placeholders(101)}`, ...tooMany),
-        () => db.one(`SELECT ${placeholders(101)}`, ...tooMany),
+        () => db.all(`SELECT exec_probe(), ${placeholders(101)}`, ...tooMany),
+        () => db.one(`SELECT exec_probe(), ${placeholders(101)}`, ...tooMany),
       ]) {
         let err: unknown;
         try {
@@ -155,18 +148,21 @@ describe('doDb', () => {
         expect((err as SqlParamError).index).toBeNull();
       }
       // None of the three reached SQLite, and nothing was written.
-      expect(execCalls()).toBe(2);
-      expect(state.storage.sql.exec('SELECT count(*) AS n FROM counters').one()).toEqual({ n: 1 });
-      // For contrast, raw exec reaches SQLite and fails there untyped.
-      expect(() => state.storage.sql.exec(`SELECT ${placeholders(101)}`, ...tooMany)).toThrow(/too many SQL variables/);
+      expect(probes()).toBe(1);
+      expect(db.one('SELECT count(*) AS n FROM counters')).toEqual({ n: 1 });
+      // For contrast, SQLite itself accepts 101 (its own limit is 32766): the
+      // 100-parameter limit is the facade's, enforced before any statement runs.
+      expect(
+        (db.raw.prepare(`SELECT exec_probe() AS p, ${placeholders(101)}`).get(...tooMany) as { p: number }).p,
+      ).toBe(1);
+      expect(probes()).toBe(2);
     });
   });
 
   it('unsafe integer parameter is rejected', async () => {
-    await runInDurableObject(stubFor('db-unsafe-int'), (_i: HarnessDO, state) => {
-      const { storage, execCalls } = countingStorage(state.storage);
-      const db = doDb(storage);
-      const insert = "INSERT INTO counters(name, label, value) VALUES ('c', ?, ?)";
+    await withMigratedDb((db) => {
+      const probes = execProbe(db);
+      const insert = "INSERT INTO counters(name, label, value) SELECT 'c', ?, ? WHERE exec_probe()";
 
       const reject = (label: string, value: unknown, reason: string) => {
         let err: unknown;
@@ -188,29 +184,29 @@ describe('doDb', () => {
       reject('bool', true, 'unsupported_type');
       reject('undef', undefined, 'unsupported_type');
       reject('u8', new Uint8Array([1]), 'unsupported_type');
-      expect(execCalls()).toBe(0);
-      expect(state.storage.sql.exec('SELECT count(*) AS n FROM counters').one()).toEqual({ n: 0 });
+      expect(probes()).toBe(0);
+      expect(db.one('SELECT count(*) AS n FROM counters')).toEqual({ n: 0 });
 
       // The boundary value and finite reals pass through exactly.
-      expect(db.run(insert, 'max', Number.MAX_SAFE_INTEGER)).toEqual({ rowsWritten: 2 });
+      expect(db.run(insert, 'max', Number.MAX_SAFE_INTEGER)).toEqual({ rowsWritten: 1 }); // DO billed 2
       expect(db.one<{ value: number }>("SELECT value FROM counters WHERE label = 'max'")).toEqual({
         value: Number.MAX_SAFE_INTEGER,
       });
-      expect(db.one<{ x: number }>('SELECT ? * 2 AS x', 1.25)).toEqual({ x: 2.5 });
-      expect(execCalls()).toBe(3);
+      expect(db.one<{ x: number }>('SELECT ? * 2 AS x WHERE exec_probe()', 1.25)).toEqual({ x: 2.5 });
+      expect(probes()).toBe(2);
     });
   });
 
-  // rowsWritten is the DO cursor's billed rows-written count, which includes
-  // index b-tree entries: it is 0 exactly when nothing was written, but it is
-  // not SQLite's changes() row count. Exact values for the pinned workerd.
+  // rowsWritten is SQLite's changes() for the statement (ADR 0005 §3.2): the
+  // rows the statement itself inserted, updated or deleted, and 0 exactly when
+  // it wrote nothing. DO SQLite billed index b-tree entries as well (6 for the
+  // three-row insert below); node:sqlite reports 3.
   it('all/one/run map rows, nulls and rowsWritten', async () => {
-    await runInDurableObject(stubFor('db-shapes'), (_i: HarnessDO, state) => {
-      const db = doDb(state.storage);
+    await withMigratedDb((db) => {
       expect(db.one('SELECT * FROM timers')).toBeNull();
       expect(db.all('SELECT * FROM timers')).toEqual([]);
       expect(db.run("INSERT INTO timers(name, due_at) VALUES ('a', 1), ('b', 2), ('c', 3)")).toEqual({
-        rowsWritten: 6, // 3 rows + 3 PK index entries
+        rowsWritten: 3, // 3 rows (DO billed 6: rows + PK index entries)
       });
       expect(db.run('UPDATE timers SET due_at = due_at + 1 WHERE due_at >= ?', 2)).toEqual({ rowsWritten: 2 });
       expect(db.run('UPDATE timers SET due_at = 0 WHERE name = ?', 'zzz')).toEqual({ rowsWritten: 0 });
@@ -221,7 +217,10 @@ describe('doDb', () => {
       ]);
       expect(db.one('SELECT name FROM timers ORDER BY due_at DESC')).toEqual({ name: 'c' });
       expect(db.one('SELECT NULL AS v')).toEqual({ v: null });
+      // A read after a write reports 0, not the previous statement's count.
+      expect(db.run('SELECT count(*) FROM timers')).toEqual({ rowsWritten: 0 });
       expect(db.run('DELETE FROM timers')).toEqual({ rowsWritten: 3 });
+      expect(db.run('DELETE FROM timers')).toEqual({ rowsWritten: 0 });
     });
   });
 });
