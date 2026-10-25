@@ -1,12 +1,21 @@
 /// <reference types="vite/client" />
 // W1-02: the runtime half of the Unicode pipeline (ADR 0004 §13 item 5). NFKC is
-// not vendored; it comes from workerd's ICU, which may be a newer Unicode version
-// than the 16.0.0 oracle (workerd's ICU is Unicode 17 and maps the then-unassigned
-// U+A7F1 to "s"). normalizeMusic therefore hands ICU only code points assigned in
-// Unicode 16.0.0. This suite runs inside workerd and fails loudly if the pipeline
-// differs from the Rust oracle for any corpus entry or, exhaustively, for any
-// Unicode scalar value in five contexts. It also proves the vendored case-folding,
-// White_Space and assigned tables are exactly what scripts/gen-unicode.ts renders.
+// not vendored; it comes from the runtime's ICU, which may be a newer Unicode
+// version than the 16.0.0 oracle (Node 26's ICU 78 is Unicode 17, as workerd's
+// was, and maps the then-unassigned U+A7F1 to "S"). normalizeMusic therefore
+// hands ICU only code points assigned in Unicode 16.0.0. This suite fails loudly
+// if the pipeline differs from the Rust oracle for any corpus entry or,
+// exhaustively, for any Unicode scalar value in five contexts. It also proves the
+// vendored case-folding, White_Space and assigned tables are exactly what
+// scripts/gen-unicode.ts renders.
+//
+// ADR 0005 §15.3 (N0-01): the suite ran inside workerd and pinned
+// `navigator.userAgent === 'Cloudflare-Workers'`; it now runs on the production
+// host, Node 26 (packages/core/vitest.config.ts, environment 'node'). The two
+// user-agent assertions became runtime-neutral checks, titles kept: the runtime's
+// ICU reports Unicode 17 or newer, and its NFKC differs from the Unicode 16.0.0
+// oracle on no code point outside the documented set, the code points Unicode
+// 16.0.0 leaves unassigned (packages/core/src/unicode/assigned-16.0.0.ts).
 
 import {
   albumKey,
@@ -243,6 +252,20 @@ async function sha256Hex(text: string): Promise<string> {
   return Array.from(digest, (b) => b.toString(16).padStart(2, '0')).join('');
 }
 
+/**
+ * The Unicode version the runtime's ICU implements, as `[major, minor]`. Node
+ * reports it as `process.versions.unicode` (for example "17.0"). Core has no Node
+ * types (it is shared with the browser), so `process` is read structurally; a
+ * runtime that reports no version fails the check instead of skipping it.
+ */
+function runtimeUnicodeVersion(): [major: number, minor: number] {
+  const versions = (globalThis as { process?: { versions?: Record<string, string | undefined> } }).process?.versions;
+  const reported = versions?.unicode ?? '';
+  expect(reported, 'process.versions.unicode').toMatch(/^\d+\.\d+(\.\d+)?$/);
+  const [major = Number.NaN, minor = Number.NaN] = reported.split('.').map(Number);
+  return [major, minor];
+}
+
 function hexCodePoints(s: string): string {
   return Array.from(s, (ch) => ch.codePointAt(0)!.toString(16).toUpperCase().padStart(4, '0')).join(' ');
 }
@@ -253,8 +276,13 @@ const golden = JSON.parse(musicKeysRaw) as {
 };
 
 it('workerd ICU NFKC matches oracle corpus', async () => {
-  // This must be the real workerd runtime, not Node's ICU.
-  expect(navigator.userAgent).toBe('Cloudflare-Workers');
+  // The runtime's ICU (Node 26 in production, ADR 0005) is Unicode 17 or newer,
+  // the version this comparison was recorded against: U+A7F1 MODIFIER LETTER
+  // CAPITAL S, new in Unicode 17, has its Unicode 17 compatibility mapping to "S"
+  // (which case folding would then turn into "s").
+  const [major] = runtimeUnicodeVersion();
+  expect(major).toBeGreaterThanOrEqual(17);
+  expect(hexCodePoints('\u{A7F1}'.normalize('NFKC'))).toBe('0053');
   expect(golden.unicodeVersion).toBe('16.0.0');
   expect(Object.keys(NFKC_ORACLE)).toEqual(golden.entries.map((e) => e.id));
 
@@ -262,7 +290,7 @@ it('workerd ICU NFKC matches oracle corpus', async () => {
   for (const entry of golden.entries) {
     const icu = hexCodePoints(entry.input.normalize('NFKC'));
     if (icu !== NFKC_ORACLE[entry.id]) {
-      drift.push(`${entry.id}: workerd ICU NFKC [${icu}] != Rust unicode-normalization [${NFKC_ORACLE[entry.id]}]`);
+      drift.push(`${entry.id}: runtime ICU NFKC [${icu}] != Rust unicode-normalization [${NFKC_ORACLE[entry.id]}]`);
     }
     // The full pipeline on top of ICU must still equal the Rust key.
     if (normalizeMusic(entry.input) !== entry.normalized) {
@@ -300,13 +328,13 @@ it('workerd ICU NFKC matches oracle corpus', async () => {
     );
     const total = [...blocks.values()].reduce((n, lines) => n + lines.length, 0);
     const expectedTotal = EXHAUSTIVE_LINE_COUNTS[name as keyof typeof EXHAUSTIVE_LINE_COUNTS];
-    if (total !== expectedTotal) mismatches.push(`${name}: workerd changes ${total} inputs, Rust ${expectedTotal}`);
+    if (total !== expectedTotal) mismatches.push(`${name}: the runtime changes ${total} inputs, Rust ${expectedTotal}`);
     for (const block of new Set([...actual.keys(), ...expected.keys()])) {
       if (actual.get(block) === expected.get(block)) continue;
       // Name the likeliest culprits: changed inputs whose code point Unicode 16.0.0 leaves unassigned.
       const suspects = (blocks.get(block) ?? []).filter((line) => !isAssigned(Number.parseInt(line, 16)));
       mismatches.push(
-        `${name} block U+${(block << 12).toString(16).toUpperCase().padStart(4, '0')}: workerd ${actual.get(block) ?? 'none'}, Rust ${expected.get(block) ?? 'none'}; changed unassigned-in-16.0.0 inputs: ${suspects.join('').trimEnd().replaceAll('\n', '; ') || 'none'}`,
+        `${name} block U+${(block << 12).toString(16).toUpperCase().padStart(4, '0')}: runtime ${actual.get(block) ?? 'none'}, Rust ${expected.get(block) ?? 'none'}; changed unassigned-in-16.0.0 inputs: ${suspects.join('').trimEnd().replaceAll('\n', '; ') || 'none'}`,
       );
     }
   }
@@ -339,7 +367,7 @@ it('code points unassigned in Unicode 16.0.0 stay NFKC-inert normalization bound
 
   // The guard is what keeps those equal. List every scalar unassigned in 16.0.0
   // for which the runtime's own NFKC already differs from Unicode 16.0.0 (which
-  // leaves it alone and never reorders or composes across it): under workerd's
+  // leaves it alone and never reorders or composes across it): under the runtime's
   // Unicode 17 ICU, U+A7F1 maps to "s" and new combining marks such as U+1ADD
   // reorder. normalizeMusic must leave each of them untouched in every context.
   const contexts: [prefix: string, suffix: string][] = [
@@ -361,12 +389,27 @@ it('code points unassigned in Unicode 16.0.0 stay NFKC-inert normalization bound
     }
     if (drifts) runtimeOnly.push(cp);
   }
-  expect(navigator.userAgent).toBe('Cloudflare-Workers');
+  // Runtime-neutral (ADR 0005 §15.3): the runtime is Unicode 17 or newer, and its
+  // NFKC drift from the Unicode 16.0.0 oracle is 0 code points outside the
+  // documented set. Assigned-in-16.0.0 scalars normalize exactly as the Rust
+  // oracle says (the exhaustive check in 'workerd ICU NFKC matches oracle
+  // corpus'); every drifting one found here is unassigned in 16.0.0 and assigned
+  // by the runtime's newer Unicode (not \p{Cn} to its own regexp engine), and the
+  // guard above kept each of them inert.
+  const [major] = runtimeUnicodeVersion();
+  expect(major).toBeGreaterThanOrEqual(17);
+  const unassignedAtRuntime = /^\p{General_Category=Unassigned}$/u;
+  const outsideDocumentedSet = runtimeOnly.filter(
+    (cp) => isAssigned(cp) || unassignedAtRuntime.test(String.fromCodePoint(cp)),
+  );
+  expect(outsideDocumentedSet.map((cp) => cp.toString(16).toUpperCase())).toEqual([]);
+  // Non-vacuous: a Unicode 17 runtime does drift, starting with U+A7F1 -> "S".
+  expect(runtimeOnly).toContain(0xa7f1);
   console.info(
     `runtime NFKC differs from Unicode 16.0.0 for ${runtimeOnly.length} code points it leaves unassigned: ${runtimeOnly.map((cp) => cp.toString(16).toUpperCase()).join(' ')}`,
   );
 
-  // workerd's ICU is at least Unicode 16.0.0, which the guard needs.
+  // The runtime's ICU is at least Unicode 16.0.0, which the guard needs.
   expect(nfkcRuntimeSupportsGroupingVersion()).toBe(true);
 }, 120_000);
 
