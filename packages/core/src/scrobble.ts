@@ -13,6 +13,14 @@
 //   fields are ignored and the remote spelling is kept. Local SPA input
 //   (`buildScrobbleRecord`) is closed: every unknown field is rejected by name,
 //   display strings are trimmed and the MBID is lowercased.
+// - ADR 0005 §6.2 adds eight optional fields (albumArtist, trackNumber,
+//   artistMbids, releaseMbid, releaseGroupMbid, isrc, submissionClient,
+//   musicService). They are checked after every schema-v1 field, so the
+//   first failure of a v1 record is unchanged. On a remote record an invalid
+//   new field is dropped (reported in `row.dropped`), never fatal and never
+//   truncated; `buildScrobbleRecord` rejects it, and protocol mapping
+//   (protocol-map.ts) drops it with a note via `validateDroppableField`.
+//   Records without the new fields are byte-identical to the v1 goldens.
 
 import type { Clock } from './deps';
 import { collectionsFor, isValidPrefix } from './namespace';
@@ -27,8 +35,20 @@ export interface ValidationFailure {
 export type Validation<T> = { ok: true; row: T } | { ok: false; reason: ValidationFailure };
 export type Build<T> = { ok: true; record: T } | { ok: false; reason: ValidationFailure };
 
-/** The schema-v1 scrobble record (known fields only). */
-export interface ScrobbleRecord {
+/** The optional ADR 0005 §6.2 fields, shared by the record and the local input. */
+export interface ScrobbleExtras {
+  albumArtist?: string;
+  trackNumber?: number;
+  artistMbids?: string[];
+  releaseMbid?: string;
+  releaseGroupMbid?: string;
+  isrc?: string;
+  submissionClient?: string;
+  musicService?: string;
+}
+
+/** The scrobble record (known fields only): schema v1 plus the §6.2 optional fields. */
+export interface ScrobbleRecord extends ScrobbleExtras {
   $type: string;
   artist: string;
   track: string;
@@ -54,10 +74,15 @@ export interface ScrobbleRow {
   createdAtNs: bigint;
   durationSeconds: number | null;
   recordingMbid: string | null;
+  /**
+   * Present only when the remote record carried an invalid §6.2 field: each
+   * such field was dropped from `record`, never truncated, and is named here.
+   */
+  dropped?: ValidationFailure[];
 }
 
 /** Local scrobble form input accepted by `buildScrobbleRecord`. */
-export interface ScrobbleInput {
+export interface ScrobbleInput extends ScrobbleExtras {
   artist: string;
   track: string;
   listenedAt: string;
@@ -70,6 +95,12 @@ export const MAX_DISPLAY_SCALARS = 256;
 export const MAX_DISPLAY_BYTES = 1024;
 export const MIN_DURATION_SECONDS = 1;
 export const MAX_DURATION_SECONDS = 86_400;
+export const MIN_TRACK_NUMBER = 1;
+export const MAX_TRACK_NUMBER = 9999;
+export const MAX_ARTIST_MBIDS = 10;
+export const MAX_SUBMISSION_CLIENT_SCALARS = 64;
+export const MAX_SUBMISSION_CLIENT_BYTES = 256;
+export const MAX_MUSIC_SERVICE_LENGTH = 253;
 
 export const MSG_NOT_OBJECT = 'expected a JSON object';
 export const MSG_UNKNOWN_FIELD = 'unknown field';
@@ -80,10 +111,41 @@ export const MSG_DURATION = 'expected an integer between 1 and 86400';
 export const MSG_UUID = 'expected a UUID';
 export const MSG_HYPHENATED_UUID = 'expected a hyphenated UUID';
 export const MSG_SCROBBLE_TYPE = 'record type does not match the configured scrobble collection';
+export const MSG_TRACK_NUMBER = 'expected an integer between 1 and 9999';
+export const MSG_ARTIST_MBIDS = 'expected an array of 1–10 distinct UUIDs';
+export const MSG_ISRC = 'expected an uppercase ISRC matching ^[A-Z]{2}[A-Z0-9]{3}[0-9]{7}$';
+export const MSG_SUBMISSION_CLIENT =
+  'expected 1–64 Unicode scalars and at most 256 UTF-8 bytes, with nonempty trimmed text';
+export const MSG_MUSIC_SERVICE = 'expected a lowercase DNS name of at most 253 characters';
 /** No Rust string can hold a lone surrogate, so this message has no oracle counterpart. */
 export const MSG_LONE_SURROGATE = 'expected well-formed Unicode text without lone surrogates';
 
-const INPUT_FIELDS: readonly string[] = ['artist', 'track', 'listenedAt', 'album', 'durationSeconds', 'recordingMbid'];
+/** The §6.2 optional fields, in the order they are checked. */
+export const OPTIONAL_FIELDS = [
+  'albumArtist',
+  'trackNumber',
+  'artistMbids',
+  'releaseMbid',
+  'releaseGroupMbid',
+  'isrc',
+  'submissionClient',
+  'musicService',
+] as const;
+export type OptionalField = (typeof OPTIONAL_FIELDS)[number];
+
+/** Every optional record field a protocol mapping may drop: the v1 optionals plus §6.2. */
+export const DROPPABLE_FIELDS = ['album', 'durationSeconds', 'recordingMbid', ...OPTIONAL_FIELDS] as const;
+export type DroppableField = (typeof DROPPABLE_FIELDS)[number];
+
+const INPUT_FIELDS: readonly string[] = [
+  'artist',
+  'track',
+  'listenedAt',
+  'album',
+  'durationSeconds',
+  'recordingMbid',
+  ...OPTIONAL_FIELDS,
+];
 
 // ---------------------------------------------------------------------------
 // Unicode helpers
@@ -219,7 +281,7 @@ export function firstUnknownField(object: JsonObject, allowed: readonly string[]
 type Field<T> = { ok: true; value: T } | { ok: false; reason: ValidationFailure };
 
 /** Present and JSON-representable: an own property whose value is not `undefined` (JSON omits those). */
-function has(object: JsonObject, field: string): boolean {
+export function has(object: JsonObject, field: string): boolean {
   return Object.hasOwn(object, field) && object[field] !== undefined;
 }
 
@@ -230,7 +292,7 @@ export function requiredString(object: JsonObject, field: string): Field<string>
   return { ok: true, value };
 }
 
-function optionalString(object: JsonObject, field: string): Field<string | undefined> {
+export function optionalString(object: JsonObject, field: string): Field<string | undefined> {
   if (!has(object, field)) return { ok: true, value: undefined };
   const value = object[field];
   if (typeof value !== 'string') return fail(field, MSG_OPTIONAL_STRING);
@@ -359,6 +421,125 @@ function validateFields(fields: Fields, receiptNs: bigint): Field<Checked> {
   };
 }
 
+// ---------------------------------------------------------------------------
+// ADR 0005 §6.2 optional fields
+
+/** The normalized value type of each droppable field. */
+export interface DroppableValues extends ScrobbleExtras {
+  album?: string;
+  durationSeconds?: number;
+  recordingMbid?: string;
+}
+
+/**
+ * The verdict on one optional field. A failure is always `droppable`: leaving
+ * the field out never makes the record or the listen invalid.
+ */
+export type DroppableResult<T> = { ok: true; value: T } | { ok: false; droppable: true; reason: ValidationFailure };
+
+function droppable(field: string, message: string): { ok: false; droppable: true; reason: ValidationFailure } {
+  return { ok: false, droppable: true, reason: { field, code: 'invalid_field', message } };
+}
+
+/** A display-like string with raw scalar and byte bounds; returns the trimmed value. */
+function boundedText(
+  field: string,
+  value: unknown,
+  maxScalars: number,
+  maxBytes: number,
+  message: string,
+): DroppableResult<string> {
+  if (typeof value !== 'string') return droppable(field, MSG_OPTIONAL_STRING);
+  if (!isWellFormed(value)) return droppable(field, MSG_LONE_SURROGATE);
+  const trimmed = trimWhiteSpace(value);
+  if (trimmed === '' || scalarCount(value) > maxScalars || utf8Length(value) > maxBytes) {
+    return droppable(field, message);
+  }
+  return { ok: true, value: trimmed };
+}
+
+function uuidField(field: string, value: unknown): DroppableResult<string> {
+  if (typeof value !== 'string') return droppable(field, MSG_OPTIONAL_STRING);
+  if (!isWellFormed(value)) return droppable(field, MSG_LONE_SURROGATE);
+  const m = validateMbid(field, value);
+  return m.ok ? m : droppable(field, m.reason.message);
+}
+
+const ISRC = /^[A-Z]{2}[A-Z0-9]{3}[0-9]{7}$/;
+const DNS_LABEL = '[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?';
+/** At least two lowercase LDH labels (the OpenAPI `MusicService` pattern). */
+const DNS_NAME = new RegExp(`^(?=.{1,${MAX_MUSIC_SERVICE_LENGTH}}$)${DNS_LABEL}(?:\\.${DNS_LABEL})+$`);
+
+function artistMbidList(value: unknown): DroppableResult<string[]> {
+  const field = 'artistMbids';
+  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_ARTIST_MBIDS) {
+    return droppable(field, MSG_ARTIST_MBIDS);
+  }
+  const out: string[] = [];
+  for (let i = 0; i < value.length; i++) {
+    // `Object.hasOwn` sees the holes of a sparse array.
+    const item: unknown = Object.hasOwn(value, i) ? value[i] : undefined;
+    if (typeof item !== 'string') return droppable(field, MSG_ARTIST_MBIDS);
+    const m = uuidField(field, item);
+    if (!m.ok) return m;
+    // Distinct as UUIDs: two spellings that differ only in case are the same artist.
+    if (out.includes(m.value)) return droppable(field, MSG_ARTIST_MBIDS);
+    out.push(m.value);
+  }
+  return { ok: true, value: out };
+}
+
+/**
+ * Validate one optional record field. The value returned is normalized the
+ * way `buildScrobbleRecord` stores it (trimmed text, lowercase UUIDs); a
+ * remote record keeps its own spelling instead. A failure names the record
+ * field, has code `invalid_field` and is marked droppable.
+ */
+export function validateDroppableField<K extends DroppableField>(
+  field: K,
+  value: unknown,
+): DroppableResult<NonNullable<DroppableValues[K]>> {
+  type R = DroppableResult<NonNullable<DroppableValues[K]>>;
+  switch (field) {
+    case 'album':
+    case 'albumArtist':
+      return boundedText(field, value, MAX_DISPLAY_SCALARS, MAX_DISPLAY_BYTES, MSG_DISPLAY) as R;
+    case 'submissionClient':
+      return boundedText(
+        field,
+        value,
+        MAX_SUBMISSION_CLIENT_SCALARS,
+        MAX_SUBMISSION_CLIENT_BYTES,
+        MSG_SUBMISSION_CLIENT,
+      ) as R;
+    case 'durationSeconds':
+      return (isDuration(value) ? { ok: true, value } : droppable(field, MSG_DURATION)) as R;
+    case 'trackNumber': {
+      const ok =
+        typeof value === 'number' && Number.isInteger(value) && value >= MIN_TRACK_NUMBER && value <= MAX_TRACK_NUMBER;
+      return (ok ? { ok: true, value } : droppable(field, MSG_TRACK_NUMBER)) as R;
+    }
+    case 'recordingMbid':
+    case 'releaseMbid':
+    case 'releaseGroupMbid':
+      return uuidField(field, value) as R;
+    case 'artistMbids':
+      return artistMbidList(value) as R;
+    case 'isrc':
+      if (typeof value !== 'string') return droppable(field, MSG_OPTIONAL_STRING) as R;
+      return (ISRC.test(value) ? { ok: true, value } : droppable(field, MSG_ISRC)) as R;
+    case 'musicService':
+      if (typeof value !== 'string') return droppable(field, MSG_OPTIONAL_STRING) as R;
+      return (DNS_NAME.test(value) ? { ok: true, value } : droppable(field, MSG_MUSIC_SERVICE)) as R;
+  }
+  throw new RangeError(`not a droppable scrobble field: ${String(field)}`);
+}
+
+/** The remote spelling of a validated field (arrays copied, so the row never aliases the input). */
+function remoteSpelling(value: unknown): unknown {
+  return Array.isArray(value) ? [...value] : value;
+}
+
 function requirePrefix(prefix: string): string {
   return collectionsFor(prefix).scrobble;
 }
@@ -400,21 +581,30 @@ export function validateScrobbleRecord(json: unknown, prefix: string, receiptNs:
   if (f.album !== undefined) record.album = f.album;
   if (f.durationSeconds !== undefined) record.durationSeconds = f.durationSeconds;
   if (f.recordingMbid !== undefined) record.recordingMbid = f.recordingMbid;
-  return {
-    ok: true,
-    row: {
-      record,
-      artist: f.artist,
-      track: f.track,
-      album: f.album ?? null,
-      listenedAt: toStorage(checked.value.listenedAtNs),
-      listenedAtNs: checked.value.listenedAtNs,
-      createdAt: toStorage(created.ns),
-      createdAtNs: created.ns,
-      durationSeconds: f.durationSeconds ?? null,
-      recordingMbid: f.recordingMbid ?? null,
-    },
+  // Open record: each §6.2 field is kept in its remote spelling when valid and
+  // dropped when not (reported, never fatal, never truncated).
+  const dropped: ValidationFailure[] = [];
+  const extras = record as unknown as Record<string, unknown>;
+  for (const name of OPTIONAL_FIELDS) {
+    if (!has(object, name)) continue;
+    const v = validateDroppableField(name, object[name]);
+    if (v.ok) extras[name] = remoteSpelling(object[name]);
+    else dropped.push(v.reason);
+  }
+  const row: ScrobbleRow = {
+    record,
+    artist: f.artist,
+    track: f.track,
+    album: f.album ?? null,
+    listenedAt: toStorage(checked.value.listenedAtNs),
+    listenedAtNs: checked.value.listenedAtNs,
+    createdAt: toStorage(created.ns),
+    createdAtNs: created.ns,
+    durationSeconds: f.durationSeconds ?? null,
+    recordingMbid: f.recordingMbid ?? null,
   };
+  if (dropped.length > 0) row.dropped = dropped;
+  return { ok: true, row };
 }
 
 /**
@@ -446,6 +636,14 @@ export function buildScrobbleRecord(input: unknown, prefix: string, clock: Clock
   if (c.album !== undefined) record.album = c.album;
   if (fields.value.durationSeconds !== undefined) record.durationSeconds = fields.value.durationSeconds;
   if (c.recordingMbid !== undefined) record.recordingMbid = c.recordingMbid;
+  // Closed input: an invalid §6.2 field rejects the build (a 422 before any operation exists).
+  const extras = record as unknown as Record<string, unknown>;
+  for (const name of OPTIONAL_FIELDS) {
+    if (!has(object, name)) continue;
+    const v = validateDroppableField(name, object[name]);
+    if (!v.ok) return { ok: false, reason: v.reason };
+    extras[name] = v.value;
+  }
   return { ok: true, record };
 }
 
