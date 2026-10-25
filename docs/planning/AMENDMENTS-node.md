@@ -398,3 +398,28 @@ Each section lists the cases of one leaf whose ADR 0004 retirement cited a super
 | --- | --- | --- |
 | `embedded_dist` | `retired:A1` (superseded by B1) | `worker/test/node/compose.test.ts › the SPA and its assets are served from ATMUSIC_ASSETS_DIR (default <release>/web/dist) with the _headers rules` (N2-01, wave 2) |
 | `missing_build` | `retired:A1` (superseded by B1) | `worker/test/node/run.test.ts › startup with an ATMUSIC_ASSETS_DIR lacking index.html exits 78 naming ATMUSIC_ASSETS_DIR and never listens` (N3-07, wave 3) |
+
+## Package deviations
+
+Places where a package's tree differs from its `files` entry in [node-waves.json](node-waves.json). Amending that entry is an owner action; until the owner does, this section is the record of where the files are.
+
+### N0-02 v1.2 contract fixtures live in api/examples/v1.2/
+
+**Declared:** the N0-02 `files` entry names `api/examples/{operation,session,account,link,import-job,credentials}.json` and `api/examples/response-cases.json` for the v1.2 fixtures and response cases.
+
+**Tree:** every v1.2 payload fixture and the v1.2 response-case inventory are in `api/examples/v1.2/` (44 files). `api/examples/response-cases.json` stays the frozen v1.1 inventory and is unchanged; `api/examples/scrobble-input.json` and `api/examples/schema-cases.json` are where the entry says.
+
+| Declared path | Actual path |
+| --- | --- |
+| `api/examples/operation.json` | `api/examples/v1.2/operation.json` |
+| `api/examples/session.json` | `api/examples/v1.2/session.json` |
+| `api/examples/account.json` | `api/examples/v1.2/account.json` |
+| `api/examples/link.json` | `api/examples/v1.2/link.json` |
+| `api/examples/import-job.json` | `api/examples/v1.2/import-job.json` |
+| `api/examples/credentials.json` | `api/examples/v1.2/credentials.json` |
+| `api/examples/response-cases.json` (v1.2 cases) | `api/examples/v1.2/response-cases.json` |
+| not declared | the other 37 `api/examples/v1.2/*.json` fixtures: `accepted`, the v1.2 `error-*` envelopes, the `*-input` request bodies, `client-metadata`, `jwks` and the remaining link, import, credential and account payloads |
+
+**Why:** `web/test/api-client.test.ts › every api/examples response decodes and a changed field type is rejected` (W1-10, case `M7.1.2/contract_drift`; not owned by N0-02) globs `api/examples/*.json` without recursing. It requires that the set of top-level response fixtures equals the set that `api/examples/response-cases.json` references, and that every route in that file has an `ApiClient` method. So any v1.2 payload at the top level, or any v1.2 case in the top-level inventory, fails that test until N5-01 gives the SPA its v1.2 client. N0-02 verified this: with `api/examples/operation.json` added at the top level, the test fails with `operation` missing from the referenced fixtures. `scripts/validate_contracts.py` (`example_inventory`) enforces the layout: an example lives directly in `api/examples` (v1.1) or in `api/examples/v1.2` (v1.2, with component example names prefixed `v1.2-`), and every file in either directory is a declared, validated component example.
+
+**Requested owner amendment:** in the N0-02 `files` entry, replace the six `api/examples/{operation,session,account,link,import-job,credentials}.json` paths with `api/examples/v1.2/`, and leave `api/examples/response-cases.json` declared, since it stays the v1.1 inventory. Any later package that reads N0-02's fixtures should cite `api/examples/v1.2/<name>.json`.

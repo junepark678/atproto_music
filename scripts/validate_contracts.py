@@ -340,6 +340,8 @@ UPLOAD_MAX_BODY_BYTES = 64 * 1024 * 1024
 # test consumes until N5-01; the v1.2 inventory lives beside the v1.2 fixtures. The one v1.1 route
 # whose payload B14 changed is re-bound there; its v1.1 case keeps the legacy static-asset fixture,
 # validated against the retained OAuthClientMetadata schema that scripts/gen-config.ts still emits.
+# The v1.2 fixtures cannot sit at the top level until then (web/test/api-client.test.ts globs
+# api/examples/*.json); AMENDMENTS-node.md "Package deviations" records this against node-waves.json.
 V11_CASES = 'response-cases.json'
 V12_CASES = 'v1.2/response-cases.json'
 INVENTORY_FILES = {V11_CASES, 'schema-cases.json', V12_CASES}
