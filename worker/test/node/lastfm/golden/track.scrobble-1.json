@@ -1,0 +1,31 @@
+{
+  "scrobbles": {
+    "scrobble": {
+      "track": {
+        "corrected": "0",
+        "#text": "Test Track"
+      },
+      "artist": {
+        "corrected": "0",
+        "#text": "Test Artist"
+      },
+      "album": {
+        "corrected": "0",
+        "#text": ""
+      },
+      "albumArtist": {
+        "corrected": "0",
+        "#text": ""
+      },
+      "timestamp": "1768474800",
+      "ignoredMessage": {
+        "code": "0",
+        "#text": ""
+      }
+    },
+    "@attr": {
+      "accepted": 1,
+      "ignored": 0
+    }
+  }
+}

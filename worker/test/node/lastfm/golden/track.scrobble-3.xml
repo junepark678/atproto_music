@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<lfm status="ok">
+  <scrobbles accepted="2" ignored="1">
+    <scrobble>
+      <track corrected="0">First Track</track>
+      <artist corrected="0">First Artist</artist>
+      <album corrected="0">First Album</album>
+      <albumArtist corrected="0"/>
+      <timestamp>1768471200</timestamp>
+      <ignoredMessage code="0"/>
+    </scrobble>
+    <scrobble>
+      <track corrected="0">Second Track</track>
+      <artist corrected="0">Second Artist</artist>
+      <album corrected="0"/>
+      <albumArtist corrected="0"/>
+      <timestamp>1768474800</timestamp>
+      <ignoredMessage code="0"/>
+    </scrobble>
+    <scrobble>
+      <track corrected="0">Old Track</track>
+      <artist corrected="0">Old Artist</artist>
+      <album corrected="0"/>
+      <albumArtist corrected="0"/>
+      <timestamp>1000000000</timestamp>
+      <ignoredMessage code="3">Timestamp too old</ignoredMessage>
+    </scrobble>
+  </scrobbles>
+</lfm>

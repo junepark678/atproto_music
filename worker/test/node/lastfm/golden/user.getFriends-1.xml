@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<lfm status="ok">
+  <friends user="alice" page="1" perPage="50" totalPages="1" total="1">
+    <user>
+      <name>bob</name>
+      <realname/>
+      <image size="small"/>
+      <image size="medium"/>
+      <image size="large"/>
+      <image size="extralarge"/>
+      <url>https://music.214510.xyz/u/did:plc:bbbbbbbbbbbbbbbbbbbbbbbb</url>
+      <country>None</country>
+      <age>0</age>
+      <gender>n</gender>
+      <subscriber>0</subscriber>
+      <playcount>9</playcount>
+      <playlists>0</playlists>
+      <bootstrap>0</bootstrap>
+      <registered unixtime="1767225600">1767225600</registered>
+      <type>user</type>
+    </user>
+  </friends>
+</lfm>
