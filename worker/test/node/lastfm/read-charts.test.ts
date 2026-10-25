@@ -235,5 +235,25 @@ describe('Last.fm chart read methods', () => {
     // from without to is 6.
     const half = await get(app, { method: 'user.getWeeklyTrackChart', user: 'alice', from: '1' });
     expect([half.status, half.body.error]).toEqual([400, 6]);
+    // from/to past year 9999 (MAX_UNIX_SECONDS) are an invalid parameter (6),
+    // never an internal failure (8) with an error log.
+    const outOfRange: Array<[string, string, string]> = [
+      ['user.getWeeklyTrackChart', '0', '300000000000'],
+      ['user.getWeeklyArtistChart', '0', '9007199254740991'],
+      ['user.getWeeklyAlbumChart', '300000000000', '300000604800'],
+    ];
+    for (const [method, from, to] of outOfRange) {
+      const res = await get(app, { method, user: 'alice', from, to });
+      expect([res.status, res.body.error, res.body.message]).toEqual([
+        400,
+        6,
+        `Invalid parameters - ${from === '0' ? 'to' : 'from'} is out of range`,
+      ]);
+    }
+    expect(app.log.logs.filter((l) => l.event === 'lastfm.method_failed')).toEqual([]);
+    // Every request was logged (7 above plus these), so the absence is not vacuous.
+    const requestLines = app.log.logs.filter((l) => l.event === 'request');
+    expect(requestLines).toHaveLength(7 + outOfRange.length);
+    expect(requestLines.slice(-outOfRange.length).map((l) => l.lastfmMethod)).toEqual(outOfRange.map(([m]) => m));
   });
 });

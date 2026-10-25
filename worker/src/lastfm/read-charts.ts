@@ -13,7 +13,7 @@
 // Weekly charts: weeks start on Sundays at 12:00 UTC. getWeeklyChartList lists
 // every week from the one holding the user's first listen to the current one.
 // The weekly charts take `from`/`to` (UNIX s, `[from, to)`; both or neither,
-// else 6) and default to the last complete week. They list the whole ranking
+// else 6; past MAX_UNIX_SECONDS, 6) and default to the last complete week. They list the whole ranking
 // of the window (Last.fm does not page them) and are not cached, since the
 // window is the client's.
 
@@ -35,7 +35,7 @@ import {
   type RangeTrackItem,
   rangeStats,
 } from '../do/read/range-stats';
-import { listensByTimestamp } from '../do/read/recent';
+import { listensByTimestamp, MAX_UNIX_SECONDS } from '../do/read/recent';
 import { images, type LfmDocument, type LfmElement, leaf, lfmOk, list, node, paged } from './encode';
 import { LastfmError } from './errors';
 import {
@@ -250,6 +250,13 @@ function weeklyChart<E extends RangeEntity>(call: LastfmCall, entity: E): LfmDoc
   const user = resolveUser(call);
   const range = lastfmWeeklyChartRange(call.params.get('from'), call.params.get('to'), nowSeconds(call));
   if (range === null) throw new LastfmError(6, INVALID_WEEK_MESSAGE);
+  // The same ceiling as secondsParam (read-user.ts): past year 9999 the
+  // window is an invalid parameter, not a range the engine can hold.
+  for (const name of ['from', 'to'] as const) {
+    if (range.week[name] > MAX_UNIX_SECONDS) {
+      throw new LastfmError(6, `Invalid parameters - ${name} is out of range`);
+    }
+  }
   const result = stats(call, user, entity, fromPeriod(range.bounds), { limit: null, offset: 0 });
   const { root, item } = WEEKLY_ROOTS[entity];
   const build = WEEKLY_ITEM[entity] as (i: RangeItemOf[E]) => LfmElement;
