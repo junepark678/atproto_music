@@ -23,7 +23,7 @@ import { seededRandom } from '@atmusic/core/test-support/random';
 import { afterEach, describe, expect, it } from 'vitest';
 import { MemoryRevocations } from '../../../src/app/revocations';
 import { csrfToken } from '../../../src/bff/csrf';
-import { createWebSessions, SESSION_COOKIE } from '../../../src/bff/sessions';
+import { createWebSessions, SESSION_COOKIE, type WebSessions } from '../../../src/bff/sessions';
 import { ensureAccount } from '../../../src/credentials/accounts';
 import { createAppPassword } from '../../../src/credentials/app-passwords';
 import { createLastfmApp, issuedAppSecret } from '../../../src/credentials/lastfm-apps';
@@ -94,6 +94,8 @@ interface World {
   app: TestApp;
   clock: FixedClock;
   journal: MemoryRevocations;
+  /** Web sessions over the server's db and journal (to log out mid-request). */
+  sessions: WebSessions;
   signIn(did: string, handle: string): Signed;
 }
 
@@ -118,6 +120,7 @@ async function world(options: { probes?: boolean } = {}): Promise<World> {
     app,
     clock,
     journal,
+    sessions,
     signIn(did, handle) {
       app.db.run(
         "INSERT INTO users (did, handle, joined_at) VALUES (?, ?, '2026-01-15T12:00:00.000000000Z')",
@@ -555,5 +558,99 @@ describe('credential mutations need a session and CSRF (ADR §5.6)', () => {
     expect(admitted[0]?.headers.get('set-cookie')).toContain(`${SESSION_COOKIE}=${alice.token};`);
     expect(snapshot()).toMatchObject({ app_passwords: 1, lb_tokens: 1, lastfm_apps: 1, lastfm_sessions: 0 });
     expect(journal.entries().map((e) => e.kind)).toEqual(['app_password', 'lb_token', 'lastfm_app', 'lastfm_session']);
+  });
+});
+
+describe('a create rechecks its session after reading the body (ADR §5.6, §5.7)', () => {
+  it('a create whose session is logged out while its body streams is 401 and writes nothing', async () => {
+    const { app, clock, journal, sessions, signIn } = await world();
+    const alice = signIn(ALICE, 'alice.example.com');
+    const creates: { path: string; head: string; tail: string; end: (s: Signed) => void }[] = [
+      {
+        path: '/api/v1/account/app-passwords',
+        head: '{"label":',
+        tail: '"late"}',
+        end: (s) => expect(sessions.logout(s.token)).toBe(true),
+      },
+      {
+        path: '/api/v1/account/listenbrainz-tokens',
+        head: '{"label":',
+        tail: '"late"}',
+        end: (s) => expect(sessions.logoutAll(s.did)).toBe(1),
+      },
+      {
+        path: '/api/v1/account/lastfm-apps',
+        head: '{"name":',
+        tail: '"late"}',
+        end: (s) => expect(sessions.logout(s.token)).toBe(true),
+      },
+    ];
+    const lastSeen = () =>
+      app.db.one<{ last_seen_ms: number }>('SELECT last_seen_ms FROM web_sessions WHERE did = ?', ALICE)
+        ?.last_seen_ms ?? null;
+
+    let signed = alice;
+    for (const c of creates) {
+      // Two days on, so the guard's admission renews the row: seeing the renewal
+      // proves the guard ran and the handler is now waiting for the body.
+      clock.advance(2 * 24 * 60 * 60_000);
+      const before = lastSeen();
+      let controller!: ReadableStreamDefaultController<Uint8Array>;
+      const body = new ReadableStream<Uint8Array>({
+        start(ctl) {
+          controller = ctl;
+        },
+      });
+      controller.enqueue(new TextEncoder().encode(c.head));
+      const pending = app.fetch(c.path, {
+        method: 'POST',
+        headers: {
+          cookie: signed.cookie,
+          'x-csrf-token': signed.csrf,
+          origin: TEST_PUBLIC_ORIGIN,
+          'content-type': 'application/json',
+        },
+        body,
+        duplex: 'half',
+      } as RequestInit);
+      for (let i = 0; i < 500 && lastSeen() === before; i++) await new Promise((r) => setTimeout(r, 5));
+      expect(lastSeen()).toBe(clock.nowMs());
+
+      // The session is cut off mid-body; then the body completes.
+      c.end(signed);
+      expect(count(app, 'web_sessions')).toBe(0);
+      controller.enqueue(new TextEncoder().encode(c.tail));
+      controller.close();
+
+      const res = await pending;
+      const text = await res.text();
+      const answer: Answer = { status: res.status, headers: res.headers, text, body: JSON.parse(text) };
+      expectError(answer, 401, 'unauthenticated');
+      expectContract('POST', c.path, answer);
+      expect(answer.headers.get('set-cookie')).toBeNull();
+      expect(text).not.toContain('late');
+      expect({
+        app_passwords: count(app, 'app_passwords'),
+        lb_tokens: count(app, 'lb_tokens'),
+        lastfm_apps: count(app, 'lastfm_apps'),
+      }).toEqual({ app_passwords: 0, lb_tokens: 0, lastfm_apps: 0 });
+
+      // Sign in again for the next route (the users row already exists).
+      const issued = sessions.create(ALICE);
+      const csrfKey = createBox(app.secrets.encryptionKeys, seededRandom(1)).csrfKey();
+      signed = {
+        did: ALICE,
+        token: issued.token,
+        cookie: `${SESSION_COOKIE}=${issued.token}`,
+        csrf: csrfToken(csrfKey, issued.token),
+      };
+    }
+    // Only the three web-session revocations were journaled; no credential was.
+    expect(journal.entries().map((e) => e.kind)).toEqual(['web_session', 'web_session', 'web_session']);
+
+    // Control: a create over a live session is admitted and writes its row.
+    const ok = await call(app, 'POST', '/api/v1/account/app-passwords', { as: signed, body: { label: 'live' } });
+    expect(ok.status).toBe(201);
+    expect(count(app, 'app_passwords')).toBe(1);
   });
 });

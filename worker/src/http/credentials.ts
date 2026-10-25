@@ -17,6 +17,15 @@
 // A refused request writes nothing. An admitted request that renewed the
 // session carries the renewal Set-Cookie (guard.ts withSessionCookie).
 //
+// **A create rechecks its session after the body.** The guard runs before
+// the body is read, so 401/403 come first; but reading up to 64 KiB is an
+// await, and a logout, logout-all, account disconnect or sign-in-policy
+// reconcile may delete the session meanwhile (ADR §5.6/§5.7: a cut-off
+// account gets no new credential). The insert therefore runs in one db.tx
+// with a fresh lookup of the request's cookie, which must still find the
+// guard's session (same token hash, same DID); otherwise the answer is 401
+// `unauthenticated`, nothing is written and no renewal cookie is sent.
+//
 // **Secrets are shown once.** A create answers 201 with the secret — the app
 // password, the ListenBrainz token or the issued app's shared secret — and
 // `Cache-Control: no-store`. Nothing keeps the plaintext: app passwords and
@@ -151,6 +160,34 @@ export class CredentialSettingsUnavailable extends Error {
   }
 }
 
+/** The guard's session was deleted or expired while the request body was read. */
+class SessionEnded extends Error {
+  override readonly name = 'SessionEnded';
+  constructor() {
+    super('the session ended before the credential was written');
+  }
+}
+
+/**
+ * `write()` in one transaction with a fresh lookup of `req`'s cookie, which
+ * must still find `session` (same token hash and DID); throws SessionEnded,
+ * having written nothing, when it does not (module comment).
+ */
+function writeInLiveSession<T>(
+  svc: CredentialSettingsService,
+  req: Request,
+  session: WebSession,
+  write: () => T extends Promise<unknown> ? never : T,
+): T {
+  return svc.deps.db.tx(() => {
+    const current = svc.sessions.lookupCookieHeader(req.headers.get('cookie'));
+    if (current === null || current.tokenHash !== session.tokenHash || current.did !== session.did) {
+      throw new SessionEnded();
+    }
+    return write();
+  });
+}
+
 /** A credential handler: a RouteDef handler that also receives the service. */
 type CredentialHandler = (
   svc: CredentialSettingsService,
@@ -183,6 +220,8 @@ async function withSession(
   try {
     response = await handle(guard.session);
   } catch (error) {
+    // The session is gone: no renewal cookie for it.
+    if (error instanceof SessionEnded) return sessionErrorResponse('unauthenticated', ctx.requestId);
     if (error instanceof ApiError) response = toErrorResponse(error, ctx.requestId);
     else if (error instanceof CredentialError) response = credentialErrorResponse(error, ctx.requestId);
     else throw error;
@@ -291,7 +330,7 @@ export const getCredentials: CredentialHandler = (svc, req, ctx) =>
 export const postAppPassword: CredentialHandler = (svc, req, ctx) =>
   withSession(svc, req, ctx, async (session) => {
     const label = await readLabelBody(req, 'label');
-    const made = createAppPassword(svc.deps, { did: session.did, label });
+    const made = writeInLiveSession(svc, req, session, () => createAppPassword(svc.deps, { did: session.did, label }));
     return created({
       id: made.id,
       label: made.label ?? label,
@@ -303,14 +342,14 @@ export const postAppPassword: CredentialHandler = (svc, req, ctx) =>
 export const postLbToken: CredentialHandler = (svc, req, ctx) =>
   withSession(svc, req, ctx, async (session) => {
     const label = await readLabelBody(req, 'label');
-    const made = createLbToken(svc.deps, { did: session.did, label });
+    const made = writeInLiveSession(svc, req, session, () => createLbToken(svc.deps, { did: session.did, label }));
     return created({ id: made.id, label: made.label ?? label, token: made.token, createdAt: iso(made.createdAtMs) });
   });
 
 export const postLastfmApp: CredentialHandler = (svc, req, ctx) =>
   withSession(svc, req, ctx, async (session) => {
     const name = await readLabelBody(req, 'name');
-    const made = createLastfmApp(svc.deps, { did: session.did, name });
+    const made = writeInLiveSession(svc, req, session, () => createLastfmApp(svc.deps, { did: session.did, name }));
     return created({
       apiKey: made.apiKey,
       sharedSecret: made.sharedSecret,
