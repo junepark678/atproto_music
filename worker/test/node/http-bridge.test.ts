@@ -15,13 +15,18 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { UUID_PATTERN } from '../../src/http/request-id';
 import {
   BODY_CAPS,
+  type BodyPolicy,
   type BridgeHandler,
   type BridgeServer,
   bodyCapFor,
+  bodyPolicyFor,
   createServer,
   DEFAULT_LISTEN,
+  envelopePolicy,
   HEADERS_TIMEOUT_MS,
   KEEP_ALIVE_TIMEOUT_MS,
+  LASTFM_BODY_TOO_LARGE,
+  LISTENBRAINZ_PAYLOAD_TOO_LARGE,
   ListenConfigError,
   parseListen,
   REQUEST_TIMEOUT_MS,
@@ -42,7 +47,10 @@ afterEach(async () => {
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
-async function start(handler: BridgeHandler, extra: { caps?: (p: string, m: string) => number; host?: string } = {}) {
+async function start(
+  handler: BridgeHandler,
+  extra: { caps?: (p: string, m: string) => BodyPolicy; host?: string } = {},
+) {
   const bridge = createServer({
     publicOrigin: ORIGIN,
     listen: { host: extra.host ?? '127.0.0.1', port: 0 },
@@ -283,7 +291,7 @@ describe('HTTP bridge', () => {
         }
         return new Response(`read ${total}`);
       },
-      { caps: (pathname) => (pathname === '/small' ? CAP : BODY_CAPS.default) },
+      { caps: (pathname) => envelopePolicy(pathname === '/small' ? CAP : BODY_CAPS.default) },
     );
 
     // Exactly the cap is accepted.
@@ -338,6 +346,113 @@ describe('HTTP bridge', () => {
     const reason = await handlerAborted;
     expect(signal.aborted).toBe(true);
     expect((reason as DOMException).name).toBe('AbortError');
+  });
+
+  it('over-cap answers follow the route protocol: /1/submit-listens runs the handler first (401 with zero body bytes read) and overflows into the verbatim ListenBrainz 400; /2.0 is Last.fm error 6; /api/v1 keeps the 413 envelope', {
+    timeout: 30_000,
+  }, async () => {
+    // The production table: who pre-checks a declared length, and at what cap.
+    expect(bodyPolicyFor('/1/submit-listens', 'POST')).toMatchObject({ limit: 10_240_000, precheckDeclared: false });
+    expect(bodyPolicyFor('/1/delete-listen', 'POST')).toMatchObject({ limit: 65_536, precheckDeclared: true });
+    expect(bodyPolicyFor('/2.0/', 'POST')).toMatchObject({ limit: 1_048_576, precheckDeclared: true });
+    expect(bodyPolicyFor('/api/v1/notify', 'POST')).toMatchObject({ limit: 65_536, precheckDeclared: true });
+    expect(LISTENBRAINZ_PAYLOAD_TOO_LARGE).toBe('Payload too large. Payload cannot exceed 10240000 bytes');
+
+    const calls: { path: string; bytesAtEntry: number; bytesAtAnswer: number }[] = [];
+    let handlerSawError: string | null = null;
+    // The production policies (no `caps`): a stand-in for the routes' own token check.
+    const { port, authority } = await start(async (request, info) => {
+      const url = new URL(request.url);
+      const entry = { path: url.pathname, bytesAtEntry: info.bodyBytesRead(), bytesAtAnswer: -1 };
+      calls.push(entry);
+      if (request.headers.get('authorization') !== 'Token good') {
+        // A token lookup takes event-loop turns; the body must stay unread meanwhile.
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        entry.bytesAtAnswer = info.bodyBytesRead();
+        return Response.json({ code: 401, error: 'Invalid authorization token.' }, { status: 401 });
+      }
+      try {
+        await request.arrayBuffer();
+      } catch (error) {
+        handlerSawError = (error as Error).name;
+        return new Response('handler answer after overflow', { status: 500 });
+      }
+      return Response.json({ status: 'ok' });
+    });
+
+    // Unauthenticated submit declaring 10 MiB (> 10,240,000): the handler runs, answers 401,
+    // and has read zero body bytes although the client already sent 64 KiB of body.
+    const anon = rawClient(port);
+    await anon.write(
+      `POST /1/submit-listens HTTP/1.1\r\nHost: ${authority}\r\nContent-Type: application/json\r\nContent-Length: 10485760\r\n\r\n`,
+    );
+    await anon.write('x'.repeat(65_536));
+    // The bridge closes the connection: the unread body is never parsed as a request.
+    const unauthorized = parseResponse(await anon.ended);
+    expect(unauthorized.status).toBe(401);
+    expect(JSON.parse(unauthorized.body)).toEqual({ code: 401, error: 'Invalid authorization token.' });
+    expect(unauthorized.headers.connection).toBe('close');
+    expect(calls).toEqual([{ path: '/1/submit-listens', bytesAtEntry: 0, bytesAtAnswer: 0 }]);
+
+    // Authenticated, 10,240,001 bytes streamed: the bridge answers ListenBrainz's verbatim 400.
+    const big = rawClient(port);
+    await big.write(
+      `POST /1/submit-listens HTTP/1.1\r\nHost: ${authority}\r\nAuthorization: Token good\r\nContent-Length: 10240001\r\n\r\n`,
+    );
+    void big.write('y'.repeat(10_240_001)).catch(() => undefined);
+    const overflow = parseResponse(await big.ended);
+    expect(overflow.status).toBe(400);
+    expect(overflow.headers['content-type']).toBe('application/json');
+    expect(overflow.headers['x-request-id']).toMatch(UUID_PATTERN);
+    expect(JSON.parse(overflow.body)).toEqual({
+      code: 400,
+      error: 'Payload too large. Payload cannot exceed 10240000 bytes',
+    });
+    expect(handlerSawError).toBe('BodyTooLargeError');
+    expect(calls).toHaveLength(2);
+
+    // Exactly 10,240,000 bytes are accepted.
+    const exact = parseResponse(
+      await exchange(
+        port,
+        `POST /1/submit-listens HTTP/1.1\r\nHost: ${authority}\r\nAuthorization: Token good\r\nContent-Length: 10240000\r\nConnection: close\r\n\r\n${'z'.repeat(10_240_000)}`,
+      ),
+    );
+    expect(exact.status).toBe(200);
+    expect(calls).toHaveLength(3);
+
+    // Pre-checked routes answer a declared length over the cap without calling the handler.
+    const declared = async (target: string, length: number, extra = '') =>
+      parseResponse(
+        await exchange(
+          port,
+          `POST ${target} HTTP/1.1\r\nHost: ${authority}\r\nContent-Length: ${length}\r\n${extra}Connection: close\r\n\r\n`,
+        ),
+      );
+    const lfmXml = await declared('/2.0/', 1_048_577);
+    expect(lfmXml.status).toBe(413);
+    expect(lfmXml.headers['content-type']).toBe('text/xml; charset=utf-8');
+    expect(lfmXml.body).toBe(
+      `<?xml version="1.0" encoding="UTF-8"?>\n<lfm status="failed"><error code="6">${LASTFM_BODY_TOO_LARGE}</error></lfm>`,
+    );
+    for (const [target, extra] of [
+      ['/2.0/?format=json', ''],
+      ['/2.0', 'Accept: application/json\r\n'],
+    ] as const) {
+      const lfmJson = await declared(target, 1_048_577, extra);
+      expect(lfmJson.status, target).toBe(413);
+      expect(lfmJson.headers['content-type']).toBe('application/json; charset=utf-8');
+      expect(JSON.parse(lfmJson.body)).toEqual({ error: 6, message: LASTFM_BODY_TOO_LARGE });
+    }
+    const lbOther = await declared('/1/delete-listen', 65_537);
+    expect(lbOther.status).toBe(413);
+    expect(JSON.parse(lbOther.body)).toEqual({ code: 413, error: 'The request body is too large.' });
+    const api = await declared('/api/v1/notify', 65_537);
+    expect(api.status).toBe(413);
+    const envelope = JSON.parse(api.body) as { error: { code: string; requestId: string } };
+    expect(envelope.error.code).toBe('payload_too_large');
+    expect(api.headers['x-request-id']).toBe(envelope.error.requestId);
+    expect(calls).toHaveLength(3);
   });
 
   it('HEAD returns headers and no body; the server has keepAliveTimeout 100000 and headersTimeout 60000', async () => {

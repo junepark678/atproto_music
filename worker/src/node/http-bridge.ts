@@ -8,13 +8,39 @@
 //   default port) or the listen address (`127.2.0.1:8888`, `[::1]:<port>`),
 //   else 421 `misdirected_request`. This stops DNS-rebinding pages in the
 //   owner's browser from reaching the loopback port.
-// - **Bodies** are streamed to the handler under a per-route cap (`bodyCapFor`,
-//   the ADR table; injectable). A Content-Length over the cap is answered 413
-//   before any body byte is read. Otherwise the bridge stops consuming the
-//   body as soon as more than `cap` bytes have arrived (the cap+1st byte),
-//   never hands the handler more than `cap` bytes, errors the handler's body
-//   stream, aborts its signal, and answers 413 itself, whatever the handler
-//   later returns. GET and HEAD carry no body.
+// - **Bodies** are streamed to the handler under a per-route `BodyPolicy`
+//   (`bodyPolicyFor`, the ADR table; injectable as `caps`). A policy names the
+//   cap, whether a declared Content-Length over it is answered before the
+//   handler runs, and the over-cap answer in the route's own protocol. The
+//   bridge stops consuming the body as soon as more than `cap` bytes have
+//   arrived (the cap+1st byte), never hands the handler more than `cap`
+//   bytes, errors the handler's body stream, aborts its signal, and answers
+//   the policy's `tooLarge` itself, whatever the handler later returns. No
+//   body byte is taken from node's request stream until the handler reads
+//   (`highWaterMark: 0`), so a handler that answers without reading has read
+//   zero bytes (`info.bodyBytesRead()`). GET and HEAD carry no body.
+// - **Over-cap answers and their order** (the §3.6 / §7.1 / §8.3 tension,
+//   decided here so N2-08 and N3-05 do not rediscover it). §3.6 says "413
+//   after at most cap+1 bytes" for every route, but §8.3 requires the
+//   ListenBrainz token and rate-limit checks before any body byte is read and
+//   lists "body over 10,240,000 bytes" as a verbatim ListenBrainz 400, and
+//   Last.fm clients parse `lfm/@status` or the JSON `error` member, never the
+//   /api/v1 envelope. So:
+//     * `/1/submit-listens`: no declared-length pre-check (the handler runs
+//       first, so an unauthenticated or rate-limited submit gets its 401/429
+//       having read zero body bytes, whatever Content-Length it declares);
+//       the streamed cap of 10,240,000 bytes is the backstop and answers
+//       ListenBrainz's 400 `{"code":400,"error":"Payload too large. Payload
+//       cannot exceed 10240000 bytes"}` (listenbrainz/webserver/views/api.py
+//       `submit_listen`). The route may also refuse a declared length itself.
+//     * other `/1/` routes: pre-check; 413 `{"code":413,"error":...}`, the
+//       ListenBrainz APIError shape.
+//     * `/2.0` and `/2.0/`: pre-check; HTTP 413 (§3.6) with a Last.fm error
+//       body, error 6, in JSON when the query has `format=json` or Accept
+//       names application/json (§7.1; a `format` inside the unread body
+//       cannot be honoured), else `<lfm status="failed">` XML.
+//     * everything else (`/api/v1`, OAuth, static): pre-check; 413
+//       `payload_too_large` in the API error envelope.
 // - **Disconnects.** When the client goes away before the response is
 //   complete, the handler's AbortSignal (also `request.signal`) is aborted.
 // - **HEAD** answers the handler's headers without a body.
@@ -31,9 +57,10 @@
 //   and LISTEN_PID is our pid; after `listen({fd})` the socket's local address
 //   is checked and a non-loopback socket (an IP socket elsewhere, or a unix
 //   socket) is closed and refused.
-// - Errors the bridge answers itself (400, 413, 421, 500) use the API error
-//   envelope with a request id from the injected Random; a handler that throws
-//   gets the generic 500, and its error is never echoed.
+// - Errors the bridge answers itself (400, 421, 500, and the /api/v1 413) use
+//   the API error envelope with a request id from the injected Random; a
+//   handler that throws gets the generic 500, and its error is never echoed.
+//   Every bridge answer carries that id in `x-request-id`.
 
 import { once } from 'node:events';
 import * as http from 'node:http';
@@ -60,12 +87,106 @@ export const BODY_CAPS = {
   importUpload: 64 * 1024 * 1024,
 } as const;
 
-/** The cap for a request to `pathname` (the URL path, still percent-encoded). */
+/** What an over-cap answer may look at: never the body. */
+export interface TooLargeContext {
+  readonly requestId: string;
+  /** PUBLIC_ORIGIN + the raw target. */
+  readonly url: URL;
+  readonly headers: Headers;
+}
+
+/** How the bridge treats one request's body (module comment). */
+export interface BodyPolicy {
+  /** The most body bytes the handler is ever given. */
+  readonly limit: number;
+  /**
+   * True: a declared Content-Length over `limit` is answered with `tooLarge`
+   * before the handler runs and before any body byte is read. False: the
+   * handler always runs first; the streamed cap is the backstop.
+   */
+  readonly precheckDeclared: boolean;
+  /** The over-cap answer, in the route's protocol. */
+  tooLarge(context: TooLargeContext): Response;
+}
+
+/**
+ * ListenBrainz's verbatim size message (`submit_listen`, MAX_LISTEN_PAYLOAD_SIZE
+ * = 10,240 bytes x 1,000 listens).
+ */
+export const LISTENBRAINZ_PAYLOAD_TOO_LARGE = `Payload too large. Payload cannot exceed ${BODY_CAPS.submitListens} bytes`;
+/** The message of the other /1/ routes' 413 (no ListenBrainz original exists). */
+export const LISTENBRAINZ_BODY_TOO_LARGE = 'The request body is too large.';
+/** Last.fm error 6 text for a /2.0 body over 1 MiB. */
+export const LASTFM_BODY_TOO_LARGE = 'Invalid parameters - The request body exceeds 1 MiB.';
+
+function noStore(contentType: string, requestId: string): Headers {
+  return new Headers({ 'content-type': contentType, 'cache-control': 'no-store', 'x-request-id': requestId });
+}
+
+/** The API error envelope 413 (`payload_too_large`). */
+export function envelopeTooLarge({ requestId }: TooLargeContext): Response {
+  const response = errorResponse('payload_too_large', 413, requestId);
+  response.headers.set('x-request-id', requestId);
+  return response;
+}
+
+/** ListenBrainz's error shape, `{"code": status, "error": message}`. */
+export function listenBrainzTooLarge(status: 400 | 413, message: string): BodyPolicy['tooLarge'] {
+  return ({ requestId }) =>
+    new Response(JSON.stringify({ code: status, error: message }), {
+      status,
+      headers: noStore('application/json', requestId),
+    });
+}
+
+/** A Last.fm-shaped error 6 with HTTP 413, JSON or XML as §7.1 picks from the query and Accept. */
+export function lastfmTooLarge({ requestId, url, headers }: TooLargeContext): Response {
+  const json =
+    url.searchParams.get('format') === 'json' ||
+    (headers.get('accept') ?? '').toLowerCase().includes('application/json');
+  if (json) {
+    return new Response(JSON.stringify({ error: 6, message: LASTFM_BODY_TOO_LARGE }), {
+      status: 413,
+      headers: noStore('application/json; charset=utf-8', requestId),
+    });
+  }
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>\n<lfm status="failed"><error code="6">${LASTFM_BODY_TOO_LARGE}</error></lfm>`;
+  return new Response(xml, { status: 413, headers: noStore('text/xml; charset=utf-8', requestId) });
+}
+
+/** The /api/v1-style policy for a cap: pre-check, envelope 413. */
+export function envelopePolicy(limit: number): BodyPolicy {
+  return { limit, precheckDeclared: true, tooLarge: envelopeTooLarge };
+}
+
+const POLICIES = {
+  default: envelopePolicy(BODY_CAPS.default),
+  importUpload: envelopePolicy(BODY_CAPS.importUpload),
+  lastfm: { limit: BODY_CAPS.lastfm, precheckDeclared: true, tooLarge: lastfmTooLarge },
+  submitListens: {
+    limit: BODY_CAPS.submitListens,
+    precheckDeclared: false,
+    tooLarge: listenBrainzTooLarge(400, LISTENBRAINZ_PAYLOAD_TOO_LARGE),
+  },
+  listenBrainz: {
+    limit: BODY_CAPS.default,
+    precheckDeclared: true,
+    tooLarge: listenBrainzTooLarge(413, LISTENBRAINZ_BODY_TOO_LARGE),
+  },
+} as const satisfies Record<string, BodyPolicy>;
+
+/** The policy for a request to `pathname` (the URL path, still percent-encoded). */
+export function bodyPolicyFor(pathname: string, method: string): BodyPolicy {
+  if (pathname === '/2.0' || pathname.startsWith('/2.0/')) return POLICIES.lastfm;
+  if (pathname === '/1/submit-listens') return POLICIES.submitListens;
+  if (pathname.startsWith('/1/')) return POLICIES.listenBrainz;
+  if (method === 'POST' && pathname === '/api/v1/imports/upload') return POLICIES.importUpload;
+  return POLICIES.default;
+}
+
+/** The cap for a request to `pathname`: `bodyPolicyFor(...).limit`. */
 export function bodyCapFor(pathname: string, method: string): number {
-  if (pathname === '/2.0' || pathname.startsWith('/2.0/')) return BODY_CAPS.lastfm;
-  if (pathname === '/1/submit-listens') return BODY_CAPS.submitListens;
-  if (method === 'POST' && pathname === '/api/v1/imports/upload') return BODY_CAPS.importUpload;
-  return BODY_CAPS.default;
+  return bodyPolicyFor(pathname, method).limit;
 }
 
 export class ListenConfigError extends Error {
@@ -156,6 +277,12 @@ export interface BridgeRequestInfo {
   readonly rawTarget: string;
   /** Aborted when the client disconnects, the body overflows, or the server closes. */
   readonly signal: AbortSignal;
+  /**
+   * Body bytes the bridge has taken out of node's request stream for this
+   * request: 0 until the handler reads its body (node's own socket buffering
+   * below that stream is bounded by its high-water mark and never parsed).
+   */
+  bodyBytesRead(): number;
 }
 
 export type BridgeHandler = (request: Request, info: BridgeRequestInfo) => Response | Promise<Response>;
@@ -165,8 +292,8 @@ export interface BridgeOptions {
   publicOrigin: string;
   listen: ListenTarget;
   handler: BridgeHandler;
-  /** Body cap per request; `bodyCapFor` by default. */
-  caps?: (pathname: string, method: string) => number;
+  /** Body policy per request (path still percent-encoded); `bodyPolicyFor` by default. */
+  caps?: (pathname: string, method: string) => BodyPolicy;
   /** Request ids of the bridge's own error answers; cryptoRandom in production. */
   random?: Random;
 }
@@ -204,7 +331,7 @@ export function createServer(options: BridgeOptions): BridgeServer {
   const publicHosts = new Set([origin.host.toLowerCase()]);
   if (origin.port === '' && defaultPort !== '') publicHosts.add(`${origin.hostname.toLowerCase()}:${defaultPort}`);
 
-  const caps = options.caps ?? bodyCapFor;
+  const caps = options.caps ?? bodyPolicyFor;
   const random = options.random ?? cryptoRandom;
   const inFlight = new Set<AbortController>();
   let bound: BoundAddress | null = null;
@@ -295,32 +422,26 @@ export function createServer(options: BridgeOptions): BridgeServer {
       return;
     }
 
-    const cap = caps(url.pathname, method);
+    const headers = inboundHeaders(req);
+    const policy = caps(url.pathname, method);
+    const cap = policy.limit;
+    const requestUrl = url;
+    const tooLarge = (): Response => policy.tooLarge({ requestId: newRequestId(random), url: requestUrl, headers });
     const declared = req.headers['content-length'];
-    if (declared !== undefined && /^[0-9]+$/.test(declared) && Number(declared) > cap) {
-      await answer(bridgeError('payload_too_large', 413));
+    if (policy.precheckDeclared && declared !== undefined && /^[0-9]+$/.test(declared) && Number(declared) > cap) {
+      await answer(tooLarge());
       return;
-    }
-
-    const headers = new Headers();
-    for (let i = 0; i + 1 < req.rawHeaders.length; i += 2) {
-      const name = req.rawHeaders[i] as string;
-      if (name.toLowerCase().startsWith('x-atmusic-')) continue;
-      try {
-        headers.append(name, req.rawHeaders[i + 1] as string);
-      } catch {
-        // A header undici refuses (never produced by node's parser in practice) is dropped.
-      }
     }
 
     const overflow = () => {
       if (!controller.signal.aborted) controller.abort(new BodyTooLargeError(`body exceeds ${cap} bytes`));
-      void answer(bridgeError('payload_too_large', 413));
+      void answer(tooLarge());
     };
     const hasBody = method !== 'GET' && method !== 'HEAD';
     const init: RequestInit & { duplex?: 'half' } = { method, headers, signal: controller.signal };
+    const counter = { bytes: 0 };
     if (hasBody) {
-      init.body = bodyStream(req, cap, overflow);
+      init.body = bodyStream(req, cap, counter, overflow);
       init.duplex = 'half';
     }
 
@@ -338,6 +459,7 @@ export function createServer(options: BridgeOptions): BridgeServer {
         peer: req.socket.remoteAddress,
         rawTarget,
         signal: controller.signal,
+        bodyBytesRead: () => counter.bytes,
       });
     } catch (error) {
       response = toErrorResponse(error, newRequestId(random));
@@ -401,9 +523,31 @@ async function closeServer(server: http.Server): Promise<void> {
   await closed;
 }
 
-/** The request body as a stream, capped (module comment). */
-function bodyStream(req: http.IncomingMessage, cap: number, onOverflow: () => void): ReadableStream<Uint8Array> {
-  let total = 0;
+/** The inbound headers, every `x-atmusic-*` dropped. */
+function inboundHeaders(req: http.IncomingMessage): Headers {
+  const headers = new Headers();
+  for (let i = 0; i + 1 < req.rawHeaders.length; i += 2) {
+    const name = req.rawHeaders[i] as string;
+    if (name.toLowerCase().startsWith('x-atmusic-')) continue;
+    try {
+      headers.append(name, req.rawHeaders[i + 1] as string);
+    } catch {
+      // A header undici refuses (never produced by node's parser in practice) is dropped.
+    }
+  }
+  return headers;
+}
+
+/**
+ * The request body as a stream, capped (module comment). `highWaterMark: 0`:
+ * nothing is pulled from the socket before the handler reads.
+ */
+function bodyStream(
+  req: http.IncomingMessage,
+  cap: number,
+  counter: { bytes: number },
+  onOverflow: () => void,
+): ReadableStream<Uint8Array> {
   let finished = false;
   return new ReadableStream<Uint8Array>(
     {
@@ -411,8 +555,8 @@ function bodyStream(req: http.IncomingMessage, cap: number, onOverflow: () => vo
         req.pause();
         req.on('data', (chunk: Buffer) => {
           if (finished) return;
-          total += chunk.byteLength;
-          if (total > cap) {
+          counter.bytes += chunk.byteLength;
+          if (counter.bytes > cap) {
             finished = true;
             req.pause();
             controller.error(new BodyTooLargeError(`body exceeds ${cap} bytes`));
@@ -441,7 +585,7 @@ function bodyStream(req: http.IncomingMessage, cap: number, onOverflow: () => vo
         req.pause();
       },
     },
-    { highWaterMark: 1 },
+    { highWaterMark: 0 },
   );
 }
 
