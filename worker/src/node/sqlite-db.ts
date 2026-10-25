@@ -32,6 +32,14 @@
 //   is set. Refusals throw SqlStatementRefusedError before anything executes.
 // - An integer above 2^53 on read throws SqlRangeError instead of a rounded
 //   number (the DO lost precision silently).
+// - The number of bind values must equal the statement's placeholder count, as
+//   DO SQLite requires ("Wrong number of parameter bindings for SQL query.");
+//   node:sqlite would bind NULL to a missing value. The count comes from the
+//   same scan as the single-statement check (`?` and `?NNN` outside literals,
+//   quoted identifiers and comments), is cached with the statement, and a
+//   mismatch throws SqlParamCountError before anything is bound. Named
+//   parameters (`:name`, `@name`, `$name`, `#name`) are refused: the facade
+//   binds positionally only.
 // - Prepared statements are cached in a 256-entry LRU keyed by SQL text.
 
 import * as sqlite from 'node:sqlite';
@@ -59,7 +67,14 @@ const SQLITE_LOCKED = 6;
 const SQLITE_CANTOPEN = 14;
 const SQLITE_AUTH = 23;
 
-export type SqlRefusalReason = 'multiple_statements' | 'transaction' | 'savepoint' | 'pragma' | 'attach' | 'detach';
+export type SqlRefusalReason =
+  | 'multiple_statements'
+  | 'named_parameter'
+  | 'transaction'
+  | 'savepoint'
+  | 'pragma'
+  | 'attach'
+  | 'detach';
 
 /** Module SQL the adapter does not execute (ADR 0005 §3.2). Nothing ran. */
 export class SqlStatementRefusedError extends Error {
@@ -69,6 +84,21 @@ export class SqlStatementRefusedError extends Error {
   ) {
     super(message);
     this.name = 'SqlStatementRefusedError';
+  }
+}
+
+/**
+ * The bind values do not match the statement's placeholders (DO SQLite throws
+ * "Wrong number of parameter bindings for SQL query."). Nothing was bound or run.
+ */
+export class SqlParamCountError extends Error {
+  readonly reason = 'wrong_param_count';
+  constructor(
+    readonly expected: number,
+    readonly actual: number,
+  ) {
+    super(`Wrong number of parameter bindings for SQL query. (the statement has ${expected}, got ${actual})`);
+    this.name = 'SqlParamCountError';
   }
 }
 
@@ -160,15 +190,45 @@ type Row = Record<string, unknown>;
 // ---------------------------------------------------------------------------
 // Statement tokenizer
 
+export interface SqlScan {
+  /** At most one statement: every top-level `;` is followed only by whitespace, comments and `;`. */
+  single: boolean;
+  /** The placeholder count SQLite reports (sqlite3_bind_parameter_count): the highest `?`/`?NNN` index. */
+  params: number;
+  /** The first named parameter (`:a`, `@a`, `$a`, `#a`) outside literals and comments, if any. */
+  named: string | null;
+}
+
+function isIdentChar(c: string | undefined): boolean {
+  if (c === undefined) return false;
+  const code = c.charCodeAt(0);
+  return (
+    (code >= 0x30 && code <= 0x39) ||
+    (code >= 0x41 && code <= 0x5a) ||
+    (code >= 0x61 && code <= 0x7a) ||
+    code === 0x5f ||
+    code >= 0x80
+  );
+}
+
+function isDigit(c: string | undefined): boolean {
+  return c !== undefined && c >= '0' && c <= '9';
+}
+
 /**
- * True when `sql` holds at most one statement: every `;` outside string and
- * blob literals, quoted identifiers ("x", `x`, [x]) and comments is followed
- * only by whitespace, comments and further `;`.
+ * Scans `sql` the way SQLite's tokenizer does for the parts the adapter checks:
+ * string and blob literals, quoted identifiers ("x", `x`, [x]) and comments are
+ * skipped; top-level `;` ends a statement; `?` takes the next index after the
+ * highest so far and `?NNN` takes NNN, so the placeholder count is the highest
+ * index (SQLite's rule); `$` inside an unquoted identifier is part of it.
  */
-export function isSingleStatement(sql: string): boolean {
+export function scanSql(sql: string): SqlScan {
   let i = 0;
   const n = sql.length;
   let ended = false; // a top-level `;` was seen
+  let single = true;
+  let params = 0;
+  let named: string | null = null;
   while (i < n) {
     const c = sql[i];
     const next = sql[i + 1];
@@ -192,7 +252,7 @@ export function isSingleStatement(sql: string): boolean {
       continue;
     }
     // Any other token after a top-level `;` starts a second statement.
-    if (ended) return false;
+    if (ended) single = false;
     if (c === "'" || c === '"' || c === '`') {
       // A doubled quote is an escaped quote inside the literal or identifier.
       let j = i + 1;
@@ -214,9 +274,37 @@ export function isSingleStatement(sql: string): boolean {
       i = end === -1 ? n : end + 1;
       continue;
     }
+    if (c === '?') {
+      let j = i + 1;
+      while (isDigit(sql[j])) j++;
+      // An out-of-range ?NNN (?0, above the variable limit) fails at prepare.
+      const index = j === i + 1 ? params + 1 : Number(sql.slice(i + 1, j));
+      if (index > params) params = index;
+      i = j;
+      continue;
+    }
+    if ((c === ':' || c === '@' || c === '$' || c === '#') && isIdentChar(next)) {
+      let j = i + 1;
+      while (isIdentChar(sql[j]) || sql[j] === '$') j++;
+      named ??= sql.slice(i, j);
+      i = j;
+      continue;
+    }
+    if (isIdentChar(c)) {
+      // An unquoted identifier, keyword or number; `$` may continue an identifier.
+      let j = i + 1;
+      while (isIdentChar(sql[j]) || sql[j] === '$') j++;
+      i = j;
+      continue;
+    }
     i++;
   }
-  return true;
+  return { single, params, named };
+}
+
+/** True when `sql` holds at most one statement (see `scanSql`). */
+export function isSingleStatement(sql: string): boolean {
+  return scanSql(sql).single;
 }
 
 // ---------------------------------------------------------------------------
@@ -384,7 +472,12 @@ export function openSqliteDb(path: string, options: OpenSqliteDbOptions = {}): S
     return sqlite.constants.SQLITE_DENY;
   });
 
-  const cache = new Map<string, NodeStatement>();
+  /** A prepared module statement and its placeholder count. */
+  interface Cached {
+    statement: NodeStatement;
+    params: number;
+  }
+  const cache = new Map<string, Cached>();
   const totalChanges = asAdapter(() => raw.prepare('SELECT total_changes() AS n') as NodeStatement);
   let depth = 0;
   let closed = false;
@@ -396,15 +489,22 @@ export function openSqliteDb(path: string, options: OpenSqliteDbOptions = {}): S
     return new SqlStatementRefusedError(reason, `module SQL may not use ${reason} statements`);
   };
 
-  const prepare = (sql: string): NodeStatement => {
+  const prepare = (sql: string): Cached => {
     const hit = cache.get(sql);
     if (hit !== undefined) {
       cache.delete(sql);
       cache.set(sql, hit);
       return hit;
     }
-    if (!isSingleStatement(sql)) {
+    const scan = scanSql(sql);
+    if (!scan.single) {
       throw new SqlStatementRefusedError('multiple_statements', 'module SQL must be a single statement');
+    }
+    if (scan.named !== null) {
+      throw new SqlStatementRefusedError(
+        'named_parameter',
+        `module SQL binds positionally; named parameter ${scan.named} is not supported`,
+      );
     }
     denied = null;
     let statement: NodeStatement;
@@ -415,21 +515,24 @@ export function openSqliteDb(path: string, options: OpenSqliteDbOptions = {}): S
     } finally {
       denied = null;
     }
-    cache.set(sql, statement);
+    const entry: Cached = { statement, params: scan.params };
+    cache.set(sql, entry);
     if (cache.size > STATEMENT_CACHE_SIZE) {
-      const [oldestSql, oldest] = cache.entries().next().value as [string, NodeStatement];
+      const [oldestSql, oldest] = cache.entries().next().value as [string, Cached];
       cache.delete(oldestSql);
-      oldest.close();
+      oldest.statement.close();
     }
-    return statement;
+    return entry;
   };
 
-  /** Checks, prepares and guards one module statement. */
+  /** Checks, prepares and guards one module statement; the value count must match its placeholders. */
   const statementFor = (sql: string, p: readonly unknown[]): NodeStatement => {
     if (closed) throw new Error('the database is closed');
     checkParams(p);
     if (depth > 0 && !raw.isTransaction) throw new TransactionAbortedError();
-    return prepare(sql);
+    const { statement, params } = prepare(sql);
+    if (p.length !== params) throw new SqlParamCountError(params, p.length);
+    return statement;
   };
 
   /** Runs one module statement; maps authorizer denials and out-of-range reads to typed errors. */
@@ -538,7 +641,7 @@ export function openSqliteDb(path: string, options: OpenSqliteDbOptions = {}): S
       if (closed) return;
       if (depth > 0) throw new Error('close() inside db.tx');
       closed = true;
-      for (const statement of cache.values()) statement.close();
+      for (const { statement } of cache.values()) statement.close();
       cache.clear();
       totalChanges.close();
       raw.close();
