@@ -1,19 +1,33 @@
 # MVP milestone status
 
-Recorded 2026-10-06 UTC. The implementation is a backend candidate. The fresh workspace run passed 345 Rust tests, 21 Python regressions and three independent fixture validators. The rebuilt Linux musl executable passed static smoke, packaging/checksums and the constrained read benchmark. [VALIDATION.md](VALIDATION.md) records the artifact, scope and remaining gates.
+Recorded 2026-10-25 for the Cloudflare Workers backend (ADR 0004).
 
-The [MVP plan](planning/MVP.md) requires merged deliverables and executed acceptance, including the applicable live evidence. No milestone or issue is closed by this candidate. Function counts do not prove all 258 named requirements.
+The acceptance gate `bash scripts/acceptance/workers-backend.sh` ran on commit `6f95c536bfc356ac5ef12524cd3cd6f6c3c34847`, with bundle SHA-256 `e796e5a5…7ab36`, and exited 0. Every deterministic suite passed: 406 tests in the repository gate, 21 backend acceptance tests in workerd, 9 Playwright tests, 25 Python regressions, the bundle guard, the case map and the Rust-oracle goldens. [VALIDATION.md](VALIDATION.md) and [backend-workers.md](verification/backend-workers.md) record the commands and counts.
 
-| Milestone | Implemented and locally verified | Remaining completion work |
-| --- | --- | --- |
-| M1: Contracts and foundation | Schema-v1 lexicons/OpenAPI, namespace publication guard, crate boundaries, embedded schema-4 migrations, atomic bounded writer, static executable checks | Record actual owner-controlled namespace evidence; merge reviewed deliverables and obtain repository CI evidence. |
-| M2: Identity and OAuth | Public HTTPS/DNS policy, verified identity, PAR/PKCE/state, ES256 DPoP nonce handling, encrypted refresh material, sessions/CSRF/logout | Execute browser and external-PDS OAuth/refresh/revocation checks against dedicated infrastructure. |
-| M3: Scrobble publishing | Durable idempotent admission, exact-current-head signed PDS reconciliation, bounded retries, create/delete crash recovery, history/lookup/cursors | Execute the external-PDS lifecycle and interrupted-write recovery on the packaged process. |
-| M4: Federation and feeds | Bounded relay decoding and WSS transport, first-matching writer discovery with inactive admission and verified snapshot activation, signature/CID/MST verification, atomic application/checkpoints, signed snapshots and account reconciliation, global/following feeds | Implement safe historical-event progress and subscription-first coverage/recovery. Production relay delivery is disabled. Execute two independently operated PDS writers and covered-relay live acceptance. |
-| M5: Read models and social | Unicode grouping, exact four-window statistics, 100,000-row production query-plan checks, verified profiles/handles, duplicate follows and following feed, mutation/restart fixtures | Execute the required packaged persistence journey and independent external social/statistics observations. |
-| M6: Deployment and operations | Configuration/proxy/body/rate limits, private metrics, embedded assets, coordinated shutdown, verified backup/restore, musl packaging and benchmark | Implement and execute complete `packaged_flow` and `packaged_recovery` using controlled upstream HTTPS infrastructure; execute and independently review the live backend matrix. |
-| M7: Preact product | Unstarted | Begin after actual M6 backend acceptance; then implement screens/API client, browser journeys, accessibility and product live checks. |
+The 258 named cases ended as follows: **204 passed, 0 failed, 9 blocked and 45 retired.** No test was skipped. All five live gates are **blocked**.
 
-Current-head evidence authorizes an exact revision and commit CID using the current DID key. It does not invent historical validity intervals. Moving heads retry within existing bounds. Invalid signatures, CIDs and identity evidence fail closed. A snapshot completed before subscription cannot prove that a quiet actor's intervening commit was observed; completed snapshots therefore do not turn global `caughtUp` true.
+The [MVP plan](planning/MVP.md) requires merged deliverables and executed acceptance, including the applicable live evidence. **No milestone is closed** while its live cases are blocked and nothing is deployed. A deterministic pass does not stand in for live evidence.
 
-Required operator inputs remain an owned namespace with ownership evidence, public HTTPS OAuth callback, dedicated identities on two independent PDSs, a supported relay with independently verified coverage, and privately supplied operator credentials. See [OAuth](verification/oauth-live.md), [scrobble](verification/scrobble-live.md), [federation](verification/federation-live.md) and [packaged acceptance](verification/backend.md) requirements. No external acceptance test has run.
+| Milestone | Passed | Failed | Blocked | Retired | Remaining completion work |
+| --- | --- | --- | --- | --- | --- |
+| M1: Contracts and foundation | 31 | 0 | 0 | 11 | Record the owner's evidence for the `dev.pythonplayer123.music` NSID authority (`_lexicon.music.pythonplayer123.dev`), obtain repository CI evidence, and merge the reviewed deliverables. |
+| M2: Identity and OAuth | 18 | 0 | 2 | 16 | Live `oauth` and `pdsCompat` gates: browser public-client sign-in on two independent PDSs, granted `repo:` scopes, sign-out, and a disposable record round trip (live_round_trip, live_disposable_record). |
+| M3: Scrobble publishing | 29 | 0 | 2 | 5 | Live `ingest` gate: an SPA publish indexed through Jetstream, and delete and reconcile with verified absence (live_create_read, live_delete). |
+| M4: Federation and feeds | 33 | 0 | 3 | 0 | Live `ingest` and `socketSoak` gates: an external writer on PDS B, external update and delete, and reconnect convergence over 24 h (live_remote_arrival, live_remote_mutation, live_recovery). |
+| M5: Read models and social | 34 | 0 | 0 | 2 | Nothing deterministic remains. Independent external social and statistics observations come with the M4 live gates. |
+| M6: Deployment and operations | 28 | 0 | 1 | 7 | Deploy a Worker version with the operator's credentials. Record a schemaVersion 2 live inventory bound to that version id and bundle hash (live_inventory), and run the `ssrfProbe` and `socketSoak` gates. |
+| M7: Preact product | 31 | 0 | 1 | 4 | Live product evidence: real OAuth, a direct second-PDS record and the browser feed, on the deployed origin (live_product). |
+
+The required operator inputs are:
+
+- a deployed Worker version id with its bundle hash;
+- the production origin `https://music.214510.xyz`;
+- the owned prefix, with its ownership evidence;
+- dedicated identities on two independently operated PDSs, with evidence that they are independent;
+- Jetstream coverage evidence;
+- `ADMIN_TOKEN`;
+- Cloudflare Analytics read access, for the soak.
+
+Supply them only through the environment. See [workers-live.md](verification/workers-live.md). No live gate has run, and nothing has been deployed by this work.
+
+Retirement of the Rust crates (W7-02) is gated on the owner. Until then, the crates remain the golden oracle.

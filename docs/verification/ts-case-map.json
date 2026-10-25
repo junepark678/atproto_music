@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "description": "Maps every named case in docs/planning/github-plan.json to TypeScript test ids (`<file> › <name>`): a primary `target` plus optional `also` ids that together assert the case outcome, each declared in docs/planning/workers-waves.json or listed under \"Required wave amendments\" in docs/planning/AMENDMENTS-workers.md; or to `retired:<A#|D>` with a reason. Notes are informational only and carry no obligation. Drafted by W0-02; W7-01 finalises it.",
+  "description": "Maps every named case in docs/planning/github-plan.json to TypeScript test ids (`<file> › <name>`): a primary `target` plus optional `also` ids that together assert the case outcome, each declared in docs/planning/workers-waves.json or listed under \"Required wave amendments\" in docs/planning/AMENDMENTS-workers.md; or to `retired:<A#|D>` with a reason. Notes are informational only and carry no obligation. Drafted by W0-02; finalised and owned by W7-01: every case maps to an existing test or a retirement (python3 scripts/validate_case_map.py --check-tests), and bash scripts/acceptance/workers-backend.sh closes the map over executed test records, failing on any mapped case whose test did not run and pass.",
   "plan": "docs/planning/github-plan.json",
   "waves": "docs/planning/workers-waves.json",
   "amendments": "docs/planning/AMENDMENTS-workers.md",
