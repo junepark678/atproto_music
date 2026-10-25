@@ -24,6 +24,16 @@
 // injected interfaces; tests pass a lookup spy and an in-memory duplex, and
 // production passes neither. There is no option that relaxes any check.
 //
+// Redirects are never followed. A request sent with `redirect: 'manual'` (all
+// SafeFetch and policyFetch requests) gets its 3xx back as a bodiless Response,
+// so the caller's own refusal decides the error (SafeFetch's permanent
+// `redirect_refused`, policyFetch's TransportError `redirect`); a 3xx to any
+// other request is TransportError `redirect`.
+//
+// The transport's response cap is a backstop only: DEFAULT_PINNED_CAPS keeps it
+// strictly larger than every SafeFetch kind cap, so SafeFetch's own
+// `body_too_large` (and policyFetch's `too_large`) trips first.
+//
 // `unpinnedFetchStub` is what run() installs as globalThis.fetch (N3-07), so a
 // consumer that forgot its transport fails loudly instead of bypassing pinning.
 
@@ -45,7 +55,7 @@ export const TRANSPORT_ERROR_CODES = [
   'connect', // the socket or TLS stage failed (refused, reset, certificate), or the request was unusable
   'timeout', // the deadline (or the caller's signal) fired before the exchange finished
   'too_large', // a request or response body over its cap
-  'redirect', // any 3xx answer; Location is never followed
+  'redirect', // a 3xx answer to a request that did not ask for redirect:'manual'; Location is never followed
   'unpinned_fetch', // the global fetch stub was called
 ] as const;
 
@@ -213,11 +223,15 @@ const KiB = 1024;
 const MiB = 1024 * KiB;
 
 /**
- * Production caps: the largest SafeFetch kind (getRepo, 32 MiB) fits; every
- * caller lowers it. The deadline is SafeFetch's and policyFetch's 10 s.
+ * Production caps. The response cap is a backstop strictly larger than the
+ * largest SafeFetch kind (getRepo, 32 MiB; policyFetch callers must keep their
+ * caps below it too), so the caller's own cap (and its error code: SafeFetch `body_too_large`, which
+ * getRepo turns into the permanent `car_too_large`) always trips first, for a
+ * declared Content-Length and for streamed bytes alike. The deadline is
+ * SafeFetch's and policyFetch's 10 s.
  */
 export const DEFAULT_PINNED_CAPS: Readonly<PinnedTransportCaps> = Object.freeze({
-  maxResponseBytes: 32 * MiB,
+  maxResponseBytes: 64 * MiB,
   maxRequestBytes: 4 * MiB,
   deadlineMs: 10_000,
 });
@@ -510,7 +524,7 @@ export function pinnedTransport(options: PinnedTransportOptions): PinnedTranspor
     }
 
     const status = answer.statusCode;
-    if (status >= 300 && status < 400) {
+    if (status >= 300 && status < 400 && request.redirect !== 'manual') {
       dropBody(answer.body);
       throw new TransportError('redirect', `redirect refused (HTTP ${status})`, { reason: `http_${status}`, status });
     }
@@ -520,6 +534,13 @@ export function pinnedTransport(options: PinnedTransportOptions): PinnedTranspor
     } catch (error) {
       dropBody(answer.body);
       throw new TransportError('connect', 'unusable response headers', { reason: 'bad_headers', cause: error });
+    }
+    if (status >= 300 && status < 400) {
+      // redirect:'manual': hand the 3xx back unfollowed and bodiless (its
+      // body, whatever its declared length, is never read); the caller
+      // refuses it with its own error code.
+      dropBody(answer.body);
+      return new Response(null, { status, headers });
     }
     const declared = headers.get('content-length');
     if (declared !== null && /^\s*\d+\s*$/.test(declared) && Number(declared.trim()) > caps.maxResponseBytes) {

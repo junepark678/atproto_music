@@ -9,11 +9,12 @@
 
 import { type Duplex, duplexPair } from 'node:stream';
 import { TLSSocket, connect as tlsConnect } from 'node:tls';
-import { createSafeFetch, isSafeFetchError, type SafeFetchError } from '@atmusic/atproto/net/safe-fetch';
+import { createSafeFetch, isSafeFetchError, KIND_CAPS, type SafeFetchError } from '@atmusic/atproto/net/safe-fetch';
 import { fixedClock } from '@atmusic/core/test-support/clock';
 import { Agent } from 'undici';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  DEFAULT_PINNED_CAPS,
   isTransportError,
   type LookupAnswer,
   type PinnedLookup,
@@ -194,6 +195,51 @@ function expectTransportError(error: unknown, code: TransportError['code']): Tra
   expect((error as TransportError).code).toBe(code);
   expect(isTransportError(error, code)).toBe(true);
   return error as TransportError;
+}
+
+const DOH_ADDRESS = '104.16.249.249';
+
+/**
+ * A network where cloudflare-dns.com answers SafeFetch's DoH pre-check with
+ * PUBLIC for pds.example.com, and every other request goes to `handler`.
+ */
+function safeFetchNet(handler: Handler): Net {
+  return fakeNet(
+    (host) => [{ address: host === 'cloudflare-dns.com' ? DOH_ADDRESS : PUBLIC }],
+    (req) => {
+      if (req.servername === 'cloudflare-dns.com') {
+        const type = new URL(`https://x${req.path}`).searchParams.get('type');
+        const answer = type === '1' ? [{ name: 'pds.example.com', type: 1, TTL: 300, data: PUBLIC }] : [];
+        return {
+          status: 200,
+          headers: { 'content-type': 'application/dns-json' },
+          body: JSON.stringify({ Status: 0, Answer: answer }),
+        };
+      }
+      return handler(req);
+    },
+  );
+}
+
+/** Requests that reached pds.example.com (not the DoH resolver). */
+function pdsRequests(net: Net): SeenRequest[] {
+  return net.requests.filter((r) => r.servername === 'pds.example.com');
+}
+
+/** A chunked response of `chunks` chunks of `chunkBytes` bytes each. */
+function chunkedReply(chunks: number, chunkBytes: number): Reply {
+  return {
+    raw: (socket) => {
+      socket.write('HTTP/1.1 200 X\r\ncontent-type: application/vnd.ipld.car\r\ntransfer-encoding: chunked\r\n\r\n');
+      const chunk = Buffer.alloc(chunkBytes, 0x61);
+      for (let i = 0; i < chunks; i++) {
+        socket.write(`${chunkBytes.toString(16)}\r\n`);
+        socket.write(chunk);
+        socket.write('\r\n');
+      }
+      socket.write('0\r\n\r\n');
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -521,6 +567,126 @@ describe('pinned transport', () => {
       );
       expect(error.message).toContain('unpinned global fetch refused');
     }
+  });
+
+  it("a 3xx to a redirect:'manual' request is handed back unfollowed, so SafeFetch over the pinned transport refuses it as redirect_refused", async () => {
+    // Directly: the transport returns the 3xx bodiless with its Location, and
+    // never requests the Location.
+    const direct = fakeNet(
+      () => [{ address: PUBLIC }],
+      () => ({ status: 302, headers: { location: 'https://internal.example.com/admin' }, body: 'moved' }),
+    );
+    const td = track(pinnedTransport({ lookup: direct.lookup, connector: direct.connector, caps: CAPS }));
+    const handedBack = await td(new Request('https://pds.example.com/r', { redirect: 'manual' }));
+    expect(handedBack.status).toBe(302);
+    expect(handedBack.headers.get('location')).toBe('https://internal.example.com/admin');
+    expect(handedBack.body).toBeNull();
+    expect(direct.lookups).toEqual(['pds.example.com']);
+    expect(direct.requests.map((r) => [r.address, r.path])).toEqual([[PUBLIC, '/r']]);
+
+    // Through SafeFetch (which sends redirect:'manual'): every 3xx is its own
+    // permanent redirect_refused with the status, never network_error, for
+    // the buffered and the streamed read alike.
+    for (const status of [301, 302, 303, 307, 308]) {
+      const net = safeFetchNet(() => ({
+        status,
+        headers: { location: 'https://internal.example.com/admin', 'content-length': String(64 * 1024 * 1024) },
+      }));
+      const transport = track(pinnedTransport({ lookup: net.lookup, connector: net.connector, caps: CAPS }));
+      const safeFetch = createSafeFetch({ transport, clock: fixedClock(), timer: manualTimer() });
+
+      const buffered = await rejection(
+        safeFetch('https://pds.example.com/xrpc/com.atproto.repo.getRecord', { kind: 'getRecord' }),
+      );
+      expect(isSafeFetchError(buffered, 'redirect_refused'), String(status)).toBe(true);
+      expect((buffered as SafeFetchError).status).toBe(status);
+      expect((buffered as SafeFetchError).reason).toBe('redirect');
+
+      const streamed = await rejection(
+        safeFetch.stream('https://pds.example.com/xrpc/com.atproto.sync.getRepo', { kind: 'getRepo' }),
+      );
+      expect(isSafeFetchError(streamed, 'redirect_refused'), String(status)).toBe(true);
+      expect((streamed as SafeFetchError).status).toBe(status);
+
+      // The Location host was never looked up or connected to.
+      expect(net.lookups).not.toContain('internal.example.com');
+      expect(net.connects.map((c) => c.host).every((h) => h === PUBLIC || h === DOH_ADDRESS)).toBe(true);
+      expect(pdsRequests(net).map((r) => r.path)).toEqual([
+        '/xrpc/com.atproto.repo.getRecord',
+        '/xrpc/com.atproto.sync.getRepo',
+      ]);
+    }
+  });
+
+  it('SafeFetch getRepo over pinnedTransport(DEFAULT_PINNED_CAPS) is body_too_large for a declared and a streamed overflow, never network_error', async () => {
+    const getRepoCap = KIND_CAPS.getRepo;
+    // The transport cap is a backstop strictly above every SafeFetch kind cap.
+    expect(DEFAULT_PINNED_CAPS.maxResponseBytes).toBeGreaterThan(Math.max(...Object.values(KIND_CAPS)));
+
+    const url = 'https://pds.example.com/xrpc/com.atproto.sync.getRepo?did=did:plc:abc';
+    // Declared: Content-Length one byte over the getRepo cap.
+    const declaredNet = safeFetchNet(() => ({
+      raw: (socket) => {
+        socket.write(
+          `HTTP/1.1 200 X\r\ncontent-type: application/vnd.ipld.car\r\ncontent-length: ${getRepoCap + 1}\r\n\r\n`,
+        );
+        socket.write(Buffer.alloc(1024, 0x61));
+      },
+    }));
+    const declaredTransport = track(
+      pinnedTransport({ lookup: declaredNet.lookup, connector: declaredNet.connector, caps: DEFAULT_PINNED_CAPS }),
+    );
+    const declaredFetch = createSafeFetch({ transport: declaredTransport, clock: fixedClock(), timer: manualTimer() });
+    for (const read of [
+      () => declaredFetch.stream(url, { kind: 'getRepo' }),
+      () => declaredFetch(url, { kind: 'getRepo' }),
+    ]) {
+      const error = await rejection(read());
+      expect(isSafeFetchError(error, 'body_too_large')).toBe(true);
+      expect((error as SafeFetchError).reason).toBe('content_length');
+      expect((error as SafeFetchError).maxBytes).toBe(getRepoCap);
+    }
+    expect(pdsRequests(declaredNet)).toHaveLength(2);
+
+    // Streamed: chunked, no Content-Length, 34 MiB in 1 MiB chunks.
+    const MiB = 1024 * 1024;
+    const streamedNet = safeFetchNet(() => chunkedReply(34, MiB));
+    const streamedTransport = track(
+      pinnedTransport({ lookup: streamedNet.lookup, connector: streamedNet.connector, caps: DEFAULT_PINNED_CAPS }),
+    );
+    const streamedFetch = createSafeFetch({ transport: streamedTransport, clock: fixedClock(), timer: manualTimer() });
+    const opened = await streamedFetch.stream(url, { kind: 'getRepo' });
+    expect(opened.status).toBe(200);
+    const reader = opened.body.getReader();
+    let read = 0;
+    let streamError: unknown = null;
+    try {
+      for (;;) {
+        const step = await reader.read();
+        if (step.done) break;
+        read += step.value.byteLength;
+      }
+    } catch (error) {
+      streamError = error;
+    }
+    expect(isSafeFetchError(streamError, 'body_too_large')).toBe(true);
+    expect((streamError as SafeFetchError).reason).toBe('streamed');
+    expect((streamError as SafeFetchError).maxBytes).toBe(getRepoCap);
+    expect(read).toBeLessThanOrEqual(getRepoCap);
+
+    const buffered = await rejection(streamedFetch(url, { kind: 'getRepo' }));
+    expect(isSafeFetchError(buffered, 'body_too_large')).toBe(true);
+    expect((buffered as SafeFetchError).reason).toBe('streamed');
+
+    // Control: a body of exactly the getRepo cap passes the transport whole.
+    const exactNet = safeFetchNet(() => chunkedReply(32, MiB));
+    const exactTransport = track(
+      pinnedTransport({ lookup: exactNet.lookup, connector: exactNet.connector, caps: DEFAULT_PINNED_CAPS }),
+    );
+    const exactFetch = createSafeFetch({ transport: exactTransport, clock: fixedClock(), timer: manualTimer() });
+    const exact = await exactFetch(url, { kind: 'getRepo' });
+    expect(exact.status).toBe(200);
+    expect(exact.body.byteLength).toBe(getRepoCap);
   });
 });
 
