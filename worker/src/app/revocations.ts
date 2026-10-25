@@ -342,6 +342,11 @@ export class FileRevocations implements Revocations {
   private size: number;
   /** Set by close(); a null fd without it means a reopen is still owed (see requireFd). */
   private closed = false;
+  /**
+   * The length of the last acknowledged line, kept when a failed append could
+   * not be cut off; the reopen cuts the file back to it (see record).
+   */
+  private cutTo: number | null = null;
 
   constructor(options: FileRevocationsOptions) {
     this.fs = options.fs ?? nodeFs;
@@ -352,8 +357,11 @@ export class FileRevocations implements Revocations {
     this.size = opened.size;
   }
 
-  /** Open (creating 0600 if missing), force mode 0600, and cut off a torn final line. */
-  private openFile(): { fd: number; size: number } {
+  /**
+   * Open (creating 0600 if missing), force mode 0600, and cut off a torn final
+   * line, or everything past `cutTo` (a line boundary) when that is given.
+   */
+  private openFile(cutTo: number | null = null): { fd: number; size: number } {
     const { O_RDWR, O_CREAT, O_NOFOLLOW } = this.fs.constants;
     const fd = this.fs.openSync(this.path, O_RDWR | O_CREAT | O_NOFOLLOW, REVOCATION_LOG_MODE);
     try {
@@ -361,9 +369,10 @@ export class FileRevocations implements Revocations {
       const text = this.fs.readFileSync(this.path, 'utf8');
       const parsed = parseRevocationLog(text);
       let size = this.fs.fstatSync(fd).size;
-      if (parsed.torn) {
-        this.fs.ftruncateSync(fd, parsed.completeBytes);
-        size = parsed.completeBytes;
+      const keep = cutTo === null ? parsed.completeBytes : Math.min(cutTo, parsed.completeBytes);
+      if (keep < size) {
+        this.fs.ftruncateSync(fd, keep);
+        size = keep;
       }
       this.fs.fsyncSync(fd);
       this.syncDirectory();
@@ -394,13 +403,14 @@ export class FileRevocations implements Revocations {
     if (this.closed) throw new RevocationJournalError('closed', 'revocation journal is closed');
     let opened: { fd: number; size: number };
     try {
-      opened = this.openFile();
+      opened = this.openFile(this.cutTo);
     } catch (cause) {
       if (cause instanceof RevocationJournalError) throw cause;
       throw new RevocationJournalError('write_failed', 'revocation journal could not be reopened', { cause });
     }
     this.fd = opened.fd;
     this.size = opened.size;
+    this.cutTo = null;
     return opened.fd;
   }
 
@@ -422,7 +432,18 @@ export class FileRevocations implements Revocations {
         this.fs.ftruncateSync(fd, this.size);
         this.fs.fsyncSync(fd);
       } catch {
-        // The torn tail is still cut off when the journal is next opened.
+        // The failed bytes may still be in the file past this.size, as a torn
+        // tail or as a complete line the caller rolled back. Appending at
+        // this.size would then overwrite only their start and leave a non-JSON
+        // line, so drop the fd instead: the next use reopens the file, cuts it
+        // back to the last acknowledged line, and throws while that fails.
+        this.cutTo = this.size;
+        this.fd = null;
+        try {
+          this.fs.closeSync(fd);
+        } catch {
+          // The descriptor is released either way; it is never used again.
+        }
       }
       throw new RevocationJournalError('write_failed', 'revocation journal append failed', { cause });
     }

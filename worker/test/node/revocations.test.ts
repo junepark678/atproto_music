@@ -662,6 +662,82 @@ describe('revocation journal', () => {
     expect(kindsAt(path)).toEqual(['a1', 'a2', 'lb-after']);
   });
 
+  it('a record() whose fsync and cleanup ftruncate both fail leaves the journal parseable: later appends start at the last acknowledged line', () => {
+    const eio = (what: string): Error => Object.assign(new Error(`EIO ${what}`), { code: 'EIO' });
+    const idsAt = (path: string): string[] =>
+      lines(path).map((l) => {
+        const e = JSON.parse(l) as { id?: string; kind: string; did: string };
+        return e.id ?? `${e.kind}:${e.did}`;
+      });
+
+    // 'full': the whole line reaches the file, then fsync fails.
+    // 'short': 40 bytes reach the file, then the write fails.
+    for (const fault of ['full', 'short'] as const) {
+      const dir = tempDir();
+      const path = revocationLogPath(dir);
+      const clock = fixedClock();
+      let failing = false;
+      const { fs: faulty, calls } = spyFs({
+        writeSync: ((fd: number, buffer: Uint8Array, offset: number, length: number, position: number) => {
+          if (failing && fault === 'short') {
+            if (offset === 0) return fs.writeSync(fd, buffer, 0, 40, position);
+            throw eio('write');
+          }
+          return fs.writeSync(fd, buffer, offset, length, position);
+        }) as unknown as typeof fs.writeSync,
+        fsyncSync: (fd: number) => {
+          if (failing) throw eio('fsync');
+          fs.fsyncSync(fd);
+        },
+        ftruncateSync: (fd: number, len?: number) => {
+          if (failing) throw eio('ftruncate');
+          fs.ftruncateSync(fd, len);
+        },
+      });
+      const journal = new FileRevocations({ path, clock, fs: faulty });
+      journal.record({ kind: 'app_password', id: 'ap-ok-1', did: ALICE });
+      const acknowledged = statSync(path).size;
+
+      // The long line fails, and so does the cleanup that would have cut it off.
+      failing = true;
+      calls.length = 0;
+      let caught: unknown;
+      try {
+        journal.record({ kind: 'web_session', hash: 'a'.repeat(64), did: ALICE });
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught, fault).toBeInstanceOf(RevocationJournalError);
+      expect((caught as RevocationJournalError).reason).toBe('write_failed');
+      expect(calls.filter((c) => c.startsWith('ftruncate:'))).toEqual([expect.stringMatching(`:${acknowledged}$`)]);
+      // The failed bytes are still in the file past the last acknowledged line.
+      expect(statSync(path).size).toBeGreaterThan(acknowledged);
+
+      // While the fault persists, record() fails closed and adds nothing.
+      const sizeDuringFault = statSync(path).size;
+      expect(() => journal.record({ kind: 'oauth_session', did: BOB })).toThrow(RevocationJournalError);
+      expect(statSync(path).size).toBe(sizeDuringFault);
+
+      // Once the disk recovers, a shorter record() lands after the last
+      // acknowledged line, and the rolled-back line is gone.
+      failing = false;
+      journal.record({ kind: 'oauth_session', did: BOB });
+      expect(readFileSync(path, 'utf8').endsWith('\n')).toBe(true);
+      expect(idsAt(path)).toEqual(['ap-ok-1', `oauth_session:${BOB}`]);
+      expect(journal.entries().map((e) => e.kind)).toEqual(['app_password', 'oauth_session']);
+      journal.record({ kind: 'lb_token', id: 'lb-ok-2', did: BOB });
+      expect(idsAt(path)).toEqual(['ap-ok-1', `oauth_session:${BOB}`, 'lb-ok-2']);
+      expect(journal.truncateBefore(T0)).toBe(0);
+      journal.close();
+      expect(mode(path)).toBe(0o600);
+
+      // A restart parses the same journal.
+      const fresh = new FileRevocations({ path, clock });
+      expect(fresh.entries().map((e) => e.kind)).toEqual(['app_password', 'oauth_session', 'lb_token']);
+      fresh.close();
+    }
+  });
+
   it('truncateBefore(t) keeps the events at or after t and a journal with a torn last line replays every complete line', () => {
     const dir = tempDir();
     const path = revocationLogPath(dir);
