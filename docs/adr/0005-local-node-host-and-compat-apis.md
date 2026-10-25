@@ -93,6 +93,19 @@ The Workers adapter is **retired** (wave 7, N7-01). Everything runs on Node 26. 
 - **Route methods.** `RouteDef.method` widens from `GET | POST` to `GET | POST | PUT | PATCH | DELETE | OPTIONS` (N2-01). `matchRoute` keeps its current `Allow` set exactly (`POST /api/v1/meta` still answers `Allow: GET`, as `composition/routing.test.ts:252-254` pins on workerd). Only the **Node dispatcher** (`worker/src/node/dispatch.ts`) maps `HEAD` to the `GET` route, drops the body, and appends `HEAD` to the `Allow` header of its own 405 answers when `GET` is registered.
 - **Route table split (N2-01).** `worker/src/router.ts` imports `envLogger` and `INDEX_NAME` from `index-do.ts`, which imports `cloudflare:workers`. N2-01 moves the host-neutral parts (`ROUTES`, `matchRoute`, `assetMiss`, `matchSpaRoute`) into `worker/src/http/routes.ts`, which imports only host-neutral modules; `router.ts` keeps only the Workers entry (`createWorker`, `handleFetch`) and re-exports the rest until N7-01. `http/admin.ts` imports `PITR_WINDOW_MS` from `app/index-core.ts` instead of `index-do.ts`.
 
+- **Pinned toolchain and dependencies (N0-01, 2026-10-25).** `.nvmrc` is `26.12.1` (CI's `setup-node` reads it), `engines.node` is `>=26.12.0`, and every version is exact in `package-lock.json`. Rule: the newest release at least 7 days old on 2026-10-25 (published on or before 2026-10-18), unless this ADR names the version.
+
+  | Package | Version | Published | Where | Note |
+  |---|---|---|---|---|
+  | `@atproto/oauth-client-node` | 0.5.10 | 2026-10-17 | `@atmusic/worker` dependency | §5.2; 0.5.11 and 0.5.12 are younger than 7 days; resolves the already-locked `@atproto/oauth-client` 0.8.10 |
+  | `ws` | 8.22.0 | 2026-09-26 | `@atmusic/worker` dependency | §3.4 |
+  | `@types/ws` | 8.18.2 | 2026-09-29 | `@atmusic/worker` devDependency | |
+  | `undici` | 8.12.2 | 2026-10-15 | `@atmusic/worker` dependency | §3.5; equals `process.versions.undici` of Node 26.12.1 (8.12.3 is newer than Node's copy); asserted by `worker/test/node/scaffold.test.ts` |
+  | `fflate` | 0.7.5 | 2026-07-20 | `@atmusic/worker` dependency | §11.1 |
+  | `esbuild` | 0.28.2 | 2026-08-08 | root devDependency (direct) | §3.9, `scripts/build-server.ts` |
+  | `lastfm-ts-api` | 2.6.2 | 2026-04-02 | root devDependency only | §15.2, the real-client e2e (N8-01) |
+  | `@types/node` | 26.6.5 | 2026-10-09 | root devDependency | newest 26.x; it does not yet declare `node:sqlite`'s `Database` export (only the `DatabaseSync` alias), so code reads `Database` structurally until the types catch up |
+
 ### 3.2 Storage: node:sqlite (`worker/src/node/sqlite-db.ts`, N1-01)
 - **API.** Use the class exported as `Database` from `node:sqlite`; `DatabaseSync` is a deprecated alias (DEP0210). Open it with `{timeout: busyTimeoutMs}`, which sets the busy timeout. `busyTimeoutMs` is an injected option: production passes 5000 (asserted at startup by reading `PRAGMA busy_timeout` back, and in the config test); tests pass about 200 ms, so no test waits 5 s in real time. There is one connection per process.
 - **Startup pragmas,** set by the adapter and read back and asserted at startup:

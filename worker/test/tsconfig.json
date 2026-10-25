@@ -1,6 +1,7 @@
 {
   // Worker test suites: Workers runtime types plus cloudflare:test and Vite's
-  // client types (import.meta.glob, ?raw imports). The test-only
+  // client types (import.meta.glob, ?raw imports), and Node's types for the
+  // worker-node project (test/node/**, ADR 0005 §15.1, N0-01). The test-only
   // Cloudflare.Env augmentation in harness/harness-do.ts applies here only;
   // ../src is typechecked by ../tsconfig.json without it.
   "extends": "../../tsconfig.base.json",
@@ -8,7 +9,7 @@
     "rootDir": ".",
     "outDir": ".tsbuild",
     "lib": ["es2024"],
-    "types": ["@cloudflare/workers-types", "@cloudflare/vitest-plugin/types", "vite/client"]
+    "types": ["@cloudflare/workers-types", "@cloudflare/vitest-plugin/types", "vite/client", "node"]
   },
   "include": ["**/*.ts"],
   "exclude": [".tsbuild"],
