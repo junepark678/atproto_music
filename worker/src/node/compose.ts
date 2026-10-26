@@ -367,7 +367,7 @@ export async function compose(config: NodeConfig, secrets: Secrets, options: Com
       if (part === undefined) continue;
       for (const [key, value] of Object.entries(part)) {
         if (Object.hasOwn(app, key)) throw new TypeError(`feature ${feature.name}: service ${key} is already provided`);
-        (app as Record<string, unknown>)[key] = value;
+        (app as unknown as Record<string, unknown>)[key] = value;
       }
     }
     Object.freeze(app);
