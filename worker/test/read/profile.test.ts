@@ -1,4 +1,4 @@
-// W3-03: GET /api/v1/users/{did}/profile over real DO SQLite (harness DO with
+// W3-03: GET /api/v1/users/{did}/profile over node:sqlite (a temporary-file database with
 // the production migrations) and the real identity resolver on the fixture
 // network (M5.2.1 profile_fields / unverified_alias, M5.2.2 unknown_empty,
 // M5.3.2 public_lists).
@@ -10,8 +10,6 @@
 // the same DID) over the fixture transport. Expectations are hardcoded from
 // TESTING.md and docs/profiles.md.
 
-import { runInDurableObject } from 'cloudflare:test';
-import { env } from 'cloudflare:workers';
 import { createIdentityResolver } from '@atmusic/atproto/identity/resolver';
 import type { IdentityResolver } from '@atmusic/atproto/identity/types';
 import {
@@ -30,18 +28,16 @@ import addFormats from 'ajv-formats';
 import { beforeAll, expect, it } from 'vitest';
 import openapiText from '../../../api/openapi.yaml?raw';
 import { type AppConfig, parseConfig, parseCursorKey } from '../../src/config';
-import { type Db, doDb } from '../../src/do/db';
+import type { Db } from '../../src/do/db';
 import { exportUser } from '../../src/do/read/export';
 import { profile } from '../../src/do/read/profile';
 import { markConnected, recordEvent, updateCheckpointBookkeeping } from '../../src/do/status';
 import { markInactive } from '../../src/do/write/account-state';
 import { applyRecordProof } from '../../src/do/write/apply-record';
-import type { Env } from '../../src/env';
 import { routes as profileRoutes } from '../../src/http/profile';
 import type { RequestCtx, RouteDef } from '../../src/http/types';
-import type { HarnessDO } from '../harness/harness-do';
-import { type LocalIndex, makeLocalIndex } from '../harness/local-index';
 import { OPTS, seedUser } from '../write/support';
+import { HARNESS_ENV, inTestDb, type LocalIndex, makeDbIndex, openTestDb, type TestDb } from './node-harness';
 
 // ---------------------------------------------------------------------------
 // Shared setup
@@ -78,16 +74,14 @@ const NOT_FOUND = {
 
 let cursorKey: CryptoKey;
 beforeAll(async () => {
-  cursorKey = await deriveCursorKey(parseCursorKey(env));
+  cursorKey = await deriveCursorKey(parseCursorKey(HARNESS_ENV));
 });
 
 /** Socket ingest mode: with a connected, caught-up checkpoint the global truth is `current`. */
-const SOCKET_CONFIG: AppConfig = parseConfig({ ...env, INGEST_MODE: 'socket' }, { allowFixturePrefix: true });
+const SOCKET_CONFIG: AppConfig = parseConfig({ ...HARNESS_ENV, INGEST_MODE: 'socket' }, { allowFixturePrefix: true });
 
-const stubFor = (name: string) => env.HARNESS.get(env.HARNESS.idFromName(name)) as DurableObjectStub<HarnessDO>;
-
-function inDo<T>(stub: DurableObjectStub<HarnessDO>, fn: (db: Db) => T): Promise<T> {
-  return runInDurableObject(stub, (_i: HarnessDO, s: DurableObjectState) => fn(doDb(s.storage)));
+function inDo<T>(store: TestDb, fn: (db: Db) => T): Promise<T> {
+  return inTestDb(store, (db) => fn(db));
 }
 
 async function verifiedProof(repo: SignedRepo, signingKey: string, collection: string, rkey: string) {
@@ -115,7 +109,7 @@ function countingResolver(inner: IdentityResolver) {
 
 interface World {
   kit: FixtureKit;
-  stub: DurableObjectStub<HarnessDO>;
+  store: TestDb;
   index: LocalIndex;
   ctx: RequestCtx;
   identityCalls: string[];
@@ -123,14 +117,14 @@ interface World {
 }
 
 /**
- * A harness DO with a connected, caught-up ingest checkpoint and the given
+ * A database with a connected, caught-up ingest checkpoint and the given
  * accounts known and active. `seed` publishes and applies the shared fixture.
  */
-async function world(name: string, o: { users: string[]; seed: boolean }): Promise<World> {
+async function world(o: { users: string[]; seed: boolean }): Promise<World> {
   const kit = await createFixtureKit();
   const seed = o.seed ? await seedReadModels(kit) : null;
-  const stub = stubFor(name);
-  await inDo(stub, (db) =>
+  const store = await openTestDb();
+  await inDo(store, (db) =>
     db.tx(() => {
       markConnected(db, NOW_MS);
       recordEvent(db, { cursor: 1, timeUs: NOW_MS * 1000 });
@@ -139,7 +133,7 @@ async function world(name: string, o: { users: string[]; seed: boolean }): Promi
     }),
   );
   const applyProofs = (proofs: RecordProof[]) =>
-    inDo(stub, (db) => proofs.map((p) => db.tx(() => applyRecordProof(db, p, OPTS)).outcome));
+    inDo(store, (db) => proofs.map((p) => db.tx(() => applyRecordProof(db, p, OPTS)).outcome));
   if (seed !== null) {
     const proofs: RecordProof[] = [];
     for (const r of seed.records.values()) {
@@ -154,12 +148,12 @@ async function world(name: string, o: { users: string[]; seed: boolean }): Promi
 
   const clock = fixedClock();
   const identity = countingResolver(createIdentityResolver({ transport: kit.transport, clock }));
-  const index = makeLocalIndex(
-    { stub, clock, identity: identity.resolver, transport: kit.transport, config: SOCKET_CONFIG },
+  const index = makeDbIndex(
+    { db: store, clock, identity: identity.resolver, transport: kit.transport, config: SOCKET_CONFIG },
     { profile, exportUser },
   );
   const ctx: RequestCtx = {
-    env: { ...env } as unknown as Env,
+    env: { ...HARNESS_ENV },
     index,
     requestId: REQUEST_ID,
     clock,
@@ -168,7 +162,7 @@ async function world(name: string, o: { users: string[]; seed: boolean }): Promi
   };
   return {
     kit,
-    stub,
+    store,
     index,
     ctx,
     identityCalls: identity.calls,
@@ -191,7 +185,7 @@ async function getProfile(ctx: RequestCtx, did: string) {
 }
 
 it('Alice followers 0 following 1; Bob followers 1 following 0; Carol 0/0', async () => {
-  const w = await world('profile-fixture', { users: [ALICE, BOB, CAROL], seed: true });
+  const w = await world({ users: [ALICE, BOB, CAROL], seed: true });
 
   const alice = await getProfile(w.ctx, ALICE);
   expect(alice.status).toBe(200);
@@ -264,7 +258,7 @@ it('Alice followers 0 following 1; Bob followers 1 following 0; Carol 0/0', asyn
   for (const did of [ALICE, BOB, CAROL]) expect(w.kit.plc.count(did)).toBe(1);
   expect(w.kit.doh.count('_atproto.alice.test', 'TXT')).toBe(1);
   // The read wrote nothing: the users rows are as seeded (no handle stored).
-  expect(await inDo(w.stub, (db) => db.all('SELECT did, handle, active FROM users ORDER BY did'))).toEqual([
+  expect(await inDo(w.store, (db) => db.all('SELECT did, handle, active FROM users ORDER BY did'))).toEqual([
     { did: ALICE, handle: null, active: 1 },
     { did: BOB, handle: null, active: 1 },
     { did: CAROL, handle: null, active: 1 },
@@ -272,16 +266,16 @@ it('Alice followers 0 following 1; Bob followers 1 following 0; Carol 0/0', asyn
 });
 
 it('unknown/inactive DID → 404 with zero identity transport calls', async () => {
-  const w = await world('profile-hidden', { users: [ALICE, BOB, CAROL], seed: true });
+  const w = await world({ users: [ALICE, BOB, CAROL], seed: true });
   // Alice is deactivated (what the status sweep applies); Carol opts out with a signed settings record.
-  await inDo(w.stub, (db) => db.tx(() => markInactive(db, ALICE, 'deactivated')));
+  await inDo(w.store, (db) => db.tx(() => markInactive(db, ALICE, 'deactivated')));
   await w.kit.externalPut('Carol', SETTINGS, 'self', {
     $type: SETTINGS,
     indexing: 'disabled',
     createdAt: '2026-01-15T11:00:00Z',
   });
   await w.apply('Carol', SETTINGS, 'self');
-  expect(await inDo(w.stub, (db) => db.all('SELECT did FROM suppression'))).toEqual([{ did: CAROL }]);
+  expect(await inDo(w.store, (db) => db.all('SELECT did FROM suppression'))).toEqual([{ did: CAROL }]);
   w.kit.resetCalls();
 
   for (const did of [UNKNOWN, ALICE, CAROL]) {
@@ -318,9 +312,9 @@ it('unknown/inactive DID → 404 with zero identity transport calls', async () =
 });
 
 it('Cache-Control no-store and handle null when unverified', async () => {
-  const w = await world('profile-unverified', { users: [ALICE, BOB, CAROL], seed: true });
+  const w = await world({ users: [ALICE, BOB, CAROL], seed: true });
   // A stored alias is not evidence: even with users.handle set, verification decides.
-  await inDo(w.stub, (db) => db.run("UPDATE users SET handle = 'alice.test' WHERE did = ?", ALICE));
+  await inDo(w.store, (db) => db.run("UPDATE users SET handle = 'alice.test' WHERE did = ?", ALICE));
   // alice.test now points at Bob's DID: Alice's document claim no longer verifies.
   w.kit.doh.setTxt('_atproto.alice.test', [`did=${BOB}`]);
 
@@ -362,7 +356,7 @@ it('Cache-Control no-store and handle null when unverified', async () => {
 
 it('known recordless user → 200 with zero totals and empty history', async () => {
   // Only Bob is known; his repository has no music records.
-  const w = await world('profile-recordless', { users: [BOB], seed: false });
+  const w = await world({ users: [BOB], seed: false });
 
   const unknown = await getProfile(w.ctx, ALICE);
   expect(unknown.status).toBe(404);
@@ -370,7 +364,7 @@ it('known recordless user → 200 with zero totals and empty history', async () 
   expect(w.identityCalls).toEqual([]);
 
   // While a snapshot of Bob is still running his indexing is unfinished.
-  await inDo(w.stub, (db) =>
+  await inDo(w.store, (db) =>
     db.run(
       `INSERT INTO repo_jobs(did, kind, state, generation, due_at, updated_at_ms)
        VALUES (?, 'snapshot', 'running', 1, ?, ?)`,
@@ -393,14 +387,14 @@ it('known recordless user → 200 with zero totals and empty history', async () 
     indexing: { state: 'recovering', caughtUp: false, lastIndexedAt: null, lagSeconds: 0 },
   });
 
-  await inDo(w.stub, (db) => db.run("UPDATE repo_jobs SET state = 'complete' WHERE did = ?", BOB));
+  await inDo(w.store, (db) => db.run("UPDATE repo_jobs SET state = 'complete' WHERE did = ?", BOB));
   const done = await getProfile(w.ctx, BOB);
   expect(done.status).toBe(200);
   expect(done.body.totalScrobbles).toBe(0);
   expect(done.body.indexing).toEqual({ state: 'current', caughtUp: true, lastIndexedAt: null, lagSeconds: 0 });
 
   // Empty history: no stored rows, and the public record read returns none.
-  expect(await inDo(w.stub, (db) => db.all('SELECT uri FROM scrobbles WHERE did = ?', BOB))).toEqual([]);
+  expect(await inDo(w.store, (db) => db.all('SELECT uri FROM scrobbles WHERE did = ?', BOB))).toEqual([]);
   const records = await w.index.exportUser(BOB);
   expect(records?.scrobbles).toEqual([]);
   expect(records?.follows).toEqual([]);

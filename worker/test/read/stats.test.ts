@@ -4,14 +4,12 @@
 // The shared fixture (tests/fixtures/read_models.json) is published into real
 // signed repositories, every record proof is checked by the production
 // verifier (verifyRecordProof over the getRecord CAR) and applied by the
-// production apply path into real DO SQLite. Requests go through the real
+// production apply path into node:sqlite. Requests go through the real
 // route handler with the stats DO module behind a local IndexRpc. Every
 // expectation is hardcoded from TESTING.md, never computed by the code under
 // test. Each request asserts the status, the OpenAPI schema (AJV), DO table
 // state (stats_cache, scrobbles) and the remote-call count (zero).
 
-import { runInDurableObject } from 'cloudflare:test';
-import { env } from 'cloudflare:workers';
 import type { SignedRepo } from '@atmusic/atproto/test-support/signed-repo';
 import { verifyRecordProof } from '@atmusic/atproto/verify/record-proof';
 import type { RecordProof } from '@atmusic/atproto/verify/types';
@@ -24,12 +22,10 @@ import fixture from '../../../tests/fixtures/read_models.json' with { type: 'jso
 import type { ModuleDeps, StatsQuery } from '../../src/do/contracts';
 import { computeStatistics, stats } from '../../src/do/read/stats';
 import { applyRecordProof } from '../../src/do/write/apply-record';
-import type { Env } from '../../src/env';
 import { routes, STATS_PATTERN } from '../../src/http/stats';
 import type { RequestCtx } from '../../src/http/types';
-import type { HarnessDO } from '../harness/harness-do';
-import { makeLocalIndex } from '../harness/local-index';
-import { ALICE, BOB, NOW_NS, OPTS, repoFor, SCROBBLE, scrobble, seedUser, stubFor, uriOf } from '../write/support';
+import { ALICE, BOB, NOW_NS, OPTS, repoFor, SCROBBLE, scrobble, seedUser, uriOf } from '../write/support';
+import { HARNESS_ENV, inTestDb, makeDbIndex, openTestDb, type TestDb } from './node-harness';
 
 // ---------------------------------------------------------------------------
 // Harness
@@ -64,8 +60,6 @@ beforeAll(async () => {
   );
 });
 
-type Stub = DurableObjectStub<HarnessDO>;
-
 /** A verified getRecord proof at the repo head, through the production verifier. */
 async function verifiedProof(repo: SignedRepo, collection: string, rkey: string): Promise<RecordProof> {
   const car = await repo.getRecordCar(collection, rkey);
@@ -73,42 +67,42 @@ async function verifiedProof(repo: SignedRepo, collection: string, rkey: string)
 }
 
 /** Apply a verified proof through the production apply path; returns the outcome. */
-async function applyVerified(stub: Stub, repo: SignedRepo, rkey: string): Promise<string> {
+async function applyVerified(store: TestDb, repo: SignedRepo, rkey: string): Promise<string> {
   const proof = await verifiedProof(repo, SCROBBLE, rkey);
-  return runInDurableObject(stub, (i: HarnessDO) => i.db.tx(() => applyRecordProof(i.db, proof, OPTS)).outcome);
+  return inTestDb(store, (db) => db.tx(() => applyRecordProof(db, proof, OPTS)).outcome);
 }
 
-async function put(stub: Stub, repo: SignedRepo, rkey: string, record: Record<string, unknown>) {
+async function put(store: TestDb, repo: SignedRepo, rkey: string, record: Record<string, unknown>) {
   await repo.put(SCROBBLE, rkey, record);
-  expect(await applyVerified(stub, repo, rkey)).toBe('applied');
+  expect(await applyVerified(store, repo, rkey)).toBe('applied');
 }
 
 /** Alice's r01..r08 (r08 created then deleted) and Bob's r09, from the shared fixture. */
-async function seedFixture(name: string) {
-  const stub = stubFor(name) as Stub;
-  await runInDurableObject(stub, (i: HarnessDO) => {
-    seedUser(i.db, ALICE);
-    seedUser(i.db, BOB);
+async function seedFixture() {
+  const store = await openTestDb();
+  await inTestDb(store, (db) => {
+    seedUser(db, ALICE);
+    seedUser(db, BOB);
   });
   const alice = await repoFor('alice');
   const bob = await repoFor('bob');
   for (const s of fixture.scrobbles) {
-    if (s.owner === ALICE) await put(stub, alice, s.rkey, { ...s.record });
-    else if (s.owner === BOB) await put(stub, bob, s.rkey, { ...s.record });
+    if (s.owner === ALICE) await put(store, alice, s.rkey, { ...s.record });
+    else if (s.owner === BOB) await put(store, bob, s.rkey, { ...s.record });
   }
   await alice.delete(SCROBBLE, 'r08');
-  expect(await applyVerified(stub, alice, 'r08')).toBe('absent');
-  const rows = await runInDurableObject(stub, (i: HarnessDO) =>
-    i.db.all<{ uri: string }>('SELECT uri FROM scrobbles WHERE did = ? ORDER BY uri', ALICE).map((r) => r.uri),
+  expect(await applyVerified(store, alice, 'r08')).toBe('absent');
+  const rows = await inTestDb(store, (db) =>
+    db.all<{ uri: string }>('SELECT uri FROM scrobbles WHERE did = ? ORDER BY uri', ALICE).map((r) => r.uri),
   );
   expect(rows).toEqual(['r01', 'r02', 'r03', 'r04', 'r05', 'r06', 'r07'].map((k) => uriOf(ALICE, SCROBBLE, k)));
-  return { stub, alice, bob };
+  return { store, alice, bob };
 }
 
-function ctxFor(stub: Stub, iso = '2026-01-15T12:00:00Z') {
-  const index = makeLocalIndex({ stub }, { stats });
+function ctxFor(store: TestDb, iso = '2026-01-15T12:00:00Z') {
+  const index = makeDbIndex({ db: store }, { stats });
   const ctx: RequestCtx = {
-    env: env as unknown as Env,
+    env: HARNESS_ENV,
     index,
     requestId: REQUEST_ID,
     clock: fixedClock(iso),
@@ -128,8 +122,8 @@ interface Got {
 }
 
 /** GET the stats route as the router would dispatch it. */
-async function getStats(stub: Stub, did: string, query = '', iso?: string): Promise<Got> {
-  const { ctx, index } = ctxFor(stub, iso);
+async function getStats(store: TestDb, did: string, query = '', iso?: string): Promise<Got> {
+  const { ctx, index } = ctxFor(store, iso);
   const path = STATS_PATTERN.replace('{did}', encodeURIComponent(did));
   const res = await route.handler(new Request(`https://music.example.test${path}${query}`), ctx, { did });
   const body = (await res.clone().json()) as Record<string, unknown>;
@@ -168,9 +162,9 @@ async function expectError(got: Got, status: number, code: string, fields?: Reco
 }
 
 /** The stats_cache row the request left behind. */
-function cacheRow(stub: Stub, did: string, win: string, lim: number) {
-  return runInDurableObject(stub, (i: HarnessDO) =>
-    i.db.one<{ as_of: string; lower: string | null; version: number; body: string }>(
+function cacheRow(store: TestDb, did: string, win: string, lim: number) {
+  return inTestDb(store, (db) =>
+    db.one<{ as_of: string; lower: string | null; version: number; body: string }>(
       'SELECT as_of, lower, version, body FROM stats_cache WHERE did = ? AND win = ? AND lim = ?',
       did,
       win,
@@ -179,11 +173,8 @@ function cacheRow(stub: Stub, did: string, win: string, lim: number) {
   );
 }
 
-function statsVersion(stub: Stub, did: string) {
-  return runInDurableObject(
-    stub,
-    (i: HarnessDO) => i.db.one<{ v: number }>('SELECT stats_version AS v FROM users WHERE did = ?', did)!.v,
-  );
+function statsVersion(store: TestDb, did: string) {
+  return inTestDb(store, (db) => db.one<{ v: number }>('SELECT stats_version AS v FROM users WHERE did = ?', did)!.v);
 }
 
 const artist = (a: string, n: number) => ({ artist: a, scrobbleCount: n });
@@ -258,10 +249,10 @@ function totalsOf(body: Record<string, unknown>) {
 }
 
 /** The normalized artist key of each displayed artist, read from the projection. */
-function artistKeys(stub: Stub, names: string[]) {
-  return runInDurableObject(stub, (i: HarnessDO) =>
+function artistKeys(store: TestDb, names: string[]) {
+  return inTestDb(store, (db) =>
     names.map(
-      (n) => i.db.one<{ k: string }>('SELECT artist_key AS k FROM scrobbles WHERE did = ? AND artist = ?', ALICE, n)!.k,
+      (n) => db.one<{ k: string }>('SELECT artist_key AS k FROM scrobbles WHERE did = ? AND artist = ?', ALICE, n)!.k,
     ),
   );
 }
@@ -271,27 +262,27 @@ function artistKeys(stub: Stub, names: string[]) {
 // ---------------------------------------------------------------------------
 
 it('all: 7 listens, 3 artists, 6 tracks; artists (radiohead,3),(björk,2),(kate bush,2)', async () => {
-  const { stub } = await seedFixture('stats-all');
-  const got = await getStats(stub, ALICE);
+  const { store } = await seedFixture();
+  const got = await getStats(store, ALICE);
   expectOk(got, 'all');
   // Defaults: window all, limit 10, asOf = the injected clock, as integer ns.
   expect(got.query).toEqual({ did: ALICE, window: 'all', limit: 10, asOfNs: NOW_NS });
   expect(totalsOf(got.body)).toEqual([7, 3, 6]);
   expect(got.body.topArtists).toEqual(EXPECTED.all.artists);
-  expect(await artistKeys(stub, ['Radiohead', 'Björk', 'Kate Bush'])).toEqual(['radiohead', 'björk', 'kate bush']);
+  expect(await artistKeys(store, ['Radiohead', 'Björk', 'Kate Bush'])).toEqual(['radiohead', 'björk', 'kate bush']);
   // Bob's r09 never leaks into Alice's statistics.
   expect(JSON.stringify(got.body)).not.toContain('Massive Attack');
   // The computed body was cached under the current version, with no lower bound.
-  const row = await cacheRow(stub, ALICE, 'all', 10);
+  const row = await cacheRow(store, ALICE, 'all', 10);
   expect(row).not.toBeNull();
   expect(row!.as_of).toBe(AS_OF);
   expect(row!.lower).toBeNull();
-  expect(row!.version).toBe(await statsVersion(stub, ALICE));
+  expect(row!.version).toBe(await statsVersion(store, ALICE));
 });
 
 it('7d: 4/2/3; artists (björk,2),(radiohead,2); tracks Björk/Jóga:2, Radiohead/No Surprises:1, Radiohead/Weird Fishes:1', async () => {
-  const { stub } = await seedFixture('stats-7d');
-  const got = await getStats(stub, ALICE, '?window=7d');
+  const { store } = await seedFixture();
+  const got = await getStats(store, ALICE, '?window=7d');
   expectOk(got, '7d');
   expect(got.query).toEqual({ did: ALICE, window: '7d', limit: 10, asOfNs: NOW_NS });
   expect(totalsOf(got.body)).toEqual([4, 2, 3]);
@@ -302,31 +293,31 @@ it('7d: 4/2/3; artists (björk,2),(radiohead,2); tracks Björk/Jóga:2, Radiohea
     track('Radiohead', 'No Surprises', 1),
     track('Radiohead', 'Weird Fishes', 1),
   ]);
-  const row = await cacheRow(stub, ALICE, '7d', 10);
+  const row = await cacheRow(store, ALICE, '7d', 10);
   expect(row!.as_of).toBe(AS_OF);
   expect(row!.lower).toBe('2026-01-08T12:00:00.000000000Z');
 });
 
 it('30d: 5/2/4 and 365d: 6/3/5 with Kate Bush 1 in 365d', async () => {
-  const { stub } = await seedFixture('stats-30d-365d');
-  const d30 = await getStats(stub, ALICE, '?window=30d');
+  const { store } = await seedFixture();
+  const d30 = await getStats(store, ALICE, '?window=30d');
   expectOk(d30, '30d');
   expect(totalsOf(d30.body)).toEqual([5, 2, 4]);
   expect(d30.body.topArtists).toEqual([artist('Radiohead', 3), artist('Björk', 2)]);
 
-  const d365 = await getStats(stub, ALICE, '?window=365d');
+  const d365 = await getStats(store, ALICE, '?window=365d');
   expectOk(d365, '365d');
   expect(totalsOf(d365.body)).toEqual([6, 3, 5]);
   expect(d365.body.topArtists).toEqual([artist('Radiohead', 3), artist('Björk', 2), artist('Kate Bush', 1)]);
 
-  expect((await cacheRow(stub, ALICE, '30d', 10))!.lower).toBe('2025-12-16T12:00:00.000000000Z');
-  expect((await cacheRow(stub, ALICE, '365d', 10))!.lower).toBe('2025-01-15T12:00:00.000000000Z');
+  expect((await cacheRow(store, ALICE, '30d', 10))!.lower).toBe('2025-12-16T12:00:00.000000000Z');
+  expect((await cacheRow(store, ALICE, '365d', 10))!.lower).toBe('2025-01-15T12:00:00.000000000Z');
 });
 
 it('top tracks and top albums for every window equal TESTING.md exactly; r05 creates no album bucket', async () => {
-  const { stub } = await seedFixture('stats-tracks-albums');
+  const { store } = await seedFixture();
   for (const window of ['all', '7d', '30d', '365d'] as const) {
-    const got = await getStats(stub, ALICE, `?window=${window}&limit=100`);
+    const got = await getStats(store, ALICE, `?window=${window}&limit=100`);
     expectOk(got, window);
     const want = EXPECTED[window];
     expect(totalsOf(got.body)).toEqual(want.totals);
@@ -341,8 +332,8 @@ it('top tracks and top albums for every window equal TESTING.md exactly; r05 cre
     );
   }
   // In 365d Kate Bush's only listen is r05: one track, no album.
-  const r05 = await runInDurableObject(stub, (i: HarnessDO) =>
-    i.db.one<{ album: string | null; album_key: string | null }>(
+  const r05 = await inTestDb(store, (db) =>
+    db.one<{ album: string | null; album_key: string | null }>(
       'SELECT album, album_key FROM scrobbles WHERE uri = ?',
       uriOf(ALICE, SCROBBLE, 'r05'),
     ),
@@ -350,7 +341,7 @@ it('top tracks and top albums for every window equal TESTING.md exactly; r05 cre
   expect(r05).toEqual({ album: null, album_key: null });
 
   // `limit` truncates every ranking but never the totals.
-  const one = await getStats(stub, ALICE, '?limit=1');
+  const one = await getStats(store, ALICE, '?limit=1');
   expectOk(one, 'all');
   expect(totalsOf(one.body)).toEqual([7, 3, 6]);
   expect(one.body.topArtists).toEqual([artist('Radiohead', 3)]);
@@ -359,8 +350,8 @@ it('top tracks and top albums for every window equal TESTING.md exactly; r05 cre
 });
 
 it('display spelling is newest record (Björk not BJÖRK) with URI tie-break', async () => {
-  const { stub, alice } = await seedFixture('stats-display');
-  const all = await getStats(stub, ALICE, '?limit=100');
+  const { store, alice } = await seedFixture();
+  const all = await getStats(store, ALICE, '?limit=100');
   expectOk(all, 'all');
   // r01 (2026-01-15, "Björk"/"Jóga"/"Homogenic") is newer than r02 ("  BJÖRK  "/"jóga"/" HOMOGENIC ").
   expect(all.body.topArtists).toContainEqual(artist('Björk', 2));
@@ -371,25 +362,25 @@ it('display spelling is newest record (Björk not BJÖRK) with URI tie-break', a
   // Equal listenedAt: the greater AT URI wins, whatever the insertion order.
   const at = '2026-01-15T11:50:00Z';
   await put(
-    stub,
+    store,
     alice,
     'u2',
     scrobble({ artist: 'MASSIVE attack', track: 'TEARDROP', album: 'MEZZANINE', listenedAt: at }),
   );
   await put(
-    stub,
+    store,
     alice,
     'u1',
     scrobble({ artist: 'Massive Attack', track: 'Teardrop', album: 'Mezzanine', listenedAt: at }),
   );
   // An older listen with yet another spelling never displays.
   await put(
-    stub,
+    store,
     alice,
     'u3',
     scrobble({ artist: 'massive attack', track: 'teardrop', album: 'mezzanine', listenedAt: '2026-01-15T10:00:00Z' }),
   );
-  const tie = await getStats(stub, ALICE, '?limit=100');
+  const tie = await getStats(store, ALICE, '?limit=100');
   expectOk(tie, 'all');
   expect(totalsOf(tie.body)).toEqual([10, 4, 7]);
   expect(tie.body.topArtists).toEqual([
@@ -401,8 +392,8 @@ it('display spelling is newest record (Björk not BJÖRK) with URI tie-break', a
   expect(tie.body.topTracks).toContainEqual(track('MASSIVE attack', 'TEARDROP', 3));
   expect(tie.body.topAlbums).toContainEqual(album('MASSIVE attack', 'MEZZANINE', 3));
   // The displayed row is the one at the greater URI (u2 > u1) among the newest.
-  const display = await runInDurableObject(stub, (i: HarnessDO) =>
-    i.db.all<{ rkey: string; artist: string; listened_at: string }>(
+  const display = await inTestDb(store, (db) =>
+    db.all<{ rkey: string; artist: string; listened_at: string }>(
       `SELECT rkey, artist, listened_at FROM scrobbles WHERE did = ? AND artist_key = 'massive attack'
        ORDER BY listened_at DESC, uri DESC`,
       ALICE,
@@ -410,8 +401,8 @@ it('display spelling is newest record (Björk not BJÖRK) with URI tie-break', a
   );
   expect(display.map((r) => r.rkey)).toEqual(['u2', 'u1', 'u3']);
   // The data changed, so the cached body was recomputed (version bumped, row rewritten).
-  const row = await cacheRow(stub, ALICE, 'all', 100);
-  expect(row!.version).toBe(await statsVersion(stub, ALICE));
+  const row = await cacheRow(store, ALICE, 'all', 100);
+  expect(row!.version).toBe(await statsVersion(store, ALICE));
   expect(JSON.parse(row!.body).statistics.topArtists[0]).toEqual(artist('MASSIVE attack', 3));
 });
 
@@ -420,7 +411,7 @@ it('display spelling is newest record (Björk not BJÖRK) with URI tie-break', a
 // ---------------------------------------------------------------------------
 
 it('invalid did, window, limit, cursor and repeated parameters are 422 naming the field, before any RPC', async () => {
-  const stub = stubFor('stats-422') as Stub;
+  const store = await openTestDb();
   const limitReason = 'Expected an integer between 1 and 100.';
   const cases: Array<[string, string, Record<string, string>]> = [
     ['alice', '', { did: 'Expected a DID.' }],
@@ -436,51 +427,51 @@ it('invalid did, window, limit, cursor and repeated parameters are 422 naming th
     [ALICE, '?cursor=abc', { cursor: 'Statistics do not use cursors.' }],
   ];
   for (const [did, query, fields] of cases) {
-    const got = await getStats(stub, did, query);
+    const got = await getStats(store, did, query);
     await expectError(got, 422, 'validation_failed', fields);
     expect(got.calls).toBe(0);
   }
   // Limit 100 is accepted (the maximum, no clamping), and so is limit 1.
-  await runInDurableObject(stub, (i: HarnessDO) => seedUser(i.db, ALICE));
+  await inTestDb(store, (db) => seedUser(db, ALICE));
   for (const limit of [1, 100]) {
-    const got = await getStats(stub, ALICE, `?limit=${limit}`);
+    const got = await getStats(store, ALICE, `?limit=${limit}`);
     expect(got.status).toBe(200);
     expect(got.query?.limit).toBe(limit);
   }
 });
 
 it('unknown, inactive and suppressed users are 404 not_found and leave no cache row', async () => {
-  const stub = stubFor('stats-404') as Stub;
+  const store = await openTestDb();
   const unknown = 'did:plc:dddddddddddddddddddddddd';
-  const got = await getStats(stub, unknown);
+  const got = await getStats(store, unknown);
   await expectError(got, 404, 'not_found', undefined);
   expect(got.calls).toBe(1);
 
   // Inactive (no complete snapshot yet) with rows present: still 404.
-  const { stub: s2 } = await seedFixture('stats-404-inactive');
-  await runInDurableObject(s2, (i: HarnessDO) => i.db.run('UPDATE users SET active = 0 WHERE did = ?', ALICE));
+  const { store: s2 } = await seedFixture();
+  await inTestDb(s2, (db) => db.run('UPDATE users SET active = 0 WHERE did = ?', ALICE));
   await expectError(await getStats(s2, ALICE), 404, 'not_found', undefined);
   // Suppressed marker present: 404 as well, even if a users row were active.
-  await runInDurableObject(s2, (i: HarnessDO) => {
-    i.db.run('UPDATE users SET active = 1 WHERE did = ?', ALICE);
-    i.db.run('INSERT INTO suppression(did, suppressed_at) VALUES (?, ?)', ALICE, AS_OF);
+  await inTestDb(s2, (db) => {
+    db.run('UPDATE users SET active = 1 WHERE did = ?', ALICE);
+    db.run('INSERT INTO suppression(did, suppressed_at) VALUES (?, ?)', ALICE, AS_OF);
   });
   await expectError(await getStats(s2, ALICE, '?window=7d'), 404, 'not_found', undefined);
-  const rows = await runInDurableObject(s2, (i: HarnessDO) =>
-    i.db.one<{ n: number }>('SELECT count(*) AS n FROM stats_cache WHERE did = ?', ALICE),
+  const rows = await inTestDb(s2, (db) =>
+    db.one<{ n: number }>('SELECT count(*) AS n FROM stats_cache WHERE did = ?', ALICE),
   );
   expect(rows).toEqual({ n: 0 });
 });
 
 it('module stats equals the uncached computation for every window', async () => {
-  const { stub } = await seedFixture('stats-module-equal');
-  await runInDurableObject(stub, (i: HarnessDO) => {
-    const m = { db: i.db } as ModuleDeps;
+  const { store } = await seedFixture();
+  await inTestDb(store, (db) => {
+    const m = { db } as ModuleDeps;
     for (const window of ['all', '7d', '30d', '365d'] as const) {
       const q: StatsQuery = { did: ALICE, window, limit: 10, asOfNs: NOW_NS };
       const first = stats(m, q);
       const second = stats(m, q);
-      const direct = computeStatistics(i.db, ALICE, window, 10, NOW_NS);
+      const direct = computeStatistics(db, ALICE, window, 10, NOW_NS);
       expect(first).toEqual(direct);
       expect(second).toEqual(direct);
       expect(direct.totalScrobbles).toBe(EXPECTED[window].totals[0]);

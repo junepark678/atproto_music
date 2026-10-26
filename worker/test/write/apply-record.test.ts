@@ -1,16 +1,15 @@
-// W2-04: applyRecordProof against real DO SQLite (harness DO with the
-// production migrations). Proofs come from real signed repositories
+// W2-04: applyRecordProof against node:sqlite (a migrated temporary-file
+// database, node-db.ts). Proofs come from real signed repositories
 // (support.ts); every expectation below is hardcoded, never computed by the
 // code under test.
 
-import { evictDurableObject, runInDurableObject } from 'cloudflare:test';
 import type { RecordProof } from '@atmusic/atproto/verify/types';
 import { describe, expect, it } from 'vitest';
 import type { Db } from '../../src/do/db';
 import { visibleScrobblesFrom } from '../../src/do/read/visibility';
 import { applyRecordProof } from '../../src/do/write/apply-record';
 import { applySnapshotChunk } from '../../src/do/write/apply-snapshot';
-import type { HarnessDO } from '../harness/harness-do';
+import { reopen, withMigratedDb } from '../node/support/node-db';
 import {
   ALICE,
   deleteProof,
@@ -26,7 +25,6 @@ import {
   scrobble,
   seedSnapshotJob,
   seedUser,
-  stubFor,
   uriOf,
   userRow,
 } from './support';
@@ -74,8 +72,7 @@ describe('applyRecordProof', () => {
     const uri = uriOf(ALICE, SCROBBLE, 'r02');
     expect(proof.commit.rev).toMatch(TID);
 
-    await runInDurableObject(stubFor('apply-record-present'), (i: HarnessDO) => {
-      const db = i.db;
+    await withMigratedDb((db) => {
       seedUser(db, ALICE);
       expect(apply(db, proof)).toEqual(APPLIED);
 
@@ -145,64 +142,66 @@ describe('applyRecordProof', () => {
     const entries = (await repo.entries()).map((e) => ({ key: e.key, cid: e.cid }));
     expect(entries).toEqual([{ key: `${SCROBBLE}/r07`, cid: cidOf(p07) }]);
     const uri08 = uriOf(ALICE, SCROBBLE, 'r08');
-    const stub = stubFor('apply-record-durable-delete');
 
-    await runInDurableObject(stub, (i: HarnessDO) => {
-      const db = i.db;
-      const generation = seedUser(db, ALICE);
-      seedSnapshotJob(db, ALICE, generation);
-      expect(apply(db, p07)).toEqual(APPLIED);
-      expect(apply(db, p08)).toEqual(APPLIED);
-      expect(visibleHistory(db, ALICE)).toEqual([uri08, uriOf(ALICE, SCROBBLE, 'r07')]);
+    await withMigratedDb((original) => {
+      {
+        const db = original;
+        const generation = seedUser(db, ALICE);
+        seedSnapshotJob(db, ALICE, generation);
+        expect(apply(db, p07)).toEqual(APPLIED);
+        expect(apply(db, p08)).toEqual(APPLIED);
+        expect(visibleHistory(db, ALICE)).toEqual([uri08, uriOf(ALICE, SCROBBLE, 'r07')]);
 
-      // The newer deletion arrives through a verified snapshot at the deleting head.
-      const chunk = db.tx(() =>
-        applySnapshotChunk(db, {
-          did: ALICE,
-          generation,
-          headRev: head.rev,
-          intervalLo: `${PREFIX}.`,
-          intervalHi: `${PREFIX}/`,
-          entries,
-          receiptNs: OPTS.receiptNs,
-          prefix: PREFIX,
-          nowNs: OPTS.nowNs,
-        }),
-      );
-      expect(chunk).toEqual({ outcome: 'applied', written: 0, unchanged: 1, deleted: 1 });
-      expect(recordState(db, uri08)).toEqual({
-        revision: head.rev,
-        cid: null,
-        state: 'absent',
-        reason: null,
-        collection: SCROBBLE,
-      });
+        // The newer deletion arrives through a verified snapshot at the deleting head.
+        const chunk = db.tx(() =>
+          applySnapshotChunk(db, {
+            did: ALICE,
+            generation,
+            headRev: head.rev,
+            intervalLo: `${PREFIX}.`,
+            intervalHi: `${PREFIX}/`,
+            entries,
+            receiptNs: OPTS.receiptNs,
+            prefix: PREFIX,
+            nowNs: OPTS.nowNs,
+          }),
+        );
+        expect(chunk).toEqual({ outcome: 'applied', written: 0, unchanged: 1, deleted: 1 });
+        expect(recordState(db, uri08)).toEqual({
+          revision: head.rev,
+          cid: null,
+          state: 'absent',
+          reason: null,
+          collection: SCROBBLE,
+        });
 
-      // The snapshot raised the per-DID floor to its verified head, so the
-      // older present proof is refused (stale_head) and changes nothing.
-      expect(userRow(db, ALICE)?.max_rev).toBe(head.rev);
-      const before = dump(db);
-      expect(p08.commit.rev < head.rev).toBe(true);
-      expect(apply(db, p08)).toEqual(STALE);
-      expect(dump(db)).toEqual(before);
-      expect(visibleHistory(db, ALICE)).toEqual([uriOf(ALICE, SCROBBLE, 'r07')]);
-    });
+        // The snapshot raised the per-DID floor to its verified head, so the
+        // older present proof is refused (stale_head) and changes nothing.
+        expect(userRow(db, ALICE)?.max_rev).toBe(head.rev);
+        const before = dump(db);
+        expect(p08.commit.rev < head.rev).toBe(true);
+        expect(apply(db, p08)).toEqual(STALE);
+        expect(dump(db)).toEqual(before);
+        expect(visibleHistory(db, ALICE)).toEqual([uriOf(ALICE, SCROBBLE, 'r07')]);
+      }
 
-    // Restart: the deletion is durable and still wins.
-    await evictDurableObject(stub);
-    await runInDurableObject(stub, (i: HarnessDO) => {
-      const db = i.db;
-      const before = dump(db);
-      expect(apply(db, p08)).toEqual(STALE);
-      expect(dump(db)).toEqual(before);
-      expect(db.all('SELECT uri FROM scrobbles WHERE uri = ?', uri08)).toEqual([]);
-      expect(recordState(db, uri08)).toMatchObject({ state: 'absent', revision: head.rev });
+      // Restart: the deletion is durable and still wins.
+      {
+        const db = reopen(original);
+        expect(db.path).toBe(original.path);
+        expect(() => original.all('SELECT 1')).toThrow();
+        const before = dump(db);
+        expect(apply(db, p08)).toEqual(STALE);
+        expect(dump(db)).toEqual(before);
+        expect(db.all('SELECT uri FROM scrobbles WHERE uri = ?', uri08)).toEqual([]);
+        expect(recordState(db, uri08)).toMatchObject({ state: 'absent', revision: head.rev });
 
-      // The live exclusion proof at the deleting head passes the floor and is
-      // stopped by the per-URI guard: noop_older.
-      expect(p08gone.commit.rev).toBe(head.rev);
-      expect(apply(db, p08gone)).toEqual(NOOP);
-      expect(dump(db)).toEqual(before);
+        // The live exclusion proof at the deleting head passes the floor and is
+        // stopped by the per-URI guard: noop_older.
+        expect(p08gone.commit.rev).toBe(head.rev);
+        expect(apply(db, p08gone)).toEqual(NOOP);
+        expect(dump(db)).toEqual(before);
+      }
     });
 
     // Live path: once a newer exclusion proof is applied, the per-DID floor
@@ -210,8 +209,7 @@ describe('applyRecordProof', () => {
     const repo2 = await repoFor('alice');
     const q08 = await putProof(repo2, SCROBBLE, 'r08', fixtureScrobble('r08'));
     const q08gone = await deleteProof(repo2, SCROBBLE, 'r08');
-    await runInDurableObject(stubFor('apply-record-durable-delete-live'), (i: HarnessDO) => {
-      const db = i.db;
+    await withMigratedDb((db) => {
       seedUser(db, ALICE);
       expect(apply(db, q08)).toEqual(APPLIED);
       expect(apply(db, q08gone)).toEqual({ outcome: 'absent', admit: false, suppressed: false });
@@ -228,8 +226,7 @@ describe('applyRecordProof', () => {
     const p02 = await putProof(repo, SCROBBLE, 'r02', fixtureScrobble('r02'));
     expect(p01.commit.rev < p02.commit.rev).toBe(true);
 
-    await runInDurableObject(stubFor('apply-record-stale-head'), (i: HarnessDO) => {
-      const db = i.db;
+    await withMigratedDb((db) => {
       seedUser(db, ALICE);
       expect(apply(db, p02)).toEqual(APPLIED);
       expect(userRow(db, ALICE)?.max_rev).toBe(p02.commit.rev);
@@ -261,8 +258,7 @@ describe('applyRecordProof', () => {
       'artist: expected 1–256 Unicode scalars and at most 1024 UTF-8 bytes, with nonempty trimmed text';
     const futureReason = 'listenedAt: timestamp must be between 1970-01-01 and receipt time plus 300 seconds';
 
-    await runInDurableObject(stubFor('apply-record-excluded'), (i: HarnessDO) => {
-      const db = i.db;
+    await withMigratedDb((db) => {
       seedUser(db, ALICE);
       expect(apply(db, valid)).toEqual(APPLIED);
       expect(visibleHistory(db, ALICE)).toEqual([r03]);
@@ -303,8 +299,7 @@ describe('applyRecordProof', () => {
     const changed = await putProof(repo, SCROBBLE, 'r03', { ...fixtureScrobble('r03'), artist: 'Björk' });
     const r03 = uriOf(ALICE, SCROBBLE, 'r03');
 
-    await runInDurableObject(stubFor('apply-record-r03-artist'), (i: HarnessDO) => {
-      const db = i.db;
+    await withMigratedDb((db) => {
       seedUser(db, ALICE);
       for (const p of seeds) expect(apply(db, p)).toEqual(APPLIED);
       expect(artistCounts(db, ALICE)).toEqual([
@@ -350,8 +345,7 @@ describe('applyRecordProof', () => {
     });
     const uri = uriOf(ALICE, SCROBBLE, 'r05');
 
-    await runInDurableObject(stubFor('apply-record-same-rev'), (i: HarnessDO) => {
-      const db = i.db;
+    await withMigratedDb((db) => {
       seedUser(db, ALICE);
       expect(apply(db, first)).toEqual(APPLIED);
       const before = dump(db);
@@ -392,8 +386,7 @@ describe('applyRecordProof', () => {
     const u1 = uriOf(ALICE, SCROBBLE, '3lb2aaaaaaaa2');
     const u2 = uriOf(ALICE, SCROBBLE, '3lb2aaaaaaaa3');
 
-    await runInDurableObject(stubFor('apply-record-same-time'), (i: HarnessDO) => {
-      const db = i.db;
+    await withMigratedDb((db) => {
       seedUser(db, ALICE);
       expect(apply(db, k1)).toEqual(APPLIED);
       expect(apply(db, k2)).toEqual(APPLIED);

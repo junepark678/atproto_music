@@ -1,8 +1,7 @@
-// W2-04: applySnapshotChunk / completeSnapshot against real DO SQLite. The
+// W2-04: applySnapshotChunk / completeSnapshot against node:sqlite. The
 // chunks carry entries enumerated from real signed repositories at a fixed
 // head (SignedRepo.entries), the same (key, cid) list the W3-05 walker emits.
 
-import { runInDurableObject } from 'cloudflare:test';
 import type { SignedRepo } from '@atmusic/atproto/test-support/signed-repo';
 import type { RecordProof } from '@atmusic/atproto/verify/types';
 import { describe, expect, it } from 'vitest';
@@ -11,7 +10,7 @@ import { visibleScrobblesFrom } from '../../src/do/read/visibility';
 import { markInactive } from '../../src/do/write/account-state';
 import { applyRecordProof } from '../../src/do/write/apply-record';
 import { applySnapshotChunk, completeSnapshot, type SnapshotChunkEntry } from '../../src/do/write/apply-snapshot';
-import type { HarnessDO } from '../harness/harness-do';
+import { withMigratedDb } from '../node/support/node-db';
 import {
   ALICE,
   BOB,
@@ -34,7 +33,6 @@ import {
   seedSnapshotJob,
   seedUser,
   settings,
-  stubFor,
   uriOf,
   userRow,
 } from './support';
@@ -105,8 +103,7 @@ describe('applySnapshotChunk', () => {
     expect(entries.map((e) => e.key)).toEqual(['a1', 'a3', 'a4', 'a5', 'a6'].map((r) => `${SCROBBLE}/${r}`));
     const u = (rkey: string) => uriOf(ALICE, SCROBBLE, rkey);
 
-    await runInDurableObject(stubFor('apply-snapshot-sweep'), (i: HarnessDO) => {
-      const db = i.db;
+    await withMigratedDb((db) => {
       const generation = seedUser(db, ALICE, { active: false });
       seedSnapshotJob(db, ALICE, generation);
       for (const p of [...live, a7]) expect(db.tx(() => applyRecordProof(db, p, OPTS))).toEqual(APPLIED);
@@ -180,8 +177,7 @@ describe('applySnapshotChunk', () => {
     const finalRepo = (await repo.list(SCROBBLE)).map((r) => ({ uri: uriOf(ALICE, SCROBBLE, r.rkey), cid: r.cid }));
     expect(finalRepo.map((r) => r.uri)).toEqual(['r01', 'r03', 'r04'].map((r) => uriOf(ALICE, SCROBBLE, r)));
 
-    await runInDurableObject(stubFor('apply-snapshot-live-race'), (i: HarnessDO) => {
-      const db = i.db;
+    await withMigratedDb((db) => {
       const generation = seedUser(db, ALICE, { active: false });
       seedSnapshotJob(db, ALICE, generation);
       expect(db.tx(() => applyRecordProof(db, upd, OPTS))).toEqual(APPLIED);
@@ -256,8 +252,7 @@ describe('applySnapshotChunk', () => {
     const head1 = repo1.head!;
     const entries1 = await entriesAt(repo1, head1.cid, () => false);
 
-    await runInDurableObject(stubFor('apply-snapshot-stale-floor-1'), (i: HarnessDO) => {
-      const db = i.db;
+    await withMigratedDb((db) => {
       const generation = seedUser(db, ALICE, { active: false });
       seedSnapshotJob(db, ALICE, generation);
       expect(db.tx(() => applyRecordProof(db, p1, OPTS))).toEqual(APPLIED);
@@ -296,8 +291,7 @@ describe('applySnapshotChunk', () => {
     const q2 = await putProof(repo2, SCROBBLE, 'a2', scrobble({ artist: 'Björk', track: 'a2' }));
     expect(q1.commit.rev < head2.rev && head2.rev < q2.commit.rev).toBe(true);
 
-    await runInDurableObject(stubFor('apply-snapshot-stale-floor-2'), (i: HarnessDO) => {
-      const db = i.db;
+    await withMigratedDb((db) => {
       const generation = seedUser(db, ALICE, { active: false });
       seedSnapshotJob(db, ALICE, generation);
       expect(db.tx(() => applyRecordProof(db, q0, OPTS))).toEqual(APPLIED);
@@ -351,8 +345,7 @@ describe('applySnapshotChunk', () => {
     expect(at3).toEqual([{ key: `${SCROBBLE}/x`, cid: cidOf(px) }]);
     const x = uriOf(ALICE, SCROBBLE, 'x');
 
-    await runInDurableObject(stubFor('apply-snapshot-stale-delete'), (i: HarnessDO) => {
-      const db = i.db;
+    await withMigratedDb((db) => {
       const generation = seedUser(db, ALICE, { active: false });
       seedSnapshotJob(db, ALICE, generation);
       expect(db.tx(() => applyRecordProof(db, px, OPTS))).toEqual(APPLIED);
@@ -425,8 +418,7 @@ describe('applySnapshotChunk', () => {
     const a0 = uriOf(ALICE, SCROBBLE, 'a0');
     const y = uriOf(ALICE, SCROBBLE, 'y');
 
-    await runInDurableObject(stubFor('apply-snapshot-stale-resurrect'), (i: HarnessDO) => {
-      const db = i.db;
+    await withMigratedDb((db) => {
       const generation = seedUser(db, ALICE, { active: false });
       expect(db.tx(() => applyRecordProof(db, p0, OPTS))).toEqual(APPLIED);
 
@@ -476,8 +468,7 @@ describe('applySnapshotChunk', () => {
     const head = repo.head!;
     const entries = await entriesAt(repo, head.cid, () => true);
 
-    await runInDurableObject(stubFor('apply-snapshot-superseded'), (i: HarnessDO) => {
-      const db = i.db;
+    await withMigratedDb((db) => {
       // Admission state: hidden, recovering, one snapshot job at the user's generation.
       const generation = seedUser(db, ALICE, { active: false });
       db.run(
@@ -549,8 +540,7 @@ describe('applySnapshotChunk', () => {
     const head = repo.head!;
     const entries = await entriesAt(repo, head.cid, () => true);
 
-    await runInDurableObject(stubFor('apply-snapshot-settings'), (i: HarnessDO) => {
-      const db = i.db;
+    await withMigratedDb((db) => {
       const generation = seedUser(db, ALICE, { active: false });
       seedSnapshotJob(db, ALICE, generation);
       expect(chunk(db, generation, head.rev, RANGE_LO, RANGE_HI, entries)).toEqual({

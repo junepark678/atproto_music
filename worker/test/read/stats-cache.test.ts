@@ -4,13 +4,11 @@
 // A cached body is reused only when users.stats_version is unchanged and no
 // row of the DID crossed either window bound since it was computed; a reused
 // body carries the current asOf. These tests drive the real module against
-// real DO SQLite, compare every answer with the uncached computation at the
+// node:sqlite, compare every answer with the uncached computation at the
 // same asOf, and assert the stats_cache row (as_of, lower, version) after each
 // request: a hit leaves it untouched, a miss rewrites it. Data comes from real
 // signed repositories through the production verifier and apply path.
 
-import { runInDurableObject } from 'cloudflare:test';
-import { env } from 'cloudflare:workers';
 import type { SignedRepo } from '@atmusic/atproto/test-support/signed-repo';
 import { verifyRecordProof } from '@atmusic/atproto/verify/record-proof';
 import type { StatsWindow } from '@atmusic/core/api-types';
@@ -23,12 +21,10 @@ import openapiText from '../../../api/openapi.yaml?raw';
 import fixture from '../../../tests/fixtures/read_models.json' with { type: 'json' };
 import { computeStatistics, stats, statsWithCache } from '../../src/do/read/stats';
 import { applyRecordProof } from '../../src/do/write/apply-record';
-import type { Env } from '../../src/env';
 import { routes, STATS_PATTERN } from '../../src/http/stats';
 import type { RequestCtx } from '../../src/http/types';
-import type { HarnessDO } from '../harness/harness-do';
-import { makeLocalIndex } from '../harness/local-index';
-import { ALICE, OPTS, repoFor, SCROBBLE, scrobble, seedUser, stubFor, uriOf } from '../write/support';
+import { ALICE, OPTS, repoFor, SCROBBLE, scrobble, seedUser, uriOf } from '../write/support';
+import { HARNESS_ENV, inTestDb, makeDbIndex, openTestDb, type TestDb } from './node-harness';
 
 function openapiValidator(schema: string) {
   const doc = JSON.parse(openapiText) as { components: unknown };
@@ -45,7 +41,6 @@ function openapiValidator(schema: string) {
 const statisticsSchema = openapiValidator('Statistics');
 
 const route = routes.find((r) => r.method === 'GET' && r.pattern === STATS_PATTERN)!;
-type Stub = DurableObjectStub<HarnessDO>;
 
 let cursorKey: CryptoKey;
 beforeAll(async () => {
@@ -58,7 +53,7 @@ beforeAll(async () => {
   );
 });
 
-async function applyVerified(stub: Stub, repo: SignedRepo, rkey: string): Promise<string> {
+async function applyVerified(store: TestDb, repo: SignedRepo, rkey: string): Promise<string> {
   const car = await repo.getRecordCar(SCROBBLE, rkey);
   const proof = await verifyRecordProof(car, {
     did: repo.did,
@@ -66,23 +61,23 @@ async function applyVerified(stub: Stub, repo: SignedRepo, rkey: string): Promis
     rkey,
     signingKey: repo.key.didKey,
   });
-  return runInDurableObject(stub, (i: HarnessDO) => i.db.tx(() => applyRecordProof(i.db, proof, OPTS)).outcome);
+  return inTestDb(store, (db) => db.tx(() => applyRecordProof(db, proof, OPTS)).outcome);
 }
 
-async function put(stub: Stub, repo: SignedRepo, rkey: string, record: Record<string, unknown>) {
+async function put(store: TestDb, repo: SignedRepo, rkey: string, record: Record<string, unknown>) {
   await repo.put(SCROBBLE, rkey, record);
-  expect(await applyVerified(stub, repo, rkey)).toBe('applied');
+  expect(await applyVerified(store, repo, rkey)).toBe('applied');
 }
 
 /** Alice's fixture scrobbles r01..r07 (r08 created and deleted), via signed commits. */
-async function seedAlice(name: string) {
-  const stub = stubFor(name) as Stub;
-  await runInDurableObject(stub, (i: HarnessDO) => seedUser(i.db, ALICE));
+async function seedAlice() {
+  const store = await openTestDb();
+  await inTestDb(store, (db) => seedUser(db, ALICE));
   const repo = await repoFor('alice');
-  for (const s of fixture.scrobbles) if (s.owner === ALICE) await put(stub, repo, s.rkey, { ...s.record });
+  for (const s of fixture.scrobbles) if (s.owner === ALICE) await put(store, repo, s.rkey, { ...s.record });
   await repo.delete(SCROBBLE, 'r08');
-  expect(await applyVerified(stub, repo, 'r08')).toBe('absent');
-  return { stub, repo };
+  expect(await applyVerified(store, repo, 'r08')).toBe('absent');
+  return { store, repo };
 }
 
 const ns = (iso: string) => fromMs(Date.parse(iso));
@@ -92,26 +87,26 @@ const ns = (iso: string) => fromMs(Date.parse(iso));
  * the uncached computation at the same asOf, the stats_cache row afterwards
  * and the current stats_version.
  */
-function request(stub: Stub, window: StatsWindow, iso: string) {
-  return runInDurableObject(stub, (i: HarnessDO) => {
+function request(store: TestDb, window: StatsWindow, iso: string) {
+  return inTestDb(store, (db) => {
     const asOfNs = ns(iso);
-    const served = statsWithCache(i.db, { did: ALICE, window, limit: 10, asOfNs });
-    const uncached = computeStatistics(i.db, ALICE, window, 10, asOfNs);
-    const row = i.db.one<{ as_of: string; lower: string | null; version: number }>(
+    const served = statsWithCache(db, { did: ALICE, window, limit: 10, asOfNs });
+    const uncached = computeStatistics(db, ALICE, window, 10, asOfNs);
+    const row = db.one<{ as_of: string; lower: string | null; version: number }>(
       'SELECT as_of, lower, version FROM stats_cache WHERE did = ? AND win = ? AND lim = 10',
       ALICE,
       window,
     );
-    const version = i.db.one<{ v: number }>('SELECT stats_version AS v FROM users WHERE did = ?', ALICE)!.v;
+    const version = db.one<{ v: number }>('SELECT stats_version AS v FROM users WHERE did = ?', ALICE)!.v;
     return { ...served, uncached, row, version };
   });
 }
 
 /** GET through the real route: status, schema, one RPC, no remote calls. */
-async function getStats(stub: Stub, query: string) {
-  const index = makeLocalIndex({ stub }, { stats });
+async function getStats(store: TestDb, query: string) {
+  const index = makeDbIndex({ db: store }, { stats });
   const ctx: RequestCtx = {
-    env: env as unknown as Env,
+    env: HARNESS_ENV,
     index,
     requestId: '1f2e3d4c-5b6a-4978-8a6b-5c4d3e2f1a0b',
     clock: fixedClock(),
@@ -131,35 +126,35 @@ async function getStats(stub: Stub, query: string) {
 }
 
 it('cache hit only when version unchanged and no row crossed either bound; result equals uncached', async () => {
-  const { stub, repo } = await seedAlice('stats-cache-validity');
+  const { store, repo } = await seedAlice();
   // A future-dated listen (accepted: receipt 12:00:00 + 300 s) that will cross the upper bound at 12:01.
-  await put(stub, repo, 'x1', scrobble({ artist: 'Portishead', track: 'Roads', listenedAt: '2026-01-15T12:01:00Z' }));
-  const v0 = await runInDurableObject(
-    stub,
-    (i: HarnessDO) => i.db.one<{ v: number }>('SELECT stats_version AS v FROM users WHERE did = ?', ALICE)!.v,
+  await put(store, repo, 'x1', scrobble({ artist: 'Portishead', track: 'Roads', listenedAt: '2026-01-15T12:01:00Z' }));
+  const v0 = await inTestDb(
+    store,
+    (db) => db.one<{ v: number }>('SELECT stats_version AS v FROM users WHERE did = ?', ALICE)!.v,
   );
 
   // 1. First request: miss, computed and stored at asOf.
-  let r = await request(stub, 'all', '2026-01-15T12:00:00Z');
+  let r = await request(store, 'all', '2026-01-15T12:00:00Z');
   expect(r.cache).toBe('miss');
   expect(r.statistics).toEqual(r.uncached);
   expect(r.statistics?.totalScrobbles).toBe(7);
   expect(r.row).toEqual({ as_of: '2026-01-15T12:00:00.000000000Z', lower: null, version: v0 });
 
   // 2. Same asOf, nothing changed: hit, identical to the uncached answer.
-  r = await request(stub, 'all', '2026-01-15T12:00:00Z');
+  r = await request(store, 'all', '2026-01-15T12:00:00Z');
   expect(r.cache).toBe('hit');
   expect(r.statistics).toEqual(r.uncached);
 
   // 3. asOf moved but no row in (12:00:00, 12:00:30]: hit with the *current* asOf; row untouched.
-  r = await request(stub, 'all', '2026-01-15T12:00:30Z');
+  r = await request(store, 'all', '2026-01-15T12:00:30Z');
   expect(r.cache).toBe('hit');
   expect(r.statistics?.asOf).toBe('2026-01-15T12:00:30.000000000Z');
   expect(r.statistics).toEqual(r.uncached);
   expect(r.row?.as_of).toBe('2026-01-15T12:00:00.000000000Z');
 
   // 4. x1 (12:01:00) is in (asOf0, asOf1]: the upper probe forces a miss; x1 now counts.
-  r = await request(stub, 'all', '2026-01-15T12:01:00Z');
+  r = await request(store, 'all', '2026-01-15T12:01:00Z');
   expect(r.cache).toBe('miss');
   expect(r.statistics).toEqual(r.uncached);
   expect(r.statistics?.totalScrobbles).toBe(8);
@@ -167,13 +162,13 @@ it('cache hit only when version unchanged and no row crossed either bound; resul
   expect(r.row).toEqual({ as_of: '2026-01-15T12:01:00.000000000Z', lower: null, version: v0 });
 
   // 5. Asking for an earlier asOf crosses x1 the other way: miss, x1 no longer counts.
-  r = await request(stub, 'all', '2026-01-15T12:00:30Z');
+  r = await request(store, 'all', '2026-01-15T12:00:30Z');
   expect(r.cache).toBe('miss');
   expect(r.statistics).toEqual(r.uncached);
   expect(r.statistics?.totalScrobbles).toBe(7);
 
   // 6. 7d: r03 sits exactly on the lower bound 2026-01-08T12:00:00 at asOf 12:00:00.
-  r = await request(stub, '7d', '2026-01-15T12:00:00Z');
+  r = await request(store, '7d', '2026-01-15T12:00:00Z');
   expect(r.cache).toBe('miss');
   expect(r.statistics?.totalScrobbles).toBe(4);
   expect(r.row).toEqual({
@@ -182,13 +177,13 @@ it('cache hit only when version unchanged and no row crossed either bound; resul
     version: v0,
   });
   // Half a second later r03 is in [lower0, lower1) and nothing is in (asOf0, asOf1]: the lower probe misses.
-  r = await request(stub, '7d', '2026-01-15T12:00:00.500Z');
+  r = await request(store, '7d', '2026-01-15T12:00:00.500Z');
   expect(r.cache).toBe('miss');
   expect(r.statistics).toEqual(r.uncached);
   expect(r.statistics?.totalScrobbles).toBe(3);
   expect(r.row?.lower).toBe('2026-01-08T12:00:00.500000000Z');
   // Both bounds move again with no row in either gap: hit.
-  r = await request(stub, '7d', '2026-01-15T12:00:30Z');
+  r = await request(store, '7d', '2026-01-15T12:00:30Z');
   expect(r.cache).toBe('hit');
   expect(r.statistics).toEqual(r.uncached);
   expect(r.statistics?.asOf).toBe('2026-01-15T12:00:30.000000000Z');
@@ -197,18 +192,18 @@ it('cache hit only when version unchanged and no row crossed either bound; resul
   // 7. A verified change bumps stats_version: a miss even though no bound moved and the
   //    changed row (r06, 2025) is outside the 7d window. The answer is unchanged.
   const before = r.statistics;
-  await put(stub, repo, 'r06', {
+  await put(store, repo, 'r06', {
     ...fixture.scrobbles.find((s) => s.rkey === 'r06')!.record,
     album: 'The Whole Story',
   });
-  r = await request(stub, '7d', '2026-01-15T12:00:30Z');
+  r = await request(store, '7d', '2026-01-15T12:00:30Z');
   expect(r.version).toBe(v0 + 1);
   expect(r.cache).toBe('miss');
   expect(r.statistics).toEqual(r.uncached);
   expect(r.statistics).toEqual(before);
   expect(r.row?.version).toBe(v0 + 1);
   // ...and the all-time body picks up the change.
-  r = await request(stub, 'all', '2026-01-15T12:00:30Z');
+  r = await request(store, 'all', '2026-01-15T12:00:30Z');
   expect(r.cache).toBe('miss');
   expect(r.statistics?.topAlbums).toContainEqual({ artist: 'Kate Bush', album: 'The Whole Story', scrobbleCount: 1 });
   expect(r.statistics?.topAlbums).not.toContainEqual({
@@ -218,38 +213,38 @@ it('cache hit only when version unchanged and no row crossed either bound; resul
   });
 
   // 8. A stored body under a stale version is never served, even when asOf is identical.
-  await runInDurableObject(stub, (i: HarnessDO) =>
-    i.db.run('UPDATE stats_cache SET version = version - 1 WHERE did = ? AND win = ?', ALICE, 'all'),
+  await inTestDb(store, (db) =>
+    db.run('UPDATE stats_cache SET version = version - 1 WHERE did = ? AND win = ?', ALICE, 'all'),
   );
-  r = await request(stub, 'all', '2026-01-15T12:00:30Z');
+  r = await request(store, 'all', '2026-01-15T12:00:30Z');
   expect(r.cache).toBe('miss');
   expect(r.row?.version).toBe(v0 + 1);
 });
 
 it('delete r01 invalidates: all → 6 listens, Homogenic 1', async () => {
-  const { stub, repo } = await seedAlice('stats-cache-delete');
-  const all0 = await getStats(stub, '');
+  const { store, repo } = await seedAlice();
+  const all0 = await getStats(store, '');
   expect([all0.totalScrobbles, all0.distinctArtists, all0.distinctTracks]).toEqual([7, 3, 6]);
   expect(all0.topAlbums).toContainEqual({ artist: 'Björk', album: 'Homogenic', scrobbleCount: 2 });
-  const d7 = await getStats(stub, '?window=7d');
+  const d7 = await getStats(store, '?window=7d');
   expect(d7.totalScrobbles).toBe(4);
-  const versionBefore = await runInDurableObject(
-    stub,
-    (i: HarnessDO) => i.db.one<{ v: number }>('SELECT stats_version AS v FROM users WHERE did = ?', ALICE)!.v,
+  const versionBefore = await inTestDb(
+    store,
+    (db) => db.one<{ v: number }>('SELECT stats_version AS v FROM users WHERE did = ?', ALICE)!.v,
   );
 
   // Signed deletion of r01; its exclusion proof is verified and applied.
   await repo.delete(SCROBBLE, 'r01');
-  expect(await applyVerified(stub, repo, 'r01')).toBe('absent');
-  const db = await runInDurableObject(stub, (i: HarnessDO) => ({
-    r01: i.db.one('SELECT uri FROM scrobbles WHERE uri = ?', uriOf(ALICE, SCROBBLE, 'r01')),
-    state: i.db.one<{ state: string }>('SELECT state FROM record_state WHERE uri = ?', uriOf(ALICE, SCROBBLE, 'r01')),
-    version: i.db.one<{ v: number }>('SELECT stats_version AS v FROM users WHERE did = ?', ALICE)!.v,
+  expect(await applyVerified(store, repo, 'r01')).toBe('absent');
+  const db = await inTestDb(store, (db) => ({
+    r01: db.one('SELECT uri FROM scrobbles WHERE uri = ?', uriOf(ALICE, SCROBBLE, 'r01')),
+    state: db.one<{ state: string }>('SELECT state FROM record_state WHERE uri = ?', uriOf(ALICE, SCROBBLE, 'r01')),
+    version: db.one<{ v: number }>('SELECT stats_version AS v FROM users WHERE did = ?', ALICE)!.v,
   }));
   expect(db).toEqual({ r01: null, state: { state: 'absent' }, version: versionBefore + 1 });
 
   // TESTING.md: all-time 6 listens, 3 artists, 6 tracks, Homogenic 1; rankings recomputed exactly.
-  const all1 = await getStats(stub, '');
+  const all1 = await getStats(store, '');
   expect([all1.totalScrobbles, all1.distinctArtists, all1.distinctTracks]).toEqual([6, 3, 6]);
   expect(all1.topArtists).toEqual([
     { artist: 'Radiohead', scrobbleCount: 3 },
@@ -272,7 +267,7 @@ it('delete r01 invalidates: all → 6 listens, Homogenic 1', async () => {
     { artist: 'Radiohead', album: 'In Rainbows', scrobbleCount: 1 },
   ]);
   // The 7d body is invalidated too: r02, r03, r07 remain.
-  const d7b = await getStats(stub, '?window=7d');
+  const d7b = await getStats(store, '?window=7d');
   expect([d7b.totalScrobbles, d7b.distinctArtists, d7b.distinctTracks]).toEqual([3, 2, 3]);
   expect(d7b.topArtists).toEqual([
     { artist: 'Radiohead', scrobbleCount: 2 },
@@ -280,8 +275,8 @@ it('delete r01 invalidates: all → 6 listens, Homogenic 1', async () => {
   ]);
 
   // Both cache rows were rewritten under the new version with the recomputed bodies.
-  const rows = await runInDurableObject(stub, (i: HarnessDO) =>
-    i.db.all<{ win: string; version: number; body: string }>(
+  const rows = await inTestDb(store, (db) =>
+    db.all<{ win: string; version: number; body: string }>(
       'SELECT win, version, body FROM stats_cache WHERE did = ? ORDER BY win',
       ALICE,
     ),

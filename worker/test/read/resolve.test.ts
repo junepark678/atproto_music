@@ -7,8 +7,6 @@
 // the test can show the module reads the cached identity instead of forcing a
 // fresh one. Expectations are hardcoded.
 
-import { runInDurableObject } from 'cloudflare:test';
-import { env } from 'cloudflare:workers';
 import { createIdentityResolver, type IdentityCache } from '@atmusic/atproto/identity/resolver';
 import type { ResolvedIdentity } from '@atmusic/atproto/identity/types';
 import { createFixtureKit } from '@atmusic/atproto/test-support/read-models';
@@ -20,13 +18,11 @@ import addFormats from 'ajv-formats';
 import { beforeAll, expect, it } from 'vitest';
 import openapiText from '../../../api/openapi.yaml?raw';
 import { parseConfig, parseCursorKey } from '../../src/config';
-import { doDb } from '../../src/do/db';
+
 import { resolveHandle } from '../../src/do/read/profile';
-import type { Env } from '../../src/env';
 import { routes as resolveRoutes } from '../../src/http/resolve';
 import type { RequestCtx } from '../../src/http/types';
-import type { HarnessDO } from '../harness/harness-do';
-import { makeLocalIndex } from '../harness/local-index';
+import { HARNESS_ENV, inTestDb, makeDbIndex, openTestDb } from './node-harness';
 
 function openapiValidator(schema: string) {
   const doc = JSON.parse(openapiText) as { components: unknown };
@@ -52,7 +48,7 @@ const GONE = 'gone.test';
 
 let cursorKey: CryptoKey;
 beforeAll(async () => {
-  cursorKey = await deriveCursorKey(parseCursorKey(env));
+  cursorKey = await deriveCursorKey(parseCursorKey(HARNESS_ENV));
 });
 
 /** A Map-backed identity cache, standing in for the DO's identity_cache hook. */
@@ -67,7 +63,7 @@ function memoryCache() {
   return { cache, map };
 }
 
-async function setup(name: string) {
+async function setup() {
   const kit = await createFixtureKit();
   // The fixture network plus one host that has no DID for its handle.
   const transport: Transport = Object.assign(
@@ -83,20 +79,20 @@ async function setup(name: string) {
   const clock = fixedClock();
   const { cache, map } = memoryCache();
   const identity = createIdentityResolver({ transport, clock, cache });
-  const stub = env.HARNESS.get(env.HARNESS.idFromName(name)) as DurableObjectStub<HarnessDO>;
-  const index = makeLocalIndex(
-    { stub, clock, identity, transport, config: parseConfig(env, { allowFixturePrefix: true }) },
+  const store = await openTestDb();
+  const index = makeDbIndex(
+    { db: store, clock, identity, transport, config: parseConfig(HARNESS_ENV, { allowFixturePrefix: true }) },
     { resolveHandle },
   );
   const ctx: RequestCtx = {
-    env: { ...env } as unknown as Env,
+    env: { ...HARNESS_ENV },
     index,
     requestId: REQUEST_ID,
     clock,
     cursorKey,
     clientIp: '203.0.113.7',
   };
-  return { kit, stub, index, ctx, cacheMap: map };
+  return { kit, store, index, ctx, cacheMap: map };
 }
 
 const resolveRoute = (() => {
@@ -115,7 +111,7 @@ function errorOf(code: string, message: string, fields?: Record<string, string>)
 }
 
 it('verified handle 200; unresolved 404; mismatch 422', async () => {
-  const { kit, stub, index, ctx, cacheMap } = await setup('resolve');
+  const { kit, store, index, ctx, cacheMap } = await setup();
 
   // --- Verified round trip (case-insensitive input, normalised output).
   const ok = await resolve(ctx, '?handle=Alice.TEST');
@@ -204,8 +200,7 @@ it('verified handle 200; unresolved 404; mismatch 422', async () => {
   ]);
 
   // Resolution creates no music user, hint or job.
-  const rows = await runInDurableObject(stub, (_i: HarnessDO, s: DurableObjectState) => {
-    const db = doDb(s.storage);
+  const rows = await inTestDb(store, (db) => {
     return {
       users: db.all('SELECT did FROM users'),
       hints: db.all('SELECT uri FROM hints'),

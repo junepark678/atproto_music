@@ -1,4 +1,4 @@
-// W3-03: public follow lists and counts over real DO SQLite (harness DO with
+// W3-03: public follow lists and counts over node:sqlite (a temporary-file database with
 // the production migrations), through the HTTP routes and IndexRpc module
 // functions (M5.3.2 external_duplicates, public_lists, list_pagination).
 //
@@ -10,8 +10,6 @@
 // invented. Expectations are hardcoded from TESTING.md, never computed by the
 // code under test.
 
-import { runInDurableObject } from 'cloudflare:test';
-import { env } from 'cloudflare:workers';
 import {
   createFixtureKit,
   type FixtureKit,
@@ -30,17 +28,15 @@ import addFormats from 'ajv-formats';
 import { beforeAll, expect, it } from 'vitest';
 import openapiText from '../../../api/openapi.yaml?raw';
 import { parseConfig, parseCursorKey } from '../../src/config';
-import { doDb } from '../../src/do/db';
+
 import { followers, following } from '../../src/do/read/follows';
 import { profile } from '../../src/do/read/profile';
 import { applyRecordProof } from '../../src/do/write/apply-record';
-import type { Env } from '../../src/env';
 import { routes as followRoutes } from '../../src/http/follows-read';
 import { routes as profileRoutes } from '../../src/http/profile';
 import type { RequestCtx, RouteDef } from '../../src/http/types';
-import type { HarnessDO } from '../harness/harness-do';
-import { type LocalIndex, makeLocalIndex } from '../harness/local-index';
 import { OPTS, seedUser } from '../write/support';
+import { HARNESS_ENV, inTestDb, type LocalIndex, makeDbIndex, openTestDb, type TestDb } from './node-harness';
 
 // ---------------------------------------------------------------------------
 // Shared setup
@@ -76,10 +72,8 @@ const FOLLOW_TS = '2025-01-01T00:00:00.000000000Z';
 
 let cursorKey: CryptoKey;
 beforeAll(async () => {
-  cursorKey = await deriveCursorKey(parseCursorKey(env));
+  cursorKey = await deriveCursorKey(parseCursorKey(HARNESS_ENV));
 });
-
-const stubFor = (name: string) => env.HARNESS.get(env.HARNESS.idFromName(name)) as DurableObjectStub<HarnessDO>;
 
 /** A verified getRecord proof for `collection/rkey` at the repository's current head. */
 async function verifiedProof(repo: SignedRepo, signingKey: string, collection: string, rkey: string) {
@@ -89,16 +83,15 @@ async function verifiedProof(repo: SignedRepo, signingKey: string, collection: s
   return verifyRecordProof(car, { did: repo.did, collection, rkey, signingKey });
 }
 
-async function applyProofs(stub: DurableObjectStub<HarnessDO>, proofs: RecordProof[]): Promise<string[]> {
-  return runInDurableObject(stub, (_i: HarnessDO, s: DurableObjectState) => {
-    const db = doDb(s.storage);
+async function applyProofs(store: TestDb, proofs: RecordProof[]): Promise<string[]> {
+  return inTestDb(store, (db) => {
     return proofs.map((p) => db.tx(() => applyRecordProof(db, p, OPTS)).outcome);
   });
 }
 
 interface World {
   kit: FixtureKit;
-  stub: DurableObjectStub<HarnessDO>;
+  store: TestDb;
   index: LocalIndex;
   ctx: RequestCtx;
   /** Verify and apply `collection/rkey` of a fixture account at its current head. */
@@ -106,12 +99,11 @@ interface World {
 }
 
 /** The shared fixture, published as signed commits and applied through the verifier. */
-async function world(name: string): Promise<World> {
+async function world(): Promise<World> {
   const kit = await createFixtureKit();
   const seed = await seedReadModels(kit);
-  const stub = stubFor(name);
-  await runInDurableObject(stub, (_i: HarnessDO, s: DurableObjectState) => {
-    const db = doDb(s.storage);
+  const store = await openTestDb();
+  await inTestDb(store, (db) => {
     for (const did of [ALICE, BOB, CAROL]) db.tx(() => seedUser(db, did));
   });
   const proofs: RecordProof[] = [];
@@ -119,18 +111,18 @@ async function world(name: string): Promise<World> {
     const user = kit.user(r.did);
     proofs.push(await verifiedProof(kit.repos[user.name], user.key.didKey, r.collection, r.rkey));
   }
-  const outcomes = await applyProofs(stub, proofs);
+  const outcomes = await applyProofs(store, proofs);
   // 9 present scrobbles + 1 follow applied; r08 proven absent.
   expect(outcomes.filter((o) => o === 'applied')).toHaveLength(10);
   expect(outcomes.filter((o) => o === 'absent')).toHaveLength(1);
 
   const clock = fixedClock();
-  const index = makeLocalIndex(
-    { stub, clock, config: parseConfig(env, { allowFixturePrefix: true }) },
+  const index = makeDbIndex(
+    { db: store, clock, config: parseConfig(HARNESS_ENV, { allowFixturePrefix: true }) },
     { following, followers, profile },
   );
   const ctx: RequestCtx = {
-    env: { ...env } as unknown as Env,
+    env: { ...HARNESS_ENV },
     index,
     requestId: REQUEST_ID,
     clock,
@@ -139,12 +131,14 @@ async function world(name: string): Promise<World> {
   };
   return {
     kit,
-    stub,
+    store,
     index,
     ctx,
     async apply(user, collection, rkey) {
       const u = kit.users[user];
-      const [outcome] = await applyProofs(stub, [await verifiedProof(kit.repos[user], u.key.didKey, collection, rkey)]);
+      const [outcome] = await applyProofs(store, [
+        await verifiedProof(kit.repos[user], u.key.didKey, collection, rkey),
+      ]);
       return outcome as string;
     },
   };
@@ -168,12 +162,9 @@ const profileRoute = route(profileRoutes, '/api/v1/users/{did}/profile');
 
 const uri = (actor: string, rkey: string) => `at://${actor}/${FOLLOW}/${rkey}`;
 
-function followRows(stub: DurableObjectStub<HarnessDO>, subject: string) {
-  return runInDurableObject(stub, (_i: HarnessDO, s: DurableObjectState) =>
-    doDb(s.storage).all<{ uri: string; actor: string }>(
-      'SELECT uri, actor FROM follows WHERE subject = ? ORDER BY uri',
-      subject,
-    ),
+function followRows(store: TestDb, subject: string) {
+  return inTestDb(store, (db) =>
+    db.all<{ uri: string; actor: string }>('SELECT uri, actor FROM follows WHERE subject = ? ORDER BY uri', subject),
   );
 }
 
@@ -196,7 +187,7 @@ async function addCarolDuplicates(w: World): Promise<{ dup1: string; dup2: strin
 }
 
 it('two active Carol→Bob records count Bob followers 2 not 3; representative is min URI', async () => {
-  const w = await world('follows-duplicates');
+  const w = await world();
   const aliceBob = uri(ALICE, await followRkey(BOB));
 
   // Baseline: the fixture's single Alice→Bob edge.
@@ -204,7 +195,7 @@ it('two active Carol→Bob records count Bob followers 2 not 3; representative i
 
   const { dup1, dup2 } = await addCarolDuplicates(w);
   // Three stored records point at Bob …
-  expect(await followRows(w.stub, BOB)).toEqual([
+  expect(await followRows(w.store, BOB)).toEqual([
     { uri: aliceBob, actor: ALICE },
     { uri: dup1, actor: CAROL },
     { uri: dup2, actor: CAROL },
@@ -238,11 +229,8 @@ it('two active Carol→Bob records count Bob followers 2 not 3; representative i
   expect(carolFollowing.body.nextCursor).toBeNull();
 
   // The representative's CID is the verified CID of dup1, not of dup2.
-  const cids = await runInDurableObject(w.stub, (_i: HarnessDO, s: DurableObjectState) =>
-    doDb(s.storage).all<{ uri: string; cid: string }>(
-      'SELECT uri, cid FROM follows WHERE actor = ? ORDER BY uri',
-      CAROL,
-    ),
+  const cids = await inTestDb(w.store, (db) =>
+    db.all<{ uri: string; cid: string }>('SELECT uri, cid FROM follows WHERE actor = ? ORDER BY uri', CAROL),
   );
   expect(bobFollowers.body.items[0].cid).toBe(cids.find((r) => r.uri === dup1)?.cid);
   expect(cids.find((r) => r.uri === dup1)?.cid).not.toBe(cids.find((r) => r.uri === dup2)?.cid);
@@ -253,7 +241,7 @@ it('two active Carol→Bob records count Bob followers 2 not 3; representative i
 });
 
 it('deleting one duplicate keeps 2; deleting both returns 1', async () => {
-  const w = await world('follows-duplicate-deletes');
+  const w = await world();
   const aliceBob = uri(ALICE, await followRkey(BOB));
   const { dup1, dup2 } = await addCarolDuplicates(w);
   expect(await counts(w, BOB)).toEqual({ followers: 2, following: 0 });
@@ -263,7 +251,7 @@ it('deleting one duplicate keeps 2; deleting both returns 1', async () => {
   // Delete the representative: a verified exclusion proof removes only that record.
   await w.kit.externalDelete('Carol', FOLLOW, 'dup1');
   expect(await w.apply('Carol', FOLLOW, 'dup1')).toBe('absent');
-  expect(await followRows(w.stub, BOB)).toEqual([
+  expect(await followRows(w.store, BOB)).toEqual([
     { uri: aliceBob, actor: ALICE },
     { uri: dup2, actor: CAROL },
   ]);
@@ -276,15 +264,15 @@ it('deleting one duplicate keeps 2; deleting both returns 1', async () => {
     [dup2, '2025-03-01T00:00:00.000000000Z'],
     [aliceBob, FOLLOW_TS],
   ]);
-  const state = await runInDurableObject(w.stub, (_i: HarnessDO, s: DurableObjectState) =>
-    doDb(s.storage).one<{ state: string }>('SELECT state FROM record_state WHERE uri = ?', dup1),
+  const state = await inTestDb(w.store, (db) =>
+    db.one<{ state: string }>('SELECT state FROM record_state WHERE uri = ?', dup1),
   );
   expect(state).toEqual({ state: 'absent' });
 
   // Delete the other: the Carol→Bob edge is gone, Alice→Bob remains.
   await w.kit.externalDelete('Carol', FOLLOW, 'dup2');
   expect(await w.apply('Carol', FOLLOW, 'dup2')).toBe('absent');
-  expect(await followRows(w.stub, BOB)).toEqual([{ uri: aliceBob, actor: ALICE }]);
+  expect(await followRows(w.store, BOB)).toEqual([{ uri: aliceBob, actor: ALICE }]);
   expect(await counts(w, BOB)).toEqual({ followers: 1, following: 0 });
   expect(await counts(w, CAROL)).toEqual({ followers: 0, following: 0 });
   const afterBoth = await get(followersRoute, w.ctx, BOB);
@@ -297,10 +285,9 @@ it('deleting one duplicate keeps 2; deleting both returns 1', async () => {
 });
 
 it('three edges with equal createdAt traverse completely at limit 1; tampered cursor → 400 invalid_cursor', async () => {
-  const w = await world('follows-pagination');
+  const w = await world();
   // A fourth active account (a follow subject only).
-  await runInDurableObject(w.stub, (_i: HarnessDO, s: DurableObjectState) => {
-    const db = doDb(s.storage);
+  await inTestDb(w.store, (db) => {
     db.tx(() => seedUser(db, DAVE));
   });
   // Alice also follows Carol and Dave, all three at the same createdAt.
