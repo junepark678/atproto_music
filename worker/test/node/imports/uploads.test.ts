@@ -30,7 +30,7 @@ import {
   intervalPacer,
   runImports,
 } from '../../../src/imports/jobs';
-import { fsUploadStore, type UploadStore } from '../../../src/imports/uploads';
+import { fsUploadStore, receiveUpload, type UploadStore } from '../../../src/imports/uploads';
 import { MAX_ZIP_ENTRIES, readZip, ZipBoundError } from '../../../src/imports/zip';
 import { bindPolicyFetch, createPolicyFetch } from '../../../src/node/policy-fetch';
 import { checkResponse } from '../../acceptance/support/openapi';
@@ -572,6 +572,77 @@ describe('import uploads', () => {
     await expect507(await post(floor, floor.login('did:plc:floorfloorfloorfloorfloo'), body));
     expect(files(floor.app.config.uploadDir)).toEqual([]);
     expect(floor.app.db.one('SELECT count(*) AS n FROM import_jobs')).toEqual({ n: 0 });
+
+    // Concurrent uploads share the cap: two bodies that each fit but not together.
+    // Each stream sends its first half, then holds the rest until both upload
+    // files exist (both admissions are past their directory scan), so a check
+    // against a snapshot taken before streaming would admit both.
+    const bytes = enc.encode(body);
+    const half = Math.floor(bytes.length / 2);
+    const shared = await importsApp({ ATMUSIC_UPLOAD_MAX_BYTES: String(bytes.length + half) });
+    const sharedDir = shared.app.config.uploadDir;
+    let release!: () => void;
+    const released = new Promise<void>((r) => {
+      release = r;
+    });
+    const gated = () => {
+      let step = 0;
+      return new ReadableStream<Uint8Array>(
+        {
+          async pull(controller) {
+            if (step++ === 0) {
+              controller.enqueue(bytes.slice(0, half));
+              return;
+            }
+            await released;
+            controller.enqueue(bytes.slice(half));
+            controller.close();
+          },
+        },
+        { highWaterMark: 0 },
+      );
+    };
+    const racing = [
+      post(shared, shared.login('did:plc:racearaceraceraceracerac'), gated(), { duplex: 'half' } as RequestInit),
+      post(shared, shared.login('did:plc:racebracebracebracebrace'), gated(), { duplex: 'half' } as RequestInit),
+    ];
+    for (let i = 0; i < 2_000 && files(sharedDir).length < 2; i++) await new Promise((r) => setTimeout(r, 1));
+    expect(files(sharedDir)).toHaveLength(2);
+    release();
+    const raced = await Promise.all(racing);
+    expect(raced.map((r) => r.status).sort()).toEqual([202, 507]);
+    const loser = raced.find((r) => r.status === 507) as Response;
+    await expect507(loser);
+    const winner = (await (raced.find((r) => r.status === 202) as Response).json()) as { id: string };
+    expect(files(sharedDir)).toEqual([`${winner.id}.upload`]);
+    expect(statSync(join(sharedDir, `${winner.id}.upload`)).size).toBe(bytes.length);
+    expect(shared.app.db.one('SELECT count(*) AS n FROM import_jobs')).toEqual({ n: 1 });
+
+    // The same through receiveUpload with declared lengths (900 + 900 > 1000).
+    const direct = join(sharedDir, 'direct');
+    const declaredRace = await Promise.all(
+      ['direct-a', 'direct-b'].map((jobId) =>
+        receiveUpload(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(new Uint8Array(900));
+              controller.close();
+            },
+          }),
+          {
+            dir: direct,
+            jobId,
+            dirMaxBytes: 1_000,
+            minFreeBytes: 0,
+            freeBytes: () => 10n ** 12n,
+            declaredLength: 900,
+          },
+        ),
+      ),
+    );
+    expect(declaredRace.filter((r) => r.ok)).toHaveLength(1);
+    expect(declaredRace.filter((r) => !r.ok)).toEqual([{ ok: false, status: 507, code: 'insufficient_storage' }]);
+    expect(readdirSync(direct).map((n) => statSync(join(direct, n)).size)).toEqual([900]);
 
     // Within the bounds: the file is kept (0600) only until parsed, cancelled or failed.
     const ok = await importsApp();

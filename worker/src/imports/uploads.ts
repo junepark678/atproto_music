@@ -11,6 +11,9 @@
 // - while streaming, the bytes actually received are counted against the same
 //   bounds (free space re-read every FREE_CHECK_BYTES) and against 64 MiB
 //   (413); any refusal or a client abort deletes the partial file.
+// - concurrent uploads into one directory share a process-wide reservation
+//   ledger (`DirLedger`): every check-and-reserve is synchronous, so two
+//   uploads can never both pass the cap on one stale snapshot (see below).
 //
 // Lifetime: the file is deleted as soon as it is fully parsed into staging,
 // and when its job is cancelled or fails (`deleteUpload`, upload_path NULL);
@@ -38,7 +41,7 @@
 
 import { createReadStream } from 'node:fs';
 import { chmod, mkdir, open, readdir, stat, unlink } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import type { Db } from '../do/db';
 import { mapLastfmRow, pageTracks } from './lastfm-source';
 import { listenedAtSeconds, mapListenBrainzRow } from './listenbrainz-source';
@@ -77,8 +80,61 @@ export function uploadPathFor(dir: string, jobId: string): string {
   return join(dir, `${jobId}${UPLOAD_SUFFIX}`);
 }
 
-/** Bytes of the regular files directly in `dir` (0 when it does not exist). */
-export async function uploadDirBytes(dir: string): Promise<number> {
+/**
+ * Process-wide accounting of one upload directory, so that concurrent
+ * `receiveUpload` calls cannot jointly exceed ATMUSIC_UPLOAD_MAX_BYTES or the
+ * free-space floor (a check made on a snapshot read before an `await` would
+ * be stale by the time the bytes are written).
+ *
+ * - `inFlight`: one reservation per upload being received. Its `reserved`
+ *   is max(declared length, bytes received) and only grows while streaming;
+ *   `written` is what is already on disk. Both change only synchronously.
+ * - `completedBytes`: a monotonic sum of the sizes of uploads this process
+ *   finished receiving. An upload that ends moves its bytes from `inFlight`
+ *   to `completedBytes` in one synchronous step.
+ *
+ * The bytes on disk of finished uploads are estimated as
+ * `scanned + (completedBytes − completedAtScanStart)`, where `scanned` is a
+ * directory scan that skipped the files of in-flight uploads. An upload that
+ * finished during the scan is counted by the delta even if the scan skipped
+ * it (and, if the scan saw it finished, twice: conservative). Deletions are
+ * not subtracted until the next upload scans again (also conservative).
+ */
+interface Reservation {
+  path: string;
+  reserved: number;
+  written: number;
+}
+
+interface DirLedger {
+  inFlight: Set<Reservation>;
+  completedBytes: number;
+}
+
+const ledgers = new Map<string, DirLedger>();
+
+function ledgerFor(dir: string): DirLedger {
+  const key = resolve(dir);
+  let ledger = ledgers.get(key);
+  if (ledger === undefined) {
+    ledger = { inFlight: new Set(), completedBytes: 0 };
+    ledgers.set(key, ledger);
+  }
+  return ledger;
+}
+
+function reservedBytes(ledger: DirLedger): { reserved: number; unwritten: number } {
+  let reserved = 0;
+  let unwritten = 0;
+  for (const r of ledger.inFlight) {
+    reserved += r.reserved;
+    unwritten += r.reserved - r.written;
+  }
+  return { reserved, unwritten };
+}
+
+/** Bytes of the regular files directly in `dir` other than `skip` (0 when it does not exist). */
+async function scanDirBytes(dir: string, skip: (path: string) => boolean): Promise<number> {
   let names: string[];
   try {
     names = await readdir(dir);
@@ -88,8 +144,10 @@ export async function uploadDirBytes(dir: string): Promise<number> {
   }
   let total = 0;
   for (const name of names) {
+    const path = join(dir, name);
+    if (skip(path)) continue;
     try {
-      const s = await stat(join(dir, name));
+      const s = await stat(path);
       if (s.isFile()) total += s.size;
     } catch {
       // vanished meanwhile
@@ -142,14 +200,43 @@ export async function receiveUpload(
     return TOO_LARGE;
   }
   await mkdir(options.dir, { recursive: true, mode: 0o700 });
-  const before = await uploadDirBytes(options.dir);
-  if (before + declared > options.dirMaxBytes || freeOf(options) - BigInt(declared) < BigInt(options.minFreeBytes)) {
+  const path = uploadPathFor(options.dir, options.jobId);
+  const ledger = ledgerFor(options.dir);
+  const completedAtScan = ledger.completedBytes;
+  const scanned = await scanDirBytes(options.dir, (p) => {
+    for (const r of ledger.inFlight) if (r.path === p) return true;
+    return false;
+  });
+  // From here on every bound check and reservation change is synchronous.
+  const finishedBase = scanned - completedAtScan;
+  const finishedBytes = () => finishedBase + ledger.completedBytes;
+  const mine: Reservation = { path, reserved: 0, written: 0 };
+  /** Grows this upload's reservation to `bytes` if the directory cap allows it. */
+  const reserve = (bytes: number): boolean => {
+    if (bytes <= mine.reserved) return true;
+    if (finishedBytes() + reservedBytes(ledger).reserved + (bytes - mine.reserved) > options.dirMaxBytes) return false;
+    mine.reserved = bytes;
+    return true;
+  };
+  /** The floor holds once every in-flight upload (this one included) writes what it reserved. */
+  const floorHolds = (): boolean => {
+    const unwritten = reservedBytes(ledger).unwritten + (ledger.inFlight.has(mine) ? 0 : mine.reserved - mine.written);
+    return freeOf(options) - BigInt(unwritten) >= BigInt(options.minFreeBytes);
+  };
+  if (!reserve(declared) || !floorHolds()) {
     cancel();
     return NO_SPACE;
   }
+  ledger.inFlight.add(mine);
 
-  const path = uploadPathFor(options.dir, options.jobId);
-  const handle = await open(path, 'wx', 0o600);
+  let handle: Awaited<ReturnType<typeof open>>;
+  try {
+    handle = await open(path, 'wx', 0o600);
+  } catch (error) {
+    ledger.inFlight.delete(mine);
+    cancel();
+    throw error;
+  }
   let received = 0;
   let sinceCheck = 0;
   let outcome: ReceiveResult | null = null;
@@ -164,11 +251,11 @@ export async function receiveUpload(
         sinceCheck += value.byteLength;
         if (received > limit) {
           outcome = TOO_LARGE;
-        } else if (before + received > options.dirMaxBytes) {
+        } else if (!reserve(received)) {
           outcome = NO_SPACE;
         } else if (sinceCheck >= FREE_CHECK_BYTES) {
           sinceCheck = 0;
-          if (freeOf(options) - BigInt(value.byteLength) < BigInt(options.minFreeBytes)) outcome = NO_SPACE;
+          if (!floorHolds()) outcome = NO_SPACE;
         }
         if (outcome !== null) {
           void reader.cancel().catch(() => undefined);
@@ -178,6 +265,7 @@ export async function receiveUpload(
         while (offset < value.byteLength) {
           const { bytesWritten } = await handle.write(value, offset, value.byteLength - offset);
           offset += bytesWritten;
+          mine.written += bytesWritten;
         }
       }
     }
@@ -185,13 +273,24 @@ export async function receiveUpload(
   } catch (error) {
     await handle.close().catch(() => undefined);
     await fsUploadStore.remove(path);
+    ledger.inFlight.delete(mine);
     throw error;
   }
-  await handle.close();
+  try {
+    await handle.close();
+  } catch (error) {
+    await fsUploadStore.remove(path);
+    ledger.inFlight.delete(mine);
+    throw error;
+  }
   if (outcome !== null) {
     await fsUploadStore.remove(path);
+    ledger.inFlight.delete(mine);
     return outcome;
   }
+  // One synchronous step: the bytes move from the reservation to the finished total.
+  ledger.inFlight.delete(mine);
+  ledger.completedBytes += received;
   return { ok: true, path, bytes: received };
 }
 
