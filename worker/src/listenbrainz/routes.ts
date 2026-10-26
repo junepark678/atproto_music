@@ -27,10 +27,12 @@
 // 3. The handler. An `LbHttpError` it throws is answered `{code, error}`; any
 //    other throw is logged by error name and answered 500 `{code: 500, error}`.
 // 4. Every answer gets the CORS set (errors.ts) and the X-RateLimit-* set of
-//    the bucket that was charged, unless the handler's answer already carries
-//    an X-RateLimit-Limit of its own: then its whole set is kept (the daily
-//    listen cap's 429 describes the daily window, ADR §8.3, and its
-//    X-RateLimit-* must agree with its Retry-After).
+//    the bucket that was charged, replacing any X-RateLimit-* a handler set,
+//    so a client pacing on Remaining always reads the bucket that refuses it.
+//    The one exception is a handler's own 429 carrying an X-RateLimit-Limit:
+//    then its whole set is kept (the daily listen cap's 429 describes the
+//    daily window, ADR §8.3, and its X-RateLimit-* must agree with its
+//    Retry-After).
 //
 // OPTIONS on a known /1/ path is 200 with the CORS set and Allow /
 // Access-Control-Allow-Methods listing the path's methods. It is never
@@ -51,13 +53,18 @@
 // simply ignores the fourth argument. They must not authenticate or charge the
 // limiter themselves: this router already has (`lb.auth` is the token check,
 // `lb.limit` the decision), and a second guard would verify every token twice
-// and charge each request to two limiters.
+// and charge each request twice. (N3-05's handlers still run their own
+// `lbGuard`; AMENDMENTS-node.md "N3-05 registry routes and the /1/ router"
+// records that the composition drops it and reads `lb.auth` / `lb.limit`.)
 //
-// The limiter lives in memory, one per `listenBrainzRoutes` call (one per
-// process), created on the first request from the composition's clock unless
-// one is passed in. Cookies are never read.
+// **One limiter per composition.** The buckets live in memory. By default
+// `routerLimiterFor(ctx)` keys them on the composition's ModuleDeps object
+// (one per app), on its injected clock, so every /1/ route of one app shares
+// them, however many times the routes are built, and two test apps never do.
+// `options.limiter` replaces that source: a function of the request context
+// (N3-05's `listenBrainzLimiterFor`, so both modules charge one limiter) or a
+// fixed ListenBrainzLimiter. Cookies are never read.
 
-import type { Clock } from '@atmusic/core/deps';
 import { type VerifiedLbToken, verifyLbToken } from '../credentials/lb-tokens';
 import { createRouteTable, type RouteTable } from '../http/routes';
 import { need, type RequestCtx, ROUTE_METHODS, type RouteDef, type RouteMethod } from '../http/types';
@@ -96,11 +103,14 @@ export interface LbRouteDef {
   handler(req: Request, ctx: RequestCtx, params: Record<string, string>, lb: LbRequest): Promise<Response>;
 }
 
+/** Where the router takes its limiter from for a request. */
+export type LimiterSource = (ctx: RequestCtx) => ListenBrainzLimiter;
+
 export interface ListenBrainzRoutesOptions {
   /** More /1/ routes (N3-05's), mounted with the same CORS, limits and fallbacks. */
   registry?: readonly LbRouteDef[];
-  /** Default: one created from the composition's clock on the first request. */
-  limiter?: ListenBrainzLimiter;
+  /** Default: `routerLimiterFor`, the composition's one limiter (module comment). */
+  limiter?: ListenBrainzLimiter | LimiterSource;
   /** Kicks the outbox after feedback queued a love or unlove. */
   kick?: FeedbackOptions['kick'];
 }
@@ -116,6 +126,22 @@ export const LB_INTERNAL_ERROR_MESSAGE = 'An internal server error occurred.';
 export const MAX_FALLBACK_DEPTH = 10;
 
 const API_PREFIX = '/1/';
+
+// ---------------------------------------------------------------------------
+// The limiter of a composition
+
+const LIMITERS = new WeakMap<object, ListenBrainzLimiter>();
+
+/** The composition's /1/ limiter: one per ModuleDeps, on its clock (module comment). */
+export function routerLimiterFor(ctx: RequestCtx): ListenBrainzLimiter {
+  const deps = need(ctx, 'deps');
+  let limiter = LIMITERS.get(deps);
+  if (limiter === undefined) {
+    limiter = new ListenBrainzLimiter(deps.clock);
+    LIMITERS.set(deps, limiter);
+  }
+  return limiter;
+}
 
 // ---------------------------------------------------------------------------
 // Authentication and response decoration
@@ -135,11 +161,13 @@ function tokenResultOf(auth: LbAuth): TokenResult {
 
 /**
  * `response` with the CORS set and `rateHeaders` (a copy; bodies are streamed
- * through). A response with an X-RateLimit-Limit of its own keeps its set.
+ * through). Only a 429 with an X-RateLimit-Limit of its own (the daily cap)
+ * keeps its set; any other answer's X-RateLimit-* is replaced.
  */
 function decorate(response: Response, rateHeaders: Readonly<Record<string, string>> | undefined): Response {
   const headers = applyLbCors(new Headers(response.headers));
-  if (rateHeaders !== undefined && !headers.has('x-ratelimit-limit')) applyRateLimitHeaders(headers, rateHeaders);
+  const ownCap = response.status === 429 && headers.has('x-ratelimit-limit');
+  if (rateHeaders !== undefined && !ownCap) applyRateLimitHeaders(headers, rateHeaders);
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
 
@@ -154,11 +182,8 @@ type Guarded = (lb: LbRequest) => Promise<Response>;
 
 /** Every /1/ route of the API, ready for the composition. */
 export function listenBrainzRoutes(options: ListenBrainzRoutesOptions = {}): RouteDef[] {
-  let limiter: ListenBrainzLimiter | null = options.limiter ?? null;
-  const limiterFor = (clock: Clock): ListenBrainzLimiter => {
-    limiter ??= new ListenBrainzLimiter(clock);
-    return limiter;
-  };
+  const source = options.limiter ?? routerLimiterFor;
+  const limiterFor: LimiterSource = typeof source === 'function' ? source : () => source;
 
   const own: LbRouteDef[] = [
     ...readRoutes(),
@@ -177,7 +202,7 @@ export function listenBrainzRoutes(options: ListenBrainzRoutesOptions = {}): Rou
     try {
       const m = need(ctx, 'deps');
       const auth = authenticate(m, req.headers.get('authorization'));
-      const decision = limiterFor(ctx.clock).limit({ clientIp: ctx.clientIp }, tokenResultOf(auth));
+      const decision = limiterFor(ctx).limit({ clientIp: ctx.clientIp }, tokenResultOf(auth));
       if (!decision.allowed) return refusal(decision);
       rateHeaders = decision.headers;
       return decorate(await run({ auth, limit: decision }), rateHeaders);

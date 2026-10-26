@@ -26,6 +26,7 @@ import { createLbToken } from '../../../src/credentials/lb-tokens';
 import type { Db } from '../../../src/do/db';
 import { applyRecordProof } from '../../../src/do/write/apply-record';
 import { LB_RATE_LIMITED_MESSAGE, lbPreflight, lbTooManyRequests } from '../../../src/listenbrainz/errors';
+import { ListenBrainzLimiter } from '../../../src/listenbrainz/limiter';
 import { rateLimitHeaders } from '../../../src/listenbrainz/rate-headers';
 import {
   LB_METHOD_NOT_ALLOWED_MESSAGE,
@@ -33,6 +34,7 @@ import {
   type LbRequest,
   type LbRouteDef,
   listenBrainzRoutes,
+  routerLimiterFor,
 } from '../../../src/listenbrainz/routes';
 import { closeApps, startApp, type TestApp } from '../support/app';
 
@@ -320,6 +322,100 @@ describe('the /1/ dispatcher (ADR §8.1, §8.7)', () => {
     // It was still charged to the token's bucket (the POST before it was the first of 100).
     const next = await app.fetch('/1/user/alice/listen-count', { headers: { authorization: `Token ${token}` } });
     expect([next.headers.get('x-ratelimit-limit'), next.headers.get('x-ratelimit-remaining')]).toEqual(['100', '97']);
+  });
+
+  it("a registry answer other than a 429 leaves with the charged bucket's X-RateLimit-*; the limiter is one per composition or options.limiter", async () => {
+    // A stand-in for an N3-05 handler that still runs its own guard against another limiter:
+    // it stamps that limiter's X-RateLimit-* on its 200 (and on a 401).
+    const stale = (status: number) =>
+      new Response(JSON.stringify({ status: 'ok' }), {
+        status,
+        headers: {
+          'content-type': 'application/json',
+          ...rateLimitHeaders({ limit: 100, remaining: 99, resetInSeconds: 1 }, Date.parse(NOW_ISO)),
+        },
+      });
+    const seen: ListenBrainzLimiter[] = [];
+    const registry: LbRouteDef[] = [
+      {
+        method: 'GET',
+        pattern: '/1/stale-probe',
+        async handler(_req, ctx) {
+          seen.push(routerLimiterFor(ctx));
+          return stale(200);
+        },
+      },
+      { method: 'GET', pattern: '/1/stale-401', handler: async () => stale(401) },
+    ];
+    const { app, clock, token } = await started(registry);
+    const auth = { headers: { authorization: `Token ${token}` } };
+
+    // Anonymous: charged to the per-IP bucket, whose headers replace the handler's.
+    for (let i = 0; i < 3; i++) {
+      const res = await app.fetch('/1/stale-probe');
+      expect([res.status, await res.json()]).toEqual([200, { status: 'ok' }]);
+      expect(res.headers.get('x-ratelimit-limit')).toBe('30');
+      expect(res.headers.get('x-ratelimit-remaining')).toBe(String(29 - i));
+      const resetIn = Number(res.headers.get('x-ratelimit-reset-in'));
+      expect(Number(res.headers.get('x-ratelimit-reset'))).toBe(clock.nowMs() / 1000 + resetIn);
+      expect(res.headers.get('access-control-expose-headers')).toBe(EXPOSE);
+    }
+    const unauth = await app.fetch('/1/stale-401');
+    expect(unauth.status).toBe(401);
+    expect([unauth.headers.get('x-ratelimit-limit'), unauth.headers.get('x-ratelimit-remaining')]).toEqual([
+      '30',
+      '26',
+    ]);
+    // Authenticated: 60 token reads, then the probe reports the token bucket's 39, not the handler's 99.
+    for (let i = 0; i < 60; i++) expect((await app.fetch('/1/user/alice/listen-count', auth)).status).toBe(200);
+    const probed = await app.fetch('/1/stale-probe', auth);
+    expect([
+      probed.status,
+      probed.headers.get('x-ratelimit-limit'),
+      probed.headers.get('x-ratelimit-remaining'),
+    ]).toEqual([200, '100', '39']);
+    // Every request of this app was charged to the one limiter of its composition.
+    expect(seen).toHaveLength(4);
+    expect(new Set(seen).size).toBe(1);
+
+    // A second app built from the same RouteDef[] has its own limiter (keyed on its ModuleDeps).
+    const routes = listenBrainzRoutes({ registry });
+    const one = await startApp({ clock: fixedClock(NOW_ISO), routes });
+    const two = await startApp({ clock: fixedClock(NOW_ISO), routes });
+    for (let i = 0; i < 2; i++)
+      expect((await one.fetch('/1/stale-probe')).headers.get('x-ratelimit-remaining')).toBe(String(29 - i));
+    expect((await two.fetch('/1/stale-probe')).headers.get('x-ratelimit-remaining')).toBe('29');
+    expect(seen).toHaveLength(7);
+    expect(seen[4]).toBe(seen[5]);
+    expect(seen[6]).not.toBe(seen[4]);
+    expect(seen.slice(4)).not.toContain(seen[0]);
+
+    // options.limiter as a function of the request: the router charges what it returns.
+    const sourceClock = fixedClock(NOW_ISO);
+    const supplied = new ListenBrainzLimiter(sourceClock, { ipRule: { capacity: 2, windowMs: 10_000 } });
+    let sourceCalls = 0;
+    const custom = await startApp({
+      clock: sourceClock,
+      routes: listenBrainzRoutes({
+        registry,
+        limiter: () => {
+          sourceCalls++;
+          return supplied;
+        },
+      }),
+    });
+    const statuses: [number, string | null][] = [];
+    for (let i = 0; i < 3; i++) {
+      const res = await custom.fetch('/1/stale-probe');
+      statuses.push([res.status, res.headers.get('x-ratelimit-limit')]);
+    }
+    expect(statuses).toEqual([
+      [200, '2'],
+      [200, '2'],
+      [429, '2'],
+    ]);
+    expect(sourceCalls).toBe(3);
+    expect(supplied.perIp.has('127.0.0.1')).toBe(true);
   });
 
   it('following and followers for Alice and Bob map the follow records', async () => {
