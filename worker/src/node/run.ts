@@ -32,9 +32,19 @@
 //     a schema (node/backup.ts; a refused free-space check exits 78 naming
 //     ATMUSIC_MIN_FREE_BYTES rather than migrating without a backup), then
 //     the migration, then the backup's backup_runs row.
-//  5–6. compose (node/compose.ts) with the production transport (pinned,
-//     §3.5), the ws Jetstream connector, the features passed in and the
-//     daily `backup` extension timer.
+//  5–6. compose (node/compose.ts) with the production feature list
+//     (node/features.ts, N4-01, which includes the daily `backup` timer), the
+//     production transport (pinned, §3.5) handed to every outbound wire, the
+//     identity resolver of the `identity` wire and the ws Jetstream connector
+//     over the pinned lookup. Then the sign-in policy is reconciled once
+//     (reconcileSignInPolicy via ProductionFeatures.startup, B20): a DID the
+//     policy no longer admits loses its OAuth session, web sessions and
+//     credentials before anything listens, and before any extension timer
+//     (outbox, forward, import, keepalive, sweep, backup) runs: compose has
+//     armed them, but each waits for the startup reconcile to finish, so a
+//     second refused DID cannot write or forward while the first one's
+//     upstream revoke is awaited. A reconcile that throws stops the startup
+//     (exit 1) with every extension timer still closed.
 //  7. Listen: an inherited LISTEN_FDS socket (systemd socket activation) wins
 //     over ATMUSIC_LISTEN, which wins over 127.2.0.1:8888.
 //  8. READY=1, then the watchdog (WATCHDOG=1 every WatchdogSec/3 while the
@@ -65,10 +75,18 @@ import { migrate } from '../do/migrate';
 import { socketAdminHandler } from '../http/admin';
 import { type AdminSocket, AdminSocketError, bindAdminSocket, hostStatus, pruneKidSessions } from './admin-socket';
 import { type HostTimers, nodeTimers } from './alarm';
-import { backupExtension, createBackups } from './backup';
+import { createBackups } from './backup';
 import { type ComposedApp, compose, type Feature, readSchemaState } from './compose';
 import { checkRuntimeEnv, type NodeConfig, type NodeEnv, type ParseNodeConfigOptions, parseNodeConfig } from './config';
 import { diskLowProbe, nodeStatfs, type StatfsFn } from './disk';
+import {
+  jetstreamConnector,
+  type OutboundTransports,
+  outboundIdentity,
+  type ProductionFeatures,
+  productionFeatures,
+  sharedOutbound,
+} from './features';
 import {
   type BoundAddress,
   type BridgeOptions,
@@ -78,7 +96,6 @@ import {
   type ListenTarget,
   socketActivation,
 } from './http-bridge';
-import { createJetstreamWsConnector } from './jetstream-ws';
 import { DEFAULT_PINNED_CAPS, pinnedTransport, unpinnedFetchStub } from './pinned-transport';
 import { type LoadSecretsDeps, loadSecrets, type Secrets } from './secrets';
 import { createShutdown, trackRequests } from './shutdown';
@@ -115,6 +132,8 @@ export interface RunningServer {
   readonly app: ComposedApp;
   readonly db: SqliteDb;
   readonly adminSocket: string;
+  /** The production feature list run() composed (node/features.ts). */
+  readonly features: ProductionFeatures;
   /** The drain run() starts on SIGTERM (for the e2e entry's own shutdown). */
   shutdown(signal?: string): Promise<void>;
 }
@@ -141,9 +160,14 @@ export interface RunOptions {
   secretsDeps?: LoadSecretsDeps;
   /** Default: the pinned transport (ADR §3.5). */
   transport?: Transport;
-  /** Default: the ws connector over JETSTREAM_URLS (ADR §3.4). */
+  /**
+   * Where each outbound wire takes its transport (node/features.ts); default
+   * `transport` for every wire. The features test hands a spy per wire.
+   */
+  outbound?: OutboundTransports;
+  /** Default: the ws connector over JETSTREAM_URLS through the `jetstream` wire's pinned lookup (ADR §3.4, §3.5). */
   connectJetstream?: ConnectJetstream;
-  /** The feature list (node/features.ts, N4-01). The backup timer is always added. */
+  /** Composed after the production list (node/features.ts), which is always composed. */
   features?: readonly Feature[];
   timers?: HostTimers;
   /** Monotonic ms for the watchdog's loop-lag probe; default performance.now. */
@@ -393,25 +417,37 @@ export async function run(opts: RunOptions): Promise<ExitCode> {
     extending.stop();
   }
 
-  // 5–6. Composition.
+  // 5–6. Composition, then the sign-in policy reconcile.
   const transport = opts.transport ?? pinnedTransport({ caps: DEFAULT_PINNED_CAPS });
+  const outbound = opts.outbound ?? sharedOutbound(transport);
   const connectJetstream =
-    opts.connectJetstream ?? createJetstreamWsConnector({ jetstreamUrls: config.app.jetstreamUrls });
-  const features: Feature[] = [...(opts.features ?? []), { name: 'backup', extensions: [backupExtension(backups)] }];
+    opts.connectJetstream ?? jetstreamConnector(config.app.jetstreamUrls, outbound.transportFor('jetstream'));
+  const diskLow = diskLowProbe(dirname(config.dbPath), config.minFreeBytes, statfs);
   let app: ComposedApp;
+  let production: ProductionFeatures;
   try {
+    production = await productionFeatures({
+      config,
+      secrets,
+      clock,
+      revocations,
+      outbound,
+      diskLow,
+      backups,
+    });
     app = await compose(config, secrets, {
       db,
-      transport,
+      transport: outbound.transportFor('core'),
+      identity: outboundIdentity(db, outbound, clock),
       connectJetstream,
-      features,
+      features: [...production.features, ...(opts.features ?? [])],
       clock,
       random,
       log,
       timers,
       assets,
       backup: backups,
-      diskLow: diskLowProbe(dirname(config.dbPath), config.minFreeBytes, statfs),
+      diskLow,
     });
   } catch (error) {
     return fail(EXIT_FAILURE, 'run.compose_failed', `startup failed (${errorName(error)})`, {
@@ -419,7 +455,22 @@ export async function run(opts: RunOptions): Promise<ExitCode> {
     });
   }
   const composed = app;
+  const features = production;
   cleanups.push(() => composed.stop());
+  if (composed.schema.status === 'ready') {
+    try {
+      // The extension timers compose armed wait for this (node/features.ts `startup`).
+      const report = await features.startup();
+      log.log('info', 'run.signin_reconciled', {
+        policy: config.signinPolicy,
+        signedOut: report.signedOut.length,
+      });
+    } catch (error) {
+      return fail(EXIT_FAILURE, 'run.reconcile_failed', `the sign-in policy reconcile failed (${errorName(error)})`, {
+        error: errorName(error),
+      });
+    }
+  }
   socket.setHandler(
     socketAdminHandler({
       index: composed.core,
@@ -536,6 +587,7 @@ export async function run(opts: RunOptions): Promise<ExitCode> {
       app: composed,
       db: openDb,
       adminSocket: socket.path,
+      features,
       shutdown: (signal) => shutdown.shutdown(signal),
     });
     if (earlySignal) void shutdown.shutdown('SIGTERM');
