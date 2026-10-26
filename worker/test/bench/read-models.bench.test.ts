@@ -21,7 +21,13 @@
 // assertions on SQLite 3.54.1: the page statement of every history and feed
 // read and every statement of a statistics miss that reads scrobbles must
 // SEARCH its index (never SCAN scrobbles, and history and the global feed never
-// sort in a temporary B-tree), and a cached statistics hit is at most 3 (`all`)
+// sort in a temporary B-tree). The bounds the budgets enforced are pinned too:
+// a deep page's search carries the keyset bound `(listened_at,uri)<(?,?)` and
+// its seek (read from the EXPLAIN bytecode) starts at the cursor's last row,
+// not at its anchor; a 7d, 30d or 365d statistics statement reads scrobbles
+// only through `did=? AND listened_at>? AND listened_at<?`, never a DID-only
+// search. Both W6-02 regressions are rebuilt on the real database as negative
+// controls. A cached statistics hit is at most 3 (`all`)
 // or 4 (a window) statements, each an indexed probe. Timings are reported,
 // never asserted: the cold call after the database file was closed and
 // reopened, and nearest-rank p50 and p95 of repeated synchronous module calls
@@ -59,7 +65,7 @@ import type { FeedQuery, HistoryQuery, KeysetQuery, ModuleDeps, TimeKey } from '
 import type { Db, SqlParam } from '../../src/do/db';
 import { feed } from '../../src/do/read/feed';
 import { history } from '../../src/do/read/history';
-import { computeStatistics, statsWithCache } from '../../src/do/read/stats';
+import { computeStatistics, statsStatements, statsWithCache, windowBounds } from '../../src/do/read/stats';
 import { bumpStatsVersion, markInactive } from '../../src/do/write/account-state';
 import { applySnapshotChunk, completeSnapshot } from '../../src/do/write/apply-snapshot';
 import {
@@ -102,6 +108,8 @@ interface ReadMeasurement extends Percentiles {
   plan: string[];
   indexes: string[];
   planIndexed: boolean;
+  /** Deep pages: whether the scrobbles index seek starts at the cursor's last row (null on a first page). */
+  seekFromLast: boolean | null;
 }
 
 interface WindowCounts {
@@ -309,13 +317,129 @@ const STATS_SEARCH =
 /** A full scan of the scrobbles table under any alias the read modules use. */
 const FULL_SCAN = /^SCAN (s|scrobbles|d)( |$)(?!USING (COVERING )?INDEX scrobbles_global_time)/;
 const TEMP_SORT = /USE TEMP B-TREE FOR (ORDER BY|.*ORDER BY)/;
+/** Any search of the scrobbles table under the aliases the page and window statements use. */
+const SCROBBLES_SEARCH = /^SEARCH (s|scrobbles) /;
+/**
+ * The ADR 0004 §15 Q10 rows-read bounds, re-derived as plan pins (ADR 0005 §15.3):
+ * - a deep page's scrobbles search carries the keyset row-value bound on the
+ *   index range (`(listened_at,uri)<(?,?)`), so the walk starts at the cursor
+ *   and not at the top of the owner's (or the global) range; EXPLAIN QUERY
+ *   PLAN cannot tell which row value keys the seek, so `seekKey` below also
+ *   checks that the seek starts at the cursor's last row (the O(depth)
+ *   regression W6-02 found keyed it by the anchor);
+ * - a bounded statistics window (7d, 30d, 365d) reads scrobbles only through
+ *   a search bounded by the DID and both window ends, so the rows read stay
+ *   proportional to the window; a DID-only search there reads the whole user
+ *   (the W6-02 regression: the inlined window CTE answered from
+ *   `scrobbles_stats (did=?)`, 20,965 rows for a 959-row 7d window).
+ */
+const DEEP_OWNER_SEARCH =
+  /^SEARCH s USING (COVERING )?INDEX scrobbles_owner_time \(did=\? AND \(listened_at,uri\)<\(\?,\?\)\)$/;
+const DEEP_GLOBAL_SEARCH = /^SEARCH s USING (COVERING )?INDEX scrobbles_global_time \(\(listened_at,uri\)<\(\?,\?\)\)$/;
+const WINDOW_SEARCH =
+  /^SEARCH (s|scrobbles) USING (COVERING )?INDEX \w+ \(did=\? AND listened_at>\? AND listened_at<\?\)$/;
 
-/** Whether a page statement's plan is the one ADR 0005 §15.3 pins for its kind. */
-function pagePlanIndexed(kind: ReadMeasurement['kind'], plan: readonly string[]): boolean {
+/** The pins as the report states them (the schema of scripts/benchmark-read-models.ts holds the same text). */
+const PLAN_RULES = {
+  history:
+    "SEARCH scrobbles_owner_time (did=?), no SCAN, no temporary B-tree; a deep page's search is bounded by (listened_at,uri)<(?,?) and seeks from the cursor's last row",
+  global:
+    "scrobbles_global_time in order, no SCAN, no temporary B-tree; a deep page's search is bounded by (listened_at,uri)<(?,?) and seeks from the cursor's last row",
+  following:
+    "SEARCH scrobbles_owner_time per followee and follows_actor_subject, no SCAN; a deep page's search is bounded by (listened_at,uri)<(?,?) and seeks from the cursor's last row",
+  stats:
+    'every scrobbles statement SEARCHes scrobbles_owner_time or scrobbles_stats by DID, no SCAN; in a 7d, 30d or 365d window every scrobbles SEARCH is bounded by did=? AND listened_at>? AND listened_at<?',
+} as const;
+
+/** Whether a page statement's plan is the one ADR 0005 §15.3 pins for its kind and page. */
+function pagePlanIndexed(kind: ReadMeasurement['kind'], plan: readonly string[], page: 'first' | 'deep'): boolean {
   if (plan.some((d) => FULL_SCAN.test(d))) return false;
+  if (page === 'deep') {
+    const deep = kind === 'global' ? DEEP_GLOBAL_SEARCH : DEEP_OWNER_SEARCH;
+    const searches = plan.filter((d) => SCROBBLES_SEARCH.test(d));
+    if (searches.length === 0 || !searches.every((d) => deep.test(d))) return false;
+  }
   if (kind === 'history') return plan.some((d) => OWNER_SEARCH.test(d)) && !plan.some((d) => TEMP_SORT.test(d));
   if (kind === 'global') return plan.some((d) => GLOBAL_ORDERED.test(d)) && !plan.some((d) => TEMP_SORT.test(d));
   return plan.some((d) => OWNER_SEARCH.test(d)) && plan.some((d) => FOLLOWS_SEARCH.test(d));
+}
+
+/**
+ * Whether an uncached statistics statement's plan is the one ADR 0005 §15.3
+ * pins: a DID search of a per-user index and no scan of scrobbles, and for a
+ * bounded window every scrobbles search bounded by both window ends.
+ */
+function statsPlanBounded(window: StatsWindow, plan: readonly string[]): boolean {
+  if (plan.some((d) => FULL_SCAN.test(d)) || !plan.some((d) => STATS_SEARCH.test(d))) return false;
+  if (WINDOW_DAYS[window] === null) return true;
+  return plan.filter((d) => SCROBBLES_SEARCH.test(d)).every((d) => WINDOW_SEARCH.test(d));
+}
+
+interface ExplainRow {
+  opcode: string;
+  p1: number;
+  p2: number;
+  p3: number;
+  p4: unknown;
+}
+
+/**
+ * The key the statement's one seek on `index` starts from (EXPLAIN bytecode,
+ * as worker/test/read/keyset.test.ts reads it): each key register traced back
+ * to the `Variable` opcode that loads it (`?N` → `params[N-1]`); a register
+ * loaded otherwise (a column of an IN list) is `{ column: true }`. The cursor
+ * is found by the index's root page, so no EXPLAIN comments are needed.
+ */
+function seekKey(db: Db, index: string, st: { sql: string; params: SqlParam[] }): unknown[] {
+  const root = db.one<{ rootpage: number }>(
+    "SELECT rootpage FROM sqlite_schema WHERE type = 'index' AND name = ?",
+    index,
+  );
+  if (root === null) throw new Error(`no index ${index}`);
+  const program = db.all<ExplainRow>(`EXPLAIN ${st.sql}`, ...st.params);
+  const open = program.filter((op) => op.opcode === 'OpenRead' && op.p2 === root.rootpage);
+  if (open.length !== 1) throw new Error(`${index} is opened ${open.length} times`);
+  const cursor = (open[0] as ExplainRow).p1;
+  const seeks = program.filter((op) => /^Seek(GE|GT|LE|LT)$/.test(op.opcode) && op.p1 === cursor);
+  if (seeks.length !== 1) throw new Error(`${seeks.length} seeks on ${index}`);
+  const { p3: first, p4: count } = seeks[0] as ExplainRow;
+  return Array.from({ length: Number(count) }, (_, k) => {
+    let register = first + k;
+    for (;;) {
+      const writer = program.find((op) => ['Variable', 'SCopy', 'Copy'].includes(op.opcode) && op.p2 === register);
+      if (writer === undefined) return { column: true };
+      if (writer.opcode === 'Variable') return st.params[writer.p1 - 1];
+      register = writer.p1;
+    }
+  });
+}
+
+/** Whether the seek key ends with the cursor's last row (time, then URI). */
+function seeksFrom(key: readonly unknown[], last: TimeKey): boolean {
+  return key.length >= 2 && key.at(-2) === last.t && key.at(-1) === last.uri;
+}
+
+/** The scrobbles index a page statement of `kind` walks. */
+const pageIndex = (kind: ReadMeasurement['kind']) =>
+  kind === 'global' ? 'scrobbles_global_time' : 'scrobbles_owner_time';
+
+/**
+ * The two-clause keyset form of a deep page statement: the anchor bound
+ * `(t, uri) <= (upper)` added before the `(t, uri) < (last)` bound. It selects
+ * the same rows (last <= upper) and plans identically, but SQLite seeks from
+ * the anchor: the pre-fix `keysetWhere` that read O(depth) rows (W6-02).
+ */
+function anchorKeyedForm(st: Trace, keyset: KeysetQuery): Trace {
+  const upper = keyset.upper as TimeKey;
+  const last = keyset.last as TimeKey;
+  const bound = ' AND (s.listened_at, s.uri) < (?, ?)';
+  if (st.sql.split(bound).length !== 2) throw new Error('the page statement has one keyset bound');
+  const at = st.params.findIndex((p, i) => p === last.t && st.params[i + 1] === last.uri);
+  if (at < 0) throw new Error('the page statement binds the cursor last row');
+  return {
+    sql: st.sql.replace(bound, ` AND (s.listened_at, s.uri) <= (?, ?)${bound}`),
+    params: [...st.params.slice(0, at), upper.t, upper.uri, ...st.params.slice(at)],
+  };
 }
 
 function indexesOf(plan: readonly string[]): string[] {
@@ -708,6 +832,9 @@ interface ReadSpec {
 interface MeasuredRead {
   measurement: ReadMeasurement;
   samples: number[];
+  /** The page statement as the module ran it, and the cursor it continued. */
+  statement: Trace;
+  keyset: KeysetQuery;
 }
 
 const ORDER = 'ORDER BY listened_at DESC, uri DESC';
@@ -753,6 +880,9 @@ async function measureRead(h: Harness, spec: ReadSpec): Promise<MeasuredRead> {
   }
   const statements = trace.length;
   const plan = planOf(plain, pageStatement);
+  const page = spec.depth === null ? 'first' : 'deep';
+  const seekFromLast =
+    keyset.last === undefined ? null : seeksFrom(seekKey(plain, pageIndex(spec.kind), pageStatement), keyset.last);
 
   // The page is exactly the next LIMIT rows of an independent OFFSET query.
   const offset = spec.depth === null ? 0 : spec.depth + 1;
@@ -777,7 +907,7 @@ async function measureRead(h: Harness, spec: ReadSpec): Promise<MeasuredRead> {
       name: spec.name,
       kind: spec.kind,
       scale: spec.scale,
-      page: spec.depth === null ? 'first' : 'deep',
+      page,
       depth: spec.depth ?? 0,
       rowsReturned: result.rows.length,
       statements,
@@ -785,9 +915,12 @@ async function measureRead(h: Harness, spec: ReadSpec): Promise<MeasuredRead> {
       ...percentilesOf(samples),
       plan,
       indexes: indexesOf(plan),
-      planIndexed: pagePlanIndexed(spec.kind, plan),
+      planIndexed: pagePlanIndexed(spec.kind, plan, page),
+      seekFromLast,
     },
     samples,
+    statement: pageStatement,
+    keyset,
   };
 }
 
@@ -939,9 +1072,7 @@ async function measureStats(
   const scrobblesPlans = trace
     .filter((t) => /^\s*(SELECT|WITH)\b/i.test(t.sql) && /\bscrobbles\b/.test(t.sql))
     .map((t) => planOf(plain, t));
-  const plansIndexed =
-    scrobblesPlans.length > 0 &&
-    scrobblesPlans.every((p) => p.some((d) => STATS_SEARCH.test(d)) && !p.some((d) => FULL_SCAN.test(d)));
+  const plansIndexed = scrobblesPlans.length > 0 && scrobblesPlans.every((p) => statsPlanBounded(window, p));
   const uncachedSamples = samplesOf(STATS_WARM_REPEATS, () =>
     computeStatistics(plain, did, window, STATS_LIMIT, NOW_NS),
   );
@@ -1270,10 +1401,7 @@ const report = once(async (): Promise<BenchReport> => {
     plans: {
       source: 'ADR 0005 §15.3 (ADR 0004 §15 Q10 re-derived as query plans)',
       sqlite: PINNED_SQLITE,
-      history: 'SEARCH scrobbles_owner_time, no SCAN, no temporary B-tree',
-      global: 'scrobbles_global_time in order, no SCAN, no temporary B-tree',
-      following: 'SEARCH scrobbles_owner_time per followee and follows_actor_subject, no SCAN',
-      stats: 'every scrobbles statement SEARCHes scrobbles_owner_time or scrobbles_stats, no SCAN',
+      ...PLAN_RULES,
       statsProbesAll: STATS_PROBES_ALL,
       statsProbesWindowed: STATS_PROBES_WINDOWED,
     },
@@ -1320,7 +1448,10 @@ const report = once(async (): Promise<BenchReport> => {
     http: http.summary,
     followUps: buildFollowUps(stats, worst),
     // Only asserted properties decide the verdict; the worst cases are reported, not asserted (Q10).
-    passed: reads.every((r) => r.planIndexed) && stats.every((s) => s.withinBudget) && http.summary.passed,
+    passed:
+      reads.every((r) => r.planIndexed && r.seekFromLast !== false) &&
+      stats.every((s) => s.withinBudget) &&
+      http.summary.passed,
   };
 });
 
@@ -1403,7 +1534,8 @@ describe('read-model benchmark', () => {
   });
 
   it('the read-model bench records p50 and p95 for history, feed and stats on node:sqlite and asserts their query plans', async () => {
-    const reads = (await readMeasurements()).map((r) => r.measurement);
+    const measured = await readMeasurements();
+    const reads = measured.map((r) => r.measurement);
     expect(reads.map((r) => r.name)).toEqual([
       'history 1000 first',
       'history 1000 deep',
@@ -1447,19 +1579,80 @@ describe('read-model benchmark', () => {
         expect([r.name, text, r.plan.some((d) => FOLLOWS_SEARCH.test(d))]).toEqual([r.name, text, true]);
         expect(r.indexes, r.name).toEqual(expect.arrayContaining(['scrobbles_owner_time', 'follows_actor_subject']));
       }
+      if (r.page === 'deep') {
+        // ... and a deep page starts at the cursor: the keyset row-value bound is on the
+        // index range (the Q10 deep-page bound, L + 3 rows read under ADR 0004) ...
+        const deep = r.kind === 'global' ? DEEP_GLOBAL_SEARCH : DEEP_OWNER_SEARCH;
+        const searches = r.plan.filter((d) => SCROBBLES_SEARCH.test(d));
+        expect([r.name, searches.length > 0 && searches.every((d) => deep.test(d))]).toEqual([r.name, true]);
+        // ... and the seek is keyed by the cursor's last row, not by its anchor.
+        expect(r.seekFromLast, r.name).toBe(true);
+      } else {
+        expect(r.seekFromLast, r.name).toBeNull();
+      }
       expect(r.planIndexed, r.name).toBe(true);
+    }
+    // The seek keys themselves: the owner DID (or the followee IN-list column), then the last row.
+    const { h: scaleH } = await scaleDb();
+    for (const m of measured.filter((x) => x.measurement.page === 'deep')) {
+      const last = m.keyset.last as TimeKey;
+      const lead =
+        m.measurement.kind === 'history'
+          ? [m.statement.params[0]]
+          : m.measurement.kind === 'following'
+            ? [{ column: true }]
+            : [];
+      expect(seekKey(scaleH.db, pageIndex(m.measurement.kind), m.statement), m.measurement.name).toEqual([
+        ...lead,
+        last.t,
+        last.uri,
+      ]);
     }
     // The plan check is not vacuous: an unindexed plan of each kind is refused.
     for (const kind of ['history', 'global', 'following'] as const) {
-      expect(pagePlanIndexed(kind, ['SCAN s', 'SEARCH u USING INTEGER PRIMARY KEY (rowid=?)']), kind).toBe(false);
+      for (const page of ['first', 'deep'] as const) {
+        expect(
+          pagePlanIndexed(kind, ['SCAN s', 'SEARCH u USING INTEGER PRIMARY KEY (rowid=?)'], page),
+          `${kind} ${page}`,
+        ).toBe(false);
+      }
       // An owner-range search with the follows edge lookup and a sorted merge is the following feed's plan only.
       const merged = [
         'SEARCH f USING COVERING INDEX follows_actor_subject (actor=?)',
         'SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at<?)',
         'USE TEMP B-TREE FOR ORDER BY',
       ];
-      expect(pagePlanIndexed(kind, merged), kind).toBe(kind === 'following');
+      expect(pagePlanIndexed(kind, merged, 'first'), kind).toBe(kind === 'following');
     }
+    // A deep page whose search lost the keyset bound (it walks from the top of the range) is refused,
+    // while the same plan is a valid first page.
+    const unbounded = {
+      history: ['SEARCH s USING INDEX scrobbles_owner_time (did=?)'],
+      global: ['SCAN s USING INDEX scrobbles_global_time'],
+      following: [
+        'SEARCH f USING COVERING INDEX follows_actor_subject (actor=?)',
+        'SEARCH s USING INDEX scrobbles_owner_time (did=?)',
+        'USE TEMP B-TREE FOR ORDER BY',
+      ],
+    } as const;
+    for (const [kind, plan] of Object.entries(unbounded) as [ReadMeasurement['kind'], readonly string[]][]) {
+      expect(pagePlanIndexed(kind, plan, 'first'), kind).toBe(true);
+      expect(pagePlanIndexed(kind, plan, 'deep'), kind).toBe(false);
+    }
+    // The O(depth) regression W6-02 found, rebuilt on the real database: the two-clause
+    // keyset form of the deepest history page returns the same rows and passes the plan
+    // pin (EXPLAIN QUERY PLAN cannot tell the two apart), but its seek is keyed by the
+    // anchor, so the seek check refuses it.
+    const deepest = measured.find((x) => x.measurement.name === 'history 100000 deep') as MeasuredRead;
+    const regressed = anchorKeyedForm(deepest.statement, deepest.keyset);
+    const uris = (st: Trace) => scaleH.db.all<{ uri: string }>(st.sql, ...st.params).map((r) => r.uri);
+    expect(uris(regressed)).toEqual(uris(deepest.statement));
+    expect(uris(regressed)).toHaveLength(LIMIT + 1);
+    expect(pagePlanIndexed('history', planOf(scaleH.db, regressed), 'deep')).toBe(true);
+    const anchor = deepest.keyset.upper as TimeKey;
+    const regressedKey = seekKey(scaleH.db, 'scrobbles_owner_time', regressed);
+    expect(regressedKey).toEqual([SCALE_DIDS[100000], anchor.t, anchor.uri]);
+    expect(seeksFrom(regressedKey, deepest.keyset.last as TimeKey)).toBe(false);
     // The other statements of a call (the indexing truth) are the same at every scale and depth.
     for (const kind of ['history', 'global', 'following'] as const) {
       const ofKind = reads.filter((r) => r.kind === kind);
@@ -1477,6 +1670,14 @@ describe('read-model benchmark', () => {
         const text = plan.join(' | ');
         expect([name, text, plan.some((d) => STATS_SEARCH.test(d))]).toEqual([name, text, true]);
         expect([name, text, plan.filter((d) => FULL_SCAN.test(d))]).toEqual([name, text, []]);
+        if (s.window !== 'all') {
+          // A bounded window reads scrobbles only through the (did, listened_at) range of the
+          // window (the Q10 bound: rows read proportional to the window, not to the user).
+          const searches = plan.filter((d) => SCROBBLES_SEARCH.test(d));
+          expect([name, text, searches.length > 0]).toEqual([name, text, true]);
+          expect([name, text, searches.filter((d) => !WINDOW_SEARCH.test(d))]).toEqual([name, text, []]);
+        }
+        expect([name, text, statsPlanBounded(s.window, plan)]).toEqual([name, text, true]);
       }
       expect(s.uncached.plansIndexed, name).toBe(true);
       expect(s.uncached.runs, name).toBe(STATS_WARM_REPEATS);
@@ -1484,6 +1685,35 @@ describe('read-model benchmark', () => {
       expect(s.cached.runs, name).toBe(WARM_REPEATS);
       expect(s.cached.p50Ms, name).toBeLessThanOrEqual(s.cached.p95Ms);
     }
+
+    // The statistics pin is not vacuous. The regressed windowed plan W6-02 found (a DID-only
+    // search of the covering scrobbles_stats index) is refused for a bounded window and is
+    // the accepted `all` plan; a bounded search next to a DID-only one is refused too.
+    const didOnly = ['SEARCH s USING COVERING INDEX scrobbles_stats (did=?)'];
+    expect(statsPlanBounded('all', didOnly)).toBe(true);
+    for (const w of ['7d', '30d', '365d'] as const) {
+      expect(statsPlanBounded(w, didOnly), w).toBe(false);
+      expect(
+        statsPlanBounded(w, [
+          'SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at>? AND listened_at<?)',
+          ...didOnly,
+        ]),
+        w,
+      ).toBe(false);
+      expect(statsPlanBounded(w, ['SCAN s']), w).toBe(false);
+    }
+    // And rebuilt on the real database: the production 7d totals statement with its window
+    // CTE inlined (the pre-fix form) answers the same totals but plans the DID-only search,
+    // so the pin refuses it; the production (materialized) form passes.
+    const tenK = SCALE_DIDS[10000];
+    const totals = statsStatements(tenK, windowBounds('7d', NOW_NS), STATS_LIMIT).totals;
+    expect(totals.sql).toContain('MATERIALIZED');
+    const inlined = { sql: totals.sql.replace('MATERIALIZED ', ''), params: totals.params };
+    expect(scaleH.db.one(inlined.sql, ...inlined.params)).toEqual(scaleH.db.one(totals.sql, ...totals.params));
+    const inlinedPlan = planOf(scaleH.db, inlined);
+    expect(inlinedPlan.filter((d) => SCROBBLES_SEARCH.test(d) && !WINDOW_SEARCH.test(d))).not.toEqual([]);
+    expect(statsPlanBounded('7d', inlinedPlan)).toBe(false);
+    expect(statsPlanBounded('7d', planOf(scaleH.db, totals))).toBe(true);
 
     // The report's per-kind p50 and p95 over every timed call.
     const value = await report();
@@ -1567,7 +1797,9 @@ describe('read-model benchmark', () => {
     // The verdict is the conjunction of every asserted property (a breach is
     // reported as failed, never hidden).
     expect(value.passed).toBe(
-      value.reads.every((r) => r.planIndexed) && value.stats.every((st) => st.withinBudget) && value.http.passed,
+      value.reads.every((r) => r.planIndexed && r.seekFromLast !== false) &&
+        value.stats.every((st) => st.withinBudget) &&
+        value.http.passed,
     );
     expect(value.passed).toBe(true);
     expect(value.plans).toMatchObject({ sqlite: '3.54.1', statsProbesAll: 3, statsProbesWindowed: 4 });

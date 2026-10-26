@@ -3,17 +3,24 @@
 //
 // - Read equivalence: the shared fixture is ingested through the production
 //   Node composition (support.ts: compose over node:sqlite, the HTTP bridge,
-//   the fixture transport), then every IndexRpc read method is called once on
-//   the composed app's IndexCore (what every route's ctx.index is) and once on
-//   a second IndexCore built over the same database file with test
-//   dependencies; the bodies must be equal.
+//   the fixture transport). On the Node host there is no IndexDO: the
+//   boundary every IndexRpc read crosses is its HTTP route (dispatcher, route
+//   handler, DTO projection and JSON over the real listener), or for
+//   adminStatus the production admin-socket handler. Each read method is
+//   called directly on the composed app's IndexCore and through its route,
+//   and the route's body must be the direct result under that route's
+//   production projection (scrobbleDto, followToDto, the RecordStatus member
+//   rules, the not_found envelope for null).
 // - start(): a recording Host (a Db wrapper that logs every statement and two
 //   recording alarm storages, all writing into one ordered event log) over
 //   the harness database.
 // - adminBackup without a backup port: `not_supported` and a byte-identical
 //   database before and after.
 // - Static: index-core.ts imports no cloudflare: module and no value from
-//   env.ts, and defines every name it took over from the Workers wrapper.
+//   env.ts and defines every name it took over from the Workers wrapper, and
+//   index-do.ts (kept until N7-01) re-exports every one of them from
+//   ../app/index-core. index-do.ts imports cloudflare:workers, so it is read
+//   as source and checked by type (`import type`), never loaded on Node.
 
 import type { Transport } from '@atmusic/atproto/transport';
 import { fromMs } from '@atmusic/core/timestamp';
@@ -24,17 +31,23 @@ import * as coreModule from '../../src/app/index-core';
 import { IndexCore } from '../../src/app/index-core';
 import indexCoreSource from '../../src/app/index-core.ts?raw';
 import servicesSource from '../../src/app/services.ts?raw';
-import type { IndexRpc, LogLevel } from '../../src/do/contracts';
+import type { IndexRpc, LogLevel, ScrobbleRow } from '../../src/do/contracts';
 import type { Db, SqlParam } from '../../src/do/db';
+import type * as doModule from '../../src/do/index-do';
+import indexDoSource from '../../src/do/index-do.ts?raw';
 import { migrate } from '../../src/do/migrate';
+import { followToDto } from '../../src/do/read/follows';
 import { markConnected } from '../../src/do/status';
 import { type AlarmStorage, nextDue, TIMER_NAMES } from '../../src/do/timers';
+import { SOCKET_STATUS_PATH, socketAdminHandler } from '../../src/http/admin';
+import { scrobbleDto } from '../../src/http/scrobbles-read';
 import {
   ALICE,
   BOB,
   closeHarnesses,
   control,
   type Harness,
+  type HttpResult,
   harness,
   ingestFixture,
   kitControl,
@@ -142,71 +155,263 @@ function dumpAll(db: Db): Record<string, unknown[]> {
   return Object.fromEntries(tables.map((t) => [t, db.all(`SELECT * FROM "${t}" ORDER BY rowid`)]));
 }
 
-it("every IndexRpc read method returns the same body through the composed app's IndexCore as through a second IndexCore over the same database file", async () => {
+it('every IndexRpc read method returns the same body through its HTTP or admin-socket route as through a direct IndexCore call over the same database', async () => {
   const kit = await kitControl();
   const h = await harness('core-reads');
   await ingestFixture(h, kit);
   const asOfNs = fromMs(control.clock.nowMs());
   const r01 = uriOf(ALICE, 'r01');
-  const calls: { [K in keyof IndexRpc]?: Parameters<IndexRpc[K]>[] } = {
-    ready: [[]],
-    indexing: [[], [ALICE], [DAVE]],
-    history: [[{ did: ALICE, limit: 3 }], [{ did: BOB, limit: 50 }]],
-    feed: [[{ scope: 'global', limit: 5 }], [{ scope: 'following', viewer: ALICE, limit: 5 }]],
-    lookup: [[r01], [uriOf(ALICE, 'zz-missing')]],
-    recordStatus: [[r01], [uriOf(DAVE, 'r01')]],
-    stats: [[{ did: ALICE, window: 'all', limit: 10, asOfNs }], [{ did: ALICE, window: '7d', limit: 2, asOfNs }]],
-    profile: [[ALICE], [DAVE]],
-    following: [[{ did: ALICE, limit: 10 }]],
-    followers: [[{ did: BOB, limit: 10 }]],
-    exportUser: [[ALICE], [DAVE]],
-    resolveHandle: [['alice.test']],
-    adminStatus: [[]],
+  const missing = uriOf(ALICE, 'zz-missing');
+  const enc = encodeURIComponent;
+
+  // The route side of each read, normalised to what the direct result determines: list
+  // routes add a cursor and asOf, so they are compared as items + indexing + "more".
+  type Seen = { status: number; body?: unknown; code?: string };
+  const whole = (r: HttpResult): Seen => ({ status: r.status, body: r.body });
+  const errorCode = (r: HttpResult): Seen => ({
+    status: r.status,
+    code: (r.body as { error?: { code?: string } } | null)?.error?.code,
+  });
+  const listView = (r: HttpResult): Seen => {
+    const b = r.body as { items: unknown[]; nextCursor: unknown; indexing: unknown };
+    return { status: r.status, body: { items: b.items, indexing: b.indexing, more: typeof b.nextCursor === 'string' } };
   };
-  expect(Object.keys(calls).sort()).toEqual([...READ_METHODS].sort());
-
-  // The composed core is the one the routes reach (ctx.index); the second one shares only the file.
-  const second = secondCore(h);
-  expect(second).not.toBe(h.core);
-  expect(second.host.alarm).not.toBe(h.core.host.alarm);
-  const composed = h.core as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>;
-  const other = second as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>;
-  const compared: string[] = [];
-  for (const method of READ_METHODS) {
-    for (const args of calls[method] as unknown[][]) {
-      const viaComposed = await composed[method]!(...args);
-      const viaSecond = await other[method]!(...args);
-      expect(viaSecond, `${method}(${JSON.stringify(args, (_k, v) => (typeof v === 'bigint' ? `${v}n` : v))})`).toEqual(
-        viaComposed,
-      );
-      compared.push(method);
+  const json = (v: unknown) => JSON.parse(JSON.stringify(v)) as unknown;
+  const nullIs404 = (v: unknown, ok: (v: unknown) => Seen): Seen =>
+    v === null ? { status: 404, code: 'not_found' } : ok(v);
+  const rowsView = (map: (row: never) => unknown, limit: number) => (v: unknown) => {
+    const r = v as { rows: never[]; hasMore: boolean; indexing: unknown };
+    return {
+      status: 200,
+      body: { items: json(r.rows.slice(0, limit).map(map)), indexing: json(r.indexing), more: r.hasMore },
+    };
+  };
+  const statusBody = (v: unknown) => {
+    // RecordStatus (record-status.ts): cid and revision unless unknown, reason only when excluded.
+    const s = v as { uri: string; state: string; cid?: string; revision?: string; reason?: string; indexing: unknown };
+    const out: Record<string, unknown> = { uri: s.uri, state: s.state, indexing: s.indexing };
+    if (s.state !== 'unknown') {
+      if (s.cid !== undefined) out.cid = s.cid;
+      if (s.revision !== undefined) out.revision = s.revision;
     }
+    if (s.state === 'excluded' && s.reason !== undefined) out.reason = s.reason;
+    return { status: 200, body: json(out) };
+  };
+
+  // The admin-socket route: the production handler over the composed IndexCore (the host
+  // half of the status is empty here, so the body is the index half only).
+  const socket = socketAdminHandler({
+    index: h.core,
+    hostStatus: () => ({}),
+    pruneKid: () => ({ status: 'active_kid' }),
+    random: control.random,
+  });
+  const viaSocket = async (path: string): Promise<HttpResult> => {
+    const res = await socket(new Request(`http://admin.invalid${path}`));
+    const text = await res.text();
+    return { status: res.status, headers: res.headers, text, body: JSON.parse(text) as unknown };
+  };
+
+  interface Case {
+    method: keyof IndexRpc;
+    args: unknown[];
+    route: () => Promise<HttpResult>;
+    seen: (r: HttpResult) => Seen;
+    expected: (direct: unknown) => Seen;
   }
-  expect(new Set(compared)).toEqual(new Set(READ_METHODS));
+  const get = (target: string) => () => h.request(target);
+  const cases: Case[] = [
+    {
+      method: 'ready',
+      args: [],
+      route: get('/health/ready'),
+      seen: whole,
+      expected: (v) =>
+        (v as { status: string }).status === 'ready' ? { status: 200, body: { status: 'ready' } } : { status: 503 },
+    },
+    {
+      method: 'indexing',
+      args: [],
+      route: get('/api/v1/meta'),
+      seen: (r) => ({ status: r.status, body: (r.body as { indexing: unknown }).indexing }),
+      expected: (v) => ({ status: 200, body: json(v) }),
+    },
+    {
+      method: 'history',
+      args: [{ did: ALICE, limit: 3 }],
+      route: get(`/api/v1/users/${ALICE}/scrobbles?limit=3`),
+      seen: listView,
+      expected: rowsView(scrobbleDto as (row: never) => unknown, 3),
+    },
+    {
+      method: 'history',
+      args: [{ did: BOB, limit: 50 }],
+      route: get(`/api/v1/users/${BOB}/scrobbles?limit=50`),
+      seen: listView,
+      expected: rowsView(scrobbleDto as (row: never) => unknown, 50),
+    },
+    {
+      method: 'feed',
+      args: [{ scope: 'global', limit: 5 }],
+      route: get('/api/v1/feed?scope=global&limit=5'),
+      seen: listView,
+      expected: rowsView(scrobbleDto as (row: never) => unknown, 5),
+    },
+    {
+      method: 'feed',
+      args: [{ scope: 'following', viewer: ALICE, limit: 5 }],
+      route: get(`/api/v1/feed?scope=following&viewer=${enc(ALICE)}&limit=5`),
+      seen: listView,
+      expected: rowsView(scrobbleDto as (row: never) => unknown, 5),
+    },
+    {
+      method: 'lookup',
+      args: [r01],
+      route: get(`/api/v1/scrobbles/${enc(r01)}`),
+      seen: whole,
+      expected: (v) =>
+        nullIs404(v, (row) => ({ status: 200, body: json({ scrobble: scrobbleDto(row as ScrobbleRow) }) })),
+    },
+    {
+      method: 'lookup',
+      args: [missing],
+      route: get(`/api/v1/scrobbles/${enc(missing)}`),
+      seen: errorCode,
+      expected: (v) => nullIs404(v, () => ({ status: 200 })),
+    },
+    {
+      method: 'recordStatus',
+      args: [r01],
+      route: get(`/api/v1/records/status?uri=${enc(r01)}`),
+      seen: whole,
+      expected: statusBody,
+    },
+    {
+      method: 'recordStatus',
+      args: [uriOf(DAVE, 'r01')],
+      route: get(`/api/v1/records/status?uri=${enc(uriOf(DAVE, 'r01'))}`),
+      seen: whole,
+      expected: statusBody,
+    },
+    {
+      method: 'stats',
+      args: [{ did: ALICE, window: 'all', limit: 10, asOfNs }],
+      route: get(`/api/v1/users/${ALICE}/stats?window=all&limit=10`),
+      seen: whole,
+      expected: (v) => nullIs404(v, (x) => ({ status: 200, body: json(x) })),
+    },
+    {
+      method: 'stats',
+      args: [{ did: ALICE, window: '7d', limit: 2, asOfNs }],
+      route: get(`/api/v1/users/${ALICE}/stats?window=7d&limit=2`),
+      seen: whole,
+      expected: (v) => nullIs404(v, (x) => ({ status: 200, body: json(x) })),
+    },
+    {
+      method: 'profile',
+      args: [ALICE],
+      route: get(`/api/v1/users/${ALICE}/profile`),
+      seen: whole,
+      expected: (v) => nullIs404(v, (x) => ({ status: 200, body: json(x) })),
+    },
+    {
+      method: 'profile',
+      args: [DAVE],
+      route: get(`/api/v1/users/${DAVE}/profile`),
+      seen: errorCode,
+      expected: (v) => nullIs404(v, () => ({ status: 200 })),
+    },
+    {
+      method: 'following',
+      args: [{ did: ALICE, limit: 10 }],
+      route: get(`/api/v1/users/${ALICE}/following?limit=10`),
+      seen: listView,
+      expected: rowsView(followToDto as (row: never) => unknown, 10),
+    },
+    {
+      method: 'followers',
+      args: [{ did: BOB, limit: 10 }],
+      route: get(`/api/v1/users/${BOB}/followers?limit=10`),
+      seen: listView,
+      expected: rowsView(followToDto as (row: never) => unknown, 10),
+    },
+    {
+      method: 'exportUser',
+      args: [ALICE],
+      route: get(`/api/v1/users/${ALICE}/export`),
+      seen: whole,
+      expected: (v) => nullIs404(v, (x) => ({ status: 200, body: json(x) })),
+    },
+    {
+      method: 'exportUser',
+      args: [DAVE],
+      route: get(`/api/v1/users/${DAVE}/export`),
+      seen: errorCode,
+      expected: (v) => nullIs404(v, () => ({ status: 200 })),
+    },
+    {
+      method: 'resolveHandle',
+      args: ['alice.test'],
+      route: get('/api/v1/resolve?handle=alice.test'),
+      seen: whole,
+      expected: (v) => {
+        const o = v as { status: string; did?: string; handle?: string };
+        return o.status === 'ok'
+          ? { status: 200, body: { did: o.did, handle: o.handle, verified: true } }
+          : { status: 0 };
+      },
+    },
+    {
+      method: 'adminStatus',
+      args: [],
+      route: () => viaSocket(SOCKET_STATUS_PATH),
+      seen: whole,
+      expected: (v) => ({ status: 200, body: json(v) }),
+    },
+  ];
+  expect(new Set(cases.map((c) => c.method))).toEqual(new Set(READ_METHODS));
 
-  // The bodies are real data, not two empty answers.
-  const page = (await h.core.history({ did: ALICE, limit: 3 })) as { rows: unknown[]; hasMore: boolean };
-  expect(page.rows).toHaveLength(3);
-  expect(page.hasMore).toBe(true);
-  expect(await h.core.lookup(r01)).toMatchObject({ uri: r01, did: ALICE, track: 'Jóga' });
-  expect(await h.core.resolveHandle('alice.test')).toEqual({ status: 'ok', did: ALICE, handle: 'alice.test' });
-  expect((await h.core.stats({ did: ALICE, window: 'all', limit: 10, asOfNs }))?.totalScrobbles).toBeGreaterThan(0);
-  expect(await h.core.profile(DAVE)).toBeNull();
-  // And the HTTP route answers from the same data.
-  const http = await h.request(`/api/v1/users/${ALICE}/scrobbles?limit=3`);
-  expect(http.status).toBe(200);
-  expect((http.body as { items: unknown[] }).items).toHaveLength(3);
+  const core = h.core as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>;
+  const seen: Array<{ name: string; route: Seen; core: Seen }> = [];
+  for (const c of cases) {
+    const name = `${c.method}(${JSON.stringify(c.args, (_k, v) => (typeof v === 'bigint' ? `${v}n` : v))})`;
+    const direct = await core[c.method]!(...c.args);
+    const viaRoute = c.seen(await c.route());
+    expect(viaRoute, name).toEqual(c.expected(direct));
+    seen.push({ name, route: viaRoute, core: c.expected(direct) });
+  }
 
-  // Argument errors reject identically through both.
-  const bad = { did: ALICE, limit: 0 };
-  const errorOf = (p: Promise<unknown>) =>
-    p.then(
-      () => null,
-      (e: Error) => ({ name: e.name, message: e.message }),
-    );
-  const composedError = await errorOf(h.core.history(bad));
-  expect(composedError).not.toBeNull();
-  expect(await errorOf(second.history(bad))).toEqual(composedError);
+  // The comparison is not vacuous: the bodies are real data, and a route answer is not
+  // equal to the projection of a different direct call.
+  const byName = (name: string) => seen.find((x) => x.name.startsWith(name)) as (typeof seen)[number];
+  const alicePage = byName('history([{"did":"did:plc:aaaa').route.body as { items: unknown[]; more: boolean };
+  expect(alicePage.items).toHaveLength(3);
+  expect(alicePage.more).toBe(true);
+  expect(byName('lookup(["at://did:plc:aaaa').route.body).toMatchObject({
+    scrobble: { uri: r01, did: ALICE, track: 'Jóga' },
+  });
+  expect(byName('resolveHandle').route).toEqual({
+    status: 200,
+    body: { did: ALICE, handle: 'alice.test', verified: true },
+  });
+  expect(
+    (byName('stats([{"did":"did:plc:aaaa').route.body as { totalScrobbles: number }).totalScrobbles,
+  ).toBeGreaterThan(0);
+  expect(byName('profile(["did:plc:dddd').route).toEqual({ status: 404, code: 'not_found' });
+  expect((byName('following').route.body as { items: unknown[] }).items.length).toBeGreaterThan(0);
+  const bobPage = rowsView(scrobbleDto as (row: never) => unknown, 50)(await h.core.history({ did: BOB, limit: 50 }));
+  expect((bobPage.body.items as unknown[]).length).toBeGreaterThan(0);
+  expect(listView(await h.request(`/api/v1/users/${ALICE}/scrobbles?limit=50`))).not.toEqual(bobPage);
+
+  // Argument errors: the route refuses before the core is called (422), and the core
+  // itself rejects the same out-of-range limit.
+  const bad = await h.request(`/api/v1/users/${ALICE}/scrobbles?limit=0`);
+  expect(errorCode(bad)).toEqual({ status: 422, code: 'validation_failed' });
+  const rejected = await h.core.history({ did: ALICE, limit: 0 }).then(
+    () => null,
+    (e: Error) => e.name,
+  );
+  expect(rejected).not.toBeNull();
 });
 
 it('IndexCore.start() calls noteRestart, lease reclaim, ensureTimers and armAlarm in that order on a recording host', async () => {
@@ -336,7 +541,7 @@ it('adminBackup on a host without a backup port answers not_supported and change
   expect(dumpAll(h.db)).toEqual(before);
 });
 
-it('app/index-core.ts imports no cloudflare: module and no value from env.ts, and defines every name it took over from the Workers wrapper', () => {
+it('app/index-core.ts imports no cloudflare: module and no value from env.ts, and index-do.ts re-exports every name it moved', () => {
   const importsOf = (source: string) =>
     [...source.matchAll(/^\s*(import|export)\s+(type\s+)?([\s\S]*?)\s+from\s+'([^']+)';/gm)].map((m) => ({
       typeOnly: m[2] !== undefined,
@@ -365,6 +570,8 @@ it('app/index-core.ts imports no cloudflare: module and no value from env.ts, an
   const coreImports = importsOf(indexCoreSource);
   expect(coreImports.length).toBeGreaterThan(20);
   expect(coreImports).toContainEqual({ typeOnly: true, clause: '{ AppConfig }', from: '../config' });
+  // The Workers wrapper is still the Workers wrapper (and so is never loaded here).
+  expect(importsOf(indexDoSource).some((i) => i.from === 'cloudflare:workers')).toBe(true);
 
   const MOVED_VALUES = [
     'envLogger',
@@ -390,19 +597,44 @@ it('app/index-core.ts imports no cloudflare: module and no value from env.ts, an
   const core = coreModule as unknown as Record<string, unknown>;
   for (const name of MOVED_VALUES) {
     expect(core[name], name).toBeDefined();
-    // Defined in index-core.ts itself, not re-exported from elsewhere.
+    // Defined in index-core.ts itself, not re-exported from elsewhere, and not in index-do.ts.
     const definition = new RegExp(`export\\s+(?:const|function|class|async function)\\s+${name}\\b`);
     expect(indexCoreSource, name).toMatch(definition);
+    expect(indexDoSource, name).not.toMatch(definition);
   }
   for (const name of MOVED_TYPES) {
     expect(indexCoreSource, name).toMatch(new RegExp(`export\\s+interface\\s+${name}\\b`));
+    expect(indexDoSource, name).not.toMatch(new RegExp(`(?:interface|type)\\s+${name}\\b\\s*[={<]`));
   }
+  // index-do.ts re-exports every moved name from ../app/index-core in one export clause.
+  const reexport = /export\s*\{([\s\S]*?)\}\s*from\s*'\.\.\/app\/index-core';/.exec(indexDoSource);
+  expect(reexport).not.toBeNull();
+  const reexported = new Set(
+    (reexport?.[1] ?? '')
+      .split(',')
+      .map((s) => s.trim().replace(/^type\s+/, ''))
+      .filter((s) => s.length > 0),
+  );
+  expect(reexported.size).toBeGreaterThanOrEqual(MOVED_VALUES.length + MOVED_TYPES.length);
+  for (const name of [...MOVED_VALUES, ...MOVED_TYPES]) expect([name, reexported.has(name)]).toEqual([name, true]);
+  // Non-vacuity: the parser finds no clause in a source without one, and a dropped name is seen.
+  expect(/export\s*\{([\s\S]*?)\}\s*from\s*'\.\.\/app\/index-core';/.exec(indexCoreSource)).toBeNull();
+  const dropped = indexDoSource.replace(/^\s*runGc,\n/m, '');
+  expect(dropped).not.toBe(indexDoSource);
+  const droppedClause = /export\s*\{([\s\S]*?)\}\s*from\s*'\.\.\/app\/index-core';/.exec(dropped)?.[1] ?? '';
+  expect(droppedClause.split(',').map((x) => x.trim())).not.toContain('runGc');
   // The error constants still describe the class.
   const error = new coreModule.IndexError();
   expect([error.name, error.message]).toEqual([coreModule.INDEX_ERROR_NAME, coreModule.INDEX_ERROR_MESSAGE]);
-  // Compile-time: the moved types resolve from index-core.ts.
+  // Compile-time: the moved types resolve from index-core.ts and through index-do.ts, and every
+  // moved value is exported by index-do.ts with index-core's type (tsc -b checks this file).
   const deps: coreModule.IndexDeps | null = null;
   const sink: coreModule.LogSink | null = null;
   const report: coreModule.GcReport | null = null;
-  expect([deps, sink, report]).toEqual([null, null, null]);
+  const viaDoDeps: doModule.IndexDeps | null = deps;
+  const viaDoSink: doModule.LogSink | null = sink;
+  const viaDoReport: doModule.GcReport | null = report;
+  const viaDo: Pick<typeof doModule, (typeof MOVED_VALUES)[number]> = coreModule;
+  expect([viaDoDeps, viaDoSink, viaDoReport]).toEqual([null, null, null]);
+  expect(Object.keys(viaDo).length).toBeGreaterThanOrEqual(MOVED_VALUES.length);
 });

@@ -1077,7 +1077,7 @@
         "worker/test/bench/read-models.bench.test.ts › the read-model bench records p50 and p95 for history, feed and stats on node:sqlite and asserts their query plans",
         "worker/test/bench/read-models.bench.test.ts › stats cache hit within ADR Q10 probe budget and equals uncached result"
       ],
-      "note": "The ADR 0004 §15 Q10 rows-read and probe budgets flag read-path regressions that still plan as indexed searches, such as the O(depth) keyset seek W6-02 found."
+      "note": "node:sqlite has no rows-read counter, so the ADR 0004 §15 Q10 rows-read budgets are re-derived as plan pins (ADR 0005 §15.3), asserted by the also-listed bench test, which flag read-path regressions that still plan as indexed searches. A deep history or feed page passes only with the (listened_at,uri)<(?,?) bound on its index range and an EXPLAIN bytecode seek that starts at the cursor's last row, so the O(depth) anchor-keyed seek W6-02 found is refused. A 7d, 30d or 365d statistics statement passes only when every scrobbles search is bounded by did=? AND listened_at>? AND listened_at<?, so the DID-only scrobbles_stats search W6-02 found is refused. The bench rebuilds both regressions on its database as negative controls. The cached-hit probe budget (at most 3 or 4 indexed statements) stays a statement count."
     },
     {
       "case": "M6.3.1/backup_during_write",

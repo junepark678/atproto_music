@@ -441,3 +441,18 @@ Places where a package's tree differs from its `files` entry in [node-waves.json
 **Requested owner amendment (N4-01):** when `node/features.ts` composes /1/:
 - pass `limiter: listenBrainzLimiterFor` (token-routes.ts) to `listenBrainzRoutes`, so the router and anything left of N3-05's guard charge one limiter;
 - drop N3-05's inner `lbGuard` from the mounted handlers (mark them `auth: 'required'` and have them read `lb.auth.token` and `lb.limit`), so each request is verified once and charged once. Until that change lands, a client pacing on X-RateLimit-Remaining reads the router's bucket. That is the bucket the router refuses on. A request that the inner guard refuses still answers with that guard's own 429 headers.
+
+### N4-03 one N1-02 index-core test title changes with the port to Node
+
+**Declared:** the N1-02 `tests` entry names `worker/test/composition/index-core.test.ts › every IndexRpc read method returns the same body through IndexDO as through IndexCore over the same storage` and `worker/test/composition/index-core.test.ts › app/index-core.ts imports no cloudflare: module and no value from env.ts, and index-do.ts re-exports every name it moved`. N4-03 ports the composition project to `environment: 'node'`, and its description allows the IndexDO-specific RPC tests to become IndexCore tests.
+
+**Tree:**
+
+| Declared title (N1-02) | Title in the tree (N4-03) |
+| --- | --- |
+| `every IndexRpc read method returns the same body through IndexDO as through IndexCore over the same storage` | `every IndexRpc read method returns the same body through its HTTP or admin-socket route as through a direct IndexCore call over the same database` |
+| `app/index-core.ts imports no cloudflare: module and no value from env.ts, and index-do.ts re-exports every name it moved` | unchanged (kept) |
+
+**Why:** IndexDO imports `cloudflare:workers`, so the Node composition project cannot load it, and on the Node host no IndexDO stands between the routes and IndexCore: `ctx.index` is the composed IndexCore. The boundary each IndexRpc read crosses on Node is its route: dispatcher, handler, DTO projection and JSON over the real listener, and for `adminStatus` the production admin-socket handler. The test calls every read method directly on the composed IndexCore and through that route, and it requires the route body to equal the direct result under the route's production projection (`scrobbleDto`, `followToDto`, the RecordStatus member rules, and the `not_found` envelope for null). It replaces a comparison of two IndexCore instances over one database file, which crossed no boundary. The second test keeps its title. While index-do.ts exists (until N7-01), it checks from source that index-do.ts re-exports every moved name from `../app/index-core` and defines none of them. Through `import type`, it checks that the moved types and values resolve through index-do.ts with index-core's types. The module is never loaded on Node.
+
+**Requested owner amendment:** in the N1-02 `tests` entry, replace the first title with the title in the tree. N7-01, which deletes index-do.ts, then drops the re-export half of the second test (and renames it).
