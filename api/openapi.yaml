@@ -1747,7 +1747,7 @@
       "post": {
         "operationId": "scrobble_create",
         "summary": "Submit a scrobble",
-        "description": "Queues a scrobble.create operation (origin web) for the session DID from a ScrobbleInput. Needs the cookie plus CSRF; with the publication gate closed it is 503 publication_disabled. Returns 202 with the queued operation (ADR 0005 §5.7, §5.8). Idempotency-Key is required: the same key and request hash return the same operation, a different hash is 409 idempotency_conflict; keys are scoped per DID.",
+        "description": "Queues a scrobble.create operation (origin web) for the session DID from a ScrobbleInput. Needs the cookie plus CSRF; with the publication gate closed it is 503 publication_disabled. Returns 202 with the queued operation (ADR 0005 §5.7, §5.8). Idempotency-Key is required: the same key and request hash return the same operation, a different hash is 409 idempotency_conflict; keys are scoped per DID. A listen over the account's daily listen cap (accounts.daily_listen_cap, default 3,000 live listens per rolling 24 h across every ingress) is 429 rate_limited with Retry-After; nothing is written and the Idempotency-Key stays unbound.",
         "x-contract": "1.2",
         "security": [
           {
@@ -1912,6 +1912,34 @@
             "x-error-codes": [
               "validation_failed"
             ]
+          },
+          "429": {
+            "description": "Over the account's daily listen cap (ADR 0005 §5.7, Q16); nothing was written and the Idempotency-Key stays unbound.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "fixture": {
+                    "$ref": "#/components/examples/error-429"
+                  }
+                }
+              }
+            },
+            "x-error-codes": [
+              "rate_limited"
+            ],
+            "headers": {
+              "Retry-After": {
+                "required": true,
+                "description": "Seconds until the oldest live listen of the rolling 24 h window leaves it.",
+                "schema": {
+                  "type": "string",
+                  "pattern": "^[0-9]+$"
+                }
+              }
+            }
           },
           "503": {
             "description": "Publication is disabled (meta.capabilities lacks publication).",

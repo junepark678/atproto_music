@@ -212,6 +212,15 @@
   {
     "method": "POST",
     "path": "/api/v1/scrobbles",
+    "status": 429,
+    "example": "error-429",
+    "headers": {
+      "Retry-After": "60"
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/scrobbles",
     "status": 503,
     "example": "v1.2-error-503-publication"
   },
