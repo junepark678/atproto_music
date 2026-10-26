@@ -9,13 +9,15 @@
 //   getRecord CAR for that commit (the bytes the fake PDS serves) goes through
 //   the production W2-03 verifier `verifyRecordProof` with the account's
 //   did:key, and the verified proof through the production W2-04
-//   `applyRecordProof`, in one transaction in the harness DO.
+//   `applyRecordProof`, in one transaction in the test database.
 // No CID, revision or row is written by hand; the only test-only write is the
 // three `users` rows (what admission plus a completed snapshot leave behind,
 // worker/test/write/support.ts seedUser).
+//
+// Each fixture is a fresh migrated node:sqlite database in its own temporary
+// file (node-harness.ts openTestDb, over node-db's withMigratedDb), closed
+// and removed after the test file.
 
-import { runInDurableObject } from 'cloudflare:test';
-import { env } from 'cloudflare:workers';
 import {
   createFixtureKit,
   FIXTURE_USERS,
@@ -33,18 +35,16 @@ import { expect } from 'vitest';
 import openapiText from '../../../api/openapi.yaml?raw';
 import fixture from '../../../tests/fixtures/read_models.json' with { type: 'json' };
 import { parseCursorKey } from '../../src/config';
-import { type Db, doDb } from '../../src/do/db';
+import type { Db } from '../../src/do/db';
 import { feed } from '../../src/do/read/feed';
 import { history } from '../../src/do/read/history';
 import { lookup } from '../../src/do/read/lookup';
 import { type ApplyResult, applyRecordProof } from '../../src/do/write/apply-record';
-import type { Env } from '../../src/env';
 import { routes as feedRoutes } from '../../src/http/feed';
 import { routes as scrobbleRoutes } from '../../src/http/scrobbles-read';
 import type { RequestCtx, RouteDef } from '../../src/http/types';
-import type { HarnessDO } from '../harness/harness-do';
-import { type LocalIndex, makeLocalIndex } from '../harness/local-index';
 import { OPTS, seedUser } from '../write/support';
+import { HARNESS_ENV, type LocalIndex, makeDbIndex, openTestDb, type TestDb } from './node-harness';
 
 export const ALICE = fixture.users.Alice.did;
 export const BOB = fixture.users.Bob.did;
@@ -91,14 +91,15 @@ export const schemas = {
 export interface ReadFixture {
   kit: FixtureKit;
   seed: SeedResult;
-  stub: DurableObjectStub<HarnessDO>;
-  /** IndexRpc over the harness DO: history, feed and lookup are the production modules. */
+  /** The fixture's database (a migrated temporary file, open until the end of the test file). */
+  db: TestDb;
+  /** IndexRpc over the database: history, feed and lookup are the production modules. */
   index: LocalIndex;
   /** Every outcome of every drained proof, in event order. */
   outcomes: Array<{ uri: string; rev: string; outcome: ApplyResult['outcome'] }>;
   /** Verify and apply every Jetstream commit not yet drained; returns the new outcomes. */
   drain(): Promise<Array<{ uri: string; rev: string; outcome: ApplyResult['outcome'] }>>;
-  /** Run `fn` against the DO's storage. */
+  /** Run `fn` against the database. */
   inDb<T>(fn: (db: Db) => T): Promise<T>;
 }
 
@@ -108,13 +109,15 @@ function userByDid(kit: FixtureKit, did: string): FixtureUser {
   return name;
 }
 
-/** A fresh harness DO named `name`, seeded with read_models.json through verify → apply. */
-export async function readFixture(name: string): Promise<ReadFixture> {
+/**
+ * A fresh database seeded with read_models.json through verify → apply.
+ * `name` labelled the harness DO; every call now gets its own database file.
+ */
+export async function readFixture(_name: string): Promise<ReadFixture> {
   const kit = await createFixtureKit();
   const seed = await seedReadModels(kit);
-  const stub = env.HARNESS.get(env.HARNESS.idFromName(name)) as DurableObjectStub<HarnessDO>;
-  const inDb = <T>(fn: (db: Db) => T): Promise<T> =>
-    runInDurableObject(stub, (_i: HarnessDO, s: DurableObjectState) => fn(doDb(s.storage)));
+  const db = await openTestDb();
+  const inDb = async <T>(fn: (db: Db) => T): Promise<T> => fn(db.db);
 
   await inDb((db) => {
     for (const n of FIXTURE_USERS) seedUser(db, kit.users[n].did);
@@ -150,8 +153,8 @@ export async function readFixture(name: string): Promise<ReadFixture> {
   };
   await drain();
 
-  const index = makeLocalIndex({ stub, clock: fixedClock() }, { history, feed, lookup });
-  return { kit, seed, stub, index, outcomes, drain, inDb };
+  const index = makeDbIndex({ db, clock: fixedClock() }, { history, feed, lookup });
+  return { kit, seed, db, index, outcomes, drain, inDb };
 }
 
 // ---------------------------------------------------------------------------
@@ -161,13 +164,13 @@ let cursorKeyPromise: Promise<CryptoKey> | null = null;
 
 /** The cursor key exactly as the Worker derives it from CURSOR_KEY (crates/core/src/cursor.rs). */
 export function harnessCursorKey(): Promise<CryptoKey> {
-  cursorKeyPromise ??= deriveCursorKey(parseCursorKey(env));
+  cursorKeyPromise ??= deriveCursorKey(parseCursorKey(HARNESS_ENV));
   return cursorKeyPromise;
 }
 
 export async function ctxFor(index: LocalIndex): Promise<RequestCtx> {
   return {
-    env: env as unknown as Env,
+    env: HARNESS_ENV,
     index,
     requestId: REQUEST_ID,
     clock: fixedClock(),

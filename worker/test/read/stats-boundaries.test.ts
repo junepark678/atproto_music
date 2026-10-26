@@ -10,8 +10,6 @@
 // hardcoded from TESTING.md (and tests/goldens/windows.json, the Rust oracle's
 // own probes), never derived from the query under test.
 
-import { runInDurableObject } from 'cloudflare:test';
-import { env } from 'cloudflare:workers';
 import type { SignedRepo } from '@atmusic/atproto/test-support/signed-repo';
 import { verifyRecordProof } from '@atmusic/atproto/verify/record-proof';
 import { fixedClock } from '@atmusic/core/test-support/clock';
@@ -22,12 +20,10 @@ import openapiText from '../../../api/openapi.yaml?raw';
 import windowsGolden from '../../../tests/goldens/windows.json' with { type: 'json' };
 import { stats } from '../../src/do/read/stats';
 import { applyRecordProof } from '../../src/do/write/apply-record';
-import type { Env } from '../../src/env';
 import { routes, STATS_PATTERN } from '../../src/http/stats';
 import type { RequestCtx } from '../../src/http/types';
-import type { HarnessDO } from '../harness/harness-do';
-import { makeLocalIndex } from '../harness/local-index';
-import { ALICE, OPTS, repoFor, SCROBBLE, scrobble, seedUser, stubFor } from '../write/support';
+import { ALICE, OPTS, repoFor, SCROBBLE, scrobble, seedUser } from '../write/support';
+import { HARNESS_ENV, inTestDb, makeDbIndex, openTestDb, type TestDb } from './node-harness';
 
 function openapiValidator(schema: string) {
   const doc = JSON.parse(openapiText) as { components: unknown };
@@ -44,7 +40,6 @@ function openapiValidator(schema: string) {
 const statisticsSchema = openapiValidator('Statistics');
 
 const route = routes.find((r) => r.method === 'GET' && r.pattern === STATS_PATTERN)!;
-type Stub = DurableObjectStub<HarnessDO>;
 
 let cursorKey: CryptoKey;
 beforeAll(async () => {
@@ -58,7 +53,7 @@ beforeAll(async () => {
 });
 
 /** Publish one probe as a signed commit; its verified proof goes through the production apply path. */
-async function publish(stub: Stub, repo: SignedRepo, rkey: string, artist: string, listenedAt: string) {
+async function publish(store: TestDb, repo: SignedRepo, rkey: string, artist: string, listenedAt: string) {
   await repo.put(SCROBBLE, rkey, scrobble({ artist, track: `${artist} track`, listenedAt, createdAt: listenedAt }));
   const car = await repo.getRecordCar(SCROBBLE, rkey);
   const proof = await verifyRecordProof(car, {
@@ -67,13 +62,13 @@ async function publish(stub: Stub, repo: SignedRepo, rkey: string, artist: strin
     rkey,
     signingKey: repo.key.didKey,
   });
-  return runInDurableObject(stub, (i: HarnessDO) => i.db.tx(() => applyRecordProof(i.db, proof, OPTS)));
+  return inTestDb(store, (db) => db.tx(() => applyRecordProof(db, proof, OPTS)));
 }
 
-async function freshAlice(name: string) {
-  const stub = stubFor(name) as Stub;
-  await runInDurableObject(stub, (i: HarnessDO) => seedUser(i.db, ALICE));
-  return { stub, repo: await repoFor('alice') };
+async function freshAlice() {
+  const store = await openTestDb();
+  await inTestDb(store, (db) => seedUser(db, ALICE));
+  return { store, repo: await repoFor('alice') };
 }
 
 interface Window {
@@ -82,10 +77,10 @@ interface Window {
 }
 
 /** GET stats at clock `iso`; asserts status, schema, one RPC, no network; returns member artists. */
-async function window(stub: Stub, win: string, iso = '2026-01-15T12:00:00Z'): Promise<Window> {
-  const index = makeLocalIndex({ stub }, { stats });
+async function window(store: TestDb, win: string, iso = '2026-01-15T12:00:00Z'): Promise<Window> {
+  const index = makeDbIndex({ db: store }, { stats });
   const ctx: RequestCtx = {
-    env: env as unknown as Env,
+    env: HARNESS_ENV,
     index,
     requestId: '9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d',
     clock: fixedClock(iso),
@@ -123,29 +118,29 @@ const PROBES: Array<[string, string]> = [
 ];
 
 it('records at lower bound −1s/0s/+1s for 7d/30d/365d have exact membership', async () => {
-  const { stub, repo } = await freshAlice('stats-lower-bounds');
+  const { store, repo } = await freshAlice();
   for (const [i, [artist, at]] of PROBES.entries()) {
-    expect((await publish(stub, repo, `b${i}`, artist, at)).outcome).toBe('applied');
+    expect((await publish(store, repo, `b${i}`, artist, at)).outcome).toBe('applied');
   }
   const sorted = (xs: string[]) => [...xs].sort();
-  expect((await window(stub, '7d')).members).toEqual(sorted(['7d 0s', '7d +1s']));
-  expect((await window(stub, '30d')).members).toEqual(sorted(['7d -1s', '7d 0s', '7d +1s', '30d 0s', '30d +1s']));
-  expect((await window(stub, '365d')).members).toEqual(
+  expect((await window(store, '7d')).members).toEqual(sorted(['7d 0s', '7d +1s']));
+  expect((await window(store, '30d')).members).toEqual(sorted(['7d -1s', '7d 0s', '7d +1s', '30d 0s', '30d +1s']));
+  expect((await window(store, '365d')).members).toEqual(
     sorted(['7d -1s', '7d 0s', '7d +1s', '30d -1s', '30d 0s', '30d +1s', '365d 0s', '365d +1s']),
   );
-  expect((await window(stub, 'all')).members).toEqual(sorted(PROBES.map(([a]) => a)));
+  expect((await window(store, 'all')).members).toEqual(sorted(PROBES.map(([a]) => a)));
 
   // One second later every lower bound has moved past its "0s" probe.
   const later = '2026-01-15T12:00:01Z';
-  expect((await window(stub, '7d', later)).members).toEqual(['7d +1s']);
-  expect((await window(stub, '30d', later)).members).toEqual(sorted(['7d -1s', '7d 0s', '7d +1s', '30d +1s']));
-  expect((await window(stub, '365d', later)).members).toEqual(
+  expect((await window(store, '7d', later)).members).toEqual(['7d +1s']);
+  expect((await window(store, '30d', later)).members).toEqual(sorted(['7d -1s', '7d 0s', '7d +1s', '30d +1s']));
+  expect((await window(store, '365d', later)).members).toEqual(
     sorted(['7d -1s', '7d 0s', '7d +1s', '30d -1s', '30d 0s', '30d +1s', '365d +1s']),
   );
 
   // The cache rows carry the exact lower bounds of the last computation.
-  const rows = await runInDurableObject(stub, (i: HarnessDO) =>
-    i.db.all<{ win: string; as_of: string; lower: string | null }>(
+  const rows = await inTestDb(store, (db) =>
+    db.all<{ win: string; as_of: string; lower: string | null }>(
       'SELECT win, as_of, lower FROM stats_cache WHERE did = ? ORDER BY win',
       ALICE,
     ),
@@ -159,13 +154,13 @@ it('records at lower bound −1s/0s/+1s for 7d/30d/365d have exact membership', 
 });
 
 it('record at asOf+300s excluded until asOf passes it', async () => {
-  const { stub, repo } = await freshAlice('stats-future');
+  const { store, repo } = await freshAlice();
   // Receipt time is asOf (12:00:00): +300 s is accepted, +301 s is excluded by validation.
-  expect((await publish(stub, repo, 'f0', 'at asOf', '2026-01-15T12:00:00Z')).outcome).toBe('applied');
-  expect((await publish(stub, repo, 'f1', 'future 300', '2026-01-15T12:05:00Z')).outcome).toBe('applied');
-  expect((await publish(stub, repo, 'f2', 'future 301', '2026-01-15T12:05:01Z')).outcome).toBe('excluded');
-  const stored = await runInDurableObject(stub, (i: HarnessDO) =>
-    i.db.all<{ rkey: string; listened_at: string }>('SELECT rkey, listened_at FROM scrobbles ORDER BY rkey'),
+  expect((await publish(store, repo, 'f0', 'at asOf', '2026-01-15T12:00:00Z')).outcome).toBe('applied');
+  expect((await publish(store, repo, 'f1', 'future 300', '2026-01-15T12:05:00Z')).outcome).toBe('applied');
+  expect((await publish(store, repo, 'f2', 'future 301', '2026-01-15T12:05:01Z')).outcome).toBe('excluded');
+  const stored = await inTestDb(store, (db) =>
+    db.all<{ rkey: string; listened_at: string }>('SELECT rkey, listened_at FROM scrobbles ORDER BY rkey'),
   );
   expect(stored).toEqual([
     { rkey: 'f0', listened_at: '2026-01-15T12:00:00.000000000Z' },
@@ -173,28 +168,28 @@ it('record at asOf+300s excluded until asOf passes it', async () => {
   ]);
 
   for (const win of ['all', '7d']) {
-    expect((await window(stub, win)).members).toEqual(['at asOf']);
-    expect((await window(stub, win, '2026-01-15T12:04:59Z')).members).toEqual(['at asOf']);
+    expect((await window(store, win)).members).toEqual(['at asOf']);
+    expect((await window(store, win, '2026-01-15T12:04:59Z')).members).toEqual(['at asOf']);
     // asOf has reached it: the upper bound is inclusive.
-    expect((await window(stub, win, '2026-01-15T12:05:00Z')).members).toEqual(['at asOf', 'future 300']);
-    expect((await window(stub, win, '2026-01-15T12:05:01Z')).members).toEqual(['at asOf', 'future 300']);
+    expect((await window(store, win, '2026-01-15T12:05:00Z')).members).toEqual(['at asOf', 'future 300']);
+    expect((await window(store, win, '2026-01-15T12:05:01Z')).members).toEqual(['at asOf', 'future 300']);
   }
 });
 
 it('every tests/goldens/windows.json probe has the Rust oracle membership', async () => {
   expect(windowsGolden.asOf).toBe('2026-01-15T12:00:00Z');
   for (const w of windowsGolden.windows) {
-    const { stub, repo } = await freshAlice(`stats-golden-${w.window}`);
+    const { store, repo } = await freshAlice();
     const included: string[] = [];
     for (const [i, p] of w.probes.entries()) {
       const name = `probe ${p.listenedAt}`;
-      expect((await publish(stub, repo, `g${i}`, name, p.listenedAt)).outcome).toBe('applied');
+      expect((await publish(store, repo, `g${i}`, name, p.listenedAt)).outcome).toBe('applied');
       if (p.included) included.push(name);
     }
-    const got = await window(stub, w.window);
+    const got = await window(store, w.window);
     expect(got.members).toEqual(included.sort());
-    const row = await runInDurableObject(stub, (i: HarnessDO) =>
-      i.db.one<{ as_of: string; lower: string | null }>('SELECT as_of, lower FROM stats_cache WHERE win = ?', w.window),
+    const row = await inTestDb(store, (db) =>
+      db.one<{ as_of: string; lower: string | null }>('SELECT as_of, lower FROM stats_cache WHERE win = ?', w.window),
     );
     expect(row).toEqual({ as_of: w.upperBound, lower: w.lowerBound });
   }

@@ -1,13 +1,11 @@
 // W4-04: GET /api/v1/records/status through the real route handler and the
-// real DO module (worker/src/do/ingest/notify.ts recordStatus) over real DO
-// SQLite (harness DO with the production migrations). Proves
+// real DO module (worker/src/do/ingest/notify.ts recordStatus) over
+// node:sqlite (a temporary-file database with the production migrations). Proves
 // M3.2.1/status_contract (N2). Every CID and revision comes from a real signed
 // repository (worker/test/write/support.ts) applied with W2-04
 // applyRecordProof; every body is validated against the OpenAPI RecordStatus
 // schema (including its if/then rules) and compared with hardcoded values.
 
-import { runInDurableObject } from 'cloudflare:test';
-import { env } from 'cloudflare:workers';
 import type { RecordProof } from '@atmusic/atproto/verify/types';
 import { deriveCursorKey } from '@atmusic/core/cursor';
 import { fixedClock } from '@atmusic/core/test-support/clock';
@@ -16,16 +14,14 @@ import addFormats from 'ajv-formats';
 import { beforeAll, expect, it } from 'vitest';
 import openapiText from '../../../api/openapi.yaml?raw';
 import { parseCursorKey } from '../../src/config';
-import { type Db, doDb } from '../../src/do/db';
+import type { Db } from '../../src/do/db';
 import { enqueueHints } from '../../src/do/ingest/hints';
 import { recordStatus } from '../../src/do/ingest/notify';
 import { markInactive } from '../../src/do/write/account-state';
 import { applyRecordProof } from '../../src/do/write/apply-record';
-import type { Env } from '../../src/env';
 import { routes as statusRoutes } from '../../src/http/record-status';
 import type { RequestCtx } from '../../src/http/types';
-import type { HarnessDO } from '../harness/harness-do';
-import { makeLocalIndex } from '../harness/local-index';
+import { HARNESS_ENV, inTestDb, makeDbIndex, openTestDb } from '../read/node-harness';
 import {
   ALICE,
   BOB,
@@ -42,7 +38,6 @@ import {
   seedSnapshotJob,
   seedUser,
   settings,
-  stubFor,
   uriOf,
 } from '../write/support';
 
@@ -81,7 +76,7 @@ const SUPPRESSED = { state: 'suppressed', caughtUp: false, lastIndexedAt: null, 
 
 let cursorKey: CryptoKey;
 beforeAll(async () => {
-  cursorKey = await deriveCursorKey(parseCursorKey(env));
+  cursorKey = await deriveCursorKey(parseCursorKey(HARNESS_ENV));
 });
 
 const statusRoute = (() => {
@@ -96,12 +91,11 @@ function cidOf(proof: RecordProof): string {
 }
 
 it('states indexed/pending/absent/excluded/unknown with cid and revision', async () => {
-  const stub = stubFor('record-status');
+  const store = await openTestDb();
   const clock = fixedClock();
-  const index = makeLocalIndex({ stub, clock }, { recordStatus: (m, uri) => recordStatus(m, uri) });
-  const ctx: RequestCtx = { env: env as unknown as Env, index, requestId: REQUEST_ID, clock, cursorKey, clientIp: '' };
-  const inDo = <T>(fn: (db: Db) => T): Promise<T> =>
-    runInDurableObject(stub, (_i: HarnessDO, s: DurableObjectState) => fn(doDb(s.storage)));
+  const index = makeDbIndex({ db: store, clock }, { recordStatus: (m, uri) => recordStatus(m, uri) });
+  const ctx: RequestCtx = { env: HARNESS_ENV, index, requestId: REQUEST_ID, clock, cursorKey, clientIp: '' };
+  const inDo = <T>(fn: (db: Db) => T): Promise<T> => inTestDb(store, (db) => fn(db));
   const get = async (query: string) => {
     const res = await statusRoute.handler(new Request(`${ORIGIN}/api/v1/records/status?${query}`), ctx, {});
     const text = await res.text();

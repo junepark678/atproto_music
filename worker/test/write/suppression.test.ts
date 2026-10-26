@@ -1,13 +1,12 @@
-// W2-04: the signed settings opt-out (ADR 0004 §5.3) against real DO SQLite.
+// W2-04: the signed settings opt-out (ADR 0004 §5.3) against node:sqlite.
 
-import { runInDurableObject } from 'cloudflare:test';
 import type { RecordProof } from '@atmusic/atproto/verify/types';
 import { describe, expect, it } from 'vitest';
 import type { Db } from '../../src/do/db';
 import { activeUser, visibleFollowEdge, visibleScrobblesFrom } from '../../src/do/read/visibility';
 import { applyRecordProof } from '../../src/do/write/apply-record';
 import { applySettings } from '../../src/do/write/suppression';
-import type { HarnessDO } from '../harness/harness-do';
+import { withMigratedDb } from '../node/support/node-db';
 import {
   ALICE,
   BOB,
@@ -27,7 +26,6 @@ import {
   SETTINGS,
   seedUser,
   settings,
-  stubFor,
   uriOf,
 } from './support';
 
@@ -115,8 +113,7 @@ describe('settings suppression', () => {
     const disabled = await putProof(alice, SETTINGS, 'self', settings('disabled'));
     const later = await putProof(alice, SCROBBLE, 'r07', fixtureScrobble('r07'));
 
-    await runInDurableObject(stubFor('suppression-disable'), (i: HarnessDO) => {
-      const db = i.db;
+    await withMigratedDb((db) => {
       seedUser(db, ALICE);
       seedUser(db, BOB);
       seedUser(db, CAROL);
@@ -198,8 +195,7 @@ describe('settings suppression', () => {
     const invalid = await putProof(alice, SETTINGS, 'self', { ...settings('enabled'), indexing: 'paused' });
     const removed = await deleteProof(alice, SETTINGS, 'self');
 
-    await runInDurableObject(stubFor('suppression-reconnect'), (i: HarnessDO) => {
-      const db = i.db;
+    await withMigratedDb((db) => {
       seedUser(db, ALICE);
       expect(apply(db, disabled)).toEqual({ outcome: 'applied', admit: false, suppressed: true });
 

@@ -10,7 +10,6 @@
 // - negative control: with the scrobbles indexes dropped, the same statements
 //   plan a full SCAN of scrobbles, and they still return identical results.
 
-import { runInDurableObject } from 'cloudflare:test';
 import { fixtureKeys } from '@atmusic/atproto/test-support/keys';
 import { SignedRepo } from '@atmusic/atproto/test-support/signed-repo';
 import type { StatsWindow } from '@atmusic/core/api-types';
@@ -20,8 +19,8 @@ import type { Db } from '../../src/do/db';
 import { computeStatistics, type Statement, statsStatements, windowBounds } from '../../src/do/read/stats';
 import { cacheProbes } from '../../src/do/read/stats-cache';
 import { applySnapshotChunk, completeSnapshot } from '../../src/do/write/apply-snapshot';
-import type { HarnessDO } from '../harness/harness-do';
-import { NOW_NS, PREFIX, SCROBBLE, scrobble, seedSnapshotJob, seedUser, stubFor } from '../write/support';
+import { NOW_NS, PREFIX, SCROBBLE, scrobble, seedSnapshotJob, seedUser } from '../write/support';
+import { inTestDb, openTestDb, type TestDb } from './node-harness';
 
 const DIDS = 100;
 const PER_DID = 1000;
@@ -43,9 +42,7 @@ function recordOf(d: number, j: number) {
   return scrobble(fields);
 }
 
-type Stub = DurableObjectStub<HarnessDO>;
-
-async function seed(stub: Stub): Promise<void> {
+async function seed(store: TestDb): Promise<void> {
   const keys = await fixtureKeys();
   for (let d = 0; d < DIDS; d++) {
     const did = didOf(d);
@@ -60,8 +57,7 @@ async function seed(stub: Stub): Promise<void> {
     const entries = commit.ops
       .map((op) => ({ key: op.path, cid: op.cid!, record: op.record }))
       .sort((x, y) => (x.key < y.key ? -1 : x.key > y.key ? 1 : 0));
-    await runInDurableObject(stub, (i: HarnessDO) => {
-      const db = i.db;
+    await inTestDb(store, (db) => {
       const generation = seedUser(db, did, { active: false });
       seedSnapshotJob(db, did, generation);
       const chunk = db.tx(() =>
@@ -119,11 +115,10 @@ const INDEXED_SEARCH =
 const FULL_SCAN = /^SCAN (s|scrobbles)\b/;
 
 it('EXPLAIN QUERY PLAN uses scrobbles_owner_time/scrobbles_stats; negative control without indexes shows SCAN', async () => {
-  const stub = stubFor('stats-plan') as Stub;
-  await seed(stub);
+  const store = await openTestDb();
+  await seed(store);
   const target = didOf(42);
-  await runInDurableObject(stub, (i: HarnessDO) => {
-    const db = i.db;
+  await inTestDb(store, (db) => {
     expect(db.one('SELECT count(*) AS n FROM scrobbles')).toEqual({ n: DIDS * PER_DID });
     expect(db.one('SELECT count(*) AS n FROM users WHERE active = 1')).toEqual({ n: DIDS });
     expect(db.one('SELECT count(*) AS n FROM scrobbles WHERE did = ?', target)).toEqual({ n: PER_DID });

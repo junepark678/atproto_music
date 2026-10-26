@@ -1,4 +1,4 @@
-// W3-03: GET /api/v1/users/{did}/export over real DO SQLite (harness DO with
+// W3-03: GET /api/v1/users/{did}/export over node:sqlite (a temporary-file database with
 // the production migrations) (A9, N3; M6.3.2 export_owner and
 // export_secret_scan, M7.2.3 export_download).
 //
@@ -12,8 +12,6 @@
 // subjects).
 // Expectations are hardcoded from TESTING.md.
 
-import { runInDurableObject } from 'cloudflare:test';
-import { env } from 'cloudflare:workers';
 import {
   createFixtureKit,
   FOLLOW_CREATED_AT,
@@ -30,18 +28,16 @@ import addFormats from 'ajv-formats';
 import { beforeAll, expect, it } from 'vitest';
 import openapiText from '../../../api/openapi.yaml?raw';
 import { parseConfig, parseCursorKey } from '../../src/config';
-import { type Db, doDb } from '../../src/do/db';
+import type { Db } from '../../src/do/db';
 import { exportUser } from '../../src/do/read/export';
 import { followCounts } from '../../src/do/read/follows';
 import { markConnected, recordEvent, updateCheckpointBookkeeping } from '../../src/do/status';
 import { markInactive } from '../../src/do/write/account-state';
 import { applyRecordProof } from '../../src/do/write/apply-record';
-import type { Env } from '../../src/env';
 import { routes as exportRoutes } from '../../src/http/export';
 import type { RequestCtx } from '../../src/http/types';
-import type { HarnessDO } from '../harness/harness-do';
-import { makeLocalIndex } from '../harness/local-index';
 import { OPTS, seedUser } from '../write/support';
+import { HARNESS_ENV, inTestDb, makeDbIndex, openTestDb, type TestDb } from './node-harness';
 
 function openapiValidator(schema: string) {
   const doc = JSON.parse(openapiText) as { components: unknown };
@@ -78,11 +74,11 @@ const DISPOSITION = 'attachment; filename="music-export.json"';
 
 let cursorKey: CryptoKey;
 beforeAll(async () => {
-  cursorKey = await deriveCursorKey(parseCursorKey(env));
+  cursorKey = await deriveCursorKey(parseCursorKey(HARNESS_ENV));
 });
 
-function inDo<T>(stub: DurableObjectStub<HarnessDO>, fn: (db: Db) => T): Promise<T> {
-  return runInDurableObject(stub, (_i: HarnessDO, s: DurableObjectState) => fn(doDb(s.storage)));
+function inDo<T>(store: TestDb, fn: (db: Db) => T): Promise<T> {
+  return inTestDb(store, (db) => fn(db));
 }
 
 async function verifiedProof(repo: SignedRepo, signingKey: string, collection: string, rkey: string) {
@@ -132,8 +128,8 @@ it('export contains only indexed public records, attachment header, 404 for inac
     createdAt: '2026-01-15T10:30:00Z',
   });
 
-  const stub = env.HARNESS.get(env.HARNESS.idFromName('export')) as DurableObjectStub<HarnessDO>;
-  await inDo(stub, (db) =>
+  const store = await openTestDb();
+  await inDo(store, (db) =>
     db.tx(() => {
       markConnected(db, NOW_MS);
       recordEvent(db, { cursor: 1, timeUs: NOW_MS * 1000 });
@@ -156,7 +152,7 @@ it('export contains only indexed public records, attachment header, 404 for inac
     const u = kit.user(t.did);
     proofs.push(await verifiedProof(kit.repos[u.name], u.key.didKey, t.collection, t.rkey));
   }
-  const outcomes = await inDo(stub, (db) => proofs.map((p) => db.tx(() => applyRecordProof(db, p, OPTS)).outcome));
+  const outcomes = await inDo(store, (db) => proofs.map((p) => db.tx(() => applyRecordProof(db, p, OPTS)).outcome));
   // r01–r07, r08 (proven absent), r09, r10, Alice→Bob, then rx1 (invalid), Alice→Dave, Alice→Erin,
   // Alice→Frank, Bob's rb2.
   expect(outcomes).toEqual([
@@ -173,7 +169,7 @@ it('export contains only indexed public records, attachment header, 404 for inac
   ]);
 
   // Marker strings in every table an export must never read.
-  await inDo(stub, (db) =>
+  await inDo(store, (db) =>
     db.tx(() => {
       db.run(
         `INSERT INTO identity_cache(did, doc_json, signing_key, pds, handle, fetched_at_ms)
@@ -209,12 +205,12 @@ it('export contains only indexed public records, attachment header, 404 for inac
   );
 
   const clock = fixedClock();
-  const index = makeLocalIndex(
-    { stub, clock, config: parseConfig({ ...env, INGEST_MODE: 'socket' }, { allowFixturePrefix: true }) },
+  const index = makeDbIndex(
+    { db: store, clock, config: parseConfig({ ...HARNESS_ENV, INGEST_MODE: 'socket' }, { allowFixturePrefix: true }) },
     { exportUser },
   );
   const ctx: RequestCtx = {
-    env: { ...env } as unknown as Env,
+    env: { ...HARNESS_ENV },
     index,
     requestId: REQUEST_ID,
     clock,
@@ -279,14 +275,14 @@ it('export contains only indexed public records, attachment header, 404 for inac
   expect(res.text).not.toContain(MARKER);
   expect(res.text).not.toContain(kit.users.Alice.token);
   expect(res.text).not.toContain(kit.users.Bob.token);
-  expect(res.text).not.toContain(env.CURSOR_KEY);
+  expect(res.text).not.toContain(HARNESS_ENV.CURSOR_KEY);
   expect(res.text).not.toContain(r('r08'));
   expect(res.text).not.toContain(r('rx1'));
   expect(res.text).not.toContain(ERIN);
   expect(res.text).not.toContain(FRANK);
   expect(res.text).not.toContain(`at://${BOB}/${SCROBBLE}`);
   // The excluded and hidden rows are really stored; the export left them alone.
-  const stored = await inDo(stub, (db) => ({
+  const stored = await inDo(store, (db) => ({
     excluded: db.one('SELECT state FROM record_state WHERE uri = ?', r('rx1')),
     hiddenEdges: db.all('SELECT subject FROM follows WHERE subject IN (?, ?) ORDER BY subject', ERIN, FRANK),
     // The profile counts agree with the export: Bob and Dave, not Erin or Frank.
@@ -306,7 +302,7 @@ it('export contains only indexed public records, attachment header, 404 for inac
   expect(schemas.Error(unknown.body)).toBe('valid');
   expect(unknown.res.headers.get('content-disposition')).toBeNull();
 
-  await inDo(stub, (db) => db.tx(() => markInactive(db, ALICE, 'deactivated')));
+  await inDo(store, (db) => db.tx(() => markInactive(db, ALICE, 'deactivated')));
   const inactive = await getExport(ctx, ALICE);
   expect(inactive.status).toBe(404);
   expect(schemas.Error(inactive.body)).toBe('valid');

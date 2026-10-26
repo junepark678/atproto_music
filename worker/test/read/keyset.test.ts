@@ -8,7 +8,7 @@
 // case must return exactly the page the two-clause form returns.
 //
 // 60 scrobbles of one user (20 seconds × 3 equal timestamps, so URIs break
-// ties) enter DO SQLite through one range snapshot of a real signed
+// ties) enter SQLite through one range snapshot of a real signed
 // repository (applySnapshotChunk + completeSnapshot, the production apply
 // path). The page is read through the production `history` module; the
 // reference pages come from independent SQL over the same storage.
@@ -20,8 +20,6 @@
 // `last` and the LIMIT stops it after limit + 1 rows; the two-clause form's
 // seek is keyed by the anchor and walks every row down to `last`.
 
-import { runInDurableObject } from 'cloudflare:test';
-import { env } from 'cloudflare:workers';
 import { fixtureKeys } from '@atmusic/atproto/test-support/keys';
 import { SignedRepo } from '@atmusic/atproto/test-support/signed-repo';
 import { fixedClock } from '@atmusic/core/test-support/clock';
@@ -29,11 +27,10 @@ import { seededRandom } from '@atmusic/core/test-support/random';
 import { describe, expect, it } from 'vitest';
 import { parseConfig } from '../../src/config';
 import type { KeysetQuery, ModuleDeps, TimeKey } from '../../src/do/contracts';
-import { type Db, doDb, type SqlParam } from '../../src/do/db';
+import type { Db, SqlParam } from '../../src/do/db';
 import { feed } from '../../src/do/read/feed';
 import { history, keysetWhere } from '../../src/do/read/history';
 import { applySnapshotChunk, completeSnapshot } from '../../src/do/write/apply-snapshot';
-import type { HarnessDO } from '../harness/harness-do';
 import {
   FOLLOW,
   NOW_MS,
@@ -44,8 +41,8 @@ import {
   scrobble,
   seedSnapshotJob,
   seedUser,
-  stubFor,
 } from '../write/support';
+import { HARNESS_ENV, inTestDb, openTestDb } from './node-harness';
 
 const DID = 'did:web:keyset.test';
 const ROWS = 60;
@@ -54,9 +51,9 @@ const ORDER = 'ORDER BY listened_at DESC, uri DESC';
 const BOTH = ' AND (s.listened_at, s.uri) <= (?, ?) AND (s.listened_at, s.uri) < (?, ?)';
 const LAST_ONLY = ' AND (s.listened_at, s.uri) < (?, ?)';
 
-async function seeded(name: string) {
+async function seeded() {
   const keys = await fixtureKeys();
-  const stub = stubFor(name);
+  const store = await openTestDb();
   const repo = new SignedRepo(DID, keys.alice, { clock: fixedClock() });
   const commit = await repo.writes(
     Array.from({ length: ROWS }, (_, j) => {
@@ -72,8 +69,7 @@ async function seeded(name: string) {
   const entries = commit.ops
     .map((op) => ({ key: op.path, cid: op.cid!, record: op.record }))
     .sort((x, y) => (x.key < y.key ? -1 : x.key > y.key ? 1 : 0));
-  await runInDurableObject(stub, (i: HarnessDO) => {
-    const db = i.db;
+  await inTestDb(store, (db) => {
     const generation = seedUser(db, DID, { active: false });
     seedSnapshotJob(db, DID, generation);
     const chunk = db.tx(() =>
@@ -95,7 +91,7 @@ async function seeded(name: string) {
     );
     expect(done).toEqual({ outcome: 'complete', active: true });
   });
-  return stub;
+  return store;
 }
 
 interface Traced {
@@ -103,9 +99,8 @@ interface Traced {
   params: SqlParam[];
 }
 
-/** The storage's Db, recording each `all` statement and its parameters. */
-function tracingDb(storage: DurableObjectStorage, trace: Traced[]): Db {
-  const base = doDb(storage);
+/** The database's Db, recording each `all` statement and its parameters. */
+function tracingDb(base: Db, trace: Traced[]): Db {
   return {
     ...base,
     all: <T>(query: string, ...params: SqlParam[]) => {
@@ -174,7 +169,7 @@ function deps(db: Db): ModuleDeps {
         throw new TypeError('no identity resolution in module tests');
       },
     },
-    config: parseConfig(env, { allowFixturePrefix: true }),
+    config: parseConfig(HARNESS_ENV, { allowFixturePrefix: true }),
     log: { log() {} },
   };
 }
@@ -189,14 +184,13 @@ interface Reader {
   sqliteLess(a: string, b: string): boolean;
 }
 
-function reader(storage: DurableObjectStorage): Reader {
-  const plain = doDb(storage);
+function reader(plain: Db): Reader {
   const keys = plain.all<TimeKey>(`SELECT listened_at AS t, uri FROM scrobbles WHERE did = ? ${ORDER}`, DID);
   return {
     keys,
     page(q) {
       const trace: Traced[] = [];
-      const r = history(deps(tracingDb(storage, trace)), { did: DID, ...q });
+      const r = history(deps(tracingDb(plain, trace)), { did: DID, ...q });
       const statement = trace[0]!;
       expect(statement.sql.trimStart().startsWith('SELECT s.* FROM scrobbles s')).toBe(true);
       return { uris: r.rows.map((x) => x.uri), hasMore: r.hasMore, statement };
@@ -219,9 +213,9 @@ const both = (upper: TimeKey, last: TimeKey): SqlParam[] => [upper.t, upper.uri,
 
 describe('keysetWhere', () => {
   it('server-issued cursors (last <= upper, ASCII) emit only the last clause and return the two-clause page with O(limit) rows read', async () => {
-    const stub = await seeded('keyset-server-cursors');
-    await runInDurableObject(stub, (_i: HarnessDO, state) => {
-      const r = reader(state.storage);
+    const store = await seeded();
+    await inTestDb(store, (db) => {
+      const r = reader(db);
       expect(r.keys).toHaveLength(ROWS);
       const k = r.keys;
       // Anchor at the newest row, last at several depths; plus equal keys and
@@ -255,7 +249,7 @@ describe('keysetWhere', () => {
       const deep: KeysetQuery = { upper: k[0]!, last: k[40]!, limit: LIMIT };
       const page = r.page(deep);
       const twoClause = r.reference(BOTH, both(k[0]!, k[40]!));
-      const plain = doDb(state.storage);
+      const plain: Db = db;
       expect(seekKey(plain, 'scrobbles_owner_time', page.statement.sql, page.statement.params)).toEqual([
         DID,
         k[40]!.t,
@@ -271,9 +265,9 @@ describe('keysetWhere', () => {
   });
 
   it('last > upper falls back to both clauses and returns only rows at or below the anchor', async () => {
-    const stub = await seeded('keyset-last-above-upper');
-    await runInDurableObject(stub, (_i: HarnessDO, state) => {
-      const r = reader(state.storage);
+    const store = await seeded();
+    await inTestDb(store, (db) => {
+      const r = reader(db);
       const k = r.keys;
       // Different timestamps, and one shared timestamp where only the URI orders them.
       expect(k[3]!.t).toBe(k[5]!.t);
@@ -301,9 +295,9 @@ describe('keysetWhere', () => {
   });
 
   it('non-ASCII keys fall back to both clauses and return the two-clause page', async () => {
-    const stub = await seeded('keyset-non-ascii');
-    await runInDurableObject(stub, (_i: HarnessDO, state) => {
-      const r = reader(state.storage);
+    const store = await seeded();
+    await inTestDb(store, (db) => {
+      const r = reader(db);
       const k = r.keys;
       const p = k[20]!;
       const bmp = `${p.uri}｡`; // U+FF61: UTF-8 EF BD A1, UTF-16 FF61
@@ -350,10 +344,10 @@ describe('keysetWhere', () => {
   // L + 1 candidates; the following feed merges one such seek per followee.
   it('history and feed page statements use the single-clause seek plan on SQLite 3.54.1 (Q10 budgets as plan assertions)', async () => {
     expect(process.versions.sqlite).toBe(PINNED_SQLITE);
-    const stub = await seeded('keyset-plans');
-    await runInDurableObject(stub, (_i: HarnessDO, state) => {
-      const plain = doDb(state.storage);
-      const r = reader(state.storage);
+    const store = await seeded();
+    await inTestDb(store, (db) => {
+      const plain: Db = db;
+      const r = reader(db);
       const k = r.keys;
       // A visible viewer following the seeded owner, for the following feed.
       const VIEWER = 'did:web:viewer.keyset.test';
@@ -375,7 +369,7 @@ describe('keysetWhere', () => {
       const expected = k.slice(41, 41 + LIMIT).map((x) => x.uri);
       const traced = (run: (m: ModuleDeps) => { rows: Array<{ uri: string }>; hasMore: boolean }) => {
         const trace: Traced[] = [];
-        const page = run(deps(tracingDb(state.storage, trace)));
+        const page = run(deps(tracingDb(db, trace)));
         const statement = trace.find((t) => t.sql.trimStart().startsWith('SELECT s.* FROM scrobbles s'));
         expect(statement).toBeDefined();
         return { uris: page.rows.map((x) => x.uri), hasMore: page.hasMore, statement: statement! };

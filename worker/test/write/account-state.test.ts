@@ -1,7 +1,6 @@
 // W2-04: account state transitions (markInactive, markReactivating) against
-// real DO SQLite, observed through the readers' visibility fragments.
+// node:sqlite (node-db.ts), observed through the readers' visibility fragments.
 
-import { runInDurableObject } from 'cloudflare:test';
 import type { RecordProof } from '@atmusic/atproto/verify/types';
 import { describe, expect, it } from 'vitest';
 import type { Db } from '../../src/do/db';
@@ -9,7 +8,7 @@ import { activeUser, visibleFollowEdge, visibleScrobblesFrom } from '../../src/d
 import { markInactive, markReactivating } from '../../src/do/write/account-state';
 import { applyRecordProof } from '../../src/do/write/apply-record';
 import { completeSnapshot } from '../../src/do/write/apply-snapshot';
-import type { HarnessDO } from '../harness/harness-do';
+import { withMigratedDb } from '../node/support/node-db';
 import {
   ALICE,
   BOB,
@@ -25,7 +24,6 @@ import {
   repoFor,
   SCROBBLE,
   seedUser,
-  stubFor,
   uriOf,
   userRow,
 } from './support';
@@ -79,8 +77,7 @@ describe('account state', () => {
     const a07 = uriOf(ALICE, SCROBBLE, 'r07');
     const b09 = uriOf(BOB, SCROBBLE, 'r09');
 
-    await runInDurableObject(stubFor('account-state-deactivate'), (i: HarnessDO) => {
-      const db = i.db;
+    await withMigratedDb((db) => {
       expect([seedUser(db, ALICE), seedUser(db, BOB), seedUser(db, CAROL)]).toEqual([1, 2, 3]);
       for (const p of proofs) expect(db.tx(() => applyRecordProof(db, p, OPTS)).outcome).toBe('applied');
       db.run(
