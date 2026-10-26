@@ -10,6 +10,8 @@
 // that drifts from the table fails typecheck and the table that drifts from
 // the ADR fails here.
 
+import { createFixtureKit, FIXTURE_USERS, seedReadModels } from '@atmusic/atproto/test-support/read-models';
+import { verifyRecordProof } from '@atmusic/atproto/verify/record-proof';
 import { fixedClock } from '@atmusic/core/test-support/clock';
 import { afterAll, describe, expect, it } from 'vitest';
 import fixture from '../../../tests/fixtures/read_models.json' with { type: 'json' };
@@ -56,8 +58,9 @@ import {
   TABLE_CLASS,
   TABLES,
 } from '../../src/do/schema';
+import { type ApplyResult, applyRecordProof } from '../../src/do/write/apply-record';
 import { closeFileIndexes, fileIndexes, nodeIndex, schemaAll } from '../node/support/with-index';
-import { readFixture } from '../read/scrobble-read-support';
+import { OPTS, seedUser } from '../write/support';
 
 afterAll(() => closeFileIndexes());
 
@@ -628,6 +631,46 @@ async function migrateToLatest(name: string): Promise<unknown> {
   return migrate(fileIndexes().get(name));
 }
 
+/**
+ * The named database of this test file (latest schema) seeded with
+ * tests/fixtures/read_models.json through the real ingestion path, as
+ * worker/test/read/scrobble-read-support.ts readFixture does on the harness
+ * DO: the fixture is published as signed commits on fake PDSs, the three
+ * `users` rows are seeded, and every Jetstream commit event's getRecord CAR
+ * goes through the production verifier `verifyRecordProof` with the
+ * account's did:key and the verified proof through the production
+ * `applyRecordProof`, one transaction each. Returns every outcome in order.
+ */
+async function readModelSource(
+  name: string,
+): Promise<{ db: Db; outcomes: Array<{ uri: string; rev: string; outcome: ApplyResult['outcome'] }> }> {
+  const kit = await createFixtureKit();
+  await seedReadModels(kit);
+  const db = fileIndexes().get(name);
+  for (const n of FIXTURE_USERS) seedUser(db, kit.users[n].did);
+  const outcomes: Array<{ uri: string; rev: string; outcome: ApplyResult['outcome'] }> = [];
+  for (const ev of kit.jetstream.events) {
+    if (ev.kind !== 'commit') continue;
+    const owner = FIXTURE_USERS.find((n) => kit.users[n].did === ev.did);
+    if (owner === undefined) throw new Error(`no fixture user ${ev.did}`);
+    const repo = kit.repos[owner];
+    const commit = repo.history.find((c) => c.rev === ev.commit.rev);
+    if (commit === undefined) throw new Error(`no commit ${ev.commit.rev} for ${ev.did}`);
+    const { collection, rkey } = ev.commit;
+    const car = await repo.getRecordCar(collection, rkey, { at: commit.cid });
+    const proof = await verifyRecordProof(car, {
+      did: ev.did,
+      collection,
+      rkey,
+      signingKey: kit.users[owner].key.didKey,
+    });
+    expect(proof.commit.rev).toBe(ev.commit.rev);
+    const applied = db.tx(() => applyRecordProof(db, proof, OPTS));
+    outcomes.push({ uri: `at://${ev.did}/${collection}/${rkey}`, rev: proof.commit.rev, outcome: applied.outcome });
+  }
+  return { db, outcomes };
+}
+
 /** Every row of `table`, each column as SQLite's quote() literal (exact bytes and type), in rowid order. */
 function quotedRows(db: Db, table: string, columns: string[]): string[] {
   const expr = columns.map((c) => `quote(${c})`).join(" || '|' || ");
@@ -992,16 +1035,16 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
     // read_models.json through verify → apply. Since N3-11 the projection also
     // writes the migration-2 scrobble columns (ADR 0005 §6.5), which a
     // version-1 schema does not have, so the fixture is applied into a scratch
-    // harness DO at the latest schema and its rows, version-1 columns only,
+    // database at the latest schema and its rows, version-1 columns only,
     // are copied into the version-1 schema: exactly what version-1 code wrote.
-    const f = await readFixture(`${name}-source`);
+    const f = await readModelSource(`${name}-source`);
     expect(f.outcomes.length).toBeGreaterThan(0);
     const v1Tables = await inDb(name, (db) =>
       tableNames(db)
         .filter((t) => t !== 'schema_migrations')
         .map((t) => ({ t, columns: columnsOf(db, t) })),
     );
-    const copied = await f.inDb((db) =>
+    const copied = await inDb(`${name}-source`, (db) =>
       v1Tables.map(({ t, columns }) => ({
         t,
         columns,

@@ -11,7 +11,11 @@
 // returns the harness Durable Object stub of the `cloudflare:*` test shim
 // (the very module that id resolves to in worker-modules), for the suites
 // that N4-05 and N4-06 de-shim; the de-shimmed suites use
-// worker/test/node/support/with-index.ts. The shim is loaded only where it
+// worker/test/node/support/with-index.ts. That stubFor import of
+// test/node/support/cloudflare-workers-shim.ts (by path, below) is the one
+// allowed shim edge of the N4-04 files: worker/test/node/deshim/
+// harness-storage.test.ts asserts it is used exactly here and only by
+// N4-05/N4-06 callers; N7-01 removes it with the shim. The shim is loaded only where it
 // can run (Node); a host without it (the workerd composition project, which
 // never calls stubFor) gets a stubFor that throws.
 

@@ -2,7 +2,14 @@
 // (ADR 0005 §15.1 step 2, N4-04), checked statically and at runtime:
 //
 // - no listed file imports `cloudflare:test` or `cloudflare:workers` (static,
-//   dynamic or mocked) or references `WebSocketPair` in code;
+//   dynamic, `typeof import()` or mocked), or one of the files those resolve
+//   to in worker-modules (the shim, its storage facade, the harness DO and
+//   the shimmed LocalIndex) by path, directly or through any module it
+//   evaluates (relative imports and the @atmusic/* packages are resolved and
+//   walked); the one allowed edge is worker/test/write/support.ts's stubFor
+//   import of the workers shim, kept for the N4-05/N4-06 suites until N7-01
+//   and asserted to be used exactly there; and no listed file references
+//   `WebSocketPair` in code;
 // - every test id node-port-inventory.json marks kept (or names as a
 //   replacement) under worker/test/storage and worker/test/harness, and every
 //   one node-waves.json declares there, is still declared with that exact
@@ -19,7 +26,7 @@
 
 import { spawnSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { parseConfig } from '../../../src/config';
@@ -33,6 +40,9 @@ const SEP = ' › ';
 const WAVE_START = 'e309f52c0c8fba3cb0949edf7284d932b09edb4f';
 
 const read = (file: string) => readFileSync(join(ROOT, file), 'utf8');
+const THIS_FILE = relative(ROOT, fileURLToPath(import.meta.url))
+  .split(sep)
+  .join('/');
 
 function filesUnder(dir: string): string[] {
   const out: string[] = [];
@@ -222,30 +232,217 @@ function unescapeJs(body: string): string {
 
 const FORBIDDEN_MODULES = new Set(['cloudflare:test', 'cloudflare:workers']);
 
-/** Every import of a forbidden module (`from`, side-effect, dynamic, require, vi.mock) and every WebSocketPair reference. */
-function shimViolations(file: string, src: string): string[] {
+/**
+ * The shim and the shimmed harness by file: what `cloudflare:test` and
+ * `cloudflare:workers` resolve to in worker-modules (worker/vitest.modules.
+ * config.ts aliases), the storage facade under them, the harness DO, its
+ * entry and setup, and the shimmed LocalIndex. Importing one of these by
+ * path is the same reach as importing the specifier.
+ */
+const FORBIDDEN_FILES = new Set([
+  'worker/test/node/support/cloudflare-test-shim.ts',
+  'worker/test/node/support/cloudflare-workers-shim.ts',
+  'worker/test/node/support/do-storage-facade.ts',
+  'worker/test/node/support/workerd-globals.ts',
+  'worker/test/harness/harness-do.ts',
+  'worker/test/harness/entry.ts',
+  'worker/test/harness/local-index.ts',
+]);
+
+/**
+ * The one allowed edge: worker/test/write/support.ts keeps `stubFor(name)`
+ * (its exported API is frozen for this wave), which returns the shim's
+ * harness DO stub, for the suites N4-05 (worker/test/ingest/) and N4-06
+ * (worker/test/read/, write/*.test.ts, http/) de-shim. The walk does not
+ * cross it, and the test asserts it is used exactly here and that every
+ * caller of stubFor through support.ts belongs to N4-05 or N4-06. N7-01
+ * deletes the shim and this allowance.
+ */
+const ALLOWED_EDGE = {
+  from: 'worker/test/write/support.ts',
+  to: 'worker/test/node/support/cloudflare-workers-shim.ts',
+} as const;
+
+const CODE_FILE = /\.(ts|mts|js|mjs)$/;
+
+interface ImportRef {
+  spec: string;
+  line: number;
+}
+
+/** Every module specifier `src` imports (`from`, side-effect, dynamic, `typeof import()`, require, vi.mock). */
+function importsOf(src: string): ImportRef[] {
   const { code, strings } = scan(src);
-  const out: string[] = [];
-  const lineOf = (offset: number) => code.slice(0, offset).split('\n').length;
+  const out: ImportRef[] = [];
   for (const s of strings) {
-    if (s.dynamic || !FORBIDDEN_MODULES.has(unescapeJs(s.body))) continue;
+    if (s.dynamic) continue;
     const before = code.slice(0, s.start);
     if (
       /\bfrom\s*$/.test(before) ||
       /\bimport\s*$/.test(before) ||
       /\b(?:import|require|vi\s*\.\s*(?:mock|doMock|importActual|importMock))\s*\(\s*$/.test(before)
     ) {
-      out.push(`${file}:${lineOf(s.start)} imports ${unescapeJs(s.body)}`);
+      out.push({ spec: unescapeJs(s.body), line: code.slice(0, s.start).split('\n').length });
     }
   }
-  // Code outside string literals: an identifier WebSocketPair (MemoryWebSocketPair is another name).
+  return out;
+}
+
+type Target =
+  | { kind: 'file'; path: string }
+  | { kind: 'module'; name: string }
+  | { kind: 'asset'; path: string }
+  | { kind: 'unresolved'; spec: string };
+
+/** Posix-normalizes a repository-relative path; null when it climbs out of the repository. */
+function normalize(path: string): string | null {
+  const parts: string[] = [];
+  for (const seg of path.split('/')) {
+    if (seg === '' || seg === '.') continue;
+    if (seg === '..') {
+      if (parts.length === 0) return null;
+      parts.pop();
+    } else parts.push(seg);
+  }
+  return parts.join('/');
+}
+
+/**
+ * Resolves `spec` imported by `from` the way the worker projects do: relative
+ * paths (extensionless, `.js` for `.ts`, `/index`), the `@atmusic/*` workspace
+ * packages (their `exports`: `./test-support/*` and `./*` -> `./src/*`), and
+ * everything else as a bare module name. `?raw` and non-code files are assets
+ * (read as data, never evaluated).
+ */
+function resolveImport(from: string, spec: string, exists: (path: string) => boolean): Target {
+  const query = spec.indexOf('?');
+  const bare = query === -1 ? spec : spec.slice(0, query);
+  let base: string | null;
+  if (bare.startsWith('./') || bare.startsWith('../')) base = normalize(`${dirname(from)}/${bare}`);
+  else {
+    const m = /^@atmusic\/(core|atproto)\/(.+)$/.exec(bare);
+    if (m === null) return { kind: 'module', name: bare };
+    const sub = m[2] as string;
+    base = `packages/${m[1]}/${sub.startsWith('test-support/') ? sub : `src/${sub}`}`;
+  }
+  if (base === null) return { kind: 'unresolved', spec };
+  const candidates = [base, `${base}.ts`, `${base}.mts`, `${base}/index.ts`];
+  if (/\.m?js$/.test(base)) candidates.unshift(base.replace(/\.(m?)js$/, '.$1ts'));
+  const path = candidates.find((c) => exists(c) && (c === base ? !c.endsWith('/') : true));
+  if (path === undefined) return { kind: 'unresolved', spec };
+  if (query !== -1 || !CODE_FILE.test(path)) return { kind: 'asset', path };
+  return { kind: 'file', path };
+}
+
+interface Reach {
+  violations: string[];
+  /** `file:line` of every use of ALLOWED_EDGE met on the walk. */
+  allowed: string[];
+  /** Every repository module evaluated by importing the roots (the roots included). */
+  closure: string[];
+}
+
+interface Sources {
+  read: (file: string) => string;
+  exists: (file: string) => boolean;
+}
+
+const REPO: Sources = {
+  read,
+  exists: (file) => {
+    try {
+      return statSync(join(ROOT, file)).isFile();
+    } catch {
+      return false;
+    }
+  },
+};
+
+/** The parsed imports of repository files, shared by the walks of this file. */
+const REPO_IMPORTS = new Map<string, ImportRef[]>();
+
+/**
+ * Walks every module `roots` import, directly or transitively, and reports
+ * each import of a forbidden specifier or a forbidden file (other than
+ * ALLOWED_EDGE, which is recorded and not crossed), and each relative import
+ * that does not resolve, with the import chain that reaches it.
+ */
+function shimReach(roots: string[], sources: Sources = REPO): Reach {
+  const parsed = sources === REPO ? REPO_IMPORTS : new Map<string, ImportRef[]>();
+  const importsIn = (file: string): ImportRef[] => {
+    const cached = parsed.get(file);
+    if (cached !== undefined) return cached;
+    const refs = importsOf(sources.read(file));
+    parsed.set(file, refs);
+    return refs;
+  };
+  const violations: string[] = [];
+  const allowed: string[] = [];
+  const via = new Map<string, string>();
+  const queue = [...roots];
+  for (const root of roots) via.set(root, '');
+  const chain = (file: string): string => {
+    const steps: string[] = [];
+    for (let f: string | undefined = file; f !== undefined && f !== ''; f = via.get(f)) steps.unshift(f);
+    return steps.join(' -> ');
+  };
+  while (queue.length > 0) {
+    const file = queue.shift() as string;
+    for (const { spec, line } of importsIn(file)) {
+      const at = `${chain(file)}:${line}`;
+      const target = resolveImport(file, spec, sources.exists);
+      if (target.kind === 'module') {
+        if (FORBIDDEN_MODULES.has(target.name)) violations.push(`${at} imports ${target.name}`);
+      } else if (target.kind === 'unresolved') {
+        if (spec.startsWith('.')) violations.push(`${at} imports ${spec}, which does not resolve`);
+      } else if (FORBIDDEN_FILES.has(target.path)) {
+        if (file === ALLOWED_EDGE.from && target.path === ALLOWED_EDGE.to) allowed.push(`${file}:${line}`);
+        else violations.push(`${at} imports ${target.path}`);
+      } else if (target.kind === 'file' && !via.has(target.path)) {
+        via.set(target.path, file);
+        queue.push(target.path);
+      }
+    }
+  }
+  return { violations, allowed: [...new Set(allowed)].sort(), closure: [...via.keys()].sort() };
+}
+
+/** The source with comments and string literals blanked (line structure kept). */
+function codeOnly(src: string): string {
+  const { code, strings } = scan(src);
   let masked = code;
   for (const s of [...strings].reverse())
-    masked = masked.slice(0, s.start) + ' '.repeat(s.end - s.start) + masked.slice(s.end);
-  for (const m of masked.matchAll(/(?<![\w$])WebSocketPair(?![\w$])/g)) {
-    out.push(`${file}:${lineOf(m.index ?? 0)} references WebSocketPair`);
+    masked = masked.slice(0, s.start) + code.slice(s.start, s.end).replace(/[^\n]/g, ' ') + masked.slice(s.end);
+  return masked;
+}
+
+/** Every `WebSocketPair` identifier in code (comments and strings skipped; MemoryWebSocketPair is another name). */
+function webSocketPairRefs(file: string, src: string): string[] {
+  const masked = codeOnly(src);
+  return [...masked.matchAll(/(?<![\w$])WebSocketPair(?![\w$])/g)].map(
+    (m) => `${file}:${masked.slice(0, m.index ?? 0).split('\n').length} references WebSocketPair`,
+  );
+}
+
+/** The direct form of the check, on one source: its forbidden imports (by specifier or by path) and WebSocketPair references. */
+function shimViolations(file: string, src: string): string[] {
+  const out: string[] = [];
+  for (const { spec, line } of importsOf(src)) {
+    const target = resolveImport(file, spec, REPO.exists);
+    if (target.kind === 'module' && FORBIDDEN_MODULES.has(target.name))
+      out.push(`${file}:${line} imports ${target.name}`);
+    if ((target.kind === 'file' || target.kind === 'asset') && FORBIDDEN_FILES.has(target.path))
+      out.push(`${file}:${line} imports ${target.path}`);
   }
-  return out;
+  return [...out, ...webSocketPairRefs(file, src)];
+}
+
+/** Virtual sources over the repository, for the negative controls. */
+function overlay(files: Record<string, string>): Sources {
+  return {
+    read: (file) => files[file] ?? read(file),
+    exists: (file) => file in files || REPO.exists(file),
+  };
 }
 
 interface Declaration {
@@ -396,7 +593,60 @@ describe('N4-04 de-shim: harness, storage and shared helpers', () => {
       ]),
     );
     const files = [...storage, ...HARNESS_TESTS, ...SHARED_HELPERS, NODE_HARNESS];
-    expect(files.flatMap((file) => shimViolations(file, read(file)))).toEqual([]);
+    // Directly: no forbidden specifier or shim file in the listed files' own
+    // imports (ALLOWED_EDGE aside) and no WebSocketPair in their code.
+    expect(
+      files.flatMap((file) =>
+        shimViolations(file, read(file)).filter(
+          (v) => !(file === ALLOWED_EDGE.from && v.endsWith(` imports ${ALLOWED_EDGE.to}`)),
+        ),
+      ),
+    ).toEqual([]);
+    // Transitively: nothing any listed file evaluates imports either, by
+    // specifier or by path, except through ALLOWED_EDGE.
+    const reach = shimReach(files);
+    expect(reach.violations).toEqual([]);
+    expect(reach.closure).toEqual(
+      expect.arrayContaining([...files, 'worker/src/do/migrate.ts', 'worker/src/node/sqlite-db.ts']),
+    );
+    expect(reach.closure.filter((f) => FORBIDDEN_FILES.has(f))).toEqual([]);
+    expect(reach.closure.filter((f) => /^worker\/test\/(read|ingest|http)\//.test(f))).toEqual([]);
+
+    // ALLOWED_EDGE is used exactly at support.ts's stubFor shim import (the
+    // type of the shim's env and the import that loads it), and of the listed
+    // files only the storage suites that take seedUser from support.ts reach it.
+    expect(reach.allowed).toEqual([`${ALLOWED_EDGE.from}:46`, `${ALLOWED_EDGE.from}:52`]);
+    expect(files.filter((f) => f !== ALLOWED_EDGE.from && shimReach([f]).closure.includes(ALLOWED_EDGE.from))).toEqual([
+      'worker/test/storage/schema-v2.test.ts',
+      'worker/test/storage/timers-extensions.test.ts',
+    ]);
+    // The remaining callers of stubFor through support.ts are suites of N4-05
+    // and N4-06 (node-waves.json owners), none of them a listed file.
+    const waves = JSON.parse(read('docs/planning/node-waves.json')) as Array<{
+      packages: Array<{ id: string; files: string[] }>;
+    }>;
+    const owned = (id: string) => waves.flatMap((w) => w.packages).find((p) => p.id === id)?.files ?? [];
+    const remaining = [...owned('N4-05'), ...owned('N4-06')];
+    expect(remaining).toEqual(expect.arrayContaining(['worker/test/ingest/', 'worker/test/read/']));
+    const ownedByRemaining = (file: string) =>
+      remaining.some((o) => (o.endsWith('/') ? file.startsWith(o) : file === o));
+    const callers = filesUnder('worker/test')
+      // This file names stubFor in its own regular expression; it never calls it.
+      .filter((f) => !f.includes('/.tsbuild/') && f !== ALLOWED_EDGE.from && f !== THIS_FILE)
+      .filter((f) => {
+        const src = read(f);
+        const importsSupport = importsOf(src).some((i) => {
+          const t = resolveImport(f, i.spec, REPO.exists);
+          return t.kind === 'file' && t.path === ALLOWED_EDGE.from;
+        });
+        return importsSupport && /(?<![\w$.])stubFor(?![\w$])/.test(codeOnly(src));
+      });
+    expect(callers.length).toBeGreaterThanOrEqual(10);
+    expect(callers).toEqual(
+      expect.arrayContaining(['worker/test/ingest/accounts.test.ts', 'worker/test/write/apply-record.test.ts']),
+    );
+    expect(callers.filter((f) => !ownedByRemaining(f))).toEqual([]);
+    expect(callers.filter((f) => files.includes(f))).toEqual([]);
 
     // The detector finds every form, and nothing in comments, strings or other names.
     const bad = [
@@ -425,6 +675,78 @@ describe('N4-04 de-shim: harness, storage and shared helpers', () => {
       "import { withIndex } from '../node/support/with-index';",
     ].join('\n');
     expect(shimViolations('fine.ts', fine)).toEqual([]);
+
+    // By path: the shim files and the shimmed harness are reported however the
+    // path is spelled, and from any file other than support.ts the allowed
+    // target is as forbidden as the rest.
+    const byPath = [
+      "import { env } from '../node/support/cloudflare-workers-shim';",
+      "import { runInDurableObject } from '../node/support/cloudflare-test-shim.ts';",
+      "type E = typeof import('../node/support/cloudflare-workers-shim.js')['env'];",
+      "const { makeLocalIndex } = await import('../harness/local-index');",
+      "import type { HarnessDO } from '../harness/harness-do';",
+      "import { openDoStorage } from '../node/support/do-storage-facade';",
+      "import { withIndex } from '../node/support/with-index';",
+    ].join('\n');
+    const at = 'worker/test/storage/by-path.test.ts';
+    expect(shimViolations(at, byPath)).toEqual([
+      `${at}:1 imports worker/test/node/support/cloudflare-workers-shim.ts`,
+      `${at}:2 imports worker/test/node/support/cloudflare-test-shim.ts`,
+      `${at}:3 imports worker/test/node/support/cloudflare-workers-shim.ts`,
+      `${at}:4 imports worker/test/harness/local-index.ts`,
+      `${at}:5 imports worker/test/harness/harness-do.ts`,
+      `${at}:6 imports worker/test/node/support/do-storage-facade.ts`,
+    ]);
+    expect(shimReach([at], overlay({ [at]: byPath })).violations).toHaveLength(6);
+
+    // Transitively: a file that reaches the shim through helpers, by specifier
+    // or by path, is reported with the chain, and a relative import that does
+    // not resolve is reported rather than skipped.
+    const virtual = overlay({
+      'worker/test/storage/v-root.test.ts':
+        "import { a } from './v-a';\nimport { b } from '../write/v-b.js';\nimport { c } from './v-missing';",
+      'worker/test/storage/v-a.ts': "export { x } from './v-c';",
+      'worker/test/storage/v-c.ts': "import { env } from 'cloudflare:workers';",
+      'worker/test/write/v-b.ts': "\nimport { SELF } from '../node/support/cloudflare-test-shim';",
+    });
+    expect(shimReach(['worker/test/storage/v-root.test.ts'], virtual).violations).toEqual([
+      'worker/test/storage/v-root.test.ts:3 imports ./v-missing, which does not resolve',
+      'worker/test/storage/v-root.test.ts -> worker/test/write/v-b.ts:2 imports worker/test/node/support/cloudflare-test-shim.ts',
+      'worker/test/storage/v-root.test.ts -> worker/test/storage/v-a.ts -> worker/test/storage/v-c.ts:1 imports cloudflare:workers',
+    ]);
+    // ALLOWED_EDGE is one edge, not a whitelisted file: support.ts's own shim
+    // import is recorded, not reported, and the shim is never walked into.
+    const viaSupport = overlay({
+      'worker/test/storage/v-support.test.ts': "import { seedUser } from '../write/support';",
+    });
+    const supportReach = shimReach(['worker/test/storage/v-support.test.ts'], viaSupport);
+    expect(supportReach.violations).toEqual([]);
+    expect(supportReach.allowed).toEqual([`${ALLOWED_EDGE.from}:46`, `${ALLOWED_EDGE.from}:52`]);
+    expect(supportReach.closure).toContain(ALLOWED_EDGE.from);
+    expect(supportReach.closure).not.toContain(ALLOWED_EDGE.to);
+    // The workspace packages resolve through their exports and are walked too.
+    const pkg = overlay({
+      'worker/test/storage/v-pkg.test.ts':
+        "import { fixedClock } from '@atmusic/core/test-support/clock';\nimport { x } from '@atmusic/core/v-pkg-shim';",
+      'packages/core/src/v-pkg-shim.ts': "import 'cloudflare:test';",
+    });
+    const pkgReach = shimReach(['worker/test/storage/v-pkg.test.ts'], pkg);
+    expect(pkgReach.violations).toEqual([
+      'worker/test/storage/v-pkg.test.ts -> packages/core/src/v-pkg-shim.ts:1 imports cloudflare:test',
+    ]);
+    expect(pkgReach.closure).toContain('packages/core/test-support/clock.ts');
+    // Before review round 1, schema-v2.test.ts imported readFixture from
+    // worker/test/read/scrobble-read-support.ts, which reaches the shim
+    // (shimmed until N4-06): that import is reported.
+    const schemaV2Before = overlay({
+      'worker/test/storage/v-schema-v2.test.ts': "import { readFixture } from '../read/scrobble-read-support';",
+    });
+    const readSupport = shimReach(['worker/test/storage/v-schema-v2.test.ts'], schemaV2Before);
+    if (/from 'cloudflare:test'/.test(read('worker/test/read/scrobble-read-support.ts'))) {
+      expect(readSupport.violations).toContain(
+        'worker/test/storage/v-schema-v2.test.ts -> worker/test/read/scrobble-read-support.ts:17 imports cloudflare:test',
+      );
+    }
 
     // Before this package the same files did import the shim modules and use WebSocketPair.
     const before = atWaveStart('worker/test/storage/migrate.test.ts');
