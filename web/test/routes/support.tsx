@@ -367,8 +367,13 @@ export function mount(path: string, state: AppState, services: ScreenServices): 
   };
 }
 
-/** Waits until `fn` stops throwing (real timers; nothing here sleeps on the frozen clock). */
-export function until<T>(fn: () => T, timeout = 2_000): Promise<T> {
+/**
+ * Waits until `fn` stops throwing (real timers; nothing here sleeps on the frozen clock).
+ * The default stays under vitest's 5 s test timeout but leaves room for the
+ * full gate, where the web project shares the CPU with the scripts project's
+ * build and type-check subprocesses.
+ */
+export function until<T>(fn: () => T, timeout = 4_000): Promise<T> {
   return vi.waitFor(fn, { timeout, interval: 5 });
 }
 
