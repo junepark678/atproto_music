@@ -1,34 +1,41 @@
-// W5-01 log redaction (M6.2.2/log_redaction, M6.2.2/metrics_auth): every
-// console line the production Worker and IndexDO write (Workers Logs) while
-// they ingest, serve, refuse and fail, captured in the shared isolate, plus
-// every error body served meanwhile. There are no OAuth codes or cookies to
-// mark (A3): the secrets are CURSOR_KEY and ADMIN_TOKEN, a presented bearer
-// token, and record contents (a track title).
+// W5-01 log redaction on the Node host (ported by N4-03; M6.2.2/log_redaction,
+// M6.2.2/metrics_auth; ADR 0005 §3.10, §13): every line the production logger
+// writes (journald JSON lines; support.ts captures them through compose's
+// `log` option with the redactions run() derives from the secrets) and every
+// console line, while the composition ingests, serves, refuses and fails,
+// plus every error body served meanwhile. The secrets are the cursor key (and
+// the other key material of the secrets file), an admin bearer token
+// presented on the TCP listener (admin lives on the unix socket, ADR §3.11),
+// a bearer marker, and record contents (a track title).
 
+import { EventEmitter } from 'node:events';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { type FixtureTransport, routerTransport } from '@atmusic/atproto/test-support/router-transport';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { envLogger, INDEX_ERROR_MESSAGE, INDEX_ERROR_NAME } from '../../src/do/index-do';
-import { flush, jetstreamServer } from '../fixtures/jetstream-server';
+import { createLogger, INDEX_ERROR_MESSAGE, INDEX_ERROR_NAME } from '../../src/app/index-core';
+import { type ExitCode, run } from '../../src/node/run';
+import { captureLog, manualTimers, refusingJetstream, testSecretsDocument } from '../node/support/app';
+import { flush, jetstreamServer } from './jetstream';
 import {
-  ADMIN_TOKEN,
   ALICE,
   activeUsers,
-  alarmsUntil,
-  CURSOR_KEY_HEX,
-  compositionEnv,
+  closeHarnesses,
   control,
   type HttpResult,
   harness,
-  inDo,
+  harnessEnv,
   kitControl,
-  postJson,
-  runAlarm,
+  redactionsOf,
   SCROBBLE,
   uriOf,
 } from './support';
 
 const TRACK_MARKER = 'TRACK-TITLE-MARKER-5b1f';
 const BEARER_MARKER = 'BEARER-MARKER-9c2e-0123456789abcdef';
-const BAD_CURSOR_KEY = 'CURSOR-KEY-MARKER-not-hex-77aa77aa77aa77aa77aa77aa77aa77aa';
+const ADMIN_TOKEN = 'admin-token-0123456789abcdef0123456789abcdef';
+const BAD_CURSOR_KEY = 'CURSOR-KEY-MARKER-not-base64-77aa77aa77aa77aa77aa77aa77aa77aa';
 
 function record(listenedAt: string, n: number) {
   return {
@@ -41,25 +48,32 @@ function record(listenedAt: string, n: number) {
   };
 }
 
+const dirs: string[] = [];
+
 describe('log redaction', () => {
-  const lines: string[] = [];
+  const consoleLines: string[] = [];
   beforeEach(() => {
-    lines.length = 0;
+    consoleLines.length = 0;
     for (const level of ['log', 'info', 'warn', 'error', 'debug'] as const) {
       vi.spyOn(console, level).mockImplementation((...args: unknown[]) => {
-        lines.push(args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' '));
+        consoleLines.push(args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' '));
       });
     }
   });
-  afterEach(() => {
+  afterEach(async () => {
     vi.restoreAllMocks();
+    await closeHarnesses();
+    for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
   });
 
   it('captured logs and error bodies contain no CURSOR_KEY, ADMIN_TOKEN or bearer marker and logs contain no track-title marker', async () => {
-    const kit = await kitControl({ env: { INGEST_MODE: 'socket', ADMIN_TOKEN } });
+    const kit = await kitControl({ env: { INGEST_MODE: 'socket' } });
     const js = jetstreamServer({ clock: kit.clock, fakes: [kit.jetstream] });
     control.connectJetstream = js.connect;
-    const h = harness('logging', { ADMIN_TOKEN });
+    const h = await harness('logging');
+    const secrets = redactionsOf(h.secrets);
+    const cursorBase64 = Buffer.from(h.secrets.cursorKey).toString('base64');
+    const cursorHex = Buffer.from(h.secrets.cursorKey).toString('hex');
     const responses: HttpResult[] = [];
     const req = async (p: Promise<HttpResult>) => {
       const r = await p;
@@ -69,28 +83,21 @@ describe('log redaction', () => {
 
     // Socket connect, then a commit carrying the marker title: hint → admission → snapshot.
     await req(h.request('/health/ready'));
-    expect(await runAlarm(h.stub)).toBe(true);
+    expect(await h.runAlarm()).toBe(true);
     await flush();
-    await inDo(h.stub, () => kit.createRecord('Alice', SCROBBLE, 'm1', record('2026-01-15T11:58:00Z', 1)));
+    await kit.createRecord('Alice', SCROBBLE, 'm1', record('2026-01-15T11:58:00Z', 1));
     await flush();
-    await alarmsUntil(h, () => inDo(h.stub, (_i, db) => activeUsers(db).includes(ALICE)));
+    await h.alarmsUntil((db) => activeUsers(db).includes(ALICE));
     // A second one through notify and the drain, and one the validator excludes (+300 s bound).
-    await inDo(h.stub, () => kit.createRecord('Alice', SCROBBLE, 'm2', record('2026-01-15T12:00:30Z', 2)));
-    await inDo(h.stub, () => kit.createRecord('Alice', SCROBBLE, 'm3', record('2027-06-01T00:00:00Z', 3)));
+    await kit.createRecord('Alice', SCROBBLE, 'm2', record('2026-01-15T12:00:30Z', 2));
+    await kit.createRecord('Alice', SCROBBLE, 'm3', record('2027-06-01T00:00:00Z', 3));
     await flush();
-    await req(postJson(h, '/api/v1/notify', { uri: uriOf(ALICE, 'm2') }, { ip: '198.51.100.9' }));
-    await alarmsUntil(h, () =>
-      inDo(
-        h.stub,
-        (_i, db) =>
-          db.all('SELECT uri FROM record_state WHERE uri IN (?, ?)', uriOf(ALICE, 'm2'), uriOf(ALICE, 'm3')).length ===
-          2,
-      ),
+    await req(h.postJson('/api/v1/notify', { uri: uriOf(ALICE, 'm2') }, { ip: '198.51.100.9' }));
+    await h.alarmsUntil(
+      (db) =>
+        db.all('SELECT uri FROM record_state WHERE uri IN (?, ?)', uriOf(ALICE, 'm2'), uriOf(ALICE, 'm3')).length === 2,
     );
-    const states = await inDo(h.stub, (_i, db) =>
-      db.all('SELECT uri, state FROM record_state WHERE did = ? ORDER BY uri', ALICE),
-    );
-    expect(states).toEqual([
+    expect(h.db.all('SELECT uri, state FROM record_state WHERE did = ? ORDER BY uri', ALICE)).toEqual([
       { uri: uriOf(ALICE, 'm1'), state: 'present' },
       { uri: uriOf(ALICE, 'm2'), state: 'present' },
       { uri: uriOf(ALICE, 'm3'), state: 'excluded' },
@@ -98,27 +105,27 @@ describe('log redaction', () => {
     const read = await req(h.request(`/api/v1/users/${ALICE}/scrobbles`));
     expect(read.text).toContain(TRACK_MARKER); // the marker is really in the index
 
-    // Admin: a wrong bearer (the marker), the right one, and a bearer on a public route.
+    // Admin on the TCP listener: whatever bearer is presented, the JSON 404 (ADR §3.11);
+    // and a bearer on a public route.
     const denied = await req(
       h.request('/internal/admin/status', { headers: { authorization: `Bearer ${BEARER_MARKER}` } }),
     );
-    expect(denied.status).toBe(401);
-    const allowed = await req(
+    expect(denied.status).toBe(404);
+    const token = await req(
       h.request('/internal/admin/status', { headers: { authorization: `Bearer ${ADMIN_TOKEN}` } }),
     );
-    expect(allowed.status).toBe(200);
-    await req(h.request('/api/v1/meta', { headers: { authorization: `Bearer ${BEARER_MARKER}` } }));
+    expect(token.status).toBe(404);
+    const meta = await req(h.request('/api/v1/meta', { headers: { authorization: `Bearer ${BEARER_MARKER}` } }));
+    expect(meta.status).toBe(200);
 
     // A storage failure (500), malformed input (400/422) and a socket drop.
     control.dbFault = { match: /FROM scrobbles/, message: `boom ${TRACK_MARKER}`, remaining: 1 };
     expect((await req(h.request(`/api/v1/users/${ALICE}/scrobbles`))).status).toBe(500);
-    // workerd reports a rejected RPC in the DO's own log stream (outside the
-    // console capture) with the error's message and stack, so what crosses the
-    // stub is itself checked: a bare IndexError with no fault text and no DO-side
-    // frame or path (workerd adds only the caller's own frames at the call site).
+    // What leaves IndexCore when a method fails is itself checked: a bare
+    // IndexError with no fault text, frame or path.
     const leak = `SQLITE_IOERR ${TRACK_MARKER} for ${ALICE} at /srv/atmusic/worker/src/do/db.ts:71:20`;
     control.dbFault = { match: /FROM scrobbles/, message: leak, remaining: 1 };
-    const rejected = await h.stub.history({ did: ALICE, limit: 5 }).then(
+    const rejected = await h.core.history({ did: ALICE, limit: 5 }).then(
       () => null,
       (error: unknown) => error,
     );
@@ -126,13 +133,14 @@ describe('log redaction', () => {
     expect(rejected).toBeInstanceOf(Error);
     const { name, message, stack } = rejected as Error;
     expect({ name, message }).toEqual({ name: INDEX_ERROR_NAME, message: INDEX_ERROR_MESSAGE });
+    expect(String(stack)).toBe(`${INDEX_ERROR_NAME}: ${INDEX_ERROR_MESSAGE}`);
     for (const text of [message, String(stack), JSON.stringify(rejected)]) {
-      for (const needle of [TRACK_MARKER, ALICE, '/srv/', 'worker/src/', 'entry.ts', 'SQLITE']) {
+      for (const needle of [TRACK_MARKER, ALICE, '/srv/', 'worker/src/', 'support.ts', 'SQLITE']) {
         expect([needle, text.includes(needle) ? text : false]).toEqual([needle, false]);
       }
     }
     // Argument validation keeps its name and message, but still no frames.
-    const invalid = await h.stub.history({ did: ALICE, limit: 0 }).then(
+    const invalid = await h.core.history({ did: ALICE, limit: 0 }).then(
       () => null,
       (error: unknown) => error as Error,
     );
@@ -141,20 +149,56 @@ describe('log redaction', () => {
     expect(String(invalid?.stack)).not.toContain('worker/src/');
     expect((await req(h.request(`/api/v1/users/${ALICE}/scrobbles?cursor=${BEARER_MARKER}`))).status).toBe(400);
     expect((await req(h.request(`/api/v1/feed?scope=following&viewer=${BEARER_MARKER}`))).status).toBe(422);
-    await inDo(h.stub, () => js.last().close(1011, `server error ${BEARER_MARKER}`));
+    js.last().close(1011, `server error ${BEARER_MARKER}`);
     await flush();
+    // gc runs (its report is logged), so the alarm path's own lines are captured too.
+    control.clock.advance(86_400_000);
+    await h.alarmsUntil(() => h.core.lastAlarm?.ran.includes('gc') === true, { max: 3 });
 
-    // A CURSOR_KEY that does not parse: 503, logged without its value.
-    const badKey = harness('logging-bad-key', { CURSOR_KEY: BAD_CURSOR_KEY });
-    expect((await req(badKey.request('/api/v1/meta'))).status).toBe(503);
+    // A cursor key that does not parse: the process refuses to start (78), naming only the field.
+    const dir = mkdtempSync(join(tmpdir(), 'atmusic-badkey-'));
+    dirs.push(dir);
+    mkdirSync(join(dir, 'web', 'dist'), { recursive: true });
+    writeFileSync(join(dir, 'web', 'dist', 'index.html'), '<!doctype html><title>t</title>');
+    const secretsFile = join(dir, 'secrets.json');
+    writeFileSync(secretsFile, JSON.stringify({ ...testSecretsDocument(), cursorKey: BAD_CURSOR_KEY }));
+    chmodSync(secretsFile, 0o600);
+    const badKeyLog = captureLog();
+    const stderr: string[] = [];
+    const exits: ExitCode[] = [];
+    const code = await run({
+      argv: ['node', 'main.mjs'],
+      env: { ...harnessEnv(dir), ATMUSIC_ASSETS_DIR: join(dir, 'web', 'dist'), ATMUSIC_SECRETS_FILE: secretsFile },
+      exit: (c) => exits.push(c),
+      log: badKeyLog.logger,
+      stdout: () => {},
+      stderr: (text) => stderr.push(text),
+      configOptions: { fixtureOrigins: true, allowFixturePrefix: true },
+      transport: routerTransport({}) as FixtureTransport,
+      connectJetstream: refusingJetstream(),
+      timers: manualTimers(),
+      signals: new EventEmitter(),
+    });
+    expect([code, exits]).toEqual([78, [78]]);
+    expect(badKeyLog.logs).toEqual([{ level: 'error', event: 'run.config_error', fields: ['cursorKey'] }]);
+    expect(stderr.join('')).toMatch(/^atmusic: configuration error: cursorKey: /);
 
-    // Even a careless call site cannot leak a secret through the production logger.
-    envLogger({ ...compositionEnv, ADMIN_TOKEN }).log('error', 'careless', {
-      detail: `token=${ADMIN_TOKEN} key=${CURSOR_KEY_HEX} upper=${CURSOR_KEY_HEX.toUpperCase()} Bearer ${BEARER_MARKER}`,
+    // Even a careless call site cannot leak a secret through the production logger:
+    // the key material wherever it occurs, any bearer value, any credential-named field.
+    // (The Node host holds no admin token; one only ever arrives as a presented bearer.)
+    const careless = captureLog(secrets);
+    careless.logger.log('error', 'careless', {
+      detail: `key=${cursorBase64} hex=${cursorHex} upper=${cursorHex.toUpperCase()} Bearer ${BEARER_MARKER} then Bearer ${ADMIN_TOKEN}`,
       authorization: `Bearer ${BEARER_MARKER}`,
     });
+    createLogger(secrets, { log: () => {}, warn: () => {}, error: (line) => consoleLines.push(line) }).log(
+      'error',
+      'careless',
+      { detail: `Bearer ${ADMIN_TOKEN} key=${cursorHex}` },
+    );
 
     // The capture is not vacuous: the flows above did log.
+    const lines = [...h.log.lines, ...badKeyLog.lines, ...careless.lines, ...consoleLines, ...stderr];
     const events = new Set(
       lines.flatMap((l) => {
         try {
@@ -170,33 +214,39 @@ describe('log redaction', () => {
       'snapshot.finished',
       'request.server_error',
       'index.rpc_failed',
-      'config.cursor_key_invalid',
+      'run.config_error',
       'gc.done',
+      'request',
       'careless',
     ]) {
       expect([event, events.has(event)]).toEqual([event, true]);
     }
-    const rpcFailed = lines.filter((l) => l.includes('"index.rpc_failed"')).map((l) => JSON.parse(l));
+    const rpcFailed = h.log.logs.filter((l) => l.event === 'index.rpc_failed');
     expect(rpcFailed).toEqual([
       { method: 'history', error: 'Error', level: 'error', event: 'index.rpc_failed' },
       { method: 'history', error: 'Error', level: 'error', event: 'index.rpc_failed' },
     ]);
-    const careless = lines.find((l) => l.includes('"careless"')) ?? '';
-    expect(careless).toContain('[redacted]');
+    expect(careless.lines[0]).toContain('[redacted]');
+    expect(careless.logs[0]?.authorization).toBe('[redacted]');
+    // Request lines never carry a query string (the cursor and viewer markers were in queries).
+    const requestLines = h.log.logs.filter((l) => l.event === 'request');
+    expect(requestLines.length).toBeGreaterThan(5);
+    expect(requestLines.every((l) => !JSON.stringify(l).includes('?'))).toBe(true);
 
-    const secrets = [CURSOR_KEY_HEX, CURSOR_KEY_HEX.toUpperCase(), ADMIN_TOKEN, BEARER_MARKER, BAD_CURSOR_KEY];
+    const needles = [...secrets, ADMIN_TOKEN, BEARER_MARKER, BAD_CURSOR_KEY, cursorHex.toUpperCase()];
+    expect(needles.length).toBeGreaterThanOrEqual(9);
     for (const line of lines) {
-      for (const needle of [...secrets, TRACK_MARKER]) {
+      for (const needle of [...needles, TRACK_MARKER]) {
         expect([needle, line.includes(needle)]).toEqual([needle, false]);
       }
     }
     const errors = responses.filter((r) => r.status >= 400);
-    expect(errors.map((r) => r.status).sort()).toEqual([400, 401, 422, 500, 503]);
+    expect(errors.map((r) => r.status).sort()).toEqual([400, 404, 404, 422, 500]);
     for (const r of errors) {
-      for (const needle of secrets)
+      for (const needle of needles)
         expect([r.status, needle, r.text.includes(needle)]).toEqual([r.status, needle, false]);
       expect(r.text).not.toContain(TRACK_MARKER);
     }
-    expect(allowed.text).not.toContain(ADMIN_TOKEN);
+    expect(meta.text).not.toContain(BEARER_MARKER);
   });
 });

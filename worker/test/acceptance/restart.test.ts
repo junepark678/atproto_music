@@ -1,26 +1,29 @@
-// W6-01 restart acceptance (ADR 0004 §10.2 "Restart", A18; TESTING.md "A
-// restart is a Durable Object eviction that keeps its storage"). Proves
-// M4.4.2/worker_restart, M5.4.3/durable_views, M5.4.3/durable_cursor,
+// W6-01 restart acceptance on the Node host (ported by N4-03; ADR 0004
+// §10.2 "Restart", ADR 0005 §15.1; TESTING.md "restart reopens same storage").
+// Proves M4.4.2/worker_restart, M5.4.3/durable_views, M5.4.3/durable_cursor,
 // M6.4.2/packaged_recovery, M7.4.2/browser_restart and the acceptance half of
 // M5.4.3/durable_delete.
 //
-// The seeded IndexDO holds a live Jetstream socket and a durable but not yet
-// drained hint when its instance dies (DO eviction; the fixture's `sever()`
-// stands in for the platform tearing the socket down with the instance). The
-// restarted instance must reopen the same storage: every table byte-identical
-// except the one write a restart is specified to make (the socket's 1→0
-// `connected` transition), responses byte-identical, a cursor issued before
-// the restart continuing, and the alarm resuming the socket from the stored
-// cursor and draining the pending hint.
+// The seeded composition holds a live Jetstream socket and a durable but not
+// yet drained hint when its process dies (the fixture's `sever()` stands in
+// for the socket dying with the process; nothing is written on the way down).
+// Restart is close-and-reopen of the same database file plus a recomposed
+// app: every table byte-identical except the one write a restart is
+// specified to make (the socket's 1→0 `connected` transition, by
+// noteRestart), responses byte-identical, a cursor issued before the restart
+// continuing, and the core alarm resuming the socket from the stored cursor
+// and draining the pending hint.
 
-import { evictDurableObject } from 'cloudflare:test';
-import { describe, expect, it } from 'vitest';
+import { statSync } from 'node:fs';
+import { afterEach, describe, expect, it } from 'vitest';
+import { closeHarnesses } from '../composition/support';
 import {
   ALICE,
   AS_OF_MS,
   allTables,
   BOB,
   CAROL,
+  flush,
   GET_RECORD,
   inSocket,
   rkeyOf,
@@ -36,7 +39,9 @@ const enc = encodeURIComponent;
 const rkeys = (body: Json): string[] => (body.items as Array<{ uri: string }>).map((s) => rkeyOf(s.uri));
 
 describe('restart acceptance', () => {
-  it('eviction preserves byte-identical tables, pre-restart cursor continues, alarm resumes', async () => {
+  afterEach(closeHarnesses);
+
+  it('restart reopens the same database file: projection tables and responses are byte-identical, a pre-restart cursor continues and timers resume', async () => {
     const a = await seedAcceptance('restart');
     const READS = [
       `/api/v1/users/${ALICE}/scrobbles?limit=100`,
@@ -64,7 +69,7 @@ describe('restart acceptance', () => {
     expect(rkeys(page1.body)).toEqual(['r07', 'r01']);
     const cursor = (page1.body as Json).nextCursor as string;
 
-    // Work that is durable but not done when the instance dies: a commit whose
+    // Work that is durable but not done when the process dies: a commit whose
     // Jetstream event is a hint the drain has not yet verified.
     const r11 = await inSocket(a, () =>
       a.kit.createRecord('Alice', SCROBBLE, 'r11', {
@@ -87,19 +92,23 @@ describe('restart acceptance', () => {
     expect(checkpoint[0]).toMatchObject({ connected: 1, mode: 'socket' });
     const storedCursor = checkpoint[0]?.cursor as number;
     expect(storedCursor).toBe(a.kit.jetstream.events.at(-1)?.seq);
+    const file = statSync(a.h.dbPath);
+    const port = a.h.address.port;
 
-    // The instance dies with its socket.
+    // The process dies with its socket, and starts again on the same file.
     a.kit.resetCalls();
-    await a.inDo(() => a.js.sever());
-    await evictDurableObject(a.stub);
+    a.js.sever();
+    await flush();
     const attempts = a.js.attempts.length;
+    await a.restart();
 
-    // The new instance reopened the same storage.
-    const after = await a.inDo((db, h, state) => ({
+    // The new composition reopened the same database file.
+    expect(statSync(a.h.dbPath).ino).toBe(file.ino);
+    expect(a.h.address.port).not.toBe(port);
+    const after = await a.inDo((db, h) => ({
       tables: allTables(db),
       constructed: h.constructed,
-      armed: h.armed.at(-1),
-      realAlarm: state.storage.getAlarm(),
+      armed: h.armed,
     }));
     expect(after.constructed).toBe(2);
     expect(a.kit.clock.nowMs()).toBe(AS_OF_MS);
@@ -107,17 +116,17 @@ describe('restart acceptance', () => {
     // exactly the restart's recorded socket drop.
     const { ingest_checkpoint: ckAfter, ...restAfter } = after.tables;
     const { ingest_checkpoint: ckBefore, ...restBefore } = before.tables;
+    expect(Object.keys(restAfter).length).toBeGreaterThan(10);
     expect(JSON.stringify(restAfter)).toBe(JSON.stringify(restBefore));
     expect(ckAfter).toEqual([
       { ...(ckBefore as Array<Record<string, unknown>>)[0], connected: 0, updated_at_ms: AS_OF_MS },
     ]);
-    // The alarm is re-armed at min(due_at): the watchdog, already due, which reconnects.
+    // The core alarm is re-armed at min(due_at): the watchdog, already due, which reconnects.
     const timers = after.tables.timers as Array<{ name: string; due_at: number }>;
     const next = Math.min(...timers.map((t) => t.due_at));
     expect(timers.find((t) => t.due_at === next)?.name).toBe('jetstream-watchdog');
     expect(next).toBeLessThanOrEqual(AS_OF_MS);
     expect(after.armed).toBe(next);
-    expect(await after.realAlarm).not.toBeNull();
     // Nothing reached the network on the way down or up.
     expect(a.kit.transport.calls.entries).toEqual([]);
     expect(a.js.attempts.length).toBe(attempts);
@@ -138,7 +147,7 @@ describe('restart acceptance', () => {
     expect(page2.status).toBe(200);
     expect(rkeys(page2.body)).toEqual(['r02', 'r03']);
 
-    // The alarm resumes: it reconnects from the stored cursor and drains the pending hint.
+    // The timers resume: the alarm reconnects from the stored cursor and drains the pending hint.
     expect(await a.alarm()).toBe(true);
     const reconnect = a.js.attempts.slice(attempts);
     expect(reconnect.map((x) => [x.cursor, x.status])).toEqual([[storedCursor, 101]]);

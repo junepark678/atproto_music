@@ -1463,7 +1463,9 @@
         "query plans"
       ],
       "title": "100×1,000 seeded records: history/feed/stats plans use indexes; negative control scans",
-      "kept": true
+      "replaced": "worker/test/acceptance/query-plans.test.ts › query plans › with 100 DIDs x 1,000 records, history, feeds and stats use their indexes on SQLite 3.54.1 and the no-index control shows SCAN",
+      "reason": "ADR 0005 §15.3 (N4-03): the same plans are pinned on the SQLite of the Node host (3.54.1, asserted) through the production Node composition instead of DO SQLite.",
+      "package": "N4-03"
     },
     {
       "id": "worker/test/acceptance/read-model-acceptance.test.ts › read-model acceptance › Alice history exact order and limit-2 pages over HTTP",
@@ -1535,7 +1537,9 @@
         "restart acceptance"
       ],
       "title": "eviction preserves byte-identical tables, pre-restart cursor continues, alarm resumes",
-      "kept": true
+      "replaced": "worker/test/acceptance/restart.test.ts › restart acceptance › restart reopens the same database file: projection tables and responses are byte-identical, a pre-restart cursor continues and timers resume",
+      "reason": "ADR 0005 §15.1, §15.3 (N4-03): a restart is close-and-reopen of the same database file plus a recomposed app (TESTING.md \"restart reopens same storage\") instead of DO eviction.",
+      "package": "N4-03"
     },
     {
       "id": "worker/test/acceptance/security.test.ts › security acceptance › notify abuse limits, SSRF fixture private DoH answer refused, redirect refused, no test seam reachable",
@@ -1544,7 +1548,9 @@
         "security acceptance"
       ],
       "title": "notify abuse limits, SSRF fixture private DoH answer refused, redirect refused, no test seam reachable",
-      "kept": true
+      "kept": true,
+      "change": "ADR 0005 §3.9, §13, §15.3 (N4-03): \"no test seam\" is shown on the Node host: the production route table and dispatcher answer the probes with the JSON 404, IndexCore has no control method, run() without the test-only config options exits 78 naming LEXICON_PREFIX, and the source scan adds fixtureOrigins: true and routerTransport; title kept.",
+      "package": "N4-03"
     },
     {
       "id": "worker/test/acceptance/security.test.ts › security acceptance › notify returns 503 when IndexDO is unavailable",
@@ -1553,7 +1559,9 @@
         "security acceptance"
       ],
       "title": "notify returns 503 when IndexDO is unavailable",
-      "kept": true
+      "kept": true,
+      "change": "ADR 0005 §15.3 (N4-03): the unavailable index is a Node composition over a never-migrated database (IndexCore not started) and a storage fault injected through the Db interface instead of the refusing production IndexDO and an overloaded DO stub; title kept.",
+      "package": "N4-03"
     },
     {
       "id": "worker/test/bench/read-models.bench.test.ts › read-model benchmark › seeded generator yields exactly 100,000 valid active rows with the documented per-user distribution",
@@ -1571,7 +1579,9 @@
         "read-model benchmark"
       ],
       "title": "history/feed page statement rows read within ADR Q10 budgets",
-      "kept": true
+      "replaced": "worker/test/bench/read-models.bench.test.ts › read-model benchmark › the read-model bench records p50 and p95 for history, feed and stats on node:sqlite and asserts their query plans",
+      "reason": "ADR 0005 §15.3 (N4-03): node:sqlite has no rows-read counter; the ADR 0004 §15 Q10 rows-read budgets become EXPLAIN QUERY PLAN assertions on SQLite 3.54.1, with p50 and p95 timings reported.",
+      "package": "N4-03"
     },
     {
       "id": "worker/test/bench/read-models.bench.test.ts › read-model benchmark › stats cache hit within ADR Q10 probe budget and equals uncached result",
@@ -1580,7 +1590,9 @@
         "read-model benchmark"
       ],
       "title": "stats cache hit within ADR Q10 probe budget and equals uncached result",
-      "kept": true
+      "kept": true,
+      "change": "ADR 0005 §15.3 (N4-03): the probe budget is the count of the hit's statements, each an indexed SEARCH by EXPLAIN QUERY PLAN; node:sqlite has no rows-read counter, so the per-statement rows-read bounds of the miss are dropped; title kept.",
+      "package": "N4-03"
     },
     {
       "id": "worker/test/bench/read-models.bench.test.ts › read-model benchmark › 600 measured requests with zero errors report p95 and check it against the target",
@@ -1589,7 +1601,9 @@
         "read-model benchmark"
       ],
       "title": "600 measured requests with zero errors report p95 and check it against the target",
-      "kept": true
+      "kept": true,
+      "change": "ADR 0005 §15.3 (N4-03): the requests go through the HTTP bridge of the production Node composition instead of createWorker and JS RPC; title kept.",
+      "package": "N4-03"
     },
     {
       "id": "worker/test/bench/read-models.bench.test.ts › read-model benchmark › benchmark JSON is produced and schema-valid",
@@ -1598,7 +1612,9 @@
         "read-model benchmark"
       ],
       "title": "benchmark JSON is produced and schema-valid",
-      "kept": true
+      "kept": true,
+      "change": "ADR 0005 §15.3 (N4-03): report schema @3 (plans and p50/p95 timings instead of rows-read budgets; node and sqlite versions instead of the Workers toolchain); the suite writes the file through writeReport instead of the BENCH_SINK service binding; title kept.",
+      "package": "N4-03"
     },
     {
       "id": "worker/test/composition/admin.test.ts › worker/src/http/admin.ts › admin routes 404 without ADMIN_TOKEN; wrong token 401 constant-time; status JSON shape",
@@ -1607,7 +1623,9 @@
         "worker/src/http/admin.ts"
       ],
       "title": "admin routes 404 without ADMIN_TOKEN; wrong token 401 constant-time; status JSON shape",
-      "kept": true
+      "replaced": "worker/test/composition/admin.test.ts › worker/src/node/admin-socket.ts › admin status over the unix socket returns the AdminStatus shape of a fresh index, and /internal/admin/status on the TCP listener is the JSON 404",
+      "reason": "ADR 0005 §3.11 (N4-03): admin moves from the Workers TCP route and ADMIN_TOKEN to the admin unix socket, whose filesystem permissions are the authentication; the TCP listener answers every /internal/ path with the JSON 404 before routing (N7-01 deletes the TCP route).",
+      "package": "N4-03"
     },
     {
       "id": "worker/test/composition/index-do.test.ts › worker/src/do/index-do.ts › constructor migrates, marks disconnected, arms alarm; alarm runs drain before snapshot",
@@ -1616,7 +1634,9 @@
         "worker/src/do/index-do.ts"
       ],
       "title": "constructor migrates, marks disconnected, arms alarm; alarm runs drain before snapshot",
-      "kept": true
+      "replaced": "worker/test/composition/index-core-node.test.ts › worker/src/app/index-core.ts on the Node host › composition migrates, marks disconnected, arms the core alarm; the alarm runs drain before snapshot",
+      "reason": "ADR 0005 §2.2, §15.1, §15.3 (N4-03): IndexDO is replaced by IndexCore on the Node host (N7-01 deletes index-do.ts); the suite runs on the production Node composition over node:sqlite, the core NodeAlarm replaces runDurableObjectAlarm, admin status is IndexCore.adminStatus (the admin socket's index half), and restart is close-and-reopen of the same database file plus a recomposed app instead of DO eviction.",
+      "package": "N4-03"
     },
     {
       "id": "worker/test/composition/index-do.test.ts › worker/src/do/index-do.ts › restart (eviction) preserves state and resumes alarm",
@@ -1625,7 +1645,9 @@
         "worker/src/do/index-do.ts"
       ],
       "title": "restart (eviction) preserves state and resumes alarm",
-      "kept": true
+      "replaced": "worker/test/composition/index-core-node.test.ts › worker/src/app/index-core.ts on the Node host › restart (close and reopen of the database file) preserves state and resumes the alarm",
+      "reason": "ADR 0005 §2.2, §15.1, §15.3 (N4-03): IndexDO is replaced by IndexCore on the Node host (N7-01 deletes index-do.ts); the suite runs on the production Node composition over node:sqlite, the core NodeAlarm replaces runDurableObjectAlarm, admin status is IndexCore.adminStatus (the admin socket's index half), and restart is close-and-reopen of the same database file plus a recomposed app instead of DO eviction.",
+      "package": "N4-03"
     },
     {
       "id": "worker/test/composition/index-do.test.ts › worker/src/do/index-do.ts › status truth through production writers: a fake Jetstream commit applied by the alarm raises admin status lastIndexedAt and sets lagSeconds, and after a socket drop and two constructor restarts the state turns stale exactly 5 min after the drop",
@@ -1634,7 +1656,9 @@
         "worker/src/do/index-do.ts"
       ],
       "title": "status truth through production writers: a fake Jetstream commit applied by the alarm raises admin status lastIndexedAt and sets lagSeconds, and after a socket drop and two constructor restarts the state turns stale exactly 5 min after the drop",
-      "kept": true
+      "replaced": "worker/test/composition/index-core-node.test.ts › worker/src/app/index-core.ts on the Node host › status truth through production writers: a fake Jetstream commit applied by the alarm raises admin status lastIndexedAt and sets lagSeconds, and after a socket drop and two restarts the state turns stale exactly 5 min after the drop",
+      "reason": "ADR 0005 §2.2, §15.1, §15.3 (N4-03): IndexDO is replaced by IndexCore on the Node host (N7-01 deletes index-do.ts); the suite runs on the production Node composition over node:sqlite, the core NodeAlarm replaces runDurableObjectAlarm, admin status is IndexCore.adminStatus (the admin socket's index half), and restart is close-and-reopen of the same database file plus a recomposed app instead of DO eviction.",
+      "package": "N4-03"
     },
     {
       "id": "worker/test/composition/index-do.test.ts › worker/src/do/index-do.ts › hints arriving after a drain wait for the 2 s drain floor, which a stream of hints never postpones",
@@ -1643,7 +1667,9 @@
         "worker/src/do/index-do.ts"
       ],
       "title": "hints arriving after a drain wait for the 2 s drain floor, which a stream of hints never postpones",
-      "kept": true
+      "replaced": "worker/test/composition/index-core-node.test.ts › worker/src/app/index-core.ts on the Node host › hints arriving after a drain wait for the 2 s drain floor, which a stream of hints never postpones",
+      "reason": "ADR 0005 §2.2, §15.1, §15.3 (N4-03): IndexDO is replaced by IndexCore on the Node host (N7-01 deletes index-do.ts); the suite runs on the production Node composition over node:sqlite, the core NodeAlarm replaces runDurableObjectAlarm, admin status is IndexCore.adminStatus (the admin socket's index half), and restart is close-and-reopen of the same database file plus a recomposed app instead of DO eviction.",
+      "package": "N4-03"
     },
     {
       "id": "worker/test/composition/index-do.test.ts › worker/src/do/index-do.ts › gap hold and clear commit in one transaction",
@@ -1652,7 +1678,9 @@
         "worker/src/do/index-do.ts"
       ],
       "title": "gap hold and clear commit in one transaction",
-      "kept": true
+      "replaced": "worker/test/composition/index-core-node.test.ts › worker/src/app/index-core.ts on the Node host › gap hold and clear commit in one transaction",
+      "reason": "ADR 0005 §2.2, §15.1, §15.3 (N4-03): IndexDO is replaced by IndexCore on the Node host (N7-01 deletes index-do.ts); the suite runs on the production Node composition over node:sqlite, the core NodeAlarm replaces runDurableObjectAlarm, admin status is IndexCore.adminStatus (the admin socket's index half), and restart is close-and-reopen of the same database file plus a recomposed app instead of DO eviction.",
+      "package": "N4-03"
     },
     {
       "id": "worker/test/composition/index-do.test.ts › worker/src/do/index-do.ts › gc is not blocked by retained hints",
@@ -1661,7 +1689,9 @@
         "worker/src/do/index-do.ts"
       ],
       "title": "gc is not blocked by retained hints",
-      "kept": true
+      "replaced": "worker/test/composition/index-core-node.test.ts › worker/src/app/index-core.ts on the Node host › gc is not blocked by retained hints",
+      "reason": "ADR 0005 §2.2, §15.1, §15.3 (N4-03): IndexDO is replaced by IndexCore on the Node host (N7-01 deletes index-do.ts); the suite runs on the production Node composition over node:sqlite, the core NodeAlarm replaces runDurableObjectAlarm, admin status is IndexCore.adminStatus (the admin socket's index half), and restart is close-and-reopen of the same database file plus a recomposed app instead of DO eviction.",
+      "package": "N4-03"
     },
     {
       "id": "worker/test/composition/logging.test.ts › log redaction › captured logs and error bodies contain no CURSOR_KEY, ADMIN_TOKEN or bearer marker and logs contain no track-title marker",
@@ -1670,7 +1700,9 @@
         "log redaction"
       ],
       "title": "captured logs and error bodies contain no CURSOR_KEY, ADMIN_TOKEN or bearer marker and logs contain no track-title marker",
-      "kept": true
+      "kept": true,
+      "change": "ADR 0005 §3.10, §3.11, §15.3 (N4-03): the secrets are the secrets-file key material (redacted as run() derives it) and a presented admin bearer, which the TCP listener answers with the JSON 404; an unparsable cursor key makes run() exit 78 naming only the field instead of a 503; title kept.",
+      "package": "N4-03"
     },
     {
       "id": "worker/test/composition/routing.test.ts › worker/src/router.ts › every API.md v1.1 route dispatches; unknown /api/x → JSON 404; non-API path → ASSETS",
@@ -1679,7 +1711,9 @@
         "worker/src/router.ts"
       ],
       "title": "every API.md v1.1 route dispatches; unknown /api/x → JSON 404; non-API path → ASSETS",
-      "kept": true
+      "kept": true,
+      "change": "ADR 0005 §3.7, §15.3 (N4-03): ported to the production Node composition; non-API paths are served by the Node static server over a real web/dist (index.html for SPA routes), /oauth/ is a router prefix, the dispatcher's 405 Allow adds HEAD, and \"the index is never reached\" is shown by recording no SQL statement; title kept.",
+      "package": "N4-03"
     },
     {
       "id": "worker/test/composition/routing.test.ts › worker/src/router.ts › inbound x-atmusic-client-ip is stripped and CF-Connecting-IP used",
@@ -1688,7 +1722,9 @@
         "worker/src/router.ts"
       ],
       "title": "inbound x-atmusic-client-ip is stripped and CF-Connecting-IP used",
-      "kept": true
+      "kept": true,
+      "change": "ADR 0005 §3.6, §15.3 (N4-03): the client-IP policy runs in cf-connecting-ip mode from a trusted loopback peer; the bridge drops x-atmusic-* (observed by a test route mounted through compose features) instead of the ASSETS request headers; title kept.",
+      "package": "N4-03"
     },
     {
       "id": "worker/test/composition/routing.test.ts › worker/src/router.ts › forced storage error → 500 envelope with UUID requestId and no stack trace or file path",
@@ -1697,7 +1733,9 @@
         "worker/src/router.ts"
       ],
       "title": "forced storage error → 500 envelope with UUID requestId and no stack trace or file path",
-      "kept": true
+      "kept": true,
+      "change": "ADR 0005 §15.3 (N4-03): the fault is injected through the Db wrapper of the Node composition; title kept.",
+      "package": "N4-03"
     },
     {
       "id": "worker/test/composition/routing.test.ts › worker/src/router.ts › asset miss: SPA route GET/HEAD serves index.html 200, every other miss is JSON not_found with x-request-id",
@@ -1706,7 +1744,9 @@
         "worker/src/router.ts"
       ],
       "title": "asset miss: SPA route GET/HEAD serves index.html 200, every other miss is JSON not_found with x-request-id",
-      "kept": true
+      "kept": true,
+      "change": "ADR 0005 §3.7, §15.3 (N4-03): asserted on the Node static server over a real web/dist: /oauth/callback is a router path, a non-GET/HEAD on an existing file is the 405 envelope with Allow: GET, HEAD, traversal is judged on the raw target, and a missing index.html is the envelope plus an assets.index_unavailable log line; title kept.",
+      "package": "N4-03"
     },
     {
       "id": "worker/test/composition/scheduled.test.ts › worker/src/scheduled.ts › cron re-arms a deleted alarm",
@@ -1715,7 +1755,9 @@
         "worker/src/scheduled.ts"
       ],
       "title": "cron re-arms a deleted alarm",
-      "kept": true
+      "replaced": "worker/test/composition/scheduled.test.ts › worker/src/node/alarm.ts ensureRunning interval › the 5-minute ensureRunning interval re-arms a lost alarm chain",
+      "reason": "ADR 0005 §2.2, §3.3, §15.3 (N4-03): the Workers cron trigger is replaced by the in-process 5-minute ensureRunning interval of the NodeScheduler.",
+      "package": "N4-03"
     },
     {
       "id": "worker/test/composition/scheduled.test.ts › worker/src/scheduled.ts › in pulse mode each cron tick makes a pulse due now, and the alarm runs it",
@@ -1724,7 +1766,9 @@
         "worker/src/scheduled.ts"
       ],
       "title": "in pulse mode each cron tick makes a pulse due now, and the alarm runs it",
-      "kept": true
+      "replaced": "worker/test/composition/scheduled.test.ts › worker/src/node/alarm.ts ensureRunning interval › the 5-minute ensureRunning interval re-arms a lost alarm chain",
+      "reason": "ADR 0005 §2.2, §15.3, B17 (N4-03): there is no cron on the Node host and parseNodeConfig admits INGEST_MODE socket and off only, so pulse mode cannot run; the interval test covers what each tick still does.",
+      "package": "N4-03"
     },
     {
       "id": "worker/test/config.test.ts › parseConfig namespace gate › empty prefix closes the gate: prefix null, ingestion off, no publication",

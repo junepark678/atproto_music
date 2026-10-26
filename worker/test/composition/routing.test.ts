@@ -1,25 +1,34 @@
-// W5-01 worker/src/router.ts + worker/src/index.ts composition: the production
-// Worker fetch over the real IndexDO (JS RPC, DO SQLite, alarm-driven
-// ingestion of read_models.json from real signed repositories).
+// W5-01 composition routing, on the Node host (ported by N4-03; ADR 0005
+// §3.6, §3.7, §3.10): the production Node composition (support.ts: compose,
+// the dispatcher, the static server over a real web/dist and the HTTP bridge
+// on 127.0.0.1:0) over IndexCore and node:sqlite, with read_models.json
+// ingested from real signed repositories by the core alarm.
 // Proves M1.2.3/packaged_http, M1.4.2/safe_errors (with error.test.ts),
-// M6.1.1/asset_missing_traversal and spa_deep_link (Worker side, ADR 0004
-// §15 Q9 asset-miss routing), M6.1.2/untrusted_forwarded and
+// M6.1.1/asset_missing_traversal and spa_deep_link (ADR 0004 §15 Q9 asset-miss
+// routing, kept by ADR 0005 §3.7), M6.1.2/untrusted_forwarded and
 // M6.2.1/bounded_state (client-IP keying).
+//
+// Where the Workers platform and the Node host differ the Node behaviour is
+// pinned: the router prefixes include /oauth/ (ADR 0005 §3.7), a method other
+// than GET/HEAD on an existing file is the static server's 405 envelope with
+// `Allow: GET, HEAD`, and "the index is never touched" is shown by the Db
+// wrapper recording no statement at all (there is no Durable Object to leave
+// uncreated).
 
-import { beforeEach, describe, expect, it } from 'vitest';
-import type { Env } from '../../src/env';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { json } from '../../src/http/json';
+import type { RouteDef } from '../../src/http/types';
 import {
   ALICE,
-  type AssetCall,
   BOB,
   CAROL,
-  constructed,
+  closeHarnesses,
   control,
+  type Harness,
+  type HttpResult,
   harness,
-  inDo,
   ingestFixture,
   kitControl,
-  postJson,
   resetControl,
   schema,
   UUID,
@@ -32,82 +41,33 @@ const rkeysOf = (body: unknown) =>
 const INDEX_HTML =
   '<!doctype html>\n<html lang="en"><head><title>atmusic</title></head><body><div id="app"></div></body></html>\n';
 const APP_JS = '"use strict";\n';
+/** The `_headers` rules scripts/gen-config.ts writes, reduced to what these assertions read. */
+const HEADERS_FILE = [
+  '/assets/*',
+  '  Cache-Control: public, max-age=31536000, immutable',
+  '/',
+  '  Cache-Control: no-cache',
+  '',
+].join('\n');
 
-/**
- * A Static Assets stand-in with `not_found_handling: "none"`: the files it
- * holds are 200 (GET with body, HEAD without) and a bare 405 for any other
- * method, anything else a bare 404, as the platform's ASSETS binding answers
- * (miniflare assets.worker.js `getResponseOrAssetIntent`). `/` is index.html
- * unless `index` says otherwise (missing, or a redirect, to prove neither is
- * passed on).
- */
-function staticAssets(index: 'ok' | 'missing' | 'redirect' = 'ok'): Fetcher & { calls: AssetCall[] } {
-  const calls: AssetCall[] = [];
-  const files = new Map<string, { body: string; headers: Record<string, string> }>([
-    [
-      '/assets/app-3f9a1c2e.js',
-      {
-        body: APP_JS,
-        headers: { 'content-type': 'text/javascript', 'cache-control': 'public, max-age=31536000, immutable' },
-      },
-    ],
-  ]);
-  if (index === 'ok')
-    files.set('/', {
-      body: INDEX_HTML,
-      headers: { 'content-type': 'text/html', 'cache-control': 'no-cache', etag: '"idx-1"' },
-    });
+function dist(index: boolean): Record<string, string> {
   return {
-    calls,
-    async fetch(input: RequestInfo | URL, init?: RequestInit) {
-      const req = new Request(input as RequestInfo, init);
-      calls.push({ url: req.url, method: req.method, headers: Object.fromEntries(req.headers) });
-      const { pathname } = new URL(req.url);
-      if (index === 'redirect' && pathname === '/') {
-        return new Response(null, { status: 307, headers: { location: '/index.html' } });
-      }
-      const file = files.get(pathname);
-      if (file === undefined) return new Response(null, { status: 404 });
-      if (req.method !== 'GET' && req.method !== 'HEAD') return new Response(null, { status: 405 });
-      return new Response(req.method === 'HEAD' ? null : file.body, { status: 200, headers: file.headers });
-    },
-    connect() {
-      throw new Error('not used');
-    },
-  } as unknown as Fetcher & { calls: AssetCall[] };
-}
-
-/** The production Worker over `assets`; returns the response and the ASSETS calls it made. */
-async function viaAssets(
-  h: ReturnType<typeof harness>,
-  assets: ReturnType<typeof staticAssets>,
-  path: string,
-  init: RequestInit & { ip?: string } = {},
-) {
-  const { ip, ...rest } = init;
-  const headers = new Headers(rest.headers);
-  if (ip !== undefined) headers.set('cf-connecting-ip', ip);
-  const before = assets.calls.length;
-  const res = await h.worker.fetch(
-    new Request(`https://music.example.test${path}`, { ...rest, headers }),
-    { ...h.env, ASSETS: assets } as Env,
-    {} as ExecutionContext,
-  );
-  const text = await res.text();
-  let body: unknown = null;
-  if ((res.headers.get('content-type') ?? '').includes('json')) body = JSON.parse(text);
-  const calls = assets.calls.slice(before);
-  return {
-    status: res.status,
-    headers: res.headers,
-    text,
-    body,
-    calls,
-    seen: calls.map((c) => `${c.method} ${new URL(c.url).pathname}`),
+    ...(index ? { 'index.html': INDEX_HTML } : {}),
+    'assets/app-3f9a1c2e.js': APP_JS,
+    _headers: HEADERS_FILE,
   };
 }
 
-function expectEnvelope(r: { status: number; headers: Headers; body: unknown }, status: number, code: string) {
+/** A test route (mounted through compose's features) that reports what a handler sees. */
+const ECHO: RouteDef = {
+  method: 'GET',
+  pattern: '/api/test/echo',
+  async handler(req, ctx) {
+    return json({ clientIp: ctx.clientIp, peer: ctx.peer, headers: Object.fromEntries(req.headers) });
+  },
+};
+
+function expectEnvelope(r: HttpResult, status: number, code: string) {
   expect(r.status).toBe(status);
   expect(r.headers.get('content-type')).toBe('application/json');
   expect(r.headers.get('cache-control')).toBe('no-store');
@@ -122,17 +82,17 @@ describe('worker/src/router.ts', () => {
   beforeEach(() => {
     resetControl();
   });
+  afterEach(closeHarnesses);
 
   it('every API.md v1.1 route dispatches; unknown /api/x → JSON 404; non-API path → ASSETS', async () => {
     const kit = await kitControl();
-    const h = harness('routing');
+    const h = await harness('routing', { dist: dist(true) });
     const seed = await ingestFixture(h, kit);
-    const tables = await inDo(h.stub, (_i, db) => ({
-      users: db.all<{ did: string; active: number }>('SELECT did, active FROM users ORDER BY did'),
-      scrobbles: db.one<{ n: number }>('SELECT count(*) AS n FROM scrobbles')?.n,
-      follows: db.all<{ actor: string; subject: string }>('SELECT actor, subject FROM follows'),
-    }));
-    expect(tables).toEqual({
+    expect({
+      users: h.db.all<{ did: string; active: number }>('SELECT did, active FROM users ORDER BY did'),
+      scrobbles: h.db.one<{ n: number }>('SELECT count(*) AS n FROM scrobbles')?.n,
+      follows: h.db.all<{ actor: string; subject: string }>('SELECT actor, subject FROM follows'),
+    }).toEqual({
       users: [
         { did: ALICE, active: 1 },
         { did: BOB, active: 1 },
@@ -143,7 +103,6 @@ describe('worker/src/router.ts', () => {
     });
 
     kit.resetCalls();
-    const assetsBefore = h.assets.calls.length;
     const r07 = encodeURIComponent(uriOf(ALICE, 'r07'));
     const reads: Array<[string, number, string]> = [
       ['/health/ready', 200, 'Ready'],
@@ -226,52 +185,65 @@ describe('worker/src/router.ts', () => {
     ).toBeGreaterThan(0);
 
     // POST /api/v1/notify dispatches (ingestFixture used it for {did}); {uri} too.
-    const notified = await postJson(h, '/api/v1/notify', { uri: uriOf(ALICE, 'r07') }, { ip: '198.51.100.2' });
+    const notified = await h.postJson('/api/v1/notify', { uri: uriOf(ALICE, 'r07') }, { ip: '198.51.100.2' });
     expect(notified.status).toBe(202);
     expect(schema('NotifyAccepted', notified.body)).toBe('valid');
-    expect(await inDo(h.stub, (_i, db) => db.all('SELECT uri, source FROM hints'))).toEqual([
-      { uri: uriOf(ALICE, 'r07'), source: 'notify' },
-    ]);
+    expect(h.db.all('SELECT uri, source FROM hints')).toEqual([{ uri: uriOf(ALICE, 'r07'), source: 'notify' }]);
 
-    // /health/live is answered by the Worker alone: a fresh name's IndexDO is never created.
-    const lonely = harness('live-only');
-    const liveRes = await lonely.request('/health/live');
-    expect(liveRes.status).toBe(200);
-    expect(schema('Live', liveRes.body)).toBe('valid');
-    expect(liveRes.body).toEqual({ status: 'live' });
-    expect(constructed(lonely.stub)).toBe(0);
+    // /health/live is answered by the process alone: not one statement reaches the database.
+    const live = await h.record(() => h.request('/health/live'));
+    expect(live.result.status).toBe(200);
+    expect(schema('Live', live.result.body)).toBe('valid');
+    expect(live.result.body).toEqual({ status: 'live' });
+    expect(live.statements).toEqual([]);
 
-    // Unknown Worker paths: the JSON 404 envelope, never ASSETS (no SPA index.html).
-    for (const path of ['/api/x', '/api/v1/nope', `/api/v1/users/${ALICE}/nope`, '/health/x', '/internal/x', '/api']) {
+    // Unknown router paths: the JSON 404 envelope, never the SPA's index.html.
+    const unrouted = await h.record(async () => {
+      for (const path of [
+        '/api/x',
+        '/api/v1/nope',
+        `/api/v1/users/${ALICE}/nope`,
+        '/health/x',
+        '/internal/x',
+        '/api',
+        // /oauth/ is a router prefix on the Node host (ADR 0005 §3.7): no SPA fallback.
+        '/oauth/callback?code=x&state=y',
+      ]) {
+        const r = await h.request(path);
+        expectEnvelope(r, 404, 'not_found');
+        expect(r.text.includes('<div id="app">')).toBe(false);
+      }
+      // An encoded traversal stays inside its segment: the route rejects it, the static server never sees it.
+      const traversal = await h.request('/api/v1/scrobbles/..%2F..%2Fassets%2Fapp-3f9a1c2e.js');
+      expectEnvelope(traversal, 422, 'validation_failed');
+      const wrongMethod = await h.request('/api/v1/meta', { method: 'POST' });
+      expectEnvelope(wrongMethod, 405, 'method_not_allowed');
+      // The Node dispatcher adds HEAD to its own 405 when GET is registered.
+      expect(wrongMethod.headers.get('allow')).toBe('GET, HEAD');
+    });
+    // The validation and routing answers never read the index.
+    expect(unrouted.statements).toEqual([]);
+
+    // Everything else is the SPA's: files from web/dist, index.html for SPA routes.
+    for (const path of ['/', '/feed']) {
       const r = await h.request(path);
-      expectEnvelope(r, 404, 'not_found');
+      expect([path, r.status, r.text]).toEqual([path, 200, INDEX_HTML]);
+      expect(r.headers.get('content-type')).toBe('text/html; charset=utf-8');
     }
-    // An encoded traversal stays inside its segment: the route rejects it, ASSETS never sees it.
-    const traversal = await h.request('/api/v1/scrobbles/..%2F..%2Fassets%2Fapp.js');
-    expectEnvelope(traversal, 422, 'validation_failed');
-    const wrongMethod = await h.request('/api/v1/meta', { method: 'POST' });
-    expectEnvelope(wrongMethod, 405, 'method_not_allowed');
-    expect(wrongMethod.headers.get('allow')).toBe('GET');
-    expect(h.assets.calls.length).toBe(assetsBefore);
-
-    // Everything else is the SPA's: passed to ASSETS unchanged in path and method.
-    for (const path of ['/', '/feed', '/oauth/callback?code=x&state=y', '/assets/missing.js']) {
-      const r = await h.request(path);
-      expect(r.status).toBe(200);
-      expect(r.text).toBe(`asset:${new URL(path, 'https://x.test').pathname}`);
-    }
-    expect(h.assets.calls.slice(assetsBefore).map((c) => [c.method, new URL(c.url).pathname])).toEqual([
-      ['GET', '/'],
-      ['GET', '/feed'],
-      ['GET', '/oauth/callback'],
-      ['GET', '/assets/missing.js'],
+    const js = await h.request('/assets/app-3f9a1c2e.js');
+    expect([js.status, js.text, js.headers.get('content-type')]).toEqual([
+      200,
+      APP_JS,
+      'text/javascript; charset=utf-8',
     ]);
+    expectEnvelope(await h.request('/assets/missing.js'), 404, 'not_found');
   });
 
   it('inbound x-atmusic-client-ip is stripped and CF-Connecting-IP used', async () => {
-    const h = harness('client-ip');
+    const h = await harness('client-ip', { features: [{ name: 'echo', routes: [ECHO] }] });
+    expect(h.config.clientIpHeader).toBe('cf-connecting-ip');
     const notifyFrom = (ip: string, spoofed: string, rkey: string) =>
-      postJson(h, '/api/v1/notify', { uri: uriOf(CAROL, rkey) }, { ip, headers: { 'x-atmusic-client-ip': spoofed } });
+      h.postJson('/api/v1/notify', { uri: uriOf(CAROL, rkey) }, { ip, headers: { 'x-atmusic-client-ip': spoofed } });
 
     // 60 per minute per CF-Connecting-IP, whatever x-atmusic-client-ip claims.
     for (let n = 0; n < 60; n++) {
@@ -284,25 +256,30 @@ describe('worker/src/router.ts', () => {
     // Spoofing the limited address from another client does not drain its bucket.
     const other = await notifyFrom('203.0.113.8', '203.0.113.7', 'r998');
     expect(other.status).toBe(202);
-    const hints = await inDo(h.stub, (_i, db) => db.all<{ uri: string }>('SELECT uri FROM hints ORDER BY uri'));
+    const hints = h.db.all<{ uri: string }>('SELECT uri FROM hints ORDER BY uri');
     expect(hints).toHaveLength(61);
     expect(hints.map((r) => r.uri)).not.toContain(uriOf(CAROL, 'r999'));
     expect(hints.map((r) => r.uri)).toContain(uriOf(CAROL, 'r998'));
 
-    // A Worker path handed to ASSETS never is; a non-Worker path is, without any x-atmusic-* header.
-    const asset = await h.request('/feed', {
+    // What a handler sees: no x-atmusic-* header at all, and the client IP from CF-Connecting-IP.
+    const echo = await h.request('/api/test/echo', {
       ip: '203.0.113.9',
       headers: { 'x-atmusic-client-ip': '10.0.0.1', 'X-Atmusic-Admin': 'yes', accept: 'text/html' },
     });
-    expect(asset.status).toBe(200);
-    const seen = h.assets.calls.at(-1)?.headers ?? {};
-    expect(Object.keys(seen).filter((k) => k.startsWith('x-atmusic-'))).toEqual([]);
-    expect(seen['cf-connecting-ip']).toBe('203.0.113.9');
-    expect(seen.accept).toBe('text/html');
+    expect(echo.status).toBe(200);
+    const seen = echo.body as { clientIp: string; peer: string; headers: Record<string, string> };
+    expect(Object.keys(seen.headers).filter((k) => k.startsWith('x-atmusic-'))).toEqual([]);
+    expect(seen.clientIp).toBe('203.0.113.9');
+    expect(seen.peer).toBe('127.0.0.1');
+    expect(seen.headers['cf-connecting-ip']).toBe('203.0.113.9');
+    expect(seen.headers.accept).toBe('text/html');
+    // Without the header the trusted loopback peer itself is the client.
+    const bare = await h.request('/api/test/echo');
+    expect((bare.body as { clientIp: string }).clientIp).toBe('127.0.0.1');
   });
 
   it('forced storage error → 500 envelope with UUID requestId and no stack trace or file path', async () => {
-    const h = harness('storage-error');
+    const h = await harness('storage-error');
     const ok = await h.request(`/api/v1/users/${ALICE}/scrobbles`);
     expect(ok.status).toBe(200);
 
@@ -324,6 +301,10 @@ describe('worker/src/router.ts', () => {
       expect([needle, failed.text.includes(needle)]).toEqual([needle, false]);
     }
     expect(control.dbFault.remaining).toBe(0);
+    // The log names the failure by error name only.
+    const logged = JSON.stringify(h.log.logs);
+    expect(logged).not.toContain('SQLITE_IOERR');
+    expect(logged).not.toContain('/srv/');
 
     // The fault is gone and the storage untouched: the same request succeeds.
     const again = await h.request(`/api/v1/users/${ALICE}/scrobbles`);
@@ -333,59 +314,57 @@ describe('worker/src/router.ts', () => {
   });
 
   it('asset miss: SPA route GET/HEAD serves index.html 200, every other miss is JSON not_found with x-request-id', async () => {
-    const h = harness('asset-miss');
-    const assets = staticAssets();
+    const h = await harness('asset-miss', { dist: dist(true) });
     const PLC = 'did:plc:aaaaaaaaaaaaaaaaaaaaaaaa';
     const WEB = 'did:web:music.example.test';
+    const recording = h.startRecording();
 
-    // An existing file is Static Assets' answer, passed on unchanged (one ASSETS call).
-    const js = await viaAssets(h, assets, '/assets/app-3f9a1c2e.js');
+    // An existing file is the static server's answer (headers from _headers).
+    const js = await h.request('/assets/app-3f9a1c2e.js');
     expect([js.status, js.text, js.headers.get('cache-control')]).toEqual([
       200,
       APP_JS,
       'public, max-age=31536000, immutable',
     ]);
-    expect(js.seen).toEqual(['GET /assets/app-3f9a1c2e.js']);
-    const root = await viaAssets(h, assets, '/');
-    expect([root.status, root.text, root.seen]).toEqual([200, INDEX_HTML, ['GET /']]);
+    const root = await h.request('/');
+    expect([root.status, root.text, root.headers.get('cache-control')]).toEqual([200, INDEX_HTML, 'no-cache']);
+    // index.html itself is served only at `/`.
+    const named = await h.request('/index.html?x=1');
+    expect([named.status, named.headers.get('location')]).toEqual([301, '/?x=1']);
 
     // Every SPA route of the shared table, raw and percent-encoded DIDs alike:
-    // the miss, then index.html fetched from ASSETS at `/` with the same method.
+    // index.html with the same method, as a 200 with no redirect.
     const spaPaths = [
-      ['/feed', '/feed'],
-      ['/feed/', '/feed/'],
-      ['/signin', '/signin'],
-      ['/scrobble', '/scrobble'],
-      ['/settings', '/settings'],
-      ['/oauth/callback?code=cod-x&state=st-x&iss=https%3A%2F%2Fpds.example.test', '/oauth/callback'],
-      [`/u/${PLC}`, `/u/${PLC}`],
-      [`/u/${PLC}?tab=history`, `/u/${PLC}`],
-      [`/u/${encodeURIComponent(PLC)}`, `/u/${encodeURIComponent(PLC)}`],
-      [`/u/${WEB}`, `/u/${WEB}`],
-      [`/u/${encodeURIComponent(WEB)}`, `/u/${encodeURIComponent(WEB)}`],
+      '/feed',
+      '/feed/',
+      '/signin',
+      '/scrobble',
+      '/settings',
+      `/u/${PLC}`,
+      `/u/${PLC}?tab=history`,
+      `/u/${encodeURIComponent(PLC)}`,
+      `/u/${WEB}`,
+      `/u/${encodeURIComponent(WEB)}`,
     ] as const;
-    for (const [path, pathname] of spaPaths) {
+    for (const path of spaPaths) {
       for (const method of ['GET', 'HEAD'] as const) {
-        const r = await viaAssets(h, assets, path, { method, headers: { accept: 'text/html' } });
+        const r = await h.request(path, { method, headers: { accept: 'text/html' } });
         const label = `${method} ${path}`;
         expect([label, r.status], label).toEqual([label, 200]);
-        expect(r.headers.get('content-type'), label).toBe('text/html');
+        expect(r.headers.get('content-type'), label).toBe('text/html; charset=utf-8');
         expect(r.headers.get('cache-control'), label).toBe('no-cache');
         expect(r.headers.get('location'), label).toBeNull();
         expect(r.headers.get('x-request-id'), label).toMatch(UUID);
         expect(r.text, label).toBe(method === 'GET' ? INDEX_HTML : '');
-        expect(r.seen, label).toEqual([`${method} ${pathname}`, `${method} /`]);
-        expect(r.calls[1]?.headers.accept, label).toBe('text/html');
       }
     }
 
-    // Every other miss: the JSON envelope, and index.html is never fetched.
+    // Every other miss: the JSON envelope, and never index.html.
     const misses = [
       '/assets/missing.js',
       '/assets/app-3f9a1c2e.js.map',
       '/unknown',
       '/unknown/api',
-      '/oauth/missing',
       '/oauth',
       '/secret.txt',
       '/index.htm',
@@ -396,26 +375,28 @@ describe('worker/src/router.ts', () => {
       `/u/${PLC}/extra`,
       '/feed/extra',
       '/settingsx',
+      // Static Assets configuration files are never served.
+      '/_headers',
     ];
     for (const path of misses) {
       for (const method of ['GET', 'HEAD'] as const) {
-        const r = await viaAssets(h, assets, path, { method });
+        const r = await h.request(path, { method });
         const label = `${method} ${path}`;
         if (method === 'GET') {
           expectEnvelope(r, 404, 'not_found');
         } else {
           expect([label, r.status, r.headers.get('content-type')]).toEqual([label, 404, 'application/json']);
           expect(r.headers.get('x-request-id'), label).toMatch(UUID);
+          expect(r.text, label).toBe('');
         }
         expect(r.text.includes('<div id="app">'), label).toBe(false);
-        expect(r.seen, label).toEqual([`${method} ${new URL(path, 'https://x.test').pathname}`]);
       }
     }
 
     // Traversal and encoding tricks (the oracle's asset_missing_traversal inputs
-    // and safe_path rules): the envelope, and index.html is never fetched. The
-    // ones the oracle's safe_path rejects never reach ASSETS at all.
-    const rejected = [
+    // and safe_path rules), judged on the raw request target: the envelope,
+    // never index.html.
+    for (const path of [
       '/assets%2f..%2fsecret',
       '/assets/%252e%252e/secret',
       '/u/did%3Aplc%3Aa%2Fb',
@@ -425,83 +406,66 @@ describe('worker/src/router.ts', () => {
       '/u/%zz',
       '/feed%',
       '/feed%2',
-    ];
-    // The URL parser itself resolves `%2e%2e` segments and turns `\` into `/`
-    // before the Worker sees the path; those land on non-SPA paths here.
-    for (const path of [...rejected, '/%2e%2e/secret', '/assets/%2E%2E/secret', '/u/%2e%2e/secret', '/u/a\\b']) {
-      const r = await viaAssets(h, assets, path);
+      '/%2e%2e/secret',
+      '/assets/%2E%2E/secret',
+      '/u/%2e%2e/secret',
+      '/u/a\\b',
+      '/assets/../index.html',
+    ]) {
+      const r = await h.request(path);
       expectEnvelope(r, 404, 'not_found');
-      expect([path, r.seen.includes('GET /')]).toEqual([path, false]);
-      if ((rejected as readonly string[]).includes(path)) expect([path, r.seen]).toEqual([path, []]);
+      expect([path, r.text.includes('<div id="app">')]).toEqual([path, false]);
     }
 
-    // A non-GET/HEAD to an SPA path with no file behind it (every SPA route
-    // but `/`): in production Static Assets finds no file and the Worker gets
-    // the request. The envelope, never 405 and never index.html.
-    const nonGet = async (method: string, path: string) => {
-      const r = await viaAssets(h, assets, path, {
+    // A non-GET/HEAD to an SPA path with no file behind it: the envelope, never 405 and never index.html.
+    for (const [method, path] of [
+      ['POST', '/feed'],
+      ['POST', `/u/${PLC}`],
+      ['POST', `/u/${encodeURIComponent(PLC)}`],
+      ['DELETE', '/settings'],
+      ['OPTIONS', '/feed'],
+    ] as const) {
+      const r = await h.request(path, {
         method,
         ...(method === 'OPTIONS' ? {} : { body: '{"x":1}', headers: { 'content-type': 'application/json' } }),
       });
       expectEnvelope(r, 404, 'not_found');
       expect(r.headers.get('allow'), `${method} ${path}`).toBeNull();
-      expect([method, path, r.seen]).toEqual([method, path, []]);
-    };
-    for (const [method, path] of [
-      ['POST', '/feed'],
-      ['POST', `/u/${PLC}`],
-      ['POST', `/u/${encodeURIComponent(PLC)}`],
-      ['PUT', '/oauth/callback'],
-      ['DELETE', '/settings'],
-      ['OPTIONS', '/feed'],
-    ] as const) {
-      await nonGet(method, path);
     }
-    // Worker-only behaviour, not what production sends. A non-GET/HEAD to a
-    // path that is an existing file (`/` is index.html, a hashed asset) never
-    // reaches the Worker: Static Assets answers it with a bare 405, no JSON
-    // and no x-request-id (the platform exception in docs/deploy/routing.md;
-    // web/tests/mvp.spec.ts pins it under wrangler dev). These cases pin only
-    // what the Worker would send were such a request routed to it, e.g. if
-    // the owner put `/` into run_worker_first.
+    // A non-GET/HEAD to an existing file (`/` is index.html, a hashed asset) is
+    // the static server's 405 envelope with Allow: GET, HEAD (ADR 0005 §3.7);
+    // on Workers the platform answered it before the Worker ran.
     for (const [method, path] of [
       ['PATCH', '/'],
       ['POST', '/assets/app-3f9a1c2e.js'],
     ] as const) {
-      await nonGet(method, path);
-      // The stand-in is the platform's answer the Worker never sees for these.
-      const platform = await assets.fetch(`https://music.example.test${path}`, { method, body: '{"x":1}' });
-      expect([method, path, platform.status, platform.headers.get('x-request-id')]).toEqual([method, path, 405, null]);
+      const r = await h.request(path, { method, body: '{"x":1}', headers: { 'content-type': 'application/json' } });
+      expectEnvelope(r, 405, 'method_not_allowed');
+      expect(r.headers.get('allow'), `${method} ${path}`).toBe('GET, HEAD');
+      expect(r.text.includes('<div id="app">')).toBe(false);
     }
 
-    // Spoofed internal headers never reach ASSETS on either fetch; others pass through.
-    const spoofed = await viaAssets(h, assets, `/u/${PLC}`, {
+    // Spoofed internal headers change nothing about the SPA answer.
+    const spoofed = await h.request(`/u/${PLC}`, {
       ip: '203.0.113.9',
       headers: { 'x-atmusic-client-ip': '10.0.0.1', 'X-Atmusic-Admin': 'yes', accept: 'text/html' },
     });
-    expect(spoofed.status).toBe(200);
-    expect(spoofed.calls).toHaveLength(2);
-    for (const call of spoofed.calls) {
-      expect(Object.keys(call.headers).filter((k) => k.startsWith('x-atmusic-'))).toEqual([]);
-      expect(call.headers['cf-connecting-ip']).toBe('203.0.113.9');
-    }
+    expect([spoofed.status, spoofed.text]).toEqual([200, INDEX_HTML]);
 
-    // index.html missing or answered with a redirect: the envelope, never a 3xx.
-    for (const mode of ['missing', 'redirect'] as const) {
-      const broken = staticAssets(mode);
-      const r = await viaAssets(h, broken, '/feed');
-      expectEnvelope(r, 404, 'not_found');
-      expect(r.headers.get('location')).toBeNull();
-      expect([mode, r.seen]).toEqual([mode, ['GET /feed', 'GET /']]);
-    }
+    // The router prefixes are unchanged: the envelope, whatever dist holds.
+    for (const path of ['/api/x', '/health/x', '/internal/x']) expectEnvelope(await h.request(path), 404, 'not_found');
+    // Asset misses never touch the index: not one statement reached the database.
+    expect(h.stopRecording()).toEqual([]);
+    expect(recording).toEqual([]);
 
-    // The Worker-first prefixes are unchanged: the envelope, ASSETS untouched.
-    for (const path of ['/api/x', '/health/x', '/internal/x']) {
-      const r = await viaAssets(h, assets, path);
-      expectEnvelope(r, 404, 'not_found');
-      expect([path, r.seen]).toEqual([path, []]);
-    }
-    // Asset misses never create or touch the IndexDO.
-    expect(constructed(h.stub)).toBe(0);
+    // index.html missing from dist: the envelope for an SPA route, never a 3xx, and the miss is logged.
+    const broken: Harness = await harness('asset-miss-no-index', { dist: dist(false) });
+    const r = await broken.request('/feed');
+    expectEnvelope(r, 404, 'not_found');
+    expect(r.headers.get('location')).toBeNull();
+    expect(broken.log.logs.filter((l) => l.event === 'assets.index_unavailable')).toEqual([
+      expect.objectContaining({ level: 'error', status: 404 }),
+    ]);
+    expect((await broken.request('/assets/app-3f9a1c2e.js')).status).toBe(200);
   });
 });

@@ -1,31 +1,29 @@
 // The shared read-model fixture through the real ingestion path, for the
-// acceptance suites (W6-01, ADR 0004 §10.3). TEST-ONLY.
+// acceptance suites (W6-01, ADR 0004 §10.3; on Node since N4-03). TEST-ONLY.
 //
 // `seedAcceptance(label)`:
 //  1. builds the fixture network (createFixtureKit: Alice, Bob and Carol as
 //     real signed repositories on three fake PDS hosts, fake PLC, DoH, relay
 //     and Jetstream) with its clock at SEED_START, two minutes before the
-//     frozen asOf, and wires it into the next TestIndexDO (entry.ts control);
+//     frozen asOf, and wires it into a fresh composition (entry.ts);
 //  2. the first alarm runs the production Jetstream watchdog, which connects
-//     the production socket to the fake Jetstream (WebSocketPair connector);
-//  3. `seedReadModels(kit)` publishes tests/fixtures/read_models.json inside
-//     the DO (the socket belongs to it): Alice's and Bob's records through
-//     their PDS's createRecord, Carol's r10 as an external writer, r08 created
-//     then deleted. Every commit reaches the index only as a **fake Jetstream
-//     event**: a hint, then admission, a range snapshot of the signed head and
-//     getRecord proofs, all run by the production alarm;
-//  4. alarms are stepped with runDurableObjectAlarm (2 s apart, the drain
-//     floor) until no hints remain, no snapshot job is open, all three users
-//     are active and no gap is pending;
+//     the production socket to the fake Jetstream (the memoryLink connector);
+//  3. `seedReadModels(kit)` publishes tests/fixtures/read_models.json: Alice's
+//     and Bob's records through their PDS's createRecord, Carol's r10 as an
+//     external writer, r08 created then deleted. Every commit reaches the
+//     index only as a **fake Jetstream event**: a hint, then admission, a range
+//     snapshot of the signed head and getRecord proofs, all run by the
+//     production alarm;
+//  4. the core alarm is stepped (2 s apart, the drain floor) until no hints
+//     remain, no snapshot job is open, all three users are active and no gap
+//     is pending;
 //  5. the clock is set to the frozen asOf 2026-01-15T12:00:00Z for the reads.
 //
-// Every HTTP response goes through the production Worker handlers
-// (`createWorker`, the code `export default` of src/index.ts runs, here with
-// the frozen clock, a seeded Random and a per-test IndexDO name, A18) and is
-// validated against api/openapi.yaml (./openapi.ts) before a test sees it.
+// Every HTTP response goes through the production Node composition (the
+// dispatcher and route table behind the HTTP bridge on 127.0.0.1:0, entry.ts)
+// and is validated against api/openapi.yaml (./openapi.ts) before a test sees
+// it.
 
-import { runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
-import { env } from 'cloudflare:workers';
 import {
   createFixtureKit,
   type FixtureKit,
@@ -35,19 +33,13 @@ import {
 } from '@atmusic/atproto/test-support/read-models';
 import type { FixtureCall } from '@atmusic/atproto/test-support/router-transport';
 import { fixedClock } from '@atmusic/core/test-support/clock';
-import { seededRandom } from '@atmusic/core/test-support/random';
 import type { Db } from '../../../src/do/db';
-import { doDb } from '../../../src/do/db';
-import type { Env } from '../../../src/env';
-import { createWorker } from '../../../src/router';
-import { flush, type JetstreamServer, jetstreamServer } from '../../fixtures/jetstream-server';
-import { ACCEPTANCE, type AcceptanceHandle, resetControl, type TestIndexDO } from '../entry';
+import { flush, type JetstreamServer, jetstreamServer } from '../../composition/jetstream';
+import type { Harness, HarnessOptions } from '../../composition/support';
+import { type AcceptanceHandle, acceptanceApp } from '../entry';
 import { checkResponse } from './openapi';
 
 export { flush };
-
-/** The acceptance bindings (the harness's Cloudflare.Env augmentation does not describe them). */
-export const acceptanceEnv = env as unknown as Env & { PROD_INDEX: Env['INDEX'] };
 
 export const AS_OF = '2026-01-15T12:00:00Z';
 export const AS_OF_MS = Date.parse(AS_OF);
@@ -72,12 +64,7 @@ export const PUT_RECORD = 'com.atproto.repo.putRecord';
 export const DELETE_RECORD = 'com.atproto.repo.deleteRecord';
 export const APP_WRITES = [CREATE_RECORD, PUT_RECORD, DELETE_RECORD] as const;
 
-let counter = 0;
-/** A DO name no other test uses (A18). */
-export function freshName(label: string): string {
-  counter += 1;
-  return `acceptance-${label}-${counter}`;
-}
+export const PUBLIC_ORIGIN = 'https://music.example.test';
 
 export interface HttpResult {
   url: string;
@@ -89,67 +76,69 @@ export interface HttpResult {
   schema: 'valid';
 }
 
+export interface RequestInitWithIp {
+  method?: string;
+  headers?: Record<string, string>;
+  body?: string;
+  ip?: string;
+}
+
 export interface Acceptance {
   name: string;
   kit: FixtureKit;
   js: JetstreamServer;
-  stub: DurableObjectStub<TestIndexDO>;
+  /** The composition harness (database, composed app, logs). */
+  h: Harness;
   /** Responses validated against api/openapi.yaml so far. */
   validated: number;
-  /** One Worker request, validated against api/openapi.yaml (throws on a violation). */
-  request(path: string, init?: RequestInit & { ip?: string }): Promise<HttpResult>;
+  /** One request through the HTTP bridge, validated against api/openapi.yaml (throws on a violation). */
+  request(path: string, init?: RequestInitWithIp): Promise<HttpResult>;
   postJson(path: string, body: unknown, ip?: string): Promise<HttpResult>;
-  /** Run `fn` inside the DO with its Db and the test control handle. */
-  inDo<R>(fn: (db: Db, handle: AcceptanceHandle, state: DurableObjectState) => R | Promise<R>): Promise<R>;
-  /** One alarm (runDurableObjectAlarm), then let socket events settle. */
+  /** Runs `fn` with the open database (the adapter) and the test handle. */
+  inDo<R>(fn: (db: Db, handle: AcceptanceHandle) => R | Promise<R>): Promise<R>;
+  /** One run of the core alarm, then let socket events settle. */
   alarm(): Promise<boolean>;
   /** Advance `stepMs` and run an alarm until `done` holds; returns the alarms run. */
   alarmsUntil(done: (db: Db) => boolean, o?: { max?: number; stepMs?: number }): Promise<number>;
+  /** The process dies and restarts: close-and-reopen of the same database file plus a recomposed app. */
+  restart(): Promise<void>;
 }
 
 export interface StartOptions {
   /** Clock start (default SEED_START). */
   at?: string;
-  envOverrides?: Partial<Env>;
+  env?: Record<string, string | undefined>;
+  harness?: HarnessOptions;
 }
 
-/** The fixture network wired into a fresh TestIndexDO whose socket is connected. Nothing is published yet. */
+/** The fixture network wired into a fresh composition whose socket is connected. Nothing is published yet. */
 export async function startAcceptance(label: string, o: StartOptions = {}): Promise<Acceptance> {
   const kit = await createFixtureKit({ clock: fixedClock(o.at ?? SEED_START) });
   const js = jetstreamServer({ clock: kit.clock, fakes: [kit.jetstream] });
-  resetControl({ clock: kit.clock, random: seededRandom(5), transport: kit.transport, connectJetstream: js.connect });
-  const name = freshName(label);
-  const workerEnv = {
-    ...acceptanceEnv,
-    ...o.envOverrides,
-    ASSETS: { fetch: async () => new Response('asset', { status: 200 }) } as unknown as Fetcher,
-  } as Env;
-  const worker = createWorker({ clock: kit.clock, random: seededRandom(11), indexName: name });
-  const stub = acceptanceEnv.INDEX.get(
-    acceptanceEnv.INDEX.idFromName(name),
-  ) as unknown as DurableObjectStub<TestIndexDO>;
+  const app = await acceptanceApp(label, {
+    clock: kit.clock,
+    transport: kit.transport,
+    connectJetstream: js.connect,
+    ...(o.env === undefined ? {} : { env: o.env }),
+    ...(o.harness === undefined ? {} : { harness: o.harness }),
+  });
+  const h = app.harness;
 
   const a: Acceptance = {
-    name,
+    name: label,
     kit,
     js,
-    stub,
+    h,
     validated: 0,
     async request(path, init = {}) {
-      const { ip, ...rest } = init;
-      const headers = new Headers(rest.headers);
-      if (ip !== undefined) headers.set('cf-connecting-ip', ip);
-      const url = `https://music.example.test${path}`;
-      const req = new Request(url, { ...rest, headers });
-      const res = await worker.fetch(req, workerEnv, {} as ExecutionContext);
-      const text = await res.text();
-      let body: unknown = null;
-      if ((res.headers.get('content-type') ?? '').includes('json')) body = JSON.parse(text);
-      const verdict = checkResponse(req.method, url, { status: res.status, headers: res.headers, body });
+      const url = `${PUBLIC_ORIGIN}${path}`;
+      const method = init.method ?? 'GET';
+      const res = await h.request(path, init);
+      const verdict = checkResponse(method, url, { status: res.status, headers: res.headers, body: res.body });
       if (verdict !== 'valid')
-        throw new Error(`${req.method} ${path} → ${res.status} violates api/openapi.yaml: ${verdict}\n${text}`);
+        throw new Error(`${method} ${path} → ${res.status} violates api/openapi.yaml: ${verdict}\n${res.text}`);
       a.validated += 1;
-      return { url, status: res.status, headers: res.headers, text, body, schema: 'valid' };
+      return { url, status: res.status, headers: res.headers, text: res.text, body: res.body, schema: 'valid' };
     },
     postJson(path, body, ip = '198.51.100.1') {
       return a.request(path, {
@@ -159,32 +148,33 @@ export async function startAcceptance(label: string, o: StartOptions = {}): Prom
         ip,
       });
     },
-    inDo(fn) {
-      return runInDurableObject(stub, (instance: TestIndexDO, state) =>
-        fn(doDb(state.storage), instance[ACCEPTANCE](), state),
-      );
+    async inDo(fn) {
+      return fn(h.db, app.handle());
     },
     async alarm() {
-      const ran = await runDurableObjectAlarm(stub);
+      const ran = await h.runAlarm();
       await flush();
       return ran;
     },
     async alarmsUntil(done, ao = {}) {
       const max = ao.max ?? 60;
       for (let n = 0; n < max; n++) {
-        if (await a.inDo((db) => done(db))) return n;
+        if (done(h.db)) return n;
         kit.clock.advance(ao.stepMs ?? 2_000);
         await a.alarm();
       }
-      if (await a.inDo((db) => done(db))) return max;
+      if (done(h.db)) return max;
       throw new Error(`condition not reached after ${max} alarms`);
     },
+    restart: () => h.restart(),
   };
 
   // The first alarm: the watchdog connects the production socket to the fake Jetstream.
-  await a.alarm();
-  const live = js.live().length;
-  if (live !== 1) throw new Error(`expected one live Jetstream socket after the first alarm, got ${live}`);
+  if ((o.env?.INGEST_MODE ?? 'socket') === 'socket') {
+    await a.alarm();
+    const live = js.live().length;
+    if (live !== 1) throw new Error(`expected one live Jetstream socket after the first alarm, got ${live}`);
+  }
   return a;
 }
 
@@ -228,7 +218,7 @@ export function projectionTables(db: Db): Record<string, unknown[]> {
 export function allTables(db: Db): Record<string, unknown[]> {
   const names = db
     .all<{ name: string }>(
-      "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%' ORDER BY name",
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
     )
     .map((r) => r.name);
   return Object.fromEntries(names.map((t) => [t, db.all(`SELECT * FROM ${t} ORDER BY 1, 2`)]));
@@ -285,9 +275,9 @@ export async function seedAcceptance(label: string, o: StartOptions = {}): Promi
   return Object.assign(a, { seed, seedAlarms, seedCalls });
 }
 
-/** Publish through the PDS (or externally) inside the DO, so the socket carries the commit, then settle. */
-export async function inSocket<R>(a: Acceptance, fn: () => Promise<R>): Promise<R> {
-  const out = await a.inDo(() => fn());
+/** Publish through the PDS (or externally), so the socket carries the commit, then settle (the workerd suites needed `a`'s DO; kept for the callers). */
+export async function inSocket<R>(_a: Acceptance, fn: () => Promise<R>): Promise<R> {
+  const out = await fn();
   await flush();
   return out;
 }

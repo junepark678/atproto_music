@@ -226,8 +226,11 @@
     },
     {
       "case": "M1.4.3/drain_success",
-      "target": "worker/test/composition/index-do.test.ts › restart (eviction) preserves state and resumes alarm",
-      "note": "The SIGTERM drain is dropped (ADR 0004 §9.3); durability across restart is DO eviction (A18)."
+      "target": "worker/test/node/shutdown.test.ts › SIGTERM closes the listener, lets an in-flight request finish within the injected drain window, closes Jetstream with 1000, closes the database and calls exit(0)",
+      "note": "ADR 0005 §3.10 restores the SIGTERM drain that ADR 0004 §9.3 dropped (N3-07); durability across a restart is close-and-reopen of the same database file plus a recomposed app (N4-03).",
+      "also": [
+        "worker/test/acceptance/restart.test.ts › restart reopens the same database file: projection tables and responses are byte-identical, a pre-restart cursor continues and timers resume"
+      ]
     },
     {
       "case": "M1.4.3/drain_timeout",
@@ -746,7 +749,7 @@
     },
     {
       "case": "M4.4.2/worker_restart",
-      "target": "worker/test/acceptance/restart.test.ts › eviction preserves byte-identical tables, pre-restart cursor continues, alarm resumes"
+      "target": "worker/test/acceptance/restart.test.ts › restart reopens the same database file: projection tables and responses are byte-identical, a pre-restart cursor continues and timers resume"
     },
     {
       "case": "M4.4.3/live_remote_arrival",
@@ -946,17 +949,17 @@
     },
     {
       "case": "M5.4.3/durable_views",
-      "target": "worker/test/acceptance/restart.test.ts › eviction preserves byte-identical tables, pre-restart cursor continues, alarm resumes"
+      "target": "worker/test/acceptance/restart.test.ts › restart reopens the same database file: projection tables and responses are byte-identical, a pre-restart cursor continues and timers resume"
     },
     {
       "case": "M5.4.3/durable_cursor",
-      "target": "worker/test/acceptance/restart.test.ts › eviction preserves byte-identical tables, pre-restart cursor continues, alarm resumes"
+      "target": "worker/test/acceptance/restart.test.ts › restart reopens the same database file: projection tables and responses are byte-identical, a pre-restart cursor continues and timers resume"
     },
     {
       "case": "M5.4.3/durable_delete",
       "target": "worker/test/write/apply-record.test.ts › older revision proof after newer delete is noop (no resurrection)",
       "also": [
-        "worker/test/acceptance/restart.test.ts › eviction preserves byte-identical tables, pre-restart cursor continues, alarm resumes",
+        "worker/test/acceptance/restart.test.ts › restart reopens the same database file: projection tables and responses are byte-identical, a pre-restart cursor continues and timers resume",
         "web/test/outbox/recovery.test.ts › crash during delete resumes with swapRecord and verifies absence"
       ]
     },
@@ -1041,7 +1044,7 @@
     },
     {
       "case": "M6.2.2/metrics_auth",
-      "target": "worker/test/composition/admin.test.ts › admin routes 404 without ADMIN_TOKEN; wrong token 401 constant-time; status JSON shape",
+      "target": "worker/test/composition/admin.test.ts › admin status over the unix socket returns the AdminStatus shape of a fresh index, and /internal/admin/status on the TCP listener is the JSON 404",
       "also": [
         "worker/test/composition/logging.test.ts › captured logs and error bodies contain no CURSOR_KEY, ADMIN_TOKEN or bearer marker and logs contain no track-title marker"
       ],
@@ -1069,12 +1072,12 @@
     },
     {
       "case": "M6.2.3/slow_query_detection",
-      "target": "worker/test/acceptance/query-plans.test.ts › 100×1,000 seeded records: history/feed/stats plans use indexes; negative control scans",
+      "target": "worker/test/acceptance/query-plans.test.ts › with 100 DIDs x 1,000 records, history, feeds and stats use their indexes on SQLite 3.54.1 and the no-index control shows SCAN",
       "also": [
-        "worker/test/bench/read-models.bench.test.ts › history/feed page statement rows read within ADR Q10 budgets",
+        "worker/test/bench/read-models.bench.test.ts › the read-model bench records p50 and p95 for history, feed and stats on node:sqlite and asserts their query plans",
         "worker/test/bench/read-models.bench.test.ts › stats cache hit within ADR Q10 probe budget and equals uncached result"
       ],
-      "note": "The ADR 0004 §15 Q10 rows-read and probe budgets flag read-path regressions that still plan as indexed searches, such as the O(depth) keyset seek W6-02 found."
+      "note": "node:sqlite has no rows-read counter, so the ADR 0004 §15 Q10 rows-read budgets are re-derived as plan pins (ADR 0005 §15.3), asserted by the also-listed bench test, which flag read-path regressions that still plan as indexed searches. A deep history or feed page passes only with the (listened_at,uri)<(?,?) bound on its index range and an EXPLAIN bytecode seek that starts at the cursor's last row, so the O(depth) anchor-keyed seek W6-02 found is refused. A 7d, 30d or 365d statistics statement passes only when every scrobbles search is bounded by did=? AND listened_at>? AND listened_at<?, so the DID-only scrobbles_stats search W6-02 found is refused. The bench rebuilds both regressions on its database as negative controls. The cached-hit probe budget (at most 3 or 4 indexed statements) stays a statement count."
     },
     {
       "case": "M6.3.1/backup_during_write",
@@ -1136,7 +1139,7 @@
     },
     {
       "case": "M6.4.2/packaged_recovery",
-      "target": "worker/test/acceptance/restart.test.ts › eviction preserves byte-identical tables, pre-restart cursor continues, alarm resumes"
+      "target": "worker/test/acceptance/restart.test.ts › restart reopens the same database file: projection tables and responses are byte-identical, a pre-restart cursor continues and timers resume"
     },
     {
       "case": "M6.4.2/unrun_gate",
@@ -1329,7 +1332,7 @@
     },
     {
       "case": "M7.4.2/browser_restart",
-      "target": "worker/test/acceptance/restart.test.ts › eviction preserves byte-identical tables, pre-restart cursor continues, alarm resumes",
+      "target": "worker/test/acceptance/restart.test.ts › restart reopens the same database file: projection tables and responses are byte-identical, a pre-restart cursor continues and timers resume",
       "also": [
         "web/test/outbox/recovery.test.ts › crash after PDS commit before local ack: ambiguous create reconciles to success via digest"
       ],

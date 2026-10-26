@@ -232,7 +232,10 @@ describe('scripts/acceptance/node-interim.sh', () => {
       expect(caseMap).toContain('PASS case map: 258 unique cases');
       // 39 since N3-11 retargeted M1.1.1/version_policy to its wave-3 four-collection title.
       expect(caseMap).toMatch(/^PENDING case map: M1\.1\.1\/version_policy: .* pending \(wave 3, N3-11\)$/m);
-      expect(caseMap).toContain('of node waves <= 0 exists; 39 targets of later node waves pending');
+      // 50 since N4-03 retargeted the restart, admin, query-plan and bench cases to its wave-4 titles
+      // (and M1.4.3/drain_success to N3-07's SIGTERM drain test).
+      expect(caseMap).toMatch(/^PENDING case map: M6\.2\.2\/metrics_auth: .* pending \(wave 4, N4-03\)$/m);
+      expect(caseMap).toContain('of node waves <= 0 exists; 50 targets of later node waves pending');
       // Every live gate ran with no environment and answered blocked (exit 2) with its missing names.
       expect(passed.liveGates).toEqual(gates);
       for (const gate of gates) {

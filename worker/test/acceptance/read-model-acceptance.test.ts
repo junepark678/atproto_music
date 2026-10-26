@@ -4,7 +4,7 @@
 // M5.1.2/window_totals, M5.4.1/manual_expectations, M5.4.2/read_acceptance and
 // the acceptance halves of M3.1.3/equal_timestamp and M5.3.2/public_lists.
 //
-// tests/fixtures/read_models.json reaches the real IndexDO only as fake
+// tests/fixtures/read_models.json reaches the production Node composition (IndexCore) only as fake
 // Jetstream events, verified and applied by the production alarm
 // (support/seed.ts). Every expected value below is hardcoded from TESTING.md
 // (CIDs come from the fixture signer, never from the code under test). Every
@@ -12,7 +12,8 @@
 // table state and the fixture network's call counts.
 
 import { followRkey } from '@atmusic/atproto/test-support/read-models';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
+import { closeHarnesses } from '../composition/support';
 import {
   ALICE,
   AS_OF,
@@ -82,10 +83,12 @@ async function pages(a: Seeded, base: string, limit: number): Promise<{ pages: s
 }
 
 describe('read-model acceptance', () => {
+  afterEach(closeHarnesses);
+
   it('Alice history exact order and limit-2 pages over HTTP', async () => {
     const a = await seedAcceptance('history');
 
-    // DO tables: the seven confirmed records with the signer's CIDs; r08 verified absent.
+    // database tables: the seven confirmed records with the signer's CIDs; r08 verified absent.
     const tables = await a.inDo((db) => ({
       stored: storedScrobbles(db, ALICE),
       r08: db.one('SELECT state, revision FROM record_state WHERE uri = ?', U('r08')),

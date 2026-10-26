@@ -4,18 +4,19 @@
 // M4.4.1/independent_write, M4.4.2/signature_failure, M4.4.2/convergence,
 // M6.3.3/suppression and the acceptance half of M4.3.1/feed_visibility.
 //
-// Everything reaches the real IndexDO as fake Jetstream events over the
+// Everything reaches the production Node composition (IndexCore) as fake Jetstream events over the
 // production socket, and is verified (signature, CIDs, MST path) and applied
 // by the production alarm. Corruptions are served by the fake PDS (fault
 // injection at the transport boundary only); the verifier is never bypassed.
 // Expected values are hardcoded; each step asserts HTTP status and schema
-// (support/openapi.ts), DO tables and the fixture network's call counts.
+// (support/openapi.ts), database tables and the fixture network's call counts.
 
 import { followRkey } from '@atmusic/atproto/test-support/read-models';
 import { carResponse } from '@atmusic/atproto/test-support/router-transport';
 import { corruptBlockByte, corruptSignature } from '@atmusic/atproto/test-support/signed-repo';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import type { Db } from '../../src/do/db';
+import { closeHarnesses } from '../composition/support';
 import {
   ALICE,
   APP_WRITES,
@@ -60,6 +61,8 @@ const counter = (db: Db, name: string, label = '') =>
   db.one<{ value: number }>('SELECT value FROM counters WHERE name = ? AND label = ?', name, label)?.value ?? 0;
 
 describe('federation acceptance', () => {
+  afterEach(closeHarnesses);
+
   it('Carol r10 appears only through external ingestion with zero app write calls', async () => {
     const a = await seedAcceptance('external-writer');
     const r10 = uriOf(CAROL, 'r10');

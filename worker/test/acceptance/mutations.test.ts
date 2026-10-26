@@ -5,16 +5,17 @@
 //
 // Every mutation is a real signed commit on the owner's fake PDS (createRecord
 // / deleteRecord as the SPA outbox would send them, or a commit by another
-// app straight into the repository), which reaches the real IndexDO only as a
+// app straight into the repository), which reaches the production Node composition (IndexCore) only as a
 // fake Jetstream event: the production drain fetches the getRecord proof,
 // verifies it and applies it. Account deactivation is detected by stepping
 // the production status-sweep timer (A17). Expected values are hardcoded from
-// TESTING.md; each step asserts HTTP status and schema, DO tables and the
+// TESTING.md; each step asserts HTTP status and schema, database tables and the
 // fixture network's call counts.
 
 import { followRkey } from '@atmusic/atproto/test-support/read-models';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import type { Db } from '../../src/do/db';
+import { closeHarnesses } from '../composition/support';
 import {
   ALICE,
   AS_OF,
@@ -79,6 +80,8 @@ async function drainNow(a: Seeded): Promise<void> {
 }
 
 describe('mutation acceptance', () => {
+  afterEach(closeHarnesses);
+
   it('delete r01 → 6/6/3, Homogenic 1, history r07,r02,…', async () => {
     const a = await seedAcceptance('delete-r01');
     const r01 = a.seed.records.get(uriOf(ALICE, 'r01'));
@@ -93,7 +96,7 @@ describe('mutation acceptance', () => {
     await drainNow(a);
     expect(a.kit.clock.nowMs()).toBe(Date.parse(AS_OF));
 
-    // DO state: the row is gone, the URI is verified absent at the deleting revision.
+    // Database state: the row is gone, the URI is verified absent at the deleting revision.
     const after = await a.inDo((db) => ({
       row: db.one('SELECT uri FROM scrobbles WHERE uri = ?', uriOf(ALICE, 'r01')),
       state: db.one('SELECT state, revision FROM record_state WHERE uri = ?', uriOf(ALICE, 'r01')),

@@ -628,9 +628,15 @@ class NodeWavesTests(unittest.TestCase):
                 self.assertNotIn(case, pending)
         # N3-11 renamed the M1.1.1/version_policy target to the four-collection title it declares in wave 3.
         self.assertEqual(pending.get('M1.1.1/version_policy'), 'N3-11')
-        self.assertEqual(len(pending), 39)
+        # N4-03 renamed the restart, admin, query-plan and bench targets to the titles it declares in wave 4
+        # (M1.4.3/drain_success now targets N3-07's SIGTERM drain test, with N4-03's restart test as also).
+        for case in ['M1.4.3/drain_success', 'M4.4.2/worker_restart', 'M5.4.3/durable_views', 'M5.4.3/durable_cursor',
+                     'M5.4.3/durable_delete', 'M6.2.2/metrics_auth', 'M6.2.3/slow_query_detection',
+                     'M6.4.2/packaged_recovery', 'M7.4.2/browser_restart']:
+            self.assertEqual(pending.get(case), 'N4-03', case)
+        self.assertEqual(len(pending), 39 + 9)
         self.assertIn('PASS case map: 258 unique cases', stdout)
-        self.assertIn('every referenced test file and name of node waves <= 0 exists; 39 targets of later node waves pending', stdout)
+        self.assertIn('every referenced test file and name of node waves <= 0 exists; 50 targets of later node waves pending', stdout)
 
 
 def case_map_with(base, case, target, reason):
