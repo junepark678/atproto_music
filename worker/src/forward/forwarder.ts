@@ -605,9 +605,12 @@ export async function runForward(
   inFlight.add(rt.db);
   try {
     const max = options.maxRequests ?? MAX_REQUESTS_PER_RUN;
-    const expired = expireRows(rt.db, now);
+    // The caller's `now` may be stale (the extension lane hands every handler
+    // the tick's timestamp after earlier handlers awaited): never act before
+    // the clock's current time.
+    let at = Math.max(now, rt.clock.nowMs());
+    const expired = expireRows(rt.db, at);
     let requests = 0;
-    let at = now;
     // A pick that sends nothing (an unreadable credential revokes its link) still counts against this bound.
     for (let picks = 0; requests < max && picks < max * 4; picks++) {
       const job = pickJob(rt, at);

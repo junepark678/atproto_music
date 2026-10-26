@@ -319,7 +319,7 @@ export function buildLinksService(context: FeatureContext, options: LinksFeature
     random: deps.random,
     log: deps.log,
     box,
-    pacing: options.pacing ?? new UpstreamPacing(),
+    pacing: options.pacing ?? new UpstreamPacing(deps.clock),
     lastfm,
     listenbrainz,
   };

@@ -13,11 +13,17 @@
 //   `X-RateLimit-Remaining: 0` (or was a 429) waits `X-RateLimit-Reset-In`
 //   seconds (`observeListenbrainz`).
 //
-// The pacer never sleeps: `try*` takes a token when one is free at `now` and
+// The pacer never sleeps: `try*` takes a token when one is free and
 // otherwise returns false; `*AvailableAt` says when the caller may try again,
-// so a timer can be scheduled for that instant. Time is always passed in
-// (the injected clock), so tests step it. State is in memory only: after a
-// restart the buckets start full, which at worst sends one request early.
+// so a timer can be scheduled for that instant. The pacer reads the injected
+// clock itself: a token is taken at the later of the caller's `now` and the
+// clock's current time, so a caller holding a stale timestamp (a timer tick
+// whose lane awaited other work first) can never send two requests less than
+// the interval apart. Tests step the injected clock. State is in memory only:
+// after a restart the buckets start full, which at worst sends one request
+// early.
+
+import type { Clock } from '@atmusic/core/deps';
 
 /** At most one Last.fm request per this many ms, server-wide (ADR §11.3). */
 export const LASTFM_MIN_INTERVAL_MS = 1_000;
@@ -51,6 +57,18 @@ export class UpstreamPacing {
   private forwardBacklog = false;
   private readonly lbNextMs = new Map<string, number>();
 
+  private readonly clock: Clock;
+
+  /** `clock` is the process's injected clock; tokens are never taken before its current time. */
+  constructor(clock: Clock) {
+    this.clock = clock;
+  }
+
+  /** The instant a token is taken at: never earlier than the clock says it is. */
+  private instant(now: number): number {
+    return Math.max(now, this.clock.nowMs());
+  }
+
   // -- Last.fm ---------------------------------------------------------------
 
   /** When `lane` may next send a Last.fm request (≤ now: it may send now). */
@@ -59,11 +77,15 @@ export class UpstreamPacing {
     return this.lastfmNextMs;
   }
 
-  /** Takes the global Last.fm token for one request at `now`; false when it is not free for `lane`. */
+  /**
+   * Takes the global Last.fm token for one request at `now` (or the clock's
+   * current time, when later); false when it is not free for `lane`.
+   */
   tryLastfm(lane: LastfmLane, now: number): boolean {
     if (lane === 'import' && this.forwardBacklog) return false;
-    if (now < this.lastfmNextMs) return false;
-    this.lastfmNextMs = now + LASTFM_MIN_INTERVAL_MS;
+    const at = this.instant(now);
+    if (at < this.lastfmNextMs) return false;
+    this.lastfmNextMs = at + LASTFM_MIN_INTERVAL_MS;
     return true;
   }
 
@@ -88,10 +110,11 @@ export class UpstreamPacing {
     return this.lbNextMs.get(key) ?? Number.NEGATIVE_INFINITY;
   }
 
-  /** Takes `key`'s ListenBrainz token at `now`; false when it is not free. */
+  /** Takes `key`'s ListenBrainz token at `now` (or the clock's current time, when later); false when it is not free. */
   tryListenbrainz(key: string, now: number): boolean {
-    if (now < this.listenbrainzAvailableAt(key)) return false;
-    this.lbNextMs.set(key, now + LISTENBRAINZ_MIN_INTERVAL_MS);
+    const at = this.instant(now);
+    if (at < this.listenbrainzAvailableAt(key)) return false;
+    this.lbNextMs.set(key, at + LISTENBRAINZ_MIN_INTERVAL_MS);
     return true;
   }
 
@@ -108,7 +131,7 @@ export class UpstreamPacing {
   observeListenbrainz(key: string, now: number, rate: ListenbrainzRateObservation, exhausted = false): number | null {
     if (!exhausted && rate.remaining !== 0) return null;
     const waitMs = Math.min(MAX_RESET_IN_MS, Math.max(LISTENBRAINZ_MIN_INTERVAL_MS, (rate.resetInS ?? 1) * 1000));
-    const until = now + waitMs;
+    const until = this.instant(now) + waitMs;
     this.deferListenbrainz(key, until);
     return until;
   }

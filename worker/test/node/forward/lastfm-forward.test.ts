@@ -200,6 +200,50 @@ describe('Last.fm forwarding', () => {
     expect(w.rows().every((r) => r.attempts === 1)).toBe(true);
   });
 
+  it('a run handed a stale now (a tick timestamp seconds old) still keeps Last.fm requests at least 1 s apart, and the shared bucket never trusts a stale caller time', async () => {
+    const w = await world();
+    w.linkLastfm(ALICE, 'alice_fm');
+    w.linkLastfm(BOB, 'bob_fm');
+    w.scrobbles(ALICE, 1, 'a');
+    w.scrobbles(BOB, 1, 'b');
+
+    // The extension lane's tick: its timestamp is handed to every handler, and the handlers
+    // before `forward` awaited PDS writes for 5 s, so `forward` sees a `now` 5 s old.
+    let tick = w.clock.nowMs();
+    w.clock.advance(5 * SECOND);
+    const report = await runForward(w.rt, tick);
+    expect(report.requests).toBe(1);
+    expect(w.lastfm.scrobbles).toHaveLength(1);
+    expect(statesOf(w.rows()).sort()).toEqual(['queued', 'sent']);
+    // The next run is scheduled a full second after the request, by the clock.
+    expect(report.nextDueMs).toBe(w.clock.nowMs() + SECOND);
+
+    // Another stale caller inside that second is still refused.
+    w.clock.advance(SECOND - 1);
+    expect((await runForward(w.rt, tick)).requests).toBe(0);
+    expect(w.lastfm.scrobbles).toHaveLength(1);
+
+    // Once the second has passed by the clock, a run with a stale `now` sends the other row.
+    w.clock.advance(1);
+    tick = w.clock.nowMs() - 5 * SECOND;
+    expect((await runForward(w.rt, tick)).requests).toBe(1);
+    expect(w.lastfm.scrobbles.map((b) => b.user).sort()).toEqual(['alice_fm', 'bob_fm']);
+    expect(statesOf(w.rows())).toEqual(['sent', 'sent']);
+    const times = w.seen.filter(([host]) => host === 'lastfm.test').map(([, , t]) => t);
+    expect(times).toHaveLength(2);
+    expect((times[1] as number) - (times[0] as number)).toBe(SECOND);
+
+    // The shared pacer itself (imports use it too): a token taken with a stale time blocks
+    // until a second after the clock's current time, not after the stale time.
+    const pacing = new UpstreamPacing(w.clock);
+    expect(pacing.tryLastfm('import', w.clock.nowMs() - 5 * SECOND)).toBe(true);
+    expect(pacing.tryLastfm('forward', w.clock.nowMs())).toBe(false);
+    expect(pacing.lastfmAvailableAt('forward', w.clock.nowMs())).toBe(w.clock.nowMs() + SECOND);
+    expect(pacing.tryListenbrainz('k', w.clock.nowMs() - 5 * SECOND)).toBe(true);
+    expect(pacing.tryListenbrainz('k', w.clock.nowMs())).toBe(false);
+    expect(pacing.listenbrainzAvailableAt('k')).toBe(w.clock.nowMs() + SECOND);
+  });
+
   it('per-item ignored code 5 is re-queued at the next 00:00 UTC; other ignored codes are recorded and not retried; codes 11, 16, 29, 8 and HTTP 503 retry with 30 s*2^n backoff; rows older than 13 days expire', async () => {
     const w = await world();
     w.linkLastfm(ALICE, 'alice_fm');
@@ -563,7 +607,7 @@ describe('Last.fm forwarding', () => {
     );
     const offPort: ForwardRuntime = {
       ...w.rt,
-      pacing: new UpstreamPacing(),
+      pacing: new UpstreamPacing(w.clock),
       lastfm: new LastfmClient({
         apiRoot: 'https://lastfm.test:8443/2.0/',
         apiKey: API_KEY,
