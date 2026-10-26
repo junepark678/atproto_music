@@ -620,8 +620,9 @@ describe('N4-04 de-shim: harness, storage and shared helpers', () => {
       'worker/test/storage/schema-v2.test.ts',
       'worker/test/storage/timers-extensions.test.ts',
     ]);
-    // The remaining callers of stubFor through support.ts are suites of N4-05
-    // and N4-06 (node-waves.json owners), none of them a listed file.
+    // Any remaining caller of stubFor through support.ts must be a suite of
+    // N4-05 or N4-06 (node-waves.json owners), never a listed file. With all
+    // three de-shim packages of wave 4 integrated, none is left.
     const waves = JSON.parse(read('docs/planning/node-waves.json')) as Array<{
       packages: Array<{ id: string; files: string[] }>;
     }>;
@@ -630,21 +631,37 @@ describe('N4-04 de-shim: harness, storage and shared helpers', () => {
     expect(remaining).toEqual(expect.arrayContaining(['worker/test/ingest/', 'worker/test/read/']));
     const ownedByRemaining = (file: string) =>
       remaining.some((o) => (o.endsWith('/') ? file.startsWith(o) : file === o));
+    const callsStubForViaSupport = (f: string, src: string) => {
+      const importsSupport = importsOf(src).some((i) => {
+        const t = resolveImport(f, i.spec, REPO.exists);
+        return t.kind === 'file' && t.path === ALLOWED_EDGE.from;
+      });
+      return importsSupport && /(?<![\w$.])stubFor(?![\w$])/.test(codeOnly(src));
+    };
+    // Positive and negative controls, so the empty result below is not vacuous.
+    expect(
+      callsStubForViaSupport(
+        'worker/test/ingest/accounts.test.ts',
+        "import { stubFor } from '../write/support';\nconst s = stubFor('x');",
+      ),
+    ).toBe(true);
+    expect(
+      callsStubForViaSupport(
+        'worker/test/ingest/accounts.test.ts',
+        "import { stubFor } from '../harness/isolation-probe';\nconst s = stubFor('x');",
+      ),
+    ).toBe(false);
+    expect(
+      callsStubForViaSupport(
+        'worker/test/ingest/accounts.test.ts',
+        "import { ALICE } from '../write/support';\n// stubFor('x') only in a comment",
+      ),
+    ).toBe(false);
     const callers = filesUnder('worker/test')
       // This file names stubFor in its own regular expression; it never calls it.
       .filter((f) => !f.includes('/.tsbuild/') && f !== ALLOWED_EDGE.from && f !== THIS_FILE)
-      .filter((f) => {
-        const src = read(f);
-        const importsSupport = importsOf(src).some((i) => {
-          const t = resolveImport(f, i.spec, REPO.exists);
-          return t.kind === 'file' && t.path === ALLOWED_EDGE.from;
-        });
-        return importsSupport && /(?<![\w$.])stubFor(?![\w$])/.test(codeOnly(src));
-      });
-    expect(callers.length).toBeGreaterThanOrEqual(10);
-    expect(callers).toEqual(
-      expect.arrayContaining(['worker/test/ingest/accounts.test.ts', 'worker/test/write/apply-record.test.ts']),
-    );
+      .filter((f) => callsStubForViaSupport(f, read(f)));
+    expect(callers).toEqual([]);
     expect(callers.filter((f) => !ownedByRemaining(f))).toEqual([]);
     expect(callers.filter((f) => files.includes(f))).toEqual([]);
 
