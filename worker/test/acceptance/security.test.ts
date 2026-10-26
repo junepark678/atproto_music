@@ -1,40 +1,45 @@
-// W6-01 security acceptance (ADR 0004 §8; TESTING.md "Security and async side
-// effects", "Fault injection exists only in test harnesses").
+// W6-01 security acceptance on the Node host (ported by N4-03; ADR 0004 §8,
+// ADR 0005 §3.5, §3.9, §13; TESTING.md "Security and async side effects",
+// "Fault injection exists only in test harnesses").
 //
-// On the seeded real IndexDO:
+// On the seeded production Node composition (entry.ts):
 // - notify abuse limits (N1): malformed JSON 400, over 2 KiB 413, strict
 //   shape 422, 61st request per IP per minute and 601st per DID per hour 429
 //   with Retry-After, new-DID admission exhausted 503 `queue_full`. Every
-//   refusal leaves every DO table unchanged and makes no remote call; a valid
+//   refusal leaves every table unchanged and makes no remote call; a valid
 //   request afterwards proves the index is still healthy;
 // - SSRF: a fixture DoH answer that puts a PDS host in private address space
 //   is refused before any request reaches that host, and a PDS redirect is
 //   refused without following it. Both leave the projection byte-identical,
 //   and the same record applies once the network is honest again;
-// - no test seam is reachable: not over HTTP through the production Worker
-//   (SELF, the entry's default export), not over JS RPC (the control method
-//   is Symbol-keyed), and the unmodified production IndexDO refuses this very
-//   environment (the fixture prefix) while production sources never read the
-//   acceptance flag or import test-support.
+// - no test seam is reachable: not over HTTP (the production route table and
+//   dispatcher answer nothing but the API), not on IndexCore (it has no
+//   control method), and the production entry refuses this very environment
+//   (the fixture prefix needs the test-only parseNodeConfig option, which
+//   main.ts never passes: run() exits 78) while production sources never
+//   import test-support or opt into a fixture option at a call site.
 
-import { runInDurableObject, SELF } from 'cloudflare:test';
-import { seededRandom } from '@atmusic/core/test-support/random';
-import { describe, expect, it } from 'vitest';
-import { ConfigError, parseConfig } from '../../src/config';
-import { IndexDO } from '../../src/do/index-do';
-import type { Env } from '../../src/env';
-import { createWorker } from '../../src/router';
-import productionWrangler from '../../wrangler.jsonc?raw';
-import { ACCEPTANCE, ALLOW_FIXTURE_VAR } from './entry';
+import { EventEmitter } from 'node:events';
+import { chmodSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { type FixtureTransport, routerTransport } from '@atmusic/atproto/test-support/router-transport';
+import { afterEach, describe, expect, it } from 'vitest';
+import envExample from '../../../config/atmusic.env.example?raw';
+import { IndexCore } from '../../src/app/index-core';
+import { ConfigError } from '../../src/config';
+import { parseNodeConfig } from '../../src/node/config';
+import { type ExitCode, run } from '../../src/node/run';
+import { closeHarnesses, control, harness, harnessEnv } from '../composition/support';
+import { captureLog, manualTimers, refusingJetstream, testSecretsDocument } from '../node/support/app';
 import { checkResponse, schema } from './support/openapi';
 import {
   ALICE,
-  acceptanceEnv,
   allTables,
   BOB,
   GET_RECORD,
   hintCount,
   inSocket,
+  PUBLIC_ORIGIN,
   projectionTables,
   SCROBBLE,
   seedAcceptance,
@@ -58,54 +63,13 @@ function newDid(n: number): string {
   return `did:plc:${out}`;
 }
 
-/** A promise's outcome, never an unhandled rejection (JS RPC promises are thenables). */
-async function settle(
-  fn: () => PromiseLike<unknown>,
-): Promise<{ ok: true; value: unknown } | { ok: false; error: string }> {
-  try {
-    return { ok: true, value: await fn() };
-  } catch (error) {
-    return { ok: false, error: String(error) };
-  }
-}
-
 function scrobble(track: string, at: string) {
   return { $type: SCROBBLE, artist: 'Kate Bush', track, listenedAt: at, createdAt: at };
 }
 
-/**
- * The PROD_INDEX namespace with every stub method run on the real production
- * IndexDO instance inside its isolate (runInDurableObject). The production
- * class, its constructor and its refusal are unchanged; what changes is only
- * how a deliberate rejection travels back. A JS RPC method that rejects is
- * logged by workerd on the callee side as "Uncaught (in promise)" even when
- * the caller awaits and catches it; through runInDurableObject the rejection
- * reaches the caller (the Worker code under test) as a plain rejected promise,
- * so the expected refusals here never add such a line and a real unhandled
- * rejection stands out.
- */
-function inIsolate(ns: Env['INDEX']): Env['INDEX'] {
-  return {
-    idFromName: (name: string) => ns.idFromName(name),
-    get: (id: DurableObjectId) => {
-      const stub = ns.get(id) as unknown as DurableObjectStub<IndexDO>;
-      return new Proxy(
-        {},
-        {
-          get: (_target, method) =>
-            typeof method !== 'string' || method === 'then'
-              ? undefined
-              : (...args: unknown[]) =>
-                  runInDurableObject(stub, (instance: IndexDO) =>
-                    (instance as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>)[method]?.(...args),
-                  ),
-        },
-      );
-    },
-  } as unknown as Env['INDEX'];
-}
-
 describe('security acceptance', () => {
+  afterEach(closeHarnesses);
+
   it('notify abuse limits, SSRF fixture private DoH answer refused, redirect refused, no test seam reachable', async () => {
     const a = await seedAcceptance('security');
     const notify = (body: unknown, ip = '203.0.113.7') => a.postJson('/api/v1/notify', body, ip);
@@ -306,8 +270,8 @@ describe('security acceptance', () => {
     ]);
 
     // ------------------------------------------------------ no test seam
-    // Over HTTP, through the production Worker export: nothing answers but the API.
-    for (const [method, path] of [
+    // Over HTTP, through the production dispatcher and route table: nothing answers but the API.
+    const probes = [
       ['GET', '/internal/acceptance'],
       ['POST', '/internal/acceptance/control'],
       ['GET', '/internal/test/reset'],
@@ -315,13 +279,12 @@ describe('security acceptance', () => {
       ['POST', '/api/v1/control'],
       ['GET', '/internal/admin/status'],
       ['POST', '/internal/admin/resnapshot'],
-    ] as const) {
-      const res = await SELF.fetch(`https://music.example.test${path}`, {
-        method,
-        headers: { authorization: 'Bearer x' },
-      });
-      const body = await res.json();
-      expect([method, path, res.status, schema('Error', body), (body as Json).error.code]).toEqual([
+      ['GET', '/api/test/echo'],
+    ] as const;
+    tables = await a.inDo(allTables);
+    for (const [method, path] of probes) {
+      const res = await a.h.request(path, { method, headers: { authorization: 'Bearer x' } });
+      expect([method, path, res.status, schema('Error', res.body), (res.body as Json).error.code]).toEqual([
         method,
         path,
         404,
@@ -329,68 +292,70 @@ describe('security acceptance', () => {
         'not_found',
       ]);
     }
-    // Over JS RPC: the control method has no string name, so a stub cannot reach it.
-    // These five probes must cross JS RPC (that is what they prove), and each
-    // refusal is awaited here; workerd still prints one callee-side
-    // "Uncaught (in promise) TypeError: The RPC receiver does not implement
-    // <name>" line per probe, which no caller can suppress. They are the only
-    // such lines this file produces.
-    const stub = a.stub as unknown as Record<string | symbol, unknown>;
-    expect(stub[ACCEPTANCE]).toBeUndefined();
-    for (const name of ['atmusic.acceptance-control', 'control', 'resetControl', 'record', 'deps']) {
-      const outcome = await settle(() => (stub[name] as () => Promise<unknown>)());
-      const refusedByReceiver = !outcome.ok && /does not implement/.test(outcome.error);
-      expect([name, outcome.ok, refusedByReceiver]).toEqual([name, false, true]);
+    expect(JSON.stringify(await a.inDo(allTables))).toBe(JSON.stringify(tables));
+    // The composed route table is the production one: /api/v1, /health and nothing internal.
+    const patterns = a.h.app.routes.routes.map((r) => `${r.method} ${r.pattern}`);
+    expect(patterns.length).toBeGreaterThan(10);
+    for (const p of patterns) expect(p).toMatch(/^(GET|POST) \/(api\/v1|health)\//);
+    for (const [method, path] of probes) {
+      expect([method, path, a.h.app.routes.match(method, path).kind]).toEqual([method, path, 'none']);
     }
-    // Inside the isolate the handle works — through runInDurableObject only.
+    // IndexCore has no control method: only its RPC, admin and lifecycle methods exist.
+    const methods = Object.getOwnPropertyNames(IndexCore.prototype).filter((n) => n !== 'constructor');
+    expect(methods.length).toBeGreaterThan(20);
+    for (const name of ['control', 'resetControl', 'record', 'stopRecording', 'acceptance', 'setClock', 'inject']) {
+      expect([name, methods.includes(name)]).toEqual([name, false]);
+    }
+    // The test handle exists only in this process's test code.
     expect(await a.inDo((_db, h) => h.constructed)).toBe(1);
 
-    // The unmodified production IndexDO refuses this environment: the fixture
-    // prefix needs allowFixturePrefix, which only test entries pass; the
-    // acceptance flag is not read by worker/src.
-    // (Run in the DO's isolate, see inIsolate: the refusal is the production one.)
-    const prodStub = acceptanceEnv.PROD_INDEX.get(
-      acceptanceEnv.PROD_INDEX.idFromName('production-class'),
-    ) as unknown as DurableObjectStub<IndexDO>;
-    const prodReady = await settle(() => runInDurableObject(prodStub, (instance: IndexDO) => instance.ready()));
-    expect(prodReady).toEqual({ ok: false, error: 'NotReadyError: index configuration is invalid (ConfigError)' });
-    expect(await runInDurableObject(prodStub, (instance: IndexDO) => instance instanceof IndexDO)).toBe(true);
-    expect(() => parseConfig(acceptanceEnv)).toThrow(ConfigError);
-    expect(() => parseConfig(acceptanceEnv)).toThrow(/com\.example\.atmusic is fixture-only/);
-    expect((acceptanceEnv as unknown as Record<string, string>)[ALLOW_FIXTURE_VAR]).toBe('true');
-    const prodWorker = createWorker({ clock: a.kit.clock, random: seededRandom(3), indexName: 'production-class' });
-    const prodEnv = { ...acceptanceEnv, INDEX: inIsolate(acceptanceEnv.PROD_INDEX) } as unknown as Env;
-    const prodFetch = async (method: 'GET' | 'POST', path: string, body?: string) => {
-      const url = `https://music.example.test${path}`;
-      const res = await prodWorker.fetch(
-        new Request(url, {
-          method,
-          headers: { 'content-type': 'application/json' },
-          ...(body === undefined ? {} : { body }),
-        }),
-        prodEnv,
-        {} as ExecutionContext,
-      );
-      const text = await res.text();
-      return { url, res, text, json: JSON.parse(text) as Json };
+    // The production entry refuses this environment: the fixture prefix needs
+    // the test-only `allowFixturePrefix` option, which main.ts never passes.
+    const env = { ...harnessEnv(a.h.dir), LEXICON_PREFIX: 'com.example.atmusic' };
+    expect(() => parseNodeConfig(env)).toThrow(ConfigError);
+    expect(() => parseNodeConfig(env, { fixtureOrigins: true })).toThrow(/com\.example\.atmusic is fixture-only/);
+    expect(parseNodeConfig(env, { fixtureOrigins: true, allowFixturePrefix: true }).app.prefix).toBe(
+      'com.example.atmusic',
+    );
+    // run() as main.ts calls it (no configOptions): exit 78 naming LEXICON_PREFIX, nothing opened.
+    const prodDir = join(a.h.dir, 'production');
+    mkdirSync(join(prodDir, 'web', 'dist'), { recursive: true });
+    writeFileSync(join(prodDir, 'web', 'dist', 'index.html'), '<!doctype html><title>t</title>');
+    const secretsFile = join(prodDir, 'secrets.json');
+    writeFileSync(secretsFile, JSON.stringify(testSecretsDocument()));
+    chmodSync(secretsFile, 0o600);
+    const prodEnv = {
+      ...harnessEnv(prodDir),
+      ATMUSIC_ASSETS_DIR: join(prodDir, 'web', 'dist'),
+      ATMUSIC_SECRETS_FILE: secretsFile,
     };
-    const notReady = await prodFetch('GET', '/health/ready');
-    expect([notReady.res.status, notReady.json.error.code]).toEqual([503, 'not_ready']);
-    expect(
-      checkResponse('GET', notReady.url, { status: 503, headers: notReady.res.headers, body: notReady.json }),
-    ).toBe('valid');
-    // A read route gets the generic error envelope, revealing nothing about why
-    // (notify's declared 503 is the next test).
-    const refusedFeed = await prodFetch('GET', '/api/v1/feed?scope=global');
-    expect([refusedFeed.res.status, refusedFeed.json.error.code, schema('Error', refusedFeed.json)]).toEqual([
-      500,
-      'internal_error',
-      'valid',
-    ]);
-    expect(refusedFeed.text).not.toMatch(/ConfigError|fixture|com\.example|LEXICON_PREFIX/);
-    // Production sources: no test-support import, no acceptance flag, no fixture-prefix opt-in.
+    const prodLog = captureLog();
+    const stderr: string[] = [];
+    const exits: ExitCode[] = [];
+    const fetchBefore = globalThis.fetch;
+    const code = await run({
+      argv: ['node', 'main.mjs', '--init'],
+      env: prodEnv,
+      exit: (c) => exits.push(c),
+      log: prodLog.logger,
+      stdout: () => {},
+      stderr: (text) => stderr.push(text),
+      transport: routerTransport({}) as FixtureTransport,
+      connectJetstream: refusingJetstream(),
+      timers: manualTimers(),
+      signals: new EventEmitter(),
+    });
+    expect([code, exits]).toEqual([78, [78]]);
+    const refusal = prodLog.logs.find((l) => l.event === 'run.config_error') as { fields: string[] } | undefined;
+    expect(refusal?.fields).toContain('LEXICON_PREFIX');
+    expect(stderr.join('')).toMatch(/LEXICON_PREFIX: .*fixture-only/);
+    // It refused before the database, the socket or the fetch stub.
+    expect(existsSync(parseNodeConfig(prodEnv, { fixtureOrigins: true, allowFixturePrefix: true }).dbPath)).toBe(false);
+    expect(globalThis.fetch).toBe(fetchBefore);
+
+    // Production sources: no test-support import, no acceptance flag, no fixture opt-in at a call site.
     const sources = Object.entries(PRODUCTION_SOURCES);
-    expect(sources.length).toBeGreaterThan(40);
+    expect(sources.length).toBeGreaterThan(60);
     for (const [file, text] of sources) {
       // Code only: comments may describe the rule they enforce.
       const code = text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
@@ -398,34 +363,35 @@ describe('security acceptance', () => {
         /from\s+['"][^'"]*test-support/,
         /ACCEPTANCE_ALLOW_FIXTURE_PREFIX/,
         /allowFixturePrefix:\s*true/,
+        /fixtureOrigins:\s*true/,
         /\bfixedClock\b/,
         /\bseededRandom\b/,
+        /\brouterTransport\b/,
       ].filter((re) => re.test(code));
       expect([file, offending]).toEqual([file, []]);
     }
-    // The scan is not vacuous: the one opt-in point exists and is a parameter.
+    // The scan is not vacuous: the two opt-in points exist and are parameters.
     expect(PRODUCTION_SOURCES['../../src/config.ts']).toMatch(/allowFixturePrefix\?: boolean/);
-    expect(productionWrangler).not.toMatch(/ACCEPTANCE_ALLOW_FIXTURE_PREFIX|TestIndexDO|com\.example\.atmusic/);
+    expect(PRODUCTION_SOURCES['../../src/node/config.ts']).toMatch(/fixtureOrigins\?: boolean/);
+    // The shipped configuration example names the production prefix, never the fixture one.
+    expect(envExample).toMatch(/LEXICON_PREFIX=dev\.pythonplayer123\.music/);
+    expect(envExample).not.toMatch(/ACCEPTANCE_ALLOW_FIXTURE_PREFIX|com\.example\.atmusic/);
   });
 
   it('notify returns 503 when IndexDO is unavailable', async () => {
     const a = await seedAcceptance('notify-unavailable');
-    const url = 'https://music.example.test/api/v1/notify';
-    const post = async (worker: ReturnType<typeof createWorker>, workerEnv: Env, body: unknown) => {
-      const res = await worker.fetch(
-        new Request(url, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json', 'cf-connecting-ip': '203.0.113.9' },
-          body: JSON.stringify(body),
-        }),
-        workerEnv,
-        {} as ExecutionContext,
-      );
-      const text = await res.text();
-      const json = JSON.parse(text) as Json;
+    const url = `${PUBLIC_ORIGIN}/api/v1/notify`;
+    const post = async (target: { request: typeof a.h.request }, body: unknown) => {
+      const res = await target.request('/api/v1/notify', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+        ip: '203.0.113.9',
+      });
+      const json = res.body as Json;
       return {
         res,
-        text,
+        text: res.text,
         json,
         verdict: checkResponse('POST', url, { status: res.status, headers: res.headers, body: json }),
       };
@@ -443,49 +409,41 @@ describe('security acceptance', () => {
       expect(r.json.error.requestId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
       expect(r.res.headers.get('x-request-id')).toBe(r.json.error.requestId);
       // Nothing about the cause leaks.
-      expect(r.text).not.toMatch(/ConfigError|NotReadyError|fixture|com\.example|LEXICON_PREFIX|overloaded|stack/i);
+      expect(r.text).not.toMatch(
+        /ConfigError|NotReadyError|IndexError|fixture|com\.example|LEXICON_PREFIX|disk|stack/i,
+      );
     };
 
     const before = await a.inDo(allTables);
     a.kit.resetCalls();
 
-    // 1. The real production IndexDO class, which refuses this (fixture-prefix)
-    //    environment: every call rejects with NotReadyError (run in its
-    //    isolate, see inIsolate).
-    const prodWorker = createWorker({
-      clock: a.kit.clock,
-      random: seededRandom(7),
-      indexName: 'production-unavailable',
-    });
-    const prodEnv = { ...acceptanceEnv, INDEX: inIsolate(acceptanceEnv.PROD_INDEX) } as unknown as Env;
+    // 1. A composition whose index storage is not ready (a database file that
+    //    was never migrated: compose leaves IndexCore unstarted and every call
+    //    rejects with NotReadyError).
+    const unready = await harness('notify-unmigrated', { migrate: false });
+    expect(unready.app.schema).toEqual({ status: 'pending', version: 0 });
+    expect(unready.core.isReady).toBe(false);
     for (const body of [{ did: ALICE }, { uri: uriOf(ALICE, 'r01') }]) {
-      expectUnavailable(await post(prodWorker, prodEnv, body), JSON.stringify(body));
+      expectUnavailable(await post(unready, body), JSON.stringify(body));
     }
     // Admission still runs first: an invalid body is its own 4xx, not a 503.
-    const invalid = await post(prodWorker, prodEnv, { uri: uriOf(ALICE, 'r01'), extra: 1 });
+    const invalid = await post(unready, { uri: uriOf(ALICE, 'r01'), extra: 1 });
     expect([invalid.res.status, invalid.json.error.code, invalid.verdict]).toEqual([422, 'validation_failed', 'valid']);
+    const notReady = await unready.request('/health/ready');
+    expect([notReady.status, (notReady.body as Json).error.code]).toEqual([503, 'not_ready']);
 
-    // 2. An IndexDO whose RPC rejects as an overloaded or reset object does
-    //    (an injected namespace; the production Worker code is unchanged).
-    let notifyCalls = 0;
-    const failing = {
-      idFromName: (name: string) => acceptanceEnv.INDEX.idFromName(name),
-      get: () => ({
-        notify: async () => {
-          notifyCalls += 1;
-          throw new Error('Durable Object is overloaded. Requests queued for too long.');
-        },
-      }),
-    };
-    const failingWorker = createWorker({ clock: a.kit.clock, random: seededRandom(9), indexName: 'overloaded' });
-    const failingEnv = { ...acceptanceEnv, INDEX: failing } as unknown as Env;
-    expectUnavailable(await post(failingWorker, failingEnv, { did: ALICE }), 'overloaded');
-    expect(notifyCalls).toBe(1);
+    // 2. An IndexCore whose storage fails under the call (an injected Db fault,
+    //    as a full disk or an I/O error would): the same 503, and the failing
+    //    transaction leaves nothing behind.
+    control.dbFault = { match: /./, message: 'SQLITE_FULL: database or disk is full', remaining: 1 };
+    expectUnavailable(await post(a.h, { did: ALICE }), 'storage failure');
+    expect(control.dbFault.remaining).toBe(0);
+    control.dbFault = null;
 
     // Neither outage touched the healthy index or the network ...
     expect(JSON.stringify(await a.inDo(allTables))).toBe(JSON.stringify(before));
     expect(a.kit.transport.calls.entries).toEqual([]);
-    // ... and the same request against the healthy IndexDO is queued (202):
+    // ... and the same request against the healthy composition is queued (202):
     // one hint row, and only the hint, its counters and the drain timer change.
     const ok = await a.postJson('/api/v1/notify', { uri: uriOf(BOB, 'r09') }, '198.51.100.250');
     expect([ok.status, ok.schema, ok.body]).toEqual([202, 'valid', { state: 'queued' }]);
@@ -502,5 +460,7 @@ describe('security acceptance', () => {
     });
     expect([escaped.status, escaped.body]).toEqual([202, { state: 'queued' }]);
     expect(((await a.inDo(allTables)).hints ?? []).map((h) => (h as { uri: string }).uri)).toEqual([uriOf(BOB, 'r09')]);
+    // The unmigrated file stayed unmigrated: nothing the refusals did created a schema.
+    expect(unready.db.one<{ n: number }>("SELECT count(*) AS n FROM sqlite_master WHERE type = 'table'")?.n).toBe(0);
   });
 });

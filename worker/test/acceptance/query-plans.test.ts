@@ -1,14 +1,15 @@
-// W6-01 query plans at scale (ADR 0004 §10.4 "Query plans"; M6.2.3
-// slow_query_detection).
+// W6-01 query plans at scale on the Node host (ported by N4-03; ADR 0004 §10.4
+// "Query plans", ADR 0005 §15.3; M6.2.3 slow_query_detection).
 //
 // 100 DIDs × 1,000 scrobbles, real signed repositories on four fake PDS
 // hosts, each DID announced through POST /api/v1/notify `{did}` and indexed by
-// exactly one range snapshot of its signed head, run by the real IndexDO alarm
-// (admission → getBlocks walk → applySnapshotChunk → completeSnapshot). Then
-// the history, global feed, following feed and statistics routes are served
-// over HTTP while the TestIndexDO's pass-through Db records every statement the
-// production read modules run, and each recorded statement is planned with
-// EXPLAIN QUERY PLAN:
+// exactly one range snapshot of its signed head, run by the production core
+// alarm (admission → getBlocks walk → applySnapshotChunk → completeSnapshot) on
+// node:sqlite. Then the history, global feed, following feed and statistics
+// routes are served over HTTP while the composition's pass-through Db
+// (entry.ts) records every statement the production read modules run, and
+// each recorded statement is planned with EXPLAIN QUERY PLAN on the SQLite the
+// Node host runs (3.54.1, asserted):
 // - with the schema's indexes: history and stats SEARCH scrobbles by DID
 //   through scrobbles_owner_time / scrobbles_stats, the global feed walks
 //   scrobbles_global_time in order, and nothing scans scrobbles or sorts it
@@ -18,7 +19,6 @@
 //   statistics cache is invalidated first (production stats_version bump),
 //   so the unindexed statistics are recomputed, not replayed from the cache.
 
-import { runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
 import { FakeDoh } from '@atmusic/atproto/test-support/fake-doh';
 import { FakePds } from '@atmusic/atproto/test-support/fake-pds';
 import { FakePlc } from '@atmusic/atproto/test-support/fake-plc';
@@ -28,15 +28,14 @@ import { routerTransport } from '@atmusic/atproto/test-support/router-transport'
 import { SignedRepo } from '@atmusic/atproto/test-support/signed-repo';
 import { fixedClock } from '@atmusic/core/test-support/clock';
 import { seededRandom } from '@atmusic/core/test-support/random';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import type { Db } from '../../src/do/db';
-import { doDb } from '../../src/do/db';
+import { JetstreamConnectError } from '../../src/do/ingest/jetstream-socket';
 import { bumpStatsVersion } from '../../src/do/write/account-state';
-import type { Env } from '../../src/env';
-import { createWorker } from '../../src/router';
-import { ACCEPTANCE, type RecordedStatement, resetControl, type TestIndexDO } from './entry';
+import { closeHarnesses } from '../composition/support';
+import { acceptanceApp, type RecordedStatement } from './entry';
 import { checkResponse } from './support/openapi';
-import { acceptanceEnv, FOLLOW, flush, freshName, SCROBBLE } from './support/seed';
+import { FOLLOW, flush, PUBLIC_ORIGIN, SCROBBLE } from './support/seed';
 
 // biome-ignore lint/suspicious/noExplicitAny: bodies are validated against api/openapi.yaml before they reach a test.
 type Json = any;
@@ -74,7 +73,9 @@ const FULL_SCAN = /^SCAN (s|scrobbles|d)$|^SCAN (s|scrobbles|d) USING (COVERING 
 const TEMP_SORT = /USE TEMP B-TREE FOR (ORDER BY|.*ORDER BY)/;
 
 describe('query plans', () => {
-  it('100×1,000 seeded records: history/feed/stats plans use indexes; negative control scans', async () => {
+  afterEach(closeHarnesses);
+
+  it('with 100 DIDs x 1,000 records, history, feeds and stats use their indexes on SQLite 3.54.1 and the no-index control shows SCAN', async () => {
     // ------------------------------------------------------------ network
     const clock = fixedClock(START);
     const keys = await fixtureKeys();
@@ -117,42 +118,39 @@ describe('query plans', () => {
     }
     const transport = routerTransport({ pds: hosts, plc, doh, relay, handles });
 
-    // The real IndexDO on that network; ingestion is notify + snapshot only here.
-    // Its info lines (one snapshot.finished per DID) are collected instead of
-    // printed; warnings and errors are collected and must stay empty.
-    const logged = { info: [] as string[], problems: [] as string[] };
-    const logSink = {
-      log: (line: string) => void logged.info.push(line),
-      warn: (line: string) => void logged.problems.push(line),
-      error: (line: string) => void logged.problems.push(line),
-    };
-    resetControl({ clock, random: seededRandom(9), transport, env: { INGEST_MODE: 'off' }, logSink });
-    const name = freshName('query-plans');
-    const stub = acceptanceEnv.INDEX.get(
-      acceptanceEnv.INDEX.idFromName(name),
-    ) as unknown as DurableObjectStub<TestIndexDO>;
-    const worker = createWorker({ clock, random: seededRandom(13), indexName: name });
-    const workerEnv = acceptanceEnv as unknown as Env;
+    // The production composition on that network; ingestion is notify + snapshot only here.
+    // Its log lines (one snapshot.finished per DID) are captured by the harness;
+    // warnings and errors must stay empty.
+    const app = await acceptanceApp('query-plans', {
+      clock,
+      random: seededRandom(9),
+      transport,
+      connectJetstream: async (url) => {
+        throw new JetstreamConnectError(null, null, `query-plans: no Jetstream at ${new URL(url).host}`);
+      },
+      env: { INGEST_MODE: 'off' },
+    });
+    const h = app.harness;
     let validated = 0;
-    const request = async (path: string, init: RequestInit & { ip?: string } = {}) => {
-      const url = `https://music.example.test${path}`;
-      const headers = new Headers(init.headers);
-      if (init.ip !== undefined) headers.set('cf-connecting-ip', init.ip);
-      const req = new Request(url, { ...init, headers });
-      const res = await worker.fetch(req, workerEnv, {} as ExecutionContext);
-      const text = await res.text();
-      const body = JSON.parse(text) as Json;
-      const verdict = checkResponse(req.method, url, { status: res.status, headers: res.headers, body });
+    const request = async (
+      path: string,
+      init: { method?: string; headers?: Record<string, string>; body?: string; ip?: string } = {},
+    ) => {
+      const url = `${PUBLIC_ORIGIN}${path}`;
+      const res = await h.request(path, init);
+      const body = res.body as Json;
+      const verdict = checkResponse(init.method ?? 'GET', url, { status: res.status, headers: res.headers, body });
       if (verdict !== 'valid') throw new Error(`${path}: ${verdict}`);
       validated += 1;
-      return { status: res.status, text, body };
+      return { status: res.status, text: res.text, body };
     };
-    const inDo = <R>(fn: (db: Db, i: TestIndexDO) => R | Promise<R>) =>
-      runInDurableObject(stub, (i: TestIndexDO, state) => fn(doDb(state.storage), i));
+    const inDo = async <R>(fn: (db: Db) => R | Promise<R>) => fn(h.db);
     const alarm = async () => {
-      await runDurableObjectAlarm(stub);
+      await h.runAlarm();
       await flush();
     };
+    // The Node host's SQLite, which these plans are pinned on.
+    expect(h.db.one<{ v: string }>('SELECT sqlite_version() AS v')?.v).toBe('3.54.1');
 
     // ------------------------------------------------------------ ingest
     // Admission takes 50 new DIDs per hour: announce them in two hourly waves.
@@ -197,12 +195,12 @@ describe('query plans', () => {
       perDid: { lo: PER_DID, hi: PER_DID },
     });
     // The production logger saw one completed, active snapshot per DID and nothing worse.
-    const finished = logged.info.map((line) => JSON.parse(line) as Json).filter((e) => e.event === 'snapshot.finished');
+    const finished = h.log.logs.filter((e) => e.event === 'snapshot.finished') as Json[];
     expect(finished).toHaveLength(DIDS);
     expect(new Set(finished.map((e) => `${e.did} ${e.outcome} ${e.active}`))).toEqual(
       new Set(Array.from({ length: DIDS }, (_, d) => `${didOf(d)} complete true`)),
     );
-    expect(logged.problems).toEqual([]);
+    expect(h.log.logs.filter((e) => e.level === 'warn' || e.level === 'error')).toEqual([]);
     // Every record came from a verified getBlocks walk of its DID's signed head.
     const getBlocks = hosts.reduce((s, h) => s + h.calls.count({ nsid: 'com.atproto.sync.getBlocks' }), 0);
     const latest = hosts.reduce((s, h) => s + h.calls.count({ nsid: 'com.atproto.sync.getLatestCommit' }), 0);
@@ -234,9 +232,9 @@ describe('query plans', () => {
             expect([label, typeof cursor]).toEqual([label, 'string']);
             url = `${path}&cursor=${encodeURIComponent(cursor)}`;
           }
-          await inDo((_db, i) => i[ACCEPTANCE]().record());
+          app.handle().record();
           const r = await request(url);
-          const statements = await inDo((_db, i) => i[ACCEPTANCE]().stopRecording());
+          const statements = app.handle().stopRecording();
           expect([label, page, r.status]).toEqual([label, page, 200]);
           out.push({ label: page === 1 ? label : `${label} p2`, text: r.text, statements });
         }
