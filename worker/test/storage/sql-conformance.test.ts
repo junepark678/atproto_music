@@ -1,6 +1,7 @@
 // SQL conformance of the Node host's SQLite (ADR 0005 §3.2): node:sqlite
 // (SQLite 3.54.1) through the production adapter (worker/src/node/sqlite-db.ts),
-// reached as DO storage through the `cloudflare:*` test shim (N2-02); before
+// over a migrated temporary-file database (worker/test/node/support/with-index.ts;
+// through the `cloudflare:*` test shim from N2-02 until N4-04 removed it); before
 // the port it ran on DO SQLite in workerd (ADR 0004 §3.2). Every expectation is
 // SQLite's documented behaviour or the adapter's documented contract,
 // hardcoded here; a runtime upgrade that changes one fails loudly.
@@ -14,22 +15,23 @@
 // statement") are replaced by the Node test at the end of this file
 // (docs/verification/node-port-inventory.json).
 
-import { runInDurableObject } from 'cloudflare:test';
-import { env } from 'cloudflare:workers';
 import { seededRandom } from '@atmusic/core/test-support/random';
 import { describe, expect, it } from 'vitest';
-import { type Db, doDb, SqlParamError } from '../../src/do/db';
-import { SqlRangeError, SqlStatementRefusedError } from '../../src/node/sqlite-db';
-import type { HarnessDO } from '../harness/harness-do';
-import { sqliteDbOf } from '../node/support/do-storage-facade';
+import { type Db, type SqlParam, SqlParamError } from '../../src/do/db';
+import { type SqliteDb, SqlRangeError, SqlStatementRefusedError } from '../../src/node/sqlite-db';
+import { schemaAll, withIndex } from '../node/support/with-index';
 
-const stubFor = (name: string) => env.HARNESS.get(env.HARNESS.idFromName(name));
 const T0 = '2026-01-15T12:00:00.000000000Z';
 const SCROBBLE = 'com.example.atmusic.scrobble';
 const FOLLOW = 'com.example.atmusic.follow';
 
-function inDb(name: string, fn: (db: Db, storage: DurableObjectStorage) => void): Promise<void> {
-  return runInDurableObject(stubFor(name), (_i: HarnessDO, state) => fn(doDb(state.storage), state.storage));
+/**
+ * Runs `fn` over a fresh migrated database: `db` through the `Db` facade, and
+ * `sqlite` the same adapter handle for its one-statement `exec` (the raw path),
+ * `tx` and `pragmas()`. `_name` labels the case (each call is its own file).
+ */
+function inDb(_name: string, fn: (db: Db, sqlite: SqliteDb) => void): Promise<void> {
+  return withIndex((db) => fn(db, db));
 }
 
 function addUser(db: Db, did: string, handle: string | null = null) {
@@ -105,7 +107,7 @@ function tableDump(db: Db): unknown {
 
 describe('DO SQLite conformance', () => {
   it('BEGIN and SAVEPOINT are rejected by exec', async () => {
-    await inDb('conf-begin', (db, storage) => {
+    await inDb('conf-begin', (db, sqlite) => {
       addUser(db, 'did:plc:alice');
       const before = tableDump(db);
       for (const statement of [
@@ -120,7 +122,7 @@ describe('DO SQLite conformance', () => {
         // Node: the adapter's authorizer denies them (DO said "use transactionSync()").
         const reason = /^(SAVEPOINT|RELEASE)/.test(statement) ? 'savepoint' : 'transaction';
         expect(
-          refusal(() => storage.sql.exec(statement)),
+          refusal(() => sqlite.exec(statement)),
           statement,
         ).toBe(reason);
         expect(
@@ -130,9 +132,9 @@ describe('DO SQLite conformance', () => {
       }
       // Also refused inside a transactionSync, and the throw rolls it back.
       expect(() =>
-        storage.transactionSync(() => {
-          storage.sql.exec("INSERT INTO timers(name, due_at) VALUES ('drain', 1)");
-          storage.sql.exec('SAVEPOINT inner_sp');
+        sqlite.tx(() => {
+          sqlite.exec("INSERT INTO timers(name, due_at) VALUES ('drain', 1)");
+          sqlite.exec('SAVEPOINT inner_sp');
         }),
       ).toThrow(SqlStatementRefusedError);
       expect(tableDump(db)).toEqual(before);
@@ -201,8 +203,13 @@ describe('DO SQLite conformance', () => {
       // index: SQLite's catalog says so, and the planner cannot use it to
       // answer a handle IS NULL query, which a full index could.
       expect(
-        db.one('SELECT "unique", partial FROM pragma_index_list(?) WHERE name = ?', 'users', 'users_verified_handle'),
-      ).toEqual({ unique: 1, partial: 1 });
+        schemaAll(
+          db,
+          'SELECT "unique", partial FROM pragma_index_list(?) WHERE name = ?',
+          'users',
+          'users_verified_handle',
+        ),
+      ).toEqual([{ unique: 1, partial: 1 }]);
       expect(db.all('SELECT did FROM users INDEXED BY users_verified_handle WHERE handle = ?', 'x')).toEqual([]);
       expect(() => db.all('SELECT did FROM users INDEXED BY users_verified_handle WHERE handle IS NULL')).toThrow(
         /no query solution/,
@@ -233,10 +240,10 @@ describe('DO SQLite conformance', () => {
   });
 
   it('FK ON DELETE CASCADE is enforced for scrobbles.did and follows.actor', async () => {
-    await inDb('conf-fk', (db, storage) => {
+    await inDb('conf-fk', (db, sqlite) => {
       // Node: the adapter sets and reads back foreign_keys=ON at open; a module PRAGMA is denied.
-      expect(sqliteDbOf(storage).pragmas().foreign_keys).toBe(1);
-      expect(refusal(() => storage.sql.exec('PRAGMA foreign_keys'))).toBe('pragma');
+      expect(sqlite.pragmas().foreign_keys).toBe(1);
+      expect(refusal(() => sqlite.exec('PRAGMA foreign_keys'))).toBe('pragma');
       addUser(db, 'did:plc:alice');
       addUser(db, 'did:plc:bob');
       addScrobble(db, 'did:plc:alice', 'a1');
@@ -257,8 +264,8 @@ describe('DO SQLite conformance', () => {
       // follows.subject is not a foreign key: following an unknown DID is stored.
       addFollow(db, 'did:plc:bob', 'did:plc:unknown', 'fu');
       // Module SQL cannot switch enforcement off (DO SQLite ignored it; Node denies it).
-      expect(refusal(() => storage.sql.exec('PRAGMA foreign_keys = OFF'))).toBe('pragma');
-      expect(sqliteDbOf(storage).pragmas().foreign_keys).toBe(1);
+      expect(refusal(() => sqlite.exec('PRAGMA foreign_keys = OFF'))).toBe('pragma');
+      expect(sqlite.pragmas().foreign_keys).toBe(1);
       expect(() => addScrobble(db, 'did:plc:nobody', 'x2')).toThrow(/FOREIGN KEY constraint failed/);
 
       db.run("DELETE FROM users WHERE did = 'did:plc:alice'");
@@ -275,7 +282,7 @@ describe('DO SQLite conformance', () => {
   // M1.3.1/unique_record: inserting the same AT URI twice is a constraint
   // failure and the row count stays one (a plain INSERT never upserts).
   it('second plain INSERT of one scrobbles.uri fails with a constraint error and the row count stays one', async () => {
-    await inDb('conf-unique-uri', (db, storage) => {
+    await inDb('conf-unique-uri', (db, sqlite) => {
       addUser(db, 'did:plc:alice');
       const uri = `at://did:plc:alice/${SCROBBLE}/r1`;
       addScrobble(db, 'did:plc:alice', 'r1');
@@ -300,7 +307,7 @@ describe('DO SQLite conformance', () => {
         'o',
       ];
       expect(() => db.run(insert, ...params)).toThrow(/UNIQUE constraint failed: scrobbles\.uri/);
-      expect(() => storage.sql.exec(insert, ...params)).toThrow(/UNIQUE constraint failed: scrobbles\.uri/);
+      expect(() => sqlite.exec(insert, ...params)).toThrow(/UNIQUE constraint failed: scrobbles\.uri/);
       expect(() => addScrobble(db, 'did:plc:alice', 'r1')).toThrow(/UNIQUE constraint failed: scrobbles\.uri/);
 
       // Inside a transaction the failure aborts the whole unit: an earlier write in it is gone.
@@ -333,8 +340,8 @@ describe('DO SQLite conformance', () => {
 
   // M1.3.1/foreign_key: a row for a missing owner is rejected with no dangling row.
   it('INSERT of a scrobble or follow whose users row is missing is rejected and leaves no row', async () => {
-    await inDb('conf-fk-missing-owner', (db, storage) => {
-      expect(sqliteDbOf(storage).pragmas().foreign_keys).toBe(1);
+    await inDb('conf-fk-missing-owner', (db, sqlite) => {
+      expect(sqlite.pragmas().foreign_keys).toBe(1);
       addUser(db, 'did:plc:bob');
       const before = { users: db.all('SELECT * FROM users'), timers: db.all('SELECT * FROM timers') };
 
@@ -520,7 +527,7 @@ describe('DO SQLite conformance', () => {
   // exactly; documents precision loss above" and "multi-statement exec binds
   // only the last statement"), plus the BEGIN/SAVEPOINT/PRAGMA denials.
   it('on Node an integer above 2^53 is refused on read, multi-statement text is refused, and BEGIN, SAVEPOINT and PRAGMA are denied', async () => {
-    await inDb('conf-node-refusals', (db, storage) => {
+    await inDb('conf-node-refusals', (db, sqlite) => {
       // Integers up to 2^53 - 1 still round-trip exactly, through doDb and raw exec.
       const put = "INSERT INTO counters(name, label, value) VALUES ('n', ?, ?)";
       const values: Array<[string, number]> = [
@@ -535,16 +542,16 @@ describe('DO SQLite conformance', () => {
         expect(
           db.one('SELECT value, CAST(value AS TEXT) AS t, typeof(value) AS ty FROM counters WHERE label = ?', label),
         ).toEqual({ value, t: String(value), ty: 'integer' });
-        expect(storage.sql.exec('SELECT value FROM counters WHERE label = ?', label).one()).toEqual({ value });
+        expect(sqlite.exec('SELECT value FROM counters WHERE label = ?', label)).toEqual([{ value }]);
       }
 
       // Above 2^53 - 1: SQLite stores the exact 64-bit integer (a literal in
       // the SQL text; no unsafe JS number can be bound), and reading it as a
       // number throws SqlRangeError (ERR_OUT_OF_RANGE) instead of returning
       // 9007199254740992 as the DO binding did. CAST(... AS TEXT) still reads it.
-      storage.sql.exec("INSERT INTO counters(name, label, value) VALUES ('n', 'above', 9007199254740993)");
+      sqlite.exec("INSERT INTO counters(name, label, value) VALUES ('n', 'above', 9007199254740993)");
       const above = "SELECT value FROM counters WHERE label = 'above'";
-      for (const read of [() => db.one(above), () => db.all(above), () => storage.sql.exec(above).toArray()]) {
+      for (const read of [() => db.one(above), () => db.all(above), () => sqlite.exec(above)]) {
         let error: unknown;
         try {
           read();
@@ -565,7 +572,7 @@ describe('DO SQLite conformance', () => {
       // Binding is guarded on every path, raw exec included (DO raw exec took
       // 2^53 + 2 and bound `true` as TEXT 'true').
       for (const value of [2 ** 53 + 2, true]) {
-        expect(() => storage.sql.exec('SELECT ? AS v', value)).toThrow(SqlParamError);
+        expect(() => sqlite.exec('SELECT ? AS v', value as SqlParam)).toThrow(SqlParamError);
         expect(() => db.one('SELECT ? AS v', value as number)).toThrow(SqlParamError);
       }
 
@@ -579,7 +586,7 @@ describe('DO SQLite conformance', () => {
         'SELECT 1 AS a; SELECT 2 AS b',
       ]) {
         expect(
-          refusal(() => storage.sql.exec(text)),
+          refusal(() => sqlite.exec(text)),
           text,
         ).toBe('multiple_statements');
         expect(
@@ -613,7 +620,7 @@ describe('DO SQLite conformance', () => {
       ];
       for (const [text, reason] of denied) {
         expect(
-          refusal(() => storage.sql.exec(text)),
+          refusal(() => sqlite.exec(text)),
           text,
         ).toBe(reason);
         expect(
@@ -629,17 +636,17 @@ describe('DO SQLite conformance', () => {
       ).toThrow(SqlStatementRefusedError);
       expect(tableDump(db)).toEqual(before);
       // The startup pragmas are untouched, read back by the adapter itself.
-      expect(sqliteDbOf(storage).pragmas()).toMatchObject({
+      expect(sqlite.pragmas()).toMatchObject({
         foreign_keys: 1,
         journal_mode: 'wal',
         synchronous: 2,
         locking_mode: 'exclusive',
       });
-      // Transactions are the adapter's: db.tx (and storage.transactionSync) nest and commit.
+      // Transactions are the adapter's: db.tx (and the adapter's own tx) nest and commit.
       db.tx(() => {
         db.run("INSERT INTO timers(name, due_at) VALUES ('outer', 3)");
         expect(() =>
-          storage.transactionSync(() => {
+          sqlite.tx(() => {
             db.run("INSERT INTO timers(name, due_at) VALUES ('inner', 4)");
             throw new Error('inner rolls back alone');
           }),
