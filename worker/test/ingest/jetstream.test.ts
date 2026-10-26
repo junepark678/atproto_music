@@ -5,8 +5,6 @@
 // M4.1.3/duplicate_commit and M4.2.1/resume. Expectations are hardcoded or
 // come from tests/fixtures/read_models.json and the fixture signer.
 
-import { runInDurableObject } from 'cloudflare:test';
-import { env } from 'cloudflare:workers';
 import { encodeEvent } from '@atmusic/atproto/test-support/fake-jetstream';
 import { FIXTURE_USERS, seedReadModels } from '@atmusic/atproto/test-support/read-models';
 import { expect, it } from 'vitest';
@@ -17,11 +15,9 @@ import { closeSocket, connect, socketWatchdog } from '../../src/do/ingest/jetstr
 import { drain } from '../../src/do/ingest/verify-drain';
 import { recordEvent } from '../../src/do/status';
 import { checkpointRow, flush, jetstreamServer, zeroJitter } from '../fixtures/jetstream-server';
-import type { HarnessDO } from '../harness/harness-do';
 import { seedUser } from '../write/support';
 import { counterValue, depsFor, kit } from './drain-support';
-
-const stubFor = (name: string) => env.HARNESS.get(env.HARNESS.idFromName(name));
+import { withIngestIndex } from './node-index';
 
 /** A Db whose writes throw while `fault()` matches the statement (fault injection through the interface). */
 function faultyDb(db: Db, fault: () => RegExp | null): Db {
@@ -68,7 +64,7 @@ it('hint durable before cursor advance; replay of inclusive cursor creates no du
   const confirmed = fixture.scrobbles.filter((s) => s.state === 'confirmed').map((s) => s.uri);
   const r08 = fixture.scrobbles.find((s) => s.rkey === 'r08')!.uri;
 
-  await runInDurableObject(stubFor('jetstream-durable'), async (i: HarnessDO) => {
+  await withIngestIndex(async (i) => {
     let fault: RegExp | null = null;
     const db = faultyDb(i.db, () => fault);
     const base = depsFor(db, k);

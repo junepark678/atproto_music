@@ -1,17 +1,13 @@
-// W3-04 hints.ts against real DO SQLite (harness DO, production migrations).
+// W3-04 hints.ts against a real SQLite file (production migrations).
 // Proves M1.3.3/event_atomicity and M4.1.3/atomic_fault (enqueue + checkpoint
 // in one transaction) and the coalescing upsert. Expectations are hardcoded.
 
-import { runInDurableObject } from 'cloudflare:test';
-import { env } from 'cloudflare:workers';
 import { describe, expect, it } from 'vitest';
 import type { Db, SqlParam } from '../../src/do/db';
 import { enqueueHints, HINT_PRIORITY, type HintInput, takeDue } from '../../src/do/ingest/hints';
 import hintsSource from '../../src/do/ingest/hints.ts?raw';
 import { indexing, markConnected } from '../../src/do/status';
-import type { HarnessDO } from '../harness/harness-do';
-
-const stubFor = (name: string) => env.HARNESS.get(env.HARNESS.idFromName(name));
+import { withIngestIndex } from './node-index';
 
 const ALICE = 'did:plc:aaaaaaaaaaaaaaaaaaaaaaaa';
 const BOB = 'did:plc:bbbbbbbbbbbbbbbbbbbbbbbb';
@@ -52,7 +48,7 @@ function faultyDb(db: Db, pattern: RegExp): Db {
 
 describe('enqueueHints', () => {
   it('duplicate hints for a URI coalesce to one row with min due_at', async () => {
-    await runInDurableObject(stubFor('hints-coalesce'), (i: HarnessDO) => {
+    await withIngestIndex((i) => {
       const db = i.db;
       const uri = `at://${ALICE}/${SCROBBLE}/r1`;
       // A reconcile hint due in 60 s, then a jetstream hint due in 10 s with a
@@ -104,7 +100,7 @@ describe('enqueueHints', () => {
   });
 
   it('enqueue and checkpoint advance commit atomically (throw rolls back both)', async () => {
-    await runInDurableObject(stubFor('hints-atomic'), (i: HarnessDO) => {
+    await withIngestIndex((i) => {
       const db = i.db;
       const before = { hints: hints(db), checkpoint: checkpoint(db), timers: db.all('SELECT * FROM timers') };
       expect(before.checkpoint).toMatchObject({ cursor: null, last_event_time_us: null });
@@ -162,7 +158,7 @@ describe('enqueueHints', () => {
     expect(/\b(?:UPDATE|INSERT\s+INTO|REPLACE\s+INTO|DELETE\s+FROM)\s+ingest_checkpoint\b/i.test(sql)).toBe(false);
     expect(hintsSource).toContain("import { recordEvent } from '../status';");
 
-    await runInDurableObject(stubFor('hints-record-event'), (i: HarnessDO) => {
+    await withIngestIndex((i) => {
       const db = i.db;
       const connectedAt = T0;
       db.tx(() => markConnected(db, connectedAt));

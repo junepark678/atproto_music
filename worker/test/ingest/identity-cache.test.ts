@@ -4,8 +4,6 @@
 // M2.1.1/cache_expiry (the `fresh: true` half is
 // packages/atproto/test/identity.test.ts). Expectations are hardcoded.
 
-import { runInDurableObject } from 'cloudflare:test';
-import { env } from 'cloudflare:workers';
 import { describe, expect, it } from 'vitest';
 import {
   cachedIdentityResolver,
@@ -13,10 +11,9 @@ import {
   IDENTITY_TTL_MS,
   resolveIdentity,
 } from '../../src/do/ingest/identity-cache';
-import type { HarnessDO } from '../harness/harness-do';
 import { kit } from './drain-support';
+import { withIngestIndex } from './node-index';
 
-const stubFor = (name: string) => env.HARNESS.get(env.HARNESS.idFromName(name));
 const T0 = Date.parse('2026-01-15T12:00:00Z');
 
 describe('identity cache', () => {
@@ -26,7 +23,7 @@ describe('identity cache', () => {
     k.resetCalls();
     expect(IDENTITY_TTL_MS).toBe(300_000);
 
-    await runInDurableObject(stubFor('identity-ttl'), async (i: HarnessDO) => {
+    await withIngestIndex(async (i) => {
       const db = i.db;
       const resolver = cachedIdentityResolver(db, { transport: k.transport, clock: k.clock });
       const m = { db, clock: k.clock, identity: resolver };
@@ -104,7 +101,7 @@ describe('identity cache', () => {
     k.plc.tombstone(bob.did);
     k.resetCalls();
 
-    await runInDurableObject(stubFor('identity-negative'), async (i: HarnessDO) => {
+    await withIngestIndex(async (i) => {
       const db = i.db;
       const m = {
         db,

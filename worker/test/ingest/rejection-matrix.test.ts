@@ -7,8 +7,6 @@
 // checkpoint tables must stay byte-identical; then the same record, served
 // valid, applies. Outcomes per kind are hardcoded.
 
-import { runInDurableObject } from 'cloudflare:test';
-import { env } from 'cloudflare:workers';
 import type { FixtureKit } from '@atmusic/atproto/test-support/read-models';
 import { carResponse } from '@atmusic/atproto/test-support/router-transport';
 import {
@@ -29,11 +27,9 @@ import {
 } from '@atmusic/atproto/test-support/signed-repo';
 import { describe, expect, it } from 'vitest';
 import { drain } from '../../src/do/ingest/verify-drain';
-import type { HarnessDO } from '../harness/harness-do';
 import { seedUser } from '../write/support';
 import { counterValue, depsFor, enqueue, GET_RECORD, hint, kit, protectedTables } from './drain-support';
-
-const stubFor = (name: string) => env.HARNESS.get(env.HARNESS.idFromName(name));
+import { withIngestIndex } from './node-index';
 
 interface Case {
   kind: string;
@@ -152,7 +148,7 @@ describe('rejection matrix', () => {
     const alice = k.users.Alice.did;
     const S = k.collections.scrobble;
 
-    await runInDurableObject(stubFor('rejection-matrix'), async (i: HarnessDO) => {
+    await withIngestIndex(async (i) => {
       const db = i.db;
       const m = depsFor(db, k);
       seedUser(db, alice);

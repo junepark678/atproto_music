@@ -1,12 +1,10 @@
-// W4-02 jetstream-socket.ts and checkpoint.ts against real DO SQLite and real
-// workerd WebSockets (WebSocketPair through the production connector, served
-// by the fake Jetstream). Timers are stepped with runDue after advancing the
+// W4-02 jetstream-socket.ts and checkpoint.ts against the production SQLite
+// adapter (a temporary file, node-index.ts) and the fake Jetstream's sockets
+// (test/fixtures/jetstream-server.ts, through the production connector). Timers are stepped with runDue after advancing the
 // frozen clock; nothing sleeps. Proves M1.1.1/version_policy,
 // M4.2.1/expired_cursor and M4.2.1/bounded_reconnect, and the status truth the
 // production socket writers produce. Expectations are hardcoded.
 
-import { evictDurableObject, runInDurableObject } from 'cloudflare:test';
-import { env } from 'cloudflare:workers';
 import type { Indexing } from '@atmusic/core/api-types';
 import { fixedClock } from '@atmusic/core/test-support/clock';
 import { seededRandom } from '@atmusic/core/test-support/random';
@@ -26,7 +24,7 @@ import {
   subscribeUrl,
 } from '../../src/do/ingest/jetstream-socket';
 import { indexing, updateCheckpointBookkeeping } from '../../src/do/status';
-import { dueAt, runDue, TIMER_NAMES, type TimerHandlers } from '../../src/do/timers';
+import { type AlarmStorage, dueAt, runDue, TIMER_NAMES, type TimerHandlers } from '../../src/do/timers';
 import { incrementCounter } from '../../src/do/write/keys';
 import {
   checkpointRow,
@@ -36,9 +34,7 @@ import {
   type JetstreamServer,
   jetstreamServer,
 } from '../fixtures/jetstream-server';
-import type { HarnessDO } from '../harness/harness-do';
-
-const stubFor = (name: string) => env.HARNESS.get(env.HARNESS.idFromName(name));
+import { withIngestIndex } from './node-index';
 
 const SECOND = 1_000;
 const MINUTE = 60 * SECOND;
@@ -88,7 +84,7 @@ const seqsSent = (server: JetstreamServer) => server.last().sent.map((t) => (JSO
 
 /** Step the alarm multiplexer: only the watchdog does work. */
 async function step(
-  storage: DurableObjectStorage,
+  storage: AlarmStorage,
   m: IngestTestDeps,
   server: JetstreamServer,
   o: { gap?: ScheduleGapRecovery } = {},
@@ -107,7 +103,7 @@ describe('jetstream socket', () => {
   it('subscribe URL has kinds=commit and the four collections only', async () => {
     const clock = fixedClock();
     const server = jetstreamServer({ clock });
-    await runInDurableObject(stubFor('socket-url'), async (i: HarnessDO) => {
+    await withIngestIndex(async (i) => {
       const m = ingestDeps(i.db, clock, { mode: 'socket' });
       expect(await connect(m, server.connect, clock.nowMs())).toMatchObject({ ok: true, gap: 'no_cursor' });
       expect(server.attempts.length).toBe(1);
@@ -165,7 +161,7 @@ describe('jetstream socket', () => {
   it('silent socket is not reconnected; planned refresh happens at 15 min from stored cursor', async () => {
     const clock = fixedClock();
     const server = jetstreamServer({ clock });
-    await runInDurableObject(stubFor('socket-silent'), async (i: HarnessDO, state) => {
+    await withIngestIndex(async (i) => {
       const m = ingestDeps(i.db, clock, { mode: 'socket' });
       expect(await connect(m, server.connect, T0)).toMatchObject({ ok: true });
       const first = server.last();
@@ -179,7 +175,7 @@ describe('jetstream socket', () => {
       const quiet = checkpointRow(i.db);
       for (let minute = 1; minute <= 14; minute++) {
         clock.set(new Date(T0 + minute * MINUTE).toISOString());
-        const report = await step(state.storage, m, server);
+        const report = await step(i.storage, m, server);
         expect(report.ran).toContain('jetstream-watchdog');
         expect(server.attempts.length).toBe(1);
         expect(dueAt(i.db, 'jetstream-watchdog')).toBe(T0 + (minute + 1) * MINUTE);
@@ -189,7 +185,7 @@ describe('jetstream socket', () => {
 
       // At 15 min: a planned refresh on the same host, resuming from the stored cursor.
       clock.set(new Date(T0 + 15 * MINUTE).toISOString());
-      await step(state.storage, m, server);
+      await step(i.storage, m, server);
       expect(server.attempts.length).toBe(2);
       expect(server.attempts[1]).toMatchObject({ host: 'jetstream.example.test', cursor: e2.seq, status: 101 });
       expect(first.closed).toBe(true);
@@ -215,90 +211,91 @@ describe('jetstream socket', () => {
     const clock = fixedClock();
     // The fake keeps exactly our 24 h lookback, so it refuses any cursor that aged past it.
     const server = jetstreamServer({ clock, lookbackHours: 24 });
-    const stub = stubFor('socket-quiet-lookback');
     const gapCalls: number[] = [];
     const gap: ScheduleGapRecovery = (_db, now) => {
       gapCalls.push(now);
     };
     let e1Seq = 0;
     let lastOpen = 0;
-    await runInDurableObject(stub, async (i: HarnessDO, state) => {
-      const m = ingestDeps(i.db, clock, { mode: 'socket' });
-      // First start (a gap by definition), then one wanted event at T0 and silence for 26 hours.
-      expect(await connect(m, server.connect, T0, { scheduleGapRecovery: gap })).toMatchObject({ gap: 'no_cursor' });
-      updateCheckpointBookkeeping(i.db, { pendingGap: false });
-      e1Seq = server.append(commit('r1')).seq;
-      await flush();
-      expect(checkpointRow(i.db)).toMatchObject({ cursor: e1Seq, last_event_time_us: T0 * 1000 });
+    await withIngestIndex(async (i) => {
+      {
+        const m = ingestDeps(i.db, clock, { mode: 'socket' });
+        // First start (a gap by definition), then one wanted event at T0 and silence for 26 hours.
+        expect(await connect(m, server.connect, T0, { scheduleGapRecovery: gap })).toMatchObject({ gap: 'no_cursor' });
+        updateCheckpointBookkeeping(i.db, { pendingGap: false });
+        e1Seq = server.append(commit('r1')).seq;
+        await flush();
+        expect(checkpointRow(i.db)).toMatchObject({ cursor: e1Seq, last_event_time_us: T0 * 1000 });
 
-      // 104 planned refreshes, one every 15 minutes, over a socket that never delivers a new event.
-      for (let n = 1; n <= 104; n++) {
-        const at = T0 + n * 15 * MINUTE;
-        clock.set(new Date(at).toISOString());
-        await step(state.storage, m, server, { gap });
-        const attempt = server.attempts.at(-1)!;
-        expect([n, attempt.status]).toEqual([n, 101]);
-        // Refresh 1 resumes from e1 (the first link saw a new event: nothing is confirmed). The
-        // links after it see only the inclusive re-delivery of e1 or nothing, so every later
-        // refresh resumes 60 s before the previous link opened.
-        const expected = n === 1 ? e1Seq : (at - 15 * MINUTE - MINUTE) * 1000;
-        expect([n, attempt.cursor]).toEqual([n, expected]);
-        expect(checkpointRow(i.db)).toMatchObject({ connected: 1, connected_at_ms: at, pending_gap: 0 });
+        // 104 planned refreshes, one every 15 minutes, over a socket that never delivers a new event.
+        for (let n = 1; n <= 104; n++) {
+          const at = T0 + n * 15 * MINUTE;
+          clock.set(new Date(at).toISOString());
+          await step(i.storage, m, server, { gap });
+          const attempt = server.attempts.at(-1)!;
+          expect([n, attempt.status]).toEqual([n, 101]);
+          // Refresh 1 resumes from e1 (the first link saw a new event: nothing is confirmed). The
+          // links after it see only the inclusive re-delivery of e1 or nothing, so every later
+          // refresh resumes 60 s before the previous link opened.
+          const expected = n === 1 ? e1Seq : (at - 15 * MINUTE - MINUTE) * 1000;
+          expect([n, attempt.cursor]).toEqual([n, expected]);
+          expect(checkpointRow(i.db)).toMatchObject({ connected: 1, connected_at_ms: at, pending_gap: 0 });
+        }
+        lastOpen = T0 + 104 * 15 * MINUTE;
+        expect(lastOpen - T0).toBe(26 * HOUR);
+        // No gap recovery beyond the first start: no cursor was ever refused or abandoned.
+        expect(gapCalls).toEqual([T0]);
+        expect(server.attempts.slice(1).every((a) => a.status === 101 && a.cursor !== null)).toBe(true);
+        expect(server.attempts).toHaveLength(105);
+        // Only e1 (and its inclusive re-delivery on refresh 1, coalesced) reached the queue.
+        expect(hintUris(i.db)).toEqual([`at://${ALICE}/${S}/r1`]);
+        expect(status(i.db, clock.nowMs())).toMatchObject({ state: 'current' });
+        expect(i.db.one("SELECT count(*) AS n FROM counters WHERE name = 'jetstream_invalid'")).toEqual({ n: 0 });
+
+        // The advanced resume point is durable: the instance dies with the link open.
+        server.sever();
+        await flush();
       }
-      lastOpen = T0 + 104 * 15 * MINUTE;
-      expect(lastOpen - T0).toBe(26 * HOUR);
-      // No gap recovery beyond the first start: no cursor was ever refused or abandoned.
-      expect(gapCalls).toEqual([T0]);
-      expect(server.attempts.slice(1).every((a) => a.status === 101 && a.cursor !== null)).toBe(true);
-      expect(server.attempts).toHaveLength(105);
-      // Only e1 (and its inclusive re-delivery on refresh 1, coalesced) reached the queue.
-      expect(hintUris(i.db)).toEqual([`at://${ALICE}/${S}/r1`]);
-      expect(status(i.db, clock.nowMs())).toMatchObject({ state: 'current' });
-      expect(i.db.one("SELECT count(*) AS n FROM counters WHERE name = 'jetstream_invalid'")).toEqual({ n: 0 });
 
-      // The advanced resume point is durable: the instance dies with the link open.
-      server.sever();
-      await flush();
-    });
+      i.restart();
+      {
+        const m = ingestDeps(i.db, clock, { mode: 'socket' });
+        // Two minutes later the new instance records the drop and reconnects: still no gap.
+        clock.set(new Date(lastOpen + 2 * MINUTE).toISOString());
+        expect(noteRestart(i.db, clock.nowMs())).toBe(true);
+        expect(checkpointRow(i.db)).toMatchObject({ cursor: (lastOpen - 16 * MINUTE) * 1000, pending_gap: 0 });
+        await step(i.storage, m, server, { gap });
+        expect(server.attempts.at(-1)).toMatchObject({ cursor: (lastOpen - 16 * MINUTE) * 1000, status: 101 });
+        expect(gapCalls).toEqual([T0]);
+        expect(checkpointRow(i.db)).toMatchObject({ connected: 1, pending_gap: 0 });
 
-    await evictDurableObject(stub);
-    await runInDurableObject(stub, async (i: HarnessDO, state) => {
-      const m = ingestDeps(i.db, clock, { mode: 'socket' });
-      // Two minutes later the new instance records the drop and reconnects: still no gap.
-      clock.set(new Date(lastOpen + 2 * MINUTE).toISOString());
-      expect(noteRestart(i.db, clock.nowMs())).toBe(true);
-      expect(checkpointRow(i.db)).toMatchObject({ cursor: (lastOpen - 16 * MINUTE) * 1000, pending_gap: 0 });
-      await step(state.storage, m, server, { gap });
-      expect(server.attempts.at(-1)).toMatchObject({ cursor: (lastOpen - 16 * MINUTE) * 1000, status: 101 });
-      expect(gapCalls).toEqual([T0]);
-      expect(checkpointRow(i.db)).toMatchObject({ connected: 1, pending_gap: 0 });
+        // A real disconnect: the server drops the link 5 minutes in (no planned refresh, nothing
+        // confirmed), and the instance stays cut off for 25 hours.
+        const dropAt = lastOpen + 7 * MINUTE;
+        clock.set(new Date(dropAt).toISOString());
+        server.last().close(1001, 'going away');
+        await flush();
+        expect(checkpointRow(i.db)).toMatchObject({ connected: 0, updated_at_ms: dropAt });
+        // The drop confirmed nothing: the resume point is still the one the link opened with.
+        expect(checkpointRow(i.db).cursor).toBe((lastOpen - 16 * MINUTE) * 1000);
 
-      // A real disconnect: the server drops the link 5 minutes in (no planned refresh, nothing
-      // confirmed), and the instance stays cut off for 25 hours.
-      const dropAt = lastOpen + 7 * MINUTE;
-      clock.set(new Date(dropAt).toISOString());
-      server.last().close(1001, 'going away');
-      await flush();
-      expect(checkpointRow(i.db)).toMatchObject({ connected: 0, updated_at_ms: dropAt });
-      // The drop confirmed nothing: the resume point is still the one the link opened with.
-      expect(checkpointRow(i.db).cursor).toBe((lastOpen - 16 * MINUTE) * 1000);
-
-      const back = dropAt + 25 * HOUR;
-      clock.set(new Date(back).toISOString());
-      await step(state.storage, m, server, { gap });
-      // Continuity was lost for longer than the lookback: gap recovery, from the live tail.
-      expect(server.attempts.at(-1)).toMatchObject({ cursor: null, status: 101 });
-      expect(gapCalls).toEqual([T0, back]);
-      expect(checkpointRow(i.db)).toMatchObject({ pending_gap: 1, connected: 1, cursor: back * 1000 });
-      expect(status(i.db, back)).toMatchObject({ state: 'recovering', caughtUp: false });
-      closeSocket(m, clock.nowMs());
+        const back = dropAt + 25 * HOUR;
+        clock.set(new Date(back).toISOString());
+        await step(i.storage, m, server, { gap });
+        // Continuity was lost for longer than the lookback: gap recovery, from the live tail.
+        expect(server.attempts.at(-1)).toMatchObject({ cursor: null, status: 101 });
+        expect(gapCalls).toEqual([T0, back]);
+        expect(checkpointRow(i.db)).toMatchObject({ pending_gap: 1, connected: 1, cursor: back * 1000 });
+        expect(status(i.db, back)).toMatchObject({ state: 'recovering', caughtUp: false });
+        closeSocket(m, clock.nowMs());
+      }
     });
   });
 
   it('close triggers reconnect delays 1,2,4,…,60s and rotates us-east→us-west', async () => {
     const clock = fixedClock();
     const server = jetstreamServer({ clock, hosts: [EAST, WEST] });
-    await runInDurableObject(stubFor('socket-backoff'), async (i: HarnessDO, state) => {
+    await withIngestIndex(async (i) => {
       const m = ingestDeps(i.db, clock, { mode: 'socket', hosts: [EAST, WEST] });
       const hostOf = (attempt: number) => (attempt % 2 === 0 ? EAST : WEST);
 
@@ -316,7 +313,7 @@ describe('jetstream socket', () => {
           expect(await socketWatchdog(m, server.connect, due - 1)).toMatchObject({ action: 'backoff' });
           expect(server.attempts.length).toBe(n);
           clock.set(new Date(due).toISOString());
-          await step(state.storage, m, server);
+          await step(i.storage, m, server);
         }
         expect(server.attempts.length).toBe(n + 1);
         expect(server.attempts[n]).toMatchObject({ host: hostOf(n), status: how === 'refuse' ? 503 : 101 });
@@ -339,7 +336,7 @@ describe('jetstream socket', () => {
 
       // A connection that stays open 60 s resets the streak: its close backs off 1 s again.
       clock.set(new Date(dueAt(i.db, 'jetstream-watchdog')!).toISOString());
-      await step(state.storage, m, server);
+      await step(i.storage, m, server);
       expect(server.attempts.at(-1)).toMatchObject({ host: EAST, status: 101 });
       expect(checkpointRow(i.db)).toMatchObject({ connected: 1, host_index: 0 });
       clock.advance(60 * SECOND);
@@ -362,7 +359,7 @@ describe('jetstream socket', () => {
     const clock = fixedClock();
     // The fake retains 48 h, so only our own 24 h lookback check can refuse the old cursor.
     const server = jetstreamServer({ clock, lookbackHours: 48 });
-    await runInDurableObject(stubFor('socket-gap'), async (i: HarnessDO, state) => {
+    await withIngestIndex(async (i) => {
       const m = ingestDeps(i.db, clock, { mode: 'socket' });
       const gapCalls: number[] = [];
       const gap: ScheduleGapRecovery = (db, now) => {
@@ -398,7 +395,7 @@ describe('jetstream socket', () => {
       server.append(commit('r2', (T0 + HOUR) * 1000));
       const at = T0 + 24 * HOUR + SECOND;
       clock.set(new Date(at).toISOString());
-      await step(state.storage, m, server, { gap });
+      await step(i.storage, m, server, { gap });
       expect(server.attempts.map((a) => [a.cursor, a.status])).toEqual([
         [null, 101],
         [null, 101], // the live tail, not the 24 h old cursor
@@ -450,7 +447,7 @@ describe('jetstream socket', () => {
       const resumeAt = (minutes: number) => (minutes === 15 ? rejectedAt : rejectedAt + (minutes - 16) * MINUTE) * 1000;
       for (const minutes of [15, 30]) {
         clock.set(new Date(rejectedAt + minutes * MINUTE).toISOString());
-        await step(state.storage, m, server, { gap });
+        await step(i.storage, m, server, { gap });
         expect(server.attempts.at(-1)).toMatchObject({ cursor: resumeAt(minutes), status: 101 });
         expect(checkpointRow(i.db)).toMatchObject({
           pending_gap: 0,
@@ -480,7 +477,7 @@ describe('jetstream socket', () => {
     const clock = fixedClock();
     // The fake retains 96 h and silently serves the old cursor: only our 24 h check can see the gap.
     const server = jetstreamServer({ clock, lookbackHours: 96 });
-    await runInDurableObject(stubFor('socket-quiet-age'), async (i: HarnessDO) => {
+    await withIngestIndex(async (i) => {
       const m = ingestDeps(i.db, clock, { mode: 'socket' });
       const gapCalls: number[] = [];
       const gap: ScheduleGapRecovery = (_db, now) => {
@@ -534,7 +531,7 @@ describe('jetstream socket', () => {
   it('a throw after the upgrade is accepted closes the socket with 1011, writes no connection evidence, and the watchdog reconnects once', async () => {
     const clock = fixedClock();
     const server = jetstreamServer({ clock, hosts: [EAST, WEST] });
-    await runInDurableObject(stubFor('socket-post-upgrade-throw'), async (i: HarnessDO, state) => {
+    await withIngestIndex(async (i) => {
       const m = ingestDeps(i.db, clock, { mode: 'socket', hosts: [EAST, WEST] });
       let failNext = true;
       const gapCalls: number[] = [];
@@ -593,7 +590,7 @@ describe('jetstream socket', () => {
 
       // The watchdog retries on the rotated host and opens exactly one new connection.
       clock.set(new Date(T0 + SECOND).toISOString());
-      await step(state.storage, m, server, { gap });
+      await step(i.storage, m, server, { gap });
       expect(server.attempts.map((a) => [a.host, a.cursor, a.status])).toEqual([
         [EAST, null, 101],
         [WEST, null, 101],
@@ -622,81 +619,82 @@ describe('jetstream socket', () => {
   it('DO eviction marks connected=false on restart and watchdog reconnects', async () => {
     const clock = fixedClock();
     const server = jetstreamServer({ clock });
-    const stub = stubFor('socket-evict');
     let e1Seq = 0;
-    await runInDurableObject(stub, async (i: HarnessDO) => {
-      const m = ingestDeps(i.db, clock, { mode: 'socket' });
-      expect(await connect(m, server.connect, T0)).toMatchObject({ ok: true });
-      e1Seq = server.append(commit('r1')).seq;
-      await flush();
-      expect(checkpointRow(i.db)).toMatchObject({
-        connected: 1,
-        connected_at_ms: T0,
-        updated_at_ms: T0,
-        cursor: e1Seq,
-      });
-      expect(dueAt(i.db, 'jetstream-watchdog')).toBe(T0 + MINUTE);
-      // The instance dies with its socket open (see jetstream-server.ts `sever`):
-      // no close handler of ours runs, so the stored flag stays connected.
-      server.sever();
-      await flush();
-      expect(checkpointRow(i.db)).toMatchObject({ connected: 1, updated_at_ms: T0 });
-    });
+    await withIngestIndex(async (i) => {
+      {
+        const m = ingestDeps(i.db, clock, { mode: 'socket' });
+        expect(await connect(m, server.connect, T0)).toMatchObject({ ok: true });
+        e1Seq = server.append(commit('r1')).seq;
+        await flush();
+        expect(checkpointRow(i.db)).toMatchObject({
+          connected: 1,
+          connected_at_ms: T0,
+          updated_at_ms: T0,
+          cursor: e1Seq,
+        });
+        expect(dueAt(i.db, 'jetstream-watchdog')).toBe(T0 + MINUTE);
+        // The instance dies with its socket open (see jetstream-server.ts `sever`):
+        // no close handler of ours runs, so the stored flag stays connected.
+        server.sever();
+        await flush();
+        expect(checkpointRow(i.db)).toMatchObject({ connected: 1, updated_at_ms: T0 });
+      }
 
-    await evictDurableObject(stub);
-    clock.set(new Date(T0 + 20 * SECOND).toISOString());
-    await runInDurableObject(stub, async (i: HarnessDO) => {
-      const m = ingestDeps(i.db, clock, { mode: 'socket' });
-      // No socket survives an eviction, but the stored flag still says connected.
-      expect(socketStatus(m).open).toBeNull();
-      expect(checkpointRow(i.db)).toMatchObject({ connected: 1 });
-      // IndexDO's constructor records the drop (W5-01 calls noteRestart).
-      expect(noteRestart(i.db, clock.nowMs())).toBe(true);
-      expect(checkpointRow(i.db)).toMatchObject({
-        connected: 0,
-        updated_at_ms: T0 + 20 * SECOND,
-        connected_at_ms: T0,
-        cursor: e1Seq,
-      });
-    });
+      i.restart();
+      clock.set(new Date(T0 + 20 * SECOND).toISOString());
+      {
+        const m = ingestDeps(i.db, clock, { mode: 'socket' });
+        // No socket survives an eviction, but the stored flag still says connected.
+        expect(socketStatus(m).open).toBeNull();
+        expect(checkpointRow(i.db)).toMatchObject({ connected: 1 });
+        // IndexDO's constructor records the drop (W5-01 calls noteRestart).
+        expect(noteRestart(i.db, clock.nowMs())).toBe(true);
+        expect(checkpointRow(i.db)).toMatchObject({
+          connected: 0,
+          updated_at_ms: T0 + 20 * SECOND,
+          connected_at_ms: T0,
+          cursor: e1Seq,
+        });
+      }
 
-    // A second restart does not move the disconnect instant.
-    await evictDurableObject(stub);
-    clock.set(new Date(T0 + 40 * SECOND).toISOString());
-    await runInDurableObject(stub, async (i: HarnessDO, state) => {
-      const m = ingestDeps(i.db, clock, { mode: 'socket' });
-      expect(noteRestart(i.db, clock.nowMs())).toBe(false);
-      expect(checkpointRow(i.db)).toMatchObject({ connected: 0, updated_at_ms: T0 + 20 * SECOND });
-      expect(status(i.db, clock.nowMs())).toMatchObject({ caughtUp: false });
+      // A second restart does not move the disconnect instant.
+      i.restart();
+      clock.set(new Date(T0 + 40 * SECOND).toISOString());
+      {
+        const m = ingestDeps(i.db, clock, { mode: 'socket' });
+        expect(noteRestart(i.db, clock.nowMs())).toBe(false);
+        expect(checkpointRow(i.db)).toMatchObject({ connected: 0, updated_at_ms: T0 + 20 * SECOND });
+        expect(status(i.db, clock.nowMs())).toMatchObject({ caughtUp: false });
 
-      // The watchdog timer survived; when it fires, this instance reconnects from the stored cursor.
-      expect(dueAt(i.db, 'jetstream-watchdog')).toBe(T0 + MINUTE);
-      clock.set(new Date(T0 + MINUTE).toISOString());
-      const report = await step(state.storage, m, server);
-      expect(report.ran).toEqual(['drain', 'jetstream-watchdog']); // drain is a no-op stub here
-      expect(server.attempts.map((a) => [a.cursor, a.status])).toEqual([
-        [null, 101],
-        [e1Seq, 101],
-      ]);
-      expect(seqsSent(server)).toEqual([e1Seq]);
-      expect(checkpointRow(i.db)).toMatchObject({
-        connected: 1,
-        connected_at_ms: T0 + MINUTE,
-        updated_at_ms: T0 + MINUTE,
-        cursor: e1Seq,
-        host_index: 0,
-      });
-      expect(hintUris(i.db)).toEqual([`at://${ALICE}/${S}/r1`]);
-      expect(socketStatus(m).open).not.toBeNull();
-      expect(dueAt(i.db, 'jetstream-watchdog')).toBe(T0 + 2 * MINUTE);
-      closeSocket(m, clock.nowMs());
+        // The watchdog timer survived; when it fires, this instance reconnects from the stored cursor.
+        expect(dueAt(i.db, 'jetstream-watchdog')).toBe(T0 + MINUTE);
+        clock.set(new Date(T0 + MINUTE).toISOString());
+        const report = await step(i.storage, m, server);
+        expect(report.ran).toEqual(['drain', 'jetstream-watchdog']); // drain is a no-op stub here
+        expect(server.attempts.map((a) => [a.cursor, a.status])).toEqual([
+          [null, 101],
+          [e1Seq, 101],
+        ]);
+        expect(seqsSent(server)).toEqual([e1Seq]);
+        expect(checkpointRow(i.db)).toMatchObject({
+          connected: 1,
+          connected_at_ms: T0 + MINUTE,
+          updated_at_ms: T0 + MINUTE,
+          cursor: e1Seq,
+          host_index: 0,
+        });
+        expect(hintUris(i.db)).toEqual([`at://${ALICE}/${S}/r1`]);
+        expect(socketStatus(m).open).not.toBeNull();
+        expect(dueAt(i.db, 'jetstream-watchdog')).toBe(T0 + 2 * MINUTE);
+        closeSocket(m, clock.nowMs());
+      }
     });
   });
 
   it('connect, messages, close and host rotation drive indexing(): lagSeconds null until the first event, exact while flowing, null after a quiet reconnect drops, stale exactly 5 min after the drop', async () => {
     const clock = fixedClock();
     const server = jetstreamServer({ clock, hosts: [EAST, WEST] });
-    await runInDurableObject(stubFor('socket-lag'), async (i: HarnessDO, state) => {
+    await withIngestIndex(async (i) => {
       const m = ingestDeps(i.db, clock, { mode: 'socket', hosts: [EAST, WEST] });
       expect(await connect(m, server.connect, T0)).toMatchObject({ ok: true, hostIndex: 0, gap: 'no_cursor' });
       expect(status(i.db, T0)).toEqual({ state: 'recovering', caughtUp: false, lastIndexedAt: null, lagSeconds: null });
@@ -733,7 +731,7 @@ describe('jetstream socket', () => {
 
       // The reconnect after 1 s goes to us-west and is quiet: no event of this connection yet.
       clock.set(new Date(drop1 + SECOND).toISOString());
-      await step(state.storage, m, server);
+      await step(i.storage, m, server);
       expect(server.attempts.at(-1)).toMatchObject({ host: WEST, cursor: e2.seq, status: 101 });
       expect(seqsSent(server)).toEqual([]);
       expect(checkpointRow(i.db)).toMatchObject({
@@ -771,7 +769,7 @@ describe('jetstream socket', () => {
       const attemptsBefore = server.attempts.length;
       for (let due = dueAt(i.db, 'jetstream-watchdog')!; due <= drop2 + 5 * MINUTE; ) {
         clock.set(new Date(due).toISOString());
-        await step(state.storage, m, server);
+        await step(i.storage, m, server);
         expect(server.attempts.at(-1)!.status).toBe(503);
         expect(checkpointRow(i.db)).toMatchObject({
           connected: 0,

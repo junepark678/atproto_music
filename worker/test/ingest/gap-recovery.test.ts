@@ -3,11 +3,9 @@
 // bound, through the W2-05 checkpoint writer only. Proves the gap half of
 // M4.2.1/expired_cursor and M4.4.2/convergence ("enter recovery state and
 // schedule known repo backfills"; pending_gap clears only once all of that
-// work completes), against real DO SQLite and, for the fixture accounts, the
+// work completes), against a real SQLite file and, for the fixture accounts, the
 // real snapshot path over the fixture network.
 
-import { runInDurableObject } from 'cloudflare:test';
-import { env } from 'cloudflare:workers';
 import { seedReadModels } from '@atmusic/atproto/test-support/read-models';
 import type { FixtureTransport } from '@atmusic/atproto/test-support/router-transport';
 import { describe, expect, it } from 'vitest';
@@ -29,11 +27,9 @@ import {
 } from '../../src/do/ingest/snapshot-job';
 import { GAP_REASON, indexing, markConnected, recordEvent, updateCheckpointBookkeeping } from '../../src/do/status';
 import { dueAt } from '../../src/do/timers';
-import type { HarnessDO } from '../harness/harness-do';
 import { seedUser } from '../write/support';
 import { type Deps, depsFor, kit } from './drain-support';
-
-const stubFor = (name: string) => env.HARNESS.get(env.HARNESS.idFromName(name));
+import { withIngestIndex } from './node-index';
 
 const T0 = Date.parse('2026-01-15T12:00:00Z');
 const CAP = 1024;
@@ -141,7 +137,7 @@ describe('gap recovery', () => {
     const k = await kit();
     const seed = await seedReadModels(k);
 
-    await runInDurableObject(stubFor('gap-recovery-bound'), async (i: HarnessDO) => {
+    await withIngestIndex(async (i) => {
       const db = i.db;
       const m = deps(db, k);
       db.tx(() => {
@@ -244,7 +240,7 @@ describe('gap recovery', () => {
     const k = await kit();
     await seedReadModels(k);
 
-    await runInDurableObject(stubFor('gap-recovery-evidence'), async (i: HarnessDO) => {
+    await withIngestIndex(async (i) => {
       const db = i.db;
       const m = deps(db, k);
       const fixture = await indexFixtureAccounts(db, k);
@@ -351,7 +347,7 @@ describe('gap recovery', () => {
       return undefined;
     });
 
-    await runInDurableObject(stubFor('gap-recovery-absorbed'), async (i: HarnessDO) => {
+    await withIngestIndex(async (i) => {
       const db = i.db;
       const m = deps(db, k, transport);
       db.tx(() => {
@@ -446,7 +442,7 @@ describe('gap recovery', () => {
 
   it('a gap scan blocked by a full queue of not-yet-due jobs arms the snapshot timer at the earliest job due_at, not every SNAPSHOT_MIN_INTERVAL_MS', async () => {
     const k = await kit();
-    await runInDurableObject(stubFor('gap-recovery-busy-timer'), async (i: HarnessDO) => {
+    await withIngestIndex(async (i) => {
       const db = i.db;
       const m = deps(db, k);
       db.tx(() => {

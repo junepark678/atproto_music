@@ -5,8 +5,6 @@
 // a complete snapshot under its current generation commits. Every expectation
 // is hardcoded from TESTING.md or comes from the fixture signer.
 
-import { runInDurableObject } from 'cloudflare:test';
-import { env } from 'cloudflare:workers';
 import { followRkey, seedReadModels } from '@atmusic/atproto/test-support/read-models';
 import type { FixtureTransport } from '@atmusic/atproto/test-support/router-transport';
 import { describe, expect, it } from 'vitest';
@@ -19,10 +17,8 @@ import { cachedIdentityResolver } from '../../src/do/ingest/identity-cache';
 import { type SnapshotStepReport, snapshotStep } from '../../src/do/ingest/snapshot-job';
 import { history } from '../../src/do/read/history';
 import { markConnected, recordEvent, updateCheckpointBookkeeping } from '../../src/do/status';
-import type { HarnessDO } from '../harness/harness-do';
 import { counterValue, type Deps, depsFor, kit } from './drain-support';
-
-const stubFor = (name: string) => env.HARNESS.get(env.HARNESS.idFromName(name));
+import { withIngestIndex } from './node-index';
 
 const T0 = Date.parse('2026-01-15T12:00:00Z');
 const STATUS = 'com.atproto.sync.getRepoStatus';
@@ -86,7 +82,7 @@ describe('deactivation and reactivation', () => {
     const alice = k.users.Alice.did;
     const bob = k.users.Bob.did;
 
-    await runInDurableObject(stubFor('reactivation-hidden-until-snapshot'), async (i: HarnessDO) => {
+    await withIngestIndex(async (i) => {
       const db = i.db;
       const m = deps(db, k);
       followUpstream(db);
@@ -204,7 +200,7 @@ describe('deactivation and reactivation', () => {
       { fixture: true as const, calls: k.transport.calls, hostnames: () => k.transport.hostnames() },
     );
 
-    await runInDurableObject(stubFor('reactivation-superseded'), async (i: HarnessDO) => {
+    await withIngestIndex(async (i) => {
       const db = i.db;
       const m = deps(db, k, transport);
       followUpstream(db);
