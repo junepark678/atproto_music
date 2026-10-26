@@ -1,11 +1,12 @@
 // N1-02: the extension timer lane and lane-scoped timers (ADR 0005 §3.3)
-// against real DO SQLite in workerd (the harness DO applies the production
-// migrations).
+// against node:sqlite through the production adapter, each case on its own
+// migrated temporary-file database (worker/test/node/support/with-index.ts,
+// N4-04; it ran on DO SQLite in workerd before ADR 0005).
 //
 // Two layers are exercised:
 // - timers.ts directly (`runDue`, `armAlarm`, `nextDue` with a lane), with
 //   recording handlers whose blocking is controlled by the test;
-// - IndexCore (app/index-core.ts) over the harness storage with a recording
+// - IndexCore (app/index-core.ts) over the test database with a recording
 //   Host: its two lanes are driven by two distinct recording AlarmStorage
 //   objects, the extension handlers come from CoreExtensions, and the core
 //   lane runs the production handlers. A core snapshot slice is held open
@@ -13,8 +14,6 @@
 //
 // Time is the frozen fixture instant; nothing sleeps.
 
-import { runInDurableObject } from 'cloudflare:test';
-import { env } from 'cloudflare:workers';
 import type { IdentityResolver, ResolvedIdentity } from '@atmusic/atproto/identity/types';
 import type { Transport } from '@atmusic/atproto/transport';
 import { type FixedClock, fixedClock } from '@atmusic/core/test-support/clock';
@@ -22,9 +21,8 @@ import { seededRandom } from '@atmusic/core/test-support/random';
 import { expect, it } from 'vitest';
 import type { CoreExtension, ExtensionContext, Host } from '../../src/app/host';
 import { IndexCore } from '../../src/app/index-core';
-import { parseConfig } from '../../src/config';
 import type { LogLevel } from '../../src/do/contracts';
-import { type Db, doDb } from '../../src/do/db';
+import type { Db } from '../../src/do/db';
 import { scheduleSnapshot } from '../../src/do/ingest/admission';
 import { migrate } from '../../src/do/migrate';
 import {
@@ -45,10 +43,9 @@ import {
   TimerReentryError,
   timerBackoffMs,
 } from '../../src/do/timers';
-import type { HarnessDO } from '../harness/harness-do';
+import type { SqliteDb } from '../../src/node/sqlite-db';
+import { harnessConfig, testAlarm, withIndex } from '../node/support/with-index';
 import { seedUser } from '../write/support';
-
-const stubFor = (name: string) => env.HARNESS.get(env.HARNESS.idFromName(name));
 
 const NOW = Date.parse('2026-01-15T12:00:00Z');
 const SECOND = 1_000;
@@ -144,13 +141,8 @@ interface CoreKit {
   logs: Array<{ level: LogLevel; event: string; fields?: Record<string, unknown> }>;
 }
 
-/** IndexCore over the harness storage with a recording Host; migrated, not started. */
-function coreKit(
-  state: DurableObjectState,
-  extensions: CoreExtension[],
-  o: { identity?: IdentityResolver } = {},
-): CoreKit {
-  const db = doDb(state.storage);
+/** IndexCore over the test database with a recording Host; migrated, not started. */
+function coreKit(db: SqliteDb, extensions: CoreExtension[], o: { identity?: IdentityResolver } = {}): CoreKit {
   const clock = fixedClock();
   const coreAlarm = recordingAlarms();
   const extAlarm = recordingAlarms();
@@ -171,9 +163,9 @@ function coreKit(
     clock,
     random: seededRandom(7),
   };
-  const config = parseConfig(env, { allowFixturePrefix: true });
+  const config = harnessConfig();
   const core = new IndexCore(config, host, extensions, o.identity === undefined ? {} : { identity: o.identity });
-  core.markMigrated(migrate(state.storage));
+  core.markMigrated(migrate(db));
   return { core, db, clock, coreAlarm, extAlarm, logs };
 }
 
@@ -205,8 +197,7 @@ it("TIMER_NAMES is the seven core names, EXTENSION_TIMER_NAMES the six extension
   expect(CORE_LANE.names).toBe(TIMER_NAMES);
   expect(EXTENSION_LANE.names).toBe(EXTENSION_TIMER_NAMES);
 
-  await runInDurableObject(stubFor('timers-ext-names'), async (_i: HarnessDO, state) => {
-    const db = doDb(state.storage);
+  await withIndex(async (db) => {
     expect(nextDue(db)).toBeNull();
     expect(nextDue(db, EXTENSION_LANE)).toBeNull();
 
@@ -244,14 +235,14 @@ it("TIMER_NAMES is the seven core names, EXTENSION_TIMER_NAMES the six extension
 });
 
 it('runDue with a names subset claims only those timers, and two lanes over two AlarmStorage objects never hit TimerReentryError', async () => {
-  await runInDurableObject(stubFor('timers-ext-subset'), async (_i: HarnessDO, state) => {
-    const db = doDb(state.storage);
+  await withIndex(async (db) => {
+    const storage = testAlarm();
     for (const name of [...TIMER_NAMES, ...EXTENSION_TIMER_NAMES]) schedule(db, name, NOW - MINUTE);
     const calls: string[] = [];
     const handlers = { ...coreHandlers(calls), ...extensionHandlers(calls) };
 
     // Only the subset (given out of order) runs, in priority order; the rest keep their rows.
-    const subset = await runDue(state.storage, db, NOW, handlers, UNLIMITED, { names: ['gc', 'forward', 'drain'] });
+    const subset = await runDue(storage, db, NOW, handlers, UNLIMITED, { names: ['gc', 'forward', 'drain'] });
     expect(subset).toEqual({
       ran: ['drain', 'gc', 'forward'],
       failed: [],
@@ -276,7 +267,7 @@ it('runDue with a names subset claims only those timers, and two lanes over two 
 
     // The default lane is the core lane: no extension timer runs.
     calls.length = 0;
-    const coreRun = await runDue(state.storage, db, NOW, handlers, UNLIMITED);
+    const coreRun = await runDue(storage, db, NOW, handlers, UNLIMITED);
     expect(coreRun.ran).toEqual(['snapshot', 'jetstream-watchdog', 'status-sweep', 'identity-sweep', 'discovery']);
     expect(timerRows(db).map((r) => r.name)).toEqual(['backup', 'expiry-sweep', 'import', 'oauth-keepalive', 'outbox']);
 
@@ -311,8 +302,7 @@ it('runDue with a names subset claims only those timers, and two lanes over two 
 });
 
 it('a core runDue started while outbox is claimed leaves ~running:outbox untouched and records no failure', async () => {
-  await runInDurableObject(stubFor('timers-ext-orphan-scope'), async (_i: HarnessDO, state) => {
-    const db = doDb(state.storage);
+  await withIndex(async (db) => {
     const coreAlarm = recordingAlarms();
     const extAlarm = recordingAlarms();
     schedule(db, 'outbox', NOW - SECOND);
@@ -360,7 +350,7 @@ it('a core runDue started while outbox is claimed leaves ~running:outbox untouch
 });
 
 it('extension handlers run on the extension lane in the order outbox, forward, import, oauth-keepalive, expiry-sweep, backup', async () => {
-  await runInDurableObject(stubFor('timers-ext-order'), async (_i: HarnessDO, state) => {
+  await withIndex(async (db) => {
     const calls: string[] = [];
     const record = (name: string) => async () => {
       calls.push(name);
@@ -372,7 +362,7 @@ it('extension handlers run on the extension lane in the order outbox, forward, i
       forward: record('forward'),
       'oauth-keepalive': record('oauth-keepalive'),
     });
-    const k = coreKit(state, [a, b]);
+    const k = coreKit(db, [a, b]);
     expect(k.core.extensionLane.names).toEqual([...EXTENSION_TIMER_NAMES]);
     k.core.start();
     const coreCallsAfterStart = k.coreAlarm.calls.length;
@@ -397,15 +387,15 @@ it('extension handlers run on the extension lane in the order outbox, forward, i
     expect(timerRows(k.db).filter((r) => (TIMER_NAMES as readonly string[]).includes(r.name))).toEqual(coreRowsBefore);
 
     // Two extensions may not claim one name, and only extension names are accepted.
-    expect(() => coreKit(state, [a, extension('c', { outbox: record('x') })])).toThrow(/already has a handler/);
+    expect(() => coreKit(db, [a, extension('c', { outbox: record('x') })])).toThrow(/already has a handler/);
     expect(() =>
-      coreKit(state, [{ name: 'd', timers: { drain: record('drain') } as unknown as CoreExtension['timers'] }]),
+      coreKit(db, [{ name: 'd', timers: { drain: record('drain') } as unknown as CoreExtension['timers'] }]),
     ).toThrow(/not an extension timer name/);
   });
 });
 
 it('a timer name without a registered handler is never written to timers and tick() skips it', async () => {
-  await runInDurableObject(stubFor('timers-ext-unregistered'), async (_i: HarnessDO, state) => {
+  await withIndex(async (db) => {
     const calls: string[] = [];
     let seen: ExtensionContext | null = null;
     const outbox: CoreExtension = {
@@ -421,7 +411,7 @@ it('a timer name without a registered handler is never written to timers and tic
         expect(ctx.schedule('forward', now)).toBeNull();
       },
     };
-    const k = coreKit(state, [outbox]);
+    const k = coreKit(db, [outbox]);
     expect(k.core.extensionLane.names).toEqual(['outbox']);
     k.core.start();
     expect(seen).toBe(k.core.extensionTimers);
@@ -454,7 +444,7 @@ it('a timer name without a registered handler is never written to timers and tic
     expect(k.extAlarm.calls.some((c) => c.op === 'set' && c.at === NOW - MINUTE)).toBe(false);
 
     // A core without extensions never touches its extension alarm at all.
-    const bare = coreKit(state, []);
+    const bare = coreKit(db, []);
     bare.core.start();
     await bare.core.ensureRunning();
     expect(await bare.core.tick('extension')).toBeNull();
@@ -464,7 +454,7 @@ it('a timer name without a registered handler is never written to timers and tic
 });
 
 it('a throwing extension handler is re-armed at now+backoff and the core lane drain timer still runs', async () => {
-  await runInDurableObject(stubFor('timers-ext-throw'), async (_i: HarnessDO, state) => {
+  await withIndex(async (db) => {
     let attempts = 0;
     const outbox = extension('outbox', {
       outbox: async () => {
@@ -472,7 +462,7 @@ it('a throwing extension handler is re-armed at now+backoff and the core lane dr
         if (attempts === 1) throw new Error('outbox upstream failed');
       },
     });
-    const k = coreKit(state, [outbox]);
+    const k = coreKit(db, [outbox]);
     schedule(k.db, 'drain', NOW);
     expect(k.core.extensionTimers.kick('outbox')).toBe(NOW);
 
@@ -515,7 +505,7 @@ it('a throwing extension handler is re-armed at now+backoff and the core lane dr
 });
 
 it('a kicked outbox handler runs while a core snapshot handler is blocked, and the core watchdog runs while an outbox handler is blocked', async () => {
-  await runInDurableObject(stubFor('timers-ext-independent'), async (_i: HarnessDO, state) => {
+  await withIndex(async (db) => {
     // The snapshot slice resolves the DID first; this resolver holds it open.
     const identityHold = deferred();
     const resolving: string[] = [];
@@ -537,7 +527,7 @@ it('a kicked outbox handler runs while a core snapshot handler is blocked, and t
         await outboxHold;
       },
     });
-    const k = coreKit(state, [outbox], { identity });
+    const k = coreKit(db, [outbox], { identity });
     seedUser(k.db, ALICE);
     expect(scheduleSnapshot(k.db, ALICE, 'test', NOW).status).toBe('scheduled');
     schedule(k.db, 'snapshot', NOW);

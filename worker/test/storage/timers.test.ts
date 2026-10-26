@@ -1,17 +1,18 @@
-// W1-08: the IndexDO alarm multiplexer (ADR 0004 §5.9) against real DO SQLite
-// in workerd (the harness DO applies the production migrations).
+// W1-08: the index alarm multiplexer (ADR 0004 §5.9) against node:sqlite
+// through the production adapter, each case on its own migrated
+// temporary-file database (worker/test/node/support/with-index.ts, N4-04; it
+// ran on DO SQLite in workerd before ADR 0005).
 //
-// Alarm calls are asserted through an injected recording AlarmStorage: the
-// frozen fixture instant (2026-01-15) is in the wall-clock past, so a real
-// alarm armed at a fixture time would fire at once into the harness DO, which
-// has no alarm() handler. Real `storage.setAlarm/getAlarm/deleteAlarm` are
-// exercised with FAR_FUTURE due times instead, which never fire during a run.
+// Alarm calls are asserted through an injected recording AlarmStorage. The
+// Node host's own alarm, NodeAlarm (worker/src/node/alarm.ts, ADR 0005 §3.3),
+// is exercised through `testAlarm()`: manual timers that never fire on their
+// own, with FAR_FUTURE due times; `nextDueMs()` is what DO `getAlarm()` was.
+// It is also the run guard `runDue` keys on, as the DO storage was.
 
-import { evictDurableObject, runInDurableObject } from 'cloudflare:test';
-import { env } from 'cloudflare:workers';
 import { fixedClock } from '@atmusic/core/test-support/clock';
 import { describe, expect, it } from 'vitest';
-import { type Db, doDb } from '../../src/do/db';
+import type { Db } from '../../src/do/db';
+import { migrate } from '../../src/do/migrate';
 import { SCHEMA_VERSION } from '../../src/do/schema';
 import {
   type AlarmStorage,
@@ -30,9 +31,17 @@ import {
   TimerReentryError,
   timerBackoffMs,
 } from '../../src/do/timers';
-import type { HarnessDO } from '../harness/harness-do';
+import { testAlarm, withIndex } from '../node/support/with-index';
 
-const stubFor = (name: string) => env.HARNESS.get(env.HARNESS.idFromName(name));
+/** A second `Db` facade over the same connection (what a second `doDb(storage)` was). */
+function dbView(db: Db): Db {
+  return {
+    all: (sql, ...p) => db.all(sql, ...p),
+    one: (sql, ...p) => db.one(sql, ...p),
+    run: (sql, ...p) => db.run(sql, ...p),
+    tx: (fn) => db.tx(fn),
+  };
+}
 
 const NOW = Date.parse('2026-01-15T12:00:00Z');
 const SECOND = 1_000;
@@ -89,8 +98,7 @@ function recordingHandlers(behaviour: Partial<Record<TimerName, Behaviour>> = {}
 
 describe('timers', () => {
   it('nextDue is the minimum and alarm is armed to it', async () => {
-    await runInDurableObject(stubFor('timers-next-due'), async (_i: HarnessDO, state) => {
-      const db = doDb(state.storage);
+    await withIndex(async (db) => {
       const alarms = recordingAlarms();
 
       // Nothing scheduled: no due time, and the alarm is deleted, not set.
@@ -134,29 +142,27 @@ describe('timers', () => {
       ]);
     });
 
-    // The same against the real DO alarm.
-    await runInDurableObject(stubFor('timers-next-due-real'), async (_i: HarnessDO, state) => {
-      const db = doDb(state.storage);
-      expect(await state.storage.getAlarm()).toBeNull();
+    // The same against the Node host's alarm (NodeAlarm), in place of the real DO alarm.
+    await withIndex(async (db) => {
+      const storage = testAlarm();
+      expect(storage.nextDueMs()).toBeNull();
       schedule(db, 'identity-sweep', FAR_FUTURE + DAY);
       schedule(db, 'jetstream-watchdog', FAR_FUTURE + MINUTE);
-      expect(armAlarm(state.storage, db)).toBe(FAR_FUTURE + MINUTE);
-      expect(await state.storage.getAlarm()).toBe(FAR_FUTURE + MINUTE);
+      expect(armAlarm(storage, db)).toBe(FAR_FUTURE + MINUTE);
+      expect(storage.nextDueMs()).toBe(FAR_FUTURE + MINUTE);
 
       cancel(db, 'jetstream-watchdog');
-      expect(armAlarm(state.storage, db)).toBe(FAR_FUTURE + DAY);
-      expect(await state.storage.getAlarm()).toBe(FAR_FUTURE + DAY);
+      expect(armAlarm(storage, db)).toBe(FAR_FUTURE + DAY);
+      expect(storage.nextDueMs()).toBe(FAR_FUTURE + DAY);
 
       cancel(db, 'identity-sweep');
-      expect(armAlarm(state.storage, db)).toBeNull();
-      expect(await state.storage.getAlarm()).toBeNull();
+      expect(armAlarm(storage, db)).toBeNull();
+      expect(storage.nextDueMs()).toBeNull();
     });
   });
 
   it('schedule keeps earlier due unless forced', async () => {
-    await runInDurableObject(stubFor('timers-schedule'), (_i: HarnessDO, state) => {
-      const db = doDb(state.storage);
-
+    await withIndex((db) => {
       expect(schedule(db, 'drain', NOW + 10 * SECOND)).toBe(NOW + 10 * SECOND);
       // Later: ignored.
       expect(schedule(db, 'drain', NOW + 20 * SECOND)).toBe(NOW + 10 * SECOND);
@@ -199,8 +205,8 @@ describe('timers', () => {
   });
 
   it('runDue executes only due timers in priority order', async () => {
-    await runInDurableObject(stubFor('timers-run-due'), async (_i: HarnessDO, state) => {
-      const db = doDb(state.storage);
+    await withIndex(async (db) => {
+      const storage = testAlarm();
       // Scheduled in scrambled order; four are due (one exactly at now).
       schedule(db, 'gc', NOW - DAY);
       schedule(db, 'discovery', NOW + HOUR);
@@ -224,7 +230,7 @@ describe('timers', () => {
         // gc does not reschedule itself: it is one-shot.
       });
 
-      const report = await runDue(state.storage, db, NOW, handlers, UNLIMITED);
+      const report = await runDue(storage, db, NOW, handlers, UNLIMITED);
 
       expect(calls).toEqual([
         { name: 'drain', now: NOW },
@@ -257,8 +263,8 @@ describe('timers', () => {
     });
 
     // Budget: maxRuns, then a deadline; an earlier handler can cancel a later one.
-    await runInDurableObject(stubFor('timers-run-due-budget'), async (_i: HarnessDO, state) => {
-      const db = doDb(state.storage);
+    await withIndex(async (db) => {
+      const storage = testAlarm();
       for (const name of TIMER_NAMES) schedule(db, name, NOW - MINUTE);
       const clock = fixedClock();
       const { handlers, calls } = recordingHandlers({
@@ -266,14 +272,14 @@ describe('timers', () => {
         'status-sweep': () => clock.advance(10 * SECOND),
       });
 
-      const first = await runDue(state.storage, db, NOW, handlers, { maxRuns: 2 });
+      const first = await runDue(storage, db, NOW, handlers, { maxRuns: 2 });
       expect(calls.map((c) => c.name)).toEqual(['drain', 'snapshot']);
       expect(first.ran).toEqual(['drain', 'snapshot']);
       // jetstream-watchdog was cancelled by snapshot, so it is not deferred.
       expect(first.deferred).toEqual(['status-sweep', 'identity-sweep', 'discovery', 'gc']);
       expect(timerRows(db).map((r) => r.name)).toEqual(['discovery', 'gc', 'identity-sweep', 'status-sweep']);
 
-      const second = await runDue(state.storage, db, NOW, handlers, {
+      const second = await runDue(storage, db, NOW, handlers, {
         maxRuns: 100,
         deadline: { clock, atMs: NOW + 5 * SECOND },
       });
@@ -287,17 +293,17 @@ describe('timers', () => {
         superseded: false,
       });
 
-      const third = await runDue(state.storage, db, NOW, handlers, { maxRuns: 0 });
+      const third = await runDue(storage, db, NOW, handlers, { maxRuns: 0 });
       expect(third.ran).toEqual([]);
       expect(third.deferred).toEqual(['identity-sweep', 'discovery', 'gc']);
       expect(calls).toHaveLength(3);
 
       // Not due yet at an earlier now: nothing runs, nothing deferred.
-      const early = await runDue(state.storage, db, NOW - 2 * MINUTE, handlers, UNLIMITED);
+      const early = await runDue(storage, db, NOW - 2 * MINUTE, handlers, UNLIMITED);
       expect(early).toEqual({ ran: [], failed: [], deferred: [], recovered: [], superseded: false });
       expect(calls).toHaveLength(3);
 
-      await runDue(state.storage, db, NOW, handlers, UNLIMITED);
+      await runDue(storage, db, NOW, handlers, UNLIMITED);
       expect(calls.map((c) => c.name)).toEqual([
         'drain',
         'snapshot',
@@ -313,18 +319,18 @@ describe('timers', () => {
       let inner: unknown = null;
       const reentrant = recordingHandlers({
         gc: async () => {
-          inner = await runDue(state.storage, db, NOW, handlers, UNLIMITED).catch((e: unknown) => e);
+          inner = await runDue(storage, db, NOW, handlers, UNLIMITED).catch((e: unknown) => e);
         },
       });
-      expect((await runDue(state.storage, db, NOW, reentrant.handlers, UNLIMITED)).ran).toEqual(['gc']);
+      expect((await runDue(storage, db, NOW, reentrant.handlers, UNLIMITED)).ran).toEqual(['gc']);
       expect(inner).toBeInstanceOf(TimerReentryError);
       expect(calls).toHaveLength(6);
     });
   });
 
   it('throwing handler is rescheduled with backoff and others still run', async () => {
-    await runInDurableObject(stubFor('timers-backoff'), async (_i: HarnessDO, state) => {
-      const db = doDb(state.storage);
+    await withIndex(async (db) => {
+      const storage = testAlarm();
       const clock = fixedClock();
       for (const name of ['drain', 'snapshot', 'status-sweep', 'gc'] as const) schedule(db, name, NOW);
 
@@ -347,7 +353,7 @@ describe('timers', () => {
         gc: (now) => void schedule(db, 'gc', now + DAY),
       });
 
-      const first = await runDue(state.storage, db, clock.nowMs(), handlers, UNLIMITED);
+      const first = await runDue(storage, db, clock.nowMs(), handlers, UNLIMITED);
       expect(calls.map((c) => c.name)).toEqual(['drain', 'snapshot', 'status-sweep', 'gc']);
       expect(first.ran).toEqual(['drain', 'gc']);
       expect(first.failed.map(({ error, ...rest }) => ({ ...rest, message: (error as Error).message }))).toEqual([
@@ -369,7 +375,7 @@ describe('timers', () => {
 
       // Backoff doubles with the consecutive-failure streak.
       clock.advance(2 * SECOND);
-      const second = await runDue(state.storage, db, clock.nowMs(), handlers, UNLIMITED);
+      const second = await runDue(storage, db, clock.nowMs(), handlers, UNLIMITED);
       expect(second.ran).toEqual(['drain']);
       expect(second.failed.map((f) => [f.name, f.streak, f.retryAtMs])).toEqual([
         ['snapshot', 2, NOW + 2 * SECOND + 4 * SECOND],
@@ -381,7 +387,7 @@ describe('timers', () => {
       // own reschedule applies again.
       snapshotFails = false;
       clock.advance(4 * SECOND);
-      const third = await runDue(state.storage, db, clock.nowMs(), handlers, UNLIMITED);
+      const third = await runDue(storage, db, clock.nowMs(), handlers, UNLIMITED);
       expect(third.ran).toEqual(['drain', 'snapshot']);
       expect(third.failed.map((f) => [f.name, f.streak, f.retryAtMs])).toEqual([
         ['status-sweep', 3, NOW + 6 * SECOND + 8 * SECOND],
@@ -407,8 +413,7 @@ describe('timers', () => {
   });
 
   it('hung handler is taken over and rescheduled on the same instance', async () => {
-    await runInDurableObject(stubFor('timers-hung'), async (_i: HarnessDO, state) => {
-      const db = doDb(state.storage);
+    await withIndex(async (db) => {
       // The recording fake stands in for the DO storage: runDue and armAlarm
       // share its identity as the run guard, and no real alarm is armed at a
       // (wall-clock past) fixture time.
@@ -508,8 +513,7 @@ describe('timers', () => {
     // Rows scheduled during the hang (a fresh drain, another due timer) do not
     // pull the alarm before the takeover time, and a run at the armed time
     // starts instead of throwing TimerReentryError.
-    await runInDurableObject(stubFor('timers-hung-fresh-rows'), async (_i: HarnessDO, state) => {
-      const db = doDb(state.storage);
+    await withIndex(async (db) => {
       const alarms = recordingAlarms();
       const storage = alarms.storage;
       schedule(db, 'drain', NOW);
@@ -554,9 +558,10 @@ describe('timers', () => {
   });
 
   it('Db wrappers over one storage share the run guard', async () => {
-    await runInDurableObject(stubFor('timers-two-wrappers'), async (_i: HarnessDO, state) => {
-      const db1 = doDb(state.storage);
-      const db2 = doDb(state.storage);
+    await withIndex(async (db) => {
+      const storage = testAlarm();
+      const db1 = dbView(db);
+      const db2 = dbView(db);
       expect(db1).not.toBe(db2);
       schedule(db1, 'drain', NOW);
 
@@ -570,15 +575,13 @@ describe('timers', () => {
             };
           }),
       });
-      const run1 = runDue(state.storage, db1, NOW, first.handlers, UNLIMITED);
+      const run1 = runDue(storage, db1, NOW, first.handlers, UNLIMITED);
       expect(first.calls).toEqual([{ name: 'drain', now: NOW }]);
 
       // A second run through the other wrapper sees the live claim as live,
       // not as an orphan: refused, nothing recovered or rescheduled.
       const second = recordingHandlers();
-      await expect(runDue(state.storage, db2, NOW + 1, second.handlers, UNLIMITED)).rejects.toBeInstanceOf(
-        TimerReentryError,
-      );
+      await expect(runDue(storage, db2, NOW + 1, second.handlers, UNLIMITED)).rejects.toBeInstanceOf(TimerReentryError);
       expect(second.calls).toEqual([]);
       expect(timerRows(db2)).toEqual([{ name: '~running:drain', due_at: NOW }]);
       expect(timerCounters(db2)).toEqual([{ name: TIMER_STREAK_COUNTER, label: 'drain', value: 1 }]);
@@ -591,7 +594,7 @@ describe('timers', () => {
       expect(timerCounters(db2)).toEqual([]);
 
       // Guard released: the other wrapper runs normally.
-      expect(await runDue(state.storage, db2, NOW + 2 * SECOND, second.handlers, UNLIMITED)).toEqual({
+      expect(await runDue(storage, db2, NOW + 2 * SECOND, second.handlers, UNLIMITED)).toEqual({
         ran: ['drain'],
         failed: [],
         deferred: [],
@@ -602,58 +605,56 @@ describe('timers', () => {
   });
 
   it('state survives DO eviction (same storage)', async () => {
-    const stub = stubFor('timers-evict');
     let pendingRun: Promise<unknown> | null = null;
-    let before: HarnessDO | null = null;
 
-    await runInDurableObject(stub, async (instance: HarnessDO, state) => {
-      before = instance;
-      const db = instance.db;
-      schedule(db, 'drain', NOW - SECOND);
-      schedule(db, 'snapshot', NOW);
-      schedule(db, 'status-sweep', NOW + HOUR);
-      schedule(db, 'gc', NOW + DAY);
+    await withIndex(async (first, ix) => {
+      const storage = testAlarm();
+      const before = first;
+      {
+        const db = first;
+        schedule(db, 'drain', NOW - SECOND);
+        schedule(db, 'snapshot', NOW);
+        schedule(db, 'status-sweep', NOW + HOUR);
+        schedule(db, 'gc', NOW + DAY);
 
-      // One completed run with a failure, so a streak exists before eviction.
-      const failing = recordingHandlers({
-        snapshot: () => {
-          throw new Error('pds down');
-        },
-        drain: (now) => void schedule(db, 'drain', now + 2 * SECOND),
-      });
-      const report = await runDue(state.storage, db, NOW, failing.handlers, UNLIMITED);
-      expect(report.ran).toEqual(['drain']);
-      expect(report.failed.map((f) => [f.name, f.retryAtMs])).toEqual([['snapshot', NOW + 2 * SECOND]]);
+        // One completed run with a failure, so a streak exists before eviction.
+        const failing = recordingHandlers({
+          snapshot: () => {
+            throw new Error('pds down');
+          },
+          drain: (now) => void schedule(db, 'drain', now + 2 * SECOND),
+        });
+        const report = await runDue(storage, db, NOW, failing.handlers, UNLIMITED);
+        expect(report.ran).toEqual(['drain']);
+        expect(report.failed.map((f) => [f.name, f.retryAtMs])).toEqual([['snapshot', NOW + 2 * SECOND]]);
 
-      // Then a run that dies with the instance: drain never settles.
-      const hanging = recordingHandlers({ drain: () => new Promise<void>(() => {}) });
-      pendingRun = runDue(state.storage, db, NOW + 2 * SECOND, hanging.handlers, UNLIMITED);
-      expect(hanging.calls).toEqual([{ name: 'drain', now: NOW + 2 * SECOND }]);
-    });
-    expect(pendingRun).not.toBeNull();
+        // Then a run that dies with the process: drain never settles.
+        const hanging = recordingHandlers({ drain: () => new Promise<void>(() => {}) });
+        pendingRun = runDue(storage, db, NOW + 2 * SECOND, hanging.handlers, UNLIMITED);
+        expect(hanging.calls).toEqual([{ name: 'drain', now: NOW + 2 * SECOND }]);
+      }
+      expect(pendingRun).not.toBeNull();
 
-    const persisted = [
-      { name: 'gc', due_at: NOW + DAY },
-      { name: 'snapshot', due_at: NOW + 2 * SECOND },
-      { name: 'status-sweep', due_at: NOW + HOUR },
-      { name: '~running:drain', due_at: NOW + 2 * SECOND },
-    ];
-    const counters = [
-      { name: TIMER_FAILURES_COUNTER, label: 'snapshot', value: 1 },
-      { name: TIMER_STREAK_COUNTER, label: 'drain', value: 1 },
-      { name: TIMER_STREAK_COUNTER, label: 'snapshot', value: 1 },
-    ];
-    await runInDurableObject(stub, (instance: HarnessDO) => {
-      expect(timerRows(instance.db)).toEqual(persisted);
-      expect(timerCounters(instance.db)).toEqual(counters);
-    });
+      const persisted = [
+        { name: 'gc', due_at: NOW + DAY },
+        { name: 'snapshot', due_at: NOW + 2 * SECOND },
+        { name: 'status-sweep', due_at: NOW + HOUR },
+        { name: '~running:drain', due_at: NOW + 2 * SECOND },
+      ];
+      const counters = [
+        { name: TIMER_FAILURES_COUNTER, label: 'snapshot', value: 1 },
+        { name: TIMER_STREAK_COUNTER, label: 'drain', value: 1 },
+        { name: TIMER_STREAK_COUNTER, label: 'snapshot', value: 1 },
+      ];
+      expect(timerRows(first)).toEqual(persisted);
+      expect(timerCounters(first)).toEqual(counters);
 
-    await evictDurableObject(stub);
-
-    await runInDurableObject(stub, async (instance: HarnessDO, state) => {
-      expect(instance).not.toBe(before);
-      expect(instance.migration).toEqual({ status: 'ready', version: SCHEMA_VERSION });
-      const db = instance.db;
+      // The restart: the same file reopened by a new process (new handle, new
+      // alarm storage, migrate re-run at open).
+      const db = ix.reopen();
+      expect(db).not.toBe(before);
+      expect(migrate(db)).toEqual({ status: 'ready', version: SCHEMA_VERSION });
+      const restarted = testAlarm();
       // Same rows, same counters, same next due (the orphaned claim included).
       expect(timerRows(db)).toEqual(persisted);
       expect(timerCounters(db)).toEqual(counters);
@@ -662,14 +663,14 @@ describe('timers', () => {
       expect(armAlarm(alarms.storage, db)).toBe(NOW + 2 * SECOND);
       expect(alarms.calls).toEqual([{ op: 'set', at: NOW + 2 * SECOND }]);
 
-      // The new instance recovers the lost drain run with backoff (streak 1
+      // The new process recovers the lost drain run with backoff (streak 1
       // from its claim) and continues snapshot's streak to 2.
       const after = NOW + 2 * SECOND;
       const { handlers, calls } = recordingHandlers({
         snapshot: (now) => void schedule(db, 'snapshot', now + MINUTE),
         drain: (now) => void schedule(db, 'drain', now + 2 * SECOND),
       });
-      const report = await runDue(state.storage, db, after, handlers, UNLIMITED);
+      const report = await runDue(restarted, db, after, handlers, UNLIMITED);
       expect(report.superseded).toBe(false);
       expect(report.recovered.map(({ error, ...rest }) => rest)).toEqual([
         { name: 'drain', retryAtMs: after + 2 * SECOND, streak: 1 },
@@ -689,7 +690,7 @@ describe('timers', () => {
       ]);
 
       // And the recovered timer runs normally afterwards.
-      const later = await runDue(state.storage, db, after + 2 * SECOND, handlers, UNLIMITED);
+      const later = await runDue(restarted, db, after + 2 * SECOND, handlers, UNLIMITED);
       expect(later.ran).toEqual(['drain']);
       expect(timerCounters(db)).toEqual([
         { name: TIMER_FAILURES_COUNTER, label: 'drain', value: 1 },
@@ -697,23 +698,29 @@ describe('timers', () => {
       ]);
     });
 
-    // The real DO alarm survives eviction too, and re-arming from the table
-    // gives the same time.
-    const real = stubFor('timers-evict-real-alarm');
-    await runInDurableObject(real, async (instance: HarnessDO, state) => {
-      schedule(instance.db, 'discovery', FAR_FUTURE + DAY);
-      schedule(instance.db, 'jetstream-watchdog', FAR_FUTURE + MINUTE);
-      expect(armAlarm(state.storage, instance.db)).toBe(FAR_FUTURE + MINUTE);
-    });
-    await evictDurableObject(real);
-    await runInDurableObject(real, async (instance: HarnessDO, state) => {
-      expect(await state.storage.getAlarm()).toBe(FAR_FUTURE + MINUTE);
-      expect(timerRows(instance.db)).toEqual([
+    // The Node alarm itself is in memory (ADR 0005 §3.3): a restart starts
+    // with none armed, and re-arming from the preserved table gives the same
+    // time the old process had armed.
+    await withIndex(async (db, ix) => {
+      const real = testAlarm();
+      schedule(db, 'discovery', FAR_FUTURE + DAY);
+      schedule(db, 'jetstream-watchdog', FAR_FUTURE + MINUTE);
+      expect(armAlarm(real, db)).toBe(FAR_FUTURE + MINUTE);
+      expect(real.nextDueMs()).toBe(FAR_FUTURE + MINUTE);
+      real.stop();
+
+      const again = ix.reopen();
+      const restarted = testAlarm();
+      expect(restarted.nextDueMs()).toBeNull();
+      expect(timerRows(again)).toEqual([
         { name: 'discovery', due_at: FAR_FUTURE + DAY },
         { name: 'jetstream-watchdog', due_at: FAR_FUTURE + MINUTE },
       ]);
-      expect(armAlarm(state.storage, instance.db)).toBe(FAR_FUTURE + MINUTE);
-      expect(await state.storage.getAlarm()).toBe(FAR_FUTURE + MINUTE);
+      expect(armAlarm(restarted, again)).toBe(FAR_FUTURE + MINUTE);
+      expect(restarted.nextDueMs()).toBe(FAR_FUTURE + MINUTE);
+      // The armed timer is one manual timeout (clamped to Node's maximum delay); none fired.
+      expect(restarted.timers.pending()).toHaveLength(1);
+      expect(restarted.running).toBe(false);
     });
   });
 });

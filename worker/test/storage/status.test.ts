@@ -1,5 +1,7 @@
-// W2-05: indexing status truth (global and per-user Indexing) against real DO
-// SQLite in workerd (the harness DO applies the production migrations).
+// W2-05: indexing status truth (global and per-user Indexing) against
+// node:sqlite through the production adapter, each case on its own migrated
+// temporary-file database (worker/test/node/support/with-index.ts, N4-04; it
+// ran on DO SQLite in workerd before ADR 0005).
 // Ports crates/server/tests/relay_recovery.rs `status_truth` (M4.2.3), the
 // reactivation backfill state (M5.2.2) and the upstream outage cases
 // (M1.4.2 upstream_outage, M6.2.2 upstream_offline).
@@ -14,8 +16,6 @@
 // A source guard keeps every other production module off the checkpoint and
 // high-water-mark columns, so the writer contract cannot be bypassed silently.
 
-import { runInDurableObject } from 'cloudflare:test';
-import { env } from 'cloudflare:workers';
 import type { Indexing } from '@atmusic/core/api-types';
 import { fixedClock } from '@atmusic/core/test-support/clock';
 import { fromMs, toStorage } from '@atmusic/core/timestamp';
@@ -24,7 +24,7 @@ import addFormats from 'ajv-formats';
 import { describe, expect, it } from 'vitest';
 import openapiText from '../../../api/openapi.yaml?raw';
 import type { IngestMode } from '../../src/config';
-import { type Db, doDb, type SqlParam } from '../../src/do/db';
+import type { Db, SqlParam } from '../../src/do/db';
 import {
   GAP_REASON,
   indexing,
@@ -35,7 +35,8 @@ import {
   recordEvent,
   updateCheckpointBookkeeping,
 } from '../../src/do/status';
-import type { HarnessDO } from '../harness/harness-do';
+import type { SqliteDb } from '../../src/node/sqlite-db';
+import { withIndex } from '../node/support/with-index';
 
 function openapiValidator(schema: string) {
   const doc = JSON.parse(openapiText) as { components: unknown };
@@ -115,8 +116,6 @@ function guardViolations(file: string, source: string): string[] {
     GUARDS.filter((guard) => guard.test(text)).map((guard) => `${file}:${line} ${guard.rule}`),
   );
 }
-
-const stubFor = (name: string) => env.HARNESS.get(env.HARNESS.idFromName(name));
 
 const SECOND = 1_000;
 const MINUTE = 60 * SECOND;
@@ -263,19 +262,18 @@ interface Executed {
   params: SqlParam[];
 }
 
-/** A read-only Db over the storage's SQL that records every statement it runs and its parameters. */
-function countingDb(storage: DurableObjectStorage): { db: Db; executed: Executed[] } {
+/** A read-only Db over the adapter's SQL that records every statement it runs and its parameters. */
+function countingDb(sqlite: SqliteDb): { db: Db; executed: Executed[] } {
   const executed: Executed[] = [];
-  const exec = (sql: string, params: SqlParam[]) => {
-    const cursor = storage.sql.exec(sql, ...params);
-    const rows = cursor.toArray();
+  const record = <R>(sql: string, params: SqlParam[], run: () => R): R => {
+    const result = run();
     executed.push({ sql, params });
-    return { rows, rowsWritten: cursor.rowsWritten };
+    return result;
   };
   const db: Db = {
-    all: <T>(sql: string, ...p: SqlParam[]) => exec(sql, p).rows as T[],
-    one: <T>(sql: string, ...p: SqlParam[]) => (exec(sql, p).rows[0] as T | undefined) ?? null,
-    run: (sql: string, ...p: SqlParam[]) => ({ rowsWritten: exec(sql, p).rowsWritten }),
+    all: <T>(sql: string, ...p: SqlParam[]) => record(sql, p, () => sqlite.all<T>(sql, ...p)),
+    one: <T>(sql: string, ...p: SqlParam[]) => record(sql, p, () => sqlite.one<T>(sql, ...p)),
+    run: (sql: string, ...p: SqlParam[]) => record(sql, p, () => sqlite.run(sql, ...p)),
     tx: () => {
       throw new Error('countingDb is read-only');
     },
@@ -373,8 +371,7 @@ function seedRows(db: Db, did: string, n: number, offset: number) {
 
 describe('indexing status truth', () => {
   it('fresh DO reports recovering, caughtUp=false', async () => {
-    await runInDurableObject(stubFor('status-fresh'), async (_i: HarnessDO, state) => {
-      const db = doDb(state.storage);
+    await withIndex(async (db) => {
       const clock = fixedClock();
       const fresh: Indexing = { state: 'recovering', caughtUp: false, lastIndexedAt: null, lagSeconds: null };
 
@@ -422,8 +419,7 @@ describe('indexing status truth', () => {
   });
 
   it('pending_gap overrides a stored current flag', async () => {
-    await runInDurableObject(stubFor('status-pending-gap'), async (_i: HarnessDO, state) => {
-      const db = doDb(state.storage);
+    await withIndex(async (db) => {
       const clock = fixedClock();
       const now = clock.nowMs();
 
@@ -489,8 +485,7 @@ describe('indexing status truth', () => {
   });
 
   it('socket disconnected >5min reports stale', async () => {
-    await runInDurableObject(stubFor('status-socket-stale'), async (_i: HarnessDO, state) => {
-      const db = doDb(state.storage);
+    await withIndex(async (db) => {
       const clock = fixedClock();
       const now = clock.nowMs();
       const dropAt = now - 5 * MINUTE;
@@ -563,8 +558,7 @@ describe('indexing status truth', () => {
   });
 
   it('pulse overdue by more than two intervals, and off mode, report stale', async () => {
-    await runInDurableObject(stubFor('status-pulse-off'), async (_i: HarnessDO, state) => {
-      const db = doDb(state.storage);
+    await withIndex(async (db) => {
       const clock = fixedClock();
       const now = clock.nowMs();
       const pulseAt = now - 10 * MINUTE;
@@ -600,8 +594,7 @@ describe('indexing status truth', () => {
   });
 
   it('user with pending reactivation snapshot reports recovering', async () => {
-    await runInDurableObject(stubFor('status-reactivation'), async (_i: HarnessDO, state) => {
-      const db = doDb(state.storage);
+    await withIndex(async (db) => {
       const clock = fixedClock();
       const now = clock.nowMs();
       healthySocket(db, now);
@@ -684,8 +677,7 @@ describe('indexing status truth', () => {
   });
 
   it('lagSeconds null when idle and exact when events flowing', async () => {
-    await runInDurableObject(stubFor('status-lag'), async (_i: HarnessDO, state) => {
-      const db = doDb(state.storage);
+    await withIndex(async (db) => {
       const clock = fixedClock();
       const now = clock.nowMs();
       const event = (timeUs: number) => ({ cursor: timeUs, timeUs });
@@ -786,8 +778,7 @@ describe('indexing status truth', () => {
   });
 
   it('an unknown DID reports recovering with no lastIndexedAt while the global index is current', async () => {
-    await runInDurableObject(stubFor('status-unknown-did'), async (_i: HarnessDO, state) => {
-      const db = doDb(state.storage);
+    await withIndex(async (db) => {
       const now = fixedClock().nowMs();
       healthySocket(db, now);
       insertUser(db, BOB, { state: 'current' });
@@ -831,8 +822,7 @@ describe('indexing status truth', () => {
   });
 
   it('caughtUp is false only while a due hint was received more than 60 s ago', async () => {
-    await runInDurableObject(stubFor('status-hints'), async (_i: HarnessDO, state) => {
-      const db = doDb(state.storage);
+    await withIndex(async (db) => {
       const clock = fixedClock();
       const now = clock.nowMs();
       healthySocket(db, now);
@@ -865,8 +855,7 @@ describe('indexing status truth', () => {
   });
 
   it('internalStatus reports the checkpoint, hint and job counts and counters', async () => {
-    await runInDurableObject(stubFor('status-internal'), async (_i: HarnessDO, state) => {
-      const db = doDb(state.storage);
+    await withIndex(async (db) => {
       const now = fixedClock().nowMs();
       healthySocket(db, now);
       setCheckpoint(db, { host_index: 2 });
@@ -908,8 +897,7 @@ describe('indexing status truth', () => {
   });
 
   it('checkpoint writers: host rotation, gap-scan progress and pending_gap clears leave updated_at_ms unchanged', async () => {
-    await runInDurableObject(stubFor('status-writers'), async (_i: HarnessDO, state) => {
-      const db = doDb(state.storage);
+    await withIndex(async (db) => {
       const clock = fixedClock();
       const t0 = clock.nowMs();
 
@@ -1007,8 +995,7 @@ describe('indexing status truth', () => {
   });
 
   it('lastIndexedAt is a monotone high-water mark that deletions do not lower', async () => {
-    await runInDurableObject(stubFor('status-high-water'), async (_i: HarnessDO, state) => {
-      const db = doDb(state.storage);
+    await withIndex(async (db) => {
       const now = fixedClock().nowMs();
       healthySocket(db, now);
       insertUser(db, ALICE);
@@ -1055,8 +1042,7 @@ describe('indexing status truth', () => {
   it('status statements use the indexes pinned by EXPLAIN QUERY PLAN (asserted by index name, SQLite version recorded) in place of the DO rowsRead budget', async () => {
     // The version the pins below were derived on, recorded with the plans.
     expect(process.versions.sqlite).toBe(PINNED_SQLITE);
-    await runInDurableObject(stubFor('status-query-plan'), async (_i: HarnessDO, state) => {
-      const db = doDb(state.storage);
+    await withIndex(async (db) => {
       const now = fixedClock().nowMs();
       healthySocket(db, now);
       insertUser(db, ALICE);
@@ -1066,7 +1052,7 @@ describe('indexing status truth', () => {
       insertHint(db, BOB, '3m4zm2ufr2221', now - SECOND, now);
 
       const reads = () => {
-        const { db: counting, executed } = countingDb(state.storage);
+        const { db: counting, executed } = countingDb(db);
         const global = indexing(counting, now, { mode: 'socket' });
         const user = indexing(counting, now, { mode: 'socket', did: ALICE });
         const plans = executed.map(({ sql, params }) => ({ sql, plan: queryPlan(db, sql, params) }));
@@ -1116,7 +1102,7 @@ describe('indexing status truth', () => {
       // per owner it seeks the DID through follows_actor_subject and then walks
       // every row the owner has. Unlike every status read above, neither step
       // can stop early, so its cost grows with the table.
-      const { db: counting } = countingDb(state.storage);
+      const { db: counting } = countingDb(db);
       const globalMax = 'SELECT max(indexed_at) AS m FROM scrobbles';
       const ownerMax = 'SELECT max(indexed_at) AS m FROM follows WHERE actor = ?';
       expect(counting.one(globalMax)).toEqual({ m: '2026-01-14T05:33:20.000000000Z' });

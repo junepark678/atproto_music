@@ -1,12 +1,33 @@
-import { evictDurableObject, runInDurableObject } from 'cloudflare:test';
-import { env, exports } from 'cloudflare:workers';
-import { describe, expect, it } from 'vitest';
-import { type Db, doDb } from '../../src/do/db';
+// Migrations (ADR 0004 §6; ADR 0005 §3.2) over the Node harness
+// (worker/test/node/support/with-index.ts, N4-04): each name is a migrated
+// SQLite file of this test file's IndexSet, which runs `migrate` whenever the
+// file is opened, as the process does at startup; `fileIndexes().reopen(name)`
+// is the restart (formerly evictDurableObject), and `fileIndexes().migrations(name)`
+// the result of each open (formerly the harness DO constructor's). The
+// readiness the harness Worker reported is asked of the production
+// /health/ready handler over an IndexCore on that database.
+
+import { afterAll, describe, expect, it } from 'vitest';
+import type { Db } from '../../src/do/db';
 import { MigrationLedgerError, migrate } from '../../src/do/migrate';
 import { MIGRATIONS, SCHEMA_VERSION, TABLES } from '../../src/do/schema';
-import type { HarnessDO } from '../harness/harness-do';
+import { ready } from '../../src/http/health';
+import type { RequestCtx } from '../../src/http/types';
+import type { SqliteDb } from '../../src/node/sqlite-db';
+import { closeFileIndexes, fileIndexes, indexCore, schemaAll } from '../node/support/with-index';
 
-const stubFor = (name: string) => env.HARNESS.get(env.HARNESS.idFromName(name));
+afterAll(() => closeFileIndexes());
+
+/** The named database of this test file (created and migrated on first open). */
+const stubFor = (name: string): SqliteDb => fileIndexes().get(name);
+/** The migration result of the latest open of `name` (what the restarted process saw). */
+const lastMigration = (name: string) => fileIndexes().migrations(name).at(-1);
+
+/** GET `url` through the production /health/ready handler, with an IndexCore over `name`'s database as the index. */
+async function readyOf(name: string, url: string): Promise<Response> {
+  const { core } = indexCore(stubFor(name));
+  return ready(new Request(url), { index: core, requestId: 'req-migrate' } as unknown as RequestCtx);
+}
 
 // Hardcoded from ADR 0004 §6.1, not derived from schema.ts.
 const EXPECTED_TABLES = [
@@ -258,22 +279,19 @@ const EXPECTED_INDEX_SHAPE: Record<string, [number, number, Array<[string, numbe
 
 const normalizeDdl = (sql: string) => sql.replace(/\s+/g, ' ').replace(/\( /g, '(').replace(/ \)/g, ')').trim();
 
-function indexShape(storage: DurableObjectStorage, table: string, index: string) {
-  const list = storage.sql
-    .exec<{ unique: number; partial: number }>(
-      'SELECT "unique", partial FROM pragma_index_list(?) WHERE name = ?',
-      table,
-      index,
-    )
-    .one();
-  const cols = storage.sql
-    .exec<{ name: string; desc: number }>(
-      'SELECT name, "desc" FROM pragma_index_xinfo(?) WHERE key = 1 ORDER BY seqno',
-      index,
-    )
-    .toArray()
-    .map((c): [string, number] => [c.name, c.desc]);
-  return [list.unique, list.partial, cols];
+function indexShape(db: Db, table: string, index: string) {
+  const [list] = schemaAll<{ unique: number; partial: number }>(
+    db,
+    'SELECT "unique", partial FROM pragma_index_list(?) WHERE name = ?',
+    table,
+    index,
+  );
+  const cols = schemaAll<{ name: string; desc: number }>(
+    db,
+    'SELECT name, "desc" FROM pragma_index_xinfo(?) WHERE key = 1 ORDER BY seqno',
+    index,
+  ).map((c): [string, number] => [c.name, c.desc]);
+  return [list?.unique, list?.partial, cols];
 }
 
 interface MasterRow {
@@ -282,27 +300,24 @@ interface MasterRow {
   sql: string | null;
 }
 
-function appObjects(storage: DurableObjectStorage): MasterRow[] {
-  return storage.sql
-    .exec<{ type: string; name: string; sql: string | null }>(
-      "SELECT type, name, sql FROM sqlite_master WHERE name NOT LIKE '\\_cf\\_%' ESCAPE '\\' AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\' ORDER BY type, name",
-    )
-    .toArray();
+function appObjects(db: Db): MasterRow[] {
+  return db.all<MasterRow>(
+    "SELECT type, name, sql FROM sqlite_master WHERE name NOT LIKE '\\_cf\\_%' ESCAPE '\\' AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\' ORDER BY type, name",
+  );
 }
 
-function dumpAll(storage: DurableObjectStorage): Record<string, unknown[]> {
+function dumpAll(db: Db): Record<string, unknown[]> {
   const out: Record<string, unknown[]> = {};
   for (const table of [...TABLES, 'schema_migrations']) {
-    out[table] = storage.sql.exec(`SELECT * FROM ${table} ORDER BY 1`).toArray();
+    out[table] = db.all(`SELECT * FROM ${table} ORDER BY 1`);
   }
   return out;
 }
 
-function columns(storage: DurableObjectStorage, table: string): string[] {
-  return storage.sql
-    .exec<{ name: string }>('SELECT name FROM pragma_table_info(?) ORDER BY cid', table)
-    .toArray()
-    .map((r) => r.name);
+function columns(db: Db, table: string): string[] {
+  return schemaAll<{ name: string }>(db, 'SELECT name FROM pragma_table_info(?) ORDER BY cid', table).map(
+    (r) => r.name,
+  );
 }
 
 const SEEDED_BY_MIGRATION_1 = ['indexing_status', 'backfill_generation', 'ingest_checkpoint'];
@@ -340,35 +355,34 @@ function expectMigration1Seeds(db: Db): void {
  * only a non-additive migration may do (ADR 0005 §3.2). Raising the
  * compatibility floor keeps the case too_new under the compatibility rule too.
  */
-function writeByIncompatibleNewerCode(storage: DurableObjectStorage, version: number): void {
-  storage.sql.exec('INSERT INTO schema_migrations(version, name) VALUES (?, ?)', version, 'from_newer_code');
-  storage.sql.exec('UPDATE schema_compat SET min_compatible_version = ?', version);
+function writeByIncompatibleNewerCode(db: Db, version: number): void {
+  db.run('INSERT INTO schema_migrations(version, name) VALUES (?, ?)', version, 'from_newer_code');
+  db.run('UPDATE schema_compat SET min_compatible_version = ?', version);
 }
 
 describe('migrate', () => {
   it('fresh DO applies migration 1 and seeds indexing_status/backfill_generation/ingest_checkpoint', async () => {
-    const stub = stubFor('migrate-fresh');
+    const db = stubFor('migrate-fresh');
 
-    // Through the harness Worker's default fetch: the constructor migrated.
-    // Deterministic: a fresh DO name, no clock and no network. scripts/test/
+    // Through the production readiness route: the open migrated.
+    // Deterministic: a fresh database, no clock and no network. scripts/test/
     // check-ts.test.ts deliberately inverts the next assertion in a disposable
     // copy (its negative control), so "expected 200 not to be 200" at this line
     // in a nested check-ts.sh run is that inversion working, not a flake here;
     // that test fails only if the nested run has other failures besides it.
-    const res = await exports.default.fetch('https://harness.test/harness/migrate-fresh');
+    const res = await readyOf('migrate-fresh', 'https://harness.test/harness/migrate-fresh');
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ migration: { status: 'ready', version: SCHEMA_VERSION } });
+    expect(await res.json()).toEqual({ status: 'ready' });
 
-    // The constructor applied every migration, migration 1 first, and
+    // The open applied every migration, migration 1 first, and
     // migration 1 seeded its three singleton rows; every other table starts
     // empty (schema_compat holds migration 2's row, schema-v2.test.ts).
-    await runInDurableObject(stub, (instance: HarnessDO, state) => {
-      expect(instance.migration).toEqual({ status: 'ready', version: SCHEMA_VERSION });
-      const db = doDb(state.storage);
+    {
+      expect(lastMigration('migrate-fresh')).toEqual({ status: 'ready', version: SCHEMA_VERSION });
       const ledger = db.all('SELECT version, name FROM schema_migrations ORDER BY version');
       expect(ledger).toEqual(MIGRATIONS.map((m) => ({ version: m.version, name: m.name })));
       expect(ledger[0]).toEqual({ version: 1, name: 'initial_workers_schema' });
-      const objects = appObjects(state.storage);
+      const objects = appObjects(db);
       const names = (type: string) => objects.filter((o) => o.type === type).map((o) => o.name);
       expect(EXPECTED_TABLES.filter((t) => !names('table').includes(t))).toEqual([]);
       expect(EXPECTED_INDEXES.filter((i) => !names('index').includes(i))).toEqual([]);
@@ -377,15 +391,15 @@ describe('migrate', () => {
         if ([...SEEDED_BY_MIGRATION_1, 'schema_migrations', 'schema_compat'].includes(table)) continue;
         expect([table, db.one<{ n: number }>(`SELECT count(*) AS n FROM ${table}`)]).toEqual([table, { n: 0 }]);
       }
-    });
+    }
 
-    // Migration 1 alone, applied to a wiped DO: the frozen DDL of ADR 0004 §6.1.
-    await runInDurableObject(stubFor('migrate-fresh-v1'), async (_instance: HarnessDO, state) => {
-      await state.storage.deleteAll();
-      expect(appObjects(state.storage)).toEqual([]);
-      expect(migrate(state.storage, MIGRATIONS.slice(0, 1))).toEqual({ status: 'ready', version: 1 });
+    // Migration 1 alone, applied to a wiped database: the frozen DDL of ADR 0004 §6.1.
+    {
+      const db = fileIndexes().reset('migrate-fresh-v1');
+      expect(appObjects(db)).toEqual([]);
+      expect(migrate(db, MIGRATIONS.slice(0, 1))).toEqual({ status: 'ready', version: 1 });
 
-      const objects = appObjects(state.storage);
+      const objects = appObjects(db);
       expect(objects.filter((o) => o.type === 'table').map((o) => o.name)).toEqual(EXPECTED_TABLES);
       expect(objects.filter((o) => o.type === 'index').map((o) => o.name)).toEqual(EXPECTED_INDEXES);
       expect(objects.some((o) => o.type === 'trigger' || o.type === 'view')).toBe(false);
@@ -398,10 +412,9 @@ describe('migrate', () => {
       expect(GOLDEN_DDL.filter((o) => o.type === 'table').map((o) => o.name)).toEqual(EXPECTED_TABLES);
       for (const o of objects.filter((x) => x.type === 'index')) {
         const table = GOLDEN_DDL.find((g) => g.name === o.name)?.sql.match(/ ON (\w+)\(/)?.[1] ?? '';
-        expect([o.name, indexShape(state.storage, table, o.name)]).toEqual([o.name, EXPECTED_INDEX_SHAPE[o.name]]);
+        expect([o.name, indexShape(db, table, o.name)]).toEqual([o.name, EXPECTED_INDEX_SHAPE[o.name]]);
       }
 
-      const db = doDb(state.storage);
       expect(db.all('SELECT * FROM schema_migrations')).toEqual([{ version: 1, name: 'initial_workers_schema' }]);
       expectMigration1Seeds(db);
       // Every other table starts empty.
@@ -411,7 +424,7 @@ describe('migrate', () => {
       }
 
       // Column sets from ADR §6.1 (extensions included, dropped columns absent).
-      expect(columns(state.storage, 'users')).toEqual([
+      expect(columns(db, 'users')).toEqual([
         'did',
         'handle',
         'handle_checked_at_ms',
@@ -428,10 +441,10 @@ describe('migrate', () => {
         'last_status_check_ms',
         'last_activity_ms',
       ]);
-      expect(columns(state.storage, 'scrobbles')).toContain('rkey');
-      expect(columns(state.storage, 'scrobbles')).not.toContain('confirmed');
-      expect(columns(state.storage, 'follows')).not.toContain('confirmed');
-      expect(columns(state.storage, 'record_state')).toEqual([
+      expect(columns(db, 'scrobbles')).toContain('rkey');
+      expect(columns(db, 'scrobbles')).not.toContain('confirmed');
+      expect(columns(db, 'follows')).not.toContain('confirmed');
+      expect(columns(db, 'record_state')).toEqual([
         'uri',
         'did',
         'collection',
@@ -441,8 +454,8 @@ describe('migrate', () => {
         'reason',
         'verified_at',
       ]);
-      expect(columns(state.storage, 'suppression')).toEqual(['did', 'suppressed_at', 'settings_uri', 'settings_rev']);
-      expect(columns(state.storage, 'repo_jobs')).toEqual([
+      expect(columns(db, 'suppression')).toEqual(['did', 'suppressed_at', 'settings_uri', 'settings_rev']);
+      expect(columns(db, 'repo_jobs')).toEqual([
         'did',
         'kind',
         'state',
@@ -458,7 +471,7 @@ describe('migrate', () => {
         'failure_code',
         'updated_at_ms',
       ]);
-      expect(columns(state.storage, 'ingest_checkpoint')).toEqual([
+      expect(columns(db, 'ingest_checkpoint')).toEqual([
         'stream',
         'cursor',
         'last_event_time_us',
@@ -470,7 +483,7 @@ describe('migrate', () => {
         'connected_at_ms',
         'updated_at_ms',
       ]);
-      expect(columns(state.storage, 'hints')).toEqual([
+      expect(columns(db, 'hints')).toEqual([
         'uri',
         'did',
         'collection',
@@ -483,7 +496,7 @@ describe('migrate', () => {
         'attempts',
         'last_error',
       ]);
-      expect(columns(state.storage, 'stats_cache')).toEqual(['did', 'win', 'lim', 'as_of', 'lower', 'version', 'body']);
+      expect(columns(db, 'stats_cache')).toEqual(['did', 'win', 'lim', 'as_of', 'lower', 'version', 'body']);
 
       // A new user is inactive until its first complete snapshot.
       db.run("INSERT INTO users(did, joined_at) VALUES ('did:plc:alice', '2026-01-15T12:00:00.000000000Z')");
@@ -506,74 +519,70 @@ describe('migrate', () => {
           "INSERT INTO hints(uri,did,collection,rkey,source,priority,receipt_time,due_at) VALUES ('at://x/c/r','did:plc:x','c','r','notify',0,'2026-01-15T12:00:00Z',0)",
         ),
       ).toThrow(/CHECK constraint failed/);
-    });
+    }
   });
 
   it('schema newer than code reports too_new', async () => {
-    const stub = stubFor('migrate-too-new');
+    const name = 'migrate-too-new';
     const newer = NEXT;
-    await runInDurableObject(stub, (_instance: HarnessDO, state) => {
-      writeByIncompatibleNewerCode(state.storage, newer);
-    });
-    await runInDurableObject(stub, (_instance: HarnessDO, state) => {
-      const before = { objects: appObjects(state.storage), data: dumpAll(state.storage) };
-      expect(migrate(state.storage)).toEqual({ status: 'too_new', version: newer });
+    writeByIncompatibleNewerCode(stubFor(name), newer);
+    {
+      const db = stubFor(name);
+      const before = { objects: appObjects(db), data: dumpAll(db) };
+      expect(migrate(db)).toEqual({ status: 'too_new', version: newer });
       // Nothing was touched: no DDL, no ledger rows, no data.
-      expect({ objects: appObjects(state.storage), data: dumpAll(state.storage) }).toEqual(before);
-    });
+      expect({ objects: appObjects(db), data: dumpAll(db) }).toEqual(before);
+    }
 
-    // A restarted DO (constructor migrate) reports too_new too, which
+    // A restarted process (migrate at open) reports too_new too, which
     // /health/ready turns into 503.
-    await evictDurableObject(stub);
-    await runInDurableObject(stub, (instance: HarnessDO) => {
-      expect(instance.migration).toEqual({ status: 'too_new', version: newer });
-    });
-    const res = await exports.default.fetch('https://harness.test/harness/migrate-too-new');
-    expect(await res.json()).toEqual({ migration: { status: 'too_new', version: newer } });
+    const db = fileIndexes().reopen(name);
+    expect(lastMigration(name)).toEqual({ status: 'too_new', version: newer });
+    expect(await indexCore(db).core.ready()).toEqual({ status: 'too_new', version: newer });
+    const res = await readyOf(name, 'https://harness.test/harness/migrate-too-new');
+    expect(res.status).toBe(503);
+    expect(await res.json()).toMatchObject({ error: { code: 'not_ready' } });
   });
 
   it('re-running migrate is a no-op', async () => {
-    const stub = stubFor('migrate-rerun');
-    await runInDurableObject(stub, (_instance: HarnessDO, state) => {
-      const db = doDb(state.storage);
+    const name = 'migrate-rerun';
+    {
+      const db = stubFor(name);
       db.run("INSERT INTO users(did, joined_at) VALUES ('did:plc:bob', '2026-01-15T12:00:00.000000000Z')");
       db.run('UPDATE backfill_generation SET last_generation = 7');
       db.run('UPDATE ingest_checkpoint SET pending_gap = 0, cursor = 1768478400000000');
 
-      const before = { objects: appObjects(state.storage), data: dumpAll(state.storage) };
-      expect(migrate(state.storage)).toEqual({ status: 'ready', version: SCHEMA_VERSION });
-      expect(migrate(state.storage)).toEqual({ status: 'ready', version: SCHEMA_VERSION });
-      expect({ objects: appObjects(state.storage), data: dumpAll(state.storage) }).toEqual(before);
+      const before = { objects: appObjects(db), data: dumpAll(db) };
+      expect(migrate(db)).toEqual({ status: 'ready', version: SCHEMA_VERSION });
+      expect(migrate(db)).toEqual({ status: 'ready', version: SCHEMA_VERSION });
+      expect({ objects: appObjects(db), data: dumpAll(db) }).toEqual(before);
       expect(db.all('SELECT * FROM schema_migrations ORDER BY version')).toEqual(LEDGER);
       // Seeds were not re-inserted over changed state.
       expect(db.all('SELECT * FROM indexing_status')).toHaveLength(1);
       expect(db.all('SELECT * FROM schema_compat')).toHaveLength(1);
       expect(db.one('SELECT last_generation FROM backfill_generation')).toEqual({ last_generation: 7 });
-    });
+    }
 
-    // The constructor's migrate after eviction is also a no-op on the same storage.
-    await evictDurableObject(stub);
-    await runInDurableObject(stub, (instance: HarnessDO, state) => {
-      expect(instance.migration).toEqual({ status: 'ready', version: SCHEMA_VERSION });
-      const db = doDb(state.storage);
+    // The migrate at reopen (a restart) is also a no-op on the same file.
+    {
+      const db = fileIndexes().reopen(name);
+      expect(lastMigration(name)).toEqual({ status: 'ready', version: SCHEMA_VERSION });
       expect(db.all('SELECT did FROM users')).toEqual([{ did: 'did:plc:bob' }]);
       expect(db.one('SELECT pending_gap, cursor FROM ingest_checkpoint')).toEqual({
         pending_gap: 0,
         cursor: 1768478400000000,
       });
-    });
+    }
   });
 
   it('a ledger written by different code is refused and rolls back', async () => {
-    const stub = stubFor('migrate-ledger-mismatch');
-    await runInDurableObject(stub, (_instance: HarnessDO, state) => {
-      state.storage.sql.exec("UPDATE schema_migrations SET name = 'someone_else' WHERE version = 1");
-      const before = dumpAll(state.storage);
-      const next = [...MIGRATIONS, { version: NEXT, name: 'next', statements: ['CREATE TABLE extra (x INTEGER)'] }];
-      expect(() => migrate(state.storage, next)).toThrow(MigrationLedgerError);
-      expect(appObjects(state.storage).some((o) => o.name === 'extra')).toBe(false);
-      expect(dumpAll(state.storage)).toEqual(before);
-    });
+    const db = stubFor('migrate-ledger-mismatch');
+    db.run("UPDATE schema_migrations SET name = 'someone_else' WHERE version = 1");
+    const before = dumpAll(db);
+    const next = [...MIGRATIONS, { version: NEXT, name: 'next', statements: ['CREATE TABLE extra (x INTEGER)'] }];
+    expect(() => migrate(db, next)).toThrow(MigrationLedgerError);
+    expect(appObjects(db).some((o) => o.name === 'extra')).toBe(false);
+    expect(dumpAll(db)).toEqual(before);
   });
 
   // M1.3.2/migration_rollback and M6.1.3/upgrade_failure: a valid statement
@@ -581,7 +590,7 @@ describe('migrate', () => {
   // one and the existing database (DDL and data) survives, also across a
   // restart with the broken code.
   it('a migration whose second statement is invalid persists neither statement and keeps the previous schema version', async () => {
-    const stub = stubFor('migrate-rollback');
+    const name = 'migrate-rollback';
     const broken = [
       ...MIGRATIONS,
       {
@@ -592,43 +601,44 @@ describe('migrate', () => {
       },
     ];
     let before: { objects: MasterRow[]; data: Record<string, unknown[]> } | undefined;
-    await runInDurableObject(stub, (instance: HarnessDO, state) => {
-      expect(instance.migration).toEqual({ status: 'ready', version: SCHEMA_VERSION });
-      const db = doDb(state.storage);
+    {
+      const db = stubFor(name);
+      expect(lastMigration(name)).toEqual({ status: 'ready', version: SCHEMA_VERSION });
       // Existing data that the failed upgrade must not delete.
       db.run("INSERT INTO users(did, joined_at) VALUES ('did:plc:alice', '2026-01-15T12:00:00.000000000Z')");
       db.run("INSERT INTO timers(name, due_at) VALUES ('drain', 5)");
-      before = { objects: appObjects(state.storage), data: dumpAll(state.storage) };
+      before = { objects: appObjects(db), data: dumpAll(db) };
 
-      expect(() => migrate(state.storage, broken)).toThrow(/syntax error|incomplete input/);
+      expect(() => migrate(db, broken)).toThrow(/syntax error|incomplete input/);
 
       // Neither the valid first statements nor the invalid one persisted.
-      expect(columns(state.storage, 'users')).not.toContain('nickname');
+      expect(columns(db, 'users')).not.toContain('nickname');
       expect(db.all("SELECT name FROM timers WHERE name = 'v2'")).toEqual([]);
       // The ledger still ends at SCHEMA_VERSION, and nothing else changed.
       expect(db.all('SELECT version, name FROM schema_migrations ORDER BY version')).toEqual(LEDGER);
-      expect({ objects: appObjects(state.storage), data: dumpAll(state.storage) }).toEqual(before);
+      expect({ objects: appObjects(db), data: dumpAll(db) }).toEqual(before);
       // The current code still sees a ready schema at its own version.
-      expect(migrate(state.storage)).toEqual({ status: 'ready', version: SCHEMA_VERSION });
-    });
+      expect(migrate(db)).toEqual({ status: 'ready', version: SCHEMA_VERSION });
+    }
 
-    // After a restart (eviction keeps storage) the database is the same and
+    // After a restart (reopening the same file) the database is the same and
     // the old code reports ready at its version.
-    await evictDurableObject(stub);
-    await runInDurableObject(stub, (instance: HarnessDO, state) => {
-      expect(instance.migration).toEqual({ status: 'ready', version: SCHEMA_VERSION });
-      expect({ objects: appObjects(state.storage), data: dumpAll(state.storage) }).toEqual(before);
+    {
+      const db = fileIndexes().reopen(name);
+      expect(lastMigration(name)).toEqual({ status: 'ready', version: SCHEMA_VERSION });
+      expect({ objects: appObjects(db), data: dumpAll(db) }).toEqual(before);
       // Retrying the broken upgrade fails the same way and still changes nothing.
-      expect(() => migrate(state.storage, broken)).toThrow(/syntax error|incomplete input/);
-      expect({ objects: appObjects(state.storage), data: dumpAll(state.storage) }).toEqual(before);
-    });
-    const res = await exports.default.fetch('https://harness.test/harness/migrate-rollback');
+      expect(() => migrate(db, broken)).toThrow(/syntax error|incomplete input/);
+      expect({ objects: appObjects(db), data: dumpAll(db) }).toEqual(before);
+    }
+    const res = await readyOf(name, 'https://harness.test/harness/migrate-rollback');
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ migration: { status: 'ready', version: SCHEMA_VERSION } });
+    expect(await res.json()).toEqual({ status: 'ready' });
 
-    // Control on a separate DO: with a valid second statement the same first
+    // Control on a separate database: with a valid second statement the same first
     // statement does persist, so the rollback above is what removed it.
-    await runInDurableObject(stubFor('migrate-rollback-control'), (_instance: HarnessDO, state) => {
+    {
+      const db = stubFor('migrate-rollback-control');
       const fixed = [
         ...MIGRATIONS,
         {
@@ -640,24 +650,22 @@ describe('migrate', () => {
           ],
         },
       ];
-      expect(migrate(state.storage, fixed)).toEqual({ status: 'ready', version: NEXT });
-      expect(columns(state.storage, 'users')).toContain('nickname');
-      expect(doDb(state.storage).all('SELECT name, due_at FROM timers')).toEqual([{ name: 'v2', due_at: 1 }]);
-    });
+      expect(migrate(db, fixed)).toEqual({ status: 'ready', version: NEXT });
+      expect(columns(db, 'users')).toContain('nickname');
+      expect(db.all('SELECT name, due_at FROM timers')).toEqual([{ name: 'v2', due_at: 1 }]);
+    }
   });
 
   it('a later migration applies once, atomically, after migration 1', async () => {
-    const stub = stubFor('migrate-next');
-    await runInDurableObject(stub, (_instance: HarnessDO, state) => {
+    {
+      const db = stubFor('migrate-next');
       const broken = [
         ...MIGRATIONS,
         { version: NEXT, name: 'next', statements: ['CREATE TABLE extra (x INTEGER)', 'THIS IS NOT SQL'] },
       ];
-      expect(() => migrate(state.storage, broken)).toThrow();
-      expect(appObjects(state.storage).some((o) => o.name === 'extra')).toBe(false);
-      expect(state.storage.sql.exec('SELECT max(version) AS v FROM schema_migrations').one()).toEqual({
-        v: SCHEMA_VERSION,
-      });
+      expect(() => migrate(db, broken)).toThrow();
+      expect(appObjects(db).some((o) => o.name === 'extra')).toBe(false);
+      expect(db.exec('SELECT max(version) AS v FROM schema_migrations')).toEqual([{ v: SCHEMA_VERSION }]);
 
       // The synthetic next migration also raises the compatibility floor (as
       // only a non-additive migration may, ADR 0005 §3.2), so the code that
@@ -670,16 +678,16 @@ describe('migrate', () => {
           statements: ['CREATE TABLE extra (x INTEGER)', `UPDATE schema_compat SET min_compatible_version = ${NEXT}`],
         },
       ];
-      expect(migrate(state.storage, good)).toEqual({ status: 'ready', version: NEXT });
-      expect(migrate(state.storage, good)).toEqual({ status: 'ready', version: NEXT });
-      expect(state.storage.sql.exec('SELECT version, name FROM schema_migrations ORDER BY version').toArray()).toEqual([
+      expect(migrate(db, good)).toEqual({ status: 'ready', version: NEXT });
+      expect(migrate(db, good)).toEqual({ status: 'ready', version: NEXT });
+      expect(db.exec('SELECT version, name FROM schema_migrations ORDER BY version')).toEqual([
         ...LEDGER,
         { version: NEXT, name: 'next' },
       ]);
       expect(LEDGER[0]).toEqual({ version: 1, name: 'initial_workers_schema' });
       // Code that only knows MIGRATIONS now sees a newer schema.
-      expect(migrate(state.storage)).toEqual({ status: 'too_new', version: NEXT });
-    });
+      expect(migrate(db)).toEqual({ status: 'too_new', version: NEXT });
+    }
   });
 
   // ADR 0005 §3.2, §6.4 (N1-10): migration 2 makes the code version 2, and a
@@ -691,15 +699,15 @@ describe('migrate', () => {
       [2, 'node_schema'],
     ]);
 
-    const stub = stubFor('migrate-v2-ready');
-    const res = await exports.default.fetch('https://harness.test/harness/migrate-v2-ready');
+    const name = 'migrate-v2-ready';
+    const res = await readyOf(name, 'https://harness.test/harness/migrate-v2-ready');
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ migration: { status: 'ready', version: 2 } });
+    expect(await res.json()).toEqual({ status: 'ready' });
 
     let before: { objects: MasterRow[]; data: Record<string, unknown[]> } | undefined;
-    await runInDurableObject(stub, (instance: HarnessDO, state) => {
-      expect(instance.migration).toEqual({ status: 'ready', version: 2 });
-      const db = doDb(state.storage);
+    {
+      expect(lastMigration(name)).toEqual({ status: 'ready', version: 2 });
+      const db = stubFor(name);
       expect(db.all('SELECT version, name FROM schema_migrations ORDER BY version')).toEqual([
         { version: 1, name: 'initial_workers_schema' },
         { version: 2, name: 'node_schema' },
@@ -709,19 +717,18 @@ describe('migrate', () => {
       db.run(
         "INSERT INTO accounts(did, username, created_at_ms, updated_at_ms) VALUES ('did:plc:alice', 'alice.test', 1, 1)",
       );
-      before = { objects: appObjects(state.storage), data: dumpAll(state.storage) };
-      expect(migrate(state.storage)).toEqual({ status: 'ready', version: 2 });
-      expect({ objects: appObjects(state.storage), data: dumpAll(state.storage) }).toEqual(before);
-    });
+      before = { objects: appObjects(db), data: dumpAll(db) };
+      expect(migrate(db)).toEqual({ status: 'ready', version: 2 });
+      expect({ objects: appObjects(db), data: dumpAll(db) }).toEqual(before);
+    }
 
-    // Reopened by the same code (eviction keeps storage): ready at 2, untouched.
-    await evictDurableObject(stub);
-    await runInDurableObject(stub, (instance: HarnessDO, state) => {
-      expect(instance.migration).toEqual({ status: 'ready', version: 2 });
-      expect({ objects: appObjects(state.storage), data: dumpAll(state.storage) }).toEqual(before);
-      expect(doDb(state.storage).all('SELECT did, username FROM accounts')).toEqual([
-        { did: 'did:plc:alice', username: 'alice.test' },
-      ]);
-    });
+    // Reopened by the same code (a restart keeps the file): ready at 2, untouched.
+    {
+      const db = fileIndexes().reopen(name);
+      expect(lastMigration(name)).toEqual({ status: 'ready', version: 2 });
+      expect(fileIndexes().migrations(name)).toHaveLength(2);
+      expect({ objects: appObjects(db), data: dumpAll(db) }).toEqual(before);
+      expect(db.all('SELECT did, username FROM accounts')).toEqual([{ did: 'did:plc:alice', username: 'alice.test' }]);
+    }
   });
 });

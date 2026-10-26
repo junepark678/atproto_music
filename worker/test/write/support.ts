@@ -5,8 +5,16 @@
 // records, deterministic fixture keys). A RecordProof is built from the
 // repository's head and its MST lookup, the same values the W2-03 verifier
 // returns after checking that CAR; nothing here invents a CID or a rev.
+//
+// Node (ADR 0005 §15.1, N4-04): this module no longer imports
+// `cloudflare:workers`. Its exported API is unchanged: `stubFor(name)` still
+// returns the harness Durable Object stub of the `cloudflare:*` test shim
+// (the very module that id resolves to in worker-modules), for the suites
+// that N4-05 and N4-06 de-shim; the de-shimmed suites use
+// worker/test/node/support/with-index.ts. The shim is loaded only where it
+// can run (Node); a host without it (the workerd composition project, which
+// never calls stubFor) gets a stubFor that throws.
 
-import { env } from 'cloudflare:workers';
 import { fixtureKeys } from '@atmusic/atproto/test-support/keys';
 import { SignedRepo } from '@atmusic/atproto/test-support/signed-repo';
 import type { RecordProof } from '@atmusic/atproto/verify/types';
@@ -31,7 +39,22 @@ export const NOW_NS = fromMs(NOW_MS);
 export const NOW_STORAGE = toStorage(NOW_NS);
 export const OPTS: ApplyOptions = { receiptNs: NOW_NS, prefix: PREFIX, nowNs: NOW_NS };
 
-export const stubFor = (name: string) => env.HARNESS.get(env.HARNESS.idFromName(name));
+type ShimEnv = typeof import('../node/support/cloudflare-workers-shim')['env'];
+
+/** The shim's harness env on Node; null on a host where the shim cannot load (workerd). */
+const shimEnv: ShimEnv | null = await (async () => {
+  if ((globalThis as { navigator?: { userAgent?: string } }).navigator?.userAgent === 'Cloudflare-Workers') return null;
+  try {
+    return (await import('../node/support/cloudflare-workers-shim')).env;
+  } catch {
+    return null;
+  }
+})();
+
+export const stubFor = (name: string) => {
+  if (shimEnv === null) throw new Error('stubFor needs the cloudflare:* test shim (the worker-modules project)');
+  return shimEnv.HARNESS.get(shimEnv.HARNESS.idFromName(name));
+};
 
 type Name = 'alice' | 'bob' | 'carol';
 const DIDS: Record<Name, string> = { alice: ALICE, bob: BOB, carol: CAROL };

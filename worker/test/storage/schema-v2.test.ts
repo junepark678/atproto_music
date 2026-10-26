@@ -1,16 +1,17 @@
 // N1-10: migration 2, the complete Node schema (ADR 0005 §3.2, §6.4, §8.3,
-// §14.5), on real DO SQLite in the harness DO (the DDL is the one node:sqlite
-// runs; N2-02 ports this file to the Node harness).
+// §14.5), on node:sqlite through the production adapter: each name is a
+// migrated file of this test file's IndexSet (worker/test/node/support/
+// with-index.ts, N4-04). Schema introspection (`pragma_table_info` and the
+// other schema pragma functions, which the adapter's authorizer denies like
+// every PRAGMA) is answered by `schemaAll` from a schema-only replica.
 //
 // Expectations are hardcoded from ADR 0005 §6.4, not derived from schema.ts.
 // The column lists are typed against worker/src/app/rows.ts, so a row type
 // that drifts from the table fails typecheck and the table that drifts from
 // the ADR fails here.
 
-import { runInDurableObject } from 'cloudflare:test';
-import { env } from 'cloudflare:workers';
 import { fixedClock } from '@atmusic/core/test-support/clock';
-import { describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it } from 'vitest';
 import fixture from '../../../tests/fixtures/read_models.json' with { type: 'json' };
 import type {
   AccountRow,
@@ -39,7 +40,7 @@ import type {
   ScrobbleV2Columns,
   WebSessionRow,
 } from '../../src/app/rows';
-import { type Db, doDb, type SqlParam } from '../../src/do/db';
+import type { Db, SqlParam } from '../../src/do/db';
 import { migrate } from '../../src/do/migrate';
 import { history } from '../../src/do/read/history';
 import {
@@ -55,11 +56,10 @@ import {
   TABLE_CLASS,
   TABLES,
 } from '../../src/do/schema';
-import type { HarnessDO } from '../harness/harness-do';
-import { makeLocalIndex } from '../harness/local-index';
+import { closeFileIndexes, fileIndexes, nodeIndex, schemaAll } from '../node/support/with-index';
 import { readFixture } from '../read/scrobble-read-support';
 
-const stubFor = (name: string) => env.HARNESS.get(env.HARNESS.idFromName(name));
+afterAll(() => closeFileIndexes());
 
 const T0 = Date.parse('2026-01-15T12:00:00Z');
 const TS = '2026-01-15T12:00:00.000000000Z';
@@ -556,45 +556,48 @@ const tableNames = (db: Db) =>
     .map((o) => o.name);
 
 function columnsOf(db: Db, table: string): string[] {
-  return db.all<{ name: string }>('SELECT name FROM pragma_table_info(?) ORDER BY cid', table).map((r) => r.name);
+  return schemaAll<{ name: string }>(db, 'SELECT name FROM pragma_table_info(?) ORDER BY cid', table).map(
+    (r) => r.name,
+  );
 }
 
 function pkOf(db: Db, table: string): string[] {
-  return db
-    .all<{ name: string }>('SELECT name FROM pragma_table_info(?) WHERE pk > 0 ORDER BY pk', table)
-    .map((r) => r.name);
+  return schemaAll<{ name: string }>(db, 'SELECT name FROM pragma_table_info(?) WHERE pk > 0 ORDER BY pk', table).map(
+    (r) => r.name,
+  );
 }
 
 function uniqueSets(db: Db, table: string): string[][] {
-  return db
-    .all<{ name: string }>("SELECT name FROM pragma_index_list(?) WHERE origin = 'u' ORDER BY name", table)
-    .map((ix) =>
-      db.all<{ name: string }>('SELECT name FROM pragma_index_info(?) ORDER BY seqno', ix.name).map((c) => c.name),
-    );
+  return schemaAll<{ name: string }>(
+    db,
+    "SELECT name FROM pragma_index_list(?) WHERE origin = 'u' ORDER BY name",
+    table,
+  ).map((ix) =>
+    schemaAll<{ name: string }>(db, 'SELECT name FROM pragma_index_info(?) ORDER BY seqno', ix.name).map((c) => c.name),
+  );
 }
 
 function indexShape(db: Db, table: string, index: string) {
-  const list = db.one<{ unique: number; partial: number }>(
+  const [list] = schemaAll<{ unique: number; partial: number }>(
+    db,
     'SELECT "unique", partial FROM pragma_index_list(?) WHERE name = ?',
     table,
     index,
   );
-  const keys = db
-    .all<{ name: string; desc: number }>(
-      'SELECT name, "desc" FROM pragma_index_xinfo(?) WHERE key = 1 ORDER BY seqno',
-      index,
-    )
-    .map((c): [string, number] => [c.name, c.desc]);
+  const keys = schemaAll<{ name: string; desc: number }>(
+    db,
+    'SELECT name, "desc" FROM pragma_index_xinfo(?) WHERE key = 1 ORDER BY seqno',
+    index,
+  ).map((c): [string, number] => [c.name, c.desc]);
   return [table, list?.unique, list?.partial, keys];
 }
 
 function foreignKeys(db: Db, table: string): string[][] {
-  return db
-    .all<{ from: string; table: string; to: string; on_delete: string }>(
-      'SELECT "from", "table", "to", on_delete FROM pragma_foreign_key_list(?)',
-      table,
-    )
-    .map((f) => [table, f.from, f.table, f.to, f.on_delete]);
+  return schemaAll<{ from: string; table: string; to: string; on_delete: string }>(
+    db,
+    'SELECT "from", "table", "to", on_delete FROM pragma_foreign_key_list(?)',
+    table,
+  ).map((f) => [table, f.from, f.table, f.to, f.on_delete]);
 }
 
 function insert(db: Db, table: string, row: Record<string, SqlParam>): void {
@@ -611,20 +614,18 @@ function plan(db: Db, tag: string, sql: string, ...params: SqlParam[]): string[]
   return db.all<{ detail: string }>(`EXPLAIN QUERY PLAN /* ${tag} */ ${sql}`, ...params).map((r) => r.detail);
 }
 
-function inDb<T>(name: string, fn: (db: Db) => T): Promise<T> {
-  return runInDurableObject(stubFor(name), (_i: HarnessDO, s: DurableObjectState) => fn(doDb(s.storage)));
+/** Runs `fn` over the named database of this test file (created and migrated on first use). */
+async function inDb<T>(name: string, fn: (db: Db) => T): Promise<T> {
+  return fn(fileIndexes().get(name));
 }
 
-/** Wipe the DO's storage and apply migration 1 only: a database written by version-1 code. */
-function resetToV1(name: string): Promise<unknown> {
-  return runInDurableObject(stubFor(name), async (_i: HarnessDO, s: DurableObjectState) => {
-    await s.storage.deleteAll();
-    return migrate(s.storage, MIGRATIONS.slice(0, 1));
-  });
+/** Wipe the named database and apply migration 1 only: a database written by version-1 code. */
+async function resetToV1(name: string): Promise<unknown> {
+  return migrate(fileIndexes().reset(name), MIGRATIONS.slice(0, 1));
 }
 
-function migrateToLatest(name: string): Promise<unknown> {
-  return runInDurableObject(stubFor(name), (_i: HarnessDO, s: DurableObjectState) => migrate(s.storage));
+async function migrateToLatest(name: string): Promise<unknown> {
+  return migrate(fileIndexes().get(name));
 }
 
 /** Every row of `table`, each column as SQLite's quote() literal (exact bytes and type), in rowid order. */
@@ -1073,7 +1074,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
     expect(after.newTablesEmpty).toEqual([]);
 
     // The production history module still reads the migrated rows.
-    const migrated = makeLocalIndex({ stub: stubFor(name), clock: fixedClock() }, { history });
+    const migrated = nodeIndex(fileIndexes().get(name), { history }, { clock: fixedClock() });
     const page = await migrated.history({ did: fixture.users.Alice.did, limit: 50 });
     expect(page.rows.map((r) => r.rkey)).toEqual(fixture.expected.aliceHistory);
   });
