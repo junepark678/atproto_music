@@ -199,7 +199,7 @@ it('bisection halves and singles are budget-checked: a bisected import never spe
     expect(h.writers.sent.filter((s) => s.nsid === GET).map((s) => s.status)).toEqual(Array(4).fill(200));
     expect(await remoteRecords(h.kit, 'Alice', SCROBBLE)).toHaveLength(200);
   });
-});
+}, 60_000); // hundreds of fake-PDS round trips; the nested check-ts control runs it under the full suite's load
 
 it('a due live operation always runs before an earlier-due import operation', async () => {
   await withHarness(async (h) => {

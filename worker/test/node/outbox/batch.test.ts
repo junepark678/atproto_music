@@ -181,7 +181,7 @@ it('a 200-write batch whose answer was lost after the PDS committed is reconcile
     },
     { random: zeroJitter() },
   );
-});
+}, 60_000); // hundreds of fake-PDS round trips; the nested check-ts control runs it under the full suite's load
 
 it('PdsWriter requests reach the fake PDS through policyFetch, and a 3xx from the PDS is a retryable TransportError redirect, never followed', async () => {
   await withHarness(
