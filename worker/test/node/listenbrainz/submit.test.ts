@@ -36,12 +36,25 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { MemoryRevocations } from '../../../src/app/revocations';
 import type { NowPlayingRow, OperationRow } from '../../../src/app/rows';
 import { ensureAccount } from '../../../src/credentials/accounts';
-import { createLbToken } from '../../../src/credentials/lb-tokens';
-import type { RouteDef } from '../../../src/http/types';
+import { createLbToken, verifyLbToken } from '../../../src/credentials/lb-tokens';
+import type { ModuleDeps } from '../../../src/do/contracts';
+import type { SqlParam } from '../../../src/do/db';
+import { need, type RequestCtx, type RouteDef } from '../../../src/http/types';
+import { parseAuthorization } from '../../../src/listenbrainz/auth-header';
 import { LB_RATE_LIMITED_MESSAGE } from '../../../src/listenbrainz/errors';
+import { refusal } from '../../../src/listenbrainz/limiter';
 import { RATE_LIMIT_EXPOSE_HEADERS } from '../../../src/listenbrainz/rate-headers';
-import { createSubmitRoutes, LB_DAILY_CAP_MESSAGE } from '../../../src/listenbrainz/submit';
-import { createTokenRoutes } from '../../../src/listenbrainz/token-routes';
+import {
+  createSubmitRoutes,
+  IGNORED_LISTENS_DAILY_LIMIT,
+  LB_DAILY_CAP_MESSAGE,
+} from '../../../src/listenbrainz/submit';
+import {
+  createTokenRoutes,
+  type LbDispatchAuth,
+  type LbModuleRouteDef,
+  listenBrainzLimiterFor,
+} from '../../../src/listenbrainz/token-routes';
 import { type BoundAddress, createServer } from '../../../src/node/http-bridge';
 import { bindPolicyFetch, createPolicyFetch } from '../../../src/node/policy-fetch';
 import { PDS_WRITER_CAPS } from '../../../src/outbox/pds-writer';
@@ -602,5 +615,280 @@ describe('POST /1/submit-listens (ADR §8.3)', () => {
     const remote = await kit.repos.Alice.getRecord(SCROBBLE, sent.rkey!);
     expect(remote).not.toBeNull();
     expect(Date.parse((remote!.value as { createdAt: string }).createdAt)).toBe(dueMs);
+  }, 30_000);
+});
+
+// ---------------------------------------------------------------------------
+// ignored_listens is idempotent and bounded (ADR §8.3, Q11).
+
+describe('ignored listens on resend (ADR §8.3)', () => {
+  const LONG = 'é'.repeat(300);
+  const ignoredCount = (r: Rig) => r.count('SELECT count(*) AS n FROM ignored_listens WHERE did = ?', ALICE);
+
+  it('resending the 3-listen batch, a duplicate in one request and a retry after the daily-cap 429 keep one ignored_listens row', async () => {
+    const r = await rig();
+    const token = r.user(ALICE, 'alice.example.com');
+    const batch = body('import', [listen(0), listen(1, { artist: LONG, track: 'Long' }), listen(2)]);
+
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const res = await submit(r.app, token, batch);
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ status: 'ok' });
+    }
+    expect(r.ops(ALICE).length).toBe(2);
+    expect(ignoredCount(r)).toBe(1);
+
+    // The same ignored listen twice in one request is recorded once; a
+    // different second or reason is a different listen.
+    const twice = await submit(
+      r.app,
+      token,
+      body('import', [
+        listen(1, { artist: LONG, track: 'Long' }),
+        listen(1, { artist: LONG, track: 'Long' }),
+        listen(3, { artist: LONG, track: 'Long' }),
+        listen(1, { artist: 'Short', track: LONG }),
+      ]),
+    );
+    expect(twice.status).toBe(200);
+    expect(
+      r.app.db
+        .all<{ reason: string; listened_at: string }>(
+          'SELECT reason, listened_at FROM ignored_listens WHERE did = ? ORDER BY id',
+          ALICE,
+        )
+        .map((row) => [row.reason, row.listened_at]),
+    ).toEqual([
+      ['artist_invalid', '2026-01-15T11:58:59.000000000Z'],
+      ['artist_invalid', '2026-01-15T11:58:57.000000000Z'],
+      ['track_invalid', '2026-01-15T11:58:59.000000000Z'],
+    ]);
+
+    // Over the daily cap: the 429 still records the ignored listen once, and a retry adds nothing.
+    r.app.db.run('UPDATE accounts SET daily_listen_cap = 3 WHERE did = ?', ALICE);
+    const capped = body('import', [listen(10), listen(11, { artist: LONG, track: 'Capped' }), listen(12)]);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const res = await submit(r.app, token, capped);
+      expect(res.status).toBe(429);
+      expect(await res.json()).toEqual({ code: 429, error: LB_DAILY_CAP_MESSAGE });
+    }
+    expect(r.ops(ALICE).length).toBe(3);
+    expect(ignoredCount(r)).toBe(4);
+    expect(
+      r.count('SELECT count(*) AS n FROM ignored_listens WHERE did = ? AND track_preview = ?', ALICE, 'Capped'),
+    ).toBe(1);
+  });
+
+  it('at most IGNORED_LISTENS_DAILY_LIMIT ignored rows are recorded per DID in 24 h; past it the answer is still 200', async () => {
+    expect(IGNORED_LISTENS_DAILY_LIMIT).toBe(3000);
+    const r = await rig();
+    const token = r.user(ALICE, 'alice.example.com');
+    const bobToken = r.user(BOB, 'bob.example.com');
+    const ignoredBatch = (from: number, n: number) =>
+      body(
+        'import',
+        Array.from({ length: n }, (_, k) => listen(from + k, { artist: `${from + k}-${LONG}`, track: 'Long' })),
+      );
+
+    for (const from of [0, 1000, 2000]) {
+      expect((await submit(r.app, token, ignoredBatch(from, 1000))).status).toBe(200);
+    }
+    expect(ignoredCount(r)).toBe(3000);
+    const past = await submit(r.app, token, ignoredBatch(3000, 1000));
+    expect(past.status).toBe(200);
+    expect(await past.json()).toEqual({ status: 'ok' });
+    expect(ignoredCount(r)).toBe(3000);
+    expect(r.ops(ALICE).length).toBe(0);
+    // The bound is per DID.
+    expect((await submit(r.app, bobToken, ignoredBatch(0, 2))).status).toBe(200);
+    expect(r.count('SELECT count(*) AS n FROM ignored_listens WHERE did = ?', BOB)).toBe(2);
+
+    // The window is rolling.
+    r.clock.advance(86_400_000);
+    expect((await submit(r.app, token, ignoredBatch(5000, 2))).status).toBe(200);
+    expect(ignoredCount(r)).toBe(3002);
+  }, 60_000);
+});
+
+// ---------------------------------------------------------------------------
+// Mounted through the /1/ dispatcher (N3-06 routes.ts `registry`): the
+// dispatcher verifies and charges once; the routes of this package take its
+// outcome and neither look the token up again nor charge a limiter.
+
+describe('the routes under the /1/ dispatcher (ADR §8.7)', () => {
+  /** The contract of N3-06's router: authenticate, charge the composition's limiter, answer `auth: required`, run. */
+  function dispatcher(
+    registry: readonly LbModuleRouteDef[],
+    lookups: { n: number },
+  ): { routes: RouteDef[]; countingDeps(deps: ModuleDeps): ModuleDeps } {
+    const counted = new WeakMap<ModuleDeps, ModuleDeps>();
+    /** The composition's deps with a db that counts token lookups (one object per app, so one limiter). */
+    const countingDeps = (deps: ModuleDeps): ModuleDeps => {
+      let wrapped = counted.get(deps);
+      if (wrapped === undefined) {
+        const db = deps.db;
+        const count = (sql: string) => {
+          if (sql.includes('FROM lb_tokens WHERE hash')) lookups.n++;
+        };
+        wrapped = {
+          ...deps,
+          db: {
+            all<T>(sql: string, ...p: SqlParam[]): T[] {
+              count(sql);
+              return db.all<T>(sql, ...p);
+            },
+            one<T>(sql: string, ...p: SqlParam[]): T | null {
+              count(sql);
+              return db.one<T>(sql, ...p);
+            },
+            run: (sql, ...p) => db.run(sql, ...p),
+            tx: (fn) => db.tx(fn),
+          },
+        };
+        counted.set(deps, wrapped);
+      }
+      return wrapped;
+    };
+    const read: LbModuleRouteDef = {
+      method: 'GET',
+      pattern: '/1/user/{user}/listen-count',
+      handler: async (_req, _ctx, _params, lb) =>
+        new Response(JSON.stringify({ payload: { count: 0 } }), { headers: lb!.limit.headers }),
+    };
+    const routes = [...registry, read]
+      .filter((route) => route.method !== 'OPTIONS')
+      .map((route) => ({
+        method: route.method,
+        pattern: route.pattern,
+        handler: async (req: Request, ctx: RequestCtx, params: Record<string, string>) => {
+          const inner: RequestCtx = { ...ctx, deps: countingDeps(need(ctx, 'deps')) };
+          const m = need(inner, 'deps');
+          const parsed = parseAuthorization(req.headers.get('authorization'));
+          const token = parsed.ok ? verifyLbToken(m, parsed.token) : null;
+          const auth: LbDispatchAuth = !parsed.ok
+            ? { status: 'absent', failure: parsed.failure }
+            : token === null
+              ? { status: 'invalid' }
+              : { status: 'valid', token };
+          const limit = listenBrainzLimiterFor(inner).limit(
+            { clientIp: inner.clientIp },
+            auth.status === 'valid' ? { status: 'valid', tokenId: auth.token.id } : { status: auth.status },
+          );
+          if (!limit.allowed) return refusal(limit);
+          if (route.auth === 'required' && auth.status !== 'valid') {
+            return new Response('dispatcher 401', { status: 401, headers: limit.headers });
+          }
+          return route.handler(req, inner, params, { auth, limit });
+        },
+      }));
+    return { routes, countingDeps };
+  }
+
+  it('60 reads then a submit, validate-token, playing-now/delete and delete-listen leave X-RateLimit-Remaining at 100 − (requests so far), with one token lookup per request', async () => {
+    const lookups = { n: 0 };
+    const registry = [...createSubmitRoutes(), ...createTokenRoutes()];
+    expect(registry.filter((route) => route.method !== 'OPTIONS').map((route) => [route.pattern, route.auth])).toEqual([
+      ['/1/submit-listens', 'required'],
+      ['/1/validate-token', 'optional'],
+      ['/1/delete-listen', 'required'],
+      ['/1/playing-now/delete', 'required'],
+    ]);
+    const clock = fixedClock();
+    const mounted = dispatcher(registry, lookups);
+    const app = await startApp({ routes: mounted.routes, clock, env: OPEN_GATE });
+    app.db.run(
+      "INSERT INTO users (did, handle, joined_at) VALUES (?, 'alice.example.com', '2026-01-15T12:00:00.000000000Z')",
+      ALICE,
+    );
+    const deps = { db: app.db, clock, random: seededRandom(0xd15), revocations: new MemoryRevocations(clock) };
+    ensureAccount(deps, { did: ALICE, verifiedHandle: 'alice.example.com' });
+    const token = createLbToken(deps, { did: ALICE, label: 'test' }).token;
+    const authorization = `Token ${token}`;
+
+    const N = 60;
+    for (let i = 1; i <= N; i++) {
+      const res = await app.fetch('/1/user/alice/listen-count', { headers: { authorization } });
+      expect(res.status).toBe(200);
+      expect(res.headers.get('x-ratelimit-remaining')).toBe(String(100 - i));
+    }
+    expect(lookups.n).toBe(N);
+
+    const submitted = await submit(app, token, body('single', [listen(0)]));
+    expect(submitted.status).toBe(200);
+    expect(await submitted.json()).toEqual({ status: 'ok' });
+    expect(submitted.headers.get('x-ratelimit-limit')).toBe('100');
+    expect(submitted.headers.get('x-ratelimit-remaining')).toBe(String(100 - (N + 1)));
+    expect(lookups.n).toBe(N + 1);
+    expect(app.db.one<{ n: number }>('SELECT count(*) AS n FROM operations WHERE did = ?', ALICE)!.n).toBe(1);
+
+    const validated = await app.fetch('/1/validate-token', { headers: { authorization } });
+    expect(validated.status).toBe(200);
+    expect(await validated.json()).toEqual({
+      code: 200,
+      message: 'Token valid.',
+      valid: true,
+      user_name: 'alice.example.com',
+    });
+    expect(validated.headers.get('x-ratelimit-remaining')).toBe(String(100 - (N + 2)));
+    expect(lookups.n).toBe(N + 2);
+
+    const cleared = await app.fetch('/1/playing-now/delete', {
+      method: 'POST',
+      headers: { authorization, 'content-type': 'application/json' },
+      body: '{}',
+    });
+    expect(cleared.status).toBe(200);
+    expect(await cleared.json()).toEqual({ status: 'ok', message: 'Playing now already cleared' });
+    expect(cleared.headers.get('x-ratelimit-remaining')).toBe(String(100 - (N + 3)));
+
+    const deleted = await app.fetch('/1/delete-listen', {
+      method: 'POST',
+      headers: { authorization, 'content-type': 'application/json' },
+      body: JSON.stringify({ listened_at: NOW_S - 60, recording_msid: '00000000-0000-4000-8000-000000000000' }),
+    });
+    expect(deleted.status).toBe(200);
+    expect(await deleted.json()).toEqual({ status: 'ok' });
+    expect(deleted.headers.get('x-ratelimit-remaining')).toBe(String(100 - (N + 4)));
+    expect(lookups.n).toBe(N + 4);
+
+    // A ?token= candidate is not the dispatcher's, so validate-token looks it
+    // up itself; the request is still charged once (per IP: no header token).
+    const byQuery = await app.fetch(`/1/validate-token?token=${token}`);
+    expect(byQuery.status).toBe(200);
+    expect(((await byQuery.json()) as { valid: unknown }).valid).toBe(true);
+    expect(byQuery.headers.get('x-ratelimit-limit')).toBe('30');
+    expect(byQuery.headers.get('x-ratelimit-remaining')).toBe('29');
+    expect(lookups.n).toBe(N + 5);
+
+    // The token bucket was charged once per request: the next read sees it.
+    const next = await app.fetch('/1/user/alice/listen-count', { headers: { authorization } });
+    expect(next.headers.get('x-ratelimit-remaining')).toBe(String(100 - (N + 5)));
+
+    // The dispatcher answers `auth: required` itself; a route reached anyway
+    // without a live token answers its 401 from the outcome, with no lookup.
+    expect((await submit(app, null, body('single', [listen(1)]))).status).toBe(401);
+    const before = lookups.n;
+    const [submitRoute] = createSubmitRoutes();
+    const directCtx = { deps: mounted.countingDeps(app.composed.core.deps), clientIp: '127.0.0.1' } as RequestCtx;
+    const limiter = listenBrainzLimiterFor(directCtx);
+    const limit = limiter.limit({ clientIp: '127.0.0.1' }, { status: 'invalid' });
+    const direct = await submitRoute!.handler(
+      new Request('https://music.example.test/1/submit-listens', {
+        method: 'POST',
+        headers: { authorization: 'Token 00000000-0000-4000-8000-000000000000' },
+        body: body('single', [listen(1)]),
+      }),
+      directCtx,
+      {},
+      { auth: { status: 'invalid' }, limit },
+    );
+    expect(direct.status).toBe(401);
+    expect(await direct.json()).toEqual({ code: 401, error: 'Invalid authorization token.' });
+    expect(direct.headers.get('x-ratelimit-remaining')).toBe(limit.headers['X-RateLimit-Remaining']);
+    expect(lookups.n).toBe(before);
+    // Nothing else was charged: the per-IP bucket moved by the one charge above.
+    const after = limiter.limit({ clientIp: '127.0.0.1' }, { status: 'invalid' });
+    expect(Number(after.headers['X-RateLimit-Remaining'])).toBe(Number(limit.headers['X-RateLimit-Remaining']) - 1);
+    expect(app.db.one<{ n: number }>('SELECT count(*) AS n FROM operations WHERE did = ?', ALICE)!.n).toBe(1);
   }, 30_000);
 });

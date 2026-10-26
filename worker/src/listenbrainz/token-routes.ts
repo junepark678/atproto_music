@@ -21,6 +21,22 @@
 // /1/ route of one app shares them and two test apps never do. A route factory
 // may be given another limiter source (`LbRouteOptions.limiter`).
 //
+// **Under the /1/ dispatcher (N3-06 routes.ts, `registry`).** The dispatcher
+// authenticates and charges every /1/ request before the handler runs and
+// hands the outcome to the handler as its fourth argument (`LbDispatch`, the
+// same shape as routes.ts `LbRequest`: `auth`, the token check, and `limit`,
+// the allowed decision). When that argument is present a route of this module
+// neither verifies the Authorization header again nor charges any limiter: it
+// takes the token from `lb.auth` and the X-RateLimit-* set from `lb.limit`, so
+// each request is verified once and charged once, to the bucket that enforces
+// §8.7 and whose headers the client sees. The routes that need a token are
+// marked `auth: 'required'`, so the dispatcher answers their 401 itself;
+// should one still be reached without a live token, it answers the same 401.
+// `lbGuard`'s own lookup and charge run only when a route is mounted without
+// the dispatcher (no fourth argument). validate-token reuses `lb.auth` when
+// its candidate is the header's token (a `token ` header is parsed the same
+// way by both rules) and looks up only a `?token=` or `Bearer` candidate.
+//
 // **validate-token** reads the token as ListenBrainz does
 // (`validateTokenCandidate`: a header starting with `token `, else `?token=`).
 // Valid → 200 `{"code":200,"message":"Token valid.","valid":true,"user_name"}`;
@@ -65,7 +81,13 @@ import { clearNowPlaying } from '../do/read/now-playing';
 import { need, type RequestCtx, type RouteDef } from '../http/types';
 import { enqueueScrobbleDelete, removeScrobbleCreate } from '../outbox/delete-ops';
 import { outboxCollections } from '../outbox/operations';
-import { LB_AUTH_MESSAGES, parseAuthorization, unauthorized, validateTokenCandidate } from './auth-header';
+import {
+  type AuthHeaderFailure,
+  LB_AUTH_MESSAGES,
+  parseAuthorization,
+  unauthorized,
+  validateTokenCandidate,
+} from './auth-header';
 import { LB_UNAVAILABLE_MESSAGE, lbError, lbJson, lbPreflight } from './errors';
 import { type LimitDecision, ListenBrainzLimiter, refusal, type TokenResult } from './limiter';
 import { isPythonUuid, pyInt } from './validate';
@@ -87,8 +109,31 @@ export function listenBrainzLimiterFor(ctx: RequestCtx): ListenBrainzLimiter {
 }
 
 export interface LbRouteOptions {
-  /** Where the routes take their limiter from; `listenBrainzLimiterFor` by default. */
+  /** Where the routes take their limiter from when mounted standalone; `listenBrainzLimiterFor` by default. */
   limiter?: (ctx: RequestCtx) => ListenBrainzLimiter;
+}
+
+// ---------------------------------------------------------------------------
+// The dispatcher's outcome (module comment)
+
+/** The dispatcher's token check (routes.ts `LbAuth`, structurally). */
+export type LbDispatchAuth =
+  | { status: 'absent'; failure: AuthHeaderFailure }
+  | { status: 'invalid' }
+  | { status: 'valid'; token: VerifiedLbToken };
+
+/** What the /1/ dispatcher hands a registry route (routes.ts `LbRequest`, structurally). */
+export interface LbDispatch {
+  auth: LbDispatchAuth;
+  /** The decision the dispatcher charged this request with. */
+  limit: LimitDecision;
+}
+
+/** A route of this package: a RouteDef whose handler also takes the dispatcher's outcome (routes.ts `LbRouteDef`). */
+export interface LbModuleRouteDef extends RouteDef {
+  /** `required`: the dispatcher answers the 401 itself, before the handler. */
+  auth?: 'required' | 'optional';
+  handler(req: Request, ctx: RequestCtx, params: Record<string, string>, lb?: LbDispatch): Promise<Response>;
 }
 
 // ---------------------------------------------------------------------------
@@ -108,11 +153,22 @@ function charge(
   return decision.allowed ? { ok: true, decision } : { ok: false, response: refusal(decision) };
 }
 
+/** The guard's answer from the dispatcher's outcome: no lookup and no charge (module comment). */
+function fromDispatch(lb: LbDispatch): LbGuardResult {
+  if (!lb.limit.allowed) return { ok: false, response: refusal(lb.limit) };
+  const rateHeaders = lb.limit.headers;
+  if (lb.auth.status === 'valid') return { ok: true, token: lb.auth.token, rateHeaders };
+  const failure = lb.auth.status === 'absent' ? lb.auth.failure : 'invalid_token';
+  return { ok: false, response: unauthorized(failure, rateHeaders) };
+}
+
 /**
  * The Authorization header, the token lookup and the rate limit, in that order
- * and before any body byte is read (module comment).
+ * and before any body byte is read (module comment). With the dispatcher's
+ * outcome `lb`, that outcome is used instead and nothing is looked up or charged.
  */
-export function lbGuard(req: Request, ctx: RequestCtx, options: LbRouteOptions = {}): LbGuardResult {
+export function lbGuard(req: Request, ctx: RequestCtx, options: LbRouteOptions = {}, lb?: LbDispatch): LbGuardResult {
+  if (lb !== undefined) return fromDispatch(lb);
   const deps = need(ctx, 'deps');
   const limiter = (options.limiter ?? listenBrainzLimiterFor)(ctx);
   const header = parseAuthorization(req.headers.get('authorization'));
@@ -180,20 +236,41 @@ function pyStr(value: unknown): string {
 export const LB_TOKEN_VALID = 'Token valid.';
 export const LB_TOKEN_INVALID = 'Token invalid.';
 
-async function validateToken(req: Request, ctx: RequestCtx, options: LbRouteOptions): Promise<Response> {
+/** The dispatcher's verdict on the validate-token candidate, when it is the header's `token ` token; else undefined. */
+function dispatchedVerdict(header: string | null, lb: LbDispatch | undefined): VerifiedLbToken | null | undefined {
+  if (lb === undefined || lb.auth.status === 'absent') return undefined;
+  // A `token ` header: both rules take `split(' ')[1]`, so the dispatcher already looked this candidate up.
+  if (!header?.toLowerCase().startsWith('token ')) return undefined;
+  return lb.auth.status === 'valid' ? lb.auth.token : null;
+}
+
+async function validateToken(
+  req: Request,
+  ctx: RequestCtx,
+  options: LbRouteOptions,
+  lb?: LbDispatch,
+): Promise<Response> {
   const deps = need(ctx, 'deps');
-  const limiter = (options.limiter ?? listenBrainzLimiterFor)(ctx);
-  const candidate = validateTokenCandidate(req.headers.get('authorization'), new URL(req.url).searchParams);
-  const verified = candidate === null ? null : verifyLbToken(deps, candidate);
-  const tokenResult: TokenResult =
-    verified !== null
-      ? { status: 'valid', tokenId: verified.id }
-      : candidate === null
-        ? { status: 'absent' }
-        : { status: 'invalid' };
-  const charged = charge(limiter, ctx, tokenResult);
-  if (!charged.ok) return charged.response;
-  const headers = charged.decision.headers;
+  const header = req.headers.get('authorization');
+  const candidate = validateTokenCandidate(header, new URL(req.url).searchParams);
+  const reused = candidate === null ? undefined : dispatchedVerdict(header, lb);
+  const verified = candidate === null ? null : reused !== undefined ? reused : verifyLbToken(deps, candidate);
+  let headers: Record<string, string>;
+  if (lb !== undefined) {
+    // Charged once, by the dispatcher (module comment).
+    if (!lb.limit.allowed) return refusal(lb.limit);
+    headers = lb.limit.headers;
+  } else {
+    const tokenResult: TokenResult =
+      verified !== null
+        ? { status: 'valid', tokenId: verified.id }
+        : candidate === null
+          ? { status: 'absent' }
+          : { status: 'invalid' };
+    const charged = charge((options.limiter ?? listenBrainzLimiterFor)(ctx), ctx, tokenResult);
+    if (!charged.ok) return charged.response;
+    headers = charged.decision.headers;
+  }
   if (candidate === null) return lbError(400, LB_AUTH_MESSAGES.noToken, headers);
   if (verified === null) return lbJson({ code: 200, message: LB_TOKEN_INVALID, valid: false }, 200, headers);
   return lbJson({ code: 200, message: LB_TOKEN_VALID, valid: true, user_name: verified.username }, 200, headers);
@@ -285,8 +362,13 @@ async function findDeleteTarget(m: ModuleDeps, did: string, seconds: bigint, msi
   return best === null ? { kind: 'none' } : { kind: 'pending', operationId: best.operationId };
 }
 
-async function deleteListen(req: Request, ctx: RequestCtx, options: LbRouteOptions): Promise<Response> {
-  const guard = lbGuard(req, ctx, options);
+async function deleteListen(
+  req: Request,
+  ctx: RequestCtx,
+  options: LbRouteOptions,
+  lb?: LbDispatch,
+): Promise<Response> {
+  const guard = lbGuard(req, ctx, options, lb);
   if (!guard.ok) return guard.response;
   const headers = guard.rateHeaders;
   const m = need(ctx, 'deps');
@@ -325,8 +407,13 @@ export const LB_PLAYING_NOW_MESSAGES = {
   clientNotString: 'client must be a string.',
 } as const;
 
-async function deletePlayingNow(req: Request, ctx: RequestCtx, options: LbRouteOptions): Promise<Response> {
-  const guard = lbGuard(req, ctx, options);
+async function deletePlayingNow(
+  req: Request,
+  ctx: RequestCtx,
+  options: LbRouteOptions,
+  lb?: LbDispatch,
+): Promise<Response> {
+  const guard = lbGuard(req, ctx, options, lb);
   if (!guard.ok) return guard.response;
   const headers = guard.rateHeaders;
   const m = need(ctx, 'deps');
@@ -345,17 +432,35 @@ async function deletePlayingNow(req: Request, ctx: RequestCtx, options: LbRouteO
 // ---------------------------------------------------------------------------
 // Routes
 
-/** The token routes, with their OPTIONS answers (§8.1). */
-export function createTokenRoutes(options: LbRouteOptions = {}): RouteDef[] {
+/**
+ * The token routes, with their OPTIONS answers (§8.1). Mountable standalone or
+ * through the /1/ dispatcher's `registry` (module comment).
+ */
+export function createTokenRoutes(options: LbRouteOptions = {}): LbModuleRouteDef[] {
   return [
-    { method: 'GET', pattern: '/1/validate-token', handler: (req, ctx) => validateToken(req, ctx, options) },
+    {
+      method: 'GET',
+      pattern: '/1/validate-token',
+      auth: 'optional',
+      handler: (req, ctx, _params, lb) => validateToken(req, ctx, options, lb),
+    },
     { method: 'OPTIONS', pattern: '/1/validate-token', handler: async () => lbPreflight(['GET']) },
-    { method: 'POST', pattern: '/1/delete-listen', handler: (req, ctx) => deleteListen(req, ctx, options) },
+    {
+      method: 'POST',
+      pattern: '/1/delete-listen',
+      auth: 'required',
+      handler: (req, ctx, _params, lb) => deleteListen(req, ctx, options, lb),
+    },
     { method: 'OPTIONS', pattern: '/1/delete-listen', handler: async () => lbPreflight(['POST']) },
-    { method: 'POST', pattern: '/1/playing-now/delete', handler: (req, ctx) => deletePlayingNow(req, ctx, options) },
+    {
+      method: 'POST',
+      pattern: '/1/playing-now/delete',
+      auth: 'required',
+      handler: (req, ctx, _params, lb) => deletePlayingNow(req, ctx, options, lb),
+    },
     { method: 'OPTIONS', pattern: '/1/playing-now/delete', handler: async () => lbPreflight(['POST']) },
   ];
 }
 
 /** The token routes over the composition's shared limiter. */
-export const routes: readonly RouteDef[] = Object.freeze(createTokenRoutes());
+export const routes: readonly LbModuleRouteDef[] = Object.freeze(createTokenRoutes());

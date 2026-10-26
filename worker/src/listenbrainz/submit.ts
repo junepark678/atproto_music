@@ -22,7 +22,15 @@
 //    - **single / import:** listens classified `ignore` (a name ListenBrainz
 //      accepts but our scrobble validator refuses) are not written; each is
 //      recorded in `ignored_listens` (source listenbrainz, reason, listened_at,
-//      the first 128 scalars of each name). The rest go through the shared
+//      the first 128 scalars of each name). That record is idempotent and
+//      bounded (`recordIgnored`): a listen already recorded for the DID (same
+//      reason, listened_at and previews, also within one request) is not
+//      recorded again, so a resent batch (an offline cache flush retried, a
+//      retry after the daily-cap 429) adds nothing; and at most
+//      IGNORED_LISTENS_DAILY_LIMIT rows are recorded per DID in any rolling
+//      24 hours, the default daily listen cap, so ignored listens, which the
+//      cap does not count, cannot fill the 30-day table. Past the bound the
+//      listen is still answered 200 and not written. The rest go through the shared
 //      ingress `acceptListens` (N2-05) with origin `listenbrainz`: listen
 //      keys (an identical resubmission creates nothing), the daily cap,
 //      `scrobble.create` operations (live priority 0) and forward rows, in one
@@ -49,8 +57,11 @@
 //    it is ignored.
 //
 // Every answer carries the CORS set (errors.ts) and the X-RateLimit-* set of
-// the charged bucket (the daily-cap 429 carries the daily window instead). The
-// body, the token and the header are never logged.
+// the charged bucket (the daily-cap 429 carries the daily window instead).
+// Under the /1/ dispatcher (N3-06, `registry`), step 1 is the dispatcher's:
+// the handler takes its fourth argument (`LbDispatch`, token-routes.ts) and
+// neither verifies the token again nor charges a limiter. The body, the token
+// and the header are never logged.
 
 import { recordingMsid } from '@atmusic/core/msid';
 import type { MappedTrack } from '@atmusic/core/protocol-map';
@@ -58,18 +69,28 @@ import type { JsonObject } from '@atmusic/core/scrobble';
 import { NS_PER_SECOND, toStorage } from '@atmusic/core/timestamp';
 import type { ModuleDeps } from '../do/contracts';
 import { upsertNowPlaying } from '../do/read/now-playing';
-import { need, type RequestCtx, type RouteDef } from '../http/types';
+import { need, type RequestCtx } from '../http/types';
 import { enqueueForwards } from '../outbox/forward-enqueue';
-import { acceptListens, DAILY_CAP_WINDOW_MS, type IngressListen } from '../outbox/ingress';
+import { acceptListens, DAILY_CAP_WINDOW_MS, DEFAULT_DAILY_LISTEN_CAP, type IngressListen } from '../outbox/ingress';
 import { LB_UNAVAILABLE_MESSAGE, lbError, lbJson, lbPreflight, lbTooManyRequests } from './errors';
 import { rateLimitHeaders } from './rate-headers';
-import { kickOutbox, type LbRouteOptions, lbGuard, lbPublicationOpen } from './token-routes';
+import {
+  kickOutbox,
+  type LbDispatch,
+  type LbModuleRouteDef,
+  type LbRouteOptions,
+  lbGuard,
+  lbPublicationOpen,
+} from './token-routes';
 import { LB_SUBMIT_MESSAGES, MAX_LISTEN_PAYLOAD_SIZE, type ValidatedListen, validateSubmission } from './validate';
 
 export const SUBMIT_LISTENS_PATH = '/1/submit-listens';
 
 /** The daily cap's 429 message (ADR §8.3). */
 export const LB_DAILY_CAP_MESSAGE = 'Daily listen limit exceeded.';
+
+/** At most this many ignored_listens rows per DID in any rolling 24 hours (module comment, step 5). */
+export const IGNORED_LISTENS_DAILY_LIMIT = DEFAULT_DAILY_LISTEN_CAP;
 
 /** Whether submissions may be queued for publication (step 2 of the module comment); shared with delete-listen. */
 export { lbPublicationOpen };
@@ -147,22 +168,70 @@ function dailyResetInSeconds(m: Pick<ModuleDeps, 'db'>, did: string, now: number
   return Math.max(1, Math.ceil(ms / 1000));
 }
 
+/**
+ * Records the ignored listens of a request in ignored_listens: once per listen
+ * (an identical row of the DID is never added again) and at most
+ * IGNORED_LISTENS_DAILY_LIMIT rows per DID per rolling 24 hours (module comment).
+ */
 function recordIgnored(m: ModuleDeps, did: string, listens: readonly ValidatedListen[], now: number): void {
-  if (listens.length === 0) return;
+  const rows: { reason: string; listenedAt: string; artist: string; track: string }[] = [];
+  for (const listen of listens) {
+    const d = listen.disposition;
+    if (d.kind !== 'ignore' || listen.listenedAtSeconds === null) continue;
+    rows.push({
+      reason: d.reason,
+      listenedAt: toStorage(BigInt(listen.listenedAtSeconds) * NS_PER_SECOND),
+      artist: d.artistPreview,
+      track: d.trackPreview,
+    });
+  }
+  if (rows.length === 0) return;
   m.db.tx(() => {
-    for (const listen of listens) {
-      const d = listen.disposition;
-      if (d.kind !== 'ignore' || listen.listenedAtSeconds === null) continue;
+    const recent =
+      m.db.one<{ n: number }>(
+        'SELECT count(*) AS n FROM ignored_listens WHERE did = ? AND created_at_ms > ?',
+        did,
+        now - DAILY_CAP_WINDOW_MS,
+      )?.n ?? 0;
+    let room = IGNORED_LISTENS_DAILY_LIMIT - recent;
+    if (room <= 0) return;
+    // listened_at is the fixed-width storage form, so string order is time order.
+    const times = rows.map((r) => r.listenedAt).sort();
+    const keyOf = (r: { reason: string; listenedAt: string; artist: string; track: string }) =>
+      JSON.stringify([r.reason, r.listenedAt, r.artist, r.track]);
+    const seen = new Set<string>();
+    for (const row of m.db.all<{ reason: string; listened_at: string; artist_preview: string; track_preview: string }>(
+      `SELECT reason, listened_at, artist_preview, track_preview FROM ignored_listens
+       WHERE did = ? AND source = 'listenbrainz' AND listened_at >= ? AND listened_at <= ?`,
+      did,
+      times[0] as string,
+      times[times.length - 1] as string,
+    )) {
+      seen.add(
+        keyOf({
+          reason: row.reason,
+          listenedAt: row.listened_at,
+          artist: row.artist_preview,
+          track: row.track_preview,
+        }),
+      );
+    }
+    for (const row of rows) {
+      if (room <= 0) break;
+      const key = keyOf(row);
+      if (seen.has(key)) continue;
+      seen.add(key);
       m.db.run(
         `INSERT INTO ignored_listens(did, source, reason, listened_at, artist_preview, track_preview, created_at_ms)
          VALUES (?, 'listenbrainz', ?, ?, ?, ?, ?)`,
         did,
-        d.reason,
-        toStorage(BigInt(listen.listenedAtSeconds) * NS_PER_SECOND),
-        d.artistPreview,
-        d.trackPreview,
+        row.reason,
+        row.listenedAt,
+        row.artist,
+        row.track,
         now,
       );
+      room--;
     }
   });
 }
@@ -257,9 +326,14 @@ async function playingNow(
 // ---------------------------------------------------------------------------
 // The handler
 
-async function handleSubmit(req: Request, ctx: RequestCtx, options: LbRouteOptions): Promise<Response> {
-  // 1. Token and rate limit: nothing of the body has been read yet.
-  const guard = lbGuard(req, ctx, options);
+async function handleSubmit(
+  req: Request,
+  ctx: RequestCtx,
+  options: LbRouteOptions,
+  lb?: LbDispatch,
+): Promise<Response> {
+  // 1. Token and rate limit (the dispatcher's, when mounted under it): nothing of the body has been read yet.
+  const guard = lbGuard(req, ctx, options, lb);
   if (!guard.ok) return guard.response;
   const headers = guard.rateHeaders;
   const m = need(ctx, 'deps');
@@ -284,13 +358,18 @@ async function handleSubmit(req: Request, ctx: RequestCtx, options: LbRouteOptio
   return submitListens(ctx, did, validated.listens, now, headers);
 }
 
-/** POST /1/submit-listens and its OPTIONS answer (§8.1). */
-export function createSubmitRoutes(options: LbRouteOptions = {}): RouteDef[] {
+/** POST /1/submit-listens and its OPTIONS answer (§8.1); mountable standalone or through the /1/ dispatcher. */
+export function createSubmitRoutes(options: LbRouteOptions = {}): LbModuleRouteDef[] {
   return [
-    { method: 'POST', pattern: SUBMIT_LISTENS_PATH, handler: (req, ctx) => handleSubmit(req, ctx, options) },
+    {
+      method: 'POST',
+      pattern: SUBMIT_LISTENS_PATH,
+      auth: 'required',
+      handler: (req, ctx, _params, lb) => handleSubmit(req, ctx, options, lb),
+    },
     { method: 'OPTIONS', pattern: SUBMIT_LISTENS_PATH, handler: async () => lbPreflight(['POST']) },
   ];
 }
 
 /** The submit routes over the composition's shared limiter. */
-export const routes: readonly RouteDef[] = Object.freeze(createSubmitRoutes());
+export const routes: readonly LbModuleRouteDef[] = Object.freeze(createSubmitRoutes());
