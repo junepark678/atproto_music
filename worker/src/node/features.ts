@@ -38,6 +38,18 @@
 // them in EXTENSION_TIMER_NAMES order (outbox, forward, import,
 // oauth-keepalive, expiry-sweep, backup).
 //
+// **The startup reconcile comes first (ADR §5.5, B20).** compose starts
+// IndexCore, and so arms the extension lane (the outbox, forward and import
+// starts are due at once), before run() can reconcile the sign-in policy; and
+// the reconcile awaits each refused DID's upstream revoke in turn. Every
+// extension timer handler of this list therefore waits for `startup()` (the
+// one startup reconcile run() calls before listen) to finish before it does
+// anything, so no PDS write, forward, import, keepalive refresh or backup runs
+// while a refused DID still holds its session, its queued operations or its
+// links. A startup reconcile that fails keeps every one of them closed (run()
+// then exits 1). Besides, `writerFor` answers null for a DID the policy
+// refuses, so the outbox blocks its operations rather than writing them.
+//
 // **Outbound transports (ADR §3.5 rule 2).** Every outbound consumer gets its
 // transport from one `OutboundTransports` source, per wiring point:
 //
@@ -72,7 +84,7 @@ import type { Revocations } from '../app/revocations';
 import { clientMetadataFor } from '../bff/client-metadata';
 import { KEEPALIVE_INTERVAL_MS, oauthKeepaliveTimer } from '../bff/keepalive';
 import { createOAuthService, type OAuthService } from '../bff/oauth-client';
-import { type ReconcileReport, reconcileSignInPolicy } from '../bff/reconcile';
+import { type ReconcileReport, reconcileSignInPolicy, signInAllowed } from '../bff/reconcile';
 import { createWebSessions, sweepExpiredWebSessions, type WebSessions } from '../bff/sessions';
 import { sweepLastfmTokens } from '../credentials/lastfm-auth';
 import { createBox } from '../crypto/box';
@@ -298,8 +310,15 @@ export interface ProductionFeatures {
   readonly features: readonly Feature[];
   /** The composition's OAuth service; null until composed. */
   oauth(): OAuthService | null;
-  /** reconcileSignInPolicy over the composed services (run() calls it once before listen). */
+  /** reconcileSignInPolicy over the composed services (what each expiry sweep runs first). */
   reconcile(): Promise<ReconcileReport>;
+  /**
+   * The startup reconcile: `reconcile()`, then the extension timers of this
+   * list may run (module comment). run() calls it once, after compose and
+   * before listen; until it resolves every extension timer handler waits, and
+   * after it rejects every one fails. A second call throws.
+   */
+  startup(): Promise<ReconcileReport>;
   /** One expiry-sweep run at `now` (what the `expiry-sweep` timer runs). */
   sweep(now: number): Promise<ExpirySweepReport>;
 }
@@ -315,6 +334,39 @@ export function lastfmImportPacer(pacing: UpstreamPacing): Pacer {
       pacing.deferLastfm(untilMs);
     },
   };
+}
+
+/** The gate the extension timers wait on until the startup reconcile has run. */
+interface StartupGate {
+  readonly done: Promise<void>;
+  open(): void;
+  fail(error: unknown): void;
+}
+
+function startupGate(): StartupGate {
+  let open!: () => void;
+  let fail!: (error: unknown) => void;
+  const done = new Promise<void>((resolve, reject) => {
+    open = resolve;
+    fail = reject;
+  });
+  // Rejection is observed by every waiting handler; this keeps it from being an unhandled one.
+  done.catch(() => undefined);
+  return { done, open, fail };
+}
+
+/** `extension` with every timer handler waiting for `gate` first. */
+function afterStartup(extension: CoreExtension, gate: StartupGate): CoreExtension {
+  const timers = extension.timers;
+  if (timers === undefined) return extension;
+  const gated: Partial<Record<keyof typeof timers, ExtensionTimerHandler>> = {};
+  for (const [name, handler] of Object.entries(timers) as Array<[keyof typeof timers, ExtensionTimerHandler]>) {
+    gated[name] = async (now, ctx) => {
+      await gate.done;
+      return handler(now, ctx);
+    };
+  }
+  return { ...extension, timers: gated };
 }
 
 class NotComposedError extends Error {
@@ -430,6 +482,8 @@ export async function productionFeatures(options: ProductionFeatureOptions): Pro
   const writers: PdsWriterSource = {
     async writerFor(did: string): Promise<PdsWriter | null> {
       const service = oauthService();
+      // A DID the policy refuses never writes, even before a reconcile has signed it out (B20).
+      if (!signInAllowed(config, did)) return null;
       if (!service.sessionStore.has(did)) return null;
       try {
         return sessionWriter(await service.restore(did));
@@ -463,6 +517,21 @@ export async function productionFeatures(options: ProductionFeatureOptions): Pro
       { db: deps.db, clock: deps.clock, log: deps.log, revocations, oauth: oauthService() },
       { signinPolicy: config.signinPolicy, signinDids: config.signinDids },
     );
+  };
+
+  const gate = startupGate();
+  let started = false;
+  const startup = async (): Promise<ReconcileReport> => {
+    if (started) throw new Error('the startup reconcile runs once');
+    started = true;
+    try {
+      const report = await reconcile();
+      gate.open();
+      return report;
+    } catch (error) {
+      gate.fail(error);
+      throw error;
+    }
   };
 
   const sweep = async (now: number): Promise<ExpirySweepReport> => {
@@ -550,10 +619,17 @@ export async function productionFeatures(options: ProductionFeatureOptions): Pro
   ];
   if (options.backups !== undefined) features.push({ name: 'backup', extensions: [backupExtension(options.backups)] });
 
+  const gatedFeatures = features.map((feature) =>
+    feature.extensions === undefined
+      ? feature
+      : { ...feature, extensions: feature.extensions.map((extension) => afterStartup(extension, gate)) },
+  );
+
   return {
-    features: Object.freeze(features),
+    features: Object.freeze(gatedFeatures),
     oauth: () => oauth,
     reconcile,
+    startup,
     sweep,
   };
 }

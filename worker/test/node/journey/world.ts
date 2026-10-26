@@ -47,6 +47,7 @@ import { type FixedClock, fixedClock } from '@atmusic/core/test-support/clock';
 import { seededRandom } from '@atmusic/core/test-support/random';
 import { vi } from 'vitest';
 import { type ConnectJetstream, JetstreamConnectError } from '../../../src/do/ingest/jetstream-socket';
+import type { HostTimers } from '../../../src/node/alarm';
 import type { OutboundTransports } from '../../../src/node/features';
 import { type ExitCode, type RunningServer, type RunOptions, run } from '../../../src/node/run';
 import { captureLog, manualTimers, TEST_PUBLIC_ORIGIN, testEnv, testSecretsDocument } from '../support/app';
@@ -183,6 +184,11 @@ export class World {
   readonly outbound: Outbound[] = [];
   readonly log = captureLog();
   readonly timers = manualTimers();
+  /**
+   * The timers the next start() hands run() instead of the manual ones (the
+   * features test's real-ordered restart); null: the manual timers.
+   */
+  runTimers: HostTimers | null = null;
   /** Every answer the world received from the app, in order. */
   readonly seen: Seen[] = [];
   /** Credential values the sign-ins handled (cookies, CSRF tokens, the authorization code and state). */
@@ -295,7 +301,7 @@ export class World {
       transport: this.transport as Transport,
       ...(this.options.outbound === undefined ? {} : { outbound: this.options.outbound(this.transport) }),
       ...connect,
-      timers: this.timers,
+      timers: this.runTimers ?? this.timers,
       ...(this.options.serverFactory === undefined ? {} : { serverFactory: this.options.serverFactory }),
       signals,
       onReady: (s) => onReady(s),
@@ -413,8 +419,12 @@ export class World {
     return { status: res.status, headers: res.headers, text, body: parsed, cookies: res.headers.getSetCookie() };
   }
 
-  /** A full sign-in through /api/v1/auth/start, the fake AS and /oauth/callback. */
-  async signIn(user: User): Promise<Signed> {
+  /**
+   * A full sign-in through /api/v1/auth/start, the fake AS and /oauth/callback,
+   * then (unless `current: false`) the wait for the DID's snapshot and verified
+   * handle; a later DID's handle waits for the daily identity sweep.
+   */
+  async signIn(user: User, o: { current?: boolean } = {}): Promise<Signed> {
     const started = await this.send('POST', '/api/v1/auth/start', {
       body: { handle: user.handle },
       headers: { origin: TEST_PUBLIC_ORIGIN },
@@ -446,7 +456,7 @@ export class World {
     this.credentials.add((session.body as { csrfToken: string }).csrfToken);
     // The admitted DID's snapshot runs on the core lane (only): until then the index has no verified
     // handle for it. The extension lane is left alone, so a journey decides when its timers run.
-    await this.until(() => this.isCurrent(user.did), { extensions: false });
+    if (o.current !== false) await this.until(() => this.isCurrent(user.did), { extensions: false });
     return { did: user.did, token, csrf: (session.body as { csrfToken: string }).csrfToken };
   }
 

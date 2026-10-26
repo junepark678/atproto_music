@@ -37,6 +37,7 @@ import { createAppPassword } from '../../src/credentials/app-passwords';
 import { createLbToken } from '../../src/credentials/lb-tokens';
 import { migrate } from '../../src/do/migrate';
 import { EXTENSION_TIMER_NAMES } from '../../src/do/timers';
+import { nodeTimers } from '../../src/node/alarm';
 import {
   checkedLookup,
   OUTBOUND_CONSUMERS,
@@ -49,7 +50,7 @@ import type { BridgeOptions } from '../../src/node/http-bridge';
 import { createServer } from '../../src/node/http-bridge';
 import { type PinnedLookup, TransportError } from '../../src/node/pinned-transport';
 import { openSqliteDb } from '../../src/node/sqlite-db';
-import { ALICE, closeWorlds, PDS_HOST, SCROBBLE, startWorld, T0, type User, World } from './journey/world';
+import { ALICE, BOB, closeWorlds, PDS_HOST, SCROBBLE, startWorld, T0, type User, World } from './journey/world';
 import { TEST_BUSY_TIMEOUT_MS } from './support/node-db';
 
 beforeEach(() => {
@@ -420,4 +421,159 @@ describe('production features', () => {
 
     await w.close();
   }, 60_000);
+
+  it('with two refused DIDs holding OAuth sessions, queued operations and queued forwards, no extension timer writes to the PDS or forwards for either while the startup reconcile awaits an upstream revoke', async () => {
+    // The revocation endpoint of the fake AS can be held: run()'s startup reconcile then waits on
+    // the first refused DID's upstream revoke while Node's own timers fire (the extension alarm is
+    // due at once: the outbox, forward and import starts).
+    let holding = false;
+    const held: Array<() => void> = [];
+    let router: FixtureTransport | null = null;
+    const outbound = (r: FixtureTransport): OutboundTransports => {
+      router = r;
+      const holdRevoke = Object.assign(
+        async (req: Request) => {
+          const url = new URL(req.url);
+          if (holding && req.method === 'POST' && url.pathname === '/oauth/revoke') {
+            await new Promise<void>((resolve) => held.push(resolve));
+          }
+          return r(req);
+        },
+        { fixture: true as const, calls: r.calls, hostnames: r.hostnames },
+      );
+      return { transportFor: (wire) => (wire === 'oauth' ? (holdRevoke as Transport) : (r as Transport)) };
+    };
+    const CAROL = 'did:plc:cccccccccccccccccccccccc';
+    const w = new World({ env: { ATMUSIC_SIGNIN_DIDS: `${ALICE},${BOB},${CAROL}` }, outbound });
+    await w.addUser('alice', ALICE);
+    const bob = await w.addUser('bob', BOB);
+    const carol = await w.addUser('carol', CAROL);
+    await w.start();
+    expect(router).not.toBeNull();
+
+    // While both were admitted (manual timers: nothing runs on its own): each signs in, links
+    // Last.fm and ListenBrainz, and posts a scrobble, which queues one operation and two forwards.
+    for (const [user, n] of [
+      [bob, 1],
+      [carol, 2],
+    ] as const) {
+      // The second DID's handle waits for the daily identity sweep; this test needs only the session.
+      const session = await w.signIn(user, { current: false });
+      const start = await w.send('POST', '/api/v1/links/lastfm/start', { as: session });
+      expect(start.status).toBe(200);
+      const cb = new URL(
+        new URL((start.body as { authorizeUrl: string }).authorizeUrl).searchParams.get('cb') as string,
+      );
+      const lfToken = w.lastfm.issueToken();
+      w.lastfm.authorizeToken(lfToken, `${user.name}_fm`);
+      expect((await w.send('GET', `${cb.pathname}${cb.search}&token=${lfToken}`, { as: session })).status).toBe(303);
+      w.lb.addToken(`${user.name}_lb`, `${user.name}-lb-link-token`);
+      const lbLink = await w.send('POST', '/api/v1/links/listenbrainz', {
+        as: session,
+        body: { token: `${user.name}-lb-link-token` },
+      });
+      expect(lbLink.status).toBe(201);
+      const posted = await w.send('POST', '/api/v1/scrobbles', {
+        as: session,
+        body: { artist: 'Stereolab', track: `Track ${n}`, listenedAt: '2026-01-15T11:55:00Z' },
+        headers: { 'idempotency-key': `two-refused-${n}` },
+      });
+      expect(posted.status).toBe(202);
+    }
+    for (const did of [BOB, CAROL]) {
+      expect(w.count('oauth_sessions', 'did = ?', did)).toBe(1);
+      expect(w.count('operations', "did = ? AND state = 'queued'", did)).toBe(1);
+      expect(w.count('forward_outbox', "did = ? AND state = 'queued'", did)).toBe(2);
+      expect(w.count('linked_accounts', "did = ? AND status = 'active'", did)).toBe(2);
+    }
+    expect(await bob.repo.list(SCROBBLE)).toHaveLength(0);
+    expect(await carol.repo.list(SCROBBLE)).toHaveLength(0);
+    expect(w.lastfm.scrobbles).toHaveLength(0);
+    expect(w.lb.submissions).toHaveLength(0);
+    expect(await w.stop()).toBe(0);
+
+    // The next start admits only Alice, on Node's own timers, recording every timeout that fires.
+    w.env.ATMUSIC_SIGNIN_DIDS = ALICE;
+    let fired = 0;
+    w.runTimers = {
+      ...nodeTimers,
+      setTimeout: (callback, delayMs) =>
+        nodeTimers.setTimeout(() => {
+          fired++;
+          callback();
+        }, delayMs),
+    };
+    const outboundBefore = w.outbound.length;
+    const pdsWrites = () =>
+      w.outbound
+        .slice(outboundBefore)
+        .filter((o) => o.host === PDS_HOST && o.method === 'POST' && PDS_WRITE_PATHS.has(o.path));
+    const forwardSends = () =>
+      w.outbound
+        .slice(outboundBefore)
+        .filter(
+          (o) =>
+            (o.host === 'lastfm.test' && o.method === 'POST') ||
+            (o.host === 'listenbrainz.test' && o.path.startsWith('/1/submit-listens')),
+        );
+    holding = true;
+    const starting = w.start();
+    // The reconcile reached the first refused DID's upstream revoke and waits on it.
+    await realUntil(() => held.length === 1);
+    // Meanwhile the alarms fire: let several rounds of timeouts run while the revoke is held.
+    const firedAtHold = fired;
+    await realUntil(() => fired >= firedAtHold + 2);
+    await realWait(250);
+    expect(held).toHaveLength(1);
+    expect(fired).toBeGreaterThan(firedAtHold);
+    expect(pdsWrites()).toEqual([]);
+    expect(forwardSends()).toEqual([]);
+    expect(w.lastfm.scrobbles).toHaveLength(0);
+    expect(w.lb.submissions).toHaveLength(0);
+
+    // Released: the second refused DID's revoke follows, then the process listens.
+    holding = false;
+    for (const release of held.splice(0)) release();
+    const server = await starting;
+    // The extension lane has run since (its timers were due at start), and still nothing went out.
+    await realUntil(() => server.app.core.lastExtensionAlarm?.ran.includes('outbox') === true);
+    await realWait(100);
+    expect(pdsWrites()).toEqual([]);
+    expect(forwardSends()).toEqual([]);
+    expect(w.lastfm.scrobbles).toHaveLength(0);
+    expect(w.lb.submissions).toHaveLength(0);
+    expect(await bob.repo.list(SCROBBLE)).toHaveLength(0);
+    expect(await carol.repo.list(SCROBBLE)).toHaveLength(0);
+    for (const did of [BOB, CAROL]) {
+      expect({
+        sessions: w.count('oauth_sessions', 'did = ?', did),
+        queued: w.count('operations', "did = ? AND state = 'queued'", did),
+        blocked: w.count('operations', "did = ? AND state = 'blocked'", did),
+        forwardsSent: w.count('forward_outbox', "did = ? AND state = 'sent'", did),
+        activeLinks: w.count('linked_accounts', "did = ? AND status = 'active'", did),
+        status: w.db.one<{ s: string }>('SELECT oauth_status AS s FROM accounts WHERE did = ?', did)?.s ?? null,
+      }).toEqual({ sessions: 0, queued: 0, blocked: 1, forwardsSent: 0, activeLinks: 0, status: 'signed_out' });
+    }
+    // Both refused DIDs were revoked upstream, once each.
+    const upstream = w.as.revocations.filter((r) => r.source === 'endpoint').map((r) => r.sub);
+    expect([...new Set(upstream)].sort()).toEqual([BOB, CAROL]);
+    const reconciled = w.log.logs.filter((l) => l.event === 'signin_policy_revoked').map((l) => l.did);
+    expect(reconciled.slice(-2)).toEqual([BOB, CAROL]);
+
+    await w.close();
+  }, 60_000);
 });
+
+/** Waits on Node's own timers (Date is faked, setTimeout is not). */
+function realWait(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Polls `done` on Node's own timers; fails after `maxMs`. */
+async function realUntil(done: () => boolean, maxMs = 10_000): Promise<void> {
+  const deadline = performance.now() + maxMs;
+  while (!done()) {
+    if (performance.now() > deadline) throw new Error('condition not reached in time');
+    await realWait(5);
+  }
+}

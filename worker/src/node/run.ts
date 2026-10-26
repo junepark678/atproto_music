@@ -37,9 +37,14 @@
 //     production transport (pinned, §3.5) handed to every outbound wire, the
 //     identity resolver of the `identity` wire and the ws Jetstream connector
 //     over the pinned lookup. Then the sign-in policy is reconciled once
-//     (reconcileSignInPolicy, B20): a DID the policy no longer admits loses
-//     its OAuth session, web sessions and credentials before anything listens.
-//     A reconcile that throws stops the startup (exit 1).
+//     (reconcileSignInPolicy via ProductionFeatures.startup, B20): a DID the
+//     policy no longer admits loses its OAuth session, web sessions and
+//     credentials before anything listens, and before any extension timer
+//     (outbox, forward, import, keepalive, sweep, backup) runs: compose has
+//     armed them, but each waits for the startup reconcile to finish, so a
+//     second refused DID cannot write or forward while the first one's
+//     upstream revoke is awaited. A reconcile that throws stops the startup
+//     (exit 1) with every extension timer still closed.
 //  7. Listen: an inherited LISTEN_FDS socket (systemd socket activation) wins
 //     over ATMUSIC_LISTEN, which wins over 127.2.0.1:8888.
 //  8. READY=1, then the watchdog (WATCHDOG=1 every WatchdogSec/3 while the
@@ -454,7 +459,8 @@ export async function run(opts: RunOptions): Promise<ExitCode> {
   cleanups.push(() => composed.stop());
   if (composed.schema.status === 'ready') {
     try {
-      const report = await features.reconcile();
+      // The extension timers compose armed wait for this (node/features.ts `startup`).
+      const report = await features.startup();
       log.log('info', 'run.signin_reconciled', {
         policy: config.signinPolicy,
         signedOut: report.signedOut.length,
