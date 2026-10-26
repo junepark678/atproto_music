@@ -698,9 +698,12 @@ describe('scripts/check-ts.sh', () => {
       const GUARD = 'scripts/check-node-bundle.ts';
       const buildHeading = 'Node server build (build-server.ts --check)';
       const guardHeading = 'Node bundle guard (check-node-bundle.ts)';
-      // Start from neither file (N3-07 adds the real ones later).
+      // Start from neither file (N3-07 adds the real ones later), nor the
+      // N3-07 suites that import them, which would not typecheck against the stubs.
       rmSync(copy.path(BUILD), { force: true });
       rmSync(copy.path(GUARD), { force: true });
+      rmSync(copy.path('scripts/test/build-server.test.ts'), { force: true });
+      rmSync(copy.path('scripts/test/check-node-bundle.test.ts'), { force: true });
 
       // 1. Only a failing guard: the build step is skipped, the guard runs and
       //    its exit status (3) is the gate's.
