@@ -5,7 +5,8 @@
 //    Messages over 64 KiB, malformed JSON and malformed events are dropped and
 //    counted (`counters('jetstream_invalid', reason)`); they carry no cursor
 //    we can trust, so the checkpoint does not move.
-// 2. A commit in a configured collection becomes one untrusted hint
+// 2. A commit in a configured collection (scrobble, follow, settings or love)
+//    becomes one untrusted hint
 //    `(did, collection, rkey)` with the claimed revision and the receipt time
 //    (the +300 s validation bound the drain applies later).
 // 3. `enqueueHints` upserts the hint and advances the checkpoint
@@ -39,10 +40,13 @@ export type MessageOutcome =
   /** The namespace gate is closed: nothing is subscribed, nothing is written. */
   | { kind: 'disabled' };
 
-/** The three subscribed collections, in a fixed order. */
+/**
+ * The four subscribed collections (Jetstream `wantedCollections`), in a fixed
+ * order: scrobble, follow, settings, love (ADR 0005 §6.3, B12).
+ */
 export function configuredCollections(m: Pick<ModuleDeps, 'config'>): string[] {
   const c = m.config.collections;
-  return c === null ? [] : [c.scrobble, c.follow, c.settings];
+  return c === null ? [] : [c.scrobble, c.follow, c.settings, c.love];
 }
 
 export function onMessage(m: ModuleDeps, text: string, receiptMs: number): MessageOutcome {

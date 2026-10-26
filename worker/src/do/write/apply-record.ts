@@ -22,21 +22,41 @@
 // - `users.stats_version` += 1 whenever a scrobble row was inserted, changed
 //   or deleted; `users.max_rev = max(max_rev, rev)`.
 // Validation uses the hint receipt time for the +300 s bound (`receiptNs`).
+//
+// ADR 0005 §6.5 (N3-11):
+// - A scrobble also projects the §6.2 optional fields its validated record
+//   kept, in their remote spelling like the v1 columns: album_artist,
+//   track_number, artist_mbids (JSON array text), release_mbid,
+//   release_group_mbid, isrc, submission_client and music_service; plus
+//   album_artist_key (the artist music key of albumArtist) and recording_msid
+//   (§8.4, from artist_key and track_key, so every projected scrobble has
+//   one). A field the validator dropped, or one the record never had, is
+//   NULL, and a newer revision without a field clears it. The v1 columns are
+//   computed exactly as before; the /api/v1 stats keep grouping by
+//   (artist_key, album_key).
+// - A `<p>.love` record projects into `loves` behind the same guards (owner,
+//   per-DID floor, per-URI record_state revision): present and valid upserts
+//   the row, invalid deletes it and records `excluded` with its reason, a
+//   proven absence deletes it and records `absent`. Loves never touch
+//   `users.stats_version` (no /api/v1 stat reads them).
 
 import type { RecordProof } from '@atmusic/atproto/verify/types';
 import { validateFollowRecord } from '@atmusic/core/follow';
+import { validateLoveRecord } from '@atmusic/core/love';
 import { MusicKeyError } from '@atmusic/core/music-key';
-import { reasonText, validateScrobbleRecord } from '@atmusic/core/scrobble';
+import { reasonText, type ScrobbleRow, validateScrobbleRecord } from '@atmusic/core/scrobble';
 import { toStorage } from '@atmusic/core/timestamp';
 import type { Db } from '../db';
 import { advanceUser, bumpStatsVersion, isSuppressed, loadUser } from './account-state';
 import {
+  albumArtistKey,
   type CollectionKind,
   collectionKind,
   EXCLUDED_COUNTER,
   guardRevision,
   incrementCounter,
   musicKeyColumns,
+  recordingMsidOf,
   recordUri,
   writeRecordState,
 } from './keys';
@@ -67,10 +87,13 @@ export function result(outcome: ApplyOutcome, extra: Partial<ApplyResult> = {}):
   return { outcome, admit: false, suppressed: false, ...extra };
 }
 
-/** One verified record version of a scrobble or follow, at revision `rev`. */
+/** The collections whose records project into a table of their own (settings go to suppression.ts). */
+export type ProjectedKind = Exclude<CollectionKind, 'settings'>;
+
+/** One verified record version of a scrobble, follow or love, at revision `rev`. */
 export interface RecordTarget {
   did: string;
-  kind: 'scrobble' | 'follow';
+  kind: ProjectedKind;
   collection: string;
   rkey: string;
   uri: string;
@@ -86,12 +109,61 @@ export interface TargetResult {
   statsChanged: boolean;
 }
 
-function deleteProjection(db: Db, kind: 'scrobble' | 'follow', uri: string): boolean {
-  const sql =
-    kind === 'scrobble'
-      ? 'DELETE FROM scrobbles WHERE uri = ? RETURNING uri'
-      : 'DELETE FROM follows WHERE uri = ? RETURNING uri';
-  return db.all<{ uri: string }>(sql, uri).length > 0;
+const DELETE_PROJECTION: Readonly<Record<ProjectedKind, string>> = {
+  scrobble: 'DELETE FROM scrobbles WHERE uri = ? RETURNING uri',
+  follow: 'DELETE FROM follows WHERE uri = ? RETURNING uri',
+  love: 'DELETE FROM loves WHERE uri = ? RETURNING uri',
+};
+
+function deleteProjection(db: Db, kind: ProjectedKind, uri: string): boolean {
+  return db.all<{ uri: string }>(DELETE_PROJECTION[kind], uri).length > 0;
+}
+
+/** The migration-2 scrobble columns of a validated row (ADR 0005 §6.2, §6.5); NULL where the record has no value. */
+export interface ScrobbleFieldColumns {
+  album_artist: string | null;
+  album_artist_key: string | null;
+  track_number: number | null;
+  /** JSON array text, remote spelling and order. */
+  artist_mbids: string | null;
+  release_mbid: string | null;
+  release_group_mbid: string | null;
+  isrc: string | null;
+  submission_client: string | null;
+  music_service: string | null;
+  recording_msid: string;
+}
+
+/**
+ * The §6.2 columns of a validated scrobble. `row.record` holds only the fields
+ * the validator kept. An album artist whose key cannot be computed
+ * (unreachable: the validator applies the same display-string rule) is
+ * dropped together with its key rather than stored without one.
+ */
+export function scrobbleFieldColumns(row: ScrobbleRow, artist_key: string, track_key: string): ScrobbleFieldColumns {
+  const r = row.record;
+  let albumArtist: string | null = r.albumArtist ?? null;
+  let albumKey: string | null = null;
+  if (albumArtist !== null) {
+    try {
+      albumKey = albumArtistKey(albumArtist);
+    } catch (error) {
+      if (!(error instanceof MusicKeyError)) throw error;
+      albumArtist = null;
+    }
+  }
+  return {
+    album_artist: albumArtist,
+    album_artist_key: albumKey,
+    track_number: r.trackNumber ?? null,
+    artist_mbids: r.artistMbids === undefined ? null : JSON.stringify(r.artistMbids),
+    release_mbid: r.releaseMbid ?? null,
+    release_group_mbid: r.releaseGroupMbid ?? null,
+    isrc: r.isrc ?? null,
+    submission_client: r.submissionClient ?? null,
+    music_service: r.musicService ?? null,
+    recording_msid: recordingMsidOf(artist_key, track_key),
+  };
 }
 
 type Verdict =
@@ -113,20 +185,28 @@ function scrobbleVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, 
     if (error instanceof MusicKeyError) return { ok: false, reason: `${error.field}: ${error.message}` };
     throw error;
   }
+  const fields = scrobbleFieldColumns(row, keys.artist_key, keys.track_key);
   return {
     ok: true,
     write: () => {
       const before = db.one<{ cid: string }>('SELECT cid FROM scrobbles WHERE uri = ?', t.uri);
       db.run(
         `INSERT INTO scrobbles(uri, cid, did, rkey, revision, artist, track, album, listened_at, created_at,
-           duration_seconds, recording_mbid, indexed_at, artist_key, track_key, album_key)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           duration_seconds, recording_mbid, indexed_at, artist_key, track_key, album_key,
+           album_artist, album_artist_key, track_number, artist_mbids, release_mbid, release_group_mbid,
+           isrc, submission_client, music_service, recording_msid)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(uri) DO UPDATE SET cid = excluded.cid, rkey = excluded.rkey, revision = excluded.revision,
            artist = excluded.artist, track = excluded.track, album = excluded.album,
            listened_at = excluded.listened_at, created_at = excluded.created_at,
            duration_seconds = excluded.duration_seconds, recording_mbid = excluded.recording_mbid,
            indexed_at = excluded.indexed_at, artist_key = excluded.artist_key,
-           track_key = excluded.track_key, album_key = excluded.album_key`,
+           track_key = excluded.track_key, album_key = excluded.album_key,
+           album_artist = excluded.album_artist, album_artist_key = excluded.album_artist_key,
+           track_number = excluded.track_number, artist_mbids = excluded.artist_mbids,
+           release_mbid = excluded.release_mbid, release_group_mbid = excluded.release_group_mbid,
+           isrc = excluded.isrc, submission_client = excluded.submission_client,
+           music_service = excluded.music_service, recording_msid = excluded.recording_msid`,
         t.uri,
         cid,
         t.did,
@@ -143,6 +223,16 @@ function scrobbleVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, 
         keys.artist_key,
         keys.track_key,
         keys.album_key,
+        fields.album_artist,
+        fields.album_artist_key,
+        fields.track_number,
+        fields.artist_mbids,
+        fields.release_mbid,
+        fields.release_group_mbid,
+        fields.isrc,
+        fields.submission_client,
+        fields.music_service,
+        fields.recording_msid,
       );
       return before === null || before.cid !== cid;
     },
@@ -174,8 +264,57 @@ function followVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, o:
   };
 }
 
+function loveVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, o: ApplyOptions): Verdict {
+  const v = validateLoveRecord(record, o.prefix, o.receiptNs);
+  if (!v.ok) return { ok: false, reason: reasonText(v.reason) };
+  const row = v.row;
+  let keys: ReturnType<typeof musicKeyColumns>;
+  try {
+    keys = musicKeyColumns(row.artist, row.track, null);
+  } catch (error) {
+    // Unreachable after validation (same display-string rule); kept fail-closed.
+    if (error instanceof MusicKeyError) return { ok: false, reason: `${error.field}: ${error.message}` };
+    throw error;
+  }
+  return {
+    ok: true,
+    write: () => {
+      db.run(
+        `INSERT INTO loves(uri, did, rkey, cid, artist, track, album, artist_key, track_key, recording_mbid,
+           created_at, indexed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(uri) DO UPDATE SET cid = excluded.cid, rkey = excluded.rkey, artist = excluded.artist,
+           track = excluded.track, album = excluded.album, artist_key = excluded.artist_key,
+           track_key = excluded.track_key, recording_mbid = excluded.recording_mbid,
+           created_at = excluded.created_at, indexed_at = excluded.indexed_at`,
+        t.uri,
+        t.did,
+        t.rkey,
+        cid,
+        row.artist,
+        row.track,
+        row.album,
+        keys.artist_key,
+        keys.track_key,
+        row.recordingMbid,
+        row.createdAt,
+        toStorage(o.nowNs),
+      );
+      return false;
+    },
+  };
+}
+
+type VerdictOf = (db: Db, t: RecordTarget, cid: string, record: unknown, o: ApplyOptions) => Verdict;
+
+const VERDICTS: Readonly<Record<ProjectedKind, VerdictOf>> = {
+  scrobble: scrobbleVerdict,
+  follow: followVerdict,
+  love: loveVerdict,
+};
+
 /**
- * Write one verified scrobble/follow version. No guards: the caller has
+ * Write one verified scrobble/follow/love version. No guards: the caller has
  * checked the owner, the per-DID floor (live proofs) and the per-URI guard.
  * Bumps `stats_version` when a scrobble row changed; does not touch max_rev.
  */
@@ -197,8 +336,7 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
     out = { outcome: 'absent', statsChanged: t.kind === 'scrobble' && deleted };
   } else {
     const { cid, record } = t.present;
-    const verdict =
-      t.kind === 'scrobble' ? scrobbleVerdict(db, t, cid, record, o) : followVerdict(db, t, cid, record, o);
+    const verdict = VERDICTS[t.kind](db, t, cid, record, o);
     if (verdict.ok) {
       const changed = verdict.write();
       writeRecordState(db, {

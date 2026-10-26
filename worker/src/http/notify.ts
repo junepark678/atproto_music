@@ -14,8 +14,9 @@
 //   key is never echoed back);
 // - `uri`: a record AT URI (`at://<did>/<nsid>/<rkey>`) whose DID is did:plc
 //   or did:web and whose collection is one of the configured `<p>.scrobble`,
-//   `<p>.follow`, `<p>.settings`; anything else (including every URI while the
-//   namespace gate is closed) is 422 `fields.uri`;
+//   `<p>.follow`, `<p>.settings`, `<p>.love` (ADR 0005 §6.3; the same set
+//   admits GET /api/v1/records/status); anything else (including every URI
+//   while the namespace gate is closed) is 422 `fields.uri`;
 // - `did`: a did:plc or did:web DID, else 422 `fields.did`.
 // Then one RPC, `IndexRpc.notify(input, clientIp)`, with the client IP the
 // Worker took from CF-Connecting-IP after stripping inbound x-atmusic-*
@@ -101,7 +102,7 @@ function invalid(fields: Record<string, string>): ApiError {
 /** The configured collections for `prefix` (null: the namespace gate is closed). */
 export function configuredCollections(prefix: string | null): ReadonlySet<string> {
   if (prefix === null) return new Set();
-  return new Set([`${prefix}.scrobble`, `${prefix}.follow`, `${prefix}.settings`]);
+  return new Set([`${prefix}.scrobble`, `${prefix}.follow`, `${prefix}.settings`, `${prefix}.love`]);
 }
 
 /** A record URI in one of `collections`, or null. */

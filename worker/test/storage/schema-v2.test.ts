@@ -9,6 +9,7 @@
 
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
+import { fixedClock } from '@atmusic/core/test-support/clock';
 import { describe, expect, it } from 'vitest';
 import fixture from '../../../tests/fixtures/read_models.json' with { type: 'json' };
 import type {
@@ -40,6 +41,7 @@ import type {
 } from '../../src/app/rows';
 import { type Db, doDb, type SqlParam } from '../../src/do/db';
 import { migrate } from '../../src/do/migrate';
+import { history } from '../../src/do/read/history';
 import {
   FORWARD_KINDS,
   IMPORT_SOURCES,
@@ -54,6 +56,7 @@ import {
   TABLES,
 } from '../../src/do/schema';
 import type { HarnessDO } from '../harness/harness-do';
+import { makeLocalIndex } from '../harness/local-index';
 import { readFixture } from '../read/scrobble-read-support';
 
 const stubFor = (name: string) => env.HARNESS.get(env.HARNESS.idFromName(name));
@@ -985,9 +988,38 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
   it('a v1 database seeded with the read-model fixture migrates to v2 with every v1 row byte-identical and the new scrobbles columns NULL', async () => {
     const name = 'schema-v2-upgrade';
     expect(await resetToV1(name)).toEqual({ status: 'ready', version: 1 });
-    // read_models.json through verify → apply into the version-1 schema.
-    const f = await readFixture(name);
+    // read_models.json through verify → apply. Since N3-11 the projection also
+    // writes the migration-2 scrobble columns (ADR 0005 §6.5), which a
+    // version-1 schema does not have, so the fixture is applied into a scratch
+    // harness DO at the latest schema and its rows, version-1 columns only,
+    // are copied into the version-1 schema: exactly what version-1 code wrote.
+    const f = await readFixture(`${name}-source`);
     expect(f.outcomes.length).toBeGreaterThan(0);
+    const v1Tables = await inDb(name, (db) =>
+      tableNames(db)
+        .filter((t) => t !== 'schema_migrations')
+        .map((t) => ({ t, columns: columnsOf(db, t) })),
+    );
+    const copied = await f.inDb((db) =>
+      v1Tables.map(({ t, columns }) => ({
+        t,
+        columns,
+        rows: db.all<Record<string, SqlParam>>(
+          `SELECT ${columns.map((c) => `"${c}"`).join(', ')} FROM "${t}" ORDER BY rowid`,
+        ),
+      })),
+    );
+    await inDb(name, (db) =>
+      db.tx(() => {
+        for (const { t } of copied) db.run(`DELETE FROM "${t}"`);
+        // users first: scrobbles and follows reference it.
+        const ordered = [...copied].sort((a, b) => Number(b.t === 'users') - Number(a.t === 'users'));
+        for (const { t, columns, rows } of ordered) {
+          const sql = `INSERT INTO "${t}"(${columns.map((c) => `"${c}"`).join(', ')}) VALUES (${columns.map(() => '?').join(', ')})`;
+          for (const row of rows) db.run(sql, ...columns.map((c) => row[c] ?? null));
+        }
+      }),
+    );
 
     const before = await inDb(name, (db) => {
       const tables = tableNames(db);
@@ -1041,7 +1073,8 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
     expect(after.newTablesEmpty).toEqual([]);
 
     // The production history module still reads the migrated rows.
-    const page = await f.index.history({ did: fixture.users.Alice.did, limit: 50 });
+    const migrated = makeLocalIndex({ stub: stubFor(name), clock: fixedClock() }, { history });
+    const page = await migrated.history({ did: fixture.users.Alice.did, limit: 50 });
     expect(page.rows.map((r) => r.rkey)).toEqual(fixture.expected.aliceHistory);
   });
 

@@ -626,9 +626,11 @@ class NodeWavesTests(unittest.TestCase):
                 self.assertEqual(pending.get(case), row[1], case)
             else:
                 self.assertNotIn(case, pending)
-        self.assertEqual(len(pending), 38)
+        # N3-11 renamed the M1.1.1/version_policy target to the four-collection title it declares in wave 3.
+        self.assertEqual(pending.get('M1.1.1/version_policy'), 'N3-11')
+        self.assertEqual(len(pending), 39)
         self.assertIn('PASS case map: 258 unique cases', stdout)
-        self.assertIn('every referenced test file and name of node waves <= 0 exists; 38 targets of later node waves pending', stdout)
+        self.assertIn('every referenced test file and name of node waves <= 0 exists; 39 targets of later node waves pending', stdout)
 
 
 def case_map_with(base, case, target, reason):

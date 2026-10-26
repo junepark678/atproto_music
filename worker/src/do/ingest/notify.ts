@@ -43,8 +43,10 @@
 //       The 1,024 pending cap full → `queue_full`.
 //
 // recordStatus(m, uri, now?) — N2, one synchronous read:
-//   - `indexed`: a visible projection row (a scrobble, or a follow, whose owner
-//     is a visible user, read/visibility.ts) with its verified cid and revision;
+//   - `indexed`: a visible projection row (a scrobble, a follow or a love,
+//     ADR 0005 §6.3, whose owner is a visible user, read/visibility.ts) with
+//     its verified cid and revision (a love's revision is its record_state
+//     revision: `loves` has no revision column);
 //   - `pending`: a hint for this URI, or an open (pending, running or failed)
 //     snapshot job for its DID, exists;
 //   - `absent` (revision) or `excluded` (cid, revision, reason): record_state;
@@ -242,6 +244,9 @@ const VISIBLE_ROW = `
   SELECT s.cid, s.revision FROM ${visibleScrobblesFrom('s', 'u')} WHERE s.uri = ?
   UNION ALL
   SELECT f.cid, f.revision FROM follows f WHERE f.uri = ? AND ${visibleDid('f.actor', 'fa')}
+  UNION ALL
+  SELECT l.cid, r.revision FROM loves l JOIN record_state r ON r.uri = l.uri
+    WHERE l.uri = ? AND r.state = 'present' AND ${visibleDid('l.did', 'la')}
   LIMIT 1`;
 
 /** N2: the indexing state of one record URI (see the header). */
@@ -253,7 +258,7 @@ export function recordStatus(m: ModuleDeps, uri: string, now: number = m.clock.n
   const did = parsed.did;
   const idx = indexing(db, now, { did, mode: m.config.ingestMode });
 
-  const row = db.one<VisibleRow>(VISIBLE_ROW, uri, uri);
+  const row = db.one<VisibleRow>(VISIBLE_ROW, uri, uri, uri);
   if (row !== null) return { uri, state: 'indexed', cid: row.cid, revision: row.revision, indexing: idx };
 
   const pending =
