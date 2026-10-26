@@ -1,9 +1,14 @@
-name: Rust scaffold
+name: Rust backend
 on:
   push:
   pull_request:
 permissions:
   contents: read
+env:
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  CARGO_PROFILE_DEV_INCREMENTAL: "false"
+  CARGO_PROFILE_TEST_INCREMENTAL: "false"
 jobs:
   check:
     runs-on: ubuntu-24.04
@@ -11,32 +16,41 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - name: Install pinned Rust
         run: rustup show
+      - name: Install pinned contract validator
+        run: |
+          python3 -m venv work/contracts-venv
+          work/contracts-venv/bin/python -m pip install -r api/requirements-contracts.txt
+          echo "$PWD/work/contracts-venv/bin" >> "$GITHUB_PATH"
       - name: Check workspace
         run: bash scripts/check.sh
+      - name: Verify checks reject formatting and assertion failures
+        run: python3 scripts/test_ci.py
       - name: Build and smoke-test host executable
         run: |
           cargo build --locked -p atmusic-server
           python3 scripts/smoke.py target/debug/atmusic
-  static-linux:
+          python3 scripts/test_smoke.py
+  # TypeScript Workers rebuild (ADR 0004). The Rust `check` job above stays
+  # unchanged as the golden-vector oracle; the static-linux job was removed (ADR §12).
+  ts:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-      - name: Install musl build tools
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
-      - name: Install pinned Rust
-        run: rustup show
-      - name: Build static executable
-        run: cargo build --locked --release --target x86_64-unknown-linux-musl -p atmusic-server
-      - name: Verify static packaging and HTTP
-        run: |
-          binary=target/x86_64-unknown-linux-musl/release/atmusic
-          if readelf -l "$binary" | grep -q INTERP; then exit 1; fi
-          if readelf -d "$binary" | grep -q NEEDED; then exit 1; fi
-          python3 scripts/smoke.py "$binary"
-          (cd "$(dirname "$binary")" && sha256sum atmusic > atmusic.sha256)
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - name: Install pinned Node (.nvmrc)
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          name: atmusic-linux-x86_64-musl
-          path: |
-            target/x86_64-unknown-linux-musl/release/atmusic
-            target/x86_64-unknown-linux-musl/release/atmusic.sha256
+          node-version-file: .nvmrc
+          cache: npm
+      - name: Install pinned contract validator
+        run: |
+          python3 -m venv .venv
+          .venv/bin/python -m pip install -r api/requirements-contracts.txt
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Install pinned actionlint (checked by the TypeScript gate)
+        run: |
+          # go install verifies the module against sum.golang.org.
+          GOBIN="$RUNNER_TEMP/bin" go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: TypeScript gate
+        run: bash scripts/check-ts.sh

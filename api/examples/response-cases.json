@@ -1,0 +1,318 @@
+[
+  {
+    "method": "GET",
+    "path": "/health/live",
+    "status": 200,
+    "example": "live"
+  },
+  {
+    "method": "GET",
+    "path": "/health/ready",
+    "status": 200,
+    "example": "ready"
+  },
+  {
+    "method": "GET",
+    "path": "/health/ready",
+    "status": 503,
+    "example": "error-503"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/meta",
+    "status": 200,
+    "example": "meta"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/meta",
+    "status": 429,
+    "example": "error-429"
+  },
+  {
+    "method": "GET",
+    "path": "/oauth/client-metadata.json",
+    "status": 200,
+    "example": "oauth-metadata"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/resolve",
+    "status": 200,
+    "example": "resolve"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/resolve",
+    "status": 404,
+    "example": "error-404"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/resolve",
+    "status": 422,
+    "example": "error-422"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/resolve",
+    "status": 429,
+    "example": "error-429"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/resolve",
+    "status": 502,
+    "example": "error-502"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/scrobbles/{id}",
+    "status": 200,
+    "example": "scrobble"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/scrobbles/{id}",
+    "status": 404,
+    "example": "error-404"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/scrobbles/{id}",
+    "status": 422,
+    "example": "error-422"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/scrobbles/{id}",
+    "status": 429,
+    "example": "error-429"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/users/{did}/scrobbles",
+    "status": 200,
+    "example": "scrobble-page"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/users/{did}/scrobbles",
+    "status": 400,
+    "example": "error-400"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/users/{did}/scrobbles",
+    "status": 422,
+    "example": "error-422"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/users/{did}/scrobbles",
+    "status": 429,
+    "example": "error-429"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/feed",
+    "status": 200,
+    "example": "scrobble-page"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/feed",
+    "status": 400,
+    "example": "error-400"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/feed",
+    "status": 422,
+    "example": "error-422"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/feed",
+    "status": 429,
+    "example": "error-429"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/users/{did}/profile",
+    "status": 200,
+    "example": "profile"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/users/{did}/profile",
+    "status": 404,
+    "example": "error-404"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/users/{did}/profile",
+    "status": 422,
+    "example": "error-422"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/users/{did}/profile",
+    "status": 429,
+    "example": "error-429"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/users/{did}/stats",
+    "status": 200,
+    "example": "stats"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/users/{did}/stats",
+    "status": 422,
+    "example": "error-422"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/users/{did}/stats",
+    "status": 429,
+    "example": "error-429"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/users/{did}/following",
+    "status": 200,
+    "example": "follow-page"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/users/{did}/following",
+    "status": 400,
+    "example": "error-400"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/users/{did}/following",
+    "status": 422,
+    "example": "error-422"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/users/{did}/following",
+    "status": 429,
+    "example": "error-429"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/users/{did}/followers",
+    "status": 200,
+    "example": "follow-page"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/users/{did}/followers",
+    "status": 400,
+    "example": "error-400"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/users/{did}/followers",
+    "status": 422,
+    "example": "error-422"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/users/{did}/followers",
+    "status": 429,
+    "example": "error-429"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/users/{did}/export",
+    "status": 200,
+    "example": "export",
+    "headers": {
+      "Content-Disposition": "attachment; filename=\"music-export.json\"",
+      "Cache-Control": "no-store"
+    }
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/users/{did}/export",
+    "status": 404,
+    "example": "error-404"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/users/{did}/export",
+    "status": 422,
+    "example": "error-422"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/users/{did}/export",
+    "status": 429,
+    "example": "error-429"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/notify",
+    "status": 202,
+    "example": "notify"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/notify",
+    "status": 400,
+    "example": "error-400"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/notify",
+    "status": 413,
+    "example": "error-413"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/notify",
+    "status": 422,
+    "example": "error-422"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/notify",
+    "status": 429,
+    "example": "error-429",
+    "headers": {
+      "Retry-After": "20"
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/notify",
+    "status": 503,
+    "example": "error-queue-full"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/records/status",
+    "status": 200,
+    "example": "record-status",
+    "headers": {
+      "Cache-Control": "no-store"
+    }
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/records/status",
+    "status": 422,
+    "example": "error-422"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/records/status",
+    "status": 429,
+    "example": "error-429"
+  }
+]

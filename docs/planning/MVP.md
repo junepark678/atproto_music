@@ -2,11 +2,13 @@
 
 Status: published and verified on GitHub. All 121 issues are published and verified: seven milestone parents, 28 coordination subissues, and 86 implementation leaves. All 114 subissue relationships, milestone assignments, leaf test matrices and native leaf dependency relationships were read back from GitHub.
 
+Amendment status: [ADR 0004](../adr/0004-cloudflare-workers.md) (Cloudflare Workers only) amends this plan as listed in its §9. Each amended passage below cites its amendment id (A1–A20, N1–N4, or D for the §9.3 dropped list). The per-leaf issue amendment texts are drafted in [AMENDMENTS-workers.md](AMENDMENTS-workers.md); publishing them to GitHub is an owner action and has not happened.
+
 ## Scope and decisions
 
-Build a Last.fm-style music listening application with public scrobbles, listening history, top artists/tracks/albums, profiles, music follows, and chronological global/following feeds. Existing AT Protocol accounts sign in via OAuth; their own external PDS stores their authoritative records. Our service is an AppView/indexer and write client, not a PDS or relay. Federation means interoperable AT records and ingestion from external writers, not a proprietary peer-to-peer database protocol.
+Build a Last.fm-style music listening application with public scrobbles, listening history, top artists/tracks/albums, profiles, music follows, and chronological global/following feeds. Existing AT Protocol accounts sign in via OAuth; their own external PDS stores their authoritative records. Our service is an AppView/indexer, not a PDS or relay; the SPA is our write client (A2). Federation means interoperable AT records and ingestion from external writers, not a proprietary peer-to-peer database protocol.
 
-Use one Rust HTTP process with embedded SQLite, embedded frontend assets, and an x86_64 Linux musl release executable. The user withdrew dynamic linking from the request; it is deferred. Preact SPA is in scope but lower priority: implementation starts after M6 backend acceptance. Define its API contract in M1. Use a reverse proxy for public HTTPS and provide an encryption key through operator configuration. SQLite is single-instance; scaling to multiple writers is deferred.
+Deploy one Cloudflare Worker with one SQLite-backed Durable Object, Workers Static Assets for the frontend, one Cron Trigger, the `CURSOR_KEY` secret, and a custom domain on an owned zone (A1). The Preact SPA is in scope and is the write client; its write path is core and starts in Wave 1, while browser end-to-end tests follow backend composition (A14). Define its API contract in M1. The Durable Object is single-instance; scaling to multiple writers is deferred.
 
 No recommendation engine, audio streaming/playback, hosted PDS/account creation, Last.fm API compatibility, Spotify/desktop player integrations, bulk historical imports, likes/comments/reposts, or native apps in this MVP. Manual scrobbling and externally published records are the first input paths. No external music catalog dependency is required.
 
@@ -15,36 +17,39 @@ No recommendation engine, audio streaming/playback, hosted PDS/account creation,
 - Production lexicon prefix must be an owner-controlled reverse-domain NSID. com.example.atmusic is fixture-only; do not publish public records under it. M1.1 explicitly tracks owner namespace selection as a required release prerequisite, without inventing ownership.
 - Collections are <prefix>.scrobble and <prefix>.follow; lexicons use schema version 1. A follow contains subject (DID) and createdAt (UTC RFC3339). A scrobble contains artist (1–256 Unicode scalar values and at most 1,024 UTF-8 bytes), track (same limits), listenedAt, createdAt, optional album (same limits), optional durationSeconds (integer 1–86,400), and optional recordingMbid (UUID). Trim required strings and reject empty values. Artist is one credited display string in v1; multi-artist structured identities are deferred.
 - listenedAt and createdAt are UTC RFC3339 timestamps. Reject timestamps more than five minutes ahead of server time; accept historical listens back to 1970-01-01. Validate ingestion against event receipt time rather than replay wall time. Remote malformed records are excluded with a reason metric. No duration threshold is enforced: scrobble records assert completed listening, and the client owns that judgment.
-- Use DID for users and AT URI for public record identity. CID/repository revision are version evidence. Each legitimate record counts as one listen; repeated plays at equal timestamps are allowed. Transport deduplication uses AT URI and owner-scoped request idempotency, not artist/title/time heuristics.
-- Local operation IDs are opaque random identifiers, distinct from AT URIs. POST requires Idempotency-Key (1–128 ASCII printable characters). Persist the payload digest/key with operation state until the account is disconnected. Derive ownership from the authenticated session, never the payload.
-- Schema-valid verified repository records are public source of truth. A local queue acknowledgement is not a published scrobble. Updates/deletes adjust the index. Local pending deletion hides a record immediately while upstream failure remains visible to the owner.
+- Use DID for users and AT URI for public record identity. CID/repository revision are version evidence. Each legitimate record counts as one listen; repeated plays at equal timestamps are allowed. Transport deduplication uses AT URI and a record key allocated once by the client, not artist/title/time heuristics (A11).
+- Local operation IDs are opaque random identifiers, distinct from AT URIs. The SPA outbox allocates each record key once, before the first attempt, and persists it with the canonical payload digest and operation state. A retry or an ambiguous create checks PDS existence and compares the digest; a different payload at that key is the client-side terminal `remote_record_conflict` and is never overwritten (A11). Ownership is the authenticated PDS repository: the AppView derives the owner from the verified repository DID, never the payload.
+- Schema-valid verified repository records are public source of truth. A local queue acknowledgement is not a published scrobble. Updates/deletes adjust the index. A pending deletion hides the record immediately in the owner's view through an optimistic SPA overlay, while upstream failure remains visible to the owner; public visibility changes once signed absence is verified, typically within seconds through notify (A13).
 - Normalize grouping strings with Unicode NFKC, full Unicode case-folding, trimming, and collapsed whitespace. Artist key = normalized artist; track key = tuple(normalized artist, normalized track); album key = tuple(normalized artist, normalized album). Missing albums are excluded from album rankings. MBIDs remain unverified optional metadata, not primary grouping keys. Retain original display values; choose the newest listen's display text with AT URI tie-break.
 - Music follows use the custom collection, separate from app.bsky.graph.follow. A deterministic record key is 'f' followed by lowercase hex SHA-256(subject DID). Remote duplicate edges collapse to actor/subject; remove an edge only when no active matching record remains.
 - Feed is this application's API over custom AT records. It is not a Bluesky feed-generator skeleton: Bluesky clients expect post records and cannot be assumed to render custom music lexicons. Third-party music clients can use the published lexicons and create compatible records directly.
-- Require a supported relay covering the intended external PDSs. Verify repository signatures, CIDs, and record membership. Historical discovery is limited to known/seeded actors and configured relay coverage. Do not promise global discovery or complete historical coverage.
+- Jetstream commit events (`kinds=commit`), notify, relay `listReposByCollection` and coalescing are hints only; authority comes from a `getRecord` proof or a range snapshot at the current signed head. Gap recovery and discovery remain required (A6). Verify repository signatures, CIDs, and record membership. Historical discovery is limited to known/seeded actors and configured relay coverage. Do not promise global discovery or complete historical coverage.
 
 ## API contract to freeze in M1
 
 Exact endpoint payloads, field names and statuses are fixed in [API.md](API.md); M1.1.4 encodes that document in OpenAPI without independent payload design.
 
-All JSON API routes use /api/v1. Standard errors: {error: {code, message, requestId, fields?}}. GET responses return 200; invalid JSON 400; invalid fields 422; authentication 401; ownership 403; absent resource 404; idempotency conflict 409; oversized input 413; rate limit 429; upstream permanent error 502 when synchronous. Async operation failures are represented in operation status, not fabricated HTTP success. Public collection endpoints have limit default 20/max 100 and opaque cursors. Response schemas must explicitly name every field in M1.1.
+All JSON API routes use /api/v1. Standard errors: {error: {code, message, requestId, fields?}}. GET responses return 200; invalid JSON 400; invalid fields 422; absent resource 404; oversized input 413; rate limit 429; upstream permanent error 502 when synchronous; an accepted notify hint 202; exhausted admission 503 `queue_full` (N1). No route authenticates, owns private state or takes an idempotency key, so the v1.0 statuses 401, 403 and 409 no longer occur (A3, A11, D). Asynchronous indexing is reported by the record status route (N2) and write failures by the SPA outbox state, never by fabricated HTTP success. Public collection endpoints have limit default 20/max 100 and opaque cursors. Response schemas must explicitly name every field in M1.1.
 
 | Area | Routes |
 | --- | --- |
 | Health/config | GET /health/live; GET /health/ready; GET /api/v1/meta |
-| Identity | GET /oauth/client-metadata.json; POST /api/v1/auth/start; GET /api/v1/auth/callback; GET /api/v1/auth/session; POST /api/v1/auth/logout; GET /api/v1/resolve?handle=... |
-| Listening | POST /api/v1/scrobbles; GET /api/v1/scrobbles/{id}; DELETE /api/v1/scrobbles/{id}; GET /api/v1/users/{did}/scrobbles; GET /api/v1/operations/{id} |
-| Read models | GET /api/v1/users/{did}/profile; GET /api/v1/users/{did}/stats?window=all\|7d\|30d\|365d&limit=...; GET /api/v1/feed?scope=global\|following |
-| Social | PUT /api/v1/follows/{did}; DELETE /api/v1/follows/{did}; GET /api/v1/users/{did}/following; GET /api/v1/users/{did}/followers |
-| User controls | GET /api/v1/account/export; DELETE /api/v1/account/local-data |
+| Identity | GET /oauth/client-metadata.json (static asset, A3); GET /api/v1/resolve?handle=... |
+| Listening | GET /api/v1/scrobbles/{id}; GET /api/v1/users/{did}/scrobbles |
+| Read models | GET /api/v1/users/{did}/profile; GET /api/v1/users/{did}/stats?window=all\|7d\|30d\|365d&limit=...; GET /api/v1/feed?scope=global\|following&viewer=... (A8) |
+| Social | GET /api/v1/users/{did}/following; GET /api/v1/users/{did}/followers |
+| User controls | GET /api/v1/users/{did}/export (A9); disconnect is the signed `<prefix>.settings/self` record (A10) |
+| Indexing | POST /api/v1/notify (N1); GET /api/v1/records/status?uri=... (N2) |
 
-All user history/profile/stats and confirmed follows are public. Session, mutation, operation, export, and local-data endpoints require the relevant owner session. Every state-changing session endpoint requires same-origin validation and a CSRF token, except auth/start which validates Origin and creates one-time OAuth state. OAuth callback uses OAuth state validation. Scrobble {id} is the URL-encoded full AT URI. Queue status is pending/succeeded/failed with attempt count, timestamps, and sanitized failure code. Operation lookup returns 403 for a known operation owned by a different signed-in DID and 404 for an absent operation; anonymous requests return 401. Local scrobble input rejects unknown fields with 422. OAuth state expires at exactly 300 seconds. Outbox retry delay is min(300s, exponential base plus uniform jitter from 0 to one quarter of that base); zero injected jitter yields 1s,2s,4s,… . A capped Retry-After can increase that delay.
+The server auth routes, the server scrobble and follow write routes, operation lookup and the two account routes of v1.0 are dropped (ADR 0004 §9.3). Sign-in, scrobbling, deletion and follows happen in the SPA, which writes to the owner's own PDS (A2, A3).
+
+All user history/profile/stats and confirmed follows are public, and so are export, notify and record status; no route reads a session, so there is no CSRF token, Origin rule or private-access matrix (D). The OAuth client runs in the browser: state, PKCE, DPoP and the issuer check belong to `@atproto/oauth-client-browser`, and the callback is the SPA route `/oauth/callback` (A3). Scrobble {id} is the URL-encoded full AT URI. Outbox status in the SPA is pending/succeeded/failed with attempt count, timestamps, and sanitized failure code (A12). Scrobble form input rejects unknown fields before any outbox operation exists. Outbox retry delay is min(300s, exponential base plus uniform jitter from 0 to one quarter of that base); zero injected jitter yields 1s,2s,4s,… . A capped Retry-After can increase that delay.
 
 Statistics return totalScrobbles, distinctArtists, distinctTracks, topArtists, topTracks, topAlbums, window, and asOf. Top lists default to 10/max 100; ties use normalized grouping keys ascending. Feed/history cursors anchor a first-page upper ordering boundary and a last-seen (listenedAt, AT URI) tuple; delete/update visibility follows current state, so this is stable traversal without full historical snapshot isolation. Document this limit; never claim a cursor freezes mutable records.
 
 ## Completion and execution rules
 
-Each implementation leaf specifies a single unit, exact file ownership, named test inputs/outcomes, and dependency links. Milestone parents and the 28 original broad issues are coordination only; implement their linked leaves. Link actual GitHub subissues, not only task-list references. Milestone order is M1 through M7 for closure; leaf dependencies are authoritative and permit prerequisite modules and fixture tasks to start across backend milestones. OAuth fixture/token/session storage precedes callback integration; cursor codec precedes history pagination. Do not infer a blanket start barrier from a milestone number; M7 alone retains the explicit backend acceptance start gate. Do not start frontend implementation before M6.4. No due dates or estimates are invented.
+Each implementation leaf specifies a single unit, exact file ownership, named test inputs/outcomes, and dependency links. Milestone parents and the 28 original broad issues are coordination only; implement their linked leaves. Link actual GitHub subissues, not only task-list references. Milestone order is M1 through M7 for closure; leaf dependencies are authoritative and permit prerequisite modules and fixture tasks to start across backend milestones. OAuth fixture/token/session storage precedes callback integration; cursor codec precedes history pagination. Do not infer a blanket start barrier from a milestone number; M7 alone retains the explicit backend acceptance start gate, now only for its browser end-to-end and live product tests. "Do not start frontend implementation before M6.4" is dropped: the SPA write path is core and starts in Wave 1 of the Workers plan (A14). No due dates or estimates are invented.
 
 An issue is complete only when its deliverables are merged, acceptance checks actually pass, configuration/API changes are documented, and required live results are recorded. Report passed, failed, skipped, and blocked separately. Fixtures establish deterministic correctness; they do not replace required external-PDS/relay/browser compatibility evidence. Tests must exercise meaningful behavior and preserve real runner exit status. Missing domain ownership, OAuth callback HTTPS, test identities, relay access, or operator credentials are concrete blockers, not reasons to silently weaken scope.
 
@@ -80,7 +85,7 @@ Completion gate: Fresh checkout builds, migrates an empty database, starts, and 
 
 - **[[M1.2.1] Pin the Rust workspace, dependencies, and crate boundaries](https://github.com/junepark678/atproto_music/issues/40)** — Cargo.toml; Cargo.lock; rust-toolchain.toml; crates/*/Cargo.toml
 - **[[M1.2.2] Wire formatting, lint, and meaningful-test CI](https://github.com/junepark678/atproto_music/issues/41)** — .github/workflows/ci.yml; scripts/check.sh; crates/server/tests/scaffold.rs
-- **[[M1.2.3] Build and smoke-test a self-contained musl artifact](https://github.com/junepark678/atproto_music/issues/42)** — .github/workflows/ci.yml; scripts/smoke.py; Cargo.toml release profile
+- **[[M1.2.3] Build and smoke-test a self-contained musl artifact](https://github.com/junepark678/atproto_music/issues/42)** — .github/workflows/ci.yml; scripts/smoke.py; Cargo.toml release profile — **Superseded (A19; ADR 0004 §9.3: the musl artifact and smoke tests are dropped; a release is a Worker version id plus a bundle SHA-256).**
 
 #### [[M1.3] Implement SQLite schema, migrations, and repositories](https://github.com/junepark678/atproto_music/issues/4)
 
@@ -93,7 +98,7 @@ Completion gate: Fresh checkout builds, migrates an empty database, starts, and 
 
 - **[[M1.4.1] Implement typed environment configuration and migrate CLI](https://github.com/junepark678/atproto_music/issues/47)** — crates/server/src/config.rs; crates/server/src/main.rs
 - **[[M1.4.2] Implement health, metadata, and uniform HTTP errors](https://github.com/junepark678/atproto_music/issues/48)** — crates/server/src/http/health.rs; crates/server/src/http/error.rs
-- **[[M1.4.3] Add server harness and bounded shutdown](https://github.com/junepark678/atproto_music/issues/49)** — crates/server/tests/common/mod.rs; crates/server/src/shutdown.rs
+- **[[M1.4.3] Add server harness and bounded shutdown](https://github.com/junepark678/atproto_music/issues/49)** — crates/server/tests/common/mod.rs; crates/server/src/shutdown.rs — **Superseded (A18; ADR 0004 §9.3: the SIGTERM drain is dropped; tests use isolated workerd storage, a unique DO name per test and DO eviction for restart).**
 
 ### M2: AT Protocol sign-in and secure sessions
 
@@ -223,31 +228,31 @@ Completion gate: Release executable runs with one persistent data directory and 
 
 #### [[M6.1] Implement asset embedding, configuration, and deployment example](https://github.com/junepark678/atproto_music/issues/27)
 
-- **[[M6.1.1] Embed compile-time assets and implement safe SPA routing](https://github.com/junepark678/atproto_music/issues/98)** — crates/server/src/http/assets.rs; crates/server/assets/; crates/server/build.rs
-- **[[M6.1.2] Validate public-origin and trusted-proxy deployment settings](https://github.com/junepark678/atproto_music/issues/99)** — crates/server/src/config.rs; docs/deployment.md
+- **[[M6.1.1] Embed compile-time assets and implement safe SPA routing](https://github.com/junepark678/atproto_music/issues/98)** — crates/server/src/http/assets.rs; crates/server/assets/; crates/server/build.rs — **Superseded (A1; ADR 0004 §9.3: build.rs embedding is replaced by Workers Static Assets with SPA fallback).**
+- **[[M6.1.2] Validate public-origin and trusted-proxy deployment settings](https://github.com/junepark678/atproto_music/issues/99)** — crates/server/src/config.rs; docs/deployment.md — **Superseded (D, ADR 0004 §9.3: the trusted proxy is replaced by Cloudflare and `CF-Connecting-IP`).**
 - **[[M6.1.3] Document fresh install, upgrade, and restart workflow](https://github.com/junepark678/atproto_music/issues/100)** — docs/deployment.md; config/atmusic.env.example
 
 #### [[M6.2] Add limits, observability, and safe degradation](https://github.com/junepark678/atproto_music/issues/28)
 
 - **[[M6.2.1] Enforce body limits and bounded per-user/IP rates](https://github.com/junepark678/atproto_music/issues/101)** — crates/server/src/http/limits.rs
-- **[[M6.2.2] Expose safe metrics and degrade on upstream outages](https://github.com/junepark678/atproto_music/issues/102)** — crates/server/src/metrics.rs; crates/server/src/http/meta.rs
+- **[[M6.2.2] Expose safe metrics and degrade on upstream outages](https://github.com/junepark678/atproto_music/issues/102)** — crates/server/src/metrics.rs; crates/server/src/http/meta.rs — **Superseded (A16: the Prometheus listener becomes Workers Logs, the `counters` table and `/internal/admin/status`).**
 - **[[M6.2.3] Add reproducible query latency benchmark](https://github.com/junepark678/atproto_music/issues/103)** — scripts/benchmark_read_models.*; docs/benchmarks/read_models.md
 
 #### [[M6.3] Implement database backup, restore, export, and account disconnect](https://github.com/junepark678/atproto_music/issues/29)
 
-- **[[M6.3.1] Implement consistent SQLite backup and verified restore](https://github.com/junepark678/atproto_music/issues/104)** — crates/storage/src/backup.rs; crates/server/src/main.rs; docs/backup.md
+- **[[M6.3.1] Implement consistent SQLite backup and verified restore](https://github.com/junepark678/atproto_music/issues/104)** — crates/storage/src/backup.rs; crates/server/src/main.rs; docs/backup.md — **Superseded (A15: file backup becomes Durable Object point-in-time recovery plus a full rebuild from public repositories).**
 - **[[M6.3.2] Implement owner-only JSON account export](https://github.com/junepark678/atproto_music/issues/105)** — crates/server/src/http/account_export.rs
 - **[[M6.3.3] Implement local-data disconnect and indexing suppression](https://github.com/junepark678/atproto_music/issues/106)** — crates/server/src/http/account_disconnect.rs; crates/storage/src/repositories/disconnect.rs
 
 #### [[M6.4] Add release CI and the backend MVP acceptance run](https://github.com/junepark678/atproto_music/issues/30)
 
-- **[[M6.4.1] Create versioned static release pipeline with checksums](https://github.com/junepark678/atproto_music/issues/107)** — .github/workflows/release.yml; docs/releases.md
+- **[[M6.4.1] Create versioned static release pipeline with checksums](https://github.com/junepark678/atproto_music/issues/107)** — .github/workflows/release.yml; docs/releases.md — **Superseded (A19: the static release pipeline becomes a Worker version (`wrangler versions upload`) with its bundle SHA-256).**
 - **[[M6.4.2] Run packaged backend fault/recovery acceptance](https://github.com/junepark678/atproto_music/issues/108)** — scripts/acceptance/backend.*; docs/verification/backend.md
 - **[[M6.4.3] Record live backend MVP gate and operational limits](https://github.com/junepark678/atproto_music/issues/109)** — docs/verification/backend-live.md; docs/deployment.md
 
 ### M7: Preact SPA and integrated product MVP — lower priority
 
-Implement the browser experience after the backend acceptance gate, using the frozen API contracts and embedded release assets.
+Implement the browser experience after the backend acceptance gate, using the frozen API contracts and embedded release assets. Amended (A14, A1): the SPA scaffold and write path start in Wave 1 of the Workers plan and are served by Workers Static Assets; the browser journey and live product gate still follow backend composition.
 
 Completion gate: A browser user can sign in, submit a scrobble, browse feeds/profiles/history/stats, follow/unfollow, delete their scrobble, export data, and sign out on the packaged binary.
 

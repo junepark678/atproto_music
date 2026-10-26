@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "rate_limited",
+    "message": "The request rate limit was exceeded.",
+    "requestId": "a858325e-7dd0-4b1b-baaa-3b65af37f963"
+  }
+}

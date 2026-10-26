@@ -1,0 +1,2039 @@
+{
+  "description": "Rust oracle validation verdicts. Parse `json` as the request/record body. kind scrobbleInput = the Rust POST /scrobbles path: ScrobbleInput::from_json, then listenedAt canonicalized to UTC with 9 fractional digits and Z (crates/server/src/http/scrobbles/create.rs, before the input digest), then into_record (local SPA input; unknown fields rejected; output is the record that path publishes, createdAt = receipt time); scrobbleRecord = ScrobbleRecord::from_json (remote record; unknown fields ignored; remote spelling kept); followRecord = FollowRecord::from_json; followSubject = FollowRecord::new(subject). Every Rust ValidationError has code invalid_field plus the field name; stage json means serde_json itself refused the document.",
+  "namespacePrefix": "com.example.atmusic",
+  "notes": [
+    "Scalar (256) and byte (1024) limits are checked on the raw value before trimming; trimming uses Unicode White_Space (Rust str::trim): U+0085 is trimmed, U+FEFF/U+200B/U+001F/U+180E are not.",
+    "Because a Unicode scalar is at most 4 UTF-8 bytes, 256 scalars can never exceed 1024 bytes; the byte limit is only reachable together with the scalar limit.",
+    "The +300 s bound is inclusive at nanosecond precision: digits beyond the ninth fractional digit at exactly receipt+300 s reject when nonzero."
+  ],
+  "receiptTime": "2026-01-15T12:00:00Z",
+  "source": "crates/core/examples/export_goldens.rs",
+  "vectors": [
+    {
+      "error": null,
+      "id": "artist_256_ascii_scalars",
+      "json": "{\"artist\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"listenedAt\":\"2026-01-15T11:00:00Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": {
+        "$type": "com.example.atmusic.scrobble",
+        "artist": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "createdAt": "2026-01-15T12:00:00Z",
+        "listenedAt": "2026-01-15T11:00:00.000000000Z",
+        "track": "Jóga"
+      },
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "accept"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "artist",
+        "message": "expected 1–256 Unicode scalars and at most 1024 UTF-8 bytes, with nonempty trimmed text",
+        "stage": "validation"
+      },
+      "id": "artist_257_ascii_scalars",
+      "json": "{\"artist\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"listenedAt\":\"2026-01-15T11:00:00Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": null,
+      "id": "artist_256_two_byte_scalars_512_bytes",
+      "json": "{\"artist\":\"éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé\",\"listenedAt\":\"2026-01-15T11:00:00Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": {
+        "$type": "com.example.atmusic.scrobble",
+        "artist": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé",
+        "createdAt": "2026-01-15T12:00:00Z",
+        "listenedAt": "2026-01-15T11:00:00.000000000Z",
+        "track": "Jóga"
+      },
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "accept"
+    },
+    {
+      "error": null,
+      "id": "artist_256_astral_scalars_1024_bytes",
+      "json": "{\"artist\":\"😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀\",\"listenedAt\":\"2026-01-15T11:00:00Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": {
+        "$type": "com.example.atmusic.scrobble",
+        "artist": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀",
+        "createdAt": "2026-01-15T12:00:00Z",
+        "listenedAt": "2026-01-15T11:00:00.000000000Z",
+        "track": "Jóga"
+      },
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "accept"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "artist",
+        "message": "expected 1–256 Unicode scalars and at most 1024 UTF-8 bytes, with nonempty trimmed text",
+        "stage": "validation"
+      },
+      "id": "artist_257_astral_scalars_1028_bytes",
+      "json": "{\"artist\":\"😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀\",\"listenedAt\":\"2026-01-15T11:00:00Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": null,
+      "id": "artist_255_astral_plus_ascii_1021_bytes",
+      "json": "{\"artist\":\"😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀a\",\"listenedAt\":\"2026-01-15T11:00:00Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": {
+        "$type": "com.example.atmusic.scrobble",
+        "artist": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀a",
+        "createdAt": "2026-01-15T12:00:00Z",
+        "listenedAt": "2026-01-15T11:00:00.000000000Z",
+        "track": "Jóga"
+      },
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "accept"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "artist",
+        "message": "expected 1–256 Unicode scalars and at most 1024 UTF-8 bytes, with nonempty trimmed text",
+        "stage": "validation"
+      },
+      "id": "artist_padded_raw_257_trimmed_255",
+      "json": "{\"artist\":\" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \",\"listenedAt\":\"2026-01-15T11:00:00Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": null,
+      "id": "artist_padded_raw_256_trimmed_254",
+      "json": "{\"artist\":\" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \",\"listenedAt\":\"2026-01-15T11:00:00Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": {
+        "$type": "com.example.atmusic.scrobble",
+        "artist": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "createdAt": "2026-01-15T12:00:00Z",
+        "listenedAt": "2026-01-15T11:00:00.000000000Z",
+        "track": "Jóga"
+      },
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "accept"
+    },
+    {
+      "error": null,
+      "id": "track_256_ascii_scalars",
+      "json": "{\"artist\":\"Björk\",\"listenedAt\":\"2026-01-15T11:00:00Z\",\"track\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
+      "kind": "scrobbleInput",
+      "output": {
+        "$type": "com.example.atmusic.scrobble",
+        "artist": "Björk",
+        "createdAt": "2026-01-15T12:00:00Z",
+        "listenedAt": "2026-01-15T11:00:00.000000000Z",
+        "track": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "accept"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "track",
+        "message": "expected 1–256 Unicode scalars and at most 1024 UTF-8 bytes, with nonempty trimmed text",
+        "stage": "validation"
+      },
+      "id": "track_257_ascii_scalars",
+      "json": "{\"artist\":\"Björk\",\"listenedAt\":\"2026-01-15T11:00:00Z\",\"track\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
+      "kind": "scrobbleInput",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": null,
+      "id": "album_256_astral_scalars_1024_bytes",
+      "json": "{\"album\":\"😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀\",\"artist\":\"Björk\",\"listenedAt\":\"2026-01-15T11:00:00Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": {
+        "$type": "com.example.atmusic.scrobble",
+        "album": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀",
+        "artist": "Björk",
+        "createdAt": "2026-01-15T12:00:00Z",
+        "listenedAt": "2026-01-15T11:00:00.000000000Z",
+        "track": "Jóga"
+      },
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "accept"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "album",
+        "message": "expected 1–256 Unicode scalars and at most 1024 UTF-8 bytes, with nonempty trimmed text",
+        "stage": "validation"
+      },
+      "id": "album_257_ascii_scalars",
+      "json": "{\"album\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"artist\":\"Björk\",\"listenedAt\":\"2026-01-15T11:00:00Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "album",
+        "message": "expected 1–256 Unicode scalars and at most 1024 UTF-8 bytes, with nonempty trimmed text",
+        "stage": "validation"
+      },
+      "id": "album_empty",
+      "json": "{\"album\":\"\",\"artist\":\"Björk\",\"listenedAt\":\"2026-01-15T11:00:00Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "album",
+        "message": "expected 1–256 Unicode scalars and at most 1024 UTF-8 bytes, with nonempty trimmed text",
+        "stage": "validation"
+      },
+      "id": "album_whitespace_only",
+      "json": "{\"album\":\" 　\",\"artist\":\"Björk\",\"listenedAt\":\"2026-01-15T11:00:00Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "artist",
+        "message": "expected 1–256 Unicode scalars and at most 1024 UTF-8 bytes, with nonempty trimmed text",
+        "stage": "validation"
+      },
+      "id": "artist_empty",
+      "json": "{\"artist\":\"\",\"listenedAt\":\"2026-01-15T11:00:00Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "artist",
+        "message": "expected 1–256 Unicode scalars and at most 1024 UTF-8 bytes, with nonempty trimmed text",
+        "stage": "validation"
+      },
+      "id": "artist_spaces_only",
+      "json": "{\"artist\":\"   \",\"listenedAt\":\"2026-01-15T11:00:00Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "artist",
+        "message": "expected 1–256 Unicode scalars and at most 1024 UTF-8 bytes, with nonempty trimmed text",
+        "stage": "validation"
+      },
+      "id": "artist_tab_newline_only",
+      "json": "{\"artist\":\"\\t\\n\\r\",\"listenedAt\":\"2026-01-15T11:00:00Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "artist",
+        "message": "expected 1–256 Unicode scalars and at most 1024 UTF-8 bytes, with nonempty trimmed text",
+        "stage": "validation"
+      },
+      "id": "artist_nel_only",
+      "json": "{\"artist\":\"\",\"listenedAt\":\"2026-01-15T11:00:00Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "artist",
+        "message": "expected 1–256 Unicode scalars and at most 1024 UTF-8 bytes, with nonempty trimmed text",
+        "stage": "validation"
+      },
+      "id": "artist_nbsp_only",
+      "json": "{\"artist\":\" \",\"listenedAt\":\"2026-01-15T11:00:00Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "artist",
+        "message": "expected 1–256 Unicode scalars and at most 1024 UTF-8 bytes, with nonempty trimmed text",
+        "stage": "validation"
+      },
+      "id": "artist_ideographic_space_only",
+      "json": "{\"artist\":\"　\",\"listenedAt\":\"2026-01-15T11:00:00Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "artist",
+        "message": "expected 1–256 Unicode scalars and at most 1024 UTF-8 bytes, with nonempty trimmed text",
+        "stage": "validation"
+      },
+      "id": "artist_line_separator_only",
+      "json": "{\"artist\":\" \",\"listenedAt\":\"2026-01-15T11:00:00Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": null,
+      "id": "artist_bom_only_not_white_space",
+      "json": "{\"artist\":\"﻿\",\"listenedAt\":\"2026-01-15T11:00:00Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": {
+        "$type": "com.example.atmusic.scrobble",
+        "artist": "﻿",
+        "createdAt": "2026-01-15T12:00:00Z",
+        "listenedAt": "2026-01-15T11:00:00.000000000Z",
+        "track": "Jóga"
+      },
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "accept"
+    },
+    {
+      "error": null,
+      "id": "artist_zwsp_only_not_white_space",
+      "json": "{\"artist\":\"​\",\"listenedAt\":\"2026-01-15T11:00:00Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": {
+        "$type": "com.example.atmusic.scrobble",
+        "artist": "​",
+        "createdAt": "2026-01-15T12:00:00Z",
+        "listenedAt": "2026-01-15T11:00:00.000000000Z",
+        "track": "Jóga"
+      },
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "accept"
+    },
+    {
+      "error": null,
+      "id": "artist_unit_separator_only_not_white_space",
+      "json": "{\"artist\":\"\\u001f\",\"listenedAt\":\"2026-01-15T11:00:00Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": {
+        "$type": "com.example.atmusic.scrobble",
+        "artist": "\u001f",
+        "createdAt": "2026-01-15T12:00:00Z",
+        "listenedAt": "2026-01-15T11:00:00.000000000Z",
+        "track": "Jóga"
+      },
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "accept"
+    },
+    {
+      "error": null,
+      "id": "artist_mongolian_vowel_separator_only",
+      "json": "{\"artist\":\"᠎\",\"listenedAt\":\"2026-01-15T11:00:00Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": {
+        "$type": "com.example.atmusic.scrobble",
+        "artist": "᠎",
+        "createdAt": "2026-01-15T12:00:00Z",
+        "listenedAt": "2026-01-15T11:00:00.000000000Z",
+        "track": "Jóga"
+      },
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "accept"
+    },
+    {
+      "error": null,
+      "id": "artist_trimmed_nel_edges",
+      "json": "{\"artist\":\"Björk\",\"listenedAt\":\"2026-01-15T11:00:00Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": {
+        "$type": "com.example.atmusic.scrobble",
+        "artist": "Björk",
+        "createdAt": "2026-01-15T12:00:00Z",
+        "listenedAt": "2026-01-15T11:00:00.000000000Z",
+        "track": "Jóga"
+      },
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "accept"
+    },
+    {
+      "error": null,
+      "id": "artist_trimmed_bom_edges_kept",
+      "json": "{\"artist\":\"﻿Björk﻿\",\"listenedAt\":\"2026-01-15T11:00:00Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": {
+        "$type": "com.example.atmusic.scrobble",
+        "artist": "﻿Björk﻿",
+        "createdAt": "2026-01-15T12:00:00Z",
+        "listenedAt": "2026-01-15T11:00:00.000000000Z",
+        "track": "Jóga"
+      },
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "accept"
+    },
+    {
+      "error": null,
+      "id": "artist_trimmed_mixed_edges",
+      "json": "{\"artist\":\"　  Björk \\t \",\"listenedAt\":\"2026-01-15T11:00:00Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": {
+        "$type": "com.example.atmusic.scrobble",
+        "artist": "Björk",
+        "createdAt": "2026-01-15T12:00:00Z",
+        "listenedAt": "2026-01-15T11:00:00.000000000Z",
+        "track": "Jóga"
+      },
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "accept"
+    },
+    {
+      "error": {
+        "code": "invalid_json",
+        "field": null,
+        "message": "serde_json rejects the document (lone surrogates are not representable as a Rust string)",
+        "stage": "json"
+      },
+      "id": "artist_lone_high_surrogate",
+      "json": "{\"artist\":\"\\ud800\",\"track\":\"Jóga\",\"listenedAt\":\"2026-01-15T11:00:00Z\"}",
+      "kind": "scrobbleInput",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_json",
+        "field": null,
+        "message": "serde_json rejects the document (lone surrogates are not representable as a Rust string)",
+        "stage": "json"
+      },
+      "id": "artist_lone_low_surrogate",
+      "json": "{\"artist\":\"\\udc00\",\"track\":\"Jóga\",\"listenedAt\":\"2026-01-15T11:00:00Z\"}",
+      "kind": "scrobbleInput",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_json",
+        "field": null,
+        "message": "serde_json rejects the document (lone surrogates are not representable as a Rust string)",
+        "stage": "json"
+      },
+      "id": "track_embedded_lone_surrogate",
+      "json": "{\"artist\":\"Björk\",\"track\":\"a\\ud83db\",\"listenedAt\":\"2026-01-15T11:00:00Z\"}",
+      "kind": "scrobbleInput",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_json",
+        "field": null,
+        "message": "serde_json rejects the document (lone surrogates are not representable as a Rust string)",
+        "stage": "json"
+      },
+      "id": "album_reversed_surrogate_pair",
+      "json": "{\"artist\":\"Björk\",\"track\":\"Jóga\",\"album\":\"\\ude00\\ud83d\",\"listenedAt\":\"2026-01-15T11:00:00Z\"}",
+      "kind": "scrobbleInput",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_json",
+        "field": null,
+        "message": "serde_json rejects the document (lone surrogates are not representable as a Rust string)",
+        "stage": "json"
+      },
+      "id": "record_artist_lone_surrogate",
+      "json": "{\"$type\":\"com.example.atmusic.scrobble\",\"artist\":\"\\ud800\",\"track\":\"Jóga\",\"listenedAt\":\"2026-01-15T11:00:00Z\",\"createdAt\":\"2026-01-15T11:00:00Z\"}",
+      "kind": "scrobbleRecord",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": null,
+      "id": "artist_valid_surrogate_pair",
+      "json": "{\"artist\":\"😀\",\"track\":\"Jóga\",\"listenedAt\":\"2026-01-15T11:00:00Z\"}",
+      "kind": "scrobbleInput",
+      "output": {
+        "$type": "com.example.atmusic.scrobble",
+        "artist": "😀",
+        "createdAt": "2026-01-15T12:00:00Z",
+        "listenedAt": "2026-01-15T11:00:00.000000000Z",
+        "track": "Jóga"
+      },
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "accept"
+    },
+    {
+      "error": null,
+      "id": "listened_at_receipt",
+      "json": "{\"artist\":\"Björk\",\"listenedAt\":\"2026-01-15T12:00:00Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": {
+        "$type": "com.example.atmusic.scrobble",
+        "artist": "Björk",
+        "createdAt": "2026-01-15T12:00:00Z",
+        "listenedAt": "2026-01-15T12:00:00.000000000Z",
+        "track": "Jóga"
+      },
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "accept"
+    },
+    {
+      "error": null,
+      "id": "listened_at_plus_300s",
+      "json": "{\"artist\":\"Björk\",\"listenedAt\":\"2026-01-15T12:05:00Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": {
+        "$type": "com.example.atmusic.scrobble",
+        "artist": "Björk",
+        "createdAt": "2026-01-15T12:00:00Z",
+        "listenedAt": "2026-01-15T12:05:00.000000000Z",
+        "track": "Jóga"
+      },
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "accept"
+    },
+    {
+      "error": null,
+      "id": "listened_at_plus_300s_zero_fraction",
+      "json": "{\"artist\":\"Björk\",\"listenedAt\":\"2026-01-15T12:05:00.000000000Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": {
+        "$type": "com.example.atmusic.scrobble",
+        "artist": "Björk",
+        "createdAt": "2026-01-15T12:00:00Z",
+        "listenedAt": "2026-01-15T12:05:00.000000000Z",
+        "track": "Jóga"
+      },
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "accept"
+    },
+    {
+      "error": null,
+      "id": "listened_at_plus_300s_zero_subnanosecond_tail",
+      "json": "{\"artist\":\"Björk\",\"listenedAt\":\"2026-01-15T12:05:00.0000000000Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": {
+        "$type": "com.example.atmusic.scrobble",
+        "artist": "Björk",
+        "createdAt": "2026-01-15T12:00:00Z",
+        "listenedAt": "2026-01-15T12:05:00.000000000Z",
+        "track": "Jóga"
+      },
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "accept"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "listenedAt",
+        "message": "timestamp must be between 1970-01-01 and receipt time plus 300 seconds",
+        "stage": "validation"
+      },
+      "id": "listened_at_plus_300s_plus_1ns",
+      "json": "{\"artist\":\"Björk\",\"listenedAt\":\"2026-01-15T12:05:00.000000001Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "listenedAt",
+        "message": "timestamp must be between 1970-01-01 and receipt time plus 300 seconds",
+        "stage": "validation"
+      },
+      "id": "listened_at_plus_300s_subnanosecond_tail",
+      "json": "{\"artist\":\"Björk\",\"listenedAt\":\"2026-01-15T12:05:00.0000000001Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "listenedAt",
+        "message": "timestamp must be between 1970-01-01 and receipt time plus 300 seconds",
+        "stage": "validation"
+      },
+      "id": "listened_at_plus_301s",
+      "json": "{\"artist\":\"Björk\",\"listenedAt\":\"2026-01-15T12:05:01Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": null,
+      "id": "listened_at_plus_299_999999999s",
+      "json": "{\"artist\":\"Björk\",\"listenedAt\":\"2026-01-15T12:04:59.999999999Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": {
+        "$type": "com.example.atmusic.scrobble",
+        "artist": "Björk",
+        "createdAt": "2026-01-15T12:00:00Z",
+        "listenedAt": "2026-01-15T12:04:59.999999999Z",
+        "track": "Jóga"
+      },
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "accept"
+    },
+    {
+      "error": null,
+      "id": "listened_at_epoch",
+      "json": "{\"artist\":\"Björk\",\"listenedAt\":\"1970-01-01T00:00:00Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": {
+        "$type": "com.example.atmusic.scrobble",
+        "artist": "Björk",
+        "createdAt": "2026-01-15T12:00:00Z",
+        "listenedAt": "1970-01-01T00:00:00.000000000Z",
+        "track": "Jóga"
+      },
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "accept"
+    },
+    {
+      "error": null,
+      "id": "listened_at_epoch_fraction",
+      "json": "{\"artist\":\"Björk\",\"listenedAt\":\"1970-01-01T00:00:00.000000001Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": {
+        "$type": "com.example.atmusic.scrobble",
+        "artist": "Björk",
+        "createdAt": "2026-01-15T12:00:00Z",
+        "listenedAt": "1970-01-01T00:00:00.000000001Z",
+        "track": "Jóga"
+      },
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "accept"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "listenedAt",
+        "message": "timestamp must be between 1970-01-01 and receipt time plus 300 seconds",
+        "stage": "validation"
+      },
+      "id": "listened_at_before_epoch_1s",
+      "json": "{\"artist\":\"Björk\",\"listenedAt\":\"1969-12-31T23:59:59Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "listenedAt",
+        "message": "timestamp must be between 1970-01-01 and receipt time plus 300 seconds",
+        "stage": "validation"
+      },
+      "id": "listened_at_before_epoch_1ns",
+      "json": "{\"artist\":\"Björk\",\"listenedAt\":\"1969-12-31T23:59:59.999999999Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": null,
+      "id": "listened_at_utc_numeric_offset",
+      "json": "{\"artist\":\"Björk\",\"listenedAt\":\"2026-01-15T11:00:00+00:00\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": {
+        "$type": "com.example.atmusic.scrobble",
+        "artist": "Björk",
+        "createdAt": "2026-01-15T12:00:00Z",
+        "listenedAt": "2026-01-15T11:00:00.000000000Z",
+        "track": "Jóga"
+      },
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "accept"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "listenedAt",
+        "message": "expected an AT Protocol UTC datetime",
+        "stage": "validation"
+      },
+      "id": "listened_at_negative_zero_offset",
+      "json": "{\"artist\":\"Björk\",\"listenedAt\":\"2026-01-15T11:00:00-00:00\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "listenedAt",
+        "message": "expected an AT Protocol UTC datetime",
+        "stage": "validation"
+      },
+      "id": "listened_at_non_utc_offset",
+      "json": "{\"artist\":\"Björk\",\"listenedAt\":\"2026-01-15T12:00:00+01:00\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "listenedAt",
+        "message": "expected an AT Protocol UTC datetime",
+        "stage": "validation"
+      },
+      "id": "listened_at_lowercase_t",
+      "json": "{\"artist\":\"Björk\",\"listenedAt\":\"2026-01-15t11:00:00Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "listenedAt",
+        "message": "expected an AT Protocol UTC datetime",
+        "stage": "validation"
+      },
+      "id": "listened_at_lowercase_z",
+      "json": "{\"artist\":\"Björk\",\"listenedAt\":\"2026-01-15T11:00:00z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "listenedAt",
+        "message": "expected an AT Protocol UTC datetime",
+        "stage": "validation"
+      },
+      "id": "listened_at_space_separator",
+      "json": "{\"artist\":\"Björk\",\"listenedAt\":\"2026-01-15 11:00:00Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "listenedAt",
+        "message": "expected an AT Protocol UTC datetime",
+        "stage": "validation"
+      },
+      "id": "listened_at_no_offset",
+      "json": "{\"artist\":\"Björk\",\"listenedAt\":\"2026-01-15T11:00:00\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "listenedAt",
+        "message": "expected an AT Protocol UTC datetime",
+        "stage": "validation"
+      },
+      "id": "listened_at_no_seconds",
+      "json": "{\"artist\":\"Björk\",\"listenedAt\":\"2026-01-15T11:00Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "listenedAt",
+        "message": "expected an AT Protocol UTC datetime",
+        "stage": "validation"
+      },
+      "id": "listened_at_leap_second",
+      "json": "{\"artist\":\"Björk\",\"listenedAt\":\"2016-12-31T23:59:60Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": null,
+      "id": "listened_at_millis",
+      "json": "{\"artist\":\"Björk\",\"listenedAt\":\"2026-01-15T11:00:00.123Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": {
+        "$type": "com.example.atmusic.scrobble",
+        "artist": "Björk",
+        "createdAt": "2026-01-15T12:00:00Z",
+        "listenedAt": "2026-01-15T11:00:00.123000000Z",
+        "track": "Jóga"
+      },
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "accept"
+    },
+    {
+      "error": null,
+      "id": "listened_at_nanos",
+      "json": "{\"artist\":\"Björk\",\"listenedAt\":\"2026-01-15T11:00:00.123456789Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": {
+        "$type": "com.example.atmusic.scrobble",
+        "artist": "Björk",
+        "createdAt": "2026-01-15T12:00:00Z",
+        "listenedAt": "2026-01-15T11:00:00.123456789Z",
+        "track": "Jóga"
+      },
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "accept"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "listenedAt",
+        "message": "expected a UTC RFC3339 timestamp",
+        "stage": "validation"
+      },
+      "id": "listened_at_invalid_date",
+      "json": "{\"artist\":\"Björk\",\"listenedAt\":\"2026-02-30T11:00:00Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "listenedAt",
+        "message": "expected an AT Protocol UTC datetime",
+        "stage": "validation"
+      },
+      "id": "listened_at_empty",
+      "json": "{\"artist\":\"Björk\",\"listenedAt\":\"\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "listenedAt",
+        "message": "required string field",
+        "stage": "validation"
+      },
+      "id": "listened_at_number",
+      "json": "{\"artist\":\"Björk\",\"listenedAt\":1768478400,\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "durationSeconds",
+        "message": "expected an integer between 1 and 86400",
+        "stage": "validation"
+      },
+      "id": "duration_0",
+      "json": "{\"artist\":\"Björk\",\"durationSeconds\":0,\"listenedAt\":\"2026-01-15T11:00:00Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": null,
+      "id": "duration_1",
+      "json": "{\"artist\":\"Björk\",\"durationSeconds\":1,\"listenedAt\":\"2026-01-15T11:00:00Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": {
+        "$type": "com.example.atmusic.scrobble",
+        "artist": "Björk",
+        "createdAt": "2026-01-15T12:00:00Z",
+        "durationSeconds": 1,
+        "listenedAt": "2026-01-15T11:00:00.000000000Z",
+        "track": "Jóga"
+      },
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "accept"
+    },
+    {
+      "error": null,
+      "id": "duration_86400",
+      "json": "{\"artist\":\"Björk\",\"durationSeconds\":86400,\"listenedAt\":\"2026-01-15T11:00:00Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": {
+        "$type": "com.example.atmusic.scrobble",
+        "artist": "Björk",
+        "createdAt": "2026-01-15T12:00:00Z",
+        "durationSeconds": 86400,
+        "listenedAt": "2026-01-15T11:00:00.000000000Z",
+        "track": "Jóga"
+      },
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "accept"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "durationSeconds",
+        "message": "expected an integer between 1 and 86400",
+        "stage": "validation"
+      },
+      "id": "duration_86401",
+      "json": "{\"artist\":\"Björk\",\"durationSeconds\":86401,\"listenedAt\":\"2026-01-15T11:00:00Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "durationSeconds",
+        "message": "expected an integer between 1 and 86400",
+        "stage": "validation"
+      },
+      "id": "duration_negative",
+      "json": "{\"artist\":\"Björk\",\"durationSeconds\":-1,\"listenedAt\":\"2026-01-15T11:00:00Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "durationSeconds",
+        "message": "expected an integer between 1 and 86400",
+        "stage": "validation"
+      },
+      "id": "duration_fractional",
+      "json": "{\"artist\":\"Björk\",\"durationSeconds\":1.5,\"listenedAt\":\"2026-01-15T11:00:00Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "durationSeconds",
+        "message": "expected an integer between 1 and 86400",
+        "stage": "validation"
+      },
+      "id": "duration_integral_float",
+      "json": "{\"artist\":\"Björk\",\"durationSeconds\":60.0,\"listenedAt\":\"2026-01-15T11:00:00Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "durationSeconds",
+        "message": "expected an integer between 1 and 86400",
+        "stage": "validation"
+      },
+      "id": "duration_string",
+      "json": "{\"artist\":\"Björk\",\"durationSeconds\":\"60\",\"listenedAt\":\"2026-01-15T11:00:00Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "durationSeconds",
+        "message": "expected an integer between 1 and 86400",
+        "stage": "validation"
+      },
+      "id": "duration_u32_overflow",
+      "json": "{\"artist\":\"Björk\",\"durationSeconds\":4294967296,\"listenedAt\":\"2026-01-15T11:00:00Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "durationSeconds",
+        "message": "expected an integer between 1 and 86400",
+        "stage": "validation"
+      },
+      "id": "duration_null",
+      "json": "{\"artist\":\"Björk\",\"durationSeconds\":null,\"listenedAt\":\"2026-01-15T11:00:00Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": null,
+      "id": "mbid_lower_hyphenated",
+      "json": "{\"artist\":\"Björk\",\"listenedAt\":\"2026-01-15T11:00:00Z\",\"recordingMbid\":\"3f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2d10\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": {
+        "$type": "com.example.atmusic.scrobble",
+        "artist": "Björk",
+        "createdAt": "2026-01-15T12:00:00Z",
+        "listenedAt": "2026-01-15T11:00:00.000000000Z",
+        "recordingMbid": "3f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2d10",
+        "track": "Jóga"
+      },
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "accept"
+    },
+    {
+      "error": null,
+      "id": "mbid_upper_hyphenated",
+      "json": "{\"artist\":\"Björk\",\"listenedAt\":\"2026-01-15T11:00:00Z\",\"recordingMbid\":\"3F2F7F3E-3C1D-4B9E-9A39-1F3A7C5B2D10\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": {
+        "$type": "com.example.atmusic.scrobble",
+        "artist": "Björk",
+        "createdAt": "2026-01-15T12:00:00Z",
+        "listenedAt": "2026-01-15T11:00:00.000000000Z",
+        "recordingMbid": "3f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2d10",
+        "track": "Jóga"
+      },
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "accept"
+    },
+    {
+      "error": null,
+      "id": "mbid_nil",
+      "json": "{\"artist\":\"Björk\",\"listenedAt\":\"2026-01-15T11:00:00Z\",\"recordingMbid\":\"00000000-0000-0000-0000-000000000000\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": {
+        "$type": "com.example.atmusic.scrobble",
+        "artist": "Björk",
+        "createdAt": "2026-01-15T12:00:00Z",
+        "listenedAt": "2026-01-15T11:00:00.000000000Z",
+        "recordingMbid": "00000000-0000-0000-0000-000000000000",
+        "track": "Jóga"
+      },
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "accept"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "recordingMbid",
+        "message": "expected a hyphenated UUID",
+        "stage": "validation"
+      },
+      "id": "mbid_simple_no_hyphens",
+      "json": "{\"artist\":\"Björk\",\"listenedAt\":\"2026-01-15T11:00:00Z\",\"recordingMbid\":\"3f2f7f3e3c1d4b9e9a391f3a7c5b2d10\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "recordingMbid",
+        "message": "expected a hyphenated UUID",
+        "stage": "validation"
+      },
+      "id": "mbid_braced",
+      "json": "{\"artist\":\"Björk\",\"listenedAt\":\"2026-01-15T11:00:00Z\",\"recordingMbid\":\"{3f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2d10}\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "recordingMbid",
+        "message": "expected a hyphenated UUID",
+        "stage": "validation"
+      },
+      "id": "mbid_urn",
+      "json": "{\"artist\":\"Björk\",\"listenedAt\":\"2026-01-15T11:00:00Z\",\"recordingMbid\":\"urn:uuid:3f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2d10\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "recordingMbid",
+        "message": "expected a UUID",
+        "stage": "validation"
+      },
+      "id": "mbid_short",
+      "json": "{\"artist\":\"Björk\",\"listenedAt\":\"2026-01-15T11:00:00Z\",\"recordingMbid\":\"3f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2d1\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "recordingMbid",
+        "message": "expected a UUID",
+        "stage": "validation"
+      },
+      "id": "mbid_non_hex",
+      "json": "{\"artist\":\"Björk\",\"listenedAt\":\"2026-01-15T11:00:00Z\",\"recordingMbid\":\"3f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2dzz\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "recordingMbid",
+        "message": "expected a UUID",
+        "stage": "validation"
+      },
+      "id": "mbid_misplaced_hyphen",
+      "json": "{\"artist\":\"Björk\",\"listenedAt\":\"2026-01-15T11:00:00Z\",\"recordingMbid\":\"3f2f7f3-e3c1d-4b9e-9a39-1f3a7c5b2d10\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "recordingMbid",
+        "message": "expected a UUID",
+        "stage": "validation"
+      },
+      "id": "mbid_padded",
+      "json": "{\"artist\":\"Björk\",\"listenedAt\":\"2026-01-15T11:00:00Z\",\"recordingMbid\":\" 3f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2d10\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "recordingMbid",
+        "message": "expected a UUID",
+        "stage": "validation"
+      },
+      "id": "mbid_empty",
+      "json": "{\"artist\":\"Björk\",\"listenedAt\":\"2026-01-15T11:00:00Z\",\"recordingMbid\":\"\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "recordingMbid",
+        "message": "expected a string or omitted field",
+        "stage": "validation"
+      },
+      "id": "mbid_number",
+      "json": "{\"artist\":\"Björk\",\"listenedAt\":\"2026-01-15T11:00:00Z\",\"recordingMbid\":42,\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": null,
+      "id": "input_minimal_valid",
+      "json": "{\"artist\":\"Björk\",\"listenedAt\":\"2026-01-15T11:00:00Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": {
+        "$type": "com.example.atmusic.scrobble",
+        "artist": "Björk",
+        "createdAt": "2026-01-15T12:00:00Z",
+        "listenedAt": "2026-01-15T11:00:00.000000000Z",
+        "track": "Jóga"
+      },
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "accept"
+    },
+    {
+      "error": null,
+      "id": "input_all_fields_valid",
+      "json": "{\"album\":\" HOMOGENIC \",\"artist\":\"  BJÖRK  \",\"durationSeconds\":305,\"listenedAt\":\"2026-01-14T11:00:00Z\",\"recordingMbid\":\"3F2F7F3E-3C1D-4B9E-9A39-1F3A7C5B2D10\",\"track\":\"jóga\"}",
+      "kind": "scrobbleInput",
+      "output": {
+        "$type": "com.example.atmusic.scrobble",
+        "album": "HOMOGENIC",
+        "artist": "BJÖRK",
+        "createdAt": "2026-01-15T12:00:00Z",
+        "durationSeconds": 305,
+        "listenedAt": "2026-01-14T11:00:00.000000000Z",
+        "recordingMbid": "3f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2d10",
+        "track": "jóga"
+      },
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "accept"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "mood",
+        "message": "unknown field",
+        "stage": "validation"
+      },
+      "id": "input_unknown_field",
+      "json": "{\"artist\":\"Björk\",\"listenedAt\":\"2026-01-15T11:00:00Z\",\"mood\":\"happy\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "createdAt",
+        "message": "unknown field",
+        "stage": "validation"
+      },
+      "id": "input_created_at_not_accepted",
+      "json": "{\"artist\":\"Björk\",\"createdAt\":\"2026-01-15T11:00:00Z\",\"listenedAt\":\"2026-01-15T11:00:00Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "$type",
+        "message": "unknown field",
+        "stage": "validation"
+      },
+      "id": "input_type_not_accepted",
+      "json": "{\"$type\":\"com.example.atmusic.scrobble\",\"artist\":\"Björk\",\"listenedAt\":\"2026-01-15T11:00:00Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "artist",
+        "message": "required string field",
+        "stage": "validation"
+      },
+      "id": "input_missing_artist",
+      "json": "{\"listenedAt\":\"2026-01-15T11:00:00Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "track",
+        "message": "required string field",
+        "stage": "validation"
+      },
+      "id": "input_missing_track",
+      "json": "{\"artist\":\"Björk\",\"listenedAt\":\"2026-01-15T11:00:00Z\"}",
+      "kind": "scrobbleInput",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "listenedAt",
+        "message": "required string field",
+        "stage": "validation"
+      },
+      "id": "input_missing_listened_at",
+      "json": "{\"artist\":\"Björk\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "artist",
+        "message": "required string field",
+        "stage": "validation"
+      },
+      "id": "input_artist_number",
+      "json": "{\"artist\":7,\"listenedAt\":\"2026-01-15T11:00:00Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "album",
+        "message": "expected a string or omitted field",
+        "stage": "validation"
+      },
+      "id": "input_album_null",
+      "json": "{\"album\":null,\"artist\":\"Björk\",\"listenedAt\":\"2026-01-15T11:00:00Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleInput",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "body",
+        "message": "expected a JSON object",
+        "stage": "validation"
+      },
+      "id": "input_not_object",
+      "json": "[\"Björk\"]",
+      "kind": "scrobbleInput",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": null,
+      "id": "record_valid",
+      "json": "{\"$type\":\"com.example.atmusic.scrobble\",\"artist\":\"Björk\",\"createdAt\":\"2026-01-15T11:00:00Z\",\"listenedAt\":\"2026-01-15T11:00:00Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleRecord",
+      "output": {
+        "$type": "com.example.atmusic.scrobble",
+        "artist": "Björk",
+        "createdAt": "2026-01-15T11:00:00Z",
+        "listenedAt": "2026-01-15T11:00:00Z",
+        "track": "Jóga"
+      },
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "accept"
+    },
+    {
+      "error": null,
+      "id": "record_remote_spelling_kept",
+      "json": "{\"$type\":\"com.example.atmusic.scrobble\",\"artist\":\"  BJÖRK  \",\"createdAt\":\"2026-01-15T11:00:00Z\",\"listenedAt\":\"2026-01-15T11:00:00Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleRecord",
+      "output": {
+        "$type": "com.example.atmusic.scrobble",
+        "artist": "  BJÖRK  ",
+        "createdAt": "2026-01-15T11:00:00Z",
+        "listenedAt": "2026-01-15T11:00:00Z",
+        "track": "Jóga"
+      },
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "accept"
+    },
+    {
+      "error": null,
+      "id": "record_unknown_field_ignored",
+      "json": "{\"$type\":\"com.example.atmusic.scrobble\",\"artist\":\"Björk\",\"createdAt\":\"2026-01-15T11:00:00Z\",\"listenedAt\":\"2026-01-15T11:00:00Z\",\"mood\":\"happy\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleRecord",
+      "output": {
+        "$type": "com.example.atmusic.scrobble",
+        "artist": "Björk",
+        "createdAt": "2026-01-15T11:00:00Z",
+        "listenedAt": "2026-01-15T11:00:00Z",
+        "track": "Jóga"
+      },
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "accept"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "$type",
+        "message": "record type does not match the configured scrobble collection",
+        "stage": "validation"
+      },
+      "id": "record_wrong_type",
+      "json": "{\"$type\":\"com.example.other.scrobble\",\"artist\":\"Björk\",\"createdAt\":\"2026-01-15T11:00:00Z\",\"listenedAt\":\"2026-01-15T11:00:00Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleRecord",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "$type",
+        "message": "record type does not match the configured scrobble collection",
+        "stage": "validation"
+      },
+      "id": "record_follow_type_in_scrobble_collection",
+      "json": "{\"$type\":\"com.example.atmusic.follow\",\"artist\":\"Björk\",\"createdAt\":\"2026-01-15T11:00:00Z\",\"listenedAt\":\"2026-01-15T11:00:00Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleRecord",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "$type",
+        "message": "required string field",
+        "stage": "validation"
+      },
+      "id": "record_missing_type",
+      "json": "{\"artist\":\"Björk\",\"listenedAt\":\"2026-01-15T11:00:00Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleRecord",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "createdAt",
+        "message": "required string field",
+        "stage": "validation"
+      },
+      "id": "record_missing_created_at",
+      "json": "{\"$type\":\"com.example.atmusic.scrobble\",\"artist\":\"Björk\",\"listenedAt\":\"2026-01-15T11:00:00Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleRecord",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": null,
+      "id": "record_created_at_plus_300s",
+      "json": "{\"$type\":\"com.example.atmusic.scrobble\",\"artist\":\"Björk\",\"createdAt\":\"2026-01-15T12:05:00Z\",\"listenedAt\":\"2026-01-15T11:00:00Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleRecord",
+      "output": {
+        "$type": "com.example.atmusic.scrobble",
+        "artist": "Björk",
+        "createdAt": "2026-01-15T12:05:00Z",
+        "listenedAt": "2026-01-15T11:00:00Z",
+        "track": "Jóga"
+      },
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "accept"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "createdAt",
+        "message": "timestamp must be between 1970-01-01 and receipt time plus 300 seconds",
+        "stage": "validation"
+      },
+      "id": "record_created_at_plus_301s",
+      "json": "{\"$type\":\"com.example.atmusic.scrobble\",\"artist\":\"Björk\",\"createdAt\":\"2026-01-15T12:05:01Z\",\"listenedAt\":\"2026-01-15T11:00:00Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleRecord",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "listenedAt",
+        "message": "timestamp must be between 1970-01-01 and receipt time plus 300 seconds",
+        "stage": "validation"
+      },
+      "id": "record_listened_at_plus_301s",
+      "json": "{\"$type\":\"com.example.atmusic.scrobble\",\"artist\":\"Björk\",\"createdAt\":\"2026-01-15T11:00:00Z\",\"listenedAt\":\"2026-01-15T12:05:01Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleRecord",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "createdAt",
+        "message": "timestamp must be between 1970-01-01 and receipt time plus 300 seconds",
+        "stage": "validation"
+      },
+      "id": "record_created_at_before_epoch",
+      "json": "{\"$type\":\"com.example.atmusic.scrobble\",\"artist\":\"Björk\",\"createdAt\":\"1969-12-31T23:59:59Z\",\"listenedAt\":\"2026-01-15T11:00:00Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleRecord",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "artist",
+        "message": "expected 1–256 Unicode scalars and at most 1024 UTF-8 bytes, with nonempty trimmed text",
+        "stage": "validation"
+      },
+      "id": "record_artist_257_scalars",
+      "json": "{\"$type\":\"com.example.atmusic.scrobble\",\"artist\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"createdAt\":\"2026-01-15T11:00:00Z\",\"listenedAt\":\"2026-01-15T11:00:00Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleRecord",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "artist",
+        "message": "expected 1–256 Unicode scalars and at most 1024 UTF-8 bytes, with nonempty trimmed text",
+        "stage": "validation"
+      },
+      "id": "record_artist_whitespace_only",
+      "json": "{\"$type\":\"com.example.atmusic.scrobble\",\"artist\":\"　\",\"createdAt\":\"2026-01-15T11:00:00Z\",\"listenedAt\":\"2026-01-15T11:00:00Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleRecord",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "durationSeconds",
+        "message": "expected an integer between 1 and 86400",
+        "stage": "validation"
+      },
+      "id": "record_duration_0",
+      "json": "{\"$type\":\"com.example.atmusic.scrobble\",\"artist\":\"Björk\",\"createdAt\":\"2026-01-15T11:00:00Z\",\"durationSeconds\":0,\"listenedAt\":\"2026-01-15T11:00:00Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleRecord",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": null,
+      "id": "record_duration_86400",
+      "json": "{\"$type\":\"com.example.atmusic.scrobble\",\"artist\":\"Björk\",\"createdAt\":\"2026-01-15T11:00:00Z\",\"durationSeconds\":86400,\"listenedAt\":\"2026-01-15T11:00:00Z\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleRecord",
+      "output": {
+        "$type": "com.example.atmusic.scrobble",
+        "artist": "Björk",
+        "createdAt": "2026-01-15T11:00:00Z",
+        "durationSeconds": 86400,
+        "listenedAt": "2026-01-15T11:00:00Z",
+        "track": "Jóga"
+      },
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "accept"
+    },
+    {
+      "error": null,
+      "id": "record_mbid_upper",
+      "json": "{\"$type\":\"com.example.atmusic.scrobble\",\"artist\":\"Björk\",\"createdAt\":\"2026-01-15T11:00:00Z\",\"listenedAt\":\"2026-01-15T11:00:00Z\",\"recordingMbid\":\"3F2F7F3E-3C1D-4B9E-9A39-1F3A7C5B2D10\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleRecord",
+      "output": {
+        "$type": "com.example.atmusic.scrobble",
+        "artist": "Björk",
+        "createdAt": "2026-01-15T11:00:00Z",
+        "listenedAt": "2026-01-15T11:00:00Z",
+        "recordingMbid": "3F2F7F3E-3C1D-4B9E-9A39-1F3A7C5B2D10",
+        "track": "Jóga"
+      },
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "accept"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "recordingMbid",
+        "message": "expected a hyphenated UUID",
+        "stage": "validation"
+      },
+      "id": "record_mbid_simple",
+      "json": "{\"$type\":\"com.example.atmusic.scrobble\",\"artist\":\"Björk\",\"createdAt\":\"2026-01-15T11:00:00Z\",\"listenedAt\":\"2026-01-15T11:00:00Z\",\"recordingMbid\":\"3f2f7f3e3c1d4b9e9a391f3a7c5b2d10\",\"track\":\"Jóga\"}",
+      "kind": "scrobbleRecord",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": null,
+      "id": "follow_valid",
+      "json": "{\"$type\":\"com.example.atmusic.follow\",\"createdAt\":\"2026-01-15T11:00:00Z\",\"subject\":\"did:plc:bbbbbbbbbbbbbbbbbbbbbbbb\"}",
+      "kind": "followRecord",
+      "output": {
+        "$type": "com.example.atmusic.follow",
+        "createdAt": "2026-01-15T11:00:00Z",
+        "subject": "did:plc:bbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "accept"
+    },
+    {
+      "error": null,
+      "id": "follow_did_web",
+      "json": "{\"$type\":\"com.example.atmusic.follow\",\"createdAt\":\"2026-01-15T11:00:00Z\",\"subject\":\"did:web:example.com\"}",
+      "kind": "followRecord",
+      "output": {
+        "$type": "com.example.atmusic.follow",
+        "createdAt": "2026-01-15T11:00:00Z",
+        "subject": "did:web:example.com"
+      },
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "accept"
+    },
+    {
+      "error": null,
+      "id": "follow_unknown_field_ignored",
+      "json": "{\"$type\":\"com.example.atmusic.follow\",\"createdAt\":\"2026-01-15T11:00:00Z\",\"note\":\"x\",\"subject\":\"did:plc:bbbbbbbbbbbbbbbbbbbbbbbb\"}",
+      "kind": "followRecord",
+      "output": {
+        "$type": "com.example.atmusic.follow",
+        "createdAt": "2026-01-15T11:00:00Z",
+        "subject": "did:plc:bbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "accept"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "$type",
+        "message": "record type does not match the configured music-follow collection",
+        "stage": "validation"
+      },
+      "id": "follow_wrong_type",
+      "json": "{\"$type\":\"com.example.atmusic.scrobble\",\"createdAt\":\"2026-01-15T11:00:00Z\",\"subject\":\"did:plc:bbbbbbbbbbbbbbbbbbbbbbbb\"}",
+      "kind": "followRecord",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "subject",
+        "message": "expected a DID",
+        "stage": "validation"
+      },
+      "id": "follow_subject_handle",
+      "json": "{\"$type\":\"com.example.atmusic.follow\",\"createdAt\":\"2026-01-15T11:00:00Z\",\"subject\":\"bob.test\"}",
+      "kind": "followRecord",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "subject",
+        "message": "expected a DID",
+        "stage": "validation"
+      },
+      "id": "follow_subject_uppercase_method",
+      "json": "{\"$type\":\"com.example.atmusic.follow\",\"createdAt\":\"2026-01-15T11:00:00Z\",\"subject\":\"did:PLC:bbbbbbbbbbbbbbbbbbbbbbbb\"}",
+      "kind": "followRecord",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": null,
+      "id": "follow_created_at_plus_300s",
+      "json": "{\"$type\":\"com.example.atmusic.follow\",\"createdAt\":\"2026-01-15T12:05:00Z\",\"subject\":\"did:plc:bbbbbbbbbbbbbbbbbbbbbbbb\"}",
+      "kind": "followRecord",
+      "output": {
+        "$type": "com.example.atmusic.follow",
+        "createdAt": "2026-01-15T12:05:00Z",
+        "subject": "did:plc:bbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "accept"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "createdAt",
+        "message": "timestamp must be between 1970-01-01 and receipt time plus 300 seconds",
+        "stage": "validation"
+      },
+      "id": "follow_created_at_plus_301s",
+      "json": "{\"$type\":\"com.example.atmusic.follow\",\"createdAt\":\"2026-01-15T12:05:01Z\",\"subject\":\"did:plc:bbbbbbbbbbbbbbbbbbbbbbbb\"}",
+      "kind": "followRecord",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "subject",
+        "message": "required string field",
+        "stage": "validation"
+      },
+      "id": "follow_missing_subject",
+      "json": "{\"$type\":\"com.example.atmusic.follow\",\"createdAt\":\"2026-01-15T11:00:00Z\"}",
+      "kind": "followRecord",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "createdAt",
+        "message": "required string field",
+        "stage": "validation"
+      },
+      "id": "follow_missing_created_at",
+      "json": "{\"$type\":\"com.example.atmusic.follow\",\"subject\":\"did:plc:bbbbbbbbbbbbbbbbbbbbbbbb\"}",
+      "kind": "followRecord",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": null,
+      "id": "follow_self_subject_syntax_only",
+      "json": "{\"$type\":\"com.example.atmusic.follow\",\"createdAt\":\"2026-01-15T11:00:00Z\",\"subject\":\"did:plc:aaaaaaaaaaaaaaaaaaaaaaaa\"}",
+      "kind": "followRecord",
+      "output": {
+        "$type": "com.example.atmusic.follow",
+        "createdAt": "2026-01-15T11:00:00Z",
+        "subject": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "accept"
+    },
+    {
+      "error": null,
+      "id": "subject_plc",
+      "json": "\"did:plc:bbbbbbbbbbbbbbbbbbbbbbbb\"",
+      "kind": "followSubject",
+      "output": {
+        "$type": "com.example.atmusic.follow",
+        "createdAt": "2026-01-15T12:00:00Z",
+        "subject": "did:plc:bbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "accept"
+    },
+    {
+      "error": null,
+      "id": "subject_web",
+      "json": "\"did:web:example.com\"",
+      "kind": "followSubject",
+      "output": {
+        "$type": "com.example.atmusic.follow",
+        "createdAt": "2026-01-15T12:00:00Z",
+        "subject": "did:web:example.com"
+      },
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "accept"
+    },
+    {
+      "error": null,
+      "id": "subject_web_port_encoded",
+      "json": "\"did:web:localhost%3A8080\"",
+      "kind": "followSubject",
+      "output": {
+        "$type": "com.example.atmusic.follow",
+        "createdAt": "2026-01-15T12:00:00Z",
+        "subject": "did:web:localhost%3A8080"
+      },
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "accept"
+    },
+    {
+      "error": null,
+      "id": "subject_colon_inside",
+      "json": "\"did:example:abc:def\"",
+      "kind": "followSubject",
+      "output": {
+        "$type": "com.example.atmusic.follow",
+        "createdAt": "2026-01-15T12:00:00Z",
+        "subject": "did:example:abc:def"
+      },
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "accept"
+    },
+    {
+      "error": null,
+      "id": "subject_allowed_punctuation",
+      "json": "\"did:example:a._-b\"",
+      "kind": "followSubject",
+      "output": {
+        "$type": "com.example.atmusic.follow",
+        "createdAt": "2026-01-15T12:00:00Z",
+        "subject": "did:example:a._-b"
+      },
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "accept"
+    },
+    {
+      "error": null,
+      "id": "subject_2048_bytes",
+      "json": "\"did:plc:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"",
+      "kind": "followSubject",
+      "output": {
+        "$type": "com.example.atmusic.follow",
+        "createdAt": "2026-01-15T12:00:00Z",
+        "subject": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "accept"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "subject",
+        "message": "expected a DID",
+        "stage": "validation"
+      },
+      "id": "subject_2049_bytes",
+      "json": "\"did:plc:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"",
+      "kind": "followSubject",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "subject",
+        "message": "expected a DID",
+        "stage": "validation"
+      },
+      "id": "subject_trailing_colon",
+      "json": "\"did:plc:abc:\"",
+      "kind": "followSubject",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "subject",
+        "message": "expected a DID",
+        "stage": "validation"
+      },
+      "id": "subject_bad_percent",
+      "json": "\"did:web:example%2\"",
+      "kind": "followSubject",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "subject",
+        "message": "expected a DID",
+        "stage": "validation"
+      },
+      "id": "subject_bad_percent_hex",
+      "json": "\"did:web:example%zz\"",
+      "kind": "followSubject",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "subject",
+        "message": "expected a DID",
+        "stage": "validation"
+      },
+      "id": "subject_uppercase_method",
+      "json": "\"did:PLC:abc\"",
+      "kind": "followSubject",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "subject",
+        "message": "expected a DID",
+        "stage": "validation"
+      },
+      "id": "subject_digit_method",
+      "json": "\"did:plc1:abc\"",
+      "kind": "followSubject",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "subject",
+        "message": "expected a DID",
+        "stage": "validation"
+      },
+      "id": "subject_empty_method",
+      "json": "\"did::abc\"",
+      "kind": "followSubject",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "subject",
+        "message": "expected a DID",
+        "stage": "validation"
+      },
+      "id": "subject_empty_identifier",
+      "json": "\"did:plc:\"",
+      "kind": "followSubject",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "subject",
+        "message": "expected a DID",
+        "stage": "validation"
+      },
+      "id": "subject_no_identifier",
+      "json": "\"did:plc\"",
+      "kind": "followSubject",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "subject",
+        "message": "expected a DID",
+        "stage": "validation"
+      },
+      "id": "subject_uppercase_prefix",
+      "json": "\"DID:plc:abc\"",
+      "kind": "followSubject",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "subject",
+        "message": "expected a DID",
+        "stage": "validation"
+      },
+      "id": "subject_space",
+      "json": "\"did:plc:ab c\"",
+      "kind": "followSubject",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "subject",
+        "message": "expected a DID",
+        "stage": "validation"
+      },
+      "id": "subject_slash",
+      "json": "\"did:web:example.com/path\"",
+      "kind": "followSubject",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "subject",
+        "message": "expected a DID",
+        "stage": "validation"
+      },
+      "id": "subject_non_ascii",
+      "json": "\"did:plc:ä\"",
+      "kind": "followSubject",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "subject",
+        "message": "expected a DID",
+        "stage": "validation"
+      },
+      "id": "subject_handle",
+      "json": "\"alice.test\"",
+      "kind": "followSubject",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    },
+    {
+      "error": {
+        "code": "invalid_field",
+        "field": "subject",
+        "message": "expected a DID",
+        "stage": "validation"
+      },
+      "id": "subject_empty",
+      "json": "\"\"",
+      "kind": "followSubject",
+      "output": null,
+      "receiptTime": "2026-01-15T12:00:00Z",
+      "verdict": "reject"
+    }
+  ]
+}

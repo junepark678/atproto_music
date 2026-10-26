@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<lfm status="ok">
+  <lovedtracks user="alice" page="1" perPage="50" totalPages="1" total="1">
+    <track>
+      <name>Test Track</name>
+      <mbid/>
+      <url>https://www.last.fm/music/Test+Artist/_/Test+Track</url>
+      <date uts="1768474800">15 Jan 2026, 11:00</date>
+      <artist>
+        <name>Test Artist</name>
+        <mbid/>
+        <url>https://www.last.fm/music/Test+Artist</url>
+      </artist>
+      <image size="small"/>
+      <image size="medium"/>
+      <image size="large"/>
+      <image size="extralarge"/>
+      <streamable fulltrack="0">0</streamable>
+    </track>
+  </lovedtracks>
+</lfm>

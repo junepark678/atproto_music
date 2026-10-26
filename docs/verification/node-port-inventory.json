@@ -1,0 +1,3501 @@
+{
+  "schemaVersion": 1,
+  "description": "ADR 0005 §15.3: every vitest test id executed at 3d953a9 (the ADR 0004 baseline: the work/ts-test-report.json of `npm test`, 406 tests; ids are `<file> › <describe…> › <title>` as scripts/report-tests.ts writes them) and its fate in the Node port. `kept`: the test keeps its file and title, byte-identical; `change` records a named expectation change (ADR 0005 §15.3) made with the title kept. `replaced`: the test id that replaces it, with the reason. scripts/test/test-inventory.test.ts checks every kept title is still declared in its file and every replacement exists. Packages that rename, replace or retire a baseline test record it here (N3-11, N5-01, N7-01).",
+  "baseline": {
+    "commit": "3d953a91d771a6003472161a5b18329a8ebe2d9c",
+    "report": "work/ts-test-report.json (vitest JSON reporter, all projects) at 3d953a9",
+    "executed": 406
+  },
+  "tests": [
+    {
+      "id": "packages/atproto/test/commit.test.ts › verifyCommit › valid secp256k1 and P-256 commits verify",
+      "file": "packages/atproto/test/commit.test.ts",
+      "ancestors": [
+        "verifyCommit"
+      ],
+      "title": "valid secp256k1 and P-256 commits verify",
+      "kept": true
+    },
+    {
+      "id": "packages/atproto/test/commit.test.ts › verifyCommit › high-S signature, wrong DID, version 2, non-TID rev are rejected with codes",
+      "file": "packages/atproto/test/commit.test.ts",
+      "ancestors": [
+        "verifyCommit"
+      ],
+      "title": "high-S signature, wrong DID, version 2, non-TID rev are rejected with codes",
+      "kept": true
+    },
+    {
+      "id": "packages/atproto/test/doh.test.ts › DoH pre-check › mixed public+private answer set is rejected",
+      "file": "packages/atproto/test/doh.test.ts",
+      "ancestors": [
+        "DoH pre-check"
+      ],
+      "title": "mixed public+private answer set is rejected",
+      "kept": true
+    },
+    {
+      "id": "packages/atproto/test/doh.test.ts › DoH pre-check › empty answer is rejected; TTL cache honors injected clock",
+      "file": "packages/atproto/test/doh.test.ts",
+      "ancestors": [
+        "DoH pre-check"
+      ],
+      "title": "empty answer is rejected; TTL cache honors injected clock",
+      "kept": true
+    },
+    {
+      "id": "packages/atproto/test/doh.test.ts › DoH pre-check › DoH body reset or oversized body is dns_failed and the target is never contacted",
+      "file": "packages/atproto/test/doh.test.ts",
+      "ancestors": [
+        "DoH pre-check"
+      ],
+      "title": "DoH body reset or oversized body is dns_failed and the target is never contacted",
+      "kept": true
+    },
+    {
+      "id": "packages/atproto/test/fixture-kit.test.ts › inclusion proof CAR verifies with @atproto/crypto cross-check for both curves",
+      "file": "packages/atproto/test/fixture-kit.test.ts",
+      "ancestors": [],
+      "title": "inclusion proof CAR verifies with @atproto/crypto cross-check for both curves",
+      "kept": true
+    },
+    {
+      "id": "packages/atproto/test/fixture-kit.test.ts › SignedRepo reproduces the Rust-signed golden commits for both curves",
+      "file": "packages/atproto/test/fixture-kit.test.ts",
+      "ancestors": [],
+      "title": "SignedRepo reproduces the Rust-signed golden commits for both curves",
+      "kept": true
+    },
+    {
+      "id": "packages/atproto/test/fixture-kit.test.ts › exclusion proof for deleted r08 contains a complete path",
+      "file": "packages/atproto/test/fixture-kit.test.ts",
+      "ancestors": [],
+      "title": "exclusion proof for deleted r08 contains a complete path",
+      "kept": true
+    },
+    {
+      "id": "packages/atproto/test/fixture-kit.test.ts › each corruption helper changes exactly one invariant",
+      "file": "packages/atproto/test/fixture-kit.test.ts",
+      "ancestors": [],
+      "title": "each corruption helper changes exactly one invariant",
+      "kept": true
+    },
+    {
+      "id": "packages/atproto/test/fixture-kit.test.ts › fake PDS createRecord with existing rkey returns RecordAlreadyExists; deleteRecord with stale swap returns InvalidSwap",
+      "file": "packages/atproto/test/fixture-kit.test.ts",
+      "ancestors": [],
+      "title": "fake PDS createRecord with existing rkey returns RecordAlreadyExists; deleteRecord with stale swap returns InvalidSwap",
+      "kept": true
+    },
+    {
+      "id": "packages/atproto/test/fixture-kit.test.ts › concurrent writes to one repo are serialized: one RecordAlreadyExists, no lost records, strictly increasing revs",
+      "file": "packages/atproto/test/fixture-kit.test.ts",
+      "ancestors": [],
+      "title": "concurrent writes to one repo are serialized: one RecordAlreadyExists, no lost records, strictly increasing revs",
+      "kept": true
+    },
+    {
+      "id": "packages/atproto/test/fixture-kit.test.ts › fake Jetstream replays inclusively from cursor and refuses cursors older than lookback",
+      "file": "packages/atproto/test/fixture-kit.test.ts",
+      "ancestors": [],
+      "title": "fake Jetstream replays inclusively from cursor and refuses cursors older than lookback",
+      "kept": true
+    },
+    {
+      "id": "packages/atproto/test/fixture-kit.test.ts › seedReadModels publishes r01–r10 with r08 deleted and the Alice→Bob follow",
+      "file": "packages/atproto/test/fixture-kit.test.ts",
+      "ancestors": [],
+      "title": "seedReadModels publishes r01–r10 with r08 deleted and the Alice→Bob follow",
+      "kept": true
+    },
+    {
+      "id": "packages/atproto/test/fixture-kit.test.ts › a record signed by one fixture account fails verification under another account's key",
+      "file": "packages/atproto/test/fixture-kit.test.ts",
+      "ancestors": [],
+      "title": "a record signed by one fixture account fails verification under another account's key",
+      "kept": true
+    },
+    {
+      "id": "packages/atproto/test/fixture-kit.test.ts › fake relay pages listReposByCollection; fake DoH and PLC answer like the real services; unrouted hosts fail",
+      "file": "packages/atproto/test/fixture-kit.test.ts",
+      "ancestors": [],
+      "title": "fake relay pages listReposByCollection; fake DoH and PLC answer like the real services; unrouted hosts fail",
+      "kept": true
+    },
+    {
+      "id": "packages/atproto/test/identity.test.ts › identity resolution › plc and did:web documents resolve signing key and PDS",
+      "file": "packages/atproto/test/identity.test.ts",
+      "ancestors": [
+        "identity resolution"
+      ],
+      "title": "plc and did:web documents resolve signing key and PDS",
+      "kept": true
+    },
+    {
+      "id": "packages/atproto/test/identity.test.ts › identity resolution › document id mismatch and missing #atproto key are rejected",
+      "file": "packages/atproto/test/identity.test.ts",
+      "ancestors": [
+        "identity resolution"
+      ],
+      "title": "document id mismatch and missing #atproto key are rejected",
+      "kept": true
+    },
+    {
+      "id": "packages/atproto/test/identity.test.ts › identity resolution › handle verified only when TXT/well-known and alsoKnownAs agree; mismatch yields null",
+      "file": "packages/atproto/test/identity.test.ts",
+      "ancestors": [
+        "identity resolution"
+      ],
+      "title": "handle verified only when TXT/well-known and alsoKnownAs agree; mismatch yields null",
+      "kept": true
+    },
+    {
+      "id": "packages/atproto/test/identity.test.ts › identity resolution › PDS endpoint that fails URL policy is rejected",
+      "file": "packages/atproto/test/identity.test.ts",
+      "ancestors": [
+        "identity resolution"
+      ],
+      "title": "PDS endpoint that fails URL policy is rejected",
+      "kept": true
+    },
+    {
+      "id": "packages/atproto/test/identity.test.ts › identity resolution › fresh:true bypasses cache after key rotation",
+      "file": "packages/atproto/test/identity.test.ts",
+      "ancestors": [
+        "identity resolution"
+      ],
+      "title": "fresh:true bypasses cache after key rotation",
+      "kept": true
+    },
+    {
+      "id": "packages/atproto/test/jetstream-events.test.ts › parseJetstreamMessage › commit create/update/delete for configured collection yields hint with seq and time_us",
+      "file": "packages/atproto/test/jetstream-events.test.ts",
+      "ancestors": [
+        "parseJetstreamMessage"
+      ],
+      "title": "commit create/update/delete for configured collection yields hint with seq and time_us",
+      "kept": true
+    },
+    {
+      "id": "packages/atproto/test/jetstream-events.test.ts › parseJetstreamMessage › identity/account/sync kinds and foreign collections are ignored",
+      "file": "packages/atproto/test/jetstream-events.test.ts",
+      "ancestors": [
+        "parseJetstreamMessage"
+      ],
+      "title": "identity/account/sync kinds and foreign collections are ignored",
+      "kept": true
+    },
+    {
+      "id": "packages/atproto/test/jetstream-events.test.ts › parseJetstreamMessage › oversize, malformed JSON, bad DID, unsafe integer are invalid",
+      "file": "packages/atproto/test/jetstream-events.test.ts",
+      "ancestors": [
+        "parseJetstreamMessage"
+      ],
+      "title": "oversize, malformed JSON, bad DID, unsafe integer are invalid",
+      "kept": true
+    },
+    {
+      "id": "packages/atproto/test/jetstream-events.test.ts › buildSubscribeUrl › buildSubscribeUrl always contains kinds=commit and every collection, never identity/account",
+      "file": "packages/atproto/test/jetstream-events.test.ts",
+      "ancestors": [
+        "buildSubscribeUrl"
+      ],
+      "title": "buildSubscribeUrl always contains kinds=commit and every collection, never identity/account",
+      "kept": true
+    },
+    {
+      "id": "packages/atproto/test/record-proof.test.ts › verifyRecordProof › inclusion proof yields present with exact cid and record",
+      "file": "packages/atproto/test/record-proof.test.ts",
+      "ancestors": [
+        "verifyRecordProof"
+      ],
+      "title": "inclusion proof yields present with exact cid and record",
+      "kept": true
+    },
+    {
+      "id": "packages/atproto/test/record-proof.test.ts › verifyRecordProof › exclusion proof yields absent",
+      "file": "packages/atproto/test/record-proof.test.ts",
+      "ancestors": [
+        "verifyRecordProof"
+      ],
+      "title": "exclusion proof yields absent",
+      "kept": true
+    },
+    {
+      "id": "packages/atproto/test/record-proof.test.ts › verifyRecordProof › removed path node yields missing_block, never absent",
+      "file": "packages/atproto/test/record-proof.test.ts",
+      "ancestors": [
+        "verifyRecordProof"
+      ],
+      "title": "removed path node yields missing_block, never absent",
+      "kept": true
+    },
+    {
+      "id": "packages/atproto/test/record-proof.test.ts › verifyRecordProof › block byte change yields cid_mismatch; record CID swap yields record_cid_mismatch",
+      "file": "packages/atproto/test/record-proof.test.ts",
+      "ancestors": [
+        "verifyRecordProof"
+      ],
+      "title": "block byte change yields cid_mismatch; record CID swap yields record_cid_mismatch",
+      "kept": true
+    },
+    {
+      "id": "packages/atproto/test/record-proof.test.ts › verifyRecordProof › MST link fields that are plain {$link} maps yield mst_invalid, never absent",
+      "file": "packages/atproto/test/record-proof.test.ts",
+      "ancestors": [
+        "verifyRecordProof"
+      ],
+      "title": "MST link fields that are plain {$link} maps yield mst_invalid, never absent",
+      "kept": true
+    },
+    {
+      "id": "packages/atproto/test/record-proof.test.ts › verifyRecordProof › truncated and oversize CARs are rejected before decode",
+      "file": "packages/atproto/test/record-proof.test.ts",
+      "ancestors": [
+        "verifyRecordProof"
+      ],
+      "title": "truncated and oversize CARs are rejected before decode",
+      "kept": true
+    },
+    {
+      "id": "packages/atproto/test/rust-golden-cars.test.ts › every tests/goldens/signed_cars manifest entry yields the expected verdict and error code",
+      "file": "packages/atproto/test/rust-golden-cars.test.ts",
+      "ancestors": [],
+      "title": "every tests/goldens/signed_cars manifest entry yields the expected verdict and error code",
+      "kept": true
+    },
+    {
+      "id": "packages/atproto/test/safe-fetch.test.ts › SafeFetch › 3xx response is refused and Location is not followed",
+      "file": "packages/atproto/test/safe-fetch.test.ts",
+      "ancestors": [
+        "SafeFetch"
+      ],
+      "title": "3xx response is refused and Location is not followed",
+      "kept": true
+    },
+    {
+      "id": "packages/atproto/test/safe-fetch.test.ts › SafeFetch › body over cap aborts with body_too_large and does not buffer the rest",
+      "file": "packages/atproto/test/safe-fetch.test.ts",
+      "ancestors": [
+        "SafeFetch"
+      ],
+      "title": "body over cap aborts with body_too_large and does not buffer the rest",
+      "kept": true
+    },
+    {
+      "id": "packages/atproto/test/safe-fetch.test.ts › SafeFetch › 10s deadline yields timeout",
+      "file": "packages/atproto/test/safe-fetch.test.ts",
+      "ancestors": [
+        "SafeFetch"
+      ],
+      "title": "10s deadline yields timeout",
+      "kept": true
+    },
+    {
+      "id": "packages/atproto/test/safe-fetch.test.ts › SafeFetch › Retry-After and RateLimit-Reset are parsed into typed error",
+      "file": "packages/atproto/test/safe-fetch.test.ts",
+      "ancestors": [
+        "SafeFetch"
+      ],
+      "title": "Retry-After and RateLimit-Reset are parsed into typed error",
+      "kept": true
+    },
+    {
+      "id": "packages/atproto/test/safe-fetch.test.ts › SafeFetch › mid-body connection reset is a typed network_error, not a raw TypeError",
+      "file": "packages/atproto/test/safe-fetch.test.ts",
+      "ancestors": [
+        "SafeFetch"
+      ],
+      "title": "mid-body connection reset is a typed network_error, not a raw TypeError",
+      "kept": true
+    },
+    {
+      "id": "packages/atproto/test/scaffold.test.ts › workerd runtime › workerd runtime has WebCrypto ECDSA P-256 and String.prototype.normalize NFKC",
+      "file": "packages/atproto/test/scaffold.test.ts",
+      "ancestors": [
+        "workerd runtime"
+      ],
+      "title": "workerd runtime has WebCrypto ECDSA P-256 and String.prototype.normalize NFKC",
+      "kept": true,
+      "change": "ADR 0005 §15.3 (round 2): the navigator.userAgent === 'Cloudflare-Workers' assertion (line 9 at 3d953a9) is replaced by runtime-neutral checks (WebCrypto ECDSA P-256 sign and verify, NFKC); title kept.",
+      "package": "N1-04"
+    },
+    {
+      "id": "packages/atproto/test/scaffold.test.ts › workerd runtime › VerifyError carries its typed code",
+      "file": "packages/atproto/test/scaffold.test.ts",
+      "ancestors": [
+        "workerd runtime"
+      ],
+      "title": "VerifyError carries its typed code",
+      "kept": true
+    },
+    {
+      "id": "packages/atproto/test/snapshot-adversarial.test.ts › missing subtree block → missing_block, never silent absence",
+      "file": "packages/atproto/test/snapshot-adversarial.test.ts",
+      "ancestors": [],
+      "title": "missing subtree block → missing_block, never silent absence",
+      "kept": true
+    },
+    {
+      "id": "packages/atproto/test/snapshot-adversarial.test.ts › out-of-order keys, repeated node CID, depth >256, layer mismatch rejected",
+      "file": "packages/atproto/test/snapshot-adversarial.test.ts",
+      "ancestors": [],
+      "title": "out-of-order keys, repeated node CID, depth >256, layer mismatch rejected",
+      "kept": true
+    },
+    {
+      "id": "packages/atproto/test/snapshot-adversarial.test.ts › getRepo stream over 32 MiB aborts; corrupted block rejected",
+      "file": "packages/atproto/test/snapshot-adversarial.test.ts",
+      "ancestors": [],
+      "title": "getRepo stream over 32 MiB aborts; corrupted block rejected",
+      "kept": true
+    },
+    {
+      "id": "packages/atproto/test/snapshot-rust-oracle.test.ts › walker output equals tests/goldens/snapshot_enumeration.json for every Rust full-repo CAR",
+      "file": "packages/atproto/test/snapshot-rust-oracle.test.ts",
+      "ancestors": [],
+      "title": "walker output equals tests/goldens/snapshot_enumeration.json for every Rust full-repo CAR",
+      "kept": true
+    },
+    {
+      "id": "packages/atproto/test/snapshot-walker.test.ts › repo with 5,000 music records and 2,000 non-music records enumerates exactly the music set across resumable steps",
+      "file": "packages/atproto/test/snapshot-walker.test.ts",
+      "ancestors": [],
+      "title": "repo with 5,000 music records and 2,000 non-music records enumerates exactly the music set across resumable steps",
+      "kept": true
+    },
+    {
+      "id": "packages/atproto/test/snapshot-walker.test.ts › 25,000-record repo completes with bounded per-step fetches (no MAX_OPERATIONS ceiling)",
+      "file": "packages/atproto/test/snapshot-walker.test.ts",
+      "ancestors": [],
+      "title": "25,000-record repo completes with bounded per-step fetches (no MAX_OPERATIONS ceiling)",
+      "kept": true
+    },
+    {
+      "id": "packages/atproto/test/snapshot-walker.test.ts › only subtrees overlapping the prefix range are fetched (call count bound)",
+      "file": "packages/atproto/test/snapshot-walker.test.ts",
+      "ancestors": [],
+      "title": "only subtrees overlapping the prefix range are fetched (call count bound)",
+      "kept": true
+    },
+    {
+      "id": "packages/atproto/test/snapshot-walker.test.ts › unchanged record CIDs are not fetched on re-snapshot",
+      "file": "packages/atproto/test/snapshot-walker.test.ts",
+      "ancestors": [],
+      "title": "unchanged record CIDs are not fetched on re-snapshot",
+      "kept": true
+    },
+    {
+      "id": "packages/atproto/test/url-policy.test.ts › url policy › rejects http, non-default port, credentials, fragment, IP literals (v4/v6/mapped/decimal), localhost, .internal, single label",
+      "file": "packages/atproto/test/url-policy.test.ts",
+      "ancestors": [
+        "url policy"
+      ],
+      "title": "rejects http, non-default port, credentials, fragment, IP literals (v4/v6/mapped/decimal), localhost, .internal, single label",
+      "kept": true
+    },
+    {
+      "id": "packages/core/test/canonical.test.ts › canonical digest › key order does not change the digest; any value change does",
+      "file": "packages/core/test/canonical.test.ts",
+      "ancestors": [
+        "canonical digest"
+      ],
+      "title": "key order does not change the digest; any value change does",
+      "kept": true
+    },
+    {
+      "id": "packages/core/test/cursor.test.ts › every cursors.json Rust token decodes to the same payload",
+      "file": "packages/core/test/cursor.test.ts",
+      "ancestors": [],
+      "title": "every cursors.json Rust token decodes to the same payload",
+      "kept": true
+    },
+    {
+      "id": "packages/core/test/cursor.test.ts › TS-encoded token equals Rust token byte-for-byte for the same inputs",
+      "file": "packages/core/test/cursor.test.ts",
+      "ancestors": [],
+      "title": "TS-encoded token equals Rust token byte-for-byte for the same inputs",
+      "kept": true
+    },
+    {
+      "id": "packages/core/test/cursor.test.ts › one-bit tamper, wrong did/scope/viewer, version 2, malformed base64 → invalid_cursor",
+      "file": "packages/core/test/cursor.test.ts",
+      "ancestors": [],
+      "title": "one-bit tamper, wrong did/scope/viewer, version 2, malformed base64 → invalid_cursor",
+      "kept": true
+    },
+    {
+      "id": "packages/core/test/cursor.test.ts › key shorter than 32 bytes is rejected",
+      "file": "packages/core/test/cursor.test.ts",
+      "ancestors": [],
+      "title": "key shorter than 32 bytes is rejected",
+      "kept": true
+    },
+    {
+      "id": "packages/core/test/follow.test.ts › follow validation and self-follow rejection",
+      "file": "packages/core/test/follow.test.ts",
+      "ancestors": [],
+      "title": "follow validation and self-follow rejection",
+      "kept": true
+    },
+    {
+      "id": "packages/core/test/follow.test.ts › follow createdAt now+300s accepted and now+301s rejected at 2026-01-15T12:00:00Z receipt",
+      "file": "packages/core/test/follow.test.ts",
+      "ancestors": [],
+      "title": "follow createdAt now+300s accepted and now+301s rejected at 2026-01-15T12:00:00Z receipt",
+      "kept": true
+    },
+    {
+      "id": "packages/core/test/music-key.test.ts › every music_keys.json vector equals the Rust key",
+      "file": "packages/core/test/music-key.test.ts",
+      "ancestors": [],
+      "title": "every music_keys.json vector equals the Rust key",
+      "kept": true
+    },
+    {
+      "id": "packages/core/test/music-key.test.ts › Björk / '  BJÖRK  ' / 'jóga' group together; Homogenic/' HOMOGENIC ' group together",
+      "file": "packages/core/test/music-key.test.ts",
+      "ancestors": [],
+      "title": "Björk / '  BJÖRK  ' / 'jóga' group together; Homogenic/' HOMOGENIC ' group together",
+      "kept": true
+    },
+    {
+      "id": "packages/core/test/music-key.test.ts › compareCodePoints orders astral above U+E000–U+FFFF like Rust",
+      "file": "packages/core/test/music-key.test.ts",
+      "ancestors": [],
+      "title": "compareCodePoints orders astral above U+E000–U+FFFF like Rust",
+      "kept": true
+    },
+    {
+      "id": "packages/core/test/music-key.test.ts › missing album yields null album key",
+      "file": "packages/core/test/music-key.test.ts",
+      "ancestors": [],
+      "title": "missing album yields null album key",
+      "kept": true
+    },
+    {
+      "id": "packages/core/test/music-key.test.ts › artist a|b with title c and artist a with title b|c yield distinct track keys",
+      "file": "packages/core/test/music-key.test.ts",
+      "ancestors": [],
+      "title": "artist a|b with title c and artist a with title b|c yield distinct track keys",
+      "kept": true
+    },
+    {
+      "id": "packages/core/test/namespace.test.ts › fixture prefix blocks publication; owned prefix with ownership ref allows it",
+      "file": "packages/core/test/namespace.test.ts",
+      "ancestors": [],
+      "title": "fixture prefix blocks publication; owned prefix with ownership ref allows it",
+      "kept": true
+    },
+    {
+      "id": "packages/core/test/record-key.test.ts › follow rkey › followRkey equals follow_rkeys.json",
+      "file": "packages/core/test/record-key.test.ts",
+      "ancestors": [
+        "follow rkey"
+      ],
+      "title": "followRkey equals follow_rkeys.json",
+      "kept": true
+    },
+    {
+      "id": "packages/core/test/record-key.test.ts › TID › TIDs are monotonic and valid for fixed clock and seeded random",
+      "file": "packages/core/test/record-key.test.ts",
+      "ancestors": [
+        "TID"
+      ],
+      "title": "TIDs are monotonic and valid for fixed clock and seeded random",
+      "kept": true
+    },
+    {
+      "id": "packages/core/test/scaffold.test.ts › test-support determinism › fixedClock starts at 2026-01-15T12:00:00Z and advance/set are exact",
+      "file": "packages/core/test/scaffold.test.ts",
+      "ancestors": [
+        "test-support determinism"
+      ],
+      "title": "fixedClock starts at 2026-01-15T12:00:00Z and advance/set are exact",
+      "kept": true
+    },
+    {
+      "id": "packages/core/test/scaffold.test.ts › test-support determinism › seeded Random is reproducible across runs",
+      "file": "packages/core/test/scaffold.test.ts",
+      "ancestors": [
+        "test-support determinism"
+      ],
+      "title": "seeded Random is reproducible across runs",
+      "kept": true
+    },
+    {
+      "id": "packages/core/test/scaffold.test.ts › error vocabulary › every error code has a default HTTP status and the ADR codes are present",
+      "file": "packages/core/test/scaffold.test.ts",
+      "ancestors": [
+        "error vocabulary"
+      ],
+      "title": "every error code has a default HTTP status and the ADR codes are present",
+      "kept": true
+    },
+    {
+      "id": "packages/core/test/scrobble.test.ts › validation.json vectors match Rust verdicts and reasons",
+      "file": "packages/core/test/scrobble.test.ts",
+      "ancestors": [],
+      "title": "validation.json vectors match Rust verdicts and reasons",
+      "kept": true
+    },
+    {
+      "id": "packages/core/test/scrobble.test.ts › now+300s accepted and now+301s rejected at 2026-01-15T12:00:00Z receipt",
+      "file": "packages/core/test/scrobble.test.ts",
+      "ancestors": [],
+      "title": "now+300s accepted and now+301s rejected at 2026-01-15T12:00:00Z receipt",
+      "kept": true
+    },
+    {
+      "id": "packages/core/test/scrobble.test.ts › White_Space trim (NEL, U+3000) differs from JS trim and matches Rust",
+      "file": "packages/core/test/scrobble.test.ts",
+      "ancestors": [],
+      "title": "White_Space trim (NEL, U+3000) differs from JS trim and matches Rust",
+      "kept": true
+    },
+    {
+      "id": "packages/core/test/scrobble.test.ts › buildScrobbleRecord rejects unknown input fields",
+      "file": "packages/core/test/scrobble.test.ts",
+      "ancestors": [],
+      "title": "buildScrobbleRecord rejects unknown input fields",
+      "kept": true
+    },
+    {
+      "id": "packages/core/test/scrobble.test.ts › duration 1 and 86400 accepted; 0, 86401 and 1.5 rejected; invalid MBID rejected; omitted album accepted",
+      "file": "packages/core/test/scrobble.test.ts",
+      "ancestors": [],
+      "title": "duration 1 and 86400 accepted; 0, 86401 and 1.5 rejected; invalid MBID rejected; omitted album accepted",
+      "kept": true
+    },
+    {
+      "id": "packages/core/test/settings.test.ts › settings record requires key self and indexing enum",
+      "file": "packages/core/test/settings.test.ts",
+      "ancestors": [],
+      "title": "settings record requires key self and indexing enum",
+      "kept": true
+    },
+    {
+      "id": "packages/core/test/syntax.test.ts › DID/handle/NSID/AT-URI/TID accept and reject spec vectors",
+      "file": "packages/core/test/syntax.test.ts",
+      "ancestors": [],
+      "title": "DID/handle/NSID/AT-URI/TID accept and reject spec vectors",
+      "kept": true
+    },
+    {
+      "id": "packages/core/test/timestamp.test.ts › storage form is fixed-width 30 chars and text order equals time order",
+      "file": "packages/core/test/timestamp.test.ts",
+      "ancestors": [],
+      "title": "storage form is fixed-width 30 chars and text order equals time order",
+      "kept": true
+    },
+    {
+      "id": "packages/core/test/timestamp.test.ts › every timestamps.json vector round-trips to the Rust storage and DTO forms",
+      "file": "packages/core/test/timestamp.test.ts",
+      "ancestors": [],
+      "title": "every timestamps.json vector round-trips to the Rust storage and DTO forms",
+      "kept": true
+    },
+    {
+      "id": "packages/core/test/unicode-runtime.test.ts › workerd ICU NFKC matches oracle corpus",
+      "file": "packages/core/test/unicode-runtime.test.ts",
+      "ancestors": [],
+      "title": "workerd ICU NFKC matches oracle corpus",
+      "kept": true,
+      "change": "ADR 0005 §15.3 (round 2): the navigator.userAgent === 'Cloudflare-Workers' assertion (line 257 at 3d953a9) is replaced by runtime-neutral checks (ICU Unicode 17 or newer, NFKC drift 0 outside the documented unassigned set); title kept.",
+      "package": "N0-01"
+    },
+    {
+      "id": "packages/core/test/unicode-runtime.test.ts › code points unassigned in Unicode 16.0.0 stay NFKC-inert normalization boundaries",
+      "file": "packages/core/test/unicode-runtime.test.ts",
+      "ancestors": [],
+      "title": "code points unassigned in Unicode 16.0.0 stay NFKC-inert normalization boundaries",
+      "kept": true,
+      "change": "ADR 0005 §15.3 (round 2): the navigator.userAgent === 'Cloudflare-Workers' assertion (line 364 at 3d953a9) is replaced by runtime-neutral checks; title kept.",
+      "package": "N0-01"
+    },
+    {
+      "id": "packages/core/test/unicode-runtime.test.ts › generated casefold/white-space tables are up to date with data file",
+      "file": "packages/core/test/unicode-runtime.test.ts",
+      "ancestors": [],
+      "title": "generated casefold/white-space tables are up to date with data file",
+      "kept": true
+    },
+    {
+      "id": "packages/core/test/write-policy.test.ts › retry delays › zero jitter yields 1s,2s,4s,8s,16s,32s,64s,128s,256s,300s",
+      "file": "packages/core/test/write-policy.test.ts",
+      "ancestors": [
+        "retry delays"
+      ],
+      "title": "zero jitter yields 1s,2s,4s,8s,16s,32s,64s,128s,256s,300s",
+      "kept": true
+    },
+    {
+      "id": "packages/core/test/write-policy.test.ts › retry delays › Retry-After 20 raises a 1s or 2s delay to 20s and is capped at 300s",
+      "file": "packages/core/test/write-policy.test.ts",
+      "ancestors": [
+        "retry delays"
+      ],
+      "title": "Retry-After 20 raises a 1s or 2s delay to 20s and is capped at 300s",
+      "kept": true
+    },
+    {
+      "id": "packages/core/test/write-policy.test.ts › retry delays › jitter stays within [base, base*1.25] for seeded random",
+      "file": "packages/core/test/write-policy.test.ts",
+      "ancestors": [
+        "retry delays"
+      ],
+      "title": "jitter stays within [base, base*1.25] for seeded random",
+      "kept": true
+    },
+    {
+      "id": "packages/core/test/write-policy.test.ts › failure classification › classify maps 429/5xx/network to transient and RecordAlreadyExists to ambiguous_create",
+      "file": "packages/core/test/write-policy.test.ts",
+      "ancestors": [
+        "failure classification"
+      ],
+      "title": "classify maps 429/5xx/network to transient and RecordAlreadyExists to ambiguous_create",
+      "kept": true
+    },
+    {
+      "id": "scripts/test/check-bundle.test.ts › fails when a test-support import is injected into a temp copy of the entry",
+      "file": "scripts/test/check-bundle.test.ts",
+      "ancestors": [],
+      "title": "fails when a test-support import is injected into a temp copy of the entry",
+      "kept": true
+    },
+    {
+      "id": "scripts/test/check-bundle.test.ts › fails when node:crypto is imported into a temp copy of the entry",
+      "file": "scripts/test/check-bundle.test.ts",
+      "ancestors": [],
+      "title": "fails when node:crypto is imported into a temp copy of the entry",
+      "kept": true
+    },
+    {
+      "id": "scripts/test/check-bundle.test.ts › refuses built client metadata or _headers that differ from the configured origin and prefix",
+      "file": "scripts/test/check-bundle.test.ts",
+      "ancestors": [],
+      "title": "refuses built client metadata or _headers that differ from the configured origin and prefix",
+      "kept": true
+    },
+    {
+      "id": "scripts/test/check-bundle.test.ts › refuses a wrangler config with a fixture or empty prefix or a route off the PUBLIC_ORIGIN host",
+      "file": "scripts/test/check-bundle.test.ts",
+      "ancestors": [],
+      "title": "refuses a wrangler config with a fixture or empty prefix or a route off the PUBLIC_ORIGIN host",
+      "kept": true
+    },
+    {
+      "id": "scripts/test/check-bundle.test.ts › refuses assets.not_found_handling other than \"none\" (ADR §15 Q9) and accepts the example config",
+      "file": "scripts/test/check-bundle.test.ts",
+      "ancestors": [],
+      "title": "refuses assets.not_found_handling other than \"none\" (ADR §15 Q9) and accepts the example config",
+      "kept": true
+    },
+    {
+      "id": "scripts/test/check-bundle.test.ts › missing Worker entry skips after config checks, and fails with --release",
+      "file": "scripts/test/check-bundle.test.ts",
+      "ancestors": [],
+      "title": "missing Worker entry skips after config checks, and fails with --release",
+      "kept": true
+    },
+    {
+      "id": "scripts/test/check-bundle.test.ts › analyzeBundle enforces the gzip limit and rejects secp256k1-node and router-transport modules",
+      "file": "scripts/test/check-bundle.test.ts",
+      "ancestors": [],
+      "title": "analyzeBundle enforces the gzip limit and rejects secp256k1-node and router-transport modules",
+      "kept": true
+    },
+    {
+      "id": "scripts/test/check-ts.test.ts › scripts/check-ts.sh › the nested gate runs alone in the last sequence group, after worker-modules",
+      "file": "scripts/test/check-ts.test.ts",
+      "ancestors": [
+        "scripts/check-ts.sh"
+      ],
+      "title": "the nested gate runs alone in the last sequence group, after worker-modules",
+      "kept": true
+    },
+    {
+      "id": "scripts/test/check-ts.test.ts › scripts/check-ts.sh › a misformatted file in a disposable copy fails the biome step and leaves the repository unchanged",
+      "file": "scripts/test/check-ts.test.ts",
+      "ancestors": [
+        "scripts/check-ts.sh"
+      ],
+      "title": "a misformatted file in a disposable copy fails the biome step and leaves the repository unchanged",
+      "kept": true
+    },
+    {
+      "id": "scripts/test/check-ts.test.ts › scripts/check-ts.sh › an inverted assertion in a disposable copy makes check-ts.sh exit nonzero",
+      "file": "scripts/test/check-ts.test.ts",
+      "ancestors": [
+        "scripts/check-ts.sh"
+      ],
+      "title": "an inverted assertion in a disposable copy makes check-ts.sh exit nonzero",
+      "kept": true
+    },
+    {
+      "id": "scripts/test/check-ts.test.ts › scripts/check-ts.sh › a wrong API field type in a disposable copy fails tsc -b",
+      "file": "scripts/test/check-ts.test.ts",
+      "ancestors": [
+        "scripts/check-ts.sh"
+      ],
+      "title": "a wrong API field type in a disposable copy fails tsc -b",
+      "kept": true
+    },
+    {
+      "id": "scripts/test/check-ts.test.ts › scripts/check-ts.sh › a worker/src file that reads the test-only HARNESS binding fails tsc -b in a disposable copy",
+      "file": "scripts/test/check-ts.test.ts",
+      "ancestors": [
+        "scripts/check-ts.sh"
+      ],
+      "title": "a worker/src file that reads the test-only HARNESS binding fails tsc -b in a disposable copy",
+      "kept": true
+    },
+    {
+      "id": "scripts/test/check-ts.test.ts › scripts/check-ts.sh › npm ci, tsc -b and the web production build pass and leave package-lock.json unchanged",
+      "file": "scripts/test/check-ts.test.ts",
+      "ancestors": [
+        "scripts/check-ts.sh"
+      ],
+      "title": "npm ci, tsc -b and the web production build pass and leave package-lock.json unchanged",
+      "kept": true
+    },
+    {
+      "id": "scripts/test/deploy.test.ts › bash scripts/deploy.sh --dry-run › refuses empty/fixture prefix and missing secret with nonzero exit",
+      "file": "scripts/test/deploy.test.ts",
+      "ancestors": [
+        "bash scripts/deploy.sh --dry-run"
+      ],
+      "title": "refuses empty/fixture prefix and missing secret with nonzero exit",
+      "kept": true
+    },
+    {
+      "id": "scripts/test/deploy.test.ts › bash scripts/deploy.sh --dry-run › valid owned prefix and CURSOR_KEY run gen-config, the web build and wrangler deploy --dry-run with exit 0",
+      "file": "scripts/test/deploy.test.ts",
+      "ancestors": [
+        "bash scripts/deploy.sh --dry-run"
+      ],
+      "title": "valid owned prefix and CURSOR_KEY run gen-config, the web build and wrangler deploy --dry-run with exit 0",
+      "kept": true
+    },
+    {
+      "id": "scripts/test/deploy.test.ts › actionlint .github/workflows/deploy.yml › workflow is valid",
+      "file": "scripts/test/deploy.test.ts",
+      "ancestors": [
+        "actionlint .github/workflows/deploy.yml"
+      ],
+      "title": "workflow is valid",
+      "kept": true
+    },
+    {
+      "id": "scripts/test/deploy.test.ts › actionlint .github/workflows/deploy.yml › deploy credentials are scoped to the deploy step",
+      "file": "scripts/test/deploy.test.ts",
+      "ancestors": [
+        "actionlint .github/workflows/deploy.yml"
+      ],
+      "title": "deploy credentials are scoped to the deploy step",
+      "kept": true
+    },
+    {
+      "id": "scripts/test/deploy.test.ts › npx tsx scripts/admin/pitr-restore.ts --help › prints usage and requires ADMIN_TOKEN",
+      "file": "scripts/test/deploy.test.ts",
+      "ancestors": [
+        "npx tsx scripts/admin/pitr-restore.ts --help"
+      ],
+      "title": "prints usage and requires ADMIN_TOKEN",
+      "kept": true
+    },
+    {
+      "id": "scripts/test/deploy.test.ts › npx tsx scripts/admin/pitr-restore.ts --help › an explicit --env is never overridden by an ambient PUBLIC_ORIGIN",
+      "file": "scripts/test/deploy.test.ts",
+      "ancestors": [
+        "npx tsx scripts/admin/pitr-restore.ts --help"
+      ],
+      "title": "an explicit --env is never overridden by an ambient PUBLIC_ORIGIN",
+      "kept": true
+    },
+    {
+      "id": "scripts/test/gen-config.test.ts › production metadata equals expected JSON for https://music.example.org with prefix org.example.music",
+      "file": "scripts/test/gen-config.test.ts",
+      "ancestors": [],
+      "title": "production metadata equals expected JSON for https://music.example.org with prefix org.example.music",
+      "kept": true
+    },
+    {
+      "id": "scripts/test/gen-config.test.ts › refuses empty or fixture prefix for production",
+      "file": "scripts/test/gen-config.test.ts",
+      "ancestors": [],
+      "title": "refuses empty or fixture prefix for production",
+      "kept": true
+    },
+    {
+      "id": "scripts/test/gen-config.test.ts › local env writes only the loopback client-id hint and removes stale metadata",
+      "file": "scripts/test/gen-config.test.ts",
+      "ancestors": [],
+      "title": "local env writes only the loopback client-id hint and removes stale metadata",
+      "kept": true
+    },
+    {
+      "id": "scripts/test/gen-config.test.ts › refuses a deployed env whose resolved routes are missing or off the PUBLIC_ORIGIN host",
+      "file": "scripts/test/gen-config.test.ts",
+      "ancestors": [],
+      "title": "refuses a deployed env whose resolved routes are missing or off the PUBLIC_ORIGIN host",
+      "kept": true
+    },
+    {
+      "id": "scripts/test/gen-config.test.ts › prefix rule and fixture prefix match worker/src/config.ts",
+      "file": "scripts/test/gen-config.test.ts",
+      "ancestors": [],
+      "title": "prefix rule and fixture prefix match worker/src/config.ts",
+      "kept": true
+    },
+    {
+      "id": "scripts/test/gen-config.test.ts › _headers contains require-trusted-types-for and frame-ancestors 'none'",
+      "file": "scripts/test/gen-config.test.ts",
+      "ancestors": [],
+      "title": "_headers contains require-trusted-types-for and frame-ancestors 'none'",
+      "kept": true
+    },
+    {
+      "id": "scripts/test/gen-config.test.ts › _headers marks /assets/* public, max-age=31536000, immutable and /index.html and /oauth/client-metadata.json no-cache",
+      "file": "scripts/test/gen-config.test.ts",
+      "ancestors": [],
+      "title": "_headers marks /assets/* public, max-age=31536000, immutable and /index.html and /oauth/client-metadata.json no-cache",
+      "kept": true
+    },
+    {
+      "id": "scripts/test/pitr-restore.test.ts › scripts/admin/pitr-restore.ts after the POST › error after an accepted POST exits 1, not 2",
+      "file": "scripts/test/pitr-restore.test.ts",
+      "ancestors": [
+        "scripts/admin/pitr-restore.ts after the POST"
+      ],
+      "title": "error after an accepted POST exits 1, not 2",
+      "kept": true
+    },
+    {
+      "id": "scripts/test/secret-scan.test.ts › scripts/test/secret-scan.test.ts › worker/.dev.vars.example, .env.example and docs contain no credential-shaped values",
+      "file": "scripts/test/secret-scan.test.ts",
+      "ancestors": [
+        "scripts/test/secret-scan.test.ts"
+      ],
+      "title": "worker/.dev.vars.example, .env.example and docs contain no credential-shaped values",
+      "kept": true
+    },
+    {
+      "id": "web/test/api-client.test.ts › decodes Page<Scrobble> and passes nextCursor unchanged",
+      "file": "web/test/api-client.test.ts",
+      "ancestors": [],
+      "title": "decodes Page<Scrobble> and passes nextCursor unchanged",
+      "kept": true
+    },
+    {
+      "id": "web/test/api-client.test.ts › maps 422 envelope to ApiError with fields",
+      "file": "web/test/api-client.test.ts",
+      "ancestors": [],
+      "title": "maps 422 envelope to ApiError with fields",
+      "kept": true
+    },
+    {
+      "id": "web/test/api-client.test.ts › notify posts {uri} and returns queued",
+      "file": "web/test/api-client.test.ts",
+      "ancestors": [],
+      "title": "notify posts {uri} and returns queued",
+      "kept": true
+    },
+    {
+      "id": "web/test/api-client.test.ts › every api/examples response decodes and a changed field type is rejected",
+      "file": "web/test/api-client.test.ts",
+      "ancestors": [],
+      "title": "every api/examples response decodes and a changed field type is rejected",
+      "kept": true
+    },
+    {
+      "id": "web/test/oauth/session.test.ts › web/test/oauth/session.test.ts › signIn requests scope 'atproto repo:<p>.scrobble repo:<p>.follow repo:<p>.settings'",
+      "file": "web/test/oauth/session.test.ts",
+      "ancestors": [
+        "web/test/oauth/session.test.ts"
+      ],
+      "title": "signIn requests scope 'atproto repo:<p>.scrobble repo:<p>.follow repo:<p>.settings'",
+      "kept": true
+    },
+    {
+      "id": "web/test/oauth/session.test.ts › web/test/oauth/session.test.ts › successful callback stores session and posts notify {did}",
+      "file": "web/test/oauth/session.test.ts",
+      "ancestors": [
+        "web/test/oauth/session.test.ts"
+      ],
+      "title": "successful callback stores session and posts notify {did}",
+      "kept": true
+    },
+    {
+      "id": "web/test/oauth/session.test.ts › web/test/oauth/session.test.ts › signOut calls revoke and clears IndexedDB stores",
+      "file": "web/test/oauth/session.test.ts",
+      "ancestors": [
+        "web/test/oauth/session.test.ts"
+      ],
+      "title": "signOut calls revoke and clears IndexedDB stores",
+      "kept": true
+    },
+    {
+      "id": "web/test/oauth/session.test.ts › web/test/oauth/session.test.ts › expired/refresh-failed session surfaces re-auth state",
+      "file": "web/test/oauth/session.test.ts",
+      "ancestors": [
+        "web/test/oauth/session.test.ts"
+      ],
+      "title": "expired/refresh-failed session surfaces re-auth state",
+      "kept": true
+    },
+    {
+      "id": "web/test/oauth/session.test.ts › web/test/oauth/session.test.ts › signOut clears IndexedDB stores when revoke fails with 500",
+      "file": "web/test/oauth/session.test.ts",
+      "ancestors": [
+        "web/test/oauth/session.test.ts"
+      ],
+      "title": "signOut clears IndexedDB stores when revoke fails with 500",
+      "kept": true
+    },
+    {
+      "id": "web/test/oauth/session.test.ts › session support › handle resolution falls back to the library DoH resolver only when /api/v1/resolve cannot answer",
+      "file": "web/test/oauth/session.test.ts",
+      "ancestors": [
+        "session support"
+      ],
+      "title": "handle resolution falls back to the library DoH resolver only when /api/v1/resolve cannot answer",
+      "kept": true
+    },
+    {
+      "id": "web/test/oauth/session.test.ts › session support › a revocation that never answers is abandoned after the timeout and the stores are still cleared",
+      "file": "web/test/oauth/session.test.ts",
+      "ancestors": [
+        "session support"
+      ],
+      "title": "a revocation that never answers is abandoned after the timeout and the stores are still cleared",
+      "kept": true
+    },
+    {
+      "id": "web/test/oauth/session.test.ts › session support › main.tsx boot: an expired stored session shows the re-auth banner; a mid-session refresh failure signs the shell out",
+      "file": "web/test/oauth/session.test.ts",
+      "ancestors": [
+        "session support"
+      ],
+      "title": "main.tsx boot: an expired stored session shows the re-auth banner; a mid-session refresh failure signs the shell out",
+      "kept": true
+    },
+    {
+      "id": "web/test/oauth/session.test.ts › session support › the callback route records the session and replaces the entry with /feed; failures show fixed text only",
+      "file": "web/test/oauth/session.test.ts",
+      "ancestors": [
+        "session support"
+      ],
+      "title": "the callback route records the session and replaces the entry with /feed; failures show fixed text only",
+      "kept": true
+    },
+    {
+      "id": "web/test/outbox/delete.test.ts › pending deletion hidden in owner overlay; failure visible",
+      "file": "web/test/outbox/delete.test.ts",
+      "ancestors": [],
+      "title": "pending deletion hidden in owner overlay; failure visible",
+      "kept": true
+    },
+    {
+      "id": "web/test/outbox/delete.test.ts › delete behind an unsent or in-flight create runs after it and leaves no record on the fake PDS",
+      "file": "web/test/outbox/delete.test.ts",
+      "ancestors": [],
+      "title": "delete behind an unsent or in-flight create runs after it and leaves no record on the fake PDS",
+      "kept": true
+    },
+    {
+      "id": "web/test/outbox/delete.test.ts › delete of a create that lost its rkey to another writer completes locally and never deletes their record",
+      "file": "web/test/outbox/delete.test.ts",
+      "ancestors": [],
+      "title": "delete of a create that lost its rkey to another writer completes locally and never deletes their record",
+      "kept": true
+    },
+    {
+      "id": "web/test/outbox/delete.test.ts › delete enqueued after the create already ended remote_record_conflict deletes the record the owner saw, with swap",
+      "file": "web/test/outbox/delete.test.ts",
+      "ancestors": [],
+      "title": "delete enqueued after the create already ended remote_record_conflict deletes the record the owner saw, with swap",
+      "kept": true
+    },
+    {
+      "id": "web/test/outbox/delete.test.ts › delete enqueued after a remote_record_conflict create shows its failure instead of completing silently",
+      "file": "web/test/outbox/delete.test.ts",
+      "ancestors": [],
+      "title": "delete enqueued after a remote_record_conflict create shows its failure instead of completing silently",
+      "kept": true
+    },
+    {
+      "id": "web/test/outbox/delete.test.ts › InvalidSwap after another client changed the record re-fetches the CID and retries the delete",
+      "file": "web/test/outbox/delete.test.ts",
+      "ancestors": [],
+      "title": "InvalidSwap after another client changed the record re-fetches the CID and retries the delete",
+      "kept": true
+    },
+    {
+      "id": "web/test/outbox/follows.test.ts › PUT, DELETE, PUT for one subject execute in order with separate ids",
+      "file": "web/test/outbox/follows.test.ts",
+      "ancestors": [],
+      "title": "PUT, DELETE, PUT for one subject execute in order with separate ids",
+      "kept": true
+    },
+    {
+      "id": "web/test/outbox/follows.test.ts › unfollow deletes all duplicate matching records and keeps unrelated subject",
+      "file": "web/test/outbox/follows.test.ts",
+      "ancestors": [],
+      "title": "unfollow deletes all duplicate matching records and keeps unrelated subject",
+      "kept": true
+    },
+    {
+      "id": "web/test/outbox/follows.test.ts › unfollow with no matching record succeeds with zero deleteRecord calls",
+      "file": "web/test/outbox/follows.test.ts",
+      "ancestors": [],
+      "title": "unfollow with no matching record succeeds with zero deleteRecord calls",
+      "kept": true
+    },
+    {
+      "id": "web/test/outbox/recovery.test.ts › crash before send: operation resumes with same rkey",
+      "file": "web/test/outbox/recovery.test.ts",
+      "ancestors": [],
+      "title": "crash before send: operation resumes with same rkey",
+      "kept": true
+    },
+    {
+      "id": "web/test/outbox/recovery.test.ts › crash after PDS commit before local ack: ambiguous create reconciles to success via digest",
+      "file": "web/test/outbox/recovery.test.ts",
+      "ancestors": [],
+      "title": "crash after PDS commit before local ack: ambiguous create reconciles to success via digest",
+      "kept": true
+    },
+    {
+      "id": "web/test/outbox/recovery.test.ts › remote record with different payload at rkey → remote_record_conflict, never overwritten",
+      "file": "web/test/outbox/recovery.test.ts",
+      "ancestors": [],
+      "title": "remote record with different payload at rkey → remote_record_conflict, never overwritten",
+      "kept": true
+    },
+    {
+      "id": "web/test/outbox/recovery.test.ts › crash during delete resumes with swapRecord and verifies absence",
+      "file": "web/test/outbox/recovery.test.ts",
+      "ancestors": [],
+      "title": "crash during delete resumes with swapRecord and verifies absence",
+      "kept": true
+    },
+    {
+      "id": "web/test/outbox/recovery.test.ts › RecordNotFound on first and repeated delete completes the operation as success",
+      "file": "web/test/outbox/recovery.test.ts",
+      "ancestors": [],
+      "title": "RecordNotFound on first and repeated delete completes the operation as success",
+      "kept": true
+    },
+    {
+      "id": "web/test/outbox/recovery.test.ts › crash after follow createRecord before local ack reconciles to one record at the deterministic rkey",
+      "file": "web/test/outbox/recovery.test.ts",
+      "ancestors": [],
+      "title": "crash after follow createRecord before local ack reconciles to one record at the deterministic rkey",
+      "kept": true
+    },
+    {
+      "id": "web/test/outbox/recovery.test.ts › one runner per DID: a second tab waits for the Web Lock and takes over after the first stops",
+      "file": "web/test/outbox/recovery.test.ts",
+      "ancestors": [],
+      "title": "one runner per DID: a second tab waits for the Web Lock and takes over after the first stops",
+      "kept": true
+    },
+    {
+      "id": "web/test/outbox/retry.test.ts › zero jitter delays 1,2,4,…,256,300 and exactly 10 attempts with no 11th request",
+      "file": "web/test/outbox/retry.test.ts",
+      "ancestors": [],
+      "title": "zero jitter delays 1,2,4,…,256,300 and exactly 10 attempts with no 11th request",
+      "kept": true
+    },
+    {
+      "id": "web/test/outbox/retry.test.ts › Retry-After 20 raises next delay to 20s",
+      "file": "web/test/outbox/retry.test.ts",
+      "ancestors": [],
+      "title": "Retry-After 20 raises next delay to 20s",
+      "kept": true
+    },
+    {
+      "id": "web/test/outbox/retry.test.ts › nonrecoverable PDS error fails the operation after exactly one request",
+      "file": "web/test/outbox/retry.test.ts",
+      "ancestors": [],
+      "title": "nonrecoverable PDS error fails the operation after exactly one request",
+      "kept": true
+    },
+    {
+      "id": "web/test/outbox/retry.test.ts › a crash during the tenth attempt is reconciled read-only, never with an eleventh create",
+      "file": "web/test/outbox/retry.test.ts",
+      "ancestors": [],
+      "title": "a crash during the tenth attempt is reconciled read-only, never with an eleventh create",
+      "kept": true
+    },
+    {
+      "id": "web/test/outbox/retry.test.ts › a notify answered 503 is retried before records/status polling",
+      "file": "web/test/outbox/retry.test.ts",
+      "ancestors": [],
+      "title": "a notify answered 503 is retried before records/status polling",
+      "kept": true
+    },
+    {
+      "id": "web/test/outbox/settings.test.ts › disconnect writes settings/self disabled and notifies",
+      "file": "web/test/outbox/settings.test.ts",
+      "ancestors": [],
+      "title": "disconnect writes settings/self disabled and notifies",
+      "kept": true
+    },
+    {
+      "id": "web/test/outbox/settings.test.ts › reconnect after disconnect runs FIFO and the last choice wins on the PDS",
+      "file": "web/test/outbox/settings.test.ts",
+      "ancestors": [],
+      "title": "reconnect after disconnect runs FIFO and the last choice wins on the PDS",
+      "kept": true
+    },
+    {
+      "id": "web/test/routes/feed.test.tsx › web/test/routes/feed.test.tsx › renders items and loads next page via nextCursor",
+      "file": "web/test/routes/feed.test.tsx",
+      "ancestors": [
+        "web/test/routes/feed.test.tsx"
+      ],
+      "title": "renders items and loads next page via nextCursor",
+      "kept": true
+    },
+    {
+      "id": "web/test/routes/feed.test.tsx › web/test/routes/feed.test.tsx › anonymous user selecting following sees a sign-in prompt and no scope=following request is sent",
+      "file": "web/test/routes/feed.test.tsx",
+      "ancestors": [
+        "web/test/routes/feed.test.tsx"
+      ],
+      "title": "anonymous user selecting following sees a sign-in prompt and no scope=following request is sent",
+      "kept": true
+    },
+    {
+      "id": "web/test/routes/feed.test.tsx › web/test/routes/feed.test.tsx › page-2 503 keeps page 1, shows retry, and a successful retry appends page 2 once",
+      "file": "web/test/routes/feed.test.tsx",
+      "ancestors": [
+        "web/test/routes/feed.test.tsx"
+      ],
+      "title": "page-2 503 keeps page 1, shows retry, and a successful retry appends page 2 once",
+      "kept": true
+    },
+    {
+      "id": "web/test/routes/feed.test.tsx › web/test/routes/feed.test.tsx › loading, empty, error and stale states render labelled text and no spinner remains after an error",
+      "file": "web/test/routes/feed.test.tsx",
+      "ancestors": [
+        "web/test/routes/feed.test.tsx"
+      ],
+      "title": "loading, empty, error and stale states render labelled text and no spinner remains after an error",
+      "kept": true
+    },
+    {
+      "id": "web/test/routes/profile.test.tsx › web/test/routes/profile.test.tsx › stats window switch fetches window and renders exact top lists",
+      "file": "web/test/routes/profile.test.tsx",
+      "ancestors": [
+        "web/test/routes/profile.test.tsx"
+      ],
+      "title": "stats window switch fetches window and renders exact top lists",
+      "kept": true
+    },
+    {
+      "id": "web/test/routes/profile.test.tsx › web/test/routes/profile.test.tsx › new verified handle for the same DID updates the display on the same /u/:did route",
+      "file": "web/test/routes/profile.test.tsx",
+      "ancestors": [
+        "web/test/routes/profile.test.tsx"
+      ],
+      "title": "new verified handle for the same DID updates the display on the same /u/:did route",
+      "kept": true
+    },
+    {
+      "id": "web/test/routes/profile.test.tsx › web/test/routes/profile.test.tsx › recordless user, no-album stats and unknown DID 404 render explicit empty and not-found states",
+      "file": "web/test/routes/profile.test.tsx",
+      "ancestors": [
+        "web/test/routes/profile.test.tsx"
+      ],
+      "title": "recordless user, no-album stats and unknown DID 404 render explicit empty and not-found states",
+      "kept": true
+    },
+    {
+      "id": "web/test/routes/profile.test.tsx › web/test/routes/profile.test.tsx › follow button shows pending then confirmed, and a permanently failed unfollow shows failed without claiming removal",
+      "file": "web/test/routes/profile.test.tsx",
+      "ancestors": [
+        "web/test/routes/profile.test.tsx"
+      ],
+      "title": "follow button shows pending then confirmed, and a permanently failed unfollow shows failed without claiming removal",
+      "kept": true
+    },
+    {
+      "id": "web/test/routes/profile.test.tsx › web/test/routes/profile.test.tsx › a follow or unfollow whose index confirmation stopped offers Follow or Unfollow again",
+      "file": "web/test/routes/profile.test.tsx",
+      "ancestors": [
+        "web/test/routes/profile.test.tsx"
+      ],
+      "title": "a follow or unfollow whose index confirmation stopped offers Follow or Unfollow again",
+      "kept": true
+    },
+    {
+      "id": "web/test/routes/profile.test.tsx › web/test/routes/profile.test.tsx › a failed or truncated following lookup shows the follow state as unknown with a re-check, never Not following",
+      "file": "web/test/routes/profile.test.tsx",
+      "ancestors": [
+        "web/test/routes/profile.test.tsx"
+      ],
+      "title": "a failed or truncated following lookup shows the follow state as unknown with a re-check, never Not following",
+      "kept": true
+    },
+    {
+      "id": "web/test/routes/profile.test.tsx › web/test/routes/profile.test.tsx › a scrobble whose index confirmation stopped reads as not confirmed in the owner's history, not as waiting",
+      "file": "web/test/routes/profile.test.tsx",
+      "ancestors": [
+        "web/test/routes/profile.test.tsx"
+      ],
+      "title": "a scrobble whose index confirmation stopped reads as not confirmed in the owner's history, not as waiting",
+      "kept": true
+    },
+    {
+      "id": "web/test/routes/profile.test.tsx › web/test/routes/profile.test.tsx › own profile has no follow control and an anonymous viewer gets a sign-in action",
+      "file": "web/test/routes/profile.test.tsx",
+      "ancestors": [
+        "web/test/routes/profile.test.tsx"
+      ],
+      "title": "own profile has no follow control and an anonymous viewer gets a sign-in action",
+      "kept": true
+    },
+    {
+      "id": "web/test/routes/profile.test.tsx › web/test/routes/profile.test.tsx › delete control appears only on the signed-in owner's own records",
+      "file": "web/test/routes/profile.test.tsx",
+      "ancestors": [
+        "web/test/routes/profile.test.tsx"
+      ],
+      "title": "delete control appears only on the signed-in owner's own records",
+      "kept": true
+    },
+    {
+      "id": "web/test/routes/scrobble.test.tsx › web/test/routes/scrobble.test.tsx › invalid input shows field errors and creates no outbox operation",
+      "file": "web/test/routes/scrobble.test.tsx",
+      "ancestors": [
+        "web/test/routes/scrobble.test.tsx"
+      ],
+      "title": "invalid input shows field errors and creates no outbox operation",
+      "kept": true
+    },
+    {
+      "id": "web/test/routes/scrobble.test.tsx › web/test/routes/scrobble.test.tsx › status progresses queued→published→indexed from mocked records/status",
+      "file": "web/test/routes/scrobble.test.tsx",
+      "ancestors": [
+        "web/test/routes/scrobble.test.tsx"
+      ],
+      "title": "status progresses queued→published→indexed from mocked records/status",
+      "kept": true
+    },
+    {
+      "id": "web/test/routes/scrobble.test.tsx › web/test/routes/scrobble.test.tsx › excluded or failed status shows the failure code, stops polling and never shows published success",
+      "file": "web/test/routes/scrobble.test.tsx",
+      "ancestors": [
+        "web/test/routes/scrobble.test.tsx"
+      ],
+      "title": "excluded or failed status shows the failure code, stops polling and never shows published success",
+      "kept": true
+    },
+    {
+      "id": "web/test/routes/settings.test.tsx › web/test/routes/settings.test.tsx › disconnect requires confirmation and enqueues settings op",
+      "file": "web/test/routes/settings.test.tsx",
+      "ancestors": [
+        "web/test/routes/settings.test.tsx"
+      ],
+      "title": "disconnect requires confirmation and enqueues settings op",
+      "kept": true
+    },
+    {
+      "id": "web/test/routes/settings.test.tsx › web/test/routes/settings.test.tsx › disconnect confirmation states that public PDS records and the opt-out record remain and claims no erasure",
+      "file": "web/test/routes/settings.test.tsx",
+      "ancestors": [
+        "web/test/routes/settings.test.tsx"
+      ],
+      "title": "disconnect confirmation states that public PDS records and the opt-out record remain and claims no erasure",
+      "kept": true
+    },
+    {
+      "id": "web/test/routes/settings.test.tsx › web/test/routes/settings.test.tsx › export action downloads /api/v1/users/<did>/export as music-export.json",
+      "file": "web/test/routes/settings.test.tsx",
+      "ancestors": [
+        "web/test/routes/settings.test.tsx"
+      ],
+      "title": "export action downloads /api/v1/users/<did>/export as music-export.json",
+      "kept": true
+    },
+    {
+      "id": "web/test/routes/shell.test.tsx › web/test/routes/shell.test.tsx › write UI hidden without publication capability",
+      "file": "web/test/routes/shell.test.tsx",
+      "ancestors": [
+        "web/test/routes/shell.test.tsx"
+      ],
+      "title": "write UI hidden without publication capability",
+      "kept": true
+    },
+    {
+      "id": "web/test/routes/shell.test.tsx › web/test/routes/shell.test.tsx › unknown route renders the not-found view",
+      "file": "web/test/routes/shell.test.tsx",
+      "ancestors": [
+        "web/test/routes/shell.test.tsx"
+      ],
+      "title": "unknown route renders the not-found view",
+      "kept": true
+    },
+    {
+      "id": "web/test/routes/shell.test.tsx › web/test/routes/shell.test.tsx › signed-in shell shows the verified handle and DID and the authenticated navigation",
+      "file": "web/test/routes/shell.test.tsx",
+      "ancestors": [
+        "web/test/routes/shell.test.tsx"
+      ],
+      "title": "signed-in shell shows the verified handle and DID and the authenticated navigation",
+      "kept": true
+    },
+    {
+      "id": "web/test/routes/shell.test.tsx › web/test/routes/shell.test.tsx › after sign-out the shell shows anonymous navigation and the settings route shows a sign-in prompt",
+      "file": "web/test/routes/shell.test.tsx",
+      "ancestors": [
+        "web/test/routes/shell.test.tsx"
+      ],
+      "title": "after sign-out the shell shows anonymous navigation and the settings route shows a sign-in prompt",
+      "kept": true
+    },
+    {
+      "id": "web/test/routes/signin.test.tsx › web/test/routes/signin.test.tsx › cancelled authorization, expired callback and unknown handle show specific recovery text with retry and no code or token in the DOM",
+      "file": "web/test/routes/signin.test.tsx",
+      "ancestors": [
+        "web/test/routes/signin.test.tsx"
+      ],
+      "title": "cancelled authorization, expired callback and unknown handle show specific recovery text with retry and no code or token in the DOM",
+      "kept": true
+    },
+    {
+      "id": "worker/test/acceptance/federation.test.ts › federation acceptance › Carol r10 appears only through external ingestion with zero app write calls",
+      "file": "worker/test/acceptance/federation.test.ts",
+      "ancestors": [
+        "federation acceptance"
+      ],
+      "title": "Carol r10 appears only through external ingestion with zero app write calls",
+      "kept": true
+    },
+    {
+      "id": "worker/test/acceptance/federation.test.ts › federation acceptance › bad signature / changed block / wrong MST path leave projection and cursor byte-identical",
+      "file": "worker/test/acceptance/federation.test.ts",
+      "ancestors": [
+        "federation acceptance"
+      ],
+      "title": "bad signature / changed block / wrong MST path leave projection and cursor byte-identical",
+      "kept": true
+    },
+    {
+      "id": "worker/test/acceptance/federation.test.ts › federation acceptance › a valid hint still applies after each rejected case",
+      "file": "worker/test/acceptance/federation.test.ts",
+      "ancestors": [
+        "federation acceptance"
+      ],
+      "title": "a valid hint still applies after each rejected case",
+      "kept": true
+    },
+    {
+      "id": "worker/test/acceptance/federation.test.ts › federation acceptance › settings disabled disconnects Carol; settings deleted reconnects after snapshot",
+      "file": "worker/test/acceptance/federation.test.ts",
+      "ancestors": [
+        "federation acceptance"
+      ],
+      "title": "settings disabled disconnects Carol; settings deleted reconnects after snapshot",
+      "kept": true
+    },
+    {
+      "id": "worker/test/acceptance/federation.test.ts › federation acceptance › duplicate events, socket drop and expired cursor converge to the exact URI/CID/payload set with no double-counted stats",
+      "file": "worker/test/acceptance/federation.test.ts",
+      "ancestors": [
+        "federation acceptance"
+      ],
+      "title": "duplicate events, socket drop and expired cursor converge to the exact URI/CID/payload set with no double-counted stats",
+      "kept": true
+    },
+    {
+      "id": "worker/test/acceptance/mutations.test.ts › mutation acceptance › delete r01 → 6/6/3, Homogenic 1, history r07,r02,…",
+      "file": "worker/test/acceptance/mutations.test.ts",
+      "ancestors": [
+        "mutation acceptance"
+      ],
+      "title": "delete r01 → 6/6/3, Homogenic 1, history r07,r02,…",
+      "kept": true
+    },
+    {
+      "id": "worker/test/acceptance/mutations.test.ts › mutation acceptance › r03 artist→Björk → Björk 3, Kate Bush 2, Radiohead 2, total 7",
+      "file": "worker/test/acceptance/mutations.test.ts",
+      "ancestors": [
+        "mutation acceptance"
+      ],
+      "title": "r03 artist→Björk → Björk 3, Kate Bush 2, Radiohead 2, total 7",
+      "kept": true
+    },
+    {
+      "id": "worker/test/acceptance/mutations.test.ts › mutation acceptance › remove Alice→Bob → following feed empty; global unchanged",
+      "file": "worker/test/acceptance/mutations.test.ts",
+      "ancestors": [
+        "mutation acceptance"
+      ],
+      "title": "remove Alice→Bob → following feed empty; global unchanged",
+      "kept": true
+    },
+    {
+      "id": "worker/test/acceptance/mutations.test.ts › mutation acceptance › Carol→Bob duplicates 2, then 2, then 1",
+      "file": "worker/test/acceptance/mutations.test.ts",
+      "ancestors": [
+        "mutation acceptance"
+      ],
+      "title": "Carol→Bob duplicates 2, then 2, then 1",
+      "kept": true
+    },
+    {
+      "id": "worker/test/acceptance/mutations.test.ts › mutation acceptance › deactivate Alice hides her; reactivation current only after snapshot",
+      "file": "worker/test/acceptance/mutations.test.ts",
+      "ancestors": [
+        "mutation acceptance"
+      ],
+      "title": "deactivate Alice hides her; reactivation current only after snapshot",
+      "kept": true
+    },
+    {
+      "id": "worker/test/acceptance/query-plans.test.ts › query plans › 100×1,000 seeded records: history/feed/stats plans use indexes; negative control scans",
+      "file": "worker/test/acceptance/query-plans.test.ts",
+      "ancestors": [
+        "query plans"
+      ],
+      "title": "100×1,000 seeded records: history/feed/stats plans use indexes; negative control scans",
+      "replaced": "worker/test/acceptance/query-plans.test.ts › query plans › with 100 DIDs x 1,000 records, history, feeds and stats use their indexes on SQLite 3.54.1 and the no-index control shows SCAN",
+      "reason": "ADR 0005 §15.3 (N4-03): the same plans are pinned on the SQLite of the Node host (3.54.1, asserted) through the production Node composition instead of DO SQLite.",
+      "package": "N4-03"
+    },
+    {
+      "id": "worker/test/acceptance/read-model-acceptance.test.ts › read-model acceptance › Alice history exact order and limit-2 pages over HTTP",
+      "file": "worker/test/acceptance/read-model-acceptance.test.ts",
+      "ancestors": [
+        "read-model acceptance"
+      ],
+      "title": "Alice history exact order and limit-2 pages over HTTP",
+      "kept": true
+    },
+    {
+      "id": "worker/test/acceptance/read-model-acceptance.test.ts › read-model acceptance › global feed r09,r10,r07,r01,r02,r03,r04,r05,r06 and Alice following r09 only",
+      "file": "worker/test/acceptance/read-model-acceptance.test.ts",
+      "ancestors": [
+        "read-model acceptance"
+      ],
+      "title": "global feed r09,r10,r07,r01,r02,r03,r04,r05,r06 and Alice following r09 only",
+      "kept": true
+    },
+    {
+      "id": "worker/test/acceptance/read-model-acceptance.test.ts › read-model acceptance › follower/following counts Alice 0/1, Bob 1/0, Carol 0/0",
+      "file": "worker/test/acceptance/read-model-acceptance.test.ts",
+      "ancestors": [
+        "read-model acceptance"
+      ],
+      "title": "follower/following counts Alice 0/1, Bob 1/0, Carol 0/0",
+      "kept": true
+    },
+    {
+      "id": "worker/test/acceptance/read-model-acceptance.test.ts › read-model acceptance › statistics tables for all/7d/30d/365d equal TESTING.md exactly (totals, artists, tracks, albums)",
+      "file": "worker/test/acceptance/read-model-acceptance.test.ts",
+      "ancestors": [
+        "read-model acceptance"
+      ],
+      "title": "statistics tables for all/7d/30d/365d equal TESTING.md exactly (totals, artists, tracks, albums)",
+      "kept": true
+    },
+    {
+      "id": "worker/test/acceptance/read-model-acceptance.test.ts › read-model acceptance › boundary seconds and future exclusion",
+      "file": "worker/test/acceptance/read-model-acceptance.test.ts",
+      "ancestors": [
+        "read-model acceptance"
+      ],
+      "title": "boundary seconds and future exclusion",
+      "kept": true
+    },
+    {
+      "id": "worker/test/acceptance/read-model-acceptance.test.ts › read-model acceptance › union of all pages equals hardcoded URI list with no duplicates",
+      "file": "worker/test/acceptance/read-model-acceptance.test.ts",
+      "ancestors": [
+        "read-model acceptance"
+      ],
+      "title": "union of all pages equals hardcoded URI list with no duplicates",
+      "kept": true
+    },
+    {
+      "id": "worker/test/acceptance/read-model-acceptance.test.ts › read-model acceptance › following cursor replayed with a different viewer is 400 invalid_cursor",
+      "file": "worker/test/acceptance/read-model-acceptance.test.ts",
+      "ancestors": [
+        "read-model acceptance"
+      ],
+      "title": "following cursor replayed with a different viewer is 400 invalid_cursor",
+      "kept": true
+    },
+    {
+      "id": "worker/test/acceptance/restart.test.ts › restart acceptance › eviction preserves byte-identical tables, pre-restart cursor continues, alarm resumes",
+      "file": "worker/test/acceptance/restart.test.ts",
+      "ancestors": [
+        "restart acceptance"
+      ],
+      "title": "eviction preserves byte-identical tables, pre-restart cursor continues, alarm resumes",
+      "replaced": "worker/test/acceptance/restart.test.ts › restart acceptance › restart reopens the same database file: projection tables and responses are byte-identical, a pre-restart cursor continues and timers resume",
+      "reason": "ADR 0005 §15.1, §15.3 (N4-03): a restart is close-and-reopen of the same database file plus a recomposed app (TESTING.md \"restart reopens same storage\") instead of DO eviction.",
+      "package": "N4-03"
+    },
+    {
+      "id": "worker/test/acceptance/security.test.ts › security acceptance › notify abuse limits, SSRF fixture private DoH answer refused, redirect refused, no test seam reachable",
+      "file": "worker/test/acceptance/security.test.ts",
+      "ancestors": [
+        "security acceptance"
+      ],
+      "title": "notify abuse limits, SSRF fixture private DoH answer refused, redirect refused, no test seam reachable",
+      "kept": true,
+      "change": "ADR 0005 §3.9, §13, §15.3 (N4-03): \"no test seam\" is shown on the Node host: the production route table and dispatcher answer the probes with the JSON 404, IndexCore has no control method, run() without the test-only config options exits 78 naming LEXICON_PREFIX, and the source scan adds fixtureOrigins: true and routerTransport; title kept.",
+      "package": "N4-03"
+    },
+    {
+      "id": "worker/test/acceptance/security.test.ts › security acceptance › notify returns 503 when IndexDO is unavailable",
+      "file": "worker/test/acceptance/security.test.ts",
+      "ancestors": [
+        "security acceptance"
+      ],
+      "title": "notify returns 503 when IndexDO is unavailable",
+      "kept": true,
+      "change": "ADR 0005 §15.3 (N4-03): the unavailable index is a Node composition over a never-migrated database (IndexCore not started) and a storage fault injected through the Db interface instead of the refusing production IndexDO and an overloaded DO stub; title kept.",
+      "package": "N4-03"
+    },
+    {
+      "id": "worker/test/bench/read-models.bench.test.ts › read-model benchmark › seeded generator yields exactly 100,000 valid active rows with the documented per-user distribution",
+      "file": "worker/test/bench/read-models.bench.test.ts",
+      "ancestors": [
+        "read-model benchmark"
+      ],
+      "title": "seeded generator yields exactly 100,000 valid active rows with the documented per-user distribution",
+      "kept": true
+    },
+    {
+      "id": "worker/test/bench/read-models.bench.test.ts › read-model benchmark › history/feed page statement rows read within ADR Q10 budgets",
+      "file": "worker/test/bench/read-models.bench.test.ts",
+      "ancestors": [
+        "read-model benchmark"
+      ],
+      "title": "history/feed page statement rows read within ADR Q10 budgets",
+      "replaced": "worker/test/bench/read-models.bench.test.ts › read-model benchmark › the read-model bench records p50 and p95 for history, feed and stats on node:sqlite and asserts their query plans",
+      "reason": "ADR 0005 §15.3 (N4-03): node:sqlite has no rows-read counter; the ADR 0004 §15 Q10 rows-read budgets become EXPLAIN QUERY PLAN assertions on SQLite 3.54.1, with p50 and p95 timings reported.",
+      "package": "N4-03"
+    },
+    {
+      "id": "worker/test/bench/read-models.bench.test.ts › read-model benchmark › stats cache hit within ADR Q10 probe budget and equals uncached result",
+      "file": "worker/test/bench/read-models.bench.test.ts",
+      "ancestors": [
+        "read-model benchmark"
+      ],
+      "title": "stats cache hit within ADR Q10 probe budget and equals uncached result",
+      "kept": true,
+      "change": "ADR 0005 §15.3 (N4-03): the probe budget is the count of the hit's statements, each an indexed SEARCH by EXPLAIN QUERY PLAN; node:sqlite has no rows-read counter, so the per-statement rows-read bounds of the miss are dropped; title kept.",
+      "package": "N4-03"
+    },
+    {
+      "id": "worker/test/bench/read-models.bench.test.ts › read-model benchmark › 600 measured requests with zero errors report p95 and check it against the target",
+      "file": "worker/test/bench/read-models.bench.test.ts",
+      "ancestors": [
+        "read-model benchmark"
+      ],
+      "title": "600 measured requests with zero errors report p95 and check it against the target",
+      "kept": true,
+      "change": "ADR 0005 §15.3 (N4-03): the requests go through the HTTP bridge of the production Node composition instead of createWorker and JS RPC; title kept.",
+      "package": "N4-03"
+    },
+    {
+      "id": "worker/test/bench/read-models.bench.test.ts › read-model benchmark › benchmark JSON is produced and schema-valid",
+      "file": "worker/test/bench/read-models.bench.test.ts",
+      "ancestors": [
+        "read-model benchmark"
+      ],
+      "title": "benchmark JSON is produced and schema-valid",
+      "kept": true,
+      "change": "ADR 0005 §15.3 (N4-03): report schema @3 (plans and p50/p95 timings instead of rows-read budgets; node and sqlite versions instead of the Workers toolchain); the suite writes the file through writeReport instead of the BENCH_SINK service binding; title kept.",
+      "package": "N4-03"
+    },
+    {
+      "id": "worker/test/composition/admin.test.ts › worker/src/http/admin.ts › admin routes 404 without ADMIN_TOKEN; wrong token 401 constant-time; status JSON shape",
+      "file": "worker/test/composition/admin.test.ts",
+      "ancestors": [
+        "worker/src/http/admin.ts"
+      ],
+      "title": "admin routes 404 without ADMIN_TOKEN; wrong token 401 constant-time; status JSON shape",
+      "replaced": "worker/test/composition/admin.test.ts › worker/src/node/admin-socket.ts › admin status over the unix socket returns the AdminStatus shape of a fresh index, and /internal/admin/status on the TCP listener is the JSON 404",
+      "reason": "ADR 0005 §3.11 (N4-03): admin moves from the Workers TCP route and ADMIN_TOKEN to the admin unix socket, whose filesystem permissions are the authentication; the TCP listener answers every /internal/ path with the JSON 404 before routing (N7-01 deletes the TCP route).",
+      "package": "N4-03"
+    },
+    {
+      "id": "worker/test/composition/index-do.test.ts › worker/src/do/index-do.ts › constructor migrates, marks disconnected, arms alarm; alarm runs drain before snapshot",
+      "file": "worker/test/composition/index-do.test.ts",
+      "ancestors": [
+        "worker/src/do/index-do.ts"
+      ],
+      "title": "constructor migrates, marks disconnected, arms alarm; alarm runs drain before snapshot",
+      "replaced": "worker/test/composition/index-core-node.test.ts › worker/src/app/index-core.ts on the Node host › composition migrates, marks disconnected, arms the core alarm; the alarm runs drain before snapshot",
+      "reason": "ADR 0005 §2.2, §15.1, §15.3 (N4-03): IndexDO is replaced by IndexCore on the Node host (N7-01 deletes index-do.ts); the suite runs on the production Node composition over node:sqlite, the core NodeAlarm replaces runDurableObjectAlarm, admin status is IndexCore.adminStatus (the admin socket's index half), and restart is close-and-reopen of the same database file plus a recomposed app instead of DO eviction.",
+      "package": "N4-03"
+    },
+    {
+      "id": "worker/test/composition/index-do.test.ts › worker/src/do/index-do.ts › restart (eviction) preserves state and resumes alarm",
+      "file": "worker/test/composition/index-do.test.ts",
+      "ancestors": [
+        "worker/src/do/index-do.ts"
+      ],
+      "title": "restart (eviction) preserves state and resumes alarm",
+      "replaced": "worker/test/composition/index-core-node.test.ts › worker/src/app/index-core.ts on the Node host › restart (close and reopen of the database file) preserves state and resumes the alarm",
+      "reason": "ADR 0005 §2.2, §15.1, §15.3 (N4-03): IndexDO is replaced by IndexCore on the Node host (N7-01 deletes index-do.ts); the suite runs on the production Node composition over node:sqlite, the core NodeAlarm replaces runDurableObjectAlarm, admin status is IndexCore.adminStatus (the admin socket's index half), and restart is close-and-reopen of the same database file plus a recomposed app instead of DO eviction.",
+      "package": "N4-03"
+    },
+    {
+      "id": "worker/test/composition/index-do.test.ts › worker/src/do/index-do.ts › status truth through production writers: a fake Jetstream commit applied by the alarm raises admin status lastIndexedAt and sets lagSeconds, and after a socket drop and two constructor restarts the state turns stale exactly 5 min after the drop",
+      "file": "worker/test/composition/index-do.test.ts",
+      "ancestors": [
+        "worker/src/do/index-do.ts"
+      ],
+      "title": "status truth through production writers: a fake Jetstream commit applied by the alarm raises admin status lastIndexedAt and sets lagSeconds, and after a socket drop and two constructor restarts the state turns stale exactly 5 min after the drop",
+      "replaced": "worker/test/composition/index-core-node.test.ts › worker/src/app/index-core.ts on the Node host › status truth through production writers: a fake Jetstream commit applied by the alarm raises admin status lastIndexedAt and sets lagSeconds, and after a socket drop and two restarts the state turns stale exactly 5 min after the drop",
+      "reason": "ADR 0005 §2.2, §15.1, §15.3 (N4-03): IndexDO is replaced by IndexCore on the Node host (N7-01 deletes index-do.ts); the suite runs on the production Node composition over node:sqlite, the core NodeAlarm replaces runDurableObjectAlarm, admin status is IndexCore.adminStatus (the admin socket's index half), and restart is close-and-reopen of the same database file plus a recomposed app instead of DO eviction.",
+      "package": "N4-03"
+    },
+    {
+      "id": "worker/test/composition/index-do.test.ts › worker/src/do/index-do.ts › hints arriving after a drain wait for the 2 s drain floor, which a stream of hints never postpones",
+      "file": "worker/test/composition/index-do.test.ts",
+      "ancestors": [
+        "worker/src/do/index-do.ts"
+      ],
+      "title": "hints arriving after a drain wait for the 2 s drain floor, which a stream of hints never postpones",
+      "replaced": "worker/test/composition/index-core-node.test.ts › worker/src/app/index-core.ts on the Node host › hints arriving after a drain wait for the 2 s drain floor, which a stream of hints never postpones",
+      "reason": "ADR 0005 §2.2, §15.1, §15.3 (N4-03): IndexDO is replaced by IndexCore on the Node host (N7-01 deletes index-do.ts); the suite runs on the production Node composition over node:sqlite, the core NodeAlarm replaces runDurableObjectAlarm, admin status is IndexCore.adminStatus (the admin socket's index half), and restart is close-and-reopen of the same database file plus a recomposed app instead of DO eviction.",
+      "package": "N4-03"
+    },
+    {
+      "id": "worker/test/composition/index-do.test.ts › worker/src/do/index-do.ts › gap hold and clear commit in one transaction",
+      "file": "worker/test/composition/index-do.test.ts",
+      "ancestors": [
+        "worker/src/do/index-do.ts"
+      ],
+      "title": "gap hold and clear commit in one transaction",
+      "replaced": "worker/test/composition/index-core-node.test.ts › worker/src/app/index-core.ts on the Node host › gap hold and clear commit in one transaction",
+      "reason": "ADR 0005 §2.2, §15.1, §15.3 (N4-03): IndexDO is replaced by IndexCore on the Node host (N7-01 deletes index-do.ts); the suite runs on the production Node composition over node:sqlite, the core NodeAlarm replaces runDurableObjectAlarm, admin status is IndexCore.adminStatus (the admin socket's index half), and restart is close-and-reopen of the same database file plus a recomposed app instead of DO eviction.",
+      "package": "N4-03"
+    },
+    {
+      "id": "worker/test/composition/index-do.test.ts › worker/src/do/index-do.ts › gc is not blocked by retained hints",
+      "file": "worker/test/composition/index-do.test.ts",
+      "ancestors": [
+        "worker/src/do/index-do.ts"
+      ],
+      "title": "gc is not blocked by retained hints",
+      "replaced": "worker/test/composition/index-core-node.test.ts › worker/src/app/index-core.ts on the Node host › gc is not blocked by retained hints",
+      "reason": "ADR 0005 §2.2, §15.1, §15.3 (N4-03): IndexDO is replaced by IndexCore on the Node host (N7-01 deletes index-do.ts); the suite runs on the production Node composition over node:sqlite, the core NodeAlarm replaces runDurableObjectAlarm, admin status is IndexCore.adminStatus (the admin socket's index half), and restart is close-and-reopen of the same database file plus a recomposed app instead of DO eviction.",
+      "package": "N4-03"
+    },
+    {
+      "id": "worker/test/composition/logging.test.ts › log redaction › captured logs and error bodies contain no CURSOR_KEY, ADMIN_TOKEN or bearer marker and logs contain no track-title marker",
+      "file": "worker/test/composition/logging.test.ts",
+      "ancestors": [
+        "log redaction"
+      ],
+      "title": "captured logs and error bodies contain no CURSOR_KEY, ADMIN_TOKEN or bearer marker and logs contain no track-title marker",
+      "kept": true,
+      "change": "ADR 0005 §3.10, §3.11, §15.3 (N4-03): the secrets are the secrets-file key material (redacted as run() derives it) and a presented admin bearer, which the TCP listener answers with the JSON 404; an unparsable cursor key makes run() exit 78 naming only the field instead of a 503; title kept.",
+      "package": "N4-03"
+    },
+    {
+      "id": "worker/test/composition/routing.test.ts › worker/src/router.ts › every API.md v1.1 route dispatches; unknown /api/x → JSON 404; non-API path → ASSETS",
+      "file": "worker/test/composition/routing.test.ts",
+      "ancestors": [
+        "worker/src/router.ts"
+      ],
+      "title": "every API.md v1.1 route dispatches; unknown /api/x → JSON 404; non-API path → ASSETS",
+      "kept": true,
+      "change": "ADR 0005 §3.7, §15.3 (N4-03): ported to the production Node composition; non-API paths are served by the Node static server over a real web/dist (index.html for SPA routes), /oauth/ is a router prefix, the dispatcher's 405 Allow adds HEAD, and \"the index is never reached\" is shown by recording no SQL statement; title kept.",
+      "package": "N4-03"
+    },
+    {
+      "id": "worker/test/composition/routing.test.ts › worker/src/router.ts › inbound x-atmusic-client-ip is stripped and CF-Connecting-IP used",
+      "file": "worker/test/composition/routing.test.ts",
+      "ancestors": [
+        "worker/src/router.ts"
+      ],
+      "title": "inbound x-atmusic-client-ip is stripped and CF-Connecting-IP used",
+      "kept": true,
+      "change": "ADR 0005 §3.6, §15.3 (N4-03): the client-IP policy runs in cf-connecting-ip mode from a trusted loopback peer; the bridge drops x-atmusic-* (observed by a test route mounted through compose features) instead of the ASSETS request headers; title kept.",
+      "package": "N4-03"
+    },
+    {
+      "id": "worker/test/composition/routing.test.ts › worker/src/router.ts › forced storage error → 500 envelope with UUID requestId and no stack trace or file path",
+      "file": "worker/test/composition/routing.test.ts",
+      "ancestors": [
+        "worker/src/router.ts"
+      ],
+      "title": "forced storage error → 500 envelope with UUID requestId and no stack trace or file path",
+      "kept": true,
+      "change": "ADR 0005 §15.3 (N4-03): the fault is injected through the Db wrapper of the Node composition; title kept.",
+      "package": "N4-03"
+    },
+    {
+      "id": "worker/test/composition/routing.test.ts › worker/src/router.ts › asset miss: SPA route GET/HEAD serves index.html 200, every other miss is JSON not_found with x-request-id",
+      "file": "worker/test/composition/routing.test.ts",
+      "ancestors": [
+        "worker/src/router.ts"
+      ],
+      "title": "asset miss: SPA route GET/HEAD serves index.html 200, every other miss is JSON not_found with x-request-id",
+      "kept": true,
+      "change": "ADR 0005 §3.7, §15.3 (N4-03): asserted on the Node static server over a real web/dist: /oauth/callback is a router path, a non-GET/HEAD on an existing file is the 405 envelope with Allow: GET, HEAD, traversal is judged on the raw target, and a missing index.html is the envelope plus an assets.index_unavailable log line; title kept.",
+      "package": "N4-03"
+    },
+    {
+      "id": "worker/test/composition/scheduled.test.ts › worker/src/scheduled.ts › cron re-arms a deleted alarm",
+      "file": "worker/test/composition/scheduled.test.ts",
+      "ancestors": [
+        "worker/src/scheduled.ts"
+      ],
+      "title": "cron re-arms a deleted alarm",
+      "replaced": "worker/test/composition/scheduled.test.ts › worker/src/node/alarm.ts ensureRunning interval › the 5-minute ensureRunning interval re-arms a lost alarm chain",
+      "reason": "ADR 0005 §2.2, §3.3, §15.3 (N4-03): the Workers cron trigger is replaced by the in-process 5-minute ensureRunning interval of the NodeScheduler.",
+      "package": "N4-03"
+    },
+    {
+      "id": "worker/test/composition/scheduled.test.ts › worker/src/scheduled.ts › in pulse mode each cron tick makes a pulse due now, and the alarm runs it",
+      "file": "worker/test/composition/scheduled.test.ts",
+      "ancestors": [
+        "worker/src/scheduled.ts"
+      ],
+      "title": "in pulse mode each cron tick makes a pulse due now, and the alarm runs it",
+      "replaced": "worker/test/composition/scheduled.test.ts › worker/src/node/alarm.ts ensureRunning interval › the 5-minute ensureRunning interval re-arms a lost alarm chain",
+      "reason": "ADR 0005 §2.2, §15.3, B17 (N4-03): there is no cron on the Node host and parseNodeConfig admits INGEST_MODE socket and off only, so pulse mode cannot run; the interval test covers what each tick still does.",
+      "package": "N4-03"
+    },
+    {
+      "id": "worker/test/config.test.ts › parseConfig namespace gate › empty prefix closes the gate: prefix null, ingestion off, no publication",
+      "file": "worker/test/config.test.ts",
+      "ancestors": [
+        "parseConfig namespace gate"
+      ],
+      "title": "empty prefix closes the gate: prefix null, ingestion off, no publication",
+      "kept": true
+    },
+    {
+      "id": "worker/test/config.test.ts › parseConfig namespace gate › fixture prefix is refused unless allowFixturePrefix, and never publishes",
+      "file": "worker/test/config.test.ts",
+      "ancestors": [
+        "parseConfig namespace gate"
+      ],
+      "title": "fixture prefix is refused unless allowFixturePrefix, and never publishes",
+      "kept": true
+    },
+    {
+      "id": "worker/test/config.test.ts › parseConfig namespace gate › owned prefix publishes only with ownership evidence",
+      "file": "worker/test/config.test.ts",
+      "ancestors": [
+        "parseConfig namespace gate"
+      ],
+      "title": "owned prefix publishes only with ownership evidence",
+      "kept": true
+    },
+    {
+      "id": "worker/test/config.test.ts › parseConfig namespace gate › decided prefix dev.pythonplayer123.music is valid, non-fixture, and publishes only with NAMESPACE_OWNERSHIP_REF",
+      "file": "worker/test/config.test.ts",
+      "ancestors": [
+        "parseConfig namespace gate"
+      ],
+      "title": "decided prefix dev.pythonplayer123.music is valid, non-fixture, and publishes only with NAMESPACE_OWNERSHIP_REF",
+      "kept": true
+    },
+    {
+      "id": "worker/test/config.test.ts › parseConfig namespace gate › shipped wrangler.jsonc carries the decided origin and prefix in every env and passes parseConfig",
+      "file": "worker/test/config.test.ts",
+      "ancestors": [
+        "parseConfig namespace gate"
+      ],
+      "title": "shipped wrangler.jsonc carries the decided origin and prefix in every env and passes parseConfig",
+      "kept": true
+    },
+    {
+      "id": "worker/test/config.test.ts › parseConfig namespace gate › rejects malformed vars with the field names",
+      "file": "worker/test/config.test.ts",
+      "ancestors": [
+        "parseConfig namespace gate"
+      ],
+      "title": "rejects malformed vars with the field names",
+      "kept": true
+    },
+    {
+      "id": "worker/test/config.test.ts › parseConfig namespace gate › one-segment, uppercase and embedded-slash LEXICON_PREFIX values are rejected naming LEXICON_PREFIX; empty yields prefix null",
+      "file": "worker/test/config.test.ts",
+      "ancestors": [
+        "parseConfig namespace gate"
+      ],
+      "title": "one-segment, uppercase and embedded-slash LEXICON_PREFIX values are rejected naming LEXICON_PREFIX; empty yields prefix null",
+      "kept": true
+    },
+    {
+      "id": "worker/test/config.test.ts › parseConfig namespace gate › http PUBLIC_ORIGIN and invalid LEXICON_PREFIX fail parseConfig naming each field without echoing any secret value",
+      "file": "worker/test/config.test.ts",
+      "ancestors": [
+        "parseConfig namespace gate"
+      ],
+      "title": "http PUBLIC_ORIGIN and invalid LEXICON_PREFIX fail parseConfig naming each field without echoing any secret value",
+      "kept": true
+    },
+    {
+      "id": "worker/test/config.test.ts › parseConfig namespace gate › CURSOR_KEY is at least 32 hex-encoded bytes and not all zero",
+      "file": "worker/test/config.test.ts",
+      "ancestors": [
+        "parseConfig namespace gate"
+      ],
+      "title": "CURSOR_KEY is at least 32 hex-encoded bytes and not all zero",
+      "kept": true
+    },
+    {
+      "id": "worker/test/harness/isolation-peer.test.ts › worker/test/harness › rows written by isolation.test.ts under the shared DO name are absent in this test file",
+      "file": "worker/test/harness/isolation-peer.test.ts",
+      "ancestors": [
+        "worker/test/harness"
+      ],
+      "title": "rows written by isolation.test.ts under the shared DO name are absent in this test file",
+      "kept": true
+    },
+    {
+      "id": "worker/test/harness/isolation.test.ts › worker/test/harness › rows written under one DO name are absent under another DO name and in another test file",
+      "file": "worker/test/harness/isolation.test.ts",
+      "ancestors": [
+        "worker/test/harness"
+      ],
+      "title": "rows written under one DO name are absent under another DO name and in another test file",
+      "kept": true
+    },
+    {
+      "id": "worker/test/harness/local-index.test.ts › worker/test/harness › local-index adapter executes a module function inside the harness DO",
+      "file": "worker/test/harness/local-index.test.ts",
+      "ancestors": [
+        "worker/test/harness"
+      ],
+      "title": "local-index adapter executes a module function inside the harness DO",
+      "kept": true
+    },
+    {
+      "id": "worker/test/harness/local-index.test.ts › worker/test/harness › local-index adapter also accepts the frozen Partial<IndexRpc> form",
+      "file": "worker/test/harness/local-index.test.ts",
+      "ancestors": [
+        "worker/test/harness"
+      ],
+      "title": "local-index adapter also accepts the frozen Partial<IndexRpc> form",
+      "kept": true
+    },
+    {
+      "id": "worker/test/harness/local-index.test.ts › worker/test/harness › pinned cloudflare:test exposes the DO, alarm, eviction and cron helpers",
+      "file": "worker/test/harness/local-index.test.ts",
+      "ancestors": [
+        "worker/test/harness"
+      ],
+      "title": "pinned cloudflare:test exposes the DO, alarm, eviction and cron helpers",
+      "kept": true,
+      "change": "ADR 0005 §15.3: the workerd-helper existence check is replaced by checks of the cloudflare:* shim cloudflare:test resolves to (each helper is the shim's, the storage is the node:sqlite facade in the file's temporary directory, an armed alarm is run and removed, eviction reopens the same file).",
+      "package": "N2-02"
+    },
+    {
+      "id": "worker/test/http/error.test.ts › envelope matches openapi Error schema with requestId UUID",
+      "file": "worker/test/http/error.test.ts",
+      "ancestors": [],
+      "title": "envelope matches openapi Error schema with requestId UUID",
+      "kept": true
+    },
+    {
+      "id": "worker/test/http/health-meta.test.ts › live 200; ready 503 when index reports too_new; meta capabilities omit publication without owned prefix",
+      "file": "worker/test/http/health-meta.test.ts",
+      "ancestors": [],
+      "title": "live 200; ready 503 when index reports too_new; meta capabilities omit publication without owned prefix",
+      "kept": true
+    },
+    {
+      "id": "worker/test/http/health-meta.test.ts › ready 200 and meta indexing stale while the index reports the socket disconnected",
+      "file": "worker/test/http/health-meta.test.ts",
+      "ancestors": [],
+      "title": "ready 200 and meta indexing stale while the index reports the socket disconnected",
+      "kept": true
+    },
+    {
+      "id": "worker/test/http/health-meta.test.ts › meta namespace equals the prefix and publication of every config parseConfig accepts for the env",
+      "file": "worker/test/http/health-meta.test.ts",
+      "ancestors": [],
+      "title": "meta namespace equals the prefix and publication of every config parseConfig accepts for the env",
+      "kept": true
+    },
+    {
+      "id": "worker/test/http/limits.test.ts › bucket refills exactly with injected clock; 61st request in a minute is limited",
+      "file": "worker/test/http/limits.test.ts",
+      "ancestors": [],
+      "title": "bucket refills exactly with injected clock; 61st request in a minute is limited",
+      "kept": true
+    },
+    {
+      "id": "worker/test/http/limits.test.ts › 10,001 distinct IP keys keep BucketSet at its cap and expired buckets are evicted",
+      "file": "worker/test/http/limits.test.ts",
+      "ancestors": [],
+      "title": "10,001 distinct IP keys keep BucketSet at its cap and expired buckets are evicted",
+      "kept": true
+    },
+    {
+      "id": "worker/test/http/params.test.ts › limit 0, -1, 1.5, 101 → 422 fields.limit; default 20; stats default 10",
+      "file": "worker/test/http/params.test.ts",
+      "ancestors": [],
+      "title": "limit 0, -1, 1.5, 101 → 422 fields.limit; default 20; stats default 10",
+      "kept": true
+    },
+    {
+      "id": "worker/test/http/params.test.ts › invalid window/scope → 422 with field name",
+      "file": "worker/test/http/params.test.ts",
+      "ancestors": [],
+      "title": "invalid window/scope → 422 with field name",
+      "kept": true
+    },
+    {
+      "id": "worker/test/http/params.test.ts › body over cap → 413; malformed JSON → 400",
+      "file": "worker/test/http/params.test.ts",
+      "ancestors": [],
+      "title": "body over cap → 413; malformed JSON → 400",
+      "kept": true
+    },
+    {
+      "id": "worker/test/http/record-status.test.ts › states indexed/pending/absent/excluded/unknown with cid and revision",
+      "file": "worker/test/http/record-status.test.ts",
+      "ancestors": [],
+      "title": "states indexed/pending/absent/excluded/unknown with cid and revision",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/accounts.test.ts › account status › deactivated status hides Alice immediately; Bob and Carol unaffected",
+      "file": "worker/test/ingest/accounts.test.ts",
+      "ancestors": [
+        "account status"
+      ],
+      "title": "deactivated status hides Alice immediately; Bob and Carol unaffected",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/accounts.test.ts › account status › reactivated status schedules snapshot and keeps hidden until completion",
+      "file": "worker/test/ingest/accounts.test.ts",
+      "ancestors": [
+        "account status"
+      ],
+      "title": "reactivated status schedules snapshot and keeps hidden until completion",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/accounts.test.ts › account status › a status job orphaned in running by an eviction is reclaimed and run by a later sweep",
+      "file": "worker/test/ingest/accounts.test.ts",
+      "ancestors": [
+        "account status"
+      ],
+      "title": "a status job orphaned in running by an eviction is reclaimed and run by a later sweep",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/accounts.test.ts › account status answers › a getRepoStatus answer naming another DID is rejected and changes no account",
+      "file": "worker/test/ingest/accounts.test.ts",
+      "ancestors": [
+        "account status answers"
+      ],
+      "title": "a getRepoStatus answer naming another DID is rejected and changes no account",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/accounts.test.ts › account status answers › getRepoStatus RepoNotFound hides the account as not_found and moves its generation",
+      "file": "worker/test/ingest/accounts.test.ts",
+      "ancestors": [
+        "account status answers"
+      ],
+      "title": "getRepoStatus RepoNotFound hides the account as not_found and moves its generation",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/accounts.test.ts › account status answers › a DID document gone from PLC (410 tombstone, 404) hides the account as deleted",
+      "file": "worker/test/ingest/accounts.test.ts",
+      "ancestors": [
+        "account status answers"
+      ],
+      "title": "a DID document gone from PLC (410 tombstone, 404) hides the account as deleted",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/accounts.test.ts › status jobs › a status job requested again while its check runs is pending again; a failed check backs off 1 s, 2 s, 4 s",
+      "file": "worker/test/ingest/accounts.test.ts",
+      "ancestors": [
+        "status jobs"
+      ],
+      "title": "a status job requested again while its check runs is pending again; a failed check backs off 1 s, 2 s, 4 s",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/admission.test.ts › admission › unknown DID admitted inactive with snapshot job; hint itself not projected",
+      "file": "worker/test/ingest/admission.test.ts",
+      "ancestors": [
+        "admission"
+      ],
+      "title": "unknown DID admitted inactive with snapshot job; hint itself not projected",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/admission.test.ts › admission › 1,024 pending jobs → next admission busy and writes nothing",
+      "file": "worker/test/ingest/admission.test.ts",
+      "ancestors": [
+        "admission"
+      ],
+      "title": "1,024 pending jobs → next admission busy and writes nothing",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/admission.test.ts › admission › scheduleSnapshot never discards or delays a walk: a started walk records one rescan request",
+      "file": "worker/test/ingest/admission.test.ts",
+      "ancestors": [
+        "admission"
+      ],
+      "title": "scheduleSnapshot never discards or delays a walk: a started walk records one rescan request",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/admission.test.ts › admission › reclaimSnapshotLeases returns orphaned running rows to pending with frontier, head and restarts kept",
+      "file": "worker/test/ingest/admission.test.ts",
+      "ancestors": [
+        "admission"
+      ],
+      "title": "reclaimSnapshotLeases returns orphaned running rows to pending with frontier, head and restarts kept",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/admission.test.ts › admission › hourly budget enforced with injected clock",
+      "file": "worker/test/ingest/admission.test.ts",
+      "ancestors": [
+        "admission"
+      ],
+      "title": "hourly budget enforced with injected clock",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/discovery.test.ts › relay discovery › listReposByCollection pages admit DIDs within budget and never project records",
+      "file": "worker/test/ingest/discovery.test.ts",
+      "ancestors": [
+        "relay discovery"
+      ],
+      "title": "listReposByCollection pages admit DIDs within budget and never project records",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/discovery.test.ts › relay discovery › gap recovery runs one full pass from the start and stays pending until it ends",
+      "file": "worker/test/ingest/discovery.test.ts",
+      "ancestors": [
+        "relay discovery"
+      ],
+      "title": "gap recovery runs one full pass from the start and stays pending until it ends",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/discovery.test.ts › relay discovery › a gap request that lands while a relay page is in flight survives the run",
+      "file": "worker/test/ingest/discovery.test.ts",
+      "ancestors": [
+        "relay discovery"
+      ],
+      "title": "a gap request that lands while a relay page is in flight survives the run",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/discovery.test.ts › relay discovery › permanently malformed relay page fails bounded and does not wedge gap discovery",
+      "file": "worker/test/ingest/discovery.test.ts",
+      "ancestors": [
+        "relay discovery"
+      ],
+      "title": "permanently malformed relay page fails bounded and does not wedge gap discovery",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/gap-recovery.test.ts › gap recovery › gap schedules all known DIDs within 1,024 bound and clears pending_gap only after all complete",
+      "file": "worker/test/ingest/gap-recovery.test.ts",
+      "ancestors": [
+        "gap recovery"
+      ],
+      "title": "gap schedules all known DIDs within 1,024 bound and clears pending_gap only after all complete",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/gap-recovery.test.ts › gap recovery › gap scan batches and maybeClearGap leave connected, connected_at_ms, updated_at_ms, cursor and last_event_time_us unchanged and indexing() recovering until the last gap job completes",
+      "file": "worker/test/ingest/gap-recovery.test.ts",
+      "ancestors": [
+        "gap recovery"
+      ],
+      "title": "gap scan batches and maybeClearGap leave connected, connected_at_ms, updated_at_ms, cursor and last_event_time_us unchanged and indexing() recovering until the last gap job completes",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/gap-recovery.test.ts › gap recovery › a gap absorbed by open walks (running, paused with a frontier, failed in backoff) keeps pending_gap and indexing() recovering until each re-walk completes",
+      "file": "worker/test/ingest/gap-recovery.test.ts",
+      "ancestors": [
+        "gap recovery"
+      ],
+      "title": "a gap absorbed by open walks (running, paused with a frontier, failed in backoff) keeps pending_gap and indexing() recovering until each re-walk completes",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/gap-recovery.test.ts › gap recovery › a gap scan blocked by a full queue of not-yet-due jobs arms the snapshot timer at the earliest job due_at, not every SNAPSHOT_MIN_INTERVAL_MS",
+      "file": "worker/test/ingest/gap-recovery.test.ts",
+      "ancestors": [
+        "gap recovery"
+      ],
+      "title": "a gap scan blocked by a full queue of not-yet-due jobs arms the snapshot timer at the earliest job due_at, not every SNAPSHOT_MIN_INTERVAL_MS",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/hints.test.ts › enqueueHints › duplicate hints for a URI coalesce to one row with min due_at",
+      "file": "worker/test/ingest/hints.test.ts",
+      "ancestors": [
+        "enqueueHints"
+      ],
+      "title": "duplicate hints for a URI coalesce to one row with min due_at",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/hints.test.ts › enqueueHints › enqueue and checkpoint advance commit atomically (throw rolls back both)",
+      "file": "worker/test/ingest/hints.test.ts",
+      "ancestors": [
+        "enqueueHints"
+      ],
+      "title": "enqueue and checkpoint advance commit atomically (throw rolls back both)",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/hints.test.ts › enqueueHints › enqueueHints checkpoint advance goes through recordEvent: indexing() lagSeconds is exact after the first event since markConnected and updated_at_ms is unchanged",
+      "file": "worker/test/ingest/hints.test.ts",
+      "ancestors": [
+        "enqueueHints"
+      ],
+      "title": "enqueueHints checkpoint advance goes through recordEvent: indexing() lagSeconds is exact after the first event since markConnected and updated_at_ms is unchanged",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/identity-cache.test.ts › identity cache › cached identity served at 299 s and refreshed at 301 s with the injected clock",
+      "file": "worker/test/ingest/identity-cache.test.ts",
+      "ancestors": [
+        "identity cache"
+      ],
+      "title": "cached identity served at 299 s and refreshed at 301 s with the injected clock",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/identity-cache.test.ts › identity cache › a definite identity failure is negatively cached for one hour; transport failures are not",
+      "file": "worker/test/ingest/identity-cache.test.ts",
+      "ancestors": [
+        "identity cache"
+      ],
+      "title": "a definite identity failure is negatively cached for one hour; transport failures are not",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/ingest-mode.test.ts › pulse mode drains to tail then closes; off mode never connects",
+      "file": "worker/test/ingest/ingest-mode.test.ts",
+      "ancestors": [],
+      "title": "pulse mode drains to tail then closes; off mode never connects",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/ingest-mode.test.ts › a pulse that receives no event leaves lagSeconds null and the last successful pulse more than two intervals ago reports stale",
+      "file": "worker/test/ingest/ingest-mode.test.ts",
+      "ancestors": [],
+      "title": "a pulse that receives no event leaves lagSeconds null and the last successful pulse more than two intervals ago reports stale",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/ingest-mode.test.ts › quiet pulses longer than lookback do not trigger gap recovery; a quiet pulse after an outage confirms nothing; a real disconnect gap still does",
+      "file": "worker/test/ingest/ingest-mode.test.ts",
+      "ancestors": [],
+      "title": "quiet pulses longer than lookback do not trigger gap recovery; a quiet pulse after an outage confirms nothing; a real disconnect gap still does",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/jetstream-socket.test.ts › jetstream socket › subscribe URL has kinds=commit and the three collections only",
+      "file": "worker/test/ingest/jetstream-socket.test.ts",
+      "ancestors": [
+        "jetstream socket"
+      ],
+      "title": "subscribe URL has kinds=commit and the three collections only",
+      "replaced": "worker/test/ingest/jetstream-socket.test.ts › jetstream socket › subscribe URL has kinds=commit and the four collections only",
+      "reason": "ADR 0005 §6.3, B12 (N3-11): a valid prefix derives a fourth collection, `<p>.love`, which config.collections and the Jetstream subscription gain, so \"the three collections only\" no longer holds; the same test, in the same file, now asserts the four collections scrobble, follow, settings and love in that order (and that a love commit is hinted).",
+      "package": "N3-11"
+    },
+    {
+      "id": "worker/test/ingest/jetstream-socket.test.ts › jetstream socket › silent socket is not reconnected; planned refresh happens at 15 min from stored cursor",
+      "file": "worker/test/ingest/jetstream-socket.test.ts",
+      "ancestors": [
+        "jetstream socket"
+      ],
+      "title": "silent socket is not reconnected; planned refresh happens at 15 min from stored cursor",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/jetstream-socket.test.ts › jetstream socket › quiet link longer than lookback does not trigger gap recovery on planned refresh; real disconnect gap still does",
+      "file": "worker/test/ingest/jetstream-socket.test.ts",
+      "ancestors": [
+        "jetstream socket"
+      ],
+      "title": "quiet link longer than lookback does not trigger gap recovery on planned refresh; real disconnect gap still does",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/jetstream-socket.test.ts › jetstream socket › close triggers reconnect delays 1,2,4,…,60s and rotates us-east→us-west",
+      "file": "worker/test/ingest/jetstream-socket.test.ts",
+      "ancestors": [
+        "jetstream socket"
+      ],
+      "title": "close triggers reconnect delays 1,2,4,…,60s and rotates us-east→us-west",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/jetstream-socket.test.ts › jetstream socket › cursor older than lookback sets pending_gap and resumes from live tail",
+      "file": "worker/test/ingest/jetstream-socket.test.ts",
+      "ancestors": [
+        "jetstream socket"
+      ],
+      "title": "cursor older than lookback sets pending_gap and resumes from live tail",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/jetstream-socket.test.ts › jetstream socket › a quiet reconnect does not hide a cursor older than lookback: its connect instant bounds the cursor time",
+      "file": "worker/test/ingest/jetstream-socket.test.ts",
+      "ancestors": [
+        "jetstream socket"
+      ],
+      "title": "a quiet reconnect does not hide a cursor older than lookback: its connect instant bounds the cursor time",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/jetstream-socket.test.ts › jetstream socket › a throw after the upgrade is accepted closes the socket with 1011, writes no connection evidence, and the watchdog reconnects once",
+      "file": "worker/test/ingest/jetstream-socket.test.ts",
+      "ancestors": [
+        "jetstream socket"
+      ],
+      "title": "a throw after the upgrade is accepted closes the socket with 1011, writes no connection evidence, and the watchdog reconnects once",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/jetstream-socket.test.ts › jetstream socket › DO eviction marks connected=false on restart and watchdog reconnects",
+      "file": "worker/test/ingest/jetstream-socket.test.ts",
+      "ancestors": [
+        "jetstream socket"
+      ],
+      "title": "DO eviction marks connected=false on restart and watchdog reconnects",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/jetstream-socket.test.ts › jetstream socket › connect, messages, close and host rotation drive indexing(): lagSeconds null until the first event, exact while flowing, null after a quiet reconnect drops, stale exactly 5 min after the drop",
+      "file": "worker/test/ingest/jetstream-socket.test.ts",
+      "ancestors": [
+        "jetstream socket"
+      ],
+      "title": "connect, messages, close and host rotation drive indexing(): lagSeconds null until the first event, exact while flowing, null after a quiet reconnect drops, stale exactly 5 min after the drop",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/jetstream.test.ts › hint durable before cursor advance; replay of inclusive cursor creates no duplicate rows",
+      "file": "worker/test/ingest/jetstream.test.ts",
+      "ancestors": [],
+      "title": "hint durable before cursor advance; replay of inclusive cursor creates no duplicate rows",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/notify.test.ts › notify › valid uri → 202 queued and one hint row; repeat coalesces",
+      "file": "worker/test/ingest/notify.test.ts",
+      "ancestors": [
+        "notify"
+      ],
+      "title": "valid uri → 202 queued and one hint row; repeat coalesces",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/notify.test.ts › notify › suppressed DID: settings hint accepted, other hints ignored with 202",
+      "file": "worker/test/ingest/notify.test.ts",
+      "ancestors": [
+        "notify"
+      ],
+      "title": "suppressed DID: settings hint accepted, other hints ignored with 202",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/notify.test.ts › notify › foreign collection or bad URI → 422; oversize → 413; unknown field → 422",
+      "file": "worker/test/ingest/notify.test.ts",
+      "ancestors": [
+        "notify"
+      ],
+      "title": "foreign collection or bad URI → 422; oversize → 413; unknown field → 422",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/notify.test.ts › notify › 61st request per IP per minute → 429 and no DB change",
+      "file": "worker/test/ingest/notify.test.ts",
+      "ancestors": [
+        "notify"
+      ],
+      "title": "61st request per IP per minute → 429 and no DB change",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/notify.test.ts › notify › 600 requests per DID per hour → 429 for the DID from any IP",
+      "file": "worker/test/ingest/notify.test.ts",
+      "ancestors": [
+        "notify"
+      ],
+      "title": "600 requests per DID per hour → 429 for the DID from any IP",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/notify.test.ts › notify › did notify for unknown DID admits snapshot; busy → 503 queue_full",
+      "file": "worker/test/ingest/notify.test.ts",
+      "ancestors": [
+        "notify"
+      ],
+      "title": "did notify for unknown DID admits snapshot; busy → 503 queue_full",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/notify.test.ts › notify › did notify for a known DID schedules at most one refresh snapshot per 24 h",
+      "file": "worker/test/ingest/notify.test.ts",
+      "ancestors": [
+        "notify"
+      ],
+      "title": "did notify for a known DID schedules at most one refresh snapshot per 24 h",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/notify.test.ts › notify › 2,048-byte body reaches the parser and 2,049-byte body → 413 with no DB change",
+      "file": "worker/test/ingest/notify.test.ts",
+      "ancestors": [
+        "notify"
+      ],
+      "title": "2,048-byte body reaches the parser and 2,049-byte body → 413 with no DB change",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/reactivation.test.ts › deactivation and reactivation › deactivate Alice hides her; reactivation stays hidden until snapshot completes, then current",
+      "file": "worker/test/ingest/reactivation.test.ts",
+      "ancestors": [
+        "deactivation and reactivation"
+      ],
+      "title": "deactivate Alice hides her; reactivation stays hidden until snapshot completes, then current",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/reactivation.test.ts › deactivation and reactivation › deactivation during in-flight snapshot makes completion superseded",
+      "file": "worker/test/ingest/reactivation.test.ts",
+      "ancestors": [
+        "deactivation and reactivation"
+      ],
+      "title": "deactivation during in-flight snapshot makes completion superseded",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/rejection-matrix.test.ts › rejection matrix › each single-invariant corruption leaves scrobbles/follows/record_state/users/ingest_checkpoint byte-identical, then a valid hint applies",
+      "file": "worker/test/ingest/rejection-matrix.test.ts",
+      "ancestors": [
+        "rejection matrix"
+      ],
+      "title": "each single-invariant corruption leaves scrobbles/follows/record_state/users/ingest_checkpoint byte-identical, then a valid hint applies",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/snapshot-job.test.ts › snapshot jobs › new DID snapshot imports r01–r07 and activates; r08 absent",
+      "file": "worker/test/ingest/snapshot-job.test.ts",
+      "ancestors": [
+        "snapshot jobs"
+      ],
+      "title": "new DID snapshot imports r01–r07 and activates; r08 absent",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/snapshot-job.test.ts › snapshot jobs › job resumes across alarms from persisted frontier after DO eviction",
+      "file": "worker/test/ingest/snapshot-job.test.ts",
+      "ancestors": [
+        "snapshot jobs"
+      ],
+      "title": "job resumes across alarms from persisted frontier after DO eviction",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/snapshot-job.test.ts › snapshot jobs › BlockNotFound mid-walk restarts at new head reusing cache; >5 restarts → repository_changed",
+      "file": "worker/test/ingest/snapshot-job.test.ts",
+      "ancestors": [
+        "snapshot jobs"
+      ],
+      "title": "BlockNotFound mid-walk restarts at new head reusing cache; >5 restarts → repository_changed",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/snapshot-job.test.ts › snapshot jobs › getBlocks unsupported falls back to getRepo stream and converges identically",
+      "file": "worker/test/ingest/snapshot-job.test.ts",
+      "ancestors": [
+        "snapshot jobs"
+      ],
+      "title": "getBlocks unsupported falls back to getRepo stream and converges identically",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/snapshot-job.test.ts › snapshot jobs › getBlocks unsupported mid-walk switches to getRepo stream",
+      "file": "worker/test/ingest/snapshot-job.test.ts",
+      "ancestors": [
+        "snapshot jobs"
+      ],
+      "title": "getBlocks unsupported mid-walk switches to getRepo stream",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/snapshot-job.test.ts › snapshot jobs › snapshot and live ingestion both reject an undecodable or over-deep record block as car_malformed",
+      "file": "worker/test/ingest/snapshot-job.test.ts",
+      "ancestors": [
+        "snapshot jobs"
+      ],
+      "title": "snapshot and live ingestion both reject an undecodable or over-deep record block as car_malformed",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/snapshot-job.test.ts › snapshot jobs › PDS migration A→B fetches from B and preserves URIs/CIDs",
+      "file": "worker/test/ingest/snapshot-job.test.ts",
+      "ancestors": [
+        "snapshot jobs"
+      ],
+      "title": "PDS migration A→B fetches from B and preserves URIs/CIDs",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/snapshot-job.test.ts › snapshot jobs › a slice in flight while 25 hints coalesce keeps its lease and its completion re-walks the newest head",
+      "file": "worker/test/ingest/snapshot-job.test.ts",
+      "ancestors": [
+        "snapshot jobs"
+      ],
+      "title": "a slice in flight while 25 hints coalesce keeps its lease and its completion re-walks the newest head",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/sweeps.test.ts › status sweep › active-in-30d DIDs are checked hourly, others daily, 200 per run",
+      "file": "worker/test/ingest/sweeps.test.ts",
+      "ancestors": [
+        "status sweep"
+      ],
+      "title": "active-in-30d DIDs are checked hourly, others daily, 200 per run",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/sweeps.test.ts › status sweep fairness › a failing PDS host does not starve DIDs on healthy hosts behind it in the round-robin",
+      "file": "worker/test/ingest/sweeps.test.ts",
+      "ancestors": [
+        "status sweep fairness"
+      ],
+      "title": "a failing PDS host does not starve DIDs on healthy hosts behind it in the round-robin",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/sweeps.test.ts › identity sweep › handle that no longer verifies becomes null; history retained",
+      "file": "worker/test/ingest/sweeps.test.ts",
+      "ancestors": [
+        "identity sweep"
+      ],
+      "title": "handle that no longer verifies becomes null; history retained",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/sweeps.test.ts › identity sweep › PDS change in DID doc schedules snapshot",
+      "file": "worker/test/ingest/sweeps.test.ts",
+      "ancestors": [
+        "identity sweep"
+      ],
+      "title": "PDS change in DID doc schedules snapshot",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/sweeps.test.ts › identity sweep › renamed handle verifies on the next identity sweep and resolves to the same DID with unchanged history",
+      "file": "worker/test/ingest/sweeps.test.ts",
+      "ancestors": [
+        "identity sweep"
+      ],
+      "title": "renamed handle verifies on the next identity sweep and resolves to the same DID with unchanged history",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/sweeps.test.ts › identity sweep › a verified handle held by another account clears the older holder",
+      "file": "worker/test/ingest/sweeps.test.ts",
+      "ancestors": [
+        "identity sweep"
+      ],
+      "title": "a verified handle held by another account clears the older holder",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/sweeps.test.ts › identity sweep edge cases › a handle re-verify transport failure (DoH TXT and well-known 503) keeps the stored handle",
+      "file": "worker/test/ingest/sweeps.test.ts",
+      "ancestors": [
+        "identity sweep edge cases"
+      ],
+      "title": "a handle re-verify transport failure (DoH TXT and well-known 503) keeps the stored handle",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/sweeps.test.ts › identity sweep edge cases › PDS-migration detection does not act on a non-fresh identity_cache entry before the first identity sweep",
+      "file": "worker/test/ingest/sweeps.test.ts",
+      "ancestors": [
+        "identity sweep edge cases"
+      ],
+      "title": "PDS-migration detection does not act on a non-fresh identity_cache entry before the first identity sweep",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/verify-drain.test.ts › verify drain › known active DID hint → one getRecord call → row applied with receipt-time validation",
+      "file": "worker/test/ingest/verify-drain.test.ts",
+      "ancestors": [
+        "verify drain"
+      ],
+      "title": "known active DID hint → one getRecord call → row applied with receipt-time validation",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/verify-drain.test.ts › verify drain › deleted record with exclusion proof → absent and removed from views",
+      "file": "worker/test/ingest/verify-drain.test.ts",
+      "ancestors": [
+        "verify drain"
+      ],
+      "title": "deleted record with exclusion proof → absent and removed from views",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/verify-drain.test.ts › verify drain › RecordNotFound without CAR schedules snapshot and does not delete",
+      "file": "worker/test/ingest/verify-drain.test.ts",
+      "ancestors": [
+        "verify drain"
+      ],
+      "title": "RecordNotFound without CAR schedules snapshot and does not delete",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/verify-drain.test.ts › verify drain › 25 hints for one DID collapse into one snapshot job",
+      "file": "worker/test/ingest/verify-drain.test.ts",
+      "ancestors": [
+        "verify drain"
+      ],
+      "title": "25 hints for one DID collapse into one snapshot job",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/verify-drain.test.ts › verify drain › coalescing during a walk keeps its frontier and lease and records one rescan; a hint flood never restarts it",
+      "file": "worker/test/ingest/verify-drain.test.ts",
+      "ancestors": [
+        "verify drain"
+      ],
+      "title": "coalescing during a walk keeps its frontier and lease and records one rescan; a hint flood never restarts it",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/verify-drain.test.ts › verify drain › a key change while a fetched proof verifies under the old key leaves verified_commits empty",
+      "file": "worker/test/ingest/verify-drain.test.ts",
+      "ancestors": [
+        "verify drain"
+      ],
+      "title": "a key change while a fetched proof verifies under the old key leaves verified_commits empty",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/verify-drain.test.ts › verify drain › 429 with Retry-After pauses host and hint; other hosts proceed",
+      "file": "worker/test/ingest/verify-drain.test.ts",
+      "ancestors": [
+        "verify drain"
+      ],
+      "title": "429 with Retry-After pauses host and hint; other hosts proceed",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/verify-drain.test.ts › verify drain › key rotation: first verify fails, fresh resolve succeeds",
+      "file": "worker/test/ingest/verify-drain.test.ts",
+      "ancestors": [
+        "verify drain"
+      ],
+      "title": "key rotation: first verify fails, fresh resolve succeeds",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/verify-drain.test.ts › verify drain › two concurrent proofs for one URI arriving out of order end with newest revision",
+      "file": "worker/test/ingest/verify-drain.test.ts",
+      "ancestors": [
+        "verify drain"
+      ],
+      "title": "two concurrent proofs for one URI arriving out of order end with newest revision",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/verify-drain.test.ts › verify drain › 100 hints for distinct URIs from interleaved alarm and RPC calls yield exactly 100 rows",
+      "file": "worker/test/ingest/verify-drain.test.ts",
+      "ancestors": [
+        "verify drain"
+      ],
+      "title": "100 hints for distinct URIs from interleaved alarm and RPC calls yield exactly 100 rows",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/verify-drain.test.ts › verify drain › RepoDeactivated creates a status job; 20 transient failures give up into a snapshot",
+      "file": "worker/test/ingest/verify-drain.test.ts",
+      "ancestors": [
+        "verify drain"
+      ],
+      "title": "RepoDeactivated creates a status job; 20 transient failures give up into a snapshot",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/verify-drain.test.ts › verify drain › Paid drain works 200 cached-identity hints in one slice: 200 getRecord calls",
+      "file": "worker/test/ingest/verify-drain.test.ts",
+      "ancestors": [
+        "verify drain"
+      ],
+      "title": "Paid drain works 200 cached-identity hints in one slice: 200 getRecord calls",
+      "kept": true
+    },
+    {
+      "id": "worker/test/ingest/verify-drain.test.ts › verify drain › PLAN=free drain stays within 40 subrequests per slice",
+      "file": "worker/test/ingest/verify-drain.test.ts",
+      "ancestors": [
+        "verify drain"
+      ],
+      "title": "PLAN=free drain stays within 40 subrequests per slice",
+      "kept": true
+    },
+    {
+      "id": "worker/test/read/cursor-http.test.ts › cursor traversal over HTTP › arrival above anchor absent until fresh traversal; deleted unreturned record disappears",
+      "file": "worker/test/read/cursor-http.test.ts",
+      "ancestors": [
+        "cursor traversal over HTTP"
+      ],
+      "title": "arrival above anchor absent until fresh traversal; deleted unreturned record disappears",
+      "kept": true
+    },
+    {
+      "id": "worker/test/read/cursor-http.test.ts › cursor traversal over HTTP › cursor from history used on feed or with different viewer → 400 invalid_cursor",
+      "file": "worker/test/read/cursor-http.test.ts",
+      "ancestors": [
+        "cursor traversal over HTTP"
+      ],
+      "title": "cursor from history used on feed or with different viewer → 400 invalid_cursor",
+      "kept": true
+    },
+    {
+      "id": "worker/test/read/cursor-http.test.ts › cursor traversal over HTTP › record whose listenedAt moves across the anchor between pages follows the documented moved-row rule",
+      "file": "worker/test/read/cursor-http.test.ts",
+      "ancestors": [
+        "cursor traversal over HTTP"
+      ],
+      "title": "record whose listenedAt moves across the anchor between pages follows the documented moved-row rule",
+      "kept": true
+    },
+    {
+      "id": "worker/test/read/export.test.ts › export contains only indexed public records, attachment header, 404 for inactive",
+      "file": "worker/test/read/export.test.ts",
+      "ancestors": [],
+      "title": "export contains only indexed public records, attachment header, 404 for inactive",
+      "kept": true
+    },
+    {
+      "id": "worker/test/read/feed.test.ts › feed › global feed r09,r10,r07,r01,r02,r03,r04,r05,r06",
+      "file": "worker/test/read/feed.test.ts",
+      "ancestors": [
+        "feed"
+      ],
+      "title": "global feed r09,r10,r07,r01,r02,r03,r04,r05,r06",
+      "kept": true
+    },
+    {
+      "id": "worker/test/read/feed.test.ts › feed › Alice following feed is r09 only and excludes self",
+      "file": "worker/test/read/feed.test.ts",
+      "ancestors": [
+        "feed"
+      ],
+      "title": "Alice following feed is r09 only and excludes self",
+      "kept": true
+    },
+    {
+      "id": "worker/test/read/feed.test.ts › feed › missing viewer for following → 422 fields.viewer",
+      "file": "worker/test/read/feed.test.ts",
+      "ancestors": [
+        "feed"
+      ],
+      "title": "missing viewer for following → 422 fields.viewer",
+      "kept": true
+    },
+    {
+      "id": "worker/test/read/follows.test.ts › two active Carol→Bob records count Bob followers 2 not 3; representative is min URI",
+      "file": "worker/test/read/follows.test.ts",
+      "ancestors": [],
+      "title": "two active Carol→Bob records count Bob followers 2 not 3; representative is min URI",
+      "kept": true
+    },
+    {
+      "id": "worker/test/read/follows.test.ts › deleting one duplicate keeps 2; deleting both returns 1",
+      "file": "worker/test/read/follows.test.ts",
+      "ancestors": [],
+      "title": "deleting one duplicate keeps 2; deleting both returns 1",
+      "kept": true
+    },
+    {
+      "id": "worker/test/read/follows.test.ts › three edges with equal createdAt traverse completely at limit 1; tampered cursor → 400 invalid_cursor",
+      "file": "worker/test/read/follows.test.ts",
+      "ancestors": [],
+      "title": "three edges with equal createdAt traverse completely at limit 1; tampered cursor → 400 invalid_cursor",
+      "kept": true
+    },
+    {
+      "id": "worker/test/read/history.test.ts › history › Alice history r07,r01,r02,r03,r04,r05,r06 (equal timestamps by URI desc)",
+      "file": "worker/test/read/history.test.ts",
+      "ancestors": [
+        "history"
+      ],
+      "title": "Alice history r07,r01,r02,r03,r04,r05,r06 (equal timestamps by URI desc)",
+      "kept": true
+    },
+    {
+      "id": "worker/test/read/history.test.ts › history › limit 2 pages [r07,r01],[r02,r03],[r04,r05],[r06] then nextCursor null",
+      "file": "worker/test/read/history.test.ts",
+      "ancestors": [
+        "history"
+      ],
+      "title": "limit 2 pages [r07,r01],[r02,r03],[r04,r05],[r06] then nextCursor null",
+      "kept": true
+    },
+    {
+      "id": "worker/test/read/history.test.ts › history › r08 deleted never appears; lookup of r08 is 404",
+      "file": "worker/test/read/history.test.ts",
+      "ancestors": [
+        "history"
+      ],
+      "title": "r08 deleted never appears; lookup of r08 is 404",
+      "kept": true
+    },
+    {
+      "id": "worker/test/read/history.test.ts › history › lookup of encoded r01 AT URI returns the exact Scrobble; unknown URI → 404",
+      "file": "worker/test/read/history.test.ts",
+      "ancestors": [
+        "history"
+      ],
+      "title": "lookup of encoded r01 AT URI returns the exact Scrobble; unknown URI → 404",
+      "kept": true
+    },
+    {
+      "id": "worker/test/read/keyset.test.ts › keysetWhere › server-issued cursors (last <= upper, ASCII) emit only the last clause and return the two-clause page with O(limit) rows read",
+      "file": "worker/test/read/keyset.test.ts",
+      "ancestors": [
+        "keysetWhere"
+      ],
+      "title": "server-issued cursors (last <= upper, ASCII) emit only the last clause and return the two-clause page with O(limit) rows read",
+      "kept": true,
+      "change": "ADR 0005 §15.3: node:sqlite has no rows-read counter; the rowsRead budget lines (two-clause > 40, emitted < 40 and <= LIMIT + 3) are replaced by the seek key read from SQLite's EXPLAIN program (the emitted form seeks at `last`, the two-clause form at the anchor) and no sort step; the Q10 budgets as plan assertions are the new test \"history and feed page statements use the single-clause seek plan on SQLite 3.54.1 (Q10 budgets as plan assertions)\".",
+      "package": "N2-02"
+    },
+    {
+      "id": "worker/test/read/keyset.test.ts › keysetWhere › last > upper falls back to both clauses and returns only rows at or below the anchor",
+      "file": "worker/test/read/keyset.test.ts",
+      "ancestors": [
+        "keysetWhere"
+      ],
+      "title": "last > upper falls back to both clauses and returns only rows at or below the anchor",
+      "kept": true
+    },
+    {
+      "id": "worker/test/read/keyset.test.ts › keysetWhere › non-ASCII keys fall back to both clauses and return the two-clause page",
+      "file": "worker/test/read/keyset.test.ts",
+      "ancestors": [
+        "keysetWhere"
+      ],
+      "title": "non-ASCII keys fall back to both clauses and return the two-clause page",
+      "kept": true
+    },
+    {
+      "id": "worker/test/read/profile.test.ts › Alice followers 0 following 1; Bob followers 1 following 0; Carol 0/0",
+      "file": "worker/test/read/profile.test.ts",
+      "ancestors": [],
+      "title": "Alice followers 0 following 1; Bob followers 1 following 0; Carol 0/0",
+      "kept": true
+    },
+    {
+      "id": "worker/test/read/profile.test.ts › unknown/inactive DID → 404 with zero identity transport calls",
+      "file": "worker/test/read/profile.test.ts",
+      "ancestors": [],
+      "title": "unknown/inactive DID → 404 with zero identity transport calls",
+      "kept": true
+    },
+    {
+      "id": "worker/test/read/profile.test.ts › Cache-Control no-store and handle null when unverified",
+      "file": "worker/test/read/profile.test.ts",
+      "ancestors": [],
+      "title": "Cache-Control no-store and handle null when unverified",
+      "kept": true
+    },
+    {
+      "id": "worker/test/read/profile.test.ts › known recordless user → 200 with zero totals and empty history",
+      "file": "worker/test/read/profile.test.ts",
+      "ancestors": [],
+      "title": "known recordless user → 200 with zero totals and empty history",
+      "kept": true
+    },
+    {
+      "id": "worker/test/read/resolve.test.ts › verified handle 200; unresolved 404; mismatch 422",
+      "file": "worker/test/read/resolve.test.ts",
+      "ancestors": [],
+      "title": "verified handle 200; unresolved 404; mismatch 422",
+      "kept": true
+    },
+    {
+      "id": "worker/test/read/stats-boundaries.test.ts › records at lower bound −1s/0s/+1s for 7d/30d/365d have exact membership",
+      "file": "worker/test/read/stats-boundaries.test.ts",
+      "ancestors": [],
+      "title": "records at lower bound −1s/0s/+1s for 7d/30d/365d have exact membership",
+      "kept": true
+    },
+    {
+      "id": "worker/test/read/stats-boundaries.test.ts › record at asOf+300s excluded until asOf passes it",
+      "file": "worker/test/read/stats-boundaries.test.ts",
+      "ancestors": [],
+      "title": "record at asOf+300s excluded until asOf passes it",
+      "kept": true
+    },
+    {
+      "id": "worker/test/read/stats-boundaries.test.ts › every tests/goldens/windows.json probe has the Rust oracle membership",
+      "file": "worker/test/read/stats-boundaries.test.ts",
+      "ancestors": [],
+      "title": "every tests/goldens/windows.json probe has the Rust oracle membership",
+      "kept": true
+    },
+    {
+      "id": "worker/test/read/stats-cache.test.ts › cache hit only when version unchanged and no row crossed either bound; result equals uncached",
+      "file": "worker/test/read/stats-cache.test.ts",
+      "ancestors": [],
+      "title": "cache hit only when version unchanged and no row crossed either bound; result equals uncached",
+      "kept": true
+    },
+    {
+      "id": "worker/test/read/stats-cache.test.ts › delete r01 invalidates: all → 6 listens, Homogenic 1",
+      "file": "worker/test/read/stats-cache.test.ts",
+      "ancestors": [],
+      "title": "delete r01 invalidates: all → 6 listens, Homogenic 1",
+      "kept": true
+    },
+    {
+      "id": "worker/test/read/stats-plan.test.ts › EXPLAIN QUERY PLAN uses scrobbles_owner_time/scrobbles_stats; negative control without indexes shows SCAN",
+      "file": "worker/test/read/stats-plan.test.ts",
+      "ancestors": [],
+      "title": "EXPLAIN QUERY PLAN uses scrobbles_owner_time/scrobbles_stats; negative control without indexes shows SCAN",
+      "kept": true
+    },
+    {
+      "id": "worker/test/read/stats.test.ts › all: 7 listens, 3 artists, 6 tracks; artists (radiohead,3),(björk,2),(kate bush,2)",
+      "file": "worker/test/read/stats.test.ts",
+      "ancestors": [],
+      "title": "all: 7 listens, 3 artists, 6 tracks; artists (radiohead,3),(björk,2),(kate bush,2)",
+      "kept": true
+    },
+    {
+      "id": "worker/test/read/stats.test.ts › 7d: 4/2/3; artists (björk,2),(radiohead,2); tracks Björk/Jóga:2, Radiohead/No Surprises:1, Radiohead/Weird Fishes:1",
+      "file": "worker/test/read/stats.test.ts",
+      "ancestors": [],
+      "title": "7d: 4/2/3; artists (björk,2),(radiohead,2); tracks Björk/Jóga:2, Radiohead/No Surprises:1, Radiohead/Weird Fishes:1",
+      "kept": true
+    },
+    {
+      "id": "worker/test/read/stats.test.ts › 30d: 5/2/4 and 365d: 6/3/5 with Kate Bush 1 in 365d",
+      "file": "worker/test/read/stats.test.ts",
+      "ancestors": [],
+      "title": "30d: 5/2/4 and 365d: 6/3/5 with Kate Bush 1 in 365d",
+      "kept": true
+    },
+    {
+      "id": "worker/test/read/stats.test.ts › top tracks and top albums for every window equal TESTING.md exactly; r05 creates no album bucket",
+      "file": "worker/test/read/stats.test.ts",
+      "ancestors": [],
+      "title": "top tracks and top albums for every window equal TESTING.md exactly; r05 creates no album bucket",
+      "kept": true
+    },
+    {
+      "id": "worker/test/read/stats.test.ts › display spelling is newest record (Björk not BJÖRK) with URI tie-break",
+      "file": "worker/test/read/stats.test.ts",
+      "ancestors": [],
+      "title": "display spelling is newest record (Björk not BJÖRK) with URI tie-break",
+      "kept": true
+    },
+    {
+      "id": "worker/test/read/stats.test.ts › invalid did, window, limit, cursor and repeated parameters are 422 naming the field, before any RPC",
+      "file": "worker/test/read/stats.test.ts",
+      "ancestors": [],
+      "title": "invalid did, window, limit, cursor and repeated parameters are 422 naming the field, before any RPC",
+      "kept": true
+    },
+    {
+      "id": "worker/test/read/stats.test.ts › unknown, inactive and suppressed users are 404 not_found and leave no cache row",
+      "file": "worker/test/read/stats.test.ts",
+      "ancestors": [],
+      "title": "unknown, inactive and suppressed users are 404 not_found and leave no cache row",
+      "kept": true
+    },
+    {
+      "id": "worker/test/read/stats.test.ts › module stats equals the uncached computation for every window",
+      "file": "worker/test/read/stats.test.ts",
+      "ancestors": [],
+      "title": "module stats equals the uncached computation for every window",
+      "kept": true
+    },
+    {
+      "id": "worker/test/storage/db.test.ts › doDb › tx rolls back all writes when the callback throws",
+      "file": "worker/test/storage/db.test.ts",
+      "ancestors": [
+        "doDb"
+      ],
+      "title": "tx rolls back all writes when the callback throws",
+      "kept": true,
+      "change": "ADR 0005 §15.3 (round 2): ported from doDb over DO storage to openSqliteDb over a migrated temporary-file database; rowsWritten is SQLite changes() (1 for one inserted row, 3 for three) instead of the DO-billed count with index entries (2 and 6), and \"never reached SQLite\" is observed through a counting SQL function instead of a sql.exec proxy.",
+      "package": "N2-02"
+    },
+    {
+      "id": "worker/test/storage/db.test.ts › doDb › 101 bound parameters raise SqlParamError before execution",
+      "file": "worker/test/storage/db.test.ts",
+      "ancestors": [
+        "doDb"
+      ],
+      "title": "101 bound parameters raise SqlParamError before execution",
+      "kept": true,
+      "change": "ADR 0005 §15.3 (round 2): ported from doDb over DO storage to openSqliteDb over a migrated temporary-file database; rowsWritten is SQLite changes() (1 for one inserted row, 3 for three) instead of the DO-billed count with index entries (2 and 6), and \"never reached SQLite\" is observed through a counting SQL function instead of a sql.exec proxy. The raw-exec contrast is SQLite accepting 101 parameters (its own limit is 32766) instead of DO refusing them.",
+      "package": "N2-02"
+    },
+    {
+      "id": "worker/test/storage/db.test.ts › doDb › unsafe integer parameter is rejected",
+      "file": "worker/test/storage/db.test.ts",
+      "ancestors": [
+        "doDb"
+      ],
+      "title": "unsafe integer parameter is rejected",
+      "kept": true,
+      "change": "ADR 0005 §15.3 (round 2): ported from doDb over DO storage to openSqliteDb over a migrated temporary-file database; rowsWritten is SQLite changes() (1 for one inserted row, 3 for three) instead of the DO-billed count with index entries (2 and 6), and \"never reached SQLite\" is observed through a counting SQL function instead of a sql.exec proxy.",
+      "package": "N2-02"
+    },
+    {
+      "id": "worker/test/storage/db.test.ts › doDb › all/one/run map rows, nulls and rowsWritten",
+      "file": "worker/test/storage/db.test.ts",
+      "ancestors": [
+        "doDb"
+      ],
+      "title": "all/one/run map rows, nulls and rowsWritten",
+      "kept": true,
+      "change": "ADR 0005 §15.3 (round 2): ported from doDb over DO storage to openSqliteDb over a migrated temporary-file database; rowsWritten is SQLite changes() (1 for one inserted row, 3 for three) instead of the DO-billed count with index entries (2 and 6), and \"never reached SQLite\" is observed through a counting SQL function instead of a sql.exec proxy.",
+      "package": "N2-02"
+    },
+    {
+      "id": "worker/test/storage/migrate.test.ts › migrate › fresh DO applies migration 1 and seeds indexing_status/backfill_generation/ingest_checkpoint",
+      "file": "worker/test/storage/migrate.test.ts",
+      "ancestors": [
+        "migrate"
+      ],
+      "title": "fresh DO applies migration 1 and seeds indexing_status/backfill_generation/ingest_checkpoint",
+      "kept": true
+    },
+    {
+      "id": "worker/test/storage/migrate.test.ts › migrate › schema newer than code reports too_new",
+      "file": "worker/test/storage/migrate.test.ts",
+      "ancestors": [
+        "migrate"
+      ],
+      "title": "schema newer than code reports too_new",
+      "kept": true
+    },
+    {
+      "id": "worker/test/storage/migrate.test.ts › migrate › re-running migrate is a no-op",
+      "file": "worker/test/storage/migrate.test.ts",
+      "ancestors": [
+        "migrate"
+      ],
+      "title": "re-running migrate is a no-op",
+      "kept": true
+    },
+    {
+      "id": "worker/test/storage/migrate.test.ts › migrate › a ledger written by different code is refused and rolls back",
+      "file": "worker/test/storage/migrate.test.ts",
+      "ancestors": [
+        "migrate"
+      ],
+      "title": "a ledger written by different code is refused and rolls back",
+      "kept": true
+    },
+    {
+      "id": "worker/test/storage/migrate.test.ts › migrate › a migration whose second statement is invalid persists neither statement and keeps the previous schema version",
+      "file": "worker/test/storage/migrate.test.ts",
+      "ancestors": [
+        "migrate"
+      ],
+      "title": "a migration whose second statement is invalid persists neither statement and keeps the previous schema version",
+      "kept": true
+    },
+    {
+      "id": "worker/test/storage/migrate.test.ts › migrate › a later migration applies once, atomically, after migration 1",
+      "file": "worker/test/storage/migrate.test.ts",
+      "ancestors": [
+        "migrate"
+      ],
+      "title": "a later migration applies once, atomically, after migration 1",
+      "kept": true
+    },
+    {
+      "id": "worker/test/storage/no-async-tx.test.ts › db.tx lint › no source file passes an async callback to db.tx",
+      "file": "worker/test/storage/no-async-tx.test.ts",
+      "ancestors": [
+        "db.tx lint"
+      ],
+      "title": "no source file passes an async callback to db.tx",
+      "kept": true
+    },
+    {
+      "id": "worker/test/storage/no-async-tx.test.ts › db.tx lint › detector flags async tx callbacks and nothing else",
+      "file": "worker/test/storage/no-async-tx.test.ts",
+      "ancestors": [
+        "db.tx lint"
+      ],
+      "title": "detector flags async tx callbacks and nothing else",
+      "kept": true
+    },
+    {
+      "id": "worker/test/storage/sql-conformance.test.ts › DO SQLite conformance › BEGIN and SAVEPOINT are rejected by exec",
+      "file": "worker/test/storage/sql-conformance.test.ts",
+      "ancestors": [
+        "DO SQLite conformance"
+      ],
+      "title": "BEGIN and SAVEPOINT are rejected by exec",
+      "kept": true,
+      "change": "ADR 0005 §15.3: on Node the adapter authorizer refuses BEGIN/COMMIT/ROLLBACK (reason transaction) and SAVEPOINT/RELEASE (reason savepoint) with SqlStatementRefusedError instead of the DO \"use transactionSync()\" error; the rollback of the enclosing transactionSync is unchanged.",
+      "package": "N2-02"
+    },
+    {
+      "id": "worker/test/storage/sql-conformance.test.ts › DO SQLite conformance › RETURNING and ON CONFLICT DO UPDATE ... WHERE behave as SQLite",
+      "file": "worker/test/storage/sql-conformance.test.ts",
+      "ancestors": [
+        "DO SQLite conformance"
+      ],
+      "title": "RETURNING and ON CONFLICT DO UPDATE ... WHERE behave as SQLite",
+      "kept": true
+    },
+    {
+      "id": "worker/test/storage/sql-conformance.test.ts › DO SQLite conformance › partial unique index users_verified_handle allows many NULLs and rejects duplicates",
+      "file": "worker/test/storage/sql-conformance.test.ts",
+      "ancestors": [
+        "DO SQLite conformance"
+      ],
+      "title": "partial unique index users_verified_handle allows many NULLs and rejects duplicates",
+      "kept": true
+    },
+    {
+      "id": "worker/test/storage/sql-conformance.test.ts › DO SQLite conformance › FK ON DELETE CASCADE is enforced for scrobbles.did and follows.actor",
+      "file": "worker/test/storage/sql-conformance.test.ts",
+      "ancestors": [
+        "DO SQLite conformance"
+      ],
+      "title": "FK ON DELETE CASCADE is enforced for scrobbles.did and follows.actor",
+      "kept": true,
+      "change": "ADR 0005 §15.3: PRAGMA is denied for module SQL on Node; foreign_keys is read back through the adapter's pragmas(), PRAGMA foreign_keys = OFF and PRAGMA foreign_key_check are asserted refused, and the dangling-row check is the equivalent LEFT JOIN.",
+      "package": "N2-02"
+    },
+    {
+      "id": "worker/test/storage/sql-conformance.test.ts › DO SQLite conformance › second plain INSERT of one scrobbles.uri fails with a constraint error and the row count stays one",
+      "file": "worker/test/storage/sql-conformance.test.ts",
+      "ancestors": [
+        "DO SQLite conformance"
+      ],
+      "title": "second plain INSERT of one scrobbles.uri fails with a constraint error and the row count stays one",
+      "kept": true
+    },
+    {
+      "id": "worker/test/storage/sql-conformance.test.ts › DO SQLite conformance › INSERT of a scrobble or follow whose users row is missing is rejected and leaves no row",
+      "file": "worker/test/storage/sql-conformance.test.ts",
+      "ancestors": [
+        "DO SQLite conformance"
+      ],
+      "title": "INSERT of a scrobble or follow whose users row is missing is rejected and leaves no row",
+      "kept": true,
+      "change": "ADR 0005 §15.3: PRAGMA is denied for module SQL on Node; foreign_keys is read back through the adapter's pragmas(), PRAGMA foreign_keys = OFF and PRAGMA foreign_key_check are asserted refused, and the dangling-row check is the equivalent LEFT JOIN.",
+      "package": "N2-02"
+    },
+    {
+      "id": "worker/test/storage/sql-conformance.test.ts › DO SQLite conformance › integers up to 2^53-1 round-trip exactly; documents precision loss above",
+      "file": "worker/test/storage/sql-conformance.test.ts",
+      "ancestors": [
+        "DO SQLite conformance"
+      ],
+      "title": "integers up to 2^53-1 round-trip exactly; documents precision loss above",
+      "replaced": "worker/test/storage/sql-conformance.test.ts › DO SQLite conformance › on Node an integer above 2^53 is refused on read, multi-statement text is refused, and BEGIN, SAVEPOINT and PRAGMA are denied",
+      "reason": "ADR 0005 §3.2, §15.3: node:sqlite throws SqlRangeError (ERR_OUT_OF_RANGE) for an integer above 2^53 on read instead of losing precision, and the raw-exec path applies the parameter guard, so \"documents precision loss above\" no longer holds; the safe-range round trip moves into the replacement.",
+      "package": "N2-02"
+    },
+    {
+      "id": "worker/test/storage/sql-conformance.test.ts › DO SQLite conformance › BLOB round-trip in snapshot_blocks",
+      "file": "worker/test/storage/sql-conformance.test.ts",
+      "ancestors": [
+        "DO SQLite conformance"
+      ],
+      "title": "BLOB round-trip in snapshot_blocks",
+      "kept": true
+    },
+    {
+      "id": "worker/test/storage/sql-conformance.test.ts › DO SQLite conformance › multi-statement exec binds only the last statement",
+      "file": "worker/test/storage/sql-conformance.test.ts",
+      "ancestors": [
+        "DO SQLite conformance"
+      ],
+      "title": "multi-statement exec binds only the last statement",
+      "replaced": "worker/test/storage/sql-conformance.test.ts › DO SQLite conformance › on Node an integer above 2^53 is refused on read, multi-statement text is refused, and BEGIN, SAVEPOINT and PRAGMA are denied",
+      "reason": "ADR 0005 §3.2, §15.3: the Node adapter refuses multi-statement text before anything runs (SqlStatementRefusedError multiple_statements) instead of running every statement and binding into the last.",
+      "package": "N2-02"
+    },
+    {
+      "id": "worker/test/storage/sql-conformance.test.ts › DO SQLite conformance › row-value comparison (a,b) < (?,?) and BINARY collation order equals UTF-8 code point order",
+      "file": "worker/test/storage/sql-conformance.test.ts",
+      "ancestors": [
+        "DO SQLite conformance"
+      ],
+      "title": "row-value comparison (a,b) < (?,?) and BINARY collation order equals UTF-8 code point order",
+      "kept": true
+    },
+    {
+      "id": "worker/test/storage/status.test.ts › indexing status truth › fresh DO reports recovering, caughtUp=false",
+      "file": "worker/test/storage/status.test.ts",
+      "ancestors": [
+        "indexing status truth"
+      ],
+      "title": "fresh DO reports recovering, caughtUp=false",
+      "kept": true
+    },
+    {
+      "id": "worker/test/storage/status.test.ts › indexing status truth › pending_gap overrides a stored current flag",
+      "file": "worker/test/storage/status.test.ts",
+      "ancestors": [
+        "indexing status truth"
+      ],
+      "title": "pending_gap overrides a stored current flag",
+      "kept": true
+    },
+    {
+      "id": "worker/test/storage/status.test.ts › indexing status truth › socket disconnected >5min reports stale",
+      "file": "worker/test/storage/status.test.ts",
+      "ancestors": [
+        "indexing status truth"
+      ],
+      "title": "socket disconnected >5min reports stale",
+      "kept": true
+    },
+    {
+      "id": "worker/test/storage/status.test.ts › indexing status truth › pulse overdue by more than two intervals, and off mode, report stale",
+      "file": "worker/test/storage/status.test.ts",
+      "ancestors": [
+        "indexing status truth"
+      ],
+      "title": "pulse overdue by more than two intervals, and off mode, report stale",
+      "kept": true
+    },
+    {
+      "id": "worker/test/storage/status.test.ts › indexing status truth › user with pending reactivation snapshot reports recovering",
+      "file": "worker/test/storage/status.test.ts",
+      "ancestors": [
+        "indexing status truth"
+      ],
+      "title": "user with pending reactivation snapshot reports recovering",
+      "kept": true
+    },
+    {
+      "id": "worker/test/storage/status.test.ts › indexing status truth › lagSeconds null when idle and exact when events flowing",
+      "file": "worker/test/storage/status.test.ts",
+      "ancestors": [
+        "indexing status truth"
+      ],
+      "title": "lagSeconds null when idle and exact when events flowing",
+      "kept": true
+    },
+    {
+      "id": "worker/test/storage/status.test.ts › indexing status truth › an unknown DID reports recovering with no lastIndexedAt while the global index is current",
+      "file": "worker/test/storage/status.test.ts",
+      "ancestors": [
+        "indexing status truth"
+      ],
+      "title": "an unknown DID reports recovering with no lastIndexedAt while the global index is current",
+      "kept": true
+    },
+    {
+      "id": "worker/test/storage/status.test.ts › indexing status truth › caughtUp is false only while a due hint was received more than 60 s ago",
+      "file": "worker/test/storage/status.test.ts",
+      "ancestors": [
+        "indexing status truth"
+      ],
+      "title": "caughtUp is false only while a due hint was received more than 60 s ago",
+      "kept": true
+    },
+    {
+      "id": "worker/test/storage/status.test.ts › indexing status truth › internalStatus reports the checkpoint, hint and job counts and counters",
+      "file": "worker/test/storage/status.test.ts",
+      "ancestors": [
+        "indexing status truth"
+      ],
+      "title": "internalStatus reports the checkpoint, hint and job counts and counters",
+      "kept": true
+    },
+    {
+      "id": "worker/test/storage/status.test.ts › indexing status truth › checkpoint writers: host rotation, gap-scan progress and pending_gap clears leave updated_at_ms unchanged",
+      "file": "worker/test/storage/status.test.ts",
+      "ancestors": [
+        "indexing status truth"
+      ],
+      "title": "checkpoint writers: host rotation, gap-scan progress and pending_gap clears leave updated_at_ms unchanged",
+      "kept": true
+    },
+    {
+      "id": "worker/test/storage/status.test.ts › indexing status truth › lastIndexedAt is a monotone high-water mark that deletions do not lower",
+      "file": "worker/test/storage/status.test.ts",
+      "ancestors": [
+        "indexing status truth"
+      ],
+      "title": "lastIndexedAt is a monotone high-water mark that deletions do not lower",
+      "kept": true
+    },
+    {
+      "id": "worker/test/storage/status.test.ts › indexing status truth › status reads are index lookups: rows read do not grow with scrobbles/follows; negative control scans",
+      "file": "worker/test/storage/status.test.ts",
+      "ancestors": [
+        "indexing status truth"
+      ],
+      "title": "status reads are index lookups: rows read do not grow with scrobbles/follows; negative control scans",
+      "replaced": "worker/test/storage/status.test.ts › indexing status truth › status statements use the indexes pinned by EXPLAIN QUERY PLAN (asserted by index name, SQLite version recorded) in place of the DO rowsRead budget",
+      "reason": "ADR 0005 §15.3: node:sqlite has no rows-read counter; the rowsRead budget (< 40 rows, equal at 2,000 and 20,000 rows, negative control >= 20,000) is re-derived as EXPLAIN QUERY PLAN pins on SQLite 3.54.1 (the index of every plan step, identical plans at both sizes, the unindexed negative control), with process.versions.sqlite asserted.",
+      "package": "N2-02"
+    },
+    {
+      "id": "worker/test/storage/status.test.ts › indexing status truth › source guard: only status.ts writes ingest_checkpoint, indexing_status and users.indexed_at, and projection inserts have a noteIndexed caller",
+      "file": "worker/test/storage/status.test.ts",
+      "ancestors": [
+        "indexing status truth"
+      ],
+      "title": "source guard: only status.ts writes ingest_checkpoint, indexing_status and users.indexed_at, and projection inserts have a noteIndexed caller",
+      "kept": true
+    },
+    {
+      "id": "worker/test/storage/timers.test.ts › timers › nextDue is the minimum and alarm is armed to it",
+      "file": "worker/test/storage/timers.test.ts",
+      "ancestors": [
+        "timers"
+      ],
+      "title": "nextDue is the minimum and alarm is armed to it",
+      "kept": true
+    },
+    {
+      "id": "worker/test/storage/timers.test.ts › timers › schedule keeps earlier due unless forced",
+      "file": "worker/test/storage/timers.test.ts",
+      "ancestors": [
+        "timers"
+      ],
+      "title": "schedule keeps earlier due unless forced",
+      "kept": true
+    },
+    {
+      "id": "worker/test/storage/timers.test.ts › timers › runDue executes only due timers in priority order",
+      "file": "worker/test/storage/timers.test.ts",
+      "ancestors": [
+        "timers"
+      ],
+      "title": "runDue executes only due timers in priority order",
+      "kept": true
+    },
+    {
+      "id": "worker/test/storage/timers.test.ts › timers › throwing handler is rescheduled with backoff and others still run",
+      "file": "worker/test/storage/timers.test.ts",
+      "ancestors": [
+        "timers"
+      ],
+      "title": "throwing handler is rescheduled with backoff and others still run",
+      "kept": true
+    },
+    {
+      "id": "worker/test/storage/timers.test.ts › timers › hung handler is taken over and rescheduled on the same instance",
+      "file": "worker/test/storage/timers.test.ts",
+      "ancestors": [
+        "timers"
+      ],
+      "title": "hung handler is taken over and rescheduled on the same instance",
+      "kept": true
+    },
+    {
+      "id": "worker/test/storage/timers.test.ts › timers › Db wrappers over one storage share the run guard",
+      "file": "worker/test/storage/timers.test.ts",
+      "ancestors": [
+        "timers"
+      ],
+      "title": "Db wrappers over one storage share the run guard",
+      "kept": true
+    },
+    {
+      "id": "worker/test/storage/timers.test.ts › timers › state survives DO eviction (same storage)",
+      "file": "worker/test/storage/timers.test.ts",
+      "ancestors": [
+        "timers"
+      ],
+      "title": "state survives DO eviction (same storage)",
+      "kept": true
+    },
+    {
+      "id": "worker/test/write/account-state.test.ts › account state › deactivation hides profile/content/follow edge immediately and bumps generation",
+      "file": "worker/test/write/account-state.test.ts",
+      "ancestors": [
+        "account state"
+      ],
+      "title": "deactivation hides profile/content/follow edge immediately and bumps generation",
+      "kept": true
+    },
+    {
+      "id": "worker/test/write/apply-record.test.ts › applyRecordProof › present valid scrobble inserts row with exact keys and record_state present",
+      "file": "worker/test/write/apply-record.test.ts",
+      "ancestors": [
+        "applyRecordProof"
+      ],
+      "title": "present valid scrobble inserts row with exact keys and record_state present",
+      "kept": true,
+      "change": "ADR 0005 §6.5, §8.4 (N3-11): the projection derives scrobbles.recording_msid from the music keys for every scrobble, so the expected row's recording_msid is the UUIDv5 of 'björk' U+0000 'jóga' instead of NULL; the other migration-2 columns stay NULL (r02 has no §6.2 field); title kept.",
+      "package": "N3-11"
+    },
+    {
+      "id": "worker/test/write/apply-record.test.ts › applyRecordProof › older revision proof after newer delete is noop (no resurrection)",
+      "file": "worker/test/write/apply-record.test.ts",
+      "ancestors": [
+        "applyRecordProof"
+      ],
+      "title": "older revision proof after newer delete is noop (no resurrection)",
+      "kept": true
+    },
+    {
+      "id": "worker/test/write/apply-record.test.ts › applyRecordProof › proof rev below users.max_rev returns stale_head and changes nothing",
+      "file": "worker/test/write/apply-record.test.ts",
+      "ancestors": [
+        "applyRecordProof"
+      ],
+      "title": "proof rev below users.max_rev returns stale_head and changes nothing",
+      "kept": true
+    },
+    {
+      "id": "worker/test/write/apply-record.test.ts › applyRecordProof › invalid remote record is excluded with reason and not visible",
+      "file": "worker/test/write/apply-record.test.ts",
+      "ancestors": [
+        "applyRecordProof"
+      ],
+      "title": "invalid remote record is excluded with reason and not visible",
+      "kept": true
+    },
+    {
+      "id": "worker/test/write/apply-record.test.ts › applyRecordProof › r03 artist change updates keys without inserting a second listen",
+      "file": "worker/test/write/apply-record.test.ts",
+      "ancestors": [
+        "applyRecordProof"
+      ],
+      "title": "r03 artist change updates keys without inserting a second listen",
+      "kept": true
+    },
+    {
+      "id": "worker/test/write/apply-record.test.ts › applyRecordProof › applying the same revision twice changes nothing and a newer revision replaces the payload with one listen",
+      "file": "worker/test/write/apply-record.test.ts",
+      "ancestors": [
+        "applyRecordProof"
+      ],
+      "title": "applying the same revision twice changes nothing and a newer revision replaces the payload with one listen",
+      "kept": true
+    },
+    {
+      "id": "worker/test/write/apply-record.test.ts › applyRecordProof › two records with identical track and listenedAt under different rkeys are two rows and two listens",
+      "file": "worker/test/write/apply-record.test.ts",
+      "ancestors": [
+        "applyRecordProof"
+      ],
+      "title": "two records with identical track and listenedAt under different rkeys are two rows and two listens",
+      "kept": true
+    },
+    {
+      "id": "worker/test/write/apply-snapshot.test.ts › applySnapshotChunk › chunk deletes rows absent from interval only when revision < headRev",
+      "file": "worker/test/write/apply-snapshot.test.ts",
+      "ancestors": [
+        "applySnapshotChunk"
+      ],
+      "title": "chunk deletes rows absent from interval only when revision < headRev",
+      "kept": true
+    },
+    {
+      "id": "worker/test/write/apply-snapshot.test.ts › applySnapshotChunk › live hint with newer revision survives snapshot sweep",
+      "file": "worker/test/write/apply-snapshot.test.ts",
+      "ancestors": [
+        "applySnapshotChunk"
+      ],
+      "title": "live hint with newer revision survives snapshot sweep",
+      "kept": true
+    },
+    {
+      "id": "worker/test/write/apply-snapshot.test.ts › applySnapshotChunk › a stale live proof below an in-progress snapshot head is stale_head and changes nothing",
+      "file": "worker/test/write/apply-snapshot.test.ts",
+      "ancestors": [
+        "applySnapshotChunk"
+      ],
+      "title": "a stale live proof below an in-progress snapshot head is stale_head and changes nothing",
+      "kept": true
+    },
+    {
+      "id": "worker/test/write/apply-snapshot.test.ts › applySnapshotChunk › a stale snapshot below a newer applied snapshot head cannot delete a record present at that head",
+      "file": "worker/test/write/apply-snapshot.test.ts",
+      "ancestors": [
+        "applySnapshotChunk"
+      ],
+      "title": "a stale snapshot below a newer applied snapshot head cannot delete a record present at that head",
+      "kept": true
+    },
+    {
+      "id": "worker/test/write/apply-snapshot.test.ts › applySnapshotChunk › a stale snapshot below a newer completed snapshot head cannot resurrect a record deleted before it",
+      "file": "worker/test/write/apply-snapshot.test.ts",
+      "ancestors": [
+        "applySnapshotChunk"
+      ],
+      "title": "a stale snapshot below a newer completed snapshot head cannot resurrect a record deleted before it",
+      "kept": true
+    },
+    {
+      "id": "worker/test/write/apply-snapshot.test.ts › applySnapshotChunk › completeSnapshot is superseded when generation changed (deactivation during snapshot)",
+      "file": "worker/test/write/apply-snapshot.test.ts",
+      "ancestors": [
+        "applySnapshotChunk"
+      ],
+      "title": "completeSnapshot is superseded when generation changed (deactivation during snapshot)",
+      "kept": true
+    },
+    {
+      "id": "worker/test/write/apply-snapshot.test.ts › applySnapshotChunk › a snapshot that finds a disabled settings record suppresses the DID and stops",
+      "file": "worker/test/write/apply-snapshot.test.ts",
+      "ancestors": [
+        "applySnapshotChunk"
+      ],
+      "title": "a snapshot that finds a disabled settings record suppresses the DID and stops",
+      "kept": true
+    },
+    {
+      "id": "worker/test/write/suppression.test.ts › settings suppression › disabled settings deletes local data and keeps only suppression marker; other owners' follows to DID hidden",
+      "file": "worker/test/write/suppression.test.ts",
+      "ancestors": [
+        "settings suppression"
+      ],
+      "title": "disabled settings deletes local data and keeps only suppression marker; other owners' follows to DID hidden",
+      "kept": true
+    },
+    {
+      "id": "worker/test/write/suppression.test.ts › settings suppression › enabled/absent settings with newer rev clears suppression and requests admission",
+      "file": "worker/test/write/suppression.test.ts",
+      "ancestors": [
+        "settings suppression"
+      ],
+      "title": "enabled/absent settings with newer rev clears suppression and requests admission",
+      "kept": true
+    }
+  ]
+}

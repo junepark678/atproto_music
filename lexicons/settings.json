@@ -1,0 +1,20 @@
+{
+  "lexicon": 1,
+  "id": "com.example.atmusic.settings",
+  "description": "Schema-v1 indexing settings (ADR 0004 §5.3, A10). This ID is fixture-only; production requires an owner-controlled prefix.",
+  "defs": {
+    "main": {
+      "type": "record",
+      "key": "literal:self",
+      "description": "The owner's indexing choice, written by the owner to their own repository at <prefix>.settings/self. indexing=disabled asks this AppView to delete its local copy of the owner's data and keep only a suppression marker; it does not erase public PDS records. Deleting the record, or indexing=enabled at a newer revision, reconnects through a fresh verified snapshot. The record itself is public.",
+      "record": {
+        "type": "object",
+        "required": ["indexing", "createdAt"],
+        "properties": {
+          "indexing": {"type": "string", "enum": ["enabled", "disabled"], "description": "disabled opts the repository out of indexing; enabled opts back in."},
+          "createdAt": {"type": "string", "format": "datetime", "description": "Explicit UTC RFC3339, from 1970-01-01 through event receipt time plus 300 seconds inclusive."}
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,11 @@
+# Local secrets for `wrangler dev` (copy to worker/.dev.vars, which is gitignored).
+# In deployed environments set them with `wrangler secret put <NAME> [--env <env>]`.
+
+# Required. Cursor HMAC application key: at least 32 random bytes, hex-encoded.
+# Generate with: openssl rand -hex 32
+CURSOR_KEY=
+
+# Optional. Enables /internal/admin/{status,pitr,resnapshot} when set.
+# At least 32 characters; compared in constant time. Leave unset to disable.
+# Generate with: openssl rand -hex 32
+# ADMIN_TOKEN=

@@ -1,0 +1,1676 @@
+[
+ {
+  "wave": 0,
+  "packages": [
+   {
+    "id": "N0-01",
+    "title": "Node 26 toolchain, pinned dependencies, worker-node test project, core under Node, gate",
+    "files": [
+     "package.json",
+     "package-lock.json",
+     ".nvmrc",
+     "tsconfig.base.json",
+     "vitest.config.ts",
+     "scripts/check-ts.sh",
+     "scripts/test/check-ts.test.ts",
+     ".github/workflows/ci.yml",
+     "packages/core/vitest.config.ts",
+     "worker/package.json",
+     "worker/tsconfig.json",
+     "worker/tsconfig.workers.json",
+     "worker/test/tsconfig.json",
+     "worker/vitest.node.config.ts",
+     "worker/vitest.modules.config.ts",
+     "worker/test/node/scaffold.test.ts",
+     "packages/core/test/unicode-runtime.test.ts"
+    ],
+    "dependsOn": [],
+    "description": "ADR 0005 §3.1, §3.9, §15.1.\n\n- Pin Node 26.12.1 in .nvmrc, set `engines.node` to `>=26.12.0`, and make CI use .nvmrc.\n- Pin exactly, choosing the newest release at least 7 days old and recording the choice in the ADR §3 tables: `@atproto/oauth-client-node` 0.5.10, `ws` 8.22.0, `@types/ws`, `undici` 8.12.2 (it must equal `process.versions.undici`), `fflate`, `esbuild` 0.28.2 (direct devDependency), `lastfm-ts-api` 2.6.2 (dev only, the real-client e2e) and `@types/node` 26.x. Regenerate package-lock.json.\n- Add the `worker-node` vitest project in worker/vitest.node.config.ts: `environment: 'node'`, `include: ['test/node/**/*.test.ts']`, `sequence.groupOrder: 1`. Exclude `test/node/**` from worker/vitest.modules.config.ts.\n- Switch packages/core to `environment: 'node'`; its 34 tests must pass unchanged under Node's ICU (Unicode 17).\n- worker/tsconfig.json gains `node` types next to `@cloudflare/workers-types`. If the two conflict, move the Workers-only files (src/index.ts, src/do/index-do.ts, src/scheduled.ts, src/env.ts) into worker/tsconfig.workers.json until N7-01 deletes them.\n- scripts/check-ts.sh gains two steps that run when their file exists: `npx tsx scripts/check-node-bundle.ts` (the Node bundle guard, a new file from N3-07; the existing Workers `check-bundle.ts` step stays until N7-01) and `npx tsx scripts/build-server.ts --check` (N3-07). Wiring them here means no later package edits check-ts.sh before N7-01.\n- **Runtime-neutral core checks (ADR §15.3).** packages/core/test/unicode-runtime.test.ts asserts `navigator.userAgent === 'Cloudflare-Workers'` at :257 and :364, which is `Node.js/26` under Node. Replace both assertions, keeping every title: ICU reports Unicode 17 or newer (`process.versions.unicode`), and the NFKC oracle drift is 0 code points outside the documented unassigned set. The UA check is recorded as a named change in node-port-inventory.json by N2-02.\n- **Timeouts.** worker/vitest.node.config.ts keeps vitest's default 5 s test timeout. Tests never wait for production durations (busy timeout, drain window and alarms are injected, ADR §3.2, §3.10); process-level tests live in scripts/test with explicit timeouts.\n- **Gate duration (ADR §15.1).** check-ts.sh accepts `--projects <list>`, used only by the nested negative controls in scripts/test/check-ts.test.ts so that each control runs just the project it exercises instead of a full nested gate (the existing nested run already takes 91.6 s of its 180 s budget). It writes work/gate-durations.json with one duration per step. No large-fixture suite may live under worker/test/node/**; those belong to worker-bench.\n\nOnly this package regenerates the lockfile in wave 0. Later packages that add or remove dependencies own package-lock.json in their own wave.",
+    "tests": [
+     "worker/test/node/scaffold.test.ts › worker-node project runs under Node >= 26.12 with node:sqlite Database available and no workerd globals (WebSocketPair, caches) defined",
+     "worker/test/node/scaffold.test.ts › String.prototype.normalize passes the Unicode 17 NFKC probe of packages/core/src/music-key.ts under Node ICU",
+     "worker/test/node/scaffold.test.ts › the installed undici version equals process.versions.undici",
+     "scripts/test/check-ts.test.ts › the gate runs the worker-node project and fails with its status when a worker-node test fails in the disposable copy, with the nested run limited by --projects worker-node",
+     "scripts/test/check-ts.test.ts › the core project reports environment node and still executes all of its tests",
+     "scripts/test/check-ts.test.ts › check-ts.sh writes work/gate-durations.json with one wall-clock duration per step, and each nested negative control finishes inside its 180 s timeout",
+     "worker/test/node/scaffold.test.ts › process.versions.sqlite is 3.45 or newer with WAL, STRICT tables and JSON functions working, and process.versions.openssl is present for TLS",
+     "packages/core/test/unicode-runtime.test.ts › workerd ICU NFKC matches oracle corpus",
+     "scripts/test/check-ts.test.ts › check-ts.sh runs scripts/check-node-bundle.ts and build-server.ts --check only when those files exist, and a failing check-node-bundle.ts fails the gate in the disposable copy"
+    ]
+   },
+   {
+    "id": "N0-02",
+    "title": "ADR 0005 contracts: API v1.2, lexicons, B-series amendments, protocol specs, case-map validator",
+    "files": [
+     "lexicons/scrobble.json",
+     "lexicons/love.json",
+     "api/openapi.yaml",
+     "api/examples/operation.json",
+     "api/examples/session.json",
+     "api/examples/account.json",
+     "api/examples/link.json",
+     "api/examples/import-job.json",
+     "api/examples/credentials.json",
+     "api/examples/scrobble-input.json",
+     "api/examples/response-cases.json",
+     "api/examples/schema-cases.json",
+     "docs/planning/API.md",
+     "docs/planning/AMENDMENTS-node.md",
+     "docs/compat/lastfm.md",
+     "docs/compat/listenbrainz.md",
+     "docs/adr/0002-oauth.md",
+     "docs/adr/0004-cloudflare-workers.md",
+     "scripts/validate_contracts.py",
+     "scripts/validate_case_map.py",
+     "scripts/test_validate_case_map.py",
+     "docs/verification/ts-case-map.json",
+     "scripts/acceptance/node-interim.sh",
+     "scripts/test/node-interim.test.ts"
+    ],
+    "dependsOn": [],
+    "description": "ADR 0005 §5.7, §6.1–§6.3, §7, §8, §16.\n\n- **lexicons/scrobble.json:** add the §6.2 optional fields with their limits. Nothing else changes; no field becomes required.\n- **lexicons/love.json:** new, with key tid; artist, track and createdAt required; album and recordingMbid optional. Fixture id `com.example.atmusic.love`.\n- **api/openapi.yaml → 1.2.0:** Scrobble and ScrobbleInput get the optional fields. Add the §5.7 routes (auth, writes, operations, account including DELETE /api/v1/account/connection and GET /api/v1/account/ignored-listens, credentials, links, imports, lastfm/authorize) with Operation (state including cancelled), Accepted, Session, Account, Link, ImportJob and Credentials schemas, cookie security, and the 400 idempotency_key_required and invalid_idempotency_key, 401, 403 csrf_failed, signin_not_allowed and oauth_binding_mismatch, 409 idempotency_conflict, 422 username_invalid, 502 oauth_upstream, 503 publication_disabled and 507 insufficient_storage responses. Remove the static client-metadata asset row and document the dynamic /oauth/client-metadata.json and /oauth/jwks.json.\n- **docs/planning/API.md:** add the v1.2 amendment paragraph; narrow 'no route reads a session' to 'no v1.1 read route'.\n- **docs/planning/AMENDMENTS-node.md:** B1–B20 issue-amendment texts in the AMENDMENTS-workers.md format, including the TESTING.md harness wording (B10), a machine-readable \"Superseded ADR 0004 amendments\" list for the validator, and per-leaf sections naming the cases retired under B4 and B11.\n- **docs/compat/lastfm.md and docs/compat/listenbrainz.md:** the client-facing protocol specifications of §7 and §8: methods, parameters, errors and client setup for Pano, multi-scrobbler, Web Scrobbler, Navidrome, Jellyfin and Music Assistant. lastfm.md states that lastfm-ts-api clients such as multi-scrobbler must use `https://music.214510.xyz/2.0/` and cannot use the loopback address or any non-443 port; that `/api/auth` and `/api/auth/` both work; and that `library.removeScrobble` with no match answers 7. listenbrainz.md states that Web Scrobbler supports scrobbles and now playing only (its love and unlove call api.listenbrainz.org with the user's token, so users must not use love with the custom entry and must revoke the token if they did), and documents the deviations: a 400 only for input ListenBrainz itself rejects; listens up to +3,600 s accepted and those beyond +300 s written once they become valid (listened_at − 300 s); names that ListenBrainz accepts but our validator refuses answered 200, not written, and listed in GET /api/v1/account/ignored-listens; -1 clears a love; return_msid only for playing_now.\n- **ADR 0002 and ADR 0004:** status lines say which sections ADR 0005 supersedes.\n- **scripts/validate_case_map.py:** accept test ids declared in docs/planning/node-waves.json as well as workers-waves.json (new `--node-waves` option, default path). **Pending targets (ADR §15.3):** with `--check-tests --node-wave <n>`, a mapped target declared by a node-waves package of a wave later than n is reported as `pending (wave <m>, <package id>)` and does not fail; targets of waves ≤ n must exist with their title. Without `--node-wave` every target must exist. Reject every retirement that cites an amendment AMENDMENTS-node.md lists as superseded (A1, A2, A3, A4, A5, A11, A12, A15, A16, A18, A19 and D), and accept `retired:B<n>` when that B amendment's section in AMENDMENTS-node.md names the case.\n- **docs/verification/ts-case-map.json (ADR §15.3, §20.2):** of the 43 cases retired under superseded amendments (26 under A1, A3, A11, A12, A15 and A19, 14 under D, 3 under A4), un-retire the 39 whose reasons ADR 0005 made false and map each to the named test listed in ADR §20.2; re-retire M1.2.3/static_elf and M6.4.1/static_release under B11 and M1.2.1/locked_build and M1.2.1/dependency_direction under B4 with reasons that are true on Node. The map then validates in this wave, because every target is declared in node-waves.json.\n- **scripts/validate_contracts.py:** validate love.json, check that every scrobble.json property other than the required four is optional, and check the new examples against their schemas.\n\n**Retire workers-backend.sh from the gate (ADR §2.2, §15.3).** It stays on disk until N7-01 deletes it, but from wave 0 it is no longer run: its `--check-tests` step fails as soon as the 39 cases point at tests of later waves, and its Playwright step drives the browser OAuth client that N5-01 removes. AMENDMENTS-node.md (B10 section) states this.\n\n**scripts/acceptance/node-interim.sh --wave <n> --out <dir>** is the per-wave acceptance until N8-01: check-ts (npm run check), the Python case-map regressions, `validate_case_map.py --check-tests --node-wave <n>`, check_goldens.sh, the live no-env checks, and Playwright only when n ≥ 6. Each step it skips prints `pending until wave <m>`. It writes summary.json and exits 0, 1 or 2 like workers-backend.sh.",
+    "tests": [
+     "python3 scripts/validate_contracts.py › passes with openapi 1.2.0, the new examples and lexicons/love.json",
+     "python3 scripts/validate_contracts.py › fails when a lexicon adds a required scrobble field or a v1.1 response schema loses a property",
+     "scripts/test_validate_case_map.py › a case target declared only in node-waves.json is accepted",
+     "scripts/test_validate_case_map.py › a case target declared in neither waves file is reported with its case name",
+     "scripts/test_validate_case_map.py › a retirement citing a superseded amendment (A3 or D) is reported with its case name and the superseding B id",
+     "scripts/test_validate_case_map.py › retired:B11 is accepted only when the B11 section of AMENDMENTS-node.md names the case",
+     "python3 scripts/validate_case_map.py › passes with no case retired under A1, A2, A3, A4, A5, A11, A12, A15, A16, A18, A19 or D and every remapped case pointing at a test declared in node-waves.json",
+     "scripts/test_validate_case_map.py › with --check-tests --node-wave 0, a target declared by a wave-3 package whose file does not exist yet is reported pending with its package id and the run passes; with --node-wave 3 or without --node-wave it fails naming the case",
+     "scripts/test/node-interim.test.ts › node-interim.sh --wave 0 in a disposable copy runs check-ts, the Python regressions, the case map with --node-wave 0, goldens and live no-env, prints Playwright as pending until wave 6, and exits 1 when any run step fails",
+     "python3 scripts/validate_case_map.py --check-tests --node-wave 0 › passes at the end of wave 0 with every remapped case reported pending under its owning package"
+    ]
+   }
+  ]
+ },
+ {
+  "wave": 1,
+  "packages": [
+   {
+    "id": "N1-01",
+    "title": "Node SQLite Db adapter, migration target, Node conformance suite",
+    "files": [
+     "worker/src/node/sqlite-db.ts",
+     "worker/src/do/migrate.ts",
+     "worker/test/node/support/node-db.ts",
+     "worker/test/node/sqlite-db.test.ts",
+     "worker/test/node/sql-conformance-node.test.ts",
+     "worker/test/node/migrate-node.test.ts"
+    ],
+    "dependsOn": [
+     "N0-01"
+    ],
+    "description": "ADR 0005 §3.2.\n\n`openSqliteDb(path, {log})` returns `Db & {exec, close, raw}` over node:sqlite `Database`:\n- startup pragmas, read back and asserted;\n- nested `tx`: BEGIN IMMEDIATE outside, SAVEPOINT/RELEASE/ROLLBACK TO inside; Promise-returning callbacks refused;\n- the existing `checkParams`; ArrayBuffer conversion of BLOB reads; `rowsWritten = changes`;\n- a multi-statement tokenizer;\n- an authorizer denying TRANSACTION, SAVEPOINT, PRAGMA, ATTACH and DETACH for module SQL;\n- `SqlRangeError` for integers above 2^53;\n- a 256-entry statement LRU;\n- `locking_mode=EXCLUSIVE` before the first WAL access: the single-writer lock that makes a second process or connection on the same file fail (ADR §3.2, §3.10);\n- `busyTimeoutMs` is an option (production 5000, read back through `PRAGMA busy_timeout`); tests pass 200 so nothing waits 5 s;\n- `{create: false}` (the default for main.ts) refuses a missing file instead of creating an empty database.\n\nmigrate.ts accepts a `MigrationTarget {exec, tx}` and keeps its current DO-storage overload for index-do.ts until N7-01. It applies the §3.2 compatibility rule: a database newer than the code is ready when `schema_compat.min_compatible_version` (absent table: the database version) is at most the code version, else too_new. The test builds synthetic migration lists, so it does not depend on N1-10.\n\ntest/node/support/node-db.ts exports `withMigratedDb(fn)` over a temporary file and `reopen(db)`. Every later worker-node test uses it.",
+    "tests": [
+     "worker/test/node/sqlite-db.test.ts › open sets journal_mode=wal, synchronous=2, foreign_keys=1, journal_size_limit=67108864 and locking_mode=exclusive, and PRAGMA busy_timeout reads back the injected busyTimeoutMs (5000 by default)",
+     "worker/test/node/sqlite-db.test.ts › nested tx: an inner throw rolls back only its savepoint, an outer throw rolls back everything, an async callback is refused and nothing commits",
+     "worker/test/node/sqlite-db.test.ts › BLOB parameters round-trip as byte-identical ArrayBuffer and run() reports rowsWritten equal to changes",
+     "worker/test/node/sqlite-db.test.ts › module SQL with two statements, BEGIN, SAVEPOINT, PRAGMA or ATTACH throws a typed error and leaves every table unchanged",
+     "worker/test/node/sqlite-db.test.ts › more than 100 parameters, an unsafe integer, true or Infinity is refused before binding",
+     "worker/test/node/sqlite-db.test.ts › reading an integer above 2^53 throws SqlRangeError instead of returning a rounded number",
+     "worker/test/node/sqlite-db.test.ts › 300 distinct statements leave at most 256 prepared statements cached",
+     "worker/test/node/sql-conformance-node.test.ts › foreign keys are enforced and PRAGMA foreign_keys=OFF from module SQL is denied",
+     "worker/test/node/migrate-node.test.ts › all MIGRATIONS apply in one transaction on a fresh file and schema_migrations lists every version",
+     "worker/test/node/migrate-node.test.ts › a database with a newer schema version reports too_new and is not modified",
+     "worker/test/node/migrate-node.test.ts › a failing migration statement leaves schema_migrations and every table unchanged",
+     "worker/test/node/migrate-node.test.ts › rows survive close and reopen of the same file",
+     "worker/test/node/sqlite-db.test.ts › while one connection holds the database, a second openSqliteDb on the same file with busyTimeoutMs 200 fails with SQLITE_BUSY after about 200 ms and changes nothing",
+     "worker/test/node/sqlite-db.test.ts › openSqliteDb with create false on a missing path throws and creates no file",
+     "worker/test/node/migrate-node.test.ts › a database at a newer version whose schema_compat.min_compatible_version is at most the code version opens ready; a larger min_compatible_version reports too_new"
+    ]
+   },
+   {
+    "id": "N1-02",
+    "title": "IndexCore extraction, Host interface, AppServices, extension timers",
+    "files": [
+     "worker/src/app/index-core.ts",
+     "worker/src/app/host.ts",
+     "worker/src/app/services.ts",
+     "worker/src/do/index-do.ts",
+     "worker/src/do/timers.ts",
+     "worker/src/do/contracts.ts",
+     "worker/test/storage/timers-extensions.test.ts",
+     "worker/test/composition/index-core.test.ts",
+     "worker/test/harness/local-index.ts"
+    ],
+    "dependsOn": [
+     "N0-01"
+    ],
+    "description": "ADR 0005 §2.2, §3.1, §3.3.\n\n- **IndexCore.** Move the IndexDO body (index-do.ts:276-600) into `IndexCore(config, host: Host, extensions: CoreExtension[])`. `Host` is `{db, alarm, extensionAlarm, connectJetstream, transport, backup?, log, clock, random}`. index-do.ts becomes a thin wrapper that builds a Workers Host and delegates, so the workerd suites keep passing.\n- **Every non-class export moves too (ADR §2.2).** `envLogger`, `createLogger`, `LogSink`, `INDEX_NAME`, `GC_*`, `HINT_*`, `ALARM_SLICE_MS`, `PITR_WINDOW_MS`, `PITR_RESTART_DELAY_MS`, `ADMIN_RESNAPSHOT_REASON`, `IndexDeps`, `NotReadyError`, `IndexError` and its constants, `GcReport` and `runGc` move to worker/src/app/index-core.ts, which imports nothing from cloudflare:* or env.ts values (types only through `import type`; `envLogger` takes a structural `{CURSOR_KEY?, ADMIN_TOKEN?}`). index-do.ts re-exports all of them, so router.ts, http/admin.ts and every test keep compiling, and keeps `protected buildDeps(env, ctx): IndexDeps` as the override seam for the test entries until N4-03 and N7-01.\n- **IndexRpc** (contracts.ts) gains `adminBackup()`. `adminPitr` stays until N7-01, and a host without a backup or PITR port answers `not_supported`.\n- **AppServices** (worker/src/app/services.ts) is an empty interface that features extend by declaration merging.\n- **Timers** (timers.ts): `TIMER_NAMES` stays exactly the seven core names, so worker/test/storage/timers.test.ts (owned by N1-10 in this wave; it schedules every TIMER_NAMES entry at :261-272) needs no change. A new `EXTENSION_TIMER_NAMES` holds outbox, forward, import, oauth-keepalive, expiry-sweep and backup, in that order. A name with no handler is never armed. A throwing handler is re-armed with backoff.\n- **Two lanes (ADR §3.3).** `runDue`, `armAlarm`, `nextDue`, `recoverOrphans` and the claim step take a lane `{names}` that defaults to `TIMER_NAMES`; each reads and writes only its lane's names and their `~running:` rows (today `nextDue` ~l.186-193 and `recoverOrphans` ~l.262-271 read every known name). The single-flight guard stays keyed on the storage object, so IndexCore drives `TIMER_NAMES` from `Host.alarm` and `EXTENSION_TIMER_NAMES` from `Host.extensionAlarm`; neither lane waits for, recovers or reschedules the other's timers.\n- **AlarmStorage** becomes the structural `{setAlarm(ms), deleteAlarm()}` type, so timers.ts no longer needs @cloudflare/workers-types (N7-01 then does not touch it).\n- **worker/test/harness/local-index.ts:** METHODS gains `adminBackup` (it is `Record<keyof IndexRpc, true>`, so tsc -b would fail without it). N7-01 removes `adminPitr` from it.",
+    "tests": [
+     "worker/test/storage/timers-extensions.test.ts › extension handlers run on the extension lane in the order outbox, forward, import, oauth-keepalive, expiry-sweep, backup",
+     "worker/test/storage/timers-extensions.test.ts › a timer name without a registered handler is never written to timers and tick() skips it",
+     "worker/test/storage/timers-extensions.test.ts › a throwing extension handler is re-armed at now+backoff and the core lane drain timer still runs",
+     "worker/test/composition/index-core.test.ts › every IndexRpc read method returns the same body through IndexDO as through IndexCore over the same storage",
+     "worker/test/composition/index-core.test.ts › IndexCore.start() calls noteRestart, lease reclaim, ensureTimers and armAlarm in that order on a recording host",
+     "worker/test/composition/index-core.test.ts › adminBackup on a host without a backup port answers not_supported and changes nothing",
+     "worker/test/storage/timers-extensions.test.ts › a kicked outbox handler runs while a core snapshot handler is blocked, and the core watchdog runs while an outbox handler is blocked",
+     "worker/test/storage/timers-extensions.test.ts › runDue with a names subset claims only those timers, and two lanes over two AlarmStorage objects never hit TimerReentryError",
+     "worker/test/storage/timers-extensions.test.ts › a core runDue started while outbox is claimed leaves ~running:outbox untouched and records no failure",
+     "worker/test/storage/timers-extensions.test.ts › TIMER_NAMES is the seven core names, EXTENSION_TIMER_NAMES the six extension names, and nextDue for one lane ignores the other lane's due rows",
+     "worker/test/composition/index-core.test.ts › app/index-core.ts imports no cloudflare: module and no value from env.ts, and index-do.ts re-exports every name it moved"
+    ]
+   },
+   {
+    "id": "N1-03",
+    "title": "Node alarm, wake heartbeat, ensureRunning interval",
+    "files": [
+     "worker/src/node/alarm.ts",
+     "worker/test/node/alarm.test.ts"
+    ],
+    "dependsOn": [
+     "N0-01"
+    ],
+    "description": "ADR 0005 §3.3.\n\n`NodeAlarm implements AlarmStorage` over one setTimeout:\n- delays clamped to 2^31−1 ms, re-armed until the wall-clock due time;\n- callback errors caught and logged, then re-armed at now + backoff;\n- `startHeartbeat(core, 30 s)` fires overdue timers after a suspend;\n- `startEnsureRunning(core, 5 min)` replaces cron.\n\nAll timers are injectable (fake timers plus fixedClock) and unref'd. `stop()` clears everything for shutdown.",
+    "tests": [
+     "worker/test/node/alarm.test.ts › setAlarm(t) fires once at t; a later setAlarm replaces the pending one; deleteAlarm cancels it",
+     "worker/test/node/alarm.test.ts › a due time 40 days ahead is reached through clamped re-arms and fires exactly once",
+     "worker/test/node/alarm.test.ts › a throwing callback is logged once, re-armed at now+backoff, and the process keeps running",
+     "worker/test/node/alarm.test.ts › after the clock jumps 3 h with the timer not yet fired, the heartbeat fires the overdue alarm within 30 s",
+     "worker/test/node/alarm.test.ts › the ensureRunning interval calls ensureRunning exactly once per 5 minutes and stop() clears every timer"
+    ]
+   },
+   {
+    "id": "N1-04",
+    "title": "ws Jetstream connector, host-neutral fake Jetstream link, atproto under Node",
+    "files": [
+     "worker/src/node/jetstream-ws.ts",
+     "packages/atproto/test-support/fake-jetstream.ts",
+     "packages/atproto/vitest.config.ts",
+     "packages/atproto/test/fake-jetstream-link.test.ts",
+     "worker/test/node/jetstream-ws.test.ts",
+     "packages/atproto/test/scaffold.test.ts"
+    ],
+    "dependsOn": [
+     "N0-01"
+    ],
+    "description": "ADR 0005 §3.4.\n\n**Connector** (`connectJetstreamWs(url, opts)` with the `ws` package):\n- https→wss mapping;\n- `unexpected-response` → `JetstreamConnectError {status, xrpcError, cursorRejected}`;\n- maxPayload 1 MiB, perMessageDeflate off, 10 s handshake timeout;\n- Buffer→ArrayBuffer LinkEvents, buffered until start();\n- close(1000);\n- only hosts in JETSTREAM_URLS.\n\n**fake-jetstream.ts** gains `memoryLink()`, an in-memory JetstreamLink connector that works on any host, and keeps its WebSocketPair export for workerd users until N7-01.\n\n**packages/atproto** switches to `environment: 'node'`; its 47 tests pass unchanged.\n\n**Runtime-neutral scaffold check (ADR §15.3).** packages/atproto/test/scaffold.test.ts:9 asserts `navigator.userAgent === 'Cloudflare-Workers'`. Replace that assertion, keeping the title, with runtime-neutral checks: WebCrypto ECDSA P-256 sign and verify round-trip, and NFKC normalisation present. The connector passes `rejectUnauthorized: true` to ws explicitly (ADR §3.4).",
+    "tests": [
+     "worker/test/node/jetstream-ws.test.ts › frames from a loopback ws server on port 0 arrive as LinkEvents in order, buffered until start()",
+     "worker/test/node/jetstream-ws.test.ts › a 400 handshake with {\"error\":\"OutdatedCursor\"} rejects with JetstreamConnectError status 400 and cursorRejected true",
+     "worker/test/node/jetstream-ws.test.ts › a frame above maxPayload closes the link with 1009 and is never delivered",
+     "worker/test/node/jetstream-ws.test.ts › close(1000) sends a close frame; a dropped TCP connection surfaces close code 1006",
+     "worker/test/node/jetstream-ws.test.ts › a URL whose host is not in JETSTREAM_URLS is refused before any connection attempt",
+     "packages/atproto/test/fake-jetstream-link.test.ts › memoryLink delivers the read-model commit events in order under environment node",
+     "packages/atproto/test/scaffold.test.ts › workerd runtime has WebCrypto ECDSA P-256 and String.prototype.normalize NFKC",
+     "worker/test/node/jetstream-ws.test.ts › the ws client is created with rejectUnauthorized true even when NODE_TLS_REJECT_UNAUTHORIZED=0 is set in the test process"
+    ]
+   },
+   {
+    "id": "N1-05",
+    "title": "Pinned outbound transport and policyFetch for POST and non-SafeFetch traffic",
+    "files": [
+     "worker/src/node/pinned-transport.ts",
+     "worker/test/node/pinned-transport.test.ts",
+     "worker/src/node/policy-fetch.ts",
+     "worker/test/node/policy-fetch.test.ts"
+    ],
+    "dependsOn": [
+     "N0-01"
+    ],
+    "description": "ADR 0005 §3.5.\n\nThe transport lives in worker/src/node/ (ADR §3.5): @atmusic/atproto is Workers- and browser-safe with no Node built-ins and declares no undici, while worker-node already has Node types and N0-01 pins undici in worker/package.json.\n\n**pinned-transport.ts:** `pinnedTransport({lookup?, caps})` returns a Transport over an undici Agent built with `connect: {rejectUnauthorized: true, lookup}`, whose lookup applies `isAllowedAddress` (net/url-policy.ts) to every answer and connects only to the checked address. Failures are `TransportError {code: 'blocked_address'|'dns'|'connect'|'timeout'|'too_large'|'redirect'|'unpinned_fetch'}`, never a raw TypeError. It also exports `unpinnedFetchStub`, which run() installs as globalThis.fetch (N3-07).\n\n**SafeFetch is not changed** (packages/atproto/src/net/safe-fetch.ts stays GET-only, read-kind-only, with its DoH pre-check, decision recorded in ADR §3.5); it runs over the pinned transport.\n\n**policy-fetch.ts:** `policyFetch(input, init, {caps})` is fetch-shaped for every other request, including POST: the URL policy (https only, default port, no IP literal, forbidden suffixes), `redirect: 'manual'` with every 3xx a TransportError, a 10 s deadline, a request-body cap and a response-body cap, and TransportError for every failure. No DoH; pinning is its address check. The OAuth client (N2-03), PdsWriter (N2-05), the forward clients (N3-08) and the import sources (N3-09) use it.\n\nTests inject the lookup function and the socket connector (a spy that records the address it was asked to connect to and answers from an in-memory duplex), so no real socket, DNS query or network is used; policyFetch tests run over the same injected connector.",
+    "tests": [
+     "worker/test/node/pinned-transport.test.ts › answers 10.0.0.5, 127.2.0.1, ::1, 169.254.169.254, 100.64.0.1 and fd00::1 are refused with blocked_address before any connect",
+     "worker/test/node/pinned-transport.test.ts › a rebinding lookup (public first, 127.0.0.1 second) never connects to loopback: the connected address is the checked one",
+     "worker/test/node/pinned-transport.test.ts › connection refused, timeout, oversized body and any 3xx reject with TransportError, never TypeError",
+     "worker/test/node/pinned-transport.test.ts › http URLs, IP literals, non-default ports and .local hosts are still refused by the SafeFetch policy in front",
+     "worker/test/node/policy-fetch.test.ts › a POST with a form body is sent through the pinned agent with method, headers and body bytes intact, and a lookup answer of 10.0.0.5 is refused with blocked_address before any connect",
+     "worker/test/node/policy-fetch.test.ts › a 302 answer to a POST is a TransportError redirect and the Location is never requested; a response over its cap is too_large and a stalled response is timeout after the injected deadline",
+     "worker/test/node/policy-fetch.test.ts › http, an IP literal, a non-default port and a .local host are refused before any lookup, for GET and POST alike",
+     "worker/test/node/pinned-transport.test.ts › the undici Agent is built with rejectUnauthorized true, and calling unpinnedFetchStub rejects with TransportError unpinned_fetch"
+    ]
+   },
+   {
+    "id": "N1-06",
+    "title": "HTTP bridge, loopback bind, static assets, trusted client IP, IPv6 /64 rate keys, LRU per-IP buckets",
+    "files": [
+     "worker/src/node/http-bridge.ts",
+     "worker/src/node/static-assets.ts",
+     "worker/src/node/client-ip.ts",
+     "worker/test/node/http-bridge.test.ts",
+     "worker/test/node/static-assets.test.ts",
+     "worker/test/node/client-ip.test.ts",
+     "worker/src/http/limits.ts",
+     "worker/test/node/limits-node.test.ts"
+    ],
+    "dependsOn": [
+     "N0-01"
+    ],
+    "description": "ADR 0005 §3.6, §3.7.\n\n**http-bridge.ts** (`createServer({publicOrigin, listen, handler, caps})`):\n- WHATWG Request/Response bridge with the URL built from PUBLIC_ORIGIN;\n- Host check (421);\n- per-route streamed body caps (413 after cap+1 bytes); AbortSignal on client disconnect; HEAD;\n- keepAliveTimeout 100 s, headersTimeout 60 s, requestTimeout 600 s;\n- loopback-only `ATMUSIC_LISTEN` parsing;\n- LISTEN_FDS socket activation with the loopback check.\n\n**static-assets.ts:**\n- in-memory web/dist; the `_headers` parser;\n- ETag/304; MIME table; /index.html → 301 /;\n- 405 JSON envelope for non-GET to an existing file;\n- traversal refusal; `_headers` never served.\n\n**client-ip.ts:** the trusted-peer CIDR rule, cf-connecting-ip, rightmost-untrusted x-forwarded-for, x-real-ip, none. The mode has no default (N1-07 makes it required), and only the header named by the mode is ever read. Ported from crates/server/src/http/limits.rs:138-191.\n\n**Rate keys and bucket sets (ADR §3.6, §8.7, §13).** client-ip.ts exports `rateKeyOf(ip)`: the IPv4 address, or the /64 prefix of an IPv6 address. limits.ts `BucketSet` gains an `onFull: 'refuse' | 'evict-lru'` option. `refuse` (the default) keeps today's behaviour, so worker/test/http/limits.test.ts (worker-modules, ported by N2-02) is unchanged; `evict-lru` drops the least recently used bucket when MAX_BUCKET_KEYS (10,000) keys are live and admits the new key. Every per-IP set built for the Node host uses `evict-lru` and `rateKeyOf`; per-credential sets use `refuse`.",
+    "tests": [
+     "worker/test/node/http-bridge.test.ts › the handler sees PUBLIC_ORIGIN + raw path; Host, X-Forwarded-Host and X-Forwarded-Proto never change request.url",
+     "worker/test/node/http-bridge.test.ts › a Host outside {public host, listen address} gets 421 misdirected_request",
+     "worker/test/node/http-bridge.test.ts › a body over the route cap gets 413 after at most cap+1 bytes read; a client abort fires the handler AbortSignal",
+     "worker/test/node/http-bridge.test.ts › HEAD returns headers and no body; the server has keepAliveTimeout 100000 and headersTimeout 60000",
+     "worker/test/node/http-bridge.test.ts › ATMUSIC_LISTEN 0.0.0.0:8888 and 192.168.1.2:8888 are startup errors; 127.2.0.1:8888 and [::1]:0 are accepted; LISTEN_FDS=1 with a non-loopback fd is refused",
+     "worker/test/node/static-assets.test.ts › files are served with the _headers CSP, nosniff, immutable /assets/* and no-cache /, an ETag, and 304 on If-None-Match",
+     "worker/test/node/static-assets.test.ts › /index.html redirects to /, /_headers is 404, and POST to an existing file is 405 with Allow: GET, HEAD and the JSON envelope",
+     "worker/test/node/static-assets.test.ts › %2e%2e, backslash and NUL paths are refused without touching the filesystem outside dist",
+     "worker/test/node/client-ip.test.ts › CF-Connecting-IP is honoured only in cf-connecting-ip mode and only from a peer in ATMUSIC_TRUSTED_PROXIES; otherwise the peer address is used",
+     "worker/test/node/client-ip.test.ts › x-forwarded-for mode returns the rightmost untrusted entry and ignores a forged leftmost entry",
+     "worker/test/node/client-ip.test.ts › a forged CF-Connecting-IP relayed by a trusted proxy is ignored in x-forwarded-for, x-real-ip and none modes, and is used only when the operator chose cf-connecting-ip",
+     "worker/test/node/limits-node.test.ts › 10,001 distinct addresses inside one IPv6 /64 share one bucket and the 31st request in 10 s from any of them is refused, while an address in another /64 is allowed",
+     "worker/test/node/limits-node.test.ts › a per-IP BucketSet with onFull evict-lru and 10,000 live keys admits a new key by evicting the least recently used one; the default refuse mode still answers retryAfter for a new key"
+    ]
+   },
+   {
+    "id": "N1-07",
+    "title": "Node configuration, systemd credential secrets, secrets generator",
+    "files": [
+     "worker/src/node/config.ts",
+     "worker/src/node/secrets.ts",
+     "worker/test/node/config.test.ts",
+     "worker/test/node/secrets.test.ts",
+     "config/atmusic.env.example",
+     "config/secrets.example.json",
+     "scripts/admin/gen-secrets.ts",
+     "scripts/test/gen-secrets.test.ts",
+     "worker/src/node/disk.ts"
+    ],
+    "dependsOn": [
+     "N0-01"
+    ],
+    "description": "ADR 0005 §3.8.\n\n**config.ts:** `parseNodeConfig(env)` returns `NodeConfig`, which embeds `parseConfig` from worker/src/config.ts. It adds every §3.8 variable, the https rules, INGEST_MODE socket|off, and the refusal of pulse. **Workers-era variables (ADR §3.8):** parseConfig still requires PLAN and DO_LOCATION_HINT and builds its budget from BUDGETS[plan]; parseNodeConfig passes `PLAN='paid'` and `DO_LOCATION_HINT=''` to it internally and rejects any operator-set PLAN or DO_LOCATION_HINT with a ConfigError citing ADR 0005. N7-01 removes them from config.ts.\n\n**Runtime environment (ADR §3.8, §14.1):** `FORBIDDEN_RUNTIME_ENV` lists NODE_OPTIONS, NODE_TLS_REJECT_UNAUTHORIZED, NODE_EXTRA_CA_CERTS, NODE_USE_ENV_PROXY, NODE_PATH, HTTP_PROXY, http_proxy, HTTPS_PROXY, https_proxy, NO_PROXY, no_proxy, ALL_PROXY, all_proxy, SSL_CERT_FILE and SSL_CERT_DIR; `checkRuntimeEnv(env)` returns a ConfigError naming the first one present (run() exits 78 on it, N3-07; the unit unsets them, N4-02).\n\n**Process timings:** NodeConfig carries `busyTimeoutMs` 5000 and `drainMs` 25000 as fixed production values (not environment variables); tests construct smaller values directly. ATMUSIC_CLIENT_IP_HEADER is required (no default; ADR §3.6). ATMUSIC_SIGNIN_POLICY (allowlist default) with ATMUSIC_SIGNIN_DIDS, ATMUSIC_UPLOAD_MAX_BYTES and ATMUSIC_MIN_FREE_BYTES are parsed here. No environment variable relaxes a rule: only the test-only option `{fixtureOrigins: true}`, which the e2e entry passes and main.ts never does, allows http origins and fixture upstreams.\n\n**secrets.ts** reads `$CREDENTIALS_DIRECTORY/secrets`, or `ATMUSIC_SECRETS_FILE` only when its mode is 0600 or stricter, and validates:\n- cursorKey of at least 32 bytes;\n- encryptionKeys with unique ids and 32-byte keys;\n- oauthSigningKeys as private ES256 JWKs with unique kids;\n- oauthAnnouncedKeys holding public keys only;\n- the optional lastfm block.\n\nSecrets are never copied into process.env, and ConfigError messages never contain values.\n\n**gen-secrets.ts** writes fresh keys to stdout or a 0600 file with local randomness, and supports `--oauth-key <kid>`.\n\n**disk.ts:** `freeBytes(path)` over `fs.statfs` and `diskLow(path, minFree)`; injectable for tests. Used by readiness (N2-01), the OAuth keepalive and store (N2-03), backups (N3-07) and the import writer (N3-09).",
+    "tests": [
+     "worker/test/node/config.test.ts › ATMUSIC_DB defaults to $STATE_DIRECTORY/atmusic.db; with neither set the ConfigError names ATMUSIC_DB",
+     "worker/test/node/config.test.ts › without the fixtureOrigins option an http PUBLIC_ORIGIN, and an upstream root that is http, an IP literal, a loopback name or a non-default port, are rejected whatever other environment variables are set",
+     "worker/test/node/config.test.ts › INGEST_MODE=pulse, an operator-set PLAN (paid or free) and DO_LOCATION_HINT are each rejected with a message citing ADR 0005, and the embedded parseConfig receives PLAN paid and an empty DO_LOCATION_HINT",
+     "worker/test/node/secrets.test.ts › secrets load from $CREDENTIALS_DIRECTORY/secrets; ATMUSIC_SECRETS_FILE with mode 0640 is refused",
+     "worker/test/node/secrets.test.ts › duplicate kids, a public-only signing key, a 16-byte cursorKey or a 31-byte encryption key are each a ConfigError naming the field",
+     "worker/test/node/secrets.test.ts › no secret value appears in process.env, JSON.stringify(config) or any thrown error text",
+     "scripts/test/gen-secrets.test.ts › gen-secrets writes a 0600 file that secrets.ts accepts, and two runs produce different keys",
+     "worker/test/node/config.test.ts › ATMUSIC_CLIENT_IP_HEADER unset is a ConfigError naming it, and the allowlist sign-in policy with an empty ATMUSIC_SIGNIN_DIDS is a ConfigError naming ATMUSIC_SIGNIN_DIDS",
+     "worker/test/node/config.test.ts › ATMUSIC_UPLOAD_MAX_BYTES defaults to 1 GiB, ATMUSIC_MIN_FREE_BYTES to 2 GiB and ATMUSIC_SIGNIN_POLICY to allowlist",
+     "worker/test/node/config.test.ts › checkRuntimeEnv names NODE_OPTIONS, NODE_TLS_REJECT_UNAUTHORIZED, NODE_EXTRA_CA_CERTS, https_proxy or SSL_CERT_FILE when any is set and passes an environment without them",
+     "worker/test/node/config.test.ts › the production NodeConfig has busyTimeoutMs 5000 and drainMs 25000, and no environment variable changes either",
+     "worker/test/node/config.test.ts › diskLow is true exactly when the injected statfs reports fewer free bytes than ATMUSIC_MIN_FREE_BYTES"
+    ]
+   },
+   {
+    "id": "N1-08",
+    "title": "Crypto primitives (AES-GCM box with HKDF, tokens, constant-time compare, MD5) and the revocation journal",
+    "files": [
+     "worker/src/crypto/box.ts",
+     "worker/src/crypto/tokens.ts",
+     "worker/src/crypto/constant-time.ts",
+     "worker/src/crypto/md5.ts",
+     "worker/test/node/crypto.test.ts",
+     "worker/src/app/revocations.ts",
+     "worker/test/node/revocations.test.ts"
+    ],
+    "dependsOn": [
+     "N0-01"
+    ],
+    "description": "ADR 0005 §3.8, §5.5, §13.\n\n- **box.ts:** `seal(purpose, plaintext, aad)` / `open(...)`. AES-256-GCM with keys from HKDF-SHA256 over `encryptionKeys`, using the salts and infos of §3.8, which are Rust-compatible for OAuth. Format `keyId‖nonce‖ct‖tag`. Typed BoxError. Rotation is open with any key and seal with keys[0]. AAD per purpose (ADR §3.8): the state key hash, the DID, `linked/<did>/<service>` and `lastfm-app/<api_key>/<did>`.\n- **tokens.ts:** random 32-byte hex session tokens, 32-hex Last.fm tokens and session keys, UUIDv4 ListenBrainz tokens, 24-character base32 app passwords; `hashToken` = SHA-256. All take an injected Random.\n- **constant-time.ts:** a portable digest compare.\n- **md5.ts:** node:crypto MD5 hex.\n\n**revocations.ts (ADR §14.5):** the `Revocations` port, `record(event)` and `replay(db)`, with a file implementation over `$STATE_DIRECTORY/revocations.log`: mode 0600, one JSON line per event (`kind` web_session | lastfm_session | app_password | lb_token | lastfm_app | linked_account | oauth_session | account_disconnect, hashes and ids only), fsync after each append, `truncateBefore(ms)`. `replay(db)` deletes each journaled row from a database copy. Credential and session modules (N2-03, N2-04, N2-09, N3-01, N3-08) call `record` before committing the deletion; an in-memory implementation serves tests.",
+    "tests": [
+     "worker/test/node/crypto.test.ts › open(seal(x, aad)) returns x; a flipped bit in nonce, ciphertext, tag or AAD throws BoxError",
+     "worker/test/node/crypto.test.ts › HKDF keys for salt atmusic/oauth/encryption/v1 info state and tokens equal the vectors from crates/atproto/src/oauth/token_store.rs",
+     "worker/test/node/crypto.test.ts › ciphertext sealed under e1 opens after e2 is prepended, and a reseal is tagged e2",
+     "worker/test/node/crypto.test.ts › a seeded Random yields fixed session tokens, 32-hex keys, a version-4 UUID and a 24-char base32 password; hashToken is SHA-256",
+     "worker/test/node/crypto.test.ts › constantTimeEqual returns false for different lengths and true only for equal digests",
+     "worker/test/node/crypto.test.ts › md5 of api_keyxxxxxxxxmethodauth.getSessiontokenxxxxxxxmysecret matches the independently computed vector",
+     "worker/test/node/crypto.test.ts › a value sealed with AAD linked/did:a/lastfm fails to open with AAD linked/did:b/lastfm or lastfm-app/K/did:a",
+     "worker/test/node/revocations.test.ts › each record() appends one fsynced 0600 JSON line holding only kind, hash or id, DID and time, and a record() that fails to write throws before the caller commits",
+     "worker/test/node/revocations.test.ts › replay() on a database copy deletes exactly the journaled web session, Last.fm session, app password, ListenBrainz token, issued app, linked account and OAuth session rows and leaves every other row",
+     "worker/test/node/revocations.test.ts › truncateBefore(t) keeps the events at or after t and a journal with a torn last line replays every complete line"
+    ]
+   },
+   {
+    "id": "N1-09",
+    "title": "Fake upstreams: OAuth AS and PDS writes with opt-in DPoP and rate limits",
+    "files": [
+     "packages/atproto/test-support/fake-oauth-as.ts",
+     "packages/atproto/test-support/fake-pds.ts",
+     "packages/atproto/test/fake-upstreams.test.ts"
+    ],
+    "dependsOn": [
+     "N0-01"
+    ],
+    "description": "ADR 0005 §5.10, §15.2. All fakes are deterministic, clock-driven and reachable only through router-transport hostnames (as.test and pds*.test); routerTransport already accepts arbitrary endpoints through its `hosts` option, so router-transport.ts is not changed. The Last.fm and ListenBrainz fakes need MD5 and Node types, so they live under worker/test/node/support/ (N1-13).\n\n**fake-oauth-as:**\n- PAR, auto-approving authorize, token;\n- private_key_jwt verification against the client's jwks_uri, fetched through the router transport;\n- the 60 s assertion age and jti uniqueness rules;\n- DPoP nonce rotation, refresh, invalid_grant, revoke (every revocation recorded);\n- client-metadata re-fetch with a 10 min cache.\n\n**fake-pds** additions, with existing behaviour unchanged:\n- applyWrites: atomic, ≤ 200 writes, ≤ 1,000,000 bytes;\n- **DPoP is opt-in per account** (ADR §5.10): `addAccount(repo, {handle, auth: 'dpop'})` makes createRecord, deleteRecord and applyWrites for that account require a DPoP-bound access token from fake-oauth-as; the default `auth: 'fixture'` keeps accepting `fixtureToken(did)` Bearer tokens, so packages/atproto/test/fixture-kit.test.ts (:595-606, :853) and test-support/read-models.ts:171 keep working unchanged;\n- RateLimit-* headers from a points ledger (create 3, update 2, delete 1); 429 when exhausted.",
+    "tests": [
+     "packages/atproto/test/fake-upstreams.test.ts › fake AS issues tokens only for a private_key_jwt assertion signed by a key in the client's jwks_uri; a replayed jti or 61 s old assertion is invalid_client",
+     "packages/atproto/test/fake-upstreams.test.ts › fake AS rotates DPoP nonces, refreshes, answers invalid_grant for a revoked refresh token and records revocations",
+     "packages/atproto/test/fake-upstreams.test.ts › fake PDS applyWrites is atomic (one existing rkey fails all 200) and rejects 201 writes and bodies over 1,000,000 bytes",
+     "packages/atproto/test/fake-upstreams.test.ts › fake PDS RateLimit-Remaining drops by 3 per create and answers 429 with RateLimit-Reset when exhausted",
+     "packages/atproto/test/fake-upstreams.test.ts › existing fake PDS getRecord, getBlocks and getRepo responses for the read-model fixture are byte-identical to before",
+     "packages/atproto/test/fake-upstreams.test.ts › an account added with auth dpop rejects the fixture Bearer token and accepts a DPoP-bound token from the fake AS, while an account added without auth still accepts fixtureToken",
+     "packages/atproto/test/fixture-kit.test.ts › fake PDS createRecord with existing rkey returns RecordAlreadyExists; deleteRecord with stale swap returns InvalidSwap"
+    ]
+   },
+   {
+    "id": "N1-10",
+    "title": "Migration 2: complete Node schema (accounts, sessions, outbox, credentials, loves, links, imports, caches)",
+    "files": [
+     "worker/src/do/schema.ts",
+     "worker/src/app/rows.ts",
+     "worker/test/storage/migrate.test.ts",
+     "worker/test/storage/schema-v2.test.ts",
+     "worker/test/harness/isolation-probe.ts",
+     "worker/test/storage/timers.test.ts",
+     "worker/test/harness/local-index.test.ts",
+     "worker/test/composition/index-do.test.ts",
+     "worker/test/composition/admin.test.ts"
+    ],
+    "dependsOn": [
+     "N0-01"
+    ],
+    "description": "ADR 0005 §3.2, §6.4. Append MIGRATION_2 with every table, column, index, CHECK, UNIQUE and FK of §6.4, including operations state cancelled, import_jobs upload_bytes, invalid_reasons and attempts, backup_runs kind, schema_compat(min_compatible_version) holding 2, and ignored_listens (ADR §8.3). Never edit migration 1. Update TABLES.\n\n**TABLE_CLASS (ADR §6.4, §14.5):** schema.ts exports `TABLE_CLASS: Record<TableName, 'derived' | 'non-derived'>` covering every entry of TABLES (v1 index tables, loves, range_stats_cache, ingestion checkpoints, caches and timers are derived; accounts, sessions, OAuth stores, operations, listen keys, budget, credentials, now_playing, links, forward_outbox, imports, ignored_listens, backup_runs, schema_compat, schema_migrations and counters are non-derived). Restore (N4-02) relies on it.\n\nworker/src/app/rows.ts holds the row types for the new tables.\n\n**Version-agnostic expectations.** Appending MIGRATION_2 makes the latest version 2, and five existing suites hard-code version 1: worker/test/harness/isolation-probe.ts:28, worker/test/storage/timers.test.ts:654, worker/test/harness/local-index.test.ts:122,166,174, worker/test/composition/index-do.test.ts:101-102,123 and worker/test/composition/admin.test.ts:119. This package owns them and derives the ready version, the schema_migrations ledger and the admin schema field from SCHEMA_VERSION and MIGRATIONS, with titles unchanged, so wave 1 keeps npm run check green.\n\nThe tests run in the existing workerd harness (DO SQLite accepts the same DDL) and are ported by N2-02. Later packages never edit the schema; a missing column needs an amendment to this package.",
+    "tests": [
+     "worker/test/storage/schema-v2.test.ts › migration 2 creates exactly the ADR 0005 §6.4 tables, scrobbles columns and indexes, and TABLES lists every table",
+     "worker/test/storage/schema-v2.test.ts › CHECK constraints accept operation state cancelled and reject an unknown operation kind, operation state, link service, import source and forward kind",
+     "worker/test/storage/schema-v2.test.ts › UNIQUE(did, idempotency_key), listen_keys PK, forward_outbox (link_id, kind, dedupe_key) and lastfm_sessions.sk_hash are enforced",
+     "worker/test/storage/schema-v2.test.ts › deleting a users row cascades its loves and deleting a linked_accounts row cascades its forward_outbox rows",
+     "worker/test/storage/schema-v2.test.ts › a v1 database seeded with the read-model fixture migrates to v2 with every v1 row byte-identical and the new scrobbles columns NULL",
+     "worker/test/storage/schema-v2.test.ts › EXPLAIN QUERY PLAN for loves by owner, due operations, due forward rows and import items by job uses the new indexes",
+     "worker/test/storage/migrate.test.ts › SCHEMA_VERSION is 2 and a v2 database opened by v2 code is ready",
+     "worker/test/storage/schema-v2.test.ts › schema_compat holds one row with min_compatible_version 2",
+     "worker/test/storage/schema-v2.test.ts › every migration after 2 contains only CREATE TABLE, CREATE INDEX and ALTER TABLE ADD COLUMN statements",
+     "worker/test/harness/local-index.test.ts › the ready status and the schema_migrations ledger equal SCHEMA_VERSION and one row per entry of MIGRATIONS",
+     "worker/test/storage/schema-v2.test.ts › every table in TABLES has exactly one TABLE_CLASS entry and the test names any table that has none",
+     "worker/test/storage/schema-v2.test.ts › ignored_listens accepts reasons artist_invalid and track_invalid only and is listed newest first by its (did, created_at_ms DESC) index"
+    ]
+   },
+   {
+    "id": "N1-11",
+    "title": "core: new optional scrobble fields, love validation, protocol field mapping, v1.2 DTO types",
+    "files": [
+     "packages/core/src/scrobble.ts",
+     "packages/core/src/love.ts",
+     "packages/core/src/api-types.ts",
+     "packages/core/test/scrobble-fields.test.ts",
+     "packages/core/test/love.test.ts",
+     "packages/core/src/protocol-map.ts",
+     "packages/core/test/protocol-map.test.ts"
+    ],
+    "dependsOn": [
+     "N0-02"
+    ],
+    "description": "ADR 0005 §6.2, §6.3.\n\n- **scrobble.ts:** validate and build the §6.2 optional fields with exact error codes. Remote records stay open (unknown fields ignored). buildScrobbleRecord stays closed. An invalid optional field in a protocol mapping is reported as droppable.\n- **love.ts:** love record validation and builder, with the scrobble limits and receipt+300 s.\n- **api-types.ts:** the optional Scrobble fields, plus the Operation (state including cancelled), Accepted, Session, Account, Link, ImportJob and Credentials DTOs from openapi 1.2.0. The `Capability` union gains writes, lastfm, listenbrainz, imports and forwarding (used by N4-01).\n- **protocol-map.ts** (moved here from N1-12 because it needs this package's validators and droppable output): Last.fm parameters and ListenBrainz track_metadata to a scrobble record input, with the dropped-field rules. Record MBIDs come from additional_info only; mbid_mapping is never copied.",
+    "tests": [
+     "packages/core/test/scrobble-fields.test.ts › albumArtist, trackNumber 1..9999, artistMbids (max 10, distinct UUIDs), releaseMbid, releaseGroupMbid, isrc, submissionClient and musicService accept valid and reject invalid values with exact codes",
+     "packages/core/test/scrobble-fields.test.ts › a remote record with the new fields validates, an unknown field is still ignored, and buildScrobbleRecord rejects an unknown input field",
+     "packages/core/test/scrobble-fields.test.ts › records without the new fields keep the canonical digests in tests/goldens/validation.json",
+     "packages/core/test/love.test.ts › a love needs artist and track within scrobble limits and createdAt at most receipt+300 s; album and recordingMbid are optional",
+     "packages/core/test/protocol-map.test.ts › Last.fm mbid, albumArtist, trackNumber and duration map to recordingMbid, albumArtist, trackNumber and durationSeconds; context, streamId and chosenByUser are dropped",
+     "packages/core/test/protocol-map.test.ts › ListenBrainz release_name, duration_ms 222500 (to 223), artist_mbids, release_mbid, release_group_mbid, isrc, tracknumber '7' and submission_client map; tags, origin_url and mbid_mapping are not copied into the record",
+     "packages/core/test/protocol-map.test.ts › an invalid optional field is dropped with a note; an invalid artist or track makes the listen invalid with its reason"
+    ]
+   },
+   {
+    "id": "N1-12",
+    "title": "core: Last.fm and ListenBrainz periods, recording MSID, listen keys",
+    "files": [
+     "packages/core/src/periods.ts",
+     "packages/core/src/msid.ts",
+     "packages/core/src/listen-key.ts",
+     "packages/core/test/periods.test.ts",
+     "packages/core/test/msid.test.ts",
+     "packages/core/test/listen-key.test.ts"
+    ],
+    "dependsOn": [
+     "N0-01"
+    ],
+    "description": "ADR 0005 §7.7, §8.4, §10.1. (protocol-map.ts moved to N1-11, which owns the optional-field validators it depends on.) Pure functions with expected values hardcoded in the tests:\n- **periods.ts:** Last.fm rolling periods, Sunday 12:00 UTC weekly boundaries, ListenBrainz calendar ranges anchored on now, listening-activity windows, buckets and labels, daily-activity grid.\n- **msid.ts:** UUIDv5 under namespace 5d1f3e2a-8b47-4c6e-9f10-2a7c3b9d0e45 over artist_key U+0000 track_key.\n- **listen-key.ts:** sha256 over did, floor seconds, artist_key and track_key.",
+    "tests": [
+     "packages/core/test/periods.test.ts › at 2026-01-15T12:00:00Z 7day/1month/3month/6month/12month lower bounds are 2026-01-08, 2025-12-16, 2025-10-17, 2025-07-19 and 2025-01-15 at 12:00Z",
+     "packages/core/test/periods.test.ts › at 2026-01-15T12:00:00Z this_week starts 2026-01-12, week is [2026-01-05, 2026-01-12), month [2025-12-01, 2026-01-01), quarter [2025-10-01, 2026-01-01), half_yearly [2025-07-01, 2026-01-01), year [2025-01-01, 2026-01-01)",
+     "packages/core/test/periods.test.ts › listening-activity for week has 14 day buckets labelled '%A %d %B %Y' and for year 24 month buckets labelled '%B %Y'; daily-activity is 7 x 24 Monday-first",
+     "packages/core/test/periods.test.ts › weekly chart boundaries fall on Sundays 12:00 UTC and 1108296002 lies in the week starting 2005-02-13T12:00:00Z",
+     "packages/core/test/msid.test.ts › recording_msid has version nibble 5, is stable across runs, and is equal for Björk/Jóga and BJÖRK/JÓGA",
+     "packages/core/test/listen-key.test.ts › the listen key is equal for case and NFKC variants in the same second and differs for +1 s or another DID"
+    ]
+   },
+   {
+    "id": "N1-13",
+    "title": "Fake Last.fm and ListenBrainz upstreams under worker/test/node/support",
+    "files": [
+     "worker/test/node/support/fake-lastfm.ts",
+     "worker/test/node/support/fake-listenbrainz.ts",
+     "worker/test/node/fake-protocol-upstreams.test.ts"
+    ],
+    "dependsOn": [
+     "N0-01"
+    ],
+    "description": "ADR 0005 §15.2. Last.fm's api_sig is MD5, WebCrypto has no MD5, and packages/atproto/test-support compiles without Node types (lib es2024 + dom), so these fakes live in worker/test/node/support/ and use node:crypto createHash('md5') directly. They do not import worker/src/crypto/md5.ts (N1-08, same wave); the test pins the same vector N1-08 pins. Each fake is a routerTransport endpoint (the existing `hosts` option), mounted at lastfm.test and listenbrainz.test by later suites, and is also startable as a loopback HTTP server for the e2e stacks (N6-01, N8-01).\n\n**fake-lastfm:**\n- verifies api_sig with its configured secret on signed methods;\n- auth.getSession; track.scrobble (≤ 50, records the inputs); updateNowPlaying; love and unlove;\n- paged user.getRecentTracks over a seeded history with a fixed `to`, with a nowplaying row on page 1;\n- scripted error codes and HTTP statuses, including a per-item ignoredMessage code 5.\n\n**fake-listenbrainz:** validate-token, recording submit-listens, paged listens by max_ts, X-RateLimit-* headers, scripted 401, 429 and 503.\n\nAll are deterministic and clock-driven.",
+    "tests": [
+     "worker/test/node/fake-protocol-upstreams.test.ts › fake Last.fm rejects a bad api_sig with 13, accepts 50 scrobbles, rejects 51 with 6, and returns scripted 9, 11, 16, 29 and HTTP 503 in order",
+     "worker/test/node/fake-protocol-upstreams.test.ts › fake Last.fm pages a 1,050-listen history at limit 200 with a fixed to into 6 pages with a nowplaying row on page 1 only",
+     "worker/test/node/fake-protocol-upstreams.test.ts › fake Last.fm computes the signature of api_keyxxxxxxxxmethodauth.getSessiontokenxxxxxxxmysecret equal to the hardcoded vector",
+     "worker/test/node/fake-protocol-upstreams.test.ts › fake ListenBrainz accepts Token and token schemes, records submit-listens bodies, pages by max_ts and emits X-RateLimit-* with scripted 429 and 503",
+     "worker/test/node/fake-protocol-upstreams.test.ts › both fakes answer through routerTransport hosts at lastfm.test and listenbrainz.test, and an unrouted host still fails like a DNS error"
+    ]
+   }
+  ]
+ },
+ {
+  "wave": 2,
+  "packages": [
+   {
+    "id": "N2-01",
+    "title": "HTTP types, host-neutral route table, Node composition and dispatcher, in-process app harness",
+    "files": [
+     "worker/src/node/compose.ts",
+     "worker/src/node/dispatch.ts",
+     "worker/src/http/types.ts",
+     "worker/src/http/routes.ts",
+     "worker/src/router.ts",
+     "worker/src/http/admin.ts",
+     "worker/test/node/support/app.ts",
+     "worker/test/node/compose.test.ts",
+     "worker/test/node/dispatch.test.ts"
+    ],
+    "dependsOn": [
+     "N1-01",
+     "N1-02",
+     "N1-03",
+     "N1-04",
+     "N1-05",
+     "N1-06",
+     "N1-07",
+     "N1-10"
+    ],
+    "description": "ADR 0005 §3.1, §3.7, §3.10. This is the composition half of the round-1 N2-01; the process half (run/main, shutdown, systemd, admin socket, backups, build and bundle guard) is N3-07. Every wave-3 route package depends on this package only.\n\n- **Route table split (ADR §3.1).** Move ROUTES, matchRoute, assetMiss and matchSpaRoute from worker/src/router.ts into worker/src/http/routes.ts, which imports only host-neutral modules (app/index-core.ts for INDEX_NAME and envLogger, never do/index-do.ts). router.ts keeps createWorker and handleFetch and re-exports the moved names, so the workerd suites and the Workers entry are unchanged until N7-01. http/admin.ts imports PITR_WINDOW_MS from app/index-core.ts instead of do/index-do.ts (its only change here).\n- **matchRoute keeps its Allow set exactly**, so worker/test/composition/routing.test.ts:252-254 (POST /api/v1/meta → Allow: GET, on workerd) still passes.\n- **RequestCtx** (http/types.ts) gains optional `deps?`, `app?` and `peer?` (clientIp stays), so the RequestCtx literals in seven worker-modules test files keep compiling; compose always sets them and handlers read them through `need(ctx, key)`, which throws CtxWiringError (500). `env` becomes `AppEnv = Pick<EnvVars, 'LEXICON_PREFIX' | 'NAMESPACE_OWNERSHIP_REF'> & {ADMIN_TOKEN?: string}` (imported with `import type`), to which the Workers Env is assignable. **RouteDef.method** widens to GET | POST | PUT | PATCH | DELETE | OPTIONS.\n- **compose(config, secrets, {transport, connectJetstream, features, clock, random})** builds the Node Host and IndexCore over an already-open, migrated db and returns `{handler, core, ready()}`. Readiness probes: schema current, config parsed, secrets loaded, OAuth keyset valid, a rolled-back write probe; `low_disk` and `oauth_store_degraded` are reported as warnings.\n- **dispatch.ts:** router prefixes /api/, /health/, /oauth/, /2.0, /2.0/, /1/ and /audioscrobbler/ and `GET /?hs=true` reach the router; then static files; then assetMiss. `/internal/` on TCP is the JSON 404 before routing. HEAD maps to the GET route without a body, and only this dispatcher appends HEAD to the Allow header of its own 405 answers. Request logs carry the route pattern and never a query string or body on any route, logging only an allowlisted Last.fm method name (ADR §3.10, §13).\n- **test/node/support/app.ts:** `startApp({routes, features, clock, transport})` on 127.0.0.1:0 for the in-process route tests of wave 3.",
+    "tests": [
+     "worker/test/node/compose.test.ts › on 127.0.0.1:0 with the fixture transport: /health/live 200, /health/ready 200, /api/v1/meta, an SPA route serves index.html, /internal/admin/status is 404",
+     "worker/test/node/compose.test.ts › /api/, /health/, /oauth/, /2.0 and /1/ reach the router even when a same-named file exists in dist; other misses get the assetMiss JSON 404",
+     "worker/test/node/compose.test.ts › /health/ready is 503 when the database is not writable or the OAuth keyset failed to load",
+     "worker/test/node/dispatch.test.ts › a PUT and an OPTIONS route dispatch; HEAD reaches the GET route without a body; another method on a matched path is 405 with Allow listing the registered methods plus HEAD when GET is registered",
+     "worker/test/node/dispatch.test.ts › http/routes.ts matchRoute still answers POST /api/v1/meta with 405 and Allow: GET, unchanged from router.ts",
+     "worker/test/node/compose.test.ts › every ctx built by compose carries deps, app and peer, and need(ctx, 'app') on a ctx without app answers 500 CtxWiringError",
+     "worker/test/node/dispatch.test.ts › request log lines carry the route pattern and never a query string on any route, including /api/auth, /lastfm/authorize and /api/v1/links/lastfm/callback",
+     "worker/test/node/dispatch.test.ts › GET /?hs=true reaches the router while GET / serves index.html",
+     "worker/test/node/compose.test.ts › the SPA and its assets are served from ATMUSIC_ASSETS_DIR (default <release>/web/dist) with the _headers rules",
+     "worker/test/node/compose.test.ts › compose, dispatch and http/routes.ts load in the worker-node project with no cloudflare: module in their import graph, and router.ts re-exports ROUTES, matchRoute and assetMiss from http/routes.ts"
+    ]
+   },
+   {
+    "id": "N2-02",
+    "title": "worker-modules on Node through a cloudflare:* test shim, with the named expectation changes",
+    "files": [
+     "worker/vitest.modules.config.ts",
+     "worker/test/node/support/cloudflare-test-shim.ts",
+     "worker/test/node/support/cloudflare-workers-shim.ts",
+     "worker/test/node/support/do-storage-facade.ts",
+     "worker/test/node/support/workerd-globals.ts",
+     "worker/test/node/support/shim.test.ts",
+     "worker/test/storage/sql-conformance.test.ts",
+     "worker/test/storage/status.test.ts",
+     "worker/test/storage/db.test.ts",
+     "worker/test/read/keyset.test.ts",
+     "worker/test/harness/local-index.test.ts",
+     "worker/test/harness/isolation.test.ts",
+     "docs/verification/node-port-inventory.json",
+     "scripts/test/test-inventory.test.ts"
+    ],
+    "dependsOn": [
+     "N1-01",
+     "N1-02",
+     "N1-04",
+     "N1-10"
+    ],
+    "description": "ADR 0005 §15.1, §15.3. The worker-modules suites are 52 files (about 17.7k lines, about 260 runInDurableObject, runDurableObjectAlarm and evictDurableObject calls) under worker/test/{harness,storage,ingest,read,write,http}. This package moves them to Node **without rewriting them**; N4-04, N4-05 and N4-06 de-shim them by directory later.\n\n- **Project.** worker/vitest.modules.config.ts switches to `environment: 'node'` and adds `resolve.alias` entries: `cloudflare:test` → worker/test/node/support/cloudflare-test-shim.ts and `cloudflare:workers` → cloudflare-workers-shim.ts, plus `setupFiles: [workerd-globals.ts]`.\n- **Shim.** `env` exposes the harness namespace bindings of worker/test/harness/wrangler.harness.jsonc (idFromName, get); `runInDurableObject(stub, fn)` runs fn with the DO instance and a `state` whose `storage` is a DO-storage facade (do-storage-facade.ts: `sql.exec(query, ...params)` returning a cursor with toArray, one, raw, columnNames and rowsWritten = changes, plus transactionSync) over node:sqlite through node-db (N1-01), so `doDb(state.storage)` keeps working; `runDurableObjectAlarm(stub)` calls the instance's alarm(); `evictDurableObject(stub)` closes and reopens the same file. `DurableObject` is a base class with `ctx` and `env`. workerd-globals.ts defines an in-memory `WebSocketPair` (over memoryLink semantics) for worker/test/fixtures/jetstream-server.ts. Each test file gets its own temporary database file. worker/test/write/support.ts and worker/test/fixtures/jetstream-server.ts therefore run unchanged.\n- **Only named expectation changes are edited (ADR §15.3), titles kept:** sql-conformance (>2^53 reads refused, multi-statement refused, BEGIN/SAVEPOINT/PRAGMA denied); status.test.ts and keyset.test.ts rowsRead budgets re-derived as EXPLAIN QUERY PLAN pins (index named in each plan detail, no SCAN of scrobbles, process.versions.sqlite recorded); db.test.ts ported from doDb over DO storage to openSqliteDb with rowsWritten equal to changes (1 for one insert, 3 for three, instead of the DO-billed 2 and 6); the workerd-helper existence checks in local-index.test.ts and isolation.test.ts replaced by shim checks.\n- **Inventory.** docs/verification/node-port-inventory.json lists every test id executed at 3d953a9 (work/ts-test-report.json) with `kept`, or `replaced: <new id>` with a reason, including the round-2 named changes (the unicode-runtime and atproto scaffold UA assertions of N0-01 and N1-04, and db.test.ts). scripts/test/test-inventory.test.ts statically checks that each kept id's title is still declared in its file and each replacement exists.",
+    "tests": [
+     "worker/test/node/support/shim.test.ts › runInDurableObject gives a state whose storage.sql runs on node:sqlite in a per-file temporary database, runDurableObjectAlarm calls alarm(), and evictDurableObject reopens the same file with every table preserved",
+     "worker/test/node/support/shim.test.ts › the in-memory WebSocketPair delivers frames in order both ways and close codes reach the other end",
+     "worker/test/harness/isolation.test.ts › each test file gets its own temporary database file and a write in one is invisible to another",
+     "worker/test/storage/sql-conformance.test.ts › on Node an integer above 2^53 is refused on read, multi-statement text is refused, and BEGIN, SAVEPOINT and PRAGMA are denied",
+     "worker/test/storage/db.test.ts › all/one/run map rows, nulls and rowsWritten",
+     "worker/test/storage/status.test.ts › status statements use the indexes pinned by EXPLAIN QUERY PLAN (asserted by index name, SQLite version recorded) in place of the DO rowsRead budget",
+     "worker/test/read/keyset.test.ts › history and feed page statements use the single-clause seek plan on SQLite 3.54.1 (Q10 budgets as plan assertions)",
+     "scripts/test/test-inventory.test.ts › every id in node-port-inventory.json is kept with its title declared in its file or replaced by an existing id with a reason",
+     "scripts/test/test-inventory.test.ts › every test title declared at 3d953a9 under worker/test/{harness,storage,ingest,read,write,http} that the inventory marks kept is still declared, byte-identical, in the same file"
+    ]
+   },
+   {
+    "id": "N2-03",
+    "title": "Confidential atproto OAuth client: identity adapter, metadata, JWKS, keyset, non-throwing encrypted stores, re-sign-in, reconciliation, keepalive",
+    "files": [
+     "worker/src/bff/oauth-client.ts",
+     "worker/src/bff/oauth-stores.ts",
+     "worker/src/bff/client-metadata.ts",
+     "worker/src/bff/keyset.ts",
+     "worker/src/bff/keepalive.ts",
+     "worker/test/node/bff/oauth-client.test.ts",
+     "worker/test/node/bff/oauth-stores.test.ts",
+     "worker/test/node/bff/client-metadata.test.ts",
+     "worker/test/node/bff/keepalive.test.ts",
+     "worker/src/bff/identity-adapter.ts",
+     "worker/src/bff/reconcile.ts",
+     "packages/core/src/client-name.ts",
+     "worker/test/node/bff/reconcile.test.ts"
+    ],
+    "dependsOn": [
+     "N1-01",
+     "N1-05",
+     "N1-07",
+     "N1-08",
+     "N1-09",
+     "N1-10"
+    ],
+    "description": "ADR 0005 §5.2–§5.5, §5.7.\n\n**oauth-client.ts:** NodeOAuthClient with requestLocalLock, `fetch: policyFetch` (N1-05), `identityResolver` from identity-adapter.ts, and query response mode. Never `handleResolver` alone: the library would build its own DidResolver against https://plc.directory/ and run it with noCache in verifyIssuer on every token response and refresh.\n- `authorize(handle, {bindingHash})` stores the login-CSRF cookie hash in oauth_states.session_binding; `callback(params, {bindingHash})` refuses a mismatch before the code exchange and consumes the state (ADR §5.6); `restore(did)` and `revoke(did)`.\n- **Hooks (ADR §5.2):** onSessionUpdated sets accounts.oauth_status='active' and moves the DID's blocked operations back to queued; onSessionDeleted sets reauth_required and blocks them, **except** while the callback wrapper's per-sub in-callback flag is set, when the library's own `revoke(sub)` of the previous session only deletes the old row.\n- **Binding check (ADR §5.5):** a definite issuer or handle mismatch revokes the new session (403 oauth_binding_mismatch); an identity-resolution error revokes nothing, keeps the new session, sets no cookie and surfaces 502 oauth_upstream.\n- Each OAuth case the Workers map retired under A3 or D is mapped to a test here (ADR §20.2).\n\n**identity-adapter.ts:** the library's IdentityResolver over our identity.resolveDid and identity.resolveHandle, mapping `noCache: true` to `{fresh: true}`.\n\n**oauth-stores.ts:** the state and session SimpleStores over oauth_states and oauth_sessions with AES-GCM sealing and AAD, a single-use 600 s state, and client_kid recorded. **No CAS** (ADR §5.5): `set()` writes unconditionally and increments generation, and **never throws** for a storage failure: the session is kept in an in-memory write-behind map that get() reads first, `oauth_store_write_failed` is logged without secrets, `oauth_store_degraded` is raised for readiness and adminStatus, and the write is retried on each get, set and keepalive run.\n\n**reconcile.ts (ADR §5.5):** `reconcileSignInPolicy(m, policy)`, run at startup and by expiry-sweep (both wired by N4-01 features): for each account the policy refuses, revoke and delete the OAuth session, delete web sessions and protocol credentials (journaled through Revocations, N1-08), set links revoked, block queued operations, set signed_out.\n\n**keepalive.ts:** the `oauth-keepalive` timer: refresh sessions last refreshed over 30 days ago, at most 20 per run, only for DIDs in use (live web session, a credential with last_used_ms within 90 days, an active link, a queued, running or blocked operation, or an unfinished import job); others are revoked upstream and marked signed_out. It pauses while the injected `diskLow()` predicate (N1-07 disk.ts) is true.\n\n**client-metadata.ts:** the exact §5.3 documents, with client_name from packages/core/src/client-name.ts (`CLIENT_NAME = 'AT Protocol Music'`, moved from scripts/gen-config.ts:42; N5-01 switches gen-config to import it). **keyset.ts:** keys from secrets plus announced public keys.\n\nAll tests run against fake-oauth-as, fake-pds (accounts with auth: 'dpop') and fake-plc through the router transport.",
+    "tests": [
+     "worker/test/node/bff/client-metadata.test.ts › the metadata for https://music.214510.xyz equals the ADR 0005 §5.3 document with client_name AT Protocol Music and the four repo: scopes, and jwks.json has no private member",
+     "worker/test/node/bff/client-metadata.test.ts › transition:generic is appended only with ATMUSIC_OAUTH_TRANSITION_GENERIC=1",
+     "worker/test/node/bff/oauth-client.test.ts › authorize then callback against the fake AS stores a session for the DID; the assertion has iss=sub=client_id, aud=issuer, a unique jti and kid k1",
+     "worker/test/node/bff/oauth-client.test.ts › a replayed state and a state older than 600 s both fail and store no session",
+     "worker/test/node/bff/oauth-client.test.ts › a callback whose sub resolves to a PDS with a different authorization server is rejected and the token is revoked",
+     "worker/test/node/bff/oauth-client.test.ts › invalid_grant on refresh deletes the session and marks the account reauth_required; a TransportError keeps the session",
+     "worker/test/node/bff/oauth-client.test.ts › a k1-bound session keeps refreshing after k2 is prepended and becomes reauth_required when k1 is removed",
+     "worker/test/node/bff/oauth-stores.test.ts › the raw database file contains no access token, refresh token or DPoP private key bytes after a sign-in",
+     "worker/test/node/bff/oauth-client.test.ts › a callback whose bindingHash differs from the state binding is refused before the code exchange and consumes the state",
+     "worker/test/node/bff/oauth-client.test.ts › authorize refuses an authorization server whose metadata lacks PAR or S256 PKCE and stores no state",
+     "worker/test/node/bff/oauth-client.test.ts › authorize sends PAR with an S256 code_challenge and a private_key_jwt assertion; the verifier and DPoP key exist only sealed in oauth_states",
+     "worker/test/node/bff/oauth-client.test.ts › a PAR error from the fake AS leaves no oauth_states row and surfaces oauth_upstream",
+     "worker/test/node/bff/oauth-client.test.ts › a token response whose iss differs from the authorize issuer or whose sub differs from the handle-resolved DID stores no session",
+     "worker/test/node/bff/oauth-client.test.ts › a use_dpop_nonce error on the token request and on a PDS write is retried once with the new nonce and succeeds",
+     "worker/test/node/bff/oauth-client.test.ts › two concurrent restore() calls on an expired session send one refresh request and both use the new token",
+     "worker/test/node/bff/oauth-client.test.ts › revoke against an AS without a revocation_endpoint deletes the local session and sends no request",
+     "worker/test/node/bff/oauth-stores.test.ts › a rotated refresh token is persisted sealed before use, and after close and reopen the next refresh sends the rotated token",
+     "worker/test/node/bff/oauth-stores.test.ts › when the oauth_sessions write fails during a refresh, set() does not throw, the next restore() uses the refreshed session from memory, oauth_store_degraded is raised, and the fake AS records no revocation",
+     "worker/test/node/bff/oauth-stores.test.ts › after the failing write recovers, the held session is persisted on the next get() and oauth_store_degraded clears",
+     "worker/test/node/bff/oauth-client.test.ts › during sign-in and a later refresh the router transport sees no request to plc.directory; DID resolution goes through our identity module with fresh true",
+     "worker/test/node/bff/oauth-client.test.ts › a callback for a DID whose document our identity rules reject fails and stores no session",
+     "worker/test/node/bff/oauth-client.test.ts › re-sign-in of a DID with queued and blocked operations leaves oauth_status active, its operations queued and runnable, and never sets reauth_required",
+     "worker/test/node/bff/oauth-client.test.ts › a PLC timeout during the binding check answers oauth_upstream, keeps the new session stored, sets no cookie and sends no revocation to the fake AS",
+     "worker/test/node/bff/keepalive.test.ts › after advancing 31 days, sessions of DIDs in use last refreshed over 30 days ago are refreshed once each, at most 20 per run",
+     "worker/test/node/bff/keepalive.test.ts › a DID with no live web session, no credential used in 90 days, no active link, no pending operation and no unfinished import is revoked upstream and marked signed_out instead of refreshed",
+     "worker/test/node/bff/keepalive.test.ts › below ATMUSIC_MIN_FREE_BYTES the keepalive refreshes nothing and reports low_disk",
+     "worker/test/node/bff/reconcile.test.ts › after a DID is removed from ATMUSIC_SIGNIN_DIDS, reconcile revokes its OAuth session at the fake AS, deletes its web sessions, Last.fm sessions, app passwords, ListenBrainz tokens and issued apps with journal entries, revokes its links, blocks its queued operations and marks it signed_out; an allowed DID is untouched"
+    ]
+   },
+   {
+    "id": "N2-04",
+    "title": "Browser sessions, CSRF and the cookie guard",
+    "files": [
+     "worker/src/bff/sessions.ts",
+     "worker/src/bff/csrf.ts",
+     "worker/src/bff/guard.ts",
+     "worker/test/node/bff/sessions.test.ts",
+     "worker/test/node/bff/csrf.test.ts"
+    ],
+    "dependsOn": [
+     "N1-01",
+     "N1-07",
+     "N1-08",
+     "N1-10"
+    ],
+    "description": "ADR 0005 §5.6.\n\n- **sessions.ts:** the `__Host-atmusic_session` cookie; SHA-256 storage; 30-day expiry with renewal after 24 h; logout and logout-all.\n- **csrf.ts:** the exactly-one-Origin rule plus the HMAC X-CSRF-Token with key and label `atmusic.csrf.v1\\0`, ported from crates/server/src/auth/csrf.rs.\n- **guard.ts:** `requireSession(req, ctx, {unsafe})` returns the session, or the 401/403 envelope. Paths under /2.0 and /1/ always resolve to no session.\n\nLogout and logout-all record each deleted session hash in the revocation journal (N1-08) before committing.",
+    "tests": [
+     "worker/test/node/bff/sessions.test.ts › create() sets __Host-atmusic_session with HttpOnly, Secure, SameSite=Lax, Path=/ and Max-Age=2592000, and stores only SHA-256 of the token",
+     "worker/test/node/bff/sessions.test.ts › unknown, expired and logged-out tokens resolve to no session; a session older than 24 h is renewed with the same token",
+     "worker/test/node/bff/sessions.test.ts › logout-all deletes every session of the DID and leaves other DIDs' sessions",
+     "worker/test/node/bff/csrf.test.ts › the Rust matrix: no cookie 401; missing, duplicate or foreign Origin, missing or wrong X-CSRF-Token 403 csrf_failed; correct pair passes",
+     "worker/test/node/bff/csrf.test.ts › GET and HEAD never require CSRF, and requests under /2.0 and /1/ resolve to no session even with a valid cookie",
+     "worker/test/node/bff/sessions.test.ts › logout and logout-all append one revocation journal entry per deleted session before the rows are gone"
+    ]
+   },
+   {
+    "id": "N2-05",
+    "title": "Server outbox: operations, runner, ops, applyWrites batching, PDS point budget",
+    "files": [
+     "worker/src/outbox/operations.ts",
+     "worker/src/outbox/runner.ts",
+     "worker/src/outbox/scrobble-ops.ts",
+     "worker/src/outbox/follow-ops.ts",
+     "worker/src/outbox/delete-ops.ts",
+     "worker/src/outbox/settings-ops.ts",
+     "worker/src/outbox/love-ops.ts",
+     "worker/src/outbox/apply-writes.ts",
+     "worker/src/outbox/budget.ts",
+     "worker/src/outbox/pds-writer.ts",
+     "worker/src/outbox/ingress.ts",
+     "worker/src/outbox/forward-enqueue.ts",
+     "worker/test/node/outbox/ingress.test.ts",
+     "worker/test/node/outbox/retry.test.ts",
+     "worker/test/node/outbox/recovery.test.ts",
+     "worker/test/node/outbox/delete.test.ts",
+     "worker/test/node/outbox/follows.test.ts",
+     "worker/test/node/outbox/settings.test.ts",
+     "worker/test/node/outbox/loves.test.ts",
+     "worker/test/node/outbox/batch.test.ts",
+     "worker/test/node/outbox/budget.test.ts"
+    ],
+    "dependsOn": [
+     "N1-01",
+     "N1-02",
+     "N1-08",
+     "N1-09",
+     "N1-10",
+     "N1-11",
+     "N1-12"
+    ],
+    "description": "ADR 0005 §5.8. This ports web/src/outbox semantics (and crates/server/src/workers/outbox.rs) to the server over the operations, operation_deps, listen_keys and pds_budget tables.\n\n**Kept exactly:**\n- the retry formula and exactly 10 attempts;\n- persist-before-send with a TID allocated once and a digest;\n- ambiguous-create reconciliation and never-overwrite;\n- swapRecord deletes;\n- predecessors;\n- follow and unfollow rules;\n- the settings record.\n\n**Added:**\n- love.put and love.delete;\n- origins and priorities;\n- applyWrites batching (≤ 200 writes, ≤ 1,000,000 bytes) with bisection;\n- the per-DID point budget honouring RateLimit-* and 429;\n- blocked state for reauth_required;\n- after each success, the record hint queued with `enqueueHints` (source notify), not the client notify RPC and its abuse buckets; a DID without a users row is admitted instead (ADR §5.8);\n- `cancelled` state for a not-yet-sent create (listen key and unsent forward rows deleted), and a chained delete for a running one, used by library.removeScrobble;\n- `acceptListens(m, {did, origin, listens, receiptMs})` (ingress.ts): the one shared ingress transaction for /2.0, /1 and web scrobbles. It writes listen keys (idempotent), applies the daily cap, creates operations and calls `enqueueForwards` (forward-enqueue.ts) for the DID's active links with the matching forward flags. enqueueForwards computes dedupe_key per kind (ADR §12.2): the listen key for scrobble, sha256(did‖started_at_ms‖artist_key‖track_key) for nowplaying, and the operation id for love and unlove.\n\n`PdsWriter` abstracts session.fetchHandler, whose requests go through policyFetch (N1-05).\n\n**Deferred listens (ADR §8.3):** acceptListens takes an optional per-listen `notBeforeMs`; when set, the operation's `due_at` and the record's `createdAt` are `notBeforeMs` (listened_at − 300 s), while the listen key and forward rows are written at once. The `outbox` timer and pdsBudget never send an operation before its due_at. The `outbox` extension timer is exported for composition. Test titles from web/test/outbox/* are kept where the behaviour is kept, so that N5-01 can remap the case map.",
+    "tests": [
+     "worker/test/node/outbox/ingress.test.ts › acceptListens writes listen keys, operations and forward rows for active links in one transaction; a repeated listen key creates nothing and is reported accepted",
+     "worker/test/node/outbox/ingress.test.ts › the daily cap counts accepted listens per DID over a rolling 24 h and reports over-cap entries without creating operations",
+     "worker/test/node/outbox/ingress.test.ts › a throw after the operation insert rolls back the listen key and forward rows",
+     "worker/test/node/outbox/retry.test.ts › retry delays are 1, 2, 4 ... s capped at 300 s with zero jitter; Retry-After: 20 gives 20 s; exactly 10 attempts and no 11th PDS request",
+     "worker/test/node/outbox/recovery.test.ts › crash before send, after PDS commit before local ack, after local commit, and during delete (database reopened) each end with exactly one PDS outcome",
+     "worker/test/node/outbox/recovery.test.ts › an ambiguous create whose existing record has the same digest succeeds; a different digest is terminal remote_record_conflict and the record is never overwritten",
+     "worker/test/node/outbox/delete.test.ts › delete uses swapRecord from record_state; InvalidSwap re-fetches and reconciles; a delete behind a pending create waits for it",
+     "worker/test/node/outbox/follows.test.ts › follow rkey is f+hex(sha256(subject)); unfollow deletes every matching listed record and keeps unrelated ones; PUT, DELETE, PUT run in order",
+     "worker/test/node/outbox/settings.test.ts › disable writes settings/self {indexing:disabled} then notifies; enable writes indexing:enabled at a newer revision",
+     "worker/test/node/outbox/loves.test.ts › a second love for the same (artist_key, track_key) succeeds without a new record; unlove deletes every matching listed love",
+     "worker/test/node/outbox/batch.test.ts › 437 import creates go as applyWrites batches of 200, 200 and 37; a 250 KB-record set splits to stay under 1,000,000 bytes",
+     "worker/test/node/outbox/batch.test.ts › a batch failing because one rkey exists is bisected; the other 199 are written once and the existing one is reconciled by digest",
+     "worker/test/node/outbox/budget.test.ts › with 5,000 points per hour, import creates stop at 833 while live creates continue to 90% of the limit; RateLimit-Remaining below reserve pauses imports until RateLimit-Reset",
+     "worker/test/node/outbox/budget.test.ts › a due live operation always runs before an earlier-due import operation",
+     "worker/test/node/outbox/budget.test.ts › a reauth_required DID's operations become blocked without spending attempts and complete after sign-in",
+     "worker/test/node/outbox/budget.test.ts › after a 200-write applyWrites batch all 200 URIs are queued as notify hints with no rate_limited outcome, and the verify drain indexes them through proofs",
+     "worker/test/node/outbox/ingress.test.ts › enqueueForwards gives love, unlove, love three distinct rows; a resent scrobble and a same-track now-playing refresh give none; the same track playing again later gives a new nowplaying row",
+     "worker/test/node/outbox/delete.test.ts › a still-queued create cancelled at removal sends nothing to the PDS and deletes its listen key and unsent forward rows; a running create gets a delete chained after it",
+     "worker/test/node/outbox/ingress.test.ts › a listen accepted with notBeforeMs = listened_at − 300 s gets an operation whose due_at and createdAt equal it, its listen key and forward rows at once, and is not sent to the fake PDS before due_at",
+     "worker/test/node/outbox/batch.test.ts › PdsWriter requests reach the fake PDS through policyFetch, and a 3xx from the PDS is a retryable TransportError redirect, never followed"
+    ]
+   },
+   {
+    "id": "N2-06",
+    "title": "Range reads: generalised stats engine and cache, recent tracks, loves, now playing, activity, user lookup",
+    "files": [
+     "worker/src/do/read/range-stats.ts",
+     "worker/src/do/read/range-stats-cache.ts",
+     "worker/src/do/read/recent.ts",
+     "worker/src/do/read/loves.ts",
+     "worker/src/do/read/now-playing.ts",
+     "worker/src/do/read/activity.ts",
+     "worker/src/do/read/user-lookup.ts",
+     "worker/test/node/read/range-stats.test.ts",
+     "worker/test/node/read/recent.test.ts",
+     "worker/test/node/read/loves-read.test.ts",
+     "worker/test/node/read/now-playing.test.ts",
+     "worker/test/node/read/activity.test.ts",
+     "worker/test/node/read/user-lookup.test.ts"
+    ],
+    "dependsOn": [
+     "N1-01",
+     "N1-10",
+     "N1-12"
+    ],
+    "description": "ADR 0005 §9, §10.\n\n**Modules** `(m: ModuleDeps, args)`:\n- `rangeStats({did, entity, lower, upper, limit, offset})` with totals and album-artist grouping, plus the exact cache;\n- `recentListens({did, after, before, limit, offset | minTs, maxTs, count})`;\n- `lovedTracks`;\n- the now-playing store (upsert with TTL, same-track refresh, share_now_playing);\n- `activity` (listening and daily);\n- `lookupUser(name)` with the §9 order: did: values, dotless usernames, a dotted username only while it equals its owner's current verified handle, then verified handles;\n- `recentListens` also takes an artist and track filter for user.getTrackScrobbles.\n\nThe existing worker/src/do/read/stats.ts is not touched. Tests seed through the real apply path where the fixture allows, and directly into loves and now_playing otherwise.",
+    "tests": [
+     "worker/test/node/read/range-stats.test.ts › Alice all-time: totals 7/3/6 and artists (radiohead,3),(björk,2),(kate bush,2), equal to /api/v1 stats window all",
+     "worker/test/node/read/range-stats.test.ts › [asOf−7 d, asOf] equals the /api/v1 7d window for totals and every top list",
+     "worker/test/node/read/range-stats.test.ts › offset/limit pages concatenate to the full ranking; album totals group by (album artist or artist, album)",
+     "worker/test/node/read/range-stats.test.ts › a cache hit occurs only with unchanged stats_version and no row across a sliding bound, and equals the uncached result",
+     "worker/test/node/read/recent.test.ts › after/before are exclusive in seconds, results are newest first, and page/limit report total and totalPages",
+     "worker/test/node/read/recent.test.ts › a min_ts query returns the oldest count listens after min_ts, reversed to newest first; max_ts <= min_ts is an error",
+     "worker/test/node/read/now-playing.test.ts › an entry expires at started+duration (or +600 s without duration); the same track refreshes it; share_now_playing=0 hides it",
+     "worker/test/node/read/loves-read.test.ts › loved tracks are newest first and isLoved matches by (artist_key, track_key) across spelling variants",
+     "worker/test/node/read/activity.test.ts › listening-activity and daily-activity counts for the fixture equal the hand-computed UTC buckets",
+     "worker/test/node/read/user-lookup.test.ts › a dotless username, a verified handle in any case and a DID resolve to the same user; unknown, inactive and suppressed users are not found",
+     "worker/test/node/read/user-lookup.test.ts › user=<handle> resolves to the handle's DID even when a stale dotted username of another account equals it"
+    ]
+   },
+   {
+    "id": "N2-07",
+    "title": "Last.fm protocol core: parameters, method-scoped signatures, errors, XML/JSON encoding with list elements",
+    "files": [
+     "worker/src/lastfm/params.ts",
+     "worker/src/lastfm/signature.ts",
+     "worker/src/lastfm/errors.ts",
+     "worker/src/lastfm/encode.ts",
+     "worker/test/node/lastfm/params.test.ts",
+     "worker/test/node/lastfm/signature.test.ts",
+     "worker/test/node/lastfm/encode.test.ts",
+     "worker/test/node/lastfm/golden/"
+    ],
+    "dependsOn": [
+     "N0-01",
+     "N1-08"
+    ],
+    "description": "ADR 0005 §7.1, §7.2, §7.4, §7.6.\n\n- **params.ts:** query plus form body; duplicate refusal; indexed arrays 0–49 and the unindexed form; format negotiation (query, body, Accept).\n- **signature.ts:** byte-ordered sign and verify, excluding api_sig, format and callback; constant-time comparison; the known-pair, issued-key and unknown-key policy. **The policy applies only to methods whose ADR §7.5 Auth column contains sig** (`requiresSignature(method)`); for read methods api_sig is ignored whether present, absent or wrong (ADR §7.3).\n- **errors.ts:** the code, message and HTTP table.\n- **encode.ts:** the element tree to XML (escape, strip invalid characters, raw) and to JSON (the §7.2 rules). Elements carry a `list` flag: a flagged child always serialises as a JSON array, including `[]` and a one-element array. Every paged or list container (recenttracks.track, trackscrobbles.track, lovedtracks.track, toptracks.track, topartists.artist, topalbums.album, the weekly charts, weeklychartlist.chart, friends.user, artists.artist, toptags.tag, album.tracks.track, similar.artist, image) is flagged, and every paged container carries @attr {user, page, perPage, totalPages, total}. Only scrobbles.scrobble keeps the single-child-becomes-object quirk. JSON number exceptions: scrobbles.@attr accepted/ignored, user.registered.#text and session.subscriber.\n\nGolden XML and JSON files are written from the documentation samples and client parser expectations (Pano LastfmDataClasses, lastfm-ts-api types).",
+    "tests": [
+     "worker/test/node/lastfm/params.test.ts › artist[0..49] parse from a form body; an unindexed single set parses; index 50, 51 entries, mixed forms or a duplicate parameter give error 6",
+     "worker/test/node/lastfm/params.test.ts › format=json in the query or body, or Accept: application/json, selects JSON; otherwise XML",
+     "worker/test/node/lastfm/signature.test.ts › the signature sorts by byte order (artist[10] before artist[1]), uses UTF-8 values and excludes api_sig, format and callback",
+     "worker/test/node/lastfm/signature.test.ts › requests signed by lastfm-ts-api 2.6.2 and a Pano-shaped request (empty params dropped, format in body) verify against panoScrobbler/panoScrobbler",
+     "worker/test/node/lastfm/signature.test.ts › an uppercase hex api_sig verifies; a one-character change fails with 13",
+     "worker/test/node/lastfm/encode.test.ts › every error code renders as {\"error\":N,\"message\"} and <lfm status=\"failed\"><error code=\"N\"> with the ADR table HTTP status",
+     "worker/test/node/lastfm/encode.test.ts › scrobbles for 1 and 3 inputs, nowplaying, recenttracks with a nowplaying row, topartists, user.getInfo and session match their XML and JSON goldens",
+     "worker/test/node/lastfm/encode.test.ts › JSON numbers are strings except scrobbles @attr accepted/ignored, registered #text and session.subscriber; empty leaves carry \"#text\":\"\"",
+     "worker/test/node/lastfm/encode.test.ts › XML escapes &<>\"' and removes U+0000-U+0008; a callback parameter is ignored and the type stays application/json",
+     "worker/test/node/lastfm/encode.test.ts › recenttracks, toptracks, topartists, topalbums, lovedtracks, friends, trackscrobbles and library artists with 0 and with 1 item match their goldens: track, artist, album and user are [] and a one-element array, and @attr carries user, page, perPage, totalPages and total",
+     "worker/test/node/lastfm/encode.test.ts › scrobbles.scrobble for one input is an object and for three inputs an array, and no other element uses the single-object form",
+     "worker/test/node/lastfm/signature.test.ts › requiresSignature is true for auth.getToken, auth.getSession, auth.getMobileSession and the write methods and false for every read method of ADR §7.5",
+     "worker/test/node/lastfm/signature.test.ts › a Pano-shaped unsigned user.getRecentTracks GET with sk and api_key and a lastfm-ts-api-shaped unsigned user.getInfo pass the policy, and the same requests with a wrong api_sig pass too"
+    ]
+   },
+   {
+    "id": "N2-08",
+    "title": "ListenBrainz protocol core: validation that rejects only what ListenBrainz rejects, token header, errors, credential-first limits, CORS",
+    "files": [
+     "worker/src/listenbrainz/validate.ts",
+     "worker/src/listenbrainz/auth-header.ts",
+     "worker/src/listenbrainz/errors.ts",
+     "worker/src/listenbrainz/rate-headers.ts",
+     "worker/test/node/listenbrainz/validate.test.ts",
+     "worker/test/node/listenbrainz/auth-header.test.ts",
+     "worker/test/node/listenbrainz/errors.test.ts",
+     "worker/src/listenbrainz/limiter.ts",
+     "worker/test/node/listenbrainz/limiter.test.ts"
+    ],
+    "dependsOn": [
+     "N0-01",
+     "N1-06",
+     "N1-11",
+     "N1-12"
+    ],
+    "description": "ADR 0005 §8.1–§8.3, §8.7.\n\n- **validate.ts:** `validateSubmission(rawBody, now)` performs the envelope checks in ListenBrainz's order with verbatim messages, then the per-listen checks with ListenBrainz's own bounds (listened_at ≤ now + 3,600 s). Only those produce an error (a 400 later). It then classifies each valid listen: `accept` (within our +300 s and our scrobble validator), `defer` with `notBeforeMs = (listened_at − 300) s` when now + 300 s < listened_at ≤ now + 3,600 s, or `ignore` with reason artist_invalid or track_invalid when a name fails our validator (more than 256 scalars, malformed UTF-16) but passes ListenBrainz's checks. The output is `{listens: [{record, disposition}]}` or the first ListenBrainz-level error.\n- **auth-header.ts:** scheme parsing and the 401 messages.\n- **errors.ts:** `{code, error}` bodies and CORS headers.\n- **rate-headers.ts:** the X-RateLimit-* header set.\n- **limiter.ts (ADR §8.7):** `limit(req, tokenResult)`: a request with a valid token is charged to its per-token bucket only (refuse mode); an unauthenticated request or a failed token check is charged to the per-IP bucket keyed by `rateKeyOf` in an `evict-lru` BucketSet (N1-06). An authenticated request is never refused because the per-IP set is full.",
+    "tests": [
+     "worker/test/node/listenbrainz/validate.test.ts › the envelope errors come in ListenBrainz order with verbatim messages: payload too large, unparsable JSON, non-object, non-list payload, empty, >1000, average >10240 bytes, bad listen_type, two listens for single",
+     "worker/test/node/listenbrainz/validate.test.ts › listened_at '123' is coerced; > now+3600 s gives 'Value for key listened_at is too high.'; < 1033430400 is too low; playing_now with listened_at is rejected",
+     "worker/test/node/listenbrainz/validate.test.ts › artist_name and track_name must be non-empty strings; empty release_name is deleted; duration with duration_ms is rejected; invalid release_mbid gives 'release_mbid MBID format invalid.'; a NUL is rejected",
+     "worker/test/node/listenbrainz/validate.test.ts › one listen that ListenBrainz itself rejects in a batch of 3 rejects the whole request and yields no records",
+     "worker/test/node/listenbrainz/auth-header.test.ts › Token, token and Bearer schemes are accepted; missing, spaceless and unknown headers give the three verbatim 401 messages",
+     "worker/test/node/listenbrainz/errors.test.ts › 429 carries the verbatim body, X-RateLimit-Limit/Remaining/Reset/Reset-In and Access-Control-Expose-Headers; OPTIONS answers 200 with the CORS set",
+     "worker/test/node/listenbrainz/validate.test.ts › a batch of 3 whose second listen has a 300-scalar artist_name is valid: two listens are accept and one is ignore with reason artist_invalid",
+     "worker/test/node/listenbrainz/validate.test.ts › a listen at now+1000 s is defer with notBeforeMs at listened_at − 300 s, at now+300 s it is accept, and at now+3601 s the request is the too-high error",
+     "worker/test/node/listenbrainz/limiter.test.ts › with the per-IP set full of 10,000 other keys, a valid token holder is limited only by its per-token bucket and gets no 429, while an unauthenticated request from a new address is admitted by evicting the least recently used IP bucket",
+     "worker/test/node/listenbrainz/limiter.test.ts › requests with a valid token never touch the per-IP bucket, and 31 unauthenticated requests in 10 s from one /64 get 429 with the X-RateLimit headers"
+    ]
+   },
+   {
+    "id": "N2-09",
+    "title": "Accounts and protocol credentials: usernames, Last.fm tokens and session keys, app passwords, ListenBrainz tokens, issued apps",
+    "files": [
+     "worker/src/credentials/accounts.ts",
+     "worker/src/credentials/lastfm-auth.ts",
+     "worker/src/credentials/app-passwords.ts",
+     "worker/src/credentials/lb-tokens.ts",
+     "worker/src/credentials/lastfm-apps.ts",
+     "worker/test/node/credentials/accounts.test.ts",
+     "worker/test/node/credentials/lastfm-auth.test.ts",
+     "worker/test/node/credentials/app-passwords.test.ts",
+     "worker/test/node/credentials/lb-tokens.test.ts",
+     "worker/test/node/credentials/lastfm-apps.test.ts"
+    ],
+    "dependsOn": [
+     "N1-01",
+     "N1-08",
+     "N1-10"
+    ],
+    "description": "ADR 0005 §7.3, §8.2, §9. Each module stores only hashes for bearer credentials and sealed secrets for issued app secrets. Each exposes a constant-time `verify*` and updates `last_used_ms` at most once per minute. The expiry-sweep handlers for lastfm_tokens are exported.\n\nEvery revoke and delete of a Last.fm session, app password, ListenBrainz token or issued app records a revocation journal entry (N1-08) before committing.",
+    "tests": [
+     "worker/test/node/credentials/accounts.test.ts › first sign-in creates username alice.bsky.social from the verified handle; a collision becomes alice.bsky.social-2; renaming to a taken name in another case fails with username_taken",
+     "worker/test/node/credentials/lastfm-auth.test.ts › getToken issues a 32-hex token; authorize binds it to a DID; getSession consumes it once; unauthorized gives 14, after 60 min 15, unknown or consumed 4",
+     "worker/test/node/credentials/lastfm-auth.test.ts › session keys are 32 hex, stored as SHA-256, never expire, and fail with 9 after revoke",
+     "worker/test/node/credentials/app-passwords.test.ts › a 24-char base32 app password is returned once, stored hashed, verified by username or handle, and fails after revoke",
+     "worker/test/node/credentials/lb-tokens.test.ts › a UUIDv4 token is returned once, stored hashed, resolves to the DID and username, and fails after revoke",
+     "worker/test/node/credentials/lastfm-apps.test.ts › an issued api_key's secret is stored sealed, is recoverable for signature checks, and is gone after delete",
+     "worker/test/node/credentials/accounts.test.ts › renaming to another DID's verified handle, or to any dotted name other than the caller's own verified handle, fails with username_invalid",
+     "worker/test/node/credentials/lastfm-auth.test.ts › getSession with an api_key other than the one that called getToken gives 4",
+     "worker/test/node/credentials/app-passwords.test.ts › revoking an app password, a ListenBrainz token, a Last.fm session or an issued app appends one revocation journal entry holding its id and no secret"
+    ]
+   }
+  ]
+ },
+ {
+  "wave": 3,
+  "packages": [
+   {
+    "id": "N3-01",
+    "title": "Auth routes: start, callback, session, logout, disconnect, client metadata and JWKS",
+    "files": [
+     "worker/src/http/auth.ts",
+     "worker/src/http/oauth-docs.ts",
+     "worker/test/node/http/auth.test.ts"
+    ],
+    "dependsOn": [
+     "N2-01",
+     "N2-03",
+     "N2-04",
+     "N2-09",
+     "N1-08"
+    ],
+    "description": "ADR 0005 §5.3, §5.6, §5.7. auth/start enforces exactly one Origin, applies the sign-in policy to the handle-resolved DID, and sets `__Host-atmusic_oauth` (32 random bytes, HttpOnly, Secure, SameSite=Lax, Path=/ because the __Host- prefix requires it, Max-Age=600), passing its SHA-256 to N2-03. The callback requires the cookie, clears it, applies the sign-in policy to the session sub (403 signin_not_allowed: the session is revoked upstream and nothing is stored), then calls `admit(db, did, 'notify', now)`; queue_full is left to the import timer and the outbox (ADR §5.7, §11.2). These routes self-register as RouteDef[] and are wired in N4-01. Tests mount them with test/node/support/app.ts against fake-oauth-as, fake-pds and fake-plc.\n\n**Round 2.** `DELETE /api/v1/account/connection` (cookie plus CSRF, ADR §5.7): revoke and delete the OAuth session upstream, delete every web session, Last.fm session, app password, ListenBrainz token and issued app of the DID, delete its linked accounts (their forward rows cascade), cancel its not-yet-sent operations, journal every deletion, set signed_out, clear the cookie, 204. The callback maps a binding-check identity error to 502 oauth_upstream without revoking (N2-03).",
+    "tests": [
+     "worker/test/node/http/auth.test.ts › POST /api/v1/auth/start {handle} returns an authorizeUrl at the fake AS; a malformed handle is 422 fields.handle; the 11th request in a minute from one IP is 429",
+     "worker/test/node/http/auth.test.ts › GET /oauth/callback sets the session cookie, creates the account and 303s to /; error=access_denied 303s to /signin?error=denied with no cookie",
+     "worker/test/node/http/auth.test.ts › GET /api/v1/auth/session returns did, handle, username, csrfToken and status, or 401 without a cookie",
+     "worker/test/node/http/auth.test.ts › POST /api/v1/auth/logout requires CSRF, clears the cookie, deletes the session and revokes upstream when no protocol credential remains",
+     "worker/test/node/http/auth.test.ts › GET /oauth/client-metadata.json and /oauth/jwks.json answer with Cache-Control max-age=300 and no Set-Cookie",
+     "worker/test/node/http/auth.test.ts › POST /api/v1/auth/start with a foreign or duplicate Origin is 403 csrf_failed and stores no state; a valid start sets __Host-atmusic_oauth with HttpOnly, Secure, SameSite=Lax, Path=/ and Max-Age=600",
+     "worker/test/node/http/auth.test.ts › a callback URL replayed from another cookie jar, or sent without __Host-atmusic_oauth, is 403 oauth_binding_mismatch, stores no session and sets no session cookie",
+     "worker/test/node/http/auth.test.ts › a callback with a replayed, expired or unknown state, or an AS error, stores no session, sets no session cookie and clears __Host-atmusic_oauth",
+     "worker/test/node/http/auth.test.ts › under the allowlist policy a DID outside ATMUSIC_SIGNIN_DIDS is 403 signin_not_allowed at start and at the callback, its OAuth session is revoked and nothing is stored",
+     "worker/test/node/http/auth.test.ts › a first sign-in of a DID with zero records admits it for indexing and its snapshot sets indexing_state current",
+     "worker/test/node/http/auth.test.ts › DELETE /api/v1/account/connection without CSRF is 403; with it the fake AS records a revocation, every web session, credential and link of the DID is gone and journaled, its queued operations are cancelled, the account is signed_out and the cookie is cleared",
+     "worker/test/node/http/auth.test.ts › signing in again while operations are queued and blocked ends with oauth_status active and the operations sent to the fake PDS, never reauth_required",
+     "worker/test/node/http/auth.test.ts › a PLC timeout during the callback binding check answers 502 oauth_upstream, sets no session cookie, and a retried sign-in succeeds without the fake AS having revoked the first new session"
+    ]
+   },
+   {
+    "id": "N3-02",
+    "title": "Write, operation and account routes (cookie + CSRF, Idempotency-Key)",
+    "files": [
+     "worker/src/http/writes.ts",
+     "worker/src/http/operations.ts",
+     "worker/src/http/account.ts",
+     "worker/test/node/http/writes.test.ts",
+     "worker/test/node/http/account.test.ts"
+    ],
+    "dependsOn": [
+     "N2-01",
+     "N2-04",
+     "N2-05",
+     "N2-09",
+     "N1-11"
+    ],
+    "description": "ADR 0005 §5.7, §5.8, §8.3: POST/DELETE scrobbles, PUT/DELETE follows, PUT/DELETE loves, PUT account/indexing, GET operations/{id}, GET/PATCH account, and GET /api/v1/account/ignored-listens (the caller's ignored_listens rows, newest first, 30-day retention). Web scrobbles go through acceptListens (N2-05) with origin web, so they get live priority and forward rows. The other writes create operations directly.",
+    "tests": [
+     "worker/test/node/http/writes.test.ts › POST /api/v1/scrobbles with Idempotency-Key returns 202 Operation; the same key and body returns the same operation; a different body is 409 idempotency_conflict; no key is 400",
+     "worker/test/node/http/writes.test.ts › no cookie is 401, missing CSRF is 403 csrf_failed, invalid fields are 422 with the v1.0 ScrobbleInput field names, a closed publication gate is 503 publication_disabled",
+     "worker/test/node/http/writes.test.ts › DELETE /api/v1/scrobbles/{id} of another DID's record is 404 and of an own record is 202 scrobble.delete",
+     "worker/test/node/http/writes.test.ts › PUT/DELETE follows, PUT/DELETE loves and PUT account/indexing each return 202 with the matching operation kind",
+     "worker/test/node/http/writes.test.ts › GET /api/v1/operations/{id} is 200 for its owner and 404 for any other session",
+     "worker/test/node/http/account.test.ts › PATCH /api/v1/account validates username, shareNowPlaying and importSharePercent 10..90; a taken username is 409 username_taken",
+     "worker/test/node/http/writes.test.ts › the same Idempotency-Key from two DIDs creates two operations",
+     "worker/test/node/http/writes.test.ts › an Idempotency-Key of 129 characters or containing a character outside [A-Za-z0-9._~-] is 400 invalid_idempotency_key",
+     "worker/test/node/http/writes.test.ts › five identical POSTs with one Idempotency-Key, two of them after the operation succeeded, return one operation and the fake PDS holds one record",
+     "worker/test/node/http/writes.test.ts › public v1.1 read responses are byte-identical with and without the owner's session cookie",
+     "worker/test/node/http/account.test.ts › PATCH username to another DID's verified handle, or to a dotted name other than the caller's own verified handle, is 422 username_invalid",
+     "worker/test/node/http/account.test.ts › GET /api/v1/account/ignored-listens lists only the caller's ignored listens newest first with reason and 128-scalar previews, and is 401 without a session"
+    ]
+   },
+   {
+    "id": "N3-03",
+    "title": "Last.fm auth and write methods, /api/auth approval redirect",
+    "files": [
+     "worker/src/lastfm/auth-methods.ts",
+     "worker/src/lastfm/write-methods.ts",
+     "worker/src/http/lastfm-authorize.ts",
+     "worker/test/node/lastfm/auth-methods.test.ts",
+     "worker/test/node/lastfm/write-methods.test.ts"
+    ],
+    "dependsOn": [
+     "N2-01",
+     "N2-04",
+     "N2-05",
+     "N2-06",
+     "N2-07",
+     "N2-09",
+     "N1-12",
+     "N1-11"
+    ],
+    "description": "ADR 0005 §7.3, §7.7, §7.8.\n\n**Exports:**\n- `authMethods` and `writeMethods`, the method tables for /2.0 dispatch (wired in N3-04 routes.ts);\n- the /api/auth and /api/auth/ redirect routes (multi-scrobbler omits the slash);\n- `POST /api/v1/lastfm/authorize`.\n\n**Behaviour:**\n- track.scrobble, track.updateNowPlaying, track.love, track.unlove and library.removeScrobble;\n- the shared acceptListens transaction from N2-05 (listen keys, operations, forward rows);\n- ignored codes 1–5;\n- the daily cap;\n- rate limits on getMobileSession keyed by (username, IP) and by IP;\n- library.removeScrobble matching indexed records and the caller's unindexed creates at that second, with error 7 for no match (ADR §7.5).\n\nSignatures are verified only for the auth and write methods (requiresSignature, N2-07).",
+    "tests": [
+     "worker/test/node/lastfm/auth-methods.test.ts › desktop flow: auth.getToken, POST /api/v1/lastfm/authorize, then auth.getSession returns session name, 32-hex key and subscriber 0 in XML and JSON",
+     "worker/test/node/lastfm/auth-methods.test.ts › GET /api/auth and GET /api/auth/ with api_key and cb both 302 to /lastfm/authorize keeping the query string; approval yields cb?token= or cb&token=; javascript:, data:, vbscript: and file: callbacks are refused",
+     "worker/test/node/lastfm/auth-methods.test.ts › auth.getMobileSession with username and app password over POST returns a session; GET gives 3; a wrong password gives 4; authToken gives 4; the 11th failed attempt for one (username, IP) in 15 min gives 29 while the same username from another IP still succeeds",
+     "worker/test/node/lastfm/auth-methods.test.ts › an issued api_key with a bad signature gives 13; the panoScrobbler pair is verified; an unknown api_key with a well-formed signature is accepted",
+     "worker/test/node/lastfm/write-methods.test.ts › track.scrobble with 3 entries answers accepted 3 with an array, creates 3 operations and listen keys; a single entry answers an object",
+     "worker/test/node/lastfm/write-methods.test.ts › resending the same batch is accepted 3 again and creates no new operation or forward row",
+     "worker/test/node/lastfm/write-methods.test.ts › empty artist gives code 1, empty track 2, timestamp 1033430399 gives 3, now+301 s gives 4, the 3,001st listen of the day gives 5; status stays ok",
+     "worker/test/node/lastfm/write-methods.test.ts › a batch missing timestamp[1] gives error 6 and stores nothing",
+     "worker/test/node/lastfm/write-methods.test.ts › track.updateNowPlaying stores now playing and answers nowplaying with ignoredMessage code 0 and #text ''",
+     "worker/test/node/lastfm/write-methods.test.ts › track.love and unlove queue love.put and love.delete operations and forward rows",
+     "worker/test/node/lastfm/write-methods.test.ts › a missing or revoked sk gives 9; a closed publication gate gives 11; accepted scrobbles enqueue forward rows for each active link",
+     "worker/test/node/lastfm/auth-methods.test.ts › multi-scrobbler's exact URL /api/auth?api_key=K&cb=http://localhost:9078/librefm/callback?state=x approves to a navigation that ends with &token=<32 hex>",
+     "worker/test/node/lastfm/write-methods.test.ts › library.removeScrobble cancels a still-queued create at that second, chains a delete after a running one, deletes an indexed record, and answers 7 'Invalid resource specified' when nothing matches"
+    ]
+   },
+   {
+    "id": "N3-04",
+    "title": "Last.fm read methods and the /2.0 dispatcher",
+    "files": [
+     "worker/src/lastfm/read-user.ts",
+     "worker/src/lastfm/read-charts.ts",
+     "worker/src/lastfm/read-entity.ts",
+     "worker/src/lastfm/routes.ts",
+     "worker/src/lastfm/as12.ts",
+     "worker/test/node/lastfm/as12.test.ts",
+     "worker/test/node/lastfm/read-user.test.ts",
+     "worker/test/node/lastfm/read-charts.test.ts",
+     "worker/test/node/lastfm/read-entity.test.ts",
+     "worker/test/node/lastfm/routes.test.ts"
+    ],
+    "dependsOn": [
+     "N2-01",
+     "N2-06",
+     "N2-07",
+     "N2-09"
+    ],
+    "description": "ADR 0005 §7.1, §7.5, §7.9.\n\n**routes.ts** mounts GET and POST on /2.0 and /2.0/ and dispatches by method over the authMethods and writeMethods tables (imported from N3-03 at composition through a registry argument; no import cycle) and the read tables. It enforces api_key, POST-only for writes, CORS on reads, and logs without query strings.\n\n**Read methods:**\n- user.getRecentTracks, getTrackScrobbles (Pano GNU FM accounts; the recent-tracks engine with a track filter), getInfo, getTopArtists/Albums/Tracks, getLovedTracks, getWeeklyChartList and the weekly charts, getFriends;\n- library.getArtists;\n- track/artist/album.getInfo;\n- the getTopTags family (empty).\n\n**as12.ts:** the reserved /audioscrobbler/ path. A 1.2 handshake answers the §7.10 FAILED line, also when sent to the root (`GET /?hs=true`, dispatched to the router by N2-01).\n\n**Round 2.** Reads ignore api_sig and use a supplied sk only to identify the caller (ADR §7.3); an unknown sk on a read is ignored, never error 9. Paged lists always serialise as arrays with @attr (N2-07 list flag).",
+    "tests": [
+     "worker/test/node/lastfm/read-user.test.ts › user.getRecentTracks for Alice lists r07, r01, r02 ... newest first with date.uts; limit 2 gives totalPages 4; the nowplaying row appears on page 1 only",
+     "worker/test/node/lastfm/read-user.test.ts › extended=1 returns artist objects and loved 0/1; from/to bounds are exclusive",
+     "worker/test/node/lastfm/read-user.test.ts › user.getInfo for Alice reports playcount 7, artist_count 3, track_count 6 and registered.unixtime from joinedAt",
+     "worker/test/node/lastfm/read-user.test.ts › user.getLovedTracks, user.getFriends (accounts Alice follows: Bob) and library.getArtists return the expected rows",
+     "worker/test/node/lastfm/read-charts.test.ts › getTopArtists overall and 7day equal the range-stats rankings with @attr.rank; limit clamps to 1000; period=2week gives 6",
+     "worker/test/node/lastfm/read-charts.test.ts › getWeeklyChartList lists Sunday 12:00 UTC weeks and getWeeklyTrackChart without from/to returns the last complete week",
+     "worker/test/node/lastfm/read-entity.test.ts › track.getInfo with username returns duration in ms, listeners, playcount, userplaycount and userloved; an unknown track gives 6",
+     "worker/test/node/lastfm/routes.test.ts › /2.0 and /2.0/ accept GET and POST; unknown or missing method gives 3; missing api_key gives 10; unknown user gives 6; reads send Access-Control-Allow-Origin: *",
+     "worker/test/node/lastfm/as12.test.ts › GET /audioscrobbler/?hs=true&p=1.2.1 answers 200 text/plain 'FAILED Protocol 1.2 is not supported; use the Last.fm 2.0 or ListenBrainz API' and stores nothing",
+     "worker/test/node/lastfm/routes.test.ts › no response body or captured log line from this suite contains an sk, api_sig, token or app password value",
+     "worker/test/node/lastfm/read-user.test.ts › user.getTrackScrobbles for Alice and one track lists only that track's listens newest first and matches its XML and JSON goldens",
+     "worker/test/node/lastfm/as12.test.ts › GET /?hs=true&p=1.2.1 at the root answers the same FAILED line",
+     "worker/test/node/lastfm/routes.test.ts › an unsigned Pano-shaped GET user.getRecentTracks with sk and api_key and an unsigned lastfm-ts-api-shaped GET user.getInfo with sk and no user answer status ok, the latter for the sk owner, and neither returns 13 or 9",
+     "worker/test/node/lastfm/read-user.test.ts › a Pano-shaped decoder (PageEntries with a required list and @attr) parses user.getRecentTracks, user.getLovedTracks, user.getTopTracks and user.getFriends JSON for a user with zero listens and with exactly one listen"
+    ]
+   },
+   {
+    "id": "N3-05",
+    "title": "ListenBrainz submit, validate-token, delete-listen, playing-now/delete",
+    "files": [
+     "worker/src/listenbrainz/submit.ts",
+     "worker/src/listenbrainz/token-routes.ts",
+     "worker/test/node/listenbrainz/submit.test.ts",
+     "worker/test/node/listenbrainz/validate-token.test.ts"
+    ],
+    "dependsOn": [
+     "N2-01",
+     "N2-05",
+     "N2-06",
+     "N2-08",
+     "N2-09",
+     "N1-10"
+    ],
+    "description": "ADR 0005 §8.2, §8.3, §8.6: POST /1/submit-listens (single, import and playing_now with return_msid), GET /1/validate-token, POST /1/delete-listen and POST /1/playing-now/delete. Listens go through acceptListens (N2-05) with origin listenbrainz.\n\nRequest bodies recorded from Web Scrobbler, Navidrome and Pano sources are committed as fixtures under worker/test/node/listenbrainz/ and replayed byte-for-byte.\n\nThe token and the per-token limit are checked before any body byte is read (ADR §8.3), through the credential-first limiter (N2-08). return_msid applies to playing_now only.\n\n**Round 2 (ADR §8.3, Q11):** 400 only for input ListenBrainz rejects. Listens classified `defer` go through acceptListens with notBeforeMs; listens classified `ignore` are not written and are recorded in ignored_listens; the response is 200 {status:ok}. The daily-cap 429 carries Retry-After and the X-RateLimit-* set with Access-Control-Expose-Headers. playing-now/delete follows ListenBrainz's order (no entry → already cleared; a stored submission_client that differs → 404; otherwise cleared, including an entry with no stored client).",
+    "tests": [
+     "worker/test/node/listenbrainz/submit.test.ts › a single listen returns 200 {status:ok} and creates one operation and listen key; an import of 1000 creates 1000",
+     "worker/test/node/listenbrainz/submit.test.ts › playing_now with return_msid=false (non-empty) returns status ok and recording_msid, stores now playing and creates no operation",
+     "worker/test/node/listenbrainz/submit.test.ts › resubmitting identical listens creates no operations; the 3,001st listen of the day is 429 with Retry-After, X-RateLimit-Limit/Remaining/Reset/Reset-In and Access-Control-Expose-Headers; a closed publication gate is 503",
+     "worker/test/node/listenbrainz/submit.test.ts › recorded Web Scrobbler (scrobble and now playing), Navidrome (int tracknumber, artist_names) and Pano request bodies are accepted unchanged",
+     "worker/test/node/listenbrainz/validate-token.test.ts › a valid header or ?token returns {code:200,message:'Token valid.',valid:true,user_name}; invalid returns 200 valid false; none is 400",
+     "worker/test/node/listenbrainz/validate-token.test.ts › delete-listen and playing-now/delete require a token and act only on the token owner's data; a client mismatch is 404",
+     "worker/test/node/listenbrainz/submit.test.ts › return_msid on a single or import submission is ignored and the response is {status:ok}",
+     "worker/test/node/listenbrainz/submit.test.ts › an unauthenticated or token-rate-limited 10 MB submit gets 401 or 429 with zero body bytes read",
+     "worker/test/node/listenbrainz/submit.test.ts › an import of 3 listens whose second has a 300-scalar artist_name answers 200 {status:ok}, creates 2 operations and 2 listen keys, and adds 1 ignored_listens row with reason artist_invalid",
+     "worker/test/node/listenbrainz/submit.test.ts › a single listen 1,000 s in the future answers 200, and its operation is due and dated at listened_at − 300 s and is not sent before then",
+     "worker/test/node/listenbrainz/validate-token.test.ts › playing-now/delete with nothing playing answers already cleared; an entry stored without a submission_client is cleared for any client value; an entry with a different stored client is 404"
+    ]
+   },
+   {
+    "id": "N3-06",
+    "title": "ListenBrainz reads, stats, feedback, social and the /1 dispatcher",
+    "files": [
+     "worker/src/listenbrainz/read.ts",
+     "worker/src/listenbrainz/stats.ts",
+     "worker/src/listenbrainz/feedback.ts",
+     "worker/src/listenbrainz/social.ts",
+     "worker/src/listenbrainz/routes.ts",
+     "worker/test/node/listenbrainz/read.test.ts",
+     "worker/test/node/listenbrainz/stats.test.ts",
+     "worker/test/node/listenbrainz/feedback.test.ts",
+     "worker/test/node/listenbrainz/routes.test.ts"
+    ],
+    "dependsOn": [
+     "N2-01",
+     "N2-05",
+     "N2-06",
+     "N2-08",
+     "N2-09"
+    ],
+    "description": "ADR 0005 §8.4–§8.7.\n\n**Endpoints:**\n- user/{u}/listens, playing-now, listen-count;\n- stats artists/releases/release-groups/recordings, listening-activity, daily-activity;\n- feedback recording-feedback and get-feedback;\n- following and followers.\n\n**routes.ts** mounts all /1/ routes (including N3-05's, through a registry argument) with CORS, the per-IP and per-token limits, and the 404 envelope.\n\nrecording-feedback resolves an MSID through indexed scrobbles, the now_playing row and not-yet-indexed scrobble.create operations, recomputing the MSID of each candidate (ADR §8.6).\n\nLimits use the credential-first limiter of N2-08: an authenticated request is charged to its token only and is never refused because the per-IP set is full.",
+    "tests": [
+     "worker/test/node/listenbrainz/read.test.ts › /1/user/alice/listens defaults to count 25, caps at 1000, applies exclusive min_ts/max_ts, reports latest/oldest_listen_ts, and echoes user_id as typed",
+     "worker/test/node/listenbrainz/read.test.ts › an unknown user is 404 'Cannot find user: x'; playing-now with nothing playing has count 0 and listens []; listen-count is 7 for Alice",
+     "worker/test/node/listenbrainz/stats.test.ts › artists, releases, release-groups and recordings payloads carry the documented keys, total_*_count and null MBIDs for range all_time",
+     "worker/test/node/listenbrainz/stats.test.ts › range=decade is 400 'Invalid range: decade'; a range with no listens is 204; count and offset page the ranking",
+     "worker/test/node/listenbrainz/stats.test.ts › listening-activity for week and year and daily-activity have the ADR bucket counts and labels",
+     "worker/test/node/listenbrainz/feedback.test.ts › score 1 queues a love, 0 an unlove, -1 clears the love; get-feedback lists loves with count, offset and total_count",
+     "worker/test/node/listenbrainz/routes.test.ts › OPTIONS is 200 with the CORS set; unknown /1/ paths are 404 {code,error}; per-IP 30/10 s and per-token 100/10 s limits answer 429 with headers",
+     "worker/test/node/listenbrainz/routes.test.ts › following and followers for Alice and Bob map the follow records",
+     "worker/test/node/listenbrainz/feedback.test.ts › an MSID of the current now-playing track or of a not-yet-indexed scrobble resolves to a love; an MSID with no candidate answers 200 ok and stores nothing"
+    ]
+   },
+   {
+    "id": "N3-07",
+    "title": "Process host: run and main, shutdown, systemd notify, admin socket, backups, build-server and the Node bundle guard",
+    "files": [
+     "worker/src/node/run.ts",
+     "worker/src/node/main.ts",
+     "worker/src/node/shutdown.ts",
+     "worker/src/node/systemd.ts",
+     "worker/src/node/admin-socket.ts",
+     "worker/src/node/backup.ts",
+     "worker/src/http/admin.ts",
+     "scripts/build-server.ts",
+     "scripts/check-node-bundle.ts",
+     "scripts/test/check-node-bundle.test.ts",
+     "scripts/test/build-server.test.ts",
+     "worker/test/node/run.test.ts",
+     "worker/test/node/shutdown.test.ts",
+     "worker/test/node/admin-socket.test.ts",
+     "worker/test/node/backup.test.ts",
+     "worker/test/node/systemd.test.ts"
+    ],
+    "dependsOn": [
+     "N2-01",
+     "N1-01",
+     "N1-03",
+     "N1-05",
+     "N1-07",
+     "N1-08",
+     "N1-10"
+    ],
+    "description": "ADR 0005 §3.9–§3.11, §14.5. The process half of the round-1 N2-01.\n\n- **run.ts / main.ts (ADR §3.9, §3.10).** `run(opts): Promise<ExitCode>` is side-effect free on import and takes argv, env, clock, exit, `busyTimeoutMs` and `drainMs` (production 5000 and 25000 from NodeConfig). Order: `checkRuntimeEnv` (exit 78 naming the variable), config and secrets (78), install `unpinnedFetchStub` as globalThis.fetch, open the db (exclusive lock; 75 database_locked; 78 for a missing file without `--init`), the admin socket, the pre-migration backup (free-space check, 78 naming ATMUSIC_MIN_FREE_BYTES when it fails) and migration under EXTEND_TIMEOUT_USEC, compose (N2-01), listen (LISTEN_FDS, then ATMUSIC_LISTEN, then 127.2.0.1:8888), READY=1. `--version` prints the build-time git sha; `--check-config` validates and exits. main.ts is the only module with a top-level effect: it calls run() with the process values and exits.\n- **shutdown.ts:** the SIGTERM drain with the injected drain window.\n- **systemd.ts:** READY=1, STOPPING=1, WATCHDOG=1 and EXTEND_TIMEOUT_USEC through an injectable systemd-notify spawner.\n- **admin-socket.ts and http/admin.ts:** the socket routes (status with backup age, queue depths, upload-directory bytes, free space, low_disk and oauth_store_degraded; backup; resnapshot; oauth prune-kid) with the portable constant-time compare. The Workers TCP admin route and ADMIN_TOKEN stay in ROUTES until N4-03 ports composition/admin.test.ts; N7-01 deletes them.\n- **backup.ts:** refuse unless free ≥ db size + ATMUSIC_MIN_FREE_BYTES (failed backup_runs row, error low_disk); node:sqlite async `backup(db, tmp, {rate})`; integrity_check in a worker_thread on a read-only connection to the copy; rename and fsync; backup_runs with kind; retention 7 daily and 4 weekly over daily and manual runs only; the pre-migration backup; the `backup` extension timer; after a completed backup, `revocations.truncateBefore(oldest backup file time)` (N1-08).\n- **build-server.ts:** esbuild bundles worker/dist/node/main.mjs, with `--check` and the git sha embedded; `--e2e [--entry <path>]` builds worker/dist/node/e2e.mjs from worker/test/e2e/node-entry.ts (which imports run.ts, never main.ts; N6-01) and exits 2 when the entry is missing. Both builds write metafiles.\n- **check-node-bundle.ts (new file; check-bundle.ts is untouched for deploy.sh and deploy.test.ts until N7-01):** fails on main.mjs inputs under test-support, worker/test or router-transport, on com.example.atmusic handling, on a cloudflare: import, on an input worker/src/do/index-do.ts, worker/src/scheduled.ts, worker/src/env.ts, worker/src/index.ts or worker/src/router.ts, on a crypto-build mismatch, and on an unpinned fetch path (any input other than pinned-transport.ts, policy-fetch.ts and the four documented fallback sites referencing globalThis.fetch, a bare fetch( or fetchTransport; or a production createIdentityResolver, createHandleResolver, createSafeFetch or new NodeOAuthClient call without its transport or fetch property). Fixture options are found by a comment-stripped call-site scan of the production sources (`fixtureOrigins: true`, `fixture: true` passed as an option, routerTransport, fixtureTransport, test-support imports, fixedClock, seededRandom), as worker/test/acceptance/security.test.ts:392-407 does, with a non-vacuity check (at least 60 files scanned, the `fixtureOrigins?: boolean` parameter found in worker/src/node/config.ts). When e2e.mjs exists, every worker/src and packages/*/src input of main.mjs except worker/src/node/main.ts must be an e2e.mjs input with the same hash, and e2e.mjs may add only worker/test/e2e, worker/test/node/support and test-support inputs. It prints the git sha and the bundle SHA-256. N0-01 already wired it into check-ts.sh.\n\n**Tests.** worker-node tests drive run() and shutdown() in-process with injected exit, clock, busyTimeoutMs ≈ 200 and drainMs ≈ 200. Tests that need a real second process spawn the built main.mjs from scripts/test/build-server.test.ts with explicit 60 s timeouts; nothing spawns tsx.",
+    "tests": [
+     "worker/test/node/run.test.ts › migrations finish before listen: the port accepts no connection until the database is migrated",
+     "worker/test/node/run.test.ts › an inherited LISTEN_FDS socket wins over ATMUSIC_LISTEN, which wins over the 127.2.0.1:8888 default",
+     "worker/test/node/run.test.ts › startup with an ATMUSIC_ASSETS_DIR lacking index.html exits 78 naming ATMUSIC_ASSETS_DIR and never listens",
+     "worker/test/node/run.test.ts › without --init a missing ATMUSIC_DB exits 78 and creates no file; with --init the file is created and migrated",
+     "worker/test/node/run.test.ts › with NODE_OPTIONS or NODE_TLS_REJECT_UNAUTHORIZED in the injected environment run() exits 78 naming it before opening the database",
+     "worker/test/node/run.test.ts › after run() starts, a call to globalThis.fetch rejects with TransportError unpinned_fetch and the composed app still serves /health/ready",
+     "worker/test/node/shutdown.test.ts › SIGTERM closes the listener, lets an in-flight request finish within the injected drain window, closes Jetstream with 1000, closes the database and calls exit(0)",
+     "worker/test/node/shutdown.test.ts › a request still running when the injected drain window ends after SIGTERM is aborted, the database is closed and exit(0) is called; the production drain window is 25 s",
+     "worker/test/node/admin-socket.test.ts › GET /admin/status over the 0600 unix socket returns adminStatus with backup age and queue depths; POST /admin/backup creates a backup",
+     "worker/test/node/backup.test.ts › a backup is written by node:sqlite backup() as .tmp, passes integrity_check in a worker thread on the copy, is renamed to atmusic-YYYYMMDDTHHMMZ.db with mode 0600 and recorded in backup_runs",
+     "worker/test/node/backup.test.ts › after 40 simulated days, retention keeps exactly 7 daily and 4 weekly files and never deletes a pre_migration copy",
+     "worker/test/node/backup.test.ts › startup with a pending migration writes a pre-migration backup before migrating",
+     "worker/test/node/backup.test.ts › while a rate-limited backup runs, 1,000 committed writes and an HTTP request are served and WATCHDOG=1 is still sent, and the copy is a consistent snapshot that passes integrity_check",
+     "worker/test/node/backup.test.ts › with free space below the database size plus ATMUSIC_MIN_FREE_BYTES the backup writes no file, records a failed backup_runs row with error low_disk, and adminStatus reports it",
+     "worker/test/node/backup.test.ts › a completed backup truncates revocations.log to the events newer than the oldest backup file in the directory",
+     "worker/test/node/systemd.test.ts › with NOTIFY_SOCKET set, READY=1 follows listen and WATCHDOG=1 is sent every WatchdogSec/3 only while the db and event-loop probes pass",
+     "worker/test/node/systemd.test.ts › during the startup pre-migration backup and migration EXTEND_TIMEOUT_USEC is sent at least every 20 s, and READY=1 comes only after listen",
+     "scripts/test/build-server.test.ts › build-server writes worker/dist/node/main.mjs, `node main.mjs --check-config` with a test config exits 0, and `node main.mjs --version` prints the git sha recorded at build time",
+     "scripts/test/build-server.test.ts › main.mjs started with ATMUSIC_PUBLIC_ORIGIN=http://127.0.0.1:1, or with LASTFM_API_ROOT=https://127.0.0.1/, exits 78 even with every test variable set",
+     "scripts/test/build-server.test.ts › the bundled main.mjs started with --init on a temporary state directory answers /health/ready, then on SIGTERM sends STOPPING=1 and exits 0 within 30 s",
+     "scripts/test/build-server.test.ts › --e2e builds worker/dist/node/e2e.mjs from a given entry and exits 2 when the entry is missing",
+     "scripts/test/build-server.test.ts › a second main.mjs on the same database exits 75 database_locked after the production busy timeout even with a different ATMUSIC_ADMIN_SOCKET, and a stale socket file is replaced",
+     "scripts/test/build-server.test.ts › main.mjs started with NODE_OPTIONS=--require=./x.js or NODE_TLS_REJECT_UNAUTHORIZED=0 exits 78 naming the variable and loads no preload",
+     "scripts/test/check-node-bundle.test.ts › the guard fails when main.mjs has a test-support, worker/test or router-transport input, com.example.atmusic handling, or a cloudflare: import",
+     "scripts/test/check-node-bundle.test.ts › the guard fails when main.mjs has worker/src/do/index-do.ts, worker/src/scheduled.ts, worker/src/env.ts, worker/src/index.ts or worker/src/router.ts as an input",
+     "scripts/test/check-node-bundle.test.ts › the guard fails when the bundle's @atcute/crypto entry differs from the one the worker-node project resolves, and prints the git sha and bundle SHA-256 otherwise",
+     "scripts/test/check-node-bundle.test.ts › a production source passing fixtureOrigins: true, fixture: true as an option, routerTransport or a test-support import fails the call-site scan, while url-policy.ts fixture handling and the fixtureOrigins?: boolean parameter pass; a scan of fewer than 60 files fails as vacuous",
+     "scripts/test/check-node-bundle.test.ts › an e2e.mjs whose worker/src or packages/*/src inputs differ from main.mjs in any file other than worker/src/node/main.ts, or that adds an input outside worker/test/e2e, worker/test/node/support and test-support, fails",
+     "scripts/test/check-node-bundle.test.ts › a main.mjs input other than pinned-transport.ts, policy-fetch.ts and the documented fallback sites that references globalThis.fetch or fetchTransport, or a createIdentityResolver call without transport, fails the unpinned-fetch rule"
+    ]
+   },
+   {
+    "id": "N3-08",
+    "title": "Forwarding to linked Last.fm and ListenBrainz accounts, link routes",
+    "files": [
+     "worker/src/forward/links.ts",
+     "worker/src/forward/forward-outbox.ts",
+     "worker/src/forward/lastfm-client.ts",
+     "worker/src/forward/listenbrainz-client.ts",
+     "worker/src/forward/forwarder.ts",
+     "worker/src/forward/upstream-pacing.ts",
+     "worker/src/http/links.ts",
+     "worker/test/node/forward/links-http.test.ts",
+     "worker/test/node/forward/lastfm-forward.test.ts",
+     "worker/test/node/forward/listenbrainz-forward.test.ts"
+    ],
+    "dependsOn": [
+     "N2-01",
+     "N2-04",
+     "N2-05",
+     "N2-07",
+     "N2-09",
+     "N1-05",
+     "N1-08",
+     "N1-09",
+     "N1-10",
+     "N1-13"
+    ],
+    "description": "ADR 0005 §12.\n\n**Linking:**\n- the Last.fm web-auth link flow with single-use link_states;\n- ListenBrainz token linking through validate-token;\n- sealed credentials;\n- PATCH and DELETE routes.\n\n**Delivery:**\n- the `forward` extension timer;\n- signed Last.fm batches of ≤ 50, with the global 1 rps bucket (`upstream-pacing.ts`, shared with imports);\n- ListenBrainz single, import ≤ 100 and playing_now;\n- feedback by MBID.\n\n**Failure handling:** retry and backoff, 13-day expiry, revocation and hold, the global pause on 10/26 surfaced in adminStatus, and now-playing sent once.\n\nUpstream hosts come from config, and tests use lastfm.test and listenbrainz.test.\n\nForward rows are created by N2-05 (enqueueForwards, with the per-kind dedupe keys of ADR §12.2); this package delivers them. Last.fm ignored code 5 is re-queued at the next 00:00 UTC; ListenBrainz rows have their own 30-day expiry.\n\n**Round 2.** The Last.fm and ListenBrainz forward clients send through policyFetch (N1-05); fake-lastfm and fake-listenbrainz come from worker/test/node/support (N1-13). DELETE /api/v1/links/{id} journals the deletion (N1-08).",
+    "tests": [
+     "worker/test/node/forward/links-http.test.ts › Last.fm link start returns LASTFM_AUTH_URL with our api_key and a cb carrying a single-use state; the callback calls signed auth.getSession and stores the sk sealed; reusing the state is 400",
+     "worker/test/node/forward/links-http.test.ts › a ListenBrainz token is validated upstream; an invalid one is 422; a valid one is stored sealed with user_name",
+     "worker/test/node/forward/links-http.test.ts › PATCH toggles forwarding; DELETE removes the credential and its queued rows; without the owner Last.fm key, Last.fm linking is 503 lastfm_not_configured",
+     "worker/test/node/forward/lastfm-forward.test.ts › queued scrobbles are sent oldest first as signed track.scrobble batches of at most 50, at least 1 s apart, and fake Last.fm verifies the signature",
+     "worker/test/node/forward/lastfm-forward.test.ts › per-item ignored code 5 is re-queued at the next 00:00 UTC; other ignored codes are recorded and not retried; codes 11, 16, 29, 8 and HTTP 503 retry with 30 s*2^n backoff; rows older than 13 days expire",
+     "worker/test/node/forward/lastfm-forward.test.ts › code 9 marks the link revoked and holds its rows, which resume after relinking; code 26 pauses all Last.fm forwarding and adminStatus reports lastfm_key_rejected",
+     "worker/test/node/forward/lastfm-forward.test.ts › now playing is forwarded once without retry and skipped when older than 60 s",
+     "worker/test/node/forward/listenbrainz-forward.test.ts › a live listen goes as single, a backlog as import batches of at most 100, now playing as playing_now once",
+     "worker/test/node/forward/listenbrainz-forward.test.ts › 401 revokes the link; 429 waits X-RateLimit-Reset-In; 400 marks the row failed with the upstream error and does not retry",
+     "worker/test/node/forward/lastfm-forward.test.ts › love, unlove, love for one track forwards track.love, track.unlove, track.love in order, and the same track played as now playing twice 10 minutes apart is forwarded twice",
+     "worker/test/node/forward/listenbrainz-forward.test.ts › ListenBrainz rows expire after 30 days, not 13",
+     "worker/test/node/forward/links-http.test.ts › a Last.fm link callback whose state belongs to another session is 403 and stores nothing",
+     "worker/test/node/forward/lastfm-forward.test.ts › forwarded track.scrobble POSTs pass through policyFetch: a fake Last.fm 302 is a retryable redirect error, not followed, and an upstream root on a non-default port is refused before sending"
+    ]
+   },
+   {
+    "id": "N3-09",
+    "title": "Imports: Last.fm and ListenBrainz sources, uploads, ZIP bounds, staging, dedupe, writer, routes",
+    "files": [
+     "worker/src/imports/jobs.ts",
+     "worker/src/imports/lastfm-source.ts",
+     "worker/src/imports/listenbrainz-source.ts",
+     "worker/src/imports/uploads.ts",
+     "worker/src/imports/zip.ts",
+     "worker/src/imports/staging.ts",
+     "worker/src/imports/writer.ts",
+     "worker/src/http/imports.ts",
+     "worker/test/node/imports/lastfm-source.test.ts",
+     "worker/test/node/imports/listenbrainz-source.test.ts",
+     "worker/test/node/imports/uploads.test.ts",
+     "worker/test/node/imports/staging.test.ts",
+     "worker/test/node/imports/writer.test.ts",
+     "worker/test/node/imports/imports-http.test.ts"
+    ],
+    "dependsOn": [
+     "N2-01",
+     "N2-04",
+     "N2-05",
+     "N1-05",
+     "N1-07",
+     "N1-09",
+     "N1-10",
+     "N1-11",
+     "N1-12",
+     "N1-13"
+    ],
+    "description": "ADR 0005 §11.\n\n**Job states:** waiting_index → fetching → writing → done, plus paused, failed and cancelled. Driven by the `import` extension timer.\n\n**Sources:**\n- Last.fm backward paging (fixed `to`, boundary dedupe, progress guarantee, nowplaying skip, sk when linked). It uses the shared upstream pacing from N3-08 through an injected `Pacer` interface defined here, so the two packages share no file.\n- ListenBrainz max_ts paging.\n- Uploads (64 MiB, streamed to disk at 0600, 507 past ATMUSIC_UPLOAD_MAX_BYTES or below ATMUSIC_MIN_FREE_BYTES; deleted once parsed or when the job is cancelled or fails; a startup sweep removes orphans). Parsing is streaming only (ADR §11.1): fflate Unzip with UnzipInflate, line-by-line JSONL, a page-splitting tokenizer for the Last.fm JSON export, and bomb bounds on actual inflated bytes (64 MiB per entry, 256 MiB total).\n- ListenBrainz feedback.jsonl resolution against the archive listens (recording_msid, then recording_mbid via mbid_mapping or additional_info), after all listens entries.\n\n**Pipeline:**\n- staging with listen-key dedupe;\n- the writer creating import-priority operations in slices of 1,000;\n- feedback score 1 → love.put operations with origin import, scores 0 and -1 skipped, unresolved rows invalid with reason feedback_unresolved;\n- the crash-loop guard: import_jobs.attempts incremented and committed before each slice, reset on completion, failed with crash_loop at 3;\n- admission: a waiting_index job whose DID has no users row retries `admit(…, 'notify', …)` on each import timer run with backoff (ADR §11.2).\n- staging rows deleted 7 days after done.\n\n**Routes:** POST imports, POST imports/upload, GET list and detail with ETA, cancel, resume.\n\n**Round 2.** The Last.fm and ListenBrainz import sources fetch through policyFetch (N1-05). The writer pauses while diskLow() (N1-07) is true, and resumes when space returns.",
+    "tests": [
+     "worker/test/node/imports/lastfm-source.test.ts › a 1,050-listen fake history at limit 200 is fetched in 6 pages with the nowplaying row skipped and every listen staged exactly once",
+     "worker/test/node/imports/lastfm-source.test.ts › after a restart between pages the job resumes at the stored cursor without refetching completed pages",
+     "worker/test/node/imports/lastfm-source.test.ts › Last.fm requests are at least 1 s apart and codes 29, 11 and 16 back off; a linked account's sk is sent",
+     "worker/test/node/imports/listenbrainz-source.test.ts › max_ts paging with count 1000 honours X-RateLimit-Reset-In and stages listens sharing a boundary second exactly once",
+     "worker/test/node/imports/uploads.test.ts › a ListenBrainz export ZIP (float listened_at, listens/2025/1.jsonl, one listen with a null and one with an object mbid_mapping) and a Last.fm JSON export stage their listens, with record MBIDs taken from additional_info only",
+     "worker/test/node/imports/uploads.test.ts › a ZIP whose headers understate sizes is refused by counting actual inflated bytes past 64 MiB per entry or 256 MiB in total; a ratio > 100 or > 10,000 entries is refused; an upload over 64 MiB is 413",
+     "worker/test/node/imports/staging.test.ts › listens already indexed, already submitted through /2.0 or /1, or repeated in the job are counted as duplicates and never written",
+     "worker/test/node/imports/staging.test.ts › a job stays waiting_index until the DID's indexing_state is current; a newly signed-in DID with zero records reaches current and the job leaves waiting_index",
+     "worker/test/node/imports/writer.test.ts › staged items become import-priority operations within the budget; written, duplicates and invalid counts are exact; cancel stops new operations",
+     "worker/test/node/imports/writer.test.ts › a restart mid-batch reuses the allocated rkeys and the PDS ends with exactly one record per unique listen",
+     "worker/test/node/imports/imports-http.test.ts › POST /api/v1/imports and upload return 202 ImportJob; GET reports progress and etaSeconds; a second active job is 409 import_active; cancel and resume work",
+     "worker/test/node/imports/uploads.test.ts › feedback.jsonl rows resolve by recording_msid to the newest archive listen and by recording_mbid through mbid_mapping or additional_info into loves; unresolved rows count invalid with reason feedback_unresolved; scores 0 and -1 are skipped",
+     "worker/test/node/imports/uploads.test.ts › an upload that would take ATMUSIC_UPLOAD_DIR past ATMUSIC_UPLOAD_MAX_BYTES or the filesystem below ATMUSIC_MIN_FREE_BYTES is 507 and writes nothing; the upload file is deleted once parsed and when its job is cancelled or fails",
+     "worker/test/node/imports/uploads.test.ts › a job whose slice was interrupted three times becomes failed with crash_loop and its upload file is deleted",
+     "worker/test/node/imports/staging.test.ts › when admission answers queue_full the import timer retries admission with backoff and the job leaves waiting_index once admitted",
+     "worker/test/node/imports/writer.test.ts › while diskLow reports true the writer creates no operations and the job reports paused with low_disk, and it continues from the same item when space returns"
+    ]
+   },
+   {
+    "id": "N3-10",
+    "title": "Credential management routes",
+    "files": [
+     "worker/src/http/credentials.ts",
+     "worker/test/node/http/credentials.test.ts"
+    ],
+    "dependsOn": [
+     "N2-01",
+     "N2-04",
+     "N2-09"
+    ],
+    "description": "ADR 0005 §5.7, §7.3, §8.2: GET /api/v1/account/credentials (metadata only); create and delete app passwords, ListenBrainz tokens and Last.fm apps; delete Last.fm sessions. Secrets are returned once in the create response with Cache-Control no-store.",
+    "tests": [
+     "worker/test/node/http/credentials.test.ts › GET /api/v1/account/credentials lists labels, client names and timestamps and no secret, hash or ciphertext",
+     "worker/test/node/http/credentials.test.ts › creating an app password, ListenBrainz token or Last.fm app returns its secret once with no-store; no later response contains it",
+     "worker/test/node/http/credentials.test.ts › after DELETE, the Last.fm session key gives 9 and the ListenBrainz token gives 401",
+     "worker/test/node/http/credentials.test.ts › every credential mutation without a session is 401 and without CSRF is 403"
+    ]
+   },
+   {
+    "id": "N3-11",
+    "title": "Projection of loves and the new scrobble fields; love collection in config and Jetstream",
+    "files": [
+     "worker/src/do/write/apply-record.ts",
+     "worker/src/do/write/apply-snapshot.ts",
+     "worker/src/do/write/keys.ts",
+     "worker/src/config.ts",
+     "worker/src/do/ingest/jetstream.ts",
+     "worker/test/config.test.ts",
+     "worker/test/node/write/apply-love.test.ts",
+     "worker/test/node/write/apply-fields.test.ts",
+     "worker/test/node/ingest/jetstream-collections.test.ts",
+     "worker/test/ingest/jetstream-socket.test.ts",
+     "worker/src/http/notify.ts",
+     "worker/src/do/ingest/notify.ts",
+     "docs/verification/node-port-inventory.json"
+    ],
+    "dependsOn": [
+     "N2-02",
+     "N1-10",
+     "N1-11",
+     "N1-12"
+    ],
+    "description": "ADR 0005 §6.3, §6.5. config.collections gains love, and wantedCollections adds `<p>.love`. apply-record and apply-snapshot project the §6.2 columns, album_artist_key and recording_msid, and apply love records into `loves` behind the record_state guard. The /api/v1 stats grouping stays unchanged.\n\nhttp/notify.ts configuredCollections and ingest/notify.ts recordStatus learn the love collection and the loves table, so records/status and notify accept love URIs and a love reaches indexed. jetstream-socket.test.ts changes its three-collection expectation to four; node-port-inventory.json records the title change (\"the three collections only\" → \"the four collections only\").",
+    "tests": [
+     "worker/test/config.test.ts › collections for an owned prefix are exactly scrobble, follow, settings and love",
+     "worker/test/node/ingest/jetstream-collections.test.ts › the Jetstream URL requests the four wantedCollections in a fixed order",
+     "worker/test/node/write/apply-love.test.ts › a verified love record projects into loves; its verified absence removes it; an older revision never resurrects it",
+     "worker/test/node/write/apply-fields.test.ts › a verified scrobble with the new fields fills the new columns, album_artist_key and recording_msid; one without them leaves them NULL and the v1 columns byte-identical",
+     "worker/test/node/write/apply-fields.test.ts › /api/v1 stats for the shared fixture are unchanged after records gain albumArtist",
+     "worker/test/ingest/jetstream-socket.test.ts › subscribe URL has kinds=commit and the four collections only",
+     "worker/test/node/write/apply-love.test.ts › a love URI passes /api/v1/records/status and /api/v1/notify validation and reports indexed after its proof"
+    ]
+   }
+  ]
+ },
+ {
+  "wave": 4,
+  "packages": [
+   {
+    "id": "N4-01",
+    "title": "Production feature wiring and in-process journeys",
+    "files": [
+     "worker/src/node/features.ts",
+     "worker/src/node/run.ts",
+     "worker/src/http/meta.ts",
+     "worker/test/node/features.test.ts",
+     "worker/test/node/journey/scrobbler-journey.test.ts",
+     "worker/test/node/journey/web-journey.test.ts",
+     "worker/test/node/journey/import-journey.test.ts",
+     "worker/test/node/journey/secret-logs.test.ts",
+     "worker/test/http/health-meta.test.ts"
+    ],
+    "dependsOn": [
+     "N3-01",
+     "N3-02",
+     "N3-03",
+     "N3-04",
+     "N3-05",
+     "N3-06",
+     "N3-07",
+     "N3-08",
+     "N3-09",
+     "N3-10",
+     "N3-11",
+     "N1-13"
+    ],
+    "description": "ADR 0005 §3.10, §4, §B18.\n\n**features.ts** is the production list: every route module of wave 3, the Last.fm and ListenBrainz registries, and the extension timers (outbox, forward, import, oauth-keepalive, expiry-sweep, backup) with their CoreExtensions. expiry-sweep composes the sweep functions exported by N2-03 (including reconcileSignInPolicy), N2-04, N2-06, N2-09 and N3-08, and the 30-day ignored_listens retention. run.ts (N3-07) uses the production list, and also calls reconcileSignInPolicy once at startup before listen. compose.ts is not edited, so N4-03's composition suites in this wave see a stable compose signature.\n\n**Pinned-transport spy (ADR §3.5).** features.test.ts builds the production composition with a spy transport that records every consumer it is handed to, and fails unless the identity resolver, handle resolver, SafeFetch, OAuth client, PdsWriter, Last.fm and ListenBrainz forward clients, import sources and Jetstream connector each received it; with the spy removed from any one of them the test fails.\n\n**meta.ts:** capabilities add writes, lastfm, listenbrainz, imports and forwarding as configured (forwarding and Last.fm API import only with the Last.fm key).\n\n**Journeys** run the whole composed app in-process with every fake upstream, the memoryLink Jetstream (echoing the fake PDS commits) and fixedClock.\n\nworker/test/http/health-meta.test.ts derives the expected capabilities and stage from the composed ctx.app instead of fixed values, and stops importing cloudflare:* (it is not in N4-06's list). The secret-logs journey adds the Last.fm desktop and web approval flows and the Last.fm link callback, whose query strings carry credentials.",
+    "tests": [
+     "worker/test/node/journey/scrobbler-journey.test.ts › Pano-shaped getMobileSession, updateNowPlaying and track.scrobble produce a DPoP-authorised PDS record, which is indexed after its proof and listed by user.getRecentTracks",
+     "worker/test/node/journey/scrobbler-journey.test.ts › that scrobble is forwarded exactly once to fake Last.fm and to fake ListenBrainz, and a resend changes nothing",
+     "worker/test/node/journey/scrobbler-journey.test.ts › a ListenBrainz client validate-token, playing_now and single listen appear in /1/user/{u}/listens, playing-now and stats",
+     "worker/test/node/journey/web-journey.test.ts › sign-in through the fake AS, POST /api/v1/scrobbles, operation succeeded, record indexed and visible in /api/v1/users/{did}/scrobbles",
+     "worker/test/node/journey/web-journey.test.ts › the expiry-sweep timer deletes expired OAuth states, link states, Last.fm tokens, web sessions and now-playing rows and keeps unexpired ones",
+     "worker/test/node/journey/import-journey.test.ts › a Last.fm API import of 1,050 listens and an overlapping ListenBrainz ZIP write each unique listen once within the budget and reach done after advancing the clock",
+     "worker/test/node/journey/import-journey.test.ts › closing and reopening the database and recomposing the app mid-journey loses and duplicates nothing",
+     "worker/test/node/journey/import-journey.test.ts › meta.capabilities lists writes, lastfm, listenbrainz, imports and forwarding with the Last.fm key, and omits forwarding without it",
+     "worker/test/node/journey/secret-logs.test.ts › no captured log line or error body from the journeys, including the Last.fm desktop flow (auth.getToken, /api/auth, /lastfm/authorize, approve, getSession), the web flow and the Last.fm link callback, contains any token, sk, app password, cookie, DPoP key or client key value seen in the run",
+     "worker/test/node/journey/secret-logs.test.ts › with sessions, sk values, app passwords, ListenBrainz tokens and linked credentials seeded, no public /api/v1, /2.0 or /1 response body in the journeys contains any of those values",
+     "worker/test/node/features.test.ts › every outbound consumer of the production composition receives the injected spy transport, and leaving it out of any one consumer makes the test fail",
+     "worker/test/node/features.test.ts › the production features register the six extension timers in EXTENSION_TIMER_NAMES order and run reconcileSignInPolicy once at startup before listen"
+    ]
+   },
+   {
+    "id": "N4-02",
+    "title": "Ops: systemd units, install, restore, admin CLI, operations and exposure docs",
+    "files": [
+     "config/systemd/atmusic.service",
+     "config/systemd/atmusic.socket",
+     "scripts/install-local.sh",
+     "scripts/admin/atmusic-admin.ts",
+     "scripts/admin/restore.ts",
+     "scripts/test/install-local.test.ts",
+     "scripts/test/restore.test.ts",
+     "scripts/test/systemd-unit.test.ts",
+     "scripts/test/atmusic-admin.test.ts",
+     "docs/operations.md",
+     "docs/backup.md",
+     "docs/deploy/local-node.md",
+     "docs/deploy/exposure.md",
+     "docs/deployment.md",
+     "scripts/test/exposure-doc.test.ts"
+    ],
+    "dependsOn": [
+     "N3-07",
+     "N1-07",
+     "N1-08",
+     "N1-10"
+    ],
+    "description": "ADR 0005 §14.\n\n**Units and scripts:**\n- the units exactly as §14.1, including the three UnsetEnvironment= lines (NODE_OPTIONS, NODE_TLS_REJECT_UNAUTHORIZED, NODE_EXTRA_CA_CERTS, NODE_USE_ENV_PROXY, NODE_PATH, both cases of HTTP_PROXY, HTTPS_PROXY, NO_PROXY and ALL_PROXY, SSL_CERT_FILE and SSL_CERT_DIR);\n- install-local.sh: build into ~/.local/lib/atmusic/releases/<sha> with `npm ci --ignore-scripts`, run `main.mjs --init` once when the database is missing, atomic current switch, install units, print the linger and enable commands, run them only with --enable;\n- restore.ts (§14.5): stop atmusic.socket and atmusic.service and verify both inactive; copy the live db to atmusic.db.pre-restore; migrate the backup copy to the code's schema version; **with a readable live db, replace every non-derived table of TABLE_CLASS (N1-10) wholesale with the live rows and keep only the derived tables from the backup** (an unclassified table aborts); with an unreadable live db refuse unless --accept-loss, which **deletes every web_sessions row and replays revocations.log** (N1-08) into the copy; then open atmusic.db.restore.tmp with journal_mode=DELETE, close it and assert no restore.tmp-wal, -shm or -journal exists; fsync it; delete the live -wal, -shm and -journal and fsync the directory; rename over atmusic.db and fsync the directory again; start both units;\n- atmusic-admin.ts (status, backup, resnapshot, prune-kid over the admin socket).\n\n**Docs:** secrets setup, key rotation, upgrades and rollback (link switch only; additive migrations), restore as disaster recovery, Gentoo notes, health, sleep, same-UID exposure and the dedicated-user option. docs/deploy/exposure.md gives per option the required ATMUSIC_CLIENT_IP_HEADER and the proxy directive (ADR §14.6): A, cloudflared with cf-connecting-ip; B, DNS-only Caddy `header_up -CF-Connecting-IP` and `header_up X-Forwarded-For {remote_host}` or nginx `proxy_set_header CF-Connecting-IP \"\"` and `proxy_set_header X-Forwarded-For $remote_addr` with x-forwarded-for, stated as valid only without the Cloudflare proxy; C, proxied DNS with mandatory Authenticated Origin Pulls, a firewall admitting only Cloudflare ranges, and Caddy `trusted_proxies static <Cloudflare ranges>` with `client_ip_headers Cf-Connecting-Ip` and `header_up X-Forwarded-For {client_ip}`, or nginx `set_real_ip_from <Cloudflare ranges>` with `real_ip_header CF-Connecting-IP`, with x-forwarded-for; the Cloudflare range list is a dated snapshot with its source URL. All tests use a temporary HOME and never call the real systemctl or loginctl.",
+    "tests": [
+     "scripts/test/systemd-unit.test.ts › atmusic.service has Type=notify, NotifyAccess=all, WatchdogSec, TimeoutStartSec=15min, RestartPreventExitStatus=78 75, StateDirectory=atmusic with mode 0700, LoadCredentialEncrypted=secrets and ATMUSIC_LISTEN=127.2.0.1:8888",
+     "scripts/test/systemd-unit.test.ts › atmusic.service sets no secret in Environment= and contains no MemoryDenyWriteExecute, PrivateNetwork or IPAddressDeny",
+     "scripts/test/systemd-unit.test.ts › atmusic.socket listens on 127.2.0.1:8888 and the bridge accepts its fd as loopback",
+     "scripts/test/install-local.test.ts › with a temporary HOME, install-local builds releases/<sha> with npm ci --ignore-scripts, runs main.mjs --init only when the database is missing, switches current atomically, installs both units and prints, but does not run, the linger command",
+     "scripts/test/atmusic-admin.test.ts › status, backup, resnapshot and prune-kid talk only to the admin socket path and print its JSON",
+     "scripts/test/restore.test.ts › with a fake systemctl, restore stops atmusic.socket and atmusic.service, proceeds only when both report inactive, swaps the db in, and starts both units only afterwards; a connection attempted mid-restore starts no server",
+     "scripts/test/restore.test.ts › with an unreadable live database restore prints what will be lost and refuses without --accept-loss",
+     "scripts/test/restore.test.ts › a restored database whose OAuth sessions and linked credentials open with the configured keys reports ready",
+     "scripts/test/restore.test.ts › restoring with secrets that lack the backup's encryption key id starts the server, marks undecryptable sessions reauth_required and prints no ciphertext or key material",
+     "scripts/test/systemd-unit.test.ts › atmusic.service unsets NODE_OPTIONS, NODE_TLS_REJECT_UNAUTHORIZED, NODE_EXTRA_CA_CERTS, NODE_USE_ENV_PROXY, NODE_PATH, HTTP_PROXY, http_proxy, HTTPS_PROXY, https_proxy, NO_PROXY, no_proxy, ALL_PROXY, all_proxy, SSL_CERT_FILE and SSL_CERT_DIR",
+     "scripts/test/restore.test.ts › with a readable live db, a sign-in, an app password and a sign-out that happened after the backup are all as they were live after restore, an account renamed after the backup keeps its new name, and the derived index rows come from the backup",
+     "scripts/test/restore.test.ts › a credential revoked and an operation accepted after the backup are respectively still rejected and still queued after restore",
+     "scripts/test/restore.test.ts › a table missing from TABLE_CLASS aborts the restore before anything is renamed",
+     "scripts/test/restore.test.ts › with --accept-loss on an unreadable live db, every web session is gone and each credential, link and OAuth session in revocations.log is deleted from the restored copy",
+     "scripts/test/restore.test.ts › killing restore after each swap step (temp file closed, temp fsynced, live WAL removed, renamed) leaves a database whose integrity_check is ok, never a restored file paired with a stale WAL, and a completed restore contains the merged live rows with no restore.tmp-wal left",
+     "scripts/test/exposure-doc.test.ts › docs/deploy/exposure.md option C requires Authenticated Origin Pulls and a Cloudflare-only firewall and gives the trusted_proxies and set_real_ip_from directives, and option B states it is for DNS-only exposure"
+    ]
+   },
+   {
+    "id": "N4-03",
+    "title": "Port the composition, acceptance and bench suites to Node",
+    "files": [
+     "worker/vitest.composition.config.ts",
+     "worker/vitest.acceptance.config.ts",
+     "worker/vitest.bench.config.ts",
+     "worker/test/composition/",
+     "worker/test/acceptance/",
+     "worker/test/bench/",
+     "scripts/benchmark-read-models.ts"
+    ],
+    "dependsOn": [
+     "N2-01",
+     "N2-02",
+     "N3-07"
+    ],
+    "description": "ADR 0005 §15.1, §15.3. These projects switch to `environment: 'node'` over compose() (N2-01) and run() (N3-07) with the fixture transport, the memoryLink Jetstream and fixedClock. The test entries (worker/test/acceptance/entry.ts and the composition entries) become Node composition factories that override dependencies through compose options instead of IndexDO.buildDeps.\n\nTitles are kept, except for:\n- the index-do and IndexDO-specific RPC tests, which become IndexCore tests;\n- scheduled.test.ts, which becomes the ensureRunning-interval test;\n- bench row budgets, which become plan assertions with timings reported.\n\nRestart is close-and-reopen of the same file plus a recomposed app. composition/admin.test.ts is ported from the Workers TCP admin route to the admin socket (N3-07); the TCP route itself is deleted by N7-01. These suites stop importing worker/test/write/support.ts and worker/test/fixtures/jetstream-server.ts through cloudflare:* (N4-04 owns those helpers). scripts/benchmark-read-models.ts drops its workerd, wrangler and vitestPlugin environment fields (:110) and records node and sqlite versions instead, so nothing in it refers to Workers when N7-01 runs its no-Workers test.",
+    "tests": [
+     "worker/test/acceptance/restart.test.ts › restart reopens the same database file: projection tables and responses are byte-identical, a pre-restart cursor continues and timers resume",
+     "worker/test/acceptance/query-plans.test.ts › with 100 DIDs x 1,000 records, history, feeds and stats use their indexes on SQLite 3.54.1 and the no-index control shows SCAN",
+     "worker/test/composition/index-core-node.test.ts › IndexCore on the Node host runs Jetstream socket mode through the ws connector to a loopback server and re-arms the alarm after a throwing tick",
+     "worker/test/composition/scheduled.test.ts › the 5-minute ensureRunning interval re-arms a lost alarm chain",
+     "worker/test/bench/read-models.bench.test.ts › the read-model bench records p50 and p95 for history, feed and stats on node:sqlite and asserts their query plans",
+     "worker/test/composition/admin.test.ts › admin status over the unix socket returns the AdminStatus shape of a fresh index, and /internal/admin/status on the TCP listener is the JSON 404",
+     "worker/test/bench/read-models.bench.test.ts › the benchmark report records node and sqlite versions and has no workerd, wrangler or vitestPlugin field"
+    ]
+   },
+   {
+    "id": "N4-04",
+    "title": "De-shim the harness and storage suites and the shared test helpers",
+    "files": [
+     "worker/test/node/support/with-index.ts",
+     "worker/test/harness/local-index.test.ts",
+     "worker/test/harness/isolation.test.ts",
+     "worker/test/harness/isolation-peer.test.ts",
+     "worker/test/harness/isolation-probe.ts",
+     "worker/test/storage/",
+     "worker/test/write/support.ts",
+     "worker/test/fixtures/jetstream-server.ts",
+     "worker/test/node/deshim/harness-storage.test.ts"
+    ],
+    "dependsOn": [
+     "N2-02"
+    ],
+    "description": "ADR 0005 §15.1 step 2. Replace the shimmed runInDurableObject, runDurableObjectAlarm, evictDurableObject and env calls with the Node harness (withMigratedDb and reopen from worker/test/node/support/node-db.ts, N1-01; IndexCore.runAlarmNow for alarms) and remove every cloudflare:test and cloudflare:workers import from the listed files, **keeping every test title byte-identical** (node-port-inventory.json marks them kept). Non-test helper modules in the listed directories (for example worker/test/read/scrobble-read-support.ts, worker/test/ingest/drain-support.ts) keep their exported names and signatures, because other directories import them. The shim and aliases stay until N7-01, so suites of the other de-shim packages keep passing whichever order they land in.\n\n- **with-index.ts:** `withIndex(fn)` over a temporary-file database migrated by node-db (N1-01), `runAlarmNow(core)`, `reopen()`. It replaces worker/test/harness/local-index.ts for the de-shimmed suites; local-index.ts, harness-do.ts, entry.ts and wrangler.harness.jsonc stay for the shimmed suites until N7-01 deletes them.\n- **Shared helpers.** worker/test/write/support.ts stops importing env from cloudflare:workers and worker/test/fixtures/jetstream-server.ts stops using WebSocketPair (it uses memoryLink and the ws connector). **Their exported API is kept exactly**, so the ingest, read, write and http suites (N4-05, N4-06) and the composition suites (N4-03) keep working unchanged in this wave.",
+    "tests": [
+     "worker/test/harness/local-index.test.ts › withIndex, runAlarmNow and reopen replace runInDurableObject, runDurableObjectAlarm and evictDurableObject, and reopen preserves every table",
+     "worker/test/node/deshim/harness-storage.test.ts › no file under worker/test/storage, the listed harness tests, worker/test/write/support.ts or worker/test/fixtures/jetstream-server.ts imports cloudflare:test or cloudflare:workers or references WebSocketPair",
+     "worker/test/node/deshim/harness-storage.test.ts › every title node-port-inventory.json marks kept for worker/test/storage and worker/test/harness is still declared byte-identical in its file",
+     "worker/test/node/deshim/harness-storage.test.ts › write/support.ts and fixtures/jetstream-server.ts export the same names with the same arity as at the start of this wave"
+    ]
+   },
+   {
+    "id": "N4-05",
+    "title": "De-shim the ingest suites",
+    "files": [
+     "worker/test/ingest/",
+     "worker/test/node/deshim/ingest.test.ts"
+    ],
+    "dependsOn": [
+     "N2-02",
+     "N3-11"
+    ],
+    "description": "ADR 0005 §15.1 step 2. Replace the shimmed runInDurableObject, runDurableObjectAlarm, evictDurableObject and env calls with the Node harness (withMigratedDb and reopen from worker/test/node/support/node-db.ts, N1-01; IndexCore.runAlarmNow for alarms) and remove every cloudflare:test and cloudflare:workers import from the listed files, **keeping every test title byte-identical** (node-port-inventory.json marks them kept). Non-test helper modules in the listed directories (for example worker/test/read/scrobble-read-support.ts, worker/test/ingest/drain-support.ts) keep their exported names and signatures, because other directories import them. The shim and aliases stay until N7-01, so suites of the other de-shim packages keep passing whichever order they land in. It uses withMigratedDb and reopen from worker/test/node/support/node-db.ts (N1-01) directly rather than N4-04's with-index.ts, so it does not depend on another package of this wave. jetstream-socket.test.ts keeps N3-11's four-collection title.",
+    "tests": [
+     "worker/test/node/deshim/ingest.test.ts › no file under worker/test/ingest imports cloudflare:test or cloudflare:workers or references WebSocketPair",
+     "worker/test/node/deshim/ingest.test.ts › every title node-port-inventory.json marks kept for worker/test/ingest is still declared byte-identical in its file",
+     "worker/test/ingest/jetstream-socket.test.ts › subscribe URL has kinds=commit and the four collections only"
+    ]
+   },
+   {
+    "id": "N4-06",
+    "title": "De-shim the read, write and http suites",
+    "files": [
+     "worker/test/read/",
+     "worker/test/write/account-state.test.ts",
+     "worker/test/write/apply-record.test.ts",
+     "worker/test/write/apply-snapshot.test.ts",
+     "worker/test/write/suppression.test.ts",
+     "worker/test/http/error.test.ts",
+     "worker/test/http/limits.test.ts",
+     "worker/test/http/params.test.ts",
+     "worker/test/http/record-status.test.ts",
+     "worker/test/node/deshim/read-write-http.test.ts"
+    ],
+    "dependsOn": [
+     "N2-02"
+    ],
+    "description": "ADR 0005 §15.1 step 2. Replace the shimmed runInDurableObject, runDurableObjectAlarm, evictDurableObject and env calls with the Node harness (withMigratedDb and reopen from worker/test/node/support/node-db.ts, N1-01; IndexCore.runAlarmNow for alarms) and remove every cloudflare:test and cloudflare:workers import from the listed files, **keeping every test title byte-identical** (node-port-inventory.json marks them kept). Non-test helper modules in the listed directories (for example worker/test/read/scrobble-read-support.ts, worker/test/ingest/drain-support.ts) keep their exported names and signatures, because other directories import them. The shim and aliases stay until N7-01, so suites of the other de-shim packages keep passing whichever order they land in. Like N4-05, it uses node-db (N1-01) directly, not N4-04's with-index.ts. worker/test/http/health-meta.test.ts is de-shimmed by N4-01, which owns it in this wave; worker/test/write/support.ts by N4-04.",
+    "tests": [
+     "worker/test/node/deshim/read-write-http.test.ts › no listed file under worker/test/read, worker/test/write or worker/test/http imports cloudflare:test or cloudflare:workers",
+     "worker/test/node/deshim/read-write-http.test.ts › every title node-port-inventory.json marks kept for the listed files is still declared byte-identical in its file"
+    ]
+   }
+  ]
+ },
+ {
+  "wave": 5,
+  "packages": [
+   {
+    "id": "N5-01",
+    "title": "Web client migration to the cookie BFF; new settings screens; Last.fm approval page; case-map remap",
+    "files": [
+     "web/package.json",
+     "package-lock.json",
+     "web/src/session/client.ts",
+     "web/src/api/writes.ts",
+     "web/src/api/client.ts",
+     "web/src/oauth/",
+     "web/src/outbox/",
+     "web/src/components/",
+     "web/src/routes/",
+     "web/src/router.tsx",
+     "web/src/app.tsx",
+     "web/src/migration.ts",
+     "packages/core/src/spa-routes.ts",
+     "scripts/gen-config.ts",
+     "scripts/test/gen-config.test.ts",
+     "web/test/",
+     "docs/verification/ts-case-map.json",
+     "docs/verification/node-port-inventory.json",
+     "web/src/main.tsx",
+     "web/src/state/"
+    ],
+    "dependsOn": [
+     "N4-01"
+    ],
+    "description": "ADR 0005 §5.9. Remove @atproto/oauth-client-browser and regenerate the lockfile.\n\n**Deleted:**\n- web/src/oauth/* — and its importers change here: web/src/main.tsx (imports ./oauth/types and globs ./oauth/session.ts at :10 and :14) boots web/src/session/client.ts instead, and web/src/state/store.ts (:13 imports PdsSession from ../oauth/types) holds the server Session DTO {did, handle, username, csrfToken, status, expiresAt} in place of PdsSession, so tsc -b stays green;\n- web/src/outbox/* except overlay.ts;\n- routes/callback.tsx.\n\n**Added:**\n- the session client (csrfToken; credentials same-origin);\n- writes with Idempotency-Key, and operation and record-status polling into the overlay;\n- migration.ts, which deletes the legacy atmusic* IndexedDB databases;\n- screens /settings/links, /settings/imports (progress, ETA, cancel), /settings/credentials (secret shown once) and /lastfm/authorize.\n\n**Config:** spa-routes drops /oauth/callback and adds the new routes. gen-config imports CLIENT_NAME from packages/core/src/client-name.ts (N2-03), stops emitting oauth/client-metadata.json, sets connect-src 'self', and takes PUBLIC_ORIGIN and LEXICON_PREFIX from --origin/--prefix or config/atmusic.env.example instead of worker/wrangler.jsonc.\n\n**Tests:** web/test/oauth and web/test/outbox are deleted. ts-case-map.json and node-port-inventory.json remap their cases to the N2-03, N2-04, N2-05 and N3-01 tests.",
+    "tests": [
+     "web/test/session/client.test.ts › getSession caches csrfToken; every mutation sends X-CSRF-Token with same-origin credentials; 401 shows signed-out and reauth_required shows the re-sign-in banner",
+     "web/test/routes/scrobble.test.tsx › submitting the form posts with a fresh Idempotency-Key and shows queued, published, then indexed from operation and record-status polling",
+     "web/test/routes/settings.test.tsx › the links, imports and credentials screens render server state; a created secret is shown once and gone after navigation",
+     "web/test/routes/lastfm-authorize.test.tsx › the page shows the client name, labelled unverified unless it is an issued app, the token request time and the callback host; approve posts /api/v1/lastfm/authorize and navigates to the returned redirect; deny stays on the page",
+     "web/test/migration.test.ts › first load deletes the legacy atmusic IndexedDB databases and makes no request outside the origin",
+     "web/test/bundle.test.ts › the built SPA contains no @atproto/oauth-client code, no PDS hostname and no IndexedDB outbox",
+     "scripts/test/gen-config.test.ts › gen-config writes no oauth/client-metadata.json, sets connect-src 'self', and the SPA routes include /lastfm/authorize and /settings/* but not /oauth/callback",
+     "python3 scripts/validate_case_map.py --check-tests › every case formerly mapped to web/test/oauth or web/test/outbox maps to an existing worker/test/node replacement",
+     "web/test/session/client.test.ts › the app state store holds the server Session DTO, and no module under web/src imports from web/src/oauth"
+    ]
+   },
+   {
+    "id": "N5-02",
+    "title": "Protocol read benchmark on a 100k-listen user",
+    "files": [
+     "scripts/benchmark-protocol-reads.ts",
+     "worker/test/bench/protocol-reads.bench.test.ts",
+     "docs/benchmarks/node-protocol-reads.md"
+    ],
+    "dependsOn": [
+     "N3-04",
+     "N3-06",
+     "N4-03"
+    ],
+    "description": "ADR 0005 §10.3. (Round 1 N4-03; it follows the bench-project port N4-03, which owns worker/test/bench/ in wave 4.) The test lives in worker/test/bench/ (the worker-bench project), never under worker/test/node/**, so the worker-node project in every npm run check stays fast. Build a deterministic 100k-listen user with a seeded generator and direct SQL inserts into the projection tables, as acceptance/query-plans does, and push a small sample (100 records) through the apply path to prove the shapes agree. Report timings for getTopTracks overall (uncached and cached), getRecentTracks page 500, and ListenBrainz stats all_time and listening-activity year. The test asserts query plans and cache-hit equality only; timings are reported against the budgets, not asserted.",
+    "tests": [
+     "worker/test/bench/protocol-reads.bench.test.ts › on a 100k-listen user the top-tracks, recent-tracks and ListenBrainz stats statements use scrobbles_stats or scrobbles_owner_time and never SCAN scrobbles",
+     "worker/test/bench/protocol-reads.bench.test.ts › the cached getTopTracks body equals the uncached body and the report records p50/p95 for each read"
+    ]
+   }
+  ]
+ },
+ {
+  "wave": 6,
+  "packages": [
+   {
+    "id": "N6-01",
+    "title": "Playwright browser journeys on the Node stack with fake AS and PDS",
+    "files": [
+     "scripts/e2e/start-stack.ts",
+     "scripts/e2e/dev-env.ts",
+     "playwright.config.ts",
+     "web/tests/mvp.spec.ts",
+     "web/tests/accessibility.spec.ts",
+     "web/tests/settings.spec.ts",
+     "worker/test/e2e/"
+    ],
+    "dependsOn": [
+     "N5-01",
+     "N4-01",
+     "N3-07",
+     "N1-13"
+    ],
+    "description": "ADR 0005 §5.10, §15.1.\n\n**start-stack** builds the SPA and the e2e bundle (`scripts/build-server.ts --e2e`, worker/dist/node/e2e.mjs from worker/test/e2e/node-entry.ts) and runs it on 127.0.0.1. The entry injects the fixture-host transport, the `fixtureOrigins` config option and the test config; it is the only place fixture hostnames are mapped, and it is never part of main.mjs (ADR §3.9). The entry maps fixture hostnames to the fake AS, PDS, PLC, Jetstream, Last.fm and ListenBrainz served by the stack, behind the existing proxy. Chromium reaches nothing else.\n\n**Journeys:** sign-in through the fake AS authorize page, scrobble, indexed, delete, follow, settings opt-out, and the new links, imports and credentials screens, with axe checks.\n\n**Removed:** wrangler dev and the dev-env PDS from this stack. **Deleted:** worker/test/e2e/entry.ts and worker/test/e2e/wrangler.e2e.jsonc (the workerd e2e entry), replaced by worker/test/e2e/node-entry.ts; scripts/e2e/dev-env.ts loses every wrangler reference (its fake hosts are served to the Node stack). The dev-env interop moves to N6-02. Fake Last.fm and ListenBrainz come from worker/test/node/support (N1-13).",
+    "tests": [
+     "web/tests/mvp.spec.ts › sign-in through the fake AS, scrobble, indexed, delete and follow journeys pass against the Node stack",
+     "web/tests/settings.spec.ts › creating an app password, linking ListenBrainz with a fake token, and starting a ListenBrainz import with visible progress",
+     "web/tests/accessibility.spec.ts › signin, feed, profile, scrobble, settings/links, settings/imports, settings/credentials and lastfm/authorize have no axe violations",
+     "web/tests/mvp.spec.ts › the stack runs worker/dist/node/e2e.mjs built from node-entry.ts, and check-node-bundle confirms its worker/src and packages/*/src inputs, except worker/src/node/main.ts, equal those of main.mjs",
+     "web/tests/mvp.spec.ts › worker/test/e2e has no entry.ts or wrangler.e2e.jsonc, and neither scripts/e2e/start-stack.ts nor scripts/e2e/dev-env.ts mentions wrangler"
+    ]
+   },
+   {
+    "id": "N6-02",
+    "title": "Node live gates (operator-run, blocked by default) and evidence keyed by the Node bundle",
+    "files": [
+     "scripts/live/",
+     "scripts/verify_live_evidence.py",
+     "scripts/test_live_evidence.py",
+     "docs/verification/node-live.md",
+     "docs/verification/live-evidence.json"
+    ],
+    "dependsOn": [
+     "N4-01",
+     "N3-07"
+    ],
+    "description": "ADR 0005 §5.10, §15.\n\n**Ports** of workers_oauth_check, workers_ingest_check, pds_compat_check, ssrf_probe and the socket soak to the Node host (node_*), against an operator-provided deployed origin and real PDS identities.\n\n**ssrf_probe.ts:** its `--emit-worker` path (scripts/live/ssrf_probe.ts:316-328) wrote a probe Worker and wrangler.jsonc and printed wrangler deploy commands; it is replaced by a Node probe script that the operator runs on the host behind the deployed origin, with no wrangler reference.\n\n**New:** devenv_oauth_check, the confidential-client interop against a local @atproto/dev-env PDS that needs an https test origin.\n\n**Rules:**\n- Every gate exits 2 with a blocked document listing missing ATMUSIC_LIVE_* names before any network request.\n- No gate contacts Last.fm or ListenBrainz.\n- Evidence is keyed by the Node bundle SHA-256.\n- The gates are never run by the acceptance script (only their no-env behaviour is).",
+    "tests": [
+     "scripts/live/node_oauth_check.ts › with every ATMUSIC_LIVE_* unset it exits 2 with a blocked document naming the missing variables and makes no network request",
+     "scripts/live/devenv_oauth_check.ts › without an https test origin it exits 2 blocked; the document names the prerequisite",
+     "scripts/test_live_evidence.py › evidence records are accepted only for the current Node bundle SHA-256 and a failed gate is never classified as passed",
+     "scripts/live/ssrf_probe.ts › --emit-probe writes a Node probe script and prints no wrangler command; no file under scripts/live mentions wrangler"
+    ]
+   }
+  ]
+ },
+ {
+  "wave": 7,
+  "packages": [
+   {
+    "id": "N7-01",
+    "title": "Retire the Workers runtime, the cloudflare:* test shim, pulse, PLAN and BUDGETS.free",
+    "files": [
+     "worker/wrangler.jsonc",
+     "worker/.dev.vars.example",
+     "worker/src/index.ts",
+     "worker/src/scheduled.ts",
+     "worker/src/env.ts",
+     "worker/src/do/index-do.ts",
+     "worker/src/do/contracts.ts",
+     "worker/src/do/migrate.ts",
+     "worker/tsconfig.workers.json",
+     "packages/atproto/wrangler.test.jsonc",
+     "packages/atproto/test-support/fake-jetstream.ts",
+     "scripts/deploy.sh",
+     "scripts/admin/pitr-restore.ts",
+     "scripts/test/deploy.test.ts",
+     "scripts/test/pitr-restore.test.ts",
+     "scripts/test/no-workers.test.ts",
+     "config/atmusic.workers.example.jsonc",
+     "package.json",
+     "package-lock.json",
+     "worker/package.json",
+     "worker/tsconfig.json",
+     "web/package.json",
+     "worker/src/router.ts",
+     "worker/src/config.ts",
+     "worker/test/config.test.ts",
+     "docs/workers.md",
+     "docs/deploy/routing.md",
+     "scripts/acceptance/workers-backend.sh",
+     "docs/verification/backend-workers.md",
+     "README.md",
+     "docs/planning/AMENDMENTS-node.md",
+     "worker/src/do/db.ts",
+     "worker/test/tsconfig.json",
+     "packages/core/package.json",
+     "packages/atproto/package.json",
+     ".github/workflows/deploy.yml",
+     "worker/test/harness/local-index.ts",
+     "worker/src/http/types.ts",
+     "worker/src/http/admin.ts",
+     "scripts/test/secret-scan.test.ts",
+     "web/vite.config.ts",
+     ".env.example",
+     "scripts/check-ts.sh",
+     "scripts/check-bundle.ts",
+     "scripts/test/check-bundle.test.ts",
+     "worker/vitest.modules.config.ts",
+     "worker/test/node/support/cloudflare-test-shim.ts",
+     "worker/test/node/support/cloudflare-workers-shim.ts",
+     "worker/test/node/support/do-storage-facade.ts",
+     "worker/test/node/support/workerd-globals.ts",
+     "worker/test/node/support/shim.test.ts",
+     "worker/test/harness/harness-do.ts",
+     "worker/test/harness/entry.ts",
+     "worker/test/harness/wrangler.harness.jsonc",
+     "worker/src/app/index-core.ts",
+     "worker/src/do/ingest/ingest-mode.ts",
+     "worker/src/do/ingest/jetstream-socket.ts",
+     "worker/test/ingest/ingest-mode.test.ts",
+     "worker/test/ingest/jetstream-socket.test.ts",
+     "docs/verification/node-port-inventory.json"
+    ],
+    "dependsOn": [
+     "N4-02",
+     "N4-03",
+     "N4-04",
+     "N4-05",
+     "N4-06",
+     "N5-01",
+     "N6-01",
+     "N6-02"
+    ],
+    "description": "ADR 0005 §2.2.\n\n**Delete:**\n- the Workers entry, IndexDO and scheduled files, and the wrangler configs. env.ts keeps only EnvVars/AppEnv (the DurableObjectNamespace and Fetcher bindings are removed); router.ts drops createWorker/handleFetch and keeps assetMiss and the route table; config.test.ts reads config/atmusic.env.example instead of wrangler.jsonc;\n- the DO overload of migrate and the adminPitr RPC;\n- the fake-jetstream WebSocketPair export;\n- deploy.sh, pitr-restore and their tests, and the Workers bundle guard scripts/check-bundle.ts with scripts/test/check-bundle.test.ts and its step in scripts/check-ts.sh (deploy.test.ts imports its analyzeBundle, so all go together);\n- workers-backend.sh (superseded by node-interim.sh from wave 0 and node-backend.sh in N8-01).\n\n**Dependencies:** remove wrangler, @cloudflare/vitest-plugin, @cloudflare/workers-types and @cloudflare/vite-plugin from the root, worker and web package files, and regenerate the lockfile.\n\n**Docs:** docs/workers.md and backend-workers.md are marked historical. The README describes the local Node host. AMENDMENTS-node.md records the retirement of the Workers-only cases.\n\n**Also (review round 1):** delete doDb from worker/src/do/db.ts; remove adminPitr from worker/test/harness/local-index.ts METHODS; drop the Workers types from worker/test/tsconfig.json; remove the workerd dev dependencies from packages/core and packages/atproto package.json; delete .github/workflows/deploy.yml (wrangler deploy); delete the Workers TCP admin route and ADMIN_TOKEN from worker/src/http/admin.ts and AppEnv in worker/src/http/types.ts; scan config/atmusic.env.example and config/systemd/* instead of worker/wrangler.jsonc in scripts/test/secret-scan.test.ts; point the web/vite.config.ts dev proxy at the Node dev server instead of wrangler dev; rewrite .env.example for the Node host. AlarmStorage is already structural (N1-02), so worker/src/do/timers.ts is not touched.\n\n**Round 2.**\n- **Its own wave.** Its no-workers test observes the outcome of N4-03 (composition suites and the benchmark script), N4-04 to N4-06 (de-shimmed suites), N6-01 (worker/test/e2e/entry.ts, wrangler.e2e.jsonc and dev-env.ts) and N6-02 (ssrf_probe.ts), so it runs after all of them.\n- **Shim removal.** Delete the cloudflare:* shim files, the aliases and setup file in worker/vitest.modules.config.ts, and the workerd harness files (harness-do.ts, harness entry.ts, wrangler.harness.jsonc).\n- **pulse, PLAN, DO_LOCATION_HINT and BUDGETS.free (B17).** Remove them from worker/src/config.ts, worker/src/do/ingest/ingest-mode.ts, the pulse paths of worker/src/do/ingest/jetstream-socket.ts and worker/src/app/index-core.ts (PulseTimer), and their tests (ingest-mode.test.ts, the pulse cases of jetstream-socket.test.ts, worker/test/config.test.ts); parseNodeConfig stops supplying PLAN. The `mode` CHECK in schema.ts migration 1 is not edited (migrations are immutable), so schema.ts is not in this package; no row with mode 'pulse' can be written on Node. Retired test ids are recorded in node-port-inventory.json with reason B17.",
+    "tests": [
+     "scripts/test/no-workers.test.ts › no tracked source imports cloudflare:* or @cloudflare/*, no package.json declares wrangler or @cloudflare/*, no workflow or script runs wrangler, and package-lock.json contains no workerd",
+     "scripts/test/no-workers.test.ts › npm run check passes in a disposable copy with no workerd binary installed",
+     "worker/test/ingest/ingest-mode.test.ts › INGEST_MODE accepts socket and off only, parseConfig has no PLAN, DO_LOCATION_HINT or budget tier, and no pulse timer or pulse code path remains in config.ts, ingest-mode.ts, jetstream-socket.ts or index-core.ts",
+     "scripts/test/no-workers.test.ts › worker/vitest.modules.config.ts has no cloudflare:* alias and no file under worker/test imports cloudflare:test or cloudflare:workers"
+    ]
+   }
+  ]
+ },
+ {
+  "wave": 8,
+  "packages": [
+   {
+    "id": "N8-01",
+    "title": "Node backend acceptance: node-backend.sh with real scrobbler-protocol clients against fake upstreams; case-map closure",
+    "files": [
+     "scripts/acceptance/node-backend.sh",
+     "scripts/e2e/fake-upstreams.ts",
+     "scripts/e2e/scrobbler-e2e.ts",
+     "scripts/e2e/scrobbler-clients/lastfm-ts-api-client.ts",
+     "scripts/e2e/scrobbler-clients/pano-lastfm.ts",
+     "scripts/e2e/scrobbler-clients/pano-listenbrainz.ts",
+     "scripts/e2e/scrobbler-clients/web-scrobbler.ts",
+     "scripts/e2e/scrobbler-clients/navidrome.ts",
+     "scripts/e2e/scrobbler-clients/multi-scrobbler-lastfm.ts",
+     "scripts/test/node-backend.test.ts",
+     "docs/verification/backend-node.md",
+     "docs/verification/ts-case-map.json",
+     "docs/MILESTONE_STATUS.md",
+     "scripts/e2e/scrobbler-clients/https-to-loopback.mjs"
+    ],
+    "dependsOn": [
+     "N7-01",
+     "N6-01",
+     "N6-02",
+     "N4-02",
+     "N5-02",
+     "N0-02"
+    ],
+    "description": "ADR 0005 §15. node-backend.sh replaces the interim node-interim.sh (N0-02) and the retired workers-backend.sh, and mirrors workers-backend.sh: --out with its gate marker, --skip counted as a failure, per-step logs, tests.jsonl, cases.jsonl and summary.json, and exit 0, 1 or 2.\n\n**Steps:**\n1. check-ts;\n2. the worker-node and acceptance projects with per-test records;\n3. Playwright e2e;\n4. scrobbler-e2e;\n5. the Python regressions;\n6. check-node-bundle (prints the bundle SHA-256);\n7. case-map --check-tests without --node-wave, so no target may be pending;\n8. goldens;\n9. `systemd-analyze --user verify` of the units (blocked, not passed, when systemd-analyze is unavailable);\n10. live-noenv;\n11. live status.\n\n**scrobbler-e2e** starts the **e2e bundle** worker/dist/node/e2e.mjs (built by `scripts/build-server.ts --e2e` (N3-07) from worker/test/e2e/node-entry.ts (N6-01), which imports run.ts and never main.ts; its feature and protocol inputs are byte-identical to main.mjs per check-bundle) with PUBLIC_ORIGIN https://music.214510.xyz on 127.2.0.1 with a free port. main.mjs itself refuses loopback upstreams and http origins and is never used here (ADR §3.9). It starts fake-upstreams.ts as separate processes: PDS with AS and PLC (packages/atproto/test-support), Jetstream, and Last.fm and ListenBrainz (worker/test/node/support, N1-13). It then drives:\n- the real lastfm-ts-api 2.6.2 client (desktop auth, scrobble batch, now playing, getRecentTracks), in a child process started with `node --import scripts/e2e/scrobbler-clients/https-to-loopback.mjs`. lastfm-ts-api always calls node:https request with only hostname, path and timeout, so it cannot reach http://127.2.0.1:<port> by configuration. The preload replaces `https.request` on the node:https module and calls `module.syncBuiltinESMExports()`, reissuing each call with http.request to 127.2.0.1:<port> with the same method, path, headers and body bytes and Host music.214510.xyz; it throws for any other hostname. The client is configured as a user would (hostname music.214510.xyz, path /2.0/);\n- byte-faithful replays of Pano (Last.fm mobile session; ListenBrainz with lowercase token and return_msid), multi-scrobbler (web auth flow through /api/auth without a slash), Web Scrobbler (scrobbles and now playing only; its love goes to api.listenbrainz.org and is not replayed) and Navidrome request sequences;\n- five replays of one POST /api/v1/scrobbles with one Idempotency-Key through a signed-in cookie jar.\n\n**Asserted for every client:** PDS records, indexing, reads through /2.0 and /1, and exactly-once forwarding. The case-map step asserts that no retirement cites a superseded amendment.\n\nNo real network is contacted, and the script never deploys or runs a live gate body.",
+    "tests": [
+     "scripts/e2e/scrobbler-e2e.ts › lastfm-ts-api 2.6.2 in a child process whose --import preload reissues https.request to http://127.2.0.1:<port> with the same path, headers and body bytes: desktop auth, track.scrobble batch and updateNowPlaying against the e2e bundle create PDS records that are indexed and returned by user.getRecentTracks",
+     "scripts/e2e/scrobbler-e2e.ts › Pano Last.fm (mobile session) and Pano ListenBrainz (lowercase token, return_msid), multi-scrobbler web auth via /api/auth without a slash, Web Scrobbler (scrobbles and now playing) and Navidrome sequences all land as indexed records readable through /2.0 and /1",
+     "scripts/e2e/scrobbler-e2e.ts › every listen accepted in the run is forwarded exactly once to the fake Last.fm and fake ListenBrainz of the linked accounts",
+     "scripts/test/node-backend.test.ts › node-backend.sh exits 1 when any step fails, when a mapped case did not execute, and on any --skip; it exits 2 on a usage error",
+     "bash scripts/acceptance/node-backend.sh › exits 0 with every step passed and live gates listed as blocked, never as passed",
+     "python3 scripts/validate_case_map.py --check-tests › every one of the 258 cases maps to an executed Node test or a retirement with a reason, and no retirement cites a superseded amendment",
+     "scripts/e2e/scrobbler-e2e.ts › the https-to-loopback preload throws for any hostname other than music.214510.xyz, and the client child opens no other connection",
+     "scripts/e2e/scrobbler-e2e.ts › five replays of one POST /api/v1/scrobbles with the same Idempotency-Key against the e2e bundle produce one operation and one PDS record",
+     "scripts/e2e/scrobbler-e2e.ts › Pano-shaped unsigned GET reads with sk and api_key (user.getRecentTracks, user.getInfo) succeed against the e2e bundle and parse with zero-, one- and many-item pages",
+     "scripts/e2e/scrobbler-e2e.ts › a Web Scrobbler ListenBrainz batch with one over-long artist name answers 200, the other listens become indexed records, and the ignored listen is listed by GET /api/v1/account/ignored-listens"
+    ]
+   }
+  ]
+ }
+]

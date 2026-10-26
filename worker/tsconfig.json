@@ -1,0 +1,21 @@
+{
+  // The application sources only (production code). Two runtimes' types side by
+  // side while the port to Node runs (ADR 0005 §3, N0-01): Node's (node:sqlite,
+  // node:crypto, undici, ws) for the Node host under src/node/** and the code it
+  // composes, and the Workers runtime's for the Workers-only files (src/index.ts,
+  // src/do/index-do.ts, src/scheduled.ts, src/env.ts) until N7-01 deletes them.
+  // The two declaration sets do not conflict (tsc 7, skipLibCheck), so the
+  // Workers-only files need no separate tsconfig.workers.json. The test suites
+  // are a separate project (test/tsconfig.json), so test-only declarations (the
+  // harness's Cloudflare.Env augmentation, cloudflare:test and Vite's client
+  // types) never reach this typecheck.
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "outDir": ".tsbuild",
+    "lib": ["es2024"],
+    "types": ["@cloudflare/workers-types", "node"]
+  },
+  "include": ["src/**/*.ts"],
+  "references": [{ "path": "../packages/core" }, { "path": "../packages/atproto" }]
+}

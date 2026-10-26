@@ -1,0 +1,10 @@
+{
+  "$type": "com.example.atmusic.scrobble",
+  "artist": "Björk",
+  "track": "Jóga",
+  "album": "Homogenic",
+  "listenedAt": "2026-01-15T11:00:00Z",
+  "createdAt": "2026-01-15T12:00:00Z",
+  "durationSeconds": 300,
+  "recordingMbid": "c7a1fa70-1af8-4f92-a2b1-d8c85a1695e9"
+}

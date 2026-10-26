@@ -1,0 +1,14 @@
+{
+  "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+  "handle": "alice.test",
+  "username": "alice.test",
+  "oauthStatus": "active",
+  "shareNowPlaying": true,
+  "importSharePercent": 50,
+  "capabilities": [
+    "writes",
+    "listenbrainz",
+    "imports",
+    "forwarding"
+  ]
+}

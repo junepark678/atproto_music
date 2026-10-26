@@ -1,0 +1,50 @@
+{
+  "toptracks": {
+    "track": [
+      {
+        "name": "Test Track",
+        "duration": "215",
+        "playcount": "3",
+        "mbid": "",
+        "url": "https://www.last.fm/music/Test+Artist/_/Test+Track",
+        "streamable": {
+          "fulltrack": "0",
+          "#text": "0"
+        },
+        "artist": {
+          "name": "Test Artist",
+          "mbid": "",
+          "url": "https://www.last.fm/music/Test+Artist"
+        },
+        "image": [
+          {
+            "size": "small",
+            "#text": ""
+          },
+          {
+            "size": "medium",
+            "#text": ""
+          },
+          {
+            "size": "large",
+            "#text": ""
+          },
+          {
+            "size": "extralarge",
+            "#text": ""
+          }
+        ],
+        "@attr": {
+          "rank": "1"
+        }
+      }
+    ],
+    "@attr": {
+      "user": "alice",
+      "page": "1",
+      "perPage": "50",
+      "totalPages": "1",
+      "total": "1"
+    }
+  }
+}

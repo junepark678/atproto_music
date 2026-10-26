@@ -1,0 +1,45 @@
+{
+  "topalbums": {
+    "album": [
+      {
+        "name": "Test Album",
+        "playcount": "4",
+        "mbid": "",
+        "url": "https://www.last.fm/music/Test+Artist/Test+Album",
+        "artist": {
+          "name": "Test Artist",
+          "mbid": "",
+          "url": "https://www.last.fm/music/Test+Artist"
+        },
+        "image": [
+          {
+            "size": "small",
+            "#text": ""
+          },
+          {
+            "size": "medium",
+            "#text": ""
+          },
+          {
+            "size": "large",
+            "#text": ""
+          },
+          {
+            "size": "extralarge",
+            "#text": ""
+          }
+        ],
+        "@attr": {
+          "rank": "1"
+        }
+      }
+    ],
+    "@attr": {
+      "user": "alice",
+      "page": "1",
+      "perPage": "50",
+      "totalPages": "1",
+      "total": "1"
+    }
+  }
+}
