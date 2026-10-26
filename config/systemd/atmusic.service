@@ -1,0 +1,58 @@
+[Unit]
+Description=atmusic (AT Protocol music AppView, Last.fm/ListenBrainz compatible)
+StartLimitIntervalSec=10min
+StartLimitBurst=10
+[Service]
+Type=notify
+NotifyAccess=all
+WatchdogSec=60s
+WatchdogSignal=SIGKILL
+WorkingDirectory=%h/.local/lib/atmusic/current
+ExecStart=/usr/bin/node --enable-source-maps %h/.local/lib/atmusic/current/worker/dist/node/main.mjs
+Environment=NODE_ENV=production ATMUSIC_LISTEN=127.2.0.1:8888 ATMUSIC_PUBLIC_ORIGIN=https://music.214510.xyz
+# ATMUSIC_CLIENT_IP_HEADER and ATMUSIC_SIGNIN_DIDS are set in atmusic.env (required; §3.8, §14.6)
+EnvironmentFile=-%E/atmusic/atmusic.env
+# The user manager's environment is inherited; none of these may reach Node (§3.8). run() exits 78 if one does.
+UnsetEnvironment=NODE_OPTIONS NODE_TLS_REJECT_UNAUTHORIZED NODE_EXTRA_CA_CERTS NODE_USE_ENV_PROXY NODE_PATH
+UnsetEnvironment=HTTP_PROXY http_proxy HTTPS_PROXY https_proxy NO_PROXY no_proxy ALL_PROXY all_proxy
+UnsetEnvironment=SSL_CERT_FILE SSL_CERT_DIR
+ConfigurationDirectory=atmusic
+StateDirectory=atmusic
+StateDirectoryMode=0700
+RuntimeDirectory=atmusic
+RuntimeDirectoryMode=0700
+LoadCredentialEncrypted=secrets:%E/atmusic/secrets.cred
+Restart=on-failure
+RestartPreventExitStatus=78 75
+RestartSec=2s
+RestartSteps=5
+RestartMaxDelaySec=2min
+TimeoutStartSec=15min
+TimeoutStopSec=30s
+KillMode=mixed
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+MemoryHigh=768M
+MemoryMax=1G
+TasksMax=256
+LimitNOFILE=8192
+SyslogIdentifier=atmusic
+[Install]
+WantedBy=default.target
