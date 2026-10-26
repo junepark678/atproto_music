@@ -1,49 +1,71 @@
 # Backup and recovery
 
-The index is **derived data**. Every scrobble, follow and opt-out it holds is a copy of a signed record in some user's public repository, and nothing else is stored: no OAuth tokens, sessions, outbox, encryption key or private account data (ADR 0004 §1.1, A3, A12). The authoritative copy of each user's data is their PDS. Recovery therefore has two tools, and neither involves copying files (amendment A15):
+The database holds two kinds of state ([ADR 0005](adr/0005-local-node-host-and-compat-apis.md) §6.4, §14.5; `TABLE_CLASS` in `worker/src/do/schema.ts` classifies every table):
 
-1. **Durable Object point-in-time recovery (PITR)**: restore the whole `IndexDO` to its state at any instant in the last 30 days.
-2. **Rebuild from the network**: start from an empty index and re-derive it from public repositories through the normal, fully verified ingestion path.
+- **derived**: the index (scrobbles, follows, loves, record states, users), its ingestion queues, Jetstream cursor, caches and timers. Every row is a copy of a signed record in some public repository and can be rebuilt from the network through the verified ingestion path.
+- **non-derived**: local state that exists nowhere else: accounts, web sessions, OAuth states and sessions, the outbox (operations, listen keys, PDS budget), Last.fm and ListenBrainz credentials (stored as hashes or sealed), linked accounts, the forward queue, imports, ignored listens, backup history, counters and the schema ledger.
 
-There is deliberately no logical dump or restore command (ADR §3.2). The only operator secret, `CURSOR_KEY`, is not in the index; keep it in a password manager. Losing it costs only outstanding pagination cursors (clients restart their traversal after one 400 `invalid_cursor`).
+Because a backup holds security state, a restore never simply puts an old file back: it keeps the live non-derived state and takes only the rebuildable index from the backup. This supersedes ADR 0004 A15 ("derived data, no file backup") and the Durable Object PITR it relied on.
 
-## Point-in-time recovery
+Secrets are **never** in a backup: credentials inside are ciphertext under keys that live only in the secrets credential ([operations.md](operations.md#secrets)). Keep the plaintext secrets document in a password manager; a backup without its keys restores the index and the hashes, but every OAuth session and linked credential becomes unreadable (`reauth_required`, relink).
 
-SQLite-backed Durable Objects keep 30 days of point-in-time history. `POST /internal/admin/pitr {atMs}` asks the `IndexDO` for the bookmark of that instant (`ctx.storage.getBookmarkForTime`), schedules it for the next session (`onNextSessionRestoreBookmark`) and aborts the instance, so the next request opens the restored storage. The route exists only while the `ADMIN_TOKEN` secret is set (otherwise it is a 404 like any unknown path) and compares the bearer token in constant time.
+## Backups
 
-Use the operator script, which never takes the token as a flag and never prints it:
+The server backs itself up, in-process (`worker/src/node/backup.ts`):
+
+- **Daily at 03:30 UTC**, and **on demand** with `atmusic-admin backup` ([operations.md](operations.md#admin-cli)).
+- **Before a migration**, at startup, when the release's schema is newer than the database's: same procedure, before `READY=1`, while systemd's start timeout is extended. If there is not enough free space the server exits 78 naming `ATMUSIC_MIN_FREE_BYTES` rather than migrating without a backup.
+
+One backup run:
+
+0. **Free space:** refused (a failed `backup_runs` row with error `low_disk`, shown by `atmusic-admin status`) unless the backup filesystem has the database size plus `ATMUSIC_MIN_FREE_BYTES` free, so a backup can never fill the disk under the live database.
+1. node:sqlite's incremental online `backup()` copies the live database into `backups/atmusic-YYYYMMDDTHHMMZ.db.tmp` (mode 0600), 100 pages per step, yielding to the event loop, so requests, Jetstream and the watchdog continue. The copy is the database as of one commit.
+2. `PRAGMA integrity_check` runs on the copy in a worker thread, never on the live file.
+3. Rename, fsync the file and the directory, record a `backup_runs` row.
+4. **Retention:** the newest backup of each of the last 7 days and of each of the 4 weeks before, counting daily and manual runs only. Pre-migration (`*.pre-migration.db`) and pre-restore copies are kept until you delete them.
+
+Backups live in `~/.local/state/atmusic/backups/` (`ATMUSIC_BACKUP_DIR`). **Offsite copies** are your choice and not built in: `rclone copy` of that directory to an R2 free-tier bucket or another remote, or an external disk; copy only complete `atmusic-*.db` files, never `*.tmp`. Litestream is possible but opt-in only (a second resident process; keep `sync-interval` at 1 minute or more to stay inside R2's free operations).
+
+### The revocation journal
+
+Every revocation or deletion of a credential (logout, logout-all, app password, Last.fm session, ListenBrainz token, issued app, unlink, OAuth session, account disconnect) is also appended to `~/.local/state/atmusic/revocations.log` before the deleting transaction commits: one JSON line per event, hashes and ids only, never a secret, mode 0600, fsync after each append. It lives **outside** the database, so backups do not contain it, and a restore over a lost database replays it. When a backup completes, the journal is truncated to the entries newer than the oldest backup still in the backup directory, so every backup that can be restored has its journal. Back it up with the backups when you copy them offsite.
+
+## Restore is disaster recovery only
+
+Restore is for a lost or corrupt database. **It is never the way to undo an upgrade**: rollback is a link switch to the previous release ([deploy/local-node.md](deploy/local-node.md#upgrades-and-rollback)). Restoring an older file wholesale would bring back credentials and sessions revoked since then, revert `oauth_sessions` to refresh tokens the authorization server has already rotated (refreshes fail with `invalid_grant`), and lose scrobbles, listen keys and forward rows already acknowledged with 200.
 
 ```sh
-read -rs ADMIN_TOKEN && export ADMIN_TOKEN    # paste the Worker's ADMIN_TOKEN; it stays out of shell history
-npx tsx scripts/admin/pitr-restore.ts --help
-npx tsx scripts/admin/pitr-restore.ts --at 2026-01-15T11:00:00Z --dry-run      # prints the request only
-npx tsx scripts/admin/pitr-restore.ts --at 2026-01-15T11:00:00Z --yes          # production origin
-npx tsx scripts/admin/pitr-restore.ts --at 2026-01-15T11:00:00Z --env staging --yes
+cd ~/.local/lib/atmusic/current
+npx tsx scripts/admin/restore.ts ~/.local/state/atmusic/backups/atmusic-20260115T0330Z.db
+# options: --accept-loss, --secrets FILE, --db PATH, --state-dir DIR, --listen HOST:PORT, --no-ready-check
 ```
 
-`--at` takes ISO-8601 with a timezone or epoch milliseconds; it must be within the last 30 days and not in the future (the Worker re-checks: 422 `fields.atMs`). An explicit `--env` always targets that env's `PUBLIC_ORIGIN` in `worker/wrangler.jsonc`, and the tool refuses (status 2, nothing sent) when an ambient `PUBLIC_ORIGIN` or an `--origin` names a different origin. Without `--env` the origin is `--origin`, else `PUBLIC_ORIGIN`, else production's `PUBLIC_ORIGIN`. The resolved env and origin are printed before anything is sent. Exit status 0 means scheduled (202 with the bookmark), 1 means the Worker refused (404: no `ADMIN_TOKEN` on that Worker; 401: wrong token; 422: out of range), 2 means a usage or configuration error and nothing was sent.
+What it does, in order (`scripts/admin/restore.ts`):
 
-After a restore:
+1. **Pre-flight**, while the service still runs: the backup must pass `integrity_check` and `foreign_key_check` and hold a schema this release can migrate; `revocations.log` must parse; the secrets must load (`--secrets FILE`, else `systemd-creds --user decrypt` of `~/.config/atmusic/secrets.cred`, else `~/.config/atmusic/secrets.json`); `atmusic.db.pre-restore` must not exist yet (the previous restore's copy is never overwritten; move it away first).
+2. **Stop** `systemctl --user stop atmusic.socket atmusic.service` and require `systemctl --user is-active` to report both stopped. The socket unit is stopped too, because an inbound connection would otherwise start the service while the database is moved aside. The live database is then opened with `locking_mode=EXCLUSIVE`, the server's own single-writer lock; if anything still holds it, the restore aborts with nothing changed.
+3. **Copy the live database** (with its WAL) to `atmusic.db.pre-restore`: a consistent `backup()` copy when it is readable, the raw files (`atmusic.db.pre-restore`, `atmusic.db.pre-restore-wal`) when it is not.
+4. **Build `atmusic.db.restore.tmp`** from a copy of the backup, migrated to this release's schema (migrations are additive). A table missing from `TABLE_CLASS` aborts here, before anything is renamed.
+   - **Live database readable:** every non-derived table is replaced wholesale by the live rows; only the derived tables keep the backup's rows. Every sign-in, rename, credential, revocation, operation, listen key, forward row and import stays exactly as it is live; the backup contributes only the index, and its Jetstream cursor and timers stay consistent with that index. Index rows written after the backup come back through Jetstream replay or gap recovery. (The schema ledger, `schema_migrations` and `schema_compat`, describes the file itself: from a live database at an older schema version the migrated copy keeps its own.)
+   - **Live database unreadable or missing:** restore prints what cannot be carried over (every non-derived change after the backup's time: sign-ins and renames, all web sessions, credentials created since, queued writes, forward rows, import progress) and **refuses unless `--accept-loss`** is given. With it, every `web_sessions` row is deleted (everyone signs in to the web UI again) and `revocations.log` is **replayed**: each journaled revocation deletes its row from the restored copy, so a credential, link or OAuth session revoked after the backup stays revoked.
+   - **Key check:** every OAuth session, linked-account credential and issued Last.fm app secret is opened with the configured encryption keys and the result is printed as counts and key ids, never ciphertext or key material. An OAuth session that does not open (its key id is not configured) makes its account `reauth_required` and blocks its queued operations until the user signs in again; the stored ciphertext is left unchanged, so restoring the missing key later still opens it. A linked credential that does not open is held by the forwarder at first use and its user relinks.
+   - The copy must pass `integrity_check` and `foreign_key_check`; a per-table summary (rows, and whether they came from `live` or `backup`) is printed.
+5. **Swap**, crash-safe at every step: open the copy with `journal_mode=DELETE` and close it, requiring that no `restore.tmp-wal`, `-shm` or `-journal` is left; fsync it; close the live database, delete `atmusic.db-wal`, `-shm` and `-journal` and fsync the directory; rename the copy over `atmusic.db` and fsync the directory again. A crash between any two steps leaves either the old file without a WAL (recoverable from `atmusic.db.pre-restore`) or the complete restored file, never a restored file paired with a stale WAL. The server switches back to `journal_mode=WAL` at its next start.
+6. **Start** `systemctl --user start atmusic.socket atmusic.service` and poll `/health/ready` on the listen address until it answers 200 `ready`.
 
-- `GET /internal/admin/status` (same bearer token) shows the restored schema version, ingest checkpoint, hint and job counts and counters; `/api/v1/meta` shows the indexing state.
-- Everything newer than `--at` is recovered from the network, not lost for good. The Jetstream cursor is the restored one: within `JETSTREAM_LOOKBACK_HOURS` (24) the socket replays from it (hints are idempotent); older than that, the DO enters gap recovery, which snapshots every known active DID and runs relay discovery. Range snapshots cover the whole `<prefix>` key range, so a `settings/self` opt-out written after `--at` is re-applied by the snapshot of that DID, and deletions are proven by its verified enumeration.
-- DIDs first admitted after `--at` reappear when they write again, sign in (the SPA sends notify), or are listed by relay discovery.
-- PITR restores storage, not code. To undo a bad version, roll the code back first (`npx wrangler rollback --config worker/wrangler.jsonc`, see [deployment.md](deployment.md)), then restore to a point before that version first ran. A restore to a point before a schema migration followed by the same new code simply re-runs the migration.
+A refusal or failure after step 2 leaves both units stopped and prints the command to start them. Exit status: 0 restored and ready, 1 refused or failed, 2 usage or configuration error (nothing stopped).
 
-## Rebuild from the network
+After a restore, `atmusic.db.pre-restore` holds the database as it was; delete it (or move it into the backup directory as `atmusic-<YYYYMMDDTHHMMZ>.pre-restore.db`, where `atmusic-admin status` lists it) once the restored service has run for a while.
 
-A rebuild is the answer when the index is older than the PITR window, when its integrity is in doubt, or when a new environment should hold the same public data. Everything goes through the production verifier: nothing is trusted that is not signed by the repository's current DID key at its current head.
+## Rebuilding the index from the network
 
-An empty `IndexDO` (a new environment, or a new Durable Object class introduced by a reviewed wrangler migration) starts with no Jetstream cursor, which is itself a gap: it resumes from the live tail, runs relay `listReposByCollection` discovery for the scrobble and follow collections, and admits each discovered DID with a complete range snapshot. Users of the SPA are also admitted when they next sign in, because it sends `POST /api/v1/notify {did}`. One DID at a time can be re-walked from its signed head with `POST /internal/admin/resnapshot {did}` (202 `scheduled`/`already`; 404 for an unknown or opted-out DID; 503 `queue_full`).
+The derived half can always be rebuilt through the production verifier, which trusts nothing not signed by the repository's current DID key at its current head. A database whose index is in doubt keeps its non-derived tables and re-derives the rest:
 
-What a rebuild reproduces, and what it cannot:
+- With no Jetstream cursor the server is in a gap: it resumes from the live tail, runs relay `listReposByCollection` discovery for the indexed collections, and admits each discovered DID with a complete range snapshot. Signed-in users are re-admitted when they next write.
+- One DID at a time: `atmusic-admin resnapshot <did>` (202 `scheduled`/`already`; 404 for an unknown or opted-out DID; `queue_full` when the snapshot queue is full).
+- Opt-outs survive: a disconnect is the public, repo-signed `<prefix>.settings/self {indexing: "disabled"}` record ([account-controls.md](account-controls.md)), honoured even for a DID the index has never seen.
+- Coverage is discovery-bounded and admission is rate-limited (50 new DIDs per hour, 1,024 pending snapshot jobs), so a large rebuild fills in over hours while global indexing reports `recovering`.
 
-- **Opt-outs survive.** A user's disconnect is the public, repo-signed `<prefix>.settings/self {indexing: "disabled"}` record ([account-controls.md](account-controls.md)). It is honoured for a DID the index has never seen, so a rebuilt index never re-indexes someone who opted out.
-- **Coverage is discovery-bounded.** Only DIDs that relay discovery lists, that write after the rebuild, or that sign in again are found. There is no global completeness promise (ADR §13).
-- **Admission is rate-limited** to 50 new DIDs per hour and 1,024 pending snapshot jobs, so a rebuild of 1,000 users takes about 20 hours; history, feeds and statistics fill in as snapshots complete, and global indexing reports `recovering` until gap recovery finishes.
+## Tests
 
-Deleting the production `IndexDO` class is irreversible after the 30-day PITR window and needs a reviewed change to the `migrations` of `worker/wrangler.jsonc`; prefer a PITR restore or a parallel environment.
-
-## What is not covered
-
-The deterministic suites exercise the admin token gate, the strict request bodies and the 30-day window check (`worker/test/composition/admin.test.ts`), and `scripts/test/deploy.test.ts` exercises `pitr-restore.ts` against a fake fetch. The local workerd test runtime does not perform a real point-in-time restore, so an actual restore is an operator action outside the suites (plan case M6.1.3/upgrade_failure, A15). Live recovery evidence belongs to the W6-05 gates.
+`worker/test/node/backup.test.ts` covers the online backup, the integrity check, retention and the journal truncation; `scripts/test/restore.test.ts` covers the restore against a fake systemd and the real server: stopping both units first, refusing an unreadable live database without `--accept-loss`, the merge of live non-derived rows over the backup's index, the journal replay, the key check with the right and a missing key, an unclassified table, and a SIGKILL after each swap step (plan cases M6.3.1/restore_state and M6.3.1/wrong_key).
