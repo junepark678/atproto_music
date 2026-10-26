@@ -20,13 +20,16 @@ import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import {
   chmodSync,
+  closeSync,
   copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
   rmSync,
   writeFileSync,
+  writeSync,
 } from 'node:fs';
 import { connect, createServer as createNetServer, type Server as NetServer } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -45,7 +48,7 @@ import { ensureAccount, renameAccount } from '../../worker/src/credentials/accou
 import { createAppPassword, revokeAppPassword, verifyAppPassword } from '../../worker/src/credentials/app-passwords.ts';
 import { type Box, createBox } from '../../worker/src/crypto/box.ts';
 import { migrate } from '../../worker/src/do/migrate.ts';
-import { SCHEMA_VERSION } from '../../worker/src/do/schema.ts';
+import { SCHEMA_VERSION, TABLE_CLASS } from '../../worker/src/do/schema.ts';
 import { deleteLink, getLinkById, openLinkCredential, saveLink } from '../../worker/src/forward/links.ts';
 import { createBackups } from '../../worker/src/node/backup.ts';
 import { type ExitCode, type RunningServer, run } from '../../worker/src/node/run.ts';
@@ -290,6 +293,69 @@ function corruptLive(world: World): Buffer {
   writeFileSync(world.dbPath, garbage);
   rmSync(`${world.dbPath}-wal`, { force: true });
   return garbage;
+}
+
+/**
+ * Turns the world's open live database (buildWorld keepWal) into a crash-time
+ * pair: the main file and its WAL as they were while it was open, with every
+ * post-backup commit only in the WAL (no checkpoint).
+ */
+function crashConsistentLive(world: World & { live: SqliteDb | null }): void {
+  const live = world.live as SqliteDb;
+  const copy = join(world.dir, 'crash');
+  mkdirSync(copy);
+  copyFileSync(world.dbPath, join(copy, 'atmusic.db'));
+  copyFileSync(`${world.dbPath}-wal`, join(copy, 'atmusic.db-wal'));
+  live.close();
+  rmSync(world.dbPath);
+  rmSync(`${world.dbPath}-wal`, { force: true });
+  rmSync(`${world.dbPath}-shm`, { force: true });
+  copyFileSync(join(copy, 'atmusic.db'), world.dbPath);
+  copyFileSync(join(copy, 'atmusic.db-wal'), `${world.dbPath}-wal`);
+  // The main file alone does not have the post-backup rows: they live in the WAL.
+  const mainOnly = join(copy, 'main-only.db');
+  copyFileSync(join(copy, 'atmusic.db'), mainOnly);
+  expect(query(mainOnly, 'SELECT rkey FROM scrobbles ORDER BY rkey')).toEqual([{ rkey: 's1' }]);
+}
+
+/** Runs `read` on a scratch copy of `path` and its WAL, so the inspected files stay as they are. */
+function onScratchCopy<T>(world: World, label: string, path: string, read: (db: sqlite.DatabaseSync) => T): T {
+  const scratch = join(world.dir, `scratch-${label}`);
+  mkdirSync(scratch);
+  copyFileSync(path, join(scratch, 'x.db'));
+  if (existsSync(`${path}-wal`)) copyFileSync(`${path}-wal`, join(scratch, 'x.db-wal'));
+  const db = new sqlite.DatabaseSync(join(scratch, 'x.db'));
+  try {
+    return read(db);
+  } finally {
+    db.close();
+  }
+}
+
+function integrity(db: sqlite.DatabaseSync, table?: string): string[] {
+  const sql = table === undefined ? 'PRAGMA integrity_check' : `PRAGMA integrity_check("${table}")`;
+  try {
+    return (db.prepare(sql).all() as Array<Record<string, unknown>>).map((r) => String(Object.values(r)[0]));
+  } catch (error) {
+    return [`error: ${(error as { errstr?: string }).errstr ?? String(error)}`];
+  }
+}
+
+/** The page numbers a WAL file holds frames for (32-byte header, then 24-byte frame headers). */
+function walPages(wal: Buffer, pageSize: number): Set<number> {
+  const pages = new Set<number>();
+  for (let at = 32; at + 24 + pageSize <= wal.length; at += 24 + pageSize) pages.add(wal.readUInt32BE(at));
+  return pages;
+}
+
+/** Overwrites one page of the main database file in place (a bad sector). */
+function damagePage(path: string, page: number, pageSize: number): void {
+  const fd = openSync(path, 'r+');
+  try {
+    writeSync(fd, Buffer.alloc(pageSize, 0x07), 0, pageSize, (page - 1) * pageSize);
+  } finally {
+    closeSync(fd);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -889,6 +955,127 @@ describe('restore.ts', () => {
     expect(rows('PRAGMA integrity_check')).toEqual([{ integrity_check: 'ok' }]);
   }, 30_000);
 
+  it('a live database that opens but fails integrity_check in a non-derived table, with commits only in its WAL, is left byte-identical by the refusal, and --accept-loss keeps that original db and -wal as the pre-restore pair', async () => {
+    const world = await buildWorld({ keepWal: true });
+    crashConsistentLive(world);
+    expect(TABLE_CLASS.linked_accounts).toBe('non-derived');
+    // Damage the linked_accounts root page in the main file. Nothing after the
+    // backup wrote it, so the WAL holds no newer copy of that page.
+    const { pageSize, root } = onScratchCopy(world, 'schema', world.dbPath, (db) => ({
+      pageSize: (db.prepare('PRAGMA page_size').get() as { page_size: number }).page_size,
+      root: (
+        db.prepare("SELECT rootpage FROM sqlite_master WHERE name = 'linked_accounts'").get() as { rootpage: number }
+      ).rootpage,
+    }));
+    expect(walPages(readFileSync(`${world.dbPath}-wal`), pageSize).has(root)).toBe(false);
+    damagePage(world.dbPath, root, pageSize);
+    const mainBefore = readFileSync(world.dbPath);
+    const walBefore = readFileSync(`${world.dbPath}-wal`);
+    // The damaged pair still opens: carol's post-backup sign-in reads (from the WAL only),
+    // the file and linked_accounts fail integrity_check, accounts passes.
+    onScratchCopy(world, 'damaged', world.dbPath, (db) => {
+      expect(db.prepare('SELECT username FROM accounts WHERE did = ?').all(DID_C)).toEqual([
+        { username: 'carol.test' },
+      ]);
+      expect(integrity(db)).not.toEqual(['ok']);
+      expect(integrity(db, 'linked_accounts')).not.toEqual(['ok']);
+      expect(integrity(db, 'accounts')).toEqual(['ok']);
+    });
+
+    const systemd = new FakeSystemd(world, { servicePort: null });
+    await systemd.boot();
+    const refused = await restoreCli(world, systemd, [...baseArgs(world), '--no-ready-check']);
+    expect(refused.code, `${refused.stdout}\n${refused.stderr}`).toBe(1);
+    expect(refused.stderr).toContain(
+      `the live database ${world.dbPath} is unusable (it cannot be read: integrity_check fails for the non-derived tables linked_accounts)`,
+    );
+    expect(refused.stderr).toContain('refusing without --accept-loss; nothing was changed');
+    // Nothing was changed: the main file and the WAL are byte-identical, no -shm or copy is left.
+    expect(readFileSync(world.dbPath).equals(mainBefore)).toBe(true);
+    expect(existsSync(`${world.dbPath}-wal`)).toBe(true);
+    expect(readFileSync(`${world.dbPath}-wal`).equals(walBefore)).toBe(true);
+    for (const leftover of ['-shm', '-journal', '.pre-restore', '.pre-restore-wal', '.restore.tmp']) {
+      expect(existsSync(`${world.dbPath}${leftover}`), leftover).toBe(false);
+    }
+    expect(systemd.events).toEqual([
+      'systemctl stop atmusic.socket atmusic.service',
+      'systemctl is-active atmusic.socket atmusic.service',
+      'step stopped',
+    ]);
+
+    // --accept-loss: the pre-restore pair is the original main file and WAL, byte for byte.
+    const accepted = await restoreCli(world, systemd, [...baseArgs(world), '--accept-loss', '--no-ready-check']);
+    expect(accepted.code, `${accepted.stdout}\n${accepted.stderr}`).toBe(0);
+    expect(accepted.stdout).toContain(
+      `copied the unreadable live files to ${world.dbPath}.pre-restore, ${world.dbPath}.pre-restore-wal`,
+    );
+    expect(readFileSync(`${world.dbPath}.pre-restore`).equals(mainBefore)).toBe(true);
+    expect(readFileSync(`${world.dbPath}.pre-restore-wal`).equals(walBefore)).toBe(true);
+    // ...so the post-backup state is still recoverable from it.
+    onScratchCopy(world, 'pre-restore', `${world.dbPath}.pre-restore`, (db) => {
+      expect(db.prepare('SELECT username FROM accounts ORDER BY did').all()).toEqual([
+        { username: 'alice2' },
+        { username: 'bob.test' },
+        { username: 'carol.test' },
+      ]);
+    });
+    // The restored database is the backup's (with every web session deleted), and sound.
+    expect(query(world.dbPath, 'SELECT username FROM accounts ORDER BY did')).toEqual([
+      { username: 'alice.test' },
+      { username: 'bob.test' },
+    ]);
+    expect(query(world.dbPath, 'SELECT count(*) AS n FROM web_sessions')).toEqual([{ n: 0 }]);
+    expect(query(world.dbPath, 'SELECT count(*) AS n FROM linked_accounts')).toEqual([{ n: 1 }]);
+    expect(query(world.dbPath, 'PRAGMA integrity_check')).toEqual([{ integrity_check: 'ok' }]);
+  }, 60_000);
+
+  it('damage confined to a derived index leaves the live database readable: post-backup accounts, renames, web sessions and queued operations survive without --accept-loss, and the damaged derived table comes from the backup', async () => {
+    const world = await buildWorld();
+    expect(TABLE_CLASS.scrobbles).toBe('derived');
+    const { pageSize, index } = onScratchCopy(world, 'schema', world.dbPath, (db) => ({
+      pageSize: (db.prepare('PRAGMA page_size').get() as { page_size: number }).page_size,
+      index: db
+        .prepare(
+          "SELECT name, rootpage FROM sqlite_master WHERE type = 'index' AND tbl_name = 'scrobbles' ORDER BY name",
+        )
+        .get() as { name: string; rootpage: number },
+    }));
+    expect(existsSync(`${world.dbPath}-wal`)).toBe(false);
+    damagePage(world.dbPath, index.rootpage, pageSize);
+    onScratchCopy(world, 'damaged', world.dbPath, (db) => {
+      expect(integrity(db)).not.toEqual(['ok']);
+      expect(integrity(db, 'scrobbles')).not.toEqual(['ok']);
+      expect(integrity(db, 'accounts')).toEqual(['ok']);
+    });
+
+    const systemd = new FakeSystemd(world, { servicePort: null });
+    await systemd.boot();
+    const result = await restoreCli(world, systemd, [...baseArgs(world), '--no-ready-check']);
+    expect(result.code, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(result.stdout).toContain('its non-derived tables are kept');
+    expect(result.stdout).toContain("the live database's derived tables scrobbles fail integrity_check");
+    expect(result.stderr).not.toContain('unusable');
+    // Post-backup non-derived state is as it was live.
+    expect(query(world.dbPath, 'SELECT did, username FROM accounts ORDER BY did')).toEqual([
+      { did: DID_A, username: 'alice2' },
+      { did: DID_B, username: 'bob.test' },
+      { did: DID_C, username: 'carol.test' },
+    ]);
+    expect(query(world.dbPath, 'SELECT did FROM web_sessions')).toEqual([{ did: DID_C }]);
+    expect(query(world.dbPath, 'SELECT id, state FROM operations ORDER BY id')).toEqual([
+      { id: 'op1', state: 'queued' },
+      { id: 'op2', state: 'queued' },
+    ]);
+    expect(
+      query(world.dbPath, 'SELECT count(*) AS n FROM app_passwords WHERE id = ?', world.ids.p1Id as string),
+    ).toEqual([{ n: 0 }]);
+    // The derived table is the backup's, intact.
+    expect(query(world.dbPath, 'SELECT rkey FROM scrobbles ORDER BY rkey')).toEqual([{ rkey: 's1' }]);
+    expect(query(world.dbPath, 'PRAGMA integrity_check')).toEqual([{ integrity_check: 'ok' }]);
+    expect(result.stdout).toMatch(/\n {2}scrobbles +1 {2}backup\n/);
+    expect(result.stdout).toMatch(/\n {2}accounts +3 {2}live\n/);
+  }, 30_000);
+
   it('killing restore after each swap step (temp file closed, temp fsynced, live WAL removed, renamed) leaves a database whose integrity_check is ok, never a restored file paired with a stale WAL, and a completed restore contains the merged live rows with no restore.tmp-wal left', async () => {
     const entryDir = mkdtempSync(join(tmpdir(), 'atmusic-restore-entry-'));
     dirs.push(entryDir);
@@ -924,21 +1111,7 @@ process.exit(code);
     /** A crash-time live database: the post-backup commits are only in its WAL. */
     const crashWorld = async (): Promise<World> => {
       const world = await buildWorld({ keepWal: true });
-      const live = (world as World & { live: SqliteDb }).live;
-      const copy = join(world.dir, 'crash');
-      mkdirSync(copy);
-      // A crash-consistent copy of the open database: the file and its WAL, no checkpoint.
-      copyFileSync(world.dbPath, join(copy, 'atmusic.db'));
-      copyFileSync(`${world.dbPath}-wal`, join(copy, 'atmusic.db-wal'));
-      live.close();
-      rmSync(world.dbPath);
-      rmSync(`${world.dbPath}-wal`, { force: true });
-      copyFileSync(join(copy, 'atmusic.db'), world.dbPath);
-      copyFileSync(join(copy, 'atmusic.db-wal'), `${world.dbPath}-wal`);
-      // The main file alone does not have the post-backup rows: they live in the WAL.
-      const mainOnly = join(copy, 'main-only.db');
-      copyFileSync(join(copy, 'atmusic.db'), mainOnly);
-      expect(query(mainOnly, 'SELECT rkey FROM scrobbles ORDER BY rkey')).toEqual([{ rkey: 's1' }]);
+      crashConsistentLive(world);
       return world;
     };
 

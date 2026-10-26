@@ -30,13 +30,24 @@
 //    `systemctl --user is-active atmusic.socket atmusic.service` must report
 //    both stopped (`inactive`, or `failed`, which is also not running).
 //    Stopping the socket unit matters: an inbound connection would otherwise
-//    socket-activate the service while the database is moved aside. The live
-//    database is then opened with locking_mode=EXCLUSIVE (the server's own
-//    single-writer lock, §3.2), which is a second barrier: if anything still
-//    holds it, the restore aborts.
-// 2. The live database (with its WAL) is copied to atmusic.db.pre-restore: a
-//    consistent node:sqlite backup() copy when it is readable, the raw files
-//    (atmusic.db.pre-restore and atmusic.db.pre-restore-wal) when it is not.
+//    socket-activate the service while the database is moved aside.
+// 2. The live database is examined on a READ-ONLY connection, whose open read
+//    transaction is the second barrier (the server's locking_mode=EXCLUSIVE
+//    cannot be taken while it is held, and a holder of it refuses the reader:
+//    the restore then aborts). Nothing of the live main file or WAL is written
+//    before the originals are preserved: closing a read-write connection would
+//    checkpoint the WAL into the main file and delete it. The live database is
+//    readable when its schema and ledger read and every non-derived TABLE_CLASS
+//    table passes PRAGMA integrity_check(<table>) and a full read; damage
+//    confined to derived tables (the rebuildable index, which comes from the
+//    backup anyway) is reported and ignored. It is then copied, still under the
+//    read-only barrier, to atmusic.db.pre-restore: a consistent node:sqlite
+//    backup() copy when it is readable, the original files byte for byte
+//    (atmusic.db.pre-restore and, when present, -wal and -journal) when it is
+//    not. Only then is it reopened read-write with locking_mode=EXCLUSIVE (the
+//    server's own single-writer lock, §3.2), held until the swap; a readable
+//    database must not have moved in between. A refusal removes the empty -wal
+//    and the -shm a read-only open may create, so it really changes nothing.
 // 3. atmusic.db.restore.tmp is a copy of the backup, migrated to this code's
 //    schema version (migrations are additive). Every table of the copy and of
 //    the live database must be classified in TABLE_CLASS (worker/src/do/
@@ -318,64 +329,164 @@ function copyPrivate(from: string, to: string): void {
 }
 
 const SIDE_FILES = ['-wal', '-shm', '-journal'] as const;
+/** The raw pre-restore copy of an unreadable live database: the main file, its WAL and its rollback journal. */
+const PRE_RESTORE_FILES = ['', '-wal', '-journal'] as const;
 
 // ---------------------------------------------------------------------------
 // The live database
+//
+// It is examined, and copied aside, without a read-write connection: closing
+// the last read-write connection of a WAL database checkpoints the WAL into the
+// main file and deletes it, so a refusal would change the very files it says it
+// left alone, and the raw pre-restore copy of an unreadable database would no
+// longer be the original pair. A read-only connection never writes the main
+// file or the WAL (it may create the -shm index, which holds no data); its open
+// read transaction is the lock barrier while the live state is examined and
+// copied, because the server's locking_mode=EXCLUSIVE needs a lock that a
+// reader's shared lock refuses (and a server holding it refuses the reader).
+// Only once the originals are preserved is the database reopened read-write
+// with locking_mode=EXCLUSIVE (§14.5 step 1), and held until the swap.
 
 type LiveState =
-  | { kind: 'readable'; db: NodeDatabase; version: number; tables: string[] }
-  | { kind: 'unreadable'; reason: string }
+  | {
+      kind: 'readable';
+      /** The read-only examining connection, then the exclusive read-write one; null in between. */
+      db: NodeDatabase | null;
+      version: number;
+      tables: string[];
+      /** Derived tables whose integrity_check fails: ignored, they come from the backup. */
+      damagedDerived: string[];
+    }
+  | { kind: 'unreadable'; db: NodeDatabase | null; reason: string }
   | { kind: 'missing' };
 
-function openLive(path: string, busyTimeoutMs: number): LiveState {
+function closeQuietly(db: NodeDatabase | null): void {
+  if (db === null) return;
+  try {
+    if (db.isOpen) db.close();
+  } catch {
+    // closing on the way out
+  }
+}
+
+function lockedAbort(): RestoreAbort {
+  return new RestoreAbort(
+    'another process holds the live database (its single-writer lock could not be shared or taken); nothing was changed',
+  );
+}
+
+function isLocked(error: unknown): boolean {
+  const code = primaryCode(error);
+  return code === SQLITE_BUSY || code === SQLITE_LOCKED;
+}
+
+/** integrity_check of one table (and its indexes) is ok and, with `readRows`, every row reads. */
+function tableIntact(db: NodeDatabase, table: string, readRows: boolean): boolean {
+  try {
+    const messages = all(db, `PRAGMA integrity_check(${quoteIdent(table)})`).map((r) => String(Object.values(r)[0]));
+    if (messages.length !== 1 || messages[0] !== 'ok') return false;
+    if (readRows) {
+      const select = db.prepare(`SELECT * FROM ${quoteIdent(table)}`);
+      select.setReadBigInts(true);
+      for (const _row of select.iterate()) {
+        // every row is read
+      }
+    }
+    return true;
+  } catch (error) {
+    if (isLocked(error)) throw lockedAbort();
+    return false;
+  }
+}
+
+/**
+ * Opens the live database read-only inside a read transaction (kept open: the
+ * barrier) and decides whether its non-derived state can be carried over:
+ * readable when the schema and ledger read and every non-derived TABLE_CLASS
+ * table passes integrity_check(<table>) and a full read. Damage confined to
+ * derived tables (the rebuildable index) does not make it unreadable.
+ */
+function examineLive(path: string, busyTimeoutMs: number): LiveState {
   if (!existsSync(path)) return { kind: 'missing' };
+  const url = pathToFileURL(path);
+  url.searchParams.set('mode', 'ro');
+  let db: NodeDatabase;
+  try {
+    db = new DatabaseClass(url, { readOnly: true, timeout: busyTimeoutMs });
+  } catch (error) {
+    return { kind: 'unreadable', db: null, reason: errorLabel(error) };
+  }
+  let tables: string[];
+  let version: number | null;
+  try {
+    db.exec('BEGIN');
+    tables = userTables(db); // the first read takes the shared lock, held until the swap
+    version = schemaVersion(db);
+  } catch (error) {
+    if (isLocked(error)) {
+      closeQuietly(db);
+      throw lockedAbort();
+    }
+    return { kind: 'unreadable', db, reason: errorLabel(error) };
+  }
+  if (version === null) return { kind: 'unreadable', db, reason: 'no schema_migrations ledger' };
+  const damagedNonDerived: string[] = [];
+  const damagedDerived: string[] = [];
+  for (const table of tables) {
+    const tableClass = classOf(table);
+    if (tableClass === undefined) continue; // restore() aborts on it
+    if (tableIntact(db, table, tableClass === 'non-derived')) continue;
+    (tableClass === 'non-derived' ? damagedNonDerived : damagedDerived).push(table);
+  }
+  if (damagedNonDerived.length > 0) {
+    return {
+      kind: 'unreadable',
+      db,
+      reason: `integrity_check fails for the non-derived tables ${damagedNonDerived.join(', ')}`,
+    };
+  }
+  return { kind: 'readable', db, version, tables, damagedDerived };
+}
+
+/**
+ * Reopens the live database read-write with the server's own single-writer
+ * lock (locking_mode=EXCLUSIVE, §3.2), after the originals are preserved. Null
+ * when the file cannot be opened as a database at all (an unreadable one).
+ */
+function lockLive(path: string, busyTimeoutMs: number): NodeDatabase | null {
   const url = pathToFileURL(path);
   url.searchParams.set('mode', 'rw');
   let db: NodeDatabase;
   try {
     db = new DatabaseClass(url, { timeout: busyTimeoutMs });
-  } catch (error) {
-    return { kind: 'unreadable', reason: errorLabel(error) };
+  } catch {
+    return null;
   }
   try {
-    // The server's own single-writer lock (§3.2), held until close.
     db.exec('PRAGMA locking_mode=EXCLUSIVE');
     db.exec('BEGIN IMMEDIATE');
     db.exec('COMMIT');
+    return db;
   } catch (error) {
-    const code = primaryCode(error);
-    try {
-      db.close();
-    } catch {
-      // already failing
-    }
-    if (code === SQLITE_BUSY || code === SQLITE_LOCKED) {
-      throw new RestoreAbort(
-        'another process holds the live database (locking_mode=EXCLUSIVE could not be taken); nothing was changed',
-      );
-    }
-    return { kind: 'unreadable', reason: errorLabel(error) };
+    closeQuietly(db);
+    if (isLocked(error)) throw lockedAbort();
+    return null;
   }
-  try {
-    const messages = integrityMessages(db);
-    if (messages.length !== 1 || messages[0] !== 'ok') {
-      db.close();
-      return { kind: 'unreadable', reason: 'integrity_check failed' };
-    }
-    const version = schemaVersion(db);
-    if (version === null) {
-      db.close();
-      return { kind: 'unreadable', reason: 'no schema_migrations ledger' };
-    }
-    return { kind: 'readable', db, version, tables: userTables(db) };
-  } catch (error) {
-    try {
-      db.close();
-    } catch {
-      // already failing
-    }
-    return { kind: 'unreadable', reason: errorLabel(error) };
-  }
+}
+
+/** Identity, size and modification time of the live main file and WAL (they must not move under the lock change). */
+function liveStamp(path: string): string {
+  return ['', '-wal']
+    .map((suffix) => {
+      try {
+        const s = statSync(`${path}${suffix}`, { bigint: true });
+        return `${s.ino}:${s.size}:${s.mtimeNs}`;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 'absent';
+        throw error;
+      }
+    })
+    .join('/');
 }
 
 // ---------------------------------------------------------------------------
@@ -653,17 +764,28 @@ export async function restore(options: RestoreOptions, deps: RestoreDeps): Promi
   let renamed = false;
   let live: LiveState | null = null;
   let tmpDb: NodeDatabase | null = null;
+  /** A read-write connection to the live database was opened (from then on it may be checkpointed). */
+  let liveWritable = false;
+  /** The live -wal and -shm that did not exist before the read-only examination (it may create both, empty). */
+  let createdSideFiles: string[] = [];
 
   const closeAll = () => {
-    for (const db of [tmpDb, live?.kind === 'readable' ? live.db : null]) {
-      if (db === null) continue;
-      try {
-        if (db.isOpen) db.close();
-      } catch {
-        // closing on the way out
+    closeQuietly(tmpDb);
+    tmpDb = null;
+    if (live !== null && live.kind !== 'missing') closeQuietly(live.db);
+    // The read-only connection may have created an empty -wal and the -shm index;
+    // while no read-write connection was opened nothing else of the live files
+    // changed, so those go too (a -wal only while it is still empty).
+    if (!liveWritable) {
+      for (const path of createdSideFiles) {
+        try {
+          if (path.endsWith('-wal') && existsSync(path) && statSync(path).size !== 0) continue;
+          removeIfPresent(path);
+        } catch {
+          // best effort
+        }
       }
     }
-    tmpDb = null;
   };
 
   try {
@@ -679,7 +801,7 @@ export async function restore(options: RestoreOptions, deps: RestoreDeps): Promi
     }
     const backup = verifyBackup(options.backupPath);
     const journal = readJournal(options.stateDir);
-    if (existsSync(preRestore) || existsSync(`${preRestore}-wal`)) {
+    if (PRE_RESTORE_FILES.some((s) => existsSync(`${preRestore}${s}`))) {
       throw new RestoreAbort(
         `${preRestore} already exists (the copy a previous restore kept); move it away or delete it first`,
       );
@@ -706,8 +828,10 @@ export async function restore(options: RestoreOptions, deps: RestoreDeps): Promi
     say(`stopped ${UNITS.join(' and ')}`);
     await step('stopped');
 
-    // 2. Open the live database (the exclusive lock is the second barrier).
-    live = openLive(dbPath, busyTimeoutMs);
+    // 2. Examine the live database on a read-only connection whose read
+    //    transaction is the lock barrier; nothing of the live files is written.
+    createdSideFiles = ['-wal', '-shm'].map((s) => `${dbPath}${s}`).filter((path) => !existsSync(path));
+    live = examineLive(dbPath, busyTimeoutMs);
     if (live.kind === 'readable') {
       if (live.version > SCHEMA_VERSION) {
         throw new RestoreAbort(
@@ -721,6 +845,11 @@ export async function restore(options: RestoreOptions, deps: RestoreDeps): Promi
         );
       }
       say(`the live database is readable (schema version ${live.version}); its non-derived tables are kept`);
+      if (live.damagedDerived.length > 0) {
+        say(
+          `the live database's derived tables ${live.damagedDerived.join(', ')} fail integrity_check; derived tables come from the backup, so this loses nothing`,
+        );
+      }
     } else {
       const reason = live.kind === 'missing' ? 'it does not exist' : `it cannot be read: ${live.reason}`;
       const since = new Date(backup.timeMs).toISOString();
@@ -749,23 +878,57 @@ export async function restore(options: RestoreOptions, deps: RestoreDeps): Promi
     }
     await step('live_opened');
 
-    // 3a. The pre-restore copy.
+    // 3a. The pre-restore copy, still under the read-only barrier and before any
+    //     read-write connection to the live database exists.
+    const copies: string[] = [];
+    let stamp = '';
     if (live.kind === 'readable') {
       const copy = `${preRestore}.tmp`;
       removeIfPresent(copy);
       closeSync(openSync(copy, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, FILE_MODE));
-      await sqlite.backup(live.db, copy);
+      await sqlite.backup(live.db as NodeDatabase, copy);
       chmodSync(copy, FILE_MODE);
       removeIfPresent(`${copy}-journal`);
       fsyncPath(copy);
       renameSync(copy, preRestore);
+      copies.push(preRestore);
       fsyncPath(dir);
+      stamp = liveStamp(dbPath);
       say(`copied the live database to ${preRestore}`);
     } else if (live.kind === 'unreadable') {
-      copyPrivate(dbPath, preRestore);
-      if (existsSync(`${dbPath}-wal`)) copyPrivate(`${dbPath}-wal`, `${preRestore}-wal`);
+      // The original files, byte for byte (the -shm holds no data; an empty -wal
+      // the read-only open created is not one of them).
+      for (const suffix of PRE_RESTORE_FILES) {
+        const path = `${dbPath}${suffix}`;
+        if (suffix !== '' && !existsSync(path)) continue;
+        if (createdSideFiles.includes(path) && statSync(path).size === 0) continue;
+        copyPrivate(path, `${preRestore}${suffix}`);
+        copies.push(`${preRestore}${suffix}`);
+      }
       fsyncPath(dir);
-      say(`copied the unreadable live files to ${preRestore}${existsSync(`${preRestore}-wal`) ? ' (and -wal)' : ''}`);
+      say(`copied the unreadable live files to ${copies.join(', ')}`);
+    }
+
+    // 3a'. Take the server's own exclusive lock, held until the swap (§14.5 step 1).
+    if (live.kind !== 'missing') {
+      closeQuietly(live.db);
+      live.db = null;
+      liveWritable = true;
+      try {
+        live.db = lockLive(dbPath, busyTimeoutMs);
+        if (live.kind === 'readable') {
+          if (live.db === null) throw new RestoreAbort('the live database could not be reopened read-write');
+          if (liveStamp(dbPath) !== stamp) {
+            throw new RestoreAbort('the live database changed while it was being copied (another process writes it)');
+          }
+        }
+      } catch (error) {
+        // This run's copies would block the next attempt (pre-flight refuses an existing pre-restore copy).
+        closeQuietly(live.db);
+        live.db = null;
+        for (const path of copies) removeIfPresent(path);
+        throw error;
+      }
     }
     await step('pre_restore_copied');
 
@@ -806,7 +969,7 @@ export async function restore(options: RestoreOptions, deps: RestoreDeps): Promi
     }
     const keepLedger = live.kind === 'readable' && live.version < SCHEMA_VERSION;
     if (live.kind === 'readable') {
-      mergeLive(tmpDb, live.db, live.tables, keepLedger);
+      mergeLive(tmpDb, live.db as NodeDatabase, live.tables, keepLedger);
       if (keepLedger) {
         say(
           `the live database is at schema version ${live.version}: the copy keeps its own ${LEDGER_TABLES.join(' and ')} (version ${SCHEMA_VERSION})`,
@@ -881,7 +1044,7 @@ export async function restore(options: RestoreOptions, deps: RestoreDeps): Promi
     await step('temp_fsynced');
 
     // 4.3 Close the live database; no stale WAL may survive next to the restored file.
-    if (live.kind === 'readable' && live.db.isOpen) live.db.close();
+    if (live.kind !== 'missing') closeQuietly(live.db);
     for (const s of SIDE_FILES) removeIfPresent(`${dbPath}${s}`);
     fsyncPath(dir);
     await step('live_wal_removed');
