@@ -1,6 +1,6 @@
 // W4-03 accounts.ts: account status from the account's own PDS
 // (com.atproto.sync.getRepoStatus), never from relay events (A17), against
-// real DO SQLite and the fixture network. Proves M4.1.1/event_types (account
+// a real SQLite file and the fixture network. Proves M4.1.1/event_types (account
 // changes come from a proof-fetch error and the getRepoStatus sweep) and
 // M5.3.3/account_state (a followed account that is taken down leaves its
 // followers' following feed at once and stays out of it, while reactivating,
@@ -12,8 +12,6 @@
 // expectation is hardcoded from TESTING.md / the fixture, never computed by the
 // code under test.
 
-import { runInDurableObject } from 'cloudflare:test';
-import { env } from 'cloudflare:workers';
 import { FIXTURE_USERS, type FixtureKit, seedReadModels } from '@atmusic/atproto/test-support/read-models';
 import { describe, expect, it } from 'vitest';
 import type { Db } from '../../src/do/db';
@@ -34,11 +32,9 @@ import { history } from '../../src/do/read/history';
 import { profile } from '../../src/do/read/profile';
 import { dueAt } from '../../src/do/timers';
 import { completeSnapshot } from '../../src/do/write/apply-snapshot';
-import type { HarnessDO } from '../harness/harness-do';
 import { seedUser } from '../write/support';
 import { type Deps, depsFor, enqueue, GET_RECORD, hint, hintRows, kit } from './drain-support';
-
-const stubFor = (name: string) => env.HARNESS.get(env.HARNESS.idFromName(name));
+import { withIngestIndex } from './node-index';
 
 const T0 = Date.parse('2026-01-15T12:00:00Z');
 const HOUR = 3_600_000;
@@ -90,7 +86,7 @@ describe('account status', () => {
     const bob = k.users.Bob.did;
     const carol = k.users.Carol.did;
 
-    await runInDurableObject(stubFor('accounts-deactivate'), async (i: HarnessDO) => {
+    await withIngestIndex(async (i) => {
       const db = i.db;
       const m = depsFor(db, k);
       await seedIndexed(db, m, k);
@@ -204,7 +200,7 @@ describe('account status', () => {
     const bob = k.users.Bob.did;
     const carol = k.users.Carol.did;
 
-    await runInDurableObject(stubFor('accounts-reactivate'), async (i: HarnessDO) => {
+    await withIngestIndex(async (i) => {
       const db = i.db;
       const m = depsFor(db, k);
       await seedIndexed(db, m, k);
@@ -310,7 +306,7 @@ describe('account status', () => {
     const bob = k.users.Bob.did;
     const carol = k.users.Carol.did;
 
-    await runInDurableObject(stubFor('accounts-status-lease'), async (i: HarnessDO) => {
+    await withIngestIndex(async (i) => {
       const db = i.db;
       const m = depsFor(db, k);
       await seedIndexed(db, m, k);
@@ -383,7 +379,7 @@ describe('account status answers', () => {
     const alice = k.users.Alice.did;
     const bob = k.users.Bob.did;
 
-    await runInDurableObject(stubFor('accounts-answer-other-did'), async (i: HarnessDO) => {
+    await withIngestIndex(async (i) => {
       const db = i.db;
       const m = depsFor(db, k);
       await seedIndexed(db, m, k);
@@ -435,7 +431,7 @@ describe('account status answers', () => {
     const bob = k.users.Bob.did;
     const carol = k.users.Carol.did;
 
-    await runInDurableObject(stubFor('accounts-repo-not-found'), async (i: HarnessDO) => {
+    await withIngestIndex(async (i) => {
       const db = i.db;
       const m = depsFor(db, k);
       await seedIndexed(db, m, k);
@@ -479,7 +475,7 @@ describe('account status answers', () => {
     const bob = k.users.Bob.did;
     const carol = k.users.Carol.did;
 
-    await runInDurableObject(stubFor('accounts-did-not-found'), async (i: HarnessDO) => {
+    await withIngestIndex(async (i) => {
       const db = i.db;
       const m = depsFor(db, k);
       await seedIndexed(db, m, k);
@@ -546,7 +542,7 @@ describe('status jobs', () => {
     const alice = k.users.Alice.did;
     const OTHER = 'did:plc:zzzzzzzzzzzzzzzzzzzzzzzz';
 
-    await runInDurableObject(stubFor('accounts-status-job-token'), async (i: HarnessDO) => {
+    await withIngestIndex(async (i) => {
       const db = i.db;
       const m = depsFor(db, k);
       await seedIndexed(db, m, k);

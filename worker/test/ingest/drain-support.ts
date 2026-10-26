@@ -1,12 +1,11 @@
 // Shared setup for the ingest-core suites (W3-04). TEST-ONLY.
 //
-// ModuleDeps over the harness DO's real SQLite, wired to the fixture network
+// ModuleDeps over the ingest suites' SQLite file (node-index.ts), wired to the fixture network
 // (packages/atproto/test-support/read-models.ts `createFixtureKit`: real
 // signed repositories on fake PDSs, fake PLC and DoH). The production SafeFetch
 // policy, identity resolver, verifier and projection apply all run unchanged;
 // only the Transport, the clock and the random source are injected.
 
-import { env } from 'cloudflare:workers';
 import { createFixtureKit, type FixtureKit } from '@atmusic/atproto/test-support/read-models';
 import { seededRandom } from '@atmusic/core/test-support/random';
 import { BUDGETS, type Plan, parseConfig, type SliceBudget } from '../../src/config';
@@ -14,6 +13,7 @@ import type { Logger, LogLevel, ModuleDeps } from '../../src/do/contracts';
 import type { Db } from '../../src/do/db';
 import { enqueueHints, type HintInput } from '../../src/do/ingest/hints';
 import { cachedIdentityResolver } from '../../src/do/ingest/identity-cache';
+import { INGEST_TEST_ENV } from './node-index';
 
 export const GET_RECORD = 'com.atproto.sync.getRecord';
 
@@ -37,9 +37,9 @@ export interface Deps extends ModuleDeps {
   log: Logger & { entries: LogEntry[] };
 }
 
-/** ModuleDeps for the harness DO's Db over the kit's fixture network (test entry config). */
+/** ModuleDeps for the test database's Db over the kit's fixture network (test entry config). */
 export function depsFor(db: Db, kit: FixtureKit, o: { plan?: Plan } = {}): Deps {
-  const base = parseConfig({ ...env, ADMIN_TOKEN: '' }, { allowFixturePrefix: true });
+  const base = parseConfig({ ...INGEST_TEST_ENV, ADMIN_TOKEN: '' }, { allowFixturePrefix: true });
   const plan = o.plan ?? base.plan;
   const config = { ...base, plan, budget: BUDGETS[plan] };
   return {

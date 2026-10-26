@@ -1,15 +1,14 @@
-// W4-01 snapshot-job.ts: resumable range snapshots (ADR 0004 §5.7) against real
-// DO SQLite and the fixture network (real signed repositories on fake PDSs,
-// fake PLC and DoH, the production SafeFetch policy, identity resolver,
-// commit verifier, range walker and projection apply). Proves
+// W4-01 snapshot-job.ts: resumable range snapshots (ADR 0004 §5.7) against the
+// production SQLite adapter (a temporary file, node-index.ts) and the fixture
+// network (real signed repositories on fake PDSs, fake PLC and DoH, the
+// production SafeFetch policy, identity resolver, commit verifier, range walker
+// and projection apply). Proves
 // M4.2.2/historical_seed and M4.2.3/pds_migration, plus the job lifecycle
 // obligations of the W4-01 plan entry (resume after eviction, missing_block
 // restarts, getRepo fallback, coalescing during a walk). Every expectation is
 // hardcoded from TESTING.md or comes from the fixture signer, never from the
 // code under test.
 
-import { evictDurableObject, runInDurableObject } from 'cloudflare:test';
-import { env } from 'cloudflare:workers';
 import { FakePds } from '@atmusic/atproto/test-support/fake-pds';
 import {
   type FixtureKit,
@@ -35,10 +34,8 @@ import { drain } from '../../src/do/ingest/verify-drain';
 import { history } from '../../src/do/read/history';
 import { markConnected, recordEvent, updateCheckpointBookkeeping } from '../../src/do/status';
 import { dueAt } from '../../src/do/timers';
-import type { HarnessDO } from '../harness/harness-do';
 import { counterValue, type Deps, depsFor, enqueue, hint, kit, protectedTables } from './drain-support';
-
-const stubFor = (name: string) => env.HARNESS.get(env.HARNESS.idFromName(name));
+import { withIngestIndex } from './node-index';
 
 const T0 = Date.parse('2026-01-15T12:00:00Z');
 const GET_BLOCKS = 'com.atproto.sync.getBlocks';
@@ -70,7 +67,7 @@ function wrap(base: FixtureTransport, o: { extra?: FakePds[]; before?: Before } 
   });
 }
 
-/** ModuleDeps over the harness Db, following the upstream in socket mode (so `indexing()` can be current). */
+/** ModuleDeps over the test Db, following the upstream in socket mode (so `indexing()` can be current). */
 function deps(db: Db, k: FixtureKit, o: { plan?: Plan; transport?: FixtureTransport } = {}): Deps {
   const base = depsFor(db, k, { plan: o.plan ?? 'paid' });
   const transport = o.transport ?? k.transport;
@@ -180,7 +177,7 @@ describe('snapshot jobs', () => {
     // Every block the walk may need: the commit, each MST node and each record (all keys are in range).
     const reachable = await k.repos.Alice.reachable(k.repos.Alice.head!.data);
 
-    await runInDurableObject(stubFor('snapshot-historical-seed'), async (i: HarnessDO) => {
+    await withIngestIndex(async (i) => {
       const db = i.db;
       const m = deps(db, k);
       followUpstream(db);
@@ -262,7 +259,6 @@ describe('snapshot jobs', () => {
   it('job resumes across alarms from persisted frontier after DO eviction', async () => {
     const { k, seed, alice, follow, scrobbleRows } = await seeded();
     const head = seed.heads.Alice;
-    const stub = stubFor('snapshot-resume-eviction');
     const budget: SliceBudget = { ...BUDGETS.free, maxEntriesPerSlice: 3 };
     let hang = false;
     let hung = 0;
@@ -278,7 +274,7 @@ describe('snapshot jobs', () => {
         resolveHandle: (handle) => m.identity.resolveHandle(handle),
       },
     });
-    const saved: { job?: RepoJobRow; cached?: string[]; orphan?: Promise<unknown>; instance?: HarnessDO } = {};
+    const saved: { job?: RepoJobRow; cached?: string[]; orphan?: Promise<unknown>; instance?: Db } = {};
     // The first getBlocks batch of the walk (any request not for the head commit) answers
     // BlockNotFound once, so the walk restarts before the eviction (restarts = 1).
     let blockNotFound = 0;
@@ -295,117 +291,118 @@ describe('snapshot jobs', () => {
 
     // Slice 1 (Free plan): one missing_block restart, then three entries applied, the
     // frontier and the restart persisted, still hidden.
-    await runInDurableObject(stub, async (i: HarnessDO) => {
-      const db = i.db;
-      const m = deps(db, k, { plan: 'free', transport: flaky });
-      admit(db, alice, 'jetstream', T0);
-      const before = k.transport.calls.entries.length;
-      const r = await snapshotStep(m, T0, budget);
-      expect([r.outcome, r.entries, r.chunks, r.restarts]).toEqual(['paused', 3, 1, 1]);
-      expect(blockNotFound).toBe(1);
-      // The Free plan's 40 subrequests per step: reserved and actually sent.
-      expect(r.subrequests).toBeLessThanOrEqual(40);
-      expect(k.transport.calls.entries.length - before).toBeLessThanOrEqual(40);
-      const persisted = job(db, alice)!;
-      saved.job = persisted;
-      expect(persisted).toMatchObject({ state: 'pending', head_cid: head.cid, head_rev: head.rev, restarts: 1 });
-      expect(counterValue(db, 'snapshot_restarts')).toBe(1);
-      expect(persisted.frontier_json).not.toBeNull();
-      // Keys in order: the follow, then r01, r02.
-      expect(follows(db, alice).map((f) => f.uri)).toEqual([follow.uri]);
-      expect(scrobbles(db, alice).map((s) => s.uri)).toEqual(scrobbleRows.slice(0, 2).map((s) => s.uri));
-      expect(db.one('SELECT active FROM users WHERE did = ?', alice)).toEqual({ active: 0 });
-      expect(historyRkeys(m, alice)).toEqual([]);
-      saved.cached = cachedCids(db, alice);
-      expect(saved.cached.length).toBeGreaterThan(0);
-    });
-    const callsSlice1 = k.pds.Alice.calls.entries.length;
-
-    const persisted = saved.job!;
-    const cachedBefore = saved.cached!;
-    // Six minutes later the cached identity has expired (5 min TTL). Slice 2
-    // claims the job and dies with the instance while it re-resolves the DID.
-    k.clock.advance(6 * 60_000);
-    const t1 = T0 + 6 * 60_000;
-    await runInDurableObject(stub, async (i: HarnessDO) => {
-      const db = i.db;
-      const m = withHang(deps(db, k, { plan: 'free' }));
-      hang = true;
-      saved.orphan = snapshotStep(m, t1, budget);
-      saved.orphan.catch(() => {});
-      await until(() => hung === 1, 'the hanging identity resolution');
-      saved.instance = i;
-      const running = job(db, alice)!;
-      expect(running.state).toBe('running');
-      expect(running.updated_at_ms).toBeGreaterThan(persisted.updated_at_ms);
-      expect(running.frontier_json).toBe(persisted.frontier_json);
-    });
-    expect(saved.orphan).toBeDefined();
-    // The instance is evicted with the slice in flight; its storage is kept.
-    // (Graceful eviction waits for the instance's requests to drain, including
-    // slice 1's finished fetches, whose 10 s SafeFetch deadline timers are still
-    // armed: this takes ~10 s of wall time. The orphaned slice itself never
-    // settles, so the outcome does not depend on that timing.)
-    const evicted = saved.instance!;
-    await evictDurableObject(stub);
-    hang = false;
-
-    // The new instance reclaims the orphan at start-up and resumes from the persisted frontier.
-    await runInDurableObject(stub, async (i: HarnessDO) => {
-      const db = i.db;
-      expect(i).not.toBe(evicted);
-      const m = deps(db, k, { plan: 'free' });
-      const orphaned = job(db, alice)!;
-      expect(orphaned.state).toBe('running');
-      // Not yet past its 15-minute lease, so only the start-up reclaim (all: true) frees it.
-      expect(reclaimSnapshotLeases(db, t1)).toEqual([]);
-      expect(reclaimSnapshotLeases(db, t1, { all: true })).toEqual([alice]);
-      const reclaimed = job(db, alice)!;
-      // The restart count survived the eviction and the reclaim.
-      expect(reclaimed).toMatchObject({
-        state: 'pending',
-        frontier_json: persisted.frontier_json,
-        head_cid: head.cid,
-        restarts: 1,
-        due_at: T0,
-      });
-      expect(reclaimed.updated_at_ms).toBeGreaterThan(orphaned.updated_at_ms);
-      expect(counterValue(db, 'snapshot_reclaimed', 'startup')).toBe(1);
-
-      const slices: number[] = [];
-      for (;;) {
+    await withIngestIndex(async (i) => {
+      {
+        const db = i.db;
+        const m = deps(db, k, { plan: 'free', transport: flaky });
+        admit(db, alice, 'jetstream', T0);
         const before = k.transport.calls.entries.length;
-        const r = await snapshotStep(m, t1, budget);
-        if (r.outcome === 'idle') break;
-        slices.push(k.transport.calls.entries.length - before);
+        const r = await snapshotStep(m, T0, budget);
+        expect([r.outcome, r.entries, r.chunks, r.restarts]).toEqual(['paused', 3, 1, 1]);
+        expect(blockNotFound).toBe(1);
+        // The Free plan's 40 subrequests per step: reserved and actually sent.
         expect(r.subrequests).toBeLessThanOrEqual(40);
-        expect(['paused', 'complete']).toContain(r.outcome);
-        if (r.outcome === 'complete') break;
+        expect(k.transport.calls.entries.length - before).toBeLessThanOrEqual(40);
+        const persisted = job(db, alice)!;
+        saved.job = persisted;
+        expect(persisted).toMatchObject({ state: 'pending', head_cid: head.cid, head_rev: head.rev, restarts: 1 });
+        expect(counterValue(db, 'snapshot_restarts')).toBe(1);
+        expect(persisted.frontier_json).not.toBeNull();
+        // Keys in order: the follow, then r01, r02.
+        expect(follows(db, alice).map((f) => f.uri)).toEqual([follow.uri]);
+        expect(scrobbles(db, alice).map((s) => s.uri)).toEqual(scrobbleRows.slice(0, 2).map((s) => s.uri));
+        expect(db.one('SELECT active FROM users WHERE did = ?', alice)).toEqual({ active: 0 });
+        expect(historyRkeys(m, alice)).toEqual([]);
+        saved.cached = cachedCids(db, alice);
+        expect(saved.cached.length).toBeGreaterThan(0);
       }
-      expect(slices.every((n) => n <= 40)).toBe(true);
-      expect(slices.length).toBeGreaterThanOrEqual(2);
+      const callsSlice1 = k.pds.Alice.calls.entries.length;
 
-      // Same final state as an uninterrupted import; the restart count never moved after slice 1.
-      expect(scrobbles(db, alice)).toEqual(scrobbleRows.map((r) => ({ ...r, revision: head.rev })));
-      expect(follows(db, alice).map((f) => [f.uri, f.cid])).toEqual([[follow.uri, follow.cid]]);
-      expect(job(db, alice)).toMatchObject({ state: 'complete', restarts: 1, frontier_json: null });
-      expect(counterValue(db, 'snapshot_restarts')).toBe(1);
-      expect(historyRkeys(m, alice)).toEqual(ALICE_HISTORY);
+      const persisted = saved.job!;
+      const cachedBefore = saved.cached!;
+      // Six minutes later the cached identity has expired (5 min TTL). Slice 2
+      // claims the job and dies with the instance while it re-resolves the DID.
+      k.clock.advance(6 * 60_000);
+      const t1 = T0 + 6 * 60_000;
+      {
+        const db = i.db;
+        const m = withHang(deps(db, k, { plan: 'free' }));
+        hang = true;
+        saved.orphan = snapshotStep(m, t1, budget);
+        saved.orphan.catch(() => {});
+        await until(() => hung === 1, 'the hanging identity resolution');
+        saved.instance = db;
+        const running = job(db, alice)!;
+        expect(running.state).toBe('running');
+        expect(running.updated_at_ms).toBeGreaterThan(persisted.updated_at_ms);
+        expect(running.frontier_json).toBe(persisted.frontier_json);
+      }
+      expect(saved.orphan).toBeDefined();
+      // The process restarts with the slice in flight: the connection is closed
+      // and the same file reopened (and migrated again); its storage is kept. The
+      // orphaned slice never settles, so it never touches the closed handle.
+      const evicted = saved.instance!;
+      i.restart();
+      hang = false;
+
+      // The new instance reclaims the orphan at start-up and resumes from the persisted frontier.
+      {
+        const db = i.db;
+        expect(i.restarts).toBe(1);
+        expect(db).not.toBe(evicted);
+        const m = deps(db, k, { plan: 'free' });
+        const orphaned = job(db, alice)!;
+        expect(orphaned.state).toBe('running');
+        // Not yet past its 15-minute lease, so only the start-up reclaim (all: true) frees it.
+        expect(reclaimSnapshotLeases(db, t1)).toEqual([]);
+        expect(reclaimSnapshotLeases(db, t1, { all: true })).toEqual([alice]);
+        const reclaimed = job(db, alice)!;
+        // The restart count survived the eviction and the reclaim.
+        expect(reclaimed).toMatchObject({
+          state: 'pending',
+          frontier_json: persisted.frontier_json,
+          head_cid: head.cid,
+          restarts: 1,
+          due_at: T0,
+        });
+        expect(reclaimed.updated_at_ms).toBeGreaterThan(orphaned.updated_at_ms);
+        expect(counterValue(db, 'snapshot_reclaimed', 'startup')).toBe(1);
+
+        const slices: number[] = [];
+        for (;;) {
+          const before = k.transport.calls.entries.length;
+          const r = await snapshotStep(m, t1, budget);
+          if (r.outcome === 'idle') break;
+          slices.push(k.transport.calls.entries.length - before);
+          expect(r.subrequests).toBeLessThanOrEqual(40);
+          expect(['paused', 'complete']).toContain(r.outcome);
+          if (r.outcome === 'complete') break;
+        }
+        expect(slices.every((n) => n <= 40)).toBe(true);
+        expect(slices.length).toBeGreaterThanOrEqual(2);
+
+        // Same final state as an uninterrupted import; the restart count never moved after slice 1.
+        expect(scrobbles(db, alice)).toEqual(scrobbleRows.map((r) => ({ ...r, revision: head.rev })));
+        expect(follows(db, alice).map((f) => [f.uri, f.cid])).toEqual([[follow.uri, follow.cid]]);
+        expect(job(db, alice)).toMatchObject({ state: 'complete', restarts: 1, frontier_json: null });
+        expect(counterValue(db, 'snapshot_restarts')).toBe(1);
+        expect(historyRkeys(m, alice)).toEqual(ALICE_HISTORY);
+      }
+
+      // Resumed, not restarted: after the reclaim no getLatestCommit, no record
+      // already applied and no cached node was requested again.
+      const after = k.pds.Alice.calls.entries.slice(callsSlice1);
+      expect(after.filter((c) => c.nsid === LATEST)).toEqual([]);
+      const requestedAfter = after.filter((c) => c.nsid === GET_BLOCKS).flatMap((c) => c.params.cids ?? []);
+      const applied = [follow.cid, scrobbleRows[0]!.cid, scrobbleRows[1]!.cid];
+      expect(requestedAfter.filter((cid) => applied.includes(cid) || cachedBefore.includes(cid))).toEqual([]);
+      // Each record not yet applied is fetched once after the reclaim (the walk picks up where it stopped).
+      const pending = scrobbleRows.slice(2).map((r) => r.cid);
+      expect(requestedAfter.filter((cid) => pending.includes(cid)).sort()).toEqual([...pending].sort());
+      // One head at the start, one at the restart in slice 1, none after the eviction.
+      expect(k.pds.Alice.count(LATEST)).toBe(2);
+      expect(blockNotFound).toBe(1);
     });
-
-    // Resumed, not restarted: after the reclaim no getLatestCommit, no record
-    // already applied and no cached node was requested again.
-    const after = k.pds.Alice.calls.entries.slice(callsSlice1);
-    expect(after.filter((c) => c.nsid === LATEST)).toEqual([]);
-    const requestedAfter = after.filter((c) => c.nsid === GET_BLOCKS).flatMap((c) => c.params.cids ?? []);
-    const applied = [follow.cid, scrobbleRows[0]!.cid, scrobbleRows[1]!.cid];
-    expect(requestedAfter.filter((cid) => applied.includes(cid) || cachedBefore.includes(cid))).toEqual([]);
-    // Each record not yet applied is fetched once after the reclaim (the walk picks up where it stopped).
-    const pending = scrobbleRows.slice(2).map((r) => r.cid);
-    expect(requestedAfter.filter((cid) => pending.includes(cid)).sort()).toEqual([...pending].sort());
-    // One head at the start, one at the restart in slice 1, none after the eviction.
-    expect(k.pds.Alice.count(LATEST)).toBe(2);
-    expect(blockNotFound).toBe(1);
   }, 40_000);
 
   it('BlockNotFound mid-walk restarts at new head reusing cache; >5 restarts → repository_changed', async () => {
@@ -416,7 +413,7 @@ describe('snapshot jobs', () => {
       const h1 = seed.heads.Alice;
       const r07 = `at://${alice}/${S}/r07`;
       const budget: SliceBudget = { ...BUDGETS.paid, maxEntriesPerSlice: 2 };
-      await runInDurableObject(stubFor('snapshot-restart-gc'), async (i: HarnessDO) => {
+      await withIngestIndex(async (i) => {
         const db = i.db;
         const m = deps(db, k);
         admit(db, alice, 'jetstream', T0);
@@ -489,7 +486,7 @@ describe('snapshot jobs', () => {
           return undefined;
         },
       });
-      await runInDurableObject(stubFor('snapshot-restart-bound'), async (i: HarnessDO) => {
+      await withIngestIndex(async (i) => {
         const db = i.db;
         const m = deps(db, k, { transport });
         admit(db, alice, 'jetstream', T0);
@@ -539,7 +536,7 @@ describe('snapshot jobs', () => {
 
     // Reference: the getBlocks walk.
     const ref: { value?: ReturnType<typeof projection> } = {};
-    await runInDurableObject(stubFor('snapshot-fallback-reference'), async (i: HarnessDO) => {
+    await withIngestIndex(async (i) => {
       const db = i.db;
       admit(db, alice, 'jetstream', T0);
       const reports = await runUntilIdle(deps(db, k), T0);
@@ -552,7 +549,7 @@ describe('snapshot jobs', () => {
 
     // Same repository, getBlocks answering 501: the getRepo stream, then local slices.
     k.pds.Alice.getBlocksSupported = false;
-    await runInDurableObject(stubFor('snapshot-fallback-getrepo'), async (i: HarnessDO) => {
+    await withIngestIndex(async (i) => {
       const db = i.db;
       const m = deps(db, k);
       admit(db, alice, 'jetstream', T0);
@@ -599,7 +596,7 @@ describe('snapshot jobs', () => {
       const { k, seed, alice } = await seeded();
       const head = seed.heads.Alice;
       const ref: { value?: ReturnType<typeof projection> } = {};
-      await runInDurableObject(stubFor('snapshot-midwalk-reference'), async (i: HarnessDO) => {
+      await withIngestIndex(async (i) => {
         admit(i.db, alice, 'jetstream', T0);
         const reports = await runUntilIdle(deps(i.db, k), T0, budget);
         expect(reports.every((r) => r.source === 'getBlocks')).toBe(true);
@@ -610,7 +607,7 @@ describe('snapshot jobs', () => {
       expect(reference.scrobbles).toHaveLength(7);
       k.resetCalls();
 
-      await runInDurableObject(stubFor('snapshot-midwalk-same-head'), async (i: HarnessDO) => {
+      await withIngestIndex(async (i) => {
         const db = i.db;
         const m = deps(db, k);
         admit(db, alice, 'jetstream', T0);
@@ -661,7 +658,7 @@ describe('snapshot jobs', () => {
       const { k, seed, alice, scrobbleRows, follow } = await seeded();
       const S = k.collections.scrobble;
       const h1 = seed.heads.Alice;
-      await runInDurableObject(stubFor('snapshot-midwalk-new-head'), async (i: HarnessDO) => {
+      await withIngestIndex(async (i) => {
         const db = i.db;
         const m = deps(db, k);
         admit(db, alice, 'jetstream', T0);
@@ -750,7 +747,7 @@ describe('snapshot jobs', () => {
       const { k, alice } = await seeded();
       const S = k.collections.scrobble;
       const bad = `at://${alice}/${S}/bad`;
-      await runInDurableObject(stubFor(`snapshot-live-parity-${c.name}`), async (i: HarnessDO) => {
+      await withIngestIndex(async (i) => {
         const db = i.db;
         const m = deps(db, k);
         // Alice is indexed from a complete snapshot of the valid repository first.
@@ -811,7 +808,7 @@ describe('snapshot jobs', () => {
     const transport = wrap(k.transport, { extra: [pdsB] });
     const r11: { cid?: string } = {};
 
-    await runInDurableObject(stubFor(`snapshot-pds-migration-${variant}`), async (i: HarnessDO) => {
+    await withIngestIndex(async (i) => {
       const db = i.db;
       admit(db, alice, 'jetstream', T0);
       expect((await runUntilIdle(deps(db, k, { transport }), T0)).map((r) => r.outcome)).toEqual(['complete']);
@@ -896,7 +893,7 @@ describe('snapshot jobs', () => {
       },
     });
 
-    await runInDurableObject(stubFor('snapshot-coalesce-in-flight'), async (i: HarnessDO) => {
+    await withIngestIndex(async (i) => {
       const db = i.db;
       const m = deps(db, k, { transport });
       admit(db, alice, 'jetstream', T0);

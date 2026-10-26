@@ -1,12 +1,10 @@
-// W3-04 admission.ts against real DO SQLite. Proves M1.3.4/queue_full and
+// W3-04 admission.ts against a real SQLite file. Proves M1.3.4/queue_full and
 // M4.2.2/backfill_limits (1,024 pending snapshot jobs, then busy with nothing
 // written), the hourly new-DID budget under the injected clock, and the
 // admission half of M5.3.3/pending_confirmed (an unknown DID's hint is never
 // projected; it admits an inactive owner plus a snapshot job). Expectations
 // are hardcoded.
 
-import { runInDurableObject } from 'cloudflare:test';
-import { env } from 'cloudflare:workers';
 import { fixedClock } from '@atmusic/core/test-support/clock';
 import { describe, expect, it } from 'vitest';
 import type { Db } from '../../src/do/db';
@@ -19,10 +17,8 @@ import {
 } from '../../src/do/ingest/admission';
 import { drain } from '../../src/do/ingest/verify-drain';
 import { indexing } from '../../src/do/status';
-import type { HarnessDO } from '../harness/harness-do';
 import { counterValue, depsFor, enqueue, GET_RECORD, hint, kit } from './drain-support';
-
-const stubFor = (name: string) => env.HARNESS.get(env.HARNESS.idFromName(name));
+import { withIngestIndex } from './node-index';
 
 const T0 = Date.parse('2026-01-15T12:00:00Z');
 const T0_STORAGE = '2026-01-15T12:00:00.000000000Z';
@@ -59,7 +55,7 @@ describe('admission', () => {
     });
     k.resetCalls();
 
-    await runInDurableObject(stubFor('admission-unknown'), async (i: HarnessDO) => {
+    await withIngestIndex(async (i) => {
       const db = i.db;
       const m = depsFor(db, k);
       enqueue(db, [hint(k, carol, S, 'r10')]);
@@ -128,7 +124,7 @@ describe('admission', () => {
   });
 
   it('1,024 pending jobs → next admission busy and writes nothing', async () => {
-    await runInDurableObject(stubFor('admission-cap'), (i: HarnessDO) => {
+    await withIngestIndex((i) => {
       const db = i.db;
       // 1,023 queued jobs for known DIDs, each at its own generation.
       db.tx(() => {
@@ -200,7 +196,7 @@ describe('admission', () => {
   });
 
   it('scheduleSnapshot never discards or delays a walk: a started walk records one rescan request', async () => {
-    await runInDurableObject(stubFor('admission-rescan'), (i: HarnessDO) => {
+    await withIngestIndex((i) => {
       const db = i.db;
       const H0 = 'bafyreih0h0h0h0h0h0h0h0h0h0h0h0h0h0h0h0h0h0h0h0h0h0h0h0h0';
       const FRONTIER = '{"stack":[],"lastKey":"com.example.atmusic.scrobble/r10"}';
@@ -350,7 +346,7 @@ describe('admission', () => {
   });
 
   it('reclaimSnapshotLeases returns orphaned running rows to pending with frontier, head and restarts kept', async () => {
-    await runInDurableObject(stubFor('admission-reclaim'), (i: HarnessDO) => {
+    await withIngestIndex((i) => {
       const db = i.db;
       const H0 = 'bafyreih0h0h0h0h0h0h0h0h0h0h0h0h0h0h0h0h0h0h0h0h0h0h0h0h0';
       const FRONTIER = '{"stack":[],"lastKey":"com.example.atmusic.scrobble/r10"}';
@@ -419,7 +415,7 @@ describe('admission', () => {
   });
 
   it('hourly budget enforced with injected clock', async () => {
-    await runInDurableObject(stubFor('admission-hourly'), (i: HarnessDO) => {
+    await withIngestIndex((i) => {
       const db = i.db;
       const clock = fixedClock('2026-01-15T12:00:00Z');
       for (let n = 1; n <= 50; n++) {

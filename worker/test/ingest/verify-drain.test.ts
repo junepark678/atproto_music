@@ -1,13 +1,11 @@
 // W3-04 verify-drain.ts: hints → identity → getRecord proof → verify → apply,
-// against real DO SQLite and the fixture network (real signed repositories on
+// against a real SQLite file and the fixture network (real signed repositories on
 // fake PDSs, fake PLC and DoH, the production SafeFetch policy). Proves
 // M5.3.3/pending_confirmed (a confirmed follow becomes an edge only once its
 // proof applies), M3.3.3/external_delete, M4.1.3/update_delete,
 // M4.1.2/key_rotation and M1.3.4/concurrent_writes. Every expectation is
 // hardcoded or comes from the fixture signer, never from the code under test.
 
-import { runInDurableObject } from 'cloudflare:test';
-import { env } from 'cloudflare:workers';
 import type { FakePds } from '@atmusic/atproto/test-support/fake-pds';
 import { testKey } from '@atmusic/atproto/test-support/keys';
 import { type FixtureKit, followRkey } from '@atmusic/atproto/test-support/read-models';
@@ -19,7 +17,6 @@ import { resolveIdentity } from '../../src/do/ingest/identity-cache';
 import { drain, drainState } from '../../src/do/ingest/verify-drain';
 import { visibleFollowEdge, visibleScrobblesFrom } from '../../src/do/read/visibility';
 import { runDue, type TimerHandlers } from '../../src/do/timers';
-import type { HarnessDO } from '../harness/harness-do';
 import { seedUser } from '../write/support';
 import {
   counterValue,
@@ -32,8 +29,7 @@ import {
   protectedTables,
   snapshotJobs,
 } from './drain-support';
-
-const stubFor = (name: string) => env.HARNESS.get(env.HARNESS.idFromName(name));
+import { withIngestIndex } from './node-index';
 
 const T0 = Date.parse('2026-01-15T12:00:00Z');
 const FUTURE_REASON = 'listenedAt: timestamp must be between 1970-01-01 and receipt time plus 300 seconds';
@@ -108,7 +104,7 @@ describe('verify drain', () => {
     const r1Cid = atBound.ops[0]!.cid!;
     k.resetCalls();
 
-    await runInDurableObject(stubFor('drain-known'), async (i: HarnessDO) => {
+    await withIngestIndex(async (i) => {
       const db = i.db;
       const m = depsFor(db, k);
       seedUser(db, alice);
@@ -223,7 +219,7 @@ describe('verify drain', () => {
     await k.externalPut('Alice', S, 'r1', scrobble(k, '2026-01-15T11:30:00Z'));
     k.resetCalls();
 
-    await runInDurableObject(stubFor('drain-delete'), async (i: HarnessDO) => {
+    await withIngestIndex(async (i) => {
       const db = i.db;
       const m = depsFor(db, k);
       seedUser(db, alice);
@@ -259,7 +255,7 @@ describe('verify drain', () => {
     const put = await k.externalPut('Alice', S, 'r1', scrobble(k, '2026-01-15T11:30:00Z'));
     k.resetCalls();
 
-    await runInDurableObject(stubFor('drain-record-not-found'), async (i: HarnessDO) => {
+    await withIngestIndex(async (i) => {
       const db = i.db;
       const m = depsFor(db, k);
       const generation = seedUser(db, alice);
@@ -295,7 +291,7 @@ describe('verify drain', () => {
     const S = k.collections.scrobble;
     k.resetCalls();
 
-    await runInDurableObject(stubFor('drain-coalesce'), async (i: HarnessDO) => {
+    await withIngestIndex(async (i) => {
       const db = i.db;
       const m = depsFor(db, k);
       const aliceGen = seedUser(db, alice);
@@ -354,7 +350,7 @@ describe('verify drain', () => {
     expect(k.repos.Alice.head!.cid).not.toBe(H0);
     k.resetCalls();
 
-    await runInDurableObject(stubFor('drain-coalesce-rescan'), async (i: HarnessDO) => {
+    await withIngestIndex(async (i) => {
       const db = i.db;
       const m = depsFor(db, k);
       const generation = seedUser(db, alice);
@@ -471,7 +467,7 @@ describe('verify drain', () => {
     expect(k.repos.Alice.head!.signedBy).toBe(k.keys.alice.didKey);
     k.resetCalls();
 
-    await runInDurableObject(stubFor('drain-key-race'), async (i: HarnessDO) => {
+    await withIngestIndex(async (i) => {
       const db = i.db;
       const m = depsFor(db, k);
       seedUser(db, alice);
@@ -551,7 +547,7 @@ describe('verify drain', () => {
     k.resetCalls();
     k.pds.Alice.rateLimit(GET_RECORD, 30);
 
-    await runInDurableObject(stubFor('drain-429'), async (i: HarnessDO) => {
+    await withIngestIndex(async (i) => {
       const db = i.db;
       const m = depsFor(db, k);
       seedUser(db, alice);
@@ -609,7 +605,7 @@ describe('verify drain', () => {
     const uri = `at://${alice}/${S}/r1`;
     k.resetCalls();
 
-    await runInDurableObject(stubFor('drain-key-rotation'), async (i: HarnessDO) => {
+    await withIngestIndex(async (i) => {
       const db = i.db;
       const m = depsFor(db, k);
       seedUser(db, alice);
@@ -673,7 +669,7 @@ describe('verify drain', () => {
     expect(v1.rev < v2.rev).toBe(true);
     k.resetCalls();
 
-    await runInDurableObject(stubFor('drain-out-of-order'), async (i: HarnessDO) => {
+    await withIngestIndex(async (i) => {
       const db = i.db;
       const m = depsFor(db, k);
       seedUser(db, alice);
@@ -764,7 +760,7 @@ describe('verify drain', () => {
     expect(all).toHaveLength(100);
     k.resetCalls();
 
-    await runInDurableObject(stubFor('drain-concurrent'), async (i: HarnessDO, ctx) => {
+    await withIngestIndex(async (i) => {
       const db = i.db;
       const base = depsFor(db, k);
       for (const repo of repos) seedUser(db, repo.did);
@@ -872,7 +868,7 @@ describe('verify drain', () => {
       };
       // Alarms until the queue is empty (each run re-arms `drain` while hints are due).
       for (let alarm = 0; alarm < 10 && db.one<{ n: number }>('SELECT count(*) AS n FROM hints')!.n > 0; alarm++) {
-        await runDue(ctx.storage, db, now + alarm * 2_000, handlers, { maxRuns: 7 });
+        await runDue(i.storage, db, now + alarm * 2_000, handlers, { maxRuns: 7 });
         await Promise.all(rpcDrains);
       }
 
@@ -914,7 +910,7 @@ describe('verify drain', () => {
     k.pds.Bob.serverError(GET_RECORD, 500, 20);
     k.resetCalls();
 
-    await runInDurableObject(stubFor('drain-errors'), async (i: HarnessDO) => {
+    await withIngestIndex(async (i) => {
       const db = i.db;
       const m = depsFor(db, k);
       const aliceGen = seedUser(db, alice);
@@ -978,7 +974,7 @@ describe('verify drain', () => {
     }
     expect(all).toHaveLength(200);
 
-    await runInDurableObject(stubFor('drain-paid-200'), async (i: HarnessDO) => {
+    await withIngestIndex(async (i) => {
       const db = i.db;
       const m = depsFor(db, k, { plan: 'paid' });
       expect(m.config.budget).toMatchObject({ drainHints: 200, concurrentFetches: 4, perHostConcurrency: 2 });
@@ -1024,7 +1020,7 @@ describe('verify drain', () => {
     await k.repos.Alice.writes(ops);
     k.resetCalls();
 
-    await runInDurableObject(stubFor('drain-free'), async (i: HarnessDO) => {
+    await withIngestIndex(async (i) => {
       const db = i.db;
       const m = depsFor(db, k, { plan: 'free' });
       expect(m.config.budget).toMatchObject({ drainHints: 40, subrequestsPerSlice: 40 });

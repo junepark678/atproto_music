@@ -1,12 +1,10 @@
 // W4-03 discovery.ts: relay listReposByCollection paging into bounded
 // admission (ADR 0004 §5.4 hint sources, §5.5 gap recovery, §5.6; amendment
-// A6), against real DO SQLite and the fixture relay. A relay listing is a
+// A6), against a real SQLite file and the fixture relay. A relay listing is a
 // hint naming only a DID: it may create an inactive users row and a pending
 // snapshot job, never a projected record. Every expected value is hardcoded
 // from the relay contents set up here.
 
-import { runInDurableObject } from 'cloudflare:test';
-import { env } from 'cloudflare:workers';
 import { type FixtureKit, seedReadModels } from '@atmusic/atproto/test-support/read-models';
 import type { FixtureTransport } from '@atmusic/atproto/test-support/router-transport';
 import { describe, expect, it } from 'vitest';
@@ -24,11 +22,9 @@ import {
 import { GAP_SCAN_DONE, maybeClearGap } from '../../src/do/ingest/snapshot-job';
 import { updateCheckpointBookkeeping } from '../../src/do/status';
 import { dueAt, runDue, type TimerHandlers } from '../../src/do/timers';
-import type { HarnessDO } from '../harness/harness-do';
 import { NOW_STORAGE, seedUser } from '../write/support';
 import { depsFor, kit } from './drain-support';
-
-const stubFor = (name: string) => env.HARNESS.get(env.HARNESS.idFromName(name));
+import { withIngestIndex } from './node-index';
 
 const T0 = Date.parse('2026-01-15T12:00:00Z');
 const HOUR = 3_600_000;
@@ -95,7 +91,7 @@ describe('relay discovery', () => {
     expect(k.relay.repos(S).length).toBe(64);
     k.resetCalls();
 
-    await runInDurableObject(stubFor('discovery-pages'), async (i: HarnessDO) => {
+    await withIngestIndex(async (i) => {
       const db = i.db;
       const m = depsFor(db, k);
       seedUser(db, alice);
@@ -168,7 +164,7 @@ describe('relay discovery', () => {
     const s = Array.from({ length: 12 }, (_, i) => syntheticDid('s', i));
     k.relay.add(S, ...s);
 
-    await runInDurableObject(stubFor('discovery-gap'), async (i: HarnessDO) => {
+    await withIngestIndex(async (i) => {
       const db = i.db;
       const m = depsFor(db, k);
       // A daily pass is half way through the scrobble listing.
@@ -219,7 +215,7 @@ describe('relay discovery', () => {
     const s = Array.from({ length: 12 }, (_, i) => syntheticDid('s', i));
     k.relay.add(S, ...s);
 
-    await runInDurableObject(stubFor('discovery-gap-race'), async (i: HarnessDO, ctx: DurableObjectState) => {
+    await withIngestIndex(async (i) => {
       const db = i.db;
       const base = depsFor(db, k);
       // A daily pass is one page into the scrobble listing; the next run is due tomorrow.
@@ -264,7 +260,7 @@ describe('relay discovery', () => {
       // The alarm claims the daily run. Its page (s5..s9) arrives after the gap request
       // reset the position: the run admits nothing from it, writes no position, and
       // leaves the gap pass due now instead of pushing the timer to tomorrow.
-      const first = await runDue(ctx.storage, db, T1, handlers, { maxRuns: 7 });
+      const first = await runDue(i.storage, db, T1, handlers, { maxRuns: 7 });
       // (`snapshot` is the one-shot timer the first daily run armed for its admissions.)
       expect(first.ran).toEqual(['snapshot', 'discovery']);
       expect(gapRequests).toBe(1);
@@ -278,7 +274,7 @@ describe('relay discovery', () => {
       // minute apart (one page per run here), and only then is the pass over.
       for (let n = 0, at = T1; n < 10 && gapDiscoveryPending(db); n++, at += 60_000) {
         expect(dueAt(db, 'discovery')).toBe(at);
-        await runDue(ctx.storage, db, at, handlers, { maxRuns: 7 });
+        await runDue(i.storage, db, at, handlers, { maxRuns: 7 });
       }
       expect(gapDiscoveryPending(db)).toBe(false);
       expect(reports.slice(1).map((r) => [r.pass, r.stop])).toEqual([
@@ -310,7 +306,7 @@ describe('relay discovery', () => {
     k.relay.add(S, ...s);
     k.relay.add(F, f);
 
-    await runInDurableObject(stubFor('discovery-malformed'), async (i: HarnessDO) => {
+    await withIngestIndex(async (i) => {
       const db = i.db;
       const base = depsFor(db, k);
       // The relay answers two positions with a permanently malformed page: the second

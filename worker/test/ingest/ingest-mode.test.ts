@@ -1,10 +1,9 @@
-// W4-02 ingest-mode.ts: pulse and off modes against real DO SQLite and real
-// workerd WebSockets served by the fake Jetstream. The 20 s pulse bound is an
+// W4-02 ingest-mode.ts: pulse and off modes against the production SQLite
+// adapter (a temporary file, node-index.ts) and the fake Jetstream's sockets
+// (test/fixtures/jetstream-server.ts). The 20 s pulse bound is an
 // injected timer stepped by the test, and alarms are stepped with runDue after
 // advancing the frozen clock; nothing sleeps. Expectations are hardcoded.
 
-import { runInDurableObject } from 'cloudflare:test';
-import { env } from 'cloudflare:workers';
 import type { Indexing } from '@atmusic/core/api-types';
 import { fixedClock } from '@atmusic/core/test-support/clock';
 import { expect, it } from 'vitest';
@@ -19,7 +18,7 @@ import {
 } from '../../src/do/ingest/ingest-mode';
 import { connect, socketStatus } from '../../src/do/ingest/jetstream-socket';
 import { indexing, recordEvent, updateCheckpointBookkeeping } from '../../src/do/status';
-import { dueAt, runDue, TIMER_NAMES, type TimerHandlers } from '../../src/do/timers';
+import { type AlarmStorage, dueAt, runDue, TIMER_NAMES, type TimerHandlers } from '../../src/do/timers';
 import {
   checkpointRow,
   flush,
@@ -28,9 +27,7 @@ import {
   type JetstreamServer,
   jetstreamServer,
 } from '../fixtures/jetstream-server';
-import type { HarnessDO } from '../harness/harness-do';
-
-const stubFor = (name: string) => env.HARNESS.get(env.HARNESS.idFromName(name));
+import { withIngestIndex } from './node-index';
 
 const SECOND = 1_000;
 const MINUTE = 60 * SECOND;
@@ -82,7 +79,7 @@ function manualTimer(): PulseTimer & { armed: Array<{ ms: number; cancelled: boo
 }
 
 /** One alarm through the timer multiplexer, where only the watchdog does work. */
-function step(storage: DurableObjectStorage, m: IngestTestDeps, d: IngestDeps) {
+function step(storage: AlarmStorage, m: IngestTestDeps, d: IngestDeps) {
   const handlers = Object.fromEntries(TIMER_NAMES.map((n) => [n, async () => {}])) as unknown as TimerHandlers;
   handlers['jetstream-watchdog'] = async (now) => {
     await jetstreamWatchdog(m, d, now);
@@ -96,7 +93,7 @@ function step(storage: DurableObjectStorage, m: IngestTestDeps, d: IngestDeps) {
 it('pulse mode drains to tail then closes; off mode never connects', async () => {
   const clock = fixedClock();
   const server = jetstreamServer({ clock });
-  await runInDurableObject(stubFor('mode-pulse-tail'), async (i: HarnessDO, state) => {
+  await withIngestIndex(async (i) => {
     const m = ingestDeps(i.db, clock, { mode: 'pulse' });
     const timer = manualTimer();
     const d: IngestDeps = { connectJetstream: server.connect, pulseTimer: timer };
@@ -163,7 +160,7 @@ it('pulse mode drains to tail then closes; off mode never connects', async () =>
 
     // The next alarm pulses from the stored (inclusive) cursor and catches r5 up.
     clock.set(new Date(T0 + 5 * MINUTE).toISOString());
-    const next = step(state.storage, m, d);
+    const next = step(i.storage, m, d);
     await flush();
     expect(server.attempts.at(-1)).toMatchObject({ cursor: live.seq, status: 101 });
     const tail = server.append(commit('r6'));
@@ -175,7 +172,7 @@ it('pulse mode drains to tail then closes; off mode never connects', async () =>
 
   // Off mode: no socket, ever.
   const offServer = jetstreamServer({ clock });
-  await runInDurableObject(stubFor('mode-off'), async (i: HarnessDO, state) => {
+  await withIngestIndex(async (i) => {
     const m = ingestDeps(i.db, clock, { mode: 'off' });
     expect(m.config.ingestMode).toBe('off');
     const d: IngestDeps = { connectJetstream: offServer.connect, pulseTimer: manualTimer() };
@@ -190,7 +187,7 @@ it('pulse mode drains to tail then closes; off mode never connects', async () =>
     expect(checkpointRow(i.db)).toEqual({ ...before, mode: 'off' });
     // The watchdog is not rescheduled in off mode, so no alarm ever connects.
     expect(dueAt(i.db, 'jetstream-watchdog')).toBeNull();
-    expect((await step(state.storage, m, d)).ran).toEqual([]);
+    expect((await step(i.storage, m, d)).ran).toEqual([]);
     expect(status(i.db, clock.nowMs(), 'off').state).toBe('stale');
 
     // Switching to off closes a socket a previous mode opened, and marks it disconnected.
@@ -209,7 +206,7 @@ it('pulse mode drains to tail then closes; off mode never connects', async () =>
 it('a pulse that receives no event leaves lagSeconds null and the last successful pulse more than two intervals ago reports stale', async () => {
   const clock = fixedClock();
   const server = jetstreamServer({ clock, hosts: [EAST, WEST] });
-  await runInDurableObject(stubFor('mode-pulse-quiet'), async (i: HarnessDO, state) => {
+  await withIngestIndex(async (i) => {
     const m = ingestDeps(i.db, clock, { mode: 'pulse', hosts: [EAST, WEST] });
     const timer = manualTimer();
     const d: IngestDeps = { connectJetstream: server.connect, pulseTimer: timer };
@@ -226,14 +223,14 @@ it('a pulse that receives no event leaves lagSeconds null and the last successfu
     clock.set(new Date(T0 + 5 * MINUTE).toISOString());
     server.at(EAST).faults.add({}, { kind: 'status', status: 503 });
     const beforeFailed = checkpointRow(i.db);
-    await step(state.storage, m, d);
+    await step(i.storage, m, d);
     expect(server.attempts.at(-1)).toMatchObject({ host: EAST, status: 503 });
     expect(checkpointRow(i.db)).toEqual({ ...beforeFailed, host_index: 1 });
     expect(dueAt(i.db, 'jetstream-watchdog')).toBe(T0 + 10 * MINUTE);
 
     // Pulse 3 on us-west from the stored cursor receives nothing and ends after 20 s.
     clock.set(new Date(T0 + 10 * MINUTE).toISOString());
-    const running = step(state.storage, m, d);
+    const running = step(i.storage, m, d);
     await flush();
     expect(server.attempts.at(-1)).toMatchObject({ host: WEST, cursor: r1.seq, status: 101 });
     expect(seqsSent(server)).toEqual([]);
@@ -276,7 +273,7 @@ it('a pulse that receives no event leaves lagSeconds null and the last successfu
     const quiet = checkpointRow(i.db);
     for (const at of [T0 + 15 * MINUTE, T0 + 20 * MINUTE]) {
       clock.set(new Date(at).toISOString());
-      await step(state.storage, m, d);
+      await step(i.storage, m, d);
       expect(server.attempts.at(-1)!.status).toBe(503);
       expect(checkpointRow(i.db)).toMatchObject({
         connected: 0,
@@ -308,7 +305,7 @@ it('quiet pulses longer than lookback do not trigger gap recovery; a quiet pulse
   const clock = fixedClock();
   // The fake keeps exactly our 24 h lookback: an aged cursor is refused upstream too.
   const server = jetstreamServer({ clock, lookbackHours: 24 });
-  await runInDurableObject(stubFor('mode-pulse-quiet-lookback'), async (i: HarnessDO, state) => {
+  await withIngestIndex(async (i) => {
     const m = ingestDeps(i.db, clock, { mode: 'pulse' });
     const timer = manualTimer();
     const gapCalls: number[] = [];
@@ -322,7 +319,7 @@ it('quiet pulses longer than lookback do not trigger gap recovery; a quiet pulse
     /** One alarm whose pulse drains its full 20 s. */
     const quietPulse = async (at: number) => {
       clock.set(new Date(at).toISOString());
-      const running = step(state.storage, m, d);
+      const running = step(i.storage, m, d);
       await flush();
       clock.advance(PULSE_DRAIN_MAX_MS);
       timer.fire();
@@ -373,6 +370,6 @@ it('quiet pulses longer than lookback do not trigger gap recovery; a quiet pulse
     expect(checkpointRow(i.db)).toMatchObject({ pending_gap: 1, cursor: back * 1000 });
     expect(status(i.db, back + PULSE_DRAIN_MAX_MS)).toMatchObject({ state: 'recovering' });
   });
-  // 302 sequential pulses through workerd: about 4.5 s alone, past the 5 s default
+  // 302 sequential pulses through the fake sockets: about 4.5 s alone, past the 5 s default
   // under full-suite parallel load (the clock is injected, so only wall time grows).
 }, 60_000);

@@ -1,12 +1,10 @@
 // W4-03 sweeps.ts: the hourly account-status sweep and the daily identity
-// sweep, against real DO SQLite and the fixture network (fake PDSs, PLC, DoH
+// sweep, against a real SQLite file and the fixture network (fake PDSs, PLC, DoH
 // TXT and well-known handles; the production SafeFetch policy and identity
 // resolver). Proves M5.2.1/handle_rename (A17 identity sweep) and the
 // handle/PDS rules of ADR 0004 §5.6. History is seeded through the production
 // verify drain from real signed commits; every expected value is hardcoded.
 
-import { runInDurableObject } from 'cloudflare:test';
-import { env } from 'cloudflare:workers';
 import { testKey } from '@atmusic/atproto/test-support/keys';
 import { FIXTURE_USERS, type FixtureKit, seedReadModels } from '@atmusic/atproto/test-support/read-models';
 import type { FixtureTransport } from '@atmusic/atproto/test-support/router-transport';
@@ -20,11 +18,9 @@ import { drain } from '../../src/do/ingest/verify-drain';
 import { history } from '../../src/do/read/history';
 import { profile, resolveHandle } from '../../src/do/read/profile';
 import { dueAt } from '../../src/do/timers';
-import type { HarnessDO } from '../harness/harness-do';
 import { seedUser } from '../write/support';
 import { type Deps, depsFor, enqueue, hint, hintRows, kit } from './drain-support';
-
-const stubFor = (name: string) => env.HARNESS.get(env.HARNESS.idFromName(name));
+import { withIngestIndex } from './node-index';
 
 const T0 = Date.parse('2026-01-15T12:00:00Z');
 const HOUR = 3_600_000;
@@ -108,7 +104,7 @@ describe('status sweep', () => {
     });
     for (const did of R) activity.set(did, T0 - DAY);
 
-    await runInDurableObject(stubFor('sweep-cadence'), async (i: HarnessDO) => {
+    await withIngestIndex(async (i) => {
       const db = i.db;
       const m = depsFor(db, k);
       for (const did of [...O, ...R]) {
@@ -205,7 +201,7 @@ describe('status sweep fairness', () => {
     }
     failing.serverError(GET_REPO_STATUS, 503, Infinity);
 
-    await runInDurableObject(stubFor('sweep-fair'), async (i: HarnessDO) => {
+    await withIngestIndex(async (i) => {
       const db = i.db;
       const m = depsFor(db, k);
       // Never checked: round-robin order is DID order, so all 200 O come before any R.
@@ -281,7 +277,7 @@ describe('identity sweep', () => {
     const bob = k.users.Bob.did;
     const carol = k.users.Carol.did;
 
-    await runInDurableObject(stubFor('sweep-handle-null'), async (i: HarnessDO) => {
+    await withIngestIndex(async (i) => {
       const db = i.db;
       const m = depsFor(db, k);
       await seedIndexed(db, m, k);
@@ -344,7 +340,7 @@ describe('identity sweep', () => {
     const k = await kit();
     const alice = k.users.Alice.did;
 
-    await runInDurableObject(stubFor('sweep-pds-change'), async (i: HarnessDO) => {
+    await withIngestIndex(async (i) => {
       const db = i.db;
       const m = depsFor(db, k);
       await seedIndexed(db, m, k);
@@ -403,7 +399,7 @@ describe('identity sweep', () => {
     const alice = k.users.Alice.did;
     const RENAMED = 'alice-renamed.test';
 
-    await runInDurableObject(stubFor('sweep-rename'), async (i: HarnessDO) => {
+    await withIngestIndex(async (i) => {
       const db = i.db;
       const m = depsFor(db, k);
       await seedIndexed(db, m, k);
@@ -455,7 +451,7 @@ describe('identity sweep', () => {
     const alice = k.users.Alice.did;
     const bob = k.users.Bob.did;
 
-    await runInDurableObject(stubFor('sweep-handle-conflict'), async (i: HarnessDO) => {
+    await withIngestIndex(async (i) => {
       const db = i.db;
       const m = depsFor(db, k);
       await seedIndexed(db, m, k);
@@ -503,7 +499,7 @@ describe('identity sweep edge cases', () => {
       { fixture: true as const, calls: k.transport.calls, hostnames: k.transport.hostnames },
     ) satisfies FixtureTransport;
 
-    await runInDurableObject(stubFor('sweep-handle-transient'), async (i: HarnessDO) => {
+    await withIngestIndex(async (i) => {
       const db = i.db;
       const base = depsFor(db, k);
       const m: Deps = { ...base, transport, identity: cachedIdentityResolver(db, { transport, clock: k.clock }) };
@@ -555,7 +551,7 @@ describe('identity sweep edge cases', () => {
     const alice = k.users.Alice.did;
     const bob = k.users.Bob.did;
 
-    await runInDurableObject(stubFor('sweep-pds-stale-cache'), async (i: HarnessDO) => {
+    await withIngestIndex(async (i) => {
       const db = i.db;
       const m = depsFor(db, k);
       // Indexed through the drain at T0: identity_cache entries from T0, users.pds not yet known.
