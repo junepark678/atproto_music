@@ -117,7 +117,7 @@ Credentials = {appPasswords: [{id, label, createdAt, lastUsedAt}], listenbrainzT
 | GET `/api/v1/auth/session` | session | none | 200 Session; 401 |
 | POST `/api/v1/auth/logout` | session + CSRF | `{everywhere?}` | 204 |
 | DELETE `/api/v1/account/connection` | session + CSRF | none | 204: OAuth session revoked and deleted, every web session, protocol credential and link deleted, unsent operations cancelled |
-| POST `/api/v1/scrobbles` | session + CSRF | ScrobbleInput, `Idempotency-Key` | 202 Accepted; 400 `idempotency_key_required` or `invalid_idempotency_key`, 409 `idempotency_conflict`, 503 `publication_disabled` |
+| POST `/api/v1/scrobbles` | session + CSRF | ScrobbleInput, `Idempotency-Key` | 202 Accepted; 400 `idempotency_key_required` or `invalid_idempotency_key`, 409 `idempotency_conflict`, 429 `rate_limited` with `Retry-After` over the daily listen cap (nothing written, key unbound), 503 `publication_disabled` |
 | DELETE `/api/v1/scrobbles/{id}` | session + CSRF | URL-encoded AT URI | 202 Accepted; another DID's record 404 |
 | PUT `/api/v1/follows/{did}` | session + CSRF | DID | 202 Accepted |
 | DELETE `/api/v1/follows/{did}` | session + CSRF | DID | 202 Accepted |

@@ -248,7 +248,7 @@ V12_STATUSES = {
     ('GET', '/api/v1/auth/session'): {200, 401},
     ('POST', '/api/v1/auth/logout'): {204, 400, 401, 403, 413},
     ('DELETE', '/api/v1/account/connection'): {204, 401, 403},
-    ('POST', '/api/v1/scrobbles'): {202, 400, 401, 403, 409, 413, 422, 503},
+    ('POST', '/api/v1/scrobbles'): {202, 400, 401, 403, 409, 413, 422, 429, 503},
     ('DELETE', '/api/v1/scrobbles/{id}'): {202, 401, 403, 404, 422, 503},
     ('PUT', '/api/v1/follows/{did}'): {202, 401, 403, 422, 503},
     ('DELETE', '/api/v1/follows/{did}'): {202, 401, 403, 422, 503},
@@ -296,6 +296,7 @@ WRITE_ROUTES = {
 REQUIRED_ERROR_CODES = {
     ('POST', '/api/v1/scrobbles', 400): {'idempotency_key_required', 'invalid_idempotency_key'},
     ('POST', '/api/v1/scrobbles', 409): {'idempotency_conflict'},
+    ('POST', '/api/v1/scrobbles', 429): {'rate_limited'},
     ('POST', '/api/v1/auth/start', 403): {'csrf_failed', 'signin_not_allowed'},
     ('POST', '/api/v1/auth/start', 502): {'oauth_upstream'},
     ('GET', '/oauth/callback', 403): {'oauth_binding_mismatch', 'signin_not_allowed'},

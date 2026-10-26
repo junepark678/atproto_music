@@ -442,6 +442,78 @@ describe('POST /api/v1/scrobbles', () => {
     ]);
   });
 
+  it('a listen over the daily listen cap is 429 rate_limited with Retry-After until the oldest live listen leaves the 24 h window, writes nothing and leaves the Idempotency-Key unbound', async () => {
+    const w = await world();
+    const alice = w.signIn(ALICE, 'alice.test');
+    linkLastfm(w.app.db, ALICE);
+    w.app.db.run('UPDATE accounts SET daily_listen_cap = 2 WHERE did = ?', ALICE);
+    // An imported listen older than every live one: imports are not capped, so it is neither
+    // counted nor the listen whose exit Retry-After waits for.
+    w.app.db.run(
+      `INSERT INTO listen_keys(did, dedupe_key, operation_id, source, created_at_ms) VALUES (?, 'imported-key', NULL, 'import', ?)`,
+      ALICE,
+      T0 - 3_600_000,
+    );
+    const post = (key: string, body: unknown) => w.send('POST', '/api/v1/scrobbles', { as: alice, key, body });
+    const L2 = { ...LISTEN, track: 'Hunter', listenedAt: '2026-01-15T12:30:00Z' };
+    const L3 = { ...LISTEN, track: 'Unravel', listenedAt: '2026-01-15T13:00:00Z' };
+
+    const first = await post('cap-1', LISTEN); // receipt T0
+    w.kit.clock.advance(3_600_000);
+    const second = await post('cap-2', L2); // receipt T0 + 1 h
+    expect([first.status, second.status]).toEqual([202, 202]);
+    w.kit.clock.advance(1_800_000); // T0 + 1.5 h: two live listens in the window, the cap is full.
+
+    const before = { ops: w.ops().map((r) => r.id), keys: w.count('listen_keys'), forwards: w.count('forward_outbox') };
+    expect(before).toEqual({ ops: [opOf(first).id, opOf(second).id], keys: 3, forwards: 2 });
+    // The oldest live listen (receipt T0) leaves the window at T0 + 24 h: 22.5 h from now.
+    const expectedRetryAfter = (T0 + 24 * 3_600_000 - w.kit.clock.nowMs()) / 1000;
+    expect(expectedRetryAfter).toBe(81_000);
+
+    for (let i = 0; i < 2; i++) {
+      const over = await post('cap-3', L3);
+      expect([over.status, errorCode(over), over.headers.get('retry-after')]).toEqual([
+        429,
+        'rate_limited',
+        String(expectedRetryAfter),
+      ]);
+      expect(contract('POST', '/api/v1/scrobbles', over)).toBe('valid');
+      expect(over.body).toMatchObject({ error: { message: 'The request rate limit was exceeded.' } });
+    }
+    // Nothing written: no operation (so cap-3 is bound to nothing), listen key or forward row.
+    expect(w.ops().map((r) => r.id)).toEqual(before.ops);
+    expect(w.count('operations', 'idempotency_key = ?', 'cap-3')).toBe(0);
+    expect(w.count('listen_keys')).toBe(before.keys);
+    expect(w.count('forward_outbox')).toBe(before.forwards);
+    // cap-3 is unbound: another listen under it is refused by the cap, not 409 idempotency_conflict.
+    const otherBody = await post('cap-3', { ...L3, track: 'Bachelorette' });
+    expect([otherBody.status, errorCode(otherBody)]).toEqual([429, 'rate_limited']);
+
+    // One millisecond before the window moves the cap still holds, with the shortest wait.
+    w.kit.clock.advance(expectedRetryAfter * 1000 - 1);
+    const almost = await post('cap-3', L3);
+    expect([almost.status, almost.headers.get('retry-after')]).toEqual([429, '1']);
+
+    // At the instant Retry-After named, the receipt-T0 listen has left the window: the same key and
+    // body are accepted as a new operation bound to cap-3, with its listen key and forward row.
+    w.kit.clock.advance(1);
+    const admitted = await post('cap-3', L3);
+    expect(admitted.status).toBe(202);
+    expect(contract('POST', '/api/v1/scrobbles', admitted)).toBe('valid');
+    expect(opOf(admitted)).toMatchObject({ kind: 'scrobble.create', origin: 'web', state: 'queued' });
+    expect(w.ops().map((r) => [r.id, r.idempotency_key])).toEqual([
+      [opOf(first).id, 'cap-1'],
+      [opOf(second).id, 'cap-2'],
+      [opOf(admitted).id, 'cap-3'],
+    ]);
+    expect(w.count('listen_keys', 'did = ? AND operation_id = ?', ALICE, opOf(admitted).id)).toBe(1);
+    expect(w.count('forward_outbox')).toBe(before.forwards + 1);
+    // Now the window is full again (receipts T0 + 1 h and T0 + 24 h).
+    const full = await post('cap-4', { ...L3, track: 'Pagan Poetry' });
+    expect([full.status, full.headers.get('retry-after')]).toEqual([429, String(3_600)]);
+    expect(w.kit.pds.Alice.count()).toBe(0);
+  });
+
   it('an Idempotency-Key of 129 characters or containing a character outside [A-Za-z0-9._~-] is 400 invalid_idempotency_key', async () => {
     const w = await world();
     const alice = w.signIn(ALICE, 'alice.test');
