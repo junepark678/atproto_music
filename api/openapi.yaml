@@ -4205,7 +4205,7 @@
       "get": {
         "operationId": "link_lastfm_callback",
         "summary": "Last.fm link callback",
-        "description": "Calls signed auth.getSession, stores the sk sealed (HKDF info lastfm) with remote_user = session.name and 303s to /settings/links. The state must be single-use, unexpired and bound to this session's token hash; otherwise 403 and nothing is stored.",
+        "description": "Calls signed auth.getSession, stores the sk sealed (HKDF info lastfm) with remote_user = session.name and 303s to /settings/links. The state must be single-use, unexpired and bound to this session's token hash, and nothing is stored otherwise: a state bound to another session is 403 csrf_failed; a malformed query or an unknown, used or expired state is 400 bad_request (ADR 0005 §12.1, plan N3-08). Without the owner's Last.fm key it is 503 lastfm_not_configured.",
         "x-contract": "1.2",
         "security": [
           {
@@ -4253,8 +4253,26 @@
               "unauthenticated"
             ]
           },
+          "400": {
+            "description": "The query does not carry exactly one well-formed state and token, or the state is unknown, used or expired. Nothing is stored.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "fixture": {
+                    "$ref": "#/components/examples/error-400"
+                  }
+                }
+              }
+            },
+            "x-error-codes": [
+              "bad_request"
+            ]
+          },
           "403": {
-            "description": "The state is unknown, used, expired or bound to another session.",
+            "description": "The state is bound to another session. Nothing is stored.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4287,6 +4305,24 @@
             },
             "x-error-codes": [
               "upstream_error"
+            ]
+          },
+          "503": {
+            "description": "Last.fm is not configured on this server.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "fixture": {
+                    "$ref": "#/components/examples/v1.2-error-503-lastfm"
+                  }
+                }
+              }
+            },
+            "x-error-codes": [
+              "lastfm_not_configured"
             ]
           }
         }
