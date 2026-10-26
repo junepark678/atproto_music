@@ -81,17 +81,20 @@ export interface LastfmRow {
   id: string;
 }
 
+/** Whether a `recenttracks.track` row is the now-playing row (the only row mapLastfmRow maps to no entry). */
+export function isNowPlaying(row: unknown): boolean {
+  const attr = obj(obj(row)?.['@attr']);
+  return attr !== null && (attr.nowplaying === 'true' || attr.nowplaying === true);
+}
+
 /**
  * One `recenttracks.track` row (API page or the lastfm.ghan.nl export):
  * mapped with `mapLastfmScrobble` (packages/core/src/protocol-map.ts), or null
  * for the now-playing row.
  */
 export function mapLastfmRow(row: unknown): LastfmRow {
+  if (isNowPlaying(row)) return { entry: null, second: null, id: '' };
   const r = obj(row) ?? {};
-  const attr = obj(r['@attr']);
-  if (attr !== null && (attr.nowplaying === 'true' || attr.nowplaying === true)) {
-    return { entry: null, second: null, id: '' };
-  }
   const artist = text(r.artist, 'name');
   const track = typeof r.name === 'string' ? r.name : undefined;
   const album = text(r.album);

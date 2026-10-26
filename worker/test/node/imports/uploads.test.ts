@@ -24,6 +24,7 @@ import { createBox } from '../../../src/crypto/box';
 import { importsFeature } from '../../../src/http/imports';
 import {
   CRASH_LOOP_ATTEMPTS,
+  cancelJob,
   createJob,
   IMPORT_FETCH_CAPS,
   type ImportRuntime,
@@ -238,6 +239,51 @@ function lastfmExportBody(n: number, base = Math.floor(T0 / 1000) - 86_400): str
       },
     },
   ]);
+}
+
+/** An UploadStore over the real files that counts `read()` calls, bytes handed out and streams released. */
+function countingStore(): { store: UploadStore; reads: number; bytes: number; released: number } {
+  const counts = { reads: 0, bytes: 0, released: 0 };
+  const store: UploadStore = {
+    read(path) {
+      counts.reads += 1;
+      const inner = fsUploadStore.read(path);
+      return (async function* () {
+        try {
+          for await (const chunk of inner) {
+            counts.bytes += chunk.byteLength;
+            yield chunk;
+          }
+        } finally {
+          counts.released += 1;
+        }
+      })();
+    },
+    remove: fsUploadStore.remove,
+  };
+  return Object.assign(counts, { store });
+}
+
+/** A Last.fm JSON export of `n` listens in pages of 200. */
+function lastfmPagedExport(n: number, base = Math.floor(T0 / 1000) - 86_400): string {
+  const pages: unknown[] = [];
+  for (let start = 0; start < n; start += 200) {
+    const track = [];
+    for (let i = start; i < Math.min(n, start + 200); i++) {
+      track.push({
+        artist: { '#text': `Paged ${i}` },
+        name: `Song ${i}`,
+        album: { '#text': '' },
+        date: { uts: String(base - i) },
+      });
+    }
+    pages.push({ recenttracks: { track } });
+  }
+  return JSON.stringify(pages);
+}
+
+function msid(i: number): string {
+  return `aaaaaaaa-0000-4000-8000-${i.toString(16).padStart(12, '0')}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -732,4 +778,114 @@ describe('import uploads', () => {
       expect(again.nextDueMs).toBeNull();
     });
   });
+
+  it('an upload parsed over several slices is read once with each slice staging only new entries; after a restart it resumes at the stored point and feedback still resolves against the skipped listens', async () => {
+    await withHarness(async (h) => {
+      h.seedUser(h.alice);
+      const N = 11_000;
+      const base = 1_700_000_000;
+      const lines: string[] = [];
+      for (let i = 0; i < N; i++) {
+        lines.push(
+          JSON.stringify({
+            listened_at: base + i + 0.25,
+            recording_msid: msid(i),
+            track_metadata: { artist_name: `Zip Artist ${i}`, track_name: `Zip Track ${i}` },
+          }),
+        );
+      }
+      const feedback = [
+        // Listen 3 is staged before the restart, so the resumed parse only skips it.
+        JSON.stringify({ recording_msid: msid(3), score: 1, created: 1_700_100_000 }),
+        JSON.stringify({ recording_msid: msid(10_500), score: 1, created: 1_700_100_001 }),
+        JSON.stringify({ recording_msid: msid(N + 1), score: 1, created: 1_700_100_002 }),
+      ];
+      const zip = zipSync({
+        'feedback.jsonl': enc.encode(feedback.join('\n')),
+        'listens/2023/11.jsonl': enc.encode(`${lines.join('\n')}\n`),
+      });
+      writeUpload(h, 'job-slices', h.alice, 'listenbrainz_zip', zip);
+      const consumed = () =>
+        (JSON.parse(job(h.db, 'job-slices').cursor_json ?? '{}') as { upload: { consumed: number } }).upload.consumed;
+
+      const first = countingStore();
+      const rt = runtime(h, first.store);
+      const r1 = await runImports(rt, h.kit.clock.nowMs());
+      expect(r1.actions).toEqual([
+        { jobId: 'job-slices', action: 'started' },
+        { jobId: 'job-slices', action: 'parsed', detail: '5000' },
+      ]);
+      expect(r1.nextDueMs).toBe(h.kit.clock.nowMs());
+      expect(job(h.db, 'job-slices')).toMatchObject({ state: 'fetching', staged: 5_000, fetched: 5_000, attempts: 0 });
+      expect(consumed()).toBe(5_000);
+
+      const r2 = await runImports(rt, h.kit.clock.nowMs());
+      expect(r2.actions).toEqual([{ jobId: 'job-slices', action: 'parsed', detail: '5000' }]);
+      expect(job(h.db, 'job-slices')).toMatchObject({
+        state: 'fetching',
+        staged: 10_000,
+        fetched: 10_000,
+        duplicates: 0,
+      });
+      expect(consumed()).toBe(10_000);
+      // The second slice continued the open parse: one read, never past the file's bytes, not released.
+      expect(first.reads).toBe(1);
+      expect(first.bytes).toBeLessThanOrEqual(zip.length);
+      expect(first.released).toBe(0);
+
+      // A process restart: the parse is reopened once and skips the 10,000 staged entries
+      // (then 1,000 listens, 2 loves and 1 unresolved feedback row).
+      h.restart();
+      const second = countingStore();
+      const r3 = await runImports(runtime(h, second.store), h.kit.clock.nowMs());
+      expect(r3.actions).toEqual([{ jobId: 'job-slices', action: 'parsed', detail: '1003' }]);
+      expect(second.reads).toBe(1);
+      expect(second.released).toBe(1);
+      const row = job(h.db, 'job-slices');
+      expect(row).toMatchObject({ state: 'writing', staged: N + 2, duplicates: 0, invalid: 1, upload_path: null });
+      expect(JSON.parse(row.invalid_reasons)).toEqual({ feedback_unresolved: 1 });
+      expect(existsSync(join(h.ctx.dir, 'imports', 'job-slices.upload'))).toBe(false);
+
+      // Every listen staged exactly once, in archive order; both loves resolved.
+      const items = h.db.all<ImportItemRow>("SELECT * FROM import_items WHERE job_id = 'job-slices' ORDER BY seq");
+      expect(items).toHaveLength(N + 2);
+      expect(new Set(items.map((i) => i.dedupe_key)).size).toBe(N + 2);
+      const records = items.map((i) => JSON.parse(i.record_json) as { kind: string; input: Record<string, unknown> });
+      const listens = records.filter((r) => r.kind !== 'love').map((r) => r.input.track);
+      expect(listens).toEqual(Array.from({ length: N }, (_, i) => `Zip Track ${i}`));
+      expect(records.filter((r) => r.kind === 'love').map((r) => r.input)).toEqual([
+        { artist: 'Zip Artist 3', track: 'Zip Track 3' },
+        { artist: 'Zip Artist 10500', track: 'Zip Track 10500' },
+      ]);
+    });
+  }, 60_000);
+
+  it('cancelling a job mid-parse releases its open upload parse and nothing more is read or staged', async () => {
+    await withHarness(async (h) => {
+      h.seedUser(h.alice);
+      const body = lastfmPagedExport(7_000);
+      const path = writeUpload(h, 'job-open', h.alice, 'lastfm_json', body);
+      const counts = countingStore();
+      const rt = runtime(h, counts.store);
+      const r1 = await runImports(rt, h.kit.clock.nowMs());
+      expect(r1.actions).toEqual([
+        { jobId: 'job-open', action: 'started' },
+        { jobId: 'job-open', action: 'parsed', detail: '5000' },
+      ]);
+      expect(job(h.db, 'job-open')).toMatchObject({ state: 'fetching', staged: 5_000 });
+      expect(counts).toMatchObject({ reads: 1, released: 0 });
+
+      const cancelled = await cancelJob(rt, h.alice, 'job-open', h.kit.clock.nowMs());
+      expect(cancelled).toMatchObject({ state: 'cancelled', upload_path: null });
+      for (let i = 0; i < 10 && counts.released === 0; i++) await new Promise((r) => setImmediate(r));
+      expect(counts.released).toBe(1);
+      expect(existsSync(path)).toBe(false);
+
+      const r2 = await runImports(rt, h.kit.clock.nowMs());
+      expect(r2.actions).toEqual([]);
+      expect(counts.reads).toBe(1);
+      expect(job(h.db, 'job-open')).toMatchObject({ state: 'cancelled', staged: 5_000, fetched: 5_000 });
+      expect(h.db.one("SELECT count(*) AS n FROM import_items WHERE job_id = 'job-open'")).toEqual({ n: 5_000 });
+    });
+  }, 60_000);
 });

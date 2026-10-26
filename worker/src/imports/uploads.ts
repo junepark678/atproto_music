@@ -21,7 +21,13 @@
 // no live job references.
 //
 // Parsing (`parseUpload`), streaming only, in a deterministic entry order so
-// a resumed parse can skip what it already staged:
+// a resumed parse can skip what it already staged (`skip`: the skipped
+// entries are counted without being mapped or hashed; skipped ListenBrainz
+// listens still feed feedback resolution). `UploadParse` is its pull view:
+// the import timer keeps one open between slices, so a slice parses only the
+// entries it stages, and the whole file is read once per process (ADR §3.3);
+// only a process restart re-reads it from the start, skipping cheaply up to
+// the persisted resume point.
 // - `lastfm_json` (the lastfm.ghan.nl export): a top-level JSON array of
 //   getRecentTracks pages, split into pages by a depth-tracking tokenizer
 //   (strings and escapes respected); each page (≤ MAX_PAGE_BYTES) is parsed
@@ -43,7 +49,7 @@ import { createReadStream } from 'node:fs';
 import { chmod, mkdir, open, readdir, stat, unlink } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import type { Db } from '../do/db';
-import { mapLastfmRow, pageTracks } from './lastfm-source';
+import { isNowPlaying, mapLastfmRow, pageTracks } from './lastfm-source';
 import { listenedAtSeconds, mapListenBrainzRow } from './listenbrainz-source';
 import type { ParsedEntry } from './staging';
 import { readZip } from './zip';
@@ -585,6 +591,12 @@ export interface ParseControl {
   emit(entry: ParsedEntry): Promise<boolean>;
   /** The feedback `created` fallback (UNIX seconds) for a row without one. */
   nowSeconds: number;
+  /**
+   * The first `skip` entries (a resumed parse's already staged ones) are not
+   * emitted, and are counted without being mapped (no protocol mapping, no
+   * listen-key hashing); skipped listens still feed feedback resolution.
+   */
+  skip?: number;
 }
 
 class StopParse extends Error {}
@@ -599,6 +611,13 @@ export async function parseUpload(
   control: ParseControl,
 ): Promise<boolean> {
   const queue: ParsedEntry[] = [];
+  let skipLeft = Math.max(0, control.skip ?? 0);
+  /** True (and one fewer left) while entries are still being skipped. */
+  const skipping = (): boolean => {
+    if (skipLeft === 0) return false;
+    skipLeft -= 1;
+    return true;
+  };
   const drain = async () => {
     while (queue.length > 0) {
       const entry = queue.shift() as ParsedEntry;
@@ -616,6 +635,8 @@ export async function parseUpload(
           throw new UploadParseError('export_malformed');
         }
         for (const row of pageTracks(page)) {
+          // mapLastfmRow maps every row but the now-playing one to an entry.
+          if (skipLeft > 0 && !isNowPlaying(row) && skipping()) continue;
           const mapped = mapLastfmRow(row);
           if (mapped.entry !== null) queue.push(mapped.entry);
         }
@@ -646,7 +667,7 @@ export async function parseUpload(
             current = name;
             splitter = new LineSplitter((line) => {
               if (line === null) {
-                if (name !== FEEDBACK_ENTRY) queue.push({ kind: 'invalid', reason: 'line_too_long' });
+                if (name !== FEEDBACK_ENTRY && !skipping()) queue.push({ kind: 'invalid', reason: 'line_too_long' });
                 return;
               }
               let raw: Json | null;
@@ -660,7 +681,12 @@ export async function parseUpload(
                 return;
               }
               if (raw === null) {
-                queue.push({ kind: 'invalid', reason: 'line_invalid' });
+                if (!skipping()) queue.push({ kind: 'invalid', reason: 'line_invalid' });
+                return;
+              }
+              if (skipping()) {
+                // Already staged: only feedback resolution needs it (the second as mapListenBrainzRow reads it).
+                resolver.noteListen(raw, listenedAtSeconds(raw.listened_at));
                 return;
               }
               const row = mapListenBrainzRow(raw);
@@ -678,12 +704,121 @@ export async function parseUpload(
     // Feedback after every listens entry: resolution needs the whole archive.
     for (const row of feedback) {
       const entry = resolver.resolve(row);
-      if (entry !== null) queue.push(entry);
+      if (entry !== null && !skipping()) queue.push(entry);
       await drain();
     }
     return true;
   } catch (error) {
     if (error instanceof StopParse) return false;
     throw error;
+  }
+}
+
+/** The parse was closed (its job was cancelled, failed or moved on) while a slice waited on it. */
+export class UploadParseClosed extends Error {
+  override readonly name = 'UploadParseClosed';
+  constructor() {
+    super('upload parse closed');
+  }
+}
+
+export interface UploadParseOptions {
+  nowSeconds: number;
+  /** Entries already staged by earlier slices (the persisted resume point). */
+  skip: number;
+  /** Entries handed out per `take()`; the parse waits once this many are buffered. */
+  batch: number;
+}
+
+/**
+ * A pull view of `parseUpload` that stays open between import slices: the
+ * parse runs until `batch` entries are buffered, then waits (holding its
+ * read position, the inflater and the feedback indexes) until the next
+ * `take()`. A slice therefore parses only the entries it stages, and the
+ * upload is read once. Memory stays bounded: at most `batch` entries are
+ * buffered. `close()` stops the parse and releases the file.
+ */
+export class UploadParse {
+  /** Entries handed out so far, the skipped ones included: the resume point after the last `take()`. */
+  position: number;
+  private buffer: ParsedEntry[] = [];
+  private finished = false;
+  private failure: { error: unknown } | null = null;
+  private closed = false;
+  private resumeProducer: (() => void) | null = null;
+  private wakeConsumer: (() => void) | null = null;
+  private readonly batch: number;
+
+  constructor(kind: UploadKind, source: AsyncIterable<Uint8Array>, options: UploadParseOptions) {
+    this.position = options.skip;
+    this.batch = Math.max(1, options.batch);
+    parseUpload(kind, source, {
+      nowSeconds: options.nowSeconds,
+      skip: options.skip,
+      emit: async (entry) => {
+        if (this.closed) return false;
+        this.buffer.push(entry);
+        if (this.buffer.length >= this.batch) {
+          const resumed = new Promise<void>((resolve) => {
+            this.resumeProducer = resolve;
+          });
+          this.wake();
+          await resumed;
+        }
+        return !this.closed;
+      },
+    }).then(
+      () => {
+        this.finished = true;
+        this.wake();
+      },
+      (error: unknown) => {
+        this.failure = { error };
+        this.wake();
+      },
+    );
+  }
+
+  private wake(): void {
+    const wake = this.wakeConsumer;
+    this.wakeConsumer = null;
+    wake?.();
+  }
+
+  /**
+   * The next entries (up to `batch`), and whether the whole upload has now
+   * been handed out. Throws the parse's error (ZipBoundError,
+   * UploadParseError, a read error), or UploadParseClosed after `close()`.
+   */
+  async take(): Promise<{ entries: ParsedEntry[]; done: boolean }> {
+    while (!this.closed && this.failure === null && !this.finished && this.buffer.length < this.batch) {
+      const woken = new Promise<void>((resolve) => {
+        this.wakeConsumer = resolve;
+      });
+      const resume = this.resumeProducer;
+      this.resumeProducer = null;
+      resume?.();
+      await woken;
+    }
+    if (this.closed) throw new UploadParseClosed();
+    if (this.failure !== null) {
+      this.closed = true;
+      throw this.failure.error;
+    }
+    const entries = this.buffer;
+    this.buffer = [];
+    this.position += entries.length;
+    return { entries, done: this.finished };
+  }
+
+  /** Stops the parse (its read stream is released) and fails any waiting `take()`. */
+  close(): void {
+    if (this.closed) return;
+    this.closed = true;
+    this.buffer = [];
+    const resume = this.resumeProducer;
+    this.resumeProducer = null;
+    resume?.();
+    this.wake();
   }
 }

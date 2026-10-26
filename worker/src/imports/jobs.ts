@@ -23,9 +23,15 @@
 //   off 30 s·2^n, capped at 1 h; the upstream rate limit pauses the job
 //   (`rate_limited`) until it resets; an upstream 401 pauses it
 //   (`upstream_unauthorized`) until the user resumes. Uploads are parsed
-//   PARSE_SLICE entries per slice; a resumed parse skips the entries it
-//   already staged. Each page or batch is staged with its cursor in one
-//   transaction (staging.ts); the upload file is deleted once fully parsed.
+//   PARSE_SLICE entries per slice, staged STAGE_BATCH per transaction with an
+//   event-loop yield between batches. The parse stays open between slices
+//   (an UploadParse per job, held in process), so a slice costs what it
+//   stages and the file is read once; `consumed` in the cursor is only the
+//   crash-resume point: after a restart (or a failed slice) the parse is
+//   reopened and skips, without mapping or hashing, the entries already
+//   staged. A parse whose job is no longer fetching that upload is closed.
+//   Each page or batch is staged with its cursor in one transaction
+//   (staging.ts); the upload file is deleted once fully parsed.
 // - **writing.** writer.ts turns staged items into import-priority operations
 //   (1,000 per slice, while fewer than 1,000 are queued). While `diskLow()`
 //   is true no operation is created and the job is paused with `low_disk`; it
@@ -61,7 +67,14 @@ import { accountNeedsSignIn } from '../outbox/operations';
 import { fetchLastfmPage, initialLastfmCursor, type LastfmCursor } from './lastfm-source';
 import { fetchListenBrainzPage, initialListenBrainzCursor, type ListenBrainzCursor } from './listenbrainz-source';
 import { type ParsedEntry, stageEntries } from './staging';
-import { deleteUpload, parseUpload, sweepOrphanUploads, UploadParseError, type UploadStore } from './uploads';
+import {
+  deleteUpload,
+  sweepOrphanUploads,
+  UploadParse,
+  UploadParseClosed,
+  UploadParseError,
+  type UploadStore,
+} from './uploads';
 import { outstanding, stagedLeft, syncOutcomes, WRITE_SLICE, writeSlice } from './writer';
 import { ZipBoundError } from './zip';
 
@@ -314,8 +327,48 @@ function setCursor(db: Db, id: string, cursor: JobCursor, now: number, extra = '
   );
 }
 
+// ---------------------------------------------------------------------------
+// Open upload parses (one per job being parsed, kept between slices)
+
+interface OpenParse {
+  parse: UploadParse;
+  path: string;
+  store: UploadStore;
+}
+
+const openParses = new WeakMap<Db, Map<string, OpenParse>>();
+
+function parsesOf(db: Db): Map<string, OpenParse> {
+  let map = openParses.get(db);
+  if (map === undefined) {
+    map = new Map();
+    openParses.set(db, map);
+  }
+  return map;
+}
+
+/** Closes the job's open upload parse, if any (its read stream is released). */
+function closeParse(db: Db, jobId: string): void {
+  const map = openParses.get(db);
+  const open = map?.get(jobId);
+  if (open === undefined) return;
+  open.parse.close();
+  map?.delete(jobId);
+}
+
+/** Closes every open parse whose job no longer fetches that upload (cancelled, failed, finished, gone). */
+function closeStaleParses(db: Db): void {
+  const map = openParses.get(db);
+  if (map === undefined) return;
+  for (const [jobId, open] of [...map]) {
+    const job = loadJob(db, jobId);
+    if (job === null || job.state !== 'fetching' || job.upload_path !== open.path) closeParse(db, jobId);
+  }
+}
+
 /** Fails the job with `error` and deletes its upload. */
 export async function failJob(rt: Pick<ImportRuntime, 'm' | 'uploads'>, id: string, error: string, now: number) {
+  closeParse(rt.m.db, id);
   rt.m.db.run(
     `UPDATE import_jobs SET state = 'failed', error = ?, finished_at_ms = ?, updated_at_ms = ?
      WHERE id = ? AND state IN ${ACTIVE_SQL}`,
@@ -338,6 +391,7 @@ export async function cancelJob(
   const job = db.one<ImportJobRow>('SELECT * FROM import_jobs WHERE id = ? AND did = ?', id, did);
   if (job === null) return null;
   if ((ACTIVE_STATES as readonly string[]).includes(job.state)) {
+    closeParse(db, id);
     db.run(
       `UPDATE import_jobs SET state = 'cancelled', finished_at_ms = ?, updated_at_ms = ? WHERE id = ?`,
       now,
@@ -382,6 +436,11 @@ function pauseJob(db: Db, job: ImportJobRow, cursor: JobCursor, error: string, n
     now,
     job.id,
   );
+}
+
+/** Yields to the event loop (pending I/O and timers run first). */
+function yieldToLoop(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
 }
 
 function backoffMs(base: number, cap: number, failures: number): number {
@@ -496,6 +555,7 @@ class ImportRun {
         this.wait(this.now + POLL_MS);
       }
     }
+    closeStaleParses(this.db);
     if (this.moreReady) this.report.nextDueMs = this.now;
     else this.report.nextDueMs = this.waits.length === 0 ? null : Math.min(...this.waits);
     return this.report;
@@ -762,33 +822,31 @@ class ImportRun {
     }
     if (!(await this.beginSlice(job))) return;
     const consumedBefore = cursor.upload?.consumed ?? 0;
-    let seen = 0;
+    const parse = this.openParse(job, path, consumedBefore);
     let consumed = consumedBefore;
-    let batch: ParsedEntry[] = [];
-    const flush = async () => {
-      if (batch.length === 0) return;
-      const entries = batch;
-      batch = [];
-      consumed += entries.length;
-      await stageEntries(rt.m, job, entries, {
-        cursorJson: JSON.stringify({ ...cursor, upload: { consumed } }),
-        now: this.now,
-      });
-    };
-    let complete: boolean;
+    let complete = false;
     try {
-      complete = await parseUpload(job.source as 'lastfm_json' | 'listenbrainz_zip', rt.uploads.read(path), {
-        nowSeconds: Math.floor(this.now / 1000),
-        emit: async (entry) => {
-          seen += 1;
-          if (seen <= consumedBefore) return true;
-          batch.push(entry);
-          if (batch.length >= STAGE_BATCH) await flush();
-          return consumed + batch.length - consumedBefore < PARSE_SLICE;
-        },
-      });
-      await flush();
+      while (!complete && consumed - consumedBefore < PARSE_SLICE) {
+        const { entries, done } = await parse.take();
+        complete = done;
+        if (entries.length > 0) {
+          consumed += entries.length;
+          await stageEntries(rt.m, job, entries, {
+            cursorJson: JSON.stringify({ ...cursor, upload: { consumed } }),
+            now: this.now,
+          });
+        }
+        // Let requests and the other timers in between staging transactions.
+        if (!complete) await yieldToLoop();
+      }
     } catch (error) {
+      // The parse cannot be continued from where it stands: reopen it next time.
+      closeParse(this.db, job.id);
+      if (error instanceof UploadParseClosed) {
+        // The job was cancelled or failed meanwhile; nothing more to do.
+        this.act(job.id, 'parsed', { detail: `${consumed - consumedBefore}` });
+        return;
+      }
       if (error instanceof ZipBoundError || error instanceof UploadParseError) {
         const code = error instanceof ZipBoundError ? `zip_${error.bound}` : error.code;
         await failJob(rt, job.id, code, this.now);
@@ -801,9 +859,10 @@ class ImportRun {
         return;
       }
       rt.m.log.log('error', 'import.parse_error', { jobId: job.id, error: errorName(error) });
-      this.retryLater(job, cursor, 'internal');
+      this.retryLater(job, parseCursor(loadJob(this.db, job.id) as ImportJobRow), 'internal');
       return;
     }
+    if (complete) closeParse(this.db, job.id);
     const after = parseCursor(loadJob(this.db, job.id) as ImportJobRow);
     if (complete) {
       after.fetchDone = true;
@@ -819,6 +878,27 @@ class ImportRun {
       this.moreReady = true;
     }
     this.act(job.id, 'parsed', { detail: `${consumed - consumedBefore}` });
+  }
+
+  /**
+   * The job's open parse when it stands exactly at `consumed` on the same
+   * upload; otherwise (first slice, a restart, a failed slice) a new one that
+   * skips the `consumed` entries already staged.
+   */
+  private openParse(job: ImportJobRow, path: string, consumed: number): UploadParse {
+    const map = parsesOf(this.db);
+    const open = map.get(job.id);
+    if (open !== undefined) {
+      if (open.path === path && open.store === this.rt.uploads && open.parse.position === consumed) return open.parse;
+      closeParse(this.db, job.id);
+    }
+    const parse = new UploadParse(job.source as 'lastfm_json' | 'listenbrainz_zip', this.rt.uploads.read(path), {
+      nowSeconds: Math.floor(this.now / 1000),
+      skip: consumed,
+      batch: STAGE_BATCH,
+    });
+    map.set(job.id, { parse, path, store: this.rt.uploads });
+    return parse;
   }
 
   private async writeSliceFor(job: ImportJobRow): Promise<void> {
