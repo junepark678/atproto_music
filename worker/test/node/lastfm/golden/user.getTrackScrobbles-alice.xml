@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<lfm status="ok">
+  <trackscrobbles user="alice" page="1" perPage="50" totalPages="1" total="2">
+    <track>
+      <artist mbid="">Björk</artist>
+      <streamable>0</streamable>
+      <image size="small"/>
+      <image size="medium"/>
+      <image size="large"/>
+      <image size="extralarge"/>
+      <mbid/>
+      <album mbid="">Homogenic</album>
+      <name>Jóga</name>
+      <url>https://www.last.fm/music/Bj%C3%B6rk/_/J%C3%B3ga</url>
+      <date uts="1768474800">15 Jan 2026, 11:00</date>
+    </track>
+    <track>
+      <artist mbid="">  BJÖRK  </artist>
+      <streamable>0</streamable>
+      <image size="small"/>
+      <image size="medium"/>
+      <image size="large"/>
+      <image size="extralarge"/>
+      <mbid/>
+      <album mbid=""> HOMOGENIC </album>
+      <name>jóga</name>
+      <url>https://www.last.fm/music/++BJ%C3%96RK++/_/j%C3%B3ga</url>
+      <date uts="1768388400">14 Jan 2026, 11:00</date>
+    </track>
+  </trackscrobbles>
+</lfm>
