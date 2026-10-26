@@ -166,28 +166,6 @@ export type LocalIndex = IndexRpc & {
   readonly deps: Omit<ModuleDeps, 'db'>;
 };
 
-const METHODS: Record<keyof IndexRpc, true> = {
-  ready: true,
-  indexing: true,
-  history: true,
-  feed: true,
-  lookup: true,
-  recordStatus: true,
-  stats: true,
-  profile: true,
-  following: true,
-  followers: true,
-  exportUser: true,
-  resolveHandle: true,
-  notify: true,
-  ensureRunning: true,
-  adminStatus: true,
-  adminPitr: true,
-  adminBackup: true,
-};
-
-export const INDEX_RPC_METHODS = Object.keys(METHODS) as (keyof IndexRpc)[];
-
 export class NotWiredError extends Error {
   constructor(method: string) {
     super(`IndexRpc.${method} is not implemented by this local index`);
@@ -231,17 +209,33 @@ export function makeDbIndex(
     },
   };
 
-  const index: Record<string, unknown> = { calls, logs, networkAttempts, deps };
-  for (const method of INDEX_RPC_METHODS) {
-    index[method] = async (...args: unknown[]) => {
-      calls.push({ method, args });
-      const fn = (impl as Record<string, ((...a: unknown[]) => unknown) | undefined>)[method];
-      if (fn === undefined) throw new NotWiredError(method);
-      const m: ModuleDeps = { ...deps, db: dbOf(state.db) };
-      return form === 'rpc' ? fn.apply(m, args) : fn(m, ...args);
-    };
-  }
-  return index as unknown as LocalIndex;
+  // IndexRpc methods are created on first access, keyed by property name, so
+  // this file holds no copy of the method list to fall out of step with
+  // contracts.ts (a method added or removed there needs no edit here). `then`
+  // stays undefined so the index is never mistaken for a thenable.
+  const own: Record<string, unknown> = { calls, logs, networkAttempts, deps };
+  const methods = new Map<string, (...args: unknown[]) => Promise<unknown>>();
+  const methodFor = (name: string) => {
+    let rpc = methods.get(name);
+    if (rpc === undefined) {
+      const method = name as keyof IndexRpc;
+      rpc = async (...args: unknown[]) => {
+        calls.push({ method, args });
+        const fn = (impl as Record<string, ((...a: unknown[]) => unknown) | undefined>)[method];
+        if (fn === undefined) throw new NotWiredError(method);
+        const m: ModuleDeps = { ...deps, db: dbOf(state.db) };
+        return form === 'rpc' ? fn.apply(m, args) : fn(m, ...args);
+      };
+      methods.set(name, rpc);
+    }
+    return rpc;
+  };
+  return new Proxy(own, {
+    get(target, prop) {
+      if (typeof prop !== 'string' || prop === 'then') return undefined;
+      return Object.hasOwn(target, prop) ? target[prop] : methodFor(prop);
+    },
+  }) as unknown as LocalIndex;
 }
 
 /** Runs `fn` against the database's current handle (what runInDurableObject did for the harness DO). */
