@@ -104,12 +104,11 @@ export interface LinksService {
 
 /**
  * The link service from `RequestCtx.app`. It is reached through this accessor
- * rather than by declaration merging into AppServices: a non-empty
- * AppServices no longer converts to the `Record<string, unknown>` that
- * node/compose.ts (N2-01, not edited here) assigns services through.
+ * rather than by declaration merging into AppServices, so `ctx.app` is
+ * narrowed through `unknown` (AppServices has members by interface merging).
  */
 export function linksServiceOf(ctx: RequestCtx): LinksService {
-  const service = (need(ctx, 'app') as Record<string, unknown>).links as LinksService | undefined;
+  const service = (need(ctx, 'app') as unknown as Record<string, unknown>).links as LinksService | undefined;
   if (service === undefined) throw new CtxWiringError('app');
   return service;
 }

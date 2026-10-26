@@ -21,10 +21,9 @@
 // `ctx.app.webWrites` (`WebWritesServices`), which `writesFeature` (writes.ts)
 // builds from the composition's FeatureContext. A composition without it
 // answers a generic 500 (CtxWiringError), never a request without a guard.
-// The member is not added to AppServices by declaration merging: compose.ts
-// assigns services through a direct `AppServices` → `Record<string, unknown>`
-// cast, which stops type-checking once AppServices has a member, so the
-// accessor below narrows `ctx.app` itself.
+// The member is added to AppServices by declaration merging (ADR 0005 §3.1),
+// so `writesFeature`'s `services` result type-checks as Partial<AppServices>
+// once other features have declared theirs (wave 3 integration).
 //
 // v1.2 error codes. The frozen v1.1 ErrorCode union (@atmusic/core/errors)
 // does not hold idempotency_key_required, invalid_idempotency_key,
@@ -68,6 +67,12 @@ export interface WebWritesService {
 /** The AppServices part writesFeature provides. */
 export interface WebWritesServices {
   webWrites: WebWritesService;
+}
+
+declare module '../app/services' {
+  interface AppServices {
+    webWrites: WebWritesService;
+  }
 }
 
 /** The WebWritesService of the composition, or CtxWiringError (a generic 500). */
