@@ -2,10 +2,10 @@ import type { Did, Handle } from '@atmusic/core/api-types';
 
 export interface Session {
   did: Did;
-  handle: Handle;
+  handle: Handle | null;
   username: string;
   csrfToken: string;
-  status: 'active';
+  status: 'active' | 'reauth_required';
   expiresAt: string;
 }
 
@@ -43,15 +43,15 @@ export class SessionClient {
     if (
       !value ||
       typeof value.did !== 'string' ||
-      typeof value.handle !== 'string' ||
+      (value.handle !== null && typeof value.handle !== 'string') ||
       typeof value.username !== 'string' ||
       typeof value.csrfToken !== 'string' ||
-      value.status !== 'active' ||
+      (value.status !== 'active' && value.status !== 'reauth_required') ||
       typeof value.expiresAt !== 'string'
     )
       throw new Error('Invalid session response');
     this.#csrfToken = value.csrfToken;
-    this.#set(value, false);
+    this.#set(value, value.status === 'reauth_required');
     return value;
   }
 

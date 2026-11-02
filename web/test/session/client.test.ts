@@ -39,6 +39,21 @@ describe('web/test/session/client.test.ts', () => {
     expect(changed).toHaveBeenLastCalledWith(null, false);
   });
 
+  it('accepts the HTTP 200 reauth_required DTO with a nullable handle and keeps CSRF usable', async () => {
+    const reauth = { ...dto, handle: null, status: 'reauth_required' as const };
+    const changed = vi.fn();
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json(reauth))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+    const client = new SessionClient({ fetch: fetcher, onChange: changed });
+    await expect(client.getSession()).resolves.toEqual(reauth);
+    expect(client.current()).toEqual(reauth);
+    expect(changed).toHaveBeenLastCalledWith(reauth, true);
+    expect((await client.mutate('/api/v1/write', { method: 'POST' })).status).toBe(204);
+    expect(new Headers(fetcher.mock.calls[1]?.[1]?.headers).get('X-CSRF-Token')).toBe(reauth.csrfToken);
+  });
+
   it('the app state store holds the server Session DTO', async () => {
     const state = createAppState();
     setSession(state, dto);
