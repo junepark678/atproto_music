@@ -99,6 +99,7 @@ export class OutboxService {
 
   async refresh(): Promise<void> {
     if (this.#stopped) return;
+    const before = new Map(this.#rows.map((row) => [row.id, this.#refreshKey(row)]));
     const pending = this.#rows.filter(
       (row) => row.state === 'queued' || row.state === 'running' || row.state === 'published',
     );
@@ -142,7 +143,6 @@ export class OutboxService {
               }
             }
           }
-          row.updatedAt = Date.now();
         } catch {
           /* transient poll failure leaves the last server state visible */
         } finally {
@@ -150,8 +150,16 @@ export class OutboxService {
         }
       }),
     );
-    this.#persist();
-    this.#notify();
+    const changed = this.#rows.filter((row) => before.get(row.id) !== this.#refreshKey(row));
+    if (changed.length > 0) {
+      for (const row of changed) row.updatedAt = Date.now();
+      this.#persist();
+      this.#notify();
+    }
+  }
+
+  #refreshKey(row: OutboxOperation): string {
+    return JSON.stringify([row.state, row.uri, row.failureCode, row.reason, row.dueAt]);
   }
 
   #add(server: ServerOperation, record?: Record<string, unknown>, subject?: Did): OutboxOperation {
