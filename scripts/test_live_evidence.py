@@ -475,6 +475,23 @@ class LiveEvidenceTests(unittest.TestCase):
             self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
             self.assertIn("independent --commit and --bundle-sha256/--artifact are required", result.stdout)
 
+    def test_explicit_node_cli_never_accepts_workers_inventory(self):
+        result = run_cli(passing_inventory(), "--node", "--commit", COMMIT,
+                         "--bundle-sha256", BUNDLE)
+        self.assertEqual(result.returncode, 2, result.stdout)
+        self.assertIn("expected schemaVersion 3 and runtime=node", result.stdout)
+
+    def test_node_ingest_absence_method_matches_pds_capability(self):
+        ingest = copy.deepcopy(passing_inventory()["gates"]["ingest"])
+        ingest.update(schemaVersion=3, runtime="node")
+        inventory = self.node_inventory(gates={"ingest": ingest, "pdsCompat": self.node_gate()})
+        verdict = evaluate_node(inventory, COMMIT, BUNDLE)
+        self.assertEqual(verdict.gates["ingest"], "passed", verdict.problems)
+        ingest["results"]["deleteReconcile"][0]["method"] = "snapshot"
+        verdict = evaluate_node(inventory, COMMIT, BUNDLE)
+        self.assertEqual(verdict.gates["ingest"], "blocked")
+        self.assertTrue(any("pdsCompat" in issue and "requires" in issue for issue in verdict.problems))
+
     def test_complete_inventory_passes(self):
         """A complete, bound inventory is the only PASS (control for the rejection tests)."""
         verdict = evaluate(passing_inventory(), BUNDLE, VERSION)

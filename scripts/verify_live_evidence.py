@@ -755,6 +755,11 @@ def evaluate_node(manifest, expected_commit, expected_bundle):
             status, issues = "blocked", [f"gates.{name} (Node gate semantics are not ported)"]
         statuses[name] = status
         all_issues += issues
+    if statuses.get("ingest") == "passed" and statuses.get("pdsCompat") == "passed":
+        mismatch = absence_method_problems(gates["ingest"], gates["pdsCompat"], prereq)
+        if mismatch:
+            statuses["ingest"] = "blocked"
+            all_issues += mismatch
     for name in sorted(set(gates) - set(REQUIRED_GATES)):
         statuses[name] = "blocked"
         all_issues.append(f"gates.{name} (unknown gate)")
@@ -831,7 +836,7 @@ def main(argv=None):
             name = entry.get("gate") if isinstance(entry, dict) else None
             status, lines = node_gate_status(name, entry, expected_commit, bundle)
             return _report(status, lines, f"Node {name or 'unknown'} gate result")
-        verdict = evaluate(manifest, bundle, commit=expected_commit)
+        verdict = evaluate_node(manifest, expected_commit, bundle)
         statuses = ", ".join(f"{name}={status}" for name, status in verdict.gates.items())
         return _report(verdict.status, verdict.problems + ([f"gates: {statuses}"] if statuses else []),
                        "Node live evidence")
