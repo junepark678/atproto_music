@@ -159,7 +159,7 @@ function latestSettingsOp(ops: readonly OutboxOperation[] | null): OutboxOperati
   return settings.at(-1) ?? null;
 }
 
-function IndexingSection({ outbox }: { outbox: OutboxService }) {
+export function IndexingSection({ outbox }: { outbox: OutboxService }) {
   const state = useAppState();
   const ops = useOutboxOps(outbox);
   const [read, setRead] = useState<IndexingRead>({ kind: 'loading' });
