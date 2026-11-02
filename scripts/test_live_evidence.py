@@ -22,6 +22,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from verify_live_evidence import (
@@ -29,6 +30,8 @@ from verify_live_evidence import (
     evaluate,
     gate_status,
     main,
+    evaluate_node,
+    node_gate_status,
     problems,
     secure_url,
 )
@@ -344,6 +347,134 @@ def fake_fetches(result):
 
 
 class LiveEvidenceTests(unittest.TestCase):
+    def node_gate(self, name="pdsCompat", **overrides):
+        entry = {
+            "schemaVersion": 3, "runtime": "node", "gate": name, "result": "passed",
+            "fixtureOnly": False, "recordedAt": "2026-01-15T12:00:00Z",
+            "testCommand": f"node scripts/live/node_{name}.mjs", "commit": COMMIT,
+            "bundleSha256": BUNDLE, "origin": ORIGIN, "lexiconPrefix": PREFIX,
+            "cleanup": "created test records removed and independently verified absent",
+            "pds": PDS, "subjects": [{"did": DID_A, "uri": None}, {"did": DID_B, "uri": None}],
+            "results": {"perPds": [
+                {"endpoint": PDS_A, "getRecordInclusion": True, "getRecordExclusion": True,
+                 "snapshotAbsence": None, "getBlocks": True, "getRepoStatus": True},
+                {"endpoint": PDS_B, "getRecordInclusion": True, "getRecordExclusion": False,
+                 "snapshotAbsence": True, "getBlocks": True, "getRepoStatus": True},
+            ]},
+        }
+        entry.update(overrides)
+        return entry
+
+    def node_inventory(self, **overrides):
+        inventory = {
+            "schemaVersion": 3, "runtime": "node", "fixtureOnly": False,
+            "release": {"commit": COMMIT, "bundleSha256": BUNDLE},
+            "prerequisites": {
+                "ownedLexiconPrefix": PREFIX, "publicHttpsOrigin": ORIGIN,
+                "identities": [{"did": DID_A, "pds": PDS_A}, {"did": DID_B, "pds": PDS_B}],
+                "independentPdsOperatorsVerified": True, "jetstreamCoverageVerified": True,
+            },
+            "gates": {},
+        }
+        inventory.update(overrides)
+        return inventory
+
+    def test_node_standalone_supported_gate_uses_independent_identity_and_no_network(self):
+        entry = self.node_gate()
+        with patch("socket.socket", side_effect=AssertionError("network attempted")), \
+                patch("socket.create_connection", side_effect=AssertionError("network attempted")), \
+                patch("socket.getaddrinfo", side_effect=AssertionError("network attempted")), \
+                patch("urllib.request.urlopen", side_effect=AssertionError("network attempted")):
+            status, issues = node_gate_status("pdsCompat", entry, COMMIT, BUNDLE)
+            dispatched = evaluate(self.node_inventory(gates={"pdsCompat": entry}), BUNDLE, commit=COMMIT)
+        self.assertEqual((status, issues), ("passed", []))
+        self.assertEqual(dispatched.gates["pdsCompat"], "passed")
+
+    def test_node_inventory_default_and_unported_gates_remain_blocked(self):
+        self.assertEqual(evaluate_node(self.node_inventory(), COMMIT, BUNDLE).status, "blocked")
+        inventory = self.node_inventory(gates={
+            "pdsCompat": self.node_gate(),
+            "oauth": self.node_gate("oauth", results={"signIns": [{"signedOut": True}]}),
+            "ingest": self.node_gate("ingest"),
+            "ssrfProbe": self.node_gate("ssrfProbe"), "socketSoak": self.node_gate("socketSoak"),
+        })
+        verdict = evaluate_node(inventory, COMMIT, BUNDLE)
+        self.assertEqual(verdict.status, "blocked")
+        self.assertEqual(verdict.gates["pdsCompat"], "passed")
+        for name in ("oauth", "ssrfProbe", "socketSoak"):
+            self.assertEqual(verdict.gates[name], "blocked", name)
+
+    def test_node_bound_failure_is_fail_but_malformed_failure_is_blocked(self):
+        failure = self.node_gate("pdsCompat", result="failed", failures=["real endpoint rejected request"])
+        self.assertEqual(node_gate_status("pdsCompat", failure, COMMIT, BUNDLE)[0], "failed")
+        self.assertEqual(node_gate_status("pdsCompat", {**failure, "failures": []}, COMMIT, BUNDLE)[0], "blocked")
+        inv = self.node_inventory(gates={"pdsCompat": failure})
+        self.assertEqual(evaluate_node(inv, COMMIT, BUNDLE).status, "failed")
+        inv["prerequisites"]["jetstreamCoverageVerified"] = False
+        self.assertEqual(evaluate_node(inv, COMMIT, BUNDLE).status, "blocked")
+
+    def test_node_requires_independent_commit_hash_and_gate_binding(self):
+        entry = self.node_gate()
+        self.assertEqual(node_gate_status("pdsCompat", entry, None, None)[0], "blocked")
+        self.assertEqual(node_gate_status("pdsCompat", entry, "0" * 40, BUNDLE)[0], "blocked")
+        self.assertEqual(node_gate_status("pdsCompat", entry, COMMIT, "0" * 64)[0], "blocked")
+        self.assertEqual(node_gate_status("pdsCompat", {**entry, "commit": "0" * 40}, COMMIT, BUNDLE)[0], "blocked")
+        self.assertEqual(node_gate_status("pdsCompat", {**entry, "bundleSha256": "0" * 64}, COMMIT, BUNDLE)[0], "blocked")
+        self.assertEqual(node_gate_status("ingest", entry, COMMIT, BUNDLE)[0], "blocked")
+        self.assertEqual(node_gate_status("pdsCompat", {**entry, "recordedAt": "bad"}, COMMIT, BUNDLE)[0], "blocked")
+        self.assertEqual(node_gate_status("pdsCompat", {**entry, "failures": ["contradiction"]}, COMMIT, BUNDLE)[0], "blocked")
+
+    def test_node_inventory_release_and_gate_identity_must_match(self):
+        inventory = self.node_inventory(gates={"pdsCompat": self.node_gate()})
+        inventory["gates"]["pdsCompat"]["bundleSha256"] = "6" * 64
+        self.assertEqual(evaluate_node(inventory, COMMIT, BUNDLE).status, "blocked")
+        inventory["gates"]["pdsCompat"]["bundleSha256"] = BUNDLE
+        inventory["release"]["commit"] = "6" * 40
+        self.assertEqual(evaluate_node(inventory, COMMIT, BUNDLE).status, "blocked")
+
+    def test_node_schema_fixture_unknown_and_prerequisite_confusion_block(self):
+        cases = [
+            {"runtime": "workers"}, {"schemaVersion": 2}, {"fixtureOnly": True},
+            {"fixtureOnly": None},
+        ]
+        for change in cases:
+            inventory = self.node_inventory(gates={"pdsCompat": self.node_gate()})
+            inventory.update(change)
+            self.assertEqual(evaluate_node(inventory, COMMIT, BUNDLE).status, "blocked", change)
+        self.assertEqual(node_gate_status("pdsCompat", self.node_gate(runtime="workers"), COMMIT, BUNDLE)[0],
+                         "blocked")
+        self.assertEqual(node_gate_status("pdsCompat", self.node_gate(fixtureOnly=True), COMMIT, BUNDLE)[0],
+                         "blocked")
+        self.assertEqual(node_gate_status("mystery", self.node_gate("mystery"), COMMIT, BUNDLE)[0], "blocked")
+        inv = self.node_inventory(gates={"pdsCompat": self.node_gate(), "mystery": {}})
+        self.assertEqual(evaluate_node(inv, COMMIT, BUNDLE).status, "blocked")
+        inv["prerequisites"]["identities"][1]["pds"] = PDS_A
+        self.assertEqual(evaluate_node(inv, COMMIT, BUNDLE).status, "blocked")
+
+    def test_node_cli_artifact_conflict_and_matching_artifact(self):
+        with tempfile.TemporaryDirectory(prefix="atmusic-node-artifact-") as directory:
+            artifact = Path(directory) / "main.mjs"
+            artifact.write_bytes(b"node bundle fixture bytes for offline verifier test")
+            digest = __import__("hashlib").sha256(artifact.read_bytes()).hexdigest()
+            gate_path = Path(directory) / "gate.json"
+            gate_path.write_text(json.dumps(self.node_gate(bundleSha256=digest)))
+            base = [sys.executable, str(ROOT / "scripts/verify_live_evidence.py"), "--gate", str(gate_path),
+                    "--node", "--commit", COMMIT, "--artifact", str(artifact)]
+            mismatch = subprocess.run(base + ["--bundle-sha256", BUNDLE], text=True, capture_output=True)
+            self.assertEqual(mismatch.returncode, 2, mismatch.stdout)
+            match = subprocess.run(base + ["--bundle-sha256", digest], text=True, capture_output=True)
+            self.assertEqual(match.returncode, 0, match.stdout + match.stderr)
+
+    def test_default_and_missing_node_cli_identity_are_blocked(self):
+        self.assertEqual(main([]), 2)
+        with tempfile.TemporaryDirectory(prefix="atmusic-node-cli-") as directory:
+            gate_path = Path(directory) / "gate.json"
+            gate_path.write_text(json.dumps(self.node_gate()))
+            result = subprocess.run([sys.executable, str(ROOT / "scripts/verify_live_evidence.py"),
+                                     "--gate", str(gate_path), "--node"], text=True, capture_output=True)
+            self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+            self.assertIn("independent --commit and --bundle-sha256/--artifact are required", result.stdout)
+
     def test_complete_inventory_passes(self):
         """A complete, bound inventory is the only PASS (control for the rejection tests)."""
         verdict = evaluate(passing_inventory(), BUNDLE, VERSION)

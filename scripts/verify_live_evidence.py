@@ -261,7 +261,7 @@ def release_problems(release):
     return problems
 
 
-def prerequisite_problems(prereq):
+def prerequisite_problems(prereq, *, node=False):
     if not isinstance(prereq, dict):
         prereq = {}
     problems = []
@@ -277,7 +277,10 @@ def prerequisite_problems(prereq):
         problems.append("prerequisites.identities (two dedicated live DIDs, each with its public HTTPS PDS)")
     elif identities[0]["did"] == identities[1]["did"] or _host(identities[0]["pds"]) == _host(identities[1]["pds"]):
         problems.append("prerequisites.identities (two different DIDs on two different PDS hosts)")
-    for flag in ("independentPdsOperatorsVerified", "jetstreamCoverageVerified", "adminTokenConfigured"):
+    flags = ("independentPdsOperatorsVerified", "jetstreamCoverageVerified")
+    if not node:
+        flags += ("adminTokenConfigured",)
+    for flag in flags:
         if prereq.get(flag) is not True:
             problems.append(f"prerequisites.{flag}")
     return problems
@@ -591,8 +594,10 @@ def absence_method_problems(ingest, pds_compat, prereq):
     return problems
 
 
-def evaluate(manifest, bundle_sha256=None, worker_version_id=None):
+def evaluate(manifest, bundle_sha256=None, worker_version_id=None, *, commit=None):
     """Classify a whole inventory: Verdict(status, problems, per-gate statuses)."""
+    if isinstance(manifest, dict) and manifest.get("runtime") == "node":
+        return evaluate_node(manifest, commit, bundle_sha256)
     if not isinstance(manifest, dict):
         return Verdict("blocked", ["inventory (not a JSON object)"], {})
     if manifest.get("schemaVersion") != SCHEMA_VERSION:
@@ -643,6 +648,129 @@ def evaluate(manifest, bundle_sha256=None, worker_version_id=None):
     return Verdict(status, problems, statuses)
 
 
+# OAuth needs its own confidential-client interoperability evidence. The old
+# Workers browser OAuth result shape is intentionally not accepted as Node proof.
+NODE_SUPPORTED_GATES = ("ingest", "pdsCompat")
+
+
+def _node_identity_problems(data, expected_commit, expected_bundle, where, *, identity_fields=True):
+    issues = []
+    if not isinstance(expected_commit, str) or not COMMIT_RE.fullmatch(expected_commit) or int(expected_commit, 16) == 0:
+        issues.append("independent expected commit must be a nonzero full 40-hex SHA")
+    if not isinstance(expected_bundle, str) or not SHA256_RE.fullmatch(expected_bundle) or int(expected_bundle, 16) == 0:
+        issues.append("independent expected bundle hash must be a nonzero 64-hex SHA-256")
+    if not isinstance(data, dict):
+        return issues + [f"{where} (not a JSON object)"]
+    if data.get("runtime") != "node" or data.get("schemaVersion") != 3:
+        issues.append(f"{where} (expected schemaVersion 3 and runtime=node)")
+    if data.get("fixtureOnly") is not False:
+        issues.append(f"{where}.fixtureOnly (must be false)")
+    if not identity_fields:
+        return issues
+    for field, expected, pattern in (("commit", expected_commit, COMMIT_RE), ("bundleSha256", expected_bundle, SHA256_RE)):
+        actual = data.get(field)
+        if not isinstance(actual, str) or not pattern.fullmatch(actual) or int(actual, 16) == 0:
+            issues.append(f"{where}.{field} (missing, malformed, or zero)")
+        elif isinstance(expected, str) and pattern.fullmatch(expected) and actual != expected:
+            issues.append(f"{where}.{field} (does not match independently expected identity)")
+    return issues
+
+
+def node_gate_status(name, entry, expected_commit, expected_bundle, prereq=None):
+    """Validate a Node gate against an independently supplied release identity."""
+    where = f"gates.{name}"
+    if name not in REQUIRED_GATES:
+        return "blocked", [f"{where} (unknown gate)"]
+    issues = _node_identity_problems(entry, expected_commit, expected_bundle, where)
+    if not isinstance(entry, dict):
+        return "blocked", issues
+    if entry.get("gate") != name:
+        issues.append(f"{where}.gate (expected {name})")
+    if not _timestamp(entry.get("recordedAt")):
+        issues.append(f"{where}.recordedAt (timezone-qualified date)")
+    if not _nonempty(entry.get("testCommand")):
+        issues.append(f"{where}.testCommand")
+    if not owned_prefix(entry.get("lexiconPrefix")):
+        issues.append(f"{where}.lexiconPrefix (owned production namespace)")
+    if not secure_url(entry.get("origin"), {"https"}, origin=True):
+        issues.append(f"{where}.origin (deployed public HTTPS origin)")
+    if isinstance(prereq, dict) and prereq:
+        if _origin(entry.get("origin")) != _origin(prereq.get("publicHttpsOrigin")):
+            issues.append(f"{where}.origin (not the prerequisite origin)")
+        if entry.get("lexiconPrefix") != prereq.get("ownedLexiconPrefix"):
+            issues.append(f"{where}.lexiconPrefix (not the owned prefix)")
+    if entry.get("result") not in OUTCOMES:
+        issues.append(f"{where}.result (one of passed, failed, blocked)")
+    if entry.get("result") == "blocked":
+        missing = entry.get("missing")
+        if not isinstance(missing, list) or not missing or not all(_nonempty(v) for v in missing):
+            issues.append(f"{where}.missing (blocked results list missing prerequisites)")
+        return "blocked", issues
+    if entry.get("result") == "failed":
+        failures = entry.get("failures")
+        if not isinstance(failures, list) or not failures or not all(_nonempty(v) for v in failures):
+            issues.append(f"{where}.failures (failed results name their failures)")
+        return ("blocked", issues) if issues else ("failed", [f"{where}: failed — {v}" for v in failures])
+    if entry.get("failures"):
+        issues.append(f"{where} (a passed result carries failures)")
+    if not _nonempty(entry.get("cleanup")):
+        issues.append(f"{where}.cleanup (cleanup outcome)")
+    if name in PDS_GATES:
+        issues += _pds_problems(where, entry, prereq if isinstance(prereq, dict) else {})
+        issues += _subject_problems(where, entry, prereq if isinstance(prereq, dict) else {},
+                                    need_uri=name == "ingest", prefix=entry.get("lexiconPrefix"))
+    if name in NODE_SUPPORTED_GATES:
+        issues += _results_problems(name, entry, entry.get("lexiconPrefix"),
+                                    prereq if isinstance(prereq, dict) else {})
+    else:
+        issues.append(f"{where} (Node gate semantics are not ported)")
+    return ("blocked", issues) if issues else ("passed", [])
+
+
+def evaluate_node(manifest, expected_commit, expected_bundle):
+    """Classify Node inventory; expected release identity is never read from evidence."""
+    binding = _node_identity_problems(manifest, expected_commit, expected_bundle, "inventory", identity_fields=False)
+    if not isinstance(manifest, dict):
+        return Verdict("blocked", binding, {})
+    release = manifest.get("release")
+    if not isinstance(release, dict):
+        binding.append("inventory.release (commit and bundleSha256 required)")
+        release = {}
+    for field, pattern, expected in (("commit", COMMIT_RE, expected_commit),
+                                     ("bundleSha256", SHA256_RE, expected_bundle)):
+        value = release.get(field)
+        if not isinstance(value, str) or not pattern.fullmatch(value) or int(value, 16) == 0:
+            binding.append(f"inventory.release.{field} (missing, malformed, or zero)")
+        elif value != expected:
+            binding.append(f"inventory.release.{field} (does not match expected identity)")
+    prereq = manifest.get("prerequisites")
+    prereq_issues = prerequisite_problems(prereq, node=True)
+    binding += prereq_issues
+    gates = manifest.get("gates") if isinstance(manifest.get("gates"), dict) else {}
+    statuses, all_issues = {}, list(binding)
+    for name in REQUIRED_GATES:
+        status, issues = node_gate_status(name, gates.get(name), expected_commit, expected_bundle,
+                                          prereq if isinstance(prereq, dict) else {})
+        if name not in NODE_SUPPORTED_GATES and status == "passed":
+            status, issues = "blocked", [f"gates.{name} (Node gate semantics are not ported)"]
+        statuses[name] = status
+        all_issues += issues
+    for name in sorted(set(gates) - set(REQUIRED_GATES)):
+        statuses[name] = "blocked"
+        all_issues.append(f"gates.{name} (unknown gate)")
+    # A gate failure is attributable only when both inventory binding/prerequisites
+    # and that gate's own identity/provenance validate.
+    if binding:
+        status = "blocked"
+    elif "failed" in statuses.values():
+        status = "failed"
+    elif all(status == "passed" for status in statuses.values()) and len(statuses) == len(REQUIRED_GATES):
+        status = "passed"
+    else:
+        status = "blocked"
+    return Verdict(status, all_issues, statuses)
+
+
 def problems(manifest, artifact_sha256=None):
     """Everything that keeps the inventory from passing (compatibility helper)."""
     return evaluate(manifest, artifact_sha256).problems
@@ -650,7 +778,9 @@ def problems(manifest, artifact_sha256=None):
 
 def _report(status, lines, subject):
     head = {
-        "passed": f"PASS: {subject} is complete for one Worker version and bundle",
+        "passed": (f"PASS: {subject} is complete for its independently expected release"
+                   if subject.startswith("Node ") else
+                   f"PASS: {subject} is complete for one Worker version and bundle"),
         "failed": f"FAIL: {subject} records a failed live gate",
         "blocked": f"BLOCKED: {subject} is incomplete; no live tests ran",
     }[status]
@@ -670,6 +800,7 @@ def main(argv=None):
     parser.add_argument("--worker-version-id", help="require the evidence to be for this Worker version id")
     parser.add_argument("--artifact", type=Path, help="require the evidence bundle hash to be this file's SHA-256")
     parser.add_argument("--commit", help="independently trusted full source commit under review")
+    parser.add_argument("--node", action="store_true", help="explicitly require the Node schema, including for --gate")
     args = parser.parse_args(argv)
     try:
         if args.gate is not None:
@@ -678,40 +809,32 @@ def main(argv=None):
             manifest = json.loads(args.manifest.read_text())
         bundle = args.bundle_sha256
         if args.artifact is not None:
-            bundle = hashlib.sha256(args.artifact.read_bytes()).hexdigest()
+            artifact_bundle = hashlib.sha256(args.artifact.read_bytes()).hexdigest()
+            if bundle is not None and bundle.lower() != artifact_bundle:
+                return _report("blocked", ["--bundle-sha256 disagrees with --artifact SHA-256"], "live evidence")
+            bundle = artifact_bundle
     except (OSError, ValueError):
         print("BLOCKED: live evidence inventory or artifact is unavailable/invalid; no live tests ran")
         return EXIT_CODES["blocked"]
     # Node schema v3 is deliberately separate from the historical Workers v2
     # verifier below. No identity is inferred from the evidence document.
     expected_commit = args.commit
-    if args.gate is not None or (isinstance(manifest, dict) and manifest.get("runtime") == "node"):
+    is_node = args.node or (args.gate is not None and isinstance(entry, dict)
+                            and entry.get("runtime") == "node") or (
+                                args.gate is None and isinstance(manifest, dict) and manifest.get("runtime") == "node")
+    if is_node:
         if (not isinstance(expected_commit, str) or not COMMIT_RE.fullmatch(expected_commit)
-                or not isinstance(bundle, str) or not SHA256_RE.fullmatch(bundle)):
+                or int(expected_commit, 16) == 0 or not isinstance(bundle, str)
+                or not SHA256_RE.fullmatch(bundle) or int(bundle, 16) == 0):
             return _report("blocked", ["independent --commit and --bundle-sha256/--artifact are required"], "Node evidence")
-        data = entry if args.gate is not None else manifest
-        if not isinstance(data, dict) or data.get("runtime") != "node" or data.get("schemaVersion") != 3 or data.get("fixtureOnly") is not False:
-            return _report("blocked", ["Node schema v3, runtime=node, fixtureOnly=false required"], "Node evidence")
-        release = data.get("release")
-        if not isinstance(release, dict) or release.get("commit") != expected_commit or release.get("bundleSha256") != bundle:
-            return _report("blocked", ["release identity missing, malformed, or mismatched"], "Node evidence")
-        gates = {data.get("gate"): data} if args.gate is not None else data.get("gates", {})
-        if not isinstance(gates, dict) or not gates:
-            return _report("blocked", ["no valid Node gate evidence"], "Node evidence")
-        required = ("oauth", "ingest", "pdsCompat", "ssrfProbe", "socketSoak")
-        statuses = {}
-        for name in required:
-            item = gates.get(name)
-            if not isinstance(item, dict): statuses[name] = "blocked"; continue
-            if item.get("runtime") != "node" or item.get("schemaVersion") != 3 or item.get("fixtureOnly") is not False or item.get("commit") != expected_commit or item.get("bundleSha256") != bundle:
-                statuses[name] = "blocked"
-            elif name in ("ssrfProbe", "socketSoak"):
-                statuses[name] = "blocked"
-            elif item.get("result") in ("passed", "failed"):
-                statuses[name] = item["result"]
-            else: statuses[name] = "blocked"
-        status = "failed" if "failed" in statuses.values() else "passed" if all(x == "passed" for x in statuses.values()) else "blocked"
-        return _report(status, [f"gates: {statuses}"], "Node live evidence")
+        if args.gate is not None:
+            name = entry.get("gate") if isinstance(entry, dict) else None
+            status, lines = node_gate_status(name, entry, expected_commit, bundle)
+            return _report(status, lines, f"Node {name or 'unknown'} gate result")
+        verdict = evaluate(manifest, bundle, commit=expected_commit)
+        statuses = ", ".join(f"{name}={status}" for name, status in verdict.gates.items())
+        return _report(verdict.status, verdict.problems + ([f"gates: {statuses}"] if statuses else []),
+                       "Node live evidence")
     if args.gate is not None:
         name = entry.get("gate") if isinstance(entry, dict) else None
         if name not in REQUIRED_GATES:
