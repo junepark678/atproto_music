@@ -34,6 +34,13 @@ export default function Settings() {
   return (
     <section aria-labelledby="page-title">
       <h1 id="page-title">Settings</h1>
+      <nav aria-label="Settings sections">
+        <ul>
+          <li><a href="/settings/links">Connected services</a></li>
+          <li><a href="/settings/imports">Import listening history</a></li>
+          <li><a href="/settings/credentials">Credentials</a></li>
+        </ul>
+      </nav>
       {signedOut ? (
         <p role="status" data-state="signed-out">
           You have signed out. This browser no longer holds your server session.
