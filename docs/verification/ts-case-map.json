@@ -299,16 +299,16 @@
     },
     {
       "case": "M2.2.1/metadata_origin",
-      "target": "scripts/test/gen-config.test.ts › production metadata equals expected JSON for https://music.example.org with prefix org.example.music"
+      "target": "scripts/test/gen-config.test.ts › --origin and --prefix override example values; stale OAuth metadata is removed"
     },
     {
       "case": "M2.2.1/metadata_contract",
-      "target": "scripts/test/gen-config.test.ts › production metadata equals expected JSON for https://music.example.org with prefix org.example.music",
+      "target": "scripts/test/gen-config.test.ts › --origin and --prefix override example values; stale OAuth metadata is removed",
       "note": "The static asset that gen-config writes is retired by N5-01 (ADR 0005 §5.3); validate_contracts.py fixes the dynamic document as the web confidential client (private_key_jwt, ES256, jwks_uri) with the /oauth/callback redirect."
     },
     {
       "case": "M2.2.1/scope_inventory",
-      "target": "web/test/oauth/session.test.ts › signIn requests scope 'atproto repo:<p>.scrobble repo:<p>.follow repo:<p>.settings'"
+      "target": "worker/test/node/bff/client-metadata.test.ts › the metadata for https://music.214510.xyz equals the ADR 0005 §5.3 document with client_name AT Protocol Music and the four repo: scopes, and jwks.json has no private member"
     },
     {
       "case": "M2.2.2/par_pkce",
@@ -357,7 +357,7 @@
     },
     {
       "case": "M2.3.2/session_expiry",
-      "target": "web/test/oauth/session.test.ts › expired/refresh-failed session surfaces re-auth state",
+      "target": "worker/test/node/bff/oauth-client.test.ts › invalid_grant on refresh deletes the session and marks the account reauth_required; a TransportError keeps the session",
       "note": "A3: sessions follow library and spec limits (at most 14 days for public clients) instead of the 7-day app cookie."
     },
     {
@@ -366,15 +366,15 @@
     },
     {
       "case": "M2.3.3/logout_local",
-      "target": "web/test/oauth/session.test.ts › signOut calls revoke and clears IndexedDB stores"
+      "target": "worker/test/node/bff/sessions.test.ts › logout and logout-all append one revocation journal entry per deleted session before the rows are gone"
     },
     {
       "case": "M2.3.3/revocation_outage",
       "target": "worker/test/node/http/auth.test.ts › revocation HTTP 500 still invalidates local sessions, clears cookies and logs no upstream secrets",
       "also": [
-        "web/test/oauth/session.test.ts › signOut clears IndexedDB stores when revoke fails with 500"
+        "worker/test/node/bff/sessions.test.ts › logout and logout-all append one revocation journal entry per deleted session before the rows are gone"
       ],
-      "note": "Node BFF: HTTP 500 at the AS revocation endpoint does not prevent local invalidation, cookie clearing, subsequent 401 or sanitized logging. Does not prove remote token invalidation during an outage. The additional browser test preserves the historical W2-06 baseline; it is not current BFF evidence."
+      "note": "Node BFF evidence shows local session invalidation and journaled revocation despite upstream failure; remote token invalidation during an outage is not established."
     },
     {
       "case": "M2.3.3/unsupported_revocation",
@@ -440,15 +440,15 @@
     },
     {
       "case": "M3.1.1/retry_collision",
-      "target": "web/test/outbox/recovery.test.ts › remote record with different payload at rkey → remote_record_conflict, never overwritten",
+      "target": "worker/test/node/outbox/recovery.test.ts › an ambiguous create whose existing record has the same digest succeeds; a different digest is terminal remote_record_conflict and the record is never overwritten",
       "also": [
-        "web/test/outbox/recovery.test.ts › crash after PDS commit before local ack: ambiguous create reconciles to success via digest"
+        "worker/test/node/outbox/recovery.test.ts › crash before send, after PDS commit before local ack, after local commit, and during delete (database reopened) each end with exactly one PDS outcome"
       ],
       "note": "A11: a changed payload at the same rkey is the client-side terminal remote_record_conflict instead of 409."
     },
     {
       "case": "M3.1.1/owner_and_validation",
-      "target": "web/test/routes/scrobble.test.tsx › invalid input shows field errors and creates no outbox operation",
+      "target": "web/test/routes/scrobble.test.tsx › invalid input shows field errors and does not create a scrobble operation",
       "also": [
         "packages/core/test/scrobble.test.ts › buildScrobbleRecord rejects unknown input fields"
       ],
@@ -497,30 +497,30 @@
     },
     {
       "case": "M3.2.1/rkey_persistence",
-      "target": "web/test/outbox/recovery.test.ts › crash before send: operation resumes with same rkey"
+      "target": "worker/test/node/outbox/recovery.test.ts › crash before send, after PDS commit before local ack, after local commit, and during delete (database reopened) each end with exactly one PDS outcome"
     },
     {
       "case": "M3.2.2/transient_schedule",
-      "target": "web/test/outbox/retry.test.ts › Retry-After 20 raises next delay to 20s"
+      "target": "worker/test/node/outbox/retry.test.ts › retry delays are 1, 2, 4 ... s capped at 300 s with zero jitter; Retry-After: 20 gives 20 s; exactly 10 attempts and no 11th PDS request"
     },
     {
       "case": "M3.2.2/terminal_attempt",
-      "target": "web/test/outbox/retry.test.ts › zero jitter delays 1,2,4,…,256,300 and exactly 10 attempts with no 11th request"
+      "target": "worker/test/node/outbox/retry.test.ts › retry delays are 1, 2, 4 ... s capped at 300 s with zero jitter; Retry-After: 20 gives 20 s; exactly 10 attempts and no 11th PDS request"
     },
     {
       "case": "M3.2.2/permanent_error",
-      "target": "web/test/outbox/retry.test.ts › nonrecoverable PDS error fails the operation after exactly one request",
+      "target": "worker/test/node/outbox/recovery.test.ts › an ambiguous create whose existing record has the same digest succeeds; a different digest is terminal remote_record_conflict and the record is never overwritten",
       "also": [
         "packages/core/test/write-policy.test.ts › classify maps 429/5xx/network to transient and RecordAlreadyExists to ambiguous_create"
       ]
     },
     {
       "case": "M3.2.3/crash_after_remote",
-      "target": "web/test/outbox/recovery.test.ts › crash after PDS commit before local ack: ambiguous create reconciles to success via digest"
+      "target": "worker/test/node/outbox/recovery.test.ts › crash before send, after PDS commit before local ack, after local commit, and during delete (database reopened) each end with exactly one PDS outcome"
     },
     {
       "case": "M3.2.3/conflicting_rkey",
-      "target": "web/test/outbox/recovery.test.ts › remote record with different payload at rkey → remote_record_conflict, never overwritten"
+      "target": "worker/test/node/outbox/recovery.test.ts › an ambiguous create whose existing record has the same digest succeeds; a different digest is terminal remote_record_conflict and the record is never overwritten"
     },
     {
       "case": "M3.2.3/five_retries",
@@ -535,33 +535,30 @@
       "target": "worker/test/read/feed.test.ts › a durable local delete hides a scrobble while queued, running, blocked, or failed, but cancellation restores visibility",
       "also": [
         "worker/test/read/feed.test.ts › a succeeded PDS delete remains hidden by its swap CID until absence proof, without hiding a recreated CID",
-        "web/test/outbox/delete.test.ts › pending deletion hidden in owner overlay; failure visible",
+        "worker/test/node/outbox/delete.test.ts › delete uses swapRecord from record_state; InvalidSwap re-fetches and reconciles; a delete behind a pending create waits for it",
         "worker/test/node/outbox/delete.test.ts › cancelling an unsent delete intent invalidates the public statistics version"
       ],
       "note": "Node public reads hide queued/running/blocked/failed delete intents; after PDS acknowledgement, a succeeded delete hides only the still-projected CID matching its persisted swap CID until verified absence, without fabricating record_state=absent or hiding a later new-CID recreation."
     },
     {
       "case": "M3.3.1/pending_create_delete",
-      "target": "web/test/outbox/delete.test.ts › delete behind an unsent or in-flight create runs after it and leaves no record on the fake PDS",
+      "target": "worker/test/node/outbox/delete.test.ts › delete uses swapRecord from record_state; InvalidSwap re-fetches and reconciles; a delete behind a pending create waits for it",
       "note": "A12: predecessor ordering through predecessorIds."
     },
     {
       "case": "M3.3.2/already_absent",
-      "target": "web/test/outbox/recovery.test.ts › RecordNotFound on first and repeated delete completes the operation as success"
+      "target": "worker/test/node/outbox/delete.test.ts › delete uses swapRecord from record_state; InvalidSwap re-fetches and reconciles; a delete behind a pending create waits for it"
     },
     {
       "case": "M3.3.2/create_in_flight",
-      "target": "web/test/outbox/delete.test.ts › delete behind an unsent or in-flight create runs after it and leaves no record on the fake PDS",
-      "also": [
-        "web/test/outbox/delete.test.ts › pending deletion hidden in owner overlay; failure visible"
-      ],
+      "target": "worker/test/node/outbox/delete.test.ts › delete uses swapRecord from record_state; InvalidSwap re-fetches and reconciles; a delete behind a pending create waits for it",
       "note": "A12 predecessor ordering; the A13 owner overlay remains in the web client, and the current Node server also has a query-time local delete overlay."
     },
     {
       "case": "M3.3.2/delete_restart",
       "target": "scripts/test/node-recovery.test.ts › packaged_recovery: SIGKILL after create and delete commits reconciles durable operations, views, cursor and checkpoint on the same database",
       "also": [
-        "web/test/outbox/recovery.test.ts › crash during delete resumes with swapRecord and verifies absence"
+        "worker/test/node/outbox/recovery.test.ts › crash before send, after PDS commit before local ack, after local commit, and during delete (database reopened) each end with exactly one PDS outcome"
       ],
       "note": "Current-Node subprocess evidence holds the succeeded delete's absence proof, checks the projected CID remains hidden from reads across SIGKILL/restart, then verifies proof-confirmed absence. Local fixture-process evidence only; not live PDS or browser acceptance."
     },
@@ -574,7 +571,7 @@
       "target": "worker/test/node/http/writes.test.ts › an HTTP delete failure hides the local record while reporting failure without claiming remote absence",
       "also": [
         "worker/test/read/feed.test.ts › a durable local delete hides a scrobble while queued, running, blocked, or failed, but cancellation restores visibility",
-        "web/test/outbox/delete.test.ts › pending deletion hidden in owner overlay; failure visible"
+        "worker/test/node/outbox/delete.test.ts › delete uses swapRecord from record_state; InvalidSwap re-fetches and reconciles; a delete behind a pending create waits for it"
       ],
       "note": "End-to-end fixture HTTP admission → terminal fake-PDS 400 → failed owner operation status proves public history/feed/lookup/stats hide the row while the PDS record and verified record_state remain present. It is deterministic fixture evidence, not live remote-failure acceptance."
     },
@@ -591,7 +588,7 @@
     },
     {
       "case": "M3.4.1/validation_matrix",
-      "target": "web/test/routes/scrobble.test.tsx › invalid input shows field errors and creates no outbox operation"
+      "target": "web/test/routes/scrobble.test.tsx › invalid input shows field errors and does not create a scrobble operation"
     },
     {
       "case": "M3.4.1/same_time_distinct",
@@ -604,14 +601,14 @@
       "case": "M3.4.2/kill_after_create",
       "target": "scripts/test/node-recovery.test.ts › packaged_recovery: SIGKILL after create and delete commits reconciles durable operations, views, cursor and checkpoint on the same database",
       "also": [
-        "web/test/outbox/recovery.test.ts › crash after PDS commit before local ack: ambiguous create reconciles to success via digest"
+        "worker/test/node/outbox/recovery.test.ts › crash before send, after PDS commit before local ack, after local commit, and during delete (database reopened) each end with exactly one PDS outcome"
       ]
     },
     {
       "case": "M3.4.2/kill_after_delete",
       "target": "scripts/test/node-recovery.test.ts › packaged_recovery: SIGKILL after create and delete commits reconciles durable operations, views, cursor and checkpoint on the same database",
       "also": [
-        "web/test/outbox/recovery.test.ts › crash during delete resumes with swapRecord and verifies absence"
+        "worker/test/node/outbox/recovery.test.ts › crash before send, after PDS commit before local ack, after local commit, and during delete (database reopened) each end with exactly one PDS outcome"
       ],
       "note": "The current-Node child process is killed while the PDS delete is acknowledged but signed absence proof is held; after restart the acknowledged CID remains hidden until proof applies and the projection becomes absent. Local deterministic evidence; other issue-contract and live gates remain separate."
     },
@@ -626,7 +623,7 @@
     },
     {
       "case": "M3.4.3/live_retries",
-      "target": "scripts/e2e/scrobbler-e2e.ts › five replays of one POST /api/v1/scrobbles with the same Idempotency-Key against the e2e bundle produce one operation and one PDS record"
+      "target": "worker/test/node/http/writes.test.ts › five identical POSTs with one Idempotency-Key, two of them after the operation succeeded, return one operation and the fake PDS holds one record"
     },
     {
       "case": "M3.4.3/live_delete",
@@ -951,17 +948,14 @@
     },
     {
       "case": "M5.3.1/restart_follow",
-      "target": "web/test/outbox/recovery.test.ts › crash after follow createRecord before local ack reconciles to one record at the deterministic rkey",
+      "target": "worker/test/node/outbox/recovery.test.ts › crash before send, after PDS commit before local ack, after local commit, and during delete (database reopened) each end with exactly one PDS outcome",
       "also": [
         "packages/core/test/record-key.test.ts › followRkey equals follow_rkeys.json"
       ]
     },
     {
       "case": "M5.3.1/unfollow_absent",
-      "target": "web/test/outbox/follows.test.ts › unfollow deletes all duplicate matching records and keeps unrelated subject",
-      "also": [
-        "web/test/outbox/follows.test.ts › unfollow with no matching record succeeds with zero deleteRecord calls"
-      ]
+      "target": "worker/test/node/outbox/follows.test.ts › follow rkey is f+hex(sha256(subject)); unfollow deletes every matching listed record and keeps unrelated ones; PUT, DELETE, PUT run in order"
     },
     {
       "case": "M5.3.2/external_duplicates",
@@ -1054,7 +1048,7 @@
       "target": "worker/test/write/apply-record.test.ts › older revision proof after newer delete is noop (no resurrection)",
       "also": [
         "worker/test/acceptance/restart.test.ts › restart reopens the same database file: projection tables and responses are byte-identical, a pre-restart cursor continues and timers resume",
-        "web/test/outbox/recovery.test.ts › crash during delete resumes with swapRecord and verifies absence"
+        "worker/test/node/outbox/recovery.test.ts › crash before send, after PDS commit before local ack, after local commit, and during delete (database reopened) each end with exactly one PDS outcome"
       ]
     },
     {
@@ -1071,7 +1065,7 @@
     },
     {
       "case": "M6.1.1/asset_cache",
-      "target": "scripts/test/gen-config.test.ts › _headers marks /assets/* public, max-age=31536000, immutable and /index.html and /oauth/client-metadata.json no-cache",
+      "target": "scripts/test/gen-config.test.ts › Node defaults come from the example env and only headers are emitted",
       "also": [
         "web/tests/mvp.spec.ts › hashed /assets/*.js returns 200 with a JavaScript content type and immutable Cache-Control"
       ],
@@ -1081,7 +1075,7 @@
       "case": "M6.1.2/untrusted_forwarded",
       "target": "worker/test/composition/routing.test.ts › inbound x-atmusic-client-ip is stripped and CF-Connecting-IP used",
       "also": [
-        "scripts/test/gen-config.test.ts › production metadata equals expected JSON for https://music.example.org with prefix org.example.music"
+        "scripts/test/gen-config.test.ts › --origin and --prefix override example values; stale OAuth metadata is removed"
       ],
       "note": "Metadata is generated at build time from PUBLIC_ORIGIN, so no forwarded header reaches it."
     },
@@ -1091,13 +1085,12 @@
     },
     {
       "case": "M6.1.2/origin_mismatch",
-      "target": "scripts/test/gen-config.test.ts › production metadata equals expected JSON for https://music.example.org with prefix org.example.music",
+      "target": "scripts/test/gen-config.test.ts › --origin and --prefix override example values; stale OAuth metadata is removed",
       "also": [
         "worker/test/node/http/auth.test.ts › POST /api/v1/auth/start with a foreign or duplicate Origin is 403 csrf_failed and stores no state; a valid start sets __Host-atmusic_oauth with HttpOnly, Secure, SameSite=Lax, Path=/ and Max-Age=600",
         "worker/test/node/http/auth.test.ts › POST /api/v1/auth/logout requires CSRF, clears the cookie, deletes the session and revokes upstream when no protocol credential remains"
       ],
       "note": "The primary Workers-era target covers build-time metadata, not request-Origin rejection. The Node supporting targets cover foreign/duplicate-Origin refusal at auth start and foreign-Origin logout without session deletion or upstream revocation; this remains fixture evidence, not live acceptance."
-
     },
     {
       "case": "M6.1.3/fresh_install",
@@ -1125,7 +1118,6 @@
         "worker/test/node/http-bridge.test.ts › a body over the route cap gets 413 after at most cap+1 bytes read; a client abort fires the handler AbortSignal"
       ],
       "note": "Historical Workers N1 target: notify is capped at 2 KiB. The current Node bridge declares a 64 KiB /api/v1/notify cap and enforces route caps, which does not reconcile the published boundary."
-
     },
     {
       "case": "M6.2.1/rate_boundary",
@@ -1287,10 +1279,7 @@
     },
     {
       "case": "M6.4.3/privacy_consistency",
-      "target": "web/test/routes/settings.test.tsx › disconnect confirmation states that public PDS records and the opt-out record remain and claims no erasure",
-      "also": [
-        "web/test/routes/settings.test.tsx › disconnect requires confirmation and enqueues settings op"
-      ]
+      "target": "web/test/routes/settings.test.tsx › disconnect confirmation explains the public opt-out and sends the confirmed choice"
     },
     {
       "case": "M7.1.1/web_build",
@@ -1318,13 +1307,13 @@
     },
     {
       "case": "M7.1.2/session_loss",
-      "target": "web/test/oauth/session.test.ts › expired/refresh-failed session surfaces re-auth state"
+      "target": "worker/test/node/bff/oauth-client.test.ts › invalid_grant on refresh deletes the session and marks the account reauth_required; a TransportError keeps the session"
     },
     {
       "case": "M7.1.3/route_deep_links",
       "target": "web/tests/mvp.spec.ts › GET /u/<did> and /feed serve index.html 200 and POST /feed never returns SPA HTML",
       "also": [
-        "web/test/routes/shell.test.tsx › unknown route renders the not-found view"
+        "web/test/routes/shell.test.tsx › recognizes deep links for every settings screen and sends unknown paths to not found"
       ]
     },
     {
@@ -1333,109 +1322,108 @@
     },
     {
       "case": "M7.1.3/state_components",
-      "target": "web/test/routes/feed.test.tsx › loading, empty, error and stale states render labelled text and no spinner remains after an error"
+      "target": "web/test/routes/feed.test.tsx › an empty feed shows an explicit empty state after loading completes"
     },
     {
       "case": "M7.2.1/signin_success",
-      "target": "web/test/routes/shell.test.tsx › signed-in shell shows the verified handle and DID and the authenticated navigation",
+      "target": "web/test/routes/shell.test.tsx › shows server session identity and the re-sign-in notice without browser OAuth state",
       "also": [
-        "web/test/oauth/session.test.ts › successful callback stores session and posts notify {did}"
+        "worker/test/node/journey/web-journey.test.ts › sign-in through the fake AS, POST /api/v1/scrobbles, operation succeeded, record indexed and visible in /api/v1/users/{did}/scrobbles"
       ]
     },
     {
       "case": "M7.2.1/signin_failures",
-      "target": "web/test/routes/signin.test.tsx › cancelled authorization, expired callback and unknown handle show specific recovery text with retry and no code or token in the DOM",
+      "target": "web/test/routes/signin.test.tsx › shows fixed recovery text for callback errors and never renders a code or token",
       "also": [
-        "web/test/oauth/session.test.ts › expired/refresh-failed session surfaces re-auth state"
+        "worker/test/node/bff/oauth-client.test.ts › invalid_grant on refresh deletes the session and marks the account reauth_required; a TransportError keeps the session"
       ]
     },
     {
       "case": "M7.2.1/logout_ui",
-      "target": "web/test/oauth/session.test.ts › signOut calls revoke and clears IndexedDB stores",
+      "target": "worker/test/node/bff/sessions.test.ts › logout and logout-all append one revocation journal entry per deleted session before the rows are gone",
       "also": [
-        "web/test/routes/shell.test.tsx › after sign-out the shell shows anonymous navigation and the settings route shows a sign-in prompt"
+        "web/test/routes/settings.test.tsx › sign out calls the server-session port and removes authenticated UI"
       ]
     },
     {
       "case": "M7.2.2/form_validation",
-      "target": "web/test/routes/scrobble.test.tsx › invalid input shows field errors and creates no outbox operation"
+      "target": "web/test/routes/scrobble.test.tsx › invalid input shows field errors and does not create a scrobble operation"
     },
     {
       "case": "M7.2.2/submit_retry",
-      "target": "web/test/outbox/recovery.test.ts › crash after PDS commit before local ack: ambiguous create reconciles to success via digest",
+      "target": "worker/test/node/outbox/recovery.test.ts › crash before send, after PDS commit before local ack, after local commit, and during delete (database reopened) each end with exactly one PDS outcome",
       "also": [
-        "web/test/routes/scrobble.test.tsx › status progresses queued→published→indexed from mocked records/status"
+        "web/test/routes/scrobble.test.tsx › submitting the form posts with a fresh Idempotency-Key and shows queued, published, then indexed from operation and record-status polling"
       ]
     },
     {
       "case": "M7.2.2/poll_terminal",
-      "target": "web/test/routes/scrobble.test.tsx › status progresses queued→published→indexed from mocked records/status",
+      "target": "web/test/routes/scrobble.test.tsx › excluded or failed status shows the failure code, stops polling and never shows published success",
       "also": [
-        "web/test/routes/scrobble.test.tsx › excluded or failed status shows the failure code, stops polling and never shows published success"
+        "web/test/components/outbox-service.test.ts › refresh notifies subscribers only after server state changes"
       ]
     },
     {
       "case": "M7.2.3/delete_owner",
-      "target": "web/test/routes/profile.test.tsx › delete control appears only on the signed-in owner's own records",
+      "target": "worker/test/node/http/writes.test.ts › DELETE /api/v1/scrobbles/{id} of another DID's record is 404 and of an own record is 202 scrobble.delete",
       "also": [
-        "web/test/outbox/delete.test.ts › pending deletion hidden in owner overlay; failure visible"
+        "worker/test/node/outbox/delete.test.ts › delete uses swapRecord from record_state; InvalidSwap re-fetches and reconciles; a delete behind a pending create waits for it"
       ],
       "note": "The forced Bob call is dropped with the server delete route (D)."
     },
     {
       "case": "M7.2.3/export_download",
-      "target": "web/test/routes/settings.test.tsx › export action downloads /api/v1/users/<did>/export as music-export.json",
+      "target": "web/test/routes/settings.test.tsx › shows server session identity and the public export link without a local browser outbox",
       "also": [
         "worker/test/read/export.test.ts › export contains only indexed public records, attachment header, 404 for inactive"
       ]
     },
     {
       "case": "M7.2.3/disconnect_text",
-      "target": "web/test/routes/settings.test.tsx › disconnect confirmation states that public PDS records and the opt-out record remain and claims no erasure",
+      "target": "web/test/routes/settings.test.tsx › disconnect confirmation explains the public opt-out and sends the confirmed choice",
       "also": [
-        "web/test/routes/settings.test.tsx › disconnect requires confirmation and enqueues settings op",
-        "web/test/outbox/settings.test.ts › disconnect writes settings/self disabled and notifies"
+        "worker/test/node/outbox/settings.test.ts › disable writes settings/self {indexing:disabled} then notifies; enable writes indexing:enabled at a newer revision"
       ]
     },
     {
       "case": "M7.3.1/feed_order",
-      "target": "web/test/routes/feed.test.tsx › renders items and loads next page via nextCursor"
+      "target": "web/test/routes/feed.test.tsx › renders items and loads the next page via the opaque nextCursor"
     },
     {
       "case": "M7.3.1/anonymous_following",
-      "target": "web/test/routes/feed.test.tsx › anonymous user selecting following sees a sign-in prompt and no scope=following request is sent",
+      "target": "web/test/routes/feed.test.tsx › an anonymous user selecting following sees a sign-in prompt and sends no following request",
       "note": "A8: the following feed needs viewer=<did>, and the SPA takes the viewer from the session."
     },
     {
       "case": "M7.3.1/feed_failure",
-      "target": "web/test/routes/feed.test.tsx › page-2 503 keeps page 1, shows retry, and a successful retry appends page 2 once"
+      "target": "web/test/routes/feed.test.tsx › page two 503 keeps page one and retry appends page two once"
     },
     {
       "case": "M7.3.2/profile_stats",
-      "target": "web/test/routes/profile.test.tsx › stats window switch fetches window and renders exact top lists"
+      "target": "web/test/routes/profile.test.tsx › stats window switch fetches the requested window and renders the server-ranked top lists"
     },
     {
       "case": "M7.3.2/handle_change",
-      "target": "web/test/routes/profile.test.tsx › new verified handle for the same DID updates the display on the same /u/:did route"
+      "target": "web/test/routes/profile.test.tsx › a refreshed verified handle updates on the same DID route"
     },
     {
       "case": "M7.3.2/empty_states",
-      "target": "web/test/routes/profile.test.tsx › recordless user, no-album stats and unknown DID 404 render explicit empty and not-found states"
+      "target": "web/test/routes/profile.test.tsx › recordless profiles show explicit empty history and unknown DIDs show not found"
     },
     {
       "case": "M7.3.3/follow_state",
-      "target": "web/test/routes/profile.test.tsx › follow button shows pending then confirmed, and a permanently failed unfollow shows failed without claiming removal",
+      "target": "web/test/routes/profile.test.tsx › follow is confirmed only after indexing and a failed unfollow never claims removal",
       "also": [
-        "web/test/outbox/follows.test.ts › PUT, DELETE, PUT for one subject execute in order with separate ids"
+        "worker/test/node/outbox/follows.test.ts › follow rkey is f+hex(sha256(subject)); unfollow deletes every matching listed record and keeps unrelated ones; PUT, DELETE, PUT run in order"
       ]
     },
     {
       "case": "M7.3.3/unfollow_failure",
-      "target": "web/test/routes/profile.test.tsx › follow button shows pending then confirmed, and a permanently failed unfollow shows failed without claiming removal"
+      "target": "web/test/routes/profile.test.tsx › follow is confirmed only after indexing and a failed unfollow never claims removal"
     },
     {
       "case": "M7.3.3/self_and_auth",
-      "target": "web/test/routes/profile.test.tsx › own profile has no follow control and an anonymous viewer gets a sign-in action",
+      "target": "web/test/routes/profile.test.tsx › owner profiles have no follow control and anonymous viewers get a sign-in action",
       "also": [
         "packages/core/test/follow.test.ts › follow validation and self-follow rejection"
       ]
@@ -1463,16 +1451,16 @@
       "case": "M7.4.2/browser_restart",
       "target": "worker/test/acceptance/restart.test.ts › restart reopens the same database file: projection tables and responses are byte-identical, a pre-restart cursor continues and timers resume",
       "also": [
-        "web/test/outbox/recovery.test.ts › crash after PDS commit before local ack: ambiguous create reconciles to success via digest"
+        "worker/test/node/outbox/recovery.test.ts › crash before send, after PDS commit before local ack, after local commit, and during delete (database reopened) each end with exactly one PDS outcome"
       ],
-      "note": "A18: restart is DO eviction; the browser journey runs against wrangler dev."
+      "note": "Current Node recovery tests cover database restart durability; Playwright browser restart acceptance remains a separate N6-01 gate."
     },
     {
       "case": "M7.4.2/browser_network",
-      "target": "web/test/oauth/session.test.ts › expired/refresh-failed session surfaces re-auth state",
+      "target": "worker/test/node/bff/oauth-client.test.ts › invalid_grant on refresh deletes the session and marks the account reauth_required; a TransportError keeps the session",
       "also": [
-        "web/test/routes/feed.test.tsx › page-2 503 keeps page 1, shows retry, and a successful retry appends page 2 once",
-        "web/test/routes/feed.test.tsx › loading, empty, error and stale states render labelled text and no spinner remains after an error"
+        "web/test/routes/feed.test.tsx › page two 503 keeps page one and retry appends page two once",
+        "web/test/routes/feed.test.tsx › an empty feed shows an explicit empty state after loading completes"
       ]
     },
     {

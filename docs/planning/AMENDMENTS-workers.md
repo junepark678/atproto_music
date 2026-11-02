@@ -1135,7 +1135,6 @@ Some cases have no wave test whose title asserts their outcome. For each one, th
 
 **W1-09**
 
-- `scripts/test/gen-config.test.ts › _headers marks /assets/* public, max-age=31536000, immutable and /index.html and /oauth/client-metadata.json no-cache` — covers `M6.1.1/asset_cache`
 
 **W1-10**
 
@@ -1148,15 +1147,9 @@ Some cases have no wave test whose title asserts their outcome. For each one, th
 
 **W2-06**
 
-- `web/test/oauth/session.test.ts › signOut clears IndexedDB stores when revoke fails with 500` — covers `M2.3.3/revocation_outage`
 
 **W2-07**
 
-- `web/test/outbox/retry.test.ts › nonrecoverable PDS error fails the operation after exactly one request` — covers `M3.2.2/permanent_error`
-- `web/test/outbox/delete.test.ts › delete behind an unsent or in-flight create runs after it and leaves no record on the fake PDS` — covers `M3.3.1/pending_create_delete`, `M3.3.2/create_in_flight`
-- `web/test/outbox/recovery.test.ts › RecordNotFound on first and repeated delete completes the operation as success` — covers `M3.3.2/already_absent`
-- `web/test/outbox/recovery.test.ts › crash after follow createRecord before local ack reconciles to one record at the deterministic rkey` — covers `M5.3.1/restart_follow`
-- `web/test/outbox/follows.test.ts › unfollow with no matching record succeeds with zero deleteRecord calls` — covers `M5.3.1/unfollow_absent`
 
 **W3-01**
 
@@ -1175,21 +1168,6 @@ Some cases have no wave test whose title asserts their outcome. For each one, th
 
 **W3-06**
 
-- `web/test/routes/feed.test.tsx › anonymous user selecting following sees a sign-in prompt and no scope=following request is sent` — covers `M7.3.1/anonymous_following`
-- `web/test/routes/feed.test.tsx › page-2 503 keeps page 1, shows retry, and a successful retry appends page 2 once` — covers `M7.3.1/feed_failure`, `M7.4.2/browser_network`
-- `web/test/routes/feed.test.tsx › loading, empty, error and stale states render labelled text and no spinner remains after an error` — covers `M7.1.3/state_components`, `M7.4.2/browser_network`
-- `web/test/routes/profile.test.tsx › new verified handle for the same DID updates the display on the same /u/:did route` — covers `M7.3.2/handle_change`
-- `web/test/routes/profile.test.tsx › recordless user, no-album stats and unknown DID 404 render explicit empty and not-found states` — covers `M7.3.2/empty_states`
-- `web/test/routes/profile.test.tsx › follow button shows pending then confirmed, and a permanently failed unfollow shows failed without claiming removal` — covers `M7.3.3/follow_state`, `M7.3.3/unfollow_failure`
-- `web/test/routes/profile.test.tsx › own profile has no follow control and an anonymous viewer gets a sign-in action` — covers `M7.3.3/self_and_auth`
-- `web/test/routes/profile.test.tsx › delete control appears only on the signed-in owner's own records` — covers `M7.2.3/delete_owner`
-- `web/test/routes/settings.test.tsx › disconnect confirmation states that public PDS records and the opt-out record remain and claims no erasure` — covers `M6.4.3/privacy_consistency`, `M7.2.3/disconnect_text`
-- `web/test/routes/settings.test.tsx › export action downloads /api/v1/users/<did>/export as music-export.json` — covers `M7.2.3/export_download`
-- `web/test/routes/scrobble.test.tsx › excluded or failed status shows the failure code, stops polling and never shows published success` — covers `M7.2.2/poll_terminal`
-- `web/test/routes/shell.test.tsx › unknown route renders the not-found view` — covers `M7.1.3/route_deep_links`
-- `web/test/routes/shell.test.tsx › signed-in shell shows the verified handle and DID and the authenticated navigation` — covers `M7.2.1/signin_success`
-- `web/test/routes/shell.test.tsx › after sign-out the shell shows anonymous navigation and the settings route shows a sign-in prompt` — covers `M7.2.1/logout_ui`
-- `web/test/routes/signin.test.tsx › cancelled authorization, expired callback and unknown handle show specific recovery text with retry and no code or token in the DOM` — covers `M7.2.1/signin_failures`
 
 **W4-03**
 

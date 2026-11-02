@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'preact';
 import { OutboxService } from '../../src/components/outbox-service';
+import { OperationStatus } from '../../src/components/operation-status';
 import { ServicesProvider, type ScreenServices } from '../../src/components/services';
 import { ScrobbleForm } from '../../src/routes/scrobble';
 import type { Session } from '../../src/session/client';
@@ -83,6 +84,30 @@ describe('web/test/routes/scrobble.test.tsx', () => {
     expect((await outbox.list())[0]?.state).toBe('indexed');
     expect(requests.filter((request) => request.path === '/api/v1/operations/op-123')).toHaveLength(2);
     expect(requests.some((request) => request.path === '/api/v1/records/status')).toBe(true);
+    await outbox.stop();
+  });
+
+  it('excluded or failed status shows the failure code, stops polling and never shows published success', async () => {
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL) => {
+      const path = new URL(String(input), 'https://music.test').pathname;
+      if (path === '/api/v1/auth/session') return Response.json(session);
+      if (path === '/api/v1/scrobbles') return Response.json({ operation: { ...operation, id: 'op-excluded', state: 'queued' } }, { status: 202 });
+      if (path === '/api/v1/operations/op-excluded') return Response.json({ ...operation, id: 'op-excluded', state: 'succeeded', uri });
+      if (path === '/api/v1/records/status') return Response.json({ uri, state: 'excluded', reason: 'record_not_visible' });
+      throw new Error(`unexpected request ${path}`);
+    });
+    const outbox = new OutboxService(session, 'com.example.atmusic');
+    await outbox.scrobble({ artist: 'Artist', track: 'Track', listenedAt: '2026-01-15T12:00:00Z' });
+    await outbox.refresh();
+    const row = (await outbox.list()).find((candidate) => candidate.id === 'op-excluded');
+    expect(row?.state).toBe('failed');
+    expect(row?.failureCode).toBe('record_excluded');
+    expect(row?.reason).toBe('record_not_visible');
+    const root = document.createElement('div');
+    render(<OperationStatus op={row!} />, root);
+    expect(root.textContent).toContain('record_not_visible');
+    expect(root.textContent).not.toContain('published to your PDS');
+    render(null, root);
     await outbox.stop();
   });
 
