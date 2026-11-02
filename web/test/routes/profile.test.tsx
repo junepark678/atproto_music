@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 import { example, DID, mount, META } from './support';
 import type { Statistics } from '@atmusic/core/api-types';
+import { followView } from '../../src/components/follow-button';
+import type { OutboxOperation } from '../../src/outbox/overlay';
+import { SESSION } from './support';
 
 describe('web/test/routes/profile.test.tsx', () => {
   it('renders the indexed profile and its reads from the Node AppView routes', async () => {
@@ -71,5 +74,29 @@ describe('web/test/routes/profile.test.tsx', () => {
     await vi.waitFor(() => expect(unknown.root.textContent).toContain('Profile not found'));
     expect(unknown.root.textContent).not.toContain('0 scrobbles');
     unknown.cleanup();
+  });
+
+  it('follow is confirmed only after indexing and a failed unfollow never claims removal', () => {
+    const op: OutboxOperation = { id: 'op-follow', did: SESSION.did, kind: 'follow_create', uri: `at://${SESSION.did}/com.example.atmusic.follow/r01`, subject: DID, state: 'queued', seq: 1, dueAt: Date.now(), attempts: 0, notified: true, polls: 0, createdAt: Date.now(), updatedAt: Date.now() };
+    const pending = followView({ viewer: SESSION.did, subject: DID, ops: [op], edge: false });
+    expect(pending.status).toContain('Follow queued');
+    expect(pending.action).toBeNull();
+    op.state = 'indexed'; op.dueAt = null;
+    expect(followView({ viewer: SESSION.did, subject: DID, ops: [op], edge: true }).status).toContain('Following (confirmed)');
+    op.kind = 'follow_delete'; op.state = 'failed'; op.failureCode = 'upstream_error';
+    const failed = followView({ viewer: SESSION.did, subject: DID, ops: [op], edge: true });
+    expect(failed.status).toContain('follow record was not removed');
+    expect(failed.status).toContain('still follow');
+    expect(failed.action).toBe('unfollow');
+  });
+
+  it('owner profiles have no follow control and anonymous viewers get a sign-in action', async () => {
+    const app = mount(`/u/${DID}`);
+    await vi.waitFor(() => expect(app.root.querySelector('.profile-header')).not.toBeNull());
+    expect(app.root.textContent).toContain('Sign in to follow this account');
+    app.state.session.value = SESSION;
+    await vi.waitFor(() => expect(app.root.querySelector('.profile-header')).not.toBeNull());
+    expect(app.root.querySelector('.follow-control')).toBeNull();
+    app.cleanup();
   });
 });

@@ -57,4 +57,14 @@ describe('web/test/routes/feed.test.tsx', () => {
     expect(app.root.textContent).toContain('Jóga');
     app.cleanup();
   });
+
+  it('an empty feed shows an explicit empty state after loading completes', async () => {
+    const page = example<{ items: unknown[]; nextCursor: string | null; asOf: string; indexing: unknown }>('scrobble-page');
+    const app = mount('/feed', async (input) => new URL(String(input), 'https://music.test').pathname === '/api/v1/feed'
+      ? Response.json({ ...page, items: [], nextCursor: null })
+      : undefined);
+    await vi.waitFor(() => expect(app.root.textContent).toContain('No scrobbles yet'));
+    expect(app.root.querySelector('[data-state="loading"]')).toBeNull();
+    app.cleanup();
+  });
 });

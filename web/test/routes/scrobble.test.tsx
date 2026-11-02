@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { render } from 'preact';
 import { OutboxService } from '../../src/components/outbox-service';
+import { ServicesProvider, type ScreenServices } from '../../src/components/services';
+import { ScrobbleForm } from '../../src/routes/scrobble';
 import type { Session } from '../../src/session/client';
 
 const session: Session = {
@@ -22,6 +25,29 @@ const uri = `at://${session.did}/com.example.atmusic.scrobble/r01`;
 
 afterEach(() => vi.unstubAllGlobals());
 describe('web/test/routes/scrobble.test.tsx', () => {
+  it('invalid input shows field errors and does not create a scrobble operation', async () => {
+    const outbox = new OutboxService(session, 'com.example.atmusic');
+    const scrobble = vi.fn();
+    outbox.scrobble = scrobble;
+    const services: ScreenServices = {
+      clock: { nowMs: () => Date.parse('2026-01-15T12:00:00Z') },
+      random: { bytes: (n) => new Uint8Array(n), float: () => 0 },
+      ticker: { every: () => () => undefined },
+      session: async () => ({ signIn: async () => undefined, signOut: async () => undefined, expiry: async () => null }),
+      outbox: async () => outbox,
+      closeOutbox: async () => undefined,
+    };
+    const root = document.createElement('div');
+    render(<ServicesProvider value={services}><ScrobbleForm outbox={outbox} /></ServicesProvider>, root);
+    root.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await vi.waitFor(() => expect(root.querySelectorAll('[data-field-error]').length).toBeGreaterThan(0));
+    expect(root.querySelector('[data-field-error="artist"]')?.textContent).toContain('Enter the artist');
+    expect(root.querySelector('[data-field-error="track"]')?.textContent).toContain('Enter the track');
+    expect(scrobble).not.toHaveBeenCalled();
+    render(null, root);
+    await outbox.stop();
+  });
+
   it('submitting the form posts with a fresh Idempotency-Key and shows queued, published, then indexed from operation and record-status polling', async () => {
     let operationPoll = 0;
     const requests: { path: string; init: RequestInit }[] = [];

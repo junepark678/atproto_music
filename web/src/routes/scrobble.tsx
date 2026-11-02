@@ -141,7 +141,7 @@ export default function ScrobbleScreen() {
   );
 }
 
-function ScrobbleForm({ outbox }: { outbox: OutboxService }) {
+export function ScrobbleForm({ outbox }: { outbox: OutboxService }) {
   const services = useServices();
   const [values, setValuesState] = useState<FormValues>(() => emptyForm(services.clock));
   // The latest input, updated synchronously: a submit right after typing must
