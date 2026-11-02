@@ -669,6 +669,7 @@ def main(argv=None):
     parser.add_argument("--bundle-sha256", help="require the evidence to be for this bundle SHA-256")
     parser.add_argument("--worker-version-id", help="require the evidence to be for this Worker version id")
     parser.add_argument("--artifact", type=Path, help="require the evidence bundle hash to be this file's SHA-256")
+    parser.add_argument("--commit", help="independently trusted full source commit under review")
     args = parser.parse_args(argv)
     try:
         if args.gate is not None:
@@ -681,6 +682,36 @@ def main(argv=None):
     except (OSError, ValueError):
         print("BLOCKED: live evidence inventory or artifact is unavailable/invalid; no live tests ran")
         return EXIT_CODES["blocked"]
+    # Node schema v3 is deliberately separate from the historical Workers v2
+    # verifier below. No identity is inferred from the evidence document.
+    expected_commit = args.commit
+    if args.gate is not None or (isinstance(manifest, dict) and manifest.get("runtime") == "node"):
+        if (not isinstance(expected_commit, str) or not COMMIT_RE.fullmatch(expected_commit)
+                or not isinstance(bundle, str) or not SHA256_RE.fullmatch(bundle)):
+            return _report("blocked", ["independent --commit and --bundle-sha256/--artifact are required"], "Node evidence")
+        data = entry if args.gate is not None else manifest
+        if not isinstance(data, dict) or data.get("runtime") != "node" or data.get("schemaVersion") != 3 or data.get("fixtureOnly") is not False:
+            return _report("blocked", ["Node schema v3, runtime=node, fixtureOnly=false required"], "Node evidence")
+        release = data.get("release")
+        if not isinstance(release, dict) or release.get("commit") != expected_commit or release.get("bundleSha256") != bundle:
+            return _report("blocked", ["release identity missing, malformed, or mismatched"], "Node evidence")
+        gates = {data.get("gate"): data} if args.gate is not None else data.get("gates", {})
+        if not isinstance(gates, dict) or not gates:
+            return _report("blocked", ["no valid Node gate evidence"], "Node evidence")
+        required = ("oauth", "ingest", "pdsCompat", "ssrfProbe", "socketSoak")
+        statuses = {}
+        for name in required:
+            item = gates.get(name)
+            if not isinstance(item, dict): statuses[name] = "blocked"; continue
+            if item.get("runtime") != "node" or item.get("schemaVersion") != 3 or item.get("fixtureOnly") is not False or item.get("commit") != expected_commit or item.get("bundleSha256") != bundle:
+                statuses[name] = "blocked"
+            elif name in ("ssrfProbe", "socketSoak"):
+                statuses[name] = "blocked"
+            elif item.get("result") in ("passed", "failed"):
+                statuses[name] = item["result"]
+            else: statuses[name] = "blocked"
+        status = "failed" if "failed" in statuses.values() else "passed" if all(x == "passed" for x in statuses.values()) else "blocked"
+        return _report(status, [f"gates: {statuses}"], "Node live evidence")
     if args.gate is not None:
         name = entry.get("gate") if isinstance(entry, dict) else None
         if name not in REQUIRED_GATES:
