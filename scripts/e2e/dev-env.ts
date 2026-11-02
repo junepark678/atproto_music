@@ -253,6 +253,9 @@ export async function startBrowserProxy(
   hosts: Readonly<Record<string, number>>,
   workerPort: number,
 ): Promise<BrowserProxy> {
+  // `hosts` is the complete TLS allowlist. In particular, callers serving an
+  // HTTPS app origin must add that origin explicitly and map it to the local
+  // app listener; no wildcard or DNS-based routing is performed here.
   const cert = selfSignedCert(Object.keys(hosts));
   const secureContext = createSecureContext({ key: cert.keyPem, cert: cert.certPem });
   const refused: string[] = [];
