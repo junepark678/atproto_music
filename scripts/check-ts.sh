@@ -198,6 +198,16 @@ if [[ -f scripts/test_validate_case_map.py ]]; then
   python3 -m unittest discover -s scripts -p test_validate_case_map.py
 fi
 
+if [[ -f scripts/test_verify_node_candidate.py ]]; then
+  step 'static Node candidate verification tests (test_verify_node_candidate.py)'
+  python3 -m unittest discover -s scripts -p test_verify_node_candidate.py
+fi
+
+if [[ -f scripts/test_stage_node_candidate.py ]]; then
+  step 'Node candidate staging and link-rollback tests (test_stage_node_candidate.py)'
+  python3 -m unittest discover -s scripts -p test_stage_node_candidate.py
+fi
+
 # The Workers bundle guard stays until N7-01 deletes it with deploy.sh.
 if [[ -f scripts/check-bundle.ts ]]; then
   step 'production bundle guard (check-bundle.ts)'

@@ -9,7 +9,7 @@
 // routes are served over HTTP while the composition's pass-through Db
 // (entry.ts) records every statement the production read modules run, and
 // each recorded statement is planned with EXPLAIN QUERY PLAN on the SQLite the
-// Node host runs (3.54.1, asserted):
+// Node host runs (3.54.0/3.54.1 baseline, actual version asserted):
 // - with the schema's indexes: history and stats SEARCH scrobbles by DID
 //   through scrobbles_owner_time / scrobbles_stats, the global feed walks
 //   scrobbles_global_time in order, and nothing scans scrobbles or sorts it
@@ -75,7 +75,7 @@ const TEMP_SORT = /USE TEMP B-TREE FOR (ORDER BY|.*ORDER BY)/;
 describe('query plans', () => {
   afterEach(closeHarnesses);
 
-  it('with 100 DIDs x 1,000 records, history, feeds and stats use their indexes on SQLite 3.54.1 and the no-index control shows SCAN', async () => {
+  it('with 100 DIDs x 1,000 records, history, feeds and stats use their indexes on supported SQLite baselines and the no-index control shows SCAN', async () => {
     // ------------------------------------------------------------ network
     const clock = fixedClock(START);
     const keys = await fixtureKeys();
@@ -150,7 +150,9 @@ describe('query plans', () => {
       await flush();
     };
     // The Node host's SQLite, which these plans are pinned on.
-    expect(h.db.one<{ v: string }>('SELECT sqlite_version() AS v')?.v).toBe('3.54.1');
+    const sqlite = h.db.one<{ v: string }>('SELECT sqlite_version() AS v')?.v;
+    expect(sqlite).toBe(process.versions.sqlite);
+    expect(['3.54.0', '3.54.1']).toContain(sqlite);
 
     // ------------------------------------------------------------ ingest
     // Admission takes 50 new DIDs per hour: announce them in two hourly waves.

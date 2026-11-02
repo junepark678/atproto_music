@@ -23,7 +23,9 @@ import type { IndexRpc, ModuleDeps } from '../do/contracts';
 import type { EnvVars } from '../env';
 
 /** What routes read of the environment (ADR 0005 §3.1); the Workers Env is assignable to it. */
-export type AppEnv = Pick<EnvVars, 'LEXICON_PREFIX' | 'NAMESPACE_OWNERSHIP_REF'> & { ADMIN_TOKEN?: string };
+export type AppEnv = Pick<EnvVars, 'LEXICON_PREFIX' | 'NAMESPACE_OWNERSHIP_REF' | 'NAMESPACE_PUBLICATION_REF'> & {
+  ADMIN_TOKEN?: string;
+};
 
 export interface RequestCtx {
   env: AppEnv;

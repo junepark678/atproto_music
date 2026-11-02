@@ -442,6 +442,7 @@ export async function compose(config: NodeConfig, secrets: Secrets, options: Com
     const env: AppEnv = {
       LEXICON_PREFIX: config.app.prefix ?? '',
       NAMESPACE_OWNERSHIP_REF: config.app.namespaceOwnershipRef ?? '',
+      NAMESPACE_PUBLICATION_REF: config.app.namespacePublicationRef ?? '',
     };
     const buildCtx = (request: Request, info: DispatchInfo, requestId: string): RequestCtx => ({
       env,

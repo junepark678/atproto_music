@@ -1,0 +1,68 @@
+# Deliberately manual and candidate-only. This does NOT publish a release or
+# replace the unreconciled Rust/static/live issue contracts (#107/#108).
+name: Node deterministic candidate
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'vX.Y.Z matching root package.json (candidate only)'
+        required: true
+        default: v0.0.0
+permissions:
+  contents: read
+jobs:
+  candidate:
+    runs-on: ubuntu-24.04
+    env:
+      CANDIDATE_TAG: ${{ inputs.tag }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Install Python 3.13 for streaming candidate checks
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.13"
+      - name: Install pinned Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - name: Install locked dependencies
+        run: npm ci --ignore-scripts
+      - name: Reject mismatching Node version tag
+        run: |
+          node --import tsx --input-type=module -e 'import {readFileSync} from "node:fs"; import {checkTag} from "./scripts/package-node-release.ts"; const p=JSON.parse(readFileSync("package.json")); const l=JSON.parse(readFileSync("package-lock.json")); checkTag(process.env.CANDIDATE_TAG,p.version,l.version); checkTag(process.env.CANDIDATE_TAG,p.version,l.packages[""].version);'
+      - name: Install contract validator
+        run: |
+          python3 -m venv .venv
+          .venv/bin/python -m pip install -r api/requirements-contracts.txt
+      - name: Install pinned actionlint (checked by the TypeScript gate)
+        run: |
+          # go install verifies the module against sum.golang.org.
+          GOBIN="$RUNNER_TEMP/bin" go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Run deterministic gate
+        run: bash scripts/check-ts.sh
+      - name: Audit production Node dependencies (triage failures; never suppress silently)
+        run: npm audit --omit=dev
+      - name: Build candidate assets (browser migration still not accepted)
+        run: npm run build:web
+      - name: Execute hash-bound subprocess fault acceptance
+        run: npx tsx scripts/acceptance/node-recovery.ts --out work/acceptance/node-recovery
+      - name: Package clean committed Node candidate
+        run: |
+          npx tsx scripts/package-node-release.ts --tag "$CANDIDATE_TAG" --out work/release-node
+          cd work/release-node
+          sha256sum -c SHA256SUMS
+      - name: Retain candidate and scoped evidence (never public release publication)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: node-deterministic-candidate-${{ github.sha }}
+          path: |
+            work/release-node/
+            work/acceptance/node-recovery/
+            work/ts-test-report.json
+            work/ts-test-cases.jsonl
+          if-no-files-found: error

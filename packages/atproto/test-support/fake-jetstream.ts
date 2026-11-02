@@ -329,6 +329,8 @@ export class FakeJetstream {
   readonly events: JetstreamEvent[] = [];
   readonly connections: FakeJetstreamConnection[] = [];
   lookbackHours: number;
+  /** Test-only coverage allowlist; null means the fake delivers every DID. */
+  private coveredDids: Set<string> | null = null;
   private readonly clock: Clock;
   private nextSeq: number;
   private lastTimeUs = 0;
@@ -338,6 +340,15 @@ export class FakeJetstream {
     this.clock = o.clock ?? { nowMs: () => FIXTURE_NOW_MS };
     this.lookbackHours = o.lookbackHours ?? 24;
     this.nextSeq = o.startSeq ?? 1;
+  }
+
+  /** Restrict replay and live delivery to these DIDs; null restores complete coverage. */
+  setCoverage(dids: readonly string[] | null): void {
+    this.coveredDids = dids === null ? null : new Set(dids);
+  }
+
+  private covers(e: JetstreamEvent): boolean {
+    return this.coveredDids === null || this.coveredDids.has(e.did);
   }
 
   /** Oldest time_us still replayable. */
@@ -351,7 +362,7 @@ export class FakeJetstream {
     this.lastTimeUs = timeUs;
     const e = { ...input, seq: this.nextSeq++, timeUs } as JetstreamEvent;
     this.events.push(e);
-    for (const c of this.connections) if (!c.closed && c.wants(e)) c.send(e);
+    for (const c of this.connections) if (this.covers(e) && !c.closed && c.wants(e)) c.send(e);
     return e;
   }
 
@@ -450,7 +461,7 @@ export class FakeJetstream {
     server.accept();
     const conn = new FakeJetstreamConnection(url, cursor, collections, kinds, client, server);
     this.connections.push(conn);
-    for (const e of resolved.events) if (conn.wants(e)) conn.send(e);
+    for (const e of resolved.events) if (this.covers(e) && conn.wants(e)) conn.send(e);
     log(101, null);
     return { kind: 'upgraded', client };
   }

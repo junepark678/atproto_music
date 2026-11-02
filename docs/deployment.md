@@ -9,6 +9,7 @@ Production is **one Node 26 process on the owner's machine**: the systemd user s
 | Health, admin CLI, logs, secrets and key rotation, Gentoo notes, sleep, same-UID exposure | [operations.md](operations.md) |
 | Backups, the revocation journal, restore (disaster recovery only) | [backup.md](backup.md) |
 | Static assets and SPA routing rules | [deploy/routing.md](deploy/routing.md) |
+| Artifact-bound rollout gates and rollback plan (currently NO-GO) | [M6 deployment plan](verification/milestones/m6-deployment-plan.md) |
 
 ## Deployment values
 
@@ -19,7 +20,7 @@ The owner decided these (ADR 0004 §15 Q3, kept by ADR 0005 §0). They are deplo
 | Public origin | `https://music.214510.xyz` | `ATMUSIC_PUBLIC_ORIGIN` in `config/systemd/atmusic.service` |
 | OAuth `client_id` | `https://music.214510.xyz/oauth/client-metadata.json`, served dynamically with `/oauth/jwks.json`; it must never change once anyone has signed in | derived from the origin |
 | Lexicon prefix | `dev.pythonplayer123.music` (NSID authority `music.pythonplayer123.dev`) | `LEXICON_PREFIX` in `~/.config/atmusic/atmusic.env` |
-| Namespace ownership | the `_lexicon.music.pythonplayer123.dev` TXT record; until `NAMESPACE_OWNERSHIP_REF` names it, `/api/v1/meta` omits `publication` and writes stay off | `NAMESPACE_OWNERSHIP_REF` in `atmusic.env` |
+| Namespace authority and schema publication | DNS ownership evidence alone does not enable writes. `/api/v1/meta` exposes `publication` only when `NAMESPACE_OWNERSHIP_REF` is set and `NAMESPACE_PUBLICATION_REF` is a `sha256:<64 lowercase hex>` digest of the owner-reviewed manifest proving all four production Lexicons were published and publicly retrieved. Keep the latter blank until that review is complete; currently the schemas are absent. | `NAMESPACE_OWNERSHIP_REF` and `NAMESPACE_PUBLICATION_REF` in `atmusic.env` |
 | Listen address | `127.2.0.1:8888` (loopback only) | `ATMUSIC_LISTEN` in the unit; `atmusic.socket` |
 | Client IP header | depends on the exposure option; no default | `ATMUSIC_CLIENT_IP_HEADER` in `atmusic.env` |
 | Sign-in policy | `allowlist` of `ATMUSIC_SIGNIN_DIDS` | `atmusic.env` |

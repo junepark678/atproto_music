@@ -37,6 +37,16 @@ type Json = any;
 const rkeys = (body: Json): string[] => (body.items as Array<{ uri: string }>).map((s) => rkeyOf(s.uri));
 const enc = encodeURIComponent;
 const GLOBAL_FEED = ['r09', 'r10', 'r07', 'r01', 'r02', 'r03', 'r04', 'r05', 'r06'];
+const PROFILE_FIELDS = [
+  'did',
+  'handle',
+  'joinedAt',
+  'indexedAt',
+  'totalScrobbles',
+  'followerCount',
+  'followingCount',
+  'indexing',
+];
 
 function dueOf(db: Db, name: string): number | null {
   return db.one<{ due_at: number }>('SELECT due_at FROM timers WHERE name = ?', name)?.due_at ?? null;
@@ -66,6 +76,14 @@ async function counts(a: Seeded, did: string): Promise<[number, number]> {
   return [(r.body as Json).followerCount, (r.body as Json).followingCount];
 }
 
+async function profileHttp(a: Seeded, did: string) {
+  const r = await a.request(`/api/v1/users/${did}/profile`);
+  expect(r.status).toBe(200);
+  expect(r.headers.get('cache-control')).toBe('no-store');
+  expect(Object.keys(r.body as Json)).toEqual(PROFILE_FIELDS);
+  return r;
+}
+
 const hints = (db: Db) => db.one<{ n: number }>('SELECT count(*) AS n FROM hints')?.n ?? 0;
 
 /**
@@ -82,8 +100,24 @@ async function drainNow(a: Seeded): Promise<void> {
 describe('mutation acceptance', () => {
   afterEach(closeHarnesses);
 
-  it('delete r01 → 6/6/3, Homogenic 1, history r07,r02,…', async () => {
+  it('delete r01 → 6/6/3, Homogenic 1, history r07,r02,… and the next HTTP profile is fresh', async () => {
     const a = await seedAcceptance('delete-r01');
+    const beforeProfile = await profileHttp(a, ALICE);
+    const warmedProfile = await profileHttp(a, ALICE);
+    expect(warmedProfile.body).toEqual(beforeProfile.body);
+    expect(beforeProfile.body).toMatchObject({
+      did: ALICE,
+      handle: 'alice.test',
+      totalScrobbles: 7,
+      followerCount: 0,
+      followingCount: 1,
+      indexing: {
+        state: 'current',
+        caughtUp: true,
+        lastIndexedAt: '2026-01-15T11:58:04.000000000Z',
+        lagSeconds: 119,
+      },
+    });
     const r01 = a.seed.records.get(uriOf(ALICE, 'r01'));
     if (r01 === undefined) throw new Error('no r01');
 
@@ -124,6 +158,22 @@ describe('mutation acceptance', () => {
       ['Kate Bush', 2],
       ['  BJÖRK  ', 1],
     ]);
+    const afterProfile = await profileHttp(a, ALICE);
+    expect(afterProfile.body).toMatchObject({
+      did: ALICE,
+      handle: 'alice.test',
+      joinedAt: (beforeProfile.body as Json).joinedAt,
+      totalScrobbles: 6,
+      followerCount: 0,
+      followingCount: 1,
+      indexing: {
+        state: 'current',
+        caughtUp: true,
+        lastIndexedAt: '2026-01-15T12:00:00.000000000Z',
+        lagSeconds: 0,
+      },
+    });
+    expect((afterProfile.body as Json).indexedAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{9}Z$/);
     expect(await history(a, ALICE)).toEqual(['r07', 'r02', 'r03', 'r04', 'r05', 'r06']);
     expect(await feed(a, 'scope=global')).toEqual(['r09', 'r10', 'r07', 'r02', 'r03', 'r04', 'r05', 'r06']);
     // The record lookup and record status agree.
@@ -132,6 +182,99 @@ describe('mutation acceptance', () => {
     const status = await a.request(`/api/v1/records/status?uri=${enc(uriOf(ALICE, 'r01'))}`);
     expect(status.status).toBe(200);
     expect(status.body).toMatchObject({ uri: uriOf(ALICE, 'r01'), state: 'absent', revision: rev });
+  });
+
+  it('create r11 → 8 listens and next HTTP profile is fresh without a cache wait', async () => {
+    const a = await seedAcceptance('create-profile-fresh');
+    const beforeProfile = await profileHttp(a, ALICE);
+    expect(beforeProfile.body).toMatchObject({ did: ALICE, totalScrobbles: 7 });
+
+    const created = await inSocket(a, () =>
+      a.kit.externalPut('Alice', SCROBBLE, 'r11', {
+        $type: SCROBBLE,
+        artist: 'Portishead',
+        track: 'Roads',
+        album: 'Dummy',
+        listenedAt: '2026-01-14T12:00:00Z',
+        createdAt: '2026-01-14T12:00:00Z',
+      }),
+    );
+    expect(created.ops.map((op) => [op.action, op.rkey])).toEqual([['create', 'r11']]);
+    await drainNow(a);
+    expect(a.kit.clock.nowMs()).toBe(Date.parse(AS_OF));
+
+    const afterProfile = await profileHttp(a, ALICE);
+    expect(afterProfile.body).toMatchObject({
+      did: ALICE,
+      handle: 'alice.test',
+      joinedAt: (beforeProfile.body as Json).joinedAt,
+      totalScrobbles: 8,
+      followerCount: 0,
+      followingCount: 1,
+      indexing: {
+        state: 'current',
+        caughtUp: true,
+        lastIndexedAt: '2026-01-15T12:00:00.000000000Z',
+        lagSeconds: 0,
+      },
+    });
+    expect((afterProfile.body as Json).indexedAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{9}Z$/);
+  });
+
+  it('handle rename resolves the same DID over HTTP without changing its profile or cursor-paged history', async () => {
+    const a = await seedAcceptance('rename-profile-http');
+    const beforeProfile = await profileHttp(a, ALICE);
+    expect((beforeProfile.body as Json).handle).toBe('alice.test');
+
+    const firstPage = await a.request(`/api/v1/users/${ALICE}/scrobbles?limit=2`);
+    expect(firstPage.status).toBe(200);
+    expect(rkeys(firstPage.body)).toEqual(['r07', 'r01']);
+    const cursor = (firstPage.body as Json).nextCursor;
+    expect(typeof cursor).toBe('string');
+    const beforeContinuation = await a.request(
+      `/api/v1/users/${ALICE}/scrobbles?limit=2&cursor=${enc(cursor as string)}`,
+    );
+    expect(rkeys(beforeContinuation.body)).toEqual(['r02', 'r03']);
+    const beforeHistory = await history(a, ALICE);
+
+    const renamed = 'alice-renamed.test';
+    a.kit.plc.setHandle(ALICE, renamed);
+    a.kit.doh.setTxt(`_atproto.${renamed}`, [`did=${ALICE}`]);
+    a.kit.handles.set(renamed, ALICE);
+    // The production identity cache is five minutes. Let the old DID document
+    // expire, then exercise the public routes against the changed fixture.
+    a.kit.clock.advance(5 * 60_000 + 1);
+
+    const resolved = await a.request(`/api/v1/resolve?handle=${renamed}`);
+    expect(resolved.status).toBe(200);
+    expect(resolved.headers.get('cache-control')).toBe('no-store');
+    expect(resolved.body).toEqual({ did: ALICE, handle: renamed, verified: true });
+    const staleHandle = await a.request('/api/v1/resolve?handle=alice.test');
+    expect(staleHandle.status).toBe(422);
+    expect(staleHandle.body).toMatchObject({ error: { code: 'identity_mismatch' } });
+
+    const afterProfile = await profileHttp(a, ALICE);
+    expect(afterProfile.body).toMatchObject({
+      did: ALICE,
+      handle: renamed,
+      joinedAt: (beforeProfile.body as Json).joinedAt,
+      totalScrobbles: (beforeProfile.body as Json).totalScrobbles,
+      followerCount: (beforeProfile.body as Json).followerCount,
+      followingCount: (beforeProfile.body as Json).followingCount,
+    });
+    expect(await history(a, ALICE)).toEqual(beforeHistory);
+    const afterContinuation = await a.request(
+      `/api/v1/users/${ALICE}/scrobbles?limit=2&cursor=${enc(cursor as string)}`,
+    );
+    expect(rkeys(afterContinuation.body)).toEqual(rkeys(beforeContinuation.body));
+    expect((afterContinuation.body as Json).nextCursor).toBe((beforeContinuation.body as Json).nextCursor);
+    expect((afterContinuation.body as Json).asOf).toBe((beforeContinuation.body as Json).asOf);
+    expect((afterContinuation.body as Json).indexing).toMatchObject({
+      state: 'current',
+      caughtUp: true,
+      lastIndexedAt: '2026-01-15T11:58:04.000000000Z',
+      lagSeconds: 420,
+    });
   });
 
   it('r03 artist→Björk → Björk 3, Kate Bush 2, Radiohead 2, total 7', async () => {

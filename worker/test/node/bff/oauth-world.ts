@@ -281,14 +281,15 @@ export async function createWorld(db: Db, o: WorldOptions = {}) {
         ...over,
       });
     },
-    async addUser(name: string, opts: { server?: 2 } = {}): Promise<WorldUser> {
+    async addUser(name: string, opts: { server?: 2; signingKey?: (typeof keys)['alice'] } = {}): Promise<WorldUser> {
       const did = didFor(world.users.length + 1);
       const handle = `${name}.test`;
       const server = opts.server === 2 && pds2 ? pds2 : pds;
       const auth = opts.server === 2 && as2 ? as2 : as;
-      const repo = new SignedRepo(did, keys.alice, { clock });
+      const signingKey = opts.signingKey ?? keys.alice;
+      const repo = new SignedRepo(did, signingKey, { clock });
       await server.addAccount(repo, { handle, auth: 'dpop' });
-      plc.register(did, { signingKey: keys.alice, pds: server.origin, handle });
+      plc.register(did, { signingKey, pds: server.origin, handle });
       doh.setTxt(`_atproto.${handle}`, [`did=${did}`]);
       auth.addAccount(did, { handle });
       const user = { name, did, handle, repo, pds: server };
@@ -462,6 +463,7 @@ export function gatedService(w: World) {
         holds.delete(path);
         h.reached = true;
         await h.promise;
+        if (req.signal.aborted) throw req.signal.reason ?? new DOMException('The operation was aborted.', 'AbortError');
       }
       return w.oauthTransport(req);
     },

@@ -38,6 +38,7 @@ function deps(db: SqliteDb, prefix = P): ModuleDeps {
       PUBLIC_ORIGIN: 'https://music.example.test',
       LEXICON_PREFIX: prefix,
       NAMESPACE_OWNERSHIP_REF: '',
+      NAMESPACE_PUBLICATION_REF: '',
       INGEST_MODE: 'socket',
       JETSTREAM_URLS: `wss://${HOST}`,
       JETSTREAM_LOOKBACK_HOURS: '24',

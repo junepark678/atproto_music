@@ -70,9 +70,17 @@ const BOB = 'did:plc:bob00000000000000000000';
 /** An owned test prefix with ownership evidence: the namespace gate allows publication (ADR §5.7). */
 const OWNED = 'org.example.music';
 const SCROBBLE = `${OWNED}.scrobble`;
-const OPEN_GATE = { LEXICON_PREFIX: OWNED, NAMESPACE_OWNERSHIP_REF: 'dns:_lexicon.music.example.org TXT' };
-/** The fixture prefix without ownership evidence: no `publication` capability. */
-const FIXTURE_GATE = { LEXICON_PREFIX: 'com.example.atmusic', NAMESPACE_OWNERSHIP_REF: '' };
+const OPEN_GATE = {
+  LEXICON_PREFIX: OWNED,
+  NAMESPACE_OWNERSHIP_REF: 'dns:_lexicon.music.example.org TXT',
+  NAMESPACE_PUBLICATION_REF: 'sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+};
+/** The fixture prefix without ownership or schema-publication evidence: no `publication` capability. */
+const FIXTURE_GATE = {
+  LEXICON_PREFIX: 'com.example.atmusic',
+  NAMESPACE_OWNERSHIP_REF: '',
+  NAMESPACE_PUBLICATION_REF: '',
+};
 
 const LB_ROUTES: readonly RouteDef[] = [...createSubmitRoutes(), ...createTokenRoutes()];
 

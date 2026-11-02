@@ -113,6 +113,15 @@ function seedCurrentUser(app: TestApp, did: string): void {
      VALUES (?, '2026-01-15T12:00:00.000000000Z', 1, 'active', 'current', 1)`,
     did,
   );
+  const username = `u${app.db.one<{ n: number }>('SELECT count(*) AS n FROM accounts')!.n + 1}`;
+  app.db.run(
+    `INSERT INTO accounts(did, username, oauth_status, import_share_pct, daily_listen_cap, created_at_ms, updated_at_ms)
+     VALUES (?, ?, 'active', 50, 3000, ?, ?)`,
+    did,
+    username,
+    T0,
+    T0,
+  );
 }
 
 const jsonBody = (value: unknown) => JSON.stringify(value);

@@ -35,6 +35,7 @@ import { fromMs, toDto } from '@atmusic/core/timestamp';
 import { MAX_ATTEMPTS } from '@atmusic/core/write-policy';
 import type { OperationKind, OperationRow, OperationState, Origin } from '../app/rows';
 import type { Db } from '../do/db';
+import { bumpStatsVersion } from '../do/write/account-state';
 
 export { MAX_ATTEMPTS };
 
@@ -117,6 +118,7 @@ export interface NewOperation {
   prepared?: Prepared<object> | null;
   swapCid?: string | null;
   dueAt: number;
+  followProofJson?: string | null;
   importJobId?: string | null;
   idempotency?: Idempotency | null;
   predecessors?: readonly string[];
@@ -160,12 +162,15 @@ export function idempotentOperation(db: Db, did: string, idempotency: Idempotenc
  */
 export function insertOperation(db: Db, op: NewOperation, now: number): OperationRow {
   return db.tx(() => {
+    if (db.one<{ did: string }>('SELECT did FROM accounts WHERE did = ?', op.did) === null) {
+      throw new Error('operation owner account does not exist');
+    }
     const state: OperationState = accountNeedsSignIn(db, op.did) ? 'blocked' : 'queued';
     const prepared = op.prepared ?? null;
     db.run(
       `INSERT INTO operations(id, did, kind, origin, priority, collection, rkey, record_json, digest, swap_cid,
-         state, attempts, due_at, idempotency_key, request_hash, import_job_id, created_at_ms, updated_at_ms)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)`,
+         state, attempts, due_at, idempotency_key, request_hash, import_job_id, created_at_ms, updated_at_ms, follow_proof_json)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)`,
       op.id,
       op.did,
       op.kind,
@@ -183,6 +188,7 @@ export function insertOperation(db: Db, op: NewOperation, now: number): Operatio
       op.importJobId ?? null,
       now,
       now,
+      op.followProofJson ?? null,
     );
     for (const pred of new Set(op.predecessors ?? [])) {
       if (pred === op.id) continue;
@@ -343,6 +349,7 @@ export function cancelUnsent(db: Db, id: string, now: number): boolean {
     const op = loadOperation(db, id);
     if (op === null || !isUnsent(op)) return false;
     db.run(`UPDATE operations SET state = 'cancelled', updated_at_ms = ? WHERE id = ?`, now, id);
+    if (op.kind === 'scrobble.delete') bumpStatsVersion(db, op.did);
     const keys = db.all<{ dedupe_key: string }>(
       'SELECT dedupe_key FROM listen_keys WHERE did = ? AND operation_id = ?',
       op.did,

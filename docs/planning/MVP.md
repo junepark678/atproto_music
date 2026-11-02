@@ -1,5 +1,15 @@
 # AT Protocol music MVP plan
 
+> **Architecture/scope notice:** this plan retains historical Rust/Workers
+> acceptance text. The accepted current host is the Node confidential BFF of
+> [ADR 0005](../adr/0005-local-node-host-and-compat-apis.md). Server sessions,
+> CSRF, authenticated writes and a durable server outbox exist again. Draft
+> [Node amendments](AMENDMENTS-node.md) are not evidence of published GitHub
+> contract reconciliation. Do not rebuild retired packaging or close issues
+> merely because current tests pass; review material semantic differences and
+> collect the required current artifact-bound acceptance evidence.
+
+
 Status: published and verified on GitHub. All 121 issues are published and verified: seven milestone parents, 28 coordination subissues, and 86 implementation leaves. All 114 subissue relationships, milestone assignments, leaf test matrices and native leaf dependency relationships were read back from GitHub.
 
 Amendment status: [ADR 0004](../adr/0004-cloudflare-workers.md) (Cloudflare Workers only) amends this plan as listed in its §9. Each amended passage below cites its amendment id (A1–A20, N1–N4, or D for the §9.3 dropped list). The per-leaf issue amendment texts are drafted in [AMENDMENTS-workers.md](AMENDMENTS-workers.md); publishing them to GitHub is an owner action and has not happened.

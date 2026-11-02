@@ -55,8 +55,11 @@
   "vars": {
     "PUBLIC_ORIGIN": "https://music.example.org",
     "LEXICON_PREFIX": "org.example.music",
-    // Set to a reviewable reference to your _lexicon TXT record to enable publication.
+    // Domain-ownership reference does not enable record publication by itself.
     "NAMESPACE_OWNERSHIP_REF": "",
+    // sha256:<64 lowercase hex> of the owner-reviewed, publicly verified schema manifest;
+    // keep empty until every production Lexicon is published and reviewed.
+    "NAMESPACE_PUBLICATION_REF": "",
     "INGEST_MODE": "socket",
     "JETSTREAM_URLS": "wss://jetstream.us-east.bsky.network,wss://jetstream.us-west.bsky.network",
     "JETSTREAM_LOOKBACK_HOURS": "24",
@@ -77,6 +80,7 @@
         "PUBLIC_ORIGIN": "https://music-staging.example.org",
         "LEXICON_PREFIX": "org.example.music",
         "NAMESPACE_OWNERSHIP_REF": "",
+        "NAMESPACE_PUBLICATION_REF": "",
         "INGEST_MODE": "pulse",
         "JETSTREAM_URLS": "wss://jetstream.us-east.bsky.network,wss://jetstream.us-west.bsky.network",
         "JETSTREAM_LOOKBACK_HOURS": "24",

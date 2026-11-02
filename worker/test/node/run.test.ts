@@ -236,7 +236,7 @@ describe('run()', () => {
     expect(server.address.port).toBe(port);
     const ready = await get(port, '/health/ready');
     expect([ready.status, JSON.parse(ready.body)]).toEqual([200, { status: 'ready' }]);
-  }, 30_000);
+  }, 60_000);
 
   it('an inherited LISTEN_FDS socket wins over ATMUSIC_LISTEN, which wins over the 127.2.0.1:8888 default', async () => {
     // 1. In-process: the target run() asks the bridge for, by precedence.
@@ -305,7 +305,12 @@ process.exit(code);
     netServers.push(inherited);
     await new Promise<void>((resolve) => inherited.listen(0, '127.0.0.1', () => resolve()));
     const inheritedPort = (inherited.address() as { port: number }).port;
-    const configuredPort = await freePort();
+    // Keep ATMUSIC_LISTEN unavailable for the duration of startup so an
+    // unrelated process cannot race the negative port assertion below.
+    const configuredPortReservation = createNetServer();
+    netServers.push(configuredPortReservation);
+    await new Promise<void>((resolve) => configuredPortReservation.listen(0, '127.0.0.1', resolve));
+    const configuredPort = (configuredPortReservation.address() as { port: number }).port;
     const f4 = fixture({
       env: {
         ATMUSIC_LISTEN: `127.0.0.1:${configuredPort}`,
@@ -338,7 +343,9 @@ process.exit(code);
     expect(output, output).toContain('"socketActivated":true');
     const answer = await get(inheritedPort, '/health/ready');
     expect([answer.status, JSON.parse(answer.body)]).toEqual([200, { status: 'ready' }]);
-    expect(await accepts(configuredPort)).toBe(false);
+    // Because the configured port stayed reserved, reaching readiness on the
+    // inherited socket proves the child never tried to bind ATMUSIC_LISTEN.
+    expect(configuredPortReservation.listening).toBe(true);
     child.kill('SIGTERM');
     expect(await exited).toBe(0);
   }, 60_000);

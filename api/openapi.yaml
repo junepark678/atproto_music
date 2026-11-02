@@ -1008,7 +1008,7 @@
           }
         },
         "x-auth-mode": "public",
-        "description": "Public JSON attachment music-export.json of the DID's indexed public records (A9, N3), read in one synchronous snapshot. Unknown or inactive users return 404. Cache-Control no-store. No sessions, tokens or private keys exist to include.",
+        "description": "Public JSON attachment music-export.json of the DID's indexed public records (A9, N3), read in one synchronous snapshot. Unknown or inactive users return 404. Cache-Control no-store. Server-held sessions, tokens, private keys and operation data are deliberately excluded from the public export.",
         "parameters": [
           {
             "$ref": "#/components/parameters/DidPath"
@@ -6200,7 +6200,7 @@
             }
           }
         },
-        "description": "Public export of one DID's indexed public records and indexing metadata (A9). No credentials exist to include."
+        "description": "Public export of one DID's indexed public records and indexing metadata (A9). The closed schema deliberately excludes server-held credentials and private operation data."
       },
       "NotifyInput": {
         "description": "Untrusted hint naming one record or one DID (N1). It can only make the AppView check public signed truth; it cannot inject data.",

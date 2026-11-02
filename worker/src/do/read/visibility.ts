@@ -7,9 +7,13 @@
 //   deactivation sets active = 0 at once (markInactive). Disconnect deletes
 //   the users row and keeps a suppression marker; the NOT EXISTS keeps that
 //   rule explicit even for a row that somehow survived.
-// - A scrobble is visible when its owner is visible. Only verified present,
-//   valid rows exist in `scrobbles` (excluded and absent records are deleted
-//   and live in record_state), so no per-row state filter is needed.
+// - A scrobble is visible when its owner is visible and it has no queued,
+//   running, blocked or failed `scrobble.delete` operation. After a PDS success,
+//   the row stays hidden while the verified projection still contains the CID
+//   that the delete used as `swapRecord`; a successful `record_not_ours` receipt
+//   has no such CID and cannot hide another writer's record. Proof-confirmed
+//   absence removes the projection row, so this query-time overlay never writes
+//   a false `record_state=absent` claim.
 // - A follow edge is visible when its actor is a visible user and its subject
 //   is not hidden: the subject has no suppression row and no users row with
 //   active = 0 (the Rust oracle, crates/storage/src/repositories/follows.rs
@@ -47,11 +51,30 @@ export function visibleDid(didColumn: string, alias = 'v'): string {
   return `EXISTS (SELECT 1 FROM users ${a} WHERE ${a}.did = ${column(didColumn)} AND ${activeUser(a)})`;
 }
 
-/** `FROM` source of visible scrobbles: `scrobbles <s> JOIN users <u>` on a visible owner. */
+/**
+ * `FROM` source of publicly visible scrobbles. A local delete intent hides its
+ * target as soon as it is durably admitted, and remains hidden while queued,
+ * running, blocked, or failed. After PDS success, it stays hidden only while
+ * the projected CID still matches the persisted swap CID; this prevents an old
+ * successful delete receipt from hiding a later recreation at the same rkey.
+ * A failed PDS write is still not a public record; the operation endpoint is
+ * the place to report its failure. The verified projection is unchanged until
+ * remote proof confirms the deletion.
+ */
 export function visibleScrobblesFrom(s = 's', u = 'u'): string {
   const sa = ident(s);
   const ua = ident(u);
-  return `scrobbles ${sa} JOIN users ${ua} ON ${ua}.did = ${sa}.did AND ${activeUser(ua)}`;
+  return `scrobbles ${sa} JOIN users ${ua}
+    ON ${ua}.did = ${sa}.did AND ${activeUser(ua)}
+    AND NOT EXISTS (
+      SELECT 1 FROM operations AS d
+      WHERE d.did = ${sa}.did AND d.rkey = ${sa}.rkey
+        AND d.kind = 'scrobble.delete'
+        AND (
+          d.state IN ('queued', 'running', 'blocked', 'failed')
+          OR (d.state = 'succeeded' AND d.swap_cid = ${sa}.cid)
+        )
+    )`;
 }
 
 /**

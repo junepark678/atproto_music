@@ -21,6 +21,23 @@ async function enqueueOne(h: Harness, i = 0) {
   return h.op(first.operationId);
 }
 
+it('a closed schema-publication gate leaves already-queued operations dormant across process restart', async () => {
+  await withHarness(async (h) => {
+    const op = await enqueueOne(h);
+    h.m = { ...h.m, config: { ...h.m.config, publication: false } };
+
+    expect(await h.run()).toMatchObject({ attempted: 0, nextDueMs: null, skipped: true });
+    expect(h.op(op.id)).toMatchObject({ state: 'queued', attempts: 0 });
+    expect(h.seen).toEqual([]);
+
+    h.restart();
+    expect(await h.run()).toMatchObject({ attempted: 0, nextDueMs: null, skipped: true });
+    expect(h.op(op.id)).toMatchObject({ state: 'queued', attempts: 0 });
+    expect(h.seen).toEqual([]);
+    expect(h.kit.pds.Alice.count()).toBe(0);
+  });
+});
+
 it('retry delays are 1, 2, 4 ... s capped at 300 s with zero jitter; Retry-After: 20 gives 20 s; exactly 10 attempts and no 11th PDS request', async () => {
   await withHarness(
     async (h) => {

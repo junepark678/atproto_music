@@ -8,6 +8,7 @@ python3 scripts/test_live_evidence.py
 python3 scripts/test_audit_release.py
 python3 scripts/live/oauth_check_test.py
 python3 scripts/acceptance/test_backend.py
+python3 scripts/test/run_init_test.py
 cargo fmt --all --check
 python3 scripts/validate_build.py
 cargo clippy --locked --workspace --all-targets -- -D warnings

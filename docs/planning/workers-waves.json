@@ -673,12 +673,16 @@
      "worker/test/read/history.test.ts › limit 2 pages [r07,r01],[r02,r03],[r04,r05],[r06] then nextCursor null",
      "worker/test/read/history.test.ts › r08 deleted never appears; lookup of r08 is 404",
      "worker/test/read/feed.test.ts › global feed r09,r10,r07,r01,r02,r03,r04,r05,r06",
+     "worker/test/read/feed.test.ts › a durable local delete hides a scrobble while queued, running, blocked, or failed, but cancellation restores visibility",
+     "worker/test/read/feed.test.ts › a succeeded PDS delete remains hidden by its swap CID until absence proof, without hiding a recreated CID",
      "worker/test/read/feed.test.ts › Alice following feed is r09 only and excludes self",
+     "worker/test/read/feed.test.ts › an existing following cursor continues after a verified unfollow between pages",
      "worker/test/read/feed.test.ts › missing viewer for following → 422 fields.viewer",
      "worker/test/read/cursor-http.test.ts › arrival above anchor absent until fresh traversal; deleted unreturned record disappears",
      "worker/test/read/cursor-http.test.ts › cursor from history used on feed or with different viewer → 400 invalid_cursor",
      "worker/test/read/history.test.ts › lookup of encoded r01 AT URI returns the exact Scrobble; unknown URI → 404",
-     "worker/test/read/cursor-http.test.ts › record whose listenedAt moves across the anchor between pages follows the documented moved-row rule"
+     "worker/test/read/cursor-http.test.ts › record whose listenedAt moves across the anchor between pages follows the documented moved-row rule",
+     "worker/test/read/cursor-http.test.ts › global feed cursor applies the moved-row rule when an update crosses its timestamp boundary"
     ]
    },
    {
@@ -958,7 +962,8 @@
      "worker/test/ingest/sweeps.test.ts › handle that no longer verifies becomes null; history retained",
      "worker/test/ingest/sweeps.test.ts › PDS change in DID doc schedules snapshot",
      "worker/test/ingest/discovery.test.ts › listReposByCollection pages admit DIDs within budget and never project records",
-     "worker/test/ingest/sweeps.test.ts › renamed handle verifies on the next identity sweep and resolves to the same DID with unchanged history"
+     "worker/test/ingest/sweeps.test.ts › renamed handle verifies on the next identity sweep and resolves to the same DID with unchanged history",
+     "worker/test/acceptance/mutations.test.ts › handle rename resolves the same DID over HTTP without changing its profile or cursor-paged history"
     ]
    },
    {
@@ -1064,12 +1069,16 @@
      "worker/test/acceptance/read-model-acceptance.test.ts › statistics tables for all/7d/30d/365d equal TESTING.md exactly (totals, artists, tracks, albums)",
      "worker/test/acceptance/read-model-acceptance.test.ts › boundary seconds and future exclusion",
      "worker/test/acceptance/read-model-acceptance.test.ts › union of all pages equals hardcoded URI list with no duplicates",
-     "worker/test/acceptance/mutations.test.ts › delete r01 → 6/6/3, Homogenic 1, history r07,r02,…",
+     "worker/test/acceptance/mutations.test.ts › delete r01 → 6/6/3, Homogenic 1, history r07,r02,… and the next HTTP profile is fresh",
+     "worker/test/acceptance/mutations.test.ts › create r11 → 8 listens and next HTTP profile is fresh without a cache wait",
+     "worker/test/acceptance/mutations.test.ts › handle rename resolves the same DID over HTTP without changing its profile or cursor-paged history",
      "worker/test/acceptance/mutations.test.ts › r03 artist→Björk → Björk 3, Kate Bush 2, Radiohead 2, total 7",
      "worker/test/acceptance/mutations.test.ts › remove Alice→Bob → following feed empty; global unchanged",
      "worker/test/acceptance/mutations.test.ts › Carol→Bob duplicates 2, then 2, then 1",
      "worker/test/acceptance/mutations.test.ts › deactivate Alice hides her; reactivation current only after snapshot",
      "worker/test/acceptance/federation.test.ts › Carol r10 appears only through external ingestion with zero app write calls",
+     "worker/test/acceptance/federation.test.ts › an independent XRPC createRecord reaches the index only through Jetstream and signed-record proof",
+     "worker/test/acceptance/federation.test.ts › an external commit omitted by configured Jetstream DID coverage remains unindexed without a gap signal",
      "worker/test/acceptance/federation.test.ts › bad signature / changed block / wrong MST path leave projection and cursor byte-identical",
      "worker/test/acceptance/federation.test.ts › settings disabled disconnects Carol; settings deleted reconnects after snapshot",
      "worker/test/acceptance/restart.test.ts › eviction preserves byte-identical tables, pre-restart cursor continues, alarm resumes",
@@ -1183,6 +1192,7 @@
     "tests": [
      "scripts/test_live_evidence.py › evidence missing version id or bundle hash is rejected",
      "scripts/test_live_evidence.py › blocked result is distinguished from pass and fail",
+     "scripts/test_live_evidence.py › A complete PDS-compat preflight with no Jetstream coverage evidence is blocked offline",
      "npx tsx scripts/live/pds_compat_check.ts (no env) › exits nonzero with blocked and lists missing names"
     ]
    }

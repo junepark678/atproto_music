@@ -14,7 +14,7 @@
 // reference pages come from independent SQL over the same storage.
 //
 // On Node (ADR 0005 §15.3, N2-02) the DO's rowsRead budgets (ADR 0004 §15
-// Q10) are plan assertions on SQLite 3.54.1: node:sqlite has no rows-read
+// Q10) are plan assertions on SQLite 3.54.0/3.54.1: node:sqlite has no rows-read
 // counter. The page statement's index seek is shown, in SQLite's own program
 // (EXPLAIN), to be keyed by the bound `last` values, so the walk starts at
 // `last` and the LIMIT stops it after limit + 1 rows; the two-clause form's
@@ -112,7 +112,8 @@ function tracingDb(base: Db, trace: Traced[]): Db {
 }
 
 /** The SQLite the plan pins of this file were derived on (ADR 0005 §0 D1). */
-const PINNED_SQLITE = '3.54.1';
+// Node's official binary and the owner's system-SQLite build differ by patch.
+const SUPPORTED_PLAN_SQLITE = ['3.54.0', '3.54.1'];
 
 interface ExplainRow {
   addr: number;
@@ -342,8 +343,8 @@ describe('keysetWhere', () => {
   // assertions: a seek keyed by `last` on the time index, rows in index order
   // (no sort) for history and the global feed, so LIMIT ends the walk after
   // L + 1 candidates; the following feed merges one such seek per followee.
-  it('history and feed page statements use the single-clause seek plan on SQLite 3.54.1 (Q10 budgets as plan assertions)', async () => {
-    expect(process.versions.sqlite).toBe(PINNED_SQLITE);
+  it('history and feed page statements use the single-clause seek plan on supported SQLite baselines (Q10 budgets as plan assertions)', async () => {
+    expect(SUPPORTED_PLAN_SQLITE).toContain(process.versions.sqlite);
     const store = await seeded();
     await inTestDb(store, (db) => {
       const plain: Db = db;

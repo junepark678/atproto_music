@@ -3,7 +3,7 @@
 // whose Rust numbers stay in the docs as history.
 //
 // Usage:
-//   npx tsx scripts/benchmark-read-models.ts [--paced] [--out <report.json>] [--no-docs]
+//   npx tsx scripts/benchmark-read-models.ts [--paced] [--require-visible-profile] [--out <report.json>] [--no-docs]
 //   npx tsx scripts/benchmark-read-models.ts --render <report.json>
 //
 // 1. Runs `vitest run --config vitest.bench.config.ts` in worker/: the suite
@@ -45,8 +45,12 @@ export const STATS_DOC = join(REPO_ROOT, 'docs', 'benchmarks', 'stats.md');
 export const REPORT_SCHEMA_ID = 'atmusic/read-models-benchmark@3';
 /** The interval of `--paced` runs: 10 requests per second. */
 export const PACED_INTERVAL_MS = 100;
-/** The SQLite the plans are pinned on (ADR 0005 §0 D1, §15.3). */
-export const PINNED_SQLITE = '3.54.1';
+/** Plan baselines: official Node 26.12.1 and the owner's system-SQLite build.
+ * Node is pinned in .nvmrc; SQLite is build-dependent. Every run must still
+ * pass the exact EXPLAIN assertions and record its actual engine version.
+ */
+export const SUPPORTED_PLAN_SQLITE = ['3.54.0', '3.54.1'] as const;
+export const PINNED_SQLITE = process.versions.sqlite;
 
 export const BENCH_TEST_FILE = 'worker/test/bench/read-models.bench.test.ts';
 
@@ -58,19 +62,51 @@ const KEPT_TESTS: readonly string[] = [
   '600 measured requests with zero errors report p95 and check it against the target',
 ];
 
-/** The titles docs/planning/node-waves.json declares for the suite file. */
-export function nodeWaveTests(
-  nodeWaves: unknown = readJson(join(REPO_ROOT, 'docs', 'planning', 'node-waves.json')),
-): string[] {
-  const waves = nodeWaves as Array<{ packages: Array<{ tests: string[] }> }>;
-  return waves
-    .flatMap((w) => w.packages.flatMap((p) => p.tests))
-    .filter((id) => id.startsWith(`${BENCH_TEST_FILE} › `))
-    .map((id) => id.slice(BENCH_TEST_FILE.length + 3));
+type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
+type NodeWaveManifest = Array<{ packages: Array<{ tests: string[] }> }>;
+
+function isRecord(value: JsonValue): value is { [key: string]: JsonValue } {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function readJson(path: string): unknown {
-  return JSON.parse(readFileSync(path, 'utf8')) as unknown;
+function isString(value: JsonValue): value is string {
+  return typeof value === 'string';
+}
+
+/** Parse the fields this runner consumes from docs/planning/node-waves.json. */
+function parseNodeWaveManifest(value: JsonValue): NodeWaveManifest | null {
+  if (!Array.isArray(value)) return null;
+  const waves: NodeWaveManifest = [];
+  for (const wave of value) {
+    if (!isRecord(wave) || !Array.isArray(wave.packages)) return null;
+    const packages: NodeWaveManifest[number]['packages'] = [];
+    for (const pkg of wave.packages) {
+      if (!isRecord(pkg) || !Array.isArray(pkg.tests) || !pkg.tests.every(isString)) return null;
+      packages.push({ tests: pkg.tests });
+    }
+    waves.push({ packages });
+  }
+  return waves;
+}
+
+const INVALID_NODE_WAVE_MANIFEST = '<invalid node-waves manifest>';
+
+/** The titles docs/planning/node-waves.json declares for the suite file. */
+export function nodeWaveTests(input?: JsonValue): string[] {
+  let manifest: NodeWaveManifest | null;
+  try {
+    const value =
+      input ?? (JSON.parse(readFileSync(join(REPO_ROOT, 'docs', 'planning', 'node-waves.json'), 'utf8')) as JsonValue);
+    manifest = parseNodeWaveManifest(value);
+  } catch {
+    return [INVALID_NODE_WAVE_MANIFEST];
+  }
+  if (manifest === null) return [INVALID_NODE_WAVE_MANIFEST];
+  return manifest.flatMap((wave) =>
+    wave.packages.flatMap((pkg) =>
+      pkg.tests.flatMap((id) => (id.startsWith(`${BENCH_TEST_FILE} › `) ? [id.slice(BENCH_TEST_FILE.length + 3)] : [])),
+    ),
+  );
 }
 
 /** The suite's named tests: the kept W6-02 titles and those node-waves.json declares (N4-03). */
@@ -178,7 +214,7 @@ export const BENCH_REPORT_SCHEMA = {
       ],
       properties: {
         source: { const: 'ADR 0005 §15.3 (ADR 0004 §15 Q10 re-derived as query plans)' },
-        sqlite: { const: PINNED_SQLITE },
+        sqlite: { enum: SUPPORTED_PLAN_SQLITE },
         history: {
           const:
             "SEARCH scrobbles_owner_time (did=?), no SCAN, no temporary B-tree; a deep page's search is bounded by (listened_at,uri)<(?,?) and seeks from the cursor's last row",
@@ -705,8 +741,64 @@ export interface BenchReport {
 export function reportErrors(value: unknown): string[] {
   const ajv = new Ajv2020({ strict: true, allErrors: true });
   const validate = ajv.compile(BENCH_REPORT_SCHEMA);
-  if (validate(value)) return [];
+  if (validate(value)) {
+    const report = value as BenchReport;
+    return report.plans.sqlite === report.environment.sqlite
+      ? []
+      : ['/plans/sqlite must equal the measured /environment/sqlite'];
+  }
   return (validate.errors ?? []).map((e) => `${e.instancePath || '/'} ${e.message ?? 'invalid'}`);
+}
+
+const CGROUP_V2_ROOT = '/sys/fs/cgroup';
+
+/** Read the tightest finite v2 CPU and memory limits in the visible cgroup hierarchy. */
+export function effectiveCgroupLimits(readFile: (path: string) => string | null): {
+  cgroupCpuMax: string | null;
+  cgroupMemoryMax: string | null;
+} {
+  const membership = readFile('/proc/self/cgroup');
+  const line = membership?.split(/\r?\n/).find((entry) => entry.startsWith('0::'));
+  if (line === undefined) return { cgroupCpuMax: null, cgroupMemoryMax: null };
+  const relativePath = line.slice(3).trim();
+  if (!relativePath.startsWith('/') || relativePath.split('/').includes('..'))
+    return { cgroupCpuMax: null, cgroupMemoryMax: null };
+  const current = resolve(CGROUP_V2_ROOT, `.${relativePath}`);
+  if (current !== CGROUP_V2_ROOT && !current.startsWith(`${CGROUP_V2_ROOT}/`))
+    return { cgroupCpuMax: null, cgroupMemoryMax: null };
+
+  const cpuLimits: Array<{ raw: string; quota: number }> = [];
+  const memoryLimits: Array<{ raw: string; bytes: number }> = [];
+  for (let directory = current; ; directory = dirname(directory)) {
+    const cpuRaw = readFile(join(directory, 'cpu.max'))?.trim();
+    const memoryRaw = readFile(join(directory, 'memory.max'))?.trim();
+    if (cpuRaw === undefined || memoryRaw === undefined) return { cgroupCpuMax: null, cgroupMemoryMax: null };
+
+    const cpuParts = cpuRaw.split(/\s+/);
+    if (cpuParts.length !== 2) return { cgroupCpuMax: null, cgroupMemoryMax: null };
+    const period = Number(cpuParts[1]);
+    if (!Number.isSafeInteger(period) || period <= 0) return { cgroupCpuMax: null, cgroupMemoryMax: null };
+    if (cpuParts[0] !== 'max') {
+      const quota = Number(cpuParts[0]);
+      if (!Number.isSafeInteger(quota) || quota <= 0) return { cgroupCpuMax: null, cgroupMemoryMax: null };
+      cpuLimits.push({ raw: cpuRaw, quota: quota / period });
+    }
+
+    if (memoryRaw !== 'max') {
+      const bytes = Number(memoryRaw);
+      if (!Number.isSafeInteger(bytes) || bytes <= 0) return { cgroupCpuMax: null, cgroupMemoryMax: null };
+      memoryLimits.push({ raw: memoryRaw, bytes });
+    }
+
+    if (directory === CGROUP_V2_ROOT) break;
+    const parent = dirname(directory);
+    if (!parent.startsWith(CGROUP_V2_ROOT)) return { cgroupCpuMax: null, cgroupMemoryMax: null };
+  }
+
+  return {
+    cgroupCpuMax: cpuLimits.sort((a, b) => a.quota - b.quota)[0]?.raw ?? null,
+    cgroupMemoryMax: memoryLimits.sort((a, b) => a.bytes - b.bytes)[0]?.raw ?? null,
+  };
 }
 
 /** The host facts the report's environment records (besides node, sqlite and the timer resolution). */
@@ -727,9 +819,54 @@ export function hostFacts(readFile: (path: string) => string | null): {
     cpuModel: cpus()[0]?.model.trim() || 'unknown',
     logicalCpus: cpus().length,
     totalMemoryBytes: totalmem(),
-    cgroupCpuMax: readFile('/sys/fs/cgroup/cpu.max'),
-    cgroupMemoryMax: readFile('/sys/fs/cgroup/memory.max'),
+    ...effectiveCgroupLimits((path) => {
+      try {
+        return readFile(path);
+      } catch {
+        return null;
+      }
+    }),
   };
+}
+
+export interface VisibleProfileInput {
+  passed: boolean;
+  environment: Pick<BenchReport['environment'], 'cgroupCpuMax' | 'cgroupMemoryMax'>;
+  http: Pick<
+    BenchReport['http'],
+    'paced' | 'intervalMs' | 'warmupRequests' | 'measuredRequests' | 'warmupErrors' | 'errors' | 'elapsedMs'
+  >;
+}
+
+function cpuQuota(raw: string | null): number | null {
+  if (raw === null) return null;
+  const parts = raw.trim().split(/\s+/);
+  if (parts.length !== 2 || parts[0] === 'max') return null;
+  const quota = Number(parts[0]);
+  const period = Number(parts[1]);
+  if (!Number.isSafeInteger(quota) || !Number.isSafeInteger(period) || quota <= 0 || period <= 0) return null;
+  return quota / period;
+}
+
+/** Violations of the published M6.2.3 2-vCPU/2-GiB paced profile. */
+export function visibleProfileErrors(report: VisibleProfileInput): string[] {
+  const errors: string[] = [];
+  if (!report.passed) errors.push('the full benchmark report verdict must pass');
+  const cpus = cpuQuota(report.environment.cgroupCpuMax);
+  if (cpus !== 2) errors.push(`visible cgroup-v2 CPU quota must be exactly 2 vCPU (observed ${cpus ?? 'unavailable'})`);
+  const memory = report.environment.cgroupMemoryMax;
+  if (memory === null || !/^[0-9]+$/.test(memory.trim()) || Number(memory.trim()) !== 2 * 1024 ** 3)
+    errors.push('visible cgroup-v2 memory.max must be exactly 2147483648 bytes (2 GiB)');
+  if (report.http.paced !== true || report.http.intervalMs !== PACED_INTERVAL_MS)
+    errors.push('HTTP requests must be paced every 100 ms (10 requests/second)');
+  if (report.http.warmupRequests !== 300)
+    errors.push('HTTP warmup must be exactly 300 requests (30 seconds at 10 requests/second)');
+  if (report.http.measuredRequests !== 600) errors.push('HTTP measurement must be exactly 600 requests');
+  if (report.http.elapsedMs < 59_000 || report.http.elapsedMs > 62_000)
+    errors.push('HTTP measurement duration must be within 59-62 seconds');
+  if (report.http.warmupErrors !== 0 || report.http.errors !== 0)
+    errors.push('HTTP warmup and measurement must have zero errors');
+  return errors;
 }
 
 // ---------------------------------------------------------------------------
@@ -747,7 +884,9 @@ function environmentRows(r: BenchReport): string[] {
     `| Runner | ${e.runner} |`,
     `| Node / SQLite | ${e.node} / ${e.sqlite} |`,
     `| Host | ${e.platform} ${e.arch} ${e.osRelease}; ${e.cpuModel}; ${e.logicalCpus} logical CPUs; ${fmt(e.totalMemoryBytes)} bytes RAM |`,
-    `| cgroup cpu.max / memory.max | ${e.cgroupCpuMax ?? 'not present'} / ${e.cgroupMemoryMax ?? 'not present'} |`,
+    `| tightest visible cgroup-v2 cpu.max / memory.max | ${e.cgroupCpuMax ?? 'not present'} / ${e.cgroupMemoryMax ?? 'not present'} |`,
+    `| Visible process-profile checks | ${visibleProfileErrors(r).length === 0 ? 'match the paced 2-vCPU / 2-GiB values' : `not met: ${visibleProfileErrors(r).join('; ')}`} |`,
+    '| Host-level resource attestation | Not checked by this runner; required separately for M6.2.3 acceptance |',
     `| Timer | ${e.timerIntegerMs ? 'integer milliseconds' : 'sub-millisecond (performance.now)'} |`,
   ];
 }
@@ -785,8 +924,7 @@ function worstCaseSection(r: BenchReport): string[] {
     ...r.worstCases.map(
       (w) =>
         `| \`${w.id}\` | ${w.scenario} | ${w.page}${w.page === 'deep' ? ` (${fmt(w.depth)})` : ''} | ${ms(w.p50Ms)} / ${ms(w.p95Ms)} | ${ms(w.denseP50Ms)} | ${w.plan
-          .filter((d) => /\bs USING\b|TEMP B-TREE/.test(d))
-          .map((d) => `\`${d}\``)
+          .flatMap((d) => (/\bs USING\b|TEMP B-TREE/.test(d) ? [`\`${d}\``] : []))
           .join('; ')} |`,
     ),
   ];
@@ -817,9 +955,10 @@ const RUST_STATS_HISTORY = `## History: Rust candidate (superseded, kept for ref
 function reproduce(): string[] {
   return [
     '```sh',
-    'npx tsx scripts/benchmark-read-models.ts --paced   # 10 requests/s, 30 s warmup, 60 s measurement; rewrites these docs',
-    'npx tsx scripts/benchmark-read-models.ts           # the same requests back to back (what the repository gate runs)',
-    'cd worker && npx vitest run --config vitest.bench.config.ts   # the suite alone; the report goes to work/bench/read-models.json',
+    'run_root="work/bench/m6-$(date -u +%Y%m%dT%H%M%SZ)"',
+    'npx tsx scripts/benchmark-read-models.ts --paced --require-visible-profile --no-docs --out "$run_root/visible-profile/read-models.json"  # visible cgroup checks only; attest host/hidden parents separately',
+    'npx tsx scripts/benchmark-read-models.ts --paced --no-docs --out "$run_root/paced/read-models.json"  # paced local measurement; not M6.2.3 acceptance',
+    'npx tsx scripts/benchmark-read-models.ts --no-docs --out "$run_root/unpaced/read-models.json"  # unpaced repository-gate run; never M6.2.3 acceptance',
     '```',
   ];
 }
@@ -831,7 +970,7 @@ export function renderReadModelsDoc(r: BenchReport): string {
   const lines = [
     '# Read-model benchmark (node:sqlite on the Node host)',
     '',
-    `Generated by \`scripts/benchmark-read-models.ts\` from the report of \`${r.generatedBy}\`. Result: **${r.passed ? 'passed' : 'failed'}**. Queries run on node:sqlite (SQLite ${r.environment.sqlite}) in the Node process that serves them (ADR 0005); the index plan is the reproducible quantity and is asserted, timings are recorded beside it. No network is involved.`,
+    `Generated by \`scripts/benchmark-read-models.ts\` from the report of \`${r.generatedBy}\`. Local benchmark verdict: **${r.passed ? 'passed' : 'failed'}**; visible process-profile checks: **${visibleProfileErrors(r).length === 0 ? 'match' : 'not met'}**. This runner does not verify host-level effective limits or an operator attestation; both remain separate requirements for M6.2.3 acceptance. Queries run on node:sqlite (SQLite ${r.environment.sqlite}) in the Node process that serves them (ADR 0005); the index plan is the reproducible quantity and is asserted, timings are recorded beside it. No network is involved.`,
     '',
     '## Environment',
     '',
@@ -891,6 +1030,7 @@ export function renderReadModelsDoc(r: BenchReport): string {
 
 export function renderStatsDoc(r: BenchReport): string {
   const t = r.timings;
+  const statsFollowUps = r.followUps.flatMap((f) => (f.id.startsWith('stats') ? [f] : []));
   const lines = [
     '# Statistics benchmark and cache (node:sqlite on the Node host)',
     '',
@@ -911,11 +1051,11 @@ export function renderStatsDoc(r: BenchReport): string {
     '',
     '## Follow-ups',
     '',
-    ...(r.followUps.filter((f) => f.id.startsWith('stats')).length === 0
+    ...(statsFollowUps.length === 0
       ? ['None.']
-      : r.followUps
-          .filter((f) => f.id.startsWith('stats'))
-          .map((f) => `- \`${f.id}\`: ${f.summary} (measured ${ms(f.measured)}, threshold ${ms(f.threshold)})`)),
+      : statsFollowUps.map(
+          (f) => `- \`${f.id}\`: ${f.summary} (measured ${ms(f.measured)}, threshold ${ms(f.threshold)})`,
+        )),
     '',
     '## Reproduce',
     '',
@@ -932,43 +1072,85 @@ export function renderStatsDoc(r: BenchReport): string {
 
 interface CliArgs {
   paced: boolean;
+  requireVisibleProfile: boolean;
   out: string;
   docs: boolean;
   render: string | null;
 }
 
-function parseArgs(argv: readonly string[]): CliArgs {
-  const args: CliArgs = { paced: false, out: DEFAULT_REPORT_PATH, docs: true, render: null };
+function parseArgs(argv: readonly string[]): { args: CliArgs } | { error: string } {
+  const args: CliArgs = {
+    paced: false,
+    requireVisibleProfile: false,
+    out: DEFAULT_REPORT_PATH,
+    docs: true,
+    render: null,
+  };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--paced') args.paced = true;
+    else if (a === '--require-visible-profile') args.requireVisibleProfile = true;
     else if (a === '--no-docs') args.docs = false;
-    else if (a === '--out' && argv[i + 1] !== undefined) args.out = resolve(argv[++i] as string);
-    else if (a === '--render' && argv[i + 1] !== undefined) args.render = resolve(argv[++i] as string);
-    else throw new Error(`unknown argument ${a}`);
+    else if (a === '--out' || a === '--render') {
+      const path = argv[i + 1];
+      if (path === undefined) return { error: `${a} requires a path` };
+      if (a === '--out') args.out = resolve(path);
+      else args.render = resolve(path);
+      i++;
+    } else return { error: `unknown argument ${a}` };
   }
-  return args;
+  return { args };
 }
 
 interface VitestJson {
-  numTotalTests: number;
-  numFailedTests: number;
   testResults: Array<{ assertionResults: Array<{ title: string; status: string }> }>;
+}
+
+function parseVitestJson(value: JsonValue): VitestJson | null {
+  if (!isRecord(value) || !Array.isArray(value.testResults)) return null;
+  const testResults: VitestJson['testResults'] = [];
+  for (const result of value.testResults) {
+    if (!isRecord(result) || !Array.isArray(result.assertionResults)) return null;
+    const assertionResults: VitestJson['testResults'][number]['assertionResults'] = [];
+    for (const assertion of result.assertionResults) {
+      if (!isRecord(assertion) || typeof assertion.title !== 'string' || typeof assertion.status !== 'string')
+        return null;
+      assertionResults.push({ title: assertion.title, status: assertion.status });
+    }
+    testResults.push({ assertionResults });
+  }
+  return { testResults };
+}
+
+function loadVitestJson(path: string): VitestJson | null {
+  try {
+    return parseVitestJson(JSON.parse(readFileSync(path, 'utf8')) as JsonValue);
+  } catch {
+    return null;
+  }
 }
 
 /** Names of the named tests that did not pass in a vitest JSON report. */
 export function missingNamedTests(report: VitestJson, named: readonly string[] = namedTests()): string[] {
   const passed = new Set(
-    report.testResults.flatMap((f) => f.assertionResults.filter((a) => a.status === 'passed').map((a) => a.title)),
+    report.testResults.flatMap((file) =>
+      file.assertionResults.flatMap((test) => (test.status === 'passed' ? [test.title] : [])),
+    ),
   );
-  return named.filter((t) => !passed.has(t));
+  return named.filter((title) => !passed.has(title));
 }
 
-function loadReport(path: string): BenchReport {
-  const value = JSON.parse(readFileSync(path, 'utf8')) as unknown;
-  const errors = reportErrors(value);
-  if (errors.length > 0) throw new Error(`${path} is not a valid benchmark report:\n${errors.join('\n')}`);
-  return value as BenchReport;
+type ReportLoad = { report: BenchReport } | { error: string };
+
+function loadReport(path: string): ReportLoad {
+  try {
+    const value = JSON.parse(readFileSync(path, 'utf8')) as unknown;
+    const errors = reportErrors(value);
+    if (errors.length > 0) return { error: `${path} is not a valid benchmark report:\n${errors.join('\n')}` };
+    return { report: value as BenchReport };
+  } catch (error) {
+    return { error: `could not load ${path}: ${error instanceof Error ? error.message : String(error)}` };
+  }
 }
 
 function writeDocs(report: BenchReport): void {
@@ -978,10 +1160,30 @@ function writeDocs(report: BenchReport): void {
 }
 
 export function main(argv: readonly string[]): number {
-  const args = parseArgs(argv);
+  const parsedArgs = parseArgs(argv);
+  if ('error' in parsedArgs) {
+    console.error(`benchmark: ${parsedArgs.error}`);
+    return 2;
+  }
+  const args = parsedArgs.args;
   if (args.render !== null) {
-    writeDocs(loadReport(args.render));
+    const loaded = loadReport(args.render);
+    if ('error' in loaded) {
+      console.error(`benchmark: ${loaded.error}`);
+      return 2;
+    }
+    const report = loaded.report;
+    writeDocs(report);
+    const profileErrors = visibleProfileErrors(report);
+    if (args.requireVisibleProfile && profileErrors.length > 0) {
+      console.error(`benchmark: visible M6.2.3 process profile not met:\n${profileErrors.join('\n')}`);
+      return 1;
+    }
     return 0;
+  }
+  if (args.requireVisibleProfile && !args.paced) {
+    console.error('benchmark: --require-visible-profile requires --paced');
+    return 2;
   }
   mkdirSync(dirname(args.out), { recursive: true });
   rmSync(args.out, { force: true });
@@ -1004,23 +1206,42 @@ export function main(argv: readonly string[]): number {
       env: { ...process.env, ATMUSIC_BENCH_OUT: args.out, ATMUSIC_BENCH_PACED: args.paced ? '1' : '0' },
     },
   );
-  const missing = existsSync(vitestJson)
-    ? missingNamedTests(JSON.parse(readFileSync(vitestJson, 'utf8')) as VitestJson)
-    : namedTests();
+  const vitestReport = existsSync(vitestJson) ? loadVitestJson(vitestJson) : null;
+  const missing = vitestReport === null ? namedTests() : missingNamedTests(vitestReport);
   // A failing run still documents what it measured: a valid report is
   // rendered (its verdict says failed), and the exit status stays nonzero.
-  const report = existsSync(args.out) ? loadReport(args.out) : null;
+  let report: BenchReport | null = null;
+  if (existsSync(args.out)) {
+    const loaded = loadReport(args.out);
+    if ('error' in loaded) console.error(`benchmark: ${loaded.error}`);
+    else report = loaded.report;
+  }
+  const profileErrors = report === null ? ['no valid benchmark report'] : visibleProfileErrors(report);
   if (report !== null) {
     console.log(
       `benchmark: ${relative(REPO_ROOT, args.out)} p95 ${report.http.p95Ms} ms (${report.http.errors} errors), passed=${report.passed}`,
     );
+    if (args.requireVisibleProfile) {
+      if (profileErrors.length === 0) {
+        console.log(
+          'benchmark: visible cgroup/request profile checks passed; host-level resource attestation is separate and not checked here; this is not full M6.2.3 acceptance',
+        );
+      } else {
+        console.error(`benchmark: visible M6.2.3 process profile not met:\n${profileErrors.join('\n')}`);
+      }
+    }
     if (args.docs) writeDocs(report);
   } else {
     console.error(`benchmark: no report at ${relative(REPO_ROOT, args.out)}`);
   }
   if (run.status !== 0) console.error(`benchmark: vitest exited with status ${run.status ?? run.signal}`);
   if (missing.length > 0) console.error(`benchmark: named tests did not pass:\n${missing.join('\n')}`);
-  return run.status === 0 && missing.length === 0 && report?.passed === true ? 0 : 1;
+  return run.status === 0 &&
+    missing.length === 0 &&
+    report?.passed === true &&
+    (!args.requireVisibleProfile || profileErrors.length === 0)
+    ? 0
+    : 1;
 }
 
 if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {

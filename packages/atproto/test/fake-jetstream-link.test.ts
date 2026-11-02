@@ -126,3 +126,47 @@ it('memoryLink delivers the read-model commit events in order under environment 
   expect(unknown).toMatchObject({ status: null, error: null });
   expect(js.calls.count()).toBe(2);
 });
+
+it('test-only DID coverage filters both Jetstream replay and live delivery without erasing the event log', async () => {
+  const kit = await createFixtureKit();
+  const write = (rkey: string, listenedAt: string) =>
+    kit.externalPut('Carol', kit.collections.scrobble, rkey, {
+      $type: kit.collections.scrobble,
+      artist: 'Portishead',
+      track: rkey,
+      listenedAt,
+      createdAt: listenedAt,
+    });
+  await write('excluded1', '2026-01-15T11:58:00Z');
+  const first = kit.jetstream.events[0];
+  if (!first) throw new Error('expected the first Carol commit event');
+  const firstSeq = first.seq;
+  const collections = [kit.collections.scrobble];
+
+  // The allowlist deliberately omits Carol. The cursor still resolves against the
+  // global event log, but neither historical nor newly appended Carol events arrive.
+  kit.jetstream.setCoverage([kit.users.Alice.did]);
+  const connect = memoryLink(kit.jetstream);
+  const url = buildSubscribeUrl(`wss://${kit.jetstream.host}`, collections, firstSeq);
+  const omittedLink = await connect(url);
+  await flush();
+  const omitted: MemoryLinkEvent[] = [];
+  omittedLink.start((event) => omitted.push(event));
+  expect(omitted).toEqual([]);
+
+  await write('excluded2', '2026-01-15T11:58:30Z');
+  await flush();
+  expect(omitted).toEqual([]);
+  expect(kit.jetstream.events).toHaveLength(2);
+
+  // Restoring full coverage makes both durable log events replay from the same cursor.
+  kit.jetstream.setCoverage(null);
+  const recoveredLink = await connect(url);
+  await flush();
+  const recovered: MemoryLinkEvent[] = [];
+  recoveredLink.start((event) => recovered.push(event));
+  expect(recovered).toEqual(kit.jetstream.events.map((event) => ({ type: 'message', data: encodeEvent(event) })));
+  omittedLink.close(1000);
+  recoveredLink.close(1000);
+  await flush();
+});

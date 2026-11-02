@@ -41,6 +41,7 @@ function baseEnv(): Record<string, string | undefined> {
     XDG_RUNTIME_DIR: '/run/user/1000',
     LEXICON_PREFIX: FIXTURE_PREFIX,
     NAMESPACE_OWNERSHIP_REF: '',
+    NAMESPACE_PUBLICATION_REF: '',
     JETSTREAM_URLS: 'wss://jetstream.example.org',
     JETSTREAM_LOOKBACK_HOURS: '24',
     RELAY_URL: 'https://relay.example.org',

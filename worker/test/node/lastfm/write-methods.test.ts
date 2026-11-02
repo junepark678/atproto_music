@@ -35,7 +35,11 @@ const ALICE = 'did:plc:aaaaaaaaaaaaaaaaaaaaaaaa';
 const ALICE_HANDLE = 'alice.test';
 const OWNED = 'org.example.music';
 const SCROBBLE = `${OWNED}.scrobble`;
-const OPEN_GATE = { LEXICON_PREFIX: OWNED, NAMESPACE_OWNERSHIP_REF: 'dns:_lexicon.music.example.org TXT' };
+const OPEN_GATE = {
+  LEXICON_PREFIX: OWNED,
+  NAMESPACE_OWNERSHIP_REF: 'dns:_lexicon.music.example.org TXT',
+  NAMESPACE_PUBLICATION_REF: 'sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+};
 const PANO = 'panoScrobbler';
 const NOW_MS = Date.parse('2026-01-15T12:00:00Z');
 const NOW_S = NOW_MS / 1000;

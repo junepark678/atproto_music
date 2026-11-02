@@ -44,7 +44,11 @@ import { TestWriters } from '../outbox/support';
 import { closeApps, startApp, TEST_PUBLIC_ORIGIN, type TestApp } from '../support/app';
 
 const OWNED = 'org.example.music';
-const OWNED_ENV = { LEXICON_PREFIX: OWNED, NAMESPACE_OWNERSHIP_REF: 'dns:_lexicon.music.example.org' };
+const OWNED_ENV = {
+  LEXICON_PREFIX: OWNED,
+  NAMESPACE_OWNERSHIP_REF: 'dns:_lexicon.music.example.org',
+  NAMESPACE_PUBLICATION_REF: 'sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+};
 const SCROBBLE = `${OWNED}.scrobble`;
 const FOLLOW = `${OWNED}.follow`;
 const LOVE = `${OWNED}.love`;
@@ -221,6 +225,75 @@ function linkLastfm(db: Db, did: string): void {
 // ---------------------------------------------------------------------------
 
 describe('POST /api/v1/scrobbles', () => {
+  it('100 concurrent writes from 10 sessions yield one durable operation and idempotency key per response', async () => {
+    const w = await world();
+    const clients = Array.from({ length: 10 }, () => w.signIn(ALICE, 'alice.test'));
+    const batch = Array.from({ length: 100 }, (_, i) => ({
+      key: `concurrent-${i}`,
+      body: {
+        ...LISTEN,
+        track: `Concurrent track ${i}`,
+        listenedAt: new Date(Date.parse('2026-01-15T12:00:00Z') - (i + 1) * 1000).toISOString(),
+      },
+    }));
+
+    // Promise.all starts all 100 tasks without waiting for a previous response;
+    // requests cross the composed Node API dispatcher using 10 distinct sessions.
+    // This is not a socket-level process or bounded-queue test.
+    const answers = await Promise.all(
+      batch.map(({ key, body }, i) =>
+        w.send('POST', '/api/v1/scrobbles', { as: clients[i % clients.length]!, key, body }),
+      ),
+    );
+
+    expect(answers).toHaveLength(batch.length);
+    for (const answer of answers) {
+      expect(answer.status).toBe(202);
+      expect(contract('POST', '/api/v1/scrobbles', answer)).toBe('valid');
+      expect(answer.headers.get('cache-control')).toBe('no-store');
+      expect(opOf(answer)).toMatchObject({ kind: 'scrobble.create', origin: 'web', state: 'queued', attempts: 0 });
+    }
+
+    const responseByKey = new Map(batch.map(({ key }, i) => [key, opOf(answers[i]!).id]));
+    expect(new Set(responseByKey.values()).size).toBe(batch.length);
+    const rows = w.ops();
+    expect(rows).toHaveLength(batch.length);
+    expect(
+      rows
+        .map((row) => ({
+          id: row.id,
+          did: row.did,
+          kind: row.kind,
+          origin: row.origin,
+          priority: row.priority,
+          collection: row.collection,
+          state: row.state,
+          attempts: row.attempts,
+          idempotencyKey: row.idempotency_key,
+          track: (JSON.parse(row.record_json!) as { track: string }).track,
+        }))
+        .sort((a, b) => a.idempotencyKey!.localeCompare(b.idempotencyKey!)),
+    ).toEqual(
+      batch
+        .map(({ key, body }) => ({
+          id: responseByKey.get(key),
+          did: ALICE,
+          kind: 'scrobble.create',
+          origin: 'web',
+          priority: 0,
+          collection: SCROBBLE,
+          state: 'queued',
+          attempts: 0,
+          idempotencyKey: key,
+          track: body.track,
+        }))
+        .sort((a, b) => a.idempotencyKey.localeCompare(b.idempotencyKey)),
+    );
+    expect(new Set(rows.map((row) => row.idempotency_key)).size).toBe(batch.length);
+    expect(w.count('listen_keys', 'did = ?', ALICE)).toBe(batch.length);
+    expect(w.kit.pds.Alice.count()).toBe(0);
+  });
+
   it('POST /api/v1/scrobbles with Idempotency-Key returns 202 Operation; the same key and body returns the same operation; a different body is 409 idempotency_conflict; no key is 400', async () => {
     const w = await world();
     const alice = w.signIn(ALICE, 'alice.test');
@@ -777,8 +850,7 @@ describe('GET /api/v1/operations/{id}', () => {
 // ---------------------------------------------------------------------------
 // Public reads
 
-async function seedIndexed(db: Db): Promise<void> {
-  const prefix = 'com.example.atmusic';
+async function seedIndexed(db: Db, prefix = 'com.example.atmusic'): Promise<void> {
   const nowNs = fromMs(T0);
   const opts = { receiptNs: nowNs, prefix, nowNs };
   const keys = await fixtureKeys();
@@ -810,7 +882,7 @@ async function seedIndexed(db: Db): Promise<void> {
   for (const s of fixture.scrobbles) {
     const repo = repos[s.owner];
     if (repo === undefined || s.state !== 'confirmed') continue;
-    await repo.put(`${prefix}.scrobble`, s.rkey, { ...s.record });
+    await repo.put(`${prefix}.scrobble`, s.rkey, { ...s.record, $type: `${prefix}.scrobble` });
     await apply(repo, `${prefix}.scrobble`, s.rkey);
   }
   const follow = `${prefix}.follow`;
@@ -820,6 +892,52 @@ async function seedIndexed(db: Db): Promise<void> {
 }
 
 describe('public reads', () => {
+  it('an HTTP delete failure hides the local record while reporting failure without claiming remote absence', async () => {
+    const w = await world();
+    await seedIndexed(w.app.db, OWNED);
+    const alice = w.signIn(ALICE, 'alice.test');
+    const uri = `at://${ALICE}/${OWNED}.scrobble/r01`;
+    const path = `/api/v1/scrobbles/${encodeURIComponent(uri)}`;
+    const statsPath = `/api/v1/users/${ALICE}/stats?window=all`;
+    const beforeStats = await w.send('GET', statsPath);
+    expect(beforeStats.status).toBe(200);
+
+    const accepted = await w.send('DELETE', path, { as: alice });
+    expect(accepted.status).toBe(202);
+    expect(contract('DELETE', path, accepted)).toBe('valid');
+    const id = opOf(accepted).id;
+    const hiddenWhileQueued = await w.send('GET', `/api/v1/users/${ALICE}/scrobbles?limit=100`);
+    expect((hiddenWhileQueued.body as { items: { uri: string }[] }).items.map((item) => item.uri)).not.toContain(uri);
+
+    // A non-retryable PDS failure reaches the production runner; it must not turn
+    // the local hiding intent into a false assertion that remote deletion succeeded.
+    w.kit.pds.Alice.fail(
+      { nsid: 'com.atproto.repo.deleteRecord' },
+      { kind: 'status', status: 400, error: 'InvalidRecord', message: 'invalid' },
+      1,
+    );
+    await w.drain();
+    expect(w.ops('id = ?', id)[0]).toMatchObject({ state: 'failed', last_error: 'invalid_record' });
+    const operation = await w.send('GET', `/api/v1/operations/${id}`, { as: alice, csrf: false });
+    expect(operation.status).toBe(200);
+    expect(operation.body).toMatchObject({ state: 'failed', error: 'invalid_record' });
+    expect(contract('GET', `/api/v1/operations/${id}`, operation)).toBe('valid');
+
+    expect((await w.kit.repos.Alice.getRecord(`${OWNED}.scrobble`, 'r01'))?.cid).not.toBeNull();
+    expect(
+      w.app.db.one<{ state: string; cid: string }>('SELECT state, cid FROM record_state WHERE uri = ?', uri),
+    ).toMatchObject({ state: 'present' });
+    const hiddenHistory = await w.send('GET', `/api/v1/users/${ALICE}/scrobbles?limit=100`);
+    expect((hiddenHistory.body as { items: { uri: string }[] }).items.map((item) => item.uri)).not.toContain(uri);
+    const feed = await w.send('GET', '/api/v1/feed?scope=global');
+    expect((feed.body as { items: { uri: string }[] }).items.map((item) => item.uri)).not.toContain(uri);
+    expect((await w.send('GET', `/api/v1/scrobbles/${encodeURIComponent(uri)}`)).status).toBe(404);
+    const afterStats = await w.send('GET', statsPath);
+    const afterTotal = (afterStats.body as { totalScrobbles: number }).totalScrobbles;
+    expect(afterTotal).toBe((beforeStats.body as { totalScrobbles: number }).totalScrobbles - 1);
+    expect(afterTotal).toBeGreaterThan(0);
+  });
+
   it("public v1.1 read responses are byte-identical with and without the owner's session cookie", async () => {
     const w = await world({ publication: false });
     await seedIndexed(w.app.db);

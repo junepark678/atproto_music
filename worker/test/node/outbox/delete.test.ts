@@ -8,7 +8,7 @@ import { expect, it } from 'vitest';
 import type { Db } from '../../../src/do/db';
 import { enqueueScrobbleDelete, removeScrobbleCreate } from '../../../src/outbox/delete-ops';
 import { acceptListens } from '../../../src/outbox/ingress';
-import { predecessorRows } from '../../../src/outbox/operations';
+import { cancelUnsent, predecessorRows } from '../../../src/outbox/operations';
 import {
   CREATE,
   DELETE,
@@ -64,7 +64,14 @@ it('delete uses swapRecord from record_state; InvalidSwap re-fetches and reconci
       // 1. An indexed record: swapRecord is record_state's CID, with no lookup first.
       const put1 = await h.kit.externalPut('Alice', SCROBBLE, '3kaaaaaaaaa22', scrobble('2026-01-15T10:00:00Z'));
       const uri1 = indexRecordState(h, '3kaaaaaaaaa22', put1.ops[0]!.cid!);
+      const versionBeforeDelete = h.db.one<{ v: number }>(
+        'SELECT stats_version AS v FROM users WHERE did = ?',
+        h.alice,
+      )!.v;
       const d1 = enqueueScrobbleDelete(h.m, { did: h.alice, uri: uri1, origin: 'web' });
+      expect(h.db.one<{ v: number }>('SELECT stats_version AS v FROM users WHERE did = ?', h.alice)!.v).toBe(
+        versionBeforeDelete + 1,
+      );
       await h.runUntilIdle();
       expect(h.writers.sent.map((s) => [s.nsid, s.status])).toEqual([[DELETE, 200]]);
       expect(h.writers.sent[0]!.body).toEqual({
@@ -147,6 +154,21 @@ it('delete uses swapRecord from record_state; InvalidSwap re-fetches and reconci
   );
 });
 
+it('cancelling an unsent delete intent invalidates the public statistics version', async () => {
+  await withHarness(async (h) => {
+    h.seedUser(h.alice);
+    h.account(h.alice);
+    const uri = `at://${h.alice}/${SCROBBLE}/3kcanceldelete001`;
+    const before = h.db.one<{ v: number }>('SELECT stats_version AS v FROM users WHERE did = ?', h.alice)!.v;
+    const del = enqueueScrobbleDelete(h.m, { did: h.alice, uri, origin: 'web' });
+    expect(h.db.one<{ v: number }>('SELECT stats_version AS v FROM users WHERE did = ?', h.alice)!.v).toBe(before + 1);
+    expect(cancelUnsent(h.db, del.id, h.kit.clock.nowMs())).toBe(true);
+    expect(h.op(del.id).state).toBe('cancelled');
+    expect(h.db.one<{ v: number }>('SELECT stats_version AS v FROM users WHERE did = ?', h.alice)!.v).toBe(before + 2);
+    expect(h.writers.sent).toEqual([]);
+  });
+});
+
 it('a still-queued create cancelled at removal sends nothing to the PDS and deletes its listen key and unsent forward rows; a running create gets a delete chained after it', async () => {
   await withHarness(async (h) => {
     h.account(h.alice);
@@ -212,5 +234,45 @@ it('delete behind an unsent or in-flight create runs after it and leaves no reco
     expect(h.writers.order()).toEqual([CREATE, DELETE]);
     expect([h.op(create.id).state, h.op(del.id).state]).toEqual(['succeeded', 'succeeded']);
     expect(await remoteRecord(h.kit, 'Alice', SCROBBLE, create.rkey!)).toBeNull();
+  });
+});
+
+it('confirmed deletion discards only the matching succeeded create payload; durable identity and listen dedupe survive restart, failed deletion retains recovery data', async () => {
+  await withHarness(async (h) => {
+    const a = await accept(h, 0);
+    const b = await accept(h, 1);
+    await h.runUntilIdle();
+    const original = h.op(a.id);
+    const uri = `at://${h.alice}/${SCROBBLE}/${a.rkey}`;
+    const del = enqueueScrobbleDelete(h.m, { did: h.alice, uri, origin: 'web' });
+    h.kit.pds.Alice.fail(
+      { nsid: DELETE },
+      { kind: 'status', status: 400, error: 'InvalidRecord', message: 'invalid' },
+      1,
+    );
+    await h.runUntilIdle();
+    expect(h.op(del.id).state).toBe('failed');
+    expect(h.op(a.id)).toEqual(original);
+    expect(await remoteRecord(h.kit, 'Alice', SCROBBLE, a.rkey!)).not.toBeNull();
+
+    const retry = enqueueScrobbleDelete(h.m, { did: h.alice, uri, origin: 'web' });
+    await h.runUntilIdle();
+    expect(h.op(retry.id).state).toBe('succeeded');
+    expect(await remoteRecord(h.kit, 'Alice', SCROBBLE, a.rkey!)).toBeNull();
+    expect(h.op(a.id)).toEqual({ ...original, record_json: null, digest: null });
+    expect(h.op(b.id).record_json).toBe(b.record_json);
+    expect(h.op(b.id).digest).toBe(b.digest);
+    h.restart();
+    expect(h.op(a.id)).toEqual({ ...original, record_json: null, digest: null });
+    const duplicate = await acceptListens(h.m, {
+      did: h.alice,
+      origin: 'lastfm',
+      listens: [{ input: listenInput(0) }],
+      receiptMs: h.kit.clock.nowMs(),
+    });
+    expect(duplicate.results[0]).toMatchObject({ status: 'accepted', operationId: a.id, duplicate: true });
+    expect(h.ops()).toHaveLength(4);
+    expect((await h.run()).attempted).toBe(0);
+    expect((await h.kit.repos.Alice.list(SCROBBLE)).map((r) => r.rkey)).toEqual([b.rkey]);
   });
 });

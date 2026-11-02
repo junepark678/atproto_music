@@ -704,6 +704,16 @@ describe('scripts/check-ts.sh', () => {
       rmSync(copy.path(GUARD), { force: true });
       rmSync(copy.path('scripts/test/build-server.test.ts'), { force: true });
       rmSync(copy.path('scripts/test/check-node-bundle.test.ts'), { force: true });
+      // Candidate/recovery tooling was added after the host build. In this
+      // deliberate pre-build-wave fixture its importers must be absent too;
+      // otherwise tsc (correctly) fails before reaching the guard control.
+      for (const path of [
+        'scripts/package-node-release.ts',
+        'scripts/acceptance/node-recovery.ts',
+        'scripts/test/node-recovery.test.ts',
+        'scripts/test/node-recovery-runner.test.ts',
+      ])
+        rmSync(copy.path(path), { force: true });
 
       // 1. Only a failing guard: the build step is skipped, the guard runs and
       //    its exit status (3) is the gate's.

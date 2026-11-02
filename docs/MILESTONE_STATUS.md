@@ -1,5 +1,19 @@
 # MVP milestone status
 
+> **Historical Workers receipt, not current Node acceptance.** ADR 0005
+> supersedes the hosting/auth/write model below. The counts, case retirements,
+> commands and operator requirements here belong to the recorded Workers
+> commit; “every deterministic gate passes” / “nothing deterministic remains”
+> are not statements about the current Node checkout. M1–M6 still need current
+> integration/CI and published-contract reconciliation as applicable, plus
+> their live gates. Namespace ownership blocks publication; a tested fail-closed
+> publication gate does not itself require live ownership evidence for M1.
+> Worker version ids, ADMIN_TOKEN and Cloudflare Analytics are not Node-host
+> prerequisites. See [ADR 0005](adr/0005-local-node-host-and-compat-apis.md),
+> [Node deployment](deploy/local-node.md), and the scoped
+> [implementation/check record](verification/implementation-agent-13.md).
+
+
 Recorded 2026-10-25 for the Cloudflare Workers backend (ADR 0004).
 
 The acceptance gate `bash scripts/acceptance/workers-backend.sh` ran on commit `6f95c536bfc356ac5ef12524cd3cd6f6c3c34847`, with bundle SHA-256 `e796e5a5…7ab36`, and exited 0. Every deterministic suite passed: 406 tests in the repository gate, 21 backend acceptance tests in workerd, 9 Playwright tests, 25 Python regressions, the bundle guard, the case map and the Rust-oracle goldens. [VALIDATION.md](VALIDATION.md) and [backend-workers.md](verification/backend-workers.md) record the commands and counts.

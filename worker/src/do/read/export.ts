@@ -16,9 +16,13 @@
 //   subjects);
 // - indexing: the per-DID truth (status.ts);
 // - exportedAt: the injected clock, rendered as every response timestamp.
-// Only `scrobbles`, `follows` and `users` are read: no record_state reasons,
-// hints, jobs, identity cache, counters or configuration can reach the body,
-// and the server holds no credentials to leak (A3).
+// Only public DTOs for the indexed records/follows and metadata are serialized.
+// The visibility predicate may consult `operations` only to hide rows with
+// queued/running/blocked/failed deletes or a matching successful-delete CID;
+// it does not serialize operation contents. Session and credential tables,
+// hints, jobs, identity cache, counters and config are
+// excluded. The Node BFF does hold credentials, so this boundary is deliberate;
+// A9 changed export authorization, not the secret-exclusion requirement.
 
 import type { Export, Scrobble } from '@atmusic/core/api-types';
 import { fromMs, toDto } from '@atmusic/core/timestamp';

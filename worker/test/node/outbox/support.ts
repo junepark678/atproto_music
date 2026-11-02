@@ -53,11 +53,12 @@ export function zeroJitter(seed = 3): Random {
 }
 
 export function testConfig() {
-  return parseConfig(
+  const config = parseConfig(
     {
       PUBLIC_ORIGIN: 'https://music.example.test',
       LEXICON_PREFIX: PREFIX,
       NAMESPACE_OWNERSHIP_REF: '',
+      NAMESPACE_PUBLICATION_REF: '',
       INGEST_MODE: 'off',
       JETSTREAM_URLS: '',
       JETSTREAM_LOOKBACK_HOURS: '24',
@@ -68,6 +69,9 @@ export function testConfig() {
     } as Parameters<typeof parseConfig>[0],
     { allowFixturePrefix: true },
   );
+  // Outbox suites opt into a fake-PDS-only publication state; the real parser
+  // never opens the fixture namespace, and production uses AppConfig as-is.
+  return { ...config, publication: true };
 }
 
 export interface LogEntry {
@@ -252,13 +256,13 @@ export async function withHarness(fn: (h: Harness) => Promise<void>, o: HarnessO
   const fetch = bindPolicyFetch(createPolicyFetch({ transport: spy }), PDS_WRITER_CAPS);
   const writers = new TestWriters(kit, fetch);
   await withMigratedDb(async (first, ctx) => {
-    const depsFor = (db: SqliteDb): OutboxDeps => ({
+    const depsFor = (db: SqliteDb, selectedConfig = config): OutboxDeps => ({
       db,
       clock: kit.clock,
       random,
       transport: kit.transport,
       identity: cachedIdentityResolver(db, { transport: kit.transport, clock: kit.clock }),
-      config,
+      config: selectedConfig,
       log,
       writers,
     });
@@ -285,7 +289,7 @@ export async function withHarness(fn: (h: Harness) => Promise<void>, o: HarnessO
       restart() {
         const next = reopen(ctx.current);
         h.db = next;
-        h.m = depsFor(next);
+        h.m = depsFor(next, h.m.config);
       },
       op(id) {
         const row = h.db.one<OperationRow>('SELECT * FROM operations WHERE id = ?', id);
@@ -299,7 +303,10 @@ export async function withHarness(fn: (h: Harness) => Promise<void>, o: HarnessO
         const username = `u${h.db.one<{ n: number }>('SELECT count(*) AS n FROM accounts')!.n + 1}`;
         h.db.run(
           `INSERT INTO accounts(did, username, oauth_status, import_share_pct, daily_listen_cap, created_at_ms, updated_at_ms)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(did) DO UPDATE SET oauth_status = excluded.oauth_status,
+             import_share_pct = excluded.import_share_pct, daily_listen_cap = excluded.daily_listen_cap,
+             updated_at_ms = excluded.updated_at_ms`,
           did,
           username,
           fields.oauth_status ?? 'active',
@@ -340,6 +347,8 @@ export async function withHarness(fn: (h: Harness) => Promise<void>, o: HarnessO
         );
       },
     };
+    h.account(h.alice);
+    h.account(h.bob);
     await fn(h);
   });
 }

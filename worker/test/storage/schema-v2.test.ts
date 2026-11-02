@@ -160,6 +160,7 @@ const NEW_TABLES: Record<string, ExpectedTable> = {
       import_job_id: true,
       created_at_ms: true,
       updated_at_ms: true,
+      follow_proof_json: true,
     }),
     pk: ['id'],
     unique: [['did', 'idempotency_key']],
@@ -1097,13 +1098,13 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
         .filter((t) => count(db, t) !== 0),
     }));
     // Every v1 row of every v1 table, column for column, as exact SQL
-    // literals; the ledger only gained migration 2's row after its v1 row.
+    // literals; only the additive migration ledger rows changed.
     const { schema_migrations: ledgerAfter, ...dataAfter } = after.rows;
     const { schema_migrations: ledgerBefore, ...dataBefore } = before.rows;
     expect(dataAfter).toEqual(dataBefore);
     expect(Object.keys(dataBefore)).toHaveLength(before.tables.length - 1);
     expect(ledgerBefore).toEqual(["1|'initial_workers_schema'"]);
-    expect(ledgerAfter).toEqual(["1|'initial_workers_schema'", "2|'node_schema'"]);
+    expect(ledgerAfter).toEqual(["1|'initial_workers_schema'", "2|'node_schema'", "3|'follow_proof_baseline'"]);
     // The new scrobble columns exist and are NULL on every migrated row.
     expect(after.newColumns).toHaveLength(expectedScrobbles);
     for (const row of after.newColumns as Array<Record<string, unknown>>) {
@@ -1112,6 +1113,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
     expect(after.ledger).toEqual([
       { version: 1, name: 'initial_workers_schema' },
       { version: 2, name: 'node_schema' },
+      { version: 3, name: 'follow_proof_baseline' },
     ]);
     expect(after.compat).toEqual([{ singleton: 1, min_compatible_version: 2 }]);
     expect(after.newTablesEmpty).toEqual([]);

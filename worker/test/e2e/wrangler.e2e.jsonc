@@ -10,9 +10,10 @@
 // SPA built for this stack into work/e2e/dist (gitignored).
 //
 // LEXICON_PREFIX is the e2e prefix of scripts/e2e/dev-env.ts (authority
-// e2e.atmusic.test under the reserved .test TLD, never publishable), with a
-// test-only NAMESPACE_OWNERSHIP_REF so the SPA's write path is live. It is
-// neither the production prefix nor the fixture prefix (which never enables
+// e2e.atmusic.test under the reserved .test TLD, never publishable), with
+// test-only synthetic ownership evidence and a shape-valid placeholder digest
+// so the SPA's write path is live. Neither is production evidence; the prefix
+// is neither the production prefix nor the fixture prefix (which never enables
 // publication).
 {
   "$schema": "../../../node_modules/wrangler/config-schema.json",
@@ -36,6 +37,7 @@
     "PUBLIC_ORIGIN": "https://music.e2e.test",
     "LEXICON_PREFIX": "test.atmusic.e2e",
     "NAMESPACE_OWNERSHIP_REF": "e2e-only: reserved .test authority e2e.atmusic.test, local dev-env PDSs",
+    "NAMESPACE_PUBLICATION_REF": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
     "INGEST_MODE": "off",
     "JETSTREAM_URLS": "",
     "JETSTREAM_LOOKBACK_HOURS": "24",

@@ -14,14 +14,18 @@
 //   kept. No matching record is success with no delete. Each confirmed delete
 //   is hinted at once, so an attempt cut short never loses one. The intent `{subject}` is stored as the
 //   operation's record_json (never sent); its rkey is the deterministic one.
-// - Follow intents for one subject keep separate operation ids and run FIFO
-//   behind their unsettled predecessors.
+// - Consecutive identical intents reuse the latest queued/running/blocked or
+//   succeeded operation identity (atomically). Failed/cancelled intents may
+//   be retried afresh, as may completed intents contradicted by a newer
+//   verified remote proof identity not present at admission; opposite intents
+//   always get distinct ids and run FIFO.
 
 import { buildFollowRecord, MSG_SELF_FOLLOW, validateDidSyntax } from '@atmusic/core/follow';
 import { followRkey } from '@atmusic/core/record-key';
 import type { ValidationFailure } from '@atmusic/core/scrobble';
 import type { OperationRow, Origin } from '../app/rows';
 import type { ModuleDeps } from '../do/contracts';
+import type { Db } from '../do/db';
 import { WRITE_COST } from './budget';
 import { ownRecordKey } from './delete-ops';
 import { insertOperation, newOperationId, outboxCollections, prepare, recordOf, unsettledAt } from './operations';
@@ -36,6 +40,35 @@ export interface EnqueueFollowArgs {
   subject: string;
   origin: Origin;
   kick?: () => void;
+}
+
+interface FollowProof {
+  uri: string;
+  revision: string;
+}
+
+/** Current verified contradictions, including duplicate-rkey follows for DELETE. */
+function contraryProofs(
+  db: Db,
+  did: string,
+  subject: string,
+  collection: string,
+  rkey: string,
+  create: boolean,
+): FollowProof[] {
+  return create
+    ? db.all<FollowProof>(
+        `SELECT r.uri, r.revision FROM record_state r WHERE r.uri = ?
+         AND NOT EXISTS (SELECT 1 FROM follows f WHERE f.uri = r.uri AND f.subject = ?)`,
+        `at://${did}/${collection}/${rkey}`,
+        subject,
+      )
+    : db.all<FollowProof>(
+        `SELECT r.uri, r.revision FROM follows f JOIN record_state r ON r.uri = f.uri
+         WHERE f.actor = ? AND f.subject = ? ORDER BY r.uri`,
+        did,
+        subject,
+      );
 }
 
 async function enqueueFollowIntent(m: ModuleDeps, args: EnqueueFollowArgs, create: boolean): Promise<EnqueueResult> {
@@ -58,24 +91,52 @@ async function enqueueFollowIntent(m: ModuleDeps, args: EnqueueFollowArgs, creat
   const prepared = await prepare(record);
   const rkey = await followRkey(args.subject);
   const now = m.clock.nowMs();
-  const operation = m.db.tx(() =>
-    insertOperation(
+  const kind = create ? 'follow.put' : 'follow.delete';
+  const operation = m.db.tx(() => {
+    // Only the latest intent may coalesce: searching for ANY earlier matching
+    // PUT would collapse PUT → DELETE → PUT and lose the final follow. Keep
+    // this read and the insert in one synchronous transaction, after awaits.
+    const latest = m.db.one<OperationRow>(
+      `SELECT * FROM operations WHERE did = ? AND collection = ? AND rkey = ?
+       ORDER BY rowid DESC LIMIT 1`,
+      args.did,
+      collection,
+      rkey,
+    );
+    if (latest?.kind === kind && ['queued', 'running', 'blocked', 'succeeded'].includes(latest.state)) {
+      // Compare proof identities with admission, never settlement time. Proof
+      // drain can precede a delayed PDS acknowledgement, and multiple commits
+      // can be verified in the same millisecond. An unchanged contrary proof
+      // from before admission is only indexing lag, not a new external intent.
+      const baseline =
+        latest.follow_proof_json === null
+          ? [] // Legacy receipt: conservatively refresh if any contrary proof exists.
+          : (JSON.parse(latest.follow_proof_json) as FollowProof[]);
+      const revisions = new Map(baseline.map((proof) => [proof.uri, proof.revision]));
+      const contradicted =
+        latest.state === 'succeeded' &&
+        contraryProofs(m.db, args.did, args.subject, collection, rkey, create).some(
+          (proof) => revisions.get(proof.uri) !== proof.revision,
+        );
+      if (!contradicted) return latest;
+    }
+    return insertOperation(
       m.db,
       {
         id: newOperationId(m.random),
         did: args.did,
-        kind: create ? 'follow.put' : 'follow.delete',
+        kind,
         origin: args.origin,
         collection,
         rkey,
         prepared,
         dueAt: now,
-        // FIFO per subject: every unsettled follow intent at the same deterministic rkey.
+        followProofJson: JSON.stringify(contraryProofs(m.db, args.did, args.subject, collection, rkey, create)),
         predecessors: unsettledAt(m.db, args.did, collection, rkey),
       },
       now,
-    ),
-  );
+    );
+  });
   args.kick?.();
   return { ok: true, operation };
 }

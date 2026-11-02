@@ -6,15 +6,16 @@ validator, both as a function and as the CLI, asserting the exit status and the
 exact problem it reports. The committed files are never modified.
 """
 
+import ast
 import copy
 import json
-from pathlib import Path
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 
 import validate_case_map as vcm
 
@@ -314,7 +315,7 @@ class CaseMapTests(unittest.TestCase):
         self.assertEqual(pending[test], 'W3-06')
         # Before the amendment is applied, removing its registry line leaves the
         # referencing case pointing at an unknown id ...
-        line = next(l for l in amendments.splitlines() if l.startswith(f'- `{test}`'))
+        line = next(candidate_line for candidate_line in amendments.splitlines() if candidate_line.startswith(f'- `{test}`'))
         found = problems(case_map, amendments=amendments.replace(line + '\n', '', 1), waves=unapplied_waves())
         self.assertEqual(found, [f"M7.3.1/anonymous_following: {test!r} is declared in neither workers-waves.json "
                                  "nor node-waves.json and is not listed under Required wave amendments"])
@@ -358,9 +359,9 @@ class CaseMapTests(unittest.TestCase):
                       f"{summary['retired']} retired with amendment ids)", result.stdout)
         entries = {e['case']: e for e in case_map['cases']}
         # Review round 2: cases whose coverage exists are mapped, not retired.
-        self.assertEqual(entries['M1.4.1/migrate_only']['target'], 'worker/test/storage/migrate.test.ts › re-running migrate is a no-op')
+        self.assertEqual(entries['M1.4.1/migrate_only']['target'], 'worker/test/node/run.test.ts › migrations finish before listen: the port accepts no connection until the database is migrated')
         self.assertEqual(entries['M2.3.2/session_expiry']['target'], 'web/test/oauth/session.test.ts › expired/refresh-failed session surfaces re-auth state')
-        self.assertEqual(entries['M6.4.1/checksum']['target'], 'npx tsx scripts/check-bundle.ts › production bundle passes guard')
+        self.assertEqual(entries['M6.4.1/checksum']['target'], 'scripts/test/build-server.test.ts › Node candidate tag/version, deterministic archive and checksum bind the real bundle; tampering, dirty sources and stale committed inputs fail closed')
         self.assertEqual(pending.get(entries['M7.3.1/anonymous_following']['target']), 'W3-06')
         # ... and a case no longer maps to an unrelated wave test.
         self.assertEqual(pending.get(entries['M6.1.1/asset_cache']['target']), 'W1-09')
@@ -382,6 +383,8 @@ def adr_remap():
             rows[case] = ('retire', retired.group(1))
         else:
             mapped = re.match(r'^(N\d-\d\d): `+(.*?)`+$', now)
+            if mapped is None:
+                raise AssertionError(f'unrecognized ADR remap row for {case}: {now}')
             rows[case] = ('map', mapped.group(1), mapped.group(2).strip())
     return rows
 
@@ -556,7 +559,7 @@ class NodeWavesTests(unittest.TestCase):
             code, stdout, stderr = run_cli(case_map, extra=('--check-tests', '--node-wave', '0', '--root', str(root)))
             self.assertEqual((code, stderr), (0, ''))
             self.assertIn(f'PENDING case map: {self.CASE}: {target!r} pending (wave 3, N3-01)', stdout)
-            self.assertIn(f"targets of later node waves pending", stdout)
+            self.assertIn("targets of later node waves pending", stdout)
             missing = f'FAIL case map: {self.CASE}: test file missing for {target!r}: worker/test/node/http/auth.test.ts'
             for extra in [('--check-tests', '--node-wave', '3', '--root', str(root)), ('--check-tests', '--root', str(root))]:
                 code, stdout, stderr = run_cli(case_map, extra=extra)
@@ -618,25 +621,60 @@ class NodeWavesTests(unittest.TestCase):
             build_tree(root, omitted)
             code, stdout, stderr = run_cli(case_map, extra=('--check-tests', '--node-wave', '0', '--root', str(root)))
         self.assertEqual((code, stderr), (0, ''))
-        pending = dict(re.findall(r"^PENDING case map: (\S+): .* pending \(wave \d, (N\d-\d\d)\)$", stdout, re.M))
+        pending_targets = {}
+        for line in stdout.splitlines():
+            match = re.match(r"^PENDING case map: (\S+): (.*) pending \(wave \d, (N\d-\d\d)\)$", line)
+            if match:
+                case, rendered_target, package = match.groups()
+                pending_targets.setdefault(case, []).append((ast.literal_eval(rendered_target), package))
+        pending = {case: targets[-1][1] for case, targets in pending_targets.items()}
+        entries = {entry['case']: entry for entry in case_map['cases']}
         for case, row in adr_remap().items():
             if row[0] != 'map':
                 continue
-            if declared[row[2]][0] > 0:
-                self.assertEqual(pending.get(case), row[1], case)
-            else:
-                self.assertNotIn(case, pending)
+            entry = entries[case]
+            targets = [entry['target'], *entry.get('also', [])]
+            expected = [(target, declared[target][1]) for target in targets if declared[target][0] > 0]
+            self.assertEqual(pending_targets.get(case, []), expected, case)
         # N3-11 renamed the M1.1.1/version_policy target to the four-collection title it declares in wave 3.
         self.assertEqual(pending.get('M1.1.1/version_policy'), 'N3-11')
         # N4-03 renamed the restart, admin, query-plan and bench targets to the titles it declares in wave 4
         # (M1.4.3/drain_success now targets N3-07's SIGTERM drain test, with N4-03's restart test as also).
         for case in ['M1.4.3/drain_success', 'M4.4.2/worker_restart', 'M5.4.3/durable_views', 'M5.4.3/durable_cursor',
                      'M5.4.3/durable_delete', 'M6.2.2/metrics_auth', 'M6.2.3/slow_query_detection',
-                     'M6.4.2/packaged_recovery', 'M7.4.2/browser_restart']:
+                     'M7.4.2/browser_restart']:
             self.assertEqual(pending.get(case), 'N4-03', case)
-        self.assertEqual(len(pending), 39 + 9)
+        # The revocation-outage case now names current Node HTTP coverage,
+        # declared by N3-01, rather than crediting only the old browser test.
+        self.assertEqual(pending.get('M2.3.3/revocation_outage'), 'N3-01')
+        # Subprocess/follow evidence adds eight uniquely pending cases; the
+        # new M4 process-recovery target adds one Node-wave pending entry. The
+        # dict retains the last supporting target; the full-ref test above
+        # checks every primary and supporting target against its owner.
+        for case in ['M3.4.1/lifecycle', 'M3.4.2/kill_after_create', 'M3.4.2/kill_after_delete',
+                     'M6.4.2/packaged_recovery', 'M6.4.2/unrun_gate', 'M6.4.1/checksum']:
+            self.assertEqual(pending.get(case), 'N3-07', case)
+        self.assertEqual(pending.get('M5.3.1/self_and_duplicate'), 'N2-05')
+        # The primary follow-journey test belongs to N4-01; its packaged second-PDS
+        # support is declared in N3-07 and is the last target in the case-map row.
+        owners = {package for _, package in pending_targets['M5.3.3/pending_confirmed']}
+        self.assertEqual(owners, {'N4-01', 'N3-07'})
+        # M1 adds explicit owner-invariant and 100-write regressions, and maps
+        # migrate_only to the Node startup-order test (not a standalone CLI).
+        # M2 maps additional OAuth boundary/race cases, including initiation-time
+        # issuer mismatch and SIGKILL refresh persistence, while preserving their wave ownership.
+        self.assertEqual(pending.get('M6.2.2/log_redaction'), 'N4-01')
+        # Current Node secret-log/export refs are in the 90-target baseline. The
+        # M6 origin (2), body-boundary (1), and rate (2) supporting refs add five
+        # targets and make three existing M6 cases pending at wave 0; M5 profile
+        # invalidation remains in workers-waves.json only.
+        self.assertEqual(len(pending), 73)
+        self.assertEqual(pending.get('M6.1.2/origin_mismatch'), 'N3-01')
+        self.assertEqual(pending.get('M6.2.1/body_boundary'), 'N1-06')
+        self.assertEqual(pending.get('M6.2.1/rate_boundary'), 'N3-02')
         self.assertIn('PASS case map: 258 unique cases', stdout)
-        self.assertIn('every referenced test file and name of node waves <= 0 exists; 50 targets of later node waves pending', stdout)
+        # The new origin/body/rate refs are declared in their Node-wave packages.
+        self.assertIn('every referenced test file and name of node waves <= 0 exists; 95 targets of later node waves pending', stdout)
 
 
 def case_map_with(base, case, target, reason):

@@ -363,7 +363,7 @@
      "worker/test/storage/schema-v2.test.ts › deleting a users row cascades its loves and deleting a linked_accounts row cascades its forward_outbox rows",
      "worker/test/storage/schema-v2.test.ts › a v1 database seeded with the read-model fixture migrates to v2 with every v1 row byte-identical and the new scrobbles columns NULL",
      "worker/test/storage/schema-v2.test.ts › EXPLAIN QUERY PLAN for loves by owner, due operations, due forward rows and import items by job uses the new indexes",
-     "worker/test/storage/migrate.test.ts › SCHEMA_VERSION is 2 and a v2 database opened by v2 code is ready",
+     "worker/test/storage/migrate.test.ts › SCHEMA_VERSION is 3 and additive follow proof storage remains compatible with v2 code",
      "worker/test/storage/schema-v2.test.ts › schema_compat holds one row with min_compatible_version 2",
      "worker/test/storage/schema-v2.test.ts › every migration after 2 contains only CREATE TABLE, CREATE INDEX and ALTER TABLE ADD COLUMN statements",
      "worker/test/harness/local-index.test.ts › the ready status and the schema_migrations ledger equal SCHEMA_VERSION and one row per entry of MIGRATIONS",
@@ -517,7 +517,7 @@
      "worker/test/storage/sql-conformance.test.ts › on Node an integer above 2^53 is refused on read, multi-statement text is refused, and BEGIN, SAVEPOINT and PRAGMA are denied",
      "worker/test/storage/db.test.ts › all/one/run map rows, nulls and rowsWritten",
      "worker/test/storage/status.test.ts › status statements use the indexes pinned by EXPLAIN QUERY PLAN (asserted by index name, SQLite version recorded) in place of the DO rowsRead budget",
-     "worker/test/read/keyset.test.ts › history and feed page statements use the single-clause seek plan on SQLite 3.54.1 (Q10 budgets as plan assertions)",
+     "worker/test/read/keyset.test.ts › history and feed page statements use the single-clause seek plan on supported SQLite baselines (Q10 budgets as plan assertions)",
      "scripts/test/test-inventory.test.ts › every id in node-port-inventory.json is kept with its title declared in its file or replaced by an existing id with a reason",
      "scripts/test/test-inventory.test.ts › every test title declared at 3d953a9 under worker/test/{harness,storage,ingest,read,write,http} that the inventory marks kept is still declared, byte-identical, in the same file"
     ]
@@ -553,18 +553,21 @@
      "worker/test/node/bff/client-metadata.test.ts › the metadata for https://music.214510.xyz equals the ADR 0005 §5.3 document with client_name AT Protocol Music and the four repo: scopes, and jwks.json has no private member",
      "worker/test/node/bff/client-metadata.test.ts › transition:generic is appended only with ATMUSIC_OAUTH_TRANSITION_GENERIC=1",
      "worker/test/node/bff/oauth-client.test.ts › authorize then callback against the fake AS stores a session for the DID; the assertion has iss=sub=client_id, aud=issuer, a unique jti and kid k1",
-     "worker/test/node/bff/oauth-client.test.ts › a replayed state and a state older than 600 s both fail and store no session",
+     "worker/test/node/bff/oauth-client.test.ts › a replay is refused, state remains valid for denial handling at 599999 ms and expires at 600000 ms",
      "worker/test/node/bff/oauth-client.test.ts › a callback whose sub resolves to a PDS with a different authorization server is rejected and the token is revoked",
+     "worker/test/node/bff/oauth-client.test.ts › two independent OAuth/PDS fixtures accept only tokens issued by their own server",
      "worker/test/node/bff/oauth-client.test.ts › invalid_grant on refresh deletes the session and marks the account reauth_required; a TransportError keeps the session",
      "worker/test/node/bff/oauth-client.test.ts › a k1-bound session keeps refreshing after k2 is prepended and becomes reauth_required when k1 is removed",
      "worker/test/node/bff/oauth-stores.test.ts › the raw database file contains no access token, refresh token or DPoP private key bytes after a sign-in",
      "worker/test/node/bff/oauth-client.test.ts › a callback whose bindingHash differs from the state binding is refused before the code exchange and consumes the state",
      "worker/test/node/bff/oauth-client.test.ts › authorize refuses an authorization server whose metadata lacks PAR or S256 PKCE and stores no state",
+     "worker/test/node/bff/oauth-client.test.ts › authorization start rejects AS metadata whose issuer differs from the advertised issuer before state or PAR",
+     "worker/test/node/bff/oauth-client.test.ts › authorization start follows identity-to-PDS-to-AS metadata and refuses an AS that does not protect the PDS",
      "worker/test/node/bff/oauth-client.test.ts › authorize sends PAR with an S256 code_challenge and a private_key_jwt assertion; the verifier and DPoP key exist only sealed in oauth_states",
-     "worker/test/node/bff/oauth-client.test.ts › a PAR error from the fake AS leaves no oauth_states row and surfaces oauth_upstream",
+     "worker/test/node/bff/oauth-client.test.ts › PAR HTTP failures and a stalled request surface oauth_upstream and leave no oauth_states row or late PAR",
      "worker/test/node/bff/oauth-client.test.ts › a token response whose iss differs from the authorize issuer or whose sub differs from the handle-resolved DID stores no session",
-     "worker/test/node/bff/oauth-client.test.ts › a use_dpop_nonce error on the token request and on a PDS write is retried once with the new nonce and succeeds",
-     "worker/test/node/bff/oauth-client.test.ts › two concurrent restore() calls on an expired session send one refresh request and both use the new token",
+     "worker/test/node/bff/oauth-client.test.ts › DPoP nonce retries use a new nonce and jti, and endless token challenges terminate safely",
+     "worker/test/node/bff/oauth-client.test.ts › ten concurrent restore() calls share one successful refresh rotation and all use the new token",
      "worker/test/node/bff/oauth-client.test.ts › revoke against an AS without a revocation_endpoint deletes the local session and sends no request",
      "worker/test/node/bff/oauth-stores.test.ts › a rotated refresh token is persisted sealed before use, and after close and reopen the next refresh sends the rotated token",
      "worker/test/node/bff/oauth-stores.test.ts › when the oauth_sessions write fails during a refresh, set() does not throw, the next restore() uses the refreshed session from memory, oauth_store_degraded is raised, and the fake AS records no revocation",
@@ -661,7 +664,12 @@
      "worker/test/node/outbox/ingress.test.ts › enqueueForwards gives love, unlove, love three distinct rows; a resent scrobble and a same-track now-playing refresh give none; the same track playing again later gives a new nowplaying row",
      "worker/test/node/outbox/delete.test.ts › a still-queued create cancelled at removal sends nothing to the PDS and deletes its listen key and unsent forward rows; a running create gets a delete chained after it",
      "worker/test/node/outbox/ingress.test.ts › a listen accepted with notBeforeMs = listened_at − 300 s gets an operation whose due_at and createdAt equal it, its listen key and forward rows at once, and is not sent to the fake PDS before due_at",
-     "worker/test/node/outbox/batch.test.ts › PdsWriter requests reach the fake PDS through policyFetch, and a 3xx from the PDS is a retryable TransportError redirect, never followed"
+     "worker/test/node/outbox/batch.test.ts › PdsWriter requests reach the fake PDS through policyFetch, and a 3xx from the PDS is a retryable TransportError redirect, never followed",
+     "worker/test/node/outbox/follows.test.ts › repeated follow and unfollow reuse the latest intent across admission, retry, restart and success, but opposite intents remain FIFO",
+     "worker/test/node/outbox/follows.test.ts › follow duplicates while running or blocked keep attempts, payload and dependencies unchanged",
+     "worker/test/node/outbox/follows.test.ts › rejects an operation whose DID has no account before writing operations or dependencies",
+     "worker/test/node/outbox/delete.test.ts › confirmed deletion discards only the matching succeeded create payload; durable identity and listen dedupe survive restart, failed deletion retains recovery data",
+     "worker/test/node/outbox/delete.test.ts › cancelling an unsent delete intent invalidates the public statistics version"
     ]
    },
    {
@@ -829,10 +837,11 @@
      "worker/test/node/http/auth.test.ts › GET /oauth/callback sets the session cookie, creates the account and 303s to /; error=access_denied 303s to /signin?error=denied with no cookie",
      "worker/test/node/http/auth.test.ts › GET /api/v1/auth/session returns did, handle, username, csrfToken and status, or 401 without a cookie",
      "worker/test/node/http/auth.test.ts › POST /api/v1/auth/logout requires CSRF, clears the cookie, deletes the session and revokes upstream when no protocol credential remains",
+     "worker/test/node/http/auth.test.ts › revocation HTTP 500 still invalidates local sessions, clears cookies and logs no upstream secrets",
      "worker/test/node/http/auth.test.ts › GET /oauth/client-metadata.json and /oauth/jwks.json answer with Cache-Control max-age=300 and no Set-Cookie",
      "worker/test/node/http/auth.test.ts › POST /api/v1/auth/start with a foreign or duplicate Origin is 403 csrf_failed and stores no state; a valid start sets __Host-atmusic_oauth with HttpOnly, Secure, SameSite=Lax, Path=/ and Max-Age=600",
      "worker/test/node/http/auth.test.ts › a callback URL replayed from another cookie jar, or sent without __Host-atmusic_oauth, is 403 oauth_binding_mismatch, stores no session and sets no session cookie",
-     "worker/test/node/http/auth.test.ts › a callback with a replayed, expired or unknown state, or an AS error, stores no session, sets no session cookie and clears __Host-atmusic_oauth",
+     "worker/test/node/http/auth.test.ts › stale state, AS denial, wrong issuer and wrong subject fail at the callback boundary without adding sessions or writes",
      "worker/test/node/http/auth.test.ts › under the allowlist policy a DID outside ATMUSIC_SIGNIN_DIDS is 403 signin_not_allowed at start and at the callback, its OAuth session is revoked and nothing is stored",
      "worker/test/node/http/auth.test.ts › a first sign-in of a DID with zero records admits it for indexing and its snapshot sets indexing_state current",
      "worker/test/node/http/auth.test.ts › DELETE /api/v1/account/connection without CSRF is 403; with it the fake AS records a revocation, every web session, credential and link of the DID is gone and journaled, its queued operations are cancelled, the account is signed_out and the cookie is cleared",
@@ -866,8 +875,11 @@
      "worker/test/node/http/writes.test.ts › GET /api/v1/operations/{id} is 200 for its owner and 404 for any other session",
      "worker/test/node/http/account.test.ts › PATCH /api/v1/account validates username, shareNowPlaying and importSharePercent 10..90; a taken username is 409 username_taken",
      "worker/test/node/http/writes.test.ts › the same Idempotency-Key from two DIDs creates two operations",
+     "worker/test/node/http/writes.test.ts › 100 concurrent writes from 10 sessions yield one durable operation and idempotency key per response",
      "worker/test/node/http/writes.test.ts › an Idempotency-Key of 129 characters or containing a character outside [A-Za-z0-9._~-] is 400 invalid_idempotency_key",
      "worker/test/node/http/writes.test.ts › five identical POSTs with one Idempotency-Key, two of them after the operation succeeded, return one operation and the fake PDS holds one record",
+     "worker/test/node/http/writes.test.ts › a listen over the daily listen cap is 429 rate_limited with Retry-After until the oldest live listen leaves the 24 h window, writes nothing and leaves the Idempotency-Key unbound",
+     "worker/test/node/http/writes.test.ts › an HTTP delete failure hides the local record while reporting failure without claiming remote absence",
      "worker/test/node/http/writes.test.ts › public v1.1 read responses are byte-identical with and without the owner's session cookie",
      "worker/test/node/http/account.test.ts › PATCH username to another DID's verified handle, or to a dotted name other than the caller's own verified handle, is 422 username_invalid",
      "worker/test/node/http/account.test.ts › GET /api/v1/account/ignored-listens lists only the caller's ignored listens newest first with reason and 128-scalar previews, and is 401 without a session"
@@ -1030,6 +1042,7 @@
      "scripts/check-node-bundle.ts",
      "scripts/test/check-node-bundle.test.ts",
      "scripts/test/build-server.test.ts",
+     "scripts/test/node-recovery.test.ts",
      "worker/test/node/run.test.ts",
      "worker/test/node/shutdown.test.ts",
      "worker/test/node/admin-socket.test.ts",
@@ -1045,7 +1058,7 @@
      "N1-08",
      "N1-10"
     ],
-    "description": "ADR 0005 §3.9–§3.11, §14.5. The process half of the round-1 N2-01.\n\n- **run.ts / main.ts (ADR §3.9, §3.10).** `run(opts): Promise<ExitCode>` is side-effect free on import and takes argv, env, clock, exit, `busyTimeoutMs` and `drainMs` (production 5000 and 25000 from NodeConfig). Order: `checkRuntimeEnv` (exit 78 naming the variable), config and secrets (78), install `unpinnedFetchStub` as globalThis.fetch, open the db (exclusive lock; 75 database_locked; 78 for a missing file without `--init`), the admin socket, the pre-migration backup (free-space check, 78 naming ATMUSIC_MIN_FREE_BYTES when it fails) and migration under EXTEND_TIMEOUT_USEC, compose (N2-01), listen (LISTEN_FDS, then ATMUSIC_LISTEN, then 127.2.0.1:8888), READY=1. `--version` prints the build-time git sha; `--check-config` validates and exits. main.ts is the only module with a top-level effect: it calls run() with the process values and exits.\n- **shutdown.ts:** the SIGTERM drain with the injected drain window.\n- **systemd.ts:** READY=1, STOPPING=1, WATCHDOG=1 and EXTEND_TIMEOUT_USEC through an injectable systemd-notify spawner.\n- **admin-socket.ts and http/admin.ts:** the socket routes (status with backup age, queue depths, upload-directory bytes, free space, low_disk and oauth_store_degraded; backup; resnapshot; oauth prune-kid) with the portable constant-time compare. The Workers TCP admin route and ADMIN_TOKEN stay in ROUTES until N4-03 ports composition/admin.test.ts; N7-01 deletes them.\n- **backup.ts:** refuse unless free ≥ db size + ATMUSIC_MIN_FREE_BYTES (failed backup_runs row, error low_disk); node:sqlite async `backup(db, tmp, {rate})`; integrity_check in a worker_thread on a read-only connection to the copy; rename and fsync; backup_runs with kind; retention 7 daily and 4 weekly over daily and manual runs only; the pre-migration backup; the `backup` extension timer; after a completed backup, `revocations.truncateBefore(oldest backup file time)` (N1-08).\n- **build-server.ts:** esbuild bundles worker/dist/node/main.mjs, with `--check` and the git sha embedded; `--e2e [--entry <path>]` builds worker/dist/node/e2e.mjs from worker/test/e2e/node-entry.ts (which imports run.ts, never main.ts; N6-01) and exits 2 when the entry is missing. Both builds write metafiles.\n- **check-node-bundle.ts (new file; check-bundle.ts is untouched for deploy.sh and deploy.test.ts until N7-01):** fails on main.mjs inputs under test-support, worker/test or router-transport, on com.example.atmusic handling, on a cloudflare: import, on an input worker/src/do/index-do.ts, worker/src/scheduled.ts, worker/src/env.ts, worker/src/index.ts or worker/src/router.ts, on a crypto-build mismatch, and on an unpinned fetch path (any input other than pinned-transport.ts, policy-fetch.ts and the four documented fallback sites referencing globalThis.fetch, a bare fetch( or fetchTransport; or a production createIdentityResolver, createHandleResolver, createSafeFetch or new NodeOAuthClient call without its transport or fetch property). Fixture options are found by a comment-stripped call-site scan of the production sources (`fixtureOrigins: true`, `fixture: true` passed as an option, routerTransport, fixtureTransport, test-support imports, fixedClock, seededRandom), as worker/test/acceptance/security.test.ts:392-407 does, with a non-vacuity check (at least 60 files scanned, the `fixtureOrigins?: boolean` parameter found in worker/src/node/config.ts). When e2e.mjs exists, every worker/src and packages/*/src input of main.mjs except worker/src/node/main.ts must be an e2e.mjs input with the same hash, and e2e.mjs may add only worker/test/e2e, worker/test/node/support and test-support inputs. It prints the git sha and the bundle SHA-256. N0-01 already wired it into check-ts.sh.\n\n**Tests.** worker-node tests drive run() and shutdown() in-process with injected exit, clock, busyTimeoutMs ≈ 200 and drainMs ≈ 200. Tests that need a real second process spawn the built main.mjs from scripts/test/build-server.test.ts with explicit 60 s timeouts; nothing spawns tsx.",
+    "description": "ADR 0005 §3.9–§3.11, §14.5. The process half of the round-1 N2-01.\n\n- **run.ts / main.ts (ADR §3.9, §3.10).** `run(opts): Promise<ExitCode>` is side-effect free on import and takes argv, env, clock, exit, `busyTimeoutMs` and `drainMs` (production 5000 and 25000 from NodeConfig). Order: `checkRuntimeEnv` (exit 78 naming the variable), config and secrets (78), install `unpinnedFetchStub` as globalThis.fetch, open the db (exclusive lock; 75 database_locked; 78 for a missing file without `--init`), the admin socket, the pre-migration backup (free-space check, 78 naming ATMUSIC_MIN_FREE_BYTES when it fails) and migration under EXTEND_TIMEOUT_USEC, compose (N2-01), listen (LISTEN_FDS, then ATMUSIC_LISTEN, then 127.2.0.1:8888), READY=1. `--version` prints the build-time git sha; `--check-config` validates and exits. main.ts is the only module with a top-level effect: it calls run() with the process values and exits.\n- **shutdown.ts:** the SIGTERM drain with the injected drain window.\n- **systemd.ts:** READY=1, STOPPING=1, WATCHDOG=1 and EXTEND_TIMEOUT_USEC through an injectable systemd-notify spawner.\n- **admin-socket.ts and http/admin.ts:** the socket routes (status with backup age, queue depths, upload-directory bytes, free space, low_disk and oauth_store_degraded; backup; resnapshot; oauth prune-kid) with the portable constant-time compare. The Workers TCP admin route and ADMIN_TOKEN stay in ROUTES until N4-03 ports composition/admin.test.ts; N7-01 deletes them.\n- **backup.ts:** refuse unless free ≥ db size + ATMUSIC_MIN_FREE_BYTES (failed backup_runs row, error low_disk); node:sqlite async `backup(db, tmp, {rate})`; integrity_check in a worker_thread on a read-only connection to the copy; rename and fsync; backup_runs with kind; retention 7 daily and 4 weekly over daily and manual runs only; the pre-migration backup; the `backup` extension timer; after a completed backup, `revocations.truncateBefore(oldest backup file time)` (N1-08).\n- **build-server.ts:** esbuild bundles worker/dist/node/main.mjs, with `--check` and the git sha embedded; `--e2e [--entry <path>]` builds worker/dist/node/e2e.mjs from worker/test/e2e/node-entry.ts (which imports run.ts, never main.ts; N6-01) and exits 2 when the entry is missing. Both builds write metafiles.\n- **check-node-bundle.ts (new file; check-bundle.ts is untouched for deploy.sh and deploy.test.ts until N7-01):** fails on main.mjs inputs under test-support, worker/test or router-transport, on com.example.atmusic handling, on a cloudflare: import, on an input worker/src/do/index-do.ts, worker/src/scheduled.ts, worker/src/env.ts, worker/src/index.ts or worker/src/router.ts, on a crypto-build mismatch, and on an unpinned fetch path (any input other than pinned-transport.ts, policy-fetch.ts and the four documented fallback sites referencing globalThis.fetch, a bare fetch( or fetchTransport; or a production createIdentityResolver, createHandleResolver, createSafeFetch or new NodeOAuthClient call without its transport or fetch property). Fixture options are found by a comment-stripped call-site scan of the production sources (`fixtureOrigins: true`, `fixture: true` passed as an option, routerTransport, fixtureTransport, test-support imports, fixedClock, seededRandom), as worker/test/acceptance/security.test.ts:392-407 does, with a non-vacuity check (at least 60 files scanned, the `fixtureOrigins?: boolean` parameter found in worker/src/node/config.ts). When e2e.mjs exists, every worker/src and packages/*/src input of main.mjs except worker/src/node/main.ts must be an e2e.mjs input with the same hash, and e2e.mjs may add only worker/test/e2e, worker/test/node/support and test-support inputs. It prints the git sha and the bundle SHA-256. N0-01 already wired it into check-ts.sh.\n\n**Tests.** worker-node tests drive run() and shutdown() in-process with injected exit, clock, busyTimeoutMs ≈ 200 and drainMs ≈ 200. Production-host subprocess checks spawn the built main.mjs from scripts/test/build-server.test.ts; fixture-recovery journeys build the guarded e2e.mjs and spawn it from scripts/test/node-recovery.test.ts. These are deterministic local processes with fake upstreams, not live acceptance.",
     "tests": [
      "worker/test/node/run.test.ts › migrations finish before listen: the port accepts no connection until the database is migrated",
      "worker/test/node/run.test.ts › an inherited LISTEN_FDS socket wins over ATMUSIC_LISTEN, which wins over the 127.2.0.1:8888 default",
@@ -1068,6 +1081,7 @@
      "scripts/test/build-server.test.ts › main.mjs started with ATMUSIC_PUBLIC_ORIGIN=http://127.0.0.1:1, or with LASTFM_API_ROOT=https://127.0.0.1/, exits 78 even with every test variable set",
      "scripts/test/build-server.test.ts › the bundled main.mjs started with --init on a temporary state directory answers /health/ready, then on SIGTERM sends STOPPING=1 and exits 0 within 30 s",
      "scripts/test/build-server.test.ts › --e2e builds worker/dist/node/e2e.mjs from a given entry and exits 2 when the entry is missing",
+     "scripts/test/node-recovery.test.ts › oauth_refresh_recovery: rotated refresh credentials and the same app-session cookie survive a child-process restart",
      "scripts/test/build-server.test.ts › a second main.mjs on the same database exits 75 database_locked after the production busy timeout even with a different ATMUSIC_ADMIN_SOCKET, and a stale socket file is replaced",
      "scripts/test/build-server.test.ts › main.mjs started with NODE_OPTIONS=--require=./x.js or NODE_TLS_REJECT_UNAUTHORIZED=0 exits 78 naming the variable and loads no preload",
      "scripts/test/check-node-bundle.test.ts › the guard fails when main.mjs has a test-support, worker/test or router-transport input, com.example.atmusic handling, or a cloudflare: import",
@@ -1075,7 +1089,14 @@
      "scripts/test/check-node-bundle.test.ts › the guard fails when the bundle's @atcute/crypto entry differs from the one the worker-node project resolves, and prints the git sha and bundle SHA-256 otherwise",
      "scripts/test/check-node-bundle.test.ts › a production source passing fixtureOrigins: true, fixture: true as an option, routerTransport or a test-support import fails the call-site scan, while url-policy.ts fixture handling and the fixtureOrigins?: boolean parameter pass; a scan of fewer than 60 files fails as vacuous",
      "scripts/test/check-node-bundle.test.ts › an e2e.mjs whose worker/src or packages/*/src inputs differ from main.mjs in any file other than worker/src/node/main.ts, or that adds an input outside worker/test/e2e, worker/test/node/support and test-support, fails",
-     "scripts/test/check-node-bundle.test.ts › a main.mjs input other than pinned-transport.ts, policy-fetch.ts and the documented fallback sites that references globalThis.fetch or fetchTransport, or a createIdentityResolver call without transport, fails the unpinned-fetch rule"
+     "scripts/test/check-node-bundle.test.ts › a main.mjs input other than pinned-transport.ts, policy-fetch.ts and the documented fallback sites that references globalThis.fetch or fetchTransport, or a createIdentityResolver call without transport, fails the unpinned-fetch rule",
+     "scripts/test/node-recovery.test.ts › packaged_recovery: SIGKILL after create and delete commits reconciles durable operations, views, cursor and checkpoint on the same database",
+     "scripts/test/node-recovery.test.ts › packaged_follow_feed_recovery: second-PDS create, update and delete persist through process restarts",
+     "scripts/test/node-recovery.test.ts › federation_process_recovery: second-PDS create/update/delete survive SIGKILL during proof and converge",
+     "scripts/test/node-recovery-runner.test.ts › unrun_gate: every required recovery journey must be present and pass exactly once",
+     "scripts/test/node-recovery-runner.test.ts › recovery CLI refuses skip/filter arguments rather than silently omitting a required journey",
+     "scripts/test/node-recovery-runner.test.ts › Node candidate version validation rejects mismatching tags and lockfiles before packaging",
+     "scripts/test/build-server.test.ts › Node candidate tag/version, deterministic archive and checksum bind the real bundle; tampering, dirty sources and stale committed inputs fail closed"
     ]
    },
    {
@@ -1274,7 +1295,8 @@
      "worker/test/node/journey/secret-logs.test.ts › no captured log line or error body from the journeys, including the Last.fm desktop flow (auth.getToken, /api/auth, /lastfm/authorize, approve, getSession), the web flow and the Last.fm link callback, contains any token, sk, app password, cookie, DPoP key or client key value seen in the run",
      "worker/test/node/journey/secret-logs.test.ts › with sessions, sk values, app passwords, ListenBrainz tokens and linked credentials seeded, no public /api/v1, /2.0 or /1 response body in the journeys contains any of those values",
      "worker/test/node/features.test.ts › every outbound consumer of the production composition receives the injected spy transport, and leaving it out of any one consumer makes the test fail",
-     "worker/test/node/features.test.ts › the production features register the six extension timers in EXTENSION_TIMER_NAMES order and run reconcileSignInPolicy once at startup before listen"
+     "worker/test/node/features.test.ts › the production features register the six extension timers in EXTENSION_TIMER_NAMES order and run reconcileSignInPolicy once at startup before listen",
+     "worker/test/node/journey/follow-journey.test.ts › queued and published-but-unverified follows are excluded from following feed; verified follow includes Bob and global feed never changes"
     ]
    },
    {
@@ -1333,7 +1355,8 @@
      "worker/test/composition/",
      "worker/test/acceptance/",
      "worker/test/bench/",
-     "scripts/benchmark-read-models.ts"
+     "scripts/benchmark-read-models.ts",
+     "scripts/test/benchmark-read-models.test.ts"
     ],
     "dependsOn": [
      "N2-01",
@@ -1343,12 +1366,16 @@
     "description": "ADR 0005 §15.1, §15.3. These projects switch to `environment: 'node'` over compose() (N2-01) and run() (N3-07) with the fixture transport, the memoryLink Jetstream and fixedClock. The test entries (worker/test/acceptance/entry.ts and the composition entries) become Node composition factories that override dependencies through compose options instead of IndexDO.buildDeps.\n\nTitles are kept, except for:\n- the index-do and IndexDO-specific RPC tests, which become IndexCore tests;\n- scheduled.test.ts, which becomes the ensureRunning-interval test;\n- bench row budgets, which become plan assertions with timings reported.\n\nRestart is close-and-reopen of the same file plus a recomposed app. composition/admin.test.ts is ported from the Workers TCP admin route to the admin socket (N3-07); the TCP route itself is deleted by N7-01. These suites stop importing worker/test/write/support.ts and worker/test/fixtures/jetstream-server.ts through cloudflare:* (N4-04 owns those helpers). scripts/benchmark-read-models.ts drops its workerd, wrangler and vitestPlugin environment fields (:110) and records node and sqlite versions instead, so nothing in it refers to Workers when N7-01 runs its no-Workers test.",
     "tests": [
      "worker/test/acceptance/restart.test.ts › restart reopens the same database file: projection tables and responses are byte-identical, a pre-restart cursor continues and timers resume",
-     "worker/test/acceptance/query-plans.test.ts › with 100 DIDs x 1,000 records, history, feeds and stats use their indexes on SQLite 3.54.1 and the no-index control shows SCAN",
+     "worker/test/acceptance/query-plans.test.ts › with 100 DIDs x 1,000 records, history, feeds and stats use their indexes on supported SQLite baselines and the no-index control shows SCAN",
      "worker/test/composition/index-core-node.test.ts › IndexCore on the Node host runs Jetstream socket mode through the ws connector to a loopback server and re-arms the alarm after a throwing tick",
      "worker/test/composition/scheduled.test.ts › the 5-minute ensureRunning interval re-arms a lost alarm chain",
      "worker/test/bench/read-models.bench.test.ts › the read-model bench records p50 and p95 for history, feed and stats on node:sqlite and asserts their query plans",
      "worker/test/composition/admin.test.ts › admin status over the unix socket returns the AdminStatus shape of a fresh index, and /internal/admin/status on the TCP listener is the JSON 404",
-     "worker/test/bench/read-models.bench.test.ts › the benchmark report records node and sqlite versions and has no workerd, wrangler or vitestPlugin field"
+     "worker/test/bench/read-models.bench.test.ts › the benchmark report records node and sqlite versions and has no workerd, wrangler or vitestPlugin field",
+     "scripts/test/benchmark-read-models.test.ts › accepts the exact 2-vCPU/2-GiB host and paced 30 s + 60 s request schedule",
+     "scripts/test/benchmark-read-models.test.ts › rejects unbounded resources, unpaced requests, the wrong counts, duration, errors, and report verdict",
+     "scripts/test/benchmark-read-models.test.ts › rejects fractional CPU quotas and malformed cgroup values",
+     "scripts/test/benchmark-read-models.test.ts › uses the tightest current or ancestor cgroup limit and fails closed when hierarchy data is missing"
     ]
    },
    {

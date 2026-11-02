@@ -244,4 +244,33 @@ describe('cursor traversal over HTTP', () => {
     expect(r07Now.listenedAt).toBe('2025-06-01T00:00:00.000000000Z');
     expect(r07Now.revision).toBe(moved[1]!.rev);
   });
+
+  it('global feed cursor applies the moved-row rule when an update crosses its timestamp boundary', async () => {
+    const f = await readFixture('feed-cursor-moved');
+    const ctx = await ctxFor(f.index);
+    const path = '/api/v1/feed?scope=global&limit=2';
+
+    const first = await get(ctx, path);
+    expect(pageRkeys(first)).toEqual(['r09', 'r10']);
+    const cursor = first.body.nextCursor;
+    expect(cursor).toEqual(expect.any(String));
+
+    // r07 was below the first-page anchor. Its verified update moves it above both
+    // the anchor and last tuple; the existing traversal must not return it later.
+    const r07 = f.seed.records.get(uriOf(ALICE, 'r07'))!;
+    await f.kit.externalPut('Alice', SCROBBLE, 'r07', {
+      ...(r07.record as object),
+      listenedAt: '2026-01-15T11:45:00Z',
+    });
+    expect((await f.drain()).map((o) => [o.uri, o.outcome])).toEqual([[uriOf(ALICE, 'r07'), 'applied']]);
+
+    const continued = await continueFrom(ctx, path, cursor!);
+    expect(continued).toEqual([
+      ['r01', 'r02'],
+      ['r03', 'r04'],
+      ['r05', 'r06'],
+    ]);
+    const fresh = await traverse(ctx, path);
+    expect(fresh.flat()).toEqual(['r07', 'r09', 'r10', 'r01', 'r02', 'r03', 'r04', 'r05', 'r06']);
+  });
 });

@@ -55,15 +55,21 @@ const schemas = {
 const REQUEST_ID = '0b8a5d3c-2e1f-4a6b-9c7d-8e9f0a1b2c3d';
 const BASE_CAPS = ['read', 'stats', 'follows', 'notify', 'indexing'];
 const OWNED = 'org.example.music';
-const OWNED_ENV = { LEXICON_PREFIX: OWNED, NAMESPACE_OWNERSHIP_REF: 'dns:_lexicon.music.example.org' };
-/** The harness namespace: the fixture prefix, no ownership evidence (wrangler.harness.jsonc). */
-const FIXTURE_ENV = { LEXICON_PREFIX: FIXTURE_PREFIX, NAMESPACE_OWNERSHIP_REF: '' };
+const PUBLICATION_REF = `sha256:${'b'.repeat(64)}`;
+const OWNED_ENV = {
+  LEXICON_PREFIX: OWNED,
+  NAMESPACE_OWNERSHIP_REF: 'dns:_lexicon.music.example.org',
+  NAMESPACE_PUBLICATION_REF: PUBLICATION_REF,
+};
+/** The harness namespace: the fixture prefix, no ownership or publication evidence (wrangler.harness.jsonc). */
+const FIXTURE_ENV = { LEXICON_PREFIX: FIXTURE_PREFIX, NAMESPACE_OWNERSHIP_REF: '', NAMESPACE_PUBLICATION_REF: '' };
 
 /** The Workers-era variables parseConfig reads (wrangler.harness.jsonc). */
 const VARS: EnvVars = {
   PUBLIC_ORIGIN: 'https://music.example.test',
   LEXICON_PREFIX: FIXTURE_PREFIX,
   NAMESPACE_OWNERSHIP_REF: '',
+  NAMESPACE_PUBLICATION_REF: '',
   INGEST_MODE: 'off',
   JETSTREAM_URLS: 'wss://jetstream.example.test',
   JETSTREAM_LOOKBACK_HOURS: '24',
@@ -97,6 +103,7 @@ function ctxFor(index: IndexRpc, vars: Partial<AppEnv> = {}, app?: AppServices):
     env: {
       LEXICON_PREFIX: vars.LEXICON_PREFIX ?? FIXTURE_ENV.LEXICON_PREFIX,
       NAMESPACE_OWNERSHIP_REF: vars.NAMESPACE_OWNERSHIP_REF ?? FIXTURE_ENV.NAMESPACE_OWNERSHIP_REF,
+      NAMESPACE_PUBLICATION_REF: vars.NAMESPACE_PUBLICATION_REF ?? FIXTURE_ENV.NAMESPACE_PUBLICATION_REF,
     },
     index,
     requestId: REQUEST_ID,
@@ -154,6 +161,7 @@ function expectedMeta(vars: Partial<AppEnv>, app: AppServices | undefined) {
   const namespace = namespaceView({
     LEXICON_PREFIX: vars.LEXICON_PREFIX ?? FIXTURE_ENV.LEXICON_PREFIX,
     NAMESPACE_OWNERSHIP_REF: vars.NAMESPACE_OWNERSHIP_REF ?? FIXTURE_ENV.NAMESPACE_OWNERSHIP_REF,
+    NAMESPACE_PUBLICATION_REF: vars.NAMESPACE_PUBLICATION_REF ?? FIXTURE_ENV.NAMESPACE_PUBLICATION_REF,
   });
   const composed = app?.meta?.capabilities;
   const capabilities = [
@@ -394,35 +402,44 @@ it('meta namespace equals the prefix and publication of every config parseConfig
   // env either parse mode accepts, the route must report exactly that config's namespace.
   const prefixes = ['', '  ', OWNED, ` ${OWNED} `, FIXTURE_PREFIX, 'Org.Example.Music', 'nodots', 'org..music'];
   const refs = ['', ' ', 'dns:_lexicon.music.example.org'];
+  const publicationRefs = ['', PUBLICATION_REF];
   let accepted = 0;
   let refused = 0;
   for (const LEXICON_PREFIX of prefixes) {
     for (const NAMESPACE_OWNERSHIP_REF of refs) {
-      const vars = { ...VARS, LEXICON_PREFIX, NAMESPACE_OWNERSHIP_REF };
-      for (const allowFixturePrefix of [false, true]) {
-        let config: ReturnType<typeof parseConfig>;
-        try {
-          config = parseConfig(vars, { allowFixturePrefix });
-        } catch (e) {
-          expect(e).toBeInstanceOf(ConfigError);
-          refused++;
-          continue;
+      for (const NAMESPACE_PUBLICATION_REF of publicationRefs) {
+        const vars = { ...VARS, LEXICON_PREFIX, NAMESPACE_OWNERSHIP_REF, NAMESPACE_PUBLICATION_REF };
+        for (const allowFixturePrefix of [false, true]) {
+          let config: ReturnType<typeof parseConfig>;
+          try {
+            config = parseConfig(vars, { allowFixturePrefix });
+          } catch (e) {
+            expect(e).toBeInstanceOf(ConfigError);
+            refused++;
+            continue;
+          }
+          accepted++;
+          expect(
+            namespaceView(vars),
+            `${LEXICON_PREFIX}|${NAMESPACE_OWNERSHIP_REF}|${NAMESPACE_PUBLICATION_REF}|${allowFixturePrefix}`,
+          ).toEqual({ prefix: config.prefix, publication: config.publication });
         }
-        accepted++;
-        expect(namespaceView(vars), `${LEXICON_PREFIX}|${NAMESPACE_OWNERSHIP_REF}|${allowFixturePrefix}`).toEqual({
-          prefix: config.prefix,
-          publication: config.publication,
-        });
+        // The fixture prefix never publishes, whatever evidence appears beside it.
+        if (LEXICON_PREFIX.trim() === FIXTURE_PREFIX) expect(namespaceView(vars).publication).toBe(false);
       }
-      // The fixture prefix never publishes, whatever sits beside it.
-      if (LEXICON_PREFIX.trim() === FIXTURE_PREFIX) expect(namespaceView(vars).publication).toBe(false);
     }
   }
-  expect(accepted).toBe(22);
-  expect(refused).toBe(26);
+  expect(accepted).toBe(26);
+  expect(refused).toBe(70);
   // An invalid prefix fails every parse (so the process cannot start and meta is never served) and is never reported.
   for (const bad of ['Org.Example.Music', 'nodots', 'org..music']) {
-    expect(namespaceView({ LEXICON_PREFIX: bad, NAMESPACE_OWNERSHIP_REF: 'dns:txt' })).toEqual({
+    expect(
+      namespaceView({
+        LEXICON_PREFIX: bad,
+        NAMESPACE_OWNERSHIP_REF: 'dns:txt',
+        NAMESPACE_PUBLICATION_REF: PUBLICATION_REF,
+      }),
+    ).toEqual({
       prefix: null,
       publication: false,
     });
@@ -436,7 +453,15 @@ it('meta namespace equals the prefix and publication of every config parseConfig
     [{ LEXICON_PREFIX: '' }, null, false],
     [{ LEXICON_PREFIX: FIXTURE_PREFIX, NAMESPACE_OWNERSHIP_REF: '' }, FIXTURE_PREFIX, false],
     [{ LEXICON_PREFIX: OWNED, NAMESPACE_OWNERSHIP_REF: '' }, OWNED, false],
-    [{ LEXICON_PREFIX: ` ${OWNED} `, NAMESPACE_OWNERSHIP_REF: 'dns:txt' }, OWNED, true],
+    [
+      {
+        LEXICON_PREFIX: ` ${OWNED} `,
+        NAMESPACE_OWNERSHIP_REF: 'dns:txt',
+        NAMESPACE_PUBLICATION_REF: PUBLICATION_REF,
+      },
+      OWNED,
+      true,
+    ],
   ];
   const counted = counting(store.core);
   for (const [vars, prefix, publication] of expectations) {

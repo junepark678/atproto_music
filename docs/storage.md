@@ -1,4 +1,75 @@
-# Storage: the IndexDO SQLite schema
+# Storage: Node SQLite and the frozen Rust oracle
+
+## Current host (ADR 0005)
+
+The accepted deployment is one Node 26 process with one local SQLite file,
+not a Durable Object. The authoritative schema is
+[`worker/src/do/schema.ts`](../worker/src/do/schema.ts); the `do/` path is
+retained for stable test ids, not a deployment dependency. Node uses
+[`sqlite-db.ts`](../worker/src/node/sqlite-db.ts): exclusive writer locking,
+WAL, FULL synchronous mode, foreign keys, a 64-MiB journal limit, a 256-entry
+statement LRU and bounded busy timeout. Transactions are synchronous, nest via
+savepoints, and reject Promise-returning callbacks.
+
+Migrations 1–3 currently apply through `do/migrate.ts` before serving.
+All pending migration statements and ledger entries commit atomically. The
+ledger is `schema_migrations`; `schema_compat.min_compatible_version` permits
+older code to read a newer **additive, compatible** schema without mutating it.
+An incompatible future schema is refused. Migrations run on startup (there is
+no standalone Node `--migrate-only` flag); startup takes pre-migration backups
+for an existing file. See
+[local-node.md](deploy/local-node.md) and [backup.md](backup.md).
+
+Migration 1 supplies the verified public index described in the historical
+section below. Migration 2 adds the v1.2 scrobble payload columns, `loves`,
+`range_stats_cache`, and private BFF/write state:
+
+- `accounts`, hash-only `web_sessions`, sealed `oauth_states` and
+  `oauth_sessions` (row-bound AES-GCM; no plaintext bearer tokens);
+- durable `operations`, `operation_deps`, owner-scoped `listen_keys`, `pds_budget`;
+- Last.fm credentials, app passwords and ListenBrainz tokens;
+- `now_playing`, linked accounts, forwarding and import queues, ignored-listen
+  bookkeeping, `backup_runs` and `schema_compat`.
+
+Migration 3 adds nullable `operations.follow_proof_json`: admission-time
+contrary verified follow URI/revision pairs, persisted atomically with the
+intent. Succeeded follow/unfollow receipts coalesce until a current contrary
+proof has an identity absent from that baseline. This does not compare local
+proof/acknowledgement timestamps: proof drain can precede a delayed write
+response, and multiple revisions can be verified in one millisecond. Unchanged
+pre-admission contradictions are indexing lag and do not fork duplicate
+intents. A new revision may conservatively refresh a receipt even if only the
+repository head advanced; a refresh reconciles through the normal writer.
+Legacy NULL baselines conservatively refresh when any contrary proof exists.
+Queued/running/blocked reuse and latest-intent FIFO are unchanged. The column
+is non-derived with its operation, is never sent to a PDS or public projection,
+and leaves the minimum-compatible schema version at **2**.
+
+`TABLES` and `TABLE_CLASS` in schema.ts enumerate every table and classify
+security state versus derived projections. Restore preserves live non-derived
+state and replays the revocation journal; copying an old backup over current
+credentials is not the restore policy. Node stores private sessions/outbox
+again: the Workers-era statements below about their removal are historical.
+Only signed verified records enter public projections; a queued write alone is
+not public confirmation. No Durable Object 10-GB cap applies to the local file.
+
+Focused checks: `worker/test/node/sqlite-db.test.ts`,
+`worker/test/storage/{migrate,schema-v2,sql-conformance}.test.ts`,
+`worker/test/node/{migrate-node,backup}.test.ts`, and `scripts/test/restore.test.ts`.
+Run `npm test -- --project worker-node --project worker-modules` for the first
+two projects (the restore test belongs to `scripts`).
+
+For the complete original M1 table/column/constraint/index reference, see
+[the frozen Rust SQLite schema](storage-rust.md). It is not a Node migration
+source and the file formats are not interchangeable.
+
+## Historical Workers schema (ADR 0004)
+
+**The remainder of this page describes the retired hosting design.** It is
+retained to explain migration 1 and the Rust-to-Workers mapping, not as current
+operator instructions. In particular its migration version, no-CLI claim,
+private-state removals, capacity limit and workerd commands are historical.
+
 
 The whole index lives in the SQLite database of one Durable Object, `IndexDO`, a single instance from `idFromName("index-v1")` ([ADR 0004](adr/0004-cloudflare-workers.md) §6). D1, KV, Queues and R2 are not used. The schema is defined in [`worker/src/do/schema.ts`](../worker/src/do/schema.ts).
 
@@ -64,3 +135,21 @@ One Durable Object holds up to 10 GB: about 10 million scrobbles at roughly 1 KB
 ## Tests
 
 `worker/test/storage/sql-conformance.test.ts` runs on real DO SQLite in workerd (52-bit precision, multi-statement bindings, foreign keys, partial unique indexes, `RETURNING`, `ON CONFLICT … WHERE`, rollback on a throw, the 101-parameter error); `worker/test/storage/migrate.test.ts` covers fresh, repeated and failing migrations; `worker/test/read/stats-plan.test.ts` checks with `EXPLAIN QUERY PLAN` that the statistics queries use the indexes; `worker/test/storage/no-async-tx.test.ts` is the `tx(async` lint. Run them with `npm test`.
+
+### Node operation payload retention
+
+After an acknowledged/reconciled successful `scrobble.delete`, the runner clears
+`record_json` and `digest` on matching succeeded `scrobble.create` receipts in
+the same settlement transaction. Operation identity, AT result, request hash,
+idempotency key and listen dedupe stay durable: retrying an accepted listen
+returns its original receipt, never recreates the deleted listen. Failed deletes
+retain recovery data. This is operation-payload minimization, **not** a claim of
+complete erasure from imports, forwards, backups or independent repositories.
+The shared Node read predicate also applies a query-time local-delete overlay:
+rows with queued, running, blocked, or failed `scrobble.delete` operations are
+excluded from public reads as soon as the operation is durably admitted. Delete
+admission/cancellation invalidates the owner's statistics cache version. The
+verified projection and `record_state` remain unchanged until proof confirms
+remote absence; this overlay does not make that claim. An acknowledged
+`succeeded` delete awaiting proof and the complete recovery lifecycle remain
+open M3 acceptance work (#68–#70, #72).

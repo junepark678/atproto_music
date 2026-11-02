@@ -30,6 +30,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { E2E_BUNDLE, gitSha, MAIN_BUNDLE, MAIN_METAFILE, main, NO_COMMIT_SHA, removeE2e } from '../build-server.ts';
+import { packageCandidate } from '../package-node-release';
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const REPO_SHA = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: REPO, encoding: 'utf8' }).trim();
@@ -44,6 +45,8 @@ function disposableCheckout(): string {
   const root = mkdtempSync(join(tmpdir(), 'atmusic-build-checkout-'));
   for (const path of [
     'package.json',
+    'package-lock.json',
+    '.nvmrc',
     'worker/package.json',
     'worker/src',
     'packages/core/package.json',
@@ -185,8 +188,8 @@ interface Proc {
   exited: Promise<{ code: number | null; signal: NodeJS.Signals | null; atMs: number }>;
 }
 
-function startMain(env: Record<string, string>, args: string[] = [], cwd = REPO): Proc {
-  const child = spawn(process.execPath, [MAIN, ...args], { env, cwd, stdio: ['ignore', 'pipe', 'pipe'] });
+function startMain(env: Record<string, string>, args: string[] = [], cwd = REPO, entry = MAIN): Proc {
+  const child = spawn(process.execPath, [entry, ...args], { env, cwd, stdio: ['ignore', 'pipe', 'pipe'] });
   children.push(child);
   let output = '';
   child.stdout?.on('data', (c: Buffer) => {
@@ -287,6 +290,206 @@ describe('build-server and main.mjs', () => {
     expect(() => gitSha(empty)).toThrow(/git rev-parse HEAD failed/);
     execFileSync('git', ['init', '-q'], { cwd: empty });
     expect(gitSha(empty)).toBe(NO_COMMIT_SHA);
+  }, 60_000);
+
+  it('Node candidate tag/version, deterministic archive and checksum bind the real bundle; tampering, dirty sources and stale committed inputs fail closed', async () => {
+    const f = await fixture();
+    const out = join(f.dir, 'candidate');
+    const options = { root: CHECKOUT, dist: DEFAULT_OUT_DIR, assets: f.env.ATMUSIC_ASSETS_DIR!, out, tag: 'v0.0.0' };
+    expect(() => packageCandidate({ ...options, tag: 'v0.1.0' })).toThrow('version mismatch');
+    const lockPath = join(CHECKOUT, 'package-lock.json');
+    const originalLock = readFileSync(lockPath);
+    try {
+      const malformed = JSON.parse(originalLock.toString()) as { packages: Record<string, unknown> };
+      delete malformed.packages[''];
+      writeFileSync(lockPath, JSON.stringify(malformed));
+      expect(() => packageCandidate(options)).toThrow('package-lock root package metadata missing');
+    } finally {
+      writeFileSync(lockPath, originalLock);
+    }
+    const archive = packageCandidate(options);
+    const original = readFileSync(archive);
+    const manifest = JSON.parse(execFileSync('tar', ['-xOzf', archive, './candidate.json'], { encoding: 'utf8' }));
+    expect(manifest).toMatchObject({
+      kind: 'node-candidate-not-accepted',
+      commit: SHA,
+      bundleSha256: createHash('sha256').update(readFileSync(MAIN)).digest('hex'),
+    });
+    expect(manifest.files['worker/dist/node/main.mjs']).toBe(manifest.bundleSha256);
+    expect(manifest.notAccepted).toEqual(
+      expect.arrayContaining([
+        'systemd unit installation and provenance',
+        'admin and restore tooling (not packaged)',
+        'web asset build/source provenance',
+        'production backup, restore, and rollback rehearsal',
+      ]),
+    );
+    const names = execFileSync('tar', ['-tzf', archive], { encoding: 'utf8' });
+    expect(names).toContain('./worker/dist/node/main.mjs');
+    expect(names).not.toContain('./main.mjs');
+    expect(names).toContain('./web/dist/index.html');
+    expect(names).not.toContain('e2e');
+    expect(names).not.toContain('./config/systemd/atmusic.service');
+    expect(names).not.toContain('./config/systemd/atmusic.socket');
+    expect(names).not.toContain('./scripts/admin/restore.ts');
+    expect(execFileSync('sha256sum', ['-c', 'SHA256SUMS'], { cwd: out, encoding: 'utf8' })).toContain('OK');
+    const staticVerification = JSON.parse(
+      execFileSync(
+        'python3',
+        [
+          join(REPO, 'scripts/verify_node_candidate.py'),
+          '--archive',
+          archive,
+          '--trusted-sha256',
+          createHash('sha256').update(original).digest('hex'),
+          '--commit',
+          SHA,
+          '--tag',
+          'v0.0.0',
+        ],
+        { cwd: f.dir, encoding: 'utf8' },
+      ),
+    );
+    expect(staticVerification).toMatchObject({
+      result: 'verified-static-candidate-not-accepted',
+      archiveSha256: createHash('sha256').update(original).digest('hex'),
+      commit: SHA,
+      bundleSha256: manifest.bundleSha256,
+      notAccepted: manifest.notAccepted,
+    });
+
+    // Stage the same independently hash-bound package bytes without executing
+    // them or touching current, systemd, credentials or database state.
+    const stagedPrefix = join(f.dir, 'candidate-staged');
+    const stagedReceipt = JSON.parse(
+      execFileSync(
+        'python3',
+        [
+          join(REPO, 'scripts/stage_node_candidate.py'),
+          'stage',
+          '--archive',
+          archive,
+          '--trusted-sha256',
+          createHash('sha256').update(original).digest('hex'),
+          '--commit',
+          SHA,
+          '--tag',
+          'v0.0.0',
+          '--prefix',
+          stagedPrefix,
+        ],
+        { cwd: f.dir, encoding: 'utf8' },
+      ),
+    );
+    expect(stagedReceipt).toMatchObject({
+      result: 'candidate-staged-not-activated',
+      archiveSha256: createHash('sha256').update(original).digest('hex'),
+      commit: SHA,
+      bundleSha256: manifest.bundleSha256,
+      switched: false,
+    });
+    const stagedRelease = join(
+      stagedPrefix,
+      'releases',
+      `${SHA}-${createHash('sha256').update(original).digest('hex').slice(0, 16)}`,
+    );
+    expect(existsSync(join(stagedPrefix, 'current'))).toBe(false);
+    for (const [relativePath, expectedSha] of Object.entries(manifest.files)) {
+      const stagedBytes = readFileSync(join(stagedRelease, relativePath));
+      expect(createHash('sha256').update(stagedBytes).digest('hex'), relativePath).toBe(expectedSha);
+    }
+
+    // Cross-check package → verifier → stager reuse against real package bytes,
+    // not only the synthetic candidate trees in the stager's unit suite.
+    const stageAgain = () =>
+      JSON.parse(
+        execFileSync(
+          'python3',
+          [
+            join(REPO, 'scripts/stage_node_candidate.py'),
+            'stage',
+            '--archive',
+            archive,
+            '--trusted-sha256',
+            createHash('sha256').update(original).digest('hex'),
+            '--commit',
+            SHA,
+            '--tag',
+            'v0.0.0',
+            '--prefix',
+            stagedPrefix,
+          ],
+          { cwd: f.dir, encoding: 'utf8' },
+        ),
+      );
+    expect(stageAgain()).toMatchObject({ reused: true, switched: false, releaseId: stagedReceipt.releaseId });
+    const stagedMainPath = join(stagedRelease, 'worker/dist/node/main.mjs');
+    const verifiedMain = readFileSync(stagedMainPath);
+    writeFileSync(stagedMainPath, Buffer.concat([verifiedMain, Buffer.from('\nmodified after staging\n')]));
+    expect(stageAgain).toThrow();
+    expect(existsSync(join(stagedPrefix, 'current'))).toBe(false);
+    writeFileSync(stagedMainPath, verifiedMain);
+    expect(stageAgain()).toMatchObject({ reused: true, switched: false, releaseId: stagedReceipt.releaseId });
+
+    // Exercise the actual extracted candidate with default asset discovery. The
+    // test environment points at an isolated state dir; only the asset override
+    // is removed so the bundled releaseRoot must resolve web/dist itself.
+    const extracted = join(f.dir, 'candidate-extracted');
+    mkdirSync(extracted);
+    execFileSync('tar', ['-xzf', archive, '-C', extracted]);
+    const packagedMain = join(extracted, 'worker', 'dist', 'node', 'main.mjs');
+    expect(existsSync(packagedMain)).toBe(true);
+    const smoke = await fixture();
+    const smokeEnv = { ...smoke.env };
+    delete smokeEnv.ATMUSIC_ASSETS_DIR;
+    const packaged = startMain(smokeEnv, ['--init'], extracted, packagedMain);
+    await waitFor(
+      () => notes(smoke).includes('READY=1') || packaged.child.exitCode !== null,
+      30_000,
+      'candidate READY=1',
+    );
+    expect(notes(smoke), packaged.output()).toContain('READY=1');
+    const packagedReady = await get({ port: portOf(smoke) }, '/health/ready');
+    expect([packagedReady.status, JSON.parse(packagedReady.body)]).toEqual([200, { status: 'ready' }]);
+    const packagedHome = await get({ port: portOf(smoke) }, '/');
+    expect(packagedHome.status).toBe(200);
+    expect(packagedHome.body).toContain('<title>atmusic</title>');
+    packaged.child.kill('SIGTERM');
+    expect(await packaged.exited).toMatchObject({ code: 0, signal: null });
+    expect(notes(smoke)).toContain('STOPPING=1');
+    packageCandidate(options);
+    expect(readFileSync(archive)).toEqual(original);
+    const tampered = Buffer.from(original);
+    tampered[20] = tampered[20]! ^ 1;
+    writeFileSync(archive, tampered);
+    expect(() => execFileSync('sha256sum', ['-c', 'SHA256SUMS'], { cwd: out, stdio: 'pipe' })).toThrow();
+    const source = join(CHECKOUT, 'worker/src/node/main.ts');
+    const before = readFileSync(source);
+    try {
+      writeFileSync(source, `${before.toString()}\n// candidate stale-input control\n`);
+      expect(() => packageCandidate(options)).toThrow('clean committed checkout');
+      const git = (...args: string[]) =>
+        execFileSync(
+          'git',
+          [
+            '-c',
+            'user.name=test',
+            '-c',
+            'user.email=test@example.test',
+            '-c',
+            'commit.gpgsign=false',
+            '-c',
+            'core.hooksPath=/dev/null',
+            ...args,
+          ],
+          { cwd: CHECKOUT, stdio: 'pipe' },
+        );
+      git('add', 'worker/src/node/main.ts');
+      git('commit', '-m', 'stale build negative control');
+      expect(() => packageCandidate(options)).toThrow(/stale\/invalid bundle input|build-info identity/);
+    } finally {
+      execFileSync('git', ['reset', '--hard', SHA], { cwd: CHECKOUT, stdio: 'pipe' });
+    }
   }, 60_000);
 
   it('main.mjs started with ATMUSIC_PUBLIC_ORIGIN=http://127.0.0.1:1, or with LASTFM_API_ROOT=https://127.0.0.1/, exits 78 even with every test variable set', async () => {

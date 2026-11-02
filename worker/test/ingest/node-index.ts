@@ -35,6 +35,7 @@ export const INGEST_TEST_ENV: Readonly<EnvVars & Pick<EnvSecrets, 'CURSOR_KEY'>>
   PUBLIC_ORIGIN: 'https://music.example.test',
   LEXICON_PREFIX: 'com.example.atmusic',
   NAMESPACE_OWNERSHIP_REF: '',
+  NAMESPACE_PUBLICATION_REF: '',
   INGEST_MODE: 'off',
   JETSTREAM_URLS: 'wss://jetstream.example.test',
   JETSTREAM_LOOKBACK_HOURS: '24',

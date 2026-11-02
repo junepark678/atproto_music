@@ -89,6 +89,8 @@ export interface Acceptance {
   js: JetstreamServer;
   /** The composition harness (database, composed app, logs). */
   h: Harness;
+  /** HTTP POST requests made by the test through this app helper, not PDS XRPC write calls. */
+  appHttpPosts: number;
   /** Responses validated against api/openapi.yaml so far. */
   validated: number;
   /** One request through the HTTP bridge, validated against api/openapi.yaml (throws on a violation). */
@@ -129,10 +131,12 @@ export async function startAcceptance(label: string, o: StartOptions = {}): Prom
     kit,
     js,
     h,
+    appHttpPosts: 0,
     validated: 0,
     async request(path, init = {}) {
       const url = `${PUBLIC_ORIGIN}${path}`;
       const method = init.method ?? 'GET';
+      if (method === 'POST') a.appHttpPosts += 1;
       const res = await h.request(path, init);
       const verdict = checkResponse(method, url, { status: res.status, headers: res.headers, body: res.body });
       if (verdict !== 'valid')

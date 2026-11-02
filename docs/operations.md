@@ -87,7 +87,7 @@ On **compromise**, remove the key at once (steps 5 only): every session bound to
 
 ## Upgrades and rollback
 
-Build outside the service with `scripts/install-local.sh` (`npm ci --ignore-scripts`, never inside the sandboxed unit), optionally `atmusic-admin backup`, then `systemctl --user restart atmusic` and check `/health/ready`. A pending migration runs at startup after a pre-migration backup. **Rollback is a link switch and a restart, never a restore**: migrations are additive, so the previous release runs on the migrated database. Details: [deploy/local-node.md](deploy/local-node.md#upgrades-and-rollback).
+Build outside the service with `scripts/install-local.sh` (`npm ci --ignore-scripts`, never inside the sandboxed unit), optionally `atmusic-admin backup`, then `systemctl --user restart atmusic` and check `/health/ready`. A pending migration runs at startup after a pre-migration backup. This is a generic local-host runbook, not deployment authorization: the current [M6 deployment safety plan](verification/milestones/m6-deployment-plan.md) is **NO-GO**, and its gates override these steps. A link-switch rollback is only appropriate after the exact prior release identity is retained and independently verified, compatibility with the migrated schema is demonstrated for that release, the operator approves, and restart/health checks are part of the approved procedure. The additive-migration policy alone does not prove compatibility for every prior release. If compatibility or recovery is uncertain, stop; never restore a backup as routine code rollback. Details: [deploy/local-node.md](deploy/local-node.md#upgrades-and-rollback).
 
 ## Restore is disaster recovery
 

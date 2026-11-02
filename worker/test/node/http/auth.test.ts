@@ -38,6 +38,7 @@ import { hashTokenHex } from '../../../src/crypto/tokens';
 import type { Db } from '../../../src/do/db';
 import { authFeature } from '../../../src/http/auth';
 import type { Feature } from '../../../src/node/compose';
+import type { NodeEnv } from '../../../src/node/config';
 import type { Secrets } from '../../../src/node/secrets';
 import type { SqliteDb } from '../../../src/node/sqlite-db';
 import { sessionWriter } from '../../../src/outbox/pds-writer';
@@ -60,6 +61,8 @@ const APP_HOST = new URL(TEST_PUBLIC_ORIGIN).host;
 const ALICE = TEST_SIGNIN_DID;
 const BOB = 'did:plc:bbbbbbbbbbbbbbbbbbbbbbbb';
 const SCROBBLE = `${FIXTURE_PREFIX}.scrobble`;
+const OUTBOX_TEST_PREFIX = 'org.example.music';
+const OUTBOX_TEST_PUBLICATION_REF = `sha256:${'d'.repeat(64)}`;
 const BINDING_COOKIE = '__Host-atmusic_oauth';
 const SESSION_COOKIE = '__Host-atmusic_session';
 const CLEAR_BINDING = `${BINDING_COOKIE}=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0`;
@@ -88,6 +91,8 @@ interface User {
 interface WorldOptions {
   /** The sign-in policy object the feature reads (mutable by the test); default the configuration's. */
   signIn?: SignInPolicy;
+  /** Explicit test-only configuration overrides (e.g. a synthetic open publication gate). */
+  env?: NodeEnv;
   /** Mount the outbox extension with writers over the feature's OAuth service. */
   outbox?: boolean;
   /** Wraps the database compose gets (to record writes). */
@@ -180,6 +185,7 @@ async function world(o: WorldOptions = {}) {
     clock,
     secrets,
     random: seededRandom(0x5eed),
+    ...(o.env === undefined ? {} : { env: o.env }),
     ...(o.wrapDb === undefined ? {} : { wrapDb: o.wrapDb }),
   });
   const running: TestApp = app;
@@ -485,6 +491,54 @@ describe('the auth routes', () => {
     ).toEqual(['web_session', 'oauth_session']);
   });
 
+  it('revocation HTTP 500 still invalidates local sessions, clears cookies and logs no upstream secrets', async () => {
+    const w = await world();
+    const alice = await w.addUser(ALICE, 'alice');
+    const token = await w.signIn(alice);
+    const csrf = await w.csrf(token);
+    const current = w.as.sessions(ALICE).find((s) => s.revoked === null);
+    expect(current).toBeDefined();
+    const requests: string[] = [];
+    const upstreamSecret = 'upstream-revocation-response-secret';
+    w.state.intercept = (req) => {
+      if (new URL(req.url).pathname !== '/oauth/revoke') return null;
+      requests.push(req.url);
+      // Never echo an upstream error body, request token or DPoP material.
+      return Promise.resolve(new Response(upstreamSecret, { status: 500 }));
+    };
+    const out = await read(
+      await w.app.fetch('/api/v1/auth/logout', {
+        method: 'POST',
+        headers: {
+          cookie: `${SESSION_COOKIE}=${token}`,
+          origin: TEST_PUBLIC_ORIGIN,
+          'x-csrf-token': csrf,
+        },
+      }),
+    );
+    expect(requests.length).toBeGreaterThanOrEqual(1);
+    expect(out.status).toBe(204);
+    expect(out.body).toBe('');
+    expect(out.cookies).toEqual([CLEAR_SESSION]);
+    expect(w.count('web_sessions')).toBe(0);
+    expect(w.count('oauth_sessions')).toBe(0);
+    expect(w.accountStatus(ALICE)).toBe('signed_out');
+    expect((await w.sessionGet(token)).status).toBe(401);
+    expect(w.revocations.entries().map((e) => e.kind)).toEqual(['web_session', 'oauth_session']);
+    // A failed upstream revoke is not a claim of remote invalidation.
+    expect(w.as.sessions(ALICE).find((s) => s.id === current?.id)?.revoked).toBeNull();
+    // The maintained client's revoke() swallows endpoint failures. Assert
+    // our local sign-out log, not an invented upstream-success/failure log.
+    expect(w.app.log.logs.filter((l) => l.event === 'signed_out')).toEqual([
+      expect.objectContaining({ level: 'info', did: ALICE, sessions: 1 }),
+    ]);
+    const exposed = JSON.stringify([out.body, out.cookies, w.app.log.lines]);
+    for (const secret of [token, csrf, upstreamSecret, current?.accessToken, current?.refreshToken]) {
+      expect(secret).toBeTypeOf('string');
+      expect(exposed).not.toContain(secret as string);
+    }
+  });
+
   it('GET /oauth/client-metadata.json and /oauth/jwks.json answer with Cache-Control max-age=300 and no Set-Cookie', async () => {
     const w = await world();
     const alice = await w.addUser(ALICE, 'alice');
@@ -610,7 +664,7 @@ describe('the auth routes', () => {
     expect(signInRows(w)).toEqual({ oauth: 0, web: 0, accounts: 0 });
   });
 
-  it('a callback with a replayed, expired or unknown state, or an AS error, stores no session, sets no session cookie and clears __Host-atmusic_oauth', async () => {
+  it('stale state, AS denial, wrong issuer and wrong subject fail at the callback boundary without adding sessions or writes', async () => {
     const w = await world();
     const alice = await w.addUser(ALICE, 'alice');
 
@@ -648,11 +702,55 @@ describe('the auth routes', () => {
     expect(r.headers.get('location')).toBe('/signin?error=denied');
     expect(r.cookies).toEqual([CLEAR_BINDING]);
 
-    // Nothing beyond the first sign-in was exchanged or stored.
+    // An authorization response with a different issuer is rejected before code exchange.
+    w.as.nextAuthorize({ iss: 'https://evil.test' });
+    const wrongIssuer = await w.begin(alice.handle);
+    const wrongIssuerPath = await w.browse(wrongIssuer.authorizeUrl);
+    const tokensBeforeIssuer = w.tokenSuccesses();
+    const issuerResult = await read(await w.callback(wrongIssuerPath, wrongIssuer.binding));
+    expect(issuerResult.status).toBe(403);
+    expect(contract('GET', '/oauth/callback', issuerResult)).toBe('valid');
+    expect(issuerResult.body).toMatchObject({ error: { code: 'oauth_binding_mismatch' } });
+    expect(issuerResult.cookies).toEqual([CLEAR_BINDING]);
+    expect(w.tokenSuccesses()).toBe(tokensBeforeIssuer);
+
+    // The AS issues a valid token for Bob during Alice's flow; the actual HTTP callback rejects and revokes it.
+    const bob = await w.addUser(BOB, 'bob');
+    w.as.nextAuthorize({ sub: bob.did });
+    const wrongSubject = await w.begin(alice.handle);
+    const wrongSubjectPath = await w.browse(wrongSubject.authorizeUrl);
+    const tokensBeforeSubject = w.tokenSuccesses();
+    const subjectResult = await read(await w.callback(wrongSubjectPath, wrongSubject.binding));
+    expect(subjectResult.status).toBe(403);
+    expect(contract('GET', '/oauth/callback', subjectResult)).toBe('valid');
+    expect(subjectResult.body).toMatchObject({ error: { code: 'oauth_binding_mismatch' } });
+    expect(subjectResult.cookies).toEqual([CLEAR_BINDING]);
+    expect(w.tokenSuccesses()).toBe(tokensBeforeSubject + 1);
+    expect(w.as.sessions(BOB)).toHaveLength(1);
+    expect(w.as.sessions(BOB)[0]?.revoked?.source).toBe('endpoint');
+
+    // Corrupt the token-endpoint DPoP proof inside the fixture transport. The AS must reject the actual callback exchange.
+    const badProof = await w.begin(alice.handle);
+    const badProofPath = await w.browse(badProof.authorizeUrl);
+    w.state.intercept = (req) => {
+      if (new URL(req.url).pathname !== '/oauth/token') return null;
+      const headers = new Headers(req.headers);
+      headers.set('dpop', 'malformed-dpop-proof');
+      return w.as.fetch(new Request(req, { headers }));
+    };
+    const badProofResult = await read(await w.callback(badProofPath, badProof.binding));
+    w.state.intercept = null;
+    expect(badProofResult.status).toBe(502);
+    expect(contract('GET', '/oauth/callback', badProofResult)).toBe('valid');
+    expect(badProofResult.body).toMatchObject({ error: { code: 'oauth_upstream' } });
+    expect(badProofResult.cookies).toEqual([CLEAR_BINDING]);
+
+    // Nothing beyond Alice's original sign-in was stored, and no PDS write was accepted.
     expect(signInRows(w)).toEqual(afterFirst.rows);
-    expect(w.tokenSuccesses()).toBe(afterFirst.tokens);
     expect(w.as.sessions(ALICE)).toHaveLength(afterFirst.as);
+    expect(w.count('accounts', 'did = ?', BOB)).toBe(0);
     expect(w.count('oauth_states')).toBe(0);
+    expect(w.pds.count('com.atproto.repo.createRecord')).toBe(0);
   });
 
   it('under the allowlist policy a DID outside ATMUSIC_SIGNIN_DIDS is 403 signin_not_allowed at start and at the callback, its OAuth session is revoked and nothing is stored', async () => {
@@ -877,6 +975,12 @@ describe('the auth routes', () => {
     const writes: Array<{ sql: string; rows: number }> = [];
     const w = await world({
       outbox: true,
+      env: {
+        LEXICON_PREFIX: OUTBOX_TEST_PREFIX,
+        NAMESPACE_OWNERSHIP_REF: 'test-only: fake authority proof',
+        // Shape-valid test fixture only; not evidence of production publication or review.
+        NAMESPACE_PUBLICATION_REF: OUTBOX_TEST_PUBLICATION_REF,
+      },
       wrapDb: (db) => ({
         all: (sql, ...p) => db.all(sql, ...p),
         one: (sql, ...p) => db.one(sql, ...p),
@@ -924,7 +1028,7 @@ describe('the auth routes', () => {
     expect(w.app.timers.pending().length).toBeGreaterThan(0);
     await w.app.composed.core.extensionAlarm();
     expect(states()).toEqual({ [a]: 'succeeded', [b]: 'succeeded' });
-    const records = await alice.repo.list(SCROBBLE);
+    const records = await alice.repo.list(`${OUTBOX_TEST_PREFIX}.scrobble`);
     expect(records.map((r) => (r.value as { track: string }).track).sort()).toEqual(['Blocked', 'Queued']);
     expect(w.accountStatus(ALICE)).toBe('active');
   });

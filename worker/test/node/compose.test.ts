@@ -16,6 +16,7 @@ import { build, type Plugin } from 'esbuild';
 import { afterEach, describe, expect, it } from 'vitest';
 import { IndexCore } from '../../src/app/index-core';
 import type { Db } from '../../src/do/db';
+import { SCHEMA_VERSION } from '../../src/do/schema';
 import { UUID_PATTERN } from '../../src/http/request-id';
 import { CtxWiringError, need, type RequestCtx, type RouteDef } from '../../src/http/types';
 import { type ReadinessWarning, WRITE_PROBE_COUNTER } from '../../src/node/compose';
@@ -68,7 +69,7 @@ describe('compose', () => {
     const app = await startApp({ transport, clock, dist: { 'index.html': INDEX, 'assets/app-3f2a.js': APP_JS } });
     expect(app.address.host).toBe('127.0.0.1');
     expect(app.address.port).toBeGreaterThan(0);
-    expect(app.composed.schema).toEqual({ status: 'ready', version: 2 });
+    expect(app.composed.schema).toEqual({ status: 'ready', version: SCHEMA_VERSION });
     expect(app.composed.core).toBeInstanceOf(IndexCore);
     expect(app.composed.core.isReady).toBe(true);
     // IndexCore started on the injected clock: its start-up timers are due at the frozen instant.
@@ -367,7 +368,11 @@ describe('compose', () => {
       expect(ctx.peer).toBe('127.0.0.1');
       expect(ctx.clientIp).toBe('127.0.0.1');
       expect(ctx.index).toBe(app.composed.core);
-      expect(ctx.env).toEqual({ LEXICON_PREFIX: 'com.example.atmusic', NAMESPACE_OWNERSHIP_REF: '' });
+      expect(ctx.env).toEqual({
+        LEXICON_PREFIX: 'com.example.atmusic',
+        NAMESPACE_OWNERSHIP_REF: '',
+        NAMESPACE_PUBLICATION_REF: '',
+      });
       expect(ctx.requestId).toBe(answers[i]?.headers.get('x-request-id'));
       expect(ctx.cursorKey.algorithm.name).toBe('HMAC');
       expect(need(ctx, 'deps')).toBe(app.composed.core.deps);

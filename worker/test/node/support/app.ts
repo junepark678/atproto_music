@@ -244,6 +244,7 @@ export function testEnv(dir: string): Record<string, string | undefined> {
     XDG_RUNTIME_DIR: join(dir, 'run'),
     LEXICON_PREFIX: FIXTURE_PREFIX,
     NAMESPACE_OWNERSHIP_REF: '',
+    NAMESPACE_PUBLICATION_REF: '',
     INGEST_MODE: 'off',
     JETSTREAM_URLS: 'wss://jetstream.example.test',
     JETSTREAM_LOOKBACK_HOURS: '24',

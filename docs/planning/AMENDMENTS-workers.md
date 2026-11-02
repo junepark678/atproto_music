@@ -422,7 +422,7 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 | `hide_immediately` | `web/test/outbox/delete.test.ts › pending deletion hidden in owner overlay; failure visible` (A13: owner-side optimistic overlay; public views change after verified absence.) |
 | `pending_create_delete` | `web/test/outbox/delete.test.ts › delete behind an unsent or in-flight create runs after it and leaves no record on the fake PDS` (required wave amendment, W2-07) (A12: predecessor ordering through predecessorIds.) |
 
-### M3.3.2 Handle remote delete idempotency and create/delete races
+**Current Node-host clarification (2026-10-28):** A13 records the accepted Workers/SPA owner overlay, not the later Node server-write implementation. The Node read model now also uses a query-time local-delete overlay to hide rows while a `scrobble.delete` operation is queued, running, blocked, or failed; admission/cancellation invalidate cached statistics without changing the verified projection or claiming remote absence. See `docs/verification/milestones/m3-audit.md` and `worker/test/read/feed.test.ts`. This implementation note does not edit or close GitHub issues and does not convert the historical A13 disposition into published contract amendment.
 
 **Amendment ids:** A12
 
@@ -600,9 +600,9 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 
 | Case | Disposition |
 | --- | --- |
-| `independent_write` | `worker/test/acceptance/federation.test.ts › Carol r10 appears only through external ingestion with zero app write calls` |
+| `independent_write` | `worker/test/acceptance/federation.test.ts › an independent XRPC createRecord reaches the index only through Jetstream and signed-record proof`; the case asserts `Acceptance.appHttpPosts === 0` and separately checks fake-PDS XRPC write calls. The legacy `Carol r10 ... zero app write calls` title refers to fake-PDS calls, not app HTTP POSTs. |
 | `independent_mutation` | `worker/test/acceptance/mutations.test.ts › r03 artist→Björk → Björk 3, Kate Bush 2, Radiohead 2, total 7`; also `worker/test/acceptance/mutations.test.ts › delete r01 → 6/6/3, Homogenic 1, history r07,r02,…`, `worker/test/acceptance/mutations.test.ts › Carol→Bob duplicates 2, then 2, then 1` (A2: every write, the SPA's included, reaches the index only through verified ingestion.) |
-| `coverage_failure` | `npx tsx scripts/live/pds_compat_check.ts (no env) › exits nonzero with blocked and lists missing names` (A6: Jetstream coverage is a live prerequisite; missing coverage is reported blocked, never a federation pass.) |
+| `coverage_failure` | `worker/test/acceptance/federation.test.ts › an external commit omitted by configured Jetstream DID coverage remains unindexed without a gap signal`; also `npx tsx scripts/live/pds_compat_check.ts (no env) › exits nonzero with blocked and lists missing names` (A6: configured coverage is a live prerequisite; the fixture shows silent omission is not detected by the runtime and does not replace the fail-closed preflight.) |
 
 ### M4.4.2 Add federation fault and convergence suite
 
@@ -616,7 +616,7 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 | --- | --- |
 | `convergence` | `worker/test/acceptance/federation.test.ts › duplicate events, socket drop and expired cursor converge to the exact URI/CID/payload set with no double-counted stats` (required wave amendment, W6-01); also `worker/test/ingest/gap-recovery.test.ts › gap schedules all known DIDs within 1,024 bound and clears pending_gap only after all complete` |
 | `signature_failure` | `worker/test/acceptance/federation.test.ts › bad signature / changed block / wrong MST path leave projection and cursor byte-identical` |
-| `worker_restart` | `worker/test/acceptance/restart.test.ts › eviction preserves byte-identical tables, pre-restart cursor continues, alarm resumes` |
+| `worker_restart` | `scripts/test/node-recovery.test.ts › federation_process_recovery: second-PDS create/update/delete survive SIGKILL during proof and converge`; also `worker/test/acceptance/restart.test.ts › eviction preserves byte-identical tables, pre-restart cursor continues, alarm resumes` (the child-process test kills/reopens the packaged Node service and is still a deterministic fake-PDS matrix, not live acceptance) |
 
 ### M4.4.3 Run two-external-PDS live federation acceptance
 

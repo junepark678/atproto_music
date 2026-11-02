@@ -7,8 +7,9 @@
 //   passes `allowFixturePrefix: true`. Only test entries (worker/test/**) pass
 //   it; production code calls `parseConfig(env)` with no options. The fixture
 //   prefix never enables publication (crates/core/src/namespace.rs).
-// - Publication additionally needs NAMESPACE_OWNERSHIP_REF, mirroring
-//   Namespace::require_publication.
+// - Publication additionally needs NAMESPACE_OWNERSHIP_REF and a
+//   NAMESPACE_PUBLICATION_REF pointing to an owner-reviewed manifest of the
+//   published schemas. DNS ownership alone never enables product writes.
 //
 // Secrets are not part of AppConfig (it reaches every DO module through
 // ModuleDeps); `parseCursorKey` reads CURSOR_KEY separately for the Worker.
@@ -84,7 +85,9 @@ export interface AppConfig {
   /** Null when prefix is null. */
   collections: Collections | null;
   namespaceOwnershipRef: string | null;
-  /** Owned, non-fixture prefix plus ownership evidence (A20 `publication`). */
+  /** SHA-256 reference to the reviewed production schema publication manifest, or null while gated. */
+  namespacePublicationRef: string | null;
+  /** Owned, non-fixture prefix plus ownership evidence and reviewed schema-publication evidence. */
   publication: boolean;
   /** The configured INGEST_MODE. */
   configuredIngestMode: IngestMode;
@@ -191,6 +194,18 @@ export function parseConfig(
   if (namespaceOwnershipRef !== null && (rawPrefix === '' || rawPrefix === FIXTURE_PREFIX)) {
     issue('NAMESPACE_OWNERSHIP_REF', 'ownership evidence requires an owned, non-fixture LEXICON_PREFIX');
   }
+  const rawPublicationRef = (env.NAMESPACE_PUBLICATION_REF ?? '').trim();
+  const namespacePublicationRef = rawPublicationRef === '' ? null : rawPublicationRef;
+  const validPublicationRef = namespacePublicationRef !== null && /^sha256:[0-9a-f]{64}$/.test(namespacePublicationRef);
+  if (namespacePublicationRef !== null && !validPublicationRef) {
+    issue(
+      'NAMESPACE_PUBLICATION_REF',
+      'must be sha256:<64 lowercase hex digits> for the reviewed publication manifest',
+    );
+  }
+  if (validPublicationRef && (namespaceOwnershipRef === null || rawPrefix === '' || rawPrefix === FIXTURE_PREFIX)) {
+    issue('NAMESPACE_PUBLICATION_REF', 'reviewed schema publication requires an owned, non-fixture LEXICON_PREFIX');
+  }
 
   const mode = env.INGEST_MODE ?? '';
   let configuredIngestMode: IngestMode = 'off';
@@ -253,7 +268,8 @@ export function parseConfig(
     fixturePrefix,
     collections: prefix === null ? null : collectionsOf(prefix),
     namespaceOwnershipRef,
-    publication: prefix !== null && !fixturePrefix && namespaceOwnershipRef !== null,
+    namespacePublicationRef,
+    publication: prefix !== null && !fixturePrefix && namespaceOwnershipRef !== null && validPublicationRef,
     configuredIngestMode,
     ingestMode: prefix === null ? 'off' : configuredIngestMode,
     jetstreamUrls,

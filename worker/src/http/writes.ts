@@ -56,7 +56,8 @@
 //   deleteRecord (the Rust oracle crates/server/src/http/scrobbles/delete.rs
 //   has no existence check either).
 // - `PUT /api/v1/follows/{did}` / `DELETE /api/v1/follows/{did}`: a
-//   `follow.put` / `follow.delete` (FIFO per subject); an invalid subject or
+//   `follow.put` / `follow.delete` (FIFO per subject; consecutive identical
+//   live/succeeded intents reuse the latest operation); an invalid subject or
 //   a self-follow is 422 with `fields.did`.
 // - `PUT /api/v1/loves` with a LoveInput (`{artist, track, album?,
 //   recordingMbid?}`, closed) → `love.put`; `DELETE

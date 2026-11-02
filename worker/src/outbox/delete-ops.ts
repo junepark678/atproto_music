@@ -23,6 +23,7 @@
 
 import type { OperationRow, Origin } from '../app/rows';
 import type { ModuleDeps } from '../do/contracts';
+import { bumpStatsVersion } from '../do/write/account-state';
 import {
   cancelUnsent,
   insertOperation,
@@ -62,8 +63,8 @@ export function enqueueScrobbleDelete(
   const rkey = ownRecordKey(args.uri, args.did, collection);
   if (rkey === null) throw new NotOwnRecordError();
   const now = m.clock.nowMs();
-  const op = m.db.tx(() =>
-    insertOperation(
+  const op = m.db.tx(() => {
+    const inserted = insertOperation(
       m.db,
       {
         id: newOperationId(m.random),
@@ -76,8 +77,12 @@ export function enqueueScrobbleDelete(
         predecessors: unsettledAt(m.db, args.did, collection, rkey),
       },
       now,
-    ),
-  );
+    );
+    // A newly admitted local tombstone changes public stats before the PDS
+    // proof removes the verified projection row.
+    bumpStatsVersion(m.db, args.did);
+    return inserted;
+  });
   args.kick?.();
   return op;
 }

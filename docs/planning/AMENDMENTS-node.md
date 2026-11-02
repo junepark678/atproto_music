@@ -257,7 +257,7 @@ Each section lists the cases of one leaf whose ADR 0004 retirement cited a super
 | Case | Was | Disposition |
 | --- | --- | --- |
 | `par_pkce` | `retired:A3` (superseded by B3) | `worker/test/node/bff/oauth-client.test.ts › authorize sends PAR with an S256 code_challenge and a private_key_jwt assertion; the verifier and DPoP key exist only sealed in oauth_states` (N2-03, wave 2) |
-| `par_failure` | `retired:A3` (superseded by B3) | `worker/test/node/bff/oauth-client.test.ts › a PAR error from the fake AS leaves no oauth_states row and surfaces oauth_upstream` (N2-03, wave 2) |
+| `par_failure` | `retired:A3` (superseded by B3) | `worker/test/node/bff/oauth-client.test.ts › PAR HTTP failures and a stalled request surface oauth_upstream and leave no oauth_states row or late PAR` (N2-03, wave 2) |
 | `wrong_origin` | `retired:D` (superseded by B16) | `worker/test/node/http/auth.test.ts › POST /api/v1/auth/start with a foreign or duplicate Origin is 403 csrf_failed and stores no state; a valid start sets __Host-atmusic_oauth with HttpOnly, Secure, SameSite=Lax, Path=/ and Max-Age=600` (N3-01, wave 3) |
 
 ### M2.2.3 Implement callback verification and DPoP nonce retry
@@ -267,8 +267,8 @@ Each section lists the cases of one leaf whose ADR 0004 retirement cited a super
 | Case | Was | Disposition |
 | --- | --- | --- |
 | `issuer_subject` | `retired:A3` (superseded by B3) | `worker/test/node/bff/oauth-client.test.ts › a token response whose iss differs from the authorize issuer or whose sub differs from the handle-resolved DID stores no session` (N2-03, wave 2) |
-| `nonce_retry` | `retired:A3` (superseded by B3) | `worker/test/node/bff/oauth-client.test.ts › a use_dpop_nonce error on the token request and on a PDS write is retried once with the new nonce and succeeds` (N2-03, wave 2) |
-| `expired_and_replay` | `retired:D` (superseded by B16) | `worker/test/node/bff/oauth-client.test.ts › a replayed state and a state older than 600 s both fail and store no session` (N2-03, wave 2) |
+| `nonce_retry` | `retired:A3` (superseded by B3) | `worker/test/node/bff/oauth-client.test.ts › DPoP nonce retries use a new nonce and jti, and endless token challenges terminate safely` (N2-03, wave 2) |
+| `expired_and_replay` | `retired:D` (superseded by B16) | `worker/test/node/bff/oauth-client.test.ts › a replay is refused, state remains valid for denial handling at 599999 ms and expires at 600000 ms` (N2-03, wave 2) |
 
 ### M2.3.1 Encrypt OAuth material and serialize token refresh
 
@@ -276,7 +276,7 @@ Each section lists the cases of one leaf whose ADR 0004 retirement cited a super
 
 | Case | Was | Disposition |
 | --- | --- | --- |
-| `refresh_race` | `retired:A3` (superseded by B3) | `worker/test/node/bff/oauth-client.test.ts › two concurrent restore() calls on an expired session send one refresh request and both use the new token` (N2-03, wave 2) |
+| `refresh_race` | `retired:A3` (superseded by B3) | `worker/test/node/bff/oauth-client.test.ts › ten concurrent restore() calls share one successful refresh rotation and all use the new token` (N2-03, wave 2) |
 | `encrypted_persistence` | `retired:D` (superseded by B16) | `worker/test/node/bff/oauth-stores.test.ts › the raw database file contains no access token, refresh token or DPoP private key bytes after a sign-in` (N2-03, wave 2) |
 
 ### M2.3.2 Issue hashed sessions and enforce CSRF
@@ -303,7 +303,7 @@ Each section lists the cases of one leaf whose ADR 0004 retirement cited a super
 | Case | Was | Disposition |
 | --- | --- | --- |
 | `refresh_persistence` | `retired:A3` (superseded by B3) | `worker/test/node/bff/oauth-stores.test.ts › a rotated refresh token is persisted sealed before use, and after close and reopen the next refresh sends the rotated token` (N2-03, wave 2) |
-| `security_matrix` | `retired:D` (superseded by B16) | `worker/test/node/http/auth.test.ts › a callback with a replayed, expired or unknown state, or an AS error, stores no session, sets no session cookie and clears __Host-atmusic_oauth` (N3-01, wave 3) |
+| `security_matrix` | `retired:D` (superseded by B16) | `worker/test/node/http/auth.test.ts › stale state, AS denial, wrong issuer and wrong subject fail at the callback boundary without adding sessions or writes` (N3-01, wave 3) |
 | `cross_owner` | `retired:D` (superseded by B16) | `worker/test/node/http/writes.test.ts › GET /api/v1/operations/{id} is 200 for its owner and 404 for any other session` (N3-02, wave 3) |
 
 ### M3.1.1 Implement authenticated scrobble input and idempotency admission

@@ -2,6 +2,18 @@
 
 `scripts/acceptance/backend.py` is an executable acceptance entrypoint, with an explicit incomplete gate. It executes `scripts/smoke.py --static` against the provided **built executable**, then real owning-crate integration targets for OAuth, CSRF/ownership, writes/retries, signed external mutations, follows/feed, statistics/deletion, disconnect/export, durable views, backup/restore and shutdown. Every target must exit zero, execute nonzero tests, and report each required named case as passed. A missing, filtered, ignored or disabled required case fails. It preserves individual logs and `report.json` with the executable SHA256, executed/ignored/filtered counts and `fixtureOnly=true`. Ignored child entrypoints retain their own count and do not contribute to executed tests.
 
+## Current Node subprocess fixture recovery (separate from packaged acceptance)
+
+A distinct local Node run executed the four required subprocess-recovery journeys through the test fixture host. This is current-Node deterministic fixture evidence; it does **not** replace the historical Rust executable evidence below or satisfy the actual-candidate/package/live requirements in #108.
+
+- Entry command: `npx tsx scripts/acceptance/node-recovery.ts --out work/verification/node-recovery-20261028T225537Z`.
+- Receipt: `work/verification/node-recovery-20261028T225537Z/summary.json`; SHA-256 `9374a9d76be247630f2d4932e619334259bbd999e38ef57f35d7d8d749b7eb7e`.
+- Recorded identity: commit `29453f8e8763083a3e3d7b10d5090285ef2f9d63`, `dirty: true`, Node `v26.12.1`, SQLite `3.54.1`; locally built main bundle SHA-256 `ee73cef17efc86da6ff8ad7ae6e7b154e3453cc06a6c94f6cf013c9b0abfb4a4`, E2E bundle SHA-256 `21084b0b12a903282853898846fb725257a545339869d90195dd688171bb4bd3`.
+- The recorded inner test command was `npx vitest run --project scripts scripts/test/node-recovery.test.ts --reporter=json`. All four required cases executed once and passed: OAuth refresh/session persistence; second-PDS create/update/delete process recovery; create/delete SIGKILL reconciliation of operations/views/cursor/checkpoint; and second-PDS follow/feed persistence across process restarts.
+- Scope is `node-subprocess-recovery-only`. The runner builds local main and fixture-host bundles and the recovery tests use the test-only fixture entrypoint; this is **not** execution of a clean accepted candidate archive or production `main.mjs`. The receipt explicitly excludes browser BFF migration, immediate deletion tombstones, backup restore in this journey, full backend case-map closure, constrained benchmark, installer activation, and live PDS/Jetstream/OAuth/soak. Do not count this as complete #108 or deployment acceptance.
+
+The Rust acceptance entrypoint remains a separate historical architecture/evidence class:
+
 ```sh
 python3 scripts/acceptance/test_backend.py
 python3 scripts/acceptance/backend.py target/x86_64-unknown-linux-musl/release/atmusic --fixture-only --output work/acceptance/backend

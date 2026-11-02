@@ -4,6 +4,7 @@
 Named tests (docs/verification/ts-case-map.json, AMENDMENTS-workers.md M6.4.1, M6.4.3):
 - evidence missing version id or bundle hash is rejected
 - blocked result is distinguished from pass and fail
+- A complete PDS-compat preflight with no Jetstream coverage evidence is blocked offline
 - npx tsx scripts/live/pds_compat_check.ts (no env) › exits nonzero with blocked and lists missing names
   (test_live_gate_scripts_without_env_exit_blocked_and_list_missing_names below runs that exact command)
 
@@ -11,19 +12,26 @@ No test makes a network request: the gate scripts run with an environment that h
 prerequisite and a preloaded fetch trap, and every manifest here is built in memory. Inventories
 built here are never written to docs/verification.
 """
+
 import contextlib
 import copy
 import io
 import json
 import os
-from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from verify_live_evidence import REQUIRED_GATES, evaluate, gate_status, main, problems, secure_url  # noqa: E402
+from verify_live_evidence import (
+    REQUIRED_GATES,
+    evaluate,
+    gate_status,
+    main,
+    problems,
+    secure_url,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 VERSION = "0f1e2d3c-4b5a-4968-8776-655443322110"
@@ -416,7 +424,7 @@ class LiveEvidenceTests(unittest.TestCase):
         self.assertEqual(evaluate(failed).gates["ingest"], "failed")
         self.assertIn("gates.ingest: failed — record was not indexed within 300 s", evaluate(failed).problems)
         verdict = evaluate(blocked)
-        self.assertEqual(verdict.gates, {**{name: "passed" for name in REQUIRED_GATES}, "socketSoak": "blocked"})
+        self.assertEqual(verdict.gates, {**dict.fromkeys(REQUIRED_GATES, "passed"), "socketSoak": "blocked"})
         self.assertIn("gates.socketSoak: blocked — ATMUSIC_LIVE_CF_API_TOKEN: missing — analytics token",
                       verdict.problems)
         # A gate with no evidence at all is blocked, never passed or failed.
@@ -826,6 +834,20 @@ class LiveEvidenceTests(unittest.TestCase):
         self.assertEqual(gate_status("pdsCompat", document, passing_inventory()["release"],
                                      passing_inventory()["prerequisites"])[0], "failed")
 
+    def test_missing_jetstream_coverage_reference_blocks_before_network(self):
+        """A complete PDS-compat preflight with no Jetstream coverage evidence is blocked offline."""
+        env = dict(PDS_COMPAT_ENV)
+        env.pop("ATMUSIC_LIVE_JETSTREAM_COVERAGE_REF")
+        result = run_script("pds_compat_check", **env, **IMPLEMENTATIONS)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertNotIn("NETWORK-ATTEMPT", result.stderr)
+        document = json.loads(result.stdout)
+        self.assertEqual(document["result"], "blocked")
+        self.assertEqual(document["missing"], [
+            "ATMUSIC_LIVE_JETSTREAM_COVERAGE_REF: missing — reference to evidence that the configured Jetstream hosts carry commits from both PDSs, A6"
+        ])
+        self.assertIn("ATMUSIC_LIVE_JETSTREAM_COVERAGE_REF: missing", result.stderr)
+
     def test_delete_reconcile_absence_method_matches_pds_compat(self):
         """Absence is an exclusion proof or a verified snapshot, matching the PDS's measured support."""
         verdict = evaluate(passing_inventory(), BUNDLE, VERSION)
@@ -837,7 +859,7 @@ class LiveEvidenceTests(unittest.TestCase):
                                           "or snapshot)"))
         manifest = passing_inventory()
         for item, method in zip(manifest["gates"]["ingest"]["results"]["deleteReconcile"],
-                                ("snapshot", "exclusionProof")):
+                                ("snapshot", "exclusionProof"), strict=True):
             item["method"] = method
         cases.append((manifest, "ingest", f"gates.ingest.results.deleteReconcile ({URI_B}: method 'exclusionProof', "
                                           "but pdsCompat for pds-beta.operator-two.org requires 'snapshot')"))
@@ -938,7 +960,9 @@ class LiveEvidenceTests(unittest.TestCase):
             self.assertIn(expected, missing)
         # Secrets passed to a blocked gate are never echoed.
         token = "s3cret-admin-token-value-" + "z" * 16
-        result = run_script("workers_socket_soak", ATMUSIC_LIVE_ADMIN_TOKEN=token, ATMUSIC_LIVE_CF_API_TOKEN="short")
+        invalid_value = "short"
+        result = run_script("workers_socket_soak", ATMUSIC_LIVE_ADMIN_TOKEN=token,
+                            ATMUSIC_LIVE_CF_API_TOKEN=invalid_value)
         self.assertEqual(result.returncode, 2)
         self.assertNotIn(token, result.stdout + result.stderr)
         manifest = passing_inventory()

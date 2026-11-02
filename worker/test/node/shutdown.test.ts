@@ -14,6 +14,8 @@ import { fixedClock } from '@atmusic/core/test-support/clock';
 import { seededRandom } from '@atmusic/core/test-support/random';
 import { afterEach, describe, expect, it } from 'vitest';
 import { FIXTURE_PREFIX } from '../../src/config';
+import type { Db } from '../../src/do/db';
+import { enqueueHints, takeDue } from '../../src/do/ingest/hints';
 import type { ConnectJetstream, JetstreamLink, LinkEvent } from '../../src/do/ingest/jetstream-socket';
 import type { RouteDef } from '../../src/http/types';
 import type { HostTimers } from '../../src/node/alarm';
@@ -23,6 +25,7 @@ import { createServer } from '../../src/node/http-bridge';
 import { type ExitCode, type RunningServer, run } from '../../src/node/run';
 import { createShutdown, DEFAULT_DRAIN_MS, trackRequests } from '../../src/node/shutdown';
 import { DatabaseLockedError, openSqliteDb } from '../../src/node/sqlite-db';
+import { insertOperation } from '../../src/outbox/operations';
 import { captureLog, testEnv, testSecretsDocument } from './support/app';
 import { TEST_BUSY_TIMEOUT_MS } from './support/node-db';
 
@@ -115,11 +118,12 @@ interface Started {
   log: ReturnType<typeof captureLog>;
   jetstream: ReturnType<typeof recordingJetstream>;
   dbPath: string;
+  dir: string;
 }
 
-async function startServer(route: RouteDef): Promise<Started> {
-  const dir = mkdtempSync(join(tmpdir(), 'atmusic-shutdown-'));
-  dirs.push(dir);
+async function startServer(route: RouteDef, existingDir?: string): Promise<Started> {
+  const dir = existingDir ?? mkdtempSync(join(tmpdir(), 'atmusic-shutdown-'));
+  if (existingDir === undefined) dirs.push(dir);
   const dist = join(dir, 'web', 'dist');
   mkdirSync(dist, { recursive: true });
   writeFileSync(join(dist, 'index.html'), '<!doctype html>');
@@ -173,7 +177,17 @@ async function startServer(route: RouteDef): Promise<Started> {
   // Ingestion is on: the Jetstream watchdog, due at start, opens a link.
   const deadline = Date.now() + 5_000;
   while (jetstream.links.length === 0 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 5));
-  return { result, server: started, exits, notes, signals, log, jetstream, dbPath: join(dir, 'state', 'atmusic.db') };
+  return {
+    result,
+    server: started,
+    exits,
+    notes,
+    signals,
+    log,
+    jetstream,
+    dbPath: join(dir, 'state', 'atmusic.db'),
+    dir,
+  };
 }
 
 interface Answer {
@@ -266,6 +280,47 @@ describe('shutdown', () => {
     const slow = slowRoute();
     const s = await startServer(slow.route);
     cleanups.push(async () => slow.release.resolve());
+    const pendingHint = {
+      did: 'did:plc:abcdefghijklmnopqrstuvwx',
+      collection: 'app.bsky.feed.post',
+      rkey: '3m7testshutdown',
+      source: 'notify' as const,
+      receiptMs: fixedClock().nowMs(),
+      dueAt: fixedClock().nowMs() + 60_000,
+    };
+    const db = s.server.db as unknown as Db;
+    const pendingDid = 'did:plc:shutdownshutdownshutdown';
+    s.server.db.run(
+      `INSERT INTO accounts(did, username, oauth_status, import_share_pct, daily_listen_cap, created_at_ms, updated_at_ms)
+       VALUES (?, 'shutdown-owner', 'active', 50, 3000, ?, ?)`,
+      pendingDid,
+      fixedClock().nowMs(),
+      fixedClock().nowMs(),
+    );
+    const pendingOperationId = 'pending-after-drain-timeout';
+    insertOperation(
+      db,
+      {
+        id: pendingOperationId,
+        did: pendingDid,
+        kind: 'scrobble.create',
+        origin: 'web',
+        collection: 'com.example.atmusic.scrobble',
+        rkey: '3m7testshutdown',
+        prepared: {
+          record: {
+            $type: 'com.example.atmusic.scrobble',
+            artist: 'Test artist',
+            track: 'Pending after timeout',
+            listenedAt: '2026-01-15T11:59:00Z',
+          },
+          digest: 'a'.repeat(64),
+        },
+        dueAt: fixedClock().nowMs() + 60_000,
+      },
+      fixedClock().nowMs(),
+    );
+    enqueueHints(db, [pendingHint]);
     const port = s.server.address.port;
     const inFlight = get(port, '/api/v1/test/slow').then(
       (answer) => ({ ok: true as const, answer }),
@@ -289,6 +344,19 @@ describe('shutdown', () => {
     const expired = s.log.logs.find((l) => l.event === 'shutdown.drain_expired');
     expect(expired).toMatchObject({ inFlight: 1, drainMs: DRAIN_MS });
     expect(s.log.logs.find((l) => l.event === 'shutdown.completed')?.drained).toBe(false);
+
+    // The in-flight HTTP operation was aborted, but independently committed queued work survives close/reopen/recompose.
+    const restarted = await startServer(slow.route, s.dir);
+    const recovered = takeDue(restarted.server.db as unknown as Db, pendingHint.dueAt ?? pendingHint.receiptMs, 10);
+    expect(recovered.map((hint) => hint.uri)).toEqual([
+      'at://did:plc:abcdefghijklmnopqrstuvwx/app.bsky.feed.post/3m7testshutdown',
+    ]);
+    expect(
+      restarted.server.db.one<{ id: string; did: string; state: string; attempts: number }>(
+        'SELECT id, did, state, attempts FROM operations WHERE id = ?',
+        pendingOperationId,
+      ),
+    ).toEqual({ id: pendingOperationId, did: pendingDid, state: 'blocked', attempts: 0 });
 
     // The production window: 25 s, the default of both the config and the drain.
     expect(PRODUCTION_DRAIN_MS).toBe(25_000);

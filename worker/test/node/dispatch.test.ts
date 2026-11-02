@@ -117,7 +117,7 @@ describe('dispatch', () => {
       routes,
       assets: null,
       context: (_r, info, requestId) => ({
-        env: { LEXICON_PREFIX: '', NAMESPACE_OWNERSHIP_REF: '' },
+        env: { LEXICON_PREFIX: '', NAMESPACE_OWNERSHIP_REF: '', NAMESPACE_PUBLICATION_REF: '' },
         index: app.composed.core,
         requestId,
         clock: app.clock,

@@ -14,6 +14,7 @@
 import { followRkey } from '@atmusic/atproto/test-support/read-models';
 import { carResponse } from '@atmusic/atproto/test-support/router-transport';
 import { corruptBlockByte, corruptSignature } from '@atmusic/atproto/test-support/signed-repo';
+import type { ScrobbleRecord } from '@atmusic/core/scrobble';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { Db } from '../../src/do/db';
 import { closeHarnesses } from '../composition/support';
@@ -22,6 +23,7 @@ import {
   APP_WRITES,
   BOB,
   CAROL,
+  CREATE_RECORD,
   count,
   FOLLOW,
   GET_RECORD,
@@ -122,6 +124,80 @@ describe('federation acceptance', () => {
     });
     expect(a.kit.pds.Carol.calls.entries.map((c) => c.nsid)).toEqual([GET_RECORD]);
     expect(await feed(a)).toEqual(['r11', 'r09', 'r10', 'r07', 'r01', 'r02', 'r03', 'r04', 'r05', 'r06']);
+  });
+
+  it('an independent XRPC createRecord reaches the index only through Jetstream and signed-record proof', async () => {
+    const a = await seedAcceptance('independent-xrpc-writer');
+    expect(a.appHttpPosts).toBe(0);
+
+    // This is an independent writer's PDS XRPC call, not a mutation of SignedRepo or an app route.
+    const written = await inSocket(a, () =>
+      a.kit.createRecord('Carol', SCROBBLE, 'r11', scrobble('Glory Box', '2026-01-15T11:55:00Z')),
+    );
+    const r11 = uriOf(CAROL, 'r11');
+    expect(written).toMatchObject({ uri: r11, cid: expect.any(String) });
+    expect(a.kit.pds.Carol.calls.entries.map((c) => c.nsid)).toEqual([CREATE_RECORD]);
+    expect(
+      a.kit.jetstream.events.filter((e) => e.kind === 'commit' && e.did === CAROL && e.commit.rkey === 'r11'),
+    ).toHaveLength(1);
+    expect(await a.inDo((db) => db.one('SELECT uri FROM scrobbles WHERE uri = ?', r11))).toBeNull();
+    expect(await a.inDo(hintCount)).toBe(1);
+
+    expect(await a.alarm()).toBe(true);
+    expect(await a.inDo((db) => db.one('SELECT uri, cid, did FROM scrobbles WHERE uri = ?', r11))).toEqual({
+      uri: r11,
+      cid: written.cid,
+      did: CAROL,
+    });
+    expect(a.kit.pds.Carol.calls.entries.map((c) => c.nsid)).toEqual([CREATE_RECORD, GET_RECORD]);
+    expect(await feed(a)).toContain('r11');
+    expect(
+      a.kit.pds.Alice.calls.entries.filter((c) => APP_WRITES.includes(c.nsid as (typeof APP_WRITES)[number])),
+    ).toEqual([]);
+    expect(
+      a.kit.pds.Bob.calls.entries.filter((c) => APP_WRITES.includes(c.nsid as (typeof APP_WRITES)[number])),
+    ).toEqual([]);
+    expect(a.appHttpPosts).toBe(0);
+  });
+
+  it('an external commit omitted by configured Jetstream DID coverage remains unindexed without a gap signal', async () => {
+    const a = await seedAcceptance('jetstream-coverage-negative');
+    const r11 = uriOf(CAROL, 'r11');
+    const feedBefore = await feed(a);
+
+    // Jetstream coverage is an operator-provided source property. The fake retains the event log,
+    // but sends/replays only Alice and Bob, modeling a stream that silently excludes Carol.
+    a.kit.jetstream.setCoverage([ALICE, BOB]);
+    const written = await inSocket(a, () =>
+      a.kit.createRecord('Carol', SCROBBLE, 'r11', scrobble('Glory Box', '2026-01-15T11:55:00Z')),
+    );
+    expect(written.uri).toBe(r11);
+    expect(
+      a.kit.jetstream.events.filter((e) => e.kind === 'commit' && e.did === CAROL && e.commit.rkey === 'r11'),
+    ).toHaveLength(1);
+    expect(
+      a.kit.jetstream.connections
+        .flatMap((c) => c.sent)
+        .some((frame) => {
+          if (typeof frame !== 'string') return false;
+          try {
+            const event = JSON.parse(frame) as { did?: string; commit?: { rkey?: string } };
+            return event.did === CAROL && event.commit?.rkey === 'r11';
+          } catch {
+            return false;
+          }
+        }),
+    ).toBe(false);
+
+    await a.alarm();
+    expect(await a.inDo(hintCount)).toBe(0);
+    expect(await a.inDo((db) => db.one('SELECT uri FROM scrobbles WHERE uri = ?', r11))).toBeNull();
+    expect(await a.inDo((db) => db.one('SELECT state FROM record_state WHERE uri = ?', r11))).toBeNull();
+    expect(a.kit.pds.Carol.calls.entries.map((c) => c.nsid)).toEqual([CREATE_RECORD]);
+    expect(await a.inDo((db) => db.one('SELECT indexing_state FROM users WHERE did = ?', CAROL))).toEqual({
+      indexing_state: 'current',
+    });
+    expect(await feed(a)).toEqual(feedBefore);
   });
 
   it('bad signature / changed block / wrong MST path leave projection and cursor byte-identical', async () => {
@@ -454,7 +530,20 @@ describe('federation acceptance', () => {
     // so it is Jetstream that refuses the stored cursor).
     await a.inDo(() => a.js.last().close(1001, 'fixture drop'));
     const r13 = await a.inDo(() =>
-      a.kit.createRecord('Bob', SCROBBLE, 'r13', scrobble('Angel', '2026-01-15T11:56:00Z', 'Massive Attack')),
+      a.kit.createRecord('Bob', SCROBBLE, 'r13', {
+        ...scrobble('Angel', '2026-01-15T11:56:00Z', 'Massive Attack'),
+        album: 'Mezzanine',
+        durationSeconds: 375,
+        recordingMbid: '11111111-1111-4111-8111-111111111111',
+        albumArtist: 'Massive Attack',
+        trackNumber: 1,
+        artistMbids: ['22222222-2222-4222-8222-222222222222'],
+        releaseMbid: '33333333-3333-4333-8333-333333333333',
+        releaseGroupMbid: '44444444-4444-4444-8444-444444444444',
+        isrc: 'GBAAA9800001',
+        submissionClient: 'federation-fixture',
+        musicService: 'music.example.test',
+      }),
     );
     a.kit.jetstream.lookbackHours = 1;
     a.kit.clock.advance(2 * 3_600_000);
@@ -478,11 +567,45 @@ describe('federation acceptance', () => {
     expect(APP_WRITES.map(pdsCalls)).toEqual([0, 0, 0]);
 
     // Converged: exactly the signer's current records, URI, CID and payload.
-    const expected: Array<{ uri: string; cid: string; artist: string; track: string }> = [];
+    const expected: Array<Record<string, unknown> & { uri: string; cid: string }> = [];
+    // This fixture uses whole-second UTC instants. Derive expectations from
+    // the independent signers, not the production validator or projector.
+    const ts30 = (value: string) => new Date(value).toISOString().replace('.000Z', '.000000000Z');
+    const expectedFollows: Array<Record<string, unknown> & { uri: string }> = [];
     for (const name of ['Alice', 'Bob', 'Carol'] as const) {
       for (const r of await a.kit.repos[name].list(SCROBBLE)) {
-        const v = r.value as { artist: string; track: string };
-        expected.push({ uri: uriOf(a.kit.users[name].did, r.rkey), cid: r.cid, artist: v.artist, track: v.track });
+        const v = r.value as ScrobbleRecord;
+        expected.push({
+          uri: uriOf(a.kit.users[name].did, r.rkey),
+          cid: r.cid,
+          did: a.kit.users[name].did,
+          rkey: r.rkey,
+          artist: v.artist,
+          track: v.track,
+          album: v.album ?? null,
+          listened_at: ts30(v.listenedAt),
+          created_at: ts30(v.createdAt),
+          duration_seconds: v.durationSeconds ?? null,
+          recording_mbid: v.recordingMbid ?? null,
+          album_artist: v.albumArtist ?? null,
+          track_number: v.trackNumber ?? null,
+          artist_mbids: v.artistMbids === undefined ? null : JSON.stringify(v.artistMbids),
+          release_mbid: v.releaseMbid ?? null,
+          release_group_mbid: v.releaseGroupMbid ?? null,
+          isrc: v.isrc ?? null,
+          submission_client: v.submissionClient ?? null,
+          music_service: v.musicService ?? null,
+        });
+      }
+      for (const r of await a.kit.repos[name].list(FOLLOW)) {
+        const v = r.value as { subject: string; createdAt: string };
+        expectedFollows.push({
+          uri: uriOf(a.kit.users[name].did, r.rkey, FOLLOW),
+          cid: r.cid,
+          actor: a.kit.users[name].did,
+          subject: v.subject,
+          created_at: ts30(v.createdAt),
+        });
       }
     }
     expected.sort((x, y) => (x.uri < y.uri ? -1 : 1));
@@ -500,12 +623,22 @@ describe('federation acceptance', () => {
       'r10',
       'r12',
     ]);
-    expect(await a.inDo((db) => db.all('SELECT uri, cid, artist, track FROM scrobbles ORDER BY uri'))).toEqual(
-      expected,
-    );
+    expect(
+      await a.inDo((db) =>
+        db.all(`SELECT uri, cid, did, rkey, artist, track, album, listened_at,
+      created_at, duration_seconds, recording_mbid, album_artist, track_number, artist_mbids,
+      release_mbid, release_group_mbid, isrc, submission_client, music_service
+      FROM scrobbles ORDER BY uri`),
+      ),
+    ).toEqual(expected);
     expect(expected.find((e) => rkeyOf(e.uri) === 'r13')?.cid).toBe(r13.cid);
-    const follows = await a.inDo((db) => db.all('SELECT uri FROM follows'));
-    expect(follows).toEqual([{ uri: uriOf(ALICE, await followRkey(BOB), FOLLOW) }]);
+    expectedFollows.sort((x, y) => (x.uri < y.uri ? -1 : 1));
+    const follows = await a.inDo((db) =>
+      db.all('SELECT uri, cid, actor, subject, created_at FROM follows ORDER BY uri'),
+    );
+    expect(expectedFollows).toHaveLength(1);
+    expect(expectedFollows[0]?.uri).toBe(uriOf(ALICE, await followRkey(BOB), FOLLOW));
+    expect(follows).toEqual(expectedFollows);
 
     // No listen counted twice.
     expect(await statsOf(ALICE)).toEqual([8, 3, 7]);

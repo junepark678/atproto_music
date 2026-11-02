@@ -1,5 +1,19 @@
 # Validation evidence and remaining gates
 
+> **Historical Workers receipt, not current Node acceptance.** ADR 0005
+> supersedes the hosting/auth/write model below. The counts, case retirements,
+> commands and operator requirements here belong to the recorded Workers
+> commit; “every deterministic gate passes” / “nothing deterministic remains”
+> are not statements about the current Node checkout. M1–M6 still need current
+> integration/CI and published-contract reconciliation as applicable, plus
+> their live gates. Namespace ownership blocks publication; a tested fail-closed
+> publication gate does not itself require live ownership evidence for M1.
+> Worker version ids, ADMIN_TOKEN and Cloudflare Analytics are not Node-host
+> prerequisites. See [ADR 0005](adr/0005-local-node-host-and-compat-apis.md),
+> [Node deployment](deploy/local-node.md), and the scoped
+> [implementation/check record](verification/implementation-agent-13.md).
+
+
 The backend runs on Cloudflare Workers only (ADR 0004): one Worker, one SQLite Durable Object (`IndexDO`), Static Assets for the Preact SPA, and one Cron. The SPA is the write client; it writes signed records straight to the user's PDS. The Rust crates under `crates/` are kept as the golden-vector oracle (ADR §15 Q6) and are not deployed.
 
 **Status: every deterministic gate passes, and every live gate is blocked.** All 258 named cases are accounted for by the acceptance gate. Live interoperability has not been established, because no live gate has run. No milestone is closed by this document.

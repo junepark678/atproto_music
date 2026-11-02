@@ -282,7 +282,8 @@ function countingDb(sqlite: SqliteDb): { db: Db; executed: Executed[] } {
 }
 
 /** The SQLite the plan pins below were derived on (ADR 0005 §0 D1); a different one fails loudly. */
-const PINNED_SQLITE = '3.54.1';
+// Node's official binary and the owner's system-SQLite build differ by patch.
+const SUPPORTED_PLAN_SQLITE = ['3.54.0', '3.54.1'];
 
 /**
  * The index of every plan step of the status reads, statement by statement in
@@ -1041,7 +1042,7 @@ describe('indexing status truth', () => {
   // the index each plan step uses on SQLite 3.54.1.
   it('status statements use the indexes pinned by EXPLAIN QUERY PLAN (asserted by index name, SQLite version recorded) in place of the DO rowsRead budget', async () => {
     // The version the pins below were derived on, recorded with the plans.
-    expect(process.versions.sqlite).toBe(PINNED_SQLITE);
+    expect(SUPPORTED_PLAN_SQLITE).toContain(process.versions.sqlite);
     await withIndex(async (db) => {
       const now = fixedClock().nowMs();
       healthySocket(db, now);

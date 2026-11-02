@@ -31,7 +31,7 @@ The Worker code already sits behind host-neutral seams:
 - The alarm multiplexer needs only `setAlarm`/`deleteAlarm` (`worker/src/do/timers.ts:123`).
 - The Jetstream socket state machine talks to a `JetstreamLink` (`worker/src/do/ingest/jetstream-socket.ts`).
 
-About ten files depend on Workers. The publication gate has never been open (`NAMESPACE_OWNERSHIP_REF` is empty), so **no production user has signed in and no record exists under `dev.pythonplayer123.music`**. That is what makes the OAuth model change and the lexicon additions cheap now.
+About ten files depend on Workers. Production schema publication remains closed unless both domain-ownership evidence and the reviewed schema-publication reference are supplied. The owner-controlled DNS proof is now observed, but the four expected production Lexicon records were absent from the authority PDS on 2026-10-28; see [ADR 0001](0001-namespace.md). Keep `NAMESPACE_PUBLICATION_REF` unset until publication and owner review are complete. This date-bounded evidence does not establish that records are absent from every repository or infer sign-in history.
 
 ---
 
@@ -89,7 +89,7 @@ The Workers adapter is **retired** (wave 7, N7-01). Everything runs on Node 26. 
   - `imports/`.
 - **No barrel files**, as before.
 - **Feature services** extend `AppServices` (`worker/src/app/services.ts`) by TypeScript interface merging, `declare module '../app/services' { interface AppServices { lastfm: … } }`. Feature packages therefore never edit a shared type file.
-- **Request context.** `RequestCtx` (`worker/src/http/types.ts`, N2-01) gains `deps?: ModuleDeps`, `app?: AppServices` and `peer?: string` (the socket address); `clientIp` stays. The new fields are **optional at the type level**, so the existing test `RequestCtx` literals (seven files under `worker/test/{http,read}`) keep compiling in wave 2. The Node composition always sets them, and a handler that needs one reads it through `need(ctx, 'app')`, which throws `CtxWiringError` (a 500) when it is absent. `env` becomes the structural `AppEnv` = `Pick<EnvVars, 'LEXICON_PREFIX' | 'NAMESPACE_OWNERSHIP_REF'> & {ADMIN_TOKEN?: string}`; the Workers `Env` is assignable to it. N7-01 drops `ADMIN_TOKEN` from it.
+- **Request context.** `RequestCtx` (`worker/src/http/types.ts`, N2-01) gains `deps?: ModuleDeps`, `app?: AppServices` and `peer?: string` (the socket address); `clientIp` stays. The new fields are **optional at the type level**, so the existing test `RequestCtx` literals (seven files under `worker/test/{http,read}`) keep compiling in wave 2. The Node composition always sets them, and a handler that needs one reads it through `need(ctx, 'app')`, which throws `CtxWiringError` (a 500) when it is absent. `env` becomes the structural `AppEnv` = `Pick<EnvVars, 'LEXICON_PREFIX' | 'NAMESPACE_OWNERSHIP_REF' | 'NAMESPACE_PUBLICATION_REF'> & {ADMIN_TOKEN?: string}`; the Workers `Env` is assignable to it. N7-01 drops `ADMIN_TOKEN` from it.
 - **Route methods.** `RouteDef.method` widens from `GET | POST` to `GET | POST | PUT | PATCH | DELETE | OPTIONS` (N2-01). `matchRoute` keeps its current `Allow` set exactly (`POST /api/v1/meta` still answers `Allow: GET`, as `composition/routing.test.ts:252-254` pins on workerd). Only the **Node dispatcher** (`worker/src/node/dispatch.ts`) maps `HEAD` to the `GET` route, drops the body, and appends `HEAD` to the `Allow` header of its own 405 answers when `GET` is registered.
 - **Route table split (N2-01).** `worker/src/router.ts` imports `envLogger` and `INDEX_NAME` from `index-do.ts`, which imports `cloudflare:workers`. N2-01 moves the host-neutral parts (`ROUTES`, `matchRoute`, `assetMiss`, `matchSpaRoute`) into `worker/src/http/routes.ts`, which imports only host-neutral modules; `router.ts` keeps only the Workers entry (`createWorker`, `handleFetch`) and re-exports the rest until N7-01. `http/admin.ts` imports `PITR_WINDOW_MS` from `app/index-core.ts` instead of `index-do.ts`.
 
@@ -234,7 +234,7 @@ The Workers adapter is **retired** (wave 7, N7-01). Everything runs on Node 26. 
 | `ATMUSIC_SIGNIN_DIDS` | (empty) | Comma-separated DIDs; required and non-empty when the policy is `allowlist` |
 | `ATMUSIC_UPLOAD_MAX_BYTES` | `1073741824` (1 GiB) | Global cap on `ATMUSIC_UPLOAD_DIR` (§11.1) |
 | `ATMUSIC_MIN_FREE_BYTES` | `2147483648` (2 GiB) | Free-space floor on the state filesystem (§11.1) |
-| `LEXICON_PREFIX`, `NAMESPACE_OWNERSHIP_REF` | as today | Namespace gate unchanged |
+| `LEXICON_PREFIX`, `NAMESPACE_OWNERSHIP_REF`, `NAMESPACE_PUBLICATION_REF` | as today; the publication reference is `sha256:<64 lowercase hex>` for the reviewed/publicly verified schema manifest | Publication requires both references; DNS authority alone leaves product writes closed |
 | `INGEST_MODE` | `socket` | `socket` or `off`; `pulse` is refused with a message citing ADR 0005 |
 | `JETSTREAM_URLS`, `JETSTREAM_LOOKBACK_HOURS`, `RELAY_URL` | as today | |
 | `LASTFM_API_ROOT` | `https://ws.audioscrobbler.com/2.0/` | https, DNS name, default port |
@@ -492,6 +492,7 @@ This is a port of `web/src/outbox/*`, which in turn ported the Rust `crates/serv
 - **Ambiguous create:** `getRecord` plus a digest comparison. Equal means success; different means terminal `remote_record_conflict`. A record is **never overwritten**, and `putRecord` is never used for creates.
 - Deletes use `swapRecord` from `record_state`. `InvalidSwap` re-fetches, reconciles and retries.
 - **Predecessors:** a delete waits for its pending create, and follow PUT/DELETE intents run FIFO.
+- Consecutive identical follow/unfollow requests reuse the latest queued, running, blocked or succeeded intent identity. An intervening opposite intent always creates a distinct FIFO operation; failed/cancelled intents may be admitted afresh. A newer verified remote change contradicting a completed intent also permits fresh admission, so external clients cannot permanently suppress later writes. Admission reads and inserts in one synchronous transaction after hashing.
 - Follow rkey `'f'+hex(sha256(subject))`. Unfollow deletes every matching follow it lists.
 - After each success, the runner queues the record's hint with `enqueueHints` (source `notify`), so the verify drain indexes the record. It does **not** go through the client `notify` RPC: that path applies the abuse buckets (60/min per IP, 600/h per DID), and one 200-write batch or a day of import writes would exhaust them. If the DID has no `users` row yet, the runner calls `admit(…, 'notify', …)` instead and the snapshot indexes the record. **Indexing is still proof-gated.**
 
@@ -1311,7 +1312,7 @@ systemd-creds --user encrypt --name=secrets secrets.json ~/.config/atmusic/secre
    ```
    `npm ci` never runs inside the sandboxed unit, and never runs dependency install scripts.
 2. `atmusic-admin backup`. The server also takes a pre-migration backup itself when a migration is pending.
-3. Switch the link atomically: `ln -sfn releases/<sha> current.tmp && mv -T current.tmp current`.
+3. Switch the link atomically through a private, uniquely created temporary directory under `~/.local/lib/atmusic`: place a relative `releases/<sha>` symlink inside it, then `mv -Tf` that symlink onto `current` and remove the empty directory. Do not reuse a fixed temporary pathname such as `current.tmp`.
 4. `systemctl --user restart atmusic`, then poll `/health/ready`.
 
 **Rollback:** point the link back and restart. Migrations are additive and `schema_compat.min_compatible_version` stays at or below the old release's version (§3.2), so the old code runs on the migrated database: it ignores the new tables and columns. **Rollback never restores a backup.** Restoring the pre-migration backup would silently undo security state (credentials and sessions revoked since then would come back; `oauth_sessions` would revert to refresh tokens the AS has already rotated, so refreshes fail with `invalid_grant`) and would lose operations, listen keys and forward rows acknowledged with 200 since the backup, contradicting §3.2. Restore is disaster recovery only (§14.5).
@@ -1439,7 +1440,7 @@ Each test file gets its own database file, through the shim and after it.
 - **Policy.** The existing 406 vitest tests and the Python regressions are **kept**. A ported test keeps its file path and title unless this ADR names the change. `docs/verification/node-port-inventory.json` records every pre-port id and its replacement, and `scripts/test/test-inventory.test.ts` enforces it.
 - **Named changes:**
   - `sql-conformance` expectations for >2^53 reads, multi-statement text, BEGIN/SAVEPOINT and PRAGMA;
-  - `rowsRead` budgets (status, keyset, bench), re-derived as `EXPLAIN QUERY PLAN` pins on SQLite 3.54.1, because node:sqlite has no rows-read counter;
+  - `rowsRead` budgets (status, keyset, bench), re-derived as `EXPLAIN QUERY PLAN` pins on supported SQLite baselines 3.54.0 (official Node) and 3.54.1 (owner system build), with the actual measured engine recorded and plan/environment versions required to agree, because node:sqlite has no rows-read counter;
   - workerd-helper existence checks (`local-index.test.ts`, the isolation tests), replaced by Node harness checks;
   - `scheduled.test.ts`, which becomes the interval test;
   - the web OAuth and outbox suites, which move to the server (§5.9);
@@ -1552,7 +1553,7 @@ The owner said "you may do what you think best". These are Claude's interim deci
 3. **Secrets setup** (§14.2), and a password-manager copy of the plaintext secrets.
 4. `loginctl enable-linger` and enabling the unit (§14.1).
 5. **`ATMUSIC_SIGNIN_DIDS`** (at least the owner's DID) and **`ATMUSIC_CLIENT_IP_HEADER`** matching the chosen exposure option (§3.6, §14.6), both in `atmusic.env`.
-6. **`NAMESPACE_OWNERSHIP_REF`** and the lexicon publication at `music.pythonplayer123.dev` before writes are enabled (unchanged from ADR 0004 Q3).
+6. **`NAMESPACE_OWNERSHIP_REF`** and the publication/review of all four production Lexicons at `music.pythonplayer123.dev` before writes are enabled; `NAMESPACE_PUBLICATION_REF` records the reviewed evidence digest. A syntactically valid digest is an operator assertion, not independent verification (see ADR 0001).
 7. Optionally, an offsite backup target (§14.5).
 
 ---
@@ -1628,21 +1629,21 @@ Every must-fix finding was checked before it was fixed. "Confirmed in code" mean
 | `M1.3.4/locked_database` | `retired:A1` | N3-07: `scripts/test/build-server.test.ts › a second main.mjs on the same database exits 75 database_locked after the production busy timeout even with a different ATMUSIC_ADMIN_SOCKET, and a stale socket file is replaced` |
 | `M1.4.1/bind_precedence` | `retired:A1` | N3-07: `worker/test/node/run.test.ts › an inherited LISTEN_FDS socket wins over ATMUSIC_LISTEN, which wins over the 127.2.0.1:8888 default` |
 | `M1.4.3/drain_timeout` | `retired:D` | N3-07: `worker/test/node/shutdown.test.ts › a request still running when the injected drain window ends after SIGTERM is aborted, the database is closed and exit(0) is called; the production drain window is 25 s` |
-| `M2.1.3/issuer_mismatch` | `retired:A3` | N2-03: `worker/test/node/bff/oauth-client.test.ts › a callback whose sub resolves to a PDS with a different authorization server is rejected and the token is revoked` |
+| `M2.1.3/issuer_mismatch` | `retired:A3` | N2-03: `worker/test/node/bff/oauth-client.test.ts › authorization start rejects AS metadata whose issuer differs from the advertised issuer before state or PAR` |
 | `M2.1.3/unsupported_server` | `retired:A3` | N2-03: `worker/test/node/bff/oauth-client.test.ts › authorize refuses an authorization server whose metadata lacks PAR or S256 PKCE and stores no state` |
 | `M2.2.2/par_pkce` | `retired:A3` | N2-03: `worker/test/node/bff/oauth-client.test.ts › authorize sends PAR with an S256 code_challenge and a private_key_jwt assertion; the verifier and DPoP key exist only sealed in oauth_states` |
-| `M2.2.2/par_failure` | `retired:A3` | N2-03: `worker/test/node/bff/oauth-client.test.ts › a PAR error from the fake AS leaves no oauth_states row and surfaces oauth_upstream` |
+| `M2.2.2/par_failure` | `retired:A3` | N2-03: `worker/test/node/bff/oauth-client.test.ts › PAR HTTP failures and a stalled request surface oauth_upstream and leave no oauth_states row or late PAR` |
 | `M2.2.2/wrong_origin` | `retired:D` | N3-01: `worker/test/node/http/auth.test.ts › POST /api/v1/auth/start with a foreign or duplicate Origin is 403 csrf_failed and stores no state; a valid start sets __Host-atmusic_oauth with HttpOnly, Secure, SameSite=Lax, Path=/ and Max-Age=600` |
 | `M2.2.3/issuer_subject` | `retired:A3` | N2-03: `worker/test/node/bff/oauth-client.test.ts › a token response whose iss differs from the authorize issuer or whose sub differs from the handle-resolved DID stores no session` |
-| `M2.2.3/nonce_retry` | `retired:A3` | N2-03: `worker/test/node/bff/oauth-client.test.ts › a use_dpop_nonce error on the token request and on a PDS write is retried once with the new nonce and succeeds` |
-| `M2.2.3/expired_and_replay` | `retired:D` | N2-03: `worker/test/node/bff/oauth-client.test.ts › a replayed state and a state older than 600 s both fail and store no session` |
-| `M2.3.1/refresh_race` | `retired:A3` | N2-03: `worker/test/node/bff/oauth-client.test.ts › two concurrent restore() calls on an expired session send one refresh request and both use the new token` |
+| `M2.2.3/nonce_retry` | `retired:A3` | N2-03: `worker/test/node/bff/oauth-client.test.ts › DPoP nonce retries use a new nonce and jti, and endless token challenges terminate safely` |
+| `M2.2.3/expired_and_replay` | `retired:D` | N2-03: `worker/test/node/bff/oauth-client.test.ts › a replay is refused, state remains valid for denial handling at 599999 ms and expires at 600000 ms` |
+| `M2.3.1/refresh_race` | `retired:A3` | N2-03: `worker/test/node/bff/oauth-client.test.ts › ten concurrent restore() calls share one successful refresh rotation and all use the new token` |
 | `M2.3.1/encrypted_persistence` | `retired:D` | N2-03: `worker/test/node/bff/oauth-stores.test.ts › the raw database file contains no access token, refresh token or DPoP private key bytes after a sign-in` |
 | `M2.3.2/cookie_and_hash` | `retired:D` | N2-04: `worker/test/node/bff/sessions.test.ts › create() sets __Host-atmusic_session with HttpOnly, Secure, SameSite=Lax, Path=/ and Max-Age=2592000, and stores only SHA-256 of the token` |
 | `M2.3.2/csrf_matrix` | `retired:D` | N2-04: `worker/test/node/bff/csrf.test.ts › the Rust matrix: no cookie 401; missing, duplicate or foreign Origin, missing or wrong X-CSRF-Token 403 csrf_failed; correct pair passes` |
 | `M2.3.3/unsupported_revocation` | `retired:A3` | N2-03: `worker/test/node/bff/oauth-client.test.ts › revoke against an AS without a revocation_endpoint deletes the local session and sends no request` |
-| `M2.4.2/refresh_persistence` | `retired:A3` | N2-03: `worker/test/node/bff/oauth-stores.test.ts › a rotated refresh token is persisted sealed before use, and after close and reopen the next refresh sends the rotated token` |
-| `M2.4.2/security_matrix` | `retired:D` | N3-01: `worker/test/node/http/auth.test.ts › a callback with a replayed, expired or unknown state, or an AS error, stores no session, sets no session cookie and clears __Host-atmusic_oauth` |
+| `M2.4.2/refresh_persistence` | `retired:A3` | N3-07: `scripts/test/node-recovery.test.ts › oauth_refresh_recovery: rotated refresh credentials and the same app-session cookie survive a child-process restart` |
+| `M2.4.2/security_matrix` | `retired:D` | N3-01: `worker/test/node/http/auth.test.ts › stale state, AS denial, wrong issuer and wrong subject fail at the callback boundary without adding sessions or writes` |
 | `M2.4.2/cross_owner` | `retired:D` | N3-02: `worker/test/node/http/writes.test.ts › GET /api/v1/operations/{id} is 200 for its owner and 404 for any other session` |
 | `M3.1.1/key_validation` | `retired:A11` | N3-02: `worker/test/node/http/writes.test.ts › an Idempotency-Key of 129 characters or containing a character outside [A-Za-z0-9._~-] is 400 invalid_idempotency_key` |
 | `M3.2.1/admission_atomic` | `retired:A12` | N2-05: `worker/test/node/outbox/ingress.test.ts › a throw after the operation insert rolls back the listen key and forward rows` |
@@ -1655,7 +1656,7 @@ Every must-fix finding was checked before it was fixed. "Confirmed in code" mean
 | `M6.3.1/backup_during_write` | `retired:A15` | N3-07: `worker/test/node/backup.test.ts › while a rate-limited backup runs, 1,000 committed writes and an HTTP request are served and WATCHDOG=1 is still sent, and the copy is a consistent snapshot that passes integrity_check` |
 | `M6.3.1/restore_state` | `retired:A15` | N4-02: `scripts/test/restore.test.ts › a restored database whose OAuth sessions and linked credentials open with the configured keys reports ready` |
 | `M6.3.1/wrong_key` | `retired:A15` | N4-02: `scripts/test/restore.test.ts › restoring with secrets that lack the backup's encryption key id starts the server, marks undecryptable sessions reauth_required and prints no ciphertext or key material` |
-| `M6.4.1/tag_version` | `retired:A19` | N3-07: ``scripts/test/build-server.test.ts › build-server writes worker/dist/node/main.mjs, `node main.mjs --check-config` with a test config exits 0, and `node main.mjs --version` prints the git sha recorded at build time`` |
+| `M6.4.1/tag_version` | `retired:A19` | N3-07: `scripts/test/build-server.test.ts › Node candidate tag/version, deterministic archive and checksum bind the real bundle; tampering, dirty sources and stale committed inputs fail closed` |
 | `M7.1.2/csrf_client` | `retired:D` | N5-01: `web/test/session/client.test.ts › getSession caches csrfToken; every mutation sends X-CSRF-Token with same-origin credentials; 401 shows signed-out and reauth_required shows the re-sign-in banner` |
 | `M7.4.1/embedded_dist` | `retired:A1` | N2-01: `worker/test/node/compose.test.ts › the SPA and its assets are served from ATMUSIC_ASSETS_DIR (default <release>/web/dist) with the _headers rules` |
 | `M7.4.1/missing_build` | `retired:A1` | N3-07: `worker/test/node/run.test.ts › startup with an ATMUSIC_ASSETS_DIR lacking index.html exits 78 naming ATMUSIC_ASSETS_DIR and never listens` |

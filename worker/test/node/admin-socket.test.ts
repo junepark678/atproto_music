@@ -13,6 +13,7 @@ import { type FixedClock, fixedClock } from '@atmusic/core/test-support/clock';
 import { seededRandom } from '@atmusic/core/test-support/random';
 import { afterEach, describe, expect, it } from 'vitest';
 import { parseRevocationLog } from '../../src/app/revocations';
+import { SCHEMA_VERSION } from '../../src/do/schema';
 import { bytesEqualConstantTime, constantTimeEqual } from '../../src/http/admin';
 import { BACKUP_FILE } from '../../src/node/backup';
 import { type ExitCode, type RunningServer, run } from '../../src/node/run';
@@ -152,7 +153,7 @@ describe('admin socket', () => {
     expect(before.status).toBe(200);
     expect(before.headers['x-request-id']).toMatch(/^[0-9a-f-]{36}$/);
     // The core half (IndexCore.adminStatus) ...
-    expect(before.json.schema).toEqual({ status: 'ready', version: 2 });
+    expect(before.json.schema).toEqual({ status: 'ready', version: SCHEMA_VERSION });
     expect(before.json).toHaveProperty('ingest.mode', 'off');
     expect(before.json).toHaveProperty('hints');
     expect(Array.isArray(before.json.counters)).toBe(true);

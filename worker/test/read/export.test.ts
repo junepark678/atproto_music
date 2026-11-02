@@ -6,8 +6,9 @@
 // verified by the W2-03 verifier and applied with W2-04 applyRecordProof. On
 // top of it the test plants records and rows that must never reach an export:
 // an excluded (invalid) record, edges to an inactive and to a suppressed
-// account, another owner's records, and marker strings in every
-// non-projection table. An edge to a DID this index has never seen is kept,
+// account, another owner's records, and marker strings in selected non-public
+// tables. Visibility may consult operations, but its private payload is never
+// serialized. An edge to a DID this index has never seen is kept,
 // as in the Rust oracle (export.rs hides only suppressed or inactive
 // subjects).
 // Expectations are hardcoded from TESTING.md.
@@ -168,7 +169,8 @@ it('export contains only indexed public records, attachment header, 404 for inac
     'applied',
   ]);
 
-  // Marker strings in every table an export must never read.
+  // Markers in non-public rows must never be serialized; visibility may consult
+  // the operation table to hide private delete intents.
   await inDo(store, (db) =>
     db.tx(() => {
       db.run(
@@ -201,6 +203,20 @@ it('export contains only indexed public records, attachment header, 404 for inac
         `${MARKER}-job`,
       );
       db.run(`INSERT INTO counters(name, label, value) VALUES ('excluded', ?, 1)`, `${MARKER}-counter`);
+      db.run(
+        `INSERT INTO operations (id, did, kind, origin, priority, collection, rkey, record_json, digest, state,
+           attempts, due_at, last_error, created_at_ms, updated_at_ms)
+         VALUES (?, ?, 'scrobble.create', 'web', 0, ?, ?, ?, 'private-digest', 'failed', 0, ?, ?, ?, ?)`,
+        `${MARKER}-bob-private-operation`,
+        BOB,
+        SCROBBLE,
+        'private-operation',
+        JSON.stringify({ artist: `${MARKER}-bob-private-operation-payload`, track: 'not public' }),
+        NOW_MS,
+        `${MARKER}-bob-private-operation-error`,
+        NOW_MS,
+        NOW_MS,
+      );
     }),
   );
 
@@ -288,12 +304,22 @@ it('export contains only indexed public records, attachment header, 404 for inac
     // The profile counts agree with the export: Bob and Dave, not Erin or Frank.
     aliceCounts: followCounts(db, ALICE),
     bob: db.all('SELECT uri FROM scrobbles WHERE did = ? ORDER BY uri', BOB),
+    privateOperation: db.one(
+      'SELECT id, did, record_json, last_error FROM operations WHERE id = ?',
+      `${MARKER}-bob-private-operation`,
+    ),
   }));
   expect(stored).toEqual({
     excluded: { state: 'excluded' },
     hiddenEdges: [{ subject: ERIN }, { subject: FRANK }],
     aliceCounts: { followerCount: 0, followingCount: 2 },
     bob: [{ uri: `at://${BOB}/${SCROBBLE}/r09` }, { uri: `at://${BOB}/${SCROBBLE}/rb2` }],
+    privateOperation: {
+      id: `${MARKER}-bob-private-operation`,
+      did: BOB,
+      record_json: JSON.stringify({ artist: `${MARKER}-bob-private-operation-payload`, track: 'not public' }),
+      last_error: `${MARKER}-bob-private-operation-error`,
+    },
   });
 
   // --- 404 for unknown and inactive accounts; 422 for a malformed DID.

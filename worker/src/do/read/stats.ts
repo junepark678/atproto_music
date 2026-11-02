@@ -93,16 +93,17 @@ export function statsStatements(did: string, bounds: StatsBounds, limit: number)
   checkStatsLimit(limit);
   const w = windowCte(bounds);
   const p = windowParams(did, bounds);
-  // The totals statement reads `w` three times. Inlined, SQLite answers the
-  // DISTINCT/GROUP BY subqueries from the covering scrobbles_stats index,
-  // which is searched by DID only: a windowed request then read every row of
-  // the DID twice, not just the window (W6-02 benchmark: 20,965 rows read for
-  // a 959-row 7d window of a 10,000-row user). Materialized, the window is
-  // read once through scrobbles_owner_time's (did, listened_at) range, so the
-  // rows read stay proportional to the window. `all` has no lower bound, so
-  // the inlined form already reads exactly the DID's rows and stays inlined.
-  // Accepted by ADR 0004 §15 Q10; the per-statement rows-read bounds are
-  // asserted by worker/test/bench/read-models.bench.test.ts.
+  // The totals statement reads `w` three times. The bounded form stays
+  // MATERIALIZED so the verified-row range and the correlated local-delete
+  // visibility probe are evaluated once, then reused by the DISTINCT/GROUP BY
+  // subqueries. Current Node/SQLite plans also push both window bounds into
+  // each inlined reference, but that repeats the owner-range and delete-intent
+  // lookups three times. The historical W6-02 plan (before the query-time
+  // visibility overlay) used only scrobbles_stats (did=?) for an inlined
+  // bounded request and read 20,965 rows for a 959-row 7d window of a
+  // 10,000-row user. `all` has no lower bound, so its inlined form reads the
+  // DID's rows once per subquery and stays inlined. The bounded-row and plan
+  // assertions are in worker/test/bench/read-models.bench.test.ts.
   const totalsW = bounds.lower === null ? w : windowCte(bounds, { materialized: true });
   return {
     totals: {

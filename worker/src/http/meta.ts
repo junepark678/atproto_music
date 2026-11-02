@@ -77,13 +77,21 @@ export type NamespaceView = Pick<AppConfig, 'prefix' | 'publication'>;
  * The namespace exactly as parseConfig derives it, without refusing anything:
  * an empty or invalid prefix gives null (an invalid one also fails the DO's
  * parse, so meta is `scaffold`), and publication needs an owned, non-fixture
- * prefix plus ownership evidence.
+ * prefix, ownership evidence, and a syntactically valid owner-reviewed schema
+ * publication manifest reference.
  */
-export function namespaceView(env: Pick<EnvVars, 'LEXICON_PREFIX' | 'NAMESPACE_OWNERSHIP_REF'>): NamespaceView {
+export function namespaceView(
+  env: Pick<EnvVars, 'LEXICON_PREFIX' | 'NAMESPACE_OWNERSHIP_REF' | 'NAMESPACE_PUBLICATION_REF'>,
+): NamespaceView {
   const raw = (env.LEXICON_PREFIX ?? '').trim();
   const prefix = raw !== '' && isValidPrefix(raw) ? raw : null;
-  const evidence = (env.NAMESPACE_OWNERSHIP_REF ?? '').trim() !== '';
-  return { prefix, publication: prefix !== null && prefix !== FIXTURE_PREFIX && evidence };
+  const ownershipEvidence = (env.NAMESPACE_OWNERSHIP_REF ?? '').trim() !== '';
+  const publicationRef = (env.NAMESPACE_PUBLICATION_REF ?? '').trim();
+  const publicationEvidence = /^sha256:[0-9a-f]{64}$/.test(publicationRef);
+  return {
+    prefix,
+    publication: prefix !== null && prefix !== FIXTURE_PREFIX && ownershipEvidence && publicationEvidence,
+  };
 }
 
 /**

@@ -128,6 +128,8 @@ export interface OperationRow {
   record_json: string | null;
   digest: string | null;
   swap_cid: string | null;
+  /** Admission-time contrary follow proofs (URI/revision pairs); NULL on legacy/non-follow receipts. */
+  follow_proof_json: string | null;
   state: OperationState;
   /** 0–10. */
   attempts: number;

@@ -1,4 +1,4 @@
-name: Rust backend
+name: Backend checks
 on:
   push:
   pull_request:
@@ -14,8 +14,19 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
       - name: Install pinned Rust
         run: rustup show
+      # Python live-evidence regressions invoke TypeScript fixture gates. They
+      # need the same pinned runtime and workspace links as the TypeScript job.
+      - name: Install pinned Node (.nvmrc)
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - name: Install locked dependencies
+        run: npm ci
       - name: Install pinned contract validator
         run: |
           python3 -m venv work/contracts-venv
@@ -30,12 +41,18 @@ jobs:
           cargo build --locked -p atmusic-server
           python3 scripts/smoke.py target/debug/atmusic
           python3 scripts/test_smoke.py
-  # TypeScript Workers rebuild (ADR 0004). The Rust `check` job above stays
-  # unchanged as the golden-vector oracle; the static-linux job was removed (ADR §12).
+  # Node product checks (ADR 0005). Rust remains a golden-vector oracle;
+  # the static-linux job was removed by ADR 0004 §12.
   ts:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Install Python 3.13 for streaming candidate checks
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.13"
       - name: Install pinned Node (.nvmrc)
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:

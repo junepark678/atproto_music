@@ -526,6 +526,20 @@ function finish(m: ModuleDeps, op: OperationRow, outcome: Outcome, now: number, 
         now,
         op.id,
       );
+      // A confirmed scrobble removal no longer needs the listen payload in
+      // succeeded create receipts. Keep identity, result CID, idempotency key
+      // and request hash so retries still resolve to their original receipt
+      // rather than republishing a deleted listen. Failed/unresolved deletes
+      // never erase the payload needed for investigation/reconciliation.
+      if (op.kind === 'scrobble.delete' && outcome.note !== 'record_not_ours') {
+        db.run(
+          `UPDATE operations SET record_json = NULL, digest = NULL
+           WHERE did = ? AND collection = ? AND rkey = ? AND kind = 'scrobble.create' AND state = 'succeeded'`,
+          op.did,
+          op.collection,
+          op.rkey,
+        );
+      }
       return;
     case 'transient':
       if (op.attempts >= MAX_ATTEMPTS) {
@@ -613,7 +627,10 @@ export function queueHints(
 export async function runOutbox(m: OutboxDeps, now: number = m.clock.nowMs()): Promise<OutboxRunReport> {
   const prefix = m.config.prefix;
   if (inFlight.has(m.db)) return { attempted: 0, batches: [], blocked: 0, nextDueMs: null, skipped: true };
-  if (prefix === null) return { attempted: 0, batches: [], blocked: 0, nextDueMs: null, skipped: false };
+  // Namespace ownership is not schema publication approval. Keep already-queued
+  // work dormant until both reviewed references open the explicit publication gate.
+  if (prefix === null || !m.config.publication)
+    return { attempted: 0, batches: [], blocked: 0, nextDueMs: null, skipped: true };
   inFlight.add(m.db);
   try {
     return await new Run(m, now, prefix).run();

@@ -4,7 +4,7 @@
 
 import { existsSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AsyncTransactionError, MAX_SQL_PARAMS, SqlParamError } from '../../src/do/db';
 import {
   DatabaseLockedError,
@@ -40,11 +40,6 @@ function scratch(options: { busyTimeoutMs?: number } = { busyTimeoutMs: TEST_BUS
 
 function names(db: SqliteDb): string[] {
   return db.all<{ name: string }>('SELECT name FROM t ORDER BY name').map((r) => r.name);
-}
-
-/** SQL texts of the statements currently prepared on the connection (SQLite's sqlite_stmt). */
-function preparedSql(db: SqliteDb): string[] {
-  return db.all<{ sql: string }>('SELECT sql FROM sqlite_stmt').map((r) => r.sql);
 }
 
 describe('openSqliteDb', () => {
@@ -349,6 +344,9 @@ describe('Db over node:sqlite', () => {
   it('more than 100 parameters, an unsafe integer, true or Infinity is refused before binding', () => {
     const { db } = scratch();
     db.run('CREATE TABLE p(v)');
+    // Observe the actual driver boundary; sqlite_stmt is an optional SQLite
+    // extension absent from the official Node binary. No production seam.
+    const prepare = vi.spyOn(db.raw, 'prepare');
     const tooMany = `INSERT INTO p(v) VALUES ${Array.from({ length: MAX_SQL_PARAMS + 1 }, () => '(?)').join(',')}`;
     const atLimit = `INSERT INTO p(v) VALUES ${Array.from({ length: MAX_SQL_PARAMS }, () => '(?)').join(',')}`;
     const cases: Array<[string, unknown[], string]> = [
@@ -377,7 +375,7 @@ describe('Db over node:sqlite', () => {
         expect((thrown as SqlParamError).reason).toBe(reason);
       }
       // Refused before binding: the statement was never even prepared.
-      expect(preparedSql(db)).not.toContain(sql);
+      expect(prepare.mock.calls.map(([text]) => text)).not.toContain(sql);
     }
     expect(db.one('SELECT count(*) AS n FROM p')).toEqual({ n: 0 });
 
@@ -431,23 +429,37 @@ describe('Db over node:sqlite', () => {
     const { db } = scratch();
     expect(STATEMENT_CACHE_SIZE).toBe(256);
     const sqlOf = (i: number) => `SELECT ${i} AS n`;
+    const original = db.raw.prepare.bind(db.raw);
+    const prepare = vi.spyOn(db.raw, 'prepare');
+    const statements: Array<{ sql: string; close: ReturnType<typeof vi.fn> }> = [];
+    prepare.mockImplementation((sql) => {
+      const statement = original(sql);
+      // Node 26 exposes close(); @types/node still only declares the alias.
+      const close = vi.spyOn(statement as typeof statement & { close(): void }, 'close');
+      statements.push({ sql, close });
+      return statement;
+    });
+    const liveSql = () => statements.filter((s) => s.close.mock.calls.length === 0).map((s) => s.sql);
     for (let i = 0; i < 300; i++) {
       expect(db.one(sqlOf(i))).toEqual({ n: i });
       // Statement 0 stays recently used, so the LRU keeps it.
       if (i % 50 === 0) expect(db.one(sqlOf(0))).toEqual({ n: 0 });
+      expect(liveSql().length).toBeLessThanOrEqual(STATEMENT_CACHE_SIZE);
     }
-    const prepared = preparedSql(db);
-    const module = prepared.filter((sql) => /^SELECT \d+ AS n$/.test(sql));
-    // The sqlite_stmt query itself is one of the cached module statements.
-    expect(module.length + 1).toBeLessThanOrEqual(256);
-    expect(module.length).toBe(255);
-    expect(prepared.filter((sql) => sql !== 'SELECT total_changes() AS n').length).toBeLessThanOrEqual(256);
-    expect(module).toContain(sqlOf(0));
-    expect(module).toContain(sqlOf(299));
-    expect(module).not.toContain(sqlOf(1));
-    expect(module).not.toContain(sqlOf(44));
-    // An evicted statement is prepared again on demand and still works.
+    // Exactly 300 distinct driver prepares: hits reuse their statement and
+    // every eviction finalizes it (not merely removing a map entry).
+    expect(prepare).toHaveBeenCalledTimes(300);
+    expect(liveSql()).toHaveLength(256);
+    expect(liveSql()).toContain(sqlOf(0));
+    expect(liveSql()).toContain(sqlOf(299));
+    expect(liveSql()).not.toContain(sqlOf(1));
+    expect(liveSql()).not.toContain(sqlOf(44));
     expect(db.one(sqlOf(1))).toEqual({ n: 1 });
-    expect(preparedSql(db)).toContain(sqlOf(1));
+    expect(prepare).toHaveBeenCalledTimes(301);
+    expect(liveSql()).toHaveLength(256);
+    expect(liveSql()).toContain(sqlOf(1));
+    db.close();
+    expect(liveSql()).toEqual([]);
+    expect(statements.every((s) => s.close.mock.calls.length === 1)).toBe(true);
   });
 });

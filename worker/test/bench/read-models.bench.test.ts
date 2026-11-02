@@ -252,7 +252,12 @@ const validateReport = ajv.compile(bench.schema);
 
 /** AJV errors for `value` against the report schema; empty when valid. */
 function reportErrors(value: unknown): string[] {
-  if (validateReport(value)) return [];
+  if (validateReport(value)) {
+    const report = value as BenchReport;
+    return report.plans.sqlite === report.environment.sqlite
+      ? []
+      : ['/plans/sqlite must equal the measured /environment/sqlite'];
+  }
   return (validateReport.errors ?? []).map((e) => `${e.instancePath || '/'} ${e.message ?? 'invalid'}`);
 }
 
@@ -1400,7 +1405,7 @@ const report = once(async (): Promise<BenchReport> => {
     limit: LIMIT,
     plans: {
       source: 'ADR 0005 §15.3 (ADR 0004 §15 Q10 re-derived as query plans)',
-      sqlite: PINNED_SQLITE,
+      sqlite,
       ...PLAN_RULES,
       statsProbesAll: STATS_PROBES_ALL,
       statsProbesWindowed: STATS_PROBES_WINDOWED,
@@ -1686,9 +1691,9 @@ describe('read-model benchmark', () => {
       expect(s.cached.p50Ms, name).toBeLessThanOrEqual(s.cached.p95Ms);
     }
 
-    // The statistics pin is not vacuous. The regressed windowed plan W6-02 found (a DID-only
-    // search of the covering scrobbles_stats index) is refused for a bounded window and is
-    // the accepted `all` plan; a bounded search next to a DID-only one is refused too.
+    // The statistics pin is not vacuous. The regressed W6-02 DID-only
+    // scrobbles_stats search is refused for a bounded window and accepted for
+    // `all`; a bounded search next to an unbounded one is refused too.
     const didOnly = ['SEARCH s USING COVERING INDEX scrobbles_stats (did=?)'];
     expect(statsPlanBounded('all', didOnly)).toBe(true);
     for (const w of ['7d', '30d', '365d'] as const) {
@@ -1702,18 +1707,23 @@ describe('read-model benchmark', () => {
       ).toBe(false);
       expect(statsPlanBounded(w, ['SCAN s']), w).toBe(false);
     }
-    // And rebuilt on the real database: the production 7d totals statement with its window
-    // CTE inlined (the pre-fix form) answers the same totals but plans the DID-only search,
-    // so the pin refuses it; the production (materialized) form passes.
+    // And rebuilt on the real database: after adding the local-delete visibility probe, both
+    // inline and materialized 7d totals use bounded owner-range searches and answer the same
+    // totals. Inlining repeats the range/probe work; materialization reduces it to one scrobble
+    // search, which is why the bounded production query remains materialized.
     const tenK = SCALE_DIDS[10000];
     const totals = statsStatements(tenK, windowBounds('7d', NOW_NS), STATS_LIMIT).totals;
     expect(totals.sql).toContain('MATERIALIZED');
     const inlined = { sql: totals.sql.replace('MATERIALIZED ', ''), params: totals.params };
     expect(scaleH.db.one(inlined.sql, ...inlined.params)).toEqual(scaleH.db.one(totals.sql, ...totals.params));
     const inlinedPlan = planOf(scaleH.db, inlined);
-    expect(inlinedPlan.filter((d) => SCROBBLES_SEARCH.test(d) && !WINDOW_SEARCH.test(d))).not.toEqual([]);
-    expect(statsPlanBounded('7d', inlinedPlan)).toBe(false);
-    expect(statsPlanBounded('7d', planOf(scaleH.db, totals))).toBe(true);
+    const inlinedSearches = inlinedPlan.filter((d) => SCROBBLES_SEARCH.test(d));
+    const materializedPlan = planOf(scaleH.db, totals);
+    const materializedSearches = materializedPlan.filter((d) => SCROBBLES_SEARCH.test(d));
+    expect(inlinedSearches.length).toBeGreaterThan(materializedSearches.length);
+    expect(inlinedSearches.every((d) => WINDOW_SEARCH.test(d))).toBe(true);
+    expect(statsPlanBounded('7d', inlinedPlan)).toBe(true);
+    expect(statsPlanBounded('7d', materializedPlan)).toBe(true);
 
     // The report's per-kind p50 and p95 over every timed call.
     const value = await report();
@@ -1802,7 +1812,20 @@ describe('read-model benchmark', () => {
         value.http.passed,
     );
     expect(value.passed).toBe(true);
-    expect(value.plans).toMatchObject({ sqlite: '3.54.1', statsProbesAll: 3, statsProbesWindowed: 4 });
+    expect(value.plans).toMatchObject({ sqlite: process.versions.sqlite, statsProbesAll: 3, statsProbesWindowed: 4 });
+    for (const sqlite of ['3.54.0', '3.54.1']) {
+      expect(
+        reportErrors({ ...value, plans: { ...value.plans, sqlite }, environment: { ...value.environment, sqlite } }),
+      ).toEqual([]);
+    }
+    expect(reportErrors({ ...value, plans: { ...value.plans, sqlite: '3.53.0' } })).not.toEqual([]);
+    expect(
+      reportErrors({
+        ...value,
+        plans: { ...value.plans, sqlite: '3.54.0' },
+        environment: { ...value.environment, sqlite: '3.54.1' },
+      }),
+    ).not.toEqual([]);
     expect(value.dataset.rows).toBe(100_000);
     expect(value.reads).toHaveLength(12);
     expect(value.stats).toHaveLength(16);

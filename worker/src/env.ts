@@ -14,6 +14,8 @@ export interface EnvVars {
   LEXICON_PREFIX: string;
   /** Reviewable evidence that the operator controls the prefix's domain. */
   NAMESPACE_OWNERSHIP_REF: string;
+  /** SHA-256 reference to the reviewed, publicly retrieved production schema manifest; absent keeps publication disabled. */
+  NAMESPACE_PUBLICATION_REF: string;
   /** `socket` | `pulse` | `off`. */
   INGEST_MODE: string;
   /** Comma-separated `wss://` Jetstream hosts, rotated on reconnect. */
@@ -46,6 +48,7 @@ export const ENV_VAR_NAMES: readonly (keyof EnvVars)[] = [
   'PUBLIC_ORIGIN',
   'LEXICON_PREFIX',
   'NAMESPACE_OWNERSHIP_REF',
+  'NAMESPACE_PUBLICATION_REF',
   'INGEST_MODE',
   'JETSTREAM_URLS',
   'JETSTREAM_LOOKBACK_HOURS',

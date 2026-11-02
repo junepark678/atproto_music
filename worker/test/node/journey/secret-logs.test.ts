@@ -48,6 +48,16 @@ afterEach(async () => {
 
 const T0_S = T0 / 1000;
 const LB_LINK_TOKEN = 'alice-listenbrainz-user-token-0001';
+const PUBLIC_PROFILE_FIELDS = [
+  'did',
+  'handle',
+  'joinedAt',
+  'indexedAt',
+  'totalScrobbles',
+  'followerCount',
+  'followingCount',
+  'indexing',
+];
 
 interface Run {
   w: World;
@@ -333,6 +343,19 @@ describe('secrets in logs and bodies', () => {
     for (const read of reads) {
       const res = await w.send('GET', read.path, { ...(read.headers === undefined ? {} : { headers: read.headers }) });
       if (res.status === 200) ok++;
+      if (read.path === `/api/v1/users/${alice.did}/profile`) {
+        expect(res.status).toBe(200);
+        expect(Object.keys(res.body as Record<string, unknown>)).toEqual(PUBLIC_PROFILE_FIELDS);
+      }
+      if (read.path === `/api/v1/users/${alice.did}/export`) {
+        expect(res.status).toBe(200);
+        const exported = res.body as { schemaVersion: number; did: string; scrobbles: unknown[]; follows: unknown[] };
+        expect(exported.schemaVersion).toBe(1);
+        expect(exported.did).toBe(alice.did);
+        expect(exported.scrobbles.length).toBeGreaterThan(0);
+        expect(Array.isArray(exported.follows)).toBe(true);
+        expect(res.headers.get('content-disposition')).toBe('attachment; filename="music-export.json"');
+      }
       expect(leaks(secrets, res.text), `${read.path} → ${res.status}`).toEqual([]);
     }
     // The reads answered with content (not a wall of errors), so the scan saw real bodies.

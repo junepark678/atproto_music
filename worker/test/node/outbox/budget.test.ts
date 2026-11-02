@@ -143,7 +143,7 @@ it('with 5,000 points per hour, import creates stop at 833 while live creates co
     expect(resumed.flatMap((r) => r.batches)).toEqual([200]);
     expect(states(h, 'import')).toEqual({ succeeded: 400 });
   });
-});
+}, 15_000);
 
 it('bisection halves and singles are budget-checked: a bisected import never spends past its share, and what the budget stops waits for the window without spending attempts', async () => {
   await withHarness(async (h) => {

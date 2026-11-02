@@ -654,7 +654,15 @@ const MIGRATION_2: Migration = {
   ],
 };
 
-export const MIGRATIONS: readonly Migration[] = [MIGRATION_1, MIGRATION_2];
+// Admission-time verified contradictions for follow intent coalescing. Kept
+// with the non-derived receipt across restart/restore; never sent to a PDS.
+const MIGRATION_3: Migration = {
+  version: 3,
+  name: 'follow_proof_baseline',
+  statements: ['ALTER TABLE operations ADD COLUMN follow_proof_json TEXT'],
+};
+
+export const MIGRATIONS: readonly Migration[] = [MIGRATION_1, MIGRATION_2, MIGRATION_3];
 
 /** The schema version this code expects. */
 export const SCHEMA_VERSION: number = MIGRATIONS[MIGRATIONS.length - 1]?.version ?? 0;

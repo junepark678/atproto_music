@@ -127,10 +127,11 @@ describe('the confidential OAuth client', () => {
     });
   });
 
-  it('a replayed state and a state older than 600 s both fail and store no session', async () => {
+  it('a replay is refused, state remains valid for denial handling at 599999 ms and expires at 600000 ms', async () => {
     await withMigratedDb(async (db) => {
       const { w, alice } = await world(db);
       const bob = await w.addUser('bob');
+      const carol = await w.addUser('carol');
       const svc = w.service();
 
       // Replay: the first callback succeeds, the same callback again fails before any token request.
@@ -148,19 +149,33 @@ describe('the confidential OAuth client', () => {
       expect(w.as.count('/oauth/token')).toBe(tokenCalls);
       expect(w.sessionRows()).toEqual(rows);
 
-      // Expiry: a state 600 s and 1 ms old is refused and deleted; nothing reaches the token endpoint.
+      // Under the accepted Node 600 s policy, 1 ms before expiry the callback consumes a valid state.
+      // Use an explicit denial to avoid the fake AS's shorter authorization-code lifetime obscuring state TTL.
       const b2 = w.binding();
-      const late = await svc.authorize(bob.handle, { bindingHash: b2.hash });
-      const lateParams = await w.browse(late.url);
-      expect(w.stateRows()).toBe(1);
-      w.advance(600_001);
-      const expired = await flowError(svc.callback(lateParams, { bindingHash: b2.hash }));
+      const almost = await svc.authorize(bob.handle, { bindingHash: b2.hash });
+      const almostParams = await w.browse(almost.url);
+      w.advance(599_999);
+      almostParams.set('error', 'access_denied');
+      const nearExpiry = await flowError(svc.callback(almostParams, { bindingHash: b2.hash }));
+      expect(nearExpiry.code).toBe('oauth_denied');
+      expect(nearExpiry.reason).not.toBe('state_expired');
+      expect(w.stateRows()).toBe(0);
+      expect(w.as.count('/oauth/token')).toBe(tokenCalls);
+      expect(w.sessionRows().map((r) => r.did)).toEqual([alice.did]);
+
+      // Exactly 600 s old is expired and deleted; nothing reaches the token endpoint.
+      const b3 = w.binding();
+      const exact = await svc.authorize(carol.handle, { bindingHash: b3.hash });
+      const exactParams = await w.browse(exact.url);
+      const tokenCallsBeforeExpiry = w.as.count('/oauth/token');
+      w.advance(600_000);
+      const expired = await flowError(svc.callback(exactParams, { bindingHash: b3.hash }));
       expect(expired.code).toBe('oauth_binding_mismatch');
       expect(expired.status).toBe(403);
       expect(expired.reason).toBe('state_expired');
       expect(expired.message).toBe('expired state');
       expect(w.stateRows()).toBe(0);
-      expect(w.as.count('/oauth/token')).toBe(tokenCalls);
+      expect(w.as.count('/oauth/token')).toBe(tokenCallsBeforeExpiry);
       expect(w.sessionRows().map((r) => r.did)).toEqual([alice.did]);
     });
   });
@@ -185,6 +200,65 @@ describe('the confidential OAuth client', () => {
       // The issuer check fetched as2's metadata through the router and stored nothing.
       expect(w.as2!.count('/.well-known/oauth-authorization-server')).toBeGreaterThan(0);
       expect(w.sessionRows()).toEqual([]);
+    });
+  });
+
+  it('two independent OAuth/PDS fixtures accept only tokens issued by their own server', async () => {
+    await withMigratedDb(async (db) => {
+      const { w, alice } = await world(db, { secondServer: true });
+      const bob = await w.addUser('bob', { server: 2, signingKey: w.keys.bob });
+      // Both repositories are addressable at both fixtures, isolating issuer/token validation from account lookup.
+      await w.pds2!.addAccount(alice.repo, { handle: alice.handle, auth: 'dpop' });
+      await w.pds.addAccount(bob.repo, { handle: bob.handle, auth: 'dpop' });
+
+      const svc = w.service();
+      const aliceSession = (await w.signIn(svc, alice)).session;
+      const bobSession = (await w.signIn(svc, bob)).session;
+      expect((await w.writeScrobble(aliceSession, 'own-as1')).status).toBe(200);
+      expect((await w.writeScrobble(bobSession, 'own-as2')).status).toBe(200);
+
+      const crossWrite = (session: typeof aliceSession, pdsOrigin: string, did: string, rkey: string) =>
+        session.fetchHandler(`${pdsOrigin}/xrpc/com.atproto.repo.createRecord`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            repo: did,
+            collection: SCROBBLE_COLLECTION,
+            rkey,
+            record: {
+              $type: SCROBBLE_COLLECTION,
+              artist: 'Artist',
+              track: 'Cross-server attempt',
+              listenedAt: '2026-01-15T11:00:00.000Z',
+            },
+          }),
+        });
+      const [aliceAtPds2, bobAtPds1] = await Promise.all([
+        crossWrite(aliceSession, w.pds2!.origin, alice.did, 'cross-as-alice'),
+        crossWrite(bobSession, w.pds.origin, bob.did, 'cross-as-bob'),
+      ]);
+      expect(aliceAtPds2.status).toBe(401);
+      expect(bobAtPds1.status).toBe(401);
+      expect(
+        w.pds2!.calls.filter({ nsid: 'com.atproto.repo.createRecord', did: bob.did }).map((c) => c.status),
+      ).toEqual([
+        401,
+        200, // the first request learns this PDS's DPoP nonce
+      ]);
+      expect(
+        w.pds2!.calls.filter({ nsid: 'com.atproto.repo.createRecord', did: alice.did }).map((c) => c.status),
+      ).toEqual([401]);
+      expect(
+        w.pds.calls.filter({ nsid: 'com.atproto.repo.createRecord', did: alice.did }).map((c) => c.status),
+      ).toEqual([
+        401,
+        200, // the first request learns this PDS's DPoP nonce
+      ]);
+      expect(w.pds.calls.filter({ nsid: 'com.atproto.repo.createRecord', did: bob.did }).map((c) => c.status)).toEqual([
+        401,
+      ]);
+      expect(await alice.repo.getRecord(SCROBBLE_COLLECTION, 'cross-as-alice')).toBeNull();
+      expect(await bob.repo.getRecord(SCROBBLE_COLLECTION, 'cross-as-bob')).toBeNull();
     });
   });
 
@@ -336,6 +410,56 @@ describe('the confidential OAuth client', () => {
     });
   });
 
+  it('authorization start follows identity-to-PDS-to-AS metadata and refuses an AS that does not protect the PDS', async () => {
+    await withMigratedDb(async (db) => {
+      const { w, alice } = await world(db);
+      const first = w.service();
+      const beforePds = w.pds.calls.count({ path: '/.well-known/oauth-protected-resource', method: 'GET' });
+      const beforeAs = w.as.count('/.well-known/oauth-authorization-server', 'GET');
+      const started = await first.authorize(alice.handle, { bindingHash: w.binding().hash });
+      expect(started.did).toBe(alice.did);
+      expect(w.pds.calls.count({ path: '/.well-known/oauth-protected-resource', method: 'GET' })).toBeGreaterThan(
+        beforePds,
+      );
+      expect(w.as.count('/.well-known/oauth-authorization-server', 'GET')).toBeGreaterThan(beforeAs);
+      const parCalls = w.as.count('/oauth/par');
+      expect(parCalls).toBeGreaterThan(0);
+      expect(w.stateRows()).toBe(1);
+
+      // A fresh client resolves discovery again; the AS may not claim an unrelated resource instead.
+      w.as.setMetadata({ protected_resources: ['https://unrelated.example'] });
+      const err = await flowError(w.service().authorize(alice.handle, { bindingHash: w.binding().hash }));
+      expect(err.code).toBe('oauth_upstream');
+      expect(w.pds.calls.count({ path: '/.well-known/oauth-protected-resource', method: 'GET' })).toBeGreaterThan(
+        beforePds,
+      );
+      expect(w.as.count('/.well-known/oauth-authorization-server', 'GET')).toBeGreaterThan(beforeAs);
+      expect(w.as.count('/oauth/par')).toBe(parCalls);
+      expect(w.stateRows()).toBe(1); // the earlier successful authorize only
+    });
+  });
+
+  it('authorization start rejects AS metadata whose issuer differs from the advertised issuer before state or PAR', async () => {
+    await withMigratedDb(async (db) => {
+      const w = await createWorld(db);
+      const alice = await w.addUser('alice');
+      const parBefore = w.as.count('/oauth/par');
+      const metadataBefore = w.as.count('/.well-known/oauth-authorization-server', 'GET');
+      w.as.setMetadata({ issuer: 'https://attacker.example' });
+
+      const err = await flowError(w.service().authorize(alice.handle, { bindingHash: w.binding().hash }));
+      expect(err.code).toBe('oauth_upstream');
+      expect(
+        findCause(err, (cause) => cause instanceof TypeError && /Invalid issuer/.test(cause.message)),
+      ).toBeInstanceOf(TypeError);
+      expect(w.as.count('/.well-known/oauth-authorization-server', 'GET')).toBeGreaterThan(metadataBefore);
+      expect(w.as.count('/oauth/par')).toBe(parBefore);
+      expect(w.as.count('/oauth/token')).toBe(0);
+      expect(w.stateRows()).toBe(0);
+      expect(w.sessionRows()).toEqual([]);
+    });
+  });
+
   it('authorize sends PAR with an S256 code_challenge and a private_key_jwt assertion; the verifier and DPoP key exist only sealed in oauth_states', async () => {
     await withMigratedDb(async (db, ctx) => {
       const { w, alice } = await world(db);
@@ -407,7 +531,7 @@ describe('the confidential OAuth client', () => {
     });
   });
 
-  it('a PAR error from the fake AS leaves no oauth_states row and surfaces oauth_upstream', async () => {
+  it('PAR HTTP failures and a stalled request surface oauth_upstream and leave no oauth_states row or late PAR', async () => {
     await withMigratedDb(async (db) => {
       const { w, alice } = await world(db);
       w.as.failOAuth('/oauth/par', 'invalid_request', 'fixture PAR refusal', 400);
@@ -422,6 +546,28 @@ describe('the confidential OAuth client', () => {
       expect(unavailable.code).toBe('oauth_upstream');
       expect(w.as.calls.filter({ path: '/oauth/par' }).map((c) => c.status)).toEqual([400, 503]);
       expect(w.stateRows()).toBe(0);
+
+      const { svc, hold } = gatedService(w);
+      const parHold = hold('/oauth/par');
+      const pending = svc.authorize(alice.handle, { bindingHash: w.binding().hash });
+      await until(() => parHold.reached);
+      expect(w.stateRows()).toBe(1);
+      expect(w.as.calls.filter({ path: '/oauth/par' }).map((c) => c.status)).toEqual([400, 503]);
+
+      w.timer.expireAll();
+      const timedOut = await flowError(pending);
+      expect(timedOut.code).toBe('oauth_upstream');
+      expect(timedOut.status).toBe(502);
+      expect(timedOut.reason).toBe('upstream');
+      expect(findCause(timedOut, (e) => (e as { code?: string })?.code === 'timeout')).toBeDefined();
+      expect(w.stateRows()).toBe(0);
+
+      // Releasing a fixture request after its deadline must not send a late PAR.
+      parHold.release();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(w.as.calls.filter({ path: '/oauth/par' }).map((c) => c.status)).toEqual([400, 503]);
+      expect(w.stateRows()).toBe(0);
+      expect(w.sessionRows()).toEqual([]);
     });
   });
 
@@ -459,7 +605,7 @@ describe('the confidential OAuth client', () => {
     });
   });
 
-  it('a use_dpop_nonce error on the token request and on a PDS write is retried once with the new nonce and succeeds', async () => {
+  it('DPoP nonce retries use a new nonce and jti, and endless token challenges terminate safely', async () => {
     await withMigratedDb(async (db) => {
       const { w, alice } = await world(db);
       const svc = w.service();
@@ -471,11 +617,16 @@ describe('the confidential OAuth client', () => {
 
       const token = w.asRequests('/oauth/token');
       expect(token.map((c) => c.status)).toEqual([400, 200]);
-      const n1 = decodeJwt(token[0]!.headers.get('dpop') ?? '')?.payload.nonce;
-      const n2 = decodeJwt(token[1]!.headers.get('dpop') ?? '')?.payload.nonce;
+      const proof1 = decodeJwt(token[0]!.headers.get('dpop') ?? '')?.payload;
+      const proof2 = decodeJwt(token[1]!.headers.get('dpop') ?? '')?.payload;
+      const n1 = proof1?.nonce;
+      const n2 = proof2?.nonce;
       expect(typeof n1).toBe('string');
       expect(typeof n2).toBe('string');
       expect(n2).not.toBe(n1);
+      expect(typeof proof1?.jti).toBe('string');
+      expect(typeof proof2?.jti).toBe('string');
+      expect(proof2?.jti).not.toBe(proof1?.jti);
       // The retry is the same request (same code, same assertion) with a new proof.
       expect(token[1]!.body).toBe(token[0]!.body);
       expect(w.sessionRows().map((r) => r.did)).toEqual([alice.did]);
@@ -493,10 +644,30 @@ describe('the confidential OAuth client', () => {
       expect(w.pds.calls.filter({ nsid: 'com.atproto.repo.createRecord' }).map((c) => c.status)).toEqual([
         401, 200, 200,
       ]);
+
+      // Keep rotating the AS nonce before every token request: the single allowed retry also gets challenged.
+      const beforeRows = w.sessionRows();
+      const beforeTokenRequests = w.asRequests('/oauth/token').length;
+      w.oauthObserver = (req) => {
+        if (new URL(req.url).pathname === '/oauth/token') w.as.rotateNonces();
+      };
+      const b2 = w.binding();
+      const params2 = await w.browse((await svc.authorize(alice.handle, { bindingHash: b2.hash })).url);
+      const endless = await flowError(svc.callback(params2, { bindingHash: b2.hash }));
+      expect(endless.code).toBe('oauth_upstream');
+      expect(endless.status).toBe(502);
+      const challenged = w.asRequests('/oauth/token').slice(beforeTokenRequests);
+      expect(challenged.map((c) => c.status)).toEqual([400, 400]);
+      const endlessProofs = challenged.map((c) => decodeJwt(c.headers.get('dpop') ?? '')?.payload);
+      expect(endlessProofs.every((p) => typeof p?.nonce === 'string' && typeof p.jti === 'string')).toBe(true);
+      expect(endlessProofs[1]?.jti).not.toBe(endlessProofs[0]?.jti);
+      expect(w.stateRows()).toBe(0);
+      expect(w.sessionRows()).toEqual(beforeRows);
+      expect(w.as.sessions(alice.did)).toHaveLength(1);
     });
   });
 
-  it('two concurrent restore() calls on an expired session send one refresh request and both use the new token', async () => {
+  it('ten concurrent restore() calls share one successful refresh rotation and all use the new token', async () => {
     await withMigratedDb(async (db) => {
       const { w, alice } = await world(db);
       const svc = w.service();
@@ -504,15 +675,16 @@ describe('the confidential OAuth client', () => {
       const before = w.as.sessions(alice.did)[0]!.accessToken;
       w.advance(3_600_000 + 60_000); // past the access token's expiry and the library's leeway
       const mark = w.as.calls.entries.length;
-      const [s1, s2] = await Promise.all([svc.restore(alice.did), svc.restore(alice.did)]);
+      const sessions = await Promise.all(Array.from({ length: 10 }, () => svc.restore(alice.did)));
       const asSession = w.as.sessions(alice.did)[0]!;
+      expect(sessions).toHaveLength(10);
       expect(asSession.refreshCount).toBe(1);
       expect(w.tokenSuccesses(mark)).toBe(1);
       expect(asSession.accessToken).not.toBe(before);
       expect(w.storedSession(alice.did)?.tokenSet.access_token).toBe(asSession.accessToken);
-      // Both sessions write with the new token (the old one is no longer accepted by the PDS).
-      expect((await w.writeScrobble(s1, 1)).status).toBe(200);
-      expect((await w.writeScrobble(s2, 2)).status).toBe(200);
+      // Each restored handle must work with the rotated token; the PDS no longer accepts the old access token.
+      const writes = await Promise.all(sessions.map((session, i) => w.writeScrobble(session, i + 1)));
+      expect(writes.map((response) => response.status)).toEqual(Array(10).fill(200));
       expect(w.as.sessions(alice.did)[0]!.refreshCount).toBe(1);
       expect(w.as.revocations).toEqual([]);
     });

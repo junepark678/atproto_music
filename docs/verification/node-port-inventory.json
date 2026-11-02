@@ -1418,7 +1418,9 @@
         "mutation acceptance"
       ],
       "title": "delete r01 → 6/6/3, Homogenic 1, history r07,r02,…",
-      "kept": true
+      "replaced": "worker/test/acceptance/mutations.test.ts › mutation acceptance › delete r01 → 6/6/3, Homogenic 1, history r07,r02,… and the next HTTP profile is fresh",
+      "package": "N4-03",
+      "reason": "Extended the existing deterministic delete acceptance with immediate public-profile freshness after deletion; the original history/read-model outcome remains asserted."
     },
     {
       "id": "worker/test/acceptance/mutations.test.ts › mutation acceptance › r03 artist→Björk → Björk 3, Kate Bush 2, Radiohead 2, total 7",
@@ -1463,8 +1465,8 @@
         "query plans"
       ],
       "title": "100×1,000 seeded records: history/feed/stats plans use indexes; negative control scans",
-      "replaced": "worker/test/acceptance/query-plans.test.ts › query plans › with 100 DIDs x 1,000 records, history, feeds and stats use their indexes on SQLite 3.54.1 and the no-index control shows SCAN",
-      "reason": "ADR 0005 §15.3 (N4-03): the same plans are pinned on the SQLite of the Node host (3.54.1, asserted) through the production Node composition instead of DO SQLite.",
+      "replaced": "worker/test/acceptance/query-plans.test.ts › query plans › with 100 DIDs x 1,000 records, history, feeds and stats use their indexes on supported SQLite baselines and the no-index control shows SCAN",
+      "reason": "ADR 0005 §15.3 (N4-03): the same plans are pinned on the SQLite of the Node host (3.54.0 or 3.54.1; measured engine asserted) through the production Node composition instead of DO SQLite.",
       "package": "N4-03"
     },
     {
@@ -1580,7 +1582,7 @@
       ],
       "title": "history/feed page statement rows read within ADR Q10 budgets",
       "replaced": "worker/test/bench/read-models.bench.test.ts › read-model benchmark › the read-model bench records p50 and p95 for history, feed and stats on node:sqlite and asserts their query plans",
-      "reason": "ADR 0005 §15.3 (N4-03): node:sqlite has no rows-read counter; the ADR 0004 §15 Q10 rows-read budgets become EXPLAIN QUERY PLAN assertions on SQLite 3.54.1, with p50 and p95 timings reported.",
+      "reason": "ADR 0005 §15.3 (N4-03): node:sqlite has no rows-read counter; the ADR 0004 §15 Q10 rows-read budgets become EXPLAIN QUERY PLAN assertions on SQLite 3.54.0/3.54.1, with p50 and p95 timings reported.",
       "package": "N4-03"
     },
     {
@@ -1789,21 +1791,21 @@
       "kept": true
     },
     {
-      "id": "worker/test/config.test.ts › parseConfig namespace gate › owned prefix publishes only with ownership evidence",
+      "id": "worker/test/config.test.ts › parseConfig namespace gate › owned prefix stays closed until ownership and reviewed schema-publication references are both present",
       "file": "worker/test/config.test.ts",
       "ancestors": [
         "parseConfig namespace gate"
       ],
-      "title": "owned prefix publishes only with ownership evidence",
+      "title": "owned prefix stays closed until ownership and reviewed schema-publication references are both present",
       "kept": true
     },
     {
-      "id": "worker/test/config.test.ts › parseConfig namespace gate › decided prefix dev.pythonplayer123.music is valid, non-fixture, and publishes only with NAMESPACE_OWNERSHIP_REF",
+      "id": "worker/test/config.test.ts › parseConfig namespace gate › decided prefix dev.pythonplayer123.music is valid, non-fixture, and publishes only with both reviewed references",
       "file": "worker/test/config.test.ts",
       "ancestors": [
         "parseConfig namespace gate"
       ],
-      "title": "decided prefix dev.pythonplayer123.music is valid, non-fixture, and publishes only with NAMESPACE_OWNERSHIP_REF",
+      "title": "decided prefix dev.pythonplayer123.music is valid, non-fixture, and publishes only with both reviewed references",
       "kept": true
     },
     {
@@ -2790,7 +2792,7 @@
       ],
       "title": "server-issued cursors (last <= upper, ASCII) emit only the last clause and return the two-clause page with O(limit) rows read",
       "kept": true,
-      "change": "ADR 0005 §15.3: node:sqlite has no rows-read counter; the rowsRead budget lines (two-clause > 40, emitted < 40 and <= LIMIT + 3) are replaced by the seek key read from SQLite's EXPLAIN program (the emitted form seeks at `last`, the two-clause form at the anchor) and no sort step; the Q10 budgets as plan assertions are the new test \"history and feed page statements use the single-clause seek plan on SQLite 3.54.1 (Q10 budgets as plan assertions)\".",
+      "change": "ADR 0005 §15.3: node:sqlite has no rows-read counter; the rowsRead budget lines (two-clause > 40, emitted < 40 and <= LIMIT + 3) are replaced by the seek key read from SQLite's EXPLAIN program (the emitted form seeks at `last`, the two-clause form at the anchor) and no sort step; the Q10 budgets as plan assertions are the new test \"history and feed page statements use the single-clause seek plan on supported SQLite baselines (Q10 budgets as plan assertions)\".",
       "package": "N2-02"
     },
     {
@@ -3267,7 +3269,7 @@
       ],
       "title": "status reads are index lookups: rows read do not grow with scrobbles/follows; negative control scans",
       "replaced": "worker/test/storage/status.test.ts › indexing status truth › status statements use the indexes pinned by EXPLAIN QUERY PLAN (asserted by index name, SQLite version recorded) in place of the DO rowsRead budget",
-      "reason": "ADR 0005 §15.3: node:sqlite has no rows-read counter; the rowsRead budget (< 40 rows, equal at 2,000 and 20,000 rows, negative control >= 20,000) is re-derived as EXPLAIN QUERY PLAN pins on SQLite 3.54.1 (the index of every plan step, identical plans at both sizes, the unindexed negative control), with process.versions.sqlite asserted.",
+      "reason": "ADR 0005 §15.3: node:sqlite has no rows-read counter; the rowsRead budget (< 40 rows, equal at 2,000 and 20,000 rows, negative control >= 20,000) is re-derived as EXPLAIN QUERY PLAN pins on SQLite 3.54.0/3.54.1 (the index of every plan step, identical plans at both sizes, the unindexed negative control), with process.versions.sqlite asserted.",
       "package": "N2-02"
     },
     {

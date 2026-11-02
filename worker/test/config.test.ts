@@ -35,11 +35,13 @@ type WranglerConfig = WranglerEnv & { env: Record<string, WranglerEnv> };
 /** The owner's decision, ADR 0004 §15 Q3. */
 const DECIDED_ORIGIN = 'https://music.214510.xyz';
 const DECIDED_PREFIX = 'dev.pythonplayer123.music';
+const PUBLICATION_REF = `sha256:${'a'.repeat(64)}`;
 
 const BASE: EnvVars = {
   PUBLIC_ORIGIN: 'https://music.example.org',
   LEXICON_PREFIX: '',
   NAMESPACE_OWNERSHIP_REF: '',
+  NAMESPACE_PUBLICATION_REF: '',
   INGEST_MODE: 'socket',
   JETSTREAM_URLS: 'wss://jetstream.us-east.bsky.network,wss://jetstream.us-west.bsky.network',
   JETSTREAM_LOOKBACK_HOURS: '24',
@@ -111,17 +113,49 @@ describe('parseConfig namespace gate', () => {
     ).toEqual(['NAMESPACE_OWNERSHIP_REF']);
   });
 
-  it('owned prefix publishes only with ownership evidence', () => {
+  it('owned prefix stays closed until ownership and reviewed schema-publication references are both present', () => {
     expect(parseConfig({ ...BASE, LEXICON_PREFIX: 'org.example.music' }).publication).toBe(false);
     const owned = parseConfig({
       ...BASE,
       LEXICON_PREFIX: 'org.example.music',
       NAMESPACE_OWNERSHIP_REF: 'docs/adr/0001-namespace.md#evidence',
     });
-    expect(owned).toMatchObject({ prefix: 'org.example.music', publication: true, ingestMode: 'socket' });
+    expect(owned).toMatchObject({
+      prefix: 'org.example.music',
+      namespacePublicationRef: null,
+      publication: false,
+      ingestMode: 'socket',
+    });
+    const published = parseConfig({
+      ...BASE,
+      LEXICON_PREFIX: 'org.example.music',
+      NAMESPACE_OWNERSHIP_REF: 'docs/adr/0001-namespace.md#evidence',
+      NAMESPACE_PUBLICATION_REF: PUBLICATION_REF,
+    });
+    expect(published).toMatchObject({
+      prefix: 'org.example.music',
+      namespacePublicationRef: PUBLICATION_REF,
+      publication: true,
+      ingestMode: 'socket',
+    });
     expect(issuesOf(() => parseConfig({ ...BASE, NAMESPACE_OWNERSHIP_REF: 'ref' }))).toEqual([
       'NAMESPACE_OWNERSHIP_REF',
     ]);
+    expect(
+      issuesOf(() =>
+        parseConfig({ ...BASE, LEXICON_PREFIX: 'org.example.music', NAMESPACE_PUBLICATION_REF: 'approved' }),
+      ),
+    ).toEqual(['NAMESPACE_PUBLICATION_REF']);
+    expect(
+      issuesOf(() =>
+        parseConfig({
+          ...BASE,
+          LEXICON_PREFIX: 'org.example.music',
+          NAMESPACE_OWNERSHIP_REF: 'owner-ref',
+          NAMESPACE_PUBLICATION_REF: 'approved',
+        }),
+      ),
+    ).toEqual(['NAMESPACE_PUBLICATION_REF']);
   });
 
   // ADR 0005 §6.3, B12 (N3-11): a valid prefix derives exactly four
@@ -148,13 +182,20 @@ describe('parseConfig namespace gate', () => {
       LEXICON_PREFIX: DECIDED_PREFIX,
       NAMESPACE_OWNERSHIP_REF: 'dns:_lexicon.music.pythonplayer123.dev TXT',
     });
-    expect(owned.publication).toBe(true);
+    expect(owned.publication).toBe(false);
+    const published = parseConfig({
+      ...BASE,
+      LEXICON_PREFIX: DECIDED_PREFIX,
+      NAMESPACE_OWNERSHIP_REF: 'dns:_lexicon.music.pythonplayer123.dev TXT',
+      NAMESPACE_PUBLICATION_REF: PUBLICATION_REF,
+    });
+    expect(published.publication).toBe(true);
     expect(owned.collections?.love).toBe('dev.pythonplayer123.music.love');
     // The closed gate has no collections at all.
     expect(parseConfig(BASE).collections).toBeNull();
   });
 
-  it('decided prefix dev.pythonplayer123.music is valid, non-fixture, and publishes only with NAMESPACE_OWNERSHIP_REF', () => {
+  it('decided prefix dev.pythonplayer123.music is valid, non-fixture, and publishes only with both reviewed references', () => {
     const decided = { ...BASE, PUBLIC_ORIGIN: DECIDED_ORIGIN, LEXICON_PREFIX: DECIDED_PREFIX };
     // Accepted without allowFixturePrefix: it is not the fixture prefix.
     const gated = parseConfig(decided);
@@ -172,8 +213,19 @@ describe('parseConfig namespace gate', () => {
       },
     });
     const ref = 'dns:_lexicon.music.pythonplayer123.dev TXT';
-    const published = parseConfig({ ...decided, NAMESPACE_OWNERSHIP_REF: ref });
-    expect(published).toMatchObject({ prefix: DECIDED_PREFIX, namespaceOwnershipRef: ref, publication: true });
+    const owned = parseConfig({ ...decided, NAMESPACE_OWNERSHIP_REF: ref });
+    expect(owned).toMatchObject({ prefix: DECIDED_PREFIX, namespaceOwnershipRef: ref, publication: false });
+    const published = parseConfig({
+      ...decided,
+      NAMESPACE_OWNERSHIP_REF: ref,
+      NAMESPACE_PUBLICATION_REF: PUBLICATION_REF,
+    });
+    expect(published).toMatchObject({
+      prefix: DECIDED_PREFIX,
+      namespaceOwnershipRef: ref,
+      namespacePublicationRef: PUBLICATION_REF,
+      publication: true,
+    });
     // Whitespace-only evidence is no evidence.
     expect(parseConfig({ ...decided, NAMESPACE_OWNERSHIP_REF: '   ' }).publication).toBe(false);
   });

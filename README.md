@@ -1,61 +1,94 @@
 # AT Protocol music
 
-A Last.fm-style service on AT Protocol: scrobbles and music follows are public records in each user's own repository, and this AppView indexes them into listening history, feeds, statistics, profiles and follow graphs. Accounts keep their data on their own PDS.
+A Last.fm-style service on AT Protocol: scrobbles and music follows are public
+records in each user's repository. This AppView indexes them into listening
+history, feeds, statistics, profiles and follow graphs.
 
-It runs entirely on Cloudflare Workers ([ADR 0004](docs/adr/0004-cloudflare-workers.md)): one Worker, one SQLite-backed Durable Object holding the whole index, Static Assets for the Preact SPA, one cron trigger and one secret. The browser SPA is the atproto OAuth client and writes to the user's PDS; the server holds no user credentials. Every record is indexed only after a signed current-head proof (`getRecord`) or a verified range snapshot (`getBlocks` MST walk).
+The accepted architecture is **one local Node 26 process**, a systemd user
+service with SQLite ([ADR 0005](docs/adr/0005-local-node-host-and-compat-apis.md)).
+The server is a confidential atproto OAuth client/BFF and owns encrypted OAuth
+sessions, cookie/CSRF sessions and a durable write outbox. Public indexing still
+requires a signed current-head proof or verified repository snapshot. The
+`worker/` package name is retained for stable paths; it does not mean that the
+accepted production host is Cloudflare Workers.
 
-**Status:** the TypeScript rebuild is implemented and covered by deterministic workerd and browser suites; the live acceptance gates (OAuth and publishing on two independent PDSs, Jetstream coverage, a 24 h socket soak) are recorded per deployed Worker version and report `blocked` until their prerequisites exist. The Rust crates under `crates/` are kept, frozen, as the golden-vector oracle.
+**Status:** Node backend foundations are implemented, but the port and M1–M6
+acceptance are not complete. At this wave-4 checkout the browser still uses the
+superseded public-client OAuth/outbox stack; Node browser integration, final
+acceptance/release tooling, current live tooling and published issue-contract
+reconciliation remain outstanding. Deterministic fixtures are not live external
+PDS evidence. No deployment or milestone closure is claimed. See the scoped
+[implementation and verification record](docs/verification/implementation-agent-13.md).
+Rust crates remain a frozen regression/golden-vector oracle.
 
-## Quickstart
+## Deterministic checks
 
-Requires Node 24 LTS (`.nvmrc`), Python 3 with `api/requirements-contracts.txt` for the contract checks, and actionlint v1.7.7 for the workflow-validity test (`scripts/test/deploy.test.ts › workflow is valid` fails, never skips, when actionlint is missing or another version). CI installs the same pinned actionlint with Go, verified against sum.golang.org:
+Requires the Node version in `.nvmrc` (**26.12.1**), Python 3 and the pinned
+contract-validator requirements, and actionlint **1.7.7**:
 
 ```sh
 npm ci
-python3 -m venv .venv && .venv/bin/python -m pip install -r api/requirements-contracts.txt
-go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7   # into $GOBIN or $GOPATH/bin (default ~/go/bin)
-bash scripts/check-ts.sh                 # the repository gate: tsc -b, biome, vitest, contracts, case map, bundle guard
+python3 -m venv .venv
+.venv/bin/python -m pip install -r api/requirements-contracts.txt
+go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+bash scripts/check-ts.sh
+python3 scripts/validate_case_map.py --check-tests --node-wave 4
 ```
 
-The test finds actionlint through `ACTIONLINT`, then `PATH`, `$GOBIN` and `$GOPATH/bin`; set `ACTIONLINT=/path/to/actionlint` for any other location.
-
-Run it locally:
+The workflow-validity test finds actionlint via `ACTIONLINT`, `PATH`, `$GOBIN`,
+or `$GOPATH/bin`. The gate runs typechecking, Biome, all Vitest projects,
+contracts, structural case-map checks and the Workers/Node bundle guards still
+present during the port. Plan assertions support SQLite **3.54.0 and 3.54.1**;
+every run checks its actual query plans and records its actual engine version.
+The official Node binary and the owner's system-SQLite build need not report
+the same patch version. No test requires the optional `sqlite_stmt` extension.
 
 ```sh
-cp worker/.dev.vars.example worker/.dev.vars       # set CURSOR_KEY to the output of: openssl rand -hex 32
-npx tsx scripts/gen-config.ts --env local          # loopback OAuth client hint
-npm run build:web                                  # vite build into web/dist
-npx wrangler dev --config worker/wrangler.jsonc --var INGEST_MODE:off
-# http://127.0.0.1:8787  (SPA dev server with hot reload: npm run dev --workspace @atmusic/web)
+npm test                                      # deterministic Vitest workspace
+bash scripts/acceptance/node-interim.sh --wave 4 # interim only, not final acceptance
+bash scripts/check_goldens.sh                 # Rust oracle; requires pinned Rust
 ```
 
-Deploy (see [deployment](docs/deployment.md) for the one-time setup: owned domain, NSID ownership, secrets):
+`npm run test:e2e` still launches the historical Workers/dev-env browser stack.
+It is not current Node BFF end-to-end evidence. The unrestricted case-map
+existence check still has later-wave missing targets; wave-scoped success does
+not mean that those targets executed.
 
-```sh
-bash scripts/deploy.sh --dry-run         # refuses an empty or fixture prefix and a missing CURSOR_KEY secret
-bash scripts/deploy.sh --initial         # first deploy of an environment (applies the Durable Object migration)
-bash scripts/deploy.sh                   # later deploys: versions upload + versions deploy, then a smoke test
-```
+## Host/build documentation
 
-Tests: `npm test` (all vitest projects: `packages/*`, `worker`, `web`, `scripts`), `npm run test:e2e` (Playwright against `wrangler dev` and a local `@atproto/dev-env` PDS), `bash scripts/check_goldens.sh` (Rust-oracle parity). The deterministic suites use the frozen clock `2026-01-15T12:00:00Z`, seeded randomness and no network.
+Read [local Node installation](docs/deploy/local-node.md),
+[deployment](docs/deployment.md), [exposure](docs/deploy/exposure.md),
+[operations](docs/operations.md), and [backup/restore](docs/backup.md).
+Build foundations use `npm run build:web` and
+`npx tsx scripts/build-server.ts --check`. Do not use the old Workers
+`scripts/deploy.sh` or the Rust release workflow as a Node release procedure.
+No live acceptance run is recorded. Publication remains fail-closed until
+reviewable namespace authority evidence is supplied.
 
 ## Layout
 
 | Path | Contents |
 | --- | --- |
-| `packages/core` | pure logic shared by Worker and SPA: validation, music keys, cursors, write policy, record keys |
-| `packages/atproto` | Workers- and browser-safe I/O: SafeFetch, identity, CAR/commit/MST verification, range snapshots, Jetstream parsing |
-| `worker` | the Worker entry, router and HTTP routes, and the `IndexDO` (schema, ingestion, reads, timers) |
-| `web` | the Preact SPA: browser OAuth client, IndexedDB outbox, screens |
-| `scripts` | gate, build config (`gen-config.ts`), bundle guard, deploy, admin and live-gate tools |
-| `crates`, `tests/goldens` | the frozen Rust oracle and its golden vectors |
+| `packages/core` | Pure validation, music keys, cursors, write policy and record keys |
+| `packages/atproto` | Identity, SafeFetch, CAR/commit/MST verification, snapshots, Jetstream and test fakes |
+| `worker/src/node`, `worker/src/app` | Node host, transport, composition, process lifecycle and indexing core |
+| `worker/src/bff`, `worker/src/outbox` | Confidential OAuth, sessions, CSRF and server publishing |
+| `worker/src/do` | Host-neutral schema, ingestion, reads and timers (historical directory name) |
+| `web` | Preact SPA, still awaiting the server-session migration at this checkout |
+| `scripts` | Checks, build, installer, admin, interim acceptance and historical live/deploy tools |
+| `crates`, `tests/goldens` | Frozen Rust oracle and shared vectors |
 
-## Documentation
+## Contracts and evidence
 
-- [Deployment](docs/deployment.md), [operations](docs/operations.md), [backup and recovery](docs/backup.md)
-- [Background work: timers, ingest modes, budgets](docs/workers.md), [storage schema](docs/storage.md)
-- [Cursors](docs/cursors.md), [profiles](docs/profiles.md), [follows](docs/follows.md), [deletion](docs/deletion.md), [export and disconnect](docs/account-controls.md)
-- [API contract](docs/planning/API.md) (as amended by ADR 0004 §9), [OpenAPI](api/openapi.yaml), [test contract](docs/planning/TESTING.md), [case map](docs/verification/ts-case-map.json)
-- [MVP decisions](docs/planning/MVP.md), [Workers wave plan](docs/planning/workers-waves.json), [Milestones](https://github.com/junepark678/atproto_music/milestones)
+- [OpenAPI](api/openapi.yaml), [API plan](docs/planning/API.md),
+  [case map](docs/verification/ts-case-map.json)
+- [Current and historical storage](docs/storage.md), [Rust schema](docs/storage-rust.md)
+- [Node wave plan](docs/planning/node-waves.json), [draft amendments](docs/planning/AMENDMENTS-node.md)
+- [Historical validation receipt](docs/VALIDATION.md), [historical milestone counts](docs/MILESTONE_STATUS.md)
+- [Live evidence inventory](docs/verification/live-evidence.json): empty/historical;
+  it is not accepted Node release evidence
 
-Fixture-only passes never substitute for the live PDS, relay and browser gates.
+GitHub issue contracts still need explicit reconciliation with ADR 0005.
+Fixture passes, mapping existence and blocked/no-environment scripts never
+substitute for actual OAuth, lifecycle, federation, social/statistics or restore
+observations bound to the deployed Node commit and bundle.

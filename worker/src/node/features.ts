@@ -482,8 +482,9 @@ export async function productionFeatures(options: ProductionFeatureOptions): Pro
   const writers: PdsWriterSource = {
     async writerFor(did: string): Promise<PdsWriter | null> {
       const service = oauthService();
-      // A DID the policy refuses never writes, even before a reconcile has signed it out (B20).
-      if (!signInAllowed(config, did)) return null;
+      // Neither a refused DID nor an unapproved/closed namespace may obtain a PDS writer.
+      // The runner also checks this gate before selecting any pending operation.
+      if (!config.app.publication || !signInAllowed(config, did)) return null;
       if (!service.sessionStore.has(did)) return null;
       try {
         return sessionWriter(await service.restore(did));

@@ -79,6 +79,7 @@ export const BOB = 'did:plc:bbbbbbbbbbbbbbbbbbbbbbbb';
 const JOURNEY_ENV = {
   LEXICON_PREFIX: OWNED,
   NAMESPACE_OWNERSHIP_REF: 'dns:_lexicon.music.example.org',
+  NAMESPACE_PUBLICATION_REF: 'sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
   INGEST_MODE: 'socket',
   LASTFM_API_ROOT: 'https://lastfm.test/2.0/',
   LASTFM_AUTH_URL: 'https://lastfm.test/api/auth/',

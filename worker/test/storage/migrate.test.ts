@@ -692,11 +692,13 @@ describe('migrate', () => {
 
   // ADR 0005 §3.2, §6.4 (N1-10): migration 2 makes the code version 2, and a
   // database at that version is ready for that code, across restarts.
-  it('SCHEMA_VERSION is 2 and a v2 database opened by v2 code is ready', async () => {
-    expect(SCHEMA_VERSION).toBe(2);
+  // Migration 3 is additive and keeps the v2 compatibility floor.
+  it('SCHEMA_VERSION is 3 and additive follow proof storage remains compatible with v2 code', async () => {
+    expect(SCHEMA_VERSION).toBe(3);
     expect(MIGRATIONS.map((m) => [m.version, m.name])).toEqual([
       [1, 'initial_workers_schema'],
       [2, 'node_schema'],
+      [3, 'follow_proof_baseline'],
     ]);
 
     const name = 'migrate-v2-ready';
@@ -706,11 +708,12 @@ describe('migrate', () => {
 
     let before: { objects: MasterRow[]; data: Record<string, unknown[]> } | undefined;
     {
-      expect(lastMigration(name)).toEqual({ status: 'ready', version: 2 });
+      expect(lastMigration(name)).toEqual({ status: 'ready', version: SCHEMA_VERSION });
       const db = stubFor(name);
       expect(db.all('SELECT version, name FROM schema_migrations ORDER BY version')).toEqual([
         { version: 1, name: 'initial_workers_schema' },
         { version: 2, name: 'node_schema' },
+        { version: 3, name: 'follow_proof_baseline' },
       ]);
       expect(db.all('SELECT min_compatible_version FROM schema_compat')).toEqual([{ min_compatible_version: 2 }]);
       // A row in a migration-2 table survives reopening.
@@ -718,14 +721,14 @@ describe('migrate', () => {
         "INSERT INTO accounts(did, username, created_at_ms, updated_at_ms) VALUES ('did:plc:alice', 'alice.test', 1, 1)",
       );
       before = { objects: appObjects(db), data: dumpAll(db) };
-      expect(migrate(db)).toEqual({ status: 'ready', version: 2 });
+      expect(migrate(db, MIGRATIONS.slice(0, 2))).toEqual({ status: 'ready', version: SCHEMA_VERSION });
       expect({ objects: appObjects(db), data: dumpAll(db) }).toEqual(before);
     }
 
-    // Reopened by the same code (a restart keeps the file): ready at 2, untouched.
+    // Reopened by the same code (a restart keeps the file): ready at 3, untouched.
     {
       const db = fileIndexes().reopen(name);
-      expect(lastMigration(name)).toEqual({ status: 'ready', version: 2 });
+      expect(lastMigration(name)).toEqual({ status: 'ready', version: SCHEMA_VERSION });
       expect(fileIndexes().migrations(name)).toHaveLength(2);
       expect({ objects: appObjects(db), data: dumpAll(db) }).toEqual(before);
       expect(db.all('SELECT did, username FROM accounts')).toEqual([{ did: 'did:plc:alice', username: 'alice.test' }]);
