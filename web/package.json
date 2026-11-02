@@ -11,7 +11,8 @@
   "scripts": {
     "build": "vite build",
     "dev": "vite",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:bundle": "npm run build && vitest run test/bundle.test.ts"
   },
   "dependencies": {
     "@atmusic/core": "0.0.0",

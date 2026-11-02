@@ -105,7 +105,7 @@ export default function SignIn() {
             onInput={(e) => setHandle((e.currentTarget as HTMLInputElement).value)}
           />
           <span class="field-hint" id="signin-hint">
-            For example alice.bsky.social or your own domain.
+            For example alice.example.social or your own domain.
           </span>
         </div>
         {message ? (
