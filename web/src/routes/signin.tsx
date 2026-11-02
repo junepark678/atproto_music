@@ -65,10 +65,20 @@ export default function SignIn() {
     );
   }
 
+  const callbackError = new URLSearchParams(window.location.search).get('error');
+  const recoveryMessage = callbackError === null
+    ? null
+    : callbackError === 'denied'
+      ? 'Authorization was cancelled. You can try signing in again.'
+      : callbackError === 'expired'
+        ? 'The sign-in request expired. Start again to get a new request.'
+        : 'Sign-in did not complete. Check your handle and try again.';
   const message =
     phase.kind === 'error'
       ? { title: 'Sign-in could not be started', message: 'Check the handle and try again.' }
-      : null;
+      : recoveryMessage !== null
+        ? { title: 'Sign-in did not complete', message: recoveryMessage }
+        : null;
   const fieldError = false;
 
   return (

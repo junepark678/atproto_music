@@ -28,11 +28,13 @@ export const META = {
   lexiconPrefix: 'com.example.atmusic',
   indexing: { state: 'current', caughtUp: true, lastIndexedAt: null, lagSeconds: 0 },
 };
-export function mount(path: string) {
+export function mount(path: string, fetcher?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response | undefined>) {
   (window as unknown as { happyDOM: { setURL(url: string): void } }).happyDOM.setURL(`https://music.test${path}`);
   const requests: string[] = [];
   const api = new ApiClient({
-    fetch: async (input) => {
+    fetch: async (input, init) => {
+      const custom = await fetcher?.(input, init);
+      if (custom) return custom;
       const url = new URL(input, 'https://music.test');
       requests.push(`${url.pathname}${url.search}`);
       const p = url.pathname;

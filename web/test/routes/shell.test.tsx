@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { App } from '../../src/app';
 import type { Session } from '../../src/session/client';
 import { createAppState } from '../../src/state/store';
+import { matchRoute } from '../../src/router';
 
 describe('web/test/routes/shell.test.tsx', () => {
   it('shows server session identity and the re-sign-in notice without browser OAuth state', async () => {
@@ -25,5 +26,26 @@ describe('web/test/routes/shell.test.tsx', () => {
     expect(root.querySelector('[role="alert"]')?.textContent).toContain('Sign in again');
     render(null, root);
     root.remove();
+  });
+
+  it('recognizes deep links for every settings screen and sends unknown paths to not found', async () => {
+    expect(matchRoute('/settings/links')?.module).toBe('settings-links');
+    expect(matchRoute('/settings/imports')?.module).toBe('settings-imports');
+    expect(matchRoute('/settings/credentials')?.module).toBe('settings-credentials');
+    expect(matchRoute('/lastfm/authorize')?.module).toBe('lastfm-authorize');
+    expect(matchRoute('/not-a-route')).toBeUndefined();
+    (window as unknown as { happyDOM: { setURL(url: string): void } }).happyDOM.setURL('https://music.test/not-a-route');
+    const root = document.createElement('div'); document.body.append(root);
+    render(<App state={createAppState()} loadMetaOnMount={false} />, root);
+    await vi.waitFor(() => expect(root.textContent).toContain('Page not found'));
+    render(null, root); root.remove();
+  });
+
+  it('the settings route gives signed-out users a sign-in prompt', async () => {
+    (window as unknown as { happyDOM: { setURL(url: string): void } }).happyDOM.setURL('https://music.test/settings');
+    const root = document.createElement('div'); document.body.append(root);
+    render(<App state={createAppState()} loadMetaOnMount={false} />, root);
+    await vi.waitFor(() => expect(root.textContent).toContain('Sign in to manage your settings'));
+    render(null, root); root.remove();
   });
 });
