@@ -26,5 +26,6 @@ Use the T3 orchestration tools for delegated work. Confirm available providers/m
 
 - Keep tasks scoped to the milestone and current architecture; cite concrete files and acceptance criteria in delegation briefs.
 - Commit frequently in small, coherent commits. Stage only files belonging to that change; never include unrelated pre-existing worktree changes.
+- Push meaningful commits as they are ready, even while the overall implementation is still in progress. Do not wait for the full milestone or backend work to be complete before pushing a completed, reviewable change.
 - Preserve user changes and coordinate shared-checkout edits to avoid overwriting another agent's work.
 - Report what was completed, what remains, and the evidence used to verify it.

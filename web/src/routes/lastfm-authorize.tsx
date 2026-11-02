@@ -13,7 +13,7 @@ export default function LastfmAuthorize() {
   const [clientName, setClientName] = useState<string | null | undefined>(undefined);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
-  const [denied, setDenied] = useState(false);
+  const [decision, setDecision] = useState<'pending' | 'approved' | 'denied'>('pending');
   useEffect(() => {
     if (!session) return;
     void listCredentials().then((value) => setClientName(value.lastfmApps.find((app) => app.apiKey === apiKey)?.name ?? null), (e) => { setClientName(null); setError(e); });
@@ -23,7 +23,11 @@ export default function LastfmAuthorize() {
     setBusy(true); setError(null);
     try {
       const result = await approveLastfmAuthorization(apiKey, token);
-      if (!callback) { setDenied(true); return; }
+      if (!callback) {
+        setDecision('approved');
+        window.history.replaceState(null, '', window.location.pathname);
+        return;
+      }
       const hash = callback.indexOf('#');
       const base = hash < 0 ? callback : callback.slice(0, hash);
       const fragment = hash < 0 ? '' : callback.slice(hash);
@@ -32,14 +36,13 @@ export default function LastfmAuthorize() {
     } catch (e) { setError(e); } finally { setBusy(false); }
   };
   const deny = () => {
-    setDenied(true);
-    const clean = `${window.location.pathname}`;
-    window.history.replaceState(null, '', clean);
+    setDecision('denied');
+    window.history.replaceState(null, '', window.location.pathname);
   };
   return <main aria-labelledby="page-title">
     <h1 id="page-title">Authorize Last.fm application</h1>
     {error && <ErrorState title="Authorization could not be completed." error={error} />}
-    {denied ? <p role="status">Authorization denied. This application was not given access.</p> : <>
+    {decision === 'denied' ? <p role="status">Authorization denied. This application was not given access.</p> : decision === 'approved' ? <p role="status">Authorization approved.</p> : <>
       <p>Allow this application to use your Last.fm account?</p>
       <dl><dt>Application</dt><dd>{clientName === null ? <><strong>Unverified application</strong> <span>(not issued by this service)</span></> : clientName}</dd>
         <dt>Requested</dt><dd>{new Date().toLocaleString()}</dd>
