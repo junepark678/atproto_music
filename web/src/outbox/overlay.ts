@@ -18,7 +18,13 @@
 // Pure functions over `OutboxStore.list(did)` rows; nothing here does I/O.
 
 import type { AtUri, Did, Scrobble } from '@atmusic/core/api-types';
-import type { OperationKind, OperationState, OutboxOperation } from './store';
+export type OperationKind = 'scrobble_create' | 'scrobble_delete' | 'follow_create' | 'follow_delete' | 'settings_put' | 'settings_delete';
+export type OperationState = 'queued' | 'running' | 'published' | 'indexed' | 'failed';
+export interface OutboxOperation {
+  id: string; did: Did; kind: OperationKind; uri: AtUri; record?: Record<string, unknown>; subject?: Did;
+  state: OperationState; seq: number; dueAt: number | null; failureCode?: string; reason?: string;
+  attempts: number; notified: boolean; polls: number; createdAt: number; updatedAt: number;
+}
 
 export interface LocalState {
   opId: string;

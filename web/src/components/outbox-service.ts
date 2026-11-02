@@ -1,149 +1,82 @@
-// The screens' handle on one signed-in DID's outbox (ADR 0004 §5.2, A12).
-//
-// It owns the `OutboxRunner` for the session and forwards every persisted
-// change to subscribers, so a screen re-reads its rows when the runner moves
-// an operation (queued → running → published → indexed, or failed). Every
-// enqueue goes through the W2-07 builders (`enqueueScrobble`, …), which
-// validate with @atmusic/core and persist the row before any attempt; a
-// rejected input therefore never creates a row. After an enqueue the runner
-// is woken so the write starts without waiting for its next timer.
-//
-// `autoStart` (the default in production) elects this tab as the DID's runner
-// through Web Locks. Tests pass `autoStart: false` and drive
-// `runner.runDue()` with the frozen clock themselves.
+import type { Did } from '@atmusic/core/api-types';
+import type { Session } from '../session/client';
+import { getOperation, writes, type ServerOperation } from '../api/writes';
+import type { OutboxOperation } from '../outbox/overlay';
 
-import type { AtUri, Did } from '@atmusic/core/api-types';
-import type { Clock, Random } from '@atmusic/core/deps';
-import type { PdsSession } from '../oauth/types';
-import { type EnqueueDeleteResult, enqueueScrobbleDelete } from '../outbox/delete-ops';
-import { enqueueFollow, enqueueUnfollow } from '../outbox/follow-ops';
-import { type AppViewApi, type OutboxLocks, OutboxRunner, type Scheduler } from '../outbox/runner';
-import { type EnqueueResult, enqueueScrobble } from '../outbox/scrobble-ops';
-import { enqueueDisconnect, enqueueReconnect } from '../outbox/settings-ops';
-import type { OutboxOperation, OutboxStore } from '../outbox/store';
-
-export interface OutboxServiceDeps {
-  store: OutboxStore;
-  session: PdsSession;
-  api: AppViewApi;
-  clock: Clock;
-  random: Random;
-  /** The deployment's owned lexicon prefix (meta.lexiconPrefix). */
-  prefix: string;
-  /** Start the background runner now (default true). */
-  autoStart?: boolean;
-  locks?: OutboxLocks;
-  scheduler?: Scheduler;
-  onError?: (error: unknown) => void;
+type Listener = () => void;
+function localKind(kind: ServerOperation['kind']): OutboxOperation['kind'] {
+  return ({ 'scrobble.create': 'scrobble_create', 'scrobble.delete': 'scrobble_delete', 'follow.put': 'follow_create', 'follow.delete': 'follow_delete', 'settings.put': 'settings_put', 'love.put': 'settings_put', 'love.delete': 'settings_delete' } as const)[kind];
 }
 
 export class OutboxService {
   readonly did: Did;
   readonly prefix: string;
-  readonly session: PdsSession;
-  readonly store: OutboxStore;
-  readonly runner: OutboxRunner;
-  readonly #clock: Clock;
-  readonly #random: Random;
-  readonly #onError: (error: unknown) => void;
-  readonly #listeners = new Set<() => void>();
+  readonly session: Session;
+  #rows: OutboxOperation[] = [];
+  #listeners = new Set<Listener>();
+  #controllers = new Set<AbortController>();
+  #sequence = 0;
+  #stopped = false;
 
-  constructor(deps: OutboxServiceDeps) {
-    this.did = deps.session.did;
-    this.prefix = deps.prefix;
-    this.session = deps.session;
-    this.store = deps.store;
-    this.#clock = deps.clock;
-    this.#random = deps.random;
-    this.#onError = deps.onError ?? ((error) => console.error('outbox runner error', error));
-    this.runner = new OutboxRunner({
-      store: deps.store,
-      session: deps.session,
-      api: deps.api,
-      clock: deps.clock,
-      random: deps.random,
-      prefix: deps.prefix,
-      ...(deps.locks ? { locks: deps.locks } : {}),
-      ...(deps.scheduler ? { scheduler: deps.scheduler } : {}),
-      onChange: () => this.#emit(),
-      onError: this.#onError,
-    });
-    if (deps.autoStart ?? true) this.start();
+  constructor(session: Session, prefix: string) { this.session = session; this.did = session.did; this.prefix = prefix; }
+  async list(): Promise<OutboxOperation[]> { return [...this.#rows].sort((a, b) => a.seq - b.seq); }
+  subscribe(listener: Listener): () => void { this.#listeners.add(listener); return () => this.#listeners.delete(listener); }
+  async stop(): Promise<void> { this.#stopped = true; for (const controller of this.#controllers) controller.abort(); this.#controllers.clear(); }
+
+  async scrobble(input: Record<string, unknown>): Promise<{ ok: true; op: OutboxOperation } | { ok: false; reason: { field: string; message: string } }> {
+    const accepted = await writes.scrobble(input);
+    const op = this.#add(accepted.operation, { artist: input.artist, track: input.track, album: input.album, ...input });
+    return { ok: true, op };
+  }
+  async deleteScrobble(uri: string): Promise<OutboxOperation> { const accepted = await writes.deleteScrobble(uri); return this.#add(accepted.operation); }
+  async follow(subject: Did): Promise<OutboxOperation> { const accepted = await writes.follow(subject); return this.#add(accepted.operation, undefined, subject); }
+  async unfollow(subject: Did): Promise<OutboxOperation> { const accepted = await writes.unfollow(subject); return this.#add(accepted.operation, undefined, subject); }
+  async disconnect(): Promise<OutboxOperation> { const accepted = await writes.indexing('disabled'); return this.#add(accepted.operation, { indexing: 'disabled' }); }
+  async reconnect(): Promise<OutboxOperation> { const accepted = await writes.indexing('enabled'); return this.#add(accepted.operation, { indexing: 'enabled' }); }
+
+  async refresh(): Promise<void> {
+    if (this.#stopped) return;
+    const pending = this.#rows.filter((row) => row.state === 'queued' || row.state === 'running' || row.state === 'published');
+    await Promise.all(pending.map(async (row) => {
+      const controller = new AbortController(); this.#controllers.add(controller);
+      try {
+        const server = await getOperation(row.id, controller.signal);
+        if (server.state === 'failed' || server.state === 'blocked' || server.state === 'cancelled') {
+          row.state = 'failed'; row.failureCode = server.error ?? server.state;
+        } else if (server.state === 'succeeded') {
+          row.state = 'published';
+          if (server.uri) row.uri = server.uri;
+          if (server.uri && row.kind.startsWith('scrobble')) {
+            try {
+              const status = await fetch(`/api/v1/records/status?uri=${encodeURIComponent(server.uri)}`, { credentials: 'same-origin', cache: 'no-store', signal: controller.signal });
+              if (status.ok && (await status.json() as { state: string }).state === 'indexed') row.state = 'indexed';
+            } catch { /* keep published while the index catches up */ }
+          }
+          if (row.kind === 'follow_create' || row.kind === 'follow_delete' || row.kind.startsWith('settings')) row.state = 'indexed';
+        }
+        row.updatedAt = Date.now();
+      } catch { /* transient poll failure leaves the last server state visible */ }
+      finally { this.#controllers.delete(controller); }
+    }));
+    this.#notify();
   }
 
-  /** Elects this tab as the DID's runner (waits while another tab holds the lock). */
-  start(): void {
-    try {
-      this.runner.start().catch(this.#onError);
-    } catch (error) {
-      // No Web Locks: rows stay queued; the screens show them as queued.
-      this.#onError(error);
-    }
-  }
-
-  /** Calls `listener` after every persisted change; returns the unsubscribe function. */
-  subscribe(listener: () => void): () => void {
-    this.#listeners.add(listener);
-    return () => {
-      this.#listeners.delete(listener);
+  #add(server: ServerOperation, record?: Record<string, unknown>, subject?: Did): OutboxOperation {
+    const existing = this.#rows.find((row) => row.id === server.id);
+    if (existing) return existing;
+    const kind = localKind(server.kind);
+    const collection = kind.startsWith('scrobble') ? 'scrobble' : kind.startsWith('follow') ? 'follow' : 'settings';
+    const row: OutboxOperation = {
+      id: server.id, did: this.did, kind, uri: server.uri ?? `at://${this.did}/${this.prefix}.${collection}/${server.id}`,
+      ...(record ? { record } : {}), ...(subject ? { subject } : {}),
+      state: server.state === 'succeeded' ? 'published' : server.state === 'failed' ? 'failed' : 'queued',
+      ...(server.error ? { failureCode: server.error } : {}), seq: ++this.#sequence,
+      dueAt: Date.now() + 2_000, attempts: server.attempts, notified: true, polls: 0,
+      createdAt: Date.parse(server.createdAt), updatedAt: Date.parse(server.updatedAt),
     };
+    this.#rows.push(row); this.#notify();
+    void this.refresh();
+    return row;
   }
-
-  /** The DID's operations, oldest first. */
-  list(): Promise<OutboxOperation[]> {
-    return this.store.list(this.did);
-  }
-
-  #emit(): void {
-    for (const listener of [...this.#listeners]) listener();
-  }
-
-  #enqueued<T extends { ok: boolean }>(result: T): T {
-    if (result.ok) {
-      this.#emit();
-      this.runner.wake();
-    }
-    return result;
-  }
-
-  #base() {
-    return { store: this.store, did: this.did, prefix: this.prefix, clock: this.#clock, random: this.#random };
-  }
-
-  /** Validates the form input with @atmusic/core and persists the create. */
-  async scrobble(input: unknown): Promise<EnqueueResult> {
-    return this.#enqueued(await enqueueScrobble({ ...this.#base(), input }));
-  }
-
-  async deleteScrobble(uri: AtUri): Promise<EnqueueDeleteResult> {
-    return this.#enqueued(await enqueueScrobbleDelete({ ...this.#base(), uri }));
-  }
-
-  async follow(subject: Did): Promise<EnqueueResult> {
-    return this.#enqueued(await enqueueFollow({ ...this.#base(), subject }));
-  }
-
-  async unfollow(subject: Did): Promise<EnqueueResult> {
-    return this.#enqueued(await enqueueUnfollow({ ...this.#base(), subject }));
-  }
-
-  /** Writes `settings/self {indexing: "disabled"}` (the public opt-out record). */
-  async disconnect(): Promise<EnqueueResult> {
-    return this.#enqueued(await enqueueDisconnect(this.#base()));
-  }
-
-  /** Writes `settings/self {indexing: "enabled"}`. */
-  async reconnect(): Promise<EnqueueResult> {
-    return this.#enqueued(await enqueueReconnect(this.#base()));
-  }
-
-  /** Stops the runner (a running attempt finishes first). */
-  async stop(): Promise<void> {
-    await this.runner.stop();
-    this.#listeners.clear();
-  }
-}
-
-export function createOutboxService(deps: OutboxServiceDeps): OutboxService {
-  return new OutboxService(deps);
+  #notify(): void { for (const listener of this.#listeners) listener(); }
 }
