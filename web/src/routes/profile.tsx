@@ -27,8 +27,8 @@ import { recordVerifiedHandle, useSessionHandle } from '../components/session-id
 import { EmptyState, ErrorState, LoadingState, SignInPrompt, StaleNotice } from '../components/state-views';
 import { StatsPanel } from '../components/stats-panel';
 import { useOutbox, useOutboxOps } from '../components/use-outbox';
+import type { OutboxOperation } from '../outbox/overlay';
 import { overlayScrobbles } from '../outbox/overlay';
-import type { OutboxOperation } from '../outbox/store';
 import { useAppState } from '../state/store';
 
 type ProfileLoad =

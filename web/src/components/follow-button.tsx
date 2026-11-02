@@ -12,8 +12,9 @@
 
 import type { Did } from '@atmusic/core/api-types';
 import { useState } from 'preact/hooks';
+import type { OutboxOperation } from '../outbox/overlay';
 import { followIntent } from '../outbox/overlay';
-import type { OutboxOperation } from '../outbox/store';
+import { describeFailure } from './format';
 import { describeOperation, isPending, withDueAt } from './operation-status';
 
 export interface FollowButtonProps {
@@ -107,13 +108,18 @@ export function followView(props: Pick<FollowButtonProps, 'viewer' | 'subject' |
 
 export function FollowButton(props: FollowButtonProps) {
   const [sending, setSending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const view = followView(props);
   const act = (run: () => Promise<unknown>) => {
+    setError(null);
     setSending(true);
-    run().finally(() => setSending(false));
+    run()
+      .catch((failure: unknown) => setError(describeFailure(failure)))
+      .finally(() => setSending(false));
   };
   return (
     <div class="follow-control">
+      {error ? <p role="alert">{error}</p> : null}
       <p class="follow-status" role="status">
         {view.status}
       </p>

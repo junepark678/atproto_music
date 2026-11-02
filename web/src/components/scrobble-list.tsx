@@ -7,7 +7,7 @@
 import type { Scrobble } from '@atmusic/core/api-types';
 import { useState } from 'preact/hooks';
 import type { LocalState } from '../outbox/overlay';
-import { formatUtc } from './format';
+import { describeFailure, formatUtc } from './format';
 import { OperationStatus } from './operation-status';
 
 export interface ListItem {
@@ -80,6 +80,7 @@ export function ScrobbleText({
 
 function DeleteControl({ scrobble, onDelete }: { scrobble: Scrobble; onDelete: (s: Scrobble) => Promise<void> }) {
   const [phase, setPhase] = useState<'idle' | 'confirm' | 'sending'>('idle');
+  const [error, setError] = useState<string | null>(null);
   const name = `“${scrobble.track}” by ${scrobble.artist}`;
   if (phase === 'idle') {
     return (
@@ -90,6 +91,7 @@ function DeleteControl({ scrobble, onDelete }: { scrobble: Scrobble; onDelete: (
   }
   return (
     <fieldset class="confirm" aria-label={`Confirm deleting ${name}`}>
+      {error ? <p role="alert">{error}</p> : null}
       <p>
         Delete {name} from your PDS? It disappears from your view now and from public views once the index verifies the
         deletion.
@@ -99,8 +101,11 @@ function DeleteControl({ scrobble, onDelete }: { scrobble: Scrobble; onDelete: (
           type="button"
           disabled={phase === 'sending'}
           onClick={() => {
+            setError(null);
             setPhase('sending');
-            onDelete(scrobble).finally(() => setPhase('idle'));
+            onDelete(scrobble)
+              .catch((failure: unknown) => setError(describeFailure(failure)))
+              .finally(() => setPhase('idle'));
           }}
         >
           Confirm delete

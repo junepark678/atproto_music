@@ -10,12 +10,12 @@ import { computed, type ReadonlySignal, type Signal, signal } from '@preact/sign
 import { createContext } from 'preact';
 import { useContext } from 'preact/hooks';
 import { type ApiClient, type ApiFailure, createApiClient, isApiFailure } from '../api/client';
-import type { PdsSession } from '../oauth/types';
+import type { Session } from '../session/client';
 
 export interface AppState {
   readonly api: ApiClient;
-  /** The signed-in session, or null when anonymous. Set by web/src/oauth/session.ts. */
-  readonly session: Signal<PdsSession | null>;
+  /** The signed-in cookie BFF session, or null when anonymous. */
+  readonly session: Signal<Session | null>;
   /** The session DID's verified handle (from /api/v1/resolve or the profile), when known. */
   readonly handle: Signal<Handle | null>;
   /** True when the session expired or refresh failed and the user must sign in again. */
@@ -32,7 +32,7 @@ export interface AppState {
 }
 
 export function createAppState(options: { api?: ApiClient } = {}): AppState {
-  const session = signal<PdsSession | null>(null);
+  const session = signal<Session | null>(null);
   const meta = signal<Meta | null>(null);
   return {
     api: options.api ?? createApiClient(),
@@ -61,7 +61,7 @@ export async function loadMeta(state: AppState, abort?: AbortSignal): Promise<vo
 }
 
 /** Records a new session (or null after sign-out) and clears per-session data. */
-export function setSession(state: AppState, session: PdsSession | null, handle: Handle | null = null): void {
+export function setSession(state: AppState, session: Session | null, handle: Handle | null = null): void {
   state.session.value = session;
   state.handle.value = session ? handle : null;
   state.reauthRequired.value = false;

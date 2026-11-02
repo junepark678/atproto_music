@@ -1,12 +1,11 @@
 // /settings (M7.2.1 logout_ui, M7.2.3; ADR 0004 §5.1 step 6, §5.3, A9, A10).
 //
 // - Session: the signed-in identity, when the session ends at the latest
-//   (public clients: 14 days after authorization) and sign-out, which stops
-//   the outbox runner, revokes upstream and clears IndexedDB.
+//   the server-provided expiry and sign-out, which ends the cookie session.
 // - Export: a download of the public `GET /api/v1/users/{did}/export`
 //   attachment, saved as music-export.json.
-// - Disconnect / reconnect: a confirmed disconnect enqueues the signed opt-out
-//   record `<prefix>.settings/self {indexing: "disabled"}` through the outbox;
+// - Disconnect / reconnect: a confirmed disconnect sends the signed opt-out
+//   record `<prefix>.settings/self {indexing: "disabled"}` through the server;
 //   reconnect writes `indexing: "enabled"`. The confirmation offers the export
 //   first and says plainly that the PDS records and the opt-out record stay
 //   public. Nothing here claims an erasure.
@@ -14,15 +13,14 @@
 import type { Did, RecordStatus } from '@atmusic/core/api-types';
 import { collectionsFor } from '@atmusic/core/namespace';
 import { useEffect, useState } from 'preact/hooks';
-import { formatUtcMs } from '../components/format';
+import { describeFailure, formatUtcMs } from '../components/format';
 import { OperationStatus } from '../components/operation-status';
 import type { OutboxService } from '../components/outbox-service';
 import { useServices } from '../components/services';
 import { useSessionHandle } from '../components/session-identity';
 import { ErrorState, LoadingState, SignInPrompt } from '../components/state-views';
 import { useOutbox, useOutboxOps } from '../components/use-outbox';
-import type { SessionExpiry } from '../oauth/session';
-import type { OutboxOperation } from '../outbox/store';
+import type { OutboxOperation } from '../outbox/overlay';
 import { setSession, useAppState } from '../state/store';
 
 export const EXPORT_FILENAME = 'music-export.json';
@@ -38,7 +36,7 @@ export default function Settings() {
       <h1 id="page-title">Settings</h1>
       {signedOut ? (
         <p role="status" data-state="signed-out">
-          You have signed out. This browser no longer holds your session or your outbox.
+          You have signed out. This browser no longer holds your server session.
         </p>
       ) : null}
       {session === null ? (
@@ -86,8 +84,9 @@ function ExportLink({ href }: { href: string }) {
 function AccountSection({ did, onSignedOut }: { did: Did; onSignedOut(): void }) {
   const state = useAppState();
   const services = useServices();
-  const [expiry, setExpiry] = useState<SessionExpiry | null | 'loading'>('loading');
+  const [expiry, setExpiry] = useState<{ sessionEndsAtMs: number | null } | null | 'loading'>('loading');
   const [signingOut, setSigningOut] = useState(false);
+  const [signOutError, setSignOutError] = useState<string | null>(null);
   const handle = state.handle.value;
 
   useEffect(() => {
@@ -110,16 +109,17 @@ function AccountSection({ did, onSignedOut }: { did: Did; onSignedOut(): void })
 
   const signOut = async () => {
     setSigningOut(true);
+    setSignOutError(null);
     try {
       await services.closeOutbox();
       const port = await services.session();
       await port.signOut();
-    } catch {
-      // The session controller clears local state whatever the revocation outcome.
-    } finally {
       setSession(state, null);
-      setSigningOut(false);
       onSignedOut();
+    } catch (error) {
+      setSignOutError(describeFailure(error));
+    } finally {
+      setSigningOut(false);
     }
   };
 
@@ -136,6 +136,7 @@ function AccountSection({ did, onSignedOut }: { did: Did; onSignedOut(): void })
             ? `Your session ends no later than ${formatUtcMs(expiry.sessionEndsAtMs)}; you will then need to sign in again.`
             : 'Your session lasts at most 14 days from when you signed in; you will then need to sign in again.'}
       </p>
+      {signOutError ? <p role="alert">Sign out did not complete. {signOutError}</p> : null}
       <button type="button" onClick={signOut} disabled={signingOut}>
         {signingOut ? 'Signing out…' : 'Sign out'}
       </button>
@@ -157,6 +158,7 @@ function IndexingSection({ outbox }: { outbox: OutboxService }) {
   const [read, setRead] = useState<IndexingRead>({ kind: 'loading' });
   const [confirming, setConfirming] = useState(false);
   const [sending, setSending] = useState(false);
+  const [writeError, setWriteError] = useState<string | null>(null);
   const settingsUri = `at://${outbox.did}/${collectionsFor(outbox.prefix).settings}/self`;
   const latest = latestSettingsOp(ops);
   const settledId = latest !== null && (latest.state === 'indexed' || latest.state === 'failed') ? latest.id : null;
@@ -195,9 +197,12 @@ function IndexingSection({ outbox }: { outbox: OutboxService }) {
 
   const run = async (write: () => Promise<unknown>) => {
     setSending(true);
+    setWriteError(null);
     try {
       await write();
       setConfirming(false);
+    } catch (error) {
+      setWriteError(describeFailure(error));
     } finally {
       setSending(false);
     }
@@ -206,6 +211,7 @@ function IndexingSection({ outbox }: { outbox: OutboxService }) {
   return (
     <section aria-labelledby="indexing-title">
       <h2 id="indexing-title">Indexing</h2>
+      {writeError ? <p role="alert">{writeError}</p> : null}
       {read.kind === 'loading' && intended === null ? <LoadingState label="Checking your indexing setting…" /> : null}
       {read.kind === 'error' && intended === null ? (
         <ErrorState title="Your indexing setting could not be checked." error={read.error} />

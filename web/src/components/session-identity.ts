@@ -6,10 +6,10 @@
 
 import type { Handle } from '@atmusic/core/api-types';
 import { useEffect } from 'preact/hooks';
-import type { PdsSession } from '../oauth/types';
+import type { Session } from '../session/client';
 import { type AppState, useAppState } from '../state/store';
 
-const asked = new WeakMap<AppState, PdsSession>();
+const asked = new WeakMap<AppState, Session>();
 
 /** Records a verified handle for the session DID, when the profile reports one. */
 export function recordVerifiedHandle(state: AppState, did: string, handle: Handle | null): void {

@@ -16,13 +16,14 @@
 import type { Clock } from '@atmusic/core/deps';
 import { buildScrobbleRecord, MSG_DURATION } from '@atmusic/core/scrobble';
 import { useRef, useState } from 'preact/hooks';
+import { describeFailure } from '../components/format';
 import { OperationStatus } from '../components/operation-status';
 import type { OutboxService } from '../components/outbox-service';
 import { useServices } from '../components/services';
 import { useSessionHandle } from '../components/session-identity';
 import { ErrorState, LoadingState, PublishingUnavailable, SignInPrompt } from '../components/state-views';
 import { useOutbox, useOutboxOps } from '../components/use-outbox';
-import type { OutboxOperation } from '../outbox/store';
+import type { OutboxOperation } from '../outbox/overlay';
 
 export type FieldName = 'artist' | 'track' | 'album' | 'listenedAt' | 'durationSeconds' | 'recordingMbid';
 
@@ -176,8 +177,8 @@ function ScrobbleForm({ outbox }: { outbox: OutboxService }) {
       }
       setSubmitted((ids) => [result.op.id, ...ids]);
       setValues(emptyForm(services.clock));
-    } catch {
-      setErrors({ form: 'Your scrobble could not be saved in this browser. Nothing was sent.' });
+    } catch (error) {
+      setErrors({ form: describeFailure(error) });
     } finally {
       setSubmitting(false);
     }

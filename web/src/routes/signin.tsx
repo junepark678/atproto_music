@@ -3,21 +3,13 @@
 // Takes a handle (or DID) and starts the browser OAuth redirect through the
 // session controller, which asks for the granular repo scopes of the
 // deployment's prefix. A failure shows the fixed recovery text for its code
-// (web/src/oauth/session.ts SIGN_IN_MESSAGES) and a retry; no library message,
-// OAuth code, state or token is ever rendered. The callback's own failures
-// (cancelled authorization, an expired or reused callback) are shown by
-// /oauth/callback with a link back here.
+// error is kept generic so upstream details and OAuth values are never shown.
 
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { useServices } from '../components/services';
-import { SIGN_IN_MESSAGES, SignInError, type SignInErrorCode } from '../oauth/session';
 import { useAppState } from '../state/store';
 
-type Phase = { kind: 'idle' } | { kind: 'redirecting' } | { kind: 'error'; code: SignInErrorCode };
-
-function errorCode(error: unknown): SignInErrorCode {
-  return error instanceof SignInError ? error.code : 'failed';
-}
+type Phase = { kind: 'idle' } | { kind: 'redirecting' } | { kind: 'error' };
 
 export default function SignIn() {
   const state = useAppState();
@@ -54,9 +46,9 @@ export default function SignIn() {
       const port = await services.session();
       await port.signIn(handleRef.current);
       // The library is navigating away to the authorization server.
-    } catch (error) {
+    } catch {
       busy.current = false;
-      setPhase({ kind: 'error', code: errorCode(error) });
+      setPhase({ kind: 'error' });
       inputRef.current?.focus();
     }
   };
@@ -73,8 +65,11 @@ export default function SignIn() {
     );
   }
 
-  const message = phase.kind === 'error' ? SIGN_IN_MESSAGES[phase.code] : null;
-  const fieldError = phase.kind === 'error' && (phase.code === 'invalid_handle' || phase.code === 'unknown_handle');
+  const message =
+    phase.kind === 'error'
+      ? { title: 'Sign-in could not be started', message: 'Check the handle and try again.' }
+      : null;
+  const fieldError = false;
 
   return (
     <section aria-labelledby="page-title">
@@ -114,12 +109,7 @@ export default function SignIn() {
           </span>
         </div>
         {message ? (
-          <div
-            class="state state-error"
-            role="alert"
-            id="signin-error"
-            data-signin-error={phase.kind === 'error' ? phase.code : undefined}
-          >
+          <div class="state state-error" role="alert" id="signin-error">
             <p class="state-title">{message.title}</p>
             <p>{message.message}</p>
             <button type="submit">Try again</button>

@@ -43,6 +43,8 @@ import type {
   TopTrack,
 } from '@atmusic/core/api-types';
 import { ApiError as CoreApiError, type ErrorCode, isErrorCode } from '@atmusic/core/errors';
+import type { Session } from '../session/client';
+import { sessionFetch } from '../session/client';
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -345,6 +347,48 @@ const resolve: Decoder<Resolve> = object({ did, handle, verified: literal(true) 
 const healthLive: Decoder<HealthLive> = object({ status: literal('live') });
 const healthReady: Decoder<HealthReady> = object({ status: literal('ready') });
 const notifyAccepted: Decoder<NotifyAccepted> = object({ state: literal('queued') });
+const serverSession: Decoder<Session> = object({
+  did,
+  handle,
+  username: str,
+  csrfToken: str,
+  status: literal('active'),
+  expiresAt: timestamp,
+});
+const serverOperation = object(
+  {
+    id: str,
+    kind: oneOf([
+      'scrobble.create',
+      'scrobble.delete',
+      'follow.put',
+      'follow.delete',
+      'settings.put',
+      'love.put',
+      'love.delete',
+    ] as const),
+    origin: oneOf(['web', 'lastfm', 'listenbrainz', 'import'] as const),
+    state: oneOf(['queued', 'running', 'succeeded', 'failed', 'blocked', 'cancelled'] as const),
+    attempts: int(0, 10),
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  },
+  { uri: atUri, cid, error: str },
+);
+const accepted = object({ operation: serverOperation });
+const authorizeStart = object({
+  authorizeUrl: refine(
+    str,
+    (v) => {
+      try {
+        return new URL(v).protocol === 'https:';
+      } catch {
+        return false;
+      }
+    },
+    'must be an HTTPS URL',
+  ),
+});
 
 const recordStatusBase = object(
   { uri: atUri, state: oneOf(['indexed', 'pending', 'absent', 'excluded', 'unknown'] as const), indexing },
@@ -477,16 +521,42 @@ export interface StatsQuery {
   limit?: number;
 }
 
+export interface ServerOperationDto {
+  id: string;
+  kind:
+    | 'scrobble.create'
+    | 'scrobble.delete'
+    | 'follow.put'
+    | 'follow.delete'
+    | 'settings.put'
+    | 'love.put'
+    | 'love.delete';
+  origin: 'web' | 'lastfm' | 'listenbrainz' | 'import';
+  state: 'queued' | 'running' | 'succeeded' | 'failed' | 'blocked' | 'cancelled';
+  attempts: number;
+  createdAt: string;
+  updatedAt: string;
+  uri?: string;
+  cid?: string;
+  error?: string;
+}
+export interface AcceptedWrite {
+  operation: ServerOperationDto;
+}
+
 type Query = Record<string, string | number | null | undefined>;
 
 interface Call<T> {
-  method: 'GET' | 'POST';
+  method: 'GET' | 'POST' | 'PUT' | 'DELETE';
   path: string;
   query?: Query;
   body?: unknown;
   expect: number;
   decode: Decoder<T>;
   noStore?: boolean;
+  headers?: Record<string, string>;
+  credentials?: RequestCredentials;
+  emptyBody?: boolean;
 }
 
 /** A path segment holding a DID: percent-encoded, with `:` kept literal as in the Rust tests. */
@@ -506,7 +576,7 @@ export class ApiClient {
 
   constructor(options: ApiClientOptions = {}) {
     this.#base = (options.baseUrl ?? '').replace(/\/+$/, '');
-    this.#fetch = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+    this.#fetch = options.fetch ?? sessionFetch;
   }
 
   /** The URL of a route with its query, as the client would request it. */
@@ -522,8 +592,9 @@ export class ApiClient {
   async #call<T>(call: Call<T>, options: CallOptions = {}): Promise<T> {
     const endpoint = `${call.method} ${call.path}`;
     const headers: Record<string, string> = { accept: 'application/json' };
+    Object.assign(headers, call.headers);
     // The AppView holds no session: nothing ambient is ever sent (ADR 0004 §8).
-    const init: RequestInit = { method: call.method, headers, credentials: 'omit' };
+    const init: RequestInit = { method: call.method, headers, credentials: call.credentials ?? 'omit' };
     if (call.body !== undefined) {
       headers['content-type'] = 'application/json';
       init.body = JSON.stringify(call.body);
@@ -546,6 +617,7 @@ export class ApiClient {
     } catch (error) {
       throw new ApiNetworkError(endpoint, error);
     }
+    if (response.ok && call.emptyBody && response.status === call.expect) return undefined as T;
     let body: unknown;
     try {
       body = JSON.parse(text);
@@ -709,6 +781,142 @@ export class ApiClient {
         path: `/api/v1/users/${didSegment(user)}/export`,
         expect: 200,
         decode: exportPayload,
+        noStore: true,
+      },
+      o,
+    );
+  }
+
+  /** Node BFF session endpoints (v1.2). */
+  authSession(o?: CallOptions): Promise<Session> {
+    return this.#call(
+      {
+        method: 'GET',
+        path: '/api/v1/auth/session',
+        expect: 200,
+        decode: serverSession,
+        credentials: 'same-origin',
+        noStore: true,
+      },
+      o,
+    );
+  }
+
+  authStart(handleValue: Handle, o?: CallOptions): Promise<{ authorizeUrl: string }> {
+    return this.#call(
+      {
+        method: 'POST',
+        path: '/api/v1/auth/start',
+        body: { handle: handleValue },
+        expect: 200,
+        decode: authorizeStart,
+        credentials: 'same-origin',
+      },
+      o,
+    );
+  }
+
+  authLogout(csrfToken: string, o?: CallOptions): Promise<void> {
+    return this.#call(
+      {
+        method: 'POST',
+        path: '/api/v1/auth/logout',
+        body: {},
+        expect: 204,
+        decode: () => undefined,
+        headers: { 'X-CSRF-Token': csrfToken },
+        credentials: 'same-origin',
+        emptyBody: true,
+      },
+      o,
+    );
+  }
+
+  createScrobble(input: unknown, csrfToken: string, idempotencyKey: string, o?: CallOptions): Promise<AcceptedWrite> {
+    return this.#call(
+      {
+        method: 'POST',
+        path: '/api/v1/scrobbles',
+        body: input,
+        expect: 202,
+        decode: accepted,
+        headers: { 'X-CSRF-Token': csrfToken, 'Idempotency-Key': idempotencyKey },
+        credentials: 'same-origin',
+      },
+      o,
+    );
+  }
+
+  deleteScrobble(uri: string, csrfToken: string, idempotencyKey: string, o?: CallOptions): Promise<AcceptedWrite> {
+    return this.#call(
+      {
+        method: 'DELETE',
+        path: `/api/v1/scrobbles/${encodeURIComponent(uri)}`,
+        expect: 202,
+        decode: accepted,
+        headers: { 'X-CSRF-Token': csrfToken, 'Idempotency-Key': idempotencyKey },
+        credentials: 'same-origin',
+      },
+      o,
+    );
+  }
+
+  follow(user: Did, csrfToken: string, idempotencyKey: string, o?: CallOptions): Promise<AcceptedWrite> {
+    return this.#call(
+      {
+        method: 'PUT',
+        path: `/api/v1/follows/${didSegment(user)}`,
+        expect: 202,
+        decode: accepted,
+        headers: { 'X-CSRF-Token': csrfToken, 'Idempotency-Key': idempotencyKey },
+        credentials: 'same-origin',
+      },
+      o,
+    );
+  }
+
+  unfollow(user: Did, csrfToken: string, idempotencyKey: string, o?: CallOptions): Promise<AcceptedWrite> {
+    return this.#call(
+      {
+        method: 'DELETE',
+        path: `/api/v1/follows/${didSegment(user)}`,
+        expect: 202,
+        decode: accepted,
+        headers: { 'X-CSRF-Token': csrfToken, 'Idempotency-Key': idempotencyKey },
+        credentials: 'same-origin',
+      },
+      o,
+    );
+  }
+
+  setIndexing(
+    indexing: 'enabled' | 'disabled',
+    csrfToken: string,
+    idempotencyKey: string,
+    o?: CallOptions,
+  ): Promise<AcceptedWrite> {
+    return this.#call(
+      {
+        method: 'PUT',
+        path: '/api/v1/account/indexing',
+        body: { indexing },
+        expect: 202,
+        decode: accepted,
+        headers: { 'X-CSRF-Token': csrfToken, 'Idempotency-Key': idempotencyKey },
+        credentials: 'same-origin',
+      },
+      o,
+    );
+  }
+
+  operation(id: string, o?: CallOptions): Promise<ServerOperationDto> {
+    return this.#call(
+      {
+        method: 'GET',
+        path: `/api/v1/operations/${encodeURIComponent(id)}`,
+        expect: 200,
+        decode: serverOperation,
+        credentials: 'same-origin',
         noStore: true,
       },
       o,

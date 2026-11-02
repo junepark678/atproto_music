@@ -9,7 +9,7 @@
 // nothing is live, so a terminal state ends all refreshing.
 
 import { useEffect, useRef, useState } from 'preact/hooks';
-import type { OutboxOperation } from '../outbox/store';
+import type { OutboxOperation } from '../outbox/overlay';
 import { useAppState } from '../state/store';
 import type { OutboxService } from './outbox-service';
 import { useServices } from './services';
@@ -89,14 +89,17 @@ export function useOutboxOps(
     };
     function reload(): void {
       const mine = ++generation;
-      outbox?.list().then(
-        (rows) => {
-          if (!active || mine !== generation) return;
-          setOps(rows);
-          syncTicker(rows);
-        },
-        () => undefined,
-      );
+      outbox
+        ?.refresh()
+        .then(() => outbox.list())
+        .then(
+          (rows) => {
+            if (!active || mine !== generation) return;
+            setOps(rows);
+            syncTicker(rows);
+          },
+          () => undefined,
+        );
     }
     const unsubscribe = outbox.subscribe(reload);
     reload();

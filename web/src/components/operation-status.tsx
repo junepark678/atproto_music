@@ -7,8 +7,7 @@
 // failed operation always shows its code, and a failed delete or unfollow
 // never says the record is gone.
 
-import type { LocalState } from '../outbox/overlay';
-import type { OperationKind, OperationState, OutboxOperation } from '../outbox/store';
+import type { LocalState, OperationKind, OperationState, OutboxOperation } from '../outbox/overlay';
 
 export interface StatusInput {
   kind: OperationKind;

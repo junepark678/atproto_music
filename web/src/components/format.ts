@@ -3,6 +3,7 @@
 // guess the interpretation.
 
 import { ApiDecodeError, ApiError, ApiNetworkError } from '../api/client';
+import { WriteError } from '../api/writes';
 
 /** `2026-01-15T11:00:00Z` → `2026-01-15 11:00 UTC` (the raw value when it does not parse). */
 export function formatUtc(timestamp: string): string {
@@ -25,6 +26,16 @@ export function plural(n: number, one: string, many = `${one}s`): string {
 
 /** A user-safe sentence for a failed API call. Server text is never echoed. */
 export function describeFailure(error: unknown): string {
+  if (error instanceof WriteError) {
+    if (error.status === 409 && error.code === 'idempotency_conflict')
+      return 'This action key was already used for different content. Try the action again once; it will receive a new key.';
+    if (error.status === 429)
+      return `Too many writes right now.${error.retryAfter ? ` Try again after ${error.retryAfter}.` : ' Try again shortly.'}`;
+    if (error.status === 503 && error.code === 'publication_disabled')
+      return 'Publishing is disabled for this deployment. Your action was not queued.';
+    if (error.status === 507 || error.code === 'insufficient_storage')
+      return 'The server has no space to queue this action. Nothing was published.';
+  }
   if (error instanceof ApiError) {
     const ref = ` (${error.code}, request ${error.requestId})`;
     if (error.status === 429) {

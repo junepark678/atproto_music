@@ -1,20 +1,50 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import { sessionFetch, SessionClient } from '../../src/session/client';
+import { describe, expect, it, vi } from 'vitest';
+import { type Session, SessionClient, sessionFetch } from '../../src/session/client';
+import { createAppState, setSession } from '../../src/state/store';
 
-afterEach(() => vi.restoreAllMocks());
-describe('session client', () => {
-  it('bootstraps session before mutation and sends CSRF token', async () => {
-    const fetcher = vi.fn().mockResolvedValueOnce(Response.json({ did: 'did:plc:x', handle: 'x.test', username: 'x', csrfToken: 'token', status: 'active', expiresAt: 'later' })).mockResolvedValueOnce(new Response(null, { status: 204 }));
-    const client = new SessionClient({ fetch: fetcher });
-    await client.mutate('/api/v1/write', { method: 'POST' });
-    expect(fetcher.mock.calls[0]![0]).toBe('/api/v1/auth/session');
-    expect(new Headers(fetcher.mock.calls[1]![1]?.headers).get('X-CSRF-Token')).toBe('token');
-    expect(fetcher.mock.calls[1]![1]?.credentials).toBe('same-origin');
+const dto: Session = {
+  did: 'did:plc:aaaaaaaaaaaaaaaaaaaaaaaa',
+  handle: 'alice.test',
+  username: 'alice',
+  csrfToken: 'csrf-123',
+  status: 'active',
+  expiresAt: '2026-12-01T00:00:00Z',
+};
+
+describe('web/test/session/client.test.ts', () => {
+  it('getSession caches csrfToken; every mutation sends X-CSRF-Token with same-origin credentials; 401 shows signed-out and reauth_required shows the re-sign-in banner', async () => {
+    const changed = vi.fn();
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json(dto))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(new Response(null, { status: 401 }));
+    const client = new SessionClient({ fetch: fetcher, onChange: changed });
+    await client.getSession();
+    const mutation = await client.mutate('/api/v1/write', { method: 'POST' });
+    expect(mutation.status).toBe(204);
+    expect(fetcher.mock.calls[0]?.[1]?.credentials).toBe('same-origin');
+    expect(new Headers(fetcher.mock.calls[1]?.[1]?.headers).get('X-CSRF-Token')).toBe(dto.csrfToken);
+    expect(fetcher.mock.calls[1]?.[1]?.credentials).toBe('same-origin');
+    const unauthorized = await client.mutate('/api/v1/write', { method: 'POST' });
+    expect(unauthorized.status).toBe(401);
+    expect(client.current()).toBeNull();
+    expect(changed).toHaveBeenLastCalledWith(null, true);
+
+    const anonymous = new SessionClient({
+      fetch: vi.fn().mockResolvedValue(new Response(null, { status: 401 })),
+      onChange: changed,
+    });
+    await expect(anonymous.getSession()).resolves.toBeNull();
+    expect(changed).toHaveBeenLastCalledWith(null, false);
   });
-  it('uses GET fetch with same-origin credentials and clears on 401', async () => {
-    const fetcher = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, { status: 401 }));
-    const response = await sessionFetch('/api/v1/me');
-    expect(response.status).toBe(401);
-    expect(fetcher.mock.calls[0]![1]?.credentials).toBe('same-origin');
+
+  it('the app state store holds the server Session DTO', async () => {
+    const state = createAppState();
+    setSession(state, dto);
+    expect(state.session.value).toEqual(dto);
+    const fetcher = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response(null, { status: 401 }));
+    await sessionFetch('/api/v1/operations/op-1');
+    expect(fetcher.mock.calls[0]?.[1]?.credentials).toBe('same-origin');
   });
 });
