@@ -69,7 +69,7 @@ export default function SignIn() {
     }
   };
 
-  if (session !== null) {
+  if (session !== null && session.status === 'active') {
     const canResumeDraft = state.scrobbleDraft.value?.did === session.did && state.canPublish.value;
     return (
       <section aria-labelledby="page-title">

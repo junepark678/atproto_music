@@ -16,6 +16,7 @@ export class SessionClient {
   #onChange: (session: Session | null, reauthRequired: boolean) => void;
   #listeners = new Set<(session: Session | null, reauthRequired: boolean) => void>();
   #fetch: typeof fetch;
+  #sessionReadGeneration = 0;
 
   constructor(
     options: { fetch?: typeof fetch; onChange?: (session: Session | null, reauthRequired: boolean) => void } = {},
@@ -34,13 +35,28 @@ export class SessionClient {
 
   async getSession(): Promise<Session | null> {
     if (this.#current !== null) return this.#current;
-    const response = await this.#fetch('/api/v1/auth/session', { credentials: 'same-origin', cache: 'no-store' });
+    const generation = ++this.#sessionReadGeneration;
+    let response: Response;
+    try {
+      response = await this.#fetch('/api/v1/auth/session', { credentials: 'same-origin', cache: 'no-store' });
+    } catch (error) {
+      if (generation !== this.#sessionReadGeneration) return this.#current;
+      throw error;
+    }
+    if (generation !== this.#sessionReadGeneration) return this.#current;
     if (response.status === 401) {
       this.#set(null, this.#reauthRequired);
       return null;
     }
     if (!response.ok) throw new Error(`Session request failed (${response.status})`);
-    const value = (await response.json()) as Session;
+    let value: Session;
+    try {
+      value = (await response.json()) as Session;
+    } catch (error) {
+      if (generation !== this.#sessionReadGeneration) return this.#current;
+      throw error;
+    }
+    if (generation !== this.#sessionReadGeneration) return this.#current;
     if (
       !value ||
       typeof value.did !== 'string' ||
@@ -58,22 +74,28 @@ export class SessionClient {
 
   /** Discard the cached DTO and read the cookie session again, e.g. after OAuth in another tab. */
   async refresh(): Promise<Session | null> {
+    this.#sessionReadGeneration++;
     this.#current = null;
     this.#csrfToken = null;
     return this.getSession();
   }
 
   unauthorized(): void {
+    this.#sessionReadGeneration++;
     this.#set(null, true);
   }
 
-  async mutate(path: string, init: RequestInit = {}): Promise<Response> {
-    if (this.#csrfToken === null) await this.getSession();
-    if (this.#csrfToken === null) throw new Error('Sign in to continue');
+  async mutate(path: string, init: RequestInit = {}, expectedDid?: Did): Promise<Response> {
+    if (this.#current === null) await this.getSession();
+    const session = this.#current;
+    const csrfToken = this.#csrfToken;
+    if (session === null || csrfToken === null) throw new Error('Sign in to continue');
+    if (expectedDid !== undefined && session.did !== expectedDid) throw new SessionIdentityChangedError();
     const headers = new Headers(init.headers);
-    headers.set('X-CSRF-Token', this.#csrfToken);
+    headers.set('X-CSRF-Token', csrfToken);
     const response = await this.#fetch(path, { ...init, headers, credentials: 'same-origin' });
     if (response.status === 401) {
+      this.#sessionReadGeneration++;
       this.#set(null, true);
     }
     return response;
@@ -99,6 +121,7 @@ export class SessionClient {
       body: '{}',
     });
     if (!response.ok && response.status !== 401) throw new Error(`Sign out failed (${response.status})`);
+    this.#sessionReadGeneration++;
     this.#set(null, false);
   }
 
@@ -108,6 +131,14 @@ export class SessionClient {
     this.#reauthRequired = reauth;
     this.#onChange(session, reauth);
     for (const listener of this.#listeners) listener(session, reauth);
+  }
+}
+
+/** A fixed, non-secret error used when a stale account view tries to write. */
+export class SessionIdentityChangedError extends Error {
+  constructor() {
+    super('The signed-in account changed. Reload before continuing.');
+    this.name = 'SessionIdentityChangedError';
   }
 }
 

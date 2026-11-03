@@ -76,6 +76,81 @@ describe('web/test/session/client.test.ts', () => {
     expect(fetcher).toHaveBeenCalledTimes(2);
   });
 
+  it('ignores a stale refresh response when a newer refresh has restored the active session', async () => {
+    let resolveInitial!: (response: Response) => void;
+    let resolveOlder!: (response: Response) => void;
+    let resolveNewer!: (response: Response) => void;
+    const fetcher = vi
+      .fn()
+      .mockImplementationOnce(() => new Promise<Response>((resolve) => (resolveInitial = resolve)))
+      .mockImplementationOnce(() => new Promise<Response>((resolve) => (resolveOlder = resolve)))
+      .mockImplementationOnce(() => new Promise<Response>((resolve) => (resolveNewer = resolve)));
+    const changed: Array<Session | null> = [];
+    const client = new SessionClient({ fetch: fetcher, onChange: (session) => changed.push(session) });
+    const initial = client.getSession();
+    resolveInitial(Response.json(dto));
+    await initial;
+
+    const older = client.refresh();
+    const newer = client.refresh();
+    resolveNewer(Response.json({ ...dto, did: 'did:plc:bbbbbbbbbbbbbbbbbbbbbbbb' }));
+    await expect(newer).resolves.toMatchObject({ did: 'did:plc:bbbbbbbbbbbbbbbbbbbbbbbb' });
+    resolveOlder(new Response(null, { status: 401 }));
+    await expect(older).resolves.toMatchObject({ did: 'did:plc:bbbbbbbbbbbbbbbbbbbbbbbb' });
+
+    expect(client.current()?.did).toBe('did:plc:bbbbbbbbbbbbbbbbbbbbbbbb');
+    expect(changed.at(-1)?.did).toBe('did:plc:bbbbbbbbbbbbbbbbbbbbbbbb');
+  });
+
+  it('ignores a stale session body that finishes parsing after a newer refresh', async () => {
+    let resolveInitial!: (response: Response) => void;
+    let resolveOlder!: (response: Response) => void;
+    let resolveNewer!: (response: Response) => void;
+    let resolveOlderJson!: (value: Session) => void;
+    const olderJson = new Promise<Session>((resolve) => (resolveOlderJson = resolve));
+    const fetcher = vi
+      .fn()
+      .mockImplementationOnce(() => new Promise<Response>((resolve) => (resolveInitial = resolve)))
+      .mockImplementationOnce(() => new Promise<Response>((resolve) => (resolveOlder = resolve)))
+      .mockImplementationOnce(() => new Promise<Response>((resolve) => (resolveNewer = resolve)));
+    const client = new SessionClient({ fetch: fetcher });
+    const initial = client.getSession();
+    resolveInitial(Response.json(dto));
+    await initial;
+
+    const older = client.refresh();
+    let jsonStarted!: () => void;
+    const started = new Promise<void>((resolve) => (jsonStarted = resolve));
+    resolveOlder({
+      status: 200,
+      ok: true,
+      json: () => {
+        jsonStarted();
+        return olderJson;
+      },
+    } as Response);
+    await started;
+    const newer = client.refresh();
+    resolveNewer(Response.json({ ...dto, did: 'did:plc:bbbbbbbbbbbbbbbbbbbbbbbb' }));
+    await newer;
+    resolveOlderJson(dto);
+    await older;
+
+    expect(client.current()?.did).toBe('did:plc:bbbbbbbbbbbbbbbbbbbbbbbb');
+  });
+
+  it('refuses to send a stale account write with a newly resolved account CSRF token', async () => {
+    const other = { ...dto, did: 'did:plc:bbbbbbbbbbbbbbbbbbbbbbbb' as Session['did'], csrfToken: 'bob-csrf' };
+    const fetcher = vi.fn().mockResolvedValueOnce(Response.json(other));
+    const client = new SessionClient({ fetch: fetcher });
+
+    await expect(client.mutate('/api/v1/scrobbles', { method: 'POST', body: '{}' }, dto.did)).rejects.toThrow(
+      'The signed-in account changed. Reload before continuing.',
+    );
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(String(fetcher.mock.calls[0]?.[0])).toBe('/api/v1/auth/session');
+  });
+
   it('preserves a scrobble draft only through same-account reauthentication', () => {
     const state = createAppState();
     setSession(state, dto);

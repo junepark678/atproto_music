@@ -1339,7 +1339,11 @@
       "case": "M7.2.1/signin_failures",
       "target": "web/test/routes/signin.test.tsx › shows fixed recovery text for callback errors and never renders a code or token",
       "also": [
-        "worker/test/node/bff/oauth-client.test.ts › invalid_grant on refresh deletes the session and marks the account reauth_required; a TransportError keeps the session"
+        "worker/test/node/bff/oauth-client.test.ts › invalid_grant on refresh deletes the session and marks the account reauth_required; a TransportError keeps the session",
+        "web/test/session/client.test.ts › ignores a stale refresh response when a newer refresh has restored the active session",
+        "web/test/session/client.test.ts › ignores a stale session body that finishes parsing after a newer refresh",
+        "web/test/session/client.test.ts › refuses to send a stale account write with a newly resolved account CSRF token",
+        "web/test/routes/signin.test.tsx › keeps the sign-in retry form visible for a reauth_required server session"
       ]
     },
     {

@@ -2,7 +2,8 @@ import { render } from 'preact';
 import { describe, expect, it, vi } from 'vitest';
 import { App } from '../../src/app';
 import { createDefaultServices, type ScreenServices, ServicesProvider } from '../../src/components/services';
-import { createAppState } from '../../src/state/store';
+import type { Session } from '../../src/session/client';
+import { createAppState, setSession } from '../../src/state/store';
 
 function services(
   signIn: (handle: string) => Promise<void>,
@@ -49,6 +50,44 @@ describe('web/test/routes/signin.test.tsx', () => {
     await vi.waitFor(() =>
       expect(root.querySelector<HTMLButtonElement>('button[type="submit"]')?.disabled).toBe(false),
     );
+    render(null, root);
+    root.remove();
+  });
+
+  it('keeps the sign-in retry form visible for a reauth_required server session', async () => {
+    const reauthenticate = vi.fn(async () => undefined);
+    const state = createAppState();
+    setSession(
+      state,
+      {
+        did: 'did:plc:aaaaaaaaaaaaaaaaaaaaaaaa',
+        handle: null,
+        username: 'alice',
+        csrfToken: 'csrf-123',
+        status: 'reauth_required',
+        expiresAt: '2026-12-01T00:00:00Z',
+      } satisfies Session,
+      null,
+      { reauthRequired: true },
+    );
+    const root = document.createElement('div');
+    document.body.append(root);
+    render(
+      <ServicesProvider
+        value={services(
+          vi.fn(async () => undefined),
+          reauthenticate,
+        )}
+      >
+        <App state={state} loadMetaOnMount={false} />
+      </ServicesProvider>,
+      root,
+    );
+    await vi.waitFor(() => expect(root.querySelector('form')).not.toBeNull());
+    expect(root.textContent).toContain('Your previous session has ended');
+    expect(root.textContent).not.toContain('You are signed in as');
+    root.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await vi.waitFor(() => expect(reauthenticate).toHaveBeenCalled());
     render(null, root);
     root.remove();
   });
