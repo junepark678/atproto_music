@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { type Session, SessionClient, sessionFetch } from '../../src/session/client';
+import { type Session, SessionClient, sessionClient, sessionFetch } from '../../src/session/client';
 import { createAppState, setScrobbleDraft, setSession } from '../../src/state/store';
 
 const sources = import.meta.glob<string>('../../src/**/*.{ts,tsx,js,jsx}', {
@@ -27,12 +27,12 @@ describe('web/test/session/client.test.ts', () => {
       .mockResolvedValueOnce(new Response(null, { status: 401 }));
     const client = new SessionClient({ fetch: fetcher, onChange: changed });
     await client.getSession();
-    const mutation = await client.mutate('/api/v1/write', { method: 'POST' });
+    const mutation = await client.mutate('/api/v1/write', { method: 'POST' }, dto.did);
     expect(mutation.status).toBe(204);
     expect(fetcher.mock.calls[0]?.[1]?.credentials).toBe('same-origin');
     expect(new Headers(fetcher.mock.calls[1]?.[1]?.headers).get('X-CSRF-Token')).toBe(dto.csrfToken);
     expect(fetcher.mock.calls[1]?.[1]?.credentials).toBe('same-origin');
-    const unauthorized = await client.mutate('/api/v1/write', { method: 'POST' });
+    const unauthorized = await client.mutate('/api/v1/write', { method: 'POST' }, dto.did);
     expect(unauthorized.status).toBe(401);
     expect(client.current()).toBeNull();
     expect(changed).toHaveBeenLastCalledWith(null, true);
@@ -45,7 +45,7 @@ describe('web/test/session/client.test.ts', () => {
     expect(changed).toHaveBeenLastCalledWith(null, false);
   });
 
-  it('accepts the HTTP 200 reauth_required DTO with a nullable handle and keeps CSRF usable', async () => {
+  it('accepts reauth_required DTOs but blocks writes except sign-out', async () => {
     const reauth = { ...dto, handle: null, status: 'reauth_required' as const };
     const changed = vi.fn();
     const fetcher = vi
@@ -56,7 +56,12 @@ describe('web/test/session/client.test.ts', () => {
     await expect(client.getSession()).resolves.toEqual(reauth);
     expect(client.current()).toEqual(reauth);
     expect(changed).toHaveBeenLastCalledWith(reauth, true);
-    expect((await client.mutate('/api/v1/write', { method: 'POST' })).status).toBe(204);
+    await expect(client.mutate('/api/v1/write', { method: 'POST' }, reauth.did)).rejects.toThrow(
+      'Sign in again before making changes.',
+    );
+    await client.logout();
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(String(fetcher.mock.calls[1]?.[0])).toBe('/api/v1/auth/logout');
     expect(new Headers(fetcher.mock.calls[1]?.[1]?.headers).get('X-CSRF-Token')).toBe(reauth.csrfToken);
   });
 
@@ -149,6 +154,65 @@ describe('web/test/session/client.test.ts', () => {
     );
     expect(fetcher).toHaveBeenCalledTimes(1);
     expect(String(fetcher.mock.calls[0]?.[0])).toBe('/api/v1/auth/session');
+  });
+
+  it('does not let a mutation 401 from the previous account clear a newer session', async () => {
+    let resolveWrite!: (response: Response) => void;
+    const pendingWrite = new Promise<Response>((resolve) => (resolveWrite = resolve));
+    const bob = { ...dto, did: 'did:plc:bbbbbbbbbbbbbbbbbbbbbbbb' as Session['did'], csrfToken: 'bob-csrf' };
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json(dto))
+      .mockImplementationOnce(() => pendingWrite)
+      .mockResolvedValueOnce(Response.json(bob));
+    const client = new SessionClient({ fetch: fetcher });
+    await client.getSession();
+    const write = client.mutate('/api/v1/write', { method: 'POST' }, dto.did);
+    await expect(client.refresh()).resolves.toEqual(bob);
+    resolveWrite(new Response(null, { status: 401 }));
+    expect((await write).status).toBe(401);
+    expect(client.current()).toEqual(bob);
+  });
+
+  it('does not let a late sign-out response cancel a newer session refresh', async () => {
+    let resolveLogout!: (response: Response) => void;
+    const pendingLogout = new Promise<Response>((resolve) => (resolveLogout = resolve));
+    let resolveRefresh!: (response: Response) => void;
+    const pendingRefresh = new Promise<Response>((resolve) => (resolveRefresh = resolve));
+    const bob = { ...dto, did: 'did:plc:bbbbbbbbbbbbbbbbbbbbbbbb' as Session['did'], csrfToken: 'bob-csrf' };
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json(dto))
+      .mockImplementationOnce(() => pendingLogout)
+      .mockImplementationOnce(() => pendingRefresh);
+    const client = new SessionClient({ fetch: fetcher });
+    await client.getSession();
+    const logout = client.logout();
+    const refresh = client.refresh();
+    resolveLogout(new Response(null, { status: 204 }));
+    await logout;
+    resolveRefresh(Response.json(bob));
+    await expect(refresh).resolves.toEqual(bob);
+    expect(client.current()).toEqual(bob);
+  });
+
+  it('does not let an authenticated GET 401 from the previous account clear a newer session', async () => {
+    const client = sessionClient();
+    let resolveOldGet!: (response: Response) => void;
+    const pendingGet = new Promise<Response>((resolve) => (resolveOldGet = resolve));
+    const bob = { ...dto, did: 'did:plc:bbbbbbbbbbbbbbbbbbbbbbbb' as Session['did'], csrfToken: 'bob-csrf' };
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json(dto))
+      .mockImplementationOnce(() => pendingGet)
+      .mockResolvedValueOnce(Response.json(bob));
+    vi.stubGlobal('fetch', fetcher);
+    await client.refresh();
+    const oldGet = sessionFetch('/api/v1/account/credentials');
+    await expect(client.refresh()).resolves.toEqual(bob);
+    resolveOldGet(new Response(null, { status: 401 }));
+    expect((await oldGet).status).toBe(401);
+    expect(client.current()).toEqual(bob);
   });
 
   it('preserves a scrobble draft only through same-account reauthentication', () => {

@@ -1481,6 +1481,7 @@
     "description": "ADR 0005 §5.9. Remove @atproto/oauth-client-browser and regenerate the lockfile.\n\n**Deleted:**\n- web/src/oauth/* — and its importers change here: web/src/main.tsx (imports ./oauth/types and globs ./oauth/session.ts at :10 and :14) boots web/src/session/client.ts instead, and web/src/state/store.ts (:13 imports PdsSession from ../oauth/types) holds the server Session DTO {did, handle, username, csrfToken, status, expiresAt} in place of PdsSession, so tsc -b stays green;\n- web/src/outbox/* except overlay.ts;\n- routes/callback.tsx.\n\n**Added:**\n- the session client (csrfToken; credentials same-origin);\n- writes with Idempotency-Key, and operation and record-status polling into the overlay;\n- migration.ts, which deletes the legacy atmusic* IndexedDB databases;\n- screens /settings/links, /settings/imports (progress, ETA, cancel), /settings/credentials (secret shown once) and /lastfm/authorize.\n\n**Config:** spa-routes drops /oauth/callback and adds the new routes. gen-config imports CLIENT_NAME from packages/core/src/client-name.ts (N2-03), stops emitting oauth/client-metadata.json, sets connect-src 'self', and takes PUBLIC_ORIGIN and LEXICON_PREFIX from --origin/--prefix or config/atmusic.env.example instead of worker/wrangler.jsonc.\n\n**Tests:** web/test/oauth and web/test/outbox are deleted. ts-case-map.json and node-port-inventory.json remap their cases to the N2-03, N2-04, N2-05 and N3-01 tests.",
     "tests": [
      "web/test/session/client.test.ts › getSession caches csrfToken; every mutation sends X-CSRF-Token with same-origin credentials; 401 shows signed-out and reauth_required shows the re-sign-in banner",
+     "web/test/session/client.test.ts › accepts reauth_required DTOs but blocks writes except sign-out",
      "web/test/routes/scrobble.test.tsx › submitting the form posts with a fresh Idempotency-Key and shows queued, published, then indexed from operation and record-status polling",
      "web/test/routes/settings.test.tsx › the links, imports and credentials screens render server state; a created secret is shown once and gone after navigation",
      "web/test/routes/lastfm-authorize.test.tsx › the page shows the client name, labelled unverified unless it is an issued app, the token request time and the callback host; approve posts /api/v1/lastfm/authorize and navigates to the returned redirect; deny stays on the page",
@@ -1492,7 +1493,10 @@
      "web/test/session/client.test.ts › ignores a stale refresh response when a newer refresh has restored the active session",
      "web/test/session/client.test.ts › ignores a stale session body that finishes parsing after a newer refresh",
      "web/test/session/client.test.ts › refuses to send a stale account write with a newly resolved account CSRF token",
+     "web/test/session/client.test.ts › does not let a mutation 401 from the previous account clear a newer session",
+     "web/test/session/client.test.ts › does not let an authenticated GET 401 from the previous account clear a newer session",
      "web/test/routes/signin.test.tsx › keeps the sign-in retry form visible for a reauth_required server session",
+     "web/test/routes/settings-accounts.test.tsx › reauth_required settings pages show account data without mutation forms",
     "web/test/routes/scrobble.test.tsx › shows sign-in after a 401, then restores the in-memory draft with a fresh write intent after reauthentication",
     "web/test/routes/scrobble.test.tsx › a late submit response cannot clear a newer draft after the form remounts",
      "web/test/routes/scrobble.test.tsx › invalid input shows field errors and does not create a scrobble operation",

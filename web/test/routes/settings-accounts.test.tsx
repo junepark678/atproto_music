@@ -3,6 +3,7 @@ import { afterEach, expect, it, vi } from 'vitest';
 import LastfmAuthorize from '../../src/routes/lastfm-authorize';
 import SettingsCredentials from '../../src/routes/settings-credentials';
 import SettingsImports from '../../src/routes/settings-imports';
+import SettingsLinks from '../../src/routes/settings-links';
 import type { Session } from '../../src/session/client';
 import { AppStateContext, createAppState, setSession } from '../../src/state/store';
 
@@ -15,9 +16,12 @@ const session: Session = {
   expiresAt: '2026-12-01T00:00:00Z',
 };
 const credentials = { appPasswords: [], listenbrainzTokens: [], lastfmApps: [], lastfmSessions: [] };
-function mount(Component: typeof SettingsCredentials | typeof SettingsImports | typeof LastfmAuthorize) {
+function mount(
+  Component: typeof SettingsCredentials | typeof SettingsImports | typeof SettingsLinks | typeof LastfmAuthorize,
+  currentSession: Session = session,
+) {
   const state = createAppState();
-  setSession(state, session);
+  setSession(state, currentSession, null, { reauthRequired: currentSession.status === 'reauth_required' });
   const root = document.createElement('div');
   render(
     <AppStateContext.Provider value={state}>
@@ -204,6 +208,37 @@ it('starts a history import and shows its progress state', async () => {
   await vi.waitFor(() => expect(root.textContent).toContain('Estimated time remaining'));
   expect(root.querySelector('progress')).not.toBeNull();
   render(null, root);
+});
+
+it('reauth_required settings pages show account data without mutation forms', async () => {
+  const reauth = { ...session, handle: null, status: 'reauth_required' as const };
+  vi.stubGlobal('fetch', async (input: RequestInfo | URL) => {
+    const path = new URL(String(input), 'https://music.test').pathname;
+    if (path === '/api/v1/account/credentials') return Response.json(credentials);
+    if (path === '/api/v1/imports') return Response.json({ items: [] });
+    if (path === '/api/v1/links') return Response.json({ items: [] });
+    throw new Error(`unexpected request GET ${path}`);
+  });
+
+  for (const Component of [SettingsCredentials, SettingsImports] as const) {
+    const root = mount(Component, reauth);
+    await vi.waitFor(() => expect(root.textContent).toContain('Sign in again'));
+    expect(root.querySelector('form')).toBeNull();
+    expect([...root.querySelectorAll('button')].map((button) => button.textContent?.trim())).not.toContain('Revoke');
+    render(null, root);
+  }
+
+  const links = mount(SettingsLinks, reauth);
+  await vi.waitFor(() => expect(links.textContent).toContain('Sign in again'));
+  expect(links.querySelector('form')).toBeNull();
+  expect(links.querySelector('button')).toBeNull();
+  render(null, links);
+
+  window.history.replaceState(null, '', '/lastfm/authorize?api_key=app-key');
+  const authorize = mount(LastfmAuthorize, reauth);
+  await vi.waitFor(() => expect(authorize.textContent).toContain('Sign in again'));
+  expect(authorize.querySelector<HTMLButtonElement>('button:last-child')?.disabled).toBe(true);
+  render(null, authorize);
 });
 
 it('labels unissued Last.fm clients and exposes the callback host without rendering the token', async () => {

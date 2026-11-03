@@ -91,9 +91,9 @@ export function createWriteIntent(id: string = crypto.randomUUID()): WriteIntent
 async function send(
   path: string,
   method: 'POST' | 'PUT' | 'DELETE',
+  expectedDid: Did,
   body?: unknown,
   intent = createWriteIntent(),
-  expectedDid?: Did,
 ): Promise<Accepted> {
   const headers: Record<string, string> = { 'content-type': 'application/json', 'Idempotency-Key': intent.key };
   const response = await sessionClient().mutate(
@@ -130,16 +130,40 @@ function removeIntent(intent: WriteIntent): void {
 }
 
 export const writes = {
-  scrobble: (body: unknown, intent?: WriteIntent, expectedDid?: Did) =>
-    send('/api/v1/scrobbles', 'POST', body, intent, expectedDid),
-  deleteScrobble: (id: string, intent = createWriteIntent(`delete:${encodeURIComponent(id)}`), expectedDid?: Did) =>
-    send(`/api/v1/scrobbles/${encodeURIComponent(id)}`, 'DELETE', undefined, intent, expectedDid),
-  follow: (did: string, intent = createWriteIntent(`follow:${did}`), expectedDid?: Did) =>
-    send(`/api/v1/follows/${encodeURIComponent(did)}`, 'PUT', undefined, intent, expectedDid),
-  unfollow: (did: string, intent = createWriteIntent(`unfollow:${did}`), expectedDid?: Did) =>
-    send(`/api/v1/follows/${encodeURIComponent(did)}`, 'DELETE', undefined, intent, expectedDid),
-  indexing: (indexing: 'enabled' | 'disabled', intent = createWriteIntent(`indexing:${indexing}`), expectedDid?: Did) =>
-    send('/api/v1/account/indexing', 'PUT', { indexing }, intent, expectedDid),
+  scrobble: (body: unknown, intent: WriteIntent | undefined, expectedDid: Did) =>
+    send('/api/v1/scrobbles', 'POST', expectedDid, body, intent),
+  deleteScrobble: (id: string, intent: WriteIntent | undefined, expectedDid: Did) =>
+    send(
+      `/api/v1/scrobbles/${encodeURIComponent(id)}`,
+      'DELETE',
+      expectedDid,
+      undefined,
+      intent ?? createWriteIntent(`delete:${encodeURIComponent(id)}`),
+    ),
+  follow: (did: string, intent: WriteIntent | undefined, expectedDid: Did) =>
+    send(
+      `/api/v1/follows/${encodeURIComponent(did)}`,
+      'PUT',
+      expectedDid,
+      undefined,
+      intent ?? createWriteIntent(`follow:${did}`),
+    ),
+  unfollow: (did: string, intent: WriteIntent | undefined, expectedDid: Did) =>
+    send(
+      `/api/v1/follows/${encodeURIComponent(did)}`,
+      'DELETE',
+      expectedDid,
+      undefined,
+      intent ?? createWriteIntent(`unfollow:${did}`),
+    ),
+  indexing: (indexing: 'enabled' | 'disabled', intent: WriteIntent | undefined, expectedDid: Did) =>
+    send(
+      '/api/v1/account/indexing',
+      'PUT',
+      expectedDid,
+      { indexing },
+      intent ?? createWriteIntent(`indexing:${indexing}`),
+    ),
 };
 
 export async function getOperation(id: string, signal?: AbortSignal): Promise<ServerOperation> {
