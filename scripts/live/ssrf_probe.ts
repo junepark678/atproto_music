@@ -20,9 +20,14 @@
 // (system lookup, TLS connector, DEFAULT_PINNED_CAPS), requests `https://<host>/`
 // for each target through it and writes a result file with one outcome per
 // target: `refused` with the policy reason, or `dns`, `timeout`,
-// `unpinned_fetch`, `connect`, `fetched` (with the status) and so on. It records
-// only outcome, code, message, elapsed time and the resolved addresses; never
-// bodies or headers, so a metadata service's answer cannot leak through it.
+// `unpinned_fetch`, `connect`, `fetched` (with the status) and so on. The
+// private result file intentionally contains configured target hostnames,
+// exact target URLs and resolved IP addresses needed for offline validation.
+// Those raw network identifiers are permitted only in this operator-controlled,
+// owner-only (0600), create-once artifact. They are never printed. The artifact
+// contains no response bodies/headers or raw exception text. Console output is
+// a fixed, allowlisted summary and omits hosts, URLs, IPs, codes and exception
+// details.
 //
 // Targets: the operator's controlled DNS names (ATMUSIC_LIVE_SSRF_HOSTS,
 // `label=host` pairs; the labels rfc1918, loopback and metadata are required)
@@ -38,7 +43,18 @@
 // exits 2 before reading anything. Evidence for this gate stays blocked in the
 // verifier until the probe contract is approved (docs/verification/node-live.md).
 
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import {
+  closeSync,
+  existsSync,
+  fchmodSync,
+  constants as fsConstants,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { classifyIpv4, classifyIpv6, parseIpv4, parseIpv6 } from '@atmusic/atproto/net/url-policy';
@@ -48,6 +64,7 @@ import {
   isTransportError,
   type PinnedLookup,
   type PinnedTransportCaps,
+  TRANSPORT_ERROR_CODES,
 } from '@atmusic/worker/node/pinned-transport';
 import {
   isNodeGateMain,
@@ -184,16 +201,16 @@ export function parseHosts(text: string): Record<string, string> {
   const entries = text.split(',');
   for (const entry of entries) {
     if (entry === '') throw new Error('empty entry in host list');
-    if (entry !== entry.trim()) throw new Error(`entry ${JSON.stringify(entry)} has surrounding whitespace`);
+    if (entry !== entry.trim()) throw new Error('host list entry has surrounding whitespace');
     const eq = entry.indexOf('=');
-    if (eq < 0) throw new Error(`entry ${JSON.stringify(entry)} is not label=host`);
+    if (eq < 0) throw new Error('host list entry must use label=host syntax');
     const label = entry.slice(0, eq);
     const host = entry.slice(eq + 1);
-    if (!LABEL.test(label)) throw new Error(`label ${JSON.stringify(label)} must match ${LABEL}`);
-    if (label in hosts) throw new Error(`duplicate label ${label}`);
+    if (!LABEL.test(label)) throw new Error('host list label is malformed');
+    if (label in hosts) throw new Error('duplicate label');
     const problem = hostnameProblem(host);
-    if (problem !== null) throw new Error(`host for ${label}: ${problem}`);
-    if (seen.has(host)) throw new Error(`host ${host} listed twice`);
+    if (problem !== null) throw new Error(`host list value is invalid: ${problem}`);
+    if (seen.has(host)) throw new Error('host listed twice');
     seen.add(host);
     hosts[label] = host;
   }
@@ -305,7 +322,56 @@ function targetUrl(host: string): string {
 
 function errorCode(error: unknown): string {
   const code = (error as { code?: unknown } | null)?.code;
-  return typeof code === 'string' ? code : 'unknown';
+  return diagnosticCode(code);
+}
+
+const DIAGNOSTIC_CODES = new Set<string>([
+  ...TRANSPORT_ERROR_CODES,
+  'aborted',
+  'bad_headers',
+  'bad_status',
+  'connect_deadline',
+  'content_length',
+  'deadline',
+  'no_answers',
+  'no_host',
+  'not_https',
+  'private_answer',
+  'private_literal',
+  'request_body',
+  'streamed',
+  'unknown',
+  'EAI_AGAIN',
+  'EAI_FAIL',
+  'ENODATA',
+  'ENOTFOUND',
+  'ETIMEOUT',
+]);
+
+function diagnosticCode(value: unknown): string {
+  return typeof value === 'string' && DIAGNOSTIC_CODES.has(value) ? value : 'unknown';
+}
+
+function diagnosticMessage(outcome: ProbeOutcomeKind, status?: number): string {
+  if (outcome === 'fetched') return `request reached an HTTP server (status ${status ?? 0})`;
+  switch (outcome) {
+    case 'refused':
+      return 'destination refused by transport policy';
+    case 'dns':
+      return 'DNS lookup did not produce a usable destination';
+    case 'timeout':
+      return 'request deadline elapsed';
+    case 'unpinned_fetch':
+      return 'request was refused by the unpinned-fetch guard';
+    case 'connect':
+      return 'connection did not complete';
+    case 'too_large':
+      return 'response exceeded the configured size limit';
+    case 'redirect':
+      return 'redirect was refused';
+    case 'error':
+      return 'request failed with an unclassified error';
+  }
 }
 
 export function observePinnedLookup(source: PinnedLookup): ObservedPinnedLookup {
@@ -318,7 +384,7 @@ export function observePinnedLookup(source: PinnedLookup): ObservedPinnedLookup 
       observed.set(hostname, result);
       return answers;
     } catch (error) {
-      observed.set(hostname, { addresses: [], classes: [], error: errorCode(error) });
+      observed.set(hostname, { addresses: [], classes: [], error: diagnosticCode(errorCode(error)) });
       throw error;
     }
   };
@@ -346,20 +412,20 @@ async function attempt(url: string, transport: Transport, now: () => number): Pr
       url,
       outcome: 'fetched',
       code: `status_${response.status}`,
-      message: `request reached a server (HTTP ${response.status})`,
+      message: diagnosticMessage('fetched', response.status),
       elapsedMs: elapsed(),
     };
   } catch (error) {
     if (isTransportError(error)) {
-      const code = error.reason ?? error.code;
+      const code = diagnosticCode(error.reason) === 'unknown' ? error.code : diagnosticCode(error.reason);
       const outcome: ProbeOutcomeKind = error.code === 'blocked_address' ? 'refused' : error.code;
-      return { url, outcome, code, message: error.message, elapsedMs: elapsed() };
+      return { url, outcome, code, message: diagnosticMessage(outcome), elapsedMs: elapsed() };
     }
     return {
       url,
       outcome: 'error',
       code: errorCode(error),
-      message: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+      message: diagnosticMessage('error'),
       elapsedMs: elapsed(),
     };
   }
@@ -433,36 +499,44 @@ export function checkProbeResult(result: unknown, hosts: Record<string, string>,
     }
     const configured = expected.find((t) => t.kind === kind && t.label === label && t.host === host);
     if (configured === undefined) {
-      problems.push(`${where}: target is not configured`);
+      problems.push(`${where}: target identity is not configured`);
       continue;
     }
     const key = `${configured.kind}:${configured.label}:${configured.host}`;
-    if (seen.has(key)) problems.push(`${where}: ${key} recorded twice`);
+    if (seen.has(key)) problems.push(`${where}: duplicate target entry`);
     seen.add(key);
     if (!Array.isArray(entry.raw) || entry.raw.length !== 1 || !isRecord(entry.raw[0])) {
-      problems.push(`${where} ${key}: exactly one valid attempt must be recorded`);
+      problems.push(`${where}: exactly one valid attempt must be recorded`);
     } else {
       const raw = entry.raw[0];
-      if (raw.url !== targetUrl(configured.host)) problems.push(`${where} ${key}: attempt URL does not match target`);
-      if (!isProbeOutcome(raw.outcome)) problems.push(`${where} ${key}: attempt outcome is invalid`);
-      if (!safeCode(raw.code)) problems.push(`${where} ${key}: attempt code is invalid`);
-      if (typeof raw.message !== 'string' || raw.message.length > 512)
-        problems.push(`${where} ${key}: attempt message is invalid`);
+      if (raw.url !== targetUrl(configured.host)) problems.push(`${where}: attempt URL does not match target`);
+      if (!isProbeOutcome(raw.outcome)) problems.push(`${where}: attempt outcome is invalid`);
+      if (!safeCode(raw.code)) problems.push(`${where}: attempt code is invalid`);
+      const status =
+        typeof raw.code === 'string' && /^status_[1-5]\d{2}$/.test(raw.code)
+          ? Number(raw.code.slice('status_'.length))
+          : undefined;
+      if (
+        !isProbeOutcome(raw.outcome) ||
+        typeof raw.message !== 'string' ||
+        raw.message !== diagnosticMessage(raw.outcome, status)
+      )
+        problems.push(`${where}: attempt message is invalid`);
       if (!Number.isSafeInteger(raw.elapsedMs) || (raw.elapsedMs as number) < 0)
-        problems.push(`${where} ${key}: attempt elapsedMs is invalid`);
+        problems.push(`${where}: attempt elapsedMs is invalid`);
       if (entry.safeFetch.outcome !== raw.outcome || entry.safeFetch.code !== raw.code)
-        problems.push(`${where} ${key}: summary does not match the recorded attempt`);
+        problems.push(`${where}: summary does not match the recorded attempt`);
     }
     const outcome = entry.safeFetch.outcome;
     const code = entry.safeFetch.code;
     if (!isProbeOutcome(outcome) || !safeCode(code)) {
-      problems.push(`${where} ${key}: pinned transport summary is malformed`);
+      problems.push(`${where}: pinned transport summary is malformed`);
       continue;
     }
     if (outcome !== 'refused') {
-      problems.push(`${where} ${key}: pinned transport outcome ${outcome} is not a policy refusal`);
+      problems.push(`${where}: pinned transport outcome ${outcome} is not a policy refusal`);
     } else if (code !== (kind === 'literal' ? 'private_literal' : 'private_answer')) {
-      problems.push(`${where} ${key}: refused with an unexpected policy code`);
+      problems.push(`${where}: refused with an unexpected policy code`);
     }
     const addresses = Array.isArray(entry.resolved.addresses) ? entry.resolved.addresses : [];
     if (
@@ -473,28 +547,41 @@ export function checkProbeResult(result: unknown, hosts: Record<string, string>,
           (parseIpv4(address) !== null || parseIpv6(address) !== null),
       )
     ) {
-      problems.push(`${where} ${key}: resolved addresses are malformed`);
+      problems.push(`${where}: resolved addresses are malformed`);
       continue;
     }
-    if ('error' in entry.resolved) problems.push(`${where} ${key}: accepted result cannot contain a resolution error`);
+    if ('error' in entry.resolved) problems.push(`${where}: accepted result cannot contain a resolution error`);
     const classes = (addresses as string[]).map(addressClass);
     const recordedClasses = Array.isArray(entry.resolved.classes) ? entry.resolved.classes : [];
     if (recordedClasses.length !== classes.length || recordedClasses.some((value, i) => value !== classes[i]))
-      problems.push(`${where} ${key}: address classes do not match the resolved addresses`);
+      problems.push(`${where}: address classes do not match the resolved addresses`);
     const want = labelClass(label);
     if (kind === 'literal' && (addresses.length !== 1 || addresses[0] !== host))
-      problems.push(`${where} ${key}: literal address does not match its configured target`);
+      problems.push(`${where}: literal address does not match its configured target`);
     if (kind === 'controlledName') {
-      if (classes.length === 0) problems.push(`${where} ${key}: no resolved addresses recorded`);
+      if (classes.length === 0) problems.push(`${where}: no resolved addresses recorded`);
       else if (want !== null && classes.some((cls) => cls !== want))
-        problems.push(`${where} ${key}: resolves to ${classes.join(',')}; every address must be ${want}`);
+        problems.push(`${where}: address classes do not match the required label class`);
     }
   }
-  for (const t of expected) {
-    const key = `${t.kind}:${t.label}:${t.host}`;
-    if (!seen.has(key)) problems.push(`target ${key} is not in the probe result`);
+  for (const [index, target] of expected.entries()) {
+    const key = `${target.kind}:${target.label}:${target.host}`;
+    if (!seen.has(key)) problems.push(`expected target ${index + 1} is missing`);
   }
   return problems;
+}
+
+/** The emitted runner may exit successfully only when the full recorded result validates. */
+export function probeResultExitCode(result: unknown, hosts: Record<string, string>, origin: string): 0 | 1 {
+  return checkProbeResult(result, hosts, origin).length === 0 ? 0 : 1;
+}
+
+/** Fixed console summaries for an emitted run; no target identity or error code is copied. */
+export function probeTargetSummaries(targets: readonly ProbeOutcome[]): string[] {
+  return targets.map((target, index) => {
+    const outcome = isProbeOutcome(target.safeFetch.outcome) ? target.safeFetch.outcome : 'error';
+    return `target ${index + 1}: ${outcome}`;
+  });
 }
 
 function isProbeOutcome(value: unknown): value is ProbeOutcomeKind {
@@ -512,7 +599,12 @@ function isProbeOutcome(value: unknown): value is ProbeOutcomeKind {
 }
 
 function safeCode(value: unknown): value is string {
-  return typeof value === 'string' && value.length > 0 && value.length <= 80 && /^[a-zA-Z0-9_.-]+$/.test(value);
+  return (
+    typeof value === 'string' &&
+    value.length > 0 &&
+    value.length <= 80 &&
+    (DIAGNOSTIC_CODES.has(value) || /^status_[1-5]\d{2}$/.test(value))
+  );
 }
 
 function safeOrigin(text: string): string | null {
@@ -559,8 +651,11 @@ function projectTargets(targets: unknown, hosts: Record<string, string>): Record
       elapsedMs: Number.isSafeInteger(attempt.elapsedMs) && (attempt.elapsedMs as number) >= 0 ? attempt.elapsedMs : 0,
     }));
     projected.push({
-      target,
-      resolved: { addresses, classes: addresses.map(addressClass) },
+      target: {
+        kind: target.kind,
+        addressClass: labelClass(target.label) ?? 'additional',
+      },
+      resolved: { addressCount: addresses.length, classes: addresses.map(addressClass) },
       raw: attempts,
       safeFetch: {
         outcome: isProbeOutcome(candidate.safeFetch.outcome) ? candidate.safeFetch.outcome : 'error',
@@ -596,7 +691,7 @@ async function run(ctx: NodeGateContext): Promise<NodeGateBodyResult> {
     results: {
       targets: problems.length === 0 ? projectTargets(record.targets, hosts) : [],
       probe: {
-        ...(problems.length === 0 ? { recordedAt: record.recordedAt, hostname: record.hostname } : {}),
+        ...(problems.length === 0 ? { recordedAt: record.recordedAt } : {}),
         transport: 'pinned',
         caps: { ...DEFAULT_PINNED_CAPS },
       },
@@ -627,7 +722,7 @@ export function parseProbeArgs(argv: readonly string[]): {
     const arg = argv[i] as string;
     const eq = arg.indexOf('=');
     const name = eq < 0 ? arg : arg.slice(0, eq);
-    if (!['--origin', '--hosts', '--out'].includes(name)) throw new Error(`unknown argument ${arg}`);
+    if (!['--origin', '--hosts', '--out'].includes(name)) throw new Error('unknown argument');
     const value = eq < 0 ? argv[++i] : arg.slice(eq + 1);
     if (value === undefined || value === '') throw new Error(`${name} needs a value`);
     values[name] = value;
@@ -655,12 +750,15 @@ export function probeSource(dir: string): string {
 //   npx tsx ${posixRelative(REPO_ROOT, resolve(dir, 'probe.ts'))} --origin <origin> --hosts <label=host,...> --out <result.json>
 //
 // It builds the production pinned transport (system lookup, TLS connector,
-// DEFAULT_PINNED_CAPS), requests https://<host>/ for every controlled name and
-// IP literal through it, and writes one outcome per target. Only outcome,
-// code, message, elapsed time and resolved addresses are recorded.
+// DEFAULT_PINNED_CAPS) and requests each controlled name and IP literal. The
+// private result file intentionally contains the configured hostnames, exact
+// target URLs, and DNS answers needed for offline validation. Raw network
+// identifiers are permitted only in this operator-controlled, owner-only
+// (0600), create-once artifact; they are never printed. Diagnostics are fixed
+// text and never include exception messages or codes from the network.
 // This file makes network requests only when run explicitly.
 
-import { writeFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { hostname } from 'node:os';
 import {
   DEFAULT_PINNED_CAPS,
@@ -676,34 +774,78 @@ import {
   type ProbeResult,
   probeTargets,
   probeTargetsFor,
+  probeResultExitCode,
+  probeTargetSummaries,
+  writePrivateProbeResult,
 } from '${gateModule}';
 
-const { origin, hosts, out } = parseProbeArgs(process.argv.slice(2));
-const observedLookup = observePinnedLookup(systemLookup);
-const transport = pinnedTransport({ caps: DEFAULT_PINNED_CAPS, lookup: observedLookup.lookup, connector: tlsSocketConnector });
-try {
-  const targets = await probeTargets(probeTargetsFor(hosts), { transport, lookup: observedLookup });
-  const result: ProbeResult = {
-    schemaVersion: PROBE_RESULT_SCHEMA_VERSION,
-    kind: PROBE_RESULT_KIND,
-    recordedAt: new Date().toISOString(),
-    hostname: hostname(),
-    origin,
-    transport: 'pinned',
-    caps: { ...DEFAULT_PINNED_CAPS },
-    hosts,
-    targets,
-  };
-  writeFileSync(out, \`\${JSON.stringify(result, null, 2)}\\n\`);
-  for (const t of targets) {
-    console.error(\`\${t.target.kind} \${t.target.label} \${t.target.host}: \${t.safeFetch.outcome} (\${t.safeFetch.code})\`);
+async function main() {
+  let args;
+  try {
+    args = parseProbeArgs(process.argv.slice(2));
+  } catch {
+    console.error('invalid probe arguments');
+    process.exitCode = 2;
+    return;
   }
-  console.log(\`wrote \${out}\`);
-  process.exitCode = targets.every((t) => t.safeFetch.outcome === 'refused') ? 0 : 1;
-} finally {
-  await transport.close();
+  if (existsSync(args.out)) {
+    console.error('probe output must be a new private file');
+    process.exitCode = 2;
+    return;
+  }
+  const observedLookup = observePinnedLookup(systemLookup);
+  const transport = pinnedTransport({ caps: DEFAULT_PINNED_CAPS, lookup: observedLookup.lookup, connector: tlsSocketConnector });
+  try {
+    const targets = await probeTargets(probeTargetsFor(args.hosts), { transport, lookup: observedLookup });
+    const result: ProbeResult = {
+      schemaVersion: PROBE_RESULT_SCHEMA_VERSION,
+      kind: PROBE_RESULT_KIND,
+      recordedAt: new Date().toISOString(),
+      hostname: hostname(),
+      origin: args.origin,
+      transport: 'pinned',
+      caps: { ...DEFAULT_PINNED_CAPS },
+      hosts: args.hosts,
+      targets,
+    };
+    writePrivateProbeResult(args.out, \`\${JSON.stringify(result, null, 2)}\\n\`);
+    // The private file contains target identities; stdout/stderr expose only
+    // ordinals and allowlisted outcomes.
+    for (const summary of probeTargetSummaries(targets)) console.error(summary);
+    console.log('probe result written to the private output file');
+    if (probeResultExitCode(result, args.hosts, args.origin) === 0) {
+      console.error('all probe observations satisfy the configured policy checks');
+      process.exitCode = 0;
+    } else {
+      console.error('probe observations failed validation');
+      process.exitCode = 1;
+    }
+  } catch {
+    console.error('probe execution failed; no success result is available');
+    process.exitCode = 1;
+  } finally {
+    await transport.close().catch(() => {
+      process.stderr.write('probe transport cleanup failed\\n');
+      process.exitCode = 1;
+    });
+  }
 }
+
+await main();
 `;
+}
+
+/** Create a new, owner-only probe artifact; existing paths and symlinks are refused. */
+export function writePrivateProbeResult(path: string, contents: string): void {
+  const noFollow = typeof fsConstants.O_NOFOLLOW === 'number' ? fsConstants.O_NOFOLLOW : 0;
+  const fd = openSync(path, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | noFollow, 0o600);
+  try {
+    fchmodSync(fd, 0o600);
+    writeFileSync(fd, contents, 'utf8');
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
 }
 
 /** Write the probe script into `dir` (inside the repository); returns the path written. No network. */
@@ -745,10 +887,15 @@ if (isNodeGateMain(import.meta.url)) {
       process.stderr.write('usage: ssrf_probe.ts --emit-probe [dir]\n');
       process.exitCode = 2;
     } else {
-      emitMain(args[1] ?? DEFAULT_PROBE_DIR, (text) => process.stdout.write(text));
+      try {
+        emitMain(args[1] ?? DEFAULT_PROBE_DIR, (text) => process.stdout.write(text));
+      } catch {
+        process.stderr.write('probe script could not be emitted\n');
+        process.exitCode = 1;
+      }
     }
   } else if (args.length > 0) {
-    process.stderr.write(`unknown arguments: ${args.join(' ')}\n`);
+    process.stderr.write('unknown arguments\n');
     process.exitCode = 2;
   } else {
     mainNodeGate(spec);
