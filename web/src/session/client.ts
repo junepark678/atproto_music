@@ -123,7 +123,6 @@ export class SessionClient {
   async logout(): Promise<void> {
     const current = this.#current ?? (await this.getSession());
     if (current === null) throw new Error('Sign in to continue');
-    const requestRevision = this.#sessionRevision;
     const response = await this.mutate(
       '/api/v1/auth/logout',
       {
@@ -135,9 +134,19 @@ export class SessionClient {
     );
     if (!response.ok && response.status !== 401) throw new Error(`Sign out failed (${response.status})`);
     if (response.status !== 401) {
-      if (this.#sessionRevision === requestRevision && this.#current?.did === current.did) {
-        this.#sessionReadGeneration++;
+      const latest = this.#current;
+      this.#sessionReadGeneration++;
+      if (latest === null || latest.did === current.did) {
         this.#set(null, false);
+        // A refresh may have been reading the same account while the logout
+        // completed. Discard that response, then reconcile the cookie once so
+        // a genuinely newer account is restored instead of being erased.
+        try {
+          await this.getSession();
+        } catch {
+          // The server accepted sign-out; keep the local session cleared until
+          // a later explicit refresh if reconciliation is temporarily offline.
+        }
       }
     }
   }

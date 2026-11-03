@@ -90,7 +90,7 @@ describe('web/test/routes/settings.test.tsx', () => {
     const state = createAppState({ api });
     state.session.value = SESSION;
     state.handle.value = SESSION.handle;
-    const signOut = vi.fn(async () => undefined);
+    const signOut = vi.fn(async () => setSession(state, null));
     const services: ScreenServices = {
       clock: { nowMs: () => Date.parse('2026-01-15T12:00:00Z') },
       random: { bytes: (n) => new Uint8Array(n), float: () => 0 },
@@ -116,6 +116,45 @@ describe('web/test/routes/settings.test.tsx', () => {
     await vi.waitFor(() => expect(root.textContent).toContain('You have signed out'));
     expect(signOut).toHaveBeenCalledOnce();
     expect(root.textContent).not.toContain(`Signed in as @${SESSION.handle}`);
+    render(null, root);
+    root.remove();
+  });
+
+  it('does not show signed-out UI or erase a different account after a late sign-out', async () => {
+    (window as unknown as { happyDOM: { setURL(url: string): void } }).happyDOM.setURL('https://music.test/settings');
+    const api = new ApiClient({ fetch: async () => new Response(null, { status: 404 }) });
+    const state = createAppState({ api });
+    state.session.value = SESSION;
+    const other = { ...SESSION, did: 'did:plc:bbbbbbbbbbbbbbbbbbbbbbbb' as typeof SESSION.did, handle: 'bob.test' };
+    let finishSignOut!: () => void;
+    const signOut = vi.fn(() => new Promise<void>((resolve) => (finishSignOut = resolve)));
+    const services: ScreenServices = {
+      clock: { nowMs: () => Date.parse('2026-01-15T12:00:00Z') },
+      random: { bytes: (n) => new Uint8Array(n), float: () => 0 },
+      ticker: { every: () => () => undefined },
+      session: async () => ({ signIn: async () => undefined, signOut, expiry: async () => null }),
+      outbox: async () => {
+        throw new Error('publishing is unavailable in this test');
+      },
+      closeOutbox: async () => undefined,
+    };
+    const root = document.createElement('div');
+    document.body.append(root);
+    render(
+      <AppStateContext.Provider value={state}>
+        <ServicesProvider value={services}>
+          <App state={state} loadMetaOnMount={false} />
+        </ServicesProvider>
+      </AppStateContext.Provider>,
+      root,
+    );
+    await vi.waitFor(() => expect(root.textContent).toContain(SESSION.did));
+    [...root.querySelectorAll('button')].find((button) => button.textContent === 'Sign out')!.click();
+    await vi.waitFor(() => expect(signOut).toHaveBeenCalledOnce());
+    setSession(state, other);
+    finishSignOut();
+    await vi.waitFor(() => expect(root.textContent).toContain(other.did));
+    expect(root.textContent).not.toContain('You have signed out');
     render(null, root);
     root.remove();
   });

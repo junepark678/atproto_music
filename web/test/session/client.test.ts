@@ -51,7 +51,8 @@ describe('web/test/session/client.test.ts', () => {
     const fetcher = vi
       .fn()
       .mockResolvedValueOnce(Response.json(reauth))
-      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(new Response(null, { status: 401 }));
     const client = new SessionClient({ fetch: fetcher, onChange: changed });
     await expect(client.getSession()).resolves.toEqual(reauth);
     expect(client.current()).toEqual(reauth);
@@ -60,9 +61,10 @@ describe('web/test/session/client.test.ts', () => {
       'Sign in again before making changes.',
     );
     await client.logout();
-    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(fetcher).toHaveBeenCalledTimes(3);
     expect(String(fetcher.mock.calls[1]?.[0])).toBe('/api/v1/auth/logout');
     expect(new Headers(fetcher.mock.calls[1]?.[1]?.headers).get('X-CSRF-Token')).toBe(reauth.csrfToken);
+    expect(String(fetcher.mock.calls[2]?.[0])).toBe('/api/v1/auth/session');
   });
 
   it('keeps the reauthentication notice through an anonymous refresh and clears it after the cookie session returns', async () => {
@@ -174,7 +176,7 @@ describe('web/test/session/client.test.ts', () => {
     expect(client.current()).toEqual(bob);
   });
 
-  it('does not let a late sign-out response cancel a newer session refresh', async () => {
+  it('reconciles a refresh of the logged-out account and preserves a different current account', async () => {
     let resolveLogout!: (response: Response) => void;
     const pendingLogout = new Promise<Response>((resolve) => (resolveLogout = resolve));
     let resolveRefresh!: (response: Response) => void;
@@ -184,14 +186,15 @@ describe('web/test/session/client.test.ts', () => {
       .fn()
       .mockResolvedValueOnce(Response.json(dto))
       .mockImplementationOnce(() => pendingLogout)
-      .mockImplementationOnce(() => pendingRefresh);
+      .mockImplementationOnce(() => pendingRefresh)
+      .mockResolvedValueOnce(Response.json(bob));
     const client = new SessionClient({ fetch: fetcher });
     await client.getSession();
     const logout = client.logout();
     const refresh = client.refresh();
     resolveLogout(new Response(null, { status: 204 }));
     await logout;
-    resolveRefresh(Response.json(bob));
+    resolveRefresh(Response.json(dto));
     await expect(refresh).resolves.toEqual(bob);
     expect(client.current()).toEqual(bob);
   });
