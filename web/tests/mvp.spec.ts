@@ -20,8 +20,10 @@
 // instead of the frozen fixture clock, and every wait is a bounded poll on an
 // observable state, never a sleep.
 
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import type { APIRequestContext, APIResponse, Locator, Page } from '@playwright/test';
 import Ajv2020 from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
@@ -36,6 +38,8 @@ import {
   workerOrigin,
 } from '../../scripts/e2e/dev-env';
 import { expect, test } from './fixtures';
+
+const repoRoot = resolve(new URL('../..', import.meta.url).pathname);
 
 // ---------------------------------------------------------------------------
 // API schema (the same AJV setup as worker/test/composition/support.ts)
@@ -531,6 +535,30 @@ test('sign-in through the fake AS, scrobble, indexed, delete and follow journeys
     await expect(page.locator('[data-state="signin-required"]')).toBeVisible();
     await expect(nav(page).getByRole('link', { name: 'Sign in' })).toBeVisible();
   });
+});
+
+test('the stack runs worker/dist/node/e2e.mjs built from node-entry.ts, and check-node-bundle confirms its worker/src and packages/*/src inputs, except worker/src/node/main.ts, equal those of main.mjs', async () => {
+  test.setTimeout(120_000);
+  const tsx = resolve(repoRoot, 'node_modules/tsx/dist/cli.mjs');
+  const dist = resolve(repoRoot, 'worker/dist/node');
+  execFileSync(process.execPath, [tsx, 'scripts/build-server.ts'], { cwd: repoRoot, stdio: 'pipe' });
+  execFileSync(process.execPath, [tsx, 'scripts/build-server.ts', '--e2e'], { cwd: repoRoot, stdio: 'pipe' });
+  expect(existsSync(resolve(dist, 'main.mjs'))).toBe(true);
+  expect(existsSync(resolve(dist, 'e2e.mjs'))).toBe(true);
+  expect(readFileSync(resolve(dist, 'e2e.inputs.json'), 'utf8')).toContain('worker/test/e2e/node-entry.ts');
+  const output = execFileSync(process.execPath, [tsx, 'scripts/check-node-bundle.ts'], {
+    cwd: repoRoot,
+    encoding: 'utf8',
+  });
+  expect(output).toContain('bundle sha256');
+});
+
+test('worker/test/e2e has no entry.ts or wrangler.e2e.jsonc, and neither scripts/e2e/start-stack.ts nor scripts/e2e/dev-env.ts mentions wrangler', () => {
+  expect(existsSync(resolve(repoRoot, 'worker/test/e2e/entry.ts'))).toBe(false);
+  expect(existsSync(resolve(repoRoot, 'worker/test/e2e/wrangler.e2e.jsonc'))).toBe(false);
+  for (const path of ['scripts/e2e/start-stack.ts', 'scripts/e2e/dev-env.ts']) {
+    expect(readFileSync(resolve(repoRoot, path), 'utf8'), path).not.toMatch(/wrangler/i);
+  }
 });
 
 test('the server OAuth callback rejects an unbound response without leaking its code or state', async ({
