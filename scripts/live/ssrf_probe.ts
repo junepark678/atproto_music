@@ -596,8 +596,7 @@ async function run(ctx: NodeGateContext): Promise<NodeGateBodyResult> {
     results: {
       targets: problems.length === 0 ? projectTargets(record.targets, hosts) : [],
       probe: {
-        recordedAt: record.recordedAt ?? null,
-        hostname: record.hostname ?? null,
+        ...(problems.length === 0 ? { recordedAt: record.recordedAt, hostname: record.hostname } : {}),
         transport: 'pinned',
         caps: { ...DEFAULT_PINNED_CAPS },
       },

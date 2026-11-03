@@ -554,8 +554,14 @@ async function runGateWith(result: unknown) {
   const path = join(scratch, `result-${Math.random().toString(36).slice(2)}.json`);
   writeFileSync(path, JSON.stringify(result));
   const io = capturedIO();
-  const code = await runNodeGate(spec, completeEnv({ [SSRF_ENV.probeResult]: path }), io.io);
-  return { code, ...io.output() };
+  let evidence = '';
+  const gateIO: NodeGateIO = { ...io.io, writeEvidence: (_path, text) => (evidence = text) };
+  const code = await runNodeGate(
+    spec,
+    completeEnv({ [SSRF_ENV.probeResult]: path, [NODE_ENV.evidenceOut]: 'captured-evidence.json' }),
+    gateIO,
+  );
+  return { code, evidence, ...io.output() };
 }
 
 describe('scripts/live/ssrf_probe.ts › gate body', () => {
@@ -737,6 +743,23 @@ describe('scripts/live/ssrf_probe.ts › gate body', () => {
     expect(run.stdout).not.toContain('synthetic-private-secret');
     expect(run.stderr).not.toContain('synthetic-private-secret');
     expect(JSON.parse(run.stdout).results.targets).toEqual([]);
+  });
+
+  test.each([
+    ['object hostname', 'hostname', { secret: 'synthetic-host-secret' }, 'synthetic-host-secret'],
+    ['string hostname', 'hostname', 'bad hostname synthetic-private-host-secret', 'synthetic-private-host-secret'],
+    ['object timestamp', 'recordedAt', { secret: 'synthetic-time-secret' }, 'synthetic-time-secret'],
+    ['string timestamp', 'recordedAt', 'synthetic-time-secret', 'synthetic-time-secret'],
+  ])('invalid %s is absent from stdout and evidence', async (_label, field, value, secret) => {
+    const result = recordedResult() as unknown as Record<string, unknown>;
+    result[field as string] = value;
+    const run = await runGateWith(result);
+    expect(run.code).toBe(NODE_EXIT_CODES.failed);
+    expect(run.stdout).not.toContain(secret);
+    expect(run.stderr).not.toContain(secret);
+    expect(run.evidence).not.toContain(secret);
+    const document = JSON.parse(run.evidence);
+    expect(document.results.probe).not.toHaveProperty(field as string);
   });
 
   test('fails (not blocks) on an unreadable result file', async () => {
