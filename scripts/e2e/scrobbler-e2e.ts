@@ -181,6 +181,7 @@ class BundleProcess {
   readonly #fakes: FakeUpstreams;
   readonly #outbound: Array<Record<string, unknown>> = [];
   #lastJetstreamSeq = 0;
+  #lastDrainedCommits: ReturnType<FakeUpstreams['drainCommits']> = [];
   readonly #commands = new Map<number, { resolve(value: unknown): void; reject(): void; timer: NodeJS.Timeout }>();
   #nextCommand = 0;
   #nextResponse: Promise<void> = Promise.resolve();
@@ -201,13 +202,7 @@ class BundleProcess {
     });
   }
 
-  static async start(
-    fakes: FakeUpstreams,
-    runtimeDir: string,
-    distDir: string,
-    port: number,
-    ingestMode: 'socket' | 'off' = 'socket',
-  ): Promise<BundleProcess> {
+  static async start(fakes: FakeUpstreams, runtimeDir: string, distDir: string, port: number): Promise<BundleProcess> {
     const secretsFile = join(runtimeDir, 'secrets.json');
     const secrets = {
       ...testSecretsDocument(),
@@ -231,7 +226,7 @@ class BundleProcess {
       LEXICON_PREFIX: E2E_PREFIX,
       NAMESPACE_OWNERSHIP_REF: 'dns:_lexicon.e2e.atmusic.test',
       NAMESPACE_PUBLICATION_REF: `sha256:${'0'.repeat(64)}`,
-      INGEST_MODE: ingestMode,
+      INGEST_MODE: 'socket',
       JETSTREAM_URLS: 'wss://jetstream.test',
       ATMUSIC_TEST_JETSTREAM_WS: fakes.jetstreamUrl,
       JETSTREAM_LOOKBACK_HOURS: '24',
@@ -322,12 +317,12 @@ class BundleProcess {
     });
   }
 
-  async pump(ms = 1000): Promise<void> {
+  async pump(ms = 1000, publishCommits = true): Promise<void> {
     await this.#fakes.advance(ms);
     await this.command('pump', { advance: ms });
-    const commits = this.#fakes.drainCommits();
-    if (commits.length > 0) {
-      const frames = await this.#fakes.appendCommits(commits.map(({ commit }) => commit));
+    this.#lastDrainedCommits = this.#fakes.drainCommits();
+    if (publishCommits && this.#lastDrainedCommits.length > 0) {
+      const frames = await this.#fakes.appendCommits(this.#lastDrainedCommits.map(({ commit }) => commit));
       for (const frame of frames) {
         try {
           const seq = (JSON.parse(frame) as { seq?: unknown }).seq;
@@ -338,6 +333,12 @@ class BundleProcess {
         }
       }
     }
+  }
+
+  async disconnectJetstream(): Promise<number> {
+    const result = await this.command('disconnectJetstream');
+    if (typeof result !== 'number') throw new Error('fixture Jetstream disconnect returned an invalid count');
+    return result;
   }
 
   async inspect(): Promise<Record<string, unknown[]>> {
@@ -1142,74 +1143,57 @@ async function panoReadShapesCase(
 }
 
 async function socketDeliveryDisabledControl(
+  bundle: BundleProcess,
   fakes: FakeUpstreams,
-  distDir: string,
 ): Promise<{ pdsCommitted: boolean; indexed: boolean; mode: string; cursor: number | null }> {
-  const bob = fakes.accounts.find((account) => account.name === 'bob');
-  if (!bob) throw new Error('negative-control account missing');
-  const runtimeDir = mkdtempSync(join(tmpdir(), 'atmusic-n8-socket-off-'));
-  let disabled: BundleProcess | null = null;
-  let stage = 'bundle-start';
-  try {
-    disabled = await BundleProcess.start(fakes, runtimeDir, distDir, await freeLoopbackPort(), 'off');
-    stage = 'signin';
-    let session: Session;
-    try {
-      session = await signIn(fakes, disabled, bob);
-    } catch (error) {
-      if (error instanceof Error) {
-        const failedStage = /fixture sign-in failed during ([a-z-]+)/.exec(error.message)?.[1];
-        if (failedStage) stage = `signin-${failedStage}`;
-      }
-      throw error;
+  const alice = fakes.accounts.find((account) => account.name === 'alice');
+  if (!alice) throw new Error('negative-control account missing');
+  const session = await signIn(fakes, bundle, alice);
+  const before = await bundle.inspect();
+  const beforeCheckpointRows = before.ingest_checkpoint;
+  const beforeCheckpoint = Array.isArray(beforeCheckpointRows) ? replayObject(beforeCheckpointRows[0]) : {};
+  const beforeCursor = typeof beforeCheckpoint.cursor === 'number' ? beforeCheckpoint.cursor : null;
+  if ((await bundle.disconnectJetstream()) < 1) throw new Error('negative-control socket was not connected');
+  const response = await session.jar.request('/api/v1/scrobbles', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      origin: PUBLIC_ORIGIN,
+      'x-csrf-token': session.csrfToken,
+      'idempotency-key': 'n8-socket-delivery-negative-control',
+    },
+    body: JSON.stringify({
+      artist: 'N8 Socket Control Artist',
+      track: 'PDS Only Control',
+      listenedAt: new Date(FIXTURE_NOW_MS - 30_000).toISOString().replace('.000', ''),
+    }),
+  });
+  if (response.status !== 202) throw new Error('negative-control write was not accepted');
+  const operationId = replayString(replayObject(replayObject(await response.json()).operation).id);
+  let succeeded = false;
+  for (let attempt = 0; attempt < 30; attempt++) {
+    // Process the write, but deliberately discard its commit frame instead of
+    // appending it to the disconnected Jetstream child.
+    await bundle.pump(0, false);
+    const operation = replayObject(await (await session.jar.request(`/api/v1/operations/${operationId}`)).json());
+    if (operation.state === 'succeeded') {
+      succeeded = true;
+      break;
     }
-    stage = 'write-acknowledgement';
-    const response = await session.jar.request('/api/v1/scrobbles', {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        origin: PUBLIC_ORIGIN,
-        'x-csrf-token': session.csrfToken,
-        'idempotency-key': 'n8-socket-off-negative-control',
-      },
-      body: JSON.stringify({
-        artist: 'N8 Socket Control Artist',
-        track: 'PDS Only Control',
-        listenedAt: new Date(FIXTURE_NOW_MS - 30_000).toISOString().replace('.000', ''),
-      }),
-    });
-    if (response.status !== 202) throw new Error('negative-control write was not accepted');
-    const operationId = replayString(replayObject(replayObject(await response.json()).operation).id);
-    let succeeded = false;
-    stage = 'operation-settlement';
-    for (let attempt = 0; attempt < 30; attempt++) {
-      await disabled.pump(1000);
-      const operation = replayObject(await (await session.jar.request(`/api/v1/operations/${operationId}`)).json());
-      if (operation.state === 'succeeded') {
-        succeeded = true;
-        break;
-      }
-      if (operation.state === 'failed' || operation.state === 'cancelled') break;
-    }
-    if (!succeeded) throw new Error('negative-control PDS write did not settle');
-    stage = 'pds-index-separation';
-    const pdsRecords = await fakes.listRecords(bob.did, `${E2E_PREFIX}.scrobble`);
-    const pdsCommitted = pdsRecords.some(({ value }) => value.track === 'PDS Only Control');
-    const inspect = await disabled.inspect();
-    const indexed = (inspect.scrobbles ?? []).some((row) => replayObject(row).track === 'PDS Only Control');
-    const checkpoints = inspect.ingest_checkpoint;
-    const checkpoint = Array.isArray(checkpoints) ? replayObject(checkpoints[0]) : {};
-    const mode = typeof checkpoint.mode === 'string' ? checkpoint.mode : '';
-    const cursor = typeof checkpoint.cursor === 'number' ? checkpoint.cursor : null;
-    if (!pdsCommitted || indexed || mode !== 'off' || cursor !== null)
-      throw new Error('socket-disabled control did not isolate PDS writes from indexed reads');
-    return { pdsCommitted, indexed, mode, cursor };
-  } catch (error) {
-    throw new Error(`socket negative control failed during ${stage} (${safeErrorName(error)})`);
-  } finally {
-    await disabled?.close().catch(() => undefined);
-    rmSync(runtimeDir, { recursive: true, force: true });
+    if (operation.state === 'failed' || operation.state === 'cancelled') break;
   }
+  if (!succeeded) throw new Error('negative-control PDS write did not settle');
+  const pdsRecords = await fakes.listRecords(alice.did, `${E2E_PREFIX}.scrobble`);
+  const pdsCommitted = pdsRecords.some(({ value }) => value.track === 'PDS Only Control');
+  const inspect = await bundle.inspect();
+  const indexed = (inspect.scrobbles ?? []).some((row) => replayObject(row).track === 'PDS Only Control');
+  const checkpoints = inspect.ingest_checkpoint;
+  const checkpoint = Array.isArray(checkpoints) ? replayObject(checkpoints[0]) : {};
+  const mode = typeof checkpoint.mode === 'string' ? checkpoint.mode : '';
+  const cursor = typeof checkpoint.cursor === 'number' ? checkpoint.cursor : null;
+  if (!pdsCommitted || indexed || checkpoint.connected !== 0 || mode !== 'socket' || cursor !== beforeCursor)
+    throw new Error('socket-disabled control did not isolate PDS writes from indexed reads');
+  return { pdsCommitted, indexed, mode, cursor };
 }
 
 async function forwardingCase(
@@ -1318,7 +1302,7 @@ async function forwardingCase(
     phase = 'socket-delivery-negative-control';
     let negativeControl: Awaited<ReturnType<typeof socketDeliveryDisabledControl>>;
     try {
-      negativeControl = await socketDeliveryDisabledControl(fakes, join(outDir, 'dist'));
+      negativeControl = await socketDeliveryDisabledControl(bundle, fakes);
     } catch (error) {
       socketControlError =
         error instanceof Error &&
