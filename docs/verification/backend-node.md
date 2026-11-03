@@ -195,7 +195,37 @@ deterministic acceptance; that earlier receipt remains useful stack history.
 
 ## Exact-head N8 acceptance runs
 
-### Current runtime-retirement stack (2026-11-04, commit `e02d96e`)
+### Latest runtime-retirement stack (2026-11-04, commit `be1c0a5`)
+
+Ran `bash scripts/acceptance/node-backend.sh --out work/acceptance/node-backend-final-20261104`
+from a clean checkout at commit
+`be1c0a573e1d0bdda7b11c9e77dc1a52d7740614`. The gate exited **0**. Its
+Node bundle SHA-256 was
+`b2ba9790e108a95bc5712d63db9f04970a51ba29bfe1fd635a1d684bdf1efe91`.
+The machine-readable summary is preserved in
+[node-backend-be1c0a5-summary.json](receipts/node-backend-be1c0a5-summary.json)
+(SHA-256
+`bceaefd5191ddf9ec5f51f8b3cdb32862fe966289e70966db5bf55db269fbe52`).
+
+| Step | Result |
+| --- | --- |
+| check-ts | PASS: 1,148 tests, including disposable npm install and full check without `workerd` |
+| Node tests | PASS: 438 tests |
+| Playwright | PASS: 13 tests |
+| Scrobbler protocol replay | PASS: 7 records |
+| Python regressions | PASS: 45 tests |
+| Node bundle guard | PASS |
+| Full case-map validation | PASS |
+| Goldens | PASS |
+| systemd unit verification | PASS |
+| Live no-environment controls | PASS as refusal checks |
+| Live inventory verification | BLOCKED: no release-bound live evidence |
+
+Totals: **1,651 tests/records passed, 0 failed or skipped**; all 258 cases
+resolved (243 passed, 9 blocked, 6 retired); all five production live gates
+remain blocked. No live services or external providers were contacted.
+
+### Previous runtime-retirement stack (2026-11-04, commit `e02d96e`)
 
 Ran `bash scripts/acceptance/node-backend.sh --out /tmp/node-backend-e02d96e`
 from a clean checkout at commit
