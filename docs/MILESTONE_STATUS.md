@@ -24,7 +24,7 @@ confirms evidence bound to the current commit and Node bundle. It replaces
 contacts a live service.
 
 Deterministic acceptance update (2026-11-03): the full N8 gate passed on clean
-commit `3ad1949e2fa040772a205124812cb51c40c725c7`; its bundle SHA-256 and
+commit `6652a9b014a83b8c4ba7b9889c69238700b8a0b6`; its bundle SHA-256 and
 full step receipt are recorded in [backend-node.md](verification/backend-node.md).
 It executed 1,614 tests/records with 0 failures; all 258 cases resolved (243
 passed, 9 blocked, 6 retired). Playwright passed 13/13 and the process-backed
@@ -37,10 +37,10 @@ M7.4.3 `live_product` remain blocked. No live services or external providers
 were contacted. N6-02 live acceptance and broader N7 retirement remain open;
 no milestone or live gate is closed by this run.
 
-The earlier receipt at `c2da66a+dirty` remains recorded as a historical
-failure, not the current result. Its missing replay and stale mappings were
-subsequently fixed; the fresh complete run above supersedes it for deterministic
-acceptance status.
+Earlier failed receipts at `c2da66a+dirty`, `4a97dc1`, and the intermediate
+`838fa217` run remain historical. Their issues were addressed by subsequent
+mapping, retirement, and timing fixes; the clean full run above is the current
+deterministic acceptance result.
 
 Historical Workers receipt follows; nothing below is a current Node statement.
 

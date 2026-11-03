@@ -190,11 +190,11 @@ above passed. Neither failure is hidden as a backend acceptance success.
 
 ## Restacked N8 acceptance run
 
-Ran `bash scripts/acceptance/node-backend.sh --out /tmp/node-backend-restacked-3ad1949`
-from a clean checkout at commit `3ad1949e2fa040772a205124812cb51c40c725c7`
+Ran `bash scripts/acceptance/node-backend.sh --out /tmp/node-backend-final-6652a9b`
+from a clean checkout at commit `6652a9b014a83b8c4ba7b9889c69238700b8a0b6`
 on 2026-11-03. The gate exited **0**: all deterministic steps and mapped
 cases passed. The Node bundle SHA-256 was
-`0b1a08c3c517e14eaaf67ec64eaf08352536140085950ec4841c46f44414e63a`.
+`4b55d1ed10e2dafa993c3b416889aa2aca3ec0c985ae08348fe23432e278e760`.
 
 | Step | Result |
 | --- | --- |
@@ -217,7 +217,19 @@ remains blocked. No live services or external providers were contacted; the
 browser and protocol journeys used local fixture processes. This is a
 deterministic acceptance pass only, not live product or N6-02 acceptance.
 
-Evidence directory: `/tmp/node-backend-restacked-3ad1949`.
+Evidence directory: `/tmp/node-backend-final-6652a9b`.
+
+An intermediate full run on `838fa217a0a8afe79843a543a7b556827e009684`
+failed: the milestone note contained an unlabelled digest, the migration
+readiness probe sampled its status before an asynchronous connect completed,
+and the Playwright stack's pump command 310 exceeded its 10-second bound.
+The digest was moved to the verification receipt, the probe now samples after
+the connect result, and a clean isolated Playwright rerun passed 13/13. The
+final full run above then passed all 1,614 tests/records and cases.
+
+The preceding complete run on `3ad1949e2fa040772a205124812cb51c40c725c7`
+also passed; this newer receipt supersedes it after the case-map/CI branch
+restack.
 
 ## Earlier complete gate run on the integrated replay branch (historical failure)
 
