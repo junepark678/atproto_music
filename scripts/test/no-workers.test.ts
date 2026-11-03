@@ -269,9 +269,11 @@ function run(command: string, args: string[], cwd: string, timeout: number, extr
   });
 }
 
+// The disposable no-workerd check creates and removes a full source copy;
+// hosted runners can need longer than Vitest's default 10 s hook timeout.
 afterEach(() => {
   for (const copy of copies.splice(0)) rmSync(copy, { recursive: true, force: true });
-});
+}, 60_000);
 
 describe('N7 Node-only runtime', () => {
   it('no tracked source imports cloudflare:* or @cloudflare/*, no package.json declares wrangler or @cloudflare/*, no workflow or script runs wrangler, and package-lock.json contains no workerd', () => {
