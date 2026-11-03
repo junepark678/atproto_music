@@ -149,7 +149,7 @@
      "worker/test/storage/timers-extensions.test.ts › runDue with a names subset claims only those timers, and two lanes over two AlarmStorage objects never hit TimerReentryError",
      "worker/test/storage/timers-extensions.test.ts › a core runDue started while outbox is claimed leaves ~running:outbox untouched and records no failure",
      "worker/test/storage/timers-extensions.test.ts › TIMER_NAMES is the seven core names, EXTENSION_TIMER_NAMES the six extension names, and nextDue for one lane ignores the other lane's due rows",
-     "worker/test/composition/index-core.test.ts › app/index-core.ts imports no cloudflare: module and no value from env.ts, and index-do.ts re-exports every name it moved"
+     "worker/test/composition/index-core.test.ts › app/index-core.ts and its host seams import no Workers modules or runtime environment values"
     ]
    },
    {

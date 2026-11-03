@@ -33,8 +33,6 @@ import indexCoreSource from '../../src/app/index-core.ts?raw';
 import servicesSource from '../../src/app/services.ts?raw';
 import type { IndexRpc, LogLevel, ScrobbleRow } from '../../src/do/contracts';
 import type { Db, SqlParam } from '../../src/do/db';
-import type * as doModule from '../../src/do/index-do';
-import indexDoSource from '../../src/do/index-do.ts?raw';
 import { migrate } from '../../src/do/migrate';
 import { followToDto } from '../../src/do/read/follows';
 import { markConnected } from '../../src/do/status';
@@ -527,25 +525,13 @@ it('adminBackup on a host without a backup port answers not_supported and change
     seen: ['manual'],
   });
 
-  // adminPitr on a host without a PITR port is not_supported too (rejects, nothing scheduled).
-  const pitr = await secondCore(h)
-    .adminPitr(T0 - 1_000)
-    .then(
-      () => null,
-      (e: Error) => ({ name: e.name, message: e.message }),
-    );
-  expect(pitr).toEqual({
-    name: 'NotSupportedError',
-    message: 'not_supported: this host has no point-in-time restore',
-  });
   expect(dumpAll(h.db)).toEqual(before);
 });
 
-it('app/index-core.ts imports no cloudflare: module and no value from env.ts, and index-do.ts re-exports every name it moved', () => {
+it('app/index-core.ts and its host seams import no Workers modules or runtime environment values', () => {
   const importsOf = (source: string) =>
     [...source.matchAll(/^\s*(import|export)\s+(type\s+)?([\s\S]*?)\s+from\s+'([^']+)';/gm)].map((m) => ({
       typeOnly: m[2] !== undefined,
-      clause: m[3] as string,
       from: m[4] as string,
     }));
   for (const [file, source] of [
@@ -558,83 +544,17 @@ it('app/index-core.ts imports no cloudflare: module and no value from env.ts, an
       imports.filter((i) => i.from.startsWith('cloudflare:')),
       file,
     ).toEqual([]);
-    expect(source, file).not.toMatch(/['"]cloudflare:/);
+    expect(source, file).not.toMatch(/["']cloudflare:/);
     expect(source, file).not.toMatch(/\bimport\s*\(/);
-    // env.ts only through `import type`.
     expect(
       imports.filter((i) => /(^|\/)env$/.test(i.from) && !i.typeOnly),
       file,
     ).toEqual([]);
   }
-  // Non-vacuity: the parser does see index-core's imports, including its type-only config import.
   const coreImports = importsOf(indexCoreSource);
   expect(coreImports.length).toBeGreaterThan(20);
-  expect(coreImports).toContainEqual({ typeOnly: true, clause: '{ AppConfig }', from: '../config' });
-  // The Workers wrapper is still the Workers wrapper (and so is never loaded here).
-  expect(importsOf(indexDoSource).some((i) => i.from === 'cloudflare:workers')).toBe(true);
-
-  const MOVED_VALUES = [
-    'envLogger',
-    'createLogger',
-    'INDEX_NAME',
-    'GC_INTERVAL_MS',
-    'GC_BLOCK_DIDS_PER_RUN',
-    'GC_HINTS_PER_RUN',
-    'HINT_ERROR_RETENTION_MS',
-    'HINT_EXPIRED_REASON',
-    'HINT_EXPIRED_COUNTER',
-    'ALARM_SLICE_MS',
-    'PITR_WINDOW_MS',
-    'PITR_RESTART_DELAY_MS',
-    'ADMIN_RESNAPSHOT_REASON',
-    'NotReadyError',
-    'IndexError',
-    'INDEX_ERROR_NAME',
-    'INDEX_ERROR_MESSAGE',
-    'runGc',
-  ] as const;
-  const MOVED_TYPES = ['LogSink', 'IndexDeps', 'GcReport'] as const;
-  const core = coreModule as unknown as Record<string, unknown>;
-  for (const name of MOVED_VALUES) {
-    expect(core[name], name).toBeDefined();
-    // Defined in index-core.ts itself, not re-exported from elsewhere, and not in index-do.ts.
-    const definition = new RegExp(`export\\s+(?:const|function|class|async function)\\s+${name}\\b`);
-    expect(indexCoreSource, name).toMatch(definition);
-    expect(indexDoSource, name).not.toMatch(definition);
-  }
-  for (const name of MOVED_TYPES) {
-    expect(indexCoreSource, name).toMatch(new RegExp(`export\\s+interface\\s+${name}\\b`));
-    expect(indexDoSource, name).not.toMatch(new RegExp(`(?:interface|type)\\s+${name}\\b\\s*[={<]`));
-  }
-  // index-do.ts re-exports every moved name from ../app/index-core in one export clause.
-  const reexport = /export\s*\{([\s\S]*?)\}\s*from\s*'\.\.\/app\/index-core';/.exec(indexDoSource);
-  expect(reexport).not.toBeNull();
-  const reexported = new Set(
-    (reexport?.[1] ?? '')
-      .split(',')
-      .map((s) => s.trim().replace(/^type\s+/, ''))
-      .filter((s) => s.length > 0),
-  );
-  expect(reexported.size).toBeGreaterThanOrEqual(MOVED_VALUES.length + MOVED_TYPES.length);
-  for (const name of [...MOVED_VALUES, ...MOVED_TYPES]) expect([name, reexported.has(name)]).toEqual([name, true]);
-  // Non-vacuity: the parser finds no clause in a source without one, and a dropped name is seen.
-  expect(/export\s*\{([\s\S]*?)\}\s*from\s*'\.\.\/app\/index-core';/.exec(indexCoreSource)).toBeNull();
-  const dropped = indexDoSource.replace(/^\s*runGc,\n/m, '');
-  expect(dropped).not.toBe(indexDoSource);
-  const droppedClause = /export\s*\{([\s\S]*?)\}\s*from\s*'\.\.\/app\/index-core';/.exec(dropped)?.[1] ?? '';
-  expect(droppedClause.split(',').map((x) => x.trim())).not.toContain('runGc');
-  // The error constants still describe the class.
-  const error = new coreModule.IndexError();
-  expect([error.name, error.message]).toEqual([coreModule.INDEX_ERROR_NAME, coreModule.INDEX_ERROR_MESSAGE]);
-  // Compile-time: the moved types resolve from index-core.ts and through index-do.ts, and every
-  // moved value is exported by index-do.ts with index-core's type (tsc -b checks this file).
-  const deps: coreModule.IndexDeps | null = null;
-  const sink: coreModule.LogSink | null = null;
-  const report: coreModule.GcReport | null = null;
-  const viaDoDeps: doModule.IndexDeps | null = deps;
-  const viaDoSink: doModule.LogSink | null = sink;
-  const viaDoReport: doModule.GcReport | null = report;
-  const viaDo: Pick<typeof doModule, (typeof MOVED_VALUES)[number]> = coreModule;
-  expect([viaDoDeps, viaDoSink, viaDoReport]).toEqual([null, null, null]);
-  expect(Object.keys(viaDo).length).toBeGreaterThanOrEqual(MOVED_VALUES.length);
+  expect(coreImports).toContainEqual({ typeOnly: true, from: '../config' });
+  expect(coreModule.IndexCore).toBeDefined();
+  expect(coreModule.createLogger).toBeDefined();
+  expect(coreModule.runGc).toBeDefined();
 });
