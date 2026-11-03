@@ -576,6 +576,14 @@ export function probeResultExitCode(result: unknown, hosts: Record<string, strin
   return checkProbeResult(result, hosts, origin).length === 0 ? 0 : 1;
 }
 
+/** Fixed console summaries for an emitted run; no target identity or error code is copied. */
+export function probeTargetSummaries(targets: readonly ProbeOutcome[]): string[] {
+  return targets.map((target, index) => {
+    const outcome = isProbeOutcome(target.safeFetch.outcome) ? target.safeFetch.outcome : 'error';
+    return `target ${index + 1}: ${outcome}`;
+  });
+}
+
 function isProbeOutcome(value: unknown): value is ProbeOutcomeKind {
   return [
     'refused',
@@ -767,6 +775,7 @@ import {
   probeTargets,
   probeTargetsFor,
   probeResultExitCode,
+  probeTargetSummaries,
   writePrivateProbeResult,
 } from '${gateModule}';
 
@@ -800,11 +809,9 @@ async function main() {
       targets,
     };
     writePrivateProbeResult(args.out, \`\${JSON.stringify(result, null, 2)}\\n\`);
-    for (const [index, target] of targets.entries()) {
-      // The private file contains target identities; stdout/stderr expose only
-      // an ordinal and a known outcome, never caller-controlled host or code.
-      console.error(\`target \${index + 1}: \${isProbeOutcome(target.safeFetch.outcome) ? target.safeFetch.outcome : 'error'}\`);
-    }
+    // The private file contains target identities; stdout/stderr expose only
+    // ordinals and allowlisted outcomes.
+    for (const summary of probeTargetSummaries(targets)) console.error(summary);
     console.log('probe result written to the private output file');
     if (probeResultExitCode(result, args.hosts, args.origin) === 0) {
       console.error('all probe observations satisfy the configured policy checks');

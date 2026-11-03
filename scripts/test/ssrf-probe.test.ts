@@ -29,6 +29,7 @@ import {
   parseHosts,
   parseProbeArgs,
   probeResultExitCode,
+  probeTargetSummaries,
   probeTargets,
   probeTargetsFor,
   SSRF_ENV,
@@ -151,8 +152,8 @@ describe('scripts/live/ssrf_probe.ts › --emit-probe', () => {
       );
       expect(source).toContain('observePinnedLookup(systemLookup)');
       expect(source).toContain('probeResultExitCode(result, args.hosts, args.origin) === 0');
-      expect(source).not.toContain('target.safeFetch.code');
-      expect(source).not.toContain('target.target.host');
+      expect(source).toContain('probeTargetSummaries(targets)');
+      expect(source).toContain('probeResultExitCode(result, args.hosts, args.origin) === 0');
       expect(source).toContain('private result file intentionally contains the configured hostnames');
       expect(source).toContain("from '../../scripts/live/ssrf_probe.ts'");
       // The emitted probe only runs when invoked explicitly; importing it must not be a side effect of the gate.
@@ -338,6 +339,22 @@ describe('scripts/live/ssrf_probe.ts › parseHosts', () => {
     }
     expect(argumentMessage).toBe('unknown argument');
     expect(argumentMessage).not.toContain(secret);
+  });
+});
+
+describe('scripts/live/ssrf_probe.ts › emitted runner summary', () => {
+  test('summarizes results using only an ordinal and an allowlisted outcome', () => {
+    const result = recordedResult();
+    const target = result.targets[0] as ProbeOutcome;
+    target.target.host = 'private-hostname-secret.example.org';
+    target.raw[0]!.url = 'https://private-hostname-secret.example.org/?code=private-url-secret';
+    target.safeFetch = { outcome: 'refused', code: 'private-code-secret' } as unknown as ProbeOutcome['safeFetch'];
+
+    const summaries = probeTargetSummaries([target]);
+    expect(summaries).toEqual(['target 1: refused']);
+    expect(JSON.stringify(summaries)).not.toContain('private-hostname-secret');
+    expect(JSON.stringify(summaries)).not.toContain('private-url-secret');
+    expect(JSON.stringify(summaries)).not.toContain('private-code-secret');
   });
 });
 
