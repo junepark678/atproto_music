@@ -282,7 +282,9 @@ describe('dispatch', () => {
       sent.map(([method, , route, status, lastfmMethod]) => [method, route, status, lastfmMethod]),
     );
     expect(sent.map((s) => s[3])).toEqual([
-      302, 404, 200, 303, 200, 200, 200, 200, 200, 200, 200, 404, 404, 200, 200, 405,
+      // /lastfm/authorize is now an SPA screen; the remaining asset/API
+      // statuses below still exercise their existing miss handling.
+      302, 200, 200, 303, 200, 200, 200, 200, 200, 200, 200, 404, 404, 200, 200, 405,
     ]);
     for (const line of lines) {
       expect(Object.keys(line).sort()).toEqual(
