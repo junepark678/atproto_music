@@ -174,6 +174,42 @@ normalizing URL separators and stripping credentials, queries and fragments.
 Drivers must still select evidence fields deliberately rather than dump
 upstream responses.
 
+### S1 and ingest audit repair receipt — 2026-11-03
+
+Astra approved the code scope `88a146f..889c916` at full code revision
+`889c9169d88e15f6b0ee8aaa6f6e44b416e33532`, with no remaining blockers.
+This is a deterministic code-review receipt, not hosted CI or live acceptance.
+The review covered required observations, local-check ordering and blocked-path
+tripwires, production-normalized app-record ownership before deletion, mixed
+URL-escape redaction, bounded late-launch handling, and truthful teardown.
+
+The scoped implementation and regression files are
+`scripts/live/node-live-gate.ts`, `scripts/live/node_ingest_check.ts`,
+`scripts/live/workers_oauth_check.ts`, `scripts/test/node-live-gate.test.ts`,
+and `scripts/test/node-ingest.test.ts`; this runbook records the contracts and
+receipt. No benchmark files or verifier gate support changed.
+
+Executed checks:
+
+- `npx vitest run --project scripts scripts/test/node-ingest.test.ts scripts/test/node-live-gate.test.ts scripts/test/node-pds-compat.test.ts`
+  — **66 passed**, independently repeated by Astra.
+- `python3 -B scripts/test_live_evidence.py` — **28 passed**, independently
+  repeated by Astra; the historical inventory remains blocked.
+- `npx tsc -b` — passed.
+- `npx biome check scripts/live/node_ingest_check.ts scripts/live/workers_oauth_check.ts scripts/live/node-live-gate.ts scripts/test/node-ingest.test.ts scripts/test/node-live-gate.test.ts`
+  and `git diff --check` — passed.
+
+App ownership uses the production builder to normalize the run's input and
+compares its full digest with independently proved content, retaining the
+verified server-assigned `createdAt`. Page, context and browser close attempts
+are bounded by the remaining budget; unresolved cleanup fails the gate.
+Promise races do not guarantee cancellation of an arbitrary injected launcher.
+Local checks remain a caller contract rather than a network sandbox.
+
+No live requests or OAuth exchanges ran. Driver/live acceptance remains
+withheld, and OAuth, SSRF and soak support remains disabled. D7 decisions below
+remain deferred. Shared helper extraction and migration are outside this slice.
+
 ## Deferred dev-env OAuth contract (D7)
 
 The completed Sonnet readiness discovery reports that `@atproto/oauth-provider`
