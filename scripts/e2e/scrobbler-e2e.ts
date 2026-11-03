@@ -539,30 +539,38 @@ async function signIn(
   account: FakeUpstreams['accounts'][number],
 ): Promise<Session> {
   const jar = new LocalCookieJar({ publicOrigin: PUBLIC_ORIGIN, transportOrigin: `http://127.2.0.1:${bundle.port}` });
-  const started = await replayAppRequest(
-    jar,
-    '/api/v1/auth/start',
-    {
-      method: 'POST',
-      headers: { origin: PUBLIC_ORIGIN, 'content-type': 'application/json' },
-      body: JSON.stringify({ handle: account.handle }),
-    },
-    [200],
-  );
-  const authorizeUrl = replayString(replayObject(started.body).authorizeUrl);
-  const authorization = await fakes.route(new Request(authorizeUrl, { redirect: 'manual' }));
-  if (authorization.status !== 303) throw new Error('OAuth provider did not complete fixture authorization');
-  const location = authorization.headers.get('location');
-  if (!location) throw new Error('OAuth provider returned no callback');
-  const callback = new URL(location);
-  if (callback.origin !== PUBLIC_ORIGIN) throw new Error('OAuth callback origin refused');
-  const callbackResponse = await jar.request(`${callback.pathname}${callback.search}`);
-  if (callbackResponse.status !== 303) throw new Error('OAuth callback failed');
-  const sessionResult = await replayAppRequest(jar, '/api/v1/auth/session', {}, [200]);
-  const sessionBody = replayObject(sessionResult.body);
-  const did = replayString(sessionBody.did);
-  if (did !== account.did) throw new Error('OAuth session DID did not match the requested account');
-  return { did, csrfToken: replayString(sessionBody.csrfToken), jar };
+  let stage = 'auth-start';
+  try {
+    const started = await replayAppRequest(
+      jar,
+      '/api/v1/auth/start',
+      {
+        method: 'POST',
+        headers: { origin: PUBLIC_ORIGIN, 'content-type': 'application/json' },
+        body: JSON.stringify({ handle: account.handle }),
+      },
+      [200],
+    );
+    const authorizeUrl = replayString(replayObject(started.body).authorizeUrl);
+    stage = 'provider-authorization';
+    const authorization = await fakes.route(new Request(authorizeUrl, { redirect: 'manual' }));
+    if (authorization.status !== 303) throw new Error('OAuth provider did not complete fixture authorization');
+    const location = authorization.headers.get('location');
+    if (!location) throw new Error('OAuth provider returned no callback');
+    const callback = new URL(location);
+    if (callback.origin !== PUBLIC_ORIGIN) throw new Error('OAuth callback origin refused');
+    stage = 'oauth-callback';
+    const callbackResponse = await jar.request(`${callback.pathname}${callback.search}`);
+    if (callbackResponse.status !== 303) throw new Error('OAuth callback failed');
+    const sessionResult = await replayAppRequest(jar, '/api/v1/auth/session', {}, [200]);
+    stage = 'session-validation';
+    const sessionBody = replayObject(sessionResult.body);
+    const did = replayString(sessionBody.did);
+    if (did !== account.did) throw new Error('OAuth session DID did not match the requested account');
+    return { did, csrfToken: replayString(sessionBody.csrfToken), jar };
+  } catch {
+    throw new Error(`fixture sign-in failed during ${stage}`);
+  }
 }
 
 async function createLastfmApp(session: Session): Promise<{ apiKey: string; sharedSecret: string }> {
