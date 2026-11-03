@@ -83,6 +83,7 @@ async function serve(
       // Resolve that one assertion-only form to the account's owning PDS.
       const url = new URL(request.url);
       if (
+        incoming.headers['x-fixture-host'] === undefined &&
         (incoming.headers.host ?? '').startsWith('127.0.0.1:') &&
         url.pathname === '/xrpc/com.atproto.repo.listRecords'
       ) {
@@ -93,10 +94,8 @@ async function serve(
       const response = await handler(request);
       outgoing.writeHead(response.status, Object.fromEntries(response.headers));
       outgoing.end(response.body === null ? null : Buffer.from(await response.arrayBuffer()));
-    } catch (error) {
-      process.stderr.write(
-        `identity fixture request failed: ${error instanceof Error ? error.stack : String(error)}\n`,
-      );
+    } catch {
+      process.stderr.write('identity fixture request failed\n');
       if (!outgoing.headersSent) outgoing.writeHead(500, { 'content-type': 'text/plain' });
       outgoing.end('fixture handler failed');
     }
