@@ -1305,7 +1305,7 @@ async function forwardingCase(
     } catch (error) {
       socketControlError =
         error instanceof Error &&
-        /^socket negative control failed during [a-z-]+ \([A-Za-z]+Error\)$/.test(error.message)
+        /^socket negative control failed during [a-z-]+ \((?:Error|[A-Za-z]+Error)\)$/.test(error.message)
           ? error.message
           : safeErrorName(error);
       throw error;
