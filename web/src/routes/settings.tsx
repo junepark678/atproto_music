@@ -226,7 +226,16 @@ export function IndexingSection({ outbox }: { outbox: OutboxService }) {
       {latest !== null ? (
         <p class="settings-op" data-op-id={latest.id}>
           {latest.kind === 'settings_put' && latest.record?.indexing === 'disabled' ? 'Disconnect: ' : 'Reconnect: '}
-          <OperationStatus op={latest} />
+          <OperationStatus
+            op={{
+              ...latest,
+              settingsIndexing:
+                latest.kind === 'settings_put' &&
+                (latest.record?.indexing === 'disabled' || latest.record?.indexing === 'enabled')
+                  ? latest.record.indexing
+                  : undefined,
+            }}
+          />
         </p>
       ) : null}
       {current === 'disconnected' ? (
@@ -245,7 +254,7 @@ export function IndexingSection({ outbox }: { outbox: OutboxService }) {
       ) : null}
       {current === 'connected' && !confirming ? (
         <>
-          <p data-indexing="enabled">This AppView indexes your public music records.</p>
+          <p data-indexing="enabled">Indexing is enabled; new public music records can be indexed by this AppView.</p>
           <button type="button" onClick={() => setConfirming(true)}>
             Disconnect…
           </button>

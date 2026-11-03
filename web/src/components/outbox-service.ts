@@ -1,4 +1,5 @@
 import type { Did } from '@atmusic/core/api-types';
+import { followRkey } from '@atmusic/core/record-key';
 import { createWriteIntent, getOperation, type ServerOperation, type WriteIntent, writes } from '../api/writes';
 import type { OutboxOperation } from '../outbox/overlay';
 import type { Session } from '../session/client';
@@ -78,7 +79,7 @@ export class OutboxService {
   }
   async deleteScrobble(uri: string): Promise<OutboxOperation> {
     const accepted = await writes.deleteScrobble(uri);
-    return this.#add(accepted.operation);
+    return this.#add(accepted.operation, undefined, undefined, uri);
   }
   async follow(subject: Did): Promise<OutboxOperation> {
     const accepted = await writes.follow(subject);
@@ -86,15 +87,16 @@ export class OutboxService {
   }
   async unfollow(subject: Did): Promise<OutboxOperation> {
     const accepted = await writes.unfollow(subject);
-    return this.#add(accepted.operation, undefined, subject);
+    const rkey = await followRkey(subject);
+    return this.#add(accepted.operation, undefined, subject, `at://${this.did}/${this.prefix}.follow/${rkey}`);
   }
   async disconnect(): Promise<OutboxOperation> {
     const accepted = await writes.indexing('disabled');
-    return this.#add(accepted.operation, { indexing: 'disabled' });
+    return this.#add(accepted.operation, { indexing: 'disabled' }, undefined, `at://${this.did}/${this.prefix}.settings/self`);
   }
   async reconnect(): Promise<OutboxOperation> {
     const accepted = await writes.indexing('enabled');
-    return this.#add(accepted.operation, { indexing: 'enabled' });
+    return this.#add(accepted.operation, { indexing: 'enabled' }, undefined, `at://${this.did}/${this.prefix}.settings/self`);
   }
 
   async refresh(): Promise<void> {
@@ -115,9 +117,19 @@ export class OutboxService {
           } else if (server.state === 'succeeded') {
             row.state = 'published';
             if (server.uri) row.uri = server.uri;
-            if (server.uri) {
+            if (
+              row.kind === 'settings_put' &&
+              (row.record?.indexing === 'disabled' || row.record?.indexing === 'enabled')
+            ) {
+              // Settings markers are hidden from record status while an
+              // account is suppressed, and can be unknown during a fresh
+              // snapshot after re-enable. A succeeded server operation is
+              // the completion signal for these settings writes.
+              row.state = 'indexed';
+              row.dueAt = null;
+            } else if (row.uri) {
               try {
-                const status = await sessionFetch(`/api/v1/records/status?uri=${encodeURIComponent(server.uri)}`, {
+                const status = await sessionFetch(`/api/v1/records/status?uri=${encodeURIComponent(row.uri)}`, {
                   credentials: 'same-origin',
                   cache: 'no-store',
                   signal: controller.signal,
@@ -162,7 +174,7 @@ export class OutboxService {
     return JSON.stringify([row.state, row.uri, row.failureCode, row.reason, row.dueAt]);
   }
 
-  #add(server: ServerOperation, record?: Record<string, unknown>, subject?: Did): OutboxOperation {
+  #add(server: ServerOperation, record?: Record<string, unknown>, subject?: Did, uri?: string): OutboxOperation {
     const existing = this.#rows.find((row) => row.id === server.id);
     if (existing) return existing;
     const kind = localKind(server.kind);
@@ -171,7 +183,7 @@ export class OutboxService {
       id: server.id,
       did: this.did,
       kind,
-      uri: server.uri ?? `at://${this.did}/${this.prefix}.${collection}/${server.id}`,
+      uri: server.uri ?? uri ?? `at://${this.did}/${this.prefix}.${collection}/${server.id}`,
       ...(record ? { record } : {}),
       ...(subject ? { subject } : {}),
       state: server.state === 'succeeded' ? 'published' : server.state === 'failed' ? 'failed' : 'queued',

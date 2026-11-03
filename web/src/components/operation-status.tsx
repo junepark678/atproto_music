@@ -18,6 +18,8 @@ export interface StatusInput {
   dueAt?: number | null;
   lastError?: string;
   attempts?: number;
+  /** The setting value used to describe a terminal server-accepted settings write. */
+  settingsIndexing?: 'enabled' | 'disabled';
 }
 
 export type Tone = 'pending' | 'success' | 'failed';
@@ -74,6 +76,9 @@ export function describeOperation(op: StatusInput): { text: string; tone: Tone }
         ? { text: `${noun} published to your PDS; the index has not confirmed it yet`, tone: 'pending' }
         : { text: `${noun} published to your PDS; waiting for the index`, tone: 'pending' };
     case 'indexed':
+      if (op.kind === 'settings_put' && op.settingsIndexing !== undefined) {
+        return { text: `Saved to your PDS: indexing is ${op.settingsIndexing}`, tone: 'success' };
+      }
       return { text: INDEXED[op.kind], tone: 'success' };
     case 'failed': {
       const code = op.failureCode ?? 'unknown_error';
