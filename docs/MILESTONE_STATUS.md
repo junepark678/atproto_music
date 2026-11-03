@@ -13,6 +13,33 @@
 > [Node deployment](deploy/local-node.md), and the scoped
 > [implementation/check record](verification/implementation-agent-13.md).
 
+## Current Node acceptance (ADR 0005 §15)
+
+The Node acceptance gate is `bash scripts/acceptance/node-backend.sh` (wave
+N8-01). It runs the 11 steps in [backend-node.md](verification/backend-node.md),
+resolves every one of the 258 case-map entries without `--node-wave`, and lists
+the live gates as blocked unless `scripts/verify_live_evidence.py --node`
+confirms evidence bound to the current commit and Node bundle. It replaces
+`scripts/acceptance/node-interim.sh` as the gate from wave 8 on and never
+contacts a live service.
+
+Current result (2026-11-03, commit `c2da66a+dirty`, evidence in
+[backend-node.md](verification/backend-node.md)): **the gate fails with exit 1
+and 13 problems.** Nine of the eleven steps pass, including Playwright e2e
+against the Node stack, the Node bundle guard, both systemd units, the no-env
+live refusals and the bound live-inventory check. The five live gates are
+listed as blocked, not passed. The blockers are outside the gate: the
+`scripts/e2e/scrobbler-e2e.ts` suite is absent (fails `scrobbler-e2e`,
+`case-map`, `M3.4.3/live_retries` and `M6.4.2/unrun_gate`); six case-map
+targets still cite retired Workers commands (`workers-backend.sh`,
+`deploy.sh --dry-run`, `check-bundle.ts`); and `check-ts` fails on the two
+Workers `deploy.test.ts` cases, the `web/test/bundle.test.ts` build timeout
+and one `node-ingest.test.ts` reaper case, which also leaves the contracts
+cases `M1.1.4/*` unexecuted. Case totals: 233 passed, 10 failed, 9 blocked,
+6 retired of 258.
+
+Historical Workers receipt follows; nothing below is a current Node statement.
+
 
 Recorded 2026-10-25 for the Cloudflare Workers backend (ADR 0004).
 
