@@ -97,6 +97,8 @@ process.on('message', async (raw) => {
           'hints',
           'users',
           'repo_jobs',
+          'forward_outbox',
+          'ignored_listens',
         ].map((table) => [table, server.db.all(`SELECT * FROM ${table} ORDER BY rowid`)]),
       );
     } else throw new Error(`unknown action ${m.action}`);
