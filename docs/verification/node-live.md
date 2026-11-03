@@ -187,9 +187,11 @@ N6-02 requires every operator driver to validate its required
 `ATMUSIC_LIVE_*` inputs before making any network request. If any are missing,
 the driver must exit **2**, print a blocked document listing each missing
 variable name, and make no network request. No gate contacts Last.fm or
-ListenBrainz. No Node live acceptance has been recorded. Confidential-client
-OAuth interop, SSRF probe, and Node soak remain deferred; full N6-02 and M6
-live acceptance stay open.
+ListenBrainz. No Node live acceptance has been recorded. A deterministic test
+now exercises the confidential client against a local `@atproto/dev-env` PDS,
+but production OAuth interop with independently operated providers remains
+deferred, as do the operator SSRF probe and Node soak. Full N6-02 and M6 live
+acceptance stay open.
 
 ## Node ingest timeout and recovery semantics
 
