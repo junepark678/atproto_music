@@ -24,9 +24,9 @@ confirms evidence bound to the current commit and Node bundle. It replaces
 contacts a live service.
 
 Deterministic acceptance update (2026-11-03): the full N8 gate passed on clean
-commit `3ad1949e2fa040772a205124812cb51c40c725c7`, bundle SHA-256
-`0b1a08c3c517e14eaaf67ec64eaf08352536140085950ec4841c46f44414e63a`. It
-executed 1,614 tests/records with 0 failures; all 258 cases resolved (243
+commit `3ad1949e2fa040772a205124812cb51c40c725c7`; its bundle SHA-256 and
+full step receipt are recorded in [backend-node.md](verification/backend-node.md).
+It executed 1,614 tests/records with 0 failures; all 258 cases resolved (243
 passed, 9 blocked, 6 retired). Playwright passed 13/13 and the process-backed
 scrobbler replay passed 7/7. See [backend-node.md](verification/backend-node.md)
 for the complete run record.
