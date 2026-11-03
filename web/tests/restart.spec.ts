@@ -68,9 +68,7 @@ test('a Node process restart mid-journey keeps the browser session cookie and in
   expect(beforeRecord).toBeDefined();
   await expect
     .poll(async () => {
-      const status = await request.get(
-        `/api/v1/records/status?uri=${encodeURIComponent(beforeRecord?.uri ?? '')}`,
-      );
+      const status = await request.get(`/api/v1/records/status?uri=${encodeURIComponent(beforeRecord?.uri ?? '')}`);
       if (!status.ok()) return null;
       return ((await status.json()) as { state?: unknown }).state;
     })
