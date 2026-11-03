@@ -227,6 +227,16 @@ describe('the confidential OAuth client against @atproto/dev-env', () => {
         expect(created.status).toBe(200);
         const createdRecord = (await created.json()) as { uri: string; cid: string };
         expect(createdRecord.uri).toContain(`/${collection}/`);
+        const listedAfterCreate = await pds.getAgent().com.atproto.repo.listRecords({
+          repo: identity.did,
+          collection,
+          limit: 100,
+        });
+        expect(
+          listedAfterCreate.data.records.some(
+            (record) => record.uri === createdRecord.uri && record.value.track === 'Confidential OAuth interop',
+          ),
+        ).toBe(true);
 
         stage = 'deleteRecord';
         const deleted = await replacement.session.fetchHandler('/xrpc/com.atproto.repo.deleteRecord', {
@@ -240,6 +250,12 @@ describe('the confidential OAuth client against @atproto/dev-env', () => {
           }),
         });
         expect(deleted.status).toBe(200);
+        const listedAfterDelete = await pds.getAgent().com.atproto.repo.listRecords({
+          repo: identity.did,
+          collection,
+          limit: 100,
+        });
+        expect(listedAfterDelete.data.records.some((record) => record.uri === createdRecord.uri)).toBe(false);
 
         stage = 'upstream revoke';
         expect(await fixtureService.revoke(identity.did)).toBe('revoked');
