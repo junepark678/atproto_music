@@ -1083,6 +1083,7 @@ async function panoReadShapesCase(
 ): Promise<CaseRecord> {
   let phase = 'fixture-account';
   const counts: number[] = [];
+  let userInfoShape = 'unread';
   try {
     const alice = fakes.accounts.find((account) => account.name === 'alice');
     if (!alice) throw new Error('fixture account missing');
@@ -1113,6 +1114,7 @@ async function panoReadShapesCase(
     phase = 'user-info';
     const info = await read({ method: 'user.getInfo', user: alice.did, sk: 'n8-pano-shape-session' });
     const user = replayObject(info.user);
+    userInfoShape = `keys=${Object.keys(user).sort().join(',')};name=${String(user.name)};url=${String(user.url)};counts=${typeof user.playcount},${typeof user.artist_count},${typeof user.track_count}`;
     if (
       user.name !== alice.handle ||
       user.url !== `${PUBLIC_ORIGIN}/u/${alice.did}` ||
@@ -1125,7 +1127,7 @@ async function panoReadShapesCase(
   } catch {
     writeFileSync(
       join(outDir, 'pano-reads.log'),
-      `Pano read-shape journey failed during ${phase}; counts=${counts.join(',')}\n`,
+      `Pano read-shape journey failed during ${phase}; counts=${counts.join(',')}; userInfo=${userInfoShape}\n`,
     );
     return caseRecord(SCROBBLER_CASES[5], 'failed', commit);
   }
@@ -1200,6 +1202,7 @@ async function forwardingCase(
   let recordDetails = '';
   let lastfmCount = -1;
   let listenbrainzCount = -1;
+  let socketControl = 'not-run';
   try {
     const alice = fakes.accounts.find((account) => account.name === 'alice');
     if (!alice) throw new Error('fixture account missing');
@@ -1289,6 +1292,7 @@ async function forwardingCase(
       throw new Error('accepted listen was not forwarded exactly once per service');
     phase = 'socket-delivery-negative-control';
     const negativeControl = await socketDeliveryDisabledControl(fakes, join(outDir, 'dist'));
+    socketControl = `pds=${negativeControl.pdsCommitted};indexed=${negativeControl.indexed};mode=${negativeControl.mode};cursor=${negativeControl.cursor}`;
     writeFileSync(
       join(outDir, 'ledger.json'),
       `${JSON.stringify({
@@ -1304,7 +1308,7 @@ async function forwardingCase(
   } catch {
     writeFileSync(
       join(outDir, 'forwarding.log'),
-      `exactly-once forwarding failed during ${phase}; expected=${expectedForwards}; observed=${forwardsObserved}; states=${forwardStates || 'none'}; lastfm=${lastfmCount}; listenbrainz=${listenbrainzCount}; records=${recordDetails}\n`,
+      `exactly-once forwarding failed during ${phase}; expected=${expectedForwards}; observed=${forwardsObserved}; states=${forwardStates || 'none'}; lastfm=${lastfmCount}; listenbrainz=${listenbrainzCount}; socketControl=${socketControl}; records=${recordDetails}\n`,
     );
     return caseRecord(SCROBBLER_CASES[2], 'failed', commit);
   }
