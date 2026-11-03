@@ -1,6 +1,6 @@
 # Node protocol-read benchmark
 
-Generated: 2026-11-03T01:02:38.899Z  
+Generated: 2026-11-03T01:05:37.556Z  
 Receipt: `worker/test/bench/protocol-reads.bench.test.ts`  
 Dataset: 100,000 listens, seed 24301, fixed clock 2026-01-15T12:00:00Z; apply-path parity sample 100 records
 
@@ -10,11 +10,11 @@ Timings are observations from this run. Budget comparisons are informational and
 
 | Read | Runs | p50 (ms) | p95 (ms) | Report-only p95 budget |
 |---|---:|---:|---:|---:|
-| top-tracks cached | 10 | 2.6708359999993263 | 2.9390910000001895 | < 20 ms |
-| top-tracks uncached | 10 | 546.6250889999992 | 550.544120999999 | < 250 ms |
-| recent-tracks page 500 | 10 | 81.43897999999899 | 82.28158599999915 | < 100 ms |
-| ListenBrainz all_time stats | 10 | 461.62752700000055 | 918.1200750000007 | not specified |
-| ListenBrainz listening-activity year | 10 | 79.52801699999691 | 80.2451710000023 | not specified |
+| top-tracks cached | 10 | 2.684192000000621 | 2.9498750000002474 | < 20 ms |
+| top-tracks uncached | 10 | 547.4348210000007 | 549.358427000001 | < 250 ms |
+| recent-tracks page 500 | 10 | 81.57088999999905 | 82.71689999999944 | < 100 ms |
+| ListenBrainz all_time stats | 10 | 462.8852740000002 | 1034.1501810000009 | not specified |
+| ListenBrainz listening-activity year | 10 | 79.09652300000016 | 79.5069739999999 | not specified |
 
 ## Query plans
 
