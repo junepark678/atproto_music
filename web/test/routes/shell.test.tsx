@@ -4,6 +4,7 @@ import { App } from '../../src/app';
 import { matchRoute } from '../../src/router';
 import type { Session } from '../../src/session/client';
 import { createAppState } from '../../src/state/store';
+import { META, SESSION } from './support';
 
 describe('web/test/routes/shell.test.tsx', () => {
   it('shows server session identity and the re-sign-in notice without browser OAuth state', async () => {
@@ -51,6 +52,23 @@ describe('web/test/routes/shell.test.tsx', () => {
     document.body.append(root);
     render(<App state={createAppState()} loadMetaOnMount={false} />, root);
     await vi.waitFor(() => expect(root.textContent).toContain('Sign in to manage your settings'));
+    render(null, root);
+    root.remove();
+  });
+
+  it('hides write UI when the deployment does not advertise publication capability', async () => {
+    const state = createAppState();
+    state.session.value = SESSION;
+    state.handle.value = SESSION.handle;
+    state.meta.value = META;
+    (window as unknown as { happyDOM: { setURL(url: string): void } }).happyDOM.setURL('https://music.test/feed');
+    const root = document.createElement('div');
+    document.body.append(root);
+    render(<App state={state} loadMetaOnMount={false} />, root);
+    await vi.waitFor(() => expect(root.querySelector('.session-identity')).not.toBeNull());
+    expect(root.querySelector('a[href="/scrobble"]')).toBeNull();
+    expect(root.textContent).not.toContain('Add a scrobble');
+    expect(root.querySelector('a[href="/settings"]')).not.toBeNull();
     render(null, root);
     root.remove();
   });

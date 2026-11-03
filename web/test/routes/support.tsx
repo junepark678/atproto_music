@@ -1,4 +1,4 @@
-import type { Did } from '@atmusic/core/api-types';
+import type { Did, Meta } from '@atmusic/core/api-types';
 import { render } from 'preact';
 import { ApiClient } from '../../src/api/client';
 import { App } from '../../src/app';
@@ -20,7 +20,7 @@ export const SESSION: Session = {
   status: 'active',
   expiresAt: '2026-12-01T00:00:00Z',
 };
-export const META = {
+export const META: Meta = {
   name: 'atproto_music',
   version: '0.1.0',
   stage: 'product',

@@ -1,7 +1,14 @@
-import type { Statistics } from '@atmusic/core/api-types';
+import type { Meta, Statistics } from '@atmusic/core/api-types';
+import { render } from 'preact';
 import { describe, expect, it, vi } from 'vitest';
+import { ApiClient } from '../../src/api/client';
+import { App } from '../../src/app';
 import { followView } from '../../src/components/follow-button';
+import type { OutboxService } from '../../src/components/outbox-service';
+import { type ScreenServices, ServicesProvider } from '../../src/components/services';
 import type { OutboxOperation } from '../../src/outbox/overlay';
+import type { Session } from '../../src/session/client';
+import { AppStateContext, createAppState } from '../../src/state/store';
 import { DID, example, META, mount, SESSION } from './support';
 
 describe('web/test/routes/profile.test.tsx', () => {
@@ -117,6 +124,11 @@ describe('web/test/routes/profile.test.tsx', () => {
     expect(failed.status).toContain('follow record was not removed');
     expect(failed.status).toContain('still follow');
     expect(failed.action).toBe('unfollow');
+
+    const unknown = followView({ viewer: SESSION.did, subject: DID, ops: null, edge: 'unknown' });
+    expect(unknown.status).toContain('Could not check whether you follow this account');
+    expect(unknown.action).toBeNull();
+    expect(unknown.recheck).toBe(true);
   });
 
   it('owner profiles have no follow control and anonymous viewers get a sign-in action', async () => {
@@ -127,5 +139,71 @@ describe('web/test/routes/profile.test.tsx', () => {
     await vi.waitFor(() => expect(app.root.querySelector('.profile-header')).not.toBeNull());
     expect(app.root.querySelector('.follow-control')).toBeNull();
     app.cleanup();
+  });
+
+  it('shows delete controls only on the signed-in owner’s records', async () => {
+    const meta: Meta = { ...META, capabilities: [...META.capabilities, 'publication'] };
+    const api = new ApiClient({
+      fetch: async (input) => {
+        const path = new URL(String(input), 'https://music.test').pathname;
+        if (path === '/api/v1/meta') return Response.json(meta);
+        if (path.endsWith('/profile')) return Response.json(example('profile'));
+        if (path.endsWith('/stats')) return Response.json(example('stats'));
+        if (path.endsWith('/scrobbles')) return Response.json(example('scrobble-page'));
+        if (path.endsWith('/following')) return Response.json(example('follow-page'));
+        return Response.json(
+          { error: { code: 'not_found', message: 'not found', requestId: 'test' } },
+          { status: 404 },
+        );
+      },
+    });
+    const state = createAppState({ api });
+    state.meta.value = meta;
+    const outbox = {
+      did: DID,
+      session: SESSION,
+      refresh: vi.fn(async () => undefined),
+      list: vi.fn(async () => []),
+      subscribe: vi.fn(() => () => undefined),
+    } as unknown as OutboxService;
+    const mutableOutbox = outbox as unknown as { did: string; session: Session };
+    const services: ScreenServices = {
+      clock: { nowMs: () => Date.parse('2026-01-15T12:00:00Z') },
+      random: { bytes: (n) => new Uint8Array(n), float: () => 0 },
+      ticker: { every: () => () => undefined },
+      session: async () => ({
+        signIn: async () => undefined,
+        signOut: async () => undefined,
+        expiry: async () => null,
+      }),
+      outbox: async () => outbox,
+      closeOutbox: async () => undefined,
+    };
+    (window as unknown as { happyDOM: { setURL(url: string): void } }).happyDOM.setURL(`https://music.test/u/${DID}`);
+    const root = document.createElement('div');
+    document.body.append(root);
+    render(
+      <AppStateContext.Provider value={state}>
+        <ServicesProvider value={services}>
+          <App state={state} loadMetaOnMount={false} />
+        </ServicesProvider>
+      </AppStateContext.Provider>,
+      root,
+    );
+    await vi.waitFor(() => expect(root.querySelector('.profile-header')).not.toBeNull());
+    expect(root.querySelector('button.delete')).toBeNull();
+    const visitor = { ...SESSION, did: 'did:plc:bbbbbbbbbbbbbbbbbbbbbbbb', handle: 'bob.test', username: 'bob' };
+    mutableOutbox.did = visitor.did;
+    mutableOutbox.session = visitor;
+    state.session.value = visitor;
+    await vi.waitFor(() => expect(root.querySelector('.follow-control')).not.toBeNull());
+    expect(root.querySelector('button.delete')).toBeNull();
+    mutableOutbox.did = SESSION.did;
+    mutableOutbox.session = SESSION;
+    state.session.value = SESSION;
+    await vi.waitFor(() => expect(root.querySelector('button.delete')).not.toBeNull());
+    expect(root.querySelectorAll('button.delete').length).toBeGreaterThan(0);
+    render(null, root);
+    root.remove();
   });
 });

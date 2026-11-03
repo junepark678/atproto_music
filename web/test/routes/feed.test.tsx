@@ -103,4 +103,52 @@ describe('web/test/routes/feed.test.tsx', () => {
     expect(app.root.querySelector('[data-state="loading"]')).toBeNull();
     app.cleanup();
   });
+
+  it('shows loading, error, retry and stale-index states without leaving a spinner behind', async () => {
+    let finishFirst!: (response: Response) => void;
+    let feedRequests = 0;
+    const page = example<{
+      items: Array<Record<string, unknown>>;
+      nextCursor: string | null;
+      asOf: string;
+      indexing: unknown;
+    }>('scrobble-page');
+    const app = mount('/feed', async (input) => {
+      const url = new URL(String(input), 'https://music.test');
+      if (url.pathname !== '/api/v1/feed') return undefined;
+      feedRequests++;
+      if (feedRequests === 1) return new Promise<Response>((resolve) => (finishFirst = resolve));
+      if (feedRequests === 2)
+        return Response.json(
+          { error: { code: 'not_ready', message: 'temporarily unavailable', requestId: 'test' } },
+          { status: 503 },
+        );
+      return Response.json({
+        ...page,
+        indexing: { state: 'stale', caughtUp: false, lastIndexedAt: null, lagSeconds: 6 },
+      });
+    });
+    await vi.waitFor(() => expect(app.root.querySelector('[data-state="loading"]')).not.toBeNull());
+    await vi.waitFor(() => expect(finishFirst).toBeTypeOf('function'));
+    finishFirst(
+      Response.json(
+        { error: { code: 'not_ready', message: 'temporarily unavailable', requestId: 'test' } },
+        { status: 503 },
+      ),
+    );
+    await vi.waitFor(() => expect(app.root.querySelector('[data-state="error"]')).not.toBeNull());
+    expect(app.root.querySelector('[data-state="loading"]')).toBeNull();
+    app.cleanup();
+
+    const staleApp = mount('/feed', async (input) => {
+      if (new URL(String(input), 'https://music.test').pathname !== '/api/v1/feed') return undefined;
+      return Response.json({
+        ...page,
+        indexing: { state: 'stale', caughtUp: false, lastIndexedAt: null, lagSeconds: 6 },
+      });
+    });
+    await vi.waitFor(() => expect(staleApp.root.querySelector('[data-state="stale"]')).not.toBeNull());
+    expect(staleApp.root.textContent).toContain('The index is behind');
+    staleApp.cleanup();
+  });
 });

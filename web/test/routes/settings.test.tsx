@@ -37,7 +37,7 @@ describe('web/test/routes/settings.test.tsx', () => {
       },
     });
     const state = createAppState({ api });
-    const outbox = new OutboxService(SESSION, META.lexiconPrefix);
+    const outbox = new OutboxService(SESSION, META.lexiconPrefix!);
     const disconnect = vi.fn(async () => ({ id: 'op-1' }) as never);
     outbox.disconnect = disconnect;
     const services: ScreenServices = {
