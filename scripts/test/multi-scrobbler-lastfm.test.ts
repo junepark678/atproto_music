@@ -11,7 +11,13 @@ const TEMP_TOKEN = '1234567890abcdef1234567890abcdef';
 const SESSION_KEY = 'abcdef1234567890abcdef1234567890';
 const COOKIE = '__Host-atmusic_session=session-cookie-secret';
 const CSRF = 'csrf-secret-value';
-const requests: Array<{ method: string; url: string; host: string | undefined; headers: IncomingMessage['headers']; body: string }> = [];
+const requests: Array<{
+  method: string;
+  url: string;
+  host: string | undefined;
+  headers: IncomingMessage['headers'];
+  body: string;
+}> = [];
 let server: Server | undefined;
 
 function respond(outgoing: ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}): void {
@@ -33,16 +39,25 @@ async function startServer(badApproval = false): Promise<string> {
         headers: incoming.headers,
         body,
       });
-      if (incoming.url === '/api/auth?api_key=0123456789abcdef0123456789abcdef&cb=http://localhost:9078/librefm/callback?state=x') {
+      if (
+        incoming.url ===
+        '/api/auth?api_key=0123456789abcdef0123456789abcdef&cb=http://localhost:9078/librefm/callback?state=x'
+      ) {
         respond(outgoing, 302, '', {
-          location: '/lastfm/authorize?api_key=0123456789abcdef0123456789abcdef&cb=http://localhost:9078/librefm/callback?state=x',
+          location:
+            '/lastfm/authorize?api_key=0123456789abcdef0123456789abcdef&cb=http://localhost:9078/librefm/callback?state=x',
         });
       } else if (incoming.url === '/api/v1/lastfm/authorize') {
         respond(outgoing, 200, { token: badApproval ? `${TEMP_TOKEN}${SESSION_KEY}` : TEMP_TOKEN });
       } else if (incoming.url?.startsWith('/2.0/?method=auth.getSession&')) {
         respond(outgoing, 200, { session: { name: 'alice.bsky.social', key: SESSION_KEY, subscriber: 0 } });
       } else if (incoming.url === '/2.0/' && body.includes('method=track.scrobble')) {
-        respond(outgoing, 200, { scrobbles: { '@attr': { accepted: 2, ignored: 0 }, scrobble: [{ track: { '#text': 'First Track' } }, { track: { '#text': 'Second Track' } }] } });
+        respond(outgoing, 200, {
+          scrobbles: {
+            '@attr': { accepted: 2, ignored: 0 },
+            scrobble: [{ track: { '#text': 'First Track' } }, { track: { '#text': 'Second Track' } }],
+          },
+        });
       } else if (incoming.url === '/2.0/' && body.includes('method=track.updateNowPlaying')) {
         respond(outgoing, 200, { nowplaying: { track: { '#text': 'Now Playing' } } });
       } else if (incoming.url?.startsWith('/2.0/?method=user.getRecentTracks&')) {
@@ -58,7 +73,7 @@ async function startServer(badApproval = false): Promise<string> {
 afterEach(async () => {
   if (server) {
     server.closeAllConnections();
-    await new Promise<void>((resolve, reject) => server!.close((error) => error ? reject(error) : resolve()));
+    await new Promise<void>((resolve, reject) => server!.close((error) => (error ? reject(error) : resolve())));
     server = undefined;
   }
 });
@@ -107,7 +122,9 @@ test('multi-scrobbler web auth, session exchange, batch writes and unsigned rece
   expect(scrobble.get('track[1]')).toBe('Second Track');
   const nowPlaying = new URLSearchParams(requests[4]!.body);
   expect([requests[4]!.method, nowPlaying.get('method'), nowPlaying.get('track')]).toEqual([
-    'POST', 'track.updateNowPlaying', 'Now Playing',
+    'POST',
+    'track.updateNowPlaying',
+    'Now Playing',
   ]);
   const recent = new URLSearchParams(requests[5]!.url.split('?')[1]);
   expect(requests[5]!.method).toBe('GET');

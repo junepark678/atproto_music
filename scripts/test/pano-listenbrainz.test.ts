@@ -1,4 +1,6 @@
+import { readFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
+import { resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { runPanoListenBrainz } from '../e2e/scrobbler-clients/pano-listenbrainz';
 
@@ -43,7 +45,7 @@ afterEach(async () => {
 });
 
 describe('Pano ListenBrainz replay client', () => {
-  it('uses lowercase token auth, return_msid for playing_now and the Pano single-listen shape', async () => {
+  it('uses lowercase token auth, return_msid and exact Pano 4.10 single-listen fixture bytes', async () => {
     const requests: Captured[] = [];
     const origin = await listen((request, body) => {
       requests.push({
@@ -58,11 +60,12 @@ describe('Pano ListenBrainz replay client', () => {
     const result = await runPanoListenBrainz({
       origin,
       token: 'PANO-TOKEN-SECRET',
-      listenedAtSeconds: 1_768_474_800,
-      artist: 'Björk',
-      track: 'Jóga',
-      release: 'Homogenic',
-      durationSeconds: 215,
+      listenedAtSeconds: 1_768_478_100,
+      artist: 'Radiohead',
+      track: 'Paranoid Android',
+      release: 'OK Computer',
+      releaseArtist: 'Radiohead',
+      durationMs: 383_000,
     });
 
     expect(result.nowPlaying).toEqual({ status: 'ok', recording_msid: 'e2e-recording-msid' });
@@ -84,37 +87,46 @@ describe('Pano ListenBrainz replay client', () => {
       payload: [
         {
           track_metadata: {
-            artist_name: 'Björk',
-            track_name: 'Jóga',
-            release_name: 'Homogenic',
+            artist_name: 'Radiohead',
+            release_name: 'OK Computer',
+            track_name: 'Paranoid Android',
             additional_info: {
+              duration_ms: 383_000,
+              release_artist_name: 'Radiohead',
               submission_client: 'Pano Scrobbler',
-              submission_client_version: '3.6',
-              duration: 215,
+              submission_client_version: '4.10',
             },
           },
         },
       ],
     });
-    expect(JSON.parse(requests[1]!.body)).toEqual({
-      listen_type: 'single',
-      payload: [
-        {
-          listened_at: 1_768_474_800,
-          track_metadata: {
-            artist_name: 'Björk',
-            track_name: 'Jóga',
-            release_name: 'Homogenic',
-            additional_info: {
-              submission_client: 'Pano Scrobbler',
-              submission_client_version: '3.6',
-              duration: 215,
-            },
-          },
-        },
-      ],
-    });
+    const capture = readFileSync(resolve('worker/test/node/listenbrainz/fixtures/pano-single.body'), 'utf8');
+    expect(requests[1]!.body).toBe(capture);
     expect(requests[0]!.body).not.toContain('PANO-TOKEN-SECRET');
     expect(requests[1]!.body).not.toContain('PANO-TOKEN-SECRET');
+  });
+  it('does not reflect malformed upstream bodies or transport error text', async () => {
+    const secret = 'PANO-LB-RESPONSE-SECRET';
+    const options = {
+      origin: 'http://127.0.0.1:1',
+      token: secret,
+      listenedAtSeconds: 1_768_478_100,
+      artist: 'Radiohead',
+      track: 'Paranoid Android',
+      release: 'OK Computer',
+      releaseArtist: 'Radiohead',
+      durationMs: 383_000,
+      fetchImpl: async () => new Response(`not-json ${secret}`, { status: 200 }),
+    } as const;
+    await expect(runPanoListenBrainz(options)).rejects.toThrow('Pano ListenBrainz playing_now returned invalid JSON');
+    await expect(
+      runPanoListenBrainz({
+        ...options,
+        fetchImpl: async () => {
+          throw new Error(`transport echoed ${secret}`);
+        },
+      }),
+    ).rejects.toThrow('Pano ListenBrainz playing_now transport failed');
+    await expect(runPanoListenBrainz(options)).rejects.not.toThrow(secret);
   });
 });

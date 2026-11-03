@@ -87,4 +87,24 @@ describe('Web Scrobbler ListenBrainz replay client', () => {
     });
     expect(requests.some((request) => request.body.includes('WEB-SCROBBLER-TOKEN-SECRET'))).toBe(false);
   });
+
+  it('does not reflect malformed upstream bodies or transport error text', async () => {
+    const secret = 'WEB-SCROBBLER-RESPONSE-SECRET';
+    const options = {
+      origin: 'http://127.0.0.1:1',
+      token: secret,
+      listenedAtSeconds: 1_768_478_100,
+      fetchImpl: async () => new Response(`not-json ${secret}`, { status: 200 }),
+    } as const;
+    await expect(runWebScrobbler(options)).rejects.toThrow('Web Scrobbler ListenBrainz returned invalid JSON');
+    await expect(
+      runWebScrobbler({
+        ...options,
+        fetchImpl: async () => {
+          throw new Error(`transport echoed ${secret}`);
+        },
+      }),
+    ).rejects.toThrow('Web Scrobbler ListenBrainz transport failed');
+    await expect(runWebScrobbler(options)).rejects.not.toThrow(secret);
+  });
 });

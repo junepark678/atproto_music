@@ -3,6 +3,7 @@
 
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { fetchWithoutLeak, jsonWithoutLeak } from './safe-http';
 
 export interface PanoListenBrainzOptions {
   origin: string;
@@ -10,8 +11,9 @@ export interface PanoListenBrainzOptions {
   listenedAtSeconds: number;
   artist: string;
   track: string;
-  release?: string;
-  durationSeconds?: number;
+  release: string;
+  releaseArtist: string;
+  durationMs: number;
   fetchImpl?: typeof fetch;
 }
 
@@ -30,12 +32,13 @@ function endpointFor(origin: string): URL {
 function metadata(options: PanoListenBrainzOptions) {
   return {
     artist_name: options.artist,
+    release_name: options.release,
     track_name: options.track,
-    ...(options.release === undefined ? {} : { release_name: options.release }),
     additional_info: {
+      duration_ms: options.durationMs,
+      release_artist_name: options.releaseArtist,
       submission_client: 'Pano Scrobbler',
-      submission_client_version: '3.6',
-      ...(options.durationSeconds === undefined ? {} : { duration: options.durationSeconds }),
+      submission_client_version: '4.10',
     },
   };
 }
@@ -49,17 +52,22 @@ async function submit(
 ): Promise<unknown> {
   const url = new URL(endpoint);
   if (listenType === 'playing_now') url.searchParams.set('return_msid', '1');
-  const response = await send(url, {
-    method: 'POST',
-    headers: {
-      authorization: `token ${token}`,
-      'content-type': 'application/json',
-      'user-agent': 'Pano Scrobbler/3.6 (Android)',
+  const response = await fetchWithoutLeak(
+    send,
+    url,
+    {
+      method: 'POST',
+      headers: {
+        authorization: `token ${token}`,
+        'content-type': 'application/json',
+        'user-agent': 'Pano Scrobbler/4.10 (Android)',
+      },
+      body: JSON.stringify({ listen_type: listenType, payload: [listen] }),
     },
-    body: JSON.stringify({ listen_type: listenType, payload: [listen] }),
-  });
+    `Pano ListenBrainz ${listenType}`,
+  );
   if (!response.ok) throw new Error(`Pano ListenBrainz ${listenType} returned HTTP ${response.status}`);
-  const body = (await response.json()) as unknown;
+  const body = await jsonWithoutLeak(response, `Pano ListenBrainz ${listenType}`);
   if (body === null || typeof body !== 'object' || (body as { status?: unknown }).status !== 'ok')
     throw new Error(`Pano ListenBrainz ${listenType} returned an invalid response`);
   return body;
@@ -70,11 +78,8 @@ export async function runPanoListenBrainz(options: PanoListenBrainzOptions): Pro
   if (!options.token) throw new TypeError('Pano ListenBrainz token must not be empty');
   if (!Number.isSafeInteger(options.listenedAtSeconds) || options.listenedAtSeconds <= 0)
     throw new RangeError('Pano listenedAtSeconds must be a positive integer');
-  if (
-    options.durationSeconds !== undefined &&
-    (!Number.isSafeInteger(options.durationSeconds) || options.durationSeconds < 0)
-  )
-    throw new RangeError('Pano durationSeconds must be a non-negative integer');
+  if (!Number.isSafeInteger(options.durationMs) || options.durationMs < 0)
+    throw new RangeError('Pano durationMs must be a non-negative integer');
   const endpoint = endpointFor(options.origin);
   const send = options.fetchImpl ?? fetch;
   const trackMetadata = metadata(options);
@@ -99,9 +104,11 @@ if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(resolve(p
       origin,
       token,
       listenedAtSeconds: 1_768_474_800,
-      artist: 'Test Artist',
-      track: 'Test Track',
-      durationSeconds: 215,
+      artist: 'Radiohead',
+      track: 'Paranoid Android',
+      release: 'OK Computer',
+      releaseArtist: 'Radiohead',
+      durationMs: 383_000,
     }).catch(() => {
       console.error('Pano ListenBrainz replay failed');
       process.exitCode = 1;

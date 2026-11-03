@@ -3,6 +3,7 @@
 
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { fetchWithoutLeak, jsonWithoutLeak } from './safe-http';
 
 export interface WebScrobblerOptions {
   origin: string;
@@ -63,17 +64,22 @@ function nowPlayingMetadata(): TrackMetadata {
 }
 
 async function post(send: typeof fetch, endpoint: URL, token: string, body: string): Promise<unknown> {
-  const response = await send(endpoint, {
-    method: 'POST',
-    headers: {
-      authorization: `Token ${token}`,
-      'content-type': 'application/json; charset=utf-8',
-      'user-agent': 'Web Scrobbler/3.15.0',
+  const response = await fetchWithoutLeak(
+    send,
+    endpoint,
+    {
+      method: 'POST',
+      headers: {
+        authorization: `Token ${token}`,
+        'content-type': 'application/json; charset=utf-8',
+        'user-agent': 'Web Scrobbler/3.15.0',
+      },
+      body,
     },
-    body,
-  });
+    'Web Scrobbler ListenBrainz',
+  );
   if (!response.ok) throw new Error(`Web Scrobbler ListenBrainz returned HTTP ${response.status}`);
-  const result = (await response.json()) as unknown;
+  const result = await jsonWithoutLeak(response, 'Web Scrobbler ListenBrainz');
   if (result === null || typeof result !== 'object' || (result as { status?: unknown }).status !== 'ok')
     throw new Error('Web Scrobbler ListenBrainz returned an invalid response');
   return result;
