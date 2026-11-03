@@ -208,7 +208,7 @@ worktree; it exited `1` with 13 problems, every one of which is a worktree gap
 outside the gate's own files.
 
 Command: `bash scripts/acceptance/node-backend.sh --out /tmp/node-backend-evidence2`
-(stderr empty; bundle `d92e80c636087a5c59c8965a634c19d94cf99965425b07246d7a5f0fd2640cbd`).
+(stderr empty; bundle SHA-256 `d92e80c636087a5c59c8965a634c19d94cf99965425b07246d7a5f0fd2640cbd`).
 
 | Step | Exit | Note |
 | --- | --- | --- |
