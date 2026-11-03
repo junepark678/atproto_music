@@ -266,6 +266,8 @@ test('unknown OAuth URL parameters and nested encoded URLs are stripped from eve
   let beyondLimit = `https://issuer.example/callback?code=${secretCode}&state=${secretState}`;
   for (let i = 0; i < 20; i++) beyondLimit = encodeURIComponent(beyondLimit);
   const encodedQuote = `https://issuer.example/callback?next=%2522%2526code%253D${secretCode}&state=${secretState}`;
+  const escapedUrl = String.raw`https:\/\/issuer.example\/cb\u003fcode=${secretCode}\u0026state=${secretState}`;
+  const apostropheUrl = `https://issuer.example/c'b?code=${secretCode}&state=${secretState}`;
   const env = validEnv({
     ATMUSIC_LIVE_TEST_PREREQUISITE: 'ready',
     [NODE_ENV.evidenceOut]: '/tmp/evidence.json',
@@ -282,6 +284,8 @@ test('unknown OAuth URL parameters and nested encoded URLs are stripped from eve
           deeplyNested,
           beyondLimit,
           encodedQuote,
+          escapedUrl,
+          apostropheUrl,
           escaped: `https:\\\\issuer.example\\callback?code=${secretCode}`,
         },
       };

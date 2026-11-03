@@ -216,18 +216,33 @@ function redactJsonValue(value: unknown, env: NodeGateEnv, ancestors = new WeakS
 export function redactNodeGateOutput(text: string, env: NodeGateEnv): string {
   let redacted = text;
   for (const secret of secretValues(env)) redacted = redacted.split(secret).join('[redacted]');
-  redacted = redacted.replace(/https?(?::|%(?:25)*3a)[^\s"'<>]+/gi, (candidate) => {
-    const trailing = candidate.match(/[),.;\]}]+$/)?.[0] ?? '';
+  redacted = redacted.replace(/https[^\s<>]*/gi, (candidate) => {
+    // Keep quotes and apostrophes inside the candidate. OAuth callback URLs
+    // may contain either in their path or as escaped JSON/JavaScript text;
+    // stopping at a quote would leave the query string (and its credentials)
+    // outside the redaction match.
+    const trailing = candidate.match(/[),.;\]}'"]+$/)?.[0] ?? '';
     let value = trailing ? candidate.slice(0, -trailing.length) : candidate;
     let complete = false;
     for (let depth = 0; depth < 16; depth++) {
-      const decoded = value.replace(/(?:%[0-9a-f]{2})+/gi, (sequence) => {
-        try {
-          return decodeURIComponent(sequence);
-        } catch {
-          return sequence;
-        }
-      });
+      const decoded = value
+        .replace(/\\u\{([0-9a-f]{1,6})\}/gi, (_escape, hex: string) => {
+          const point = Number.parseInt(hex, 16);
+          return point <= 0x10ffff ? String.fromCodePoint(point) : _escape;
+        })
+        .replace(/\\u([0-9a-f]{4})/gi, (_escape, hex: string) => String.fromCharCode(Number.parseInt(hex, 16)))
+        .replace(/\\x([0-9a-f]{2})/gi, (_escape, hex: string) => String.fromCharCode(Number.parseInt(hex, 16)))
+        .replace(/\\\//g, '/')
+        .replace(/(?:%[0-9a-f]{2})+/gi, (sequence) => {
+          try {
+            return decodeURIComponent(sequence);
+          } catch {
+            return sequence;
+          }
+        })
+        // WHATWG URL parsing treats backslashes as slashes for special URLs.
+        // Do the same after interpreting explicit JS escapes above.
+        .replaceAll('\\', '/');
       if (decoded === value) {
         complete = true;
         break;
@@ -236,10 +251,10 @@ export function redactNodeGateOutput(text: string, env: NodeGateEnv): string {
     }
     // Do not emit a partially decoded token: a deeper encoded URL may still
     // contain callback credentials or OAuth state.
-    if (!complete && /%[0-9a-f]{2}/i.test(value)) return '[redacted-url]';
-    value = value.replaceAll('\\', '/');
+    if (!complete && (/%[0-9a-f]{2}/i.test(value) || /\\u[0-9a-f]{2,}/i.test(value))) return '[redacted-url]';
     try {
       const url = new URL(value);
+      if (url.protocol !== 'http:' && url.protocol !== 'https:') return '[redacted-url]';
       const hadRootSlash = url.pathname === '/' && !value.endsWith('/');
       url.username = '';
       url.password = '';
