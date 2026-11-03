@@ -9,20 +9,21 @@ export interface Session {
   expiresAt: string;
 }
 
+export type SessionChangeKind = 'authenticated' | 'anonymous' | 'reauth_required' | 'signed_out';
+export type SessionChangeListener = (session: Session | null, reauthRequired: boolean, kind: SessionChangeKind) => void;
+
 export class SessionClient {
   #csrfToken: string | null = null;
   #current: Session | null = null;
   #published: Session | null = null;
   #reauthRequired = false;
-  #onChange: (session: Session | null, reauthRequired: boolean) => void;
-  #listeners = new Set<(session: Session | null, reauthRequired: boolean) => void>();
+  #onChange: SessionChangeListener;
+  #listeners = new Set<SessionChangeListener>();
   #fetch: typeof fetch;
   #sessionReadGeneration = 0;
   #sessionRevision = 0;
 
-  constructor(
-    options: { fetch?: typeof fetch; onChange?: (session: Session | null, reauthRequired: boolean) => void } = {},
-  ) {
+  constructor(options: { fetch?: typeof fetch; onChange?: SessionChangeListener } = {}) {
     this.#fetch = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
     this.#onChange = options.onChange ?? (() => undefined);
   }
@@ -33,7 +34,7 @@ export class SessionClient {
   sessionRevision(): number {
     return this.#sessionRevision;
   }
-  subscribe(listener: (session: Session | null, reauthRequired: boolean) => void): () => void {
+  subscribe(listener: SessionChangeListener): () => void {
     this.#listeners.add(listener);
     return () => this.#listeners.delete(listener);
   }
@@ -50,7 +51,7 @@ export class SessionClient {
     }
     if (generation !== this.#sessionReadGeneration) return this.#current;
     if (response.status === 401) {
-      this.#set(null, this.#reauthRequired);
+      this.#set(null, this.#reauthRequired, this.#reauthRequired ? 'reauth_required' : 'anonymous');
       return null;
     }
     if (!response.ok) throw new Error(`Session request failed (${response.status})`);
@@ -73,7 +74,11 @@ export class SessionClient {
     )
       throw new Error('Invalid session response');
     this.#csrfToken = value.csrfToken;
-    this.#set(value, value.status === 'reauth_required');
+    this.#set(
+      value,
+      value.status === 'reauth_required',
+      value.status === 'reauth_required' ? 'reauth_required' : 'authenticated',
+    );
     return value;
   }
 
@@ -89,7 +94,7 @@ export class SessionClient {
   unauthorized(expectedRevision?: number): boolean {
     if (expectedRevision !== undefined && expectedRevision !== this.#sessionRevision) return false;
     this.#sessionReadGeneration++;
-    this.#set(null, true);
+    this.#set(null, true, 'reauth_required');
     return true;
   }
 
@@ -143,7 +148,7 @@ export class SessionClient {
         // cleared #current without publishing; leaving the published session
         // in place would keep authenticated controls visible if reconciliation
         // then fails.
-        this.#set(null, false);
+        this.#set(null, false, 'signed_out');
       }
       // Invalidate any read that started while logout was pending, then
       // reconcile the cookie. This matters when a refresh has cleared the
@@ -157,7 +162,7 @@ export class SessionClient {
     }
   }
 
-  #set(session: Session | null, reauth: boolean): void {
+  #set(session: Session | null, reauth: boolean, kind: SessionChangeKind): void {
     if (
       this.#current?.did !== session?.did ||
       this.#current?.csrfToken !== session?.csrfToken ||
@@ -169,8 +174,8 @@ export class SessionClient {
     this.#published = session;
     this.#csrfToken = session?.csrfToken ?? null;
     this.#reauthRequired = reauth;
-    this.#onChange(session, reauth);
-    for (const listener of this.#listeners) listener(session, reauth);
+    this.#onChange(session, reauth, kind);
+    for (const listener of this.#listeners) listener(session, reauth, kind);
   }
 }
 

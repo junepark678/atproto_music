@@ -14,8 +14,8 @@ void removeLegacyDatabases().catch(() => {});
 const client = sessionClient();
 listenForSessionReady(client);
 render(<App state={state} />, root);
-void bootstrapSession(client, (session, reauth) => {
-  setSession(state, session, null, { reauthRequired: reauth });
+void bootstrapSession(client, (session, reauth, kind) => {
+  setSession(state, session, null, { reauthRequired: reauth, kind });
 })
   .then((session) => {
     if (session?.status === 'active') finishReauthPopup(sessionStorage);

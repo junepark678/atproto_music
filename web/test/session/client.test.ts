@@ -72,7 +72,9 @@ describe('web/test/session/client.test.ts', () => {
     const client = new SessionClient({ fetch: vi.fn().mockResolvedValue(Response.json(reauth)) });
 
     await expect(
-      bootstrapSession(client, (session, reauthRequired) => setSession(state, session, null, { reauthRequired })),
+      bootstrapSession(client, (session, reauthRequired, kind) =>
+        setSession(state, session, null, { reauthRequired, kind }),
+      ),
     ).resolves.toEqual(reauth);
 
     expect(state.session.value).toEqual(reauth);
@@ -96,14 +98,14 @@ describe('web/test/session/client.test.ts', () => {
     const unauthorized = await client.mutate('/api/v1/write', { method: 'POST' }, dto.did);
     expect(unauthorized.status).toBe(401);
     expect(client.current()).toBeNull();
-    expect(changed).toHaveBeenLastCalledWith(null, true);
+    expect(changed).toHaveBeenLastCalledWith(null, true, 'reauth_required');
 
     const anonymous = new SessionClient({
       fetch: vi.fn().mockResolvedValue(new Response(null, { status: 401 })),
       onChange: changed,
     });
     await expect(anonymous.getSession()).resolves.toBeNull();
-    expect(changed).toHaveBeenLastCalledWith(null, false);
+    expect(changed).toHaveBeenLastCalledWith(null, false, 'anonymous');
   });
 
   it('accepts reauth_required DTOs but blocks writes except sign-out', async () => {
@@ -117,7 +119,7 @@ describe('web/test/session/client.test.ts', () => {
     const client = new SessionClient({ fetch: fetcher, onChange: changed });
     await expect(client.getSession()).resolves.toEqual(reauth);
     expect(client.current()).toEqual(reauth);
-    expect(changed).toHaveBeenLastCalledWith(reauth, true);
+    expect(changed).toHaveBeenLastCalledWith(reauth, true, 'reauth_required');
     await expect(client.mutate('/api/v1/write', { method: 'POST' }, reauth.did)).rejects.toThrow(
       'Sign in again before making changes.',
     );
@@ -143,7 +145,7 @@ describe('web/test/session/client.test.ts', () => {
     const state = createAppState();
     const client = new SessionClient({
       fetch: fetcher,
-      onChange: (session, reauthRequired) => setSession(state, session, null, { reauthRequired }),
+      onChange: (session, reauthRequired, kind) => setSession(state, session, null, { reauthRequired, kind }),
     });
     await client.getSession();
     const values = {
@@ -184,7 +186,7 @@ describe('web/test/session/client.test.ts', () => {
       .mockResolvedValueOnce(new Response(null, { status: 401 }));
     const client = new SessionClient({
       fetch: fetcher,
-      onChange: (session, reauthRequired) => setSession(state, session, null, { reauthRequired }),
+      onChange: (session, reauthRequired, kind) => setSession(state, session, null, { reauthRequired, kind }),
     });
     await client.getSession();
     setScrobbleDraft(state, values);
@@ -206,7 +208,7 @@ describe('web/test/session/client.test.ts', () => {
       .mockRejectedValueOnce(new TypeError('offline'));
     const client = new SessionClient({
       fetch: fetcher,
-      onChange: (session, reauthRequired) => setSession(state, session, null, { reauthRequired }),
+      onChange: (session, reauthRequired, kind) => setSession(state, session, null, { reauthRequired, kind }),
     });
     await client.getSession();
 
@@ -243,10 +245,10 @@ describe('web/test/session/client.test.ts', () => {
     const client = new SessionClient({ fetch: fetcher, onChange: changed });
     client.unauthorized();
     await expect(client.getSession()).resolves.toBeNull();
-    expect(changed).toHaveBeenLastCalledWith(null, true);
+    expect(changed).toHaveBeenLastCalledWith(null, true, 'reauth_required');
 
     await expect(client.refresh()).resolves.toEqual(dto);
-    expect(changed).toHaveBeenLastCalledWith(dto, false);
+    expect(changed).toHaveBeenLastCalledWith(dto, false, 'authenticated');
     expect(fetcher).toHaveBeenCalledTimes(2);
   });
 
@@ -367,7 +369,7 @@ describe('web/test/session/client.test.ts', () => {
     };
     const client = new SessionClient({
       fetch: fetcher,
-      onChange: (session, reauthRequired) => setSession(state, session, null, { reauthRequired }),
+      onChange: (session, reauthRequired, kind) => setSession(state, session, null, { reauthRequired, kind }),
     });
     await client.getSession();
     const logout = client.logout();
@@ -395,7 +397,7 @@ describe('web/test/session/client.test.ts', () => {
     const state = createAppState();
     const client = new SessionClient({
       fetch: fetcher,
-      onChange: (session, reauthRequired) => setSession(state, session, null, { reauthRequired }),
+      onChange: (session, reauthRequired, kind) => setSession(state, session, null, { reauthRequired, kind }),
     });
     await client.getSession();
     const logout = client.logout();
@@ -456,8 +458,42 @@ describe('web/test/session/client.test.ts', () => {
     setSession(state, other);
     expect(state.scrobbleDraft.value).toBeNull();
     setScrobbleDraft(state, values);
-    setSession(state, null);
+    setSession(state, null, null, { kind: 'signed_out' });
     expect(state.scrobbleDraft.value).toBeNull();
+  });
+
+  it('keeps a persisted draft through anonymous bootstrap and restores it only for the same account', async () => {
+    sessionStorage.removeItem('atmusic:scrobble-draft');
+    const original = createAppState();
+    setSession(original, dto);
+    const values = {
+      artist: 'Persisted Artist',
+      track: 'Persisted Track',
+      album: '',
+      listenedAt: '2026-01-15T12:00:00Z',
+      durationSeconds: '',
+      recordingMbid: '',
+    };
+    setScrobbleDraft(original, values);
+
+    const reloaded = createAppState();
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(null, { status: 401 }))
+      .mockResolvedValueOnce(Response.json(dto));
+    const client = new SessionClient({
+      fetch: fetcher,
+      onChange: (session, reauthRequired, kind) => setSession(reloaded, session, null, { reauthRequired, kind }),
+    });
+
+    await expect(client.getSession()).resolves.toBeNull();
+    expect(reloaded.session.value).toBeNull();
+    expect(reloaded.scrobbleDraft.value).toBeNull();
+    expect(sessionStorage.getItem('atmusic:scrobble-draft')).toContain('Persisted Artist');
+
+    await expect(client.refresh()).resolves.toEqual(dto);
+    expect(reloaded.session.value).toEqual(dto);
+    expect(reloaded.scrobbleDraft.value).toEqual({ did: dto.did, revision: 1, values });
   });
 
   it('the app state store holds the server Session DTO, and no module under web/src imports from web/src/oauth', async () => {

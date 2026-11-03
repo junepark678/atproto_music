@@ -180,8 +180,8 @@ describe('web/test/routes/scrobble.test.tsx', () => {
       lexiconPrefix: 'com.example.atmusic',
       indexing: { state: 'current', caughtUp: true, lastIndexedAt: null, lagSeconds: 0 },
     };
-    const updateState = sessionClient().subscribe((current, reauthRequired) => {
-      setSession(state, current, null, { reauthRequired });
+    const updateState = sessionClient().subscribe((current, reauthRequired, kind) => {
+      setSession(state, current, null, { reauthRequired, kind });
     });
     const stopListening = listenForSessionReady(sessionClient());
     vi.spyOn(state.api, 'profile').mockRejectedValue(new Error('profile unavailable'));

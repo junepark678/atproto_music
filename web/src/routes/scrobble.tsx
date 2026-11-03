@@ -152,7 +152,12 @@ export function ScrobbleForm({ outbox }: { outbox: OutboxService }) {
   // The latest input, updated synchronously: a submit right after typing must
   // validate what is in the fields, not the last rendered state.
   const valuesRef = useRef(values);
+  const mountedRef = useRef(false);
   useEffect(() => {
+    if (!mountedRef.current) {
+      mountedRef.current = true;
+      return;
+    }
     if (draft === null || draft.did !== outbox.did) {
       const reset = emptyForm(services.clock);
       valuesRef.current = reset;

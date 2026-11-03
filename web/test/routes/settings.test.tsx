@@ -90,7 +90,7 @@ describe('web/test/routes/settings.test.tsx', () => {
     const state = createAppState({ api });
     state.session.value = SESSION;
     state.handle.value = SESSION.handle;
-    const signOut = vi.fn(async () => setSession(state, null));
+    const signOut = vi.fn(async () => setSession(state, null, null, { kind: 'signed_out' }));
     const services: ScreenServices = {
       clock: { nowMs: () => Date.parse('2026-01-15T12:00:00Z') },
       random: { bytes: (n) => new Uint8Array(n), float: () => 0 },

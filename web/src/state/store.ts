@@ -10,7 +10,7 @@ import { computed, type ReadonlySignal, type Signal, signal } from '@preact/sign
 import { createContext } from 'preact';
 import { useContext } from 'preact/hooks';
 import { type ApiClient, type ApiFailure, createApiClient, isApiFailure } from '../api/client';
-import type { Session } from '../session/client';
+import type { Session, SessionChangeKind } from '../session/client';
 
 export interface ScrobbleDraftValues {
   artist: string;
@@ -141,19 +141,22 @@ export async function loadMeta(state: AppState, abort?: AbortSignal): Promise<vo
   }
 }
 
-/** Records the session; only a reauthentication transition preserves its draft. */
+/** Records the session; drafts survive anonymous/reauth states until logout or an identity change. */
 export function setSession(
   state: AppState,
   session: Session | null,
   handle: Handle | null = null,
-  options: { reauthRequired?: boolean } = {},
+  options: { reauthRequired?: boolean; kind?: SessionChangeKind } = {},
 ): void {
   const reauthRequired = options.reauthRequired ?? false;
+  const kind =
+    options.kind ?? (session === null ? (reauthRequired ? 'reauth_required' : 'anonymous') : 'authenticated');
   let draft = state.scrobbleDraft.value;
-  if (session === null && !reauthRequired) {
+  if (kind === 'signed_out') {
     state.scrobbleDraft.value = null;
     writeStoredDraft(null);
-  } else if (session !== null) {
+  }
+  if (session !== null) {
     if (draft !== null && draft.did !== session.did) {
       draft = null;
       state.scrobbleDraft.value = null;
