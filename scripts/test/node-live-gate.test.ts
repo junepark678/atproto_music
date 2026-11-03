@@ -256,6 +256,13 @@ test('unknown OAuth URL parameters and nested encoded URLs are stripped from eve
   const nested = encodeURIComponent(
     `https://issuer.example/callback?code=${secretCode}&state=${secretState}#${secretRequest}`,
   );
+  const deeplyNested = encodeURIComponent(
+    encodeURIComponent(
+      encodeURIComponent(
+        `https://issuer.example/callback?code=${secretCode}&state=${secretState}&request_uri=${secretRequest}`,
+      ),
+    ),
+  );
   const env = validEnv({
     ATMUSIC_LIVE_TEST_PREREQUISITE: 'ready',
     [NODE_ENV.evidenceOut]: '/tmp/evidence.json',
@@ -265,7 +272,10 @@ test('unknown OAuth URL parameters and nested encoded URLs are stripped from eve
       context.log(`navigation https://issuer.example/cb?code=${secretCode}&state=${secretState}`);
       context.cleanup(`retry ${nested}`);
       context.fail(`callback https://issuer.example/cb?request_uri=${secretRequest}`);
-      return { ...emptyBody, results: { nested } };
+      return {
+        ...emptyBody,
+        results: { nested, deeplyNested, escaped: `https:\\\\issuer.example\\callback?code=${secretCode}` },
+      };
     }),
     env,
     capture.io,
@@ -274,6 +284,7 @@ test('unknown OAuth URL parameters and nested encoded URLs are stripped from eve
   expect(joined).not.toContain(secretCode);
   expect(joined).not.toContain(secretState);
   expect(joined).not.toContain(secretRequest);
+  expect(joined).not.toContain('%253A');
   expect(joined).toContain('https://issuer.example/cb');
 
   const thrown = ioCapture();

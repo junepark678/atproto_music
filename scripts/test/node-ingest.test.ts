@@ -5,7 +5,14 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { Browser, Page } from '@playwright/test';
 import { expect, test, vi } from 'vitest';
 import { ENV } from '../live/live-gate.ts';
-import { type IngestDependencies, NODE_INGEST_ENV, runNodeIngest, spec } from '../live/node_ingest_check.ts';
+import {
+  browserRequest,
+  deadlineTimer,
+  type IngestDependencies,
+  NODE_INGEST_ENV,
+  runNodeIngest,
+  spec,
+} from '../live/node_ingest_check.ts';
 import { NODE_ENV, type NodeGateContext, type NodeGateIO, runNodeGate } from '../live/node-live-gate.ts';
 import { OAUTH_ENV } from '../live/workers_oauth_check.ts';
 
@@ -148,6 +155,7 @@ function mockDependencies(
     mismatchIdentity?: boolean;
     stallStatus?: boolean;
     malformedAppAck?: boolean;
+    wrongProofRecord?: boolean;
   } = {},
 ) {
   const recordStates = new Map<string, string>();
@@ -205,7 +213,7 @@ function mockDependencies(
         if (path === '/api/v1/scrobbles' && method === 'POST') {
           appCreatePosts++;
           if (options.loseAppCreateResponse && appCreatePosts === 1) throw new Error('response lost after app commit');
-          if (options.malformedAppAck && appCreatePosts === 1) return { status: 202, json: { operation: {} } };
+          if (options.malformedAppAck && appCreatePosts === 1) return { status: 202, json: { operation: { id: '' } } };
           return { status: 202, json: { operation: { id: 'local-create' } } };
         }
         if (path.endsWith('/local-create')) {
@@ -309,6 +317,7 @@ function mockDependencies(
     verifyRecordAt: vi.fn(async (did) => ({
       state: 'present' as const,
       cid: did === DID_A ? CID_A : options.wrongPdsCid ? CID_A : CID_B,
+      ...(did === DID_B ? { record: options.wrongProofRecord ? { artist: 'different record' } : pdsRecord } : {}),
       rev: REV_PRESENT,
       commitCid: CID_A,
       pds: did === DID_A ? goodEnv[ENV.pdsA]! : goodEnv[ENV.pdsB]!,
@@ -547,7 +556,7 @@ test('PDS delete response loss is reconciled without replaying the conditional d
   expect(result.subjects[1]).toMatchObject({ did: DID_B, unresolved: false });
 });
 
-test('app delete response loss is reconciled without submitting a second DELETE', async () => {
+test('app delete response loss remains unresolved without submitting a second DELETE', async () => {
   const { deps, deletePosts } = mockDependencies({ loseAppDeleteResponse: true });
   const failures: string[] = [];
   const cleanup: string[] = [];
@@ -555,7 +564,7 @@ test('app delete response loss is reconciled without submitting a second DELETE'
 
   expect(failures).toContain('Node ingest failed during app delete reconciliation');
   expect(deletePosts().appDeletePosts).toBe(1);
-  expect(result.subjects[0]).toMatchObject({ did: DID_A, unresolved: false });
+  expect(result.subjects[0]).toMatchObject({ did: DID_A, unresolved: true });
 });
 
 test('mixed PDS exclusion and snapshot methods remain paired to their own operators', async () => {
@@ -585,11 +594,20 @@ test('stale absence revisions remain unresolved without replaying either delete'
   expect(result.subjects.every((subject) => subject.unresolved)).toBe(true);
 });
 
-test('PDS CID mismatch fails acceptance and identity/PDS mismatch blocks before browser launch', async () => {
+test('PDS CID mismatch fails acceptance without deleting an unverified record, and identity/PDS mismatch blocks before browser launch', async () => {
   const mismatch = mockDependencies({ wrongPdsCid: true });
   const failures: string[] = [];
-  await runNodeIngest(makeContext(failures, []), mismatch.deps);
+  const mismatchResult = await runNodeIngest(makeContext(failures, []), mismatch.deps);
   expect(failures).toContain('Node ingest failed during PDS B scrobble indexing');
+  expect(mismatch.deletePosts()).toMatchObject({ pdsDeletePosts: 0 });
+  expect(mismatchResult.subjects[1]).toMatchObject({ did: DID_B, unresolved: true });
+
+  const wrongContent = mockDependencies({ losePdsCreateResponse: true, wrongProofRecord: true });
+  const contentFailures: string[] = [];
+  const contentResult = await runNodeIngest(makeContext(contentFailures, []), wrongContent.deps);
+  expect(contentFailures).toContain('Node ingest failed during PDS B scrobble submission');
+  expect(wrongContent.deletePosts()).toMatchObject({ pdsDeletePosts: 0 });
+  expect(contentResult.subjects[1]).toMatchObject({ did: DID_B, unresolved: true });
 
   const identity = mockDependencies({ mismatchIdentity: true });
   const identityFailures: string[] = [];
@@ -617,7 +635,7 @@ test('cleanup failure marks the URI left behind and fails the gate', async () =>
 
   expect(state.localDeleteFailed).toBe(true);
   expect(failures).toContain('Node ingest failed during app delete reconciliation');
-  expect(failures).toContain(`delete outcome remains unresolved for ${URI_A}`);
+  expect(failures).toContain(`delete operation for ${URI_A} is unknown and remains unresolved`);
   expect(cleanup).toContain(
     `${URI_A} LEFT BEHIND: delete outcome is uncertain; reconcile without replaying the mutation`,
   );
@@ -625,4 +643,39 @@ test('cleanup failure marks the URI left behind and fails the gate', async () =>
     expect.objectContaining({ did: DID_A, uri: URI_A, unresolved: true }),
     expect.objectContaining({ did: DID_B, uri: expect.stringMatching(/^at:\/\//) }),
   ]);
+});
+
+test('deadline timers round fractional milliseconds and refuse to start after expiry', () => {
+  const timer = deadlineTimer(performance.now() + 250);
+  expect(timer.timeout(200.25)).toBeInstanceOf(AbortSignal);
+  expect(() => deadlineTimer(performance.now() - 1).timeout(100)).toThrow('Node ingest deadline exceeded');
+});
+
+test('browser request deadline remains active through response body consumption', async () => {
+  let aborted = false;
+  const fetcher = vi.fn(async (_input: string | URL, init: RequestInit = {}) => {
+    const signal = init.signal as AbortSignal;
+    return {
+      status: 200,
+      text: () =>
+        new Promise<string>((_resolve, reject) => {
+          signal.addEventListener(
+            'abort',
+            () => {
+              aborted = true;
+              reject(new DOMException('aborted', 'AbortError'));
+            },
+            { once: true },
+          );
+        }),
+    } as Response;
+  });
+  vi.stubGlobal('fetch', fetcher);
+  const page = {
+    evaluate: async (fn: unknown, args: unknown) => (fn as (value: unknown) => Promise<unknown>)(args),
+  } as unknown as Page;
+  await expect(browserRequest(page, '/api/v1/slow', 'GET', undefined, undefined, {}, 10)).rejects.toThrow();
+  expect(fetcher).toHaveBeenCalledOnce();
+  expect(aborted).toBe(true);
+  vi.unstubAllGlobals();
 });

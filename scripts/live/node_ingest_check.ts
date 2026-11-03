@@ -123,12 +123,25 @@ export interface IngestDependencies {
   checkIdentityPds(did: string, pds: string, timeoutMs?: number): Promise<unknown>;
 }
 
-function deadlineTimer(deadlineAt: number) {
+export function deadlineTimer(deadlineAt: number) {
   return {
     timeout(ms: number): AbortSignal {
-      return AbortSignal.timeout(Math.max(1, Math.min(ms, deadlineAt - performance.now())));
+      const remaining = Math.min(ms, deadlineAt - performance.now());
+      if (remaining <= 0) throw new Error('Node ingest deadline exceeded');
+      return AbortSignal.timeout(Math.max(1, Math.ceil(remaining)));
     },
   };
+}
+
+const OPERATION_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+function operationId(value: unknown): string | undefined {
+  return typeof value === 'string' && OPERATION_ID_RE.test(value) ? value : undefined;
+}
+
+function remainingMs(deadlineAt: number, reserveMs = 0): number {
+  const remaining = Math.floor(deadlineAt - performance.now() - reserveMs);
+  if (remaining <= 0) throw new Error('Node ingest deadline exceeded');
+  return remaining;
 }
 
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
@@ -162,7 +175,7 @@ const dependencies: IngestDependencies = {
     checkIdentityPds(did, pds, { timer: deadlineTimer(performance.now() + timeoutMs) }),
 };
 
-async function browserRequest(
+export async function browserRequest(
   page: Page,
   path: string,
   method: 'GET' | 'POST' | 'DELETE',
@@ -209,37 +222,37 @@ async function appUiSignIn(
   context: NodeGateContext,
   timeoutMs: number,
   deps: IngestDependencies,
+  phaseBudget: () => number,
 ): Promise<BrowserSession> {
   const origin = context.origin;
-  await page.goto(new URL('/signin', origin).href, { timeout: timeoutMs });
-  await page.locator('#signin-handle').fill(context.get(OAUTH_ENV.handleA), { timeout: timeoutMs });
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click({ timeout: timeoutMs });
-  await page.waitForURL((url) => url.origin !== origin, { timeout: Math.min(30_000, timeoutMs) });
+  const deadlineAt = performance.now() + timeoutMs;
+  const actionTimeout = (cap = timeoutMs) => Math.min(remainingMs(deadlineAt), phaseBudget(), cap);
+  await page.goto(new URL('/signin', origin).href, { timeout: actionTimeout() });
+  await page.locator('#signin-handle').fill(context.get(OAUTH_ENV.handleA), { timeout: actionTimeout() });
+  await page.getByRole('button', { name: 'Sign in', exact: true }).click({ timeout: actionTimeout() });
+  await page.waitForURL((url) => url.origin !== origin, { timeout: actionTimeout(30_000) });
 
   const password = page.locator('input[type="password"]').first();
   if (context.env[OAUTH_ENV.interactive] !== '1') {
-    await password.waitFor({ state: 'visible', timeout: timeoutMs });
+    await password.waitFor({ state: 'visible', timeout: actionTimeout() });
     const identifier = page.locator('input[autocomplete="username"], input[name="username"]').first();
     if ((await identifier.isVisible().catch(() => false)) && (await identifier.inputValue()) === '') {
-      await identifier.fill(context.get(OAUTH_ENV.handleA));
+      await identifier.fill(context.get(OAUTH_ENV.handleA), { timeout: actionTimeout() });
     }
-    await password.fill(context.get(OAUTH_ENV.passwordA), { timeout: timeoutMs });
-    await password.press('Enter', { timeout: timeoutMs });
+    await password.fill(context.get(OAUTH_ENV.passwordA), { timeout: actionTimeout() });
+    await password.press('Enter', { timeout: actionTimeout() });
   }
 
-  const deadline = performance.now() + timeoutMs;
-  while (new URL(page.url()).origin !== origin && performance.now() < deadline) {
+  while (new URL(page.url()).origin !== origin && performance.now() < deadlineAt) {
     const consent = page.getByRole('button', { name: /^(authorize|accept|allow|approve)$/i }).first();
-    if (await consent.isVisible().catch(() => false))
-      await consent.click({ timeout: Math.max(1, deadline - performance.now()) });
+    if (await consent.isVisible().catch(() => false)) await consent.click({ timeout: actionTimeout() });
     else {
       const next = page.getByRole('button', { name: /^(next|continue|sign in|log in)$/i }).first();
-      if (await next.isVisible().catch(() => false))
-        await next.click({ timeout: Math.max(1, deadline - performance.now()) });
-      else await deps.sleep(Math.min(250, Math.max(1, deadline - performance.now())));
+      if (await next.isVisible().catch(() => false)) await next.click({ timeout: actionTimeout() });
+      else await deps.sleep(Math.min(250, actionTimeout()));
     }
   }
-  await page.waitForURL((url) => url.origin === origin, { timeout: Math.max(1, deadline - performance.now()) });
+  await page.waitForURL((url) => url.origin === origin, { timeout: actionTimeout() });
   const sessionResponse = await browserRequest(
     page,
     '/api/v1/auth/session',
@@ -247,7 +260,7 @@ async function appUiSignIn(
     undefined,
     undefined,
     {},
-    timeoutMs,
+    actionTimeout(),
   );
   const did = field<string>(sessionResponse.json, 'did');
   const csrfToken = field<string>(sessionResponse.json, 'csrfToken');
@@ -348,12 +361,14 @@ async function recoverPdsCreate(
   );
   const expectedUri = `at://${did}/${collection}/${rkey}`;
   expect(uri === expectedUri, 'PDS B getRecord returned a different URI');
-  expect(
-    (await canonicalDigest(value)) === (await canonicalDigest(intendedRecord)),
-    'PDS B record at intended key conflicts with this run',
-  );
+  const intendedDigest = await canonicalDigest(intendedRecord);
+  expect((await canonicalDigest(value)) === intendedDigest, 'PDS B record at intended key conflicts with this run');
   const proof = await deps.verifyRecordAt(did, collection, rkey, timeoutMs);
   expect(proof.state === 'present' && proof.cid === cid, 'PDS B recovery CID lacks matching independent proof');
+  expect(
+    proof.record !== undefined && (await canonicalDigest(proof.record)) === intendedDigest,
+    'PDS B recovered record content is not bound to the independently verified CID',
+  );
   return { uri, cid, rev: proof.rev };
 }
 
@@ -369,8 +384,11 @@ async function localDelete(page: Page, csrfToken: string, uri: string, timeoutMs
   );
   const operation = field<Record<string, unknown>>(response.json, 'operation');
   const id = field<string>(operation, 'id');
-  expect(response.status === 202 && typeof id === 'string', `DELETE /api/v1/scrobbles returned ${response.status}`);
-  return id;
+  expect(
+    response.status === 202 && operationId(id) !== undefined,
+    `DELETE /api/v1/scrobbles returned ${response.status}`,
+  );
+  return id as string;
 }
 
 async function operationUntilSucceeded(
@@ -383,7 +401,7 @@ async function operationUntilSucceeded(
   const found = await pollUntil(
     async () => {
       const remaining = deadline - performance.now();
-      if (remaining <= 0) return null;
+      if (remaining <= 0) throw new Error('Node ingest deadline exceeded');
       const response = await browserRequest(
         page,
         `/api/v1/operations/${encodeURIComponent(id)}`,
@@ -450,13 +468,12 @@ async function awaitIndexed(
   written: Written,
   receipt: { kind: 'operation'; dto: Record<string, unknown> } | { kind: 'pds'; completedAt: string },
   timeoutMs: number,
-  deadlineAt: number,
   deps: IngestDependencies,
 ) {
   const deadline = performance.now() + timeoutMs;
   const done = await pollUntil(
     async () => {
-      const remaining = Math.max(1, Math.floor(deadline - performance.now()));
+      const remaining = remainingMs(deadline);
       const status = await recordStatus(page, written.uri, Math.min(30_000, remaining));
       return field<string>(status, 'state') === 'indexed' ? status : null;
     },
@@ -466,12 +483,7 @@ async function awaitIndexed(
   const indexedObservedAt = deps.now().getTime();
   const parsed = parseRecordUri(written.uri);
   expect(parsed !== null, `malformed record URI ${written.uri}`);
-  const proof = await deps.verifyRecordAt(
-    parsed.did,
-    parsed.collection,
-    parsed.rkey,
-    Math.max(1, deadlineAt - performance.now()),
-  );
+  const proof = await deps.verifyRecordAt(parsed.did, parsed.collection, parsed.rkey, remainingMs(deadline));
   const statusCid = field<string>(done.value, 'cid');
   expect(proof.state === 'present', `${written.uri} was indexed but its PDS proof is absent`);
   expect(
@@ -512,13 +524,12 @@ async function awaitAbsent(
   presentRev: string,
   deleteCompletedAt: string,
   timeoutMs: number,
-  deadlineAt: number,
   deps: IngestDependencies,
 ) {
   const deadline = performance.now() + timeoutMs;
   const found = await pollUntil(
     async () => {
-      const remaining = Math.max(1, Math.floor(deadline - performance.now()));
+      const remaining = remainingMs(deadline);
       const status = await recordStatus(page, uri, Math.min(30_000, remaining));
       return field<string>(status, 'state') === 'absent' ? status : null;
     },
@@ -530,7 +541,7 @@ async function awaitAbsent(
   expect(parsed !== null, `malformed record URI ${uri}`);
   const absence = await deps.verifyAbsent(parsed.did, parsed.collection, parsed.rkey, {
     after: presentRev,
-    timeoutMs: Math.max(1, deadlineAt - performance.now()),
+    timeoutMs: remainingMs(deadline),
   });
   expect(absence.rev > presentRev, `${uri}: absence proof is not newer than its present proof`);
   return {
@@ -571,8 +582,8 @@ export async function runNodeIngest(
   const timeoutMs = Number(context.env[NODE_INGEST_ENV.timeoutSeconds] || 300) * 1000;
   const deadlineAt = performance.now() + timeoutMs;
   const recoveryReserveMs = Math.min(60_000, Math.floor(timeoutMs * 0.2));
-  const phaseBudgetMs = () => Math.max(1, Math.floor(deadlineAt - performance.now() - recoveryReserveMs));
-  const cleanupBudgetMs = () => Math.max(1, Math.floor(deadlineAt - performance.now()));
+  const phaseBudgetMs = () => remainingMs(deadlineAt, recoveryReserveMs);
+  const cleanupBudgetMs = () => remainingMs(deadlineAt);
   const pds: PdsInfo[] = [];
   const didA = context.get(ENV.didA);
   const didB = context.get(ENV.didB);
@@ -591,11 +602,23 @@ export async function runNodeIngest(
     pds.push(await deps.pdsInfo(endpointB, context.get(ENV.pdsBImplementation), phaseBudgetMs()));
     await deps.checkIdentityPds(didA, pds[0]!.endpoint, phaseBudgetMs());
     await deps.checkIdentityPds(didB, pds[1]!.endpoint, phaseBudgetMs());
-    browser = await deps.browser();
-    browserContext = await browser.newContext();
-    page = await browserContext.newPage();
+    const browserLaunch = deps.browser();
+    browserLaunch
+      .then((lateBrowser) => {
+        if (browser === null && performance.now() >= deadlineAt) void lateBrowser.close().catch(() => undefined);
+      })
+      .catch(() => undefined);
+    browser = await withTimeout(browserLaunch, phaseBudgetMs(), 'browser launch');
+    browserContext = await withTimeout(browser.newContext(), phaseBudgetMs(), 'browser context creation');
+    page = await withTimeout(browserContext.newPage(), phaseBudgetMs(), 'browser page creation');
     phase = 'browser sign-in';
-    appSession = await appUiSignIn(page, context, Math.min(signInTimeoutMs(context.env), phaseBudgetMs()), deps);
+    appSession = await appUiSignIn(
+      page,
+      context,
+      Math.min(signInTimeoutMs(context.env), phaseBudgetMs()),
+      deps,
+      phaseBudgetMs,
+    );
 
     const runId = randomUUID();
     phase = 'app scrobble submission';
@@ -625,7 +648,7 @@ export async function runNodeIngest(
       phaseBudgetMs(),
     );
     const localOperation = field<Record<string, unknown>>(localResponse.json, 'operation');
-    const localOperationId = field<string>(localOperation, 'id');
+    const localOperationId = operationId(field<unknown>(localOperation, 'id'));
     if (typeof localOperationId === 'string') localRecord.operationId = localOperationId;
     expect(
       localResponse.status === 202 && typeof localOperationId === 'string',
@@ -648,14 +671,7 @@ export async function runNodeIngest(
     );
     localRecord.owned = true;
     phase = 'app scrobble indexing';
-    const localIndexed = await awaitIndexed(
-      page,
-      local,
-      { kind: 'operation', dto: localOp },
-      phaseBudgetMs(),
-      deadlineAt,
-      deps,
-    );
+    const localIndexed = await awaitIndexed(page, local, { kind: 'operation', dto: localOp }, phaseBudgetMs(), deps);
     results.localPublish = localIndexed;
     localRecord.presentRev = String(localIndexed.verifiedRev);
     delete localRecord.operationId;
@@ -697,8 +713,6 @@ export async function runNodeIngest(
     );
     expect(external.uri === externalRecord.uri, 'PDS B createRecord returned a URI other than its preallocated key');
     externalRecord.cid = external.cid;
-    externalRecord.owned = true;
-    delete externalRecord.rkey;
     expect(parseRecordUri(external.uri)?.did === didB, `PDS B wrote ${external.uri}, not identity B`);
     // Direct PDS writes have no BFF operation DTO; record the PDS answer as the
     // write timestamp and label the same wall-clock observation as approximate.
@@ -709,11 +723,15 @@ export async function runNodeIngest(
       external,
       { kind: 'pds', completedAt: externalWriteAt },
       phaseBudgetMs(),
-      deadlineAt,
       deps,
     );
     results.externalPublish = externalIndexed;
     externalRecord.presentRev = String(externalIndexed.verifiedRev);
+    // A response URI/CID is only an acknowledgement. Do not authorize the
+    // conditional cleanup delete until independent CID and content verification
+    // has completed in awaitIndexed.
+    externalRecord.owned = true;
+    delete externalRecord.rkey;
 
     phase = 'app delete reconciliation';
     const deleteReconcile: Record<string, unknown>[] = [];
@@ -731,7 +749,6 @@ export async function runNodeIngest(
         String(localIndexed.verifiedRev),
         String(appDelete.updatedAt),
         phaseBudgetMs(),
-        deadlineAt,
         deps,
       )),
     });
@@ -749,7 +766,6 @@ export async function runNodeIngest(
         String(externalIndexed.verifiedRev),
         externalDeleteAt,
         phaseBudgetMs(),
-        deadlineAt,
         deps,
       )),
     });
@@ -777,7 +793,7 @@ export async function runNodeIngest(
               Math.min(15_000, cleanupBudgetMs()),
             );
             const ack = field<Record<string, unknown>>(replay.json, 'operation');
-            const recoveredId = field<string>(ack, 'id');
+            const recoveredId = operationId(field<unknown>(ack, 'id'));
             expect(
               replay.status === 202 && typeof recoveredId === 'string',
               'idempotent replay acknowledgement was malformed',
@@ -811,7 +827,6 @@ export async function runNodeIngest(
                 { uri, cid: record.cid, rev: null },
                 { kind: 'operation', dto: operation },
                 Math.min(cleanupBudgetMs(), 15_000),
-                deadlineAt,
                 deps,
               );
               record.presentRev = String(indexed.verifiedRev);
@@ -846,11 +861,12 @@ export async function runNodeIngest(
             record.presentRev!,
             String(deletion.updatedAt),
             Math.min(cleanupBudgetMs(), 15_000),
-            deadlineAt,
             deps,
           );
           record.reconciled = true;
           delete record.deleteOperationId;
+        } else if (record.via === 'app') {
+          context.fail(`delete operation for ${record.uri} is unknown and remains unresolved`);
         } else {
           const parsed = parseRecordUri(record.uri!);
           if (!parsed) {
@@ -909,6 +925,8 @@ export async function runNodeIngest(
         }
         record.cid = recovered.cid;
         record.presentRev = recovered.rev;
+        // recoverPdsCreate binds the intended payload to the independently
+        // verified CID before this record can become eligible for deletion.
         record.owned = true;
       } catch {
         context.fail('PDS B create could not be safely recovered; the expected subject may require operator cleanup');
@@ -939,7 +957,6 @@ export async function runNodeIngest(
                 record.presentRev,
                 String(deletion.updatedAt),
                 Math.min(cleanupBudgetMs(), 15_000),
-                deadlineAt,
                 deps,
               );
               record.reconciled = true;

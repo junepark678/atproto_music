@@ -603,6 +603,8 @@ export async function adminStatus(ctx: GateContext): Promise<Record<string, unkn
 export interface VerifiedRecord {
   state: 'present' | 'absent';
   cid: string | null;
+  /** Decoded, CID-checked atproto JSON value for a present record. */
+  record?: unknown;
   rev: string;
   commitCid: string;
   pds: string;
@@ -649,6 +651,7 @@ export async function verifyRecordAt(
   return {
     state: proof.state,
     cid: proof.state === 'present' ? proof.cid : null,
+    ...(proof.state === 'present' ? { record: proof.record } : {}),
     rev: proof.commit.rev,
     commitCid: proof.commit.cid,
     pds: identity.pds,

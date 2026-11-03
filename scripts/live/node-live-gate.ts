@@ -216,10 +216,22 @@ function redactJsonValue(value: unknown, env: NodeGateEnv, ancestors = new WeakS
 export function redactNodeGateOutput(text: string, env: NodeGateEnv): string {
   let redacted = text;
   for (const secret of secretValues(env)) redacted = redacted.split(secret).join('[redacted]');
-  redacted = redacted.replace(/https?%3a%2f%2f[^\s"'<>]+/gi, '[redacted-url]');
-  redacted = redacted.replace(/https?:\/\/[^\s"'<>\\]+/gi, (candidate) => {
+  // Decode bounded layers so nested and escaped OAuth callback URLs are
+  // normalized before their query and fragment are removed.
+  for (let depth = 0; depth < 6; depth++) {
+    const decoded = redacted.replace(/(?:%[0-9a-f]{2})+/gi, (sequence) => {
+      try {
+        return decodeURIComponent(sequence);
+      } catch {
+        return sequence;
+      }
+    });
+    if (decoded === redacted) break;
+    redacted = decoded;
+  }
+  redacted = redacted.replace(/https?:[\\/]{1,3}[^\s"'<>]+/gi, (candidate) => {
     const trailing = candidate.match(/[),.;\]}]+$/)?.[0] ?? '';
-    const value = trailing ? candidate.slice(0, -trailing.length) : candidate;
+    const value = (trailing ? candidate.slice(0, -trailing.length) : candidate).replaceAll('\\', '/');
     try {
       const url = new URL(value);
       const hadRootSlash = url.pathname === '/' && !value.endsWith('/');
