@@ -281,8 +281,19 @@ export async function runMultiScrobblerLastfm(
     )
   )
     return fail();
-  const recentNames = new Set((trackList as Array<Record<string, unknown>>).map((track) => track.name));
-  if (batch.some((item) => !recentNames.has(item.track))) return fail();
+  const listens = trackList as Array<Record<string, unknown>>;
+  const matchesSubmittedListen = (item: (typeof batch)[number]) =>
+    listens.some((track) => {
+      if (track.name !== item.track) return false;
+      const date = track.date;
+      if (!date || typeof date !== 'object' || Array.isArray(date)) return false;
+      return (
+        hasText(track.artist) &&
+        (track.artist as Record<string, unknown>)['#text'] === item.artist &&
+        (date as Record<string, unknown>).uts === item.timestamp
+      );
+    });
+  if (batch.some((item) => !matchesSubmittedListen(item))) return fail();
 
   return {
     redirectPath: '/api/auth',
