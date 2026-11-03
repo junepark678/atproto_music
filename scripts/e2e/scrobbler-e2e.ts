@@ -1107,16 +1107,16 @@ async function panoReadShapesCase(
     const send = localClientFetch(bundle);
     await waitForIndexed(bundle, fakes, alice.did, 4);
     await bundle.pump(120_000);
-    const read = async (query: Record<string, string>) => {
+    const read = async (query: Record<string, string>, expectError = false) => {
       const url = new URL('/2.0/', origin);
       url.search = new URLSearchParams({ api_key: 'panoScrobbler', format: 'json', ...query }).toString();
       const response = await send(url, { headers: { 'user-agent': 'Pano Scrobbler/4.10 (Android)' } });
-      if (response.status !== 200) throw new Error('Pano read returned a non-success status');
+      if (response.status !== 200 && !expectError) throw new Error('Pano read returned a non-success status');
       return replayObject(await response.json());
     };
     if (!sessionKey) throw new Error('Pano mobile session missing');
     for (const method of ['user.getRecentTracks', 'user.getInfo']) {
-      const invalid = await read({ method, sk: 'invalid-session-negative-control' });
+      const invalid = await read({ method, sk: 'invalid-session-negative-control' }, true);
       if (typeof invalid.error !== 'number') throw new Error('invalid Pano session was accepted');
     }
     const common = { method: 'user.getRecentTracks', sk: sessionKey };
