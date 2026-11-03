@@ -23,7 +23,10 @@ const SECRETS_FILE = join(STATE_DIR, 'secrets.json');
 const RUNTIME_DIR = join(WORK_DIR, 'run');
 export const CONTROL_TOKEN_FILE = join(STATE_DIR, 'control-token');
 const CONTROL_TOKEN_HEADER = 'x-atmusic-e2e-control-token';
-const COMMAND_TIMEOUT_MS = 10_000;
+// A pump runs both the core alarm and its extension alarm. On a loaded CI host
+// these can include synchronous SQLite work, so leave headroom beyond the
+// database busy timeout without risking an unbounded webServer shutdown.
+const COMMAND_TIMEOUT_MS = 30_000;
 const BIN = join(REPO_ROOT, 'node_modules', '.bin');
 let activeStop: (() => Promise<void>) | null = null;
 
