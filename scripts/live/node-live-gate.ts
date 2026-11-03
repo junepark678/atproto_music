@@ -100,6 +100,7 @@ export const NODE_EXIT_CODES: Readonly<Record<NodeGateResult, number>> = {
 const COMMIT = /^[0-9a-f]{40}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
 const IPV4 = /^\d{1,3}(?:\.\d{1,3}){3}$/;
+const OWNED_PREFIX = /^[a-z][a-z0-9-]*(?:\.[a-z][a-z0-9-]*)+$/;
 const RESERVED_SUFFIXES = new Set(['example', 'invalid', 'test', 'localhost', 'local', 'onion', 'arpa', 'internal']);
 const RESERVED_DOMAINS = ['example.com', 'example.net', 'example.org'];
 const SECRET_NAME = /(TOKEN|PASSWORD|SECRET|PRIVATE_KEY)/i;
@@ -152,7 +153,7 @@ const IDENTITY_AND_RELEASE: readonly NodeGateRequirement[] = [
     name: NODE_ENV.prefix,
     what: 'owned production lexicon prefix',
     check: (value) => {
-      if (!isValidPrefix(value)) return 'not a valid NSID prefix';
+      if (!isValidPrefix(value) || !OWNED_PREFIX.test(value)) return 'not a valid NSID prefix';
       if (isFixturePrefix(value) || /^(com|org|net)\.example\./.test(value)) {
         return 'fixture/example prefix is never live';
       }
@@ -180,6 +181,27 @@ function secretValues(env: NodeGateEnv): string[] {
     .filter(([name, value]) => SECRET_NAME.test(name) && typeof value === 'string' && value.length >= 4)
     .map(([, value]) => value as string)
     .sort((a, b) => b.length - a.length);
+}
+
+function redactJsonValue(value: unknown, env: NodeGateEnv, ancestors = new WeakSet<object>()): unknown {
+  if (typeof value === 'string') return redactNodeGateOutput(value, env);
+  if (value === null || typeof value !== 'object') return value;
+  if (value instanceof Date) return value.toJSON();
+  if (ancestors.has(value)) return '[circular]';
+  ancestors.add(value);
+  let redacted: unknown;
+  if (Array.isArray(value)) {
+    redacted = value.map((item) => redactJsonValue(item, env, ancestors));
+  } else {
+    redacted = Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [
+        redactNodeGateOutput(key, env),
+        redactJsonValue(item, env, ancestors),
+      ]),
+    );
+  }
+  ancestors.delete(value);
+  return redacted;
 }
 
 export function redactNodeGateOutput(text: string, env: NodeGateEnv): string {
@@ -215,7 +237,8 @@ function validValue(env: NodeGateEnv, name: string, requirement: NodeGateRequire
 }
 
 function emit(evidence: NodeGateEvidence, env: NodeGateEnv, io: NodeGateIO): number {
-  const document = redactNodeGateOutput(`${JSON.stringify(evidence, null, 2)}\n`, env);
+  const safeEvidence = redactJsonValue(evidence, env);
+  const document = redactNodeGateOutput(`${JSON.stringify(safeEvidence, null, 2)}\n`, env);
   io.stdout(document);
   const evidencePath = env[NODE_ENV.evidenceOut];
   if (evidencePath) io.writeEvidence(evidencePath, document);
@@ -293,7 +316,9 @@ export async function runNodeGate(
     bundleSha256: get(NODE_ENV.bundleSha256),
     origin: context.origin,
     lexiconPrefix: context.lexiconPrefix,
-    ...body,
+    pds: body.pds,
+    subjects: body.subjects,
+    results: body.results,
     cleanup: cleanupNotes.length > 0 ? cleanupNotes.join('; ') : 'nothing created',
     ...(failures.length > 0 ? { failures } : {}),
   };

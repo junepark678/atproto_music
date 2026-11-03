@@ -104,6 +104,21 @@ test('zero or malformed release identity is blocked and never reaches the body',
   expect(body).not.toHaveBeenCalled();
 });
 
+test('a prefix rejected by the independent verifier is blocked before the body', async () => {
+  const body = vi.fn(async () => emptyBody);
+  const capture = ioCapture();
+  const env = validEnv({
+    [NODE_ENV.prefix]: 'org.123music',
+    ATMUSIC_LIVE_TEST_PREREQUISITE: 'ready',
+  });
+
+  expect(await runNodeGate(spec(body), env, capture.io)).toBe(2);
+  expect(body).not.toHaveBeenCalled();
+  expect(documentFrom(capture.output().stdout).missing).toContainEqual(
+    expect.stringContaining(`${NODE_ENV.prefix}: invalid`),
+  );
+});
+
 test('emits schema-v3 top-level identity for a successful injected body', async () => {
   const capture = ioCapture();
   const exit = await runNodeGate(
@@ -153,6 +168,24 @@ test('injected failures are failed results with details and supplied secrets red
   expect(stdout).toContain('[redacted]');
 });
 
+test('secrets containing JSON escapes are redacted before serialization', async () => {
+  const capture = ioCapture();
+  const secret = 'private"\\\nkey-value';
+  const env = validEnv({
+    ATMUSIC_LIVE_TEST_PREREQUISITE: 'ready',
+    ATMUSIC_LIVE_PDS_PASSWORD: secret,
+  });
+  await runNodeGate(
+    spec(async () => ({ ...emptyBody, results: { credential: secret } })),
+    env,
+    capture.io,
+  );
+
+  const stdout = capture.output().stdout;
+  expect(stdout).not.toContain(secret);
+  expect(documentFrom(stdout).results).toEqual({ credential: '[redacted]' });
+});
+
 test('a recorded nonfatal failure cannot be emitted as passed', async () => {
   const capture = ioCapture();
   const exit = await runNodeGate(
@@ -168,6 +201,34 @@ test('a recorded nonfatal failure cannot be emitted as passed', async () => {
   expect(documentFrom(capture.output().stdout)).toMatchObject({
     result: 'failed',
     failures: ['the PDS did not return the expected state'],
+  });
+});
+
+test('body output cannot override the harness gate identity or failure classification', async () => {
+  const capture = ioCapture();
+  const exit = await runNodeGate(
+    spec(async (context) => {
+      context.fail('the expected record was missing');
+      return {
+        ...emptyBody,
+        gate: 'ssrfProbe',
+        result: 'passed',
+        commit: '0'.repeat(40),
+        bundleSha256: '0'.repeat(64),
+        failures: [],
+      } as unknown as NodeGateBodyResult;
+    }),
+    validEnv({ ATMUSIC_LIVE_TEST_PREREQUISITE: 'ready' }),
+    capture.io,
+  );
+
+  expect(exit).toBe(1);
+  expect(documentFrom(capture.output().stdout)).toMatchObject({
+    gate: 'ingest',
+    result: 'failed',
+    commit: GOOD_COMMIT,
+    bundleSha256: GOOD_BUNDLE,
+    failures: ['the expected record was missing'],
   });
 });
 
