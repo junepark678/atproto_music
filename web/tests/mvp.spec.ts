@@ -519,34 +519,13 @@ test('full journey sign-in → scrobble indexed → stats → follow/unfollow �
     expect(history.body.items.map((s) => s.uri)).toEqual([airbagUri]);
   });
 
-  // 8. Sign out: the session and every IndexedDB store are gone, and a reload stays anonymous.
+  // 8. Sign out: the server session is gone, and a reload stays anonymous.
   await test.step('sign out', async () => {
     await page.getByRole('button', { name: 'Sign out' }).click();
     await expect(page.locator('[data-state="signed-out"]')).toBeVisible({ timeout: 30_000 });
     await expect(nav(page).getByRole('link', { name: 'Sign in' })).toBeVisible();
     await expect(nav(page).getByRole('link', { name: 'My profile' })).toHaveCount(0);
-    const stores = await page.evaluate(async () => {
-      const counts: Record<string, number> = {};
-      for (const info of await indexedDB.databases()) {
-        if (!info.name) continue;
-        const db = await new Promise<IDBDatabase>((resolve, reject) => {
-          const open = indexedDB.open(info.name as string);
-          open.onsuccess = () => resolve(open.result);
-          open.onerror = () => reject(open.error);
-        });
-        for (const name of Array.from(db.objectStoreNames)) {
-          counts[`${info.name}/${name}`] = await new Promise<number>((resolve, reject) => {
-            const count = db.transaction(name).objectStore(name).count();
-            count.onsuccess = () => resolve(count.result);
-            count.onerror = () => reject(count.error);
-          });
-        }
-        db.close();
-      }
-      return counts;
-    });
-    expect(Object.keys(stores).length).toBeGreaterThan(0);
-    expect(Object.entries(stores).filter(([, n]) => n !== 0)).toEqual([]);
+    expect(await page.evaluate(() => indexedDB.databases())).toEqual([]);
     await page.reload();
     await expect(heading(page)).toHaveText('Settings');
     await expect(page.locator('[data-state="signin-required"]')).toBeVisible();
@@ -554,19 +533,23 @@ test('full journey sign-in → scrobble indexed → stats → follow/unfollow �
   });
 });
 
-test('the server OAuth callback consumes the response and never serves a browser OAuth callback screen', async ({
+test('the server OAuth callback rejects an unbound response without leaking its code or state', async ({
   page,
   request,
 }) => {
   const res = await request.get('/oauth/callback?code=fixture-code&state=unknown&iss=https%3A%2F%2Fas.test', {
     maxRedirects: 0,
   });
-  expect(res.status()).toBe(303);
-  expect(res.headers().location).toMatch(/^\/signin\?error=/);
-  expect(res.headers()['set-cookie']).toContain('__Host-atmusic_oauth=');
-  await page.goto('/oauth/callback');
-  await expect(page).toHaveURL(/\/signin\?error=/);
-  await expect(page.getByText(/fixture-code|unknown/)).toHaveCount(0);
+  expect(res.status()).toBe(403);
+  expect(res.headers()['content-type']).toContain('application/json');
+  expect(res.headers()['set-cookie'] ?? '').toContain('__Host-atmusic_oauth=;');
+  expect(res.headers()['set-cookie'] ?? '').toContain('Max-Age=0');
+  const body = await res.text();
+  expect(body).toContain('oauth_binding_mismatch');
+  expect(body).not.toContain('fixture-code');
+  expect(body).not.toContain('unknown');
+  await page.goto('/oauth/callback?code=fixture-code&state=unknown&iss=https%3A%2F%2Fas.test');
+  await expect(page.locator('body')).not.toContainText(/fixture-code|unknown/);
 });
 
 test('GET /u/<did> and /feed serve index.html 200 and POST /feed never returns SPA HTML', async ({ page, request }) => {
@@ -636,7 +619,7 @@ test('GET /u/<did> and /feed serve index.html 200 and POST /feed never returns S
   // A non-GET/HEAD to an SPA path is the JSON 404 envelope (oracle
   // spa_deep_link: POST /feed → 404 not_found), never a bare 405 and never
   // index.html.
-  for (const path of ['/feed', canonicalProfile, `/u/${bob.did}`, '/oauth/callback']) {
+  for (const path of ['/feed', canonicalProfile, `/u/${bob.did}`]) {
     const post = await request.post(path, { data: { x: 1 }, maxRedirects: 0 });
     await expectNotFoundEnvelope(post, `POST ${path}`);
     expect(post.headers().allow, `POST ${path}`).toBeUndefined();
@@ -645,14 +628,9 @@ test('GET /u/<did> and /feed serve index.html 200 and POST /feed never returns S
   await expectNotFoundEnvelope(await request.delete(`/u/${bob.did}`, { maxRedirects: 0 }), `DELETE /u/${bob.did}`);
 });
 
-test('platform exception: non-GET/HEAD to an existing file (/, a hashed asset) is a bare Static Assets 405, never SPA HTML', async ({
-  request,
-}) => {
-  // ADR §15 Q9 has the Worker answer asset misses only. A path that is an
-  // existing file never misses, so Static Assets answers a non-GET/HEAD to it
-  // with its own bare 405 before the Worker runs: no JSON envelope and no
-  // x-request-id (the platform exception in docs/deploy/routing.md). This
-  // pins that answer, so a platform or config change that alters it fails.
+test('non-GET/HEAD to an existing asset returns Node 405, never SPA HTML', async ({ request }) => {
+  // Existing static files reject methods other than GET/HEAD. The Node host
+  // adds its request ID to every response, including this 405.
   const html = builtIndexHtml();
   const scripts = [...html.matchAll(/src="(\/assets\/[\w.-]+-[\w-]{8,}\.js)"/g)].map((m) => m[1] as string);
   expect(scripts.length).toBeGreaterThan(0);
@@ -668,12 +646,12 @@ test('platform exception: non-GET/HEAD to an existing file (/, a hashed asset) i
     const res = await request.fetch(path, { method, data: { x: 1 }, maxRedirects: 0 });
     const body = await res.text();
     expect([label, res.status()]).toEqual([label, 405]);
-    expect(res.headers()['x-request-id'], label).toBeUndefined();
-    expect(res.headers()['content-type'] ?? '', label).not.toContain('application/json');
+    expect(res.headers()['x-request-id'], label).toMatch(/^[0-9a-f-]{36}$/i);
+    expect(res.headers()['content-type'] ?? '', label).toContain('application/json');
     expect(res.headers().location, label).toBeUndefined();
-    expect(res.headers().allow, label).toBeUndefined();
+    expect(res.headers().allow, label).toBe('GET, HEAD');
     expect(isSpaHtml(body), label).toBe(false);
-    expect(body, label).toBe('');
+    expect(schemaErrors('Error', JSON.parse(body) as unknown), `${label}: error envelope`).toBe('valid');
   }
   // A non-GET/HEAD to an SPA route with no file behind it does reach the Worker.
   await expectNotFoundEnvelope(await request.post('/feed', { data: { x: 1 }, maxRedirects: 0 }), 'POST /feed');

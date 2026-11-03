@@ -168,12 +168,15 @@ test('no serious/critical axe violations on all routes', async ({ page, request 
     ['/', 'Feed'],
     ['/feed', 'Feed'],
     ['/signin', 'Sign in'],
-    ['/oauth/callback', 'Signing in'],
     [`/u/${bob.did}`, `@${bob.handle}`],
     [`/u/${unknownDid}`, 'Profile not found'],
     ['/u/not-a-did', 'Profile not found'],
     ['/scrobble', 'Add a scrobble'],
     ['/settings', 'Settings'],
+    ['/settings/links', 'Connected services'],
+    ['/settings/imports', 'Import listening history'],
+    ['/settings/credentials', 'Credentials'],
+    ['/lastfm/authorize', 'Last.fm authorization'],
   ];
   for (const [path, title] of anonymous) {
     await page.goto(path);
@@ -340,6 +343,9 @@ test('keyboard-only journey reaches sign-in, scrobble submit, window tabs, follo
   await page.keyboard.type('Cloudbusting');
   await tabTo(page, page.getByLabel('Album (optional)'), 'album field');
   await page.keyboard.type('Hounds of Love');
+  await tabTo(page, page.getByLabel('Listened at (UTC)'), 'listened-at field');
+  await page.keyboard.press('Control+A');
+  await page.keyboard.type(new Date(net.fixtureNowMs - 60_000).toISOString().replace(/\.\d{3}Z$/, 'Z'));
   await tabTo(page, page.getByRole('button', { name: 'Publish scrobble' }), 'publish button');
   await page.keyboard.press('Enter');
   const submitted = page.locator('li[data-op-id]').filter({ hasText: 'Cloudbusting' }).locator('.op-status');
