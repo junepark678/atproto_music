@@ -19,6 +19,7 @@ import {
 
 export const SOAK_HOURS = 'ATMUSIC_LIVE_SOAK_HOURS';
 export const POLL_SECONDS = 'ATMUSIC_LIVE_SOAK_POLL_S';
+const SOCKET_REQUEST_TIMEOUT = 'SOCKET_REQUEST_TIMEOUT';
 
 const LIMITATIONS = [
   'The Node verifier supports PASS only for ingest and pdsCompat; socketSoak remains blocked.',
@@ -56,15 +57,20 @@ export function createBoundedSocketSender(
         { eval: true, execArgv: [], env: {}, workerData: { socketPath, request } },
       );
       let settled = false;
-      const finish = (answer: AdminAnswer | null) => {
+      const finish = (answer: AdminAnswer | null, deadlineExpired = false) => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
         void worker.terminate().catch(() => undefined);
-        if (answer === null) reject(new Error('socket_request_failed'));
-        else resolve(answer);
+        if (answer === null) {
+          const failure = new Error(deadlineExpired ? 'socket_request_timeout' : 'socket_request_failed') as Error & {
+            code?: string;
+          };
+          if (deadlineExpired) failure.code = SOCKET_REQUEST_TIMEOUT;
+          reject(failure);
+        } else resolve(answer);
       };
-      const timer = setTimeout(() => finish(null), request.timeoutMs);
+      const timer = setTimeout(() => finish(null, true), request.timeoutMs);
       worker.once('message', (answer: AdminAnswer | null) => finish(answer));
       worker.once('error', () => finish(null));
       worker.once('exit', () => finish(null));
@@ -160,6 +166,10 @@ function availabilityFailure(answer: AdminAnswer | null): string {
   return 'invalid_json';
 }
 
+function isSocketRequestTimeout(error: unknown): boolean {
+  return error !== null && typeof error === 'object' && 'code' in error && error.code === SOCKET_REQUEST_TIMEOUT;
+}
+
 function blockedEvidenceIO(io: NodeGateIO): NodeGateIO {
   const rewrite = (text: string): string => {
     try {
@@ -228,7 +238,9 @@ export function createSocketSoakSpec(deps: SocketSoakDependencies = defaultSocke
             const outcome = await Promise.race([
               request.then(
                 (value) => ({ kind: 'answer' as const, value }),
-                () => ({ kind: 'error' as const }),
+                (error: unknown) => ({
+                  kind: isSocketRequestTimeout(error) ? ('timeout' as const) : ('error' as const),
+                }),
               ),
               new Promise<{ kind: 'timeout' }>((resolve) => {
                 timer = setTimeout(() => resolve({ kind: 'timeout' }), timeoutMs);
@@ -302,11 +314,20 @@ export function createSocketSoakSpec(deps: SocketSoakDependencies = defaultSocke
       }
       const elapsedMs = deps.nowMs() - start;
       if (!Number.isFinite(elapsedMs) || elapsedMs < 0) throw new Error('invalid_collector_clock');
+      const requestedDurationMs = hours * 60 * 60 * 1000;
+      const plannedSamples = Math.ceil(requestedDurationMs / pollMs);
+      const trailingWindowMs =
+        previousSampleElapsed === null ? 0 : Math.max(0, requestedDurationMs - previousSampleElapsed);
+      const trailingMissedPolls =
+        elapsedMs >= requestedDurationMs && !terminalRequestTimeout && previousSampleElapsed !== null
+          ? Math.min(Math.max(0, plannedSamples - samples.length), Math.floor(trailingWindowMs / pollMs))
+          : 0;
+      missingSamples += trailingMissedPolls;
       return {
         pds: [],
         subjects: [],
         results: {
-          requestedDurationMs: hours * 60 * 60 * 1000,
+          requestedDurationMs,
           elapsedMs,
           startedAt: startWall,
           endedAt: deps.wallNow().toISOString(),
@@ -331,21 +352,30 @@ export async function runSocketSoak(
   io?: NodeGateIO,
   deps: SocketSoakDependencies = defaultSocketSoakDependencies,
 ): Promise<number> {
+  const baseIo: NodeGateIO = io ?? {
+    stdout: (text) => process.stdout.write(text),
+    stderr: (text) => process.stderr.write(text),
+    writeEvidence: (path, text) => writeFileSync(path, text, { mode: 0o600 }),
+    now: () => new Date(),
+  };
+  let stdoutEmitted = false;
+  const trackingIo: NodeGateIO = {
+    ...baseIo,
+    stdout: (text) => {
+      baseIo.stdout(text);
+      stdoutEmitted = true;
+    },
+  };
   try {
-    await runNodeGate(
-      createSocketSoakSpec(deps),
-      env,
-      blockedEvidenceIO(
-        io ?? {
-          stdout: (text) => process.stdout.write(text),
-          stderr: (text) => process.stderr.write(text),
-          writeEvidence: (path, text) => writeFileSync(path, text, { mode: 0o600 }),
-          now: () => new Date(),
-        },
-      ),
-    );
+    await runNodeGate(createSocketSoakSpec(deps), env, blockedEvidenceIO(trackingIo));
     return 2;
   } catch {
+    if (stdoutEmitted) {
+      baseIo.stderr(
+        'BLOCKED: Node socketSoak evidence artifact could not be written; the JSON document remains on stdout.\n',
+      );
+      return 2;
+    }
     const failDoc = `${JSON.stringify(
       {
         schemaVersion: 3,
@@ -368,10 +398,23 @@ export async function runSocketSoak(
       null,
       2,
     )}\n`;
-    (io?.stdout ?? ((text: string) => process.stdout.write(text)))(failDoc);
+    try {
+      baseIo.stdout(failDoc);
+      stdoutEmitted = true;
+    } catch {
+      baseIo.stderr('BLOCKED: Node socketSoak collection failed before evidence could be emitted.\n');
+      return 2;
+    }
     const evidencePath = env[NODE_ENV.evidenceOut];
-    if (io && evidencePath) io.writeEvidence(evidencePath, failDoc);
-    else if (evidencePath) writeFileSync(evidencePath, failDoc, { mode: '0600' });
+    if (evidencePath) {
+      try {
+        baseIo.writeEvidence(evidencePath, failDoc);
+      } catch {
+        baseIo.stderr(
+          'BLOCKED: Node socketSoak evidence artifact could not be written; the JSON document remains on stdout.\n',
+        );
+      }
+    }
     return 2;
   }
 }

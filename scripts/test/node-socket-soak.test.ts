@@ -273,6 +273,46 @@ describe('Node socket soak configuration and evidence', () => {
     expect(evidence.results.missingSampleCount).toBeGreaterThan(1);
   });
 
+  it('counts scheduled polls missed after the final sleep overshoots the collection window', async () => {
+    const deps = fakeDependencies({
+      sleep: async () => {
+        deps.advance(24 * 60 * 60 * 1000);
+      },
+    });
+    const result = await execute({ ...validEnv, [SOAK_HOURS]: '24', [POLL_SECONDS]: '3600' }, deps);
+    const evidence = JSON.parse(result.stdout);
+    expect(evidence.results.sampleCount).toBe(1);
+    expect(evidence.results.collectionWindowElapsed).toBe(true);
+    expect(evidence.results.missingSampleCount).toBe(23);
+  });
+
+  it('keeps one valid stdout document when writing the evidence artifact fails', async () => {
+    const captured = capture();
+    let writes = 0;
+    const io: NodeGateIO = {
+      ...captured.io,
+      writeEvidence: () => {
+        writes++;
+        throw new Error('private artifact path unavailable');
+      },
+    };
+    const deps = fakeDependencies();
+    const exit = await runSocketSoak(
+      { ...validEnv, [NODE_ENV.evidenceOut]: '/private/evidence.json', [POLL_SECONDS]: '3600' },
+      io,
+      deps.deps,
+    );
+    const emitted = captured.output();
+    const evidence = JSON.parse(emitted.stdout);
+    expect(exit).toBe(2);
+    expect(evidence.result).toBe('blocked');
+    expect(emitted.stdout.match(/"gate": "socketSoak"/g)).toHaveLength(1);
+    expect(writes).toBe(1);
+    expect(emitted.stderr).toContain('evidence artifact could not be written');
+    expect(emitted.stdout).not.toContain('private artifact path unavailable');
+    expect(emitted.stderr).not.toContain('/private/evidence.json');
+  });
+
   it('bounds a hung request and stops sampling after its hard timeout', async () => {
     vi.useFakeTimers();
     try {
@@ -284,6 +324,27 @@ describe('Node socket soak configuration and evidence', () => {
       const evidence = JSON.parse(result.stdout);
       expect(result.exit).toBe(2);
       expect(send).toHaveBeenCalledTimes(1);
+      expect(evidence.results.samples).toHaveLength(1);
+      expect(evidence.results.samples[0].gap).toBe('request_timeout');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('classifies the production sender deadline as a terminal request timeout', async () => {
+    vi.useFakeTimers();
+    try {
+      const worker = new EventEmitter() as EventEmitter & { terminate: ReturnType<typeof vi.fn> };
+      worker.terminate = vi.fn(async () => 0);
+      const workerFactory = vi.fn(() => worker as unknown as Worker);
+      const deps = fakeDependencies({ send: createBoundedSocketSender(workerFactory) });
+      const pending = execute({ ...validEnv, [SOAK_HOURS]: '24' }, deps);
+      await vi.advanceTimersByTimeAsync(5000);
+      const result = await pending;
+      const evidence = JSON.parse(result.stdout);
+      expect(result.exit).toBe(2);
+      expect(workerFactory).toHaveBeenCalledTimes(1);
+      expect(worker.terminate).toHaveBeenCalledTimes(1);
       expect(evidence.results.samples).toHaveLength(1);
       expect(evidence.results.samples[0].gap).toBe('request_timeout');
     } finally {
