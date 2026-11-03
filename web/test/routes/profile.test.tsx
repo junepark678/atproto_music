@@ -129,6 +129,96 @@ describe('web/test/routes/profile.test.tsx', () => {
     expect(unknown.status).toContain('Could not check whether you follow this account');
     expect(unknown.action).toBeNull();
     expect(unknown.recheck).toBe(true);
+
+    op.kind = 'follow_create';
+    op.state = 'published';
+    op.dueAt = null;
+    const stoppedFollow = followView({ viewer: SESSION.did, subject: DID, ops: [op], edge: false });
+    expect(stoppedFollow.status).toContain('the index has not confirmed it yet');
+    expect(stoppedFollow.action).toBe('follow');
+    op.kind = 'follow_delete';
+    const stoppedUnfollow = followView({ viewer: SESSION.did, subject: DID, ops: [op], edge: true });
+    expect(stoppedUnfollow.action).toBe('unfollow');
+  });
+
+  it("a scrobble whose index confirmation stopped reads as not confirmed in the owner's history, not as waiting", async () => {
+    const meta: Meta = { ...META, capabilities: [...META.capabilities, 'publication'] };
+    const stats = example<Statistics>('stats');
+    const api = new ApiClient({
+      fetch: async (input) => {
+        const path = new URL(String(input), 'https://music.test').pathname;
+        if (path === '/api/v1/meta') return Response.json(meta);
+        if (path.endsWith('/profile')) return Response.json(example('profile'));
+        if (path.endsWith('/stats')) return Response.json(stats);
+        if (path.endsWith('/scrobbles'))
+          return Response.json({ ...example('scrobble-page'), items: [], nextCursor: null });
+        if (path.endsWith('/following')) return Response.json(example('follow-page'));
+        return Response.json(
+          { error: { code: 'not_found', message: 'not found', requestId: 'test' } },
+          { status: 404 },
+        );
+      },
+    });
+    const state = createAppState({ api });
+    state.meta.value = meta;
+    state.session.value = SESSION;
+    const op: OutboxOperation = {
+      id: 'op-stopped-scrobble',
+      did: SESSION.did,
+      kind: 'scrobble_create',
+      uri: `at://${SESSION.did}/com.example.atmusic.scrobble/r01`,
+      record: {
+        $type: 'com.example.atmusic.scrobble',
+        artist: 'Björk',
+        track: 'Jóga',
+        listenedAt: '2026-01-15T11:00:00Z',
+      },
+      state: 'published',
+      seq: 1,
+      dueAt: null,
+      attempts: 1,
+      notified: true,
+      polls: 1,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    const outbox = {
+      did: DID,
+      session: SESSION,
+      refresh: vi.fn(async () => undefined),
+      list: vi.fn(async () => [op]),
+      subscribe: vi.fn(() => () => undefined),
+    } as unknown as OutboxService;
+    const services: ScreenServices = {
+      clock: { nowMs: () => Date.parse('2026-01-15T12:00:00Z') },
+      random: { bytes: (n) => new Uint8Array(n), float: () => 0 },
+      ticker: { every: () => () => undefined },
+      session: async () => ({
+        signIn: async () => undefined,
+        signOut: async () => undefined,
+        expiry: async () => null,
+      }),
+      outbox: async () => outbox,
+      closeOutbox: async () => undefined,
+    };
+    (window as unknown as { happyDOM: { setURL(url: string): void } }).happyDOM.setURL(`https://music.test/u/${DID}`);
+    const root = document.createElement('div');
+    document.body.append(root);
+    render(
+      <AppStateContext.Provider value={state}>
+        <ServicesProvider value={services}>
+          <App state={state} loadMetaOnMount={false} />
+        </ServicesProvider>
+      </AppStateContext.Provider>,
+      root,
+    );
+    await vi.waitFor(() => expect(root.querySelector('.profile-header')).not.toBeNull());
+    await vi.waitFor(() => expect(root.querySelector('ul[aria-labelledby="pending-title"] li')).not.toBeNull());
+    const status = root.querySelector('.op-status');
+    expect(status?.textContent).toContain('the index has not confirmed it yet');
+    expect(status?.textContent).not.toContain('waiting for the index');
+    render(null, root);
+    root.remove();
   });
 
   it('owner profiles have no follow control and anonymous viewers get a sign-in action', async () => {

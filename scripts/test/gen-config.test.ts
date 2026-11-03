@@ -41,6 +41,10 @@ test('Node defaults come from the example env and only headers are emitted', () 
     expect(headers).toContain("connect-src 'self'");
     expect(headers).not.toContain('https:;');
     expect(headers).not.toContain('oauth');
+    expect(headers).toContain("frame-ancestors 'none'");
+    expect(headers).toContain("require-trusted-types-for 'script'");
+    expect(headers).toContain('/assets/*\n  Cache-Control: public, max-age=31536000, immutable');
+    expect(headers).toContain('/\n  Cache-Control: no-cache\n/index.html\n  Cache-Control: no-cache');
     expect(CSP).toContain("connect-src 'self'");
     expect(CLIENT_NAME).toBe('AT Protocol Music');
   } finally {

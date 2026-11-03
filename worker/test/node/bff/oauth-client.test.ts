@@ -716,6 +716,27 @@ describe('the confidential OAuth client', () => {
     });
   });
 
+  it('a revoke whose upstream request never answers is abandoned after the policy deadline and deletes the local session', async () => {
+    await withMigratedDb(async (db) => {
+      const { w, alice } = await world(db);
+      const { svc, hold } = gatedService(w);
+      await w.signIn(svc, alice);
+      w.seedAccount(alice.did, 'alice');
+      const held = hold('/oauth/revoke');
+      const revoking = svc.revoke(alice.did);
+      await until(() => held.reached);
+
+      w.timer.expireAll();
+      expect(await revoking).toBe('revoked');
+      held.release();
+
+      expect(w.sessionRows()).toEqual([]);
+      expect(w.as.revocations).toEqual([]);
+      expect(w.accountStatus(alice.did)).toBe('signed_out');
+      expect(w.revocations.entries()).toEqual([{ kind: 'oauth_session', did: alice.did, at: w.clock.nowMs() }]);
+    });
+  });
+
   it('during sign-in and a later refresh the router transport sees no request to plc.directory; DID resolution goes through our identity module with fresh true', async () => {
     await withMigratedDb(async (db) => {
       const { w, alice } = await world(db);

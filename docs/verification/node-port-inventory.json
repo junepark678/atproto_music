@@ -865,16 +865,16 @@
       "title": "_headers contains require-trusted-types-for and frame-ancestors 'none'",
       "replaced": "scripts/test/gen-config.test.ts › Node defaults come from the example env and only headers are emitted",
       "package": "N7-01",
-      "reason": "The Workers/browser-era behavior was migrated in N7-01; its current Node or server-session equivalent is asserted by the replacement test."
+      "reason": "The generated CSP assertions cover frame-ancestors and Trusted Types directives."
     },
     {
       "id": "scripts/test/gen-config.test.ts › _headers marks /assets/* public, max-age=31536000, immutable and /index.html and /oauth/client-metadata.json no-cache",
       "file": "scripts/test/gen-config.test.ts",
       "ancestors": [],
       "title": "_headers marks /assets/* public, max-age=31536000, immutable and /index.html and /oauth/client-metadata.json no-cache",
-      "replaced": "scripts/test/gen-config.test.ts › --origin and --prefix override example values; stale OAuth metadata is removed",
+      "replaced": "scripts/test/gen-config.test.ts › Node defaults come from the example env and only headers are emitted",
       "package": "N7-01",
-      "reason": "The Workers/browser-era behavior was migrated in N7-01; its current Node or server-session equivalent is asserted by the replacement test."
+      "reason": "The generated-header assertions cover immutable asset caching and no-cache index responses; OAuth metadata is served dynamically by the Node host."
     },
     {
       "id": "scripts/test/pitr-restore.test.ts › scripts/admin/pitr-restore.ts after the POST › error after an accepted POST exits 1, not 2",
@@ -995,9 +995,9 @@
         "session support"
       ],
       "title": "a revocation that never answers is abandoned after the timeout and the stores are still cleared",
-      "replaced": "worker/test/node/bff/oauth-client.test.ts › the confidential OAuth client › revoke against an AS without a revocation_endpoint deletes the local session and sends no request",
+      "replaced": "worker/test/node/bff/oauth-client.test.ts › a revoke whose upstream request never answers is abandoned after the policy deadline and deletes the local session",
       "package": "N5-01",
-      "reason": "The Workers/browser-era behavior was migrated in N5-01; its current Node or server-session equivalent is asserted by the replacement test."
+      "reason": "The Node regression holds the fake AS revocation request through the injected policy deadline and verifies local deletion and one revocation journal entry."
     },
     {
       "id": "web/test/oauth/session.test.ts › session support › main.tsx boot: an expired stored session shows the re-auth banner; a mid-session refresh failure signs the shell out",
@@ -1323,9 +1323,9 @@
         "web/test/routes/profile.test.tsx"
       ],
       "title": "a follow or unfollow whose index confirmation stopped offers Follow or Unfollow again",
-      "replaced": "worker/test/node/outbox/retry.test.ts › a tenth attempt interrupted and then blocked is reconciled after sign-in with exactly one getRecord and settles, also when that look first answers 401",
+      "replaced": "web/test/routes/profile.test.tsx › web/test/routes/profile.test.tsx › follow is confirmed only after indexing and a failed unfollow never claims removal",
       "package": "N5-01",
-      "reason": "The Workers/browser-era behavior was migrated in N5-01; its current Node or server-session equivalent is asserted by the replacement test."
+      "reason": "The profile follow-view regression asserts retry actions for stopped published follow and unfollow operations, while preserving indexed-edge state."
     },
     {
       "id": "web/test/routes/profile.test.tsx › web/test/routes/profile.test.tsx › a failed or truncated following lookup shows the follow state as unknown with a re-check, never Not following",
@@ -1345,9 +1345,7 @@
         "web/test/routes/profile.test.tsx"
       ],
       "title": "a scrobble whose index confirmation stopped reads as not confirmed in the owner's history, not as waiting",
-      "replaced": "web/test/routes/profile.test.tsx › web/test/routes/profile.test.tsx › follow is confirmed only after indexing and a failed unfollow never claims removal",
-      "package": "N5-01",
-      "reason": "The Workers/browser-era behavior was migrated in N5-01; its current Node or server-session equivalent is asserted by the replacement test."
+      "kept": true
     },
     {
       "id": "web/test/routes/profile.test.tsx › web/test/routes/profile.test.tsx › own profile has no follow control and an anonymous viewer gets a sign-in action",
