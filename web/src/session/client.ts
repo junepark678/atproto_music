@@ -142,6 +142,7 @@ export class SessionClient {
         // transition until the reconciliation read confirms there is no
         // account; doing so could erase a newer account's draft.
         if (latest !== null) this.#set(null, false);
+        else this.#reauthRequired = false;
         // A refresh may have been reading the same account while the logout
         // completed. Discard that response, then reconcile the cookie once so
         // a genuinely newer account is restored instead of being erased.

@@ -23,7 +23,7 @@ export function listenForSessionReady(client: SessionClient): () => void {
   const channel = typeof BroadcastChannel === 'undefined' ? null : new BroadcastChannel(CHANNEL_NAME);
   channel?.addEventListener('message', onMessage);
   const onFocus = () => {
-    if (document.visibilityState === 'visible' && client.current() === null) refresh();
+    if (document.visibilityState === 'visible' && client.current()?.status !== 'active') refresh();
   };
   window.addEventListener('focus', onFocus);
   return () => {

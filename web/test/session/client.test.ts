@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { type Session, SessionClient, sessionClient, sessionFetch } from '../../src/session/client';
+import { listenForSessionReady } from '../../src/session/reauth-channel';
 import { createAppState, setScrobbleDraft, setSession } from '../../src/state/store';
 
 const sources = import.meta.glob<string>('../../src/**/*.{ts,tsx,js,jsx}', {
@@ -65,6 +66,61 @@ describe('web/test/session/client.test.ts', () => {
     expect(String(fetcher.mock.calls[1]?.[0])).toBe('/api/v1/auth/logout');
     expect(new Headers(fetcher.mock.calls[1]?.[1]?.headers).get('X-CSRF-Token')).toBe(reauth.csrfToken);
     expect(String(fetcher.mock.calls[2]?.[0])).toBe('/api/v1/auth/session');
+  });
+
+  it('clears the reauth flag and draft when sign-out is confirmed during a pending refresh', async () => {
+    const reauth = { ...dto, handle: null, status: 'reauth_required' as const };
+    let resolveLogout!: (response: Response) => void;
+    const pendingLogout = new Promise<Response>((resolve) => (resolveLogout = resolve));
+    let resolveRefresh!: (response: Response) => void;
+    const pendingRefresh = new Promise<Response>((resolve) => (resolveRefresh = resolve));
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json(reauth))
+      .mockImplementationOnce(() => pendingLogout)
+      .mockImplementationOnce(() => pendingRefresh)
+      .mockResolvedValueOnce(new Response(null, { status: 401 }));
+    const state = createAppState();
+    const client = new SessionClient({
+      fetch: fetcher,
+      onChange: (session, reauthRequired) => setSession(state, session, null, { reauthRequired }),
+    });
+    await client.getSession();
+    const values = {
+      artist: 'Draft Artist',
+      track: 'Draft Track',
+      album: '',
+      listenedAt: '2026-01-15T12:00:00Z',
+      durationSeconds: '',
+      recordingMbid: '',
+    };
+    setScrobbleDraft(state, values);
+    const logout = client.logout();
+    const refresh = client.refresh();
+    resolveLogout(new Response(null, { status: 204 }));
+    await logout;
+    resolveRefresh(new Response(null, { status: 401 }));
+    await expect(refresh).resolves.toBeNull();
+    expect(state.session.value).toBeNull();
+    expect(state.reauthRequired.value).toBe(false);
+    expect(state.scrobbleDraft.value).toBeNull();
+  });
+
+  it('refreshes a cached expired session on focus when BroadcastChannel is unavailable', async () => {
+    const reauth = { ...dto, handle: null, status: 'reauth_required' as const };
+    const client = new SessionClient({ fetch: vi.fn().mockResolvedValue(Response.json(reauth)) });
+    await client.getSession();
+    vi.stubGlobal('BroadcastChannel', undefined);
+    const refresh = vi.spyOn(client, 'refresh').mockResolvedValue(dto);
+    const visibility = Object.getOwnPropertyDescriptor(document, 'visibilityState');
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
+    const stop = listenForSessionReady(client);
+    window.dispatchEvent(new Event('focus'));
+    await vi.waitFor(() => expect(refresh).toHaveBeenCalledOnce());
+    stop();
+    if (visibility) Object.defineProperty(document, 'visibilityState', visibility);
+    else Reflect.deleteProperty(document, 'visibilityState');
+    vi.unstubAllGlobals();
   });
 
   it('keeps the reauthentication notice through an anonymous refresh and clears it after the cookie session returns', async () => {
