@@ -195,25 +195,24 @@ deterministic acceptance; that earlier receipt remains useful stack history.
 
 ## Exact-head N8 acceptance runs
 
-### Latest runtime-retirement stack (2026-11-04, commit `be1c0a5`)
+### Latest runtime-retirement stack (2026-11-04, commit `dabaabf`)
 
-Ran `bash scripts/acceptance/node-backend.sh --out work/acceptance/node-backend-final-20261104`
+Ran `bash scripts/acceptance/node-backend.sh --out work/acceptance/node-backend-final-dabaabf`
 from a clean checkout at commit
-`be1c0a573e1d0bdda7b11c9e77dc1a52d7740614`. The gate exited **0**. Its
+`dabaabf3a871b181c6fb5c6d2a415812259e55aa`. The gate exited **0**. Its
 Node bundle SHA-256 was
-`b2ba9790e108a95bc5712d63db9f04970a51ba29bfe1fd635a1d684bdf1efe91`.
+`a6f3f15ad504991bc1479621835a1609f74b0b64aa92de86f88d5dee829177fd`.
 The machine-readable summary is preserved in
-[node-backend-be1c0a5-summary.json](receipts/node-backend-be1c0a5-summary.json)
-(SHA-256
-`bceaefd5191ddf9ec5f51f8b3cdb32862fe966289e70966db5bf55db269fbe52`).
+[node-backend-dabaabf-summary.json](receipts/node-backend-dabaabf-summary.json)
+(SHA-256 `6aec6f09b4d7ba3f8db9fc489c2cd339b401b2965f4419fb5902cdf4bc376832`).
 
 | Step | Result |
 | --- | --- |
-| check-ts | PASS: 1,148 tests, including disposable npm install and full check without `workerd` |
-| Node tests | PASS: 438 tests |
-| Playwright | PASS: 13 tests |
-| Scrobbler protocol replay | PASS: 7 records |
-| Python regressions | PASS: 45 tests |
+| check-ts | PASS: 1,150 tests; 613s, including disposable npm install and full check without `workerd` |
+| Node tests | PASS: 438 tests; 39s |
+| Playwright | PASS: 13 tests; 80s |
+| Scrobbler protocol replay | PASS: 7 records; 12s |
+| Python regressions | PASS: 45 tests; 26s |
 | Node bundle guard | PASS |
 | Full case-map validation | PASS |
 | Goldens | PASS |
@@ -221,9 +220,19 @@ The machine-readable summary is preserved in
 | Live no-environment controls | PASS as refusal checks |
 | Live inventory verification | BLOCKED: no release-bound live evidence |
 
-Totals: **1,651 tests/records passed, 0 failed or skipped**; all 258 cases
+Totals: **1,653 tests/records passed, 0 failed or skipped**; all 258 cases
 resolved (243 passed, 9 blocked, 6 retired); all five production live gates
 remain blocked. No live services or external providers were contacted.
+
+### Previous runtime-retirement stack (2026-11-04, commit `be1c0a5`)
+
+The preceding exact-head run passed with 1,651 tests/records and no failures or
+skips. Its bundle SHA-256 was
+`b2ba9790e108a95bc5712d63db9f04970a51ba29bfe1fd635a1d684bdf1efe91`; the
+[exact-head receipt](receipts/node-backend-be1c0a5-summary.json) remains
+available (SHA-256
+`bceaefd5191ddf9ec5f51f8b3cdb32862fe966289e70966db5bf55db269fbe52`).
+All five production live gates were blocked.
 
 ### Previous runtime-retirement stack (2026-11-04, commit `e02d96e`)
 
