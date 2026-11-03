@@ -13,8 +13,8 @@ import { type FixedClock, fixedClock } from '@atmusic/core/test-support/clock';
 import { seededRandom } from '@atmusic/core/test-support/random';
 import { afterEach, describe, expect, it } from 'vitest';
 import { parseRevocationLog } from '../../src/app/revocations';
+import { constantTimeEqual } from '../../src/crypto/constant-time';
 import { SCHEMA_VERSION } from '../../src/do/schema';
-import { bytesEqualConstantTime, constantTimeEqual } from '../../src/http/admin';
 import { BACKUP_FILE } from '../../src/node/backup';
 import { type ExitCode, type RunningServer, run } from '../../src/node/run';
 import { captureLog, manualTimers, refusingJetstream, testEnv, testSecretsDocument } from './support/app';
@@ -191,12 +191,11 @@ describe('admin socket', () => {
     const wrong = await request({ socketPath }, 'GET', '/admin/backup');
     expect([wrong.status, wrong.headers.allow]).toEqual([405, 'POST']);
 
-    // The portable constant-time compare works on Node (no subtle.timingSafeEqual here).
-    expect(typeof (crypto.subtle as unknown as Record<string, unknown>).timingSafeEqual).toBe('undefined');
+    // The portable constant-time compare also handles byte arrays and unequal lengths.
     expect(await constantTimeEqual('x'.repeat(40), 'x'.repeat(40))).toBe(true);
     expect(await constantTimeEqual('x'.repeat(40), `${'x'.repeat(39)}y`)).toBe(false);
     expect(await constantTimeEqual('short', 'x'.repeat(4096))).toBe(false);
-    expect(bytesEqualConstantTime(new Uint8Array([1, 2]), new Uint8Array([1, 2, 0]))).toBe(false);
+    expect(constantTimeEqual(new Uint8Array([1, 2]), new Uint8Array([1, 2, 0]))).toBe(false);
 
     // The TCP listener never serves admin routes, under either prefix.
     expect((await request({ port: server.address.port }, 'GET', '/internal/admin/status')).status).toBe(404);
