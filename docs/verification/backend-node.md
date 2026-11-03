@@ -190,6 +190,43 @@ above passed. Neither failure is hidden as a backend acceptance success.
 
 ## Restacked N8 acceptance run
 
+The later exact-head run below supersedes the `6652a9b` receipt for current
+deterministic acceptance; that earlier receipt remains useful stack history.
+
+## Exact-head N8 acceptance run
+
+Ran `bash scripts/acceptance/node-backend.sh --out /tmp/node-backend-final-af4a3ef`
+from a clean checkout at commit
+`af4a3ef6bf5c60923abe87bcb5aa48f1d8770f67` on 2026-11-03. The gate exited
+**0**: all deterministic steps and mapped cases passed. The Node bundle
+SHA-256 is
+`d5bc7d60e80f5668aeb02d21cc773d13082d2114ce8cce0084a678ffe0f5a594`.
+
+| Step | Result |
+| --- | --- |
+| check-ts | PASS: 1,110 tests; 335s |
+| Node tests | PASS: 440 tests |
+| Playwright | PASS: 13 tests; 74s |
+| Scrobbler protocol replay | PASS: 7 records; 13s |
+| Python regressions | PASS: 44 tests; 19s |
+| Node bundle guard | PASS |
+| Full case-map validation | PASS |
+| Goldens | PASS |
+| systemd unit verification | PASS |
+| Live no-environment controls | PASS as refusal checks |
+| Live inventory verification | BLOCKED: no current release-bound live evidence |
+
+Totals: **1,614 tests/records passed, 0 failed**; all 258 cases were resolved
+(243 passed, 9 blocked, 6 retired); all five required live gates were blocked
+(oauth, ingest, pdsCompat, ssrfProbe, socketSoak). M7.4.3 `live_product` also
+remains blocked. No live services or external providers were contacted; the
+browser and protocol journeys used local fixture processes. This is a
+deterministic acceptance pass only, not live product or N6-02 acceptance.
+
+Evidence directory: `/tmp/node-backend-final-af4a3ef`.
+
+## Earlier restacked N8 acceptance run
+
 Ran `bash scripts/acceptance/node-backend.sh --out /tmp/node-backend-final-6652a9b`
 from a clean checkout at commit `6652a9b014a83b8c4ba7b9889c69238700b8a0b6`
 on 2026-11-03. The gate exited **0**: all deterministic steps and mapped
