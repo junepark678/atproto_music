@@ -3,7 +3,9 @@
 // parent IPC; the browser uses the same hosts through a local TLS proxy.
 
 import { type ChildProcess, spawn } from 'node:child_process';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { chmodSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { createServer as createHttpServer, type Server as HttpServer } from 'node:http';
 import { createServer } from 'node:net';
 import { join } from 'node:path';
 import { testSecretsDocument } from '../../worker/test/node/support/app';
@@ -18,6 +20,9 @@ export const NETWORK_FILE = join(WORK_DIR, 'network.json');
 export const E2E_BUNDLE = join(REPO_ROOT, 'worker', 'dist', 'node', 'e2e.mjs');
 const SECRETS_FILE = join(STATE_DIR, 'secrets.json');
 const RUNTIME_DIR = join(WORK_DIR, 'run');
+export const CONTROL_TOKEN_FILE = join(STATE_DIR, 'control-token');
+const CONTROL_TOKEN_HEADER = 'x-atmusic-e2e-control-token';
+const COMMAND_TIMEOUT_MS = 10_000;
 const BIN = join(REPO_ROOT, 'node_modules', '.bin');
 let activeStop: (() => Promise<void>) | null = null;
 
@@ -157,14 +162,21 @@ export async function startStack(): Promise<{ stop(): Promise<void> }> {
   let world: FixtureWorld | null = null;
   let child: ChildProcess | null = null;
   let stopped = false;
+  let expectedExit: ChildProcess | null = null;
   let stopPromise: Promise<void> | null = null;
+  let restartTask: Promise<void> | null = null;
   let pumpTask: Promise<void> | null = null;
   let pumpTimer: NodeJS.Timeout | null = null;
   let wakePump: (() => void) | null = null;
+  let resumePump: (() => void) | null = null;
+  let pumpPaused = false;
+  let pumpInFlight: Promise<void> | null = null;
   let commandId = 0;
+  let generation = 0;
   let lastPumpWallMs = 0;
   let activeCommand: { id: number; resolve(value: unknown): void; reject(error: Error): void } | null = null;
-  let outboundQueue = Promise.resolve();
+  let controlServer: HttpServer | null = null;
+  const sentCommits: unknown[] = [];
 
   const stop = (): Promise<void> => {
     if (stopPromise !== null) return stopPromise;
@@ -175,11 +187,20 @@ export async function startStack(): Promise<{ stop(): Promise<void> }> {
       wakePump?.();
       wakePump = null;
     }
+    resumePump?.();
+    resumePump = null;
     stopPromise = (async () => {
       try {
         await terminate(child);
+        await restartTask?.catch(() => {});
+        await terminate(child);
         await pumpTask?.catch(() => {});
       } finally {
+        if (controlServer !== null) {
+          await new Promise<void>((resolve) => controlServer?.close(() => resolve()));
+          controlServer = null;
+        }
+        rmSync(CONTROL_TOKEN_FILE, { force: true });
         if (world !== null) await world.close();
         activeStop = null;
       }
@@ -215,11 +236,13 @@ export async function startStack(): Promise<{ stop(): Promise<void> }> {
 
     writeFileSync(SECRETS_FILE, `${JSON.stringify(testSecretsDocument())}\n`, { mode: 0o600 });
     chmodSync(SECRETS_FILE, 0o600);
+    const controlToken = randomBytes(32).toString('hex');
+    writeFileSync(CONTROL_TOKEN_FILE, controlToken, { mode: 0o600 });
     const signinDids = world.network.accounts.map((account) => account.did).join(',');
     const childStartWallMs = Date.now();
     world.advance(childStartWallMs - world.clockStartedWallMs);
     lastPumpWallMs = childStartWallMs;
-    const env: NodeJS.ProcessEnv = {
+    const makeChildEnv = (): NodeJS.ProcessEnv => ({
       ...process.env,
       ATMUSIC_PUBLIC_ORIGIN: originText,
       ATMUSIC_LISTEN: `127.0.0.1:${ports.worker}`,
@@ -228,7 +251,8 @@ export async function startStack(): Promise<{ stop(): Promise<void> }> {
       ATMUSIC_SIGNIN_POLICY: 'allowlist',
       ATMUSIC_ASSETS_DIR: DIST_DIR,
       ATMUSIC_SECRETS_FILE: SECRETS_FILE,
-      ATMUSIC_TEST_NOW_MS: String(world.clock.nowMs()),
+      ATMUSIC_TEST_NOW_MS: String(world?.clock.nowMs()),
+      ATMUSIC_TEST_JETSTREAM_COMMITS: Buffer.from(JSON.stringify(sentCommits)).toString('base64'),
       ATMUSIC_DB: join(STATE_DIR, 'atmusic.db'),
       STATE_DIRECTORY: STATE_DIR,
       XDG_RUNTIME_DIR: RUNTIME_DIR,
@@ -239,72 +263,12 @@ export async function startStack(): Promise<{ stop(): Promise<void> }> {
       JETSTREAM_URLS: 'wss://jetstream.test',
       JETSTREAM_LOOKBACK_HOURS: '24',
       RELAY_URL: 'https://relay.test/',
-    };
-    log(`Node e2e bundle on ${originText}`);
-    child = spawn(process.execPath, [E2E_BUNDLE, '--init'], {
-      cwd: REPO_ROOT,
-      env,
-      stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
     });
-
-    const ready = new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(
-        () => reject(new Error(`Node e2e bundle did not answer ${originText} within 120000 ms`)),
-        120_000,
-      );
-      child?.on('message', (raw: unknown) => {
-        const message = raw as WireMessage;
-        if (message.type === 'ready') {
-          clearTimeout(timeout);
-          resolve();
-        } else if (message.type === 'answer' && Number.isSafeInteger(message.id)) {
-          const current = activeCommand;
-          if (current !== null && current.id === message.id) {
-            activeCommand = null;
-            if (typeof message.error === 'string') current.reject(new Error(message.error));
-            else current.resolve(message.result);
-          }
-        } else if (message.type === 'request') {
-          // Requests are routed in arrival order. Responses are sent only after
-          // each upstream body is fully read, so IPC never races a pump answer.
-          outboundQueue = outboundQueue.then(async () => {
-            try {
-              const reply = await routeOutbound(message, world as FixtureWorld);
-              if (child?.connected) {
-                await new Promise<void>((res, rej) => child?.send(reply, (error) => (error ? rej(error) : res())));
-              }
-            } catch (error) {
-              const failure = { ...ipcErrorResponse(error), id: message.id as number };
-              if (child?.connected) {
-                await new Promise<void>((res, rej) =>
-                  child?.send(failure, (sendError) => (sendError ? rej(sendError) : res())),
-                );
-              }
-            }
-          });
-          void outboundQueue.catch((error) => console.error(`[e2e] outbound IPC router: ${messageOf(error)}`));
-        }
-      });
-      child?.once('error', (error) => {
-        clearTimeout(timeout);
-        reject(error);
-      });
-      child?.once('exit', (code, signal) => {
-        clearTimeout(timeout);
-        if (activeCommand !== null) {
-          activeCommand.reject(new Error(`Node e2e bundle exited with ${code ?? signal}`));
-          activeCommand = null;
-        }
-        if (!stopped) reject(new Error(`Node e2e bundle exited with ${code ?? signal}`));
-      });
-    });
-
-    const healthDeadline = Date.now() + 120_000;
-    const waitForHttp = async (): Promise<void> => {
-      while (!stopped && Date.now() < healthDeadline) {
-        if (child?.exitCode !== null && child?.exitCode !== undefined) {
-          throw new Error(`Node e2e bundle exited with ${child.exitCode}`);
-        }
+    const waitForHttp = async (proc: ChildProcess): Promise<void> => {
+      const healthDeadline = Date.now() + 120_000;
+      while (!stopped && child === proc && Date.now() < healthDeadline) {
+        if (proc.exitCode !== null || proc.signalCode !== null)
+          throw new Error(`Node e2e bundle exited with ${proc.exitCode ?? proc.signalCode}`);
         try {
           const local = `http://127.0.0.1:${ports.worker}`;
           const requestHeaders = { host: APP_HOST };
@@ -323,17 +287,100 @@ export async function startStack(): Promise<{ stop(): Promise<void> }> {
       }
       throw new Error(`Node e2e bundle did not answer ${originText} within 120000 ms`);
     };
-    await Promise.all([ready, waitForHttp()]);
+    const spawnNodeBundle = async (): Promise<ChildProcess> => {
+      const proc = spawn(process.execPath, [E2E_BUNDLE, '--init'], {
+        cwd: REPO_ROOT,
+        env: makeChildEnv(),
+        stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
+      });
+      child = proc;
+      let queue = Promise.resolve();
+      const ready = new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(
+          () => reject(new Error(`Node e2e bundle did not answer ${originText} within 120000 ms`)),
+          120_000,
+        );
+        proc.on('message', (raw: unknown) => {
+          const message = raw as WireMessage;
+          if (message.type === 'ready') {
+            clearTimeout(timeout);
+            resolve();
+          } else if (message.type === 'answer' && Number.isSafeInteger(message.id)) {
+            if (child !== proc) return;
+            const current = activeCommand;
+            if (current !== null && current.id === message.id) {
+              activeCommand = null;
+              if (typeof message.error === 'string') current.reject(new Error(message.error));
+              else current.resolve(message.result);
+            }
+          } else if (message.type === 'request') {
+            // Requests are routed in arrival order. Responses are sent only after
+            // each upstream body is fully read, so IPC never races a pump answer.
+            queue = queue.then(async () => {
+              try {
+                const reply = await routeOutbound(message, world as FixtureWorld);
+                if (child === proc && proc.connected) {
+                  await new Promise<void>((res, rej) => proc.send(reply, (error) => (error ? rej(error) : res())));
+                }
+              } catch (error) {
+                const failure = { ...ipcErrorResponse(error), id: message.id as number };
+                if (child === proc && proc.connected) {
+                  await new Promise<void>((res, rej) =>
+                    proc.send(failure, (sendError) => (sendError ? rej(sendError) : res())),
+                  );
+                }
+              }
+            });
+            void queue.catch((error) => console.error(`[e2e] outbound IPC router: ${messageOf(error)}`));
+          }
+        });
+        proc.once('error', (error) => {
+          clearTimeout(timeout);
+          reject(error);
+        });
+        proc.once('exit', (code, signal) => {
+          clearTimeout(timeout);
+          if (child === proc && proc !== expectedExit && activeCommand !== null) {
+            activeCommand.reject(new Error(`Node e2e bundle exited with ${code ?? signal}`));
+            activeCommand = null;
+          }
+          if (child === proc && proc !== expectedExit && !stopped)
+            reject(new Error(`Node e2e bundle exited with ${code ?? signal}`));
+        });
+      });
+      await Promise.all([ready, waitForHttp(proc)]);
+      return proc;
+    };
+    log(`Node e2e bundle on ${originText}`);
+    child = await spawnNodeBundle();
 
     const sendCommand = (command: Record<string, unknown>): Promise<unknown> => {
       if (stopped || child?.connected !== true) return Promise.resolve(null);
       const id = ++commandId;
       return new Promise((resolve, reject) => {
-        activeCommand = { id, resolve, reject };
+        const timeout = setTimeout(() => {
+          if (activeCommand?.id !== id) return;
+          activeCommand = null;
+          reject(new Error(`Node e2e bundle command ${id} timed out after ${COMMAND_TIMEOUT_MS} ms`));
+        }, COMMAND_TIMEOUT_MS);
+        activeCommand = {
+          id,
+          resolve: (value) => {
+            clearTimeout(timeout);
+            resolve(value);
+          },
+          reject: (error) => {
+            clearTimeout(timeout);
+            reject(error);
+          },
+        };
         child?.send({ type: 'command', id, ...command }, (error) => {
           if (error) {
-            activeCommand = null;
-            reject(error);
+            if (activeCommand?.id === id) {
+              activeCommand = null;
+              clearTimeout(timeout);
+              reject(error);
+            }
           }
         });
       });
@@ -342,7 +389,9 @@ export async function startStack(): Promise<{ stop(): Promise<void> }> {
       if (stopped || child?.connected !== true) return;
       const commits = world?.drainCommits() ?? [];
       if (commits.length > 0) {
-        await sendCommand({ action: 'events', commits: commits.map(({ commit }) => commit) });
+        const payload = commits.map(({ commit }) => commit);
+        sentCommits.push(...payload);
+        await sendCommand({ action: 'events', commits: payload });
       }
       const now = Date.now();
       const advance = Math.max(0, now - lastPumpWallMs);
@@ -352,8 +401,23 @@ export async function startStack(): Promise<{ stop(): Promise<void> }> {
     };
     const pumpLoop = async (): Promise<void> => {
       while (!stopped) {
-        await pump();
+        if (pumpPaused) {
+          await new Promise<void>((resolve) => {
+            resumePump = resolve;
+          });
+          resumePump = null;
+          continue;
+        }
+        const iteration = pump();
+        pumpInFlight = iteration;
+        try {
+          await iteration;
+        } catch (error) {
+          if (restartTask === null) throw error;
+        }
+        if (pumpInFlight === iteration) pumpInFlight = null;
         if (stopped) return;
+        if (pumpPaused) continue;
         await new Promise<void>((resolve) => {
           wakePump = resolve;
           pumpTimer = setTimeout(() => {
@@ -366,10 +430,113 @@ export async function startStack(): Promise<{ stop(): Promise<void> }> {
     };
     pumpTask = pumpLoop();
     void pumpTask.catch((error) => {
-      if (!stopped) {
+      if (!stopped && restartTask === null) {
         console.error(`[e2e] pump failed: ${messageOf(error)}`);
         void stop().catch((stopError) => console.error(`[e2e] teardown failed: ${messageOf(stopError)}`));
       }
+    });
+    const restartBundle = (signal: NodeJS.Signals = 'SIGKILL'): Promise<void> => {
+      if (restartTask !== null) return restartTask;
+      restartTask = (async () => {
+        if (stopped) throw new Error('cannot restart a stopped e2e stack');
+        pumpPaused = true;
+        if (pumpTimer !== null) {
+          clearTimeout(pumpTimer);
+          pumpTimer = null;
+          wakePump?.();
+          wakePump = null;
+        }
+        await pumpInFlight?.catch(() => {});
+        const previous = child;
+        if (previous === null) throw new Error('Node e2e bundle is not running');
+        expectedExit = previous;
+        previous.kill(signal);
+        await waitForExit(previous);
+        expectedExit = null;
+        if (stopped) throw new Error('e2e stack stopped while restarting the Node bundle');
+        world?.advance(Math.max(0, Date.now() - lastPumpWallMs));
+        lastPumpWallMs = Date.now();
+        await spawnNodeBundle();
+        generation += 1;
+        pumpPaused = false;
+        resumePump?.();
+        resumePump = null;
+        wakePump?.();
+      })().finally(() => {
+        restartTask = null;
+      });
+      return restartTask;
+    };
+    controlServer = createHttpServer((request, response) => {
+      const url = new URL(request.url ?? '/', `http://127.0.0.1:${ports.control}`);
+      const suppliedToken = request.headers[CONTROL_TOKEN_HEADER];
+      const provided = Buffer.from(typeof suppliedToken === 'string' ? suppliedToken : '');
+      const expected = Buffer.from(controlToken);
+      const authorized =
+        request.headers.host === `127.0.0.1:${ports.control}` &&
+        request.headers.origin === undefined &&
+        provided.length === expected.length &&
+        timingSafeEqual(provided, expected);
+      if (!authorized) {
+        response.writeHead(403, { 'content-type': 'application/json' });
+        response.end(JSON.stringify({ error: 'forbidden' }));
+        return;
+      }
+      if (request.method !== 'POST') {
+        response.writeHead(404, { 'content-type': 'application/json' });
+        response.end(JSON.stringify({ error: 'not_found' }));
+        return;
+      }
+      if (url.pathname === '/pump/pause') {
+        pumpPaused = true;
+        if (pumpTimer !== null) {
+          clearTimeout(pumpTimer);
+          pumpTimer = null;
+          wakePump?.();
+          wakePump = null;
+        }
+        const inFlight = pumpInFlight?.catch(() => {}) ?? Promise.resolve();
+        void inFlight.then(() => {
+          response.writeHead(204);
+          response.end();
+        });
+        return;
+      }
+      if (url.pathname === '/pump/resume') {
+        pumpPaused = false;
+        resumePump?.();
+        resumePump = null;
+        wakePump?.();
+        response.writeHead(204);
+        response.end();
+        return;
+      }
+      if (url.pathname !== '/restart') {
+        response.writeHead(404, { 'content-type': 'application/json' });
+        response.end(JSON.stringify({ error: 'not_found' }));
+        return;
+      }
+      const requestedSignal = url.searchParams.get('signal');
+      const signal: NodeJS.Signals = requestedSignal === 'SIGTERM' ? 'SIGTERM' : 'SIGKILL';
+      const previousPid = child?.pid ?? null;
+      void restartBundle(signal).then(
+        () => {
+          response.writeHead(200, { 'content-type': 'application/json' });
+          response.end(JSON.stringify({ generation, pid: child?.pid ?? null, previousPid }));
+        },
+        (error: unknown) => {
+          pumpPaused = false;
+          resumePump?.();
+          resumePump = null;
+          response.writeHead(500, { 'content-type': 'application/json' });
+          response.end(JSON.stringify({ error: messageOf(error) }));
+          void stop().catch((stopError) => console.error(`[e2e] restart failure teardown: ${messageOf(stopError)}`));
+        },
+      );
+    });
+    await new Promise<void>((resolve, reject) => {
+      controlServer?.once('error', reject);
+      controlServer?.listen(ports.control, '127.0.0.1', resolve);
     });
     log('ready');
     return { stop };

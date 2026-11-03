@@ -1449,11 +1449,13 @@
     },
     {
       "case": "M7.4.2/browser_restart",
-      "target": "worker/test/acceptance/restart.test.ts › restart reopens the same database file: projection tables and responses are byte-identical, a pre-restart cursor continues and timers resume",
+      "target": "web/tests/restart.spec.ts › a Node process restart mid-journey keeps the browser session cookie and indexed data, and new writes still index",
       "also": [
-        "worker/test/node/outbox/recovery.test.ts › crash before send, after PDS commit before local ack, after local commit, and during delete (database reopened) each end with exactly one PDS outcome"
+        "worker/test/acceptance/restart.test.ts › restart reopens the same database file: projection tables and responses are byte-identical, a pre-restart cursor continues and timers resume",
+        "worker/test/node/outbox/recovery.test.ts › crash before send, after PDS commit before local ack, after local commit, and during delete (database reopened) each end with exactly one PDS outcome",
+        "scripts/test/node-recovery.test.ts › oauth_refresh_recovery: rotated refresh credentials and the same app-session cookie survive a child-process restart"
       ],
-      "note": "Current Node recovery tests cover database restart durability; Playwright browser restart acceptance remains a separate N6-01 gate."
+      "note": "Playwright SIGKILLs and re-spawns the packaged Node e2e bundle mid-journey against the same SQLite file and session-sealing keys while the fake AS/PDS/PLC and proxy stay up. It proves the same browser session cookie, persisted indexed data, and post-restart write indexing. Local fixture evidence only; not live PDS or live operator acceptance."
     },
     {
       "case": "M7.4.2/browser_network",

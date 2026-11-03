@@ -63,10 +63,18 @@ export interface E2ePorts {
   pds1: number;
   pds2: number;
   proxy: number;
+  control: number;
 }
 
 /** Fixed loopback ports (playwright.config.ts needs the proxy port before anything starts). */
-export const DEFAULT_PORTS: Readonly<E2ePorts> = { worker: 8787, plc: 2582, pds1: 2583, pds2: 2584, proxy: 2580 };
+export const DEFAULT_PORTS: Readonly<E2ePorts> = {
+  worker: 8787,
+  plc: 2582,
+  pds1: 2583,
+  pds2: 2584,
+  proxy: 2580,
+  control: 2585,
+};
 
 /** The SPA/Node origin for `ports` (an atproto loopback client must use 127.0.0.1). */
 export function workerOrigin(ports: Pick<E2ePorts, 'worker'>): string {
@@ -87,6 +95,7 @@ export function portsFromEnv(env: NodeJS.ProcessEnv = process.env): E2ePorts {
     pds1: read('E2E_PDS1_PORT', DEFAULT_PORTS.pds1),
     pds2: read('E2E_PDS2_PORT', DEFAULT_PORTS.pds2),
     proxy: read('E2E_PROXY_PORT', DEFAULT_PORTS.proxy),
+    control: read('E2E_CONTROL_PORT', DEFAULT_PORTS.control),
   };
 }
 
