@@ -188,11 +188,42 @@ an old self-test count assertion: an omitted case now fails the two mapped
 gate self-references as well. The assertion was fixed and the 20-test rerun
 above passed. Neither failure is hidden as a backend acceptance success.
 
-**No fresh complete `node-backend.sh` run was attempted in this integration.**
-The scoped checks and seven replay records do not clear the saved full-gate
-failures below. The saved M7 deterministic browser journey passed, but
-`M7.4.3/live_product` is still operator-blocked. N6-02 live OAuth/SSRF/soak and
-N7 retirement remain incomplete. No live refusal is counted as live success.
+## Fresh complete gate run on the integrated replay branch
+
+Ran `bash scripts/acceptance/node-backend.sh --out /tmp/node-backend-pr132`
+from a clean checkout at commit `4a97dc178a460a36ef92b4e3e7b304377c31aeb7`
+on 2026-11-03. The gate exited **1**; this is a failure receipt, not a passing
+acceptance. Bundle SHA-256 was
+`2ae153351d9ca71e3356b194b7b42b1d67328860d57ab581ece0685a994e4b3d`.
+
+| Step | Exit | Result |
+| --- | --- | --- |
+| check-ts | 1 | 1,009 passed / 5 failed / 0 skipped of 1,014; 412 seconds under concurrent benchmark load |
+| Node tests | 0 | 440 passed |
+| Playwright | 0 | 13 passed |
+| Scrobbler protocol replay | 0 | 7 records passed |
+| Python regressions | 0 | 44 passed |
+| Node bundle guard | 0 | Passed |
+| Full case-map validator | 0 | Passed |
+| Goldens | 0 | Passed |
+| systemd unit verification | 0 | Passed |
+| Live no-environment controls | 0 | Passed as refusal checks |
+| Live inventory verification | 0 | Correctly reported 5 required gates BLOCKED; this is not live acceptance |
+
+The five `check-ts` failures were two obsolete Workers `deploy.test.ts` cases,
+the secret scan finding two labelled SHA-256 values in this document, and two
+OAuth keepalive tests that timed out under the concurrent run. The digest scan
+was corrected in commit `a692195` by labelling the older bundle digest and
+allowlisting this verification report as a digest-only document. The keepalive
+file then passed alone (5/5); the full suite still needs a quiet rerun. The
+Workers deployment tests remain for N7-01 to retire.
+
+The fail-fast `check-ts` step did not reach contract validation, leaving the
+route-inventory and response-example cases unexecuted. Overall records were
+1,518 executed (1,513 passed, 5 failed), 258 cases (238 passed, 5 failed,
+9 blocked, 6 retired). Live evidence was unavailable: all five required gates
+remain blocked, and `M7.4.3/live_product` remains operator-blocked. N6-02 live
+OAuth/SSRF/soak and N7 retirement are incomplete.
 
 ## Saved gate evidence before integration
 
