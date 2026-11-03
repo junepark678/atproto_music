@@ -193,9 +193,39 @@ above passed. Neither failure is hidden as a backend acceptance success.
 The later exact-head run below supersedes the `6652a9b` receipt for current
 deterministic acceptance; that earlier receipt remains useful stack history.
 
-## Exact-head N8 acceptance run
+## Exact-head N8 acceptance runs
 
-### Current runtime-retirement stack (2026-11-04, commit `8d415468`)
+### Current runtime-retirement stack (2026-11-04, commit `e02d96e`)
+
+Ran `bash scripts/acceptance/node-backend.sh --out /tmp/node-backend-e02d96e`
+from a clean checkout at commit
+`e02d96e0e1e5aad4ac8855bdb2f5e08f6db4272d`. The gate exited **0**. Its
+Node bundle SHA-256 was
+`ff147b70d55521015cb807c3161873f2d2e563c6ab4c5525c1509540e38dc312`.
+The machine-readable summary is preserved in
+[node-backend-e02d96e-summary.json](receipts/node-backend-e02d96e-summary.json)
+(SHA-256
+`ac1ee31ddaacbb801584f3d9abb24960dfa39d29ba3538842a58a186a39a606f`).
+
+| Step | Result |
+| --- | --- |
+| check-ts | PASS: 1,148 tests; 611s, including disposable npm install and full check without `workerd` |
+| Node tests | PASS: 438 tests; 42s |
+| Playwright | PASS: 13 tests; 64s |
+| Scrobbler protocol replay | PASS: 7 records; 10s |
+| Python regressions | PASS: 45 tests; 16s |
+| Node bundle guard | PASS |
+| Full case-map validation | PASS |
+| Goldens | PASS |
+| systemd unit verification | PASS |
+| Live no-environment controls | PASS as refusal checks |
+| Live inventory verification | BLOCKED: no release-bound live evidence |
+
+Totals: **1,651 tests/records passed, 0 failed or skipped**; all 258 cases
+resolved (243 passed, 9 blocked, 6 retired); all five production live gates
+remain blocked. No live services or external providers were contacted.
+
+### Previous runtime-retirement stack (2026-11-04, commit `8d415468`)
 
 Ran `bash scripts/acceptance/node-backend.sh --out /tmp/node-backend-8d41546`
 from a clean checkout at commit

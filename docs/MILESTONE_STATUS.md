@@ -24,12 +24,13 @@ confirms evidence bound to the current commit and Node bundle. It replaces
 contacts a live service.
 
 Deterministic acceptance update (2026-11-04): the full N8 gate passed on clean
-commit `8d415468`; its bundle SHA-256 and machine-readable summary are recorded
+commit `e02d96e`; its bundle SHA-256 and machine-readable summary are recorded
 in [backend-node.md](verification/backend-node.md) and
-[the exact-head receipt](verification/receipts/node-backend-8d41546-summary.json).
-It executed 1,650 tests/records with 0 failures or skips; all 258 cases resolved
+[the exact-head receipt](verification/receipts/node-backend-e02d96e-summary.json).
+It executed 1,651 tests/records with 0 failures or skips; all 258 cases resolved
 (243 passed, 9 blocked, 6 retired). Playwright passed 13/13 and the
-process-backed scrobbler replay passed 7/7.
+process-backed scrobbler replay passed 7/7. The run also passed the explicit
+clean-install/full-check no-workerd acceptance test.
 
 This deterministic pass does **not** close live acceptance: all five
 release-bound live gates (oauth, ingest, pdsCompat, ssrfProbe, socketSoak) and
@@ -40,9 +41,10 @@ or live gate is closed by this run.
 
 Earlier failed receipts at `c2da66a+dirty`, `4a97dc1`, and the intermediate
 `838fa217` run remain historical. Their issues were addressed by subsequent
-mapping, retirement, and timing fixes; the clean full run above is the current
-deterministic acceptance result. The prior `af4a3ef` run remains recorded as
-history in [backend-node.md](verification/backend-node.md).
+mapping, retirement, and timing fixes. The clean `8d415468` run is also retained
+as the prior exact-head receipt in [backend-node.md](verification/backend-node.md);
+`e02d96e` is the current deterministic acceptance result. The prior `af4a3ef`
+run remains recorded as history there.
 
 Historical Workers receipt follows; nothing below is a current Node statement.
 
