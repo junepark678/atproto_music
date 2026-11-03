@@ -150,6 +150,30 @@ ListenBrainz. No Node live acceptance has been recorded. Confidential-client
 OAuth interop, SSRF probe, and Node soak remain deferred; full N6-02 and M6
 live acceptance stay open.
 
+## Deferred dev-env OAuth contract (D7)
+
+The completed Sonnet readiness discovery reports that `@atproto/oauth-provider`
+can fetch discoverable HTTPS client metadata and JWKS through valid public TLS
+without a provider change. This is implementation readiness information, not
+an executed OAuth exchange or live acceptance receipt; no OAuth or live network
+was run for that discovery.
+
+The current e2e stack uses `FakeOAuthAs` and `FakePds`. The
+`startDevEnv`/`TestPds` path is unused. The existing HTTPS IPC fixture could be
+extended to forward selected hosts to a loopback `TestPds`, but OAuth session
+scope, refresh, and revocation observations have no HTTP surface and would
+require in-process observation within the PDS process.
+
+Implementation remains deferred pending decisions on:
+
+- the app process and public HTTPS origin architecture;
+- separate advisory `devenvOAuth` evidence versus the required `oauth` gate;
+- exact prerequisite environment variable names;
+- a read-only OAuth store accessor and its allowed observation fields.
+
+These findings do not add a gate, establish its evidence schema, or enable any
+OAuth PASS semantics. Existing verifier support remains unchanged.
+
 ## Node ingest timeout and recovery semantics
 
 `npx tsx scripts/live/node_ingest_check.ts` accepts an optional
