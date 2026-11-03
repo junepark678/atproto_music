@@ -188,7 +188,38 @@ an old self-test count assertion: an omitted case now fails the two mapped
 gate self-references as well. The assertion was fixed and the 20-test rerun
 above passed. Neither failure is hidden as a backend acceptance success.
 
-## Fresh complete gate run on the integrated replay branch
+## Restacked N8 acceptance run
+
+Ran `bash scripts/acceptance/node-backend.sh --out /tmp/node-backend-restacked-3ad1949`
+from a clean checkout at commit `3ad1949e2fa040772a205124812cb51c40c725c7`
+on 2026-11-03. The gate exited **0**: all deterministic steps and mapped
+cases passed. The Node bundle SHA-256 was
+`0b1a08c3c517e14eaaf67ec64eaf08352536140085950ec4841c46f44414e63a`.
+
+| Step | Result |
+| --- | --- |
+| check-ts | PASS: 1,110 tests |
+| Node tests | PASS: 440 tests |
+| Playwright | PASS: 13 tests |
+| Scrobbler protocol replay | PASS: 7 records |
+| Python regressions | PASS: 44 tests |
+| Node bundle guard | PASS |
+| Full case-map validation | PASS |
+| Goldens | PASS |
+| systemd unit verification | PASS |
+| Live no-environment controls | PASS as refusal checks |
+| Live inventory verification | BLOCKED: no current release-bound live evidence |
+
+Totals: **1,614 tests/records passed, 0 failed**; all 258 cases were resolved
+(243 passed, 9 blocked, 6 retired); all five required live gates were blocked
+(oauth, ingest, pdsCompat, ssrfProbe, socketSoak). M7.4.3 `live_product` also
+remains blocked. No live services or external providers were contacted; the
+browser and protocol journeys used local fixture processes. This is a
+deterministic acceptance pass only, not live product or N6-02 acceptance.
+
+Evidence directory: `/tmp/node-backend-restacked-3ad1949`.
+
+## Earlier complete gate run on the integrated replay branch (historical failure)
 
 Ran `bash scripts/acceptance/node-backend.sh --out /tmp/node-backend-pr132`
 from a clean checkout at commit `4a97dc178a460a36ef92b4e3e7b304377c31aeb7`

@@ -23,23 +23,24 @@ confirms evidence bound to the current commit and Node bundle. It replaces
 `scripts/acceptance/node-interim.sh` as the gate from wave 8 on and never
 contacts a live service.
 
-Integration update (2026-11-03): the committed N8 gate from `e96ca593` was
-cherry-picked onto reviewed PR #130 head `6c7b946` without conflicts. The gate
-now consumes the current replay's explicit `--out` JSONL contract, and the
-stale acceptance command mappings point at current Node tests or the exact
-N8 gate declarations. Both case-map modes and the scoped tooling regressions
-pass. A bounded loopback-only replay on `889aa4f` emitted seven passing records.
-See [backend-node.md](verification/backend-node.md) for commands and evidence.
-**No fresh complete backend gate has run; Node backend acceptance is not PASS.**
+Deterministic acceptance update (2026-11-03): the full N8 gate passed on clean
+commit `3ad1949e2fa040772a205124812cb51c40c725c7`, bundle SHA-256
+`0b1a08c3c517e14eaaf67ec64eaf08352536140085950ec4841c46f44414e63a`. It
+executed 1,614 tests/records with 0 failures; all 258 cases resolved (243
+passed, 9 blocked, 6 retired). Playwright passed 13/13 and the process-backed
+scrobbler replay passed 7/7. See [backend-node.md](verification/backend-node.md)
+for the complete run record.
 
-The saved gate receipt at `c2da66a+dirty` remains a failed run (exit 1, 13
-problems). Its missing replay script and stale mappings are corrected in this
-tree; its `check-ts` failures in legacy deploy tests, the Node ingest lifecycle
-test and the web bundle timeout have not been cleared by a fresh full gate.
-The saved deterministic M7 browser journey passed, while
-`M7.4.3/live_product` remains operator-blocked. No live services or external
-providers were contacted for this integration. N6-02 live OAuth/SSRF/soak and
-N7 retirement remain incomplete; no milestone or live gate is closed here.
+This deterministic pass does **not** close live acceptance: all five
+release-bound live gates (oauth, ingest, pdsCompat, ssrfProbe, socketSoak) and
+M7.4.3 `live_product` remain blocked. No live services or external providers
+were contacted. N6-02 live acceptance and broader N7 retirement remain open;
+no milestone or live gate is closed by this run.
+
+The earlier receipt at `c2da66a+dirty` remains recorded as a historical
+failure, not the current result. Its missing replay and stale mappings were
+subsequently fixed; the fresh complete run above supersedes it for deterministic
+acceptance status.
 
 Historical Workers receipt follows; nothing below is a current Node statement.
 
