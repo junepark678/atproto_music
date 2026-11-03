@@ -127,4 +127,28 @@ describe('Pano Last.fm replay client', () => {
     expect(requests[3]!.body).toBe('');
     expect(requests[0]!.userAgent).toBe('Pano Scrobbler/3.6 (Android)');
   });
+
+  it('does not reflect malformed upstream bodies or transport error text', async () => {
+    const secret = 'PANO-RESPONSE-SECRET';
+    const options = {
+      origin: 'http://127.0.0.1:1',
+      username: 'pano-user',
+      appPassword: secret,
+      listenedAtSeconds: 1_768_478_100,
+      artist: 'Radiohead',
+      track: 'Paranoid Android',
+      durationSeconds: 215,
+      fetchImpl: async () => new Response(`not-json ${secret}`, { status: 200 }),
+    } as const;
+    await expect(runPanoLastfm(options)).rejects.toThrow('Pano Last.fm auth.getMobileSession returned invalid JSON');
+    await expect(
+      runPanoLastfm({
+        ...options,
+        fetchImpl: async () => {
+          throw new Error(`transport echoed ${secret}`);
+        },
+      }),
+    ).rejects.toThrow('Pano Last.fm auth.getMobileSession transport failed');
+    await expect(runPanoLastfm(options)).rejects.not.toThrow(secret);
+  });
 });

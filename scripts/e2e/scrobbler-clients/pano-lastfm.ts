@@ -5,6 +5,7 @@
 import { createHash } from 'node:crypto';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { fetchWithoutLeak, jsonWithoutLeak } from './safe-http';
 
 export const PANO_API_KEY = 'panoScrobbler';
 export const PANO_API_SECRET = 'panoScrobbler';
@@ -47,7 +48,7 @@ function signedForm(params: Record<string, string>): URLSearchParams {
 
 async function readJson(response: Response, method: string): Promise<unknown> {
   if (!response.ok) throw new Error(`Pano ${method} returned HTTP ${response.status}`);
-  const body = (await response.json()) as unknown;
+  const body = await jsonWithoutLeak(response, `Pano Last.fm ${method}`);
   if (body === null || typeof body !== 'object' || 'error' in body) {
     throw new Error(`Pano ${method} returned an invalid or error response`);
   }
@@ -64,6 +65,8 @@ export async function runPanoLastfm(options: PanoLastfmOptions): Promise<PanoLas
   if (endpoint.protocol !== 'http:' && endpoint.protocol !== 'https:')
     throw new TypeError('Pano origin must be HTTP(S)');
   const send = options.fetchImpl ?? fetch;
+  const request = (input: string | URL, init: RequestInit, method: string) =>
+    fetchWithoutLeak(send, input, init, `Pano Last.fm ${method}`);
 
   const authForm = signedForm({
     method: 'auth.getMobileSession',
@@ -71,14 +74,18 @@ export async function runPanoLastfm(options: PanoLastfmOptions): Promise<PanoLas
     password: options.appPassword,
   });
   const auth = (await readJson(
-    await send(endpoint, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/x-www-form-urlencoded; charset=UTF-8',
-        'user-agent': 'Pano Scrobbler/3.6 (Android)',
+    await request(
+      endpoint,
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/x-www-form-urlencoded; charset=UTF-8',
+          'user-agent': 'Pano Scrobbler/3.6 (Android)',
+        },
+        body: authForm,
       },
-      body: authForm,
-    }),
+      'auth.getMobileSession',
+    ),
     'auth.getMobileSession',
   )) as { session?: { name?: unknown; key?: unknown } };
   const session = auth.session;
@@ -94,11 +101,15 @@ export async function runPanoLastfm(options: PanoLastfmOptions): Promise<PanoLas
     sk: session.key,
   });
   const scrobble = await readJson(
-    await send(endpoint, {
-      method: 'POST',
-      headers: { 'content-type': 'application/x-www-form-urlencoded; charset=UTF-8' },
-      body: scrobbleForm,
-    }),
+    await request(
+      endpoint,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded; charset=UTF-8' },
+        body: scrobbleForm,
+      },
+      'track.scrobble',
+    ),
     'track.scrobble',
   );
 
@@ -110,11 +121,15 @@ export async function runPanoLastfm(options: PanoLastfmOptions): Promise<PanoLas
     sk: session.key,
   });
   const nowPlaying = await readJson(
-    await send(endpoint, {
-      method: 'POST',
-      headers: { 'content-type': 'application/x-www-form-urlencoded; charset=UTF-8' },
-      body: nowPlayingForm,
-    }),
+    await request(
+      endpoint,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded; charset=UTF-8' },
+        body: nowPlayingForm,
+      },
+      'track.updateNowPlaying',
+    ),
     'track.updateNowPlaying',
   );
 
@@ -131,10 +146,14 @@ export async function runPanoLastfm(options: PanoLastfmOptions): Promise<PanoLas
     extended: '1',
   });
   const recentTracks = await readJson(
-    await send(`${endpoint}?${read.toString()}`, {
-      method: 'GET',
-      headers: { 'user-agent': 'Pano Scrobbler/3.6 (Android)' },
-    }),
+    await request(
+      `${endpoint}?${read.toString()}`,
+      {
+        method: 'GET',
+        headers: { 'user-agent': 'Pano Scrobbler/3.6 (Android)' },
+      },
+      'user.getRecentTracks',
+    ),
     'user.getRecentTracks',
   );
   return { username: session.name, scrobble, nowPlaying, recentTracks };

@@ -2,7 +2,7 @@
 // check. The sample metadata and property order come from the committed capture.
 
 export type NavidromeSubmitOutcome =
-  | 'accepted'
+  | 'acknowledged'
   | 'unauthorized'
   | 'rate_limited'
   | 'unavailable'
@@ -65,17 +65,27 @@ export async function submitNavidromeListen(baseUrl: string, token: string): Pro
       method: 'POST',
       headers: {
         Authorization: `Token ${token}`,
-        'Content-Type': 'application/json',
+        'Content-Type': 'application/json; charset=UTF-8',
       },
       body,
       redirect: 'error',
     });
-    void response.body?.cancel().catch(() => undefined);
 
     if (response.status === 401) return 'unauthorized';
     if (response.status === 429) return 'rate_limited';
     if (response.status === 503) return 'unavailable';
-    return response.ok ? 'accepted' : 'rejected';
+    if (response.status !== 200) {
+      void response.body?.cancel().catch(() => undefined);
+      return 'rejected';
+    }
+    try {
+      const result = (await response.json()) as { status?: unknown };
+      // This is a protocol acknowledgement, not proof every listen was written:
+      // ListenBrainz also answers status=ok when it records an ignored listen.
+      return result !== null && typeof result === 'object' && result.status === 'ok' ? 'acknowledged' : 'rejected';
+    } catch {
+      return 'rejected';
+    }
   } catch {
     // Do not expose the URL, request headers, token, or upstream error text.
     return 'transport_error';

@@ -1,8 +1,9 @@
 // Deterministic multi-scrobbler protocol replay. The unknown public API key
 // models multi-scrobbler's deployed/custom entry; its accepted signatures are
 // deliberately fixed 32-hex test values, not credentials for a live service.
-import { request as httpRequest } from 'node:http';
+
 import type { IncomingHttpHeaders } from 'node:http';
+import { request as httpRequest } from 'node:http';
 
 export const MULTI_SCROBBLER_PUBLIC_ORIGIN = 'https://music.214510.xyz';
 const API_KEY = '0123456789abcdef0123456789abcdef';
@@ -39,32 +40,24 @@ async function request(
   const headers = Object.fromEntries(new Headers(init.headers).entries());
   headers.host = new URL(origin).host;
   const body =
-    typeof init.body === 'string'
-      ? init.body
-      : init.body instanceof URLSearchParams
-        ? init.body.toString()
-        : undefined;
+    typeof init.body === 'string' ? init.body : init.body instanceof URLSearchParams ? init.body.toString() : undefined;
   return new Promise((resolve, reject) => {
-    const request = httpRequest(
-      target,
-      { method: init.method ?? 'GET', headers },
-      (incoming) => {
-        const chunks: Buffer[] = [];
-        incoming.on('data', (chunk: Buffer) => chunks.push(Buffer.from(chunk)));
-        incoming.on('end', () => {
-          resolve(
-            new Response(Buffer.concat(chunks), {
-              status: incoming.statusCode ?? 502,
-              headers: Object.fromEntries(
-                Object.entries(incoming.headers as IncomingHttpHeaders).flatMap(([key, value]) =>
-                  typeof value === 'string' ? [[key, value]] : [],
-                ),
+    const request = httpRequest(target, { method: init.method ?? 'GET', headers }, (incoming) => {
+      const chunks: Buffer[] = [];
+      incoming.on('data', (chunk: Buffer) => chunks.push(Buffer.from(chunk)));
+      incoming.on('end', () => {
+        resolve(
+          new Response(Buffer.concat(chunks), {
+            status: incoming.statusCode ?? 502,
+            headers: Object.fromEntries(
+              Object.entries(incoming.headers as IncomingHttpHeaders).flatMap(([key, value]) =>
+                typeof value === 'string' ? [[key, value]] : [],
               ),
-            }),
-          );
-        });
-      },
-    );
+            ),
+          }),
+        );
+      });
+    });
     request.once('error', () => reject(new Error('multi-scrobbler loopback transport failed')));
     request.end(body);
   });
@@ -90,11 +83,7 @@ export async function runMultiScrobblerLastfm(
   const publicOrigin = MULTI_SCROBBLER_PUBLIC_ORIGIN;
   const transportOrigin = options.transportOrigin ?? publicOrigin;
 
-  const redirect = await request(
-    publicOrigin,
-    transportOrigin,
-    `/api/auth?api_key=${API_KEY}&cb=${CALLBACK}`,
-  );
+  const redirect = await request(publicOrigin, transportOrigin, `/api/auth?api_key=${API_KEY}&cb=${CALLBACK}`);
   const expectedLocation = `/lastfm/authorize?api_key=${API_KEY}&cb=${CALLBACK}`;
   if (redirect.status !== 302 || redirect.headers.get('location') !== expectedLocation) return fail();
 

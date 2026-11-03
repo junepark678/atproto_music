@@ -63,11 +63,11 @@ test('Navidrome posts the captured ListenBrainz request bytes to its /1/ base', 
     const request = await seen;
     const capture = await readFile(CAPTURE);
 
-    expect(outcome).toBe('accepted');
+    expect(outcome).toBe('acknowledged');
     expect(request.method).toBe('POST');
     expect(request.path).toBe('/1/submit-listens');
     expect(request.authorization).toBe('Token navidrome-test-token');
-    expect(request.contentType).toBe('application/json');
+    expect(request.contentType).toBe('application/json; charset=UTF-8');
     expect(request.body.equals(capture)).toBe(true);
   } finally {
     await closeServer(server);
@@ -101,7 +101,7 @@ test('upstream and transport failures return allowlisted outcomes without reflec
   try {
     const outcome = await submitNavidromeListen(baseUrl, token);
     expect(outcome).toBe('unavailable');
-    expect(['accepted', 'unauthorized', 'rate_limited', 'unavailable', 'rejected', 'transport_error']).toContain(
+    expect(['acknowledged', 'unauthorized', 'rate_limited', 'unavailable', 'rejected', 'transport_error']).toContain(
       outcome,
     );
     expect(JSON.stringify(outcome)).not.toContain(token);
@@ -118,5 +118,23 @@ test('upstream and transport failures return allowlisted outcomes without reflec
     expect(JSON.stringify(outcome)).not.toContain(token);
   } finally {
     await closeServer(broken.server);
+  }
+});
+
+test.each([
+  ['invalid JSON', 'not-json', 200],
+  ['error status', '{"status":"error"}', 200],
+  ['empty success', '', 200],
+  ['no-content success', '', 204],
+])('Navidrome treats %s as no valid protocol acknowledgement', async (_label, body, status) => {
+  const { server, baseUrl } = await startServer((_request, response) => {
+    response.writeHead(status, { 'Content-Type': 'application/json' });
+    response.end(body);
+  });
+
+  try {
+    expect(await submitNavidromeListen(baseUrl, 'navidrome-token')).toBe('rejected');
+  } finally {
+    await closeServer(server);
   }
 });
