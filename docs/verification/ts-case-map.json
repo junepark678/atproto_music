@@ -623,7 +623,7 @@
     },
     {
       "case": "M3.4.3/live_retries",
-      "target": "worker/test/node/http/writes.test.ts › five identical POSTs with one Idempotency-Key, two of them after the operation succeeded, return one operation and the fake PDS holds one record"
+      "target": "scripts/e2e/scrobbler-e2e.ts › five replays of one POST /api/v1/scrobbles with the same Idempotency-Key against the e2e bundle produce one operation and one PDS record"
     },
     {
       "case": "M3.4.3/live_delete",
