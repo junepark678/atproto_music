@@ -61,7 +61,7 @@ const RULES: readonly { rule: string; pattern: RegExp }[] = [
  * files name the digest (SHA-256, sha256, artifact) on the same or the
  * previous line.
  */
-const DIGEST_RECORDS: Readonly<Record<string, 'manifest' | 'labelled'>> = {
+const DIGEST_RECORDS: Readonly<Record<string, 'manifest' | 'labelled' | 'node-backend-receipt'>> = {
   'docs/VALIDATION.md': 'labelled',
   'docs/adr/0002-oauth.md': 'labelled',
   'docs/benchmarks/read_models.json': 'labelled',
@@ -71,6 +71,7 @@ const DIGEST_RECORDS: Readonly<Record<string, 'manifest' | 'labelled'>> = {
   'docs/verification/backend.md': 'labelled',
   'docs/verification/live-evidence.json': 'labelled',
   'docs/verification/backend-node.md': 'labelled',
+  'docs/verification/receipts/node-backend-14f6ee3-summary.json': 'node-backend-receipt',
 };
 const DIGEST_LABEL = /sha-?256|artifact/i;
 const MANIFEST_LINE = /^\s*"[A-Za-z0-9_./-]+\.[A-Za-z]+": "[0-9a-f]{64}",?$/;
@@ -85,6 +86,18 @@ function allowedDigest(file: string, lines: readonly string[], index: number): b
   const line = lines[index] ?? '';
   if (kind === 'manifest') return MANIFEST_LINE.test(line);
   if (kind === 'labelled') return DIGEST_LABEL.test(line) || DIGEST_LABEL.test(lines[index - 1] ?? '');
+  if (kind === 'node-backend-receipt') {
+    const declaredBundle = lines
+      .find((candidate) => /^\s*"bundleSha256"\s*:/.test(candidate))
+      ?.match(/"bundleSha256"\s*:\s*"([0-9a-f]{64})"/)?.[1];
+    if (!declaredBundle) return false;
+    const words = hex64Words(line);
+    return (
+      words.length > 0 &&
+      words.every((word) => word === declaredBundle) &&
+      (/"bundleSha256"\s*:/.test(line) || /bundle\s+[0-9a-f]{64}/i.test(line))
+    );
+  }
   return false;
 }
 
@@ -215,6 +228,20 @@ describe('scripts/test/secret-scan.test.ts', () => {
     expect(
       scanText('docs/verification/backend-production-inputs.json', `  "crates/core/src/lib.rs": "${hex}",`),
     ).toEqual([]);
+    const receiptPath = 'docs/verification/receipts/node-backend-14f6ee3-summary.json';
+    const receiptWithBundleDigest = [
+      '{',
+      `  "bundleSha256": "${hex}",`,
+      `      "message": "recorded evidence is bound to bundle ${hex}"`,
+      '}',
+    ].join('\n');
+    expect(scanText(receiptPath, receiptWithBundleDigest)).toEqual([]);
+    expect(
+      scanText(
+        receiptPath,
+        receiptWithBundleDigest.replace(`bound to bundle ${hex}`, `bound to bundle ${'a'.repeat(64)}`),
+      ).map((finding) => finding.rule),
+    ).toContain('hex-64');
     for (const [file, sample] of [
       ['docs/VALIDATION.md', `CURSOR_KEY ${hex}`],
       ['docs/adr/0002-oauth.md', `Some text\n${hex}`],
