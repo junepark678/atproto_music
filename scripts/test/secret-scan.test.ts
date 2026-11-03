@@ -72,6 +72,7 @@ const DIGEST_RECORDS: Readonly<Record<string, 'manifest' | 'labelled' | 'node-ba
   'docs/verification/live-evidence.json': 'labelled',
   'docs/verification/backend-node.md': 'labelled',
   'docs/verification/receipts/node-backend-14f6ee3-summary.json': 'node-backend-receipt',
+  'docs/verification/receipts/node-backend-8d41546-summary.json': 'node-backend-receipt',
 };
 const DIGEST_LABEL = /sha-?256|artifact/i;
 const MANIFEST_LINE = /^\s*"[A-Za-z0-9_./-]+\.[A-Za-z]+": "[0-9a-f]{64}",?$/;
@@ -228,7 +229,7 @@ describe('scripts/test/secret-scan.test.ts', () => {
     expect(
       scanText('docs/verification/backend-production-inputs.json', `  "crates/core/src/lib.rs": "${hex}",`),
     ).toEqual([]);
-    const receiptPath = 'docs/verification/receipts/node-backend-14f6ee3-summary.json';
+    const receiptPath = 'docs/verification/receipts/node-backend-8d41546-summary.json';
     const receiptWithBundleDigest = [
       '{',
       `  "bundleSha256": "${hex}",`,

@@ -24,9 +24,9 @@ confirms evidence bound to the current commit and Node bundle. It replaces
 contacts a live service.
 
 Deterministic acceptance update (2026-11-04): the full N8 gate passed on clean
-commit `14f6ee36`; its bundle SHA-256 and machine-readable summary are recorded
+commit `8d415468`; its bundle SHA-256 and machine-readable summary are recorded
 in [backend-node.md](verification/backend-node.md) and
-[the exact-head receipt](verification/receipts/node-backend-14f6ee3-summary.json).
+[the exact-head receipt](verification/receipts/node-backend-8d41546-summary.json).
 It executed 1,650 tests/records with 0 failures or skips; all 258 cases resolved
 (243 passed, 9 blocked, 6 retired). Playwright passed 13/13 and the
 process-backed scrobbler replay passed 7/7.
@@ -34,8 +34,9 @@ process-backed scrobbler replay passed 7/7.
 This deterministic pass does **not** close live acceptance: all five
 release-bound live gates (oauth, ingest, pdsCompat, ssrfProbe, socketSoak) and
 M7.4.3 `live_product` remain blocked. No live services or external providers
-were contacted. N6-02 live acceptance and broader N7 retirement remain open;
-no milestone or live gate is closed by this run.
+were contacted. N6-02 live acceptance remains open. The run also verifies the
+N7-01 disposable installation and full check without `workerd`; no milestone
+or live gate is closed by this run.
 
 Earlier failed receipts at `c2da66a+dirty`, `4a97dc1`, and the intermediate
 `838fa217` run remain historical. Their issues were addressed by subsequent
