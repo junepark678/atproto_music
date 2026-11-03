@@ -1,9 +1,8 @@
 // The host boundary of the index (ADR 0005 §2.1, §3.1, §3.3; N1-02).
 //
 // `IndexCore` (app/index-core.ts) is host-neutral: everything it needs from
-// the process around it arrives as a `Host`. The Workers wrapper
-// (do/index-do.ts) builds one from the DO's storage until N7-01; the Node
-// composition (node/compose.ts, N2-01) builds one from node:sqlite, two
+// the process around it arrives as a `Host`. The Node composition
+// (node/compose.ts, N2-01) builds one from node:sqlite, two
 // NodeAlarms (N1-03), the ws connector (N1-04) and the pinned transport
 // (N1-05).
 //

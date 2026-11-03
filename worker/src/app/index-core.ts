@@ -8,8 +8,7 @@
 // alarms, the Jetstream connector, the transport, an optional backup port,
 // the logger, the clock and the randomness. This module imports no
 // `cloudflare:*` module and no value from env.ts (worker/test/composition/
-// index-core.test.ts checks it); do/index-do.ts is the Workers wrapper until
-// N7-01 and the Node composition (node/compose.ts, N2-01) the other host.
+// index-core.test.ts checks it); the Node composition is its host.
 //
 // Life cycle:
 //  1. `new IndexCore(config, host, extensions, options)`. The identity

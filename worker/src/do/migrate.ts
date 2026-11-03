@@ -4,9 +4,9 @@
 // and ledger row commits or none does. `schema_migrations` replaces PRAGMA
 // user_version.
 //
-// Targets. `migrate` runs over a `MigrationTarget {exec, tx}`: the Node `Db`
-// (worker/src/node/sqlite-db.ts) is one. The Durable Object storage overload
-// (`sql` + `transactionSync`) is kept for index-do.ts until N7-01.
+// Targets. Production uses the Node `MigrationTarget {exec, tx}` facade
+// (worker/src/node/sqlite-db.ts). The old test-only DO harness overload will
+// be removed with the cloudflare:* shim in N7-01.
 //
 // Compatibility rule (ADR 0005 §3.2). Code at version n opening a database at
 // version m > n reads `schema_compat.min_compatible_version` (when that table
