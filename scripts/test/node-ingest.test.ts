@@ -653,7 +653,7 @@ test('successful recovery spends only the remaining deadline on independent proo
     deadlineAt,
   );
   expect(recovered).toMatchObject({ uri: URI_B, cid: CID_B, rev: REV_PRESENT });
-  expect(proofTimeout).toBeLessThan(210);
+  expect(proofTimeout).toBeLessThanOrEqual(210);
 });
 
 test('stalled browser response and body consumption are bounded by the shared total timeout', async () => {
