@@ -195,6 +195,40 @@ deterministic acceptance; that earlier receipt remains useful stack history.
 
 ## Exact-head N8 acceptance run
 
+### Current runtime-retirement stack (2026-11-04)
+
+Ran `bash scripts/acceptance/node-backend.sh --out
+/tmp/node-backend-current-14f6ee3` from a clean checkout at commit
+`14f6ee36ff0859c82def2f424cf9853b44c50e84`. The gate exited **0**. Its
+Node bundle SHA-256 was
+`562dae10fc41620efa0ebe398b6a8be1e7e840a682d50c19f211621ab16f5e55`.
+The gate summary is preserved in
+[node-backend-14f6ee3-summary.json](receipts/node-backend-14f6ee3-summary.json)
+(SHA-256 `f3f1ef658ceb041490ad3ea26cd6f3b57b928c02edd489aebf4021a503613c42`).
+
+| Step | Result |
+| --- | --- |
+| check-ts | PASS: 1,147 tests; 639s |
+| Node tests | PASS: 438 tests |
+| Playwright | PASS: 13 tests; 75s |
+| Scrobbler protocol replay | PASS: 7 records; 14s |
+| Python regressions | PASS: 45 tests; 26s |
+| Node bundle guard | PASS |
+| Full case-map validation | PASS |
+| Goldens | PASS |
+| systemd unit verification | PASS |
+| Live no-environment controls | PASS as refusal checks |
+| Live inventory verification | BLOCKED: no current release-bound live evidence |
+
+Totals: **1,650 tests/records passed, 0 failed or skipped**; all 258 cases
+resolved (243 passed, 9 blocked, 6 retired); all five production live gates
+remain blocked. The 9 blocked cases include the live product requirement.
+The runner's live step exiting 0 means the inventory is correctly classified
+as blocked, not that a live gate passed. No live services or external
+providers were contacted.
+
+The previous exact-head run below is retained as stack history.
+
 Ran `bash scripts/acceptance/node-backend.sh --out /tmp/node-backend-final-af4a3ef`
 from a clean checkout at commit
 `af4a3ef6bf5c60923abe87bcb5aa48f1d8770f67` on 2026-11-03. The gate exited

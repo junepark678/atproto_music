@@ -23,13 +23,13 @@ confirms evidence bound to the current commit and Node bundle. It replaces
 `scripts/acceptance/node-interim.sh` as the gate from wave 8 on and never
 contacts a live service.
 
-Deterministic acceptance update (2026-11-03): the full N8 gate passed on clean
-commit `af4a3ef`; its bundle SHA-256 and full
-step receipt are recorded in [backend-node.md](verification/backend-node.md).
-It executed 1,614 tests/records with 0 failures; all 258 cases resolved (243
-passed, 9 blocked, 6 retired). Playwright passed 13/13 and the process-backed
-scrobbler replay passed 7/7. See [backend-node.md](verification/backend-node.md)
-for the complete exact-head run record.
+Deterministic acceptance update (2026-11-04): the full N8 gate passed on clean
+commit `14f6ee36`; its bundle SHA-256 and machine-readable summary are recorded
+in [backend-node.md](verification/backend-node.md) and
+[the exact-head receipt](verification/receipts/node-backend-14f6ee3-summary.json).
+It executed 1,650 tests/records with 0 failures or skips; all 258 cases resolved
+(243 passed, 9 blocked, 6 retired). Playwright passed 13/13 and the
+process-backed scrobbler replay passed 7/7.
 
 This deterministic pass does **not** close live acceptance: all five
 release-bound live gates (oauth, ingest, pdsCompat, ssrfProbe, socketSoak) and
@@ -40,7 +40,8 @@ no milestone or live gate is closed by this run.
 Earlier failed receipts at `c2da66a+dirty`, `4a97dc1`, and the intermediate
 `838fa217` run remain historical. Their issues were addressed by subsequent
 mapping, retirement, and timing fixes; the clean full run above is the current
-deterministic acceptance result.
+deterministic acceptance result. The prior `af4a3ef` run remains recorded as
+history in [backend-node.md](verification/backend-node.md).
 
 Historical Workers receipt follows; nothing below is a current Node statement.
 
