@@ -1101,7 +1101,8 @@ async function panoReadShapesCase(
       if (response.status !== 200) throw new Error('Pano read returned a non-success status');
       return replayObject(await response.json());
     };
-    const common = { method: 'user.getRecentTracks', user: alice.did, sk: 'n8-pano-shape-session' };
+    const client = await runPanoLastfm({ origin, username: alice.handle, appPassword: 'unused', listenedAtSeconds: 1768474800, artist: 'Shape', track: 'Seed', durationSeconds: 200, fetchImpl: send });
+    const common = { method: 'user.getRecentTracks', sk: client.sessionKey };
     phase = 'empty-page';
     const empty = replayObject((await read({ ...common, from: '2000000000', page: '2' })).recenttracks);
     counts.push(Array.isArray(empty.track) ? empty.track.length : -1);
@@ -1115,7 +1116,7 @@ async function panoReadShapesCase(
     if (!Array.isArray(one.track) || one.track.length !== 1) throw new Error('single Pano read shape failed');
     if (!Array.isArray(many.track) || many.track.length < 2) throw new Error('many Pano read shape failed');
     phase = 'user-info';
-    const info = await read({ method: 'user.getInfo', user: alice.did, sk: 'n8-pano-shape-session' });
+    const info = await read({ method: 'user.getInfo', sk: client.sessionKey });
     const user = replayObject(info.user);
     userInfoShape = `keys=${Object.keys(user).sort().join(',')};name=${String(user.name)};url=${String(user.url)};counts=${typeof user.playcount},${typeof user.artist_count},${typeof user.track_count}`;
     if (
