@@ -195,7 +195,40 @@ deterministic acceptance; that earlier receipt remains useful stack history.
 
 ## Exact-head N8 acceptance runs
 
-### Latest runtime-retirement stack (2026-11-04, commit `dabaabf`)
+### Current combined integration run (2026-11-04, commit `4322f5d`)
+
+Ran `bash scripts/acceptance/node-backend.sh --out
+work/acceptance/final-node-integration-rerun` from a clean checkout at commit
+`4322f5db7b80d0638eaa8ead1df916893e7763b1`. The gate exited **0**. Its Node
+bundle SHA-256 was
+`ef40a8efe971bd02481f6759430497bbcef8d92848feba80e88ad6bf34b72d06`. The
+machine-readable summary is preserved in
+[node-backend-4322f5d-summary.json](receipts/node-backend-4322f5d-summary.json)
+(SHA-256
+`1f518362ed61725bcc386bce3ee0fffe30b68ecb6345c8008367db44711da488`).
+
+| Step | Result |
+| --- | --- |
+| check-ts | PASS: 1,187 tests; includes disposable install and full no-workerd check |
+| Node tests | PASS: 439 tests |
+| Playwright | PASS: 14 tests |
+| Scrobbler protocol replay | PASS: 7 records |
+| Python regressions | PASS: 45 tests |
+| Node bundle guard | PASS |
+| Full case-map validation | PASS: all 258 entries resolved |
+| Goldens | PASS |
+| systemd unit verification | PASS |
+| Live no-environment controls | PASS as refusal checks |
+| Live inventory verification | BLOCKED: no release-bound live evidence |
+
+Totals: **1,692 tests/records passed, 0 failed or skipped**; all 258 cases
+resolved (243 passed, 9 blocked, 6 retired); all five production live gates
+remain blocked. The 9 blocked cases include the M7.4.3 live-product requirement.
+No live services or external providers were contacted. This run exercises the
+current SSRF, socket-soak and dev-env OAuth fixtures, but does not establish
+production observations for those gates.
+
+### Previous runtime-retirement stack (2026-11-04, commit `dabaabf`)
 
 Ran `bash scripts/acceptance/node-backend.sh --out work/acceptance/node-backend-final-dabaabf`
 from a clean checkout at commit
