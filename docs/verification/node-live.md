@@ -88,7 +88,14 @@ The Node SSRF probe driver is ported. `npx tsx scripts/live/ssrf_probe.ts
 --emit-probe` emits a host-side probe using the production pinned transport;
 running the emitted probe is an explicit operator action and makes network
 requests to the configured controlled names and private-address literals. The
-gate validates the recorded result offline. Its required inputs are
+runner writes its detailed result to a newly created owner-only (`0600`) local
+file. That private artifact contains the controlled hostnames, exact probe
+target URLs, and DNS answer addresses needed for offline validation. Treat it
+as sensitive operational data: do not publish it or commit it. The runner's
+console and the schema-v3 gate evidence contain only an allowlisted summary;
+they exclude probe target URLs, hostnames, addresses, response bodies, headers,
+and raw exception messages. The common evidence envelope still includes the
+configured public origin. Its required inputs are
 `ATMUSIC_LIVE_SSRF_HOSTS` (`label=host` pairs for `rfc1918`, `loopback`, and
 `metadata`) and `ATMUSIC_LIVE_SSRF_PROBE_RESULT` (absolute result-file path),
 along with the common Node release identity and origin/prefix. The no-input

@@ -4,12 +4,17 @@
 // primitives. Nothing here opens a socket or resolves a name.
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { duplexPair } from 'node:stream';
 import { fileURLToPath } from 'node:url';
-import { DEFAULT_PINNED_CAPS, pinnedTransport, unpinnedFetchStub } from '@atmusic/worker/node/pinned-transport';
+import {
+  DEFAULT_PINNED_CAPS,
+  pinnedTransport,
+  TransportError,
+  unpinnedFetchStub,
+} from '@atmusic/worker/node/pinned-transport';
 import { afterAll, describe, expect, test } from 'vitest';
 import { NODE_ENV, NODE_EXIT_CODES, type NodeGateIO, runNodeGate } from '../live/node-live-gate.ts';
 import {
@@ -23,10 +28,12 @@ import {
   type ProbeResult,
   parseHosts,
   parseProbeArgs,
+  probeResultExitCode,
   probeTargets,
   probeTargetsFor,
   SSRF_ENV,
   spec,
+  writePrivateProbeResult,
 } from '../live/ssrf_probe.ts';
 
 const REPO = resolve(fileURLToPath(new URL('../..', import.meta.url)));
@@ -166,7 +173,7 @@ describe('scripts/live/ssrf_probe.ts › --emit-probe', () => {
   test('refuses a directory outside the repository and a malformed invocation', () => {
     const outside = spawnDriver(['--emit-probe', join(scratch, 'elsewhere')], liveEnvUnset());
     expect(outside.status).not.toBe(0);
-    expect(outside.stderr).toContain('inside the repository');
+    expect(outside.stderr).toContain('probe script could not be emitted');
     expect(existsSync(join(scratch, 'elsewhere', 'probe.ts'))).toBe(false);
 
     const usage = spawnDriver(['--emit-probe', 'a', 'b'], liveEnvUnset());
@@ -176,6 +183,38 @@ describe('scripts/live/ssrf_probe.ts › --emit-probe', () => {
     const unknown = spawnDriver(['--emit-worker'], liveEnvUnset());
     expect(unknown.status).toBe(2);
     expect(unknown.stderr).toContain('unknown arguments');
+  });
+
+  test('malformed runner arguments cannot echo unknown option values and do not open a socket', () => {
+    const dir = `work/ssrf-probe-args-${process.pid}`;
+    const abs = resolve(REPO, dir);
+    rmSync(abs, { recursive: true, force: true });
+    try {
+      expect(spawnDriver(['--emit-probe', dir], liveEnvUnset()).status).toBe(0);
+      const probe = resolve(abs, 'probe.ts');
+      const secret = 'synthetic-private-argument-secret';
+      // The generated runner is invoked with its untrusted arguments below.
+      const malformed = spawnSync(
+        process.execPath,
+        ['--import=tsx', '--import', trapPath, probe, `--unknown=${secret}`],
+        { env: liveEnvUnset(), encoding: 'utf8', timeout: 60_000, cwd: REPO },
+      );
+      expect(malformed.status).toBe(2);
+      expect(malformed.stdout).not.toContain(secret);
+      expect(malformed.stderr).not.toContain(secret);
+      expect(malformed.stderr).toContain('invalid probe arguments');
+      expect(malformed.stderr).not.toContain('network call during emission');
+    } finally {
+      rmSync(abs, { recursive: true, force: true });
+    }
+  });
+
+  test('private result writer creates an owner-only file and refuses replacement', () => {
+    const path = join(scratch, 'private-result.json');
+    writePrivateProbeResult(path, '{"safe":true}\n');
+    expect(readFileSync(path, 'utf8')).toBe('{"safe":true}\n');
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+    expect(() => writePrivateProbeResult(path, '{}')).toThrow();
   });
 });
 
@@ -485,6 +524,46 @@ describe('scripts/live/ssrf_probe.ts › probeTargets', () => {
     expect(outcome?.safeFetch).toEqual({ outcome: 'unpinned_fetch', code: 'unpinned_fetch' });
   });
 
+  test('arbitrary transport exceptions are reduced to fixed diagnostics', async () => {
+    const secret = 'synthetic-network-error-secret';
+    let invoked = false;
+    const transport: import('@atmusic/atproto/transport').Transport = async () => {
+      invoked = true;
+      throw Object.assign(new Error(`connection failed with ${secret}`), { code: secret });
+    };
+    const [outcome] = await probeTargets(
+      [{ label: 'rfc1918', host: 'rfc1918.probe.example.org', kind: 'controlledName' }],
+      { transport },
+    );
+    expect(invoked).toBe(true);
+    expect(outcome?.safeFetch).toEqual({ outcome: 'error', code: 'unknown' });
+    expect(outcome?.raw[0]?.message).toBe('request failed with an unclassified error');
+    expect(JSON.stringify(outcome)).not.toContain(secret);
+
+    const transportSecret = 'synthetic-transport-reason-secret';
+    const [transportFailure] = await probeTargets(
+      [{ label: 'rfc1918', host: 'rfc1918.probe.example.org', kind: 'controlledName' }],
+      {
+        transport: async () => {
+          throw new TransportError('connect', `private details ${transportSecret}`, { reason: transportSecret });
+        },
+      },
+    );
+    expect(transportFailure?.safeFetch).toEqual({ outcome: 'connect', code: 'connect' });
+    expect(transportFailure?.raw[0]?.message).toBe('connection did not complete');
+    expect(JSON.stringify(transportFailure)).not.toContain(transportSecret);
+
+    const dnsSecret = 'synthetic-dns-detail-secret';
+    const dnsNet = fakeNet(() => Promise.reject(Object.assign(new Error(dnsSecret), { code: dnsSecret })));
+    const dnsFailure = await probeOne(
+      { label: 'rfc1918', host: 'rfc1918.probe.example.org', kind: 'controlledName' },
+      dnsNet,
+    );
+    expect(dnsFailure.safeFetch).toEqual({ outcome: 'dns', code: 'dns' });
+    expect(dnsFailure.resolved.error).toBe('unknown');
+    expect(JSON.stringify(dnsFailure)).not.toContain(dnsSecret);
+  });
+
   test('builds one controlled-name target per host plus the three literals', () => {
     const targets = probeTargetsFor(parseHosts(HOSTS));
     expect(targets.map((t) => `${t.kind}:${t.label}:${t.host}`)).toEqual([
@@ -526,7 +605,7 @@ function recordedResult(mutate: (result: ProbeResult) => void = () => undefined)
             url: `https://${target.host}/`,
             outcome: 'refused',
             code,
-            message: `destination refused: ${code}`,
+            message: 'destination refused by transport policy',
             elapsedMs: 1,
           },
         ],
@@ -581,6 +660,9 @@ describe('scripts/live/ssrf_probe.ts › gate body', () => {
     expect(doc.results.targets[0].raw[0]).toEqual({ outcome: 'refused', code: 'private_answer', elapsedMs: 1 });
     expect(doc.results.targets[0].raw[0]).not.toHaveProperty('message');
     expect(doc.results.targets[0].raw[0]).not.toHaveProperty('url');
+    expect(doc.results.targets[0].target).not.toHaveProperty('host');
+    expect(JSON.stringify(doc.results)).not.toContain('rfc1918.probe.example.org');
+    expect(JSON.stringify(doc.results)).not.toContain('10.1.2.3');
   });
 
   test.each([
@@ -627,7 +709,7 @@ describe('scripts/live/ssrf_probe.ts › gate body', () => {
           classes: ['rfc1918', 'public'],
         };
       },
-      'every address must be rfc1918',
+      'address classes do not match the required label class',
     ],
     [
       'no resolved addresses',
@@ -641,7 +723,7 @@ describe('scripts/live/ssrf_probe.ts › gate body', () => {
       (r: ProbeResult) => {
         r.targets.pop();
       },
-      'literal:metadata:169.254.169.254 is not in the probe result',
+      'expected target 6 is missing',
     ],
     [
       'foreign target',
@@ -651,7 +733,7 @@ describe('scripts/live/ssrf_probe.ts › gate body', () => {
           target: { label: 'rfc1918', host: 'other.example.org', kind: 'controlledName' },
         });
       },
-      'target is not configured',
+      'target identity is not configured',
     ],
     [
       'empty raw',
@@ -725,7 +807,6 @@ describe('scripts/live/ssrf_probe.ts › gate body', () => {
     const result = recordedResult() as ProbeResult & { attackerField?: string };
     result.attackerField = 'synthetic-secret';
     (result.targets[0] as ProbeOutcome & { secret?: string }).secret = 'synthetic-secret';
-    (result.targets[0] as ProbeOutcome).raw[0]!.message = 'diagnostic synthetic-secret';
     const run = await runGateWith(result);
     expect(run.code).toBe(NODE_EXIT_CODES.blocked);
     expect(run.stdout).not.toContain('synthetic-secret');
@@ -733,6 +814,14 @@ describe('scripts/live/ssrf_probe.ts › gate body', () => {
     expect(doc.results.targets[0]).not.toHaveProperty('secret');
     expect(doc.results.targets[0].raw[0]).not.toHaveProperty('message');
     expect(doc.results).not.toHaveProperty('attackerField');
+
+    const malformedDiagnostic = recordedResult();
+    malformedDiagnostic.targets[0]!.raw[0]!.message = 'diagnostic synthetic-secret';
+    const rejected = await runGateWith(malformedDiagnostic);
+    expect(rejected.code).toBe(NODE_EXIT_CODES.failed);
+    expect(rejected.stdout).not.toContain('synthetic-secret');
+    expect(rejected.stderr).not.toContain('synthetic-secret');
+    expect(rejected.evidence).not.toContain('synthetic-secret');
   });
 
   test('malformed address strings fail without being copied into evidence', async () => {
@@ -775,6 +864,26 @@ describe('scripts/live/ssrf_probe.ts › gate body', () => {
 
   test('checkProbeResult rejects a non-object', () => {
     expect(checkProbeResult(null, parseHosts(HOSTS), ORIGIN)).toEqual(['probe result is not a JSON object']);
+  });
+
+  test('the emitted runner exit code requires complete validation of every target and address class', () => {
+    const valid = recordedResult();
+    expect(probeResultExitCode(valid, parseHosts(HOSTS), ORIGIN)).toBe(0);
+
+    const wrongClass = recordedResult((result) => {
+      const target = result.targets[0] as ProbeOutcome;
+      target.resolved = { addresses: ['127.0.0.1'], classes: ['loopback'] };
+    });
+    expect(probeResultExitCode(wrongClass, parseHosts(HOSTS), ORIGIN)).toBe(1);
+
+    const mixed = recordedResult((result) => {
+      const target = result.targets[0] as ProbeOutcome;
+      target.resolved = {
+        addresses: ['10.1.2.3', '93.184.216.34'],
+        classes: ['rfc1918', 'public'],
+      };
+    });
+    expect(probeResultExitCode(mixed, parseHosts(HOSTS), ORIGIN)).toBe(1);
   });
 });
 
