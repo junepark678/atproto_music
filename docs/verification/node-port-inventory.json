@@ -1965,7 +1965,9 @@
         "parseConfig namespace gate"
       ],
       "title": "shipped wrangler.jsonc carries the decided origin and prefix in every env and passes parseConfig",
-      "kept": true
+      "replaced": "scripts/test/gen-config.test.ts › Node defaults come from the example env and only headers are emitted",
+      "package": "N7-01",
+      "reason": "N7-01 retires worker/wrangler.jsonc as the shipped configuration (ADR 0005 §15.3); the Node host is configured from config/atmusic.env.example, whose decided defaults are asserted by the replacement test."
     },
     {
       "id": "worker/test/config.test.ts › parseConfig namespace gate › rejects malformed vars with the field names",
@@ -2350,21 +2352,27 @@
       "file": "worker/test/ingest/ingest-mode.test.ts",
       "ancestors": [],
       "title": "pulse mode drains to tail then closes; off mode never connects",
-      "kept": true
+      "replaced": "worker/test/composition/index-core-node.test.ts › IndexCore on the Node host runs Jetstream socket mode through the ws connector to a loopback server and re-arms the alarm after a throwing tick",
+      "package": "N7-01",
+      "reason": "N7-01 deleted the pulse ingest mode (ADR 0005 §15.3); the Node host runs the resident socket mode only, asserted by the replacement test."
     },
     {
       "id": "worker/test/ingest/ingest-mode.test.ts › a pulse that receives no event leaves lagSeconds null and the last successful pulse more than two intervals ago reports stale",
       "file": "worker/test/ingest/ingest-mode.test.ts",
       "ancestors": [],
       "title": "a pulse that receives no event leaves lagSeconds null and the last successful pulse more than two intervals ago reports stale",
-      "kept": true
+      "replaced": "worker/test/composition/index-core-node.test.ts › IndexCore on the Node host runs Jetstream socket mode through the ws connector to a loopback server and re-arms the alarm after a throwing tick",
+      "package": "N7-01",
+      "reason": "N7-01 deleted the pulse ingest mode and its lag and stale reporting (ADR 0005 §15.3); the Node host runs the resident socket mode only, asserted by the replacement test."
     },
     {
       "id": "worker/test/ingest/ingest-mode.test.ts › quiet pulses longer than lookback do not trigger gap recovery; a quiet pulse after an outage confirms nothing; a real disconnect gap still does",
       "file": "worker/test/ingest/ingest-mode.test.ts",
       "ancestors": [],
       "title": "quiet pulses longer than lookback do not trigger gap recovery; a quiet pulse after an outage confirms nothing; a real disconnect gap still does",
-      "kept": true
+      "replaced": "worker/test/composition/index-core-node.test.ts › IndexCore on the Node host runs Jetstream socket mode through the ws connector to a loopback server and re-arms the alarm after a throwing tick",
+      "package": "N7-01",
+      "reason": "N7-01 deleted the pulse ingest mode and its quiet-pulse gap handling (ADR 0005 §15.3); the Node host runs the resident socket mode only, asserted by the replacement test."
     },
     {
       "id": "worker/test/ingest/jetstream-socket.test.ts › jetstream socket › subscribe URL has kinds=commit and the three collections only",
