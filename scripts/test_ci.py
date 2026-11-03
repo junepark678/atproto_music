@@ -3,7 +3,6 @@
 import hashlib
 import os
 from pathlib import Path
-import re
 import shutil
 import subprocess
 import tempfile
@@ -21,7 +20,7 @@ def require(condition, message):
 def expect_failure(command, directory):
     result = subprocess.run(
         command, cwd=directory, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        env={**os.environ, "CARGO_TARGET_DIR": str(ROOT / "target" / "ci-negative"),
+        env={**os.environ, "CARGO_TARGET_DIR": str(Path(directory) / "target"),
              "CARGO_PROFILE_DEV_DEBUG": "0", "CARGO_PROFILE_TEST_DEBUG": "0",
              "CARGO_PROFILE_DEV_INCREMENTAL": "false", "CARGO_PROFILE_TEST_INCREMENTAL": "false"},
     )
@@ -39,10 +38,8 @@ def main():
         shutil.copytree(
             ROOT,
             copy,
-            ignore=shutil.ignore_patterns(".git", "node_modules", "target", "work", "__pycache__"),
+            ignore=shutil.ignore_patterns(".git", "target", "work", "__pycache__", "node_modules", ".venv"),
         )
-        if (ROOT / "node_modules").is_dir():
-            (copy / "node_modules").symlink_to(ROOT / "node_modules", target_is_directory=True)
         source = copy / "crates/server/tests/scaffold.rs"
         source.write_bytes(original + b"\nfn intentionally_unformatted(){let _value=1;}\n")
         expect_failure(["cargo", "fmt", "--all", "--check"], copy)
@@ -53,14 +50,15 @@ def main():
         require(marker in text, "readiness assertion to invert is missing")
         source.write_text(text.replace(marker, "assert_eq!(status, 504);", 1))
         output = expect_failure(
-            ["bash", "scripts/check.sh"], copy
+            ["cargo", "test", "--locked", "-p", "atmusic-server", "--test", "scaffold"], copy
         )
-        plain_output = re.sub(r"\x1b\[[0-9;]*m", "", output)
-        require(executed_tests(plain_output) >= 1, "negative readiness test executed no tests")
         require(
-            "liveness_does_not_claim_readiness ... FAILED" in plain_output,
-            "inverted readiness assertion was not the observed test failure",
+            executed_tests(output) >= 4,
+            "negative readiness test did not execute router tests; "
+            f"disposable check output:\n{output[-6000:]}",
         )
+        require("liveness_does_not_claim_readiness ... FAILED" in output,
+                "inverted readiness assertion was not the observed test failure")
         print("PASS ci_assertion_failure: inverted readiness assertion fails the executed suite")
 
     require(hashlib.sha256(scaffold.read_bytes()).digest() == digest,
