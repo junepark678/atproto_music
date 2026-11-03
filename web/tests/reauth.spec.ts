@@ -42,15 +42,17 @@ test('same-account OAuth reauthentication in a popup preserves the scrobble draf
   await expect(page.locator('.session-identity .did')).toHaveText(alice.did, { timeout: 30_000 });
   await expect(page.getByRole('link', { name: 'Return to your saved scrobble draft' })).toBeVisible();
   await expect.poll(() => popup.isClosed(), { timeout: 30_000 }).toBe(true);
+  // A same-tab reload is not required for the popup flow, but the app keeps
+  // this nonsecret draft in tab-scoped storage so an interrupted reload does
+  // not discard the user's work.
+  await page.reload();
+  await expect(page.locator('.session-identity .did')).toHaveText(alice.did, { timeout: 30_000 });
+  await expect(page.getByRole('link', { name: 'Return to your saved scrobble draft' })).toBeVisible();
   await page.getByRole('link', { name: 'Return to your saved scrobble draft' }).click();
   await expect(page.locator('input[name="artist"]')).toHaveValue('Draft Artist');
   await expect(page.locator('input[name="track"]')).toHaveValue('Draft Track');
   expect(refusedWrite).toBe(true);
-  expect(
-    await page.evaluate(() =>
-      Array.from({ length: sessionStorage.length }, (_, index) =>
-        sessionStorage.getItem(sessionStorage.key(index) ?? ''),
-      ).join('\n'),
-    ),
-  ).not.toContain('Draft Artist');
+  const persistedDraft = await page.evaluate(() => sessionStorage.getItem('atmusic:scrobble-draft'));
+  expect(persistedDraft).toContain('Draft Artist');
+  expect(persistedDraft).not.toContain('csrf');
 });

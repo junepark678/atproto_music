@@ -12,6 +12,7 @@ export interface Session {
 export class SessionClient {
   #csrfToken: string | null = null;
   #current: Session | null = null;
+  #published: Session | null = null;
   #reauthRequired = false;
   #onChange: (session: Session | null, reauthRequired: boolean) => void;
   #listeners = new Set<(session: Session | null, reauthRequired: boolean) => void>();
@@ -133,25 +134,25 @@ export class SessionClient {
       current.did,
     );
     if (!response.ok && response.status !== 401) throw new Error(`Sign out failed (${response.status})`);
-    if (response.status !== 401) {
-      const latest = this.#current;
+    if (response.status === 401 || response.ok) {
+      const newerCurrent = this.#current !== null && this.#current.did !== current.did;
+      const newerPublished = this.#published !== null && this.#published.did !== current.did;
       this.#sessionReadGeneration++;
-      if (latest === null || latest.did === current.did) {
-        // `refresh()` clears the internal cache while keeping the last
-        // published identity in the UI. Do not publish another anonymous
-        // transition until the reconciliation read confirms there is no
-        // account; doing so could erase a newer account's draft.
-        if (latest !== null) this.#set(null, false);
-        else this.#reauthRequired = false;
-        // A refresh may have been reading the same account while the logout
-        // completed. Discard that response, then reconcile the cookie once so
-        // a genuinely newer account is restored instead of being erased.
-        try {
-          await this.getSession();
-        } catch {
-          // The server accepted sign-out; keep the local session cleared until
-          // a later explicit refresh if reconciliation is temporarily offline.
-        }
+      if (!newerCurrent && !newerPublished) {
+        // Clear the visible session immediately. A pending refresh may have
+        // cleared #current without publishing; leaving the published session
+        // in place would keep authenticated controls visible if reconciliation
+        // then fails.
+        this.#set(null, false);
+      }
+      // Invalidate any read that started while logout was pending, then
+      // reconcile the cookie. This matters when a refresh has cleared the
+      // internal cache while the UI still publishes a newer account.
+      try {
+        await this.getSession();
+      } catch {
+        // The server accepted or rejected the old session; keep the local
+        // state cleared (or the newer account preserved) until a later read.
       }
     }
   }
@@ -165,6 +166,7 @@ export class SessionClient {
     )
       this.#sessionRevision++;
     this.#current = session;
+    this.#published = session;
     this.#csrfToken = session?.csrfToken ?? null;
     this.#reauthRequired = reauth;
     this.#onChange(session, reauth);

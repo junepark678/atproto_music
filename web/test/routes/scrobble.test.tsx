@@ -28,7 +28,10 @@ const operation = {
 };
 const uri = `at://${session.did}/com.example.atmusic.scrobble/r01`;
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.unstubAllGlobals();
+  sessionStorage.removeItem('atmusic:scrobble-draft');
+});
 describe('web/test/routes/scrobble.test.tsx', () => {
   it('invalid input shows field errors and does not create a scrobble operation', async () => {
     const outbox = new OutboxService(session, 'com.example.atmusic');
@@ -136,7 +139,8 @@ describe('web/test/routes/scrobble.test.tsx', () => {
     await outbox.stop();
   });
 
-  it('shows sign-in after a 401, then restores the in-memory draft with a fresh write intent after reauthentication', async () => {
+  it('restores the same-account draft after reauthentication and app recreation with a fresh write intent', async () => {
+    sessionStorage.removeItem('atmusic:scrobble-draft');
     sessionClient().unauthorized();
     const keys: string[] = [];
     let sessionReads = 0;
@@ -219,12 +223,9 @@ describe('web/test/routes/scrobble.test.tsx', () => {
       artist.dispatchEvent(new Event('input', { bubbles: true }));
       track.value = 'Draft Track';
       track.dispatchEvent(new Event('input', { bubbles: true }));
-      expect(sessionStorage.getItem('atmusic:scrobble-draft')).toBeNull();
-      expect(
-        Array.from({ length: sessionStorage.length }, (_, index) =>
-          sessionStorage.getItem(sessionStorage.key(index) ?? ''),
-        ).join('\n'),
-      ).not.toContain('Draft Artist');
+      const persistedDraft = sessionStorage.getItem('atmusic:scrobble-draft');
+      expect(persistedDraft).toContain('Draft Artist');
+      expect(persistedDraft).not.toContain(session.csrfToken);
       root.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
 
       await vi.waitFor(() => expect(root.textContent).toContain('Sign in to publish scrobbles'));
@@ -237,9 +238,8 @@ describe('web/test/routes/scrobble.test.tsx', () => {
         values: expect.objectContaining({ artist: 'Draft Artist', track: 'Draft Track' }),
       });
 
-      // This is the same signal sent by the OAuth callback page after its
-      // full-page redirect. The parent tab refreshes its cookie session while
-      // retaining the draft in memory.
+      // The callback in the separate OAuth context signals the parent tab to
+      // refresh its cookie session. The nonsecret draft remains tab-local.
       announceSessionReady();
       await vi.waitFor(() => expect(root.querySelector('input[name="artist"]')).not.toBeNull());
       expect(root.querySelector<HTMLInputElement>('input[name="artist"]')?.value).toBe('Draft Artist');
@@ -251,6 +251,7 @@ describe('web/test/routes/scrobble.test.tsx', () => {
         expect(writeCount).toBe(2);
         expect(state.scrobbleDraft.value).toBeNull();
       });
+      expect(sessionStorage.getItem('atmusic:scrobble-draft')).toBeNull();
       expect(keys[0]).toBeTruthy();
       expect(keys[1]).toBeTruthy();
       expect(keys[1]).not.toBe(keys[0]);

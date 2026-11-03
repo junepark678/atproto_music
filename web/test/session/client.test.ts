@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { bootstrapSession } from '../../src/session/bootstrap';
 import { type Session, SessionClient, sessionClient, sessionFetch } from '../../src/session/client';
-import { listenForSessionReady } from '../../src/session/reauth-channel';
+import { finishReauthPopup, listenForSessionReady, REAUTH_POPUP_MARKER } from '../../src/session/reauth-channel';
 import { createAppState, setScrobbleDraft, setSession } from '../../src/state/store';
 
 const sources = import.meta.glob<string>('../../src/**/*.{ts,tsx,js,jsx}', {
@@ -20,6 +20,52 @@ const dto: Session = {
 };
 
 describe('web/test/session/client.test.ts', () => {
+  it('only announces and closes the marked reauthentication popup, not a normal bootstrap', () => {
+    const announce = vi.fn();
+    const close = vi.fn();
+    sessionStorage.removeItem(REAUTH_POPUP_MARKER);
+    expect(finishReauthPopup(sessionStorage, announce, close)).toBe(false);
+    expect(announce).not.toHaveBeenCalled();
+    expect(close).not.toHaveBeenCalled();
+    sessionStorage.setItem(REAUTH_POPUP_MARKER, '1');
+    expect(finishReauthPopup(sessionStorage, announce, close)).toBe(true);
+    expect(announce).toHaveBeenCalledOnce();
+    expect(close).toHaveBeenCalledOnce();
+    expect(sessionStorage.getItem(REAUTH_POPUP_MARKER)).toBeNull();
+    expect(finishReauthPopup(sessionStorage, announce, close)).toBe(false);
+  });
+
+  it('restores only the same account draft after the app state is recreated', () => {
+    sessionStorage.removeItem('atmusic:scrobble-draft');
+    const values = {
+      artist: 'Draft Artist',
+      track: 'Draft Track',
+      album: '',
+      listenedAt: '2026-01-15T12:00:00Z',
+      durationSeconds: '',
+      recordingMbid: '',
+    };
+    const firstApp = createAppState();
+    setSession(firstApp, dto);
+    setScrobbleDraft(firstApp, values);
+    expect(sessionStorage.getItem('atmusic:scrobble-draft')).toContain('Draft Artist');
+    expect(sessionStorage.getItem('atmusic:scrobble-draft')).not.toContain(dto.csrfToken);
+
+    const reloadedApp = createAppState();
+    setSession(reloadedApp, dto);
+    expect(reloadedApp.scrobbleDraft.value).toEqual({
+      did: dto.did,
+      revision: 1,
+      values,
+    });
+
+    const other = { ...dto, did: 'did:plc:bbbbbbbbbbbbbbbbbbbbbbbb' as Session['did'] };
+    const otherApp = createAppState();
+    setSession(otherApp, other);
+    expect(otherApp.scrobbleDraft.value).toBeNull();
+    expect(sessionStorage.getItem('atmusic:scrobble-draft')).toBeNull();
+  });
+
   it('keeps the reauthentication flag when the initial bootstrap restores an expired session', async () => {
     const reauth = { ...dto, handle: null, status: 'reauth_required' as const };
     const state = createAppState();
@@ -118,6 +164,57 @@ describe('web/test/session/client.test.ts', () => {
     expect(state.session.value).toBeNull();
     expect(state.reauthRequired.value).toBe(false);
     expect(state.scrobbleDraft.value).toBeNull();
+  });
+
+  it('clears reauthentication state after logout returns 401', async () => {
+    const reauth = { ...dto, handle: null, status: 'reauth_required' as const };
+    const state = createAppState();
+    const values = {
+      artist: 'Draft Artist',
+      track: 'Draft Track',
+      album: '',
+      listenedAt: '2026-01-15T12:00:00Z',
+      durationSeconds: '',
+      recordingMbid: '',
+    };
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json(reauth))
+      .mockResolvedValueOnce(new Response(null, { status: 401 }))
+      .mockResolvedValueOnce(new Response(null, { status: 401 }));
+    const client = new SessionClient({
+      fetch: fetcher,
+      onChange: (session, reauthRequired) => setSession(state, session, null, { reauthRequired }),
+    });
+    await client.getSession();
+    setScrobbleDraft(state, values);
+
+    await client.logout();
+
+    expect(state.session.value).toBeNull();
+    expect(state.reauthRequired.value).toBe(false);
+    expect(state.scrobbleDraft.value).toBeNull();
+    expect(sessionStorage.getItem('atmusic:scrobble-draft')).toBeNull();
+  });
+
+  it('does not keep the published session when logout reconciliation fails', async () => {
+    const state = createAppState();
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json(dto))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockRejectedValueOnce(new TypeError('offline'));
+    const client = new SessionClient({
+      fetch: fetcher,
+      onChange: (session, reauthRequired) => setSession(state, session, null, { reauthRequired }),
+    });
+    await client.getSession();
+
+    await expect(client.logout()).resolves.toBeUndefined();
+
+    expect(client.current()).toBeNull();
+    expect(state.session.value).toBeNull();
+    expect(state.reauthRequired.value).toBe(false);
   });
 
   it('refreshes a cached expired session on focus when BroadcastChannel is unavailable', async () => {
@@ -284,6 +381,41 @@ describe('web/test/session/client.test.ts', () => {
     expect(client.current()).toEqual(bob);
     expect(state.session.value).toEqual(bob);
     expect(state.scrobbleDraft.value).toEqual({ did: bob.did, revision: 1, values });
+  });
+
+  it('does not let a late 401 logout for one account clear a newer account', async () => {
+    let resolveLogout!: (response: Response) => void;
+    const pendingLogout = new Promise<Response>((resolve) => (resolveLogout = resolve));
+    const bob = { ...dto, did: 'did:plc:bbbbbbbbbbbbbbbbbbbbbbbb' as Session['did'], csrfToken: 'bob-csrf' };
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json(dto))
+      .mockImplementationOnce(() => pendingLogout)
+      .mockResolvedValueOnce(Response.json(bob));
+    const state = createAppState();
+    const client = new SessionClient({
+      fetch: fetcher,
+      onChange: (session, reauthRequired) => setSession(state, session, null, { reauthRequired }),
+    });
+    await client.getSession();
+    const logout = client.logout();
+    await expect(client.refresh()).resolves.toEqual(bob);
+    const values = {
+      artist: 'Bob Draft',
+      track: 'Draft Track',
+      album: '',
+      listenedAt: '2026-01-15T12:00:00Z',
+      durationSeconds: '',
+      recordingMbid: '',
+    };
+    setScrobbleDraft(state, values);
+
+    resolveLogout(new Response(null, { status: 401 }));
+    await logout;
+
+    expect(client.current()).toEqual(bob);
+    expect(state.session.value).toEqual(bob);
+    expect(state.scrobbleDraft.value?.values).toEqual(values);
   });
 
   it('does not let an authenticated GET 401 from the previous account clear a newer session', async () => {

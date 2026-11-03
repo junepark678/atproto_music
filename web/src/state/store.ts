@@ -33,7 +33,7 @@ export interface AppState {
   readonly api: ApiClient;
   /** The signed-in cookie BFF session, or null when anonymous. */
   readonly session: Signal<Session | null>;
-  /** Non-secret scrobble form values kept in memory across a reauthentication. */
+  /** Non-secret scrobble form values retained across same-tab reauthentication. */
   readonly scrobbleDraft: Signal<ScrobbleDraft | null>;
   /** The session DID's verified handle (from /api/v1/resolve or the profile), when known. */
   readonly handle: Signal<Handle | null>;
@@ -51,6 +51,65 @@ export interface AppState {
 }
 
 const draftRevision = new WeakMap<AppState, number>();
+const DRAFT_STORAGE_KEY = 'atmusic:scrobble-draft';
+
+function readStoredDraft(): ScrobbleDraft | null {
+  try {
+    const raw = sessionStorage.getItem(DRAFT_STORAGE_KEY);
+    if (raw === null) return null;
+    const value: unknown = JSON.parse(raw);
+    if (typeof value !== 'object' || value === null) {
+      sessionStorage.removeItem(DRAFT_STORAGE_KEY);
+      return null;
+    }
+    const draft = value as Partial<ScrobbleDraft>;
+    const values = draft.values as Partial<ScrobbleDraftValues> | undefined;
+    if (
+      typeof draft.did !== 'string' ||
+      typeof draft.revision !== 'number' ||
+      !Number.isInteger(draft.revision) ||
+      draft.revision < 1 ||
+      values === undefined ||
+      typeof values.artist !== 'string' ||
+      typeof values.track !== 'string' ||
+      typeof values.album !== 'string' ||
+      typeof values.listenedAt !== 'string' ||
+      typeof values.durationSeconds !== 'string' ||
+      typeof values.recordingMbid !== 'string'
+    ) {
+      sessionStorage.removeItem(DRAFT_STORAGE_KEY);
+      return null;
+    }
+    return {
+      did: draft.did,
+      revision: draft.revision,
+      values: {
+        artist: values.artist,
+        track: values.track,
+        album: values.album,
+        listenedAt: values.listenedAt,
+        durationSeconds: values.durationSeconds,
+        recordingMbid: values.recordingMbid,
+      },
+    };
+  } catch {
+    try {
+      sessionStorage.removeItem(DRAFT_STORAGE_KEY);
+    } catch {
+      // Storage may be unavailable; ignore malformed persisted data.
+    }
+    return null;
+  }
+}
+
+function writeStoredDraft(draft: ScrobbleDraft | null): void {
+  try {
+    if (draft === null) sessionStorage.removeItem(DRAFT_STORAGE_KEY);
+    else sessionStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify(draft));
+  } catch {
+    // Draft persistence is best-effort; the in-memory form remains usable.
+  }
+}
 
 export function createAppState(options: { api?: ApiClient } = {}): AppState {
   const session = signal<Session | null>(null);
@@ -90,9 +149,26 @@ export function setSession(
   options: { reauthRequired?: boolean } = {},
 ): void {
   const reauthRequired = options.reauthRequired ?? false;
-  const draft = state.scrobbleDraft.value;
-  if ((session === null && !reauthRequired) || (session !== null && draft !== null && draft.did !== session.did)) {
+  let draft = state.scrobbleDraft.value;
+  if (session === null && !reauthRequired) {
     state.scrobbleDraft.value = null;
+    writeStoredDraft(null);
+  } else if (session !== null) {
+    if (draft !== null && draft.did !== session.did) {
+      draft = null;
+      state.scrobbleDraft.value = null;
+      writeStoredDraft(null);
+    }
+    if (draft === null) {
+      const stored = readStoredDraft();
+      if (stored?.did === session.did) {
+        draft = stored;
+        state.scrobbleDraft.value = stored;
+        draftRevision.set(state, stored.revision);
+      } else if (stored !== null) {
+        writeStoredDraft(null);
+      }
+    }
   }
   state.session.value = session;
   state.handle.value = session ? handle : null;
@@ -105,11 +181,14 @@ export function setScrobbleDraft(state: AppState, values: ScrobbleDraftValues): 
   if (did === undefined) return;
   const revision = (draftRevision.get(state) ?? 0) + 1;
   draftRevision.set(state, revision);
-  state.scrobbleDraft.value = { did, revision, values: { ...values } };
+  const draft = { did, revision, values: { ...values } };
+  state.scrobbleDraft.value = draft;
+  writeStoredDraft(draft);
 }
 
 export function clearScrobbleDraft(state: AppState): void {
   state.scrobbleDraft.value = null;
+  writeStoredDraft(null);
 }
 
 export const AppStateContext = createContext<AppState | null>(null);
