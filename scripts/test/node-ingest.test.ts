@@ -39,16 +39,20 @@ const goodEnv: Record<string, string> = {
   [NODE_INGEST_ENV.appPasswordB]: 'pds-b-app-password-test',
 };
 
-function makeContext(failures: string[] = [], cleanup: string[] = []): NodeGateContext {
+function makeContext(
+  failures: string[] = [],
+  cleanup: string[] = [],
+  env: Record<string, string> = goodEnv,
+): NodeGateContext {
   return {
-    env: goodEnv,
+    env,
     get: (name) => {
-      const value = goodEnv[name];
+      const value = env[name];
       if (!value) throw new Error(`missing ${name}`);
       return value;
     },
-    origin: goodEnv[NODE_ENV.origin]!,
-    lexiconPrefix: goodEnv[NODE_ENV.prefix]!,
+    origin: env[NODE_ENV.origin]!,
+    lexiconPrefix: env[NODE_ENV.prefix]!,
     log: () => undefined,
     fail: (message) => failures.push(message),
     cleanup: (message) => cleanup.push(message),
@@ -101,7 +105,13 @@ function assertVerifierPairing(body: Awaited<ReturnType<typeof runNodeIngest>>, 
     results: {
       perPds: [
         { endpoint: goodEnv[ENV.pdsA], getRecordExclusion: true },
-        { endpoint: goodEnv[ENV.pdsB], getRecordExclusion: true },
+        {
+          endpoint: goodEnv[ENV.pdsB],
+          getRecordExclusion:
+            ((body.results.deleteReconcile as Array<{ via: string; method: string }> | undefined) ?? []).find(
+              (entry) => entry.via === 'pdsB',
+            )?.method === 'exclusionProof',
+        },
       ],
     },
   };
@@ -122,11 +132,39 @@ function assertVerifierPairing(body: Awaited<ReturnType<typeof runNodeIngest>>, 
   expect(JSON.parse(output)).toEqual({ status: 'passed', problems: [], pairing: [] });
 }
 
-function mockDependencies(options: { failLocalDelete?: boolean } = {}) {
+function mockDependencies(
+  options: {
+    failLocalDelete?: boolean;
+    operationStates?: string[];
+    losePdsCreateResponse?: boolean;
+    loseAppCreateResponse?: boolean;
+    pdsReadAbsent?: boolean;
+    losePdsDeleteResponse?: boolean;
+    loseAppDeleteResponse?: boolean;
+    snapshotPdsB?: boolean;
+    staleAbsence?: boolean;
+    wrongPdsCid?: boolean;
+    wrongPdsCreateUri?: boolean;
+    mismatchIdentity?: boolean;
+    stallStatus?: boolean;
+    malformedAppAck?: boolean;
+  } = {},
+) {
   const recordStates = new Map<string, string>();
+  let externalUri = URI_B;
+  let operationPolls = 0;
+  let appCreatePosts = 0;
+  let appDeletePosts = 0;
+  let pdsDeletePosts = 0;
+  let pdsRecord: object | null = null;
   const browserCalls = { launched: 0, closed: 0, contextClosed: 0 };
-  const browserRequests: Array<{ path: string; method: string; csrf?: string; extraHeaders?: Record<string, string> }> =
-    [];
+  const browserRequests: Array<{
+    path: string;
+    method: string;
+    body?: unknown;
+    csrf?: string;
+    extraHeaders?: Record<string, string>;
+  }> = [];
   const state = { localDeleteFailed: false };
   let currentUrl = 'about:blank';
   const locator = (label = '') => ({
@@ -142,6 +180,7 @@ function mockDependencies(options: { failLocalDelete?: boolean } = {}) {
     first: vi.fn(() => locator(label)),
   });
   const page = {
+    close: vi.fn(async () => undefined),
     goto: vi.fn(async (url: string) => {
       currentUrl = url;
     }),
@@ -160,27 +199,29 @@ function mockDependencies(options: { failLocalDelete?: boolean } = {}) {
         args: { path: string; method: string; body?: unknown; csrf?: string; extraHeaders?: Record<string, string> },
       ) => {
         const { path, method, body } = args;
-        browserRequests.push({ path, method, csrf: args.csrf, extraHeaders: args.extraHeaders });
+        browserRequests.push({ path, method, body, csrf: args.csrf, extraHeaders: args.extraHeaders });
         if (path === '/api/v1/auth/session')
           return { status: 200, json: { did: DID_A, csrfToken: 'csrf-session-value' } };
         if (path === '/api/v1/scrobbles' && method === 'POST') {
+          appCreatePosts++;
+          if (options.loseAppCreateResponse && appCreatePosts === 1) throw new Error('response lost after app commit');
+          if (options.malformedAppAck && appCreatePosts === 1) return { status: 202, json: { operation: {} } };
           return { status: 202, json: { operation: { id: 'local-create' } } };
         }
         if (path.endsWith('/local-create')) {
+          const state = options.operationStates?.[operationPolls++] ?? 'succeeded';
           return {
             status: 200,
             json: {
-              operation: {
-                id: 'local-create',
-                state: 'succeeded',
-                uri: URI_A,
-                cid: CID_A,
-                updatedAt: '2026-11-03T00:00:00.000Z',
-              },
+              id: 'local-create',
+              state,
+              ...(state === 'succeeded' ? { uri: URI_A, cid: CID_A } : {}),
+              updatedAt: '2026-11-03T00:00:00.000Z',
             },
           };
         }
         if (path.includes('/records/status?')) {
+          if (options.stallStatus) return new Promise<never>(() => {});
           const uri = new URL(path, goodEnv[NODE_ENV.origin]).searchParams.get('uri')!;
           return {
             status: 200,
@@ -192,17 +233,19 @@ function mockDependencies(options: { failLocalDelete?: boolean } = {}) {
           };
         }
         if (path.startsWith('/api/v1/scrobbles/') && method === 'DELETE') {
+          appDeletePosts++;
           if (options.failLocalDelete) {
             state.localDeleteFailed = true;
             return { status: 503, json: { error: 'temporary failure' } };
           }
           recordStates.set(URI_A, 'absent');
+          if (options.loseAppDeleteResponse) throw new Error('app delete response lost after commit');
           return { status: 202, json: { operation: { id: 'local-delete' } } };
         }
         if (path.endsWith('/local-delete')) {
           return {
             status: 200,
-            json: { operation: { id: 'local-delete', state: 'succeeded', updatedAt: '2026-11-03T00:00:00.000Z' } },
+            json: { id: 'local-delete', state: 'succeeded', updatedAt: '2026-11-03T00:00:00.000Z' },
           };
         }
         throw new Error(`unexpected browser request ${method} ${path} with ${JSON.stringify(body)}`);
@@ -227,39 +270,68 @@ function mockDependencies(options: { failLocalDelete?: boolean } = {}) {
       return browser as unknown as Browser;
     },
     pdsInfo: async (endpoint, implementation) => ({ endpoint, implementation, version: '1.2.3' }),
-    httpJson: vi.fn(async (url: string | URL) => {
+    httpJson: vi.fn(async (url: string | URL, init?: { body?: unknown }) => {
       const path = new URL(url).pathname;
       if (path.endsWith('com.atproto.server.createSession'))
         return { status: 200, headers: new Headers(), json: { did: DID_B, accessJwt: 'unused-test-jwt' } };
       if (path.endsWith('com.atproto.repo.createRecord')) {
-        recordStates.set(URI_B, 'indexed');
-        return { status: 200, headers: new Headers(), json: { uri: URI_B, cid: CID_B, commit: { rev: REV_PRESENT } } };
+        const request = init?.body as { repo: string; collection: string; rkey: string; record: object };
+        externalUri = `at://${request.repo}/${request.collection}/${request.rkey}`;
+        pdsRecord = request.record;
+        recordStates.set(externalUri, 'indexed');
+        if (options.losePdsCreateResponse) throw new Error('socket reset after remote commit');
+        return {
+          status: 200,
+          headers: new Headers(),
+          json: {
+            uri: options.wrongPdsCreateUri ? `at://${DID_B}/org.atproto.music.scrobble/2zzzzzzzzzzzz` : externalUri,
+            cid: CID_B,
+            commit: { rev: REV_PRESENT },
+          },
+        };
       }
+      if (path.endsWith('com.atproto.repo.getRecord'))
+        if (options.pdsReadAbsent) return { status: 404, headers: new Headers(), json: null };
+      if (path.endsWith('com.atproto.repo.getRecord'))
+        return {
+          status: 200,
+          headers: new Headers(),
+          json: { uri: externalUri, cid: CID_B, value: pdsRecord },
+        };
       if (path.endsWith('com.atproto.repo.deleteRecord')) {
-        recordStates.set(URI_B, 'absent');
+        pdsDeletePosts++;
+        recordStates.set(externalUri, 'absent');
+        if (options.losePdsDeleteResponse) throw new Error('PDS delete response lost after commit');
         return { status: 200, headers: new Headers(), json: { commit: { rev: REV_ABSENT } } };
       }
       throw new Error(`unexpected PDS request ${path}`);
     }),
     verifyRecordAt: vi.fn(async (did) => ({
       state: 'present' as const,
-      cid: did === DID_A ? CID_A : CID_B,
+      cid: did === DID_A ? CID_A : options.wrongPdsCid ? CID_A : CID_B,
       rev: REV_PRESENT,
       commitCid: CID_A,
       pds: did === DID_A ? goodEnv[ENV.pdsA]! : goodEnv[ENV.pdsB]!,
     })),
-    verifyAbsent: vi.fn(async (_did, _collection, _rkey, opts) => ({
-      method: 'exclusionProof' as const,
-      rev: REV_ABSENT,
-      commitCid: CID_B,
-      pds: goodEnv[ENV.pdsB]!,
-      after: opts?.after,
-    })),
+    verifyAbsent: vi.fn(async (did, _collection, _rkey, opts) => {
+      if (options.failLocalDelete && did === DID_A) throw new Error('record still present');
+      const snapshot = options.snapshotPdsB && did === DID_B;
+      return {
+        method: snapshot ? ('snapshot' as const) : ('exclusionProof' as const),
+        ...(snapshot ? { exclusionProofUnavailable: 'MethodNotImplemented', keysEnumerated: 3 } : {}),
+        rev: options.staleAbsence ? REV_PRESENT : REV_ABSENT,
+        commitCid: CID_B,
+        pds: did === DID_A ? goodEnv[ENV.pdsA]! : goodEnv[ENV.pdsB]!,
+        after: opts?.after,
+      };
+    }),
     now: () => new Date('2026-11-03T00:00:02.000Z'),
     sleep: async () => undefined,
-    checkIdentityPds: async () => undefined,
+    checkIdentityPds: async (did) => {
+      if (options.mismatchIdentity && did === DID_B) throw new Error('identity PDS mismatch');
+    },
   };
-  return { deps, browserCalls, browserRequests, state };
+  return { deps, browserCalls, browserRequests, state, deletePosts: () => ({ appDeletePosts, pdsDeletePosts }) };
 }
 
 test('zero-network preflight blocks and names missing Node inputs', async () => {
@@ -278,6 +350,29 @@ test('zero-network preflight blocks and names missing Node inputs', async () => 
   expect(run).not.toHaveBeenCalled();
 });
 
+test.each([undefined, '', '60'])(
+  'harness accepts omitted, empty, or valid optional ingest timeout (%s)',
+  async (value) => {
+    const { deps } = mockDependencies();
+    const env = { ...goodEnv };
+    if (value === undefined) delete env[NODE_INGEST_ENV.timeoutSeconds];
+    else env[NODE_INGEST_ENV.timeoutSeconds] = value;
+    const capture = ioCapture();
+    const ingestSpec = { ...spec, run: (context: NodeGateContext) => runNodeIngest(context, deps) };
+    expect(await runNodeGate(ingestSpec, env, capture.io)).toBe(0);
+    expect((JSON.parse(capture.output().stdout) as { result: string }).result).toBe('passed');
+  },
+);
+
+test.each(['bad', '0', '-1', '3601'])('invalid ingest timeout %s blocks before invoking the body', async (value) => {
+  const run = vi.fn(async () => ({ pds: [], subjects: [], results: {} }));
+  const capture = ioCapture();
+  expect(await runNodeGate({ ...spec, run }, { ...goodEnv, [NODE_INGEST_ENV.timeoutSeconds]: value }, capture.io)).toBe(
+    2,
+  );
+  expect(run).not.toHaveBeenCalled();
+});
+
 test('importing the driver is inert', () => {
   const moduleUrl = pathToFileURL(resolve(REPO, 'scripts/live/node_ingest_check.ts')).href;
   const result = spawnSync(process.execPath, [TSX, '-e', `void import(${JSON.stringify(moduleUrl)})`], {
@@ -292,7 +387,9 @@ test('importing the driver is inert', () => {
 });
 
 test('mocked app UI and PDS flow emits verifier-compatible CID and absence fields', async () => {
-  const { deps, browserCalls, browserRequests } = mockDependencies();
+  const { deps, browserCalls, browserRequests } = mockDependencies({
+    operationStates: ['queued', 'running', 'succeeded'],
+  });
   const failures: string[] = [];
   const cleanup: string[] = [];
   const result = await runNodeIngest(makeContext(failures, cleanup), deps);
@@ -300,8 +397,8 @@ test('mocked app UI and PDS flow emits verifier-compatible CID and absence field
   expect(failures).toEqual([]);
   expect(result.pds).toHaveLength(2);
   expect(result.subjects).toEqual([
-    { did: DID_A, uri: URI_A },
-    { did: DID_B, uri: URI_B },
+    expect.objectContaining({ did: DID_A, uri: URI_A, unresolved: false }),
+    expect.objectContaining({ did: DID_B, uri: expect.stringMatching(/^at:\/\//) }),
   ]);
   expect(result.results.localPublish).toMatchObject({
     cid: CID_A,
@@ -320,12 +417,12 @@ test('mocked app UI and PDS flow emits verifier-compatible CID and absence field
   });
   expect(result.results.deleteReconcile).toEqual([
     expect.objectContaining({ uri: URI_A, via: 'app', absentVerified: true, method: 'exclusionProof' }),
-    expect.objectContaining({ uri: URI_B, via: 'pdsB', absentVerified: true, method: 'exclusionProof' }),
+    expect.objectContaining({ via: 'pdsB', absentVerified: true, method: 'exclusionProof' }),
   ]);
   expect(cleanup).toEqual(
     expect.arrayContaining([
       `${URI_A} deleted and reconciled absent (app)`,
-      `${URI_B} deleted and reconciled absent (pdsB)`,
+      expect.stringMatching(/deleted and reconciled absent \(pdsB\)$/),
     ]),
   );
   expect(browserCalls).toEqual({ launched: 1, closed: 1, contextClosed: 1 });
@@ -352,6 +449,166 @@ test('mocked app UI and PDS flow emits verifier-compatible CID and absence field
   assertVerifierPairing(result, cleanup);
 });
 
+test.each(['failed', 'cancelled', 'blocked'])(
+  'terminal operation state %s fails promptly and retains unresolved intent',
+  async (state) => {
+    const { deps } = mockDependencies({ operationStates: [state] });
+    const failures: string[] = [];
+    const cleanup: string[] = [];
+    const result = await runNodeIngest(makeContext(failures, cleanup), deps);
+
+    expect(failures).toContain('Node ingest failed during app scrobble operation');
+    expect(result.subjects[0]).toMatchObject({ did: DID_A, uri: null, unresolved: true, operationId: 'local-create' });
+  },
+);
+
+test('committed PDS create with a lost response is recovered by key, verified, conditionally deleted, and still fails', async () => {
+  const { deps } = mockDependencies({ losePdsCreateResponse: true });
+  const failures: string[] = [];
+  const cleanup: string[] = [];
+  const result = await runNodeIngest(makeContext(failures, cleanup), deps);
+
+  expect(failures).toContain('Node ingest failed during PDS B scrobble submission');
+  expect(deps.httpJson).toHaveBeenCalledWith(
+    expect.any(URL),
+    expect.objectContaining({ body: expect.objectContaining({ swapRecord: CID_B }) }),
+  );
+  expect(result.subjects[1]).toMatchObject({ did: DID_B, unresolved: false });
+  expect(cleanup.some((line) => line.includes('deleted and reconciled absent (pdsB)'))).toBe(true);
+});
+
+test('PDS create URI mismatch is rejected and cleanup only uses the preallocated key after digest proof', async () => {
+  const { deps } = mockDependencies({ wrongPdsCreateUri: true });
+  const failures: string[] = [];
+  const cleanup: string[] = [];
+  const result = await runNodeIngest(makeContext(failures, cleanup), deps);
+
+  expect(failures).toContain('Node ingest failed during PDS B scrobble submission');
+  expect(deps.httpJson).toHaveBeenCalledWith(
+    expect.any(URL),
+    expect.objectContaining({ body: expect.objectContaining({ swapRecord: CID_B }) }),
+  );
+  expect(result.subjects[1]).toMatchObject({ did: DID_B, unresolved: false });
+});
+
+test('lost app acknowledgement replays the exact idempotency key and payload for cleanup', async () => {
+  const { deps, browserRequests } = mockDependencies({ loseAppCreateResponse: true });
+  const failures: string[] = [];
+  const cleanup: string[] = [];
+  const result = await runNodeIngest(makeContext(failures, cleanup), deps);
+
+  expect(failures).toContain('Node ingest failed during app scrobble submission');
+  const posts = browserRequests.filter((request) => request.path === '/api/v1/scrobbles' && request.method === 'POST');
+  expect(posts).toHaveLength(2);
+  expect(posts[0]?.extraHeaders).toEqual(posts[1]?.extraHeaders);
+  expect(posts[0]?.body).toEqual(posts[1]?.body);
+  expect(result.subjects[0]).toMatchObject({ did: DID_A, uri: URI_A, unresolved: false });
+});
+
+test('malformed app acknowledgement is recovered through the original idempotency key', async () => {
+  const { deps, browserRequests } = mockDependencies({ malformedAppAck: true });
+  const failures: string[] = [];
+  const cleanup: string[] = [];
+  const result = await runNodeIngest(makeContext(failures, cleanup), deps);
+
+  expect(failures).toContain('Node ingest failed during app scrobble submission');
+  const posts = browserRequests.filter((request) => request.path === '/api/v1/scrobbles' && request.method === 'POST');
+  expect(posts).toHaveLength(2);
+  expect(posts[0]?.extraHeaders).toEqual(posts[1]?.extraHeaders);
+  expect(posts[0]?.body).toEqual(posts[1]?.body);
+  expect(result.subjects[0]).toMatchObject({ did: DID_A, uri: URI_A, unresolved: false });
+});
+
+test('PDS absence after an ambiguous create remains unresolved and is never treated as clean', async () => {
+  const { deps } = mockDependencies({ losePdsCreateResponse: true, pdsReadAbsent: true });
+  const failures: string[] = [];
+  const cleanup: string[] = [];
+  const result = await runNodeIngest(makeContext(failures, cleanup), deps);
+
+  expect(failures).toContain('Node ingest failed during PDS B scrobble submission');
+  expect(failures).toContain(
+    'PDS B create remains unresolved after an absence observation; a delayed commit is still possible',
+  );
+  expect(deps.httpJson).not.toHaveBeenCalledWith(
+    expect.any(URL),
+    expect.objectContaining({ body: expect.objectContaining({ swapRecord: expect.any(String) }) }),
+  );
+  expect(result.subjects[1]).toMatchObject({ did: DID_B, unresolved: true, uri: expect.stringMatching(/^at:\/\//) });
+});
+
+test('PDS delete response loss is reconciled without replaying the conditional delete', async () => {
+  const { deps, deletePosts } = mockDependencies({ losePdsDeleteResponse: true });
+  const failures: string[] = [];
+  const cleanup: string[] = [];
+  const result = await runNodeIngest(makeContext(failures, cleanup), deps);
+
+  expect(failures).toContain('Node ingest failed during PDS B delete reconciliation');
+  expect(deletePosts().pdsDeletePosts).toBe(1);
+  expect(result.subjects[1]).toMatchObject({ did: DID_B, unresolved: false });
+});
+
+test('app delete response loss is reconciled without submitting a second DELETE', async () => {
+  const { deps, deletePosts } = mockDependencies({ loseAppDeleteResponse: true });
+  const failures: string[] = [];
+  const cleanup: string[] = [];
+  const result = await runNodeIngest(makeContext(failures, cleanup), deps);
+
+  expect(failures).toContain('Node ingest failed during app delete reconciliation');
+  expect(deletePosts().appDeletePosts).toBe(1);
+  expect(result.subjects[0]).toMatchObject({ did: DID_A, unresolved: false });
+});
+
+test('mixed PDS exclusion and snapshot methods remain paired to their own operators', async () => {
+  const { deps } = mockDependencies({ snapshotPdsB: true });
+  const failures: string[] = [];
+  const cleanup: string[] = [];
+  const result = await runNodeIngest(makeContext(failures, cleanup), deps);
+
+  expect(failures).toEqual([]);
+  expect((result.results.deleteReconcile as Array<Record<string, unknown>>)[1]).toMatchObject({
+    via: 'pdsB',
+    method: 'snapshot',
+    exclusionProofUnavailable: 'MethodNotImplemented',
+    keysEnumerated: 3,
+  });
+  assertVerifierPairing(result, cleanup);
+});
+
+test('stale absence revisions remain unresolved without replaying either delete', async () => {
+  const { deps, deletePosts } = mockDependencies({ staleAbsence: true });
+  const failures: string[] = [];
+  const cleanup: string[] = [];
+  const result = await runNodeIngest(makeContext(failures, cleanup), deps);
+
+  expect(failures.length).toBeGreaterThan(0);
+  expect(deletePosts()).toEqual({ appDeletePosts: 1, pdsDeletePosts: 1 });
+  expect(result.subjects.every((subject) => subject.unresolved)).toBe(true);
+});
+
+test('PDS CID mismatch fails acceptance and identity/PDS mismatch blocks before browser launch', async () => {
+  const mismatch = mockDependencies({ wrongPdsCid: true });
+  const failures: string[] = [];
+  await runNodeIngest(makeContext(failures, []), mismatch.deps);
+  expect(failures).toContain('Node ingest failed during PDS B scrobble indexing');
+
+  const identity = mockDependencies({ mismatchIdentity: true });
+  const identityFailures: string[] = [];
+  await runNodeIngest(makeContext(identityFailures, []), identity.deps);
+  expect(identityFailures).toContain('Node ingest failed during PDS identity checks');
+  expect(identity.browserCalls.launched).toBe(0);
+});
+
+test('stalled browser response and body consumption are bounded by the shared total timeout', async () => {
+  const { deps, browserCalls } = mockDependencies({ stallStatus: true });
+  const failures: string[] = [];
+  const env = { ...goodEnv, [NODE_INGEST_ENV.timeoutSeconds]: '1' };
+  await runNodeIngest(makeContext(failures, [], env), deps);
+
+  expect(failures).toContain('Node ingest failed during app scrobble indexing');
+  expect(browserCalls.closed).toBe(1);
+  expect(browserCalls.contextClosed).toBe(1);
+});
+
 test('cleanup failure marks the URI left behind and fails the gate', async () => {
   const { deps, state } = mockDependencies({ failLocalDelete: true });
   const failures: string[] = [];
@@ -359,10 +616,13 @@ test('cleanup failure marks the URI left behind and fails the gate', async () =>
   const result = await runNodeIngest(makeContext(failures, cleanup), deps);
 
   expect(state.localDeleteFailed).toBe(true);
-  expect(failures.some((failure) => failure.includes('DELETE /api/v1/scrobbles'))).toBe(true);
-  expect(cleanup).toContain(`${URI_A} LEFT BEHIND: delete and reconcile manually`);
+  expect(failures).toContain('Node ingest failed during app delete reconciliation');
+  expect(failures).toContain(`delete outcome remains unresolved for ${URI_A}`);
+  expect(cleanup).toContain(
+    `${URI_A} LEFT BEHIND: delete outcome is uncertain; reconcile without replaying the mutation`,
+  );
   expect(result.subjects).toEqual([
-    { did: DID_A, uri: URI_A },
-    { did: DID_B, uri: URI_B },
+    expect.objectContaining({ did: DID_A, uri: URI_A, unresolved: true }),
+    expect.objectContaining({ did: DID_B, uri: expect.stringMatching(/^at:\/\//) }),
   ]);
 });

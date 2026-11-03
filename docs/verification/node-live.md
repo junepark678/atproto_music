@@ -149,3 +149,27 @@ variable name, and make no network request. No gate contacts Last.fm or
 ListenBrainz. No Node live acceptance has been recorded. Confidential-client
 OAuth interop, SSRF probe, and Node soak remain deferred; full N6-02 and M6
 live acceptance stay open.
+
+## Node ingest timeout and recovery semantics
+
+`npx tsx scripts/live/node_ingest_check.ts` accepts an optional
+`ATMUSIC_LIVE_INGEST_TIMEOUT_S` from 1 through 3600 seconds (default 300). This
+is one total monotonic budget for the run. The driver reserves part of that
+budget for ambiguous-write recovery, conditional cleanup, and browser teardown;
+requests and poll calls use the remaining phase budget.
+
+The app scrobble request is frozen with its original idempotency key before it
+is sent. If its acknowledgement is lost or malformed, recovery replays that
+same payload and key, then polls the returned operation DTO. The direct PDS B
+write uses one preallocated TID and one create request. An ambiguous response
+is resolved only by reading that exact key, comparing canonical record digests,
+and independently verifying the CID. Cleanup uses `swapRecord` with the
+verified CID. An absence observation while a create may still commit remains
+unresolved; the driver does not replay the create or treat that observation as
+cleanup proof. HTTP 202 for a delete is only acceptance: the operation and a
+newer independently verified absence are required for reconciliation.
+
+Unresolved operations and subjects are recorded in `results` and make the
+gate fail. Browser errors are represented by fixed phase names; shared Node
+evidence output strips URL credentials, query strings, and fragments before
+writing stdout, stderr, or the evidence file.
