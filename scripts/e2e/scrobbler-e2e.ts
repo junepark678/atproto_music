@@ -1141,9 +1141,12 @@ async function socketDeliveryDisabledControl(
   if (!bob) throw new Error('negative-control account missing');
   const runtimeDir = mkdtempSync(join(tmpdir(), 'atmusic-n8-socket-off-'));
   let disabled: BundleProcess | null = null;
+  let stage = 'bundle-start';
   try {
     disabled = await BundleProcess.start(fakes, runtimeDir, distDir, await freeLoopbackPort(), 'off');
+    stage = 'signin';
     const session = await signIn(fakes, disabled, bob);
+    stage = 'write-acknowledgement';
     const response = await session.jar.request('/api/v1/scrobbles', {
       method: 'POST',
       headers: {
@@ -1161,6 +1164,7 @@ async function socketDeliveryDisabledControl(
     if (response.status !== 202) throw new Error('negative-control write was not accepted');
     const operationId = replayString(replayObject(replayObject(await response.json()).operation).id);
     let succeeded = false;
+    stage = 'operation-settlement';
     for (let attempt = 0; attempt < 30; attempt++) {
       await disabled.pump(1000);
       const operation = replayObject(await (await session.jar.request(`/api/v1/operations/${operationId}`)).json());
@@ -1171,6 +1175,7 @@ async function socketDeliveryDisabledControl(
       if (operation.state === 'failed' || operation.state === 'cancelled') break;
     }
     if (!succeeded) throw new Error('negative-control PDS write did not settle');
+    stage = 'pds-index-separation';
     const pdsRecords = await fakes.listRecords(bob.did, `${E2E_PREFIX}.scrobble`);
     const pdsCommitted = pdsRecords.some(({ value }) => value.track === 'PDS Only Control');
     const inspect = await disabled.inspect();
@@ -1182,6 +1187,8 @@ async function socketDeliveryDisabledControl(
     if (!pdsCommitted || indexed || mode !== 'off' || cursor !== null)
       throw new Error('socket-disabled control did not isolate PDS writes from indexed reads');
     return { pdsCommitted, indexed, mode, cursor };
+  } catch (error) {
+    throw new Error(`socket negative control failed during ${stage} (${safeErrorName(error)})`);
   } finally {
     await disabled?.close().catch(() => undefined);
     rmSync(runtimeDir, { recursive: true, force: true });
@@ -1203,6 +1210,7 @@ async function forwardingCase(
   let lastfmCount = -1;
   let listenbrainzCount = -1;
   let socketControl = 'not-run';
+  let socketControlError = 'none';
   try {
     const alice = fakes.accounts.find((account) => account.name === 'alice');
     if (!alice) throw new Error('fixture account missing');
@@ -1291,7 +1299,17 @@ async function forwardingCase(
     )
       throw new Error('accepted listen was not forwarded exactly once per service');
     phase = 'socket-delivery-negative-control';
-    const negativeControl = await socketDeliveryDisabledControl(fakes, join(outDir, 'dist'));
+    let negativeControl: Awaited<ReturnType<typeof socketDeliveryDisabledControl>>;
+    try {
+      negativeControl = await socketDeliveryDisabledControl(fakes, join(outDir, 'dist'));
+    } catch (error) {
+      socketControlError =
+        error instanceof Error &&
+        /^socket negative control failed during [a-z-]+ \([A-Za-z]+Error\)$/.test(error.message)
+          ? error.message
+          : safeErrorName(error);
+      throw error;
+    }
     socketControl = `pds=${negativeControl.pdsCommitted};indexed=${negativeControl.indexed};mode=${negativeControl.mode};cursor=${negativeControl.cursor}`;
     writeFileSync(
       join(outDir, 'ledger.json'),
@@ -1308,7 +1326,7 @@ async function forwardingCase(
   } catch {
     writeFileSync(
       join(outDir, 'forwarding.log'),
-      `exactly-once forwarding failed during ${phase}; expected=${expectedForwards}; observed=${forwardsObserved}; states=${forwardStates || 'none'}; lastfm=${lastfmCount}; listenbrainz=${listenbrainzCount}; socketControl=${socketControl}; records=${recordDetails}\n`,
+      `exactly-once forwarding failed during ${phase}; expected=${expectedForwards}; observed=${forwardsObserved}; states=${forwardStates || 'none'}; lastfm=${lastfmCount}; listenbrainz=${listenbrainzCount}; socketControl=${socketControl}; socketControlError=${socketControlError}; records=${recordDetails}\n`,
     );
     return caseRecord(SCROBBLER_CASES[2], 'failed', commit);
   }
