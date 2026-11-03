@@ -137,7 +137,11 @@ export class SessionClient {
       const latest = this.#current;
       this.#sessionReadGeneration++;
       if (latest === null || latest.did === current.did) {
-        this.#set(null, false);
+        // `refresh()` clears the internal cache while keeping the last
+        // published identity in the UI. Do not publish another anonymous
+        // transition until the reconciliation read confirms there is no
+        // account; doing so could erase a newer account's draft.
+        if (latest !== null) this.#set(null, false);
         // A refresh may have been reading the same account while the logout
         // completed. Discard that response, then reconcile the cookie once so
         // a genuinely newer account is restored instead of being erased.

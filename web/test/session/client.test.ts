@@ -176,7 +176,7 @@ describe('web/test/session/client.test.ts', () => {
     expect(client.current()).toEqual(bob);
   });
 
-  it('reconciles a refresh of the logged-out account and preserves a different current account', async () => {
+  it('preserves a newer account draft while reconciling logout against a pending refresh', async () => {
     let resolveLogout!: (response: Response) => void;
     const pendingLogout = new Promise<Response>((resolve) => (resolveLogout = resolve));
     let resolveRefresh!: (response: Response) => void;
@@ -186,17 +186,34 @@ describe('web/test/session/client.test.ts', () => {
       .fn()
       .mockResolvedValueOnce(Response.json(dto))
       .mockImplementationOnce(() => pendingLogout)
+      .mockResolvedValueOnce(Response.json(bob))
       .mockImplementationOnce(() => pendingRefresh)
       .mockResolvedValueOnce(Response.json(bob));
-    const client = new SessionClient({ fetch: fetcher });
+    const state = createAppState();
+    const values = {
+      artist: 'Bob Draft',
+      track: 'Draft Track',
+      album: '',
+      listenedAt: '2026-01-15T12:00:00Z',
+      durationSeconds: '',
+      recordingMbid: '',
+    };
+    const client = new SessionClient({
+      fetch: fetcher,
+      onChange: (session, reauthRequired) => setSession(state, session, null, { reauthRequired }),
+    });
     await client.getSession();
     const logout = client.logout();
+    await expect(client.refresh()).resolves.toEqual(bob);
+    setScrobbleDraft(state, values);
     const refresh = client.refresh();
     resolveLogout(new Response(null, { status: 204 }));
     await logout;
     resolveRefresh(Response.json(dto));
     await expect(refresh).resolves.toEqual(bob);
     expect(client.current()).toEqual(bob);
+    expect(state.session.value).toEqual(bob);
+    expect(state.scrobbleDraft.value).toEqual({ did: bob.did, revision: 1, values });
   });
 
   it('does not let an authenticated GET 401 from the previous account clear a newer session', async () => {
