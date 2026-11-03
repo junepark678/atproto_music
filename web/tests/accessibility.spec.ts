@@ -15,14 +15,17 @@
 // account she follows. Each test has its own browser context.
 
 import AxeBuilder from '@axe-core/playwright';
-import { type APIRequestContext, expect, type Locator, type Page, test } from '@playwright/test';
+import { type APIRequestContext, type Locator, type Page } from '@playwright/test';
+import { expect, test } from './fixtures';
 import {
   account,
-  authorizeOnDevPds,
+  authorizeOnFixtureAs,
+  portsFromEnv,
   type E2eAccount,
   type E2eNetwork,
   pdsListRecords,
   readNetwork,
+  workerOrigin,
 } from '../../scripts/e2e/dev-env';
 
 let net: E2eNetwork;
@@ -35,13 +38,21 @@ async function profileStatus(request: APIRequestContext, did: string): Promise<n
   return (await request.get(`/api/v1/users/${enc(did)}/profile`)).status();
 }
 
-test.beforeAll(async ({ request }) => {
+test.beforeAll(async () => {
   net = readNetwork();
   bob = account(net, 'bob');
   carol = account(net, 'carol');
-  const notify = await request.post('/api/v1/notify', { data: { did: bob.did } });
-  expect(notify.status()).toBe(202);
-  await expect.poll(() => profileStatus(request, bob.did), { timeout: 60_000 }).toBe(200);
+  const origin = workerOrigin(portsFromEnv());
+  const notify = await fetch(`${origin}/api/v1/notify`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ did: bob.did }),
+  });
+  expect(notify.status).toBe(202);
+  await expect.poll(async () => {
+    const response = await fetch(`${origin}/api/v1/users/${enc(bob.did)}/profile`);
+    return response.status;
+  }, { timeout: 60_000 }).toBe(200);
 });
 
 // ---------------------------------------------------------------------------
@@ -81,7 +92,7 @@ async function signIn(page: Page, request: APIRequestContext, acct: E2eAccount):
   await page.goto('/signin');
   await page.getByLabel('Your handle').fill(acct.handle);
   await page.getByRole('button', { name: 'Sign in' }).click();
-  await authorizeOnDevPds(page, acct);
+  await authorizeOnFixtureAs(page, acct);
   await page.waitForURL((u) => u.pathname === '/feed');
   await expect(nav(page).getByRole('link', { name: 'Settings' })).toBeVisible();
   await expect.poll(() => profileStatus(request, acct.did), { timeout: 60_000 }).toBe(200);
@@ -309,7 +320,7 @@ test('keyboard-only journey reaches sign-in, scrobble submit, window tabs, follo
   await page.keyboard.type(carol.handle);
   await tabTo(page, page.getByRole('button', { name: 'Sign in' }), 'sign-in button');
   await page.keyboard.press('Enter');
-  await authorizeOnDevPds(page, carol, { keyboard: true });
+  await authorizeOnFixtureAs(page, carol);
   await page.waitForURL((u) => u.pathname === '/feed');
   await expect(nav(page).getByRole('link', { name: 'Settings' })).toBeVisible();
   await expect.poll(() => profileStatus(request, carol.did), { timeout: 60_000 }).toBe(200);

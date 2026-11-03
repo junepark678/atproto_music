@@ -9,6 +9,7 @@ import { type FixtureTransport, routerTransport } from '@atmusic/atproto/test-su
 import { SignedRepo } from '@atmusic/atproto/test-support/signed-repo';
 import { fixedClock, type FixedClock } from '@atmusic/core/test-support/clock';
 import { seededRandom } from '@atmusic/core/test-support/random';
+import { buildScrobbleRecord } from '@atmusic/core/scrobble';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import type { E2eAccount, E2eNetwork, E2ePorts } from './dev-env';
@@ -34,13 +35,13 @@ export interface FixtureWorld {
   close(): Promise<void>;
 }
 
-async function serveFixtureHandler(handler: (request: Request) => Promise<Response>): Promise<{
+async function serveFixtureHandler(handler: (request: Request) => Promise<Response>, hostOverride?: string): Promise<{
   port: number;
   close(): Promise<void>;
 }> {
   const server: Server = createServer(async (incoming, outgoing) => {
     try {
-      const request = await webRequest(incoming);
+      const request = await webRequest(incoming, hostOverride);
       const response = await handler(request);
       const body = response.body === null ? null : Buffer.from(await response.arrayBuffer());
       outgoing.writeHead(response.status, Object.fromEntries(response.headers));
@@ -60,8 +61,8 @@ async function serveFixtureHandler(handler: (request: Request) => Promise<Respon
   };
 }
 
-async function webRequest(incoming: IncomingMessage): Promise<Request> {
-  const host = incoming.headers.host ?? 'fixture.test';
+async function webRequest(incoming: IncomingMessage, hostOverride?: string): Promise<Request> {
+  const host = hostOverride ?? incoming.headers.host ?? 'fixture.test';
   const method = incoming.method ?? 'GET';
   const chunks: Buffer[] = [];
   for await (const chunk of incoming) chunks.push(Buffer.from(chunk));
@@ -97,6 +98,16 @@ export async function startFixtureWorld(ports: E2ePorts): Promise<FixtureWorld> 
     const pds = pdsByName[name];
     const key = keys[name];
     const repo = new SignedRepo(did, key, { clock });
+    if (name === 'bob') {
+      const listenedAt = new Date(FIXTURE_NOW_MS - 60_000).toISOString().slice(0, 19) + 'Z';
+      const built = buildScrobbleRecord(
+        { artist: 'Kate Bush', track: 'Running Up That Hill', album: 'Hounds of Love', listenedAt },
+        E2E_PREFIX,
+        clock,
+      );
+      if (!built.ok) throw new Error(`seed scrobble invalid: ${built.reason.field}`);
+      await repo.put(`${E2E_PREFIX}.scrobble`, 'bob-seed', built.record);
+    }
     await pds.addAccount(repo, { handle, auth: 'dpop' });
     pds.onCommit((commitDid, commit) => pendingCommits.push({ did: commitDid, commit }));
     plc.register(did, { signingKey: key, pds: `https://${pdsHosts[name]}`, handle });
@@ -148,8 +159,8 @@ export async function startFixtureWorld(ports: E2ePorts): Promise<FixtureWorld> 
   });
   as.connect(transport);
   const fixtureServers = await Promise.all([
-    serveFixtureHandler((request) => transport(request)),
-    serveFixtureHandler((request) => transport(request)),
+    serveFixtureHandler((request) => transport(request), PDS1_HOST),
+    serveFixtureHandler((request) => transport(request), PDS2_HOST),
     serveFixtureHandler((request) => transport(request)),
     serveFixtureHandler((request) => transport(request)),
     serveFixtureHandler((request) => transport(request)),
@@ -176,12 +187,13 @@ export async function startFixtureWorld(ports: E2ePorts): Promise<FixtureWorld> 
   const proxy = await startBrowserProxy(ports.proxy, hosts, ports.worker);
   const network: E2eNetwork = {
     prefix: E2E_PREFIX,
+    fixtureNowMs: FIXTURE_NOW_MS,
     workerOrigin: `https://${APP_HOST}`,
     proxyPort: proxy.port,
     plcPort: hosts[PLC_HOST]!,
     hosts,
     accounts,
-    seeded: { bobScrobble: '' },
+    seeded: { bobScrobble: `at://${accounts[1]!.did}/${E2E_PREFIX}.scrobble/bob-seed` },
   };
   return {
     network,

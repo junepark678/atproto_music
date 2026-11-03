@@ -106,6 +106,7 @@ export interface E2eAccount {
 /** What the tests and the Worker learn about the running network (work/e2e/network.json). */
 export interface E2eNetwork {
   prefix: string;
+  fixtureNowMs: number;
   workerOrigin: string;
   proxyPort: number;
   plcPort: number;
@@ -409,6 +410,7 @@ export async function startDevEnv(ports: E2ePorts = portsFromEnv()): Promise<Dev
 
     const network: E2eNetwork = {
       prefix: E2E_PREFIX,
+      fixtureNowMs: Date.now(),
       workerOrigin: workerOrigin(ports),
       proxyPort: proxy.port,
       plcPort: plc.port,
@@ -469,29 +471,8 @@ async function tabUntilFocused(page: Page, target: Locator, label: string, max =
  * after the SPA redirected there: the password, then consent. `keyboard`
  * drives them with Tab/Enter only.
  */
-export async function authorizeOnDevPds(
-  page: Page,
-  acct: E2eAccount,
-  options: { keyboard?: boolean } = {},
-): Promise<void> {
-  await page.waitForURL((url) => url.host === acct.pdsHost && url.pathname === '/oauth/authorize', {
-    timeout: 30_000,
-  });
-  const password = page.getByLabel('Password', { exact: true });
-  await password.waitFor();
-  if (options.keyboard === true) {
-    // A real Tab loop (no programmatic focus): the provider's own pages must
-    // be operable from the keyboard as a user meets them.
-    await tabUntilFocused(page, password, 'PDS password field');
-    await page.keyboard.type(acct.password);
-    await page.keyboard.press('Enter');
-    const authorize = page.getByRole('button', { name: 'Authorize' });
-    await authorize.waitFor();
-    await tabUntilFocused(page, authorize, 'PDS Authorize button');
-    await page.keyboard.press('Enter');
-  } else {
-    await password.fill(acct.password);
-    await page.getByRole('button', { name: 'Sign in' }).click();
-    await page.getByRole('button', { name: 'Authorize' }).click();
-  }
+/** FakeOAuthAs auto-approves its fixture account and returns through the BFF callback. */
+export async function authorizeOnFixtureAs(page: Page, _acct: E2eAccount): Promise<void> {
+  await page.waitForURL((url) => url.pathname === '/' || url.pathname === '/feed', { timeout: 30_000 });
+  if (new URL(page.url()).pathname === '/') await page.goto('/feed');
 }

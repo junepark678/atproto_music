@@ -22,16 +22,19 @@
 
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { type APIRequestContext, type APIResponse, expect, type Locator, type Page, test } from '@playwright/test';
+import { type APIRequestContext, type APIResponse, type Locator, type Page } from '@playwright/test';
+import { expect, test } from './fixtures';
 import Ajv2020 from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
 import {
   account,
-  authorizeOnDevPds,
+  authorizeOnFixtureAs,
   type E2eAccount,
   type E2eNetwork,
+  portsFromEnv,
   pdsListRecords,
   readNetwork,
+  workerOrigin,
 } from '../../scripts/e2e/dev-env';
 
 // ---------------------------------------------------------------------------
@@ -125,18 +128,26 @@ let alice: E2eAccount;
 let bob: E2eAccount;
 let prefix: string;
 
-test.beforeAll(async ({ request }) => {
+test.beforeAll(async () => {
   net = readNetwork();
   alice = account(net, 'alice');
   bob = account(net, 'bob');
   prefix = net.prefix;
   // Bob is known to the index before the journey: notify {did}, then his
   // snapshot (one verified scrobble) makes his profile public.
-  const notify = await request.post('/api/v1/notify', { data: { did: bob.did } });
-  expect(notify.status()).toBe(202);
+  const origin = workerOrigin(portsFromEnv());
+  const notify = await fetch(`${origin}/api/v1/notify`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ did: bob.did }),
+  });
+  expect(notify.status).toBe(202);
   expect(schemaErrors('NotifyAccepted', await notify.json())).toBe('valid');
   await expect
-    .poll(async () => (await api<Profile>(request, `/api/v1/users/${enc(bob.did)}/profile`, 'Profile')).body, {
+    .poll(async () => {
+      const response = await fetch(`${origin}/api/v1/users/${enc(bob.did)}/profile`);
+      return (await response.json()) as Profile;
+    }, {
       timeout: 60_000,
     })
     .toMatchObject({ did: bob.did, handle: bob.handle, totalScrobbles: 1 });
@@ -216,19 +227,18 @@ const followRkey = (subject: string) => `f${createHash('sha256').update(subject)
 
 // ---------------------------------------------------------------------------
 
-test('full journey sign-in → scrobble indexed → stats → follow/unfollow → delete → export → disconnect/reconnect → sign-out', async ({
+test('sign-in through the fake AS, scrobble, indexed, delete and follow journeys pass against the Node stack', async ({
   page,
   request,
 }) => {
   test.setTimeout(300_000);
-  const startMs = Date.now();
+  const startMs = net.fixtureNowMs;
   const scrobbleCollection = `${prefix}.scrobble`;
   const followCollection = `${prefix}.follow`;
   const settingsCollection = `${prefix}.settings`;
 
-  // 1. Sign in with the loopback client: our /signin → the PDS's own
-  //    password and consent pages → /oauth/callback (the SPA) → /feed.
-  await test.step('sign in with the loopback OAuth client', async () => {
+  // 1. Sign in through the fixture AS and the Node BFF callback.
+  await test.step('sign in through the fake OAuth AS', async () => {
     const callback = page.waitForResponse(
       (r) => new URL(r.url()).pathname === '/oauth/callback' && r.request().isNavigationRequest(),
     );
@@ -236,11 +246,10 @@ test('full journey sign-in → scrobble indexed → stats → follow/unfollow �
     await expect(heading(page)).toHaveText('Sign in');
     await page.getByLabel('Your handle').fill(alice.handle);
     await page.getByRole('button', { name: 'Sign in' }).click();
-    await authorizeOnDevPds(page, alice);
+    await authorizeOnFixtureAs(page, alice);
     const cb = await callback;
-    expect(cb.status()).toBe(200);
-    expect(cb.headers()['content-type']).toContain('text/html');
-    expect(await cb.text()).toBe(builtIndexHtml()); // the SPA's index.html, not a Worker JSON route
+    expect(cb.status()).toBe(303);
+    expect(cb.headers().location).toBe('/'); // BFF consumes the OAuth response and redirects to the SPA
     await page.waitForURL((u) => u.pathname === '/feed');
     expect(new URL(page.url()).search).toBe(''); // code, state and iss are gone
     await expect(nav(page).getByRole('link', { name: 'My profile' })).toHaveAttribute('href', `/u/${alice.did}`);
@@ -542,37 +551,16 @@ test('full journey sign-in → scrobble indexed → stats → follow/unfollow �
   });
 });
 
-test('OAuth callback navigation is served by SPA (/oauth/callback not intercepted by Worker)', async ({
-  page,
-  request,
-}) => {
-  // /oauth/* is not Worker-first: the callback (with its code, state and iss)
-  // is the SPA's index.html, byte for byte, with 200 and no redirect. Whether
-  // Static Assets or the Worker's asset-miss handling sent it is not what this
-  // proves (since ADR §15 Q9 it is the Worker); what it proves is that no
-  // Worker route consumed the callback.
-  const res = await request.get('/oauth/callback?code=cod-x&state=st-x&iss=https%3A%2F%2Fpds1.test', {
-    headers: { 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document', accept: 'text/html' },
+test('the server OAuth callback consumes the response and never serves a browser OAuth callback screen', async ({ page, request }) => {
+  const res = await request.get('/oauth/callback?code=fixture-code&state=unknown&iss=https%3A%2F%2Fas.test', {
     maxRedirects: 0,
   });
-  expect(res.status()).toBe(200);
-  expect(res.headers().location).toBeUndefined();
-  expect(res.headers()['content-type']).toContain('text/html');
-  expect(res.headers()['cache-control']).not.toContain('immutable');
-  const html = await res.text();
-  expect(html).toBe(builtIndexHtml());
-  expect(html).toMatch(/<script type="module" crossorigin src="\/assets\/index-[\w-]+\.js"><\/script>/);
-  // Its neighbours under /oauth/ are not SPA routes.
-  await expectNotFoundEnvelope(
-    await request.get('/oauth/missing', { headers: { 'sec-fetch-mode': 'navigate', accept: 'text/html' } }),
-    '/oauth/missing',
-  );
-
-  // The SPA itself handles the route: without a pending sign-in it says so.
+  expect(res.status()).toBe(303);
+  expect(res.headers().location).toMatch(/^\/signin\?error=/);
+  expect(res.headers()['set-cookie']).toContain('__Host-atmusic_oauth=');
   await page.goto('/oauth/callback');
-  await expect(heading(page)).toHaveText('Signing in');
-  await expect(page.getByText('There is no sign-in in progress.')).toBeVisible();
-  await expect(page.getByRole('link', { name: 'Sign in', exact: true }).last()).toHaveAttribute('href', '/signin');
+  await expect(page).toHaveURL(/\/signin\?error=/);
+  await expect(page.getByText(/fixture-code|unknown/)).toHaveCount(0);
 });
 
 test('GET /u/<did> and /feed serve index.html 200 and POST /feed never returns SPA HTML', async ({ page, request }) => {

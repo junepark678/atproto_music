@@ -14,7 +14,7 @@ import { defineConfig, devices } from '@playwright/test';
 import { portsFromEnv, workerOrigin } from './scripts/e2e/dev-env';
 
 const ports = portsFromEnv();
-const origin = workerOrigin(ports);
+const origin = 'https://music.e2e.test';
 
 export default defineConfig({
   testDir: 'web/tests',
@@ -29,8 +29,7 @@ export default defineConfig({
   reporter: [['list']],
   use: {
     baseURL: origin,
-    // The dev-env PDSs and PLC are https behind the stack's proxy, with a
-    // self-signed certificate; loopback (the Worker) bypasses the proxy.
+    // Fixture hosts and the Node app use self-signed HTTPS through the allowlisted proxy.
     proxy: { server: `http://127.0.0.1:${ports.proxy}`, bypass: '127.0.0.1' },
     ignoreHTTPSErrors: true,
     trace: 'retain-on-failure',
@@ -40,7 +39,9 @@ export default defineConfig({
   projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
   webServer: {
     command: 'npx tsx scripts/e2e/start-stack.ts',
-    url: `${origin}/health/live`,
+    // The fixture host is browser-only and resolves through the test proxy.
+    // Playwright's webServer readiness probe must use the loopback listener.
+    url: `${workerOrigin(ports)}/health/live`,
     reuseExistingServer: false,
     timeout: 240_000,
     stdout: 'pipe',
