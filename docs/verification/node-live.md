@@ -150,6 +150,30 @@ ListenBrainz. No Node live acceptance has been recorded. Confidential-client
 OAuth interop, SSRF probe, and Node soak remain deferred; full N6-02 and M6
 live acceptance stay open.
 
+## Shared harness validation
+
+Drivers may declare `NodeGateSpec.observations` as top-level `results` keys
+with an `accept(value)` validator. Every declared key must be an own property
+of `results`, and its validator must return `null` to accept it. Missing keys,
+rejections, and validator exceptions produce `failed` evidence with an
+`observation <key>:` diagnostic. Omitting this opt-in declaration preserves
+existing driver behavior; it does not establish that a driver has complete
+accepted observations or extend verifier gate support.
+
+The optional synchronous `localChecks(env)` hook runs only after all ordinary
+requirements and `extraChecks` succeed, before the gate body. It is restricted
+by contract to filesystem reads and local tools such as `git` and
+`node --version`; it must not perform network or browser work. Reported problems
+and exceptions produce blocked evidence and prevent body execution. This is
+an ordering contract, not a sandbox for arbitrary hook code.
+
+Shared output redacts supplied secret environment values, including key,
+cookie and CSRF inputs, and absolute home/runtime paths under `/home/` and
+`/run/user/`. URL sanitization decodes mixed percent and Unicode escapes before
+normalizing URL separators and stripping credentials, queries and fragments.
+Drivers must still select evidence fields deliberately rather than dump
+upstream responses.
+
 ## Deferred dev-env OAuth contract (D7)
 
 The completed Sonnet readiness discovery reports that `@atproto/oauth-provider`
