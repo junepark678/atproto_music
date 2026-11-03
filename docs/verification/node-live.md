@@ -80,13 +80,27 @@ A future Node OAuth result must show an actual granted scope containing
 grant. This four-collection rule is separate from the historical Workers
 `full_repo_grant` rule, which remains three collections. The Node OAuth gate
 is not enabled by this validator rule and remains blocked until the exchange
-and revocation evidence contract is accepted and the corresponding
-observations are implemented. At this stage only the applicable existing
-`ingest` and `pdsCompat` structural result checks can pass as Node standalone
-gates. The `ssrfProbe` and `socketSoak` collectors also stay blocked: their
-observations do not enable verifier PASS until their Node semantics and
-acceptance contracts are approved. Workers Cloudflare/DO analytics do not
-stand in for Node acceptance. Unknown gates never enable PASS.
+and revocation evidence contract is accepted and the corresponding observations
+are implemented. At this stage only the applicable existing `ingest` and
+`pdsCompat` structural result checks can pass as Node standalone gates.
+
+The Node SSRF probe driver is ported. `npx tsx scripts/live/ssrf_probe.ts
+--emit-probe` emits a host-side probe using the production pinned transport;
+running the emitted probe is an explicit operator action and makes network
+requests to the configured controlled names and private-address literals. The
+gate validates the recorded result offline. Its required inputs are
+`ATMUSIC_LIVE_SSRF_HOSTS` (`label=host` pairs for `rfc1918`, `loopback`, and
+`metadata`) and `ATMUSIC_LIVE_SSRF_PROBE_RESULT` (absolute result-file path),
+along with the common Node release identity and origin/prefix. The no-input
+gate invocation exits 2 before reading a result or opening a connection.
+`ssrfProbe` remains blocked by this verifier: its probe-result provenance and
+acceptance contract are not approved, and the gate is not enabled in
+`NODE_SUPPORTED_GATES`. A recorded probe cannot change that.
+
+The Node socket-soak collector records protected Unix-socket observations, but
+it also remains blocked until Node metrics, thresholds, and restart/reconnect
+semantics are accepted. Workers Cloudflare/DO analytics do not stand in for
+Node acceptance. Unknown gates never enable PASS.
 
 Run `npx tsx scripts/live/node_oauth_check.ts` to validate the current OAuth
 gate prerequisites. It requires the Node release identity, both independent
@@ -95,20 +109,19 @@ PDS identities and implementation names, `ATMUSIC_LIVE_HANDLE_A` and
 `ATMUSIC_LIVE_PASSWORD_B` or `ATMUSIC_LIVE_OAUTH_INTERACTIVE=1`. Its optional
 `ATMUSIC_LIVE_OAUTH_TIMEOUT_S` accepts 30–3600 seconds. Missing or malformed
 inputs produce blocked schema-v3 evidence before any network or browser
-operation. Even with all inputs present, it exits 2 with the unimplemented
+operation. Even with all inputs present, it exits 2 with the unresolved
 exchange/revocation contract named; this is a preflight, not OAuth acceptance.
 
 ### Dev-env OAuth preflight (advisory only)
 
-`npx tsx scripts/live/devenv_oauth_check.ts` currently validates only the
-presence and shape of `ATMUSIC_DEVENV_PDS_URL` and
-`ATMUSIC_DEVENV_HTTPS_ORIGIN`. The origin must be a bare HTTPS origin; the PDS
-value must be a bare HTTP or HTTPS origin. The client ID is derived from the
-origin's `/oauth/client-metadata.json`, and the production client authenticates
-with `private_key_jwt`; no client secret is needed. This preflight performs no
-network, socket, child-process, or browser operation and exits 2 with a blocked
-document even when both inputs are valid because the interop flow is not
-implemented yet.
+`npx tsx scripts/live/devenv_oauth_check.ts` validates only the presence and
+shape of `ATMUSIC_DEVENV_PDS_URL` and `ATMUSIC_DEVENV_HTTPS_ORIGIN`. The origin
+must be a bare HTTPS origin; the PDS value must be a bare HTTP or HTTPS origin.
+The client ID is derived from the origin's `/oauth/client-metadata.json`, and
+the production client authenticates with `private_key_jwt`; no client secret
+is needed. This preflight performs no network, socket, child-process, or
+browser operation and exits 2 with a blocked document even when both inputs
+are valid because the interop flow is not implemented yet.
 
 Its schema-v3 document has `runtime: "node"`, `fixtureOnly: true`,
 `gate: "devenvOauth"`, and `result: "blocked"`. It is not one of the five

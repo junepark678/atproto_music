@@ -142,7 +142,7 @@ export const PREFIX_REQ: Requirement = {
 };
 export const VERSION_REQ: Requirement = {
   name: ENV.versionId,
-  what: 'Worker version id under test, from wrangler versions upload or deployments status',
+  what: 'Worker version id under test, as reported by the deployment platform',
   check: (v) => (UUID.test(v) ? null : 'must be a lowercase UUID'),
 };
 export const BUNDLE_REQ: Requirement = {

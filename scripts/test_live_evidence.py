@@ -68,8 +68,9 @@ LIVE_SCRIPTS = {
     "workers_ingest_check": ("ingest", ["ATMUSIC_LIVE_ORIGIN", "ATMUSIC_LIVE_DID_B", "ATMUSIC_LIVE_ADMIN_TOKEN",
                                         "ATMUSIC_LIVE_JETSTREAM_COVERAGE_REF", "ATMUSIC_LIVE_APP_PASSWORD_B",
                                         *IMPLEMENTATIONS]),
-    "ssrf_probe": ("ssrfProbe", ["ATMUSIC_LIVE_ORIGIN", "ATMUSIC_LIVE_ADMIN_TOKEN", "ATMUSIC_LIVE_SSRF_PROBE_URL",
-                                 "ATMUSIC_LIVE_SSRF_HOSTS"]),
+    "ssrf_probe": ("ssrfProbe", ["ATMUSIC_LIVE_ORIGIN", "ATMUSIC_LIVE_LEXICON_PREFIX", "ATMUSIC_LIVE_COMMIT",
+                                 "ATMUSIC_LIVE_BUNDLE_SHA256", "ATMUSIC_LIVE_SSRF_HOSTS",
+                                 "ATMUSIC_LIVE_SSRF_PROBE_RESULT"]),
     "workers_socket_soak": ("socketSoak", ["ATMUSIC_LIVE_ORIGIN", "ATMUSIC_LIVE_ADMIN_TOKEN",
                                            "ATMUSIC_LIVE_JETSTREAM_COVERAGE_REF", "ATMUSIC_LIVE_CF_API_TOKEN",
                                            "ATMUSIC_LIVE_CF_ACCOUNT_ID", "ATMUSIC_LIVE_CF_DO_NAMESPACE_ID"]),
@@ -1141,6 +1142,21 @@ class LiveEvidenceTests(unittest.TestCase):
                 document = json.loads(result.stdout)
                 self.assertEqual(document["gate"], gate_name)
                 self.assertEqual(document["result"], "blocked")
+                if script == "ssrf_probe":
+                    # Node schema-v3 gate: no Worker deployment/admin inputs. Its
+                    # prerequisites are rejected before the gate body reads a result.
+                    self.assertEqual(document["schemaVersion"], 3)
+                    self.assertEqual(document["runtime"], "node")
+                    self.assertFalse(document["fixtureOnly"])
+                    missing = "\n".join(document["missing"])
+                    for name in names:
+                        self.assertIn(f"{name}: missing", missing)
+                        self.assertIn(name, result.stderr)
+                    self.assertTrue(result.stderr.startswith("BLOCKED: ssrfProbe Node live gate"), result.stderr)
+                    status, issues = node_gate_status(gate_name, document, None, None)
+                    self.assertEqual(status, "blocked")
+                    self.assertTrue(issues)
+                    continue
                 self.assertIsNone(document["workerVersionId"])
                 missing = "\n".join(document["missing"])
                 for name in names:
