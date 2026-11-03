@@ -17,6 +17,13 @@ import { INGEST_TEST_ENV } from './node-index';
 
 export const GET_RECORD = 'com.atproto.sync.getRecord';
 
+/**
+ * The Workers-era free-tier slice budget (ADR 0004 §5.7), kept TEST-ONLY after
+ * N7-01 retired `BUDGETS.free` (B17) so the drain suites can still exercise a
+ * tight per-slice subrequest ceiling.
+ */
+export const FREE_BUDGET: SliceBudget = { ...BUDGETS.paid, drainHints: 40, subrequestsPerSlice: 40 };
+
 export interface LogEntry {
   level: LogLevel;
   event: string;
@@ -41,7 +48,7 @@ export interface Deps extends ModuleDeps {
 export function depsFor(db: Db, kit: FixtureKit, o: { plan?: Plan } = {}): Deps {
   const base = parseConfig({ ...INGEST_TEST_ENV, ADMIN_TOKEN: '' }, { allowFixturePrefix: true });
   const plan = o.plan ?? base.plan;
-  const config = { ...base, plan, budget: BUDGETS[plan] };
+  const config = { ...base, plan, budget: plan === 'free' ? FREE_BUDGET : BUDGETS.paid };
   return {
     db,
     clock: kit.clock,

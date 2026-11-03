@@ -15,10 +15,11 @@
 // ephemeral listen port and upstream roots on the reserved fixture TLDs
 // (`.test`, `.example`), which only a fixture transport can reach.
 //
-// Workers-era variables (ADR §3.8, §20.4 #27): parseConfig still requires PLAN
-// and DO_LOCATION_HINT. Until N7-01 removes them, this module passes
-// `PLAN='paid'` and `DO_LOCATION_HINT=''` internally and refuses any value the
-// operator sets for either, as it refuses INGEST_MODE=pulse.
+// Workers-era variables (ADR §3.8, §20.4 #27): parseConfig no longer knows
+// PLAN or DO_LOCATION_HINT (retired by N7-01, B17), and INGEST_MODE accepts
+// only `socket` or `off`. This module still refuses any value the operator
+// sets for the retired variables, and INGEST_MODE=pulse, with a message that
+// names ADR 0005 so a stale Workers environment fails loudly.
 //
 // Process timings (busy timeout, drain window) are fixed production values,
 // not environment variables; tests construct a NodeConfig with smaller ones.
@@ -269,8 +270,6 @@ export function parseNodeConfig(env: NodeEnv, opts: ParseNodeConfigOptions = {})
         JETSTREAM_URLS: env.JETSTREAM_URLS ?? '',
         JETSTREAM_LOOKBACK_HOURS: env.JETSTREAM_LOOKBACK_HOURS ?? '',
         RELAY_URL: env.RELAY_URL ?? '',
-        PLAN: 'paid',
-        DO_LOCATION_HINT: '',
       },
       { allowFixturePrefix: opts.allowFixturePrefix === true },
     );

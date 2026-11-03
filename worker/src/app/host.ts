@@ -24,7 +24,6 @@ import type { Transport } from '@atmusic/atproto/transport';
 import type { Clock, Random } from '@atmusic/core/deps';
 import type { BackupKind, BackupOutcome, Logger, ModuleDeps, PitrResult } from '../do/contracts';
 import type { Db } from '../do/db';
-import type { PulseTimer } from '../do/ingest/ingest-mode';
 import type { ConnectJetstream } from '../do/ingest/jetstream-socket';
 import type { AlarmStorage, ExtensionTimerName, ScheduleOptions } from '../do/timers';
 
@@ -60,8 +59,6 @@ export interface Host {
 export interface IndexCoreOptions {
   /** Default: `cachedIdentityResolver(host.db, {transport, clock})`. */
   identity?: IdentityResolver;
-  /** Measures the pulse's 20 s bound; default setTimeout (removed with pulse by N7-01). */
-  pulseTimer?: PulseTimer;
 }
 
 /** What an extension sees of the core. */

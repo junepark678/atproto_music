@@ -57,7 +57,7 @@
 
 import { deriveCursorKey } from '@atmusic/core/cursor';
 import { type Clock, cryptoRandom, type Random, systemClock } from '@atmusic/core/deps';
-import { LOCATION_HINTS, parseCursorKey } from './config';
+import { parseCursorKey } from './config';
 import type { IndexRpc, Logger } from './do/contracts';
 import { envLogger, INDEX_NAME } from './do/index-do';
 import type { Env } from './env';
@@ -125,13 +125,14 @@ export async function dispatch(req: Request, ctx: RequestCtx, log: Logger): Prom
 // ---------------------------------------------------------------------------
 // The Worker fetch
 
+/** The Workers location hints `DO_LOCATION_HINT` may name (retired from config.ts by N7-01, B17). */
+const LOCATION_HINTS: readonly string[] = ['wnam', 'enam', 'sam', 'weur', 'eeur', 'apac', 'oc', 'afr', 'me'];
+
 /** The IndexDO stub (ADR §4.1): `INDEX.get(INDEX.idFromName(name), {locationHint})`. */
 export function indexStub(env: Pick<Env, 'INDEX' | 'DO_LOCATION_HINT'>, name: string = INDEX_NAME): IndexRpc {
   const hint = (env.DO_LOCATION_HINT ?? '').trim();
   const options =
-    hint !== '' && (LOCATION_HINTS as readonly string[]).includes(hint)
-      ? { locationHint: hint as DurableObjectLocationHint }
-      : undefined;
+    hint !== '' && LOCATION_HINTS.includes(hint) ? { locationHint: hint as DurableObjectLocationHint } : undefined;
   return env.INDEX.get(env.INDEX.idFromName(name), options) as unknown as IndexRpc;
 }
 

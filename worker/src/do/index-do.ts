@@ -121,7 +121,6 @@ export class IndexDO extends DurableObject<Env> implements IndexRpc, AdminRpc {
         ? null
         : new IndexCore(deps.config, workersHost(ctx, deps), [], {
             identity: deps.identity,
-            ...(deps.pulseTimer === undefined ? {} : { pulseTimer: deps.pulseTimer }),
           });
     const core = this.core;
     void ctx.blockConcurrencyWhile(async () => {
@@ -229,7 +228,7 @@ export class IndexDO extends DurableObject<Env> implements IndexRpc, AdminRpc {
     return this.#call('notify', (c) => c.notify(input, ip));
   }
 
-  /** Cron (scheduled.ts): the timers exist and the alarm is armed; in pulse mode a pulse is due now. */
+  /** Cron (scheduled.ts): the timers exist and the alarm is armed. */
   async ensureRunning(): Promise<void> {
     return this.#call('ensureRunning', (c) => c.ensureRunning());
   }

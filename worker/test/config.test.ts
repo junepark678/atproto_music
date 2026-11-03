@@ -1,43 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import { ConfigError, FIXTURE_PREFIX, parseConfig, parseCursorKey } from '../src/config';
 import type { EnvVars } from '../src/env';
-import wranglerJsonc from '../wrangler.jsonc?raw';
-
-/** Strips JSONC comments outside string literals (wrangler.jsonc has no trailing commas). */
-function parseJsonc(text: string): unknown {
-  let out = '';
-  let i = 0;
-  while (i < text.length) {
-    const c = text[i];
-    if (c === '"') {
-      let j = i + 1;
-      while (j < text.length && text[j] !== '"') j += text[j] === '\\' ? 2 : 1;
-      out += text.slice(i, j + 1);
-      i = j + 1;
-    } else if (c === '/' && text[i + 1] === '/') {
-      while (i < text.length && text[i] !== '\n') i++;
-    } else if (c === '/' && text[i + 1] === '*') {
-      i = text.indexOf('*/', i + 2) + 2;
-    } else {
-      out += c;
-      i++;
-    }
-  }
-  return JSON.parse(out);
-}
-
-interface WranglerEnv {
-  vars: EnvVars;
-  routes: { pattern: string; custom_domain: boolean }[];
-}
-type WranglerConfig = WranglerEnv & { env: Record<string, WranglerEnv> };
 
 /** The owner's decision, ADR 0004 §15 Q3. */
 const DECIDED_ORIGIN = 'https://music.214510.xyz';
 const DECIDED_PREFIX = 'dev.pythonplayer123.music';
 const PUBLICATION_REF = `sha256:${'a'.repeat(64)}`;
 
-const BASE: EnvVars = {
+/** parseConfig's vars: PLAN and DO_LOCATION_HINT were retired by N7-01 (B17). */
+const BASE: Omit<EnvVars, 'PLAN' | 'DO_LOCATION_HINT'> = {
   PUBLIC_ORIGIN: 'https://music.example.org',
   LEXICON_PREFIX: '',
   NAMESPACE_OWNERSHIP_REF: '',
@@ -46,8 +17,6 @@ const BASE: EnvVars = {
   JETSTREAM_URLS: 'wss://jetstream.us-east.bsky.network,wss://jetstream.us-west.bsky.network',
   JETSTREAM_LOOKBACK_HOURS: '24',
   RELAY_URL: 'https://relay1.us-east.bsky.network',
-  PLAN: 'paid',
-  DO_LOCATION_HINT: 'enam',
 };
 
 function issuesOf(fn: () => unknown): string[] {
@@ -71,7 +40,6 @@ describe('parseConfig namespace gate', () => {
       configuredIngestMode: 'socket',
       ingestMode: 'off',
       plan: 'paid',
-      doLocationHint: 'enam',
       adminEnabled: false,
       jetstreamUrls: ['wss://jetstream.us-east.bsky.network', 'wss://jetstream.us-west.bsky.network'],
       jetstreamLookbackHours: 24,
@@ -230,28 +198,6 @@ describe('parseConfig namespace gate', () => {
     expect(parseConfig({ ...decided, NAMESPACE_OWNERSHIP_REF: '   ' }).publication).toBe(false);
   });
 
-  it('shipped wrangler.jsonc carries the decided origin and prefix in every env and passes parseConfig', () => {
-    expect(wranglerJsonc).not.toContain('example.org');
-    const config = parseJsonc(wranglerJsonc) as WranglerConfig;
-    expect(Object.keys(config.env).sort()).toEqual(['free', 'staging']);
-    expect(config.vars.PUBLIC_ORIGIN).toBe(DECIDED_ORIGIN);
-    expect(config.routes).toEqual([{ pattern: 'music.214510.xyz', custom_domain: true }]);
-    const envs: [string, WranglerEnv][] = [['production', config], ...Object.entries(config.env)];
-    const origins = new Set<string>();
-    for (const [name, env] of envs) {
-      const parsed = parseConfig(env.vars);
-      expect(parsed, name).toMatchObject({ prefix: DECIDED_PREFIX, fixturePrefix: false, publication: false });
-      const host = new URL(parsed.publicOrigin).host;
-      expect(host === '214510.xyz' || host.endsWith('.214510.xyz'), name).toBe(true);
-      expect(env.routes, name).toEqual([{ pattern: host, custom_domain: true }]);
-      origins.add(parsed.publicOrigin);
-    }
-    // Each env has its own hostname, so its own OAuth client_id.
-    expect(origins.size).toBe(envs.length);
-    expect(parseConfig(config.vars)).toMatchObject({ plan: 'paid', ingestMode: 'socket' });
-    expect(parseConfig(config.env.staging?.vars ?? BASE)).toMatchObject({ plan: 'free', ingestMode: 'pulse' });
-  });
-
   it('rejects malformed vars with the field names', () => {
     for (const prefix of ['Org.Example', 'example', 'org..x', '9rg.example', 'org.-x', 'org.x-']) {
       expect(
@@ -280,26 +226,19 @@ describe('parseConfig namespace gate', () => {
           JETSTREAM_URLS: 'https://jetstream.example.org',
           JETSTREAM_LOOKBACK_HOURS: '1.5',
           RELAY_URL: 'wss://relay.example.org',
-          PLAN: 'enterprise',
-          DO_LOCATION_HINT: 'mars',
           ADMIN_TOKEN: 'short',
         }),
       ),
-    ).toEqual([
-      'INGEST_MODE',
-      'JETSTREAM_URLS',
-      'JETSTREAM_LOOKBACK_HOURS',
-      'RELAY_URL',
-      'PLAN',
-      'DO_LOCATION_HINT',
-      'ADMIN_TOKEN',
-    ]);
+    ).toEqual(['INGEST_MODE', 'JETSTREAM_URLS', 'JETSTREAM_LOOKBACK_HOURS', 'RELAY_URL', 'ADMIN_TOKEN']);
     expect(issuesOf(() => parseConfig({ ...BASE, JETSTREAM_URLS: '' }))).toEqual(['JETSTREAM_URLS']);
     expect(parseConfig({ ...BASE, JETSTREAM_URLS: '', INGEST_MODE: 'off' }).jetstreamUrls).toEqual([]);
-    const free = parseConfig({ ...BASE, PLAN: 'free', DO_LOCATION_HINT: '', ADMIN_TOKEN: 'a'.repeat(32) });
-    expect(free).toMatchObject({ plan: 'free', doLocationHint: null, adminEnabled: true });
-    expect(free.budget.subrequestsPerSlice).toBe(40);
-    expect(JSON.stringify(free)).not.toContain('a'.repeat(32));
+    // The Workers-era pulse mode is no longer a value (N7-01, B17).
+    expect(issuesOf(() => parseConfig({ ...BASE, INGEST_MODE: 'pulse' }))).toEqual(['INGEST_MODE']);
+    const admin = parseConfig({ ...BASE, ADMIN_TOKEN: 'a'.repeat(32) });
+    expect(admin).toMatchObject({ plan: 'paid', adminEnabled: true });
+    expect(admin.budget.subrequestsPerSlice).toBe(200);
+    expect(Object.keys(admin)).not.toContain('doLocationHint');
+    expect(JSON.stringify(admin)).not.toContain('a'.repeat(32));
   });
 
   // M1.1.1/invalid_namespace: empty prefix, one segment, uppercase segment and

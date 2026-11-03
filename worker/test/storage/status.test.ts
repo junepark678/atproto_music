@@ -128,10 +128,15 @@ const P = 'com.example.atmusic';
 const ts = (ms: number) => toStorage(fromMs(ms));
 const ns = (iso: string) => fromMs(Date.parse(iso));
 
-/** Reads one Indexing and checks it against the OpenAPI schema and that the read wrote nothing. */
-function read(db: Db, nowMs: number, mode: IngestMode, did?: string): Indexing {
+/**
+ * Reads one Indexing and checks it against the OpenAPI schema and that the read wrote nothing.
+ * `pulse` is no longer an IngestMode (N7-01, B17); the cases below that pass it
+ * exercise status.ts's not-socket, not-off fallthrough for Workers-era rows.
+ */
+function read(db: Db, nowMs: number, mode: IngestMode | 'pulse', did?: string): Indexing {
   const before = dump(db);
-  const result = did === undefined ? indexing(db, nowMs, { mode }) : indexing(db, nowMs, { mode, did });
+  const m = mode as IngestMode;
+  const result = did === undefined ? indexing(db, nowMs, { mode: m }) : indexing(db, nowMs, { mode: m, did });
   expect(validIndexing(result)).toBe('valid');
   expect(dump(db)).toEqual(before);
   return result;

@@ -34,7 +34,7 @@ import { drain } from '../../src/do/ingest/verify-drain';
 import { history } from '../../src/do/read/history';
 import { markConnected, recordEvent, updateCheckpointBookkeeping } from '../../src/do/status';
 import { dueAt } from '../../src/do/timers';
-import { counterValue, type Deps, depsFor, enqueue, hint, kit, protectedTables } from './drain-support';
+import { counterValue, type Deps, depsFor, enqueue, FREE_BUDGET, hint, kit, protectedTables } from './drain-support';
 import { withIngestIndex } from './node-index';
 
 const T0 = Date.parse('2026-01-15T12:00:00Z');
@@ -259,7 +259,7 @@ describe('snapshot jobs', () => {
   it('job resumes across alarms from persisted frontier after DO eviction', async () => {
     const { k, seed, alice, follow, scrobbleRows } = await seeded();
     const head = seed.heads.Alice;
-    const budget: SliceBudget = { ...BUDGETS.free, maxEntriesPerSlice: 3 };
+    const budget: SliceBudget = { ...FREE_BUDGET, maxEntriesPerSlice: 3 };
     let hang = false;
     let hung = 0;
     /** The production resolver, except that while `hang` is set a resolution never settles. */

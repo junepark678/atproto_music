@@ -202,7 +202,7 @@ describe('parseNodeConfig', () => {
     expect(fields(issuesOf(() => parse({ ...env, ATMUSIC_LISTEN: '127.0.0.1:0' })))).toEqual(['ATMUSIC_LISTEN']);
   });
 
-  it('INGEST_MODE=pulse, an operator-set PLAN (paid or free) and DO_LOCATION_HINT are each rejected with a message citing ADR 0005, and the embedded parseConfig receives PLAN paid and an empty DO_LOCATION_HINT', () => {
+  it('INGEST_MODE=pulse, an operator-set PLAN (paid or free) and DO_LOCATION_HINT are each rejected with a message citing ADR 0005, and the embedded parseConfig receives neither PLAN nor DO_LOCATION_HINT', () => {
     const cases: [string, Record<string, string>][] = [
       ['INGEST_MODE', { INGEST_MODE: 'pulse' }],
       ['PLAN', { PLAN: 'paid' }],
@@ -225,16 +225,16 @@ describe('parseNodeConfig', () => {
     const cfg = parse(baseEnv());
     expect(parseConfigSpy).toHaveBeenCalledTimes(1);
     const [handed, options] = parseConfigSpy.mock.calls[0] ?? [];
-    expect(handed?.PLAN).toBe('paid');
-    expect(handed?.DO_LOCATION_HINT).toBe('');
+    expect(handed).not.toHaveProperty('PLAN');
+    expect(handed).not.toHaveProperty('DO_LOCATION_HINT');
     expect(handed?.INGEST_MODE).toBe('socket');
     expect(handed?.PUBLIC_ORIGIN).toBe('https://music.example.org');
     expect(handed?.ADMIN_TOKEN).toBeUndefined();
     expect(options).toEqual({ allowFixturePrefix: true });
-    // So the embedded config carries the paid budget and no location hint.
+    // So the embedded config carries the paid budget and no location hint key.
     expect(cfg.app.plan).toBe('paid');
     expect(cfg.app.budget).toEqual(BUDGETS.paid);
-    expect(cfg.app.doLocationHint).toBeNull();
+    expect(Object.keys(cfg.app)).not.toContain('doLocationHint');
     expect(cfg.app.collections?.scrobble).toBe(`${FIXTURE_PREFIX}.scrobble`);
   });
 

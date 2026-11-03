@@ -99,7 +99,7 @@ import { pruneVerifiedCommits } from '../do/ingest/commit-cache';
 import { discover, ensureDiscoveryTimer, requestGapDiscovery } from '../do/ingest/discovery';
 import { deleteHint, nextHintDue } from '../do/ingest/hints';
 import { cachedIdentityResolver, pruneIdentityCache } from '../do/ingest/identity-cache';
-import { type IngestDeps, jetstreamWatchdog, type PulseTimer } from '../do/ingest/ingest-mode';
+import { type IngestDeps, jetstreamWatchdog } from '../do/ingest/ingest-mode';
 import type { ConnectJetstream } from '../do/ingest/jetstream-socket';
 import { notify, recordStatus } from '../do/ingest/notify';
 import { clearExpiredHostPauses } from '../do/ingest/pds-budget';
@@ -162,8 +162,6 @@ export const ADMIN_RESNAPSHOT_REASON = 'admin';
  */
 export interface IndexDeps extends ModuleDeps {
   connectJetstream: ConnectJetstream;
-  /** Measures the pulse's 20 s bound; default setTimeout. */
-  pulseTimer?: PulseTimer;
   /** Where the alarm is armed (production: `ctx.storage`). One object per instance. */
   alarms: AlarmStorage;
 }
@@ -379,7 +377,6 @@ export class IndexCore implements IndexRpc, AdminRpc {
 
     this.ingest = {
       connectJetstream: host.connectJetstream,
-      ...(options.pulseTimer === undefined ? {} : { pulseTimer: options.pulseTimer }),
       scheduleGapRecovery: (db, now) => {
         scheduleGapRecovery(db, now);
         requestGapDiscovery(db, now);
@@ -445,9 +442,8 @@ export class IndexCore implements IndexRpc, AdminRpc {
 
   /**
    * Every periodic core timer exists, and the queue timers agree with the
-   * queues. At start-up the Jetstream watchdog is made due now (reconnect, or
-   * the first pulse; with ingestion `off` it runs once to close and record the
-   * mode); later calls (cron, the ensureRunning interval) only recreate it
+   * queues. At start-up the Jetstream watchdog is made due now (reconnect;
+   * with ingestion `off` it runs once to close and record the mode); later calls (cron, the ensureRunning interval) only recreate it
    * when it is missing.
    */
   private ensureTimers(now: number, o: { startup?: boolean } = {}): void {
@@ -688,13 +684,12 @@ export class IndexCore implements IndexRpc, AdminRpc {
 
   /**
    * Cron (scheduled.ts) and the Node 5-minute interval: the timers exist and
-   * both alarms are armed; in pulse mode a pulse is due now.
+   * both alarms are armed.
    */
   async ensureRunning(): Promise<void> {
     return this.#rpc('ensureRunning', () => {
       const m = this.live();
       const now = m.clock.nowMs();
-      if (m.config.ingestMode === 'pulse') m.db.tx(() => schedule(m.db, 'jetstream-watchdog', now));
       this.ensureTimers(now);
       armAlarm(this.host.alarm, m.db, CORE_LANE);
       this.armExtensionLane();
