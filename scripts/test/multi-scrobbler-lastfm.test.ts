@@ -25,7 +25,16 @@ function respond(outgoing: ServerResponse, status: number, body: unknown, header
   outgoing.end(typeof body === 'string' ? body : JSON.stringify(body));
 }
 
-async function startServer(badApproval = false): Promise<string> {
+interface ServerBehavior {
+  badApproval?: boolean;
+  sessionName?: string;
+  scrobbleBody?: unknown;
+  nowPlayingBody?: unknown;
+  recentBody?: unknown;
+  sessionStatus?: number;
+}
+
+async function startServer(behavior: ServerBehavior = {}): Promise<string> {
   requests.length = 0;
   server = createServer((incoming, outgoing) => {
     const chunks: Buffer[] = [];
@@ -48,20 +57,55 @@ async function startServer(badApproval = false): Promise<string> {
             '/lastfm/authorize?api_key=0123456789abcdef0123456789abcdef&cb=http://localhost:9078/librefm/callback?state=x',
         });
       } else if (incoming.url === '/api/v1/lastfm/authorize') {
-        respond(outgoing, 200, { token: badApproval ? `${TEMP_TOKEN}${SESSION_KEY}` : TEMP_TOKEN });
-      } else if (incoming.url?.startsWith('/2.0/?method=auth.getSession&')) {
-        respond(outgoing, 200, { session: { name: 'alice.bsky.social', key: SESSION_KEY, subscriber: 0 } });
-      } else if (incoming.url === '/2.0/' && body.includes('method=track.scrobble')) {
         respond(outgoing, 200, {
-          scrobbles: {
-            '@attr': { accepted: 2, ignored: 0 },
-            scrobble: [{ track: { '#text': 'First Track' } }, { track: { '#text': 'Second Track' } }],
-          },
+          token: behavior.badApproval ? `${TEMP_TOKEN}${SESSION_KEY}` : TEMP_TOKEN,
         });
+      } else if (incoming.url?.startsWith('/2.0/?method=auth.getSession&')) {
+        if (behavior.sessionStatus === 204) {
+          outgoing.writeHead(204);
+          outgoing.end();
+        } else {
+          respond(outgoing, 200, {
+            session: {
+              name: behavior.sessionName ?? 'alice.bsky.social',
+              key: SESSION_KEY,
+              subscriber: 0,
+            },
+          });
+        }
+      } else if (incoming.url === '/2.0/' && body.includes('method=track.scrobble')) {
+        respond(
+          outgoing,
+          200,
+          behavior.scrobbleBody ?? {
+            scrobbles: {
+              '@attr': { accepted: 2, ignored: 0 },
+              scrobble: [
+                { track: { '#text': 'First Track' }, ignoredMessage: { code: '0', '#text': '' } },
+                { track: { '#text': 'Second Track' }, ignoredMessage: { code: '0', '#text': '' } },
+              ],
+            },
+          },
+        );
       } else if (incoming.url === '/2.0/' && body.includes('method=track.updateNowPlaying')) {
-        respond(outgoing, 200, { nowplaying: { track: { '#text': 'Now Playing' } } });
+        respond(
+          outgoing,
+          200,
+          behavior.nowPlayingBody ?? {
+            nowplaying: {
+              track: { '#text': 'Now Playing' },
+              ignoredMessage: { code: '0', '#text': '' },
+            },
+          },
+        );
       } else if (incoming.url?.startsWith('/2.0/?method=user.getRecentTracks&')) {
-        respond(outgoing, 200, { recenttracks: { track: [{ name: 'First Track' }, { name: 'Second Track' }] } });
+        respond(
+          outgoing,
+          200,
+          behavior.recentBody ?? {
+            recenttracks: { track: [{ name: 'First Track' }, { name: 'Second Track' }] },
+          },
+        );
       } else respond(outgoing, 404, { error: 'unexpected request' });
     });
   });
@@ -85,7 +129,7 @@ test('multi-scrobbler web auth, session exchange, batch writes and unsigned rece
   expect(result).toEqual({
     redirectPath: '/api/auth',
     callbackPath: '/librefm/callback?state=x',
-    sessionName: 'alice.bsky.social',
+    sessionEstablished: true,
     scrobbleBatchSize: 2,
     recentTrackCount: 2,
   });
@@ -141,7 +185,7 @@ test('multi-scrobbler web auth, session exchange, batch writes and unsigned rece
 });
 
 test('invalid protocol responses fail with a stable error that never leaks temporary or session secrets', async () => {
-  const transportOrigin = await startServer(true);
+  const transportOrigin = await startServer({ badApproval: true });
   // A malformed approval token fails before any Last.fm request and the thrown
   // error is deliberately independent of all response data.
   let caught = '';
@@ -153,4 +197,32 @@ test('invalid protocol responses fail with a stable error that never leaks tempo
   expect(caught).toBe('Error: multi-scrobbler Last.fm protocol response was invalid');
   expect(caught).not.toContain(TEMP_TOKEN);
   expect(caught).not.toContain(SESSION_KEY);
+});
+
+test('a session response cannot echo its key through the session name', async () => {
+  const transportOrigin = await startServer({ sessionName: SESSION_KEY });
+  await expect(runMultiScrobblerLastfm({ cookie: COOKIE, csrfToken: CSRF, transportOrigin })).rejects.toThrow(
+    'multi-scrobbler Last.fm protocol response was invalid',
+  );
+  expect(requests).toHaveLength(3);
+});
+
+test.each([
+  ['malformed scrobble acknowledgement', { scrobbleBody: { scrobbles: {} } }],
+  ['malformed now-playing acknowledgement', { nowPlayingBody: { nowplaying: [] } }],
+  ['empty recent-track result', { recentBody: { recenttracks: { track: [] } } }],
+  ['bodyless success response', { sessionStatus: 204 }],
+])('%s fails instead of reporting successful replay', async (_label, behavior) => {
+  const transportOrigin = await startServer(behavior);
+  await expect(runMultiScrobblerLastfm({ cookie: COOKIE, csrfToken: CSRF, transportOrigin })).rejects.toThrow(
+    'multi-scrobbler Last.fm protocol response was invalid',
+  );
+});
+
+test('transport requires a loopback HTTP origin and never defaults to public HTTPS through node:http', async () => {
+  requests.length = 0;
+  await expect(
+    runMultiScrobblerLastfm({ cookie: COOKIE, csrfToken: CSRF, transportOrigin: MULTI_SCROBBLER_PUBLIC_ORIGIN }),
+  ).rejects.toThrow('multi-scrobbler Last.fm protocol response was invalid');
+  expect(requests).toHaveLength(0);
 });

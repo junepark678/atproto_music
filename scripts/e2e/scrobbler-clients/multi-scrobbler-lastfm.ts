@@ -13,14 +13,14 @@ const CALLBACK = 'http://localhost:9078/librefm/callback?state=x';
 export interface MultiScrobblerLastfmOptions {
   cookie: string;
   csrfToken: string;
-  /** Test transport override. Headers and URL semantics retain the public origin. */
-  transportOrigin?: string;
+  /** Required loopback HTTP listener; request Host remains the public HTTPS host. */
+  transportOrigin: string;
 }
 
 export interface MultiScrobblerLastfmResult {
   redirectPath: string;
   callbackPath: string;
-  sessionName: string;
+  sessionEstablished: true;
   scrobbleBatchSize: number;
   recentTrackCount: number;
 }
@@ -36,7 +36,21 @@ async function request(
   path: string,
   init: RequestInit = {},
 ): Promise<Response> {
-  const target = new URL(path, transportOrigin);
+  const base = new URL(transportOrigin);
+  const loopback =
+    base.hostname === 'localhost' || /^127(?:\.\d{1,3}){3}$/.test(base.hostname) || base.hostname === '[::1]';
+  if (
+    base.protocol !== 'http:' ||
+    !loopback ||
+    base.username ||
+    base.password ||
+    base.pathname !== '/' ||
+    base.search ||
+    base.hash
+  )
+    return fail();
+  const target = new URL(path, base);
+  if (target.origin !== base.origin) return fail();
   const headers = Object.fromEntries(new Headers(init.headers).entries());
   headers.host = new URL(origin).host;
   const body =
@@ -45,17 +59,25 @@ async function request(
     const request = httpRequest(target, { method: init.method ?? 'GET', headers }, (incoming) => {
       const chunks: Buffer[] = [];
       incoming.on('data', (chunk: Buffer) => chunks.push(Buffer.from(chunk)));
+      incoming.once('aborted', () => reject(new Error('multi-scrobbler loopback transport failed')));
+      incoming.once('error', () => reject(new Error('multi-scrobbler loopback transport failed')));
       incoming.on('end', () => {
-        resolve(
-          new Response(Buffer.concat(chunks), {
-            status: incoming.statusCode ?? 502,
-            headers: Object.fromEntries(
-              Object.entries(incoming.headers as IncomingHttpHeaders).flatMap(([key, value]) =>
-                typeof value === 'string' ? [[key, value]] : [],
+        try {
+          const status = incoming.statusCode ?? 502;
+          const noBody = status === 204 || status === 205 || status === 304;
+          resolve(
+            new Response(noBody ? null : Buffer.concat(chunks), {
+              status,
+              headers: Object.fromEntries(
+                Object.entries(incoming.headers as IncomingHttpHeaders).flatMap(([key, value]) =>
+                  typeof value === 'string' ? [[key, value]] : [],
+                ),
               ),
-            ),
-          }),
-        );
+            }),
+          );
+        } catch {
+          reject(new Error('multi-scrobbler loopback transport failed'));
+        }
       });
     });
     request.once('error', () => reject(new Error('multi-scrobbler loopback transport failed')));
@@ -81,7 +103,7 @@ export async function runMultiScrobblerLastfm(
   options: MultiScrobblerLastfmOptions,
 ): Promise<MultiScrobblerLastfmResult> {
   const publicOrigin = MULTI_SCROBBLER_PUBLIC_ORIGIN;
-  const transportOrigin = options.transportOrigin ?? publicOrigin;
+  const transportOrigin = options.transportOrigin;
 
   const redirect = await request(publicOrigin, transportOrigin, `/api/auth?api_key=${API_KEY}&cb=${CALLBACK}`);
   const expectedLocation = `/lastfm/authorize?api_key=${API_KEY}&cb=${CALLBACK}`;
@@ -121,7 +143,14 @@ export async function runMultiScrobblerLastfm(
   if (!session || typeof session !== 'object' || Array.isArray(session)) return fail();
   const sessionName = (session as Record<string, unknown>).name;
   const sessionKey = (session as Record<string, unknown>).key;
-  if (typeof sessionName !== 'string' || typeof sessionKey !== 'string' || !/^[0-9a-f]{32}$/.test(sessionKey))
+  if (
+    typeof sessionName !== 'string' ||
+    sessionName.length === 0 ||
+    typeof sessionKey !== 'string' ||
+    !/^[0-9a-f]{32}$/.test(sessionKey) ||
+    sessionName.includes(sessionKey) ||
+    sessionName.includes(temporaryToken)
+  )
     return fail();
 
   const batch = [
@@ -143,6 +172,23 @@ export async function runMultiScrobblerLastfm(
   const scrobbleBody = await json(scrobbles);
   const scrobbleRoot = scrobbleBody.scrobbles;
   if (!scrobbleRoot || typeof scrobbleRoot !== 'object' || Array.isArray(scrobbleRoot)) return fail();
+  const scrobbleRecord = scrobbleRoot as Record<string, unknown>;
+  const attributes = scrobbleRecord['@attr'];
+  const scrobbleItems = scrobbleRecord.scrobble;
+  if (
+    !attributes ||
+    typeof attributes !== 'object' ||
+    (attributes as Record<string, unknown>).accepted !== batch.length ||
+    (attributes as Record<string, unknown>).ignored !== 0 ||
+    !Array.isArray(scrobbleItems) ||
+    scrobbleItems.length !== batch.length ||
+    !scrobbleItems.every((item) => {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) return false;
+      const ignored = (item as Record<string, unknown>).ignoredMessage;
+      return Boolean(ignored && typeof ignored === 'object' && (ignored as Record<string, unknown>).code === '0');
+    })
+  )
+    return fail();
 
   const nowPlaying = await lastfmPost(transportOrigin, {
     method: 'track.updateNowPlaying',
@@ -155,7 +201,16 @@ export async function runMultiScrobblerLastfm(
   });
   if (nowPlaying.status !== 200) return fail();
   const nowBody = await json(nowPlaying);
-  if (!nowBody.nowplaying || typeof nowBody.nowplaying !== 'object') return fail();
+  const nowPlayingResult = nowBody.nowplaying;
+  if (
+    !nowPlayingResult ||
+    typeof nowPlayingResult !== 'object' ||
+    Array.isArray(nowPlayingResult) ||
+    !(nowPlayingResult as Record<string, unknown>).ignoredMessage ||
+    typeof (nowPlayingResult as Record<string, unknown>).ignoredMessage !== 'object' ||
+    ((nowPlayingResult as Record<string, unknown>).ignoredMessage as Record<string, unknown>).code !== '0'
+  )
+    return fail();
 
   const recentPath = `/2.0/?${new URLSearchParams({
     method: 'user.getRecentTracks',
@@ -169,12 +224,23 @@ export async function runMultiScrobblerLastfm(
   const recentTracks = recentBody.recenttracks;
   if (!recentTracks || typeof recentTracks !== 'object' || Array.isArray(recentTracks)) return fail();
   const trackList = (recentTracks as Record<string, unknown>).track;
-  if (!Array.isArray(trackList) || !trackList.every((track) => track && typeof track === 'object')) return fail();
+  if (
+    !Array.isArray(trackList) ||
+    trackList.length === 0 ||
+    !trackList.every(
+      (track) =>
+        track &&
+        typeof track === 'object' &&
+        !Array.isArray(track) &&
+        typeof (track as Record<string, unknown>).name === 'string',
+    )
+  )
+    return fail();
 
   return {
     redirectPath: '/api/auth',
     callbackPath: '/librefm/callback?state=x',
-    sessionName,
+    sessionEstablished: true,
     scrobbleBatchSize: batch.length,
     recentTrackCount: trackList.length,
   };
