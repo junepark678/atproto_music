@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -84,6 +84,64 @@ test('a lock left by a killed stack process is reclaimed for the next run', asyn
 
   const release = await acquireStackOwnership({ worker: 0, plc: 0, pds1: 0, pds2: 0, proxy: 0, control: 0 }, lockPath);
   release();
+});
+
+test('competing starters cannot remove the replacement lock while reclaiming a stale owner', async () => {
+  const lockPath = temporaryLockPath();
+  mkdirSync(lockPath);
+  writeFileSync(join(lockPath, 'owner.json'), `${JSON.stringify({ pid: 2_000_000_000, token: 'a'.repeat(32) })}\n`);
+  const sourceUrl = pathToFileURL(resolve('scripts/e2e/start-stack.ts')).href;
+  const contenderSource = `import { acquireStackOwnership } from ${JSON.stringify(sourceUrl)}; try { await acquireStackOwnership({ worker: 0, plc: 0, pds1: 0, pds2: 0, proxy: 0, control: 0 }, ${JSON.stringify(lockPath)}); console.log('ACQUIRED'); setInterval(() => {}, 1000); } catch { console.log('REJECTED'); }`;
+  const contenders = [0, 1].map(() =>
+    spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', contenderSource], {
+      cwd: process.cwd(),
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }),
+  );
+  const output = contenders.map(() => '');
+  for (const [index, child] of contenders.entries()) {
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (chunk: string) => {
+      output[index] += chunk;
+    });
+    child.stderr.on('data', (chunk: string) => {
+      output[index] += chunk;
+    });
+  }
+
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const deadline = setTimeout(() => reject(new Error(`contenders did not settle: ${output.join(' | ')}`)), 10_000);
+      const check = (): void => {
+        if (output.every((value) => value.includes('ACQUIRED') || value.includes('REJECTED'))) {
+          clearTimeout(deadline);
+          resolve();
+        }
+      };
+      for (const child of contenders) child.stdout?.on('data', check);
+    });
+
+    expect(output.filter((value) => value.includes('ACQUIRED'))).toHaveLength(1);
+    expect(output.filter((value) => value.includes('REJECTED'))).toHaveLength(1);
+    expect(JSON.parse(readFileSync(join(lockPath, 'owner.json'), 'utf8'))).toMatchObject({
+      pid: expect.any(Number),
+      token: expect.stringMatching(/^[a-f0-9]{32}$/),
+    });
+  } finally {
+    for (const child of contenders) {
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+    }
+    await Promise.all(
+      contenders.map(
+        (child) =>
+          new Promise<void>((resolve) => {
+            if (child.exitCode !== null || child.signalCode !== null) return resolve();
+            child.once('exit', () => resolve());
+          }),
+      ),
+    );
+  }
 });
 
 test('occupied e2e port releases the ownership lock before rejecting startup', async () => {

@@ -4,7 +4,7 @@
 
 import { type ChildProcess, spawn } from 'node:child_process';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { chmodSync, closeSync, mkdirSync, openSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer as createHttpServer, type Server as HttpServer } from 'node:http';
 import { createServer } from 'node:net';
 import { join } from 'node:path';
@@ -54,7 +54,7 @@ interface StackLockOwner {
 
 function readStackLockOwner(lockPath: string): StackLockOwner | null {
   try {
-    const value: unknown = JSON.parse(readFileSync(lockPath, 'utf8'));
+    const value: unknown = JSON.parse(readFileSync(join(lockPath, 'owner.json'), 'utf8'));
     if (
       typeof value !== 'object' ||
       value === null ||
@@ -89,19 +89,47 @@ function reclaimStaleStackLock(lockPath: string): boolean {
   const observed = readStackLockOwner(lockPath);
   if (!observed || processIsAlive(observed.pid)) return false;
 
-  // Re-read before unlinking so an owner that released and replaced the file
-  // while we checked its PID is never mistaken for the stale lock.
-  const current = readStackLockOwner(lockPath);
-  if (!current || current.pid !== observed.pid || current.token !== observed.token || processIsAlive(current.pid)) {
-    return false;
-  }
+  // Only one process can create this marker, so stale-owner validation and
+  // replacement-lock removal cannot race between competing starters.
+  const reclaimPath = join(lockPath, '.reclaim');
   try {
-    unlinkSync(lockPath);
-    return true;
+    mkdirSync(reclaimPath, { mode: 0o700 });
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return true;
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST' || (error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return false;
+    }
     throw error;
   }
+
+  const current = readStackLockOwner(lockPath);
+  if (!current || current.pid !== observed.pid || current.token !== observed.token || processIsAlive(current.pid)) {
+    rmSync(reclaimPath, { recursive: true, force: true });
+    return false;
+  }
+
+  // Rename the entire lock directory atomically. A new owner may create the
+  // original path immediately; cleanup touches only our unique tombstone.
+  const reclaimedPath = `${lockPath}.stale-${randomBytes(8).toString('hex')}`;
+  try {
+    renameSync(lockPath, reclaimedPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return true;
+    try {
+      rmSync(reclaimPath, { recursive: true, force: true });
+    } catch {
+      // Preserve the original rename error; a remaining marker fails closed.
+    }
+    throw error;
+  }
+  // If tombstone cleanup fails, ownership is still safely reclaimed because
+  // the original path was atomically vacated. Never touch it again here: a
+  // competing starter may already have installed a replacement lock there.
+  try {
+    rmSync(reclaimedPath, { recursive: true, force: true });
+  } catch {
+    // A leftover uniquely named tombstone cannot block or affect a new owner.
+  }
+  return true;
 }
 
 function run(cmd: string, args: string[], cwd: string, env: NodeJS.ProcessEnv = process.env): Promise<void> {
@@ -130,10 +158,9 @@ async function assertPortsFree(ports: E2ePorts): Promise<void> {
 /** Claims this workspace before checking ports or touching stack output. */
 export async function acquireStackOwnership(ports: E2ePorts, lockPath = STACK_LOCK_FILE): Promise<() => void> {
   const token = randomBytes(16).toString('hex');
-  let fd: number;
   for (let attempt = 0; ; attempt += 1) {
     try {
-      fd = openSync(lockPath, 'wx', 0o600);
+      mkdirSync(lockPath, { mode: 0o700 });
       break;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
@@ -144,11 +171,13 @@ export async function acquireStackOwnership(ports: E2ePorts, lockPath = STACK_LO
     }
   }
   try {
-    writeFileSync(fd, `${JSON.stringify({ pid: process.pid, token })}\n`);
+    writeFileSync(join(lockPath, 'owner.json'), `${JSON.stringify({ pid: process.pid, token })}\n`, {
+      flag: 'wx',
+      mode: 0o600,
+    });
   } catch (error) {
-    closeSync(fd);
     try {
-      unlinkSync(lockPath);
+      rmSync(lockPath, { recursive: true, force: true });
     } catch {
       // Preserve the original write error; the lock path is included in the error context below.
     }
@@ -158,10 +187,9 @@ export async function acquireStackOwnership(ports: E2ePorts, lockPath = STACK_LO
   const release = (): void => {
     if (released) return;
     released = true;
-    closeSync(fd);
     try {
-      const owner = JSON.parse(readFileSync(lockPath, 'utf8')) as { token?: unknown };
-      if (owner.token === token) unlinkSync(lockPath);
+      const owner = JSON.parse(readFileSync(join(lockPath, 'owner.json'), 'utf8')) as { token?: unknown };
+      if (owner.token === token) rmSync(lockPath, { recursive: true, force: true });
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
