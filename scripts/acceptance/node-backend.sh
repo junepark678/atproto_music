@@ -116,7 +116,7 @@ run_step() {
 
 step_check_ts() {
   rm -f work/ts-test-cases.jsonl
-  bash scripts/check-ts.sh
+  ATMUSIC_RUN_NO_WORKERS_ACCEPTANCE=1 bash scripts/check-ts.sh
   local status=$?
   if [[ -f work/ts-test-cases.jsonl ]]; then cp work/ts-test-cases.jsonl "$OUT/check-ts.jsonl"; fi
   return $status
@@ -306,7 +306,7 @@ step_live() {
 }
 
 echo "node-backend acceptance gate: commit $COMMIT, out ${OUT#"$ROOT"/}"
-run_step check-ts 'bash scripts/check-ts.sh' step_check_ts
+run_step check-ts 'ATMUSIC_RUN_NO_WORKERS_ACCEPTANCE=1 bash scripts/check-ts.sh' step_check_ts
 run_step node-tests 'npx vitest run --project worker-node --project worker-acceptance' step_node_tests
 run_step e2e 'npx playwright test' step_e2e
 run_step scrobbler-e2e "npx tsx scripts/e2e/scrobbler-e2e.ts --out \"$OUT/scrobbler-e2e\"" step_scrobbler_e2e

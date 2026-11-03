@@ -40,7 +40,7 @@ run shows every problem. Each step writes `<step>.command` (the command line),
 
 | Step | Command | What it contributes |
 | --- | --- | --- |
-| `check-ts` | `bash scripts/check-ts.sh` | Typecheck, lint, contract validation, unit suites; produces `check-ts.jsonl` test records. |
+| `check-ts` | `ATMUSIC_RUN_NO_WORKERS_ACCEPTANCE=1 bash scripts/check-ts.sh` | Typecheck, lint, contract validation, unit suites, and the explicit disposable no-workerd install/check; produces `check-ts.jsonl` test records. Ordinary `npm test` and `npm run check` leave that network-dependent install test skipped. |
 | `node-tests` | `npx vitest run --project worker-node --project worker-acceptance` | Node runtime and acceptance suites; produces `node-tests-report.json` and `node-tests.jsonl`. |
 | `e2e` | `npx playwright test` | Browser end-to-end suites; produces `e2e-report.json`. |
 | `scrobbler-e2e` | `npx tsx scripts/e2e/scrobbler-e2e.ts --out "$OUT/scrobbler-e2e"` | Process-backed fixture replay; copies the emitted `scrobbler-e2e/scrobbler-e2e.jsonl` to `scrobbler-e2e.jsonl` for closure, including failed records on a nonzero exit. Missing JSONL fails the step; log lines cannot replace records. |
