@@ -1496,6 +1496,7 @@
      "web/test/session/client.test.ts › does not let a mutation 401 from the previous account clear a newer session",
      "web/test/session/client.test.ts › does not let an authenticated GET 401 from the previous account clear a newer session",
      "web/test/session/client.test.ts › clears the reauth flag and draft when sign-out is confirmed during a pending refresh",
+     "web/test/session/client.test.ts › keeps the reauthentication flag when the initial bootstrap restores an expired session",
      "web/test/session/client.test.ts › refreshes a cached expired session on focus when BroadcastChannel is unavailable",
      "web/test/routes/signin.test.tsx › keeps the sign-in retry form visible for a reauth_required server session",
      "web/test/routes/settings-accounts.test.tsx › reauth_required settings pages show account data without mutation forms",

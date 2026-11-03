@@ -1,6 +1,7 @@
 import { render } from 'preact';
 import { App } from './app';
 import { removeLegacyDatabases } from './migration';
+import { bootstrapSession } from './session/bootstrap';
 import { sessionClient } from './session/client';
 import { announceSessionReady, listenForSessionReady, REAUTH_POPUP_MARKER } from './session/reauth-channel';
 import { createAppState, setSession } from './state/store';
@@ -12,14 +13,11 @@ const state = createAppState();
 void removeLegacyDatabases().catch(() => {});
 const client = sessionClient();
 listenForSessionReady(client);
-client.subscribe((session, reauth) => {
-  setSession(state, session, null, { reauthRequired: reauth });
-});
 render(<App state={state} />, root);
-void client
-  .getSession()
+void bootstrapSession(client, (session, reauth) => {
+  setSession(state, session, null, { reauthRequired: reauth });
+})
   .then((session) => {
-    setSession(state, session);
     if (session?.status === 'active') {
       announceSessionReady();
       try {

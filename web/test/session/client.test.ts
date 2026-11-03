@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { bootstrapSession } from '../../src/session/bootstrap';
 import { type Session, SessionClient, sessionClient, sessionFetch } from '../../src/session/client';
 import { listenForSessionReady } from '../../src/session/reauth-channel';
 import { createAppState, setScrobbleDraft, setSession } from '../../src/state/store';
@@ -19,6 +20,19 @@ const dto: Session = {
 };
 
 describe('web/test/session/client.test.ts', () => {
+  it('keeps the reauthentication flag when the initial bootstrap restores an expired session', async () => {
+    const reauth = { ...dto, handle: null, status: 'reauth_required' as const };
+    const state = createAppState();
+    const client = new SessionClient({ fetch: vi.fn().mockResolvedValue(Response.json(reauth)) });
+
+    await expect(
+      bootstrapSession(client, (session, reauthRequired) => setSession(state, session, null, { reauthRequired })),
+    ).resolves.toEqual(reauth);
+
+    expect(state.session.value).toEqual(reauth);
+    expect(state.reauthRequired.value).toBe(true);
+  });
+
   it('getSession caches csrfToken; every mutation sends X-CSRF-Token with same-origin credentials; 401 shows signed-out and reauth_required shows the re-sign-in banner', async () => {
     const changed = vi.fn();
     const fetcher = vi
