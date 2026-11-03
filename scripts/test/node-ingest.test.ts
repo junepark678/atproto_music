@@ -1,6 +1,8 @@
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { createRequire } from 'node:module';
-import { resolve } from 'node:path';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { systemClock } from '@atmusic/core/deps';
 import { buildScrobbleRecord } from '@atmusic/core/scrobble';
@@ -17,6 +19,7 @@ import {
   spec,
 } from '../live/node_ingest_check.ts';
 import { NODE_ENV, type NodeGateContext, type NodeGateIO, runNodeGate } from '../live/node-live-gate.ts';
+import { startOwnedChromium } from '../live/owned-chromium.ts';
 import { OAUTH_ENV } from '../live/workers_oauth_check.ts';
 
 const REPO = resolve(fileURLToPath(new URL('../..', import.meta.url)));
@@ -770,6 +773,35 @@ test('a forever-pending browser launch is terminated before evidence can return'
   expect(failures).toEqual(emittedFailures);
   expect(cleanup).toEqual(emittedCleanup);
   expect(failures).toContain('Node ingest failed during PDS identity checks');
+});
+
+test('Node ingest reaps the actual owned startup process before returning timeout evidence', async () => {
+  const { deps } = mockDependencies();
+  const fixtureDir = await mkdtemp(join(tmpdir(), 'atmusic-ingest-test-'));
+  const pidFile = join(fixtureDir, 'pid');
+  deps.startBrowser = (timeoutMs) =>
+    startOwnedChromium(false, timeoutMs, 250, {
+      executablePath: process.execPath,
+      args: [
+        '-e',
+        `require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setInterval(() => {}, 1000)`,
+      ],
+    });
+  const failures: string[] = [];
+  const cleanup: string[] = [];
+  const startedAt = performance.now();
+  await runNodeIngest(makeContext(failures, cleanup, { ...goodEnv, [NODE_INGEST_ENV.timeoutSeconds]: '1' }), deps);
+  const pid = Number(await readFile(pidFile, 'utf8'));
+  const emittedFailures = [...failures];
+  const emittedCleanup = [...cleanup];
+
+  expect(performance.now() - startedAt).toBeLessThan(1_300);
+  expect(() => process.kill(pid, 0)).toThrow();
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  expect(failures).toEqual(emittedFailures);
+  expect(cleanup).toEqual(emittedCleanup);
+  expect(failures).toContain('Node ingest failed during PDS identity checks');
+  await rm(fixtureDir, { recursive: true, force: true });
 });
 
 test.each([1_100, 1_500])('browser startup scheduled at %d ms is canceled at the launch deadline', async (launchMs) => {

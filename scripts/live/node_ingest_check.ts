@@ -34,6 +34,7 @@ import {
   type NodeGateContext,
   type NodeGateSpec,
 } from './node-live-gate.ts';
+import { type OwnedChromiumLaunch, startOwnedChromium } from './owned-chromium.ts';
 import { launchBrowser, OAUTH_ENV, signInChecks, signInTimeoutMs } from './workers_oauth_check.ts';
 
 export const NODE_INGEST_ENV = {
@@ -110,6 +111,7 @@ interface BrowserApiResponse {
 
 export interface IngestDependencies {
   browser(timeoutMs: number): Promise<Browser>;
+  startBrowser?(timeoutMs: number): OwnedChromiumLaunch;
   pdsInfo(endpoint: string, implementation: string, timeoutMs?: number): Promise<PdsInfo>;
   httpJson: typeof httpJson;
   verifyRecordAt(did: string, collection: string, rkey: string, timeoutMs?: number): ReturnType<typeof verifyRecordAt>;
@@ -172,6 +174,7 @@ async function closeWithinDeadline<T>(
 
 const dependencies: IngestDependencies = {
   browser: (timeoutMs) => launchBrowser(process.env, timeoutMs),
+  startBrowser: (timeoutMs) => startOwnedChromium(process.env[OAUTH_ENV.interactive] === '1', timeoutMs),
   pdsInfo: (endpoint, implementation, timeoutMs) => pdsInfo(endpoint, implementation, timeoutMs),
   httpJson,
   verifyRecordAt: (did, collection, rkey, timeoutMs = 15_000) =>
@@ -630,6 +633,7 @@ export async function runNodeIngest(
   const records: RecordIntent[] = [];
   const results: Record<string, unknown> = {};
   let browser: Browser | null = null;
+  let browserLaunch: OwnedChromiumLaunch | null = null;
   let browserContext: Awaited<ReturnType<Browser['newContext']>> | null = null;
   let browserContextClosed = false;
   let page: Page | null = null;
@@ -643,17 +647,26 @@ export async function runNodeIngest(
     await deps.checkIdentityPds(didB, pds[1]!.endpoint, phaseBudgetMs());
     const launchDeadline = performance.now() + phaseBudgetMs();
     try {
-      // Playwright's launch timeout tears down the partially started browser
-      // process. Await it directly so no launch continuation can outlive the
-      // gate body or mutate evidence after it has been emitted.
-      browser = await deps.browser(remainingMs(launchDeadline));
+      if (deps.startBrowser !== undefined) {
+        browserLaunch = deps.startBrowser(remainingMs(launchDeadline));
+        browser = await withTimeout(browserLaunch.ready, remainingMs(launchDeadline), 'browser launch');
+      } else {
+        browser = await deps.browser(remainingMs(launchDeadline));
+      }
       if (performance.now() > launchDeadline) {
-        await closeWithinDeadline(() => browser!.close(), deadlineAt, 'late browser close', 100);
+        if (browserLaunch !== null) await browserLaunch.terminate(deadlineAt);
+        else await closeWithinDeadline(() => browser!.close(), deadlineAt, 'late browser close', 250);
         browser = null;
         throw new Error('browser launch deadline exceeded');
       }
     } catch (error) {
-      if (browser !== null && performance.now() >= launchDeadline) {
+      if (browserLaunch !== null && browser === null) {
+        const stopped = await browserLaunch.terminate(deadlineAt);
+        if (!stopped.processStopped)
+          context.cleanup('owned browser process termination was not confirmed before the ingest deadline');
+        else if (!stopped.profileRemoved)
+          context.cleanup('owned browser temporary profile removal was not confirmed before the ingest deadline');
+      } else if (browser !== null && performance.now() >= launchDeadline) {
         context.cleanup('late browser launch unresolved; inspect the runner process for a browser left open');
       }
       throw error;
@@ -1091,28 +1104,54 @@ export async function runNodeIngest(
     results.unresolvedSubjects = unresolvedSubjects;
     results.unresolvedOperations = unresolvedOperations;
     try {
-      if (page !== null) await closeWithinDeadline(() => page!.close(), deadlineAt, 'page close');
+      if (page !== null)
+        await closeWithinDeadline(() => page!.close(), deadlineAt, 'page close', browserLaunch === null ? 0 : 250);
     } catch {
       context.fail('page close failed during teardown');
       context.cleanup('page close failed');
     }
     try {
       if (browserContext !== null)
-        await closeWithinDeadline(() => browserContext!.close(), deadlineAt, 'browser context close');
+        await closeWithinDeadline(
+          () => browserContext!.close(),
+          deadlineAt,
+          'browser context close',
+          browserLaunch === null ? 0 : 250,
+        );
       if (browserContext !== null) browserContextClosed = true;
     } catch {
       context.fail('browser context close failed during teardown');
-      context.cleanup(
-        'browser context closure was not confirmed; inspect the runner process and close any remaining context',
-      );
+      if (browserLaunch === null)
+        context.cleanup(
+          'browser context closure was not confirmed; inspect the runner process and close any remaining context',
+        );
     }
     try {
-      if (browser !== null) await closeWithinDeadline(() => browser!.close(), deadlineAt, 'browser close');
+      if (browser !== null)
+        await closeWithinDeadline(
+          () => browser!.close(),
+          deadlineAt,
+          'browser close',
+          browserLaunch === null ? 0 : 250,
+        );
     } catch {
       context.fail('browser close failed during teardown');
-      context.cleanup(
-        'browser process closure was not confirmed; inspect the runner process and terminate any remaining browser',
-      );
+      if (browserLaunch === null)
+        context.cleanup(
+          'browser process closure was not confirmed; inspect the runner process and terminate any remaining browser',
+        );
+    }
+    if (browserLaunch !== null) {
+      const stopped = await browserLaunch.terminate(deadlineAt);
+      if (stopped.processStopped) browserContextClosed = browserContext !== null;
+      else {
+        context.fail('owned browser process termination was not confirmed during teardown');
+        context.cleanup('owned browser process termination was not confirmed; inspect the runner process');
+      }
+      if (!stopped.profileRemoved) {
+        context.fail('owned browser temporary profile removal was not confirmed during teardown');
+        context.cleanup('owned browser temporary profile removal was not confirmed; inspect the runner temp directory');
+      }
     }
     if (appSession !== null) {
       if (browserContextClosed)
