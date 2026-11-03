@@ -151,31 +151,6 @@ export function validateReport(v: unknown): asserts v is ProtocolReadsReport {
     typeof v.dataset.applyPathRecords !== 'number' ||
     !Number.isInteger(v.dataset.applyPathRecords) ||
     v.dataset.applyPathRecords < 1 ||
-    !record(v.dataset.operations) ||
-    typeof v.dataset.operations.total !== 'number' ||
-    !Number.isSafeInteger(v.dataset.operations.total) ||
-    v.dataset.operations.total < 1 ||
-    typeof v.dataset.operations.scrobbleCreateSucceeded !== 'number' ||
-    !Number.isSafeInteger(v.dataset.operations.scrobbleCreateSucceeded) ||
-    v.dataset.operations.scrobbleCreateSucceeded < 0 ||
-    !record(v.dataset.operations.scrobbleDelete) ||
-    !['queued', 'running', 'blocked', 'failed', 'succeededMatchingCid', 'succeededStaleCid'].every(
-      (state) =>
-        typeof v.dataset.operations.scrobbleDelete[state] === 'number' &&
-        Number.isSafeInteger(v.dataset.operations.scrobbleDelete[state]) &&
-        (v.dataset.operations.scrobbleDelete[state] as number) >= 0,
-    ) ||
-    typeof v.dataset.operations.visibleScrobbles !== 'number' ||
-    !Number.isSafeInteger(v.dataset.operations.visibleScrobbles) ||
-    typeof v.dataset.operations.hiddenScrobbles !== 'number' ||
-    !Number.isSafeInteger(v.dataset.operations.hiddenScrobbles) ||
-    v.dataset.operations.visibleScrobbles + v.dataset.operations.hiddenScrobbles !== v.dataset.listens ||
-    v.dataset.operations.total !==
-      v.dataset.operations.scrobbleCreateSucceeded +
-        Object.values(v.dataset.operations.scrobbleDelete).reduce(
-          (sum, value) => sum + (typeof value === 'number' ? value : Number.NaN),
-          0,
-        ) ||
     !record(v.plans) ||
     typeof v.plans.source !== 'string' ||
     !record(v.reads) ||
@@ -184,6 +159,49 @@ export function validateReport(v: unknown): asserts v is ProtocolReadsReport {
     !record(v.reads.topTracks.uncached)
   )
     throw Error('invalid protocol-read report envelope');
+  const dataset = v.dataset;
+  if (!record(dataset.operations)) throw Error('invalid protocol-read report envelope');
+  const operations = dataset.operations;
+  const deleteStateNames = [
+    'queued',
+    'running',
+    'blocked',
+    'failed',
+    'succeededMatchingCid',
+    'succeededStaleCid',
+  ] as const;
+  if (
+    typeof operations.total !== 'number' ||
+    !Number.isSafeInteger(operations.total) ||
+    operations.total < 1 ||
+    typeof operations.scrobbleCreateSucceeded !== 'number' ||
+    !Number.isSafeInteger(operations.scrobbleCreateSucceeded) ||
+    operations.scrobbleCreateSucceeded < 0 ||
+    !record(operations.scrobbleDelete)
+  ) {
+    throw Error('invalid protocol-read report envelope');
+  }
+  const deleteCounts = operations.scrobbleDelete;
+  if (Object.keys(deleteCounts).length !== deleteStateNames.length) {
+    throw Error('invalid protocol-read report envelope');
+  }
+  const deleteValues = deleteStateNames.map((state) => deleteCounts[state]);
+  if (
+    !deleteValues.every((value) => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) ||
+    typeof operations.visibleScrobbles !== 'number' ||
+    !Number.isSafeInteger(operations.visibleScrobbles) ||
+    operations.visibleScrobbles < 0 ||
+    typeof operations.hiddenScrobbles !== 'number' ||
+    !Number.isSafeInteger(operations.hiddenScrobbles) ||
+    operations.hiddenScrobbles < 0 ||
+    operations.visibleScrobbles + operations.hiddenScrobbles !== dataset.listens
+  ) {
+    throw Error('invalid protocol-read report envelope');
+  }
+  const deleteTotal = (deleteValues as number[]).reduce((sum, value) => sum + value, 0);
+  if (operations.total !== operations.scrobbleCreateSucceeded + deleteTotal) {
+    throw Error('invalid protocol-read report envelope');
+  }
   for (const key of ['topTracks', 'recentTracks', 'listenbrainzAllTime', 'listeningActivityYear']) {
     const plans = v.plans[key];
     if (!Array.isArray(plans) || plans.length === 0) throw Error(`invalid query plan set: ${key}`);

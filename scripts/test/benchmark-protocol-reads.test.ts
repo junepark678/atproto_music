@@ -65,11 +65,30 @@ describe('protocol-read benchmark report', () => {
     const badVisibility = report();
     badVisibility.dataset.operations.hiddenScrobbles--;
     expect(() => validateReport(badVisibility)).toThrow(/invalid protocol-read report envelope/);
+
+    const negativeVisible = report();
+    negativeVisible.dataset.operations.visibleScrobbles = -1;
+    negativeVisible.dataset.operations.hiddenScrobbles = 100_001;
+    expect(() => validateReport(negativeVisible)).toThrow(/invalid protocol-read report envelope/);
+
+    const negativeHidden = report();
+    negativeHidden.dataset.operations.visibleScrobbles = 100_001;
+    negativeHidden.dataset.operations.hiddenScrobbles = -1;
+    expect(() => validateReport(negativeHidden)).toThrow(/invalid protocol-read report envelope/);
+  });
+
+  it('rejects unrecognized delete-state fields instead of omitting them from rendered totals', () => {
+    const value = report();
+    const withExtra = value.dataset.operations.scrobbleDelete as typeof value.dataset.operations.scrobbleDelete & {
+      extra?: number;
+    };
+    withExtra.extra = 1;
+    value.dataset.operations.total++;
+    expect(() => validateReport(value)).toThrow(/invalid protocol-read report envelope/);
   });
 
   it('rejects legacy receipts that do not describe the operations dataset', () => {
-    const legacy = report() as ProtocolReadsReport & { schema: string };
-    legacy.schema = 'atmusic/protocol-reads-benchmark@1';
+    const legacy: unknown = { ...report(), schema: 'atmusic/protocol-reads-benchmark@1' };
     expect(() => validateReport(legacy)).toThrow(/invalid protocol-read report envelope/);
   });
 });

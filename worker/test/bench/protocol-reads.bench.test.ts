@@ -164,7 +164,7 @@ function directInsert(db: Db, did: string, item: Generated, prepared?: PreparedI
   else db.run(INSERT, ...(values as SqlParam[]));
 }
 
-function seedOperations(db: Db): void {
+function seedOperations(db: TestApp['db']): void {
   const creates = db.raw.prepare(`INSERT INTO operations(
     id,did,kind,origin,priority,collection,rkey,state,attempts,due_at,created_at_ms,updated_at_ms
   ) VALUES(?,?,'scrobble.create','web',0,?,?,'succeeded',1,?,?,?)`);
