@@ -3,6 +3,7 @@
 
 import { mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { fixtureKeys } from '@atmusic/atproto/test-support/keys';
 import { SignedRepo } from '@atmusic/atproto/test-support/signed-repo';
 import { verifyRecordProof } from '@atmusic/atproto/verify/record-proof';
@@ -32,6 +33,9 @@ const API_KEY = 'pano-test-key';
 const LISTENS = 100_000;
 const SEED = 0x5eed;
 const READS = 10;
+// The fixture freezes time, so the per-IP read buckets do not refill. Keep
+// READS under Last.fm's 18-request and ListenBrainz's 14-request test budgets.
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
 
 const COLUMNS = `uri,cid,did,rkey,revision,artist,track,album,listened_at,created_at,duration_seconds,
   recording_mbid,indexed_at,artist_key,track_key,album_key,album_artist,album_artist_key,track_number,
@@ -166,7 +170,9 @@ async function measure(
 }
 
 function reportFile(): string {
-  return resolve(process.env.ATMUSIC_PROTOCOL_BENCH_OUT ?? 'work/bench/protocol-reads.json');
+  return process.env.ATMUSIC_PROTOCOL_BENCH_OUT
+    ? resolve(process.env.ATMUSIC_PROTOCOL_BENCH_OUT)
+    : resolve(REPO_ROOT, 'work/bench/protocol-reads.json');
 }
 
 async function fixture(): Promise<{ app: TestApp; captured: Captured[] }> {
@@ -319,7 +325,9 @@ describe('N5-02 protocol read benchmark', () => {
     const cachedTop = await json(app, path);
     expect(cachedTop.response.status, cachedTop.body).toBe(200);
     expect(cachedTop.body).toBe(uncachedTop.body);
-    expect(captured.slice(cacheStart).some((q) => /\b(?:FROM|JOIN)\s+scrobbles\b/i.test(q.sql))).toBe(false);
+    const cachedQueries = captured.slice(cacheStart);
+    expect(cachedQueries.some((q) => /\bFROM\s+range_stats_cache\b/i.test(q.sql))).toBe(true);
+    expect(cachedQueries.some((q) => /\b(?:FROM|JOIN)\s+scrobbles\b/i.test(q.sql))).toBe(false);
 
     const report: ProtocolReadsReport = {
       schema: 'atmusic/protocol-reads-benchmark@1',

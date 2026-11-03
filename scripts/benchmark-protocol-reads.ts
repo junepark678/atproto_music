@@ -13,9 +13,11 @@
 
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 export const REPORT_SCHEMA_ID = 'atmusic/protocol-reads-benchmark@1';
-export const DEFAULT_DOC = resolve('docs/benchmarks/node-protocol-reads.md');
+export const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+export const DEFAULT_DOC = resolve(REPO_ROOT, 'docs/benchmarks/node-protocol-reads.md');
 const names = ['topTracks', 'recentTracksPage500', 'listenbrainzAllTime', 'listeningActivityYear'] as const;
 export type Timing = { runs: number; p50Ms: number; p95Ms: number };
 export interface QueryPlanStatement {
@@ -60,6 +62,12 @@ const SQL_KEYWORDS = new Set([
   'ORDER',
   'LIMIT',
   'UNION',
+  'SET',
+  'USING',
+  'NATURAL',
+  'HAVING',
+  'EXCEPT',
+  'INTERSECT',
 ]);
 function scrobblesAliases(sql: string): string[] {
   const aliases: string[] = [];
@@ -179,7 +187,7 @@ export function renderReport(r: ProtocolReadsReport): string {
     'ListenBrainz all_time stats': null,
     'ListenBrainz listening-activity year': null,
   };
-  return `# Node protocol-read benchmark\n\nGenerated: ${r.generatedAt}  \nReceipt: \`${r.generatedBy}\`  \nDataset: ${r.dataset.listens.toLocaleString()} listens, seed ${r.dataset.seed}, fixed clock ${r.dataset.clock}; apply-path parity sample ${r.dataset.applyPathRecords} records\n\nThe main fixture inserts the 100,000-listen projection through direct SQL after production record normalization. The parity sample compares signed repository verification and the production apply path against equivalent direct inserts. Reads are measured through the Node HTTP composition; fixture setup, cache invalidation, and report writing are outside each timed sample. Each read has ten samples. Requests are top tracks (period=overall), recent tracks (page 500, limit 200), ListenBrainz recordings (range=all_time, count=100), and listening activity (range=year). The ListenBrainz stats query-plan sample is a cold cache miss and its timing samples clear the cache before each request.\n\nTimings are observations from this run. Budget comparisons are informational and are not acceptance assertions. The ADR §10.3 report-only budgets are uncached top tracks p95 <250 ms, cached top tracks p95 <20 ms, and recent tracks page 500 p95 <100 ms. No budget is specified for the ListenBrainz reads.\n\n| Read | Runs | p50 (ms) | p95 (ms) | Report-only p95 budget |\n|---|---:|---:|---:|---:|\n${rows.map(([n, t]) => `| ${n} | ${t.runs} | ${t.p50Ms} | ${t.p95Ms} | ${budgets[n] === null ? 'not specified' : `< ${budgets[n]} ms`} |`).join('\n')}\n\n## Query plans\n\n${Object.entries(
+  return `# Node protocol-read benchmark\n\nGenerated: ${r.generatedAt}  \nReceipt: \`${r.generatedBy}\`  \nDataset: ${r.dataset.listens.toLocaleString()} listens, seed ${r.dataset.seed}, fixed clock ${r.dataset.clock}; apply-path parity sample ${r.dataset.applyPathRecords} records\n\nThe main fixture inserts the 100,000-listen projection through direct SQL after production record normalization. The parity sample compares signed repository verification and the production apply path against equivalent direct inserts. Reads are measured through the Node HTTP composition; fixture setup, cache invalidation, and report writing are outside each timed sample. Each read has ten samples. Requests are top tracks (period=overall), recent tracks (page 500, limit 200), ListenBrainz recordings (range=all_time, count=100), and listening activity (range=year). The ListenBrainz stats query-plan sample is a cold cache miss and its timing samples clear the cache before each request.\n\nTimings are observations from this run. Budget comparisons are informational and are not acceptance assertions. The ADR §10.3 report-only budgets are uncached top tracks p95 <250 ms, cached top tracks p95 <20 ms, and recent tracks page 500 p95 <100 ms. No budget is specified for the ListenBrainz reads.\n\n| Read | Runs | p50 (ms) | p95 (ms) | Report-only p95 budget |\n|---|---:|---:|---:|---:|\n${rows.map(([n, t]) => `| ${n} | ${t.runs} | ${t.p50Ms.toFixed(2)} | ${t.p95Ms.toFixed(2)} | ${budgets[n] === null ? 'not specified' : `< ${budgets[n]} ms`} |`).join('\n')}\n\n## Query plans\n\n${Object.entries(
     r.plans,
   )
     .filter(([k]) => k !== 'source')
@@ -205,7 +213,7 @@ export function main(args = process.argv.slice(2)): number {
     const report = JSON.parse(readFileSync(resolve(input), 'utf8')) as unknown;
     validateReport(report);
     const outFlag = args.indexOf('--out');
-    const out = outFlag >= 0 ? resolve(args[outFlag + 1]!) : resolve('work/bench/protocol-reads.json');
+    const out = outFlag >= 0 ? resolve(args[outFlag + 1]!) : resolve(REPO_ROOT, 'work/bench/protocol-reads.json');
     if (!renderOnly) {
       mkdirSync(dirname(out), { recursive: true });
       writeFileSync(out, `${JSON.stringify(report, null, 2)}\n`);
