@@ -2825,9 +2825,9 @@
         "verify drain"
       ],
       "title": "PLAN=free drain stays within 40 subrequests per slice",
-      "retired": "B17",
+      "replaced": "worker/test/ingest/verify-drain.test.ts › verify drain › drain respects an explicitly supplied tight subrequest budget",
       "package": "N7-01",
-      "reason": "The plan-tier-specific 40-subrequest Free budget is retired by B17; Node uses its fixed configured work limits."
+      "reason": "N7-01 removed the Workers PLAN tier; the test injects a tight test budget directly without a runtime plan selector."
     },
     {
       "id": "worker/test/read/cursor-http.test.ts › cursor traversal over HTTP › arrival above anchor absent until fresh traversal; deleted unreturned record disappears",
