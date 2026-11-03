@@ -5,8 +5,12 @@ import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
 const client = require('lastfm-ts-api') as {
-  LastFMAuth: new (...args: unknown[]) => { getToken(): Promise<unknown>; getSession(params: { token: string }): Promise<unknown> };
-  LastFMTrack: new (...args: unknown[]) => { scrobbleMany(items: unknown[]): Promise<unknown>; updateNowPlaying(params: unknown): Promise<unknown> };
+  LastFMAuth: new (
+    ...args: unknown[]
+  ) => { getToken(): Promise<unknown>; getSession(params: { token: string }): Promise<unknown> };
+  LastFMTrack: new (
+    ...args: unknown[]
+  ) => { scrobbleMany(items: unknown[]): Promise<unknown>; updateNowPlaying(params: unknown): Promise<unknown> };
   LastFMUser: new (...args: unknown[]) => { getRecentTracks(params: unknown): Promise<unknown> };
 };
 
@@ -47,14 +51,15 @@ async function main(): Promise<void> {
   const config = { hostname: 'music.214510.xyz', path: '/2.0/' };
   const auth = new client.LastFMAuth(API_KEY, API_SECRET, undefined, config);
   const tokenResult = await auth.getToken();
-  const token = typeof tokenResult === 'string'
-    ? tokenResult
-    : String((tokenResult as { token?: unknown })?.token ?? '');
+  const token =
+    typeof tokenResult === 'string' ? tokenResult : String((tokenResult as { token?: unknown })?.token ?? '');
   if (!token) throw new Error('lastfm-ts-api auth.getToken returned no token');
   await waitForAuthorization(token);
 
   const sessionResult = await auth.getSession({ token });
-  const session = (sessionResult as { session?: { key?: string; name?: string } })?.session ?? sessionResult as { key?: string; name?: string };
+  const session =
+    (sessionResult as { session?: { key?: string; name?: string } })?.session ??
+    (sessionResult as { key?: string; name?: string });
   if (!session?.key) throw new Error('lastfm-ts-api auth.getSession returned no session key');
 
   const track = new client.LastFMTrack(API_KEY, API_SECRET, session.key, config);
@@ -71,9 +76,11 @@ async function main(): Promise<void> {
   const recent = await user.getRecentTracks({ user: session.name ?? USER, limit: 10 });
 
   send({ type: 'answer', id: 0, result: { token, session: session.name ?? USER, recent } });
+  process.disconnect?.();
 }
 
 main().catch((error: unknown) => {
-  send({ type: 'error', error: error instanceof Error ? error.stack ?? error.message : String(error) });
+  send({ type: 'error', error: error instanceof Error ? (error.stack ?? error.message) : String(error) });
+  process.disconnect?.();
   process.exitCode = 1;
 });

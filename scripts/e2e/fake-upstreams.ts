@@ -3,9 +3,9 @@
 // numbered command/answer envelope used by the other e2e child processes.
 import { type ChildProcess, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { fixedClock } from '../../packages/core/test-support/clock';
 import { FakeLastfm, serveFake as serveLastfm } from '../../worker/test/node/support/fake-lastfm';
 import { FakeListenBrainz } from '../../worker/test/node/support/fake-listenbrainz';
-import { fixedClock } from '../../packages/core/test-support/clock';
 
 const FIXED_NOW = Date.UTC(2026, 0, 15, 12, 0, 0);
 const LASTFM_API_KEY = 'e2e-lastfm-api-key';
@@ -19,12 +19,14 @@ export interface FakeUpstreams {
   lastfmOrigin: string;
   listenBrainzOrigin: string;
   authorizeLastfmToken(token: string, user?: string): Promise<void>;
+  snapshot(): Promise<{ lastfm: unknown; listenbrainz: unknown }>;
   close(): Promise<void>;
 }
 
 interface IpcMessage {
   type?: unknown;
   id?: unknown;
+  role?: unknown;
   action?: unknown;
   token?: unknown;
   user?: unknown;
@@ -47,7 +49,9 @@ async function runChild(role: string): Promise<void> {
     host: 'lastfm.test',
   });
   lastfm.addUser(LASTFM_USER);
-  lastfm.seedHistory(LASTFM_USER, [{ artist: 'Seed Artist', track: 'Seed Track', uts: Math.floor(FIXED_NOW / 1000) - 3600 }]);
+  lastfm.seedHistory(LASTFM_USER, [
+    { artist: 'Seed Artist', track: 'Seed Track', uts: Math.floor(FIXED_NOW / 1000) - 3600 },
+  ]);
   const listenbrainz = new FakeListenBrainz({ clock, host: 'listenbrainz.test' });
   listenbrainz.addToken(LISTENBRAINZ_USER, LISTENBRAINZ_TOKEN);
 
@@ -60,14 +64,17 @@ async function runChild(role: string): Promise<void> {
     const answer = (result?: unknown) => process.send?.({ type: 'answer', id: message.id, result });
     try {
       if (message.action === 'authorizeLastfmToken' && role === 'lastfm') {
-        if (typeof message.token !== 'string' || typeof message.user !== 'string') throw new TypeError('invalid Last.fm authorization command');
+        if (typeof message.token !== 'string' || typeof message.user !== 'string')
+          throw new TypeError('invalid Last.fm authorization command');
         lastfm.authorizeToken(message.token, message.user);
         lastfm.addUser(message.user);
         answer(true);
       } else if (message.action === 'snapshot') {
-        answer(role === 'lastfm'
-          ? { scrobbles: lastfm.scrobbles, nowPlaying: lastfm.nowPlayingCalls, calls: lastfm.calls.entries }
-          : { submissions: listenbrainz.submissions, calls: listenbrainz.calls.entries });
+        answer(
+          role === 'lastfm'
+            ? { scrobbles: lastfm.scrobbles, nowPlaying: lastfm.nowPlayingCalls, calls: lastfm.calls.entries }
+            : { submissions: listenbrainz.submissions, calls: listenbrainz.calls.entries },
+        );
       } else if (message.action === 'stop') {
         closing ??= server.close();
         void closing.then(() => answer(true));
@@ -160,7 +167,17 @@ export async function startFakeUpstreams(): Promise<FakeUpstreams> {
     listenBrainzOrigin: listenbrainz.origin,
     authorizeLastfmToken(token, user = LASTFM_USER) {
       if (closed) return Promise.reject(new Error('fake upstreams are closed'));
-      return childMessage(lastfm.child, { id: ++commandId, action: 'authorizeLastfmToken', token, user }).then(() => undefined);
+      return childMessage(lastfm.child, { id: ++commandId, action: 'authorizeLastfmToken', token, user }).then(
+        () => undefined,
+      );
+    },
+    async snapshot() {
+      if (closed) throw new Error('fake upstreams are closed');
+      const [lastfmSnapshot, listenbrainzSnapshot] = await Promise.all([
+        childMessage(lastfm.child, { id: ++commandId, action: 'snapshot' }),
+        childMessage(listenbrainz.child, { id: ++commandId, action: 'snapshot' }),
+      ]);
+      return { lastfm: lastfmSnapshot, listenbrainz: listenbrainzSnapshot };
     },
     async close() {
       if (closed) return;
