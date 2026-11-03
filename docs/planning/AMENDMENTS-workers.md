@@ -1180,7 +1180,7 @@ Some cases have no wave test whose title asserts their outcome. For each one, th
 **W5-01** (new files: `worker/test/composition/logging.test.ts`)
 
 - `worker/test/composition/logging.test.ts › captured logs and error bodies contain no CURSOR_KEY, ADMIN_TOKEN or bearer marker and logs contain no track-title marker` — covers `M6.2.2/metrics_auth`, `M6.2.2/log_redaction`
-- `worker/test/composition/routing.test.ts › forced storage error → 500 envelope with UUID requestId and no stack trace or file path` — covers `M1.4.2/safe_errors`
+- `worker/test/node/compose.test.ts › every ctx built by compose carries deps, app and peer, and need(ctx, 'app') on a ctx without app answers 500 CtxWiringError` — Node composition equivalent for `M1.4.2/safe_errors` after N7-01 retires the Workers fetch adapter.
 
 **W6-01**
 

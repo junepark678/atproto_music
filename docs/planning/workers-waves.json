@@ -1032,7 +1032,7 @@
      "worker/test/composition/scheduled.test.ts › cron re-arms a deleted alarm",
      "npx tsx scripts/check-bundle.ts › production bundle passes guard",
      "worker/test/composition/logging.test.ts › captured logs and error bodies contain no CURSOR_KEY, ADMIN_TOKEN or bearer marker and logs contain no track-title marker",
-     "worker/test/composition/routing.test.ts › forced storage error → 500 envelope with UUID requestId and no stack trace or file path",
+     "worker/test/node/compose.test.ts › every ctx built by compose carries deps, app and peer, and need(ctx, 'app') on a ctx without app answers 500 CtxWiringError",
      "worker/test/composition/index-do.test.ts › status truth through production writers: a fake Jetstream commit applied by the alarm raises admin status lastIndexedAt and sets lagSeconds, and after a socket drop and two constructor restarts the state turns stale exactly 5 min after the drop"
     ]
    }

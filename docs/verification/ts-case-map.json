@@ -104,7 +104,7 @@
     },
     {
       "case": "M1.2.3/packaged_http",
-      "target": "worker/test/composition/routing.test.ts › every API.md v1.1 route dispatches; unknown /api/x → JSON 404; non-API path → ASSETS",
+      "target": "worker/test/node/compose.test.ts › /api/, /health/, /oauth/, /2.0 and /1/ reach the router even when a same-named file exists in dist; other misses get the assetMiss JSON 404",
       "also": [
         "worker/test/http/health-meta.test.ts › live 200; ready 503 when index reports too_new; meta capabilities omit publication without owned prefix"
       ],
@@ -221,8 +221,8 @@
       "case": "M1.4.2/safe_errors",
       "target": "worker/test/http/error.test.ts › envelope matches openapi Error schema with requestId UUID",
       "also": [
-        "worker/test/composition/routing.test.ts › forced storage error → 500 envelope with UUID requestId and no stack trace or file path",
-        "worker/test/composition/routing.test.ts › every API.md v1.1 route dispatches; unknown /api/x → JSON 404; non-API path → ASSETS"
+        "worker/test/node/compose.test.ts › every ctx built by compose carries deps, app and peer, and need(ctx, 'app') on a ctx without app answers 500 CtxWiringError",
+        "worker/test/node/compose.test.ts › /api/, /health/, /oauth/, /2.0 and /1/ reach the router even when a same-named file exists in dist; other misses get the assetMiss JSON 404"
       ]
     },
     {
@@ -1058,7 +1058,8 @@
       "case": "M6.1.1/asset_missing_traversal",
       "target": "web/tests/mvp.spec.ts › non-navigation GET /assets/missing.js and encoded ../ traversal return 404, never index.html",
       "also": [
-        "worker/test/composition/routing.test.ts › every API.md v1.1 route dispatches; unknown /api/x → JSON 404; non-API path → ASSETS"
+        "worker/test/node/compose.test.ts › /api/, /health/, /oauth/, /2.0 and /1/ reach the router even when a same-named file exists in dist; other misses get the assetMiss JSON 404",
+        "worker/test/node/static-assets.test.ts › %2e%2e, backslash and NUL paths are refused without touching the filesystem outside dist"
       ],
       "note": "Asset lookup is Workers Static Assets behaviour (ADR 0004 §9.3 drops build.rs embedding)."
     },
@@ -1076,7 +1077,7 @@
     },
     {
       "case": "M6.1.2/untrusted_forwarded",
-      "target": "worker/test/composition/routing.test.ts › inbound x-atmusic-client-ip is stripped and CF-Connecting-IP used",
+      "target": "worker/test/node/client-ip.test.ts › CF-Connecting-IP is honoured only in cf-connecting-ip mode and only from a peer in ATMUSIC_TRUSTED_PROXIES; otherwise the peer address is used",
       "also": [
         "scripts/test/gen-config.test.ts › --origin and --prefix override example values; stale OAuth metadata is removed"
       ],
@@ -1138,7 +1139,7 @@
       "case": "M6.2.1/bounded_state",
       "target": "worker/test/http/limits.test.ts › 10,001 distinct IP keys keep BucketSet at its cap and expired buckets are evicted",
       "also": [
-        "worker/test/composition/routing.test.ts › inbound x-atmusic-client-ip is stripped and CF-Connecting-IP used"
+        "worker/test/node/client-ip.test.ts › CF-Connecting-IP is honoured only in cf-connecting-ip mode and only from a peer in ATMUSIC_TRUSTED_PROXIES; otherwise the peer address is used"
       ],
       "note": "Buckets fail open after a DO restart (ADR 0004 §8)."
     },

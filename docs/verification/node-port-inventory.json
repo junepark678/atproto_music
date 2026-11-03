@@ -1863,9 +1863,9 @@
         "worker/src/router.ts"
       ],
       "title": "every API.md v1.1 route dispatches; unknown /api/x → JSON 404; non-API path → ASSETS",
-      "kept": true,
-      "change": "ADR 0005 §3.7, §15.3 (N4-03): ported to the production Node composition; non-API paths are served by the Node static server over a real web/dist (index.html for SPA routes), /oauth/ is a router prefix, the dispatcher's 405 Allow adds HEAD, and \"the index is never reached\" is shown by recording no SQL statement; title kept.",
-      "package": "N4-03"
+      "package": "N7-01",
+      "replaced": "worker/test/node/compose.test.ts › /api/, /health/, /oauth/, /2.0 and /1/ reach the router even when a same-named file exists in dist; other misses get the assetMiss JSON 404",
+      "reason": "N7-01 removes the Workers fetch adapter; the production Node dispatcher, static server and client-IP policy now provide the corresponding behavior."
     },
     {
       "id": "worker/test/composition/routing.test.ts › worker/src/router.ts › inbound x-atmusic-client-ip is stripped and CF-Connecting-IP used",
@@ -1874,9 +1874,9 @@
         "worker/src/router.ts"
       ],
       "title": "inbound x-atmusic-client-ip is stripped and CF-Connecting-IP used",
-      "kept": true,
-      "change": "ADR 0005 §3.6, §15.3 (N4-03): the client-IP policy runs in cf-connecting-ip mode from a trusted loopback peer; the bridge drops x-atmusic-* (observed by a test route mounted through compose features) instead of the ASSETS request headers; title kept.",
-      "package": "N4-03"
+      "package": "N7-01",
+      "replaced": "worker/test/node/client-ip.test.ts › CF-Connecting-IP is honoured only in cf-connecting-ip mode and only from a peer in ATMUSIC_TRUSTED_PROXIES; otherwise the peer address is used",
+      "reason": "N7-01 removes the Workers fetch adapter; the production Node dispatcher, static server and client-IP policy now provide the corresponding behavior."
     },
     {
       "id": "worker/test/composition/routing.test.ts › worker/src/router.ts › forced storage error → 500 envelope with UUID requestId and no stack trace or file path",
@@ -1885,9 +1885,9 @@
         "worker/src/router.ts"
       ],
       "title": "forced storage error → 500 envelope with UUID requestId and no stack trace or file path",
-      "kept": true,
-      "change": "ADR 0005 §15.3 (N4-03): the fault is injected through the Db wrapper of the Node composition; title kept.",
-      "package": "N4-03"
+      "package": "N7-01",
+      "replaced": "worker/test/node/compose.test.ts › every ctx built by compose carries deps, app and peer, and need(ctx, 'app') on a ctx without app answers 500 CtxWiringError",
+      "reason": "N7-01 removes the Workers fetch adapter; the production Node dispatcher, static server and client-IP policy now provide the corresponding behavior."
     },
     {
       "id": "worker/test/composition/routing.test.ts › worker/src/router.ts › asset miss: SPA route GET/HEAD serves index.html 200, every other miss is JSON not_found with x-request-id",
@@ -1896,9 +1896,9 @@
         "worker/src/router.ts"
       ],
       "title": "asset miss: SPA route GET/HEAD serves index.html 200, every other miss is JSON not_found with x-request-id",
-      "kept": true,
-      "change": "ADR 0005 §3.7, §15.3 (N4-03): asserted on the Node static server over a real web/dist: /oauth/callback is a router path, a non-GET/HEAD on an existing file is the 405 envelope with Allow: GET, HEAD, traversal is judged on the raw target, and a missing index.html is the envelope plus an assets.index_unavailable log line; title kept.",
-      "package": "N4-03"
+      "package": "N7-01",
+      "replaced": "worker/test/node/compose.test.ts › the SPA and its assets are served from ATMUSIC_ASSETS_DIR (default <release>/web/dist) with the _headers rules",
+      "reason": "N7-01 removes the Workers fetch adapter; the production Node dispatcher, static server and client-IP policy now provide the corresponding behavior."
     },
     {
       "id": "worker/test/composition/scheduled.test.ts › worker/src/scheduled.ts › cron re-arms a deleted alarm",
