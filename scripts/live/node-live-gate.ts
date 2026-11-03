@@ -216,22 +216,28 @@ function redactJsonValue(value: unknown, env: NodeGateEnv, ancestors = new WeakS
 export function redactNodeGateOutput(text: string, env: NodeGateEnv): string {
   let redacted = text;
   for (const secret of secretValues(env)) redacted = redacted.split(secret).join('[redacted]');
-  // Decode bounded layers so nested and escaped OAuth callback URLs are
-  // normalized before their query and fragment are removed.
-  for (let depth = 0; depth < 6; depth++) {
-    const decoded = redacted.replace(/(?:%[0-9a-f]{2})+/gi, (sequence) => {
-      try {
-        return decodeURIComponent(sequence);
-      } catch {
-        return sequence;
-      }
-    });
-    if (decoded === redacted) break;
-    redacted = decoded;
-  }
-  redacted = redacted.replace(/https?:[\\/]{1,3}[^\s"'<>]+/gi, (candidate) => {
+  redacted = redacted.replace(/https?(?::|%(?:25)*3a)[^\s"'<>]+/gi, (candidate) => {
     const trailing = candidate.match(/[),.;\]}]+$/)?.[0] ?? '';
-    const value = (trailing ? candidate.slice(0, -trailing.length) : candidate).replaceAll('\\', '/');
+    let value = trailing ? candidate.slice(0, -trailing.length) : candidate;
+    let complete = false;
+    for (let depth = 0; depth < 16; depth++) {
+      const decoded = value.replace(/(?:%[0-9a-f]{2})+/gi, (sequence) => {
+        try {
+          return decodeURIComponent(sequence);
+        } catch {
+          return sequence;
+        }
+      });
+      if (decoded === value) {
+        complete = true;
+        break;
+      }
+      value = decoded;
+    }
+    // Do not emit a partially decoded token: a deeper encoded URL may still
+    // contain callback credentials or OAuth state.
+    if (!complete && /%[0-9a-f]{2}/i.test(value)) return '[redacted-url]';
+    value = value.replaceAll('\\', '/');
     try {
       const url = new URL(value);
       const hadRootSlash = url.pathname === '/' && !value.endsWith('/');
@@ -276,7 +282,9 @@ function validValue(env: NodeGateEnv, name: string, requirement: NodeGateRequire
 
 function emit(evidence: NodeGateEvidence, env: NodeGateEnv, io: NodeGateIO): number {
   const safeEvidence = redactJsonValue(evidence, env);
-  const document = redactNodeGateOutput(`${JSON.stringify(safeEvidence, null, 2)}\n`, env);
+  // Every string and object key has already been sanitized structurally. Do
+  // not rewrite serialized JSON, since redaction could introduce raw quotes.
+  const document = `${JSON.stringify(safeEvidence, null, 2)}\n`;
   io.stdout(document);
   const evidencePath = env[NODE_ENV.evidenceOut];
   if (evidencePath) io.writeEvidence(evidencePath, document);
