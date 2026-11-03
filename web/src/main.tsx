@@ -11,8 +11,7 @@ const state = createAppState();
 void removeLegacyDatabases().catch(() => {});
 const client = sessionClient();
 client.subscribe((session, reauth) => {
-  setSession(state, session);
-  state.reauthRequired.value = reauth;
+  setSession(state, session, null, { reauthRequired: reauth });
 });
 render(<App state={state} />, root);
 void client

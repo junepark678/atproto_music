@@ -12,10 +12,27 @@ import { useContext } from 'preact/hooks';
 import { type ApiClient, type ApiFailure, createApiClient, isApiFailure } from '../api/client';
 import type { Session } from '../session/client';
 
+export interface ScrobbleDraftValues {
+  artist: string;
+  track: string;
+  album: string;
+  listenedAt: string;
+  durationSeconds: string;
+  recordingMbid: string;
+}
+
+export interface ScrobbleDraft {
+  /** Drafts belong to the account that started them and never cross accounts. */
+  did: string;
+  values: ScrobbleDraftValues;
+}
+
 export interface AppState {
   readonly api: ApiClient;
   /** The signed-in cookie BFF session, or null when anonymous. */
   readonly session: Signal<Session | null>;
+  /** Non-secret scrobble form values kept in memory across a reauthentication. */
+  readonly scrobbleDraft: Signal<ScrobbleDraft | null>;
   /** The session DID's verified handle (from /api/v1/resolve or the profile), when known. */
   readonly handle: Signal<Handle | null>;
   /** True when the session expired or refresh failed and the user must sign in again. */
@@ -37,6 +54,7 @@ export function createAppState(options: { api?: ApiClient } = {}): AppState {
   return {
     api: options.api ?? createApiClient(),
     session,
+    scrobbleDraft: signal<ScrobbleDraft | null>(null),
     handle: signal<Handle | null>(null),
     reauthRequired: signal(false),
     meta,
@@ -60,11 +78,32 @@ export async function loadMeta(state: AppState, abort?: AbortSignal): Promise<vo
   }
 }
 
-/** Records a new session (or null after sign-out) and clears per-session data. */
-export function setSession(state: AppState, session: Session | null, handle: Handle | null = null): void {
+/** Records the session; only a reauthentication transition preserves its draft. */
+export function setSession(
+  state: AppState,
+  session: Session | null,
+  handle: Handle | null = null,
+  options: { reauthRequired?: boolean } = {},
+): void {
+  const reauthRequired = options.reauthRequired ?? false;
+  const draft = state.scrobbleDraft.value;
+  if ((session === null && !reauthRequired) || (session !== null && draft !== null && draft.did !== session.did)) {
+    state.scrobbleDraft.value = null;
+  }
   state.session.value = session;
   state.handle.value = session ? handle : null;
-  state.reauthRequired.value = false;
+  state.reauthRequired.value = reauthRequired;
+}
+
+/** Updates the active account's non-secret scrobble draft in memory. */
+export function setScrobbleDraft(state: AppState, values: ScrobbleDraftValues): void {
+  const did = state.session.value?.did;
+  if (did === undefined) return;
+  state.scrobbleDraft.value = { did, values: { ...values } };
+}
+
+export function clearScrobbleDraft(state: AppState): void {
+  state.scrobbleDraft.value = null;
 }
 
 export const AppStateContext = createContext<AppState | null>(null);

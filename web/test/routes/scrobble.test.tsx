@@ -1,10 +1,12 @@
 import { render } from 'preact';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { App } from '../../src/app';
 import { OperationStatus } from '../../src/components/operation-status';
 import { OutboxService } from '../../src/components/outbox-service';
 import { type ScreenServices, ServicesProvider } from '../../src/components/services';
 import { ScrobbleForm } from '../../src/routes/scrobble';
-import type { Session } from '../../src/session/client';
+import { type Session, sessionClient } from '../../src/session/client';
+import { AppStateContext, createAppState, setSession } from '../../src/state/store';
 
 const session: Session = {
   did: 'did:plc:aaaaaaaaaaaaaaaaaaaaaaaa',
@@ -42,11 +44,15 @@ describe('web/test/routes/scrobble.test.tsx', () => {
       outbox: async () => outbox,
       closeOutbox: async () => undefined,
     };
+    const state = createAppState();
+    setSession(state, session);
     const root = document.createElement('div');
     render(
-      <ServicesProvider value={services}>
-        <ScrobbleForm outbox={outbox} />
-      </ServicesProvider>,
+      <AppStateContext.Provider value={state}>
+        <ServicesProvider value={services}>
+          <ScrobbleForm outbox={outbox} />
+        </ServicesProvider>
+      </AppStateContext.Provider>,
       root,
     );
     root.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
@@ -56,6 +62,130 @@ describe('web/test/routes/scrobble.test.tsx', () => {
     expect(scrobble).not.toHaveBeenCalled();
     render(null, root);
     await outbox.stop();
+  });
+
+  it('shows sign-in after a 401, then restores the in-memory draft with a fresh write intent after reauthentication', async () => {
+    sessionClient().unauthorized();
+    const keys: string[] = [];
+    let sessionReads = 0;
+    let writeCount = 0;
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init: RequestInit = {}) => {
+      const url = new URL(String(input), 'https://music.test');
+      if (url.pathname === '/api/v1/auth/session') {
+        sessionReads += 1;
+        return Response.json({ ...session, csrfToken: `csrf-${sessionReads}` });
+      }
+      if (url.pathname === '/api/v1/scrobbles') {
+        writeCount += 1;
+        keys.push(new Headers(init.headers).get('Idempotency-Key') ?? '');
+        if (writeCount === 1) {
+          return Response.json({ error: { code: 'session_expired', message: 'session expired' } }, { status: 401 });
+        }
+        return Response.json(
+          {
+            operation: {
+              ...operation,
+              id: 'op-after-reauth',
+              state: 'queued',
+            },
+          },
+          { status: 202 },
+        );
+      }
+      throw new Error(`unexpected request ${url.pathname}`);
+    });
+
+    const state = createAppState();
+    state.meta.value = {
+      name: 'atproto_music',
+      version: 'test',
+      stage: 'product',
+      capabilities: ['read', 'publication'],
+      lexiconPrefix: 'com.example.atmusic',
+      indexing: { state: 'current', caughtUp: true, lastIndexedAt: null, lagSeconds: 0 },
+    };
+    const updateState = sessionClient().subscribe((current, reauthRequired) => {
+      setSession(state, current, null, { reauthRequired });
+    });
+    vi.spyOn(state.api, 'profile').mockRejectedValue(new Error('profile unavailable'));
+    const outboxes: OutboxService[] = [];
+    const services: ScreenServices = {
+      clock: { nowMs: () => Date.parse('2026-01-15T12:00:00Z') },
+      random: { bytes: (n) => new Uint8Array(n), float: () => 0 },
+      ticker: { every: () => () => undefined },
+      session: async () => ({
+        signIn: async () => undefined,
+        signOut: async () => undefined,
+        expiry: async () => null,
+      }),
+      outbox: async ({ session: current, prefix }) => {
+        const next = new OutboxService(current, prefix);
+        outboxes.push(next);
+        return next;
+      },
+      closeOutbox: async () => {
+        await Promise.all(outboxes.map((outbox) => outbox.stop()));
+      },
+    };
+    const root = document.createElement('div');
+    document.body.append(root);
+    try {
+      await sessionClient().getSession();
+      (window as unknown as { happyDOM: { setURL(url: string): void } }).happyDOM.setURL('https://music.test/scrobble');
+      render(
+        <ServicesProvider value={services}>
+          <App state={state} loadMetaOnMount={false} />
+        </ServicesProvider>,
+        root,
+      );
+      await vi.waitFor(() => expect(root.querySelector('input[name="artist"]')).not.toBeNull());
+
+      const artist = root.querySelector<HTMLInputElement>('input[name="artist"]')!;
+      const track = root.querySelector<HTMLInputElement>('input[name="track"]')!;
+      artist.value = 'Draft Artist';
+      artist.dispatchEvent(new Event('input', { bubbles: true }));
+      track.value = 'Draft Track';
+      track.dispatchEvent(new Event('input', { bubbles: true }));
+      expect(sessionStorage.getItem('atmusic:scrobble-draft')).toBeNull();
+      expect(
+        Array.from({ length: sessionStorage.length }, (_, index) =>
+          sessionStorage.getItem(sessionStorage.key(index) ?? ''),
+        ).join('\n'),
+      ).not.toContain('Draft Artist');
+      root.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+
+      await vi.waitFor(() => expect(root.textContent).toContain('Sign in to publish scrobbles'));
+      expect(root.querySelector('input[name="artist"]')).toBeNull();
+      expect(root.querySelector('button[type="submit"]')).toBeNull();
+      expect(state.reauthRequired.value).toBe(true);
+      expect(state.scrobbleDraft.value).toEqual({
+        did: session.did,
+        values: expect.objectContaining({ artist: 'Draft Artist', track: 'Draft Track' }),
+      });
+
+      await sessionClient().getSession();
+      await vi.waitFor(() => expect(root.querySelector('input[name="artist"]')).not.toBeNull());
+      expect(root.querySelector<HTMLInputElement>('input[name="artist"]')?.value).toBe('Draft Artist');
+      expect(root.querySelector<HTMLInputElement>('input[name="track"]')?.value).toBe('Draft Track');
+      expect(root.textContent).not.toContain('Loading your outbox');
+
+      root.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      await vi.waitFor(() => {
+        expect(writeCount).toBe(2);
+        expect(state.scrobbleDraft.value).toBeNull();
+      });
+      expect(keys[0]).toBeTruthy();
+      expect(keys[1]).toBeTruthy();
+      expect(keys[1]).not.toBe(keys[0]);
+      expect(outboxes.length).toBeGreaterThanOrEqual(2);
+    } finally {
+      updateState();
+      sessionClient().unauthorized();
+      render(null, root);
+      await Promise.all(outboxes.map((outbox) => outbox.stop()));
+      root.remove();
+      sessionStorage.clear();
+    }
   });
 
   it('submitting the form posts with a fresh Idempotency-Key and shows queued, published, then indexed from operation and record-status polling', async () => {

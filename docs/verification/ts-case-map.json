@@ -1307,7 +1307,10 @@
     },
     {
       "case": "M7.1.2/session_loss",
-      "target": "worker/test/node/bff/oauth-client.test.ts › invalid_grant on refresh deletes the session and marks the account reauth_required; a TransportError keeps the session"
+      "target": "worker/test/node/bff/oauth-client.test.ts › invalid_grant on refresh deletes the session and marks the account reauth_required; a TransportError keeps the session",
+      "also": [
+        "web/test/routes/scrobble.test.tsx › shows sign-in after a 401, then restores the in-memory draft with a fresh write intent after reauthentication"
+      ]
     },
     {
       "case": "M7.1.3/route_deep_links",
@@ -1462,7 +1465,8 @@
       "target": "worker/test/node/bff/oauth-client.test.ts › invalid_grant on refresh deletes the session and marks the account reauth_required; a TransportError keeps the session",
       "also": [
         "web/test/routes/feed.test.tsx › page two 503 keeps page one and retry appends page two once",
-        "web/test/routes/feed.test.tsx › an empty feed shows an explicit empty state after loading completes"
+        "web/test/routes/feed.test.tsx › an empty feed shows an explicit empty state after loading completes",
+        "web/test/routes/scrobble.test.tsx › shows sign-in after a 401, then restores the in-memory draft with a fresh write intent after reauthentication"
       ]
     },
     {

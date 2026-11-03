@@ -24,10 +24,11 @@ import { useSessionHandle } from '../components/session-identity';
 import { ErrorState, LoadingState, PublishingUnavailable, SignInPrompt } from '../components/state-views';
 import { useOutbox, useOutboxOps } from '../components/use-outbox';
 import type { OutboxOperation } from '../outbox/overlay';
+import { clearScrobbleDraft, type ScrobbleDraftValues, setScrobbleDraft, useAppState } from '../state/store';
 
 export type FieldName = 'artist' | 'track' | 'album' | 'listenedAt' | 'durationSeconds' | 'recordingMbid';
 
-export type FormValues = Record<FieldName, string>;
+export type FormValues = ScrobbleDraftValues;
 
 export type FieldErrors = Partial<Record<FieldName | 'form', string>>;
 
@@ -142,14 +143,19 @@ export default function ScrobbleScreen() {
 }
 
 export function ScrobbleForm({ outbox }: { outbox: OutboxService }) {
+  const state = useAppState();
   const services = useServices();
-  const [values, setValuesState] = useState<FormValues>(() => emptyForm(services.clock));
+  const [values, setValuesState] = useState<FormValues>(() => {
+    const draft = state.scrobbleDraft.value;
+    return draft?.did === outbox.did ? { ...draft.values } : emptyForm(services.clock);
+  });
   // The latest input, updated synchronously: a submit right after typing must
   // validate what is in the fields, not the last rendered state.
   const valuesRef = useRef(values);
   const setValues = (next: FormValues) => {
     valuesRef.current = next;
     setValuesState(next);
+    setScrobbleDraft(state, next);
   };
   const [errors, setErrors] = useState<FieldErrors>({});
   const [submitting, setSubmitting] = useState(false);
@@ -176,7 +182,10 @@ export function ScrobbleForm({ outbox }: { outbox: OutboxService }) {
         return;
       }
       setSubmitted((ids) => [result.op.id, ...ids]);
-      setValues(emptyForm(services.clock));
+      clearScrobbleDraft(state);
+      const reset = emptyForm(services.clock);
+      valuesRef.current = reset;
+      setValuesState(reset);
     } catch (error) {
       setErrors({ form: describeFailure(error) });
     } finally {

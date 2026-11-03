@@ -1,6 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
 import { type Session, SessionClient, sessionFetch } from '../../src/session/client';
-import { createAppState, setSession } from '../../src/state/store';
+import { createAppState, setScrobbleDraft, setSession } from '../../src/state/store';
+
+const sources = import.meta.glob<string>('../../src/**/*.{ts,tsx,js,jsx}', {
+  eager: true,
+  query: '?raw',
+  import: 'default',
+});
 
 const dto: Session = {
   did: 'did:plc:aaaaaaaaaaaaaaaaaaaaaaaa',
@@ -54,12 +60,45 @@ describe('web/test/session/client.test.ts', () => {
     expect(new Headers(fetcher.mock.calls[1]?.[1]?.headers).get('X-CSRF-Token')).toBe(reauth.csrfToken);
   });
 
-  it('the app state store holds the server Session DTO', async () => {
+  it('preserves a scrobble draft only through same-account reauthentication', () => {
+    const state = createAppState();
+    setSession(state, dto);
+    const values = {
+      artist: 'Draft Artist',
+      track: 'Draft Track',
+      album: '',
+      listenedAt: '2026-01-15T12:00:00Z',
+      durationSeconds: '',
+      recordingMbid: '',
+    };
+    setScrobbleDraft(state, values);
+    setSession(state, null, null, { reauthRequired: true });
+    expect(state.scrobbleDraft.value).toEqual({ did: dto.did, values });
+
+    const other = { ...dto, did: 'did:plc:bbbbbbbbbbbbbbbbbbbbbbbb' as Session['did'] };
+    setSession(state, other);
+    expect(state.scrobbleDraft.value).toBeNull();
+    setScrobbleDraft(state, values);
+    setSession(state, null);
+    expect(state.scrobbleDraft.value).toBeNull();
+  });
+
+  it('the app state store holds the server Session DTO, and no module under web/src imports from web/src/oauth', async () => {
     const state = createAppState();
     setSession(state, dto);
     expect(state.session.value).toEqual(dto);
     const fetcher = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response(null, { status: 401 }));
     await sessionFetch('/api/v1/operations/op-1');
     expect(fetcher.mock.calls[0]?.[1]?.credentials).toBe('same-origin');
+
+    const importPattern = /\b(?:from\s+|import\s*(?:\(\s*)?)['"]([^'"]+)['"]/g;
+    const offenders: string[] = [];
+    for (const [path, source] of Object.entries(sources)) {
+      for (const match of source.matchAll(importPattern)) {
+        const specifier = match[1] ?? '';
+        if (specifier.split('/').includes('oauth')) offenders.push(`${path}: ${specifier}`);
+      }
+    }
+    expect(offenders).toEqual([]);
   });
 });

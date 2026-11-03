@@ -1489,6 +1489,7 @@
      "scripts/test/gen-config.test.ts › gen-config writes no oauth/client-metadata.json, sets connect-src 'self', and the SPA routes include /lastfm/authorize and /settings/* but not /oauth/callback",
      "python3 scripts/validate_case_map.py --check-tests › every case formerly mapped to web/test/oauth or web/test/outbox maps to an existing worker/test/node replacement",
      "web/test/session/client.test.ts › the app state store holds the server Session DTO, and no module under web/src imports from web/src/oauth",
+    "web/test/routes/scrobble.test.tsx › shows sign-in after a 401, then restores the in-memory draft with a fresh write intent after reauthentication",
      "web/test/routes/scrobble.test.tsx › invalid input shows field errors and does not create a scrobble operation",
      "web/test/routes/settings.test.tsx › shows server session identity and the public export link without a local browser outbox",
      "web/test/routes/settings.test.tsx › disconnect confirmation explains the public opt-out and sends the confirmed choice",
