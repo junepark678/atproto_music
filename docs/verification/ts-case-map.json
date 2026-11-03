@@ -86,7 +86,7 @@
     },
     {
       "case": "M1.2.2/ci_green",
-      "target": "scripts/test/node-interim.test.ts › node-interim.sh --wave 0 in a disposable copy runs check-ts, the Python regressions, the case map with --node-wave 0, goldens and live no-env, prints Playwright as pending until wave 6, and exits 1 when any run step fails"
+      "target": "bash scripts/acceptance/node-backend.sh › exits 0 with deterministic steps passed and live gates blocked, and exits 1 when systemd-analyze is unavailable"
     },
     {
       "case": "M1.2.2/ci_format_failure",
@@ -201,8 +201,10 @@
       "target": "worker/test/config.test.ts › http PUBLIC_ORIGIN and invalid LEXICON_PREFIX fail parseConfig naming each field without echoing any secret value",
       "also": [
         "scripts/test/build-server.test.ts › main.mjs started with ATMUSIC_PUBLIC_ORIGIN=http://127.0.0.1:1, or with LASTFM_API_ROOT=https://127.0.0.1/, exits 78 even with every test variable set",
-        "packages/core/test/cursor.test.ts › key shorter than 32 bytes is rejected"
-      ]
+        "packages/core/test/cursor.test.ts › key shorter than 32 bytes is rejected",
+        "worker/test/node/secrets.test.ts › secrets load from $CREDENTIALS_DIRECTORY/secrets; ATMUSIC_SECRETS_FILE with mode 0640 is refused"
+      ],
+      "note": "Node configuration checks cover invalid origin/prefix, production refusal of loopback origins/upstreams, missing or insecure secrets files and short cursor keys."
     },
     {
       "case": "M1.4.2/ready_before_storage",
@@ -397,7 +399,8 @@
       "case": "M2.4.1/no_prod_bypass",
       "target": "scripts/test/check-node-bundle.test.ts › the guard fails when main.mjs has a test-support, worker/test or router-transport input, com.example.atmusic handling, or a cloudflare: import",
       "also": [
-        "scripts/test/check-node-bundle.test.ts › a production source passing fixtureOrigins: true, fixture: true as an option, routerTransport or a test-support import fails the call-site scan, while url-policy.ts fixture handling and the fixtureOrigins?: boolean parameter pass; a scan of fewer than 60 files fails as vacuous"
+        "scripts/test/check-node-bundle.test.ts › a production source passing fixtureOrigins: true, fixture: true as an option, routerTransport or a test-support import fails the call-site scan, while url-policy.ts fixture handling and the fixtureOrigins?: boolean parameter pass; a scan of fewer than 60 files fails as vacuous",
+        "scripts/test/check-node-bundle.test.ts › the guard fails when the bundle's @atcute/crypto entry differs from the one the worker-node project resolves, and prints the git sha and bundle SHA-256 otherwise"
       ]
     },
     {
@@ -1094,11 +1097,13 @@
     },
     {
       "case": "M6.1.3/fresh_install",
-      "target": "scripts/test/install-local.test.ts › with a temporary HOME, install-local builds releases/<sha> with npm ci --ignore-scripts, runs main.mjs --init only when the database is missing, switches current atomically, installs both units and prints, but does not run, the linger command",
+      "target": "scripts/test/build-server.test.ts › the bundled main.mjs started with --init on a temporary state directory answers /health/ready, then on SIGTERM sends STOPPING=1 and exits 0 within 30 s",
       "also": [
+        "scripts/test/install-local.test.ts › with a temporary HOME, install-local builds releases/<sha> with npm ci --ignore-scripts, runs main.mjs --init only when the database is missing, switches current atomically, installs both units and prints, but does not run, the linger command",
         "worker/test/storage/migrate.test.ts › fresh DO applies migration 1 and seeds indexing_status/backfill_generation/ingest_checkpoint",
         "worker/test/http/health-meta.test.ts › live 200; ready 503 when index reports too_new; meta capabilities omit publication without owned prefix"
-      ]
+      ],
+      "note": "Current Node bundle --init on fresh temporary state proves readiness, database permissions and clean shutdown. This is local fixture evidence; deployed installer and live acceptance remain separate."
     },
     {
       "case": "M6.1.3/upgrade_failure",
@@ -1251,7 +1256,7 @@
     },
     {
       "case": "M6.4.2/packaged_flow",
-      "target": "scripts/test/node-interim.test.ts › node-interim.sh --wave 0 in a disposable copy runs check-ts, the Python regressions, the case map with --node-wave 0, goldens and live no-env, prints Playwright as pending until wave 6, and exits 1 when any run step fails"
+      "target": "bash scripts/acceptance/node-backend.sh › exits 0 with deterministic steps passed and live gates blocked, and exits 1 when systemd-analyze is unavailable"
     },
     {
       "case": "M6.4.2/packaged_recovery",
@@ -1265,7 +1270,7 @@
       "case": "M6.4.2/unrun_gate",
       "target": "scripts/test_validate_case_map.py › --check-tests reports a missing test file or name",
       "also": [
-        "python3 scripts/validate_case_map.py --check-tests › every mapped test file and name exists; 258 cases covered",
+        "python3 scripts/validate_case_map.py --check-tests › every one of the 258 cases maps to an executed Node test or a retirement with a reason, and no retirement cites a superseded amendment",
         "scripts/test/node-recovery-runner.test.ts › unrun_gate: every required recovery journey must be present and pass exactly once"
       ]
     },

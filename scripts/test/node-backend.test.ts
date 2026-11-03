@@ -661,7 +661,9 @@ describe('scripts/acceptance/node-backend.sh', () => {
       const recorded = notRunCases.find((c) => c.case === omittedCase);
       expect(recorded?.result).toBe('failed');
       expect(recorded?.notRun?.some((n) => n.includes(vitestTarget as string))).toBe(true);
-      expect(notRunSummary.cases.failed).toBe(omittedCases.length);
+      // Self-referencing gate cases also fail when any mapped case did not run.
+      const selfCases = mapped.caseMap.filter((c) => [c.target, ...(c.also ?? [])].some((r) => prefixOf(r) === SELF));
+      expect(notRunSummary.cases.failed).toBe(new Set([...omittedCases, ...selfCases].map((c) => c.case)).size);
 
       // 5. --skip disables a step: it is recorded as skipped and the gate fails; other steps still run.
       const skipped = copy.gate(['--skip', 'goldens', '--skip', 'e2e', '--skip', 'scrobbler-e2e']);
