@@ -1701,6 +1701,7 @@
      "scripts/test/node-backend.test.ts",
      "scripts/test/fake-upstreams.test.ts",
      "scripts/test/node-entry.test.ts",
+     "scripts/test/cookie-jar.test.ts",
      "scripts/test/scrobbler-e2e.test.ts",
      "docs/verification/backend-node.md",
      "docs/verification/ts-case-map.json",
