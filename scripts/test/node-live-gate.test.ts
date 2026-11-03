@@ -271,6 +271,8 @@ test('unknown OAuth URL parameters and nested encoded URLs are stripped from eve
   let beyondLimit = `https://issuer.example/callback?code=${secretCode}&state=${secretState}`;
   for (let i = 0; i < 20; i++) beyondLimit = encodeURIComponent(beyondLimit);
   const encodedQuote = `https://issuer.example/callback?next=%2522%2526code%253D${secretCode}&state=${secretState}`;
+  const mixedEscapeUrl = `https://issuer.example/cb%5Cu003fcode%3D${secretCode}%26state%3D${secretState}`;
+  const nestedMixedEscapeUrl = encodeURIComponent(encodeURIComponent(mixedEscapeUrl));
   const escapedUrl = String.raw`https:\/\/issuer.example\/cb\u003fcode=${secretCode}\u0026state=${secretState}`;
   const mixedEscapeUrl = 'https://issuer.example/cb%5Cu003fcode=synthetic-code';
   const reverseOrderUrl = encodeURIComponent(
@@ -311,6 +313,8 @@ test('unknown OAuth URL parameters and nested encoded URLs are stripped from eve
           deeplyNested,
           beyondLimit,
           encodedQuote,
+          mixedEscapeUrl,
+          nestedMixedEscapeUrl,
           escapedUrl,
           mixedEscapeUrl,
           reverseOrderUrl,

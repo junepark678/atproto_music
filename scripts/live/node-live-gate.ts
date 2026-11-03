@@ -263,6 +263,10 @@ export function redactNodeGateOutput(text: string, env: NodeGateEnv): string {
     // a JavaScript escape (for example %5Cu003f) that must be decoded first.
     value = value.replaceAll('\\', '/');
     try {
+      // Normalize only after escaped material has reached a fixed point. A
+      // percent-decoded `\\u003f` must survive this loop so the next pass can
+      // decode it before WHATWG backslash normalization.
+      value = value.replaceAll('\\', '/');
       const url = new URL(value);
       if (url.protocol !== 'http:' && url.protocol !== 'https:') return '[redacted-url]';
       const hadRootSlash = url.pathname === '/' && !value.endsWith('/');
