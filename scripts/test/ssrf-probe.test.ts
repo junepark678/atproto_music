@@ -150,6 +150,10 @@ describe('scripts/live/ssrf_probe.ts › --emit-probe', () => {
         'pinnedTransport({ caps: DEFAULT_PINNED_CAPS, lookup: observedLookup.lookup, connector: tlsSocketConnector })',
       );
       expect(source).toContain('observePinnedLookup(systemLookup)');
+      expect(source).toContain('probeResultExitCode(result, args.hosts, args.origin) === 0');
+      expect(source).not.toContain('target.safeFetch.code');
+      expect(source).not.toContain('target.target.host');
+      expect(source).toContain('private result file intentionally contains the configured hostnames');
       expect(source).toContain("from '../../scripts/live/ssrf_probe.ts'");
       // The emitted probe only runs when invoked explicitly; importing it must not be a side effect of the gate.
       expect(readFileSync(DRIVER, 'utf8')).not.toMatch(/from '[^']*\/probe\.ts'/);
@@ -308,6 +312,32 @@ describe('scripts/live/ssrf_probe.ts › parseHosts', () => {
     ['rfc1918,loopback=b.example.org,metadata=c.example.org', 'label=host'],
   ])('rejects %j', (text, problem) => {
     expect(() => parseHosts(text)).toThrow(problem);
+  });
+
+  test('parse diagnostics never copy caller-controlled labels, hosts, or unknown options', () => {
+    const secret = 'synthetic-private-argument-secret';
+    for (const invalid of [
+      `unexpected-label=${HOSTS.split(',')[0]!.split('=')[1]},loopback=loopback.probe.example.org,metadata=metadata.probe.example.org`,
+      `rfc1918=${secret}/path,loopback=loopback.probe.example.org,metadata=metadata.probe.example.org`,
+    ]) {
+      let message = '';
+      try {
+        parseHosts(invalid);
+      } catch (error) {
+        message = error instanceof Error ? error.message : String(error);
+      }
+      expect(message).not.toContain(secret);
+      expect(message).not.toContain('unexpected-label');
+      expect(message).not.toContain('/path');
+    }
+    let argumentMessage = '';
+    try {
+      parseProbeArgs([`--unknown=${secret}`]);
+    } catch (error) {
+      argumentMessage = error instanceof Error ? error.message : String(error);
+    }
+    expect(argumentMessage).toBe('unknown argument');
+    expect(argumentMessage).not.toContain(secret);
   });
 });
 

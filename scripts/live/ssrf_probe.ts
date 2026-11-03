@@ -21,10 +21,13 @@
 // for each target through it and writes a result file with one outcome per
 // target: `refused` with the policy reason, or `dns`, `timeout`,
 // `unpinned_fetch`, `connect`, `fetched` (with the status) and so on. The
-// private result file contains exact target URLs, hostnames and resolved IPs
-// for offline validation; it is created owner-only (0600). It contains no
-// response bodies/headers or raw exception text. Console output is a fixed,
-// allowlisted summary and omits hosts, URLs, IPs, codes and exception details.
+// private result file intentionally contains configured target hostnames,
+// exact target URLs and resolved IP addresses needed for offline validation.
+// Those raw network identifiers are permitted only in this operator-controlled,
+// owner-only (0600), create-once artifact. They are never printed. The artifact
+// contains no response bodies/headers or raw exception text. Console output is
+// a fixed, allowlisted summary and omits hosts, URLs, IPs, codes and exception
+// details.
 //
 // Targets: the operator's controlled DNS names (ATMUSIC_LIVE_SSRF_HOSTS,
 // `label=host` pairs; the labels rfc1918, loopback and metadata are required)
@@ -198,16 +201,16 @@ export function parseHosts(text: string): Record<string, string> {
   const entries = text.split(',');
   for (const entry of entries) {
     if (entry === '') throw new Error('empty entry in host list');
-    if (entry !== entry.trim()) throw new Error(`entry ${JSON.stringify(entry)} has surrounding whitespace`);
+    if (entry !== entry.trim()) throw new Error('host list entry has surrounding whitespace');
     const eq = entry.indexOf('=');
-    if (eq < 0) throw new Error(`entry ${JSON.stringify(entry)} is not label=host`);
+    if (eq < 0) throw new Error('host list entry must use label=host syntax');
     const label = entry.slice(0, eq);
     const host = entry.slice(eq + 1);
-    if (!LABEL.test(label)) throw new Error(`label ${JSON.stringify(label)} must match ${LABEL}`);
-    if (label in hosts) throw new Error(`duplicate label ${label}`);
+    if (!LABEL.test(label)) throw new Error('host list label is malformed');
+    if (label in hosts) throw new Error('duplicate label');
     const problem = hostnameProblem(host);
-    if (problem !== null) throw new Error(`host for ${label}: ${problem}`);
-    if (seen.has(host)) throw new Error(`host ${host} listed twice`);
+    if (problem !== null) throw new Error(`host list value is invalid: ${problem}`);
+    if (seen.has(host)) throw new Error('host listed twice');
     seen.add(host);
     hosts[label] = host;
   }
@@ -740,9 +743,11 @@ export function probeSource(dir: string): string {
 //
 // It builds the production pinned transport (system lookup, TLS connector,
 // DEFAULT_PINNED_CAPS) and requests each controlled name and IP literal. The
-// private result file contains exact URLs, hostnames, and DNS answers for
-// offline validation; it is created mode 0600 and is never printed. Diagnostics
-// are fixed text and never include exception messages or codes from the network.
+// private result file intentionally contains the configured hostnames, exact
+// target URLs, and DNS answers needed for offline validation. Raw network
+// identifiers are permitted only in this operator-controlled, owner-only
+// (0600), create-once artifact; they are never printed. Diagnostics are fixed
+// text and never include exception messages or codes from the network.
 // This file makes network requests only when run explicitly.
 
 import { existsSync } from 'node:fs';
@@ -796,7 +801,9 @@ async function main() {
     };
     writePrivateProbeResult(args.out, \`\${JSON.stringify(result, null, 2)}\\n\`);
     for (const [index, target] of targets.entries()) {
-      console.error(\`target \${index + 1}: \${target.safeFetch.outcome}\`);
+      // The private file contains target identities; stdout/stderr expose only
+      // an ordinal and a known outcome, never caller-controlled host or code.
+      console.error(\`target \${index + 1}: \${isProbeOutcome(target.safeFetch.outcome) ? target.safeFetch.outcome : 'error'}\`);
     }
     console.log('probe result written to the private output file');
     if (probeResultExitCode(result, args.hosts, args.origin) === 0) {
