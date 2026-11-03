@@ -158,6 +158,17 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: str
   }
 }
 
+async function closeWithinDeadline<T>(
+  close: () => Promise<T>,
+  deadlineAt: number,
+  label: string,
+  reserveMs = 0,
+): Promise<T> {
+  const timeoutMs = Math.floor(deadlineAt - performance.now() - reserveMs);
+  if (timeoutMs <= 0) throw new Error(`${label} deadline exceeded`);
+  return withTimeout(close(), timeoutMs, label);
+}
+
 const dependencies: IngestDependencies = {
   browser: () => launchBrowser(process.env),
   pdsInfo: (endpoint, implementation, timeoutMs) => pdsInfo(endpoint, implementation, timeoutMs),
@@ -496,8 +507,16 @@ async function awaitIndexed(
   );
   if (expectedRecord !== undefined) {
     const expectedDigest = await canonicalDigest(expectedRecord);
+    // createdAt is assigned by the BFF when it accepts the request. It is the
+    // only record field that the client cannot determine in advance.
+    const actualPayload = Object.hasOwn(expectedRecord, 'createdAt')
+      ? proof.record
+      : (() => {
+          const { createdAt: _createdAt, ...payload } = (proof.record ?? {}) as Record<string, unknown>;
+          return payload;
+        })();
     expect(
-      proof.record !== undefined && (await canonicalDigest(proof.record)) === expectedDigest,
+      proof.record !== undefined && (await canonicalDigest(actualPayload)) === expectedDigest,
       `${written.uri}: independently verified PDS content differs from the intended record`,
     );
   }
@@ -527,6 +546,10 @@ async function awaitIndexed(
         ? 'approximate wall-clock time from succeeded operation.updatedAt to first indexed status observation; includes polling delay and clock skew'
         : 'approximate wall-clock time from PDS createRecord response to first indexed status observation; includes polling delay and clock skew',
   };
+}
+
+function intendedAppRecord(collection: string, requestBody: object): object {
+  return { $type: collection, ...requestBody };
 }
 
 async function awaitAbsent(
@@ -604,6 +627,7 @@ export async function runNodeIngest(
   const results: Record<string, unknown> = {};
   let browser: Browser | null = null;
   let browserContext: Awaited<ReturnType<Browser['newContext']>> | null = null;
+  let browserContextClosed = false;
   let page: Page | null = null;
   let appSession: BrowserSession | null = null;
   let pdsSession: PdsSession | null = null;
@@ -614,28 +638,52 @@ export async function runNodeIngest(
     await deps.checkIdentityPds(didA, pds[0]!.endpoint, phaseBudgetMs());
     await deps.checkIdentityPds(didB, pds[1]!.endpoint, phaseBudgetMs());
     const browserLaunch = deps.browser();
-    const launchState: { abandoned: boolean; browser: Browser | null; closed: boolean } = {
+    const launchState: { abandoned: boolean; browser: Browser | null; closePromise: Promise<void> | null } = {
       abandoned: false,
       browser: null,
-      closed: false,
+      closePromise: null,
     };
-    const closeLateLaunch = () => {
-      if (launchState.abandoned && launchState.browser !== null && !launchState.closed) {
-        launchState.closed = true;
-        void launchState.browser.close().catch(() => undefined);
+    const closeLateBrowser = (launchedBrowser: Browser): Promise<void> => {
+      if (launchState.closePromise === null) {
+        launchState.closePromise = (async () => {
+          try {
+            await closeWithinDeadline(() => launchedBrowser.close(), deadlineAt, 'late browser close', 100);
+          } catch {
+            context.fail('late browser launch could not be closed before the ingest deadline');
+            context.cleanup('late browser launch unresolved; inspect the runner process for a browser left open');
+          }
+        })();
       }
+      return launchState.closePromise;
     };
-    browserLaunch
-      .then((lateBrowser) => {
-        launchState.browser = lateBrowser;
-        closeLateLaunch();
-      })
-      .catch(() => undefined);
+    const launchOutcome = browserLaunch.then(async (launchedBrowser) => {
+      launchState.browser = launchedBrowser;
+      if (launchState.abandoned) {
+        try {
+          await closeLateBrowser(launchedBrowser);
+        } catch {
+          context.cleanup('late browser launch cleanup did not settle; inspect the runner process');
+        }
+      }
+      return launchedBrowser;
+    });
     try {
-      browser = await withTimeout(browserLaunch, phaseBudgetMs(), 'browser launch');
+      browser = await withTimeout(launchOutcome, phaseBudgetMs(), 'browser launch');
     } catch (error) {
       launchState.abandoned = true;
-      closeLateLaunch();
+      try {
+        if (launchState.browser !== null) {
+          await withTimeout(
+            closeLateBrowser(launchState.browser),
+            Math.max(1, cleanupBudgetMs() - 25),
+            'late browser launch cleanup',
+          );
+        } else {
+          await withTimeout(launchOutcome, Math.max(1, cleanupBudgetMs() - 25), 'late browser launch cleanup');
+        }
+      } catch {
+        context.cleanup('browser launch did not settle before the ingest deadline; inspect the runner process');
+      }
       throw error;
     }
     browserContext = await withTimeout(browser.newContext(), phaseBudgetMs(), 'browser context creation');
@@ -698,10 +746,17 @@ export async function runNodeIngest(
       parseRecordUri(local.uri)?.collection === collectionsFor(context.lexiconPrefix).scrobble,
       'local BFF wrote outside the scrobble collection',
     );
-    localRecord.owned = true;
     phase = 'app scrobble indexing';
-    const localIndexed = await awaitIndexed(page, local, { kind: 'operation', dto: localOp }, phaseBudgetMs(), deps);
+    const localIndexed = await awaitIndexed(
+      page,
+      local,
+      { kind: 'operation', dto: localOp },
+      phaseBudgetMs(),
+      deps,
+      intendedAppRecord(collectionsFor(context.lexiconPrefix).scrobble, localPayload),
+    );
     results.localPublish = localIndexed;
+    localRecord.owned = true;
     localRecord.presentRev = String(localIndexed.verifiedRev);
     delete localRecord.operationId;
     delete localRecord.idempotencyKey;
@@ -848,18 +903,21 @@ export async function runNodeIngest(
             record.uri = uri;
             record.cid = field<string>(operation, 'cid');
             const parsed = parseRecordUri(uri);
-            record.owned = parsed?.did === didA && parsed.collection === collectionsFor(context.lexiconPrefix).scrobble;
-            if (!record.owned)
+            const isIntendedAppRecord =
+              parsed?.did === didA && parsed.collection === collectionsFor(context.lexiconPrefix).scrobble;
+            if (!isIntendedAppRecord)
               context.fail('recovered app operation returned a URI outside its intended owner/collection');
-            if (record.owned && record.cid) {
+            if (isIntendedAppRecord && record.cid) {
               const indexed = await awaitIndexed(
                 page,
                 { uri, cid: record.cid, rev: null },
                 { kind: 'operation', dto: operation },
                 Math.min(cleanupBudgetMs(), 15_000),
                 deps,
+                intendedAppRecord(collectionsFor(context.lexiconPrefix).scrobble, record.requestBody ?? {}),
               );
               record.presentRev = String(indexed.verifiedRev);
+              record.owned = true;
               results.localPublish ??= indexed;
               record.operationState = 'succeeded';
               delete record.operationId;
@@ -1061,26 +1119,37 @@ export async function runNodeIngest(
     results.unresolvedSubjects = unresolvedSubjects;
     results.unresolvedOperations = unresolvedOperations;
     try {
-      if (page !== null) await withTimeout(page.close(), cleanupBudgetMs(), 'page close');
+      if (page !== null) await closeWithinDeadline(() => page!.close(), deadlineAt, 'page close');
     } catch {
       context.fail('page close failed during teardown');
       context.cleanup('page close failed');
     }
     try {
       if (browserContext !== null)
-        await withTimeout(browserContext.close(), cleanupBudgetMs(), 'browser context close');
+        await closeWithinDeadline(() => browserContext!.close(), deadlineAt, 'browser context close');
+      if (browserContext !== null) browserContextClosed = true;
     } catch {
       context.fail('browser context close failed during teardown');
-      context.cleanup('browser context close failed');
+      context.cleanup(
+        'browser context closure was not confirmed; inspect the runner process and close any remaining context',
+      );
     }
     try {
-      if (browser !== null) await withTimeout(browser.close(), cleanupBudgetMs(), 'browser close');
+      if (browser !== null) await closeWithinDeadline(() => browser!.close(), deadlineAt, 'browser close');
     } catch {
       context.fail('browser close failed during teardown');
-      context.cleanup('browser close failed');
+      context.cleanup(
+        'browser process closure was not confirmed; inspect the runner process and terminate any remaining browser',
+      );
     }
-    if (appSession !== null)
-      context.cleanup(`${didA}: browser context discarded; no sign-out or upstream revocation claim was made`);
+    if (appSession !== null) {
+      if (browserContextClosed)
+        context.cleanup(`${didA}: browser context discarded; no sign-out or upstream revocation claim was made`);
+      else
+        context.cleanup(
+          `${didA}: browser context closure was not confirmed; inspect the runner process and close any remaining session`,
+        );
+    }
   }
   return {
     pds,

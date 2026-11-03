@@ -157,6 +157,9 @@ function mockDependencies(
     stallStatus?: boolean;
     malformedAppAck?: boolean;
     wrongProofRecord?: boolean;
+    appProofMismatch?: boolean;
+    contextCloseMode?: 'reject' | 'hang';
+    browserCloseMode?: 'reject' | 'hang';
   } = {},
 ) {
   const recordStates = new Map<string, string>();
@@ -166,6 +169,7 @@ function mockDependencies(
   let appDeletePosts = 0;
   let pdsDeletePosts = 0;
   let pdsRecord: object | null = null;
+  let appRecord: object | null = null;
   const browserCalls = { launched: 0, closed: 0, contextClosed: 0 };
   const browserRequests: Array<{
     path: string;
@@ -213,6 +217,11 @@ function mockDependencies(
           return { status: 200, json: { did: DID_A, csrfToken: 'csrf-session-value' } };
         if (path === '/api/v1/scrobbles' && method === 'POST') {
           appCreatePosts++;
+          appRecord = {
+            $type: 'org.atproto.music.scrobble',
+            ...(body as object),
+            createdAt: '2026-11-03T00:00:00Z',
+          };
           if (options.loseAppCreateResponse && appCreatePosts === 1) throw new Error('response lost after app commit');
           if (options.malformedAppAck && appCreatePosts === 1) return { status: 202, json: { operation: { id: '' } } };
           return { status: 202, json: { operation: { id: 'local-create' } } };
@@ -265,12 +274,16 @@ function mockDependencies(
     newPage: async () => page,
     close: async () => {
       browserCalls.contextClosed++;
+      if (options.contextCloseMode === 'reject') throw new Error('context close failed');
+      if (options.contextCloseMode === 'hang') return new Promise<void>(() => {});
     },
   };
   const browser = {
     newContext: async () => browserContext,
     close: async () => {
       browserCalls.closed++;
+      if (options.browserCloseMode === 'reject') throw new Error('browser close failed');
+      if (options.browserCloseMode === 'hang') return new Promise<void>(() => {});
     },
   };
   const deps: IngestDependencies = {
@@ -318,7 +331,13 @@ function mockDependencies(
     verifyRecordAt: vi.fn(async (did) => ({
       state: 'present' as const,
       cid: did === DID_A ? CID_A : options.wrongPdsCid ? CID_A : CID_B,
-      ...(did === DID_B ? { record: options.wrongProofRecord ? { artist: 'different record' } : pdsRecord } : {}),
+      ...(did === DID_A
+        ? {
+            record: options.appProofMismatch ? { ...appRecord, artist: 'different app payload' } : appRecord,
+          }
+        : {
+            record: options.wrongProofRecord ? { artist: 'different record' } : pdsRecord,
+          }),
       rev: REV_PRESENT,
       commitCid: CID_A,
       pds: did === DID_A ? goodEnv[ENV.pdsA]! : goodEnv[ENV.pdsB]!,
@@ -515,6 +534,29 @@ test('lost app acknowledgement replays the exact idempotency key and payload for
   expect(result.subjects[0]).toMatchObject({ did: DID_A, uri: URI_A, unresolved: false });
 });
 
+test.each([
+  ['normal app publish', {}],
+  ['recovered app publish', { loseAppCreateResponse: true }],
+] as const)('%s rejects wrong content with a matching CID and never deletes it', async (_label, options) => {
+  const { deps, deletePosts } = mockDependencies({ ...options, appProofMismatch: true });
+  const failures: string[] = [];
+  const cleanup: string[] = [];
+  const result = await runNodeIngest(makeContext(failures, cleanup), deps);
+
+  expect(failures).toContain(
+    `Node ingest failed during ${'loseAppCreateResponse' in options ? 'app scrobble submission' : 'app scrobble indexing'}`,
+  );
+  expect(deps.verifyRecordAt).toHaveBeenCalledWith(
+    DID_A,
+    'org.atproto.music.scrobble',
+    expect.any(String),
+    expect.any(Number),
+  );
+  expect(deletePosts().appDeletePosts).toBe(0);
+  expect(result.subjects[0]).toMatchObject({ did: DID_A, uri: URI_A, unresolved: true });
+  expect(cleanup.some((line) => line.includes(`${URI_A} LEFT BEHIND`))).toBe(true);
+});
+
 test('malformed app acknowledgement is recovered through the original idempotency key', async () => {
   const { deps, browserRequests } = mockDependencies({ malformedAppAck: true });
   const failures: string[] = [];
@@ -678,6 +720,55 @@ test('a browser launch resolving after its phase deadline is closed', async () =
   await runNodeIngest(makeContext(failures, [], { ...goodEnv, [NODE_INGEST_ENV.timeoutSeconds]: '1' }), deps);
   expect(failures).toContain('Node ingest failed during PDS identity checks');
   await vi.waitFor(() => expect(browserCalls.closed).toBe(1), { timeout: 1_000 });
+});
+
+test('a rejected browser launch remains bounded and does not claim a discarded context', async () => {
+  const { deps, browserCalls } = mockDependencies();
+  deps.browser = async () => {
+    throw new Error('launch rejected');
+  };
+  const failures: string[] = [];
+  const cleanup: string[] = [];
+  await runNodeIngest(makeContext(failures, cleanup), deps);
+  expect(failures).toContain('Node ingest failed during PDS identity checks');
+  expect(browserCalls.contextClosed).toBe(0);
+  expect(cleanup).not.toContain(
+    `${DID_A}: browser context discarded; no sign-out or upstream revocation claim was made`,
+  );
+});
+
+test.each(['reject', 'hang'] as const)(
+  'context close %s leaves actionable evidence within the total deadline',
+  async (mode) => {
+    const { deps } = mockDependencies({ contextCloseMode: mode });
+    const failures: string[] = [];
+    const cleanup: string[] = [];
+    const started = performance.now();
+    await runNodeIngest(makeContext(failures, cleanup, { ...goodEnv, [NODE_INGEST_ENV.timeoutSeconds]: '1' }), deps);
+    expect(performance.now() - started).toBeLessThan(1_300);
+    expect(failures).toContain('browser context close failed during teardown');
+    expect(cleanup).toContain(
+      `${DID_A}: browser context closure was not confirmed; inspect the runner process and close any remaining session`,
+    );
+    expect(cleanup).not.toContain(
+      `${DID_A}: browser context discarded; no sign-out or upstream revocation claim was made`,
+    );
+  },
+);
+
+test('a late browser with a hanging close cannot extend the absolute ingest deadline', async () => {
+  const { deps } = mockDependencies({ browserCloseMode: 'hang' });
+  const startBrowser = deps.browser;
+  deps.browser = async () => {
+    await new Promise((resolve) => setTimeout(resolve, 850));
+    return startBrowser();
+  };
+  const failures: string[] = [];
+  const cleanup: string[] = [];
+  const started = performance.now();
+  await runNodeIngest(makeContext(failures, cleanup, { ...goodEnv, [NODE_INGEST_ENV.timeoutSeconds]: '1' }), deps);
+  expect(performance.now() - started).toBeLessThan(1_300);
+  expect(cleanup).toContain('late browser launch unresolved; inspect the runner process for a browser left open');
 });
 
 test('cleanup failure marks the URI left behind and fails the gate', async () => {
