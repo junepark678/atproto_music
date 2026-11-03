@@ -57,7 +57,7 @@ function childDone(child: ChildProcess): Promise<{ code: number | null; stderr: 
   });
 }
 
-test('separate fake processes support the real Last.fm client through the restricted HTTPS preload', async () => {
+test('the pinned Last.fm client waits for parent-side app approval and reports no credentials', async () => {
   const fakes = await startFakeUpstreams();
   const target = new URL(fakes.lastfmOrigin);
   const proxy: Server = createServer((incoming, outgoing) => forwardTo(target, incoming, outgoing));
@@ -70,7 +70,13 @@ test('separate fake processes support the real Last.fm client through the restri
     const client = resolve(REPO, 'scripts/e2e/scrobbler-clients/lastfm-ts-api-client.ts');
     const child = spawn(process.execPath, ['--import', preload, client], {
       cwd: REPO,
-      env: { ...process.env, ATMUSIC_E2E_SCROBBLER_PORT: String(port) },
+      env: {
+        ...process.env,
+        ATMUSIC_E2E_SCROBBLER_PORT: String(port),
+        ATMUSIC_E2E_LASTFM_API_KEY: 'e2e-lastfm-api-key',
+        ATMUSIC_E2E_LASTFM_SHARED_SECRET: 'e2e-lastfm-api-secret',
+        ATMUSIC_E2E_LASTFM_USER: 'e2e-lastfm-user',
+      },
       stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
     });
     clientChild = child;
@@ -88,15 +94,22 @@ test('separate fake processes support the real Last.fm client through the restri
         const message = raw as {
           type?: unknown;
           id?: unknown;
+          action?: unknown;
+          apiKey?: unknown;
           token?: unknown;
-          user?: unknown;
           result?: unknown;
           error?: unknown;
         };
-        if (message.type === 'command' && message.id === 1 && message.token && message.user) {
+        if (
+          message.type === 'command' &&
+          message.action === 'approveLastfmToken' &&
+          typeof message.id === 'number' &&
+          message.apiKey === 'e2e-lastfm-api-key' &&
+          typeof message.token === 'string'
+        ) {
           void fakes
-            .authorizeLastfmToken(String(message.token), String(message.user))
-            .then(() => child.send?.({ type: 'answer', id: 1, result: true }))
+            .authorizeLastfmToken(message.token, 'e2e-lastfm-user')
+            .then(() => child.send?.({ type: 'answer', id: message.id, result: true }))
             .catch(reject);
         } else if (message.type === 'answer' && message.id === 0) resolveResult(message.result);
         else if (message.type === 'error') reject(new Error(String(message.error)));
@@ -110,7 +123,13 @@ test('separate fake processes support the real Last.fm client through the restri
       done,
     ]);
     expect(exit.code, exit.stderr).toBe(0);
-    expect(clientResult).toMatchObject({ session: 'e2e-lastfm-user' });
+    expect(clientResult).toMatchObject({
+      sessionEstablished: true,
+      scrobbleBatchSize: 2,
+      recentTrackNames: expect.arrayContaining(['First Track', 'Second Track']),
+    });
+    expect(JSON.stringify(clientResult)).not.toContain('e2e-lastfm-api-secret');
+    expect(JSON.stringify(clientResult)).not.toContain('e2e-lastfm-api-key');
     const snapshot = await fakes.snapshot();
     expect(snapshot.lastfm).toMatchObject({
       scrobbles: [

@@ -1704,6 +1704,7 @@
      "scripts/test/fake-upstreams.test.ts",
      "scripts/test/cookie-jar.test.ts",
      "scripts/test/scrobbler-e2e.test.ts",
+     "scripts/test/scrobbler-harness.test.ts",
      "docs/verification/backend-node.md",
      "docs/verification/ts-case-map.json",
      "docs/MILESTONE_STATUS.md",
@@ -1728,7 +1729,8 @@
      "scripts/e2e/scrobbler-e2e.ts › the https-to-loopback preload throws for any hostname other than music.214510.xyz, and the client child opens no other connection",
      "scripts/e2e/scrobbler-e2e.ts › five replays of one POST /api/v1/scrobbles with the same Idempotency-Key against the e2e bundle produce one operation and one PDS record",
      "scripts/e2e/scrobbler-e2e.ts › Pano-shaped unsigned GET reads with sk and api_key (user.getRecentTracks, user.getInfo) succeed against the e2e bundle and parse with zero-, one- and many-item pages",
-     "scripts/e2e/scrobbler-e2e.ts › a Web Scrobbler ListenBrainz batch with one over-long artist name answers 200, the other listens become indexed records, and the ignored listen is listed by GET /api/v1/account/ignored-listens"
+     "scripts/e2e/scrobbler-e2e.ts › a Web Scrobbler ListenBrainz batch with one over-long artist name answers 200, the other listens become indexed records, and the ignored listen is listed by GET /api/v1/account/ignored-listens",
+     "scripts/test/scrobbler-harness.test.ts › the pinned Last.fm client waits for parent-side app approval and reports no credentials"
     ]
    }
   ]
