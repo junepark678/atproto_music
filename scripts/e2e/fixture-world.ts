@@ -111,7 +111,12 @@ async function serve(
 const didToPds = new Map<string, string>();
 
 /** Shared deterministic fixture construction, used only inside the identity child. */
-async function runIdentityChild(workerPort: number, withPlaywrightListenBrainz: boolean): Promise<void> {
+async function runIdentityChild(
+  workerPort: number,
+  withPlaywrightListenBrainz: boolean,
+  appHost = '127.0.0.1',
+  publicHost = APP_HOST,
+): Promise<void> {
   if (!process.send) throw new Error('identity child requires IPC');
   const clock = fixedClock(new Date(FIXTURE_NOW_MS).toISOString());
   const keys = await fixtureKeys();
@@ -175,14 +180,14 @@ async function runIdentityChild(workerPort: number, withPlaywrightListenBrainz: 
     const url = new URL(req.url);
     const init: RequestInit = { method: req.method, headers: req.headers, redirect: 'manual' };
     if (req.method !== 'GET' && req.method !== 'HEAD') init.body = await req.arrayBuffer();
-    return fetch(`http://127.0.0.1:${workerPort}${url.pathname}${url.search}`, init);
+    return fetch(`http://${appHost}:${workerPort}${url.pathname}${url.search}`, init);
   };
   const transport: FixtureTransport = routerTransport({
     pds: [pds1, pds2],
     plc,
     doh,
     hosts: {
-      [APP_HOST]:
+      [publicHost]:
         workerPort > 0
           ? localApp
           : async () => new Response('application host is not part of the identity fixture', { status: 501 }),
@@ -288,6 +293,8 @@ async function stopChild(child: ChildProcess): Promise<void> {
 export async function startIdentityFixture(
   workerPort = 0,
   withPlaywrightListenBrainz = false,
+  appHost = '127.0.0.1',
+  publicHost = APP_HOST,
 ): Promise<{
   child: ChildProcess;
   port: number;
@@ -306,6 +313,8 @@ export async function startIdentityFixture(
       '--identity-child',
       String(workerPort),
       withPlaywrightListenBrainz ? 'playwright' : 'identity',
+      appHost,
+      publicHost,
     ],
     {
       cwd: process.cwd(),
@@ -436,4 +445,4 @@ export async function startFixtureWorld(ports: E2ePorts): Promise<FixtureWorld> 
 }
 
 if (process.argv[2] === '--identity-child')
-  await runIdentityChild(Number(process.argv[3]), process.argv[4] === 'playwright');
+  await runIdentityChild(Number(process.argv[3]), process.argv[4] === 'playwright', process.argv[5], process.argv[6]);

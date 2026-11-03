@@ -27,22 +27,35 @@ export interface FakeUpstreams {
   lastfmOrigin: string;
   listenBrainzOrigin: string;
   accounts: Array<{ name: string; handle: string; did: string; pdsHost: string }>;
+  listenBrainzToken: string;
   route(request: Request): Promise<Response>;
   listRecords(
     did: string,
     collection: string,
   ): Promise<Array<{ uri: string; cid: string; value: Record<string, unknown> }>>;
+  advance(ms: number): Promise<void>;
   drainCommits(): Array<{ did: string; commit: CommitResult }>;
   appendCommits(commits: readonly CommitResult[]): Promise<string[]>;
   authorizeLastfmToken(token: string, user?: string): Promise<void>;
+  prepareLastfmLink(token: string, user: string): Promise<void>;
+  addListenBrainzToken(token: string, user: string): Promise<void>;
   snapshot(): Promise<{ lastfm: unknown; listenbrainz: unknown }>;
   close(): Promise<void>;
+}
+
+export interface FakeUpstreamOptions {
+  /** Optional app listener port; when set, OAuth metadata fetches reach the local e2e bundle. */
+  workerPort?: number;
+  /** Public host in the OAuth client's metadata URL. */
+  publicHost?: string;
 }
 
 type UpstreamRole = 'lastfm' | 'listenbrainz' | 'jetstream';
 type IpcCommand =
   | { type: 'command'; id: number; action: 'stop' | 'snapshot' }
   | { type: 'command'; id: number; action: 'authorizeLastfmToken'; token: string; user: string }
+  | { type: 'command'; id: number; action: 'prepareLastfmLink'; token: string; user: string }
+  | { type: 'command'; id: number; action: 'addListenBrainzToken'; token: string; user: string }
   | { type: 'command'; id: number; action: 'appendCommits'; commits: CommitResult[] };
 type IpcMessage =
   | { type: 'ready'; role: UpstreamRole; origin: string }
@@ -83,6 +96,17 @@ async function runScrobblerChild(role: 'lastfm' | 'listenbrainz'): Promise<void>
         if (!lastfm) throw new Error('authorizeLastfmToken is only valid for the Last.fm child');
         lastfm.authorizeToken(message.token, message.user);
         lastfm.addUser(message.user);
+        answer(true);
+      } else if (message.action === 'prepareLastfmLink' && role === 'lastfm') {
+        if (!lastfm || typeof message.token !== 'string' || typeof message.user !== 'string')
+          throw new TypeError('invalid Last.fm link fixture command');
+        lastfm.issueToken(message.token);
+        lastfm.authorizeToken(message.token, message.user);
+        answer(true);
+      } else if (message.action === 'addListenBrainzToken' && role === 'listenbrainz') {
+        if (!listenbrainz || typeof message.token !== 'string' || typeof message.user !== 'string')
+          throw new TypeError('invalid ListenBrainz fixture command');
+        listenbrainz.addToken(message.user, message.token);
         answer(true);
       } else if (message.action === 'snapshot') {
         answer(
@@ -135,7 +159,7 @@ async function runJetstreamChild(): Promise<void> {
         wire.on('message', (data, isBinary) => {
           if (!isBinary) memory.send(data.toString());
           else if (Array.isArray(data)) memory.send(Buffer.concat(data));
-          else if (Buffer.isBuffer(data)) memory.send(data);
+          else if (Buffer.isBuffer(data)) memory.send(new Uint8Array(data));
           else memory.send(data as ArrayBuffer);
         });
         wire.on('close', (code, reason) => {
@@ -261,11 +285,16 @@ async function startChild(
 }
 
 /** Starts the real local fake processes; caller owns and must close the result. */
-export async function startFakeUpstreams(): Promise<FakeUpstreams> {
+export async function startFakeUpstreams(options: FakeUpstreamOptions = {}): Promise<FakeUpstreams> {
   const started: Array<{ child: ChildProcess; origin: string }> = [];
   let identity: Awaited<ReturnType<typeof startIdentityFixture>> | null = null;
   try {
-    identity = await startIdentityFixture();
+    identity = await startIdentityFixture(
+      options.workerPort ?? 0,
+      false,
+      '127.2.0.1',
+      options.publicHost ?? 'music.214510.xyz',
+    );
     started.push(await startChild('jetstream'));
     started.push(await startChild('lastfm'));
     started.push(await startChild('listenbrainz'));
@@ -285,6 +314,7 @@ export async function startFakeUpstreams(): Promise<FakeUpstreams> {
     lastfmOrigin: lastfm.origin,
     listenBrainzOrigin: listenbrainz.origin,
     accounts: identity.accounts.map(({ name, handle, did, pdsHost }) => ({ name, handle, did, pdsHost })),
+    listenBrainzToken: LISTENBRAINZ_TOKEN,
     route(request) {
       if (closed) return Promise.reject(new Error('fake upstreams are closed'));
       return identity!.route(request);
@@ -303,6 +333,7 @@ export async function startFakeUpstreams(): Promise<FakeUpstreams> {
       ).records;
     },
     drainCommits: () => identity!.drainCommits(),
+    advance: (ms) => identity!.advance(ms),
     async appendCommits(commits) {
       if (closed) throw new Error('fake upstreams are closed');
       if (commits.length === 0) return [];
@@ -319,6 +350,26 @@ export async function startFakeUpstreams(): Promise<FakeUpstreams> {
         type: 'command',
         id: ++commandId,
         action: 'authorizeLastfmToken',
+        token,
+        user,
+      }).then(() => undefined);
+    },
+    prepareLastfmLink(token, user) {
+      if (closed) return Promise.reject(new Error('fake upstreams are closed'));
+      return childMessage(lastfm.child, {
+        type: 'command',
+        id: ++commandId,
+        action: 'prepareLastfmLink',
+        token,
+        user,
+      }).then(() => undefined);
+    },
+    addListenBrainzToken(token, user = LISTENBRAINZ_USER) {
+      if (closed) return Promise.reject(new Error('fake upstreams are closed'));
+      return childMessage(listenbrainz.child, {
+        type: 'command',
+        id: ++commandId,
+        action: 'addListenBrainzToken',
         token,
         user,
       }).then(() => undefined);

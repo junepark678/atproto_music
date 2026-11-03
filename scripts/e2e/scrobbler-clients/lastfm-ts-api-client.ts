@@ -38,6 +38,7 @@ interface PendingApproval {
 }
 
 let nextId = 0;
+let phase = 'configuration';
 const pending = new Map<number, PendingApproval>();
 
 function send(value: unknown): void {
@@ -69,6 +70,18 @@ function requestApproval(token: string): Promise<void> {
   });
 }
 
+function requestPump(): Promise<void> {
+  const id = ++nextId;
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      pending.delete(id);
+      reject(new Error('index pump timeout'));
+    }, APPROVAL_TIMEOUT_MS);
+    pending.set(id, { resolve, reject, timeout });
+    send({ type: 'command', id, action: 'pumpJetstream' });
+  });
+}
+
 function stringField(value: unknown, key: string): string {
   if (typeof value !== 'object' || value === null) throw new Error('invalid response');
   const field = (value as Record<string, unknown>)[key];
@@ -80,31 +93,84 @@ async function main(): Promise<void> {
   if (!API_KEY || !API_SECRET || !USER) throw new Error('missing client configuration');
   const config = { hostname: HOST, path: '/2.0/' };
   const auth = new client.LastFMAuth(API_KEY, API_SECRET, undefined, config);
+  phase = 'get-token';
   const token = stringField(await auth.getToken(), 'token');
+  phase = 'parent-approval';
   await requestApproval(token);
 
+  phase = 'get-session';
   const sessionResult = await auth.getSession({ token });
   const session =
     typeof sessionResult === 'object' && sessionResult !== null && 'session' in sessionResult
       ? (sessionResult as { session?: unknown }).session
       : sessionResult;
   const sessionKey = stringField(session, 'key');
-  const sessionName = stringField(session, 'name');
+  stringField(session, 'name');
 
   const track = new client.LastFMTrack(API_KEY, API_SECRET, sessionKey, config);
   const user = new client.LastFMUser(API_KEY, API_SECRET, sessionKey, config);
   const now = Math.floor(Number(process.env.ATMUSIC_E2E_NOW_MS ?? Date.UTC(2026, 0, 15, 12, 0, 0)) / 1000);
+  phase = 'scrobble';
   await track.scrobbleMany([
     { artist: 'E2E Artist', track: 'First Track', timestamp: now - 120 },
     { artist: 'E2E Artist', track: 'Second Track', timestamp: now - 60 },
   ]);
+  phase = 'now-playing';
   await track.updateNowPlaying({ artist: 'E2E Artist', track: 'Now Playing' });
-  const recent = await user.getRecentTracks({ user: sessionName || USER, limit: 10 });
+  phase = 'jetstream-pump';
+  await requestPump();
+  phase = 'recent-read';
+  let recent: unknown;
+  try {
+    recent = await user.getRecentTracks({ user: USER, limit: 10 });
+  } catch (error) {
+    const content =
+      typeof error === 'object' && error !== null && 'content' in error
+        ? (error as { content?: unknown }).content
+        : undefined;
+    let apiErrorCode: number | null = null;
+    if (typeof content === 'string') {
+      try {
+        const body = JSON.parse(content) as { error?: unknown; message?: unknown };
+        if (typeof body.error === 'number') apiErrorCode = body.error;
+        else if (typeof body.error === 'object' && body.error !== null && 'code' in body.error) {
+          const code = (body.error as { code?: unknown }).code;
+          if (typeof code === 'number') apiErrorCode = code;
+        }
+      } catch {}
+    }
+    send({ type: 'error', error: 'lastfm-ts-api client failed', phase, diagnostic: { apiErrorCode } });
+    process.disconnect?.();
+    process.exitCode = 1;
+    return;
+  }
   const recentTracks =
     typeof recent === 'object' && recent !== null && 'recenttracks' in recent
       ? (recent as { recenttracks?: { track?: unknown } }).recenttracks?.track
       : undefined;
-  if (!Array.isArray(recentTracks)) throw new Error('invalid read response');
+  if (!Array.isArray(recentTracks)) {
+    const record = typeof recent === 'object' && recent !== null ? (recent as Record<string, unknown>) : {};
+    const recentRoot =
+      typeof record.recenttracks === 'object' && record.recenttracks !== null
+        ? (record.recenttracks as Record<string, unknown>)
+        : {};
+    const errorRoot =
+      typeof record.error === 'object' && record.error !== null ? (record.error as Record<string, unknown>) : {};
+    send({
+      type: 'error',
+      error: 'lastfm-ts-api client failed',
+      phase,
+      diagnostic: {
+        rootKeys: Object.keys(record).sort(),
+        recentKeys: Object.keys(recentRoot).sort(),
+        trackType: Array.isArray(recentRoot.track) ? 'array' : typeof recentRoot.track,
+        apiErrorCode: typeof errorRoot.code === 'number' ? errorRoot.code : null,
+      },
+    });
+    process.disconnect?.();
+    process.exitCode = 1;
+    return;
+  }
 
   // Return only the assertions the parent needs. Never return the redeemable
   // auth token, session key, API credentials, or raw library response.
@@ -128,7 +194,7 @@ async function main(): Promise<void> {
 main().catch(() => {
   for (const request of pending.values()) clearTimeout(request.timeout);
   pending.clear();
-  send({ type: 'error', error: 'lastfm-ts-api client failed' });
+  send({ type: 'error', error: 'lastfm-ts-api client failed', phase });
   process.disconnect?.();
   process.exitCode = 1;
 });

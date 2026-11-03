@@ -111,6 +111,11 @@ export class LocalCookieJar {
     });
   }
 
+  /** Cookie header for an explicitly same-origin browser-style replay request. */
+  cookieHeader(path = '/'): string {
+    return this.#cookieHeader(path);
+  }
+
   #cookieHeader(pathname: string): string {
     return [...this.#cookies.values()]
       .filter(

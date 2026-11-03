@@ -57,7 +57,7 @@ function request(input, options, callback) {
     headers.Host = PUBLIC_HOST;
   }
   const method = config.method ?? supplied.method ?? 'GET';
-  return http.request(
+  const target = http.request(
     {
       ...supplied,
       ...config,
@@ -71,8 +71,20 @@ function request(input, options, callback) {
       method,
       headers,
     },
-    cb,
+    (response) => {
+      try {
+        process.send?.({
+          type: 'request-observed',
+          host: PUBLIC_HOST,
+          method,
+          path: typeof path === 'string' ? path.split('?')[0] : '/',
+          status: response.statusCode ?? 0,
+        });
+      } catch {}
+      cb?.(response);
+    },
   );
+  return target;
 }
 
 https.request = request;
