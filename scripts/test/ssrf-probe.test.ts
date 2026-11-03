@@ -5,18 +5,18 @@
 
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { duplexPair } from 'node:stream';
 import { fileURLToPath } from 'node:url';
-import { pinnedTransport, unpinnedFetchStub } from '@atmusic/worker/node/pinned-transport';
+import { DEFAULT_PINNED_CAPS, pinnedTransport, unpinnedFetchStub } from '@atmusic/worker/node/pinned-transport';
 import { afterAll, describe, expect, test } from 'vitest';
 import { NODE_ENV, NODE_EXIT_CODES, type NodeGateIO, runNodeGate } from '../live/node-live-gate.ts';
 import {
   addressClass,
   checkProbeResult,
   LITERAL_TARGETS,
+  observePinnedLookup,
   PROBE_RESULT_KIND,
   PROBE_RESULT_SCHEMA_VERSION,
   type ProbeOutcome,
@@ -30,7 +30,6 @@ import {
 } from '../live/ssrf_probe.ts';
 
 const REPO = resolve(fileURLToPath(new URL('../..', import.meta.url)));
-const TSX = createRequire(resolve(REPO, 'package.json')).resolve('tsx/cli');
 const DRIVER = resolve(REPO, 'scripts/live/ssrf_probe.ts');
 const HOSTS =
   'rfc1918=rfc1918.probe.example.org,loopback=loopback.probe.example.org,metadata=metadata.probe.example.org';
@@ -47,6 +46,7 @@ import tls from 'node:tls';
 import http from 'node:http';
 import https from 'node:https';
 const trip = (what) => () => { process.stderr.write('network call during emission: ' + what + '\\n'); process.exit(97); };
+globalThis.__SSRF_NETWORK_TRAP_INSTALLED = true;
 dns.lookup = trip('dns.lookup'); dns.resolve = trip('dns.resolve'); dns.resolve4 = trip('dns.resolve4'); dns.resolve6 = trip('dns.resolve6');
 dns.promises.lookup = trip('dns.promises.lookup'); dns.promises.resolve = trip('dns.promises.resolve');
 net.connect = trip('net.connect'); net.createConnection = trip('net.createConnection');
@@ -72,7 +72,16 @@ function liveEnvUnset(): NodeJS.ProcessEnv {
 }
 
 function spawnDriver(args: string[], env: NodeJS.ProcessEnv) {
-  return spawnSync(process.execPath, ['--import', trapPath, TSX, DRIVER, ...args], {
+  return spawnSync(process.execPath, ['--import=tsx', '--import', trapPath, DRIVER, ...args], {
+    env,
+    encoding: 'utf8',
+    timeout: 60_000,
+    cwd: REPO,
+  });
+}
+
+function spawnScript(path: string, env: NodeJS.ProcessEnv) {
+  return spawnSync(process.execPath, ['--import=tsx', '--import', trapPath, path], {
     env,
     encoding: 'utf8',
     timeout: 60_000,
@@ -131,8 +140,9 @@ describe('scripts/live/ssrf_probe.ts › --emit-probe', () => {
       expect(source.toLowerCase()).not.toContain('wrangler');
       expect(source).toContain("from '@atmusic/worker/node/pinned-transport'");
       expect(source).toContain(
-        'pinnedTransport({ caps: DEFAULT_PINNED_CAPS, lookup: systemLookup, connector: tlsSocketConnector })',
+        'pinnedTransport({ caps: DEFAULT_PINNED_CAPS, lookup: observedLookup.lookup, connector: tlsSocketConnector })',
       );
+      expect(source).toContain('observePinnedLookup(systemLookup)');
       expect(source).toContain("from '../../scripts/live/ssrf_probe.ts'");
       // The emitted probe only runs when invoked explicitly; importing it must not be a side effect of the gate.
       expect(readFileSync(DRIVER, 'utf8')).not.toMatch(/from '[^']*\/probe\.ts'/);
@@ -140,6 +150,17 @@ describe('scripts/live/ssrf_probe.ts › --emit-probe', () => {
       rmSync(abs, { recursive: true, force: true });
     }
     expect(readFileSync(DRIVER, 'utf8').toLowerCase()).not.toContain('wrangler');
+  });
+
+  test('the network trap intercepts fetch in the actual tsx child process', () => {
+    const target = join(scratch, 'trap-child.mjs');
+    writeFileSync(
+      target,
+      "if (globalThis.__SSRF_NETWORK_TRAP_INSTALLED !== true) process.exit(98); globalThis.fetch('https://example.invalid');\n",
+    );
+    const run = spawnScript(target, liveEnvUnset());
+    expect(run.status).toBe(97);
+    expect(run.stderr).toContain('network call during emission: fetch');
   });
 
   test('refuses a directory outside the repository and a malformed invocation', () => {
@@ -198,7 +219,8 @@ describe('scripts/live/ssrf_probe.ts › prerequisites', () => {
     const io = capturedIO();
     const env = completeEnv({ [SSRF_ENV.hosts]: 'rfc1918=10.0.0.1,loopback=lo.example.org,metadata=md.example.org' });
     expect(await runNodeGate(spec, env, io.io)).toBe(NODE_EXIT_CODES.blocked);
-    expect(io.output().stdout).toContain('IP literal');
+    expect(io.output().stdout).toContain('canonical label=host pairs');
+    expect(io.output().stdout).not.toContain('10.0.0.1');
   });
 });
 
@@ -235,6 +257,7 @@ describe('scripts/live/ssrf_probe.ts › parseHosts', () => {
     ['rfc1918=a%2eexample.org,loopback=b.example.org,metadata=c.example.org', 'bare DNS name'],
     ['rfc1918=fe80::1%eth0,loopback=b.example.org,metadata=c.example.org', 'bare DNS name'],
     ['rfc1918=a.example.org.,loopback=b.example.org,metadata=c.example.org', 'trailing dot'],
+    ['rfc1918=0x7f.0x1,loopback=b.example.org,metadata=c.example.org', 'canonicalizes this host to an IP literal'],
     ['rfc1918=a.example.123,loopback=b.example.org,metadata=c.example.org', 'numeric top-level'],
     ['rfc1918=example,loopback=b.example.org,metadata=c.example.org', 'single-label'],
     ['rfc1918=a.localhost,loopback=b.example.org,metadata=c.example.org', 'localhost'],
@@ -342,9 +365,10 @@ async function probeOne(
   net: ReturnType<typeof fakeNet>,
   timer = manualTimer(),
 ): Promise<ProbeOutcome> {
-  const transport = pinnedTransport({ caps: CAPS, lookup: net.lookup, connector: net.connector, timer });
+  const observed = observePinnedLookup(net.lookup);
+  const transport = pinnedTransport({ caps: CAPS, lookup: observed.lookup, connector: net.connector, timer });
   try {
-    const [outcome] = await probeTargets([target], { transport, lookup: net.lookup });
+    const [outcome] = await probeTargets([target], { transport, lookup: observed });
     return outcome as ProbeOutcome;
   } finally {
     await transport.close();
@@ -385,6 +409,24 @@ describe('scripts/live/ssrf_probe.ts › probeTargets', () => {
     expect(net.connects).toEqual([]);
   });
 
+  test('evidence records the exact lookup answers used by the transport', async () => {
+    let calls = 0;
+    const net = fakeNet(async () => {
+      calls += 1;
+      return calls === 1
+        ? [{ address: '10.0.0.1', family: 4 }]
+        : [
+            { address: '93.184.216.34', family: 4 },
+            { address: '192.0.2.1', family: 4 },
+          ];
+    });
+    const outcome = await probeOne({ label: 'extra', host: 'changing.example.org', kind: 'controlledName' }, net);
+    expect(calls).toBe(1);
+    expect(outcome.resolved.addresses).toEqual(['10.0.0.1']);
+    expect(outcome.resolved.classes).toEqual(['rfc1918']);
+    expect(outcome.safeFetch).toEqual({ outcome: 'refused', code: 'private_answer' });
+  });
+
   test('a DNS failure is reported as dns, not as a refusal', async () => {
     const net = fakeNet(() => Promise.reject(Object.assign(new Error('getaddrinfo ENOTFOUND'), { code: 'ENOTFOUND' })));
     const outcome = await probeOne(
@@ -404,11 +446,12 @@ describe('scripts/live/ssrf_probe.ts › probeTargets', () => {
   test('a public answer that never responds is reported as timeout', async () => {
     const timer = manualTimer();
     const net = fakeNet(() => Promise.resolve([{ address: '93.184.216.34' }]));
-    const transport = pinnedTransport({ caps: CAPS, lookup: net.lookup, connector: net.connector, timer });
+    const observed = observePinnedLookup(net.lookup);
+    const transport = pinnedTransport({ caps: CAPS, lookup: observed.lookup, connector: net.connector, timer });
     try {
       const pending = probeTargets([{ label: 'extra', host: 'slow.probe.example.org', kind: 'controlledName' }], {
         transport,
-        lookup: net.lookup,
+        lookup: observed,
       });
       for (let i = 0; i < 50 && net.connects.length === 0; i++) await new Promise((r) => setImmediate(r));
       timer.fireAll();
@@ -467,7 +510,7 @@ function recordedResult(mutate: (result: ProbeResult) => void = () => undefined)
     hostname: 'origin-host',
     origin: ORIGIN,
     transport: 'pinned',
-    caps: { ...CAPS },
+    caps: { ...DEFAULT_PINNED_CAPS },
     hosts,
     targets: probeTargetsFor(hosts).map((target) => {
       const literal = target.kind === 'literal';
@@ -495,6 +538,18 @@ function recordedResult(mutate: (result: ProbeResult) => void = () => undefined)
   return result;
 }
 
+function setOutcome(
+  result: ProbeResult,
+  index: number,
+  outcome: ProbeOutcome['safeFetch']['outcome'],
+  code: string,
+): void {
+  const target = result.targets[index] as ProbeOutcome;
+  target.safeFetch = { outcome, code };
+  target.raw[0]!.outcome = outcome;
+  target.raw[0]!.code = code;
+}
+
 async function runGateWith(result: unknown) {
   const path = join(scratch, `result-${Math.random().toString(36).slice(2)}.json`);
   writeFileSync(path, JSON.stringify(result));
@@ -504,52 +559,59 @@ async function runGateWith(result: unknown) {
 }
 
 describe('scripts/live/ssrf_probe.ts › gate body', () => {
-  test('passes when every configured target was refused by policy', async () => {
+  test('preserves valid observations but keeps acceptance blocked until the contract is approved', async () => {
     const run = await runGateWith(recordedResult());
-    expect(run.stderr).toContain('PASS: ssrfProbe');
-    expect(run.code).toBe(NODE_EXIT_CODES.passed);
+    expect(run.stderr).toContain(
+      'BLOCKED: ssrfProbe Node live gate observations were recorded but acceptance is disabled',
+    );
+    expect(run.stderr).not.toContain('PASS: ssrfProbe');
+    expect(run.code).toBe(NODE_EXIT_CODES.blocked);
     const doc = JSON.parse(run.stdout);
     expect(doc.gate).toBe('ssrfProbe');
-    expect(doc.result).toBe('passed');
+    expect(doc.result).toBe('blocked');
+    expect(doc.missing.join('\n')).toContain('acceptance is disabled');
     expect(doc.results.targets).toHaveLength(6);
     expect(doc.results.probe.transport).toBe('pinned');
+    expect(doc.results.targets[0].raw[0]).toEqual({ outcome: 'refused', code: 'private_answer', elapsedMs: 1 });
+    expect(doc.results.targets[0].raw[0]).not.toHaveProperty('message');
+    expect(doc.results.targets[0].raw[0]).not.toHaveProperty('url');
   });
 
   test.each([
     [
       'dns',
       (r: ProbeResult) => {
-        (r.targets[0] as ProbeOutcome).safeFetch = { outcome: 'dns', code: 'ENOTFOUND' };
+        setOutcome(r, 0, 'dns', 'ENOTFOUND');
       },
-      'outcome "dns" (ENOTFOUND) is not a policy refusal',
+      'pinned transport outcome dns is not a policy refusal',
     ],
     [
       'timeout',
       (r: ProbeResult) => {
-        (r.targets[1] as ProbeOutcome).safeFetch = { outcome: 'timeout', code: 'deadline' };
+        setOutcome(r, 1, 'timeout', 'deadline');
       },
-      'outcome "timeout"',
+      'pinned transport outcome timeout is not a policy refusal',
     ],
     [
       'unpinned_fetch',
       (r: ProbeResult) => {
-        (r.targets[2] as ProbeOutcome).safeFetch = { outcome: 'unpinned_fetch', code: 'unpinned_fetch' };
+        setOutcome(r, 2, 'unpinned_fetch', 'unpinned_fetch');
       },
-      'outcome "unpinned_fetch"',
+      'pinned transport outcome unpinned_fetch is not a policy refusal',
     ],
     [
       'fetched',
       (r: ProbeResult) => {
-        (r.targets[3] as ProbeOutcome).safeFetch = { outcome: 'fetched', code: 'status_200' };
+        setOutcome(r, 3, 'fetched', 'status_200');
       },
-      'outcome "fetched"',
+      'pinned transport outcome fetched is not a policy refusal',
     ],
     [
       'refused for the wrong reason',
       (r: ProbeResult) => {
         (r.targets[0] as ProbeOutcome).safeFetch = { outcome: 'refused', code: 'not_https' };
       },
-      'not for its address',
+      'unexpected policy code',
     ],
     [
       'mixed address classes',
@@ -583,14 +645,28 @@ describe('scripts/live/ssrf_probe.ts › gate body', () => {
           target: { label: 'rfc1918', host: 'other.example.org', kind: 'controlledName' },
         });
       },
-      'is not a configured target',
+      'target is not configured',
     ],
     [
       'empty raw',
       (r: ProbeResult) => {
         (r.targets[0] as ProbeOutcome).raw = [];
       },
-      'no recorded attempt',
+      'exactly one valid attempt',
+    ],
+    [
+      'null attempt',
+      (r: ProbeResult) => {
+        (r.targets[0] as { raw: unknown[] }).raw = [null];
+      },
+      'exactly one valid attempt',
+    ],
+    [
+      'resolved class mismatch',
+      (r: ProbeResult) => {
+        (r.targets[0] as ProbeOutcome).resolved.classes = ['public'];
+      },
+      'address classes do not match',
     ],
     [
       'wrong origin',
@@ -604,7 +680,7 @@ describe('scripts/live/ssrf_probe.ts › gate body', () => {
       (r: ProbeResult) => {
         r.hosts = { ...r.hosts, metadata: 'x.example.org' };
       },
-      'probe hosts',
+      'probe controlled-host list does not match configuration',
     ],
     [
       'unpinned transport',
@@ -626,6 +702,41 @@ describe('scripts/live/ssrf_probe.ts › gate body', () => {
     const doc = JSON.parse(run.stdout);
     expect(doc.result).toBe('failed');
     expect(doc.failures.join('\n')).toContain(message);
+  });
+
+  test('rejects missing hostname and altered pinned transport caps', async () => {
+    const missingHostname: unknown = { ...recordedResult() };
+    delete (missingHostname as Record<string, unknown>).hostname;
+    expect(checkProbeResult(missingHostname, parseHosts(HOSTS), ORIGIN)).toContain('probe hostname is malformed');
+    const alteredCaps = recordedResult();
+    (alteredCaps.caps as { deadlineMs: number }).deadlineMs += 1;
+    expect(checkProbeResult(alteredCaps, parseHosts(HOSTS), ORIGIN)).toContain(
+      'probe transport caps do not match the production pinned defaults',
+    );
+  });
+
+  test('copies only allowlisted observations into evidence', async () => {
+    const result = recordedResult() as ProbeResult & { attackerField?: string };
+    result.attackerField = 'synthetic-secret';
+    (result.targets[0] as ProbeOutcome & { secret?: string }).secret = 'synthetic-secret';
+    (result.targets[0] as ProbeOutcome).raw[0]!.message = 'diagnostic synthetic-secret';
+    const run = await runGateWith(result);
+    expect(run.code).toBe(NODE_EXIT_CODES.blocked);
+    expect(run.stdout).not.toContain('synthetic-secret');
+    const doc = JSON.parse(run.stdout);
+    expect(doc.results.targets[0]).not.toHaveProperty('secret');
+    expect(doc.results.targets[0].raw[0]).not.toHaveProperty('message');
+    expect(doc.results).not.toHaveProperty('attackerField');
+  });
+
+  test('malformed address strings fail without being copied into evidence', async () => {
+    const result = recordedResult();
+    (result.targets[0] as ProbeOutcome).resolved.addresses = ['synthetic-private-secret'];
+    const run = await runGateWith(result);
+    expect(run.code).toBe(NODE_EXIT_CODES.failed);
+    expect(run.stdout).not.toContain('synthetic-private-secret');
+    expect(run.stderr).not.toContain('synthetic-private-secret');
+    expect(JSON.parse(run.stdout).results.targets).toEqual([]);
   });
 
   test('fails (not blocks) on an unreadable result file', async () => {

@@ -63,6 +63,7 @@ function makeContext(
     lexiconPrefix: env[NODE_ENV.prefix]!,
     log: () => undefined,
     fail: (message) => failures.push(message),
+    block: () => undefined,
     cleanup: (message) => cleanup.push(message),
   };
 }
@@ -653,7 +654,8 @@ test('successful recovery spends only the remaining deadline on independent proo
     deadlineAt,
   );
   expect(recovered).toMatchObject({ uri: URI_B, cid: CID_B, rev: REV_PRESENT });
-  expect(proofTimeout).toBeLessThanOrEqual(210);
+  // Keep a 20 ms scheduling tolerance while still detecting a renewed 250 ms budget.
+  expect(proofTimeout).toBeLessThan(230);
 });
 
 test('stalled browser response and body consumption are bounded by the shared total timeout', async () => {

@@ -82,6 +82,8 @@ export interface NodeGateContext {
   lexiconPrefix: string;
   log(message: string): void;
   fail(message: string): void;
+  /** Keep accepted observations but prevent this gate from claiming PASS. */
+  block(message: string): void;
   cleanup(message: string): void;
 }
 
@@ -295,7 +297,7 @@ function validValue(env: NodeGateEnv, name: string, requirement: NodeGateRequire
   return value;
 }
 
-function emit(evidence: NodeGateEvidence, env: NodeGateEnv, io: NodeGateIO): number {
+function emit(evidence: NodeGateEvidence, env: NodeGateEnv, io: NodeGateIO, blockedAfterRun = false): number {
   const safeEvidence = redactJsonValue(evidence, env);
   // Every string and object key has already been sanitized structurally. Do
   // not rewrite serialized JSON, since redaction could introduce raw quotes.
@@ -308,7 +310,9 @@ function emit(evidence: NodeGateEvidence, env: NodeGateEnv, io: NodeGateIO): num
       ? `PASS: ${evidence.gate} Node live gate passed for commit ${evidence.commit}`
       : evidence.result === 'failed'
         ? `FAIL: ${evidence.gate} Node live gate failed`
-        : `BLOCKED: ${evidence.gate} Node live gate prerequisites are missing; no live request was made`;
+        : blockedAfterRun
+          ? `BLOCKED: ${evidence.gate} Node live gate observations were recorded but acceptance is disabled`
+          : `BLOCKED: ${evidence.gate} Node live gate prerequisites are missing; no live request was made`;
   const details = [...(evidence.missing ?? []), ...(evidence.failures ?? [])].map((line) => `- ${line}`);
   io.stderr(redactNodeGateOutput(`${[headline, ...details].join('\n')}\n`, env));
   return NODE_EXIT_CODES[evidence.result];
@@ -350,6 +354,7 @@ export async function runNodeGate(
     return value;
   };
   const failures: string[] = [];
+  const blocked: string[] = [];
   const cleanupNotes: string[] = [];
   const context: NodeGateContext = {
     env,
@@ -358,6 +363,7 @@ export async function runNodeGate(
     lexiconPrefix: get(NODE_ENV.prefix),
     log: (message) => io.stderr(redactNodeGateOutput(`${message}\n`, env)),
     fail: (message) => failures.push(message),
+    block: (message) => blocked.push(message),
     cleanup: (message) => cleanupNotes.push(message),
   };
 
@@ -372,7 +378,7 @@ export async function runNodeGate(
 
   const evidence: NodeGateEvidence = {
     ...base,
-    result: failures.length > 0 ? 'failed' : 'passed',
+    result: failures.length > 0 ? 'failed' : blocked.length > 0 ? 'blocked' : 'passed',
     commit: get(NODE_ENV.commit),
     bundleSha256: get(NODE_ENV.bundleSha256),
     origin: context.origin,
@@ -381,9 +387,10 @@ export async function runNodeGate(
     subjects: body.subjects,
     results: body.results,
     cleanup: cleanupNotes.length > 0 ? cleanupNotes.join('; ') : 'nothing created',
+    ...(blocked.length > 0 ? { missing: blocked } : {}),
     ...(failures.length > 0 ? { failures } : {}),
   };
-  return emit(evidence, env, io);
+  return emit(evidence, env, io, blocked.length > 0);
 }
 
 /** True when the caller is the process entry point; safe to use at module scope. */

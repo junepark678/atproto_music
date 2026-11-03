@@ -43,7 +43,12 @@ import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { classifyIpv4, classifyIpv6, parseIpv4, parseIpv6 } from '@atmusic/atproto/net/url-policy';
 import type { Transport } from '@atmusic/atproto/transport';
-import { isTransportError, type PinnedLookup, type PinnedTransportCaps } from '@atmusic/worker/node/pinned-transport';
+import {
+  DEFAULT_PINNED_CAPS,
+  isTransportError,
+  type PinnedLookup,
+  type PinnedTransportCaps,
+} from '@atmusic/worker/node/pinned-transport';
 import {
   isNodeGateMain,
   mainNodeGate,
@@ -158,6 +163,17 @@ export function hostnameProblem(host: string): string | null {
   if (!labels.every((label) => HOST_LABEL.test(label))) return 'malformed DNS label';
   if (/^\d+$/.test(labels[labels.length - 1] as string)) return 'numeric top-level label';
   if (labels[labels.length - 1] === 'localhost') return 'localhost is not a controlled name';
+  // WHATWG URL parsing accepts legacy IPv4 spellings such as 0x7f.0x1 and
+  // canonicalizes them to 127.0.0.1. Do not let a configured DNS name hide an
+  // IP literal behind that alternate syntax.
+  try {
+    const canonical = new URL(`https://${host}/`).hostname;
+    if (canonical !== host && parseIpv4(canonical) !== null) {
+      return 'URL canonicalizes this host to an IP literal';
+    }
+  } catch {
+    return 'malformed DNS name';
+  }
   return null;
 }
 
@@ -195,8 +211,10 @@ export const SSRF_REQS: readonly NodeGateRequirement[] = [
       try {
         parseHosts(value);
         return null;
-      } catch (error) {
-        return error instanceof Error ? error.message : String(error);
+      } catch {
+        // The full input may be copied into a blocked evidence document. Keep
+        // diagnostics static so a malformed host list cannot inject secrets.
+        return 'must contain canonical label=host pairs for controlled DNS names';
       }
     },
   },
@@ -270,9 +288,15 @@ export function probeTargetsFor(hosts: Record<string, string>): ProbeTarget[] {
 
 export interface ProbeOptions {
   transport: Transport;
-  /** Records what each controlled name resolves to; omitted → no resolution step. */
-  lookup?: PinnedLookup;
+  /** Observes the same lookup function that was supplied to the transport. */
+  lookup?: ObservedPinnedLookup;
   now?: () => number;
+}
+
+/** Lookup wrapper shared by the production transport and the evidence collector. */
+export interface ObservedPinnedLookup {
+  lookup: PinnedLookup;
+  result(hostname: string): ProbeResolution;
 }
 
 function targetUrl(host: string): string {
@@ -284,16 +308,32 @@ function errorCode(error: unknown): string {
   return typeof code === 'string' ? code : 'unknown';
 }
 
-async function resolveTarget(target: ProbeTarget, lookup: PinnedLookup | undefined): Promise<ProbeResolution> {
+export function observePinnedLookup(source: PinnedLookup): ObservedPinnedLookup {
+  const observed = new Map<string, ProbeResolution>();
+  const lookup: PinnedLookup = async (hostname) => {
+    try {
+      const answers = await source(hostname);
+      const addresses = answers.map((answer) => String(answer.address));
+      const result = { addresses, classes: addresses.map(addressClass) };
+      observed.set(hostname, result);
+      return answers;
+    } catch (error) {
+      observed.set(hostname, { addresses: [], classes: [], error: errorCode(error) });
+      throw error;
+    }
+  };
+  return {
+    lookup,
+    result(hostname) {
+      return observed.get(hostname) ?? { addresses: [], classes: [] };
+    },
+  };
+}
+
+function resolutionFor(target: ProbeTarget, lookup: ObservedPinnedLookup | undefined): ProbeResolution {
   if (target.kind === 'literal') return { addresses: [target.host], classes: [addressClass(target.host)] };
   if (lookup === undefined) return { addresses: [], classes: [] };
-  try {
-    const answers = await lookup(target.host);
-    const addresses = answers.map((answer) => String(answer.address));
-    return { addresses, classes: addresses.map(addressClass) };
-  } catch (error) {
-    return { addresses: [], classes: [], error: errorCode(error) };
-  }
+  return lookup.result(target.host);
 }
 
 async function attempt(url: string, transport: Transport, now: () => number): Promise<ProbeAttempt> {
@@ -330,9 +370,12 @@ export async function probeTargets(targets: readonly ProbeTarget[], options: Pro
   const now = options.now ?? (() => performance.now());
   const outcomes: ProbeOutcome[] = [];
   for (const target of targets) {
-    const resolved = await resolveTarget(target, options.lookup);
     const raw = [await attempt(targetUrl(target.host), options.transport, now)];
     const last = raw[raw.length - 1] as ProbeAttempt;
+    // The attempt runs first. For controlled names, `lookup.result` reads the
+    // exact answer set used by the transport; it never performs a second DNS
+    // request that could disagree with the address the transport pinned.
+    const resolved = resolutionFor(target, options.lookup);
     outcomes.push({ target, resolved, raw, safeFetch: { outcome: last.outcome, code: last.code } });
   }
   return outcomes;
@@ -350,18 +393,27 @@ export function checkProbeResult(result: unknown, hosts: Record<string, string>,
   const problems: string[] = [];
   if (!isRecord(result)) return ['probe result is not a JSON object'];
   if (result.schemaVersion !== PROBE_RESULT_SCHEMA_VERSION)
-    problems.push(
-      `probe result schemaVersion ${JSON.stringify(result.schemaVersion)} != ${PROBE_RESULT_SCHEMA_VERSION}`,
-    );
-  if (result.kind !== PROBE_RESULT_KIND)
-    problems.push(`probe result kind ${JSON.stringify(result.kind)} != ${PROBE_RESULT_KIND}`);
-  if (result.transport !== 'pinned') problems.push(`probe transport ${JSON.stringify(result.transport)} != pinned`);
-  if (typeof result.recordedAt !== 'string' || Number.isNaN(Date.parse(result.recordedAt)))
+    problems.push(`probe result schemaVersion must be ${PROBE_RESULT_SCHEMA_VERSION}`);
+  if (result.kind !== PROBE_RESULT_KIND) problems.push('probe result kind is not recognized');
+  if (result.transport !== 'pinned') problems.push('probe transport must be pinned');
+  if (
+    typeof result.recordedAt !== 'string' ||
+    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(result.recordedAt) ||
+    Number.isNaN(Date.parse(result.recordedAt))
+  )
     problems.push('probe result recordedAt is not a timestamp');
-  if (typeof result.origin !== 'string' || safeOrigin(result.origin) !== origin)
-    problems.push(`probe origin ${JSON.stringify(result.origin)} != ${origin}`);
+  if (
+    typeof result.hostname !== 'string' ||
+    result.hostname.length < 1 ||
+    result.hostname.length > 253 ||
+    !/^[a-zA-Z0-9.-]+$/.test(result.hostname)
+  )
+    problems.push('probe hostname is malformed');
+  if (result.origin !== origin) problems.push('probe origin mismatch');
   if (!isRecord(result.hosts) || JSON.stringify(sorted(result.hosts)) !== JSON.stringify(sorted(hosts)))
-    problems.push(`probe hosts ${JSON.stringify(result.hosts)} != ${JSON.stringify(hosts)}`);
+    problems.push('probe controlled-host list does not match configuration');
+  if (!isRecord(result.caps) || JSON.stringify(sorted(result.caps)) !== JSON.stringify(sorted(DEFAULT_PINNED_CAPS)))
+    problems.push('probe transport caps do not match the production pinned defaults');
   if (problems.length > 0) return problems;
 
   const expected = probeTargetsFor(hosts);
@@ -375,25 +427,63 @@ export function checkProbeResult(result: unknown, hosts: Record<string, string>,
       continue;
     }
     const { label, host, kind } = entry.target;
-    const key = `${kind}:${label}:${host}`;
-    if (!expected.some((t) => t.kind === kind && t.label === label && t.host === host)) {
-      problems.push(`${where}: ${key} is not a configured target`);
+    if (typeof label !== 'string' || typeof host !== 'string' || typeof kind !== 'string') {
+      problems.push(`${where}: target identity fields must be strings`);
       continue;
     }
+    const configured = expected.find((t) => t.kind === kind && t.label === label && t.host === host);
+    if (configured === undefined) {
+      problems.push(`${where}: target is not configured`);
+      continue;
+    }
+    const key = `${configured.kind}:${configured.label}:${configured.host}`;
     if (seen.has(key)) problems.push(`${where}: ${key} recorded twice`);
     seen.add(key);
-    if (!Array.isArray(entry.raw) || entry.raw.length === 0) problems.push(`${where} ${key}: no recorded attempt`);
+    if (!Array.isArray(entry.raw) || entry.raw.length !== 1 || !isRecord(entry.raw[0])) {
+      problems.push(`${where} ${key}: exactly one valid attempt must be recorded`);
+    } else {
+      const raw = entry.raw[0];
+      if (raw.url !== targetUrl(configured.host)) problems.push(`${where} ${key}: attempt URL does not match target`);
+      if (!isProbeOutcome(raw.outcome)) problems.push(`${where} ${key}: attempt outcome is invalid`);
+      if (!safeCode(raw.code)) problems.push(`${where} ${key}: attempt code is invalid`);
+      if (typeof raw.message !== 'string' || raw.message.length > 512)
+        problems.push(`${where} ${key}: attempt message is invalid`);
+      if (!Number.isSafeInteger(raw.elapsedMs) || (raw.elapsedMs as number) < 0)
+        problems.push(`${where} ${key}: attempt elapsedMs is invalid`);
+      if (entry.safeFetch.outcome !== raw.outcome || entry.safeFetch.code !== raw.code)
+        problems.push(`${where} ${key}: summary does not match the recorded attempt`);
+    }
     const outcome = entry.safeFetch.outcome;
     const code = entry.safeFetch.code;
-    if (outcome !== 'refused') {
-      problems.push(
-        `${where} ${key}: pinned transport outcome ${JSON.stringify(outcome)} (${String(code)}) is not a policy refusal`,
-      );
-    } else if (code !== (kind === 'literal' ? 'private_literal' : 'private_answer')) {
-      problems.push(`${where} ${key}: refused for ${String(code)}, not for its address`);
+    if (!isProbeOutcome(outcome) || !safeCode(code)) {
+      problems.push(`${where} ${key}: pinned transport summary is malformed`);
+      continue;
     }
-    const want = labelClass(String(label));
-    const classes = Array.isArray(entry.resolved.classes) ? entry.resolved.classes.map(String) : [];
+    if (outcome !== 'refused') {
+      problems.push(`${where} ${key}: pinned transport outcome ${outcome} is not a policy refusal`);
+    } else if (code !== (kind === 'literal' ? 'private_literal' : 'private_answer')) {
+      problems.push(`${where} ${key}: refused with an unexpected policy code`);
+    }
+    const addresses = Array.isArray(entry.resolved.addresses) ? entry.resolved.addresses : [];
+    if (
+      !addresses.every(
+        (address) =>
+          typeof address === 'string' &&
+          address.length <= 128 &&
+          (parseIpv4(address) !== null || parseIpv6(address) !== null),
+      )
+    ) {
+      problems.push(`${where} ${key}: resolved addresses are malformed`);
+      continue;
+    }
+    if ('error' in entry.resolved) problems.push(`${where} ${key}: accepted result cannot contain a resolution error`);
+    const classes = (addresses as string[]).map(addressClass);
+    const recordedClasses = Array.isArray(entry.resolved.classes) ? entry.resolved.classes : [];
+    if (recordedClasses.length !== classes.length || recordedClasses.some((value, i) => value !== classes[i]))
+      problems.push(`${where} ${key}: address classes do not match the resolved addresses`);
+    const want = labelClass(label);
+    if (kind === 'literal' && (addresses.length !== 1 || addresses[0] !== host))
+      problems.push(`${where} ${key}: literal address does not match its configured target`);
     if (kind === 'controlledName') {
       if (classes.length === 0) problems.push(`${where} ${key}: no resolved addresses recorded`);
       else if (want !== null && classes.some((cls) => cls !== want))
@@ -405,6 +495,24 @@ export function checkProbeResult(result: unknown, hosts: Record<string, string>,
     if (!seen.has(key)) problems.push(`target ${key} is not in the probe result`);
   }
   return problems;
+}
+
+function isProbeOutcome(value: unknown): value is ProbeOutcomeKind {
+  return [
+    'refused',
+    'dns',
+    'timeout',
+    'unpinned_fetch',
+    'connect',
+    'too_large',
+    'redirect',
+    'fetched',
+    'error',
+  ].includes(String(value));
+}
+
+function safeCode(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= 80 && /^[a-zA-Z0-9_.-]+$/.test(value);
 }
 
 function safeOrigin(text: string): string | null {
@@ -419,33 +527,79 @@ function sorted(record: Record<string, unknown>): Record<string, unknown> {
   return Object.fromEntries(Object.entries(record).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
 }
 
+function projectTargets(targets: unknown, hosts: Record<string, string>): Record<string, unknown>[] {
+  if (!Array.isArray(targets)) return [];
+  const expected = probeTargetsFor(hosts);
+  const projected: Record<string, unknown>[] = [];
+  for (const candidate of targets) {
+    if (
+      !isRecord(candidate) ||
+      !isRecord(candidate.target) ||
+      !isRecord(candidate.safeFetch) ||
+      !isRecord(candidate.resolved) ||
+      !Array.isArray(candidate.raw)
+    )
+      continue;
+    const identity = candidate.target;
+    const target = expected.find(
+      (item) => item.label === identity.label && item.host === identity.host && item.kind === identity.kind,
+    );
+    if (!target) continue;
+    const addresses = Array.isArray(candidate.resolved.addresses)
+      ? candidate.resolved.addresses.filter(
+          (address): address is string =>
+            typeof address === 'string' &&
+            address.length <= 128 &&
+            (parseIpv4(address) !== null || parseIpv6(address) !== null),
+        )
+      : [];
+    const attempts = candidate.raw.filter(isRecord).map((attempt) => ({
+      outcome: isProbeOutcome(attempt.outcome) ? attempt.outcome : 'error',
+      code: safeCode(attempt.code) ? attempt.code : 'invalid',
+      elapsedMs: Number.isSafeInteger(attempt.elapsedMs) && (attempt.elapsedMs as number) >= 0 ? attempt.elapsedMs : 0,
+    }));
+    projected.push({
+      target,
+      resolved: { addresses, classes: addresses.map(addressClass) },
+      raw: attempts,
+      safeFetch: {
+        outcome: isProbeOutcome(candidate.safeFetch.outcome) ? candidate.safeFetch.outcome : 'error',
+        code: safeCode(candidate.safeFetch.code) ? candidate.safeFetch.code : 'invalid',
+      },
+    });
+  }
+  return projected;
+}
+
 async function run(ctx: NodeGateContext): Promise<NodeGateBodyResult> {
   const hosts = parseHosts(ctx.get(SSRF_ENV.hosts));
   const path = ctx.get(SSRF_ENV.probeResult);
   let result: unknown;
   try {
     result = JSON.parse(readFileSync(path, 'utf8'));
-  } catch (error) {
-    ctx.fail(`probe result ${path} is unreadable: ${error instanceof Error ? error.message : String(error)}`);
+  } catch {
+    ctx.fail('probe result file is unreadable or invalid JSON');
     return { pds: [], subjects: [], results: {} };
   }
   const problems = checkProbeResult(result, hosts, ctx.origin);
   for (const problem of problems) ctx.fail(problem);
   const record = isRecord(result) ? result : {};
   ctx.log(
-    `probe result ${path}: ${problems.length === 0 ? 'every target refused by policy' : `${problems.length} problem(s)`}`,
+    `probe result: ${problems.length === 0 ? 'all configured targets refused by policy' : `${problems.length} problem(s)`}`,
   );
+  if (problems.length === 0) {
+    ctx.block('ssrfProbe acceptance is disabled until the recorded-observation contract is approved');
+  }
   return {
     pds: [],
     subjects: [],
     results: {
-      targets: Array.isArray(record.targets) ? record.targets : [],
+      targets: problems.length === 0 ? projectTargets(record.targets, hosts) : [],
       probe: {
         recordedAt: record.recordedAt ?? null,
         hostname: record.hostname ?? null,
-        transport: record.transport ?? null,
-        caps: record.caps ?? null,
-        resultPath: path,
+        transport: 'pinned',
+        caps: { ...DEFAULT_PINNED_CAPS },
       },
     },
   };
@@ -516,6 +670,7 @@ import {
   tlsSocketConnector,
 } from '@atmusic/worker/node/pinned-transport';
 import {
+  observePinnedLookup,
   parseProbeArgs,
   PROBE_RESULT_KIND,
   PROBE_RESULT_SCHEMA_VERSION,
@@ -525,9 +680,10 @@ import {
 } from '${gateModule}';
 
 const { origin, hosts, out } = parseProbeArgs(process.argv.slice(2));
-const transport = pinnedTransport({ caps: DEFAULT_PINNED_CAPS, lookup: systemLookup, connector: tlsSocketConnector });
+const observedLookup = observePinnedLookup(systemLookup);
+const transport = pinnedTransport({ caps: DEFAULT_PINNED_CAPS, lookup: observedLookup.lookup, connector: tlsSocketConnector });
 try {
-  const targets = await probeTargets(probeTargetsFor(hosts), { transport, lookup: systemLookup });
+  const targets = await probeTargets(probeTargetsFor(hosts), { transport, lookup: observedLookup });
   const result: ProbeResult = {
     schemaVersion: PROBE_RESULT_SCHEMA_VERSION,
     kind: PROBE_RESULT_KIND,
