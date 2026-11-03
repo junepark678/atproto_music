@@ -658,6 +658,7 @@ async function runLastfmClient(
 ): Promise<{
   result: Record<string, unknown>;
   requests: Array<{ host: string; method: string; path: string; status: number }>;
+  connections: Array<{ remoteAddress: string; remotePort: number }>;
 }> {
   const child = spawn(process.execPath, ['--import', PRELOAD_PATH, LASTFM_CLIENT_PATH], {
     cwd: REPO_ROOT,
@@ -675,6 +676,7 @@ async function runLastfmClient(
   let rejection: Error | null = null;
   let clientPhase = 'startup';
   let safeDiagnostic = '';
+  const connections: Array<{ remoteAddress: string; remotePort: number }> = [];
   const clientRequests: Array<{ host: string; method: string; path: string; status: number }> = [];
   const completed = new Promise<void>((resolveDone, rejectDone) => {
     const timeout = setTimeout(() => rejectDone(new Error('lastfm-ts-api child timeout')), 30_000);
@@ -694,6 +696,9 @@ async function runLastfmClient(
             path: observed.path,
             status: observed.status,
           });
+      } else if ((message as Record<string, unknown>).type === 'connection-observed') {
+        const observed = raw as { remoteAddress: string; remotePort: number };
+        connections.push({ remoteAddress: observed.remoteAddress, remotePort: observed.remotePort });
       } else if (
         message.type === 'command' &&
         message.action === 'approveLastfmToken' &&
@@ -778,7 +783,7 @@ async function runLastfmClient(
   }
   if (clientRequests.length) safeDiagnostic = `; requests=${clientRequests.join('|')}`;
   if (rejection !== null) throw rejection;
-  return { result: replayObject(result), requests: clientRequests };
+  return { result: replayObject(result), requests: clientRequests, connections };
 }
 
 async function waitForIndexed(
@@ -825,7 +830,13 @@ async function clientCase(
     phase = 'lastfm-ts-api-client';
     const clientRun = await runLastfmClient(bundle, session, alice.did, credentials);
     const result = clientRun.result;
-    writeJsonl(join(outDir, 'client-sockets.jsonl'), clientRun.requests);
+    writeJsonl(join(outDir, 'client-sockets.jsonl'), clientRun.connections);
+    if (
+      clientRun.connections.length !== clientRun.requests.length ||
+      clientRun.connections.length === 0 ||
+      clientRun.connections.some((socket) => socket.remoteAddress !== '127.2.0.1' || socket.remotePort !== bundle.port)
+    )
+      throw new Error('real client socket escaped pinned TCP destination');
     if (
       result.sessionEstablished !== true ||
       result.scrobbleBatchSize !== 2 ||
@@ -866,6 +877,7 @@ async function combinedClientsCase(
   commit: string,
   outDir: string,
   listenbrainzToken: string,
+  onPanoSession: (key: string) => void,
 ): Promise<CaseRecord[]> {
   let phase = 'fixture-account';
   try {
@@ -878,7 +890,7 @@ async function combinedClientsCase(
     const origin = `http://127.2.0.1:${bundle.port}`;
     const send = localClientFetch(bundle);
     phase = 'pano-lastfm';
-    await runPanoLastfm({
+    const pano = await runPanoLastfm({
       origin,
       username: alice.handle,
       appPassword,
@@ -888,6 +900,7 @@ async function combinedClientsCase(
       durationSeconds: 180,
       fetchImpl: send,
     });
+    onPanoSession(pano.sessionKey);
     phase = 'pano-listenbrainz';
     await runPanoListenBrainz({
       origin,
@@ -940,9 +953,8 @@ async function combinedClientsCase(
     const lastfmUrl = new URL('/2.0/', pdsOrigin);
     lastfmUrl.search = new URLSearchParams({
       method: 'user.getRecentTracks',
-      user: alice.did,
       api_key: 'panoScrobbler',
-      sk: 'n8-pano-read-session',
+      sk: pano.sessionKey,
       format: 'json',
       limit: '50',
       page: '1',
@@ -1079,6 +1091,7 @@ async function idempotencyCase(
 }
 
 async function panoReadShapesCase(
+  sessionKey: string,
   bundle: BundleProcess,
   fakes: FakeUpstreams,
   commit: string,
@@ -1101,8 +1114,12 @@ async function panoReadShapesCase(
       if (response.status !== 200) throw new Error('Pano read returned a non-success status');
       return replayObject(await response.json());
     };
-    const client = await runPanoLastfm({ origin, username: alice.handle, appPassword: 'unused', listenedAtSeconds: 1768474800, artist: 'Shape', track: 'Seed', durationSeconds: 200, fetchImpl: send });
-    const common = { method: 'user.getRecentTracks', sk: client.sessionKey };
+    if (!sessionKey) throw new Error('Pano mobile session missing');
+    for (const method of ['user.getRecentTracks', 'user.getInfo']) {
+      const invalid = await read({ method, sk: 'invalid-session-negative-control' });
+      if (typeof invalid.error !== 'number') throw new Error('invalid Pano session was accepted');
+    }
+    const common = { method: 'user.getRecentTracks', sk: sessionKey };
     phase = 'empty-page';
     const empty = replayObject((await read({ ...common, from: '2000000000', page: '2' })).recenttracks);
     counts.push(Array.isArray(empty.track) ? empty.track.length : -1);
@@ -1115,8 +1132,22 @@ async function panoReadShapesCase(
     if (!Array.isArray(empty.track) || empty.track.length !== 0) throw new Error('empty Pano read shape failed');
     if (!Array.isArray(one.track) || one.track.length !== 1) throw new Error('single Pano read shape failed');
     if (!Array.isArray(many.track) || many.track.length < 2) throw new Error('many Pano read shape failed');
+    for (const page of [one, many]) {
+      for (const raw of page.track as unknown[]) {
+        const track = replayObject(raw);
+        if (
+          typeof track.name !== 'string' ||
+          !track.name ||
+          typeof replayObject(track.artist)['#text'] !== 'string' ||
+          !/^\d+$/.test(String(replayObject(track.date).uts))
+        )
+          throw new Error('Pano parsed track fields failed');
+      }
+    }
+    if (!(many.track as unknown[]).some((raw) => replayObject(raw).name === 'Pano Last.fm Listen'))
+      throw new Error('authenticated Pano read omitted its mobile-session scrobble');
     phase = 'user-info';
-    const info = await read({ method: 'user.getInfo', sk: client.sessionKey });
+    const info = await read({ method: 'user.getInfo', sk: sessionKey });
     const user = replayObject(info.user);
     userInfoShape = `keys=${Object.keys(user).sort().join(',')};name=${String(user.name)};url=${String(user.url)};counts=${typeof user.playcount},${typeof user.artist_count},${typeof user.track_count}`;
     if (
@@ -1339,7 +1370,11 @@ async function forwardingCase(
   }
 }
 
-async function preloadIsolationCase(bundle: BundleProcess, commit: string): Promise<CaseRecord> {
+async function preloadIsolationCase(
+  bundle: BundleProcess,
+  commit: string,
+  realClientPassed: boolean,
+): Promise<CaseRecord> {
   const source = `import net from 'node:net'; import https from 'node:https'; let opened = 0; const connect = net.connect; net.connect = (...args) => { opened++; return connect(...args); }; try { https.request({ hostname: 'refused.invalid', path: '/' }); process.exitCode = 1; } catch { process.exitCode = opened === 0 ? 0 : 1; }`;
   const child = spawn(process.execPath, ['--import', PRELOAD_PATH, '--input-type=module', '-e', source], {
     cwd: REPO_ROOT,
@@ -1347,7 +1382,7 @@ async function preloadIsolationCase(bundle: BundleProcess, commit: string): Prom
     stdio: 'ignore',
   });
   const code = await new Promise<number>((resolveCode) => child.once('exit', (value) => resolveCode(value ?? 1)));
-  return caseRecord(SCROBBLER_CASES[3], code === 0 ? 'passed' : 'failed', commit);
+  return caseRecord(SCROBBLER_CASES[3], code === 0 && realClientPassed ? 'passed' : 'failed', commit);
 }
 
 export async function runScrobblerE2e(outDir = join(REPO_ROOT, 'work/e2e/scrobbler')): Promise<number> {
@@ -1395,11 +1430,16 @@ export async function runScrobblerE2e(outDir = join(REPO_ROOT, 'work/e2e/scrobbl
     const linkingSession = await signIn(fakes, bundle, alice);
     const listenbrainzToken = await linkListenBrainz(linkingSession, fakes);
     await linkLastfm(linkingSession, fakes);
+    let panoSessionKey = '';
     records.push(await clientCase(bundle, fakes, output, commit));
-    records.push(...(await combinedClientsCase(bundle, fakes, commit, output, listenbrainzToken)));
-    records.push(await preloadIsolationCase(bundle, commit));
+    records.push(
+      ...(await combinedClientsCase(bundle, fakes, commit, output, listenbrainzToken, (key) => {
+        panoSessionKey = key;
+      })),
+    );
+    records.push(await preloadIsolationCase(bundle, commit, records[0]?.result === 'passed'));
     records.push(await idempotencyCase(bundle, fakes, commit, output));
-    records.push(await panoReadShapesCase(bundle, fakes, commit, output));
+    records.push(await panoReadShapesCase(panoSessionKey, bundle, fakes, commit, output));
     records.push(await forwardingCase(bundle, fakes, commit, output, listenbrainzToken));
     writeJsonl(join(output, 'outbound.jsonl'), bundle.outbound);
     writeJsonl(join(output, 'scrobbler-e2e.jsonl'), records);
