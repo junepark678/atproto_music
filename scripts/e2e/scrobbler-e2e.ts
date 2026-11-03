@@ -1202,8 +1202,8 @@ async function socketDeliveryDisabledControl(
     if (!pdsCommitted || indexed || checkpoint.connected !== 0 || mode !== 'socket' || cursor !== beforeCursor)
       throw new Error('socket-disabled control did not isolate PDS writes from indexed reads');
     return { pdsCommitted, indexed, mode, cursor };
-  } catch {
-    throw new Error(`socket negative control failed during ${stage}`);
+  } catch (error) {
+    throw new Error(`socket negative control failed during ${stage} (${safeErrorName(error)})`);
   }
 }
 
