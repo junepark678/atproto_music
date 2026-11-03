@@ -68,21 +68,35 @@ required gate to be complete and supported.
 The verifier shares applicable structural checks for public HTTPS origin,
 owned namespace, PDS identities, result shape, and cleanup. It does not infer
 confidential Node OAuth interoperability from the historical Workers browser
-OAuth evidence. Node OAuth evidence remains blocked until that driver and its
-exchange and upstream-revocation observations have an accepted contract. A
-future Node OAuth result must show an actual granted scope containing
+OAuth evidence. The Node OAuth preflight driver exists, but deliberately
+remains blocked until its exchange and upstream-revocation observations have
+an accepted contract. It validates the ordinary release identity, two
+independently operated PDS identities, handles, and sign-in mode, then stops
+before browser or network work. Supplying every input does not make it pass.
+A future Node OAuth result must show an actual granted scope containing
 `atproto` and create, update, and delete on each of the four Node collections
 `<prefix>.scrobble`, `<prefix>.follow`, `<prefix>.settings`, and
 `<prefix>.love`; any actual `transition:*` scope token invalidates that
 grant. This four-collection rule is separate from the historical Workers
 `full_repo_grant` rule, which remains three collections. The Node OAuth gate
 is not enabled by this validator rule and remains blocked until the exchange
-and revocation evidence contract and driver are implemented. At this stage
-only the applicable existing `ingest` and `pdsCompat` structural result
-checks can pass as Node standalone gates.
-`ssrfProbe` and `socketSoak` also remain blocked until their Node driver
-semantics are ported; Workers Cloudflare/DO analytics do not stand in for Node
-acceptance. Unknown gates never enable PASS.
+and revocation evidence contract is accepted and the corresponding
+observations are implemented. At this stage only the applicable existing
+`ingest` and `pdsCompat` structural result checks can pass as Node standalone
+gates. The `ssrfProbe` and `socketSoak` collectors also stay blocked: their
+observations do not enable verifier PASS until their Node semantics and
+acceptance contracts are approved. Workers Cloudflare/DO analytics do not
+stand in for Node acceptance. Unknown gates never enable PASS.
+
+Run `npx tsx scripts/live/node_oauth_check.ts` to validate the current OAuth
+gate prerequisites. It requires the Node release identity, both independent
+PDS identities and implementation names, `ATMUSIC_LIVE_HANDLE_A` and
+`ATMUSIC_LIVE_HANDLE_B`, and either both `ATMUSIC_LIVE_PASSWORD_A` and
+`ATMUSIC_LIVE_PASSWORD_B` or `ATMUSIC_LIVE_OAUTH_INTERACTIVE=1`. Its optional
+`ATMUSIC_LIVE_OAUTH_TIMEOUT_S` accepts 30–3600 seconds. Missing or malformed
+inputs produce blocked schema-v3 evidence before any network or browser
+operation. Even with all inputs present, it exits 2 with the unimplemented
+exchange/revocation contract named; this is a preflight, not OAuth acceptance.
 
 ### Dev-env OAuth preflight (advisory only)
 
