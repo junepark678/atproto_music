@@ -4,7 +4,7 @@
 
 import { type ChildProcess, spawn } from 'node:child_process';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { chmodSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, mkdirSync, openSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createServer as createHttpServer, type Server as HttpServer } from 'node:http';
 import { createServer } from 'node:net';
 import { join } from 'node:path';
@@ -17,6 +17,7 @@ export const WORK_DIR = join(REPO_ROOT, 'work', 'e2e');
 export const DIST_DIR = join(WORK_DIR, 'dist');
 export const STATE_DIR = join(WORK_DIR, 'state');
 export const NETWORK_FILE = join(WORK_DIR, 'network.json');
+export const STACK_LOCK_FILE = join(WORK_DIR, 'start-stack.lock');
 export const E2E_BUNDLE = join(REPO_ROOT, 'worker', 'dist', 'node', 'e2e.mjs');
 const SECRETS_FILE = join(STATE_DIR, 'secrets.json');
 const RUNTIME_DIR = join(WORK_DIR, 'run');
@@ -64,6 +65,56 @@ async function assertPortsFree(ports: E2ePorts): Promise<void> {
       probe.listen(port, '127.0.0.1', () => probe.close(() => resolve()));
     });
   }
+}
+
+/** Claims this workspace before checking ports or touching stack output. */
+export async function acquireStackOwnership(ports: E2ePorts, lockPath = STACK_LOCK_FILE): Promise<() => void> {
+  const token = randomBytes(16).toString('hex');
+  let fd: number;
+  try {
+    fd = openSync(lockPath, 'wx', 0o600);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+      let owner = 'owner metadata unavailable';
+      try {
+        owner = readFileSync(lockPath, 'utf8').trim();
+      } catch {
+        // Keep the actionable path even if the lock was removed concurrently.
+      }
+      throw new Error(`another e2e stack owns this workspace (${lockPath}; ${owner})`);
+    }
+    throw error;
+  }
+  try {
+    writeFileSync(fd, `${JSON.stringify({ pid: process.pid, token })}\n`);
+  } catch (error) {
+    closeSync(fd);
+    try {
+      unlinkSync(lockPath);
+    } catch {
+      // Preserve the original write error; the lock path is included in the error context below.
+    }
+    throw new Error(`could not write e2e workspace lock ${lockPath}: ${messageOf(error)}`);
+  }
+  let released = false;
+  const release = (): void => {
+    if (released) return;
+    released = true;
+    closeSync(fd);
+    try {
+      const owner = JSON.parse(readFileSync(lockPath, 'utf8')) as { token?: unknown };
+      if (owner.token === token) unlinkSync(lockPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+  };
+  try {
+    await assertPortsFree(ports);
+  } catch (error) {
+    release();
+    throw error;
+  }
+  return release;
 }
 
 function ipcErrorResponse(error: unknown): {
@@ -148,14 +199,18 @@ async function terminate(child: ChildProcess | null): Promise<void> {
 /** Starts the Node e2e bundle and serializes pump commands and IPC routing. */
 export async function startStack(): Promise<{ stop(): Promise<void> }> {
   mkdirSync(WORK_DIR, { recursive: true });
-  rmSync(DIST_DIR, { recursive: true, force: true });
-  rmSync(STATE_DIR, { recursive: true, force: true });
-  rmSync(RUNTIME_DIR, { recursive: true, force: true });
-  mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
-  mkdirSync(RUNTIME_DIR, { recursive: true, mode: 0o700 });
-
   const ports = portsFromEnv();
-  await assertPortsFree(ports);
+  const releaseOwnership = await acquireStackOwnership(ports);
+  try {
+    rmSync(DIST_DIR, { recursive: true, force: true });
+    rmSync(STATE_DIR, { recursive: true, force: true });
+    rmSync(RUNTIME_DIR, { recursive: true, force: true });
+    mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
+    mkdirSync(RUNTIME_DIR, { recursive: true, mode: 0o700 });
+  } catch (error) {
+    releaseOwnership();
+    throw error;
+  }
   const originText = `https://${APP_HOST}`;
   log('starting HTTPS fixture world (FakeOAuthAs, FakePds, FakePlc, FakeDoh, browser proxy)');
 
@@ -196,13 +251,17 @@ export async function startStack(): Promise<{ stop(): Promise<void> }> {
         await terminate(child);
         await pumpTask?.catch(() => {});
       } finally {
-        if (controlServer !== null) {
-          await new Promise<void>((resolve) => controlServer?.close(() => resolve()));
-          controlServer = null;
+        try {
+          if (controlServer !== null) {
+            await new Promise<void>((resolve) => controlServer?.close(() => resolve()));
+            controlServer = null;
+          }
+          rmSync(CONTROL_TOKEN_FILE, { force: true });
+          if (world !== null) await world.close();
+        } finally {
+          activeStop = null;
+          releaseOwnership();
         }
-        rmSync(CONTROL_TOKEN_FILE, { force: true });
-        if (world !== null) await world.close();
-        activeStop = null;
       }
     })();
     return stopPromise;
@@ -361,7 +420,12 @@ export async function startStack(): Promise<{ stop(): Promise<void> }> {
         const timeout = setTimeout(() => {
           if (activeCommand?.id !== id) return;
           activeCommand = null;
-          reject(new Error(`Node e2e bundle command ${id} timed out after ${COMMAND_TIMEOUT_MS} ms`));
+          const action = typeof command.action === 'string' ? command.action : 'unknown';
+          reject(
+            new Error(
+              `Node e2e bundle command ${id} (${action}, generation ${generation}) timed out after ${COMMAND_TIMEOUT_MS} ms; execution is unknown, so the command will not be retried`,
+            ),
+          );
         }, COMMAND_TIMEOUT_MS);
         activeCommand = {
           id,
@@ -446,7 +510,9 @@ export async function startStack(): Promise<{ stop(): Promise<void> }> {
           wakePump?.();
           wakePump = null;
         }
-        await pumpInFlight?.catch(() => {});
+        // A timeout or rejection leaves mutation completion unknown. Do not hide
+        // it by restarting the child and replaying work against a fresh process.
+        await pumpInFlight;
         const previous = child;
         if (previous === null) throw new Error('Node e2e bundle is not running');
         expectedExit = previous;
