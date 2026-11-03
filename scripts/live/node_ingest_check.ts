@@ -7,6 +7,7 @@ import { canonicalDigest } from '@atmusic/core/canonical';
 import { cryptoRandom, systemClock } from '@atmusic/core/deps';
 import { collectionsFor } from '@atmusic/core/namespace';
 import { newTid } from '@atmusic/core/record-key';
+import { buildScrobbleRecord } from '@atmusic/core/scrobble';
 import { parseRecordUri } from '@atmusic/core/syntax';
 import type { Browser, Page } from '@playwright/test';
 import {
@@ -108,7 +109,7 @@ interface BrowserApiResponse {
 }
 
 export interface IngestDependencies {
-  browser(): Promise<Browser>;
+  browser(timeoutMs: number): Promise<Browser>;
   pdsInfo(endpoint: string, implementation: string, timeoutMs?: number): Promise<PdsInfo>;
   httpJson: typeof httpJson;
   verifyRecordAt(did: string, collection: string, rkey: string, timeoutMs?: number): ReturnType<typeof verifyRecordAt>;
@@ -170,7 +171,7 @@ async function closeWithinDeadline<T>(
 }
 
 const dependencies: IngestDependencies = {
-  browser: () => launchBrowser(process.env),
+  browser: (timeoutMs) => launchBrowser(process.env, timeoutMs),
   pdsInfo: (endpoint, implementation, timeoutMs) => pdsInfo(endpoint, implementation, timeoutMs),
   httpJson,
   verifyRecordAt: (did, collection, rkey, timeoutMs = 15_000) =>
@@ -548,8 +549,11 @@ async function awaitIndexed(
   };
 }
 
-function intendedAppRecord(collection: string, requestBody: object): object {
-  return { $type: collection, ...requestBody };
+function intendedAppRecord(prefix: string, requestBody: object): object {
+  const built = buildScrobbleRecord(requestBody, prefix, systemClock);
+  expect(built.ok, 'app request body is not a valid scrobble input');
+  const { createdAt: _serverAssignedCreatedAt, ...record } = built.record;
+  return record;
 }
 
 async function awaitAbsent(
@@ -637,52 +641,20 @@ export async function runNodeIngest(
     pds.push(await deps.pdsInfo(endpointB, context.get(ENV.pdsBImplementation), phaseBudgetMs()));
     await deps.checkIdentityPds(didA, pds[0]!.endpoint, phaseBudgetMs());
     await deps.checkIdentityPds(didB, pds[1]!.endpoint, phaseBudgetMs());
-    const browserLaunch = deps.browser();
-    const launchState: { abandoned: boolean; browser: Browser | null; closePromise: Promise<void> | null } = {
-      abandoned: false,
-      browser: null,
-      closePromise: null,
-    };
-    const closeLateBrowser = (launchedBrowser: Browser): Promise<void> => {
-      if (launchState.closePromise === null) {
-        launchState.closePromise = (async () => {
-          try {
-            await closeWithinDeadline(() => launchedBrowser.close(), deadlineAt, 'late browser close', 100);
-          } catch {
-            context.fail('late browser launch could not be closed before the ingest deadline');
-            context.cleanup('late browser launch unresolved; inspect the runner process for a browser left open');
-          }
-        })();
-      }
-      return launchState.closePromise;
-    };
-    const launchOutcome = browserLaunch.then(async (launchedBrowser) => {
-      launchState.browser = launchedBrowser;
-      if (launchState.abandoned) {
-        try {
-          await closeLateBrowser(launchedBrowser);
-        } catch {
-          context.cleanup('late browser launch cleanup did not settle; inspect the runner process');
-        }
-      }
-      return launchedBrowser;
-    });
+    const launchDeadline = performance.now() + phaseBudgetMs();
     try {
-      browser = await withTimeout(launchOutcome, phaseBudgetMs(), 'browser launch');
+      // Playwright's launch timeout tears down the partially started browser
+      // process. Await it directly so no launch continuation can outlive the
+      // gate body or mutate evidence after it has been emitted.
+      browser = await deps.browser(remainingMs(launchDeadline));
+      if (performance.now() > launchDeadline) {
+        await closeWithinDeadline(() => browser!.close(), deadlineAt, 'late browser close', 100);
+        browser = null;
+        throw new Error('browser launch deadline exceeded');
+      }
     } catch (error) {
-      launchState.abandoned = true;
-      try {
-        if (launchState.browser !== null) {
-          await withTimeout(
-            closeLateBrowser(launchState.browser),
-            Math.max(1, cleanupBudgetMs() - 25),
-            'late browser launch cleanup',
-          );
-        } else {
-          await withTimeout(launchOutcome, Math.max(1, cleanupBudgetMs() - 25), 'late browser launch cleanup');
-        }
-      } catch {
-        context.cleanup('browser launch did not settle before the ingest deadline; inspect the runner process');
+      if (browser !== null && performance.now() >= launchDeadline) {
+        context.cleanup('late browser launch unresolved; inspect the runner process for a browser left open');
       }
       throw error;
     }
@@ -753,7 +725,7 @@ export async function runNodeIngest(
       { kind: 'operation', dto: localOp },
       phaseBudgetMs(),
       deps,
-      intendedAppRecord(collectionsFor(context.lexiconPrefix).scrobble, localPayload),
+      intendedAppRecord(context.lexiconPrefix, localPayload),
     );
     results.localPublish = localIndexed;
     localRecord.owned = true;
@@ -914,7 +886,7 @@ export async function runNodeIngest(
                 { kind: 'operation', dto: operation },
                 Math.min(cleanupBudgetMs(), 15_000),
                 deps,
-                intendedAppRecord(collectionsFor(context.lexiconPrefix).scrobble, record.requestBody ?? {}),
+                intendedAppRecord(context.lexiconPrefix, record.requestBody ?? {}),
               );
               record.presentRev = String(indexed.verifiedRev);
               record.owned = true;

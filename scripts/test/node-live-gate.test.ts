@@ -272,6 +272,22 @@ test('unknown OAuth URL parameters and nested encoded URLs are stripped from eve
     String.raw`https://issuer.example/cb\u003fcode=${secretCode}\u0026state=${secretState}`,
   );
   const percentThenEscapeUrl = `https://issuer.example/cb%255Cu003fcode=${secretCode}%255Cu0026state=${secretState}`;
+  const backslashHexUrl = String.raw`https://issuer.example/cb\x3fcode=synthetic-code`;
+  const bracedUnicodeUrl = String.raw`https://issuer.example/cb\u{3f}code=synthetic-code`;
+  const encodeDepth = (value: string, depth: number) => {
+    let encoded = value;
+    for (let i = 0; i < depth; i++) encoded = encodeURIComponent(encoded);
+    return encoded;
+  };
+  const boundaryDepthUrl = encodeDepth(
+    String.raw`https://issuer.example/cb\u003fcode=${secretCode}&state=${secretState}`,
+    15,
+  );
+  const exhaustedDepthUrl = encodeDepth(
+    String.raw`https://issuer.example/cb\u003fcode=${secretCode}&state=${secretState}`,
+    16,
+  );
+  const mixedBeyondBudgetUrl = encodeDepth(String.raw`https://issuer.example/cb\u{3f}code=synthetic-code`, 15);
   const apostropheUrl = `https://issuer.example/c'b?code=${secretCode}&state=${secretState}`;
   const env = validEnv({
     ATMUSIC_LIVE_TEST_PREREQUISITE: 'ready',
@@ -294,6 +310,11 @@ test('unknown OAuth URL parameters and nested encoded URLs are stripped from eve
           mixedEscapeUrl,
           reverseOrderUrl,
           percentThenEscapeUrl,
+          backslashHexUrl,
+          bracedUnicodeUrl,
+          boundaryDepthUrl,
+          exhaustedDepthUrl,
+          mixedBeyondBudgetUrl,
           apostropheUrl,
           escaped: `https:\\\\issuer.example\\callback?code=${secretCode}`,
         },
@@ -304,7 +325,6 @@ test('unknown OAuth URL parameters and nested encoded URLs are stripped from eve
   );
   const { stdout, stderr } = capture.output();
   const evidenceOutput = capture.files.map((f) => f.text).join('\n');
-  const joined = `${stdout}\n${stderr}\n${evidenceOutput}`;
   for (const channel of [stdout, stderr, evidenceOutput]) {
     expect(channel).not.toContain(secretCode);
     expect(channel).not.toContain(secretState);
@@ -312,9 +332,11 @@ test('unknown OAuth URL parameters and nested encoded URLs are stripped from eve
     expect(channel).not.toContain('synthetic-code');
     expect(channel).not.toContain('%253A');
   }
-  expect(joined).toContain('https://issuer.example/cb');
-  expect(joined).not.toContain('cb%5Cu003f');
+  expect(stdout).toContain('https://issuer.example/cb');
+  expect(stdout).not.toContain('cb%5Cu003f');
   expect(() => JSON.parse(capture.files[0]!.text)).not.toThrow();
+  expect(() => JSON.parse(stdout)).not.toThrow();
+  expect(stderr).toContain('FAIL: ingest Node live gate failed');
   expect(() => JSON.parse(stdout)).not.toThrow();
 
   const thrown = ioCapture();
