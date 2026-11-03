@@ -1315,7 +1315,6 @@
       "case": "M7.1.2/session_loss",
       "target": "worker/test/node/bff/oauth-client.test.ts › invalid_grant on refresh deletes the session and marks the account reauth_required; a TransportError keeps the session",
       "also": [
-        "web/test/routes/scrobble.test.tsx › shows sign-in after a 401, then restores the in-memory draft with a fresh write intent after reauthentication",
         "web/tests/reauth.spec.ts › same-account OAuth reauthentication in a popup preserves the scrobble draft across the callback redirect",
         "web/test/session/client.test.ts › keeps the reauthentication flag when the initial bootstrap restores an expired session",
         "web/test/session/client.test.ts › refreshes a cached expired session on focus when BroadcastChannel is unavailable"
@@ -1484,7 +1483,6 @@
       "also": [
         "web/test/routes/feed.test.tsx › page two 503 keeps page one and retry appends page two once",
         "web/test/routes/feed.test.tsx › an empty feed shows an explicit empty state after loading completes",
-        "web/test/routes/scrobble.test.tsx › shows sign-in after a 401, then restores the in-memory draft with a fresh write intent after reauthentication",
         "web/tests/reauth.spec.ts › same-account OAuth reauthentication in a popup preserves the scrobble draft across the callback redirect"
       ]
     },
