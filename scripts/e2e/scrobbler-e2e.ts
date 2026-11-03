@@ -1139,7 +1139,9 @@ async function panoReadShapesCase(
           typeof track.name !== 'string' ||
           !track.name ||
           typeof replayObject(track.artist)['#text'] !== 'string' ||
-          !/^\d+$/.test(String(replayObject(track.date).uts))
+          (track.date === undefined
+            ? replayObject(track['@attr']).nowplaying !== 'true'
+            : !/^\d+$/.test(String(replayObject(track.date).uts)))
         )
           throw new Error('Pano parsed track fields failed');
       }
