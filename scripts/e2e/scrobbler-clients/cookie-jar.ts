@@ -113,7 +113,11 @@ export class LocalCookieJar {
 
   #cookieHeader(pathname: string): string {
     return [...this.#cookies.values()]
-      .filter((cookie) => pathname.startsWith(cookie.path))
+      .filter(
+        (cookie) =>
+          pathname === cookie.path ||
+          (pathname.startsWith(cookie.path) && (cookie.path.endsWith('/') || pathname[cookie.path.length] === '/')),
+      )
       .sort((left, right) => right.path.length - left.path.length)
       .map(({ name, value }) => `${name}=${value}`)
       .join('; ');
@@ -127,6 +131,9 @@ export class LocalCookieJar {
       if (equals < 1) continue;
       const name = first.slice(0, equals);
       const value = first.slice(equals + 1);
+      if (!/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(name) || !/^[\x21\x23-\x2B\x2D-\x3A\x3C-\x5B\x5D-\x7E]*$/.test(value)) {
+        throw new Error(SAFE_ERROR);
+      }
       const attributes = new Map<string, string | true>();
       for (const segment of segments) {
         const separator = segment.indexOf('=');
