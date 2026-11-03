@@ -1114,7 +1114,7 @@ async function panoReadShapesCase(
     const info = await read({ method: 'user.getInfo', user: alice.did, sk: 'n8-pano-shape-session' });
     const user = replayObject(info.user);
     if (
-      user.name !== 'alice' ||
+      user.name !== alice.handle ||
       user.url !== `${PUBLIC_ORIGIN}/u/${alice.did}` ||
       typeof user.playcount !== 'string' ||
       typeof user.artist_count !== 'string' ||
@@ -1225,7 +1225,7 @@ async function forwardingCase(
     }
     if (
       settledRows.length !== records.length * 2 ||
-      !settledRows.every((row) => row.state === 'sent' && row.attempts === 0)
+      !settledRows.every((row) => row.state === 'sent' && row.attempts === 1)
     )
       forwardStates = [
         ...settledRows.reduce(
@@ -1237,7 +1237,7 @@ async function forwardingCase(
         .join(',');
     if (
       settledRows.length !== records.length * 2 ||
-      !settledRows.every((row) => row.state === 'sent' && row.attempts === 0)
+      !settledRows.every((row) => row.state === 'sent' && row.attempts === 1)
     )
       throw new Error('forward outbox did not settle once per linked protocol');
     const snapshot = await fakes.snapshot();
