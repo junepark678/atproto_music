@@ -111,6 +111,10 @@ test('the pinned Last.fm client waits for parent-side app approval and reports n
             .authorizeLastfmToken(message.token, 'e2e-lastfm-user')
             .then(() => child.send?.({ type: 'answer', id: message.id, result: true }))
             .catch(reject);
+        } else if (message.type === 'command' && message.action === 'pumpJetstream' && typeof message.id === 'number') {
+          // This isolated client test verifies the HTTP protocol against the
+          // fake Last.fm child; indexing is covered by the integrated journey.
+          child.send?.({ type: 'answer', id: message.id, result: true });
         } else if (message.type === 'answer' && message.id === 0) resolveResult(message.result);
         else if (message.type === 'error') reject(new Error(String(message.error)));
       });

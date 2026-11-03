@@ -86,3 +86,13 @@ test('rejects cross-origin paths, unsafe destinations and invalid __Host cookies
     () => new LocalCookieJar({ publicOrigin: PUBLIC_ORIGIN, transportOrigin: 'https://secret.example/token' }),
   ).toThrow('scrobbler e2e app request failed');
 });
+
+test('pins authority-looking paths to the loopback transport before sending session cookies', async () => {
+  const jar = new LocalCookieJar({ publicOrigin: PUBLIC_ORIGIN, transportOrigin: await startServer() });
+  await jar.request('/auth/start');
+  const response = await jar.request('https://music.214510.xyz//outside.invalid/steal');
+  expect(response.status).toBe(200);
+  expect(seen.at(-1)?.headers.host).toBe('music.214510.xyz');
+  expect(seen.at(-1)?.headers.cookie).toContain('session-value');
+  expect(seen.at(-1)?.url).toBe('//outside.invalid/steal');
+});

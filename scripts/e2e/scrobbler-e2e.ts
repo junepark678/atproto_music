@@ -84,12 +84,37 @@ function safeErrorName(error: unknown): string {
   return error instanceof Error && /^[A-Za-z]+Error$/.test(error.name) ? error.name : 'Error';
 }
 
+export async function terminateChild(child: ChildProcess, graceMs = 1500): Promise<void> {
+  const isRunning = () => child.exitCode === null && child.signalCode === null;
+  if (!isRunning()) return;
+  const waitForExit = async (timeoutMs: number): Promise<boolean> => {
+    if (!isRunning()) return true;
+    const exited = once(child, 'exit').then(() => true);
+    const timeout = new Promise<boolean>((resolveExit) => setTimeout(() => resolveExit(false), timeoutMs));
+    return Promise.race([exited, timeout]);
+  };
+  try {
+    child.kill('SIGTERM');
+  } catch {}
+  if (await waitForExit(graceMs)) return;
+  try {
+    child.kill('SIGKILL');
+  } catch {}
+  if (!(await waitForExit(graceMs))) throw new Error('owned child did not exit after kill fallback');
+}
+
 function localHttpRequest(
   origin: string,
   path: string,
   options: { method: string; headers: readonly [string, string][]; body: Buffer | null },
 ): Promise<Response> {
-  const target = new URL(path, origin);
+  const base = new URL(origin);
+  const supplied = new URL(path, 'http://fixture.invalid');
+  if (supplied.origin !== 'http://fixture.invalid') throw new Error('local fake destination refused');
+  const target = new URL(base.origin);
+  target.pathname = supplied.pathname;
+  target.search = supplied.search;
+  if (target.origin !== base.origin) throw new Error('local fake destination refused');
   return new Promise((resolveResponse, reject) => {
     const headers = Object.fromEntries(options.headers);
     headers.host = target.host;
@@ -155,6 +180,7 @@ class BundleProcess {
   readonly #child: ChildProcess;
   readonly #fakes: FakeUpstreams;
   readonly #outbound: Array<Record<string, unknown>> = [];
+  #lastJetstreamSeq = 0;
   readonly #commands = new Map<number, { resolve(value: unknown): void; reject(): void; timer: NodeJS.Timeout }>();
   #nextCommand = 0;
   #nextResponse: Promise<void> = Promise.resolve();
@@ -175,7 +201,13 @@ class BundleProcess {
     });
   }
 
-  static async start(fakes: FakeUpstreams, runtimeDir: string, distDir: string, port: number): Promise<BundleProcess> {
+  static async start(
+    fakes: FakeUpstreams,
+    runtimeDir: string,
+    distDir: string,
+    port: number,
+    ingestMode: 'socket' | 'off' = 'socket',
+  ): Promise<BundleProcess> {
     const secretsFile = join(runtimeDir, 'secrets.json');
     const secrets = {
       ...testSecretsDocument(),
@@ -199,7 +231,7 @@ class BundleProcess {
       LEXICON_PREFIX: E2E_PREFIX,
       NAMESPACE_OWNERSHIP_REF: 'dns:_lexicon.e2e.atmusic.test',
       NAMESPACE_PUBLICATION_REF: `sha256:${'0'.repeat(64)}`,
-      INGEST_MODE: 'socket',
+      INGEST_MODE: ingestMode,
       JETSTREAM_URLS: 'wss://jetstream.test',
       ATMUSIC_TEST_JETSTREAM_WS: fakes.jetstreamUrl,
       JETSTREAM_LOOKBACK_HOURS: '24',
@@ -234,20 +266,30 @@ class BundleProcess {
         rejectReady(new Error('bundle exited during startup'));
       });
     });
-    const { authority } = await ready;
-    const address = new URL(`http://${authority}`);
-    const reportedPort = Number(address.port);
-    if (!Number.isSafeInteger(reportedPort) || reportedPort !== port || address.hostname !== '127.2.0.1') {
-      child.kill('SIGTERM');
-      throw new Error('bundle listener refused loopback address');
+    try {
+      const { authority } = await ready;
+      const address = new URL(`http://${authority}`);
+      const reportedPort = Number(address.port);
+      if (!Number.isSafeInteger(reportedPort) || reportedPort !== port || address.hostname !== '127.2.0.1') {
+        throw new Error('bundle listener refused loopback address');
+      }
+      const bundle = new BundleProcess(child, fakes, port);
+      await bundle.health();
+      return bundle;
+    } catch (error) {
+      await terminateChild(child).catch(() => {
+        throw new Error('bundle startup child cleanup failed');
+      });
+      throw error;
     }
-    const bundle = new BundleProcess(child, fakes, port);
-    await bundle.health();
-    return bundle;
   }
 
   get outbound(): readonly Record<string, unknown>[] {
     return this.#outbound;
+  }
+
+  get lastJetstreamSeq(): number {
+    return this.#lastJetstreamSeq;
   }
 
   async health(): Promise<void> {
@@ -284,7 +326,18 @@ class BundleProcess {
     await this.#fakes.advance(ms);
     await this.command('pump', { advance: ms });
     const commits = this.#fakes.drainCommits();
-    if (commits.length > 0) await this.#fakes.appendCommits(commits.map(({ commit }) => commit));
+    if (commits.length > 0) {
+      const frames = await this.#fakes.appendCommits(commits.map(({ commit }) => commit));
+      for (const frame of frames) {
+        try {
+          const seq = (JSON.parse(frame) as { seq?: unknown }).seq;
+          if (typeof seq === 'number' && Number.isSafeInteger(seq))
+            this.#lastJetstreamSeq = Math.max(this.#lastJetstreamSeq, seq);
+        } catch {
+          throw new Error('fixture Jetstream emitted an invalid frame');
+        }
+      }
+    }
   }
 
   async inspect(): Promise<Record<string, unknown[]>> {
@@ -389,15 +442,7 @@ class BundleProcess {
   async close(): Promise<void> {
     if (this.#closed) return;
     this.#closed = true;
-    if (this.#child.exitCode === null && this.#child.signalCode === null) {
-      const exited = once(this.#child, 'exit');
-      this.#child.kill('SIGTERM');
-      await Promise.race([exited, new Promise((resolveExit) => setTimeout(resolveExit, 3000))]);
-      if (this.#child.exitCode === null && this.#child.signalCode === null) {
-        this.#child.kill('SIGKILL');
-        await exited;
-      }
-    }
+    await terminateChild(this.#child, 3000);
   }
 }
 
@@ -420,6 +465,34 @@ function caseRecord(title: string, result: CaseRecord['result'], commit: string)
     result,
     commit,
   };
+}
+
+function unixSeconds(value: unknown): number {
+  if (typeof value === 'number' && Number.isSafeInteger(value)) return value;
+  if (typeof value === 'string') {
+    if (/^\d{1,12}$/.test(value)) return Number(value);
+    const parsed = Date.parse(value);
+    if (Number.isFinite(parsed)) return Math.floor(parsed / 1000);
+  }
+  throw new Error('protocol read omitted a valid listen timestamp');
+}
+
+function recordKey(artist: unknown, track: unknown, timestamp: unknown): string {
+  if (typeof artist !== 'string' || artist.length === 0 || typeof track !== 'string' || track.length === 0)
+    throw new Error('protocol read omitted listen identity');
+  return JSON.stringify([artist, track, unixSeconds(timestamp)]);
+}
+
+function assertSameMultiset(expected: readonly string[], observed: readonly string[], source: string): void {
+  const counts = (values: readonly string[]) => {
+    const result = new Map<string, number>();
+    for (const value of values) result.set(value, (result.get(value) ?? 0) + 1);
+    return result;
+  };
+  const want = counts(expected);
+  const got = counts(observed);
+  if (want.size !== got.size || [...want].some(([key, count]) => got.get(key) !== count))
+    throw new Error(`${source} did not return the exact accepted listen identity multiset`);
 }
 
 async function prepareAssets(distDir: string): Promise<void> {
@@ -540,15 +613,18 @@ async function linkListenBrainz(session: Session, fakes: FakeUpstreams): Promise
     { label: 'N8 protocol replay' },
     { csrfToken: session.csrfToken, publicOrigin: PUBLIC_ORIGIN, acceptedStatuses: [201] },
   );
-  const token = replayString(replayObject(tokenReply.body).token);
-  await fakes.addListenBrainzToken(token, 'e2e-listenbrainz-user');
+  const incomingClientToken = replayString(replayObject(tokenReply.body).token);
+  const linkedUpstreamToken = fakes.listenBrainzToken;
+  if (incomingClientToken === linkedUpstreamToken) throw new Error('ListenBrainz fixture credentials must be distinct');
   await replayAppJson(
     session.jar,
     '/api/v1/links/listenbrainz',
-    { token },
+    { token: linkedUpstreamToken },
     { csrfToken: session.csrfToken, publicOrigin: PUBLIC_ORIGIN, acceptedStatuses: [201] },
   );
-  return token;
+  // The app-issued credential accepted from clients differs from the linked
+  // upstream credential used by forwarding.
+  return incomingClientToken;
 }
 
 async function linkLastfm(session: Session, fakes: FakeUpstreams): Promise<void> {
@@ -692,13 +768,12 @@ async function runLastfmClient(
       }
     });
   });
-  await completed;
-  if (clientRequests.length) safeDiagnostic = `; requests=${clientRequests.join('|')}`;
-  if (!child.killed && child.exitCode === null && child.signalCode === null) {
-    const exited = once(child, 'exit');
-    child.kill('SIGTERM');
-    await Promise.race([exited, new Promise((resolveExit) => setTimeout(resolveExit, 1000))]);
+  try {
+    await completed;
+  } finally {
+    await terminateChild(child);
   }
+  if (clientRequests.length) safeDiagnostic = `; requests=${clientRequests.join('|')}`;
   if (rejection !== null) throw rejection;
   return { result: replayObject(result), requests: clientRequests };
 }
@@ -715,7 +790,16 @@ async function waitForIndexed(
     const inspect = await bundle.inspect();
     const indexedRows = inspect.scrobbles ?? [];
     const ownRows = indexedRows.filter((row) => replayObject(row).did === did);
-    if (records.length >= minimum && ownRows.length >= minimum) return;
+    const checkpoints = inspect.ingest_checkpoint;
+    const checkpoint = Array.isArray(checkpoints) ? replayObject(checkpoints[0]) : {};
+    if (
+      records.length >= minimum &&
+      ownRows.length >= minimum &&
+      checkpoint.connected === 1 &&
+      typeof checkpoint.cursor === 'number' &&
+      checkpoint.cursor >= bundle.lastJetstreamSeq
+    )
+      return;
   }
   throw new Error('indexing did not settle before the bounded fixture deadline');
 }
@@ -739,7 +823,13 @@ async function clientCase(
     const clientRun = await runLastfmClient(bundle, session, alice.did, credentials);
     const result = clientRun.result;
     writeJsonl(join(outDir, 'client-sockets.jsonl'), clientRun.requests);
-    if (result.sessionEstablished !== true || result.scrobbleBatchSize !== 2 || !Array.isArray(result.recentTrackNames))
+    if (
+      result.sessionEstablished !== true ||
+      result.scrobbleBatchSize !== 2 ||
+      !Array.isArray(result.recentTrackNames) ||
+      !result.recentTrackNames.includes('First Track') ||
+      !result.recentTrackNames.includes('Second Track')
+    )
       throw new Error('real client did not report the expected safe result');
     phase = 'socket-indexing';
     await waitForIndexed(bundle, fakes, session.did, 2);
@@ -842,19 +932,55 @@ async function combinedClientsCase(
     await waitForIndexed(bundle, fakes, session.did, 9);
     phase = 'pds-reads';
     const records = await fakes.listRecords(session.did, `${E2E_PREFIX}.scrobble`);
-    const names = new Set(
-      records.map(({ value }) => value.track).filter((track): track is string => typeof track === 'string'),
+    const expectedKeys = records.map(({ value }) => recordKey(value.artist, value.track, value.listenedAt));
+    const pdsOrigin = `http://127.2.0.1:${bundle.port}`;
+    const lastfmUrl = new URL('/2.0/', pdsOrigin);
+    lastfmUrl.search = new URLSearchParams({
+      method: 'user.getRecentTracks',
+      user: alice.did,
+      api_key: 'panoScrobbler',
+      sk: 'n8-pano-read-session',
+      format: 'json',
+      limit: '50',
+      page: '1',
+    }).toString();
+    const lastfmResponse = await send(lastfmUrl, { headers: { 'user-agent': 'Pano Scrobbler/4.10 (Android)' } });
+    if (!lastfmResponse.ok) throw new Error('Last.fm read did not return success');
+    const lastfmRoot = replayObject(await lastfmResponse.json());
+    const recent = replayObject(lastfmRoot.recenttracks).track;
+    if (!Array.isArray(recent)) throw new Error('Last.fm recent read was not an array');
+    const lastfmKeys = recent
+      .map((raw) => {
+        const item = replayObject(raw);
+        const attributes = item['@attr'];
+        if (
+          typeof attributes === 'object' &&
+          attributes !== null &&
+          (attributes as Record<string, unknown>).nowplaying === 'true'
+        )
+          return null;
+        const artist = replayObject(item.artist)['#text'];
+        const date = replayObject(item.date).uts;
+        return recordKey(artist, item.name, typeof date === 'string' ? Number(date) : date);
+      })
+      .filter((key): key is string => key !== null);
+    const listenbrainzResponse = await session.jar.request(
+      `/1/user/${encodeURIComponent(alice.did)}/listens?count=100`,
     );
-    for (const expected of [
-      'Pano Last.fm Listen',
-      'Pano ListenBrainz Listen',
-      'First Track',
-      'Second Track',
-      'Hoppípolla',
-      'Starálfur',
-      'Harder, Better, Faster, Stronger',
-    ])
-      if (!names.has(expected)) throw new Error('protocol replay record missing');
+    if (!listenbrainzResponse.ok) throw new Error('ListenBrainz read did not return success');
+    const listenbrainzPayload = replayObject(replayObject(await listenbrainzResponse.json()).payload);
+    if (!Array.isArray(listenbrainzPayload.listens)) throw new Error('ListenBrainz read was not an array');
+    const listenbrainzKeys = listenbrainzPayload.listens.map((raw) => {
+      const listen = replayObject(raw);
+      const metadata = replayObject(listen.track_metadata);
+      return recordKey(metadata.artist_name, metadata.track_name, listen.listened_at);
+    });
+    assertSameMultiset(expectedKeys, lastfmKeys, 'Last.fm read');
+    assertSameMultiset(expectedKeys, listenbrainzKeys, 'ListenBrainz read');
+    if (records.some(({ value }) => value.track === 'Too Long Artist'))
+      throw new Error('ignored listen was published to the PDS');
+    if ([...lastfmKeys, ...listenbrainzKeys].some((key) => key.includes('Too Long Artist')))
+      throw new Error('ignored listen appeared in a protocol read');
     return [caseRecord(SCROBBLER_CASES[1], 'passed', commit), caseRecord(SCROBBLER_CASES[6], 'passed', commit)];
   } catch {
     writeFileSync(join(outDir, 'combined-clients.log'), `combined clients failed during ${phase}\n`);
@@ -915,12 +1041,17 @@ async function idempotencyCase(
     firstReplayUniqueIds = new Set(ids).size;
     if (new Set(ids).size !== 1) throw new Error('idempotent submissions returned different operations');
     phase = 'operation-poll';
+    let terminalState: unknown;
     for (let attempt = 0; attempt < 60; attempt++) {
       await bundle.pump(1000);
       const status = replayObject(await (await session.jar.request(`/api/v1/operations/${ids[0]}`)).json());
-      if (status.state === 'succeeded') break;
+      if (status.state === 'succeeded') {
+        terminalState = status.state;
+        break;
+      }
       if (status.state === 'failed' || status.state === 'cancelled') throw new Error('idempotent operation failed');
     }
+    if (terminalState !== 'succeeded') throw new Error('idempotent operation did not reach succeeded');
     phase = 'post-terminal-replay';
     const finalIds = [await submit(), await submit()];
     if (finalIds.some((id) => id !== ids[0])) throw new Error('terminal replay changed operation identity');
@@ -928,6 +1059,10 @@ async function idempotencyCase(
     const records = await fakes.listRecords(alice.did, `${E2E_PREFIX}.scrobble`);
     if (records.filter(({ value }) => value.track === 'One Durable Listen').length !== 1)
       throw new Error('idempotency replay created more than one PDS record');
+    const operations = (await bundle.inspect()).operations ?? [];
+    const matchingOperations = operations.filter((row) => replayObject(row).id === ids[0]);
+    if (matchingOperations.length !== 1 || replayObject(matchingOperations[0]).state !== 'succeeded')
+      throw new Error('idempotency did not settle as exactly one durable operation');
     return caseRecord(SCROBBLER_CASES[4], 'passed', commit);
   } catch (error) {
     const status =
@@ -962,7 +1097,7 @@ async function panoReadShapesCase(
       if (response.status !== 200) throw new Error('Pano read returned a non-success status');
       return replayObject(await response.json());
     };
-    const common = { method: 'user.getRecentTracks', user: alice.did };
+    const common = { method: 'user.getRecentTracks', user: alice.did, sk: 'n8-pano-shape-session' };
     phase = 'empty-page';
     const empty = replayObject((await read({ ...common, from: '2000000000', page: '2' })).recenttracks);
     counts.push(Array.isArray(empty.track) ? empty.track.length : -1);
@@ -976,8 +1111,16 @@ async function panoReadShapesCase(
     if (!Array.isArray(one.track) || one.track.length !== 1) throw new Error('single Pano read shape failed');
     if (!Array.isArray(many.track) || many.track.length < 2) throw new Error('many Pano read shape failed');
     phase = 'user-info';
-    const info = await read({ method: 'user.getInfo', user: alice.did });
-    if (!info.user || typeof info.user !== 'object') throw new Error('Pano user.getInfo shape failed');
+    const info = await read({ method: 'user.getInfo', user: alice.did, sk: 'n8-pano-shape-session' });
+    const user = replayObject(info.user);
+    if (
+      user.name !== 'alice' ||
+      user.url !== `${PUBLIC_ORIGIN}/u/${alice.did}` ||
+      typeof user.playcount !== 'string' ||
+      typeof user.artist_count !== 'string' ||
+      typeof user.track_count !== 'string'
+    )
+      throw new Error('Pano user.getInfo shape failed');
     return caseRecord(SCROBBLER_CASES[5], 'passed', commit);
   } catch {
     writeFileSync(
@@ -988,11 +1131,67 @@ async function panoReadShapesCase(
   }
 }
 
+async function socketDeliveryDisabledControl(
+  fakes: FakeUpstreams,
+  distDir: string,
+): Promise<{ pdsCommitted: boolean; indexed: boolean; mode: string; cursor: number | null }> {
+  const bob = fakes.accounts.find((account) => account.name === 'bob');
+  if (!bob) throw new Error('negative-control account missing');
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'atmusic-n8-socket-off-'));
+  let disabled: BundleProcess | null = null;
+  try {
+    disabled = await BundleProcess.start(fakes, runtimeDir, distDir, await freeLoopbackPort(), 'off');
+    const session = await signIn(fakes, disabled, bob);
+    const response = await session.jar.request('/api/v1/scrobbles', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        origin: PUBLIC_ORIGIN,
+        'x-csrf-token': session.csrfToken,
+        'idempotency-key': 'n8-socket-off-negative-control',
+      },
+      body: JSON.stringify({
+        artist: 'N8 Socket Control Artist',
+        track: 'PDS Only Control',
+        listenedAt: new Date(FIXTURE_NOW_MS - 30_000).toISOString().replace('.000', ''),
+      }),
+    });
+    if (response.status !== 202) throw new Error('negative-control write was not accepted');
+    const operationId = replayString(replayObject(replayObject(await response.json()).operation).id);
+    let succeeded = false;
+    for (let attempt = 0; attempt < 30; attempt++) {
+      await disabled.pump(1000);
+      const operation = replayObject(await (await session.jar.request(`/api/v1/operations/${operationId}`)).json());
+      if (operation.state === 'succeeded') {
+        succeeded = true;
+        break;
+      }
+      if (operation.state === 'failed' || operation.state === 'cancelled') break;
+    }
+    if (!succeeded) throw new Error('negative-control PDS write did not settle');
+    const pdsRecords = await fakes.listRecords(bob.did, `${E2E_PREFIX}.scrobble`);
+    const pdsCommitted = pdsRecords.some(({ value }) => value.track === 'PDS Only Control');
+    const inspect = await disabled.inspect();
+    const indexed = (inspect.scrobbles ?? []).some((row) => replayObject(row).track === 'PDS Only Control');
+    const checkpoints = inspect.ingest_checkpoint;
+    const checkpoint = Array.isArray(checkpoints) ? replayObject(checkpoints[0]) : {};
+    const mode = typeof checkpoint.mode === 'string' ? checkpoint.mode : '';
+    const cursor = typeof checkpoint.cursor === 'number' ? checkpoint.cursor : null;
+    if (!pdsCommitted || indexed || mode !== 'off' || cursor !== null)
+      throw new Error('socket-disabled control did not isolate PDS writes from indexed reads');
+    return { pdsCommitted, indexed, mode, cursor };
+  } finally {
+    await disabled?.close().catch(() => undefined);
+    rmSync(runtimeDir, { recursive: true, force: true });
+  }
+}
+
 async function forwardingCase(
   bundle: BundleProcess,
   fakes: FakeUpstreams,
   commit: string,
   outDir: string,
+  incomingClientToken: string,
 ): Promise<CaseRecord> {
   let phase = 'fixture-account';
   let expectedForwards = 0;
@@ -1006,10 +1205,9 @@ async function forwardingCase(
     if (!alice) throw new Error('fixture account missing');
     const records = await fakes.listRecords(alice.did, `${E2E_PREFIX}.scrobble`);
     expectedForwards = records.length * 2;
-    const expected = new Map<string, number>();
+    const expectedKeys: string[] = [];
     for (const { value } of records) {
-      if (typeof value.track !== 'string') throw new Error('PDS listen track is missing');
-      expected.set(value.track, (expected.get(value.track) ?? 0) + 1);
+      expectedKeys.push(recordKey(value.artist, value.track, value.listenedAt));
     }
     recordDetails = records
       .map(({ value }) => `${String(value.artist)}|${String(value.track)}|${String(value.listenedAt)}`)
@@ -1025,7 +1223,10 @@ async function forwardingCase(
       forwardsObserved = settledRows.length;
       if (settledRows.length === records.length * 2 && settledRows.every((row) => row.state === 'sent')) break;
     }
-    if (settledRows.length !== records.length * 2 || !settledRows.every((row) => row.state === 'sent'))
+    if (
+      settledRows.length !== records.length * 2 ||
+      !settledRows.every((row) => row.state === 'sent' && row.attempts === 0)
+    )
       forwardStates = [
         ...settledRows.reduce(
           (counts, row) => counts.set(String(row.state), (counts.get(String(row.state)) ?? 0) + 1),
@@ -1034,44 +1235,68 @@ async function forwardingCase(
       ]
         .map(([state, count]) => `${state}:${count}`)
         .join(',');
-    if (settledRows.length !== records.length * 2 || !settledRows.every((row) => row.state === 'sent'))
+    if (
+      settledRows.length !== records.length * 2 ||
+      !settledRows.every((row) => row.state === 'sent' && row.attempts === 0)
+    )
       throw new Error('forward outbox did not settle once per linked protocol');
     const snapshot = await fakes.snapshot();
     const lastfm = replayObject(snapshot.lastfm);
     const lastfmBatches = Array.isArray(lastfm.scrobbles) ? lastfm.scrobbles : [];
-    const lastfmTracks = lastfmBatches.flatMap((batch) => {
-      const items = replayObject(batch).items;
+    const lastfmKeys = lastfmBatches.flatMap((batch) => {
+      const batchRecord = replayObject(batch);
+      if (batchRecord.user !== 'e2e-lastfm-user') throw new Error('Last.fm forwarding used the wrong account');
+      const items = batchRecord.items;
       return Array.isArray(items)
-        ? items.map((item) => replayObject(item).track).filter((track): track is string => typeof track === 'string')
+        ? items.map((item) => {
+            const track = replayObject(item);
+            return recordKey(track.artist, track.track, track.timestamp);
+          })
         : [];
     });
     const listenbrainz = replayObject(snapshot.listenbrainz);
     const submissions = Array.isArray(listenbrainz.submissions) ? listenbrainz.submissions : [];
-    const listenbrainzTracks = submissions.flatMap((submission) => {
+    const scrobbleSubmissions = submissions
+      .map((submission) => replayObject(submission))
+      .filter((submission) => submission.listenType !== 'playing_now');
+    if (
+      scrobbleSubmissions.some((submission) => submission.token !== fakes.listenBrainzToken) ||
+      scrobbleSubmissions.some((submission) => submission.token === incomingClientToken)
+    )
+      throw new Error('forwarder used the wrong ListenBrainz credential');
+    const listenbrainzKeys = submissions.flatMap((submission) => {
       const submissionRecord = replayObject(submission);
       if (submissionRecord.listenType === 'playing_now') return [];
+      if (submissionRecord.user !== 'e2e-listenbrainz-user')
+        throw new Error('ListenBrainz forwarding used the wrong account');
       const payload = replayObject(submissionRecord.json).payload;
       return Array.isArray(payload)
         ? payload.flatMap((item) => {
-            const track = replayObject(replayObject(item).track_metadata).track_name;
-            return typeof track === 'string' ? [track] : [];
+            const listen = replayObject(item);
+            const metadata = replayObject(listen.track_metadata);
+            return [recordKey(metadata.artist_name, metadata.track_name, listen.listened_at)];
           })
         : [];
     });
-    lastfmCount = lastfmTracks.length;
-    listenbrainzCount = listenbrainzTracks.length;
-    const countEach = (tracks: string[]) =>
-      [...expected].every(([track, count]) => tracks.filter((item) => item === track).length === count) &&
-      tracks.length === records.length;
-    if (!countEach(lastfmTracks) || !countEach(listenbrainzTracks))
+    lastfmCount = lastfmKeys.length;
+    listenbrainzCount = listenbrainzKeys.length;
+    assertSameMultiset(expectedKeys, lastfmKeys, 'Last.fm forwarding');
+    assertSameMultiset(expectedKeys, listenbrainzKeys, 'ListenBrainz forwarding');
+    if (
+      lastfmKeys.some((key) => key.includes('Too Long Artist')) ||
+      listenbrainzKeys.some((key) => key.includes('Too Long Artist'))
+    )
       throw new Error('accepted listen was not forwarded exactly once per service');
+    phase = 'socket-delivery-negative-control';
+    const negativeControl = await socketDeliveryDisabledControl(fakes, join(outDir, 'dist'));
     writeFileSync(
       join(outDir, 'ledger.json'),
       `${JSON.stringify({
         acceptedScrobbles: records.length,
         forwardRows: settledRows.length,
-        fakeLastfmAccepted: lastfmTracks.length,
-        fakeListenBrainzAccepted: listenbrainzTracks.length,
+        fakeLastfmAccepted: lastfmKeys.length,
+        fakeListenBrainzAccepted: listenbrainzKeys.length,
+        socketDeliveryNegativeControl: negativeControl,
         exactOncePerService: true,
       })}\n`,
     );
@@ -1146,7 +1371,7 @@ export async function runScrobblerE2e(outDir = join(REPO_ROOT, 'work/e2e/scrobbl
     records.push(await preloadIsolationCase(bundle, commit));
     records.push(await idempotencyCase(bundle, fakes, commit, output));
     records.push(await panoReadShapesCase(bundle, fakes, commit, output));
-    records.push(await forwardingCase(bundle, fakes, commit, output));
+    records.push(await forwardingCase(bundle, fakes, commit, output, listenbrainzToken));
     writeJsonl(join(output, 'outbound.jsonl'), bundle.outbound);
     writeJsonl(join(output, 'scrobbler-e2e.jsonl'), records);
     return records.every((record) => record.result === 'passed') ? 0 : 1;

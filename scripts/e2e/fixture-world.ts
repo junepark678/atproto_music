@@ -82,7 +82,10 @@ async function serve(
       // Direct test evidence uses 127.0.0.1 and a repo DID, with no Host header.
       // Resolve that one assertion-only form to the account's owning PDS.
       const url = new URL(request.url);
-      if ((incoming.headers.host ?? '').startsWith('127.0.0.1:') && url.pathname.endsWith('/listRecords')) {
+      if (
+        (incoming.headers.host ?? '').startsWith('127.0.0.1:') &&
+        url.pathname === '/xrpc/com.atproto.repo.listRecords'
+      ) {
         const repo = url.searchParams.get('repo');
         const pdsHost = repo === null ? undefined : didToPds.get(repo);
         if (pdsHost) request = new Request(`https://${pdsHost}${url.pathname}${url.search}`, request);

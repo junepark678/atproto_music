@@ -64,7 +64,13 @@ export class LocalCookieJar {
     try {
       const publicUrl = new URL(path, this.#publicOrigin);
       if (publicUrl.origin !== this.#publicOrigin.origin) throw new Error();
-      target = new URL(`${publicUrl.pathname}${publicUrl.search}`, this.#transportOrigin);
+      // Assign URL components instead of resolving a `//...` pathname, which
+      // URL() would interpret as an authority and could send the cookie to a
+      // different host.
+      target = new URL(this.#transportOrigin.origin);
+      target.pathname = publicUrl.pathname;
+      target.search = publicUrl.search;
+      if (target.origin !== this.#transportOrigin.origin) throw new Error();
       headers = Object.fromEntries(new Headers(init.headers).entries());
       headers.host = this.#publicOrigin.host;
       const cookie = this.#cookieHeader(publicUrl.pathname);
