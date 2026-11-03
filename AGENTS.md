@@ -13,7 +13,8 @@ Use the T3 orchestration tools for delegated work. Confirm available providers/m
 - Planning and design direction: Claude Opus 5.5 (`claudeAgent`, model `claude-opus-5-5`).
 - Set Opus reasoning effort to `low` for frontend work.
 - Implementation: GPT-6 Luna (`codex`, model `gpt-6-luna`).
-- Claude Sonnet 5.5 (`claude-sonnet-5-5`) may be used only if Opus explicitly routes a bounded task to it; Opus is the frontend lead.
+- Discovery, repository reconnaissance, and implementation-readiness research: Claude Sonnet 5.5 (`claude-sonnet-5-5`). Do not spend Opus on discovery; reserve Opus for UI planning and design decisions.
+- Frontend implementation stays with Luna. Opus may route a bounded frontend task to Sonnet 5.5 when useful; Opus remains the frontend design lead.
 
 ### Backend
 
@@ -21,6 +22,12 @@ Use the T3 orchestration tools for delegated work. Confirm available providers/m
 - Planning: Claude Opus 5.5 (`claudeAgent`, model `claude-opus-5-5`).
 - Implementation: GPT-6 Luna (`codex`, model `gpt-6-luna`).
 - Sol coordinates backend plans, decomposes work for Luna, and reconciles implementation results with Opus's direction.
+- For technically decisive or detail-heavy backend work, fan out bounded tasks to Claude Fable 5.1 or GPT-6 Astra. Prefer Astra for code audits, security reviews, and acceptance reviews; send findings through Sol before assigning implementation fixes to Luna.
+
+### Coordination
+
+- Use the available orchestration tools rather than substituting an unrequested provider or local CLI. Continue already-running work when fanning out new tasks; do not cancel or replace active work unless it is obsolete or the user asks.
+- Keep PRs stacked on their intended base branches, commit and push reviewable slices frequently, and mark implementation PRs ready for review when their scoped acceptance evidence is recorded. Link each updated PR to the orchestration thread after pushing.
 
 ## Execution and source control
 
