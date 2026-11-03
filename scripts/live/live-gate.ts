@@ -554,14 +554,14 @@ export function field<T = unknown>(value: unknown, key: string): T | undefined {
  * A version that cannot be read (no answer, no `version`, a placeholder) fails
  * the gate: the evidence never records an unknown version.
  */
-export async function pdsInfo(endpoint: string, implementation: string): Promise<PdsInfo> {
+export async function pdsInfo(endpoint: string, implementation: string, timeoutMs = HTTP_TIMEOUT_MS): Promise<PdsInfo> {
   expect(
     implementation.trim() !== '' && !isPlaceholder(implementation),
     `${endpoint}: no implementation name declared`,
   );
   let health: JsonResponse;
   try {
-    health = await httpJson(xrpcUrl(endpoint, '_health'));
+    health = await httpJson(xrpcUrl(endpoint, '_health'), { timeoutMs });
   } catch (error) {
     throw new GateFailure(`${endpoint}: /xrpc/_health unavailable, PDS version unknown (${message(error)})`);
   }
@@ -615,6 +615,8 @@ export interface VerifiedRecord {
  */
 export interface VerifierNetwork {
   transport?: Transport;
+  /** Optional deadline source forwarded to identity and SafeFetch requests. */
+  timer?: { timeout(ms: number): AbortSignal };
 }
 
 /**
@@ -635,9 +637,11 @@ export async function verifyRecordAt(
     import('@atmusic/atproto/net/safe-fetch'),
     import('@atmusic/atproto/verify/record-proof'),
   ]);
-  const { transport } = network;
-  const identity = await createIdentityResolver({ clock: systemClock, transport }).resolveDid(did, { fresh: true });
-  const safeFetch = createSafeFetch({ clock: systemClock, transport });
+  const { transport, timer } = network;
+  const identity = await createIdentityResolver({ clock: systemClock, transport, timer }).resolveDid(did, {
+    fresh: true,
+  });
+  const safeFetch = createSafeFetch({ clock: systemClock, transport, timer });
   const { body } = await safeFetch(xrpcUrl(identity.pds, 'com.atproto.sync.getRecord', { did, collection, rkey }), {
     kind: 'getRecord',
   });
@@ -723,9 +727,11 @@ export async function verifyAbsentBySnapshot(
     import('@atmusic/atproto/snapshot/walker'),
     import('@atmusic/atproto/verify/commit'),
   ]);
-  const { transport } = network;
-  const identity = await createIdentityResolver({ clock: systemClock, transport }).resolveDid(did, { fresh: true });
-  const safeFetch = createSafeFetch({ clock: systemClock, transport });
+  const { transport, timer } = network;
+  const identity = await createIdentityResolver({ clock: systemClock, transport, timer }).resolveDid(did, {
+    fresh: true,
+  });
+  const safeFetch = createSafeFetch({ clock: systemClock, transport, timer });
   const cache = new MemoryBlockCache();
   const streamed = await streamRepoIntoCache({ safeFetch, pds: identity.pds, did, cache });
   const root = cache.get(streamed.root);
@@ -809,12 +815,18 @@ export async function verifyAbsent(
 }
 
 /** The DID document's PDS must be the endpoint the operator declared. */
-export async function checkIdentityPds(did: string, declared: string): Promise<string> {
+export async function checkIdentityPds(
+  did: string,
+  declared: string,
+  network: Pick<VerifierNetwork, 'timer'> = {},
+): Promise<string> {
   const [{ systemClock }, { createIdentityResolver }] = await Promise.all([
     import('@atmusic/core/deps'),
     import('@atmusic/atproto/identity/resolver'),
   ]);
-  const identity = await createIdentityResolver({ clock: systemClock }).resolveDid(did, { fresh: true });
+  const identity = await createIdentityResolver({ clock: systemClock, timer: network.timer }).resolveDid(did, {
+    fresh: true,
+  });
   expect(
     normalizedOrigin(identity.pds) === normalizedOrigin(declared),
     `${did} resolves to PDS ${identity.pds}, not the declared ${normalizedOrigin(declared)}`,
@@ -834,8 +846,9 @@ export async function pollUntil<T>(
   for (;;) {
     const value = await probe();
     if (value !== null) return { value, elapsedMs: Math.round(performance.now() - start) };
-    if (performance.now() - start >= timeoutMs) return null;
-    await sleep(intervalMs);
+    const remaining = timeoutMs - (performance.now() - start);
+    if (remaining <= 0) return null;
+    await sleep(Math.min(intervalMs, Math.max(1, Math.ceil(remaining))));
   }
 }
 

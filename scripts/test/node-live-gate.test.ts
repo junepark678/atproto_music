@@ -248,6 +248,73 @@ test('evidence output path is written with the same redacted JSON document', asy
   expect(capture.files[0]?.text).not.toContain(env.ATMUSIC_LIVE_ADMIN_TOKEN);
 });
 
+test('unknown OAuth URL parameters and nested encoded URLs are stripped from every evidence channel', async () => {
+  const capture = ioCapture();
+  const secretCode = 'unknown-code-7f91';
+  const secretState = 'unknown-state-a832';
+  const secretRequest = 'opaque-request-uri-bb51';
+  const nested = encodeURIComponent(
+    `https://issuer.example/callback?code=${secretCode}&state=${secretState}#${secretRequest}`,
+  );
+  const env = validEnv({
+    ATMUSIC_LIVE_TEST_PREREQUISITE: 'ready',
+    [NODE_ENV.evidenceOut]: '/tmp/evidence.json',
+  });
+  await runNodeGate(
+    spec(async (context) => {
+      context.log(`navigation https://issuer.example/cb?code=${secretCode}&state=${secretState}`);
+      context.cleanup(`retry ${nested}`);
+      context.fail(`callback https://issuer.example/cb?request_uri=${secretRequest}`);
+      return { ...emptyBody, results: { nested } };
+    }),
+    env,
+    capture.io,
+  );
+  const joined = `${capture.output().stdout}\n${capture.output().stderr}\n${capture.files.map((f) => f.text).join('\n')}`;
+  expect(joined).not.toContain(secretCode);
+  expect(joined).not.toContain(secretState);
+  expect(joined).not.toContain(secretRequest);
+  expect(joined).toContain('https://issuer.example/cb');
+
+  const thrown = ioCapture();
+  const credentialUrl = `https://user:password@issuer.example/callback?code=${secretCode}&state=${secretState}#${secretRequest}`;
+  await runNodeGate(
+    spec(async () => {
+      throw new Error(`unexpected runner failure at ${credentialUrl}`);
+    }),
+    env,
+    thrown.io,
+  );
+  const thrownOutput = `${thrown.output().stdout}\n${thrown.output().stderr}\n${thrown.files.map((f) => f.text).join('\n')}`;
+  expect(thrownOutput).not.toContain('user:password');
+  expect(thrownOutput).not.toContain(secretCode);
+  expect(thrownOutput).not.toContain(secretState);
+  expect(thrownOutput).not.toContain(secretRequest);
+});
+
+test('optional requirements skip missing values but validate supplied values', async () => {
+  const body = vi.fn(async () => emptyBody);
+  const optionalSpec = spec(body);
+  optionalSpec.requirements = [
+    ...optionalSpec.requirements,
+    {
+      name: 'ATMUSIC_OPTIONAL',
+      what: 'optional input',
+      optional: true,
+      check: (value) => (value === 'ok' ? null : 'invalid'),
+    },
+  ];
+  for (const value of [undefined, '']) {
+    const env = validEnv({ ATMUSIC_LIVE_TEST_PREREQUISITE: 'ready' });
+    if (value !== undefined) env.ATMUSIC_OPTIONAL = value;
+    expect(await runNodeGate(optionalSpec, env, ioCapture().io)).toBe(0);
+  }
+  for (const value of ['bad', '0', '-1', '3601']) {
+    const env = validEnv({ ATMUSIC_LIVE_TEST_PREREQUISITE: 'ready', ATMUSIC_OPTIONAL: value });
+    expect(await runNodeGate(optionalSpec, env, ioCapture().io)).toBe(2);
+  }
+});
+
 test('importing the harness performs no work or output', () => {
   const moduleUrl = pathToFileURL(resolve(REPO, 'scripts/live/node-live-gate.ts')).href;
   const result = spawnSync(process.execPath, [TSX, '-e', `void import(${JSON.stringify(moduleUrl)})`], {

@@ -26,6 +26,7 @@ export type NodeGateEnv = Readonly<Record<string, string | undefined>>;
 export interface NodeGateRequirement {
   name: string;
   what: string;
+  optional?: boolean;
   check?: (value: string, env: NodeGateEnv) => string | null;
 }
 
@@ -38,6 +39,14 @@ export interface NodePdsInfo {
 export interface NodeSubject {
   did: string;
   uri: string | null;
+  expectedUri?: string | null;
+  route?: string;
+  unresolved?: boolean;
+  operationId?: string;
+  deleteOperationId?: string;
+  idempotencyKey?: string;
+  rkey?: string;
+  operationState?: string;
 }
 
 export interface NodeGateBodyResult {
@@ -167,7 +176,7 @@ function missingRequirements(env: NodeGateEnv, requirements: readonly NodeGateRe
   for (const requirement of requirements) {
     const value = env[requirement.name];
     if (value === undefined || value === '') {
-      missing.push(`${requirement.name}: missing — ${requirement.what}`);
+      if (!requirement.optional) missing.push(`${requirement.name}: missing — ${requirement.what}`);
       continue;
     }
     const issue = requirement.check?.(value, env);
@@ -207,6 +216,23 @@ function redactJsonValue(value: unknown, env: NodeGateEnv, ancestors = new WeakS
 export function redactNodeGateOutput(text: string, env: NodeGateEnv): string {
   let redacted = text;
   for (const secret of secretValues(env)) redacted = redacted.split(secret).join('[redacted]');
+  redacted = redacted.replace(/https?%3a%2f%2f[^\s"'<>]+/gi, '[redacted-url]');
+  redacted = redacted.replace(/https?:\/\/[^\s"'<>\\]+/gi, (candidate) => {
+    const trailing = candidate.match(/[),.;\]}]+$/)?.[0] ?? '';
+    const value = trailing ? candidate.slice(0, -trailing.length) : candidate;
+    try {
+      const url = new URL(value);
+      const hadRootSlash = url.pathname === '/' && !value.endsWith('/');
+      url.username = '';
+      url.password = '';
+      url.search = '';
+      url.hash = '';
+      const safe = hadRootSlash ? url.origin : url.href;
+      return `${safe}${trailing}`;
+    } catch {
+      return '[redacted-url]';
+    }
+  });
   redacted = redacted.replace(/Bearer\s+[A-Za-z0-9._~+/-]+=*/g, 'Bearer [redacted]');
   redacted = redacted.replace(/eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*/g, '[redacted-jwt]');
   return redacted;
