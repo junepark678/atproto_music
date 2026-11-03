@@ -170,9 +170,14 @@ test('the HTTPS preload rejects every non-public hostname before opening a conne
   expect(exit.stderr).toContain('refused hostname attacker.example');
 });
 
-test('the HTTPS preload rejects transport overrides, including Unix socket paths', async () => {
+test('the HTTPS preload rejects transport overrides, including custom agents and Unix socket paths', async () => {
   const preload = resolve(REPO, 'scripts/e2e/scrobbler-clients/https-to-loopback.mjs');
-  for (const option of ["{ socketPath: '/tmp/attacker.sock' }", '{ createConnection() {} }', '{ lookup() {} }']) {
+  for (const option of [
+    "{ socketPath: '/tmp/attacker.sock' }",
+    '{ createConnection() {} }',
+    '{ lookup() {} }',
+    '{ _defaultAgent: { constructor: class OverrideAgent {} } }',
+  ]) {
     const code = `import https from 'node:https'; https.request({ hostname: 'music.214510.xyz', ...${option} });`;
     const child = spawn(process.execPath, ['--import', preload, '--input-type=module', '-e', code], {
       cwd: REPO,

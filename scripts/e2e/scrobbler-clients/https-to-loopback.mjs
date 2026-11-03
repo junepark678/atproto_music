@@ -54,7 +54,7 @@ function request(input, options, callback) {
   const path = config.path ?? supplied.path ?? (source ? `${source.pathname}${source.search}` : '/');
   const headers = { ...(supplied.headers ?? {}), ...(config.headers ?? {}) };
   for (const sourceOptions of [supplied, config]) {
-    for (const key of ['socketPath', 'createConnection', 'lookup', 'agent', 'localAddress', 'family', 'autoSelectFamily']) {
+    for (const key of ['socketPath', 'createConnection', 'lookup', 'agent', '_defaultAgent', 'localAddress', 'family', 'autoSelectFamily']) {
       if (sourceOptions[key] !== undefined) {
         throw new Error(`HTTPS e2e preload refused transport override ${key}`);
       }
@@ -64,19 +64,20 @@ function request(input, options, callback) {
     headers.Host = PUBLIC_HOST;
   }
   const method = config.method ?? supplied.method ?? 'GET';
+  const timeout = config.timeout ?? supplied.timeout;
+  const signal = config.signal ?? supplied.signal;
   const target = http.request(
     {
-      ...supplied,
-      ...config,
       protocol: 'http:',
       hostname: LOOPBACK_HOST,
       host: LOOPBACK_HOST,
       port,
-      servername: undefined,
       agent: false,
       path,
       method,
       headers,
+      ...(timeout === undefined ? {} : { timeout }),
+      ...(signal === undefined ? {} : { signal }),
     },
     (response) => {
       try {
