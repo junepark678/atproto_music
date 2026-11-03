@@ -9,8 +9,7 @@
     "./test-support/*": "./test-support/*.ts"
   },
   "scripts": {
-    "test": "vitest run --config vitest.modules.config.ts",
-    "dev": "wrangler dev --config wrangler.jsonc"
+    "test": "vitest run --config vitest.modules.config.ts"
   },
   "dependencies": {
     "@atcute/cbor": "2.3.8",

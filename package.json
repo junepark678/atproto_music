@@ -19,7 +19,7 @@
     "typecheck": "tsc -b",
     "lint": "biome check .",
     "build:web": "npm run build --workspace @atmusic/web",
-    "dev": "wrangler dev --config worker/wrangler.jsonc",
+    "dev": "npm run dev --workspace @atmusic/web",
     "test:e2e": "playwright test",
     "check": "bash scripts/check-ts.sh"
   },
