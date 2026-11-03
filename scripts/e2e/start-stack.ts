@@ -47,6 +47,63 @@ function log(message: string): void {
   console.log(`[e2e] ${message}`);
 }
 
+interface StackLockOwner {
+  pid: number;
+  token: string;
+}
+
+function readStackLockOwner(lockPath: string): StackLockOwner | null {
+  try {
+    const value: unknown = JSON.parse(readFileSync(lockPath, 'utf8'));
+    if (
+      typeof value !== 'object' ||
+      value === null ||
+      !('pid' in value) ||
+      !('token' in value) ||
+      !Number.isSafeInteger(value.pid) ||
+      (value.pid as number) < 1 ||
+      typeof value.token !== 'string' ||
+      !/^[a-f0-9]{32}$/.test(value.token)
+    ) {
+      return null;
+    }
+    return { pid: value.pid as number, token: value.token };
+  } catch {
+    return null;
+  }
+}
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    // EPERM means the process exists but is owned by another user. Only ESRCH
+    // establishes that a lock owner has exited; all other errors fail closed.
+    return (error as NodeJS.ErrnoException).code !== 'ESRCH';
+  }
+}
+
+/** Reclaims only a well-formed lock whose recorded process is no longer alive. */
+function reclaimStaleStackLock(lockPath: string): boolean {
+  const observed = readStackLockOwner(lockPath);
+  if (!observed || processIsAlive(observed.pid)) return false;
+
+  // Re-read before unlinking so an owner that released and replaced the file
+  // while we checked its PID is never mistaken for the stale lock.
+  const current = readStackLockOwner(lockPath);
+  if (!current || current.pid !== observed.pid || current.token !== observed.token || processIsAlive(current.pid)) {
+    return false;
+  }
+  try {
+    unlinkSync(lockPath);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return true;
+    throw error;
+  }
+}
+
 function run(cmd: string, args: string[], cwd: string, env: NodeJS.ProcessEnv = process.env): Promise<void> {
   return new Promise((resolve, reject) => {
     const child = spawn(cmd, args, { cwd, env, stdio: 'inherit' });
@@ -74,19 +131,17 @@ async function assertPortsFree(ports: E2ePorts): Promise<void> {
 export async function acquireStackOwnership(ports: E2ePorts, lockPath = STACK_LOCK_FILE): Promise<() => void> {
   const token = randomBytes(16).toString('hex');
   let fd: number;
-  try {
-    fd = openSync(lockPath, 'wx', 0o600);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
-      let owner = 'owner metadata unavailable';
-      try {
-        owner = readFileSync(lockPath, 'utf8').trim();
-      } catch {
-        // Keep the actionable path even if the lock was removed concurrently.
-      }
-      throw new Error(`another e2e stack owns this workspace (${lockPath}; ${owner})`);
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      fd = openSync(lockPath, 'wx', 0o600);
+      break;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      if (attempt === 0 && reclaimStaleStackLock(lockPath)) continue;
+      const owner = readStackLockOwner(lockPath);
+      const description = owner ? `owner pid ${owner.pid}` : 'owner metadata unavailable';
+      throw new Error(`another e2e stack owns this workspace (${lockPath}; ${description})`);
     }
-    throw error;
   }
   try {
     writeFileSync(fd, `${JSON.stringify({ pid: process.pid, token })}\n`);

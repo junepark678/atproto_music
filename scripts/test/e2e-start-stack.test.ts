@@ -1,7 +1,9 @@
+import { spawn } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { afterEach, expect, test } from 'vitest';
 import { certificateSerialFromDigest } from '../e2e/dev-env';
 import { acquireStackOwnership } from '../e2e/start-stack';
@@ -29,6 +31,59 @@ test('e2e workspace lock is exclusive and released for a later run', async () =>
 
   const releaseNextRun = await acquireStackOwnership(ports, lockPath);
   releaseNextRun();
+});
+
+test('a lock left by a killed stack process is reclaimed for the next run', async () => {
+  const lockPath = temporaryLockPath();
+  const sourceUrl = pathToFileURL(resolve('scripts/e2e/start-stack.ts')).href;
+  const child = spawn(
+    process.execPath,
+    [
+      '--import',
+      'tsx',
+      '--input-type=module',
+      '-e',
+      `import { acquireStackOwnership } from ${JSON.stringify(sourceUrl)}; await acquireStackOwnership({ worker: 0, plc: 0, pds1: 0, pds2: 0, proxy: 0, control: 0 }, ${JSON.stringify(lockPath)}); console.log('LOCK_READY'); setInterval(() => {}, 1000);`,
+    ],
+    { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'] },
+  );
+
+  let output = '';
+  child.stdout.setEncoding('utf8');
+  child.stderr.setEncoding('utf8');
+  child.stdout.on('data', (chunk: string) => {
+    output += chunk;
+  });
+  child.stderr.on('data', (chunk: string) => {
+    output += chunk;
+  });
+  const childExit = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
+    child.once('error', reject);
+    child.once('exit', (code, signal) => resolve({ code, signal }));
+  });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`child did not acquire lock: ${output}`)), 10_000);
+      child.once('error', (error) => {
+        clearTimeout(timer);
+        reject(error);
+      });
+      child.stdout.on('data', () => {
+        if (!output.includes('LOCK_READY')) return;
+        clearTimeout(timer);
+        resolve();
+      });
+    });
+
+    child.kill('SIGKILL');
+    const exit = await childExit;
+    expect(exit.signal).toBe('SIGKILL');
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+  }
+
+  const release = await acquireStackOwnership({ worker: 0, plc: 0, pds1: 0, pds2: 0, proxy: 0, control: 0 }, lockPath);
+  release();
 });
 
 test('occupied e2e port releases the ownership lock before rejecting startup', async () => {
