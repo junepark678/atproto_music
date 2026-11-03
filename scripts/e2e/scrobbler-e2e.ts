@@ -1146,54 +1146,65 @@ async function socketDeliveryDisabledControl(
   bundle: BundleProcess,
   fakes: FakeUpstreams,
 ): Promise<{ pdsCommitted: boolean; indexed: boolean; mode: string; cursor: number | null }> {
-  const alice = fakes.accounts.find((account) => account.name === 'alice');
-  if (!alice) throw new Error('negative-control account missing');
-  const session = await signIn(fakes, bundle, alice);
-  const before = await bundle.inspect();
-  const beforeCheckpointRows = before.ingest_checkpoint;
-  const beforeCheckpoint = Array.isArray(beforeCheckpointRows) ? replayObject(beforeCheckpointRows[0]) : {};
-  const beforeCursor = typeof beforeCheckpoint.cursor === 'number' ? beforeCheckpoint.cursor : null;
-  if ((await bundle.disconnectJetstream()) < 1) throw new Error('negative-control socket was not connected');
-  const response = await session.jar.request('/api/v1/scrobbles', {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      origin: PUBLIC_ORIGIN,
-      'x-csrf-token': session.csrfToken,
-      'idempotency-key': 'n8-socket-delivery-negative-control',
-    },
-    body: JSON.stringify({
-      artist: 'N8 Socket Control Artist',
-      track: 'PDS Only Control',
-      listenedAt: new Date(FIXTURE_NOW_MS - 30_000).toISOString().replace('.000', ''),
-    }),
-  });
-  if (response.status !== 202) throw new Error('negative-control write was not accepted');
-  const operationId = replayString(replayObject(replayObject(await response.json()).operation).id);
-  let succeeded = false;
-  for (let attempt = 0; attempt < 30; attempt++) {
-    // Process the write, but deliberately discard its commit frame instead of
-    // appending it to the disconnected Jetstream child.
-    await bundle.pump(0, false);
-    const operation = replayObject(await (await session.jar.request(`/api/v1/operations/${operationId}`)).json());
-    if (operation.state === 'succeeded') {
-      succeeded = true;
-      break;
+  let stage = 'fixture-account';
+  try {
+    const alice = fakes.accounts.find((account) => account.name === 'alice');
+    if (!alice) throw new Error('negative-control account missing');
+    stage = 'signin';
+    const session = await signIn(fakes, bundle, alice);
+    stage = 'pre-disconnect-checkpoint';
+    const before = await bundle.inspect();
+    const beforeCheckpointRows = before.ingest_checkpoint;
+    const beforeCheckpoint = Array.isArray(beforeCheckpointRows) ? replayObject(beforeCheckpointRows[0]) : {};
+    const beforeCursor = typeof beforeCheckpoint.cursor === 'number' ? beforeCheckpoint.cursor : null;
+    stage = 'socket-disconnect';
+    if ((await bundle.disconnectJetstream()) < 1) throw new Error('negative-control socket was not connected');
+    stage = 'write-acknowledgement';
+    const response = await session.jar.request('/api/v1/scrobbles', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        origin: PUBLIC_ORIGIN,
+        'x-csrf-token': session.csrfToken,
+        'idempotency-key': 'n8-socket-delivery-negative-control',
+      },
+      body: JSON.stringify({
+        artist: 'N8 Socket Control Artist',
+        track: 'PDS Only Control',
+        listenedAt: new Date(FIXTURE_NOW_MS - 30_000).toISOString().replace('.000', ''),
+      }),
+    });
+    if (response.status !== 202) throw new Error('negative-control write was not accepted');
+    const operationId = replayString(replayObject(replayObject(await response.json()).operation).id);
+    let succeeded = false;
+    stage = 'operation-settlement';
+    for (let attempt = 0; attempt < 30; attempt++) {
+      // Process the write, but deliberately discard its commit frame instead
+      // of appending it to the disconnected Jetstream child.
+      await bundle.pump(0, false);
+      const operation = replayObject(await (await session.jar.request(`/api/v1/operations/${operationId}`)).json());
+      if (operation.state === 'succeeded') {
+        succeeded = true;
+        break;
+      }
+      if (operation.state === 'failed' || operation.state === 'cancelled') break;
     }
-    if (operation.state === 'failed' || operation.state === 'cancelled') break;
+    if (!succeeded) throw new Error('negative-control PDS write did not settle');
+    stage = 'pds-index-separation';
+    const pdsRecords = await fakes.listRecords(alice.did, `${E2E_PREFIX}.scrobble`);
+    const pdsCommitted = pdsRecords.some(({ value }) => value.track === 'PDS Only Control');
+    const inspect = await bundle.inspect();
+    const indexed = (inspect.scrobbles ?? []).some((row) => replayObject(row).track === 'PDS Only Control');
+    const checkpoints = inspect.ingest_checkpoint;
+    const checkpoint = Array.isArray(checkpoints) ? replayObject(checkpoints[0]) : {};
+    const mode = typeof checkpoint.mode === 'string' ? checkpoint.mode : '';
+    const cursor = typeof checkpoint.cursor === 'number' ? checkpoint.cursor : null;
+    if (!pdsCommitted || indexed || checkpoint.connected !== 0 || mode !== 'socket' || cursor !== beforeCursor)
+      throw new Error('socket-disabled control did not isolate PDS writes from indexed reads');
+    return { pdsCommitted, indexed, mode, cursor };
+  } catch {
+    throw new Error(`socket negative control failed during ${stage}`);
   }
-  if (!succeeded) throw new Error('negative-control PDS write did not settle');
-  const pdsRecords = await fakes.listRecords(alice.did, `${E2E_PREFIX}.scrobble`);
-  const pdsCommitted = pdsRecords.some(({ value }) => value.track === 'PDS Only Control');
-  const inspect = await bundle.inspect();
-  const indexed = (inspect.scrobbles ?? []).some((row) => replayObject(row).track === 'PDS Only Control');
-  const checkpoints = inspect.ingest_checkpoint;
-  const checkpoint = Array.isArray(checkpoints) ? replayObject(checkpoints[0]) : {};
-  const mode = typeof checkpoint.mode === 'string' ? checkpoint.mode : '';
-  const cursor = typeof checkpoint.cursor === 'number' ? checkpoint.cursor : null;
-  if (!pdsCommitted || indexed || checkpoint.connected !== 0 || mode !== 'socket' || cursor !== beforeCursor)
-    throw new Error('socket-disabled control did not isolate PDS writes from indexed reads');
-  return { pdsCommitted, indexed, mode, cursor };
 }
 
 async function forwardingCase(
