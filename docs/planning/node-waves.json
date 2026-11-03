@@ -1598,7 +1598,8 @@
     "id": "N7-01",
     "title": "Retire the Workers runtime, the cloudflare:* test shim, pulse, PLAN and BUDGETS.free",
     "files": [
-     "worker/wrangler.jsonc",
+        "worker/wrangler.jsonc",
+        ".gitignore",
      "worker/.dev.vars.example",
      "worker/src/index.ts",
      "worker/src/scheduled.ts",
@@ -1657,7 +1658,14 @@
      "worker/src/do/ingest/jetstream-socket.ts",
      "worker/test/ingest/ingest-mode.test.ts",
      "worker/test/ingest/jetstream-socket.test.ts",
-     "docs/verification/node-port-inventory.json"
+     "docs/verification/node-port-inventory.json",
+     "scripts/test/check-ts.test.ts",
+     "worker/test/node/deshim/ingest.test.ts",
+     "worker/test/storage/no-async-tx.test.ts",
+     "worker/test/http/params.test.ts",
+     "worker/test/ingest/notify.test.ts",
+     "worker/test/node/journey/world.ts",
+     "scripts/test/fake-upstreams.test.ts"
     ],
     "dependsOn": [
      "N4-02",

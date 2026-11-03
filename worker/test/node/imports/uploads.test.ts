@@ -588,7 +588,12 @@ describe('import uploads', () => {
   it('an upload that would take ATMUSIC_UPLOAD_DIR past ATMUSIC_UPLOAD_MAX_BYTES or the filesystem below ATMUSIC_MIN_FREE_BYTES is 507 and writes nothing; the upload file is deleted once parsed and when its job is cancelled or fails', async () => {
     const body = lastfmExportBody(20);
     expect(body.length).toBeGreaterThan(1_000);
-    const post = (a: ImportsApp, headers: Record<string, string>, payload: BodyInit, extra: RequestInit = {}) =>
+    const post = (
+      a: ImportsApp,
+      headers: Record<string, string>,
+      payload: Exclude<RequestInit['body'], null>,
+      extra: RequestInit = {},
+    ) =>
       a.app.fetch('/api/v1/imports/upload?source=lastfm_json', {
         method: 'POST',
         headers: { ...headers, 'content-type': 'application/octet-stream' },

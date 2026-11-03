@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { ConfigError, FIXTURE_PREFIX, parseConfig, parseCursorKey } from '../src/config';
 import type { EnvVars } from '../src/env';
@@ -7,8 +8,33 @@ const DECIDED_ORIGIN = 'https://music.214510.xyz';
 const DECIDED_PREFIX = 'dev.pythonplayer123.music';
 const PUBLICATION_REF = `sha256:${'a'.repeat(64)}`;
 
-/** parseConfig's vars: PLAN and DO_LOCATION_HINT were retired by N7-01 (B17). */
-const BASE: Omit<EnvVars, 'PLAN' | 'DO_LOCATION_HINT'> = {
+describe('Node environment example', () => {
+  it('documents the Node host inputs instead of a Workers config', () => {
+    const example = readFileSync(new URL('../../config/atmusic.env.example', import.meta.url), 'utf8');
+    for (const name of [
+      'ATMUSIC_PUBLIC_ORIGIN',
+      'ATMUSIC_CLIENT_IP_HEADER',
+      'ATMUSIC_SIGNIN_DIDS',
+      'LEXICON_PREFIX',
+      'NAMESPACE_OWNERSHIP_REF',
+      'NAMESPACE_PUBLICATION_REF',
+      'JETSTREAM_URLS',
+      'JETSTREAM_LOOKBACK_HOURS',
+      'RELAY_URL',
+      'ATMUSIC_LISTEN',
+      'INGEST_MODE',
+      'ATMUSIC_DB',
+      'ATMUSIC_ADMIN_SOCKET',
+    ]) {
+      expect(example, name).toMatch(new RegExp(`^#?${name}=`, 'm'));
+    }
+    expect(example).not.toMatch(/wrangler|ADMIN_TOKEN|DO_LOCATION_HINT|PLAN=/i);
+    expect(() => parseConfig(BASE)).not.toThrow();
+  });
+});
+
+/** Node host environment variables only; Worker bindings and vars are retired. */
+const BASE: EnvVars = {
   PUBLIC_ORIGIN: 'https://music.example.org',
   LEXICON_PREFIX: '',
   NAMESPACE_OWNERSHIP_REF: '',
@@ -39,11 +65,9 @@ describe('parseConfig namespace gate', () => {
       fixturePrefix: false,
       configuredIngestMode: 'socket',
       ingestMode: 'off',
-      adminEnabled: false,
       jetstreamUrls: ['wss://jetstream.us-east.bsky.network', 'wss://jetstream.us-west.bsky.network'],
       jetstreamLookbackHours: 24,
     });
-    expect(config).not.toHaveProperty('plan');
     expect(config.budget).toEqual({
       drainHints: 200,
       subrequestsPerSlice: 200,
@@ -226,20 +250,15 @@ describe('parseConfig namespace gate', () => {
           JETSTREAM_URLS: 'https://jetstream.example.org',
           JETSTREAM_LOOKBACK_HOURS: '1.5',
           RELAY_URL: 'wss://relay.example.org',
-          ADMIN_TOKEN: 'short',
         }),
       ),
-    ).toEqual(['INGEST_MODE', 'JETSTREAM_URLS', 'JETSTREAM_LOOKBACK_HOURS', 'RELAY_URL', 'ADMIN_TOKEN']);
+    ).toEqual(['INGEST_MODE', 'JETSTREAM_URLS', 'JETSTREAM_LOOKBACK_HOURS', 'RELAY_URL']);
     expect(issuesOf(() => parseConfig({ ...BASE, JETSTREAM_URLS: '' }))).toEqual(['JETSTREAM_URLS']);
     expect(parseConfig({ ...BASE, JETSTREAM_URLS: '', INGEST_MODE: 'off' }).jetstreamUrls).toEqual([]);
     // The Workers-era pulse mode is no longer a value (N7-01, B17).
     expect(issuesOf(() => parseConfig({ ...BASE, INGEST_MODE: 'pulse' }))).toEqual(['INGEST_MODE']);
-    const admin = parseConfig({ ...BASE, ADMIN_TOKEN: 'a'.repeat(32) });
-    expect(admin).toMatchObject({ adminEnabled: true });
-    expect(admin).not.toHaveProperty('plan');
-    expect(admin.budget.subrequestsPerSlice).toBe(200);
-    expect(Object.keys(admin)).not.toContain('doLocationHint');
-    expect(JSON.stringify(admin)).not.toContain('a'.repeat(32));
+    const config = parseConfig(BASE);
+    expect(config.budget.subrequestsPerSlice).toBe(200);
   });
 
   // M1.1.1/invalid_namespace: empty prefix, one segment, uppercase segment and
@@ -310,13 +329,11 @@ describe('parseConfig namespace gate', () => {
   // malformed key fail with the field names and no secret value anywhere in
   // the error (message, issues or its serialization).
   it('http PUBLIC_ORIGIN and invalid LEXICON_PREFIX fail parseConfig naming each field without echoing any secret value', () => {
-    const adminToken = 'S3cr3t-admin-token'; // set but shorter than 32 characters: invalid
     const cursorKey = 'feedfacecafebeef'.repeat(3); // 24 bytes: below the 32-byte minimum
     const env = {
       ...BASE,
       PUBLIC_ORIGIN: 'http://public.example',
       LEXICON_PREFIX: 'Public.Example/music',
-      ADMIN_TOKEN: adminToken,
     };
 
     let error: unknown;
@@ -329,11 +346,10 @@ describe('parseConfig namespace gate', () => {
     const configError = error as ConfigError;
     expect(configError.name).toBe('ConfigError');
     // Every invalid field is named, in order, and nothing else is.
-    expect(configError.issues.map((i) => i.field)).toEqual(['PUBLIC_ORIGIN', 'LEXICON_PREFIX', 'ADMIN_TOKEN']);
+    expect(configError.issues.map((i) => i.field)).toEqual(['PUBLIC_ORIGIN', 'LEXICON_PREFIX']);
     expect(configError.message).toBe(
       'invalid configuration: PUBLIC_ORIGIN: must be an https origin without path, port, query, fragment or credentials; ' +
-        'LEXICON_PREFIX: must be a lowercase reverse-domain NSID prefix; ' +
-        'ADMIN_TOKEN: must be at least 32 characters when set',
+        'LEXICON_PREFIX: must be a lowercase reverse-domain NSID prefix',
     );
 
     let keyError: unknown;
@@ -352,8 +368,6 @@ describe('parseConfig namespace gate', () => {
     for (const err of [configError, keyError as ConfigError]) {
       const surfaces = [err.message, String(err), JSON.stringify(err.issues), JSON.stringify(err), err.stack ?? ''];
       for (const surface of surfaces) {
-        expect(surface).not.toContain(adminToken);
-        expect(surface).not.toContain('S3cr3t');
         expect(surface).not.toContain(cursorKey);
         expect(surface).not.toContain('feedfacecafebeef');
       }
@@ -364,21 +378,16 @@ describe('parseConfig namespace gate', () => {
     expect(issuesOf(() => parseConfig({ ...BASE, LEXICON_PREFIX: 'Public.Example/music' }))).toEqual([
       'LEXICON_PREFIX',
     ]);
-    // Control: the same env with valid values parses, and a valid token is
-    // reduced to a boolean rather than copied into AppConfig.
-    const validToken = 'v'.repeat(40);
+    // Control: the same env with valid values parses without Worker secrets.
     const ok = parseConfig({
       ...env,
       PUBLIC_ORIGIN: 'https://public.example',
       LEXICON_PREFIX: 'org.example.music',
-      ADMIN_TOKEN: validToken,
     });
     expect(ok).toMatchObject({
       publicOrigin: 'https://public.example',
       prefix: 'org.example.music',
-      adminEnabled: true,
     });
-    expect(JSON.stringify(ok)).not.toContain(validToken);
   });
 
   it('CURSOR_KEY is at least 32 hex-encoded bytes and not all zero', () => {

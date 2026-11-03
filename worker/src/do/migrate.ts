@@ -4,9 +4,8 @@
 // and ledger row commits or none does. `schema_migrations` replaces PRAGMA
 // user_version.
 //
-// Targets. Production uses the Node `MigrationTarget {exec, tx}` facade
-// (worker/src/node/sqlite-db.ts). The old test-only DO harness overload will
-// be removed with the cloudflare:* shim in N7-01.
+// The Node `MigrationTarget {exec, tx}` facade is implemented by
+// worker/src/node/sqlite-db.ts.
 //
 // Compatibility rule (ADR 0005 §3.2). Code at version n opening a database at
 // version m > n reads `schema_compat.min_compatible_version` (when that table
@@ -45,19 +44,6 @@ const LEDGER_DDL = `CREATE TABLE IF NOT EXISTS schema_migrations (
   name TEXT NOT NULL
 )`;
 
-type MigrationStorage = Pick<DurableObjectStorage, 'sql' | 'transactionSync'>;
-
-function isDurableObjectStorage(target: MigrationStorage | MigrationTarget): target is MigrationStorage {
-  return 'transactionSync' in target && 'sql' in target;
-}
-
-function doTarget(storage: MigrationStorage): MigrationTarget {
-  return {
-    exec: (sql, ...params) => storage.sql.exec(sql, ...params).toArray(),
-    tx: <T>(fn: () => T extends Promise<unknown> ? never : T): T => storage.transactionSync(() => fn() as T),
-  };
-}
-
 /**
  * The database's `schema_compat.min_compatible_version`, or null when the
  * table is absent. Several rows (never written by our migrations) count as
@@ -91,11 +77,8 @@ function checkLedgerPrefix(
   });
 }
 
-export function migrate(
-  target: MigrationTarget | MigrationStorage,
-  migrations: readonly Migration[] = MIGRATIONS,
-): MigrateResult {
-  const db = isDurableObjectStorage(target) ? doTarget(target) : target;
+export function migrate(target: MigrationTarget, migrations: readonly Migration[] = MIGRATIONS): MigrateResult {
+  const db = target;
   return db.tx((): MigrateResult => {
     db.exec(LEDGER_DDL);
     const applied = db.exec('SELECT version, name FROM schema_migrations ORDER BY version') as Array<{

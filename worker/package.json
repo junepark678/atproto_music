@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "The atmusic Worker and its IndexDO Durable Object.",
+  "description": "The atmusic Node application server.",
   "exports": {
     "./*": "./src/*.ts",
     "./test-support/*": "./test-support/*.ts"
@@ -21,13 +21,10 @@
     "ws": "8.22.0"
   },
   "devDependencies": {
-    "@cloudflare/vitest-plugin": "1.4.4",
-    "@cloudflare/workers-types": "5.20261010.1",
     "@types/ws": "8.18.2",
     "ajv": "8.20.0",
     "ajv-formats": "3.0.1",
     "fast-check": "4.10.2",
-    "vitest": "5.0.5",
-    "wrangler": "4.151.1"
+    "vitest": "5.0.5"
   }
 }
