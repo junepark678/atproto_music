@@ -7,11 +7,9 @@
 //   npx tsx scripts/benchmark-protocol-reads.ts --render <receipt.json>
 //
 // Receipt schema (atmusic/protocol-reads-benchmark@1): {schema, generatedBy,
-// generatedAt, dataset:{listens}, plans:{source,topTracks,recentTracks,
-// listenbrainzAllTime,listeningActivityYear}, reads:{topTracks:{cached,
-// uncached},recentTracksPage500,listenbrainzAllTime,listeningActivityYear}}.
-// Each read has {runs,p50Ms,p95Ms}, using nearest-rank percentiles. Plans are
-// non-empty EXPLAIN QUERY PLAN detail arrays and may not contain SCAN scrobbles.
+// generatedAt, dataset:{listens,seed,clock,applyPathRecords}, plans:{...},
+// reads:{...}. Every plan preserves executed SQL beside EXPLAIN rows so alias
+// scans can be rejected without mistaking CTE scans for scrobbles table scans.
 
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
@@ -19,18 +17,22 @@ import { dirname, resolve } from 'node:path';
 export const REPORT_SCHEMA_ID = 'atmusic/protocol-reads-benchmark@1';
 export const DEFAULT_DOC = resolve('docs/benchmarks/node-protocol-reads.md');
 const names = ['topTracks', 'recentTracksPage500', 'listenbrainzAllTime', 'listeningActivityYear'] as const;
-type Timing = { runs: number; p50Ms: number; p95Ms: number };
+export type Timing = { runs: number; p50Ms: number; p95Ms: number };
+export interface QueryPlanStatement {
+  sql: string;
+  details: string[];
+}
 export interface ProtocolReadsReport {
   schema: typeof REPORT_SCHEMA_ID;
   generatedBy: string;
   generatedAt: string;
-  dataset: { listens: number };
+  dataset: { listens: number; seed: number; clock: string; applyPathRecords: number };
   plans: {
     source: string;
-    topTracks: string[];
-    recentTracks: string[];
-    listenbrainzAllTime: string[];
-    listeningActivityYear: string[];
+    topTracks: QueryPlanStatement[];
+    recentTracks: QueryPlanStatement[];
+    listenbrainzAllTime: QueryPlanStatement[];
+    listeningActivityYear: QueryPlanStatement[];
   };
   reads: {
     topTracks: { cached: Timing; uncached: Timing };
@@ -44,60 +46,123 @@ function record(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
-function timing(v: unknown): v is Timing {
-  return (
-    record(v) &&
-    typeof v.runs === 'number' &&
-    Number.isInteger(v.runs) &&
-    v.runs >= 1 &&
-    typeof v.p50Ms === 'number' &&
-    Number.isFinite(v.p50Ms) &&
-    v.p50Ms >= 0 &&
-    typeof v.p95Ms === 'number' &&
-    Number.isFinite(v.p95Ms) &&
-    v.p95Ms >= v.p50Ms
-  );
+const SQL_KEYWORDS = new Set([
+  'AS',
+  'ON',
+  'WHERE',
+  'JOIN',
+  'LEFT',
+  'RIGHT',
+  'INNER',
+  'OUTER',
+  'CROSS',
+  'GROUP',
+  'ORDER',
+  'LIMIT',
+  'UNION',
+]);
+function scrobblesAliases(sql: string): string[] {
+  const aliases: string[] = [];
+  const pattern = /\b(?:FROM|JOIN)\s+scrobbles(?:\s+(?:AS\s+)?([A-Za-z_][A-Za-z0-9_]*))?/gi;
+  for (const match of sql.matchAll(pattern)) {
+    const candidate = match[1];
+    aliases.push(candidate === undefined || SQL_KEYWORDS.has(candidate.toUpperCase()) ? 'scrobbles' : candidate);
+  }
+  return aliases;
+}
+
+/** Validate the executed scrobbles statement against its actual EXPLAIN rows. */
+export function validatePlanStatement(v: unknown): asserts v is QueryPlanStatement {
+  if (
+    !record(v) ||
+    typeof v.sql !== 'string' ||
+    !Array.isArray(v.details) ||
+    v.details.length === 0 ||
+    !v.details.every((x) => typeof x === 'string' && x.length > 0)
+  ) {
+    throw Error('invalid query plan statement');
+  }
+  const aliases = scrobblesAliases(v.sql);
+  if (aliases.length === 0) throw Error('query plan statement does not reference scrobbles');
+  const details = v.details as string[];
+  for (const alias of aliases) {
+    const escaped = alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    if (details.some((detail) => new RegExp(`\\bSCAN\\s+${escaped}(?:\\s|$)`, 'i').test(detail))) {
+      throw Error(`query plan scans scrobbles alias ${alias}`);
+    }
+  }
+  const driver = aliases[0]!;
+  const escapedDriver = driver.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  if (
+    !details.some((detail) =>
+      new RegExp(
+        `\\bSEARCH\\s+${escapedDriver}\\s+USING\\s+(?:COVERING\\s+)?INDEX\\s+scrobbles_(?:stats|owner_time)\\b`,
+        'i',
+      ).test(detail),
+    )
+  ) {
+    throw Error(`query plan does not use scrobbles_stats or scrobbles_owner_time for ${driver}`);
+  }
 }
 
 export function validateReport(v: unknown): asserts v is ProtocolReadsReport {
-  if (!record(v) || v.schema !== REPORT_SCHEMA_ID || typeof v.generatedBy !== 'string' || !v.generatedBy) {
-    throw Error('invalid protocol-read report envelope');
-  }
-
-  const dataset = v.dataset;
-  const plans = v.plans;
-  const reads = v.reads;
   if (
+    !record(v) ||
+    v.schema !== REPORT_SCHEMA_ID ||
+    typeof v.generatedBy !== 'string' ||
+    !v.generatedBy ||
     typeof v.generatedAt !== 'string' ||
     !Number.isFinite(Date.parse(v.generatedAt)) ||
-    !record(dataset) ||
-    typeof dataset.listens !== 'number' ||
-    !Number.isInteger(dataset.listens) ||
-    dataset.listens < 1 ||
-    !record(plans) ||
-    typeof plans.source !== 'string' ||
-    !record(reads) ||
-    !record(reads.topTracks)
-  ) {
+    !record(v.dataset) ||
+    typeof v.dataset.listens !== 'number' ||
+    !Number.isInteger(v.dataset.listens) ||
+    v.dataset.listens < 1 ||
+    typeof v.dataset.seed !== 'number' ||
+    !Number.isSafeInteger(v.dataset.seed) ||
+    typeof v.dataset.clock !== 'string' ||
+    !Number.isFinite(Date.parse(v.dataset.clock)) ||
+    typeof v.dataset.applyPathRecords !== 'number' ||
+    !Number.isInteger(v.dataset.applyPathRecords) ||
+    v.dataset.applyPathRecords < 1 ||
+    !record(v.plans) ||
+    typeof v.plans.source !== 'string' ||
+    !record(v.reads) ||
+    !record(v.reads.topTracks) ||
+    !record(v.reads.topTracks.cached) ||
+    !record(v.reads.topTracks.uncached)
+  )
     throw Error('invalid protocol-read report envelope');
-  }
-
   for (const key of ['topTracks', 'recentTracks', 'listenbrainzAllTime', 'listeningActivityYear']) {
-    const plan = plans[key];
-    if (
-      !Array.isArray(plan) ||
-      plan.length === 0 ||
-      !plan.every((s: unknown) => typeof s === 'string' && s.length > 0) ||
-      plan.some((s: unknown) => typeof s === 'string' && /SCAN\s+scrobbles\b/i.test(s))
-    ) {
-      throw Error(`invalid or unbounded query plan: ${key}`);
+    const plans = v.plans[key];
+    if (!Array.isArray(plans) || plans.length === 0) throw Error(`invalid query plan set: ${key}`);
+    for (const plan of plans) {
+      try {
+        validatePlanStatement(plan);
+      } catch (error) {
+        throw Error(
+          `invalid or unbounded query plan: ${key}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
     }
   }
-
-  for (const key of names) {
-    const samples = key === 'topTracks' ? [reads.topTracks.cached, reads.topTracks.uncached] : [reads[key]];
-    if (!samples.every(timing)) throw Error(`invalid timing/percentiles: ${key}`);
-  }
+  for (const key of names)
+    for (const timing of key === 'topTracks'
+      ? [v.reads.topTracks.cached, v.reads.topTracks.uncached]
+      : [v.reads[key]]) {
+      if (
+        !record(timing) ||
+        typeof timing.runs !== 'number' ||
+        !Number.isInteger(timing.runs) ||
+        timing.runs < 1 ||
+        typeof timing.p50Ms !== 'number' ||
+        !Number.isFinite(timing.p50Ms) ||
+        timing.p50Ms < 0 ||
+        typeof timing.p95Ms !== 'number' ||
+        !Number.isFinite(timing.p95Ms) ||
+        timing.p95Ms < timing.p50Ms
+      )
+        throw Error(`invalid timing/percentiles: ${key}`);
+    }
 }
 export function renderReport(r: ProtocolReadsReport): string {
   const rows: Array<[string, Timing]> = [
@@ -107,11 +172,26 @@ export function renderReport(r: ProtocolReadsReport): string {
     ['ListenBrainz all_time stats', r.reads.listenbrainzAllTime],
     ['ListenBrainz listening-activity year', r.reads.listeningActivityYear],
   ];
-  return `# Node protocol-read benchmark\n\nGenerated: ${r.generatedAt}  \nReceipt: \`${r.generatedBy}\`  \nDataset: ${r.dataset.listens.toLocaleString()} listens\n\n| Read | Runs | p50 (ms) | p95 (ms) |\n|---|---:|---:|---:|\n${rows.map(([n, t]) => `| ${n} | ${t.runs} | ${t.p50Ms} | ${t.p95Ms} |`).join('\n')}\n\n## Query plans\n\n${Object.entries(
+  const budgets: Record<string, number | null> = {
+    'top-tracks cached': 20,
+    'top-tracks uncached': 250,
+    'recent-tracks page 500': 100,
+    'ListenBrainz all_time stats': null,
+    'ListenBrainz listening-activity year': null,
+  };
+  return `# Node protocol-read benchmark\n\nGenerated: ${r.generatedAt}  \nReceipt: \`${r.generatedBy}\`  \nDataset: ${r.dataset.listens.toLocaleString()} listens, seed ${r.dataset.seed}, fixed clock ${r.dataset.clock}; apply-path parity sample ${r.dataset.applyPathRecords} records\n\nThe main fixture inserts the 100,000-listen projection through direct SQL after production record normalization. The parity sample compares signed repository verification and the production apply path against equivalent direct inserts. Reads are measured through the Node HTTP composition; fixture setup, cache invalidation, and report writing are outside each timed sample. Each read has ten samples. Requests are top tracks (period=overall), recent tracks (page 500, limit 200), ListenBrainz recordings (range=all_time, count=100), and listening activity (range=year). The ListenBrainz stats query-plan sample is a cold cache miss and its timing samples clear the cache before each request.\n\nTimings are observations from this run. Budget comparisons are informational and are not acceptance assertions. The ADR §10.3 report-only budgets are uncached top tracks p95 <250 ms, cached top tracks p95 <20 ms, and recent tracks page 500 p95 <100 ms. No budget is specified for the ListenBrainz reads.\n\n| Read | Runs | p50 (ms) | p95 (ms) | Report-only p95 budget |\n|---|---:|---:|---:|---:|\n${rows.map(([n, t]) => `| ${n} | ${t.runs} | ${t.p50Ms} | ${t.p95Ms} | ${budgets[n] === null ? 'not specified' : `< ${budgets[n]} ms`} |`).join('\n')}\n\n## Query plans\n\n${Object.entries(
     r.plans,
   )
     .filter(([k]) => k !== 'source')
-    .map(([k, p]) => `### ${k}\n\n${(p as string[]).map((x) => `- ${x}`).join('\n')}`)
+    .map(
+      ([k, p]) =>
+        `### ${k}\n\n${(p as QueryPlanStatement[])
+          .map(
+            (x, index) =>
+              `#### Statement ${index + 1}\n\n\`\`\`sql\n${x.sql}\n\`\`\`\n\n${x.details.map((detail) => `- ${detail}`).join('\n')}`,
+          )
+          .join('\n\n')}`,
+    )
     .join('\n\n')}\n\nPlan source: ${r.plans.source}\n`;
 }
 export function main(args = process.argv.slice(2)): number {
