@@ -3,6 +3,7 @@ import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, test } from 'vitest';
+import { certificateSerialFromDigest } from '../e2e/dev-env';
 import { acquireStackOwnership } from '../e2e/start-stack';
 
 const temporaryDirectories: string[] = [];
@@ -44,4 +45,15 @@ test('occupied e2e port releases the ownership lock before rejecting startup', a
   } finally {
     await new Promise<void>((resolve, reject) => listener.close((error) => (error ? reject(error) : resolve())));
   }
+});
+
+test('self-signed certificate serial is a canonical positive DER integer', () => {
+  const zeroAfterMask = certificateSerialFromDigest(Buffer.from([0x80, 1, 2, 3, 4, 5, 6, 7]));
+  const zeroDigest = certificateSerialFromDigest(Buffer.from([0, 1, 2, 3, 4, 5, 6, 7]));
+  const highBit = certificateSerialFromDigest(Buffer.from([0xff, 1, 2, 3, 4, 5, 6, 7]));
+
+  expect(zeroAfterMask[0]).toBe(1);
+  expect(zeroDigest[0]).toBe(1);
+  expect(highBit[0]).toBe(0x7f);
+  expect(zeroAfterMask).toHaveLength(8);
 });
