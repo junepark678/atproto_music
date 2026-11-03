@@ -84,6 +84,56 @@ checks can pass as Node standalone gates.
 semantics are ported; Workers Cloudflare/DO analytics do not stand in for Node
 acceptance. Unknown gates never enable PASS.
 
+### Node ingest driver (N6-02 slice)
+
+Run `npx tsx scripts/live/node_ingest_check.ts` only against the deployed Node
+origin. It uses the app's `/signin` UI for identity A, then reads the active
+session and `csrfToken` from `GET /api/v1/auth/session`; it does not observe or
+claim results about the server-side OAuth exchange. The scrobble is submitted
+to `POST /api/v1/scrobbles`, its operation is polled until `succeeded`, and
+`/api/v1/records/status` is polled until `indexed`. The succeeded operation
+CID, indexed status CID, and independent production `verifyRecordAt` proof CID
+must all match.
+
+Identity B uses `ATMUSIC_LIVE_APP_PASSWORD_B` only with PDS B
+`com.atproto.server.createSession`, `com.atproto.repo.createRecord`, and
+`com.atproto.repo.deleteRecord`. The gate waits for its URI to index and checks
+the PDS write response CID against status and independent proof CIDs. Both
+records are deleted and must reconcile to `absent`; the independent
+`verifyAbsent` proof must use the existing `exclusionProof` or `snapshot`
+method and a head newer than the present proof.
+The evidence records those method fields for pairing with the PDS capability
+evidence.
+
+The Node outbox persists operation `updatedAt` when the write succeeds and
+queues an indexing hint in the same transaction. Jetstream events also queue
+hints; neither source marks the record indexed. The independent IndexCore
+proof/apply path drives `records/status` to `indexed` or `absent`, which is why
+the gate waits for status and then fetches a fresh record proof. Publish
+`lagMs` is an approximate wall-clock interval from the successful write
+timestamp to the first indexed status observation. For the direct PDS B write,
+the PDS create answer is the starting timestamp. Both include status polling
+delay and possible clock skew; they are not upstream request latency or a
+precise Jetstream latency measurement. Delete `lagMs` is measured from the
+successful delete operation timestamp for A or the PDS delete response for B
+to the first absent status observation, with the same polling and clock-skew
+limits. Cleanup attempts both deletes after a failure and records each created
+AT URI as deleted and reconciled, delete accepted but absence unproven, or
+`LEFT BEHIND` so an operator can follow up.
+The ephemeral browser context is discarded; this gate makes no upstream
+session-revocation claim.
+
+Required inputs are the Node release identity and origin/prefix, the two PDS
+identities/endpoints/implementation names and independence evidence,
+`ATMUSIC_LIVE_JETSTREAM_COVERAGE_REF`, handles A and B,
+`ATMUSIC_LIVE_APP_PASSWORD_B`, and either `ATMUSIC_LIVE_PASSWORD_A` or
+`ATMUSIC_LIVE_OAUTH_INTERACTIVE=1`. The timeout is optional and defaults to
+300 seconds. Missing prerequisites are listed in a blocked schema-v3 document
+and cause exit 2 before browser launch or network requests. This driver does
+not contact Last.fm or ListenBrainz. It is operator-run and is not invoked by
+the acceptance suite; deterministic no-network, inert-import, and mocked-flow
+tests do not establish live acceptance.
+
 ## Historical compatibility and live-driver boundary
 
 Without `--node`, schema-v1/v2 Workers inventory and gate documents continue
@@ -92,10 +142,10 @@ path is regression-tested and cannot satisfy Node CLI acceptance. Schema-v3
 Node documents dispatch to the Node verifier; `--node` explicitly requires
 Node mode even for a standalone gate.
 
-N6-02 requires every future operator driver to validate its required
+N6-02 requires every operator driver to validate its required
 `ATMUSIC_LIVE_*` inputs before making any network request. If any are missing,
 the driver must exit **2**, print a blocked document listing each missing
 variable name, and make no network request. No gate contacts Last.fm or
-ListenBrainz. No Node live acceptance has been recorded. The live drivers,
-confidential-client OAuth interop, SSRF probe, and Node soak remain deferred;
-full N6-02 and M6 live acceptance stay open.
+ListenBrainz. No Node live acceptance has been recorded. Confidential-client
+OAuth interop, SSRF probe, and Node soak remain deferred; full N6-02 and M6
+live acceptance stay open.
