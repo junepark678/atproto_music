@@ -64,6 +64,27 @@ globalThis.fetch = trip('fetch');
 createRequire(import.meta.url)('node:module').syncBuiltinESMExports();
 `;
 
+const RUNNER_PRELOAD = `
+import dns from 'node:dns';
+import { createRequire } from 'node:module';
+import net from 'node:net';
+import tls from 'node:tls';
+const answers = new Map([
+  ['rfc1918.probe.example.org', [{ address: '10.1.2.3', family: 4 }]],
+  ['loopback.probe.example.org', [{ address: '127.0.0.2', family: 4 }]],
+  ['metadata.probe.example.org', [{ address: '169.254.169.254', family: 4 }]],
+]);
+dns.promises.lookup = async (host) => {
+  const result = answers.get(host);
+  if (!result) throw Object.assign(new Error('unexpected test DNS name'), { code: 'ENOTFOUND' });
+  return result;
+};
+const trip = () => { process.stderr.write('unexpected network connection\\n'); process.exit(97); };
+net.connect = trip; net.createConnection = trip; tls.connect = trip;
+globalThis.fetch = trip;
+createRequire(import.meta.url)('node:module').syncBuiltinESMExports();
+`;
+
 const scratch = mkdtempSync(join(tmpdir(), 'ssrf-probe-test-'));
 const trapPath = join(scratch, 'net-trap.mjs');
 writeFileSync(trapPath, NET_TRAP);
@@ -211,6 +232,38 @@ describe('scripts/live/ssrf_probe.ts › --emit-probe', () => {
       expect(malformed.stderr).not.toContain('network call during emission');
     } finally {
       rmSync(abs, { recursive: true, force: true });
+    }
+  });
+
+  test('executes the emitted runner success path with synthetic DNS and no socket access', () => {
+    const dir = `work/ssrf-probe-success-${process.pid}`;
+    const abs = resolve(REPO, dir);
+    const out = join(scratch, 'complete-probe-result.json');
+    const runnerTrap = join(scratch, 'runner-dns-trap.mjs');
+    rmSync(abs, { recursive: true, force: true });
+    rmSync(out, { force: true });
+    writeFileSync(runnerTrap, RUNNER_PRELOAD);
+    try {
+      const emitted = spawnDriver(['--emit-probe', dir], liveEnvUnset());
+      expect(emitted.status).toBe(0);
+      const probe = resolve(abs, 'probe.ts');
+      const run = spawnSync(
+        process.execPath,
+        ['--import=tsx', '--import', runnerTrap, probe, '--origin', ORIGIN, '--hosts', HOSTS, '--out', out],
+        { env: liveEnvUnset(), encoding: 'utf8', timeout: 60_000, cwd: REPO },
+      );
+      expect(run.status).toBe(0);
+      expect(run.stderr).toContain('target 1: refused');
+      expect(run.stderr).toContain('target 6: refused');
+      expect(run.stderr).not.toContain('unexpected network connection');
+      expect(run.stdout).toContain('probe result written to the private output file');
+      const result = JSON.parse(readFileSync(out, 'utf8')) as ProbeResult;
+      expect(result.targets).toHaveLength(6);
+      expect(result.targets.every((target) => target.safeFetch.outcome === 'refused')).toBe(true);
+      expect(probeResultExitCode(result, parseHosts(HOSTS), ORIGIN)).toBe(0);
+    } finally {
+      rmSync(abs, { recursive: true, force: true });
+      rmSync(out, { force: true });
     }
   });
 
