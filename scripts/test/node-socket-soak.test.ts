@@ -273,7 +273,7 @@ describe('Node socket soak configuration and evidence', () => {
     expect(evidence.results.missingSampleCount).toBeGreaterThan(1);
   });
 
-  it('counts scheduled polls missed after the final sleep overshoots the collection window', async () => {
+  it('counts scheduled polls missed after the final sleep reaches the deadline, excluding the deadline poll', async () => {
     const deps = fakeDependencies({
       sleep: async () => {
         deps.advance(24 * 60 * 60 * 1000);
@@ -284,6 +284,21 @@ describe('Node socket soak configuration and evidence', () => {
     expect(evidence.results.sampleCount).toBe(1);
     expect(evidence.results.collectionWindowElapsed).toBe(true);
     expect(evidence.results.missingSampleCount).toBe(23);
+  });
+
+  it('does not recount interval misses when the final sleep reaches the deadline', async () => {
+    let sleeps = 0;
+    const deps = fakeDependencies({
+      sleep: async () => {
+        deps.advance(sleeps++ === 0 ? 2 * 60 * 60 * 1000 : 22 * 60 * 60 * 1000);
+      },
+    });
+    const result = await execute({ ...validEnv, [SOAK_HOURS]: '24', [POLL_SECONDS]: '3600' }, deps);
+    const evidence = JSON.parse(result.stdout);
+    expect(evidence.results.samples).toHaveLength(2);
+    expect(evidence.results.samples[1].missedPolls).toBe(1);
+    expect(evidence.results.collectionWindowElapsed).toBe(true);
+    expect(evidence.results.missingSampleCount).toBe(22);
   });
 
   it('keeps one valid stdout document when writing the evidence artifact fails', async () => {

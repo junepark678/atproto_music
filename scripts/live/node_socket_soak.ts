@@ -320,7 +320,10 @@ export function createSocketSoakSpec(deps: SocketSoakDependencies = defaultSocke
         previousSampleElapsed === null ? 0 : Math.max(0, requestedDurationMs - previousSampleElapsed);
       const trailingMissedPolls =
         elapsedMs >= requestedDurationMs && !terminalRequestTimeout && previousSampleElapsed !== null
-          ? Math.min(Math.max(0, plannedSamples - samples.length), Math.floor(trailingWindowMs / pollMs))
+          ? Math.min(
+              Math.max(0, plannedSamples - samples.length - missingSamples),
+              Math.floor(trailingWindowMs / pollMs),
+            )
           : 0;
       missingSamples += trailingMissedPolls;
       return {
