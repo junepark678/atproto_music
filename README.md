@@ -37,8 +37,8 @@ python3 scripts/validate_case_map.py --check-tests --node-wave 4
 
 The workflow-validity test finds actionlint via `ACTIONLINT`, `PATH`, `$GOBIN`,
 or `$GOPATH/bin`. The gate runs typechecking, Biome, all Vitest projects,
-contracts, structural case-map checks and the Workers/Node bundle guards still
-present during the port. Plan assertions support SQLite **3.54.0 and 3.54.1**;
+contracts, structural case-map checks and the Node build and bundle guards.
+Plan assertions support SQLite **3.54.0 and 3.54.1**;
 every run checks its actual query plans and records its actual engine version.
 The official Node binary and the owner's system-SQLite build need not report
 the same patch version. No test requires the optional `sqlite_stmt` extension.
@@ -60,8 +60,9 @@ Read [local Node installation](docs/deploy/local-node.md),
 [deployment](docs/deployment.md), [exposure](docs/deploy/exposure.md),
 [operations](docs/operations.md), and [backup/restore](docs/backup.md).
 Build foundations use `npm run build:web` and
-`npx tsx scripts/build-server.ts --check`. Do not use the old Workers
-`scripts/deploy.sh` or the Rust release workflow as a Node release procedure.
+`npx tsx scripts/build-server.ts --check`. The old Workers `scripts/deploy.sh`
+was deleted by N7-01; do not use it from git history or the Rust release
+workflow as a Node release procedure.
 No live acceptance run is recorded. Publication remains fail-closed until
 reviewable namespace authority evidence is supplied.
 

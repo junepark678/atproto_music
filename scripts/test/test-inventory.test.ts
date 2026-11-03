@@ -331,7 +331,9 @@ describe('node-port test inventory', () => {
 
     // The checker is not vacuous: each corruption is reported.
     const kept = doc.tests.find((e) => e.kept && e.file.startsWith('worker/test/storage/'));
-    const firstReplaced = replaced[0];
+    // The first replaced entry whose own file still exists: N7-01 replaced the
+    // entries of deleted tool tests, whose file is reported missing instead.
+    const firstReplaced = replaced.find((e) => readRepo(e.file) !== null);
     expect(kept).toBeDefined();
     expect(firstReplaced).toBeDefined();
     const corrupt = (edit: (tests: Entry[]) => void): string[] => {

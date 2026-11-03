@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Interim per-wave acceptance for the ADR 0005 Node port (N0-02; ADR 0005 §2.2,
-# §15.3, §17, B10). It replaces scripts/acceptance/workers-backend.sh in the
-# gate from wave 0 until scripts/acceptance/node-backend.sh (N8-01):
+# §15.3, §17, B10). It replaced scripts/acceptance/workers-backend.sh (deleted
+# by N7-01) in the gate from wave 0 until scripts/acceptance/node-backend.sh
+# (N8-01):
 #
 #   bash scripts/acceptance/node-interim.sh --wave <n> [--out DIR] [--skip STEP]...
 #
