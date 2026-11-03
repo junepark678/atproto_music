@@ -1,8 +1,8 @@
 # Node protocol-read benchmark
 
-Generated: 2026-11-03T02:56:46.243Z  
-Receipt: `worker/test/bench/protocol-reads.bench.test.ts`  
-Dataset: 100,000 listens, seed 24301, fixed clock 2026-01-15T12:00:00Z; apply-path parity sample 100 records
+- Generated: 2026-11-03T04:22:41.282Z
+- Receipt: `worker/test/bench/protocol-reads.bench.test.ts`
+- Dataset: 100,000 listens, seed 24301, fixed clock 2026-01-15T12:00:00Z; apply-path parity sample 100 records
 
 The main fixture inserts the 100,000-listen projection through direct SQL after production record normalization. The parity sample compares signed repository verification and the production apply path against equivalent direct inserts. Reads are measured through the Node HTTP composition; fixture setup, cache invalidation, and report writing are outside each timed sample. Each read has ten samples. Requests are top tracks (period=overall), recent tracks (page 500, limit 200), ListenBrainz recordings (range=all_time, count=100), and listening activity (range=year). The ListenBrainz stats query-plan sample is a cold cache miss and its timing samples clear the cache before each request.
 
@@ -10,11 +10,11 @@ Timings are observations from this run. Budget comparisons are informational and
 
 | Read | Runs | p50 (ms) | p95 (ms) | Report-only p95 budget |
 |---|---:|---:|---:|---:|
-| top-tracks cached | 10 | 3.22 | 4.04 | < 20 ms |
-| top-tracks uncached | 10 | 613.63 | 832.21 | < 250 ms |
-| recent-tracks page 500 | 10 | 85.57 | 126.32 | < 100 ms |
-| ListenBrainz all_time stats | 10 | 513.29 | 623.99 | not specified |
-| ListenBrainz listening-activity year | 10 | 81.91 | 103.49 | not specified |
+| top-tracks cached | 10 | 2.68 | 2.88 | < 20 ms |
+| top-tracks uncached | 10 | 436.06 | 439.99 | < 250 ms |
+| recent-tracks page 500 | 10 | 93.14 | 301.01 | < 100 ms |
+| ListenBrainz all_time stats | 10 | 436.47 | 533.31 | not specified |
+| ListenBrainz listening-activity year | 10 | 79.73 | 80.96 | not specified |
 
 ## Query plans
 
@@ -23,7 +23,7 @@ Timings are observations from this run. Budget comparisons are informational and
 #### Statement 1
 
 ```sql
-WITH w AS (SELECT s.uri, s.listened_at, s.artist_key, s.track_key,
+WITH w AS MATERIALIZED (SELECT s.uri, s.listened_at, s.artist_key, s.track_key,
       s.album_key, s.album_artist_key, s.duration_seconds FROM scrobbles s JOIN users u
     ON u.did = s.did AND (u.active = 1 AND NOT EXISTS (SELECT 1 FROM suppression x WHERE x.did = u.did))
     AND NOT EXISTS (
@@ -36,49 +36,25 @@ WITH w AS (SELECT s.uri, s.listened_at, s.artist_key, s.track_key,
         )
     )
     WHERE s.did = ? AND s.listened_at < ?)
-        SELECT (SELECT count(*) FROM w) AS listens,
-               (SELECT count(DISTINCT artist_key) FROM w) AS artists,
-               (SELECT count(*) FROM (SELECT 1 FROM w GROUP BY artist_key, track_key)) AS tracks,
-               (SELECT count(*) FROM (SELECT 1 FROM w WHERE album_key IS NOT NULL
-                  GROUP BY coalesce(album_artist_key, artist_key), album_key)) AS albums
+        SELECT count(*) AS listens,
+               count(DISTINCT artist_key) AS artists,
+               count(DISTINCT hex(artist_key) || ':' || hex(track_key)) AS tracks,
+               count(DISTINCT CASE WHEN album_key IS NOT NULL
+                 THEN hex(coalesce(album_artist_key, artist_key)) || ':' || hex(album_key) END) AS albums
+        FROM w
 ```
 
-- SCAN CONSTANT ROW
-- SCALAR SUBQUERY 4
+- MATERIALIZE w
 - SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)
 - CORRELATED SCALAR SUBQUERY 1
 - SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)
 - SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at<?)
 - CORRELATED SCALAR SUBQUERY 2
 - SEARCH d USING INDEX operations_did_state (did=?)
-- SCALAR SUBQUERY 5
 - USE TEMP B-TREE FOR count(DISTINCT)
-- SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)
-- CORRELATED SCALAR SUBQUERY 1
-- SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)
-- SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at<?)
-- CORRELATED SCALAR SUBQUERY 2
-- SEARCH d USING INDEX operations_did_state (did=?)
-- SCALAR SUBQUERY 7
-- CO-ROUTINE (subquery-6)
-- SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)
-- CORRELATED SCALAR SUBQUERY 1
-- SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)
-- SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at<?)
-- CORRELATED SCALAR SUBQUERY 2
-- SEARCH d USING INDEX operations_did_state (did=?)
-- USE TEMP B-TREE FOR GROUP BY
-- SCAN (subquery-6)
-- SCALAR SUBQUERY 9
-- CO-ROUTINE (subquery-8)
-- SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)
-- CORRELATED SCALAR SUBQUERY 1
-- SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)
-- SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at<?)
-- CORRELATED SCALAR SUBQUERY 2
-- SEARCH d USING INDEX operations_did_state (did=?)
-- USE TEMP B-TREE FOR GROUP BY
-- SCAN (subquery-8)
+- USE TEMP B-TREE FOR count(DISTINCT)
+- USE TEMP B-TREE FOR count(DISTINCT)
+- SCAN w
 
 #### Statement 2
 
@@ -187,15 +163,14 @@ WITH w AS MATERIALIZED (SELECT s.uri, s.listened_at, s.artist_key, s.track_key,
         )
     )
     WHERE s.did = ? AND s.listened_at < ? AND s.listened_at >= ?)
-        SELECT (SELECT count(*) FROM w) AS listens,
-               (SELECT count(DISTINCT artist_key) FROM w) AS artists,
-               (SELECT count(*) FROM (SELECT 1 FROM w GROUP BY artist_key, track_key)) AS tracks,
-               (SELECT count(*) FROM (SELECT 1 FROM w WHERE album_key IS NOT NULL
-                  GROUP BY coalesce(album_artist_key, artist_key), album_key)) AS albums
+        SELECT count(*) AS listens,
+               count(DISTINCT artist_key) AS artists,
+               count(DISTINCT hex(artist_key) || ':' || hex(track_key)) AS tracks,
+               count(DISTINCT CASE WHEN album_key IS NOT NULL
+                 THEN hex(coalesce(album_artist_key, artist_key)) || ':' || hex(album_key) END) AS albums
+        FROM w
 ```
 
-- SCAN CONSTANT ROW
-- SCALAR SUBQUERY 4
 - MATERIALIZE w
 - SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)
 - CORRELATED SCALAR SUBQUERY 1
@@ -203,20 +178,10 @@ WITH w AS MATERIALIZED (SELECT s.uri, s.listened_at, s.artist_key, s.track_key,
 - SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at>? AND listened_at<?)
 - CORRELATED SCALAR SUBQUERY 2
 - SEARCH d USING INDEX operations_did_state (did=?)
-- SCAN w
-- SCALAR SUBQUERY 5
+- USE TEMP B-TREE FOR count(DISTINCT)
+- USE TEMP B-TREE FOR count(DISTINCT)
 - USE TEMP B-TREE FOR count(DISTINCT)
 - SCAN w
-- SCALAR SUBQUERY 7
-- CO-ROUTINE (subquery-6)
-- SCAN w
-- USE TEMP B-TREE FOR GROUP BY
-- SCAN (subquery-6)
-- SCALAR SUBQUERY 9
-- CO-ROUTINE (subquery-8)
-- SCAN w
-- USE TEMP B-TREE FOR GROUP BY
-- SCAN (subquery-8)
 
 #### Statement 2
 
