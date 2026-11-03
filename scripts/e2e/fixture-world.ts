@@ -1,5 +1,8 @@
 // TEST-ONLY Node e2e network. Every upstream is an in-process fake and every
 // public HTTPS host is explicitly routed by the parent IPC transport.
+
+import { createServer, type IncomingMessage, type Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { FakeDoh } from '@atmusic/atproto/test-support/fake-doh';
 import { FakeOAuthAs } from '@atmusic/atproto/test-support/fake-oauth-as';
 import { FakePds } from '@atmusic/atproto/test-support/fake-pds';
@@ -7,11 +10,9 @@ import { FakePlc } from '@atmusic/atproto/test-support/fake-plc';
 import { fixtureKeys } from '@atmusic/atproto/test-support/keys';
 import { type FixtureTransport, routerTransport } from '@atmusic/atproto/test-support/router-transport';
 import { SignedRepo } from '@atmusic/atproto/test-support/signed-repo';
-import { fixedClock, type FixedClock } from '@atmusic/core/test-support/clock';
-import { seededRandom } from '@atmusic/core/test-support/random';
 import { buildScrobbleRecord } from '@atmusic/core/scrobble';
-import { createServer, type IncomingMessage, type Server } from 'node:http';
-import type { AddressInfo } from 'node:net';
+import { type FixedClock, fixedClock } from '@atmusic/core/test-support/clock';
+import { seededRandom } from '@atmusic/core/test-support/random';
 import type { E2eAccount, E2eNetwork, E2ePorts } from './dev-env';
 import { E2E_PREFIX, PLC_HOST, startBrowserProxy } from './dev-env';
 
@@ -35,7 +36,10 @@ export interface FixtureWorld {
   close(): Promise<void>;
 }
 
-async function serveFixtureHandler(handler: (request: Request) => Promise<Response>, hostOverride?: string): Promise<{
+async function serveFixtureHandler(
+  handler: (request: Request) => Promise<Response>,
+  hostOverride?: string,
+): Promise<{
   port: number;
   close(): Promise<void>;
 }> {
@@ -99,7 +103,7 @@ export async function startFixtureWorld(ports: E2ePorts): Promise<FixtureWorld> 
     const key = keys[name];
     const repo = new SignedRepo(did, key, { clock });
     if (name === 'bob') {
-      const listenedAt = new Date(FIXTURE_NOW_MS - 60_000).toISOString().slice(0, 19) + 'Z';
+      const listenedAt = `${new Date(FIXTURE_NOW_MS - 60_000).toISOString().slice(0, 19)}Z`;
       const built = buildScrobbleRecord(
         { artist: 'Kate Bush', track: 'Running Up That Hill', album: 'Hounds of Love', listenedAt },
         E2E_PREFIX,

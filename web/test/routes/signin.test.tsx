@@ -43,11 +43,18 @@ describe('web/test/routes/signin.test.tsx', () => {
   });
 
   it('shows fixed recovery text for callback errors and never renders a code or token', async () => {
-    (window as unknown as { happyDOM: { setURL(url: string): void } }).happyDOM.setURL('https://music.test/signin?error=denied&code=secret-code&token=secret-token');
+    (window as unknown as { happyDOM: { setURL(url: string): void } }).happyDOM.setURL(
+      'https://music.test/signin?error=denied&code=secret-code&token=secret-token',
+    );
     const state = createAppState();
     const root = document.createElement('div');
     document.body.append(root);
-    render(<ServicesProvider value={services(async () => undefined)}><App state={state} loadMetaOnMount={false} /></ServicesProvider>, root);
+    render(
+      <ServicesProvider value={services(async () => undefined)}>
+        <App state={state} loadMetaOnMount={false} />
+      </ServicesProvider>,
+      root,
+    );
     await vi.waitFor(() => expect(root.textContent).toContain('Authorization was cancelled'));
     expect(root.textContent).not.toContain('secret-code');
     expect(root.textContent).not.toContain('secret-token');

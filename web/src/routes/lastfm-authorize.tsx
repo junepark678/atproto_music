@@ -9,18 +9,37 @@ export default function LastfmAuthorize() {
   const apiKey = params.get('api_key') ?? '';
   const token = params.get('token') ?? undefined;
   const callback = params.get('cb');
-  const callbackHost = (() => { try { return callback ? new URL(callback).host : 'No callback requested'; } catch { return 'Invalid callback'; } })();
+  const callbackHost = (() => {
+    try {
+      return callback ? new URL(callback).host : 'No callback requested';
+    } catch {
+      return 'Invalid callback';
+    }
+  })();
   const [clientName, setClientName] = useState<string | null | undefined>(undefined);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const [decision, setDecision] = useState<'pending' | 'approved' | 'denied'>('pending');
   useEffect(() => {
     if (!session) return;
-    void listCredentials().then((value) => setClientName(value.lastfmApps.find((app) => app.apiKey === apiKey)?.name ?? null), (e) => { setClientName(null); setError(e); });
+    void listCredentials().then(
+      (value) => setClientName(value.lastfmApps.find((app) => app.apiKey === apiKey)?.name ?? null),
+      (e) => {
+        setClientName(null);
+        setError(e);
+      },
+    );
   }, [session, apiKey]);
-  if (!session) return <section aria-labelledby="page-title"><h1 id="page-title">Last.fm authorization</h1><SignInPrompt>Sign in before authorizing a Last.fm application.</SignInPrompt></section>;
+  if (!session)
+    return (
+      <section aria-labelledby="page-title">
+        <h1 id="page-title">Last.fm authorization</h1>
+        <SignInPrompt>Sign in before authorizing a Last.fm application.</SignInPrompt>
+      </section>
+    );
   const approve = async () => {
-    setBusy(true); setError(null);
+    setBusy(true);
+    setError(null);
     try {
       const result = await approveLastfmAuthorization(apiKey, token);
       if (!callback) {
@@ -33,23 +52,58 @@ export default function LastfmAuthorize() {
       const fragment = hash < 0 ? '' : callback.slice(hash);
       const separator = base.includes('?') ? (base.endsWith('?') || base.endsWith('&') ? '' : '&') : '?';
       window.location.assign(`${base}${separator}token=${encodeURIComponent(result.token)}${fragment}`);
-    } catch (e) { setError(e); } finally { setBusy(false); }
+    } catch (e) {
+      setError(e);
+    } finally {
+      setBusy(false);
+    }
   };
   const deny = () => {
     setDecision('denied');
     window.history.replaceState(null, '', window.location.pathname);
   };
-  return <main aria-labelledby="page-title">
-    <h1 id="page-title">Authorize Last.fm application</h1>
-    {error && <ErrorState title="Authorization could not be completed." error={error} />}
-    {decision === 'denied' ? <p role="status">Authorization denied. This application was not given access.</p> : decision === 'approved' ? <p role="status">Authorization approved.</p> : <>
-      <p>Allow this application to use your Last.fm account?</p>
-      <dl><dt>Application</dt><dd>{clientName === null ? <><strong>Unverified application</strong> <span>(not issued by this service)</span></> : clientName}</dd>
-        <dt>Requested</dt><dd>{new Date().toLocaleString()}</dd>
-        <dt>Callback host</dt><dd><strong>{callbackHost}</strong></dd></dl>
-      {clientName === null && <p role="note">Only approve if you recognize and trust this application.</p>}
-      <div><button type="button" disabled={busy || !apiKey} onClick={deny} autoFocus>Deny</button> <button type="button" disabled={busy || !apiKey} onClick={() => void approve()}>{busy ? 'Authorizing…' : 'Approve'}</button></div>
-    </>}
-    {clientName === undefined && !error && <LoadingState label="Checking application details…" />}
-  </main>;
+  return (
+    <main aria-labelledby="page-title">
+      <h1 id="page-title">Authorize Last.fm application</h1>
+      {error && <ErrorState title="Authorization could not be completed." error={error} />}
+      {decision === 'denied' ? (
+        <p role="status">Authorization denied. This application was not given access.</p>
+      ) : decision === 'approved' ? (
+        <p role="status">Authorization approved.</p>
+      ) : (
+        <>
+          <p>Allow this application to use your Last.fm account?</p>
+          <dl>
+            <dt>Application</dt>
+            <dd>
+              {clientName === null ? (
+                <>
+                  <strong>Unverified application</strong> <span>(not issued by this service)</span>
+                </>
+              ) : (
+                clientName
+              )}
+            </dd>
+            <dt>Requested</dt>
+            <dd>{new Date().toLocaleString()}</dd>
+            <dt>Callback host</dt>
+            <dd>
+              <strong>{callbackHost}</strong>
+            </dd>
+          </dl>
+          {clientName === null && <p role="note">Only approve if you recognize and trust this application.</p>}
+          <div>
+            {/* biome-ignore lint/a11y/noAutofocus: Deny is the safe default for this authorization prompt. */}
+            <button type="button" disabled={busy || !apiKey} onClick={deny} autoFocus>
+              Deny
+            </button>{' '}
+            <button type="button" disabled={busy || !apiKey} onClick={() => void approve()}>
+              {busy ? 'Authorizing…' : 'Approve'}
+            </button>
+          </div>
+        </>
+      )}
+      {clientName === undefined && !error && <LoadingState label="Checking application details…" />}
+    </main>
+  );
 }

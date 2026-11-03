@@ -1,8 +1,8 @@
 import { render } from 'preact';
 import { App } from './app';
+import { removeLegacyDatabases } from './migration';
 import { sessionClient } from './session/client';
 import { createAppState, setSession } from './state/store';
-import { removeLegacyDatabases } from './migration';
 import './styles/base.css';
 
 const root = document.getElementById('app');
@@ -15,6 +15,9 @@ client.subscribe((session, reauth) => {
   state.reauthRequired.value = reauth;
 });
 render(<App state={state} />, root);
-void client.getSession().then((session) => setSession(state, session)).catch((error: unknown) => {
-  console.error('session restore failed', error);
-});
+void client
+  .getSession()
+  .then((session) => setSession(state, session))
+  .catch((error: unknown) => {
+    console.error('session restore failed', error);
+  });

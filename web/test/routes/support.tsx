@@ -28,7 +28,10 @@ export const META = {
   lexiconPrefix: 'com.example.atmusic',
   indexing: { state: 'current', caughtUp: true, lastIndexedAt: null, lagSeconds: 0 },
 };
-export function mount(path: string, fetcher?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response | undefined>) {
+export function mount(
+  path: string,
+  fetcher?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response | undefined>,
+) {
   (window as unknown as { happyDOM: { setURL(url: string): void } }).happyDOM.setURL(`https://music.test${path}`);
   const requests: string[] = [];
   const api = new ApiClient({

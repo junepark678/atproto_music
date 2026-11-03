@@ -50,7 +50,7 @@ import { createSecureContext, TLSSocket } from 'node:tls';
 import { fileURLToPath } from 'node:url';
 import { buildScrobbleRecord } from '@atmusic/core/scrobble';
 import type { TestPds } from '@atproto/dev-env';
-import type { Locator, Page } from '@playwright/test';
+import type { Page } from '@playwright/test';
 
 /** The e2e lexicon prefix (see the header comment). Never the fixture or the production prefix. */
 export const E2E_PREFIX = 'test.atmusic.e2e';
@@ -454,16 +454,6 @@ export async function pdsListRecords(
   if (res.status !== 200) throw new Error(`listRecords ${collection} for ${acct.name}: HTTP ${res.status}`);
   return ((await res.json()) as { records: Array<{ uri: string; cid: string; value: Record<string, unknown> }> })
     .records;
-}
-
-/** Presses Tab until `target` has focus (it may already have it, e.g. autofocus); at most `max` presses. */
-async function tabUntilFocused(page: Page, target: Locator, label: string, max = 40): Promise<void> {
-  const focused = () => target.evaluate((el) => el.matches(':focus'));
-  for (let i = 0; i <= max; i++) {
-    if (await focused()) return;
-    if (i < max) await page.keyboard.press('Tab');
-  }
-  throw new Error(`${label}: not reached with ${max} Tab presses`);
 }
 
 /**

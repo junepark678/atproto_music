@@ -9,7 +9,16 @@
 // therefore matches the raw DID form (`/u/did:plc:…`, `/u/did:web:host`) and
 // the percent-encoded one (`/u/did%3Aplc%3A…`) alike.
 
-export type SpaRouteModule = 'feed' | 'signin' | 'profile' | 'scrobble' | 'settings' | 'settings-links' | 'settings-imports' | 'settings-credentials' | 'lastfm-authorize';
+export type SpaRouteModule =
+  | 'feed'
+  | 'signin'
+  | 'profile'
+  | 'scrobble'
+  | 'settings'
+  | 'settings-links'
+  | 'settings-imports'
+  | 'settings-credentials'
+  | 'lastfm-authorize';
 
 export interface SpaRoute {
   path: string;

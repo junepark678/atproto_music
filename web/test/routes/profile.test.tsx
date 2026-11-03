@@ -1,9 +1,8 @@
-import { describe, expect, it, vi } from 'vitest';
-import { example, DID, mount, META } from './support';
 import type { Statistics } from '@atmusic/core/api-types';
+import { describe, expect, it, vi } from 'vitest';
 import { followView } from '../../src/components/follow-button';
 import type { OutboxOperation } from '../../src/outbox/overlay';
-import { SESSION } from './support';
+import { DID, example, META, mount, SESSION } from './support';
 
 describe('web/test/routes/profile.test.tsx', () => {
   it('renders the indexed profile and its reads from the Node AppView routes', async () => {
@@ -22,7 +21,12 @@ describe('web/test/routes/profile.test.tsx', () => {
       if (url.pathname.endsWith('/stats')) {
         requested.push(url.searchParams.get('window') ?? 'all');
         const stats = example<Statistics>('stats');
-        return Response.json({ ...stats, window: url.searchParams.get('window') ?? 'all', totalScrobbles: 7, topArtists: [{ artist: 'Server ranked artist', scrobbleCount: 7 }] });
+        return Response.json({
+          ...stats,
+          window: url.searchParams.get('window') ?? 'all',
+          totalScrobbles: 7,
+          topArtists: [{ artist: 'Server ranked artist', scrobbleCount: 7 }],
+        });
       }
       return undefined;
     });
@@ -58,8 +62,10 @@ describe('web/test/routes/profile.test.tsx', () => {
     const app = mount(`/u/${DID}`, async (input) => {
       const url = new URL(String(input), 'https://music.test');
       if (url.pathname.endsWith('/profile')) return Response.json({ ...profile, totalScrobbles: 0 });
-      if (url.pathname.endsWith('/stats')) return Response.json({ ...stats, totalScrobbles: 0, topArtists: [], topTracks: [], topAlbums: [] });
-      if (url.pathname.endsWith('/scrobbles')) return Response.json({ ...example('scrobble-page'), items: [], nextCursor: null });
+      if (url.pathname.endsWith('/stats'))
+        return Response.json({ ...stats, totalScrobbles: 0, topArtists: [], topTracks: [], topAlbums: [] });
+      if (url.pathname.endsWith('/scrobbles'))
+        return Response.json({ ...example('scrobble-page'), items: [], nextCursor: null });
       return undefined;
     });
     await vi.waitFor(() => expect(app.root.textContent).toContain('No scrobbles yet'));
@@ -68,7 +74,11 @@ describe('web/test/routes/profile.test.tsx', () => {
 
     const unknown = mount(`/u/${DID}`, async (input) => {
       const url = new URL(String(input), 'https://music.test');
-      if (url.pathname.endsWith('/profile')) return Response.json({ error: { code: 'not_found', message: 'not found', requestId: '00000000-0000-4000-8000-000000000001' } }, { status: 404 });
+      if (url.pathname.endsWith('/profile'))
+        return Response.json(
+          { error: { code: 'not_found', message: 'not found', requestId: '00000000-0000-4000-8000-000000000001' } },
+          { status: 404 },
+        );
       return undefined;
     });
     await vi.waitFor(() => expect(unknown.root.textContent).toContain('Profile not found'));
@@ -77,13 +87,32 @@ describe('web/test/routes/profile.test.tsx', () => {
   });
 
   it('follow is confirmed only after indexing and a failed unfollow never claims removal', () => {
-    const op: OutboxOperation = { id: 'op-follow', did: SESSION.did, kind: 'follow_create', uri: `at://${SESSION.did}/com.example.atmusic.follow/r01`, subject: DID, state: 'queued', seq: 1, dueAt: Date.now(), attempts: 0, notified: true, polls: 0, createdAt: Date.now(), updatedAt: Date.now() };
+    const op: OutboxOperation = {
+      id: 'op-follow',
+      did: SESSION.did,
+      kind: 'follow_create',
+      uri: `at://${SESSION.did}/com.example.atmusic.follow/r01`,
+      subject: DID,
+      state: 'queued',
+      seq: 1,
+      dueAt: Date.now(),
+      attempts: 0,
+      notified: true,
+      polls: 0,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
     const pending = followView({ viewer: SESSION.did, subject: DID, ops: [op], edge: false });
     expect(pending.status).toContain('Follow queued');
     expect(pending.action).toBeNull();
-    op.state = 'indexed'; op.dueAt = null;
-    expect(followView({ viewer: SESSION.did, subject: DID, ops: [op], edge: true }).status).toContain('Following (confirmed)');
-    op.kind = 'follow_delete'; op.state = 'failed'; op.failureCode = 'upstream_error';
+    op.state = 'indexed';
+    op.dueAt = null;
+    expect(followView({ viewer: SESSION.did, subject: DID, ops: [op], edge: true }).status).toContain(
+      'Following (confirmed)',
+    );
+    op.kind = 'follow_delete';
+    op.state = 'failed';
+    op.failureCode = 'upstream_error';
     const failed = followView({ viewer: SESSION.did, subject: DID, ops: [op], edge: true });
     expect(failed.status).toContain('follow record was not removed');
     expect(failed.status).toContain('still follow');

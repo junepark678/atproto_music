@@ -1,15 +1,17 @@
-// @ts-ignore Node APIs are used only by the test runner; the browser project has no Node type dependency.
+// @ts-expect-error Node APIs are used only by the test runner; the browser project has no Node type dependency.
 import { readdirSync, readFileSync } from 'node:fs';
-// @ts-ignore Node APIs are used only by the test runner; the browser project has no Node type dependency.
+// @ts-expect-error Node APIs are used only by the test runner; the browser project has no Node type dependency.
 import { join, resolve } from 'node:path';
 import { expect, it } from 'vitest';
 
 const webRoot = resolve('.');
 function files(dir: string): string[] {
-  return (readdirSync(dir, { withFileTypes: true }) as Array<{ name: string; isDirectory(): boolean }>).flatMap((entry) => {
-    const path = join(dir, entry.name);
-    return entry.isDirectory() ? files(path) : [path];
-  });
+  return (readdirSync(dir, { withFileTypes: true }) as Array<{ name: string; isDirectory(): boolean }>).flatMap(
+    (entry) => {
+      const path = join(dir, entry.name);
+      return entry.isDirectory() ? files(path) : [path];
+    },
+  );
 }
 
 it('contains a Node-session SPA without browser OAuth, PDS hosts, or IndexedDB outbox code', () => {

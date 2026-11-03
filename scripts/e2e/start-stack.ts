@@ -6,14 +6,10 @@ import { type ChildProcess, spawn } from 'node:child_process';
 import { chmodSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { join } from 'node:path';
-import { buildHeaders, main as genConfig, HEADERS_FILE, REPO_ROOT } from '../gen-config';
 import { testSecretsDocument } from '../../worker/test/node/support/app';
-import {
-  E2E_PREFIX,
-  type E2ePorts,
-  portsFromEnv,
-} from './dev-env';
-import { APP_HOST, startFixtureWorld, type FixtureWorld } from './fixture-world';
+import { buildHeaders, main as genConfig, HEADERS_FILE, REPO_ROOT } from '../gen-config';
+import { E2E_PREFIX, type E2ePorts, portsFromEnv } from './dev-env';
+import { APP_HOST, type FixtureWorld, startFixtureWorld } from './fixture-world';
 
 export const WORK_DIR = join(REPO_ROOT, 'work', 'e2e');
 export const DIST_DIR = join(WORK_DIR, 'dist');
@@ -65,7 +61,12 @@ async function assertPortsFree(ports: E2ePorts): Promise<void> {
   }
 }
 
-function ipcErrorResponse(error: unknown): { type: 'response'; status: number; headers: [string, string][]; body: string } {
+function ipcErrorResponse(error: unknown): {
+  type: 'response';
+  status: number;
+  headers: [string, string][];
+  body: string;
+} {
   return {
     type: 'response',
     status: 599,
@@ -75,7 +76,10 @@ function ipcErrorResponse(error: unknown): { type: 'response'; status: number; h
 }
 
 /** The only network router for node-entry's fixture transport. */
-async function routeOutbound(message: WireMessage, world: FixtureWorld): Promise<{
+async function routeOutbound(
+  message: WireMessage,
+  world: FixtureWorld,
+): Promise<{
   type: 'response';
   id: number;
   status: number;
@@ -244,7 +248,10 @@ export async function startStack(): Promise<{ stop(): Promise<void> }> {
     });
 
     const ready = new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error(`Node e2e bundle did not answer ${originText} within 120000 ms`)), 120_000);
+      const timeout = setTimeout(
+        () => reject(new Error(`Node e2e bundle did not answer ${originText} within 120000 ms`)),
+        120_000,
+      );
       child?.on('message', (raw: unknown) => {
         const message = raw as WireMessage;
         if (message.type === 'ready') {
@@ -264,9 +271,7 @@ export async function startStack(): Promise<{ stop(): Promise<void> }> {
             try {
               const reply = await routeOutbound(message, world as FixtureWorld);
               if (child?.connected) {
-                await new Promise<void>((res, rej) =>
-                  child?.send(reply, (error) => (error ? rej(error) : res())),
-                );
+                await new Promise<void>((res, rej) => child?.send(reply, (error) => (error ? rej(error) : res())));
               }
             } catch (error) {
               const failure = { ...ipcErrorResponse(error), id: message.id as number };

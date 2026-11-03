@@ -22,8 +22,7 @@
 
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { type APIRequestContext, type APIResponse, type Locator, type Page } from '@playwright/test';
-import { expect, test } from './fixtures';
+import type { APIRequestContext, APIResponse, Locator, Page } from '@playwright/test';
 import Ajv2020 from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
 import {
@@ -31,11 +30,12 @@ import {
   authorizeOnFixtureAs,
   type E2eAccount,
   type E2eNetwork,
-  portsFromEnv,
   pdsListRecords,
+  portsFromEnv,
   readNetwork,
   workerOrigin,
 } from '../../scripts/e2e/dev-env';
+import { expect, test } from './fixtures';
 
 // ---------------------------------------------------------------------------
 // API schema (the same AJV setup as worker/test/composition/support.ts)
@@ -144,12 +144,15 @@ test.beforeAll(async () => {
   expect(notify.status).toBe(202);
   expect(schemaErrors('NotifyAccepted', await notify.json())).toBe('valid');
   await expect
-    .poll(async () => {
-      const response = await fetch(`${origin}/api/v1/users/${enc(bob.did)}/profile`);
-      return (await response.json()) as Profile;
-    }, {
-      timeout: 60_000,
-    })
+    .poll(
+      async () => {
+        const response = await fetch(`${origin}/api/v1/users/${enc(bob.did)}/profile`);
+        return (await response.json()) as Profile;
+      },
+      {
+        timeout: 60_000,
+      },
+    )
     .toMatchObject({ did: bob.did, handle: bob.handle, totalScrobbles: 1 });
 });
 
@@ -551,7 +554,10 @@ test('sign-in through the fake AS, scrobble, indexed, delete and follow journeys
   });
 });
 
-test('the server OAuth callback consumes the response and never serves a browser OAuth callback screen', async ({ page, request }) => {
+test('the server OAuth callback consumes the response and never serves a browser OAuth callback screen', async ({
+  page,
+  request,
+}) => {
   const res = await request.get('/oauth/callback?code=fixture-code&state=unknown&iss=https%3A%2F%2Fas.test', {
     maxRedirects: 0,
   });

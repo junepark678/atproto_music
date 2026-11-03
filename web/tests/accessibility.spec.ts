@@ -15,18 +15,18 @@
 // account she follows. Each test has its own browser context.
 
 import AxeBuilder from '@axe-core/playwright';
-import { type APIRequestContext, type Locator, type Page } from '@playwright/test';
-import { expect, test } from './fixtures';
+import type { APIRequestContext, Locator, Page } from '@playwright/test';
 import {
   account,
   authorizeOnFixtureAs,
-  portsFromEnv,
   type E2eAccount,
   type E2eNetwork,
   pdsListRecords,
+  portsFromEnv,
   readNetwork,
   workerOrigin,
 } from '../../scripts/e2e/dev-env';
+import { expect, test } from './fixtures';
 
 let net: E2eNetwork;
 let bob: E2eAccount;
@@ -49,10 +49,15 @@ test.beforeAll(async () => {
     body: JSON.stringify({ did: bob.did }),
   });
   expect(notify.status).toBe(202);
-  await expect.poll(async () => {
-    const response = await fetch(`${origin}/api/v1/users/${enc(bob.did)}/profile`);
-    return response.status;
-  }, { timeout: 60_000 }).toBe(200);
+  await expect
+    .poll(
+      async () => {
+        const response = await fetch(`${origin}/api/v1/users/${enc(bob.did)}/profile`);
+        return response.status;
+      },
+      { timeout: 60_000 },
+    )
+    .toBe(200);
 });
 
 // ---------------------------------------------------------------------------

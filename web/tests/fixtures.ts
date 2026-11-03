@@ -1,8 +1,4 @@
-import {
-  expect,
-  test as base,
-  type APIRequestContext,
-} from '@playwright/test';
+import { type APIRequestContext, test as base, expect } from '@playwright/test';
 import { portsFromEnv } from '../../scripts/e2e/dev-env';
 
 function apiContextOptions() {

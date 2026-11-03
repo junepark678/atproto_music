@@ -92,11 +92,21 @@ export class OutboxService {
   }
   async disconnect(): Promise<OutboxOperation> {
     const accepted = await writes.indexing('disabled');
-    return this.#add(accepted.operation, { indexing: 'disabled' }, undefined, `at://${this.did}/${this.prefix}.settings/self`);
+    return this.#add(
+      accepted.operation,
+      { indexing: 'disabled' },
+      undefined,
+      `at://${this.did}/${this.prefix}.settings/self`,
+    );
   }
   async reconnect(): Promise<OutboxOperation> {
     const accepted = await writes.indexing('enabled');
-    return this.#add(accepted.operation, { indexing: 'enabled' }, undefined, `at://${this.did}/${this.prefix}.settings/self`);
+    return this.#add(
+      accepted.operation,
+      { indexing: 'enabled' },
+      undefined,
+      `at://${this.did}/${this.prefix}.settings/self`,
+    );
   }
 
   async refresh(): Promise<void> {

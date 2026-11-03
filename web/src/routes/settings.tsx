@@ -36,9 +36,15 @@ export default function Settings() {
       <h1 id="page-title">Settings</h1>
       <nav aria-label="Settings sections">
         <ul>
-          <li><a href="/settings/links">Connected services</a></li>
-          <li><a href="/settings/imports">Import listening history</a></li>
-          <li><a href="/settings/credentials">Credentials</a></li>
+          <li>
+            <a href="/settings/links">Connected services</a>
+          </li>
+          <li>
+            <a href="/settings/imports">Import listening history</a>
+          </li>
+          <li>
+            <a href="/settings/credentials">Credentials</a>
+          </li>
         </ul>
       </nav>
       {signedOut ? (

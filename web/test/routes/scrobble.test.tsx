@@ -1,8 +1,8 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'preact';
-import { OutboxService } from '../../src/components/outbox-service';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { OperationStatus } from '../../src/components/operation-status';
-import { ServicesProvider, type ScreenServices } from '../../src/components/services';
+import { OutboxService } from '../../src/components/outbox-service';
+import { type ScreenServices, ServicesProvider } from '../../src/components/services';
 import { ScrobbleForm } from '../../src/routes/scrobble';
 import type { Session } from '../../src/session/client';
 
@@ -34,12 +34,21 @@ describe('web/test/routes/scrobble.test.tsx', () => {
       clock: { nowMs: () => Date.parse('2026-01-15T12:00:00Z') },
       random: { bytes: (n) => new Uint8Array(n), float: () => 0 },
       ticker: { every: () => () => undefined },
-      session: async () => ({ signIn: async () => undefined, signOut: async () => undefined, expiry: async () => null }),
+      session: async () => ({
+        signIn: async () => undefined,
+        signOut: async () => undefined,
+        expiry: async () => null,
+      }),
       outbox: async () => outbox,
       closeOutbox: async () => undefined,
     };
     const root = document.createElement('div');
-    render(<ServicesProvider value={services}><ScrobbleForm outbox={outbox} /></ServicesProvider>, root);
+    render(
+      <ServicesProvider value={services}>
+        <ScrobbleForm outbox={outbox} />
+      </ServicesProvider>,
+      root,
+    );
     root.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
     await vi.waitFor(() => expect(root.querySelectorAll('[data-field-error]').length).toBeGreaterThan(0));
     expect(root.querySelector('[data-field-error="artist"]')?.textContent).toContain('Enter the artist');
@@ -91,9 +100,12 @@ describe('web/test/routes/scrobble.test.tsx', () => {
     vi.stubGlobal('fetch', async (input: RequestInfo | URL) => {
       const path = new URL(String(input), 'https://music.test').pathname;
       if (path === '/api/v1/auth/session') return Response.json(session);
-      if (path === '/api/v1/scrobbles') return Response.json({ operation: { ...operation, id: 'op-excluded', state: 'queued' } }, { status: 202 });
-      if (path === '/api/v1/operations/op-excluded') return Response.json({ ...operation, id: 'op-excluded', state: 'succeeded', uri });
-      if (path === '/api/v1/records/status') return Response.json({ uri, state: 'excluded', reason: 'record_not_visible' });
+      if (path === '/api/v1/scrobbles')
+        return Response.json({ operation: { ...operation, id: 'op-excluded', state: 'queued' } }, { status: 202 });
+      if (path === '/api/v1/operations/op-excluded')
+        return Response.json({ ...operation, id: 'op-excluded', state: 'succeeded', uri });
+      if (path === '/api/v1/records/status')
+        return Response.json({ uri, state: 'excluded', reason: 'record_not_visible' });
       throw new Error(`unexpected request ${path}`);
     });
     const outbox = new OutboxService(session, 'com.example.atmusic');
