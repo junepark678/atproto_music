@@ -1,7 +1,11 @@
-import { spawnSync } from 'node:child_process';
+import childProcess, { spawnSync } from 'node:child_process';
+import dns from 'node:dns';
 import { createRequire } from 'node:module';
+import net from 'node:net';
 import { resolve } from 'node:path';
+import tls from 'node:tls';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { chromium } from '@playwright/test';
 import { expect, test, vi } from 'vitest';
 import {
   NODE_ENV,
@@ -45,11 +49,11 @@ function ioCapture() {
   return { io, files, output: () => ({ stdout, stderr }) };
 }
 
-const emptyBody: NodeGateBodyResult = { pds: [], subjects: [], results: { checked: true } };
+const emptyBody: NodeGateBodyResult = { pds: [], subjects: [], results: { checked: true, contract: true } };
 
 function spec(run: NodeGateSpec['run'] = async () => emptyBody): NodeGateSpec {
   return {
-    gate: 'ingest',
+    gate: 'oauth',
     script: 'scripts/live/node_ingest_check.ts',
     requirements: [
       {
@@ -58,6 +62,7 @@ function spec(run: NodeGateSpec['run'] = async () => emptyBody): NodeGateSpec {
         check: (value) => (value === 'ready' ? null : 'must equal ready'),
       },
     ],
+    observations: [{ key: 'contract', accept: (value) => (value === true ? null : 'must be true') }],
     run,
   };
 }
@@ -125,7 +130,7 @@ test('emits schema-v3 top-level identity for a successful injected body', async 
     spec(async ({ origin, lexiconPrefix, get }) => ({
       pds: [{ endpoint: 'https://pds-one.example.org', implementation: 'PDS', version: '1.0' }],
       subjects: [{ did: 'did:plc:abcdefghijklmnopqrstuvwx', uri: null }],
-      results: { origin, lexiconPrefix, declared: get('ATMUSIC_LIVE_TEST_PREREQUISITE') },
+      results: { origin, lexiconPrefix, declared: get('ATMUSIC_LIVE_TEST_PREREQUISITE'), contract: true },
     })),
     validEnv({ ATMUSIC_LIVE_TEST_PREREQUISITE: 'ready' }),
     capture.io,
@@ -137,7 +142,7 @@ test('emits schema-v3 top-level identity for a successful injected body', async 
     schemaVersion: 3,
     runtime: 'node',
     fixtureOnly: false,
-    gate: 'ingest',
+    gate: 'oauth',
     result: 'passed',
     commit: GOOD_COMMIT,
     bundleSha256: GOOD_BUNDLE,
@@ -176,14 +181,14 @@ test('secrets containing JSON escapes are redacted before serialization', async 
     ATMUSIC_LIVE_PDS_PASSWORD: secret,
   });
   await runNodeGate(
-    spec(async () => ({ ...emptyBody, results: { credential: secret } })),
+    spec(async () => ({ ...emptyBody, results: { credential: secret, contract: true } })),
     env,
     capture.io,
   );
 
   const stdout = capture.output().stdout;
   expect(stdout).not.toContain(secret);
-  expect(documentFrom(stdout).results).toEqual({ credential: '[redacted]' });
+  expect(documentFrom(stdout).results).toEqual({ credential: '[redacted]', contract: true });
 });
 
 test('a recorded nonfatal failure cannot be emitted as passed', async () => {
@@ -224,7 +229,7 @@ test('body output cannot override the harness gate identity or failure classific
 
   expect(exit).toBe(1);
   expect(documentFrom(capture.output().stdout)).toMatchObject({
-    gate: 'ingest',
+    gate: 'oauth',
     result: 'failed',
     commit: GOOD_COMMIT,
     bundleSha256: GOOD_BUNDLE,
@@ -239,7 +244,7 @@ test('evidence output path is written with the same redacted JSON document', asy
     [NODE_ENV.evidenceOut]: '/tmp/node-live-gate.json',
   });
   await runNodeGate(
-    spec(async () => ({ ...emptyBody, results: { token: env.ATMUSIC_LIVE_ADMIN_TOKEN } })),
+    spec(async () => ({ ...emptyBody, results: { token: env.ATMUSIC_LIVE_ADMIN_TOKEN, contract: true } })),
     env,
     capture.io,
   );
@@ -316,6 +321,7 @@ test('unknown OAuth URL parameters and nested encoded URLs are stripped from eve
           exhaustedDepthUrl,
           mixedBeyondBudgetUrl,
           apostropheUrl,
+          contract: true,
           escaped: `https:\\\\issuer.example\\callback?code=${secretCode}`,
         },
       };
@@ -336,7 +342,7 @@ test('unknown OAuth URL parameters and nested encoded URLs are stripped from eve
   expect(stdout).not.toContain('cb%5Cu003f');
   expect(() => JSON.parse(capture.files[0]!.text)).not.toThrow();
   expect(() => JSON.parse(stdout)).not.toThrow();
-  expect(stderr).toContain('FAIL: ingest Node live gate failed');
+  expect(stderr).toContain('FAIL: oauth Node live gate failed');
   expect(() => JSON.parse(stdout)).not.toThrow();
 
   const thrown = ioCapture();
@@ -376,6 +382,163 @@ test('optional requirements skip missing values but validate supplied values', a
     const env = validEnv({ ATMUSIC_LIVE_TEST_PREREQUISITE: 'ready', ATMUSIC_OPTIONAL: value });
     expect(await runNodeGate(optionalSpec, env, ioCapture().io)).toBe(2);
   }
+});
+
+test('observations fail for missing, undefined, rejected, and throwing validators', async () => {
+  for (const results of [{}, { proof: undefined }, { proof: 'placeholder' }]) {
+    const capture = ioCapture();
+    const custom = {
+      ...spec(async () => ({ pds: [], subjects: [], results })),
+      observations: [{ key: 'proof', accept: (value: unknown) => (value === 'verified' ? null : 'not verified') }],
+    } satisfies NodeGateSpec;
+    expect(await runNodeGate(custom, validEnv({ ATMUSIC_LIVE_TEST_PREREQUISITE: 'ready' }), capture.io)).toBe(1);
+    expect(documentFrom(capture.output().stdout).result).toBe('failed');
+  }
+  const thrown = ioCapture();
+  const custom = {
+    ...spec(async () => ({ pds: [], subjects: [], results: { proof: true } })),
+    observations: [
+      {
+        key: 'proof',
+        accept: () => {
+          throw new Error('validator exploded');
+        },
+      },
+    ],
+  } satisfies NodeGateSpec;
+  expect(await runNodeGate(custom, validEnv({ ATMUSIC_LIVE_TEST_PREREQUISITE: 'ready' }), thrown.io)).toBe(1);
+  expect(documentFrom(thrown.output().stdout).failures?.join(' ')).toContain('validator exploded');
+});
+
+test('every gate with an empty body fails unless it receives its gate observation contract', async () => {
+  for (const gate of ['oauth', 'ingest', 'pdsCompat', 'ssrfProbe', 'socketSoak'] as const) {
+    const candidate: NodeGateSpec = {
+      ...spec(async () => ({ pds: [], subjects: [], results: {} })),
+      gate,
+      observations: undefined,
+    };
+    const capture = ioCapture();
+    expect(await runNodeGate(candidate, validEnv({ ATMUSIC_LIVE_TEST_PREREQUISITE: 'ready' }), capture.io)).toBe(1);
+    expect(documentFrom(capture.output().stdout).result).toBe('failed');
+  }
+});
+
+test('built-in ingest and PDS contracts reject no-op results; explicit contracts can pass or reject', async () => {
+  for (const gate of ['ingest', 'pdsCompat'] as const) {
+    const capture = ioCapture();
+    expect(
+      await runNodeGate(
+        { ...spec(async () => ({ pds: [], subjects: [], results: {} })), gate },
+        validEnv({ ATMUSIC_LIVE_TEST_PREREQUISITE: 'ready' }),
+        capture.io,
+      ),
+    ).toBe(1);
+  }
+  const good = ioCapture();
+  const explicit: NodeGateSpec = {
+    ...spec(async () => ({ pds: [], subjects: [], results: { proof: 'verified' } })),
+    observations: [{ key: 'proof', accept: (value) => (value === 'verified' ? null : 'not verified') }],
+  };
+  expect(await runNodeGate(explicit, validEnv({ ATMUSIC_LIVE_TEST_PREREQUISITE: 'ready' }), good.io)).toBe(0);
+  const bad = ioCapture();
+  expect(
+    await runNodeGate(
+      { ...explicit, run: async () => ({ pds: [], subjects: [], results: { proof: 'nope' } }) },
+      validEnv({ ATMUSIC_LIVE_TEST_PREREQUISITE: 'ready' }),
+      bad.io,
+    ),
+  ).toBe(1);
+});
+
+test('local checks run only after prerequisites and block before body on errors or exceptions', async () => {
+  const localChecks = vi.fn(() => ['local artifact missing']);
+  const unexpected = () => {
+    throw new Error('blocked path attempted external work');
+  };
+  const tripwires = [
+    vi.spyOn(globalThis, 'fetch').mockImplementation(unexpected),
+    vi.spyOn(dns, 'lookup').mockImplementation(unexpected),
+    vi.spyOn(dns.promises, 'lookup').mockImplementation(unexpected),
+    vi.spyOn(dns, 'resolve').mockImplementation(unexpected),
+    vi.spyOn(dns, 'resolve4').mockImplementation(unexpected),
+    vi.spyOn(dns, 'resolve6').mockImplementation(unexpected),
+    vi.spyOn(dns, 'resolveTxt').mockImplementation(unexpected),
+    vi.spyOn(dns.promises, 'resolve').mockImplementation(unexpected),
+    vi.spyOn(dns.promises, 'resolve4').mockImplementation(unexpected),
+    vi.spyOn(dns.promises, 'resolve6').mockImplementation(unexpected),
+    vi.spyOn(net, 'connect').mockImplementation(unexpected),
+    vi.spyOn(net, 'createConnection').mockImplementation(unexpected),
+    vi.spyOn(tls, 'connect').mockImplementation(unexpected),
+    vi.spyOn(childProcess, 'spawn').mockImplementation(unexpected),
+    vi.spyOn(chromium, 'launch').mockImplementation(unexpected),
+  ];
+  const body = vi.fn(async () => emptyBody);
+  const candidate = { ...spec(body), localChecks };
+  try {
+    const invalid = ioCapture();
+    expect(await runNodeGate(candidate, {}, invalid.io)).toBe(2);
+    expect(localChecks).not.toHaveBeenCalled();
+    const valid = ioCapture();
+    expect(await runNodeGate(candidate, validEnv({ ATMUSIC_LIVE_TEST_PREREQUISITE: 'ready' }), valid.io)).toBe(2);
+    expect(documentFrom(valid.output().stdout).missing).toContain('local artifact missing');
+    const throws = ioCapture();
+    expect(
+      await runNodeGate(
+        {
+          ...candidate,
+          localChecks: () => {
+            throw new Error('git unavailable');
+          },
+        },
+        validEnv({ ATMUSIC_LIVE_TEST_PREREQUISITE: 'ready' }),
+        throws.io,
+      ),
+    ).toBe(2);
+    expect(documentFrom(throws.output().stdout).missing?.join(' ')).toContain('git unavailable');
+    expect(body).not.toHaveBeenCalled();
+    for (const tripwire of tripwires) expect(tripwire).not.toHaveBeenCalled();
+  } finally {
+    for (const tripwire of tripwires) tripwire.mockRestore();
+  }
+});
+
+test('redacts KEY, COOKIE, CSRF secrets and absolute home/runtime paths in every evidence channel', async () => {
+  const env = validEnv({
+    ATMUSIC_LIVE_TEST_PREREQUISITE: 'ready',
+    ATMUSIC_LIVE_SIGNING_KEY: 'signing-key-value',
+    ATMUSIC_LIVE_SESSION_COOKIE: 'cookie-value-123',
+    ATMUSIC_LIVE_CSRF: 'csrf-secret-value',
+    [NODE_ENV.evidenceOut]: '/tmp/live-evidence.json',
+  });
+  const capture = ioCapture();
+  await runNodeGate(
+    spec(async (context) => {
+      context.log(`/home/june/private ${env.ATMUSIC_LIVE_SIGNING_KEY}`);
+      context.cleanup(`/Users/june/private ${env.ATMUSIC_LIVE_SESSION_COOKIE}`);
+      context.fail(`/run/user/1000/private ${env.ATMUSIC_LIVE_CSRF} /run/user/1000`);
+      return {
+        ...emptyBody,
+        results: { '/home/june/private': `/run/user/1000/x ${env.ATMUSIC_LIVE_SIGNING_KEY}`, contract: true },
+      };
+    }),
+    env,
+    capture.io,
+  );
+  const outputs = [capture.output().stdout, capture.output().stderr, ...capture.files.map(({ text }) => text)].join(
+    '\n',
+  );
+  for (const secret of [
+    'signing-key-value',
+    'cookie-value-123',
+    'csrf-secret-value',
+    '/home/june/',
+    '/Users/june/',
+    '/run/user/1000/',
+    '/run/user/1000',
+  ]) {
+    expect(outputs).not.toContain(secret);
+  }
+  expect(capture.files[0]?.path).toBe('/tmp/live-evidence.json');
 });
 
 test('importing the harness performs no work or output', () => {

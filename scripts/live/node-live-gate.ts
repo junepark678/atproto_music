@@ -9,6 +9,7 @@ import { writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { isFixturePrefix, isValidPrefix } from '@atmusic/core/namespace';
+import { observeNodeGateResults } from './node-live-support.ts';
 
 export const NODE_EVIDENCE_SCHEMA_VERSION = 3 as const;
 export const NODE_ENV = {
@@ -55,6 +56,11 @@ export interface NodeGateBodyResult {
   results: Record<string, unknown>;
 }
 
+export interface NodeGateObservation {
+  key: string;
+  accept(value: unknown): string | null;
+}
+
 export interface NodeGateEvidence {
   schemaVersion: typeof NODE_EVIDENCE_SCHEMA_VERSION;
   runtime: 'node';
@@ -90,6 +96,9 @@ export interface NodeGateSpec {
   script: string;
   requirements: readonly NodeGateRequirement[];
   extraChecks?: (env: NodeGateEnv) => string[];
+  /** Synchronous local-only preflight (filesystem/git/node --version; never network/browser). */
+  localChecks?: (env: NodeGateEnv) => string[];
+  observations?: readonly NodeGateObservation[];
   run(context: NodeGateContext): Promise<NodeGateBodyResult>;
 }
 
@@ -112,7 +121,7 @@ const IPV4 = /^\d{1,3}(?:\.\d{1,3}){3}$/;
 const OWNED_PREFIX = /^[a-z][a-z0-9-]*(?:\.[a-z][a-z0-9-]*)+$/;
 const RESERVED_SUFFIXES = new Set(['example', 'invalid', 'test', 'localhost', 'local', 'onion', 'arpa', 'internal']);
 const RESERVED_DOMAINS = ['example.com', 'example.net', 'example.org'];
-const SECRET_NAME = /(TOKEN|PASSWORD|SECRET|PRIVATE_KEY)/i;
+const SECRET_NAME = /(TOKEN|PASSWORD|SECRET|PRIVATE_KEY|KEY|COOKIE|CSRF)/i;
 
 function nonzeroHex(value: string, expression: RegExp): boolean {
   return expression.test(value) && /[1-9a-f]/.test(value);
@@ -269,6 +278,10 @@ export function redactNodeGateOutput(text: string, env: NodeGateEnv): string {
   });
   redacted = redacted.replace(/Bearer\s+[A-Za-z0-9._~+/-]+=*/g, 'Bearer [redacted]');
   redacted = redacted.replace(/eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*/g, '[redacted-jwt]');
+  redacted = redacted.replace(
+    /(?:\/home\/[^\s<>"'`]+|\/Users\/[^\s<>"'`]+|\/run\/user\/\d+(?:\/[^\s<>"'`]*)?)/g,
+    '[redacted-path]',
+  );
   return redacted;
 }
 
@@ -323,7 +336,19 @@ export async function runNodeGate(
 ): Promise<number> {
   const base = evidenceBase(spec, io);
   const requirements = [...IDENTITY_AND_RELEASE, ...spec.requirements];
-  const missing = [...missingRequirements(env, requirements), ...(spec.extraChecks?.(env) ?? [])];
+  let missing = missingRequirements(env, requirements);
+  try {
+    missing.push(...(spec.extraChecks?.(env) ?? []));
+  } catch (error) {
+    missing.push(`extra checks failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (missing.length === 0 && spec.localChecks) {
+    try {
+      missing = [...spec.localChecks(env)];
+    } catch (error) {
+      missing = [`local checks failed: ${error instanceof Error ? error.message : String(error)}`];
+    }
+  }
   if (missing.length > 0) {
     const commit = validValue(env, NODE_ENV.commit, IDENTITY_AND_RELEASE[0]!);
     const bundleSha256 = validValue(env, NODE_ENV.bundleSha256, IDENTITY_AND_RELEASE[1]!);
@@ -370,6 +395,8 @@ export async function runNodeGate(
       error instanceof Error ? `${error.name === 'Error' ? '' : `${error.name}: `}${error.message}` : String(error),
     );
   }
+
+  failures.push(...observeNodeGateResults(spec.gate, spec.observations, body?.results));
 
   const evidence: NodeGateEvidence = {
     ...base,
