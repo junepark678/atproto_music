@@ -10,9 +10,18 @@ interface Captured {
   userAgent: string;
 }
 
+interface ServerBehavior {
+  scrobbleResponse?: unknown;
+  nowPlayingResponse?: unknown;
+  recentResponse?: unknown;
+}
+
 let server: Server | null = null;
 
-async function listen(handler: (request: IncomingMessage, body: string) => void): Promise<string> {
+async function listen(
+  handler: (request: IncomingMessage, body: string) => void,
+  behavior: ServerBehavior = {},
+): Promise<string> {
   server = createServer((request, response) => {
     const chunks: Buffer[] = [];
     request.on('data', (chunk: Buffer) => chunks.push(Buffer.from(chunk)));
@@ -26,10 +35,28 @@ async function listen(handler: (request: IncomingMessage, body: string) => void)
         method === 'auth.getMobileSession'
           ? { session: { name: 'pano-user', key: 'fake-session-key' } }
           : method === 'track.scrobble'
-            ? { scrobbles: { '@attr': { accepted: 1, ignored: 0 } } }
+            ? (behavior.scrobbleResponse ?? {
+                scrobbles: {
+                  '@attr': { accepted: 1, ignored: 0 },
+                  scrobble: {
+                    track: { corrected: '0', '#text': 'Test Track' },
+                    artist: { corrected: '0', '#text': 'Test Artist' },
+                    timestamp: '1768474800',
+                    ignoredMessage: { code: '0', '#text': '' },
+                  },
+                },
+              })
             : method === 'track.updateNowPlaying'
-              ? { nowplaying: { track: { name: 'Test Track' } } }
-              : { recenttracks: { track: [], '@attr': { user: 'pano-user', totalPages: 0 } } };
+              ? (behavior.nowPlayingResponse ?? {
+                  nowplaying: {
+                    track: { corrected: '0', '#text': 'Test Track' },
+                    artist: { corrected: '0', '#text': 'Test Artist' },
+                    ignoredMessage: { code: '0', '#text': '' },
+                  },
+                })
+              : (behavior.recentResponse ?? {
+                  recenttracks: { track: [], '@attr': { user: 'pano-user', totalPages: 0 } },
+                });
       response.writeHead(200, { 'content-type': 'application/json' });
       response.end(JSON.stringify(result));
     });
@@ -126,6 +153,53 @@ describe('Pano Last.fm replay client', () => {
     );
     expect(requests[3]!.body).toBe('');
     expect(requests[0]!.userAgent).toBe('Pano Scrobbler/3.6 (Android)');
+  });
+
+  it.each([
+    [
+      'scrobble ignored',
+      {
+        scrobbleResponse: {
+          scrobbles: {
+            '@attr': { accepted: 0, ignored: 1 },
+            scrobble: {
+              track: { corrected: '0', '#text': 'Test Track' },
+              artist: { corrected: '0', '#text': 'Test Artist' },
+              timestamp: '1768474800',
+              ignoredMessage: { code: '1', '#text': 'ignored' },
+            },
+          },
+        },
+      },
+    ],
+    ['scrobble acknowledgement missing', { scrobbleResponse: {} }],
+    [
+      'now-playing ignored',
+      {
+        nowPlayingResponse: {
+          nowplaying: {
+            track: { corrected: '0', '#text': 'Test Track' },
+            artist: { corrected: '0', '#text': 'Test Artist' },
+            ignoredMessage: { code: '1', '#text': 'ignored' },
+          },
+        },
+      },
+    ],
+    ['now-playing acknowledgement missing', { nowPlayingResponse: {} }],
+    ['recent-tracks response malformed', { recentResponse: { recenttracks: {} } }],
+  ])('%s is rejected instead of reported as a successful replay', async (_label, behavior) => {
+    const origin = await listen(() => {}, behavior);
+    await expect(
+      runPanoLastfm({
+        origin,
+        username: 'pano-user',
+        appPassword: 'APP-PASSWORD-SECRET',
+        listenedAtSeconds: 1_768_474_800,
+        artist: 'Test Artist',
+        track: 'Test Track',
+        durationSeconds: 215,
+      }),
+    ).rejects.toThrow(/invalid acknowledgement|invalid response/);
   });
 
   it('does not reflect malformed upstream bodies or transport error text', async () => {
