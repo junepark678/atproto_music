@@ -583,7 +583,7 @@
       "case": "M3.4.1/lifecycle",
       "target": "scripts/test/node-recovery.test.ts › packaged_recovery: SIGKILL after create and delete commits reconciles durable operations, views, cursor and checkpoint on the same database",
       "also": [
-        "web/tests/mvp.spec.ts › full journey sign-in → scrobble indexed → stats → follow/unfollow → delete → export → disconnect/reconnect → sign-out"
+        "web/tests/mvp.spec.ts › sign-in through the fake AS, scrobble, indexed, delete and follow journeys pass against the Node stack"
       ]
     },
     {
@@ -1445,7 +1445,7 @@
     },
     {
       "case": "M7.4.2/browser_journey",
-      "target": "web/tests/mvp.spec.ts › full journey sign-in → scrobble indexed → stats → follow/unfollow → delete → export → disconnect/reconnect → sign-out"
+      "target": "web/tests/mvp.spec.ts › sign-in through the fake AS, scrobble, indexed, delete and follow journeys pass against the Node stack"
     },
     {
       "case": "M7.4.2/browser_restart",
@@ -1465,7 +1465,7 @@
     },
     {
       "case": "M7.4.3/a11y_screens",
-      "target": "web/tests/accessibility.spec.ts › no serious/critical axe violations on all routes"
+      "target": "web/tests/accessibility.spec.ts › signin, feed, profile, scrobble, settings/links, settings/imports, settings/credentials and lastfm/authorize have no axe violations"
     },
     {
       "case": "M7.4.3/keyboard_journey",

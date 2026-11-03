@@ -1,9 +1,9 @@
 // Browser end-to-end tests (W6-03; ADR 0004 §10.1 "Browser"): `npm run test:e2e`.
 //
 // One stack per run (scripts/e2e/start-stack.ts as the webServer): the
-// production Worker with the e2e IndexDO entry under `wrangler dev`, the SPA
-// built into work/e2e/dist, and @atproto/dev-env (PLC plus two PDSs). Chromium
-// reaches the dev-env's https hosts only through the stack's proxy; every
+// Node e2e bundle, the SPA built into work/e2e/dist, and in-process fakes for
+// the AS, PLC, two PDSs, Jetstream, Last.fm and ListenBrainz. Chromium
+// reaches the fixture HTTPS hosts only through the stack's proxy; every
 // other destination is refused, so no test touches the real network.
 //
 // The suites share the stack and its state (the journey writes records), so

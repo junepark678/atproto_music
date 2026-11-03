@@ -25,9 +25,9 @@
 // and the PDS must be https. The proxy gives the real library, unmodified, a
 // real https PDS and a real OAuth provider (PAR, PKCE, DPoP with nonces).
 //
-// The Worker (wrangler dev, worker/test/e2e/entry.ts) reaches the same hosts
-// through its own e2e Transport, which maps exactly these hosts to the same
-// loopback ports; `workerNetwork()` is the description it receives.
+// The Node e2e bundle reaches the same hosts through its fixture transport,
+// which maps exactly these hosts to the same loopback ports; `workerNetwork()`
+// is the description it receives.
 //
 // The e2e lexicon prefix is E2E_PREFIX (`test.atmusic.e2e`, NSID authority
 // `e2e.atmusic.test` under the RFC 6761 reserved `.test` TLD, so it can never
@@ -54,7 +54,7 @@ import type { Page } from '@playwright/test';
 
 /** The e2e lexicon prefix (see the header comment). Never the fixture or the production prefix. */
 export const E2E_PREFIX = 'test.atmusic.e2e';
-/** The PLC host the browser OAuth library (and the Worker) resolve did:plc against. */
+/** The PLC host the fixture BFF resolves did:plc against. */
 export const PLC_HOST = 'plc.directory';
 
 export interface E2ePorts {
@@ -68,7 +68,7 @@ export interface E2ePorts {
 /** Fixed loopback ports (playwright.config.ts needs the proxy port before anything starts). */
 export const DEFAULT_PORTS: Readonly<E2ePorts> = { worker: 8787, plc: 2582, pds1: 2583, pds2: 2584, proxy: 2580 };
 
-/** The SPA/Worker origin for `ports` (an atproto loopback client must use 127.0.0.1). */
+/** The SPA/Node origin for `ports` (an atproto loopback client must use 127.0.0.1). */
 export function workerOrigin(ports: Pick<E2ePorts, 'worker'>): string {
   return `http://127.0.0.1:${ports.worker}`;
 }
@@ -103,21 +103,21 @@ export interface E2eAccount {
   pdsPort: number;
 }
 
-/** What the tests and the Worker learn about the running network (work/e2e/network.json). */
+/** What the tests and the fixture host learn about the network (work/e2e/network.json). */
 export interface E2eNetwork {
   prefix: string;
   fixtureNowMs: number;
   workerOrigin: string;
   proxyPort: number;
   plcPort: number;
-  /** Public host → loopback port, for every host the proxy and the Worker transport serve. */
+  /** Public host → loopback port, for every host the proxy and fixture transport serve. */
   hosts: Record<string, number>;
   accounts: E2eAccount[];
   /** URIs of records created by the setup (bob's seed scrobble). */
   seeded: { bobScrobble: string };
 }
 
-/** The Worker's view: hosts and verified handles only (passed as the E2E_NETWORK var). */
+/** Fixture transport configuration: hosts and verified handles. */
 export interface WorkerNetwork {
   hosts: Record<string, number>;
   handles: Record<string, string>;
@@ -127,7 +127,7 @@ export function workerNetwork(net: E2eNetwork): WorkerNetwork {
   return { hosts: net.hosts, handles: Object.fromEntries(net.accounts.map((a) => [a.handle, a.did])) };
 }
 
-/** base64url(JSON) so the value survives `wrangler dev --var NAME:VALUE`. */
+/** base64url(JSON) for passing the fixture network through the process environment. */
 export function encodeWorkerNetwork(net: WorkerNetwork): string {
   return Buffer.from(JSON.stringify(net), 'utf8').toString('base64url');
 }
