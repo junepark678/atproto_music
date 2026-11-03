@@ -81,8 +81,18 @@ async function startServer(behavior: ServerBehavior = {}): Promise<string> {
             scrobbles: {
               '@attr': { accepted: 2, ignored: 0 },
               scrobble: [
-                { track: { '#text': 'First Track' }, ignoredMessage: { code: '0', '#text': '' } },
-                { track: { '#text': 'Second Track' }, ignoredMessage: { code: '0', '#text': '' } },
+                {
+                  artist: { '#text': 'Multi Scrobbler Artist' },
+                  track: { '#text': 'First Track' },
+                  timestamp: '1768478280',
+                  ignoredMessage: { code: '0', '#text': '' },
+                },
+                {
+                  artist: { '#text': 'Multi Scrobbler Artist' },
+                  track: { '#text': 'Second Track' },
+                  timestamp: '1768478340',
+                  ignoredMessage: { code: '0', '#text': '' },
+                },
               ],
             },
           },
@@ -93,6 +103,7 @@ async function startServer(behavior: ServerBehavior = {}): Promise<string> {
           200,
           behavior.nowPlayingBody ?? {
             nowplaying: {
+              artist: { '#text': 'Multi Scrobbler Artist' },
               track: { '#text': 'Now Playing' },
               ignoredMessage: { code: '0', '#text': '' },
             },
@@ -103,7 +114,12 @@ async function startServer(behavior: ServerBehavior = {}): Promise<string> {
           outgoing,
           200,
           behavior.recentBody ?? {
-            recenttracks: { track: [{ name: 'First Track' }, { name: 'Second Track' }] },
+            recenttracks: {
+              track: [
+                { name: 'First Track', artist: { '#text': 'Multi Scrobbler Artist' } },
+                { name: 'Second Track', artist: { '#text': 'Multi Scrobbler Artist' } },
+              ],
+            },
           },
         );
       } else respond(outgoing, 404, { error: 'unexpected request' });
@@ -209,8 +225,42 @@ test('a session response cannot echo its key through the session name', async ()
 
 test.each([
   ['malformed scrobble acknowledgement', { scrobbleBody: { scrobbles: {} } }],
+  [
+    'scrobble acknowledgement without echoed track data',
+    { scrobbleBody: { scrobbles: { '@attr': { accepted: 2, ignored: 0 }, scrobble: [{}, {}] } } },
+  ],
   ['malformed now-playing acknowledgement', { nowPlayingBody: { nowplaying: [] } }],
+  [
+    'now-playing acknowledgement without track data',
+    { nowPlayingBody: { nowplaying: { ignoredMessage: { code: '0', '#text': '' } } } },
+  ],
   ['empty recent-track result', { recentBody: { recenttracks: { track: [] } } }],
+  [
+    'recent track with empty name',
+    {
+      recentBody: {
+        recenttracks: {
+          track: [
+            { name: '', artist: { '#text': 'Multi Scrobbler Artist' } },
+            { name: 'Second Track', artist: { '#text': 'Multi Scrobbler Artist' } },
+          ],
+        },
+      },
+    },
+  ],
+  [
+    'recent tracks do not include the submitted listens',
+    {
+      recentBody: {
+        recenttracks: {
+          track: [
+            { name: 'Other Track', artist: { '#text': 'Multi Scrobbler Artist' } },
+            { name: 'Another Track', artist: { '#text': 'Multi Scrobbler Artist' } },
+          ],
+        },
+      },
+    },
+  ],
   ['bodyless success response', { sessionStatus: 204 }],
 ])('%s fails instead of reporting successful replay', async (_label, behavior) => {
   const transportOrigin = await startServer(behavior);
@@ -225,4 +275,22 @@ test('transport requires a loopback HTTP origin and never defaults to public HTT
     runMultiScrobblerLastfm({ cookie: COOKIE, csrfToken: CSRF, transportOrigin: MULTI_SCROBBLER_PUBLIC_ORIGIN }),
   ).rejects.toThrow('multi-scrobbler Last.fm protocol response was invalid');
   expect(requests).toHaveLength(0);
+});
+
+test('malformed transport URLs and headers are converted to a stable secret-free error', async () => {
+  const secret = 'malformed-url-secret';
+  await expect(
+    runMultiScrobblerLastfm({
+      cookie: COOKIE,
+      csrfToken: CSRF,
+      transportOrigin: `http://[invalid-${secret}`,
+    }),
+  ).rejects.toThrow('multi-scrobbler Last.fm protocol response was invalid');
+  await expect(
+    runMultiScrobblerLastfm({
+      cookie: `bad\n${secret}`,
+      csrfToken: CSRF,
+      transportOrigin: await startServer(),
+    }),
+  ).rejects.toThrow('multi-scrobbler Last.fm protocol response was invalid');
 });

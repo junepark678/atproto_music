@@ -9,6 +9,7 @@ export const MULTI_SCROBBLER_PUBLIC_ORIGIN = 'https://music.214510.xyz';
 const API_KEY = '0123456789abcdef0123456789abcdef';
 const API_SIG = 'a'.repeat(32);
 const CALLBACK = 'http://localhost:9078/librefm/callback?state=x';
+const SAFE_PROTOCOL_ERROR = 'multi-scrobbler Last.fm protocol response was invalid';
 
 export interface MultiScrobblerLastfmOptions {
   cookie: string;
@@ -27,7 +28,7 @@ export interface MultiScrobblerLastfmResult {
 
 function fail(): never {
   // Avoid including response bodies, URLs, callback tokens or session keys.
-  throw new Error('multi-scrobbler Last.fm protocol response was invalid');
+  throw new Error(SAFE_PROTOCOL_ERROR);
 }
 
 async function request(
@@ -36,53 +37,90 @@ async function request(
   path: string,
   init: RequestInit = {},
 ): Promise<Response> {
-  const base = new URL(transportOrigin);
-  const loopback =
-    base.hostname === 'localhost' || /^127(?:\.\d{1,3}){3}$/.test(base.hostname) || base.hostname === '[::1]';
-  if (
-    base.protocol !== 'http:' ||
-    !loopback ||
-    base.username ||
-    base.password ||
-    base.pathname !== '/' ||
-    base.search ||
-    base.hash
-  )
+  let target: URL;
+  let headers: Record<string, string>;
+  let body: string | undefined;
+  let method: string;
+  try {
+    const base = new URL(transportOrigin);
+    const loopback =
+      base.hostname === 'localhost' || /^127(?:\.\d{1,3}){3}$/.test(base.hostname) || base.hostname === '[::1]';
+    if (
+      base.protocol !== 'http:' ||
+      !loopback ||
+      base.username ||
+      base.password ||
+      base.pathname !== '/' ||
+      base.search ||
+      base.hash
+    )
+      return fail();
+    target = new URL(path, base);
+    if (target.origin !== base.origin) return fail();
+    headers = Object.fromEntries(new Headers(init.headers).entries());
+    headers.host = new URL(origin).host;
+    body =
+      typeof init.body === 'string'
+        ? init.body
+        : init.body instanceof URLSearchParams
+          ? init.body.toString()
+          : undefined;
+    method = init.method ?? 'GET';
+  } catch {
     return fail();
-  const target = new URL(path, base);
-  if (target.origin !== base.origin) return fail();
-  const headers = Object.fromEntries(new Headers(init.headers).entries());
-  headers.host = new URL(origin).host;
-  const body =
-    typeof init.body === 'string' ? init.body : init.body instanceof URLSearchParams ? init.body.toString() : undefined;
+  }
   return new Promise((resolve, reject) => {
-    const request = httpRequest(target, { method: init.method ?? 'GET', headers }, (incoming) => {
-      const chunks: Buffer[] = [];
-      incoming.on('data', (chunk: Buffer) => chunks.push(Buffer.from(chunk)));
-      incoming.once('aborted', () => reject(new Error('multi-scrobbler loopback transport failed')));
-      incoming.once('error', () => reject(new Error('multi-scrobbler loopback transport failed')));
-      incoming.on('end', () => {
-        try {
-          const status = incoming.statusCode ?? 502;
-          const noBody = status === 204 || status === 205 || status === 304;
-          resolve(
-            new Response(noBody ? null : Buffer.concat(chunks), {
-              status,
-              headers: Object.fromEntries(
-                Object.entries(incoming.headers as IncomingHttpHeaders).flatMap(([key, value]) =>
-                  typeof value === 'string' ? [[key, value]] : [],
+    try {
+      const request = httpRequest(target, { method, headers }, (incoming) => {
+        const chunks: Buffer[] = [];
+        incoming.on('data', (chunk: Buffer) => chunks.push(Buffer.from(chunk)));
+        incoming.once('aborted', () => reject(new Error(SAFE_PROTOCOL_ERROR)));
+        incoming.once('error', () => reject(new Error(SAFE_PROTOCOL_ERROR)));
+        incoming.on('end', () => {
+          try {
+            const status = incoming.statusCode ?? 502;
+            const noBody = status === 204 || status === 205 || status === 304;
+            resolve(
+              new Response(noBody ? null : Buffer.concat(chunks), {
+                status,
+                headers: Object.fromEntries(
+                  Object.entries(incoming.headers as IncomingHttpHeaders).flatMap(([key, value]) =>
+                    typeof value === 'string' ? [[key, value]] : [],
+                  ),
                 ),
-              ),
-            }),
-          );
-        } catch {
-          reject(new Error('multi-scrobbler loopback transport failed'));
-        }
+              }),
+            );
+          } catch {
+            reject(new Error(SAFE_PROTOCOL_ERROR));
+          }
+        });
       });
-    });
-    request.once('error', () => reject(new Error('multi-scrobbler loopback transport failed')));
-    request.end(body);
+      request.once('error', () => reject(new Error(SAFE_PROTOCOL_ERROR)));
+      request.end(body);
+    } catch {
+      reject(new Error(SAFE_PROTOCOL_ERROR));
+    }
   });
+}
+
+function hasText(value: unknown): boolean {
+  return Boolean(
+    value &&
+      typeof value === 'object' &&
+      !Array.isArray(value) &&
+      typeof (value as Record<string, unknown>)['#text'] === 'string' &&
+      ((value as Record<string, unknown>)['#text'] as string).trim().length > 0,
+  );
+}
+
+function hasSuccessfulIgnoredMessage(value: unknown): boolean {
+  return Boolean(
+    value &&
+      typeof value === 'object' &&
+      !Array.isArray(value) &&
+      (value as Record<string, unknown>).code === '0' &&
+      typeof (value as Record<string, unknown>)['#text'] === 'string',
+  );
 }
 
 async function json(response: Response): Promise<Record<string, unknown>> {
@@ -182,10 +220,15 @@ export async function runMultiScrobblerLastfm(
     (attributes as Record<string, unknown>).ignored !== 0 ||
     !Array.isArray(scrobbleItems) ||
     scrobbleItems.length !== batch.length ||
-    !scrobbleItems.every((item) => {
+    !scrobbleItems.every((item, index) => {
       if (!item || typeof item !== 'object' || Array.isArray(item)) return false;
       const ignored = (item as Record<string, unknown>).ignoredMessage;
-      return Boolean(ignored && typeof ignored === 'object' && (ignored as Record<string, unknown>).code === '0');
+      return (
+        hasText((item as Record<string, unknown>).track) &&
+        hasText((item as Record<string, unknown>).artist) &&
+        (item as Record<string, unknown>).timestamp === batch[index]?.timestamp &&
+        hasSuccessfulIgnoredMessage(ignored)
+      );
     })
   )
     return fail();
@@ -206,9 +249,9 @@ export async function runMultiScrobblerLastfm(
     !nowPlayingResult ||
     typeof nowPlayingResult !== 'object' ||
     Array.isArray(nowPlayingResult) ||
-    !(nowPlayingResult as Record<string, unknown>).ignoredMessage ||
-    typeof (nowPlayingResult as Record<string, unknown>).ignoredMessage !== 'object' ||
-    ((nowPlayingResult as Record<string, unknown>).ignoredMessage as Record<string, unknown>).code !== '0'
+    !hasText((nowPlayingResult as Record<string, unknown>).track) ||
+    !hasText((nowPlayingResult as Record<string, unknown>).artist) ||
+    !hasSuccessfulIgnoredMessage((nowPlayingResult as Record<string, unknown>).ignoredMessage)
   )
     return fail();
 
@@ -232,10 +275,14 @@ export async function runMultiScrobblerLastfm(
         track &&
         typeof track === 'object' &&
         !Array.isArray(track) &&
-        typeof (track as Record<string, unknown>).name === 'string',
+        typeof (track as Record<string, unknown>).name === 'string' &&
+        ((track as Record<string, unknown>).name as string).trim().length > 0 &&
+        hasText((track as Record<string, unknown>).artist),
     )
   )
     return fail();
+  const recentNames = new Set((trackList as Array<Record<string, unknown>>).map((track) => track.name));
+  if (batch.some((item) => !recentNames.has(item.track))) return fail();
 
   return {
     redirectPath: '/api/auth',
