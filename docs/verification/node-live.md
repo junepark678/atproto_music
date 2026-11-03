@@ -84,6 +84,25 @@ checks can pass as Node standalone gates.
 semantics are ported; Workers Cloudflare/DO analytics do not stand in for Node
 acceptance. Unknown gates never enable PASS.
 
+### Dev-env OAuth preflight (advisory only)
+
+`npx tsx scripts/live/devenv_oauth_check.ts` currently validates only the
+presence and shape of `ATMUSIC_DEVENV_PDS_URL` and
+`ATMUSIC_DEVENV_HTTPS_ORIGIN`. The origin must be a bare HTTPS origin; the PDS
+value must be a bare HTTP or HTTPS origin. The client ID is derived from the
+origin's `/oauth/client-metadata.json`, and the production client authenticates
+with `private_key_jwt`; no client secret is needed. This preflight performs no
+network, socket, child-process, or browser operation and exits 2 with a blocked
+document even when both inputs are valid because the interop flow is not
+implemented yet.
+
+Its schema-v3 document has `runtime: "node"`, `fixtureOnly: true`,
+`gate: "devenvOauth"`, and `result: "blocked"`. It is not one of the five
+required production gates and must not be added to `live-evidence.json` or used
+to satisfy the production `oauth` gate. This advisory result does not prove
+confidential-client exchange, scope, CRUD, token supersession, or upstream
+revocation, and does not complete N6-02.
+
 ### Node ingest driver (N6-02 slice)
 
 Run `npx tsx scripts/live/node_ingest_check.ts` only against the deployed Node

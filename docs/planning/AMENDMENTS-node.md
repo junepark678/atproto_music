@@ -456,3 +456,18 @@ Places where a package's tree differs from its `files` entry in [node-waves.json
 **Why:** IndexDO imports `cloudflare:workers`, so the Node composition project cannot load it, and on the Node host no IndexDO stands between the routes and IndexCore: `ctx.index` is the composed IndexCore. The boundary each IndexRpc read crosses on Node is its route: dispatcher, handler, DTO projection and JSON over the real listener, and for `adminStatus` the production admin-socket handler. The test calls every read method directly on the composed IndexCore and through that route, and it requires the route body to equal the direct result under the route's production projection (`scrobbleDto`, `followToDto`, the RecordStatus member rules, and the `not_found` envelope for null). It replaces a comparison of two IndexCore instances over one database file, which crossed no boundary. The second test keeps its title. While index-do.ts exists (until N7-01), it checks from source that index-do.ts re-exports every moved name from `../app/index-core` and defines none of them. Through `import type`, it checks that the moved types and values resolve through index-do.ts with index-core's types. The module is never loaded on Node.
 
 **Requested owner amendment:** in the N1-02 `tests` entry, replace the first title with the title in the tree. N7-01, which deletes index-do.ts, then drops the re-export half of the second test (and renames it).
+
+
+## N6-02 dev-env OAuth preflight classification
+
+The dev-env OAuth preflight is an advisory fixture check, not the production
+`oauth` gate and not one of the five gates required by the Node inventory. It
+emits schema-v3 `runtime: "node"`, `fixtureOnly: true`, `gate: "devenvOauth"`,
+and `result: "blocked"`; it never enables verifier PASS. Its current inputs
+are a local PDS URL and a bare HTTPS test origin. The client ID is derived from
+the origin's client-metadata route and the BFF uses `private_key_jwt`, so no
+client secret is requested. Even with valid inputs, the driver remains blocked
+until an offline interop harness records accepted exchange, four-collection
+grant, CRUD, supersession, and upstream-revocation observations. Those fixture
+observations do not satisfy live OAuth evidence from two independently
+operated PDSs or close N6-02.
