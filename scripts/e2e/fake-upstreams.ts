@@ -36,6 +36,7 @@ export interface FakeUpstreams {
   advance(ms: number): Promise<void>;
   drainCommits(): Array<{ did: string; commit: CommitResult }>;
   appendCommits(commits: readonly CommitResult[]): Promise<string[]>;
+  disconnectJetstream(): Promise<number>;
   authorizeLastfmToken(token: string, user?: string): Promise<void>;
   prepareLastfmLink(token: string, user: string): Promise<void>;
   addListenBrainzToken(token: string, user: string): Promise<void>;
@@ -52,7 +53,7 @@ export interface FakeUpstreamOptions {
 
 type UpstreamRole = 'lastfm' | 'listenbrainz' | 'jetstream';
 type IpcCommand =
-  | { type: 'command'; id: number; action: 'stop' | 'snapshot' }
+  | { type: 'command'; id: number; action: 'stop' | 'snapshot' | 'disconnect' }
   | { type: 'command'; id: number; action: 'authorizeLastfmToken'; token: string; user: string }
   | { type: 'command'; id: number; action: 'prepareLastfmLink'; token: string; user: string }
   | { type: 'command'; id: number; action: 'addListenBrainzToken'; token: string; user: string }
@@ -203,7 +204,20 @@ async function runJetstreamChild(): Promise<void> {
       if (message.action === 'appendCommits' && Array.isArray(message.commits)) {
         answer((message.commits as CommitResult[]).flatMap((commit) => fake.appendCommit(commit).map(encodeEvent)));
       } else if (message.action === 'snapshot') answer(fake.events.map(encodeEvent));
-      else if (message.action === 'stop') {
+      else if (message.action === 'disconnect') {
+        const clients = [...wss.clients];
+        const closed = Promise.all(
+          clients.map(
+            (client) =>
+              new Promise<void>((resolveClose) => {
+                if (client.readyState === client.CLOSED) resolveClose();
+                else client.once('close', () => resolveClose());
+              }),
+          ),
+        );
+        for (const client of clients) client.close(1011, 'fixture delivery disabled');
+        void closed.then(() => answer(clients.length));
+      } else if (message.action === 'stop') {
         for (const client of wss.clients) client.close(1001, 'fixture stopping');
         closing ??= new Promise<void>((resolve) => {
           wss.close(() => http.close(() => resolve()));
@@ -343,6 +357,17 @@ export async function startFakeUpstreams(options: FakeUpstreamOptions = {}): Pro
         action: 'appendCommits',
         commits: [...commits],
       })) as string[];
+    },
+    disconnectJetstream() {
+      if (closed) return Promise.reject(new Error('fake upstreams are closed'));
+      return childMessage(jetstream.child, {
+        type: 'command',
+        id: ++commandId,
+        action: 'disconnect',
+      }).then((result) => {
+        if (typeof result !== 'number') throw new Error('Jetstream disconnect result is malformed');
+        return result;
+      });
     },
     authorizeLastfmToken(token, user = LASTFM_USER) {
       if (closed) return Promise.reject(new Error('fake upstreams are closed'));

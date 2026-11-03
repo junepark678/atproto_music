@@ -335,12 +335,6 @@ class BundleProcess {
     }
   }
 
-  async disconnectJetstream(): Promise<number> {
-    const result = await this.command('disconnectJetstream');
-    if (typeof result !== 'number') throw new Error('fixture Jetstream disconnect returned an invalid count');
-    return result;
-  }
-
   async inspect(): Promise<Record<string, unknown[]>> {
     const result = await this.command('inspect');
     return replayObject(result) as Record<string, unknown[]>;
@@ -1158,7 +1152,7 @@ async function socketDeliveryDisabledControl(
     const beforeCheckpoint = Array.isArray(beforeCheckpointRows) ? replayObject(beforeCheckpointRows[0]) : {};
     const beforeCursor = typeof beforeCheckpoint.cursor === 'number' ? beforeCheckpoint.cursor : null;
     stage = 'socket-disconnect';
-    if ((await bundle.disconnectJetstream()) < 1) throw new Error('negative-control socket was not connected');
+    if ((await fakes.disconnectJetstream()) < 1) throw new Error('negative-control socket was not connected');
     stage = 'write-acknowledgement';
     const response = await session.jar.request('/api/v1/scrobbles', {
       method: 'POST',
