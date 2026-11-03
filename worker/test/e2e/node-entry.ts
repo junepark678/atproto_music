@@ -7,12 +7,22 @@ import { fixedClock } from '@atmusic/core/test-support/clock';
 import { JetstreamConnectError } from '../../src/do/ingest/jetstream-socket';
 import { type RunningServer, run } from '../../src/node/run';
 import { manualTimers } from '../node/support/app';
+import { createLoopbackJetstreamConnector } from './loopback-jetstream';
 
 if (!process.send) throw new Error('fixture host requires IPC');
 const send = (value: unknown) => process.send?.(value);
 const clock = fixedClock(new Date(Number(process.env.ATMUSIC_TEST_NOW_MS)).toISOString());
 Date.now = () => clock.nowMs();
 const jetstream = new FakeJetstream({ clock });
+const testJetstreamOrigin = process.env.ATMUSIC_TEST_JETSTREAM_WS;
+const configuredJetstreamUrls = (process.env.JETSTREAM_URLS ?? '')
+  .split(',')
+  .map((url) => url.trim())
+  .filter((url) => url !== '');
+const connectJetstream =
+  testJetstreamOrigin === undefined
+    ? memoryLink(jetstream, { connectError: (s, e, m) => new JetstreamConnectError(s, e, m) })
+    : createLoopbackJetstreamConnector(testJetstreamOrigin, configuredJetstreamUrls);
 const initialCommits = process.env.ATMUSIC_TEST_JETSTREAM_COMMITS;
 if (initialCommits) {
   const commits = JSON.parse(Buffer.from(initialCommits, 'base64').toString('utf8')) as CommitResult[];
@@ -102,8 +112,8 @@ const code = await run({
   timers: manualTimers(),
   configOptions: { fixtureOrigins: true, allowFixturePrefix: true },
   transport,
-  connectJetstream: memoryLink(jetstream, { connectError: (s, e, m) => new JetstreamConnectError(s, e, m) }),
-  onReady: (s) => {
+  connectJetstream,
+  onReady: (s: RunningServer) => {
     server = s;
     send({ type: 'ready', authority: s.address.authority });
   },
