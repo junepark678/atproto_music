@@ -60,6 +60,22 @@ describe('web/test/session/client.test.ts', () => {
     expect(new Headers(fetcher.mock.calls[1]?.[1]?.headers).get('X-CSRF-Token')).toBe(reauth.csrfToken);
   });
 
+  it('keeps the reauthentication notice through an anonymous refresh and clears it after the cookie session returns', async () => {
+    const changed = vi.fn();
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(null, { status: 401 }))
+      .mockResolvedValueOnce(Response.json(dto));
+    const client = new SessionClient({ fetch: fetcher, onChange: changed });
+    client.unauthorized();
+    await expect(client.getSession()).resolves.toBeNull();
+    expect(changed).toHaveBeenLastCalledWith(null, true);
+
+    await expect(client.refresh()).resolves.toEqual(dto);
+    expect(changed).toHaveBeenLastCalledWith(dto, false);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
   it('preserves a scrobble draft only through same-account reauthentication', () => {
     const state = createAppState();
     setSession(state, dto);
@@ -73,7 +89,7 @@ describe('web/test/session/client.test.ts', () => {
     };
     setScrobbleDraft(state, values);
     setSession(state, null, null, { reauthRequired: true });
-    expect(state.scrobbleDraft.value).toEqual({ did: dto.did, values });
+    expect(state.scrobbleDraft.value).toEqual({ did: dto.did, revision: 1, values });
 
     const other = { ...dto, did: 'did:plc:bbbbbbbbbbbbbbbbbbbbbbbb' as Session['did'] };
     setSession(state, other);

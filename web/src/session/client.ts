@@ -12,6 +12,7 @@ export interface Session {
 export class SessionClient {
   #csrfToken: string | null = null;
   #current: Session | null = null;
+  #reauthRequired = false;
   #onChange: (session: Session | null, reauthRequired: boolean) => void;
   #listeners = new Set<(session: Session | null, reauthRequired: boolean) => void>();
   #fetch: typeof fetch;
@@ -35,7 +36,7 @@ export class SessionClient {
     if (this.#current !== null) return this.#current;
     const response = await this.#fetch('/api/v1/auth/session', { credentials: 'same-origin', cache: 'no-store' });
     if (response.status === 401) {
-      this.#set(null, false);
+      this.#set(null, this.#reauthRequired);
       return null;
     }
     if (!response.ok) throw new Error(`Session request failed (${response.status})`);
@@ -53,6 +54,13 @@ export class SessionClient {
     this.#csrfToken = value.csrfToken;
     this.#set(value, value.status === 'reauth_required');
     return value;
+  }
+
+  /** Discard the cached DTO and read the cookie session again, e.g. after OAuth in another tab. */
+  async refresh(): Promise<Session | null> {
+    this.#current = null;
+    this.#csrfToken = null;
+    return this.getSession();
   }
 
   unauthorized(): void {
@@ -97,6 +105,7 @@ export class SessionClient {
   #set(session: Session | null, reauth: boolean): void {
     this.#current = session;
     this.#csrfToken = session?.csrfToken ?? null;
+    this.#reauthRequired = reauth;
     this.#onChange(session, reauth);
     for (const listener of this.#listeners) listener(session, reauth);
   }

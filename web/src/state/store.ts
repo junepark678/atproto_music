@@ -24,6 +24,8 @@ export interface ScrobbleDraftValues {
 export interface ScrobbleDraft {
   /** Drafts belong to the account that started them and never cross accounts. */
   did: string;
+  /** Changes on each edit so an older in-flight write cannot clear a newer draft. */
+  revision: number;
   values: ScrobbleDraftValues;
 }
 
@@ -47,6 +49,8 @@ export interface AppState {
    */
   readonly canPublish: ReadonlySignal<boolean>;
 }
+
+const draftRevision = new WeakMap<AppState, number>();
 
 export function createAppState(options: { api?: ApiClient } = {}): AppState {
   const session = signal<Session | null>(null);
@@ -99,7 +103,9 @@ export function setSession(
 export function setScrobbleDraft(state: AppState, values: ScrobbleDraftValues): void {
   const did = state.session.value?.did;
   if (did === undefined) return;
-  state.scrobbleDraft.value = { did, values: { ...values } };
+  const revision = (draftRevision.get(state) ?? 0) + 1;
+  draftRevision.set(state, revision);
+  state.scrobbleDraft.value = { did, revision, values: { ...values } };
 }
 
 export function clearScrobbleDraft(state: AppState): void {

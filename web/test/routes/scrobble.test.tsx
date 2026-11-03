@@ -4,8 +4,10 @@ import { App } from '../../src/app';
 import { OperationStatus } from '../../src/components/operation-status';
 import { OutboxService } from '../../src/components/outbox-service';
 import { type ScreenServices, ServicesProvider } from '../../src/components/services';
+import type { OutboxOperation } from '../../src/outbox/overlay';
 import { ScrobbleForm } from '../../src/routes/scrobble';
 import { type Session, sessionClient } from '../../src/session/client';
+import { announceSessionReady, listenForSessionReady } from '../../src/session/reauth-channel';
 import { AppStateContext, createAppState, setSession } from '../../src/state/store';
 
 const session: Session = {
@@ -64,6 +66,76 @@ describe('web/test/routes/scrobble.test.tsx', () => {
     await outbox.stop();
   });
 
+  it('a late submit response cannot clear a newer draft after the form remounts', async () => {
+    const outbox = new OutboxService(session, 'com.example.atmusic');
+    let complete!: (value: { ok: true; op: OutboxOperation }) => void;
+    outbox.scrobble = vi.fn(() => new Promise<{ ok: true; op: OutboxOperation }>((resolve) => (complete = resolve)));
+    const state = createAppState();
+    setSession(state, session);
+    const services: ScreenServices = {
+      clock: { nowMs: () => Date.parse('2026-01-15T12:00:00Z') },
+      random: { bytes: (n) => new Uint8Array(n), float: () => 0 },
+      ticker: { every: () => () => undefined },
+      session: async () => ({
+        signIn: async () => undefined,
+        signOut: async () => undefined,
+        expiry: async () => null,
+      }),
+      outbox: async () => outbox,
+      closeOutbox: async () => undefined,
+    };
+    const root = document.createElement('div');
+    const renderForm = () =>
+      render(
+        <AppStateContext.Provider value={state}>
+          <ServicesProvider value={services}>
+            <ScrobbleForm outbox={outbox} />
+          </ServicesProvider>
+        </AppStateContext.Provider>,
+        root,
+      );
+    renderForm();
+    const artist = root.querySelector<HTMLInputElement>('input[name="artist"]')!;
+    const track = root.querySelector<HTMLInputElement>('input[name="track"]')!;
+    artist.value = 'Submitted Artist';
+    artist.dispatchEvent(new Event('input', { bubbles: true }));
+    track.value = 'Submitted Track';
+    track.dispatchEvent(new Event('input', { bubbles: true }));
+    root.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await vi.waitFor(() => expect(outbox.scrobble).toHaveBeenCalledTimes(1));
+
+    render(null, root);
+    renderForm();
+    const restoredArtist = root.querySelector<HTMLInputElement>('input[name="artist"]')!;
+    restoredArtist.value = 'Newer Artist';
+    restoredArtist.dispatchEvent(new Event('input', { bubbles: true }));
+    const newerRevision = state.scrobbleDraft.value?.revision;
+    complete({
+      ok: true,
+      op: {
+        id: 'late-op',
+        did: session.did,
+        kind: 'scrobble_create',
+        uri,
+        state: 'queued',
+        seq: 1,
+        dueAt: Date.now() + 2_000,
+        attempts: 1,
+        notified: true,
+        polls: 0,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      },
+    });
+    await vi.waitFor(() =>
+      expect(root.querySelector<HTMLInputElement>('input[name="artist"]')?.value).toBe('Newer Artist'),
+    );
+    expect(state.scrobbleDraft.value?.revision).toBe(newerRevision);
+    expect(state.scrobbleDraft.value?.values.artist).toBe('Newer Artist');
+    render(null, root);
+    await outbox.stop();
+  });
+
   it('shows sign-in after a 401, then restores the in-memory draft with a fresh write intent after reauthentication', async () => {
     sessionClient().unauthorized();
     const keys: string[] = [];
@@ -107,6 +179,7 @@ describe('web/test/routes/scrobble.test.tsx', () => {
     const updateState = sessionClient().subscribe((current, reauthRequired) => {
       setSession(state, current, null, { reauthRequired });
     });
+    const stopListening = listenForSessionReady(sessionClient());
     vi.spyOn(state.api, 'profile').mockRejectedValue(new Error('profile unavailable'));
     const outboxes: OutboxService[] = [];
     const services: ScreenServices = {
@@ -160,10 +233,14 @@ describe('web/test/routes/scrobble.test.tsx', () => {
       expect(state.reauthRequired.value).toBe(true);
       expect(state.scrobbleDraft.value).toEqual({
         did: session.did,
+        revision: expect.any(Number),
         values: expect.objectContaining({ artist: 'Draft Artist', track: 'Draft Track' }),
       });
 
-      await sessionClient().getSession();
+      // This is the same signal sent by the OAuth callback page after its
+      // full-page redirect. The parent tab refreshes its cookie session while
+      // retaining the draft in memory.
+      announceSessionReady();
       await vi.waitFor(() => expect(root.querySelector('input[name="artist"]')).not.toBeNull());
       expect(root.querySelector<HTMLInputElement>('input[name="artist"]')?.value).toBe('Draft Artist');
       expect(root.querySelector<HTMLInputElement>('input[name="track"]')?.value).toBe('Draft Track');
@@ -180,6 +257,7 @@ describe('web/test/routes/scrobble.test.tsx', () => {
       expect(outboxes.length).toBeGreaterThanOrEqual(2);
     } finally {
       updateState();
+      stopListening();
       sessionClient().unauthorized();
       render(null, root);
       await Promise.all(outboxes.map((outbox) => outbox.stop()));

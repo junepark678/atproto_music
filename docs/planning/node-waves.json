@@ -1490,6 +1490,7 @@
      "python3 scripts/validate_case_map.py --check-tests › every case formerly mapped to web/test/oauth or web/test/outbox maps to an existing worker/test/node replacement",
      "web/test/session/client.test.ts › the app state store holds the server Session DTO, and no module under web/src imports from web/src/oauth",
     "web/test/routes/scrobble.test.tsx › shows sign-in after a 401, then restores the in-memory draft with a fresh write intent after reauthentication",
+    "web/test/routes/scrobble.test.tsx › a late submit response cannot clear a newer draft after the form remounts",
      "web/test/routes/scrobble.test.tsx › invalid input shows field errors and does not create a scrobble operation",
      "web/test/routes/settings.test.tsx › shows server session identity and the public export link without a local browser outbox",
      "web/test/routes/settings.test.tsx › disconnect confirmation explains the public opt-out and sends the confirmed choice",
@@ -1549,6 +1550,7 @@
     "web/tests/restart.spec.ts",
      "web/tests/accessibility.spec.ts",
      "web/tests/settings.spec.ts",
+     "web/tests/reauth.spec.ts",
      "worker/test/e2e/"
     ],
     "dependsOn": [
@@ -1557,12 +1559,13 @@
      "N3-07",
      "N1-13"
     ],
-  "description": "ADR 0005 §5.10, §15.1.\n\n**start-stack** builds the SPA and the e2e bundle (`scripts/build-server.ts --e2e`, worker/dist/node/e2e.mjs from worker/test/e2e/node-entry.ts) and runs it on 127.0.0.1. The entry injects the fixture-host transport, the `fixtureOrigins` config option and the test config; it is the only place fixture hostnames are mapped, and it is never part of main.mjs (ADR §3.9). The entry maps fixture hostnames to the fake AS, PDS, PLC, Jetstream, Last.fm and ListenBrainz served by the stack, behind the existing proxy. Chromium reaches nothing else.\n\n**Journeys:** sign-in through the fake AS authorize page, scrobble, indexed, delete, follow, settings opt-out, and the new links, imports and credentials screens, with axe checks. A test-only loopback control port can SIGKILL and restart e2e.mjs against the same database and session-sealing keys while keeping fixture services alive.\n\n**Removed:** wrangler dev and the dev-env PDS from this stack. **Deleted:** worker/test/e2e/entry.ts and worker/test/e2e/wrangler.e2e.jsonc (the workerd e2e entry), replaced by worker/test/e2e/node-entry.ts; scripts/e2e/dev-env.ts loses every wrangler reference (its fake hosts are served to the Node stack). The dev-env interop moves to N6-02. Fake Last.fm and ListenBrainz come from worker/test/node/support (N1-13).",
+    "description": "ADR 0005 §5.10, §15.1.\n\n**start-stack** builds the SPA and the e2e bundle (`scripts/build-server.ts --e2e`, worker/dist/node/e2e.mjs from worker/test/e2e/node-entry.ts) and runs it on 127.0.0.1. The entry injects the fixture-host transport, the `fixtureOrigins` config option and the test config; it is the only place fixture hostnames are mapped, and it is never part of main.mjs (ADR §3.9). The entry maps fixture hostnames to the fake AS, PDS, PLC, Jetstream, Last.fm and ListenBrainz served by the stack, behind the existing proxy. Chromium reaches nothing else.\n\n**Journeys:** sign-in through the fake AS authorize page, scrobble, indexed, delete, follow, same-account popup reauthentication across the real OAuth callback redirect with the draft retained in the parent tab, settings opt-out, and the new links, imports and credentials screens, with axe checks. A test-only loopback control port can SIGKILL and restart e2e.mjs against the same database and session-sealing keys while keeping fixture services alive.\n\n**Removed:** wrangler dev and the dev-env PDS from this stack. **Deleted:** worker/test/e2e/entry.ts and worker/test/e2e/wrangler.e2e.jsonc (the workerd e2e entry), replaced by worker/test/e2e/node-entry.ts; scripts/e2e/dev-env.ts loses every wrangler reference (its fake hosts are served to the Node stack). The dev-env interop moves to N6-02. Fake Last.fm and ListenBrainz come from worker/test/node/support (N1-13).",
     "tests": [
      "web/tests/mvp.spec.ts › sign-in through the fake AS, scrobble, indexed, delete and follow journeys pass against the Node stack",
     "web/tests/restart.spec.ts › a Node process restart mid-journey keeps the browser session cookie and indexed data, and new writes still index",
      "web/tests/settings.spec.ts › creating an app password, linking ListenBrainz with a fake token, and starting a ListenBrainz import with visible progress",
      "web/tests/accessibility.spec.ts › signin, feed, profile, scrobble, settings/links, settings/imports, settings/credentials and lastfm/authorize have no axe violations",
+     "web/tests/reauth.spec.ts › same-account OAuth reauthentication in a popup preserves the scrobble draft across the callback redirect",
      "web/tests/mvp.spec.ts › the stack runs worker/dist/node/e2e.mjs built from node-entry.ts, and check-node-bundle confirms its worker/src and packages/*/src inputs, except worker/src/node/main.ts, equal those of main.mjs",
      "web/tests/mvp.spec.ts › worker/test/e2e has no entry.ts or wrangler.e2e.jsonc, and neither scripts/e2e/start-stack.ts nor scripts/e2e/dev-env.ts mentions wrangler"
     ]
