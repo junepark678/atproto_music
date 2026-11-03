@@ -726,9 +726,10 @@ describe('scripts/check-ts.sh', () => {
       const failingSteps = stepHeadings(failing.output);
       expect(failingSteps).not.toContain(buildHeading);
       expect(failingSteps.at(-1)).toBe(guardHeading);
-      // Every earlier step ran and passed first, the Workers bundle guard included.
+      // Every earlier step ran and passed first (the Workers bundle guard step is
+      // gone since N7-01 deleted scripts/check-bundle.ts).
       expect(failingSteps).toContain('test (vitest, projects: worker-node)');
-      expect(failingSteps).toContain('production bundle guard (check-bundle.ts)');
+      expect(failingSteps).not.toContain('production bundle guard (check-bundle.ts)');
       expect(failing.output).toContain('check-node-bundle stub: unpinned fetch path in main.mjs');
       expect(failing.output).not.toContain('PASS check-ts');
       const failed = JSON.parse(copy.read('work/gate-durations.json')) as GateDurations;
