@@ -61,7 +61,7 @@ if [[ "$OUT" != "$DEFAULT_OUT" && ! -f "$OUT/$MARKER" && -n "$(ls -A "$OUT" 2>/d
 fi
 echo "output directory of scripts/acceptance/node-backend.sh; its known files are replaced on each run" > "$OUT/$MARKER" || exit 2
 
-stale=(check-ts.jsonl node-tests-report.json node-tests.jsonl e2e-report.json scrobbler-e2e.jsonl python.jsonl
+stale=(scrobbler-e2e/scrobbler-e2e.jsonl check-ts.jsonl node-tests-report.json node-tests.jsonl e2e-report.json scrobbler-e2e.jsonl python.jsonl
   live-gates.txt live-inventory.txt live-inventory.exit tests.jsonl cases.jsonl live.json summary.json)
 for s in "${STEPS[@]}"; do stale+=("$s.log" "$s.status" "$s.command"); done
 for f in "${stale[@]}"; do rm -f -- "${OUT:?}/$f"; done
@@ -151,7 +151,15 @@ step_scrobbler_e2e() {
     echo "scripts/e2e/scrobbler-e2e.ts does not exist; the scrobbler end-to-end suite did not run"
     return 1
   fi
-  ATMUSIC_ACCEPTANCE_RECORDS="$OUT/scrobbler-e2e.jsonl" npx tsx scripts/e2e/scrobbler-e2e.ts
+  local status
+  npx tsx scripts/e2e/scrobbler-e2e.ts --out "$OUT/scrobbler-e2e"
+  status=$?
+  if [[ ! -f "$OUT/scrobbler-e2e/scrobbler-e2e.jsonl" ]]; then
+    echo "scrobbler-e2e emitted no JSONL records in $OUT/scrobbler-e2e"
+    return 1
+  fi
+  cp "$OUT/scrobbler-e2e/scrobbler-e2e.jsonl" "$OUT/scrobbler-e2e.jsonl" || return 1
+  return $status
 }
 
 step_python() {
@@ -301,7 +309,7 @@ echo "node-backend acceptance gate: commit $COMMIT, out ${OUT#"$ROOT"/}"
 run_step check-ts 'bash scripts/check-ts.sh' step_check_ts
 run_step node-tests 'npx vitest run --project worker-node --project worker-acceptance' step_node_tests
 run_step e2e 'npx playwright test' step_e2e
-run_step scrobbler-e2e 'npx tsx scripts/e2e/scrobbler-e2e.ts' step_scrobbler_e2e
+run_step scrobbler-e2e "npx tsx scripts/e2e/scrobbler-e2e.ts --out \"$OUT/scrobbler-e2e\"" step_scrobbler_e2e
 run_step python 'python3 -m unittest (scripts/test_*.py referenced by the case map)' step_python
 run_step check-node-bundle 'npx tsx scripts/check-node-bundle.ts' step_check_node_bundle
 run_step case-map 'python3 scripts/validate_case_map.py --check-tests' step_case_map
@@ -380,16 +388,6 @@ except (ValueError, TypeError, KeyError):
     e2e_records = []
 records += e2e_records
 by_source['e2e'] = len(e2e_records)
-
-# The scrobbler suite without a records file: its "PASS <title>" / "FAIL <title>" lines stand in.
-if by_source['scrobbler-e2e'] == 0 and status['scrobbler-e2e'] not in ('skipped', 'missing'):
-    for line in log['scrobbler-e2e'].splitlines():
-        m = re.fullmatch(r'(PASS|FAIL) (.+)', line.rstrip())
-        if m and not m.group(2).startswith('scrobbler-e2e'):
-            records.append({'target': 'scripts/e2e/scrobbler-e2e.ts' + SEP + m.group(2).strip(), 'command': command['scrobbler-e2e'],
-                            'executed': 1, 'result': 'passed' if m.group(1) == 'PASS' else 'failed', 'commit': commit})
-            by_source['scrobbler-e2e'] += 1
-
 
 def synthetic(target, cmd, ok):
     return {'target': target, 'command': cmd, 'executed': 1, 'result': 'passed' if ok else 'failed', 'commit': commit}

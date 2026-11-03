@@ -346,7 +346,7 @@ class DisposableCopy {
   }
 
   /** scrobbler-e2e.ts stand-in: names every mapped title (for --check-tests) and records them as passed. */
-  private writeScrobblerStub(): void {
+  writeScrobblerStub(mode: 'passed' | 'failed' | 'missing' = 'passed'): void {
     const titles = this.refs.filter((r) => prefixOf(r) === SCROBBLER).map(nameOf);
     mkdirSync(join(this.dir, 'scripts/e2e'), { recursive: true });
     writeFileSync(
@@ -354,20 +354,30 @@ class DisposableCopy {
       [
         '// scrobbler-e2e stand-in for scripts/test/node-backend.test.ts; mapped titles:',
         ...titles.map((t) => `// ${t}`),
-        "import { appendFileSync, writeFileSync } from 'node:fs';",
+        "import { appendFileSync, existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';",
+        "import { join } from 'node:path';",
         `const titles: string[] = ${JSON.stringify(titles)};`,
         `appendFileSync(${JSON.stringify(this.stubLog)}, \`scrobbler-e2e|\${process.argv.slice(2).join(' ')}|\${process.cwd()}\\n\`);`,
-        "const out = process.env.ATMUSIC_ACCEPTANCE_RECORDS ?? '';",
+        "if (process.argv.length !== 4 || process.argv[2] !== '--out') process.exit(2);",
+        'const out = process.argv[3]!;',
+        'mkdirSync(out, { recursive: true });',
+        "const marker = join(out, '.scrobbler-e2e');",
+        'if (readdirSync(out).length > 0 && !existsSync(marker)) process.exit(2);',
+        "writeFileSync(marker, 'scrobbler-e2e owned output\\n');",
         'const records = titles.map((title) => ({',
         `  target: \`${SCROBBLER} › \${title}\`,`,
         `  command: 'npx tsx ${SCROBBLER}',`,
         '  executed: 1,',
-        "  result: 'passed',",
+        `  result: '${mode === 'failed' ? 'failed' : 'passed'}',`,
         "  commit: process.env.ATMUSIC_ACCEPTANCE_COMMIT ?? 'unknown',",
         '}));',
-        "if (out !== '') writeFileSync(out, records.map((r) => `${JSON.stringify(r)}\\n`).join(''));",
-        'for (const title of titles) console.log(`PASS ${title}`);',
-        'console.log(`scrobbler-e2e stub: ${titles.length} scenario(s) passed`);',
+        ...(mode === 'missing'
+          ? ['for (const title of titles) console.log(`PASS ${title}`);']
+          : [
+              "writeFileSync(join(out, 'scrobbler-e2e.jsonl'), records.map((r) => `${JSON.stringify(r)}\\n`).join(''));",
+            ]),
+        'console.log(`scrobbler-e2e stub: ${titles.length} scenario(s)`);',
+        `process.exitCode = ${mode === 'failed' ? 1 : 0};`,
         '',
       ].join('\n'),
     );
@@ -548,11 +558,20 @@ describe('scripts/acceptance/node-backend.sh', () => {
       expect(tests.some((t) => t.target === vitestTarget && t.executed === 1 && t.result === 'passed')).toBe(true);
       expect(existsSync(join(copy.out(), '.node-backend-gate'))).toBe(true);
       expect(existsSync(join(copy.out(), 'live.json'))).toBe(true);
+      const replayRecords = copy.jsonl<TestRecord>('scrobbler-e2e.jsonl');
+      expect(replayRecords).toEqual(copy.jsonl<TestRecord>('scrobbler-e2e/scrobbler-e2e.jsonl'));
+      expect(replayRecords.length).toBeGreaterThan(0);
+      expect(tests.filter((t) => t.target.startsWith(`${SCROBBLER} › `))).toEqual(replayRecords);
+      expect(cases.find((c) => c.case === 'M3.4.3/live_retries')?.result).toBe('passed');
+      expect(cases.find((c) => c.case === 'M7.4.3/live_product')?.result).toBe('blocked');
       const calls = copy.calls();
       const names = stubNames(calls);
       expect(names.filter((n) => n === 'check-ts')).toHaveLength(1);
       expect(names.filter((n) => n === 'goldens')).toHaveLength(1);
       expect(names.filter((n) => n === 'scrobbler-e2e')).toHaveLength(1);
+      expect(calls.find((c) => c.startsWith('scrobbler-e2e|'))).toBe(
+        `scrobbler-e2e|--out ${join(copy.out(), 'scrobbler-e2e')}|${copy.dir}`,
+      );
       expect(names.filter((n) => n === 'check-node-bundle')).toHaveLength(1);
       expect(names.filter((n) => n === 'systemd-analyze')).toHaveLength(1);
       expect(calls.find((c) => c.startsWith('systemd-analyze|'))).toContain(
@@ -563,6 +582,30 @@ describe('scripts/acceptance/node-backend.sh', () => {
       ).toHaveLength(1);
       expect(calls.filter((c) => c.startsWith('npx|playwright test'))).toHaveLength(1);
       for (const call of calls) expect(call.endsWith(`|${copy.dir}`), call).toBe(true);
+
+      // A zero-exit replay with only PASS log lines cannot reuse the preceding run's JSONL.
+      copy.writeScrobblerStub('missing');
+      const missingReplay = copy.gate([]);
+      expect(missingReplay.status, missingReplay.stdout + missingReplay.stderr).toBe(1);
+      expect(copy.status('scrobbler-e2e')).toBe('1');
+      expect(copy.summary().tests.bySource['scrobbler-e2e']).toBe(0);
+      expect(existsSync(join(copy.out(), 'scrobbler-e2e.jsonl'))).toBe(false);
+      expect(existsSync(join(copy.out(), 'scrobbler-e2e/scrobbler-e2e.jsonl'))).toBe(false);
+      expect(copy.jsonl<CaseRecord>('cases.jsonl').find((c) => c.case === 'M3.4.3/live_retries')?.notRun).toEqual(
+        mapped.refs.filter((r) => prefixOf(r) === SCROBBLER),
+      );
+      copy.calls();
+
+      // Failed JSONL records are ingested even when the replay process exits nonzero.
+      copy.writeScrobblerStub('failed');
+      const failedReplay = copy.gate([]);
+      expect(failedReplay.status, failedReplay.stdout + failedReplay.stderr).toBe(1);
+      expect(copy.summary().tests.bySource['scrobbler-e2e']).toBe(replayRecords.length);
+      expect(copy.jsonl<CaseRecord>('cases.jsonl').find((c) => c.case === 'M3.4.3/live_retries')?.failedTests).toEqual(
+        mapped.refs.filter((r) => prefixOf(r) === SCROBBLER),
+      );
+      copy.calls();
+      copy.writeScrobblerStub();
 
       // 2. systemd-analyze unavailable: the deterministic step is blocked, never passed, and the gate fails.
       const blocked = copy.gate([], { withoutSystemdAnalyze: true });
@@ -621,7 +664,7 @@ describe('scripts/acceptance/node-backend.sh', () => {
       expect(notRunSummary.cases.failed).toBe(omittedCases.length);
 
       // 5. --skip disables a step: it is recorded as skipped and the gate fails; other steps still run.
-      const skipped = copy.gate(['--skip', 'goldens', '--skip', 'e2e']);
+      const skipped = copy.gate(['--skip', 'goldens', '--skip', 'e2e', '--skip', 'scrobbler-e2e']);
       expect(skipped.status, skipped.stdout + skipped.stderr).toBe(1);
       expect(skipped.stdout).toMatch(/^==> goldens: SKIPPED \(--skip goldens; a disabled step fails the gate\)$/m);
       const skippedSummary = copy.summary();
@@ -637,6 +680,7 @@ describe('scripts/acceptance/node-backend.sh', () => {
       expect(skippedSummary.problems).toContain('step e2e was disabled with --skip; a disabled step is never a pass');
       expect(skippedSummary.problems.some((p) => /^case .*: not executed: /.test(p))).toBe(true);
       expect(skippedSummary.tests.bySource.e2e).toBe(0);
+      expect(skippedSummary.tests.bySource['scrobbler-e2e']).toBe(0);
       expect(stubNames(copy.calls())).not.toContain('goldens');
 
       // 6. Usage errors exit 2 before any step runs.
@@ -667,6 +711,9 @@ describe('scripts/acceptance/node-backend.sh', () => {
       const freshOut = join(copy.dir, 'fresh-out');
       expect(existsSync(join(freshOut, '.node-backend-gate'))).toBe(true);
       expect(stepOf(copy.summary(freshOut), 'live').exit).toBe('skipped');
+      expect(copy.jsonl<TestRecord>('scrobbler-e2e/scrobbler-e2e.jsonl', freshOut)).toEqual(
+        copy.jsonl<TestRecord>('scrobbler-e2e.jsonl', freshOut),
+      );
       expect(copy.summary(freshOut).problems).toContain(
         'step live was disabled with --skip; a disabled step is never a pass',
       );

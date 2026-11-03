@@ -43,7 +43,7 @@ run shows every problem. Each step writes `<step>.command` (the command line),
 | `check-ts` | `bash scripts/check-ts.sh` | Typecheck, lint, contract validation, unit suites; produces `check-ts.jsonl` test records. |
 | `node-tests` | `npx vitest run --project worker-node --project worker-acceptance` | Node runtime and acceptance suites; produces `node-tests-report.json` and `node-tests.jsonl`. |
 | `e2e` | `npx playwright test` | Browser end-to-end suites; produces `e2e-report.json`. |
-| `scrobbler-e2e` | `npx tsx scripts/e2e/scrobbler-e2e.ts` | Scrobbler end-to-end run against the fixture world; produces `scrobbler-e2e.jsonl` (the `PASS`/`FAIL <title>` log lines are the fallback). |
+| `scrobbler-e2e` | `npx tsx scripts/e2e/scrobbler-e2e.ts --out "$OUT/scrobbler-e2e"` | Process-backed fixture replay; copies the emitted `scrobbler-e2e/scrobbler-e2e.jsonl` to `scrobbler-e2e.jsonl` for closure, including failed records on a nonzero exit. Missing JSONL fails the step; log lines cannot replace records. |
 | `python` | `python3 -m unittest` over every `scripts/test_*.py` the case map or wave plan references | Python tooling suites; produces `python.jsonl`. |
 | `check-node-bundle` | `npx tsx scripts/check-node-bundle.ts` | Guards the Node bundle and prints `bundle sha256 <hex>  main.mjs`, the SHA-256 the live step binds to. |
 | `case-map` | `python3 scripts/validate_case_map.py --check-tests` | Unrestricted case-map check (no `--node-wave`): every one of the 258 cases must map to an existing Node test or a retirement with a reason. A pending target fails the gate (ADR 0005 §15.3). |
