@@ -39,11 +39,11 @@ describe('parseConfig namespace gate', () => {
       fixturePrefix: false,
       configuredIngestMode: 'socket',
       ingestMode: 'off',
-      plan: 'paid',
       adminEnabled: false,
       jetstreamUrls: ['wss://jetstream.us-east.bsky.network', 'wss://jetstream.us-west.bsky.network'],
       jetstreamLookbackHours: 24,
     });
+    expect(config).not.toHaveProperty('plan');
     expect(config.budget).toEqual({
       drainHints: 200,
       subrequestsPerSlice: 200,
@@ -235,7 +235,8 @@ describe('parseConfig namespace gate', () => {
     // The Workers-era pulse mode is no longer a value (N7-01, B17).
     expect(issuesOf(() => parseConfig({ ...BASE, INGEST_MODE: 'pulse' }))).toEqual(['INGEST_MODE']);
     const admin = parseConfig({ ...BASE, ADMIN_TOKEN: 'a'.repeat(32) });
-    expect(admin).toMatchObject({ plan: 'paid', adminEnabled: true });
+    expect(admin).toMatchObject({ adminEnabled: true });
+    expect(admin).not.toHaveProperty('plan');
     expect(admin.budget.subrequestsPerSlice).toBe(200);
     expect(Object.keys(admin)).not.toContain('doLocationHint');
     expect(JSON.stringify(admin)).not.toContain('a'.repeat(32));

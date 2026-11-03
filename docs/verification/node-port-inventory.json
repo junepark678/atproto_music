@@ -2813,7 +2813,9 @@
         "verify drain"
       ],
       "title": "Paid drain works 200 cached-identity hints in one slice: 200 getRecord calls",
-      "kept": true
+      "replaced": "worker/test/ingest/verify-drain.test.ts › verify drain › the configured drain budget handles 200 cached-identity hints in one slice",
+      "package": "N7-01",
+      "reason": "N7-01 removed the Workers PLAN tier; this regression now checks the single configured Node drain budget without a paid-tier selector."
     },
     {
       "id": "worker/test/ingest/verify-drain.test.ts › verify drain › PLAN=free drain stays within 40 subrequests per slice",
@@ -2822,7 +2824,9 @@
         "verify drain"
       ],
       "title": "PLAN=free drain stays within 40 subrequests per slice",
-      "kept": true
+      "replaced": "worker/test/ingest/verify-drain.test.ts › verify drain › drain respects an explicitly supplied tight subrequest budget",
+      "package": "N7-01",
+      "reason": "N7-01 removed the Workers PLAN tier; the test now injects a tight test budget directly and does not select a runtime plan."
     },
     {
       "id": "worker/test/read/cursor-http.test.ts › cursor traversal over HTTP › arrival above anchor absent until fresh traversal; deleted unreturned record disappears",
