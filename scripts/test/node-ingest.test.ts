@@ -10,6 +10,7 @@ import {
   deadlineTimer,
   type IngestDependencies,
   NODE_INGEST_ENV,
+  recoverPdsCreate,
   runNodeIngest,
   spec,
 } from '../live/node_ingest_check.ts';
@@ -594,7 +595,7 @@ test('stale absence revisions remain unresolved without replaying either delete'
   expect(result.subjects.every((subject) => subject.unresolved)).toBe(true);
 });
 
-test('PDS CID mismatch fails acceptance without deleting an unverified record, and identity/PDS mismatch blocks before browser launch', async () => {
+test('PDS CID and verified-content mismatches fail acceptance without deleting an unverified record', async () => {
   const mismatch = mockDependencies({ wrongPdsCid: true });
   const failures: string[] = [];
   const mismatchResult = await runNodeIngest(makeContext(failures, []), mismatch.deps);
@@ -602,18 +603,57 @@ test('PDS CID mismatch fails acceptance without deleting an unverified record, a
   expect(mismatch.deletePosts()).toMatchObject({ pdsDeletePosts: 0 });
   expect(mismatchResult.subjects[1]).toMatchObject({ did: DID_B, unresolved: true });
 
-  const wrongContent = mockDependencies({ losePdsCreateResponse: true, wrongProofRecord: true });
+  const wrongContent = mockDependencies({ wrongProofRecord: true });
   const contentFailures: string[] = [];
   const contentResult = await runNodeIngest(makeContext(contentFailures, []), wrongContent.deps);
-  expect(contentFailures).toContain('Node ingest failed during PDS B scrobble submission');
+  expect(contentFailures).toContain('Node ingest failed during PDS B scrobble indexing');
   expect(wrongContent.deletePosts()).toMatchObject({ pdsDeletePosts: 0 });
   expect(contentResult.subjects[1]).toMatchObject({ did: DID_B, unresolved: true });
+});
 
+test('identity/PDS mismatch blocks before browser launch', async () => {
   const identity = mockDependencies({ mismatchIdentity: true });
   const identityFailures: string[] = [];
   await runNodeIngest(makeContext(identityFailures, []), identity.deps);
   expect(identityFailures).toContain('Node ingest failed during PDS identity checks');
   expect(identity.browserCalls.launched).toBe(0);
+});
+
+test('successful recovery spends only the remaining deadline on independent proof', async () => {
+  const { deps } = mockDependencies();
+  const record = { artist: 'recovery', track: 'bounded' };
+  let proofTimeout = Number.POSITIVE_INFINITY;
+  deps.httpJson = vi.fn(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    return {
+      status: 200,
+      headers: new Headers(),
+      json: { uri: `at://${DID_B}/org.atproto.music.scrobble/3jzfcijpj2z2b`, cid: CID_B, value: record },
+    };
+  });
+  deps.verifyRecordAt = vi.fn(async (_did, _collection, _rkey, timeoutMs) => {
+    proofTimeout = timeoutMs ?? Number.POSITIVE_INFINITY;
+    return {
+      state: 'present' as const,
+      cid: CID_B,
+      rev: REV_PRESENT,
+      commitCid: CID_A,
+      pds: goodEnv[ENV.pdsB]!,
+      record,
+    };
+  });
+  const deadlineAt = performance.now() + 250;
+  const recovered = await recoverPdsCreate(
+    deps,
+    goodEnv[ENV.pdsB]!,
+    DID_B,
+    'org.atproto.music.scrobble',
+    '3jzfcijpj2z2b',
+    record,
+    deadlineAt,
+  );
+  expect(recovered).toMatchObject({ uri: URI_B, cid: CID_B, rev: REV_PRESENT });
+  expect(proofTimeout).toBeLessThan(210);
 });
 
 test('stalled browser response and body consumption are bounded by the shared total timeout', async () => {
@@ -625,6 +665,19 @@ test('stalled browser response and body consumption are bounded by the shared to
   expect(failures).toContain('Node ingest failed during app scrobble indexing');
   expect(browserCalls.closed).toBe(1);
   expect(browserCalls.contextClosed).toBe(1);
+});
+
+test('a browser launch resolving after its phase deadline is closed', async () => {
+  const { deps, browserCalls } = mockDependencies();
+  const startBrowser = deps.browser;
+  deps.browser = async () => {
+    await new Promise((resolve) => setTimeout(resolve, 850));
+    return startBrowser();
+  };
+  const failures: string[] = [];
+  await runNodeIngest(makeContext(failures, [], { ...goodEnv, [NODE_INGEST_ENV.timeoutSeconds]: '1' }), deps);
+  expect(failures).toContain('Node ingest failed during PDS identity checks');
+  await vi.waitFor(() => expect(browserCalls.closed).toBe(1), { timeout: 1_000 });
 });
 
 test('cleanup failure marks the URI left behind and fails the gate', async () => {

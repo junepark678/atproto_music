@@ -236,7 +236,10 @@ async function appUiSignIn(
   if (context.env[OAUTH_ENV.interactive] !== '1') {
     await password.waitFor({ state: 'visible', timeout: actionTimeout() });
     const identifier = page.locator('input[autocomplete="username"], input[name="username"]').first();
-    if ((await identifier.isVisible().catch(() => false)) && (await identifier.inputValue()) === '') {
+    if (
+      (await identifier.isVisible().catch(() => false)) &&
+      (await identifier.inputValue({ timeout: actionTimeout() })) === ''
+    ) {
       await identifier.fill(context.get(OAUTH_ENV.handleA), { timeout: actionTimeout() });
     }
     await password.fill(context.get(OAUTH_ENV.passwordA), { timeout: actionTimeout() });
@@ -337,18 +340,18 @@ async function pdsDelete(
   return field<string>(field(response.json, 'commit'), 'rev') ?? null;
 }
 
-async function recoverPdsCreate(
+export async function recoverPdsCreate(
   deps: IngestDependencies,
   pds: string,
   did: string,
   collection: string,
   rkey: string,
   intendedRecord: object,
-  timeoutMs = 15_000,
+  deadlineAt: number,
 ): Promise<Written | null> {
   const response = await deps.httpJson(xrpcUrl(pds, 'com.atproto.repo.getRecord', { repo: did, collection, rkey }), {
     method: 'GET',
-    timeoutMs,
+    timeoutMs: remainingMs(deadlineAt),
   });
   if (response.status === 404) return null;
   expect(response.status === 200, `PDS B getRecord returned HTTP ${response.status}`);
@@ -363,7 +366,7 @@ async function recoverPdsCreate(
   expect(uri === expectedUri, 'PDS B getRecord returned a different URI');
   const intendedDigest = await canonicalDigest(intendedRecord);
   expect((await canonicalDigest(value)) === intendedDigest, 'PDS B record at intended key conflicts with this run');
-  const proof = await deps.verifyRecordAt(did, collection, rkey, timeoutMs);
+  const proof = await deps.verifyRecordAt(did, collection, rkey, remainingMs(deadlineAt));
   expect(proof.state === 'present' && proof.cid === cid, 'PDS B recovery CID lacks matching independent proof');
   expect(
     proof.record !== undefined && (await canonicalDigest(proof.record)) === intendedDigest,
@@ -469,6 +472,7 @@ async function awaitIndexed(
   receipt: { kind: 'operation'; dto: Record<string, unknown> } | { kind: 'pds'; completedAt: string },
   timeoutMs: number,
   deps: IngestDependencies,
+  expectedRecord?: object,
 ) {
   const deadline = performance.now() + timeoutMs;
   const done = await pollUntil(
@@ -490,6 +494,13 @@ async function awaitIndexed(
     written.cid === statusCid && statusCid === proof.cid,
     `${written.uri}: operation CID ${written.cid}, status CID ${statusCid}, and independent proof CID ${proof.cid} differ`,
   );
+  if (expectedRecord !== undefined) {
+    const expectedDigest = await canonicalDigest(expectedRecord);
+    expect(
+      proof.record !== undefined && (await canonicalDigest(proof.record)) === expectedDigest,
+      `${written.uri}: independently verified PDS content differs from the intended record`,
+    );
+  }
   const updatedAt =
     receipt.kind === 'operation' ? opUpdatedAtMs(receipt.dto, written.uri) : Date.parse(receipt.completedAt);
   expect(Number.isFinite(updatedAt), `${written.uri}: write receipt has no valid timestamp`);
@@ -603,12 +614,30 @@ export async function runNodeIngest(
     await deps.checkIdentityPds(didA, pds[0]!.endpoint, phaseBudgetMs());
     await deps.checkIdentityPds(didB, pds[1]!.endpoint, phaseBudgetMs());
     const browserLaunch = deps.browser();
+    const launchState: { abandoned: boolean; browser: Browser | null; closed: boolean } = {
+      abandoned: false,
+      browser: null,
+      closed: false,
+    };
+    const closeLateLaunch = () => {
+      if (launchState.abandoned && launchState.browser !== null && !launchState.closed) {
+        launchState.closed = true;
+        void launchState.browser.close().catch(() => undefined);
+      }
+    };
     browserLaunch
       .then((lateBrowser) => {
-        if (browser === null && performance.now() >= deadlineAt) void lateBrowser.close().catch(() => undefined);
+        launchState.browser = lateBrowser;
+        closeLateLaunch();
       })
       .catch(() => undefined);
-    browser = await withTimeout(browserLaunch, phaseBudgetMs(), 'browser launch');
+    try {
+      browser = await withTimeout(browserLaunch, phaseBudgetMs(), 'browser launch');
+    } catch (error) {
+      launchState.abandoned = true;
+      closeLateLaunch();
+      throw error;
+    }
     browserContext = await withTimeout(browser.newContext(), phaseBudgetMs(), 'browser context creation');
     page = await withTimeout(browserContext.newPage(), phaseBudgetMs(), 'browser page creation');
     phase = 'browser sign-in';
@@ -724,6 +753,7 @@ export async function runNodeIngest(
       { kind: 'pds', completedAt: externalWriteAt },
       phaseBudgetMs(),
       deps,
+      intendedRecord,
     );
     results.externalPublish = externalIndexed;
     externalRecord.presentRev = String(externalIndexed.verifiedRev);
@@ -911,7 +941,7 @@ export async function runNodeIngest(
           parsed.collection,
           parsed.rkey,
           record.requestBody,
-          Math.min(cleanupBudgetMs(), 15_000),
+          performance.now() + Math.min(cleanupBudgetMs(), 15_000),
         );
         if (recovered === null) {
           context.fail(
