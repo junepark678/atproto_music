@@ -457,7 +457,6 @@ Places where a package's tree differs from its `files` entry in [node-waves.json
 
 **Requested owner amendment:** in the N1-02 `tests` entry, replace the first title with the title in the tree. N7-01, which deletes index-do.ts, then drops the re-export half of the second test (and renames it).
 
-
 ## N6-02 dev-env OAuth preflight classification
 
 The dev-env OAuth preflight is an advisory fixture check, not the production
@@ -471,3 +470,16 @@ until an offline interop harness records accepted exchange, four-collection
 grant, CRUD, supersession, and upstream-revocation observations. Those fixture
 observations do not satisfy live OAuth evidence from two independently
 operated PDSs or close N6-02.
+
+### N5-02 additive delete-target index (migration 4)
+
+The operations-aware 100,000-listen benchmark retains its bounded 256-operation
+fixture (250 succeeded creates and six deletes). Its pre-index plans probed
+`operations_did_state (did=?)` for each visibility check. Migration 4 adds the
+partial `operations_scrobble_delete_target(did,rkey)` index for
+`kind='scrobble.delete'`, without changing public reads, API contracts, delete
+state/CID semantics, applied migrations 1–3, or the compatibility floor of 2.
+Post-index plans and timings are recorded in
+[the protocol-read report](../benchmarks/node-protocol-reads.md). These are
+uncontrolled synthetic observations, not evidence of lifetime scaling or a
+measurement of migration cost; no live services are involved.
