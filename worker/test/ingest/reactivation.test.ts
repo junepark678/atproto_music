@@ -8,7 +8,7 @@
 import { followRkey, seedReadModels } from '@atmusic/atproto/test-support/read-models';
 import type { FixtureTransport } from '@atmusic/atproto/test-support/router-transport';
 import { describe, expect, it } from 'vitest';
-import { BUDGETS, type SliceBudget } from '../../src/config';
+import { DEFAULT_SLICE_BUDGET, type SliceBudget } from '../../src/config';
 import type { RepoJobRow } from '../../src/do/contracts';
 import type { Db } from '../../src/do/db';
 import { admit } from '../../src/do/ingest/admission';
@@ -26,7 +26,7 @@ const STATUS = 'com.atproto.sync.getRepoStatus';
 const ALICE_HISTORY = ['r07', 'r01', 'r02', 'r03', 'r04', 'r05', 'r06'];
 
 function deps(db: Db, k: Awaited<ReturnType<typeof kit>>, transport: FixtureTransport = k.transport): Deps {
-  const base = depsFor(db, k, { plan: 'paid' });
+  const base = depsFor(db, k);
   return {
     ...base,
     transport,
@@ -134,7 +134,7 @@ describe('deactivation and reactivation', () => {
       expect(visible(m, alice)).toEqual([]);
 
       // The snapshot runs in slices; between them Alice stays hidden.
-      const budget: SliceBudget = { ...BUDGETS.paid, maxEntriesPerSlice: 3 };
+      const budget: SliceBudget = { ...DEFAULT_SLICE_BUDGET, maxEntriesPerSlice: 3 };
       const outcomes: string[] = [];
       for (;;) {
         const r = await snapshotStep(m, T0, budget);
@@ -244,7 +244,7 @@ describe('deactivation and reactivation', () => {
       // Reactivation: a fresh walk at g2. A deactivation again between its slices
       // supersedes it at the next claim, before any request is made.
       expect(reactivate(db, alice, T0)).toEqual({ changed: true, schedule: { status: 'scheduled', generation: g2 } });
-      const budget: SliceBudget = { ...BUDGETS.paid, maxEntriesPerSlice: 2 };
+      const budget: SliceBudget = { ...DEFAULT_SLICE_BUDGET, maxEntriesPerSlice: 2 };
       expect((await snapshotStep(m, T0, budget)).outcome).toBe('paused');
       const g3 = (deactivate(db, alice, 'takendown') as { generation: number }).generation;
       const before = k.pds.Alice.calls.entries.length;

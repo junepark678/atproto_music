@@ -65,9 +65,7 @@
 //   Then `identity-sweep` is due again in one day.
 //
 // Both sweeps reserve subrequests before every network step (pds-budget.ts
-// SubrequestMeter): Free uses the plan's 40 per slice; Paid backstops at the
-// batch's worst case (so a full batch fits) under the 10,000 per invocation.
-// No `db.tx` spans an await.
+// SubrequestMeter), sized so the full bounded batch fits. No `db.tx` spans an await.
 
 import { claimedHandle, type DidDocument, isIdentityError } from '@atmusic/atproto/identity/did-doc';
 import { createSafeFetch, isSafeFetchError } from '@atmusic/atproto/net/safe-fetch';
@@ -504,10 +502,9 @@ export async function checkIdentity(
   });
 }
 
-/** A fresh subrequest meter for one identity-sweep slice (Free: the plan's slice limit). */
+/** A fresh subrequest meter sized for one identity-sweep slice. */
 function identityMeter(m: Pick<ModuleDeps, 'config'>): SubrequestMeter {
   const budget = m.config.budget;
-  if (m.config.plan === 'free') return new SubrequestMeter(budget.subrequestsPerSlice);
   return new SubrequestMeter(
     Math.max(budget.subrequestsPerSlice, IDENTITY_SWEEP_BATCH * (IDENTITY_RESOLVE_COST + HANDLE_RECHECK_COST)),
   );

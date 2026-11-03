@@ -25,6 +25,7 @@ import { describe, expect, it } from 'vitest';
 import openapiText from '../../../api/openapi.yaml?raw';
 import type { IngestMode } from '../../src/config';
 import type { Db, SqlParam } from '../../src/do/db';
+import { readIngestCheckpoint } from '../../src/do/ingest/checkpoint';
 import {
   GAP_REASON,
   indexing,
@@ -757,7 +758,8 @@ describe('indexing status truth', () => {
         updated_at_ms: t1 + 20 * SECOND,
       });
 
-      // Pulse mode (the Free default). Six hours ago a pulse delivered an event.
+      // Legacy pulse checkpoint rows remain readable after the Node runtime
+      // retires pulse connections. Six hours ago a pulse delivered an event.
       const T = now + 6 * 60 * MINUTE;
       db.tx(() => markConnected(db, T - 6 * 60 * MINUTE));
       db.tx(() => recordEvent(db, event((T - 6 * 60 * MINUTE) * 1000)));
@@ -774,12 +776,15 @@ describe('indexing status truth', () => {
       db.tx(() => markConnected(db, pulse));
       db.tx(() => recordEvent(db, event((pulse - 2 * SECOND) * 1000)));
       db.tx(() => markDisconnected(db, pulse + 20 * SECOND));
-      expect(read(db, pulse + MINUTE, 'pulse')).toEqual({
+      db.run("UPDATE ingest_checkpoint SET mode = 'pulse' WHERE stream = 'jetstream'");
+      expect(readIngestCheckpoint(db).mode).toBe('pulse');
+      expect(read(db, pulse + MINUTE, 'socket')).toEqual({
         state: 'current',
-        caughtUp: true,
+        caughtUp: false,
         lastIndexedAt: null,
         lagSeconds: 62,
       });
+      expect(readIngestCheckpoint(db).mode).toBe('pulse');
     });
   });
 

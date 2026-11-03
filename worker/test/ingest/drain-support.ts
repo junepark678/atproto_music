@@ -8,7 +8,7 @@
 
 import { createFixtureKit, type FixtureKit } from '@atmusic/atproto/test-support/read-models';
 import { seededRandom } from '@atmusic/core/test-support/random';
-import { BUDGETS, type Plan, parseConfig, type SliceBudget } from '../../src/config';
+import { DEFAULT_SLICE_BUDGET, parseConfig, type SliceBudget } from '../../src/config';
 import type { Logger, LogLevel, ModuleDeps } from '../../src/do/contracts';
 import type { Db } from '../../src/do/db';
 import { enqueueHints, type HintInput } from '../../src/do/ingest/hints';
@@ -18,11 +18,10 @@ import { INGEST_TEST_ENV } from './node-index';
 export const GET_RECORD = 'com.atproto.sync.getRecord';
 
 /**
- * The Workers-era free-tier slice budget (ADR 0004 §5.7), kept TEST-ONLY after
- * N7-01 retired `BUDGETS.free` (B17) so the drain suites can still exercise a
- * tight per-slice subrequest ceiling.
+ * A deliberately tight test budget so the drain suites can exercise a small
+ * per-slice subrequest ceiling without a runtime budget tier.
  */
-export const FREE_BUDGET: SliceBudget = { ...BUDGETS.paid, drainHints: 40, subrequestsPerSlice: 40 };
+export const TIGHT_TEST_BUDGET: SliceBudget = { ...DEFAULT_SLICE_BUDGET, drainHints: 2, subrequestsPerSlice: 40 };
 
 export interface LogEntry {
   level: LogLevel;
@@ -45,10 +44,9 @@ export interface Deps extends ModuleDeps {
 }
 
 /** ModuleDeps for the test database's Db over the kit's fixture network (test entry config). */
-export function depsFor(db: Db, kit: FixtureKit, o: { plan?: Plan } = {}): Deps {
+export function depsFor(db: Db, kit: FixtureKit, o: { budget?: SliceBudget } = {}): Deps {
   const base = parseConfig({ ...INGEST_TEST_ENV, ADMIN_TOKEN: '' }, { allowFixturePrefix: true });
-  const plan = o.plan ?? base.plan;
-  const config = { ...base, plan, budget: plan === 'free' ? FREE_BUDGET : BUDGETS.paid };
+  const config = { ...base, budget: o.budget ?? DEFAULT_SLICE_BUDGET };
   return {
     db,
     clock: kit.clock,
@@ -73,7 +71,7 @@ export function enqueue(db: Db, hints: HintInput[]): string[] {
 
 /** A paid budget with a lower hint count, for tests that step the drain. */
 export function budget(o: Partial<SliceBudget> = {}): SliceBudget {
-  return { ...BUDGETS.paid, ...o };
+  return { ...DEFAULT_SLICE_BUDGET, ...o };
 }
 
 /** Rows of the tables a rejected proof must leave byte-identical (ADR 0004 §7.6). */

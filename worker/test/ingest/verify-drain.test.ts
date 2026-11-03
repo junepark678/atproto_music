@@ -28,6 +28,7 @@ import {
   kit,
   protectedTables,
   snapshotJobs,
+  TIGHT_TEST_BUDGET,
 } from './drain-support';
 import { withIngestIndex } from './node-index';
 
@@ -943,7 +944,7 @@ describe('verify drain', () => {
     });
   });
 
-  it('Paid drain works 200 cached-identity hints in one slice: 200 getRecord calls', async () => {
+  it('the configured drain budget handles 200 cached-identity hints in one slice', async () => {
     const k = await kit();
     const S = k.collections.scrobble;
     // Ten writers (20 hints each, below the coalescing threshold) on the kit's three hosts.
@@ -976,7 +977,7 @@ describe('verify drain', () => {
 
     await withIngestIndex(async (i) => {
       const db = i.db;
-      const m = depsFor(db, k, { plan: 'paid' });
+      const m = depsFor(db, k);
       expect(m.config.budget).toMatchObject({ drainHints: 200, concurrentFetches: 4, perHostConcurrency: 2 });
       for (const repo of repos) {
         seedUser(db, repo.did);
@@ -1007,7 +1008,7 @@ describe('verify drain', () => {
     });
   });
 
-  it('PLAN=free drain stays within 40 subrequests per slice', async () => {
+  it('drain respects an explicitly supplied tight subrequest budget', async () => {
     const k = await kit();
     const alice = k.users.Alice.did;
     const S = k.collections.scrobble;
@@ -1022,18 +1023,19 @@ describe('verify drain', () => {
 
     await withIngestIndex(async (i) => {
       const db = i.db;
-      const m = depsFor(db, k, { plan: 'free' });
-      expect(m.config.budget).toMatchObject({ drainHints: 40, subrequestsPerSlice: 40 });
+      const m = depsFor(db, k, { budget: TIGHT_TEST_BUDGET });
+      expect(m.config.budget).toMatchObject({ drainHints: 2, subrequestsPerSlice: 40 });
       seedUser(db, alice);
       enqueue(
         db,
         ops.map((o) => hint(k, alice, S, o.rkey)),
       );
       let total = 0;
-      for (let slice = 0; slice < 5 && db.one<{ n: number }>('SELECT count(*) AS n FROM hints')!.n > 0; slice++) {
+      for (let slice = 0; slice < 12 && db.one<{ n: number }>('SELECT count(*) AS n FROM hints')!.n > 0; slice++) {
         const before = k.transport.calls.count();
         const report = await drain(m, k.clock.nowMs(), m.config.budget);
         const sent = k.transport.calls.count() - before;
+        expect(report.claimed).toBeLessThanOrEqual(2);
         // What was actually sent never exceeds what was reserved, which never exceeds 40.
         expect(report.subrequests).toBeLessThanOrEqual(40);
         expect(sent).toBeLessThanOrEqual(report.subrequests);

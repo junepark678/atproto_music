@@ -9,7 +9,7 @@
 import { seedReadModels } from '@atmusic/atproto/test-support/read-models';
 import type { FixtureTransport } from '@atmusic/atproto/test-support/router-transport';
 import { describe, expect, it } from 'vitest';
-import { BUDGETS } from '../../src/config';
+import { DEFAULT_SLICE_BUDGET } from '../../src/config';
 import type { RepoJobRow } from '../../src/do/contracts';
 import type { Db } from '../../src/do/db';
 import { admit } from '../../src/do/ingest/admission';
@@ -38,7 +38,7 @@ const GET_BLOCKS = 'com.atproto.sync.getBlocks';
 type Kit = Awaited<ReturnType<typeof kit>>;
 
 function deps(db: Db, k: Kit, transport: FixtureTransport = k.transport): Deps {
-  const base = depsFor(db, k, { plan: 'paid' });
+  const base = depsFor(db, k);
   return {
     ...base,
     transport,
@@ -363,7 +363,7 @@ describe('gap recovery', () => {
       expect(job(db, carol)).toMatchObject({ state: 'failed', failure_code: 'bad_response' });
       // Alice: a walk in progress, paused between slices with its frontier.
       expect(admit(db, alice, 'jetstream', T0).status).toBe('admitted');
-      expect((await snapshotStep(m, T0, { ...BUDGETS.paid, maxEntriesPerSlice: 2 })).outcome).toBe('paused');
+      expect((await snapshotStep(m, T0, { ...DEFAULT_SLICE_BUDGET, maxEntriesPerSlice: 2 })).outcome).toBe('paused');
       expect(job(db, alice)).toMatchObject({ state: 'pending', head_cid: seed.heads.Alice.cid, attempts: 0 });
       // Bob (due first): a slice in flight, held at its first MST node fetch.
       expect(admit(db, bob, 'jetstream', T0 - 1).status).toBe('admitted');

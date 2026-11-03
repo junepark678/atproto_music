@@ -13,7 +13,7 @@
 //
 // - INGEST_MODE is `socket` or `off`. The Workers-era `pulse` mode, PLAN tier
 //   and DO_LOCATION_HINT were retired on the Node host (ADR 0005 §3.8, B17):
-//   every deployment runs the single slice budget `BUDGETS.paid`.
+//   every deployment runs the single configured Node slice budget.
 //
 // Secrets are not part of AppConfig (it reaches every DO module through
 // ModuleDeps); `parseCursorKey` reads CURSOR_KEY separately for the Worker.
@@ -23,14 +23,7 @@ import type { EnvSecrets, EnvVars } from './env';
 export const FIXTURE_PREFIX = 'com.example.atmusic';
 
 export type IngestMode = 'socket' | 'off';
-/**
- * The slice-budget tier. Only `paid` is configured since B17 retired PLAN;
- * the type keeps `free` so drain/sweep code comparing against it still
- * typechecks until those modules are retired in turn.
- */
-export type Plan = 'paid' | 'free';
-
-/** Per-alarm budgets (ADR 0004 §5.4, §5.9, F5); the single tier left after B17. */
+/** Per-alarm budget limits (ADR 0004 §5.4, §5.9, F5). */
 export interface SliceBudget {
   /** Hints verified per drain run. */
   drainHints: number;
@@ -44,14 +37,12 @@ export interface SliceBudget {
   perHostConcurrency: number;
 }
 
-export const BUDGETS: Readonly<Record<'paid', SliceBudget>> = {
-  paid: {
-    drainHints: 200,
-    subrequestsPerSlice: 200,
-    maxEntriesPerSlice: 2000,
-    concurrentFetches: 4,
-    perHostConcurrency: 2,
-  },
+export const DEFAULT_SLICE_BUDGET: Readonly<SliceBudget> = {
+  drainHints: 200,
+  subrequestsPerSlice: 200,
+  maxEntriesPerSlice: 2000,
+  concurrentFetches: 4,
+  perHostConcurrency: 2,
 };
 
 /**
@@ -95,8 +86,6 @@ export interface AppConfig {
   jetstreamUrls: readonly string[];
   jetstreamLookbackHours: number;
   relayUrl: string;
-  /** Always `paid` since B17; see `Plan`. */
-  plan: Plan;
   budget: SliceBudget;
   /** True when ADMIN_TOKEN is set (the token itself is not copied here). */
   adminEnabled: boolean;
@@ -262,8 +251,7 @@ export function parseConfig(
     jetstreamUrls,
     jetstreamLookbackHours,
     relayUrl,
-    plan: 'paid',
-    budget: BUDGETS.paid,
+    budget: DEFAULT_SLICE_BUDGET,
     adminEnabled: adminToken !== '',
   };
 }

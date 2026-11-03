@@ -63,15 +63,9 @@
 // Budget: the slice reserves PROOF_FETCH_COST per fetch and
 // IDENTITY_RESOLVE_COST per identity resolution that is not served from
 // identity_cache, before starting it (SubrequestMeter). A hint that does not
-// fit is left due for the next alarm. The limit (`drainSubrequestLimit`):
-// - `PLAN=free`: the plan's 40 subrequests per slice (ADR §5.4, §5.9), under
-//   the Free plan's 50 per invocation;
-// - Paid: the ADR bounds the drain by hints (200), not subrequests, so the
-//   meter only backstops it at `drainHints` × WORST_HINT_SUBREQUESTS (3,400
-//   for 200 hints: uncached identity, proof, one fresh-identity retry each),
-//   which leaves room for the rest of the alarm (a snapshot slice of 200,
-//   the sweeps) under the Paid plan's 10,000 per invocation. Every claimed
-//   hint fits, so a Paid backlog of 200 hints drains in one alarm.
+// fit is left due for the next alarm. The configured hint count and per-slice
+// budget determine the meter limit; every claimed hint fits, leaving room for
+// snapshot and sweep work in the same alarm.
 //
 // Concurrency: every `db.tx` here is synchronous and opens after the awaited
 // fetch/verify completed, so no transaction spans an await (ADR F3). The
@@ -83,7 +77,7 @@ import { createSafeFetch, isSafeFetchError, type SafeFetch } from '@atmusic/atpr
 import { VerifyError, type VerifyErrorCode } from '@atmusic/atproto/verify/types';
 import { isTid } from '@atmusic/core/syntax';
 import { fromMs, parseRfc3339 } from '@atmusic/core/timestamp';
-import type { Plan, SliceBudget } from '../../config';
+import type { SliceBudget } from '../../config';
 import type { ModuleDeps } from '../contracts';
 import type { Db } from '../db';
 import { cancel, schedule } from '../timers';
@@ -136,12 +130,8 @@ export const COALESCED_REASON = 'coalesced';
 /** Most subrequests one hint can reserve: an uncached identity, the proof, one fresh-identity retry. */
 export const WORST_HINT_SUBREQUESTS = PROOF_FETCH_COST + 2 * IDENTITY_RESOLVE_COST;
 
-/** The subrequest limit of one drain slice (see the header, "Budget"). */
-export function drainSubrequestLimit(
-  plan: Plan,
-  budget: Pick<SliceBudget, 'drainHints' | 'subrequestsPerSlice'>,
-): number {
-  if (plan === 'free') return budget.subrequestsPerSlice;
+/** The subrequest limit of one drain slice. */
+export function drainSubrequestLimit(budget: Pick<SliceBudget, 'drainHints' | 'subrequestsPerSlice'>): number {
   return Math.max(budget.subrequestsPerSlice, budget.drainHints * WORST_HINT_SUBREQUESTS);
 }
 
@@ -501,9 +491,7 @@ function fetchFailed(c: Ctx, row: HintRow, host: string, error: unknown): Outcom
 }
 
 /**
- * One drain slice. `budget` defaults to the configured plan's slice budget
- * (`PLAN=free`: 40 hints within 40 subrequests; Paid: 200 hints, each of
- * which fits the subrequest backstop, see `drainSubrequestLimit`).
+ * One drain slice. `budget` defaults to the fixed Node slice budget.
  */
 export async function drain(m: ModuleDeps, now: number, budget: SliceBudget = m.config.budget): Promise<DrainReport> {
   if (!Number.isSafeInteger(now) || now < 0) throw new RangeError(`now must be epoch ms, got ${now}`);
@@ -520,7 +508,7 @@ export async function drain(m: ModuleDeps, now: number, budget: SliceBudget = m.
     m,
     prefix,
     now,
-    meter: new SubrequestMeter(drainSubrequestLimit(m.config.plan, budget)),
+    meter: new SubrequestMeter(drainSubrequestLimit(budget)),
     limiter: state.limiter,
     safeFetch: createSafeFetch({ transport: m.transport, clock: m.clock }),
     stop: false,

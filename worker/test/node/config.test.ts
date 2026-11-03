@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { BUDGETS, ConfigError, type ConfigIssue, FIXTURE_PREFIX, parseConfig } from '../../src/config';
+import { ConfigError, type ConfigIssue, DEFAULT_SLICE_BUDGET, FIXTURE_PREFIX, parseConfig } from '../../src/config';
 import {
   checkRuntimeEnv,
   FORBIDDEN_RUNTIME_ENV,
@@ -231,9 +231,9 @@ describe('parseNodeConfig', () => {
     expect(handed?.PUBLIC_ORIGIN).toBe('https://music.example.org');
     expect(handed?.ADMIN_TOKEN).toBeUndefined();
     expect(options).toEqual({ allowFixturePrefix: true });
-    // So the embedded config carries the paid budget and no location hint key.
-    expect(cfg.app.plan).toBe('paid');
-    expect(cfg.app.budget).toEqual(BUDGETS.paid);
+    // The embedded config carries the single budget and no tier/location selector.
+    expect(cfg.app).not.toHaveProperty('plan');
+    expect(cfg.app.budget).toEqual(DEFAULT_SLICE_BUDGET);
     expect(Object.keys(cfg.app)).not.toContain('doLocationHint');
     expect(cfg.app.collections?.scrobble).toBe(`${FIXTURE_PREFIX}.scrobble`);
   });
