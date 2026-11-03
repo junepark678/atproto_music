@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { expect, test } from 'vitest';
-import { CLIENT_NAME, CSP, planGenConfig } from '../gen-config.ts';
+import { CLIENT_NAME, CSP, deployedValueIssues, planGenConfig, wranglerEnvSection } from '../gen-config.ts';
 
 const REPO = resolve(fileURLToPath(new URL('../..', import.meta.url)));
 const TSX = createRequire(join(REPO, 'package.json')).resolve('tsx/cli');
@@ -50,6 +50,29 @@ test('Node defaults come from the example env and only headers are emitted', () 
   } finally {
     rmSync(out, { recursive: true, force: true });
   }
+});
+
+test('deployment validation recognizes Wrangler bare custom-domain patterns', () => {
+  const section = wranglerEnvSection(
+    {
+      vars: { PUBLIC_ORIGIN: 'https://music.example.org', LEXICON_PREFIX: 'org.example.music' },
+      routes: [{ pattern: 'music.example.org', custom_domain: true }],
+    },
+    'production',
+  );
+  expect(section.routeHosts).toEqual(['music.example.org']);
+  expect(deployedValueIssues(section.vars.PUBLIC_ORIGIN!, section.vars.LEXICON_PREFIX!, section.routeHosts)).toEqual(
+    [],
+  );
+  expect(
+    wranglerEnvSection(
+      {
+        vars: { PUBLIC_ORIGIN: 'https://music.example.org' },
+        routes: [{ pattern: 'music.example.org/*', custom_domain: true }],
+      },
+      'production',
+    ).routeHosts,
+  ).toEqual([]);
 });
 
 test('--origin and --prefix override example values; stale OAuth metadata is removed', () => {

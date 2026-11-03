@@ -55,7 +55,7 @@ export function readJsonc(path: string): unknown {
 export function wranglerEnvSection(config: unknown, env: EnvName) {
   type Section = {
     vars?: Record<string, string>;
-    routes?: Array<{ pattern?: string }>;
+    routes?: Array<{ pattern?: string; custom_domain?: boolean }>;
     route?: string;
     main?: string;
     assets?: { directory?: string; not_found_handling?: string };
@@ -67,9 +67,19 @@ export function wranglerEnvSection(config: unknown, env: EnvName) {
     (section?.route ? [{ pattern: section.route }] : (root.routes ?? (root.route ? [{ pattern: root.route }] : [])));
   const routeHosts = routes
     .map((route) => {
+      const pattern = route.pattern ?? '';
       try {
-        return new URL(route.pattern ?? '').host;
+        return new URL(pattern).host;
       } catch {
+        // Wrangler custom domains use a bare hostname (`music.example.org`),
+        // while route patterns with paths or wildcards are not custom-domain
+        // evidence for the PUBLIC_ORIGIN host check.
+        if (
+          route.custom_domain === true &&
+          /^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i.test(pattern)
+        ) {
+          return new URL(`https://${pattern}`).host;
+        }
         return '';
       }
     })

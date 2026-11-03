@@ -227,8 +227,14 @@ test('refuses a wrangler config with a fixture or empty prefix or a route off th
   const copy = workerCopy();
   const base = readFileSync(copy.config, 'utf8');
   const cases: { vars?: Record<string, string>; route?: string; message: string }[] = [
-    { vars: { LEXICON_PREFIX: 'com.example.atmusic' }, message: 'fixture-only and must never be published' },
-    { vars: { LEXICON_PREFIX: '' }, message: 'LEXICON_PREFIX is empty' },
+    {
+      vars: { LEXICON_PREFIX: 'com.example.atmusic' },
+      message: 'LEXICON_PREFIX must be a lowercase non-fixture reverse-domain NSID prefix',
+    },
+    {
+      vars: { LEXICON_PREFIX: '' },
+      message: 'LEXICON_PREFIX must be a lowercase non-fixture reverse-domain NSID prefix',
+    },
     { vars: { PUBLIC_ORIGIN: 'http://music.214510.xyz' }, message: 'PUBLIC_ORIGIN must be an https origin' },
     { route: 'other.214510.xyz', message: 'route other.214510.xyz is not on PUBLIC_ORIGIN host' },
   ];
