@@ -1852,9 +1852,10 @@
         "log redaction"
       ],
       "title": "captured logs and error bodies contain no CURSOR_KEY, ADMIN_TOKEN or bearer marker and logs contain no track-title marker",
-      "kept": true,
       "change": "ADR 0005 §3.10, §3.11, §15.3 (N4-03): the secrets are the secrets-file key material (redacted as run() derives it) and a presented admin bearer, which the TCP listener answers with the JSON 404; an unparsable cursor key makes run() exit 78 naming only the field instead of a 503; title kept.",
-      "package": "N4-03"
+      "package": "N4-03",
+      "replaced": "worker/test/composition/logging.test.ts › log redaction › captured logs and error bodies contain no CURSOR_KEY or bearer marker and logs contain no track-title marker",
+      "reason": "N7-01 removes the Workers TCP admin token route; the Node logger still proves cursor-key, bearer and record-content redaction."
     },
     {
       "id": "worker/test/composition/routing.test.ts › worker/src/router.ts › every API.md v1.1 route dispatches; unknown /api/x → JSON 404; non-API path → ASSETS",
@@ -2824,9 +2825,9 @@
         "verify drain"
       ],
       "title": "PLAN=free drain stays within 40 subrequests per slice",
-      "replaced": "worker/test/ingest/verify-drain.test.ts › verify drain › drain respects an explicitly supplied tight subrequest budget",
+      "retired": "B17",
       "package": "N7-01",
-      "reason": "N7-01 removed the Workers PLAN tier; the test now injects a tight test budget directly and does not select a runtime plan."
+      "reason": "The plan-tier-specific 40-subrequest Free budget is retired by B17; Node uses its fixed configured work limits."
     },
     {
       "id": "worker/test/read/cursor-http.test.ts › cursor traversal over HTTP › arrival above anchor absent until fresh traversal; deleted unreturned record disappears",

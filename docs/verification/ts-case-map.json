@@ -1147,7 +1147,7 @@
       "case": "M6.2.2/metrics_auth",
       "target": "worker/test/composition/admin.test.ts › admin status over the unix socket returns the AdminStatus shape of a fresh index, and /internal/admin/status on the TCP listener is the JSON 404",
       "also": [
-        "worker/test/composition/logging.test.ts › captured logs and error bodies contain no CURSOR_KEY, ADMIN_TOKEN or bearer marker and logs contain no track-title marker"
+        "worker/test/composition/logging.test.ts › captured logs and error bodies contain no CURSOR_KEY or bearer marker and logs contain no track-title marker"
       ],
       "note": "The current Node host exposes admin/status and backup only through the filesystem-authenticated Unix socket (0700 directory/0600 socket); the TCP listener returns 404. The listed Workers-era logging test remains a required wave-amendment target, not evidence for Node OAuth credential redaction. Local access-control evidence is not deployed service-manager proof."
     },
@@ -1160,7 +1160,7 @@
     },
     {
       "case": "M6.2.2/log_redaction",
-      "target": "worker/test/composition/logging.test.ts › captured logs and error bodies contain no CURSOR_KEY, ADMIN_TOKEN or bearer marker and logs contain no track-title marker",
+      "target": "worker/test/composition/logging.test.ts › captured logs and error bodies contain no CURSOR_KEY or bearer marker and logs contain no track-title marker",
       "also": [
         "worker/test/node/journey/secret-logs.test.ts › no captured log line or error body from the journeys, including the Last.fm desktop flow (auth.getToken, /api/auth, /lastfm/authorize, approve, getSession), the web flow and the Last.fm link callback, contains any token, sk, app password, cookie, DPoP key or client key value seen in the run",
         "worker/test/node/journey/secret-logs.test.ts › with sessions, sk values, app passwords, ListenBrainz tokens and linked credentials seeded, no public /api/v1, /2.0 or /1 response body in the journeys contains any of those values"

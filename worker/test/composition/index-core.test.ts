@@ -75,7 +75,6 @@ const KIND: Record<keyof IndexRpc, 'read' | 'write'> = {
   adminStatus: 'read',
   notify: 'write',
   ensureRunning: 'write',
-  adminPitr: 'write',
   adminBackup: 'write',
 };
 const READ_METHODS = (Object.keys(KIND) as (keyof IndexRpc)[]).filter((m) => KIND[m] === 'read');

@@ -21,7 +21,7 @@
 import type { IdentityResolver } from '@atmusic/atproto/identity/types';
 import type { Transport } from '@atmusic/atproto/transport';
 import type { Clock, Random } from '@atmusic/core/deps';
-import type { BackupKind, BackupOutcome, Logger, ModuleDeps, PitrResult } from '../do/contracts';
+import type { BackupKind, BackupOutcome, Logger, ModuleDeps } from '../do/contracts';
 import type { Db } from '../do/db';
 import type { ConnectJetstream } from '../do/ingest/jetstream-socket';
 import type { AlarmStorage, ExtensionTimerName, ScheduleOptions } from '../do/timers';
@@ -29,11 +29,6 @@ import type { AlarmStorage, ExtensionTimerName, ScheduleOptions } from '../do/ti
 /** Online backups (ADR 0005 §14.5; implemented by worker/src/node/backup.ts, N3-07). */
 export interface BackupPort {
   run(kind: BackupKind): Promise<Exclude<BackupOutcome, { status: 'not_supported' }>>;
-}
-
-/** Durable Objects point-in-time restore (ADR 0004 A15). Workers host only; removed by N7-01. */
-export interface PitrPort {
-  restore(atMs: number): Promise<PitrResult>;
 }
 
 export interface Host {
@@ -47,8 +42,6 @@ export interface Host {
   transport: Transport;
   /** Absent: adminBackup answers `not_supported` and changes nothing. */
   backup?: BackupPort;
-  /** Absent: adminPitr rejects with NotSupportedError. Workers host only, until N7-01. */
-  pitr?: PitrPort;
   log: Logger;
   clock: Clock;
   random: Random;

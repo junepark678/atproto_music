@@ -40,8 +40,6 @@ export const INGEST_TEST_ENV: Readonly<EnvVars & Pick<EnvSecrets, 'CURSOR_KEY'>>
   JETSTREAM_URLS: 'wss://jetstream.example.test',
   JETSTREAM_LOOKBACK_HOURS: '24',
   RELAY_URL: 'https://relay.example.test',
-  PLAN: 'paid',
-  DO_LOCATION_HINT: '',
   // Test-only key material (32 bytes); never a production secret.
   CURSOR_KEY: '000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f',
 });

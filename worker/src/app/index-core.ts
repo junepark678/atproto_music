@@ -52,7 +52,7 @@
 // queue timers are only ever pulled forward.
 //
 // RPC rejections (ADR 0004 §5.9 logging): no raw error leaves a method.
-// NotReadyError, NotSupportedError, RangeError (argument validation) and
+// NotReadyError, RangeError (argument validation) and
 // ApiError keep their name and message but lose their stack and cause;
 // anything else (a storage fault, a platform error, a module bug) is logged
 // through the logger by method and error name only and rejects as a bare
@@ -83,7 +83,6 @@ import type {
   LogLevel,
   ModuleDeps,
   NotifyOutcome,
-  PitrResult,
   ResolveOutcome,
   RowsResult,
   ScrobbleRow,
@@ -148,10 +147,6 @@ export const HINT_EXPIRED_REASON = 'hint_expired';
 export const HINT_EXPIRED_COUNTER = 'hint_expired';
 /** No new timer handler starts this long after a lane's run began (the DO alarm wall limit is 15 min). */
 export const ALARM_SLICE_MS = 5 * 60_000;
-/** Durable Objects keep 30 days of point-in-time history (ADR 0004 A15). */
-export const PITR_WINDOW_MS = 30 * 24 * 3_600_000;
-/** The restart into a restored bookmark is deferred so the RPC answer leaves first. */
-export const PITR_RESTART_DELAY_MS = 50;
 export const ADMIN_RESNAPSHOT_REASON = 'admin';
 
 /**
@@ -180,7 +175,7 @@ const BEARER_VALUE = /\b(Bearer)\s+[^\s",]+/gi;
 
 /**
  * The production Logger: one JSON line per event to the console (Workers
- * Logs). `secrets` (CURSOR_KEY, ADMIN_TOKEN) are replaced wherever they
+ * Logs). `secrets` (CURSOR_KEY) are replaced wherever they
  * occur, as is any `Bearer <value>`, and a field whose key names a credential
  * is dropped to `[redacted]`. Callers still never pass record contents.
  */
@@ -215,9 +210,9 @@ export function createLogger(secrets: readonly (string | undefined)[], sink: Log
   };
 }
 
-/** The Logger for `env`: redacts its CURSOR_KEY and ADMIN_TOKEN (structural, so any host's env fits). */
-export function envLogger(env: { CURSOR_KEY?: string; ADMIN_TOKEN?: string }, sink?: LogSink): Logger {
-  return createLogger([env.CURSOR_KEY, env.ADMIN_TOKEN], sink);
+/** The Logger for `env`: redacts its CURSOR_KEY (structural, so any host's env fits). */
+export function envLogger(env: { CURSOR_KEY?: string }, sink?: LogSink): Logger {
+  return createLogger([env.CURSOR_KEY], sink);
 }
 
 /** An error's name for logs: never its message, which may carry values. */
@@ -236,14 +231,6 @@ export class NotReadyError extends Error {
 }
 
 export const NOT_SUPPORTED = 'not_supported';
-
-/** The host has no port for this operation (adminPitr without a PITR port). */
-export class NotSupportedError extends Error {
-  constructor(message: string = NOT_SUPPORTED) {
-    super(message);
-    this.name = 'NotSupportedError';
-  }
-}
 
 export const INDEX_ERROR_NAME = 'IndexError';
 export const INDEX_ERROR_MESSAGE = 'index operation failed';
@@ -275,7 +262,6 @@ function bare<E extends Error>(error: E): E {
  */
 function rpcRejection(error: unknown, method: string, log: Logger | null): Error {
   if (error instanceof NotReadyError) return bare(new NotReadyError(error.message));
-  if (error instanceof NotSupportedError) return bare(new NotSupportedError(error.message));
   if (error instanceof RangeError) return bare(new RangeError(error.message));
   if (error instanceof ApiError) return bare(new ApiError(error.code, error.message, error.fields, error.status));
   const fields = { method, error: errorName(error) };
@@ -702,24 +688,6 @@ export class IndexCore implements IndexRpc, AdminRpc {
         schema: this.migration as MigrateResult,
         ...internalStatus(m.db, m.clock.nowMs(), { mode: m.config.ingestMode }),
       };
-    });
-  }
-
-  /**
-   * ADR 0004 A15: restore the whole index to its state at `atMs` (within the
-   * last 30 days) through the host's PITR port. A host without one (Node)
-   * rejects with NotSupportedError. Removed by N7-01.
-   */
-  async adminPitr(atMs: number): Promise<PitrResult> {
-    return this.#rpc('adminPitr', async () => {
-      const m = this.live();
-      const pitr = this.host.pitr;
-      if (pitr === undefined) throw new NotSupportedError(`${NOT_SUPPORTED}: this host has no point-in-time restore`);
-      const now = m.clock.nowMs();
-      if (!Number.isSafeInteger(atMs) || atMs > now || atMs < now - PITR_WINDOW_MS) {
-        throw new RangeError('atMs must be integer epoch ms within the last 30 days');
-      }
-      return pitr.restore(atMs);
     });
   }
 

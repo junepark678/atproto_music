@@ -150,7 +150,7 @@ Retired cases (true on Node):
 
 **Demonstrated gap:** `pulse` mode existed only for the Workers Free plan's limits.
 
-**Amendment text:** `INGEST_MODE` is `socket` (default) or `off`; `pulse` is refused with a message citing ADR 0005. N7-01 removes `pulse`, `PLAN`, `DO_LOCATION_HINT` and `BUDGETS.free`; until then the Node config passes `PLAN='paid'` and `DO_LOCATION_HINT=''` to the embedded `parseConfig` and refuses any operator-set value.
+**Amendment text:** `INGEST_MODE` is `socket` (default) or `off`; the Node parser rejects every other mode. N7-01 removes the Workers-only pulse path, plan tiers, placement hint and free-tier budget from runtime configuration. Unknown legacy environment names have no effect on the Node parser. The Node host uses one fixed slice budget; immutable migration 1 retains its historical mode CHECK so old databases remain readable.
 
 ### B18 Meta (amends A20)
 

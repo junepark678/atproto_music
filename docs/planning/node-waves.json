@@ -275,7 +275,11 @@
     "tests": [
      "worker/test/node/config.test.ts › ATMUSIC_DB defaults to $STATE_DIRECTORY/atmusic.db; with neither set the ConfigError names ATMUSIC_DB",
      "worker/test/node/config.test.ts › without the fixtureOrigins option an http PUBLIC_ORIGIN, and an upstream root that is http, an IP literal, a loopback name or a non-default port, are rejected whatever other environment variables are set",
+<<<<<<< HEAD
      "worker/test/node/config.test.ts › INGEST_MODE=pulse, an operator-set PLAN (paid or free) and DO_LOCATION_HINT are each rejected with a message citing ADR 0005, and the embedded parseConfig receives PLAN paid and an empty DO_LOCATION_HINT",
+=======
+     "worker/test/node/config.test.ts › INGEST_MODE accepts socket and off only, ignores retired plan and placement variables, and embedded config has no tier or placement fields",
+>>>>>>> 725aa36 (retire legacy plan and PITR configuration)
      "worker/test/node/secrets.test.ts › secrets load from $CREDENTIALS_DIRECTORY/secrets; ATMUSIC_SECRETS_FILE with mode 0640 is refused",
      "worker/test/node/secrets.test.ts › duplicate kids, a public-only signing key, a 16-byte cursorKey or a 31-byte encryption key are each a ConfigError naming the field",
      "worker/test/node/secrets.test.ts › no secret value appears in process.env, JSON.stringify(config) or any thrown error text",

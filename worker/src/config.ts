@@ -11,19 +11,19 @@
 //   NAMESPACE_PUBLICATION_REF pointing to an owner-reviewed manifest of the
 //   published schemas. DNS ownership alone never enables product writes.
 //
-// - INGEST_MODE is `socket` or `off`. The Workers-era `pulse` mode, PLAN tier
-//   and DO_LOCATION_HINT were retired on the Node host (ADR 0005 §3.8, B17):
-//   every deployment runs the single configured Node slice budget.
+// - The Node host accepts `socket` or `off` ingestion and uses one fixed
+//   slice budget (`NODE_BUDGET`); tier and location bindings are not part of
+//   this configuration.
 //
 // Secrets are not part of AppConfig (it reaches every DO module through
-// ModuleDeps); `parseCursorKey` reads CURSOR_KEY separately for the Worker.
+// ModuleDeps); `parseCursorKey` reads CURSOR_KEY separately from the secret file.
 
 import type { EnvSecrets, EnvVars } from './env';
 
 export const FIXTURE_PREFIX = 'com.example.atmusic';
 
 export type IngestMode = 'socket' | 'off';
-/** Per-alarm budget limits (ADR 0004 §5.4, §5.9, F5). */
+/** Per-alarm budgets (ADR 0005 §3.8); a single fixed Node budget. */
 export interface SliceBudget {
   /** Hints verified per drain run. */
   drainHints: number;
@@ -37,7 +37,7 @@ export interface SliceBudget {
   perHostConcurrency: number;
 }
 
-export const DEFAULT_SLICE_BUDGET: Readonly<SliceBudget> = {
+export const NODE_BUDGET: SliceBudget = {
   drainHints: 200,
   subrequestsPerSlice: 200,
   maxEntriesPerSlice: 2000,
@@ -87,8 +87,6 @@ export interface AppConfig {
   jetstreamLookbackHours: number;
   relayUrl: string;
   budget: SliceBudget;
-  /** True when ADMIN_TOKEN is set (the token itself is not copied here). */
-  adminEnabled: boolean;
 }
 
 export interface ConfigIssue {
@@ -108,7 +106,6 @@ export interface ParseConfigOptions {
   allowFixturePrefix?: boolean;
 }
 
-const MIN_ADMIN_TOKEN_CHARS = 32;
 const MAX_LOOKBACK_HOURS = 720;
 
 function validLabel(label: string): boolean {
@@ -151,10 +148,7 @@ function isServiceUrl(value: string, protocol: 'https:' | 'wss:'): boolean {
   );
 }
 
-export function parseConfig(
-  env: Omit<EnvVars, 'PLAN' | 'DO_LOCATION_HINT'> & Pick<EnvSecrets, 'ADMIN_TOKEN'>,
-  options: ParseConfigOptions = {},
-): AppConfig {
+export function parseConfig(env: EnvVars, options: ParseConfigOptions = {}): AppConfig {
   const issues: ConfigIssue[] = [];
   const issue = (field: string, message: string) => issues.push({ field, message });
 
@@ -231,11 +225,6 @@ export function parseConfig(
     issue('RELAY_URL', 'must be an https:// host without path, port, query or credentials');
   }
 
-  const adminToken = env.ADMIN_TOKEN ?? '';
-  if (adminToken !== '' && adminToken.length < MIN_ADMIN_TOKEN_CHARS) {
-    issue('ADMIN_TOKEN', `must be at least ${MIN_ADMIN_TOKEN_CHARS} characters when set`);
-  }
-
   if (issues.length > 0) throw new ConfigError(issues);
 
   return {
@@ -251,8 +240,7 @@ export function parseConfig(
     jetstreamUrls,
     jetstreamLookbackHours,
     relayUrl,
-    budget: DEFAULT_SLICE_BUDGET,
-    adminEnabled: adminToken !== '',
+    budget: NODE_BUDGET,
   };
 }
 

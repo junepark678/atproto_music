@@ -63,7 +63,7 @@ export function testConfig() {
       JETSTREAM_URLS: '',
       JETSTREAM_LOOKBACK_HOURS: '24',
       RELAY_URL: 'https://relay.example.test',
-    } as Parameters<typeof parseConfig>[0],
+            } as Parameters<typeof parseConfig>[0],
     { allowFixturePrefix: true },
   );
   // Outbox suites opt into a fake-PDS-only publication state; the real parser

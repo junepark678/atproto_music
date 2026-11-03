@@ -763,7 +763,6 @@ describe('N4-04 de-shim: harness, storage and shared helpers', () => {
         const expected = parseConfig(
           {
             ...(vars as unknown as Parameters<typeof parseConfig>[0]),
-            ADMIN_TOKEN: '',
             ...('mode' in o
               ? { INGEST_MODE: o.mode, JETSTREAM_URLS: 'wss://east.example.test,wss://west.example.test' }
               : {}),

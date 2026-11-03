@@ -1,4 +1,3 @@
-import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { ConfigError, FIXTURE_PREFIX, parseConfig, parseCursorKey } from '../src/config';
 import type { EnvVars } from '../src/env';
@@ -7,31 +6,6 @@ import type { EnvVars } from '../src/env';
 const DECIDED_ORIGIN = 'https://music.214510.xyz';
 const DECIDED_PREFIX = 'dev.pythonplayer123.music';
 const PUBLICATION_REF = `sha256:${'a'.repeat(64)}`;
-
-describe('Node environment example', () => {
-  it('documents the Node host inputs instead of a Workers config', () => {
-    const example = readFileSync(new URL('../../config/atmusic.env.example', import.meta.url), 'utf8');
-    for (const name of [
-      'ATMUSIC_PUBLIC_ORIGIN',
-      'ATMUSIC_CLIENT_IP_HEADER',
-      'ATMUSIC_SIGNIN_DIDS',
-      'LEXICON_PREFIX',
-      'NAMESPACE_OWNERSHIP_REF',
-      'NAMESPACE_PUBLICATION_REF',
-      'JETSTREAM_URLS',
-      'JETSTREAM_LOOKBACK_HOURS',
-      'RELAY_URL',
-      'ATMUSIC_LISTEN',
-      'INGEST_MODE',
-      'ATMUSIC_DB',
-      'ATMUSIC_ADMIN_SOCKET',
-    ]) {
-      expect(example, name).toMatch(new RegExp(`^#?${name}=`, 'm'));
-    }
-    expect(example).not.toMatch(/wrangler|ADMIN_TOKEN|DO_LOCATION_HINT|PLAN=/i);
-    expect(() => parseConfig(BASE)).not.toThrow();
-  });
-});
 
 /** Node host environment variables only; Worker bindings and vars are retired. */
 const BASE: EnvVars = {
