@@ -116,8 +116,16 @@ async function startServer(behavior: ServerBehavior = {}): Promise<string> {
           behavior.recentBody ?? {
             recenttracks: {
               track: [
-                { name: 'First Track', artist: { '#text': 'Multi Scrobbler Artist' } },
-                { name: 'Second Track', artist: { '#text': 'Multi Scrobbler Artist' } },
+                {
+                  name: 'First Track',
+                  artist: { '#text': 'Multi Scrobbler Artist' },
+                  date: { uts: '1768478280', '#text': '15 Jan 2026, 11:58' },
+                },
+                {
+                  name: 'Second Track',
+                  artist: { '#text': 'Multi Scrobbler Artist' },
+                  date: { uts: '1768478340', '#text': '15 Jan 2026, 11:59' },
+                },
               ],
             },
           },
@@ -256,6 +264,48 @@ test.each([
           track: [
             { name: 'Other Track', artist: { '#text': 'Multi Scrobbler Artist' } },
             { name: 'Another Track', artist: { '#text': 'Multi Scrobbler Artist' } },
+          ],
+        },
+      },
+    },
+  ],
+  [
+    'recent tracks have unrelated artists',
+    {
+      recentBody: {
+        recenttracks: {
+          track: [
+            {
+              name: 'First Track',
+              artist: { '#text': 'Unrelated Artist' },
+              date: { uts: '1768478280', '#text': '15 Jan 2026, 11:58' },
+            },
+            {
+              name: 'Second Track',
+              artist: { '#text': 'Unrelated Artist' },
+              date: { uts: '1768478340', '#text': '15 Jan 2026, 11:59' },
+            },
+          ],
+        },
+      },
+    },
+  ],
+  [
+    'recent tracks have stale timestamps',
+    {
+      recentBody: {
+        recenttracks: {
+          track: [
+            {
+              name: 'First Track',
+              artist: { '#text': 'Multi Scrobbler Artist' },
+              date: { uts: '1768474680', '#text': '15 Jan 2026, 10:58' },
+            },
+            {
+              name: 'Second Track',
+              artist: { '#text': 'Multi Scrobbler Artist' },
+              date: { uts: '1768474740', '#text': '15 Jan 2026, 10:59' },
+            },
           ],
         },
       },
