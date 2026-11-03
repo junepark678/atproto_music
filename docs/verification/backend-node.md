@@ -70,7 +70,7 @@ case-map entry:
   line. `npx tsx scripts/live/<gate>.ts (no env)` passes only when the
   `live-noenv` run of that gate exited 2 with a blocked document.
 - The gate's own self-reference (`bash scripts/acceptance/node-backend.sh › exits 0
-  with every step passed and live gates listed as blocked, never as passed`) is
+  with deterministic steps passed and live gates blocked, and exits 1 when systemd-analyze is unavailable`) is
   decided last: it counts the run and passes only if the whole gate passes.
 - Any other target resolves to a record by exact id, then by title suffix,
   then by file prefix plus title.
@@ -107,9 +107,9 @@ Files in the evidence directory:
 
 - `<step>.command`, `<step>.status`, `<step>.log` for each of the 11 steps.
 - `tests.jsonl`: one record per executed test (`target`, `command`, `executed`,
-  `result`, `commit`, `source`).
-- `cases.jsonl`: one record per case-map entry (`case`, `state`, `count`,
-  `commit`, `bundleSha256`, `command`, `target`, `reason`).
+  `result`, `commit`).
+- `cases.jsonl`: one record per case-map entry (`case`, `result`, `count`,
+  `commit`, `bundleSha256`, `commands`, `targets`, plus any failure/block/retirement detail).
 - `live.json`: the live gate table (`gate`, `script`, `result`, `missing`,
   `message`).
 - `summary.json`: `{gate, commit, bundleSha256, steps, tests, cases, live, liveGates, result, problems}`.
@@ -137,7 +137,68 @@ current commit and to the bundle SHA-256 printed by `check-node-bundle`. A live
 gate therefore turns from `blocked` to `passed` only when verified evidence for
 this exact bundle exists; stale or unbound evidence leaves it blocked.
 
-## Executed evidence
+## Integration evidence on the reviewed replay stack
+
+Recorded 2026-11-03. Base: PR #130, `feat/n8-integrated-audit-fixes` at
+`6c7b946cbc4fe3b99a9b08dd096af419eb1f67d0`. The existing gate commit
+`e96ca593e1f3c6a6d3e5c3db254f8e2143c7af3b` was cherry-picked as `b708429`
+without conflicts. No current replay source was replaced or reverted.
+The runner fix is `9e481f3`; the mapping integration is `889aa4f`.
+
+The gate invokes the replay with `--out "$OUT/scrobbler-e2e"`, preserves its
+exit status when records exist, and ingests the emitted JSONL even on failure.
+It clears the preceding run's JSONL before execution; a missing records file
+fails the step. A successful-looking log cannot replace records. Disposable-copy
+regressions exercise passing, missing, stale, failed and skipped replay output,
+the custom output directory, and the existing systemd/step/usage controls.
+They also check that `live_retries` resolves to the replay and `live_product`
+stays blocked when only no-env refusals exist.
+
+Case mapping changes replace the stale Workers gate, deploy dry-run and bundle
+guard references with exact current Node titles. `M6.4.2/unrun_gate` uses the
+N8 validator declaration. The first validation after remapping failed with
+`required wave amendment ... deploy.sh --dry-run ... is referenced by no case`;
+only then was that W6-04 required-registry line removed. Its historical leaf
+text remains. All 258 cases and all six explicit retirements are preserved.
+No baseline test was renamed, replaced or retired, so
+`node-port-inventory.json` is unchanged; its two inventory tests pass.
+
+| Check | Result |
+| --- | --- |
+| `python3 -B scripts/validate_case_map.py --check-tests --node-wave 7` | PASS: 258 cases, 252 mapped, 6 retired; 4 wave-8 references reported pending (gate self-references, validator and replay). |
+| `python3 -B scripts/validate_case_map.py --check-tests` | PASS: every referenced test file and name exists; no pending targets. This is a static check, not executed-case closure. |
+| `python3 -B -m unittest discover -s scripts -p test_validate_case_map.py` | PASS: 16 regressions. |
+| `python3 -B -m unittest discover -s scripts -p test_live_evidence.py` | PASS: 28 regressions; no live tests ran. |
+| `./node_modules/.bin/vitest run --project scripts scripts/test/node-backend.test.ts scripts/test/check-node-bundle.test.ts scripts/test/build-server.test.ts scripts/test/test-inventory.test.ts scripts/test/scrobbler-e2e.test.ts --maxWorkers=2` | PASS: 5 files, 20 tests; JSON report at `work/acceptance/n8-integration/focused.json`. |
+| `./node_modules/.bin/vitest run --project worker-node worker/test/node/config.test.ts worker/test/node/secrets.test.ts --maxWorkers=1` | PASS: 2 files, 11 tests. |
+| `bash -n scripts/acceptance/node-backend.sh`; focused Biome check; `git diff --check` | PASS; Biome reports only warnings about literal placeholders in generated stub source. |
+| `timeout --kill-after=10s 240s ./node_modules/.bin/tsx scripts/e2e/scrobbler-e2e.ts --out work/acceptance/n8-integration/replay` | Exit 0 on clean `889aa4fda2191acbf940d5b54213e4ec79452e8f`: 7 executed, passing JSONL records, including `M3.4.3/live_retries`. |
+
+Replay evidence: `work/acceptance/n8-integration/replay/scrobbler-e2e.jsonl`
+(SHA-256 `a00cb5985d8f020f678511c0bb2502ff24e9c842a586a0e13d3c5684636b12c6`).
+`ledger.json` records 10 accepted listens, 20 forwarding rows, 10 fake Last.fm
+and 10 fake ListenBrainz accepts. The socket-disabled control committed a PDS
+record without indexing it. The replay used process-backed loopback fixtures;
+no live service or external provider request ran.
+
+An initial broader focused run used a shared `node_modules` symlink and the
+bundle guard rejected its out-of-checkout crypto paths; a local dependency
+copy corrected the test setup without a network install. That run also exposed
+an old self-test count assertion: an omitted case now fails the two mapped
+gate self-references as well. The assertion was fixed and the 20-test rerun
+above passed. Neither failure is hidden as a backend acceptance success.
+
+**No fresh complete `node-backend.sh` run was attempted in this integration.**
+The scoped checks and seven replay records do not clear the saved full-gate
+failures below. The saved M7 deterministic browser journey passed, but
+`M7.4.3/live_product` is still operator-blocked. N6-02 live OAuth/SSRF/soak and
+N7 retirement remain incomplete. No live refusal is counted as live success.
+
+## Saved gate evidence before integration
+
+This receipt describes the earlier gate checkout. The absent replay and stale
+mappings below have since been integrated; the receipt remains a failure and
+is not a fresh result for the integrated tree.
 
 Recorded 2026-11-03 on commit `c2da66aa0a8b90f5226751ed392fe7e0fcc2c87d+dirty`
 (branch `t3/n8-backend-acceptance-gate`, dirty because the gate, its test and
@@ -197,9 +258,7 @@ without one. The gate now strips that period and the case passes with four
 records.
 
 Gate self-tests (`scripts/test/node-backend.test.ts`, one vitest case driving a
-disposable copy of the gate with stubbed step commands; see the `tests.jsonl`
-record `bash scripts/acceptance/node-backend.sh › exits 0 with every step passed
-and live gates listed as blocked, never as passed`):
+disposable copy of the gate with stubbed step commands):
 
 - every stub passing with the live inventory unverifiable exits `0`, lists the
   five live gates as `blocked` and prints the `PASS node-backend` line;

@@ -23,20 +23,23 @@ confirms evidence bound to the current commit and Node bundle. It replaces
 `scripts/acceptance/node-interim.sh` as the gate from wave 8 on and never
 contacts a live service.
 
-Current result (2026-11-03, commit `c2da66a+dirty`, evidence in
-[backend-node.md](verification/backend-node.md)): **the gate fails with exit 1
-and 13 problems.** Nine of the eleven steps pass, including Playwright e2e
-against the Node stack, the Node bundle guard, both systemd units, the no-env
-live refusals and the bound live-inventory check. The five live gates are
-listed as blocked, not passed. The blockers are outside the gate: the
-`scripts/e2e/scrobbler-e2e.ts` suite is absent (fails `scrobbler-e2e`,
-`case-map`, `M3.4.3/live_retries` and `M6.4.2/unrun_gate`); six case-map
-targets still cite retired Workers commands (`workers-backend.sh`,
-`deploy.sh --dry-run`, `check-bundle.ts`); and `check-ts` fails on the two
-Workers `deploy.test.ts` cases, the `web/test/bundle.test.ts` build timeout
-and one `node-ingest.test.ts` reaper case, which also leaves the contracts
-cases `M1.1.4/*` unexecuted. Case totals: 233 passed, 10 failed, 9 blocked,
-6 retired of 258.
+Integration update (2026-11-03): the committed N8 gate from `e96ca593` was
+cherry-picked onto reviewed PR #130 head `6c7b946` without conflicts. The gate
+now consumes the current replay's explicit `--out` JSONL contract, and the
+stale acceptance command mappings point at current Node tests or the exact
+N8 gate declarations. Both case-map modes and the scoped tooling regressions
+pass. A bounded loopback-only replay on `889aa4f` emitted seven passing records.
+See [backend-node.md](verification/backend-node.md) for commands and evidence.
+**No fresh complete backend gate has run; Node backend acceptance is not PASS.**
+
+The saved gate receipt at `c2da66a+dirty` remains a failed run (exit 1, 13
+problems). Its missing replay script and stale mappings are corrected in this
+tree; its `check-ts` failures in legacy deploy tests, the Node ingest lifecycle
+test and the web bundle timeout have not been cleared by a fresh full gate.
+The saved deterministic M7 browser journey passed, while
+`M7.4.3/live_product` remains operator-blocked. No live services or external
+providers were contacted for this integration. N6-02 live OAuth/SSRF/soak and
+N7 retirement remain incomplete; no milestone or live gate is closed here.
 
 Historical Workers receipt follows; nothing below is a current Node statement.
 
