@@ -159,7 +159,10 @@ async function tabTo(page: Page, target: Locator, label: string, max = 80): Prom
 
 // ---------------------------------------------------------------------------
 
-test('no serious/critical axe violations on all routes', async ({ page, request }) => {
+test('signin, feed, profile, scrobble, settings/links, settings/imports, settings/credentials and lastfm/authorize have no axe violations', async ({
+  page,
+  request,
+}) => {
   test.setTimeout(180_000);
   const unknownDid = 'did:plc:aaaaaaaaaaaaaaaaaaaaaaaa';
 

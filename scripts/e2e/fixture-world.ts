@@ -14,8 +14,6 @@ import { buildScrobbleRecord } from '@atmusic/core/scrobble';
 import { type FixedClock, fixedClock } from '@atmusic/core/test-support/clock';
 import { seededRandom } from '@atmusic/core/test-support/random';
 import { FakeListenBrainz } from '../../worker/test/node/support/fake-listenbrainz';
-import { createServer, type IncomingMessage, type Server } from 'node:http';
-import type { AddressInfo } from 'node:net';
 import type { E2eAccount, E2eNetwork, E2ePorts } from './dev-env';
 import { E2E_PREFIX, PLC_HOST, startBrowserProxy } from './dev-env';
 
@@ -99,10 +97,13 @@ export async function startFixtureWorld(ports: E2ePorts): Promise<FixtureWorld> 
   const doh = new FakeDoh();
   const listenbrainz = new FakeListenBrainz({ clock, host: LISTENBRAINZ_HOST });
   listenbrainz.addToken(E2E_LISTENBRAINZ_USER, E2E_LISTENBRAINZ_TOKEN);
-  listenbrainz.seedListens(E2E_LISTENBRAINZ_USER, Array.from({ length: 12 }, (_, index) => ({
-    listened_at: Math.floor(FIXTURE_NOW_MS / 1000) - 3600 - index * 86400,
-    track_metadata: { artist_name: `Fixture Artist ${index + 1}`, track_name: `Fixture Track ${index + 1}` },
-  })));
+  listenbrainz.seedListens(
+    E2E_LISTENBRAINZ_USER,
+    Array.from({ length: 12 }, (_, index) => ({
+      listened_at: Math.floor(FIXTURE_NOW_MS / 1000) - 3600 - index * 86400,
+      track_metadata: { artist_name: `Fixture Artist ${index + 1}`, track_name: `Fixture Track ${index + 1}` },
+    })),
+  );
   const accounts: E2eAccount[] = [];
   const pdsByName = { alice: pds1, bob: pds2, carol: pds2 };
   const pdsHosts = { alice: PDS1_HOST, bob: PDS2_HOST, carol: PDS2_HOST };
