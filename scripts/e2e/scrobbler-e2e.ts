@@ -1153,7 +1153,16 @@ async function socketDeliveryDisabledControl(
   try {
     disabled = await BundleProcess.start(fakes, runtimeDir, distDir, await freeLoopbackPort(), 'off');
     stage = 'signin';
-    const session = await signIn(fakes, disabled, bob);
+    let session: Session;
+    try {
+      session = await signIn(fakes, disabled, bob);
+    } catch (error) {
+      if (error instanceof Error) {
+        const failedStage = /fixture sign-in failed during ([a-z-]+)/.exec(error.message)?.[1];
+        if (failedStage) stage = `signin-${failedStage}`;
+      }
+      throw error;
+    }
     stage = 'write-acknowledgement';
     const response = await session.jar.request('/api/v1/scrobbles', {
       method: 'POST',
