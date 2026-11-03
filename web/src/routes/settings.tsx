@@ -21,7 +21,7 @@ import { useSessionHandle } from '../components/session-identity';
 import { ErrorState, LoadingState, SignInPrompt } from '../components/state-views';
 import { useOutbox, useOutboxOps } from '../components/use-outbox';
 import type { OutboxOperation } from '../outbox/overlay';
-import { setSession, useAppState } from '../state/store';
+import { useAppState } from '../state/store';
 
 export const EXPORT_FILENAME = 'music-export.json';
 
@@ -127,8 +127,7 @@ function AccountSection({ did, onSignedOut }: { did: Did; onSignedOut(): void })
       await services.closeOutbox();
       const port = await services.session();
       await port.signOut();
-      setSession(state, null);
-      onSignedOut();
+      if (state.session.value === null) onSignedOut();
     } catch (error) {
       setSignOutError(describeFailure(error));
     } finally {

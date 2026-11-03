@@ -38,11 +38,27 @@ export default function SignIn() {
     return () => removeEventListener('pageshow', onShow);
   }, []);
 
+  useEffect(() => {
+    const onFocus = () => {
+      // The user may close the OAuth popup without completing sign-in. Let
+      // them retry instead of leaving the form disabled indefinitely.
+      if (!state.reauthRequired.value || !busy.current) return;
+      busy.current = false;
+      setPhase({ kind: 'idle' });
+    };
+    addEventListener('focus', onFocus);
+    return () => removeEventListener('focus', onFocus);
+  }, [state]);
+
   const start = async () => {
     if (busy.current) return;
     busy.current = true;
     setPhase({ kind: 'redirecting' });
     try {
+      if (state.reauthRequired.value && services.reauthenticate) {
+        await services.reauthenticate(handleRef.current);
+        return;
+      }
       const port = await services.session();
       await port.signIn(handleRef.current);
       // The library is navigating away to the authorization server.
@@ -53,7 +69,8 @@ export default function SignIn() {
     }
   };
 
-  if (session !== null) {
+  if (session !== null && session.status === 'active') {
+    const canResumeDraft = state.scrobbleDraft.value?.did === session.did && state.canPublish.value;
     return (
       <section aria-labelledby="page-title">
         <h1 id="page-title">Sign in</h1>
@@ -61,6 +78,11 @@ export default function SignIn() {
           You are signed in as <code>{session.did}</code>. <a href="/feed">Go to the feed</a> or{' '}
           <a href="/settings">manage your session</a>.
         </p>
+        {canResumeDraft ? (
+          <p>
+            <a href="/scrobble">Return to your saved scrobble draft</a>
+          </p>
+        ) : null}
       </section>
     );
   }
@@ -76,7 +98,12 @@ export default function SignIn() {
           : 'Sign-in did not complete. Check your handle and try again.';
   const message =
     phase.kind === 'error'
-      ? { title: 'Sign-in could not be started', message: 'Check the handle and try again.' }
+      ? {
+          title: 'Sign-in could not be started',
+          message: state.reauthRequired.value
+            ? 'Allow sign-in popups for this site, then try again.'
+            : 'Check the handle and try again.',
+        }
       : recoveryMessage !== null
         ? { title: 'Sign-in did not complete', message: recoveryMessage }
         : null;
@@ -128,7 +155,7 @@ export default function SignIn() {
         ) : null}
         {phase.kind === 'redirecting' ? (
           <p role="status" data-state="loading">
-            Contacting your account provider…
+            {state.reauthRequired.value ? 'Opening a sign-in window…' : 'Contacting your account provider…'}
           </p>
         ) : null}
         {message ? null : (

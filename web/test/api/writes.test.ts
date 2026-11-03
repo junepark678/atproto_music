@@ -42,12 +42,12 @@ describe('server writes', () => {
     });
     const intent = createWriteIntent('same-scrobble-intent');
     const body = { artist: 'Artist', track: 'Track', listenedAt: '2026-01-15T12:00:00Z' };
-    await expect(writes.scrobble(body, intent)).rejects.toMatchObject({
+    await expect(writes.scrobble(body, intent, session.did)).rejects.toMatchObject({
       status: 429,
       code: 'rate_limited',
       retryAfter: '30',
     });
-    await writes.scrobble(body, intent);
+    await writes.scrobble(body, intent, session.did);
     expect(keys).toHaveLength(2);
     expect(keys[0]).toBeTruthy();
     expect(keys[1]).toBe(keys[0]);
