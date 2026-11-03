@@ -53,6 +53,13 @@ function request(input, options, callback) {
   }
   const path = config.path ?? supplied.path ?? (source ? `${source.pathname}${source.search}` : '/');
   const headers = { ...(supplied.headers ?? {}), ...(config.headers ?? {}) };
+  for (const sourceOptions of [supplied, config]) {
+    for (const key of ['socketPath', 'createConnection', 'lookup', 'agent', 'localAddress', 'family', 'autoSelectFamily']) {
+      if (sourceOptions[key] !== undefined) {
+        throw new Error(`HTTPS e2e preload refused transport override ${key}`);
+      }
+    }
+  }
   if (!Object.keys(headers).some((name) => name.toLowerCase() === 'host')) {
     headers.Host = PUBLIC_HOST;
   }
@@ -84,6 +91,13 @@ function request(input, options, callback) {
       cb?.(response);
     },
   );
+  target.on('socket', (socket) => {
+    socket.once('connect', () => {
+      try {
+        process.send?.({ type: 'connection-observed', remoteAddress: socket.remoteAddress, remotePort: socket.remotePort });
+      } catch {}
+    });
+  });
   return target;
 }
 
