@@ -1,10 +1,20 @@
 // @ts-expect-error Node APIs are used only by the test runner; the browser project has no Node type dependency.
+import { execFileSync } from 'node:child_process';
+// @ts-expect-error Node APIs are used only by the test runner; the browser project has no Node type dependency.
 import { readdirSync, readFileSync } from 'node:fs';
 // @ts-expect-error Node APIs are used only by the test runner; the browser project has no Node type dependency.
-import { join, resolve } from 'node:path';
-import { expect, it } from 'vitest';
+import { dirname, join, resolve } from 'node:path';
+// @ts-expect-error Node APIs are used only by the test runner; the browser project has no Node type dependency.
+import { fileURLToPath } from 'node:url';
+import { beforeAll, expect, it } from 'vitest';
 
-const webRoot = resolve('.');
+const webRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const repoRoot = resolve(webRoot, '..');
+
+beforeAll(() => {
+  execFileSync('npm', ['run', 'build', '--workspace', '@atmusic/web'], { cwd: repoRoot, stdio: 'pipe' });
+});
+
 function files(dir: string): string[] {
   return (readdirSync(dir, { withFileTypes: true }) as Array<{ name: string; isDirectory(): boolean }>).flatMap(
     (entry) => {

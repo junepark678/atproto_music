@@ -230,7 +230,7 @@ const followRkey = (subject: string) => `f${createHash('sha256').update(subject)
 
 // ---------------------------------------------------------------------------
 
-test('sign-in through the fake AS, scrobble, indexed, delete and follow journeys pass against the Node stack', async ({
+test('full journey sign-in → scrobble indexed → stats → follow/unfollow → delete → export → disconnect/reconnect → sign-out', async ({
   page,
   request,
 }) => {
