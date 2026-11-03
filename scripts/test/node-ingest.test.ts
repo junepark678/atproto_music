@@ -1,5 +1,5 @@
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { access, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -779,10 +779,13 @@ test('Node ingest reaps the actual owned startup process before returning timeou
   const { deps } = mockDependencies();
   const fixtureDir = await mkdtemp(join(tmpdir(), 'atmusic-ingest-test-'));
   const pidFile = join(fixtureDir, 'pid');
-  deps.startBrowser = (timeoutMs) =>
-    startOwnedChromium(false, timeoutMs, 250, {
+  deps.startBrowser = (launchDeadlineAt, cleanupDeadlineAt) =>
+    startOwnedChromium({
+      interactive: false,
+      launchDeadlineAt,
+      cleanupDeadlineAt,
       executablePath: process.execPath,
-      args: [
+      args: () => [
         '-e',
         `require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setInterval(() => {}, 1000)`,
       ],
@@ -802,6 +805,34 @@ test('Node ingest reaps the actual owned startup process before returning timeou
   expect(cleanup).toEqual(emittedCleanup);
   expect(failures).toContain('Node ingest failed during PDS identity checks');
   await rm(fixtureDir, { recursive: true, force: true });
+});
+
+test('a stalled actual owned Chromium is killed within the ingest teardown reserve', async () => {
+  const { deps } = mockDependencies();
+  let owned: ReturnType<typeof startOwnedChromium> | undefined;
+  deps.startBrowser = (launchDeadlineAt, cleanupDeadlineAt) => {
+    owned = startOwnedChromium({ interactive: false, launchDeadlineAt, cleanupDeadlineAt });
+    return {
+      ...owned,
+      ready: owned.ready.then((browser) => {
+        if (owned?.pid !== undefined) process.kill(-owned.pid, 'SIGSTOP');
+        return browser;
+      }),
+    };
+  };
+  const failures: string[] = [];
+  const cleanup: string[] = [];
+  const startedAt = performance.now();
+  await runNodeIngest(makeContext(failures, cleanup, { ...goodEnv, [NODE_INGEST_ENV.timeoutSeconds]: '3' }), deps);
+  const elapsedMs = performance.now() - startedAt;
+
+  expect(owned).toBeDefined();
+  expect(elapsedMs).toBeLessThan(3_100);
+  expect(failures).not.toContain('owned browser process termination was not confirmed during teardown');
+  expect(cleanup).not.toContain('owned browser process termination was not confirmed; inspect the runner process');
+  expect(owned!.pid).toBeDefined();
+  expect(() => process.kill(owned!.pid!, 0)).toThrow();
+  await expect(access(owned!.root)).rejects.toMatchObject({ code: 'ENOENT' });
 });
 
 test.each([1_100, 1_500])('browser startup scheduled at %d ms is canceled at the launch deadline', async (launchMs) => {

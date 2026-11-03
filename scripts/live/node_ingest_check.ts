@@ -111,7 +111,7 @@ interface BrowserApiResponse {
 
 export interface IngestDependencies {
   browser(timeoutMs: number): Promise<Browser>;
-  startBrowser?(timeoutMs: number): OwnedChromiumLaunch;
+  startBrowser?(launchDeadlineAt: number, cleanupDeadlineAt: number): OwnedChromiumLaunch;
   pdsInfo(endpoint: string, implementation: string, timeoutMs?: number): Promise<PdsInfo>;
   httpJson: typeof httpJson;
   verifyRecordAt(did: string, collection: string, rkey: string, timeoutMs?: number): ReturnType<typeof verifyRecordAt>;
@@ -174,7 +174,12 @@ async function closeWithinDeadline<T>(
 
 const dependencies: IngestDependencies = {
   browser: (timeoutMs) => launchBrowser(process.env, timeoutMs),
-  startBrowser: (timeoutMs) => startOwnedChromium(process.env[OAUTH_ENV.interactive] === '1', timeoutMs),
+  startBrowser: (launchDeadlineAt, cleanupDeadlineAt) =>
+    startOwnedChromium({
+      interactive: process.env[OAUTH_ENV.interactive] === '1',
+      launchDeadlineAt,
+      cleanupDeadlineAt,
+    }),
   pdsInfo: (endpoint, implementation, timeoutMs) => pdsInfo(endpoint, implementation, timeoutMs),
   httpJson,
   verifyRecordAt: (did, collection, rkey, timeoutMs = 15_000) =>
@@ -623,8 +628,10 @@ export async function runNodeIngest(
   const timeoutMs = Number(context.env[NODE_INGEST_ENV.timeoutSeconds] || 300) * 1000;
   const deadlineAt = performance.now() + timeoutMs;
   const recoveryReserveMs = Math.min(60_000, Math.floor(timeoutMs * 0.2));
+  const teardownReserveMs = Math.min(2_000, Math.floor(recoveryReserveMs / 2));
+  const recoveryDeadlineAt = deadlineAt - teardownReserveMs;
   const phaseBudgetMs = () => remainingMs(deadlineAt, recoveryReserveMs);
-  const cleanupBudgetMs = () => remainingMs(deadlineAt);
+  const cleanupBudgetMs = () => remainingMs(recoveryDeadlineAt);
   const pds: PdsInfo[] = [];
   const didA = context.get(ENV.didA);
   const didB = context.get(ENV.didB);
@@ -648,23 +655,25 @@ export async function runNodeIngest(
     const launchDeadline = performance.now() + phaseBudgetMs();
     try {
       if (deps.startBrowser !== undefined) {
-        browserLaunch = deps.startBrowser(remainingMs(launchDeadline));
+        browserLaunch = deps.startBrowser(launchDeadline, deadlineAt);
         browser = await withTimeout(browserLaunch.ready, remainingMs(launchDeadline), 'browser launch');
       } else {
         browser = await deps.browser(remainingMs(launchDeadline));
       }
       if (performance.now() > launchDeadline) {
-        if (browserLaunch !== null) await browserLaunch.terminate(deadlineAt);
-        else await closeWithinDeadline(() => browser!.close(), deadlineAt, 'late browser close', 250);
+        if (browserLaunch !== null) await browserLaunch.terminate();
+        else await closeWithinDeadline(() => browser!.close(), recoveryDeadlineAt, 'late browser close', 250);
         browser = null;
         throw new Error('browser launch deadline exceeded');
       }
     } catch (error) {
       if (browserLaunch !== null && browser === null) {
-        const stopped = await browserLaunch.terminate(deadlineAt);
+        const stopped = await browserLaunch.terminate();
         if (!stopped.processStopped)
           context.cleanup('owned browser process termination was not confirmed before the ingest deadline');
-        else if (!stopped.profileRemoved)
+        if (!stopped.connectionSettled)
+          context.cleanup('owned browser CDP connection settlement was not confirmed before the ingest deadline');
+        if (!stopped.profileRemoved)
           context.cleanup('owned browser temporary profile removal was not confirmed before the ingest deadline');
       } else if (browser !== null && performance.now() >= launchDeadline) {
         context.cleanup('late browser launch unresolved; inspect the runner process for a browser left open');
@@ -1105,7 +1114,11 @@ export async function runNodeIngest(
     results.unresolvedOperations = unresolvedOperations;
     try {
       if (page !== null)
-        await closeWithinDeadline(() => page!.close(), deadlineAt, 'page close', browserLaunch === null ? 0 : 250);
+        await closeWithinDeadline(
+          () => page!.close(),
+          browserLaunch === null ? deadlineAt : recoveryDeadlineAt,
+          'page close',
+        );
     } catch {
       context.fail('page close failed during teardown');
       context.cleanup('page close failed');
@@ -1114,9 +1127,8 @@ export async function runNodeIngest(
       if (browserContext !== null)
         await closeWithinDeadline(
           () => browserContext!.close(),
-          deadlineAt,
+          browserLaunch === null ? deadlineAt : recoveryDeadlineAt,
           'browser context close',
-          browserLaunch === null ? 0 : 250,
         );
       if (browserContext !== null) browserContextClosed = true;
     } catch {
@@ -1130,9 +1142,8 @@ export async function runNodeIngest(
       if (browser !== null)
         await closeWithinDeadline(
           () => browser!.close(),
-          deadlineAt,
+          browserLaunch === null ? deadlineAt : recoveryDeadlineAt,
           'browser close',
-          browserLaunch === null ? 0 : 250,
         );
     } catch {
       context.fail('browser close failed during teardown');
@@ -1142,11 +1153,15 @@ export async function runNodeIngest(
         );
     }
     if (browserLaunch !== null) {
-      const stopped = await browserLaunch.terminate(deadlineAt);
-      if (stopped.processStopped) browserContextClosed = browserContext !== null;
-      else {
+      const stopped = await browserLaunch.terminate();
+      if (stopped.processStopped && stopped.connectionSettled) browserContextClosed = browserContext !== null;
+      if (!stopped.processStopped) {
         context.fail('owned browser process termination was not confirmed during teardown');
         context.cleanup('owned browser process termination was not confirmed; inspect the runner process');
+      }
+      if (!stopped.connectionSettled) {
+        context.fail('owned browser CDP connection settlement was not confirmed during teardown');
+        context.cleanup('owned browser CDP connection settlement was not confirmed; inspect the runner process');
       }
       if (!stopped.profileRemoved) {
         context.fail('owned browser temporary profile removal was not confirmed during teardown');
