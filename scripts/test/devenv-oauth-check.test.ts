@@ -7,8 +7,6 @@ const require = createRequire(import.meta.url);
 const good = {
   ATMUSIC_DEVENV_PDS_URL: 'http://127.0.0.1:2583',
   ATMUSIC_DEVENV_HTTPS_ORIGIN: 'https://music.example.test',
-  ATMUSIC_DEVENV_CLIENT_ID: 'https://music.example.test/oauth/client-metadata.json',
-  ATMUSIC_DEVENV_CLIENT_SECRET: 'private-test-secret',
 };
 
 test('imports and all preflight paths are inert across transports', async () => {
@@ -50,12 +48,12 @@ test('imports and all preflight paths are inert across transports', async () => 
     trap(require('node:net').Socket.prototype, 'connect');
     syncBuiltinESMExports();
     const { runDevenvOauthCheck, DEVENV_OAUTH_ENV } = await import('../live/devenv_oauth_check.ts');
+    expect(DEVENV_OAUTH_ENV).toEqual(['ATMUSIC_DEVENV_PDS_URL', 'ATMUSIC_DEVENV_HTTPS_ORIGIN']);
     expect(output).not.toHaveBeenCalled();
     const run = (env: Record<string, string | undefined>) => {
       output.mockClear();
       expect(runDevenvOauthCheck(env)).toBe(2);
       const text = String(output.mock.calls[0]?.[0]);
-      expect(text).not.toContain(good.ATMUSIC_DEVENV_CLIENT_SECRET);
       const evidence = JSON.parse(text);
       expect(evidence).toMatchObject({
         schemaVersion: 3,
@@ -78,11 +76,15 @@ test('imports and all preflight paths are inert across transports', async () => 
       'https://example.test/path',
       'https://example.test?q=1',
       'https://example.test/#x',
+      'https://example.test/',
     ]) {
       expect(run({ ...good, ATMUSIC_DEVENV_HTTPS_ORIGIN: origin }).invalid).toContain('ATMUSIC_DEVENV_HTTPS_ORIGIN');
     }
-    expect(run({ ...good, ATMUSIC_DEVENV_PDS_URL: 'file:///tmp/pds' }).invalid).toContain('ATMUSIC_DEVENV_PDS_URL');
+    for (const url of ['file:///tmp/pds', 'http://localhost/path', 'http://127.0.0.1:2583/']) {
+      expect(run({ ...good, ATMUSIC_DEVENV_PDS_URL: url }).invalid).toContain('ATMUSIC_DEVENV_PDS_URL');
+    }
     expect(run(good).reason).toContain('not implemented');
+    expect(run({ ...good, ATMUSIC_DEVENV_CLIENT_SECRET: 'unused-secret-placeholder' }).missing).toEqual([]);
     expect(attempts).toEqual([]);
   } finally {
     for (const restore of restorers.reverse()) restore();

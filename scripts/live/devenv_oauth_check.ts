@@ -1,11 +1,6 @@
 import { isNodeGateMain } from './node-live-gate.ts';
 
-export const DEVENV_OAUTH_ENV = [
-  'ATMUSIC_DEVENV_PDS_URL',
-  'ATMUSIC_DEVENV_HTTPS_ORIGIN',
-  'ATMUSIC_DEVENV_CLIENT_ID',
-  'ATMUSIC_DEVENV_CLIENT_SECRET',
-] as const;
+export const DEVENV_OAUTH_ENV = ['ATMUSIC_DEVENV_PDS_URL', 'ATMUSIC_DEVENV_HTTPS_ORIGIN'] as const;
 
 export function runDevenvOauthCheck(env: Readonly<Record<string, string | undefined>>): number {
   const missing = DEVENV_OAUTH_ENV.filter((name) => !env[name]?.trim());
@@ -22,14 +17,16 @@ export function runDevenvOauthCheck(env: Readonly<Record<string, string | undefi
             !url.password &&
             url.pathname === '/' &&
             !url.search &&
-            !url.hash
+            !url.hash &&
+            url.origin === value
           : (url.protocol === 'https:' || url.protocol === 'http:') &&
             !!url.hostname &&
             !url.username &&
             !url.password &&
             url.pathname === '/' &&
             !url.search &&
-            !url.hash;
+            !url.hash &&
+            url.origin === value;
       if (!valid) invalid.push(name);
     } catch {
       invalid.push(name);
