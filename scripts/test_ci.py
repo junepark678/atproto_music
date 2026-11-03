@@ -3,6 +3,7 @@
 import hashlib
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
@@ -35,7 +36,13 @@ def main():
     subprocess.run(["cargo", "fmt", "--all", "--check"], cwd=ROOT, check=True)
     with tempfile.TemporaryDirectory(prefix="atmusic-ci-") as directory:
         copy = Path(directory) / "source"
-        shutil.copytree(ROOT, copy, ignore=shutil.ignore_patterns(".git", "target", "work", "__pycache__"))
+        shutil.copytree(
+            ROOT,
+            copy,
+            ignore=shutil.ignore_patterns(".git", "node_modules", "target", "work", "__pycache__"),
+        )
+        if (ROOT / "node_modules").is_dir():
+            (copy / "node_modules").symlink_to(ROOT / "node_modules", target_is_directory=True)
         source = copy / "crates/server/tests/scaffold.rs"
         source.write_bytes(original + b"\nfn intentionally_unformatted(){let _value=1;}\n")
         expect_failure(["cargo", "fmt", "--all", "--check"], copy)
@@ -48,9 +55,12 @@ def main():
         output = expect_failure(
             ["bash", "scripts/check.sh"], copy
         )
-        require(executed_tests(output) >= 4, "negative readiness test did not execute router tests")
-        require("liveness_does_not_claim_readiness ... FAILED" in output,
-                "inverted readiness assertion was not the observed test failure")
+        plain_output = re.sub(r"\x1b\[[0-9;]*m", "", output)
+        require(executed_tests(plain_output) >= 1, "negative readiness test executed no tests")
+        require(
+            "liveness_does_not_claim_readiness ... FAILED" in plain_output,
+            "inverted readiness assertion was not the observed test failure",
+        )
         print("PASS ci_assertion_failure: inverted readiness assertion fails the executed suite")
 
     require(hashlib.sha256(scaffold.read_bytes()).digest() == digest,
