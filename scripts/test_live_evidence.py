@@ -26,11 +26,14 @@ from unittest.mock import patch
 from pathlib import Path
 
 from verify_live_evidence import (
+    NODE_SUPPORTED_GATES,
     REQUIRED_GATES,
     evaluate,
     gate_status,
+    full_repo_grant,
     main,
     evaluate_node,
+    node_full_repo_grant,
     node_gate_status,
     problems,
     secure_url,
@@ -404,6 +407,41 @@ class LiveEvidenceTests(unittest.TestCase):
         for name in ("oauth", "ssrfProbe", "socketSoak"):
             self.assertEqual(verdict.gates[name], "blocked", name)
 
+    def test_node_oauth_grant_requires_all_four_collections_but_remains_blocked(self):
+        grants = " ".join(f"repo:{PREFIX}.{name}" for name in ("scrobble", "follow", "settings", "love"))
+        four_collection_grant = f"atproto {grants}"
+        scopes = {
+            "fourCollection": four_collection_grant,
+            "missingLove": "atproto " + " ".join(
+                f"repo:{PREFIX}.{name}" for name in ("scrobble", "follow", "settings")
+            ),
+            "partialLoveActions": four_collection_grant.replace(
+                f"repo:{PREFIX}.love", f"repo:{PREFIX}.love?action=create&action=update"
+            ),
+            "missingAtproto": grants,
+            "transitionScope": four_collection_grant + " transition:generic",
+        }
+        self.assertTrue(node_full_repo_grant(PREFIX, scopes["fourCollection"]))
+        self.assertFalse(node_full_repo_grant(PREFIX, scopes["missingLove"]))
+        self.assertFalse(node_full_repo_grant(PREFIX, scopes["partialLoveActions"]))
+        self.assertFalse(node_full_repo_grant(PREFIX, scopes["missingAtproto"]))
+        self.assertFalse(node_full_repo_grant(PREFIX, scopes["transitionScope"]))
+        self.assertNotIn("oauth", NODE_SUPPORTED_GATES)
+
+        entry = self.node_gate("oauth", results={"signIns": [
+            {"did": DID_A, "grantedScope": scopes["fourCollection"]},
+            {"did": DID_B, "grantedScope": scopes["fourCollection"]},
+        ]})
+        status, issues = node_gate_status("oauth", entry, COMMIT, BUNDLE, self.node_inventory()["prerequisites"])
+        self.assertEqual(status, "blocked")
+        self.assertTrue(any("Node gate semantics are not ported" in issue for issue in issues), issues)
+        self.assertFalse(any("all four Node collections" in issue for issue in issues), issues)
+
+        entry["results"]["signIns"][0]["grantedScope"] = scopes["missingLove"]
+        status, issues = node_gate_status("oauth", entry, COMMIT, BUNDLE, self.node_inventory()["prerequisites"])
+        self.assertEqual(status, "blocked")
+        self.assertTrue(any("all four Node collections" in issue for issue in issues), issues)
+
     def test_node_bound_failure_is_fail_but_malformed_failure_is_blocked(self):
         failure = self.node_gate("pdsCompat", result="failed", failures=["real endpoint rejected request"])
         self.assertEqual(node_gate_status("pdsCompat", failure, COMMIT, BUNDLE)[0], "failed")
@@ -741,6 +779,8 @@ class LiveEvidenceTests(unittest.TestCase):
                                          "noDelete": False, "noAtproto": False, "missingSettings": False})
         # The gate's own checks: the control has no failure; each defect is exactly one named failure.
         self.assertEqual(out["failures"]["control"], [])
+        # The legacy Workers verifier deliberately keeps its three-collection grant contract.
+        self.assertTrue(full_repo_grant(p, scopes["full"]))
         self.assertEqual(out["failures"]["nullSub"], ["https://pds.test: the token response has no sub"])
         self.assertEqual(out["failures"]["otherSub"],
                          [f"https://pds.test: token sub did:plc:zzzzzzzzzzzzzzzzzzzzzzzz is not {DID_A}"])

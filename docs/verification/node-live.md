@@ -69,8 +69,17 @@ The verifier shares applicable structural checks for public HTTPS origin,
 owned namespace, PDS identities, result shape, and cleanup. It does not infer
 confidential Node OAuth interoperability from the historical Workers browser
 OAuth evidence. Node OAuth evidence remains blocked until that driver and its
-semantics are ported. At this stage only the applicable existing `ingest` and
-`pdsCompat` structural result checks can pass as Node standalone gates.
+exchange and upstream-revocation observations have an accepted contract. A
+future Node OAuth result must show an actual granted scope containing
+`atproto` and create, update, and delete on each of the four Node collections
+`<prefix>.scrobble`, `<prefix>.follow`, `<prefix>.settings`, and
+`<prefix>.love`; any actual `transition:*` scope token invalidates that
+grant. This four-collection rule is separate from the historical Workers
+`full_repo_grant` rule, which remains three collections. The Node OAuth gate
+is not enabled by this validator rule and remains blocked until the exchange
+and revocation evidence contract and driver are implemented. At this stage
+only the applicable existing `ingest` and `pdsCompat` structural result
+checks can pass as Node standalone gates.
 `ssrfProbe` and `socketSoak` also remain blocked until their Node driver
 semantics are ported; Workers Cloudflare/DO analytics do not stand in for Node
 acceptance. Unknown gates never enable PASS.

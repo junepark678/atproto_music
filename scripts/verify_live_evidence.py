@@ -195,6 +195,24 @@ def full_repo_grant(prefix, scope):
     return True
 
 
+def node_full_repo_grant(prefix, scope):
+    """Node OAuth grant: `atproto` plus full repo actions on all four Node collections."""
+    tokens = scope.split() if isinstance(scope, str) else []
+    grants = [g for g in map(_repo_grant, tokens) if g is not None]
+    if "atproto" not in tokens or any(token.startswith("transition:") for token in tokens):
+        return False
+    if not isinstance(prefix, str):
+        return False
+    for collection in (f"{prefix}.scrobble", f"{prefix}.follow", f"{prefix}.settings", f"{prefix}.love"):
+        actions = set()
+        for collections, granted in grants:
+            if collection in collections:
+                actions |= granted
+        if not set(REPO_ACTIONS) <= actions:
+            return False
+    return True
+
+
 def _close(a, b):
     return _number(a) and _number(b) and abs(a - b) <= 1e-6 * max(1.0, abs(a), abs(b))
 
@@ -653,6 +671,34 @@ def evaluate(manifest, bundle_sha256=None, worker_version_id=None, *, commit=Non
 NODE_SUPPORTED_GATES = ("ingest", "pdsCompat")
 
 
+def _node_oauth_results_problems(entry, prefix, prereq):
+    """Validate the Node-specific grant shape without accepting OAuth as a supported gate."""
+    where = "gates.oauth.results"
+    results = entry.get("results")
+    if not isinstance(results, dict) or not results:
+        return [where]
+    sign_ins = results.get("signIns")
+    if not isinstance(sign_ins, list) or len(sign_ins) < 2:
+        return [f"{where}.signIns (one per PDS)"]
+    problems = []
+    for item in sign_ins:
+        if not isinstance(item, dict) or not live_did(item.get("did")):
+            problems.append(f"{where}.signIns (DID)")
+        elif not _nonempty(item.get("grantedScope")) or not node_full_repo_grant(prefix, item["grantedScope"]):
+            problems.append(
+                f"{where}.signIns ({item['did']}: grantedScope is not atproto plus create, update and delete on "
+                "all four Node collections, and must not include transition:* scopes)"
+            )
+    identities = _identities(prereq) if isinstance(prereq, dict) else None
+    dids = sorted(str(item.get("did")) for item in sign_ins if isinstance(item, dict))
+    if identities is not None:
+        if dids != sorted(str(did) for did, _ in identities):
+            problems.append(f"{where}.signIns (must be exactly one sign-in per prerequisite identity)")
+    elif len(set(dids)) != len(dids):
+        problems.append(f"{where}.signIns (one identity signed in twice)")
+    return problems
+
+
 def _node_identity_problems(data, expected_commit, expected_bundle, where, *, identity_fields=True):
     issues = []
     if not isinstance(expected_commit, str) or not COMMIT_RE.fullmatch(expected_commit) or int(expected_commit, 16) == 0:
@@ -719,7 +765,14 @@ def node_gate_status(name, entry, expected_commit, expected_bundle, prereq=None)
         issues += _pds_problems(where, entry, prereq if isinstance(prereq, dict) else {})
         issues += _subject_problems(where, entry, prereq if isinstance(prereq, dict) else {},
                                     need_uri=name == "ingest", prefix=entry.get("lexiconPrefix"))
-    if name in NODE_SUPPORTED_GATES:
+    if name == "oauth":
+        issues += _node_oauth_results_problems(entry, entry.get("lexiconPrefix"),
+                                               prereq if isinstance(prereq, dict) else {})
+        # Grant validation is necessary but not sufficient: the exchange and
+        # upstream-revocation observation contract is not settled yet.
+        if name not in NODE_SUPPORTED_GATES:
+            issues.append(f"{where} (Node gate semantics are not ported)")
+    elif name in NODE_SUPPORTED_GATES:
         issues += _results_problems(name, entry, entry.get("lexiconPrefix"),
                                     prereq if isinstance(prereq, dict) else {})
     else:
