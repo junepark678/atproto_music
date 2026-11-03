@@ -363,7 +363,7 @@
      "worker/test/storage/schema-v2.test.ts › deleting a users row cascades its loves and deleting a linked_accounts row cascades its forward_outbox rows",
      "worker/test/storage/schema-v2.test.ts › a v1 database seeded with the read-model fixture migrates to v2 with every v1 row byte-identical and the new scrobbles columns NULL",
      "worker/test/storage/schema-v2.test.ts › EXPLAIN QUERY PLAN for loves by owner, due operations, due forward rows and import items by job uses the new indexes",
-     "worker/test/storage/migrate.test.ts › SCHEMA_VERSION is 3 and additive follow proof storage remains compatible with v2 code",
+     "worker/test/storage/migrate.test.ts › SCHEMA_VERSION is 4; follow-proof and delete-target indexes are additive and keep v2 compatibility",
      "worker/test/storage/schema-v2.test.ts › schema_compat holds one row with min_compatible_version 2",
      "worker/test/storage/schema-v2.test.ts › every migration after 2 contains only CREATE TABLE, CREATE INDEX and ALTER TABLE ADD COLUMN statements",
      "worker/test/harness/local-index.test.ts › the ready status and the schema_migrations ledger equal SCHEMA_VERSION and one row per entry of MIGRATIONS",
@@ -1518,6 +1518,7 @@
     "files": [
      "scripts/benchmark-protocol-reads.ts",
      "worker/test/bench/protocol-reads.bench.test.ts",
+     "worker/test/node/read/delete-visibility-plan.test.ts",
      "docs/benchmarks/node-protocol-reads.md"
     ],
     "dependsOn": [
@@ -1525,10 +1526,11 @@
      "N3-06",
      "N4-03"
     ],
-    "description": "ADR 0005 §10.3. (Round 1 N4-03; it follows the bench-project port N4-03, which owns worker/test/bench/ in wave 4.) The test lives in worker/test/bench/ (the worker-bench project), never under worker/test/node/**, so the worker-node project in every npm run check stays fast. Build a deterministic 100k-listen user with a seeded generator and direct SQL inserts into the projection tables, as acceptance/query-plans does, and push a small sample (100 records) through the apply path to prove the shapes agree. Report timings for getTopTracks overall (uncached and cached), getRecentTracks page 500, and ListenBrainz stats all_time and listening-activity year. The test asserts query plans and cache-hit equality only; timings are reported against the budgets, not asserted.",
+    "description": "ADR 0005 §10.3. (Round 1 N4-03; it follows the bench-project port N4-03, which owns worker/test/bench/ in wave 4.) The 100k measurement suite lives in worker/test/bench/ (the worker-bench project), never under worker/test/node/**, so the worker-node project in every npm run check stays fast. A small Node read regression separately proves that the migration-4 partial index is naturally selected and that deletion visibility bodies are byte-identical with and without it. Build a deterministic 100k-listen user with a seeded generator and direct SQL inserts into the projection tables, as acceptance/query-plans does, and push a small sample (100 records) through the apply path to prove the shapes agree. Report timings for getTopTracks overall (uncached and cached), getRecentTracks page 500, and ListenBrainz stats all_time and listening-activity year. The test asserts query plans and cache-hit equality only; timings are reported against the budgets, not asserted.",
     "tests": [
      "worker/test/bench/protocol-reads.bench.test.ts › on a 100k-listen user the top-tracks, recent-tracks and ListenBrainz stats statements use scrobbles_stats or scrobbles_owner_time and never SCAN scrobbles",
-     "worker/test/bench/protocol-reads.bench.test.ts › the cached getTopTracks body equals the uncached body and the report records p50/p95 for each read"
+     "worker/test/bench/protocol-reads.bench.test.ts › the cached getTopTracks body equals the uncached body and the report records p50/p95 for each read",
+     "worker/test/node/read/delete-visibility-plan.test.ts › delete visibility searches by did and rkey and has byte-equal bodies without the index for every state/CID case"
     ]
    }
   ]

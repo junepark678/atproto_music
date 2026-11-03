@@ -2,9 +2,9 @@
 // dropping it changes the plan while public bodies and state/CID rules agree.
 import { fromMs } from '@atmusic/core/timestamp';
 import { expect, it } from 'vitest';
-import { computeStatistics } from '../../src/do/read/stats';
-import { visibleScrobblesFrom } from '../../src/do/read/visibility';
-import { ALICE, BOB, ctxFor, get, pageRkeys, readFixture, SCROBBLE, uriOf } from './scrobble-read-support';
+import { computeStatistics } from '../../../src/do/read/stats';
+import { visibleScrobblesFrom } from '../../../src/do/read/visibility';
+import { ALICE, BOB, ctxFor, get, pageRkeys, readFixture, SCROBBLE, uriOf } from '../../read/scrobble-read-support';
 
 it('delete visibility searches by did and rkey and has byte-equal bodies without the index for every state/CID case', async () => {
   const f = await readFixture('delete-target-plan');

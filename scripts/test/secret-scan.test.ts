@@ -66,13 +66,14 @@ const DIGEST_RECORDS: Readonly<Record<string, 'manifest' | 'labelled'>> = {
   'docs/adr/0002-oauth.md': 'labelled',
   'docs/benchmarks/read_models.json': 'labelled',
   'docs/benchmarks/read_models.md': 'labelled',
+  'docs/benchmarks/receipts/n5-02-read-models-post-index.json': 'labelled',
   'docs/verification/backend-candidate.json': 'labelled',
   'docs/verification/backend-production-inputs.json': 'manifest',
   'docs/verification/backend.md': 'labelled',
   'docs/verification/live-evidence.json': 'labelled',
   'docs/verification/backend-node.md': 'labelled',
 };
-const DIGEST_LABEL = /sha-?256|artifact/i;
+const DIGEST_LABEL = /sha-?256|artifact|digest/i;
 const MANIFEST_LINE = /^\s*"[A-Za-z0-9_./-]+\.[A-Za-z]+": "[0-9a-f]{64}",?$/;
 
 /** Words of exactly 64 hex digits, split on non-hex characters as the oracle does. */
