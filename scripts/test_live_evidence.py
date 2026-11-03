@@ -382,6 +382,28 @@ class LiveEvidenceTests(unittest.TestCase):
         inventory.update(overrides)
         return inventory
 
+    def test_devenv_oauth_advisory_never_closes_live_inventory(self):
+        self.assertEqual(set(REQUIRED_GATES),
+                         {"oauth", "pdsCompat", "ingest", "ssrfProbe", "socketSoak"})
+        self.assertNotIn("devenvOauth", NODE_SUPPORTED_GATES)
+        advisory = self.node_gate("devenvOauth", fixtureOnly=True)
+        status, issues = node_gate_status("devenvOauth", advisory, COMMIT, BUNDLE)
+        self.assertEqual(status, "blocked")
+        self.assertIn("gates.devenvOauth (unknown gate)", issues)
+        verdict = evaluate_node(self.node_inventory(gates={"devenvOauth": advisory}),
+                                COMMIT, BUNDLE)
+        self.assertEqual(verdict.status, "blocked")
+        for name in REQUIRED_GATES:
+            self.assertEqual(verdict.gates[name], "blocked")
+        # Even otherwise valid supported evidence cannot pass with a fixture marker.
+        status, issues = node_gate_status("pdsCompat", self.node_gate(fixtureOnly=True),
+                                         COMMIT, BUNDLE)
+        self.assertEqual(status, "blocked")
+        self.assertTrue(any("fixtureOnly" in issue for issue in issues))
+        for name in REQUIRED_GATES:
+            relabeled = dict(advisory, gate=name)
+            self.assertEqual(node_gate_status(name, relabeled, COMMIT, BUNDLE)[0], "blocked")
+
     def test_node_standalone_supported_gate_uses_independent_identity_and_no_network(self):
         entry = self.node_gate()
         with patch("socket.socket", side_effect=AssertionError("network attempted")), \
