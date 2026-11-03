@@ -1571,7 +1571,8 @@
     "title": "Node live gates (operator-run, blocked by default) and evidence keyed by the Node bundle",
     "files": [
      "scripts/live/",
-   "scripts/test/node-oauth.test.ts",
+     "scripts/test/node-oauth.test.ts",
+     "worker/test/node/bff/devenv-oauth.test.ts",
      "scripts/verify_live_evidence.py",
      "scripts/test_live_evidence.py",
      "docs/verification/node-live.md",
@@ -1584,6 +1585,7 @@
     "description": "ADR 0005 §5.10, §15.\n\n**Ports** of workers_oauth_check, workers_ingest_check, pds_compat_check, ssrf_probe and the socket soak to the Node host (node_*), against an operator-provided deployed origin and real PDS identities.\n\n**ssrf_probe.ts:** its `--emit-worker` path (scripts/live/ssrf_probe.ts:316-328) wrote a probe Worker and wrangler.jsonc and printed wrangler deploy commands; it is replaced by a Node probe script that the operator runs on the host behind the deployed origin, with no wrangler reference.\n\n**New:** devenv_oauth_check, the confidential-client interop against a local @atproto/dev-env PDS that needs an https test origin.\n\n**Rules:**\n- Every gate exits 2 with a blocked document listing missing ATMUSIC_LIVE_* names before any network request.\n- No gate contacts Last.fm or ListenBrainz.\n- Evidence is keyed by the Node bundle SHA-256.\n- The gates are never run by the acceptance script (only their no-env behaviour is).",
     "tests": [
     "scripts/test/node-oauth.test.ts › with every ATMUSIC_LIVE_* unset it exits 2 with a blocked document naming the missing variables and makes no network request",
+     "worker/test/node/bff/devenv-oauth.test.ts › exchanges a confidential grant, writes and deletes through the PDS, and observes upstream revocation",
      "scripts/live/devenv_oauth_check.ts › without an https test origin it exits 2 blocked; the document names the prerequisite",
      "scripts/test_live_evidence.py › evidence records are accepted only for the current Node bundle SHA-256 and a failed gate is never classified as passed",
      "scripts/live/ssrf_probe.ts › --emit-probe writes a Node probe script and prints no wrangler command; no file under scripts/live mentions wrangler"
