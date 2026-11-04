@@ -108,6 +108,54 @@ describe('web/test/session/client.test.ts', () => {
     expect(changed).toHaveBeenLastCalledWith(null, false, 'anonymous');
   });
 
+  it('coalesces concurrent mutation session reads so every caller uses the resolved session', async () => {
+    let resolveSession!: (response: Response) => void;
+    const pendingSession = new Promise<Response>((resolve) => (resolveSession = resolve));
+    const fetcher = vi.fn((input: RequestInfo | URL) => {
+      if (String(input) === '/api/v1/auth/session') return pendingSession;
+      return Promise.resolve(new Response(null, { status: 204 }));
+    });
+    const client = new SessionClient({ fetch: fetcher });
+
+    const first = client.mutate('/api/v1/write/first', { method: 'POST' }, dto.did);
+    const second = client.mutate('/api/v1/write/second', { method: 'POST' }, dto.did);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+
+    resolveSession(Response.json(dto));
+    const results = await Promise.all([first, second]);
+
+    expect(results.map((result) => result.status)).toEqual([204, 204]);
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    expect(fetcher.mock.calls.slice(1).map(([url]) => String(url))).toEqual([
+      '/api/v1/write/first',
+      '/api/v1/write/second',
+    ]);
+  });
+
+  it('makes superseded session-read callers await the replacement read', async () => {
+    let resolveFirst!: (response: Response) => void;
+    let resolveSecond!: (response: Response) => void;
+    const firstRead = new Promise<Response>((resolve) => (resolveFirst = resolve));
+    const secondRead = new Promise<Response>((resolve) => (resolveSecond = resolve));
+    const fetcher = vi
+      .fn()
+      .mockImplementationOnce(() => firstRead)
+      .mockImplementationOnce(() => secondRead)
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+    const client = new SessionClient({ fetch: fetcher });
+
+    const mutation = client.mutate('/api/v1/write', { method: 'POST' }, dto.did);
+    const refresh = client.refresh();
+    resolveFirst(Response.json(dto));
+    await Promise.resolve();
+    expect(fetcher).toHaveBeenCalledTimes(2);
+
+    resolveSecond(Response.json(dto));
+    await expect(refresh).resolves.toEqual(dto);
+    await expect(mutation).resolves.toMatchObject({ status: 204 });
+    expect(fetcher).toHaveBeenCalledTimes(3);
+  });
+
   it('accepts reauth_required DTOs but blocks writes except sign-out', async () => {
     const reauth = { ...dto, handle: null, status: 'reauth_required' as const };
     const changed = vi.fn();
@@ -393,6 +441,7 @@ describe('web/test/session/client.test.ts', () => {
       .fn()
       .mockResolvedValueOnce(Response.json(dto))
       .mockImplementationOnce(() => pendingLogout)
+      .mockResolvedValueOnce(Response.json(bob))
       .mockResolvedValueOnce(Response.json(bob));
     const state = createAppState();
     const client = new SessionClient({
@@ -418,6 +467,35 @@ describe('web/test/session/client.test.ts', () => {
     expect(client.current()).toEqual(bob);
     expect(state.session.value).toEqual(bob);
     expect(state.scrobbleDraft.value?.values).toEqual(values);
+  });
+
+  it('re-reads the cookie after logout instead of retaining a cached replacement account', async () => {
+    let resolveLogout!: (response: Response) => void;
+    const pendingLogout = new Promise<Response>((resolve) => (resolveLogout = resolve));
+    const bob = { ...dto, did: 'did:plc:bbbbbbbbbbbbbbbbbbbbbbbb' as Session['did'], csrfToken: 'bob-csrf' };
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json(dto))
+      .mockImplementationOnce(() => pendingLogout)
+      .mockResolvedValueOnce(Response.json(bob))
+      .mockResolvedValueOnce(new Response(null, { status: 401 }));
+    const state = createAppState();
+    const client = new SessionClient({
+      fetch: fetcher,
+      onChange: (session, reauthRequired, kind) => setSession(state, session, null, { reauthRequired, kind }),
+    });
+    await client.getSession();
+    const logout = client.logout();
+    await expect(client.refresh()).resolves.toEqual(bob);
+
+    resolveLogout(new Response(null, { status: 204 }));
+    await logout;
+
+    expect(fetcher).toHaveBeenCalledTimes(4);
+    expect(String(fetcher.mock.calls[3]?.[0])).toBe('/api/v1/auth/session');
+    expect(client.current()).toBeNull();
+    expect(state.session.value).toBeNull();
+    expect(state.reauthRequired.value).toBe(false);
   });
 
   it('does not let an authenticated GET 401 from the previous account clear a newer session', async () => {
