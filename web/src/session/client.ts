@@ -129,6 +129,7 @@ export class SessionClient {
   async logout(): Promise<void> {
     const current = this.#current ?? (await this.getSession());
     if (current === null) throw new Error('Sign in to continue');
+    const logoutCsrfToken = current.csrfToken;
     const response = await this.mutate(
       '/api/v1/auth/logout',
       {
@@ -140,8 +141,10 @@ export class SessionClient {
     );
     if (!response.ok && response.status !== 401) throw new Error(`Sign out failed (${response.status})`);
     if (response.status === 401 || response.ok) {
-      const newerCurrent = this.#current !== null && this.#current.did !== current.did;
-      const newerPublished = this.#published !== null && this.#published.did !== current.did;
+      const isReplacementSession = (session: Session | null): boolean =>
+        session !== null && (session.did !== current.did || session.csrfToken !== logoutCsrfToken);
+      const newerCurrent = isReplacementSession(this.#current);
+      const newerPublished = isReplacementSession(this.#published);
       this.#sessionReadGeneration++;
       if (!newerCurrent && !newerPublished) {
         // Clear the visible session immediately. A pending refresh may have

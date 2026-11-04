@@ -420,6 +420,48 @@ describe('web/test/session/client.test.ts', () => {
     expect(state.scrobbleDraft.value?.values).toEqual(values);
   });
 
+  it('does not let a late logout clear a replacement session for the same account', async () => {
+    sessionStorage.removeItem('atmusic:scrobble-draft');
+    let resolveLogout!: (response: Response) => void;
+    const pendingLogout = new Promise<Response>((resolve) => (resolveLogout = resolve));
+    const replacement = { ...dto, csrfToken: 'replacement-csrf', expiresAt: '2026-12-02T00:00:00Z' };
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json(dto))
+      .mockImplementationOnce(() => pendingLogout)
+      .mockResolvedValueOnce(Response.json(replacement));
+    const state = createAppState();
+    const values = {
+      artist: 'Same Account Draft',
+      track: 'Draft Track',
+      album: '',
+      listenedAt: '2026-01-15T12:00:00Z',
+      durationSeconds: '',
+      recordingMbid: '',
+    };
+    const changes: Array<{ session: Session | null; kind: string }> = [];
+    const client = new SessionClient({
+      fetch: fetcher,
+      onChange: (session, reauthRequired, kind) => {
+        changes.push({ session, kind });
+        setSession(state, session, null, { reauthRequired, kind });
+      },
+    });
+    await client.getSession();
+    const logout = client.logout();
+    await expect(client.refresh()).resolves.toEqual(replacement);
+    setScrobbleDraft(state, values);
+
+    resolveLogout(new Response(null, { status: 401 }));
+    await logout;
+
+    expect(client.current()).toEqual(replacement);
+    expect(state.session.value).toEqual(replacement);
+    expect(state.scrobbleDraft.value?.values).toEqual(values);
+    expect(changes.map((change) => change.kind)).not.toContain('signed_out');
+    sessionStorage.removeItem('atmusic:scrobble-draft');
+  });
+
   it('does not let an authenticated GET 401 from the previous account clear a newer session', async () => {
     const client = sessionClient();
     let resolveOldGet!: (response: Response) => void;
