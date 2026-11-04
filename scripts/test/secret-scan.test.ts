@@ -76,6 +76,7 @@ const DIGEST_RECORDS: Readonly<Record<string, 'manifest' | 'labelled' | 'node-ba
   'docs/verification/receipts/node-backend-be1c0a5-summary.json': 'node-backend-receipt',
   'docs/verification/receipts/node-backend-dabaabf-summary.json': 'node-backend-receipt',
   'docs/verification/receipts/node-backend-e02d96e-summary.json': 'node-backend-receipt',
+  'docs/verification/receipts/node-backend-4322f5d-summary.json': 'node-backend-receipt',
 };
 const DIGEST_LABEL = /sha-?256|artifact/i;
 const MANIFEST_LINE = /^\s*"[A-Za-z0-9_./-]+\.[A-Za-z]+": "[0-9a-f]{64}",?$/;

@@ -1,10 +1,12 @@
-import { useEffect, useState } from 'preact/hooks';
+import { useEffect, useRef, useState } from 'preact/hooks';
 import { approveLastfmAuthorization, listCredentials } from '../api/account';
 import { ErrorState, LoadingState, SignInPrompt } from '../components/state-views';
 import { useAppState } from '../state/store';
 
 export default function LastfmAuthorize() {
   const session = useAppState().session.value;
+  const ownerDid = useRef(session?.did ?? null);
+  if (ownerDid.current === null && session !== null) ownerDid.current = session.did;
   const params = new URLSearchParams(window.location.search);
   const apiKey = params.get('api_key') ?? '';
   const token = params.get('token') ?? undefined;
@@ -37,11 +39,14 @@ export default function LastfmAuthorize() {
         <SignInPrompt>Sign in before authorizing a Last.fm application.</SignInPrompt>
       </section>
     );
+  const expectedDid = ownerDid.current ?? session.did;
+  const canApprove = session.status === 'active' && session.did === expectedDid;
   const approve = async () => {
+    if (!canApprove) return;
     setBusy(true);
     setError(null);
     try {
-      const result = await approveLastfmAuthorization(apiKey, token);
+      const result = await approveLastfmAuthorization(apiKey, expectedDid, token);
       if (!callback) {
         setDecision('approved');
         window.history.replaceState(null, '', window.location.pathname);
@@ -92,12 +97,13 @@ export default function LastfmAuthorize() {
             </dd>
           </dl>
           {clientName === null && <p role="note">Only approve if you recognize and trust this application.</p>}
+          {!canApprove ? <p role="status">Sign in again before authorizing this application.</p> : null}
           <div>
             {/* biome-ignore lint/a11y/noAutofocus: Deny is the safe default for this authorization prompt. */}
             <button type="button" disabled={busy || !apiKey} onClick={deny} autoFocus>
               Deny
             </button>{' '}
-            <button type="button" disabled={busy || !apiKey} onClick={() => void approve()}>
+            <button type="button" disabled={busy || !apiKey || !canApprove} onClick={() => void approve()}>
               {busy ? 'Authorizing…' : 'Approve'}
             </button>
           </div>
