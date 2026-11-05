@@ -20,6 +20,8 @@ function observer(
   options: {
     issuer?: string;
     localSession?: boolean;
+    heldSession?: boolean;
+    ciphertextPresent?: boolean;
     refresh?: (tokenSet: unknown) => Promise<unknown>;
     fetchHandler?: (input: string, init?: RequestInit) => Promise<Response>;
   } = {},
@@ -43,7 +45,12 @@ function observer(
   let version = 1;
   const service = {
     sessionStore: {
-      snapshot: vi.fn(() => ({ session: current, version })),
+      snapshot: vi.fn(() => ({
+        session: current,
+        version,
+        held: options.heldSession ? { session: current ?? saved, atMs: 0 } : undefined,
+        ciphertext: options.ciphertextPresent === false || options.heldSession ? null : new Uint8Array([1]),
+      })),
       has: vi.fn(() => current !== undefined && (options.localSession ?? false)),
     },
     restore: vi.fn(async () => session),
@@ -95,6 +102,12 @@ describe('host OAuth live observer', () => {
     });
   });
 
+  it('does not claim a sealed exchange when the session exists only in write-behind memory', async () => {
+    const world = observer({ heldSession: true });
+    expect(await world.instance.capture(DID)).toEqual({ status: 'session_not_sealed' });
+    expect(world.service.restore).not.toHaveBeenCalled();
+  });
+
   it('proves sign-out by refreshing the captured sealed token and accepting only invalid_grant', async () => {
     let usedToken = '';
     const refresh = vi.fn(async (tokenSet: unknown) => {
@@ -134,6 +147,12 @@ describe('host OAuth live observer', () => {
     ]);
     let nextCid = 0;
     const requests: string[] = [];
+    const originalTimeout = AbortSignal.timeout;
+    const cleanupTimeoutRequests: number[] = [];
+    const timeoutSpy = vi.spyOn(AbortSignal, 'timeout').mockImplementation((delay) => {
+      if (delay === 4 * 60_000) cleanupTimeoutRequests.push(requests.length);
+      return originalTimeout.call(AbortSignal, delay);
+    });
     const fetchHandler = vi.fn(async (input: string, init?: RequestInit) => {
       requests.push(input);
       const url = new URL(input, 'https://pds.test');
@@ -178,6 +197,9 @@ describe('host OAuth live observer', () => {
     expect((await world.instance.capture(DID)).status).toBe('captured');
     const result = await world.instance.exerciseCrud(DID, 'did:plc:bcdefghijklmnopqrstuvwxy');
     expect(result.status, `${JSON.stringify(result)} requests=${requests.join('|')}`).toBe('passed');
+    expect(cleanupTimeoutRequests).toHaveLength(1);
+    expect(cleanupTimeoutRequests[0]).toBeGreaterThan(0);
+    timeoutSpy.mockRestore();
     expect(result.cleanupVerified).toBe(true);
     expect(records.get(`${collection}/self`)?.value).toEqual(original);
     expect(records.get(`${collection}/self`)?.cid).not.toBe('original-cid');

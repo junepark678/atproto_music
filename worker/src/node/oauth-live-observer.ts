@@ -222,7 +222,6 @@ export function createOAuthLiveObserver(options: {
       ...(requestSignal === undefined ? [] : [requestSignal]),
       AbortSignal.timeout(CRUD_PHASE_TIMEOUT_MS),
     ]);
-    const cleanupSignal = AbortSignal.timeout(CRUD_CLEANUP_TIMEOUT_MS);
     const now = new Date(options.nowMs()).toISOString();
     const later = new Date(options.nowMs() + 1).toISOString();
     const marker = `atmusic-oauth-${newTid(options.clock, options.random)}`;
@@ -386,6 +385,9 @@ export function createOAuthLiveObserver(options: {
       });
     }
 
+    // Start the cleanup budget only after CRUD has finished. A long but
+    // successful CRUD phase must not consume the bounded recovery window.
+    const cleanupSignal = AbortSignal.timeout(CRUD_CLEANUP_TIMEOUT_MS);
     let cleanupVerified = true;
     for (const intent of owned) {
       // Repeated runs preserve the singleton; partial temporary writes are
@@ -406,9 +408,15 @@ export function createOAuthLiveObserver(options: {
         for (const [key, value] of captures) if (expired(value)) captures.delete(key);
         const before = oauth.sessionStore.snapshot(did);
         const saved = before.session;
+        // A session returned from the in-memory write-behind map is not proof
+        // that the confidential exchange was durably sealed on this host.
         if (!saved || saved.tokenSet.sub !== did) {
           captures.delete(did);
           return { status: 'no_session' };
+        }
+        if (before.held !== undefined || before.ciphertext === null) {
+          captures.delete(did);
+          return { status: 'session_not_sealed' };
         }
         if (!saved.tokenSet.refresh_token) {
           captures.delete(did);
@@ -420,6 +428,8 @@ export function createOAuthLiveObserver(options: {
         const after = oauth.sessionStore.snapshot(did);
         if (
           after.session === undefined ||
+          after.held !== undefined ||
+          after.ciphertext === null ||
           after.version !== before.version ||
           after.session.tokenSet.refresh_token !== saved.tokenSet.refresh_token
         ) {
