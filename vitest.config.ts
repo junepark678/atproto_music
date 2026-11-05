@@ -14,9 +14,9 @@ export default defineConfig({
       'packages/*',
       'worker/vitest.*.config.ts',
       'web',
-      // Node-side tooling tests (scripts/test/**: W1-09 gen-config/check-bundle,
-      // deploy, pitr-restore, secret-scan). They spawn npm, tsc, biome, tsx and
-      // wrangler, hence the long default timeout.
+      // Node-side tooling tests (scripts/test/**: gen-config, secret-scan, the
+      // Node build/bundle guard, install-local, restore). They spawn npm, tsc,
+      // biome and tsx, hence the long default timeout.
       {
         test: {
           name: 'scripts',

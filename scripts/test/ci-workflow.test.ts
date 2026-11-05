@@ -77,8 +77,10 @@ it('Node candidate workflow is manual, pinned, tested, audited and checksum-chec
   expect(candidate).toContain('sha256sum -c SHA256SUMS');
 });
 
-// The full gate includes deploy.test.ts, which fails if actionlint is absent
-// or not v1.7.7. Installing Go's module is not enough without GITHUB_PATH.
+// N7-01 deleted deploy.test.ts (the Workers deploy workflow check), so no gate
+// test needs actionlint any more; the install stays pinned in both full-gate
+// workflows as a documented prerequisite (README) until a Node workflow check
+// uses it again. Installing Go's module is not enough without GITHUB_PATH.
 it('every full TypeScript gate workflow installs and exposes actionlint v1.7.7 before testing', () => {
   const candidate = readFileSync(
     fileURLToPath(new URL('../../.github/workflows/node-candidate.yml', import.meta.url)),
