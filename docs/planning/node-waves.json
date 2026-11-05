@@ -1500,7 +1500,7 @@
      "web/test/session/client.test.ts › refreshes a cached expired session on focus when BroadcastChannel is unavailable",
      "web/test/routes/signin.test.tsx › keeps the sign-in retry form visible for a reauth_required server session",
      "web/test/routes/settings-accounts.test.tsx › reauth_required settings pages show account data without mutation forms",
-    "web/test/routes/scrobble.test.tsx › shows sign-in after a 401, then restores the in-memory draft with a fresh write intent after reauthentication",
+    "web/test/routes/scrobble.test.tsx › restores the same-account draft after reauthentication and app recreation with a fresh write intent",
     "web/test/routes/scrobble.test.tsx › a late submit response cannot clear a newer draft after the form remounts",
      "web/test/routes/scrobble.test.tsx › invalid input shows field errors and does not create a scrobble operation",
      "web/test/routes/settings.test.tsx › shows server session identity and the public export link without a local browser outbox",
