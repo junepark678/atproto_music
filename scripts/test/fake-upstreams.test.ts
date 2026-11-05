@@ -27,7 +27,7 @@ const commit = (did: string, rkey: string): CommitResult =>
     car: new Uint8Array(),
   }) as unknown as CommitResult;
 
-function nextMessage(socket: WebSocket, timeoutMs = 2_000): Promise<string> {
+function nextMessage(socket: WebSocket, timeoutMs = 10_000): Promise<string> {
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => reject(new Error('Jetstream event timed out')), timeoutMs);
     socket.once('message', (data) => {
