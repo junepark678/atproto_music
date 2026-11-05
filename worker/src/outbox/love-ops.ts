@@ -217,6 +217,9 @@ function existingLove(op: OperationRow, ctx: ExecContext, key: string): Existing
   const db = ctx.m.db;
   const last = decisions(ctx, op.did).get(key);
   if (last !== undefined) {
+    // A completed unlove supersedes the still-visible projection until its
+    // deletion hint is verified. Re-loving must write its new persisted key.
+    if (last.kind === 'love.delete') return null;
     if (last.kind === 'love.put' && last.uri !== null && last.cid !== null) {
       const rkey = ownRecordKey(last.uri, op.did, op.collection);
       if (rkey !== null) {

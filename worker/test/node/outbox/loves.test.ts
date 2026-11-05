@@ -253,6 +253,51 @@ it('a verified same-rkey overwrite invalidates an old love success after restart
   });
 });
 
+for (const sequence of ['immediate', 'restart', 'queued'] as const) {
+  it(`re-loving an indexed track after unlove creates its persisted key with stale deletion projection (${sequence})`, async () => {
+    await withHarness(async (h) => {
+      h.seedUser(h.alice);
+      const first = await enqueueLove(h.m, {
+        did: h.alice,
+        input: { artist: 'Artist A', track: 'Track A' },
+        origin: 'web',
+      });
+      if (!first.ok || first.operation.rkey === null) throw new Error('first love was not admitted');
+      await h.runUntilIdle();
+      expect((await projectLove(h, first.operation.rkey)).outcome).toBe('applied');
+
+      const unlove = await enqueueUnlove(h.m, {
+        did: h.alice,
+        artist: 'Artist A',
+        track: 'Track A',
+        origin: 'web',
+      });
+      if (!unlove.ok) throw new Error('unlove was not admitted');
+      if (sequence !== 'queued') {
+        await h.runUntilIdle();
+        expect(await remoteRecords(h.kit, 'Alice', LOVE)).toHaveLength(0);
+        if (sequence === 'restart') h.restart();
+      }
+
+      const again = await enqueueLove(h.m, {
+        did: h.alice,
+        input: { artist: 'artist a', track: 'TRACK A' },
+        origin: 'web',
+      });
+      if (!again.ok) throw new Error('re-love was not admitted');
+      await h.runUntilIdle();
+      const uri = `at://${h.alice}/${LOVE}/${again.operation.rkey}`;
+      expect(again.operation.rkey).not.toBe(first.operation.rkey);
+      expect(h.op(again.operation.id)).toMatchObject({ state: 'succeeded', result_uri: uri });
+      expect(h.writers.order()).toEqual([CREATE, LIST, DELETE, CREATE]);
+      expect(h.writers.sent.at(-1)?.body).toMatchObject({ rkey: again.operation.rkey });
+      expect(await remoteRecords(h.kit, 'Alice', LOVE)).toEqual([
+        expect.objectContaining({ rkey: again.operation.rkey }),
+      ]);
+    });
+  });
+}
+
 it('a verified same-key metadata rewrite reuses the current CID without creating another love', async () => {
   await withHarness(async (h) => {
     h.seedUser(h.alice);
