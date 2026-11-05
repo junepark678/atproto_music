@@ -2,8 +2,10 @@ import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { withBoundedRecovery } from '@atmusic/core/oauth-live-budget';
+import { OAUTH_LIVE_BUDGETS, withBoundedRecovery } from '@atmusic/core/oauth-live-budget';
 import { expect, test, vi } from 'vitest';
+import * as admin from '../admin/atmusic-admin.ts';
+import * as liveGate from '../live/live-gate.ts';
 import {
   assertNoExistingFollow,
   browserRequest,
@@ -15,6 +17,7 @@ import {
   spec,
 } from '../live/node_oauth_check.ts';
 import { NODE_ENV, type NodeGateIO, runNodeGate } from '../live/node-live-gate.ts';
+import * as oauthBrowser from '../live/workers_oauth_check.ts';
 
 const REPO = resolve(fileURLToPath(new URL('../..', import.meta.url)));
 const TSX = createRequire(resolve(REPO, 'package.json')).resolve('tsx/cli');
@@ -154,6 +157,122 @@ test('the OAuth grant validator accepts both repo scope encodings and requires e
   expect(hasAllTwelveActions('org.atproto.music', queryScope.replace('&action=delete', ''))).toBe(false);
 });
 
+test.each([false, true])('a valid 202 at phase expiry is reconciled before logout (ack URI: %s)', async (hasUri) => {
+  const env = completeEnv();
+  const did = env.ATMUSIC_LIVE_DID_A!;
+  const origin = env[NODE_ENV.origin]!;
+  const collection = 'org.atproto.music.scrobble';
+  const rkey = 'record-key';
+  const uri = `at://${did}/${collection}/${rkey}`;
+  const deleteRoute = `/api/v1/scrobbles/${encodeURIComponent(uri)}`;
+  const cid = 'bafyreiaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+  const scope = `atproto ${['scrobble', 'follow', 'settings', 'love'].map((name) => `repo:org.atproto.music.${name}`).join(' ')}`;
+  let now = 0;
+  vi.spyOn(performance, 'now').mockImplementation(() => now);
+  const events: string[] = [];
+  const locator = { fill: async () => undefined, click: async () => undefined };
+  const page = {
+    goto: async () => undefined,
+    locator: () => locator,
+    getByRole: () => locator,
+    waitForURL: async () => undefined,
+    url: () => origin,
+    evaluate: async (_callback: unknown, arg: { path: string; method: string }) => {
+      events.push(`${arg.method} ${arg.path}`);
+      if (arg.path === '/api/v1/auth/session') return { status: 200, json: { did, csrfToken: 'synthetic-csrf' } };
+      if (arg.path === '/api/v1/auth/logout') return { status: 204, json: null };
+      if (arg.path === '/api/v1/scrobbles' && arg.method === 'POST') {
+        now = OAUTH_LIVE_BUDGETS.appPhaseMs;
+        return {
+          status: 202,
+          json: { operation: { id: 'accepted-write', state: 'queued', ...(hasUri ? { uri } : {}) } },
+        };
+      }
+      if (arg.path === '/api/v1/operations/accepted-write') {
+        return { status: 200, json: { id: 'accepted-write', state: 'succeeded', kind: 'scrobble.create', uri, cid } };
+      }
+      if (arg.path === deleteRoute && arg.method === 'DELETE') {
+        return { status: 202, json: { operation: { id: 'cleanup-delete', state: 'queued' } } };
+      }
+      if (arg.path === '/api/v1/operations/cleanup-delete') {
+        return { status: 200, json: { id: 'cleanup-delete', state: 'succeeded', kind: 'scrobble.delete' } };
+      }
+      throw new Error(`unexpected browser request ${arg.path}`);
+    },
+  };
+  vi.spyOn(oauthBrowser, 'launchBrowser').mockResolvedValue({
+    newContext: async () => ({ newPage: async () => page, close: async () => undefined }),
+    close: async () => undefined,
+  } as unknown as Awaited<ReturnType<typeof oauthBrowser.launchBrowser>>);
+  vi.spyOn(liveGate, 'pdsInfo').mockImplementation(async (endpoint, implementation) => ({
+    endpoint,
+    implementation,
+    version: 'test',
+  }));
+  vi.spyOn(liveGate, 'checkIdentityPds').mockResolvedValue('fixture.handle');
+  vi.spyOn(liveGate, 'httpJson').mockImplementation(async (input) => {
+    const url = new URL(input);
+    let status = 200;
+    let json: unknown;
+    if (url.pathname === '/oauth/client-metadata.json') {
+      json = {
+        client_id: `${origin}/oauth/client-metadata.json`,
+        token_endpoint_auth_method: 'private_key_jwt',
+        dpop_bound_access_tokens: true,
+        scope,
+      };
+    } else if (url.pathname === '/.well-known/oauth-protected-resource') {
+      status = 404;
+      json = null;
+    } else if (url.pathname === '/xrpc/com.atproto.identity.resolveHandle') {
+      json = { did: url.hostname.startsWith('pds-a.') ? did : env.ATMUSIC_LIVE_DID_B };
+    } else throw new Error(`unexpected HTTP ${url.pathname}`);
+    return { status, json, headers: new Headers() };
+  });
+  const present = vi
+    .spyOn(liveGate, 'verifyRecordAt')
+    .mockResolvedValue({ state: 'present', cid, rev: '3jzfcijpj2z2a', commitCid: cid, pds: env.ATMUSIC_LIVE_PDS_A! });
+  const absent = vi.spyOn(liveGate, 'verifyAbsent').mockImplementation(async () => {
+    events.push('verified absence');
+    return { method: 'exclusionProof', rev: '3jzfcijpj2z2b', commitCid: cid, pds: env.ATMUSIC_LIVE_PDS_A! };
+  });
+  vi.spyOn(admin, 'sendOverSocket').mockImplementation(async (_socket, request) => {
+    const phase = (request.body as { phase: string }).phase;
+    const body =
+      phase === 'capture'
+        ? {
+            status: 'captured',
+            tokenSub: did,
+            issuerHost: new URL(env.ATMUSIC_LIVE_PDS_A!).hostname,
+            sealedSessionObserved: true,
+            clientAuthMethod: 'private_key_jwt',
+            dpopBound: true,
+            refreshTokenPresent: true,
+            grantedScope: scope,
+          }
+        : phase === 'crud'
+          ? { status: 'passed', cleanupVerified: true, crud: [] }
+          : phase === 'prepare_sign_out'
+            ? { status: 'prepared', refreshTokenPresent: true, sessionVersionStable: true }
+            : { status: 'revoked', localSessionAbsent: true, refreshRejected: true, refreshError: 'invalid_grant' };
+    return { status: 200, body: JSON.stringify(body) };
+  });
+  const result = capture();
+  try {
+    expect(await runNodeGate(spec, env, result.io)).toBe(1);
+    expect(events).toContain(`DELETE ${deleteRoute}`);
+    expect(present).toHaveBeenCalledWith(did, collection, rkey, expect.anything());
+    expect(absent).toHaveBeenCalledOnce();
+    expect(events.indexOf('verified absence')).toBeLessThan(events.indexOf('POST /api/v1/auth/logout'));
+    expect(events.includes('GET /api/v1/operations/accepted-write')).toBe(!hasUri);
+    const evidence = JSON.parse(result.output().stdout);
+    expect(evidence.result).toBe('failed');
+    expect(evidence.cleanup).toContain('1 accepted app write(s) reconciled during recovery');
+  } finally {
+    vi.restoreAllMocks();
+  }
+});
+
 test('automated OAuth sign-in requires the configured PDS handle to resolve to its exact DID', () => {
   const did = 'did:plc:abcdefghijklmnopqrstuvwx';
   expect(handleResolutionMatchesDid(200, { did }, did)).toBe(true);
@@ -285,18 +404,19 @@ test('a delayed Playwright evaluation does not fetch after expiry and settles be
   let evaluationSettled = false;
   const page = {
     evaluate: async (callback: (arg: unknown) => Promise<unknown> | unknown, arg: unknown) => {
-      evaluateCalls += 1;
-      if (evaluateCalls === 1) await new Promise((resolve) => setTimeout(resolve, 40));
+      const callNumber = ++evaluateCalls;
+      if (callNumber === 1) await new Promise((resolve) => setTimeout(resolve, 40));
       try {
         return await callback(arg);
       } finally {
-        if (evaluateCalls === 1) evaluationSettled = true;
+        if (callNumber === 1) evaluationSettled = true;
       }
     },
   } as unknown as import('@playwright/test').Page;
   const fetch = vi.fn(async () => Response.json({ ok: true }));
   vi.stubGlobal('fetch', fetch);
   let recoveryStarted = false;
+  let settledAtRecovery: boolean | undefined;
   try {
     await expect(
       withBoundedRecovery(
@@ -306,7 +426,7 @@ test('a delayed Playwright evaluation does not fetch after expiry and settles be
         },
         async (deadline) => {
           recoveryStarted = true;
-          expect(evaluationSettled).toBe(true);
+          settledAtRecovery = evaluationSettled;
           deadline.assertActive();
         },
         { appPhaseMs: 500, appCleanupMs: 500 },
@@ -314,6 +434,7 @@ test('a delayed Playwright evaluation does not fetch after expiry and settles be
     ).rejects.toThrow(/timed out/);
     expect(fetch).not.toHaveBeenCalled();
     expect(recoveryStarted).toBe(true);
+    expect(settledAtRecovery).toBe(true);
   } finally {
     vi.unstubAllGlobals();
   }
