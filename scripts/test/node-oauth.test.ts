@@ -6,7 +6,10 @@ import { expect, test, vi } from 'vitest';
 import {
   assertNoExistingFollow,
   browserRequest,
+  expectedAuthorizationOrigin,
+  handleResolutionMatchesDid,
   hasAllTwelveActions,
+  isExpectedAuthorizationOrigin,
   NODE_OAUTH_ENV,
   spec,
 } from '../live/node_oauth_check.ts';
@@ -148,6 +151,52 @@ test('the OAuth grant validator accepts both repo scope encodings and requires e
   expect(hasAllTwelveActions('org.atproto.music', colonScope)).toBe(true);
   expect(hasAllTwelveActions('org.atproto.music', queryScope)).toBe(true);
   expect(hasAllTwelveActions('org.atproto.music', queryScope.replace('&action=delete', ''))).toBe(false);
+});
+
+test('automated OAuth sign-in requires the configured PDS handle to resolve to its exact DID', () => {
+  const did = 'did:plc:abcdefghijklmnopqrstuvwx';
+  expect(handleResolutionMatchesDid(200, { did }, did)).toBe(true);
+  expect(handleResolutionMatchesDid(200, { did: 'did:plc:bcdefghijklmnopqrstuvwxy' }, did)).toBe(false);
+  expect(handleResolutionMatchesDid(200, { did: ['not', 'a', 'DID'] }, did)).toBe(false);
+  expect(handleResolutionMatchesDid(404, { did }, did)).toBe(false);
+  expect(handleResolutionMatchesDid(200, null, did)).toBe(false);
+});
+
+test('automated OAuth sign-in pins the authorization origin to valid PDS metadata', () => {
+  const pds = 'https://pds-a.example.net';
+  expect(
+    expectedAuthorizationOrigin(pds, 200, {
+      resource: pds,
+      authorization_servers: ['https://login.example.org/oauth'],
+    }),
+  ).toBe('https://login.example.org');
+  expect(expectedAuthorizationOrigin(pds, 404, null)).toBe(pds);
+
+  for (const metadata of [
+    { resource: pds, authorization_servers: ['https://login.example.org', 'https://attacker.example'] },
+    { resource: 'https://attacker.example', authorization_servers: ['https://login.example.org'] },
+    { resource: pds, authorization_servers: ['http://login.example.org'] },
+    { resource: pds, authorization_servers: [null] },
+    { resource: pds, authorization_servers: ['https://user:pass@login.example.org'] },
+    { resource: pds, authorization_servers: ['https://login.example.org?next=attacker'] },
+  ]) {
+    expect(() => expectedAuthorizationOrigin(pds, 200, metadata)).toThrow();
+  }
+  expect(() => expectedAuthorizationOrigin('http://pds-a.example.net', 404, null)).toThrow();
+  expect(() => expectedAuthorizationOrigin(pds, 500, null)).toThrow();
+});
+
+test('password entry accepts only the exact pinned authorization origin', () => {
+  const expected = 'https://login.example.org';
+  expect(isExpectedAuthorizationOrigin('https://login.example.org/oauth/authorize', expected)).toBe(true);
+  for (const current of [
+    'https://attacker.example/oauth/authorize',
+    'https://login.example.org.attacker.example/oauth/authorize',
+    'https://login.example.org:444/oauth/authorize',
+    'not a URL',
+  ]) {
+    expect(isExpectedAuthorizationOrigin(current, expected)).toBe(false);
+  }
 });
 
 test('the browser request deadline aborts a fetch that never responds', async () => {

@@ -183,4 +183,69 @@ describe('host OAuth live observer', () => {
     expect(records.get(`${collection}/self`)?.cid).not.toBe('original-cid');
     expect(fetchHandler).toHaveBeenCalled();
   });
+
+  it('stops CRUD on client disconnect and completes bounded cleanup before returning', async () => {
+    const records = new Map<string, { value: Record<string, unknown>; cid: string }>();
+    let nextCid = 0;
+    let reads = 0;
+    let releaseHangingRead!: () => void;
+    const hangingReadStarted = new Promise<void>((resolve) => {
+      releaseHangingRead = resolve;
+    });
+    const fetchHandler = vi.fn(async (input: string, init?: RequestInit) => {
+      const url = new URL(input, 'https://pds.test');
+      const method = url.pathname.split('.').at(-1);
+      if (init?.signal?.aborted) throw new DOMException('aborted', 'AbortError');
+      if (method === 'getRecord') {
+        reads += 1;
+        if (reads === 3) {
+          releaseHangingRead();
+          await new Promise<never>((_resolve, reject) => {
+            init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), {
+              once: true,
+            });
+          });
+        }
+        const key = `${url.searchParams.get('collection')}/${url.searchParams.get('rkey')}`;
+        const current = records.get(key);
+        return current
+          ? Response.json({ uri: `at://${DID}/${key}`, cid: current.cid, value: current.value })
+          : Response.json({ error: 'RecordNotFound' }, { status: 400 });
+      }
+      const body = JSON.parse(String(init?.body)) as {
+        collection: string;
+        rkey: string;
+        record?: Record<string, unknown>;
+      };
+      const key = `${body.collection}/${body.rkey}`;
+      if (method === 'createRecord') {
+        const cid = `cid-${++nextCid}`;
+        if (!body.record) return Response.json({ error: 'InvalidRecord' }, { status: 400 });
+        records.set(key, { value: body.record, cid });
+        return Response.json({ uri: `at://${DID}/${key}`, cid });
+      }
+      if (method === 'putRecord') {
+        const current = records.get(key);
+        if (!current || !body.record) return Response.json({ error: 'InvalidRecord' }, { status: 400 });
+        const cid = `cid-${++nextCid}`;
+        records.set(key, { value: body.record, cid });
+        return Response.json({ uri: `at://${DID}/${key}`, cid });
+      }
+      if (method === 'deleteRecord') {
+        records.delete(key);
+        return Response.json({ success: true });
+      }
+      return Response.json({ error: 'UnknownMethod' }, { status: 404 });
+    });
+    const world = observer({ fetchHandler });
+    expect((await world.instance.capture(DID)).status).toBe('captured');
+    const controller = new AbortController();
+    const work = world.instance.exerciseCrud(DID, 'did:plc:bcdefghijklmnopqrstuvwxy', controller.signal);
+    await hangingReadStarted;
+    controller.abort();
+    const result = await work;
+    expect(result.status).toBe('failed');
+    expect(result.cleanupVerified).toBe(true);
+    expect(records.size).toBe(0);
+  });
 });

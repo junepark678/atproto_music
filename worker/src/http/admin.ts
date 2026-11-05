@@ -57,7 +57,7 @@ export type PruneKidOutcome = { status: 'pruned'; kid: string; sessions: number 
 
 export interface SocketOAuthLiveObserver {
   capture(did: string): Promise<Record<string, unknown>>;
-  exerciseCrud(did: string, followSubject: string): Promise<Record<string, unknown>>;
+  exerciseCrud(did: string, followSubject: string, signal?: AbortSignal): Promise<Record<string, unknown>>;
   prepareSignOut(did: string): Promise<Record<string, unknown>>;
   verifyAfterSignOut(did: string): Promise<Record<string, unknown>>;
 }
@@ -148,7 +148,7 @@ export function socketAdminHandler(deps: SocketAdminDeps): (req: Request) => Pro
         if (typeof value.followSubject !== 'string' || !isSupportedDid(value.followSubject)) {
           throw invalidField('followSubject', 'Expected a did:plc or did:web DID.');
         }
-        return json(await deps.oauthLiveObserver.exerciseCrud(value.did, value.followSubject), 200);
+        return json(await deps.oauthLiveObserver.exerciseCrud(value.did, value.followSubject, req.signal), 200);
       }
       if (value.phase === 'prepare_sign_out' && Object.keys(value).length === 2) {
         return json(await deps.oauthLiveObserver.prepareSignOut(value.did), 200);

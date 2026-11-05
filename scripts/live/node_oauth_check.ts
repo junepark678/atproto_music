@@ -40,6 +40,8 @@ export const NODE_OAUTH_ENV = {
   timeoutSeconds: 'ATMUSIC_LIVE_OAUTH_TIMEOUT_S',
 } as const;
 
+const CRUD_SOCKET_TIMEOUT_MS = 15 * 60_000;
+
 const timeout: NodeGateRequirement = {
   name: NODE_OAUTH_ENV.timeoutSeconds,
   what: 'optional timeout in seconds from 30 through 3600 (default 300)',
@@ -110,6 +112,45 @@ type CreatedRecord = { uri: string; cid: string; rev: string };
 
 const object = (value: unknown): JsonObject | null =>
   value !== null && typeof value === 'object' && !Array.isArray(value) ? (value as JsonObject) : null;
+
+export function handleResolutionMatchesDid(status: number, value: unknown, expectedDid: string): boolean {
+  return status === 200 && object(value)?.did === expectedDid;
+}
+
+export function expectedAuthorizationOrigin(pds: string, status: number, value: unknown): string {
+  const pdsUrl = new URL(pds);
+  if (pdsUrl.protocol !== 'https:' || pdsUrl.username || pdsUrl.password) {
+    throw new Error('prevalidated PDS origin is not an HTTPS origin');
+  }
+  if (status === 404) return pdsUrl.origin;
+  const metadata = object(value);
+  const servers = metadata?.authorization_servers;
+  const resource = metadata?.resource;
+  if (status !== 200 || typeof resource !== 'string' || !Array.isArray(servers) || servers.length !== 1) {
+    throw new Error('PDS authorization-server metadata is not valid for the pinned resource');
+  }
+  const resourceUrl = new URL(resource);
+  const issuerUrl = new URL(servers[0] as string);
+  if (
+    resourceUrl.origin !== pdsUrl.origin ||
+    issuerUrl.protocol !== 'https:' ||
+    issuerUrl.username !== '' ||
+    issuerUrl.password !== '' ||
+    issuerUrl.search !== '' ||
+    issuerUrl.hash !== ''
+  ) {
+    throw new Error('PDS authorization-server metadata does not bind a public HTTPS issuer to this resource');
+  }
+  return issuerUrl.origin;
+}
+
+export function isExpectedAuthorizationOrigin(currentUrl: string, expectedOrigin: string): boolean {
+  try {
+    return new URL(currentUrl).origin === new URL(expectedOrigin).origin;
+  } catch {
+    return false;
+  }
+}
 
 export async function browserRequest(
   page: import('@playwright/test').Page,
@@ -251,6 +292,7 @@ async function signIn(
   context: NodeGateContext,
   page: import('@playwright/test').Page,
   which: 'A' | 'B',
+  expectedIssuerOrigin: string,
   timeoutMs: number,
 ): Promise<Session> {
   const handleName = which === 'A' ? OAUTH_ENV.handleA : OAUTH_ENV.handleB;
@@ -268,6 +310,9 @@ async function signIn(
   while (new URL(page.url()).origin !== origin && performance.now() < deadline) {
     const password = page.locator('input[type="password"]').first();
     if (!passwordSent && context.env[passwordName] && (await password.isVisible().catch(() => false))) {
+      if (!isExpectedAuthorizationOrigin(page.url(), expectedIssuerOrigin)) {
+        throw new Error(`refusing to enter the PDS ${which} password outside its pinned authorization server`);
+      }
       const identifier = page.locator('input[autocomplete="username"], input[name="username"]').first();
       if ((await identifier.isVisible().catch(() => false)) && !(await identifier.inputValue().catch(() => ''))) {
         await identifier.fill(context.get(handleName), { timeout: budget() });
@@ -313,7 +358,10 @@ async function socketObserve(
     method: 'POST',
     path: '/admin/oauth/live-observe',
     body,
-    timeoutMs: 30_000,
+    // The observer performs multiple sequential repository calls plus cleanup.
+    // Its bounded CRUD phase and cleanup budget fit inside this client wait, so
+    // the browser does not sign out while host-side cleanup is still running.
+    timeoutMs: phase === 'crud' ? CRUD_SOCKET_TIMEOUT_MS : 30_000,
   };
   const socket = defaultSocketPath(context.env, process.getuid?.() ?? null);
   const answer = await sendOverSocket(socket, request);
@@ -581,7 +629,7 @@ async function appWrites(
     if (!followUri) throw new Error('follow operation returned a malformed record URI');
     if (!followCleanup) throw new Error('accepted follow has no cleanup registration');
     followCleanup.rkey = followUri.rkey;
-    attachRecord(followCleanup, followCreated);
+    attachRecord(followCleanup, followOperation);
     const followProof = await record('follow.put', followCreated, collections.follow, { subject: peerDid });
     followCleanup.after = followProof.rev;
     const unfollow = await appOperation(page, session.csrf, `/api/v1/follows/${encodeURIComponent(peerDid)}`, 'DELETE');
@@ -608,7 +656,7 @@ async function appWrites(
     if (!loveUri) throw new Error('love operation returned a malformed record URI');
     if (!loveCleanup) throw new Error('accepted love has no cleanup registration');
     loveCleanup.rkey = loveUri.rkey;
-    attachRecord(loveCleanup, loveCreated);
+    attachRecord(loveCleanup, loveOperation);
     const loveProof = await record('love.put', loveCreated, collections.love, { artist, track });
     loveCleanup.after = loveProof.rev;
     const unlove = await appOperation(page, session.csrf, loveRoute, 'DELETE');
@@ -768,19 +816,34 @@ export const spec: NodeGateSpec = {
         which: 'A' as const,
         did: context.get(ENV.didA),
         pds: context.get(ENV.pdsA),
+        handle: context.get(OAUTH_ENV.handleA),
         implementation: context.get(ENV.pdsAImplementation),
       },
       {
         which: 'B' as const,
         did: context.get(ENV.didB),
         pds: context.get(ENV.pdsB),
+        handle: context.get(OAUTH_ENV.handleB),
         implementation: context.get(ENV.pdsBImplementation),
       },
     ];
     const pds: Awaited<ReturnType<typeof pdsInfo>>[] = [];
+    const authorizationOrigins: string[] = [];
     for (const identity of identities) {
       const info = await pdsInfo(identity.pds, identity.implementation);
       await checkIdentityPds(identity.did, info.endpoint);
+      const handle = await httpJson(
+        xrpcUrl(info.endpoint, 'com.atproto.identity.resolveHandle', { handle: identity.handle }),
+      );
+      if (!handleResolutionMatchesDid(handle.status, handle.json, identity.did)) {
+        throw new Error(
+          `configured handle for PDS ${identity.which} does not resolve to the expected DID on its declared PDS`,
+        );
+      }
+      const protectedResource = await httpJson(new URL('/.well-known/oauth-protected-resource', info.endpoint));
+      authorizationOrigins.push(
+        expectedAuthorizationOrigin(info.endpoint, protectedResource.status, protectedResource.json),
+      );
       pds.push(info);
     }
 
@@ -796,7 +859,7 @@ export const spec: NodeGateSpec = {
         let captured = false;
         let activeSession: Session | null = null;
         try {
-          const session = await signIn(context, page, identity.which, timeoutMs);
+          const session = await signIn(context, page, identity.which, authorizationOrigins[index]!, timeoutMs);
           activeSession = session;
           const capture = await socketObserve(context, session.did, 'capture');
           if (

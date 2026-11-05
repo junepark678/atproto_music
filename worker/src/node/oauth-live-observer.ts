@@ -9,6 +9,9 @@ import { type NodeSavedSession, OAuthResponseError } from '@atproto/oauth-client
 import type { OAuthService } from '../bff/oauth-client';
 
 const CAPTURE_TTL_MS = 10 * 60_000;
+const XRPC_REQUEST_TIMEOUT_MS = 30_000;
+const CRUD_PHASE_TIMEOUT_MS = 10 * 60_000;
+const CRUD_CLEANUP_TIMEOUT_MS = 4 * 60_000;
 const NSID = '[a-z][a-z0-9-]*(?:\\.[a-z][a-z0-9-]*)+';
 const SAFE_SCOPE_TOKEN = new RegExp(
   `^(?:atproto|transition:[a-zA-Z0-9._:-]{1,128}|repo:${NSID}(?:\\?action=(?:create|update|delete)(?:&action=(?:create|update|delete))*)?|repo\\?(?:collection=${NSID})(?:&collection=${NSID})*(?:&action=(?:create|update|delete))*)$`,
@@ -23,7 +26,7 @@ type Capture = {
 
 export interface OAuthLiveObserver {
   capture(did: string): Promise<Record<string, unknown>>;
-  exerciseCrud(did: string, followSubject: string): Promise<Record<string, unknown>>;
+  exerciseCrud(did: string, followSubject: string, signal?: AbortSignal): Promise<Record<string, unknown>>;
   prepareSignOut(did: string): Promise<Record<string, unknown>>;
   verifyAfterSignOut(did: string): Promise<Record<string, unknown>>;
 }
@@ -86,8 +89,11 @@ export function createOAuthLiveObserver(options: {
     session: OAuthSession,
     method: string,
     body?: RecordValue,
+    signal?: AbortSignal,
   ): Promise<{ response: Response; json: RecordValue | null }> {
+    const requestTimeout = AbortSignal.timeout(XRPC_REQUEST_TIMEOUT_MS);
     const response = await session.fetchHandler(`/xrpc/${method}`, {
+      signal: signal === undefined ? requestTimeout : AbortSignal.any([signal, requestTimeout]),
       ...(body === undefined
         ? {}
         : {
@@ -109,9 +115,10 @@ export function createOAuthLiveObserver(options: {
     session: OAuthSession,
     did: string,
     intent: RecordIntent,
+    signal?: AbortSignal,
   ): Promise<{ status: number; error: string | null; value: RecordValue | null; cid: string | null }> {
     const query = new URLSearchParams({ repo: did, collection: intent.collection, rkey: intent.rkey });
-    const { response, json } = await xrpc(session, `com.atproto.repo.getRecord?${query}`);
+    const { response, json } = await xrpc(session, `com.atproto.repo.getRecord?${query}`, undefined, signal);
     return {
       status: response.status,
       error: typeof json?.error === 'string' ? json.error : null,
@@ -143,42 +150,66 @@ export function createOAuthLiveObserver(options: {
     return record.createdAt === intent.initial.createdAt || record.createdAt === intent.updated.createdAt;
   }
 
-  async function deleteOwnedRecord(session: OAuthSession, did: string, intent: RecordIntent): Promise<boolean> {
-    const current = await readRecord(session, did, intent);
+  async function deleteOwnedRecord(
+    session: OAuthSession,
+    did: string,
+    intent: RecordIntent,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    const current = await readRecord(session, did, intent, signal);
     if (current.status === 400 && current.error === 'RecordNotFound' && current.value === null) return true;
     if (current.status !== 200 || current.cid === null || !hasMarker(intent, current.value)) return false;
-    const deleted = await xrpc(session, 'com.atproto.repo.deleteRecord', {
-      repo: did,
-      collection: intent.collection,
-      rkey: intent.rkey,
-      swapRecord: current.cid,
-    });
+    const deleted = await xrpc(
+      session,
+      'com.atproto.repo.deleteRecord',
+      {
+        repo: did,
+        collection: intent.collection,
+        rkey: intent.rkey,
+        swapRecord: current.cid,
+      },
+      signal,
+    );
     if (deleted.response.status !== 200) return false;
-    const absence = await readRecord(session, did, intent);
+    const absence = await readRecord(session, did, intent, signal);
     return absence.status === 400 && absence.error === 'RecordNotFound' && absence.value === null;
   }
 
-  async function restoreOriginalRecord(session: OAuthSession, did: string, intent: RecordIntent): Promise<boolean> {
+  async function restoreOriginalRecord(
+    session: OAuthSession,
+    did: string,
+    intent: RecordIntent,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
     if (intent.restoreValue === undefined) return true;
-    const current = await readRecord(session, did, intent);
+    const current = await readRecord(session, did, intent, signal);
     if (current.status === 200 && equalJson(current.value, intent.restoreValue)) return true;
     if (current.status === 200) {
-      if (!hasMarker(intent, current.value) || !(await deleteOwnedRecord(session, did, intent))) return false;
+      if (!hasMarker(intent, current.value) || !(await deleteOwnedRecord(session, did, intent, signal))) return false;
     } else if (!(current.status === 400 && current.error === 'RecordNotFound' && current.value === null)) {
       return false;
     }
-    const restored = await xrpc(session, 'com.atproto.repo.createRecord', {
-      repo: did,
-      collection: intent.collection,
-      rkey: intent.rkey,
-      record: intent.restoreValue,
-    });
+    const restored = await xrpc(
+      session,
+      'com.atproto.repo.createRecord',
+      {
+        repo: did,
+        collection: intent.collection,
+        rkey: intent.rkey,
+        record: intent.restoreValue,
+      },
+      signal,
+    );
     if (restored.response.status !== 200) return false;
-    const check = await readRecord(session, did, intent);
+    const check = await readRecord(session, did, intent, signal);
     return check.status === 200 && equalJson(check.value, intent.restoreValue);
   }
 
-  async function runCrud(did: string, followSubject: string): Promise<Record<string, unknown>> {
+  async function runCrud(
+    did: string,
+    followSubject: string,
+    requestSignal?: AbortSignal,
+  ): Promise<Record<string, unknown>> {
     if (!options.prefix) return { status: 'prefix_unavailable' };
     const oauth = service();
     const saved = oauth.sessionStore.snapshot(did).session;
@@ -187,6 +218,11 @@ export function createOAuthLiveObserver(options: {
       return { status: 'capture_missing_or_expired' };
     const session = await oauth.restore(did, false);
     const prefix = options.prefix;
+    const phaseSignal = AbortSignal.any([
+      ...(requestSignal === undefined ? [] : [requestSignal]),
+      AbortSignal.timeout(CRUD_PHASE_TIMEOUT_MS),
+    ]);
+    const cleanupSignal = AbortSignal.timeout(CRUD_CLEANUP_TIMEOUT_MS);
     const now = new Date(options.nowMs()).toISOString();
     const later = new Date(options.nowMs() + 1).toISOString();
     const marker = `atmusic-oauth-${newTid(options.clock, options.random)}`;
@@ -238,7 +274,7 @@ export function createOAuthLiveObserver(options: {
       let deleteStatus = 0;
       let verified = false;
       try {
-        const before = await readRecord(session, did, intent);
+        const before = await readRecord(session, did, intent, phaseSignal);
         const isAbsent = before.status === 400 && before.error === 'RecordNotFound' && before.value === null;
         const existingSettings =
           intent.collection.endsWith('.settings') &&
@@ -266,57 +302,77 @@ export function createOAuthLiveObserver(options: {
         // restoration) and the temporary record carries this run's marker.
         owned.push(intent);
         if (existingSettings) {
-          const removed = await xrpc(session, 'com.atproto.repo.deleteRecord', {
-            repo: did,
-            collection: intent.collection,
-            rkey: intent.rkey,
-            swapRecord: before.cid as string,
-          });
+          const removed = await xrpc(
+            session,
+            'com.atproto.repo.deleteRecord',
+            {
+              repo: did,
+              collection: intent.collection,
+              rkey: intent.rkey,
+              swapRecord: before.cid as string,
+            },
+            phaseSignal,
+          );
           if (removed.response.status !== 200) throw new Error('settings_remove_existing');
-          const absence = await readRecord(session, did, intent);
+          const absence = await readRecord(session, did, intent, phaseSignal);
           if (absence.status !== 400 || absence.error !== 'RecordNotFound' || absence.value !== null)
             throw new Error('settings_remove_existing_verify');
         }
-        const created = await xrpc(session, 'com.atproto.repo.createRecord', {
-          repo: did,
-          collection: intent.collection,
-          rkey: intent.rkey,
-          record: intent.initial,
-        });
+        const created = await xrpc(
+          session,
+          'com.atproto.repo.createRecord',
+          {
+            repo: did,
+            collection: intent.collection,
+            rkey: intent.rkey,
+            record: intent.initial,
+          },
+          phaseSignal,
+        );
         createdStatus = created.response.status;
         createdCid = typeof created.json?.cid === 'string' ? created.json.cid : null;
         if (createdStatus !== 200) throw new Error('create');
         if (createdCid === null) throw new Error('create');
-        const createdRead = await readRecord(session, did, intent);
+        const createdRead = await readRecord(session, did, intent, phaseSignal);
         if (createdRead.status !== 200 || createdRead.cid !== createdCid || !hasMarker(intent, createdRead.value))
           throw new Error('create_verify');
 
-        const updated = await xrpc(session, 'com.atproto.repo.putRecord', {
-          repo: did,
-          collection: intent.collection,
-          rkey: intent.rkey,
-          record: intent.updated,
-          swapRecord: createdCid,
-        });
+        const updated = await xrpc(
+          session,
+          'com.atproto.repo.putRecord',
+          {
+            repo: did,
+            collection: intent.collection,
+            rkey: intent.rkey,
+            record: intent.updated,
+            swapRecord: createdCid,
+          },
+          phaseSignal,
+        );
         updatedStatus = updated.response.status;
         updatedCid = typeof updated.json?.cid === 'string' ? updated.json.cid : null;
         if (updatedStatus !== 200 || updatedCid === null || updatedCid === createdCid) throw new Error('update');
-        const updatedRead = await readRecord(session, did, intent);
+        const updatedRead = await readRecord(session, did, intent, phaseSignal);
         if (updatedRead.status !== 200 || updatedRead.cid !== updatedCid || !hasMarker(intent, updatedRead.value))
           throw new Error('update_verify');
 
-        const deleted = await xrpc(session, 'com.atproto.repo.deleteRecord', {
-          repo: did,
-          collection: intent.collection,
-          rkey: intent.rkey,
-          swapRecord: updatedCid,
-        });
+        const deleted = await xrpc(
+          session,
+          'com.atproto.repo.deleteRecord',
+          {
+            repo: did,
+            collection: intent.collection,
+            rkey: intent.rkey,
+            swapRecord: updatedCid,
+          },
+          phaseSignal,
+        );
         deleteStatus = deleted.response.status;
         if (deleteStatus !== 200) throw new Error('delete');
-        const absent = await readRecord(session, did, intent);
+        const absent = await readRecord(session, did, intent, phaseSignal);
         if (absent.status !== 400 || absent.error !== 'RecordNotFound' || absent.value !== null)
           throw new Error('delete_verify');
-        if (!(await restoreOriginalRecord(session, did, intent))) throw new Error('settings_restore');
+        if (!(await restoreOriginalRecord(session, did, intent, phaseSignal))) throw new Error('settings_restore');
         verified = true;
       } catch {
         failed = true;
@@ -336,8 +392,8 @@ export function createOAuthLiveObserver(options: {
       // deleted only when their current content carries this run's marker.
       const cleaned =
         intent.restoreValue !== undefined
-          ? await restoreOriginalRecord(session, did, intent).catch(() => false)
-          : await deleteOwnedRecord(session, did, intent).catch(() => false);
+          ? await restoreOriginalRecord(session, did, intent, cleanupSignal).catch(() => false)
+          : await deleteOwnedRecord(session, did, intent, cleanupSignal).catch(() => false);
       if (!cleaned) cleanupVerified = false;
     }
     return { status: failed ? 'failed' : 'passed', crud: output, cleanupVerified };
@@ -421,10 +477,10 @@ export function createOAuthLiveObserver(options: {
       }
     },
 
-    async exerciseCrud(did, followSubject) {
+    async exerciseCrud(did, followSubject, signal) {
       try {
         if (did === followSubject) return { status: 'invalid_follow_subject' };
-        return await runCrud(did, followSubject);
+        return await runCrud(did, followSubject, signal);
       } catch {
         return { status: 'crud_failed', crud: [], cleanupVerified: false };
       }

@@ -15,6 +15,8 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { parseRevocationLog } from '../../src/app/revocations';
 import { constantTimeEqual } from '../../src/crypto/constant-time';
 import { SCHEMA_VERSION } from '../../src/do/schema';
+import { socketAdminHandler } from '../../src/http/admin';
+import { bindAdminSocket } from '../../src/node/admin-socket';
 import { BACKUP_FILE } from '../../src/node/backup';
 import { type ExitCode, type RunningServer, run } from '../../src/node/run';
 import { captureLog, manualTimers, refusingJetstream, testEnv, testSecretsDocument } from './support/app';
@@ -278,5 +280,71 @@ describe('admin socket', () => {
       (await request({ port: server.address.port }, 'POST', '/admin/oauth/live-observe', { did, phase: 'capture' }))
         .status,
     ).toBe(404);
+  });
+
+  it('aborts a long OAuth CRUD observation when its Unix-socket client disconnects', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'atmusic-admin-abort-'));
+    dirs.push(dir);
+    const socketPath = join(dir, 'admin.sock');
+    let started!: () => void;
+    let aborted!: () => void;
+    const observerStarted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const observerAborted = new Promise<void>((resolve) => {
+      aborted = resolve;
+    });
+    const socket = await bindAdminSocket({
+      path: socketPath,
+      log: captureLog().logger,
+      random: seededRandom(31),
+    });
+    socket.setHandler(
+      socketAdminHandler({
+        index: {
+          adminStatus: async () => ({}) as never,
+          adminBackup: async () => ({ status: 'not_supported' }),
+          adminResnapshot: async () => ({ status: 'unknown' }),
+        },
+        hostStatus: () => ({}),
+        pruneKid: () => ({ status: 'active_kid' }),
+        random: seededRandom(32),
+        oauthLiveObserver: {
+          capture: async () => ({ status: 'unused' }),
+          exerciseCrud: async (_did, _subject, signal) => {
+            started();
+            await new Promise<void>((resolve) => {
+              if (signal?.aborted) resolve();
+              else signal?.addEventListener('abort', () => resolve(), { once: true });
+            });
+            aborted();
+            return { status: 'failed', cleanupVerified: false };
+          },
+          prepareSignOut: async () => ({ status: 'unused' }),
+          verifyAfterSignOut: async () => ({ status: 'unused' }),
+        },
+      }),
+    );
+    const req = http.request({
+      socketPath,
+      path: '/admin/oauth/live-observe',
+      method: 'POST',
+      headers: { host: 'admin.socket', 'content-type': 'application/json' },
+    });
+    req.on('error', () => {});
+    req.end(
+      JSON.stringify({
+        did: 'did:plc:abcdefghijklmnopqrstuvwx',
+        phase: 'crud',
+        followSubject: 'did:plc:bcdefghijklmnopqrstuvwxy',
+      }),
+    );
+    try {
+      await observerStarted;
+      req.destroy();
+      await observerAborted;
+    } finally {
+      await socket.close();
+    }
   });
 });

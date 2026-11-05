@@ -507,6 +507,13 @@ class LiveEvidenceTests(unittest.TestCase):
         self.assertEqual(status, "blocked")
         self.assertTrue(any("bound to its prerequisite OAuth issuer host" in issue for issue in issues), issues)
 
+        for malformed_host in ([], {}):
+            broken = copy.deepcopy(entry)
+            broken["results"]["signIns"][0]["issuerHost"] = malformed_host
+            status, issues = node_gate_status("oauth", broken, COMMIT, BUNDLE, prereq)
+            self.assertEqual(status, "blocked")
+            self.assertTrue(any("issuer host" in issue for issue in issues), issues)
+
     def test_node_bound_failure_is_fail_but_malformed_failure_is_blocked(self):
         failure = self.node_gate("pdsCompat", result="failed", failures=["real endpoint rejected request"])
         self.assertEqual(node_gate_status("pdsCompat", failure, COMMIT, BUNDLE)[0], "failed")

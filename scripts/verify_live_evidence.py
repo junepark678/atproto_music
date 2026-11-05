@@ -780,7 +780,11 @@ def _node_oauth_results_problems(entry, prefix, prereq):
             problems.append(f"{where}.signIns (must be exactly one sign-in per prerequisite identity)")
         expected_pairs = {(did, host) for did, host in identities}
         observed_pairs = {
-            (item.get("did"), item.get("issuerHost")) for item in sign_ins if isinstance(item, dict)
+            (item.get("did"), item.get("issuerHost"))
+            for item in sign_ins
+            if isinstance(item, dict)
+            and isinstance(item.get("did"), str)
+            and isinstance(item.get("issuerHost"), str)
         }
         if observed_pairs != expected_pairs:
             problems.append(f"{where}.signIns (each DID must be bound to its prerequisite OAuth issuer host)")
