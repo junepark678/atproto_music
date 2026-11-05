@@ -16,8 +16,11 @@ bash scripts/acceptance/node-backend.sh --skip e2e            # negative control
 ```
 
 - `--out DIR` chooses the evidence directory (relative paths resolve against
-  the caller's working directory). The gate writes a `.node-backend-gate`
-  marker into the directory it creates. It refuses, with exit 2, any `--out`
+  the caller's working directory). An output directory inside the source
+  checkout must be git-ignored (the default `work/` path is); otherwise the gate
+  refuses it before creation so it cannot make the source appear dirty to the
+  process-backed replay. The gate writes a `.node-backend-gate` marker into the
+  directory it creates. It refuses, with exit 2, any `--out`
   that is non-empty and lacks that marker, so it never deletes foreign output.
   Inside its own directory it removes only the file names it writes.
 - `--skip STEP` disables a step. A disabled step is recorded with status
@@ -40,7 +43,7 @@ run shows every problem. Each step writes `<step>.command` (the command line),
 
 | Step | Command | What it contributes |
 | --- | --- | --- |
-| `check-ts` | `bash scripts/check-ts.sh` | Typecheck, lint, contract validation, unit suites; produces `check-ts.jsonl` test records. |
+| `check-ts` | `ATMUSIC_RUN_NO_WORKERS_ACCEPTANCE=1 bash scripts/check-ts.sh` | Typecheck, lint, contract validation, unit suites, and the explicit disposable no-workerd install/check; produces `check-ts.jsonl` test records. Ordinary `npm test` and `npm run check` leave that network-dependent install test skipped. |
 | `node-tests` | `npx vitest run --project worker-node --project worker-acceptance` | Node runtime and acceptance suites; produces `node-tests-report.json` and `node-tests.jsonl`. |
 | `e2e` | `npx playwright test` | Browser end-to-end suites; produces `e2e-report.json`. |
 | `scrobbler-e2e` | `npx tsx scripts/e2e/scrobbler-e2e.ts --out "$OUT/scrobbler-e2e"` | Process-backed fixture replay; copies the emitted `scrobbler-e2e/scrobbler-e2e.jsonl` to `scrobbler-e2e.jsonl` for closure, including failed records on a nonzero exit. Missing JSONL fails the step; log lines cannot replace records. |
@@ -50,7 +53,10 @@ run shows every problem. Each step writes `<step>.command` (the command line),
 | `goldens` | `bash scripts/check_goldens.sh` | Golden-file equivalence. |
 | `systemd` | `systemd-analyze --user verify config/systemd/atmusic.service config/systemd/atmusic.socket` | Unit-file verification. A missing unit fails; a missing `systemd-analyze` marks the step `blocked`, and a blocked deterministic step fails the gate. |
 | `live-noenv` | `npx tsx scripts/live/<gate>.ts` with every `ATMUSIC_LIVE_*` unset | Every live gate under `scripts/live/` must answer exit 2 with `result: blocked` and a non-empty `missing` list; output is kept as `live-noenv-<gate>.json/.stderr/.exit`. |
-| `live` | `python3 scripts/verify_live_evidence.py --node --commit HEAD --bundle-sha256 <check-node-bundle>` | Verifies the recorded live inventory (`docs/verification/live-evidence.json` or `ATMUSIC_LIVE_INVENTORY`) offline against this commit and bundle. Exit 0 (complete) or 2 (blocked) passes; exit 1 (a recorded failure) fails. |
+| `live` | `python3 scripts/verify_live_evidence.py --node --commit HEAD --bundle-sha256 <check-node-bundle>` | Verifies the recorded live inventory (`docs/verification/live-evidence.json` or `ATMUSIC_LIVE_INVENTORY`) offline against this commit and bundle. Exit 0 (complete) or 2 (blocked) passes; exit 1 (a release-bound, attributable
+  recorded failure) fails. A `gate=failed` diagnostic in an inventory that the
+  verifier classifies as blocked remains blocked; the diagnostic is not treated
+  as a release failure without valid inventory-wide prerequisites and binding. |
 
 ## Closure and records
 
@@ -193,7 +199,177 @@ above passed. Neither failure is hidden as a backend acceptance success.
 The later exact-head run below supersedes the `6652a9b` receipt for current
 deterministic acceptance; that earlier receipt remains useful stack history.
 
-## Exact-head N8 acceptance run
+## Exact-head N8 acceptance runs
+
+### Current combined integration run (2026-11-04, commit `4322f5d`)
+
+Ran `bash scripts/acceptance/node-backend.sh --out
+work/acceptance/final-node-integration-rerun` from a clean checkout at commit
+`4322f5db7b80d0638eaa8ead1df916893e7763b1`. The gate exited **0**. Its Node
+bundle SHA-256 was
+`ef40a8efe971bd02481f6759430497bbcef8d92848feba80e88ad6bf34b72d06`. The
+machine-readable summary is preserved in
+[node-backend-4322f5d-summary.json](receipts/node-backend-4322f5d-summary.json)
+(SHA-256
+`1f518362ed61725bcc386bce3ee0fffe30b68ecb6345c8008367db44711da488`).
+
+| Step | Result |
+| --- | --- |
+| check-ts | PASS: 1,187 tests; includes disposable install and full no-workerd check |
+| Node tests | PASS: 439 tests |
+| Playwright | PASS: 14 tests |
+| Scrobbler protocol replay | PASS: 7 records |
+| Python regressions | PASS: 45 tests |
+| Node bundle guard | PASS |
+| Full case-map validation | PASS: all 258 entries resolved |
+| Goldens | PASS |
+| systemd unit verification | PASS |
+| Live no-environment controls | PASS as refusal checks |
+| Live inventory verification | BLOCKED: no release-bound live evidence |
+
+Totals: **1,692 tests/records passed, 0 failed or skipped**; all 258 cases
+resolved (243 passed, 9 blocked, 6 retired); all five production live gates
+remain blocked. The 9 blocked cases include the M7.4.3 live-product requirement.
+No live services or external providers were contacted. This run exercises the
+current SSRF, socket-soak and dev-env OAuth fixtures, but does not establish
+production observations for those gates.
+
+### Previous runtime-retirement stack (2026-11-04, commit `dabaabf`)
+
+Ran `bash scripts/acceptance/node-backend.sh --out work/acceptance/node-backend-final-dabaabf`
+from a clean checkout at commit
+`dabaabf3a871b181c6fb5c6d2a415812259e55aa`. The gate exited **0**. Its
+Node bundle SHA-256 was
+`a6f3f15ad504991bc1479621835a1609f74b0b64aa92de86f88d5dee829177fd`.
+The machine-readable summary is preserved in
+[node-backend-dabaabf-summary.json](receipts/node-backend-dabaabf-summary.json)
+(SHA-256 `6aec6f09b4d7ba3f8db9fc489c2cd339b401b2965f4419fb5902cdf4bc376832`).
+
+| Step | Result |
+| --- | --- |
+| check-ts | PASS: 1,150 tests; 613s, including disposable npm install and full check without `workerd` |
+| Node tests | PASS: 438 tests; 39s |
+| Playwright | PASS: 13 tests; 80s |
+| Scrobbler protocol replay | PASS: 7 records; 12s |
+| Python regressions | PASS: 45 tests; 26s |
+| Node bundle guard | PASS |
+| Full case-map validation | PASS |
+| Goldens | PASS |
+| systemd unit verification | PASS |
+| Live no-environment controls | PASS as refusal checks |
+| Live inventory verification | BLOCKED: no release-bound live evidence |
+
+Totals: **1,653 tests/records passed, 0 failed or skipped**; all 258 cases
+resolved (243 passed, 9 blocked, 6 retired); all five production live gates
+remain blocked. No live services or external providers were contacted.
+
+### Previous runtime-retirement stack (2026-11-04, commit `be1c0a5`)
+
+The preceding exact-head run passed with 1,651 tests/records and no failures or
+skips. Its bundle SHA-256 was
+`b2ba9790e108a95bc5712d63db9f04970a51ba29bfe1fd635a1d684bdf1efe91`; the
+[exact-head receipt](receipts/node-backend-be1c0a5-summary.json) remains
+available (SHA-256
+`bceaefd5191ddf9ec5f51f8b3cdb32862fe966289e70966db5bf55db269fbe52`).
+All five production live gates were blocked.
+
+### Previous runtime-retirement stack (2026-11-04, commit `e02d96e`)
+
+Ran `bash scripts/acceptance/node-backend.sh --out /tmp/node-backend-e02d96e`
+from a clean checkout at commit
+`e02d96e0e1e5aad4ac8855bdb2f5e08f6db4272d`. The gate exited **0**. Its
+Node bundle SHA-256 was
+`ff147b70d55521015cb807c3161873f2d2e563c6ab4c5525c1509540e38dc312`.
+The machine-readable summary is preserved in
+[node-backend-e02d96e-summary.json](receipts/node-backend-e02d96e-summary.json)
+(SHA-256
+`ac1ee31ddaacbb801584f3d9abb24960dfa39d29ba3538842a58a186a39a606f`).
+
+| Step | Result |
+| --- | --- |
+| check-ts | PASS: 1,148 tests; 611s, including disposable npm install and full check without `workerd` |
+| Node tests | PASS: 438 tests; 42s |
+| Playwright | PASS: 13 tests; 64s |
+| Scrobbler protocol replay | PASS: 7 records; 10s |
+| Python regressions | PASS: 45 tests; 16s |
+| Node bundle guard | PASS |
+| Full case-map validation | PASS |
+| Goldens | PASS |
+| systemd unit verification | PASS |
+| Live no-environment controls | PASS as refusal checks |
+| Live inventory verification | BLOCKED: no release-bound live evidence |
+
+Totals: **1,651 tests/records passed, 0 failed or skipped**; all 258 cases
+resolved (243 passed, 9 blocked, 6 retired); all five production live gates
+remain blocked. No live services or external providers were contacted.
+
+### Previous runtime-retirement stack (2026-11-04, commit `8d415468`)
+
+Ran `bash scripts/acceptance/node-backend.sh --out /tmp/node-backend-8d41546`
+from a clean checkout at commit
+`8d415468448c7465c40ba340cee6130d37d6cf2a`. The gate exited **0**. Its
+Node bundle SHA-256 was
+`8ca1fb241af76993d9456abf577c24591227895749b27d96d3eabdc424723e58`.
+The machine-readable summary is preserved in
+[node-backend-8d41546-summary.json](receipts/node-backend-8d41546-summary.json)
+(SHA-256
+`7a9677641f88f5cd98f004c916cf8d92cbdf27dd8198169944767c2866c281c0`).
+
+| Step | Result |
+| --- | --- |
+| check-ts | PASS: 1,147 tests; 619s |
+| Node tests | PASS: 438 tests; 37s |
+| Playwright | PASS: 13 tests; 58s |
+| Scrobbler protocol replay | PASS: 7 records; 9s |
+| Python regressions | PASS: 45 tests; 14s |
+| Node bundle guard | PASS |
+| Full case-map validation | PASS |
+| Goldens | PASS |
+| systemd unit verification | PASS |
+| Live no-environment controls | PASS as refusal checks |
+| Live inventory verification | BLOCKED: no release-bound live evidence |
+
+Totals: **1,650 tests/records passed, 0 failed or skipped**; all 258 cases
+resolved (243 passed, 9 blocked, 6 retired); all five production live gates
+remain blocked. The live step exited 0 because the verifier correctly
+classified the absent live evidence as blocked. No live services or external
+providers were contacted. This includes the N7-01 clean-install check: `npm ci`
+and the full `npm run check` passed in a disposable source copy with no
+`workerd` installed.
+
+### Previous runtime-retirement stack (2026-11-04, commit `14f6ee36`)
+
+Ran `bash scripts/acceptance/node-backend.sh --out
+/tmp/node-backend-current-14f6ee3` from a clean checkout at commit
+`14f6ee36ff0859c82def2f424cf9853b44c50e84`. The gate exited **0**. Its
+Node bundle SHA-256 was
+`562dae10fc41620efa0ebe398b6a8be1e7e840a682d50c19f211621ab16f5e55`.
+The gate summary is preserved in
+[node-backend-14f6ee3-summary.json](receipts/node-backend-14f6ee3-summary.json)
+(SHA-256 `f3f1ef658ceb041490ad3ea26cd6f3b57b928c02edd489aebf4021a503613c42`).
+
+| Step | Result |
+| --- | --- |
+| check-ts | PASS: 1,147 tests; 639s |
+| Node tests | PASS: 438 tests |
+| Playwright | PASS: 13 tests; 75s |
+| Scrobbler protocol replay | PASS: 7 records; 14s |
+| Python regressions | PASS: 45 tests; 26s |
+| Node bundle guard | PASS |
+| Full case-map validation | PASS |
+| Goldens | PASS |
+| systemd unit verification | PASS |
+| Live no-environment controls | PASS as refusal checks |
+| Live inventory verification | BLOCKED: no current release-bound live evidence |
+
+Totals: **1,650 tests/records passed, 0 failed or skipped**; all 258 cases
+resolved (243 passed, 9 blocked, 6 retired); all five production live gates
+remain blocked. The 9 blocked cases include the live product requirement.
+The runner's live step exiting 0 means the inventory is correctly classified
+as blocked, not that a live gate passed. No live services or external
+providers were contacted.
+
+The previous exact-head run below is retained as stack history.
 
 Ran `bash scripts/acceptance/node-backend.sh --out /tmp/node-backend-final-af4a3ef`
 from a clean checkout at commit

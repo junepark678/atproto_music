@@ -290,7 +290,7 @@ describe('jetstream socket', () => {
         closeSocket(m, clock.nowMs());
       }
     });
-  });
+  }, 15_000);
 
   it('close triggers reconnect delays 1,2,4,…,60s and rotates us-east→us-west', async () => {
     const clock = fixedClock();

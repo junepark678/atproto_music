@@ -471,6 +471,13 @@ grant, CRUD, supersession, and upstream-revocation observations. Those fixture
 observations do not satisfy live OAuth evidence from two independently
 operated PDSs or close N6-02.
 
+The offline regression `worker/test/node/bff/devenv-oauth.test.ts` exercises the
+confidential client against the actual `@atproto/dev-env` provider, including
+exchange, four-collection grant, CRUD, session supersession, and provider
+token-store revocation. This fixture test is not run by the preflight driver,
+does not exercise the provider browser consent UI, and is not evidence for the
+production `oauth` gate.
+
 ### N5-02 additive delete-target index (migration 4)
 
 The operations-aware 100,000-listen benchmark retains its bounded 256-operation

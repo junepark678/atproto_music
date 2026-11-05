@@ -68,27 +68,49 @@ required gate to be complete and supported.
 The verifier shares applicable structural checks for public HTTPS origin,
 owned namespace, PDS identities, result shape, and cleanup. It does not infer
 confidential Node OAuth interoperability from the historical Workers browser
-OAuth evidence. The Node OAuth preflight driver exists, but deliberately
-remains blocked until its exchange and upstream-revocation observations have
-an accepted contract. It validates the ordinary release identity, two
-independently operated PDS identities, handles, and sign-in mode, then stops
-before browser or network work. Supplying every input does not make it pass.
-A future Node OAuth result must show an actual granted scope containing
-`atproto` and create, update, and delete on each of the four Node collections
-`<prefix>.scrobble`, `<prefix>.follow`, `<prefix>.settings`, and
-`<prefix>.love`; any actual `transition:*` scope token invalidates that
-grant. This four-collection rule is separate from the historical Workers
-`full_repo_grant` rule, which remains three collections. The Node OAuth gate
-is not enabled by this validator rule and remains blocked until the exchange
-and revocation evidence contract is accepted and the corresponding observations
-are implemented. At this stage only the applicable existing `ingest` and
-`pdsCompat` structural result checks can pass as Node standalone gates.
+OAuth evidence. The accepted Node OAuth contract requires, for each of the two
+PDS identities, a sealed host session row showing `private_key_jwt`, DPoP-bound
+tokens, and a refresh token; the observed token subject must match the DID. The
+issuer hostname observed from that sealed session must match the DID's
+prerequisite PDS host. The granted scope must contain `atproto` and create,
+update, and delete on each of
+the four Node collections `<prefix>.scrobble`, `<prefix>.follow`,
+`<prefix>.settings`, and `<prefix>.love`; any `transition:*` token invalidates
+that grant. This four-collection rule is separate from the historical Workers
+`full_repo_grant` rule, which remains three collections.
+
+The same authenticated session must exercise all twelve direct PDS CRUD
+permissions (create, update, delete on each collection) with successful
+responses and verified record state. It must also exercise the seven app
+write intents (`scrobble.create`, `scrobble.delete`, `follow.put`,
+`follow.delete`, `love.put`, `love.delete`, and `settings.put`) and verify
+their terminal operation state and record presence or absence. After the app's
+sign-out completes, the host must confirm the sealed local session row is gone
+and make a refresh request with the captured pre-sign-out refresh token; only
+an upstream OAuth `invalid_grant` rejection proves revocation. Evidence may
+contain booleans, outcome enums, DIDs, collection names, statuses, and CIDs,
+but never tokens, cookies, passwords, or DPoP/private-key material.
+
+The Node OAuth driver and strict verifier contract now implement these
+observations. `oauth` is a supported Node gate, but no live OAuth result is
+recorded by this change. The gate still exits 2 before browser or network work
+when prerequisites are missing, and a PASS requires two independently
+operated PDS identities plus release-bound evidence that satisfies every
+check above. Enabling the evidence contract does not itself complete the live
+OAuth milestone or the full Node inventory.
 
 The Node SSRF probe driver is ported. `npx tsx scripts/live/ssrf_probe.ts
 --emit-probe` emits a host-side probe using the production pinned transport;
 running the emitted probe is an explicit operator action and makes network
 requests to the configured controlled names and private-address literals. The
-gate validates the recorded result offline. Its required inputs are
+runner writes its detailed result to a newly created owner-only (`0600`) local
+file. That private artifact contains the controlled hostnames, exact probe
+target URLs, and DNS answer addresses needed for offline validation. Treat it
+as sensitive operational data: do not publish it or commit it. The runner's
+console and the schema-v3 gate evidence contain only an allowlisted summary;
+they exclude probe target URLs, hostnames, addresses, response bodies, headers,
+and raw exception messages. The common evidence envelope still includes the
+configured public origin. Its required inputs are
 `ATMUSIC_LIVE_SSRF_HOSTS` (`label=host` pairs for `rfc1918`, `loopback`, and
 `metadata`) and `ATMUSIC_LIVE_SSRF_PROBE_RESULT` (absolute result-file path),
 along with the common Node release identity and origin/prefix. The no-input
@@ -102,15 +124,16 @@ it also remains blocked until Node metrics, thresholds, and restart/reconnect
 semantics are accepted. Workers Cloudflare/DO analytics do not stand in for
 Node acceptance. Unknown gates never enable PASS.
 
-Run `npx tsx scripts/live/node_oauth_check.ts` to validate the current OAuth
-gate prerequisites. It requires the Node release identity, both independent
+Run `npx tsx scripts/live/node_oauth_check.ts` only against the deployed Node
+origin. It requires the Node release identity, both independently operated
 PDS identities and implementation names, `ATMUSIC_LIVE_HANDLE_A` and
 `ATMUSIC_LIVE_HANDLE_B`, and either both `ATMUSIC_LIVE_PASSWORD_A` and
 `ATMUSIC_LIVE_PASSWORD_B` or `ATMUSIC_LIVE_OAUTH_INTERACTIVE=1`. Its optional
 `ATMUSIC_LIVE_OAUTH_TIMEOUT_S` accepts 30–3600 seconds. Missing or malformed
 inputs produce blocked schema-v3 evidence before any network or browser
-operation. Even with all inputs present, it exits 2 with the unresolved
-exchange/revocation contract named; this is a preflight, not OAuth acceptance.
+operation. With valid inputs it performs the sealed-session observation,
+direct CRUD, seven app writes, sign-out, and upstream refresh-rejection checks.
+No live OAuth gate has yet been executed against an accepted release.
 
 ### Dev-env OAuth preflight (advisory only)
 
@@ -119,16 +142,25 @@ shape of `ATMUSIC_DEVENV_PDS_URL` and `ATMUSIC_DEVENV_HTTPS_ORIGIN`. The origin
 must be a bare HTTPS origin; the PDS value must be a bare HTTP or HTTPS origin.
 The client ID is derived from the origin's `/oauth/client-metadata.json`, and
 the production client authenticates with `private_key_jwt`; no client secret
-is needed. This preflight performs no network, socket, child-process, or
-browser operation and exits 2 with a blocked document even when both inputs
-are valid because the interop flow is not implemented yet.
+is needed. The local regression
+`worker/test/node/bff/devenv-oauth.test.ts` exercises the production confidential
+client against a real `@atproto/dev-env` PDS: exchange, the four repository
+grants, create/delete, replacement-session revocation, and provider token-store
+cleanup. It uses a host-restricted fixture transport and does not contact the
+Internet. The test drives the provider authorization decision through its
+server APIs rather than exercising its browser consent UI.
+
+`devenv_oauth_check.ts` remains a preflight only. It performs no network,
+socket, child-process, or browser operation and exits 2 with a blocked document
+even when both inputs are valid; it does not run the fixture suite or produce
+operator evidence.
 
 Its schema-v3 document has `runtime: "node"`, `fixtureOnly: true`,
 `gate: "devenvOauth"`, and `result: "blocked"`. It is not one of the five
 required production gates and must not be added to `live-evidence.json` or used
 to satisfy the production `oauth` gate. This advisory result does not prove
-confidential-client exchange, scope, CRUD, token supersession, or upstream
-revocation, and does not complete N6-02.
+live confidential-client interop with an independently operated provider and
+does not complete N6-02.
 
 ### Node ingest driver (N6-02 slice)
 
@@ -192,9 +224,11 @@ N6-02 requires every operator driver to validate its required
 `ATMUSIC_LIVE_*` inputs before making any network request. If any are missing,
 the driver must exit **2**, print a blocked document listing each missing
 variable name, and make no network request. No gate contacts Last.fm or
-ListenBrainz. No Node live acceptance has been recorded. Confidential-client
-OAuth interop, SSRF probe, and Node soak remain deferred; full N6-02 and M6
-live acceptance stay open.
+ListenBrainz. No Node live acceptance has been recorded. A deterministic test
+now exercises the confidential client against a local `@atproto/dev-env` PDS,
+but production OAuth interop with independently operated providers remains
+deferred, as do the operator SSRF probe and Node soak. Full N6-02 and M6 live
+acceptance stay open.
 
 ## Node ingest timeout and recovery semantics
 
