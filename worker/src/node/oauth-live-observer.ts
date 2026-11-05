@@ -8,10 +8,21 @@ import type { OAuthSession } from '@atproto/oauth-client-node';
 import { type NodeSavedSession, OAuthResponseError } from '@atproto/oauth-client-node';
 import type { OAuthService } from '../bff/oauth-client';
 
-const CAPTURE_TTL_MS = 10 * 60_000;
 const XRPC_REQUEST_TIMEOUT_MS = 30_000;
 const CRUD_PHASE_TIMEOUT_MS = 10 * 60_000;
 const CRUD_CLEANUP_TIMEOUT_MS = 4 * 60_000;
+// Keep the sealed-session evidence alive through the longest supported run:
+// one hour each for bounded app operations and sign-out/revocation, the CRUD
+// and independent cleanup windows, and a one-minute handoff margin.
+const APP_OPERATIONS_TIMEOUT_MS = 60 * 60_000;
+const SIGN_OUT_PHASE_TIMEOUT_MS = 60 * 60_000;
+const SIGN_OUT_HANDOFF_TIMEOUT_MS = 60_000;
+const CAPTURE_TTL_MS =
+  APP_OPERATIONS_TIMEOUT_MS +
+  SIGN_OUT_PHASE_TIMEOUT_MS +
+  CRUD_PHASE_TIMEOUT_MS +
+  CRUD_CLEANUP_TIMEOUT_MS +
+  SIGN_OUT_HANDOFF_TIMEOUT_MS;
 const NSID = '[a-z][a-z0-9-]*(?:\\.[a-z][a-z0-9-]*)+';
 const SAFE_SCOPE_TOKEN = new RegExp(
   `^(?:atproto|transition:[a-zA-Z0-9._:-]{1,128}|repo:${NSID}(?:\\?action=(?:create|update|delete)(?:&action=(?:create|update|delete))*)?|repo\\?(?:collection=${NSID})(?:&collection=${NSID})*(?:&action=(?:create|update|delete))*)$`,

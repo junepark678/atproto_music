@@ -26,6 +26,7 @@ function observer(
     fetchHandler?: (input: string, init?: RequestInit) => Promise<Response>;
   } = {},
 ) {
+  let currentNow = Date.parse('2026-11-05T00:00:00.000Z');
   const saved = {
     tokenSet: {
       sub: DID,
@@ -58,7 +59,7 @@ function observer(
   return {
     instance: createOAuthLiveObserver({
       oauth: () => service,
-      nowMs: () => Date.parse('2026-11-05T00:00:00.000Z'),
+      nowMs: () => currentNow,
       prefix: 'dev.pythonplayer123.music',
       clock: fixedClock(),
       random: seededRandom(19),
@@ -69,6 +70,9 @@ function observer(
     setCurrent(next: typeof saved | undefined, nextVersion: number) {
       current = next;
       version = nextVersion;
+    },
+    setNow(next: number) {
+      currentNow = next;
     },
   };
 }
@@ -137,6 +141,32 @@ describe('host OAuth live observer', () => {
     expect(refresh).toHaveBeenCalledOnce();
     expect(usedToken).toBe('newly-rotated-refresh-token');
     expect(JSON.stringify(result)).not.toContain(REFRESH);
+  });
+
+  it('keeps the capture through a bounded run longer than CRUD cleanup, without changing the session', async () => {
+    const world = observer();
+    expect((await world.instance.capture(DID)).status).toBe('captured');
+    const savedSession = world.service.sessionStore.snapshot(DID).session;
+    const version = world.service.sessionStore.snapshot(DID).version;
+
+    // CRUD can consume 10 minutes and its independent cleanup another 4.
+    world.setNow(Date.parse('2026-11-05T00:14:01.000Z'));
+    expect(await world.instance.prepareSignOut(DID)).toEqual({
+      status: 'prepared',
+      refreshTokenPresent: true,
+      sessionVersionStable: true,
+    });
+    expect(world.service.sessionStore.snapshot(DID)).toMatchObject({ session: savedSession, version });
+
+    // The bounded run allowance includes an hour each for app operations and
+    // sign-out/revocation, in addition to CRUD, cleanup, and the handoff.
+    world.setNow(Date.parse('2026-11-05T02:15:01.000Z'));
+    expect(await world.instance.prepareSignOut(DID)).toEqual({ status: 'capture_missing_or_expired' });
+    expect(await world.instance.verifyAfterSignOut(DID)).toMatchObject({
+      status: 'capture_missing_or_expired',
+      localSessionAbsent: false,
+      refreshRejected: false,
+    });
   });
 
   it('restores an existing settings/self singleton after exercising CRUD', async () => {
