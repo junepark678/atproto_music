@@ -6,8 +6,9 @@
 > commit; “every deterministic gate passes” / “nothing deterministic remains”
 > are not statements about the current Node checkout. M1–M6 still need current
 > integration/CI and published-contract reconciliation as applicable, plus
-> their live gates. Namespace ownership blocks publication; a tested fail-closed
-> publication gate does not itself require live ownership evidence for M1.
+> their live gates. Current namespace ownership/publication is recorded in
+> [the owner publication receipt](verification/lexicon-publication/README.md);
+> it does not establish current Node or live acceptance.
 > Worker version ids, ADMIN_TOKEN and Cloudflare Analytics are not Node-host
 > prerequisites. See [ADR 0005](adr/0005-local-node-host-and-compat-apis.md),
 > [Node deployment](deploy/local-node.md), and the scoped
@@ -23,7 +24,19 @@ confirms evidence bound to the current commit and Node bundle. It replaces
 `scripts/acceptance/node-interim.sh` as the gate from wave 8 on and never
 contacts a live service.
 
-Deterministic acceptance update (2026-11-04): the latest full N8 gate passed on
+Current candidate update (2026-11-06): the full N8 attempt at `396de2d`
+**failed** because the production-SPA setup hook exceeded its 10-second budget.
+It passed 1,799 executed records; one bundle test was skipped by the failed
+suite. Browser E2E (14), protocol replay (7), Python (45), Node tests (477),
+bundle guard, case map, goldens, systemd and live refusal controls passed.
+`check-ts` stopped before contract validation, so the overall case result was
+239 passed, 4 failed, 9 blocked and 6 retired. The exact failed receipt and
+runner correction are recorded in [backend-node.md](verification/backend-node.md).
+[PR #149](https://github.com/junepark678/atproto_music/pull/149) integrates the
+reviewed backend fixes and published-schema guard; final acceptance remains
+pending. Live identity gates remain owner-skipped, with no credentials sought.
+
+Earlier successful baseline (2026-11-04): the full N8 gate passed on
 clean integration commit `4322f5d`; its bundle SHA-256 and machine-readable
 summary are recorded in [backend-node.md](verification/backend-node.md) and
 [the exact-head receipt](verification/receipts/node-backend-4322f5d-summary.json).
@@ -43,8 +56,8 @@ Earlier failed receipts at `c2da66a+dirty`, `4a97dc1`, and the intermediate
 `838fa217` run remain historical. Their issues were addressed by subsequent
 mapping, retirement, and timing fixes. The clean `be1c0a5`, `e02d96e`, `8d415468`
 and `dabaabf` runs are retained as prior exact-head receipts in
-[backend-node.md](verification/backend-node.md); `4322f5d` is the current
-deterministic acceptance result. The prior `af4a3ef` run remains recorded as
+[backend-node.md](verification/backend-node.md); `4322f5d` is a prior
+successful baseline, not acceptance of the newer candidate. The prior `af4a3ef` run remains recorded as
 history there.
 
 Historical Workers receipt follows; nothing below is a current Node statement.

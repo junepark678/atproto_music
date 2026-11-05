@@ -195,7 +195,37 @@ deterministic acceptance; that earlier receipt remains useful stack history.
 
 ## Exact-head N8 acceptance runs
 
-### Current combined integration run (2026-11-04, commit `4322f5d`)
+### Candidate integration attempt (2026-11-06, commit `396de2d`)
+
+Ran `bash scripts/acceptance/node-backend.sh --out
+work/acceptance/node-candidate-396de2d` at clean commit
+`396de2dd33c217438c63e8fd1d21a1ddf2a40bb4`. Exit **1**; this is a failed
+receipt, not current acceptance. The machine-readable summary is
+[node-backend-396de2d-summary.json](receipts/node-backend-396de2d-summary.json).
+
+The sole failed step was `check-ts`: `web/test/bundle.test.ts` exceeded its
+10-second `beforeAll` budget while building the production SPA alongside the
+fixture suites. Its test was skipped by the failed suite. Every other
+executed test passed, including the explicit clean-install/no-workerd test;
+`check-ts` exited before its contract-validation step. The acceptance closure
+therefore also lacked the two contract-validator case targets.
+
+Other steps passed: Node/acceptance tests **477**, Playwright **14**, scrobbler
+replay **7**, Python **45**, bundle guard, unrestricted case map, goldens,
+systemd verification, live no-environment controls, and offline live-inventory
+classification. Totals: **1,799 executed records passed, 0 failed records,
+1 skipped test**; cases **239 passed, 4 failed, 9 blocked, 6 retired**. The gate
+still failed on the suite error and missing contract evidence. All five live
+gates remained blocked, and no credential-dependent live gate was run.
+
+Commit `cd74ba0` gives runner setup hooks a bounded 60 seconds; per-test
+timeouts and assertions remain unchanged, and no `web/` file is modified.
+The isolated production-bundle test passed with that setup budget. Later
+candidate changes also integrate the N5 operations fixture and additive
+migration-4 index. A full gate rerun is required for their exact final head;
+[PR #149](https://github.com/junepark678/atproto_music/pull/149) records progress.
+
+### Previous combined integration run (2026-11-04, commit `4322f5d`)
 
 Ran `bash scripts/acceptance/node-backend.sh --out
 work/acceptance/final-node-integration-rerun` from a clean checkout at commit
