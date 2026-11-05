@@ -945,6 +945,7 @@ export const spec: NodeGateSpec = {
             afterSignOut.refreshRejected !== true ||
             afterSignOut.refreshError !== 'invalid_grant'
           ) {
+            context.cleanup(`${identity.did}: session removal or refresh-token revocation remains unverified`);
             throw new Error(`upstream refresh-token revocation was not proven for PDS ${identity.which}`);
           }
           signIns.push({
@@ -973,7 +974,14 @@ export const spec: NodeGateSpec = {
             const cleanupSession = sessionForCleanup.value;
             if (captured && cleanupSession.did !== undefined) {
               try {
-                await socketObserve(context, cleanupSession.did, 'prepare_sign_out');
+                const prepared = await socketObserve(context, cleanupSession.did, 'prepare_sign_out');
+                if (
+                  prepared.status !== 'prepared' ||
+                  prepared.refreshTokenPresent !== true ||
+                  prepared.sessionVersionStable !== true
+                ) {
+                  context.cleanup(`${identity.did}: host sign-out preparation incomplete; app logout will still run`);
+                }
               } catch {
                 context.cleanup(`${identity.did}: host sign-out preparation failed; app logout will still run`);
               }
@@ -986,7 +994,15 @@ export const spec: NodeGateSpec = {
             }
             if (captured && appSignOutCompleted && cleanupSession.did !== undefined) {
               try {
-                await socketObserve(context, cleanupSession.did, 'after_sign_out');
+                const observed = await socketObserve(context, cleanupSession.did, 'after_sign_out');
+                if (
+                  observed.status !== 'revoked' ||
+                  observed.localSessionAbsent !== true ||
+                  observed.refreshRejected !== true ||
+                  observed.refreshError !== 'invalid_grant'
+                ) {
+                  context.cleanup(`${identity.did}: session removal or refresh-token revocation remains unverified`);
+                }
               } catch {
                 context.cleanup(`${identity.did}: host revocation verification failed after app logout`);
               }

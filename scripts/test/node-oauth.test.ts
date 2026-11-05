@@ -157,7 +157,7 @@ test('the OAuth grant validator accepts both repo scope encodings and requires e
 });
 
 // Keep spec.run and signIn real: mock only browser, public HTTP and Unix-socket boundaries.
-async function runCallbackFailure(callbackBody: unknown, observerFails = false) {
+async function runCallbackFailure(callbackBody: unknown, observerFailure?: 'throw' | 'structured') {
   const env = completeEnv();
   const origin = env[NODE_ENV.origin]!;
   const requests: { path: string; csrf?: string }[] = [];
@@ -214,7 +214,7 @@ async function runCallbackFailure(callbackBody: unknown, observerFails = false) 
   });
   const observe = vi.spyOn(admin, 'sendOverSocket').mockImplementation(async (_socket, request) => {
     const phase = (request.body as { phase: string }).phase;
-    if (phase === 'prepare_sign_out') throw new Error('observer unavailable');
+    if (phase === 'prepare_sign_out' && observerFailure === 'throw') throw new Error('observer unavailable');
     const body =
       phase === 'capture'
         ? {
@@ -229,7 +229,11 @@ async function runCallbackFailure(callbackBody: unknown, observerFails = false) 
           }
         : phase === 'crud'
           ? { status: 'failed' }
-          : { status: 'revoked' };
+          : phase === 'prepare_sign_out'
+            ? { status: 'prepared', refreshTokenPresent: true, sessionVersionStable: true }
+            : observerFailure === 'structured'
+              ? { status: 'refresh_still_valid', localSessionAbsent: true, refreshRejected: false }
+              : { status: 'revoked', localSessionAbsent: true, refreshRejected: true, refreshError: 'invalid_grant' };
     return { status: 200, body: JSON.stringify(body) };
   });
   const result = capture();
@@ -244,11 +248,14 @@ async function runCallbackFailure(callbackBody: unknown, observerFails = false) 
     expect(closeBrowser).toHaveBeenCalledOnce();
     const evidence = JSON.parse(result.output().stdout);
     expect(evidence.result).toBe('failed');
-    if (observerFails) {
+    if (observerFailure !== undefined) {
       expect(
         observe.mock.calls.some(([, request]) => (request.body as { phase: string }).phase === 'prepare_sign_out'),
       ).toBe(true);
       expect(evidence.failures).toContain('direct repository CRUD checks failed for PDS A');
+      if (observerFailure === 'structured') {
+        expect(evidence.cleanup).toContain('session removal or refresh-token revocation remains unverified');
+      } else expect(evidence.cleanup).toContain('host sign-out preparation failed; app logout will still run');
     } else expect(evidence.failures[0]).toMatch(/sign-in (resolved to a different DID|returned no active app session)/);
   } finally {
     vi.restoreAllMocks();
@@ -264,7 +271,11 @@ test.each([
 });
 
 test('production cleanup still logs out when host preparation throws after capture', async () => {
-  await runCallbackFailure({ did: completeEnv().ATMUSIC_LIVE_DID_A, csrfToken: 'callback-csrf-token' }, true);
+  await runCallbackFailure({ did: completeEnv().ATMUSIC_LIVE_DID_A, csrfToken: 'callback-csrf-token' }, 'throw');
+});
+
+test('production cleanup records an unsuccessful observation after app logout', async () => {
+  await runCallbackFailure({ did: completeEnv().ATMUSIC_LIVE_DID_A, csrfToken: 'callback-csrf-token' }, 'structured');
 });
 
 test('automated OAuth sign-in requires the configured PDS handle to resolve to its exact DID', () => {
