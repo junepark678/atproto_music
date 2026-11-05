@@ -16,8 +16,11 @@ bash scripts/acceptance/node-backend.sh --skip e2e            # negative control
 ```
 
 - `--out DIR` chooses the evidence directory (relative paths resolve against
-  the caller's working directory). The gate writes a `.node-backend-gate`
-  marker into the directory it creates. It refuses, with exit 2, any `--out`
+  the caller's working directory). An output directory inside the source
+  checkout must be git-ignored (the default `work/` path is); otherwise the gate
+  refuses it before creation so it cannot make the source appear dirty to the
+  process-backed replay. The gate writes a `.node-backend-gate` marker into the
+  directory it creates. It refuses, with exit 2, any `--out`
   that is non-empty and lacks that marker, so it never deletes foreign output.
   Inside its own directory it removes only the file names it writes.
 - `--skip STEP` disables a step. A disabled step is recorded with status
@@ -50,7 +53,10 @@ run shows every problem. Each step writes `<step>.command` (the command line),
 | `goldens` | `bash scripts/check_goldens.sh` | Golden-file equivalence. |
 | `systemd` | `systemd-analyze --user verify config/systemd/atmusic.service config/systemd/atmusic.socket` | Unit-file verification. A missing unit fails; a missing `systemd-analyze` marks the step `blocked`, and a blocked deterministic step fails the gate. |
 | `live-noenv` | `npx tsx scripts/live/<gate>.ts` with every `ATMUSIC_LIVE_*` unset | Every live gate under `scripts/live/` must answer exit 2 with `result: blocked` and a non-empty `missing` list; output is kept as `live-noenv-<gate>.json/.stderr/.exit`. |
-| `live` | `python3 scripts/verify_live_evidence.py --node --commit HEAD --bundle-sha256 <check-node-bundle>` | Verifies the recorded live inventory (`docs/verification/live-evidence.json` or `ATMUSIC_LIVE_INVENTORY`) offline against this commit and bundle. Exit 0 (complete) or 2 (blocked) passes; exit 1 (a recorded failure) fails. |
+| `live` | `python3 scripts/verify_live_evidence.py --node --commit HEAD --bundle-sha256 <check-node-bundle>` | Verifies the recorded live inventory (`docs/verification/live-evidence.json` or `ATMUSIC_LIVE_INVENTORY`) offline against this commit and bundle. Exit 0 (complete) or 2 (blocked) passes; exit 1 (a release-bound, attributable
+  recorded failure) fails. A `gate=failed` diagnostic in an inventory that the
+  verifier classifies as blocked remains blocked; the diagnostic is not treated
+  as a release failure without valid inventory-wide prerequisites and binding. |
 
 ## Closure and records
 

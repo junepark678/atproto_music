@@ -64,6 +64,8 @@ jobs:
           .venv/bin/python -m pip install -r api/requirements-contracts.txt
       - name: Install locked dependencies
         run: npm ci
+      - name: Install Chromium for owned-browser lifecycle tests
+        run: npx playwright install --with-deps chromium
       - name: Install pinned actionlint (checked by the TypeScript gate)
         run: |
           # go install verifies the module against sum.golang.org.

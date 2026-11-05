@@ -57,6 +57,52 @@ async function readJson(response: Response, method: string): Promise<unknown> {
   return body;
 }
 
+function isObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function hasText(value: unknown, expected: string): boolean {
+  return isObject(value) && value['#text'] === expected;
+}
+
+function validateScrobble(value: unknown, options: PanoLastfmOptions): void {
+  if (!isObject(value) || !isObject(value.scrobbles) || !isObject(value.scrobbles['@attr']))
+    throw new Error('Pano track.scrobble returned an invalid acknowledgement');
+  const counts = value.scrobbles['@attr'];
+  const accepted = counts.accepted;
+  const ignored = counts.ignored;
+  const item = value.scrobbles.scrobble;
+  const ignoredMessage = isObject(item) ? item.ignoredMessage : undefined;
+  if (
+    accepted !== 1 ||
+    ignored !== 0 ||
+    !isObject(item) ||
+    !hasText(item.track, options.track) ||
+    !hasText(item.artist, options.artist) ||
+    item.timestamp !== String(options.listenedAtSeconds) ||
+    !isObject(ignoredMessage) ||
+    ignoredMessage.code !== '0' ||
+    typeof ignoredMessage['#text'] !== 'string'
+  ) {
+    throw new Error('Pano track.scrobble returned an invalid acknowledgement');
+  }
+}
+
+function validateNowPlaying(value: unknown, options: PanoLastfmOptions): void {
+  if (!isObject(value) || !isObject(value.nowplaying))
+    throw new Error('Pano track.updateNowPlaying returned an invalid acknowledgement');
+  const item = value.nowplaying;
+  if (
+    !hasText(item.track, options.track) ||
+    !hasText(item.artist, options.artist) ||
+    !isObject(item.ignoredMessage) ||
+    item.ignoredMessage.code !== '0' ||
+    typeof item.ignoredMessage['#text'] !== 'string'
+  ) {
+    throw new Error('Pano track.updateNowPlaying returned an invalid acknowledgement');
+  }
+}
+
 /** Execute Pano's mobile-session, scrobble, now-playing and recent-read flow. */
 export async function runPanoLastfm(options: PanoLastfmOptions): Promise<PanoLastfmResult> {
   if (!Number.isSafeInteger(options.listenedAtSeconds) || options.listenedAtSeconds <= 0)
@@ -114,6 +160,7 @@ export async function runPanoLastfm(options: PanoLastfmOptions): Promise<PanoLas
     ),
     'track.scrobble',
   );
+  validateScrobble(scrobble, options);
 
   const nowPlayingForm = signedForm({
     method: 'track.updateNowPlaying',
@@ -134,6 +181,7 @@ export async function runPanoLastfm(options: PanoLastfmOptions): Promise<PanoLas
     ),
     'track.updateNowPlaying',
   );
+  validateNowPlaying(nowPlaying, options);
 
   // Pano reads are unsigned and carry sk + api_key. This mirrors the captured
   // client request shape and verifies the server resolves the session owner.
@@ -157,6 +205,13 @@ export async function runPanoLastfm(options: PanoLastfmOptions): Promise<PanoLas
     ),
     'user.getRecentTracks',
   );
+  if (
+    !isObject(recentTracks) ||
+    !isObject(recentTracks.recenttracks) ||
+    !Array.isArray(recentTracks.recenttracks.track)
+  ) {
+    throw new Error('Pano user.getRecentTracks returned an invalid response');
+  }
   return { username: session.name, sessionKey: session.key, scrobble, nowPlaying, recentTracks };
 }
 
