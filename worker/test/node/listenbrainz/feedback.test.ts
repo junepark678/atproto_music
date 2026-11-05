@@ -171,20 +171,23 @@ afterEach(closeApps);
 
 describe('ListenBrainz feedback (ADR §8.6)', () => {
   it('requires the shared publication gate before reading feedback or queuing love operations', async () => {
-    const rig = await started(CLOSED_GATE);
-    seedForwardLink(rig.app.db);
-    expect(rig.app.config.app).toMatchObject({ prefix: 'com.example.atmusic', publication: false });
-    const msid = await recordingMsid('Björk', 'Jóga');
-    for (const score of [1, 0, -1] as const) {
-      const res = await rig.post(score === 0 ? '{invalid json' : { recording_msid: msid, score });
-      expect([res.status, await res.json()]).toEqual([
-        503,
-        { code: 503, error: 'Cannot submit listens to queue, please try again later.' },
-      ]);
+    for (const prefix of ['com.example.atmusic', '']) {
+      const rig = await started({ ...CLOSED_GATE, LEXICON_PREFIX: prefix });
+      seedForwardLink(rig.app.db);
+      expect(rig.app.config.app).toMatchObject({ prefix: prefix || null, publication: false });
+      const msid = await recordingMsid('Björk', 'Jóga');
+      for (const score of [1, 0, -1] as const) {
+        const res = await rig.post({ recording_msid: msid, score });
+        expect([res.status, await res.json()]).toEqual([
+          503,
+          { code: 503, error: 'Cannot submit listens to queue, please try again later.' },
+        ]);
+      }
+      expect((await rig.post('{invalid json')).status).toBe(503);
+      expect(rig.ops()).toEqual([]);
+      expect(rig.app.db.one('SELECT count(*) AS n FROM forward_outbox')).toEqual({ n: 0 });
+      expect(rig.kicks()).toBe(0);
     }
-    expect(rig.ops()).toEqual([]);
-    expect(rig.app.db.one('SELECT count(*) AS n FROM forward_outbox')).toEqual({ n: 0 });
-    expect(rig.kicks()).toBe(0);
   });
 
   it('score 1 queues a love, 0 an unlove, -1 clears the love; get-feedback lists loves with count, offset and total_count', async () => {

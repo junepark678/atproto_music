@@ -73,10 +73,18 @@ interface World {
 let enqueueRandom = seededRandom(11);
 
 async function world(
-  options: { transportWrap?: (fake: FakeLastfm) => (req: Request) => Promise<Response> } = {},
+  options: {
+    transportWrap?: (fake: FakeLastfm) => (req: Request) => Promise<Response>;
+    validateScrobbleTimestamps?: boolean;
+  } = {},
 ): Promise<World> {
   const clock = fixedClock();
-  const lastfm = new FakeLastfm({ clock, apiKey: API_KEY, secret: SECRET });
+  const lastfm = new FakeLastfm({
+    clock,
+    apiKey: API_KEY,
+    secret: SECRET,
+    validateScrobbleTimestamps: options.validateScrobbleTimestamps,
+  });
   const lb = new FakeListenBrainz({ clock });
   const seen: Array<[string, string, number]> = [];
   const record = (endpoint: { fetch(req: Request): Promise<Response> }) => async (req: Request) => {
@@ -210,7 +218,7 @@ describe('Last.fm forwarding', () => {
   });
 
   it('defers future ListenBrainz forwards until due, preserves receipt timestamps, and relinking cannot release them early', async () => {
-    const w = await world();
+    const w = await world({ validateScrobbleTimestamps: true });
     const { id } = w.linkLastfm(ALICE, 'alice_fm');
     const receipt = w.clock.nowMs();
     const dueAt = receipt + 25 * MINUTE;
@@ -249,7 +257,7 @@ describe('Last.fm forwarding', () => {
 
   it('keeps a deferred forward durable across a composition restart and sends it once at the due boundary', async () => {
     const clock = fixedClock();
-    const lastfm = new FakeLastfm({ clock, apiKey: API_KEY, secret: SECRET });
+    const lastfm = new FakeLastfm({ clock, apiKey: API_KEY, secret: SECRET, validateScrobbleTimestamps: true });
     const secrets = parseSecrets({ ...testSecretsDocument(), lastfm: { apiKey: API_KEY, sharedSecret: SECRET } });
     const stateDir = mkdtempSync(join(tmpdir(), 'atmusic-forward-restart-'));
     const appOptions = () => ({
