@@ -62,13 +62,17 @@ test('actual Chromium cancellation exits promptly and leaves no profile or refer
     const startedAt = performance.now();
     const child = spawnDriver(scenario);
     const result = await child;
-    expect(performance.now() - startedAt, `${scenario} child exit`).toBeLessThan(2_000);
+    // Node/tsx startup is separate from the owned browser lifecycle. Keep a
+    // process-exit bound so a referenced transport handle still fails here.
+    expect(performance.now() - startedAt, `${scenario} child exit`).toBeLessThan(10_000);
     expect(result.status, result.stderr).toBe(0);
     const payload = JSON.parse(result.stdout.trim()) as {
       root: string;
       pid: number;
+      lifecycleMs: number;
       status: { processStopped: boolean; profileRemoved: boolean; connectionSettled: boolean };
     };
+    expect(payload.lifecycleMs, `${scenario} lifecycle`).toBeLessThan(2_000);
     expect(payload.status).toEqual({ processStopped: true, profileRemoved: true, connectionSettled: true });
     expect(() => process.kill(payload.pid, 0)).toThrow();
     await expect(access(payload.root)).rejects.toMatchObject({ code: 'ENOENT' });
