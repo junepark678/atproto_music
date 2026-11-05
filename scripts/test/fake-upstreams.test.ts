@@ -27,7 +27,7 @@ const commit = (did: string, rkey: string): CommitResult =>
     car: new Uint8Array(),
   }) as unknown as CommitResult;
 
-function nextMessage(socket: WebSocket, timeoutMs = 10_000): Promise<string> {
+function nextMessage(socket: WebSocket, timeoutMs = 2_000): Promise<string> {
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => reject(new Error('Jetstream event timed out')), timeoutMs);
     socket.once('message', (data) => {
@@ -100,12 +100,15 @@ test('Jetstream child accepts commits and replays them through its WebSocket end
     await fakes.appendCommits([committed]);
     const endpoint = new URL('/xrpc/network.bsky.jetstream.subscribeEvents?cursor=1&kinds=commit', fakes.jetstreamUrl);
     socket = new WebSocket(endpoint);
+    // Register before open: the child can send the cursor replay as soon as
+    // the server accepts the socket, before the client's open handler runs.
+    const replayMessage = nextMessage(socket);
     const opened = new Promise<void>((resolve, reject) => {
       socket!.once('open', resolve);
       socket!.once('error', reject);
     });
     await opened;
-    const replay = JSON.parse(await nextMessage(socket)) as {
+    const replay = JSON.parse(await replayMessage) as {
       did: string;
       seq: number;
       kind: string;
