@@ -34,7 +34,7 @@
 
 import { ApiError } from '@atmusic/core/errors';
 import type { Revocations } from '../app/revocations';
-import { requireSession, withSessionCookie } from '../bff/guard';
+import { requireSession, sessionErrorResponse, withSessionCookie } from '../bff/guard';
 import { createWebSessions } from '../bff/sessions';
 import { authorizeToken, createAuthorizedToken, isValidApiKey } from '../credentials/lastfm-auth';
 import { createBox } from '../crypto/box';
@@ -43,6 +43,7 @@ import type { Feature } from '../node/compose';
 import { errorResponse, toErrorResponse } from './error';
 import { json } from './json';
 import { readJsonBody } from './params';
+import { SessionEnded, writeInLiveSession } from './session-write';
 import { need, type RequestCtx, type RouteDef } from './types';
 
 /** The SPA approval page (@atmusic/core/spa-routes, web N5). */
@@ -169,14 +170,16 @@ async function authorize(req: Request, ctx: RequestCtx): Promise<Response> {
   try {
     const input = parseAuthorizeInput(await readJsonBody(req, AUTHORIZE_MAX_BODY_BYTES));
     const m = need(ctx, 'deps');
-    if (input.token !== undefined) {
-      const result = authorizeToken(m, { did: session.did, apiKey: input.apiKey, token: input.token });
-      response = result.ok ? json({ token: input.token }) : errorResponse('not_found', undefined, ctx.requestId);
-    } else {
+    response = writeInLiveSession(m.db, services.sessions, req, session, () => {
+      if (input.token !== undefined) {
+        const result = authorizeToken(m, { did: session.did, apiKey: input.apiKey, token: input.token });
+        return result.ok ? json({ token: input.token }) : errorResponse('not_found', undefined, ctx.requestId);
+      }
       const result = createAuthorizedToken(m, { did: session.did, apiKey: input.apiKey });
-      response = result.ok ? json({ token: result.value.token }) : errorResponse('not_found', undefined, ctx.requestId);
-    }
+      return result.ok ? json({ token: result.value.token }) : errorResponse('not_found', undefined, ctx.requestId);
+    });
   } catch (error) {
+    if (error instanceof SessionEnded) return sessionErrorResponse('unauthenticated', ctx.requestId);
     response = toErrorResponse(error, ctx.requestId);
   }
   return withSessionCookie(response, session);
