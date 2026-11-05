@@ -254,4 +254,29 @@ describe('admin socket', () => {
     const bad = await request({ socketPath }, 'POST', '/admin/oauth/prune-kid', { kid: 'k0', extra: 1 });
     expect(bad.status).toBe(422);
   });
+
+  it('POST /admin/oauth/live-observe is socket-only, validates its phase shape, and never returns session credentials', async () => {
+    const { server } = await startServer();
+    const did = 'did:plc:aaaaaaaaaaaaaaaaaaaaaaaa';
+    const captured = await request({ socketPath: server.adminSocket }, 'POST', '/admin/oauth/live-observe', {
+      did,
+      phase: 'capture',
+    });
+    expect(captured.status).toBe(200);
+    expect(captured.json).toEqual({ status: 'no_session' });
+    expect(JSON.stringify(captured.json)).not.toMatch(/access_token|refresh_token|private_key|cookie/i);
+
+    const extra = await request({ socketPath: server.adminSocket }, 'POST', '/admin/oauth/live-observe', {
+      did,
+      phase: 'capture',
+      secret: 'must-not-be-accepted',
+    });
+    expect(extra.status).toBe(422);
+    expect(JSON.stringify(extra.json)).not.toContain('must-not-be-accepted');
+
+    expect(
+      (await request({ port: server.address.port }, 'POST', '/admin/oauth/live-observe', { did, phase: 'capture' }))
+        .status,
+    ).toBe(404);
+  });
 });

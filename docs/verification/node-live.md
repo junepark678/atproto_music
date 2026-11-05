@@ -68,21 +68,36 @@ required gate to be complete and supported.
 The verifier shares applicable structural checks for public HTTPS origin,
 owned namespace, PDS identities, result shape, and cleanup. It does not infer
 confidential Node OAuth interoperability from the historical Workers browser
-OAuth evidence. The Node OAuth preflight driver exists, but deliberately
-remains blocked until its exchange and upstream-revocation observations have
-an accepted contract. It validates the ordinary release identity, two
-independently operated PDS identities, handles, and sign-in mode, then stops
-before browser or network work. Supplying every input does not make it pass.
-A future Node OAuth result must show an actual granted scope containing
-`atproto` and create, update, and delete on each of the four Node collections
-`<prefix>.scrobble`, `<prefix>.follow`, `<prefix>.settings`, and
-`<prefix>.love`; any actual `transition:*` scope token invalidates that
-grant. This four-collection rule is separate from the historical Workers
-`full_repo_grant` rule, which remains three collections. The Node OAuth gate
-is not enabled by this validator rule and remains blocked until the exchange
-and revocation evidence contract is accepted and the corresponding observations
-are implemented. At this stage only the applicable existing `ingest` and
-`pdsCompat` structural result checks can pass as Node standalone gates.
+OAuth evidence. The accepted Node OAuth contract requires, for each of the two
+PDS identities, a sealed host session row showing `private_key_jwt`, DPoP-bound
+tokens, and a refresh token; the observed token subject must match the DID. The
+issuer hostname observed from that sealed session must match the DID's
+prerequisite PDS host. The granted scope must contain `atproto` and create,
+update, and delete on each of
+the four Node collections `<prefix>.scrobble`, `<prefix>.follow`,
+`<prefix>.settings`, and `<prefix>.love`; any `transition:*` token invalidates
+that grant. This four-collection rule is separate from the historical Workers
+`full_repo_grant` rule, which remains three collections.
+
+The same authenticated session must exercise all twelve direct PDS CRUD
+permissions (create, update, delete on each collection) with successful
+responses and verified record state. It must also exercise the seven app
+write intents (`scrobble.create`, `scrobble.delete`, `follow.put`,
+`follow.delete`, `love.put`, `love.delete`, and `settings.put`) and verify
+their terminal operation state and record presence or absence. After the app's
+sign-out completes, the host must confirm the sealed local session row is gone
+and make a refresh request with the captured pre-sign-out refresh token; only
+an upstream OAuth `invalid_grant` rejection proves revocation. Evidence may
+contain booleans, outcome enums, DIDs, collection names, statuses, and CIDs,
+but never tokens, cookies, passwords, or DPoP/private-key material.
+
+The Node OAuth driver and strict verifier contract now implement these
+observations. `oauth` is a supported Node gate, but no live OAuth result is
+recorded by this change. The gate still exits 2 before browser or network work
+when prerequisites are missing, and a PASS requires two independently
+operated PDS identities plus release-bound evidence that satisfies every
+check above. Enabling the evidence contract does not itself complete the live
+OAuth milestone or the full Node inventory.
 
 The Node SSRF probe driver is ported. `npx tsx scripts/live/ssrf_probe.ts
 --emit-probe` emits a host-side probe using the production pinned transport;
@@ -109,15 +124,16 @@ it also remains blocked until Node metrics, thresholds, and restart/reconnect
 semantics are accepted. Workers Cloudflare/DO analytics do not stand in for
 Node acceptance. Unknown gates never enable PASS.
 
-Run `npx tsx scripts/live/node_oauth_check.ts` to validate the current OAuth
-gate prerequisites. It requires the Node release identity, both independent
+Run `npx tsx scripts/live/node_oauth_check.ts` only against the deployed Node
+origin. It requires the Node release identity, both independently operated
 PDS identities and implementation names, `ATMUSIC_LIVE_HANDLE_A` and
 `ATMUSIC_LIVE_HANDLE_B`, and either both `ATMUSIC_LIVE_PASSWORD_A` and
 `ATMUSIC_LIVE_PASSWORD_B` or `ATMUSIC_LIVE_OAUTH_INTERACTIVE=1`. Its optional
 `ATMUSIC_LIVE_OAUTH_TIMEOUT_S` accepts 30–3600 seconds. Missing or malformed
 inputs produce blocked schema-v3 evidence before any network or browser
-operation. Even with all inputs present, it exits 2 with the unresolved
-exchange/revocation contract named; this is a preflight, not OAuth acceptance.
+operation. With valid inputs it performs the sealed-session observation,
+direct CRUD, seven app writes, sign-out, and upstream refresh-rejection checks.
+No live OAuth gate has yet been executed against an accepted release.
 
 ### Dev-env OAuth preflight (advisory only)
 

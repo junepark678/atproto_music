@@ -430,7 +430,7 @@ class LiveEvidenceTests(unittest.TestCase):
         for name in ("oauth", "ssrfProbe", "socketSoak"):
             self.assertEqual(verdict.gates[name], "blocked", name)
 
-    def test_node_oauth_grant_requires_all_four_collections_but_remains_blocked(self):
+    def test_node_oauth_grant_requires_all_twelve_actions_and_observed_exchange_crud_writes_and_revocation(self):
         grants = " ".join(f"repo:{PREFIX}.{name}" for name in ("scrobble", "follow", "settings", "love"))
         four_collection_grant = f"atproto {grants}"
         scopes = {
@@ -449,21 +449,56 @@ class LiveEvidenceTests(unittest.TestCase):
         self.assertFalse(node_full_repo_grant(PREFIX, scopes["partialLoveActions"]))
         self.assertFalse(node_full_repo_grant(PREFIX, scopes["missingAtproto"]))
         self.assertFalse(node_full_repo_grant(PREFIX, scopes["transitionScope"]))
-        self.assertNotIn("oauth", NODE_SUPPORTED_GATES)
+        self.assertIn("oauth", NODE_SUPPORTED_GATES)
 
-        entry = self.node_gate("oauth", results={"signIns": [
-            {"did": DID_A, "grantedScope": scopes["fourCollection"]},
-            {"did": DID_B, "grantedScope": scopes["fourCollection"]},
-        ]})
-        status, issues = node_gate_status("oauth", entry, COMMIT, BUNDLE, self.node_inventory()["prerequisites"])
-        self.assertEqual(status, "blocked")
-        self.assertTrue(any("Node gate semantics are not ported" in issue for issue in issues), issues)
-        self.assertFalse(any("all four Node collections" in issue for issue in issues), issues)
+        collections = [f"{PREFIX}.{name}" for name in ("scrobble", "follow", "settings", "love")]
+        app_kinds = ("scrobble.create", "scrobble.delete", "follow.put", "follow.delete",
+                     "love.put", "love.delete", "settings.put")
 
-        entry["results"]["signIns"][0]["grantedScope"] = scopes["missingLove"]
-        status, issues = node_gate_status("oauth", entry, COMMIT, BUNDLE, self.node_inventory()["prerequisites"])
+        def sign_in(did, issuer_host, scope):
+            return {
+                "did": did, "issuerHost": issuer_host, "tokenSub": did, "grantedScope": scope,
+                "exchange": {"sealedSessionObserved": True, "clientAuthMethod": "private_key_jwt",
+                             "dpopBound": True, "refreshTokenPresent": True},
+                "crud": [{"collection": collection, "create": {"status": 200, "cid": CID},
+                          "update": {"status": 200, "cid": CID2}, "delete": {"status": 200},
+                          "verified": True} for collection in collections],
+                "appWrites": [{"kind": kind, "operationState": "succeeded",
+                               "recordVerified": kind in ("scrobble.create", "follow.put", "love.put", "settings.put"),
+                               "absenceVerified": kind in ("scrobble.delete", "follow.delete", "love.delete")}
+                              for kind in app_kinds],
+                "signOut": {"appSignOutCompleted": True, "localSessionAbsent": True,
+                            "refreshRejected": True, "refreshError": "invalid_grant"},
+            }
+
+        entry = self.node_gate("oauth", results={
+            "signIns": [sign_in(DID_A, "pds-alpha.operator-one.net", scopes["fourCollection"]),
+                        sign_in(DID_B, "pds-beta.operator-two.org", scopes["fourCollection"])],
+            "cleanup": "temporary records removed and absence verified",
+        })
+        prereq = self.node_inventory()["prerequisites"]
+        status, issues = node_gate_status("oauth", entry, COMMIT, BUNDLE, prereq)
+        self.assertEqual((status, issues), ("passed", []))
+
+        for scope in (scopes["missingLove"], scopes["partialLoveActions"], scopes["missingAtproto"],
+                      scopes["transitionScope"]):
+            broken = copy.deepcopy(entry)
+            broken["results"]["signIns"][0]["grantedScope"] = scope
+            status, issues = node_gate_status("oauth", broken, COMMIT, BUNDLE, prereq)
+            self.assertEqual(status, "blocked", scope)
+            self.assertTrue(any("all four Node collections" in issue for issue in issues), issues)
+
+        broken = copy.deepcopy(entry)
+        broken["results"]["signIns"][0]["signOut"]["refreshRejected"] = False
+        status, issues = node_gate_status("oauth", broken, COMMIT, BUNDLE, prereq)
         self.assertEqual(status, "blocked")
-        self.assertTrue(any("all four Node collections" in issue for issue in issues), issues)
+        self.assertTrue(any("upstream refresh-token revocation" in issue for issue in issues), issues)
+
+        broken = copy.deepcopy(entry)
+        broken["results"]["signIns"][0]["issuerHost"] = "pds-beta.operator-two.org"
+        status, issues = node_gate_status("oauth", broken, COMMIT, BUNDLE, prereq)
+        self.assertEqual(status, "blocked")
+        self.assertTrue(any("bound to its prerequisite OAuth issuer host" in issue for issue in issues), issues)
 
     def test_node_bound_failure_is_fail_but_malformed_failure_is_blocked(self):
         failure = self.node_gate("pdsCompat", result="failed", failures=["real endpoint rejected request"])

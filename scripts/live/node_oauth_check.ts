@@ -1,93 +1,682 @@
 // Node confidential OAuth live gate.
 //
-// This gate is intentionally fail-closed until the independent upstream
-// exchange and revocation observations are implemented and accepted by the
-// evidence verifier. It must not infer revocation from local session deletion
-// or from disposal of a browser context.
+// This gate observes the confidential exchange from the host's sealed session
+// row, exercises direct CRUD and every app write route, then asks that same
+// host to prove the refresh token was rejected after sign-out. Secrets and
+// token material never enter evidence.
 
-import { IDENTITY_REQS, PDS_IMPLEMENTATION_REQS } from './live-gate.ts';
-import { isNodeGateMain, mainNodeGate, type NodeGateRequirement, type NodeGateSpec } from './node-live-gate.ts';
+import { randomUUID } from 'node:crypto';
+import { followRkey } from '@atmusic/core/record-key';
+import { parseRecordUri } from '@atmusic/core/syntax';
+import { type AdminRequest, defaultSocketPath, sendOverSocket } from '../admin/atmusic-admin.ts';
+import {
+  checkIdentityPds,
+  ENV,
+  field,
+  httpJson,
+  IDENTITY_REQS,
+  PDS_IMPLEMENTATION_REQS,
+  pdsInfo,
+  verifyAbsent,
+  verifyRecordAt,
+} from './live-gate.ts';
+import {
+  isNodeGateMain,
+  mainNodeGate,
+  type NodeGateContext,
+  type NodeGateRequirement,
+  type NodeGateSpec,
+} from './node-live-gate.ts';
+import { launchBrowser, OAUTH_ENV, signInChecks, signInTimeoutMs } from './workers_oauth_check.ts';
 
 export const NODE_OAUTH_ENV = {
-  handleA: 'ATMUSIC_LIVE_HANDLE_A',
-  handleB: 'ATMUSIC_LIVE_HANDLE_B',
-  passwordA: 'ATMUSIC_LIVE_PASSWORD_A',
-  passwordB: 'ATMUSIC_LIVE_PASSWORD_B',
-  interactive: 'ATMUSIC_LIVE_OAUTH_INTERACTIVE',
+  handleA: OAUTH_ENV.handleA,
+  handleB: OAUTH_ENV.handleB,
+  passwordA: OAUTH_ENV.passwordA,
+  passwordB: OAUTH_ENV.passwordB,
+  interactive: OAUTH_ENV.interactive,
   timeoutSeconds: 'ATMUSIC_LIVE_OAUTH_TIMEOUT_S',
 } as const;
-
-const handle = (name: string, which: string): NodeGateRequirement => ({
-  name,
-  what: `handle of the dedicated identity on PDS ${which}`,
-  check: (value) => (/^[a-z0-9.-]+\.[a-z][a-z0-9-]*$/i.test(value) ? null : 'not a handle'),
-});
-
-const password = (name: string, which: string): NodeGateRequirement => ({
-  name,
-  what: `password for the dedicated identity on PDS ${which}; may be omitted when headed interactive sign-in is enabled`,
-  optional: true,
-});
-
-const interactive: NodeGateRequirement = {
-  name: NODE_OAUTH_ENV.interactive,
-  what: 'set to 1 to complete both PDS sign-ins by hand in a headed browser',
-  optional: true,
-  check: (value) => (value === '1' ? null : 'must be 1'),
-};
 
 const timeout: NodeGateRequirement = {
   name: NODE_OAUTH_ENV.timeoutSeconds,
   what: 'optional timeout in seconds from 30 through 3600 (default 300)',
   optional: true,
-  check: (value) => {
-    const parsed = Number(value);
-    return Number.isInteger(parsed) && parsed >= 30 && parsed <= 3600 ? null : 'must be an integer from 30 to 3600';
-  },
+  check: (value) =>
+    Number.isInteger(Number(value)) && Number(value) >= 30 && Number(value) <= 3600
+      ? null
+      : 'must be an integer from 30 to 3600',
 };
 
-function signInChecks(env: Readonly<Record<string, string | undefined>>): string[] {
-  const interactiveMode = env[NODE_OAUTH_ENV.interactive] === '1';
-  const missing: string[] = [];
-  for (const [passwordName, which] of [
-    [NODE_OAUTH_ENV.passwordA, 'A'],
-    [NODE_OAUTH_ENV.passwordB, 'B'],
-  ] as const) {
-    if (!env[passwordName]?.trim() && !interactiveMode) {
-      missing.push(
-        `${passwordName} or ${NODE_OAUTH_ENV.interactive}: provide the PDS ${which} account password or enable headed sign-in`,
-      );
-    }
-  }
-  return missing;
+const requirements = [
+  ...IDENTITY_REQS,
+  ...PDS_IMPLEMENTATION_REQS,
+  { name: OAUTH_ENV.handleA, what: 'handle of the dedicated identity on PDS A', check: validHandle },
+  { name: OAUTH_ENV.handleB, what: 'handle of the dedicated identity on PDS B', check: validHandle },
+  {
+    name: OAUTH_ENV.passwordA,
+    what: 'password for identity A; may be omitted for headed interactive sign-in',
+    optional: true,
+  },
+  {
+    name: OAUTH_ENV.passwordB,
+    what: 'password for identity B; may be omitted for headed interactive sign-in',
+    optional: true,
+  },
+  {
+    name: OAUTH_ENV.interactive,
+    what: 'set to 1 for headed interactive sign-in',
+    optional: true,
+    check: (v: string) => (v === '1' ? null : 'must be 1'),
+  },
+  timeout,
+] as const;
+
+function validHandle(value: string): string | null {
+  return /^[a-z0-9.-]+\.[a-z][a-z0-9-]*$/i.test(value) ? null : 'not a handle';
 }
 
-const CONTRACT_BLOCK =
-  'confidential OAuth exchange and upstream revocation observations are not implemented; no live request was made';
+function extraChecks(env: Readonly<Record<string, string | undefined>>): string[] {
+  const interactive = env[OAUTH_ENV.interactive] === '1';
+  return [
+    ...signInChecks(env, OAUTH_ENV.passwordA, 'A'),
+    ...signInChecks(env, OAUTH_ENV.passwordB, 'B'),
+    ...(!interactive && env[OAUTH_ENV.passwordA]?.trim() === '' ? [`${OAUTH_ENV.passwordA}: blank`] : []),
+    ...(!interactive && env[OAUTH_ENV.passwordB]?.trim() === '' ? [`${OAUTH_ENV.passwordB}: blank`] : []),
+    ...(env[ENV.didA] === env[ENV.didB] ? [`${ENV.didB}: must differ from DID A`] : []),
+    ...(differentPdsProblem(env) ? [differentPdsProblem(env) as string] : []),
+  ];
+}
 
-/**
- * The evidence contract is deliberately blocked even with complete operator
- * inputs. The current verifier does not accept Node OAuth PASS semantics, and
- * no browser disposal or local row deletion is treated as upstream revocation.
- */
+function differentPdsProblem(env: Readonly<Record<string, string | undefined>>): string | null {
+  const a = env[ENV.pdsA];
+  const b = env[ENV.pdsB];
+  if (!a || !b) return null;
+  try {
+    return new URL(a).hostname.toLowerCase() === new URL(b).hostname.toLowerCase()
+      ? `${ENV.pdsB}: must use a different PDS host from PDS A`
+      : null;
+  } catch {
+    return null; // The required-value validators report malformed endpoints.
+  }
+}
+
+type JsonObject = Record<string, unknown>;
+type ApiResponse = { status: number; json: unknown };
+type Session = { did: string; csrf: string };
+type CreatedRecord = { uri: string; cid: string; rev: string };
+
+const object = (value: unknown): JsonObject | null =>
+  value !== null && typeof value === 'object' && !Array.isArray(value) ? (value as JsonObject) : null;
+
+async function browserRequest(
+  page: import('@playwright/test').Page,
+  path: string,
+  method: 'GET' | 'POST' | 'PUT' | 'DELETE',
+  csrf?: string,
+  body?: unknown,
+  idempotencyKey?: string,
+): Promise<ApiResponse> {
+  return page.evaluate(
+    async ({ path, method, csrf, body, idempotencyKey }) => {
+      const headers: Record<string, string> = { accept: 'application/json' };
+      if (csrf !== undefined) headers['x-csrf-token'] = csrf;
+      if (body !== undefined) headers['content-type'] = 'application/json';
+      if (idempotencyKey !== undefined) headers['idempotency-key'] = idempotencyKey;
+      const response = await fetch(path, {
+        method,
+        credentials: 'same-origin',
+        headers,
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      });
+      const text = await response.text();
+      let json: unknown = null;
+      try {
+        json = text ? (JSON.parse(text) as unknown) : null;
+      } catch {
+        /* status is enough for failure */
+      }
+      return { status: response.status, json };
+    },
+    { path, method, csrf, body, idempotencyKey },
+  );
+}
+
+async function signIn(
+  context: NodeGateContext,
+  page: import('@playwright/test').Page,
+  which: 'A' | 'B',
+  timeoutMs: number,
+): Promise<Session> {
+  const handleName = which === 'A' ? OAUTH_ENV.handleA : OAUTH_ENV.handleB;
+  const passwordName = which === 'A' ? OAUTH_ENV.passwordA : OAUTH_ENV.passwordB;
+  const didName = which === 'A' ? ENV.didA : ENV.didB;
+  const origin = context.origin;
+  const deadline = performance.now() + timeoutMs;
+  const budget = () => Math.max(1, Math.min(30_000, deadline - performance.now()));
+  await page.goto(new URL('/signin', origin).href, { timeout: budget() });
+  await page.locator('#signin-handle').fill(context.get(handleName), { timeout: budget() });
+  await page.getByRole('button', { name: 'Sign in', exact: true }).click({ timeout: budget() });
+  await page.waitForURL((url) => url.origin !== origin, { timeout: budget() });
+
+  let passwordSent = false;
+  while (new URL(page.url()).origin !== origin && performance.now() < deadline) {
+    const password = page.locator('input[type="password"]').first();
+    if (!passwordSent && context.env[passwordName] && (await password.isVisible().catch(() => false))) {
+      const identifier = page.locator('input[autocomplete="username"], input[name="username"]').first();
+      if ((await identifier.isVisible().catch(() => false)) && !(await identifier.inputValue().catch(() => ''))) {
+        await identifier.fill(context.get(handleName), { timeout: budget() });
+      }
+      await password.fill(context.get(passwordName), { timeout: budget() });
+      await password.press('Enter', { timeout: budget() });
+      passwordSent = true;
+      continue;
+    }
+    const consent = page.getByRole('button', { name: /^(authorize|accept|allow|approve)$/i }).first();
+    if (await consent.isVisible().catch(() => false)) {
+      await consent.click({ timeout: budget() });
+      continue;
+    }
+    const next = page.getByRole('button', { name: /^(next|continue|sign in|log in)$/i }).first();
+    if (await next.isVisible().catch(() => false)) {
+      await next.click({ timeout: budget() });
+      continue;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  if (new URL(page.url()).origin !== origin) throw new Error(`PDS ${which} authorization did not return to the app`);
+
+  const response = await browserRequest(page, '/api/v1/auth/session', 'GET');
+  const body = object(response.json);
+  if (response.status !== 200 || typeof body?.did !== 'string' || typeof body.csrfToken !== 'string') {
+    throw new Error(`PDS ${which} sign-in returned no active app session`);
+  }
+  const expectedDid = context.get(didName);
+  if (body.did !== expectedDid) throw new Error(`PDS ${which} sign-in resolved to a different DID`);
+  return { did: body.did, csrf: body.csrfToken };
+}
+
+async function socketObserve(
+  context: NodeGateContext,
+  did: string,
+  phase: 'capture' | 'crud' | 'after_sign_out',
+  followSubject?: string,
+): Promise<JsonObject> {
+  const body: Record<string, string> = { did, phase };
+  if (followSubject !== undefined) body.followSubject = followSubject;
+  const request: AdminRequest = {
+    method: 'POST',
+    path: '/admin/oauth/live-observe',
+    body,
+    timeoutMs: 30_000,
+  };
+  const socket = defaultSocketPath(context.env, process.getuid?.() ?? null);
+  const answer = await sendOverSocket(socket, request);
+  const decoded = object(JSON.parse(answer.body) as unknown);
+  if (answer.status !== 200 || decoded === null)
+    throw new Error(`host OAuth observation returned HTTP ${answer.status}`);
+  return decoded;
+}
+
+async function appOperation(
+  page: import('@playwright/test').Page,
+  csrf: string,
+  route: string,
+  method: 'POST' | 'PUT' | 'DELETE',
+  body?: unknown,
+  idempotency = false,
+): Promise<JsonObject> {
+  const ack = await browserRequest(page, route, method, csrf, body, idempotency ? randomUUID() : undefined);
+  const operation = object(field(ack.json, 'operation'));
+  if (ack.status !== 202 || typeof operation?.id !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(operation.id)) {
+    throw new Error(`${method} ${new URL(route, 'https://local.invalid').pathname} was not accepted as an operation`);
+  }
+  const deadline = performance.now() + 5 * 60_000;
+  for (;;) {
+    const remaining = deadline - performance.now();
+    if (remaining <= 0) throw new Error('app write did not settle before the acceptance deadline');
+    const status = await browserRequest(page, `/api/v1/operations/${encodeURIComponent(operation.id)}`, 'GET');
+    const value = object(status.json);
+    if (status.status !== 200 || value?.id !== operation.id || typeof value.state !== 'string') {
+      throw new Error('app write operation status was malformed');
+    }
+    if (value.state === 'succeeded') return value;
+    if (value.state === 'failed' || value.state === 'blocked' || value.state === 'cancelled') {
+      throw new Error(`app write operation ended ${value.state}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, Math.min(500, remaining)));
+  }
+}
+
+function operationRecord(operation: JsonObject): CreatedRecord {
+  const uri = operation.uri;
+  const cid = operation.cid;
+  const updatedAt = operation.updatedAt;
+  if (
+    typeof uri !== 'string' ||
+    typeof cid !== 'string' ||
+    typeof updatedAt !== 'string' ||
+    !Number.isFinite(Date.parse(updatedAt))
+  ) {
+    throw new Error('succeeded app operation did not identify its PDS record');
+  }
+  const parsed = parseRecordUri(uri);
+  if (!parsed) throw new Error('succeeded app operation returned a malformed record URI');
+  return { uri, cid, rev: '' };
+}
+
+async function provePresent(
+  did: string,
+  expectedCollection: string,
+  record: CreatedRecord,
+  expected: JsonObject,
+): Promise<{ rev: string; rkey: string }> {
+  const parsed = parseRecordUri(record.uri);
+  if (!parsed || parsed.did !== did || parsed.collection !== expectedCollection)
+    throw new Error('app write returned a record outside its intended repo collection');
+  const proof = await verifyRecordAt(did, parsed.collection, parsed.rkey);
+  const value = object(proof.record);
+  if (proof.state !== 'present' || proof.cid !== record.cid || value === null)
+    throw new Error('app write record lacks an independently verified inclusion proof');
+  for (const [key, expectedValue] of Object.entries(expected))
+    if (value[key] !== expectedValue) throw new Error(`app write record content mismatch for ${key}`);
+  return { rev: proof.rev, rkey: parsed.rkey };
+}
+
+async function proveAbsent(did: string, collection: string, rkey: string, after: string): Promise<boolean> {
+  const proof = await verifyAbsent(did, collection, rkey, { after });
+  return proof.method === 'exclusionProof' || proof.method === 'snapshot';
+}
+
+async function appWrites(
+  context: NodeGateContext,
+  page: import('@playwright/test').Page,
+  session: Session,
+  peerDid: string,
+  cleanupNotes: string[],
+): Promise<Record<string, unknown>[]> {
+  const prefix = context.lexiconPrefix;
+  const collections = {
+    scrobble: `${prefix}.scrobble`,
+    follow: `${prefix}.follow`,
+    love: `${prefix}.love`,
+    settings: `${prefix}.settings`,
+  };
+  const nonce = randomUUID();
+  const artist = `ATMusic acceptance ${nonce}`;
+  const track = `Live OAuth ${nonce}`;
+  const listenedAt = new Date(Date.now() - 5 * 60_000).toISOString();
+  const writes: Record<string, unknown>[] = [];
+  const pending: Array<{ kind: string; collection: string; rkey: string; after: string | null; route: string }> = [];
+  let previousIndexing: 'enabled' | 'disabled' | null = null;
+  let settingsChanged = false;
+  let runFailed = false;
+  let cleanupFailed = false;
+  const record = async (kind: string, created: CreatedRecord, collection: string, expected: JsonObject) => {
+    const proof = await provePresent(session.did, collection, created, expected);
+    writes.push({ kind, operationState: 'succeeded', recordVerified: true, absenceVerified: false });
+    return { ...proof, collection, uri: created.uri };
+  };
+  const deleted = async (kind: string, collection: string, rkey: string, after: string) => {
+    if (!(await proveAbsent(session.did, collection, rkey, after))) throw new Error(`${kind} absence was not verified`);
+    writes.push({ kind, operationState: 'succeeded', recordVerified: false, absenceVerified: true });
+  };
+  const removePending = (kind: string) => {
+    const index = pending.findIndex((item) => item.kind === kind);
+    if (index >= 0) pending.splice(index, 1);
+  };
+  try {
+    const scrobbleOp = await appOperation(
+      page,
+      session.csrf,
+      '/api/v1/scrobbles',
+      'POST',
+      {
+        artist,
+        track,
+        listenedAt,
+      },
+      true,
+    );
+    if (scrobbleOp.kind !== 'scrobble.create') throw new Error('scrobble route produced the wrong operation kind');
+    const scrobble = operationRecord(scrobbleOp);
+    const scrobbleUri = parseRecordUri(scrobble.uri);
+    if (!scrobbleUri) throw new Error('scrobble operation returned a malformed record URI');
+    const scrobbleCleanup = {
+      kind: 'scrobble.delete',
+      collection: collections.scrobble,
+      rkey: scrobbleUri.rkey,
+      after: null as string | null,
+      route: `/api/v1/scrobbles/${encodeURIComponent(scrobble.uri)}`,
+    };
+    pending.push(scrobbleCleanup);
+    const scrobbleProof = await record('scrobble.create', scrobble, collections.scrobble, { artist, track });
+    scrobbleCleanup.after = scrobbleProof.rev;
+    const scrobbleDelete = await appOperation(
+      page,
+      session.csrf,
+      `/api/v1/scrobbles/${encodeURIComponent(scrobble.uri)}`,
+      'DELETE',
+    );
+    if (scrobbleDelete.kind !== 'scrobble.delete')
+      throw new Error('scrobble delete route produced the wrong operation kind');
+    await deleted('scrobble.delete', collections.scrobble, scrobbleProof.rkey, scrobbleProof.rev);
+    removePending('scrobble.delete');
+
+    const followKey = await followRkey(peerDid);
+    const beforeFollow = await verifyRecordAt(session.did, collections.follow, followKey);
+    if (beforeFollow.state !== 'absent')
+      throw new Error('dedicated OAuth identities already have a follow record; refusing to alter it');
+    const followOperation = await appOperation(
+      page,
+      session.csrf,
+      `/api/v1/follows/${encodeURIComponent(peerDid)}`,
+      'PUT',
+    );
+    if (followOperation.kind !== 'follow.put') throw new Error('follow route produced the wrong operation kind');
+    const followCreated = operationRecord(followOperation);
+    const followUri = parseRecordUri(followCreated.uri);
+    if (!followUri) throw new Error('follow operation returned a malformed record URI');
+    const followCleanup = {
+      kind: 'follow.delete',
+      collection: collections.follow,
+      rkey: followUri.rkey,
+      after: null as string | null,
+      route: `/api/v1/follows/${encodeURIComponent(peerDid)}`,
+    };
+    pending.push(followCleanup);
+    const followProof = await record('follow.put', followCreated, collections.follow, { subject: peerDid });
+    followCleanup.after = followProof.rev;
+    const unfollow = await appOperation(page, session.csrf, `/api/v1/follows/${encodeURIComponent(peerDid)}`, 'DELETE');
+    if (unfollow.kind !== 'follow.delete') throw new Error('unfollow route produced the wrong operation kind');
+    await deleted('follow.delete', collections.follow, followProof.rkey, followProof.rev);
+    removePending('follow.delete');
+
+    const loveOperation = await appOperation(page, session.csrf, '/api/v1/loves', 'PUT', { artist, track });
+    if (loveOperation.kind !== 'love.put') throw new Error('love route produced the wrong operation kind');
+    const loveCreated = operationRecord(loveOperation);
+    const loveUri = parseRecordUri(loveCreated.uri);
+    if (!loveUri) throw new Error('love operation returned a malformed record URI');
+    const loveCleanup = {
+      kind: 'love.delete',
+      collection: collections.love,
+      rkey: loveUri.rkey,
+      after: null as string | null,
+      route: `/api/v1/loves?artist=${encodeURIComponent(artist)}&track=${encodeURIComponent(track)}`,
+    };
+    pending.push(loveCleanup);
+    const loveProof = await record('love.put', loveCreated, collections.love, { artist, track });
+    loveCleanup.after = loveProof.rev;
+    const unlove = await appOperation(
+      page,
+      session.csrf,
+      `/api/v1/loves?artist=${encodeURIComponent(artist)}&track=${encodeURIComponent(track)}`,
+      'DELETE',
+    );
+    if (unlove.kind !== 'love.delete') throw new Error('unlove route produced the wrong operation kind');
+    await deleted('love.delete', collections.love, loveProof.rkey, loveProof.rev);
+    removePending('love.delete');
+
+    const settingsRkey = 'self';
+    const beforeSettings = await verifyRecordAt(session.did, collections.settings, settingsRkey);
+    const priorValue = beforeSettings.state === 'present' ? object(beforeSettings.record)?.indexing : null;
+    if (priorValue === 'enabled' || priorValue === 'disabled') previousIndexing = priorValue;
+    if (priorValue !== null && priorValue !== undefined && priorValue !== 'enabled' && priorValue !== 'disabled') {
+      throw new Error('existing settings record has an unrecognized indexing value');
+    }
+    const selectedIndexing = previousIndexing === 'enabled' ? 'disabled' : 'enabled';
+    // Mark the prior value as needing restoration before issuing the mutation:
+    // the request may commit even if its response is lost or polling fails.
+    settingsChanged = true;
+    const settingsOperation = await appOperation(page, session.csrf, '/api/v1/account/indexing', 'PUT', {
+      indexing: selectedIndexing,
+    });
+    if (settingsOperation.kind !== 'settings.put') throw new Error('settings route produced the wrong operation kind');
+    const settingsCreated = operationRecord(settingsOperation);
+    const settingsProof = await record('settings.put', settingsCreated, collections.settings, {
+      indexing: selectedIndexing,
+    });
+
+    if (previousIndexing === 'enabled' || previousIndexing === 'disabled') {
+      const restore = await appOperation(page, session.csrf, '/api/v1/account/indexing', 'PUT', {
+        indexing: previousIndexing,
+      });
+      if (restore.kind !== 'settings.put') throw new Error('settings restoration produced the wrong operation kind');
+      const restored = operationRecord(restore);
+      await provePresent(session.did, collections.settings, restored, { indexing: previousIndexing });
+      settingsChanged = false;
+      cleanupNotes.push(`${session.did}: previous indexing setting restored through the app`);
+    } else {
+      // Settings has no app-supported delete route. Preserve this one benign
+      // default on the dedicated acceptance identity and report it explicitly.
+      cleanupNotes.push(
+        `${session.did}: created default settings/self=${selectedIndexing}; API exposes no delete route`,
+      );
+    }
+
+    if (writes.length !== 7 || settingsProof.collection !== collections.settings)
+      throw new Error('app write coverage construction failed');
+  } catch {
+    runFailed = true;
+  }
+
+  for (const item of [...pending]) {
+    try {
+      const current = await verifyRecordAt(session.did, item.collection, item.rkey);
+      if (current.state === 'absent') {
+        removePending(item.kind);
+        continue;
+      }
+      const operation = await appOperation(page, session.csrf, item.route, 'DELETE');
+      if (operation.kind !== item.kind) {
+        cleanupFailed = true;
+        continue;
+      }
+      await proveAbsent(session.did, item.collection, item.rkey, current.rev);
+      removePending(item.kind);
+    } catch {
+      // Keep only the fixed local record identity in the cleanup note.
+      cleanupFailed = true;
+    }
+  }
+  if (pending.length > 0) {
+    cleanupNotes.push(`${session.did}: ${pending.length} app-created record(s) remain unresolved`);
+    cleanupFailed = true;
+  }
+  if (runFailed && previousIndexing === null && settingsChanged) {
+    cleanupNotes.push(`${session.did}: settings/self may have been created; API exposes no delete route`);
+    cleanupFailed = true;
+  }
+  if (settingsChanged && previousIndexing !== null) {
+    try {
+      const restore = await appOperation(page, session.csrf, '/api/v1/account/indexing', 'PUT', {
+        indexing: previousIndexing,
+      });
+      const restored = operationRecord(restore);
+      await provePresent(session.did, collections.settings, restored, { indexing: previousIndexing });
+      cleanupNotes.push(`${session.did}: previous indexing setting restored after a failed check`);
+      settingsChanged = false;
+    } catch {
+      cleanupNotes.push(`${session.did}: previous indexing setting could not be restored`);
+      cleanupFailed = true;
+    }
+  }
+  if (runFailed || cleanupFailed) throw new Error('app write verification or cleanup failed');
+  return writes;
+}
+
+async function validateClientMetadata(context: NodeGateContext): Promise<void> {
+  const response = await httpJson(new URL('/oauth/client-metadata.json', context.origin));
+  const metadata = object(response.json);
+  const scope = typeof metadata?.scope === 'string' ? metadata.scope : '';
+  if (
+    response.status !== 200 ||
+    metadata?.client_id !== `${context.origin}/oauth/client-metadata.json` ||
+    metadata.token_endpoint_auth_method !== 'private_key_jwt' ||
+    metadata.dpop_bound_access_tokens !== true ||
+    !hasAllTwelveActions(context.lexiconPrefix, scope) ||
+    scope.split(/\s+/).some((token) => token.startsWith('transition:'))
+  ) {
+    throw new Error('deployed confidential client metadata does not request the complete four-collection scope');
+  }
+}
+
+function hasAllTwelveActions(prefix: string, scope: string): boolean {
+  const tokens = scope.split(/\s+/).filter(Boolean);
+  if (!tokens.includes('atproto')) return false;
+  const expected = ['scrobble', 'follow', 'settings', 'love'].map((name) => `${prefix}.${name}`);
+  const grants = new Map<string, Set<string>>();
+  for (const token of tokens) {
+    if (!token.startsWith('repo:')) continue;
+    const [collection, query] = token.slice(5).split('?', 2);
+    if (!collection) continue;
+    const actions = query ? new URLSearchParams(query).getAll('action') : ['create', 'update', 'delete'];
+    const set = grants.get(collection) ?? new Set<string>();
+    for (const action of actions) set.add(action);
+    grants.set(collection, set);
+  }
+  return expected.every((collection) =>
+    ['create', 'update', 'delete'].every((action) => grants.get(collection)?.has(action)),
+  );
+}
+
 export const spec: NodeGateSpec = {
   gate: 'oauth',
   script: 'scripts/live/node_oauth_check.ts',
-  requirements: [
-    ...IDENTITY_REQS,
-    ...PDS_IMPLEMENTATION_REQS,
-    handle(NODE_OAUTH_ENV.handleA, 'A'),
-    handle(NODE_OAUTH_ENV.handleB, 'B'),
-    password(NODE_OAUTH_ENV.passwordA, 'A'),
-    password(NODE_OAUTH_ENV.passwordB, 'B'),
-    interactive,
-    timeout,
-  ],
-  extraChecks: (env) => [...signInChecks(env), CONTRACT_BLOCK],
-  async run() {
-    // CONTRACT_BLOCK prevents the harness from invoking this body. Keep the
-    // empty result inert if that contract changes before this driver is ported.
-    return { pds: [], subjects: [], results: {} };
+  requirements,
+  extraChecks,
+  async run(context) {
+    await validateClientMetadata(context);
+    const identities = [
+      {
+        which: 'A' as const,
+        did: context.get(ENV.didA),
+        pds: context.get(ENV.pdsA),
+        implementation: context.get(ENV.pdsAImplementation),
+      },
+      {
+        which: 'B' as const,
+        did: context.get(ENV.didB),
+        pds: context.get(ENV.pdsB),
+        implementation: context.get(ENV.pdsBImplementation),
+      },
+    ];
+    const pds: Awaited<ReturnType<typeof pdsInfo>>[] = [];
+    for (const identity of identities) {
+      const info = await pdsInfo(identity.pds, identity.implementation);
+      await checkIdentityPds(identity.did, info.endpoint);
+      pds.push(info);
+    }
+
+    const timeoutMs = signInTimeoutMs(context.env);
+    const browser = await launchBrowser(context.env);
+    const signIns: Record<string, unknown>[] = [];
+    const cleanupNotes: string[] = [];
+    try {
+      for (const [index, identity] of identities.entries()) {
+        const browserContext = await browser.newContext();
+        const page = await browserContext.newPage();
+        let appSignOutCompleted = false;
+        let captured = false;
+        let activeSession: Session | null = null;
+        try {
+          const session = await signIn(context, page, identity.which, timeoutMs);
+          activeSession = session;
+          const capture = await socketObserve(context, session.did, 'capture');
+          if (
+            capture.status !== 'captured' ||
+            capture.tokenSub !== session.did ||
+            capture.issuerHost !== new URL(identity.pds).hostname.toLowerCase() ||
+            capture.sealedSessionObserved !== true ||
+            capture.clientAuthMethod !== 'private_key_jwt' ||
+            capture.dpopBound !== true ||
+            capture.refreshTokenPresent !== true ||
+            typeof capture.grantedScope !== 'string'
+          ) {
+            throw new Error(`host did not observe the expected confidential OAuth session for PDS ${identity.which}`);
+          }
+          captured = true;
+          if (
+            !hasAllTwelveActions(context.lexiconPrefix, capture.grantedScope) ||
+            capture.grantedScope.split(/\s+/).some((token: string) => token.startsWith('transition:'))
+          ) {
+            throw new Error(`PDS ${identity.which} did not grant all twelve repo actions`);
+          }
+          const crudResult = await socketObserve(context, session.did, 'crud', identities[index === 0 ? 1 : 0]!.did);
+          if (
+            crudResult.status !== 'passed' ||
+            crudResult.cleanupVerified !== true ||
+            !Array.isArray(crudResult.crud)
+          ) {
+            throw new Error(`direct repository CRUD checks failed for PDS ${identity.which}`);
+          }
+          const writes = await appWrites(context, page, session, identities[index === 0 ? 1 : 0]!.did, cleanupNotes);
+          if (writes.length !== 7) throw new Error(`app write checks were incomplete for PDS ${identity.which}`);
+
+          const logout = await browserRequest(page, '/api/v1/auth/logout', 'POST', session.csrf, {});
+          appSignOutCompleted = logout.status === 204;
+          if (!appSignOutCompleted) throw new Error(`app sign-out failed for PDS ${identity.which}`);
+          const afterSignOut = await socketObserve(context, session.did, 'after_sign_out');
+          if (
+            afterSignOut.status !== 'revoked' ||
+            afterSignOut.localSessionAbsent !== true ||
+            afterSignOut.refreshRejected !== true ||
+            afterSignOut.refreshError !== 'invalid_grant'
+          ) {
+            throw new Error(`upstream refresh-token revocation was not proven for PDS ${identity.which}`);
+          }
+          signIns.push({
+            did: session.did,
+            issuerHost: capture.issuerHost,
+            tokenSub: capture.tokenSub,
+            grantedScope: capture.grantedScope,
+            exchange: {
+              sealedSessionObserved: capture.sealedSessionObserved,
+              clientAuthMethod: capture.clientAuthMethod,
+              dpopBound: capture.dpopBound,
+              refreshTokenPresent: capture.refreshTokenPresent,
+            },
+            crud: crudResult.crud,
+            appWrites: writes,
+            signOut: {
+              appSignOutCompleted,
+              localSessionAbsent: afterSignOut.localSessionAbsent,
+              refreshRejected: afterSignOut.refreshRejected,
+              refreshError: afterSignOut.refreshError,
+            },
+          });
+        } finally {
+          if (activeSession !== null && !appSignOutCompleted) {
+            try {
+              const logout = await browserRequest(page, '/api/v1/auth/logout', 'POST', activeSession.csrf, {});
+              appSignOutCompleted = logout.status === 204;
+              if (captured && appSignOutCompleted) await socketObserve(context, activeSession.did, 'after_sign_out');
+            } catch {
+              appSignOutCompleted = false;
+            }
+            if (!appSignOutCompleted) {
+              context.cleanup(
+                `${identity.did}: sign-out incomplete; host capture is time-limited and acceptance failed`,
+              );
+            }
+          }
+          await browserContext.close().catch(() => undefined);
+        }
+      }
+    } finally {
+      await browser.close().catch(() => undefined);
+    }
+    return {
+      pds,
+      subjects: identities.map((identity) => ({ did: identity.did, uri: null })),
+      results: {
+        signIns,
+        cleanup:
+          cleanupNotes.length > 0
+            ? cleanupNotes.join('; ')
+            : 'all temporary scrobbles, follows, and loves were deleted and absence verified; settings were preserved',
+      },
+    };
   },
 };
 

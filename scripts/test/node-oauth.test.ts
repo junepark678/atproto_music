@@ -99,23 +99,19 @@ test('with every ATMUSIC_LIVE_* unset it exits 2 with a blocked document naming 
   expect(evidence.missing.some((entry) => entry.includes(NODE_OAUTH_ENV.interactive))).toBe(true);
 });
 
-test('a complete operator environment remains blocked before invoking OAuth or networking', async () => {
-  const run = vi.fn(spec.run);
+test('the complete synthetic environment reaches only the injected runner and never initiates networking itself', async () => {
+  const run = vi.fn(async () => ({ pds: [], subjects: [], results: { signIns: [], cleanup: 'synthetic test only' } }));
   const fetch = vi.fn(async () => {
     throw new Error('unexpected network request');
   });
   vi.stubGlobal('fetch', fetch);
   const result = capture();
   try {
-    expect(await runNodeGate({ ...spec, run }, completeEnv(), result.io)).toBe(2);
-    expect(run).not.toHaveBeenCalled();
+    expect(await runNodeGate({ ...spec, run }, completeEnv(), result.io)).toBe(0);
+    expect(run).toHaveBeenCalledOnce();
     expect(fetch).not.toHaveBeenCalled();
     const evidence = JSON.parse(result.output().stdout) as { result: string; missing: string[] };
-    expect(evidence.result).toBe('blocked');
-    expect(evidence.missing).toHaveLength(1);
-    expect(
-      evidence.missing.some((entry) => entry.includes('upstream revocation observations are not implemented')),
-    ).toBe(true);
+    expect(evidence.result).toBe('passed');
   } finally {
     vi.unstubAllGlobals();
   }
