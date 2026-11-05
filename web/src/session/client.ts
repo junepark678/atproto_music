@@ -21,6 +21,7 @@ export class SessionClient {
   #listeners = new Set<SessionChangeListener>();
   #fetch: typeof fetch;
   #sessionReadGeneration = 0;
+  #sessionReadPromise: Promise<Session | null> | null = null;
   #sessionRevision = 0;
 
   constructor(options: { fetch?: typeof fetch; onChange?: SessionChangeListener } = {}) {
@@ -41,15 +42,28 @@ export class SessionClient {
 
   async getSession(): Promise<Session | null> {
     if (this.#current !== null) return this.#current;
+    if (this.#sessionReadPromise !== null) return this.#sessionReadPromise;
     const generation = ++this.#sessionReadGeneration;
+    const read = this.#readSession(generation);
+    this.#sessionReadPromise = read;
+    try {
+      return await read;
+    } finally {
+      if (this.#sessionReadPromise === read) this.#sessionReadPromise = null;
+    }
+  }
+
+  async #readSession(generation: number): Promise<Session | null> {
+    const currentOrReplacement = (): Promise<Session | null> | Session | null =>
+      this.#sessionReadPromise ?? this.#current;
     let response: Response;
     try {
       response = await this.#fetch('/api/v1/auth/session', { credentials: 'same-origin', cache: 'no-store' });
     } catch (error) {
-      if (generation !== this.#sessionReadGeneration) return this.#current;
+      if (generation !== this.#sessionReadGeneration) return currentOrReplacement();
       throw error;
     }
-    if (generation !== this.#sessionReadGeneration) return this.#current;
+    if (generation !== this.#sessionReadGeneration) return currentOrReplacement();
     if (response.status === 401) {
       this.#set(null, this.#reauthRequired, this.#reauthRequired ? 'reauth_required' : 'anonymous');
       return null;
@@ -59,10 +73,10 @@ export class SessionClient {
     try {
       value = (await response.json()) as Session;
     } catch (error) {
-      if (generation !== this.#sessionReadGeneration) return this.#current;
+      if (generation !== this.#sessionReadGeneration) return currentOrReplacement();
       throw error;
     }
-    if (generation !== this.#sessionReadGeneration) return this.#current;
+    if (generation !== this.#sessionReadGeneration) return currentOrReplacement();
     if (
       !value ||
       typeof value.did !== 'string' ||
@@ -85,6 +99,7 @@ export class SessionClient {
   /** Discard the cached DTO and read the cookie session again, e.g. after OAuth in another tab. */
   async refresh(): Promise<Session | null> {
     this.#sessionReadGeneration++;
+    this.#sessionReadPromise = null;
     this.#sessionRevision++;
     this.#current = null;
     this.#csrfToken = null;
@@ -94,6 +109,7 @@ export class SessionClient {
   unauthorized(expectedRevision?: number): boolean {
     if (expectedRevision !== undefined && expectedRevision !== this.#sessionRevision) return false;
     this.#sessionReadGeneration++;
+    this.#sessionReadPromise = null;
     this.#set(null, true, 'reauth_required');
     return true;
   }
@@ -146,6 +162,7 @@ export class SessionClient {
       const newerCurrent = isReplacementSession(this.#current);
       const newerPublished = isReplacementSession(this.#published);
       this.#sessionReadGeneration++;
+      this.#sessionReadPromise = null;
       if (!newerCurrent && !newerPublished) {
         // Clear the visible session immediately. A pending refresh may have
         // cleared #current without publishing; leaving the published session
@@ -157,7 +174,7 @@ export class SessionClient {
       // reconcile the cookie. This matters when a refresh has cleared the
       // internal cache while the UI still publishes a newer account.
       try {
-        await this.getSession();
+        await this.refresh();
       } catch {
         // The server accepted or rejected the old session; keep the local
         // state cleared (or the newer account preserved) until a later read.

@@ -7,6 +7,7 @@ import { canonicalDigest } from '@atmusic/core/canonical';
 import { cryptoRandom, systemClock } from '@atmusic/core/deps';
 import { collectionsFor } from '@atmusic/core/namespace';
 import { newTid } from '@atmusic/core/record-key';
+import { buildScrobbleRecord, validateScrobbleRecord } from '@atmusic/core/scrobble';
 import { parseRecordUri } from '@atmusic/core/syntax';
 import type { Browser, Page } from '@playwright/test';
 import {
@@ -33,6 +34,7 @@ import {
   type NodeGateContext,
   type NodeGateSpec,
 } from './node-live-gate.ts';
+import { type OwnedChromiumLaunch, startOwnedChromium } from './owned-chromium.ts';
 import { launchBrowser, OAUTH_ENV, signInChecks, signInTimeoutMs } from './workers_oauth_check.ts';
 
 export const NODE_INGEST_ENV = {
@@ -108,7 +110,8 @@ interface BrowserApiResponse {
 }
 
 export interface IngestDependencies {
-  browser(): Promise<Browser>;
+  browser(timeoutMs: number): Promise<Browser>;
+  startBrowser?(launchDeadlineAt: number, cleanupDeadlineAt: number): OwnedChromiumLaunch;
   pdsInfo(endpoint: string, implementation: string, timeoutMs?: number): Promise<PdsInfo>;
   httpJson: typeof httpJson;
   verifyRecordAt(did: string, collection: string, rkey: string, timeoutMs?: number): ReturnType<typeof verifyRecordAt>;
@@ -158,8 +161,25 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: str
   }
 }
 
+async function closeWithinDeadline<T>(
+  close: () => Promise<T>,
+  deadlineAt: number,
+  label: string,
+  reserveMs = 0,
+): Promise<T> {
+  const timeoutMs = Math.floor(deadlineAt - performance.now() - reserveMs);
+  if (timeoutMs <= 0) throw new Error(`${label} deadline exceeded`);
+  return withTimeout(close(), timeoutMs, label);
+}
+
 const dependencies: IngestDependencies = {
-  browser: () => launchBrowser(process.env),
+  browser: (timeoutMs) => launchBrowser(process.env, timeoutMs),
+  startBrowser: (launchDeadlineAt, cleanupDeadlineAt) =>
+    startOwnedChromium({
+      interactive: process.env[OAUTH_ENV.interactive] === '1',
+      launchDeadlineAt,
+      cleanupDeadlineAt,
+    }),
   pdsInfo: (endpoint, implementation, timeoutMs) => pdsInfo(endpoint, implementation, timeoutMs),
   httpJson,
   verifyRecordAt: (did, collection, rkey, timeoutMs = 15_000) =>
@@ -495,9 +515,24 @@ async function awaitIndexed(
     `${written.uri}: operation CID ${written.cid}, status CID ${statusCid}, and independent proof CID ${proof.cid} differ`,
   );
   if (expectedRecord !== undefined) {
+    if (!Object.hasOwn(expectedRecord, 'createdAt')) {
+      const prefix = parsed.collection.slice(0, parsed.collection.lastIndexOf('.'));
+      expect(
+        validateScrobbleRecord(proof.record, prefix, BigInt(Date.now()) * 1_000_000n).ok,
+        `${written.uri}: independently verified PDS record is not a valid canonical scrobble`,
+      );
+    }
     const expectedDigest = await canonicalDigest(expectedRecord);
+    // createdAt is assigned by the BFF when it accepts the request. It is the
+    // only record field that the client cannot determine in advance.
+    const actualPayload = Object.hasOwn(expectedRecord, 'createdAt')
+      ? proof.record
+      : (() => {
+          const { createdAt: _createdAt, ...payload } = (proof.record ?? {}) as Record<string, unknown>;
+          return payload;
+        })();
     expect(
-      proof.record !== undefined && (await canonicalDigest(proof.record)) === expectedDigest,
+      proof.record !== undefined && (await canonicalDigest(actualPayload)) === expectedDigest,
       `${written.uri}: independently verified PDS content differs from the intended record`,
     );
   }
@@ -527,6 +562,13 @@ async function awaitIndexed(
         ? 'approximate wall-clock time from succeeded operation.updatedAt to first indexed status observation; includes polling delay and clock skew'
         : 'approximate wall-clock time from PDS createRecord response to first indexed status observation; includes polling delay and clock skew',
   };
+}
+
+function intendedAppRecord(prefix: string, requestBody: object): object {
+  const built = buildScrobbleRecord(requestBody, prefix, systemClock);
+  expect(built.ok, 'app request body is not a valid scrobble input');
+  const { createdAt: _serverAssignedCreatedAt, ...record } = built.record;
+  return record;
 }
 
 async function awaitAbsent(
@@ -593,8 +635,10 @@ export async function runNodeIngest(
   const timeoutMs = Number(context.env[NODE_INGEST_ENV.timeoutSeconds] || 300) * 1000;
   const deadlineAt = performance.now() + timeoutMs;
   const recoveryReserveMs = Math.min(60_000, Math.floor(timeoutMs * 0.2));
+  const teardownReserveMs = Math.min(2_000, Math.floor(recoveryReserveMs / 2));
+  const recoveryDeadlineAt = deadlineAt - teardownReserveMs;
   const phaseBudgetMs = () => remainingMs(deadlineAt, recoveryReserveMs);
-  const cleanupBudgetMs = () => remainingMs(deadlineAt);
+  const cleanupBudgetMs = () => remainingMs(recoveryDeadlineAt);
   const pds: PdsInfo[] = [];
   const didA = context.get(ENV.didA);
   const didB = context.get(ENV.didB);
@@ -603,7 +647,9 @@ export async function runNodeIngest(
   const records: RecordIntent[] = [];
   const results: Record<string, unknown> = {};
   let browser: Browser | null = null;
+  let browserLaunch: OwnedChromiumLaunch | null = null;
   let browserContext: Awaited<ReturnType<Browser['newContext']>> | null = null;
+  let browserContextClosed = false;
   let page: Page | null = null;
   let appSession: BrowserSession | null = null;
   let pdsSession: PdsSession | null = null;
@@ -613,29 +659,32 @@ export async function runNodeIngest(
     pds.push(await deps.pdsInfo(endpointB, context.get(ENV.pdsBImplementation), phaseBudgetMs()));
     await deps.checkIdentityPds(didA, pds[0]!.endpoint, phaseBudgetMs());
     await deps.checkIdentityPds(didB, pds[1]!.endpoint, phaseBudgetMs());
-    const browserLaunch = deps.browser();
-    const launchState: { abandoned: boolean; browser: Browser | null; closed: boolean } = {
-      abandoned: false,
-      browser: null,
-      closed: false,
-    };
-    const closeLateLaunch = () => {
-      if (launchState.abandoned && launchState.browser !== null && !launchState.closed) {
-        launchState.closed = true;
-        void launchState.browser.close().catch(() => undefined);
-      }
-    };
-    browserLaunch
-      .then((lateBrowser) => {
-        launchState.browser = lateBrowser;
-        closeLateLaunch();
-      })
-      .catch(() => undefined);
+    const launchDeadline = performance.now() + phaseBudgetMs();
     try {
-      browser = await withTimeout(browserLaunch, phaseBudgetMs(), 'browser launch');
+      if (deps.startBrowser !== undefined) {
+        browserLaunch = deps.startBrowser(launchDeadline, deadlineAt);
+        browser = await withTimeout(browserLaunch.ready, remainingMs(launchDeadline), 'browser launch');
+      } else {
+        browser = await deps.browser(remainingMs(launchDeadline));
+      }
+      if (performance.now() > launchDeadline) {
+        if (browserLaunch !== null) await browserLaunch.terminate();
+        else await closeWithinDeadline(() => browser!.close(), recoveryDeadlineAt, 'late browser close', 250);
+        browser = null;
+        throw new Error('browser launch deadline exceeded');
+      }
     } catch (error) {
-      launchState.abandoned = true;
-      closeLateLaunch();
+      if (browserLaunch !== null && browser === null) {
+        const stopped = await browserLaunch.terminate();
+        if (!stopped.processStopped)
+          context.cleanup('owned browser process termination was not confirmed before the ingest deadline');
+        if (!stopped.connectionSettled)
+          context.cleanup('owned browser CDP connection settlement was not confirmed before the ingest deadline');
+        if (!stopped.profileRemoved)
+          context.cleanup('owned browser temporary profile removal was not confirmed before the ingest deadline');
+      } else if (browser !== null && performance.now() >= launchDeadline) {
+        context.cleanup('late browser launch unresolved; inspect the runner process for a browser left open');
+      }
       throw error;
     }
     browserContext = await withTimeout(browser.newContext(), phaseBudgetMs(), 'browser context creation');
@@ -698,10 +747,17 @@ export async function runNodeIngest(
       parseRecordUri(local.uri)?.collection === collectionsFor(context.lexiconPrefix).scrobble,
       'local BFF wrote outside the scrobble collection',
     );
-    localRecord.owned = true;
     phase = 'app scrobble indexing';
-    const localIndexed = await awaitIndexed(page, local, { kind: 'operation', dto: localOp }, phaseBudgetMs(), deps);
+    const localIndexed = await awaitIndexed(
+      page,
+      local,
+      { kind: 'operation', dto: localOp },
+      phaseBudgetMs(),
+      deps,
+      intendedAppRecord(context.lexiconPrefix, localPayload),
+    );
     results.localPublish = localIndexed;
+    localRecord.owned = true;
     localRecord.presentRev = String(localIndexed.verifiedRev);
     delete localRecord.operationId;
     delete localRecord.idempotencyKey;
@@ -848,18 +904,21 @@ export async function runNodeIngest(
             record.uri = uri;
             record.cid = field<string>(operation, 'cid');
             const parsed = parseRecordUri(uri);
-            record.owned = parsed?.did === didA && parsed.collection === collectionsFor(context.lexiconPrefix).scrobble;
-            if (!record.owned)
+            const isIntendedAppRecord =
+              parsed?.did === didA && parsed.collection === collectionsFor(context.lexiconPrefix).scrobble;
+            if (!isIntendedAppRecord)
               context.fail('recovered app operation returned a URI outside its intended owner/collection');
-            if (record.owned && record.cid) {
+            if (isIntendedAppRecord && record.cid) {
               const indexed = await awaitIndexed(
                 page,
                 { uri, cid: record.cid, rev: null },
                 { kind: 'operation', dto: operation },
                 Math.min(cleanupBudgetMs(), 15_000),
                 deps,
+                intendedAppRecord(context.lexiconPrefix, record.requestBody ?? {}),
               );
               record.presentRev = String(indexed.verifiedRev);
+              record.owned = true;
               results.localPublish ??= indexed;
               record.operationState = 'succeeded';
               delete record.operationId;
@@ -1061,26 +1120,69 @@ export async function runNodeIngest(
     results.unresolvedSubjects = unresolvedSubjects;
     results.unresolvedOperations = unresolvedOperations;
     try {
-      if (page !== null) await withTimeout(page.close(), cleanupBudgetMs(), 'page close');
+      if (page !== null)
+        await closeWithinDeadline(
+          () => page!.close(),
+          browserLaunch === null ? deadlineAt : recoveryDeadlineAt,
+          'page close',
+        );
     } catch {
       context.fail('page close failed during teardown');
       context.cleanup('page close failed');
     }
     try {
       if (browserContext !== null)
-        await withTimeout(browserContext.close(), cleanupBudgetMs(), 'browser context close');
+        await closeWithinDeadline(
+          () => browserContext!.close(),
+          browserLaunch === null ? deadlineAt : recoveryDeadlineAt,
+          'browser context close',
+        );
+      if (browserContext !== null) browserContextClosed = true;
     } catch {
       context.fail('browser context close failed during teardown');
-      context.cleanup('browser context close failed');
+      if (browserLaunch === null)
+        context.cleanup(
+          'browser context closure was not confirmed; inspect the runner process and close any remaining context',
+        );
     }
     try {
-      if (browser !== null) await withTimeout(browser.close(), cleanupBudgetMs(), 'browser close');
+      if (browser !== null)
+        await closeWithinDeadline(
+          () => browser!.close(),
+          browserLaunch === null ? deadlineAt : recoveryDeadlineAt,
+          'browser close',
+        );
     } catch {
       context.fail('browser close failed during teardown');
-      context.cleanup('browser close failed');
+      if (browserLaunch === null)
+        context.cleanup(
+          'browser process closure was not confirmed; inspect the runner process and terminate any remaining browser',
+        );
     }
-    if (appSession !== null)
-      context.cleanup(`${didA}: browser context discarded; no sign-out or upstream revocation claim was made`);
+    if (browserLaunch !== null) {
+      const stopped = await browserLaunch.terminate();
+      if (stopped.processStopped && stopped.connectionSettled) browserContextClosed = browserContext !== null;
+      if (!stopped.processStopped) {
+        context.fail('owned browser process termination was not confirmed during teardown');
+        context.cleanup('owned browser process termination was not confirmed; inspect the runner process');
+      }
+      if (!stopped.connectionSettled) {
+        context.fail('owned browser CDP connection settlement was not confirmed during teardown');
+        context.cleanup('owned browser CDP connection settlement was not confirmed; inspect the runner process');
+      }
+      if (!stopped.profileRemoved) {
+        context.fail('owned browser temporary profile removal was not confirmed during teardown');
+        context.cleanup('owned browser temporary profile removal was not confirmed; inspect the runner temp directory');
+      }
+    }
+    if (appSession !== null) {
+      if (browserContextClosed)
+        context.cleanup(`${didA}: browser context discarded; no sign-out or upstream revocation claim was made`);
+      else
+        context.cleanup(
+          `${didA}: browser context closure was not confirmed; inspect the runner process and close any remaining session`,
+        );
+    }
   }
   return {
     pds,

@@ -153,7 +153,10 @@ interface Harness {
   index: LocalIndex;
   limits: NotifyLimits;
   inDo<T>(fn: (db: Db, m: ModuleDeps) => T): Promise<T>;
-  post(body: BodyInit | null, o?: { ip?: string; headers?: HeadersInit }): Promise<Reply>;
+  post(
+    body: Exclude<RequestInit['body'], null> | null,
+    o?: { ip?: string; headers?: NonNullable<RequestInit['headers']> },
+  ): Promise<Reply>;
   postJson(value: unknown, ip?: string): Promise<Reply>;
 }
 
@@ -176,7 +179,10 @@ function harness(i: IngestIndex): Harness {
     notify: (m, input, ip) => notify(m, input, ip, clock.nowMs(), limits),
   });
   const inDo = async <T>(fn: (db: Db, m: ModuleDeps) => T): Promise<T> => fn(i.db, { ...index.deps, db: i.db });
-  const post = async (body: BodyInit | null, o: { ip?: string; headers?: HeadersInit } = {}): Promise<Reply> => {
+  const post = async (
+    body: Exclude<RequestInit['body'], null> | null,
+    o: { ip?: string; headers?: NonNullable<RequestInit['headers']> } = {},
+  ): Promise<Reply> => {
     const ctx: RequestCtx = {
       env: INGEST_TEST_ENV,
       index,
@@ -187,7 +193,11 @@ function harness(i: IngestIndex): Harness {
     };
     const headers = new Headers(o.headers);
     if (!headers.has('content-type')) headers.set('content-type', 'application/json');
-    const res = await notifyRoute.handler(new Request(URL_NOTIFY, { method: 'POST', body, headers }), ctx, {});
+    const res = await notifyRoute.handler(
+      new Request(URL_NOTIFY, Object.assign({ method: 'POST', body, headers }, { duplex: 'half' })),
+      ctx,
+      {},
+    );
     const text = await res.text();
     return { status: res.status, headers: res.headers, text, body: text === '' ? null : JSON.parse(text) };
   };

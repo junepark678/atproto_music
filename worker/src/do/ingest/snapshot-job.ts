@@ -41,8 +41,8 @@
 //     job is `complete` and the cache is cleared. A generation change makes
 //     the completion `superseded`: nothing is activated, the job is closed
 //     and the cache cleared.
-//  7. The slice stops when its configured subrequest budget (200; each
-//     SafeFetch is reserved as SNAPSHOT_FETCH_COST: the request and
+//  7. The slice stops when its subrequest budget (Free: the plan's 40, Paid:
+//     200; each SafeFetch is reserved as SNAPSHOT_FETCH_COST: the request and
 //     an A and AAAA DoH pre-check, an uncached identity as
 //     IDENTITY_RESOLVE_COST) or its entry budget (2,000) is spent: the job goes
 //     back to `pending`, due now, with its frontier.
@@ -1062,8 +1062,9 @@ function emptyReport(): SnapshotStepReport {
 }
 
 /**
- * One snapshot slice (see the header). `budget` defaults to the fixed Node
- * slice budget, with at most `maxEntriesPerSlice` entries applied.
+ * One snapshot slice (see the header). `budget` defaults to the configured
+ * fixed Node slice budget, with at most
+ * `maxEntriesPerSlice` entries applied.
  */
 export async function snapshotStep(
   m: ModuleDeps,

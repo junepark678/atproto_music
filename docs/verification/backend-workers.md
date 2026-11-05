@@ -1,4 +1,7 @@
-# Workers backend acceptance gate
+# Historical Workers backend acceptance gate
+
+This is the retained record of the ADR 0004 Workers acceptance run. Its gate
+and runtime have been retired; it is not current Node acceptance evidence.
 
 `scripts/acceptance/workers-backend.sh` is the acceptance gate for the Cloudflare Workers backend (ADR 0004 §10, A18, A19; package W7-01). It runs every deterministic suite. Then it closes the [258-case map](ts-case-map.json) over the tests that actually ran. Every named case in `docs/planning/github-plan.json` ends as passed, failed, blocked or retired, with its own record.
 

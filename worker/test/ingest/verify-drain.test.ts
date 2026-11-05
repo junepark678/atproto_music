@@ -12,6 +12,7 @@ import { type FixtureKit, followRkey } from '@atmusic/atproto/test-support/read-
 import { carResponse, type FixtureTransport } from '@atmusic/atproto/test-support/router-transport';
 import { SignedRepo } from '@atmusic/atproto/test-support/signed-repo';
 import { describe, expect, it } from 'vitest';
+import { NODE_BUDGET, type SliceBudget } from '../../src/config';
 import type { Db } from '../../src/do/db';
 import { resolveIdentity } from '../../src/do/ingest/identity-cache';
 import { drain, drainState } from '../../src/do/ingest/verify-drain';
@@ -28,12 +29,12 @@ import {
   kit,
   protectedTables,
   snapshotJobs,
-  TIGHT_TEST_BUDGET,
 } from './drain-support';
 import { withIngestIndex } from './node-index';
 
 const T0 = Date.parse('2026-01-15T12:00:00Z');
 const FUTURE_REASON = 'listenedAt: timestamp must be between 1970-01-01 and receipt time plus 300 seconds';
+const TIGHT_TEST_BUDGET: SliceBudget = { ...NODE_BUDGET, drainHints: 2, subrequestsPerSlice: 40 };
 
 function scrobble(k: FixtureKit, listenedAt: string, extra: Record<string, unknown> = {}) {
   return {
