@@ -298,6 +298,8 @@ export interface FakeLastfmOptions {
   /** Its shared secret, used to verify `api_sig`. */
   secret: string;
   host?: string;
+  /** Opt in to clock-based rejection of future scrobbles; scripted-only by default. */
+  validateScrobbleTimestamps?: boolean;
 }
 
 const SIGNED_METHODS = new Set([
@@ -360,6 +362,7 @@ export class FakeLastfm implements Routable {
   private readonly clock: Clock;
   private readonly apiKey: string;
   private readonly secret: string;
+  private readonly validateScrobbleTimestamps: boolean;
   private readonly users = new Map<string, UserState>();
   private readonly sessions = new Map<string, string>();
   private readonly tokens = new Map<string, TokenState>();
@@ -372,6 +375,7 @@ export class FakeLastfm implements Routable {
     this.clock = opts.clock;
     this.apiKey = opts.apiKey;
     this.secret = opts.secret;
+    this.validateScrobbleTimestamps = opts.validateScrobbleTimestamps ?? false;
     this.host = opts.host ?? LASTFM_HOST;
   }
 
@@ -603,7 +607,13 @@ export class FakeLastfm implements Routable {
     });
 
     const state = this.userState(user)!;
-    const codes = items.map(() => this.itemCodes.shift() ?? 0);
+    const nowSeconds = Math.floor(this.clock.nowMs() / 1000);
+    const codes = items.map((item) => {
+      // Every submitted item consumes its own injected outcome, including a
+      // timestamp rejection, so later items/requests never inherit its fault.
+      const injected = this.itemCodes.shift() ?? 0;
+      return this.validateScrobbleTimestamps && Number(item.timestamp) > nowSeconds + 300 ? 4 : injected;
+    });
     items.forEach((item, i) => {
       if (codes[i] !== 0) return;
       state.history.push({

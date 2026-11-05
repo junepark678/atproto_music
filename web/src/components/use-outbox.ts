@@ -30,7 +30,7 @@ export function useOutbox(): OutboxState {
   const [result, setResult] = useState<OutboxState>({ status: 'loading' });
 
   useEffect(() => {
-    if (session === null || !canPublish || prefix === null) return;
+    if (session === null || session.status !== 'active' || !canPublish || prefix === null) return;
     let live = true;
     setResult({ status: 'loading' });
     services.outbox({ session, prefix, api: state.api }).then(
@@ -46,7 +46,7 @@ export function useOutbox(): OutboxState {
     };
   }, [session, canPublish, prefix, services, state]);
 
-  if (session === null) return { status: 'anonymous' };
+  if (session === null || session.status !== 'active') return { status: 'anonymous' };
   if (!canPublish || prefix === null) return { status: 'unavailable' };
   if (result.status === 'ready' && result.outbox.session !== session) return { status: 'loading' };
   return result;

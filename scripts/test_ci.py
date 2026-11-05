@@ -18,9 +18,42 @@ def require(condition, message):
 
 
 def expect_failure(command, directory):
+    env = {
+        **os.environ,
+        "CARGO_TARGET_DIR": str(ROOT / "target" / "ci-negative"),
+        "CARGO_PROFILE_DEV_DEBUG": "0",
+        "CARGO_PROFILE_TEST_DEBUG": "0",
+        "CARGO_PROFILE_DEV_INCREMENTAL": "false",
+        "CARGO_PROFILE_TEST_INCREMENTAL": "false",
+    }
+    # CI installs the contract validator under work/, which is intentionally
+    # excluded from the disposable copy. Preserve that venv for the copied
+    # scripts/check.sh invocation instead of letting the copy fall back to the
+    # system Python without attrs.
+    common = subprocess.run(
+        ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+        cwd=ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    candidates = [
+        env.get("VIRTUAL_ENV"),
+        str(ROOT / ".venv"),
+        str(ROOT / "work" / "contracts-venv"),
+        str(Path(common.stdout.strip()).parent / ".venv") if common.returncode == 0 else None,
+    ]
+    venv = next(
+        (Path(candidate) for candidate in candidates if candidate and (Path(candidate) / "bin" / "activate").is_file()),
+        None,
+    )
+    if venv is not None:
+        env["VIRTUAL_ENV"] = str(venv)
+        env["PATH"] = f"{venv / 'bin'}:{env.get('PATH', '')}"
     result = subprocess.run(
         command, cwd=directory, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        env={**os.environ, "CARGO_TARGET_DIR": str(Path(directory) / "target"),
+        env={**env, "CARGO_TARGET_DIR": str(Path(directory) / "target"),
              "CARGO_PROFILE_DEV_DEBUG": "0", "CARGO_PROFILE_TEST_DEBUG": "0",
              "CARGO_PROFILE_DEV_INCREMENTAL": "false", "CARGO_PROFILE_TEST_INCREMENTAL": "false"},
     )
@@ -38,7 +71,8 @@ def main():
         shutil.copytree(
             ROOT,
             copy,
-            ignore=shutil.ignore_patterns(".git", "target", "work", "__pycache__", "node_modules", ".venv"),
+            symlinks=True,
+            ignore=shutil.ignore_patterns(".git", "target", "work", "__pycache__", ".venv"),
         )
         source = copy / "crates/server/tests/scaffold.rs"
         source.write_bytes(original + b"\nfn intentionally_unformatted(){let _value=1;}\n")
@@ -58,7 +92,7 @@ def main():
             f"disposable check output:\n{output[-6000:]}",
         )
         require("liveness_does_not_claim_readiness ... FAILED" in output,
-                "inverted readiness assertion was not the observed test failure")
+                f"inverted readiness assertion was not the observed test failure:\n{output}")
         print("PASS ci_assertion_failure: inverted readiness assertion fails the executed suite")
 
     require(hashlib.sha256(scaffold.read_bytes()).digest() == digest,

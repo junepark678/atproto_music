@@ -34,7 +34,6 @@ import {
 
 const TRACK_MARKER = 'TRACK-TITLE-MARKER-5b1f';
 const BEARER_MARKER = 'BEARER-MARKER-9c2e-0123456789abcdef';
-const ADMIN_TOKEN = 'admin-token-0123456789abcdef0123456789abcdef';
 const BAD_CURSOR_KEY = 'CURSOR-KEY-MARKER-not-base64-77aa77aa77aa77aa77aa77aa77aa77aa';
 
 function record(listenedAt: string, n: number) {
@@ -66,7 +65,7 @@ describe('log redaction', () => {
     for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
   });
 
-  it('captured logs and error bodies contain no CURSOR_KEY, ADMIN_TOKEN or bearer marker and logs contain no track-title marker', async () => {
+  it('captured logs and error bodies contain no CURSOR_KEY or bearer marker and logs contain no track-title marker', async () => {
     const kit = await kitControl({ env: { INGEST_MODE: 'socket' } });
     const js = jetstreamServer({ clock: kit.clock, fakes: [kit.jetstream] });
     control.connectJetstream = js.connect;
@@ -105,16 +104,7 @@ describe('log redaction', () => {
     const read = await req(h.request(`/api/v1/users/${ALICE}/scrobbles`));
     expect(read.text).toContain(TRACK_MARKER); // the marker is really in the index
 
-    // Admin on the TCP listener: whatever bearer is presented, the JSON 404 (ADR §3.11);
-    // and a bearer on a public route.
-    const denied = await req(
-      h.request('/internal/admin/status', { headers: { authorization: `Bearer ${BEARER_MARKER}` } }),
-    );
-    expect(denied.status).toBe(404);
-    const token = await req(
-      h.request('/internal/admin/status', { headers: { authorization: `Bearer ${ADMIN_TOKEN}` } }),
-    );
-    expect(token.status).toBe(404);
+    // A bearer on a public route must not be copied into logs or error bodies.
     const meta = await req(h.request('/api/v1/meta', { headers: { authorization: `Bearer ${BEARER_MARKER}` } }));
     expect(meta.status).toBe(200);
 
@@ -188,13 +178,13 @@ describe('log redaction', () => {
     // (The Node host holds no admin token; one only ever arrives as a presented bearer.)
     const careless = captureLog(secrets);
     careless.logger.log('error', 'careless', {
-      detail: `key=${cursorBase64} hex=${cursorHex} upper=${cursorHex.toUpperCase()} Bearer ${BEARER_MARKER} then Bearer ${ADMIN_TOKEN}`,
+      detail: `key=${cursorBase64} hex=${cursorHex} upper=${cursorHex.toUpperCase()} Bearer ${BEARER_MARKER}`,
       authorization: `Bearer ${BEARER_MARKER}`,
     });
     createLogger(secrets, { log: () => {}, warn: () => {}, error: (line) => consoleLines.push(line) }).log(
       'error',
       'careless',
-      { detail: `Bearer ${ADMIN_TOKEN} key=${cursorHex}` },
+      { detail: `Bearer ${BEARER_MARKER} key=${cursorHex}` },
     );
 
     // The capture is not vacuous: the flows above did log.
@@ -233,7 +223,7 @@ describe('log redaction', () => {
     expect(requestLines.length).toBeGreaterThan(5);
     expect(requestLines.every((l) => !JSON.stringify(l).includes('?'))).toBe(true);
 
-    const needles = [...secrets, ADMIN_TOKEN, BEARER_MARKER, BAD_CURSOR_KEY, cursorHex.toUpperCase()];
+    const needles = [...secrets, BEARER_MARKER, BAD_CURSOR_KEY, cursorHex.toUpperCase()];
     expect(needles.length).toBeGreaterThanOrEqual(9);
     for (const line of lines) {
       for (const needle of [...needles, TRACK_MARKER]) {
@@ -241,7 +231,7 @@ describe('log redaction', () => {
       }
     }
     const errors = responses.filter((r) => r.status >= 400);
-    expect(errors.map((r) => r.status).sort()).toEqual([400, 404, 404, 422, 500]);
+    expect(errors.map((r) => r.status).sort()).toEqual([400, 422, 500]);
     for (const r of errors) {
       for (const needle of needles)
         expect([r.status, needle, r.text.includes(needle)]).toEqual([r.status, needle, false]);

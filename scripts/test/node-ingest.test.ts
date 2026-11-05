@@ -68,6 +68,7 @@ function makeContext(
     lexiconPrefix: env[NODE_ENV.prefix]!,
     log: () => undefined,
     fail: (message) => failures.push(message),
+    block: () => undefined,
     cleanup: (message) => cleanup.push(message),
   };
 }
@@ -163,6 +164,7 @@ function mockDependencies(
     malformedAppAck?: boolean;
     wrongProofRecord?: boolean;
     appProofMismatch?: boolean;
+    appProofCreatedAt?: 'missing' | 'malformed';
     contextCloseMode?: 'reject' | 'hang';
     browserCloseMode?: 'reject' | 'hang';
   } = {},
@@ -184,6 +186,17 @@ function mockDependencies(
     extraHeaders?: Record<string, string>;
   }> = [];
   const state = { localDeleteFailed: false };
+  function appProofRecord(): object | null {
+    if (appRecord === null) return null;
+    if (options.appProofMismatch) return { ...appRecord, artist: 'different app payload' };
+    if (options.appProofCreatedAt !== undefined) {
+      const altered = { ...appRecord } as Record<string, unknown>;
+      if (options.appProofCreatedAt === 'missing') delete altered.createdAt;
+      else altered.createdAt = 'not-a-date';
+      return altered;
+    }
+    return appRecord;
+  }
   let currentUrl = 'about:blank';
   const locator = (label = '') => ({
     fill: vi.fn(async () => undefined),
@@ -334,9 +347,7 @@ function mockDependencies(
       state: 'present' as const,
       cid: did === DID_A ? CID_A : options.wrongPdsCid ? CID_A : CID_B,
       ...(did === DID_A
-        ? {
-            record: options.appProofMismatch ? { ...appRecord, artist: 'different app payload' } : appRecord,
-          }
+        ? { record: appProofRecord() }
         : {
             record: options.wrongProofRecord ? { artist: 'different record' } : pdsRecord,
           }),
@@ -560,6 +571,25 @@ test.each([
 });
 
 test.each([
+  ['normal', 'missing', {}],
+  ['normal', 'malformed', {}],
+  ['recovered', 'missing', { loseAppCreateResponse: true }],
+  ['recovered', 'malformed', { loseAppCreateResponse: true }],
+] as const)('%s app proof with %s createdAt refuses cleanup', async (_mode, createdAt, options) => {
+  const { deps, deletePosts } = mockDependencies({ ...options, appProofCreatedAt: createdAt });
+  const failures: string[] = [];
+  const cleanup: string[] = [];
+  const result = await runNodeIngest(makeContext(failures, cleanup), deps);
+
+  expect(failures).toContain(
+    `Node ingest failed during ${'loseAppCreateResponse' in options ? 'app scrobble submission' : 'app scrobble indexing'}`,
+  );
+  expect(deletePosts().appDeletePosts).toBe(0);
+  expect(result.subjects[0]).toMatchObject({ did: DID_A, uri: URI_A, unresolved: true });
+  expect(cleanup.some((line) => line.includes(`${URI_A} LEFT BEHIND`))).toBe(true);
+});
+
+test.each([
   ['normal app publish', {}, []],
   ['recovered app publish', { loseAppCreateResponse: true }, ['Node ingest failed during app scrobble submission']],
 ] as const)('%s verifies the BFF-normalized record and permits cleanup', async (_label, options, expectedFailures) => {
@@ -716,7 +746,8 @@ test('successful recovery spends only the remaining deadline on independent proo
     deadlineAt,
   );
   expect(recovered).toMatchObject({ uri: URI_B, cid: CID_B, rev: REV_PRESENT });
-  expect(proofTimeout).toBeLessThanOrEqual(210);
+  // Keep a 20 ms scheduling tolerance while still detecting a renewed 250 ms budget.
+  expect(proofTimeout).toBeLessThan(230);
 });
 
 test('stalled browser response and body consumption are bounded by the shared total timeout', async () => {

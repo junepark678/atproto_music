@@ -8,7 +8,7 @@
 import { followRkey, seedReadModels } from '@atmusic/atproto/test-support/read-models';
 import type { FixtureTransport } from '@atmusic/atproto/test-support/router-transport';
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_SLICE_BUDGET, type SliceBudget } from '../../src/config';
+import { NODE_BUDGET, type SliceBudget } from '../../src/config';
 import type { RepoJobRow } from '../../src/do/contracts';
 import type { Db } from '../../src/do/db';
 import { admit } from '../../src/do/ingest/admission';
@@ -134,7 +134,7 @@ describe('deactivation and reactivation', () => {
       expect(visible(m, alice)).toEqual([]);
 
       // The snapshot runs in slices; between them Alice stays hidden.
-      const budget: SliceBudget = { ...DEFAULT_SLICE_BUDGET, maxEntriesPerSlice: 3 };
+      const budget: SliceBudget = { ...NODE_BUDGET, maxEntriesPerSlice: 3 };
       const outcomes: string[] = [];
       for (;;) {
         const r = await snapshotStep(m, T0, budget);
@@ -244,7 +244,7 @@ describe('deactivation and reactivation', () => {
       // Reactivation: a fresh walk at g2. A deactivation again between its slices
       // supersedes it at the next claim, before any request is made.
       expect(reactivate(db, alice, T0)).toEqual({ changed: true, schedule: { status: 'scheduled', generation: g2 } });
-      const budget: SliceBudget = { ...DEFAULT_SLICE_BUDGET, maxEntriesPerSlice: 2 };
+      const budget: SliceBudget = { ...NODE_BUDGET, maxEntriesPerSlice: 2 };
       expect((await snapshotStep(m, T0, budget)).outcome).toBe('paused');
       const g3 = (deactivate(db, alice, 'takendown') as { generation: number }).generation;
       const before = k.pds.Alice.calls.entries.length;

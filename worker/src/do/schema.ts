@@ -662,7 +662,15 @@ const MIGRATION_3: Migration = {
   statements: ['ALTER TABLE operations ADD COLUMN follow_proof_json TEXT'],
 };
 
-export const MIGRATIONS: readonly Migration[] = [MIGRATION_1, MIGRATION_2, MIGRATION_3];
+// Supports the correlated target lookup in read/visibility.ts without changing
+// visibility semantics for other operation kinds or states.
+const MIGRATION_4: Migration = {
+  version: 4,
+  name: 'scrobble_delete_target_index',
+  statements: ["CREATE INDEX operations_scrobble_delete_target ON operations(did,rkey) WHERE kind = 'scrobble.delete'"],
+};
+
+export const MIGRATIONS: readonly Migration[] = [MIGRATION_1, MIGRATION_2, MIGRATION_3, MIGRATION_4];
 
 /** The schema version this code expects. */
 export const SCHEMA_VERSION: number = MIGRATIONS[MIGRATIONS.length - 1]?.version ?? 0;

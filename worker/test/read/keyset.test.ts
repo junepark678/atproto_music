@@ -133,17 +133,15 @@ interface ExplainRow {
  */
 function seekKey(db: Db, index: string, sql: string, params: SqlParam[]): unknown[] {
   const program = db.all<ExplainRow>(`EXPLAIN ${sql}`, ...params);
-  // The official Node binary may omit EXPLAIN comments while the owner's
-  // system-SQLite build includes them. OpenRead.p2 is the stable root page in
-  // both builds, so use sqlite_schema as the portable index identity.
-  const rootPage = db.one<{ rootpage: number }>(
-    "SELECT rootpage FROM sqlite_schema WHERE type = 'index' AND name = ?",
+  // EXPLAIN comments are optional in SQLite builds (ENABLE_EXPLAIN_COMMENTS).
+  // Resolve the index's root page from the schema and identify OpenRead by its
+  // database/root-page operands so this remains stable on Node's bundled SQLite.
+  const schemaIndex = db.one<{ rootpage: number }>(
+    "SELECT rootpage FROM main.sqlite_schema WHERE type = 'index' AND name = ?",
     index,
-  )?.rootpage;
-  expect(rootPage, `${index} exists in sqlite_schema`).toBeTypeOf('number');
-  const open = program.filter(
-    (op) => op.opcode === 'OpenRead' && ((op.comment ?? '').endsWith(`; ${index}`) || op.p2 === rootPage),
   );
+  expect(schemaIndex, `schema contains ${index}`).toBeDefined();
+  const open = program.filter((op) => op.opcode === 'OpenRead' && op.p2 === schemaIndex!.rootpage && op.p3 === 0);
   expect(open, `${index} is opened once`).toHaveLength(1);
   const cursor = open[0]!.p1;
   const seeks = program.filter((op) => /^Seek(GE|GT|LE|LT)$/.test(op.opcode) && op.p1 === cursor);

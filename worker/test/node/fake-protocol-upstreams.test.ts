@@ -65,6 +65,26 @@ async function body(res: Response): Promise<Record<string, unknown>> {
 }
 
 describe('fake Last.fm', () => {
+  for (const validateScrobbleTimestamps of [false, true]) {
+    it(`keeps scripted item codes aligned with timestamp validation ${validateScrobbleTimestamps ? 'enabled' : 'disabled by default'}`, async () => {
+      const fake = new FakeLastfm({
+        clock: fixedClock(),
+        apiKey: API_KEY,
+        secret: SECRET,
+        ...(validateScrobbleTimestamps ? { validateScrobbleTimestamps: true } : {}),
+      });
+      const sk = fake.addSession('alice');
+      const params = scrobbleParams(sk, 2);
+      params['timestamp[0]'] = String(NOW_S + 301);
+      params['timestamp[1]'] = String(NOW_S);
+      fake.ignoreItems(5, 1);
+      expect((await signedPost(fake, params)).status).toBe(200);
+      expect(fake.scrobbles[0]?.codes).toEqual(validateScrobbleTimestamps ? [4, 1] : [5, 1]);
+      expect((await signedPost(fake, scrobbleParams(sk, 1, NOW_S))).status).toBe(200);
+      expect(fake.scrobbles[1]?.codes).toEqual([0]);
+    });
+  }
+
   it('fake Last.fm rejects a bad api_sig with 13, accepts 50 scrobbles, rejects 51 with 6, and returns scripted 9, 11, 16, 29 and HTTP 503 in order', async () => {
     const clock = fixedClock();
     const fake = new FakeLastfm({ clock, apiKey: API_KEY, secret: SECRET });

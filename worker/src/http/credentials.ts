@@ -93,6 +93,7 @@ import { errorResponse, toErrorResponse } from './error';
 import { json, NO_STORE } from './json';
 import { topLevelKeys } from './notify';
 import { invalidField, readJsonBody } from './params';
+import { SessionEnded, writeInLiveSession } from './session-write';
 import type { RequestCtx, RouteDef } from './types';
 
 export const CREDENTIALS_PATTERN = '/api/v1/account/credentials';
@@ -158,34 +159,6 @@ export class CredentialSettingsUnavailable extends Error {
   constructor() {
     super('the credential-settings service is not composed');
   }
-}
-
-/** The guard's session was deleted or expired while the request body was read. */
-class SessionEnded extends Error {
-  override readonly name = 'SessionEnded';
-  constructor() {
-    super('the session ended before the credential was written');
-  }
-}
-
-/**
- * `write()` in one transaction with a fresh lookup of `req`'s cookie, which
- * must still find `session` (same token hash and DID); throws SessionEnded,
- * having written nothing, when it does not (module comment).
- */
-function writeInLiveSession<T>(
-  svc: CredentialSettingsService,
-  req: Request,
-  session: WebSession,
-  write: () => T extends Promise<unknown> ? never : T,
-): T {
-  return svc.deps.db.tx(() => {
-    const current = svc.sessions.lookupCookieHeader(req.headers.get('cookie'));
-    if (current === null || current.tokenHash !== session.tokenHash || current.did !== session.did) {
-      throw new SessionEnded();
-    }
-    return write();
-  });
 }
 
 /** A credential handler: a RouteDef handler that also receives the service. */
@@ -330,7 +303,9 @@ export const getCredentials: CredentialHandler = (svc, req, ctx) =>
 export const postAppPassword: CredentialHandler = (svc, req, ctx) =>
   withSession(svc, req, ctx, async (session) => {
     const label = await readLabelBody(req, 'label');
-    const made = writeInLiveSession(svc, req, session, () => createAppPassword(svc.deps, { did: session.did, label }));
+    const made = writeInLiveSession(svc.deps.db, svc.sessions, req, session, () =>
+      createAppPassword(svc.deps, { did: session.did, label }),
+    );
     return created({
       id: made.id,
       label: made.label ?? label,
@@ -342,14 +317,18 @@ export const postAppPassword: CredentialHandler = (svc, req, ctx) =>
 export const postLbToken: CredentialHandler = (svc, req, ctx) =>
   withSession(svc, req, ctx, async (session) => {
     const label = await readLabelBody(req, 'label');
-    const made = writeInLiveSession(svc, req, session, () => createLbToken(svc.deps, { did: session.did, label }));
+    const made = writeInLiveSession(svc.deps.db, svc.sessions, req, session, () =>
+      createLbToken(svc.deps, { did: session.did, label }),
+    );
     return created({ id: made.id, label: made.label ?? label, token: made.token, createdAt: iso(made.createdAtMs) });
   });
 
 export const postLastfmApp: CredentialHandler = (svc, req, ctx) =>
   withSession(svc, req, ctx, async (session) => {
     const name = await readLabelBody(req, 'name');
-    const made = writeInLiveSession(svc, req, session, () => createLastfmApp(svc.deps, { did: session.did, name }));
+    const made = writeInLiveSession(svc.deps.db, svc.sessions, req, session, () =>
+      createLastfmApp(svc.deps, { did: session.did, name }),
+    );
     return created({
       apiKey: made.apiKey,
       sharedSecret: made.sharedSecret,

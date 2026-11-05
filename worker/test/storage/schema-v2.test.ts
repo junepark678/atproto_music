@@ -420,6 +420,15 @@ const NEW_SCROBBLE_COLUMNS = cols<ScrobbleV2Columns>({
 
 /** New named indexes: table, unique, partial, [column, desc] in key order. */
 const NEW_INDEXES: Record<string, [string, number, number, Array<[string, number]>]> = {
+  operations_scrobble_delete_target: [
+    'operations',
+    0,
+    1,
+    [
+      ['did', 0],
+      ['rkey', 0],
+    ],
+  ],
   // Partial (WHERE recording_msid IS NOT NULL), so it never shadows the
   // per-DID time index while msids are NULL.
   scrobbles_msid: [
@@ -1104,7 +1113,12 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
     expect(dataAfter).toEqual(dataBefore);
     expect(Object.keys(dataBefore)).toHaveLength(before.tables.length - 1);
     expect(ledgerBefore).toEqual(["1|'initial_workers_schema'"]);
-    expect(ledgerAfter).toEqual(["1|'initial_workers_schema'", "2|'node_schema'", "3|'follow_proof_baseline'"]);
+    expect(ledgerAfter).toEqual([
+      "1|'initial_workers_schema'",
+      "2|'node_schema'",
+      "3|'follow_proof_baseline'",
+      "4|'scrobble_delete_target_index'",
+    ]);
     // The new scrobble columns exist and are NULL on every migrated row.
     expect(after.newColumns).toHaveLength(expectedScrobbles);
     for (const row of after.newColumns as Array<Record<string, unknown>>) {
@@ -1114,6 +1128,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       { version: 1, name: 'initial_workers_schema' },
       { version: 2, name: 'node_schema' },
       { version: 3, name: 'follow_proof_baseline' },
+      { version: 4, name: 'scrobble_delete_target_index' },
     ]);
     expect(after.compat).toEqual([{ singleton: 1, min_compatible_version: 2 }]);
     expect(after.newTablesEmpty).toEqual([]);

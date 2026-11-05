@@ -1,0 +1,176 @@
+{
+  "gate": "node-backend",
+  "commit": "be1c0a573e1d0bdda7b11c9e77dc1a52d7740614",
+  "bundleSha256": "b2ba9790e108a95bc5712d63db9f04970a51ba29bfe1fd635a1d684bdf1efe91",
+  "steps": {
+    "check-ts": {
+      "command": "ATMUSIC_RUN_NO_WORKERS_ACCEPTANCE=1 bash scripts/check-ts.sh",
+      "exit": "0"
+    },
+    "node-tests": {
+      "command": "npx vitest run --project worker-node --project worker-acceptance",
+      "exit": "0"
+    },
+    "e2e": {
+      "command": "npx playwright test",
+      "exit": "0"
+    },
+    "scrobbler-e2e": {
+      "command": "npx tsx scripts/e2e/scrobbler-e2e.ts --out \"/home/june/.t3/worktrees/atproto_music/t3-26cbf84d/work/acceptance/node-backend-final-20261104/scrobbler-e2e\"",
+      "exit": "0"
+    },
+    "python": {
+      "command": "python3 -m unittest (scripts/test_*.py referenced by the case map)",
+      "exit": "0"
+    },
+    "check-node-bundle": {
+      "command": "npx tsx scripts/check-node-bundle.ts",
+      "exit": "0"
+    },
+    "case-map": {
+      "command": "python3 scripts/validate_case_map.py --check-tests",
+      "exit": "0"
+    },
+    "goldens": {
+      "command": "bash scripts/check_goldens.sh",
+      "exit": "0"
+    },
+    "systemd": {
+      "command": "systemd-analyze --user verify config/systemd/atmusic.service config/systemd/atmusic.socket",
+      "exit": "0"
+    },
+    "live-noenv": {
+      "command": "npx tsx scripts/live/<gate>.ts (every ATMUSIC_LIVE_* unset)",
+      "exit": "0"
+    },
+    "live": {
+      "command": "python3 scripts/verify_live_evidence.py --node --commit HEAD --bundle-sha256 <check-node-bundle>",
+      "exit": "0"
+    }
+  },
+  "tests": {
+    "executed": 1651,
+    "passed": 1651,
+    "failed": 0,
+    "skipped": 0,
+    "todo": 0,
+    "bySource": {
+      "check-ts": 1148,
+      "node-tests": 438,
+      "python": 45,
+      "scrobbler-e2e": 7,
+      "e2e": 13
+    }
+  },
+  "cases": {
+    "total": 258,
+    "passed": 243,
+    "failed": 0,
+    "blocked": 9,
+    "retired": 6
+  },
+  "live": {
+    "passed": 0,
+    "failed": 0,
+    "blocked": 5
+  },
+  "liveGates": [
+    {
+      "gate": "oauth",
+      "script": "scripts/live/node_oauth_check.ts",
+      "result": "blocked",
+      "missing": [
+        "ATMUSIC_LIVE_COMMIT: missing — full nonzero source commit SHA for the deployed Node release",
+        "ATMUSIC_LIVE_BUNDLE_SHA256: missing — SHA-256 of the deployed production worker/dist/node/main.mjs bytes",
+        "ATMUSIC_LIVE_ORIGIN: missing — deployed public [redacted-url] origin",
+        "ATMUSIC_LIVE_LEXICON_PREFIX: missing — owned production lexicon prefix",
+        "ATMUSIC_LIVE_DID_A: missing — dedicated test DID on PDS A",
+        "ATMUSIC_LIVE_PDS_A: missing — PDS A endpoint on public [redacted-url]",
+        "ATMUSIC_LIVE_DID_B: missing — dedicated test DID on PDS B",
+        "ATMUSIC_LIVE_PDS_B: missing — PDS B endpoint on public [redacted-url] a different host from PDS A",
+        "ATMUSIC_LIVE_PDS_INDEPENDENCE_REF: missing — reference to evidence that PDS A and PDS B are independently operated",
+        "ATMUSIC_LIVE_PDS_A_IMPLEMENTATION: missing — implementation name of PDS A (e.g. @atproto/pds); the version is read from /xrpc/_health",
+        "ATMUSIC_LIVE_PDS_B_IMPLEMENTATION: missing — implementation name of PDS B; the version is read from /xrpc/_health",
+        "ATMUSIC_LIVE_HANDLE_A: missing — handle of the dedicated identity on PDS A",
+        "ATMUSIC_LIVE_HANDLE_B: missing — handle of the dedicated identity on PDS B",
+        "ATMUSIC_LIVE_PASSWORD_A or ATMUSIC_LIVE_OAUTH_INTERACTIVE: provide the PDS A account password or enable headed sign-in",
+        "ATMUSIC_LIVE_PASSWORD_B or ATMUSIC_LIVE_OAUTH_INTERACTIVE: provide the PDS B account password or enable headed sign-in",
+        "confidential OAuth exchange and upstream revocation observations are not implemented; no live request was made"
+      ],
+      "message": "recorded evidence: no passing oauth result bound to bundle b2ba9790e108a95bc5712d63db9f04970a51ba29bfe1fd635a1d684bdf1efe91 in the inventory; run npx tsx scripts/live/node_oauth_check.ts and record its document"
+    },
+    {
+      "gate": "ingest",
+      "script": "scripts/live/node_ingest_check.ts",
+      "result": "blocked",
+      "missing": [
+        "ATMUSIC_LIVE_COMMIT: missing — full nonzero source commit SHA for the deployed Node release",
+        "ATMUSIC_LIVE_BUNDLE_SHA256: missing — SHA-256 of the deployed production worker/dist/node/main.mjs bytes",
+        "ATMUSIC_LIVE_ORIGIN: missing — deployed public [redacted-url] origin",
+        "ATMUSIC_LIVE_LEXICON_PREFIX: missing — owned production lexicon prefix",
+        "ATMUSIC_LIVE_DID_A: missing — dedicated test DID on PDS A",
+        "ATMUSIC_LIVE_PDS_A: missing — PDS A endpoint on public [redacted-url]",
+        "ATMUSIC_LIVE_DID_B: missing — dedicated test DID on PDS B",
+        "ATMUSIC_LIVE_PDS_B: missing — PDS B endpoint on public [redacted-url] a different host from PDS A",
+        "ATMUSIC_LIVE_PDS_INDEPENDENCE_REF: missing — reference to evidence that PDS A and PDS B are independently operated",
+        "ATMUSIC_LIVE_PDS_A_IMPLEMENTATION: missing — implementation name of PDS A (e.g. @atproto/pds); the version is read from /xrpc/_health",
+        "ATMUSIC_LIVE_PDS_B_IMPLEMENTATION: missing — implementation name of PDS B; the version is read from /xrpc/_health",
+        "ATMUSIC_LIVE_JETSTREAM_COVERAGE_REF: missing — reference to evidence that the configured Jetstream hosts carry commits from both PDSs, A6",
+        "ATMUSIC_LIVE_HANDLE_A: missing — handle of identity A for app UI sign-in",
+        "ATMUSIC_LIVE_HANDLE_B: missing — handle of identity B for PDS B session",
+        "ATMUSIC_LIVE_APP_PASSWORD_B: missing — app password of identity B for direct PDS B record create/delete",
+        "ATMUSIC_LIVE_PASSWORD_A: missing — account password for the automated sign-in on PDS A (or ATMUSIC_LIVE_OAUTH_INTERACTIVE)"
+      ],
+      "message": "recorded evidence: no passing ingest result bound to bundle b2ba9790e108a95bc5712d63db9f04970a51ba29bfe1fd635a1d684bdf1efe91 in the inventory; run npx tsx scripts/live/node_ingest_check.ts and record its document"
+    },
+    {
+      "gate": "pdsCompat",
+      "script": "scripts/live/node_pds_compat_check.ts",
+      "result": "blocked",
+      "missing": [
+        "ATMUSIC_LIVE_COMMIT: missing — full nonzero source commit SHA for the deployed Node release",
+        "ATMUSIC_LIVE_BUNDLE_SHA256: missing — SHA-256 of the deployed production worker/dist/node/main.mjs bytes",
+        "ATMUSIC_LIVE_ORIGIN: missing — deployed public [redacted-url] origin",
+        "ATMUSIC_LIVE_LEXICON_PREFIX: missing — owned production lexicon prefix",
+        "ATMUSIC_LIVE_DID_A: missing — dedicated test DID on PDS A",
+        "ATMUSIC_LIVE_PDS_A: missing — PDS A endpoint on public [redacted-url]",
+        "ATMUSIC_LIVE_DID_B: missing — dedicated test DID on PDS B",
+        "ATMUSIC_LIVE_PDS_B: missing — PDS B endpoint on public [redacted-url] a different host from PDS A",
+        "ATMUSIC_LIVE_PDS_INDEPENDENCE_REF: missing — reference to evidence that PDS A and PDS B are independently operated",
+        "ATMUSIC_LIVE_PDS_A_IMPLEMENTATION: missing — implementation name of PDS A (e.g. @atproto/pds); the version is read from /xrpc/_health",
+        "ATMUSIC_LIVE_PDS_B_IMPLEMENTATION: missing — implementation name of PDS B; the version is read from /xrpc/_health",
+        "ATMUSIC_LIVE_JETSTREAM_COVERAGE_REF: missing — reference to evidence that the configured Jetstream hosts carry commits from both PDSs, A6"
+      ],
+      "message": "recorded evidence: no passing pdsCompat result bound to bundle b2ba9790e108a95bc5712d63db9f04970a51ba29bfe1fd635a1d684bdf1efe91 in the inventory; run npx tsx scripts/live/node_pds_compat_check.ts and record its document"
+    },
+    {
+      "gate": "ssrfProbe",
+      "script": "scripts/live/ssrf_probe.ts",
+      "result": "blocked",
+      "missing": [
+        "ATMUSIC_LIVE_COMMIT: missing — full nonzero source commit SHA for the deployed Node release",
+        "ATMUSIC_LIVE_BUNDLE_SHA256: missing — SHA-256 of the deployed production worker/dist/node/main.mjs bytes",
+        "ATMUSIC_LIVE_ORIGIN: missing — deployed public [redacted-url] origin",
+        "ATMUSIC_LIVE_LEXICON_PREFIX: missing — owned production lexicon prefix",
+        "ATMUSIC_LIVE_SSRF_HOSTS: missing — controlled DNS names as label=host pairs (labels rfc1918, loopback, metadata required)",
+        "ATMUSIC_LIVE_SSRF_PROBE_RESULT: missing — absolute path of the result file the emitted Node probe wrote on the origin host"
+      ],
+      "message": "recorded evidence: no passing ssrfProbe result bound to bundle b2ba9790e108a95bc5712d63db9f04970a51ba29bfe1fd635a1d684bdf1efe91 in the inventory; run npx tsx scripts/live/ssrf_probe.ts and record its document"
+    },
+    {
+      "gate": "socketSoak",
+      "script": "scripts/live/node_socket_soak.ts",
+      "result": "blocked",
+      "missing": [
+        "ATMUSIC_LIVE_COMMIT: missing — full nonzero source commit SHA for the deployed Node release",
+        "ATMUSIC_LIVE_BUNDLE_SHA256: missing — SHA-256 of the deployed production worker/dist/node/main.mjs bytes",
+        "ATMUSIC_LIVE_ORIGIN: missing — deployed public [redacted-url] origin",
+        "ATMUSIC_LIVE_LEXICON_PREFIX: missing — owned production lexicon prefix",
+        "Node socketSoak acceptance contract is not approved; gate is informational only."
+      ],
+      "message": "recorded evidence: no passing socketSoak result bound to bundle b2ba9790e108a95bc5712d63db9f04970a51ba29bfe1fd635a1d684bdf1efe91 in the inventory; run npx tsx scripts/live/node_socket_soak.ts and record its document"
+    }
+  ],
+  "result": "passed",
+  "problems": []
+}
