@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { startOwnedChromium } from '../live/owned-chromium.ts';
 
 const scenario = process.argv[2];
+const lifecycleStartedAt = performance.now();
 const launchDeadlineAt = performance.now() + 1_500;
 const resetFixture = (profile: string) => [
   '-e',
@@ -49,6 +50,8 @@ if (!status.processStopped || !status.profileRemoved || !status.connectionSettle
     process.stderr.write('owned profile still exists after confirmed termination\n');
     process.exitCode = 1;
   } catch {
-    process.stdout.write(`${JSON.stringify({ root: launched.root, pid: launched.pid, status, readyError })}\n`);
+    process.stdout.write(
+      `${JSON.stringify({ root: launched.root, pid: launched.pid, status, readyError, lifecycleMs: performance.now() - lifecycleStartedAt })}\n`,
+    );
   }
 }
