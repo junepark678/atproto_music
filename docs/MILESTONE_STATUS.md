@@ -1,5 +1,44 @@
 # MVP milestone status
 
+## Current Node acceptance (ADR 0005), recorded 2026-11-06
+
+`bash scripts/acceptance/node-backend.sh` ran on clean commit `2a545b6` (the merged
+`feat/mvp-complete` stack, bundle SHA-256 `184e32dd…a92a`) and printed
+`PASS node-backend`. All 1,854 executed tests passed, with 0 failed and 0 skipped:
+
+- check-ts: 1,309
+- Node and acceptance: 479
+- Python: 45
+- process-backed scrobbler replays: 7
+- Playwright: 14
+
+The 258 named cases ended with **243 passed, 0 failed, 9 blocked and 6 retired**.
+Every blocked case is a live case. All five live gates (`oauth`, `ingest`, `pdsCompat`,
+`ssrfProbe`, `socketSoak`) are blocked, because the owner chose not to supply
+dedicated test identities on two independent PDSs. Each gate refuses to run without
+its environment and makes no network request. A deterministic pass does not stand in
+for live evidence.
+
+| Milestone | Passed | Failed | Blocked (live) | Retired | Remaining |
+| --- | --- | --- | --- | --- | --- |
+| M1: Contracts and foundation | 39 | 0 | 0 | 3 | None. The production Lexicon schemas are published, and the publication gate is open ([evidence](verification/lexicon-publication/README.md)). |
+| M2: Identity and OAuth | 34 | 0 | 2 | 0 | live_round_trip and live_disposable_record (`oauth` and `pdsCompat` gates). |
+| M3: Scrobble publishing | 34 | 0 | 2 | 0 | live_create_read and live_delete (`ingest` gate). |
+| M4: Federation and feeds | 33 | 0 | 3 | 0 | live_remote_arrival, live_remote_mutation and live_recovery (`ingest` and `socketSoak` gates). |
+| M5: Read models and social | 36 | 0 | 0 | 0 | None. |
+| M6: Deployment and operations | 33 | 0 | 1 | 2 | live_inventory (a bundle-bound live evidence inventory). |
+| M7: Preact product | 34 | 0 | 1 | 1 | live_product (real OAuth and a second-PDS record on the deployed origin). |
+
+The deterministic work for M1–M7 is complete and merged. The only open items are
+the live cases listed above. Running them needs the inputs that
+[workers-live.md](verification/workers-live.md) and the Node live scripts in
+`scripts/live/` name: two dedicated identities on independently operated PDSs, with
+evidence that the PDSs are independent, and Jetstream coverage evidence.
+
+---
+
+## Historical Workers receipt (ADR 0004)
+
 > **Historical Workers receipt, not current Node acceptance.** ADR 0005
 > supersedes the hosting/auth/write model below. The counts, case retirements,
 > commands and operator requirements here belong to the recorded Workers
