@@ -176,7 +176,7 @@ class DisposableCopy {
     expect(existsSync(join(this.dir, SELF))).toBe(false);
     // An empty git repository (no commit), so tests run by the copied gate
     // that list files with `git ls-files --others --exclude-standard`
-    // (scripts/test/deploy.test.ts) see the copy's files as in a checkout.
+    // (scripts/test/node-interim.test.ts) see the copy's files as in a checkout.
     const init = exec('git', ['init', '-q'], this.dir);
     expect(init.status, init.stderr).toBe(0);
     if (options.linkNodeModules) this.linkNodeModules();
@@ -356,7 +356,7 @@ describe('scripts/check-ts.sh', () => {
       }
     }
     expect(byName.get('worker-node')?.groupOrder).toBe(modules?.groupOrder);
-    expect(byName.get('scripts')?.files).toContain('scripts/test/deploy.test.ts');
+    expect(byName.get('scripts')?.files).toContain('scripts/test/node-interim.test.ts');
     expect(byName.get('scripts')?.groupOrder).toBeLessThan(modules?.groupOrder ?? 0);
   });
 
@@ -727,9 +727,10 @@ describe('scripts/check-ts.sh', () => {
       const failingSteps = stepHeadings(failing.output);
       expect(failingSteps).not.toContain(buildHeading);
       expect(failingSteps.at(-1)).toBe(guardHeading);
-      // Every earlier step ran and passed first, the Workers bundle guard included.
+      // Every earlier step ran and passed first (the Workers bundle guard step is
+      // gone since N7-01 deleted scripts/check-bundle.ts).
       expect(failingSteps).toContain('test (vitest, projects: worker-node)');
-      expect(failingSteps).toContain('production bundle guard (check-bundle.ts)');
+      expect(failingSteps).not.toContain('production bundle guard (check-bundle.ts)');
       expect(failing.output).toContain('check-node-bundle stub: unpinned fetch path in main.mjs');
       expect(failing.output).not.toContain('PASS check-ts');
       const failed = JSON.parse(copy.read('work/gate-durations.json')) as GateDurations;

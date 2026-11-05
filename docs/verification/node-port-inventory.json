@@ -661,49 +661,63 @@
       "file": "scripts/test/check-bundle.test.ts",
       "ancestors": [],
       "title": "fails when a test-support import is injected into a temp copy of the entry",
-      "kept": true
+      "replaced": "scripts/test/check-node-bundle.test.ts › the guard fails when main.mjs has a test-support, worker/test or router-transport input, com.example.atmusic handling, or a cloudflare: import",
+      "package": "N7-01",
+      "reason": "N7-01 deleted the Workers bundle guard scripts/check-bundle.ts with its tests (ADR 0005 §15.3); the Node bundle guard rejects a test-support input in main.mjs, asserted by the replacement test."
     },
     {
       "id": "scripts/test/check-bundle.test.ts › fails when node:crypto is imported into a temp copy of the entry",
       "file": "scripts/test/check-bundle.test.ts",
       "ancestors": [],
       "title": "fails when node:crypto is imported into a temp copy of the entry",
-      "kept": true
+      "replaced": "scripts/test/check-node-bundle.test.ts › the guard fails when the bundle's @atcute/crypto entry differs from the one the worker-node project resolves, and prints the git sha and bundle SHA-256 otherwise",
+      "package": "N7-01",
+      "reason": "N7-01 deleted the Workers bundle guard scripts/check-bundle.ts with its tests (ADR 0005 §15.3); the Node bundle guard pins the crypto entry the bundle may resolve, asserted by the replacement test."
     },
     {
       "id": "scripts/test/check-bundle.test.ts › refuses built client metadata or _headers that differ from the configured origin and prefix",
       "file": "scripts/test/check-bundle.test.ts",
       "ancestors": [],
       "title": "refuses built client metadata or _headers that differ from the configured origin and prefix",
-      "kept": true
+      "replaced": "scripts/test/gen-config.test.ts › environment values override the example and invalid origins are refused without writes",
+      "package": "N7-01",
+      "reason": "N7-01 deleted the Workers bundle guard scripts/check-bundle.ts with its tests (ADR 0005 §15.3); the Node config generator refuses an origin that differs from the configured one, asserted by the replacement test."
     },
     {
       "id": "scripts/test/check-bundle.test.ts › refuses a wrangler config with a fixture or empty prefix or a route off the PUBLIC_ORIGIN host",
       "file": "scripts/test/check-bundle.test.ts",
       "ancestors": [],
       "title": "refuses a wrangler config with a fixture or empty prefix or a route off the PUBLIC_ORIGIN host",
-      "kept": true
+      "replaced": "scripts/test/build-server.test.ts › main.mjs started with ATMUSIC_PUBLIC_ORIGIN=http://127.0.0.1:1, or with LASTFM_API_ROOT=https://127.0.0.1/, exits 78 even with every test variable set",
+      "package": "N7-01",
+      "reason": "N7-01 deleted the Workers bundle guard scripts/check-bundle.ts with its tests (ADR 0005 §15.3); the Node host refuses a fixture or off-origin configuration at start with exit 78, asserted by the replacement test."
     },
     {
       "id": "scripts/test/check-bundle.test.ts › refuses assets.not_found_handling other than \"none\" (ADR §15 Q9) and accepts the example config",
       "file": "scripts/test/check-bundle.test.ts",
       "ancestors": [],
       "title": "refuses assets.not_found_handling other than \"none\" (ADR §15 Q9) and accepts the example config",
-      "kept": true
+      "replaced": "scripts/test/gen-config.test.ts › Node defaults come from the example env and only headers are emitted",
+      "package": "N7-01",
+      "reason": "N7-01 deleted the Workers bundle guard scripts/check-bundle.ts with its tests (ADR 0005 §15.3); the Node host has no assets handler; the config-example defaults are asserted by the replacement test."
     },
     {
       "id": "scripts/test/check-bundle.test.ts › missing Worker entry skips after config checks, and fails with --release",
       "file": "scripts/test/check-bundle.test.ts",
       "ancestors": [],
       "title": "missing Worker entry skips after config checks, and fails with --release",
-      "kept": true
+      "replaced": "scripts/test/check-ts.test.ts › check-ts.sh runs scripts/check-node-bundle.ts and build-server.ts --check only when those files exist, and a failing check-node-bundle.ts fails the gate in the disposable copy",
+      "package": "N7-01",
+      "reason": "N7-01 deleted the Workers bundle guard scripts/check-bundle.ts with its tests (ADR 0005 §15.3); the gate runs the Node guard only when its file exists and fails on its failure, asserted by the replacement test."
     },
     {
       "id": "scripts/test/check-bundle.test.ts › analyzeBundle enforces the gzip limit and rejects secp256k1-node and router-transport modules",
       "file": "scripts/test/check-bundle.test.ts",
       "ancestors": [],
       "title": "analyzeBundle enforces the gzip limit and rejects secp256k1-node and router-transport modules",
-      "kept": true
+      "replaced": "scripts/test/check-node-bundle.test.ts › the guard fails when main.mjs has worker/src/do/index-do.ts, worker/src/scheduled.ts, worker/src/env.ts, worker/src/index.ts or worker/src/router.ts as an input",
+      "package": "N7-01",
+      "reason": "N7-01 deleted the Workers bundle guard scripts/check-bundle.ts with its tests (ADR 0005 §15.3); the Node bundle guard rejects Workers-only modules as bundle inputs, asserted by the replacement test."
     },
     {
       "id": "scripts/test/check-ts.test.ts › scripts/check-ts.sh › the nested gate runs alone in the last sequence group, after worker-modules",
@@ -766,7 +780,9 @@
         "bash scripts/deploy.sh --dry-run"
       ],
       "title": "refuses empty/fixture prefix and missing secret with nonzero exit",
-      "kept": true
+      "replaced": "scripts/test/build-server.test.ts › main.mjs started with ATMUSIC_PUBLIC_ORIGIN=http://127.0.0.1:1, or with LASTFM_API_ROOT=https://127.0.0.1/, exits 78 even with every test variable set",
+      "package": "N7-01",
+      "reason": "N7-01 deleted the Workers deploy script scripts/deploy.sh with its tests (ADR 0005 §15.3); the Node host refuses a fixture or empty configuration with a nonzero exit, asserted by the replacement test."
     },
     {
       "id": "scripts/test/deploy.test.ts › bash scripts/deploy.sh --dry-run › valid owned prefix and CURSOR_KEY run gen-config, the web build and wrangler deploy --dry-run with exit 0",
@@ -775,7 +791,9 @@
         "bash scripts/deploy.sh --dry-run"
       ],
       "title": "valid owned prefix and CURSOR_KEY run gen-config, the web build and wrangler deploy --dry-run with exit 0",
-      "kept": true
+      "replaced": "scripts/test/install-local.test.ts › with a temporary HOME, install-local builds releases/<sha> with npm ci --ignore-scripts, runs main.mjs --init only when the database is missing, switches current atomically, installs both units and prints, but does not run, the linger command",
+      "package": "N7-01",
+      "reason": "N7-01 deleted the Workers deploy script scripts/deploy.sh with its tests (ADR 0005 §15.3); the Node release is installed by scripts/install-local.sh, asserted by the replacement test."
     },
     {
       "id": "scripts/test/deploy.test.ts › actionlint .github/workflows/deploy.yml › workflow is valid",
@@ -784,7 +802,9 @@
         "actionlint .github/workflows/deploy.yml"
       ],
       "title": "workflow is valid",
-      "kept": true
+      "replaced": "scripts/test/ci-workflow.test.ts › every full TypeScript gate workflow installs and exposes actionlint v1.7.7 before testing",
+      "package": "N7-01",
+      "reason": "N7-01 deleted the Workers deploy workflow .github/workflows/deploy.yml with its tests (ADR 0005 §15.3); the remaining gate workflows are checked by the replacement test."
     },
     {
       "id": "scripts/test/deploy.test.ts › actionlint .github/workflows/deploy.yml › deploy credentials are scoped to the deploy step",
@@ -793,7 +813,9 @@
         "actionlint .github/workflows/deploy.yml"
       ],
       "title": "deploy credentials are scoped to the deploy step",
-      "kept": true
+      "replaced": "scripts/test/ci-workflow.test.ts › CI and candidate checkouts do not persist credentials into artifacts",
+      "package": "N7-01",
+      "reason": "N7-01 deleted the Workers deploy workflow .github/workflows/deploy.yml with its tests (ADR 0005 §15.3); credential scoping of the remaining workflows is asserted by the replacement test."
     },
     {
       "id": "scripts/test/deploy.test.ts › npx tsx scripts/admin/pitr-restore.ts --help › prints usage and requires ADMIN_TOKEN",
@@ -802,7 +824,9 @@
         "npx tsx scripts/admin/pitr-restore.ts --help"
       ],
       "title": "prints usage and requires ADMIN_TOKEN",
-      "kept": true
+      "replaced": "scripts/test/restore.test.ts › with a fake systemctl, restore stops atmusic.socket and atmusic.service, proceeds only when both report inactive, swaps the db in, and starts both units only afterwards; a connection attempted mid-restore starts no server",
+      "package": "N7-01",
+      "reason": "N7-01 deleted the Workers PITR tool scripts/admin/pitr-restore.ts with its tests (ADR 0005 §15.3); the Node restore procedure is scripts/restore.sh, asserted by the replacement test."
     },
     {
       "id": "scripts/test/deploy.test.ts › npx tsx scripts/admin/pitr-restore.ts --help › an explicit --env is never overridden by an ambient PUBLIC_ORIGIN",
@@ -811,7 +835,9 @@
         "npx tsx scripts/admin/pitr-restore.ts --help"
       ],
       "title": "an explicit --env is never overridden by an ambient PUBLIC_ORIGIN",
-      "kept": true
+      "replaced": "scripts/test/restore.test.ts › with an unreadable live database restore prints what will be lost and refuses without --accept-loss",
+      "package": "N7-01",
+      "reason": "N7-01 deleted the Workers PITR tool scripts/admin/pitr-restore.ts with its tests (ADR 0005 §15.3); the Node restore refuses data loss without an explicit flag, asserted by the replacement test."
     },
     {
       "id": "scripts/test/gen-config.test.ts › production metadata equals expected JSON for https://music.example.org with prefix org.example.music",
@@ -883,7 +909,9 @@
         "scripts/admin/pitr-restore.ts after the POST"
       ],
       "title": "error after an accepted POST exits 1, not 2",
-      "kept": true
+      "replaced": "scripts/test/restore.test.ts › a table missing from TABLE_CLASS aborts the restore before anything is renamed",
+      "package": "N7-01",
+      "reason": "N7-01 deleted the Workers PITR tool scripts/admin/pitr-restore.ts with its tests (ADR 0005 §15.3); the Node restore aborts before changing anything on an error, asserted by the replacement test."
     },
     {
       "id": "scripts/test/secret-scan.test.ts › scripts/test/secret-scan.test.ts › worker/.dev.vars.example, .env.example and docs contain no credential-shaped values",
