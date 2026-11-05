@@ -603,7 +603,8 @@ export class FakeLastfm implements Routable {
     });
 
     const state = this.userState(user)!;
-    const codes = items.map(() => this.itemCodes.shift() ?? 0);
+    const nowSeconds = Math.floor(this.clock.nowMs() / 1000);
+    const codes = items.map((item) => (Number(item.timestamp) > nowSeconds + 300 ? 4 : (this.itemCodes.shift() ?? 0)));
     items.forEach((item, i) => {
       if (codes[i] !== 0) return;
       state.history.push({

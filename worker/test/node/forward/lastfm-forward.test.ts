@@ -11,6 +11,9 @@
 // so every 200 below is a verified signature. Forward rows are queued with
 // N2-05's enqueueForwards / enqueueLove, as live ingress queues them.
 
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { routerTransport } from '@atmusic/atproto/test-support/router-transport';
 import { type FixedClock, fixedClock } from '@atmusic/core/test-support/clock';
 import { seededRandom } from '@atmusic/core/test-support/random';
@@ -18,7 +21,13 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { MemoryRevocations } from '../../../src/app/revocations';
 import type { ForwardOutboxRow } from '../../../src/app/rows';
 import { ensureAccount } from '../../../src/credentials/accounts';
-import { BACKOFF_BASE_MS, LASTFM_EXPIRY_MS, LASTFM_KEY_REJECTED } from '../../../src/forward/forward-outbox';
+import {
+  BACKOFF_BASE_MS,
+  holdLinkRows,
+  LASTFM_EXPIRY_MS,
+  LASTFM_KEY_REJECTED,
+  resumeHeldRows,
+} from '../../../src/forward/forward-outbox';
 import { type ForwardRuntime, KEY_REJECTED_PROBE_MS, runForward } from '../../../src/forward/forwarder';
 import { LASTFM_CAPS, LastfmClient } from '../../../src/forward/lastfm-client';
 import { saveLink } from '../../../src/forward/links';
@@ -198,6 +207,112 @@ describe('Last.fm forwarding', () => {
 
     expect(statesOf(w.rows()).every((s) => s === 'sent')).toBe(true);
     expect(w.rows().every((r) => r.attempts === 1)).toBe(true);
+  });
+
+  it('defers future ListenBrainz forwards until due, preserves receipt timestamps, and relinking cannot release them early', async () => {
+    const w = await world();
+    const { id } = w.linkLastfm(ALICE, 'alice_fm');
+    const receipt = w.clock.nowMs();
+    const dueAt = receipt + 25 * MINUTE;
+    const listenedAt = dueAt + 5 * MINUTE;
+    const item: ForwardItem = {
+      kind: 'scrobble',
+      listenKey: 'deferred-listen-key',
+      payload: {
+        listen: { artist: 'Future Artist', track: 'Future Track', listenedAt: new Date(listenedAt).toISOString() },
+        origin: 'listenbrainz',
+      },
+    };
+    enqueueForwards(w.app.db, { did: ALICE, items: [item], now: receipt, dueAt, random: enqueueRandom });
+    expect(w.rows(ALICE)).toMatchObject([
+      { state: 'queued', due_at: dueAt, created_at_ms: receipt, updated_at_ms: receipt },
+    ]);
+    enqueueForwards(w.app.db, { did: ALICE, items: [item], now: receipt + 1, dueAt, random: enqueueRandom });
+    expect(w.rows(ALICE)).toHaveLength(1);
+    expect((await w.run()).requests).toBe(0);
+    expect(w.lastfm.calls.count({ nsid: 'track.scrobble' })).toBe(0);
+
+    // A revoke/hold/relink cycle must retain the delivery not-before time.
+    holdLinkRows(w.app.db, id, receipt + 2);
+    resumeHeldRows(w.app.db, id, receipt + 3);
+    expect(w.rows(ALICE)[0]).toMatchObject({ state: 'queued', due_at: dueAt, updated_at_ms: receipt + 3 });
+    w.clock.set(new Date(dueAt - 1).toISOString());
+    expect((await w.run()).requests).toBe(0);
+    expect(w.lastfm.calls.count({ nsid: 'track.scrobble' })).toBe(0);
+    w.clock.set(new Date(dueAt).toISOString());
+    expect((await w.run()).requests).toBe(1);
+    expect(w.rows(ALICE)[0]).toMatchObject({ state: 'sent', created_at_ms: receipt, due_at: dueAt });
+    expect(w.lastfm.scrobbles.at(-1)?.codes).toEqual([0]);
+    expect((await w.run()).requests).toBe(0);
+    expect(w.lastfm.calls.count({ nsid: 'track.scrobble' })).toBe(1);
+  });
+
+  it('keeps a deferred forward durable across a composition restart and sends it once at the due boundary', async () => {
+    const clock = fixedClock();
+    const lastfm = new FakeLastfm({ clock, apiKey: API_KEY, secret: SECRET });
+    const secrets = parseSecrets({ ...testSecretsDocument(), lastfm: { apiKey: API_KEY, sharedSecret: SECRET } });
+    const stateDir = mkdtempSync(join(tmpdir(), 'atmusic-forward-restart-'));
+    const appOptions = () => ({
+      clock,
+      secrets,
+      transport: routerTransport({ hosts: { 'lastfm.test': lastfm } }),
+      features: [linksFeature({ revocations: new MemoryRevocations(clock) })],
+      env: { ...UPSTREAM_ENV, STATE_DIRECTORY: stateDir },
+    });
+    let app = await startApp(appOptions());
+    try {
+      ensureAccount({ db: app.db, clock }, { did: ALICE, verifiedHandle: null });
+      const service = (app.composed.app as unknown as { links: LinksService }).links;
+      const sk = lastfm.addSession('restart_user');
+      saveLink(
+        { db: app.db, clock, random: service.forwarding.random, box: service.forwarding.box },
+        { did: ALICE, service: 'lastfm', remoteUser: 'restart_user', credential: sk },
+      );
+      const receipt = clock.nowMs();
+      const dueAt = receipt + 25 * MINUTE;
+      const listenedAt = dueAt + 5 * MINUTE;
+      const item: ForwardItem = {
+        kind: 'scrobble',
+        listenKey: 'restart-deferred-key',
+        payload: {
+          listen: { artist: 'Restart Artist', track: 'Due Later', listenedAt: new Date(listenedAt).toISOString() },
+          origin: 'listenbrainz',
+        },
+      };
+      enqueueForwards(app.db, { did: ALICE, items: [item], now: receipt, dueAt, random: seededRandom(71) });
+      expect(app.db.one('SELECT state, due_at, created_at_ms, updated_at_ms FROM forward_outbox')).toEqual({
+        state: 'queued',
+        due_at: dueAt,
+        created_at_ms: receipt,
+        updated_at_ms: receipt,
+      });
+      await app.close();
+
+      clock.set(new Date(dueAt - 1).toISOString());
+      app = await startApp(appOptions());
+      const restartedService = (app.composed.app as unknown as { links: LinksService }).links;
+      expect(app.db.one('SELECT state, due_at, created_at_ms, updated_at_ms FROM forward_outbox')).toEqual({
+        state: 'queued',
+        due_at: dueAt,
+        created_at_ms: receipt,
+        updated_at_ms: receipt,
+      });
+      expect((await runForward(restartedService.forwarding)).requests).toBe(0);
+      expect(lastfm.calls.count({ nsid: 'track.scrobble' })).toBe(0);
+      clock.set(new Date(dueAt).toISOString());
+      expect((await runForward(restartedService.forwarding)).requests).toBe(1);
+      expect(app.db.one('SELECT state, due_at, created_at_ms FROM forward_outbox')).toEqual({
+        state: 'sent',
+        due_at: dueAt,
+        created_at_ms: receipt,
+      });
+      expect(lastfm.scrobbles.at(-1)?.codes).toEqual([0]);
+      expect((await runForward(restartedService.forwarding)).requests).toBe(0);
+      expect(lastfm.calls.count({ nsid: 'track.scrobble' })).toBe(1);
+    } finally {
+      await app.close();
+      rmSync(stateDir, { recursive: true, force: true });
+    }
   });
 
   it('a run handed a stale now (a tick timestamp seconds old) still keeps Last.fm requests at least 1 s apart, and the shared bucket never trusts a stale caller time', async () => {
