@@ -36,6 +36,7 @@ import {
   type NodeGateRequirement,
   type NodeGateSpec,
 } from './node-live-gate.ts';
+import { nodeOauthObservations } from './node-live-support.ts';
 import { launchBrowser, OAUTH_ENV, signInChecks, signInTimeoutMs } from './workers_oauth_check.ts';
 
 export const NODE_OAUTH_ENV = {
@@ -115,6 +116,31 @@ function differentPdsProblem(env: Readonly<Record<string, string | undefined>>):
 type JsonObject = Record<string, unknown>;
 type ApiResponse = { status: number; json: unknown };
 type Session = { did: string; csrf: string };
+type CleanupSession = { did?: string; csrf: string };
+
+export function validatedCallbackSession(
+  response: ApiResponse,
+  which: 'A' | 'B',
+  expectedDid: string,
+  onCallbackSession: (session: CleanupSession) => void,
+): Session {
+  const body = object(response.json);
+  // A nonempty CSRF token is required before the caller can safely attempt
+  // sign-out, even if the response status or identity validation fails.
+  if (typeof body?.csrfToken === 'string' && body.csrfToken.length > 0) {
+    onCallbackSession({ did: typeof body.did === 'string' ? body.did : undefined, csrf: body.csrfToken });
+  }
+  if (
+    response.status !== 200 ||
+    typeof body?.did !== 'string' ||
+    typeof body.csrfToken !== 'string' ||
+    body.csrfToken.length === 0
+  ) {
+    throw new Error(`PDS ${which} sign-in returned no active app session`);
+  }
+  if (body.did !== expectedDid) throw new Error(`PDS ${which} sign-in resolved to a different DID`);
+  return { did: body.did, csrf: body.csrfToken };
+}
 type CreatedRecord = { uri: string; cid: string; rev: string };
 
 const object = (value: unknown): JsonObject | null =>
@@ -397,6 +423,7 @@ async function signIn(
   which: 'A' | 'B',
   expectedIssuerOrigin: string,
   timeoutMs: number,
+  onCallbackSession: (session: CleanupSession) => void,
 ): Promise<Session> {
   const handleName = which === 'A' ? OAUTH_ENV.handleA : OAUTH_ENV.handleB;
   const passwordName = which === 'A' ? OAUTH_ENV.passwordA : OAUTH_ENV.passwordB;
@@ -440,13 +467,8 @@ async function signIn(
   if (new URL(page.url()).origin !== origin) throw new Error(`PDS ${which} authorization did not return to the app`);
 
   const response = await browserRequest(page, '/api/v1/auth/session', 'GET');
-  const body = object(response.json);
-  if (response.status !== 200 || typeof body?.did !== 'string' || typeof body.csrfToken !== 'string') {
-    throw new Error(`PDS ${which} sign-in returned no active app session`);
-  }
   const expectedDid = context.get(didName);
-  if (body.did !== expectedDid) throw new Error(`PDS ${which} sign-in resolved to a different DID`);
-  return { did: body.did, csrf: body.csrfToken };
+  return validatedCallbackSession(response, which, expectedDid, onCallbackSession);
 }
 
 async function socketObserve(
@@ -1039,6 +1061,7 @@ export const spec: NodeGateSpec = {
   script: 'scripts/live/node_oauth_check.ts',
   requirements,
   extraChecks,
+  observations: nodeOauthObservations(),
   async run(context) {
     await validateClientMetadata(context);
     const identities = [
@@ -1088,10 +1111,18 @@ export const spec: NodeGateSpec = {
         let appSignOutCompleted = false;
         let signOutDeadline: Deadline | null = null;
         let captured = false;
-        let activeSession: Session | null = null;
+        const sessionForCleanup: { value: CleanupSession | null } = { value: null };
         try {
-          const session = await signIn(context, page, identity.which, authorizationOrigins[index]!, timeoutMs);
-          activeSession = session;
+          const session = await signIn(
+            context,
+            page,
+            identity.which,
+            authorizationOrigins[index]!,
+            timeoutMs,
+            (session) => {
+              sessionForCleanup.value = session;
+            },
+          );
           const capture = await socketObserve(context, session.did, 'capture');
           if (
             capture.status !== 'captured' ||
@@ -1156,6 +1187,7 @@ export const spec: NodeGateSpec = {
             afterSignOut.refreshRejected !== true ||
             afterSignOut.refreshError !== 'invalid_grant'
           ) {
+            context.cleanup(`${identity.did}: session removal or refresh-token revocation remains unverified`);
             throw new Error(`upstream refresh-token revocation was not proven for PDS ${identity.which}`);
           }
           signIns.push({
@@ -1180,25 +1212,63 @@ export const spec: NodeGateSpec = {
             },
           });
         } finally {
-          if (activeSession !== null && !appSignOutCompleted) {
+          if (sessionForCleanup.value !== null && !appSignOutCompleted) {
+            const cleanupSession = sessionForCleanup.value;
             signOutDeadline ??= createDeadline(OAUTH_LIVE_BUDGETS.signOutMs);
+            if (captured && cleanupSession.did !== undefined) {
+              try {
+                const prepared = await socketObserve(
+                  context,
+                  cleanupSession.did,
+                  'prepare_sign_out',
+                  undefined,
+                  signOutDeadline,
+                );
+                if (
+                  prepared.status !== 'prepared' ||
+                  prepared.refreshTokenPresent !== true ||
+                  prepared.sessionVersionStable !== true
+                ) {
+                  context.cleanup(`${identity.did}: host sign-out preparation incomplete; app logout will still run`);
+                }
+              } catch {
+                context.cleanup(`${identity.did}: host sign-out preparation failed; app logout will still run`);
+              }
+            }
             try {
-              if (captured)
-                await socketObserve(context, activeSession.did, 'prepare_sign_out', undefined, signOutDeadline);
               const logout = await browserRequest(
                 page,
                 '/api/v1/auth/logout',
                 'POST',
-                activeSession.csrf,
+                cleanupSession.csrf,
                 {},
                 undefined,
                 signOutDeadline.timeoutMs(30_000),
               );
               appSignOutCompleted = logout.status === 204;
-              if (captured && appSignOutCompleted)
-                await socketObserve(context, activeSession.did, 'after_sign_out', undefined, signOutDeadline);
             } catch {
               appSignOutCompleted = false;
+            }
+            if (captured && appSignOutCompleted && cleanupSession.did !== undefined) {
+              try {
+                const observed = await socketObserve(
+                  context,
+                  cleanupSession.did,
+                  'after_sign_out',
+                  undefined,
+                  signOutDeadline,
+                );
+                if (
+                  observed.status !== 'revoked' ||
+                  observed.localSessionAbsent !== true ||
+                  observed.refreshRejected !== true ||
+                  observed.refreshError !== 'invalid_grant'
+                ) {
+                  context.cleanup(`${identity.did}: session removal or refresh-token revocation remains unverified`);
+                }
+              } catch {
+                context.cleanup(`${identity.did}: host revocation verification failed after app logout`);
+              }
             }
             if (!appSignOutCompleted) {
               context.cleanup(

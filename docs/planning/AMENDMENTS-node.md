@@ -457,7 +457,6 @@ Places where a package's tree differs from its `files` entry in [node-waves.json
 
 **Requested owner amendment:** in the N1-02 `tests` entry, replace the first title with the title in the tree. N7-01, which deletes index-do.ts, then drops the re-export half of the second test (and renames it).
 
-
 ## N6-02 dev-env OAuth preflight classification
 
 The dev-env OAuth preflight is an advisory fixture check, not the production
@@ -466,10 +465,59 @@ emits schema-v3 `runtime: "node"`, `fixtureOnly: true`, `gate: "devenvOauth"`,
 and `result: "blocked"`; it never enables verifier PASS. Its current inputs
 are a local PDS URL and a bare HTTPS test origin. The client ID is derived from
 the origin's client-metadata route and the BFF uses `private_key_jwt`, so no
-client secret is requested. The offline test
-`worker/test/node/bff/devenv-oauth.test.ts` exercises the confidential client
-against the actual `@atproto/dev-env` provider, including exchange,
-four-collection grant, CRUD, session supersession, and provider token-store
-revocation. This fixture test is not run by the preflight driver and is not
-evidence for the production `oauth` gate. Live OAuth evidence from two
-independently operated PDSs remains outstanding, so this does not close N6-02.
+client secret is requested. Even with valid inputs, the driver remains blocked
+until an offline interop harness records accepted exchange, four-collection
+grant, CRUD, supersession, and upstream-revocation observations. Those fixture
+observations do not satisfy live OAuth evidence from two independently
+operated PDSs or close N6-02.
+
+The offline regression `worker/test/node/bff/devenv-oauth.test.ts` exercises the
+confidential client against the actual `@atproto/dev-env` provider, including
+exchange, four-collection grant, CRUD, session supersession, and provider
+token-store revocation. This fixture test is not run by the preflight driver,
+does not exercise the provider browser consent UI, and is not evidence for the
+production `oauth` gate.
+
+### N5-02 additive delete-target index (migration 4)
+
+The operations-aware 100,000-listen benchmark retains its bounded 256-operation
+fixture (250 succeeded creates and six deletes). Its pre-index plans probed
+`operations_did_state (did=?)` for each visibility check. Migration 4 adds the
+partial `operations_scrobble_delete_target(did,rkey)` index for
+`kind='scrobble.delete'`, without changing public reads, API contracts, delete
+state/CID semantics, applied migrations 1–3, or the compatibility floor of 2.
+Post-index plans and timings are recorded in
+[the protocol-read report](../benchmarks/node-protocol-reads.md). These are
+uncontrolled synthetic observations, not evidence of lifetime scaling or a
+measurement of migration cost; no live services are involved.
+
+Saved schema-v2 receipts are
+`docs/benchmarks/receipts/n5-02-protocol-reads-{pre,post}-index.json`.
+The saved pre-index receipt was reused, not rerun. The post-index run kept
+99,995 visible / 5 hidden listens and ten samples per read. Its p50/p95 (ms)
+were 506.28/733.56 for uncached top tracks, 256.31/355.51 for recent page 500,
+541.11/752.16 for ListenBrainz all_time, and 109.21/354.59 for activity year.
+The top-track and recent-page report-only p95 budgets remain unmet.
+All seven captured visibility probes naturally use the new `(did,rkey)` index;
+no covering extension or `INDEXED BY` was needed. Read-model plan pins and their
+renderer were updated with the measured target lookup; cache-hit statement
+budgets stay 3 (`all`) and 4 (windowed). Its current Node receipt is
+`docs/benchmarks/receipts/n5-02-read-models-post-index.json`; the older
+`read_models.json` remains historical Rust evidence.
+
+Re-render the committed reports without measuring again:
+
+```sh
+npx tsx scripts/benchmark-protocol-reads.ts --render docs/benchmarks/receipts/n5-02-protocol-reads-post-index.json --baseline docs/benchmarks/receipts/n5-02-protocol-reads-pre-index.json
+npx tsx scripts/benchmark-read-models.ts --render docs/benchmarks/receipts/n5-02-read-models-post-index.json
+```
+
+Verification: 39 focused migration/index/visibility/renderer tests initially
+passed; the broader storage/read suites passed 101 tests, the Node protocol
+read and HTTP query-plan/read-model acceptance suites passed 28, and the
+updated read-model bench passed all 6 tests. The focused post-index protocol
+bench passed both tests. The final renderer suites passed 10 tests and
+`npx tsc -b --pretty false` passed. The index-drop/restore regression compares
+serialized feed, following-feed, history and lookup response bodies plus
+statistics across queued, running, blocked, failed, cancelled and succeeded
+matching/stale/NULL-CID deletes. Production read SQL and API code are unchanged.
