@@ -43,7 +43,7 @@ export function runDevenvOauthCheck(env: Readonly<Record<string, string | undefi
     reason:
       missing.length || invalid.length
         ? `Invalid or missing prerequisites: ${[...missing, ...invalid].join(', ')}`
-        : 'Confidential-client OAuth exchange and upstream revocation are not implemented; no endpoints were contacted.',
+        : 'This preflight does not run the local interop fixture or contact endpoints; it remains blocked and advisory.',
   };
   process.stdout.write(`${JSON.stringify(evidence)}\n`);
   return 2;

@@ -1,7 +1,11 @@
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import { access, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { createRequire } from 'node:module';
-import { resolve } from 'node:path';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { systemClock } from '@atmusic/core/deps';
+import { buildScrobbleRecord } from '@atmusic/core/scrobble';
 import type { Browser, Page } from '@playwright/test';
 import { expect, test, vi } from 'vitest';
 import { ENV } from '../live/live-gate.ts';
@@ -15,6 +19,7 @@ import {
   spec,
 } from '../live/node_ingest_check.ts';
 import { NODE_ENV, type NodeGateContext, type NodeGateIO, runNodeGate } from '../live/node-live-gate.ts';
+import { startOwnedChromium } from '../live/owned-chromium.ts';
 import { OAUTH_ENV } from '../live/workers_oauth_check.ts';
 
 const REPO = resolve(fileURLToPath(new URL('../..', import.meta.url)));
@@ -158,6 +163,9 @@ function mockDependencies(
     stallStatus?: boolean;
     malformedAppAck?: boolean;
     wrongProofRecord?: boolean;
+    appProofMismatch?: boolean;
+    contextCloseMode?: 'reject' | 'hang';
+    browserCloseMode?: 'reject' | 'hang';
   } = {},
 ) {
   const recordStates = new Map<string, string>();
@@ -167,6 +175,7 @@ function mockDependencies(
   let appDeletePosts = 0;
   let pdsDeletePosts = 0;
   let pdsRecord: object | null = null;
+  let appRecord: object | null = null;
   const browserCalls = { launched: 0, closed: 0, contextClosed: 0 };
   const browserRequests: Array<{
     path: string;
@@ -214,6 +223,8 @@ function mockDependencies(
           return { status: 200, json: { did: DID_A, csrfToken: 'csrf-session-value' } };
         if (path === '/api/v1/scrobbles' && method === 'POST') {
           appCreatePosts++;
+          const built = buildScrobbleRecord(body, 'org.atproto.music', systemClock);
+          appRecord = built.ok ? built.record : null;
           if (options.loseAppCreateResponse && appCreatePosts === 1) throw new Error('response lost after app commit');
           if (options.malformedAppAck && appCreatePosts === 1) return { status: 202, json: { operation: { id: '' } } };
           return { status: 202, json: { operation: { id: 'local-create' } } };
@@ -266,12 +277,16 @@ function mockDependencies(
     newPage: async () => page,
     close: async () => {
       browserCalls.contextClosed++;
+      if (options.contextCloseMode === 'reject') throw new Error('context close failed');
+      if (options.contextCloseMode === 'hang') return new Promise<void>(() => {});
     },
   };
   const browser = {
     newContext: async () => browserContext,
     close: async () => {
       browserCalls.closed++;
+      if (options.browserCloseMode === 'reject') throw new Error('browser close failed');
+      if (options.browserCloseMode === 'hang') return new Promise<void>(() => {});
     },
   };
   const deps: IngestDependencies = {
@@ -319,7 +334,13 @@ function mockDependencies(
     verifyRecordAt: vi.fn(async (did) => ({
       state: 'present' as const,
       cid: did === DID_A ? CID_A : options.wrongPdsCid ? CID_A : CID_B,
-      ...(did === DID_B ? { record: options.wrongProofRecord ? { artist: 'different record' } : pdsRecord } : {}),
+      ...(did === DID_A
+        ? {
+            record: options.appProofMismatch ? { ...appRecord, artist: 'different app payload' } : appRecord,
+          }
+        : {
+            record: options.wrongProofRecord ? { artist: 'different record' } : pdsRecord,
+          }),
       rev: REV_PRESENT,
       commitCid: CID_A,
       pds: did === DID_A ? goodEnv[ENV.pdsA]! : goodEnv[ENV.pdsB]!,
@@ -516,6 +537,48 @@ test('lost app acknowledgement replays the exact idempotency key and payload for
   expect(result.subjects[0]).toMatchObject({ did: DID_A, uri: URI_A, unresolved: false });
 });
 
+test.each([
+  ['normal app publish', {}],
+  ['recovered app publish', { loseAppCreateResponse: true }],
+] as const)('%s rejects wrong content with a matching CID and never deletes it', async (_label, options) => {
+  const { deps, deletePosts } = mockDependencies({ ...options, appProofMismatch: true });
+  const failures: string[] = [];
+  const cleanup: string[] = [];
+  const result = await runNodeIngest(makeContext(failures, cleanup), deps);
+
+  expect(failures).toContain(
+    `Node ingest failed during ${'loseAppCreateResponse' in options ? 'app scrobble submission' : 'app scrobble indexing'}`,
+  );
+  expect(deps.verifyRecordAt).toHaveBeenCalledWith(
+    DID_A,
+    'org.atproto.music.scrobble',
+    expect.any(String),
+    expect.any(Number),
+  );
+  expect(deletePosts().appDeletePosts).toBe(0);
+  expect(result.subjects[0]).toMatchObject({ did: DID_A, uri: URI_A, unresolved: true });
+  expect(cleanup.some((line) => line.includes(`${URI_A} LEFT BEHIND`))).toBe(true);
+});
+
+test.each([
+  ['normal app publish', {}, []],
+  ['recovered app publish', { loseAppCreateResponse: true }, ['Node ingest failed during app scrobble submission']],
+] as const)('%s verifies the BFF-normalized record and permits cleanup', async (_label, options, expectedFailures) => {
+  const { deps, deletePosts } = mockDependencies(options);
+  const failures: string[] = [];
+  const result = await runNodeIngest(makeContext(failures), deps);
+
+  expect(failures).toEqual(expectedFailures);
+  expect(deps.verifyRecordAt).toHaveBeenCalledWith(
+    DID_A,
+    'org.atproto.music.scrobble',
+    expect.any(String),
+    expect.any(Number),
+  );
+  expect(deletePosts().appDeletePosts).toBe(1);
+  expect(result.subjects[0]).toMatchObject({ did: DID_A, uri: URI_A, unresolved: false });
+});
+
 test('malformed app acknowledgement is recovered through the original idempotency key', async () => {
   const { deps, browserRequests } = mockDependencies({ malformedAppAck: true });
   const failures: string[] = [];
@@ -672,14 +735,189 @@ test('stalled browser response and body consumption are bounded by the shared to
 test('a browser launch resolving after its phase deadline is closed', async () => {
   const { deps, browserCalls } = mockDependencies();
   const startBrowser = deps.browser;
-  deps.browser = async () => {
+  deps.browser = async (timeoutMs) => {
     await new Promise((resolve) => setTimeout(resolve, 850));
-    return startBrowser();
+    return startBrowser(timeoutMs);
   };
   const failures: string[] = [];
   await runNodeIngest(makeContext(failures, [], { ...goodEnv, [NODE_INGEST_ENV.timeoutSeconds]: '1' }), deps);
   expect(failures).toContain('Node ingest failed during PDS identity checks');
   await vi.waitFor(() => expect(browserCalls.closed).toBe(1), { timeout: 1_000 });
+});
+
+test('a forever-pending browser launch is terminated before evidence can return', async () => {
+  const { deps } = mockDependencies();
+  let fixturePid: number | undefined;
+  let fixtureClosed = false;
+  deps.browser = (timeoutMs) => {
+    const fixture = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+    fixturePid = fixture.pid;
+    return new Promise((_resolve, reject) => {
+      const timeout = setTimeout(() => fixture.kill('SIGTERM'), timeoutMs);
+      fixture.once('close', () => {
+        fixtureClosed = true;
+        clearTimeout(timeout);
+        reject(new Error('simulated Playwright launch timeout'));
+      });
+    });
+  };
+  const failures: string[] = [];
+  const cleanup: string[] = [];
+  const started = performance.now();
+  await runNodeIngest(makeContext(failures, cleanup, { ...goodEnv, [NODE_INGEST_ENV.timeoutSeconds]: '1' }), deps);
+  const emittedFailures = [...failures];
+  const emittedCleanup = [...cleanup];
+  await new Promise((resolve) => setTimeout(resolve, 30));
+
+  expect(performance.now() - started).toBeLessThan(1_300);
+  expect(fixturePid).toBeDefined();
+  expect(fixtureClosed).toBe(true);
+  expect(failures).toEqual(emittedFailures);
+  expect(cleanup).toEqual(emittedCleanup);
+  expect(failures).toContain('Node ingest failed during PDS identity checks');
+});
+
+test('Node ingest reaps the actual owned startup process before returning timeout evidence', async () => {
+  const { deps } = mockDependencies();
+  const fixtureDir = await mkdtemp(join(tmpdir(), 'atmusic-ingest-test-'));
+  const pidFile = join(fixtureDir, 'pid');
+  deps.startBrowser = (launchDeadlineAt, cleanupDeadlineAt) =>
+    startOwnedChromium({
+      interactive: false,
+      launchDeadlineAt,
+      cleanupDeadlineAt,
+      executablePath: process.execPath,
+      args: () => [
+        '-e',
+        `require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setInterval(() => {}, 1000)`,
+      ],
+    });
+  const failures: string[] = [];
+  const cleanup: string[] = [];
+  const startedAt = performance.now();
+  await runNodeIngest(makeContext(failures, cleanup, { ...goodEnv, [NODE_INGEST_ENV.timeoutSeconds]: '1' }), deps);
+  const pid = Number(await readFile(pidFile, 'utf8'));
+  const emittedFailures = [...failures];
+  const emittedCleanup = [...cleanup];
+
+  expect(performance.now() - startedAt).toBeLessThan(1_300);
+  expect(() => process.kill(pid, 0)).toThrow();
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  expect(failures).toEqual(emittedFailures);
+  expect(cleanup).toEqual(emittedCleanup);
+  expect(failures).toContain('Node ingest failed during PDS identity checks');
+  await rm(fixtureDir, { recursive: true, force: true });
+});
+
+test('a stalled actual owned Chromium is killed within the ingest teardown reserve', async () => {
+  const { deps } = mockDependencies();
+  let owned: ReturnType<typeof startOwnedChromium> | undefined;
+  deps.startBrowser = (launchDeadlineAt, cleanupDeadlineAt) => {
+    owned = startOwnedChromium({ interactive: false, launchDeadlineAt, cleanupDeadlineAt });
+    return {
+      ...owned,
+      ready: owned.ready.then((browser) => {
+        if (owned?.pid !== undefined) process.kill(-owned.pid, 'SIGSTOP');
+        return browser;
+      }),
+    };
+  };
+  const failures: string[] = [];
+  const cleanup: string[] = [];
+  const startedAt = performance.now();
+  await runNodeIngest(makeContext(failures, cleanup, { ...goodEnv, [NODE_INGEST_ENV.timeoutSeconds]: '3' }), deps);
+  const elapsedMs = performance.now() - startedAt;
+
+  expect(owned).toBeDefined();
+  expect(elapsedMs).toBeLessThan(3_100);
+  expect(failures).not.toContain('owned browser process termination was not confirmed during teardown');
+  expect(cleanup).not.toContain('owned browser process termination was not confirmed; inspect the runner process');
+  expect(owned!.pid).toBeDefined();
+  expect(() => process.kill(owned!.pid!, 0)).toThrow();
+  await expect(access(owned!.root)).rejects.toMatchObject({ code: 'ENOENT' });
+});
+
+test.each([1_100, 1_500])('browser startup scheduled at %d ms is canceled at the launch deadline', async (launchMs) => {
+  const { deps, browserCalls } = mockDependencies();
+  const startBrowser = deps.browser;
+  let fixtureClosed = false;
+  deps.browser = (timeoutMs) => {
+    const fixture = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+    return new Promise((resolve, reject) => {
+      const finishTimer = setTimeout(() => startBrowser(timeoutMs).then(resolve, reject), launchMs);
+      const timeout = setTimeout(() => fixture.kill('SIGTERM'), timeoutMs);
+      fixture.once('close', () => {
+        fixtureClosed = true;
+        clearTimeout(finishTimer);
+        clearTimeout(timeout);
+        reject(new Error('simulated Playwright launch timeout'));
+      });
+    });
+  };
+  const failures: string[] = [];
+  const cleanup: string[] = [];
+  const started = performance.now();
+  await runNodeIngest(makeContext(failures, cleanup, { ...goodEnv, [NODE_INGEST_ENV.timeoutSeconds]: '1' }), deps);
+  const elapsedMs = performance.now() - started;
+  const emittedFailures = [...failures];
+  const emittedCleanup = [...cleanup];
+  await new Promise((resolve) => setTimeout(resolve, launchMs + 20));
+
+  expect(elapsedMs).toBeLessThan(1_100);
+  expect(fixtureClosed).toBe(true);
+  expect(browserCalls.launched).toBe(0);
+  expect(failures).toEqual(emittedFailures);
+  expect(cleanup).toEqual(emittedCleanup);
+  expect(failures).toContain('Node ingest failed during PDS identity checks');
+});
+
+test('a rejected browser launch remains bounded and does not claim a discarded context', async () => {
+  const { deps, browserCalls } = mockDependencies();
+  deps.browser = async () => {
+    throw new Error('launch rejected');
+  };
+  const failures: string[] = [];
+  const cleanup: string[] = [];
+  await runNodeIngest(makeContext(failures, cleanup), deps);
+  expect(failures).toContain('Node ingest failed during PDS identity checks');
+  expect(browserCalls.contextClosed).toBe(0);
+  expect(cleanup).not.toContain(
+    `${DID_A}: browser context discarded; no sign-out or upstream revocation claim was made`,
+  );
+});
+
+test.each(['reject', 'hang'] as const)(
+  'context close %s leaves actionable evidence within the total deadline',
+  async (mode) => {
+    const { deps } = mockDependencies({ contextCloseMode: mode });
+    const failures: string[] = [];
+    const cleanup: string[] = [];
+    const started = performance.now();
+    await runNodeIngest(makeContext(failures, cleanup, { ...goodEnv, [NODE_INGEST_ENV.timeoutSeconds]: '1' }), deps);
+    expect(performance.now() - started).toBeLessThan(1_300);
+    expect(failures).toContain('browser context close failed during teardown');
+    expect(cleanup).toContain(
+      `${DID_A}: browser context closure was not confirmed; inspect the runner process and close any remaining session`,
+    );
+    expect(cleanup).not.toContain(
+      `${DID_A}: browser context discarded; no sign-out or upstream revocation claim was made`,
+    );
+  },
+);
+
+test('a late browser with a hanging close cannot extend the absolute ingest deadline', async () => {
+  const { deps } = mockDependencies({ browserCloseMode: 'hang' });
+  const startBrowser = deps.browser;
+  deps.browser = async (timeoutMs) => {
+    await new Promise((resolve) => setTimeout(resolve, 850));
+    return startBrowser(timeoutMs);
+  };
+  const failures: string[] = [];
+  const cleanup: string[] = [];
+  const started = performance.now();
+  await runNodeIngest(makeContext(failures, cleanup, { ...goodEnv, [NODE_INGEST_ENV.timeoutSeconds]: '1' }), deps);
+  expect(performance.now() - started).toBeLessThan(1_300);
+  expect(cleanup).toContain('late browser launch unresolved; inspect the runner process for a browser left open');
 });
 
 test('cleanup failure marks the URI left behind and fails the gate', async () => {

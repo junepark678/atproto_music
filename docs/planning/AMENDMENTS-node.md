@@ -466,8 +466,10 @@ emits schema-v3 `runtime: "node"`, `fixtureOnly: true`, `gate: "devenvOauth"`,
 and `result: "blocked"`; it never enables verifier PASS. Its current inputs
 are a local PDS URL and a bare HTTPS test origin. The client ID is derived from
 the origin's client-metadata route and the BFF uses `private_key_jwt`, so no
-client secret is requested. Even with valid inputs, the driver remains blocked
-until an offline interop harness records accepted exchange, four-collection
-grant, CRUD, supersession, and upstream-revocation observations. Those fixture
-observations do not satisfy live OAuth evidence from two independently
-operated PDSs or close N6-02.
+client secret is requested. The offline test
+`worker/test/node/bff/devenv-oauth.test.ts` exercises the confidential client
+against the actual `@atproto/dev-env` provider, including exchange,
+four-collection grant, CRUD, session supersession, and provider token-store
+revocation. This fixture test is not run by the preflight driver and is not
+evidence for the production `oauth` gate. Live OAuth evidence from two
+independently operated PDSs remains outstanding, so this does not close N6-02.

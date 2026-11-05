@@ -71,6 +71,8 @@ const DIGEST_RECORDS: Readonly<Record<string, 'manifest' | 'labelled'>> = {
   'docs/verification/backend-production-inputs.json': 'manifest',
   'docs/verification/backend.md': 'labelled',
   'docs/verification/live-evidence.json': 'labelled',
+  'docs/verification/lexicon-publication/README.md': 'labelled',
+  'docs/verification/lexicon-publication/manifest.json': 'labelled',
 };
 const DIGEST_LABEL = /sha-?256|artifact/i;
 const MANIFEST_LINE = /^\s*"[A-Za-z0-9_./-]+\.[A-Za-z]+": "[0-9a-f]{64}",?$/;
