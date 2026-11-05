@@ -26,6 +26,14 @@ export interface Deadline {
   timeout(ms: number): AbortSignal;
 }
 
+/** An in-flight operation could not be stopped, so starting recovery may be unsafe. */
+export class UnsafeRecoveryError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'UnsafeRecoveryError';
+  }
+}
+
 /** A phase deadline that can only shorten nested request timers. */
 export function createDeadline(timeoutMs: number, now: () => number = () => performance.now()): Deadline {
   const expiresAt = now() + timeoutMs;
@@ -43,7 +51,7 @@ export function createDeadline(timeoutMs: number, now: () => number = () => perf
     timeoutMs(maxMs) {
       const remaining = remainingMs();
       if (remaining <= 0) throw new Error('OAuth live phase deadline exceeded');
-      return Math.max(1, Math.min(maxMs, remaining));
+      return Math.max(1, Math.min(maxMs, Math.ceil(remaining)));
     },
     timeout(ms) {
       const remaining = remainingMs();
@@ -53,7 +61,7 @@ export function createDeadline(timeoutMs: number, now: () => number = () => perf
   };
 }
 
-/** Run the acceptance phase, then always run recovery against its own fresh budget. */
+/** Run acceptance and, when safe, recovery against a fresh cleanup budget. */
 export async function withBoundedRecovery<T>(
   run: (deadline: Deadline) => Promise<T>,
   recover: (deadline: Deadline, runError: unknown | null) => Promise<void>,
@@ -63,16 +71,24 @@ export async function withBoundedRecovery<T>(
   let result: T;
   let runError: unknown | null = null;
   try {
-    result = await run(createDeadline(budgets.appPhaseMs, now));
+    const runDeadline = createDeadline(budgets.appPhaseMs, now);
+    result = await run(runDeadline);
+    // A callback may resolve after its last awaited operation and otherwise
+    // make a late result look like a successful acceptance phase.
+    runDeadline.assertActive();
   } catch (error) {
     runError = error;
     result = undefined as T;
   }
   let recoveryError: unknown | null = null;
-  try {
-    await recover(createDeadline(budgets.appCleanupMs, now), runError);
-  } catch (error) {
-    recoveryError = error;
+  if (!(runError instanceof UnsafeRecoveryError)) {
+    const recoveryDeadline = createDeadline(budgets.appCleanupMs, now);
+    try {
+      await recover(recoveryDeadline, runError);
+      recoveryDeadline.assertActive();
+    } catch (error) {
+      recoveryError = error;
+    }
   }
   if (runError !== null) throw runError;
   if (recoveryError !== null) throw recoveryError;
