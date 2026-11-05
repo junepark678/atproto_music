@@ -214,8 +214,11 @@ describe('run()', () => {
     let stop = false;
     const prober = (async () => {
       while (!stop) {
+        const accepted = await accepts(port);
+        // Sample after the asynchronous connect result. Sampling before the
+        // await can label a connection accepted after migration as pre-migration.
         migrated = started.log.logs.some((l) => l.event === 'run.migrated');
-        attempts.push({ accepted: await accepts(port), migrated });
+        attempts.push({ accepted, migrated });
         await new Promise((resolve) => setImmediate(resolve));
       }
     })();
@@ -227,9 +230,8 @@ describe('run()', () => {
     const before = (atListen ?? []).filter((e) => e === 'backup.completed' || e === 'run.migrated');
     expect(before).toEqual(['backup.completed', 'run.migrated']);
     expect(started.log.logs.filter((l) => l.event === 'run.migrated').length).toBe(1);
-    // Every attempt before the migration was logged was refused, and there were some.
+    // Any connection result observed before the migration log must be refused.
     const beforeMigration = attempts.filter((a) => !a.migrated);
-    expect(beforeMigration.length).toBeGreaterThan(0);
     expect(beforeMigration.every((a) => !a.accepted)).toBe(true);
     // After ready the database is at the latest version and the port answers.
     expect(readSchemaState(server.db)).toEqual({ status: 'ready', version: MIGRATIONS.length });

@@ -504,10 +504,9 @@ export async function checkIdentity(
   });
 }
 
-/** A fresh subrequest meter for one identity-sweep slice (Free: the plan's slice limit). */
+/** A fresh subrequest meter for one identity-sweep slice. */
 function identityMeter(m: Pick<ModuleDeps, 'config'>): SubrequestMeter {
   const budget = m.config.budget;
-  if (m.config.plan === 'free') return new SubrequestMeter(budget.subrequestsPerSlice);
   return new SubrequestMeter(
     Math.max(budget.subrequestsPerSlice, IDENTITY_SWEEP_BATCH * (IDENTITY_RESOLVE_COST + HANDLE_RECHECK_COST)),
   );

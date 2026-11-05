@@ -46,8 +46,6 @@ export const HARNESS_ENV: Readonly<EnvVars & Pick<EnvSecrets, 'CURSOR_KEY'>> = O
   JETSTREAM_URLS: 'wss://jetstream.example.test',
   JETSTREAM_LOOKBACK_HOURS: '24',
   RELAY_URL: 'https://relay.example.test',
-  PLAN: 'paid',
-  DO_LOCATION_HINT: '',
   CURSOR_KEY: '000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f',
 });
 

@@ -23,6 +23,8 @@ export interface PanoLastfmOptions {
 
 export interface PanoLastfmResult {
   username: string;
+  /** Kept in memory for authenticated read acceptance; never serialize this result. */
+  sessionKey: string;
   scrobble: unknown;
   nowPlaying: unknown;
   recentTracks: unknown;
@@ -185,7 +187,6 @@ export async function runPanoLastfm(options: PanoLastfmOptions): Promise<PanoLas
   // client request shape and verifies the server resolves the session owner.
   const read = new URLSearchParams({
     method: 'user.getRecentTracks',
-    user: session.name,
     sk: session.key,
     api_key: PANO_API_KEY,
     format: 'json',
@@ -211,7 +212,7 @@ export async function runPanoLastfm(options: PanoLastfmOptions): Promise<PanoLas
   ) {
     throw new Error('Pano user.getRecentTracks returned an invalid response');
   }
-  return { username: session.name, scrobble, nowPlaying, recentTracks };
+  return { username: session.name, sessionKey: session.key, scrobble, nowPlaying, recentTracks };
 }
 
 if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {

@@ -222,8 +222,14 @@ function invalidCursor(): ApiError {
   return new ApiError('invalid_cursor', 'ignored-listens cursor is invalid');
 }
 
-function macInput(did: string, payload: string): Uint8Array {
-  return encoder.encode(`${CURSOR_LABEL}${did}\0${payload}`);
+function ownedBytes(bytes: Uint8Array): ArrayBuffer {
+  const copy = new ArrayBuffer(bytes.byteLength);
+  new Uint8Array(copy).set(bytes);
+  return copy;
+}
+
+function macInput(did: string, payload: string): ArrayBuffer {
+  return ownedBytes(encoder.encode(`${CURSOR_LABEL}${did}\0${payload}`));
 }
 
 /** The signed cursor after `position`, bound to `did`. */
@@ -245,7 +251,7 @@ export async function decodeIgnoredCursor(key: CryptoKey, did: string, token: st
   if (Buffer.from(payload, 'utf8').toString('base64url') !== rawPayload || mac.toString('base64url') !== rawMac) {
     throw invalidCursor();
   }
-  if (mac.length !== 32 || !(await crypto.subtle.verify('HMAC', key, mac, macInput(did, payload)))) {
+  if (mac.length !== 32 || !(await crypto.subtle.verify('HMAC', key, ownedBytes(mac), macInput(did, payload)))) {
     throw invalidCursor();
   }
   let parsed: unknown;

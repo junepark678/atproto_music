@@ -1,3 +1,4 @@
+import type { Did } from '@atmusic/core/api-types';
 import { sessionClient, sessionFetch } from '../session/client';
 
 export type Link = {
@@ -43,40 +44,61 @@ async function get<T>(path: string): Promise<T> {
   if (!r.ok) throw new Error(`${path} (${r.status})`);
   return r.json() as Promise<T>;
 }
-async function mutate<T = void>(path: string, method: string, body?: unknown): Promise<T> {
-  const r = await sessionClient().mutate(path, {
-    method,
-    ...(body === undefined ? {} : { headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),
-  });
+async function mutate<T = void>(path: string, method: string, expectedDid: Did, body?: unknown): Promise<T> {
+  const r = await sessionClient().mutate(
+    path,
+    {
+      method,
+      ...(body === undefined ? {} : { headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),
+    },
+    expectedDid,
+  );
   if (!r.ok) throw new Error(`${path} (${r.status})`);
   return (r.status === 204 ? undefined : r.json()) as Promise<T>;
 }
 const segment = (s: string) => encodeURIComponent(s);
 export const listLinks = () => get<{ items: Link[] }>('/api/v1/links');
-export const startLastfmLink = () => mutate<{ authorizeUrl: string }>('/api/v1/links/lastfm/start', 'POST');
-export const addListenbrainzLink = (token: string) => mutate<Link>('/api/v1/links/listenbrainz', 'POST', { token });
-export const unlink = (id: string) => mutate(`/api/v1/links/${segment(id)}`, 'DELETE');
-export const startImport = (source: 'lastfm' | 'listenbrainz', username: string) =>
-  mutate<ImportJob>('/api/v1/imports', 'POST', { source, username });
+export const startLastfmLink = (expectedDid: Did) =>
+  mutate<{ authorizeUrl: string }>('/api/v1/links/lastfm/start', 'POST', expectedDid);
+export const addListenbrainzLink = (token: string, expectedDid: Did) =>
+  mutate<Link>('/api/v1/links/listenbrainz', 'POST', expectedDid, { token });
+export const unlink = (id: string, expectedDid: Did) => mutate(`/api/v1/links/${segment(id)}`, 'DELETE', expectedDid);
+export const startImport = (source: 'lastfm' | 'listenbrainz', username: string, expectedDid: Did) =>
+  mutate<ImportJob>('/api/v1/imports', 'POST', expectedDid, { source, username });
 export const listImports = () => get<{ items: ImportJob[] }>('/api/v1/imports');
-export const cancelImport = (id: string) => mutate<ImportJob>(`/api/v1/imports/${segment(id)}/cancel`, 'POST');
-export const resumeImport = (id: string) => mutate<ImportJob>(`/api/v1/imports/${segment(id)}/resume`, 'POST');
-export async function uploadImport(source: 'lastfm_json' | 'listenbrainz_zip', body: BodyInit): Promise<ImportJob> {
+export const cancelImport = (id: string, expectedDid: Did) =>
+  mutate<ImportJob>(`/api/v1/imports/${segment(id)}/cancel`, 'POST', expectedDid);
+export const resumeImport = (id: string, expectedDid: Did) =>
+  mutate<ImportJob>(`/api/v1/imports/${segment(id)}/resume`, 'POST', expectedDid);
+export async function uploadImport(
+  source: 'lastfm_json' | 'listenbrainz_zip',
+  body: BodyInit,
+  expectedDid: Did,
+): Promise<ImportJob> {
   const path = `/api/v1/imports/upload?source=${encodeURIComponent(source)}`;
-  const r = await sessionClient().mutate(path, { method: 'POST', body });
+  const r = await sessionClient().mutate(path, { method: 'POST', body }, expectedDid);
   if (!r.ok) throw new Error(`${path} (${r.status})`);
   return r.json() as Promise<ImportJob>;
 }
 export const listCredentials = () => get<Credentials>('/api/v1/account/credentials');
-export const createAppPassword = (label: string) =>
-  mutate<Extract<CreatedSecret, { password: string }>>('/api/v1/account/app-passwords', 'POST', { label });
-export const revokeAppPassword = (id: string) => mutate(`/api/v1/account/app-passwords/${segment(id)}`, 'DELETE');
-export const createListenbrainzToken = (label: string) =>
-  mutate<Extract<CreatedSecret, { token: string }>>('/api/v1/account/listenbrainz-tokens', 'POST', { label });
-export const revokeListenbrainzToken = (id: string) =>
-  mutate(`/api/v1/account/listenbrainz-tokens/${segment(id)}`, 'DELETE');
-export const createLastfmApp = (name: string) =>
-  mutate<CreatedLastfmApp>('/api/v1/account/lastfm-apps', 'POST', { name });
-export const revokeLastfmSession = (id: string) => mutate(`/api/v1/account/lastfm-sessions/${segment(id)}`, 'DELETE');
-export const approveLastfmAuthorization = (apiKey: string, token?: string) =>
-  mutate<{ token: string }>('/api/v1/lastfm/authorize', 'POST', token === undefined ? { apiKey } : { apiKey, token });
+export const createAppPassword = (label: string, expectedDid: Did) =>
+  mutate<Extract<CreatedSecret, { password: string }>>('/api/v1/account/app-passwords', 'POST', expectedDid, { label });
+export const revokeAppPassword = (id: string, expectedDid: Did) =>
+  mutate(`/api/v1/account/app-passwords/${segment(id)}`, 'DELETE', expectedDid);
+export const createListenbrainzToken = (label: string, expectedDid: Did) =>
+  mutate<Extract<CreatedSecret, { token: string }>>('/api/v1/account/listenbrainz-tokens', 'POST', expectedDid, {
+    label,
+  });
+export const revokeListenbrainzToken = (id: string, expectedDid: Did) =>
+  mutate(`/api/v1/account/listenbrainz-tokens/${segment(id)}`, 'DELETE', expectedDid);
+export const createLastfmApp = (name: string, expectedDid: Did) =>
+  mutate<CreatedLastfmApp>('/api/v1/account/lastfm-apps', 'POST', expectedDid, { name });
+export const revokeLastfmSession = (id: string, expectedDid: Did) =>
+  mutate(`/api/v1/account/lastfm-sessions/${segment(id)}`, 'DELETE', expectedDid);
+export const approveLastfmAuthorization = (apiKey: string, expectedDid: Did, token?: string) =>
+  mutate<{ token: string }>(
+    '/api/v1/lastfm/authorize',
+    'POST',
+    expectedDid,
+    token === undefined ? { apiKey } : { apiKey, token },
+  );

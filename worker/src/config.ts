@@ -11,20 +11,19 @@
 //   NAMESPACE_PUBLICATION_REF pointing to an owner-reviewed manifest of the
 //   published schemas. DNS ownership alone never enables product writes.
 //
+// - The Node host accepts `socket` or `off` ingestion and uses one fixed
+//   slice budget (`NODE_BUDGET`); tier and location bindings are not part of
+//   this configuration.
+//
 // Secrets are not part of AppConfig (it reaches every DO module through
-// ModuleDeps); `parseCursorKey` reads CURSOR_KEY separately for the Worker.
+// ModuleDeps); `parseCursorKey` reads CURSOR_KEY separately from the secret file.
 
 import type { EnvSecrets, EnvVars } from './env';
 
 export const FIXTURE_PREFIX = 'com.example.atmusic';
 
-export type IngestMode = 'socket' | 'pulse' | 'off';
-export type Plan = 'paid' | 'free';
-
-export const LOCATION_HINTS = ['wnam', 'enam', 'sam', 'weur', 'eeur', 'apac', 'oc', 'afr', 'me'] as const;
-export type LocationHint = (typeof LOCATION_HINTS)[number];
-
-/** Per-alarm budgets (ADR 0004 §5.4, §5.9, F5). */
+export type IngestMode = 'socket' | 'off';
+/** Per-alarm budgets (ADR 0005 §3.8); a single fixed Node budget. */
 export interface SliceBudget {
   /** Hints verified per drain run. */
   drainHints: number;
@@ -38,21 +37,12 @@ export interface SliceBudget {
   perHostConcurrency: number;
 }
 
-export const BUDGETS: Readonly<Record<Plan, SliceBudget>> = {
-  paid: {
-    drainHints: 200,
-    subrequestsPerSlice: 200,
-    maxEntriesPerSlice: 2000,
-    concurrentFetches: 4,
-    perHostConcurrency: 2,
-  },
-  free: {
-    drainHints: 40,
-    subrequestsPerSlice: 40,
-    maxEntriesPerSlice: 2000,
-    concurrentFetches: 4,
-    perHostConcurrency: 2,
-  },
+export const NODE_BUDGET: SliceBudget = {
+  drainHints: 200,
+  subrequestsPerSlice: 200,
+  maxEntriesPerSlice: 2000,
+  concurrentFetches: 4,
+  perHostConcurrency: 2,
 };
 
 /**
@@ -96,11 +86,7 @@ export interface AppConfig {
   jetstreamUrls: readonly string[];
   jetstreamLookbackHours: number;
   relayUrl: string;
-  plan: Plan;
   budget: SliceBudget;
-  doLocationHint: LocationHint | null;
-  /** True when ADMIN_TOKEN is set (the token itself is not copied here). */
-  adminEnabled: boolean;
 }
 
 export interface ConfigIssue {
@@ -120,7 +106,6 @@ export interface ParseConfigOptions {
   allowFixturePrefix?: boolean;
 }
 
-const MIN_ADMIN_TOKEN_CHARS = 32;
 const MAX_LOOKBACK_HOURS = 720;
 
 function validLabel(label: string): boolean {
@@ -163,10 +148,7 @@ function isServiceUrl(value: string, protocol: 'https:' | 'wss:'): boolean {
   );
 }
 
-export function parseConfig(
-  env: EnvVars & Pick<EnvSecrets, 'ADMIN_TOKEN'>,
-  options: ParseConfigOptions = {},
-): AppConfig {
+export function parseConfig(env: EnvVars, options: ParseConfigOptions = {}): AppConfig {
   const issues: ConfigIssue[] = [];
   const issue = (field: string, message: string) => issues.push({ field, message });
 
@@ -209,10 +191,10 @@ export function parseConfig(
 
   const mode = env.INGEST_MODE ?? '';
   let configuredIngestMode: IngestMode = 'off';
-  if (mode === 'socket' || mode === 'pulse' || mode === 'off') {
+  if (mode === 'socket' || mode === 'off') {
     configuredIngestMode = mode;
   } else {
-    issue('INGEST_MODE', 'must be socket, pulse or off');
+    issue('INGEST_MODE', 'must be socket or off');
   }
 
   const jetstreamUrls = (env.JETSTREAM_URLS ?? '')
@@ -243,23 +225,6 @@ export function parseConfig(
     issue('RELAY_URL', 'must be an https:// host without path, port, query or credentials');
   }
 
-  const planRaw = env.PLAN ?? '';
-  let plan: Plan = 'paid';
-  if (planRaw === 'paid' || planRaw === 'free') plan = planRaw;
-  else issue('PLAN', 'must be paid or free');
-
-  const hintRaw = (env.DO_LOCATION_HINT ?? '').trim();
-  let doLocationHint: LocationHint | null = null;
-  if (hintRaw !== '') {
-    if ((LOCATION_HINTS as readonly string[]).includes(hintRaw)) doLocationHint = hintRaw as LocationHint;
-    else issue('DO_LOCATION_HINT', `must be empty or one of ${LOCATION_HINTS.join(', ')}`);
-  }
-
-  const adminToken = env.ADMIN_TOKEN ?? '';
-  if (adminToken !== '' && adminToken.length < MIN_ADMIN_TOKEN_CHARS) {
-    issue('ADMIN_TOKEN', `must be at least ${MIN_ADMIN_TOKEN_CHARS} characters when set`);
-  }
-
   if (issues.length > 0) throw new ConfigError(issues);
 
   return {
@@ -275,10 +240,7 @@ export function parseConfig(
     jetstreamUrls,
     jetstreamLookbackHours,
     relayUrl,
-    plan,
-    budget: BUDGETS[plan],
-    doLocationHint,
-    adminEnabled: adminToken !== '',
+    budget: NODE_BUDGET,
   };
 }
 

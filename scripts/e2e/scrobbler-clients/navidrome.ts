@@ -55,13 +55,17 @@ function submitUrl(base: string): URL | null {
 }
 
 /** Submit the captured Navidrome-shaped listen to a configured ListenBrainz /1/ base. */
-export async function submitNavidromeListen(baseUrl: string, token: string): Promise<NavidromeSubmitOutcome> {
+export async function submitNavidromeListen(
+  baseUrl: string,
+  token: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<NavidromeSubmitOutcome> {
   const url = submitUrl(baseUrl);
   if (url === null) return 'invalid_base_url';
 
   const body = JSON.stringify(capturedListen);
   try {
-    const response = await fetch(url, {
+    const response = await fetchImpl(url, {
       method: 'POST',
       headers: {
         Authorization: `Token ${token}`,

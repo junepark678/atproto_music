@@ -483,12 +483,9 @@ export function scheduleStatusJobsTimer(db: Db, now: number): number | null {
   return schedule(db, 'status-sweep', at);
 }
 
-/** A fresh subrequest meter for `checks` status checks (Free: the plan's slice limit). */
+/** A fresh subrequest meter for `checks` status checks. */
 export function statusMeter(m: Pick<ModuleDeps, 'config'>, checks: number): SubrequestMeter {
   const budget = m.config.budget;
-  const limit =
-    m.config.plan === 'free'
-      ? budget.subrequestsPerSlice
-      : Math.max(budget.subrequestsPerSlice, checks * WORST_STATUS_CHECK_SUBREQUESTS);
+  const limit = Math.max(budget.subrequestsPerSlice, checks * WORST_STATUS_CHECK_SUBREQUESTS);
   return new SubrequestMeter(limit);
 }

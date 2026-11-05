@@ -53,26 +53,53 @@ function request(input, options, callback) {
   }
   const path = config.path ?? supplied.path ?? (source ? `${source.pathname}${source.search}` : '/');
   const headers = { ...(supplied.headers ?? {}), ...(config.headers ?? {}) };
+  for (const sourceOptions of [supplied, config]) {
+    for (const key of ['socketPath', 'createConnection', 'lookup', 'agent', '_defaultAgent', 'localAddress', 'family', 'autoSelectFamily']) {
+      if (sourceOptions[key] !== undefined) {
+        throw new Error(`HTTPS e2e preload refused transport override ${key}`);
+      }
+    }
+  }
   if (!Object.keys(headers).some((name) => name.toLowerCase() === 'host')) {
     headers.Host = PUBLIC_HOST;
   }
   const method = config.method ?? supplied.method ?? 'GET';
-  return http.request(
+  const timeout = config.timeout ?? supplied.timeout;
+  const signal = config.signal ?? supplied.signal;
+  const target = http.request(
     {
-      ...supplied,
-      ...config,
       protocol: 'http:',
       hostname: LOOPBACK_HOST,
       host: LOOPBACK_HOST,
       port,
-      servername: undefined,
       agent: false,
       path,
       method,
       headers,
+      ...(timeout === undefined ? {} : { timeout }),
+      ...(signal === undefined ? {} : { signal }),
     },
-    cb,
+    (response) => {
+      try {
+        process.send?.({
+          type: 'request-observed',
+          host: PUBLIC_HOST,
+          method,
+          path: typeof path === 'string' ? path.split('?')[0] : '/',
+          status: response.statusCode ?? 0,
+        });
+      } catch {}
+      cb?.(response);
+    },
   );
+  target.on('socket', (socket) => {
+    socket.once('connect', () => {
+      try {
+        process.send?.({ type: 'connection-observed', remoteAddress: socket.remoteAddress, remotePort: socket.remotePort });
+      } catch {}
+    });
+  });
+  return target;
 }
 
 https.request = request;

@@ -25,6 +25,7 @@ import { describe, expect, it } from 'vitest';
 import openapiText from '../../../api/openapi.yaml?raw';
 import type { IngestMode } from '../../src/config';
 import type { Db, SqlParam } from '../../src/do/db';
+import { readIngestCheckpoint } from '../../src/do/ingest/checkpoint';
 import {
   GAP_REASON,
   indexing,
@@ -128,10 +129,15 @@ const P = 'com.example.atmusic';
 const ts = (ms: number) => toStorage(fromMs(ms));
 const ns = (iso: string) => fromMs(Date.parse(iso));
 
-/** Reads one Indexing and checks it against the OpenAPI schema and that the read wrote nothing. */
-function read(db: Db, nowMs: number, mode: IngestMode, did?: string): Indexing {
+/**
+ * Reads one Indexing and checks it against the OpenAPI schema and that the read wrote nothing.
+ * `pulse` is no longer an IngestMode (N7-01, B17); the cases below that pass it
+ * exercise status.ts's not-socket, not-off fallthrough for Workers-era rows.
+ */
+function read(db: Db, nowMs: number, mode: IngestMode | 'pulse', did?: string): Indexing {
   const before = dump(db);
-  const result = did === undefined ? indexing(db, nowMs, { mode }) : indexing(db, nowMs, { mode, did });
+  const m = mode as IngestMode;
+  const result = did === undefined ? indexing(db, nowMs, { mode: m }) : indexing(db, nowMs, { mode: m, did });
   expect(validIndexing(result)).toBe('valid');
   expect(dump(db)).toEqual(before);
   return result;
@@ -752,7 +758,8 @@ describe('indexing status truth', () => {
         updated_at_ms: t1 + 20 * SECOND,
       });
 
-      // Pulse mode (the Free default). Six hours ago a pulse delivered an event.
+      // Legacy pulse checkpoint rows remain readable after the Node runtime
+      // retires pulse connections. Six hours ago a pulse delivered an event.
       const T = now + 6 * 60 * MINUTE;
       db.tx(() => markConnected(db, T - 6 * 60 * MINUTE));
       db.tx(() => recordEvent(db, event((T - 6 * 60 * MINUTE) * 1000)));
@@ -769,12 +776,15 @@ describe('indexing status truth', () => {
       db.tx(() => markConnected(db, pulse));
       db.tx(() => recordEvent(db, event((pulse - 2 * SECOND) * 1000)));
       db.tx(() => markDisconnected(db, pulse + 20 * SECOND));
-      expect(read(db, pulse + MINUTE, 'pulse')).toEqual({
+      db.run("UPDATE ingest_checkpoint SET mode = 'pulse' WHERE stream = 'jetstream'");
+      expect(readIngestCheckpoint(db).mode).toBe('pulse');
+      expect(read(db, pulse + MINUTE, 'socket')).toEqual({
         state: 'current',
-        caughtUp: true,
+        caughtUp: false,
         lastIndexedAt: null,
         lagSeconds: 62,
       });
+      expect(readIngestCheckpoint(db).mode).toBe('pulse');
     });
   });
 

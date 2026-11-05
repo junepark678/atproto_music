@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'preact/hooks';
+import type { Did } from '@atmusic/core/api-types';
+import { useEffect, useRef, useState } from 'preact/hooks';
 import {
   type CreatedLastfmApp,
   type CreatedSecret,
@@ -16,8 +17,11 @@ import { useAppState } from '../state/store';
 
 export default function SettingsCredentials() {
   const session = useAppState().session.value;
+  const ownerDid = useRef(session?.did ?? null);
+  if (ownerDid.current === null && session !== null) ownerDid.current = session.did;
   const [credentials, setCredentials] = useState<Credentials | null>(null);
   const [secret, setSecret] = useState<CreatedSecret | CreatedLastfmApp | null>(null);
+  const [secretDid, setSecretDid] = useState<string | null>(null);
   const [label, setLabel] = useState('');
   const [tokenLabel, setTokenLabel] = useState('');
   const [appName, setAppName] = useState('');
@@ -46,7 +50,11 @@ export default function SettingsCredentials() {
         <SignInPrompt>Sign in to manage credentials.</SignInPrompt>
       </section>
     );
+  const expectedDid = ownerDid.current ?? session.did;
+  const canManage = session.status === 'active' && session.did === expectedDid;
+  const visibleSecret = secretDid === expectedDid && session.did === expectedDid ? secret : null;
   const run = async (fn: () => Promise<unknown>) => {
+    if (!canManage) return;
     setBusy(true);
     setError(null);
     try {
@@ -58,12 +66,13 @@ export default function SettingsCredentials() {
       setBusy(false);
     }
   };
-  const create = async (event: Event, fn: (value: string) => Promise<CreatedSecret>) => {
+  const create = async (event: Event, fn: (value: string, did: Did) => Promise<CreatedSecret>) => {
     event.preventDefault();
     const value = label.trim();
     if (!value) return;
     await run(async () => {
-      setSecret(await fn(value));
+      setSecret(await fn(value, expectedDid));
+      setSecretDid(expectedDid);
       setLabel('');
     });
   };
@@ -71,51 +80,60 @@ export default function SettingsCredentials() {
     <section aria-labelledby="page-title">
       <h1 id="page-title">Credentials</h1>
       <p>New secrets are shown once. Copy and save them before leaving this page.</p>
+      {!canManage && <p role="status">Sign in again before changing credentials.</p>}
       {error && <ErrorState title="Credentials could not be updated." error={error} onRetry={() => void refresh()} />}
-      {secret && (
+      {visibleSecret && (
         <section aria-labelledby="secret-title">
           <h2 id="secret-title">Save this secret now</h2>
-          {'password' in secret ? (
+          {'password' in visibleSecret ? (
             <label>
               App password
-              <input readOnly value={secret.password} onFocus={(e) => e.currentTarget.select()} />
+              <input readOnly value={visibleSecret.password} onFocus={(e) => e.currentTarget.select()} />
             </label>
-          ) : 'token' in secret ? (
+          ) : 'token' in visibleSecret ? (
             <label>
               ListenBrainz token
-              <input readOnly value={secret.token} onFocus={(e) => e.currentTarget.select()} />
+              <input readOnly value={visibleSecret.token} onFocus={(e) => e.currentTarget.select()} />
             </label>
           ) : (
             <>
               <label>
                 Last.fm API key
-                <input readOnly value={secret.apiKey} onFocus={(e) => e.currentTarget.select()} />
+                <input readOnly value={visibleSecret.apiKey} onFocus={(e) => e.currentTarget.select()} />
               </label>
               <label>
                 Last.fm shared secret
-                <input readOnly value={secret.sharedSecret} onFocus={(e) => e.currentTarget.select()} />
+                <input readOnly value={visibleSecret.sharedSecret} onFocus={(e) => e.currentTarget.select()} />
               </label>
             </>
           )}
-          <button type="button" onClick={() => setSecret(null)}>
+          <button
+            type="button"
+            onClick={() => {
+              setSecret(null);
+              setSecretDid(null);
+            }}
+          >
             I’ve saved it
           </button>
         </section>
       )}
       <section aria-labelledby="passwords-title">
         <h2 id="passwords-title">App passwords</h2>
-        <form onSubmit={(e) => void create(e, createAppPassword)}>
-          <label for="credential-label">Label</label>
-          <input
-            id="credential-label"
-            value={label}
-            onInput={(e) => setLabel((e.currentTarget as HTMLInputElement).value)}
-            required
-          />
-          <button type="submit" disabled={busy || !label.trim()}>
-            Create app password
-          </button>
-        </form>
+        {canManage ? (
+          <form onSubmit={(e) => void create(e, (value, did) => createAppPassword(value, did))}>
+            <label for="credential-label">Label</label>
+            <input
+              id="credential-label"
+              value={label}
+              onInput={(e) => setLabel((e.currentTarget as HTMLInputElement).value)}
+              required
+            />
+            <button type="submit" disabled={busy || !label.trim()}>
+              Create app password
+            </button>
+          </form>
+        ) : null}
         {credentials === null ? (
           <LoadingState label="Loading credentials…" />
         ) : credentials.appPasswords.length === 0 ? (
@@ -125,9 +143,15 @@ export default function SettingsCredentials() {
             {credentials.appPasswords.map((item) => (
               <li key={item.id}>
                 {item.label} · created {new Date(item.createdAt).toLocaleDateString()}{' '}
-                <button type="button" disabled={busy} onClick={() => void run(() => revokeAppPassword(item.id))}>
-                  Revoke
-                </button>
+                {canManage ? (
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => void run(() => revokeAppPassword(item.id, expectedDid))}
+                  >
+                    Revoke
+                  </button>
+                ) : null}
               </li>
             ))}
           </ul>
@@ -135,28 +159,31 @@ export default function SettingsCredentials() {
       </section>
       <section aria-labelledby="tokens-title">
         <h2 id="tokens-title">ListenBrainz tokens</h2>
-        <form
-          onSubmit={(e) => {
-            e.preventDefault();
-            const value = tokenLabel.trim();
-            if (value)
-              void run(async () => {
-                setSecret(await createListenbrainzToken(value));
-                setTokenLabel('');
-              });
-          }}
-        >
-          <label for="token-label">Label</label>
-          <input
-            id="token-label"
-            value={tokenLabel}
-            onInput={(e) => setTokenLabel((e.currentTarget as HTMLInputElement).value)}
-            required
-          />
-          <button type="submit" disabled={busy || !tokenLabel.trim()}>
-            Create ListenBrainz token
-          </button>
-        </form>
+        {canManage ? (
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              const value = tokenLabel.trim();
+              if (value)
+                void run(async () => {
+                  setSecret(await createListenbrainzToken(value, expectedDid));
+                  setSecretDid(expectedDid);
+                  setTokenLabel('');
+                });
+            }}
+          >
+            <label for="token-label">Label</label>
+            <input
+              id="token-label"
+              value={tokenLabel}
+              onInput={(e) => setTokenLabel((e.currentTarget as HTMLInputElement).value)}
+              required
+            />
+            <button type="submit" disabled={busy || !tokenLabel.trim()}>
+              Create ListenBrainz token
+            </button>
+          </form>
+        ) : null}
         {credentials &&
           (credentials.listenbrainzTokens.length === 0 ? (
             <EmptyState>No ListenBrainz tokens.</EmptyState>
@@ -165,13 +192,15 @@ export default function SettingsCredentials() {
               {credentials.listenbrainzTokens.map((item) => (
                 <li key={item.id}>
                   {item.label} · created {new Date(item.createdAt).toLocaleDateString()}{' '}
-                  <button
-                    type="button"
-                    disabled={busy}
-                    onClick={() => void run(() => revokeListenbrainzToken(item.id))}
-                  >
-                    Revoke
-                  </button>
+                  {canManage ? (
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => void run(() => revokeListenbrainzToken(item.id, expectedDid))}
+                    >
+                      Revoke
+                    </button>
+                  ) : null}
                 </li>
               ))}
             </ul>
@@ -179,28 +208,31 @@ export default function SettingsCredentials() {
       </section>
       <section aria-labelledby="lastfm-apps-title">
         <h2 id="lastfm-apps-title">Last.fm applications</h2>
-        <form
-          onSubmit={(e) => {
-            e.preventDefault();
-            const name = appName.trim();
-            if (name)
-              void run(async () => {
-                setSecret(await createLastfmApp(name));
-                setAppName('');
-              });
-          }}
-        >
-          <label for="lastfm-app-name">Application name</label>
-          <input
-            id="lastfm-app-name"
-            value={appName}
-            onInput={(e) => setAppName((e.currentTarget as HTMLInputElement).value)}
-            required
-          />
-          <button type="submit" disabled={busy || !appName.trim()}>
-            Create Last.fm app
-          </button>
-        </form>
+        {canManage ? (
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              const name = appName.trim();
+              if (name)
+                void run(async () => {
+                  setSecret(await createLastfmApp(name, expectedDid));
+                  setSecretDid(expectedDid);
+                  setAppName('');
+                });
+            }}
+          >
+            <label for="lastfm-app-name">Application name</label>
+            <input
+              id="lastfm-app-name"
+              value={appName}
+              onInput={(e) => setAppName((e.currentTarget as HTMLInputElement).value)}
+              required
+            />
+            <button type="submit" disabled={busy || !appName.trim()}>
+              Create Last.fm app
+            </button>
+          </form>
+        ) : null}
         {credentials?.lastfmApps.length ? (
           <ul>
             {credentials.lastfmApps.map((app) => (
@@ -218,9 +250,15 @@ export default function SettingsCredentials() {
             {credentials.lastfmSessions.map((item) => (
               <li key={item.id}>
                 {item.clientName} · created {new Date(item.createdAt).toLocaleDateString()}{' '}
-                <button type="button" disabled={busy} onClick={() => void run(() => revokeLastfmSession(item.id))}>
-                  Revoke
-                </button>
+                {canManage ? (
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => void run(() => revokeLastfmSession(item.id, expectedDid))}
+                  >
+                    Revoke
+                  </button>
+                ) : null}
               </li>
             ))}
           </ul>

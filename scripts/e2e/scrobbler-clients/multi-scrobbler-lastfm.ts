@@ -10,12 +10,17 @@ const API_KEY = '0123456789abcdef0123456789abcdef';
 const API_SIG = 'a'.repeat(32);
 const CALLBACK = 'http://localhost:9078/librefm/callback?state=x';
 const SAFE_PROTOCOL_ERROR = 'multi-scrobbler Last.fm protocol response was invalid';
+let currentStage = 'setup';
+let stageObserver: ((stage: string) => void) | undefined;
 
 export interface MultiScrobblerLastfmOptions {
   cookie: string;
   csrfToken: string;
   /** Required loopback HTTP listener; request Host remains the public HTTPS host. */
   transportOrigin: string;
+  /** Parent-owned Jetstream pump used by the integrated N8 runner before reads. */
+  beforeRecentRead?: () => Promise<void>;
+  onStage?: (stage: string) => void;
 }
 
 export interface MultiScrobblerLastfmResult {
@@ -37,6 +42,23 @@ async function request(
   path: string,
   init: RequestInit = {},
 ): Promise<Response> {
+  const pathOnly = path.split('?', 1)[0];
+  if (pathOnly === '/2.0/' || pathOnly === '/2.0') {
+    try {
+      const method = new URL(path, 'http://fixture.invalid').searchParams.get('method');
+      const methods = new Set(['auth.getSession', 'track.scrobble', 'track.updateNowPlaying', 'user.getRecentTracks']);
+      currentStage = method && methods.has(method) ? method : 'lastfm-method';
+    } catch {
+      currentStage = 'lastfm-method';
+    }
+  } else
+    currentStage =
+      pathOnly === '/api/auth'
+        ? 'approval-redirect'
+        : pathOnly === '/api/v1/lastfm/authorize'
+          ? 'app-approval'
+          : 'unexpected-path';
+  stageObserver?.(currentStage);
   let target: URL;
   let headers: Record<string, string>;
   let body: string | undefined;
@@ -142,6 +164,7 @@ export async function runMultiScrobblerLastfm(
 ): Promise<MultiScrobblerLastfmResult> {
   const publicOrigin = MULTI_SCROBBLER_PUBLIC_ORIGIN;
   const transportOrigin = options.transportOrigin;
+  stageObserver = options.onStage;
 
   const redirect = await request(publicOrigin, transportOrigin, `/api/auth?api_key=${API_KEY}&cb=${CALLBACK}`);
   const expectedLocation = `/lastfm/authorize?api_key=${API_KEY}&cb=${CALLBACK}`;
@@ -261,6 +284,7 @@ export async function runMultiScrobblerLastfm(
     sk: sessionKey,
     format: 'json',
   })}`;
+  await options.beforeRecentRead?.();
   const recent = await request(publicOrigin, transportOrigin, recentPath);
   if (recent.status !== 200) return fail();
   const recentBody = await json(recent);

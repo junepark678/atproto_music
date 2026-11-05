@@ -1063,7 +1063,7 @@ function emptyReport(): SnapshotStepReport {
 
 /**
  * One snapshot slice (see the header). `budget` defaults to the configured
- * plan's slice budget (`PLAN=free`: 40 subrequests; Paid: 200), with at most
+ * fixed Node slice budget, with at most
  * `maxEntriesPerSlice` entries applied.
  */
 export async function snapshotStep(

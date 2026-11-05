@@ -19,12 +19,13 @@
     "typecheck": "tsc -b",
     "lint": "biome check .",
     "build:web": "npm run build --workspace @atmusic/web",
-    "dev": "wrangler dev --config worker/wrangler.jsonc",
+    "dev": "npm run dev --workspace @atmusic/web",
     "test:e2e": "playwright test",
     "check": "bash scripts/check-ts.sh"
   },
   "devDependencies": {
     "@atproto/dev-env": "0.6.17",
+    "@babel/parser": "7.29.9",
     "@axe-core/playwright": "4.13.0",
     "@biomejs/biome": "2.5.15",
     "@playwright/test": "1.64.1",
@@ -36,7 +37,6 @@
     "vitest": "5.0.5"
   },
   "allowScripts": {
-    "workerd@1.20261012.1": true,
     "esbuild@0.28.2": true,
     "sharp@0.35.5": true,
     "sharp@0.33.5": true,
