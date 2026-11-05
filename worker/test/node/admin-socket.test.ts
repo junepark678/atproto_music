@@ -13,8 +13,10 @@ import { type FixedClock, fixedClock } from '@atmusic/core/test-support/clock';
 import { seededRandom } from '@atmusic/core/test-support/random';
 import { afterEach, describe, expect, it } from 'vitest';
 import { parseRevocationLog } from '../../src/app/revocations';
+import { constantTimeEqual } from '../../src/crypto/constant-time';
 import { SCHEMA_VERSION } from '../../src/do/schema';
-import { bytesEqualConstantTime, constantTimeEqual } from '../../src/http/admin';
+import { socketAdminHandler } from '../../src/http/admin';
+import { bindAdminSocket } from '../../src/node/admin-socket';
 import { BACKUP_FILE } from '../../src/node/backup';
 import { type ExitCode, type RunningServer, run } from '../../src/node/run';
 import { captureLog, manualTimers, refusingJetstream, testEnv, testSecretsDocument } from './support/app';
@@ -191,12 +193,11 @@ describe('admin socket', () => {
     const wrong = await request({ socketPath }, 'GET', '/admin/backup');
     expect([wrong.status, wrong.headers.allow]).toEqual([405, 'POST']);
 
-    // The portable constant-time compare works on Node (no subtle.timingSafeEqual here).
-    expect(typeof (crypto.subtle as unknown as Record<string, unknown>).timingSafeEqual).toBe('undefined');
+    // The portable constant-time compare also handles byte arrays and unequal lengths.
     expect(await constantTimeEqual('x'.repeat(40), 'x'.repeat(40))).toBe(true);
     expect(await constantTimeEqual('x'.repeat(40), `${'x'.repeat(39)}y`)).toBe(false);
     expect(await constantTimeEqual('short', 'x'.repeat(4096))).toBe(false);
-    expect(bytesEqualConstantTime(new Uint8Array([1, 2]), new Uint8Array([1, 2, 0]))).toBe(false);
+    expect(constantTimeEqual(new Uint8Array([1, 2]), new Uint8Array([1, 2, 0]))).toBe(false);
 
     // The TCP listener never serves admin routes, under either prefix.
     expect((await request({ port: server.address.port }, 'GET', '/internal/admin/status')).status).toBe(404);
@@ -254,5 +255,96 @@ describe('admin socket', () => {
     // A malformed body is the error envelope.
     const bad = await request({ socketPath }, 'POST', '/admin/oauth/prune-kid', { kid: 'k0', extra: 1 });
     expect(bad.status).toBe(422);
+  });
+
+  it('POST /admin/oauth/live-observe is socket-only, validates its phase shape, and never returns session credentials', async () => {
+    const { server } = await startServer();
+    const did = 'did:plc:aaaaaaaaaaaaaaaaaaaaaaaa';
+    const captured = await request({ socketPath: server.adminSocket }, 'POST', '/admin/oauth/live-observe', {
+      did,
+      phase: 'capture',
+    });
+    expect(captured.status).toBe(200);
+    expect(captured.json).toEqual({ status: 'no_session' });
+    expect(JSON.stringify(captured.json)).not.toMatch(/access_token|refresh_token|private_key|cookie/i);
+
+    const extra = await request({ socketPath: server.adminSocket }, 'POST', '/admin/oauth/live-observe', {
+      did,
+      phase: 'capture',
+      secret: 'must-not-be-accepted',
+    });
+    expect(extra.status).toBe(422);
+    expect(JSON.stringify(extra.json)).not.toContain('must-not-be-accepted');
+
+    expect(
+      (await request({ port: server.address.port }, 'POST', '/admin/oauth/live-observe', { did, phase: 'capture' }))
+        .status,
+    ).toBe(404);
+  });
+
+  it('aborts a long OAuth CRUD observation when its Unix-socket client disconnects', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'atmusic-admin-abort-'));
+    dirs.push(dir);
+    const socketPath = join(dir, 'admin.sock');
+    let started!: () => void;
+    let aborted!: () => void;
+    const observerStarted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const observerAborted = new Promise<void>((resolve) => {
+      aborted = resolve;
+    });
+    const socket = await bindAdminSocket({
+      path: socketPath,
+      log: captureLog().logger,
+      random: seededRandom(31),
+    });
+    socket.setHandler(
+      socketAdminHandler({
+        index: {
+          adminStatus: async () => ({}) as never,
+          adminBackup: async () => ({ status: 'not_supported' }),
+          adminResnapshot: async () => ({ status: 'unknown' }),
+        },
+        hostStatus: () => ({}),
+        pruneKid: () => ({ status: 'active_kid' }),
+        random: seededRandom(32),
+        oauthLiveObserver: {
+          capture: async () => ({ status: 'unused' }),
+          exerciseCrud: async (_did, _subject, signal) => {
+            started();
+            await new Promise<void>((resolve) => {
+              if (signal?.aborted) resolve();
+              else signal?.addEventListener('abort', () => resolve(), { once: true });
+            });
+            aborted();
+            return { status: 'failed', cleanupVerified: false };
+          },
+          prepareSignOut: async () => ({ status: 'unused' }),
+          verifyAfterSignOut: async () => ({ status: 'unused' }),
+        },
+      }),
+    );
+    const req = http.request({
+      socketPath,
+      path: '/admin/oauth/live-observe',
+      method: 'POST',
+      headers: { host: 'admin.socket', 'content-type': 'application/json' },
+    });
+    req.on('error', () => {});
+    req.end(
+      JSON.stringify({
+        did: 'did:plc:abcdefghijklmnopqrstuvwx',
+        phase: 'crud',
+        followSubject: 'did:plc:bcdefghijklmnopqrstuvwxy',
+      }),
+    );
+    try {
+      await observerStarted;
+      req.destroy();
+      await observerAborted;
+    } finally {
+      await socket.close();
+    }
   });
 });

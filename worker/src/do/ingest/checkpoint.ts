@@ -43,6 +43,9 @@ export const TIME_CURSOR_MIN = 1_000_000_000_000_000;
 
 export type GapReason = 'no_cursor' | 'cursor_too_old' | 'cursor_rejected';
 
+/** Values retained in migration 1 rows; pulse is historical and never a runtime mode. */
+export type StoredIngestMode = IngestMode | 'pulse';
+
 /**
  * Gap recovery (W4-01 `scheduleGapRecovery`): schedules bounded snapshot
  * batches over the known active DIDs and a discovery pass. Synchronous; it
@@ -58,7 +61,7 @@ export interface IngestCheckpoint {
   connected: boolean;
   pendingGap: boolean;
   gapScanAfterDid: string | null;
-  mode: IngestMode | null;
+  mode: StoredIngestMode | null;
   hostIndex: number;
   connectedAtMs: number | null;
   /** The disconnect instant while `connected` is false (0: never written). */
@@ -71,7 +74,7 @@ interface Row {
   connected: number;
   pending_gap: number;
   gap_scan_after_did: string | null;
-  mode: IngestMode | null;
+  mode: StoredIngestMode | null;
   host_index: number;
   connected_at_ms: number | null;
   updated_at_ms: number;

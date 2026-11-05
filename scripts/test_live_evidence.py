@@ -68,8 +68,9 @@ LIVE_SCRIPTS = {
     "workers_ingest_check": ("ingest", ["ATMUSIC_LIVE_ORIGIN", "ATMUSIC_LIVE_DID_B", "ATMUSIC_LIVE_ADMIN_TOKEN",
                                         "ATMUSIC_LIVE_JETSTREAM_COVERAGE_REF", "ATMUSIC_LIVE_APP_PASSWORD_B",
                                         *IMPLEMENTATIONS]),
-    "ssrf_probe": ("ssrfProbe", ["ATMUSIC_LIVE_ORIGIN", "ATMUSIC_LIVE_ADMIN_TOKEN", "ATMUSIC_LIVE_SSRF_PROBE_URL",
-                                 "ATMUSIC_LIVE_SSRF_HOSTS"]),
+    "ssrf_probe": ("ssrfProbe", ["ATMUSIC_LIVE_ORIGIN", "ATMUSIC_LIVE_LEXICON_PREFIX", "ATMUSIC_LIVE_COMMIT",
+                                 "ATMUSIC_LIVE_BUNDLE_SHA256", "ATMUSIC_LIVE_SSRF_HOSTS",
+                                 "ATMUSIC_LIVE_SSRF_PROBE_RESULT"]),
     "workers_socket_soak": ("socketSoak", ["ATMUSIC_LIVE_ORIGIN", "ATMUSIC_LIVE_ADMIN_TOKEN",
                                            "ATMUSIC_LIVE_JETSTREAM_COVERAGE_REF", "ATMUSIC_LIVE_CF_API_TOKEN",
                                            "ATMUSIC_LIVE_CF_ACCOUNT_ID", "ATMUSIC_LIVE_CF_DO_NAMESPACE_ID"]),
@@ -382,6 +383,28 @@ class LiveEvidenceTests(unittest.TestCase):
         inventory.update(overrides)
         return inventory
 
+    def test_devenv_oauth_advisory_never_closes_live_inventory(self):
+        self.assertEqual(set(REQUIRED_GATES),
+                         {"oauth", "pdsCompat", "ingest", "ssrfProbe", "socketSoak"})
+        self.assertNotIn("devenvOauth", NODE_SUPPORTED_GATES)
+        advisory = self.node_gate("devenvOauth", fixtureOnly=True)
+        status, issues = node_gate_status("devenvOauth", advisory, COMMIT, BUNDLE)
+        self.assertEqual(status, "blocked")
+        self.assertIn("gates.devenvOauth (unknown gate)", issues)
+        verdict = evaluate_node(self.node_inventory(gates={"devenvOauth": advisory}),
+                                COMMIT, BUNDLE)
+        self.assertEqual(verdict.status, "blocked")
+        for name in REQUIRED_GATES:
+            self.assertEqual(verdict.gates[name], "blocked")
+        # Even otherwise valid supported evidence cannot pass with a fixture marker.
+        status, issues = node_gate_status("pdsCompat", self.node_gate(fixtureOnly=True),
+                                         COMMIT, BUNDLE)
+        self.assertEqual(status, "blocked")
+        self.assertTrue(any("fixtureOnly" in issue for issue in issues))
+        for name in REQUIRED_GATES:
+            relabeled = dict(advisory, gate=name)
+            self.assertEqual(node_gate_status(name, relabeled, COMMIT, BUNDLE)[0], "blocked")
+
     def test_node_standalone_supported_gate_uses_independent_identity_and_no_network(self):
         entry = self.node_gate()
         with patch("socket.socket", side_effect=AssertionError("network attempted")), \
@@ -407,7 +430,7 @@ class LiveEvidenceTests(unittest.TestCase):
         for name in ("oauth", "ssrfProbe", "socketSoak"):
             self.assertEqual(verdict.gates[name], "blocked", name)
 
-    def test_node_oauth_grant_requires_all_four_collections_but_remains_blocked(self):
+    def test_node_oauth_grant_requires_all_twelve_actions_and_observed_exchange_crud_writes_and_revocation(self):
         grants = " ".join(f"repo:{PREFIX}.{name}" for name in ("scrobble", "follow", "settings", "love"))
         four_collection_grant = f"atproto {grants}"
         scopes = {
@@ -426,21 +449,93 @@ class LiveEvidenceTests(unittest.TestCase):
         self.assertFalse(node_full_repo_grant(PREFIX, scopes["partialLoveActions"]))
         self.assertFalse(node_full_repo_grant(PREFIX, scopes["missingAtproto"]))
         self.assertFalse(node_full_repo_grant(PREFIX, scopes["transitionScope"]))
-        self.assertNotIn("oauth", NODE_SUPPORTED_GATES)
+        self.assertIn("oauth", NODE_SUPPORTED_GATES)
 
-        entry = self.node_gate("oauth", results={"signIns": [
-            {"did": DID_A, "grantedScope": scopes["fourCollection"]},
-            {"did": DID_B, "grantedScope": scopes["fourCollection"]},
-        ]})
-        status, issues = node_gate_status("oauth", entry, COMMIT, BUNDLE, self.node_inventory()["prerequisites"])
-        self.assertEqual(status, "blocked")
-        self.assertTrue(any("Node gate semantics are not ported" in issue for issue in issues), issues)
-        self.assertFalse(any("all four Node collections" in issue for issue in issues), issues)
+        collections = [f"{PREFIX}.{name}" for name in ("scrobble", "follow", "settings", "love")]
+        app_kinds = ("scrobble.create", "scrobble.delete", "follow.put", "follow.delete",
+                     "love.put", "love.delete", "settings.put")
 
-        entry["results"]["signIns"][0]["grantedScope"] = scopes["missingLove"]
-        status, issues = node_gate_status("oauth", entry, COMMIT, BUNDLE, self.node_inventory()["prerequisites"])
+        def sign_in(did, issuer_host, scope):
+            return {
+                "did": did, "issuerHost": issuer_host, "tokenSub": did, "grantedScope": scope,
+                "exchange": {"sealedSessionObserved": True, "clientAuthMethod": "private_key_jwt",
+                             "dpopBound": True, "refreshTokenPresent": True},
+                "crud": [{"collection": collection, "create": {"status": 200, "cid": CID},
+                          "update": {"status": 200, "cid": CID2}, "delete": {"status": 200},
+                          "verified": True} for collection in collections],
+                "appWrites": [{"kind": kind, "operationState": "succeeded",
+                               "recordVerified": kind in ("scrobble.create", "follow.put", "love.put", "settings.put"),
+                               "absenceVerified": kind in ("scrobble.delete", "follow.delete", "love.delete")}
+                              for kind in app_kinds],
+                "signOut": {"appSignOutCompleted": True, "sessionVersionStableUntilSignOut": True,
+                            "localSessionAbsent": True,
+                            "refreshRejected": True, "refreshError": "invalid_grant"},
+            }
+
+        entry = self.node_gate("oauth", results={
+            "signIns": [sign_in(DID_A, "pds-alpha.operator-one.net", scopes["fourCollection"]),
+                        sign_in(DID_B, "pds-beta.operator-two.org", scopes["fourCollection"])],
+            "cleanup": "temporary records removed and absence verified",
+        })
+        prereq = self.node_inventory()["prerequisites"]
+        status, issues = node_gate_status("oauth", entry, COMMIT, BUNDLE, prereq)
+        self.assertEqual((status, issues), ("passed", []))
+
+        for scope in (scopes["missingLove"], scopes["partialLoveActions"], scopes["missingAtproto"],
+                      scopes["transitionScope"]):
+            broken = copy.deepcopy(entry)
+            broken["results"]["signIns"][0]["grantedScope"] = scope
+            status, issues = node_gate_status("oauth", broken, COMMIT, BUNDLE, prereq)
+            self.assertEqual(status, "blocked", scope)
+            self.assertTrue(any("all four Node collections" in issue for issue in issues), issues)
+
+        broken = copy.deepcopy(entry)
+        broken["results"]["signIns"][0]["signOut"]["refreshRejected"] = False
+        status, issues = node_gate_status("oauth", broken, COMMIT, BUNDLE, prereq)
         self.assertEqual(status, "blocked")
-        self.assertTrue(any("all four Node collections" in issue for issue in issues), issues)
+        self.assertTrue(any("upstream refresh-token revocation" in issue for issue in issues), issues)
+
+        broken = copy.deepcopy(entry)
+        broken["results"]["signIns"][0]["signOut"]["sessionVersionStableUntilSignOut"] = False
+        status, issues = node_gate_status("oauth", broken, COMMIT, BUNDLE, prereq)
+        self.assertEqual(status, "blocked")
+        self.assertTrue(any("upstream refresh-token revocation" in issue for issue in issues), issues)
+
+        broken = copy.deepcopy(entry)
+        broken["results"]["signIns"][0]["issuerHost"] = "pds-beta.operator-two.org"
+        status, issues = node_gate_status("oauth", broken, COMMIT, BUNDLE, prereq)
+        self.assertEqual(status, "blocked")
+        self.assertTrue(any("bound to its prerequisite OAuth issuer host" in issue for issue in issues), issues)
+
+        # A single gate document has no external prerequisites, so its own two
+        # declared PDS endpoints still have to bind the complete issuer set.
+        status, issues = node_gate_status("oauth", entry, COMMIT, BUNDLE)
+        self.assertEqual((status, issues), ("passed", []))
+        for issuer_hosts in (
+            ("unrelated.operator.net", "pds-beta.operator-two.org"),
+            ("pds-alpha.operator-one.net", "pds-alpha.operator-one.net"),
+        ):
+            broken = copy.deepcopy(entry)
+            for sign_in, issuer_host in zip(broken["results"]["signIns"], issuer_hosts):
+                sign_in["issuerHost"] = issuer_host
+            status, issues = node_gate_status("oauth", broken, COMMIT, BUNDLE)
+            self.assertEqual(status, "blocked", issuer_hosts)
+            self.assertTrue(any("issuer hosts must match the two declared PDS hosts" in issue
+                                for issue in issues), issues)
+
+        for malformed_endpoint in ([1], {"endpoint": "invalid"}, 42, True):
+            broken = copy.deepcopy(entry)
+            broken["pds"][0]["endpoint"] = malformed_endpoint
+            status, issues = node_gate_status("oauth", broken, COMMIT, BUNDLE)
+            self.assertEqual(status, "blocked", malformed_endpoint)
+            self.assertTrue(issues)
+
+        for malformed_host in ([], {}):
+            broken = copy.deepcopy(entry)
+            broken["results"]["signIns"][0]["issuerHost"] = malformed_host
+            status, issues = node_gate_status("oauth", broken, COMMIT, BUNDLE, prereq)
+            self.assertEqual(status, "blocked")
+            self.assertTrue(any("issuer host" in issue for issue in issues), issues)
 
     def test_node_bound_failure_is_fail_but_malformed_failure_is_blocked(self):
         failure = self.node_gate("pdsCompat", result="failed", failures=["real endpoint rejected request"])
@@ -1119,6 +1214,21 @@ class LiveEvidenceTests(unittest.TestCase):
                 document = json.loads(result.stdout)
                 self.assertEqual(document["gate"], gate_name)
                 self.assertEqual(document["result"], "blocked")
+                if script == "ssrf_probe":
+                    # Node schema-v3 gate: no Worker deployment/admin inputs. Its
+                    # prerequisites are rejected before the gate body reads a result.
+                    self.assertEqual(document["schemaVersion"], 3)
+                    self.assertEqual(document["runtime"], "node")
+                    self.assertFalse(document["fixtureOnly"])
+                    missing = "\n".join(document["missing"])
+                    for name in names:
+                        self.assertIn(f"{name}: missing", missing)
+                        self.assertIn(name, result.stderr)
+                    self.assertTrue(result.stderr.startswith("BLOCKED: ssrfProbe Node live gate"), result.stderr)
+                    status, issues = node_gate_status(gate_name, document, None, None)
+                    self.assertEqual(status, "blocked")
+                    self.assertTrue(issues)
+                    continue
                 self.assertIsNone(document["workerVersionId"])
                 missing = "\n".join(document["missing"])
                 for name in names:

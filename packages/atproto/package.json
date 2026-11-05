@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Workers- and browser-safe AT Protocol I/O: transport, identity, verification, snapshots, Jetstream.",
+  "description": "Node-safe AT Protocol I/O: transport, identity, verification, snapshots, Jetstream.",
   "exports": {
     "./*": "./src/*.ts",
     "./test-support/*": "./test-support/*.ts"
@@ -25,8 +25,6 @@
   },
   "devDependencies": {
     "@atproto/crypto": "0.5.7",
-    "@cloudflare/vitest-plugin": "1.4.4",
-    "@cloudflare/workers-types": "5.20261010.1",
     "fast-check": "4.10.2",
     "vitest": "5.0.5"
   }

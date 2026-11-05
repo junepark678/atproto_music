@@ -4,7 +4,7 @@
 
 import { type ChildProcess, spawn } from 'node:child_process';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { chmodSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer as createHttpServer, type Server as HttpServer } from 'node:http';
 import { createServer } from 'node:net';
 import { join } from 'node:path';
@@ -17,12 +17,16 @@ export const WORK_DIR = join(REPO_ROOT, 'work', 'e2e');
 export const DIST_DIR = join(WORK_DIR, 'dist');
 export const STATE_DIR = join(WORK_DIR, 'state');
 export const NETWORK_FILE = join(WORK_DIR, 'network.json');
+export const STACK_LOCK_FILE = join(WORK_DIR, 'start-stack.lock');
 export const E2E_BUNDLE = join(REPO_ROOT, 'worker', 'dist', 'node', 'e2e.mjs');
 const SECRETS_FILE = join(STATE_DIR, 'secrets.json');
 const RUNTIME_DIR = join(WORK_DIR, 'run');
 export const CONTROL_TOKEN_FILE = join(STATE_DIR, 'control-token');
 const CONTROL_TOKEN_HEADER = 'x-atmusic-e2e-control-token';
-const COMMAND_TIMEOUT_MS = 10_000;
+// A pump runs both the core alarm and its extension alarm. On a loaded CI host
+// these can include synchronous SQLite work, so leave headroom beyond the
+// database busy timeout without risking an unbounded webServer shutdown.
+const COMMAND_TIMEOUT_MS = 30_000;
 const BIN = join(REPO_ROOT, 'node_modules', '.bin');
 let activeStop: (() => Promise<void>) | null = null;
 
@@ -41,6 +45,91 @@ interface WireMessage {
 
 function log(message: string): void {
   console.log(`[e2e] ${message}`);
+}
+
+interface StackLockOwner {
+  pid: number;
+  token: string;
+}
+
+function readStackLockOwner(lockPath: string): StackLockOwner | null {
+  try {
+    const value: unknown = JSON.parse(readFileSync(join(lockPath, 'owner.json'), 'utf8'));
+    if (
+      typeof value !== 'object' ||
+      value === null ||
+      !('pid' in value) ||
+      !('token' in value) ||
+      !Number.isSafeInteger(value.pid) ||
+      (value.pid as number) < 1 ||
+      typeof value.token !== 'string' ||
+      !/^[a-f0-9]{32}$/.test(value.token)
+    ) {
+      return null;
+    }
+    return { pid: value.pid as number, token: value.token };
+  } catch {
+    return null;
+  }
+}
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    // EPERM means the process exists but is owned by another user. Only ESRCH
+    // establishes that a lock owner has exited; all other errors fail closed.
+    return (error as NodeJS.ErrnoException).code !== 'ESRCH';
+  }
+}
+
+/** Reclaims only a well-formed lock whose recorded process is no longer alive. */
+function reclaimStaleStackLock(lockPath: string): boolean {
+  const observed = readStackLockOwner(lockPath);
+  if (!observed || processIsAlive(observed.pid)) return false;
+
+  // Only one process can create this marker, so stale-owner validation and
+  // replacement-lock removal cannot race between competing starters.
+  const reclaimPath = join(lockPath, '.reclaim');
+  try {
+    mkdirSync(reclaimPath, { mode: 0o700 });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST' || (error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return false;
+    }
+    throw error;
+  }
+
+  const current = readStackLockOwner(lockPath);
+  if (!current || current.pid !== observed.pid || current.token !== observed.token || processIsAlive(current.pid)) {
+    rmSync(reclaimPath, { recursive: true, force: true });
+    return false;
+  }
+
+  // Rename the entire lock directory atomically. A new owner may create the
+  // original path immediately; cleanup touches only our unique tombstone.
+  const reclaimedPath = `${lockPath}.stale-${randomBytes(8).toString('hex')}`;
+  try {
+    renameSync(lockPath, reclaimedPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return true;
+    try {
+      rmSync(reclaimPath, { recursive: true, force: true });
+    } catch {
+      // Preserve the original rename error; a remaining marker fails closed.
+    }
+    throw error;
+  }
+  // If tombstone cleanup fails, ownership is still safely reclaimed because
+  // the original path was atomically vacated. Never touch it again here: a
+  // competing starter may already have installed a replacement lock there.
+  try {
+    rmSync(reclaimedPath, { recursive: true, force: true });
+  } catch {
+    // A leftover uniquely named tombstone cannot block or affect a new owner.
+  }
+  return true;
 }
 
 function run(cmd: string, args: string[], cwd: string, env: NodeJS.ProcessEnv = process.env): Promise<void> {
@@ -64,6 +153,54 @@ async function assertPortsFree(ports: E2ePorts): Promise<void> {
       probe.listen(port, '127.0.0.1', () => probe.close(() => resolve()));
     });
   }
+}
+
+/** Claims this workspace before checking ports or touching stack output. */
+export async function acquireStackOwnership(ports: E2ePorts, lockPath = STACK_LOCK_FILE): Promise<() => void> {
+  const token = randomBytes(16).toString('hex');
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      mkdirSync(lockPath, { mode: 0o700 });
+      break;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      if (attempt === 0 && reclaimStaleStackLock(lockPath)) continue;
+      const owner = readStackLockOwner(lockPath);
+      const description = owner ? `owner pid ${owner.pid}` : 'owner metadata unavailable';
+      throw new Error(`another e2e stack owns this workspace (${lockPath}; ${description})`);
+    }
+  }
+  try {
+    writeFileSync(join(lockPath, 'owner.json'), `${JSON.stringify({ pid: process.pid, token })}\n`, {
+      flag: 'wx',
+      mode: 0o600,
+    });
+  } catch (error) {
+    try {
+      rmSync(lockPath, { recursive: true, force: true });
+    } catch {
+      // Preserve the original write error; the lock path is included in the error context below.
+    }
+    throw new Error(`could not write e2e workspace lock ${lockPath}: ${messageOf(error)}`);
+  }
+  let released = false;
+  const release = (): void => {
+    if (released) return;
+    released = true;
+    try {
+      const owner = JSON.parse(readFileSync(join(lockPath, 'owner.json'), 'utf8')) as { token?: unknown };
+      if (owner.token === token) rmSync(lockPath, { recursive: true, force: true });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+  };
+  try {
+    await assertPortsFree(ports);
+  } catch (error) {
+    release();
+    throw error;
+  }
+  return release;
 }
 
 function ipcErrorResponse(error: unknown): {
@@ -148,14 +285,18 @@ async function terminate(child: ChildProcess | null): Promise<void> {
 /** Starts the Node e2e bundle and serializes pump commands and IPC routing. */
 export async function startStack(): Promise<{ stop(): Promise<void> }> {
   mkdirSync(WORK_DIR, { recursive: true });
-  rmSync(DIST_DIR, { recursive: true, force: true });
-  rmSync(STATE_DIR, { recursive: true, force: true });
-  rmSync(RUNTIME_DIR, { recursive: true, force: true });
-  mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
-  mkdirSync(RUNTIME_DIR, { recursive: true, mode: 0o700 });
-
   const ports = portsFromEnv();
-  await assertPortsFree(ports);
+  const releaseOwnership = await acquireStackOwnership(ports);
+  try {
+    rmSync(DIST_DIR, { recursive: true, force: true });
+    rmSync(STATE_DIR, { recursive: true, force: true });
+    rmSync(RUNTIME_DIR, { recursive: true, force: true });
+    mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
+    mkdirSync(RUNTIME_DIR, { recursive: true, mode: 0o700 });
+  } catch (error) {
+    releaseOwnership();
+    throw error;
+  }
   const originText = `https://${APP_HOST}`;
   log('starting HTTPS fixture world (FakeOAuthAs, FakePds, FakePlc, FakeDoh, browser proxy)');
 
@@ -196,13 +337,17 @@ export async function startStack(): Promise<{ stop(): Promise<void> }> {
         await terminate(child);
         await pumpTask?.catch(() => {});
       } finally {
-        if (controlServer !== null) {
-          await new Promise<void>((resolve) => controlServer?.close(() => resolve()));
-          controlServer = null;
+        try {
+          if (controlServer !== null) {
+            await new Promise<void>((resolve) => controlServer?.close(() => resolve()));
+            controlServer = null;
+          }
+          rmSync(CONTROL_TOKEN_FILE, { force: true });
+          if (world !== null) await world.close();
+        } finally {
+          activeStop = null;
+          releaseOwnership();
         }
-        rmSync(CONTROL_TOKEN_FILE, { force: true });
-        if (world !== null) await world.close();
-        activeStop = null;
       }
     })();
     return stopPromise;
@@ -361,7 +506,12 @@ export async function startStack(): Promise<{ stop(): Promise<void> }> {
         const timeout = setTimeout(() => {
           if (activeCommand?.id !== id) return;
           activeCommand = null;
-          reject(new Error(`Node e2e bundle command ${id} timed out after ${COMMAND_TIMEOUT_MS} ms`));
+          const action = typeof command.action === 'string' ? command.action : 'unknown';
+          reject(
+            new Error(
+              `Node e2e bundle command ${id} (${action}, generation ${generation}) timed out after ${COMMAND_TIMEOUT_MS} ms; execution is unknown, so the command will not be retried`,
+            ),
+          );
         }, COMMAND_TIMEOUT_MS);
         activeCommand = {
           id,
@@ -446,7 +596,9 @@ export async function startStack(): Promise<{ stop(): Promise<void> }> {
           wakePump?.();
           wakePump = null;
         }
-        await pumpInFlight?.catch(() => {});
+        // A timeout or rejection leaves mutation completion unknown. Do not hide
+        // it by restarting the child and replaying work against a fresh process.
+        await pumpInFlight;
         const previous = child;
         if (previous === null) throw new Error('Node e2e bundle is not running');
         expectedExit = previous;

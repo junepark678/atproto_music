@@ -48,7 +48,7 @@ interface Rig {
     method: string,
     path: string,
     headers?: Record<string, string>,
-    body?: BodyInit,
+    body?: Exclude<RequestInit['body'], null>,
   ): Promise<{ status: number; body: Answer }>;
   tick(times?: number): Promise<void>;
   clock: ReturnType<typeof fixedClock>;
