@@ -9,6 +9,7 @@ import { writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { isFixturePrefix, isValidPrefix } from '@atmusic/core/namespace';
+import { observeNodeGateResults } from './node-live-support.ts';
 
 export const NODE_EVIDENCE_SCHEMA_VERSION = 3 as const;
 export const NODE_ENV = {
@@ -55,6 +56,11 @@ export interface NodeGateBodyResult {
   results: Record<string, unknown>;
 }
 
+export interface NodeGateObservation {
+  key: string;
+  accept(value: unknown, lexiconPrefix?: string): string | null;
+}
+
 export interface NodeGateEvidence {
   schemaVersion: typeof NODE_EVIDENCE_SCHEMA_VERSION;
   runtime: 'node';
@@ -92,6 +98,9 @@ export interface NodeGateSpec {
   script: string;
   requirements: readonly NodeGateRequirement[];
   extraChecks?: (env: NodeGateEnv) => string[];
+  /** Synchronous local-only preflight (filesystem/git/node --version; never network/browser). */
+  localChecks?: (env: NodeGateEnv) => string[];
+  observations?: readonly NodeGateObservation[];
   run(context: NodeGateContext): Promise<NodeGateBodyResult>;
 }
 
@@ -114,7 +123,7 @@ const IPV4 = /^\d{1,3}(?:\.\d{1,3}){3}$/;
 const OWNED_PREFIX = /^[a-z][a-z0-9-]*(?:\.[a-z][a-z0-9-]*)+$/;
 const RESERVED_SUFFIXES = new Set(['example', 'invalid', 'test', 'localhost', 'local', 'onion', 'arpa', 'internal']);
 const RESERVED_DOMAINS = ['example.com', 'example.net', 'example.org'];
-const SECRET_NAME = /(TOKEN|PASSWORD|SECRET|PRIVATE_KEY)/i;
+const SECRET_NAME = /(TOKEN|PASSWORD|SECRET|PRIVATE_KEY|KEY|COOKIE|CSRF)/i;
 
 function nonzeroHex(value: string, expression: RegExp): boolean {
   return expression.test(value) && /[1-9a-f]/.test(value);
@@ -218,7 +227,7 @@ function redactJsonValue(value: unknown, env: NodeGateEnv, ancestors = new WeakS
 export function redactNodeGateOutput(text: string, env: NodeGateEnv): string {
   let redacted = text;
   for (const secret of secretValues(env)) redacted = redacted.split(secret).join('[redacted]');
-  redacted = redacted.replace(/https[^\s<>]*/gi, (candidate) => {
+  redacted = redacted.replace(/https?(?=[:%\\])[^\s<>]*/gi, (candidate) => {
     // Keep quotes and apostrophes inside the candidate. OAuth callback URLs
     // may contain either in their path or as escaped JSON/JavaScript text;
     // stopping at a quote would leave the query string (and its credentials)
@@ -226,36 +235,41 @@ export function redactNodeGateOutput(text: string, env: NodeGateEnv): string {
     const trailing = candidate.match(/[),.;\]}'"]+$/)?.[0] ?? '';
     let value = trailing ? candidate.slice(0, -trailing.length) : candidate;
     let complete = false;
-    for (let depth = 0; depth < 16; depth++) {
-      const decoded = value
-        .replace(/\\u\{([0-9a-f]{1,6})\}/gi, (_escape, hex: string) => {
-          const point = Number.parseInt(hex, 16);
-          return point <= 0x10ffff ? String.fromCodePoint(point) : _escape;
-        })
-        .replace(/\\u([0-9a-f]{4})/gi, (_escape, hex: string) => String.fromCharCode(Number.parseInt(hex, 16)))
-        .replace(/\\x([0-9a-f]{2})/gi, (_escape, hex: string) => String.fromCharCode(Number.parseInt(hex, 16)))
-        .replace(/\\\//g, '/')
-        .replace(/(?:%[0-9a-f]{2})+/gi, (sequence) => {
-          try {
-            return decodeURIComponent(sequence);
-          } catch {
-            return sequence;
-          }
-        });
-      if (decoded === value) {
-        complete = true;
-        break;
+    try {
+      for (let depth = 0; depth < 16; depth++) {
+        let decoded = value
+          .replace(/\\u\{([0-9a-f]{1,6})\}/gi, (_escape, hex: string) => {
+            const point = Number.parseInt(hex, 16);
+            if (point > 0x10ffff) throw new URIError('invalid Unicode escape');
+            return String.fromCodePoint(point);
+          })
+          .replace(/\\u([0-9a-f]{4})/gi, (_escape, hex: string) => String.fromCharCode(Number.parseInt(hex, 16)))
+          .replace(/\\x([0-9a-f]{2})/gi, (_escape, hex: string) => String.fromCharCode(Number.parseInt(hex, 16)))
+          .replace(/\\\//g, '/');
+        // Decode the whole candidate so a malformed byte sequence cannot hide
+        // an adjacent encoded separator from this pass.
+        if (decoded.includes('%')) decoded = decodeURIComponent(decoded);
+        if (decoded === value) {
+          complete = true;
+          break;
+        }
+        value = decoded;
       }
-      value = decoded;
+    } catch {
+      return '[redacted-url]';
     }
     // Do not emit a partially decoded token: a deeper encoded URL may still
     // contain callback credentials or OAuth state.
-    if (!complete) return '[redacted-url]';
+    if (!complete || /\\(?:u|x)/i.test(value)) return '[redacted-url]';
     // WHATWG URL parsing treats backslashes as slashes for special URLs. Do
     // this only after the fixed-point pass, since percent decoding can expose
     // a JavaScript escape (for example %5Cu003f) that must be decoded first.
     value = value.replaceAll('\\', '/');
     try {
+      // Normalize only after escaped material has reached a fixed point. A
+      // percent-decoded `\\u003f` must survive this loop so the next pass can
+      // decode it before WHATWG backslash normalization.
+      value = value.replaceAll('\\', '/');
       const url = new URL(value);
       if (url.protocol !== 'http:' && url.protocol !== 'https:') return '[redacted-url]';
       const hadRootSlash = url.pathname === '/' && !value.endsWith('/');
@@ -271,6 +285,10 @@ export function redactNodeGateOutput(text: string, env: NodeGateEnv): string {
   });
   redacted = redacted.replace(/Bearer\s+[A-Za-z0-9._~+/-]+=*/g, 'Bearer [redacted]');
   redacted = redacted.replace(/eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*/g, '[redacted-jwt]');
+  redacted = redacted.replace(
+    /(?:\/home\/[^\s<>"'`]+|\/Users\/[^\s<>"'`]+|\/run\/user\/\d+(?:\/[^\s<>"'`]*)?)/g,
+    '[redacted-path]',
+  );
   return redacted;
 }
 
@@ -327,7 +345,19 @@ export async function runNodeGate(
 ): Promise<number> {
   const base = evidenceBase(spec, io);
   const requirements = [...IDENTITY_AND_RELEASE, ...spec.requirements];
-  const missing = [...missingRequirements(env, requirements), ...(spec.extraChecks?.(env) ?? [])];
+  let missing = missingRequirements(env, requirements);
+  try {
+    missing.push(...(spec.extraChecks?.(env) ?? []));
+  } catch (error) {
+    missing.push(`extra checks failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (missing.length === 0 && spec.localChecks) {
+    try {
+      missing = [...spec.localChecks(env)];
+    } catch (error) {
+      missing = [`local checks failed: ${error instanceof Error ? error.message : String(error)}`];
+    }
+  }
   if (missing.length > 0) {
     const commit = validValue(env, NODE_ENV.commit, IDENTITY_AND_RELEASE[0]!);
     const bundleSha256 = validValue(env, NODE_ENV.bundleSha256, IDENTITY_AND_RELEASE[1]!);
@@ -376,6 +406,10 @@ export async function runNodeGate(
       error instanceof Error ? `${error.name === 'Error' ? '' : `${error.name}: `}${error.message}` : String(error),
     );
   }
+
+  failures.push(
+    ...observeNodeGateResults(spec.gate, spec.observations, body?.results, context.lexiconPrefix, blocked.length > 0),
+  );
 
   const evidence: NodeGateEvidence = {
     ...base,

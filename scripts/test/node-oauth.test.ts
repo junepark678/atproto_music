@@ -2,7 +2,10 @@ import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { OAUTH_LIVE_BUDGETS, withBoundedRecovery } from '@atmusic/core/oauth-live-budget';
 import { expect, test, vi } from 'vitest';
+import * as admin from '../admin/atmusic-admin.ts';
+import * as liveGate from '../live/live-gate.ts';
 import {
   assertNoExistingFollow,
   browserRequest,
@@ -13,7 +16,8 @@ import {
   NODE_OAUTH_ENV,
   spec,
 } from '../live/node_oauth_check.ts';
-import { NODE_ENV, type NodeGateIO, runNodeGate } from '../live/node-live-gate.ts';
+import { NODE_ENV, type NodeGateIO, type NodeGateSpec, runNodeGate } from '../live/node-live-gate.ts';
+import * as oauthBrowser from '../live/workers_oauth_check.ts';
 
 const REPO = resolve(fileURLToPath(new URL('../..', import.meta.url)));
 const TSX = createRequire(resolve(REPO, 'package.json')).resolve('tsx/cli');
@@ -116,7 +120,15 @@ test('the complete synthetic environment reaches only the injected runner and ne
   vi.stubGlobal('fetch', fetch);
   const result = capture();
   try {
-    expect(await runNodeGate({ ...spec, run }, completeEnv(), result.io)).toBe(0);
+    const synthetic = {
+      ...spec,
+      run,
+      observations: [
+        { key: 'signIns', accept: () => null },
+        { key: 'cleanup', accept: () => null },
+      ],
+    } satisfies NodeGateSpec;
+    expect(await runNodeGate(synthetic, completeEnv(), result.io)).toBe(0);
     expect(run).toHaveBeenCalledOnce();
     expect(fetch).not.toHaveBeenCalled();
     const evidence = JSON.parse(result.output().stdout) as { result: string; missing: string[] };
@@ -151,6 +163,244 @@ test('the OAuth grant validator accepts both repo scope encodings and requires e
   expect(hasAllTwelveActions('org.atproto.music', colonScope)).toBe(true);
   expect(hasAllTwelveActions('org.atproto.music', queryScope)).toBe(true);
   expect(hasAllTwelveActions('org.atproto.music', queryScope.replace('&action=delete', ''))).toBe(false);
+});
+
+// Keep spec.run and signIn real: mock only browser, public HTTP and Unix-socket boundaries.
+async function runCallbackFailure(callbackBody: unknown, observerFailure?: 'throw' | 'structured') {
+  const env = completeEnv();
+  const origin = env[NODE_ENV.origin]!;
+  const requests: { path: string; csrf?: string }[] = [];
+  const locator = {
+    fill: vi.fn(async () => undefined),
+    click: vi.fn(async () => undefined),
+  };
+  const page = {
+    goto: vi.fn(async () => undefined),
+    locator: () => locator,
+    getByRole: () => locator,
+    waitForURL: vi.fn(async () => undefined),
+    url: () => origin,
+    evaluate: vi.fn(async (_callback: unknown, arg: { path: string; csrf?: string }) => {
+      requests.push(arg);
+      if (arg.path === '/api/v1/auth/session') return { status: 200, json: callbackBody };
+      if (arg.path === '/api/v1/auth/logout') return { status: 204, json: null };
+      throw new Error(`unexpected browser request ${arg.path}`);
+    }),
+  };
+  const closeContext = vi.fn(async () => undefined);
+  const closeBrowser = vi.fn(async () => undefined);
+  vi.spyOn(oauthBrowser, 'launchBrowser').mockResolvedValue({
+    newContext: async () => ({ newPage: async () => page, close: closeContext }),
+    close: closeBrowser,
+  } as unknown as Awaited<ReturnType<typeof oauthBrowser.launchBrowser>>);
+  vi.spyOn(liveGate, 'pdsInfo').mockImplementation(async (endpoint, implementation) => ({
+    endpoint,
+    implementation,
+    version: 'test',
+  }));
+  vi.spyOn(liveGate, 'checkIdentityPds').mockResolvedValue('fixture.handle');
+  const scope = `atproto ${['scrobble', 'follow', 'settings', 'love']
+    .map((name) => `repo:org.atproto.music.${name}`)
+    .join(' ')}`;
+  vi.spyOn(liveGate, 'httpJson').mockImplementation(async (input) => {
+    const url = new URL(input);
+    let json: unknown;
+    let status = 200;
+    if (url.pathname === '/oauth/client-metadata.json') {
+      json = {
+        client_id: `${origin}/oauth/client-metadata.json`,
+        token_endpoint_auth_method: 'private_key_jwt',
+        dpop_bound_access_tokens: true,
+        scope,
+      };
+    } else if (url.pathname === '/.well-known/oauth-protected-resource') {
+      status = 404;
+      json = null;
+    } else if (url.pathname === '/xrpc/com.atproto.identity.resolveHandle') {
+      json = { did: url.hostname.startsWith('pds-a.') ? env.ATMUSIC_LIVE_DID_A : env.ATMUSIC_LIVE_DID_B };
+    } else throw new Error(`unexpected public request ${url.pathname}`);
+    return { status, json, headers: new Headers() };
+  });
+  const observe = vi.spyOn(admin, 'sendOverSocket').mockImplementation(async (_socket, request) => {
+    const phase = (request.body as { phase: string }).phase;
+    if (phase === 'prepare_sign_out' && observerFailure === 'throw') throw new Error('observer unavailable');
+    const body =
+      phase === 'capture'
+        ? {
+            status: 'captured',
+            tokenSub: env.ATMUSIC_LIVE_DID_A,
+            issuerHost: new URL(env.ATMUSIC_LIVE_PDS_A!).hostname,
+            sealedSessionObserved: true,
+            clientAuthMethod: 'private_key_jwt',
+            dpopBound: true,
+            refreshTokenPresent: true,
+            grantedScope: scope,
+          }
+        : phase === 'crud'
+          ? { status: 'failed' }
+          : phase === 'prepare_sign_out'
+            ? { status: 'prepared', refreshTokenPresent: true, sessionVersionStable: true }
+            : observerFailure === 'structured'
+              ? { status: 'refresh_still_valid', localSessionAbsent: true, refreshRejected: false }
+              : { status: 'revoked', localSessionAbsent: true, refreshRejected: true, refreshError: 'invalid_grant' };
+    return { status: 200, body: JSON.stringify(body) };
+  });
+  const result = capture();
+  try {
+    // A returned callback goes directly to session validation. In the observer
+    // case capture succeeds, then CRUD failure enters the real cleanup block.
+    expect(await runNodeGate(spec, env, result.io)).toBe(1);
+    expect(requests.filter((request) => request.path === '/api/v1/auth/logout')).toEqual([
+      expect.objectContaining({ csrf: 'callback-csrf-token' }),
+    ]);
+    expect(closeContext).toHaveBeenCalledOnce();
+    expect(closeBrowser).toHaveBeenCalledOnce();
+    const evidence = JSON.parse(result.output().stdout);
+    expect(evidence.result).toBe('failed');
+    if (observerFailure !== undefined) {
+      expect(
+        observe.mock.calls.some(([, request]) => (request.body as { phase: string }).phase === 'prepare_sign_out'),
+      ).toBe(true);
+      expect(evidence.failures).toContain('direct repository CRUD checks failed for PDS A');
+      if (observerFailure === 'structured') {
+        expect(evidence.cleanup).toContain('session removal or refresh-token revocation remains unverified');
+      } else expect(evidence.cleanup).toContain('host sign-out preparation failed; app logout will still run');
+    } else expect(evidence.failures[0]).toMatch(/sign-in (resolved to a different DID|returned no active app session)/);
+  } finally {
+    vi.restoreAllMocks();
+  }
+}
+
+test.each([
+  { did: 'did:plc:bcdefghijklmnopqrstuvwxy', csrfToken: 'callback-csrf-token' },
+  { csrfToken: 'callback-csrf-token' },
+  { did: 42, csrfToken: 'callback-csrf-token' },
+])('production OAuth orchestration logs out after invalid callback session: %j', async (body) => {
+  await runCallbackFailure(body);
+});
+
+test('production cleanup still logs out when host preparation throws after capture', async () => {
+  await runCallbackFailure({ did: completeEnv().ATMUSIC_LIVE_DID_A, csrfToken: 'callback-csrf-token' }, 'throw');
+});
+
+test('production cleanup records an unsuccessful observation after app logout', async () => {
+  await runCallbackFailure({ did: completeEnv().ATMUSIC_LIVE_DID_A, csrfToken: 'callback-csrf-token' }, 'structured');
+});
+
+test.each([false, true])('a valid 202 at phase expiry is reconciled before logout (ack URI: %s)', async (hasUri) => {
+  const env = completeEnv();
+  const did = env.ATMUSIC_LIVE_DID_A!;
+  const origin = env[NODE_ENV.origin]!;
+  const collection = 'org.atproto.music.scrobble';
+  const rkey = 'record-key';
+  const uri = `at://${did}/${collection}/${rkey}`;
+  const deleteRoute = `/api/v1/scrobbles/${encodeURIComponent(uri)}`;
+  const cid = 'bafyreiaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+  const scope = `atproto ${['scrobble', 'follow', 'settings', 'love'].map((name) => `repo:org.atproto.music.${name}`).join(' ')}`;
+  let now = 0;
+  vi.spyOn(performance, 'now').mockImplementation(() => now);
+  const events: string[] = [];
+  const locator = { fill: async () => undefined, click: async () => undefined };
+  const page = {
+    goto: async () => undefined,
+    locator: () => locator,
+    getByRole: () => locator,
+    waitForURL: async () => undefined,
+    url: () => origin,
+    evaluate: async (_callback: unknown, arg: { path: string; method: string }) => {
+      events.push(`${arg.method} ${arg.path}`);
+      if (arg.path === '/api/v1/auth/session') return { status: 200, json: { did, csrfToken: 'synthetic-csrf' } };
+      if (arg.path === '/api/v1/auth/logout') return { status: 204, json: null };
+      if (arg.path === '/api/v1/scrobbles' && arg.method === 'POST') {
+        now = OAUTH_LIVE_BUDGETS.appPhaseMs;
+        return {
+          status: 202,
+          json: { operation: { id: 'accepted-write', state: 'queued', ...(hasUri ? { uri } : {}) } },
+        };
+      }
+      if (arg.path === '/api/v1/operations/accepted-write') {
+        return { status: 200, json: { id: 'accepted-write', state: 'succeeded', kind: 'scrobble.create', uri, cid } };
+      }
+      if (arg.path === deleteRoute && arg.method === 'DELETE') {
+        return { status: 202, json: { operation: { id: 'cleanup-delete', state: 'queued' } } };
+      }
+      if (arg.path === '/api/v1/operations/cleanup-delete') {
+        return { status: 200, json: { id: 'cleanup-delete', state: 'succeeded', kind: 'scrobble.delete' } };
+      }
+      throw new Error(`unexpected browser request ${arg.path}`);
+    },
+  };
+  vi.spyOn(oauthBrowser, 'launchBrowser').mockResolvedValue({
+    newContext: async () => ({ newPage: async () => page, close: async () => undefined }),
+    close: async () => undefined,
+  } as unknown as Awaited<ReturnType<typeof oauthBrowser.launchBrowser>>);
+  vi.spyOn(liveGate, 'pdsInfo').mockImplementation(async (endpoint, implementation) => ({
+    endpoint,
+    implementation,
+    version: 'test',
+  }));
+  vi.spyOn(liveGate, 'checkIdentityPds').mockResolvedValue('fixture.handle');
+  vi.spyOn(liveGate, 'httpJson').mockImplementation(async (input) => {
+    const url = new URL(input);
+    let status = 200;
+    let json: unknown;
+    if (url.pathname === '/oauth/client-metadata.json') {
+      json = {
+        client_id: `${origin}/oauth/client-metadata.json`,
+        token_endpoint_auth_method: 'private_key_jwt',
+        dpop_bound_access_tokens: true,
+        scope,
+      };
+    } else if (url.pathname === '/.well-known/oauth-protected-resource') {
+      status = 404;
+      json = null;
+    } else if (url.pathname === '/xrpc/com.atproto.identity.resolveHandle') {
+      json = { did: url.hostname.startsWith('pds-a.') ? did : env.ATMUSIC_LIVE_DID_B };
+    } else throw new Error(`unexpected HTTP ${url.pathname}`);
+    return { status, json, headers: new Headers() };
+  });
+  const present = vi
+    .spyOn(liveGate, 'verifyRecordAt')
+    .mockResolvedValue({ state: 'present', cid, rev: '3jzfcijpj2z2a', commitCid: cid, pds: env.ATMUSIC_LIVE_PDS_A! });
+  const absent = vi.spyOn(liveGate, 'verifyAbsent').mockImplementation(async () => {
+    events.push('verified absence');
+    return { method: 'exclusionProof', rev: '3jzfcijpj2z2b', commitCid: cid, pds: env.ATMUSIC_LIVE_PDS_A! };
+  });
+  vi.spyOn(admin, 'sendOverSocket').mockImplementation(async (_socket, request) => {
+    const phase = (request.body as { phase: string }).phase;
+    const body =
+      phase === 'capture'
+        ? {
+            status: 'captured',
+            tokenSub: did,
+            issuerHost: new URL(env.ATMUSIC_LIVE_PDS_A!).hostname,
+            sealedSessionObserved: true,
+            clientAuthMethod: 'private_key_jwt',
+            dpopBound: true,
+            refreshTokenPresent: true,
+            grantedScope: scope,
+          }
+        : phase === 'crud'
+          ? { status: 'passed', cleanupVerified: true, crud: [] }
+          : phase === 'prepare_sign_out'
+            ? { status: 'prepared', refreshTokenPresent: true, sessionVersionStable: true }
+            : { status: 'revoked', localSessionAbsent: true, refreshRejected: true, refreshError: 'invalid_grant' };
+    return { status: 200, body: JSON.stringify(body) };
+  });
+  const result = capture();
+  try {
+    expect(await runNodeGate(spec, env, result.io)).toBe(1);
+    expect(events).toContain(`DELETE ${deleteRoute}`);
+    expect(present).toHaveBeenCalledWith(did, collection, rkey, expect.anything());
+    expect(absent).toHaveBeenCalledOnce();
+    expect(events.indexOf('verified absence')).toBeLessThan(events.indexOf('POST /api/v1/auth/logout'));
+    expect(events.includes('GET /api/v1/operations/accepted-write')).toBe(!hasUri);
+    const evidence = JSON.parse(result.output().stdout);
+    expect(evidence.result).toBe('failed');
+    expect(evidence.cleanup).toContain('1 accepted app write(s) reconciled during recovery');
+  } finally {
+    vi.restoreAllMocks();
+  }
 });
 
 test('automated OAuth sign-in requires the configured PDS handle to resolve to its exact DID', () => {
@@ -200,27 +450,53 @@ test('password entry accepts only the exact pinned authorization origin', () => 
 });
 
 test('the browser request deadline aborts a fetch that never responds', async () => {
+  let evaluationSettled = false;
+  let aborted = false;
   const page = {
-    evaluate: async (callback: (arg: unknown) => Promise<unknown>, arg: unknown) => callback(arg),
+    evaluate: async (callback: (arg: unknown) => Promise<unknown>, arg: unknown) => {
+      try {
+        return await callback(arg);
+      } finally {
+        evaluationSettled = true;
+      }
+    },
   } as unknown as import('@playwright/test').Page;
   const fetch = vi.fn(
     async (_input: string | URL, init?: RequestInit) =>
       new Promise<Response>((_resolve, reject) => {
-        init?.signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+        init?.signal?.addEventListener(
+          'abort',
+          () => {
+            aborted = true;
+            reject(new Error('aborted'));
+          },
+          { once: true },
+        );
       }),
   );
   vi.stubGlobal('fetch', fetch);
   try {
-    await expect(browserRequest(page, '/api/v1/auth/logout', 'POST', undefined, {}, undefined, 20)).rejects.toThrow(
-      /timed out/,
-    );
+    await expect(
+      withBoundedRecovery(
+        async () => browserRequest(page, '/api/v1/auth/logout', 'POST', undefined, {}, undefined, 100),
+        async (deadline) => {
+          expect(aborted).toBe(true);
+          expect(evaluationSettled).toBe(true);
+          deadline.assertActive();
+        },
+        { appPhaseMs: 500, appCleanupMs: 500 },
+      ),
+    ).rejects.toThrow(/timed out/);
     expect(fetch).toHaveBeenCalledOnce();
+    expect(aborted).toBe(true);
+    expect(evaluationSettled).toBe(true);
   } finally {
     vi.unstubAllGlobals();
   }
 });
 
 test('the browser request deadline aborts a response body that never finishes', async () => {
+  let aborted = false;
   const page = {
     evaluate: async (callback: (arg: unknown) => Promise<unknown>, arg: unknown) => callback(arg),
   } as unknown as import('@playwright/test').Page;
@@ -231,15 +507,93 @@ test('the browser request deadline aborts a response body that never finishes', 
       text: () =>
         new Promise<string>((_resolve, reject) => {
           signal?.addEventListener('abort', () => reject(new Error('body aborted')), { once: true });
+          signal?.addEventListener(
+            'abort',
+            () => {
+              aborted = true;
+            },
+            { once: true },
+          );
         }),
     } as Response;
   });
   vi.stubGlobal('fetch', fetch);
   try {
-    await expect(browserRequest(page, '/api/v1/auth/logout', 'POST', undefined, {}, undefined, 20)).rejects.toThrow(
+    await expect(browserRequest(page, '/api/v1/auth/logout', 'POST', undefined, {}, undefined, 100)).rejects.toThrow(
       /timed out/,
     );
     expect(fetch).toHaveBeenCalledOnce();
+    expect(aborted).toBe(true);
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
+
+test('a delayed Playwright evaluation does not fetch after expiry and settles before recovery starts', async () => {
+  let evaluateCalls = 0;
+  let evaluationSettled = false;
+  const page = {
+    evaluate: async (callback: (arg: unknown) => Promise<unknown> | unknown, arg: unknown) => {
+      const callNumber = ++evaluateCalls;
+      if (callNumber === 1) await new Promise((resolve) => setTimeout(resolve, 40));
+      try {
+        return await callback(arg);
+      } finally {
+        if (callNumber === 1) evaluationSettled = true;
+      }
+    },
+  } as unknown as import('@playwright/test').Page;
+  const fetch = vi.fn(async () => Response.json({ ok: true }));
+  vi.stubGlobal('fetch', fetch);
+  let recoveryStarted = false;
+  let settledAtRecovery: boolean | undefined;
+  try {
+    await expect(
+      withBoundedRecovery(
+        async (deadline) => {
+          deadline.assertActive();
+          await browserRequest(page, '/api/v1/auth/logout', 'POST', undefined, {}, undefined, 10);
+        },
+        async (deadline) => {
+          recoveryStarted = true;
+          settledAtRecovery = evaluationSettled;
+          deadline.assertActive();
+        },
+        { appPhaseMs: 500, appCleanupMs: 500 },
+      ),
+    ).rejects.toThrow(/timed out/);
+    expect(fetch).not.toHaveBeenCalled();
+    expect(recoveryStarted).toBe(true);
+    expect(settledAtRecovery).toBe(true);
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
+
+test('an evaluation that cannot be cancelled or settled prevents unsafe recovery', async () => {
+  let evaluateCalls = 0;
+  const page = {
+    evaluate: async (callback: (arg: unknown) => Promise<unknown> | unknown, arg: unknown) => {
+      evaluateCalls += 1;
+      if (evaluateCalls === 1) return new Promise<never>(() => {});
+      return callback(arg);
+    },
+  } as unknown as import('@playwright/test').Page;
+  const fetch = vi.fn(async () => Response.json({ ok: true }));
+  vi.stubGlobal('fetch', fetch);
+  let recoveryStarted = false;
+  try {
+    await expect(
+      withBoundedRecovery(
+        async () => browserRequest(page, '/api/v1/auth/logout', 'POST', undefined, {}, undefined, 10),
+        async () => {
+          recoveryStarted = true;
+        },
+        { appPhaseMs: 500, appCleanupMs: 500 },
+      ),
+    ).rejects.toThrow(/browser request cleanup failed/);
+    expect(recoveryStarted).toBe(false);
+    expect(fetch).not.toHaveBeenCalled();
   } finally {
     vi.unstubAllGlobals();
   }
