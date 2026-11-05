@@ -12,6 +12,7 @@ import {
   isExpectedAuthorizationOrigin,
   NODE_OAUTH_ENV,
   spec,
+  validatedCallbackSession,
 } from '../live/node_oauth_check.ts';
 import { NODE_ENV, type NodeGateIO, runNodeGate } from '../live/node-live-gate.ts';
 
@@ -151,6 +152,55 @@ test('the OAuth grant validator accepts both repo scope encodings and requires e
   expect(hasAllTwelveActions('org.atproto.music', colonScope)).toBe(true);
   expect(hasAllTwelveActions('org.atproto.music', queryScope)).toBe(true);
   expect(hasAllTwelveActions('org.atproto.music', queryScope.replace('&action=delete', ''))).toBe(false);
+});
+
+test('a successful callback is signed out when the returned session has the wrong DID, and the gate fails', async () => {
+  const expectedDid = 'did:plc:abcdefghijklmnopqrstuvwx';
+  const callbackDid = 'did:plc:bcdefghijklmnopqrstuvwxy';
+  const requests: { input: string | URL; init?: RequestInit }[] = [];
+  const fetch = vi.fn(async (input: string | URL, init?: RequestInit) => {
+    requests.push({ input, init });
+    return new Response(null, { status: 204 });
+  });
+  vi.stubGlobal('fetch', fetch);
+  const page = {
+    evaluate: async (callback: (arg: unknown) => Promise<unknown>, arg: unknown) => callback(arg),
+  } as unknown as import('@playwright/test').Page;
+  const result = capture();
+  const callbackBody = { did: callbackDid, csrfToken: 'callback-csrf-token' };
+  const failingSpec = {
+    ...spec,
+    run: async () => {
+      const activeSession: { value: { did: string; csrf: string } | null } = { value: null };
+      let appSignOutCompleted = false;
+      try {
+        validatedCallbackSession({ status: 200, json: callbackBody }, 'A', expectedDid, (session) => {
+          activeSession.value = session;
+        });
+      } finally {
+        if (activeSession.value !== null && !appSignOutCompleted) {
+          const logout = await browserRequest(page, '/api/v1/auth/logout', 'POST', activeSession.value.csrf, {});
+          appSignOutCompleted = logout.status === 204;
+        }
+      }
+      return { pds: [], subjects: [], results: {} };
+    },
+  };
+
+  try {
+    expect(await runNodeGate(failingSpec, completeEnv(), result.io)).toBe(1);
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(requests[0]?.input).toBe('/api/v1/auth/logout');
+    expect(requests[0]?.init?.method).toBe('POST');
+    const requestHeaders = requests[0]?.init?.headers as Record<string, string> | undefined;
+    expect(requestHeaders?.['x-csrf-token']).toBe('callback-csrf-token');
+    expect(JSON.parse(result.output().stdout)).toMatchObject({
+      result: 'failed',
+      failures: ['PDS A sign-in resolved to a different DID'],
+    });
+  } finally {
+    vi.unstubAllGlobals();
+  }
 });
 
 test('automated OAuth sign-in requires the configured PDS handle to resolve to its exact DID', () => {

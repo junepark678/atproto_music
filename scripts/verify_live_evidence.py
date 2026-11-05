@@ -788,8 +788,24 @@ def _node_oauth_results_problems(entry, prefix, prereq):
         }
         if observed_pairs != expected_pairs:
             problems.append(f"{where}.signIns (each DID must be bound to its prerequisite OAuth issuer host)")
-    elif len(set(dids)) != len(dids):
-        problems.append(f"{where}.signIns (one identity signed in twice)")
+    else:
+        if len(set(dids)) != len(dids):
+            problems.append(f"{where}.signIns (one identity signed in twice)")
+        declared_pds = entry.get("pds")
+        declared_hosts = set()
+        if isinstance(declared_pds, list):
+            for pds in declared_pds:
+                if isinstance(pds, dict):
+                    host = _host(pds.get("endpoint"))
+                    if host:
+                        declared_hosts.add(host)
+        observed_hosts = {
+            item.get("issuerHost")
+            for item in sign_ins
+            if isinstance(item, dict) and isinstance(item.get("issuerHost"), str)
+        }
+        if len(declared_hosts) != 2 or observed_hosts != declared_hosts:
+            problems.append(f"{where}.signIns (issuer hosts must match the two declared PDS hosts)")
     return problems
 
 

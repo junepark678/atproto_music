@@ -108,6 +108,25 @@ function differentPdsProblem(env: Readonly<Record<string, string | undefined>>):
 type JsonObject = Record<string, unknown>;
 type ApiResponse = { status: number; json: unknown };
 type Session = { did: string; csrf: string };
+
+export function validatedCallbackSession(
+  response: ApiResponse,
+  which: 'A' | 'B',
+  expectedDid: string,
+  onCallbackSession: (session: Session) => void,
+): Session {
+  const body = object(response.json);
+  // A nonempty CSRF token is required before the caller can safely attempt
+  // sign-out, even if the response status or identity validation fails.
+  if (typeof body?.did === 'string' && typeof body.csrfToken === 'string' && body.csrfToken.length > 0) {
+    onCallbackSession({ did: body.did, csrf: body.csrfToken });
+  }
+  if (response.status !== 200 || typeof body?.did !== 'string' || typeof body.csrfToken !== 'string') {
+    throw new Error(`PDS ${which} sign-in returned no active app session`);
+  }
+  if (body.did !== expectedDid) throw new Error(`PDS ${which} sign-in resolved to a different DID`);
+  return { did: body.did, csrf: body.csrfToken };
+}
 type CreatedRecord = { uri: string; cid: string; rev: string };
 
 const object = (value: unknown): JsonObject | null =>
@@ -294,6 +313,7 @@ async function signIn(
   which: 'A' | 'B',
   expectedIssuerOrigin: string,
   timeoutMs: number,
+  onCallbackSession: (session: Session) => void,
 ): Promise<Session> {
   const handleName = which === 'A' ? OAUTH_ENV.handleA : OAUTH_ENV.handleB;
   const passwordName = which === 'A' ? OAUTH_ENV.passwordA : OAUTH_ENV.passwordB;
@@ -337,13 +357,8 @@ async function signIn(
   if (new URL(page.url()).origin !== origin) throw new Error(`PDS ${which} authorization did not return to the app`);
 
   const response = await browserRequest(page, '/api/v1/auth/session', 'GET');
-  const body = object(response.json);
-  if (response.status !== 200 || typeof body?.did !== 'string' || typeof body.csrfToken !== 'string') {
-    throw new Error(`PDS ${which} sign-in returned no active app session`);
-  }
   const expectedDid = context.get(didName);
-  if (body.did !== expectedDid) throw new Error(`PDS ${which} sign-in resolved to a different DID`);
-  return { did: body.did, csrf: body.csrfToken };
+  return validatedCallbackSession(response, which, expectedDid, onCallbackSession);
 }
 
 async function socketObserve(
@@ -857,10 +872,18 @@ export const spec: NodeGateSpec = {
         const page = await browserContext.newPage();
         let appSignOutCompleted = false;
         let captured = false;
-        let activeSession: Session | null = null;
+        const sessionForCleanup: { value: Session | null } = { value: null };
         try {
-          const session = await signIn(context, page, identity.which, authorizationOrigins[index]!, timeoutMs);
-          activeSession = session;
+          const session = await signIn(
+            context,
+            page,
+            identity.which,
+            authorizationOrigins[index]!,
+            timeoutMs,
+            (session) => {
+              sessionForCleanup.value = session;
+            },
+          );
           const capture = await socketObserve(context, session.did, 'capture');
           if (
             capture.status !== 'captured' ||
@@ -940,12 +963,20 @@ export const spec: NodeGateSpec = {
             },
           });
         } finally {
-          if (activeSession !== null && !appSignOutCompleted) {
+          if (sessionForCleanup.value !== null && !appSignOutCompleted) {
             try {
-              if (captured) await socketObserve(context, activeSession.did, 'prepare_sign_out');
-              const logout = await browserRequest(page, '/api/v1/auth/logout', 'POST', activeSession.csrf, {});
+              if (captured) await socketObserve(context, sessionForCleanup.value.did, 'prepare_sign_out');
+              const logout = await browserRequest(
+                page,
+                '/api/v1/auth/logout',
+                'POST',
+                sessionForCleanup.value.csrf,
+                {},
+              );
               appSignOutCompleted = logout.status === 204;
-              if (captured && appSignOutCompleted) await socketObserve(context, activeSession.did, 'after_sign_out');
+              if (captured && appSignOutCompleted) {
+                await socketObserve(context, sessionForCleanup.value.did, 'after_sign_out');
+              }
             } catch {
               appSignOutCompleted = false;
             }
