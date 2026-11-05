@@ -58,6 +58,7 @@ export type PruneKidOutcome = { status: 'pruned'; kid: string; sessions: number 
 export interface SocketOAuthLiveObserver {
   capture(did: string): Promise<Record<string, unknown>>;
   exerciseCrud(did: string, followSubject: string): Promise<Record<string, unknown>>;
+  prepareSignOut(did: string): Promise<Record<string, unknown>>;
   verifyAfterSignOut(did: string): Promise<Record<string, unknown>>;
 }
 
@@ -149,11 +150,14 @@ export function socketAdminHandler(deps: SocketAdminDeps): (req: Request) => Pro
         }
         return json(await deps.oauthLiveObserver.exerciseCrud(value.did, value.followSubject), 200);
       }
+      if (value.phase === 'prepare_sign_out' && Object.keys(value).length === 2) {
+        return json(await deps.oauthLiveObserver.prepareSignOut(value.did), 200);
+      }
       if (value.phase === 'after_sign_out') {
         if (Object.keys(value).length !== 2) throw invalidField('body', 'Unexpected field.');
         return json(await deps.oauthLiveObserver.verifyAfterSignOut(value.did), 200);
       }
-      throw invalidField('phase', 'Expected capture, crud, or after_sign_out.');
+      throw invalidField('phase', 'Expected capture, crud, prepare_sign_out, or after_sign_out.');
     },
   };
 

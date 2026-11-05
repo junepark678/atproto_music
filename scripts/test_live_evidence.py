@@ -467,7 +467,8 @@ class LiveEvidenceTests(unittest.TestCase):
                                "recordVerified": kind in ("scrobble.create", "follow.put", "love.put", "settings.put"),
                                "absenceVerified": kind in ("scrobble.delete", "follow.delete", "love.delete")}
                               for kind in app_kinds],
-                "signOut": {"appSignOutCompleted": True, "localSessionAbsent": True,
+                "signOut": {"appSignOutCompleted": True, "sessionVersionStableUntilSignOut": True,
+                            "localSessionAbsent": True,
                             "refreshRejected": True, "refreshError": "invalid_grant"},
             }
 
@@ -490,6 +491,12 @@ class LiveEvidenceTests(unittest.TestCase):
 
         broken = copy.deepcopy(entry)
         broken["results"]["signIns"][0]["signOut"]["refreshRejected"] = False
+        status, issues = node_gate_status("oauth", broken, COMMIT, BUNDLE, prereq)
+        self.assertEqual(status, "blocked")
+        self.assertTrue(any("upstream refresh-token revocation" in issue for issue in issues), issues)
+
+        broken = copy.deepcopy(entry)
+        broken["results"]["signIns"][0]["signOut"]["sessionVersionStableUntilSignOut"] = False
         status, issues = node_gate_status("oauth", broken, COMMIT, BUNDLE, prereq)
         self.assertEqual(status, "blocked")
         self.assertTrue(any("upstream refresh-token revocation" in issue for issue in issues), issues)

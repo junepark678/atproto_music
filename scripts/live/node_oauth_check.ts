@@ -6,19 +6,21 @@
 // token material never enter evidence.
 
 import { randomUUID } from 'node:crypto';
-import { followRkey } from '@atmusic/core/record-key';
 import { parseRecordUri } from '@atmusic/core/syntax';
 import { type AdminRequest, defaultSocketPath, sendOverSocket } from '../admin/atmusic-admin.ts';
 import {
   checkIdentityPds,
   ENV,
+  exclusionProofUnavailable,
   field,
   httpJson,
   IDENTITY_REQS,
   PDS_IMPLEMENTATION_REQS,
   pdsInfo,
   verifyAbsent,
+  verifyAbsentBySnapshot,
   verifyRecordAt,
+  xrpcUrl,
 } from './live-gate.ts';
 import {
   isNodeGateMain,
@@ -109,37 +111,140 @@ type CreatedRecord = { uri: string; cid: string; rev: string };
 const object = (value: unknown): JsonObject | null =>
   value !== null && typeof value === 'object' && !Array.isArray(value) ? (value as JsonObject) : null;
 
-async function browserRequest(
+export async function browserRequest(
   page: import('@playwright/test').Page,
   path: string,
   method: 'GET' | 'POST' | 'PUT' | 'DELETE',
   csrf?: string,
   body?: unknown,
   idempotencyKey?: string,
+  timeoutMs = 30_000,
 ): Promise<ApiResponse> {
-  return page.evaluate(
-    async ({ path, method, csrf, body, idempotencyKey }) => {
+  const evaluation = page.evaluate(
+    async ({ path, method, csrf, body, idempotencyKey, timeoutMs }) => {
       const headers: Record<string, string> = { accept: 'application/json' };
       if (csrf !== undefined) headers['x-csrf-token'] = csrf;
       if (body !== undefined) headers['content-type'] = 'application/json';
       if (idempotencyKey !== undefined) headers['idempotency-key'] = idempotencyKey;
-      const response = await fetch(path, {
-        method,
-        credentials: 'same-origin',
-        headers,
-        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-      });
-      const text = await response.text();
-      let json: unknown = null;
       try {
-        json = text ? (JSON.parse(text) as unknown) : null;
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), timeoutMs);
+        try {
+          const response = await fetch(path, {
+            method,
+            credentials: 'same-origin',
+            headers,
+            signal: controller.signal,
+            ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+          });
+          const text = await response.text();
+          let json: unknown = null;
+          try {
+            json = text ? (JSON.parse(text) as unknown) : null;
+          } catch {
+            /* status is enough for failure */
+          }
+          return { status: response.status, json };
+        } finally {
+          clearTimeout(timer);
+        }
       } catch {
-        /* status is enough for failure */
+        throw new Error('browser request timed out or failed');
       }
-      return { status: response.status, json };
     },
-    { path, method, csrf, body, idempotencyKey },
+    { path, method, csrf, body, idempotencyKey, timeoutMs },
   );
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      evaluation,
+      new Promise<ApiResponse>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error('browser request timed out')), timeoutMs + 250);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+async function verifyCurrentRecordState(
+  did: string,
+  collection: string,
+  rkey: string,
+): Promise<{
+  state: 'present' | 'absent';
+  rev: string;
+  method: 'inclusion' | 'exclusionProof' | 'snapshot';
+  record?: unknown;
+}> {
+  try {
+    const proof = await verifyRecordAt(did, collection, rkey);
+    return {
+      state: proof.state,
+      rev: proof.rev,
+      method: proof.state === 'present' ? 'inclusion' : 'exclusionProof',
+      ...(proof.state === 'present' ? { record: proof.record } : {}),
+    };
+  } catch (error) {
+    if (exclusionProofUnavailable(error) === null) throw error;
+    const snapshot = await verifyAbsentBySnapshot(did, collection, rkey);
+    return { state: snapshot.state, rev: snapshot.rev, method: 'snapshot' };
+  }
+}
+
+export async function assertNoExistingFollow(
+  pds: string,
+  did: string,
+  collection: string,
+  subject: string,
+): Promise<void> {
+  let cursor: string | undefined;
+  const cursors = new Set<string>();
+  const uris = new Set<string>();
+  for (let page = 0; page < 500; page++) {
+    const listed = await httpJson(
+      xrpcUrl(pds, 'com.atproto.repo.listRecords', {
+        repo: did,
+        collection,
+        limit: '100',
+        ...(cursor === undefined ? {} : { cursor }),
+      }),
+    );
+    const payload = object(listed.json);
+    const records = payload?.records;
+    if (listed.status !== 200 || !Array.isArray(records))
+      throw new Error('could not safely enumerate existing follow records');
+    for (const item of records) {
+      const row = object(item);
+      const uri = row?.uri;
+      const cid = row?.cid;
+      const value = object(row?.value);
+      const parsed = typeof uri === 'string' ? parseRecordUri(uri) : null;
+      if (
+        !parsed ||
+        parsed.did !== did ||
+        parsed.collection !== collection ||
+        typeof cid !== 'string' ||
+        !cid ||
+        value === null ||
+        uris.has(uri as string)
+      )
+        throw new Error('PDS returned a malformed or duplicate follow record');
+      uris.add(uri as string);
+      if (value.subject === subject) {
+        // Follow deletion removes every record matching the subject, including
+        // records at noncanonical keys written by other clients.
+        throw new Error('dedicated OAuth identities already follow each other; refusing to alter existing records');
+      }
+    }
+    const next = payload?.cursor;
+    if (next === undefined || next === null || next === '') return;
+    if (typeof next !== 'string' || cursors.has(next))
+      throw new Error('PDS follow listing returned a malformed or repeated cursor');
+    cursors.add(next);
+    cursor = next;
+  }
+  throw new Error('PDS follow listing exceeded the bounded preflight limit');
 }
 
 async function signIn(
@@ -199,7 +304,7 @@ async function signIn(
 async function socketObserve(
   context: NodeGateContext,
   did: string,
-  phase: 'capture' | 'crud' | 'after_sign_out',
+  phase: 'capture' | 'crud' | 'prepare_sign_out' | 'after_sign_out',
   followSubject?: string,
 ): Promise<JsonObject> {
   const body: Record<string, string> = { did, phase };
@@ -224,18 +329,48 @@ async function appOperation(
   route: string,
   method: 'POST' | 'PUT' | 'DELETE',
   body?: unknown,
-  idempotency = false,
+  idempotencyKey?: string,
+  onAccepted?: (operation: JsonObject) => void,
 ): Promise<JsonObject> {
-  const ack = await browserRequest(page, route, method, csrf, body, idempotency ? randomUUID() : undefined);
+  const deadline = performance.now() + 5 * 60_000;
+  let ack: ApiResponse;
+  for (;;) {
+    try {
+      ack = await browserRequest(
+        page,
+        route,
+        method,
+        csrf,
+        body,
+        idempotencyKey,
+        Math.min(30_000, deadline - performance.now()),
+      );
+      break;
+    } catch {
+      // Retrying a scrobble is safe only with the same idempotency key; this
+      // recovers the accepted operation when its first acknowledgement was lost.
+      if (idempotencyKey === undefined || performance.now() >= deadline)
+        throw new Error('app write acknowledgement was not received');
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  }
   const operation = object(field(ack.json, 'operation'));
   if (ack.status !== 202 || typeof operation?.id !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(operation.id)) {
     throw new Error(`${method} ${new URL(route, 'https://local.invalid').pathname} was not accepted as an operation`);
   }
-  const deadline = performance.now() + 5 * 60_000;
+  onAccepted?.(operation);
   for (;;) {
     const remaining = deadline - performance.now();
     if (remaining <= 0) throw new Error('app write did not settle before the acceptance deadline');
-    const status = await browserRequest(page, `/api/v1/operations/${encodeURIComponent(operation.id)}`, 'GET');
+    const status = await browserRequest(
+      page,
+      `/api/v1/operations/${encodeURIComponent(operation.id)}`,
+      'GET',
+      undefined,
+      undefined,
+      undefined,
+      Math.min(30_000, remaining),
+    );
     const value = object(status.json);
     if (status.status !== 200 || value?.id !== operation.id || typeof value.state !== 'string') {
       throw new Error('app write operation status was malformed');
@@ -293,6 +428,7 @@ async function appWrites(
   page: import('@playwright/test').Page,
   session: Session,
   peerDid: string,
+  pdsEndpoint: string,
   cleanupNotes: string[],
 ): Promise<Record<string, unknown>[]> {
   const prefix = context.lexiconPrefix;
@@ -307,7 +443,15 @@ async function appWrites(
   const track = `Live OAuth ${nonce}`;
   const listenedAt = new Date(Date.now() - 5 * 60_000).toISOString();
   const writes: Record<string, unknown>[] = [];
-  const pending: Array<{ kind: string; collection: string; rkey: string; after: string | null; route: string }> = [];
+  type PendingWrite = {
+    kind: string;
+    collection: string;
+    rkey: string | null;
+    after: string | null;
+    route: string;
+    operationId: string;
+  };
+  const pending: PendingWrite[] = [];
   let previousIndexing: 'enabled' | 'disabled' | null = null;
   let settingsChanged = false;
   let runFailed = false;
@@ -325,7 +469,62 @@ async function appWrites(
     const index = pending.findIndex((item) => item.kind === kind);
     if (index >= 0) pending.splice(index, 1);
   };
+  const registerPending = (kind: string, collection: string, route: string, operation: JsonObject): PendingWrite => {
+    const item: PendingWrite = {
+      kind,
+      collection,
+      rkey: null,
+      after: null,
+      route,
+      operationId: typeof operation.id === 'string' ? operation.id : '',
+    };
+    const parsed = typeof operation.uri === 'string' ? parseRecordUri(operation.uri) : null;
+    if (parsed?.did === session.did && parsed.collection === collection) item.rkey = parsed.rkey;
+    pending.push(item);
+    return item;
+  };
+  const attachRecord = (item: PendingWrite, operation: JsonObject): void => {
+    const created = operationRecord(operation);
+    const parsed = parseRecordUri(created.uri);
+    if (!parsed || parsed.did !== session.did || parsed.collection !== item.collection)
+      throw new Error('accepted app write returned a record outside its intended collection');
+    item.rkey = parsed.rkey;
+  };
+  const recoverPendingKey = async (item: PendingWrite): Promise<boolean> => {
+    if (item.rkey !== null) return true;
+    if (!/^[A-Za-z0-9_-]{1,64}$/.test(item.operationId)) return false;
+    const deadline = performance.now() + 30_000;
+    while (performance.now() < deadline) {
+      const status = await browserRequest(
+        page,
+        `/api/v1/operations/${encodeURIComponent(item.operationId)}`,
+        'GET',
+        undefined,
+        undefined,
+        undefined,
+        Math.min(10_000, deadline - performance.now()),
+      );
+      const operation = object(status.json);
+      if (status.status !== 200 || operation?.id !== item.operationId || typeof operation.state !== 'string')
+        return false;
+      if (typeof operation.uri === 'string') {
+        const parsed = parseRecordUri(operation.uri);
+        if (!parsed || parsed.did !== session.did || parsed.collection !== item.collection) return false;
+        item.rkey = parsed.rkey;
+        if (item.kind === 'scrobble.delete' && item.route === '') {
+          const uri = `at://${parsed.did}/${parsed.collection}/${parsed.rkey}`;
+          item.route = `/api/v1/scrobbles/${encodeURIComponent(uri)}`;
+        }
+        return true;
+      }
+      if (['failed', 'blocked', 'cancelled'].includes(operation.state)) return false;
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    return false;
+  };
   try {
+    const scrobbleKey = randomUUID();
+    let scrobbleCleanup: PendingWrite | undefined;
     const scrobbleOp = await appOperation(
       page,
       session.csrf,
@@ -336,20 +535,19 @@ async function appWrites(
         track,
         listenedAt,
       },
-      true,
+      scrobbleKey,
+      (operation) => {
+        scrobbleCleanup = registerPending('scrobble.delete', collections.scrobble, '', operation);
+      },
     );
     if (scrobbleOp.kind !== 'scrobble.create') throw new Error('scrobble route produced the wrong operation kind');
     const scrobble = operationRecord(scrobbleOp);
     const scrobbleUri = parseRecordUri(scrobble.uri);
     if (!scrobbleUri) throw new Error('scrobble operation returned a malformed record URI');
-    const scrobbleCleanup = {
-      kind: 'scrobble.delete',
-      collection: collections.scrobble,
-      rkey: scrobbleUri.rkey,
-      after: null as string | null,
-      route: `/api/v1/scrobbles/${encodeURIComponent(scrobble.uri)}`,
-    };
-    pending.push(scrobbleCleanup);
+    if (!scrobbleCleanup) throw new Error('accepted scrobble has no cleanup registration');
+    scrobbleCleanup.route = `/api/v1/scrobbles/${encodeURIComponent(scrobble.uri)}`;
+    scrobbleCleanup.rkey = scrobbleUri.rkey;
+    attachRecord(scrobbleCleanup, scrobbleOp);
     const scrobbleProof = await record('scrobble.create', scrobble, collections.scrobble, { artist, track });
     scrobbleCleanup.after = scrobbleProof.rev;
     const scrobbleDelete = await appOperation(
@@ -363,28 +561,27 @@ async function appWrites(
     await deleted('scrobble.delete', collections.scrobble, scrobbleProof.rkey, scrobbleProof.rev);
     removePending('scrobble.delete');
 
-    const followKey = await followRkey(peerDid);
-    const beforeFollow = await verifyRecordAt(session.did, collections.follow, followKey);
-    if (beforeFollow.state !== 'absent')
-      throw new Error('dedicated OAuth identities already have a follow record; refusing to alter it');
+    await assertNoExistingFollow(pdsEndpoint, session.did, collections.follow, peerDid);
+    let followCleanup: PendingWrite | undefined;
+    const followRoute = `/api/v1/follows/${encodeURIComponent(peerDid)}`;
     const followOperation = await appOperation(
       page,
       session.csrf,
-      `/api/v1/follows/${encodeURIComponent(peerDid)}`,
+      followRoute,
       'PUT',
+      undefined,
+      undefined,
+      (operation) => {
+        followCleanup = registerPending('follow.delete', collections.follow, followRoute, operation);
+      },
     );
     if (followOperation.kind !== 'follow.put') throw new Error('follow route produced the wrong operation kind');
     const followCreated = operationRecord(followOperation);
     const followUri = parseRecordUri(followCreated.uri);
     if (!followUri) throw new Error('follow operation returned a malformed record URI');
-    const followCleanup = {
-      kind: 'follow.delete',
-      collection: collections.follow,
-      rkey: followUri.rkey,
-      after: null as string | null,
-      route: `/api/v1/follows/${encodeURIComponent(peerDid)}`,
-    };
-    pending.push(followCleanup);
+    if (!followCleanup) throw new Error('accepted follow has no cleanup registration');
+    followCleanup.rkey = followUri.rkey;
+    attachRecord(followCleanup, followCreated);
     const followProof = await record('follow.put', followCreated, collections.follow, { subject: peerDid });
     followCleanup.after = followProof.rev;
     const unfollow = await appOperation(page, session.csrf, `/api/v1/follows/${encodeURIComponent(peerDid)}`, 'DELETE');
@@ -392,33 +589,37 @@ async function appWrites(
     await deleted('follow.delete', collections.follow, followProof.rkey, followProof.rev);
     removePending('follow.delete');
 
-    const loveOperation = await appOperation(page, session.csrf, '/api/v1/loves', 'PUT', { artist, track });
+    let loveCleanup: PendingWrite | undefined;
+    const loveRoute = `/api/v1/loves?artist=${encodeURIComponent(artist)}&track=${encodeURIComponent(track)}`;
+    const loveOperation = await appOperation(
+      page,
+      session.csrf,
+      '/api/v1/loves',
+      'PUT',
+      { artist, track },
+      undefined,
+      (operation) => {
+        loveCleanup = registerPending('love.delete', collections.love, loveRoute, operation);
+      },
+    );
     if (loveOperation.kind !== 'love.put') throw new Error('love route produced the wrong operation kind');
     const loveCreated = operationRecord(loveOperation);
     const loveUri = parseRecordUri(loveCreated.uri);
     if (!loveUri) throw new Error('love operation returned a malformed record URI');
-    const loveCleanup = {
-      kind: 'love.delete',
-      collection: collections.love,
-      rkey: loveUri.rkey,
-      after: null as string | null,
-      route: `/api/v1/loves?artist=${encodeURIComponent(artist)}&track=${encodeURIComponent(track)}`,
-    };
-    pending.push(loveCleanup);
+    if (!loveCleanup) throw new Error('accepted love has no cleanup registration');
+    loveCleanup.rkey = loveUri.rkey;
+    attachRecord(loveCleanup, loveCreated);
     const loveProof = await record('love.put', loveCreated, collections.love, { artist, track });
     loveCleanup.after = loveProof.rev;
-    const unlove = await appOperation(
-      page,
-      session.csrf,
-      `/api/v1/loves?artist=${encodeURIComponent(artist)}&track=${encodeURIComponent(track)}`,
-      'DELETE',
-    );
+    const unlove = await appOperation(page, session.csrf, loveRoute, 'DELETE');
     if (unlove.kind !== 'love.delete') throw new Error('unlove route produced the wrong operation kind');
     await deleted('love.delete', collections.love, loveProof.rkey, loveProof.rev);
     removePending('love.delete');
 
     const settingsRkey = 'self';
-    const beforeSettings = await verifyRecordAt(session.did, collections.settings, settingsRkey);
+    const beforeSettings = await verifyCurrentRecordState(session.did, collections.settings, settingsRkey);
+    if (beforeSettings.state === 'present' && beforeSettings.record === undefined)
+      throw new Error('existing settings record could not be read with an inclusion proof');
     const priorValue = beforeSettings.state === 'present' ? object(beforeSettings.record)?.indexing : null;
     if (priorValue === 'enabled' || priorValue === 'disabled') previousIndexing = priorValue;
     if (priorValue !== null && priorValue !== undefined && priorValue !== 'enabled' && priorValue !== 'disabled') {
@@ -462,7 +663,11 @@ async function appWrites(
 
   for (const item of [...pending]) {
     try {
-      const current = await verifyRecordAt(session.did, item.collection, item.rkey);
+      if (!(await recoverPendingKey(item)) || item.rkey === null) {
+        cleanupFailed = true;
+        continue;
+      }
+      const current = await verifyCurrentRecordState(session.did, item.collection, item.rkey);
       if (current.state === 'absent') {
         removePending(item.kind);
         continue;
@@ -521,19 +726,30 @@ async function validateClientMetadata(context: NodeGateContext): Promise<void> {
   }
 }
 
-function hasAllTwelveActions(prefix: string, scope: string): boolean {
+export function hasAllTwelveActions(prefix: string, scope: string): boolean {
   const tokens = scope.split(/\s+/).filter(Boolean);
   if (!tokens.includes('atproto')) return false;
   const expected = ['scrobble', 'follow', 'settings', 'love'].map((name) => `${prefix}.${name}`);
   const grants = new Map<string, Set<string>>();
   for (const token of tokens) {
-    if (!token.startsWith('repo:')) continue;
-    const [collection, query] = token.slice(5).split('?', 2);
-    if (!collection) continue;
-    const actions = query ? new URLSearchParams(query).getAll('action') : ['create', 'update', 'delete'];
-    const set = grants.get(collection) ?? new Set<string>();
-    for (const action of actions) set.add(action);
-    grants.set(collection, set);
+    if (!token.startsWith('repo:') && !token.startsWith('repo?')) continue;
+    const splitAt = token.indexOf('?');
+    const head = splitAt < 0 ? token : token.slice(0, splitAt);
+    const params = new URLSearchParams(splitAt < 0 ? '' : token.slice(splitAt + 1));
+    let positional = '';
+    try {
+      positional = head.startsWith('repo:') ? decodeURIComponent(head.slice('repo:'.length)) : '';
+    } catch {
+      continue;
+    }
+    const collections = [...(positional ? [positional] : []), ...params.getAll('collection')];
+    const actions = params.getAll('action');
+    const allowed = new Set(actions.length === 0 ? ['create', 'update', 'delete'] : actions);
+    for (const collection of collections) {
+      const set = grants.get(collection) ?? new Set<string>();
+      for (const action of allowed) set.add(action);
+      grants.set(collection, set);
+    }
   }
   return expected.every((collection) =>
     ['create', 'update', 'delete'].every((action) => grants.get(collection)?.has(action)),
@@ -610,9 +826,23 @@ export const spec: NodeGateSpec = {
           ) {
             throw new Error(`direct repository CRUD checks failed for PDS ${identity.which}`);
           }
-          const writes = await appWrites(context, page, session, identities[index === 0 ? 1 : 0]!.did, cleanupNotes);
+          const writes = await appWrites(
+            context,
+            page,
+            session,
+            identities[index === 0 ? 1 : 0]!.did,
+            pds[index]!.endpoint,
+            cleanupNotes,
+          );
           if (writes.length !== 7) throw new Error(`app write checks were incomplete for PDS ${identity.which}`);
 
+          const prepared = await socketObserve(context, session.did, 'prepare_sign_out');
+          if (
+            prepared.status !== 'prepared' ||
+            prepared.refreshTokenPresent !== true ||
+            prepared.sessionVersionStable !== true
+          )
+            throw new Error('host could not bind the current refresh token to the upcoming sign-out');
           const logout = await browserRequest(page, '/api/v1/auth/logout', 'POST', session.csrf, {});
           appSignOutCompleted = logout.status === 204;
           if (!appSignOutCompleted) throw new Error(`app sign-out failed for PDS ${identity.which}`);
@@ -640,6 +870,7 @@ export const spec: NodeGateSpec = {
             appWrites: writes,
             signOut: {
               appSignOutCompleted,
+              sessionVersionStableUntilSignOut: prepared.sessionVersionStable,
               localSessionAbsent: afterSignOut.localSessionAbsent,
               refreshRejected: afterSignOut.refreshRejected,
               refreshError: afterSignOut.refreshError,
@@ -648,6 +879,7 @@ export const spec: NodeGateSpec = {
         } finally {
           if (activeSession !== null && !appSignOutCompleted) {
             try {
+              if (captured) await socketObserve(context, activeSession.did, 'prepare_sign_out');
               const logout = await browserRequest(page, '/api/v1/auth/logout', 'POST', activeSession.csrf, {});
               appSignOutCompleted = logout.status === 204;
               if (captured && appSignOutCompleted) await socketObserve(context, activeSession.did, 'after_sign_out');

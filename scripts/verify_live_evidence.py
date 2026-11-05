@@ -766,8 +766,9 @@ def _node_oauth_results_problems(entry, prefix, prereq):
                 problems.append(f"{where}.signIns ({item['did']}: missing app-supported write kind)")
         sign_out = item.get("signOut")
         if not isinstance(sign_out, dict) or set(sign_out) != {
-            "appSignOutCompleted", "localSessionAbsent", "refreshRejected", "refreshError"
+            "appSignOutCompleted", "sessionVersionStableUntilSignOut", "localSessionAbsent", "refreshRejected", "refreshError"
         } or sign_out.get("appSignOutCompleted") is not True \
+                or sign_out.get("sessionVersionStableUntilSignOut") is not True \
                 or sign_out.get("localSessionAbsent") is not True \
                 or sign_out.get("refreshRejected") is not True \
                 or sign_out.get("refreshError") != "invalid_grant":

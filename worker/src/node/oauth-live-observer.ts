@@ -17,12 +17,14 @@ const SAFE_SCOPE_TOKEN = new RegExp(
 type Capture = {
   saved: NodeSavedSession;
   server: OAuthSession['server'];
+  version: number;
   expiresAt: number;
 };
 
 export interface OAuthLiveObserver {
   capture(did: string): Promise<Record<string, unknown>>;
   exerciseCrud(did: string, followSubject: string): Promise<Record<string, unknown>>;
+  prepareSignOut(did: string): Promise<Record<string, unknown>>;
   verifyAfterSignOut(did: string): Promise<Record<string, unknown>>;
 }
 
@@ -34,10 +36,31 @@ type RecordIntent = {
   initial: RecordValue;
   updated: RecordValue;
   marker: string;
+  restoreValue?: RecordValue;
 };
 
 function asRecord(value: unknown): RecordValue | null {
   return typeof value === 'object' && value !== null && !Array.isArray(value) ? (value as RecordValue) : null;
+}
+
+function equalJson(left: unknown, right: unknown): boolean {
+  if (left === right) return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return (
+      Array.isArray(left) &&
+      Array.isArray(right) &&
+      left.length === right.length &&
+      left.every((value, index) => equalJson(value, right[index]))
+    );
+  }
+  const a = asRecord(left);
+  const b = asRecord(right);
+  if (a === null || b === null) return false;
+  const aKeys = Object.keys(a).sort();
+  const bKeys = Object.keys(b).sort();
+  return (
+    aKeys.length === bKeys.length && aKeys.every((key, index) => key === bKeys[index] && equalJson(a[key], b[key]))
+  );
 }
 
 export function createOAuthLiveObserver(options: {
@@ -135,6 +158,26 @@ export function createOAuthLiveObserver(options: {
     return absence.status === 400 && absence.error === 'RecordNotFound' && absence.value === null;
   }
 
+  async function restoreOriginalRecord(session: OAuthSession, did: string, intent: RecordIntent): Promise<boolean> {
+    if (intent.restoreValue === undefined) return true;
+    const current = await readRecord(session, did, intent);
+    if (current.status === 200 && equalJson(current.value, intent.restoreValue)) return true;
+    if (current.status === 200) {
+      if (!hasMarker(intent, current.value) || !(await deleteOwnedRecord(session, did, intent))) return false;
+    } else if (!(current.status === 400 && current.error === 'RecordNotFound' && current.value === null)) {
+      return false;
+    }
+    const restored = await xrpc(session, 'com.atproto.repo.createRecord', {
+      repo: did,
+      collection: intent.collection,
+      rkey: intent.rkey,
+      record: intent.restoreValue,
+    });
+    if (restored.response.status !== 200) return false;
+    const check = await readRecord(session, did, intent);
+    return check.status === 200 && equalJson(check.value, intent.restoreValue);
+  }
+
   async function runCrud(did: string, followSubject: string): Promise<Record<string, unknown>> {
     if (!options.prefix) return { status: 'prefix_unavailable' };
     const oauth = service();
@@ -196,7 +239,14 @@ export function createOAuthLiveObserver(options: {
       let verified = false;
       try {
         const before = await readRecord(session, did, intent);
-        if (before.status !== 400 || before.error !== 'RecordNotFound' || before.value !== null) {
+        const isAbsent = before.status === 400 && before.error === 'RecordNotFound' && before.value === null;
+        const existingSettings =
+          intent.collection.endsWith('.settings') &&
+          before.status === 200 &&
+          before.cid !== null &&
+          before.value !== null &&
+          before.value.$type === intent.collection;
+        if (!isAbsent && !existingSettings) {
           failed = true;
           output.push({
             collection: intent.collection,
@@ -207,10 +257,26 @@ export function createOAuthLiveObserver(options: {
           });
           continue;
         }
-        // The rkey was absent and this intent carries a unique marker. If the
-        // request loses its response after a server-side commit, cleanup can
-        // recover ownership from that record before conditionally deleting it.
+        if (existingSettings) {
+          // `settings/self` is a singleton. Preserve its exact record before
+          // exercising delete/create/update, then restore it after the probe.
+          intent.restoreValue = before.value as RecordValue;
+        }
+        // The rkey was absent (or the existing singleton is recorded for
+        // restoration) and the temporary record carries this run's marker.
         owned.push(intent);
+        if (existingSettings) {
+          const removed = await xrpc(session, 'com.atproto.repo.deleteRecord', {
+            repo: did,
+            collection: intent.collection,
+            rkey: intent.rkey,
+            swapRecord: before.cid as string,
+          });
+          if (removed.response.status !== 200) throw new Error('settings_remove_existing');
+          const absence = await readRecord(session, did, intent);
+          if (absence.status !== 400 || absence.error !== 'RecordNotFound' || absence.value !== null)
+            throw new Error('settings_remove_existing_verify');
+        }
         const created = await xrpc(session, 'com.atproto.repo.createRecord', {
           repo: did,
           collection: intent.collection,
@@ -250,6 +316,7 @@ export function createOAuthLiveObserver(options: {
         const absent = await readRecord(session, did, intent);
         if (absent.status !== 400 || absent.error !== 'RecordNotFound' || absent.value !== null)
           throw new Error('delete_verify');
+        if (!(await restoreOriginalRecord(session, did, intent))) throw new Error('settings_restore');
         verified = true;
       } catch {
         failed = true;
@@ -265,11 +332,12 @@ export function createOAuthLiveObserver(options: {
 
     let cleanupVerified = true;
     for (const intent of owned) {
-      // Already-deleted records count as clean; partially completed operations
-      // are removed only when their current content carries this run's marker.
-      const current = await readRecord(session, did, intent).catch(() => null);
-      if (current?.status === 400 && current.error === 'RecordNotFound' && current.value === null) continue;
-      const cleaned = await deleteOwnedRecord(session, did, intent).catch(() => false);
+      // Repeated runs preserve the singleton; partial temporary writes are
+      // deleted only when their current content carries this run's marker.
+      const cleaned =
+        intent.restoreValue !== undefined
+          ? await restoreOriginalRecord(session, did, intent).catch(() => false)
+          : await deleteOwnedRecord(session, did, intent).catch(() => false);
       if (!cleaned) cleanupVerified = false;
     }
     return { status: failed ? 'failed' : 'passed', crud: output, cleanupVerified };
@@ -333,6 +401,7 @@ export function createOAuthLiveObserver(options: {
         captures.set(did, {
           saved,
           server: session.server,
+          version: after.version,
           expiresAt: options.nowMs() + CAPTURE_TTL_MS,
         });
 
@@ -361,6 +430,43 @@ export function createOAuthLiveObserver(options: {
       }
     },
 
+    async prepareSignOut(did) {
+      const capture = captures.get(did);
+      if (!capture || expired(capture)) return { status: 'capture_missing_or_expired' };
+      try {
+        const oauth = service();
+        const before = oauth.sessionStore.snapshot(did);
+        const saved = before.session;
+        if (!saved || saved.tokenSet.sub !== did || !saved.tokenSet.refresh_token)
+          return { status: 'session_changed_before_sign_out' };
+        const session = await oauth.restore(did, false);
+        const after = oauth.sessionStore.snapshot(did);
+        if (
+          after.session === undefined ||
+          after.version !== before.version ||
+          after.session.tokenSet.refresh_token !== saved.tokenSet.refresh_token ||
+          after.session.tokenSet.sub !== did ||
+          after.session.tokenSet.iss !== capture.saved.tokenSet.iss ||
+          after.session.authMethod.method !== 'private_key_jwt' ||
+          after.session.tokenSet.token_type !== 'DPoP'
+        ) {
+          return { status: 'session_changed_before_sign_out' };
+        }
+        const tokenInfo = await session.getTokenInfo(false);
+        if (tokenInfo.sub !== did || tokenInfo.iss !== after.session.tokenSet.iss)
+          return { status: 'session_binding_mismatch_before_sign_out' };
+        captures.set(did, {
+          saved: after.session,
+          server: session.server,
+          version: after.version,
+          expiresAt: capture.expiresAt,
+        });
+        return { status: 'prepared', refreshTokenPresent: true, sessionVersionStable: true };
+      } catch {
+        return { status: 'prepare_failed' };
+      }
+    },
+
     async verifyAfterSignOut(did) {
       const capture = captures.get(did);
       captures.delete(did);
@@ -373,8 +479,12 @@ export function createOAuthLiveObserver(options: {
         };
       }
       let localSessionAbsent = false;
+      let afterVersion = -1;
       try {
-        localSessionAbsent = !service().sessionStore.has(did);
+        const store = service().sessionStore;
+        const after = store.snapshot(did);
+        afterVersion = after.version;
+        localSessionAbsent = after.session === undefined && !store.has(did);
       } catch {
         return {
           status: 'local_session_check_failed',
@@ -387,6 +497,14 @@ export function createOAuthLiveObserver(options: {
         return {
           status: 'local_session_still_present',
           localSessionAbsent: false,
+          refreshRejected: false,
+          refreshError: 'not_observed',
+        };
+      }
+      if (afterVersion !== capture.version + 1) {
+        return {
+          status: 'session_changed_after_prepare',
+          localSessionAbsent: true,
           refreshRejected: false,
           refreshError: 'not_observed',
         };
