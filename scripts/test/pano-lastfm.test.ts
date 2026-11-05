@@ -99,6 +99,7 @@ describe('Pano Last.fm replay client', () => {
     });
 
     expect(result.username).toBe('pano-user');
+    expect(result.sessionKey).toBe('fake-session-key');
     expect(
       requests.map((request) => [
         request.method,
@@ -141,7 +142,6 @@ describe('Pano Last.fm replay client', () => {
       Object.fromEntries(
         new URLSearchParams({
           method: 'user.getRecentTracks',
-          user: 'pano-user',
           sk: 'fake-session-key',
           api_key: 'panoScrobbler',
           format: 'json',

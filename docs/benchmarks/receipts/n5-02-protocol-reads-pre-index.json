@@ -1,0 +1,165 @@
+{
+  "schema": "atmusic/protocol-reads-benchmark@2",
+  "generatedBy": "worker/test/bench/protocol-reads.bench.test.ts",
+  "generatedAt": "2026-11-03T07:14:07.984Z",
+  "dataset": {
+    "listens": 100000,
+    "seed": 24301,
+    "clock": "2026-01-15T12:00:00Z",
+    "applyPathRecords": 100,
+    "operations": {
+      "total": 256,
+      "scrobbleCreateSucceeded": 250,
+      "scrobbleDelete": {
+        "queued": 1,
+        "running": 1,
+        "blocked": 1,
+        "failed": 1,
+        "succeededMatchingCid": 1,
+        "succeededStaleCid": 1
+      },
+      "visibleScrobbles": 99995,
+      "hiddenScrobbles": 5
+    }
+  },
+  "plans": {
+    "source": "EXPLAIN QUERY PLAN; Node v26.12.1; node:sqlite 3.54.1; linux/x64",
+    "topTracks": [
+      {
+        "sql": "WITH w AS MATERIALIZED (SELECT s.uri, s.listened_at, s.artist_key, s.track_key,\n      s.album_key, s.album_artist_key, s.duration_seconds FROM scrobbles s JOIN users u\n    ON u.did = s.did AND (u.active = 1 AND NOT EXISTS (SELECT 1 FROM suppression x WHERE x.did = u.did))\n    AND NOT EXISTS (\n      SELECT 1 FROM operations AS d\n      WHERE d.did = s.did AND d.rkey = s.rkey\n        AND d.kind = 'scrobble.delete'\n        AND (\n          d.state IN ('queued', 'running', 'blocked', 'failed')\n          OR (d.state = 'succeeded' AND d.swap_cid = s.cid)\n        )\n    )\n    WHERE s.did = ? AND s.listened_at < ?)\n        SELECT count(*) AS listens,\n               count(DISTINCT artist_key) AS artists,\n               count(DISTINCT hex(artist_key) || ':' || hex(track_key)) AS tracks,\n               count(DISTINCT CASE WHEN album_key IS NOT NULL\n                 THEN hex(coalesce(album_artist_key, artist_key)) || ':' || hex(album_key) END) AS albums\n        FROM w",
+        "details": [
+          "MATERIALIZE w",
+          "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+          "CORRELATED SCALAR SUBQUERY 1",
+          "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+          "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at<?)",
+          "CORRELATED SCALAR SUBQUERY 2",
+          "SEARCH d USING INDEX operations_did_state (did=?)",
+          "USE TEMP B-TREE FOR count(DISTINCT)",
+          "USE TEMP B-TREE FOR count(DISTINCT)",
+          "USE TEMP B-TREE FOR count(DISTINCT)",
+          "SCAN w"
+        ]
+      },
+      {
+        "sql": "WITH w AS (SELECT s.uri, s.listened_at, s.artist_key, s.track_key,\n      s.album_key, s.album_artist_key, s.duration_seconds FROM scrobbles s JOIN users u\n    ON u.did = s.did AND (u.active = 1 AND NOT EXISTS (SELECT 1 FROM suppression x WHERE x.did = u.did))\n    AND NOT EXISTS (\n      SELECT 1 FROM operations AS d\n      WHERE d.did = s.did AND d.rkey = s.rkey\n        AND d.kind = 'scrobble.delete'\n        AND (\n          d.state IN ('queued', 'running', 'blocked', 'failed')\n          OR (d.state = 'succeeded' AND d.swap_cid = s.cid)\n        )\n    )\n    WHERE s.did = ? AND s.listened_at < ?),\n        g AS (SELECT artist_key, track_key, count(*) AS c, max(listened_at || ' ' || uri) AS newest,\n                     max(CASE WHEN duration_seconds IS NOT NULL THEN listened_at || ' ' || uri END) AS newest_dur\n              FROM w GROUP BY artist_key, track_key)\n        SELECT g.artist_key AS artist_key, g.track_key AS track_key, g.c AS c, d.listened_at AS newest_at,\n               d.artist AS artist, d.track AS track, d.album AS album, d.recording_mbid AS recording_mbid,\n               d.release_mbid AS release_mbid, d.artist_mbids AS artist_mbids, dd.duration_seconds AS duration_seconds\n        FROM g JOIN scrobbles d ON d.uri = substr(g.newest, 32)\n        LEFT JOIN scrobbles dd ON dd.uri = substr(g.newest_dur, 32)\n        ORDER BY g.c DESC, g.artist_key ASC, g.track_key ASC LIMIT ? OFFSET ?",
+        "details": [
+          "CO-ROUTINE g",
+          "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+          "CORRELATED SCALAR SUBQUERY 1",
+          "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+          "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at<?)",
+          "CORRELATED SCALAR SUBQUERY 2",
+          "SEARCH d USING INDEX operations_did_state (did=?)",
+          "USE TEMP B-TREE FOR GROUP BY",
+          "SCAN g",
+          "SEARCH d USING INDEX sqlite_autoindex_scrobbles_1 (uri=?)",
+          "SEARCH dd USING INDEX sqlite_autoindex_scrobbles_1 (uri=?) LEFT-JOIN",
+          "USE TEMP B-TREE FOR ORDER BY"
+        ]
+      }
+    ],
+    "recentTracks": [
+      {
+        "sql": "SELECT count(*) AS n FROM scrobbles s JOIN users u\n    ON u.did = s.did AND (u.active = 1 AND NOT EXISTS (SELECT 1 FROM suppression x WHERE x.did = u.did))\n    AND NOT EXISTS (\n      SELECT 1 FROM operations AS d\n      WHERE d.did = s.did AND d.rkey = s.rkey\n        AND d.kind = 'scrobble.delete'\n        AND (\n          d.state IN ('queued', 'running', 'blocked', 'failed')\n          OR (d.state = 'succeeded' AND d.swap_cid = s.cid)\n        )\n    ) WHERE s.did = ?",
+        "details": [
+          "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+          "CORRELATED SCALAR SUBQUERY 1",
+          "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+          "SEARCH s USING INDEX scrobbles_stats (did=?)",
+          "CORRELATED SCALAR SUBQUERY 2",
+          "SEARCH d USING INDEX operations_did_state (did=?)"
+        ]
+      },
+      {
+        "sql": "SELECT s.* FROM scrobbles s JOIN users u\n    ON u.did = s.did AND (u.active = 1 AND NOT EXISTS (SELECT 1 FROM suppression x WHERE x.did = u.did))\n    AND NOT EXISTS (\n      SELECT 1 FROM operations AS d\n      WHERE d.did = s.did AND d.rkey = s.rkey\n        AND d.kind = 'scrobble.delete'\n        AND (\n          d.state IN ('queued', 'running', 'blocked', 'failed')\n          OR (d.state = 'succeeded' AND d.swap_cid = s.cid)\n        )\n    ) WHERE s.did = ?\n     ORDER BY s.listened_at DESC, s.uri DESC LIMIT ? OFFSET ?",
+        "details": [
+          "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+          "CORRELATED SCALAR SUBQUERY 1",
+          "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+          "SEARCH s USING INDEX scrobbles_owner_time (did=?)",
+          "CORRELATED SCALAR SUBQUERY 2",
+          "SEARCH d USING INDEX operations_did_state (did=?)"
+        ]
+      }
+    ],
+    "listenbrainzAllTime": [
+      {
+        "sql": "WITH w AS MATERIALIZED (SELECT s.uri, s.listened_at, s.artist_key, s.track_key,\n      s.album_key, s.album_artist_key, s.duration_seconds FROM scrobbles s JOIN users u\n    ON u.did = s.did AND (u.active = 1 AND NOT EXISTS (SELECT 1 FROM suppression x WHERE x.did = u.did))\n    AND NOT EXISTS (\n      SELECT 1 FROM operations AS d\n      WHERE d.did = s.did AND d.rkey = s.rkey\n        AND d.kind = 'scrobble.delete'\n        AND (\n          d.state IN ('queued', 'running', 'blocked', 'failed')\n          OR (d.state = 'succeeded' AND d.swap_cid = s.cid)\n        )\n    )\n    WHERE s.did = ? AND s.listened_at < ? AND s.listened_at >= ?)\n        SELECT count(*) AS listens,\n               count(DISTINCT artist_key) AS artists,\n               count(DISTINCT hex(artist_key) || ':' || hex(track_key)) AS tracks,\n               count(DISTINCT CASE WHEN album_key IS NOT NULL\n                 THEN hex(coalesce(album_artist_key, artist_key)) || ':' || hex(album_key) END) AS albums\n        FROM w",
+        "details": [
+          "MATERIALIZE w",
+          "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+          "CORRELATED SCALAR SUBQUERY 1",
+          "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+          "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at>? AND listened_at<?)",
+          "CORRELATED SCALAR SUBQUERY 2",
+          "SEARCH d USING INDEX operations_did_state (did=?)",
+          "USE TEMP B-TREE FOR count(DISTINCT)",
+          "USE TEMP B-TREE FOR count(DISTINCT)",
+          "USE TEMP B-TREE FOR count(DISTINCT)",
+          "SCAN w"
+        ]
+      },
+      {
+        "sql": "WITH w AS (SELECT s.uri, s.listened_at, s.artist_key, s.track_key,\n      s.album_key, s.album_artist_key, s.duration_seconds FROM scrobbles s JOIN users u\n    ON u.did = s.did AND (u.active = 1 AND NOT EXISTS (SELECT 1 FROM suppression x WHERE x.did = u.did))\n    AND NOT EXISTS (\n      SELECT 1 FROM operations AS d\n      WHERE d.did = s.did AND d.rkey = s.rkey\n        AND d.kind = 'scrobble.delete'\n        AND (\n          d.state IN ('queued', 'running', 'blocked', 'failed')\n          OR (d.state = 'succeeded' AND d.swap_cid = s.cid)\n        )\n    )\n    WHERE s.did = ? AND s.listened_at < ? AND s.listened_at >= ?),\n        g AS (SELECT artist_key, track_key, count(*) AS c, max(listened_at || ' ' || uri) AS newest,\n                     max(CASE WHEN duration_seconds IS NOT NULL THEN listened_at || ' ' || uri END) AS newest_dur\n              FROM w GROUP BY artist_key, track_key)\n        SELECT g.artist_key AS artist_key, g.track_key AS track_key, g.c AS c, d.listened_at AS newest_at,\n               d.artist AS artist, d.track AS track, d.album AS album, d.recording_mbid AS recording_mbid,\n               d.release_mbid AS release_mbid, d.artist_mbids AS artist_mbids, dd.duration_seconds AS duration_seconds\n        FROM g JOIN scrobbles d ON d.uri = substr(g.newest, 32)\n        LEFT JOIN scrobbles dd ON dd.uri = substr(g.newest_dur, 32)\n        ORDER BY g.c DESC, g.artist_key ASC, g.track_key ASC LIMIT ? OFFSET ?",
+        "details": [
+          "CO-ROUTINE g",
+          "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+          "CORRELATED SCALAR SUBQUERY 1",
+          "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+          "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at>? AND listened_at<?)",
+          "CORRELATED SCALAR SUBQUERY 2",
+          "SEARCH d USING INDEX operations_did_state (did=?)",
+          "USE TEMP B-TREE FOR GROUP BY",
+          "SCAN g",
+          "SEARCH d USING INDEX sqlite_autoindex_scrobbles_1 (uri=?)",
+          "SEARCH dd USING INDEX sqlite_autoindex_scrobbles_1 (uri=?) LEFT-JOIN",
+          "USE TEMP B-TREE FOR ORDER BY"
+        ]
+      }
+    ],
+    "listeningActivityYear": [
+      {
+        "sql": "SELECT substr(s.listened_at, 1, 7) AS p, count(*) AS c FROM scrobbles s JOIN users u\n    ON u.did = s.did AND (u.active = 1 AND NOT EXISTS (SELECT 1 FROM suppression x WHERE x.did = u.did))\n    AND NOT EXISTS (\n      SELECT 1 FROM operations AS d\n      WHERE d.did = s.did AND d.rkey = s.rkey\n        AND d.kind = 'scrobble.delete'\n        AND (\n          d.state IN ('queued', 'running', 'blocked', 'failed')\n          OR (d.state = 'succeeded' AND d.swap_cid = s.cid)\n        )\n    )\n     WHERE s.did = ? AND s.listened_at < ? AND s.listened_at >= ? GROUP BY substr(s.listened_at, 1, 7)",
+        "details": [
+          "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+          "CORRELATED SCALAR SUBQUERY 1",
+          "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+          "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at>? AND listened_at<?)",
+          "CORRELATED SCALAR SUBQUERY 2",
+          "SEARCH d USING INDEX operations_did_state (did=?)",
+          "USE TEMP B-TREE FOR GROUP BY"
+        ]
+      }
+    ]
+  },
+  "reads": {
+    "topTracks": {
+      "cached": {
+        "runs": 10,
+        "p50Ms": 3.276110000006156,
+        "p95Ms": 6.834797999996226
+      },
+      "uncached": {
+        "runs": 10,
+        "p50Ms": 9138.389561999997,
+        "p95Ms": 10007.293117000008
+      }
+    },
+    "recentTracksPage500": {
+      "runs": 10,
+      "p50Ms": 9187.244532000012,
+      "p95Ms": 12125.753884000005
+    },
+    "listenbrainzAllTime": {
+      "runs": 10,
+      "p50Ms": 10010.037451000011,
+      "p95Ms": 11783.651853999996
+    },
+    "listeningActivityYear": {
+      "runs": 10,
+      "p50Ms": 4156.52270599996,
+      "p95Ms": 4749.518083999981
+    }
+  }
+}

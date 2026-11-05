@@ -10,12 +10,31 @@ import { computed, type ReadonlySignal, type Signal, signal } from '@preact/sign
 import { createContext } from 'preact';
 import { useContext } from 'preact/hooks';
 import { type ApiClient, type ApiFailure, createApiClient, isApiFailure } from '../api/client';
-import type { Session } from '../session/client';
+import type { Session, SessionChangeKind } from '../session/client';
+
+export interface ScrobbleDraftValues {
+  artist: string;
+  track: string;
+  album: string;
+  listenedAt: string;
+  durationSeconds: string;
+  recordingMbid: string;
+}
+
+export interface ScrobbleDraft {
+  /** Drafts belong to the account that started them and never cross accounts. */
+  did: string;
+  /** Changes on each edit so an older in-flight write cannot clear a newer draft. */
+  revision: number;
+  values: ScrobbleDraftValues;
+}
 
 export interface AppState {
   readonly api: ApiClient;
   /** The signed-in cookie BFF session, or null when anonymous. */
   readonly session: Signal<Session | null>;
+  /** Non-secret scrobble form values retained across same-tab reauthentication. */
+  readonly scrobbleDraft: Signal<ScrobbleDraft | null>;
   /** The session DID's verified handle (from /api/v1/resolve or the profile), when known. */
   readonly handle: Signal<Handle | null>;
   /** True when the session expired or refresh failed and the user must sign in again. */
@@ -31,12 +50,74 @@ export interface AppState {
   readonly canPublish: ReadonlySignal<boolean>;
 }
 
+const draftRevision = new WeakMap<AppState, number>();
+const DRAFT_STORAGE_KEY = 'atmusic:scrobble-draft';
+
+function readStoredDraft(): ScrobbleDraft | null {
+  try {
+    const raw = sessionStorage.getItem(DRAFT_STORAGE_KEY);
+    if (raw === null) return null;
+    const value: unknown = JSON.parse(raw);
+    if (typeof value !== 'object' || value === null) {
+      sessionStorage.removeItem(DRAFT_STORAGE_KEY);
+      return null;
+    }
+    const draft = value as Partial<ScrobbleDraft>;
+    const values = draft.values as Partial<ScrobbleDraftValues> | undefined;
+    if (
+      typeof draft.did !== 'string' ||
+      typeof draft.revision !== 'number' ||
+      !Number.isInteger(draft.revision) ||
+      draft.revision < 1 ||
+      values === undefined ||
+      typeof values.artist !== 'string' ||
+      typeof values.track !== 'string' ||
+      typeof values.album !== 'string' ||
+      typeof values.listenedAt !== 'string' ||
+      typeof values.durationSeconds !== 'string' ||
+      typeof values.recordingMbid !== 'string'
+    ) {
+      sessionStorage.removeItem(DRAFT_STORAGE_KEY);
+      return null;
+    }
+    return {
+      did: draft.did,
+      revision: draft.revision,
+      values: {
+        artist: values.artist,
+        track: values.track,
+        album: values.album,
+        listenedAt: values.listenedAt,
+        durationSeconds: values.durationSeconds,
+        recordingMbid: values.recordingMbid,
+      },
+    };
+  } catch {
+    try {
+      sessionStorage.removeItem(DRAFT_STORAGE_KEY);
+    } catch {
+      // Storage may be unavailable; ignore malformed persisted data.
+    }
+    return null;
+  }
+}
+
+function writeStoredDraft(draft: ScrobbleDraft | null): void {
+  try {
+    if (draft === null) sessionStorage.removeItem(DRAFT_STORAGE_KEY);
+    else sessionStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify(draft));
+  } catch {
+    // Draft persistence is best-effort; the in-memory form remains usable.
+  }
+}
+
 export function createAppState(options: { api?: ApiClient } = {}): AppState {
   const session = signal<Session | null>(null);
   const meta = signal<Meta | null>(null);
   return {
     api: options.api ?? createApiClient(),
     session,
+    scrobbleDraft: signal<ScrobbleDraft | null>(null),
     handle: signal<Handle | null>(null),
     reauthRequired: signal(false),
     meta,
@@ -60,11 +141,57 @@ export async function loadMeta(state: AppState, abort?: AbortSignal): Promise<vo
   }
 }
 
-/** Records a new session (or null after sign-out) and clears per-session data. */
-export function setSession(state: AppState, session: Session | null, handle: Handle | null = null): void {
+/** Records the session; drafts survive anonymous/reauth states until logout or an identity change. */
+export function setSession(
+  state: AppState,
+  session: Session | null,
+  handle: Handle | null = null,
+  options: { reauthRequired?: boolean; kind?: SessionChangeKind } = {},
+): void {
+  const reauthRequired = options.reauthRequired ?? false;
+  const kind =
+    options.kind ?? (session === null ? (reauthRequired ? 'reauth_required' : 'anonymous') : 'authenticated');
+  let draft = state.scrobbleDraft.value;
+  if (kind === 'signed_out') {
+    state.scrobbleDraft.value = null;
+    writeStoredDraft(null);
+  }
+  if (session !== null) {
+    if (draft !== null && draft.did !== session.did) {
+      draft = null;
+      state.scrobbleDraft.value = null;
+      writeStoredDraft(null);
+    }
+    if (draft === null) {
+      const stored = readStoredDraft();
+      if (stored?.did === session.did) {
+        draft = stored;
+        state.scrobbleDraft.value = stored;
+        draftRevision.set(state, stored.revision);
+      } else if (stored !== null) {
+        writeStoredDraft(null);
+      }
+    }
+  }
   state.session.value = session;
   state.handle.value = session ? handle : null;
-  state.reauthRequired.value = false;
+  state.reauthRequired.value = reauthRequired;
+}
+
+/** Updates the active account's non-secret scrobble draft in memory. */
+export function setScrobbleDraft(state: AppState, values: ScrobbleDraftValues): void {
+  const did = state.session.value?.did;
+  if (did === undefined) return;
+  const revision = (draftRevision.get(state) ?? 0) + 1;
+  draftRevision.set(state, revision);
+  const draft = { did, revision, values: { ...values } };
+  state.scrobbleDraft.value = draft;
+  writeStoredDraft(draft);
+}
+
+export function clearScrobbleDraft(state: AppState): void {
+  state.scrobbleDraft.value = null;
+  writeStoredDraft(null);
 }
 
 export const AppStateContext = createContext<AppState | null>(null);

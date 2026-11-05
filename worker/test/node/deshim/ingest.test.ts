@@ -350,18 +350,45 @@ describe('ingest de-shim', () => {
   it('every title node-port-inventory.json marks kept for worker/test/ingest is still declared byte-identical in its file', () => {
     const entries = ingestEntries();
     const kept = entries.filter((e) => e.kept === true);
-    // The ADR 0004 baseline's ingest tests: 77 kept in 15 files, 1 replaced (N3-11).
-    expect(kept).toHaveLength(77);
-    expect(new Set(kept.map((e) => e.file)).size).toBe(15);
+    // The ADR 0004 baseline's ingest tests: 72 kept in 14 files, 6 replaced
+    // (1 by N3-11; 3 pulse-mode cases of ingest-mode.test.ts and 2 plan-tier
+    // cases of verify-drain.test.ts by N7-01,
+    // ADR 0005 §15.3, which maps them to the N4-03 socket-mode composition test).
+    expect(kept).toHaveLength(72);
+    expect(new Set(kept.map((e) => e.file)).size).toBe(14);
     const problems = kept.flatMap((e) => undeclared(read(e.file), e).map((p) => `${e.id}: ${p} not declared`));
     expect(problems).toEqual([]);
 
     // N3-11's replacement is declared under its new title, in the same file, and the old title is gone.
+    // N7-01's pulse cases point at the socket-mode composition test; removed
+    // plan-tier titles point at the budget tests that no longer select a plan.
     const replaced = entries.filter((e) => e.replaced !== undefined);
+    const socketMode =
+      'worker/test/composition/index-core-node.test.ts › IndexCore on the Node host runs Jetstream socket mode through the ws connector to a loopback server and re-arms the alarm after a throwing tick';
     expect(replaced.map((e) => [e.id, e.replaced])).toEqual([
+      [
+        'worker/test/ingest/ingest-mode.test.ts › pulse mode drains to tail then closes; off mode never connects',
+        socketMode,
+      ],
+      [
+        'worker/test/ingest/ingest-mode.test.ts › a pulse that receives no event leaves lagSeconds null and the last successful pulse more than two intervals ago reports stale',
+        socketMode,
+      ],
+      [
+        'worker/test/ingest/ingest-mode.test.ts › quiet pulses longer than lookback do not trigger gap recovery; a quiet pulse after an outage confirms nothing; a real disconnect gap still does',
+        socketMode,
+      ],
       [
         'worker/test/ingest/jetstream-socket.test.ts › jetstream socket › subscribe URL has kinds=commit and the three collections only',
         'worker/test/ingest/jetstream-socket.test.ts › jetstream socket › subscribe URL has kinds=commit and the four collections only',
+      ],
+      [
+        'worker/test/ingest/verify-drain.test.ts › verify drain › Paid drain works 200 cached-identity hints in one slice: 200 getRecord calls',
+        'worker/test/ingest/verify-drain.test.ts › verify drain › the configured drain budget handles 200 cached-identity hints in one slice',
+      ],
+      [
+        'worker/test/ingest/verify-drain.test.ts › verify drain › PLAN=free drain stays within 40 subrequests per slice',
+        'worker/test/ingest/verify-drain.test.ts › verify drain › drain respects an explicitly supplied tight subrequest budget',
       ],
     ]);
     const socket = read(`${INGEST_DIR}/jetstream-socket.test.ts`);

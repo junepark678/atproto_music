@@ -1,5 +1,6 @@
-// The Jetstream socket (ADR 0004 §5.5 `socket` mode) and the connector shared
-// with `pulse` mode (worker/src/do/ingest/ingest-mode.ts).
+// The Jetstream socket (ADR 0004 §5.5 `socket` mode; ADR 0005 §3.8) and its
+// connector. The Workers-era `pulse` paths were retired by N7-01 (B17): every
+// link is a socket link, and ingest-mode.ts only dispatches `socket` or `off`.
 //
 // Connector. `connectJetstream(url)` is the only network edge. Production
 // (`createJetstreamConnector()`) does `fetch(httpsUrl, {headers:{Upgrade:
@@ -41,11 +42,9 @@
 // Quiet links (ADR §15 Q11). A link that received no message (other than the
 // inclusive re-delivery of the event its resume point names) is confirmed
 // healthy at its open instant when it ends by our own close after its whole
-// confirmation window: a socket link at its planned refresh (open
-// continuously for PLANNED_REFRESH_MS), or a pulse that drained its full 20 s
-// (ingest-mode.ts) from a cursor at most QUIET_PULSE_MAX_BACKLOG_MS older than
-// the pulse (a short drain proves nothing about a long replay). Then, before
-// the close, the resume point moves to `open instant − 60 s`
+// confirmation window: its planned refresh (open continuously for
+// PLANNED_REFRESH_MS). Then, before the close, the resume point moves to
+// `open instant − 60 s`
 // (checkpoint.ts `noteHealthyResume`), so a stream with no wanted events for
 // longer than JETSTREAM_LOOKBACK_HOURS never looks like a gap. A close or an
 // error from the server, a local failure, a superseding connect or a link
@@ -85,11 +84,6 @@ export const RECONNECT_CAP_MS = 60_000;
 export const RECONNECT_JITTER = 0.2;
 /** A connection open at least this long resets the backoff streak. */
 export const STABLE_CONNECTION_MS = 60_000;
-/**
- * A quiet pulse confirms its open instant healthy only when it started from a
- * cursor at most this much older than the pulse (three pulse intervals).
- */
-export const QUIET_PULSE_MAX_BACKLOG_MS = 15 * 60_000;
 /** Deadline for the upgrade request. */
 export const CONNECT_TIMEOUT_MS = 10_000;
 const ERROR_BODY_LIMIT = 4096;
@@ -229,17 +223,11 @@ export const connectJetstream: ConnectJetstream = createJetstreamConnector();
 // ---------------------------------------------------------------------------
 // Socket state (per IndexDO instance)
 
-export type LinkMode = 'socket' | 'pulse';
-
 export interface SocketOptions {
   /** W4-01's scheduleGapRecovery, wired by W5-01 (see checkpoint.ts). */
   scheduleGapRecovery?: ScheduleGapRecovery;
   /** A socket event wrote a timer outside an alarm: re-arm the alarm (W5-01). */
   onTimersChanged?: () => void;
-  /** Called after every message outcome on the current link (pulse uses it to detect the tail). */
-  onOutcome?: (o: MessageOutcome) => void;
-  /** Called once when the current link ends (close, error or local failure). */
-  onEnd?: (cause: EndCause) => void;
 }
 
 export type EndCause = 'close' | 'error' | 'local_failure' | 'cursor_rejected' | 'superseded';
@@ -247,7 +235,8 @@ export type EndCause = 'close' | 'error' | 'local_failure' | 'cursor_rejected' |
 export interface OpenLink {
   link: JetstreamLink;
   url: string;
-  mode: LinkMode;
+  /** Always `socket` since N7-01 retired pulse links; kept in the status shape. */
+  mode: 'socket';
   hostIndex: number;
   /** The cursor the URL carried; null for the live tail. */
   cursor: number | null;
@@ -343,28 +332,27 @@ function bump(m: ModuleDeps, s: SocketState, now: number): number {
 }
 
 /**
- * Open the Jetstream link for `mode` (default: the configured effective mode).
- * Resolves once the link is open (or failed). At most one connect runs at a
- * time; a second call while one is in flight joins it.
+ * Open the Jetstream socket link (a no-op `off` result when the configured
+ * ingest mode is `off`, or nothing is configured to subscribe to). Resolves
+ * once the link is open (or failed). At most one connect runs at a time; a
+ * second call while one is in flight joins it.
  */
 export function connect(
   m: ModuleDeps,
   connectJetstream: ConnectJetstream,
   now: number,
-  options: SocketOptions & { mode?: LinkMode } = {},
+  options: SocketOptions = {},
 ): Promise<ConnectResult> {
   const s = stateOf(m);
   if (s.connecting !== null) return s.connecting;
-  const mode = options.mode ?? m.config.ingestMode;
-  if (mode === 'off' || configuredCollections(m).length === 0 || m.config.jetstreamUrls.length === 0) {
+  if (m.config.ingestMode === 'off' || configuredCollections(m).length === 0 || m.config.jetstreamUrls.length === 0) {
     return Promise.resolve({ ok: false, reason: 'off' });
   }
-  if (s.current !== null && s.current.mode === mode) {
+  if (s.current !== null) {
     return Promise.resolve({ ok: true, url: s.current.url, hostIndex: s.current.hostIndex, gap: null, reused: true });
   }
-  if (s.current !== null) dropLink(m, s, 'superseded', now);
   s.options = options;
-  const run = doConnect(m, s, connectJetstream, now, mode).finally(() => {
+  const run = doConnect(m, s, connectJetstream, now).finally(() => {
     s.connecting = null;
   });
   s.connecting = run;
@@ -376,7 +364,6 @@ async function doConnect(
   s: SocketState,
   connector: ConnectJetstream,
   now: number,
-  mode: LinkMode,
 ): Promise<ConnectResult> {
   const cp = readIngestCheckpoint(m.db);
   const hostIndex = cp.hostIndex % hostCount(m.config);
@@ -398,7 +385,7 @@ async function doConnect(
     }
   } catch (error) {
     const e = error instanceof JetstreamConnectError ? error : null;
-    return connectFailed(m, s, mode, hostIndex, now, url, {
+    return connectFailed(m, s, hostIndex, now, url, {
       status: e?.status ?? null,
       error: e?.error ?? null,
       detail: e === null ? String(error) : null,
@@ -414,25 +401,23 @@ async function doConnect(
   try {
     m.db.tx(() => {
       noteConnected(m.db, openedAtMs, {
-        mode,
+        mode: 'socket',
         hostIndex,
         gap,
         attemptMs: now,
         ...(s.options.scheduleGapRecovery === undefined ? {} : { scheduleGapRecovery: s.options.scheduleGapRecovery }),
       });
-      if (mode === 'socket') {
-        schedule(
-          m.db,
-          'jetstream-watchdog',
-          Math.min(openedAtMs + WATCHDOG_INTERVAL_MS, openedAtMs + PLANNED_REFRESH_MS),
-          { force: true },
-        );
-      }
+      schedule(
+        m.db,
+        'jetstream-watchdog',
+        Math.min(openedAtMs + WATCHDOG_INTERVAL_MS, openedAtMs + PLANNED_REFRESH_MS),
+        { force: true },
+      );
     });
   } catch (error) {
     link.close(1011, 'local_failure');
     m.log.log('error', 'jetstream_connect_bookkeeping_failed', { error: String(error) });
-    return connectFailed(m, s, mode, hostIndex, now, url, {
+    return connectFailed(m, s, hostIndex, now, url, {
       status: null,
       error: 'local_failure',
       detail: String(error),
@@ -442,7 +427,7 @@ async function doConnect(
   const open: OpenLink = {
     link,
     url,
-    mode,
+    mode: 'socket',
     hostIndex,
     cursor,
     resumeCursor: gap === null ? cp.cursor : tailCursor(now),
@@ -456,7 +441,6 @@ async function doConnect(
   s.current = open;
   m.log.log('info', 'jetstream_connected', {
     host: new URL(url).host,
-    mode,
     cursor,
     gap,
   });
@@ -466,13 +450,12 @@ async function doConnect(
 
 /**
  * A failed connect (refused or failed upgrade, or local bookkeeping that threw
- * after the upgrade): writes no connection evidence, rotates `host_index` and,
- * in socket mode, bumps the backoff and schedules the watchdog.
+ * after the upgrade): writes no connection evidence, rotates `host_index`,
+ * bumps the backoff and schedules the watchdog.
  */
 function connectFailed(
   m: ModuleDeps,
   s: SocketState,
-  mode: LinkMode,
   hostIndex: number,
   now: number,
   url: string,
@@ -482,10 +465,8 @@ function connectFailed(
   let retryAtMs: number | undefined;
   m.db.tx(() => {
     noteHostIndex(m.db, next);
-    if (mode === 'socket') {
-      retryAtMs = bump(m, s, now);
-      schedule(m.db, 'jetstream-watchdog', retryAtMs, { force: true });
-    }
+    retryAtMs = bump(m, s, now);
+    schedule(m.db, 'jetstream-watchdog', retryAtMs, { force: true });
   });
   m.log.log('warn', 'jetstream_connect_failed', {
     host: new URL(url).host,
@@ -528,9 +509,7 @@ function onLinkEvent(m: ModuleDeps, s: SocketState, open: OpenLink, e: LinkEvent
     if (outcome.kind === 'notice' && outcome.notice.type === 'error' && /cursor/i.test(outcome.notice.name)) {
       s.forceTail = true;
       dropLink(m, s, 'cursor_rejected', now);
-      return;
     }
-    s.options.onOutcome?.(outcome);
     return;
   }
   m.log.log('warn', 'jetstream_disconnected', {
@@ -546,14 +525,9 @@ function onLinkEvent(m: ModuleDeps, s: SocketState, open: OpenLink, e: LinkEvent
  * instant (see the header, "Quiet links")? Only a link that received no
  * message beyond the re-delivery of its resume point's own event qualifies.
  */
-function quietAndHealthy(open: OpenLink, now: number, end: 'planned_refresh' | 'pulse_drained'): boolean {
+function quietAndHealthy(open: OpenLink, now: number): boolean {
   if (open.activity !== 0 || open.resumeCursor === null) return false;
-  if (end === 'planned_refresh') return open.mode === 'socket' && now - open.openedAtMs >= PLANNED_REFRESH_MS;
-  return (
-    open.mode === 'pulse' &&
-    open.startTimeUs !== null &&
-    open.startTimeUs >= (open.openedAtMs - QUIET_PULSE_MAX_BACKLOG_MS) * 1000
-  );
+  return now - open.openedAtMs >= PLANNED_REFRESH_MS;
 }
 
 /**
@@ -573,10 +547,10 @@ function dropLink(m: ModuleDeps, s: SocketState, cause: EndCause, now: number, o
   m.db.tx(() => {
     if (o.healthy === true) {
       const resume = noteHealthyResume(m.db, open.openedAtMs, open.resumeCursor!);
-      if (resume !== null) m.log.log('info', 'jetstream_quiet_resume', { mode: open.mode, cursor: resume });
+      if (resume !== null) m.log.log('info', 'jetstream_quiet_resume', { cursor: resume });
     }
     noteDisconnected(m.db, now, rotate === undefined ? {} : { hostIndex: rotate });
-    if (open.mode !== 'socket' || cause === 'superseded') return;
+    if (cause === 'superseded') return;
     if (cause === 'cursor_rejected') {
       s.nextAttemptAtMs = now;
       schedule(m.db, 'jetstream-watchdog', now, { force: true });
@@ -584,21 +558,17 @@ function dropLink(m: ModuleDeps, s: SocketState, cause: EndCause, now: number, o
       schedule(m.db, 'jetstream-watchdog', bump(m, s, now), { force: true });
     }
   });
-  if (open.mode === 'socket' && cause !== 'superseded') s.options.onTimersChanged?.();
-  s.options.onEnd?.(cause);
+  if (cause !== 'superseded') s.options.onTimersChanged?.();
 }
 
 /**
- * Close this instance's link, if any (off mode, mode change, shutdown, pulse
- * end). Marks disconnected. `pulseDrained`: a pulse closing after its full
- * drain window (ingest-mode.ts), which may confirm a quiet link healthy.
+ * Close this instance's link, if any (off mode, mode change, shutdown). Marks
+ * disconnected; confirms nothing about the link's health.
  */
-export function closeSocket(m: ModuleDeps, now: number, o: { pulseDrained?: boolean } = {}): boolean {
+export function closeSocket(m: ModuleDeps, now: number): boolean {
   const s = stateOf(m);
-  const open = s.current;
-  if (open === null) return false;
-  const healthy = o.pulseDrained === true && quietAndHealthy(open, now, 'pulse_drained');
-  dropLink(m, s, 'superseded', now, { healthy });
+  if (s.current === null) return false;
+  dropLink(m, s, 'superseded', now);
   return true;
 }
 
@@ -631,7 +601,7 @@ export async function socketWatchdog(
     return { action: 'busy', nextAtMs: now + WATCHDOG_INTERVAL_MS };
   }
   const open = s.current;
-  if (open !== null && open.mode === 'socket') {
+  if (open !== null) {
     if (now < open.refreshAtMs) {
       const next = Math.min(now + WATCHDOG_INTERVAL_MS, open.refreshAtMs);
       schedule(m.db, 'jetstream-watchdog', next, { force: true });
@@ -640,16 +610,16 @@ export async function socketWatchdog(
     // Planned refresh: the connection is healthy, so no backoff and no rotation;
     // a quiet one also moves the resume point forward (Q11, see the header).
     m.log.log('info', 'jetstream_planned_refresh', { host: new URL(open.url).host });
-    dropLink(m, s, 'superseded', now, { healthy: quietAndHealthy(open, now, 'planned_refresh') });
+    dropLink(m, s, 'superseded', now, { healthy: quietAndHealthy(open, now) });
     s.streak = 0;
-    const result = await connect(m, connectJetstream, now, { ...options, mode: 'socket' });
+    const result = await connect(m, connectJetstream, now, options);
     return { action: result.ok ? 'refreshed' : 'failed', connect: result, nextAtMs: nextWatchdog(m) };
   }
   if (now < s.nextAttemptAtMs) {
     schedule(m.db, 'jetstream-watchdog', s.nextAttemptAtMs, { force: true });
     return { action: 'backoff', nextAtMs: s.nextAttemptAtMs };
   }
-  const result = await connect(m, connectJetstream, now, { ...options, mode: 'socket' });
+  const result = await connect(m, connectJetstream, now, options);
   return { action: result.ok ? 'connected' : 'failed', connect: result, nextAtMs: nextWatchdog(m) };
 }
 

@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { BUDGETS, ConfigError, type ConfigIssue, FIXTURE_PREFIX, parseConfig } from '../../src/config';
+import { ConfigError, type ConfigIssue, FIXTURE_PREFIX, NODE_BUDGET, parseConfig } from '../../src/config';
 import {
   checkRuntimeEnv,
   FORBIDDEN_RUNTIME_ENV,
@@ -202,39 +202,28 @@ describe('parseNodeConfig', () => {
     expect(fields(issuesOf(() => parse({ ...env, ATMUSIC_LISTEN: '127.0.0.1:0' })))).toEqual(['ATMUSIC_LISTEN']);
   });
 
-  it('INGEST_MODE=pulse, an operator-set PLAN (paid or free) and DO_LOCATION_HINT are each rejected with a message citing ADR 0005, and the embedded parseConfig receives PLAN paid and an empty DO_LOCATION_HINT', () => {
-    const cases: [string, Record<string, string>][] = [
-      ['INGEST_MODE', { INGEST_MODE: 'pulse' }],
-      ['PLAN', { PLAN: 'paid' }],
-      ['PLAN', { PLAN: 'free' }],
-      ['PLAN', { PLAN: '' }],
-      ['DO_LOCATION_HINT', { DO_LOCATION_HINT: 'weur' }],
-      ['DO_LOCATION_HINT', { DO_LOCATION_HINT: '' }],
-    ];
-    for (const [field, extra] of cases) {
-      const issues = issuesOf(() => parse({ ...baseEnv(), ...extra }));
-      expect(fields(issues), JSON.stringify(extra)).toEqual([field]);
-      expect(issues[0]?.message, JSON.stringify(extra)).toMatch(/ADR 0005/);
-    }
+  it('INGEST_MODE accepts socket and off only, ignores retired plan and placement variables, and embedded config has no tier or placement fields', () => {
+    const pulse = issuesOf(() => parse({ ...baseEnv(), INGEST_MODE: 'pulse' }));
+    expect(fields(pulse)).toEqual(['INGEST_MODE']);
+    expect(pulse[0]?.message).toBe('must be socket or off');
     // Any other mode is refused too; socket is the default and off stays.
     expect(fields(issuesOf(() => parse({ ...baseEnv(), INGEST_MODE: 'poll' })))).toEqual(['INGEST_MODE']);
     expect(parse(baseEnv()).ingestMode).toBe('socket');
     expect(parse({ ...baseEnv(), INGEST_MODE: 'off', JETSTREAM_URLS: '' }).ingestMode).toBe('off');
+    expect(parse({ ...baseEnv(), PLAN: 'free', DO_LOCATION_HINT: 'weur' }).app).toEqual(parse(baseEnv()).app);
 
     parseConfigSpy.mockClear();
     const cfg = parse(baseEnv());
     expect(parseConfigSpy).toHaveBeenCalledTimes(1);
     const [handed, options] = parseConfigSpy.mock.calls[0] ?? [];
-    expect(handed?.PLAN).toBe('paid');
-    expect(handed?.DO_LOCATION_HINT).toBe('');
+    expect(handed).not.toHaveProperty('PLAN');
+    expect(handed).not.toHaveProperty('DO_LOCATION_HINT');
     expect(handed?.INGEST_MODE).toBe('socket');
     expect(handed?.PUBLIC_ORIGIN).toBe('https://music.example.org');
-    expect(handed?.ADMIN_TOKEN).toBeUndefined();
     expect(options).toEqual({ allowFixturePrefix: true });
-    // So the embedded config carries the paid budget and no location hint.
-    expect(cfg.app.plan).toBe('paid');
-    expect(cfg.app.budget).toEqual(BUDGETS.paid);
-    expect(cfg.app.doLocationHint).toBeNull();
+    // The embedded config carries the fixed Node budget and no placement key.
+    expect(cfg.app.budget).toEqual(NODE_BUDGET);
+    expect(Object.keys(cfg.app)).not.toContain('doLocationHint');
     expect(cfg.app.collections?.scrobble).toBe(`${FIXTURE_PREFIX}.scrobble`);
   });
 

@@ -1,0 +1,3547 @@
+{
+  "schema": "atmusic/read-models-benchmark@3",
+  "generatedBy": "worker/test/bench/read-models.bench.test.ts",
+  "frozenClock": "2026-01-15T12:00:00Z",
+  "environment": {
+    "runner": "node:sqlite in this Node process (vitest, environment node); HTTP through the production Node composition on 127.0.0.1",
+    "node": "v26.12.1",
+    "sqlite": "3.54.1",
+    "platform": "linux",
+    "arch": "x64",
+    "osRelease": "7.2.12-gentoo-dist-hardened",
+    "cpuModel": "Intel(R) Core(TM) i5-14600K",
+    "logicalCpus": 20,
+    "totalMemoryBytes": 67067195392,
+    "cgroupCpuMax": null,
+    "cgroupMemoryMax": null,
+    "timerIntegerMs": false
+  },
+  "limit": 20,
+  "plans": {
+    "source": "ADR 0005 §15.3 (ADR 0004 §15 Q10 re-derived as query plans)",
+    "sqlite": "3.54.1",
+    "history": "SEARCH scrobbles_owner_time (did=?), no SCAN, no temporary B-tree; a deep page's search is bounded by (listened_at,uri)<(?,?) and seeks from the cursor's last row; delete visibility SEARCHes operations_scrobble_delete_target by did and rkey",
+    "global": "scrobbles_global_time in order, no SCAN, no temporary B-tree; a deep page's search is bounded by (listened_at,uri)<(?,?) and seeks from the cursor's last row; delete visibility SEARCHes operations_scrobble_delete_target by did and rkey",
+    "following": "SEARCH scrobbles_owner_time per followee and follows_actor_subject, no SCAN; a deep page's search is bounded by (listened_at,uri)<(?,?) and seeks from the cursor's last row; delete visibility SEARCHes operations_scrobble_delete_target by did and rkey",
+    "stats": "every scrobbles statement SEARCHes scrobbles_owner_time or scrobbles_stats by DID, no SCAN; in a 7d, 30d or 365d window every scrobbles SEARCH is bounded by did=? AND listened_at>? AND listened_at<?; delete visibility SEARCHes operations_scrobble_delete_target by did and rkey",
+    "statsProbesAll": 3,
+    "statsProbesWindowed": 4
+  },
+  "dataset": {
+    "seed": 7,
+    "users": 100,
+    "rowsPerUser": 1000,
+    "rows": 100000,
+    "activeUsers": 100,
+    "verifiedCommits": 100,
+    "chunks": 100,
+    "maxChunkEntries": 1000,
+    "excluded": 0,
+    "digest": "561cf834ad47974bc3fe6c26f2d629ae0429c0a099b0fc34c2853d25ab4b552d",
+    "distribution": {
+      "artistsPerUser": 100,
+      "rowsPerArtist": 10,
+      "tracksPerUser": 500,
+      "rowsPerTrack": 2,
+      "albumsPerUser": 50,
+      "rowsPerAlbum": 20,
+      "spacingSeconds": 60,
+      "durationSeconds": {
+        "min": 120,
+        "max": 419
+      }
+    },
+    "seedMs": 19003.217449
+  },
+  "scales": [
+    {
+      "scrobbles": 1000,
+      "did": "did:web:scale-1k.test",
+      "curve": "secp256k1",
+      "chunks": 1,
+      "written": 1000,
+      "seedMs": 365.8943470000013
+    },
+    {
+      "scrobbles": 10000,
+      "did": "did:web:scale-10k.test",
+      "curve": "p256",
+      "chunks": 5,
+      "written": 10000,
+      "seedMs": 2797.9630050000014
+    },
+    {
+      "scrobbles": 50000,
+      "did": "did:web:scale-50k.test",
+      "curve": "secp256k1",
+      "chunks": 25,
+      "written": 50000,
+      "seedMs": 12719.710545000002
+    },
+    {
+      "scrobbles": 100000,
+      "did": "did:web:scale-100k.test",
+      "curve": "p256",
+      "chunks": 50,
+      "written": 100000,
+      "seedMs": 35768.81454000001
+    }
+  ],
+  "reads": [
+    {
+      "name": "history 1000 first",
+      "kind": "history",
+      "scale": 1000,
+      "page": "first",
+      "depth": 0,
+      "rowsReturned": 20,
+      "statements": 6,
+      "coldMs": 1.2295460000023013,
+      "runs": 20,
+      "p50Ms": 0.245320999994874,
+      "p95Ms": 0.3084519999974873,
+      "plan": [
+        "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+        "CORRELATED SCALAR SUBQUERY 1",
+        "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+        "SEARCH s USING INDEX scrobbles_owner_time (did=?)",
+        "CORRELATED SCALAR SUBQUERY 2",
+        "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)"
+      ],
+      "indexes": [
+        "sqlite_autoindex_users_1",
+        "sqlite_autoindex_suppression_1",
+        "scrobbles_owner_time",
+        "operations_scrobble_delete_target"
+      ],
+      "planIndexed": true,
+      "seekFromLast": null
+    },
+    {
+      "name": "history 1000 deep",
+      "kind": "history",
+      "scale": 1000,
+      "page": "deep",
+      "depth": 500,
+      "rowsReturned": 20,
+      "statements": 6,
+      "coldMs": 0.7860539999965113,
+      "runs": 20,
+      "p50Ms": 0.25046199999633245,
+      "p95Ms": 0.30805700000200886,
+      "plan": [
+        "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+        "CORRELATED SCALAR SUBQUERY 1",
+        "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+        "SEARCH s USING INDEX scrobbles_owner_time (did=? AND (listened_at,uri)<(?,?))",
+        "CORRELATED SCALAR SUBQUERY 2",
+        "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)"
+      ],
+      "indexes": [
+        "sqlite_autoindex_users_1",
+        "sqlite_autoindex_suppression_1",
+        "scrobbles_owner_time",
+        "operations_scrobble_delete_target"
+      ],
+      "planIndexed": true,
+      "seekFromLast": true
+    },
+    {
+      "name": "history 10000 first",
+      "kind": "history",
+      "scale": 10000,
+      "page": "first",
+      "depth": 0,
+      "rowsReturned": 20,
+      "statements": 6,
+      "coldMs": 0.6831819999933941,
+      "runs": 20,
+      "p50Ms": 0.24149000000033993,
+      "p95Ms": 0.28939199999149423,
+      "plan": [
+        "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+        "CORRELATED SCALAR SUBQUERY 1",
+        "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+        "SEARCH s USING INDEX scrobbles_owner_time (did=?)",
+        "CORRELATED SCALAR SUBQUERY 2",
+        "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)"
+      ],
+      "indexes": [
+        "sqlite_autoindex_users_1",
+        "sqlite_autoindex_suppression_1",
+        "scrobbles_owner_time",
+        "operations_scrobble_delete_target"
+      ],
+      "planIndexed": true,
+      "seekFromLast": null
+    },
+    {
+      "name": "history 10000 deep",
+      "kind": "history",
+      "scale": 10000,
+      "page": "deep",
+      "depth": 5000,
+      "rowsReturned": 20,
+      "statements": 6,
+      "coldMs": 0.657695000001695,
+      "runs": 20,
+      "p50Ms": 0.2519999999931315,
+      "p95Ms": 0.3066149999940535,
+      "plan": [
+        "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+        "CORRELATED SCALAR SUBQUERY 1",
+        "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+        "SEARCH s USING INDEX scrobbles_owner_time (did=? AND (listened_at,uri)<(?,?))",
+        "CORRELATED SCALAR SUBQUERY 2",
+        "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)"
+      ],
+      "indexes": [
+        "sqlite_autoindex_users_1",
+        "sqlite_autoindex_suppression_1",
+        "scrobbles_owner_time",
+        "operations_scrobble_delete_target"
+      ],
+      "planIndexed": true,
+      "seekFromLast": true
+    },
+    {
+      "name": "history 50000 first",
+      "kind": "history",
+      "scale": 50000,
+      "page": "first",
+      "depth": 0,
+      "rowsReturned": 20,
+      "statements": 6,
+      "coldMs": 0.6231390000029933,
+      "runs": 20,
+      "p50Ms": 0.23739900000509806,
+      "p95Ms": 0.29179499999736436,
+      "plan": [
+        "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+        "CORRELATED SCALAR SUBQUERY 1",
+        "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+        "SEARCH s USING INDEX scrobbles_owner_time (did=?)",
+        "CORRELATED SCALAR SUBQUERY 2",
+        "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)"
+      ],
+      "indexes": [
+        "sqlite_autoindex_users_1",
+        "sqlite_autoindex_suppression_1",
+        "scrobbles_owner_time",
+        "operations_scrobble_delete_target"
+      ],
+      "planIndexed": true,
+      "seekFromLast": null
+    },
+    {
+      "name": "history 50000 deep",
+      "kind": "history",
+      "scale": 50000,
+      "page": "deep",
+      "depth": 25000,
+      "rowsReturned": 20,
+      "statements": 6,
+      "coldMs": 0.7052810000022873,
+      "runs": 20,
+      "p50Ms": 0.25854500000423286,
+      "p95Ms": 0.31460000001243316,
+      "plan": [
+        "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+        "CORRELATED SCALAR SUBQUERY 1",
+        "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+        "SEARCH s USING INDEX scrobbles_owner_time (did=? AND (listened_at,uri)<(?,?))",
+        "CORRELATED SCALAR SUBQUERY 2",
+        "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)"
+      ],
+      "indexes": [
+        "sqlite_autoindex_users_1",
+        "sqlite_autoindex_suppression_1",
+        "scrobbles_owner_time",
+        "operations_scrobble_delete_target"
+      ],
+      "planIndexed": true,
+      "seekFromLast": true
+    },
+    {
+      "name": "history 100000 first",
+      "kind": "history",
+      "scale": 100000,
+      "page": "first",
+      "depth": 0,
+      "rowsReturned": 20,
+      "statements": 6,
+      "coldMs": 0.6490279999998165,
+      "runs": 20,
+      "p50Ms": 0.23172299998987,
+      "p95Ms": 0.26823200000217184,
+      "plan": [
+        "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+        "CORRELATED SCALAR SUBQUERY 1",
+        "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+        "SEARCH s USING INDEX scrobbles_owner_time (did=?)",
+        "CORRELATED SCALAR SUBQUERY 2",
+        "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)"
+      ],
+      "indexes": [
+        "sqlite_autoindex_users_1",
+        "sqlite_autoindex_suppression_1",
+        "scrobbles_owner_time",
+        "operations_scrobble_delete_target"
+      ],
+      "planIndexed": true,
+      "seekFromLast": null
+    },
+    {
+      "name": "history 100000 deep",
+      "kind": "history",
+      "scale": 100000,
+      "page": "deep",
+      "depth": 50000,
+      "rowsReturned": 20,
+      "statements": 6,
+      "coldMs": 0.7053739999973914,
+      "runs": 20,
+      "p50Ms": 0.24812599999131635,
+      "p95Ms": 0.3624039999995148,
+      "plan": [
+        "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+        "CORRELATED SCALAR SUBQUERY 1",
+        "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+        "SEARCH s USING INDEX scrobbles_owner_time (did=? AND (listened_at,uri)<(?,?))",
+        "CORRELATED SCALAR SUBQUERY 2",
+        "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)"
+      ],
+      "indexes": [
+        "sqlite_autoindex_users_1",
+        "sqlite_autoindex_suppression_1",
+        "scrobbles_owner_time",
+        "operations_scrobble_delete_target"
+      ],
+      "planIndexed": true,
+      "seekFromLast": true
+    },
+    {
+      "name": "global first",
+      "kind": "global",
+      "scale": null,
+      "page": "first",
+      "depth": 0,
+      "rowsReturned": 20,
+      "statements": 3,
+      "coldMs": 0.8011049999913666,
+      "runs": 20,
+      "p50Ms": 0.23197300000174437,
+      "p95Ms": 0.29479100000753533,
+      "plan": [
+        "SCAN s USING INDEX scrobbles_global_time",
+        "CORRELATED SCALAR SUBQUERY 2",
+        "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+        "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+        "CORRELATED SCALAR SUBQUERY 1",
+        "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)"
+      ],
+      "indexes": [
+        "scrobbles_global_time",
+        "operations_scrobble_delete_target",
+        "sqlite_autoindex_users_1",
+        "sqlite_autoindex_suppression_1"
+      ],
+      "planIndexed": true,
+      "seekFromLast": null
+    },
+    {
+      "name": "following first",
+      "kind": "following",
+      "scale": null,
+      "page": "first",
+      "depth": 0,
+      "rowsReturned": 20,
+      "statements": 3,
+      "coldMs": 0.9486739999993006,
+      "runs": 20,
+      "p50Ms": 0.3529790000029607,
+      "p95Ms": 0.4032979999901727,
+      "plan": [
+        "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+        "LIST SUBQUERY 7",
+        "SEARCH f_actor EXISTS USING INDEX sqlite_autoindex_users_1 (did=?)",
+        "CORRELATED SCALAR SUBQUERY 3",
+        "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+        "SEARCH f USING COVERING INDEX follows_actor_subject (actor=?)",
+        "CORRELATED SCALAR SUBQUERY 5",
+        "SEARCH f_subject_x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+        "CORRELATED SCALAR SUBQUERY 6",
+        "SEARCH f_subject USING INDEX sqlite_autoindex_users_1 (did=?)",
+        "CORRELATED SCALAR SUBQUERY 1",
+        "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+        "REUSE LIST SUBQUERY 7",
+        "SEARCH s USING INDEX scrobbles_owner_time (did=?)",
+        "CORRELATED SCALAR SUBQUERY 2",
+        "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+        "USE TEMP B-TREE FOR ORDER BY"
+      ],
+      "indexes": [
+        "sqlite_autoindex_users_1",
+        "sqlite_autoindex_suppression_1",
+        "follows_actor_subject",
+        "scrobbles_owner_time",
+        "operations_scrobble_delete_target"
+      ],
+      "planIndexed": true,
+      "seekFromLast": null
+    },
+    {
+      "name": "global deep",
+      "kind": "global",
+      "scale": null,
+      "page": "deep",
+      "depth": 80500,
+      "rowsReturned": 20,
+      "statements": 3,
+      "coldMs": 0.6095040000072913,
+      "runs": 20,
+      "p50Ms": 0.2403340000018943,
+      "p95Ms": 0.40186899999389425,
+      "plan": [
+        "SEARCH s USING INDEX scrobbles_global_time ((listened_at,uri)<(?,?))",
+        "CORRELATED SCALAR SUBQUERY 2",
+        "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+        "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+        "CORRELATED SCALAR SUBQUERY 1",
+        "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)"
+      ],
+      "indexes": [
+        "scrobbles_global_time",
+        "operations_scrobble_delete_target",
+        "sqlite_autoindex_users_1",
+        "sqlite_autoindex_suppression_1"
+      ],
+      "planIndexed": true,
+      "seekFromLast": true
+    },
+    {
+      "name": "following deep",
+      "kind": "following",
+      "scale": null,
+      "page": "deep",
+      "depth": 80500,
+      "rowsReturned": 20,
+      "statements": 3,
+      "coldMs": 0.9970630000025267,
+      "runs": 20,
+      "p50Ms": 0.37394199999107514,
+      "p95Ms": 0.5667050000047311,
+      "plan": [
+        "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+        "LIST SUBQUERY 7",
+        "SEARCH f_actor EXISTS USING INDEX sqlite_autoindex_users_1 (did=?)",
+        "CORRELATED SCALAR SUBQUERY 3",
+        "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+        "SEARCH f USING COVERING INDEX follows_actor_subject (actor=?)",
+        "CORRELATED SCALAR SUBQUERY 5",
+        "SEARCH f_subject_x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+        "CORRELATED SCALAR SUBQUERY 6",
+        "SEARCH f_subject USING INDEX sqlite_autoindex_users_1 (did=?)",
+        "CORRELATED SCALAR SUBQUERY 1",
+        "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+        "REUSE LIST SUBQUERY 7",
+        "SEARCH s USING INDEX scrobbles_owner_time (did=? AND (listened_at,uri)<(?,?))",
+        "CORRELATED SCALAR SUBQUERY 2",
+        "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+        "USE TEMP B-TREE FOR ORDER BY"
+      ],
+      "indexes": [
+        "sqlite_autoindex_users_1",
+        "sqlite_autoindex_suppression_1",
+        "follows_actor_subject",
+        "scrobbles_owner_time",
+        "operations_scrobble_delete_target"
+      ],
+      "planIndexed": true,
+      "seekFromLast": true
+    }
+  ],
+  "stats": [
+    {
+      "scale": 1000,
+      "window": "all",
+      "windowRows": 1000,
+      "expected": {
+        "windowRows": 1000,
+        "artistGroups": 349,
+        "trackGroups": 899,
+        "albumGroups": 687,
+        "topArtistCounts": [
+          53,
+          21,
+          19,
+          16,
+          13,
+          13,
+          12,
+          10,
+          10,
+          10
+        ],
+        "topTrackCounts": [
+          7,
+          4,
+          4,
+          4,
+          4,
+          4,
+          3,
+          3,
+          3,
+          3
+        ],
+        "topAlbumCounts": [
+          9,
+          8,
+          7,
+          7,
+          7,
+          6,
+          5,
+          5,
+          5,
+          4
+        ]
+      },
+      "observed": {
+        "windowRows": 1000,
+        "totalScrobbles": 1000,
+        "distinctArtists": 349,
+        "distinctTracks": 899,
+        "topArtistCounts": [
+          53,
+          21,
+          19,
+          16,
+          13,
+          13,
+          12,
+          10,
+          10,
+          10
+        ],
+        "topTrackCounts": [
+          7,
+          4,
+          4,
+          4,
+          4,
+          4,
+          3,
+          3,
+          3,
+          3
+        ],
+        "topAlbumCounts": [
+          9,
+          8,
+          7,
+          7,
+          7,
+          6,
+          5,
+          5,
+          5,
+          4
+        ]
+      },
+      "uncached": {
+        "statements": 7,
+        "coldMs": 11.435127999997349,
+        "runs": 5,
+        "p50Ms": 9.650737999996636,
+        "p95Ms": 10.059602000008454,
+        "scrobblesPlans": [
+          [
+            "SCAN CONSTANT ROW",
+            "SCALAR SUBQUERY 4",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "SCALAR SUBQUERY 5",
+            "USE TEMP B-TREE FOR count(DISTINCT)",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "SCALAR SUBQUERY 7",
+            "CO-ROUTINE (subquery-6)",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "USE TEMP B-TREE FOR GROUP BY",
+            "SCAN (subquery-6)"
+          ],
+          [
+            "CO-ROUTINE g",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "USE TEMP B-TREE FOR GROUP BY",
+            "SCAN g",
+            "SEARCH d USING INDEX sqlite_autoindex_scrobbles_1 (uri=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ],
+          [
+            "CO-ROUTINE g",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "USE TEMP B-TREE FOR GROUP BY",
+            "SCAN g",
+            "SEARCH d USING INDEX sqlite_autoindex_scrobbles_1 (uri=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ],
+          [
+            "CO-ROUTINE g",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "USE TEMP B-TREE FOR GROUP BY",
+            "SCAN g",
+            "SEARCH d USING INDEX sqlite_autoindex_scrobbles_1 (uri=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ]
+        ],
+        "plansIndexed": true
+      },
+      "cached": {
+        "probes": 3,
+        "probeKinds": [
+          "users",
+          "cache",
+          "exists"
+        ],
+        "probesIndexed": true,
+        "probeBudget": 3,
+        "withinProbeBudget": true,
+        "runs": 20,
+        "p50Ms": 0.022001999997883104,
+        "p95Ms": 0.03618700000515673
+      },
+      "afterVersionBump": {
+        "cache": "miss",
+        "equalsUncached": true
+      },
+      "equalsUncached": true,
+      "withinBudget": true
+    },
+    {
+      "scale": 1000,
+      "window": "7d",
+      "windowRows": 10,
+      "expected": {
+        "windowRows": 10,
+        "artistGroups": 10,
+        "trackGroups": 10,
+        "albumGroups": 8,
+        "topArtistCounts": [
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "topTrackCounts": [
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "topAlbumCounts": [
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1
+        ]
+      },
+      "observed": {
+        "windowRows": 10,
+        "totalScrobbles": 10,
+        "distinctArtists": 10,
+        "distinctTracks": 10,
+        "topArtistCounts": [
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "topTrackCounts": [
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "topAlbumCounts": [
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1
+        ]
+      },
+      "uncached": {
+        "statements": 7,
+        "coldMs": 1.785647999990033,
+        "runs": 5,
+        "p50Ms": 0.7641260000091279,
+        "p95Ms": 0.96898799999326,
+        "scrobblesPlans": [
+          [
+            "SCAN CONSTANT ROW",
+            "SCALAR SUBQUERY 4",
+            "MATERIALIZE w",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at>? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "SCAN w",
+            "SCALAR SUBQUERY 5",
+            "USE TEMP B-TREE FOR count(DISTINCT)",
+            "SCAN w",
+            "SCALAR SUBQUERY 7",
+            "CO-ROUTINE (subquery-6)",
+            "SCAN w",
+            "USE TEMP B-TREE FOR GROUP BY",
+            "SCAN (subquery-6)"
+          ],
+          [
+            "CO-ROUTINE g",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at>? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "USE TEMP B-TREE FOR GROUP BY",
+            "SCAN g",
+            "SEARCH d USING INDEX sqlite_autoindex_scrobbles_1 (uri=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ],
+          [
+            "CO-ROUTINE g",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at>? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "USE TEMP B-TREE FOR GROUP BY",
+            "SCAN g",
+            "SEARCH d USING INDEX sqlite_autoindex_scrobbles_1 (uri=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ],
+          [
+            "CO-ROUTINE g",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at>? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "USE TEMP B-TREE FOR GROUP BY",
+            "SCAN g",
+            "SEARCH d USING INDEX sqlite_autoindex_scrobbles_1 (uri=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ]
+        ],
+        "plansIndexed": true
+      },
+      "cached": {
+        "probes": 4,
+        "probeKinds": [
+          "users",
+          "cache",
+          "exists",
+          "exists"
+        ],
+        "probesIndexed": true,
+        "probeBudget": 4,
+        "withinProbeBudget": true,
+        "runs": 20,
+        "p50Ms": 0.019642999992356636,
+        "p95Ms": 0.03475600000820123
+      },
+      "afterVersionBump": {
+        "cache": "miss",
+        "equalsUncached": true
+      },
+      "equalsUncached": true,
+      "withinBudget": true
+    },
+    {
+      "scale": 1000,
+      "window": "30d",
+      "windowRows": 42,
+      "expected": {
+        "windowRows": 42,
+        "artistGroups": 41,
+        "trackGroups": 42,
+        "albumGroups": 36,
+        "topArtistCounts": [
+          2,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "topTrackCounts": [
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "topAlbumCounts": [
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1
+        ]
+      },
+      "observed": {
+        "windowRows": 42,
+        "totalScrobbles": 42,
+        "distinctArtists": 41,
+        "distinctTracks": 42,
+        "topArtistCounts": [
+          2,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "topTrackCounts": [
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "topAlbumCounts": [
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1
+        ]
+      },
+      "uncached": {
+        "statements": 7,
+        "coldMs": 2.025898000007146,
+        "runs": 5,
+        "p50Ms": 1.0842390000034356,
+        "p95Ms": 1.1277089999930467,
+        "scrobblesPlans": [
+          [
+            "SCAN CONSTANT ROW",
+            "SCALAR SUBQUERY 4",
+            "MATERIALIZE w",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at>? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "SCAN w",
+            "SCALAR SUBQUERY 5",
+            "USE TEMP B-TREE FOR count(DISTINCT)",
+            "SCAN w",
+            "SCALAR SUBQUERY 7",
+            "CO-ROUTINE (subquery-6)",
+            "SCAN w",
+            "USE TEMP B-TREE FOR GROUP BY",
+            "SCAN (subquery-6)"
+          ],
+          [
+            "CO-ROUTINE g",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at>? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "USE TEMP B-TREE FOR GROUP BY",
+            "SCAN g",
+            "SEARCH d USING INDEX sqlite_autoindex_scrobbles_1 (uri=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ],
+          [
+            "CO-ROUTINE g",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at>? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "USE TEMP B-TREE FOR GROUP BY",
+            "SCAN g",
+            "SEARCH d USING INDEX sqlite_autoindex_scrobbles_1 (uri=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ],
+          [
+            "CO-ROUTINE g",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at>? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "USE TEMP B-TREE FOR GROUP BY",
+            "SCAN g",
+            "SEARCH d USING INDEX sqlite_autoindex_scrobbles_1 (uri=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ]
+        ],
+        "plansIndexed": true
+      },
+      "cached": {
+        "probes": 4,
+        "probeKinds": [
+          "users",
+          "cache",
+          "exists",
+          "exists"
+        ],
+        "probesIndexed": true,
+        "probeBudget": 4,
+        "withinProbeBudget": true,
+        "runs": 20,
+        "p50Ms": 0.020240999991074204,
+        "p95Ms": 0.029364999994868413
+      },
+      "afterVersionBump": {
+        "cache": "miss",
+        "equalsUncached": true
+      },
+      "equalsUncached": true,
+      "withinBudget": true
+    },
+    {
+      "scale": 1000,
+      "window": "365d",
+      "windowRows": 500,
+      "expected": {
+        "windowRows": 500,
+        "artistGroups": 256,
+        "trackGroups": 473,
+        "albumGroups": 373,
+        "topArtistCounts": [
+          22,
+          13,
+          10,
+          10,
+          8,
+          7,
+          7,
+          6,
+          5,
+          5
+        ],
+        "topTrackCounts": [
+          3,
+          3,
+          2,
+          2,
+          2,
+          2,
+          2,
+          2,
+          2,
+          2
+        ],
+        "topAlbumCounts": [
+          4,
+          4,
+          4,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          2
+        ]
+      },
+      "observed": {
+        "windowRows": 500,
+        "totalScrobbles": 500,
+        "distinctArtists": 256,
+        "distinctTracks": 473,
+        "topArtistCounts": [
+          22,
+          13,
+          10,
+          10,
+          8,
+          7,
+          7,
+          6,
+          5,
+          5
+        ],
+        "topTrackCounts": [
+          3,
+          3,
+          2,
+          2,
+          2,
+          2,
+          2,
+          2,
+          2,
+          2
+        ],
+        "topAlbumCounts": [
+          4,
+          4,
+          4,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          2
+        ]
+      },
+      "uncached": {
+        "statements": 7,
+        "coldMs": 6.296377999999095,
+        "runs": 5,
+        "p50Ms": 5.13973999999871,
+        "p95Ms": 5.17032800000743,
+        "scrobblesPlans": [
+          [
+            "SCAN CONSTANT ROW",
+            "SCALAR SUBQUERY 4",
+            "MATERIALIZE w",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at>? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "SCAN w",
+            "SCALAR SUBQUERY 5",
+            "USE TEMP B-TREE FOR count(DISTINCT)",
+            "SCAN w",
+            "SCALAR SUBQUERY 7",
+            "CO-ROUTINE (subquery-6)",
+            "SCAN w",
+            "USE TEMP B-TREE FOR GROUP BY",
+            "SCAN (subquery-6)"
+          ],
+          [
+            "CO-ROUTINE g",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at>? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "USE TEMP B-TREE FOR GROUP BY",
+            "SCAN g",
+            "SEARCH d USING INDEX sqlite_autoindex_scrobbles_1 (uri=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ],
+          [
+            "CO-ROUTINE g",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at>? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "USE TEMP B-TREE FOR GROUP BY",
+            "SCAN g",
+            "SEARCH d USING INDEX sqlite_autoindex_scrobbles_1 (uri=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ],
+          [
+            "CO-ROUTINE g",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at>? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "USE TEMP B-TREE FOR GROUP BY",
+            "SCAN g",
+            "SEARCH d USING INDEX sqlite_autoindex_scrobbles_1 (uri=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ]
+        ],
+        "plansIndexed": true
+      },
+      "cached": {
+        "probes": 4,
+        "probeKinds": [
+          "users",
+          "cache",
+          "exists",
+          "exists"
+        ],
+        "probesIndexed": true,
+        "probeBudget": 4,
+        "withinProbeBudget": true,
+        "runs": 20,
+        "p50Ms": 0.02024899999378249,
+        "p95Ms": 0.029347000003326684
+      },
+      "afterVersionBump": {
+        "cache": "miss",
+        "equalsUncached": true
+      },
+      "equalsUncached": true,
+      "withinBudget": true
+    },
+    {
+      "scale": 10000,
+      "window": "all",
+      "windowRows": 10000,
+      "expected": {
+        "windowRows": 10000,
+        "artistGroups": 400,
+        "trackGroups": 5516,
+        "albumGroups": 2739,
+        "topArtistCounts": [
+          505,
+          205,
+          170,
+          147,
+          124,
+          106,
+          99,
+          93,
+          89,
+          89
+        ],
+        "topTrackCounts": [
+          28,
+          28,
+          26,
+          25,
+          25,
+          23,
+          23,
+          23,
+          22,
+          22
+        ],
+        "topAlbumCounts": [
+          59,
+          58,
+          57,
+          57,
+          57,
+          51,
+          49,
+          47,
+          30,
+          30
+        ]
+      },
+      "observed": {
+        "windowRows": 10000,
+        "totalScrobbles": 10000,
+        "distinctArtists": 400,
+        "distinctTracks": 5516,
+        "topArtistCounts": [
+          505,
+          205,
+          170,
+          147,
+          124,
+          106,
+          99,
+          93,
+          89,
+          89
+        ],
+        "topTrackCounts": [
+          28,
+          28,
+          26,
+          25,
+          25,
+          23,
+          23,
+          23,
+          22,
+          22
+        ],
+        "topAlbumCounts": [
+          59,
+          58,
+          57,
+          57,
+          57,
+          51,
+          49,
+          47,
+          30,
+          30
+        ]
+      },
+      "uncached": {
+        "statements": 7,
+        "coldMs": 82.5627700000041,
+        "runs": 5,
+        "p50Ms": 80.17790799999784,
+        "p95Ms": 81.13164699998742,
+        "scrobblesPlans": [
+          [
+            "SCAN CONSTANT ROW",
+            "SCALAR SUBQUERY 4",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "SCALAR SUBQUERY 5",
+            "USE TEMP B-TREE FOR count(DISTINCT)",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "SCALAR SUBQUERY 7",
+            "CO-ROUTINE (subquery-6)",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "USE TEMP B-TREE FOR GROUP BY",
+            "SCAN (subquery-6)"
+          ],
+          [
+            "CO-ROUTINE g",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "USE TEMP B-TREE FOR GROUP BY",
+            "SCAN g",
+            "SEARCH d USING INDEX sqlite_autoindex_scrobbles_1 (uri=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ],
+          [
+            "CO-ROUTINE g",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "USE TEMP B-TREE FOR GROUP BY",
+            "SCAN g",
+            "SEARCH d USING INDEX sqlite_autoindex_scrobbles_1 (uri=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ],
+          [
+            "CO-ROUTINE g",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "USE TEMP B-TREE FOR GROUP BY",
+            "SCAN g",
+            "SEARCH d USING INDEX sqlite_autoindex_scrobbles_1 (uri=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ]
+        ],
+        "plansIndexed": true
+      },
+      "cached": {
+        "probes": 3,
+        "probeKinds": [
+          "users",
+          "cache",
+          "exists"
+        ],
+        "probesIndexed": true,
+        "probeBudget": 3,
+        "withinProbeBudget": true,
+        "runs": 20,
+        "p50Ms": 0.01732800000172574,
+        "p95Ms": 0.024883000005502254
+      },
+      "afterVersionBump": {
+        "cache": "miss",
+        "equalsUncached": true
+      },
+      "equalsUncached": true,
+      "withinBudget": true
+    },
+    {
+      "scale": 10000,
+      "window": "7d",
+      "windowRows": 96,
+      "expected": {
+        "windowRows": 96,
+        "artistGroups": 84,
+        "trackGroups": 95,
+        "albumGroups": 81,
+        "topArtistCounts": [
+          3,
+          3,
+          2,
+          2,
+          2,
+          2,
+          2,
+          2,
+          2,
+          2
+        ],
+        "topTrackCounts": [
+          2,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "topAlbumCounts": [
+          2,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1
+        ]
+      },
+      "observed": {
+        "windowRows": 96,
+        "totalScrobbles": 96,
+        "distinctArtists": 84,
+        "distinctTracks": 95,
+        "topArtistCounts": [
+          3,
+          3,
+          2,
+          2,
+          2,
+          2,
+          2,
+          2,
+          2,
+          2
+        ],
+        "topTrackCounts": [
+          2,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "topAlbumCounts": [
+          2,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1
+        ]
+      },
+      "uncached": {
+        "statements": 7,
+        "coldMs": 2.5639960000116844,
+        "runs": 5,
+        "p50Ms": 1.5091290000127628,
+        "p95Ms": 1.5842200000042794,
+        "scrobblesPlans": [
+          [
+            "SCAN CONSTANT ROW",
+            "SCALAR SUBQUERY 4",
+            "MATERIALIZE w",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at>? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "SCAN w",
+            "SCALAR SUBQUERY 5",
+            "USE TEMP B-TREE FOR count(DISTINCT)",
+            "SCAN w",
+            "SCALAR SUBQUERY 7",
+            "CO-ROUTINE (subquery-6)",
+            "SCAN w",
+            "USE TEMP B-TREE FOR GROUP BY",
+            "SCAN (subquery-6)"
+          ],
+          [
+            "CO-ROUTINE g",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at>? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "USE TEMP B-TREE FOR GROUP BY",
+            "SCAN g",
+            "SEARCH d USING INDEX sqlite_autoindex_scrobbles_1 (uri=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ],
+          [
+            "CO-ROUTINE g",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at>? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "USE TEMP B-TREE FOR GROUP BY",
+            "SCAN g",
+            "SEARCH d USING INDEX sqlite_autoindex_scrobbles_1 (uri=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ],
+          [
+            "CO-ROUTINE g",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at>? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "USE TEMP B-TREE FOR GROUP BY",
+            "SCAN g",
+            "SEARCH d USING INDEX sqlite_autoindex_scrobbles_1 (uri=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ]
+        ],
+        "plansIndexed": true
+      },
+      "cached": {
+        "probes": 4,
+        "probeKinds": [
+          "users",
+          "cache",
+          "exists",
+          "exists"
+        ],
+        "probesIndexed": true,
+        "probeBudget": 4,
+        "withinProbeBudget": true,
+        "runs": 20,
+        "p50Ms": 0.020046000005095266,
+        "p95Ms": 0.027515000008861534
+      },
+      "afterVersionBump": {
+        "cache": "miss",
+        "equalsUncached": true
+      },
+      "equalsUncached": true,
+      "withinBudget": true
+    },
+    {
+      "scale": 10000,
+      "window": "30d",
+      "windowRows": 411,
+      "expected": {
+        "windowRows": 411,
+        "artistGroups": 239,
+        "trackGroups": 401,
+        "albumGroups": 323,
+        "topArtistCounts": [
+          18,
+          6,
+          6,
+          5,
+          5,
+          5,
+          4,
+          4,
+          4,
+          4
+        ],
+        "topTrackCounts": [
+          2,
+          2,
+          2,
+          2,
+          2,
+          2,
+          2,
+          2,
+          2,
+          2
+        ],
+        "topAlbumCounts": [
+          3,
+          3,
+          3,
+          3,
+          2,
+          2,
+          2,
+          2,
+          2,
+          2
+        ]
+      },
+      "observed": {
+        "windowRows": 411,
+        "totalScrobbles": 411,
+        "distinctArtists": 239,
+        "distinctTracks": 401,
+        "topArtistCounts": [
+          18,
+          6,
+          6,
+          5,
+          5,
+          5,
+          4,
+          4,
+          4,
+          4
+        ],
+        "topTrackCounts": [
+          2,
+          2,
+          2,
+          2,
+          2,
+          2,
+          2,
+          2,
+          2,
+          2
+        ],
+        "topAlbumCounts": [
+          3,
+          3,
+          3,
+          3,
+          2,
+          2,
+          2,
+          2,
+          2,
+          2
+        ]
+      },
+      "uncached": {
+        "statements": 7,
+        "coldMs": 5.41220500000054,
+        "runs": 5,
+        "p50Ms": 4.393046999990474,
+        "p95Ms": 4.4372609999991255,
+        "scrobblesPlans": [
+          [
+            "SCAN CONSTANT ROW",
+            "SCALAR SUBQUERY 4",
+            "MATERIALIZE w",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at>? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "SCAN w",
+            "SCALAR SUBQUERY 5",
+            "USE TEMP B-TREE FOR count(DISTINCT)",
+            "SCAN w",
+            "SCALAR SUBQUERY 7",
+            "CO-ROUTINE (subquery-6)",
+            "SCAN w",
+            "USE TEMP B-TREE FOR GROUP BY",
+            "SCAN (subquery-6)"
+          ],
+          [
+            "CO-ROUTINE g",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at>? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "USE TEMP B-TREE FOR GROUP BY",
+            "SCAN g",
+            "SEARCH d USING INDEX sqlite_autoindex_scrobbles_1 (uri=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ],
+          [
+            "CO-ROUTINE g",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at>? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "USE TEMP B-TREE FOR GROUP BY",
+            "SCAN g",
+            "SEARCH d USING INDEX sqlite_autoindex_scrobbles_1 (uri=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ],
+          [
+            "CO-ROUTINE g",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at>? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "USE TEMP B-TREE FOR GROUP BY",
+            "SCAN g",
+            "SEARCH d USING INDEX sqlite_autoindex_scrobbles_1 (uri=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ]
+        ],
+        "plansIndexed": true
+      },
+      "cached": {
+        "probes": 4,
+        "probeKinds": [
+          "users",
+          "cache",
+          "exists",
+          "exists"
+        ],
+        "probesIndexed": true,
+        "probeBudget": 4,
+        "withinProbeBudget": true,
+        "runs": 20,
+        "p50Ms": 0.02013299999816809,
+        "p95Ms": 0.027878000008058734
+      },
+      "afterVersionBump": {
+        "cache": "miss",
+        "equalsUncached": true
+      },
+      "equalsUncached": true,
+      "withinBudget": true
+    },
+    {
+      "scale": 10000,
+      "window": "365d",
+      "windowRows": 5001,
+      "expected": {
+        "windowRows": 5001,
+        "artistGroups": 400,
+        "trackGroups": 3481,
+        "albumGroups": 2059,
+        "topArtistCounts": [
+          262,
+          105,
+          86,
+          71,
+          67,
+          48,
+          46,
+          45,
+          44,
+          43
+        ],
+        "topTrackCounts": [
+          18,
+          17,
+          14,
+          13,
+          13,
+          13,
+          13,
+          12,
+          12,
+          12
+        ],
+        "topAlbumCounts": [
+          35,
+          33,
+          32,
+          30,
+          28,
+          26,
+          22,
+          18,
+          16,
+          16
+        ]
+      },
+      "observed": {
+        "windowRows": 5001,
+        "totalScrobbles": 5001,
+        "distinctArtists": 400,
+        "distinctTracks": 3481,
+        "topArtistCounts": [
+          262,
+          105,
+          86,
+          71,
+          67,
+          48,
+          46,
+          45,
+          44,
+          43
+        ],
+        "topTrackCounts": [
+          18,
+          17,
+          14,
+          13,
+          13,
+          13,
+          13,
+          12,
+          12,
+          12
+        ],
+        "topAlbumCounts": [
+          35,
+          33,
+          32,
+          30,
+          28,
+          26,
+          22,
+          18,
+          16,
+          16
+        ]
+      },
+      "uncached": {
+        "statements": 7,
+        "coldMs": 41.829888000007486,
+        "runs": 5,
+        "p50Ms": 40.59599800000433,
+        "p95Ms": 40.99760000000242,
+        "scrobblesPlans": [
+          [
+            "SCAN CONSTANT ROW",
+            "SCALAR SUBQUERY 4",
+            "MATERIALIZE w",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at>? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "SCAN w",
+            "SCALAR SUBQUERY 5",
+            "USE TEMP B-TREE FOR count(DISTINCT)",
+            "SCAN w",
+            "SCALAR SUBQUERY 7",
+            "CO-ROUTINE (subquery-6)",
+            "SCAN w",
+            "USE TEMP B-TREE FOR GROUP BY",
+            "SCAN (subquery-6)"
+          ],
+          [
+            "CO-ROUTINE g",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at>? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "USE TEMP B-TREE FOR GROUP BY",
+            "SCAN g",
+            "SEARCH d USING INDEX sqlite_autoindex_scrobbles_1 (uri=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ],
+          [
+            "CO-ROUTINE g",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at>? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "USE TEMP B-TREE FOR GROUP BY",
+            "SCAN g",
+            "SEARCH d USING INDEX sqlite_autoindex_scrobbles_1 (uri=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ],
+          [
+            "CO-ROUTINE g",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at>? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "USE TEMP B-TREE FOR GROUP BY",
+            "SCAN g",
+            "SEARCH d USING INDEX sqlite_autoindex_scrobbles_1 (uri=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ]
+        ],
+        "plansIndexed": true
+      },
+      "cached": {
+        "probes": 4,
+        "probeKinds": [
+          "users",
+          "cache",
+          "exists",
+          "exists"
+        ],
+        "probesIndexed": true,
+        "probeBudget": 4,
+        "withinProbeBudget": true,
+        "runs": 20,
+        "p50Ms": 0.02064099999552127,
+        "p95Ms": 0.0393939999921713
+      },
+      "afterVersionBump": {
+        "cache": "miss",
+        "equalsUncached": true
+      },
+      "equalsUncached": true,
+      "withinBudget": true
+    },
+    {
+      "scale": 50000,
+      "window": "all",
+      "windowRows": 50000,
+      "expected": {
+        "windowRows": 50000,
+        "artistGroups": 400,
+        "trackGroups": 9667,
+        "albumGroups": 3200,
+        "topArtistCounts": [
+          2496,
+          1041,
+          746,
+          651,
+          550,
+          516,
+          467,
+          461,
+          440,
+          405
+        ],
+        "topTrackCounts": [
+          119,
+          118,
+          113,
+          112,
+          106,
+          105,
+          104,
+          104,
+          103,
+          101
+        ],
+        "topAlbumCounts": [
+          304,
+          295,
+          271,
+          268,
+          252,
+          250,
+          241,
+          231,
+          123,
+          118
+        ]
+      },
+      "observed": {
+        "windowRows": 50000,
+        "totalScrobbles": 50000,
+        "distinctArtists": 400,
+        "distinctTracks": 9667,
+        "topArtistCounts": [
+          2496,
+          1041,
+          746,
+          651,
+          550,
+          516,
+          467,
+          461,
+          440,
+          405
+        ],
+        "topTrackCounts": [
+          119,
+          118,
+          113,
+          112,
+          106,
+          105,
+          104,
+          104,
+          103,
+          101
+        ],
+        "topAlbumCounts": [
+          304,
+          295,
+          271,
+          268,
+          252,
+          250,
+          241,
+          231,
+          123,
+          118
+        ]
+      },
+      "uncached": {
+        "statements": 7,
+        "coldMs": 378.5646880000131,
+        "runs": 5,
+        "p50Ms": 372.59324699999706,
+        "p95Ms": 375.4889819999953,
+        "scrobblesPlans": [
+          [
+            "SCAN CONSTANT ROW",
+            "SCALAR SUBQUERY 4",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "SCALAR SUBQUERY 5",
+            "USE TEMP B-TREE FOR count(DISTINCT)",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "SCALAR SUBQUERY 7",
+            "CO-ROUTINE (subquery-6)",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "USE TEMP B-TREE FOR GROUP BY",
+            "SCAN (subquery-6)"
+          ],
+          [
+            "CO-ROUTINE g",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "USE TEMP B-TREE FOR GROUP BY",
+            "SCAN g",
+            "SEARCH d USING INDEX sqlite_autoindex_scrobbles_1 (uri=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ],
+          [
+            "CO-ROUTINE g",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "USE TEMP B-TREE FOR GROUP BY",
+            "SCAN g",
+            "SEARCH d USING INDEX sqlite_autoindex_scrobbles_1 (uri=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ],
+          [
+            "CO-ROUTINE g",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "USE TEMP B-TREE FOR GROUP BY",
+            "SCAN g",
+            "SEARCH d USING INDEX sqlite_autoindex_scrobbles_1 (uri=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ]
+        ],
+        "plansIndexed": true
+      },
+      "cached": {
+        "probes": 3,
+        "probeKinds": [
+          "users",
+          "cache",
+          "exists"
+        ],
+        "probesIndexed": true,
+        "probeBudget": 3,
+        "withinProbeBudget": true,
+        "runs": 20,
+        "p50Ms": 0.01726000000780914,
+        "p95Ms": 0.025512000007438473
+      },
+      "afterVersionBump": {
+        "cache": "miss",
+        "equalsUncached": true
+      },
+      "equalsUncached": true,
+      "withinBudget": true
+    },
+    {
+      "scale": 50000,
+      "window": "7d",
+      "windowRows": 480,
+      "expected": {
+        "windowRows": 480,
+        "artistGroups": 249,
+        "trackGroups": 455,
+        "albumGroups": 364,
+        "topArtistCounts": [
+          26,
+          10,
+          10,
+          9,
+          7,
+          7,
+          6,
+          5,
+          5,
+          4
+        ],
+        "topTrackCounts": [
+          3,
+          3,
+          2,
+          2,
+          2,
+          2,
+          2,
+          2,
+          2,
+          2
+        ],
+        "topAlbumCounts": [
+          5,
+          4,
+          4,
+          4,
+          3,
+          3,
+          3,
+          3,
+          2,
+          2
+        ]
+      },
+      "observed": {
+        "windowRows": 480,
+        "totalScrobbles": 480,
+        "distinctArtists": 249,
+        "distinctTracks": 455,
+        "topArtistCounts": [
+          26,
+          10,
+          10,
+          9,
+          7,
+          7,
+          6,
+          5,
+          5,
+          4
+        ],
+        "topTrackCounts": [
+          3,
+          3,
+          2,
+          2,
+          2,
+          2,
+          2,
+          2,
+          2,
+          2
+        ],
+        "topAlbumCounts": [
+          5,
+          4,
+          4,
+          4,
+          3,
+          3,
+          3,
+          3,
+          2,
+          2
+        ]
+      },
+      "uncached": {
+        "statements": 7,
+        "coldMs": 5.967888999992283,
+        "runs": 5,
+        "p50Ms": 4.860990000001038,
+        "p95Ms": 4.90274700000009,
+        "scrobblesPlans": [
+          [
+            "SCAN CONSTANT ROW",
+            "SCALAR SUBQUERY 4",
+            "MATERIALIZE w",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at>? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "SCAN w",
+            "SCALAR SUBQUERY 5",
+            "USE TEMP B-TREE FOR count(DISTINCT)",
+            "SCAN w",
+            "SCALAR SUBQUERY 7",
+            "CO-ROUTINE (subquery-6)",
+            "SCAN w",
+            "USE TEMP B-TREE FOR GROUP BY",
+            "SCAN (subquery-6)"
+          ],
+          [
+            "CO-ROUTINE g",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at>? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "USE TEMP B-TREE FOR GROUP BY",
+            "SCAN g",
+            "SEARCH d USING INDEX sqlite_autoindex_scrobbles_1 (uri=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ],
+          [
+            "CO-ROUTINE g",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at>? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "USE TEMP B-TREE FOR GROUP BY",
+            "SCAN g",
+            "SEARCH d USING INDEX sqlite_autoindex_scrobbles_1 (uri=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ],
+          [
+            "CO-ROUTINE g",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at>? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "USE TEMP B-TREE FOR GROUP BY",
+            "SCAN g",
+            "SEARCH d USING INDEX sqlite_autoindex_scrobbles_1 (uri=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ]
+        ],
+        "plansIndexed": true
+      },
+      "cached": {
+        "probes": 4,
+        "probeKinds": [
+          "users",
+          "cache",
+          "exists",
+          "exists"
+        ],
+        "probesIndexed": true,
+        "probeBudget": 4,
+        "withinProbeBudget": true,
+        "runs": 20,
+        "p50Ms": 0.020425000009709038,
+        "p95Ms": 0.028420000002370216
+      },
+      "afterVersionBump": {
+        "cache": "miss",
+        "equalsUncached": true
+      },
+      "equalsUncached": true,
+      "withinBudget": true
+    },
+    {
+      "scale": 50000,
+      "window": "30d",
+      "windowRows": 2056,
+      "expected": {
+        "windowRows": 2056,
+        "artistGroups": 388,
+        "trackGroups": 1714,
+        "albumGroups": 1218,
+        "topArtistCounts": [
+          114,
+          45,
+          27,
+          24,
+          24,
+          23,
+          21,
+          21,
+          20,
+          18
+        ],
+        "topTrackCounts": [
+          7,
+          7,
+          7,
+          6,
+          6,
+          6,
+          6,
+          6,
+          6,
+          6
+        ],
+        "topAlbumCounts": [
+          18,
+          15,
+          14,
+          13,
+          13,
+          11,
+          9,
+          8,
+          6,
+          6
+        ]
+      },
+      "observed": {
+        "windowRows": 2056,
+        "totalScrobbles": 2056,
+        "distinctArtists": 388,
+        "distinctTracks": 1714,
+        "topArtistCounts": [
+          114,
+          45,
+          27,
+          24,
+          24,
+          23,
+          21,
+          21,
+          20,
+          18
+        ],
+        "topTrackCounts": [
+          7,
+          7,
+          7,
+          6,
+          6,
+          6,
+          6,
+          6,
+          6,
+          6
+        ],
+        "topAlbumCounts": [
+          18,
+          15,
+          14,
+          13,
+          13,
+          11,
+          9,
+          8,
+          6,
+          6
+        ]
+      },
+      "uncached": {
+        "statements": 7,
+        "coldMs": 18.56623799999943,
+        "runs": 5,
+        "p50Ms": 17.24121500000183,
+        "p95Ms": 17.32195299999148,
+        "scrobblesPlans": [
+          [
+            "SCAN CONSTANT ROW",
+            "SCALAR SUBQUERY 4",
+            "MATERIALIZE w",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at>? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "SCAN w",
+            "SCALAR SUBQUERY 5",
+            "USE TEMP B-TREE FOR count(DISTINCT)",
+            "SCAN w",
+            "SCALAR SUBQUERY 7",
+            "CO-ROUTINE (subquery-6)",
+            "SCAN w",
+            "USE TEMP B-TREE FOR GROUP BY",
+            "SCAN (subquery-6)"
+          ],
+          [
+            "CO-ROUTINE g",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at>? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "USE TEMP B-TREE FOR GROUP BY",
+            "SCAN g",
+            "SEARCH d USING INDEX sqlite_autoindex_scrobbles_1 (uri=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ],
+          [
+            "CO-ROUTINE g",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at>? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "USE TEMP B-TREE FOR GROUP BY",
+            "SCAN g",
+            "SEARCH d USING INDEX sqlite_autoindex_scrobbles_1 (uri=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ],
+          [
+            "CO-ROUTINE g",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at>? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "USE TEMP B-TREE FOR GROUP BY",
+            "SCAN g",
+            "SEARCH d USING INDEX sqlite_autoindex_scrobbles_1 (uri=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ]
+        ],
+        "plansIndexed": true
+      },
+      "cached": {
+        "probes": 4,
+        "probeKinds": [
+          "users",
+          "cache",
+          "exists",
+          "exists"
+        ],
+        "probesIndexed": true,
+        "probeBudget": 4,
+        "withinProbeBudget": true,
+        "runs": 20,
+        "p50Ms": 0.020465999987209216,
+        "p95Ms": 0.029003999996348284
+      },
+      "afterVersionBump": {
+        "cache": "miss",
+        "equalsUncached": true
+      },
+      "equalsUncached": true,
+      "withinBudget": true
+    },
+    {
+      "scale": 50000,
+      "window": "365d",
+      "windowRows": 25009,
+      "expected": {
+        "windowRows": 25009,
+        "artistGroups": 400,
+        "trackGroups": 8428,
+        "albumGroups": 3159,
+        "topArtistCounts": [
+          1235,
+          507,
+          369,
+          317,
+          275,
+          256,
+          238,
+          218,
+          215,
+          208
+        ],
+        "topTrackCounts": [
+          62,
+          61,
+          60,
+          58,
+          57,
+          56,
+          54,
+          52,
+          51,
+          51
+        ],
+        "topAlbumCounts": [
+          150,
+          142,
+          134,
+          133,
+          125,
+          124,
+          117,
+          115,
+          67,
+          64
+        ]
+      },
+      "observed": {
+        "windowRows": 25009,
+        "totalScrobbles": 25009,
+        "distinctArtists": 400,
+        "distinctTracks": 8428,
+        "topArtistCounts": [
+          1235,
+          507,
+          369,
+          317,
+          275,
+          256,
+          238,
+          218,
+          215,
+          208
+        ],
+        "topTrackCounts": [
+          62,
+          61,
+          60,
+          58,
+          57,
+          56,
+          54,
+          52,
+          51,
+          51
+        ],
+        "topAlbumCounts": [
+          150,
+          142,
+          134,
+          133,
+          125,
+          124,
+          117,
+          115,
+          67,
+          64
+        ]
+      },
+      "uncached": {
+        "statements": 7,
+        "coldMs": 181.55714299999818,
+        "runs": 5,
+        "p50Ms": 179.35777600000438,
+        "p95Ms": 180.10152100000414,
+        "scrobblesPlans": [
+          [
+            "SCAN CONSTANT ROW",
+            "SCALAR SUBQUERY 4",
+            "MATERIALIZE w",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at>? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "SCAN w",
+            "SCALAR SUBQUERY 5",
+            "USE TEMP B-TREE FOR count(DISTINCT)",
+            "SCAN w",
+            "SCALAR SUBQUERY 7",
+            "CO-ROUTINE (subquery-6)",
+            "SCAN w",
+            "USE TEMP B-TREE FOR GROUP BY",
+            "SCAN (subquery-6)"
+          ],
+          [
+            "CO-ROUTINE g",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at>? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "USE TEMP B-TREE FOR GROUP BY",
+            "SCAN g",
+            "SEARCH d USING INDEX sqlite_autoindex_scrobbles_1 (uri=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ],
+          [
+            "CO-ROUTINE g",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at>? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "USE TEMP B-TREE FOR GROUP BY",
+            "SCAN g",
+            "SEARCH d USING INDEX sqlite_autoindex_scrobbles_1 (uri=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ],
+          [
+            "CO-ROUTINE g",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at>? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "USE TEMP B-TREE FOR GROUP BY",
+            "SCAN g",
+            "SEARCH d USING INDEX sqlite_autoindex_scrobbles_1 (uri=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ]
+        ],
+        "plansIndexed": true
+      },
+      "cached": {
+        "probes": 4,
+        "probeKinds": [
+          "users",
+          "cache",
+          "exists",
+          "exists"
+        ],
+        "probesIndexed": true,
+        "probeBudget": 4,
+        "withinProbeBudget": true,
+        "runs": 20,
+        "p50Ms": 0.020424000002094544,
+        "p95Ms": 0.028604999999515712
+      },
+      "afterVersionBump": {
+        "cache": "miss",
+        "equalsUncached": true
+      },
+      "equalsUncached": true,
+      "withinBudget": true
+    },
+    {
+      "scale": 100000,
+      "window": "all",
+      "windowRows": 100000,
+      "expected": {
+        "windowRows": 100000,
+        "artistGroups": 400,
+        "trackGroups": 9976,
+        "albumGroups": 3200,
+        "topArtistCounts": [
+          5061,
+          2090,
+          1580,
+          1392,
+          1156,
+          1040,
+          1022,
+          905,
+          833,
+          822
+        ],
+        "topTrackCounts": [
+          231,
+          229,
+          225,
+          223,
+          217,
+          212,
+          209,
+          208,
+          207,
+          204
+        ],
+        "topAlbumCounts": [
+          576,
+          561,
+          557,
+          552,
+          537,
+          524,
+          521,
+          504,
+          245,
+          242
+        ]
+      },
+      "observed": {
+        "windowRows": 100000,
+        "totalScrobbles": 100000,
+        "distinctArtists": 400,
+        "distinctTracks": 9976,
+        "topArtistCounts": [
+          5061,
+          2090,
+          1580,
+          1392,
+          1156,
+          1040,
+          1022,
+          905,
+          833,
+          822
+        ],
+        "topTrackCounts": [
+          231,
+          229,
+          225,
+          223,
+          217,
+          212,
+          209,
+          208,
+          207,
+          204
+        ],
+        "topAlbumCounts": [
+          576,
+          561,
+          557,
+          552,
+          537,
+          524,
+          521,
+          504,
+          245,
+          242
+        ]
+      },
+      "uncached": {
+        "statements": 7,
+        "coldMs": 921.4829869999958,
+        "runs": 5,
+        "p50Ms": 1007.8308180000022,
+        "p95Ms": 1155.3845130000118,
+        "scrobblesPlans": [
+          [
+            "SCAN CONSTANT ROW",
+            "SCALAR SUBQUERY 4",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "SCALAR SUBQUERY 5",
+            "USE TEMP B-TREE FOR count(DISTINCT)",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "SCALAR SUBQUERY 7",
+            "CO-ROUTINE (subquery-6)",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "USE TEMP B-TREE FOR GROUP BY",
+            "SCAN (subquery-6)"
+          ],
+          [
+            "CO-ROUTINE g",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "USE TEMP B-TREE FOR GROUP BY",
+            "SCAN g",
+            "SEARCH d USING INDEX sqlite_autoindex_scrobbles_1 (uri=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ],
+          [
+            "CO-ROUTINE g",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "USE TEMP B-TREE FOR GROUP BY",
+            "SCAN g",
+            "SEARCH d USING INDEX sqlite_autoindex_scrobbles_1 (uri=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ],
+          [
+            "CO-ROUTINE g",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "USE TEMP B-TREE FOR GROUP BY",
+            "SCAN g",
+            "SEARCH d USING INDEX sqlite_autoindex_scrobbles_1 (uri=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ]
+        ],
+        "plansIndexed": true
+      },
+      "cached": {
+        "probes": 3,
+        "probeKinds": [
+          "users",
+          "cache",
+          "exists"
+        ],
+        "probesIndexed": true,
+        "probeBudget": 3,
+        "withinProbeBudget": true,
+        "runs": 20,
+        "p50Ms": 0.043575999996392056,
+        "p95Ms": 0.07217800000216812
+      },
+      "afterVersionBump": {
+        "cache": "miss",
+        "equalsUncached": true
+      },
+      "equalsUncached": true,
+      "withinBudget": true
+    },
+    {
+      "scale": 100000,
+      "window": "7d",
+      "windowRows": 960,
+      "expected": {
+        "windowRows": 960,
+        "artistGroups": 331,
+        "trackGroups": 874,
+        "albumGroups": 665,
+        "topArtistCounts": [
+          38,
+          20,
+          18,
+          15,
+          13,
+          10,
+          9,
+          9,
+          8,
+          8
+        ],
+        "topTrackCounts": [
+          5,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3
+        ],
+        "topAlbumCounts": [
+          11,
+          6,
+          5,
+          5,
+          5,
+          4,
+          4,
+          4,
+          4,
+          3
+        ]
+      },
+      "observed": {
+        "windowRows": 960,
+        "totalScrobbles": 960,
+        "distinctArtists": 331,
+        "distinctTracks": 874,
+        "topArtistCounts": [
+          38,
+          20,
+          18,
+          15,
+          13,
+          10,
+          9,
+          9,
+          8,
+          8
+        ],
+        "topTrackCounts": [
+          5,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3
+        ],
+        "topAlbumCounts": [
+          11,
+          6,
+          5,
+          5,
+          5,
+          4,
+          4,
+          4,
+          4,
+          3
+        ]
+      },
+      "uncached": {
+        "statements": 7,
+        "coldMs": 12.557908999995561,
+        "runs": 5,
+        "p50Ms": 12.623208000004524,
+        "p95Ms": 13.229024000000209,
+        "scrobblesPlans": [
+          [
+            "SCAN CONSTANT ROW",
+            "SCALAR SUBQUERY 4",
+            "MATERIALIZE w",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at>? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "SCAN w",
+            "SCALAR SUBQUERY 5",
+            "USE TEMP B-TREE FOR count(DISTINCT)",
+            "SCAN w",
+            "SCALAR SUBQUERY 7",
+            "CO-ROUTINE (subquery-6)",
+            "SCAN w",
+            "USE TEMP B-TREE FOR GROUP BY",
+            "SCAN (subquery-6)"
+          ],
+          [
+            "CO-ROUTINE g",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at>? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "USE TEMP B-TREE FOR GROUP BY",
+            "SCAN g",
+            "SEARCH d USING INDEX sqlite_autoindex_scrobbles_1 (uri=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ],
+          [
+            "CO-ROUTINE g",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at>? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "USE TEMP B-TREE FOR GROUP BY",
+            "SCAN g",
+            "SEARCH d USING INDEX sqlite_autoindex_scrobbles_1 (uri=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ],
+          [
+            "CO-ROUTINE g",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at>? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "USE TEMP B-TREE FOR GROUP BY",
+            "SCAN g",
+            "SEARCH d USING INDEX sqlite_autoindex_scrobbles_1 (uri=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ]
+        ],
+        "plansIndexed": true
+      },
+      "cached": {
+        "probes": 4,
+        "probeKinds": [
+          "users",
+          "cache",
+          "exists",
+          "exists"
+        ],
+        "probesIndexed": true,
+        "probeBudget": 4,
+        "withinProbeBudget": true,
+        "runs": 20,
+        "p50Ms": 0.03320700000040233,
+        "p95Ms": 0.04074100000434555
+      },
+      "afterVersionBump": {
+        "cache": "miss",
+        "equalsUncached": true
+      },
+      "equalsUncached": true,
+      "withinBudget": true
+    },
+    {
+      "scale": 100000,
+      "window": "30d",
+      "windowRows": 4115,
+      "expected": {
+        "windowRows": 4115,
+        "artistGroups": 399,
+        "trackGroups": 3046,
+        "albumGroups": 1863,
+        "topArtistCounts": [
+          195,
+          84,
+          57,
+          55,
+          52,
+          44,
+          39,
+          37,
+          36,
+          35
+        ],
+        "topTrackCounts": [
+          12,
+          12,
+          11,
+          10,
+          10,
+          10,
+          10,
+          9,
+          9,
+          9
+        ],
+        "topAlbumCounts": [
+          26,
+          23,
+          23,
+          21,
+          20,
+          19,
+          18,
+          16,
+          15,
+          13
+        ]
+      },
+      "observed": {
+        "windowRows": 4115,
+        "totalScrobbles": 4115,
+        "distinctArtists": 399,
+        "distinctTracks": 3046,
+        "topArtistCounts": [
+          195,
+          84,
+          57,
+          55,
+          52,
+          44,
+          39,
+          37,
+          36,
+          35
+        ],
+        "topTrackCounts": [
+          12,
+          12,
+          11,
+          10,
+          10,
+          10,
+          10,
+          9,
+          9,
+          9
+        ],
+        "topAlbumCounts": [
+          26,
+          23,
+          23,
+          21,
+          20,
+          19,
+          18,
+          16,
+          15,
+          13
+        ]
+      },
+      "uncached": {
+        "statements": 7,
+        "coldMs": 42.69838200000231,
+        "runs": 5,
+        "p50Ms": 47.117534000004525,
+        "p95Ms": 49.41461000000709,
+        "scrobblesPlans": [
+          [
+            "SCAN CONSTANT ROW",
+            "SCALAR SUBQUERY 4",
+            "MATERIALIZE w",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at>? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "SCAN w",
+            "SCALAR SUBQUERY 5",
+            "USE TEMP B-TREE FOR count(DISTINCT)",
+            "SCAN w",
+            "SCALAR SUBQUERY 7",
+            "CO-ROUTINE (subquery-6)",
+            "SCAN w",
+            "USE TEMP B-TREE FOR GROUP BY",
+            "SCAN (subquery-6)"
+          ],
+          [
+            "CO-ROUTINE g",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at>? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "USE TEMP B-TREE FOR GROUP BY",
+            "SCAN g",
+            "SEARCH d USING INDEX sqlite_autoindex_scrobbles_1 (uri=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ],
+          [
+            "CO-ROUTINE g",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at>? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "USE TEMP B-TREE FOR GROUP BY",
+            "SCAN g",
+            "SEARCH d USING INDEX sqlite_autoindex_scrobbles_1 (uri=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ],
+          [
+            "CO-ROUTINE g",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at>? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "USE TEMP B-TREE FOR GROUP BY",
+            "SCAN g",
+            "SEARCH d USING INDEX sqlite_autoindex_scrobbles_1 (uri=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ]
+        ],
+        "plansIndexed": true
+      },
+      "cached": {
+        "probes": 4,
+        "probeKinds": [
+          "users",
+          "cache",
+          "exists",
+          "exists"
+        ],
+        "probesIndexed": true,
+        "probeBudget": 4,
+        "withinProbeBudget": true,
+        "runs": 20,
+        "p50Ms": 0.035248999993200414,
+        "p95Ms": 0.07604299999366049
+      },
+      "afterVersionBump": {
+        "cache": "miss",
+        "equalsUncached": true
+      },
+      "equalsUncached": true,
+      "withinBudget": true
+    },
+    {
+      "scale": 100000,
+      "window": "365d",
+      "windowRows": 50058,
+      "expected": {
+        "windowRows": 50058,
+        "artistGroups": 400,
+        "trackGroups": 9678,
+        "albumGroups": 3200,
+        "topArtistCounts": [
+          2421,
+          1061,
+          758,
+          702,
+          578,
+          515,
+          479,
+          437,
+          423,
+          400
+        ],
+        "topTrackCounts": [
+          125,
+          108,
+          107,
+          105,
+          104,
+          103,
+          103,
+          101,
+          101,
+          101
+        ],
+        "topAlbumCounts": [
+          272,
+          268,
+          267,
+          264,
+          260,
+          248,
+          245,
+          231,
+          127,
+          117
+        ]
+      },
+      "observed": {
+        "windowRows": 50058,
+        "totalScrobbles": 50058,
+        "distinctArtists": 400,
+        "distinctTracks": 9678,
+        "topArtistCounts": [
+          2421,
+          1061,
+          758,
+          702,
+          578,
+          515,
+          479,
+          437,
+          423,
+          400
+        ],
+        "topTrackCounts": [
+          125,
+          108,
+          107,
+          105,
+          104,
+          103,
+          103,
+          101,
+          101,
+          101
+        ],
+        "topAlbumCounts": [
+          272,
+          268,
+          267,
+          264,
+          260,
+          248,
+          245,
+          231,
+          127,
+          117
+        ]
+      },
+      "uncached": {
+        "statements": 7,
+        "coldMs": 544.3276110000006,
+        "runs": 5,
+        "p50Ms": 511.092558999997,
+        "p95Ms": 593.7156549999927,
+        "scrobblesPlans": [
+          [
+            "SCAN CONSTANT ROW",
+            "SCALAR SUBQUERY 4",
+            "MATERIALIZE w",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at>? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "SCAN w",
+            "SCALAR SUBQUERY 5",
+            "USE TEMP B-TREE FOR count(DISTINCT)",
+            "SCAN w",
+            "SCALAR SUBQUERY 7",
+            "CO-ROUTINE (subquery-6)",
+            "SCAN w",
+            "USE TEMP B-TREE FOR GROUP BY",
+            "SCAN (subquery-6)"
+          ],
+          [
+            "CO-ROUTINE g",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at>? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "USE TEMP B-TREE FOR GROUP BY",
+            "SCAN g",
+            "SEARCH d USING INDEX sqlite_autoindex_scrobbles_1 (uri=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ],
+          [
+            "CO-ROUTINE g",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at>? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "USE TEMP B-TREE FOR GROUP BY",
+            "SCAN g",
+            "SEARCH d USING INDEX sqlite_autoindex_scrobbles_1 (uri=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ],
+          [
+            "CO-ROUTINE g",
+            "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+            "CORRELATED SCALAR SUBQUERY 1",
+            "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+            "SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at>? AND listened_at<?)",
+            "CORRELATED SCALAR SUBQUERY 2",
+            "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+            "USE TEMP B-TREE FOR GROUP BY",
+            "SCAN g",
+            "SEARCH d USING INDEX sqlite_autoindex_scrobbles_1 (uri=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ]
+        ],
+        "plansIndexed": true
+      },
+      "cached": {
+        "probes": 4,
+        "probeKinds": [
+          "users",
+          "cache",
+          "exists",
+          "exists"
+        ],
+        "probesIndexed": true,
+        "probeBudget": 4,
+        "withinProbeBudget": true,
+        "runs": 20,
+        "p50Ms": 0.0720910000090953,
+        "p95Ms": 0.0947030000097584
+      },
+      "afterVersionBump": {
+        "cache": "miss",
+        "equalsUncached": true
+      },
+      "equalsUncached": true,
+      "withinBudget": true
+    }
+  ],
+  "worstCases": [
+    {
+      "id": "following-sparse-followees-first",
+      "scenario": "Following feed, first page: the viewer follows only 3 accounts with 20 listens each, spread over two years of a 20,060-row visible timeline.",
+      "name": "worst following sparse first",
+      "kind": "following",
+      "scale": null,
+      "page": "first",
+      "depth": 0,
+      "rowsReturned": 20,
+      "statements": 3,
+      "coldMs": 0.8727510000026086,
+      "runs": 20,
+      "p50Ms": 0.4635500000003958,
+      "p95Ms": 0.7250389999971958,
+      "plan": [
+        "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+        "LIST SUBQUERY 7",
+        "SEARCH f_actor EXISTS USING INDEX sqlite_autoindex_users_1 (did=?)",
+        "CORRELATED SCALAR SUBQUERY 3",
+        "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+        "SEARCH f USING COVERING INDEX follows_actor_subject (actor=?)",
+        "CORRELATED SCALAR SUBQUERY 5",
+        "SEARCH f_subject_x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+        "CORRELATED SCALAR SUBQUERY 6",
+        "SEARCH f_subject USING INDEX sqlite_autoindex_users_1 (did=?)",
+        "CORRELATED SCALAR SUBQUERY 1",
+        "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+        "REUSE LIST SUBQUERY 7",
+        "SEARCH s USING INDEX scrobbles_owner_time (did=?)",
+        "CORRELATED SCALAR SUBQUERY 2",
+        "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+        "USE TEMP B-TREE FOR ORDER BY"
+      ],
+      "denseP50Ms": 0.3529790000029607,
+      "asserted": false
+    },
+    {
+      "id": "following-sparse-followees-deep",
+      "scenario": "Following feed, deep page (depth 30): the viewer follows only 3 accounts with 20 listens each, spread over two years of a 20,060-row visible timeline.",
+      "name": "worst following sparse deep",
+      "kind": "following",
+      "scale": null,
+      "page": "deep",
+      "depth": 30,
+      "rowsReturned": 20,
+      "statements": 3,
+      "coldMs": 0.7643780000071274,
+      "runs": 20,
+      "p50Ms": 0.35931600000185426,
+      "p95Ms": 0.4021879999927478,
+      "plan": [
+        "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+        "LIST SUBQUERY 7",
+        "SEARCH f_actor EXISTS USING INDEX sqlite_autoindex_users_1 (did=?)",
+        "CORRELATED SCALAR SUBQUERY 3",
+        "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+        "SEARCH f USING COVERING INDEX follows_actor_subject (actor=?)",
+        "CORRELATED SCALAR SUBQUERY 5",
+        "SEARCH f_subject_x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+        "CORRELATED SCALAR SUBQUERY 6",
+        "SEARCH f_subject USING INDEX sqlite_autoindex_users_1 (did=?)",
+        "CORRELATED SCALAR SUBQUERY 1",
+        "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)",
+        "REUSE LIST SUBQUERY 7",
+        "SEARCH s USING INDEX scrobbles_owner_time (did=? AND (listened_at,uri)<(?,?))",
+        "CORRELATED SCALAR SUBQUERY 2",
+        "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+        "USE TEMP B-TREE FOR ORDER BY"
+      ],
+      "denseP50Ms": 0.3529790000029607,
+      "asserted": false
+    },
+    {
+      "id": "global-hidden-newest-first",
+      "scenario": "Global feed, first page: the newest 1,000 rows belong to an owner deactivated by the production markInactive (rows kept, owner hidden), above a 20,060-row visible timeline.",
+      "name": "worst global hidden newest first",
+      "kind": "global",
+      "scale": null,
+      "page": "first",
+      "depth": 0,
+      "rowsReturned": 20,
+      "statements": 3,
+      "coldMs": 1.2197009999945294,
+      "runs": 20,
+      "p50Ms": 0.7447300000058021,
+      "p95Ms": 0.793481000000611,
+      "plan": [
+        "SCAN s USING INDEX scrobbles_global_time",
+        "CORRELATED SCALAR SUBQUERY 2",
+        "SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)",
+        "SEARCH u USING INDEX sqlite_autoindex_users_1 (did=?)",
+        "CORRELATED SCALAR SUBQUERY 1",
+        "SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)"
+      ],
+      "denseP50Ms": 0.23197300000174437,
+      "asserted": false
+    }
+  ],
+  "timings": {
+    "history": {
+      "runs": 160,
+      "p50Ms": 0.24776500000734814,
+      "p95Ms": 0.34175900000263937
+    },
+    "feed": {
+      "runs": 80,
+      "p50Ms": 0.3354330000001937,
+      "p95Ms": 0.41911899999831803
+    },
+    "stats": {
+      "runs": 80,
+      "p50Ms": 13.229024000000209,
+      "p95Ms": 952.8701589999982
+    },
+    "statsCached": {
+      "runs": 320,
+      "p50Ms": 0.020759999999427237,
+      "p95Ms": 0.07414100000460166
+    }
+  },
+  "http": {
+    "endpoints": [
+      "/api/v1/users/{did}/scrobbles?limit=20",
+      "/api/v1/feed?scope=global&limit=20"
+    ],
+    "warmupRequests": 300,
+    "measuredRequests": 600,
+    "warmupErrors": 0,
+    "errors": 0,
+    "paced": false,
+    "intervalMs": 0,
+    "elapsedMs": 749.5896740000026,
+    "meanMs": 1.2271013750003719,
+    "p50Ms": 0.9877980000019306,
+    "p95Ms": 2.89949599999818,
+    "p95Rank": 570,
+    "p99Ms": 4.040314999991097,
+    "maxMs": 6.55918599999859,
+    "targetMs": 300,
+    "passed": true
+  },
+  "followUps": [
+    {
+      "id": "worst-following-sparse-followees-first",
+      "summary": "Following feed, first page: the viewer follows only 3 accounts with 20 listens each, spread over two years of a 20,060-row visible timeline. p50 0.464 ms, p95 0.725 ms for 20 rows (the dense first page of this kind of read: p50 0.353 ms; scrobbles plan: SEARCH s USING INDEX scrobbles_owner_time (did=?); USE TEMP B-TREE FOR ORDER BY). SQLite walks each followee's scrobbles_owner_time range (up to L + 1 rows each) and merges the walks in a temporary B-tree, so the cost grows with the number of followees, not with the size of the global timeline. Measured and reported, not asserted (Q10).",
+      "measured": 0.4635500000003958,
+      "threshold": 0.3529790000029607
+    },
+    {
+      "id": "worst-following-sparse-followees-deep",
+      "summary": "Following feed, deep page (depth 30): the viewer follows only 3 accounts with 20 listens each, spread over two years of a 20,060-row visible timeline. p50 0.359 ms, p95 0.402 ms for 20 rows (the dense first page of this kind of read: p50 0.353 ms; scrobbles plan: SEARCH s USING INDEX scrobbles_owner_time (did=? AND (listened_at,uri)<(?,?)); USE TEMP B-TREE FOR ORDER BY). The same per-followee walks start below the cursor, so a deep page costs no more than a first page. Measured and reported, not asserted (Q10).",
+      "measured": 0.35931600000185426,
+      "threshold": 0.3529790000029607
+    },
+    {
+      "id": "worst-global-hidden-newest-first",
+      "summary": "Global feed, first page: the newest 1,000 rows belong to an owner deactivated by the production markInactive (rows kept, owner hidden), above a 20,060-row visible timeline. p50 0.745 ms, p95 0.793 ms for 20 rows (the dense first page of this kind of read: p50 0.232 ms; scrobbles plan: SCAN s USING INDEX scrobbles_global_time). The scrobbles_global_time walk visits and discards every hidden row above the first visible one, each with its owner-visibility probe, so the cost grows linearly with the hidden owner's newest rows. Candidate fixes (not decided): keep hidden owners' rows out of the global walk, for example by deleting them on deactivation and re-snapshotting on reactivation, or a visibility column in the global index. Measured and reported, not asserted (Q10).",
+      "measured": 0.7447300000058021,
+      "threshold": 0.23197300000174437
+    },
+    {
+      "id": "stats-10000-all-over-50ms",
+      "summary": "Uncached all statistics of the 10,000-scrobble user (10,000 window rows) took 82.6 ms on node:sqlite (cold 82.6 ms, p50 80.2 ms, p95 81.1 ms; a cached hit p50 0.017 ms). Read-time aggregation is linear in the window rows; pre-aggregated per-user counters would bound it if such users appear.",
+      "measured": 82.5627700000041,
+      "threshold": 50
+    },
+    {
+      "id": "stats-50000-all-over-50ms",
+      "summary": "Uncached all statistics of the 50,000-scrobble user (50,000 window rows) took 378.6 ms on node:sqlite (cold 378.6 ms, p50 372.6 ms, p95 375.5 ms; a cached hit p50 0.017 ms). Read-time aggregation is linear in the window rows; pre-aggregated per-user counters would bound it if such users appear.",
+      "measured": 378.5646880000131,
+      "threshold": 50
+    },
+    {
+      "id": "stats-50000-365d-over-50ms",
+      "summary": "Uncached 365d statistics of the 50,000-scrobble user (25,009 window rows) took 181.6 ms on node:sqlite (cold 181.6 ms, p50 179.4 ms, p95 180.1 ms; a cached hit p50 0.020 ms). Read-time aggregation is linear in the window rows; pre-aggregated per-user counters would bound it if such users appear.",
+      "measured": 181.55714299999818,
+      "threshold": 50
+    },
+    {
+      "id": "stats-100000-all-over-50ms",
+      "summary": "Uncached all statistics of the 100,000-scrobble user (100,000 window rows) took 1155.4 ms on node:sqlite (cold 921.5 ms, p50 1007.8 ms, p95 1155.4 ms; a cached hit p50 0.044 ms). Read-time aggregation is linear in the window rows; pre-aggregated per-user counters would bound it if such users appear.",
+      "measured": 1155.3845130000118,
+      "threshold": 50
+    },
+    {
+      "id": "stats-100000-365d-over-50ms",
+      "summary": "Uncached 365d statistics of the 100,000-scrobble user (50,058 window rows) took 593.7 ms on node:sqlite (cold 544.3 ms, p50 511.1 ms, p95 593.7 ms; a cached hit p50 0.072 ms). Read-time aggregation is linear in the window rows; pre-aggregated per-user counters would bound it if such users appear.",
+      "measured": 593.7156549999927,
+      "threshold": 50
+    }
+  ],
+  "passed": true
+}

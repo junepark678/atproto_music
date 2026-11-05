@@ -170,6 +170,26 @@ test('the HTTPS preload rejects every non-public hostname before opening a conne
   expect(exit.stderr).toContain('refused hostname attacker.example');
 });
 
+test('the HTTPS preload rejects transport overrides, including custom agents and Unix socket paths', async () => {
+  const preload = resolve(REPO, 'scripts/e2e/scrobbler-clients/https-to-loopback.mjs');
+  for (const option of [
+    "{ socketPath: '/tmp/attacker.sock' }",
+    '{ createConnection() {} }',
+    '{ lookup() {} }',
+    '{ _defaultAgent: { constructor: class OverrideAgent {} } }',
+  ]) {
+    const code = `import https from 'node:https'; https.request({ hostname: 'music.214510.xyz', ...${option} });`;
+    const child = spawn(process.execPath, ['--import', preload, '--input-type=module', '-e', code], {
+      cwd: REPO,
+      env: { ...process.env, ATMUSIC_E2E_SCROBBLER_PORT: '30000' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const exit = await childDone(child);
+    expect(exit.code).not.toBe(0);
+    expect(exit.stderr).toContain('refused transport override');
+  }
+});
+
 test('the HTTPS preload preserves the request method, path, Host header, and body bytes', async () => {
   const preload = resolve(REPO, 'scripts/e2e/scrobbler-clients/https-to-loopback.mjs');
   const body = 'artist=Å+Band&track=Path%20Test';

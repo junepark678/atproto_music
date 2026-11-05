@@ -138,6 +138,10 @@ export async function bindAdminSocket(options: AdminSocketOptions): Promise<Admi
   let handler: AdminHandler | null = null;
   const server = http.createServer();
   server.on('request', (req: http.IncomingMessage, res: http.ServerResponse) => {
+    const controller = new AbortController();
+    res.once('close', () => {
+      if (!res.writableFinished) controller.abort(new Error('admin client disconnected'));
+    });
     void (async () => {
       const requestId = newRequestId(random);
       try {
@@ -159,6 +163,7 @@ export async function bindAdminSocket(options: AdminSocketOptions): Promise<Admi
         const request = new Request(`${ADMIN_SOCKET_ORIGIN}${target}`, {
           method,
           headers,
+          signal: controller.signal,
           ...(body === null || body.byteLength === 0 ? {} : { body: new Uint8Array(body) }),
         });
         await writeResponse(res, await handler(request));

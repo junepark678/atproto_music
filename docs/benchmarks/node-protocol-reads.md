@@ -1,20 +1,34 @@
 # Node protocol-read benchmark
 
-- Generated: 2026-11-03T04:22:41.282Z
+- Generated: 2026-11-03T07:40:03.625Z
 - Receipt: `worker/test/bench/protocol-reads.bench.test.ts`
-- Dataset: 100,000 listens, seed 24301, fixed clock 2026-01-15T12:00:00Z; apply-path parity sample 100 records
+- Schema: `atmusic/protocol-reads-benchmark@2`
+- Dataset: 100,000 listens, seed 24301, fixed clock 2026-01-15T12:00:00Z; apply-path parity sample 100 records; 256 operations (250 succeeded scrobble creates, 6 scrobble deletes); 99,995 visible / 5 hidden listens
 
-The main fixture inserts the 100,000-listen projection through direct SQL after production record normalization. The parity sample compares signed repository verification and the production apply path against equivalent direct inserts. Reads are measured through the Node HTTP composition; fixture setup, cache invalidation, and report writing are outside each timed sample. Each read has ten samples. Requests are top tracks (period=overall), recent tracks (page 500, limit 200), ListenBrainz recordings (range=all_time, count=100), and listening activity (range=year). The ListenBrainz stats query-plan sample is a cold cache miss and its timing samples clear the cache before each request.
+The main fixture inserts the 100,000-listen projection through direct SQL after production record normalization, then seeds a deterministic history of succeeded create operations and delete operations spanning queued, running, blocked, failed, succeeded with matching CID, and succeeded with stale CID. The operation count is deliberately bounded for a reproducible measurement and is reported explicitly; it does not claim to model a user's lifetime operation history. The parity sample compares signed repository verification and the production apply path against equivalent direct inserts. Reads are measured through the Node HTTP composition; fixture setup, cache invalidation, and report writing are outside each timed sample. Each read has ten samples. Requests are top tracks (period=overall), recent tracks (page 500, limit 200), ListenBrainz recordings (range=all_time, count=100), and listening activity (range=year). The ListenBrainz stats query-plan sample is a cold cache miss and its timing samples clear the cache before each request.
 
-Timings are observations from this run. Budget comparisons are informational and are not acceptance assertions. The ADR §10.3 report-only budgets are uncached top tracks p95 <250 ms, cached top tracks p95 <20 ms, and recent tracks page 500 p95 <100 ms. No budget is specified for the ListenBrainz reads.
+Timings are observations from this run. Budget comparisons are informational and are not acceptance assertions. The ADR §10.3 report-only budgets are uncached top tracks p95 <250 ms, cached top tracks p95 <20 ms, and recent tracks page 500 p95 <100 ms. With ten samples, nearest-rank p95 is the slowest sample. No budget is specified for the ListenBrainz reads.
 
 | Read | Runs | p50 (ms) | p95 (ms) | Report-only p95 budget |
 |---|---:|---:|---:|---:|
-| top-tracks cached | 10 | 2.68 | 2.88 | < 20 ms |
-| top-tracks uncached | 10 | 436.06 | 439.99 | < 250 ms |
-| recent-tracks page 500 | 10 | 93.14 | 301.01 | < 100 ms |
-| ListenBrainz all_time stats | 10 | 436.47 | 533.31 | not specified |
-| ListenBrainz listening-activity year | 10 | 79.73 | 80.96 | not specified |
+| top-tracks cached | 10 | 3.22 | 3.87 | < 20 ms |
+| top-tracks uncached | 10 | 506.28 | 733.56 | < 250 ms |
+| recent-tracks page 500 | 10 | 256.31 | 355.51 | < 100 ms |
+| ListenBrainz all_time stats | 10 | 541.11 | 752.16 | not specified |
+| ListenBrainz listening-activity year | 10 | 109.21 | 354.59 | not specified |
+
+## Saved pre-index comparison
+
+The saved pre-index v2 receipt was generated at 2026-11-03T07:14:07.984Z; this post-index receipt was generated at 2026-11-03T07:40:03.625Z. Dataset fields match, including the bounded 256-operation history. The runs were not made under controlled load. This comparison does not establish lifetime scaling, performance with 100,000 operations, or migration cost. The query plans below preserve the current executed SQL and probes; the saved baseline receipt preserves its original plans.
+
+| Read | Pre-index p50 (ms) | Pre-index p95 (ms) | Post-index p50 (ms) | Post-index p95 (ms) |
+|---|---:|---:|---:|---:|
+| top-tracks uncached | 9138.39 | 10007.29 | 506.28 | 733.56 |
+| recent-tracks page 500 | 9187.24 | 12125.75 | 256.31 | 355.51 |
+| ListenBrainz all_time stats | 10010.04 | 11783.65 | 541.11 | 752.16 |
+| ListenBrainz listening-activity year | 4156.52 | 4749.52 | 109.21 | 354.59 |
+
+The historical zero-operation v1 run (2026-11-03T04:29:17.913Z) recorded p50s of 466.45 ms (uncached top tracks), 81.42 ms (recent page 500), 461.27 ms (ListenBrainz all_time), and 80.04 ms (activity year). That receipt lacks the v2 operations metadata and is descriptive context only.
 
 ## Query plans
 
@@ -50,7 +64,7 @@ WITH w AS MATERIALIZED (SELECT s.uri, s.listened_at, s.artist_key, s.track_key,
 - SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)
 - SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at<?)
 - CORRELATED SCALAR SUBQUERY 2
-- SEARCH d USING INDEX operations_did_state (did=?)
+- SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)
 - USE TEMP B-TREE FOR count(DISTINCT)
 - USE TEMP B-TREE FOR count(DISTINCT)
 - USE TEMP B-TREE FOR count(DISTINCT)
@@ -89,7 +103,7 @@ WITH w AS (SELECT s.uri, s.listened_at, s.artist_key, s.track_key,
 - SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)
 - SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at<?)
 - CORRELATED SCALAR SUBQUERY 2
-- SEARCH d USING INDEX operations_did_state (did=?)
+- SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)
 - USE TEMP B-TREE FOR GROUP BY
 - SCAN g
 - SEARCH d USING INDEX sqlite_autoindex_scrobbles_1 (uri=?)
@@ -119,7 +133,7 @@ SELECT count(*) AS n FROM scrobbles s JOIN users u
 - SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)
 - SEARCH s USING INDEX scrobbles_stats (did=?)
 - CORRELATED SCALAR SUBQUERY 2
-- SEARCH d USING INDEX operations_did_state (did=?)
+- SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)
 
 #### Statement 2
 
@@ -143,7 +157,7 @@ SELECT s.* FROM scrobbles s JOIN users u
 - SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)
 - SEARCH s USING INDEX scrobbles_owner_time (did=?)
 - CORRELATED SCALAR SUBQUERY 2
-- SEARCH d USING INDEX operations_did_state (did=?)
+- SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)
 
 ### listenbrainzAllTime
 
@@ -177,7 +191,7 @@ WITH w AS MATERIALIZED (SELECT s.uri, s.listened_at, s.artist_key, s.track_key,
 - SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)
 - SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at>? AND listened_at<?)
 - CORRELATED SCALAR SUBQUERY 2
-- SEARCH d USING INDEX operations_did_state (did=?)
+- SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)
 - USE TEMP B-TREE FOR count(DISTINCT)
 - USE TEMP B-TREE FOR count(DISTINCT)
 - USE TEMP B-TREE FOR count(DISTINCT)
@@ -216,7 +230,7 @@ WITH w AS (SELECT s.uri, s.listened_at, s.artist_key, s.track_key,
 - SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)
 - SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at>? AND listened_at<?)
 - CORRELATED SCALAR SUBQUERY 2
-- SEARCH d USING INDEX operations_did_state (did=?)
+- SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)
 - USE TEMP B-TREE FOR GROUP BY
 - SCAN g
 - SEARCH d USING INDEX sqlite_autoindex_scrobbles_1 (uri=?)
@@ -247,7 +261,7 @@ SELECT substr(s.listened_at, 1, 7) AS p, count(*) AS c FROM scrobbles s JOIN use
 - SEARCH x USING COVERING INDEX sqlite_autoindex_suppression_1 (did=?)
 - SEARCH s USING INDEX scrobbles_owner_time (did=? AND listened_at>? AND listened_at<?)
 - CORRELATED SCALAR SUBQUERY 2
-- SEARCH d USING INDEX operations_did_state (did=?)
+- SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)
 - USE TEMP B-TREE FOR GROUP BY
 
 Plan source: EXPLAIN QUERY PLAN; Node v26.12.1; node:sqlite 3.54.1; linux/x64

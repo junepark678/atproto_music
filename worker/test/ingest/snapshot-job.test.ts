@@ -19,7 +19,7 @@ import {
 import type { FixtureTransport } from '@atmusic/atproto/test-support/router-transport';
 import { cborCid } from '@atmusic/atproto/test-support/signed-repo';
 import { describe, expect, it } from 'vitest';
-import { BUDGETS, type Plan, type SliceBudget } from '../../src/config';
+import { NODE_BUDGET, type SliceBudget } from '../../src/config';
 import type { RepoJobRow } from '../../src/do/contracts';
 import type { Db } from '../../src/do/db';
 import { admit, reclaimSnapshotLeases, scheduleSnapshot } from '../../src/do/ingest/admission';
@@ -34,7 +34,7 @@ import { drain } from '../../src/do/ingest/verify-drain';
 import { history } from '../../src/do/read/history';
 import { markConnected, recordEvent, updateCheckpointBookkeeping } from '../../src/do/status';
 import { dueAt } from '../../src/do/timers';
-import { counterValue, type Deps, depsFor, enqueue, hint, kit, protectedTables } from './drain-support';
+import { counterValue, type Deps, depsFor, enqueue, hint, kit, protectedTables, SMALL_BUDGET } from './drain-support';
 import { withIngestIndex } from './node-index';
 
 const T0 = Date.parse('2026-01-15T12:00:00Z');
@@ -68,8 +68,8 @@ function wrap(base: FixtureTransport, o: { extra?: FakePds[]; before?: Before } 
 }
 
 /** ModuleDeps over the test Db, following the upstream in socket mode (so `indexing()` can be current). */
-function deps(db: Db, k: FixtureKit, o: { plan?: Plan; transport?: FixtureTransport } = {}): Deps {
-  const base = depsFor(db, k, { plan: o.plan ?? 'paid' });
+function deps(db: Db, k: FixtureKit, o: { budget?: SliceBudget; transport?: FixtureTransport } = {}): Deps {
+  const base = depsFor(db, k, { budget: o.budget });
   const transport = o.transport ?? k.transport;
   return {
     ...base,
@@ -259,7 +259,7 @@ describe('snapshot jobs', () => {
   it('job resumes across alarms from persisted frontier after DO eviction', async () => {
     const { k, seed, alice, follow, scrobbleRows } = await seeded();
     const head = seed.heads.Alice;
-    const budget: SliceBudget = { ...BUDGETS.free, maxEntriesPerSlice: 3 };
+    const budget: SliceBudget = { ...SMALL_BUDGET, maxEntriesPerSlice: 3 };
     let hang = false;
     let hung = 0;
     /** The production resolver, except that while `hang` is set a resolution never settles. */
@@ -294,7 +294,7 @@ describe('snapshot jobs', () => {
     await withIngestIndex(async (i) => {
       {
         const db = i.db;
-        const m = deps(db, k, { plan: 'free', transport: flaky });
+        const m = deps(db, k, { budget: SMALL_BUDGET, transport: flaky });
         admit(db, alice, 'jetstream', T0);
         const before = k.transport.calls.entries.length;
         const r = await snapshotStep(m, T0, budget);
@@ -326,7 +326,7 @@ describe('snapshot jobs', () => {
       const t1 = T0 + 6 * 60_000;
       {
         const db = i.db;
-        const m = withHang(deps(db, k, { plan: 'free' }));
+        const m = withHang(deps(db, k, { budget: SMALL_BUDGET }));
         hang = true;
         saved.orphan = snapshotStep(m, t1, budget);
         saved.orphan.catch(() => {});
@@ -350,7 +350,7 @@ describe('snapshot jobs', () => {
         const db = i.db;
         expect(i.restarts).toBe(1);
         expect(db).not.toBe(evicted);
-        const m = deps(db, k, { plan: 'free' });
+        const m = deps(db, k, { budget: SMALL_BUDGET });
         const orphaned = job(db, alice)!;
         expect(orphaned.state).toBe('running');
         // Not yet past its 15-minute lease, so only the start-up reclaim (all: true) frees it.
@@ -412,7 +412,7 @@ describe('snapshot jobs', () => {
       const S = k.collections.scrobble;
       const h1 = seed.heads.Alice;
       const r07 = `at://${alice}/${S}/r07`;
-      const budget: SliceBudget = { ...BUDGETS.paid, maxEntriesPerSlice: 2 };
+      const budget: SliceBudget = { ...NODE_BUDGET, maxEntriesPerSlice: 2 };
       await withIngestIndex(async (i) => {
         const db = i.db;
         const m = deps(db, k);
@@ -553,7 +553,7 @@ describe('snapshot jobs', () => {
       const db = i.db;
       const m = deps(db, k);
       admit(db, alice, 'jetstream', T0);
-      const budget: SliceBudget = { ...BUDGETS.paid, maxEntriesPerSlice: 3 };
+      const budget: SliceBudget = { ...NODE_BUDGET, maxEntriesPerSlice: 3 };
       const first = await snapshotStep(m, T0, budget);
       expect([first.outcome, first.source, first.entries]).toEqual(['paused', 'getRepo', 3]);
       const frontier = JSON.parse(job(db, alice)!.frontier_json!) as { source: string; walk: { headCid: string } };
@@ -589,7 +589,7 @@ describe('snapshot jobs', () => {
       record_state: db.all('SELECT * FROM record_state ORDER BY uri'),
       users: db.all('SELECT * FROM users ORDER BY did'),
     });
-    const budget: SliceBudget = { ...BUDGETS.paid, maxEntriesPerSlice: 3 };
+    const budget: SliceBudget = { ...NODE_BUDGET, maxEntriesPerSlice: 3 };
 
     // Part 1: the head is unchanged, so the walk keeps its frontier and goes on cache-only.
     {
@@ -897,7 +897,7 @@ describe('snapshot jobs', () => {
       const db = i.db;
       const m = deps(db, k, { transport });
       admit(db, alice, 'jetstream', T0);
-      const budget: SliceBudget = { ...BUDGETS.paid, maxEntriesPerSlice: 4 };
+      const budget: SliceBudget = { ...NODE_BUDGET, maxEntriesPerSlice: 4 };
       const slice = snapshotStep(m, T0, budget);
       await until(() => gate !== null, 'the walk to reach its first node fetch');
       const running = job(db, alice)!;

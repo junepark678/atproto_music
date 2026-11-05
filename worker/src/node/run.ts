@@ -96,6 +96,7 @@ import {
   type ListenTarget,
   socketActivation,
 } from './http-bridge';
+import { createOAuthLiveObserver } from './oauth-live-observer';
 import { DEFAULT_PINNED_CAPS, pinnedTransport, unpinnedFetchStub } from './pinned-transport';
 import { type LoadSecretsDeps, loadSecrets, type Secrets } from './secrets';
 import { createShutdown, trackRequests } from './shutdown';
@@ -490,6 +491,13 @@ export async function run(opts: RunOptions): Promise<ExitCode> {
           { db: openDb, clock, signingKids: secrets.oauthSigningKeys.map((k) => k.kid), revocations: journal, log },
           kid,
         ),
+      oauthLiveObserver: createOAuthLiveObserver({
+        oauth: features.oauth,
+        nowMs: () => clock.nowMs(),
+        prefix: config.app.prefix,
+        clock,
+        random,
+      }),
       random,
     }),
   );
