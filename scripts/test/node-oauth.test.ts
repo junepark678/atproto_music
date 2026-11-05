@@ -16,7 +16,7 @@ import {
   NODE_OAUTH_ENV,
   spec,
 } from '../live/node_oauth_check.ts';
-import { NODE_ENV, type NodeGateIO, runNodeGate } from '../live/node-live-gate.ts';
+import { NODE_ENV, type NodeGateIO, type NodeGateSpec, runNodeGate } from '../live/node-live-gate.ts';
 import * as oauthBrowser from '../live/workers_oauth_check.ts';
 
 const REPO = resolve(fileURLToPath(new URL('../..', import.meta.url)));
@@ -120,7 +120,15 @@ test('the complete synthetic environment reaches only the injected runner and ne
   vi.stubGlobal('fetch', fetch);
   const result = capture();
   try {
-    expect(await runNodeGate({ ...spec, run }, completeEnv(), result.io)).toBe(0);
+    const synthetic = {
+      ...spec,
+      run,
+      observations: [
+        { key: 'signIns', accept: () => null },
+        { key: 'cleanup', accept: () => null },
+      ],
+    } satisfies NodeGateSpec;
+    expect(await runNodeGate(synthetic, completeEnv(), result.io)).toBe(0);
     expect(run).toHaveBeenCalledOnce();
     expect(fetch).not.toHaveBeenCalled();
     const evidence = JSON.parse(result.output().stdout) as { result: string; missing: string[] };

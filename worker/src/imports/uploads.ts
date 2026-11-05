@@ -255,9 +255,17 @@ export async function receiveUpload(
         if (done) break;
         received += value.byteLength;
         sinceCheck += value.byteLength;
+        const previousReservation = mine.reserved;
         if (received > limit) {
           outcome = TOO_LARGE;
         } else if (!reserve(received)) {
+          outcome = NO_SPACE;
+        } else if (mine.reserved > previousReservation && !floorHolds()) {
+          // A reservation can grow in sub-FREE_CHECK_BYTES chunks. Recheck
+          // the aggregate unwritten reservations at every growth, before
+          // writing this chunk; the periodic check below still catches free
+          // space consumed by unrelated writers while a declared reservation
+          // remains unchanged.
           outcome = NO_SPACE;
         } else if (sinceCheck >= FREE_CHECK_BYTES) {
           sinceCheck = 0;

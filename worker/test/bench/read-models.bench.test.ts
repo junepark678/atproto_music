@@ -347,13 +347,13 @@ const WINDOW_SEARCH =
 /** The pins as the report states them (the schema of scripts/benchmark-read-models.ts holds the same text). */
 const PLAN_RULES = {
   history:
-    "SEARCH scrobbles_owner_time (did=?), no SCAN, no temporary B-tree; a deep page's search is bounded by (listened_at,uri)<(?,?) and seeks from the cursor's last row",
+    "SEARCH scrobbles_owner_time (did=?), no SCAN, no temporary B-tree; a deep page's search is bounded by (listened_at,uri)<(?,?) and seeks from the cursor's last row; delete visibility SEARCHes operations_scrobble_delete_target by did and rkey",
   global:
-    "scrobbles_global_time in order, no SCAN, no temporary B-tree; a deep page's search is bounded by (listened_at,uri)<(?,?) and seeks from the cursor's last row",
+    "scrobbles_global_time in order, no SCAN, no temporary B-tree; a deep page's search is bounded by (listened_at,uri)<(?,?) and seeks from the cursor's last row; delete visibility SEARCHes operations_scrobble_delete_target by did and rkey",
   following:
-    "SEARCH scrobbles_owner_time per followee and follows_actor_subject, no SCAN; a deep page's search is bounded by (listened_at,uri)<(?,?) and seeks from the cursor's last row",
+    "SEARCH scrobbles_owner_time per followee and follows_actor_subject, no SCAN; a deep page's search is bounded by (listened_at,uri)<(?,?) and seeks from the cursor's last row; delete visibility SEARCHes operations_scrobble_delete_target by did and rkey",
   stats:
-    'every scrobbles statement SEARCHes scrobbles_owner_time or scrobbles_stats by DID, no SCAN; in a 7d, 30d or 365d window every scrobbles SEARCH is bounded by did=? AND listened_at>? AND listened_at<?',
+    'every scrobbles statement SEARCHes scrobbles_owner_time or scrobbles_stats by DID, no SCAN; in a 7d, 30d or 365d window every scrobbles SEARCH is bounded by did=? AND listened_at>? AND listened_at<?; delete visibility SEARCHes operations_scrobble_delete_target by did and rkey',
 } as const;
 
 /** Whether a page statement's plan is the one ADR 0005 §15.3 pins for its kind and page. */
@@ -1567,6 +1567,7 @@ describe('read-model benchmark', () => {
       expect(Number.isFinite(r.coldMs) && r.coldMs > 0, r.name).toBe(true);
       // The page statement's plan on SQLite 3.54.1 (ADR 0005 §15.3): no scan of scrobbles ...
       const text = r.plan.join(' | ');
+      expect(r.plan, r.name).toContain('SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)');
       expect([r.name, text, r.plan.filter((d) => FULL_SCAN.test(d))]).toEqual([r.name, text, []]);
       if (r.kind === 'history') {
         // ... history searches the owner's range and never sorts ...
@@ -1673,6 +1674,7 @@ describe('read-model benchmark', () => {
       expect(s.uncached.scrobblesPlans.length, name).toBeGreaterThanOrEqual(4);
       for (const plan of s.uncached.scrobblesPlans) {
         const text = plan.join(' | ');
+        expect(plan, name).toContain('SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)');
         expect([name, text, plan.some((d) => STATS_SEARCH.test(d))]).toEqual([name, text, true]);
         expect([name, text, plan.filter((d) => FULL_SCAN.test(d))]).toEqual([name, text, []]);
         if (s.window !== 'all') {
