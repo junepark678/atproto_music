@@ -136,15 +136,16 @@ function sessionCount(app: TestApp): number {
 }
 
 describe('Last.fm auth methods and approval', () => {
-  it('an already approved desktop token cannot mint a non-expiring session after logout-all', async () => {
+  it('an already approved desktop token remains redeemable once after browser logout-all', async () => {
     const r = await rig();
     const issued = issueToken(r.deps, PANO);
     if (!issued.ok) throw new Error('auth.getToken failed');
     expect(authorizeToken(r.deps, { did: ALICE, apiKey: PANO, token: issued.value.token })).toEqual({ ok: true });
     expect(r.sessions.logoutAll(ALICE)).toBe(1);
+    expect(getSession(r.deps, { apiKey: PANO, token: issued.value.token })).toMatchObject({ ok: true });
+    expect(sessionCount(r.app)).toBe(1);
+    expect(tokenRow(r.app, issued.value.token)?.state).toBe('consumed');
     expect(getSession(r.deps, { apiKey: PANO, token: issued.value.token })).toEqual({ ok: false, code: 4 });
-    expect(sessionCount(r.app)).toBe(0);
-    expect(tokenRow(r.app, issued.value.token)?.state).toBe('authorized');
   });
 
   it.each([
