@@ -11,6 +11,7 @@ import { describe, expect, it } from 'vitest';
 import type { ImportItemRow, ImportJobRow } from '../../../src/app/rows';
 import { createBox, linkedAad } from '../../../src/crypto/box';
 import {
+  cancelJob,
   createJob,
   IMPORT_FETCH_CAPS,
   type ImportRunReport,
@@ -38,7 +39,13 @@ interface Rig {
   requests: Array<{ atMs: number; params: URLSearchParams }>;
 }
 
-function rig(h: Harness, fake: FakeLastfm, requests: Rig['requests'], pacer: Pacer = intervalPacer()): Rig {
+function rig(
+  h: Harness,
+  fake: FakeLastfm,
+  requests: Rig['requests'],
+  pacer: Pacer = intervalPacer(),
+  diskLow: () => boolean = () => false,
+): Rig {
   const transport = Object.assign(
     async (req: Request) => {
       const url = new URL(req.url);
@@ -57,7 +64,7 @@ function rig(h: Harness, fake: FakeLastfm, requests: Rig['requests'], pacer: Pac
     listenbrainzApiRoot: 'https://listenbrainz.test/',
     fetch: bindPolicyFetch(createPolicyFetch({ transport }), IMPORT_FETCH_CAPS),
     pacers: { lastfm: pacer, listenbrainz: intervalPacer() },
-    diskLow: () => false,
+    diskLow,
     uploads: fsUploadStore,
     box: createBox(KEYS, h.m.random),
   };
@@ -101,6 +108,95 @@ function newFake(h: Harness): FakeLastfm {
 }
 
 describe('lastfm_api import source', () => {
+  it('pauses before API work and again after fetch or async preparation when disk pressure appears, then resumes from the committed cursor', async () => {
+    await withHarness(async (h) => {
+      h.seedUser(h.alice);
+      const fake = newFake(h);
+      const requests: Rig['requests'] = [];
+      let low = true;
+      const r = rig(h, fake, requests, intervalPacer(), () => low);
+      createJob(h.db, { id: 'job-low-start', did: h.alice, source: 'lastfm_api', remoteUser: USER, now: T0 });
+      const initialCursor = parseCursor(job(h, 'job-low-start')).lastfm;
+
+      const initiallyLow = await runImports(r.rt, h.kit.clock.nowMs());
+      expect(initiallyLow.actions.map((a) => a.action)).toEqual(['started', 'paused']);
+      expect(initiallyLow.nextDueMs).toBe(h.kit.clock.nowMs() + 60_000);
+      expect(job(h, 'job-low-start')).toMatchObject({
+        state: 'paused',
+        error: 'low_disk',
+        fetched: 0,
+        staged: 0,
+        attempts: 0,
+      });
+      expect(requests).toHaveLength(0);
+
+      low = false;
+      h.kit.clock.advance(60_000);
+      const originalFetch = r.rt.fetch;
+      r.rt.fetch = async (input, init) => {
+        const response = await originalFetch(input, init);
+        low = true;
+        return response;
+      };
+      const afterFetch = await runImports(r.rt, h.kit.clock.nowMs());
+      expect(afterFetch.actions.map((a) => a.action)).toEqual(['resumed', 'paused']);
+      expect(job(h, 'job-low-start')).toMatchObject({
+        state: 'paused',
+        error: 'low_disk',
+        fetched: 0,
+        staged: 0,
+        attempts: 0,
+      });
+      expect(requests).toHaveLength(1);
+
+      // Disk becomes low only at the staging pre-commit gate, after the
+      // asynchronous listen-key preparation. The proposed page cursor and
+      // entries must remain uncommitted.
+      low = false;
+      r.rt.fetch = originalFetch;
+      h.kit.clock.advance(60_000);
+      let checks = 0;
+      r.rt.diskLow = () => ++checks >= 3;
+      const beforeCommit = await runImports(r.rt, h.kit.clock.nowMs());
+      expect(beforeCommit.actions.map((a) => a.action)).toEqual(['resumed', 'paused']);
+      expect(job(h, 'job-low-start')).toMatchObject({
+        state: 'paused',
+        error: 'low_disk',
+        fetched: 0,
+        staged: 0,
+        attempts: 0,
+      });
+      expect(parseCursor(job(h, 'job-low-start')).lastfm).toEqual(initialCursor);
+      expect(items(h, 'job-low-start')).toHaveLength(0);
+
+      r.rt.diskLow = () => false;
+      h.kit.clock.advance(60_000);
+      await runImports(r.rt, h.kit.clock.nowMs());
+      expect(job(h, 'job-low-start')).toMatchObject({ state: 'fetching', fetched: 200, staged: 200, attempts: 0 });
+      expect(new Set(items(h, 'job-low-start').map((item) => item.dedupe_key)).size).toBe(200);
+    });
+  });
+
+  it('a cancellation during an awaited API fetch cannot be replaced by the staging pause gate', async () => {
+    await withHarness(async (h) => {
+      h.seedUser(h.alice);
+      const requests: Rig['requests'] = [];
+      const r = rig(h, newFake(h), requests);
+      createJob(h.db, { id: 'job-cancel-await', did: h.alice, source: 'lastfm_api', remoteUser: USER, now: T0 });
+      const originalFetch = r.rt.fetch;
+      r.rt.fetch = async (input, init) => {
+        const response = await originalFetch(input, init);
+        await cancelJob(r.rt, h.alice, 'job-cancel-await', h.kit.clock.nowMs());
+        return response;
+      };
+
+      await runImports(r.rt, h.kit.clock.nowMs());
+      expect(job(h, 'job-cancel-await')).toMatchObject({ state: 'cancelled', error: null, fetched: 0, staged: 0 });
+      expect(items(h, 'job-cancel-await')).toHaveLength(0);
+      expect(requests).toHaveLength(1);
+    });
+  });
+
   it('a 1,050-listen fake history at limit 200 is fetched in 6 pages with the nowplaying row skipped and every listen staged exactly once', async () => {
     await withHarness(async (h) => {
       h.seedUser(h.alice);
