@@ -239,10 +239,7 @@ export function redactNodeGateOutput(text: string, env: NodeGateEnv): string {
           } catch {
             return sequence;
           }
-        })
-        // WHATWG URL parsing treats backslashes as slashes for special URLs.
-        // Do the same after interpreting explicit JS escapes above.
-        .replaceAll('\\', '/');
+        });
       if (decoded === value) {
         complete = true;
         break;
@@ -251,7 +248,11 @@ export function redactNodeGateOutput(text: string, env: NodeGateEnv): string {
     }
     // Do not emit a partially decoded token: a deeper encoded URL may still
     // contain callback credentials or OAuth state.
-    if (!complete && (/%[0-9a-f]{2}/i.test(value) || /\\u[0-9a-f]{2,}/i.test(value))) return '[redacted-url]';
+    if (!complete) return '[redacted-url]';
+    // WHATWG URL parsing treats backslashes as slashes for special URLs. Do
+    // this only after the fixed-point pass, since percent decoding can expose
+    // a JavaScript escape (for example %5Cu003f) that must be decoded first.
+    value = value.replaceAll('\\', '/');
     try {
       const url = new URL(value);
       if (url.protocol !== 'http:' && url.protocol !== 'https:') return '[redacted-url]';
