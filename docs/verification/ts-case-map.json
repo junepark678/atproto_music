@@ -104,7 +104,7 @@
     },
     {
       "case": "M1.2.3/packaged_http",
-      "target": "worker/test/composition/routing.test.ts › every API.md v1.1 route dispatches; unknown /api/x → JSON 404; non-API path → ASSETS",
+      "target": "worker/test/node/compose.test.ts › /api/, /health/, /oauth/, /2.0 and /1/ reach the router even when a same-named file exists in dist; other misses get the assetMiss JSON 404",
       "also": [
         "worker/test/http/health-meta.test.ts › live 200; ready 503 when index reports too_new; meta capabilities omit publication without owned prefix"
       ],
@@ -221,8 +221,8 @@
       "case": "M1.4.2/safe_errors",
       "target": "worker/test/http/error.test.ts › envelope matches openapi Error schema with requestId UUID",
       "also": [
-        "worker/test/composition/routing.test.ts › forced storage error → 500 envelope with UUID requestId and no stack trace or file path",
-        "worker/test/composition/routing.test.ts › every API.md v1.1 route dispatches; unknown /api/x → JSON 404; non-API path → ASSETS"
+        "worker/test/node/compose.test.ts › every ctx built by compose carries deps, app and peer, and need(ctx, 'app') on a ctx without app answers 500 CtxWiringError",
+        "worker/test/node/compose.test.ts › /api/, /health/, /oauth/, /2.0 and /1/ reach the router even when a same-named file exists in dist; other misses get the assetMiss JSON 404"
       ]
     },
     {
@@ -1058,7 +1058,8 @@
       "case": "M6.1.1/asset_missing_traversal",
       "target": "web/tests/mvp.spec.ts › non-navigation GET /assets/missing.js and encoded ../ traversal return 404, never index.html",
       "also": [
-        "worker/test/composition/routing.test.ts › every API.md v1.1 route dispatches; unknown /api/x → JSON 404; non-API path → ASSETS"
+        "worker/test/node/compose.test.ts › /api/, /health/, /oauth/, /2.0 and /1/ reach the router even when a same-named file exists in dist; other misses get the assetMiss JSON 404",
+        "worker/test/node/static-assets.test.ts › %2e%2e, backslash and NUL paths are refused without touching the filesystem outside dist"
       ],
       "note": "Asset lookup is Workers Static Assets behaviour (ADR 0004 §9.3 drops build.rs embedding)."
     },
@@ -1076,7 +1077,7 @@
     },
     {
       "case": "M6.1.2/untrusted_forwarded",
-      "target": "worker/test/composition/routing.test.ts › inbound x-atmusic-client-ip is stripped and CF-Connecting-IP used",
+      "target": "worker/test/node/client-ip.test.ts › CF-Connecting-IP is honoured only in cf-connecting-ip mode and only from a peer in ATMUSIC_TRUSTED_PROXIES; otherwise the peer address is used",
       "also": [
         "scripts/test/gen-config.test.ts › --origin and --prefix override example values; stale OAuth metadata is removed"
       ],
@@ -1138,7 +1139,7 @@
       "case": "M6.2.1/bounded_state",
       "target": "worker/test/http/limits.test.ts › 10,001 distinct IP keys keep BucketSet at its cap and expired buckets are evicted",
       "also": [
-        "worker/test/composition/routing.test.ts › inbound x-atmusic-client-ip is stripped and CF-Connecting-IP used"
+        "worker/test/node/client-ip.test.ts › CF-Connecting-IP is honoured only in cf-connecting-ip mode and only from a peer in ATMUSIC_TRUSTED_PROXIES; otherwise the peer address is used"
       ],
       "note": "Buckets fail open after a DO restart (ADR 0004 §8)."
     },
@@ -1146,7 +1147,7 @@
       "case": "M6.2.2/metrics_auth",
       "target": "worker/test/composition/admin.test.ts › admin status over the unix socket returns the AdminStatus shape of a fresh index, and /internal/admin/status on the TCP listener is the JSON 404",
       "also": [
-        "worker/test/composition/logging.test.ts › captured logs and error bodies contain no CURSOR_KEY, ADMIN_TOKEN or bearer marker and logs contain no track-title marker"
+        "worker/test/composition/logging.test.ts › captured logs and error bodies contain no CURSOR_KEY or bearer marker and logs contain no track-title marker"
       ],
       "note": "The current Node host exposes admin/status and backup only through the filesystem-authenticated Unix socket (0700 directory/0600 socket); the TCP listener returns 404. The listed Workers-era logging test remains a required wave-amendment target, not evidence for Node OAuth credential redaction. Local access-control evidence is not deployed service-manager proof."
     },
@@ -1159,7 +1160,7 @@
     },
     {
       "case": "M6.2.2/log_redaction",
-      "target": "worker/test/composition/logging.test.ts › captured logs and error bodies contain no CURSOR_KEY, ADMIN_TOKEN or bearer marker and logs contain no track-title marker",
+      "target": "worker/test/composition/logging.test.ts › captured logs and error bodies contain no CURSOR_KEY or bearer marker and logs contain no track-title marker",
       "also": [
         "worker/test/node/journey/secret-logs.test.ts › no captured log line or error body from the journeys, including the Last.fm desktop flow (auth.getToken, /api/auth, /lastfm/authorize, approve, getSession), the web flow and the Last.fm link callback, contains any token, sk, app password, cookie, DPoP key or client key value seen in the run",
         "worker/test/node/journey/secret-logs.test.ts › with sessions, sk values, app passwords, ListenBrainz tokens and linked credentials seeded, no public /api/v1, /2.0 or /1 response body in the journeys contains any of those values"
@@ -1312,7 +1313,12 @@
     },
     {
       "case": "M7.1.2/session_loss",
-      "target": "worker/test/node/bff/oauth-client.test.ts › invalid_grant on refresh deletes the session and marks the account reauth_required; a TransportError keeps the session"
+      "target": "worker/test/node/bff/oauth-client.test.ts › invalid_grant on refresh deletes the session and marks the account reauth_required; a TransportError keeps the session",
+      "also": [
+        "web/tests/reauth.spec.ts › same-account OAuth reauthentication in a popup preserves the scrobble draft across the callback redirect",
+        "web/test/session/client.test.ts › keeps the reauthentication flag when the initial bootstrap restores an expired session",
+        "web/test/session/client.test.ts › refreshes a cached expired session on focus when BroadcastChannel is unavailable"
+      ]
     },
     {
       "case": "M7.1.3/route_deep_links",
@@ -1340,14 +1346,23 @@
       "case": "M7.2.1/signin_failures",
       "target": "web/test/routes/signin.test.tsx › shows fixed recovery text for callback errors and never renders a code or token",
       "also": [
-        "worker/test/node/bff/oauth-client.test.ts › invalid_grant on refresh deletes the session and marks the account reauth_required; a TransportError keeps the session"
+        "worker/test/node/bff/oauth-client.test.ts › invalid_grant on refresh deletes the session and marks the account reauth_required; a TransportError keeps the session",
+        "web/test/session/client.test.ts › ignores a stale refresh response when a newer refresh has restored the active session",
+        "web/test/session/client.test.ts › ignores a stale session body that finishes parsing after a newer refresh",
+        "web/test/session/client.test.ts › refuses to send a stale account write with a newly resolved account CSRF token",
+        "web/test/session/client.test.ts › does not let a mutation 401 from the previous account clear a newer session",
+        "web/test/session/client.test.ts › does not let an authenticated GET 401 from the previous account clear a newer session",
+        "web/test/session/client.test.ts › accepts reauth_required DTOs but blocks writes except sign-out",
+        "web/test/routes/signin.test.tsx › keeps the sign-in retry form visible for a reauth_required server session",
+        "web/test/routes/settings-accounts.test.tsx › reauth_required settings pages show account data without mutation forms"
       ]
     },
     {
       "case": "M7.2.1/logout_ui",
       "target": "worker/test/node/bff/sessions.test.ts › logout and logout-all append one revocation journal entry per deleted session before the rows are gone",
       "also": [
-        "web/test/routes/settings.test.tsx › sign out calls the server-session port and removes authenticated UI"
+        "web/test/routes/settings.test.tsx › sign out calls the server-session port and removes authenticated UI",
+        "web/test/session/client.test.ts › clears the reauth flag and draft when sign-out is confirmed during a pending refresh"
       ]
     },
     {
@@ -1467,7 +1482,8 @@
       "target": "worker/test/node/bff/oauth-client.test.ts › invalid_grant on refresh deletes the session and marks the account reauth_required; a TransportError keeps the session",
       "also": [
         "web/test/routes/feed.test.tsx › page two 503 keeps page one and retry appends page two once",
-        "web/test/routes/feed.test.tsx › an empty feed shows an explicit empty state after loading completes"
+        "web/test/routes/feed.test.tsx › an empty feed shows an explicit empty state after loading completes",
+        "web/tests/reauth.spec.ts › same-account OAuth reauthentication in a popup preserves the scrobble draft across the callback redirect"
       ]
     },
     {

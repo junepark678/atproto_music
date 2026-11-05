@@ -32,14 +32,25 @@ import { listenBrainzRoutes } from '../../../src/listenbrainz/routes';
 import { acceptListens } from '../../../src/outbox/ingress';
 import { closeApps, startApp, type TestApp } from '../support/app';
 
-const PREFIX = 'com.example.atmusic';
-const SCROBBLE = `${PREFIX}.scrobble`;
+const PREFIX = 'org.example.music';
+const FIXTURE_PREFIX = 'com.example.atmusic';
+const SCROBBLE = `${FIXTURE_PREFIX}.scrobble`;
 const LOVE = `${PREFIX}.love`;
+const OPEN_GATE = {
+  LEXICON_PREFIX: PREFIX,
+  NAMESPACE_OWNERSHIP_REF: 'dns:_lexicon.music.example.org TXT',
+  NAMESPACE_PUBLICATION_REF: `sha256:${'c'.repeat(64)}`,
+};
+const CLOSED_GATE = {
+  LEXICON_PREFIX: 'com.example.atmusic',
+  NAMESPACE_OWNERSHIP_REF: '',
+  NAMESPACE_PUBLICATION_REF: '',
+};
 const ALICE = fixture.users.Alice.did;
 const BOB = fixture.users.Bob.did;
 const NOW_ISO = '2026-01-15T12:00:00Z';
 const NOW_NS = fromMs(Date.parse(NOW_ISO));
-const OPTS = { receiptNs: NOW_NS, prefix: PREFIX, nowNs: NOW_NS };
+const OPTS = { receiptNs: NOW_NS, prefix: FIXTURE_PREFIX, nowNs: NOW_NS };
 const unix = (iso: string) => Date.parse(iso) / 1000;
 
 function seedUser(db: Db, did: string, handle: string): void {
@@ -68,9 +79,9 @@ interface Rig {
   kicks(): number;
 }
 
-async function started(): Promise<Rig> {
+async function started(env: Record<string, string> = OPEN_GATE): Promise<Rig> {
   let kicks = 0;
-  const app = await startApp({ routes: listenBrainzRoutes({ kick: () => kicks++ }) });
+  const app = await startApp({ routes: listenBrainzRoutes({ kick: () => kicks++ }), env });
   const db = app.db;
   seedUser(db, ALICE, fixture.users.Alice.handle);
   seedUser(db, BOB, fixture.users.Bob.handle);
@@ -145,12 +156,45 @@ function seedLove(
   );
 }
 
+function seedForwardLink(db: Db): void {
+  db.run(
+    `INSERT INTO linked_accounts(id, did, service, remote_user, credential_ciphertext, key_id, created_at_ms, updated_at_ms)
+     VALUES ('feedback-link', ?, 'listenbrainz', 'alice_lb', ?, 'e1', ?, ?)`,
+    ALICE,
+    new Uint8Array(Buffer.from('sealed-test-credential')).buffer,
+    Date.parse(NOW_ISO),
+    Date.parse(NOW_ISO),
+  );
+}
+
 afterEach(closeApps);
 
 describe('ListenBrainz feedback (ADR §8.6)', () => {
+  it('requires the shared publication gate before reading feedback or queuing love operations', async () => {
+    for (const prefix of ['com.example.atmusic', '']) {
+      const rig = await started({ ...CLOSED_GATE, LEXICON_PREFIX: prefix });
+      seedForwardLink(rig.app.db);
+      expect(rig.app.config.app).toMatchObject({ prefix: prefix || null, publication: false });
+      const msid = await recordingMsid('Björk', 'Jóga');
+      for (const score of [1, 0, -1] as const) {
+        const res = await rig.post({ recording_msid: msid, score });
+        expect([res.status, await res.json()]).toEqual([
+          503,
+          { code: 503, error: 'Cannot submit listens to queue, please try again later.' },
+        ]);
+      }
+      expect((await rig.post('{invalid json')).status).toBe(503);
+      expect(rig.ops()).toEqual([]);
+      expect(rig.app.db.one('SELECT count(*) AS n FROM forward_outbox')).toEqual({ n: 0 });
+      expect(rig.kicks()).toBe(0);
+    }
+  });
+
   it('score 1 queues a love, 0 an unlove, -1 clears the love; get-feedback lists loves with count, offset and total_count', async () => {
     const rig = await started();
     const { app } = rig;
+    expect(app.config.app.publication).toBe(true);
+    seedForwardLink(app.db);
     const joga = await recordingMsid('Björk', 'Jóga');
 
     // score 1: a love.put of the newest indexed listen of that MSID (r01's spelling and album).
@@ -174,6 +218,7 @@ describe('ListenBrainz feedback (ADR §8.6)', () => {
       { op_id: ops[2]!.id, pred_id: ops[1]!.id },
     ]);
     expect(rig.kicks()).toBe(3);
+    expect(app.db.one('SELECT count(*) AS n FROM forward_outbox')).toEqual({ n: 3 });
 
     // The stored MSID column (the N3-11 projection) and a recording MBID resolve too.
     app.db.run(

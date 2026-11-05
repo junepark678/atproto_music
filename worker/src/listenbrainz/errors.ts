@@ -38,13 +38,13 @@ export function applyLbCors(headers: Headers): Headers {
 }
 
 /** A /1/ JSON response with the CORS set. */
-export function lbJson(body: unknown, status = 200, headers?: HeadersInit): Response {
+export function lbJson(body: unknown, status = 200, headers?: NonNullable<RequestInit['headers']>): Response {
   const out = applyLbCors(new Headers(headers));
   return json(body, status, out);
 }
 
 /** A ListenBrainz error: `{"code": status, "error": message}` with the CORS set. */
-export function lbError(status: number, message: string, headers?: HeadersInit): Response {
+export function lbError(status: number, message: string, headers?: NonNullable<RequestInit['headers']>): Response {
   if (!Number.isInteger(status) || status < 400 || status > 599) {
     throw new RangeError(`lbError needs an HTTP error status, got ${status}`);
   }

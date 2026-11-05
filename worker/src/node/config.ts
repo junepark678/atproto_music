@@ -15,11 +15,9 @@
 // ephemeral listen port and upstream roots on the reserved fixture TLDs
 // (`.test`, `.example`), which only a fixture transport can reach.
 //
-// Workers-era variables (ADR §3.8, §20.4 #27): parseConfig no longer knows
-// PLAN or DO_LOCATION_HINT (retired by N7-01, B17), and INGEST_MODE accepts
-// only `socket` or `off`. This module still refuses any value the operator
-// sets for the retired variables, and INGEST_MODE=pulse, with a message that
-// names ADR 0005 so a stale Workers environment fails loudly.
+// Node parses only the variables in the Node host contract. Unknown legacy
+// settings such as plan tiers and placement hints do not affect its config;
+// INGEST_MODE accepts `socket` or `off` only.
 //
 // Process timings (busy timeout, drain window) are fixed production values,
 // not environment variables; tests construct a NodeConfig with smaller ones.
@@ -238,16 +236,10 @@ export function parseNodeConfig(env: NodeEnv, opts: ParseNodeConfigOptions = {})
   const issues: ConfigIssue[] = [];
   const issue = (field: string, message: string) => issues.push({ field, message });
 
-  // --- Workers-era variables and ingest mode (ADR §3.8) --------------------
-  for (const name of ['PLAN', 'DO_LOCATION_HINT']) {
-    if (env[name] !== undefined) {
-      issue(name, 'is a Cloudflare Workers setting and is refused on the Node host (ADR 0005 §3.8); remove it');
-    }
-  }
+  // --- Ingest mode ---------------------------------------------------------
   const ingestRaw = env.INGEST_MODE ?? 'socket';
   let ingestMode: NodeIngestMode = 'socket';
   if (ingestRaw === 'socket' || ingestRaw === 'off') ingestMode = ingestRaw;
-  else if (ingestRaw === 'pulse') issue('INGEST_MODE', 'pulse is a Workers mode and is refused (ADR 0005 §3.8)');
   else issue('INGEST_MODE', 'must be socket or off');
 
   // --- Public origin ---------------------------------------------------------

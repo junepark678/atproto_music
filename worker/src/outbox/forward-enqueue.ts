@@ -86,6 +86,8 @@ function flagColumn(kind: ForwardKind): 'forward_scrobbles' | 'forward_now_playi
 export interface EnqueueForwardsArgs {
   did: string;
   items: readonly ForwardItem[];
+  /** Earliest delivery time (epoch ms); defaults to receipt time. */
+  dueAt?: number;
   now: number;
   /** Ids for new rows (the injected randomness). */
   random: Random;
@@ -98,6 +100,10 @@ export interface EnqueueForwardsArgs {
  */
 export function enqueueForwards(db: Db, args: EnqueueForwardsArgs): number {
   if (args.items.length === 0) return 0;
+  const dueAt = args.dueAt ?? args.now;
+  if (!Number.isSafeInteger(dueAt) || dueAt < 0) {
+    throw new RangeError('dueAt must be a non-negative safe integer of epoch ms');
+  }
   return db.tx(() => {
     const links = db.all<{ id: string; forward_scrobbles: number; forward_now_playing: number }>(
       `SELECT id, forward_scrobbles, forward_now_playing FROM linked_accounts
@@ -121,7 +127,7 @@ export function enqueueForwards(db: Db, args: EnqueueForwardsArgs): number {
           item.kind,
           key,
           payload,
-          args.now,
+          dueAt,
           args.now,
           args.now,
         ).rowsWritten;
