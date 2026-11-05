@@ -113,8 +113,11 @@ test('Jetstream child accepts commits and replays them through its WebSocket end
     };
     expect(replay).toMatchObject({ did: alice.did, seq: 1, kind: 'commit', commit: { rkey: 'first' } });
 
+    // The child broadcasts synchronously while handling appendCommits, before
+    // it sends the IPC acknowledgement. Subscribe before sending the command.
+    const liveMessage = nextMessage(socket);
     await fakes.appendCommits([commit(alice.did, 'live')]);
-    const live = JSON.parse(await nextMessage(socket)) as { seq: number; commit: { rkey: string } };
+    const live = JSON.parse(await liveMessage) as { seq: number; commit: { rkey: string } };
     expect(live).toMatchObject({ seq: 2, commit: { rkey: 'live' } });
   } finally {
     socket?.close();
