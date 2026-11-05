@@ -5,11 +5,11 @@
 //   would cost one listRecords per 100 loves on every attempt, quadratic in an
 //   import's size). A `love.put` decides from, in order:
 //   1. the DID's last succeeded love operation for the key (love intents of
-//      one key run FIFO, so it is the newest of our own decisions): a love.put
-//      whose record the index has not seen deleted means the love exists; a
-//      love.delete means ours are gone;
-//   2. with no such operation, the `loves` projection (loves by other apps,
-//      or ours from before this database).
+//      one key run FIFO, so it is the newest of our own decisions). A still
+//      unindexed put is reusable; once a proof exists, the current projected
+//      identity and CID decide whether its historic receipt is still current;
+//   2. the `loves` projection (loves by other apps, or ours from before this
+//      database).
 //   An existing love makes the operation succeed with that record, writing
 //   nothing, and hints it. Otherwise it creates the record at its persisted
 //   TID rkey with ambiguous-create reconciliation (getRecord at that rkey +
@@ -217,12 +217,43 @@ function existingLove(op: OperationRow, ctx: ExecContext, key: string): Existing
   const db = ctx.m.db;
   const last = decisions(ctx, op.did).get(key);
   if (last !== undefined) {
-    if (last.kind === 'love.delete' || last.uri === null || last.cid === null) return null;
-    const rkey = ownRecordKey(last.uri, op.did, op.collection);
-    const gone =
-      db.one<{ x: number }>(`SELECT 1 AS x FROM record_state WHERE uri = ? AND state = 'absent'`, last.uri) !== null;
-    if (rkey !== null && !gone) return { uri: last.uri, cid: last.cid, rkey };
-    // Our love was deleted elsewhere (seen by the index): fall back to the projection.
+    if (last.kind === 'love.put' && last.uri !== null && last.cid !== null) {
+      const rkey = ownRecordKey(last.uri, op.did, op.collection);
+      if (rkey !== null) {
+        const state = db.one<{ cid: string | null; state: string }>(
+          `SELECT cid, state FROM record_state WHERE uri = ?`,
+          last.uri,
+        );
+        if (state === null) {
+          // A successful write can be ahead of its proof. Keep that receipt
+          // reusable across runs so a second intent cannot duplicate it.
+          return { uri: last.uri, cid: last.cid, rkey };
+        }
+        if (state.state === 'present' && state.cid !== null) {
+          const projected = db.one<{
+            uri: string;
+            cid: string;
+            artist_key: string;
+            track_key: string;
+          }>(`SELECT uri, cid, artist_key, track_key FROM loves WHERE uri = ? AND did = ?`, last.uri, op.did);
+          const record = recordOf(op);
+          const [artistKey, trackKeyPart] = trackKey(record?.artist as string, record?.track as string);
+          if (
+            projected !== null &&
+            projected.cid === state.cid &&
+            projected.artist_key === artistKey &&
+            projected.track_key === trackKeyPart
+          ) {
+            // A same-rkey metadata rewrite is still this love, but its
+            // verified current CID replaces the historic operation receipt.
+            return { uri: projected.uri, cid: projected.cid, rkey };
+          }
+        }
+        // An absent/excluded proof, or a present proof for another identity,
+        // invalidates the old success. The current matching projection below
+        // may still contain the requested love at a different URI.
+      }
+    }
   }
   const record = recordOf(op);
   const [artistKey, trackKeyPart] = trackKey(record?.artist as string, record?.track as string);
