@@ -271,8 +271,9 @@ test('unknown OAuth URL parameters and nested encoded URLs are stripped from eve
   let beyondLimit = `https://issuer.example/callback?code=${secretCode}&state=${secretState}`;
   for (let i = 0; i < 20; i++) beyondLimit = encodeURIComponent(beyondLimit);
   const encodedQuote = `https://issuer.example/callback?next=%2522%2526code%253D${secretCode}&state=${secretState}`;
+  const mixedEscapeUrl = `https://issuer.example/cb%5Cu003fcode%3D${secretCode}%26state%3D${secretState}`;
+  const nestedMixedEscapeUrl = encodeURIComponent(encodeURIComponent(mixedEscapeUrl));
   const escapedUrl = String.raw`https:\/\/issuer.example\/cb\u003fcode=${secretCode}\u0026state=${secretState}`;
-  const mixedEscapeUrl = 'https://issuer.example/cb%5Cu003fcode=synthetic-code';
   const reverseOrderUrl = encodeURIComponent(
     String.raw`https://issuer.example/cb\u003fcode=${secretCode}\u0026state=${secretState}`,
   );
@@ -311,8 +312,9 @@ test('unknown OAuth URL parameters and nested encoded URLs are stripped from eve
           deeplyNested,
           beyondLimit,
           encodedQuote,
-          escapedUrl,
           mixedEscapeUrl,
+          nestedMixedEscapeUrl,
+          escapedUrl,
           reverseOrderUrl,
           percentThenEscapeUrl,
           backslashHexUrl,
@@ -359,6 +361,44 @@ test('unknown OAuth URL parameters and nested encoded URLs are stripped from eve
   expect(thrownOutput).not.toContain(secretCode);
   expect(thrownOutput).not.toContain(secretState);
   expect(thrownOutput).not.toContain(secretRequest);
+});
+
+test('malformed and depth-bounded HTTP URL escapes fail closed across evidence channels', async () => {
+  const secret = 'callback-private-182735';
+  const deeplyEncode = (url: string) => {
+    let encoded = url;
+    for (let depth = 0; depth < 16; depth++) encoded = encodeURIComponent(encoded);
+    return encoded;
+  };
+  const candidates = [
+    `https://issuer.example/cb%FF%5Cu003fcode%3D${secret}`,
+    deeplyEncode(String.raw`https://issuer.example/cb\x3fcode=${secret}`),
+    deeplyEncode(String.raw`https://issuer.example/cb\u{3f}code=${secret}`),
+    String.raw`https://issuer.example/cb\u{110000}code=${secret}`,
+    String.raw`https://issuer.example/cb\xZZcode=${secret}`,
+    `http://private-user:private-password@issuer.example/cb?code=${secret}#${secret}`,
+    `http://issuer.example/cb%FF%5Cu003fcode%3D${secret}`,
+  ];
+  for (const candidate of candidates) {
+    const capture = ioCapture();
+    await runNodeGate(
+      spec(async (context) => {
+        context.log(candidate);
+        context.cleanup(candidate);
+        context.fail(candidate);
+        return { ...emptyBody, results: { candidate, [candidate]: candidate } };
+      }),
+      validEnv({ ATMUSIC_LIVE_TEST_PREREQUISITE: 'ready', [NODE_ENV.evidenceOut]: '/tmp/evidence.json' }),
+      capture.io,
+    );
+    expect(capture.files).toHaveLength(1);
+    for (const output of [capture.output().stdout, capture.output().stderr, capture.files[0]!.text]) {
+      expect(output).not.toContain(secret);
+      expect(output).not.toContain('private-user');
+      expect(output).not.toContain('private-password');
+    }
+    expect(() => JSON.parse(capture.files[0]!.text)).not.toThrow();
+  }
 });
 
 test('optional requirements skip missing values but validate supplied values', async () => {

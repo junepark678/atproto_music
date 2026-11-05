@@ -225,7 +225,7 @@ function redactJsonValue(value: unknown, env: NodeGateEnv, ancestors = new WeakS
 export function redactNodeGateOutput(text: string, env: NodeGateEnv): string {
   let redacted = text;
   for (const secret of secretValues(env)) redacted = redacted.split(secret).join('[redacted]');
-  redacted = redacted.replace(/https[^\s<>]*/gi, (candidate) => {
+  redacted = redacted.replace(/https?[^\s<>]*/gi, (candidate) => {
     // Keep quotes and apostrophes inside the candidate. OAuth callback URLs
     // may contain either in their path or as escaped JSON/JavaScript text;
     // stopping at a quote would leave the query string (and its credentials)
@@ -233,36 +233,41 @@ export function redactNodeGateOutput(text: string, env: NodeGateEnv): string {
     const trailing = candidate.match(/[),.;\]}'"]+$/)?.[0] ?? '';
     let value = trailing ? candidate.slice(0, -trailing.length) : candidate;
     let complete = false;
-    for (let depth = 0; depth < 16; depth++) {
-      const decoded = value
-        .replace(/\\u\{([0-9a-f]{1,6})\}/gi, (_escape, hex: string) => {
-          const point = Number.parseInt(hex, 16);
-          return point <= 0x10ffff ? String.fromCodePoint(point) : _escape;
-        })
-        .replace(/\\u([0-9a-f]{4})/gi, (_escape, hex: string) => String.fromCharCode(Number.parseInt(hex, 16)))
-        .replace(/\\x([0-9a-f]{2})/gi, (_escape, hex: string) => String.fromCharCode(Number.parseInt(hex, 16)))
-        .replace(/\\\//g, '/')
-        .replace(/(?:%[0-9a-f]{2})+/gi, (sequence) => {
-          try {
-            return decodeURIComponent(sequence);
-          } catch {
-            return sequence;
-          }
-        });
-      if (decoded === value) {
-        complete = true;
-        break;
+    try {
+      for (let depth = 0; depth < 16; depth++) {
+        let decoded = value
+          .replace(/\\u\{([0-9a-f]{1,6})\}/gi, (_escape, hex: string) => {
+            const point = Number.parseInt(hex, 16);
+            if (point > 0x10ffff) throw new URIError('invalid Unicode escape');
+            return String.fromCodePoint(point);
+          })
+          .replace(/\\u([0-9a-f]{4})/gi, (_escape, hex: string) => String.fromCharCode(Number.parseInt(hex, 16)))
+          .replace(/\\x([0-9a-f]{2})/gi, (_escape, hex: string) => String.fromCharCode(Number.parseInt(hex, 16)))
+          .replace(/\\\//g, '/');
+        // Decode the whole candidate so a malformed byte sequence cannot hide
+        // an adjacent encoded separator from this pass.
+        if (decoded.includes('%')) decoded = decodeURIComponent(decoded);
+        if (decoded === value) {
+          complete = true;
+          break;
+        }
+        value = decoded;
       }
-      value = decoded;
+    } catch {
+      return '[redacted-url]';
     }
     // Do not emit a partially decoded token: a deeper encoded URL may still
     // contain callback credentials or OAuth state.
-    if (!complete) return '[redacted-url]';
+    if (!complete || /\\(?:u|x)/i.test(value)) return '[redacted-url]';
     // WHATWG URL parsing treats backslashes as slashes for special URLs. Do
     // this only after the fixed-point pass, since percent decoding can expose
     // a JavaScript escape (for example %5Cu003f) that must be decoded first.
     value = value.replaceAll('\\', '/');
     try {
+      // Normalize only after escaped material has reached a fixed point. A
+      // percent-decoded `\\u003f` must survive this loop so the next pass can
+      // decode it before WHATWG backslash normalization.
+      value = value.replaceAll('\\', '/');
       const url = new URL(value);
       if (url.protocol !== 'http:' && url.protocol !== 'https:') return '[redacted-url]';
       const hadRootSlash = url.pathname === '/' && !value.endsWith('/');

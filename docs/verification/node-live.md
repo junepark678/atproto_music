@@ -150,6 +150,90 @@ ListenBrainz. No Node live acceptance has been recorded. Confidential-client
 OAuth interop, SSRF probe, and Node soak remain deferred; full N6-02 and M6
 live acceptance stay open.
 
+## Shared harness validation
+
+Drivers may declare `NodeGateSpec.observations` as top-level `results` keys
+with an `accept(value)` validator. Every declared key must be an own property
+of `results`, and its validator must return `null` to accept it. Missing keys,
+rejections, and validator exceptions produce `failed` evidence with an
+`observation <key>:` diagnostic. Omitting this opt-in declaration preserves
+existing driver behavior; it does not establish that a driver has complete
+accepted observations or extend verifier gate support.
+
+The optional synchronous `localChecks(env)` hook runs only after all ordinary
+requirements and `extraChecks` succeed, before the gate body. It is restricted
+by contract to filesystem reads and local tools such as `git` and
+`node --version`; it must not perform network or browser work. Reported problems
+and exceptions produce blocked evidence and prevent body execution. This is
+an ordering contract, not a sandbox for arbitrary hook code.
+
+Shared output redacts supplied secret environment values, including key,
+cookie and CSRF inputs, and absolute home/runtime paths under `/home/` and
+`/run/user/`. URL sanitization decodes mixed percent and Unicode escapes before
+normalizing URL separators and stripping credentials, queries and fragments.
+Drivers must still select evidence fields deliberately rather than dump
+upstream responses.
+
+### S1 and ingest audit repair receipt — 2026-11-03
+
+Astra approved the code scope `88a146f..889c916` at full code revision
+`889c9169d88e15f6b0ee8aaa6f6e44b416e33532`, with no remaining blockers.
+This is a deterministic code-review receipt, not hosted CI or live acceptance.
+The review covered required observations, local-check ordering and blocked-path
+tripwires, production-normalized app-record ownership before deletion, mixed
+URL-escape redaction, bounded late-launch handling, and truthful teardown.
+
+The scoped implementation and regression files are
+`scripts/live/node-live-gate.ts`, `scripts/live/node_ingest_check.ts`,
+`scripts/live/workers_oauth_check.ts`, `scripts/test/node-live-gate.test.ts`,
+and `scripts/test/node-ingest.test.ts`; this runbook records the contracts and
+receipt. No benchmark files or verifier gate support changed.
+
+Executed checks:
+
+- `npx vitest run --project scripts scripts/test/node-ingest.test.ts scripts/test/node-live-gate.test.ts scripts/test/node-pds-compat.test.ts`
+  — **66 passed**, independently repeated by Astra.
+- `python3 -B scripts/test_live_evidence.py` — **28 passed**, independently
+  repeated by Astra; the historical inventory remains blocked.
+- `npx tsc -b` — passed.
+- `npx biome check scripts/live/node_ingest_check.ts scripts/live/workers_oauth_check.ts scripts/live/node-live-gate.ts scripts/test/node-ingest.test.ts scripts/test/node-live-gate.test.ts`
+  and `git diff --check` — passed.
+
+App ownership uses the production builder to normalize the run's input and
+compares its full digest with independently proved content, retaining the
+verified server-assigned `createdAt`. Page, context and browser close attempts
+are bounded by the remaining budget; unresolved cleanup fails the gate.
+Promise races do not guarantee cancellation of an arbitrary injected launcher.
+Local checks remain a caller contract rather than a network sandbox.
+
+No live requests or OAuth exchanges ran. Driver/live acceptance remains
+withheld, and OAuth, SSRF and soak support remains disabled. D7 decisions below
+remain deferred. Shared helper extraction and migration are outside this slice.
+
+## Deferred dev-env OAuth contract (D7)
+
+The completed Sonnet readiness discovery reports that `@atproto/oauth-provider`
+can fetch discoverable HTTPS client metadata and JWKS through valid public TLS
+without a provider change. This is implementation readiness information, not
+an executed OAuth exchange or live acceptance receipt; no OAuth or live network
+was run for that discovery.
+
+The current e2e stack uses `FakeOAuthAs` and `FakePds`. The
+`startDevEnv`/`TestPds` path is unused. The existing HTTPS IPC fixture could be
+extended to forward selected hosts to a loopback `TestPds`, but OAuth session
+scope, refresh, and revocation observations have no HTTP surface and would
+require in-process observation within the PDS process.
+
+Implementation remains deferred pending decisions on:
+
+- the app process and public HTTPS origin architecture;
+- separate advisory `devenvOAuth` evidence versus the required `oauth` gate;
+- exact prerequisite environment variable names;
+- a read-only OAuth store accessor and its allowed observation fields.
+
+These findings do not add a gate, establish its evidence schema, or enable any
+OAuth PASS semantics. Existing verifier support remains unchanged.
+
 ## Node ingest timeout and recovery semantics
 
 `npx tsx scripts/live/node_ingest_check.ts` accepts an optional
