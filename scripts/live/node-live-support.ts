@@ -205,10 +205,15 @@ export function observeNodeGateResults(
   declared: readonly NodeGateObservation[] | undefined,
   results: unknown,
   lexiconPrefix = '',
+  informationallyBlocked = false,
 ): string[] {
   const resultObject = object(results);
   const observations = [...(DEFAULT_NODE_GATE_OBSERVATIONS[gate] ?? []), ...(declared ?? [])];
-  if (observations.length === 0) return [`${gate} has no accepted observation contract`];
+  if (observations.length === 0) {
+    // A driver may retain informational observations without an approved
+    // contract only when it has already explicitly blocked acceptance.
+    return informationallyBlocked ? [] : [`${gate} has no accepted observation contract`];
+  }
   if (!resultObject) return ['results: must be an object'];
   const failures: string[] = [];
   for (const observation of observations) {

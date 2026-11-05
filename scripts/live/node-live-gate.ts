@@ -227,7 +227,7 @@ function redactJsonValue(value: unknown, env: NodeGateEnv, ancestors = new WeakS
 export function redactNodeGateOutput(text: string, env: NodeGateEnv): string {
   let redacted = text;
   for (const secret of secretValues(env)) redacted = redacted.split(secret).join('[redacted]');
-  redacted = redacted.replace(/https?[^\s<>]*/gi, (candidate) => {
+  redacted = redacted.replace(/https?(?=[:%\\])[^\s<>]*/gi, (candidate) => {
     // Keep quotes and apostrophes inside the candidate. OAuth callback URLs
     // may contain either in their path or as escaped JSON/JavaScript text;
     // stopping at a quote would leave the query string (and its credentials)
@@ -407,7 +407,9 @@ export async function runNodeGate(
     );
   }
 
-  failures.push(...observeNodeGateResults(spec.gate, spec.observations, body?.results, context.lexiconPrefix));
+  failures.push(
+    ...observeNodeGateResults(spec.gate, spec.observations, body?.results, context.lexiconPrefix, blocked.length > 0),
+  );
 
   const evidence: NodeGateEvidence = {
     ...base,

@@ -13,6 +13,7 @@ import {
   type NodeGateEvidence,
   type NodeGateIO,
   type NodeGateSpec,
+  redactNodeGateOutput,
   runNodeGate,
 } from '../live/node-live-gate.ts';
 
@@ -448,6 +449,55 @@ test('observations fail for missing, undefined, rejected, and throwing validator
   } satisfies NodeGateSpec;
   expect(await runNodeGate(custom, validEnv({ ATMUSIC_LIVE_TEST_PREREQUISITE: 'ready' }), thrown.io)).toBe(1);
   expect(documentFrom(thrown.output().stdout).failures?.join(' ')).toContain('validator exploded');
+});
+
+test('an explicit informational block needs no approved contract but cannot bypass failures or known contracts', async () => {
+  for (const gate of ['ssrfProbe', 'socketSoak'] as const) {
+    for (const failed of [false, true]) {
+      const candidate: NodeGateSpec = {
+        ...spec(async (context) => {
+          context.block('acceptance contract is not approved');
+          if (failed) context.fail('probe failed');
+          return { pds: [], subjects: [], results: { diagnostic: true } };
+        }),
+        gate,
+        observations: undefined,
+      };
+      const capture = ioCapture();
+      expect(await runNodeGate(candidate, validEnv({ ATMUSIC_LIVE_TEST_PREREQUISITE: 'ready' }), capture.io)).toBe(
+        failed ? 1 : 2,
+      );
+      expect(documentFrom(capture.output().stdout).result).toBe(failed ? 'failed' : 'blocked');
+    }
+  }
+  const capture = ioCapture();
+  expect(
+    await runNodeGate(
+      {
+        ...spec(async (context) => {
+          context.block('informational');
+          return { pds: [], subjects: [], results: {} };
+        }),
+        gate: 'ingest',
+        observations: undefined,
+      },
+      validEnv({ ATMUSIC_LIVE_TEST_PREREQUISITE: 'ready' }),
+      capture.io,
+    ),
+  ).toBe(1);
+});
+
+test('URL redaction preserves diagnostic words but strips raw and escaped URL credentials', () => {
+  const env = validEnv();
+  for (const diagnostic of ['http_status', 'https_status', 'http_error', 'http500']) {
+    expect(redactNodeGateOutput(diagnostic, env)).toBe(diagnostic);
+  }
+  for (const url of [
+    'https://issuer.example/cb?code=private-callback-value',
+    String.raw`https\u003a\u002f\u002fissuer.example/cb?code=private-callback-value`,
+    'https%3A%2F%2Fissuer.example%2Fcb%3Fcode%3Dprivate-callback-value',
+  ])
+    expect(redactNodeGateOutput(url, env)).not.toContain('private-callback-value');
 });
 
 test('every gate with an empty body fails unless it receives its gate observation contract', async () => {
