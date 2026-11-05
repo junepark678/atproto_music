@@ -278,10 +278,10 @@ export function signInFailures(
   return failures;
 }
 
-export async function launchBrowser(env: EnvMap) {
+export async function launchBrowser(env: EnvMap, timeoutMs = 180_000) {
   const { chromium } = await import('@playwright/test');
   try {
-    return await chromium.launch({ headless: env[OAUTH_ENV.interactive] !== '1' });
+    return await chromium.launch({ headless: env[OAUTH_ENV.interactive] !== '1', timeout: timeoutMs });
   } catch (error) {
     throw new GateFailure(`cannot launch Chromium (run \`npx playwright install chromium\`): ${String(error)}`);
   }
