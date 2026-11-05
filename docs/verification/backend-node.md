@@ -53,10 +53,7 @@ run shows every problem. Each step writes `<step>.command` (the command line),
 | `goldens` | `bash scripts/check_goldens.sh` | Golden-file equivalence. |
 | `systemd` | `systemd-analyze --user verify config/systemd/atmusic.service config/systemd/atmusic.socket` | Unit-file verification. A missing unit fails; a missing `systemd-analyze` marks the step `blocked`, and a blocked deterministic step fails the gate. |
 | `live-noenv` | `npx tsx scripts/live/<gate>.ts` with every `ATMUSIC_LIVE_*` unset | Every live gate under `scripts/live/` must answer exit 2 with `result: blocked` and a non-empty `missing` list; output is kept as `live-noenv-<gate>.json/.stderr/.exit`. |
-| `live` | `python3 scripts/verify_live_evidence.py --node --commit HEAD --bundle-sha256 <check-node-bundle>` | Verifies the recorded live inventory (`docs/verification/live-evidence.json` or `ATMUSIC_LIVE_INVENTORY`) offline against this commit and bundle. Exit 0 (complete) or 2 (blocked) passes; exit 1 (a release-bound, attributable
-  recorded failure) fails. A `gate=failed` diagnostic in an inventory that the
-  verifier classifies as blocked remains blocked; the diagnostic is not treated
-  as a release failure without valid inventory-wide prerequisites and binding. |
+| `live` | `python3 scripts/verify_live_evidence.py --node --commit HEAD --bundle-sha256 <check-node-bundle>` | Verifies the recorded live inventory (`docs/verification/live-evidence.json` or `ATMUSIC_LIVE_INVENTORY`) offline against this commit and bundle. Exit 0 (complete) or 2 (blocked) passes; exit 1 (a release-bound, attributable recorded failure) fails. A `gate=failed` diagnostic in an inventory that the verifier classifies as blocked remains blocked; the diagnostic is not treated as a release failure without valid inventory-wide prerequisites and binding. |
 
 ## Closure and records
 
@@ -200,6 +197,44 @@ The later exact-head run below supersedes the `6652a9b` receipt for current
 deterministic acceptance; that earlier receipt remains useful stack history.
 
 ## Exact-head N8 acceptance runs
+
+### Final backend candidate (2026-11-06, commit `461e7a9`)
+
+Ran `bash scripts/acceptance/node-backend.sh --out
+work/acceptance/node-candidate-461e7a9` from clean commit
+`461e7a97a3bd4f18041c507cf45c1240b101b197`. All eleven steps passed and the
+gate exited **0**. The production bundle SHA-256 was
+`f146583d4d1e3fe1af8ba72448a93b9f39b5033e86b8d9f3fe4a560e29982ada`.
+The exact machine-readable receipt is
+[node-backend-461e7a9-summary.json](receipts/node-backend-461e7a9-summary.json)
+(SHA-256 `0f74aaf75b5847fe7d58c978674ebe8929c9f466441cdf9b354b09a4679004f3`).
+
+The run passed **1,848 executed records, 0 failed, 0 skipped**: repository
+Vitest **1,303**, dedicated Node/acceptance **479**, Playwright **14**,
+process-backed scrobbler replay **7**, and Python **45**. Contracts, the
+unrestricted case map, goldens, systemd units, Node bundle guard, all live
+no-environment refusals, and offline inventory classification passed. The
+explicit disposable clean-install/full-check without Workers also passed.
+All **258** cases resolved: **243 passed, 0 failed, 9 blocked, 6 retired**.
+All **five live gates remain blocked**. No dedicated identity, live upstream,
+credential-dependent gate, deployment, or publication action was used.
+
+The follow-on base-composition commit
+`a2308dcde643613101181c4530bdc2c83e547da6` has a byte-identical tracked tree:
+`git diff --exit-code 461e7a9 a2308dc` passed. It records ordinary merges of the
+final #140 base through #143/#144/#150 and #145–#148. This receipt remains
+bound to the tested `461e7a9` commit and its bundle, not a later documentation
+commit. Hosted checks for each updated PR head are recorded separately in
+[PR #149](https://github.com/junepark678/atproto_music/pull/149).
+
+Astra's final scoped static review found no blocking merge findings and
+confirmed the retained OAuth fixes: shared 90-minute capture budgets,
+cancellation settlement before recovery, accepted-write cleanup registration,
+CSRF-first callback cleanup, logout after observer-preparation failure, and
+standalone issuer-host binding. Their regression suites ran within the full
+gate. Earlier signed-proof, revocation-race, forwarding and import-pressure
+reviews and regressions remain part of the candidate. This deterministic pass
+does not close N6-02 or live product acceptance.
 
 ### Candidate integration attempt (2026-11-06, commit `396de2d`)
 

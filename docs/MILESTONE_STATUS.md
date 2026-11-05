@@ -24,17 +24,19 @@ confirms evidence bound to the current commit and Node bundle. It replaces
 `scripts/acceptance/node-interim.sh` as the gate from wave 8 on and never
 contacts a live service.
 
-Current candidate update (2026-11-06): the full N8 attempt at `396de2d`
-**failed** because the production-SPA setup hook exceeded its 10-second budget.
-It passed 1,799 executed records; one bundle test was skipped by the failed
-suite. Browser E2E (14), protocol replay (7), Python (45), Node tests (477),
-bundle guard, case map, goldens, systemd and live refusal controls passed.
-`check-ts` stopped before contract validation, so the overall case result was
-239 passed, 4 failed, 9 blocked and 6 retired. The exact failed receipt and
-runner correction are recorded in [backend-node.md](verification/backend-node.md).
-[PR #149](https://github.com/junepark678/atproto_music/pull/149) integrates the
-reviewed backend fixes and published-schema guard; final acceptance remains
-pending. Live identity gates remain owner-skipped, with no credentials sought.
+Current candidate update (2026-11-06): the complete N8 gate passed at clean
+commit `461e7a9`, with **1,848 executed records, 0 failures and 0 skips**.
+All 258 cases resolved: **243 passed, 9 blocked and 6 retired**. The exact
+commit, bundle SHA-256, per-step results and machine-readable receipt are in
+[backend-node.md](verification/backend-node.md) and
+[the receipt](verification/receipts/node-backend-461e7a9-summary.json).
+The subsequent base-composition commit `a2308dc` has a byte-identical tracked
+tree; later documentation commits do not change that receipt's identity.
+[PR #149](https://github.com/junepark678/atproto_music/pull/149) records the
+reviewed backend fixes, published-schema guard and per-head hosted CI status.
+The failed `396de2d` attempt remains recorded as history. Live identity gates
+remain owner-skipped, with no credentials sought. No milestone is closed by
+this deterministic pass.
 
 Earlier successful baseline (2026-11-04): the full N8 gate passed on
 clean integration commit `4322f5d`; its bundle SHA-256 and machine-readable
