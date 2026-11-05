@@ -222,6 +222,18 @@ export function getSession(
     if (row.api_key !== input.apiKey) return fail(4);
     if (deps.clock.nowMs() >= row.expires_at_ms) return fail(15);
     if (row.state !== 'authorized' || row.did === null) return fail(14);
+    // An approved desktop token is still a credential write. Do not let a
+    // client redeem it into a non-expiring session after the user's last live
+    // browser session has ended (logout-all, expiry or disconnect).
+    if (
+      db.one<{ live: number }>(
+        'SELECT 1 AS live FROM web_sessions WHERE did = ? AND expires_at_ms > ? LIMIT 1',
+        row.did,
+        deps.clock.nowMs(),
+      ) === null
+    ) {
+      return fail(4);
+    }
     const { rowsWritten } = db.run(
       "UPDATE lastfm_tokens SET state = 'consumed' WHERE token_hash = ? AND state = 'authorized'",
       toBlob(digest),
