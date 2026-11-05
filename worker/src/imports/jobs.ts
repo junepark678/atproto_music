@@ -739,12 +739,12 @@ class ImportRun {
             nowMs: this.now,
           },
         );
-        if (this.pauseForLowDisk(job.id)) return;
         // Spent window: no further request before it resets.
         if (outcome.rate !== null && outcome.rate.remaining === 0 && outcome.rate.resetInSeconds !== null) {
           pacer.holdUntil(this.now + outcome.rate.resetInSeconds * 1000);
         }
         if (outcome.kind === 'rate_limited' && outcome.untilMs !== undefined) pacer.holdUntil(outcome.untilMs);
+        if (this.pauseForLowDisk(job.id)) return;
         await this.applyFetch(job, cursor, outcome, (c) => ({ listenbrainz: c }));
       }
     } catch (error) {
