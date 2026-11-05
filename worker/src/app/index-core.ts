@@ -8,8 +8,7 @@
 // alarms, the Jetstream connector, the transport, an optional backup port,
 // the logger, the clock and the randomness. This module imports no
 // `cloudflare:*` module and no value from env.ts (worker/test/composition/
-// index-core.test.ts checks it); do/index-do.ts is the Workers wrapper until
-// N7-01 and the Node composition (node/compose.ts, N2-01) the other host.
+// index-core.test.ts checks it); the Node composition is its host.
 //
 // Life cycle:
 //  1. `new IndexCore(config, host, extensions, options)`. The identity
@@ -53,7 +52,7 @@
 // queue timers are only ever pulled forward.
 //
 // RPC rejections (ADR 0004 §5.9 logging): no raw error leaves a method.
-// NotReadyError, NotSupportedError, RangeError (argument validation) and
+// NotReadyError, RangeError (argument validation) and
 // ApiError keep their name and message but lose their stack and cause;
 // anything else (a storage fault, a platform error, a module bug) is logged
 // through the logger by method and error name only and rejects as a bare
@@ -84,7 +83,6 @@ import type {
   LogLevel,
   ModuleDeps,
   NotifyOutcome,
-  PitrResult,
   ResolveOutcome,
   RowsResult,
   ScrobbleRow,
@@ -99,7 +97,7 @@ import { pruneVerifiedCommits } from '../do/ingest/commit-cache';
 import { discover, ensureDiscoveryTimer, requestGapDiscovery } from '../do/ingest/discovery';
 import { deleteHint, nextHintDue } from '../do/ingest/hints';
 import { cachedIdentityResolver, pruneIdentityCache } from '../do/ingest/identity-cache';
-import { type IngestDeps, jetstreamWatchdog, type PulseTimer } from '../do/ingest/ingest-mode';
+import { type IngestDeps, jetstreamWatchdog } from '../do/ingest/ingest-mode';
 import type { ConnectJetstream } from '../do/ingest/jetstream-socket';
 import { notify, recordStatus } from '../do/ingest/notify';
 import { clearExpiredHostPauses } from '../do/ingest/pds-budget';
@@ -149,10 +147,6 @@ export const HINT_EXPIRED_REASON = 'hint_expired';
 export const HINT_EXPIRED_COUNTER = 'hint_expired';
 /** No new timer handler starts this long after a lane's run began (the DO alarm wall limit is 15 min). */
 export const ALARM_SLICE_MS = 5 * 60_000;
-/** Durable Objects keep 30 days of point-in-time history (ADR 0004 A15). */
-export const PITR_WINDOW_MS = 30 * 24 * 3_600_000;
-/** The restart into a restored bookmark is deferred so the RPC answer leaves first. */
-export const PITR_RESTART_DELAY_MS = 50;
 export const ADMIN_RESNAPSHOT_REASON = 'admin';
 
 /**
@@ -162,8 +156,6 @@ export const ADMIN_RESNAPSHOT_REASON = 'admin';
  */
 export interface IndexDeps extends ModuleDeps {
   connectJetstream: ConnectJetstream;
-  /** Measures the pulse's 20 s bound; default setTimeout. */
-  pulseTimer?: PulseTimer;
   /** Where the alarm is armed (production: `ctx.storage`). One object per instance. */
   alarms: AlarmStorage;
 }
@@ -183,7 +175,7 @@ const BEARER_VALUE = /\b(Bearer)\s+[^\s",]+/gi;
 
 /**
  * The production Logger: one JSON line per event to the console (Workers
- * Logs). `secrets` (CURSOR_KEY, ADMIN_TOKEN) are replaced wherever they
+ * Logs). `secrets` (CURSOR_KEY) are replaced wherever they
  * occur, as is any `Bearer <value>`, and a field whose key names a credential
  * is dropped to `[redacted]`. Callers still never pass record contents.
  */
@@ -218,9 +210,9 @@ export function createLogger(secrets: readonly (string | undefined)[], sink: Log
   };
 }
 
-/** The Logger for `env`: redacts its CURSOR_KEY and ADMIN_TOKEN (structural, so any host's env fits). */
-export function envLogger(env: { CURSOR_KEY?: string; ADMIN_TOKEN?: string }, sink?: LogSink): Logger {
-  return createLogger([env.CURSOR_KEY, env.ADMIN_TOKEN], sink);
+/** The Logger for `env`: redacts its CURSOR_KEY (structural, so any host's env fits). */
+export function envLogger(env: { CURSOR_KEY?: string }, sink?: LogSink): Logger {
+  return createLogger([env.CURSOR_KEY], sink);
 }
 
 /** An error's name for logs: never its message, which may carry values. */
@@ -239,14 +231,6 @@ export class NotReadyError extends Error {
 }
 
 export const NOT_SUPPORTED = 'not_supported';
-
-/** The host has no port for this operation (adminPitr without a PITR port). */
-export class NotSupportedError extends Error {
-  constructor(message: string = NOT_SUPPORTED) {
-    super(message);
-    this.name = 'NotSupportedError';
-  }
-}
 
 export const INDEX_ERROR_NAME = 'IndexError';
 export const INDEX_ERROR_MESSAGE = 'index operation failed';
@@ -278,7 +262,6 @@ function bare<E extends Error>(error: E): E {
  */
 function rpcRejection(error: unknown, method: string, log: Logger | null): Error {
   if (error instanceof NotReadyError) return bare(new NotReadyError(error.message));
-  if (error instanceof NotSupportedError) return bare(new NotSupportedError(error.message));
   if (error instanceof RangeError) return bare(new RangeError(error.message));
   if (error instanceof ApiError) return bare(new ApiError(error.code, error.message, error.fields, error.status));
   const fields = { method, error: errorName(error) };
@@ -379,7 +362,6 @@ export class IndexCore implements IndexRpc, AdminRpc {
 
     this.ingest = {
       connectJetstream: host.connectJetstream,
-      ...(options.pulseTimer === undefined ? {} : { pulseTimer: options.pulseTimer }),
       scheduleGapRecovery: (db, now) => {
         scheduleGapRecovery(db, now);
         requestGapDiscovery(db, now);
@@ -445,9 +427,8 @@ export class IndexCore implements IndexRpc, AdminRpc {
 
   /**
    * Every periodic core timer exists, and the queue timers agree with the
-   * queues. At start-up the Jetstream watchdog is made due now (reconnect, or
-   * the first pulse; with ingestion `off` it runs once to close and record the
-   * mode); later calls (cron, the ensureRunning interval) only recreate it
+   * queues. At start-up the Jetstream watchdog is made due now (reconnect;
+   * with ingestion `off` it runs once to close and record the mode); later calls (cron, the ensureRunning interval) only recreate it
    * when it is missing.
    */
   private ensureTimers(now: number, o: { startup?: boolean } = {}): void {
@@ -688,13 +669,12 @@ export class IndexCore implements IndexRpc, AdminRpc {
 
   /**
    * Cron (scheduled.ts) and the Node 5-minute interval: the timers exist and
-   * both alarms are armed; in pulse mode a pulse is due now.
+   * both alarms are armed.
    */
   async ensureRunning(): Promise<void> {
     return this.#rpc('ensureRunning', () => {
       const m = this.live();
       const now = m.clock.nowMs();
-      if (m.config.ingestMode === 'pulse') m.db.tx(() => schedule(m.db, 'jetstream-watchdog', now));
       this.ensureTimers(now);
       armAlarm(this.host.alarm, m.db, CORE_LANE);
       this.armExtensionLane();
@@ -708,24 +688,6 @@ export class IndexCore implements IndexRpc, AdminRpc {
         schema: this.migration as MigrateResult,
         ...internalStatus(m.db, m.clock.nowMs(), { mode: m.config.ingestMode }),
       };
-    });
-  }
-
-  /**
-   * ADR 0004 A15: restore the whole index to its state at `atMs` (within the
-   * last 30 days) through the host's PITR port. A host without one (Node)
-   * rejects with NotSupportedError. Removed by N7-01.
-   */
-  async adminPitr(atMs: number): Promise<PitrResult> {
-    return this.#rpc('adminPitr', async () => {
-      const m = this.live();
-      const pitr = this.host.pitr;
-      if (pitr === undefined) throw new NotSupportedError(`${NOT_SUPPORTED}: this host has no point-in-time restore`);
-      const now = m.clock.nowMs();
-      if (!Number.isSafeInteger(atMs) || atMs > now || atMs < now - PITR_WINDOW_MS) {
-        throw new RangeError('atMs must be integer epoch ms within the last 30 days');
-      }
-      return pitr.restore(atMs);
     });
   }
 

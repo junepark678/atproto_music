@@ -100,15 +100,16 @@ test('Jetstream child accepts commits and replays them through its WebSocket end
     await fakes.appendCommits([committed]);
     const endpoint = new URL('/xrpc/network.bsky.jetstream.subscribeEvents?cursor=1&kinds=commit', fakes.jetstreamUrl);
     socket = new WebSocket(endpoint);
-    // Register before open: the child can send the cursor replay as soon as
-    // the server accepts the socket, before the client's open handler runs.
-    const replayMessage = nextMessage(socket);
+    // The fake sends cursor replay during the upgrade. Register before waiting
+    // for `open`, because the first message can arrive before that event's
+    // continuation runs on a busy CI worker.
+    const replayed = nextMessage(socket);
     const opened = new Promise<void>((resolve, reject) => {
       socket!.once('open', resolve);
       socket!.once('error', reject);
     });
     await opened;
-    const replay = JSON.parse(await replayMessage) as {
+    const replay = JSON.parse(await replayed) as {
       did: string;
       seq: number;
       kind: string;

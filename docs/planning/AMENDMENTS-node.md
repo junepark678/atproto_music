@@ -150,7 +150,7 @@ Retired cases (true on Node):
 
 **Demonstrated gap:** `pulse` mode existed only for the Workers Free plan's limits.
 
-**Amendment text:** `INGEST_MODE` is `socket` (default) or `off`; `pulse` is refused with a message citing ADR 0005. N7-01 removes `pulse`, `PLAN`, `DO_LOCATION_HINT` and `BUDGETS.free`; until then the Node config passes `PLAN='paid'` and `DO_LOCATION_HINT=''` to the embedded `parseConfig` and refuses any operator-set value.
+**Amendment text:** `INGEST_MODE` is `socket` (default) or `off`; the Node parser rejects every other mode. N7-01 removes the Workers-only pulse path, plan tiers, placement hint and free-tier budget from runtime configuration. Unknown legacy environment names have no effect on the Node parser. The Node host uses one fixed slice budget; immutable migration 1 retains its historical mode CHECK so old databases remain readable.
 
 ### B18 Meta (amends A20)
 
@@ -456,3 +456,68 @@ Places where a package's tree differs from its `files` entry in [node-waves.json
 **Why:** IndexDO imports `cloudflare:workers`, so the Node composition project cannot load it, and on the Node host no IndexDO stands between the routes and IndexCore: `ctx.index` is the composed IndexCore. The boundary each IndexRpc read crosses on Node is its route: dispatcher, handler, DTO projection and JSON over the real listener, and for `adminStatus` the production admin-socket handler. The test calls every read method directly on the composed IndexCore and through that route, and it requires the route body to equal the direct result under the route's production projection (`scrobbleDto`, `followToDto`, the RecordStatus member rules, and the `not_found` envelope for null). It replaces a comparison of two IndexCore instances over one database file, which crossed no boundary. The second test keeps its title. While index-do.ts exists (until N7-01), it checks from source that index-do.ts re-exports every moved name from `../app/index-core` and defines none of them. Through `import type`, it checks that the moved types and values resolve through index-do.ts with index-core's types. The module is never loaded on Node.
 
 **Requested owner amendment:** in the N1-02 `tests` entry, replace the first title with the title in the tree. N7-01, which deletes index-do.ts, then drops the re-export half of the second test (and renames it).
+
+## N6-02 dev-env OAuth preflight classification
+
+The dev-env OAuth preflight is an advisory fixture check, not the production
+`oauth` gate and not one of the five gates required by the Node inventory. It
+emits schema-v3 `runtime: "node"`, `fixtureOnly: true`, `gate: "devenvOauth"`,
+and `result: "blocked"`; it never enables verifier PASS. Its current inputs
+are a local PDS URL and a bare HTTPS test origin. The client ID is derived from
+the origin's client-metadata route and the BFF uses `private_key_jwt`, so no
+client secret is requested. Even with valid inputs, the driver remains blocked
+until an offline interop harness records accepted exchange, four-collection
+grant, CRUD, supersession, and upstream-revocation observations. Those fixture
+observations do not satisfy live OAuth evidence from two independently
+operated PDSs or close N6-02.
+
+The offline regression `worker/test/node/bff/devenv-oauth.test.ts` exercises the
+confidential client against the actual `@atproto/dev-env` provider, including
+exchange, four-collection grant, CRUD, session supersession, and provider
+token-store revocation. This fixture test is not run by the preflight driver,
+does not exercise the provider browser consent UI, and is not evidence for the
+production `oauth` gate.
+
+### N5-02 additive delete-target index (migration 4)
+
+The operations-aware 100,000-listen benchmark retains its bounded 256-operation
+fixture (250 succeeded creates and six deletes). Its pre-index plans probed
+`operations_did_state (did=?)` for each visibility check. Migration 4 adds the
+partial `operations_scrobble_delete_target(did,rkey)` index for
+`kind='scrobble.delete'`, without changing public reads, API contracts, delete
+state/CID semantics, applied migrations 1–3, or the compatibility floor of 2.
+Post-index plans and timings are recorded in
+[the protocol-read report](../benchmarks/node-protocol-reads.md). These are
+uncontrolled synthetic observations, not evidence of lifetime scaling or a
+measurement of migration cost; no live services are involved.
+
+Saved schema-v2 receipts are
+`docs/benchmarks/receipts/n5-02-protocol-reads-{pre,post}-index.json`.
+The saved pre-index receipt was reused, not rerun. The post-index run kept
+99,995 visible / 5 hidden listens and ten samples per read. Its p50/p95 (ms)
+were 506.28/733.56 for uncached top tracks, 256.31/355.51 for recent page 500,
+541.11/752.16 for ListenBrainz all_time, and 109.21/354.59 for activity year.
+The top-track and recent-page report-only p95 budgets remain unmet.
+All seven captured visibility probes naturally use the new `(did,rkey)` index;
+no covering extension or `INDEXED BY` was needed. Read-model plan pins and their
+renderer were updated with the measured target lookup; cache-hit statement
+budgets stay 3 (`all`) and 4 (windowed). Its current Node receipt is
+`docs/benchmarks/receipts/n5-02-read-models-post-index.json`; the older
+`read_models.json` remains historical Rust evidence.
+
+Re-render the committed reports without measuring again:
+
+```sh
+npx tsx scripts/benchmark-protocol-reads.ts --render docs/benchmarks/receipts/n5-02-protocol-reads-post-index.json --baseline docs/benchmarks/receipts/n5-02-protocol-reads-pre-index.json
+npx tsx scripts/benchmark-read-models.ts --render docs/benchmarks/receipts/n5-02-read-models-post-index.json
+```
+
+Verification: 39 focused migration/index/visibility/renderer tests initially
+passed; the broader storage/read suites passed 101 tests, the Node protocol
+read and HTTP query-plan/read-model acceptance suites passed 28, and the
+updated read-model bench passed all 6 tests. The focused post-index protocol
+bench passed both tests. The final renderer suites passed 10 tests and
+`npx tsc -b --pretty false` passed. The index-drop/restore regression compares
+serialized feed, following-feed, history and lookup response bodies plus
+statistics across queued, running, blocked, failed, cancelled and succeeded
+matching/stale/NULL-CID deletes. Production read SQL and API code are unchanged.

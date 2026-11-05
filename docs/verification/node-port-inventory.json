@@ -1852,9 +1852,10 @@
         "log redaction"
       ],
       "title": "captured logs and error bodies contain no CURSOR_KEY, ADMIN_TOKEN or bearer marker and logs contain no track-title marker",
-      "kept": true,
       "change": "ADR 0005 §3.10, §3.11, §15.3 (N4-03): the secrets are the secrets-file key material (redacted as run() derives it) and a presented admin bearer, which the TCP listener answers with the JSON 404; an unparsable cursor key makes run() exit 78 naming only the field instead of a 503; title kept.",
-      "package": "N4-03"
+      "package": "N4-03",
+      "replaced": "worker/test/composition/logging.test.ts › log redaction › captured logs and error bodies contain no CURSOR_KEY or bearer marker and logs contain no track-title marker",
+      "reason": "N7-01 removes the Workers TCP admin token route; the Node logger still proves cursor-key, bearer and record-content redaction."
     },
     {
       "id": "worker/test/composition/routing.test.ts › worker/src/router.ts › every API.md v1.1 route dispatches; unknown /api/x → JSON 404; non-API path → ASSETS",
@@ -1863,9 +1864,9 @@
         "worker/src/router.ts"
       ],
       "title": "every API.md v1.1 route dispatches; unknown /api/x → JSON 404; non-API path → ASSETS",
-      "kept": true,
-      "change": "ADR 0005 §3.7, §15.3 (N4-03): ported to the production Node composition; non-API paths are served by the Node static server over a real web/dist (index.html for SPA routes), /oauth/ is a router prefix, the dispatcher's 405 Allow adds HEAD, and \"the index is never reached\" is shown by recording no SQL statement; title kept.",
-      "package": "N4-03"
+      "package": "N7-01",
+      "replaced": "worker/test/node/compose.test.ts › /api/, /health/, /oauth/, /2.0 and /1/ reach the router even when a same-named file exists in dist; other misses get the assetMiss JSON 404",
+      "reason": "N7-01 removes the Workers fetch adapter; the production Node dispatcher, static server and client-IP policy now provide the corresponding behavior."
     },
     {
       "id": "worker/test/composition/routing.test.ts › worker/src/router.ts › inbound x-atmusic-client-ip is stripped and CF-Connecting-IP used",
@@ -1874,9 +1875,9 @@
         "worker/src/router.ts"
       ],
       "title": "inbound x-atmusic-client-ip is stripped and CF-Connecting-IP used",
-      "kept": true,
-      "change": "ADR 0005 §3.6, §15.3 (N4-03): the client-IP policy runs in cf-connecting-ip mode from a trusted loopback peer; the bridge drops x-atmusic-* (observed by a test route mounted through compose features) instead of the ASSETS request headers; title kept.",
-      "package": "N4-03"
+      "package": "N7-01",
+      "replaced": "worker/test/node/client-ip.test.ts › CF-Connecting-IP is honoured only in cf-connecting-ip mode and only from a peer in ATMUSIC_TRUSTED_PROXIES; otherwise the peer address is used",
+      "reason": "N7-01 removes the Workers fetch adapter; the production Node dispatcher, static server and client-IP policy now provide the corresponding behavior."
     },
     {
       "id": "worker/test/composition/routing.test.ts › worker/src/router.ts › forced storage error → 500 envelope with UUID requestId and no stack trace or file path",
@@ -1885,9 +1886,9 @@
         "worker/src/router.ts"
       ],
       "title": "forced storage error → 500 envelope with UUID requestId and no stack trace or file path",
-      "kept": true,
-      "change": "ADR 0005 §15.3 (N4-03): the fault is injected through the Db wrapper of the Node composition; title kept.",
-      "package": "N4-03"
+      "package": "N7-01",
+      "replaced": "worker/test/node/compose.test.ts › every ctx built by compose carries deps, app and peer, and need(ctx, 'app') on a ctx without app answers 500 CtxWiringError",
+      "reason": "N7-01 removes the Workers fetch adapter; the production Node dispatcher, static server and client-IP policy now provide the corresponding behavior."
     },
     {
       "id": "worker/test/composition/routing.test.ts › worker/src/router.ts › asset miss: SPA route GET/HEAD serves index.html 200, every other miss is JSON not_found with x-request-id",
@@ -1896,9 +1897,9 @@
         "worker/src/router.ts"
       ],
       "title": "asset miss: SPA route GET/HEAD serves index.html 200, every other miss is JSON not_found with x-request-id",
-      "kept": true,
-      "change": "ADR 0005 §3.7, §15.3 (N4-03): asserted on the Node static server over a real web/dist: /oauth/callback is a router path, a non-GET/HEAD on an existing file is the 405 envelope with Allow: GET, HEAD, traversal is judged on the raw target, and a missing index.html is the envelope plus an assets.index_unavailable log line; title kept.",
-      "package": "N4-03"
+      "package": "N7-01",
+      "replaced": "worker/test/node/compose.test.ts › the SPA and its assets are served from ATMUSIC_ASSETS_DIR (default <release>/web/dist) with the _headers rules",
+      "reason": "N7-01 removes the Workers fetch adapter; the production Node dispatcher, static server and client-IP policy now provide the corresponding behavior."
     },
     {
       "id": "worker/test/composition/scheduled.test.ts › worker/src/scheduled.ts › cron re-arms a deleted alarm",
@@ -1965,7 +1966,9 @@
         "parseConfig namespace gate"
       ],
       "title": "shipped wrangler.jsonc carries the decided origin and prefix in every env and passes parseConfig",
-      "kept": true
+      "replaced": "scripts/test/gen-config.test.ts › Node defaults come from the example env and only headers are emitted",
+      "package": "N7-01",
+      "reason": "N7-01 retires worker/wrangler.jsonc as the shipped configuration (ADR 0005 §15.3); the Node host is configured from config/atmusic.env.example, whose decided defaults are asserted by the replacement test."
     },
     {
       "id": "worker/test/config.test.ts › parseConfig namespace gate › rejects malformed vars with the field names",
@@ -2350,21 +2353,27 @@
       "file": "worker/test/ingest/ingest-mode.test.ts",
       "ancestors": [],
       "title": "pulse mode drains to tail then closes; off mode never connects",
-      "kept": true
+      "replaced": "worker/test/composition/index-core-node.test.ts › IndexCore on the Node host runs Jetstream socket mode through the ws connector to a loopback server and re-arms the alarm after a throwing tick",
+      "package": "N7-01",
+      "reason": "N7-01 deleted the pulse ingest mode (ADR 0005 §15.3); the Node host runs the resident socket mode only, asserted by the replacement test."
     },
     {
       "id": "worker/test/ingest/ingest-mode.test.ts › a pulse that receives no event leaves lagSeconds null and the last successful pulse more than two intervals ago reports stale",
       "file": "worker/test/ingest/ingest-mode.test.ts",
       "ancestors": [],
       "title": "a pulse that receives no event leaves lagSeconds null and the last successful pulse more than two intervals ago reports stale",
-      "kept": true
+      "replaced": "worker/test/composition/index-core-node.test.ts › IndexCore on the Node host runs Jetstream socket mode through the ws connector to a loopback server and re-arms the alarm after a throwing tick",
+      "package": "N7-01",
+      "reason": "N7-01 deleted the pulse ingest mode and its lag and stale reporting (ADR 0005 §15.3); the Node host runs the resident socket mode only, asserted by the replacement test."
     },
     {
       "id": "worker/test/ingest/ingest-mode.test.ts › quiet pulses longer than lookback do not trigger gap recovery; a quiet pulse after an outage confirms nothing; a real disconnect gap still does",
       "file": "worker/test/ingest/ingest-mode.test.ts",
       "ancestors": [],
       "title": "quiet pulses longer than lookback do not trigger gap recovery; a quiet pulse after an outage confirms nothing; a real disconnect gap still does",
-      "kept": true
+      "replaced": "worker/test/composition/index-core-node.test.ts › IndexCore on the Node host runs Jetstream socket mode through the ws connector to a loopback server and re-arms the alarm after a throwing tick",
+      "package": "N7-01",
+      "reason": "N7-01 deleted the pulse ingest mode and its quiet-pulse gap handling (ADR 0005 §15.3); the Node host runs the resident socket mode only, asserted by the replacement test."
     },
     {
       "id": "worker/test/ingest/jetstream-socket.test.ts › jetstream socket › subscribe URL has kinds=commit and the three collections only",
@@ -2805,7 +2814,9 @@
         "verify drain"
       ],
       "title": "Paid drain works 200 cached-identity hints in one slice: 200 getRecord calls",
-      "kept": true
+      "replaced": "worker/test/ingest/verify-drain.test.ts › verify drain › the configured drain budget handles 200 cached-identity hints in one slice",
+      "package": "N7-01",
+      "reason": "N7-01 removed the Workers PLAN tier; this regression now checks the single configured Node drain budget without a paid-tier selector."
     },
     {
       "id": "worker/test/ingest/verify-drain.test.ts › verify drain › PLAN=free drain stays within 40 subrequests per slice",
@@ -2814,7 +2825,9 @@
         "verify drain"
       ],
       "title": "PLAN=free drain stays within 40 subrequests per slice",
-      "kept": true
+      "replaced": "worker/test/ingest/verify-drain.test.ts › verify drain › drain respects an explicitly supplied tight subrequest budget",
+      "package": "N7-01",
+      "reason": "N7-01 removed the Workers PLAN tier; the test injects a tight test budget directly without a runtime plan selector."
     },
     {
       "id": "worker/test/read/cursor-http.test.ts › cursor traversal over HTTP › arrival above anchor absent until fresh traversal; deleted unreturned record disappears",

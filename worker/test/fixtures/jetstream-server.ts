@@ -355,7 +355,6 @@ export interface IngestDepsOptions {
  */
 export function ingestDeps(db: Db, clock: Clock, o: IngestDepsOptions = {}): IngestTestDeps {
   const base = harnessConfig({
-    ADMIN_TOKEN: '',
     ...(o.prefix === undefined ? {} : { LEXICON_PREFIX: o.prefix }),
     ...(o.mode === undefined ? {} : { INGEST_MODE: o.mode }),
     ...(o.hosts === undefined ? {} : { JETSTREAM_URLS: o.hosts.map((h) => `wss://${h}`).join(',') }),

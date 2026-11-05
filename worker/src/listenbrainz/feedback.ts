@@ -38,7 +38,7 @@
 //   the key for case 1, the newest love of the key for case 4).
 // - An id with no candidate answers 200 `{"status":"ok"}` and stores nothing,
 //   as ListenBrainz does for an MSID it cannot use.
-// - Namespace gate closed (no lexicon prefix): 503, nothing stored.
+// - Publication gate closed: 503 before the body is read, nothing stored.
 //
 // Reads (get-feedback): the user's loves (the proof-gated `loves` projection)
 // newest first, `{feedback: [{user_id, recording_msid, recording_mbid, score:
@@ -58,7 +58,7 @@ import { storageToUnixSeconds } from '../do/read/recent';
 import { readJsonBody } from '../http/params';
 import { need, type RequestCtx } from '../http/types';
 import { enqueueLove, enqueueUnlove } from '../outbox/love-ops';
-import { lbError, lbJson } from './errors';
+import { LB_UNAVAILABLE_MESSAGE, lbError, lbJson } from './errors';
 import {
   booleanArg,
   intArg,
@@ -70,6 +70,7 @@ import {
   resolveLbUser,
 } from './read';
 import type { LbRequest, LbRouteDef } from './routes';
+import { lbGuard, lbPublicationOpen } from './token-routes';
 
 /** The most body bytes a feedback request may carry (the bridge's /1/ cap). */
 export const FEEDBACK_MAX_BODY_BYTES = 64 * 1024;
@@ -372,10 +373,11 @@ async function postRecordingFeedback(
   options: FeedbackOptions,
 ): Promise<Response> {
   const m = need(ctx, 'deps');
-  if (lb.auth.status !== 'valid') throw new Error('recording-feedback reached without a valid token');
-  const did = lb.auth.token.did;
+  const guard = lbGuard(req, ctx, {}, lb);
+  if (!guard.ok) return guard.response;
+  if (!lbPublicationOpen(m.config)) return lbError(503, LB_UNAVAILABLE_MESSAGE, guard.rateHeaders);
+  const did = guard.token.did;
   const feedback = parseFeedback(await readFeedbackBody(req));
-  if (m.config.prefix === null) return lbError(503, FEEDBACK_MESSAGES.unavailable);
 
   const target = await resolveFeedbackTarget(m, did, feedback);
   if (target === null) return lbJson({ status: 'ok' });

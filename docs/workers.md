@@ -1,4 +1,11 @@
-# Background work: timers, ingest modes and budgets
+# Historical: Workers background work
+
+This document describes the retired ADR 0004 Workers runtime. Its alarm,
+Durable Object, pulse mode and plan-tier details are not configuration or
+operational instructions for the current Node host. See [operations](operations.md)
+and [Node deployment](deployment.md) for the supported runtime.
+
+## Background work: timers, ingest modes and budgets
 
 All background work runs inside the single `IndexDO` ([ADR 0004](adr/0004-cloudflare-workers.md) §5.4–§5.9). There are no worker processes, queues or threads: one Durable Object alarm drives everything, and every step is bounded, durable before it acknowledges anything, and idempotent, because alarms are delivered at least once.
 

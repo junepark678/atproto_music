@@ -264,6 +264,8 @@ export interface StageOptions {
   cursorJson?: string;
   /** Reset the crash-loop counter in the same commit (the slice completed). */
   completeSlice?: boolean;
+  /** Last synchronous gate before the staging transaction. False discards the prepared batch. */
+  beforeCommit?: () => boolean;
   now: number;
 }
 
@@ -277,11 +279,16 @@ export async function stageEntries(
   job: StageTarget,
   entries: readonly ParsedEntry[],
   options: StageOptions,
-): Promise<StageResult> {
+): Promise<StageResult | null> {
   const prefix = m.config.prefix;
   if (prefix === null) throw new RangeError('the namespace gate is closed: no lexicon prefix');
   const prepared: Prepared[] = [];
   for (const entry of entries) prepared.push(await prepareEntry(m, job.did, prefix, entry));
+
+  // Preparing listen keys is asynchronous. Recheck state and disk pressure
+  // immediately before entering the synchronous transaction so a cancellation
+  // or a low-disk pause cannot commit this not-yet-staged batch.
+  if (options.beforeCommit !== undefined && !options.beforeCommit()) return null;
 
   const db = m.db;
   return db.tx((): StageResult => {

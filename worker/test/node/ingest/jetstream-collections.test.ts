@@ -43,9 +43,6 @@ function deps(db: SqliteDb, prefix = P): ModuleDeps {
       JETSTREAM_URLS: `wss://${HOST}`,
       JETSTREAM_LOOKBACK_HOURS: '24',
       RELAY_URL: 'https://relay.example.test',
-      PLAN: 'paid',
-      DO_LOCATION_HINT: '',
-      ADMIN_TOKEN: '',
     },
     { allowFixturePrefix: true },
   );

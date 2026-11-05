@@ -67,7 +67,7 @@ export class OutboxService {
     const body = JSON.stringify(input);
     if (this.#pendingScrobble?.body !== body) this.#pendingScrobble = { body, intent: createWriteIntent() };
     const intent = this.#pendingScrobble.intent;
-    const accepted = await writes.scrobble(input, intent);
+    const accepted = await writes.scrobble(input, intent, this.did);
     this.#pendingScrobble = null;
     const op = this.#add(accepted.operation, {
       artist: input.artist,
@@ -78,20 +78,20 @@ export class OutboxService {
     return { ok: true, op };
   }
   async deleteScrobble(uri: string): Promise<OutboxOperation> {
-    const accepted = await writes.deleteScrobble(uri);
+    const accepted = await writes.deleteScrobble(uri, undefined, this.did);
     return this.#add(accepted.operation, undefined, undefined, uri);
   }
   async follow(subject: Did): Promise<OutboxOperation> {
-    const accepted = await writes.follow(subject);
+    const accepted = await writes.follow(subject, undefined, this.did);
     return this.#add(accepted.operation, undefined, subject);
   }
   async unfollow(subject: Did): Promise<OutboxOperation> {
-    const accepted = await writes.unfollow(subject);
+    const accepted = await writes.unfollow(subject, undefined, this.did);
     const rkey = await followRkey(subject);
     return this.#add(accepted.operation, undefined, subject, `at://${this.did}/${this.prefix}.follow/${rkey}`);
   }
   async disconnect(): Promise<OutboxOperation> {
-    const accepted = await writes.indexing('disabled');
+    const accepted = await writes.indexing('disabled', undefined, this.did);
     return this.#add(
       accepted.operation,
       { indexing: 'disabled' },
@@ -100,7 +100,7 @@ export class OutboxService {
     );
   }
   async reconnect(): Promise<OutboxOperation> {
-    const accepted = await writes.indexing('enabled');
+    const accepted = await writes.indexing('enabled', undefined, this.did);
     return this.#add(
       accepted.operation,
       { indexing: 'enabled' },
