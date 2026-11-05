@@ -31,6 +31,10 @@ const NOW_STORAGE = toStorage(NOW_NS);
 const OPTS: ApplyOptions = { receiptNs: NOW_NS, prefix: PREFIX, nowNs: NOW_NS };
 const API_KEY = 'pano-test-key';
 const LISTENS = 100_000;
+// Exercise accumulated visibility history without adding an unmeasured index.
+const CREATE_OPERATIONS = 250;
+const HIDDEN_LISTENS = 5;
+const VISIBLE_LISTENS = LISTENS - HIDDEN_LISTENS;
 const SEED = 0x5eed;
 const READS = 10;
 // The fixture freezes time, so the per-IP read buckets do not refill. Keep
@@ -48,10 +52,29 @@ interface QueryPlanStatement {
   details: string[];
 }
 interface ProtocolReadsReport {
-  schema: 'atmusic/protocol-reads-benchmark@1';
+  schema: 'atmusic/protocol-reads-benchmark@2';
   generatedBy: string;
   generatedAt: string;
-  dataset: { listens: number; seed: number; clock: string; applyPathRecords: number };
+  dataset: {
+    listens: number;
+    seed: number;
+    clock: string;
+    applyPathRecords: number;
+    operations: {
+      total: number;
+      scrobbleCreateSucceeded: number;
+      scrobbleDelete: {
+        queued: number;
+        running: number;
+        blocked: number;
+        failed: number;
+        succeededMatchingCid: number;
+        succeededStaleCid: number;
+      };
+      visibleScrobbles: number;
+      hiddenScrobbles: number;
+    };
+  };
   plans: {
     source: string;
     topTracks: QueryPlanStatement[];
@@ -141,6 +164,45 @@ function directInsert(db: Db, did: string, item: Generated, prepared?: PreparedI
   else db.run(INSERT, ...(values as SqlParam[]));
 }
 
+function seedOperations(db: TestApp['db']): void {
+  const creates = db.raw.prepare(`INSERT INTO operations(
+    id,did,kind,origin,priority,collection,rkey,state,attempts,due_at,created_at_ms,updated_at_ms
+  ) VALUES(?,?,'scrobble.create','web',0,?,?,'succeeded',1,?,?,?)`);
+  const deletes = db.raw.prepare(`INSERT INTO operations(
+    id,did,kind,origin,priority,collection,rkey,state,attempts,due_at,created_at_ms,updated_at_ms,swap_cid
+  ) VALUES(?,?,'scrobble.delete','web',0,?,?,?,1,?,?,?,?)`);
+  db.tx(() => {
+    for (let index = 0; index < CREATE_OPERATIONS; index++) {
+      const listenIndex = index * Math.floor(LISTENS / CREATE_OPERATIONS);
+      const rkey = `r${String(listenIndex).padStart(13, '0')}`;
+      creates.run(`bench-create-${index}`, DID, SCROBBLE, rkey, NOW, NOW, NOW);
+    }
+    const deleteCases = [
+      { id: 'queued', index: 0, state: 'queued' },
+      { id: 'running', index: 1, state: 'running' },
+      { id: 'blocked', index: 2, state: 'blocked' },
+      { id: 'failed', index: 3, state: 'failed' },
+      { id: 'succeeded-matching', index: 4, state: 'succeeded' },
+      { id: 'succeeded-stale', index: 5, state: 'succeeded' },
+    ] as const;
+    for (const item of deleteCases) {
+      const rkey = `r${String(item.index).padStart(13, '0')}`;
+      const cid = `bafyrei${String(item.index).padStart(48, 'a')}`;
+      deletes.run(
+        `bench-delete-${item.id}`,
+        DID,
+        SCROBBLE,
+        rkey,
+        item.state,
+        NOW,
+        NOW,
+        NOW,
+        item.id === 'succeeded-stale' ? `${cid}-stale` : cid,
+      );
+    }
+  });
+}
+
 function plans(db: Db, statements: Captured[]): QueryPlanStatement[] {
   return statements.map((statement) => ({
     sql: statement.sql,
@@ -208,6 +270,7 @@ async function fixture(): Promise<{ app: TestApp; captured: Captured[] }> {
     for (let i = 0; i < LISTENS; i++) directInsert(app.db, DID, recordFor(i, random), stmt);
     app.db.run('UPDATE users SET stats_version = 1 WHERE did = ?', DID);
   });
+  seedOperations(app.db);
   expect(app.db.one<{ count: number }>('SELECT count(*) AS count FROM scrobbles WHERE did = ?', DID)?.count).toBe(
     LISTENS,
   );
@@ -330,10 +393,29 @@ describe('N5-02 protocol read benchmark', () => {
     expect(cachedQueries.some((q) => /\b(?:FROM|JOIN)\s+scrobbles\b/i.test(q.sql))).toBe(false);
 
     const report: ProtocolReadsReport = {
-      schema: 'atmusic/protocol-reads-benchmark@1',
+      schema: 'atmusic/protocol-reads-benchmark@2',
       generatedBy: 'worker/test/bench/protocol-reads.bench.test.ts',
       generatedAt: new Date().toISOString(),
-      dataset: { listens: LISTENS, seed: SEED, clock: NOW_ISO, applyPathRecords: 100 },
+      dataset: {
+        listens: LISTENS,
+        seed: SEED,
+        clock: NOW_ISO,
+        applyPathRecords: 100,
+        operations: {
+          total: CREATE_OPERATIONS + 6,
+          scrobbleCreateSucceeded: CREATE_OPERATIONS,
+          scrobbleDelete: {
+            queued: 1,
+            running: 1,
+            blocked: 1,
+            failed: 1,
+            succeededMatchingCid: 1,
+            succeededStaleCid: 1,
+          },
+          visibleScrobbles: VISIBLE_LISTENS,
+          hiddenScrobbles: HIDDEN_LISTENS,
+        },
+      },
       plans: {
         source: `EXPLAIN QUERY PLAN; Node ${process.version}; node:sqlite ${app.db.one<{ version: string }>('SELECT sqlite_version() AS version')?.version ?? 'unknown'}; ${process.platform}/${process.arch}`,
         topTracks: readPlans.topTracks!,
@@ -364,6 +446,20 @@ describe('N5-02 protocol read benchmark', () => {
     expect(
       evidence.app.db.one<{ count: number }>('SELECT count(*) AS count FROM scrobbles WHERE did=?', DID)?.count,
     ).toBe(LISTENS);
+    expect(
+      evidence.app.db.one<{ count: number }>('SELECT count(*) AS count FROM operations WHERE did=?', DID)?.count,
+    ).toBe(CREATE_OPERATIONS + 6);
+    expect(
+      evidence.app.db.one<{ count: number }>(
+        `SELECT count(*) AS count FROM scrobbles s WHERE s.did=? AND NOT EXISTS (
+          SELECT 1 FROM operations d WHERE d.did=s.did AND d.collection=? AND d.rkey=s.rkey
+            AND d.kind='scrobble.delete'
+            AND (d.state IN ('queued','running','blocked','failed') OR (d.state='succeeded' AND d.swap_cid=s.cid))
+        )`,
+        DID,
+        SCROBBLE,
+      )?.count,
+    ).toBe(VISIBLE_LISTENS);
     expect(evidence.applyRows).toHaveLength(100);
     expect(evidence.directRows).toEqual(evidence.applyRows);
     for (const statements of Object.values(evidence.readPlans)) {
@@ -426,8 +522,12 @@ async function captureReadPlans(app: TestApp, captured: Captured[]): Promise<Rec
       expect(body.toptracks!['@attr'].total).not.toBe('0');
       expect(body.toptracks!.track.length).toBeGreaterThan(0);
     } else if (request.includes('RecentTracks')) {
-      expect(body.recenttracks!['@attr']).toMatchObject({ page: '500', perPage: '200', total: String(LISTENS) });
-      expect(body.recenttracks!.track).toHaveLength(200);
+      expect(body.recenttracks!['@attr']).toMatchObject({
+        page: '500',
+        perPage: '200',
+        total: String(VISIBLE_LISTENS),
+      });
+      expect(body.recenttracks!.track).toHaveLength(Math.min(200, VISIBLE_LISTENS - 99_800));
     } else if (request.includes('recordings')) {
       expect(body.payload!).toMatchObject({ user_id: 'benchuser', range: 'all_time', count: 100 });
       expect(body.payload!.recordings).toHaveLength(100);

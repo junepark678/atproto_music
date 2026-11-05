@@ -1,20 +1,33 @@
 # Node protocol-read benchmark
 
-- Generated: 2026-11-03T04:22:41.282Z
+- Generated: 2026-11-03T07:14:07.984Z
 - Receipt: `worker/test/bench/protocol-reads.bench.test.ts`
-- Dataset: 100,000 listens, seed 24301, fixed clock 2026-01-15T12:00:00Z; apply-path parity sample 100 records
+- Dataset: 100,000 listens, seed 24301, fixed clock 2026-01-15T12:00:00Z; apply-path parity sample 100 records; 256 operations (250 succeeded scrobble creates, 6 scrobble deletes); 99,995 visible / 5 hidden listens
 
-The main fixture inserts the 100,000-listen projection through direct SQL after production record normalization. The parity sample compares signed repository verification and the production apply path against equivalent direct inserts. Reads are measured through the Node HTTP composition; fixture setup, cache invalidation, and report writing are outside each timed sample. Each read has ten samples. Requests are top tracks (period=overall), recent tracks (page 500, limit 200), ListenBrainz recordings (range=all_time, count=100), and listening activity (range=year). The ListenBrainz stats query-plan sample is a cold cache miss and its timing samples clear the cache before each request.
+The main fixture inserts the 100,000-listen projection through direct SQL after production record normalization, then seeds a deterministic history of succeeded create operations and delete operations spanning queued, running, blocked, failed, succeeded with matching CID, and succeeded with stale CID. The operation count is deliberately bounded for a reproducible pre-index measurement and is reported explicitly; it does not claim to model a user's lifetime operation history. The parity sample compares signed repository verification and the production apply path against equivalent direct inserts. Reads are measured through the Node HTTP composition; fixture setup, cache invalidation, and report writing are outside each timed sample. Each read has ten samples. Requests are top tracks (period=overall), recent tracks (page 500, limit 200), ListenBrainz recordings (range=all_time, count=100), and listening activity (range=year). The ListenBrainz stats query-plan sample is a cold cache miss and its timing samples clear the cache before each request.
 
-Timings are observations from this run. Budget comparisons are informational and are not acceptance assertions. The ADR §10.3 report-only budgets are uncached top tracks p95 <250 ms, cached top tracks p95 <20 ms, and recent tracks page 500 p95 <100 ms. No budget is specified for the ListenBrainz reads.
+Timings are observations from this run. Budget comparisons are informational and are not acceptance assertions. The ADR §10.3 report-only budgets are uncached top tracks p95 <250 ms, cached top tracks p95 <20 ms, and recent tracks page 500 p95 <100 ms. With ten samples, nearest-rank p95 is the slowest sample. No budget is specified for the ListenBrainz reads.
 
 | Read | Runs | p50 (ms) | p95 (ms) | Report-only p95 budget |
 |---|---:|---:|---:|---:|
-| top-tracks cached | 10 | 2.68 | 2.88 | < 20 ms |
-| top-tracks uncached | 10 | 436.06 | 439.99 | < 250 ms |
-| recent-tracks page 500 | 10 | 93.14 | 301.01 | < 100 ms |
-| ListenBrainz all_time stats | 10 | 436.47 | 533.31 | not specified |
-| ListenBrainz listening-activity year | 10 | 79.73 | 80.96 | not specified |
+| top-tracks cached | 10 | 3.28 | 6.83 | < 20 ms |
+| top-tracks uncached | 10 | 9138.39 | 10007.29 | < 250 ms |
+| recent-tracks page 500 | 10 | 9187.24 | 12125.75 | < 100 ms |
+| ListenBrainz all_time stats | 10 | 10010.04 | 11783.65 | not specified |
+| ListenBrainz listening-activity year | 10 | 4156.52 | 4749.52 | not specified |
+
+## Comparison with the zero-operation run
+
+The zero-operation reference is the v1 receipt generated at 2026-11-03T04:29:17.913Z (`work/bench/protocol-reads.json`); this run was generated at 2026-11-03T07:14:07.984Z. Both use the same 100,000-listen seed, clock, and read shapes. The comparison is descriptive: the runs were not made under a controlled load environment.
+
+| Read | Zero operations p50 (ms) | 256 operations p50 (ms) | Observed ratio |
+|---|---:|---:|---:|
+| top-tracks uncached | 466.45 | 9138.39 | 19.6× |
+| recent-tracks page 500 | 81.42 | 9187.24 | 112.8× |
+| ListenBrainz all_time stats | 461.27 | 10010.04 | 21.7× |
+| ListenBrainz listening-activity year | 80.04 | 4156.52 | 51.9× |
+
+The operation-bearing query plans still probe `operations_did_state (did=?)`; this fixture measures a substantial slowdown even with 250 successful create rows and six delete rows. This supports a targeted query/index investigation, but the bounded operation population does not establish lifetime-growth behavior or the cost of the proposed migration.
 
 ## Query plans
 
