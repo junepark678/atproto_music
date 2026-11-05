@@ -207,6 +207,7 @@ export async function acceptListens(m: ModuleDeps, args: AcceptListensArgs): Pro
       enqueueForwards(db, {
         did: args.did,
         items: [{ kind: 'scrobble', listenKey: prep.key, payload: { listen: prep.forward, origin: args.origin } }],
+        dueAt: prep.dueAt,
         now,
         random: m.random,
       });

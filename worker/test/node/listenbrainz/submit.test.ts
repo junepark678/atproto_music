@@ -142,7 +142,8 @@ function submit(
 ): Promise<Response> {
   const headers: Record<string, string> = { 'content-type': 'application/json', ...o.headers };
   if (token !== null) headers.authorization = `${o.scheme ?? 'Token'} ${token}`;
-  return app.fetch(`/1/submit-listens${o.query ?? ''}`, { method: 'POST', headers, body });
+  const requestBody = body instanceof Uint8Array ? Buffer.from(body).buffer.slice(0) : body;
+  return app.fetch(`/1/submit-listens${o.query ?? ''}`, { method: 'POST', headers, body: requestBody });
 }
 
 /** A ListenBrainz listen `i` (distinct names), listened_at a minute or more before now. */

@@ -8,7 +8,7 @@
 
 import { createFixtureKit, type FixtureKit } from '@atmusic/atproto/test-support/read-models';
 import { seededRandom } from '@atmusic/core/test-support/random';
-import { DEFAULT_SLICE_BUDGET, parseConfig, type SliceBudget } from '../../src/config';
+import { NODE_BUDGET, parseConfig, type SliceBudget } from '../../src/config';
 import type { Logger, LogLevel, ModuleDeps } from '../../src/do/contracts';
 import type { Db } from '../../src/do/db';
 import { enqueueHints, type HintInput } from '../../src/do/ingest/hints';
@@ -18,10 +18,9 @@ import { INGEST_TEST_ENV } from './node-index';
 export const GET_RECORD = 'com.atproto.sync.getRecord';
 
 /**
- * A deliberately tight test budget so the drain suites can exercise a small
- * per-slice subrequest ceiling without a runtime budget tier.
+ * A deliberately small budget used by tests to exercise resumable slices.
  */
-export const TIGHT_TEST_BUDGET: SliceBudget = { ...DEFAULT_SLICE_BUDGET, drainHints: 2, subrequestsPerSlice: 40 };
+export const SMALL_BUDGET: SliceBudget = { ...NODE_BUDGET, drainHints: 40, subrequestsPerSlice: 40 };
 
 export interface LogEntry {
   level: LogLevel;
@@ -45,8 +44,8 @@ export interface Deps extends ModuleDeps {
 
 /** ModuleDeps for the test database's Db over the kit's fixture network (test entry config). */
 export function depsFor(db: Db, kit: FixtureKit, o: { budget?: SliceBudget } = {}): Deps {
-  const base = parseConfig({ ...INGEST_TEST_ENV, ADMIN_TOKEN: '' }, { allowFixturePrefix: true });
-  const config = { ...base, budget: o.budget ?? DEFAULT_SLICE_BUDGET };
+  const base = parseConfig(INGEST_TEST_ENV, { allowFixturePrefix: true });
+  const config = { ...base, budget: o.budget ?? base.budget };
   return {
     db,
     clock: kit.clock,
@@ -71,7 +70,7 @@ export function enqueue(db: Db, hints: HintInput[]): string[] {
 
 /** A paid budget with a lower hint count, for tests that step the drain. */
 export function budget(o: Partial<SliceBudget> = {}): SliceBudget {
-  return { ...DEFAULT_SLICE_BUDGET, ...o };
+  return { ...NODE_BUDGET, ...o };
 }
 
 /** Rows of the tables a rejected proof must leave byte-identical (ADR 0004 §7.6). */

@@ -10,6 +10,10 @@
 // against the contract with AJV (acceptance/support/openapi.ts).
 
 import { createHash } from 'node:crypto';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import * as sqlite from 'node:sqlite';
 import { routerTransport } from '@atmusic/atproto/test-support/router-transport';
 import { type FixedClock, fixedClock } from '@atmusic/core/test-support/clock';
 import { seededRandom } from '@atmusic/core/test-support/random';
@@ -20,9 +24,10 @@ import { csrfToken } from '../../../src/bff/csrf';
 import { createWebSessions, SESSION_COOKIE, type WebSessions } from '../../../src/bff/sessions';
 import { ensureAccount } from '../../../src/credentials/accounts';
 import { type Box, BoxError, createBox, linkedAad } from '../../../src/crypto/box';
-import { LINK_STATE_TTL_MS, sweepExpiredLinkStates } from '../../../src/forward/links';
+import { LINK_STATE_TTL_MS, saveLink, sweepExpiredLinkStates } from '../../../src/forward/links';
 import { linksFeature } from '../../../src/http/links';
 import { parseSecrets } from '../../../src/node/secrets';
+import { openSqliteDb } from '../../../src/node/sqlite-db';
 import { enqueueForwards } from '../../../src/outbox/forward-enqueue';
 import { checkResponse } from '../../acceptance/support/openapi';
 import { closeApps, startApp, TEST_PUBLIC_ORIGIN, type TestApp, testSecretsDocument } from '../support/app';
@@ -140,6 +145,129 @@ async function startLastfm(w: World, token: string): Promise<{ state: string; au
 }
 
 describe('link routes', () => {
+  it.each(['logout', 'logout-all', 'disconnect', 'expiry'] as const)(
+    'Last.fm callback cannot relink after %s while auth.getSession is in flight, even with a new same-DID cookie',
+    async (revocation) => {
+      const w = await world();
+      const token = w.signIn(ALICE);
+      const { state } = await startLastfm(w, token);
+      const lfToken = w.lastfm.issueToken(undefined, API_KEY);
+      w.lastfm.authorizeToken(lfToken, 'alice_fm');
+      let reached!: () => void;
+      let release!: () => void;
+      const upstreamReached = new Promise<void>((resolve) => {
+        reached = resolve;
+      });
+      const upstreamRelease = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const originalFetch = w.lastfm.fetch.bind(w.lastfm);
+      w.lastfm.fetch = async (req: Request) => {
+        reached();
+        await upstreamRelease;
+        return originalFetch(req);
+      };
+      const callback = `/api/v1/links/lastfm/callback?state=${state}&token=${lfToken}`;
+      const pending = w.app.fetch(callback, { headers: w.headers(token) });
+      await upstreamReached;
+      if (revocation === 'logout') expect(w.sessions.logout(token)).toBe(true);
+      else if (revocation === 'logout-all') expect(w.sessions.logoutAll(ALICE)).toBe(1);
+      else if (revocation === 'disconnect') {
+        const { disconnectLocally } = await import('../../../src/http/auth');
+        disconnectLocally({ db: w.app.db, revocations: w.journal }, ALICE, w.clock.nowMs());
+      } else {
+        w.app.db.run('UPDATE web_sessions SET expires_at_ms = ? WHERE did = ?', w.clock.nowMs() - 1, ALICE);
+      }
+      const replacement = w.sessions.create(ALICE).token;
+      release();
+      const answer = await pending;
+      expect(answer.status).toBe(401);
+      expect(answer.headers.get('set-cookie')).toBeNull();
+      expect(await answer.json()).toMatchObject({ error: { code: 'unauthenticated' } });
+      expect(w.headers(replacement).cookie).not.toBe(w.headers(token).cookie);
+      expect(links(w)).toEqual([]);
+      expect(w.app.db.one('SELECT 1 FROM forward_outbox')).toBeNull();
+      expect(w.app.db.one('SELECT 1 FROM link_states')).toBeNull();
+      expect(w.journal.entries().some((e) => e.kind === 'linked_account')).toBe(false);
+      const dir = mkdtempSync(join(tmpdir(), 'atmusic-link-race-'));
+      const path = join(dir, 'reopened.db');
+      await sqlite.backup(w.app.db.raw, path);
+      const reopened = openSqliteDb(path, { busyTimeoutMs: 200 });
+      try {
+        expect(reopened.one('SELECT 1 FROM linked_accounts')).toBeNull();
+        expect(reopened.one('SELECT 1 FROM link_states')).toBeNull();
+        expect(reopened.one('SELECT 1 FROM forward_outbox')).toBeNull();
+      } finally {
+        reopened.close();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('ListenBrainz link cannot save or requeue held rows after logout-all during validation', async () => {
+    const w = await world();
+    const token = w.signIn(ALICE);
+    w.lb.addToken('Alice_LB', 'lb-token-1');
+    const initial = saveLink(
+      { db: w.app.db, clock: w.clock, random: seededRandom(99), box: w.box },
+      { did: ALICE, service: 'listenbrainz', remoteUser: 'previous_user', credential: 'old-lb-token' },
+    );
+    w.app.db.run(
+      `INSERT INTO forward_outbox (id, link_id, did, kind, dedupe_key, payload_json, state, attempts, due_at,
+         last_error, created_at_ms, updated_at_ms)
+       VALUES ('held-row-1', ?, ?, 'scrobble', 'cid-1', '{}', 'held', 0, ?, 'upstream_error', ?, ?)`,
+      initial.link.id,
+      ALICE,
+      w.clock.nowMs(),
+      w.clock.nowMs(),
+      w.clock.nowMs(),
+    );
+    let reached!: () => void;
+    let release!: () => void;
+    const upstreamReached = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    const upstreamRelease = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const originalFetch = w.lb.fetch.bind(w.lb);
+    w.lb.fetch = async (req: Request) => {
+      reached();
+      await upstreamRelease;
+      return originalFetch(req);
+    };
+    const pending = w.app.fetch('/api/v1/links/listenbrainz', {
+      method: 'POST',
+      headers: { ...w.headers(token, true), 'content-type': 'application/json' },
+      body: JSON.stringify({ token: 'lb-token-1' }),
+    });
+    await upstreamReached;
+    expect(w.sessions.logoutAll(ALICE)).toBe(1);
+    const replacement = w.sessions.create(ALICE).token;
+    release();
+    const answer = await pending;
+    expect(answer.status).toBe(401);
+    expect(answer.headers.get('set-cookie')).toBeNull();
+    expect(await answer.json()).toMatchObject({ error: { code: 'unauthenticated' } });
+    expect(w.headers(replacement).cookie).not.toBe(w.headers(token).cookie);
+    expect(links(w)).toEqual([initial.link]);
+    expect(w.app.db.one<{ state: string }>("SELECT state FROM forward_outbox WHERE id = 'held-row-1'")?.state).toBe(
+      'held',
+    );
+    const dir = mkdtempSync(join(tmpdir(), 'atmusic-held-link-'));
+    const path = join(dir, 'reopened.db');
+    await sqlite.backup(w.app.db.raw, path);
+    const reopened = openSqliteDb(path, { busyTimeoutMs: 200 });
+    try {
+      expect(reopened.one<{ state: string }>("SELECT state FROM forward_outbox WHERE id = 'held-row-1'")?.state).toBe(
+        'held',
+      );
+    } finally {
+      reopened.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('Last.fm link start returns LASTFM_AUTH_URL with our api_key and a cb carrying a single-use state; the callback calls signed auth.getSession and stores the sk sealed; reusing the state is 400', async () => {
     const w = await world();
     const token = w.signIn(ALICE);

@@ -11,7 +11,7 @@ WAL, FULL synchronous mode, foreign keys, a 64-MiB journal limit, a 256-entry
 statement LRU and bounded busy timeout. Transactions are synchronous, nest via
 savepoints, and reject Promise-returning callbacks.
 
-Migrations 1–3 currently apply through `do/migrate.ts` before serving.
+Migrations 1–4 currently apply through `do/migrate.ts` before serving.
 All pending migration statements and ledger entries commit atomically. The
 ledger is `schema_migrations`; `schema_compat.min_compatible_version` permits
 older code to read a newer **additive, compatible** schema without mutating it.
@@ -44,6 +44,13 @@ Legacy NULL baselines conservatively refresh when any contrary proof exists.
 Queued/running/blocked reuse and latest-intent FIFO are unchanged. The column
 is non-derived with its operation, is never sent to a PDS or public projection,
 and leaves the minimum-compatible schema version at **2**.
+
+Migration 4 adds `operations_scrobble_delete_target`, a partial index on
+`operations(did,rkey) WHERE kind = 'scrobble.delete'`. Public scrobble reads
+can probe the exact owner's target instead of walking all of that owner's
+operations. The state and swap-CID visibility predicate is unchanged; create
+operations do not occupy this index. This additive migration leaves
+`min_compatible_version` at **2** and does not alter migrations 1–3.
 
 `TABLES` and `TABLE_CLASS` in schema.ts enumerate every table and classify
 security state versus derived projections. Restore preserves live non-derived

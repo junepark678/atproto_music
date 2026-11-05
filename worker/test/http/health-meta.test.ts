@@ -74,8 +74,6 @@ const VARS: EnvVars = {
   JETSTREAM_URLS: 'wss://jetstream.example.test',
   JETSTREAM_LOOKBACK_HOURS: '24',
   RELAY_URL: 'https://relay.example.test',
-  PLAN: 'paid',
-  DO_LOCATION_HINT: '',
 } as EnvVars;
 
 let cursorKey: CryptoKey;

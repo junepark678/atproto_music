@@ -5,7 +5,7 @@
 // route, by its schema; database state and outbound calls are checked where
 // the case is about them.
 
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -481,7 +481,7 @@ describe('compose', () => {
     expect(await missing.text()).not.toContain(APP_JS);
   });
 
-  it('compose, dispatch and http/routes.ts load in the worker-node project with no cloudflare: module in their import graph, and router.ts re-exports ROUTES, matchRoute and assetMiss from http/routes.ts', async () => {
+  it('compose and dispatch load without Workers modules; router.ts is a host-neutral route barrel and Worker entry files are absent', async () => {
     // They load here, in plain Node (no cloudflare:* alias exists in this project).
     const composeModule = await import('../../src/node/compose');
     const dispatchModule = await import('../../src/node/dispatch');
@@ -529,9 +529,7 @@ describe('compose', () => {
       }
     }
 
-    // router.ts's graph does reach cloudflare:workers (through do/index-do.ts): the check above is not vacuous.
-    const routerCloudflare: string[] = [];
-    await build({
+    const routerBuild = await build({
       entryPoints: [join(WORKER_ROOT, 'src/router.ts')],
       bundle: true,
       write: false,
@@ -539,33 +537,17 @@ describe('compose', () => {
       platform: 'node',
       format: 'esm',
       logLevel: 'silent',
-      plugins: [
-        {
-          name: 'record-cloudflare',
-          setup(b) {
-            b.onResolve({ filter: /^cloudflare:/ }, (args) => {
-              routerCloudflare.push(args.path);
-              return { path: args.path, external: true };
-            });
-          },
-        },
-      ],
     });
-    expect(routerCloudflare).toContain('cloudflare:workers');
+    const routerInputs = Object.keys(routerBuild.metafile.inputs);
+    expect(routerInputs.some((i) => i.endsWith('worker/src/http/routes.ts'))).toBe(true);
+    expect(routerInputs.some((i) => i.endsWith('worker/src/do/index-do.ts'))).toBe(false);
+    expect(routerInputs.some((i) => i.endsWith('worker/src/env.ts'))).toBe(false);
+    expect(existsSync(join(WORKER_ROOT, 'src/index.ts'))).toBe(false);
+    expect(existsSync(join(WORKER_ROOT, 'src/scheduled.ts'))).toBe(false);
 
     // router.ts re-exports the very bindings of http/routes.ts: one bundle imports both and compares identity.
     const out = mkdtempSync(join(tmpdir(), 'atmusic-reexport-'));
     dirs.push(out);
-    const stub: Plugin = {
-      name: 'stub-cloudflare',
-      setup(b) {
-        b.onResolve({ filter: /^cloudflare:/ }, (args) => ({ path: args.path, namespace: 'stub' }));
-        b.onLoad({ filter: /.*/, namespace: 'stub' }, () => ({
-          contents: 'export class DurableObject { constructor(ctx, env) { this.ctx = ctx; this.env = env; } }',
-          loader: 'js',
-        }));
-      },
-    };
     const routerPath = JSON.stringify(join(WORKER_ROOT, 'src/router.ts'));
     const routesPath = JSON.stringify(join(WORKER_ROOT, 'src/http/routes.ts'));
     await build({
@@ -587,7 +569,6 @@ export const meta = router.matchRoute('POST', '/api/v1/meta');`,
       platform: 'node',
       format: 'esm',
       logLevel: 'silent',
-      plugins: [stub],
     });
     const bundled = (await import(join(out, 'reexport.mjs'))) as {
       same: Record<string, boolean>;

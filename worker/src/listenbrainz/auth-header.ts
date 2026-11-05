@@ -61,7 +61,7 @@ export function parseAuthorization(value: string | null | undefined): AuthHeader
 }
 
 /** The 401 for a failed header or token check, with the CORS set. */
-export function unauthorized(f: AuthHeaderFailure, headers?: HeadersInit): Response {
+export function unauthorized(f: AuthHeaderFailure, headers?: NonNullable<RequestInit['headers']>): Response {
   return lbError(401, MESSAGE_OF[f], headers);
 }
 

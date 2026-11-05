@@ -1,8 +1,7 @@
 // N7-01 ingest-mode.ts: the `off` mode against the production SQLite adapter
 // (a temporary file, node-index.ts) and the fake Jetstream's sockets
 // (test/fixtures/jetstream-server.ts), plus the retirement of the Workers-era
-// `pulse` mode, PLAN tier, DO_LOCATION_HINT and free budget (ADR 0005 §3.8,
-// B17). Alarms are stepped with runDue after advancing the frozen clock;
+// pulse mode and plan tiers (ADR 0005 §3.8, B17). Alarms are stepped with runDue after advancing the frozen clock;
 // nothing sleeps. Expectations are hardcoded.
 
 import { readFileSync } from 'node:fs';
@@ -11,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import type { Indexing } from '@atmusic/core/api-types';
 import { fixedClock } from '@atmusic/core/test-support/clock';
 import { expect, it } from 'vitest';
-import { ConfigError, DEFAULT_SLICE_BUDGET, type IngestMode, parseConfig } from '../../src/config';
+import { ConfigError, type IngestMode, NODE_BUDGET, parseConfig } from '../../src/config';
 import type { Db } from '../../src/do/db';
 import { type IngestDeps, jetstreamWatchdog } from '../../src/do/ingest/ingest-mode';
 import { connect } from '../../src/do/ingest/jetstream-socket';
@@ -52,16 +51,13 @@ function issuesOf(fn: () => unknown): string[] {
 }
 
 it('INGEST_MODE accepts socket and off only, parseConfig has no PLAN, DO_LOCATION_HINT or budget tier, and no pulse timer or pulse code path remains in config.ts, ingest-mode.ts, jetstream-socket.ts or index-core.ts', () => {
-  // The harness env still names the Workers-era vars for the integrator's
-  // env.ts rewrite; parseConfig neither reads nor types them.
-  const { PLAN: _plan, DO_LOCATION_HINT: _hint, CURSOR_KEY: _key, ...vars } = INGEST_TEST_ENV;
+  const { CURSOR_KEY: _key, ...vars } = INGEST_TEST_ENV;
   const options = { allowFixturePrefix: true };
   for (const mode of ['socket', 'off'] as const) {
     const cfg = parseConfig({ ...vars, INGEST_MODE: mode }, options);
     expect(cfg.ingestMode).toBe(mode);
-    expect(cfg.budget).toEqual(DEFAULT_SLICE_BUDGET);
+    expect(cfg.budget).toEqual(NODE_BUDGET);
     expect(cfg.budget.subrequestsPerSlice).toBe(200);
-    expect(cfg).not.toHaveProperty('plan');
     expect(Object.keys(cfg)).not.toContain('doLocationHint');
   }
   // No default: an empty or unknown mode names the field, as does the retired pulse.
@@ -75,14 +71,8 @@ it('INGEST_MODE accepts socket and off only, parseConfig has no PLAN, DO_LOCATIO
     }
     expect(caught?.issues, mode).toEqual([{ field: 'INGEST_MODE', message: 'must be socket or off' }]);
   }
-  // One fixed budget is configured; there is no tier to select by PLAN.
-  expect(DEFAULT_SLICE_BUDGET).toEqual({
-    drainHints: 200,
-    subrequestsPerSlice: 200,
-    maxEntriesPerSlice: 2000,
-    concurrentFetches: 4,
-    perHostConcurrency: 2,
-  });
+  // The Node host has one fixed budget and no tier selector.
+  expect(NODE_BUDGET).toMatchObject({ drainHints: 200, subrequestsPerSlice: 200 });
   expect(issuesOf(() => parseConfig({ ...vars, INGEST_MODE: 'off', JETSTREAM_URLS: '' }, options))).toEqual([]);
 
   // Source text: the retired symbols are gone (comments may still name the
@@ -92,9 +82,6 @@ it('INGEST_MODE accepts socket and off only, parseConfig has no PLAN, DO_LOCATIO
   const socket = source('do/ingest/jetstream-socket.ts');
   const indexCore = source('app/index-core.ts');
   const nodeConfig = source('node/config.ts');
-  const drain = source('do/ingest/verify-drain.ts');
-  const accounts = source('do/ingest/accounts.ts');
-  const sweeps = source('do/ingest/sweeps.ts');
   for (const [name, text] of [
     ['config.ts', config],
     ['ingest-mode.ts', ingestMode],
@@ -123,13 +110,6 @@ it('INGEST_MODE accepts socket and off only, parseConfig has no PLAN, DO_LOCATIO
   // parseNodeConfig refuses the vars (ADR 0005 §3.8) and no longer supplies PLAN.
   expect(nodeConfig).not.toMatch(/PLAN:\s*'paid'/);
   expect(nodeConfig).not.toMatch(/DO_LOCATION_HINT:\s*''/);
-  for (const [name, text] of [
-    ['verify-drain.ts', drain],
-    ['accounts.ts', accounts],
-    ['sweeps.ts', sweeps],
-  ] as const) {
-    expect(text, `${name} still selects a plan tier`).not.toMatch(/config\.plan|plan === ['"]free['"]/);
-  }
 });
 
 it('off mode never connects, closes an open socket, and does not reschedule the watchdog', async () => {

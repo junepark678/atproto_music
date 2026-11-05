@@ -9,16 +9,22 @@ export interface Session {
   expiresAt: string;
 }
 
+export type SessionChangeKind = 'authenticated' | 'anonymous' | 'reauth_required' | 'signed_out';
+export type SessionChangeListener = (session: Session | null, reauthRequired: boolean, kind: SessionChangeKind) => void;
+
 export class SessionClient {
   #csrfToken: string | null = null;
   #current: Session | null = null;
-  #onChange: (session: Session | null, reauthRequired: boolean) => void;
-  #listeners = new Set<(session: Session | null, reauthRequired: boolean) => void>();
+  #published: Session | null = null;
+  #reauthRequired = false;
+  #onChange: SessionChangeListener;
+  #listeners = new Set<SessionChangeListener>();
   #fetch: typeof fetch;
+  #sessionReadGeneration = 0;
+  #sessionReadPromise: Promise<Session | null> | null = null;
+  #sessionRevision = 0;
 
-  constructor(
-    options: { fetch?: typeof fetch; onChange?: (session: Session | null, reauthRequired: boolean) => void } = {},
-  ) {
+  constructor(options: { fetch?: typeof fetch; onChange?: SessionChangeListener } = {}) {
     this.#fetch = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
     this.#onChange = options.onChange ?? (() => undefined);
   }
@@ -26,20 +32,51 @@ export class SessionClient {
   current(): Session | null {
     return this.#current;
   }
-  subscribe(listener: (session: Session | null, reauthRequired: boolean) => void): () => void {
+  sessionRevision(): number {
+    return this.#sessionRevision;
+  }
+  subscribe(listener: SessionChangeListener): () => void {
     this.#listeners.add(listener);
     return () => this.#listeners.delete(listener);
   }
 
   async getSession(): Promise<Session | null> {
     if (this.#current !== null) return this.#current;
-    const response = await this.#fetch('/api/v1/auth/session', { credentials: 'same-origin', cache: 'no-store' });
+    if (this.#sessionReadPromise !== null) return this.#sessionReadPromise;
+    const generation = ++this.#sessionReadGeneration;
+    const read = this.#readSession(generation);
+    this.#sessionReadPromise = read;
+    try {
+      return await read;
+    } finally {
+      if (this.#sessionReadPromise === read) this.#sessionReadPromise = null;
+    }
+  }
+
+  async #readSession(generation: number): Promise<Session | null> {
+    const currentOrReplacement = (): Promise<Session | null> | Session | null =>
+      this.#sessionReadPromise ?? this.#current;
+    let response: Response;
+    try {
+      response = await this.#fetch('/api/v1/auth/session', { credentials: 'same-origin', cache: 'no-store' });
+    } catch (error) {
+      if (generation !== this.#sessionReadGeneration) return currentOrReplacement();
+      throw error;
+    }
+    if (generation !== this.#sessionReadGeneration) return currentOrReplacement();
     if (response.status === 401) {
-      this.#set(null, false);
+      this.#set(null, this.#reauthRequired, this.#reauthRequired ? 'reauth_required' : 'anonymous');
       return null;
     }
     if (!response.ok) throw new Error(`Session request failed (${response.status})`);
-    const value = (await response.json()) as Session;
+    let value: Session;
+    try {
+      value = (await response.json()) as Session;
+    } catch (error) {
+      if (generation !== this.#sessionReadGeneration) return currentOrReplacement();
+      throw error;
+    }
+    if (generation !== this.#sessionReadGeneration) return currentOrReplacement();
     if (
       !value ||
       typeof value.did !== 'string' ||
@@ -51,23 +88,44 @@ export class SessionClient {
     )
       throw new Error('Invalid session response');
     this.#csrfToken = value.csrfToken;
-    this.#set(value, value.status === 'reauth_required');
+    this.#set(
+      value,
+      value.status === 'reauth_required',
+      value.status === 'reauth_required' ? 'reauth_required' : 'authenticated',
+    );
     return value;
   }
 
-  unauthorized(): void {
-    this.#set(null, true);
+  /** Discard the cached DTO and read the cookie session again, e.g. after OAuth in another tab. */
+  async refresh(): Promise<Session | null> {
+    this.#sessionReadGeneration++;
+    this.#sessionReadPromise = null;
+    this.#sessionRevision++;
+    this.#current = null;
+    this.#csrfToken = null;
+    return this.getSession();
   }
 
-  async mutate(path: string, init: RequestInit = {}): Promise<Response> {
-    if (this.#csrfToken === null) await this.getSession();
-    if (this.#csrfToken === null) throw new Error('Sign in to continue');
+  unauthorized(expectedRevision?: number): boolean {
+    if (expectedRevision !== undefined && expectedRevision !== this.#sessionRevision) return false;
+    this.#sessionReadGeneration++;
+    this.#sessionReadPromise = null;
+    this.#set(null, true, 'reauth_required');
+    return true;
+  }
+
+  async mutate(path: string, init: RequestInit = {}, expectedDid: Did): Promise<Response> {
+    if (this.#current === null) await this.getSession();
+    const session = this.#current;
+    const csrfToken = this.#csrfToken;
+    if (session === null || csrfToken === null) throw new Error('Sign in to continue');
+    if (session.did !== expectedDid) throw new SessionIdentityChangedError();
+    if (session.status !== 'active' && path !== '/api/v1/auth/logout') throw new SessionReauthenticationRequiredError();
+    const requestRevision = this.#sessionRevision;
     const headers = new Headers(init.headers);
-    headers.set('X-CSRF-Token', this.#csrfToken);
+    headers.set('X-CSRF-Token', csrfToken);
     const response = await this.#fetch(path, { ...init, headers, credentials: 'same-origin' });
-    if (response.status === 401) {
-      this.#set(null, true);
-    }
+    if (response.status === 401) this.unauthorized(requestRevision);
     return response;
   }
 
@@ -85,20 +143,75 @@ export class SessionClient {
   }
 
   async logout(): Promise<void> {
-    const response = await this.mutate('/api/v1/auth/logout', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: '{}',
-    });
+    const current = this.#current ?? (await this.getSession());
+    if (current === null) throw new Error('Sign in to continue');
+    const logoutCsrfToken = current.csrfToken;
+    const response = await this.mutate(
+      '/api/v1/auth/logout',
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: '{}',
+      },
+      current.did,
+    );
     if (!response.ok && response.status !== 401) throw new Error(`Sign out failed (${response.status})`);
-    this.#set(null, false);
+    if (response.status === 401 || response.ok) {
+      const isReplacementSession = (session: Session | null): boolean =>
+        session !== null && (session.did !== current.did || session.csrfToken !== logoutCsrfToken);
+      const newerCurrent = isReplacementSession(this.#current);
+      const newerPublished = isReplacementSession(this.#published);
+      this.#sessionReadGeneration++;
+      this.#sessionReadPromise = null;
+      if (!newerCurrent && !newerPublished) {
+        // Clear the visible session immediately. A pending refresh may have
+        // cleared #current without publishing; leaving the published session
+        // in place would keep authenticated controls visible if reconciliation
+        // then fails.
+        this.#set(null, false, 'signed_out');
+      }
+      // Invalidate any read that started while logout was pending, then
+      // reconcile the cookie. This matters when a refresh has cleared the
+      // internal cache while the UI still publishes a newer account.
+      try {
+        await this.refresh();
+      } catch {
+        // The server accepted or rejected the old session; keep the local
+        // state cleared (or the newer account preserved) until a later read.
+      }
+    }
   }
 
-  #set(session: Session | null, reauth: boolean): void {
+  #set(session: Session | null, reauth: boolean, kind: SessionChangeKind): void {
+    if (
+      this.#current?.did !== session?.did ||
+      this.#current?.csrfToken !== session?.csrfToken ||
+      this.#current?.status !== session?.status ||
+      this.#reauthRequired !== reauth
+    )
+      this.#sessionRevision++;
     this.#current = session;
+    this.#published = session;
     this.#csrfToken = session?.csrfToken ?? null;
-    this.#onChange(session, reauth);
-    for (const listener of this.#listeners) listener(session, reauth);
+    this.#reauthRequired = reauth;
+    this.#onChange(session, reauth, kind);
+    for (const listener of this.#listeners) listener(session, reauth, kind);
+  }
+}
+
+/** A fixed, non-secret error used when a stale account view tries to write. */
+export class SessionIdentityChangedError extends Error {
+  constructor() {
+    super('The signed-in account changed. Reload before continuing.');
+    this.name = 'SessionIdentityChangedError';
+  }
+}
+
+/** A fixed error used when an expired account attempts a mutation. */
+export class SessionReauthenticationRequiredError extends Error {
+  constructor() {
+    super('Sign in again before making changes.');
+    this.name = 'SessionReauthenticationRequiredError';
   }
 }
 
@@ -109,13 +222,19 @@ export function sessionClient(): SessionClient {
 }
 
 /** Fetch API requests through the Node session boundary. */
-export async function sessionFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
+export async function sessionFetch(
+  input: RequestInfo | URL,
+  init: RequestInit = {},
+  expectedDid?: Did,
+): Promise<Response> {
   const client = sessionClient();
   const method = (init.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase();
   if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') {
+    const requestRevision = client.sessionRevision();
     const response = await globalThis.fetch(input, { ...init, credentials: 'same-origin' });
-    if (response.status === 401) client.unauthorized();
+    if (response.status === 401) client.unauthorized(requestRevision);
     return response;
   }
-  return client.mutate(input instanceof Request ? input.url : String(input), { ...init, method });
+  if (expectedDid === undefined) throw new Error('Account identity is required for a mutation');
+  return client.mutate(input instanceof Request ? input.url : String(input), { ...init, method }, expectedDid);
 }

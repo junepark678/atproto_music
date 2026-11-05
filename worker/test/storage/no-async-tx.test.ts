@@ -67,7 +67,6 @@ describe('db.tx lint', () => {
       'worker/src/do/db.ts',
       'worker/src/do/migrate.ts',
       'worker/src/do/contracts.ts',
-      'worker/test/harness/local-index.ts',
       'worker/test/storage/db.test.ts',
       'packages/core/src/deps.ts',
       'packages/core/test-support/clock.ts',
