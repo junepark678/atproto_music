@@ -273,6 +273,19 @@ class DisposableCopy {
     );
     this.writeNpxShim();
     this.writeShim('systemd-analyze', `exit 0\n`);
+
+    // The gate binds evidence to git HEAD and checks that `--out` paths are
+    // ignored. Give this disposable source copy a real, clean git boundary.
+    const init = exec('git', ['init', '--quiet'], this.dir);
+    expect(init.status, init.stderr).toBe(0);
+    const nameConfigured = exec('git', ['config', 'user.name', 'Node acceptance fixture'], this.dir);
+    expect(nameConfigured.status, nameConfigured.stderr).toBe(0);
+    const emailConfigured = exec('git', ['config', 'user.email', 'node-acceptance-fixture@example.invalid'], this.dir);
+    expect(emailConfigured.status, emailConfigured.stderr).toBe(0);
+    const added = exec('git', ['add', '-A'], this.dir);
+    expect(added.status, added.stderr).toBe(0);
+    const committed = exec('git', ['commit', '--quiet', '-m', 'disposable acceptance fixture'], this.dir);
+    expect(committed.status, committed.stderr).toBe(0);
   }
 
   private record(name: string): string {
@@ -419,9 +432,10 @@ class DisposableCopy {
     return restricted;
   }
 
-  gate(args: string[], options: { withoutSystemdAnalyze?: boolean } = {}): Result {
+  gate(args: string[], options: { withoutSystemdAnalyze?: boolean; liveInventory?: string } = {}): Result {
     const env = childEnv();
     env.PATH = this.path(options.withoutSystemdAnalyze ?? false);
+    if (options.liveInventory !== undefined) env.ATMUSIC_LIVE_INVENTORY = options.liveInventory;
     return exec('bash', ['scripts/acceptance/node-backend.sh', ...args], this.dir, env);
   }
 
@@ -665,7 +679,56 @@ describe('scripts/acceptance/node-backend.sh', () => {
       const selfCases = mapped.caseMap.filter((c) => [c.target, ...(c.also ?? [])].some((r) => prefixOf(r) === SELF));
       expect(notRunSummary.cases.failed).toBe(new Set([...omittedCases, ...selfCases].map((c) => c.case)).size);
 
-      // 5. --skip disables a step: it is recorded as skipped and the gate fails; other steps still run.
+      // 5. A gate-level failure diagnostic in an inventory that is not release/prerequisite-bound stays blocked.
+      const inventoryCopy = freshCopy();
+      const sourceCommit = exec('git', ['rev-parse', 'HEAD'], inventoryCopy.dir).stdout.trim();
+      const inventoryPath = join(inventoryCopy.dir, 'work/unbound-failure.json');
+      mkdirSync(join(inventoryCopy.dir, 'work'), { recursive: true });
+      writeFileSync(
+        inventoryPath,
+        JSON.stringify({
+          schemaVersion: 3,
+          runtime: 'node',
+          fixtureOnly: false,
+          release: { commit: sourceCommit, bundleSha256: BUNDLE_SHA },
+          prerequisites: {
+            ownedLexiconPrefix: 'dev.pythonplayer123.music',
+            publicHttpsOrigin: 'https://music.214510.xyz',
+            jetstreamCoverageVerified: false,
+          },
+          gates: {
+            pdsCompat: {
+              schemaVersion: 3,
+              runtime: 'node',
+              fixtureOnly: false,
+              gate: 'pdsCompat',
+              result: 'failed',
+              recordedAt: '2026-11-04T00:00:00Z',
+              testCommand: 'operator-run pds compatibility probe',
+              commit: sourceCommit,
+              bundleSha256: BUNDLE_SHA,
+              origin: 'https://music.214510.xyz',
+              lexiconPrefix: 'dev.pythonplayer123.music',
+              failures: ['fixture diagnostic failure'],
+              cleanup: 'no records created',
+            },
+          },
+        }),
+      );
+      const unboundFailure = inventoryCopy.gate([], { liveInventory: inventoryPath });
+      expect(unboundFailure.status, unboundFailure.stdout + unboundFailure.stderr).toBe(0);
+      expect(inventoryCopy.status('live')).toBe('0');
+      const unboundSummary = inventoryCopy.summary();
+      expect(unboundSummary.liveGates.find((g) => g.gate === 'pdsCompat')?.result).toBe('blocked');
+      expect(unboundSummary.live.failed).toBe(0);
+      expect(unboundSummary.live.blocked).toBe(unboundSummary.liveGates.length);
+      expect(unboundSummary.problems).toEqual([]);
+      expect(unboundSummary.liveGates.find((g) => g.gate === 'pdsCompat')?.message).toContain(
+        'the pdsCompat=failed diagnostic is not attributable',
+      );
+      inventoryCopy.calls();
+
+      // 6. --skip disables a step: it is recorded as skipped and the gate fails; other steps still run.
       const skipped = copy.gate(['--skip', 'goldens', '--skip', 'e2e', '--skip', 'scrobbler-e2e']);
       expect(skipped.status, skipped.stdout + skipped.stderr).toBe(1);
       expect(skipped.stdout).toMatch(/^==> goldens: SKIPPED \(--skip goldens; a disabled step fails the gate\)$/m);
@@ -685,7 +748,7 @@ describe('scripts/acceptance/node-backend.sh', () => {
       expect(skippedSummary.tests.bySource['scrobbler-e2e']).toBe(0);
       expect(stubNames(copy.calls())).not.toContain('goldens');
 
-      // 6. Usage errors exit 2 before any step runs.
+      // 7. Usage errors exit 2 before any step runs.
       for (const args of [['--bogus'], ['--skip', 'deploy'], ['--skip'], ['--out'], ['extra']]) {
         const usage = copy.gate(args);
         expect(usage.status, args.join(' ')).toBe(2);
@@ -694,8 +757,8 @@ describe('scripts/acceptance/node-backend.sh', () => {
       }
       expect(copy.calls()).toEqual([]);
 
-      // 7. --out refuses a non-empty directory this gate did not create, and leaves it untouched.
-      const foreign = join(copy.dir, 'foreign-out');
+      // 8. --out refuses a non-empty directory this gate did not create, and leaves it untouched.
+      const foreign = join(copy.dir, 'work/foreign-out');
       mkdirSync(foreign, { recursive: true });
       writeFileSync(join(foreign, 'keep.txt'), 'user data\n');
       const refused = copy.gate(['--out', foreign]);
@@ -707,10 +770,18 @@ describe('scripts/acceptance/node-backend.sh', () => {
       expect(readFileSync(join(foreign, 'keep.txt'), 'utf8')).toBe('user data\n');
       expect(copy.calls()).toEqual([]);
 
-      // 8. --out accepts a fresh directory (relative to the caller) and marks it as the gate's own.
-      const fresh = copy.gate(['--out', 'fresh-out', '--skip', 'live']);
+      // An unignored in-checkout output path would break the replay's clean-source requirement.
+      const dirtyOutputPath = join(copy.dir, 'fresh-out');
+      const dirtyOutput = copy.gate(['--out', dirtyOutputPath]);
+      expect(dirtyOutput.status, dirtyOutput.stdout + dirtyOutput.stderr).toBe(2);
+      expect(dirtyOutput.stderr).toContain('output inside the source checkout must be git-ignored');
+      expect(existsSync(dirtyOutputPath)).toBe(false);
+      expect(copy.calls()).toEqual([]);
+
+      // A fresh output directory under git-ignored work/ is accepted and gate-owned.
+      const fresh = copy.gate(['--out', 'work/fresh-out', '--skip', 'live']);
       expect(fresh.status, fresh.stdout + fresh.stderr).toBe(1);
-      const freshOut = join(copy.dir, 'fresh-out');
+      const freshOut = join(copy.dir, 'work/fresh-out');
       expect(existsSync(join(freshOut, '.node-backend-gate'))).toBe(true);
       expect(stepOf(copy.summary(freshOut), 'live').exit).toBe('skipped');
       expect(copy.jsonl<TestRecord>('scrobbler-e2e/scrobbler-e2e.jsonl', freshOut)).toEqual(
