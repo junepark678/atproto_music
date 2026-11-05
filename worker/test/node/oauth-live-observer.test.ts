@@ -1,3 +1,4 @@
+import { OAUTH_LIVE_CAPTURE_TTL_MS } from '@atmusic/core/oauth-live-budget';
 import { fixedClock } from '@atmusic/core/test-support/clock';
 import { seededRandom } from '@atmusic/core/test-support/random';
 import { OAuthResponseError } from '@atproto/oauth-client-node';
@@ -143,30 +144,53 @@ describe('host OAuth live observer', () => {
     expect(JSON.stringify(result)).not.toContain(REFRESH);
   });
 
-  it('keeps the capture through a bounded run longer than CRUD cleanup, without changing the session', async () => {
-    const world = observer();
-    expect((await world.instance.capture(DID)).status).toBe('captured');
-    const savedSession = world.service.sessionStore.snapshot(DID).session;
-    const version = world.service.sessionStore.snapshot(DID).version;
-
-    // CRUD can consume 10 minutes and its independent cleanup another 4.
-    world.setNow(Date.parse('2026-11-05T00:14:01.000Z'));
-    expect(await world.instance.prepareSignOut(DID)).toEqual({
-      status: 'prepared',
-      refreshTokenPresent: true,
-      sessionVersionStable: true,
+  it('prepares and proves invalid_grant one millisecond before the enforced capture TTL', async () => {
+    const refresh = vi.fn(async () => {
+      throw new OAuthResponseError(new Response(null, { status: 400 }), { error: 'invalid_grant' });
     });
-    expect(world.service.sessionStore.snapshot(DID)).toMatchObject({ session: savedSession, version });
+    const world = observer({ refresh });
+    expect((await world.instance.capture(DID)).status).toBe('captured');
+    world.setNow(Date.parse('2026-11-05T00:00:00.000Z') + OAUTH_LIVE_CAPTURE_TTL_MS - 1);
+    expect((await world.instance.prepareSignOut(DID)).status).toBe('prepared');
+    world.setCurrent(undefined, 2);
+    expect(await world.instance.verifyAfterSignOut(DID)).toMatchObject({
+      status: 'revoked',
+      localSessionAbsent: true,
+      refreshRejected: true,
+      refreshError: 'invalid_grant',
+    });
+    expect(refresh).toHaveBeenCalledOnce();
+  });
 
-    // The bounded run allowance includes an hour each for app operations and
-    // sign-out/revocation, in addition to CRUD, cleanup, and the handoff.
-    world.setNow(Date.parse('2026-11-05T02:15:01.000Z'));
+  it('refuses preparation exactly at the capture TTL and never refreshes after expiry', async () => {
+    const refresh = vi.fn(async () => undefined);
+    const world = observer({ refresh });
+    expect((await world.instance.capture(DID)).status).toBe('captured');
+    world.setNow(Date.parse('2026-11-05T00:00:00.000Z') + OAUTH_LIVE_CAPTURE_TTL_MS);
     expect(await world.instance.prepareSignOut(DID)).toEqual({ status: 'capture_missing_or_expired' });
+    world.setCurrent(undefined, 2);
     expect(await world.instance.verifyAfterSignOut(DID)).toMatchObject({
       status: 'capture_missing_or_expired',
       localSessionAbsent: false,
       refreshRejected: false,
     });
+    expect(refresh).not.toHaveBeenCalled();
+  });
+
+  it('does not extend the capture TTL when prepareSignOut runs', async () => {
+    const refresh = vi.fn(async () => undefined);
+    const world = observer({ refresh });
+    expect((await world.instance.capture(DID)).status).toBe('captured');
+    const capturedAt = Date.parse('2026-11-05T00:00:00.000Z');
+    world.setNow(capturedAt + OAUTH_LIVE_CAPTURE_TTL_MS - 1);
+    expect((await world.instance.prepareSignOut(DID)).status).toBe('prepared');
+    world.setNow(capturedAt + OAUTH_LIVE_CAPTURE_TTL_MS);
+    world.setCurrent(undefined, 2);
+    expect(await world.instance.verifyAfterSignOut(DID)).toMatchObject({
+      status: 'capture_missing_or_expired',
+      refreshRejected: false,
+    });
+    expect(refresh).not.toHaveBeenCalled();
   });
 
   it('restores an existing settings/self singleton after exercising CRUD', async () => {
