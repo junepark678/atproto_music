@@ -531,7 +531,6 @@ async function appOperation(
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
   }
-  phaseDeadline.assertActive();
   const operation = object(field(ack.json, 'operation'));
   if (ack.status !== 202 || typeof operation?.id !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(operation.id)) {
     throw new Error(`${method} ${new URL(route, 'https://local.invalid').pathname} was not accepted as an operation`);
@@ -630,6 +629,7 @@ async function appWrites(
   pdsEndpoint: string,
   cleanupNotes: string[],
 ): Promise<Record<string, unknown>[]> {
+  const cleanupNoteStart = cleanupNotes.length;
   let appDeadline = createDeadline(OAUTH_LIVE_BUDGETS.appPhaseMs);
   let cleanupDeadline = createDeadline(OAUTH_LIVE_BUDGETS.appCleanupMs);
   const prefix = context.lexiconPrefix;
@@ -681,7 +681,12 @@ async function appWrites(
       operationId: typeof operation.id === 'string' ? operation.id : '',
     };
     const parsed = typeof operation.uri === 'string' ? parseRecordUri(operation.uri) : null;
-    if (parsed?.did === session.did && parsed.collection === collection) item.rkey = parsed.rkey;
+    if (parsed?.did === session.did && parsed.collection === collection) {
+      item.rkey = parsed.rkey;
+      if (kind === 'scrobble.delete' && item.route === '') {
+        item.route = `/api/v1/scrobbles/${encodeURIComponent(operation.uri as string)}`;
+      }
+    }
     pending.push(item);
     return item;
   };
@@ -925,6 +930,7 @@ async function appWrites(
     async (deadline, runError) => {
       cleanupDeadline = deadline;
       if (runError !== null) runFailed = true;
+      const recoveryCount = pending.length;
       for (const item of [...pending]) {
         try {
           if (!(await recoverPendingKey(item)) || item.rkey === null) {
@@ -993,8 +999,14 @@ async function appWrites(
         }
       }
       if (cleanupFailed) throw new Error('app write recovery failed');
+      if (recoveryCount > 0) {
+        cleanupNotes.push(`${session.did}: ${recoveryCount} accepted app write(s) reconciled during recovery`);
+      }
     },
-  );
+  ).catch((error: unknown) => {
+    for (const note of cleanupNotes.slice(cleanupNoteStart)) context.cleanup(note);
+    throw error;
+  });
 }
 
 async function validateClientMetadata(context: NodeGateContext): Promise<void> {
