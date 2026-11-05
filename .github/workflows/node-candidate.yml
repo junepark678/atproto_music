@@ -30,6 +30,8 @@ jobs:
           cache: npm
       - name: Install locked dependencies
         run: npm ci --ignore-scripts
+      - name: Install Chromium for owned-browser lifecycle tests
+        run: npx playwright install --with-deps chromium
       - name: Reject mismatching Node version tag
         run: |
           node --import tsx --input-type=module -e 'import {readFileSync} from "node:fs"; import {checkTag} from "./scripts/package-node-release.ts"; const p=JSON.parse(readFileSync("package.json")); const l=JSON.parse(readFileSync("package-lock.json")); checkTag(process.env.CANDIDATE_TAG,p.version,l.version); checkTag(process.env.CANDIDATE_TAG,p.version,l.packages[""].version);'
