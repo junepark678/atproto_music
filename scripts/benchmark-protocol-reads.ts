@@ -3,7 +3,7 @@
 // durable Markdown report.
 //
 // Usage:
-//   npx tsx scripts/benchmark-protocol-reads.ts <receipt.json> [--out <report.json>] [--no-docs]
+//   npx tsx scripts/benchmark-protocol-reads.ts <receipt.json> [--out <report.json>] [--baseline <receipt.json>] [--no-docs]
 //   npx tsx scripts/benchmark-protocol-reads.ts --render <receipt.json>
 //
 // Receipt schema (atmusic/protocol-reads-benchmark@2): {schema, generatedBy,
@@ -14,6 +14,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isDeepStrictEqual } from 'node:util';
 
 export const REPORT_SCHEMA_ID = 'atmusic/protocol-reads-benchmark@2';
 export const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -234,7 +235,11 @@ export function validateReport(v: unknown): asserts v is ProtocolReadsReport {
         throw Error(`invalid timing/percentiles: ${key}`);
     }
 }
-export function renderReport(r: ProtocolReadsReport): string {
+export function renderReport(r: ProtocolReadsReport, baseline?: ProtocolReadsReport): string {
+  if (baseline !== undefined) {
+    validateReport(baseline);
+    if (!isDeepStrictEqual(r.dataset, baseline.dataset)) throw Error('baseline dataset must match the current receipt');
+  }
   const rows: Array<[string, Timing]> = [
     ['top-tracks cached', r.reads.topTracks.cached],
     ['top-tracks uncached', r.reads.topTracks.uncached],
@@ -249,7 +254,7 @@ export function renderReport(r: ProtocolReadsReport): string {
     'ListenBrainz all_time stats': null,
     'ListenBrainz listening-activity year': null,
   };
-  return `# Node protocol-read benchmark\n\n- Generated: ${r.generatedAt}\n- Receipt: \`${r.generatedBy}\`\n- Dataset: ${r.dataset.listens.toLocaleString()} listens, seed ${r.dataset.seed}, fixed clock ${r.dataset.clock}; apply-path parity sample ${r.dataset.applyPathRecords} records; ${r.dataset.operations.total.toLocaleString()} operations (${r.dataset.operations.scrobbleCreateSucceeded.toLocaleString()} succeeded scrobble creates, ${r.dataset.operations.scrobbleDelete.queued + r.dataset.operations.scrobbleDelete.running + r.dataset.operations.scrobbleDelete.blocked + r.dataset.operations.scrobbleDelete.failed + r.dataset.operations.scrobbleDelete.succeededMatchingCid + r.dataset.operations.scrobbleDelete.succeededStaleCid} scrobble deletes); ${r.dataset.operations.visibleScrobbles.toLocaleString()} visible / ${r.dataset.operations.hiddenScrobbles.toLocaleString()} hidden listens\n\nThe main fixture inserts the 100,000-listen projection through direct SQL after production record normalization, then seeds a deterministic history of succeeded create operations and delete operations spanning queued, running, blocked, failed, succeeded with matching CID, and succeeded with stale CID. The operation count is deliberately bounded for a reproducible pre-index measurement and is reported explicitly; it does not claim to model a user's lifetime operation history. The parity sample compares signed repository verification and the production apply path against equivalent direct inserts. Reads are measured through the Node HTTP composition; fixture setup, cache invalidation, and report writing are outside each timed sample. Each read has ten samples. Requests are top tracks (period=overall), recent tracks (page 500, limit 200), ListenBrainz recordings (range=all_time, count=100), and listening activity (range=year). The ListenBrainz stats query-plan sample is a cold cache miss and its timing samples clear the cache before each request.\n\nTimings are observations from this run. Budget comparisons are informational and are not acceptance assertions. The ADR §10.3 report-only budgets are uncached top tracks p95 <250 ms, cached top tracks p95 <20 ms, and recent tracks page 500 p95 <100 ms. With ten samples, nearest-rank p95 is the slowest sample. No budget is specified for the ListenBrainz reads.\n\n| Read | Runs | p50 (ms) | p95 (ms) | Report-only p95 budget |\n|---|---:|---:|---:|---:|\n${rows.map(([n, t]) => `| ${n} | ${t.runs} | ${t.p50Ms.toFixed(2)} | ${t.p95Ms.toFixed(2)} | ${budgets[n] === null ? 'not specified' : `< ${budgets[n]} ms`} |`).join('\n')}\n\n## Query plans\n\n${Object.entries(
+  return `# Node protocol-read benchmark\n\n- Generated: ${r.generatedAt}\n- Receipt: \`${r.generatedBy}\`\n- Schema: \`${r.schema}\`\n- Dataset: ${r.dataset.listens.toLocaleString()} listens, seed ${r.dataset.seed}, fixed clock ${r.dataset.clock}; apply-path parity sample ${r.dataset.applyPathRecords} records; ${r.dataset.operations.total.toLocaleString()} operations (${r.dataset.operations.scrobbleCreateSucceeded.toLocaleString()} succeeded scrobble creates, ${r.dataset.operations.scrobbleDelete.queued + r.dataset.operations.scrobbleDelete.running + r.dataset.operations.scrobbleDelete.blocked + r.dataset.operations.scrobbleDelete.failed + r.dataset.operations.scrobbleDelete.succeededMatchingCid + r.dataset.operations.scrobbleDelete.succeededStaleCid} scrobble deletes); ${r.dataset.operations.visibleScrobbles.toLocaleString()} visible / ${r.dataset.operations.hiddenScrobbles.toLocaleString()} hidden listens\n\nThe main fixture inserts the 100,000-listen projection through direct SQL after production record normalization, then seeds a deterministic history of succeeded create operations and delete operations spanning queued, running, blocked, failed, succeeded with matching CID, and succeeded with stale CID. The operation count is deliberately bounded for a reproducible measurement and is reported explicitly; it does not claim to model a user's lifetime operation history. The parity sample compares signed repository verification and the production apply path against equivalent direct inserts. Reads are measured through the Node HTTP composition; fixture setup, cache invalidation, and report writing are outside each timed sample. Each read has ten samples. Requests are top tracks (period=overall), recent tracks (page 500, limit 200), ListenBrainz recordings (range=all_time, count=100), and listening activity (range=year). The ListenBrainz stats query-plan sample is a cold cache miss and its timing samples clear the cache before each request.\n\nTimings are observations from this run. Budget comparisons are informational and are not acceptance assertions. The ADR §10.3 report-only budgets are uncached top tracks p95 <250 ms, cached top tracks p95 <20 ms, and recent tracks page 500 p95 <100 ms. With ten samples, nearest-rank p95 is the slowest sample. No budget is specified for the ListenBrainz reads.\n\n| Read | Runs | p50 (ms) | p95 (ms) | Report-only p95 budget |\n|---|---:|---:|---:|---:|\n${rows.map(([n, t]) => `| ${n} | ${t.runs} | ${t.p50Ms.toFixed(2)} | ${t.p95Ms.toFixed(2)} | ${budgets[n] === null ? 'not specified' : `< ${budgets[n]} ms`} |`).join('\n')}\n\n${baseline === undefined ? '' : renderComparison(r, baseline)}## Query plans\n\n${Object.entries(
     r.plans,
   )
     .filter(([k]) => k !== 'source')
@@ -264,16 +269,49 @@ export function renderReport(r: ProtocolReadsReport): string {
     )
     .join('\n\n')}\n\nPlan source: ${r.plans.source}\n`;
 }
+/** Both percentiles come from saved v2 receipts; no benchmark is rerun here. */
+function renderComparison(r: ProtocolReadsReport, baseline: ProtocolReadsReport): string {
+  const pairs: Array<[string, Timing, Timing]> = [
+    ['top-tracks uncached', baseline.reads.topTracks.uncached, r.reads.topTracks.uncached],
+    ['recent-tracks page 500', baseline.reads.recentTracksPage500, r.reads.recentTracksPage500],
+    ['ListenBrainz all_time stats', baseline.reads.listenbrainzAllTime, r.reads.listenbrainzAllTime],
+    ['ListenBrainz listening-activity year', baseline.reads.listeningActivityYear, r.reads.listeningActivityYear],
+  ];
+  return `## Saved pre-index comparison
+
+The saved pre-index v2 receipt was generated at ${baseline.generatedAt}; this post-index receipt was generated at ${r.generatedAt}. Dataset fields match, including the bounded ${r.dataset.operations.total}-operation history. The runs were not made under controlled load. This comparison does not establish lifetime scaling, performance with 100,000 operations, or migration cost. The query plans below preserve the current executed SQL and probes; the saved baseline receipt preserves its original plans.
+
+| Read | Pre-index p50 (ms) | Pre-index p95 (ms) | Post-index p50 (ms) | Post-index p95 (ms) |
+|---|---:|---:|---:|---:|
+${pairs.map(([name, before, after]) => `| ${name} | ${before.p50Ms.toFixed(2)} | ${before.p95Ms.toFixed(2)} | ${after.p50Ms.toFixed(2)} | ${after.p95Ms.toFixed(2)} |`).join('\n')}
+
+The historical zero-operation v1 run (2026-11-03T04:29:17.913Z) recorded p50s of 466.45 ms (uncached top tracks), 81.42 ms (recent page 500), 461.27 ms (ListenBrainz all_time), and 80.04 ms (activity year). That receipt lacks the v2 operations metadata and is descriptive context only.
+
+`;
+}
+
 export function main(args = process.argv.slice(2)): number {
   const renderOnly = args[0] === '--render';
   const input = args[renderOnly ? 1 : 0];
   if (!input) {
-    console.error('Usage: benchmark-protocol-reads.ts [--render] <receipt.json> [--out <report.json>] [--no-docs]');
+    console.error(
+      'Usage: benchmark-protocol-reads.ts [--render] <receipt.json> [--out <report.json>] [--baseline <receipt.json>] [--no-docs]',
+    );
     return 2;
   }
   try {
     const report = JSON.parse(readFileSync(resolve(input), 'utf8')) as unknown;
     validateReport(report);
+    const baselineFlag = args.indexOf('--baseline');
+    let baseline: ProtocolReadsReport | undefined;
+    if (baselineFlag >= 0) {
+      const path = args[baselineFlag + 1];
+      if (!path || path.startsWith('--')) throw Error('--baseline requires a receipt path');
+      const value: unknown = JSON.parse(readFileSync(resolve(path), 'utf8'));
+      validateReport(value);
+      baseline = value;
+    }
+    const rendered = renderReport(report, baseline);
     const outFlag = args.indexOf('--out');
     const out = outFlag >= 0 ? resolve(args[outFlag + 1]!) : resolve(REPO_ROOT, 'work/bench/protocol-reads.json');
     if (!renderOnly) {
@@ -282,7 +320,7 @@ export function main(args = process.argv.slice(2)): number {
     }
     if (!args.includes('--no-docs')) {
       mkdirSync(dirname(DEFAULT_DOC), { recursive: true });
-      writeFileSync(DEFAULT_DOC, renderReport(report));
+      writeFileSync(DEFAULT_DOC, rendered);
     }
     return 0;
   } catch (e) {
