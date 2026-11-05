@@ -38,6 +38,15 @@ while [[ $# -gt 0 ]]; do
       [[ $# -ge 2 && -n "$2" ]] || usage
       OUT="$2"
       [[ "$OUT" == /* ]] || OUT="$CALLER_PWD/$OUT"
+      OUT="$(python3 -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve())' "$OUT")" || exit 2
+      if [[ "$OUT" == "$ROOT" || "$OUT" == "$ROOT/"* ]]; then
+        if [[ "$OUT" == "$ROOT" ]]; then output_relative='.'; else output_relative="${OUT#"$ROOT"/}"; fi
+        if ! git -C "$ROOT" check-ignore -q -- "$output_relative"; then
+          echo "node-backend: refusing --out $OUT: output inside the source checkout must be git-ignored" \
+            "(choose a path outside the checkout or under work/)" >&2
+          exit 2
+        fi
+      fi
       shift 2
       ;;
     --skip)
@@ -116,7 +125,7 @@ run_step() {
 
 step_check_ts() {
   rm -f work/ts-test-cases.jsonl
-  bash scripts/check-ts.sh
+  ATMUSIC_RUN_NO_WORKERS_ACCEPTANCE=1 bash scripts/check-ts.sh
   local status=$?
   if [[ -f work/ts-test-cases.jsonl ]]; then cp work/ts-test-cases.jsonl "$OUT/check-ts.jsonl"; fi
   return $status
@@ -306,7 +315,7 @@ step_live() {
 }
 
 echo "node-backend acceptance gate: commit $COMMIT, out ${OUT#"$ROOT"/}"
-run_step check-ts 'bash scripts/check-ts.sh' step_check_ts
+run_step check-ts 'ATMUSIC_RUN_NO_WORKERS_ACCEPTANCE=1 bash scripts/check-ts.sh' step_check_ts
 run_step node-tests 'npx vitest run --project worker-node --project worker-acceptance' step_node_tests
 run_step e2e 'npx playwright test' step_e2e
 run_step scrobbler-e2e "npx tsx scripts/e2e/scrobbler-e2e.ts --out \"$OUT/scrobbler-e2e\"" step_scrobbler_e2e
@@ -510,8 +519,12 @@ for gate in GATE_NAMES:
         state, message = 'blocked', f'inventory reports {gate}=passed but verify_live_evidence.py exited {inventory_exit}; not accepted as passed'
     elif state == 'passed':
         message = f'recorded evidence: verified passing {gate} result bound to commit {commit} and bundle {bundle}'
+    elif state == 'failed' and inventory_exit == '1':
+        message = f'recorded evidence: a failed {gate} result is attributable to this inventory and bundle {bundle or "(unknown)"}'
     elif state == 'failed':
-        message = f'recorded evidence: a failed {gate} result is bound to bundle {bundle or "(unknown)"} in the inventory'
+        state = 'blocked'
+        message = (f'inventory verifier classified the inventory as blocked (exit {inventory_exit}); '
+                   f'the {gate}=failed diagnostic is not attributable without an inventory-wide pass')
     else:
         message = (f'recorded evidence: no passing {gate} result bound to bundle {bundle or "(unknown)"} in the inventory; '
                    f'run npx tsx {script_path} and record its document')

@@ -43,15 +43,24 @@ export const SOCKET_STATUS_PATH = '/admin/status';
 export const SOCKET_BACKUP_PATH = '/admin/backup';
 export const SOCKET_RESNAPSHOT_PATH = '/admin/resnapshot';
 export const SOCKET_PRUNE_KID_PATH = '/admin/oauth/prune-kid';
+export const SOCKET_OAUTH_LIVE_OBSERVE_PATH = '/admin/oauth/live-observe';
 
 const SOCKET_ROUTE_METHODS: Readonly<Record<string, 'GET' | 'POST'>> = {
   [SOCKET_STATUS_PATH]: 'GET',
   [SOCKET_BACKUP_PATH]: 'POST',
   [SOCKET_RESNAPSHOT_PATH]: 'POST',
   [SOCKET_PRUNE_KID_PATH]: 'POST',
+  [SOCKET_OAUTH_LIVE_OBSERVE_PATH]: 'POST',
 };
 
 export type PruneKidOutcome = { status: 'pruned'; kid: string; sessions: number } | { status: 'active_kid' };
+
+export interface SocketOAuthLiveObserver {
+  capture(did: string): Promise<Record<string, unknown>>;
+  exerciseCrud(did: string, followSubject: string, signal?: AbortSignal): Promise<Record<string, unknown>>;
+  prepareSignOut(did: string): Promise<Record<string, unknown>>;
+  verifyAfterSignOut(did: string): Promise<Record<string, unknown>>;
+}
 
 /** What the socket routes need from the process (node/run.ts builds it). */
 export interface SocketAdminDeps {
@@ -63,6 +72,8 @@ export interface SocketAdminDeps {
   /** The host half of the status (backup, queues, uploads, disk, warnings). */
   hostStatus(): Promise<Record<string, unknown>> | Record<string, unknown>;
   pruneKid(kid: string): Promise<PruneKidOutcome> | PruneKidOutcome;
+  /** Host-private OAuth acceptance observation; reachable only via this Unix socket. */
+  oauthLiveObserver?: SocketOAuthLiveObserver;
   random: Random;
 }
 
@@ -116,6 +127,37 @@ export function socketAdminHandler(deps: SocketAdminDeps): (req: Request) => Pro
         throw invalidField('kid', 'This key still signs: remove it from oauthSigningKeys and restart first.');
       }
       return json({ kid: outcome.kid, sessions: outcome.sessions }, 200);
+    },
+    [SOCKET_OAUTH_LIVE_OBSERVE_PATH]: async (req) => {
+      if (!deps.oauthLiveObserver) return json({ status: 'unavailable' }, 501);
+      const body = await readJsonBody(req, ADMIN_MAX_BODY_BYTES);
+      if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+        throw invalidField('body', 'Expected an object with did and phase fields.');
+      }
+      const value = body as Record<string, unknown>;
+      if (!Object.hasOwn(value, 'did') || !Object.hasOwn(value, 'phase')) {
+        throw invalidField('body', 'Expected an object with did and phase fields.');
+      }
+      if (typeof value.did !== 'string' || !isSupportedDid(value.did)) {
+        throw invalidField('did', 'Expected a did:plc or did:web DID.');
+      }
+      if (value.phase === 'capture' && Object.keys(value).length === 2) {
+        return json(await deps.oauthLiveObserver.capture(value.did), 200);
+      }
+      if (value.phase === 'crud' && Object.keys(value).length === 3) {
+        if (typeof value.followSubject !== 'string' || !isSupportedDid(value.followSubject)) {
+          throw invalidField('followSubject', 'Expected a did:plc or did:web DID.');
+        }
+        return json(await deps.oauthLiveObserver.exerciseCrud(value.did, value.followSubject, req.signal), 200);
+      }
+      if (value.phase === 'prepare_sign_out' && Object.keys(value).length === 2) {
+        return json(await deps.oauthLiveObserver.prepareSignOut(value.did), 200);
+      }
+      if (value.phase === 'after_sign_out') {
+        if (Object.keys(value).length !== 2) throw invalidField('body', 'Unexpected field.');
+        return json(await deps.oauthLiveObserver.verifyAfterSignOut(value.did), 200);
+      }
+      throw invalidField('phase', 'Expected capture, crud, prepare_sign_out, or after_sign_out.');
     },
   };
 

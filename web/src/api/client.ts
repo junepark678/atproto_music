@@ -490,12 +490,12 @@ export const decoders = {
 // Client
 // ---------------------------------------------------------------------------
 
-export type FetchLike = (input: string, init: RequestInit) => Promise<Response>;
+export type FetchLike = (input: string, init: RequestInit, expectedDid?: Did) => Promise<Response>;
 
 export interface ApiClientOptions {
   /** Origin to prefix, e.g. `https://music.example.org`. Empty (the default) means same-origin relative URLs. */
   baseUrl?: string;
-  /** Injected fetch; defaults to `globalThis.fetch`. */
+  /** Injected fetch; defaults to the same-origin session boundary for reads and account writes. */
   fetch?: FetchLike;
 }
 
@@ -556,6 +556,7 @@ interface Call<T> {
   noStore?: boolean;
   headers?: Record<string, string>;
   credentials?: RequestCredentials;
+  expectedDid?: Did;
   emptyBody?: boolean;
 }
 
@@ -576,7 +577,16 @@ export class ApiClient {
 
   constructor(options: ApiClientOptions = {}) {
     this.#base = (options.baseUrl ?? '').replace(/\/+$/, '');
-    this.#fetch = options.fetch ?? sessionFetch;
+    this.#fetch =
+      options.fetch ??
+      ((input, init, expectedDid) => {
+        const method = (init.method ?? 'GET').toUpperCase();
+        if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS' || expectedDid !== undefined)
+          return sessionFetch(input, init, expectedDid);
+        // Public/session-start writes have no account identity to bind. All
+        // account-scoped mutations set expectedDid and use SessionClient.
+        return globalThis.fetch(input, init);
+      });
   }
 
   /** The URL of a route with its query, as the client would request it. */
@@ -604,7 +614,7 @@ export class ApiClient {
 
     let response: Response;
     try {
-      response = await this.#fetch(this.url(call.path, call.query), init);
+      response = await this.#fetch(this.url(call.path, call.query), init, call.expectedDid);
     } catch (error) {
       throw new ApiNetworkError(endpoint, error);
     }
@@ -816,7 +826,7 @@ export class ApiClient {
     );
   }
 
-  authLogout(csrfToken: string, o?: CallOptions): Promise<void> {
+  authLogout(csrfToken: string, expectedDid: Did, o?: CallOptions): Promise<void> {
     return this.#call(
       {
         method: 'POST',
@@ -827,12 +837,19 @@ export class ApiClient {
         headers: { 'X-CSRF-Token': csrfToken },
         credentials: 'same-origin',
         emptyBody: true,
+        expectedDid,
       },
       o,
     );
   }
 
-  createScrobble(input: unknown, csrfToken: string, idempotencyKey: string, o?: CallOptions): Promise<AcceptedWrite> {
+  createScrobble(
+    input: unknown,
+    csrfToken: string,
+    idempotencyKey: string,
+    expectedDid: Did,
+    o?: CallOptions,
+  ): Promise<AcceptedWrite> {
     return this.#call(
       {
         method: 'POST',
@@ -842,12 +859,19 @@ export class ApiClient {
         decode: accepted,
         headers: { 'X-CSRF-Token': csrfToken, 'Idempotency-Key': idempotencyKey },
         credentials: 'same-origin',
+        expectedDid,
       },
       o,
     );
   }
 
-  deleteScrobble(uri: string, csrfToken: string, idempotencyKey: string, o?: CallOptions): Promise<AcceptedWrite> {
+  deleteScrobble(
+    uri: string,
+    csrfToken: string,
+    idempotencyKey: string,
+    expectedDid: Did,
+    o?: CallOptions,
+  ): Promise<AcceptedWrite> {
     return this.#call(
       {
         method: 'DELETE',
@@ -856,12 +880,19 @@ export class ApiClient {
         decode: accepted,
         headers: { 'X-CSRF-Token': csrfToken, 'Idempotency-Key': idempotencyKey },
         credentials: 'same-origin',
+        expectedDid,
       },
       o,
     );
   }
 
-  follow(user: Did, csrfToken: string, idempotencyKey: string, o?: CallOptions): Promise<AcceptedWrite> {
+  follow(
+    user: Did,
+    csrfToken: string,
+    idempotencyKey: string,
+    expectedDid: Did,
+    o?: CallOptions,
+  ): Promise<AcceptedWrite> {
     return this.#call(
       {
         method: 'PUT',
@@ -870,12 +901,19 @@ export class ApiClient {
         decode: accepted,
         headers: { 'X-CSRF-Token': csrfToken, 'Idempotency-Key': idempotencyKey },
         credentials: 'same-origin',
+        expectedDid,
       },
       o,
     );
   }
 
-  unfollow(user: Did, csrfToken: string, idempotencyKey: string, o?: CallOptions): Promise<AcceptedWrite> {
+  unfollow(
+    user: Did,
+    csrfToken: string,
+    idempotencyKey: string,
+    expectedDid: Did,
+    o?: CallOptions,
+  ): Promise<AcceptedWrite> {
     return this.#call(
       {
         method: 'DELETE',
@@ -884,6 +922,7 @@ export class ApiClient {
         decode: accepted,
         headers: { 'X-CSRF-Token': csrfToken, 'Idempotency-Key': idempotencyKey },
         credentials: 'same-origin',
+        expectedDid,
       },
       o,
     );
@@ -893,6 +932,7 @@ export class ApiClient {
     indexing: 'enabled' | 'disabled',
     csrfToken: string,
     idempotencyKey: string,
+    expectedDid: Did,
     o?: CallOptions,
   ): Promise<AcceptedWrite> {
     return this.#call(
@@ -904,6 +944,7 @@ export class ApiClient {
         decode: accepted,
         headers: { 'X-CSRF-Token': csrfToken, 'Idempotency-Key': idempotencyKey },
         credentials: 'same-origin',
+        expectedDid,
       },
       o,
     );

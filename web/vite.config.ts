@@ -8,7 +8,9 @@
 import preact from '@preact/preset-vite';
 import { defineConfig } from 'vite';
 
-const NODE_DEV = 'http://127.0.0.1:8888';
+// Match the Node host's default loopback bind. `changeOrigin` sends this
+// authority in Host so http-bridge accepts proxied development requests.
+const NODE_DEV = 'http://127.2.0.1:8888';
 
 export default defineConfig({
   plugins: [preact()],
@@ -17,12 +19,12 @@ export default defineConfig({
     port: 5173,
     strictPort: true,
     proxy: {
-      '/api': { target: NODE_DEV },
-      '/health': { target: NODE_DEV },
-      '/oauth': { target: NODE_DEV },
-      '/2.0': { target: NODE_DEV },
-      '/1': { target: NODE_DEV },
-      '/audioscrobbler': { target: NODE_DEV },
+      '/api': { target: NODE_DEV, changeOrigin: true },
+      '/health': { target: NODE_DEV, changeOrigin: true },
+      '/oauth': { target: NODE_DEV, changeOrigin: true },
+      '/2.0': { target: NODE_DEV, changeOrigin: true },
+      '/1': { target: NODE_DEV, changeOrigin: true },
+      '/audioscrobbler': { target: NODE_DEV, changeOrigin: true },
     },
   },
   preview: {

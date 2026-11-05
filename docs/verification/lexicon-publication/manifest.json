@@ -1,0 +1,40 @@
+{
+  "authorityDid": "did:plc:gsichz64a5qpjvmjktkltkw2",
+  "ownershipRef": "dns:_lexicon.music.pythonplayer123.dev",
+  "prefix": "dev.pythonplayer123.music",
+  "verifiedAt": "2026-11-05T08:00:23.863Z",
+  "records": [
+    {
+      "nsid": "dev.pythonplayer123.music.scrobble",
+      "uri": "at://did:plc:gsichz64a5qpjvmjktkltkw2/com.atproto.lexicon.schema/dev.pythonplayer123.music.scrobble",
+      "cid": "bafyreig3yl63x36qijlow6nu2r4my5kr27fuiel4laie7kjbb4vchu5rtm",
+      "contentSha256": "46505935a0583c8aad61af7241f2c719cf84069b21a20fb863e027d4053740a0",
+      "publicRetrieval": "https://enoki.us-east.host.bsky.network/xrpc/com.atproto.repo.getRecord?repo=did:plc:gsichz64a5qpjvmjktkltkw2&collection=com.atproto.lexicon.schema&rkey=dev.pythonplayer123.music.scrobble",
+      "match": true
+    },
+    {
+      "nsid": "dev.pythonplayer123.music.follow",
+      "uri": "at://did:plc:gsichz64a5qpjvmjktkltkw2/com.atproto.lexicon.schema/dev.pythonplayer123.music.follow",
+      "cid": "bafyreihu2kycrodp2ouschmsghaezpc5htc6eluze3lgvri5tyftcsw6jm",
+      "contentSha256": "187f7e1b6776aa0e1e669f54e1686cd24285c921245dfd4a6eee26fa35b78a2e",
+      "publicRetrieval": "https://enoki.us-east.host.bsky.network/xrpc/com.atproto.repo.getRecord?repo=did:plc:gsichz64a5qpjvmjktkltkw2&collection=com.atproto.lexicon.schema&rkey=dev.pythonplayer123.music.follow",
+      "match": true
+    },
+    {
+      "nsid": "dev.pythonplayer123.music.love",
+      "uri": "at://did:plc:gsichz64a5qpjvmjktkltkw2/com.atproto.lexicon.schema/dev.pythonplayer123.music.love",
+      "cid": "bafyreias4rmyqgv42i77pkna3zc3ovs5rjldsr3klw7nvewlngf645l6um",
+      "contentSha256": "d29aa92ba12b3970e61e7a5d1a9df7bfe35a70c087a163c192254006b9877350",
+      "publicRetrieval": "https://enoki.us-east.host.bsky.network/xrpc/com.atproto.repo.getRecord?repo=did:plc:gsichz64a5qpjvmjktkltkw2&collection=com.atproto.lexicon.schema&rkey=dev.pythonplayer123.music.love",
+      "match": true
+    },
+    {
+      "nsid": "dev.pythonplayer123.music.settings",
+      "uri": "at://did:plc:gsichz64a5qpjvmjktkltkw2/com.atproto.lexicon.schema/dev.pythonplayer123.music.settings",
+      "cid": "bafyreic2gfogdiziepma7f6n7rzj7gdhwdbyftokrykrbay4drlszwnslm",
+      "contentSha256": "7b383707777d0a79294d25ecd16d85fed639130921fdd52a748d3a195024f8ee",
+      "publicRetrieval": "https://enoki.us-east.host.bsky.network/xrpc/com.atproto.repo.getRecord?repo=did:plc:gsichz64a5qpjvmjktkltkw2&collection=com.atproto.lexicon.schema&rkey=dev.pythonplayer123.music.settings",
+      "match": true
+    }
+  ]
+}

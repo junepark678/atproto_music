@@ -3,7 +3,16 @@ import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { expect, test, vi } from 'vitest';
-import { NODE_OAUTH_ENV, spec } from '../live/node_oauth_check.ts';
+import {
+  assertNoExistingFollow,
+  browserRequest,
+  expectedAuthorizationOrigin,
+  handleResolutionMatchesDid,
+  hasAllTwelveActions,
+  isExpectedAuthorizationOrigin,
+  NODE_OAUTH_ENV,
+  spec,
+} from '../live/node_oauth_check.ts';
 import { NODE_ENV, type NodeGateIO, runNodeGate } from '../live/node-live-gate.ts';
 
 const REPO = resolve(fileURLToPath(new URL('../..', import.meta.url)));
@@ -99,23 +108,19 @@ test('with every ATMUSIC_LIVE_* unset it exits 2 with a blocked document naming 
   expect(evidence.missing.some((entry) => entry.includes(NODE_OAUTH_ENV.interactive))).toBe(true);
 });
 
-test('a complete operator environment remains blocked before invoking OAuth or networking', async () => {
-  const run = vi.fn(spec.run);
+test('the complete synthetic environment reaches only the injected runner and never initiates networking itself', async () => {
+  const run = vi.fn(async () => ({ pds: [], subjects: [], results: { signIns: [], cleanup: 'synthetic test only' } }));
   const fetch = vi.fn(async () => {
     throw new Error('unexpected network request');
   });
   vi.stubGlobal('fetch', fetch);
   const result = capture();
   try {
-    expect(await runNodeGate({ ...spec, run }, completeEnv(), result.io)).toBe(2);
-    expect(run).not.toHaveBeenCalled();
+    expect(await runNodeGate({ ...spec, run }, completeEnv(), result.io)).toBe(0);
+    expect(run).toHaveBeenCalledOnce();
     expect(fetch).not.toHaveBeenCalled();
     const evidence = JSON.parse(result.output().stdout) as { result: string; missing: string[] };
-    expect(evidence.result).toBe('blocked');
-    expect(evidence.missing).toHaveLength(1);
-    expect(
-      evidence.missing.some((entry) => entry.includes('upstream revocation observations are not implemented')),
-    ).toBe(true);
+    expect(evidence.result).toBe('passed');
   } finally {
     vi.unstubAllGlobals();
   }
@@ -135,4 +140,139 @@ test('importing the Node OAuth gate is inert', () => {
   expect(result.status).toBe(0);
   expect(result.stdout).toBe('');
   expect(result.stderr).toBe('');
+});
+
+test('the OAuth grant validator accepts both repo scope encodings and requires every app collection action', () => {
+  const collections = ['scrobble', 'follow', 'settings', 'love'].map((name) => `org.atproto.music.${name}`);
+  const colonScope = `atproto ${collections.map((collection) => `repo:${collection}`).join(' ')}`;
+  const queryScope = `atproto ${collections
+    .map((collection) => `repo?collection=${encodeURIComponent(collection)}&action=create&action=update&action=delete`)
+    .join(' ')}`;
+  expect(hasAllTwelveActions('org.atproto.music', colonScope)).toBe(true);
+  expect(hasAllTwelveActions('org.atproto.music', queryScope)).toBe(true);
+  expect(hasAllTwelveActions('org.atproto.music', queryScope.replace('&action=delete', ''))).toBe(false);
+});
+
+test('automated OAuth sign-in requires the configured PDS handle to resolve to its exact DID', () => {
+  const did = 'did:plc:abcdefghijklmnopqrstuvwx';
+  expect(handleResolutionMatchesDid(200, { did }, did)).toBe(true);
+  expect(handleResolutionMatchesDid(200, { did: 'did:plc:bcdefghijklmnopqrstuvwxy' }, did)).toBe(false);
+  expect(handleResolutionMatchesDid(200, { did: ['not', 'a', 'DID'] }, did)).toBe(false);
+  expect(handleResolutionMatchesDid(404, { did }, did)).toBe(false);
+  expect(handleResolutionMatchesDid(200, null, did)).toBe(false);
+});
+
+test('automated OAuth sign-in pins the authorization origin to valid PDS metadata', () => {
+  const pds = 'https://pds-a.example.net';
+  expect(
+    expectedAuthorizationOrigin(pds, 200, {
+      resource: pds,
+      authorization_servers: ['https://login.example.org/oauth'],
+    }),
+  ).toBe('https://login.example.org');
+  expect(expectedAuthorizationOrigin(pds, 404, null)).toBe(pds);
+
+  for (const metadata of [
+    { resource: pds, authorization_servers: ['https://login.example.org', 'https://attacker.example'] },
+    { resource: 'https://attacker.example', authorization_servers: ['https://login.example.org'] },
+    { resource: pds, authorization_servers: ['http://login.example.org'] },
+    { resource: pds, authorization_servers: [null] },
+    { resource: pds, authorization_servers: ['https://user:pass@login.example.org'] },
+    { resource: pds, authorization_servers: ['https://login.example.org?next=attacker'] },
+  ]) {
+    expect(() => expectedAuthorizationOrigin(pds, 200, metadata)).toThrow();
+  }
+  expect(() => expectedAuthorizationOrigin('http://pds-a.example.net', 404, null)).toThrow();
+  expect(() => expectedAuthorizationOrigin(pds, 500, null)).toThrow();
+});
+
+test('password entry accepts only the exact pinned authorization origin', () => {
+  const expected = 'https://login.example.org';
+  expect(isExpectedAuthorizationOrigin('https://login.example.org/oauth/authorize', expected)).toBe(true);
+  for (const current of [
+    'https://attacker.example/oauth/authorize',
+    'https://login.example.org.attacker.example/oauth/authorize',
+    'https://login.example.org:444/oauth/authorize',
+    'not a URL',
+  ]) {
+    expect(isExpectedAuthorizationOrigin(current, expected)).toBe(false);
+  }
+});
+
+test('the browser request deadline aborts a fetch that never responds', async () => {
+  const page = {
+    evaluate: async (callback: (arg: unknown) => Promise<unknown>, arg: unknown) => callback(arg),
+  } as unknown as import('@playwright/test').Page;
+  const fetch = vi.fn(
+    async (_input: string | URL, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+      }),
+  );
+  vi.stubGlobal('fetch', fetch);
+  try {
+    await expect(browserRequest(page, '/api/v1/auth/logout', 'POST', undefined, {}, undefined, 20)).rejects.toThrow(
+      /timed out/,
+    );
+    expect(fetch).toHaveBeenCalledOnce();
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
+
+test('the browser request deadline aborts a response body that never finishes', async () => {
+  const page = {
+    evaluate: async (callback: (arg: unknown) => Promise<unknown>, arg: unknown) => callback(arg),
+  } as unknown as import('@playwright/test').Page;
+  const fetch = vi.fn(async (_input: string | URL, init?: RequestInit) => {
+    const signal = init?.signal;
+    return {
+      status: 200,
+      text: () =>
+        new Promise<string>((_resolve, reject) => {
+          signal?.addEventListener('abort', () => reject(new Error('body aborted')), { once: true });
+        }),
+    } as Response;
+  });
+  vi.stubGlobal('fetch', fetch);
+  try {
+    await expect(browserRequest(page, '/api/v1/auth/logout', 'POST', undefined, {}, undefined, 20)).rejects.toThrow(
+      /timed out/,
+    );
+    expect(fetch).toHaveBeenCalledOnce();
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
+
+test('follow preflight searches every page and refuses any pre-existing record for the peer', async () => {
+  const did = 'did:plc:abcdefghijklmnopqrstuvwx';
+  const collection = 'org.atproto.music.follow';
+  const peer = 'did:plc:bcdefghijklmnopqrstuvwxy';
+  const fetch = vi
+    .fn()
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({ records: [], cursor: 'page-two' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    )
+    .mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          records: [{ uri: `at://${did}/${collection}/noncanonical-key`, cid: 'bafyreia', value: { subject: peer } }],
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ),
+    );
+  vi.stubGlobal('fetch', fetch);
+  try {
+    await expect(assertNoExistingFollow('https://pds.test', did, collection, peer)).rejects.toThrow(
+      /already follow each other/,
+    );
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(String(fetch.mock.calls[1]?.[0])).toContain('cursor=page-two');
+  } finally {
+    vi.unstubAllGlobals();
+  }
 });

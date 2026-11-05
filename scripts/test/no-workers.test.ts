@@ -282,6 +282,14 @@ describe('N7 Node-only runtime', () => {
     expect(problems).toEqual([]);
   });
 
+  it('Vite proxies same-origin API routes to the Node listener with an accepted Host authority', () => {
+    const config = readFileSync(join(ROOT, 'web/vite.config.ts'), 'utf8');
+    expect(config).toContain("const NODE_DEV = 'http://127.2.0.1:8888';");
+    for (const route of ['/api', '/health', '/oauth', '/2.0', '/1', '/audioscrobbler']) {
+      expect(config).toContain(`'${route}': { target: NODE_DEV, changeOrigin: true }`);
+    }
+  });
+
   it('worker/vitest.modules.config.ts has no cloudflare:* alias and no file under worker/test imports cloudflare:test or cloudflare:workers', () => {
     const config = readFileSync(join(ROOT, 'worker/vitest.modules.config.ts'), 'utf8');
     expect(config).not.toMatch(/cloudflare:(?:test|workers)/);
@@ -296,7 +304,10 @@ describe('N7 Node-only runtime', () => {
     expect(problems).toEqual([]);
   });
 
-  it(
+  // This acceptance test installs dependencies into a disposable checkout and
+  // may need network access. Keep ordinary `npm test`/`npm run check` offline;
+  // the Node backend acceptance runner enables it explicitly.
+  it.skipIf(process.env.ATMUSIC_RUN_NO_WORKERS_ACCEPTANCE !== '1')(
     'npm run check passes in a disposable copy with no workerd binary installed',
     () => {
       const copy = copySource();
