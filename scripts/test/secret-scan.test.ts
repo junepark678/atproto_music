@@ -81,8 +81,6 @@ const DIGEST_RECORDS: Readonly<Record<string, 'manifest' | 'labelled' | 'node-ba
   'docs/verification/receipts/node-backend-dabaabf-summary.json': 'node-backend-receipt',
   'docs/verification/receipts/node-backend-e02d96e-summary.json': 'node-backend-receipt',
   'docs/verification/receipts/node-backend-4322f5d-summary.json': 'node-backend-receipt',
-  'docs/verification/lexicon-publication/README.md': 'labelled',
-  'docs/verification/lexicon-publication/manifest.json': 'labelled',
 };
 const DIGEST_LABEL = /sha-?256|artifact|digest/i;
 const MANIFEST_LINE = /^\s*"[A-Za-z0-9_./-]+\.[A-Za-z]+": "[0-9a-f]{64}",?$/;
