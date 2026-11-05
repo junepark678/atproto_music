@@ -105,17 +105,25 @@ presence and shape of `ATMUSIC_DEVENV_PDS_URL` and
 `ATMUSIC_DEVENV_HTTPS_ORIGIN`. The origin must be a bare HTTPS origin; the PDS
 value must be a bare HTTP or HTTPS origin. The client ID is derived from the
 origin's `/oauth/client-metadata.json`, and the production client authenticates
-with `private_key_jwt`; no client secret is needed. This preflight performs no
-network, socket, child-process, or browser operation and exits 2 with a blocked
-document even when both inputs are valid because the interop flow is not
-implemented yet.
+with `private_key_jwt`; no client secret is needed. The local regression
+`worker/test/node/bff/devenv-oauth.test.ts` exercises the production confidential
+client against a real `@atproto/dev-env` PDS: exchange, the four repository
+grants, create/delete, replacement-session revocation, and provider token-store
+cleanup. It uses a host-restricted fixture transport and does not contact the
+Internet. The test drives the provider authorization decision through its
+server APIs rather than exercising its browser consent UI.
+
+`devenv_oauth_check.ts` remains a preflight only. It performs no network,
+socket, child-process, or browser operation and exits 2 with a blocked document
+even when both inputs are valid; it does not run the fixture suite or produce
+operator evidence.
 
 Its schema-v3 document has `runtime: "node"`, `fixtureOnly: true`,
 `gate: "devenvOauth"`, and `result: "blocked"`. It is not one of the five
 required production gates and must not be added to `live-evidence.json` or used
 to satisfy the production `oauth` gate. This advisory result does not prove
-confidential-client exchange, scope, CRUD, token supersession, or upstream
-revocation, and does not complete N6-02.
+live confidential-client interop with an independently operated provider and
+does not complete N6-02.
 
 ### Node ingest driver (N6-02 slice)
 
@@ -179,9 +187,11 @@ N6-02 requires every operator driver to validate its required
 `ATMUSIC_LIVE_*` inputs before making any network request. If any are missing,
 the driver must exit **2**, print a blocked document listing each missing
 variable name, and make no network request. No gate contacts Last.fm or
-ListenBrainz. No Node live acceptance has been recorded. Confidential-client
-OAuth interop, SSRF probe, and Node soak remain deferred; full N6-02 and M6
-live acceptance stay open.
+ListenBrainz. No Node live acceptance has been recorded. A deterministic test
+now exercises the confidential client against a local `@atproto/dev-env` PDS,
+but production OAuth interop with independently operated providers remains
+deferred, as do the operator SSRF probe and Node soak. Full N6-02 and M6 live
+acceptance stay open.
 
 ## Node ingest timeout and recovery semantics
 

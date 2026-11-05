@@ -267,6 +267,27 @@ test('unknown OAuth URL parameters and nested encoded URLs are stripped from eve
   for (let i = 0; i < 20; i++) beyondLimit = encodeURIComponent(beyondLimit);
   const encodedQuote = `https://issuer.example/callback?next=%2522%2526code%253D${secretCode}&state=${secretState}`;
   const escapedUrl = String.raw`https:\/\/issuer.example\/cb\u003fcode=${secretCode}\u0026state=${secretState}`;
+  const mixedEscapeUrl = 'https://issuer.example/cb%5Cu003fcode=synthetic-code';
+  const reverseOrderUrl = encodeURIComponent(
+    String.raw`https://issuer.example/cb\u003fcode=${secretCode}\u0026state=${secretState}`,
+  );
+  const percentThenEscapeUrl = `https://issuer.example/cb%255Cu003fcode=${secretCode}%255Cu0026state=${secretState}`;
+  const backslashHexUrl = String.raw`https://issuer.example/cb\x3fcode=synthetic-code`;
+  const bracedUnicodeUrl = String.raw`https://issuer.example/cb\u{3f}code=synthetic-code`;
+  const encodeDepth = (value: string, depth: number) => {
+    let encoded = value;
+    for (let i = 0; i < depth; i++) encoded = encodeURIComponent(encoded);
+    return encoded;
+  };
+  const boundaryDepthUrl = encodeDepth(
+    String.raw`https://issuer.example/cb\u003fcode=${secretCode}&state=${secretState}`,
+    15,
+  );
+  const exhaustedDepthUrl = encodeDepth(
+    String.raw`https://issuer.example/cb\u003fcode=${secretCode}&state=${secretState}`,
+    16,
+  );
+  const mixedBeyondBudgetUrl = encodeDepth(String.raw`https://issuer.example/cb\u{3f}code=synthetic-code`, 15);
   const apostropheUrl = `https://issuer.example/c'b?code=${secretCode}&state=${secretState}`;
   const env = validEnv({
     ATMUSIC_LIVE_TEST_PREREQUISITE: 'ready',
@@ -275,6 +296,7 @@ test('unknown OAuth URL parameters and nested encoded URLs are stripped from eve
   await runNodeGate(
     spec(async (context) => {
       context.log(`navigation https://issuer.example/cb?code=${secretCode}&state=${secretState}`);
+      context.log(`mixed ${mixedEscapeUrl}`);
       context.cleanup(`retry ${nested}`);
       context.fail(`callback https://issuer.example/cb?request_uri=${secretRequest}`);
       return {
@@ -285,6 +307,14 @@ test('unknown OAuth URL parameters and nested encoded URLs are stripped from eve
           beyondLimit,
           encodedQuote,
           escapedUrl,
+          mixedEscapeUrl,
+          reverseOrderUrl,
+          percentThenEscapeUrl,
+          backslashHexUrl,
+          bracedUnicodeUrl,
+          boundaryDepthUrl,
+          exhaustedDepthUrl,
+          mixedBeyondBudgetUrl,
           apostropheUrl,
           escaped: `https:\\\\issuer.example\\callback?code=${secretCode}`,
         },
@@ -293,13 +323,21 @@ test('unknown OAuth URL parameters and nested encoded URLs are stripped from eve
     env,
     capture.io,
   );
-  const joined = `${capture.output().stdout}\n${capture.output().stderr}\n${capture.files.map((f) => f.text).join('\n')}`;
-  expect(joined).not.toContain(secretCode);
-  expect(joined).not.toContain(secretState);
-  expect(joined).not.toContain(secretRequest);
-  expect(joined).not.toContain('%253A');
-  expect(joined).toContain('https://issuer.example/cb');
+  const { stdout, stderr } = capture.output();
+  const evidenceOutput = capture.files.map((f) => f.text).join('\n');
+  for (const channel of [stdout, stderr, evidenceOutput]) {
+    expect(channel).not.toContain(secretCode);
+    expect(channel).not.toContain(secretState);
+    expect(channel).not.toContain(secretRequest);
+    expect(channel).not.toContain('synthetic-code');
+    expect(channel).not.toContain('%253A');
+  }
+  expect(stdout).toContain('https://issuer.example/cb');
+  expect(stdout).not.toContain('cb%5Cu003f');
   expect(() => JSON.parse(capture.files[0]!.text)).not.toThrow();
+  expect(() => JSON.parse(stdout)).not.toThrow();
+  expect(stderr).toContain('FAIL: ingest Node live gate failed');
+  expect(() => JSON.parse(stdout)).not.toThrow();
 
   const thrown = ioCapture();
   const credentialUrl = `https://user:password@issuer.example/callback?code=${secretCode}&state=${secretState}#${secretRequest}`;

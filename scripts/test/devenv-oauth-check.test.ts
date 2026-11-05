@@ -83,7 +83,7 @@ test('imports and all preflight paths are inert across transports', async () => 
     for (const url of ['file:///tmp/pds', 'http://localhost/path', 'http://127.0.0.1:2583/']) {
       expect(run({ ...good, ATMUSIC_DEVENV_PDS_URL: url }).invalid).toContain('ATMUSIC_DEVENV_PDS_URL');
     }
-    expect(run(good).reason).toContain('not implemented');
+    expect(run(good).reason).toContain('does not run the local interop fixture');
     expect(run({ ...good, ATMUSIC_DEVENV_CLIENT_SECRET: 'unused-secret-placeholder' }).missing).toEqual([]);
     expect(attempts).toEqual([]);
   } finally {
