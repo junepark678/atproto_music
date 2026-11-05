@@ -15,7 +15,7 @@
 
 import type { Clock } from '@atmusic/core/deps';
 import { buildScrobbleRecord, MSG_DURATION } from '@atmusic/core/scrobble';
-import { useRef, useState } from 'preact/hooks';
+import { useEffect, useRef, useState } from 'preact/hooks';
 import { describeFailure } from '../components/format';
 import { OperationStatus } from '../components/operation-status';
 import type { OutboxService } from '../components/outbox-service';
@@ -24,10 +24,11 @@ import { useSessionHandle } from '../components/session-identity';
 import { ErrorState, LoadingState, PublishingUnavailable, SignInPrompt } from '../components/state-views';
 import { useOutbox, useOutboxOps } from '../components/use-outbox';
 import type { OutboxOperation } from '../outbox/overlay';
+import { clearScrobbleDraft, type ScrobbleDraftValues, setScrobbleDraft, useAppState } from '../state/store';
 
 export type FieldName = 'artist' | 'track' | 'album' | 'listenedAt' | 'durationSeconds' | 'recordingMbid';
 
-export type FormValues = Record<FieldName, string>;
+export type FormValues = ScrobbleDraftValues;
 
 export type FieldErrors = Partial<Record<FieldName | 'form', string>>;
 
@@ -142,14 +143,31 @@ export default function ScrobbleScreen() {
 }
 
 export function ScrobbleForm({ outbox }: { outbox: OutboxService }) {
+  const state = useAppState();
   const services = useServices();
-  const [values, setValuesState] = useState<FormValues>(() => emptyForm(services.clock));
+  const draft = state.scrobbleDraft.value;
+  const [values, setValuesState] = useState<FormValues>(() => {
+    return draft?.did === outbox.did ? { ...draft.values } : emptyForm(services.clock);
+  });
   // The latest input, updated synchronously: a submit right after typing must
   // validate what is in the fields, not the last rendered state.
   const valuesRef = useRef(values);
+  const mountedRef = useRef(false);
+  useEffect(() => {
+    if (!mountedRef.current) {
+      mountedRef.current = true;
+      return;
+    }
+    if (draft === null || draft.did !== outbox.did) {
+      const reset = emptyForm(services.clock);
+      valuesRef.current = reset;
+      setValuesState(reset);
+    }
+  }, [draft, outbox.did, services.clock]);
   const setValues = (next: FormValues) => {
     valuesRef.current = next;
     setValuesState(next);
+    setScrobbleDraft(state, next);
   };
   const [errors, setErrors] = useState<FieldErrors>({});
   const [submitting, setSubmitting] = useState(false);
@@ -168,6 +186,8 @@ export function ScrobbleForm({ outbox }: { outbox: OutboxService }) {
       if (first) formRef.current?.querySelector<HTMLInputElement>(`[name="${first.name}"]`)?.focus();
       return;
     }
+    const submittedDraftRevision =
+      state.scrobbleDraft.value?.did === outbox.did ? state.scrobbleDraft.value.revision : undefined;
     setSubmitting(true);
     try {
       const result = await outbox.scrobble(formInput(current).input);
@@ -176,7 +196,24 @@ export function ScrobbleForm({ outbox }: { outbox: OutboxService }) {
         return;
       }
       setSubmitted((ids) => [result.op.id, ...ids]);
-      setValues(emptyForm(services.clock));
+      const latestDraft = state.scrobbleDraft.value;
+      if (
+        submittedDraftRevision !== undefined &&
+        latestDraft?.did === outbox.did &&
+        latestDraft.revision === submittedDraftRevision
+      ) {
+        clearScrobbleDraft(state);
+      }
+      if (
+        (submittedDraftRevision === undefined && (latestDraft === null || latestDraft.did !== outbox.did)) ||
+        (submittedDraftRevision !== undefined &&
+          latestDraft?.did === outbox.did &&
+          latestDraft.revision === submittedDraftRevision)
+      ) {
+        const reset = emptyForm(services.clock);
+        valuesRef.current = reset;
+        setValuesState(reset);
+      }
     } catch (error) {
       setErrors({ form: describeFailure(error) });
     } finally {

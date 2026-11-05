@@ -320,10 +320,10 @@ export function holdLinkRows(db: Db, linkId: string, now: number): number {
   ).rowsWritten;
 }
 
-/** Queues a relinked link's held rows again, due now. Returns how many. */
+/** Queues a relinked link's held rows without bypassing their original due time. */
 export function resumeHeldRows(db: Db, linkId: string, now: number): number {
   return db.run(
-    `UPDATE forward_outbox SET state = 'queued', due_at = ?, updated_at_ms = ? WHERE link_id = ? AND state = 'held'`,
+    `UPDATE forward_outbox SET state = 'queued', due_at = max(due_at, ?), updated_at_ms = ? WHERE link_id = ? AND state = 'held'`,
     now,
     now,
     linkId,

@@ -399,12 +399,12 @@ export class World {
         headers.set('x-csrf-token', o.as.csrf);
       }
     }
-    let body: string | Uint8Array | undefined;
+    let body: string | ArrayBuffer | undefined;
     if (o.form !== undefined) {
       body = new URLSearchParams(o.form).toString();
       headers.set('content-type', 'application/x-www-form-urlencoded');
     } else if (o.body instanceof Uint8Array) {
-      body = o.body;
+      body = Uint8Array.from(o.body).buffer;
     } else if (o.body !== undefined) {
       body = typeof o.body === 'string' ? o.body : JSON.stringify(o.body);
       if (!headers.has('content-type')) headers.set('content-type', 'application/json');

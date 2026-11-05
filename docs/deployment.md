@@ -8,7 +8,6 @@ Production is **one Node 26 process on the owner's machine**: the systemd user s
 | How public traffic reaches the port (Cloudflare Tunnel, Caddy/nginx DNS-only, proxied DNS) and the matching `ATMUSIC_CLIENT_IP_HEADER` | [deploy/exposure.md](deploy/exposure.md) |
 | Health, admin CLI, logs, secrets and key rotation, Gentoo notes, sleep, same-UID exposure | [operations.md](operations.md) |
 | Backups, the revocation journal, restore (disaster recovery only) | [backup.md](backup.md) |
-| Static assets and SPA routing rules | [deploy/routing.md](deploy/routing.md) |
 | Artifact-bound rollout gates and rollback plan (currently NO-GO) | [M6 deployment plan](verification/milestones/m6-deployment-plan.md) |
 
 ## Deployment values
