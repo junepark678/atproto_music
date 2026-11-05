@@ -153,7 +153,9 @@ npm run --silent lint
 # Every project (core, atproto, worker-modules, worker-node, worker-composition,
 # worker-acceptance, worker-bench, web, scripts, scripts-gate), or only the
 # --projects ones.
-vitest_args=(--reporter=default --reporter=json)
+# Setup can build the production SPA while fixture benchmarks use the CPU.
+# Keep that work bounded without changing per-test deadlines or assertions.
+vitest_args=(--reporter=default --reporter=json --hookTimeout=60000)
 test_command='npm test'
 if ((${#projects[@]} > 0)); then
   step "test (vitest, projects: ${projects[*]})"
