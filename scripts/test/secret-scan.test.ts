@@ -1,11 +1,10 @@
 // Credential scan of the configuration examples and docs (plan case
 // M6.1.3/secret_example_scan; ADR 0004 §8 "Server secrets"; W6-04).
 //
-// The operator-facing examples (worker/.dev.vars.example, .env.example,
-// config/*.example*), the committed wrangler config, README.md and every text
+// The operator-facing Node examples, README.md and every text
 // file under docs/ must contain no credential-shaped value: no PEM private
 // key, JWT or provider token, no long random value assigned to a key, token,
-// secret or password name, no literal piped into `wrangler secret put` and no
+// secret or password name, no literal piped into a secret-management command and no
 // literal bearer token. As in the Rust oracle (crates/server/tests/
 // deployment.rs `secret_example_scan`), any word of exactly 64 hex digits
 // (a line split on non-hex characters) is a literal 32-byte secret, whatever
@@ -45,7 +44,7 @@ const RULES: readonly { rule: string; pattern: RegExp }[] = [
   {
     rule: 'secret-put-literal',
     pattern:
-      /\b(?:echo|printf)\s+(?:-[a-z]+\s+)?["']?[A-Za-z0-9+/=_-]{16,}["']?\s*\|\s*(?:npx\s+)?wrangler\s+secret\s+put\b/,
+      /\b(?:echo|printf)\s+(?:-[a-z]+\s+)?["']?[A-Za-z0-9+/=_-]{16,}["']?\s*\|\s*(?:npx\s+)?(?:wrangler\s+secret\s+put|systemd-creds\s+encrypt)\b/,
   },
   {
     rule: 'bearer-literal',
@@ -62,19 +61,29 @@ const RULES: readonly { rule: string; pattern: RegExp }[] = [
  * files name the digest (SHA-256, sha256, artifact) on the same or the
  * previous line.
  */
-const DIGEST_RECORDS: Readonly<Record<string, 'manifest' | 'labelled'>> = {
+const DIGEST_RECORDS: Readonly<Record<string, 'manifest' | 'labelled' | 'node-backend-receipt'>> = {
   'docs/VALIDATION.md': 'labelled',
   'docs/adr/0002-oauth.md': 'labelled',
   'docs/benchmarks/read_models.json': 'labelled',
   'docs/benchmarks/read_models.md': 'labelled',
+  'docs/benchmarks/receipts/n5-02-read-models-post-index.json': 'labelled',
   'docs/verification/backend-candidate.json': 'labelled',
   'docs/verification/backend-production-inputs.json': 'manifest',
   'docs/verification/backend.md': 'labelled',
   'docs/verification/live-evidence.json': 'labelled',
+  'docs/verification/backend-node.md': 'labelled',
   'docs/verification/lexicon-publication/README.md': 'labelled',
   'docs/verification/lexicon-publication/manifest.json': 'labelled',
+  'docs/verification/receipts/node-backend-461e7a9-summary.json': 'node-backend-receipt',
+  'docs/verification/receipts/node-backend-396de2d-summary.json': 'node-backend-receipt',
+  'docs/verification/receipts/node-backend-14f6ee3-summary.json': 'node-backend-receipt',
+  'docs/verification/receipts/node-backend-8d41546-summary.json': 'node-backend-receipt',
+  'docs/verification/receipts/node-backend-be1c0a5-summary.json': 'node-backend-receipt',
+  'docs/verification/receipts/node-backend-dabaabf-summary.json': 'node-backend-receipt',
+  'docs/verification/receipts/node-backend-e02d96e-summary.json': 'node-backend-receipt',
+  'docs/verification/receipts/node-backend-4322f5d-summary.json': 'node-backend-receipt',
 };
-const DIGEST_LABEL = /sha-?256|artifact/i;
+const DIGEST_LABEL = /sha-?256|artifact|digest/i;
 const MANIFEST_LINE = /^\s*"[A-Za-z0-9_./-]+\.[A-Za-z]+": "[0-9a-f]{64}",?$/;
 
 /** Words of exactly 64 hex digits, split on non-hex characters as the oracle does. */
@@ -87,6 +96,18 @@ function allowedDigest(file: string, lines: readonly string[], index: number): b
   const line = lines[index] ?? '';
   if (kind === 'manifest') return MANIFEST_LINE.test(line);
   if (kind === 'labelled') return DIGEST_LABEL.test(line) || DIGEST_LABEL.test(lines[index - 1] ?? '');
+  if (kind === 'node-backend-receipt') {
+    const declaredBundle = lines
+      .find((candidate) => /^\s*"bundleSha256"\s*:/.test(candidate))
+      ?.match(/"bundleSha256"\s*:\s*"([0-9a-f]{64})"/)?.[1];
+    if (!declaredBundle) return false;
+    const words = hex64Words(line);
+    return (
+      words.length > 0 &&
+      words.every((word) => word === declaredBundle) &&
+      (/"bundleSha256"\s*:/.test(line) || /bundle\s+[0-9a-f]{64}/i.test(line))
+    );
+  }
   return false;
 }
 
@@ -136,14 +157,7 @@ function walk(dir: string): string[] {
 
 /** The files this scan covers, repository-relative. */
 function scannedFiles(): string[] {
-  const fixed = [
-    'worker/.dev.vars.example',
-    '.env.example',
-    'config/atmusic.env.example',
-    'config/atmusic.workers.example.jsonc',
-    'worker/wrangler.jsonc',
-    'README.md',
-  ];
+  const fixed = ['.env.example', 'config/atmusic.env.example', 'README.md'];
   const docs = walk(join(ROOT, 'docs')).map((f) => relative(ROOT, f).split(sep).join('/'));
   return [...fixed, ...docs];
 }
@@ -170,7 +184,7 @@ describe('scripts/test/secret-scan.test.ts', () => {
       'slack-token': `SLACK=${['xo', 'xb'].join('')}-${'1234567890'}-${'a1B2c3D4e5'}`,
       'gitlab-token': `${['gl', 'pat'].join('')}-${'a1B2_c3D4-'.repeat(2)}`,
       'api-key-sk': `${['s', 'k'].join('')}-${'a1B2c3D4'.repeat(3)}`,
-      'secret-put-literal': `echo ${hex} | npx wrangler secret put CURSOR_KEY`,
+      'secret-put-literal': `echo ${hex} | systemd-creds encrypt CURSOR_KEY`,
       'bearer-literal': `Authorization: Bearer ${mixed}`,
     };
     for (const [rule, sample] of Object.entries(samples)) {
@@ -203,7 +217,7 @@ describe('scripts/test/secret-scan.test.ts', () => {
       hex,
       hex.toUpperCase(),
       `CURSOR_KEY value ${hex}`,
-      `wrangler secret put CURSOR_KEY <<< ${hex}`,
+      `systemd-creds encrypt CURSOR_KEY <<< ${hex}`,
       `bundle sha256 ${hex}`,
       `\`${hex}\``,
       `x${hex}`, // x is not a hex digit, so the word is still 64 long
@@ -224,6 +238,20 @@ describe('scripts/test/secret-scan.test.ts', () => {
     expect(
       scanText('docs/verification/backend-production-inputs.json', `  "crates/core/src/lib.rs": "${hex}",`),
     ).toEqual([]);
+    const receiptPath = 'docs/verification/receipts/node-backend-dabaabf-summary.json';
+    const receiptWithBundleDigest = [
+      '{',
+      `  "bundleSha256": "${hex}",`,
+      `      "message": "recorded evidence is bound to bundle ${hex}"`,
+      '}',
+    ].join('\n');
+    expect(scanText(receiptPath, receiptWithBundleDigest)).toEqual([]);
+    expect(
+      scanText(
+        receiptPath,
+        receiptWithBundleDigest.replace(`bound to bundle ${hex}`, `bound to bundle ${'a'.repeat(64)}`),
+      ).map((finding) => finding.rule),
+    ).toContain('hex-64');
     for (const [file, sample] of [
       ['docs/VALIDATION.md', `CURSOR_KEY ${hex}`],
       ['docs/adr/0002-oauth.md', `Some text\n${hex}`],
@@ -260,7 +288,6 @@ describe('scripts/test/secret-scan.test.ts', () => {
     // or a doc this package rewrote for operators.
     for (const record of Object.keys(DIGEST_RECORDS)) expect(files).toContain(record);
     for (const operatorFile of [
-      'worker/.dev.vars.example',
       '.env.example',
       'config/atmusic.env.example',
       'README.md',
@@ -273,17 +300,11 @@ describe('scripts/test/secret-scan.test.ts', () => {
       expect(DIGEST_RECORDS[operatorFile], operatorFile).toBeUndefined();
     }
 
-    // worker/.dev.vars.example names the secrets with empty values only.
-    const devVars = readFileSync(join(ROOT, 'worker/.dev.vars.example'), 'utf8');
-    expect(assignments(devVars)).toEqual(['CURSOR_KEY=']);
-    expect(devVars).toMatch(/^# ADMIN_TOKEN=$/m);
-    // .env.example and config/atmusic.env.example are pointers to it, with no
-    // variables of the retired Rust executable left to fill in.
-    for (const pointer of ['.env.example', 'config/atmusic.env.example']) {
-      const text = readFileSync(join(ROOT, pointer), 'utf8');
-      expect(text, pointer).toContain('worker/.dev.vars.example');
-      expect(assignments(text), pointer).toEqual([]);
-      expect(text, pointer).not.toMatch(/ATMUSIC_ENCRYPTION_KEY|ATMUSIC_METRICS_TOKEN/);
-    }
+    const envExample = readFileSync(join(ROOT, 'config/atmusic.env.example'), 'utf8');
+    expect(assignments(envExample)).toEqual([]);
+    expect(envExample).not.toMatch(/ATMUSIC_ENCRYPTION_KEY|ATMUSIC_METRICS_TOKEN|ADMIN_TOKEN|DO_LOCATION_HINT/);
+    const pointer = readFileSync(join(ROOT, '.env.example'), 'utf8');
+    expect(pointer).toContain('config/atmusic.env.example');
+    expect(assignments(pointer)).toEqual([]);
   });
 });

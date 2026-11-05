@@ -768,9 +768,9 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 
 | Case | Disposition |
 | --- | --- |
-| `metrics_auth` | `worker/test/composition/admin.test.ts › admin routes 404 without ADMIN_TOKEN; wrong token 401 constant-time; status JSON shape`; also `worker/test/composition/logging.test.ts › captured logs and error bodies contain no CURSOR_KEY, ADMIN_TOKEN or bearer marker and logs contain no track-title marker` (required wave amendment, W5-01) (A16: metrics become /internal/admin/status.) |
+| `metrics_auth` | `worker/test/composition/admin.test.ts › admin routes 404 without ADMIN_TOKEN; wrong token 401 constant-time; status JSON shape`; also `worker/test/composition/logging.test.ts › captured logs and error bodies contain no CURSOR_KEY or bearer marker and logs contain no track-title marker` (required wave amendment, W5-01) (A16: metrics become /internal/admin/status.) |
 | `upstream_offline` | `worker/test/storage/status.test.ts › socket disconnected >5min reports stale`; also `worker/test/http/health-meta.test.ts › ready 200 and meta indexing stale while the index reports the socket disconnected` (required wave amendment, W1-07) |
-| `log_redaction` | `worker/test/composition/logging.test.ts › captured logs and error bodies contain no CURSOR_KEY, ADMIN_TOKEN or bearer marker and logs contain no track-title marker` (required wave amendment, W5-01) (There are no OAuth codes or cookies to mark (A3).) |
+| `log_redaction` | `worker/test/composition/logging.test.ts › captured logs and error bodies contain no CURSOR_KEY or bearer marker and logs contain no track-title marker` (required wave amendment, W5-01) (There are no OAuth codes or cookies to mark (A3).) |
 
 ### M6.2.3 Add reproducible query latency benchmark
 
@@ -1179,8 +1179,8 @@ Some cases have no wave test whose title asserts their outcome. For each one, th
 
 **W5-01** (new files: `worker/test/composition/logging.test.ts`)
 
-- `worker/test/composition/logging.test.ts › captured logs and error bodies contain no CURSOR_KEY, ADMIN_TOKEN or bearer marker and logs contain no track-title marker` — covers `M6.2.2/metrics_auth`, `M6.2.2/log_redaction`
-- `worker/test/composition/routing.test.ts › forced storage error → 500 envelope with UUID requestId and no stack trace or file path` — covers `M1.4.2/safe_errors`
+- `worker/test/composition/logging.test.ts › captured logs and error bodies contain no CURSOR_KEY or bearer marker and logs contain no track-title marker` — covers `M6.2.2/metrics_auth`, `M6.2.2/log_redaction`
+- `worker/test/node/compose.test.ts › every ctx built by compose carries deps, app and peer, and need(ctx, 'app') on a ctx without app answers 500 CtxWiringError` — Node composition equivalent for `M1.4.2/safe_errors` after N7-01 retires the Workers fetch adapter.
 
 **W6-01**
 

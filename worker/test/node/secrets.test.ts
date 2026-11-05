@@ -233,8 +233,6 @@ describe('loadSecrets', () => {
         INGEST_MODE: 'off',
         JETSTREAM_LOOKBACK_HOURS: '24',
         RELAY_URL: 'https://relay.example.org',
-        PLAN: undefined,
-        DO_LOCATION_HINT: undefined,
       },
       { allowFixturePrefix: true },
     );

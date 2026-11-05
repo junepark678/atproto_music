@@ -26,6 +26,7 @@
 // transport (test-support only), whose `fixture: true` mark admits the
 // reserved fixture TLDs exactly as it does for SafeFetch.
 
+import type { ReadableStreamReadResult } from 'node:stream/web';
 import { type DeadlineTimer, systemTimer } from '@atmusic/atproto/net/safe-fetch';
 import { checkUrl, isFixtureTransport } from '@atmusic/atproto/net/url-policy';
 import type { Transport } from '@atmusic/atproto/transport';
@@ -194,6 +195,12 @@ function cappedBody(
   });
 }
 
+function ownedArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  const copy = new ArrayBuffer(bytes.byteLength);
+  new Uint8Array(copy).set(bytes);
+  return copy;
+}
+
 function discard(response: Response): void {
   if (response.body) response.body.cancel().catch(() => {});
 }
@@ -240,7 +247,7 @@ export function createPolicyFetch(options: CreatePolicyFetchOptions): PolicyFetc
     const request = new Request(url.href, {
       method: draft.method,
       headers: draft.headers,
-      body,
+      body: body === null ? null : ownedArrayBuffer(body),
       redirect: 'manual',
       signal,
     });

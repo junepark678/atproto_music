@@ -4,9 +4,7 @@
 //
 // Hosts (ADR 0005 §3.4, N1-04):
 // - `fetch(req)` answers an upgrade with a 101 Response carrying the client
-//   end of a socket pair: workerd's WebSocketPair when the host has one (kept
-//   for the workerd suites until N7-01), else the in-memory
-//   `MemoryWebSocketPair` below. Where the host's Response refuses status 101
+//   end of an in-memory `MemoryWebSocketPair`. Where the host's Response refuses status 101
 //   (Node/undici), the 101 and `webSocket` are set on a stand-in Response.
 // - `memoryLink(fakes)` is an in-memory JetstreamLink connector that works on
 //   any host: it runs the same handshake (faults, call log, cursor checks)
@@ -78,14 +76,13 @@ export interface FakeJetstreamOptions {
   startSeq?: number;
 }
 
-/** What a workerd WebSocket adds to the DOM type. */
-type WorkerdWebSocket = WebSocket & { accept(): void };
-type WebSocketPairCtor = new () => { 0: WorkerdWebSocket; 1: WorkerdWebSocket };
+/** Accept method used by both ends of the in-memory test socket. */
+type MemorySocket = WebSocket & { accept(): void };
 
 /** The two ends of a socket pair: the client end goes to the connector, the server end stays with the fake. */
 export interface SocketPair {
-  client: WorkerdWebSocket;
-  server: WorkerdWebSocket;
+  client: MemorySocket;
+  server: MemorySocket;
 }
 
 const WS_CONNECTING = 0;
@@ -207,17 +204,9 @@ export class MemoryWebSocketPair {
 export function memoryPair(): SocketPair {
   const pair = new MemoryWebSocketPair();
   return {
-    client: pair[0] as unknown as WorkerdWebSocket,
-    server: pair[1] as unknown as WorkerdWebSocket,
+    client: pair[0] as unknown as MemorySocket,
+    server: pair[1] as unknown as MemorySocket,
   };
-}
-
-/** The host's WebSocketPair when it has one (workerd), else the in-memory pair. */
-function webSocketPair(): SocketPair {
-  const Ctor = (globalThis as { WebSocketPair?: WebSocketPairCtor }).WebSocketPair;
-  if (!Ctor) return memoryPair();
-  const pair = new Ctor();
-  return { client: pair[0], server: pair[1] };
 }
 
 /**
@@ -226,7 +215,7 @@ function webSocketPair(): SocketPair {
  * RangeError) gets a stand-in Response with `status`, `ok`, `statusText` and
  * `webSocket` set on the instance.
  */
-function upgradeResponse(client: WorkerdWebSocket): Response {
+function upgradeResponse(client: MemorySocket): Response {
   try {
     return new Response(null, { status: 101, webSocket: client } as ResponseInit & { webSocket: WebSocket });
   } catch (error) {
@@ -247,7 +236,7 @@ export type CursorResolution =
   | { ok: false; reason: 'outdated_cursor'; floorUs: number };
 
 /** A handshake's outcome: a refusal Response (no socket), or an accepted upgrade's client end. */
-export type Handshake = { kind: 'refused'; response: Response } | { kind: 'upgraded'; client: WorkerdWebSocket };
+export type Handshake = { kind: 'refused'; response: Response } | { kind: 'upgraded'; client: MemorySocket };
 
 /** One subscriber socket, driven by the test. */
 export class FakeJetstreamConnection {
@@ -266,7 +255,7 @@ export class FakeJetstreamConnection {
     readonly collections: readonly string[],
     readonly kinds: readonly string[],
     readonly client: WebSocket,
-    private readonly server: WorkerdWebSocket,
+    private readonly server: MemorySocket,
   ) {
     server.addEventListener('message', (ev) => {
       this.received.push(typeof ev.data === 'string' ? ev.data : '[binary]');
@@ -403,7 +392,7 @@ export class FakeJetstream {
 
   /** The HTTP face: a refusal, or a 101 whose `webSocket` is the client end (workerd's pair, else in-memory). */
   readonly fetch = async (req: Request): Promise<Response> => {
-    const answer = await this.handshake(req, webSocketPair);
+    const answer = await this.handshake(req, memoryPair);
     return answer.kind === 'refused' ? answer.response : upgradeResponse(answer.client);
   };
 
@@ -548,7 +537,7 @@ async function refusalName(res: Response): Promise<string | null> {
 }
 
 /** Accepts `ws` and buffers its events until the owner starts the link (as the worker's `linkOf`). */
-function bufferedLink(ws: WorkerdWebSocket, url: string): MemoryJetstreamLink {
+function bufferedLink(ws: MemorySocket, url: string): MemoryJetstreamLink {
   ws.accept();
   const queue: MemoryLinkEvent[] = [];
   let sink: ((e: MemoryLinkEvent) => void) | null = null;

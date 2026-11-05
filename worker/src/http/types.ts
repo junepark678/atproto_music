@@ -4,9 +4,8 @@
 // composition (worker/src/node/compose.ts) adds the feature routes.
 //
 // RequestCtx (ADR 0005 §3.1):
-// - `env` is the structural AppEnv: the two namespace variables meta, notify
-//   and record-status read, plus the Workers-only ADMIN_TOKEN (removed by
-//   N7-01). The Workers `Env` is assignable to it.
+// - `env` is the structural AppEnv: the namespace variables meta, notify and
+//   record-status read.
 // - `deps`, `app` and `peer` are optional at the type level, so the RequestCtx
 //   literals of the worker-modules suites keep compiling. The Node composition
 //   always sets them; a handler that needs one reads it through
@@ -23,9 +22,7 @@ import type { IndexRpc, ModuleDeps } from '../do/contracts';
 import type { EnvVars } from '../env';
 
 /** What routes read of the environment (ADR 0005 §3.1); the Workers Env is assignable to it. */
-export type AppEnv = Pick<EnvVars, 'LEXICON_PREFIX' | 'NAMESPACE_OWNERSHIP_REF' | 'NAMESPACE_PUBLICATION_REF'> & {
-  ADMIN_TOKEN?: string;
-};
+export type AppEnv = Pick<EnvVars, 'LEXICON_PREFIX' | 'NAMESPACE_OWNERSHIP_REF' | 'NAMESPACE_PUBLICATION_REF'>;
 
 export interface RequestCtx {
   env: AppEnv;

@@ -47,7 +47,7 @@
 import { ApiError } from '@atmusic/core/errors';
 import type { Revocations } from '../app/revocations';
 import type { AppServices } from '../app/services';
-import { requireSession, type SessionGuardCtx, withSessionCookie } from '../bff/guard';
+import { requireSession, type SessionGuardCtx, sessionErrorResponse, withSessionCookie } from '../bff/guard';
 import { createWebSessions, type WebSession, type WebSessions } from '../bff/sessions';
 import { CredentialError } from '../credentials/accounts';
 import { type Box, createBox } from '../crypto/box';
@@ -73,6 +73,7 @@ import { bindPolicyFetch, createPolicyFetch } from '../node/policy-fetch';
 import { errorResponse, toErrorResponse } from './error';
 import { json } from './json';
 import { readJsonBody } from './params';
+import { SessionEnded, writeInLiveSession } from './session-write';
 import { CtxWiringError, need, type RequestCtx, type RouteDef } from './types';
 
 /** The JSON body cap of the link routes (the contract's x-maxBodyBytes). */
@@ -158,6 +159,7 @@ function guarded(handler: Handler): RouteDef['handler'] {
     try {
       res = await handler(req, ctx, service, admitted.session, params);
     } catch (error) {
+      if (error instanceof SessionEnded) return sessionErrorResponse('unauthenticated', ctx.requestId);
       // An account that disconnected between the guard and here holds no links.
       if (error instanceof CredentialError && error.reason === 'no_account') {
         res = errorResponse('not_found', 404, ctx.requestId);
@@ -219,9 +221,11 @@ const lastfmCallback: Handler = async (req, ctx, service, session) => {
   }
   const out = await service.lastfm.getSession(tokens[0] as string);
   if (!out.ok) return errorResponse('upstream_error', 502, ctx.requestId);
-  saveLink(
-    { db: service.db, clock: ctx.clock, random: service.forwarding.random, box: service.box },
-    { did: session.did, service: 'lastfm', remoteUser: out.value.name, credential: out.value.key },
+  writeInLiveSession(service.db, service.sessions, req, session, () =>
+    saveLink(
+      { db: service.db, clock: ctx.clock, random: service.forwarding.random, box: service.box },
+      { did: session.did, service: 'lastfm', remoteUser: out.value.name, credential: out.value.key },
+    ),
   );
   return new Response(null, { status: 303, headers: { location: LINKS_SETTINGS_PATH, 'cache-control': 'no-store' } });
 };
@@ -238,9 +242,12 @@ const listenbrainzLink: Handler = async (req, ctx, service, session) => {
   const out = await service.listenbrainz.validateToken(token);
   if (!out.ok) return errorResponse('upstream_error', 502, ctx.requestId);
   if (!out.value.valid) throw fieldError('token', 'ListenBrainz does not accept this token.');
-  const saved = saveLink(
-    { db: service.db, clock: ctx.clock, random: service.forwarding.random, box: service.box },
-    { did: session.did, service: 'listenbrainz', remoteUser: out.value.userName, credential: token },
+  const remoteUser = out.value.userName;
+  const saved = writeInLiveSession(service.db, service.sessions, req, session, () =>
+    saveLink(
+      { db: service.db, clock: ctx.clock, random: service.forwarding.random, box: service.box },
+      { did: session.did, service: 'listenbrainz', remoteUser, credential: token },
+    ),
   );
   return json(linkDto(saved.link), 201);
 };

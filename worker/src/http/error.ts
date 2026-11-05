@@ -31,7 +31,7 @@ export const ERROR_MESSAGES: Readonly<Record<ErrorCode, string>> = {
 
 export interface ErrorOptions {
   /** Extra response headers, e.g. `Retry-After` on 429. `Cache-Control` is always `no-store`. */
-  headers?: HeadersInit;
+  headers?: NonNullable<RequestInit['headers']>;
 }
 
 function assertErrorStatus(status: number): void {

@@ -181,6 +181,18 @@ function utcTime(ms: number): Buffer {
   return der(0x17, Buffer.from(text, 'ascii'));
 }
 
+/** Return an eight-byte DER INTEGER payload that is positive and minimally encoded. */
+export function certificateSerialFromDigest(digest: Uint8Array): Buffer {
+  if (digest.length < 8) throw new Error('certificate serial digest must contain at least eight bytes');
+  const serial = Buffer.from(digest.subarray(0, 8));
+  serial[0] = (serial[0] as number) & 0x7f; // positive INTEGER
+  // DER forbids an unnecessary leading zero octet. Masking a first byte of
+  // 0x00 or 0x80 would otherwise leave a non-canonical serial and OpenSSL may
+  // reject the certificate with ASN.1 illegal padding.
+  if (serial[0] === 0) serial[0] = 1;
+  return serial;
+}
+
 export interface SelfSignedCert {
   keyPem: string;
   certPem: string;
@@ -192,8 +204,7 @@ export function selfSignedCert(dnsNames: readonly string[], nowMs: number = Date
   const spki = publicKey.export({ type: 'spki', format: 'der' });
   const ecdsaSha256 = seq(oid('1.2.840.10045.4.3.2'));
   const name = seq(der(0x31, seq(oid('2.5.4.3'), der(0x0c, Buffer.from('atmusic e2e dev-env', 'utf8')))));
-  const serial = createHash('sha256').update(spki).digest().subarray(0, 8);
-  serial[0] = (serial[0] as number) & 0x7f; // positive INTEGER
+  const serial = certificateSerialFromDigest(createHash('sha256').update(spki).digest());
   const san = seq(...dnsNames.map((n) => der(0x82, Buffer.from(n, 'ascii'))));
   const extensions = der(
     0xa3,

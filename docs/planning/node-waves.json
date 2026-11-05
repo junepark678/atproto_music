@@ -149,7 +149,7 @@
      "worker/test/storage/timers-extensions.test.ts › runDue with a names subset claims only those timers, and two lanes over two AlarmStorage objects never hit TimerReentryError",
      "worker/test/storage/timers-extensions.test.ts › a core runDue started while outbox is claimed leaves ~running:outbox untouched and records no failure",
      "worker/test/storage/timers-extensions.test.ts › TIMER_NAMES is the seven core names, EXTENSION_TIMER_NAMES the six extension names, and nextDue for one lane ignores the other lane's due rows",
-     "worker/test/composition/index-core.test.ts › app/index-core.ts imports no cloudflare: module and no value from env.ts, and index-do.ts re-exports every name it moved"
+     "worker/test/composition/index-core.test.ts › app/index-core.ts and its host seams import no Workers modules or runtime environment values"
     ]
    },
    {
@@ -275,7 +275,7 @@
     "tests": [
      "worker/test/node/config.test.ts › ATMUSIC_DB defaults to $STATE_DIRECTORY/atmusic.db; with neither set the ConfigError names ATMUSIC_DB",
      "worker/test/node/config.test.ts › without the fixtureOrigins option an http PUBLIC_ORIGIN, and an upstream root that is http, an IP literal, a loopback name or a non-default port, are rejected whatever other environment variables are set",
-     "worker/test/node/config.test.ts › INGEST_MODE=pulse, an operator-set PLAN (paid or free) and DO_LOCATION_HINT are each rejected with a message citing ADR 0005, and the embedded parseConfig receives PLAN paid and an empty DO_LOCATION_HINT",
+     "worker/test/node/config.test.ts › INGEST_MODE accepts socket and off only, ignores retired plan and placement variables, and embedded config has no tier or placement fields",
      "worker/test/node/secrets.test.ts › secrets load from $CREDENTIALS_DIRECTORY/secrets; ATMUSIC_SECRETS_FILE with mode 0640 is refused",
      "worker/test/node/secrets.test.ts › duplicate kids, a public-only signing key, a 16-byte cursorKey or a 31-byte encryption key are each a ConfigError naming the field",
      "worker/test/node/secrets.test.ts › no secret value appears in process.env, JSON.stringify(config) or any thrown error text",
@@ -363,7 +363,7 @@
      "worker/test/storage/schema-v2.test.ts › deleting a users row cascades its loves and deleting a linked_accounts row cascades its forward_outbox rows",
      "worker/test/storage/schema-v2.test.ts › a v1 database seeded with the read-model fixture migrates to v2 with every v1 row byte-identical and the new scrobbles columns NULL",
      "worker/test/storage/schema-v2.test.ts › EXPLAIN QUERY PLAN for loves by owner, due operations, due forward rows and import items by job uses the new indexes",
-     "worker/test/storage/migrate.test.ts › SCHEMA_VERSION is 3 and additive follow proof storage remains compatible with v2 code",
+     "worker/test/storage/migrate.test.ts › SCHEMA_VERSION is 4; follow-proof and delete-target indexes are additive and keep v2 compatibility",
      "worker/test/storage/schema-v2.test.ts › schema_compat holds one row with min_compatible_version 2",
      "worker/test/storage/schema-v2.test.ts › every migration after 2 contains only CREATE TABLE, CREATE INDEX and ALTER TABLE ADD COLUMN statements",
      "worker/test/harness/local-index.test.ts › the ready status and the schema_migrations ledger equal SCHEMA_VERSION and one row per entry of MIGRATIONS",
@@ -1481,6 +1481,7 @@
     "description": "ADR 0005 §5.9. Remove @atproto/oauth-client-browser and regenerate the lockfile.\n\n**Deleted:**\n- web/src/oauth/* — and its importers change here: web/src/main.tsx (imports ./oauth/types and globs ./oauth/session.ts at :10 and :14) boots web/src/session/client.ts instead, and web/src/state/store.ts (:13 imports PdsSession from ../oauth/types) holds the server Session DTO {did, handle, username, csrfToken, status, expiresAt} in place of PdsSession, so tsc -b stays green;\n- web/src/outbox/* except overlay.ts;\n- routes/callback.tsx.\n\n**Added:**\n- the session client (csrfToken; credentials same-origin);\n- writes with Idempotency-Key, and operation and record-status polling into the overlay;\n- migration.ts, which deletes the legacy atmusic* IndexedDB databases;\n- screens /settings/links, /settings/imports (progress, ETA, cancel), /settings/credentials (secret shown once) and /lastfm/authorize.\n\n**Config:** spa-routes drops /oauth/callback and adds the new routes. gen-config imports CLIENT_NAME from packages/core/src/client-name.ts (N2-03), stops emitting oauth/client-metadata.json, sets connect-src 'self', and takes PUBLIC_ORIGIN and LEXICON_PREFIX from --origin/--prefix or config/atmusic.env.example instead of worker/wrangler.jsonc.\n\n**Tests:** web/test/oauth and web/test/outbox are deleted. ts-case-map.json and node-port-inventory.json remap their cases to the N2-03, N2-04, N2-05 and N3-01 tests.",
     "tests": [
      "web/test/session/client.test.ts › getSession caches csrfToken; every mutation sends X-CSRF-Token with same-origin credentials; 401 shows signed-out and reauth_required shows the re-sign-in banner",
+     "web/test/session/client.test.ts › accepts reauth_required DTOs but blocks writes except sign-out",
      "web/test/routes/scrobble.test.tsx › submitting the form posts with a fresh Idempotency-Key and shows queued, published, then indexed from operation and record-status polling",
      "web/test/routes/settings.test.tsx › the links, imports and credentials screens render server state; a created secret is shown once and gone after navigation",
      "web/test/routes/lastfm-authorize.test.tsx › the page shows the client name, labelled unverified unless it is an issued app, the token request time and the callback host; approve posts /api/v1/lastfm/authorize and navigates to the returned redirect; deny stays on the page",
@@ -1489,6 +1490,18 @@
      "scripts/test/gen-config.test.ts › gen-config writes no oauth/client-metadata.json, sets connect-src 'self', and the SPA routes include /lastfm/authorize and /settings/* but not /oauth/callback",
      "python3 scripts/validate_case_map.py --check-tests › every case formerly mapped to web/test/oauth or web/test/outbox maps to an existing worker/test/node replacement",
      "web/test/session/client.test.ts › the app state store holds the server Session DTO, and no module under web/src imports from web/src/oauth",
+     "web/test/session/client.test.ts › ignores a stale refresh response when a newer refresh has restored the active session",
+     "web/test/session/client.test.ts › ignores a stale session body that finishes parsing after a newer refresh",
+     "web/test/session/client.test.ts › refuses to send a stale account write with a newly resolved account CSRF token",
+     "web/test/session/client.test.ts › does not let a mutation 401 from the previous account clear a newer session",
+     "web/test/session/client.test.ts › does not let an authenticated GET 401 from the previous account clear a newer session",
+     "web/test/session/client.test.ts › clears the reauth flag and draft when sign-out is confirmed during a pending refresh",
+     "web/test/session/client.test.ts › keeps the reauthentication flag when the initial bootstrap restores an expired session",
+     "web/test/session/client.test.ts › refreshes a cached expired session on focus when BroadcastChannel is unavailable",
+     "web/test/routes/signin.test.tsx › keeps the sign-in retry form visible for a reauth_required server session",
+     "web/test/routes/settings-accounts.test.tsx › reauth_required settings pages show account data without mutation forms",
+    "web/test/routes/scrobble.test.tsx › shows sign-in after a 401, then restores the in-memory draft with a fresh write intent after reauthentication",
+    "web/test/routes/scrobble.test.tsx › a late submit response cannot clear a newer draft after the form remounts",
      "web/test/routes/scrobble.test.tsx › invalid input shows field errors and does not create a scrobble operation",
      "web/test/routes/settings.test.tsx › shows server session identity and the public export link without a local browser outbox",
      "web/test/routes/settings.test.tsx › disconnect confirmation explains the public opt-out and sends the confirmed choice",
@@ -1518,6 +1531,7 @@
     "files": [
      "scripts/benchmark-protocol-reads.ts",
      "worker/test/bench/protocol-reads.bench.test.ts",
+     "worker/test/node/read/delete-visibility-plan.test.ts",
      "docs/benchmarks/node-protocol-reads.md"
     ],
     "dependsOn": [
@@ -1525,10 +1539,11 @@
      "N3-06",
      "N4-03"
     ],
-    "description": "ADR 0005 §10.3. (Round 1 N4-03; it follows the bench-project port N4-03, which owns worker/test/bench/ in wave 4.) The test lives in worker/test/bench/ (the worker-bench project), never under worker/test/node/**, so the worker-node project in every npm run check stays fast. Build a deterministic 100k-listen user with a seeded generator and direct SQL inserts into the projection tables, as acceptance/query-plans does, and push a small sample (100 records) through the apply path to prove the shapes agree. Report timings for getTopTracks overall (uncached and cached), getRecentTracks page 500, and ListenBrainz stats all_time and listening-activity year. The test asserts query plans and cache-hit equality only; timings are reported against the budgets, not asserted.",
+    "description": "ADR 0005 §10.3. (Round 1 N4-03; it follows the bench-project port N4-03, which owns worker/test/bench/ in wave 4.) The 100k measurement suite lives in worker/test/bench/ (the worker-bench project), never under worker/test/node/**, so the worker-node project in every npm run check stays fast. A small Node read regression separately proves that the migration-4 partial index is naturally selected and that deletion visibility bodies are byte-identical with and without it. Build a deterministic 100k-listen user with a seeded generator and direct SQL inserts into the projection tables, as acceptance/query-plans does, and push a small sample (100 records) through the apply path to prove the shapes agree. Report timings for getTopTracks overall (uncached and cached), getRecentTracks page 500, and ListenBrainz stats all_time and listening-activity year. The test asserts query plans and cache-hit equality only; timings are reported against the budgets, not asserted.",
     "tests": [
      "worker/test/bench/protocol-reads.bench.test.ts › on a 100k-listen user the top-tracks, recent-tracks and ListenBrainz stats statements use scrobbles_stats or scrobbles_owner_time and never SCAN scrobbles",
-     "worker/test/bench/protocol-reads.bench.test.ts › the cached getTopTracks body equals the uncached body and the report records p50/p95 for each read"
+     "worker/test/bench/protocol-reads.bench.test.ts › the cached getTopTracks body equals the uncached body and the report records p50/p95 for each read",
+     "worker/test/node/read/delete-visibility-plan.test.ts › delete visibility searches by did and rkey and has byte-equal bodies without the index for every state/CID case"
     ]
    }
   ]
@@ -1548,6 +1563,7 @@
     "web/tests/restart.spec.ts",
      "web/tests/accessibility.spec.ts",
      "web/tests/settings.spec.ts",
+     "web/tests/reauth.spec.ts",
      "worker/test/e2e/"
     ],
     "dependsOn": [
@@ -1556,12 +1572,13 @@
      "N3-07",
      "N1-13"
     ],
-  "description": "ADR 0005 §5.10, §15.1.\n\n**start-stack** builds the SPA and the e2e bundle (`scripts/build-server.ts --e2e`, worker/dist/node/e2e.mjs from worker/test/e2e/node-entry.ts) and runs it on 127.0.0.1. The entry injects the fixture-host transport, the `fixtureOrigins` config option and the test config; it is the only place fixture hostnames are mapped, and it is never part of main.mjs (ADR §3.9). The entry maps fixture hostnames to the fake AS, PDS, PLC, Jetstream, Last.fm and ListenBrainz served by the stack, behind the existing proxy. Chromium reaches nothing else.\n\n**Journeys:** sign-in through the fake AS authorize page, scrobble, indexed, delete, follow, settings opt-out, and the new links, imports and credentials screens, with axe checks. A test-only loopback control port can SIGKILL and restart e2e.mjs against the same database and session-sealing keys while keeping fixture services alive.\n\n**Removed:** wrangler dev and the dev-env PDS from this stack. **Deleted:** worker/test/e2e/entry.ts and worker/test/e2e/wrangler.e2e.jsonc (the workerd e2e entry), replaced by worker/test/e2e/node-entry.ts; scripts/e2e/dev-env.ts loses every wrangler reference (its fake hosts are served to the Node stack). The dev-env interop moves to N6-02. Fake Last.fm and ListenBrainz come from worker/test/node/support (N1-13).",
+    "description": "ADR 0005 §5.10, §15.1.\n\n**start-stack** builds the SPA and the e2e bundle (`scripts/build-server.ts --e2e`, worker/dist/node/e2e.mjs from worker/test/e2e/node-entry.ts) and runs it on 127.0.0.1. The entry injects the fixture-host transport, the `fixtureOrigins` config option and the test config; it is the only place fixture hostnames are mapped, and it is never part of main.mjs (ADR §3.9). The entry maps fixture hostnames to the fake AS, PDS, PLC, Jetstream, Last.fm and ListenBrainz served by the stack, behind the existing proxy. Chromium reaches nothing else.\n\n**Journeys:** sign-in through the fake AS authorize page, scrobble, indexed, delete, follow, same-account popup reauthentication across the real OAuth callback redirect with the draft retained in the parent tab, settings opt-out, and the new links, imports and credentials screens, with axe checks. A test-only loopback control port can SIGKILL and restart e2e.mjs against the same database and session-sealing keys while keeping fixture services alive.\n\n**Removed:** wrangler dev and the dev-env PDS from this stack. **Deleted:** worker/test/e2e/entry.ts and worker/test/e2e/wrangler.e2e.jsonc (the workerd e2e entry), replaced by worker/test/e2e/node-entry.ts; scripts/e2e/dev-env.ts loses every wrangler reference (its fake hosts are served to the Node stack). The dev-env interop moves to N6-02. Fake Last.fm and ListenBrainz come from worker/test/node/support (N1-13).",
     "tests": [
      "web/tests/mvp.spec.ts › sign-in through the fake AS, scrobble, indexed, delete and follow journeys pass against the Node stack",
     "web/tests/restart.spec.ts › a Node process restart mid-journey keeps the browser session cookie and indexed data, and new writes still index",
      "web/tests/settings.spec.ts › creating an app password, linking ListenBrainz with a fake token, and starting a ListenBrainz import with visible progress",
      "web/tests/accessibility.spec.ts › signin, feed, profile, scrobble, settings/links, settings/imports, settings/credentials and lastfm/authorize have no axe violations",
+     "web/tests/reauth.spec.ts › same-account OAuth reauthentication in a popup preserves the scrobble draft across the callback redirect",
      "web/tests/mvp.spec.ts › the stack runs worker/dist/node/e2e.mjs built from node-entry.ts, and check-node-bundle confirms its worker/src and packages/*/src inputs, except worker/src/node/main.ts, equal those of main.mjs",
      "web/tests/mvp.spec.ts › worker/test/e2e has no entry.ts or wrangler.e2e.jsonc, and neither scripts/e2e/start-stack.ts nor scripts/e2e/dev-env.ts mentions wrangler"
     ]
@@ -1571,6 +1588,8 @@
     "title": "Node live gates (operator-run, blocked by default) and evidence keyed by the Node bundle",
     "files": [
      "scripts/live/",
+     "scripts/test/node-oauth.test.ts",
+     "worker/test/node/bff/devenv-oauth.test.ts",
      "scripts/verify_live_evidence.py",
      "scripts/test_live_evidence.py",
      "docs/verification/node-live.md",
@@ -1582,7 +1601,8 @@
     ],
     "description": "ADR 0005 §5.10, §15.\n\n**Ports** of workers_oauth_check, workers_ingest_check, pds_compat_check, ssrf_probe and the socket soak to the Node host (node_*), against an operator-provided deployed origin and real PDS identities.\n\n**ssrf_probe.ts:** its `--emit-worker` path (scripts/live/ssrf_probe.ts:316-328) wrote a probe Worker and wrangler.jsonc and printed wrangler deploy commands; it is replaced by a Node probe script that the operator runs on the host behind the deployed origin, with no wrangler reference.\n\n**New:** devenv_oauth_check, the confidential-client interop against a local @atproto/dev-env PDS that needs an https test origin.\n\n**Rules:**\n- Every gate exits 2 with a blocked document listing missing ATMUSIC_LIVE_* names before any network request.\n- No gate contacts Last.fm or ListenBrainz.\n- Evidence is keyed by the Node bundle SHA-256.\n- The gates are never run by the acceptance script (only their no-env behaviour is).",
     "tests": [
-     "scripts/live/node_oauth_check.ts › with every ATMUSIC_LIVE_* unset it exits 2 with a blocked document naming the missing variables and makes no network request",
+    "scripts/test/node-oauth.test.ts › with every ATMUSIC_LIVE_* unset it exits 2 with a blocked document naming the missing variables and makes no network request",
+     "worker/test/node/bff/devenv-oauth.test.ts › exchanges a confidential grant, writes and deletes through the PDS, and observes upstream revocation",
      "scripts/live/devenv_oauth_check.ts › without an https test origin it exits 2 blocked; the document names the prerequisite",
      "scripts/test_live_evidence.py › evidence records are accepted only for the current Node bundle SHA-256 and a failed gate is never classified as passed",
      "scripts/live/ssrf_probe.ts › --emit-probe writes a Node probe script and prints no wrangler command; no file under scripts/live mentions wrangler"
@@ -1597,7 +1617,8 @@
     "id": "N7-01",
     "title": "Retire the Workers runtime, the cloudflare:* test shim, pulse, PLAN and BUDGETS.free",
     "files": [
-     "worker/wrangler.jsonc",
+        "worker/wrangler.jsonc",
+        ".gitignore",
      "worker/.dev.vars.example",
      "worker/src/index.ts",
      "worker/src/scheduled.ts",
@@ -1656,7 +1677,14 @@
      "worker/src/do/ingest/jetstream-socket.ts",
      "worker/test/ingest/ingest-mode.test.ts",
      "worker/test/ingest/jetstream-socket.test.ts",
-     "docs/verification/node-port-inventory.json"
+     "docs/verification/node-port-inventory.json",
+     "scripts/test/check-ts.test.ts",
+     "worker/test/node/deshim/ingest.test.ts",
+     "worker/test/storage/no-async-tx.test.ts",
+     "worker/test/http/params.test.ts",
+     "worker/test/ingest/notify.test.ts",
+     "worker/test/node/journey/world.ts",
+     "scripts/test/fake-upstreams.test.ts"
     ],
     "dependsOn": [
      "N4-02",
@@ -1718,7 +1746,7 @@
      "N5-02",
      "N0-02"
     ],
-    "description": "ADR 0005 §15. node-backend.sh replaces the interim node-interim.sh (N0-02) and the retired workers-backend.sh, and mirrors workers-backend.sh: --out with its gate marker, --skip counted as a failure, per-step logs, tests.jsonl, cases.jsonl and summary.json, and exit 0, 1 or 2. A blocked deterministic step (including missing systemd-analyze) fails acceptance; only owner-operated live gates may be blocked on an otherwise successful run.\n\n**Steps:**\n1. check-ts;\n2. the worker-node and acceptance projects with per-test records;\n3. Playwright e2e;\n4. scrobbler-e2e;\n5. the Python regressions;\n6. check-node-bundle (prints the bundle SHA-256);\n7. case-map --check-tests without --node-wave, so no target may be pending;\n8. goldens;\n9. `systemd-analyze --user verify` of the units (blocked, not passed, when systemd-analyze is unavailable, and acceptance exits 1);\n10. live-noenv;\n11. live status.\n\n**scrobbler-e2e** starts the **e2e bundle** worker/dist/node/e2e.mjs (built by `scripts/build-server.ts --e2e` (N3-07) from worker/test/e2e/node-entry.ts, which imports run.ts and never main.ts; its feature and protocol inputs are byte-identical to main.mjs per check-bundle) with `ATMUSIC_PUBLIC_ORIGIN=https://music.214510.xyz` on 127.2.0.1 with a free port. main.mjs itself refuses loopback upstreams and http origins and is never used here (ADR §3.9). It starts fake-upstreams.ts as separate processes: an identity child hosting PDS with AS and PLC (packages/atproto/test-support), a Jetstream WebSocket child, and Last.fm and ListenBrainz children (worker/test/node/support, N1-13). The e2e node-entry gains an environment-gated WebSocket connector to the local Jetstream child; Playwright keeps its current in-memory connector. PDS commits reach the real socket ingest path; an IPC event shortcut does not satisfy this gate.\n\nIt then drives:\n- the real lastfm-ts-api 2.6.2 client (desktop auth, scrobble batch, now playing, getRecentTracks), in a child process started with `node --import scripts/e2e/scrobbler-clients/https-to-loopback.mjs`. lastfm-ts-api always calls node:https request with only hostname, path and timeout, so it cannot reach http://127.2.0.1:<port> by configuration. The preload replaces `https.request` on the node:https module and calls `module.syncBuiltinESMExports()`, reissuing each call with http.request to 127.2.0.1:<port> with the same method, path, headers and body bytes and Host music.214510.xyz; it throws for any other hostname. The client is configured as a user would (hostname music.214510.xyz, path /2.0/);\n- byte-faithful replays of Pano (Last.fm mobile session; ListenBrainz with lowercase token and return_msid), multi-scrobbler (web auth flow through /api/auth without a slash), Web Scrobbler (scrobbles and now playing only; its love goes to api.listenbrainz.org and is not replayed) and Navidrome request sequences;\n- five replays of one POST /api/v1/scrobbles with one Idempotency-Key through a signed-in cookie jar.\n\n**Asserted for every client:** PDS records, socket indexing, reads through /2.0 and /1, and exactly-once forwarding in a fault-free run with no retry or upstream fault. Evidence records accepted listens and forward calls as a multiset; a retry/fault scenario cannot be reported as exactly once. The case-map step asserts that no retirement cites a superseded amendment.\n\nNo real network is contacted: all outbound bundle requests are routed to the process allowlist and recorded, the client preload rejects other hostnames and records sockets, and the script never deploys or runs a live gate body.",
+    "description": "ADR 0005 §15. node-backend.sh replaces the interim node-interim.sh (N0-02) and the retired workers-backend.sh, and mirrors workers-backend.sh: --out with its gate marker (outside the source checkout or within a git-ignored path), --skip counted as a failure, per-step logs, tests.jsonl, cases.jsonl and summary.json, and exit 0, 1 or 2. A blocked deterministic step (including missing systemd-analyze) fails acceptance; only owner-operated live gates may be blocked on an otherwise successful run.\n\n**Steps:**\n1. check-ts;\n2. the worker-node and acceptance projects with per-test records;\n3. Playwright e2e;\n4. scrobbler-e2e;\n5. the Python regressions;\n6. check-node-bundle (prints the bundle SHA-256);\n7. case-map --check-tests without --node-wave, so no target may be pending;\n8. goldens;\n9. `systemd-analyze --user verify` of the units (blocked, not passed, when systemd-analyze is unavailable, and acceptance exits 1);\n10. live-noenv;\n11. live status.\n\n**scrobbler-e2e** starts the **e2e bundle** worker/dist/node/e2e.mjs (built by `scripts/build-server.ts --e2e` (N3-07) from worker/test/e2e/node-entry.ts, which imports run.ts and never main.ts; its feature and protocol inputs are byte-identical to main.mjs per check-bundle) with `ATMUSIC_PUBLIC_ORIGIN=https://music.214510.xyz` on 127.2.0.1 with a free port. main.mjs itself refuses loopback upstreams and http origins and is never used here (ADR §3.9). It starts fake-upstreams.ts as separate processes: an identity child hosting PDS with AS and PLC (packages/atproto/test-support), a Jetstream WebSocket child, and Last.fm and ListenBrainz children (worker/test/node/support, N1-13). The e2e node-entry gains an environment-gated WebSocket connector to the local Jetstream child; Playwright keeps its current in-memory connector. PDS commits reach the real socket ingest path; an IPC event shortcut does not satisfy this gate.\n\nIt then drives:\n- the real lastfm-ts-api 2.6.2 client (desktop auth, scrobble batch, now playing, getRecentTracks), in a child process started with `node --import scripts/e2e/scrobbler-clients/https-to-loopback.mjs`. lastfm-ts-api always calls node:https request with only hostname, path and timeout, so it cannot reach http://127.2.0.1:<port> by configuration. The preload replaces `https.request` on the node:https module and calls `module.syncBuiltinESMExports()`, reissuing each call with http.request to 127.2.0.1:<port> with the same method, path, headers and body bytes and Host music.214510.xyz; it throws for any other hostname. The client is configured as a user would (hostname music.214510.xyz, path /2.0/);\n- byte-faithful replays of Pano (Last.fm mobile session; ListenBrainz with lowercase token and return_msid), multi-scrobbler (web auth flow through /api/auth without a slash), Web Scrobbler (scrobbles and now playing only; its love goes to api.listenbrainz.org and is not replayed) and Navidrome request sequences;\n- five replays of one POST /api/v1/scrobbles with one Idempotency-Key through a signed-in cookie jar.\n\n**Asserted for every client:** PDS records, socket indexing, reads through /2.0 and /1, and exactly-once forwarding in a fault-free run with no retry or upstream fault. Evidence records accepted listens and forward calls as a multiset; a retry/fault scenario cannot be reported as exactly once. The case-map step asserts that no retirement cites a superseded amendment.\n\nNo real network is contacted: all outbound bundle requests are routed to the process allowlist and recorded, the client preload rejects other hostnames and records sockets, and the script never deploys or runs a live gate body.",
     "tests": [
      "scripts/e2e/scrobbler-e2e.ts › lastfm-ts-api 2.6.2 in a child process whose --import preload reissues https.request to http://127.2.0.1:<port> with the same path, headers and body bytes: desktop auth, track.scrobble batch and updateNowPlaying against the e2e bundle create PDS records that are indexed and returned by user.getRecentTracks",
      "scripts/e2e/scrobbler-e2e.ts › Pano Last.fm (mobile session) and Pano ListenBrainz (lowercase token, return_msid), multi-scrobbler web auth via /api/auth without a slash, Web Scrobbler (scrobbles and now playing) and Navidrome sequences all land as indexed records readable through /2.0 and /1",

@@ -222,7 +222,7 @@ export interface RequestOptions {
 /** One request to `address` with the request target exactly as given (no URL normalisation). */
 export function rawRequest(address: BoundAddress, target: string, o: RequestOptions = {}): Promise<HttpResult> {
   const headers: Record<string, string> = {};
-  for (const [k, v] of new Headers(o.headers as HeadersInit | undefined)) headers[k] = v;
+  for (const [k, v] of new Headers(o.headers as NonNullable<RequestInit['headers']> | undefined)) headers[k] = v;
   if (o.ip !== undefined) headers['cf-connecting-ip'] = o.ip;
   const body = o.body === undefined ? undefined : typeof o.body === 'string' ? Buffer.from(o.body) : o.body;
   if (body !== undefined) headers['content-length'] = String(body.byteLength);
@@ -424,7 +424,7 @@ export async function harness(label: string, options: HarnessOptions = {}): Prom
     },
     request: (target, o) => rawRequest(need(address, 'listener'), target, o),
     postJson(target, body, o = {}) {
-      const headers = new Headers(o.headers as HeadersInit | undefined);
+      const headers = new Headers(o.headers as NonNullable<RequestInit['headers']> | undefined);
       headers.set('content-type', 'application/json');
       return h.request(target, { ...o, method: 'POST', headers, body: JSON.stringify(body) });
     },
