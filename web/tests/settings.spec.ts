@@ -1,4 +1,5 @@
 import { account, authorizeOnFixtureAs, type E2eAccount, readNetwork } from '../../scripts/e2e/dev-env';
+import { E2E_LISTENBRAINZ_TOKEN, E2E_LISTENBRAINZ_USER } from '../../scripts/e2e/fixture-world';
 import { expect, test } from './fixtures';
 
 let carol: E2eAccount;
@@ -7,7 +8,7 @@ test.beforeAll(() => {
   carol = account(readNetwork(), 'carol');
 });
 
-test('settings routes use the server session, show secrets once, and make Last.fm denial the safe default', async ({
+test('creating an app password, linking ListenBrainz with a fake token, and starting a ListenBrainz import with visible progress', async ({
   page,
 }) => {
   test.setTimeout(90_000);
@@ -21,12 +22,20 @@ test('settings routes use the server session, show secrets once, and make Last.f
   await expect(page.getByRole('heading', { level: 1 })).toHaveText('Connected services');
   await expect(page.getByLabel('ListenBrainz user token')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Connect Last.fm' })).toBeVisible();
+  await page.getByLabel('ListenBrainz user token').fill(E2E_LISTENBRAINZ_TOKEN);
+  await page.getByRole('button', { name: 'Connect ListenBrainz' }).click();
+  await expect(page.getByRole('status')).toHaveText('ListenBrainz connected.');
 
   await page.goto('/settings/imports');
   await expect(page.getByRole('heading', { level: 1 })).toHaveText('Import listening history');
   await expect(page.getByLabel('Username')).toBeVisible();
   await expect(page.locator('input[type="file"]')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Import activity' })).toBeVisible();
+  await page.getByLabel('Service').selectOption('listenbrainz');
+  await page.getByLabel('Username').fill(E2E_LISTENBRAINZ_USER);
+  await page.getByRole('button', { name: 'Start import' }).click();
+  await expect(page.getByRole('progressbar', { name: /listenbrainz api import: .* progress/i })).toBeVisible();
+  await expect(page.getByRole('status')).toContainText(/waiting_index|Estimated time remaining:/);
 
   await page.goto('/settings/credentials');
   await expect(page.getByRole('heading', { level: 1 })).toHaveText('Credentials');

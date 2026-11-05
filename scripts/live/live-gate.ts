@@ -142,7 +142,7 @@ export const PREFIX_REQ: Requirement = {
 };
 export const VERSION_REQ: Requirement = {
   name: ENV.versionId,
-  what: 'Worker version id under test, from wrangler versions upload or deployments status',
+  what: 'Worker version id under test, as reported by the deployment platform',
   check: (v) => (UUID.test(v) ? null : 'must be a lowercase UUID'),
 };
 export const BUNDLE_REQ: Requirement = {
@@ -554,14 +554,14 @@ export function field<T = unknown>(value: unknown, key: string): T | undefined {
  * A version that cannot be read (no answer, no `version`, a placeholder) fails
  * the gate: the evidence never records an unknown version.
  */
-export async function pdsInfo(endpoint: string, implementation: string): Promise<PdsInfo> {
+export async function pdsInfo(endpoint: string, implementation: string, timeoutMs = HTTP_TIMEOUT_MS): Promise<PdsInfo> {
   expect(
     implementation.trim() !== '' && !isPlaceholder(implementation),
     `${endpoint}: no implementation name declared`,
   );
   let health: JsonResponse;
   try {
-    health = await httpJson(xrpcUrl(endpoint, '_health'));
+    health = await httpJson(xrpcUrl(endpoint, '_health'), { timeoutMs });
   } catch (error) {
     throw new GateFailure(`${endpoint}: /xrpc/_health unavailable, PDS version unknown (${message(error)})`);
   }
@@ -603,6 +603,8 @@ export async function adminStatus(ctx: GateContext): Promise<Record<string, unkn
 export interface VerifiedRecord {
   state: 'present' | 'absent';
   cid: string | null;
+  /** Decoded, CID-checked atproto JSON value for a present record. */
+  record?: unknown;
   rev: string;
   commitCid: string;
   pds: string;
@@ -615,6 +617,10 @@ export interface VerifiedRecord {
  */
 export interface VerifierNetwork {
   transport?: Transport;
+  /** Optional deadline source forwarded to identity and SafeFetch requests. */
+  timer?: { timeout(ms: number): AbortSignal };
+  /** Cooperative deadline check for verification work that does not issue a request. */
+  assertActive?: () => void;
 }
 
 /**
@@ -629,22 +635,30 @@ export async function verifyRecordAt(
   rkey: string,
   network: VerifierNetwork = {},
 ): Promise<VerifiedRecord> {
+  network.assertActive?.();
   const [{ systemClock }, { createIdentityResolver }, { createSafeFetch }, { verifyRecordProof }] = await Promise.all([
     import('@atmusic/core/deps'),
     import('@atmusic/atproto/identity/resolver'),
     import('@atmusic/atproto/net/safe-fetch'),
     import('@atmusic/atproto/verify/record-proof'),
   ]);
-  const { transport } = network;
-  const identity = await createIdentityResolver({ clock: systemClock, transport }).resolveDid(did, { fresh: true });
-  const safeFetch = createSafeFetch({ clock: systemClock, transport });
+  network.assertActive?.();
+  const { transport, timer } = network;
+  const identity = await createIdentityResolver({ clock: systemClock, transport, timer }).resolveDid(did, {
+    fresh: true,
+  });
+  network.assertActive?.();
+  const safeFetch = createSafeFetch({ clock: systemClock, transport, timer });
   const { body } = await safeFetch(xrpcUrl(identity.pds, 'com.atproto.sync.getRecord', { did, collection, rkey }), {
     kind: 'getRecord',
   });
+  network.assertActive?.();
   const proof = await verifyRecordProof(body, { did, collection, rkey, signingKey: identity.signingKey });
+  network.assertActive?.();
   return {
     state: proof.state,
     cid: proof.state === 'present' ? proof.cid : null,
+    ...(proof.state === 'present' ? { record: proof.record } : {}),
     rev: proof.commit.rev,
     commitCid: proof.commit.cid,
     pds: identity.pds,
@@ -706,6 +720,7 @@ export async function verifyAbsentBySnapshot(
   rkey: string,
   network: VerifierNetwork = {},
 ): Promise<VerifiedAbsence & { state: 'absent' | 'present' }> {
+  network.assertActive?.();
   const [
     { systemClock },
     { createIdentityResolver },
@@ -723,17 +738,23 @@ export async function verifyAbsentBySnapshot(
     import('@atmusic/atproto/snapshot/walker'),
     import('@atmusic/atproto/verify/commit'),
   ]);
-  const { transport } = network;
-  const identity = await createIdentityResolver({ clock: systemClock, transport }).resolveDid(did, { fresh: true });
-  const safeFetch = createSafeFetch({ clock: systemClock, transport });
+  network.assertActive?.();
+  const { transport, timer } = network;
+  const identity = await createIdentityResolver({ clock: systemClock, transport, timer }).resolveDid(did, {
+    fresh: true,
+  });
+  network.assertActive?.();
+  const safeFetch = createSafeFetch({ clock: systemClock, transport, timer });
   const cache = new MemoryBlockCache();
   const streamed = await streamRepoIntoCache({ safeFetch, pds: identity.pds, did, cache });
+  network.assertActive?.();
   const root = cache.get(streamed.root);
   expect(root !== null, `getRepo CAR for ${did} lacks its root commit ${streamed.root}`);
   const commit = await verifyCommit(new Map([[streamed.root, root]]), streamed.root, {
     did,
     signingKey: identity.signingKey,
   });
+  network.assertActive?.();
   // Every key of `collection` is `collection/<rkey>`; '/' (0x2F) and '0' (0x30)
   // are adjacent, so [collection/, collection0) holds exactly those keys.
   const key = `${collection}/${rkey}`;
@@ -741,6 +762,7 @@ export async function verifyAbsentBySnapshot(
   let keysEnumerated = 0;
   let found: string | null = null;
   for (let steps = 0; ; steps++) {
+    network.assertActive?.();
     expect(steps < MAX_SNAPSHOT_STEPS, `snapshot walk of ${did} did not finish in ${MAX_SNAPSHOT_STEPS} steps`);
     const result = await step(state, cacheOnlySource(cache), cache, {
       maxFetches: 50,
@@ -748,11 +770,13 @@ export async function verifyAbsentBySnapshot(
       // Unknown CIDs make the walker fetch and hash-check the record block of the key.
       knownCid: () => null,
     });
+    network.assertActive?.();
     keysEnumerated += result.entries.length;
     for (const entry of result.entries) if (entry.key === key) found = entry.cid;
     state = result.state;
     if (result.done) break;
   }
+  network.assertActive?.();
   return {
     state: found === null ? 'absent' : 'present',
     method: 'snapshot',
@@ -784,6 +808,7 @@ export async function verifyAbsent(
   rkey: string,
   options: AbsenceOptions,
 ): Promise<VerifiedAbsence> {
+  options.assertActive?.();
   const uri = `at://${did}/${collection}/${rkey}`;
   const newer = (absence: VerifiedAbsence): VerifiedAbsence => {
     expect(
@@ -795,26 +820,39 @@ export async function verifyAbsent(
   let unavailable: string;
   try {
     const proof = await verifyRecordAt(did, collection, rkey, options);
+    options.assertActive?.();
     expect(proof.state === 'absent', `${uri}: its PDS still proves it present`);
-    return newer({ method: 'exclusionProof', rev: proof.rev, commitCid: proof.commitCid, pds: proof.pds });
+    const absence = newer({ method: 'exclusionProof', rev: proof.rev, commitCid: proof.commitCid, pds: proof.pds });
+    options.assertActive?.();
+    return absence;
   } catch (error) {
+    options.assertActive?.();
     const reason = exclusionProofUnavailable(error);
     if (reason === null) throw error;
     unavailable = reason;
   }
   const snapshot = await verifyAbsentBySnapshot(did, collection, rkey, options);
+  options.assertActive?.();
   expect(snapshot.state === 'absent', `${uri}: the verified snapshot at rev ${snapshot.rev} still holds it`);
   const { state: _state, ...absence } = snapshot;
-  return newer({ ...absence, exclusionProofUnavailable: unavailable });
+  const verified = newer({ ...absence, exclusionProofUnavailable: unavailable });
+  options.assertActive?.();
+  return verified;
 }
 
 /** The DID document's PDS must be the endpoint the operator declared. */
-export async function checkIdentityPds(did: string, declared: string): Promise<string> {
+export async function checkIdentityPds(
+  did: string,
+  declared: string,
+  network: Pick<VerifierNetwork, 'timer'> = {},
+): Promise<string> {
   const [{ systemClock }, { createIdentityResolver }] = await Promise.all([
     import('@atmusic/core/deps'),
     import('@atmusic/atproto/identity/resolver'),
   ]);
-  const identity = await createIdentityResolver({ clock: systemClock }).resolveDid(did, { fresh: true });
+  const identity = await createIdentityResolver({ clock: systemClock, timer: network.timer }).resolveDid(did, {
+    fresh: true,
+  });
   expect(
     normalizedOrigin(identity.pds) === normalizedOrigin(declared),
     `${did} resolves to PDS ${identity.pds}, not the declared ${normalizedOrigin(declared)}`,
@@ -834,8 +872,9 @@ export async function pollUntil<T>(
   for (;;) {
     const value = await probe();
     if (value !== null) return { value, elapsedMs: Math.round(performance.now() - start) };
-    if (performance.now() - start >= timeoutMs) return null;
-    await sleep(intervalMs);
+    const remaining = timeoutMs - (performance.now() - start);
+    if (remaining <= 0) return null;
+    await sleep(Math.min(intervalMs, Math.max(1, Math.ceil(remaining))));
   }
 }
 

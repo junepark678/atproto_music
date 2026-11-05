@@ -661,49 +661,63 @@
       "file": "scripts/test/check-bundle.test.ts",
       "ancestors": [],
       "title": "fails when a test-support import is injected into a temp copy of the entry",
-      "kept": true
+      "replaced": "scripts/test/check-node-bundle.test.ts › the guard fails when main.mjs has a test-support, worker/test or router-transport input, com.example.atmusic handling, or a cloudflare: import",
+      "package": "N7-01",
+      "reason": "N7-01 deleted the Workers bundle guard scripts/check-bundle.ts with its tests (ADR 0005 §15.3); the Node bundle guard rejects a test-support input in main.mjs, asserted by the replacement test."
     },
     {
       "id": "scripts/test/check-bundle.test.ts › fails when node:crypto is imported into a temp copy of the entry",
       "file": "scripts/test/check-bundle.test.ts",
       "ancestors": [],
       "title": "fails when node:crypto is imported into a temp copy of the entry",
-      "kept": true
+      "replaced": "scripts/test/check-node-bundle.test.ts › the guard fails when the bundle's @atcute/crypto entry differs from the one the worker-node project resolves, and prints the git sha and bundle SHA-256 otherwise",
+      "package": "N7-01",
+      "reason": "N7-01 deleted the Workers bundle guard scripts/check-bundle.ts with its tests (ADR 0005 §15.3); the Node bundle guard pins the crypto entry the bundle may resolve, asserted by the replacement test."
     },
     {
       "id": "scripts/test/check-bundle.test.ts › refuses built client metadata or _headers that differ from the configured origin and prefix",
       "file": "scripts/test/check-bundle.test.ts",
       "ancestors": [],
       "title": "refuses built client metadata or _headers that differ from the configured origin and prefix",
-      "kept": true
+      "replaced": "scripts/test/gen-config.test.ts › environment values override the example and invalid origins are refused without writes",
+      "package": "N7-01",
+      "reason": "N7-01 deleted the Workers bundle guard scripts/check-bundle.ts with its tests (ADR 0005 §15.3); the Node config generator refuses an origin that differs from the configured one, asserted by the replacement test."
     },
     {
       "id": "scripts/test/check-bundle.test.ts › refuses a wrangler config with a fixture or empty prefix or a route off the PUBLIC_ORIGIN host",
       "file": "scripts/test/check-bundle.test.ts",
       "ancestors": [],
       "title": "refuses a wrangler config with a fixture or empty prefix or a route off the PUBLIC_ORIGIN host",
-      "kept": true
+      "replaced": "scripts/test/build-server.test.ts › main.mjs started with ATMUSIC_PUBLIC_ORIGIN=http://127.0.0.1:1, or with LASTFM_API_ROOT=https://127.0.0.1/, exits 78 even with every test variable set",
+      "package": "N7-01",
+      "reason": "N7-01 deleted the Workers bundle guard scripts/check-bundle.ts with its tests (ADR 0005 §15.3); the Node host refuses a fixture or off-origin configuration at start with exit 78, asserted by the replacement test."
     },
     {
       "id": "scripts/test/check-bundle.test.ts › refuses assets.not_found_handling other than \"none\" (ADR §15 Q9) and accepts the example config",
       "file": "scripts/test/check-bundle.test.ts",
       "ancestors": [],
       "title": "refuses assets.not_found_handling other than \"none\" (ADR §15 Q9) and accepts the example config",
-      "kept": true
+      "replaced": "scripts/test/gen-config.test.ts › Node defaults come from the example env and only headers are emitted",
+      "package": "N7-01",
+      "reason": "N7-01 deleted the Workers bundle guard scripts/check-bundle.ts with its tests (ADR 0005 §15.3); the Node host has no assets handler; the config-example defaults are asserted by the replacement test."
     },
     {
       "id": "scripts/test/check-bundle.test.ts › missing Worker entry skips after config checks, and fails with --release",
       "file": "scripts/test/check-bundle.test.ts",
       "ancestors": [],
       "title": "missing Worker entry skips after config checks, and fails with --release",
-      "kept": true
+      "replaced": "scripts/test/check-ts.test.ts › check-ts.sh runs scripts/check-node-bundle.ts and build-server.ts --check only when those files exist, and a failing check-node-bundle.ts fails the gate in the disposable copy",
+      "package": "N7-01",
+      "reason": "N7-01 deleted the Workers bundle guard scripts/check-bundle.ts with its tests (ADR 0005 §15.3); the gate runs the Node guard only when its file exists and fails on its failure, asserted by the replacement test."
     },
     {
       "id": "scripts/test/check-bundle.test.ts › analyzeBundle enforces the gzip limit and rejects secp256k1-node and router-transport modules",
       "file": "scripts/test/check-bundle.test.ts",
       "ancestors": [],
       "title": "analyzeBundle enforces the gzip limit and rejects secp256k1-node and router-transport modules",
-      "kept": true
+      "replaced": "scripts/test/check-node-bundle.test.ts › the guard fails when main.mjs has worker/src/do/index-do.ts, worker/src/scheduled.ts, worker/src/env.ts, worker/src/index.ts or worker/src/router.ts as an input",
+      "package": "N7-01",
+      "reason": "N7-01 deleted the Workers bundle guard scripts/check-bundle.ts with its tests (ADR 0005 §15.3); the Node bundle guard rejects Workers-only modules as bundle inputs, asserted by the replacement test."
     },
     {
       "id": "scripts/test/check-ts.test.ts › scripts/check-ts.sh › the nested gate runs alone in the last sequence group, after worker-modules",
@@ -766,7 +780,9 @@
         "bash scripts/deploy.sh --dry-run"
       ],
       "title": "refuses empty/fixture prefix and missing secret with nonzero exit",
-      "kept": true
+      "replaced": "scripts/test/build-server.test.ts › main.mjs started with ATMUSIC_PUBLIC_ORIGIN=http://127.0.0.1:1, or with LASTFM_API_ROOT=https://127.0.0.1/, exits 78 even with every test variable set",
+      "package": "N7-01",
+      "reason": "N7-01 deleted the Workers deploy script scripts/deploy.sh with its tests (ADR 0005 §15.3); the Node host refuses a fixture or empty configuration with a nonzero exit, asserted by the replacement test."
     },
     {
       "id": "scripts/test/deploy.test.ts › bash scripts/deploy.sh --dry-run › valid owned prefix and CURSOR_KEY run gen-config, the web build and wrangler deploy --dry-run with exit 0",
@@ -775,7 +791,9 @@
         "bash scripts/deploy.sh --dry-run"
       ],
       "title": "valid owned prefix and CURSOR_KEY run gen-config, the web build and wrangler deploy --dry-run with exit 0",
-      "kept": true
+      "replaced": "scripts/test/install-local.test.ts › with a temporary HOME, install-local builds releases/<sha> with npm ci --ignore-scripts, runs main.mjs --init only when the database is missing, switches current atomically, installs both units and prints, but does not run, the linger command",
+      "package": "N7-01",
+      "reason": "N7-01 deleted the Workers deploy script scripts/deploy.sh with its tests (ADR 0005 §15.3); the Node release is installed by scripts/install-local.sh, asserted by the replacement test."
     },
     {
       "id": "scripts/test/deploy.test.ts › actionlint .github/workflows/deploy.yml › workflow is valid",
@@ -784,7 +802,9 @@
         "actionlint .github/workflows/deploy.yml"
       ],
       "title": "workflow is valid",
-      "kept": true
+      "replaced": "scripts/test/ci-workflow.test.ts › every full TypeScript gate workflow installs and exposes actionlint v1.7.7 before testing",
+      "package": "N7-01",
+      "reason": "N7-01 deleted the Workers deploy workflow .github/workflows/deploy.yml with its tests (ADR 0005 §15.3); the remaining gate workflows are checked by the replacement test."
     },
     {
       "id": "scripts/test/deploy.test.ts › actionlint .github/workflows/deploy.yml › deploy credentials are scoped to the deploy step",
@@ -793,7 +813,9 @@
         "actionlint .github/workflows/deploy.yml"
       ],
       "title": "deploy credentials are scoped to the deploy step",
-      "kept": true
+      "replaced": "scripts/test/ci-workflow.test.ts › CI and candidate checkouts do not persist credentials into artifacts",
+      "package": "N7-01",
+      "reason": "N7-01 deleted the Workers deploy workflow .github/workflows/deploy.yml with its tests (ADR 0005 §15.3); credential scoping of the remaining workflows is asserted by the replacement test."
     },
     {
       "id": "scripts/test/deploy.test.ts › npx tsx scripts/admin/pitr-restore.ts --help › prints usage and requires ADMIN_TOKEN",
@@ -802,7 +824,9 @@
         "npx tsx scripts/admin/pitr-restore.ts --help"
       ],
       "title": "prints usage and requires ADMIN_TOKEN",
-      "kept": true
+      "replaced": "scripts/test/restore.test.ts › with a fake systemctl, restore stops atmusic.socket and atmusic.service, proceeds only when both report inactive, swaps the db in, and starts both units only afterwards; a connection attempted mid-restore starts no server",
+      "package": "N7-01",
+      "reason": "N7-01 deleted the Workers PITR tool scripts/admin/pitr-restore.ts with its tests (ADR 0005 §15.3); the Node restore procedure is scripts/restore.sh, asserted by the replacement test."
     },
     {
       "id": "scripts/test/deploy.test.ts › npx tsx scripts/admin/pitr-restore.ts --help › an explicit --env is never overridden by an ambient PUBLIC_ORIGIN",
@@ -811,56 +835,72 @@
         "npx tsx scripts/admin/pitr-restore.ts --help"
       ],
       "title": "an explicit --env is never overridden by an ambient PUBLIC_ORIGIN",
-      "kept": true
+      "replaced": "scripts/test/restore.test.ts › with an unreadable live database restore prints what will be lost and refuses without --accept-loss",
+      "package": "N7-01",
+      "reason": "N7-01 deleted the Workers PITR tool scripts/admin/pitr-restore.ts with its tests (ADR 0005 §15.3); the Node restore refuses data loss without an explicit flag, asserted by the replacement test."
     },
     {
       "id": "scripts/test/gen-config.test.ts › production metadata equals expected JSON for https://music.example.org with prefix org.example.music",
       "file": "scripts/test/gen-config.test.ts",
       "ancestors": [],
       "title": "production metadata equals expected JSON for https://music.example.org with prefix org.example.music",
-      "kept": true
+      "replaced": "worker/test/node/bff/client-metadata.test.ts › client metadata and JWKS › the metadata for https://music.214510.xyz equals the ADR 0005 §5.3 document with client_name AT Protocol Music and the four repo: scopes, and jwks.json has no private member",
+      "package": "N7-01",
+      "reason": "The Workers/browser-era behavior was migrated in N7-01; its current Node or server-session equivalent is asserted by the replacement test."
     },
     {
       "id": "scripts/test/gen-config.test.ts › refuses empty or fixture prefix for production",
       "file": "scripts/test/gen-config.test.ts",
       "ancestors": [],
       "title": "refuses empty or fixture prefix for production",
-      "kept": true
+      "replaced": "scripts/test/gen-config.test.ts › environment values override the example and invalid origins are refused without writes",
+      "package": "N7-01",
+      "reason": "The Workers/browser-era behavior was migrated in N7-01; its current Node or server-session equivalent is asserted by the replacement test."
     },
     {
       "id": "scripts/test/gen-config.test.ts › local env writes only the loopback client-id hint and removes stale metadata",
       "file": "scripts/test/gen-config.test.ts",
       "ancestors": [],
       "title": "local env writes only the loopback client-id hint and removes stale metadata",
-      "kept": true
+      "replaced": "scripts/test/gen-config.test.ts › Node defaults come from the example env and only headers are emitted",
+      "package": "N7-01",
+      "reason": "The Workers/browser-era behavior was migrated in N7-01; its current Node or server-session equivalent is asserted by the replacement test."
     },
     {
       "id": "scripts/test/gen-config.test.ts › refuses a deployed env whose resolved routes are missing or off the PUBLIC_ORIGIN host",
       "file": "scripts/test/gen-config.test.ts",
       "ancestors": [],
       "title": "refuses a deployed env whose resolved routes are missing or off the PUBLIC_ORIGIN host",
-      "kept": true
+      "replaced": "scripts/test/gen-config.test.ts › environment values override the example and invalid origins are refused without writes",
+      "package": "N7-01",
+      "reason": "The Workers/browser-era behavior was migrated in N7-01; its current Node or server-session equivalent is asserted by the replacement test."
     },
     {
       "id": "scripts/test/gen-config.test.ts › prefix rule and fixture prefix match worker/src/config.ts",
       "file": "scripts/test/gen-config.test.ts",
       "ancestors": [],
       "title": "prefix rule and fixture prefix match worker/src/config.ts",
-      "kept": true
+      "replaced": "scripts/test/gen-config.test.ts › Node defaults come from the example env and only headers are emitted",
+      "package": "N7-01",
+      "reason": "The Workers/browser-era behavior was migrated in N7-01; its current Node or server-session equivalent is asserted by the replacement test."
     },
     {
       "id": "scripts/test/gen-config.test.ts › _headers contains require-trusted-types-for and frame-ancestors 'none'",
       "file": "scripts/test/gen-config.test.ts",
       "ancestors": [],
       "title": "_headers contains require-trusted-types-for and frame-ancestors 'none'",
-      "kept": true
+      "replaced": "scripts/test/gen-config.test.ts › Node defaults come from the example env and only headers are emitted",
+      "package": "N7-01",
+      "reason": "The generated CSP assertions cover frame-ancestors and Trusted Types directives."
     },
     {
       "id": "scripts/test/gen-config.test.ts › _headers marks /assets/* public, max-age=31536000, immutable and /index.html and /oauth/client-metadata.json no-cache",
       "file": "scripts/test/gen-config.test.ts",
       "ancestors": [],
       "title": "_headers marks /assets/* public, max-age=31536000, immutable and /index.html and /oauth/client-metadata.json no-cache",
-      "kept": true
+      "replaced": "scripts/test/gen-config.test.ts › Node defaults come from the example env and only headers are emitted",
+      "package": "N7-01",
+      "reason": "The generated-header assertions cover immutable asset caching and no-cache index responses; OAuth metadata is served dynamically by the Node host."
     },
     {
       "id": "scripts/test/pitr-restore.test.ts › scripts/admin/pitr-restore.ts after the POST › error after an accepted POST exits 1, not 2",
@@ -869,7 +909,9 @@
         "scripts/admin/pitr-restore.ts after the POST"
       ],
       "title": "error after an accepted POST exits 1, not 2",
-      "kept": true
+      "replaced": "scripts/test/restore.test.ts › a table missing from TABLE_CLASS aborts the restore before anything is renamed",
+      "package": "N7-01",
+      "reason": "N7-01 deleted the Workers PITR tool scripts/admin/pitr-restore.ts with its tests (ADR 0005 §15.3); the Node restore aborts before changing anything on an error, asserted by the replacement test."
     },
     {
       "id": "scripts/test/secret-scan.test.ts › scripts/test/secret-scan.test.ts › worker/.dev.vars.example, .env.example and docs contain no credential-shaped values",
@@ -915,7 +957,9 @@
         "web/test/oauth/session.test.ts"
       ],
       "title": "signIn requests scope 'atproto repo:<p>.scrobble repo:<p>.follow repo:<p>.settings'",
-      "kept": true
+      "replaced": "worker/test/node/bff/oauth-client.test.ts › the confidential OAuth client › authorize sends PAR with an S256 code_challenge and a private_key_jwt assertion; the verifier and DPoP key exist only sealed in oauth_states",
+      "package": "N5-01",
+      "reason": "The Workers/browser-era behavior was migrated in N5-01; its current Node or server-session equivalent is asserted by the replacement test."
     },
     {
       "id": "web/test/oauth/session.test.ts › web/test/oauth/session.test.ts › successful callback stores session and posts notify {did}",
@@ -924,7 +968,9 @@
         "web/test/oauth/session.test.ts"
       ],
       "title": "successful callback stores session and posts notify {did}",
-      "kept": true
+      "replaced": "worker/test/node/bff/oauth-client.test.ts › the confidential OAuth client › authorize then callback against the fake AS stores a session for the DID; the assertion has iss=sub=client_id, aud=issuer, a unique jti and kid k1",
+      "package": "N5-01",
+      "reason": "The Workers/browser-era behavior was migrated in N5-01; its current Node or server-session equivalent is asserted by the replacement test."
     },
     {
       "id": "web/test/oauth/session.test.ts › web/test/oauth/session.test.ts › signOut calls revoke and clears IndexedDB stores",
@@ -933,7 +979,9 @@
         "web/test/oauth/session.test.ts"
       ],
       "title": "signOut calls revoke and clears IndexedDB stores",
-      "kept": true
+      "replaced": "worker/test/node/bff/sessions.test.ts › web sessions › logout and logout-all append one revocation journal entry per deleted session before the rows are gone",
+      "package": "N5-01",
+      "reason": "The Workers/browser-era behavior was migrated in N5-01; its current Node or server-session equivalent is asserted by the replacement test."
     },
     {
       "id": "web/test/oauth/session.test.ts › web/test/oauth/session.test.ts › expired/refresh-failed session surfaces re-auth state",
@@ -942,7 +990,9 @@
         "web/test/oauth/session.test.ts"
       ],
       "title": "expired/refresh-failed session surfaces re-auth state",
-      "kept": true
+      "replaced": "worker/test/node/bff/oauth-client.test.ts › the confidential OAuth client › invalid_grant on refresh deletes the session and marks the account reauth_required; a TransportError keeps the session",
+      "package": "N5-01",
+      "reason": "The Workers/browser-era behavior was migrated in N5-01; its current Node or server-session equivalent is asserted by the replacement test."
     },
     {
       "id": "web/test/oauth/session.test.ts › web/test/oauth/session.test.ts › signOut clears IndexedDB stores when revoke fails with 500",
@@ -951,7 +1001,9 @@
         "web/test/oauth/session.test.ts"
       ],
       "title": "signOut clears IndexedDB stores when revoke fails with 500",
-      "kept": true
+      "replaced": "worker/test/node/bff/sessions.test.ts › web sessions › logout and logout-all append one revocation journal entry per deleted session before the rows are gone",
+      "package": "N5-01",
+      "reason": "The Workers/browser-era behavior was migrated in N5-01; its current Node or server-session equivalent is asserted by the replacement test."
     },
     {
       "id": "web/test/oauth/session.test.ts › session support › handle resolution falls back to the library DoH resolver only when /api/v1/resolve cannot answer",
@@ -960,7 +1012,9 @@
         "session support"
       ],
       "title": "handle resolution falls back to the library DoH resolver only when /api/v1/resolve cannot answer",
-      "kept": true
+      "replaced": "worker/test/node/bff/oauth-client.test.ts › the confidential OAuth client › authorization start follows identity-to-PDS-to-AS metadata and refuses an AS that does not protect the PDS",
+      "package": "N5-01",
+      "reason": "The Workers/browser-era behavior was migrated in N5-01; its current Node or server-session equivalent is asserted by the replacement test."
     },
     {
       "id": "web/test/oauth/session.test.ts › session support › a revocation that never answers is abandoned after the timeout and the stores are still cleared",
@@ -969,7 +1023,9 @@
         "session support"
       ],
       "title": "a revocation that never answers is abandoned after the timeout and the stores are still cleared",
-      "kept": true
+      "replaced": "worker/test/node/bff/oauth-client.test.ts › a revoke whose upstream request never answers is abandoned after the policy deadline and deletes the local session",
+      "package": "N5-01",
+      "reason": "The Node regression holds the fake AS revocation request through the injected policy deadline and verifies local deletion and one revocation journal entry."
     },
     {
       "id": "web/test/oauth/session.test.ts › session support › main.tsx boot: an expired stored session shows the re-auth banner; a mid-session refresh failure signs the shell out",
@@ -978,7 +1034,9 @@
         "session support"
       ],
       "title": "main.tsx boot: an expired stored session shows the re-auth banner; a mid-session refresh failure signs the shell out",
-      "kept": true
+      "replaced": "web/test/session/client.test.ts › web/test/session/client.test.ts › getSession caches csrfToken; every mutation sends X-CSRF-Token with same-origin credentials; 401 shows signed-out and reauth_required shows the re-sign-in banner",
+      "package": "N5-01",
+      "reason": "The Workers/browser-era behavior was migrated in N5-01; its current Node or server-session equivalent is asserted by the replacement test."
     },
     {
       "id": "web/test/oauth/session.test.ts › session support › the callback route records the session and replaces the entry with /feed; failures show fixed text only",
@@ -987,168 +1045,216 @@
         "session support"
       ],
       "title": "the callback route records the session and replaces the entry with /feed; failures show fixed text only",
-      "kept": true
+      "replaced": "worker/test/node/bff/oauth-client.test.ts › the confidential OAuth client › authorize then callback against the fake AS stores a session for the DID; the assertion has iss=sub=client_id, aud=issuer, a unique jti and kid k1",
+      "package": "N5-01",
+      "reason": "The Workers/browser-era behavior was migrated in N5-01; its current Node or server-session equivalent is asserted by the replacement test."
     },
     {
       "id": "web/test/outbox/delete.test.ts › pending deletion hidden in owner overlay; failure visible",
       "file": "web/test/outbox/delete.test.ts",
       "ancestors": [],
       "title": "pending deletion hidden in owner overlay; failure visible",
-      "kept": true
+      "replaced": "web/test/outbox/overlay.test.ts › pending owner delete hides the record, while a failed delete stays visible with its failure",
+      "package": "N5-01",
+      "reason": "The Workers/browser-era behavior was migrated in N5-01; its current Node or server-session equivalent is asserted by the replacement test."
     },
     {
       "id": "web/test/outbox/delete.test.ts › delete behind an unsent or in-flight create runs after it and leaves no record on the fake PDS",
       "file": "web/test/outbox/delete.test.ts",
       "ancestors": [],
       "title": "delete behind an unsent or in-flight create runs after it and leaves no record on the fake PDS",
-      "kept": true
+      "replaced": "worker/test/node/outbox/delete.test.ts › delete behind an unsent or in-flight create runs after it and leaves no record on the fake PDS",
+      "package": "N5-01",
+      "reason": "The Workers/browser-era behavior was migrated in N5-01; its current Node or server-session equivalent is asserted by the replacement test."
     },
     {
       "id": "web/test/outbox/delete.test.ts › delete of a create that lost its rkey to another writer completes locally and never deletes their record",
       "file": "web/test/outbox/delete.test.ts",
       "ancestors": [],
       "title": "delete of a create that lost its rkey to another writer completes locally and never deletes their record",
-      "kept": true
+      "replaced": "worker/test/node/outbox/recovery.test.ts › an ambiguous create whose existing record has the same digest succeeds; a different digest is terminal remote_record_conflict and the record is never overwritten",
+      "package": "N5-01",
+      "reason": "The Workers/browser-era behavior was migrated in N5-01; its current Node or server-session equivalent is asserted by the replacement test."
     },
     {
       "id": "web/test/outbox/delete.test.ts › delete enqueued after the create already ended remote_record_conflict deletes the record the owner saw, with swap",
       "file": "web/test/outbox/delete.test.ts",
       "ancestors": [],
       "title": "delete enqueued after the create already ended remote_record_conflict deletes the record the owner saw, with swap",
-      "kept": true
+      "replaced": "worker/test/node/outbox/delete.test.ts › delete uses swapRecord from record_state; InvalidSwap re-fetches and reconciles; a delete behind a pending create waits for it",
+      "package": "N5-01",
+      "reason": "The Workers/browser-era behavior was migrated in N5-01; its current Node or server-session equivalent is asserted by the replacement test."
     },
     {
       "id": "web/test/outbox/delete.test.ts › delete enqueued after a remote_record_conflict create shows its failure instead of completing silently",
       "file": "web/test/outbox/delete.test.ts",
       "ancestors": [],
       "title": "delete enqueued after a remote_record_conflict create shows its failure instead of completing silently",
-      "kept": true
+      "replaced": "worker/test/node/outbox/recovery.test.ts › an ambiguous create whose existing record has the same digest succeeds; a different digest is terminal remote_record_conflict and the record is never overwritten",
+      "package": "N5-01",
+      "reason": "The Workers/browser-era behavior was migrated in N5-01; its current Node or server-session equivalent is asserted by the replacement test."
     },
     {
       "id": "web/test/outbox/delete.test.ts › InvalidSwap after another client changed the record re-fetches the CID and retries the delete",
       "file": "web/test/outbox/delete.test.ts",
       "ancestors": [],
       "title": "InvalidSwap after another client changed the record re-fetches the CID and retries the delete",
-      "kept": true
+      "replaced": "worker/test/node/outbox/delete.test.ts › delete uses swapRecord from record_state; InvalidSwap re-fetches and reconciles; a delete behind a pending create waits for it",
+      "package": "N5-01",
+      "reason": "The Workers/browser-era behavior was migrated in N5-01; its current Node or server-session equivalent is asserted by the replacement test."
     },
     {
       "id": "web/test/outbox/follows.test.ts › PUT, DELETE, PUT for one subject execute in order with separate ids",
       "file": "web/test/outbox/follows.test.ts",
       "ancestors": [],
       "title": "PUT, DELETE, PUT for one subject execute in order with separate ids",
-      "kept": true
+      "replaced": "worker/test/node/outbox/follows.test.ts › follow rkey is f+hex(sha256(subject)); unfollow deletes every matching listed record and keeps unrelated ones; PUT, DELETE, PUT run in order",
+      "package": "N5-01",
+      "reason": "The Workers/browser-era behavior was migrated in N5-01; its current Node or server-session equivalent is asserted by the replacement test."
     },
     {
       "id": "web/test/outbox/follows.test.ts › unfollow deletes all duplicate matching records and keeps unrelated subject",
       "file": "web/test/outbox/follows.test.ts",
       "ancestors": [],
       "title": "unfollow deletes all duplicate matching records and keeps unrelated subject",
-      "kept": true
+      "replaced": "worker/test/node/outbox/follows.test.ts › follow rkey is f+hex(sha256(subject)); unfollow deletes every matching listed record and keeps unrelated ones; PUT, DELETE, PUT run in order",
+      "package": "N5-01",
+      "reason": "The Workers/browser-era behavior was migrated in N5-01; its current Node or server-session equivalent is asserted by the replacement test."
     },
     {
       "id": "web/test/outbox/follows.test.ts › unfollow with no matching record succeeds with zero deleteRecord calls",
       "file": "web/test/outbox/follows.test.ts",
       "ancestors": [],
       "title": "unfollow with no matching record succeeds with zero deleteRecord calls",
-      "kept": true
+      "replaced": "worker/test/node/outbox/follows.test.ts › unfollow with no matching record succeeds with zero deleteRecord calls",
+      "package": "N5-01",
+      "reason": "The Workers/browser-era behavior was migrated in N5-01; its current Node or server-session equivalent is asserted by the replacement test."
     },
     {
       "id": "web/test/outbox/recovery.test.ts › crash before send: operation resumes with same rkey",
       "file": "web/test/outbox/recovery.test.ts",
       "ancestors": [],
       "title": "crash before send: operation resumes with same rkey",
-      "kept": true
+      "replaced": "worker/test/node/outbox/recovery.test.ts › crash before send, after PDS commit before local ack, after local commit, and during delete (database reopened) each end with exactly one PDS outcome",
+      "package": "N5-01",
+      "reason": "The Workers/browser-era behavior was migrated in N5-01; its current Node or server-session equivalent is asserted by the replacement test."
     },
     {
       "id": "web/test/outbox/recovery.test.ts › crash after PDS commit before local ack: ambiguous create reconciles to success via digest",
       "file": "web/test/outbox/recovery.test.ts",
       "ancestors": [],
       "title": "crash after PDS commit before local ack: ambiguous create reconciles to success via digest",
-      "kept": true
+      "replaced": "worker/test/node/outbox/recovery.test.ts › crash before send, after PDS commit before local ack, after local commit, and during delete (database reopened) each end with exactly one PDS outcome",
+      "package": "N5-01",
+      "reason": "The Workers/browser-era behavior was migrated in N5-01; its current Node or server-session equivalent is asserted by the replacement test."
     },
     {
       "id": "web/test/outbox/recovery.test.ts › remote record with different payload at rkey → remote_record_conflict, never overwritten",
       "file": "web/test/outbox/recovery.test.ts",
       "ancestors": [],
       "title": "remote record with different payload at rkey → remote_record_conflict, never overwritten",
-      "kept": true
+      "replaced": "worker/test/node/outbox/recovery.test.ts › an ambiguous create whose existing record has the same digest succeeds; a different digest is terminal remote_record_conflict and the record is never overwritten",
+      "package": "N5-01",
+      "reason": "The Workers/browser-era behavior was migrated in N5-01; its current Node or server-session equivalent is asserted by the replacement test."
     },
     {
       "id": "web/test/outbox/recovery.test.ts › crash during delete resumes with swapRecord and verifies absence",
       "file": "web/test/outbox/recovery.test.ts",
       "ancestors": [],
       "title": "crash during delete resumes with swapRecord and verifies absence",
-      "kept": true
+      "replaced": "worker/test/node/outbox/delete.test.ts › delete uses swapRecord from record_state; InvalidSwap re-fetches and reconciles; a delete behind a pending create waits for it",
+      "package": "N5-01",
+      "reason": "The Workers/browser-era behavior was migrated in N5-01; its current Node or server-session equivalent is asserted by the replacement test."
     },
     {
       "id": "web/test/outbox/recovery.test.ts › RecordNotFound on first and repeated delete completes the operation as success",
       "file": "web/test/outbox/recovery.test.ts",
       "ancestors": [],
       "title": "RecordNotFound on first and repeated delete completes the operation as success",
-      "kept": true
+      "replaced": "worker/test/node/outbox/delete.test.ts › delete uses swapRecord from record_state; InvalidSwap re-fetches and reconciles; a delete behind a pending create waits for it",
+      "package": "N5-01",
+      "reason": "The Workers/browser-era behavior was migrated in N5-01; its current Node or server-session equivalent is asserted by the replacement test."
     },
     {
       "id": "web/test/outbox/recovery.test.ts › crash after follow createRecord before local ack reconciles to one record at the deterministic rkey",
       "file": "web/test/outbox/recovery.test.ts",
       "ancestors": [],
       "title": "crash after follow createRecord before local ack reconciles to one record at the deterministic rkey",
-      "kept": true
+      "replaced": "worker/test/node/outbox/recovery.test.ts › crash after follow createRecord before local ack reconciles to one record at the deterministic rkey",
+      "package": "N5-01",
+      "reason": "The Workers/browser-era behavior was migrated in N5-01; its current Node or server-session equivalent is asserted by the replacement test."
     },
     {
       "id": "web/test/outbox/recovery.test.ts › one runner per DID: a second tab waits for the Web Lock and takes over after the first stops",
       "file": "web/test/outbox/recovery.test.ts",
       "ancestors": [],
       "title": "one runner per DID: a second tab waits for the Web Lock and takes over after the first stops",
-      "kept": true
+      "replaced": "worker/test/node/outbox/retry.test.ts › a tenth attempt interrupted and then blocked is reconciled after sign-in with exactly one getRecord and settles, also when that look first answers 401",
+      "package": "N5-01",
+      "reason": "The Workers/browser-era behavior was migrated in N5-01; its current Node or server-session equivalent is asserted by the replacement test."
     },
     {
       "id": "web/test/outbox/retry.test.ts › zero jitter delays 1,2,4,…,256,300 and exactly 10 attempts with no 11th request",
       "file": "web/test/outbox/retry.test.ts",
       "ancestors": [],
       "title": "zero jitter delays 1,2,4,…,256,300 and exactly 10 attempts with no 11th request",
-      "kept": true
+      "replaced": "worker/test/node/outbox/retry.test.ts › retry delays are 1, 2, 4 ... s capped at 300 s with zero jitter; Retry-After: 20 gives 20 s; exactly 10 attempts and no 11th PDS request",
+      "package": "N5-01",
+      "reason": "The Workers/browser-era behavior was migrated in N5-01; its current Node or server-session equivalent is asserted by the replacement test."
     },
     {
       "id": "web/test/outbox/retry.test.ts › Retry-After 20 raises next delay to 20s",
       "file": "web/test/outbox/retry.test.ts",
       "ancestors": [],
       "title": "Retry-After 20 raises next delay to 20s",
-      "kept": true
+      "replaced": "worker/test/node/outbox/retry.test.ts › Retry-After 20 raises next delay to 20s",
+      "package": "N5-01",
+      "reason": "The Workers/browser-era behavior was migrated in N5-01; its current Node or server-session equivalent is asserted by the replacement test."
     },
     {
       "id": "web/test/outbox/retry.test.ts › nonrecoverable PDS error fails the operation after exactly one request",
       "file": "web/test/outbox/retry.test.ts",
       "ancestors": [],
       "title": "nonrecoverable PDS error fails the operation after exactly one request",
-      "kept": true
+      "replaced": "worker/test/node/outbox/retry.test.ts › nonrecoverable PDS error fails the operation after exactly one request",
+      "package": "N5-01",
+      "reason": "The Workers/browser-era behavior was migrated in N5-01; its current Node or server-session equivalent is asserted by the replacement test."
     },
     {
       "id": "web/test/outbox/retry.test.ts › a crash during the tenth attempt is reconciled read-only, never with an eleventh create",
       "file": "web/test/outbox/retry.test.ts",
       "ancestors": [],
       "title": "a crash during the tenth attempt is reconciled read-only, never with an eleventh create",
-      "kept": true
+      "replaced": "worker/test/node/outbox/retry.test.ts › a crash during the tenth attempt is reconciled read-only, never with an eleventh create",
+      "package": "N5-01",
+      "reason": "The Workers/browser-era behavior was migrated in N5-01; its current Node or server-session equivalent is asserted by the replacement test."
     },
     {
       "id": "web/test/outbox/retry.test.ts › a notify answered 503 is retried before records/status polling",
       "file": "web/test/outbox/retry.test.ts",
       "ancestors": [],
       "title": "a notify answered 503 is retried before records/status polling",
-      "kept": true
+      "replaced": "worker/test/node/outbox/retry.test.ts › the outbox extension timer runs due work and reschedules itself at the next retry",
+      "package": "N5-01",
+      "reason": "The Workers/browser-era behavior was migrated in N5-01; its current Node or server-session equivalent is asserted by the replacement test."
     },
     {
       "id": "web/test/outbox/settings.test.ts › disconnect writes settings/self disabled and notifies",
       "file": "web/test/outbox/settings.test.ts",
       "ancestors": [],
       "title": "disconnect writes settings/self disabled and notifies",
-      "kept": true
+      "replaced": "worker/test/node/outbox/settings.test.ts › disable writes settings/self {indexing:disabled} then notifies; enable writes indexing:enabled at a newer revision",
+      "package": "N5-01",
+      "reason": "The Workers/browser-era behavior was migrated in N5-01; its current Node or server-session equivalent is asserted by the replacement test."
     },
     {
       "id": "web/test/outbox/settings.test.ts › reconnect after disconnect runs FIFO and the last choice wins on the PDS",
       "file": "web/test/outbox/settings.test.ts",
       "ancestors": [],
       "title": "reconnect after disconnect runs FIFO and the last choice wins on the PDS",
-      "kept": true
+      "replaced": "worker/test/node/outbox/settings.test.ts › reconnect after disconnect runs FIFO and the last choice wins on the PDS",
+      "package": "N5-01",
+      "reason": "The Workers/browser-era behavior was migrated in N5-01; its current Node or server-session equivalent is asserted by the replacement test."
     },
     {
       "id": "web/test/routes/feed.test.tsx › web/test/routes/feed.test.tsx › renders items and loads next page via nextCursor",
@@ -1157,7 +1263,9 @@
         "web/test/routes/feed.test.tsx"
       ],
       "title": "renders items and loads next page via nextCursor",
-      "kept": true
+      "replaced": "web/test/routes/feed.test.tsx › web/test/routes/feed.test.tsx › renders items and loads the next page via the opaque nextCursor",
+      "package": "N5-01",
+      "reason": "The Workers/browser-era behavior was migrated in N5-01; its current Node or server-session equivalent is asserted by the replacement test."
     },
     {
       "id": "web/test/routes/feed.test.tsx › web/test/routes/feed.test.tsx › anonymous user selecting following sees a sign-in prompt and no scope=following request is sent",
@@ -1166,7 +1274,9 @@
         "web/test/routes/feed.test.tsx"
       ],
       "title": "anonymous user selecting following sees a sign-in prompt and no scope=following request is sent",
-      "kept": true
+      "replaced": "web/test/routes/feed.test.tsx › web/test/routes/feed.test.tsx › an anonymous user selecting following sees a sign-in prompt and sends no following request",
+      "package": "N5-01",
+      "reason": "The Workers/browser-era behavior was migrated in N5-01; its current Node or server-session equivalent is asserted by the replacement test."
     },
     {
       "id": "web/test/routes/feed.test.tsx › web/test/routes/feed.test.tsx › page-2 503 keeps page 1, shows retry, and a successful retry appends page 2 once",
@@ -1175,7 +1285,9 @@
         "web/test/routes/feed.test.tsx"
       ],
       "title": "page-2 503 keeps page 1, shows retry, and a successful retry appends page 2 once",
-      "kept": true
+      "replaced": "web/test/routes/feed.test.tsx › web/test/routes/feed.test.tsx › page two 503 keeps page one and retry appends page two once",
+      "package": "N5-01",
+      "reason": "The Workers/browser-era behavior was migrated in N5-01; its current Node or server-session equivalent is asserted by the replacement test."
     },
     {
       "id": "web/test/routes/feed.test.tsx › web/test/routes/feed.test.tsx › loading, empty, error and stale states render labelled text and no spinner remains after an error",
@@ -1184,7 +1296,9 @@
         "web/test/routes/feed.test.tsx"
       ],
       "title": "loading, empty, error and stale states render labelled text and no spinner remains after an error",
-      "kept": true
+      "replaced": "web/test/routes/feed.test.tsx › web/test/routes/feed.test.tsx › shows loading, error, retry and stale-index states without leaving a spinner behind",
+      "package": "N5-01",
+      "reason": "The Workers/browser-era behavior was migrated in N5-01; its current Node or server-session equivalent is asserted by the replacement test."
     },
     {
       "id": "web/test/routes/profile.test.tsx › web/test/routes/profile.test.tsx › stats window switch fetches window and renders exact top lists",
@@ -1193,7 +1307,9 @@
         "web/test/routes/profile.test.tsx"
       ],
       "title": "stats window switch fetches window and renders exact top lists",
-      "kept": true
+      "replaced": "web/test/routes/profile.test.tsx › web/test/routes/profile.test.tsx › stats window switch fetches the requested window and renders the server-ranked top lists",
+      "package": "N5-01",
+      "reason": "The Workers/browser-era behavior was migrated in N5-01; its current Node or server-session equivalent is asserted by the replacement test."
     },
     {
       "id": "web/test/routes/profile.test.tsx › web/test/routes/profile.test.tsx › new verified handle for the same DID updates the display on the same /u/:did route",
@@ -1202,7 +1318,9 @@
         "web/test/routes/profile.test.tsx"
       ],
       "title": "new verified handle for the same DID updates the display on the same /u/:did route",
-      "kept": true
+      "replaced": "web/test/routes/profile.test.tsx › web/test/routes/profile.test.tsx › a refreshed verified handle updates on the same DID route",
+      "package": "N5-01",
+      "reason": "The Workers/browser-era behavior was migrated in N5-01; its current Node or server-session equivalent is asserted by the replacement test."
     },
     {
       "id": "web/test/routes/profile.test.tsx › web/test/routes/profile.test.tsx › recordless user, no-album stats and unknown DID 404 render explicit empty and not-found states",
@@ -1211,7 +1329,9 @@
         "web/test/routes/profile.test.tsx"
       ],
       "title": "recordless user, no-album stats and unknown DID 404 render explicit empty and not-found states",
-      "kept": true
+      "replaced": "web/test/routes/profile.test.tsx › web/test/routes/profile.test.tsx › recordless profiles show explicit empty history and unknown DIDs show not found",
+      "package": "N5-01",
+      "reason": "The Workers/browser-era behavior was migrated in N5-01; its current Node or server-session equivalent is asserted by the replacement test."
     },
     {
       "id": "web/test/routes/profile.test.tsx › web/test/routes/profile.test.tsx › follow button shows pending then confirmed, and a permanently failed unfollow shows failed without claiming removal",
@@ -1220,7 +1340,9 @@
         "web/test/routes/profile.test.tsx"
       ],
       "title": "follow button shows pending then confirmed, and a permanently failed unfollow shows failed without claiming removal",
-      "kept": true
+      "replaced": "web/test/routes/profile.test.tsx › web/test/routes/profile.test.tsx › follow is confirmed only after indexing and a failed unfollow never claims removal",
+      "package": "N5-01",
+      "reason": "The Workers/browser-era behavior was migrated in N5-01; its current Node or server-session equivalent is asserted by the replacement test."
     },
     {
       "id": "web/test/routes/profile.test.tsx › web/test/routes/profile.test.tsx › a follow or unfollow whose index confirmation stopped offers Follow or Unfollow again",
@@ -1229,7 +1351,9 @@
         "web/test/routes/profile.test.tsx"
       ],
       "title": "a follow or unfollow whose index confirmation stopped offers Follow or Unfollow again",
-      "kept": true
+      "replaced": "web/test/routes/profile.test.tsx › web/test/routes/profile.test.tsx › follow is confirmed only after indexing and a failed unfollow never claims removal",
+      "package": "N5-01",
+      "reason": "The profile follow-view regression asserts retry actions for stopped published follow and unfollow operations, while preserving indexed-edge state."
     },
     {
       "id": "web/test/routes/profile.test.tsx › web/test/routes/profile.test.tsx › a failed or truncated following lookup shows the follow state as unknown with a re-check, never Not following",
@@ -1238,7 +1362,9 @@
         "web/test/routes/profile.test.tsx"
       ],
       "title": "a failed or truncated following lookup shows the follow state as unknown with a re-check, never Not following",
-      "kept": true
+      "replaced": "web/test/routes/profile.test.tsx › web/test/routes/profile.test.tsx › follow is confirmed only after indexing and a failed unfollow never claims removal",
+      "package": "N5-01",
+      "reason": "The Workers/browser-era behavior was migrated in N5-01; its current Node or server-session equivalent is asserted by the replacement test."
     },
     {
       "id": "web/test/routes/profile.test.tsx › web/test/routes/profile.test.tsx › a scrobble whose index confirmation stopped reads as not confirmed in the owner's history, not as waiting",
@@ -1256,7 +1382,9 @@
         "web/test/routes/profile.test.tsx"
       ],
       "title": "own profile has no follow control and an anonymous viewer gets a sign-in action",
-      "kept": true
+      "replaced": "web/test/routes/profile.test.tsx › web/test/routes/profile.test.tsx › owner profiles have no follow control and anonymous viewers get a sign-in action",
+      "package": "N5-01",
+      "reason": "The Workers/browser-era behavior was migrated in N5-01; its current Node or server-session equivalent is asserted by the replacement test."
     },
     {
       "id": "web/test/routes/profile.test.tsx › web/test/routes/profile.test.tsx › delete control appears only on the signed-in owner's own records",
@@ -1265,7 +1393,9 @@
         "web/test/routes/profile.test.tsx"
       ],
       "title": "delete control appears only on the signed-in owner's own records",
-      "kept": true
+      "replaced": "web/test/routes/profile.test.tsx › web/test/routes/profile.test.tsx › shows delete controls only on the signed-in owner’s records",
+      "package": "N5-01",
+      "reason": "The Workers/browser-era behavior was migrated in N5-01; its current Node or server-session equivalent is asserted by the replacement test."
     },
     {
       "id": "web/test/routes/scrobble.test.tsx › web/test/routes/scrobble.test.tsx › invalid input shows field errors and creates no outbox operation",
@@ -1274,7 +1404,9 @@
         "web/test/routes/scrobble.test.tsx"
       ],
       "title": "invalid input shows field errors and creates no outbox operation",
-      "kept": true
+      "replaced": "web/test/routes/scrobble.test.tsx › web/test/routes/scrobble.test.tsx › invalid input shows field errors and does not create a scrobble operation",
+      "package": "N5-01",
+      "reason": "The Workers/browser-era behavior was migrated in N5-01; its current Node or server-session equivalent is asserted by the replacement test."
     },
     {
       "id": "web/test/routes/scrobble.test.tsx › web/test/routes/scrobble.test.tsx › status progresses queued→published→indexed from mocked records/status",
@@ -1283,7 +1415,9 @@
         "web/test/routes/scrobble.test.tsx"
       ],
       "title": "status progresses queued→published→indexed from mocked records/status",
-      "kept": true
+      "replaced": "web/test/routes/scrobble.test.tsx › web/test/routes/scrobble.test.tsx › submitting the form posts with a fresh Idempotency-Key and shows queued, published, then indexed from operation and record-status polling",
+      "package": "N5-01",
+      "reason": "The Workers/browser-era behavior was migrated in N5-01; its current Node or server-session equivalent is asserted by the replacement test."
     },
     {
       "id": "web/test/routes/scrobble.test.tsx › web/test/routes/scrobble.test.tsx › excluded or failed status shows the failure code, stops polling and never shows published success",
@@ -1301,7 +1435,9 @@
         "web/test/routes/settings.test.tsx"
       ],
       "title": "disconnect requires confirmation and enqueues settings op",
-      "kept": true
+      "replaced": "web/test/routes/settings.test.tsx › web/test/routes/settings.test.tsx › disconnect confirmation explains the public opt-out and sends the confirmed choice",
+      "package": "N5-01",
+      "reason": "The Workers/browser-era behavior was migrated in N5-01; its current Node or server-session equivalent is asserted by the replacement test."
     },
     {
       "id": "web/test/routes/settings.test.tsx › web/test/routes/settings.test.tsx › disconnect confirmation states that public PDS records and the opt-out record remain and claims no erasure",
@@ -1310,7 +1446,9 @@
         "web/test/routes/settings.test.tsx"
       ],
       "title": "disconnect confirmation states that public PDS records and the opt-out record remain and claims no erasure",
-      "kept": true
+      "replaced": "web/test/routes/settings.test.tsx › web/test/routes/settings.test.tsx › disconnect confirmation explains the public opt-out and sends the confirmed choice",
+      "package": "N5-01",
+      "reason": "The Workers/browser-era behavior was migrated in N5-01; its current Node or server-session equivalent is asserted by the replacement test."
     },
     {
       "id": "web/test/routes/settings.test.tsx › web/test/routes/settings.test.tsx › export action downloads /api/v1/users/<did>/export as music-export.json",
@@ -1319,7 +1457,9 @@
         "web/test/routes/settings.test.tsx"
       ],
       "title": "export action downloads /api/v1/users/<did>/export as music-export.json",
-      "kept": true
+      "replaced": "web/test/routes/settings.test.tsx › web/test/routes/settings.test.tsx › shows server session identity and the public export link without a local browser outbox",
+      "package": "N5-01",
+      "reason": "The Workers/browser-era behavior was migrated in N5-01; its current Node or server-session equivalent is asserted by the replacement test."
     },
     {
       "id": "web/test/routes/shell.test.tsx › web/test/routes/shell.test.tsx › write UI hidden without publication capability",
@@ -1328,7 +1468,9 @@
         "web/test/routes/shell.test.tsx"
       ],
       "title": "write UI hidden without publication capability",
-      "kept": true
+      "replaced": "web/test/routes/shell.test.tsx › web/test/routes/shell.test.tsx › hides write UI when the deployment does not advertise publication capability",
+      "package": "N5-01",
+      "reason": "The Workers/browser-era behavior was migrated in N5-01; its current Node or server-session equivalent is asserted by the replacement test."
     },
     {
       "id": "web/test/routes/shell.test.tsx › web/test/routes/shell.test.tsx › unknown route renders the not-found view",
@@ -1337,7 +1479,9 @@
         "web/test/routes/shell.test.tsx"
       ],
       "title": "unknown route renders the not-found view",
-      "kept": true
+      "replaced": "web/test/routes/shell.test.tsx › web/test/routes/shell.test.tsx › recognizes deep links for every settings screen and sends unknown paths to not found",
+      "package": "N5-01",
+      "reason": "The Workers/browser-era behavior was migrated in N5-01; its current Node or server-session equivalent is asserted by the replacement test."
     },
     {
       "id": "web/test/routes/shell.test.tsx › web/test/routes/shell.test.tsx › signed-in shell shows the verified handle and DID and the authenticated navigation",
@@ -1346,7 +1490,9 @@
         "web/test/routes/shell.test.tsx"
       ],
       "title": "signed-in shell shows the verified handle and DID and the authenticated navigation",
-      "kept": true
+      "replaced": "web/test/routes/shell.test.tsx › web/test/routes/shell.test.tsx › shows server session identity and the re-sign-in notice without browser OAuth state",
+      "package": "N5-01",
+      "reason": "The Workers/browser-era behavior was migrated in N5-01; its current Node or server-session equivalent is asserted by the replacement test."
     },
     {
       "id": "web/test/routes/shell.test.tsx › web/test/routes/shell.test.tsx › after sign-out the shell shows anonymous navigation and the settings route shows a sign-in prompt",
@@ -1355,7 +1501,9 @@
         "web/test/routes/shell.test.tsx"
       ],
       "title": "after sign-out the shell shows anonymous navigation and the settings route shows a sign-in prompt",
-      "kept": true
+      "replaced": "web/test/routes/settings.test.tsx › web/test/routes/settings.test.tsx › sign out calls the server-session port and removes authenticated UI",
+      "package": "N5-01",
+      "reason": "The Workers/browser-era behavior was migrated in N5-01; its current Node or server-session equivalent is asserted by the replacement test."
     },
     {
       "id": "web/test/routes/signin.test.tsx › web/test/routes/signin.test.tsx › cancelled authorization, expired callback and unknown handle show specific recovery text with retry and no code or token in the DOM",
@@ -1364,7 +1512,9 @@
         "web/test/routes/signin.test.tsx"
       ],
       "title": "cancelled authorization, expired callback and unknown handle show specific recovery text with retry and no code or token in the DOM",
-      "kept": true
+      "replaced": "web/test/routes/signin.test.tsx › web/test/routes/signin.test.tsx › shows fixed recovery text for callback errors and never renders a code or token",
+      "package": "N5-01",
+      "reason": "The Workers/browser-era behavior was migrated in N5-01; its current Node or server-session equivalent is asserted by the replacement test."
     },
     {
       "id": "worker/test/acceptance/federation.test.ts › federation acceptance › Carol r10 appears only through external ingestion with zero app write calls",
@@ -1702,9 +1852,10 @@
         "log redaction"
       ],
       "title": "captured logs and error bodies contain no CURSOR_KEY, ADMIN_TOKEN or bearer marker and logs contain no track-title marker",
-      "kept": true,
       "change": "ADR 0005 §3.10, §3.11, §15.3 (N4-03): the secrets are the secrets-file key material (redacted as run() derives it) and a presented admin bearer, which the TCP listener answers with the JSON 404; an unparsable cursor key makes run() exit 78 naming only the field instead of a 503; title kept.",
-      "package": "N4-03"
+      "package": "N4-03",
+      "replaced": "worker/test/composition/logging.test.ts › log redaction › captured logs and error bodies contain no CURSOR_KEY or bearer marker and logs contain no track-title marker",
+      "reason": "N7-01 removes the Workers TCP admin token route; the Node logger still proves cursor-key, bearer and record-content redaction."
     },
     {
       "id": "worker/test/composition/routing.test.ts › worker/src/router.ts › every API.md v1.1 route dispatches; unknown /api/x → JSON 404; non-API path → ASSETS",
@@ -1713,9 +1864,9 @@
         "worker/src/router.ts"
       ],
       "title": "every API.md v1.1 route dispatches; unknown /api/x → JSON 404; non-API path → ASSETS",
-      "kept": true,
-      "change": "ADR 0005 §3.7, §15.3 (N4-03): ported to the production Node composition; non-API paths are served by the Node static server over a real web/dist (index.html for SPA routes), /oauth/ is a router prefix, the dispatcher's 405 Allow adds HEAD, and \"the index is never reached\" is shown by recording no SQL statement; title kept.",
-      "package": "N4-03"
+      "package": "N7-01",
+      "replaced": "worker/test/node/compose.test.ts › /api/, /health/, /oauth/, /2.0 and /1/ reach the router even when a same-named file exists in dist; other misses get the assetMiss JSON 404",
+      "reason": "N7-01 removes the Workers fetch adapter; the production Node dispatcher, static server and client-IP policy now provide the corresponding behavior."
     },
     {
       "id": "worker/test/composition/routing.test.ts › worker/src/router.ts › inbound x-atmusic-client-ip is stripped and CF-Connecting-IP used",
@@ -1724,9 +1875,9 @@
         "worker/src/router.ts"
       ],
       "title": "inbound x-atmusic-client-ip is stripped and CF-Connecting-IP used",
-      "kept": true,
-      "change": "ADR 0005 §3.6, §15.3 (N4-03): the client-IP policy runs in cf-connecting-ip mode from a trusted loopback peer; the bridge drops x-atmusic-* (observed by a test route mounted through compose features) instead of the ASSETS request headers; title kept.",
-      "package": "N4-03"
+      "package": "N7-01",
+      "replaced": "worker/test/node/client-ip.test.ts › CF-Connecting-IP is honoured only in cf-connecting-ip mode and only from a peer in ATMUSIC_TRUSTED_PROXIES; otherwise the peer address is used",
+      "reason": "N7-01 removes the Workers fetch adapter; the production Node dispatcher, static server and client-IP policy now provide the corresponding behavior."
     },
     {
       "id": "worker/test/composition/routing.test.ts › worker/src/router.ts › forced storage error → 500 envelope with UUID requestId and no stack trace or file path",
@@ -1735,9 +1886,9 @@
         "worker/src/router.ts"
       ],
       "title": "forced storage error → 500 envelope with UUID requestId and no stack trace or file path",
-      "kept": true,
-      "change": "ADR 0005 §15.3 (N4-03): the fault is injected through the Db wrapper of the Node composition; title kept.",
-      "package": "N4-03"
+      "package": "N7-01",
+      "replaced": "worker/test/node/compose.test.ts › every ctx built by compose carries deps, app and peer, and need(ctx, 'app') on a ctx without app answers 500 CtxWiringError",
+      "reason": "N7-01 removes the Workers fetch adapter; the production Node dispatcher, static server and client-IP policy now provide the corresponding behavior."
     },
     {
       "id": "worker/test/composition/routing.test.ts › worker/src/router.ts › asset miss: SPA route GET/HEAD serves index.html 200, every other miss is JSON not_found with x-request-id",
@@ -1746,9 +1897,9 @@
         "worker/src/router.ts"
       ],
       "title": "asset miss: SPA route GET/HEAD serves index.html 200, every other miss is JSON not_found with x-request-id",
-      "kept": true,
-      "change": "ADR 0005 §3.7, §15.3 (N4-03): asserted on the Node static server over a real web/dist: /oauth/callback is a router path, a non-GET/HEAD on an existing file is the 405 envelope with Allow: GET, HEAD, traversal is judged on the raw target, and a missing index.html is the envelope plus an assets.index_unavailable log line; title kept.",
-      "package": "N4-03"
+      "package": "N7-01",
+      "replaced": "worker/test/node/compose.test.ts › the SPA and its assets are served from ATMUSIC_ASSETS_DIR (default <release>/web/dist) with the _headers rules",
+      "reason": "N7-01 removes the Workers fetch adapter; the production Node dispatcher, static server and client-IP policy now provide the corresponding behavior."
     },
     {
       "id": "worker/test/composition/scheduled.test.ts › worker/src/scheduled.ts › cron re-arms a deleted alarm",
@@ -1815,7 +1966,9 @@
         "parseConfig namespace gate"
       ],
       "title": "shipped wrangler.jsonc carries the decided origin and prefix in every env and passes parseConfig",
-      "kept": true
+      "replaced": "scripts/test/gen-config.test.ts › Node defaults come from the example env and only headers are emitted",
+      "package": "N7-01",
+      "reason": "N7-01 retires worker/wrangler.jsonc as the shipped configuration (ADR 0005 §15.3); the Node host is configured from config/atmusic.env.example, whose decided defaults are asserted by the replacement test."
     },
     {
       "id": "worker/test/config.test.ts › parseConfig namespace gate › rejects malformed vars with the field names",
@@ -2200,21 +2353,27 @@
       "file": "worker/test/ingest/ingest-mode.test.ts",
       "ancestors": [],
       "title": "pulse mode drains to tail then closes; off mode never connects",
-      "kept": true
+      "replaced": "worker/test/composition/index-core-node.test.ts › IndexCore on the Node host runs Jetstream socket mode through the ws connector to a loopback server and re-arms the alarm after a throwing tick",
+      "package": "N7-01",
+      "reason": "N7-01 deleted the pulse ingest mode (ADR 0005 §15.3); the Node host runs the resident socket mode only, asserted by the replacement test."
     },
     {
       "id": "worker/test/ingest/ingest-mode.test.ts › a pulse that receives no event leaves lagSeconds null and the last successful pulse more than two intervals ago reports stale",
       "file": "worker/test/ingest/ingest-mode.test.ts",
       "ancestors": [],
       "title": "a pulse that receives no event leaves lagSeconds null and the last successful pulse more than two intervals ago reports stale",
-      "kept": true
+      "replaced": "worker/test/composition/index-core-node.test.ts › IndexCore on the Node host runs Jetstream socket mode through the ws connector to a loopback server and re-arms the alarm after a throwing tick",
+      "package": "N7-01",
+      "reason": "N7-01 deleted the pulse ingest mode and its lag and stale reporting (ADR 0005 §15.3); the Node host runs the resident socket mode only, asserted by the replacement test."
     },
     {
       "id": "worker/test/ingest/ingest-mode.test.ts › quiet pulses longer than lookback do not trigger gap recovery; a quiet pulse after an outage confirms nothing; a real disconnect gap still does",
       "file": "worker/test/ingest/ingest-mode.test.ts",
       "ancestors": [],
       "title": "quiet pulses longer than lookback do not trigger gap recovery; a quiet pulse after an outage confirms nothing; a real disconnect gap still does",
-      "kept": true
+      "replaced": "worker/test/composition/index-core-node.test.ts › IndexCore on the Node host runs Jetstream socket mode through the ws connector to a loopback server and re-arms the alarm after a throwing tick",
+      "package": "N7-01",
+      "reason": "N7-01 deleted the pulse ingest mode and its quiet-pulse gap handling (ADR 0005 §15.3); the Node host runs the resident socket mode only, asserted by the replacement test."
     },
     {
       "id": "worker/test/ingest/jetstream-socket.test.ts › jetstream socket › subscribe URL has kinds=commit and the three collections only",
@@ -2655,7 +2814,9 @@
         "verify drain"
       ],
       "title": "Paid drain works 200 cached-identity hints in one slice: 200 getRecord calls",
-      "kept": true
+      "replaced": "worker/test/ingest/verify-drain.test.ts › verify drain › the configured drain budget handles 200 cached-identity hints in one slice",
+      "package": "N7-01",
+      "reason": "N7-01 removed the Workers PLAN tier; this regression now checks the single configured Node drain budget without a paid-tier selector."
     },
     {
       "id": "worker/test/ingest/verify-drain.test.ts › verify drain › PLAN=free drain stays within 40 subrequests per slice",
@@ -2664,7 +2825,9 @@
         "verify drain"
       ],
       "title": "PLAN=free drain stays within 40 subrequests per slice",
-      "kept": true
+      "replaced": "worker/test/ingest/verify-drain.test.ts › verify drain › drain respects an explicitly supplied tight subrequest budget",
+      "package": "N7-01",
+      "reason": "N7-01 removed the Workers PLAN tier; the test injects a tight test budget directly without a runtime plan selector."
     },
     {
       "id": "worker/test/read/cursor-http.test.ts › cursor traversal over HTTP › arrival above anchor absent until fresh traversal; deleted unreturned record disappears",

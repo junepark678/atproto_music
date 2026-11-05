@@ -12,47 +12,43 @@ requires a signed current-head proof or verified repository snapshot. The
 `worker/` package name is retained for stable paths; it does not mean that the
 accepted production host is Cloudflare Workers.
 
-**Status:** Node backend foundations are implemented, but the port and M1–M6
-acceptance are not complete. At this wave-4 checkout the browser still uses the
-superseded public-client OAuth/outbox stack; Node browser integration, final
-acceptance/release tooling, current live tooling and published issue-contract
-reconciliation remain outstanding. Deterministic fixtures are not live external
-PDS evidence. No deployment or milestone closure is claimed. See the scoped
-[implementation and verification record](docs/verification/implementation-agent-13.md).
-Rust crates remain a frozen regression/golden-vector oracle.
+**Status:** the Node host, server-session browser, Node browser journeys, and
+Node acceptance tooling are implemented. The Workers runtime and test shims are
+retired. Deterministic acceptance and local benchmarks do not establish live
+OAuth interoperability, two-operator PDS coverage, production SSRF behavior, or
+the required soak; those gates and operator evidence remain open. No deployment
+or milestone closure is claimed. Rust crates remain a frozen regression and
+golden-vector oracle.
 
 ## Deterministic checks
 
 Requires the Node version in `.nvmrc` (**26.12.1**), Python 3 and the pinned
-contract-validator requirements, and actionlint **1.7.7**:
+contract-validator requirements:
 
 ```sh
 npm ci
 python3 -m venv .venv
 .venv/bin/python -m pip install -r api/requirements-contracts.txt
-go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
-bash scripts/check-ts.sh
-python3 scripts/validate_case_map.py --check-tests --node-wave 4
+npm run check
+python3 scripts/validate_case_map.py --check-tests
 ```
 
-The workflow-validity test finds actionlint via `ACTIONLINT`, `PATH`, `$GOBIN`,
-or `$GOPATH/bin`. The gate runs typechecking, Biome, all Vitest projects,
-contracts, structural case-map checks and the Workers/Node bundle guards still
-present during the port. Plan assertions support SQLite **3.54.0 and 3.54.1**;
-every run checks its actual query plans and records its actual engine version.
+The gate runs typechecking, Biome, all Vitest projects, contracts, structural
+case-map checks and the Node bundle guard. Plan assertions support SQLite
+**3.54.0 and 3.54.1**; every run checks its actual query plans and records its
+actual engine version.
 The official Node binary and the owner's system-SQLite build need not report
 the same patch version. No test requires the optional `sqlite_stmt` extension.
 
 ```sh
 npm test                                      # deterministic Vitest workspace
-bash scripts/acceptance/node-interim.sh --wave 4 # interim only, not final acceptance
+bash scripts/acceptance/node-interim.sh --wave 7 # interim only, not final acceptance
 bash scripts/check_goldens.sh                 # Rust oracle; requires pinned Rust
 ```
 
-`npm run test:e2e` still launches the historical Workers/dev-env browser stack.
-It is not current Node BFF end-to-end evidence. The unrestricted case-map
-existence check still has later-wave missing targets; wave-scoped success does
-not mean that those targets executed.
+`npm run test:e2e` launches the Node fixture stack. The full acceptance record
+is produced by `bash scripts/acceptance/node-backend.sh`; absent live evidence
+is reported as blocked, not passed.
 
 ## Host/build documentation
 
@@ -60,8 +56,8 @@ Read [local Node installation](docs/deploy/local-node.md),
 [deployment](docs/deployment.md), [exposure](docs/deploy/exposure.md),
 [operations](docs/operations.md), and [backup/restore](docs/backup.md).
 Build foundations use `npm run build:web` and
-`npx tsx scripts/build-server.ts --check`. Do not use the old Workers
-`scripts/deploy.sh` or the Rust release workflow as a Node release procedure.
+`npx tsx scripts/build-server.ts --check`. The retired Workers deployment
+procedure and Rust release workflow are not Node release procedures.
 No live acceptance run is recorded. Publication remains fail-closed until
 reviewable namespace authority evidence is supplied.
 
@@ -74,8 +70,8 @@ reviewable namespace authority evidence is supplied.
 | `worker/src/node`, `worker/src/app` | Node host, transport, composition, process lifecycle and indexing core |
 | `worker/src/bff`, `worker/src/outbox` | Confidential OAuth, sessions, CSRF and server publishing |
 | `worker/src/do` | Host-neutral schema, ingestion, reads and timers (historical directory name) |
-| `web` | Preact SPA, still awaiting the server-session migration at this checkout |
-| `scripts` | Checks, build, installer, admin, interim acceptance and historical live/deploy tools |
+| `web` | Preact SPA using server sessions and Node-backed account screens |
+| `scripts` | Checks, build, installer, admin, Node acceptance and historical live evidence tools |
 | `crates`, `tests/goldens` | Frozen Rust oracle and shared vectors |
 
 ## Contracts and evidence

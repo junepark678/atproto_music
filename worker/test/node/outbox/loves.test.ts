@@ -1,12 +1,28 @@
 // Loves through the server outbox (ADR 0005 §5.8, §6.3, §7.8; N2-05): one
 // love per (artist_key, track_key), and unlove mirrors unfollow.
 
+import { verifyRecordProof } from '@atmusic/atproto/verify/record-proof';
+import { fromMs } from '@atmusic/core/timestamp';
 import { expect, it } from 'vitest';
+import { applyRecordProof } from '../../../src/do/write/apply-record';
 import { enqueueLove, enqueueUnlove } from '../../../src/outbox/love-ops';
-import { CREATE, DELETE, GET, LIST, LOVE, remoteRecords, withHarness } from './support';
+import { CREATE, DELETE, GET, type Harness, LIST, LOVE, remoteRecords, withHarness } from './support';
 
 function love(artist: string, track: string) {
   return { $type: LOVE, artist, track, createdAt: '2026-01-15T11:00:00Z' };
+}
+
+/** Applies a fake-PDS commit through the production record-proof verifier and projector. */
+async function projectLove(h: Harness, rkey: string) {
+  const car = await h.kit.repos.Alice.getRecordCar(LOVE, rkey);
+  const proof = await verifyRecordProof(car, {
+    did: h.alice,
+    collection: LOVE,
+    rkey,
+    signingKey: h.kit.users.Alice.key.didKey,
+  });
+  const nowNs = fromMs(h.kit.clock.nowMs());
+  return h.db.tx(() => applyRecordProof(h.db, proof, { prefix: 'com.example.atmusic', nowNs, receiptNs: nowNs }));
 }
 
 it('a second love for the same (artist_key, track_key) succeeds without a new record; unlove deletes every matching listed love', async () => {
@@ -182,6 +198,216 @@ it('love.put decides from local state, never listing: an indexed love from anoth
     expect((await remoteRecords(h.kit, 'Alice', LOVE)).map((r) => r.rkey).sort()).toEqual(
       ['3kotherapp222', again.operation.rkey!].sort(),
     );
+  });
+});
+
+it('a verified same-rkey overwrite invalidates an old love success after restart and creates the requested identity at a new persisted rkey', async () => {
+  await withHarness(async (h) => {
+    h.seedUser(h.alice);
+    const rkey = '3kotherapp222';
+    const uri = `at://${h.alice}/${LOVE}/${rkey}`;
+    await h.kit.externalPut('Alice', LOVE, rkey, love('Artist A', 'Track A'));
+    expect((await projectLove(h, rkey)).outcome).toBe('applied');
+
+    const oldSuccess = await enqueueLove(h.m, {
+      did: h.alice,
+      input: { artist: 'Artist A', track: 'Track A' },
+      origin: 'web',
+    });
+    if (!oldSuccess.ok) throw new Error(JSON.stringify(oldSuccess.reason));
+    await h.runUntilIdle();
+    expect(h.op(oldSuccess.operation.id)).toMatchObject({ state: 'succeeded', result_uri: uri });
+    expect(h.writers.sent).toEqual([]);
+
+    // A different valid record at the same URI is verified and replaces the projection.
+    await h.kit.externalPut('Alice', LOVE, rkey, love('Artist B', 'Track B'));
+    expect((await projectLove(h, rkey)).outcome).toBe('applied');
+    expect(h.db.one('SELECT artist, track FROM loves WHERE uri = ?', uri)).toEqual({
+      artist: 'Artist B',
+      track: 'Track B',
+    });
+
+    h.restart();
+    const requested = await enqueueLove(h.m, {
+      did: h.alice,
+      input: { artist: 'Artist A', track: 'Track A' },
+      origin: 'web',
+    });
+    if (!requested.ok) throw new Error(JSON.stringify(requested.reason));
+    await h.runUntilIdle();
+
+    const createdUri = `at://${h.alice}/${LOVE}/${requested.operation.rkey}`;
+    expect(requested.operation.rkey).not.toBe(rkey);
+    expect(h.op(requested.operation.id)).toMatchObject({ state: 'succeeded', result_uri: createdUri });
+    expect(h.writers.order()).toEqual([CREATE]);
+    expect(h.writers.sent[0]?.body).toMatchObject({ rkey: requested.operation.rkey });
+    expect(await remoteRecords(h.kit, 'Alice', LOVE)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ rkey, value: expect.objectContaining({ artist: 'Artist B', track: 'Track B' }) }),
+        expect.objectContaining({
+          rkey: requested.operation.rkey,
+          value: expect.objectContaining({ artist: 'Artist A', track: 'Track A' }),
+        }),
+      ]),
+    );
+  });
+});
+
+for (const sequence of ['immediate', 'restart', 'queued'] as const) {
+  it(`re-loving an indexed track after unlove creates its persisted key with stale deletion projection (${sequence})`, async () => {
+    await withHarness(async (h) => {
+      h.seedUser(h.alice);
+      const first = await enqueueLove(h.m, {
+        did: h.alice,
+        input: { artist: 'Artist A', track: 'Track A' },
+        origin: 'web',
+      });
+      if (!first.ok || first.operation.rkey === null) throw new Error('first love was not admitted');
+      await h.runUntilIdle();
+      expect((await projectLove(h, first.operation.rkey)).outcome).toBe('applied');
+
+      const unlove = await enqueueUnlove(h.m, {
+        did: h.alice,
+        artist: 'Artist A',
+        track: 'Track A',
+        origin: 'web',
+      });
+      if (!unlove.ok) throw new Error('unlove was not admitted');
+      if (sequence !== 'queued') {
+        await h.runUntilIdle();
+        expect(await remoteRecords(h.kit, 'Alice', LOVE)).toHaveLength(0);
+        if (sequence === 'restart') h.restart();
+      }
+
+      const again = await enqueueLove(h.m, {
+        did: h.alice,
+        input: { artist: 'artist a', track: 'TRACK A' },
+        origin: 'web',
+      });
+      if (!again.ok) throw new Error('re-love was not admitted');
+      await h.runUntilIdle();
+      const uri = `at://${h.alice}/${LOVE}/${again.operation.rkey}`;
+      expect(again.operation.rkey).not.toBe(first.operation.rkey);
+      expect(h.op(again.operation.id)).toMatchObject({ state: 'succeeded', result_uri: uri });
+      expect(h.writers.order()).toEqual([CREATE, LIST, DELETE, CREATE]);
+      expect(h.writers.sent.at(-1)?.body).toMatchObject({ rkey: again.operation.rkey });
+      expect(await remoteRecords(h.kit, 'Alice', LOVE)).toEqual([
+        expect.objectContaining({ rkey: again.operation.rkey }),
+      ]);
+    });
+  });
+}
+
+it('a verified same-key metadata rewrite reuses the current CID without creating another love', async () => {
+  await withHarness(async (h) => {
+    h.seedUser(h.alice);
+    const rkey = '3kotherapp222';
+    const uri = `at://${h.alice}/${LOVE}/${rkey}`;
+    await h.kit.externalPut('Alice', LOVE, rkey, love('Artist A', 'Track A'));
+    await projectLove(h, rkey);
+    const oldSuccess = await enqueueLove(h.m, {
+      did: h.alice,
+      input: { artist: 'Artist A', track: 'Track A' },
+      origin: 'web',
+    });
+    if (!oldSuccess.ok) throw new Error(JSON.stringify(oldSuccess.reason));
+    await h.runUntilIdle();
+    const historicCid = h.op(oldSuccess.operation.id).result_cid;
+
+    await h.kit.externalPut('Alice', LOVE, rkey, {
+      ...love('ARTIST A', 'track a'),
+      album: 'A verified metadata update',
+    });
+    await projectLove(h, rkey);
+    const currentCid = h.db.one<{ cid: string }>('SELECT cid FROM loves WHERE uri = ?', uri)!.cid;
+    expect(currentCid).not.toBe(historicCid);
+
+    h.restart();
+    const again = await enqueueLove(h.m, {
+      did: h.alice,
+      input: { artist: 'Artist A', track: 'Track A' },
+      origin: 'web',
+    });
+    if (!again.ok) throw new Error(JSON.stringify(again.reason));
+    await h.runUntilIdle();
+    expect(h.writers.sent).toEqual([]);
+    expect(h.op(again.operation.id)).toMatchObject({ state: 'succeeded', result_uri: uri, result_cid: currentCid });
+  });
+});
+
+for (const proofState of ['absent', 'excluded'] as const) {
+  it(`a verified ${proofState} proof invalidates a historic love success`, async () => {
+    await withHarness(async (h) => {
+      h.seedUser(h.alice);
+      const rkey = '3kotherapp222';
+      const uri = `at://${h.alice}/${LOVE}/${rkey}`;
+      await h.kit.externalPut('Alice', LOVE, rkey, love('Artist A', 'Track A'));
+      await projectLove(h, rkey);
+      const oldSuccess = await enqueueLove(h.m, {
+        did: h.alice,
+        input: { artist: 'Artist A', track: 'Track A' },
+        origin: 'web',
+      });
+      if (!oldSuccess.ok) throw new Error(JSON.stringify(oldSuccess.reason));
+      await h.runUntilIdle();
+      expect(h.op(oldSuccess.operation.id).result_uri).toBe(uri);
+
+      if (proofState === 'absent') {
+        await h.kit.externalDelete('Alice', LOVE, rkey);
+        expect((await projectLove(h, rkey)).outcome).toBe('absent');
+      } else {
+        await h.kit.externalPut('Alice', LOVE, rkey, love('', 'Track A'));
+        expect((await projectLove(h, rkey)).outcome).toBe('excluded');
+      }
+
+      h.restart();
+      const requested = await enqueueLove(h.m, {
+        did: h.alice,
+        input: { artist: 'Artist A', track: 'Track A' },
+        origin: 'web',
+      });
+      if (!requested.ok) throw new Error(JSON.stringify(requested.reason));
+      await h.runUntilIdle();
+      expect(requested.operation.rkey).not.toBe(rkey);
+      expect(h.op(requested.operation.id)).toMatchObject({
+        state: 'succeeded',
+        result_uri: `at://${h.alice}/${LOVE}/${requested.operation.rkey}`,
+      });
+      expect(h.writers.order()).toEqual([CREATE]);
+    });
+  });
+}
+
+it('a successful but unindexed love remains reusable after restart', async () => {
+  await withHarness(async (h) => {
+    const first = await enqueueLove(h.m, {
+      did: h.alice,
+      input: { artist: 'Artist A', track: 'Track A' },
+      origin: 'web',
+    });
+    if (!first.ok) throw new Error(JSON.stringify(first.reason));
+    await h.runUntilIdle();
+    const firstRow = h.op(first.operation.id);
+    expect(firstRow.state).toBe('succeeded');
+    expect(h.db.one('SELECT uri FROM record_state WHERE uri = ?', firstRow.result_uri)).toBeNull();
+    expect(h.writers.order()).toEqual([CREATE]);
+
+    h.restart();
+    const second = await enqueueLove(h.m, {
+      did: h.alice,
+      input: { artist: 'artist a', track: 'track a' },
+      origin: 'web',
+    });
+    if (!second.ok) throw new Error(JSON.stringify(second.reason));
+    await h.runUntilIdle();
+    expect(h.op(second.operation.id)).toMatchObject({
+      state: 'succeeded',
+      attempts: 1,
+      result_uri: firstRow.result_uri,
+      result_cid: firstRow.result_cid,
+    });
+    expect(h.writers.order()).toEqual([CREATE]);
+    expect(await remoteRecords(h.kit, 'Alice', LOVE)).toHaveLength(1);
   });
 });
 

@@ -1,9 +1,8 @@
 // The host boundary of the index (ADR 0005 §2.1, §3.1, §3.3; N1-02).
 //
 // `IndexCore` (app/index-core.ts) is host-neutral: everything it needs from
-// the process around it arrives as a `Host`. The Workers wrapper
-// (do/index-do.ts) builds one from the DO's storage until N7-01; the Node
-// composition (node/compose.ts, N2-01) builds one from node:sqlite, two
+// the process around it arrives as a `Host`. The Node composition
+// (node/compose.ts, N2-01) builds one from node:sqlite, two
 // NodeAlarms (N1-03), the ws connector (N1-04) and the pinned transport
 // (N1-05).
 //
@@ -22,20 +21,14 @@
 import type { IdentityResolver } from '@atmusic/atproto/identity/types';
 import type { Transport } from '@atmusic/atproto/transport';
 import type { Clock, Random } from '@atmusic/core/deps';
-import type { BackupKind, BackupOutcome, Logger, ModuleDeps, PitrResult } from '../do/contracts';
+import type { BackupKind, BackupOutcome, Logger, ModuleDeps } from '../do/contracts';
 import type { Db } from '../do/db';
-import type { PulseTimer } from '../do/ingest/ingest-mode';
 import type { ConnectJetstream } from '../do/ingest/jetstream-socket';
 import type { AlarmStorage, ExtensionTimerName, ScheduleOptions } from '../do/timers';
 
 /** Online backups (ADR 0005 §14.5; implemented by worker/src/node/backup.ts, N3-07). */
 export interface BackupPort {
   run(kind: BackupKind): Promise<Exclude<BackupOutcome, { status: 'not_supported' }>>;
-}
-
-/** Durable Objects point-in-time restore (ADR 0004 A15). Workers host only; removed by N7-01. */
-export interface PitrPort {
-  restore(atMs: number): Promise<PitrResult>;
 }
 
 export interface Host {
@@ -49,8 +42,6 @@ export interface Host {
   transport: Transport;
   /** Absent: adminBackup answers `not_supported` and changes nothing. */
   backup?: BackupPort;
-  /** Absent: adminPitr rejects with NotSupportedError. Workers host only, until N7-01. */
-  pitr?: PitrPort;
   log: Logger;
   clock: Clock;
   random: Random;
@@ -60,8 +51,6 @@ export interface Host {
 export interface IndexCoreOptions {
   /** Default: `cachedIdentityResolver(host.db, {transport, clock})`. */
   identity?: IdentityResolver;
-  /** Measures the pulse's 20 s bound; default setTimeout (removed with pulse by N7-01). */
-  pulseTimer?: PulseTimer;
 }
 
 /** What an extension sees of the core. */

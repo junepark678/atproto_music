@@ -200,11 +200,6 @@ export interface AdminStatus {
   counters: Array<{ name: string; label: string; value: number }>;
 }
 
-export interface PitrResult {
-  /** The restore bookmark scheduled for the next session. */
-  bookmark: string;
-}
-
 /** Why a backup ran (ADR 0005 §6.4 `backup_runs.kind`, §14.5). */
 export type BackupKind = 'daily' | 'manual' | 'pre_migration' | 'pre_restore';
 
@@ -238,8 +233,6 @@ export interface IndexRpc {
   notify(input: NotifyInput, ip: string): Promise<NotifyOutcome>;
   ensureRunning(): Promise<void>;
   adminStatus(): Promise<AdminStatus>;
-  /** ADR 0004 A15; stays until N7-01. A host without a PITR port rejects with NotSupportedError. */
-  adminPitr(atMs: number): Promise<PitrResult>;
   /** One manual backup through the host's backup port (ADR 0005 §14.5). */
   adminBackup(): Promise<BackupOutcome>;
 }

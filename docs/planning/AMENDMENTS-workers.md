@@ -64,11 +64,11 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 
 **Demonstrated gap:** (A18) Workers tests run in workerd through `@cloudflare/vitest-plugin`; there is no process, port or `LD_PRELOAD` to control, and restart is DO eviction.
 
-**Amendment text:** The CI gate is `npm ci` and `bash scripts/check-ts.sh` (typecheck, biome lint, vitest through `scripts/report-tests.ts`, contract and case-map validators, bundle guard). A zero-test run fails. Integration note (W6-04, recorded by W6R-04): between those two steps the `ts` job in `.github/workflows/ci.yml` also installs actionlint v1.7.7 (`go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7`, checksum-verified by sum.golang.org, onto `PATH`), because the gate's `scripts/test/deploy.test.ts › workflow is valid` runs it on `deploy.yml` and fails when it is missing or another version; `deploy.yml` installs it the same way before its own gate step. The Rust `check` job stays for the oracle until W7-02. The disposable-copy negative controls are kept: a misformatted file fails the biome step and an inverted assertion fails the gate, each without changing the repository.
+**Amendment text:** The CI gate is `npm ci` and `bash scripts/check-ts.sh` (typecheck, biome lint, vitest through `scripts/report-tests.ts`, contract and case-map validators, bundle guard). A zero-test run fails. Integration note (W6-04, recorded by W6R-04): between those two steps the `ts` job in `.github/workflows/ci.yml` also installs actionlint v1.7.7 (`go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7`, checksum-verified by sum.golang.org, onto `PATH`), because the gate's `scripts/test/deploy.test.ts › workflow is valid` runs it on `deploy.yml` and fails when it is missing or another version; `deploy.yml` installs it the same way before its own gate step. The Rust `check` job stays for the oracle until W7-02. The disposable-copy negative controls are kept: a misformatted file fails the biome step and an inverted assertion fails the gate, each without changing the repository. *(Superseded by N7-01: `scripts/check-bundle.ts`, `scripts/deploy.sh`, `scripts/test/deploy.test.ts` and `.github/workflows/deploy.yml` are deleted; the gate runs the Node build and bundle guards; the current mapping is in `docs/verification/ts-case-map.json`.)*
 
 | Case | Disposition |
 | --- | --- |
-| `ci_green` | `bash scripts/acceptance/workers-backend.sh › exits 0 with all deterministic suites passing and lists live gates as blocked when prerequisites absent` |
+| `ci_green` | `bash scripts/acceptance/workers-backend.sh › exits 0 with all deterministic suites passing and lists live gates as blocked when prerequisites absent` *(Superseded by N7-01: `scripts/acceptance/workers-backend.sh` is deleted; `ci_green` maps to the `scripts/test/node-interim.test.ts` gate run; the current mapping is in `docs/verification/ts-case-map.json`.)* |
 | `ci_format_failure` | `scripts/test/check-ts.test.ts › a misformatted file in a disposable copy fails the biome step and leaves the repository unchanged` (required wave amendment, W0-01) (A18: formatting is the biome step of scripts/check-ts.sh; rustfmt applies only to the frozen oracle.) |
 | `ci_assertion_failure` | `scripts/test/check-ts.test.ts › an inverted assertion in a disposable copy makes check-ts.sh exit nonzero` (required wave amendment, W0-01) |
 
@@ -148,13 +148,13 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 
 **Demonstrated gap:** (A1) A Worker binds no address or port and has no command-line entry point: configuration arrives as Worker vars and secrets in `env`, and the single SQLite Durable Object migrates itself in its constructor, so there is no listener precedence to resolve and no separate migrate command to run (ADR 0004 §1.2, §6).
 
-**Amendment text:** Configuration is Worker vars and secrets parsed by `parseConfig(env)` (W0-01) and refused by `scripts/deploy.sh --dry-run` (W6-04). There is no listener, port or migrate CLI; `migrate_only` becomes the DO constructor migration, which is current on first run and a no-op on rerun.
+**Amendment text:** Configuration is Worker vars and secrets parsed by `parseConfig(env)` (W0-01) and refused by `scripts/deploy.sh --dry-run` (W6-04). There is no listener, port or migrate CLI; `migrate_only` becomes the DO constructor migration, which is current on first run and a no-op on rerun. *(Superseded by N7-01: `scripts/deploy.sh` is deleted; the Node host refuses an invalid configuration with exit 78; the current mapping is in `docs/verification/ts-case-map.json`.)*
 
 | Case | Disposition |
 | --- | --- |
 | `bind_precedence` | `retired:A1`: A Worker binds no address or port. |
 | `migrate_only` | `worker/test/storage/migrate.test.ts › re-running migrate is a no-op`; also `worker/test/storage/migrate.test.ts › fresh DO applies migration 1 and seeds indexing_status/backfill_generation/ingest_checkpoint` (A1: there is no CLI or listener; the DO constructor runs migrate under blockConcurrencyWhile.) |
-| `invalid_config` | `worker/test/config.test.ts › http PUBLIC_ORIGIN and invalid LEXICON_PREFIX fail parseConfig naming each field without echoing any secret value` (required wave amendment, W0-01); also `bash scripts/deploy.sh --dry-run › refuses empty/fixture prefix and missing secret with nonzero exit`, `packages/core/test/cursor.test.ts › key shorter than 32 bytes is rejected` |
+| `invalid_config` | `worker/test/config.test.ts › http PUBLIC_ORIGIN and invalid LEXICON_PREFIX fail parseConfig naming each field without echoing any secret value` (required wave amendment, W0-01); also `bash scripts/deploy.sh --dry-run › refuses empty/fixture prefix and missing secret with nonzero exit`, `packages/core/test/cursor.test.ts › key shorter than 32 bytes is rejected` *(Superseded by N7-01: the `scripts/deploy.sh --dry-run` id is replaced by the `scripts/test/build-server.test.ts` exit-78 test; the current mapping is in `docs/verification/ts-case-map.json`.)* |
 
 ### M1.4.2 Implement health, metadata, and uniform HTTP errors
 
@@ -322,7 +322,7 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 | --- | --- |
 | `fixture_isolation` | `packages/atproto/test/fixture-kit.test.ts › a record signed by one fixture account fails verification under another account's key` (required wave amendment, W1-05) (Token isolation is retired with server OAuth (A3).) |
 | `fault_controls` | `packages/atproto/test/fixture-kit.test.ts › fake PDS createRecord with existing rkey returns RecordAlreadyExists; deleteRecord with stale swap returns InvalidSwap` (Nonce, wrong-issuer and refresh-rotation modes belong to the browser OAuth library (A3).) |
-| `no_prod_bypass` | `scripts/test/check-bundle.test.ts › fails when a test-support import is injected into a temp copy of the entry`; also `npx tsx scripts/check-bundle.ts › production bundle passes guard` |
+| `no_prod_bypass` | `scripts/test/check-bundle.test.ts › fails when a test-support import is injected into a temp copy of the entry`; also `npx tsx scripts/check-bundle.ts › production bundle passes guard` *(Superseded by N7-01: `scripts/check-bundle.ts` and its test are deleted; `no_prod_bypass` maps to `scripts/test/check-node-bundle.test.ts`; the current mapping is in `docs/verification/ts-case-map.json`.)* |
 
 ### M2.4.2 Add OAuth/session negative integration matrix
 
@@ -736,11 +736,11 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 
 **Demonstrated gap:** (A1) There is no binary to install, database file to migrate or service to restart: a deploy is `wrangler` uploading a Worker version bound to one SQLite Durable Object, a custom domain and the `CURSOR_KEY` secret, and the DO migrates itself on first use. (A15) A Durable Object has no file to copy; DO point-in-time recovery covers 30 days and the index is re-derivable from public repositories.
 
-**Amendment text:** The install flow is `wrangler` deploy with a custom domain, `CURSOR_KEY` and an owned prefix; `scripts/deploy.sh --dry-run` refuses an empty or fixture prefix and a missing secret. Recovery from a bad upgrade is DO point-in-time recovery.
+**Amendment text:** The install flow is `wrangler` deploy with a custom domain, `CURSOR_KEY` and an owned prefix; `scripts/deploy.sh --dry-run` refuses an empty or fixture prefix and a missing secret. Recovery from a bad upgrade is DO point-in-time recovery. *(Superseded by N7-01: `scripts/deploy.sh` and `scripts/admin/pitr-restore.ts` are deleted; the Node install is `scripts/install-local.sh` and recovery is `scripts/restore.sh`; the current mapping is in `docs/verification/ts-case-map.json`.)*
 
 | Case | Disposition |
 | --- | --- |
-| `fresh_install` | `bash scripts/deploy.sh --dry-run › valid owned prefix and CURSOR_KEY run gen-config, the web build and wrangler deploy --dry-run with exit 0` (required wave amendment, W6-04); also `worker/test/storage/migrate.test.ts › fresh DO applies migration 1 and seeds indexing_status/backfill_generation/ingest_checkpoint`, `worker/test/http/health-meta.test.ts › live 200; ready 503 when index reports too_new; meta capabilities omit publication without owned prefix` |
+| `fresh_install` | `bash scripts/deploy.sh --dry-run › valid owned prefix and CURSOR_KEY run gen-config, the web build and wrangler deploy --dry-run with exit 0` (required wave amendment, W6-04); also `worker/test/storage/migrate.test.ts › fresh DO applies migration 1 and seeds indexing_status/backfill_generation/ingest_checkpoint`, `worker/test/http/health-meta.test.ts › live 200; ready 503 when index reports too_new; meta capabilities omit publication without owned prefix` *(Superseded by N7-01: the `scripts/deploy.sh --dry-run` id is replaced by the `scripts/test/install-local.test.ts` install test; the current mapping is in `docs/verification/ts-case-map.json`.)* |
 | `upgrade_failure` | `worker/test/storage/migrate.test.ts › a migration whose second statement is invalid persists neither statement and keeps the previous schema version` (required wave amendment, W0-01) (A15: recovery after a bad deploy is DO point-in-time recovery, an operator action outside the deterministic suite.) |
 | `secret_example_scan` | `scripts/test/secret-scan.test.ts › worker/.dev.vars.example, .env.example and docs contain no credential-shaped values` (required wave amendment, W6-04) |
 
@@ -768,9 +768,9 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 
 | Case | Disposition |
 | --- | --- |
-| `metrics_auth` | `worker/test/composition/admin.test.ts › admin routes 404 without ADMIN_TOKEN; wrong token 401 constant-time; status JSON shape`; also `worker/test/composition/logging.test.ts › captured logs and error bodies contain no CURSOR_KEY, ADMIN_TOKEN or bearer marker and logs contain no track-title marker` (required wave amendment, W5-01) (A16: metrics become /internal/admin/status.) |
+| `metrics_auth` | `worker/test/composition/admin.test.ts › admin routes 404 without ADMIN_TOKEN; wrong token 401 constant-time; status JSON shape`; also `worker/test/composition/logging.test.ts › captured logs and error bodies contain no CURSOR_KEY or bearer marker and logs contain no track-title marker` (required wave amendment, W5-01) (A16: metrics become /internal/admin/status.) |
 | `upstream_offline` | `worker/test/storage/status.test.ts › socket disconnected >5min reports stale`; also `worker/test/http/health-meta.test.ts › ready 200 and meta indexing stale while the index reports the socket disconnected` (required wave amendment, W1-07) |
-| `log_redaction` | `worker/test/composition/logging.test.ts › captured logs and error bodies contain no CURSOR_KEY, ADMIN_TOKEN or bearer marker and logs contain no track-title marker` (required wave amendment, W5-01) (There are no OAuth codes or cookies to mark (A3).) |
+| `log_redaction` | `worker/test/composition/logging.test.ts › captured logs and error bodies contain no CURSOR_KEY or bearer marker and logs contain no track-title marker` (required wave amendment, W5-01) (There are no OAuth codes or cookies to mark (A3).) |
 
 ### M6.2.3 Add reproducible query latency benchmark
 
@@ -834,12 +834,12 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 
 **Demonstrated gap:** (A19) A Worker has no executable artifact; a release is a Worker version id and the bundle SHA-256.
 
-**Amendment text:** Superseded. The release is a Worker version uploaded with `wrangler versions upload`, identified by its version id and bundle SHA-256. The checksum obligation is kept in that form: `scripts/check-bundle.ts` prints the bundle SHA-256, and live evidence without the version id or bundle hash is rejected.
+**Amendment text:** Superseded. The release is a Worker version uploaded with `wrangler versions upload`, identified by its version id and bundle SHA-256. The checksum obligation is kept in that form: `scripts/check-bundle.ts` prints the bundle SHA-256, and live evidence without the version id or bundle hash is rejected. *(Superseded by N7-01: `scripts/check-bundle.ts` is deleted; the Node bundle SHA-256 is printed by `scripts/check-node-bundle.ts`; the current mapping is in `docs/verification/ts-case-map.json`.)*
 
 | Case | Disposition |
 | --- | --- |
 | `tag_version` | `retired:A19`: Releases are Worker versions (wrangler versions upload), not tagged musl artifacts. |
-| `checksum` | `npx tsx scripts/check-bundle.ts › production bundle passes guard`; also `scripts/test_live_evidence.py › evidence missing version id or bundle hash is rejected` (A19: the release checksum is the bundle SHA-256 that check-bundle prints and the live evidence records with the Worker version id.) |
+| `checksum` | `npx tsx scripts/check-bundle.ts › production bundle passes guard`; also `scripts/test_live_evidence.py › evidence missing version id or bundle hash is rejected` (A19: the release checksum is the bundle SHA-256 that check-bundle prints and the live evidence records with the Worker version id.) *(Superseded by N7-01: the `npx tsx scripts/check-bundle.ts` id is replaced by the `scripts/test/check-node-bundle.test.ts` crypto-entry test; the current mapping is in `docs/verification/ts-case-map.json`.)* |
 | `static_release` | `retired:A19`: There is no ELF executable to inspect. |
 
 ### M6.4.2 Run packaged backend fault/recovery acceptance
@@ -848,11 +848,11 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 
 **Demonstrated gap:** (A18) Workers tests run in workerd through `@cloudflare/vitest-plugin`; there is no process, port or `LD_PRELOAD` to control, and restart is DO eviction. (A19) A Worker has no executable artifact; a release is a Worker version id and the bundle SHA-256.
 
-**Amendment text:** The acceptance run is `scripts/acceptance/workers-backend.sh` (W7-01) and the case map closure; an unmapped case or a missing test fails it.
+**Amendment text:** The acceptance run is `scripts/acceptance/workers-backend.sh` (W7-01) and the case map closure; an unmapped case or a missing test fails it. *(Superseded by N7-01: `scripts/acceptance/workers-backend.sh` is deleted; the interim run is `scripts/acceptance/node-interim.sh`; the current mapping is in `docs/verification/ts-case-map.json`.)*
 
 | Case | Disposition |
 | --- | --- |
-| `packaged_flow` | `bash scripts/acceptance/workers-backend.sh › exits 0 with all deterministic suites passing and lists live gates as blocked when prerequisites absent` |
+| `packaged_flow` | `bash scripts/acceptance/workers-backend.sh › exits 0 with all deterministic suites passing and lists live gates as blocked when prerequisites absent` *(Superseded by N7-01: `packaged_flow` maps to the `scripts/test/node-interim.test.ts` gate run; the current mapping is in `docs/verification/ts-case-map.json`.)* |
 | `packaged_recovery` | `worker/test/acceptance/restart.test.ts › eviction preserves byte-identical tables, pre-restart cursor continues, alarm resumes` |
 | `unrun_gate` | `scripts/test_validate_case_map.py › --check-tests reports a missing test file or name` (required wave amendment, W0-02); also `python3 scripts/validate_case_map.py --check-tests › every mapped test file and name exists; 258 cases covered` |
 
@@ -1179,8 +1179,8 @@ Some cases have no wave test whose title asserts their outcome. For each one, th
 
 **W5-01** (new files: `worker/test/composition/logging.test.ts`)
 
-- `worker/test/composition/logging.test.ts › captured logs and error bodies contain no CURSOR_KEY, ADMIN_TOKEN or bearer marker and logs contain no track-title marker` — covers `M6.2.2/metrics_auth`, `M6.2.2/log_redaction`
-- `worker/test/composition/routing.test.ts › forced storage error → 500 envelope with UUID requestId and no stack trace or file path` — covers `M1.4.2/safe_errors`
+- `worker/test/composition/logging.test.ts › captured logs and error bodies contain no CURSOR_KEY or bearer marker and logs contain no track-title marker` — covers `M6.2.2/metrics_auth`, `M6.2.2/log_redaction`
+- `worker/test/node/compose.test.ts › every ctx built by compose carries deps, app and peer, and need(ctx, 'app') on a ctx without app answers 500 CtxWiringError` — Node composition equivalent for `M1.4.2/safe_errors` after N7-01 retires the Workers fetch adapter.
 
 **W6-01**
 
@@ -1201,7 +1201,7 @@ Some cases have no wave test whose title asserts their outcome. For each one, th
 
 **W6-04** (new files: `scripts/test/secret-scan.test.ts`)
 
-- `bash scripts/deploy.sh --dry-run › valid owned prefix and CURSOR_KEY run gen-config, the web build and wrangler deploy --dry-run with exit 0` — covers `M6.1.3/fresh_install`
+*(Superseded by N7-01: the former `bash scripts/deploy.sh --dry-run › valid owned prefix and CURSOR_KEY run gen-config, the web build and wrangler deploy --dry-run with exit 0` item covered `M6.1.3/fresh_install`; `scripts/deploy.sh` and its test are deleted, and the case now maps to `scripts/test/install-local.test.ts` in `docs/verification/ts-case-map.json`.)*
 - `scripts/test/secret-scan.test.ts › worker/.dev.vars.example, .env.example and docs contain no credential-shaped values` — covers `M6.1.3/secret_example_scan`
 
 ## Status writer contract (W2-05)

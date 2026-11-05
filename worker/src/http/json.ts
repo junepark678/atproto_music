@@ -23,7 +23,7 @@ export const NO_STORE_ROUTES: readonly string[] = [
  * `json(body, status, headers)`: a JSON response. `Content-Type` is
  * `application/json`; `Cache-Control` is `no-store` unless `headers` sets one.
  */
-export function json(body: unknown, status = 200, headers?: HeadersInit): Response {
+export function json(body: unknown, status = 200, headers?: NonNullable<RequestInit['headers']>): Response {
   if (!Number.isInteger(status) || status < 200 || status > 599) {
     throw new RangeError(`json() needs an HTTP status from 200 to 599, got ${status}`);
   }
@@ -36,7 +36,7 @@ export function json(body: unknown, status = 200, headers?: HeadersInit): Respon
 }
 
 /** A `json()` response for one of NO_STORE_ROUTES: `no-store` is forced, whatever `headers` say. */
-export function noStoreJson(body: unknown, status = 200, headers?: HeadersInit): Response {
+export function noStoreJson(body: unknown, status = 200, headers?: NonNullable<RequestInit['headers']>): Response {
   const out = new Headers(headers);
   out.set('cache-control', NO_STORE);
   return json(body, status, out);

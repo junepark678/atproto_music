@@ -195,6 +195,24 @@ def full_repo_grant(prefix, scope):
     return True
 
 
+def node_full_repo_grant(prefix, scope):
+    """Node OAuth grant: `atproto` plus full repo actions on all four Node collections."""
+    tokens = scope.split() if isinstance(scope, str) else []
+    grants = [g for g in map(_repo_grant, tokens) if g is not None]
+    if "atproto" not in tokens or any(token.startswith("transition:") for token in tokens):
+        return False
+    if not isinstance(prefix, str):
+        return False
+    for collection in (f"{prefix}.scrobble", f"{prefix}.follow", f"{prefix}.settings", f"{prefix}.love"):
+        actions = set()
+        for collections, granted in grants:
+            if collection in collections:
+                actions |= granted
+        if not set(REPO_ACTIONS) <= actions:
+            return False
+    return True
+
+
 def _close(a, b):
     return _number(a) and _number(b) and abs(a - b) <= 1e-6 * max(1.0, abs(a), abs(b))
 
@@ -650,7 +668,145 @@ def evaluate(manifest, bundle_sha256=None, worker_version_id=None, *, commit=Non
 
 # OAuth needs its own confidential-client interoperability evidence. The old
 # Workers browser OAuth result shape is intentionally not accepted as Node proof.
-NODE_SUPPORTED_GATES = ("ingest", "pdsCompat")
+NODE_SUPPORTED_GATES = ("oauth", "ingest", "pdsCompat")
+
+
+def _node_oauth_results_problems(entry, prefix, prereq):
+    """Validate the accepted Node confidential-OAuth contract before it can PASS."""
+    where = "gates.oauth.results"
+    results = entry.get("results")
+    if not isinstance(results, dict) or set(results) != {"signIns", "cleanup"}:
+        return [where]
+    problems = []
+    if not _nonempty(results.get("cleanup")):
+        problems.append(f"{where}.cleanup (cleanup outcome)")
+    sign_ins = results.get("signIns")
+    if not isinstance(sign_ins, list) or len(sign_ins) != 2:
+        return problems + [f"{where}.signIns (exactly one per PDS)"]
+    collections = tuple(f"{prefix}.{name}" for name in ("scrobble", "follow", "settings", "love"))
+    app_write_kinds = (
+        "scrobble.create", "scrobble.delete", "follow.put", "follow.delete",
+        "love.put", "love.delete", "settings.put",
+    )
+    for item in sign_ins:
+        if not isinstance(item, dict) or set(item) != {
+            "did", "issuerHost", "tokenSub", "grantedScope", "exchange", "crud", "appWrites", "signOut"
+        } or not live_did(item.get("did")):
+            problems.append(f"{where}.signIns (DID)")
+            continue
+        if not isinstance(item.get("issuerHost"), str) or not item["issuerHost"] \
+                or item["issuerHost"] != item["issuerHost"].lower():
+            problems.append(f"{where}.signIns ({item['did']}: observed OAuth issuer host is missing or non-canonical)")
+        if item.get("tokenSub") != item["did"]:
+            problems.append(f"{where}.signIns ({item['did']}: token sub does not match DID)")
+        if not _nonempty(item.get("grantedScope")) or not node_full_repo_grant(prefix, item["grantedScope"]):
+            problems.append(
+                f"{where}.signIns ({item['did']}: grantedScope is not atproto plus create, update and delete on "
+                "all four Node collections, and must not include transition:* scopes)"
+            )
+        exchange = item.get("exchange")
+        if not isinstance(exchange, dict) or set(exchange) != {
+            "sealedSessionObserved", "clientAuthMethod", "dpopBound", "refreshTokenPresent"
+        } or exchange.get("sealedSessionObserved") is not True \
+                or exchange.get("clientAuthMethod") != "private_key_jwt" \
+                or exchange.get("dpopBound") is not True \
+                or exchange.get("refreshTokenPresent") is not True:
+            problems.append(f"{where}.signIns ({item['did']}: confidential exchange not observed from sealed session)")
+        crud = item.get("crud")
+        if not isinstance(crud, list) or len(crud) != len(collections):
+            problems.append(f"{where}.signIns ({item['did']}: CRUD coverage for all four collections)")
+        else:
+            observed = []
+            for check in crud:
+                if not isinstance(check, dict) or set(check) != {"collection", "create", "update", "delete", "verified"}:
+                    problems.append(f"{where}.signIns ({item['did']}: malformed CRUD observation)")
+                    continue
+                collection = check.get("collection")
+                if collection not in collections or collection in observed:
+                    problems.append(f"{where}.signIns ({item['did']}: unexpected or duplicate CRUD collection)")
+                    continue
+                observed.append(collection)
+                for action in ("create", "update"):
+                    action_result = check.get(action)
+                    if not isinstance(action_result, dict) or set(action_result) != {"status", "cid"} \
+                            or action_result.get("status") != 200 \
+                            or not isinstance(action_result.get("cid"), str) \
+                            or CID_RE.fullmatch(action_result["cid"]) is None:
+                        problems.append(f"{where}.signIns ({item['did']}: {action} not verified for {collection})")
+                delete_result = check.get("delete")
+                if not isinstance(delete_result, dict) or set(delete_result) != {"status"} \
+                        or delete_result.get("status") != 200:
+                    problems.append(f"{where}.signIns ({item['did']}: delete not verified for {collection})")
+                if check.get("verified") is not True:
+                    problems.append(f"{where}.signIns ({item['did']}: CRUD record verification failed for {collection})")
+            if sorted(observed) != sorted(collections):
+                problems.append(f"{where}.signIns ({item['did']}: CRUD does not cover all four collections)")
+        app_writes = item.get("appWrites")
+        if not isinstance(app_writes, list) or len(app_writes) != len(app_write_kinds):
+            problems.append(f"{where}.signIns ({item['did']}: all app-supported write routes were not exercised)")
+        else:
+            observed_writes = []
+            for write in app_writes:
+                if not isinstance(write, dict) or set(write) != {
+                    "kind", "operationState", "recordVerified", "absenceVerified"
+                }:
+                    problems.append(f"{where}.signIns ({item['did']}: malformed app write observation)")
+                    continue
+                kind = write.get("kind")
+                if kind not in app_write_kinds or kind in observed_writes:
+                    problems.append(f"{where}.signIns ({item['did']}: unexpected or duplicate app write kind)")
+                    continue
+                observed_writes.append(kind)
+                expected_record = kind in ("scrobble.create", "follow.put", "love.put", "settings.put")
+                if write.get("operationState") != "succeeded" \
+                        or write.get("recordVerified") is not expected_record \
+                        or write.get("absenceVerified") is not (not expected_record):
+                    problems.append(f"{where}.signIns ({item['did']}: app write not reconciled for {kind})")
+            if sorted(observed_writes) != sorted(app_write_kinds):
+                problems.append(f"{where}.signIns ({item['did']}: missing app-supported write kind)")
+        sign_out = item.get("signOut")
+        if not isinstance(sign_out, dict) or set(sign_out) != {
+            "appSignOutCompleted", "sessionVersionStableUntilSignOut", "localSessionAbsent", "refreshRejected", "refreshError"
+        } or sign_out.get("appSignOutCompleted") is not True \
+                or sign_out.get("sessionVersionStableUntilSignOut") is not True \
+                or sign_out.get("localSessionAbsent") is not True \
+                or sign_out.get("refreshRejected") is not True \
+                or sign_out.get("refreshError") != "invalid_grant":
+            problems.append(f"{where}.signIns ({item['did']}: upstream refresh-token revocation not verified)")
+    identities = _identities(prereq) if isinstance(prereq, dict) else None
+    dids = sorted(str(item.get("did")) for item in sign_ins if isinstance(item, dict))
+    if identities is not None:
+        if dids != sorted(str(did) for did, _ in identities):
+            problems.append(f"{where}.signIns (must be exactly one sign-in per prerequisite identity)")
+        expected_pairs = {(did, host) for did, host in identities}
+        observed_pairs = {
+            (item.get("did"), item.get("issuerHost"))
+            for item in sign_ins
+            if isinstance(item, dict)
+            and isinstance(item.get("did"), str)
+            and isinstance(item.get("issuerHost"), str)
+        }
+        if observed_pairs != expected_pairs:
+            problems.append(f"{where}.signIns (each DID must be bound to its prerequisite OAuth issuer host)")
+    else:
+        if len(set(dids)) != len(dids):
+            problems.append(f"{where}.signIns (one identity signed in twice)")
+        declared_pds = entry.get("pds")
+        declared_hosts = set()
+        if isinstance(declared_pds, list):
+            for pds in declared_pds:
+                if isinstance(pds, dict) and isinstance(pds.get("endpoint"), str):
+                    host = _host(pds.get("endpoint"))
+                    if host:
+                        declared_hosts.add(host)
+        observed_hosts = {
+            item.get("issuerHost")
+            for item in sign_ins
+            if isinstance(item, dict) and isinstance(item.get("issuerHost"), str)
+        }
+        if len(declared_hosts) != 2 or observed_hosts != declared_hosts:
+            problems.append(f"{where}.signIns (issuer hosts must match the two declared PDS hosts)")
+    return problems
 
 
 def _node_identity_problems(data, expected_commit, expected_bundle, where, *, identity_fields=True):
@@ -719,7 +875,12 @@ def node_gate_status(name, entry, expected_commit, expected_bundle, prereq=None)
         issues += _pds_problems(where, entry, prereq if isinstance(prereq, dict) else {})
         issues += _subject_problems(where, entry, prereq if isinstance(prereq, dict) else {},
                                     need_uri=name == "ingest", prefix=entry.get("lexiconPrefix"))
-    if name in NODE_SUPPORTED_GATES:
+    if name == "oauth":
+        issues += _node_oauth_results_problems(entry, entry.get("lexiconPrefix"),
+                                               prereq if isinstance(prereq, dict) else {})
+        if name not in NODE_SUPPORTED_GATES:
+            issues.append(f"{where} (Node gate semantics are not ported)")
+    elif name in NODE_SUPPORTED_GATES:
         issues += _results_problems(name, entry, entry.get("lexiconPrefix"),
                                     prereq if isinstance(prereq, dict) else {})
     else:

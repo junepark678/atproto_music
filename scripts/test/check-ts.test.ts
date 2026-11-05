@@ -174,11 +174,28 @@ class DisposableCopy {
       }
     }
     expect(existsSync(join(this.dir, SELF))).toBe(false);
-    // An empty git repository (no commit), so tests run by the copied gate
-    // that list files with `git ls-files --others --exclude-standard`
-    // (scripts/test/deploy.test.ts) see the copy's files as in a checkout.
+    // A disposable commit lets the copied gate exercise contract validation
+    // and release identity checks, which require a resolvable HEAD. The copied
+    // files are also tracked so git ls-files-based checks see checkout inputs.
     const init = exec('git', ['init', '-q'], this.dir);
     expect(init.status, init.stderr).toBe(0);
+    const add = exec('git', ['add', '-A'], this.dir);
+    expect(add.status, add.stderr).toBe(0);
+    const commit = exec(
+      'git',
+      [
+        '-c',
+        'user.name=Node gate tests',
+        '-c',
+        'user.email=node-gate-tests@example.invalid',
+        'commit',
+        '--quiet',
+        '-m',
+        'disposable test snapshot',
+      ],
+      this.dir,
+    );
+    expect(commit.status, commit.stderr).toBe(0);
     if (options.linkNodeModules) this.linkNodeModules();
   }
 
@@ -356,7 +373,8 @@ describe('scripts/check-ts.sh', () => {
       }
     }
     expect(byName.get('worker-node')?.groupOrder).toBe(modules?.groupOrder);
-    expect(byName.get('scripts')?.files).toContain('scripts/test/deploy.test.ts');
+    expect(byName.get('scripts')?.files).toContain('scripts/test/node-interim.test.ts');
+    expect(byName.get('scripts')?.files).not.toContain('scripts/test/deploy.test.ts');
     expect(byName.get('scripts')?.groupOrder).toBeLessThan(modules?.groupOrder ?? 0);
   });
 
@@ -503,18 +521,17 @@ describe('scripts/check-ts.sh', () => {
       const copy = disposableCopy({ linkNodeModules: true });
       const reader = "import { env } from 'cloudflare:workers';\n\nexport const harness = env.HARNESS;\n";
 
-      // Control: test code sees the harness's Cloudflare.Env augmentation.
+      // The Node-only projects no longer provide Cloudflare module aliases or ambient types.
       copy.write('worker/test/harness/env-probe.ts', reader);
       const test = copy.run('npx', 'tsc', '-b');
-      expect(test.status, test.output).toBe(0);
+      expect(test.status, test.output).not.toBe(0);
+      expect(test.output).toContain("Cannot find module 'cloudflare:workers'");
 
-      // Production code does not: the augmentation stays out of its typecheck.
       copy.write('worker/src/env-probe.ts', reader);
       const src = copy.run('npx', 'tsc', '-b');
       expect(src.status, src.output).not.toBe(0);
-      expect(src.output).toMatch(/worker\/src\/env-probe\.ts\(3,\d+\): error TS2339/);
-      expect(src.output).toContain("Property 'HARNESS' does not exist");
-      expect(src.output).not.toContain('worker/test/harness/env-probe.ts');
+      expect(src.output).toContain('worker/test/harness/env-probe.ts');
+      expect(src.output).toContain('worker/src/env-probe.ts');
 
       expect(fingerprint()).toBe(before);
     },
@@ -726,9 +743,9 @@ describe('scripts/check-ts.sh', () => {
       const failingSteps = stepHeadings(failing.output);
       expect(failingSteps).not.toContain(buildHeading);
       expect(failingSteps.at(-1)).toBe(guardHeading);
-      // Every earlier step ran and passed first, the Workers bundle guard included.
+      // Every earlier step ran and passed first; the retired Workers guard is absent.
       expect(failingSteps).toContain('test (vitest, projects: worker-node)');
-      expect(failingSteps).toContain('production bundle guard (check-bundle.ts)');
+      expect(failingSteps).not.toContain('production bundle guard (check-bundle.ts)');
       expect(failing.output).toContain('check-node-bundle stub: unpinned fetch path in main.mjs');
       expect(failing.output).not.toContain('PASS check-ts');
       const failed = JSON.parse(copy.read('work/gate-durations.json')) as GateDurations;

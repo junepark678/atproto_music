@@ -153,7 +153,9 @@ npm run --silent lint
 # Every project (core, atproto, worker-modules, worker-node, worker-composition,
 # worker-acceptance, worker-bench, web, scripts, scripts-gate), or only the
 # --projects ones.
-vitest_args=(--reporter=default --reporter=json)
+# Setup can build the production SPA while fixture benchmarks use the CPU.
+# Keep that work bounded without changing per-test deadlines or assertions.
+vitest_args=(--reporter=default --reporter=json --hookTimeout=60000)
 test_command='npm test'
 if ((${#projects[@]} > 0)); then
   step "test (vitest, projects: ${projects[*]})"
@@ -208,16 +210,12 @@ if [[ -f scripts/test_stage_node_candidate.py ]]; then
   python3 -m unittest discover -s scripts -p test_stage_node_candidate.py
 fi
 
-# The Workers bundle guard stays until N7-01 deletes it with deploy.sh.
-if [[ -f scripts/check-bundle.ts ]]; then
-  step 'production bundle guard (check-bundle.ts)'
-  npx tsx scripts/check-bundle.ts
-fi
+# The Workers bundle guard (scripts/check-bundle.ts) was deleted by N7-01 with
+# deploy.sh; the Node guard below is the only bundle guard.
 
 # The Node host's build and bundle guard (ADR 0005 §3.9, both N3-07), wired here
-# by N0-01 so that no later package edits this script before N7-01. Each runs
-# only when its file exists. The build comes first because the guard reads the
-# esbuild metafiles it writes.
+# by N0-01. Each runs only when its file exists. The build comes first because
+# the guard reads the esbuild metafiles it writes.
 if [[ -f scripts/build-server.ts ]]; then
   step 'Node server build (build-server.ts --check)'
   npx tsx scripts/build-server.ts --check

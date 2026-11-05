@@ -8,7 +8,6 @@ Production is **one Node 26 process on the owner's machine**: the systemd user s
 | How public traffic reaches the port (Cloudflare Tunnel, Caddy/nginx DNS-only, proxied DNS) and the matching `ATMUSIC_CLIENT_IP_HEADER` | [deploy/exposure.md](deploy/exposure.md) |
 | Health, admin CLI, logs, secrets and key rotation, Gentoo notes, sleep, same-UID exposure | [operations.md](operations.md) |
 | Backups, the revocation journal, restore (disaster recovery only) | [backup.md](backup.md) |
-| Static assets and SPA routing rules | [deploy/routing.md](deploy/routing.md) |
 | Artifact-bound rollout gates and rollback plan (currently NO-GO) | [M6 deployment plan](verification/milestones/m6-deployment-plan.md) |
 
 ## Deployment values
@@ -43,4 +42,4 @@ Then choose an exposure option ([deploy/exposure.md](deploy/exposure.md)) and ch
 
 ## Not a deployment target any more: Cloudflare Workers
 
-ADR 0004 deployed one Worker plus one SQLite Durable Object on Workers Paid. ADR 0005 retires that host: the owner's decision D1 rules out the Paid plan, and the Free plan cannot run the BFF, the resident Jetstream socket, the Last.fm signatures or multi-day imports. Until N7-01 removes them, `worker/wrangler.jsonc`, `scripts/deploy.sh`, `scripts/check-bundle.ts` and `scripts/admin/pitr-restore.ts` stay in the repository only for the Workers test entry; **do not run `scripts/deploy.sh` for production**, and never against the production origin, since the Worker's public OAuth client and the Node host's confidential client cannot share one `client_id`. The previous version of this guide is in git history (`git log -- docs/deployment.md`).
+ADR 0004 deployed one Worker plus one SQLite Durable Object on Workers Paid. ADR 0005 retires that host: the owner's decision D1 rules out the Paid plan, and the Free plan cannot run the BFF, the resident Jetstream socket, the Last.fm signatures or multi-day imports. N7-01 deleted `scripts/deploy.sh`, `scripts/check-bundle.ts`, `scripts/admin/pitr-restore.ts`, their tests and `.github/workflows/deploy.yml`; `worker/wrangler.jsonc` stays in the repository only for the Workers test entry. **There is no Workers deploy path any more**: never deploy the Worker against the production origin, since the Worker's public OAuth client and the Node host's confidential client cannot share one `client_id`. The previous version of this guide is in git history (`git log -- docs/deployment.md`).

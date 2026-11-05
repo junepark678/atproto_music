@@ -6,12 +6,63 @@
 > commit; “every deterministic gate passes” / “nothing deterministic remains”
 > are not statements about the current Node checkout. M1–M6 still need current
 > integration/CI and published-contract reconciliation as applicable, plus
-> their live gates. Namespace ownership blocks publication; a tested fail-closed
-> publication gate does not itself require live ownership evidence for M1.
+> their live gates. Current namespace ownership/publication is recorded in
+> [the owner publication receipt](verification/lexicon-publication/README.md);
+> it does not establish current Node or live acceptance.
 > Worker version ids, ADMIN_TOKEN and Cloudflare Analytics are not Node-host
 > prerequisites. See [ADR 0005](adr/0005-local-node-host-and-compat-apis.md),
 > [Node deployment](deploy/local-node.md), and the scoped
 > [implementation/check record](verification/implementation-agent-13.md).
+
+## Current Node acceptance (ADR 0005 §15)
+
+The Node acceptance gate is `bash scripts/acceptance/node-backend.sh` (wave
+N8-01). It runs the 11 steps in [backend-node.md](verification/backend-node.md),
+resolves every one of the 258 case-map entries without `--node-wave`, and lists
+the live gates as blocked unless `scripts/verify_live_evidence.py --node`
+confirms evidence bound to the current commit and Node bundle. It replaces
+`scripts/acceptance/node-interim.sh` as the gate from wave 8 on and never
+contacts a live service.
+
+Current candidate update (2026-11-06): the complete N8 gate passed at clean
+commit `461e7a9`, with **1,848 executed records, 0 failures and 0 skips**.
+All 258 cases resolved: **243 passed, 9 blocked and 6 retired**. The exact
+commit, bundle SHA-256, per-step results and machine-readable receipt are in
+[backend-node.md](verification/backend-node.md) and
+[the receipt](verification/receipts/node-backend-461e7a9-summary.json).
+The subsequent base-composition commit `a2308dc` has a byte-identical tracked
+tree; later documentation commits do not change that receipt's identity.
+[PR #149](https://github.com/junepark678/atproto_music/pull/149) records the
+reviewed backend fixes, published-schema guard and per-head hosted CI status.
+The failed `396de2d` attempt remains recorded as history. Live identity gates
+remain owner-skipped, with no credentials sought. No milestone is closed by
+this deterministic pass.
+
+Earlier successful baseline (2026-11-04): the full N8 gate passed on
+clean integration commit `4322f5d`; its bundle SHA-256 and machine-readable
+summary are recorded in [backend-node.md](verification/backend-node.md) and
+[the exact-head receipt](verification/receipts/node-backend-4322f5d-summary.json).
+It executed 1,692 tests/records with 0 failures or skips; all 258 cases resolved
+(243 passed, 9 blocked, 6 retired). Playwright passed 14/14 and the
+process-backed scrobbler replay passed 7/7. The run also passed the explicit
+clean-install/full-check no-workerd acceptance test.
+
+This deterministic pass does **not** close live acceptance: all five
+release-bound live gates (oauth, ingest, pdsCompat, ssrfProbe, socketSoak) and
+M7.4.3 `live_product` remain blocked. No live services or external providers
+were contacted. N6-02 live acceptance remains open. The run also verifies the
+N7-01 disposable installation and full check without `workerd`; no milestone
+or live gate is closed by this run.
+
+Earlier failed receipts at `c2da66a+dirty`, `4a97dc1`, and the intermediate
+`838fa217` run remain historical. Their issues were addressed by subsequent
+mapping, retirement, and timing fixes. The clean `be1c0a5`, `e02d96e`, `8d415468`
+and `dabaabf` runs are retained as prior exact-head receipts in
+[backend-node.md](verification/backend-node.md); `4322f5d` is a prior
+successful baseline, not acceptance of the newer candidate. The prior `af4a3ef` run remains recorded as
+history there.
+
+Historical Workers receipt follows; nothing below is a current Node statement.
 
 
 Recorded 2026-10-25 for the Cloudflare Workers backend (ADR 0004).

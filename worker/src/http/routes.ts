@@ -41,8 +41,8 @@
 //   - otherwise the request goes to the assets without any `x-atmusic-*`
 //     header; any answer but 404 is returned as is;
 //   - on a 404, a path of the SPA route table (@atmusic/core/spa-routes, the
-//     table web/src/router.tsx renders: `/`, `/feed`, `/oauth/callback`,
-//     `/u/<did>` raw or percent-encoded, ...) gets index.html, fetched from
+//     table web/src/router.tsx renders: `/`, `/feed`, `/settings/links`,
+//     `/lastfm/authorize`, `/u/<did>` raw or percent-encoded, ...) gets index.html, fetched from
 //     the assets at `/` with the same method, as a 200 with no redirect;
 //     every other miss (`/assets/*`, unknown paths) is the JSON not_found
 //     envelope.

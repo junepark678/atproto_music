@@ -193,17 +193,24 @@ function windowParams(did: string, range: StorageRange): SqlParam[] {
 export function rangeStatsStatements(did: string, range: StorageRange, limit: number | null, offset: number) {
   const w = windowCte(range);
   const p = windowParams(did, range);
-  const totalsW = range.lower === null ? w : windowCte(range, { materialized: true });
+  // The totals statement reads the window once. Materialize even the
+  // unbounded all-time range so the distinct aggregates do not each rescan
+  // every visible listen and its pending-delete checks. Tuple keys are encoded
+  // as hex components with a delimiter, preserving exact tuple equality even
+  // when a component contains NUL or the delimiter. The cached and uncached
+  // item-ranking queries keep their existing plans.
+  const totalsW = windowCte(range, { materialized: true });
   // LIMIT -1 is SQLite's "no limit"; OFFSET still applies.
   const page: SqlParam[] = [limit ?? -1, offset];
   return {
     totals: {
       sql: `WITH ${totalsW}
-        SELECT (SELECT count(*) FROM w) AS listens,
-               (SELECT count(DISTINCT artist_key) FROM w) AS artists,
-               (SELECT count(*) FROM (SELECT 1 FROM w GROUP BY artist_key, track_key)) AS tracks,
-               (SELECT count(*) FROM (SELECT 1 FROM w WHERE album_key IS NOT NULL
-                  GROUP BY coalesce(album_artist_key, artist_key), album_key)) AS albums`,
+        SELECT count(*) AS listens,
+               count(DISTINCT artist_key) AS artists,
+               count(DISTINCT hex(artist_key) || ':' || hex(track_key)) AS tracks,
+               count(DISTINCT CASE WHEN album_key IS NOT NULL
+                 THEN hex(coalesce(album_artist_key, artist_key)) || ':' || hex(album_key) END) AS albums
+        FROM w`,
       params: p,
     },
     artists: {

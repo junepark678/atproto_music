@@ -47,7 +47,11 @@ const MiB = 1024 * 1024;
 // ---------------------------------------------------------------------------
 // Rigs
 
-function runtime(h: Harness, uploads: UploadStore = fsUploadStore): ImportRuntime {
+function runtime(
+  h: Harness,
+  uploads: UploadStore = fsUploadStore,
+  diskLow: () => boolean = () => false,
+): ImportRuntime {
   const transport = Object.assign(async (req: Request) => h.kit.transport(req), {
     fixture: true as const,
   }) as unknown as Transport;
@@ -58,7 +62,7 @@ function runtime(h: Harness, uploads: UploadStore = fsUploadStore): ImportRuntim
     listenbrainzApiRoot: 'https://listenbrainz.test/',
     fetch: bindPolicyFetch(createPolicyFetch({ transport }), IMPORT_FETCH_CAPS),
     pacers: { lastfm: intervalPacer(), listenbrainz: intervalPacer() },
-    diskLow: () => false,
+    diskLow,
     uploads,
     box: null,
   };
@@ -298,6 +302,78 @@ function msid(i: number): string {
 // ---------------------------------------------------------------------------
 
 describe('import uploads', () => {
+  it('both upload formats pause before opening their files when disk is low, retain the upload, and resume after a database restart', async () => {
+    await withHarness(async (h) => {
+      h.seedUser(h.alice);
+      h.seedUser(h.bob);
+      const listens = '{"listened_at": 1735689600, "track_metadata": {"artist_name": "LB", "track_name": "ZIP"}}';
+      const zip = zipSync({ 'listens/2025/1.jsonl': enc.encode(`${listens}\n`) });
+      const lastfm = lastfmExportBody(1);
+      const zipPath = writeUpload(h, 'job-low-zip', h.alice, 'listenbrainz_zip', zip);
+      const jsonPath = writeUpload(h, 'job-low-json', h.bob, 'lastfm_json', lastfm);
+      const counted = countingStore();
+      let low = true;
+      const rt = runtime(h, counted.store, () => low);
+
+      await runImports(rt, h.kit.clock.nowMs());
+      await runImports(rt, h.kit.clock.nowMs());
+      expect(job(h.db, 'job-low-zip')).toMatchObject({
+        state: 'paused',
+        error: 'low_disk',
+        fetched: 0,
+        staged: 0,
+        attempts: 0,
+      });
+      expect(job(h.db, 'job-low-json')).toMatchObject({
+        state: 'paused',
+        error: 'low_disk',
+        fetched: 0,
+        staged: 0,
+        attempts: 0,
+      });
+      expect(counted.reads).toBe(0);
+      expect(existsSync(zipPath)).toBe(true);
+      expect(existsSync(jsonPath)).toBe(true);
+
+      low = false;
+      h.restart();
+      const resumed = runtime(h, counted.store, () => low);
+      await untilState(h, resumed, 'job-low-zip', 'writing');
+      await untilState(h, resumed, 'job-low-json', 'writing');
+      expect(job(h.db, 'job-low-zip')).toMatchObject({ fetched: 1, staged: 1, attempts: 0, upload_path: null });
+      expect(job(h.db, 'job-low-json')).toMatchObject({ fetched: 1, staged: 1, attempts: 0, upload_path: null });
+      expect(counted.reads).toBeGreaterThan(0);
+    });
+  });
+
+  it('a low-disk flip after STAGE_BATCH pauses at the exact committed prefix and restart resumes without loss or duplicates', async () => {
+    await withHarness(async (h) => {
+      h.seedUser(h.alice);
+      const body = lastfmExportBody(1_200);
+      const path = writeUpload(h, 'job-prefix', h.alice, 'lastfm_json', body);
+      let checks = 0;
+      const pressured = runtime(h, fsUploadStore, () => ++checks === 4);
+
+      await runImports(pressured, h.kit.clock.nowMs());
+      const paused = job(h.db, 'job-prefix');
+      expect(paused).toMatchObject({ state: 'paused', error: 'low_disk', fetched: 1_000, staged: 1_000, attempts: 0 });
+      expect(JSON.parse(paused.cursor_json ?? '{}')).toMatchObject({ upload: { consumed: 1_000 } });
+      expect(h.db.one('SELECT count(*) AS n FROM import_items WHERE job_id = ?', 'job-prefix')).toEqual({ n: 1_000 });
+      expect(existsSync(path)).toBe(true);
+
+      h.restart();
+      const resumed = runtime(h, fsUploadStore, () => false);
+      await untilState(h, resumed, 'job-prefix', 'writing');
+      const after = job(h.db, 'job-prefix');
+      const rows = h.db.all<ImportItemRow>('SELECT * FROM import_items WHERE job_id = ? ORDER BY seq', 'job-prefix');
+      expect(after).toMatchObject({ fetched: 1_200, staged: 1_200, attempts: 0, upload_path: null });
+      expect(rows).toHaveLength(1_200);
+      expect(new Set(rows.map((item) => item.dedupe_key)).size).toBe(1_200);
+      expect(rows.map((item) => item.seq)).toEqual(Array.from({ length: 1_200 }, (_, i) => i));
+      expect(existsSync(path)).toBe(false);
+    });
+  });
+
   it('a ListenBrainz export ZIP (float listened_at, listens/2025/1.jsonl, one listen with a null and one with an object mbid_mapping) and a Last.fm JSON export stage their listens, with record MBIDs taken from additional_info only', async () => {
     await withHarness(async (h) => {
       h.seedUser(h.alice);
@@ -588,7 +664,12 @@ describe('import uploads', () => {
   it('an upload that would take ATMUSIC_UPLOAD_DIR past ATMUSIC_UPLOAD_MAX_BYTES or the filesystem below ATMUSIC_MIN_FREE_BYTES is 507 and writes nothing; the upload file is deleted once parsed and when its job is cancelled or fails', async () => {
     const body = lastfmExportBody(20);
     expect(body.length).toBeGreaterThan(1_000);
-    const post = (a: ImportsApp, headers: Record<string, string>, payload: BodyInit, extra: RequestInit = {}) =>
+    const post = (
+      a: ImportsApp,
+      headers: Record<string, string>,
+      payload: Exclude<RequestInit['body'], null>,
+      extra: RequestInit = {},
+    ) =>
       a.app.fetch('/api/v1/imports/upload?source=lastfm_json', {
         method: 'POST',
         headers: { ...headers, 'content-type': 'application/octet-stream' },
@@ -698,6 +779,194 @@ describe('import uploads', () => {
     expect(declaredRace.filter((r) => r.ok)).toHaveLength(1);
     expect(declaredRace.filter((r) => !r.ok)).toEqual([{ ok: false, status: 507, code: 'insufficient_storage' }]);
     expect(readdirSync(direct).map((n) => statSync(join(direct, n)).size)).toEqual([900]);
+
+    const floorBytes = 10_000_000n;
+    const floorRaceDir = join(sharedDir, 'floor-reservation-race');
+    const floorRace = await Promise.all(
+      ['floor-a', 'floor-b'].map((jobId) =>
+        receiveUpload(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(new Uint8Array(700));
+              controller.close();
+            },
+          }),
+          {
+            dir: floorRaceDir,
+            jobId,
+            dirMaxBytes: MiB,
+            minFreeBytes: Number(floorBytes),
+            freeBytes: () => floorBytes + 1_000n,
+            declaredLength: 700,
+          },
+        ),
+      ),
+    );
+    expect(floorRace.filter((r) => r.ok)).toHaveLength(1);
+    expect(floorRace.filter((r) => !r.ok)).toEqual([{ ok: false, status: 507, code: 'insufficient_storage' }]);
+    expect(readdirSync(floorRaceDir)).toHaveLength(1);
+
+    // Unknown and underestimated lengths must reserve each growth before any
+    // bytes from that chunk reach disk. A single sub-1 MiB chunk used to pass
+    // because only the initial free-space snapshot was checked.
+    const growthDir = join(sharedDir, 'growth-floor');
+    const halfMiB = new Uint8Array(512 * 1024);
+    for (const [jobId, declaredLength] of [
+      ['unknown-length', null],
+      ['understated-length', 1],
+    ] as const) {
+      const result = await receiveUpload(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(halfMiB);
+            controller.close();
+          },
+        }),
+        {
+          dir: growthDir,
+          jobId,
+          dirMaxBytes: MiB,
+          minFreeBytes: Number(floorBytes),
+          freeBytes: () => floorBytes + 1_000n,
+          declaredLength,
+        },
+      );
+      expect(result).toEqual({ ok: false, status: 507, code: 'insufficient_storage' });
+      expect(existsSync(join(growthDir, `${jobId}.upload`))).toBe(false);
+    }
+
+    // Several small chunks cumulatively consume the floor. The free-space
+    // fake reflects bytes already written, so each new reservation is tested
+    // against all in-flight unwritten bytes before that chunk is written.
+    const chunkDir = join(sharedDir, 'chunk-floor');
+    const allowance = 2 * 64 * 1024 + 100;
+    const chunked = await receiveUpload(
+      new ReadableStream<Uint8Array>(
+        {
+          pull(controller) {
+            controller.enqueue(new Uint8Array(64 * 1024));
+            if (statSync(join(chunkDir, 'chunked.upload'), { throwIfNoEntry: false })?.size === 2 * 64 * 1024)
+              controller.close();
+          },
+        },
+        { highWaterMark: 0 },
+      ),
+      {
+        dir: chunkDir,
+        jobId: 'chunked',
+        dirMaxBytes: MiB,
+        minFreeBytes: Number(floorBytes),
+        freeBytes: (path) => {
+          const size = statSync(join(path, 'chunked.upload'), { throwIfNoEntry: false })?.size ?? 0;
+          return floorBytes + BigInt(allowance - size);
+        },
+        declaredLength: null,
+      },
+    );
+    expect(chunked).toEqual({ ok: false, status: 507, code: 'insufficient_storage' });
+    expect(existsSync(join(chunkDir, 'chunked.upload'))).toBe(false);
+
+    // Exact floor boundary is accepted, and a refused reservation is released
+    // so the next upload can use the same available space.
+    const boundaryDir = join(sharedDir, 'boundary-floor');
+    const boundaryBytes = new Uint8Array(128 * 1024);
+    const boundary = await receiveUpload(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(boundaryBytes);
+          controller.close();
+        },
+      }),
+      {
+        dir: boundaryDir,
+        jobId: 'boundary',
+        dirMaxBytes: MiB,
+        minFreeBytes: Number(floorBytes),
+        freeBytes: () => floorBytes + BigInt(boundaryBytes.length),
+        declaredLength: null,
+      },
+    );
+    expect(boundary).toMatchObject({ ok: true, bytes: boundaryBytes.length });
+    expect(statSync(join(boundaryDir, 'boundary.upload')).size).toBe(boundaryBytes.length);
+
+    const releaseDir = join(sharedDir, 'reservation-release');
+    const retryBytes = new Uint8Array(700);
+    const refuse = await receiveUpload(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(retryBytes);
+          controller.close();
+        },
+      }),
+      {
+        dir: releaseDir,
+        jobId: 'refused',
+        dirMaxBytes: MiB,
+        minFreeBytes: Number(floorBytes),
+        freeBytes: () => floorBytes + 100n,
+        declaredLength: 700,
+      },
+    );
+    expect(refuse).toMatchObject({ ok: false, status: 507 });
+    const retry = await receiveUpload(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(retryBytes);
+          controller.close();
+        },
+      }),
+      {
+        dir: releaseDir,
+        jobId: 'retry',
+        dirMaxBytes: MiB,
+        minFreeBytes: Number(floorBytes),
+        freeBytes: () => floorBytes + 700n,
+        declaredLength: 700,
+      },
+    );
+    expect(retry).toMatchObject({ ok: true, bytes: 700 });
+
+    const abortDir = join(sharedDir, 'abort-release');
+    let pulls = 0;
+    await expect(
+      receiveUpload(
+        new ReadableStream<Uint8Array>(
+          {
+            pull(controller) {
+              if (pulls++ === 0) controller.enqueue(retryBytes);
+              else throw new Error('client aborted');
+            },
+          },
+          { highWaterMark: 0 },
+        ),
+        {
+          dir: abortDir,
+          jobId: 'aborted',
+          dirMaxBytes: MiB,
+          minFreeBytes: Number(floorBytes),
+          freeBytes: () => floorBytes + 700n,
+          declaredLength: 700,
+        },
+      ),
+    ).rejects.toThrow('client aborted');
+    expect(existsSync(join(abortDir, 'aborted.upload'))).toBe(false);
+    const afterAbort = await receiveUpload(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(retryBytes);
+          controller.close();
+        },
+      }),
+      {
+        dir: abortDir,
+        jobId: 'after-abort',
+        dirMaxBytes: MiB,
+        minFreeBytes: Number(floorBytes),
+        freeBytes: () => floorBytes + 700n,
+        declaredLength: 700,
+      },
+    );
+    expect(afterAbort).toMatchObject({ ok: true, bytes: 700 });
 
     // Within the bounds: the file is kept (0600) only until parsed, cancelled or failed.
     const ok = await importsApp();

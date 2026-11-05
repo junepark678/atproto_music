@@ -272,7 +272,15 @@ describe('secrets in logs and bodies', () => {
 
     // Every error answer the run received, the refusals above included.
     const errors = w.seen.filter((s) => s.status >= 400);
-    expect(errors.length).toBeGreaterThanOrEqual(8);
+    expect(errors.map(({ method, path, status }) => [method, path.split('?')[0], status])).toEqual([
+      ['GET', '/oauth/callback', 403],
+      ['GET', '/api/v1/links/lastfm/callback', 400],
+      ['POST', '/2.0/', 403],
+      ['POST', '/2.0/', 403],
+      ['POST', '/2.0/', 403],
+      ['POST', '/1/submit-listens', 401],
+      ['POST', '/api/v1/scrobbles', 403],
+    ]);
     const leakedBodies = errors.flatMap((e) =>
       leaks(secrets, e.text).map((label) => `${label}: ${e.method} ${e.status}`),
     );

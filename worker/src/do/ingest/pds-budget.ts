@@ -1,5 +1,5 @@
 // Per-PDS-host politeness and the per-slice subrequest budget (ADR 0004 §5.4
-// "Budget per alarm", "Errors"; §11 Free-plan limits).
+// "Budget per alarm", "Errors").
 //
 // - Host backoff (`host_backoff(host, until_ms)`, durable): a 429, a 5xx or a
 //   timeout from a PDS pauses every proof fetch to that host until `until_ms`.
@@ -15,11 +15,9 @@
 //   PDS host (2). Waiters are served FIFO. It holds no durable state, so an
 //   eviction simply starts empty.
 // - Subrequest budget (`SubrequestMeter`): an alarm slice may start outbound
-//   work only while its reserved upper bound fits its limit (Free: the plan's
-//   `subrequestsPerSlice`, 40, under the Free plan's 50 subrequests per
-//   invocation; the Paid drain is bounded by hints instead, see
-//   verify-drain.ts `drainSubrequestLimit`). Costs are reserved before the
-//   work starts and never refunded, so the slice can never exceed the limit.
+//   work only while its reserved upper bound fits its fixed configured limit.
+//   Costs are reserved before the work starts and never refunded, so the slice
+//   can never exceed the limit.
 
 import type { SafeFetchError } from '@atmusic/atproto/net/safe-fetch';
 import type { Db } from '../db';

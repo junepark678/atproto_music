@@ -24,7 +24,7 @@ function files(dir: string): string[] {
   );
 }
 
-it('contains a Node-session SPA without browser OAuth, PDS hosts, or IndexedDB outbox code', () => {
+it('the built SPA contains no @atproto/oauth-client code, no PDS hostname and no IndexedDB outbox', () => {
   const src = files(join(webRoot, 'src')).filter((path) => /\.(ts|tsx)$/.test(path));
   const assets = files(join(webRoot, 'dist')).filter((path) => /\.(js|html)$/.test(path));
   expect(src.length).toBeGreaterThan(0);
@@ -35,4 +35,5 @@ it('contains a Node-session SPA without browser OAuth, PDS hosts, or IndexedDB o
   expect(bundle).not.toMatch(/@atproto\/oauth-client/);
   expect(bundle).not.toMatch(/(?:https?:\/\/)?(?:bsky\.social|bsky\.network)/i);
   expect(bundle).not.toContain('indexedDB.open');
+  expect(bundle).not.toMatch(/indexedDB\s*\.\s*open/);
 });

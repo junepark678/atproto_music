@@ -133,8 +133,11 @@ it('invalid window/scope → 422 with field name', async () => {
 
 it('body over cap → 413; malformed JSON → 400', async () => {
   const CAP = 2048;
-  const post = (body: BodyInit, headers?: HeadersInit) =>
-    new Request('https://music.example.test/api/v1/notify', { method: 'POST', body, headers });
+  const post = (body: Exclude<RequestInit['body'], null>, headers?: NonNullable<RequestInit['headers']>) =>
+    new Request(
+      'https://music.example.test/api/v1/notify',
+      Object.assign({ method: 'POST', body, headers }, { duplex: 'half' }),
+    );
   const read = (req: Request) => respond(() => readJsonBody(req, CAP));
 
   // Exactly at the cap is parsed; one byte over is 413. Bytes, not characters, count.
@@ -177,7 +180,7 @@ it('body over cap → 413; malformed JSON → 400', async () => {
   expect(declaredPulls).toBe(0);
 
   // Malformed JSON, empty bodies, a BOM and invalid UTF-8 are 400 invalid_json.
-  const malformed: BodyInit[] = [
+  const malformed: Exclude<RequestInit['body'], null>[] = [
     '{"uri":',
     '',
     '{"uri":"a",}',
