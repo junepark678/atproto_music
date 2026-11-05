@@ -71,6 +71,8 @@ const DIGEST_RECORDS: Readonly<Record<string, 'manifest' | 'labelled' | 'node-ba
   'docs/verification/backend.md': 'labelled',
   'docs/verification/live-evidence.json': 'labelled',
   'docs/verification/backend-node.md': 'labelled',
+  'docs/verification/lexicon-publication/README.md': 'labelled',
+  'docs/verification/lexicon-publication/manifest.json': 'labelled',
   'docs/verification/receipts/node-backend-14f6ee3-summary.json': 'node-backend-receipt',
   'docs/verification/receipts/node-backend-8d41546-summary.json': 'node-backend-receipt',
   'docs/verification/receipts/node-backend-be1c0a5-summary.json': 'node-backend-receipt',
