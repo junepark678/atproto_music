@@ -31,7 +31,7 @@ const NOW_STORAGE = toStorage(NOW_NS);
 const OPTS: ApplyOptions = { receiptNs: NOW_NS, prefix: PREFIX, nowNs: NOW_NS };
 const API_KEY = 'pano-test-key';
 const LISTENS = 100_000;
-// Exercise accumulated visibility history without adding an unmeasured index.
+// Exercise bounded visibility history using the current migrated schema.
 const CREATE_OPERATIONS = 250;
 const HIDDEN_LISTENS = 5;
 const VISIBLE_LISTENS = LISTENS - HIDDEN_LISTENS;
@@ -371,7 +371,14 @@ describe('N5-02 protocol read benchmark', () => {
     ).not.toThrow();
     for (const statements of Object.values(readPlans)) {
       expect(statements.length).toBeGreaterThan(0);
-      for (const statement of statements) validatePlanStatement(statement);
+      for (const statement of statements) {
+        validatePlanStatement(statement);
+        // Pin the naturally selected owner/target probe, without INDEXED BY.
+        expect(statement.details).toContain(
+          'SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)',
+        );
+        expect(statement.details.some((detail) => detail.includes('operations_did_state'))).toBe(false);
+      }
     }
 
     const path = lfm('user.getTopTracks', { period: 'overall' });

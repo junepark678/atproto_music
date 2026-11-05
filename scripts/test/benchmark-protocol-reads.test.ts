@@ -57,6 +57,20 @@ describe('protocol-read benchmark report', () => {
     expect(renderReport(value)).toContain('nearest-rank p95 is the slowest sample');
   });
 
+  it('renders both saved percentiles and rejects mismatched comparison fixtures', () => {
+    const current = report();
+    const baseline = report();
+    baseline.generatedAt = '2026-01-14T12:00:00.000Z';
+    baseline.reads.topTracks = { cached: timing, uncached: { runs: 10, p50Ms: 9138.39, p95Ms: 10007.29 } };
+    const rendered = renderReport(current, baseline);
+    expect(rendered).toContain('| top-tracks uncached | 9138.39 | 10007.29 | 10.00 | 20.00 |');
+    expect(rendered).toContain('not made under controlled load');
+    expect(rendered).toContain('2026-01-14T12:00:00.000Z');
+    expect(rendered).toContain('does not establish lifetime scaling');
+    baseline.dataset.seed++;
+    expect(() => renderReport(current, baseline)).toThrow(/baseline dataset must match/);
+  });
+
   it('rejects inconsistent operation totals and visibility counts', () => {
     const badTotal = report();
     badTotal.dataset.operations.total++;
