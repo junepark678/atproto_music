@@ -795,7 +795,7 @@ def _node_oauth_results_problems(entry, prefix, prereq):
         declared_hosts = set()
         if isinstance(declared_pds, list):
             for pds in declared_pds:
-                if isinstance(pds, dict):
+                if isinstance(pds, dict) and isinstance(pds.get("endpoint"), str):
                     host = _host(pds.get("endpoint"))
                     if host:
                         declared_hosts.add(host)

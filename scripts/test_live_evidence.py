@@ -523,6 +523,13 @@ class LiveEvidenceTests(unittest.TestCase):
             self.assertTrue(any("issuer hosts must match the two declared PDS hosts" in issue
                                 for issue in issues), issues)
 
+        for malformed_endpoint in ([1], {"endpoint": "invalid"}, 42, True):
+            broken = copy.deepcopy(entry)
+            broken["pds"][0]["endpoint"] = malformed_endpoint
+            status, issues = node_gate_status("oauth", broken, COMMIT, BUNDLE)
+            self.assertEqual(status, "blocked", malformed_endpoint)
+            self.assertTrue(issues)
+
         for malformed_host in ([], {}):
             broken = copy.deepcopy(entry)
             broken["results"]["signIns"][0]["issuerHost"] = malformed_host

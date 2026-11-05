@@ -3,6 +3,8 @@ import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { expect, test, vi } from 'vitest';
+import * as admin from '../admin/atmusic-admin.ts';
+import * as liveGate from '../live/live-gate.ts';
 import {
   assertNoExistingFollow,
   browserRequest,
@@ -12,9 +14,9 @@ import {
   isExpectedAuthorizationOrigin,
   NODE_OAUTH_ENV,
   spec,
-  validatedCallbackSession,
 } from '../live/node_oauth_check.ts';
 import { NODE_ENV, type NodeGateIO, runNodeGate } from '../live/node-live-gate.ts';
+import * as oauthBrowser from '../live/workers_oauth_check.ts';
 
 const REPO = resolve(fileURLToPath(new URL('../..', import.meta.url)));
 const TSX = createRequire(resolve(REPO, 'package.json')).resolve('tsx/cli');
@@ -154,53 +156,115 @@ test('the OAuth grant validator accepts both repo scope encodings and requires e
   expect(hasAllTwelveActions('org.atproto.music', queryScope.replace('&action=delete', ''))).toBe(false);
 });
 
-test('a successful callback is signed out when the returned session has the wrong DID, and the gate fails', async () => {
-  const expectedDid = 'did:plc:abcdefghijklmnopqrstuvwx';
-  const callbackDid = 'did:plc:bcdefghijklmnopqrstuvwxy';
-  const requests: { input: string | URL; init?: RequestInit }[] = [];
-  const fetch = vi.fn(async (input: string | URL, init?: RequestInit) => {
-    requests.push({ input, init });
-    return new Response(null, { status: 204 });
-  });
-  vi.stubGlobal('fetch', fetch);
-  const page = {
-    evaluate: async (callback: (arg: unknown) => Promise<unknown>, arg: unknown) => callback(arg),
-  } as unknown as import('@playwright/test').Page;
-  const result = capture();
-  const callbackBody = { did: callbackDid, csrfToken: 'callback-csrf-token' };
-  const failingSpec = {
-    ...spec,
-    run: async () => {
-      const activeSession: { value: { did: string; csrf: string } | null } = { value: null };
-      let appSignOutCompleted = false;
-      try {
-        validatedCallbackSession({ status: 200, json: callbackBody }, 'A', expectedDid, (session) => {
-          activeSession.value = session;
-        });
-      } finally {
-        if (activeSession.value !== null && !appSignOutCompleted) {
-          const logout = await browserRequest(page, '/api/v1/auth/logout', 'POST', activeSession.value.csrf, {});
-          appSignOutCompleted = logout.status === 204;
-        }
-      }
-      return { pds: [], subjects: [], results: {} };
-    },
+// Keep spec.run and signIn real: mock only browser, public HTTP and Unix-socket boundaries.
+async function runCallbackFailure(callbackBody: unknown, observerFails = false) {
+  const env = completeEnv();
+  const origin = env[NODE_ENV.origin]!;
+  const requests: { path: string; csrf?: string }[] = [];
+  const locator = {
+    fill: vi.fn(async () => undefined),
+    click: vi.fn(async () => undefined),
   };
-
+  const page = {
+    goto: vi.fn(async () => undefined),
+    locator: () => locator,
+    getByRole: () => locator,
+    waitForURL: vi.fn(async () => undefined),
+    url: () => origin,
+    evaluate: vi.fn(async (_callback: unknown, arg: { path: string; csrf?: string }) => {
+      requests.push(arg);
+      if (arg.path === '/api/v1/auth/session') return { status: 200, json: callbackBody };
+      if (arg.path === '/api/v1/auth/logout') return { status: 204, json: null };
+      throw new Error(`unexpected browser request ${arg.path}`);
+    }),
+  };
+  const closeContext = vi.fn(async () => undefined);
+  const closeBrowser = vi.fn(async () => undefined);
+  vi.spyOn(oauthBrowser, 'launchBrowser').mockResolvedValue({
+    newContext: async () => ({ newPage: async () => page, close: closeContext }),
+    close: closeBrowser,
+  } as unknown as Awaited<ReturnType<typeof oauthBrowser.launchBrowser>>);
+  vi.spyOn(liveGate, 'pdsInfo').mockImplementation(async (endpoint, implementation) => ({
+    endpoint,
+    implementation,
+    version: 'test',
+  }));
+  vi.spyOn(liveGate, 'checkIdentityPds').mockResolvedValue('fixture.handle');
+  const scope = `atproto ${['scrobble', 'follow', 'settings', 'love']
+    .map((name) => `repo:org.atproto.music.${name}`)
+    .join(' ')}`;
+  vi.spyOn(liveGate, 'httpJson').mockImplementation(async (input) => {
+    const url = new URL(input);
+    let json: unknown;
+    let status = 200;
+    if (url.pathname === '/oauth/client-metadata.json') {
+      json = {
+        client_id: `${origin}/oauth/client-metadata.json`,
+        token_endpoint_auth_method: 'private_key_jwt',
+        dpop_bound_access_tokens: true,
+        scope,
+      };
+    } else if (url.pathname === '/.well-known/oauth-protected-resource') {
+      status = 404;
+      json = null;
+    } else if (url.pathname === '/xrpc/com.atproto.identity.resolveHandle') {
+      json = { did: url.hostname.startsWith('pds-a.') ? env.ATMUSIC_LIVE_DID_A : env.ATMUSIC_LIVE_DID_B };
+    } else throw new Error(`unexpected public request ${url.pathname}`);
+    return { status, json, headers: new Headers() };
+  });
+  const observe = vi.spyOn(admin, 'sendOverSocket').mockImplementation(async (_socket, request) => {
+    const phase = (request.body as { phase: string }).phase;
+    if (phase === 'prepare_sign_out') throw new Error('observer unavailable');
+    const body =
+      phase === 'capture'
+        ? {
+            status: 'captured',
+            tokenSub: env.ATMUSIC_LIVE_DID_A,
+            issuerHost: new URL(env.ATMUSIC_LIVE_PDS_A!).hostname,
+            sealedSessionObserved: true,
+            clientAuthMethod: 'private_key_jwt',
+            dpopBound: true,
+            refreshTokenPresent: true,
+            grantedScope: scope,
+          }
+        : phase === 'crud'
+          ? { status: 'failed' }
+          : { status: 'revoked' };
+    return { status: 200, body: JSON.stringify(body) };
+  });
+  const result = capture();
   try {
-    expect(await runNodeGate(failingSpec, completeEnv(), result.io)).toBe(1);
-    expect(fetch).toHaveBeenCalledOnce();
-    expect(requests[0]?.input).toBe('/api/v1/auth/logout');
-    expect(requests[0]?.init?.method).toBe('POST');
-    const requestHeaders = requests[0]?.init?.headers as Record<string, string> | undefined;
-    expect(requestHeaders?.['x-csrf-token']).toBe('callback-csrf-token');
-    expect(JSON.parse(result.output().stdout)).toMatchObject({
-      result: 'failed',
-      failures: ['PDS A sign-in resolved to a different DID'],
-    });
+    // A returned callback goes directly to session validation. In the observer
+    // case capture succeeds, then CRUD failure enters the real cleanup block.
+    expect(await runNodeGate(spec, env, result.io)).toBe(1);
+    expect(requests.filter((request) => request.path === '/api/v1/auth/logout')).toEqual([
+      expect.objectContaining({ csrf: 'callback-csrf-token' }),
+    ]);
+    expect(closeContext).toHaveBeenCalledOnce();
+    expect(closeBrowser).toHaveBeenCalledOnce();
+    const evidence = JSON.parse(result.output().stdout);
+    expect(evidence.result).toBe('failed');
+    if (observerFails) {
+      expect(
+        observe.mock.calls.some(([, request]) => (request.body as { phase: string }).phase === 'prepare_sign_out'),
+      ).toBe(true);
+      expect(evidence.failures).toContain('direct repository CRUD checks failed for PDS A');
+    } else expect(evidence.failures[0]).toMatch(/sign-in (resolved to a different DID|returned no active app session)/);
   } finally {
-    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
   }
+}
+
+test.each([
+  { did: 'did:plc:bcdefghijklmnopqrstuvwxy', csrfToken: 'callback-csrf-token' },
+  { csrfToken: 'callback-csrf-token' },
+  { did: 42, csrfToken: 'callback-csrf-token' },
+])('production OAuth orchestration logs out after invalid callback session: %j', async (body) => {
+  await runCallbackFailure(body);
+});
+
+test('production cleanup still logs out when host preparation throws after capture', async () => {
+  await runCallbackFailure({ did: completeEnv().ATMUSIC_LIVE_DID_A, csrfToken: 'callback-csrf-token' }, true);
 });
 
 test('automated OAuth sign-in requires the configured PDS handle to resolve to its exact DID', () => {

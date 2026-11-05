@@ -108,20 +108,26 @@ function differentPdsProblem(env: Readonly<Record<string, string | undefined>>):
 type JsonObject = Record<string, unknown>;
 type ApiResponse = { status: number; json: unknown };
 type Session = { did: string; csrf: string };
+type CleanupSession = { did?: string; csrf: string };
 
 export function validatedCallbackSession(
   response: ApiResponse,
   which: 'A' | 'B',
   expectedDid: string,
-  onCallbackSession: (session: Session) => void,
+  onCallbackSession: (session: CleanupSession) => void,
 ): Session {
   const body = object(response.json);
   // A nonempty CSRF token is required before the caller can safely attempt
   // sign-out, even if the response status or identity validation fails.
-  if (typeof body?.did === 'string' && typeof body.csrfToken === 'string' && body.csrfToken.length > 0) {
-    onCallbackSession({ did: body.did, csrf: body.csrfToken });
+  if (typeof body?.csrfToken === 'string' && body.csrfToken.length > 0) {
+    onCallbackSession({ did: typeof body.did === 'string' ? body.did : undefined, csrf: body.csrfToken });
   }
-  if (response.status !== 200 || typeof body?.did !== 'string' || typeof body.csrfToken !== 'string') {
+  if (
+    response.status !== 200 ||
+    typeof body?.did !== 'string' ||
+    typeof body.csrfToken !== 'string' ||
+    body.csrfToken.length === 0
+  ) {
     throw new Error(`PDS ${which} sign-in returned no active app session`);
   }
   if (body.did !== expectedDid) throw new Error(`PDS ${which} sign-in resolved to a different DID`);
@@ -313,7 +319,7 @@ async function signIn(
   which: 'A' | 'B',
   expectedIssuerOrigin: string,
   timeoutMs: number,
-  onCallbackSession: (session: Session) => void,
+  onCallbackSession: (session: CleanupSession) => void,
 ): Promise<Session> {
   const handleName = which === 'A' ? OAUTH_ENV.handleA : OAUTH_ENV.handleB;
   const passwordName = which === 'A' ? OAUTH_ENV.passwordA : OAUTH_ENV.passwordB;
@@ -872,7 +878,7 @@ export const spec: NodeGateSpec = {
         const page = await browserContext.newPage();
         let appSignOutCompleted = false;
         let captured = false;
-        const sessionForCleanup: { value: Session | null } = { value: null };
+        const sessionForCleanup: { value: CleanupSession | null } = { value: null };
         try {
           const session = await signIn(
             context,
@@ -964,21 +970,26 @@ export const spec: NodeGateSpec = {
           });
         } finally {
           if (sessionForCleanup.value !== null && !appSignOutCompleted) {
-            try {
-              if (captured) await socketObserve(context, sessionForCleanup.value.did, 'prepare_sign_out');
-              const logout = await browserRequest(
-                page,
-                '/api/v1/auth/logout',
-                'POST',
-                sessionForCleanup.value.csrf,
-                {},
-              );
-              appSignOutCompleted = logout.status === 204;
-              if (captured && appSignOutCompleted) {
-                await socketObserve(context, sessionForCleanup.value.did, 'after_sign_out');
+            const cleanupSession = sessionForCleanup.value;
+            if (captured && cleanupSession.did !== undefined) {
+              try {
+                await socketObserve(context, cleanupSession.did, 'prepare_sign_out');
+              } catch {
+                context.cleanup(`${identity.did}: host sign-out preparation failed; app logout will still run`);
               }
+            }
+            try {
+              const logout = await browserRequest(page, '/api/v1/auth/logout', 'POST', cleanupSession.csrf, {});
+              appSignOutCompleted = logout.status === 204;
             } catch {
               appSignOutCompleted = false;
+            }
+            if (captured && appSignOutCompleted && cleanupSession.did !== undefined) {
+              try {
+                await socketObserve(context, cleanupSession.did, 'after_sign_out');
+              } catch {
+                context.cleanup(`${identity.did}: host revocation verification failed after app logout`);
+              }
             }
             if (!appSignOutCompleted) {
               context.cleanup(
