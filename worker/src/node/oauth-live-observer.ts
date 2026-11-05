@@ -3,15 +3,13 @@
 // returns access tokens, refresh tokens, cookies, or DPoP key material.
 
 import type { Clock, Random } from '@atmusic/core/deps';
+import { OAUTH_LIVE_BUDGETS, OAUTH_LIVE_CAPTURE_TTL_MS } from '@atmusic/core/oauth-live-budget';
 import { followRkey, newTid } from '@atmusic/core/record-key';
 import type { OAuthSession } from '@atproto/oauth-client-node';
 import { type NodeSavedSession, OAuthResponseError } from '@atproto/oauth-client-node';
 import type { OAuthService } from '../bff/oauth-client';
 
-const CAPTURE_TTL_MS = 10 * 60_000;
 const XRPC_REQUEST_TIMEOUT_MS = 30_000;
-const CRUD_PHASE_TIMEOUT_MS = 10 * 60_000;
-const CRUD_CLEANUP_TIMEOUT_MS = 4 * 60_000;
 const NSID = '[a-z][a-z0-9-]*(?:\\.[a-z][a-z0-9-]*)+';
 const SAFE_SCOPE_TOKEN = new RegExp(
   `^(?:atproto|transition:[a-zA-Z0-9._:-]{1,128}|repo:${NSID}(?:\\?action=(?:create|update|delete)(?:&action=(?:create|update|delete))*)?|repo\\?(?:collection=${NSID})(?:&collection=${NSID})*(?:&action=(?:create|update|delete))*)$`,
@@ -220,7 +218,7 @@ export function createOAuthLiveObserver(options: {
     const prefix = options.prefix;
     const phaseSignal = AbortSignal.any([
       ...(requestSignal === undefined ? [] : [requestSignal]),
-      AbortSignal.timeout(CRUD_PHASE_TIMEOUT_MS),
+      AbortSignal.timeout(OAUTH_LIVE_BUDGETS.crudMs),
     ]);
     const now = new Date(options.nowMs()).toISOString();
     const later = new Date(options.nowMs() + 1).toISOString();
@@ -387,7 +385,7 @@ export function createOAuthLiveObserver(options: {
 
     // Start the cleanup budget only after CRUD has finished. A long but
     // successful CRUD phase must not consume the bounded recovery window.
-    const cleanupSignal = AbortSignal.timeout(CRUD_CLEANUP_TIMEOUT_MS);
+    const cleanupSignal = AbortSignal.timeout(OAUTH_LIVE_BUDGETS.crudCleanupMs);
     let cleanupVerified = true;
     for (const intent of owned) {
       // Repeated runs preserve the singleton; partial temporary writes are
@@ -468,7 +466,7 @@ export function createOAuthLiveObserver(options: {
           saved,
           server: session.server,
           version: after.version,
-          expiresAt: options.nowMs() + CAPTURE_TTL_MS,
+          expiresAt: options.nowMs() + OAUTH_LIVE_CAPTURE_TTL_MS,
         });
 
         return {
