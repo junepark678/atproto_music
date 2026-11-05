@@ -50,6 +50,72 @@ function history(): LbListen[] {
 }
 
 describe('listenbrainz_api import source', () => {
+  it('retains the exhausted upstream window when disk pressure pauses a received page', async () => {
+    await withHarness(async (h) => {
+      h.seedUser(h.alice);
+      const clock = h.kit.clock;
+      const fake = new FakeListenBrainz({ clock, rateLimit: 1, rateWindowS: 300 });
+      fake.seedListens(USER, history().slice(0, 5));
+      const requests: number[] = [];
+      const transport = Object.assign(
+        async (req: Request) => {
+          if (new URL(req.url).hostname !== 'listenbrainz.test') return h.kit.transport(req);
+          requests.push(clock.nowMs());
+          return fake.fetch(req);
+        },
+        { fixture: true as const },
+      ) as unknown as Transport;
+      let low = false;
+      const fetch = bindPolicyFetch(createPolicyFetch({ transport }), IMPORT_FETCH_CAPS);
+      const rt: ImportRuntime = {
+        m: h.m,
+        uploadDir: `${h.ctx.dir}/imports`,
+        lastfm: null,
+        listenbrainzApiRoot: 'https://listenbrainz.test/',
+        fetch: async (input, init) => {
+          const response = await fetch(input, init);
+          low = true;
+          return response;
+        },
+        pacers: { lastfm: intervalPacer(), listenbrainz: intervalPacer() },
+        diskLow: () => low,
+        uploads: fsUploadStore,
+        box: null,
+      };
+      createJob(h.db, { id: 'job-lb-window', did: h.alice, source: 'listenbrainz_api', remoteUser: USER, now: T0 });
+      const initialCursor = parseCursor(
+        h.db.one<ImportJobRow>("SELECT * FROM import_jobs WHERE id = 'job-lb-window'")!,
+      );
+      await runImports(rt, clock.nowMs());
+      expect(requests).toEqual([T0]);
+      expect(h.db.one("SELECT state, error, fetched, staged FROM import_jobs WHERE id = 'job-lb-window'")).toEqual({
+        state: 'paused',
+        error: 'low_disk',
+        fetched: 0,
+        staged: 0,
+      });
+      expect(
+        parseCursor(h.db.one<ImportJobRow>("SELECT * FROM import_jobs WHERE id = 'job-lb-window'")!).listenbrainz,
+      ).toEqual(initialCursor.listenbrainz);
+
+      low = false;
+      rt.fetch = fetch;
+      clock.advance(60_000);
+      await runImports(rt, clock.nowMs());
+      clock.set(new Date(T0 + 299_999).toISOString());
+      await runImports(rt, clock.nowMs());
+      expect(requests).toEqual([T0]);
+      clock.advance(1);
+      await runImports(rt, clock.nowMs());
+      expect(requests).toEqual([T0, T0 + 300_000]);
+      expect(h.db.one("SELECT state, fetched, staged FROM import_jobs WHERE id = 'job-lb-window'")).toEqual({
+        state: 'writing',
+        fetched: 5,
+        staged: 5,
+      });
+    });
+  });
+
   it('does no API work while disk is low and preserves the proposed page until a restart resumes safely', async () => {
     await withHarness(async (h) => {
       h.seedUser(h.alice);
