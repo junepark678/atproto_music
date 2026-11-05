@@ -20,7 +20,7 @@ import { createWebSessions, SESSION_COOKIE } from '../../../src/bff/sessions';
 import { type CredentialDeps, ensureAccount } from '../../../src/credentials/accounts';
 import { createAppPassword } from '../../../src/credentials/app-passwords';
 import { createLastfmApp } from '../../../src/credentials/lastfm-apps';
-import { AUTH_TOKEN_UNSUPPORTED } from '../../../src/credentials/lastfm-auth';
+import { AUTH_TOKEN_UNSUPPORTED, authorizeToken, getSession, issueToken } from '../../../src/credentials/lastfm-auth';
 import { callbackNavigation, lastfmAuthFeature } from '../../../src/http/lastfm-authorize';
 import type { RouteDef } from '../../../src/http/types';
 import { authMethods, handleLastfmMethod } from '../../../src/lastfm/auth-methods';
@@ -56,6 +56,8 @@ const PROTOCOL_ROUTES: RouteDef[] = (['GET', 'POST'] as const).map((method) => (
 interface Rig {
   app: TestApp;
   deps: CredentialDeps;
+  clock: ReturnType<typeof fixedClock>;
+  sessions: ReturnType<typeof createWebSessions>;
   /** A cookie session for ALICE: the Cookie header and the X-CSRF-Token. */
   cookie: string;
   csrf: string;
@@ -77,9 +79,10 @@ async function rig(env?: Record<string, string>): Promise<Rig> {
     ALICE_HANDLE,
   );
   ensureAccount(deps, { did: ALICE, verifiedHandle: ALICE_HANDLE });
-  const web = createWebSessions(deps).create(ALICE);
+  const sessions = createWebSessions(deps);
+  const web = sessions.create(ALICE);
   const csrfKey = app.composed.app.lastfmAuth.csrfKey;
-  return { app, deps, cookie: `${SESSION_COOKIE}=${web.token}`, csrf: csrfToken(csrfKey, web.token) };
+  return { app, deps, clock, sessions, cookie: `${SESSION_COOKIE}=${web.token}`, csrf: csrfToken(csrfKey, web.token) };
 }
 
 afterEach(closeApps);
@@ -133,6 +136,82 @@ function sessionCount(app: TestApp): number {
 }
 
 describe('Last.fm auth methods and approval', () => {
+  it('an already approved desktop token remains redeemable once after browser logout-all', async () => {
+    const r = await rig();
+    const issued = issueToken(r.deps, PANO);
+    if (!issued.ok) throw new Error('auth.getToken failed');
+    expect(authorizeToken(r.deps, { did: ALICE, apiKey: PANO, token: issued.value.token })).toEqual({ ok: true });
+    expect(r.sessions.logoutAll(ALICE)).toBe(1);
+    expect(getSession(r.deps, { apiKey: PANO, token: issued.value.token })).toMatchObject({ ok: true });
+    expect(sessionCount(r.app)).toBe(1);
+    expect(tokenRow(r.app, issued.value.token)?.state).toBe('consumed');
+    expect(getSession(r.deps, { apiKey: PANO, token: issued.value.token })).toEqual({ ok: false, code: 4 });
+  });
+
+  it.each([
+    ['web approval', undefined],
+    ['desktop approval', 'f'.repeat(32)],
+  ] as const)(
+    '%s does not write after logout-all while the request body is incomplete',
+    async (_name, desktopToken) => {
+      const r = await rig();
+      const { app } = r;
+      const isWeb = desktopToken === undefined;
+      let token: string | undefined = desktopToken;
+      if (token !== undefined) {
+        const issued = await call(app, { method: 'auth.getToken', api_key: PANO }, { method: 'POST' });
+        const issuedBody = await jsonOf(issued);
+        token = issuedBody.token as string;
+        expect(token).toMatch(HEX32);
+      }
+      const input = JSON.stringify({ apiKey: PANO, ...(token === undefined ? {} : { token }) });
+      const split = Math.floor(input.length / 2);
+      const clock = r.clock;
+      clock.advance(2 * 24 * 60 * 60_000);
+      const before = app.db.one<{ last_seen_ms: number }>('SELECT last_seen_ms FROM web_sessions')!.last_seen_ms;
+      let controller!: ReadableStreamDefaultController<Uint8Array>;
+      const body = new ReadableStream<Uint8Array>({
+        start(ctl) {
+          controller = ctl;
+        },
+      });
+      controller.enqueue(new TextEncoder().encode(input.slice(0, split)));
+      const pending = app.fetch('/api/v1/lastfm/authorize', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          cookie: r.cookie,
+          origin: TEST_PUBLIC_ORIGIN,
+          'x-csrf-token': r.csrf,
+        },
+        body,
+        duplex: 'half',
+      } as RequestInit);
+      for (let i = 0; i < 500; i++) {
+        const seen = app.db.one<{ last_seen_ms: number }>('SELECT last_seen_ms FROM web_sessions')?.last_seen_ms;
+        if (seen !== before) break;
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      expect(app.db.one<{ last_seen_ms: number }>('SELECT last_seen_ms FROM web_sessions')?.last_seen_ms).toBe(
+        clock.nowMs(),
+      );
+      expect(r.sessions.logoutAll(ALICE)).toBe(1);
+      controller.enqueue(new TextEncoder().encode(input.slice(split)));
+      controller.close();
+      const answer = await pending;
+      expect(answer.status).toBe(401);
+      expect((await jsonOf(answer)).error).toMatchObject({ code: 'unauthenticated' });
+      expect(answer.headers.get('set-cookie')).toBeNull();
+      if (isWeb) {
+        expect(app.db.one('SELECT 1 FROM lastfm_tokens')).toBeNull();
+      } else {
+        const issuedToken = token as string;
+        expect(tokenRow(app, issuedToken)?.state).toBe('issued');
+        expect(sessionCount(app)).toBe(0);
+      }
+    },
+  );
+
   it('desktop flow: auth.getToken, POST /api/v1/lastfm/authorize, then auth.getSession returns session name, 32-hex key and subscriber 0 in XML and JSON', async () => {
     const r = await rig();
     const { app } = r;

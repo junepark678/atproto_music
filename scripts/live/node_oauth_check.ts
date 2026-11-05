@@ -36,6 +36,7 @@ import {
   type NodeGateRequirement,
   type NodeGateSpec,
 } from './node-live-gate.ts';
+import { nodeOauthObservations } from './node-live-support.ts';
 import { launchBrowser, OAUTH_ENV, signInChecks, signInTimeoutMs } from './workers_oauth_check.ts';
 
 export const NODE_OAUTH_ENV = {
@@ -1060,6 +1061,7 @@ export const spec: NodeGateSpec = {
   script: 'scripts/live/node_oauth_check.ts',
   requirements,
   extraChecks,
+  observations: nodeOauthObservations(),
   async run(context) {
     await validateClientMetadata(context);
     const identities = [

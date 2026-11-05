@@ -16,7 +16,9 @@
 //   admitted; the admission snapshot then sets `indexing_state`, also for a
 //   DID with zero records. At most MAX_FETCHING (2) jobs fetch at once
 //   server-wide; a job beyond that waits here.
-// - **fetching.** API sources fetch one page per slice, through policyFetch,
+// - **fetching.** Low disk pauses before pacing/fetching/parsing and is checked
+//   again after async work and immediately before a staging transaction. API
+//   sources fetch one page per slice, through policyFetch,
 //   after taking the source's pacer slot (Last.fm: one global request per
 //   second shared with forwarding; ListenBrainz: one per second, held until
 //   `X-RateLimit-Reset-In` when the window is spent). Transient failures back
@@ -658,7 +660,7 @@ class ImportRun {
   /** Whether `job` could take a slice now (used only to decide whether to run again at once). */
   private ready(job: ImportJobRow): boolean {
     const cursor = parseCursor(job);
-    if (job.state === 'fetching') return (cursor.retry?.notBeforeMs ?? 0) <= this.now;
+    if (job.state === 'fetching') return !this.rt.diskLow() && (cursor.retry?.notBeforeMs ?? 0) <= this.now;
     if (job.state === 'writing') {
       return !this.rt.diskLow() && stagedLeft(this.db, job.id) > 0 && outstanding(this.db, job.id) < WRITE_SLICE;
     }
@@ -682,6 +684,9 @@ class ImportRun {
     const job = loadJob(this.db, row.id) as ImportJobRow;
     if (job.state === 'fetching') {
       const cursor = parseCursor(job);
+      // A low-disk pause is recoverable and does not count as a failed slice.
+      // Check before a retry or pacer decision can schedule fetch/parser work.
+      if (this.pauseForLowDisk(job.id)) return;
       if (cursor.retry !== undefined && cursor.retry.notBeforeMs > this.now) {
         this.act(job.id, 'backoff', { atMs: cursor.retry.notBeforeMs });
         this.wait(cursor.retry.notBeforeMs);
@@ -722,6 +727,7 @@ class ImportRun {
             cursor: cursor.lastfm ?? initialLastfmCursor(job.created_at_ms),
           },
         );
+        if (this.pauseForLowDisk(job.id)) return;
         await this.applyFetch(job, cursor, outcome, (c) => ({ lastfm: c }));
       } else {
         const outcome = await fetchListenBrainzPage(
@@ -738,6 +744,7 @@ class ImportRun {
           pacer.holdUntil(this.now + outcome.rate.resetInSeconds * 1000);
         }
         if (outcome.kind === 'rate_limited' && outcome.untilMs !== undefined) pacer.holdUntil(outcome.untilMs);
+        if (this.pauseForLowDisk(job.id)) return;
         await this.applyFetch(job, cursor, outcome, (c) => ({ listenbrainz: c }));
       }
     } catch (error) {
@@ -773,11 +780,13 @@ class ImportRun {
         const next: JobCursor = { ...cursor, ...store(outcome.cursor) };
         delete next.retry;
         if (outcome.done) next.fetchDone = true;
-        await stageEntries(this.rt.m, job, outcome.entries, {
+        const staged = await stageEntries(this.rt.m, job, outcome.entries, {
           cursorJson: JSON.stringify(next),
           completeSlice: true,
+          beforeCommit: () => this.canStage(job.id),
           now: this.now,
         });
+        if (staged === null) return;
         if (outcome.done) {
           this.db.run(
             `UPDATE import_jobs SET state = 'writing', updated_at_ms = ? WHERE id = ? AND state = 'fetching'`,
@@ -828,13 +837,22 @@ class ImportRun {
     try {
       while (!complete && consumed - consumedBefore < PARSE_SLICE) {
         const { entries, done } = await parse.take();
+        if (this.pauseForLowDisk(job.id)) {
+          closeParse(this.db, job.id);
+          return;
+        }
         complete = done;
         if (entries.length > 0) {
           consumed += entries.length;
-          await stageEntries(rt.m, job, entries, {
+          const staged = await stageEntries(rt.m, job, entries, {
             cursorJson: JSON.stringify({ ...cursor, upload: { consumed } }),
+            beforeCommit: () => this.canStage(job.id),
             now: this.now,
           });
+          if (staged === null) {
+            closeParse(this.db, job.id);
+            return;
+          }
         }
         // Let requests and the other timers in between staging transactions.
         if (!complete) await yieldToLoop();
@@ -925,6 +943,23 @@ class ImportRun {
       rt.m.log.log('error', 'import.write_error', { jobId: job.id, error: errorName(error) });
       this.retryLater(job, parseCursor(job), 'internal');
     }
+  }
+
+  /** Pauses only a still-fetching job, preserving its last committed cursor. */
+  private pauseForLowDisk(jobId: string): boolean {
+    if (!this.rt.diskLow()) return false;
+    const current = loadJob(this.db, jobId);
+    if (current === null || current.state !== 'fetching') return true;
+    pauseJob(this.db, current, parseCursor(current), 'low_disk', this.now);
+    this.act(jobId, 'paused', { detail: 'low_disk' });
+    return true;
+  }
+
+  /** The staging transaction may commit only while the job remains fetching and disk is safe. */
+  private canStage(jobId: string): boolean {
+    const current = loadJob(this.db, jobId);
+    if (current === null || current.state !== 'fetching') return false;
+    return !this.pauseForLowDisk(jobId);
   }
 }
 

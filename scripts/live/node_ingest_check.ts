@@ -7,7 +7,7 @@ import { canonicalDigest } from '@atmusic/core/canonical';
 import { cryptoRandom, systemClock } from '@atmusic/core/deps';
 import { collectionsFor } from '@atmusic/core/namespace';
 import { newTid } from '@atmusic/core/record-key';
-import { buildScrobbleRecord } from '@atmusic/core/scrobble';
+import { buildScrobbleRecord, validateScrobbleRecord } from '@atmusic/core/scrobble';
 import { parseRecordUri } from '@atmusic/core/syntax';
 import type { Browser, Page } from '@playwright/test';
 import {
@@ -515,6 +515,13 @@ async function awaitIndexed(
     `${written.uri}: operation CID ${written.cid}, status CID ${statusCid}, and independent proof CID ${proof.cid} differ`,
   );
   if (expectedRecord !== undefined) {
+    if (!Object.hasOwn(expectedRecord, 'createdAt')) {
+      const prefix = parsed.collection.slice(0, parsed.collection.lastIndexOf('.'));
+      expect(
+        validateScrobbleRecord(proof.record, prefix, BigInt(Date.now()) * 1_000_000n).ok,
+        `${written.uri}: independently verified PDS record is not a valid canonical scrobble`,
+      );
+    }
     const expectedDigest = await canonicalDigest(expectedRecord);
     // createdAt is assigned by the BFF when it accepts the request. It is the
     // only record field that the client cannot determine in advance.

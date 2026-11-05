@@ -247,8 +247,18 @@ describe('acceptListens', () => {
       expect(h.db.all('SELECT dedupe_key, created_at_ms FROM listen_keys')).toEqual([
         { dedupe_key: key, created_at_ms: T0 },
       ]);
-      expect(h.db.all('SELECT link_id, dedupe_key, due_at FROM forward_outbox')).toEqual([
-        { link_id: link, dedupe_key: key, due_at: T0 },
+      expect(h.db.all('SELECT link_id, dedupe_key, due_at, created_at_ms, updated_at_ms FROM forward_outbox')).toEqual([
+        { link_id: link, dedupe_key: key, due_at: notBeforeMs, created_at_ms: T0, updated_at_ms: T0 },
+      ]);
+      const duplicate = await acceptListens(h.m, {
+        did: h.alice,
+        origin: 'listenbrainz',
+        listens: [{ input, notBeforeMs }],
+        receiptMs: T0 + 1_000,
+      });
+      expect(duplicate.results).toMatchObject([{ status: 'accepted', duplicate: true }]);
+      expect(h.db.all('SELECT due_at, created_at_ms, updated_at_ms FROM forward_outbox')).toEqual([
+        { due_at: notBeforeMs, created_at_ms: T0, updated_at_ms: T0 },
       ]);
 
       // Not before due_at: nothing is sent, and the outbox asks to run exactly then.
