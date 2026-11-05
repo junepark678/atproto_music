@@ -373,6 +373,7 @@ describe('scripts/check-ts.sh', () => {
       }
     }
     expect(byName.get('worker-node')?.groupOrder).toBe(modules?.groupOrder);
+    expect(byName.get('scripts')?.files).toContain('scripts/test/node-interim.test.ts');
     expect(byName.get('scripts')?.files).not.toContain('scripts/test/deploy.test.ts');
     expect(byName.get('scripts')?.groupOrder).toBeLessThan(modules?.groupOrder ?? 0);
   });

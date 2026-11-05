@@ -153,7 +153,8 @@ server APIs rather than exercising its browser consent UI.
 `devenv_oauth_check.ts` remains a preflight only. It performs no network,
 socket, child-process, or browser operation and exits 2 with a blocked document
 even when both inputs are valid; it does not run the fixture suite or produce
-operator evidence.
+operator evidence. The local fixture suite is run separately as a deterministic
+regression and does not consume the preflight's inputs.
 
 Its schema-v3 document has `runtime: "node"`, `fixtureOnly: true`,
 `gate: "devenvOauth"`, and `result: "blocked"`. It is not one of the five
@@ -229,6 +230,95 @@ now exercises the confidential client against a local `@atproto/dev-env` PDS,
 but production OAuth interop with independently operated providers remains
 deferred, as do the operator SSRF probe and Node soak. Full N6-02 and M6 live
 acceptance stay open.
+
+## Shared harness validation
+
+Drivers may declare `NodeGateSpec.observations` as top-level `results` keys
+with an `accept(value)` validator. Every declared key must be an own property
+of `results`, and its validator must return `null` to accept it. Missing keys,
+rejections, and validator exceptions produce `failed` evidence with an
+`observation <key>:` diagnostic. Omitting this opt-in declaration preserves
+existing driver behavior; it does not establish that a driver has complete
+accepted observations or extend verifier gate support.
+
+The optional synchronous `localChecks(env)` hook runs only after all ordinary
+requirements and `extraChecks` succeed, before the gate body. It is restricted
+by contract to filesystem reads and local tools such as `git` and
+`node --version`; it must not perform network or browser work. Reported problems
+and exceptions produce blocked evidence and prevent body execution. This is
+an ordering contract, not a sandbox for arbitrary hook code.
+
+Shared output redacts supplied secret environment values, including key,
+cookie and CSRF inputs, and absolute home/runtime paths under `/home/` and
+`/run/user/`. URL sanitization decodes mixed percent and Unicode escapes before
+normalizing URL separators and stripping credentials, queries and fragments.
+Drivers must still select evidence fields deliberately rather than dump
+upstream responses.
+
+### S1 and ingest audit repair receipt — 2026-11-03
+
+Astra approved the code scope `88a146f..889c916` at full code revision
+`889c9169d88e15f6b0ee8aaa6f6e44b416e33532`, with no remaining blockers.
+This is a deterministic code-review receipt, not hosted CI or live acceptance.
+The review covered required observations, local-check ordering and blocked-path
+tripwires, production-normalized app-record ownership before deletion, mixed
+URL-escape redaction, bounded late-launch handling, and truthful teardown.
+
+The scoped implementation and regression files are
+`scripts/live/node-live-gate.ts`, `scripts/live/node_ingest_check.ts`,
+`scripts/live/workers_oauth_check.ts`, `scripts/test/node-live-gate.test.ts`,
+and `scripts/test/node-ingest.test.ts`; this runbook records the contracts and
+receipt. No benchmark files or verifier gate support changed.
+
+Executed checks:
+
+- `npx vitest run --project scripts scripts/test/node-ingest.test.ts scripts/test/node-live-gate.test.ts scripts/test/node-pds-compat.test.ts`
+  — **66 passed**, independently repeated by Astra.
+- `python3 -B scripts/test_live_evidence.py` — **28 passed**, independently
+  repeated by Astra; the historical inventory remains blocked.
+- `npx tsc -b` — passed.
+- `npx biome check scripts/live/node_ingest_check.ts scripts/live/workers_oauth_check.ts scripts/live/node-live-gate.ts scripts/test/node-ingest.test.ts scripts/test/node-live-gate.test.ts`
+  and `git diff --check` — passed.
+
+App ownership uses the production builder to normalize the run's input and
+compares its full digest with independently proved content, retaining the
+verified server-assigned `createdAt`. Page, context and browser close attempts
+are bounded by the remaining budget; unresolved cleanup fails the gate.
+Promise races do not guarantee cancellation of an arbitrary injected launcher.
+Local checks remain a caller contract rather than a network sandbox.
+
+No live requests or OAuth exchanges ran. Driver/live acceptance remains
+withheld. `oauth` is a supported Node evidence gate, while `ssrfProbe` and
+`socketSoak` remain unsupported and blocked. Shared helper extraction and
+migration are outside this slice.
+
+## Dev-env OAuth advisory regression (D7)
+
+The completed Sonnet readiness discovery reports that `@atproto/oauth-provider`
+can fetch discoverable HTTPS client metadata and JWKS through valid public TLS
+without a provider change. This is implementation readiness information, not
+an executed OAuth exchange or live acceptance receipt; no OAuth or live network
+was run for that discovery.
+
+The current end-to-end stack uses `FakeOAuthAs` and `FakePds`. Separately,
+`worker/test/node/bff/devenv-oauth.test.ts` runs the production confidential
+OAuth client against a real local `@atproto/dev-env` PDS. This advisory test
+covers exchange, the four repository grants, create/delete, replacement-session
+revocation, and token-store cleanup. It drives provider authorization through
+server APIs rather than its browser consent UI, and is not a live or browser
+consent test.
+
+The standalone `devenv_oauth_check.ts` remains a shape-only preflight that exits
+2 with a blocked document. The fixture test and preflight do not add a required
+production gate or produce operator evidence. In particular:
+
+- `devenvOauth` is not among the required production gates;
+- its fixture-only blocked document cannot satisfy `oauth`;
+- no independently operated PDS live OAuth result has been recorded.
+
+`NODE_SUPPORTED_GATES` remains unchanged. `ssrfProbe` and `socketSoak` stay
+blocked, and the dedicated-identity OAuth/ingest live runs remain owner-skipped
+until their prerequisites are supplied.
 
 ## Node ingest timeout and recovery semantics
 
