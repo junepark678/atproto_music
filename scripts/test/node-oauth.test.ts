@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { withBoundedRecovery } from '@atmusic/core/oauth-live-budget';
 import { expect, test, vi } from 'vitest';
 import {
   assertNoExistingFollow,
@@ -200,27 +201,53 @@ test('password entry accepts only the exact pinned authorization origin', () => 
 });
 
 test('the browser request deadline aborts a fetch that never responds', async () => {
+  let evaluationSettled = false;
+  let aborted = false;
   const page = {
-    evaluate: async (callback: (arg: unknown) => Promise<unknown>, arg: unknown) => callback(arg),
+    evaluate: async (callback: (arg: unknown) => Promise<unknown>, arg: unknown) => {
+      try {
+        return await callback(arg);
+      } finally {
+        evaluationSettled = true;
+      }
+    },
   } as unknown as import('@playwright/test').Page;
   const fetch = vi.fn(
     async (_input: string | URL, init?: RequestInit) =>
       new Promise<Response>((_resolve, reject) => {
-        init?.signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+        init?.signal?.addEventListener(
+          'abort',
+          () => {
+            aborted = true;
+            reject(new Error('aborted'));
+          },
+          { once: true },
+        );
       }),
   );
   vi.stubGlobal('fetch', fetch);
   try {
-    await expect(browserRequest(page, '/api/v1/auth/logout', 'POST', undefined, {}, undefined, 20)).rejects.toThrow(
-      /timed out/,
-    );
+    await expect(
+      withBoundedRecovery(
+        async () => browserRequest(page, '/api/v1/auth/logout', 'POST', undefined, {}, undefined, 100),
+        async (deadline) => {
+          expect(aborted).toBe(true);
+          expect(evaluationSettled).toBe(true);
+          deadline.assertActive();
+        },
+        { appPhaseMs: 500, appCleanupMs: 500 },
+      ),
+    ).rejects.toThrow(/timed out/);
     expect(fetch).toHaveBeenCalledOnce();
+    expect(aborted).toBe(true);
+    expect(evaluationSettled).toBe(true);
   } finally {
     vi.unstubAllGlobals();
   }
 });
 
 test('the browser request deadline aborts a response body that never finishes', async () => {
+  let aborted = false;
   const page = {
     evaluate: async (callback: (arg: unknown) => Promise<unknown>, arg: unknown) => callback(arg),
   } as unknown as import('@playwright/test').Page;
@@ -231,15 +258,91 @@ test('the browser request deadline aborts a response body that never finishes', 
       text: () =>
         new Promise<string>((_resolve, reject) => {
           signal?.addEventListener('abort', () => reject(new Error('body aborted')), { once: true });
+          signal?.addEventListener(
+            'abort',
+            () => {
+              aborted = true;
+            },
+            { once: true },
+          );
         }),
     } as Response;
   });
   vi.stubGlobal('fetch', fetch);
   try {
-    await expect(browserRequest(page, '/api/v1/auth/logout', 'POST', undefined, {}, undefined, 20)).rejects.toThrow(
+    await expect(browserRequest(page, '/api/v1/auth/logout', 'POST', undefined, {}, undefined, 100)).rejects.toThrow(
       /timed out/,
     );
     expect(fetch).toHaveBeenCalledOnce();
+    expect(aborted).toBe(true);
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
+
+test('a delayed Playwright evaluation does not fetch after expiry and settles before recovery starts', async () => {
+  let evaluateCalls = 0;
+  let evaluationSettled = false;
+  const page = {
+    evaluate: async (callback: (arg: unknown) => Promise<unknown> | unknown, arg: unknown) => {
+      evaluateCalls += 1;
+      if (evaluateCalls === 1) await new Promise((resolve) => setTimeout(resolve, 40));
+      try {
+        return await callback(arg);
+      } finally {
+        if (evaluateCalls === 1) evaluationSettled = true;
+      }
+    },
+  } as unknown as import('@playwright/test').Page;
+  const fetch = vi.fn(async () => Response.json({ ok: true }));
+  vi.stubGlobal('fetch', fetch);
+  let recoveryStarted = false;
+  try {
+    await expect(
+      withBoundedRecovery(
+        async (deadline) => {
+          deadline.assertActive();
+          await browserRequest(page, '/api/v1/auth/logout', 'POST', undefined, {}, undefined, 10);
+        },
+        async (deadline) => {
+          recoveryStarted = true;
+          expect(evaluationSettled).toBe(true);
+          deadline.assertActive();
+        },
+        { appPhaseMs: 500, appCleanupMs: 500 },
+      ),
+    ).rejects.toThrow(/timed out/);
+    expect(fetch).not.toHaveBeenCalled();
+    expect(recoveryStarted).toBe(true);
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
+
+test('an evaluation that cannot be cancelled or settled prevents unsafe recovery', async () => {
+  let evaluateCalls = 0;
+  const page = {
+    evaluate: async (callback: (arg: unknown) => Promise<unknown> | unknown, arg: unknown) => {
+      evaluateCalls += 1;
+      if (evaluateCalls === 1) return new Promise<never>(() => {});
+      return callback(arg);
+    },
+  } as unknown as import('@playwright/test').Page;
+  const fetch = vi.fn(async () => Response.json({ ok: true }));
+  vi.stubGlobal('fetch', fetch);
+  let recoveryStarted = false;
+  try {
+    await expect(
+      withBoundedRecovery(
+        async () => browserRequest(page, '/api/v1/auth/logout', 'POST', undefined, {}, undefined, 10),
+        async () => {
+          recoveryStarted = true;
+        },
+        { appPhaseMs: 500, appCleanupMs: 500 },
+      ),
+    ).rejects.toThrow(/browser request cleanup failed/);
+    expect(recoveryStarted).toBe(false);
+    expect(fetch).not.toHaveBeenCalled();
   } finally {
     vi.unstubAllGlobals();
   }

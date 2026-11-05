@@ -10,6 +10,7 @@ import {
   createDeadline,
   type Deadline,
   OAUTH_LIVE_BUDGETS,
+  UnsafeRecoveryError,
   withBoundedRecovery,
 } from '@atmusic/core/oauth-live-budget';
 import { parseRecordUri } from '@atmusic/core/syntax';
@@ -167,16 +168,39 @@ export async function browserRequest(
   idempotencyKey?: string,
   timeoutMs = 30_000,
 ): Promise<ApiResponse> {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new Error('browser request deadline exceeded');
+  const requestId = randomUUID();
+  const expiresAt = Date.now() + Math.max(1, Math.ceil(timeoutMs));
+  const registryKey = '__atmusicOAuthBrowserRequests';
   const evaluation = page.evaluate(
-    async ({ path, method, csrf, body, idempotencyKey, timeoutMs }) => {
+    async ({ path, method, csrf, body, idempotencyKey, requestId, expiresAt, registryKey }) => {
+      type RequestRegistry = { controllers: Map<string, AbortController>; cancelled: Set<string> };
+      const global = globalThis as unknown as Record<string, unknown>;
+      let registry = global[registryKey] as RequestRegistry | undefined;
+      if (registry === undefined) {
+        registry = { controllers: new Map<string, AbortController>(), cancelled: new Set<string>() };
+        global[registryKey] = registry;
+      }
+      // Playwright may not begin this evaluation until after the host deadline.
+      // The absolute wall-clock expiry is fixed at dispatch, so this check is
+      // before fetch and does not grant a fresh timeout after evaluation starts.
+      if (registry.cancelled.has(requestId) || Date.now() >= expiresAt) {
+        registry.cancelled.delete(requestId);
+        throw new Error('browser request deadline exceeded');
+      }
       const headers: Record<string, string> = { accept: 'application/json' };
       if (csrf !== undefined) headers['x-csrf-token'] = csrf;
       if (body !== undefined) headers['content-type'] = 'application/json';
       if (idempotencyKey !== undefined) headers['idempotency-key'] = idempotencyKey;
       try {
         const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), timeoutMs);
+        registry.controllers.set(requestId, controller);
+        const timer = setTimeout(() => controller.abort(), Math.max(0, expiresAt - Date.now()));
         try {
+          if (Date.now() >= expiresAt || registry.cancelled.has(requestId)) {
+            controller.abort();
+            throw new Error('browser request deadline exceeded');
+          }
           const response = await fetch(path, {
             method,
             credentials: 'same-origin',
@@ -185,6 +209,8 @@ export async function browserRequest(
             ...(body === undefined ? {} : { body: JSON.stringify(body) }),
           });
           const text = await response.text();
+          if (Date.now() >= expiresAt || registry.cancelled.has(requestId))
+            throw new Error('browser request deadline exceeded');
           let json: unknown = null;
           try {
             json = text ? (JSON.parse(text) as unknown) : null;
@@ -194,24 +220,81 @@ export async function browserRequest(
           return { status: response.status, json };
         } finally {
           clearTimeout(timer);
+          registry.controllers.delete(requestId);
+          registry.cancelled.delete(requestId);
         }
       } catch {
         throw new Error('browser request timed out or failed');
       }
     },
-    { path, method, csrf, body, idempotencyKey, timeoutMs },
+    { path, method, csrf, body, idempotencyKey, requestId, expiresAt, registryKey },
   );
   let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    return await Promise.race([
-      evaluation,
-      new Promise<ApiResponse>((_resolve, reject) => {
-        timer = setTimeout(() => reject(new Error('browser request timed out')), timeoutMs);
-      }),
-    ]);
-  } finally {
-    if (timer !== undefined) clearTimeout(timer);
+  const expired = Symbol('expired');
+  const outcome = await Promise.race([
+    evaluation.then(
+      (value) => ({ kind: 'value' as const, value }),
+      (error: unknown) => ({ kind: 'error' as const, error }),
+    ),
+    new Promise<typeof expired>((resolve) => {
+      timer = setTimeout(() => resolve(expired), Math.max(0, expiresAt - Date.now()));
+    }),
+  ]);
+  if (timer !== undefined) clearTimeout(timer);
+  if (outcome !== expired) {
+    if (outcome.kind === 'error') throw new Error('browser request timed out or failed');
+    return outcome.value;
   }
+
+  // Mark cancellation even when the original evaluate has not started yet.
+  // When it eventually runs, the pre-fetch check observes this tombstone.
+  const cancelEvaluation = page.evaluate(
+    ({ requestId, registryKey }) => {
+      type RequestRegistry = { controllers: Map<string, AbortController>; cancelled: Set<string> };
+      const global = globalThis as unknown as Record<string, unknown>;
+      const registry = global[registryKey] as RequestRegistry | undefined;
+      if (registry === undefined) {
+        global[registryKey] = { controllers: new Map(), cancelled: new Set([requestId]) };
+        return;
+      }
+      registry.cancelled.add(requestId);
+      registry.controllers.get(requestId)?.abort();
+    },
+    { requestId, registryKey },
+  );
+  const cleanupTimeout = 2_000;
+  const settled = Symbol('settled');
+  let cancellationTimer: ReturnType<typeof setTimeout> | undefined;
+  const cancellation = await Promise.race([
+    cancelEvaluation.then(
+      () => ({ kind: 'settled' as const }),
+      () => ({ kind: 'failed' as const }),
+    ),
+    new Promise<typeof settled>((resolve) => {
+      cancellationTimer = setTimeout(() => resolve(settled), cleanupTimeout);
+    }),
+  ]);
+  if (cancellationTimer !== undefined) clearTimeout(cancellationTimer);
+  if (cancellation === settled || cancellation.kind === 'failed') {
+    // Keep observing the original promise (the race above already attached a
+    // rejection handler), but never start record recovery with an unknown
+    // browser-side mutation still running.
+    throw new UnsafeRecoveryError('browser request cleanup failed; cancellation could not be confirmed');
+  }
+  let evaluationTimer: ReturnType<typeof setTimeout> | undefined;
+  const evaluationSettled = await Promise.race([
+    evaluation.then(
+      () => true,
+      () => true,
+    ),
+    new Promise<boolean>((resolve) => {
+      evaluationTimer = setTimeout(() => resolve(false), cleanupTimeout);
+    }),
+  ]);
+  if (evaluationTimer !== undefined) clearTimeout(evaluationTimer);
+  if (!evaluationSettled)
+    throw new UnsafeRecoveryError('browser request cleanup failed; evaluation did not settle after cancellation');
+  throw new Error('browser request timed out');
 }
 
 async function verifyCurrentRecordState(
@@ -226,7 +309,11 @@ async function verifyCurrentRecordState(
   record?: unknown;
 }> {
   try {
-    const proof = await verifyRecordAt(did, collection, rkey, { timer: deadline });
+    const proof = await verifyRecordAt(did, collection, rkey, {
+      timer: deadline,
+      assertActive: () => deadline.assertActive(),
+    });
+    deadline.assertActive();
     return {
       state: proof.state,
       rev: proof.rev,
@@ -235,7 +322,11 @@ async function verifyCurrentRecordState(
     };
   } catch (error) {
     if (exclusionProofUnavailable(error) === null) throw error;
-    const snapshot = await verifyAbsentBySnapshot(did, collection, rkey, { timer: deadline });
+    const snapshot = await verifyAbsentBySnapshot(did, collection, rkey, {
+      timer: deadline,
+      assertActive: () => deadline.assertActive(),
+    });
+    deadline.assertActive();
     return { state: snapshot.state, rev: snapshot.rev, method: 'snapshot' };
   }
 }
@@ -410,7 +501,8 @@ async function appOperation(
         Math.min(30_000, deadline - performance.now(), phaseDeadline.remainingMs()),
       );
       break;
-    } catch {
+    } catch (error) {
+      if (error instanceof UnsafeRecoveryError) throw error;
       // Retrying a scrobble is safe only with the same idempotency key; this
       // recovers the accepted operation when its first acknowledgement was lost.
       if (idempotencyKey === undefined || performance.now() >= deadline || phaseDeadline.remainingMs() <= 0)
@@ -418,6 +510,7 @@ async function appOperation(
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
   }
+  phaseDeadline.assertActive();
   const operation = object(field(ack.json, 'operation'));
   if (ack.status !== 202 || typeof operation?.id !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(operation.id)) {
     throw new Error(`${method} ${new URL(route, 'https://local.invalid').pathname} was not accepted as an operation`);
@@ -436,11 +529,15 @@ async function appOperation(
       undefined,
       Math.min(30_000, remaining, phaseDeadline.remainingMs()),
     );
+    phaseDeadline.assertActive();
     const value = object(status.json);
     if (status.status !== 200 || value?.id !== operation.id || typeof value.state !== 'string') {
       throw new Error('app write operation status was malformed');
     }
-    if (value.state === 'succeeded') return value;
+    if (value.state === 'succeeded') {
+      phaseDeadline.assertActive();
+      return value;
+    }
     if (value.state === 'failed' || value.state === 'blocked' || value.state === 'cancelled') {
       throw new Error(`app write operation ended ${value.state}`);
     }
@@ -475,7 +572,11 @@ async function provePresent(
   const parsed = parseRecordUri(record.uri);
   if (!parsed || parsed.did !== did || parsed.collection !== expectedCollection)
     throw new Error('app write returned a record outside its intended repo collection');
-  const proof = await verifyRecordAt(did, parsed.collection, parsed.rkey, { timer: deadline });
+  const proof = await verifyRecordAt(did, parsed.collection, parsed.rkey, {
+    timer: deadline,
+    assertActive: () => deadline.assertActive(),
+  });
+  deadline.assertActive();
   const value = object(proof.record);
   if (proof.state !== 'present' || proof.cid !== record.cid || value === null)
     throw new Error('app write record lacks an independently verified inclusion proof');
@@ -491,7 +592,12 @@ async function proveAbsent(
   after: string,
   deadline: Deadline,
 ): Promise<boolean> {
-  const proof = await verifyAbsent(did, collection, rkey, { after, timer: deadline });
+  const proof = await verifyAbsent(did, collection, rkey, {
+    after,
+    timer: deadline,
+    assertActive: () => deadline.assertActive(),
+  });
+  deadline.assertActive();
   return proof.method === 'exclusionProof' || proof.method === 'snapshot';
 }
 
@@ -782,8 +888,15 @@ async function appWrites(
 
         if (writes.length !== 7 || settingsProof.collection !== collections.settings)
           throw new Error('app write coverage construction failed');
-      } catch {
+      } catch (error) {
         runFailed = true;
+        if (error instanceof UnsafeRecoveryError) {
+          cleanupFailed = true;
+          cleanupNotes.push(
+            `${session.did}: browser request cleanup failed; pending writes remain unresolved and safe recovery was not attempted`,
+          );
+          throw error;
+        }
       }
       if (runFailed) throw new Error('app write verification failed');
       return writes;
