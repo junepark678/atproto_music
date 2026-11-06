@@ -1,0 +1,492 @@
+{
+  "description": "Record set returned by the frozen Rust verify_snapshot for each valid full-repo CAR, in MST key order: only the configured music collections (<prefix>.scrobble, <prefix>.follow); every other record is skipped, both inside the walker range [<prefix>., <prefix>/) (skippedInRange: <prefix>.settings/self, <prefix>.scrobble-x, <prefix>.scrobbles, <prefix>.followx and other in-range siblings) and outside it (outsideRange: look-alike collections just below and above the prefix, and keys exactly at the exclusive upper bound <prefix>/). rangeEntries lists every signed MST leaf with lower <= key < upper in key order (music = also in entries); it is derived by the exporter from the signed MST, which it asserts complete, not returned by verify_snapshot. verdict put = proven and schema-valid; exclude = proven but rejected by schema validation (still part of the enumerated set; Rust's Exclude mutation carries no CID, so cid is the signed MST leaf, asserted equal to it for every entry).",
+  "namespacePrefix": "com.example.atmusic",
+  "receiptTime": "2026-01-15T12:00:00Z",
+  "snapshots": [
+    {
+      "car": "signed_cars/secp256k1_full_repo.car",
+      "commitCid": "bafyreigigasu5a2vqmdqq4v7rwvy457bx37sjmurgqarvcd5bwj2w5lpri",
+      "curve": "secp256k1",
+      "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "entries": [
+        {
+          "cid": "bafyreigw3nmdy57hn2vt74hrpb2ypmlhat2ygcqp73pzo5x6todzrdfuqu",
+          "error": null,
+          "key": "com.example.atmusic.follow/f9a71cc1369cb0ae7a6fa16d2b9ecdc8d3ba62a9c519fe9af11a322c90e9ef6f2",
+          "recordType": "follow",
+          "verdict": "put"
+        },
+        {
+          "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
+          "error": null,
+          "key": "com.example.atmusic.scrobble/r01",
+          "recordType": "scrobble",
+          "verdict": "put"
+        },
+        {
+          "cid": "bafyreic76xlxzcd7e7ttpeosypcanxkemjta3lk4kwcswj4gap3mvbhyye",
+          "error": null,
+          "key": "com.example.atmusic.scrobble/r02",
+          "recordType": "scrobble",
+          "verdict": "put"
+        },
+        {
+          "cid": "bafyreifol3yrb7zmq7bdpqfdtmwrptgj6255ibeqqwfm4u6nnkyneyn7qq",
+          "error": null,
+          "key": "com.example.atmusic.scrobble/r03",
+          "recordType": "scrobble",
+          "verdict": "put"
+        },
+        {
+          "cid": "bafyreials5vhdtp27ucromo5wuycf2hu2ehiglyc6ygqx7hbalafaitt4y",
+          "error": null,
+          "key": "com.example.atmusic.scrobble/r04",
+          "recordType": "scrobble",
+          "verdict": "put"
+        },
+        {
+          "cid": "bafyreiaa4ka5defk3ra2p6zyrgajcjcjtaljgv4ay4vbi23bfdvckhrvxi",
+          "error": null,
+          "key": "com.example.atmusic.scrobble/r05",
+          "recordType": "scrobble",
+          "verdict": "put"
+        },
+        {
+          "cid": "bafyreibzfqnw7lebotnodcnzjsxsgcvii3lbhlqox3glzufkr3ldv6w764",
+          "error": null,
+          "key": "com.example.atmusic.scrobble/r06",
+          "recordType": "scrobble",
+          "verdict": "put"
+        },
+        {
+          "cid": "bafyreibrfkgrvrky65s5zsqzmhyga6sgzood7sbp5o6pwrhwdjdgina3e4",
+          "error": null,
+          "key": "com.example.atmusic.scrobble/r07",
+          "recordType": "scrobble",
+          "verdict": "put"
+        },
+        {
+          "cid": "bafyreib7w7bquoodm3un6sy3irvzk4jv4amp3a5ecwt6m5x4ddru7awfea",
+          "error": {
+            "code": "invalid_field",
+            "field": "artist",
+            "message": "expected 1–256 Unicode scalars and at most 1024 UTF-8 bytes, with nonempty trimmed text"
+          },
+          "key": "com.example.atmusic.scrobble/r99",
+          "recordType": null,
+          "verdict": "exclude"
+        }
+      ],
+      "outsideRange": [
+        "app.bsky.feed.like/l00",
+        "app.bsky.feed.like/l01",
+        "app.bsky.feed.like/l02",
+        "app.bsky.feed.like/l03",
+        "app.bsky.feed.like/l04",
+        "app.bsky.feed.like/l05",
+        "app.bsky.feed.like/l06",
+        "app.bsky.feed.like/l07",
+        "app.bsky.feed.post/p00",
+        "app.bsky.feed.post/p01",
+        "app.bsky.feed.post/p02",
+        "app.bsky.feed.post/p03",
+        "app.bsky.feed.post/p04",
+        "app.bsky.feed.post/p05",
+        "app.bsky.feed.post/p06",
+        "app.bsky.feed.post/p07",
+        "app.bsky.feed.post/p08",
+        "app.bsky.feed.post/p09",
+        "app.bsky.feed.post/p10",
+        "app.bsky.feed.post/p11",
+        "app.bsky.feed.post/p12",
+        "app.bsky.feed.post/p13",
+        "app.bsky.feed.post/p14",
+        "com.example.atmusia.post/a00",
+        "com.example.atmusia.post/a01",
+        "com.example.atmusia.post/a02",
+        "com.example.atmusic-x.post/h00",
+        "com.example.atmusic-x.post/h01",
+        "com.example.atmusic-x.post/h02",
+        "com.example.atmusic/x00",
+        "com.example.atmusic/x01",
+        "com.example.atmusicz.post/z00",
+        "com.example.atmusicz.post/z01",
+        "com.example.atmusicz.post/z02",
+        "zz.example.other/o00",
+        "zz.example.other/o01",
+        "zz.example.other/o02"
+      ],
+      "rangeEntries": [
+        {
+          "cid": "bafyreiaeh2czk7okntvjlmgrgp63d552lbr3w3glqjsmxxwpfp4ia2gug4",
+          "key": "com.example.atmusic.aaa/a00",
+          "music": false
+        },
+        {
+          "cid": "bafyreibiqdbgwexna4cdfafhhbyaanz32n75jj3ias4zsccpukurbfvjaa",
+          "key": "com.example.atmusic.aaa/a01",
+          "music": false
+        },
+        {
+          "cid": "bafyreigw3nmdy57hn2vt74hrpb2ypmlhat2ygcqp73pzo5x6todzrdfuqu",
+          "key": "com.example.atmusic.follow/f9a71cc1369cb0ae7a6fa16d2b9ecdc8d3ba62a9c519fe9af11a322c90e9ef6f2",
+          "music": true
+        },
+        {
+          "cid": "bafyreibsiu3l5xtmghlavurhnglkfsoo2pm3uwv4g3e6res6a4cnypxyri",
+          "key": "com.example.atmusic.followx/a00",
+          "music": false
+        },
+        {
+          "cid": "bafyreia4bsegvi5w5f6lyrwafdegohewchi6zws7dmkg7ultwcztvrkcca",
+          "key": "com.example.atmusic.followx/a01",
+          "music": false
+        },
+        {
+          "cid": "bafyreif6busdqg6d6tt2kz5xsjkh63mgqelafegwjw4bajodl7xqeqf4ie",
+          "key": "com.example.atmusic.other/a00",
+          "music": false
+        },
+        {
+          "cid": "bafyreia4oq3tdkocudxif75z5arz5wmmeuelscoqvjlwkbse36yqqulxsq",
+          "key": "com.example.atmusic.other/a01",
+          "music": false
+        },
+        {
+          "cid": "bafyreihvz3kvfyghgvw7cxspyt5cio6os5l5b6naehp4ragrayehepx7wu",
+          "key": "com.example.atmusic.scrobble-x/a00",
+          "music": false
+        },
+        {
+          "cid": "bafyreiewti27q4e365nzqb4rvs66guglzku5fplb2gwnr5bdhvi4rg2tny",
+          "key": "com.example.atmusic.scrobble-x/a01",
+          "music": false
+        },
+        {
+          "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
+          "key": "com.example.atmusic.scrobble/r01",
+          "music": true
+        },
+        {
+          "cid": "bafyreic76xlxzcd7e7ttpeosypcanxkemjta3lk4kwcswj4gap3mvbhyye",
+          "key": "com.example.atmusic.scrobble/r02",
+          "music": true
+        },
+        {
+          "cid": "bafyreifol3yrb7zmq7bdpqfdtmwrptgj6255ibeqqwfm4u6nnkyneyn7qq",
+          "key": "com.example.atmusic.scrobble/r03",
+          "music": true
+        },
+        {
+          "cid": "bafyreials5vhdtp27ucromo5wuycf2hu2ehiglyc6ygqx7hbalafaitt4y",
+          "key": "com.example.atmusic.scrobble/r04",
+          "music": true
+        },
+        {
+          "cid": "bafyreiaa4ka5defk3ra2p6zyrgajcjcjtaljgv4ay4vbi23bfdvckhrvxi",
+          "key": "com.example.atmusic.scrobble/r05",
+          "music": true
+        },
+        {
+          "cid": "bafyreibzfqnw7lebotnodcnzjsxsgcvii3lbhlqox3glzufkr3ldv6w764",
+          "key": "com.example.atmusic.scrobble/r06",
+          "music": true
+        },
+        {
+          "cid": "bafyreibrfkgrvrky65s5zsqzmhyga6sgzood7sbp5o6pwrhwdjdgina3e4",
+          "key": "com.example.atmusic.scrobble/r07",
+          "music": true
+        },
+        {
+          "cid": "bafyreib7w7bquoodm3un6sy3irvzk4jv4amp3a5ecwt6m5x4ddru7awfea",
+          "key": "com.example.atmusic.scrobble/r99",
+          "music": true
+        },
+        {
+          "cid": "bafyreifoparxlqs5mdaa4kkld37j47bszhgvaczba4m52wuvv5zdpy4eiq",
+          "key": "com.example.atmusic.scrobbles/a00",
+          "music": false
+        },
+        {
+          "cid": "bafyreihica3xaa7unpsxidad2bt3eesivikb5t3sqojbabf7cabnfg62nu",
+          "key": "com.example.atmusic.scrobbles/a01",
+          "music": false
+        },
+        {
+          "cid": "bafyreihgm3w42yxxk5iww2kbhzh5okmpcp2gabc4f5rtvappvcdcrpoibe",
+          "key": "com.example.atmusic.settings/self",
+          "music": false
+        },
+        {
+          "cid": "bafyreih2pdygrsynyygumcfniu6bo5g6dnhtqynzqbzdlvvrx6njoe4pme",
+          "key": "com.example.atmusic.zzz/z00",
+          "music": false
+        },
+        {
+          "cid": "bafyreif6wzry5nh3o5keninzl26lqycpm72bw4b47zugbx45xj7dgxssuy",
+          "key": "com.example.atmusic.zzz/z01",
+          "music": false
+        }
+      ],
+      "rev": "3m4zm2ufr2222",
+      "skippedInRange": [
+        "com.example.atmusic.aaa/a00",
+        "com.example.atmusic.aaa/a01",
+        "com.example.atmusic.followx/a00",
+        "com.example.atmusic.followx/a01",
+        "com.example.atmusic.other/a00",
+        "com.example.atmusic.other/a01",
+        "com.example.atmusic.scrobble-x/a00",
+        "com.example.atmusic.scrobble-x/a01",
+        "com.example.atmusic.scrobbles/a00",
+        "com.example.atmusic.scrobbles/a01",
+        "com.example.atmusic.settings/self",
+        "com.example.atmusic.zzz/z00",
+        "com.example.atmusic.zzz/z01"
+      ]
+    },
+    {
+      "car": "signed_cars/p256_full_repo.car",
+      "commitCid": "bafyreia2iuqtnjc3qabygivqbge2map2dmtqqwdxytbzr6gw2bydb7ujle",
+      "curve": "p256",
+      "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "entries": [
+        {
+          "cid": "bafyreigw3nmdy57hn2vt74hrpb2ypmlhat2ygcqp73pzo5x6todzrdfuqu",
+          "error": null,
+          "key": "com.example.atmusic.follow/f9a71cc1369cb0ae7a6fa16d2b9ecdc8d3ba62a9c519fe9af11a322c90e9ef6f2",
+          "recordType": "follow",
+          "verdict": "put"
+        },
+        {
+          "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
+          "error": null,
+          "key": "com.example.atmusic.scrobble/r01",
+          "recordType": "scrobble",
+          "verdict": "put"
+        },
+        {
+          "cid": "bafyreic76xlxzcd7e7ttpeosypcanxkemjta3lk4kwcswj4gap3mvbhyye",
+          "error": null,
+          "key": "com.example.atmusic.scrobble/r02",
+          "recordType": "scrobble",
+          "verdict": "put"
+        },
+        {
+          "cid": "bafyreifol3yrb7zmq7bdpqfdtmwrptgj6255ibeqqwfm4u6nnkyneyn7qq",
+          "error": null,
+          "key": "com.example.atmusic.scrobble/r03",
+          "recordType": "scrobble",
+          "verdict": "put"
+        },
+        {
+          "cid": "bafyreials5vhdtp27ucromo5wuycf2hu2ehiglyc6ygqx7hbalafaitt4y",
+          "error": null,
+          "key": "com.example.atmusic.scrobble/r04",
+          "recordType": "scrobble",
+          "verdict": "put"
+        },
+        {
+          "cid": "bafyreiaa4ka5defk3ra2p6zyrgajcjcjtaljgv4ay4vbi23bfdvckhrvxi",
+          "error": null,
+          "key": "com.example.atmusic.scrobble/r05",
+          "recordType": "scrobble",
+          "verdict": "put"
+        },
+        {
+          "cid": "bafyreibzfqnw7lebotnodcnzjsxsgcvii3lbhlqox3glzufkr3ldv6w764",
+          "error": null,
+          "key": "com.example.atmusic.scrobble/r06",
+          "recordType": "scrobble",
+          "verdict": "put"
+        },
+        {
+          "cid": "bafyreibrfkgrvrky65s5zsqzmhyga6sgzood7sbp5o6pwrhwdjdgina3e4",
+          "error": null,
+          "key": "com.example.atmusic.scrobble/r07",
+          "recordType": "scrobble",
+          "verdict": "put"
+        },
+        {
+          "cid": "bafyreib7w7bquoodm3un6sy3irvzk4jv4amp3a5ecwt6m5x4ddru7awfea",
+          "error": {
+            "code": "invalid_field",
+            "field": "artist",
+            "message": "expected 1–256 Unicode scalars and at most 1024 UTF-8 bytes, with nonempty trimmed text"
+          },
+          "key": "com.example.atmusic.scrobble/r99",
+          "recordType": null,
+          "verdict": "exclude"
+        }
+      ],
+      "outsideRange": [
+        "app.bsky.feed.like/l00",
+        "app.bsky.feed.like/l01",
+        "app.bsky.feed.like/l02",
+        "app.bsky.feed.like/l03",
+        "app.bsky.feed.like/l04",
+        "app.bsky.feed.like/l05",
+        "app.bsky.feed.like/l06",
+        "app.bsky.feed.like/l07",
+        "app.bsky.feed.post/p00",
+        "app.bsky.feed.post/p01",
+        "app.bsky.feed.post/p02",
+        "app.bsky.feed.post/p03",
+        "app.bsky.feed.post/p04",
+        "app.bsky.feed.post/p05",
+        "app.bsky.feed.post/p06",
+        "app.bsky.feed.post/p07",
+        "app.bsky.feed.post/p08",
+        "app.bsky.feed.post/p09",
+        "app.bsky.feed.post/p10",
+        "app.bsky.feed.post/p11",
+        "app.bsky.feed.post/p12",
+        "app.bsky.feed.post/p13",
+        "app.bsky.feed.post/p14",
+        "com.example.atmusia.post/a00",
+        "com.example.atmusia.post/a01",
+        "com.example.atmusia.post/a02",
+        "com.example.atmusic-x.post/h00",
+        "com.example.atmusic-x.post/h01",
+        "com.example.atmusic-x.post/h02",
+        "com.example.atmusic/x00",
+        "com.example.atmusic/x01",
+        "com.example.atmusicz.post/z00",
+        "com.example.atmusicz.post/z01",
+        "com.example.atmusicz.post/z02",
+        "zz.example.other/o00",
+        "zz.example.other/o01",
+        "zz.example.other/o02"
+      ],
+      "rangeEntries": [
+        {
+          "cid": "bafyreiaeh2czk7okntvjlmgrgp63d552lbr3w3glqjsmxxwpfp4ia2gug4",
+          "key": "com.example.atmusic.aaa/a00",
+          "music": false
+        },
+        {
+          "cid": "bafyreibiqdbgwexna4cdfafhhbyaanz32n75jj3ias4zsccpukurbfvjaa",
+          "key": "com.example.atmusic.aaa/a01",
+          "music": false
+        },
+        {
+          "cid": "bafyreigw3nmdy57hn2vt74hrpb2ypmlhat2ygcqp73pzo5x6todzrdfuqu",
+          "key": "com.example.atmusic.follow/f9a71cc1369cb0ae7a6fa16d2b9ecdc8d3ba62a9c519fe9af11a322c90e9ef6f2",
+          "music": true
+        },
+        {
+          "cid": "bafyreibsiu3l5xtmghlavurhnglkfsoo2pm3uwv4g3e6res6a4cnypxyri",
+          "key": "com.example.atmusic.followx/a00",
+          "music": false
+        },
+        {
+          "cid": "bafyreia4bsegvi5w5f6lyrwafdegohewchi6zws7dmkg7ultwcztvrkcca",
+          "key": "com.example.atmusic.followx/a01",
+          "music": false
+        },
+        {
+          "cid": "bafyreif6busdqg6d6tt2kz5xsjkh63mgqelafegwjw4bajodl7xqeqf4ie",
+          "key": "com.example.atmusic.other/a00",
+          "music": false
+        },
+        {
+          "cid": "bafyreia4oq3tdkocudxif75z5arz5wmmeuelscoqvjlwkbse36yqqulxsq",
+          "key": "com.example.atmusic.other/a01",
+          "music": false
+        },
+        {
+          "cid": "bafyreihvz3kvfyghgvw7cxspyt5cio6os5l5b6naehp4ragrayehepx7wu",
+          "key": "com.example.atmusic.scrobble-x/a00",
+          "music": false
+        },
+        {
+          "cid": "bafyreiewti27q4e365nzqb4rvs66guglzku5fplb2gwnr5bdhvi4rg2tny",
+          "key": "com.example.atmusic.scrobble-x/a01",
+          "music": false
+        },
+        {
+          "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
+          "key": "com.example.atmusic.scrobble/r01",
+          "music": true
+        },
+        {
+          "cid": "bafyreic76xlxzcd7e7ttpeosypcanxkemjta3lk4kwcswj4gap3mvbhyye",
+          "key": "com.example.atmusic.scrobble/r02",
+          "music": true
+        },
+        {
+          "cid": "bafyreifol3yrb7zmq7bdpqfdtmwrptgj6255ibeqqwfm4u6nnkyneyn7qq",
+          "key": "com.example.atmusic.scrobble/r03",
+          "music": true
+        },
+        {
+          "cid": "bafyreials5vhdtp27ucromo5wuycf2hu2ehiglyc6ygqx7hbalafaitt4y",
+          "key": "com.example.atmusic.scrobble/r04",
+          "music": true
+        },
+        {
+          "cid": "bafyreiaa4ka5defk3ra2p6zyrgajcjcjtaljgv4ay4vbi23bfdvckhrvxi",
+          "key": "com.example.atmusic.scrobble/r05",
+          "music": true
+        },
+        {
+          "cid": "bafyreibzfqnw7lebotnodcnzjsxsgcvii3lbhlqox3glzufkr3ldv6w764",
+          "key": "com.example.atmusic.scrobble/r06",
+          "music": true
+        },
+        {
+          "cid": "bafyreibrfkgrvrky65s5zsqzmhyga6sgzood7sbp5o6pwrhwdjdgina3e4",
+          "key": "com.example.atmusic.scrobble/r07",
+          "music": true
+        },
+        {
+          "cid": "bafyreib7w7bquoodm3un6sy3irvzk4jv4amp3a5ecwt6m5x4ddru7awfea",
+          "key": "com.example.atmusic.scrobble/r99",
+          "music": true
+        },
+        {
+          "cid": "bafyreifoparxlqs5mdaa4kkld37j47bszhgvaczba4m52wuvv5zdpy4eiq",
+          "key": "com.example.atmusic.scrobbles/a00",
+          "music": false
+        },
+        {
+          "cid": "bafyreihica3xaa7unpsxidad2bt3eesivikb5t3sqojbabf7cabnfg62nu",
+          "key": "com.example.atmusic.scrobbles/a01",
+          "music": false
+        },
+        {
+          "cid": "bafyreihgm3w42yxxk5iww2kbhzh5okmpcp2gabc4f5rtvappvcdcrpoibe",
+          "key": "com.example.atmusic.settings/self",
+          "music": false
+        },
+        {
+          "cid": "bafyreih2pdygrsynyygumcfniu6bo5g6dnhtqynzqbzdlvvrx6njoe4pme",
+          "key": "com.example.atmusic.zzz/z00",
+          "music": false
+        },
+        {
+          "cid": "bafyreif6wzry5nh3o5keninzl26lqycpm72bw4b47zugbx45xj7dgxssuy",
+          "key": "com.example.atmusic.zzz/z01",
+          "music": false
+        }
+      ],
+      "rev": "3m4zm2ufr2222",
+      "skippedInRange": [
+        "com.example.atmusic.aaa/a00",
+        "com.example.atmusic.aaa/a01",
+        "com.example.atmusic.followx/a00",
+        "com.example.atmusic.followx/a01",
+        "com.example.atmusic.other/a00",
+        "com.example.atmusic.other/a01",
+        "com.example.atmusic.scrobble-x/a00",
+        "com.example.atmusic.scrobble-x/a01",
+        "com.example.atmusic.scrobbles/a00",
+        "com.example.atmusic.scrobbles/a01",
+        "com.example.atmusic.settings/self",
+        "com.example.atmusic.zzz/z00",
+        "com.example.atmusic.zzz/z01"
+      ]
+    }
+  ],
+  "source": "crates/atproto/examples/export_signed_cars.rs"
+}

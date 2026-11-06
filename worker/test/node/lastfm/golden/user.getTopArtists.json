@@ -1,0 +1,69 @@
+{
+  "topartists": {
+    "artist": [
+      {
+        "name": "Test Artist",
+        "playcount": "12",
+        "mbid": "",
+        "url": "https://www.last.fm/music/Test+Artist",
+        "streamable": "0",
+        "image": [
+          {
+            "size": "small",
+            "#text": ""
+          },
+          {
+            "size": "medium",
+            "#text": ""
+          },
+          {
+            "size": "large",
+            "#text": ""
+          },
+          {
+            "size": "extralarge",
+            "#text": ""
+          }
+        ],
+        "@attr": {
+          "rank": "1"
+        }
+      },
+      {
+        "name": "Other Artist",
+        "playcount": "5",
+        "mbid": "",
+        "url": "https://www.last.fm/music/Other+Artist",
+        "streamable": "0",
+        "image": [
+          {
+            "size": "small",
+            "#text": ""
+          },
+          {
+            "size": "medium",
+            "#text": ""
+          },
+          {
+            "size": "large",
+            "#text": ""
+          },
+          {
+            "size": "extralarge",
+            "#text": ""
+          }
+        ],
+        "@attr": {
+          "rank": "2"
+        }
+      }
+    ],
+    "@attr": {
+      "user": "alice",
+      "page": "1",
+      "perPage": "50",
+      "totalPages": "1",
+      "total": "2"
+    }
+  }
+}

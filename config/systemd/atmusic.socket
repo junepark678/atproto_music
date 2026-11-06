@@ -1,0 +1,16 @@
+# Optional socket activation for atmusic.service (ADR 0005 §14.1, §3.6).
+#
+# Keeps 127.2.0.1:8888 open across restarts, so a tunnel or reverse proxy sees
+# queued connections instead of 502s. systemd hands the listening socket to
+# atmusic.service as fd 3 (LISTEN_FDS=1); the server checks that its local
+# address is loopback before serving on it. An inbound connection starts the
+# service, so every tool that must keep the service stopped (restore,
+# ADR §14.5) stops this unit first:
+#   systemctl --user stop atmusic.socket atmusic.service
+[Unit]
+Description=atmusic listening socket (127.2.0.1:8888)
+[Socket]
+ListenStream=127.2.0.1:8888
+Accept=no
+[Install]
+WantedBy=sockets.target

@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "invalid_idempotency_key",
+    "message": "Idempotency-Key must be 1-128 characters from [A-Za-z0-9._~-].",
+    "requestId": "a858325e-7dd0-4b1b-baaa-3b65af37f963"
+  }
+}

@@ -1,0 +1,11 @@
+[
+  {"field":"artist","value":"","reason":"empty display value"},
+  {"field":"track","value":" \t\n ","reason":"whitespace-only display value"},
+  {"field":"listenedAt","value":"1969-12-31T23:59:59Z","reason":"before epoch"},
+  {"field":"listenedAt","value":"2026-01-15T12:05:01Z","reason":"more than 300 seconds ahead of receipt time"},
+  {"field":"createdAt","value":"2026-01-15T12:05:01Z","reason":"more than 300 seconds ahead of receipt time"},
+  {"field":"durationSeconds","value":0,"reason":"below integer bound"},
+  {"field":"durationSeconds","value":86401,"reason":"above integer bound"},
+  {"field":"durationSeconds","value":1.5,"reason":"noninteger"},
+  {"field":"recordingMbid","value":"not-a-uuid","reason":"invalid UUID"}
+]

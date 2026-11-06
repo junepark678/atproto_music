@@ -1,0 +1,12 @@
+{
+  "toptracks": {
+    "track": [],
+    "@attr": {
+      "user": "alice",
+      "page": "1",
+      "perPage": "50",
+      "totalPages": "0",
+      "total": "0"
+    }
+  }
+}

@@ -1,0 +1,1056 @@
+{
+  "description": "Rust-signed golden CARs. expected.code is the TypeScript VerifyErrorCode (ADR 0004 §4.4) for verifyRecordProof({did, collection, rkey, signingKey}) over the file; rust.error is the frozen Rust VerificationError observed by rust.verifier (verify_snapshot_record with the target path/CID, or verify_snapshot for full-repo CARs and their corruptions). Every entry was re-verified from disk by the exporter.",
+  "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+  "entries": [
+    {
+      "base": null,
+      "bytes": 1283,
+      "carRoot": "bafyreigigasu5a2vqmdqq4v7rwvy457bx37sjmurgqarvcd5bwj2w5lpri",
+      "corruption": null,
+      "curve": "secp256k1",
+      "description": "sync.getRecord-style inclusion proof for r01: signed commit, MST path nodes root to leaf, record block.",
+      "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected": {
+        "code": null,
+        "state": "present",
+        "verdict": "valid"
+      },
+      "file": "secp256k1_getrecord_inclusion.car",
+      "kind": "inclusion_proof",
+      "name": "secp256k1_getrecord_inclusion",
+      "rev": "3m4zm2ufr2222",
+      "rust": {
+        "error": null,
+        "verdict": "valid",
+        "verifier": "verify_snapshot_record"
+      },
+      "sha256": "fc8fa0d46eb3e65193d465b3004e78c7b3e6d375dad005969f00320dc99bc1ee",
+      "signingKey": "did:key:zQ3shXgWjVsCJsv9mBm6kVqFSjAnErMg3zG9CcyvmUCCaFRCr",
+      "target": {
+        "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
+        "collection": "com.example.atmusic.scrobble",
+        "rkey": "r01"
+      }
+    },
+    {
+      "base": null,
+      "bytes": 1200,
+      "carRoot": "bafyreigigasu5a2vqmdqq4v7rwvy457bx37sjmurgqarvcd5bwj2w5lpri",
+      "corruption": null,
+      "curve": "secp256k1",
+      "description": "sync.getRecord-style exclusion proof for r08 (absent): signed commit and the MST path nodes covering the key.",
+      "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected": {
+        "code": null,
+        "state": "absent",
+        "verdict": "valid"
+      },
+      "file": "secp256k1_getrecord_exclusion.car",
+      "kind": "exclusion_proof",
+      "name": "secp256k1_getrecord_exclusion",
+      "rev": "3m4zm2ufr2222",
+      "rust": {
+        "error": null,
+        "verdict": "valid",
+        "verifier": "verify_snapshot_record"
+      },
+      "sha256": "eac5d0c4737ae98625f28a59299a3d39b1e24188c7bbafcaa01e41943da12a60",
+      "signingKey": "did:key:zQ3shXgWjVsCJsv9mBm6kVqFSjAnErMg3zG9CcyvmUCCaFRCr",
+      "target": {
+        "cid": null,
+        "collection": "com.example.atmusic.scrobble",
+        "rkey": "r08"
+      }
+    },
+    {
+      "base": null,
+      "bytes": 14008,
+      "carRoot": "bafyreigigasu5a2vqmdqq4v7rwvy457bx37sjmurgqarvcd5bwj2w5lpri",
+      "corruption": null,
+      "curve": "secp256k1",
+      "description": "Complete signed repository: 7 fixture scrobbles, 1 follow, 1 schema-invalid scrobble (r99, excluded) and 50 non-music records (35 outside [<p>., <p>/), 13 inside it in non-music collections including <p>.settings/self, 2 at the exclusive upper bound <p>/).",
+      "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected": {
+        "code": null,
+        "state": null,
+        "verdict": "valid"
+      },
+      "file": "secp256k1_full_repo.car",
+      "kind": "full_repo",
+      "name": "secp256k1_full_repo",
+      "rev": "3m4zm2ufr2222",
+      "rust": {
+        "error": null,
+        "verdict": "valid",
+        "verifier": "verify_snapshot"
+      },
+      "sha256": "3eed2f09b060d5edb3884facc92b849327907a54681ee53be6f641962dacfbf6",
+      "signingKey": "did:key:zQ3shXgWjVsCJsv9mBm6kVqFSjAnErMg3zG9CcyvmUCCaFRCr",
+      "target": {
+        "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
+        "collection": "com.example.atmusic.scrobble",
+        "rkey": "r01"
+      }
+    },
+    {
+      "base": "secp256k1_full_repo",
+      "bytes": 14008,
+      "carRoot": "bafyreidg2pk5ijulaoyrjkgki3wrl7cadbxs4k6w7m7kwa5jzjj7dxu7ru",
+      "corruption": "signature_byte",
+      "curve": "secp256k1",
+      "description": "Bit 0 of the first signature byte flipped; the commit block is re-hashed and the CAR root updated, so only the signature is wrong.",
+      "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected": {
+        "code": "bad_signature",
+        "state": null,
+        "verdict": "invalid"
+      },
+      "file": "secp256k1_corrupt_signature_byte.car",
+      "kind": "corruption",
+      "name": "secp256k1_corrupt_signature_byte",
+      "rev": "3m4zm2ufr2222",
+      "rust": {
+        "error": "InvalidSignature",
+        "verdict": "invalid",
+        "verifier": "verify_snapshot"
+      },
+      "sha256": "44b0ba5b1f1813faf32b544463ce80d945411fcf2092aefd64e5206087dc332d",
+      "signingKey": "did:key:zQ3shXgWjVsCJsv9mBm6kVqFSjAnErMg3zG9CcyvmUCCaFRCr",
+      "target": {
+        "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
+        "collection": "com.example.atmusic.scrobble",
+        "rkey": "r01"
+      }
+    },
+    {
+      "base": "secp256k1_full_repo",
+      "bytes": 14008,
+      "carRoot": "bafyreidvxpnblffzxl7am67vzuf6gc624bkt47bsqlsipixvozq4whh7uq",
+      "corruption": "signature_high_s",
+      "curve": "secp256k1",
+      "description": "Signature replaced by its malleable high-S twin (s -> n - s); mathematically valid ECDSA but forbidden by atproto. Commit re-hashed, root updated.",
+      "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected": {
+        "code": "bad_signature",
+        "state": null,
+        "verdict": "invalid"
+      },
+      "file": "secp256k1_corrupt_signature_high_s.car",
+      "kind": "corruption",
+      "name": "secp256k1_corrupt_signature_high_s",
+      "rev": "3m4zm2ufr2222",
+      "rust": {
+        "error": "InvalidSignature",
+        "verdict": "invalid",
+        "verifier": "verify_snapshot"
+      },
+      "sha256": "1000566af4359bedfa460dc45476cb424899ab3279d24d091803dd078e3a4e84",
+      "signingKey": "did:key:zQ3shXgWjVsCJsv9mBm6kVqFSjAnErMg3zG9CcyvmUCCaFRCr",
+      "target": {
+        "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
+        "collection": "com.example.atmusic.scrobble",
+        "rkey": "r01"
+      }
+    },
+    {
+      "base": "secp256k1_full_repo",
+      "bytes": 14008,
+      "carRoot": "bafyreigigasu5a2vqmdqq4v7rwvy457bx37sjmurgqarvcd5bwj2w5lpri",
+      "corruption": "record_block_byte",
+      "curve": "secp256k1",
+      "description": "Bit 0 of the last byte of the r01 record block flipped; its CID is unchanged.",
+      "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected": {
+        "code": "cid_mismatch",
+        "state": null,
+        "verdict": "invalid"
+      },
+      "file": "secp256k1_corrupt_record_block_byte.car",
+      "kind": "corruption",
+      "name": "secp256k1_corrupt_record_block_byte",
+      "rev": "3m4zm2ufr2222",
+      "rust": {
+        "error": "CidMismatch",
+        "verdict": "invalid",
+        "verifier": "verify_snapshot"
+      },
+      "sha256": "1f5314d1933f07aa50854ef159b55c79051a1a9b95bb9331c7af821e325a0be8",
+      "signingKey": "did:key:zQ3shXgWjVsCJsv9mBm6kVqFSjAnErMg3zG9CcyvmUCCaFRCr",
+      "target": {
+        "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
+        "collection": "com.example.atmusic.scrobble",
+        "rkey": "r01"
+      }
+    },
+    {
+      "base": "secp256k1_full_repo",
+      "bytes": 14008,
+      "carRoot": "bafyreigigasu5a2vqmdqq4v7rwvy457bx37sjmurgqarvcd5bwj2w5lpri",
+      "corruption": "mst_node_byte",
+      "curve": "secp256k1",
+      "description": "Bit 0 of the last byte of the MST root node (commit.data, on every key's path) flipped; its CID is unchanged.",
+      "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected": {
+        "code": "cid_mismatch",
+        "state": null,
+        "verdict": "invalid"
+      },
+      "file": "secp256k1_corrupt_mst_node_byte.car",
+      "kind": "corruption",
+      "name": "secp256k1_corrupt_mst_node_byte",
+      "rev": "3m4zm2ufr2222",
+      "rust": {
+        "error": "CidMismatch",
+        "verdict": "invalid",
+        "verifier": "verify_snapshot"
+      },
+      "sha256": "957ba0ee4b3d42a168f1badb4d60e2dc3f941266aa9b1a0a09e7a55321028c05",
+      "signingKey": "did:key:zQ3shXgWjVsCJsv9mBm6kVqFSjAnErMg3zG9CcyvmUCCaFRCr",
+      "target": {
+        "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
+        "collection": "com.example.atmusic.scrobble",
+        "rkey": "r01"
+      }
+    },
+    {
+      "base": "secp256k1_full_repo",
+      "bytes": 14008,
+      "carRoot": "bafyreihiteipys6bdsvjms6v5v7qy4w6hse4xnhgry4aqtmwh7vym43pgq",
+      "corruption": "mst_structure",
+      "curve": "secp256k1",
+      "description": "MST root node's first entry claims prefix length 1 with no previous key; node re-hashed and commit.data re-signed, so hashes and signature are valid and only the MST invariant fails.",
+      "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected": {
+        "code": "mst_invalid",
+        "state": null,
+        "verdict": "invalid"
+      },
+      "file": "secp256k1_corrupt_mst_structure_resigned.car",
+      "kind": "corruption",
+      "name": "secp256k1_corrupt_mst_structure_resigned",
+      "rev": "3m4zm2ufr2222",
+      "rust": {
+        "error": "InvalidMst",
+        "verdict": "invalid",
+        "verifier": "verify_snapshot"
+      },
+      "sha256": "9523452850e4d668638b83591f5073be4e5e9b17ed6e9f88827e4295c0964b69",
+      "signingKey": "did:key:zQ3shXgWjVsCJsv9mBm6kVqFSjAnErMg3zG9CcyvmUCCaFRCr",
+      "target": {
+        "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
+        "collection": "com.example.atmusic.scrobble",
+        "rkey": "r01"
+      }
+    },
+    {
+      "base": "secp256k1_full_repo",
+      "bytes": 14008,
+      "carRoot": "bafyreia3fdczymzqcwubmfltfi3ybcikgcf46qqmu3tyzhdb6pmh6cdchy",
+      "corruption": "did",
+      "curve": "secp256k1",
+      "description": "Commit did replaced by did:plc:zzzzzzzzzzzzzzzzzzzzzzzz and re-signed with the same key; the expected DID is Alice's.",
+      "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected": {
+        "code": "did_mismatch",
+        "state": null,
+        "verdict": "invalid"
+      },
+      "file": "secp256k1_corrupt_did.car",
+      "kind": "corruption",
+      "name": "secp256k1_corrupt_did",
+      "rev": "3m4zm2ufr2222",
+      "rust": {
+        "error": "CommitMismatch",
+        "verdict": "invalid",
+        "verifier": "verify_snapshot"
+      },
+      "sha256": "6f3b17f033bab499ac85aa63156d06a6d06d43cc2f18d13430b132b84f0975ae",
+      "signingKey": "did:key:zQ3shXgWjVsCJsv9mBm6kVqFSjAnErMg3zG9CcyvmUCCaFRCr",
+      "target": {
+        "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
+        "collection": "com.example.atmusic.scrobble",
+        "rkey": "r01"
+      }
+    },
+    {
+      "base": "secp256k1_full_repo",
+      "bytes": 14008,
+      "carRoot": "bafyreibqwchih2ecojifa7eslkdf43ajups6n2ibm77hzyk6ydyrctpyvy",
+      "corruption": "version",
+      "curve": "secp256k1",
+      "description": "Commit version 2 instead of 3, re-signed.",
+      "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected": {
+        "code": "bad_version",
+        "state": null,
+        "verdict": "invalid"
+      },
+      "file": "secp256k1_corrupt_version.car",
+      "kind": "corruption",
+      "name": "secp256k1_corrupt_version",
+      "rev": "3m4zm2ufr2222",
+      "rust": {
+        "error": "CommitMismatch",
+        "verdict": "invalid",
+        "verifier": "verify_snapshot"
+      },
+      "sha256": "842a7196d13d7c5c4b3cffb26749a1144eacbe85d84407be59955ad814d5f270",
+      "signingKey": "did:key:zQ3shXgWjVsCJsv9mBm6kVqFSjAnErMg3zG9CcyvmUCCaFRCr",
+      "target": {
+        "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
+        "collection": "com.example.atmusic.scrobble",
+        "rkey": "r01"
+      }
+    },
+    {
+      "base": "secp256k1_full_repo",
+      "bytes": 14008,
+      "carRoot": "bafyreiel2uuwcfibhya7qhuusutj3424woy55vv26qcsqtdr2ypl2br7ca",
+      "corruption": "rev",
+      "curve": "secp256k1",
+      "description": "Commit rev '1111111111111' (13 characters, outside the TID base32 alphabet), re-signed.",
+      "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected": {
+        "code": "bad_rev",
+        "state": null,
+        "verdict": "invalid"
+      },
+      "file": "secp256k1_corrupt_rev.car",
+      "kind": "corruption",
+      "name": "secp256k1_corrupt_rev",
+      "rev": "3m4zm2ufr2222",
+      "rust": {
+        "error": "CommitMismatch",
+        "verdict": "invalid",
+        "verifier": "verify_snapshot"
+      },
+      "sha256": "3ae6d7c5e674041495938fd9d6b2cadba70f3347b976970d297bb6ab98707b86",
+      "signingKey": "did:key:zQ3shXgWjVsCJsv9mBm6kVqFSjAnErMg3zG9CcyvmUCCaFRCr",
+      "target": {
+        "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
+        "collection": "com.example.atmusic.scrobble",
+        "rkey": "r01"
+      }
+    },
+    {
+      "base": "secp256k1_full_repo",
+      "bytes": 14008,
+      "carRoot": "bafyreihdo5eyb5bldm5tccnk4zxybnn6pczddqbw6qeqybh4xtmazukk2y",
+      "corruption": "root",
+      "curve": "secp256k1",
+      "description": "CAR header root replaced by a well-formed dag-cbor CID with no block in the CAR; all blocks unchanged.",
+      "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected": {
+        "code": "missing_block",
+        "state": null,
+        "verdict": "invalid"
+      },
+      "file": "secp256k1_corrupt_root.car",
+      "kind": "corruption",
+      "name": "secp256k1_corrupt_root",
+      "rev": "3m4zm2ufr2222",
+      "rust": {
+        "error": "MissingProof",
+        "verdict": "invalid",
+        "verifier": "verify_snapshot"
+      },
+      "sha256": "02ecc06b25a0eac5d74d65f5be0e3df6822fe01caf44d540c21b8f5f1f31adcb",
+      "signingKey": "did:key:zQ3shXgWjVsCJsv9mBm6kVqFSjAnErMg3zG9CcyvmUCCaFRCr",
+      "target": {
+        "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
+        "collection": "com.example.atmusic.scrobble",
+        "rkey": "r01"
+      }
+    },
+    {
+      "base": "secp256k1_full_repo",
+      "bytes": 7004,
+      "carRoot": null,
+      "corruption": "truncation",
+      "curve": "secp256k1",
+      "description": "Full repo CAR truncated to its first half (mid-section).",
+      "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected": {
+        "code": "car_malformed",
+        "state": null,
+        "verdict": "invalid"
+      },
+      "file": "secp256k1_corrupt_truncated.car",
+      "kind": "corruption",
+      "name": "secp256k1_corrupt_truncated",
+      "rev": "3m4zm2ufr2222",
+      "rust": {
+        "error": "InvalidCar",
+        "verdict": "invalid",
+        "verifier": "verify_snapshot"
+      },
+      "sha256": "5d97f5866f2bb17b37a6482d0bcfe7367a54a86059e81fc162372ffb4c726b8e",
+      "signingKey": "did:key:zQ3shXgWjVsCJsv9mBm6kVqFSjAnErMg3zG9CcyvmUCCaFRCr",
+      "target": {
+        "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
+        "collection": "com.example.atmusic.scrobble",
+        "rkey": "r01"
+      }
+    },
+    {
+      "base": "secp256k1_full_repo",
+      "bytes": 8388609,
+      "carRoot": null,
+      "corruption": "oversize",
+      "curve": "secp256k1",
+      "description": "Well-formed full repo CAR plus one unreferenced, correctly hashed dag-cbor padding block, totalling 8 MiB + 1 byte (one over the Rust MAX_CAR_BYTES).",
+      "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected": {
+        "code": "car_too_large",
+        "state": null,
+        "verdict": "invalid"
+      },
+      "file": "secp256k1_corrupt_oversize.car",
+      "kind": "corruption",
+      "name": "secp256k1_corrupt_oversize",
+      "rev": "3m4zm2ufr2222",
+      "rust": {
+        "error": "CarTooLarge",
+        "verdict": "invalid",
+        "verifier": "verify_snapshot"
+      },
+      "sha256": "3366784f6ddb0854dd77e71a0ec896d1a4e9a5beb6136f766a8efd352aadcbff",
+      "signingKey": "did:key:zQ3shXgWjVsCJsv9mBm6kVqFSjAnErMg3zG9CcyvmUCCaFRCr",
+      "target": {
+        "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
+        "collection": "com.example.atmusic.scrobble",
+        "rkey": "r01"
+      }
+    },
+    {
+      "base": "secp256k1_full_repo",
+      "bytes": 14018,
+      "carRoot": "bafyreigigasu5a2vqmdqq4v7rwvy457bx37sjmurgqarvcd5bwj2w5lpri",
+      "corruption": "record_cid_swap",
+      "curve": "secp256k1",
+      "description": "The r01 record block is replaced by a different, correctly hashed record block (track 'Jóga (swapped)'); the signed MST still commits to the original r01 CID, whose block is now absent. The swapped block is indistinguishable from an unreferenced extra block, so the verdict is missing_block (ADR 0004 §7.3 step 3: an incomplete path throws missing_block); record_cid_mismatch is not reachable from a CAR because only CID-verified blocks enter the store, so W2-03 covers it with its own unit case.",
+      "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected": {
+        "code": "missing_block",
+        "state": null,
+        "verdict": "invalid"
+      },
+      "file": "secp256k1_corrupt_record_cid_swap.car",
+      "kind": "corruption",
+      "name": "secp256k1_corrupt_record_cid_swap",
+      "rev": "3m4zm2ufr2222",
+      "rust": {
+        "error": "MissingProof",
+        "verdict": "invalid",
+        "verifier": "verify_snapshot"
+      },
+      "sha256": "a3dc9f770bb55d9ac0c67cd021aa57b9bcbfd667246ca454c0ec55ec63aafc60",
+      "signingKey": "did:key:zQ3shXgWjVsCJsv9mBm6kVqFSjAnErMg3zG9CcyvmUCCaFRCr",
+      "target": {
+        "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
+        "collection": "com.example.atmusic.scrobble",
+        "rkey": "r01"
+      }
+    },
+    {
+      "base": "secp256k1_getrecord_inclusion",
+      "bytes": 1097,
+      "carRoot": "bafyreigigasu5a2vqmdqq4v7rwvy457bx37sjmurgqarvcd5bwj2w5lpri",
+      "corruption": "missing_path_node",
+      "curve": "secp256k1",
+      "description": "Inclusion proof for r01 with the deepest MST path node removed.",
+      "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected": {
+        "code": "missing_block",
+        "state": null,
+        "verdict": "invalid"
+      },
+      "file": "secp256k1_inclusion_missing_mst_node.car",
+      "kind": "corruption",
+      "name": "secp256k1_inclusion_missing_mst_node",
+      "rev": "3m4zm2ufr2222",
+      "rust": {
+        "error": "MissingProof",
+        "verdict": "invalid",
+        "verifier": "verify_snapshot_record"
+      },
+      "sha256": "ae412d98c8ea3480779e9d5ddc1ed4f718954f1ba21d1e72fe47b78ae9cf3ebb",
+      "signingKey": "did:key:zQ3shXgWjVsCJsv9mBm6kVqFSjAnErMg3zG9CcyvmUCCaFRCr",
+      "target": {
+        "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
+        "collection": "com.example.atmusic.scrobble",
+        "rkey": "r01"
+      }
+    },
+    {
+      "base": "secp256k1_getrecord_exclusion",
+      "bytes": 1069,
+      "carRoot": "bafyreigigasu5a2vqmdqq4v7rwvy457bx37sjmurgqarvcd5bwj2w5lpri",
+      "corruption": "missing_path_node",
+      "curve": "secp256k1",
+      "description": "Exclusion proof for r08 with the deepest MST path node removed; must be missing_block, never absent.",
+      "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected": {
+        "code": "missing_block",
+        "state": null,
+        "verdict": "invalid"
+      },
+      "file": "secp256k1_exclusion_missing_mst_node.car",
+      "kind": "corruption",
+      "name": "secp256k1_exclusion_missing_mst_node",
+      "rev": "3m4zm2ufr2222",
+      "rust": {
+        "error": "MissingProof",
+        "verdict": "invalid",
+        "verifier": "verify_snapshot_record"
+      },
+      "sha256": "779854d4c69764c4c885473c2f1f1cf55b3ae03c05aea41b886ccce6749c702a",
+      "signingKey": "did:key:zQ3shXgWjVsCJsv9mBm6kVqFSjAnErMg3zG9CcyvmUCCaFRCr",
+      "target": {
+        "cid": null,
+        "collection": "com.example.atmusic.scrobble",
+        "rkey": "r08"
+      }
+    },
+    {
+      "base": null,
+      "bytes": 1283,
+      "carRoot": "bafyreia2iuqtnjc3qabygivqbge2map2dmtqqwdxytbzr6gw2bydb7ujle",
+      "corruption": null,
+      "curve": "p256",
+      "description": "sync.getRecord-style inclusion proof for r01: signed commit, MST path nodes root to leaf, record block.",
+      "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected": {
+        "code": null,
+        "state": "present",
+        "verdict": "valid"
+      },
+      "file": "p256_getrecord_inclusion.car",
+      "kind": "inclusion_proof",
+      "name": "p256_getrecord_inclusion",
+      "rev": "3m4zm2ufr2222",
+      "rust": {
+        "error": null,
+        "verdict": "valid",
+        "verifier": "verify_snapshot_record"
+      },
+      "sha256": "deec08c02e44dda585b586a71f847bb2c8ccee3005fac9121ced17bf3a9707f2",
+      "signingKey": "did:key:zDnaejgmAHMLkBPMBWnkBxyGxpXx8LgE4WJAYDhwZzyoRAddF",
+      "target": {
+        "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
+        "collection": "com.example.atmusic.scrobble",
+        "rkey": "r01"
+      }
+    },
+    {
+      "base": null,
+      "bytes": 1200,
+      "carRoot": "bafyreia2iuqtnjc3qabygivqbge2map2dmtqqwdxytbzr6gw2bydb7ujle",
+      "corruption": null,
+      "curve": "p256",
+      "description": "sync.getRecord-style exclusion proof for r08 (absent): signed commit and the MST path nodes covering the key.",
+      "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected": {
+        "code": null,
+        "state": "absent",
+        "verdict": "valid"
+      },
+      "file": "p256_getrecord_exclusion.car",
+      "kind": "exclusion_proof",
+      "name": "p256_getrecord_exclusion",
+      "rev": "3m4zm2ufr2222",
+      "rust": {
+        "error": null,
+        "verdict": "valid",
+        "verifier": "verify_snapshot_record"
+      },
+      "sha256": "a209640c04cd3feae717068d4277bfad313498fefc2f328c12e50f2681560430",
+      "signingKey": "did:key:zDnaejgmAHMLkBPMBWnkBxyGxpXx8LgE4WJAYDhwZzyoRAddF",
+      "target": {
+        "cid": null,
+        "collection": "com.example.atmusic.scrobble",
+        "rkey": "r08"
+      }
+    },
+    {
+      "base": null,
+      "bytes": 14008,
+      "carRoot": "bafyreia2iuqtnjc3qabygivqbge2map2dmtqqwdxytbzr6gw2bydb7ujle",
+      "corruption": null,
+      "curve": "p256",
+      "description": "Complete signed repository: 7 fixture scrobbles, 1 follow, 1 schema-invalid scrobble (r99, excluded) and 50 non-music records (35 outside [<p>., <p>/), 13 inside it in non-music collections including <p>.settings/self, 2 at the exclusive upper bound <p>/).",
+      "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected": {
+        "code": null,
+        "state": null,
+        "verdict": "valid"
+      },
+      "file": "p256_full_repo.car",
+      "kind": "full_repo",
+      "name": "p256_full_repo",
+      "rev": "3m4zm2ufr2222",
+      "rust": {
+        "error": null,
+        "verdict": "valid",
+        "verifier": "verify_snapshot"
+      },
+      "sha256": "3423169790d6374acb724a879f311a27f29ccd8820d41fec211ade2e7b1b99e4",
+      "signingKey": "did:key:zDnaejgmAHMLkBPMBWnkBxyGxpXx8LgE4WJAYDhwZzyoRAddF",
+      "target": {
+        "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
+        "collection": "com.example.atmusic.scrobble",
+        "rkey": "r01"
+      }
+    },
+    {
+      "base": "p256_full_repo",
+      "bytes": 14008,
+      "carRoot": "bafyreihzuiafb3x55ozmbfxchlv325egrf5oa5qrxcnjj7sqn4ae5l6yey",
+      "corruption": "signature_byte",
+      "curve": "p256",
+      "description": "Bit 0 of the first signature byte flipped; the commit block is re-hashed and the CAR root updated, so only the signature is wrong.",
+      "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected": {
+        "code": "bad_signature",
+        "state": null,
+        "verdict": "invalid"
+      },
+      "file": "p256_corrupt_signature_byte.car",
+      "kind": "corruption",
+      "name": "p256_corrupt_signature_byte",
+      "rev": "3m4zm2ufr2222",
+      "rust": {
+        "error": "InvalidSignature",
+        "verdict": "invalid",
+        "verifier": "verify_snapshot"
+      },
+      "sha256": "f93b52580aa2926d588f43fbb52124668fa013f68f910a416494304747f2b8a2",
+      "signingKey": "did:key:zDnaejgmAHMLkBPMBWnkBxyGxpXx8LgE4WJAYDhwZzyoRAddF",
+      "target": {
+        "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
+        "collection": "com.example.atmusic.scrobble",
+        "rkey": "r01"
+      }
+    },
+    {
+      "base": "p256_full_repo",
+      "bytes": 14008,
+      "carRoot": "bafyreifg4mxh5qcmp4sqtknbi2gh42puexicgfkbry6ss4wtnsia4xza2u",
+      "corruption": "signature_high_s",
+      "curve": "p256",
+      "description": "Signature replaced by its malleable high-S twin (s -> n - s); mathematically valid ECDSA but forbidden by atproto. Commit re-hashed, root updated.",
+      "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected": {
+        "code": "bad_signature",
+        "state": null,
+        "verdict": "invalid"
+      },
+      "file": "p256_corrupt_signature_high_s.car",
+      "kind": "corruption",
+      "name": "p256_corrupt_signature_high_s",
+      "rev": "3m4zm2ufr2222",
+      "rust": {
+        "error": "InvalidSignature",
+        "verdict": "invalid",
+        "verifier": "verify_snapshot"
+      },
+      "sha256": "9945139470ba8a2fb3c84021cb5d94ce85add16754fa93c656ca762a447b9b3a",
+      "signingKey": "did:key:zDnaejgmAHMLkBPMBWnkBxyGxpXx8LgE4WJAYDhwZzyoRAddF",
+      "target": {
+        "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
+        "collection": "com.example.atmusic.scrobble",
+        "rkey": "r01"
+      }
+    },
+    {
+      "base": "p256_full_repo",
+      "bytes": 14008,
+      "carRoot": "bafyreia2iuqtnjc3qabygivqbge2map2dmtqqwdxytbzr6gw2bydb7ujle",
+      "corruption": "record_block_byte",
+      "curve": "p256",
+      "description": "Bit 0 of the last byte of the r01 record block flipped; its CID is unchanged.",
+      "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected": {
+        "code": "cid_mismatch",
+        "state": null,
+        "verdict": "invalid"
+      },
+      "file": "p256_corrupt_record_block_byte.car",
+      "kind": "corruption",
+      "name": "p256_corrupt_record_block_byte",
+      "rev": "3m4zm2ufr2222",
+      "rust": {
+        "error": "CidMismatch",
+        "verdict": "invalid",
+        "verifier": "verify_snapshot"
+      },
+      "sha256": "354c3e1e6693732ef392039f51928206f0b44869e5f7b74c6af560827e1d487b",
+      "signingKey": "did:key:zDnaejgmAHMLkBPMBWnkBxyGxpXx8LgE4WJAYDhwZzyoRAddF",
+      "target": {
+        "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
+        "collection": "com.example.atmusic.scrobble",
+        "rkey": "r01"
+      }
+    },
+    {
+      "base": "p256_full_repo",
+      "bytes": 14008,
+      "carRoot": "bafyreia2iuqtnjc3qabygivqbge2map2dmtqqwdxytbzr6gw2bydb7ujle",
+      "corruption": "mst_node_byte",
+      "curve": "p256",
+      "description": "Bit 0 of the last byte of the MST root node (commit.data, on every key's path) flipped; its CID is unchanged.",
+      "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected": {
+        "code": "cid_mismatch",
+        "state": null,
+        "verdict": "invalid"
+      },
+      "file": "p256_corrupt_mst_node_byte.car",
+      "kind": "corruption",
+      "name": "p256_corrupt_mst_node_byte",
+      "rev": "3m4zm2ufr2222",
+      "rust": {
+        "error": "CidMismatch",
+        "verdict": "invalid",
+        "verifier": "verify_snapshot"
+      },
+      "sha256": "9b75dab3ae18692982fa05fc12a1c3e52cf86d369cc010b809653940bd42eb8c",
+      "signingKey": "did:key:zDnaejgmAHMLkBPMBWnkBxyGxpXx8LgE4WJAYDhwZzyoRAddF",
+      "target": {
+        "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
+        "collection": "com.example.atmusic.scrobble",
+        "rkey": "r01"
+      }
+    },
+    {
+      "base": "p256_full_repo",
+      "bytes": 14008,
+      "carRoot": "bafyreihsk66xzcmb6gndxksgnfkvdbfv63fzp4mdfpobc3eici47vnqyvi",
+      "corruption": "mst_structure",
+      "curve": "p256",
+      "description": "MST root node's first entry claims prefix length 1 with no previous key; node re-hashed and commit.data re-signed, so hashes and signature are valid and only the MST invariant fails.",
+      "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected": {
+        "code": "mst_invalid",
+        "state": null,
+        "verdict": "invalid"
+      },
+      "file": "p256_corrupt_mst_structure_resigned.car",
+      "kind": "corruption",
+      "name": "p256_corrupt_mst_structure_resigned",
+      "rev": "3m4zm2ufr2222",
+      "rust": {
+        "error": "InvalidMst",
+        "verdict": "invalid",
+        "verifier": "verify_snapshot"
+      },
+      "sha256": "6d7bdab2d904c835e3ea8306caa7f3e70caf934487b3b0c57d799e9cbf204609",
+      "signingKey": "did:key:zDnaejgmAHMLkBPMBWnkBxyGxpXx8LgE4WJAYDhwZzyoRAddF",
+      "target": {
+        "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
+        "collection": "com.example.atmusic.scrobble",
+        "rkey": "r01"
+      }
+    },
+    {
+      "base": "p256_full_repo",
+      "bytes": 14008,
+      "carRoot": "bafyreihgmvtlq2yk7lr7znp2nwjvhot4kaxxlpjmx76fzcfbbfs7rmwenu",
+      "corruption": "did",
+      "curve": "p256",
+      "description": "Commit did replaced by did:plc:zzzzzzzzzzzzzzzzzzzzzzzz and re-signed with the same key; the expected DID is Alice's.",
+      "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected": {
+        "code": "did_mismatch",
+        "state": null,
+        "verdict": "invalid"
+      },
+      "file": "p256_corrupt_did.car",
+      "kind": "corruption",
+      "name": "p256_corrupt_did",
+      "rev": "3m4zm2ufr2222",
+      "rust": {
+        "error": "CommitMismatch",
+        "verdict": "invalid",
+        "verifier": "verify_snapshot"
+      },
+      "sha256": "bee9215677bba8e1cd3c733658c1d904cd9890ef43117304381f9fa2822467ed",
+      "signingKey": "did:key:zDnaejgmAHMLkBPMBWnkBxyGxpXx8LgE4WJAYDhwZzyoRAddF",
+      "target": {
+        "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
+        "collection": "com.example.atmusic.scrobble",
+        "rkey": "r01"
+      }
+    },
+    {
+      "base": "p256_full_repo",
+      "bytes": 14008,
+      "carRoot": "bafyreicglhgw7nhovvpk2zbfpnpdsansl3qbotxezt4j2mlibymvpozjui",
+      "corruption": "version",
+      "curve": "p256",
+      "description": "Commit version 2 instead of 3, re-signed.",
+      "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected": {
+        "code": "bad_version",
+        "state": null,
+        "verdict": "invalid"
+      },
+      "file": "p256_corrupt_version.car",
+      "kind": "corruption",
+      "name": "p256_corrupt_version",
+      "rev": "3m4zm2ufr2222",
+      "rust": {
+        "error": "CommitMismatch",
+        "verdict": "invalid",
+        "verifier": "verify_snapshot"
+      },
+      "sha256": "e87df0fcda6fb4256b3f02c3474a7710836e6dc16e0c5f612e584b407ba517c0",
+      "signingKey": "did:key:zDnaejgmAHMLkBPMBWnkBxyGxpXx8LgE4WJAYDhwZzyoRAddF",
+      "target": {
+        "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
+        "collection": "com.example.atmusic.scrobble",
+        "rkey": "r01"
+      }
+    },
+    {
+      "base": "p256_full_repo",
+      "bytes": 14008,
+      "carRoot": "bafyreia4v52t2fxkqm67yibmdgaexxyqlyrgoyvopuylsgoem7kkvxuvbe",
+      "corruption": "rev",
+      "curve": "p256",
+      "description": "Commit rev '1111111111111' (13 characters, outside the TID base32 alphabet), re-signed.",
+      "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected": {
+        "code": "bad_rev",
+        "state": null,
+        "verdict": "invalid"
+      },
+      "file": "p256_corrupt_rev.car",
+      "kind": "corruption",
+      "name": "p256_corrupt_rev",
+      "rev": "3m4zm2ufr2222",
+      "rust": {
+        "error": "CommitMismatch",
+        "verdict": "invalid",
+        "verifier": "verify_snapshot"
+      },
+      "sha256": "230c515ee8a1efff43a4f2aea7f93e2f412a6910bece974dc9beff47e907c292",
+      "signingKey": "did:key:zDnaejgmAHMLkBPMBWnkBxyGxpXx8LgE4WJAYDhwZzyoRAddF",
+      "target": {
+        "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
+        "collection": "com.example.atmusic.scrobble",
+        "rkey": "r01"
+      }
+    },
+    {
+      "base": "p256_full_repo",
+      "bytes": 14008,
+      "carRoot": "bafyreihdo5eyb5bldm5tccnk4zxybnn6pczddqbw6qeqybh4xtmazukk2y",
+      "corruption": "root",
+      "curve": "p256",
+      "description": "CAR header root replaced by a well-formed dag-cbor CID with no block in the CAR; all blocks unchanged.",
+      "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected": {
+        "code": "missing_block",
+        "state": null,
+        "verdict": "invalid"
+      },
+      "file": "p256_corrupt_root.car",
+      "kind": "corruption",
+      "name": "p256_corrupt_root",
+      "rev": "3m4zm2ufr2222",
+      "rust": {
+        "error": "MissingProof",
+        "verdict": "invalid",
+        "verifier": "verify_snapshot"
+      },
+      "sha256": "e91e11b3b9789f5deb2385f6027398f57580b1044d5672f514c323c650869cb3",
+      "signingKey": "did:key:zDnaejgmAHMLkBPMBWnkBxyGxpXx8LgE4WJAYDhwZzyoRAddF",
+      "target": {
+        "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
+        "collection": "com.example.atmusic.scrobble",
+        "rkey": "r01"
+      }
+    },
+    {
+      "base": "p256_full_repo",
+      "bytes": 7004,
+      "carRoot": null,
+      "corruption": "truncation",
+      "curve": "p256",
+      "description": "Full repo CAR truncated to its first half (mid-section).",
+      "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected": {
+        "code": "car_malformed",
+        "state": null,
+        "verdict": "invalid"
+      },
+      "file": "p256_corrupt_truncated.car",
+      "kind": "corruption",
+      "name": "p256_corrupt_truncated",
+      "rev": "3m4zm2ufr2222",
+      "rust": {
+        "error": "InvalidCar",
+        "verdict": "invalid",
+        "verifier": "verify_snapshot"
+      },
+      "sha256": "585fe1bf142c86ec424291e322f6a533dff55656faee0856fd9f4373d6af89a9",
+      "signingKey": "did:key:zDnaejgmAHMLkBPMBWnkBxyGxpXx8LgE4WJAYDhwZzyoRAddF",
+      "target": {
+        "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
+        "collection": "com.example.atmusic.scrobble",
+        "rkey": "r01"
+      }
+    },
+    {
+      "base": "p256_full_repo",
+      "bytes": 8388609,
+      "carRoot": null,
+      "corruption": "oversize",
+      "curve": "p256",
+      "description": "Well-formed full repo CAR plus one unreferenced, correctly hashed dag-cbor padding block, totalling 8 MiB + 1 byte (one over the Rust MAX_CAR_BYTES).",
+      "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected": {
+        "code": "car_too_large",
+        "state": null,
+        "verdict": "invalid"
+      },
+      "file": "p256_corrupt_oversize.car",
+      "kind": "corruption",
+      "name": "p256_corrupt_oversize",
+      "rev": "3m4zm2ufr2222",
+      "rust": {
+        "error": "CarTooLarge",
+        "verdict": "invalid",
+        "verifier": "verify_snapshot"
+      },
+      "sha256": "c4faa6ffad5021e2e8ccd186cb5456080d34cb6a3aa6ae731823acecd497f691",
+      "signingKey": "did:key:zDnaejgmAHMLkBPMBWnkBxyGxpXx8LgE4WJAYDhwZzyoRAddF",
+      "target": {
+        "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
+        "collection": "com.example.atmusic.scrobble",
+        "rkey": "r01"
+      }
+    },
+    {
+      "base": "p256_full_repo",
+      "bytes": 14018,
+      "carRoot": "bafyreia2iuqtnjc3qabygivqbge2map2dmtqqwdxytbzr6gw2bydb7ujle",
+      "corruption": "record_cid_swap",
+      "curve": "p256",
+      "description": "The r01 record block is replaced by a different, correctly hashed record block (track 'Jóga (swapped)'); the signed MST still commits to the original r01 CID, whose block is now absent. The swapped block is indistinguishable from an unreferenced extra block, so the verdict is missing_block (ADR 0004 §7.3 step 3: an incomplete path throws missing_block); record_cid_mismatch is not reachable from a CAR because only CID-verified blocks enter the store, so W2-03 covers it with its own unit case.",
+      "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected": {
+        "code": "missing_block",
+        "state": null,
+        "verdict": "invalid"
+      },
+      "file": "p256_corrupt_record_cid_swap.car",
+      "kind": "corruption",
+      "name": "p256_corrupt_record_cid_swap",
+      "rev": "3m4zm2ufr2222",
+      "rust": {
+        "error": "MissingProof",
+        "verdict": "invalid",
+        "verifier": "verify_snapshot"
+      },
+      "sha256": "b597ebc13623a8259f046f842fa4b2bf5be5fde6be9d83a0ec5dce858f6494ad",
+      "signingKey": "did:key:zDnaejgmAHMLkBPMBWnkBxyGxpXx8LgE4WJAYDhwZzyoRAddF",
+      "target": {
+        "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
+        "collection": "com.example.atmusic.scrobble",
+        "rkey": "r01"
+      }
+    },
+    {
+      "base": "p256_getrecord_inclusion",
+      "bytes": 1097,
+      "carRoot": "bafyreia2iuqtnjc3qabygivqbge2map2dmtqqwdxytbzr6gw2bydb7ujle",
+      "corruption": "missing_path_node",
+      "curve": "p256",
+      "description": "Inclusion proof for r01 with the deepest MST path node removed.",
+      "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected": {
+        "code": "missing_block",
+        "state": null,
+        "verdict": "invalid"
+      },
+      "file": "p256_inclusion_missing_mst_node.car",
+      "kind": "corruption",
+      "name": "p256_inclusion_missing_mst_node",
+      "rev": "3m4zm2ufr2222",
+      "rust": {
+        "error": "MissingProof",
+        "verdict": "invalid",
+        "verifier": "verify_snapshot_record"
+      },
+      "sha256": "164c9d709360d8384ed016643995bfb01dee2d2746c4f8bc08eb1e64a7f8ca2c",
+      "signingKey": "did:key:zDnaejgmAHMLkBPMBWnkBxyGxpXx8LgE4WJAYDhwZzyoRAddF",
+      "target": {
+        "cid": "bafyreid5qpw2fo22qy4r6t5xcep5weebu6l7bwwwd4lnzu54glaqu6fchu",
+        "collection": "com.example.atmusic.scrobble",
+        "rkey": "r01"
+      }
+    },
+    {
+      "base": "p256_getrecord_exclusion",
+      "bytes": 1069,
+      "carRoot": "bafyreia2iuqtnjc3qabygivqbge2map2dmtqqwdxytbzr6gw2bydb7ujle",
+      "corruption": "missing_path_node",
+      "curve": "p256",
+      "description": "Exclusion proof for r08 with the deepest MST path node removed; must be missing_block, never absent.",
+      "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected": {
+        "code": "missing_block",
+        "state": null,
+        "verdict": "invalid"
+      },
+      "file": "p256_exclusion_missing_mst_node.car",
+      "kind": "corruption",
+      "name": "p256_exclusion_missing_mst_node",
+      "rev": "3m4zm2ufr2222",
+      "rust": {
+        "error": "MissingProof",
+        "verdict": "invalid",
+        "verifier": "verify_snapshot_record"
+      },
+      "sha256": "9f980e116b1a82c9975d478fb269446cf216bb7a33ddeac426fbfbab5714a15c",
+      "signingKey": "did:key:zDnaejgmAHMLkBPMBWnkBxyGxpXx8LgE4WJAYDhwZzyoRAddF",
+      "target": {
+        "cid": null,
+        "collection": "com.example.atmusic.scrobble",
+        "rkey": "r08"
+      }
+    }
+  ],
+  "keys": {
+    "p256": {
+      "didKey": "did:key:zDnaejgmAHMLkBPMBWnkBxyGxpXx8LgE4WJAYDhwZzyoRAddF",
+      "seedHex": "0707070707070707070707070707070707070707070707070707070707070707",
+      "testOnly": true
+    },
+    "secp256k1": {
+      "didKey": "did:key:zQ3shXgWjVsCJsv9mBm6kVqFSjAnErMg3zG9CcyvmUCCaFRCr",
+      "seedHex": "0707070707070707070707070707070707070707070707070707070707070707",
+      "testOnly": true
+    }
+  },
+  "maxCarBytesRust": 8388608,
+  "namespacePrefix": "com.example.atmusic",
+  "notes": [
+    "Rust enforces TID syntax for rev only in verify_snapshot (frames::validate_revision); verify_snapshot_record does not, so the rev corruption is applied to the full-repo CAR.",
+    "All corruptions except the two missing_path_node cases are applied to the full-repo CAR and touch the commit, the MST root node or the r01 record, so they are on the r01 proof path for a record-proof verifier as well as for a snapshot walker.",
+    "Both curves sign the same records, so MST nodes and record CIDs are identical across curves; only commit blocks differ."
+  ],
+  "receiptTime": "2026-01-15T12:00:00Z",
+  "rustErrorToCode": {
+    "CarTooLarge": "car_too_large",
+    "CidMismatch": "cid_mismatch",
+    "CommitMismatch": "did_mismatch | bad_version | bad_rev (Rust has one variant; the corruption field disambiguates)",
+    "InvalidCar": "car_malformed",
+    "InvalidMst": "mst_invalid",
+    "InvalidSignature": "bad_signature",
+    "MissingProof": "missing_block (including record_cid_swap: the proven CID has no block in the CAR)"
+  },
+  "source": "crates/atproto/examples/export_signed_cars.rs"
+}

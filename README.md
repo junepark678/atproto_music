@@ -1,36 +1,90 @@
 # AT Protocol music
 
-A Last.fm-style application using AT Protocol records for public scrobbles and music follows. Existing accounts retain their records on external PDSs. The intended backend is a self-contained Rust executable with embedded SQLite and, later, a Preact SPA.
+A Last.fm-style service on AT Protocol: scrobbles and music follows are public
+records in each user's repository. This AppView indexes them into listening
+history, feeds, statistics, profiles and follow graphs.
 
-**Current state: scaffold, not MVP.** There is no authentication, database schema, scrobbling, federation, or Preact implementation yet. Readiness deliberately returns HTTP 503.
+The accepted architecture is **one local Node 26 process**, a systemd user
+service with SQLite ([ADR 0005](docs/adr/0005-local-node-host-and-compat-apis.md)).
+The server is a confidential atproto OAuth client/BFF and owns encrypted OAuth
+sessions, cookie/CSRF sessions and a durable write outbox. Public indexing still
+requires a signed current-head proof or verified repository snapshot. The
+`worker/` package name is retained for stable paths; it does not mean that the
+accepted production host is Cloudflare Workers.
 
-## Development
+**Status:** the Node host, server-session browser, Node browser journeys, and
+Node acceptance tooling are implemented. The Workers runtime and test shims are
+retired. Deterministic acceptance and local benchmarks do not establish live
+OAuth interoperability, two-operator PDS coverage, production SSRF behavior, or
+the required soak; those gates and operator evidence remain open. No deployment
+or milestone closure is claimed. Rust crates remain a frozen regression and
+golden-vector oracle.
 
-Install Rust with rustup; the repository pins Rust 1.90.0. Linux builds need a C compiler. The static release additionally needs musl-tools (`musl-gcc`). No database service or Node runtime is needed for the scaffold.
+## Deterministic checks
+
+Requires the Node version in `.nvmrc` (**26.12.1**), Python 3 and the pinned
+contract-validator requirements:
 
 ```sh
-cargo build --locked --workspace
-bash scripts/check.sh
-cargo run --locked -p atmusic-server -- serve --bind 127.0.0.1:3000
+npm ci
+python3 -m venv .venv
+.venv/bin/python -m pip install -r api/requirements-contracts.txt
+npm run check
+python3 scripts/validate_case_map.py --check-tests
 ```
 
-The server embeds a placeholder page at `/`, responds at `/health/live` and `/api/v1/meta`, and returns `503 not_initialized` at `/health/ready`. Unimplemented routes return JSON 404. `ATMUSIC_BIND` overrides the default bind address; `--bind` takes precedence. SIGINT and SIGTERM shut down the scaffold cleanly.
+The gate runs typechecking, Biome, all Vitest projects, contracts, structural
+case-map checks and the Node bundle guard. Plan assertions support SQLite
+**3.54.0 and 3.54.1**; every run checks its actual query plans and records its
+actual engine version.
+The official Node binary and the owner's system-SQLite build need not report
+the same patch version. No test requires the optional `sqlite_stmt` extension.
 
 ```sh
-python3 scripts/smoke.py target/debug/atmusic
-cargo build --locked --release --target x86_64-unknown-linux-musl -p atmusic-server
-python3 scripts/smoke.py target/x86_64-unknown-linux-musl/release/atmusic
+npm test                                      # deterministic Vitest workspace
+bash scripts/acceptance/node-interim.sh --wave 7 # interim only, not final acceptance
+bash scripts/check_goldens.sh                 # Rust oracle; requires pinned Rust
 ```
 
-The smoke test starts its own server on a temporary port, checks real HTTP behavior, and stops it. It verifies the scaffold, not music features. CI checks formatting, clippy, tests, host startup, and static packaging. The Preact workspace is deferred until the backend acceptance milestone.
+`npm run test:e2e` launches the Node fixture stack. The full acceptance record
+is produced by `bash scripts/acceptance/node-backend.sh`; absent live evidence
+is reported as blocked, not passed.
 
-## Implementation plan
+## Host/build documentation
 
-- [Milestones](https://github.com/junepark678/atproto_music/milestones)
-- [MVP decisions and issue specifications](docs/planning/MVP.md)
-- [Fixed API payload contract](docs/planning/API.md)
-- [Detailed deterministic test contract](docs/planning/TESTING.md)
-- [Scaffold validation evidence](docs/VALIDATION.md)
-- [Machine-readable issue hierarchy](docs/planning/github-plan.json)
+Read [local Node installation](docs/deploy/local-node.md),
+[deployment](docs/deployment.md), [exposure](docs/deploy/exposure.md),
+[operations](docs/operations.md), and [backup/restore](docs/backup.md).
+Build foundations use `npm run build:web` and
+`npx tsx scripts/build-server.ts --check`. The retired Workers deployment
+procedure and Rust release workflow are not Node release procedures.
+No live acceptance run is recorded. Publication remains fail-closed until
+reviewable namespace authority evidence is supplied.
 
-Leaf issues are the implementation unit. Parent issues coordinate their children. Follow explicit dependencies; do not substitute mock-only passes for live PDS/relay/browser gates.
+## Layout
+
+| Path | Contents |
+| --- | --- |
+| `packages/core` | Pure validation, music keys, cursors, write policy and record keys |
+| `packages/atproto` | Identity, SafeFetch, CAR/commit/MST verification, snapshots, Jetstream and test fakes |
+| `worker/src/node`, `worker/src/app` | Node host, transport, composition, process lifecycle and indexing core |
+| `worker/src/bff`, `worker/src/outbox` | Confidential OAuth, sessions, CSRF and server publishing |
+| `worker/src/do` | Host-neutral schema, ingestion, reads and timers (historical directory name) |
+| `web` | Preact SPA using server sessions and Node-backed account screens |
+| `scripts` | Checks, build, installer, admin, Node acceptance and historical live evidence tools |
+| `crates`, `tests/goldens` | Frozen Rust oracle and shared vectors |
+
+## Contracts and evidence
+
+- [OpenAPI](api/openapi.yaml), [API plan](docs/planning/API.md),
+  [case map](docs/verification/ts-case-map.json)
+- [Current and historical storage](docs/storage.md), [Rust schema](docs/storage-rust.md)
+- [Node wave plan](docs/planning/node-waves.json), [draft amendments](docs/planning/AMENDMENTS-node.md)
+- [Historical validation receipt](docs/VALIDATION.md), [historical milestone counts](docs/MILESTONE_STATUS.md)
+- [Live evidence inventory](docs/verification/live-evidence.json): empty/historical;
+  it is not accepted Node release evidence
+
+GitHub issue contracts still need explicit reconciliation with ADR 0005.
+Fixture passes, mapping existence and blocked/no-environment scripts never
+substitute for actual OAuth, lifecycle, federation, social/statistics or restore
+observations bound to the deployed Node commit and bundle.

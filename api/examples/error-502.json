@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "upstream_error",
+    "message": "The upstream request permanently failed.",
+    "requestId": "a858325e-7dd0-4b1b-baaa-3b65af37f963"
+  }
+}

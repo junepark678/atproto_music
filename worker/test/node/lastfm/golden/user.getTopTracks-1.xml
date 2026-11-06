@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<lfm status="ok">
+  <toptracks user="alice" page="1" perPage="50" totalPages="1" total="1">
+    <track rank="1">
+      <name>Test Track</name>
+      <duration>215</duration>
+      <playcount>3</playcount>
+      <mbid/>
+      <url>https://www.last.fm/music/Test+Artist/_/Test+Track</url>
+      <streamable fulltrack="0">0</streamable>
+      <artist>
+        <name>Test Artist</name>
+        <mbid/>
+        <url>https://www.last.fm/music/Test+Artist</url>
+      </artist>
+      <image size="small"/>
+      <image size="medium"/>
+      <image size="large"/>
+      <image size="extralarge"/>
+    </track>
+  </toptracks>
+</lfm>

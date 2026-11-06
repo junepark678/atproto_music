@@ -1,0 +1,48 @@
+{
+  "friends": {
+    "user": [
+      {
+        "name": "bob",
+        "realname": "",
+        "image": [
+          {
+            "size": "small",
+            "#text": ""
+          },
+          {
+            "size": "medium",
+            "#text": ""
+          },
+          {
+            "size": "large",
+            "#text": ""
+          },
+          {
+            "size": "extralarge",
+            "#text": ""
+          }
+        ],
+        "url": "https://music.214510.xyz/u/did:plc:bbbbbbbbbbbbbbbbbbbbbbbb",
+        "country": "None",
+        "age": "0",
+        "gender": "n",
+        "subscriber": "0",
+        "playcount": "9",
+        "playlists": "0",
+        "bootstrap": "0",
+        "registered": {
+          "unixtime": "1767225600",
+          "#text": "1767225600"
+        },
+        "type": "user"
+      }
+    ],
+    "@attr": {
+      "user": "alice",
+      "page": "1",
+      "perPage": "50",
+      "totalPages": "1",
+      "total": "1"
+    }
+  }
+}

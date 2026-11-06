@@ -1,0 +1,6165 @@
+{
+  "artistKeyOrdering": {
+    "pairs": [
+      {
+        "a": "björk",
+        "b": "jóga",
+        "cmp": -1
+      },
+      {
+        "a": "björk",
+        "b": "homogenic",
+        "cmp": -1
+      },
+      {
+        "a": "björk",
+        "b": "strasse",
+        "cmp": -1
+      },
+      {
+        "a": "björk",
+        "b": "ss",
+        "cmp": -1
+      },
+      {
+        "a": "björk",
+        "b": "abc123",
+        "cmp": 1
+      },
+      {
+        "a": "björk",
+        "b": "i̇stanbul",
+        "cmp": -1
+      },
+      {
+        "a": "björk",
+        "b": "ıstanbul",
+        "cmp": -1
+      },
+      {
+        "a": "björk",
+        "b": "istanbul",
+        "cmp": -1
+      },
+      {
+        "a": "björk",
+        "b": "fish",
+        "cmp": -1
+      },
+      {
+        "a": "björk",
+        "b": "ffl",
+        "cmp": -1
+      },
+      {
+        "a": "björk",
+        "b": "kelvin",
+        "cmp": -1
+      },
+      {
+        "a": "björk",
+        "b": "å",
+        "cmp": -1
+      },
+      {
+        "a": "björk",
+        "b": "σσσ",
+        "cmp": -1
+      },
+      {
+        "a": "björk",
+        "b": "Ꭰ",
+        "cmp": -1
+      },
+      {
+        "a": "björk",
+        "b": "ɤ",
+        "cmp": -1
+      },
+      {
+        "a": "björk",
+        "b": "kate bush",
+        "cmp": -1
+      },
+      {
+        "a": "björk",
+        "b": "﻿björk",
+        "cmp": -1
+      },
+      {
+        "a": "björk",
+        "b": "﻿",
+        "cmp": -1
+      },
+      {
+        "a": "björk",
+        "b": "👩‍🎤",
+        "cmp": -1
+      },
+      {
+        "a": "björk",
+        "b": "a‍b",
+        "cmp": 1
+      },
+      {
+        "a": "björk",
+        "b": "a​b",
+        "cmp": 1
+      },
+      {
+        "a": "björk",
+        "b": "a᠎b",
+        "cmp": 1
+      },
+      {
+        "a": "björk",
+        "b": "a\u001fb",
+        "cmp": 1
+      },
+      {
+        "a": "björk",
+        "b": "̈",
+        "cmp": -1
+      },
+      {
+        "a": "björk",
+        "b": "x ̅",
+        "cmp": -1
+      },
+      {
+        "a": "björk",
+        "b": "a",
+        "cmp": 1
+      },
+      {
+        "a": "björk",
+        "b": "𐐨",
+        "cmp": -1
+      },
+      {
+        "a": "björk",
+        "b": "😀",
+        "cmp": -1
+      },
+      {
+        "a": "björk",
+        "b": "𐀀",
+        "cmp": -1
+      },
+      {
+        "a": "björk",
+        "b": "",
+        "cmp": -1
+      },
+      {
+        "a": "björk",
+        "b": "�",
+        "cmp": -1
+      },
+      {
+        "a": "björk",
+        "b": "￿",
+        "cmp": -1
+      },
+      {
+        "a": "björk",
+        "b": "ᅵ",
+        "cmp": -1
+      },
+      {
+        "a": "björk",
+        "b": "퟿",
+        "cmp": -1
+      },
+      {
+        "a": "björk",
+        "b": "a|b",
+        "cmp": 1
+      },
+      {
+        "a": "björk",
+        "b": "a b",
+        "cmp": 1
+      },
+      {
+        "a": "björk",
+        "b": "artist a feat. artist b",
+        "cmp": 1
+      },
+      {
+        "a": "björk",
+        "b": "artist a",
+        "cmp": 1
+      },
+      {
+        "a": "jóga",
+        "b": "homogenic",
+        "cmp": 1
+      },
+      {
+        "a": "jóga",
+        "b": "strasse",
+        "cmp": -1
+      },
+      {
+        "a": "jóga",
+        "b": "ss",
+        "cmp": -1
+      },
+      {
+        "a": "jóga",
+        "b": "abc123",
+        "cmp": 1
+      },
+      {
+        "a": "jóga",
+        "b": "i̇stanbul",
+        "cmp": 1
+      },
+      {
+        "a": "jóga",
+        "b": "ıstanbul",
+        "cmp": -1
+      },
+      {
+        "a": "jóga",
+        "b": "istanbul",
+        "cmp": 1
+      },
+      {
+        "a": "jóga",
+        "b": "fish",
+        "cmp": 1
+      },
+      {
+        "a": "jóga",
+        "b": "ffl",
+        "cmp": 1
+      },
+      {
+        "a": "jóga",
+        "b": "kelvin",
+        "cmp": -1
+      },
+      {
+        "a": "jóga",
+        "b": "å",
+        "cmp": -1
+      },
+      {
+        "a": "jóga",
+        "b": "σσσ",
+        "cmp": -1
+      },
+      {
+        "a": "jóga",
+        "b": "Ꭰ",
+        "cmp": -1
+      },
+      {
+        "a": "jóga",
+        "b": "ɤ",
+        "cmp": -1
+      },
+      {
+        "a": "jóga",
+        "b": "kate bush",
+        "cmp": -1
+      },
+      {
+        "a": "jóga",
+        "b": "﻿björk",
+        "cmp": -1
+      },
+      {
+        "a": "jóga",
+        "b": "﻿",
+        "cmp": -1
+      },
+      {
+        "a": "jóga",
+        "b": "👩‍🎤",
+        "cmp": -1
+      },
+      {
+        "a": "jóga",
+        "b": "a‍b",
+        "cmp": 1
+      },
+      {
+        "a": "jóga",
+        "b": "a​b",
+        "cmp": 1
+      },
+      {
+        "a": "jóga",
+        "b": "a᠎b",
+        "cmp": 1
+      },
+      {
+        "a": "jóga",
+        "b": "a\u001fb",
+        "cmp": 1
+      },
+      {
+        "a": "jóga",
+        "b": "̈",
+        "cmp": -1
+      },
+      {
+        "a": "jóga",
+        "b": "x ̅",
+        "cmp": -1
+      },
+      {
+        "a": "jóga",
+        "b": "a",
+        "cmp": 1
+      },
+      {
+        "a": "jóga",
+        "b": "𐐨",
+        "cmp": -1
+      },
+      {
+        "a": "jóga",
+        "b": "😀",
+        "cmp": -1
+      },
+      {
+        "a": "jóga",
+        "b": "𐀀",
+        "cmp": -1
+      },
+      {
+        "a": "jóga",
+        "b": "",
+        "cmp": -1
+      },
+      {
+        "a": "jóga",
+        "b": "�",
+        "cmp": -1
+      },
+      {
+        "a": "jóga",
+        "b": "￿",
+        "cmp": -1
+      },
+      {
+        "a": "jóga",
+        "b": "ᅵ",
+        "cmp": -1
+      },
+      {
+        "a": "jóga",
+        "b": "퟿",
+        "cmp": -1
+      },
+      {
+        "a": "jóga",
+        "b": "a|b",
+        "cmp": 1
+      },
+      {
+        "a": "jóga",
+        "b": "a b",
+        "cmp": 1
+      },
+      {
+        "a": "jóga",
+        "b": "artist a feat. artist b",
+        "cmp": 1
+      },
+      {
+        "a": "jóga",
+        "b": "artist a",
+        "cmp": 1
+      },
+      {
+        "a": "homogenic",
+        "b": "strasse",
+        "cmp": -1
+      },
+      {
+        "a": "homogenic",
+        "b": "ss",
+        "cmp": -1
+      },
+      {
+        "a": "homogenic",
+        "b": "abc123",
+        "cmp": 1
+      },
+      {
+        "a": "homogenic",
+        "b": "i̇stanbul",
+        "cmp": -1
+      },
+      {
+        "a": "homogenic",
+        "b": "ıstanbul",
+        "cmp": -1
+      },
+      {
+        "a": "homogenic",
+        "b": "istanbul",
+        "cmp": -1
+      },
+      {
+        "a": "homogenic",
+        "b": "fish",
+        "cmp": 1
+      },
+      {
+        "a": "homogenic",
+        "b": "ffl",
+        "cmp": 1
+      },
+      {
+        "a": "homogenic",
+        "b": "kelvin",
+        "cmp": -1
+      },
+      {
+        "a": "homogenic",
+        "b": "å",
+        "cmp": -1
+      },
+      {
+        "a": "homogenic",
+        "b": "σσσ",
+        "cmp": -1
+      },
+      {
+        "a": "homogenic",
+        "b": "Ꭰ",
+        "cmp": -1
+      },
+      {
+        "a": "homogenic",
+        "b": "ɤ",
+        "cmp": -1
+      },
+      {
+        "a": "homogenic",
+        "b": "kate bush",
+        "cmp": -1
+      },
+      {
+        "a": "homogenic",
+        "b": "﻿björk",
+        "cmp": -1
+      },
+      {
+        "a": "homogenic",
+        "b": "﻿",
+        "cmp": -1
+      },
+      {
+        "a": "homogenic",
+        "b": "👩‍🎤",
+        "cmp": -1
+      },
+      {
+        "a": "homogenic",
+        "b": "a‍b",
+        "cmp": 1
+      },
+      {
+        "a": "homogenic",
+        "b": "a​b",
+        "cmp": 1
+      },
+      {
+        "a": "homogenic",
+        "b": "a᠎b",
+        "cmp": 1
+      },
+      {
+        "a": "homogenic",
+        "b": "a\u001fb",
+        "cmp": 1
+      },
+      {
+        "a": "homogenic",
+        "b": "̈",
+        "cmp": -1
+      },
+      {
+        "a": "homogenic",
+        "b": "x ̅",
+        "cmp": -1
+      },
+      {
+        "a": "homogenic",
+        "b": "a",
+        "cmp": 1
+      },
+      {
+        "a": "homogenic",
+        "b": "𐐨",
+        "cmp": -1
+      },
+      {
+        "a": "homogenic",
+        "b": "😀",
+        "cmp": -1
+      },
+      {
+        "a": "homogenic",
+        "b": "𐀀",
+        "cmp": -1
+      },
+      {
+        "a": "homogenic",
+        "b": "",
+        "cmp": -1
+      },
+      {
+        "a": "homogenic",
+        "b": "�",
+        "cmp": -1
+      },
+      {
+        "a": "homogenic",
+        "b": "￿",
+        "cmp": -1
+      },
+      {
+        "a": "homogenic",
+        "b": "ᅵ",
+        "cmp": -1
+      },
+      {
+        "a": "homogenic",
+        "b": "퟿",
+        "cmp": -1
+      },
+      {
+        "a": "homogenic",
+        "b": "a|b",
+        "cmp": 1
+      },
+      {
+        "a": "homogenic",
+        "b": "a b",
+        "cmp": 1
+      },
+      {
+        "a": "homogenic",
+        "b": "artist a feat. artist b",
+        "cmp": 1
+      },
+      {
+        "a": "homogenic",
+        "b": "artist a",
+        "cmp": 1
+      },
+      {
+        "a": "strasse",
+        "b": "ss",
+        "cmp": 1
+      },
+      {
+        "a": "strasse",
+        "b": "abc123",
+        "cmp": 1
+      },
+      {
+        "a": "strasse",
+        "b": "i̇stanbul",
+        "cmp": 1
+      },
+      {
+        "a": "strasse",
+        "b": "ıstanbul",
+        "cmp": -1
+      },
+      {
+        "a": "strasse",
+        "b": "istanbul",
+        "cmp": 1
+      },
+      {
+        "a": "strasse",
+        "b": "fish",
+        "cmp": 1
+      },
+      {
+        "a": "strasse",
+        "b": "ffl",
+        "cmp": 1
+      },
+      {
+        "a": "strasse",
+        "b": "kelvin",
+        "cmp": 1
+      },
+      {
+        "a": "strasse",
+        "b": "å",
+        "cmp": -1
+      },
+      {
+        "a": "strasse",
+        "b": "σσσ",
+        "cmp": -1
+      },
+      {
+        "a": "strasse",
+        "b": "Ꭰ",
+        "cmp": -1
+      },
+      {
+        "a": "strasse",
+        "b": "ɤ",
+        "cmp": -1
+      },
+      {
+        "a": "strasse",
+        "b": "kate bush",
+        "cmp": 1
+      },
+      {
+        "a": "strasse",
+        "b": "﻿björk",
+        "cmp": -1
+      },
+      {
+        "a": "strasse",
+        "b": "﻿",
+        "cmp": -1
+      },
+      {
+        "a": "strasse",
+        "b": "👩‍🎤",
+        "cmp": -1
+      },
+      {
+        "a": "strasse",
+        "b": "a‍b",
+        "cmp": 1
+      },
+      {
+        "a": "strasse",
+        "b": "a​b",
+        "cmp": 1
+      },
+      {
+        "a": "strasse",
+        "b": "a᠎b",
+        "cmp": 1
+      },
+      {
+        "a": "strasse",
+        "b": "a\u001fb",
+        "cmp": 1
+      },
+      {
+        "a": "strasse",
+        "b": "̈",
+        "cmp": -1
+      },
+      {
+        "a": "strasse",
+        "b": "x ̅",
+        "cmp": -1
+      },
+      {
+        "a": "strasse",
+        "b": "a",
+        "cmp": 1
+      },
+      {
+        "a": "strasse",
+        "b": "𐐨",
+        "cmp": -1
+      },
+      {
+        "a": "strasse",
+        "b": "😀",
+        "cmp": -1
+      },
+      {
+        "a": "strasse",
+        "b": "𐀀",
+        "cmp": -1
+      },
+      {
+        "a": "strasse",
+        "b": "",
+        "cmp": -1
+      },
+      {
+        "a": "strasse",
+        "b": "�",
+        "cmp": -1
+      },
+      {
+        "a": "strasse",
+        "b": "￿",
+        "cmp": -1
+      },
+      {
+        "a": "strasse",
+        "b": "ᅵ",
+        "cmp": -1
+      },
+      {
+        "a": "strasse",
+        "b": "퟿",
+        "cmp": -1
+      },
+      {
+        "a": "strasse",
+        "b": "a|b",
+        "cmp": 1
+      },
+      {
+        "a": "strasse",
+        "b": "a b",
+        "cmp": 1
+      },
+      {
+        "a": "strasse",
+        "b": "artist a feat. artist b",
+        "cmp": 1
+      },
+      {
+        "a": "strasse",
+        "b": "artist a",
+        "cmp": 1
+      },
+      {
+        "a": "ss",
+        "b": "abc123",
+        "cmp": 1
+      },
+      {
+        "a": "ss",
+        "b": "i̇stanbul",
+        "cmp": 1
+      },
+      {
+        "a": "ss",
+        "b": "ıstanbul",
+        "cmp": -1
+      },
+      {
+        "a": "ss",
+        "b": "istanbul",
+        "cmp": 1
+      },
+      {
+        "a": "ss",
+        "b": "fish",
+        "cmp": 1
+      },
+      {
+        "a": "ss",
+        "b": "ffl",
+        "cmp": 1
+      },
+      {
+        "a": "ss",
+        "b": "kelvin",
+        "cmp": 1
+      },
+      {
+        "a": "ss",
+        "b": "å",
+        "cmp": -1
+      },
+      {
+        "a": "ss",
+        "b": "σσσ",
+        "cmp": -1
+      },
+      {
+        "a": "ss",
+        "b": "Ꭰ",
+        "cmp": -1
+      },
+      {
+        "a": "ss",
+        "b": "ɤ",
+        "cmp": -1
+      },
+      {
+        "a": "ss",
+        "b": "kate bush",
+        "cmp": 1
+      },
+      {
+        "a": "ss",
+        "b": "﻿björk",
+        "cmp": -1
+      },
+      {
+        "a": "ss",
+        "b": "﻿",
+        "cmp": -1
+      },
+      {
+        "a": "ss",
+        "b": "👩‍🎤",
+        "cmp": -1
+      },
+      {
+        "a": "ss",
+        "b": "a‍b",
+        "cmp": 1
+      },
+      {
+        "a": "ss",
+        "b": "a​b",
+        "cmp": 1
+      },
+      {
+        "a": "ss",
+        "b": "a᠎b",
+        "cmp": 1
+      },
+      {
+        "a": "ss",
+        "b": "a\u001fb",
+        "cmp": 1
+      },
+      {
+        "a": "ss",
+        "b": "̈",
+        "cmp": -1
+      },
+      {
+        "a": "ss",
+        "b": "x ̅",
+        "cmp": -1
+      },
+      {
+        "a": "ss",
+        "b": "a",
+        "cmp": 1
+      },
+      {
+        "a": "ss",
+        "b": "𐐨",
+        "cmp": -1
+      },
+      {
+        "a": "ss",
+        "b": "😀",
+        "cmp": -1
+      },
+      {
+        "a": "ss",
+        "b": "𐀀",
+        "cmp": -1
+      },
+      {
+        "a": "ss",
+        "b": "",
+        "cmp": -1
+      },
+      {
+        "a": "ss",
+        "b": "�",
+        "cmp": -1
+      },
+      {
+        "a": "ss",
+        "b": "￿",
+        "cmp": -1
+      },
+      {
+        "a": "ss",
+        "b": "ᅵ",
+        "cmp": -1
+      },
+      {
+        "a": "ss",
+        "b": "퟿",
+        "cmp": -1
+      },
+      {
+        "a": "ss",
+        "b": "a|b",
+        "cmp": 1
+      },
+      {
+        "a": "ss",
+        "b": "a b",
+        "cmp": 1
+      },
+      {
+        "a": "ss",
+        "b": "artist a feat. artist b",
+        "cmp": 1
+      },
+      {
+        "a": "ss",
+        "b": "artist a",
+        "cmp": 1
+      },
+      {
+        "a": "abc123",
+        "b": "i̇stanbul",
+        "cmp": -1
+      },
+      {
+        "a": "abc123",
+        "b": "ıstanbul",
+        "cmp": -1
+      },
+      {
+        "a": "abc123",
+        "b": "istanbul",
+        "cmp": -1
+      },
+      {
+        "a": "abc123",
+        "b": "fish",
+        "cmp": -1
+      },
+      {
+        "a": "abc123",
+        "b": "ffl",
+        "cmp": -1
+      },
+      {
+        "a": "abc123",
+        "b": "kelvin",
+        "cmp": -1
+      },
+      {
+        "a": "abc123",
+        "b": "å",
+        "cmp": -1
+      },
+      {
+        "a": "abc123",
+        "b": "σσσ",
+        "cmp": -1
+      },
+      {
+        "a": "abc123",
+        "b": "Ꭰ",
+        "cmp": -1
+      },
+      {
+        "a": "abc123",
+        "b": "ɤ",
+        "cmp": -1
+      },
+      {
+        "a": "abc123",
+        "b": "kate bush",
+        "cmp": -1
+      },
+      {
+        "a": "abc123",
+        "b": "﻿björk",
+        "cmp": -1
+      },
+      {
+        "a": "abc123",
+        "b": "﻿",
+        "cmp": -1
+      },
+      {
+        "a": "abc123",
+        "b": "👩‍🎤",
+        "cmp": -1
+      },
+      {
+        "a": "abc123",
+        "b": "a‍b",
+        "cmp": -1
+      },
+      {
+        "a": "abc123",
+        "b": "a​b",
+        "cmp": -1
+      },
+      {
+        "a": "abc123",
+        "b": "a᠎b",
+        "cmp": -1
+      },
+      {
+        "a": "abc123",
+        "b": "a\u001fb",
+        "cmp": 1
+      },
+      {
+        "a": "abc123",
+        "b": "̈",
+        "cmp": -1
+      },
+      {
+        "a": "abc123",
+        "b": "x ̅",
+        "cmp": -1
+      },
+      {
+        "a": "abc123",
+        "b": "a",
+        "cmp": 1
+      },
+      {
+        "a": "abc123",
+        "b": "𐐨",
+        "cmp": -1
+      },
+      {
+        "a": "abc123",
+        "b": "😀",
+        "cmp": -1
+      },
+      {
+        "a": "abc123",
+        "b": "𐀀",
+        "cmp": -1
+      },
+      {
+        "a": "abc123",
+        "b": "",
+        "cmp": -1
+      },
+      {
+        "a": "abc123",
+        "b": "�",
+        "cmp": -1
+      },
+      {
+        "a": "abc123",
+        "b": "￿",
+        "cmp": -1
+      },
+      {
+        "a": "abc123",
+        "b": "ᅵ",
+        "cmp": -1
+      },
+      {
+        "a": "abc123",
+        "b": "퟿",
+        "cmp": -1
+      },
+      {
+        "a": "abc123",
+        "b": "a|b",
+        "cmp": -1
+      },
+      {
+        "a": "abc123",
+        "b": "a b",
+        "cmp": 1
+      },
+      {
+        "a": "abc123",
+        "b": "artist a feat. artist b",
+        "cmp": -1
+      },
+      {
+        "a": "abc123",
+        "b": "artist a",
+        "cmp": -1
+      },
+      {
+        "a": "i̇stanbul",
+        "b": "ıstanbul",
+        "cmp": -1
+      },
+      {
+        "a": "i̇stanbul",
+        "b": "istanbul",
+        "cmp": 1
+      },
+      {
+        "a": "i̇stanbul",
+        "b": "fish",
+        "cmp": 1
+      },
+      {
+        "a": "i̇stanbul",
+        "b": "ffl",
+        "cmp": 1
+      },
+      {
+        "a": "i̇stanbul",
+        "b": "kelvin",
+        "cmp": -1
+      },
+      {
+        "a": "i̇stanbul",
+        "b": "å",
+        "cmp": -1
+      },
+      {
+        "a": "i̇stanbul",
+        "b": "σσσ",
+        "cmp": -1
+      },
+      {
+        "a": "i̇stanbul",
+        "b": "Ꭰ",
+        "cmp": -1
+      },
+      {
+        "a": "i̇stanbul",
+        "b": "ɤ",
+        "cmp": -1
+      },
+      {
+        "a": "i̇stanbul",
+        "b": "kate bush",
+        "cmp": -1
+      },
+      {
+        "a": "i̇stanbul",
+        "b": "﻿björk",
+        "cmp": -1
+      },
+      {
+        "a": "i̇stanbul",
+        "b": "﻿",
+        "cmp": -1
+      },
+      {
+        "a": "i̇stanbul",
+        "b": "👩‍🎤",
+        "cmp": -1
+      },
+      {
+        "a": "i̇stanbul",
+        "b": "a‍b",
+        "cmp": 1
+      },
+      {
+        "a": "i̇stanbul",
+        "b": "a​b",
+        "cmp": 1
+      },
+      {
+        "a": "i̇stanbul",
+        "b": "a᠎b",
+        "cmp": 1
+      },
+      {
+        "a": "i̇stanbul",
+        "b": "a\u001fb",
+        "cmp": 1
+      },
+      {
+        "a": "i̇stanbul",
+        "b": "̈",
+        "cmp": -1
+      },
+      {
+        "a": "i̇stanbul",
+        "b": "x ̅",
+        "cmp": -1
+      },
+      {
+        "a": "i̇stanbul",
+        "b": "a",
+        "cmp": 1
+      },
+      {
+        "a": "i̇stanbul",
+        "b": "𐐨",
+        "cmp": -1
+      },
+      {
+        "a": "i̇stanbul",
+        "b": "😀",
+        "cmp": -1
+      },
+      {
+        "a": "i̇stanbul",
+        "b": "𐀀",
+        "cmp": -1
+      },
+      {
+        "a": "i̇stanbul",
+        "b": "",
+        "cmp": -1
+      },
+      {
+        "a": "i̇stanbul",
+        "b": "�",
+        "cmp": -1
+      },
+      {
+        "a": "i̇stanbul",
+        "b": "￿",
+        "cmp": -1
+      },
+      {
+        "a": "i̇stanbul",
+        "b": "ᅵ",
+        "cmp": -1
+      },
+      {
+        "a": "i̇stanbul",
+        "b": "퟿",
+        "cmp": -1
+      },
+      {
+        "a": "i̇stanbul",
+        "b": "a|b",
+        "cmp": 1
+      },
+      {
+        "a": "i̇stanbul",
+        "b": "a b",
+        "cmp": 1
+      },
+      {
+        "a": "i̇stanbul",
+        "b": "artist a feat. artist b",
+        "cmp": 1
+      },
+      {
+        "a": "i̇stanbul",
+        "b": "artist a",
+        "cmp": 1
+      },
+      {
+        "a": "ıstanbul",
+        "b": "istanbul",
+        "cmp": 1
+      },
+      {
+        "a": "ıstanbul",
+        "b": "fish",
+        "cmp": 1
+      },
+      {
+        "a": "ıstanbul",
+        "b": "ffl",
+        "cmp": 1
+      },
+      {
+        "a": "ıstanbul",
+        "b": "kelvin",
+        "cmp": 1
+      },
+      {
+        "a": "ıstanbul",
+        "b": "å",
+        "cmp": 1
+      },
+      {
+        "a": "ıstanbul",
+        "b": "σσσ",
+        "cmp": -1
+      },
+      {
+        "a": "ıstanbul",
+        "b": "Ꭰ",
+        "cmp": -1
+      },
+      {
+        "a": "ıstanbul",
+        "b": "ɤ",
+        "cmp": -1
+      },
+      {
+        "a": "ıstanbul",
+        "b": "kate bush",
+        "cmp": 1
+      },
+      {
+        "a": "ıstanbul",
+        "b": "﻿björk",
+        "cmp": -1
+      },
+      {
+        "a": "ıstanbul",
+        "b": "﻿",
+        "cmp": -1
+      },
+      {
+        "a": "ıstanbul",
+        "b": "👩‍🎤",
+        "cmp": -1
+      },
+      {
+        "a": "ıstanbul",
+        "b": "a‍b",
+        "cmp": 1
+      },
+      {
+        "a": "ıstanbul",
+        "b": "a​b",
+        "cmp": 1
+      },
+      {
+        "a": "ıstanbul",
+        "b": "a᠎b",
+        "cmp": 1
+      },
+      {
+        "a": "ıstanbul",
+        "b": "a\u001fb",
+        "cmp": 1
+      },
+      {
+        "a": "ıstanbul",
+        "b": "̈",
+        "cmp": -1
+      },
+      {
+        "a": "ıstanbul",
+        "b": "x ̅",
+        "cmp": 1
+      },
+      {
+        "a": "ıstanbul",
+        "b": "a",
+        "cmp": 1
+      },
+      {
+        "a": "ıstanbul",
+        "b": "𐐨",
+        "cmp": -1
+      },
+      {
+        "a": "ıstanbul",
+        "b": "😀",
+        "cmp": -1
+      },
+      {
+        "a": "ıstanbul",
+        "b": "𐀀",
+        "cmp": -1
+      },
+      {
+        "a": "ıstanbul",
+        "b": "",
+        "cmp": -1
+      },
+      {
+        "a": "ıstanbul",
+        "b": "�",
+        "cmp": -1
+      },
+      {
+        "a": "ıstanbul",
+        "b": "￿",
+        "cmp": -1
+      },
+      {
+        "a": "ıstanbul",
+        "b": "ᅵ",
+        "cmp": -1
+      },
+      {
+        "a": "ıstanbul",
+        "b": "퟿",
+        "cmp": -1
+      },
+      {
+        "a": "ıstanbul",
+        "b": "a|b",
+        "cmp": 1
+      },
+      {
+        "a": "ıstanbul",
+        "b": "a b",
+        "cmp": 1
+      },
+      {
+        "a": "ıstanbul",
+        "b": "artist a feat. artist b",
+        "cmp": 1
+      },
+      {
+        "a": "ıstanbul",
+        "b": "artist a",
+        "cmp": 1
+      },
+      {
+        "a": "istanbul",
+        "b": "fish",
+        "cmp": 1
+      },
+      {
+        "a": "istanbul",
+        "b": "ffl",
+        "cmp": 1
+      },
+      {
+        "a": "istanbul",
+        "b": "kelvin",
+        "cmp": -1
+      },
+      {
+        "a": "istanbul",
+        "b": "å",
+        "cmp": -1
+      },
+      {
+        "a": "istanbul",
+        "b": "σσσ",
+        "cmp": -1
+      },
+      {
+        "a": "istanbul",
+        "b": "Ꭰ",
+        "cmp": -1
+      },
+      {
+        "a": "istanbul",
+        "b": "ɤ",
+        "cmp": -1
+      },
+      {
+        "a": "istanbul",
+        "b": "kate bush",
+        "cmp": -1
+      },
+      {
+        "a": "istanbul",
+        "b": "﻿björk",
+        "cmp": -1
+      },
+      {
+        "a": "istanbul",
+        "b": "﻿",
+        "cmp": -1
+      },
+      {
+        "a": "istanbul",
+        "b": "👩‍🎤",
+        "cmp": -1
+      },
+      {
+        "a": "istanbul",
+        "b": "a‍b",
+        "cmp": 1
+      },
+      {
+        "a": "istanbul",
+        "b": "a​b",
+        "cmp": 1
+      },
+      {
+        "a": "istanbul",
+        "b": "a᠎b",
+        "cmp": 1
+      },
+      {
+        "a": "istanbul",
+        "b": "a\u001fb",
+        "cmp": 1
+      },
+      {
+        "a": "istanbul",
+        "b": "̈",
+        "cmp": -1
+      },
+      {
+        "a": "istanbul",
+        "b": "x ̅",
+        "cmp": -1
+      },
+      {
+        "a": "istanbul",
+        "b": "a",
+        "cmp": 1
+      },
+      {
+        "a": "istanbul",
+        "b": "𐐨",
+        "cmp": -1
+      },
+      {
+        "a": "istanbul",
+        "b": "😀",
+        "cmp": -1
+      },
+      {
+        "a": "istanbul",
+        "b": "𐀀",
+        "cmp": -1
+      },
+      {
+        "a": "istanbul",
+        "b": "",
+        "cmp": -1
+      },
+      {
+        "a": "istanbul",
+        "b": "�",
+        "cmp": -1
+      },
+      {
+        "a": "istanbul",
+        "b": "￿",
+        "cmp": -1
+      },
+      {
+        "a": "istanbul",
+        "b": "ᅵ",
+        "cmp": -1
+      },
+      {
+        "a": "istanbul",
+        "b": "퟿",
+        "cmp": -1
+      },
+      {
+        "a": "istanbul",
+        "b": "a|b",
+        "cmp": 1
+      },
+      {
+        "a": "istanbul",
+        "b": "a b",
+        "cmp": 1
+      },
+      {
+        "a": "istanbul",
+        "b": "artist a feat. artist b",
+        "cmp": 1
+      },
+      {
+        "a": "istanbul",
+        "b": "artist a",
+        "cmp": 1
+      },
+      {
+        "a": "fish",
+        "b": "ffl",
+        "cmp": 1
+      },
+      {
+        "a": "fish",
+        "b": "kelvin",
+        "cmp": -1
+      },
+      {
+        "a": "fish",
+        "b": "å",
+        "cmp": -1
+      },
+      {
+        "a": "fish",
+        "b": "σσσ",
+        "cmp": -1
+      },
+      {
+        "a": "fish",
+        "b": "Ꭰ",
+        "cmp": -1
+      },
+      {
+        "a": "fish",
+        "b": "ɤ",
+        "cmp": -1
+      },
+      {
+        "a": "fish",
+        "b": "kate bush",
+        "cmp": -1
+      },
+      {
+        "a": "fish",
+        "b": "﻿björk",
+        "cmp": -1
+      },
+      {
+        "a": "fish",
+        "b": "﻿",
+        "cmp": -1
+      },
+      {
+        "a": "fish",
+        "b": "👩‍🎤",
+        "cmp": -1
+      },
+      {
+        "a": "fish",
+        "b": "a‍b",
+        "cmp": 1
+      },
+      {
+        "a": "fish",
+        "b": "a​b",
+        "cmp": 1
+      },
+      {
+        "a": "fish",
+        "b": "a᠎b",
+        "cmp": 1
+      },
+      {
+        "a": "fish",
+        "b": "a\u001fb",
+        "cmp": 1
+      },
+      {
+        "a": "fish",
+        "b": "̈",
+        "cmp": -1
+      },
+      {
+        "a": "fish",
+        "b": "x ̅",
+        "cmp": -1
+      },
+      {
+        "a": "fish",
+        "b": "a",
+        "cmp": 1
+      },
+      {
+        "a": "fish",
+        "b": "𐐨",
+        "cmp": -1
+      },
+      {
+        "a": "fish",
+        "b": "😀",
+        "cmp": -1
+      },
+      {
+        "a": "fish",
+        "b": "𐀀",
+        "cmp": -1
+      },
+      {
+        "a": "fish",
+        "b": "",
+        "cmp": -1
+      },
+      {
+        "a": "fish",
+        "b": "�",
+        "cmp": -1
+      },
+      {
+        "a": "fish",
+        "b": "￿",
+        "cmp": -1
+      },
+      {
+        "a": "fish",
+        "b": "ᅵ",
+        "cmp": -1
+      },
+      {
+        "a": "fish",
+        "b": "퟿",
+        "cmp": -1
+      },
+      {
+        "a": "fish",
+        "b": "a|b",
+        "cmp": 1
+      },
+      {
+        "a": "fish",
+        "b": "a b",
+        "cmp": 1
+      },
+      {
+        "a": "fish",
+        "b": "artist a feat. artist b",
+        "cmp": 1
+      },
+      {
+        "a": "fish",
+        "b": "artist a",
+        "cmp": 1
+      },
+      {
+        "a": "ffl",
+        "b": "kelvin",
+        "cmp": -1
+      },
+      {
+        "a": "ffl",
+        "b": "å",
+        "cmp": -1
+      },
+      {
+        "a": "ffl",
+        "b": "σσσ",
+        "cmp": -1
+      },
+      {
+        "a": "ffl",
+        "b": "Ꭰ",
+        "cmp": -1
+      },
+      {
+        "a": "ffl",
+        "b": "ɤ",
+        "cmp": -1
+      },
+      {
+        "a": "ffl",
+        "b": "kate bush",
+        "cmp": -1
+      },
+      {
+        "a": "ffl",
+        "b": "﻿björk",
+        "cmp": -1
+      },
+      {
+        "a": "ffl",
+        "b": "﻿",
+        "cmp": -1
+      },
+      {
+        "a": "ffl",
+        "b": "👩‍🎤",
+        "cmp": -1
+      },
+      {
+        "a": "ffl",
+        "b": "a‍b",
+        "cmp": 1
+      },
+      {
+        "a": "ffl",
+        "b": "a​b",
+        "cmp": 1
+      },
+      {
+        "a": "ffl",
+        "b": "a᠎b",
+        "cmp": 1
+      },
+      {
+        "a": "ffl",
+        "b": "a\u001fb",
+        "cmp": 1
+      },
+      {
+        "a": "ffl",
+        "b": "̈",
+        "cmp": -1
+      },
+      {
+        "a": "ffl",
+        "b": "x ̅",
+        "cmp": -1
+      },
+      {
+        "a": "ffl",
+        "b": "a",
+        "cmp": 1
+      },
+      {
+        "a": "ffl",
+        "b": "𐐨",
+        "cmp": -1
+      },
+      {
+        "a": "ffl",
+        "b": "😀",
+        "cmp": -1
+      },
+      {
+        "a": "ffl",
+        "b": "𐀀",
+        "cmp": -1
+      },
+      {
+        "a": "ffl",
+        "b": "",
+        "cmp": -1
+      },
+      {
+        "a": "ffl",
+        "b": "�",
+        "cmp": -1
+      },
+      {
+        "a": "ffl",
+        "b": "￿",
+        "cmp": -1
+      },
+      {
+        "a": "ffl",
+        "b": "ᅵ",
+        "cmp": -1
+      },
+      {
+        "a": "ffl",
+        "b": "퟿",
+        "cmp": -1
+      },
+      {
+        "a": "ffl",
+        "b": "a|b",
+        "cmp": 1
+      },
+      {
+        "a": "ffl",
+        "b": "a b",
+        "cmp": 1
+      },
+      {
+        "a": "ffl",
+        "b": "artist a feat. artist b",
+        "cmp": 1
+      },
+      {
+        "a": "ffl",
+        "b": "artist a",
+        "cmp": 1
+      },
+      {
+        "a": "kelvin",
+        "b": "å",
+        "cmp": -1
+      },
+      {
+        "a": "kelvin",
+        "b": "σσσ",
+        "cmp": -1
+      },
+      {
+        "a": "kelvin",
+        "b": "Ꭰ",
+        "cmp": -1
+      },
+      {
+        "a": "kelvin",
+        "b": "ɤ",
+        "cmp": -1
+      },
+      {
+        "a": "kelvin",
+        "b": "kate bush",
+        "cmp": 1
+      },
+      {
+        "a": "kelvin",
+        "b": "﻿björk",
+        "cmp": -1
+      },
+      {
+        "a": "kelvin",
+        "b": "﻿",
+        "cmp": -1
+      },
+      {
+        "a": "kelvin",
+        "b": "👩‍🎤",
+        "cmp": -1
+      },
+      {
+        "a": "kelvin",
+        "b": "a‍b",
+        "cmp": 1
+      },
+      {
+        "a": "kelvin",
+        "b": "a​b",
+        "cmp": 1
+      },
+      {
+        "a": "kelvin",
+        "b": "a᠎b",
+        "cmp": 1
+      },
+      {
+        "a": "kelvin",
+        "b": "a\u001fb",
+        "cmp": 1
+      },
+      {
+        "a": "kelvin",
+        "b": "̈",
+        "cmp": -1
+      },
+      {
+        "a": "kelvin",
+        "b": "x ̅",
+        "cmp": -1
+      },
+      {
+        "a": "kelvin",
+        "b": "a",
+        "cmp": 1
+      },
+      {
+        "a": "kelvin",
+        "b": "𐐨",
+        "cmp": -1
+      },
+      {
+        "a": "kelvin",
+        "b": "😀",
+        "cmp": -1
+      },
+      {
+        "a": "kelvin",
+        "b": "𐀀",
+        "cmp": -1
+      },
+      {
+        "a": "kelvin",
+        "b": "",
+        "cmp": -1
+      },
+      {
+        "a": "kelvin",
+        "b": "�",
+        "cmp": -1
+      },
+      {
+        "a": "kelvin",
+        "b": "￿",
+        "cmp": -1
+      },
+      {
+        "a": "kelvin",
+        "b": "ᅵ",
+        "cmp": -1
+      },
+      {
+        "a": "kelvin",
+        "b": "퟿",
+        "cmp": -1
+      },
+      {
+        "a": "kelvin",
+        "b": "a|b",
+        "cmp": 1
+      },
+      {
+        "a": "kelvin",
+        "b": "a b",
+        "cmp": 1
+      },
+      {
+        "a": "kelvin",
+        "b": "artist a feat. artist b",
+        "cmp": 1
+      },
+      {
+        "a": "kelvin",
+        "b": "artist a",
+        "cmp": 1
+      },
+      {
+        "a": "å",
+        "b": "σσσ",
+        "cmp": -1
+      },
+      {
+        "a": "å",
+        "b": "Ꭰ",
+        "cmp": -1
+      },
+      {
+        "a": "å",
+        "b": "ɤ",
+        "cmp": -1
+      },
+      {
+        "a": "å",
+        "b": "kate bush",
+        "cmp": 1
+      },
+      {
+        "a": "å",
+        "b": "﻿björk",
+        "cmp": -1
+      },
+      {
+        "a": "å",
+        "b": "﻿",
+        "cmp": -1
+      },
+      {
+        "a": "å",
+        "b": "👩‍🎤",
+        "cmp": -1
+      },
+      {
+        "a": "å",
+        "b": "a‍b",
+        "cmp": 1
+      },
+      {
+        "a": "å",
+        "b": "a​b",
+        "cmp": 1
+      },
+      {
+        "a": "å",
+        "b": "a᠎b",
+        "cmp": 1
+      },
+      {
+        "a": "å",
+        "b": "a\u001fb",
+        "cmp": 1
+      },
+      {
+        "a": "å",
+        "b": "̈",
+        "cmp": -1
+      },
+      {
+        "a": "å",
+        "b": "x ̅",
+        "cmp": 1
+      },
+      {
+        "a": "å",
+        "b": "a",
+        "cmp": 1
+      },
+      {
+        "a": "å",
+        "b": "𐐨",
+        "cmp": -1
+      },
+      {
+        "a": "å",
+        "b": "😀",
+        "cmp": -1
+      },
+      {
+        "a": "å",
+        "b": "𐀀",
+        "cmp": -1
+      },
+      {
+        "a": "å",
+        "b": "",
+        "cmp": -1
+      },
+      {
+        "a": "å",
+        "b": "�",
+        "cmp": -1
+      },
+      {
+        "a": "å",
+        "b": "￿",
+        "cmp": -1
+      },
+      {
+        "a": "å",
+        "b": "ᅵ",
+        "cmp": -1
+      },
+      {
+        "a": "å",
+        "b": "퟿",
+        "cmp": -1
+      },
+      {
+        "a": "å",
+        "b": "a|b",
+        "cmp": 1
+      },
+      {
+        "a": "å",
+        "b": "a b",
+        "cmp": 1
+      },
+      {
+        "a": "å",
+        "b": "artist a feat. artist b",
+        "cmp": 1
+      },
+      {
+        "a": "å",
+        "b": "artist a",
+        "cmp": 1
+      },
+      {
+        "a": "σσσ",
+        "b": "Ꭰ",
+        "cmp": -1
+      },
+      {
+        "a": "σσσ",
+        "b": "ɤ",
+        "cmp": 1
+      },
+      {
+        "a": "σσσ",
+        "b": "kate bush",
+        "cmp": 1
+      },
+      {
+        "a": "σσσ",
+        "b": "﻿björk",
+        "cmp": -1
+      },
+      {
+        "a": "σσσ",
+        "b": "﻿",
+        "cmp": -1
+      },
+      {
+        "a": "σσσ",
+        "b": "👩‍🎤",
+        "cmp": -1
+      },
+      {
+        "a": "σσσ",
+        "b": "a‍b",
+        "cmp": 1
+      },
+      {
+        "a": "σσσ",
+        "b": "a​b",
+        "cmp": 1
+      },
+      {
+        "a": "σσσ",
+        "b": "a᠎b",
+        "cmp": 1
+      },
+      {
+        "a": "σσσ",
+        "b": "a\u001fb",
+        "cmp": 1
+      },
+      {
+        "a": "σσσ",
+        "b": "̈",
+        "cmp": 1
+      },
+      {
+        "a": "σσσ",
+        "b": "x ̅",
+        "cmp": 1
+      },
+      {
+        "a": "σσσ",
+        "b": "a",
+        "cmp": 1
+      },
+      {
+        "a": "σσσ",
+        "b": "𐐨",
+        "cmp": -1
+      },
+      {
+        "a": "σσσ",
+        "b": "😀",
+        "cmp": -1
+      },
+      {
+        "a": "σσσ",
+        "b": "𐀀",
+        "cmp": -1
+      },
+      {
+        "a": "σσσ",
+        "b": "",
+        "cmp": -1
+      },
+      {
+        "a": "σσσ",
+        "b": "�",
+        "cmp": -1
+      },
+      {
+        "a": "σσσ",
+        "b": "￿",
+        "cmp": -1
+      },
+      {
+        "a": "σσσ",
+        "b": "ᅵ",
+        "cmp": -1
+      },
+      {
+        "a": "σσσ",
+        "b": "퟿",
+        "cmp": -1
+      },
+      {
+        "a": "σσσ",
+        "b": "a|b",
+        "cmp": 1
+      },
+      {
+        "a": "σσσ",
+        "b": "a b",
+        "cmp": 1
+      },
+      {
+        "a": "σσσ",
+        "b": "artist a feat. artist b",
+        "cmp": 1
+      },
+      {
+        "a": "σσσ",
+        "b": "artist a",
+        "cmp": 1
+      },
+      {
+        "a": "Ꭰ",
+        "b": "ɤ",
+        "cmp": 1
+      },
+      {
+        "a": "Ꭰ",
+        "b": "kate bush",
+        "cmp": 1
+      },
+      {
+        "a": "Ꭰ",
+        "b": "﻿björk",
+        "cmp": -1
+      },
+      {
+        "a": "Ꭰ",
+        "b": "﻿",
+        "cmp": -1
+      },
+      {
+        "a": "Ꭰ",
+        "b": "👩‍🎤",
+        "cmp": -1
+      },
+      {
+        "a": "Ꭰ",
+        "b": "a‍b",
+        "cmp": 1
+      },
+      {
+        "a": "Ꭰ",
+        "b": "a​b",
+        "cmp": 1
+      },
+      {
+        "a": "Ꭰ",
+        "b": "a᠎b",
+        "cmp": 1
+      },
+      {
+        "a": "Ꭰ",
+        "b": "a\u001fb",
+        "cmp": 1
+      },
+      {
+        "a": "Ꭰ",
+        "b": "̈",
+        "cmp": 1
+      },
+      {
+        "a": "Ꭰ",
+        "b": "x ̅",
+        "cmp": 1
+      },
+      {
+        "a": "Ꭰ",
+        "b": "a",
+        "cmp": 1
+      },
+      {
+        "a": "Ꭰ",
+        "b": "𐐨",
+        "cmp": -1
+      },
+      {
+        "a": "Ꭰ",
+        "b": "😀",
+        "cmp": -1
+      },
+      {
+        "a": "Ꭰ",
+        "b": "𐀀",
+        "cmp": -1
+      },
+      {
+        "a": "Ꭰ",
+        "b": "",
+        "cmp": -1
+      },
+      {
+        "a": "Ꭰ",
+        "b": "�",
+        "cmp": -1
+      },
+      {
+        "a": "Ꭰ",
+        "b": "￿",
+        "cmp": -1
+      },
+      {
+        "a": "Ꭰ",
+        "b": "ᅵ",
+        "cmp": 1
+      },
+      {
+        "a": "Ꭰ",
+        "b": "퟿",
+        "cmp": -1
+      },
+      {
+        "a": "Ꭰ",
+        "b": "a|b",
+        "cmp": 1
+      },
+      {
+        "a": "Ꭰ",
+        "b": "a b",
+        "cmp": 1
+      },
+      {
+        "a": "Ꭰ",
+        "b": "artist a feat. artist b",
+        "cmp": 1
+      },
+      {
+        "a": "Ꭰ",
+        "b": "artist a",
+        "cmp": 1
+      },
+      {
+        "a": "ɤ",
+        "b": "kate bush",
+        "cmp": 1
+      },
+      {
+        "a": "ɤ",
+        "b": "﻿björk",
+        "cmp": -1
+      },
+      {
+        "a": "ɤ",
+        "b": "﻿",
+        "cmp": -1
+      },
+      {
+        "a": "ɤ",
+        "b": "👩‍🎤",
+        "cmp": -1
+      },
+      {
+        "a": "ɤ",
+        "b": "a‍b",
+        "cmp": 1
+      },
+      {
+        "a": "ɤ",
+        "b": "a​b",
+        "cmp": 1
+      },
+      {
+        "a": "ɤ",
+        "b": "a᠎b",
+        "cmp": 1
+      },
+      {
+        "a": "ɤ",
+        "b": "a\u001fb",
+        "cmp": 1
+      },
+      {
+        "a": "ɤ",
+        "b": "̈",
+        "cmp": -1
+      },
+      {
+        "a": "ɤ",
+        "b": "x ̅",
+        "cmp": 1
+      },
+      {
+        "a": "ɤ",
+        "b": "a",
+        "cmp": 1
+      },
+      {
+        "a": "ɤ",
+        "b": "𐐨",
+        "cmp": -1
+      },
+      {
+        "a": "ɤ",
+        "b": "😀",
+        "cmp": -1
+      },
+      {
+        "a": "ɤ",
+        "b": "𐀀",
+        "cmp": -1
+      },
+      {
+        "a": "ɤ",
+        "b": "",
+        "cmp": -1
+      },
+      {
+        "a": "ɤ",
+        "b": "�",
+        "cmp": -1
+      },
+      {
+        "a": "ɤ",
+        "b": "￿",
+        "cmp": -1
+      },
+      {
+        "a": "ɤ",
+        "b": "ᅵ",
+        "cmp": -1
+      },
+      {
+        "a": "ɤ",
+        "b": "퟿",
+        "cmp": -1
+      },
+      {
+        "a": "ɤ",
+        "b": "a|b",
+        "cmp": 1
+      },
+      {
+        "a": "ɤ",
+        "b": "a b",
+        "cmp": 1
+      },
+      {
+        "a": "ɤ",
+        "b": "artist a feat. artist b",
+        "cmp": 1
+      },
+      {
+        "a": "ɤ",
+        "b": "artist a",
+        "cmp": 1
+      },
+      {
+        "a": "kate bush",
+        "b": "﻿björk",
+        "cmp": -1
+      },
+      {
+        "a": "kate bush",
+        "b": "﻿",
+        "cmp": -1
+      },
+      {
+        "a": "kate bush",
+        "b": "👩‍🎤",
+        "cmp": -1
+      },
+      {
+        "a": "kate bush",
+        "b": "a‍b",
+        "cmp": 1
+      },
+      {
+        "a": "kate bush",
+        "b": "a​b",
+        "cmp": 1
+      },
+      {
+        "a": "kate bush",
+        "b": "a᠎b",
+        "cmp": 1
+      },
+      {
+        "a": "kate bush",
+        "b": "a\u001fb",
+        "cmp": 1
+      },
+      {
+        "a": "kate bush",
+        "b": "̈",
+        "cmp": -1
+      },
+      {
+        "a": "kate bush",
+        "b": "x ̅",
+        "cmp": -1
+      },
+      {
+        "a": "kate bush",
+        "b": "a",
+        "cmp": 1
+      },
+      {
+        "a": "kate bush",
+        "b": "𐐨",
+        "cmp": -1
+      },
+      {
+        "a": "kate bush",
+        "b": "😀",
+        "cmp": -1
+      },
+      {
+        "a": "kate bush",
+        "b": "𐀀",
+        "cmp": -1
+      },
+      {
+        "a": "kate bush",
+        "b": "",
+        "cmp": -1
+      },
+      {
+        "a": "kate bush",
+        "b": "�",
+        "cmp": -1
+      },
+      {
+        "a": "kate bush",
+        "b": "￿",
+        "cmp": -1
+      },
+      {
+        "a": "kate bush",
+        "b": "ᅵ",
+        "cmp": -1
+      },
+      {
+        "a": "kate bush",
+        "b": "퟿",
+        "cmp": -1
+      },
+      {
+        "a": "kate bush",
+        "b": "a|b",
+        "cmp": 1
+      },
+      {
+        "a": "kate bush",
+        "b": "a b",
+        "cmp": 1
+      },
+      {
+        "a": "kate bush",
+        "b": "artist a feat. artist b",
+        "cmp": 1
+      },
+      {
+        "a": "kate bush",
+        "b": "artist a",
+        "cmp": 1
+      },
+      {
+        "a": "﻿björk",
+        "b": "﻿",
+        "cmp": 1
+      },
+      {
+        "a": "﻿björk",
+        "b": "👩‍🎤",
+        "cmp": -1
+      },
+      {
+        "a": "﻿björk",
+        "b": "a‍b",
+        "cmp": 1
+      },
+      {
+        "a": "﻿björk",
+        "b": "a​b",
+        "cmp": 1
+      },
+      {
+        "a": "﻿björk",
+        "b": "a᠎b",
+        "cmp": 1
+      },
+      {
+        "a": "﻿björk",
+        "b": "a\u001fb",
+        "cmp": 1
+      },
+      {
+        "a": "﻿björk",
+        "b": "̈",
+        "cmp": 1
+      },
+      {
+        "a": "﻿björk",
+        "b": "x ̅",
+        "cmp": 1
+      },
+      {
+        "a": "﻿björk",
+        "b": "a",
+        "cmp": 1
+      },
+      {
+        "a": "﻿björk",
+        "b": "𐐨",
+        "cmp": -1
+      },
+      {
+        "a": "﻿björk",
+        "b": "😀",
+        "cmp": -1
+      },
+      {
+        "a": "﻿björk",
+        "b": "𐀀",
+        "cmp": -1
+      },
+      {
+        "a": "﻿björk",
+        "b": "",
+        "cmp": 1
+      },
+      {
+        "a": "﻿björk",
+        "b": "�",
+        "cmp": -1
+      },
+      {
+        "a": "﻿björk",
+        "b": "￿",
+        "cmp": -1
+      },
+      {
+        "a": "﻿björk",
+        "b": "ᅵ",
+        "cmp": 1
+      },
+      {
+        "a": "﻿björk",
+        "b": "퟿",
+        "cmp": 1
+      },
+      {
+        "a": "﻿björk",
+        "b": "a|b",
+        "cmp": 1
+      },
+      {
+        "a": "﻿björk",
+        "b": "a b",
+        "cmp": 1
+      },
+      {
+        "a": "﻿björk",
+        "b": "artist a feat. artist b",
+        "cmp": 1
+      },
+      {
+        "a": "﻿björk",
+        "b": "artist a",
+        "cmp": 1
+      },
+      {
+        "a": "﻿",
+        "b": "👩‍🎤",
+        "cmp": -1
+      },
+      {
+        "a": "﻿",
+        "b": "a‍b",
+        "cmp": 1
+      },
+      {
+        "a": "﻿",
+        "b": "a​b",
+        "cmp": 1
+      },
+      {
+        "a": "﻿",
+        "b": "a᠎b",
+        "cmp": 1
+      },
+      {
+        "a": "﻿",
+        "b": "a\u001fb",
+        "cmp": 1
+      },
+      {
+        "a": "﻿",
+        "b": "̈",
+        "cmp": 1
+      },
+      {
+        "a": "﻿",
+        "b": "x ̅",
+        "cmp": 1
+      },
+      {
+        "a": "﻿",
+        "b": "a",
+        "cmp": 1
+      },
+      {
+        "a": "﻿",
+        "b": "𐐨",
+        "cmp": -1
+      },
+      {
+        "a": "﻿",
+        "b": "😀",
+        "cmp": -1
+      },
+      {
+        "a": "﻿",
+        "b": "𐀀",
+        "cmp": -1
+      },
+      {
+        "a": "﻿",
+        "b": "",
+        "cmp": 1
+      },
+      {
+        "a": "﻿",
+        "b": "�",
+        "cmp": -1
+      },
+      {
+        "a": "﻿",
+        "b": "￿",
+        "cmp": -1
+      },
+      {
+        "a": "﻿",
+        "b": "ᅵ",
+        "cmp": 1
+      },
+      {
+        "a": "﻿",
+        "b": "퟿",
+        "cmp": 1
+      },
+      {
+        "a": "﻿",
+        "b": "a|b",
+        "cmp": 1
+      },
+      {
+        "a": "﻿",
+        "b": "a b",
+        "cmp": 1
+      },
+      {
+        "a": "﻿",
+        "b": "artist a feat. artist b",
+        "cmp": 1
+      },
+      {
+        "a": "﻿",
+        "b": "artist a",
+        "cmp": 1
+      },
+      {
+        "a": "👩‍🎤",
+        "b": "a‍b",
+        "cmp": 1
+      },
+      {
+        "a": "👩‍🎤",
+        "b": "a​b",
+        "cmp": 1
+      },
+      {
+        "a": "👩‍🎤",
+        "b": "a᠎b",
+        "cmp": 1
+      },
+      {
+        "a": "👩‍🎤",
+        "b": "a\u001fb",
+        "cmp": 1
+      },
+      {
+        "a": "👩‍🎤",
+        "b": "̈",
+        "cmp": 1
+      },
+      {
+        "a": "👩‍🎤",
+        "b": "x ̅",
+        "cmp": 1
+      },
+      {
+        "a": "👩‍🎤",
+        "b": "a",
+        "cmp": 1
+      },
+      {
+        "a": "👩‍🎤",
+        "b": "𐐨",
+        "cmp": 1
+      },
+      {
+        "a": "👩‍🎤",
+        "b": "😀",
+        "cmp": -1
+      },
+      {
+        "a": "👩‍🎤",
+        "b": "𐀀",
+        "cmp": 1
+      },
+      {
+        "a": "👩‍🎤",
+        "b": "",
+        "cmp": 1
+      },
+      {
+        "a": "👩‍🎤",
+        "b": "�",
+        "cmp": 1
+      },
+      {
+        "a": "👩‍🎤",
+        "b": "￿",
+        "cmp": 1
+      },
+      {
+        "a": "👩‍🎤",
+        "b": "ᅵ",
+        "cmp": 1
+      },
+      {
+        "a": "👩‍🎤",
+        "b": "퟿",
+        "cmp": 1
+      },
+      {
+        "a": "👩‍🎤",
+        "b": "a|b",
+        "cmp": 1
+      },
+      {
+        "a": "👩‍🎤",
+        "b": "a b",
+        "cmp": 1
+      },
+      {
+        "a": "👩‍🎤",
+        "b": "artist a feat. artist b",
+        "cmp": 1
+      },
+      {
+        "a": "👩‍🎤",
+        "b": "artist a",
+        "cmp": 1
+      },
+      {
+        "a": "a‍b",
+        "b": "a​b",
+        "cmp": 1
+      },
+      {
+        "a": "a‍b",
+        "b": "a᠎b",
+        "cmp": 1
+      },
+      {
+        "a": "a‍b",
+        "b": "a\u001fb",
+        "cmp": 1
+      },
+      {
+        "a": "a‍b",
+        "b": "̈",
+        "cmp": -1
+      },
+      {
+        "a": "a‍b",
+        "b": "x ̅",
+        "cmp": -1
+      },
+      {
+        "a": "a‍b",
+        "b": "a",
+        "cmp": 1
+      },
+      {
+        "a": "a‍b",
+        "b": "𐐨",
+        "cmp": -1
+      },
+      {
+        "a": "a‍b",
+        "b": "😀",
+        "cmp": -1
+      },
+      {
+        "a": "a‍b",
+        "b": "𐀀",
+        "cmp": -1
+      },
+      {
+        "a": "a‍b",
+        "b": "",
+        "cmp": -1
+      },
+      {
+        "a": "a‍b",
+        "b": "�",
+        "cmp": -1
+      },
+      {
+        "a": "a‍b",
+        "b": "￿",
+        "cmp": -1
+      },
+      {
+        "a": "a‍b",
+        "b": "ᅵ",
+        "cmp": -1
+      },
+      {
+        "a": "a‍b",
+        "b": "퟿",
+        "cmp": -1
+      },
+      {
+        "a": "a‍b",
+        "b": "a|b",
+        "cmp": 1
+      },
+      {
+        "a": "a‍b",
+        "b": "a b",
+        "cmp": 1
+      },
+      {
+        "a": "a‍b",
+        "b": "artist a feat. artist b",
+        "cmp": 1
+      },
+      {
+        "a": "a‍b",
+        "b": "artist a",
+        "cmp": 1
+      },
+      {
+        "a": "a​b",
+        "b": "a᠎b",
+        "cmp": 1
+      },
+      {
+        "a": "a​b",
+        "b": "a\u001fb",
+        "cmp": 1
+      },
+      {
+        "a": "a​b",
+        "b": "̈",
+        "cmp": -1
+      },
+      {
+        "a": "a​b",
+        "b": "x ̅",
+        "cmp": -1
+      },
+      {
+        "a": "a​b",
+        "b": "a",
+        "cmp": 1
+      },
+      {
+        "a": "a​b",
+        "b": "𐐨",
+        "cmp": -1
+      },
+      {
+        "a": "a​b",
+        "b": "😀",
+        "cmp": -1
+      },
+      {
+        "a": "a​b",
+        "b": "𐀀",
+        "cmp": -1
+      },
+      {
+        "a": "a​b",
+        "b": "",
+        "cmp": -1
+      },
+      {
+        "a": "a​b",
+        "b": "�",
+        "cmp": -1
+      },
+      {
+        "a": "a​b",
+        "b": "￿",
+        "cmp": -1
+      },
+      {
+        "a": "a​b",
+        "b": "ᅵ",
+        "cmp": -1
+      },
+      {
+        "a": "a​b",
+        "b": "퟿",
+        "cmp": -1
+      },
+      {
+        "a": "a​b",
+        "b": "a|b",
+        "cmp": 1
+      },
+      {
+        "a": "a​b",
+        "b": "a b",
+        "cmp": 1
+      },
+      {
+        "a": "a​b",
+        "b": "artist a feat. artist b",
+        "cmp": 1
+      },
+      {
+        "a": "a​b",
+        "b": "artist a",
+        "cmp": 1
+      },
+      {
+        "a": "a᠎b",
+        "b": "a\u001fb",
+        "cmp": 1
+      },
+      {
+        "a": "a᠎b",
+        "b": "̈",
+        "cmp": -1
+      },
+      {
+        "a": "a᠎b",
+        "b": "x ̅",
+        "cmp": -1
+      },
+      {
+        "a": "a᠎b",
+        "b": "a",
+        "cmp": 1
+      },
+      {
+        "a": "a᠎b",
+        "b": "𐐨",
+        "cmp": -1
+      },
+      {
+        "a": "a᠎b",
+        "b": "😀",
+        "cmp": -1
+      },
+      {
+        "a": "a᠎b",
+        "b": "𐀀",
+        "cmp": -1
+      },
+      {
+        "a": "a᠎b",
+        "b": "",
+        "cmp": -1
+      },
+      {
+        "a": "a᠎b",
+        "b": "�",
+        "cmp": -1
+      },
+      {
+        "a": "a᠎b",
+        "b": "￿",
+        "cmp": -1
+      },
+      {
+        "a": "a᠎b",
+        "b": "ᅵ",
+        "cmp": -1
+      },
+      {
+        "a": "a᠎b",
+        "b": "퟿",
+        "cmp": -1
+      },
+      {
+        "a": "a᠎b",
+        "b": "a|b",
+        "cmp": 1
+      },
+      {
+        "a": "a᠎b",
+        "b": "a b",
+        "cmp": 1
+      },
+      {
+        "a": "a᠎b",
+        "b": "artist a feat. artist b",
+        "cmp": 1
+      },
+      {
+        "a": "a᠎b",
+        "b": "artist a",
+        "cmp": 1
+      },
+      {
+        "a": "a\u001fb",
+        "b": "̈",
+        "cmp": -1
+      },
+      {
+        "a": "a\u001fb",
+        "b": "x ̅",
+        "cmp": -1
+      },
+      {
+        "a": "a\u001fb",
+        "b": "a",
+        "cmp": 1
+      },
+      {
+        "a": "a\u001fb",
+        "b": "𐐨",
+        "cmp": -1
+      },
+      {
+        "a": "a\u001fb",
+        "b": "😀",
+        "cmp": -1
+      },
+      {
+        "a": "a\u001fb",
+        "b": "𐀀",
+        "cmp": -1
+      },
+      {
+        "a": "a\u001fb",
+        "b": "",
+        "cmp": -1
+      },
+      {
+        "a": "a\u001fb",
+        "b": "�",
+        "cmp": -1
+      },
+      {
+        "a": "a\u001fb",
+        "b": "￿",
+        "cmp": -1
+      },
+      {
+        "a": "a\u001fb",
+        "b": "ᅵ",
+        "cmp": -1
+      },
+      {
+        "a": "a\u001fb",
+        "b": "퟿",
+        "cmp": -1
+      },
+      {
+        "a": "a\u001fb",
+        "b": "a|b",
+        "cmp": -1
+      },
+      {
+        "a": "a\u001fb",
+        "b": "a b",
+        "cmp": -1
+      },
+      {
+        "a": "a\u001fb",
+        "b": "artist a feat. artist b",
+        "cmp": -1
+      },
+      {
+        "a": "a\u001fb",
+        "b": "artist a",
+        "cmp": -1
+      },
+      {
+        "a": "̈",
+        "b": "x ̅",
+        "cmp": 1
+      },
+      {
+        "a": "̈",
+        "b": "a",
+        "cmp": 1
+      },
+      {
+        "a": "̈",
+        "b": "𐐨",
+        "cmp": -1
+      },
+      {
+        "a": "̈",
+        "b": "😀",
+        "cmp": -1
+      },
+      {
+        "a": "̈",
+        "b": "𐀀",
+        "cmp": -1
+      },
+      {
+        "a": "̈",
+        "b": "",
+        "cmp": -1
+      },
+      {
+        "a": "̈",
+        "b": "�",
+        "cmp": -1
+      },
+      {
+        "a": "̈",
+        "b": "￿",
+        "cmp": -1
+      },
+      {
+        "a": "̈",
+        "b": "ᅵ",
+        "cmp": -1
+      },
+      {
+        "a": "̈",
+        "b": "퟿",
+        "cmp": -1
+      },
+      {
+        "a": "̈",
+        "b": "a|b",
+        "cmp": 1
+      },
+      {
+        "a": "̈",
+        "b": "a b",
+        "cmp": 1
+      },
+      {
+        "a": "̈",
+        "b": "artist a feat. artist b",
+        "cmp": 1
+      },
+      {
+        "a": "̈",
+        "b": "artist a",
+        "cmp": 1
+      },
+      {
+        "a": "x ̅",
+        "b": "a",
+        "cmp": 1
+      },
+      {
+        "a": "x ̅",
+        "b": "𐐨",
+        "cmp": -1
+      },
+      {
+        "a": "x ̅",
+        "b": "😀",
+        "cmp": -1
+      },
+      {
+        "a": "x ̅",
+        "b": "𐀀",
+        "cmp": -1
+      },
+      {
+        "a": "x ̅",
+        "b": "",
+        "cmp": -1
+      },
+      {
+        "a": "x ̅",
+        "b": "�",
+        "cmp": -1
+      },
+      {
+        "a": "x ̅",
+        "b": "￿",
+        "cmp": -1
+      },
+      {
+        "a": "x ̅",
+        "b": "ᅵ",
+        "cmp": -1
+      },
+      {
+        "a": "x ̅",
+        "b": "퟿",
+        "cmp": -1
+      },
+      {
+        "a": "x ̅",
+        "b": "a|b",
+        "cmp": 1
+      },
+      {
+        "a": "x ̅",
+        "b": "a b",
+        "cmp": 1
+      },
+      {
+        "a": "x ̅",
+        "b": "artist a feat. artist b",
+        "cmp": 1
+      },
+      {
+        "a": "x ̅",
+        "b": "artist a",
+        "cmp": 1
+      },
+      {
+        "a": "a",
+        "b": "𐐨",
+        "cmp": -1
+      },
+      {
+        "a": "a",
+        "b": "😀",
+        "cmp": -1
+      },
+      {
+        "a": "a",
+        "b": "𐀀",
+        "cmp": -1
+      },
+      {
+        "a": "a",
+        "b": "",
+        "cmp": -1
+      },
+      {
+        "a": "a",
+        "b": "�",
+        "cmp": -1
+      },
+      {
+        "a": "a",
+        "b": "￿",
+        "cmp": -1
+      },
+      {
+        "a": "a",
+        "b": "ᅵ",
+        "cmp": -1
+      },
+      {
+        "a": "a",
+        "b": "퟿",
+        "cmp": -1
+      },
+      {
+        "a": "a",
+        "b": "a|b",
+        "cmp": -1
+      },
+      {
+        "a": "a",
+        "b": "a b",
+        "cmp": -1
+      },
+      {
+        "a": "a",
+        "b": "artist a feat. artist b",
+        "cmp": -1
+      },
+      {
+        "a": "a",
+        "b": "artist a",
+        "cmp": -1
+      },
+      {
+        "a": "𐐨",
+        "b": "😀",
+        "cmp": -1
+      },
+      {
+        "a": "𐐨",
+        "b": "𐀀",
+        "cmp": 1
+      },
+      {
+        "a": "𐐨",
+        "b": "",
+        "cmp": 1
+      },
+      {
+        "a": "𐐨",
+        "b": "�",
+        "cmp": 1
+      },
+      {
+        "a": "𐐨",
+        "b": "￿",
+        "cmp": 1
+      },
+      {
+        "a": "𐐨",
+        "b": "ᅵ",
+        "cmp": 1
+      },
+      {
+        "a": "𐐨",
+        "b": "퟿",
+        "cmp": 1
+      },
+      {
+        "a": "𐐨",
+        "b": "a|b",
+        "cmp": 1
+      },
+      {
+        "a": "𐐨",
+        "b": "a b",
+        "cmp": 1
+      },
+      {
+        "a": "𐐨",
+        "b": "artist a feat. artist b",
+        "cmp": 1
+      },
+      {
+        "a": "𐐨",
+        "b": "artist a",
+        "cmp": 1
+      },
+      {
+        "a": "😀",
+        "b": "𐀀",
+        "cmp": 1
+      },
+      {
+        "a": "😀",
+        "b": "",
+        "cmp": 1
+      },
+      {
+        "a": "😀",
+        "b": "�",
+        "cmp": 1
+      },
+      {
+        "a": "😀",
+        "b": "￿",
+        "cmp": 1
+      },
+      {
+        "a": "😀",
+        "b": "ᅵ",
+        "cmp": 1
+      },
+      {
+        "a": "😀",
+        "b": "퟿",
+        "cmp": 1
+      },
+      {
+        "a": "😀",
+        "b": "a|b",
+        "cmp": 1
+      },
+      {
+        "a": "😀",
+        "b": "a b",
+        "cmp": 1
+      },
+      {
+        "a": "😀",
+        "b": "artist a feat. artist b",
+        "cmp": 1
+      },
+      {
+        "a": "😀",
+        "b": "artist a",
+        "cmp": 1
+      },
+      {
+        "a": "𐀀",
+        "b": "",
+        "cmp": 1
+      },
+      {
+        "a": "𐀀",
+        "b": "�",
+        "cmp": 1
+      },
+      {
+        "a": "𐀀",
+        "b": "￿",
+        "cmp": 1
+      },
+      {
+        "a": "𐀀",
+        "b": "ᅵ",
+        "cmp": 1
+      },
+      {
+        "a": "𐀀",
+        "b": "퟿",
+        "cmp": 1
+      },
+      {
+        "a": "𐀀",
+        "b": "a|b",
+        "cmp": 1
+      },
+      {
+        "a": "𐀀",
+        "b": "a b",
+        "cmp": 1
+      },
+      {
+        "a": "𐀀",
+        "b": "artist a feat. artist b",
+        "cmp": 1
+      },
+      {
+        "a": "𐀀",
+        "b": "artist a",
+        "cmp": 1
+      },
+      {
+        "a": "",
+        "b": "�",
+        "cmp": -1
+      },
+      {
+        "a": "",
+        "b": "￿",
+        "cmp": -1
+      },
+      {
+        "a": "",
+        "b": "ᅵ",
+        "cmp": 1
+      },
+      {
+        "a": "",
+        "b": "퟿",
+        "cmp": 1
+      },
+      {
+        "a": "",
+        "b": "a|b",
+        "cmp": 1
+      },
+      {
+        "a": "",
+        "b": "a b",
+        "cmp": 1
+      },
+      {
+        "a": "",
+        "b": "artist a feat. artist b",
+        "cmp": 1
+      },
+      {
+        "a": "",
+        "b": "artist a",
+        "cmp": 1
+      },
+      {
+        "a": "�",
+        "b": "￿",
+        "cmp": -1
+      },
+      {
+        "a": "�",
+        "b": "ᅵ",
+        "cmp": 1
+      },
+      {
+        "a": "�",
+        "b": "퟿",
+        "cmp": 1
+      },
+      {
+        "a": "�",
+        "b": "a|b",
+        "cmp": 1
+      },
+      {
+        "a": "�",
+        "b": "a b",
+        "cmp": 1
+      },
+      {
+        "a": "�",
+        "b": "artist a feat. artist b",
+        "cmp": 1
+      },
+      {
+        "a": "�",
+        "b": "artist a",
+        "cmp": 1
+      },
+      {
+        "a": "￿",
+        "b": "ᅵ",
+        "cmp": 1
+      },
+      {
+        "a": "￿",
+        "b": "퟿",
+        "cmp": 1
+      },
+      {
+        "a": "￿",
+        "b": "a|b",
+        "cmp": 1
+      },
+      {
+        "a": "￿",
+        "b": "a b",
+        "cmp": 1
+      },
+      {
+        "a": "￿",
+        "b": "artist a feat. artist b",
+        "cmp": 1
+      },
+      {
+        "a": "￿",
+        "b": "artist a",
+        "cmp": 1
+      },
+      {
+        "a": "ᅵ",
+        "b": "퟿",
+        "cmp": -1
+      },
+      {
+        "a": "ᅵ",
+        "b": "a|b",
+        "cmp": 1
+      },
+      {
+        "a": "ᅵ",
+        "b": "a b",
+        "cmp": 1
+      },
+      {
+        "a": "ᅵ",
+        "b": "artist a feat. artist b",
+        "cmp": 1
+      },
+      {
+        "a": "ᅵ",
+        "b": "artist a",
+        "cmp": 1
+      },
+      {
+        "a": "퟿",
+        "b": "a|b",
+        "cmp": 1
+      },
+      {
+        "a": "퟿",
+        "b": "a b",
+        "cmp": 1
+      },
+      {
+        "a": "퟿",
+        "b": "artist a feat. artist b",
+        "cmp": 1
+      },
+      {
+        "a": "퟿",
+        "b": "artist a",
+        "cmp": 1
+      },
+      {
+        "a": "a|b",
+        "b": "a b",
+        "cmp": 1
+      },
+      {
+        "a": "a|b",
+        "b": "artist a feat. artist b",
+        "cmp": 1
+      },
+      {
+        "a": "a|b",
+        "b": "artist a",
+        "cmp": 1
+      },
+      {
+        "a": "a b",
+        "b": "artist a feat. artist b",
+        "cmp": -1
+      },
+      {
+        "a": "a b",
+        "b": "artist a",
+        "cmp": -1
+      },
+      {
+        "a": "artist a feat. artist b",
+        "b": "artist a",
+        "cmp": 1
+      }
+    ],
+    "sorted": [
+      "a",
+      "a\u001fb",
+      "a b",
+      "abc123",
+      "artist a",
+      "artist a feat. artist b",
+      "a|b",
+      "a᠎b",
+      "a​b",
+      "a‍b",
+      "björk",
+      "ffl",
+      "fish",
+      "homogenic",
+      "istanbul",
+      "i̇stanbul",
+      "jóga",
+      "kate bush",
+      "kelvin",
+      "ss",
+      "strasse",
+      "x ̅",
+      "å",
+      "ıstanbul",
+      "ɤ",
+      "̈",
+      "σσσ",
+      "ᅵ",
+      "Ꭰ",
+      "퟿",
+      "",
+      "﻿",
+      "﻿björk",
+      "�",
+      "￿",
+      "𐀀",
+      "𐐨",
+      "👩‍🎤",
+      "😀"
+    ]
+  },
+  "description": "Rust oracle music grouping keys: NFKC (Unicode 16) -> full default case fold -> trim and collapse Unicode White_Space. `normalized` is music_key::normalize; `artistKey` is ArtistKey::new (display-string validation first). Pairwise `cmp` is Rust Ord (-1/0/1), i.e. UTF-8 byte / code-point order, not UTF-16 order.",
+  "entries": [
+    {
+      "artistKey": "björk",
+      "artistKeyError": null,
+      "id": "testing_bjork",
+      "input": "Björk",
+      "inputCodePoints": [
+        "U+0042",
+        "U+006A",
+        "U+00F6",
+        "U+0072",
+        "U+006B"
+      ],
+      "normalized": "björk",
+      "normalizedCodePoints": [
+        "U+0062",
+        "U+006A",
+        "U+00F6",
+        "U+0072",
+        "U+006B"
+      ]
+    },
+    {
+      "artistKey": "björk",
+      "artistKeyError": null,
+      "id": "testing_bjork_upper_padded",
+      "input": "  BJÖRK  ",
+      "inputCodePoints": [
+        "U+0020",
+        "U+0020",
+        "U+0042",
+        "U+004A",
+        "U+00D6",
+        "U+0052",
+        "U+004B",
+        "U+0020",
+        "U+0020"
+      ],
+      "normalized": "björk",
+      "normalizedCodePoints": [
+        "U+0062",
+        "U+006A",
+        "U+00F6",
+        "U+0072",
+        "U+006B"
+      ]
+    },
+    {
+      "artistKey": "björk",
+      "artistKeyError": null,
+      "id": "testing_bjork_decomposed",
+      "input": " BJÖRK ",
+      "inputCodePoints": [
+        "U+0020",
+        "U+0042",
+        "U+004A",
+        "U+004F",
+        "U+0308",
+        "U+0052",
+        "U+004B",
+        "U+0020"
+      ],
+      "normalized": "björk",
+      "normalizedCodePoints": [
+        "U+0062",
+        "U+006A",
+        "U+00F6",
+        "U+0072",
+        "U+006B"
+      ]
+    },
+    {
+      "artistKey": "björk",
+      "artistKeyError": null,
+      "id": "testing_bjork_unicode_spaces",
+      "input": "  BJÖRK　",
+      "inputCodePoints": [
+        "U+2003",
+        "U+00A0",
+        "U+0042",
+        "U+004A",
+        "U+00D6",
+        "U+0052",
+        "U+004B",
+        "U+3000"
+      ],
+      "normalized": "björk",
+      "normalizedCodePoints": [
+        "U+0062",
+        "U+006A",
+        "U+00F6",
+        "U+0072",
+        "U+006B"
+      ]
+    },
+    {
+      "artistKey": "jóga",
+      "artistKeyError": null,
+      "id": "testing_joga",
+      "input": "Jóga",
+      "inputCodePoints": [
+        "U+004A",
+        "U+00F3",
+        "U+0067",
+        "U+0061"
+      ],
+      "normalized": "jóga",
+      "normalizedCodePoints": [
+        "U+006A",
+        "U+00F3",
+        "U+0067",
+        "U+0061"
+      ]
+    },
+    {
+      "artistKey": "jóga",
+      "artistKeyError": null,
+      "id": "testing_joga_lower",
+      "input": "jóga",
+      "inputCodePoints": [
+        "U+006A",
+        "U+00F3",
+        "U+0067",
+        "U+0061"
+      ],
+      "normalized": "jóga",
+      "normalizedCodePoints": [
+        "U+006A",
+        "U+00F3",
+        "U+0067",
+        "U+0061"
+      ]
+    },
+    {
+      "artistKey": "jóga",
+      "artistKeyError": null,
+      "id": "testing_joga_decomposed",
+      "input": " jóga ",
+      "inputCodePoints": [
+        "U+0020",
+        "U+006A",
+        "U+006F",
+        "U+0301",
+        "U+0067",
+        "U+0061",
+        "U+00A0"
+      ],
+      "normalized": "jóga",
+      "normalizedCodePoints": [
+        "U+006A",
+        "U+00F3",
+        "U+0067",
+        "U+0061"
+      ]
+    },
+    {
+      "artistKey": "homogenic",
+      "artistKeyError": null,
+      "id": "testing_homogenic",
+      "input": "Homogenic",
+      "inputCodePoints": [
+        "U+0048",
+        "U+006F",
+        "U+006D",
+        "U+006F",
+        "U+0067",
+        "U+0065",
+        "U+006E",
+        "U+0069",
+        "U+0063"
+      ],
+      "normalized": "homogenic",
+      "normalizedCodePoints": [
+        "U+0068",
+        "U+006F",
+        "U+006D",
+        "U+006F",
+        "U+0067",
+        "U+0065",
+        "U+006E",
+        "U+0069",
+        "U+0063"
+      ]
+    },
+    {
+      "artistKey": "homogenic",
+      "artistKeyError": null,
+      "id": "testing_homogenic_padded_upper",
+      "input": " HOMOGENIC ",
+      "inputCodePoints": [
+        "U+0020",
+        "U+0048",
+        "U+004F",
+        "U+004D",
+        "U+004F",
+        "U+0047",
+        "U+0045",
+        "U+004E",
+        "U+0049",
+        "U+0043",
+        "U+0020"
+      ],
+      "normalized": "homogenic",
+      "normalizedCodePoints": [
+        "U+0068",
+        "U+006F",
+        "U+006D",
+        "U+006F",
+        "U+0067",
+        "U+0065",
+        "U+006E",
+        "U+0069",
+        "U+0063"
+      ]
+    },
+    {
+      "artistKey": "strasse",
+      "artistKeyError": null,
+      "id": "sharp_s",
+      "input": "Straße",
+      "inputCodePoints": [
+        "U+0053",
+        "U+0074",
+        "U+0072",
+        "U+0061",
+        "U+00DF",
+        "U+0065"
+      ],
+      "normalized": "strasse",
+      "normalizedCodePoints": [
+        "U+0073",
+        "U+0074",
+        "U+0072",
+        "U+0061",
+        "U+0073",
+        "U+0073",
+        "U+0065"
+      ]
+    },
+    {
+      "artistKey": "strasse",
+      "artistKeyError": null,
+      "id": "sharp_s_upper",
+      "input": "STRASSE",
+      "inputCodePoints": [
+        "U+0053",
+        "U+0054",
+        "U+0052",
+        "U+0041",
+        "U+0053",
+        "U+0053",
+        "U+0045"
+      ],
+      "normalized": "strasse",
+      "normalizedCodePoints": [
+        "U+0073",
+        "U+0074",
+        "U+0072",
+        "U+0061",
+        "U+0073",
+        "U+0073",
+        "U+0065"
+      ]
+    },
+    {
+      "artistKey": "ss",
+      "artistKeyError": null,
+      "id": "capital_sharp_s",
+      "input": "ẞ",
+      "inputCodePoints": [
+        "U+1E9E"
+      ],
+      "normalized": "ss",
+      "normalizedCodePoints": [
+        "U+0073",
+        "U+0073"
+      ]
+    },
+    {
+      "artistKey": "strasse",
+      "artistKeyError": null,
+      "id": "fullwidth_strasse",
+      "input": "ＳＴＲＡＳＳＥ",
+      "inputCodePoints": [
+        "U+FF33",
+        "U+FF34",
+        "U+FF32",
+        "U+FF21",
+        "U+FF33",
+        "U+FF33",
+        "U+FF25"
+      ],
+      "normalized": "strasse",
+      "normalizedCodePoints": [
+        "U+0073",
+        "U+0074",
+        "U+0072",
+        "U+0061",
+        "U+0073",
+        "U+0073",
+        "U+0065"
+      ]
+    },
+    {
+      "artistKey": "abc123",
+      "artistKeyError": null,
+      "id": "fullwidth_digits_letters",
+      "input": "ＡＢＣ１２３",
+      "inputCodePoints": [
+        "U+FF21",
+        "U+FF22",
+        "U+FF23",
+        "U+FF11",
+        "U+FF12",
+        "U+FF13"
+      ],
+      "normalized": "abc123",
+      "normalizedCodePoints": [
+        "U+0061",
+        "U+0062",
+        "U+0063",
+        "U+0031",
+        "U+0032",
+        "U+0033"
+      ]
+    },
+    {
+      "artistKey": "i̇stanbul",
+      "artistKeyError": null,
+      "id": "dotted_capital_i",
+      "input": "İstanbul",
+      "inputCodePoints": [
+        "U+0130",
+        "U+0073",
+        "U+0074",
+        "U+0061",
+        "U+006E",
+        "U+0062",
+        "U+0075",
+        "U+006C"
+      ],
+      "normalized": "i̇stanbul",
+      "normalizedCodePoints": [
+        "U+0069",
+        "U+0307",
+        "U+0073",
+        "U+0074",
+        "U+0061",
+        "U+006E",
+        "U+0062",
+        "U+0075",
+        "U+006C"
+      ]
+    },
+    {
+      "artistKey": "ıstanbul",
+      "artistKeyError": null,
+      "id": "dotless_small_i",
+      "input": "ıstanbul",
+      "inputCodePoints": [
+        "U+0131",
+        "U+0073",
+        "U+0074",
+        "U+0061",
+        "U+006E",
+        "U+0062",
+        "U+0075",
+        "U+006C"
+      ],
+      "normalized": "ıstanbul",
+      "normalizedCodePoints": [
+        "U+0131",
+        "U+0073",
+        "U+0074",
+        "U+0061",
+        "U+006E",
+        "U+0062",
+        "U+0075",
+        "U+006C"
+      ]
+    },
+    {
+      "artistKey": "istanbul",
+      "artistKeyError": null,
+      "id": "plain_istanbul",
+      "input": "Istanbul",
+      "inputCodePoints": [
+        "U+0049",
+        "U+0073",
+        "U+0074",
+        "U+0061",
+        "U+006E",
+        "U+0062",
+        "U+0075",
+        "U+006C"
+      ],
+      "normalized": "istanbul",
+      "normalizedCodePoints": [
+        "U+0069",
+        "U+0073",
+        "U+0074",
+        "U+0061",
+        "U+006E",
+        "U+0062",
+        "U+0075",
+        "U+006C"
+      ]
+    },
+    {
+      "artistKey": "fish",
+      "artistKeyError": null,
+      "id": "fi_ligature",
+      "input": "ﬁsh",
+      "inputCodePoints": [
+        "U+FB01",
+        "U+0073",
+        "U+0068"
+      ],
+      "normalized": "fish",
+      "normalizedCodePoints": [
+        "U+0066",
+        "U+0069",
+        "U+0073",
+        "U+0068"
+      ]
+    },
+    {
+      "artistKey": "ffl",
+      "artistKeyError": null,
+      "id": "ffl_ligature",
+      "input": "ﬄ",
+      "inputCodePoints": [
+        "U+FB04"
+      ],
+      "normalized": "ffl",
+      "normalizedCodePoints": [
+        "U+0066",
+        "U+0066",
+        "U+006C"
+      ]
+    },
+    {
+      "artistKey": "kelvin",
+      "artistKeyError": null,
+      "id": "kelvin_sign",
+      "input": "Kelvin",
+      "inputCodePoints": [
+        "U+212A",
+        "U+0065",
+        "U+006C",
+        "U+0076",
+        "U+0069",
+        "U+006E"
+      ],
+      "normalized": "kelvin",
+      "normalizedCodePoints": [
+        "U+006B",
+        "U+0065",
+        "U+006C",
+        "U+0076",
+        "U+0069",
+        "U+006E"
+      ]
+    },
+    {
+      "artistKey": "kelvin",
+      "artistKeyError": null,
+      "id": "ascii_kelvin",
+      "input": "Kelvin",
+      "inputCodePoints": [
+        "U+004B",
+        "U+0065",
+        "U+006C",
+        "U+0076",
+        "U+0069",
+        "U+006E"
+      ],
+      "normalized": "kelvin",
+      "normalizedCodePoints": [
+        "U+006B",
+        "U+0065",
+        "U+006C",
+        "U+0076",
+        "U+0069",
+        "U+006E"
+      ]
+    },
+    {
+      "artistKey": "å",
+      "artistKeyError": null,
+      "id": "angstrom_sign",
+      "input": "Å",
+      "inputCodePoints": [
+        "U+212B"
+      ],
+      "normalized": "å",
+      "normalizedCodePoints": [
+        "U+00E5"
+      ]
+    },
+    {
+      "artistKey": "σσσ",
+      "artistKeyError": null,
+      "id": "final_sigma",
+      "input": "Σςσ",
+      "inputCodePoints": [
+        "U+03A3",
+        "U+03C2",
+        "U+03C3"
+      ],
+      "normalized": "σσσ",
+      "normalizedCodePoints": [
+        "U+03C3",
+        "U+03C3",
+        "U+03C3"
+      ]
+    },
+    {
+      "artistKey": "Ꭰ",
+      "artistKeyError": null,
+      "id": "cherokee_full_fold",
+      "input": "ꭰ",
+      "inputCodePoints": [
+        "U+AB70"
+      ],
+      "normalized": "Ꭰ",
+      "normalizedCodePoints": [
+        "U+13A0"
+      ]
+    },
+    {
+      "artistKey": "ɤ",
+      "artistKeyError": null,
+      "id": "unicode16_mapping",
+      "input": "Ɤ",
+      "inputCodePoints": [
+        "U+A7CB"
+      ],
+      "normalized": "ɤ",
+      "normalizedCodePoints": [
+        "U+0264"
+      ]
+    },
+    {
+      "artistKey": "kate bush",
+      "artistKeyError": null,
+      "id": "nel_inside",
+      "input": "KateBush",
+      "inputCodePoints": [
+        "U+004B",
+        "U+0061",
+        "U+0074",
+        "U+0065",
+        "U+0085",
+        "U+0042",
+        "U+0075",
+        "U+0073",
+        "U+0068"
+      ],
+      "normalized": "kate bush",
+      "normalizedCodePoints": [
+        "U+006B",
+        "U+0061",
+        "U+0074",
+        "U+0065",
+        "U+0020",
+        "U+0062",
+        "U+0075",
+        "U+0073",
+        "U+0068"
+      ]
+    },
+    {
+      "artistKey": "kate bush",
+      "artistKeyError": null,
+      "id": "nel_edges",
+      "input": "Kate Bush",
+      "inputCodePoints": [
+        "U+0085",
+        "U+004B",
+        "U+0061",
+        "U+0074",
+        "U+0065",
+        "U+0020",
+        "U+0042",
+        "U+0075",
+        "U+0073",
+        "U+0068",
+        "U+0085"
+      ],
+      "normalized": "kate bush",
+      "normalizedCodePoints": [
+        "U+006B",
+        "U+0061",
+        "U+0074",
+        "U+0065",
+        "U+0020",
+        "U+0062",
+        "U+0075",
+        "U+0073",
+        "U+0068"
+      ]
+    },
+    {
+      "artistKey": "kate bush",
+      "artistKeyError": null,
+      "id": "mixed_whitespace",
+      "input": "Kate  \t\n　 Bush",
+      "inputCodePoints": [
+        "U+004B",
+        "U+0061",
+        "U+0074",
+        "U+0065",
+        "U+2003",
+        "U+00A0",
+        "U+0009",
+        "U+000A",
+        "U+3000",
+        "U+2028",
+        "U+0042",
+        "U+0075",
+        "U+0073",
+        "U+0068"
+      ],
+      "normalized": "kate bush",
+      "normalizedCodePoints": [
+        "U+006B",
+        "U+0061",
+        "U+0074",
+        "U+0065",
+        "U+0020",
+        "U+0062",
+        "U+0075",
+        "U+0073",
+        "U+0068"
+      ]
+    },
+    {
+      "artistKey": "kate bush",
+      "artistKeyError": null,
+      "id": "ascii_kate_bush",
+      "input": "Kate Bush",
+      "inputCodePoints": [
+        "U+004B",
+        "U+0061",
+        "U+0074",
+        "U+0065",
+        "U+0020",
+        "U+0042",
+        "U+0075",
+        "U+0073",
+        "U+0068"
+      ],
+      "normalized": "kate bush",
+      "normalizedCodePoints": [
+        "U+006B",
+        "U+0061",
+        "U+0074",
+        "U+0065",
+        "U+0020",
+        "U+0062",
+        "U+0075",
+        "U+0073",
+        "U+0068"
+      ]
+    },
+    {
+      "artistKey": "﻿björk",
+      "artistKeyError": null,
+      "id": "bom_leading",
+      "input": "﻿Björk",
+      "inputCodePoints": [
+        "U+FEFF",
+        "U+0042",
+        "U+006A",
+        "U+00F6",
+        "U+0072",
+        "U+006B"
+      ],
+      "normalized": "﻿björk",
+      "normalizedCodePoints": [
+        "U+FEFF",
+        "U+0062",
+        "U+006A",
+        "U+00F6",
+        "U+0072",
+        "U+006B"
+      ]
+    },
+    {
+      "artistKey": "﻿",
+      "artistKeyError": null,
+      "id": "bom_only",
+      "input": "﻿",
+      "inputCodePoints": [
+        "U+FEFF"
+      ],
+      "normalized": "﻿",
+      "normalizedCodePoints": [
+        "U+FEFF"
+      ]
+    },
+    {
+      "artistKey": "👩‍🎤",
+      "artistKeyError": null,
+      "id": "zwj_sequence",
+      "input": "👩‍🎤",
+      "inputCodePoints": [
+        "U+1F469",
+        "U+200D",
+        "U+1F3A4"
+      ],
+      "normalized": "👩‍🎤",
+      "normalizedCodePoints": [
+        "U+1F469",
+        "U+200D",
+        "U+1F3A4"
+      ]
+    },
+    {
+      "artistKey": "a‍b",
+      "artistKeyError": null,
+      "id": "zwj_between_letters",
+      "input": "a‍b",
+      "inputCodePoints": [
+        "U+0061",
+        "U+200D",
+        "U+0062"
+      ],
+      "normalized": "a‍b",
+      "normalizedCodePoints": [
+        "U+0061",
+        "U+200D",
+        "U+0062"
+      ]
+    },
+    {
+      "artistKey": "a​b",
+      "artistKeyError": null,
+      "id": "zwsp_not_whitespace",
+      "input": "a​b",
+      "inputCodePoints": [
+        "U+0061",
+        "U+200B",
+        "U+0062"
+      ],
+      "normalized": "a​b",
+      "normalizedCodePoints": [
+        "U+0061",
+        "U+200B",
+        "U+0062"
+      ]
+    },
+    {
+      "artistKey": "a᠎b",
+      "artistKeyError": null,
+      "id": "mongolian_vowel_separator",
+      "input": "a᠎b",
+      "inputCodePoints": [
+        "U+0061",
+        "U+180E",
+        "U+0062"
+      ],
+      "normalized": "a᠎b",
+      "normalizedCodePoints": [
+        "U+0061",
+        "U+180E",
+        "U+0062"
+      ]
+    },
+    {
+      "artistKey": "a\u001fb",
+      "artistKeyError": null,
+      "id": "unit_separator_not_whitespace",
+      "input": "a\u001fb",
+      "inputCodePoints": [
+        "U+0061",
+        "U+001F",
+        "U+0062"
+      ],
+      "normalized": "a\u001fb",
+      "normalizedCodePoints": [
+        "U+0061",
+        "U+001F",
+        "U+0062"
+      ]
+    },
+    {
+      "artistKey": "̈",
+      "artistKeyError": null,
+      "id": "diaeresis_spacing_mark",
+      "input": "¨",
+      "inputCodePoints": [
+        "U+00A8"
+      ],
+      "normalized": "̈",
+      "normalizedCodePoints": [
+        "U+0308"
+      ]
+    },
+    {
+      "artistKey": "x ̅",
+      "artistKeyError": null,
+      "id": "overline",
+      "input": "x‾",
+      "inputCodePoints": [
+        "U+0078",
+        "U+203E"
+      ],
+      "normalized": "x ̅",
+      "normalizedCodePoints": [
+        "U+0078",
+        "U+0020",
+        "U+0305"
+      ]
+    },
+    {
+      "artistKey": "a",
+      "artistKeyError": null,
+      "id": "math_bold_a_astral",
+      "input": "𝐀",
+      "inputCodePoints": [
+        "U+1D400"
+      ],
+      "normalized": "a",
+      "normalizedCodePoints": [
+        "U+0061"
+      ]
+    },
+    {
+      "artistKey": "𐐨",
+      "artistKeyError": null,
+      "id": "deseret_capital_astral",
+      "input": "𐐀",
+      "inputCodePoints": [
+        "U+10400"
+      ],
+      "normalized": "𐐨",
+      "normalizedCodePoints": [
+        "U+10428"
+      ]
+    },
+    {
+      "artistKey": "😀",
+      "artistKeyError": null,
+      "id": "emoji_astral",
+      "input": "😀",
+      "inputCodePoints": [
+        "U+1F600"
+      ],
+      "normalized": "😀",
+      "normalizedCodePoints": [
+        "U+1F600"
+      ]
+    },
+    {
+      "artistKey": "𐀀",
+      "artistKeyError": null,
+      "id": "first_astral",
+      "input": "𐀀",
+      "inputCodePoints": [
+        "U+10000"
+      ],
+      "normalized": "𐀀",
+      "normalizedCodePoints": [
+        "U+10000"
+      ]
+    },
+    {
+      "artistKey": "",
+      "artistKeyError": null,
+      "id": "private_use_e000",
+      "input": "",
+      "inputCodePoints": [
+        "U+E000"
+      ],
+      "normalized": "",
+      "normalizedCodePoints": [
+        "U+E000"
+      ]
+    },
+    {
+      "artistKey": "�",
+      "artistKeyError": null,
+      "id": "replacement_fffd",
+      "input": "�",
+      "inputCodePoints": [
+        "U+FFFD"
+      ],
+      "normalized": "�",
+      "normalizedCodePoints": [
+        "U+FFFD"
+      ]
+    },
+    {
+      "artistKey": "￿",
+      "artistKeyError": null,
+      "id": "noncharacter_ffff",
+      "input": "￿",
+      "inputCodePoints": [
+        "U+FFFF"
+      ],
+      "normalized": "￿",
+      "normalizedCodePoints": [
+        "U+FFFF"
+      ]
+    },
+    {
+      "artistKey": "ᅵ",
+      "artistKeyError": null,
+      "id": "halfwidth_hangul_ffdc",
+      "input": "ￜ",
+      "inputCodePoints": [
+        "U+FFDC"
+      ],
+      "normalized": "ᅵ",
+      "normalizedCodePoints": [
+        "U+1175"
+      ]
+    },
+    {
+      "artistKey": "퟿",
+      "artistKeyError": null,
+      "id": "hangul_jamo_extended_d7ff",
+      "input": "퟿",
+      "inputCodePoints": [
+        "U+D7FF"
+      ],
+      "normalized": "퟿",
+      "normalizedCodePoints": [
+        "U+D7FF"
+      ]
+    },
+    {
+      "artistKey": "a|b",
+      "artistKeyError": null,
+      "id": "tuple_separator_ab",
+      "input": "a|b",
+      "inputCodePoints": [
+        "U+0061",
+        "U+007C",
+        "U+0062"
+      ],
+      "normalized": "a|b",
+      "normalizedCodePoints": [
+        "U+0061",
+        "U+007C",
+        "U+0062"
+      ]
+    },
+    {
+      "artistKey": "a",
+      "artistKeyError": null,
+      "id": "tuple_separator_a",
+      "input": "a",
+      "inputCodePoints": [
+        "U+0061"
+      ],
+      "normalized": "a",
+      "normalizedCodePoints": [
+        "U+0061"
+      ]
+    },
+    {
+      "artistKey": "a b",
+      "artistKeyError": null,
+      "id": "prefix_a_space_b",
+      "input": "a b",
+      "inputCodePoints": [
+        "U+0061",
+        "U+0020",
+        "U+0062"
+      ],
+      "normalized": "a b",
+      "normalizedCodePoints": [
+        "U+0061",
+        "U+0020",
+        "U+0062"
+      ]
+    },
+    {
+      "artistKey": "artist a feat. artist b",
+      "artistKeyError": null,
+      "id": "credit_feat",
+      "input": "Artist A feat. Artist B",
+      "inputCodePoints": [
+        "U+0041",
+        "U+0072",
+        "U+0074",
+        "U+0069",
+        "U+0073",
+        "U+0074",
+        "U+0020",
+        "U+0041",
+        "U+0020",
+        "U+0066",
+        "U+0065",
+        "U+0061",
+        "U+0074",
+        "U+002E",
+        "U+0020",
+        "U+0041",
+        "U+0072",
+        "U+0074",
+        "U+0069",
+        "U+0073",
+        "U+0074",
+        "U+0020",
+        "U+0042"
+      ],
+      "normalized": "artist a feat. artist b",
+      "normalizedCodePoints": [
+        "U+0061",
+        "U+0072",
+        "U+0074",
+        "U+0069",
+        "U+0073",
+        "U+0074",
+        "U+0020",
+        "U+0061",
+        "U+0020",
+        "U+0066",
+        "U+0065",
+        "U+0061",
+        "U+0074",
+        "U+002E",
+        "U+0020",
+        "U+0061",
+        "U+0072",
+        "U+0074",
+        "U+0069",
+        "U+0073",
+        "U+0074",
+        "U+0020",
+        "U+0062"
+      ]
+    },
+    {
+      "artistKey": "artist a",
+      "artistKeyError": null,
+      "id": "credit_plain",
+      "input": "Artist A",
+      "inputCodePoints": [
+        "U+0041",
+        "U+0072",
+        "U+0074",
+        "U+0069",
+        "U+0073",
+        "U+0074",
+        "U+0020",
+        "U+0041"
+      ],
+      "normalized": "artist a",
+      "normalizedCodePoints": [
+        "U+0061",
+        "U+0072",
+        "U+0074",
+        "U+0069",
+        "U+0073",
+        "U+0074",
+        "U+0020",
+        "U+0061"
+      ]
+    },
+    {
+      "artistKey": null,
+      "artistKeyError": {
+        "code": "invalid_field",
+        "field": "artist",
+        "message": "expected 1–256 Unicode scalars and at most 1024 UTF-8 bytes, with nonempty trimmed text"
+      },
+      "id": "whitespace_only",
+      "input": " \t　",
+      "inputCodePoints": [
+        "U+0020",
+        "U+0009",
+        "U+3000"
+      ],
+      "normalized": "",
+      "normalizedCodePoints": []
+    },
+    {
+      "artistKey": null,
+      "artistKeyError": {
+        "code": "invalid_field",
+        "field": "artist",
+        "message": "expected 1–256 Unicode scalars and at most 1024 UTF-8 bytes, with nonempty trimmed text"
+      },
+      "id": "nel_only",
+      "input": "",
+      "inputCodePoints": [
+        "U+0085"
+      ],
+      "normalized": "",
+      "normalizedCodePoints": []
+    },
+    {
+      "artistKey": null,
+      "artistKeyError": {
+        "code": "invalid_field",
+        "field": "artist",
+        "message": "expected 1–256 Unicode scalars and at most 1024 UTF-8 bytes, with nonempty trimmed text"
+      },
+      "id": "nbsp_only",
+      "input": " ",
+      "inputCodePoints": [
+        "U+00A0"
+      ],
+      "normalized": "",
+      "normalizedCodePoints": []
+    },
+    {
+      "artistKey": null,
+      "artistKeyError": {
+        "code": "invalid_field",
+        "field": "artist",
+        "message": "expected 1–256 Unicode scalars and at most 1024 UTF-8 bytes, with nonempty trimmed text"
+      },
+      "id": "empty",
+      "input": "",
+      "inputCodePoints": [],
+      "normalized": "",
+      "normalizedCodePoints": []
+    }
+  ],
+  "source": "crates/core/examples/export_goldens.rs",
+  "trackKeyOrdering": {
+    "pairs": [
+      {
+        "a": [
+          "björk",
+          "jóga"
+        ],
+        "b": [
+          "radiohead",
+          "weird fishes"
+        ],
+        "cmp": -1
+      },
+      {
+        "a": [
+          "björk",
+          "jóga"
+        ],
+        "b": [
+          "radiohead",
+          "karma police"
+        ],
+        "cmp": -1
+      },
+      {
+        "a": [
+          "björk",
+          "jóga"
+        ],
+        "b": [
+          "radiohead",
+          "no surprises"
+        ],
+        "cmp": -1
+      },
+      {
+        "a": [
+          "björk",
+          "jóga"
+        ],
+        "b": [
+          "kate bush",
+          "running up that hill"
+        ],
+        "cmp": -1
+      },
+      {
+        "a": [
+          "björk",
+          "jóga"
+        ],
+        "b": [
+          "kate bush",
+          "cloudbusting"
+        ],
+        "cmp": -1
+      },
+      {
+        "a": [
+          "björk",
+          "jóga"
+        ],
+        "b": [
+          "a|b",
+          "c"
+        ],
+        "cmp": 1
+      },
+      {
+        "a": [
+          "björk",
+          "jóga"
+        ],
+        "b": [
+          "a",
+          "b|c"
+        ],
+        "cmp": 1
+      },
+      {
+        "a": [
+          "björk",
+          "jóga"
+        ],
+        "b": [
+          "a b",
+          "a"
+        ],
+        "cmp": 1
+      },
+      {
+        "a": [
+          "björk",
+          "jóga"
+        ],
+        "b": [
+          "a",
+          "z"
+        ],
+        "cmp": 1
+      },
+      {
+        "a": [
+          "björk",
+          "jóga"
+        ],
+        "b": [
+          "a",
+          ""
+        ],
+        "cmp": 1
+      },
+      {
+        "a": [
+          "björk",
+          "jóga"
+        ],
+        "b": [
+          "a",
+          "𐀀"
+        ],
+        "cmp": 1
+      },
+      {
+        "a": [
+          "björk",
+          "jóga"
+        ],
+        "b": [
+          "",
+          "a"
+        ],
+        "cmp": -1
+      },
+      {
+        "a": [
+          "björk",
+          "jóga"
+        ],
+        "b": [
+          "𐀀",
+          "a"
+        ],
+        "cmp": -1
+      },
+      {
+        "a": [
+          "radiohead",
+          "weird fishes"
+        ],
+        "b": [
+          "radiohead",
+          "karma police"
+        ],
+        "cmp": 1
+      },
+      {
+        "a": [
+          "radiohead",
+          "weird fishes"
+        ],
+        "b": [
+          "radiohead",
+          "no surprises"
+        ],
+        "cmp": 1
+      },
+      {
+        "a": [
+          "radiohead",
+          "weird fishes"
+        ],
+        "b": [
+          "kate bush",
+          "running up that hill"
+        ],
+        "cmp": 1
+      },
+      {
+        "a": [
+          "radiohead",
+          "weird fishes"
+        ],
+        "b": [
+          "kate bush",
+          "cloudbusting"
+        ],
+        "cmp": 1
+      },
+      {
+        "a": [
+          "radiohead",
+          "weird fishes"
+        ],
+        "b": [
+          "a|b",
+          "c"
+        ],
+        "cmp": 1
+      },
+      {
+        "a": [
+          "radiohead",
+          "weird fishes"
+        ],
+        "b": [
+          "a",
+          "b|c"
+        ],
+        "cmp": 1
+      },
+      {
+        "a": [
+          "radiohead",
+          "weird fishes"
+        ],
+        "b": [
+          "a b",
+          "a"
+        ],
+        "cmp": 1
+      },
+      {
+        "a": [
+          "radiohead",
+          "weird fishes"
+        ],
+        "b": [
+          "a",
+          "z"
+        ],
+        "cmp": 1
+      },
+      {
+        "a": [
+          "radiohead",
+          "weird fishes"
+        ],
+        "b": [
+          "a",
+          ""
+        ],
+        "cmp": 1
+      },
+      {
+        "a": [
+          "radiohead",
+          "weird fishes"
+        ],
+        "b": [
+          "a",
+          "𐀀"
+        ],
+        "cmp": 1
+      },
+      {
+        "a": [
+          "radiohead",
+          "weird fishes"
+        ],
+        "b": [
+          "",
+          "a"
+        ],
+        "cmp": -1
+      },
+      {
+        "a": [
+          "radiohead",
+          "weird fishes"
+        ],
+        "b": [
+          "𐀀",
+          "a"
+        ],
+        "cmp": -1
+      },
+      {
+        "a": [
+          "radiohead",
+          "karma police"
+        ],
+        "b": [
+          "radiohead",
+          "no surprises"
+        ],
+        "cmp": -1
+      },
+      {
+        "a": [
+          "radiohead",
+          "karma police"
+        ],
+        "b": [
+          "kate bush",
+          "running up that hill"
+        ],
+        "cmp": 1
+      },
+      {
+        "a": [
+          "radiohead",
+          "karma police"
+        ],
+        "b": [
+          "kate bush",
+          "cloudbusting"
+        ],
+        "cmp": 1
+      },
+      {
+        "a": [
+          "radiohead",
+          "karma police"
+        ],
+        "b": [
+          "a|b",
+          "c"
+        ],
+        "cmp": 1
+      },
+      {
+        "a": [
+          "radiohead",
+          "karma police"
+        ],
+        "b": [
+          "a",
+          "b|c"
+        ],
+        "cmp": 1
+      },
+      {
+        "a": [
+          "radiohead",
+          "karma police"
+        ],
+        "b": [
+          "a b",
+          "a"
+        ],
+        "cmp": 1
+      },
+      {
+        "a": [
+          "radiohead",
+          "karma police"
+        ],
+        "b": [
+          "a",
+          "z"
+        ],
+        "cmp": 1
+      },
+      {
+        "a": [
+          "radiohead",
+          "karma police"
+        ],
+        "b": [
+          "a",
+          ""
+        ],
+        "cmp": 1
+      },
+      {
+        "a": [
+          "radiohead",
+          "karma police"
+        ],
+        "b": [
+          "a",
+          "𐀀"
+        ],
+        "cmp": 1
+      },
+      {
+        "a": [
+          "radiohead",
+          "karma police"
+        ],
+        "b": [
+          "",
+          "a"
+        ],
+        "cmp": -1
+      },
+      {
+        "a": [
+          "radiohead",
+          "karma police"
+        ],
+        "b": [
+          "𐀀",
+          "a"
+        ],
+        "cmp": -1
+      },
+      {
+        "a": [
+          "radiohead",
+          "no surprises"
+        ],
+        "b": [
+          "kate bush",
+          "running up that hill"
+        ],
+        "cmp": 1
+      },
+      {
+        "a": [
+          "radiohead",
+          "no surprises"
+        ],
+        "b": [
+          "kate bush",
+          "cloudbusting"
+        ],
+        "cmp": 1
+      },
+      {
+        "a": [
+          "radiohead",
+          "no surprises"
+        ],
+        "b": [
+          "a|b",
+          "c"
+        ],
+        "cmp": 1
+      },
+      {
+        "a": [
+          "radiohead",
+          "no surprises"
+        ],
+        "b": [
+          "a",
+          "b|c"
+        ],
+        "cmp": 1
+      },
+      {
+        "a": [
+          "radiohead",
+          "no surprises"
+        ],
+        "b": [
+          "a b",
+          "a"
+        ],
+        "cmp": 1
+      },
+      {
+        "a": [
+          "radiohead",
+          "no surprises"
+        ],
+        "b": [
+          "a",
+          "z"
+        ],
+        "cmp": 1
+      },
+      {
+        "a": [
+          "radiohead",
+          "no surprises"
+        ],
+        "b": [
+          "a",
+          ""
+        ],
+        "cmp": 1
+      },
+      {
+        "a": [
+          "radiohead",
+          "no surprises"
+        ],
+        "b": [
+          "a",
+          "𐀀"
+        ],
+        "cmp": 1
+      },
+      {
+        "a": [
+          "radiohead",
+          "no surprises"
+        ],
+        "b": [
+          "",
+          "a"
+        ],
+        "cmp": -1
+      },
+      {
+        "a": [
+          "radiohead",
+          "no surprises"
+        ],
+        "b": [
+          "𐀀",
+          "a"
+        ],
+        "cmp": -1
+      },
+      {
+        "a": [
+          "kate bush",
+          "running up that hill"
+        ],
+        "b": [
+          "kate bush",
+          "cloudbusting"
+        ],
+        "cmp": 1
+      },
+      {
+        "a": [
+          "kate bush",
+          "running up that hill"
+        ],
+        "b": [
+          "a|b",
+          "c"
+        ],
+        "cmp": 1
+      },
+      {
+        "a": [
+          "kate bush",
+          "running up that hill"
+        ],
+        "b": [
+          "a",
+          "b|c"
+        ],
+        "cmp": 1
+      },
+      {
+        "a": [
+          "kate bush",
+          "running up that hill"
+        ],
+        "b": [
+          "a b",
+          "a"
+        ],
+        "cmp": 1
+      },
+      {
+        "a": [
+          "kate bush",
+          "running up that hill"
+        ],
+        "b": [
+          "a",
+          "z"
+        ],
+        "cmp": 1
+      },
+      {
+        "a": [
+          "kate bush",
+          "running up that hill"
+        ],
+        "b": [
+          "a",
+          ""
+        ],
+        "cmp": 1
+      },
+      {
+        "a": [
+          "kate bush",
+          "running up that hill"
+        ],
+        "b": [
+          "a",
+          "𐀀"
+        ],
+        "cmp": 1
+      },
+      {
+        "a": [
+          "kate bush",
+          "running up that hill"
+        ],
+        "b": [
+          "",
+          "a"
+        ],
+        "cmp": -1
+      },
+      {
+        "a": [
+          "kate bush",
+          "running up that hill"
+        ],
+        "b": [
+          "𐀀",
+          "a"
+        ],
+        "cmp": -1
+      },
+      {
+        "a": [
+          "kate bush",
+          "cloudbusting"
+        ],
+        "b": [
+          "a|b",
+          "c"
+        ],
+        "cmp": 1
+      },
+      {
+        "a": [
+          "kate bush",
+          "cloudbusting"
+        ],
+        "b": [
+          "a",
+          "b|c"
+        ],
+        "cmp": 1
+      },
+      {
+        "a": [
+          "kate bush",
+          "cloudbusting"
+        ],
+        "b": [
+          "a b",
+          "a"
+        ],
+        "cmp": 1
+      },
+      {
+        "a": [
+          "kate bush",
+          "cloudbusting"
+        ],
+        "b": [
+          "a",
+          "z"
+        ],
+        "cmp": 1
+      },
+      {
+        "a": [
+          "kate bush",
+          "cloudbusting"
+        ],
+        "b": [
+          "a",
+          ""
+        ],
+        "cmp": 1
+      },
+      {
+        "a": [
+          "kate bush",
+          "cloudbusting"
+        ],
+        "b": [
+          "a",
+          "𐀀"
+        ],
+        "cmp": 1
+      },
+      {
+        "a": [
+          "kate bush",
+          "cloudbusting"
+        ],
+        "b": [
+          "",
+          "a"
+        ],
+        "cmp": -1
+      },
+      {
+        "a": [
+          "kate bush",
+          "cloudbusting"
+        ],
+        "b": [
+          "𐀀",
+          "a"
+        ],
+        "cmp": -1
+      },
+      {
+        "a": [
+          "a|b",
+          "c"
+        ],
+        "b": [
+          "a",
+          "b|c"
+        ],
+        "cmp": 1
+      },
+      {
+        "a": [
+          "a|b",
+          "c"
+        ],
+        "b": [
+          "a b",
+          "a"
+        ],
+        "cmp": 1
+      },
+      {
+        "a": [
+          "a|b",
+          "c"
+        ],
+        "b": [
+          "a",
+          "z"
+        ],
+        "cmp": 1
+      },
+      {
+        "a": [
+          "a|b",
+          "c"
+        ],
+        "b": [
+          "a",
+          ""
+        ],
+        "cmp": 1
+      },
+      {
+        "a": [
+          "a|b",
+          "c"
+        ],
+        "b": [
+          "a",
+          "𐀀"
+        ],
+        "cmp": 1
+      },
+      {
+        "a": [
+          "a|b",
+          "c"
+        ],
+        "b": [
+          "",
+          "a"
+        ],
+        "cmp": -1
+      },
+      {
+        "a": [
+          "a|b",
+          "c"
+        ],
+        "b": [
+          "𐀀",
+          "a"
+        ],
+        "cmp": -1
+      },
+      {
+        "a": [
+          "a",
+          "b|c"
+        ],
+        "b": [
+          "a b",
+          "a"
+        ],
+        "cmp": -1
+      },
+      {
+        "a": [
+          "a",
+          "b|c"
+        ],
+        "b": [
+          "a",
+          "z"
+        ],
+        "cmp": -1
+      },
+      {
+        "a": [
+          "a",
+          "b|c"
+        ],
+        "b": [
+          "a",
+          ""
+        ],
+        "cmp": -1
+      },
+      {
+        "a": [
+          "a",
+          "b|c"
+        ],
+        "b": [
+          "a",
+          "𐀀"
+        ],
+        "cmp": -1
+      },
+      {
+        "a": [
+          "a",
+          "b|c"
+        ],
+        "b": [
+          "",
+          "a"
+        ],
+        "cmp": -1
+      },
+      {
+        "a": [
+          "a",
+          "b|c"
+        ],
+        "b": [
+          "𐀀",
+          "a"
+        ],
+        "cmp": -1
+      },
+      {
+        "a": [
+          "a b",
+          "a"
+        ],
+        "b": [
+          "a",
+          "z"
+        ],
+        "cmp": 1
+      },
+      {
+        "a": [
+          "a b",
+          "a"
+        ],
+        "b": [
+          "a",
+          ""
+        ],
+        "cmp": 1
+      },
+      {
+        "a": [
+          "a b",
+          "a"
+        ],
+        "b": [
+          "a",
+          "𐀀"
+        ],
+        "cmp": 1
+      },
+      {
+        "a": [
+          "a b",
+          "a"
+        ],
+        "b": [
+          "",
+          "a"
+        ],
+        "cmp": -1
+      },
+      {
+        "a": [
+          "a b",
+          "a"
+        ],
+        "b": [
+          "𐀀",
+          "a"
+        ],
+        "cmp": -1
+      },
+      {
+        "a": [
+          "a",
+          "z"
+        ],
+        "b": [
+          "a",
+          ""
+        ],
+        "cmp": -1
+      },
+      {
+        "a": [
+          "a",
+          "z"
+        ],
+        "b": [
+          "a",
+          "𐀀"
+        ],
+        "cmp": -1
+      },
+      {
+        "a": [
+          "a",
+          "z"
+        ],
+        "b": [
+          "",
+          "a"
+        ],
+        "cmp": -1
+      },
+      {
+        "a": [
+          "a",
+          "z"
+        ],
+        "b": [
+          "𐀀",
+          "a"
+        ],
+        "cmp": -1
+      },
+      {
+        "a": [
+          "a",
+          ""
+        ],
+        "b": [
+          "a",
+          "𐀀"
+        ],
+        "cmp": -1
+      },
+      {
+        "a": [
+          "a",
+          ""
+        ],
+        "b": [
+          "",
+          "a"
+        ],
+        "cmp": -1
+      },
+      {
+        "a": [
+          "a",
+          ""
+        ],
+        "b": [
+          "𐀀",
+          "a"
+        ],
+        "cmp": -1
+      },
+      {
+        "a": [
+          "a",
+          "𐀀"
+        ],
+        "b": [
+          "",
+          "a"
+        ],
+        "cmp": -1
+      },
+      {
+        "a": [
+          "a",
+          "𐀀"
+        ],
+        "b": [
+          "𐀀",
+          "a"
+        ],
+        "cmp": -1
+      },
+      {
+        "a": [
+          "",
+          "a"
+        ],
+        "b": [
+          "𐀀",
+          "a"
+        ],
+        "cmp": -1
+      }
+    ]
+  },
+  "tuples": [
+    {
+      "album": "Homogenic",
+      "albumKey": [
+        "björk",
+        "homogenic"
+      ],
+      "albumKeyError": null,
+      "artist": "Björk",
+      "track": "Jóga",
+      "trackKey": [
+        "björk",
+        "jóga"
+      ],
+      "trackKeyError": null
+    },
+    {
+      "album": " HOMOGENIC ",
+      "albumKey": [
+        "björk",
+        "homogenic"
+      ],
+      "albumKeyError": null,
+      "artist": "  BJÖRK  ",
+      "track": "jóga",
+      "trackKey": [
+        "björk",
+        "jóga"
+      ],
+      "trackKeyError": null
+    },
+    {
+      "album": null,
+      "albumKey": null,
+      "albumKeyError": null,
+      "artist": " BJÖRK",
+      "track": " jóga ",
+      "trackKey": [
+        "björk",
+        "jóga"
+      ],
+      "trackKeyError": null
+    },
+    {
+      "album": "In Rainbows",
+      "albumKey": [
+        "radiohead",
+        "in rainbows"
+      ],
+      "albumKeyError": null,
+      "artist": "Radiohead",
+      "track": "Weird Fishes",
+      "trackKey": [
+        "radiohead",
+        "weird fishes"
+      ],
+      "trackKeyError": null
+    },
+    {
+      "album": "OK Computer",
+      "albumKey": [
+        "radiohead",
+        "ok computer"
+      ],
+      "albumKeyError": null,
+      "artist": "Radiohead",
+      "track": "Karma Police",
+      "trackKey": [
+        "radiohead",
+        "karma police"
+      ],
+      "trackKeyError": null
+    },
+    {
+      "album": "OK Computer",
+      "albumKey": [
+        "radiohead",
+        "ok computer"
+      ],
+      "albumKeyError": null,
+      "artist": "Radiohead",
+      "track": "No Surprises",
+      "trackKey": [
+        "radiohead",
+        "no surprises"
+      ],
+      "trackKeyError": null
+    },
+    {
+      "album": null,
+      "albumKey": null,
+      "albumKeyError": null,
+      "artist": "Kate Bush",
+      "track": "Running Up That Hill",
+      "trackKey": [
+        "kate bush",
+        "running up that hill"
+      ],
+      "trackKeyError": null
+    },
+    {
+      "album": "Hounds of Love",
+      "albumKey": [
+        "kate bush",
+        "hounds of love"
+      ],
+      "albumKeyError": null,
+      "artist": "Kate Bush",
+      "track": "Cloudbusting",
+      "trackKey": [
+        "kate bush",
+        "cloudbusting"
+      ],
+      "trackKeyError": null
+    },
+    {
+      "album": "c",
+      "albumKey": [
+        "a|b",
+        "c"
+      ],
+      "albumKeyError": null,
+      "artist": "a|b",
+      "track": "c",
+      "trackKey": [
+        "a|b",
+        "c"
+      ],
+      "trackKeyError": null
+    },
+    {
+      "album": "b|c",
+      "albumKey": [
+        "a",
+        "b|c"
+      ],
+      "albumKeyError": null,
+      "artist": "a",
+      "track": "b|c",
+      "trackKey": [
+        "a",
+        "b|c"
+      ],
+      "trackKeyError": null
+    },
+    {
+      "album": null,
+      "albumKey": null,
+      "albumKeyError": null,
+      "artist": "a b",
+      "track": "a",
+      "trackKey": [
+        "a b",
+        "a"
+      ],
+      "trackKeyError": null
+    },
+    {
+      "album": null,
+      "albumKey": null,
+      "albumKeyError": null,
+      "artist": "a",
+      "track": "z",
+      "trackKey": [
+        "a",
+        "z"
+      ],
+      "trackKeyError": null
+    },
+    {
+      "album": null,
+      "albumKey": null,
+      "albumKeyError": null,
+      "artist": "a",
+      "track": "",
+      "trackKey": [
+        "a",
+        ""
+      ],
+      "trackKeyError": null
+    },
+    {
+      "album": null,
+      "albumKey": null,
+      "albumKeyError": null,
+      "artist": "a",
+      "track": "𐀀",
+      "trackKey": [
+        "a",
+        "𐀀"
+      ],
+      "trackKeyError": null
+    },
+    {
+      "album": null,
+      "albumKey": null,
+      "albumKeyError": null,
+      "artist": "",
+      "track": "a",
+      "trackKey": [
+        "",
+        "a"
+      ],
+      "trackKeyError": null
+    },
+    {
+      "album": null,
+      "albumKey": null,
+      "albumKeyError": null,
+      "artist": "𐀀",
+      "track": "a",
+      "trackKey": [
+        "𐀀",
+        "a"
+      ],
+      "trackKeyError": null
+    },
+    {
+      "album": null,
+      "albumKey": null,
+      "albumKeyError": null,
+      "artist": "Björk",
+      "track": "",
+      "trackKey": null,
+      "trackKeyError": {
+        "code": "invalid_field",
+        "field": "track",
+        "message": "expected 1–256 Unicode scalars and at most 1024 UTF-8 bytes, with nonempty trimmed text"
+      }
+    },
+    {
+      "album": "",
+      "albumKey": null,
+      "albumKeyError": {
+        "code": "invalid_field",
+        "field": "album",
+        "message": "expected 1–256 Unicode scalars and at most 1024 UTF-8 bytes, with nonempty trimmed text"
+      },
+      "artist": "Björk",
+      "track": "Jóga",
+      "trackKey": [
+        "björk",
+        "jóga"
+      ],
+      "trackKeyError": null
+    },
+    {
+      "album": " 　",
+      "albumKey": null,
+      "albumKeyError": {
+        "code": "invalid_field",
+        "field": "album",
+        "message": "expected 1–256 Unicode scalars and at most 1024 UTF-8 bytes, with nonempty trimmed text"
+      },
+      "artist": "Björk",
+      "track": "Jóga",
+      "trackKey": [
+        "björk",
+        "jóga"
+      ],
+      "trackKeyError": null
+    },
+    {
+      "album": "Homogenic",
+      "albumKey": null,
+      "albumKeyError": {
+        "code": "invalid_field",
+        "field": "artist",
+        "message": "expected 1–256 Unicode scalars and at most 1024 UTF-8 bytes, with nonempty trimmed text"
+      },
+      "artist": "",
+      "track": "Jóga",
+      "trackKey": null,
+      "trackKeyError": {
+        "code": "invalid_field",
+        "field": "artist",
+        "message": "expected 1–256 Unicode scalars and at most 1024 UTF-8 bytes, with nonempty trimmed text"
+      }
+    }
+  ],
+  "unicodeVersion": "16.0.0"
+}

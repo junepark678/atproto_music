@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "fixtureOnly": false,
+  "artifactSha256": "89ec2297963533f98b8fefde4e300b9f196e6e22ea5c5148133c75b2190f0777",
+  "prerequisites": {
+    "dedicatedIdentities": [],
+    "ownedLexiconPrefix": null,
+    "publicHttpsOrigin": null,
+    "pdsEndpoints": [],
+    "independentPdsOperatorsVerified": false,
+    "relayUrl": null,
+    "relayCoverageVerified": false
+  },
+  "evidence": {}
+}

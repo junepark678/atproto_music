@@ -1,0 +1,12 @@
+{
+  // Production application sources, running only on Node 26.
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "outDir": ".tsbuild",
+    "lib": ["es2024", "dom", "dom.iterable"],
+    "types": ["node"]
+  },
+  "include": ["src/**/*.ts"],
+  "references": [{ "path": "../packages/core" }, { "path": "../packages/atproto" }]
+}

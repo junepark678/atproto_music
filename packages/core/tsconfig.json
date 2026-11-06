@@ -1,0 +1,11 @@
+{
+  // Pure, I/O-free code shared by workerd and the browser: only the APIs both
+  // provide (ES2024 plus the web platform globals such as crypto/TextEncoder).
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "outDir": ".tsbuild",
+    "lib": ["es2024", "dom", "dom.iterable"]
+  },
+  "include": ["src/**/*.ts", "test-support/**/*.ts", "test/**/*.ts"]
+}

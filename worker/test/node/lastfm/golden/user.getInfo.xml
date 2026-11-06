@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<lfm status="ok">
+  <user>
+    <name>alice</name>
+    <realname/>
+    <url>https://music.214510.xyz/u/did:plc:aaaaaaaaaaaaaaaaaaaaaaaa</url>
+    <country>None</country>
+    <age>0</age>
+    <gender>n</gender>
+    <subscriber>0</subscriber>
+    <playcount>42</playcount>
+    <artist_count>7</artist_count>
+    <track_count>20</track_count>
+    <album_count>9</album_count>
+    <playlists>0</playlists>
+    <bootstrap>0</bootstrap>
+    <registered unixtime="1767225600">1767225600</registered>
+    <type>user</type>
+    <image size="small"/>
+    <image size="medium"/>
+    <image size="large"/>
+    <image size="extralarge"/>
+  </user>
+</lfm>

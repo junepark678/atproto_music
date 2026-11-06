@@ -1,0 +1,11 @@
+{
+  "id": "01JH9ZK3W5N2Q8R4T6V8X0Y2Z4",
+  "kind": "scrobble.create",
+  "origin": "web",
+  "state": "succeeded",
+  "attempts": 1,
+  "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/3mfixture22a2",
+  "cid": "bafyreieogjytekr7rpqty3rtkfjjglj35ub2ipqjh6ftn7rbxwqe5242jq",
+  "createdAt": "2026-01-15T12:00:00Z",
+  "updatedAt": "2026-01-15T12:00:01Z"
+}

@@ -1,0 +1,7 @@
+# Pages are public; the JSON API, admin and OAuth callback are not for crawlers.
+# /oauth/client-metadata.json stays crawlable: authorization servers fetch it.
+User-agent: *
+Disallow: /api/
+Disallow: /internal/
+Disallow: /health/
+Disallow: /oauth/callback

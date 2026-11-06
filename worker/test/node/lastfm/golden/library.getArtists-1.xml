@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<lfm status="ok">
+  <artists user="alice" page="1" perPage="50" totalPages="1" total="1">
+    <artist>
+      <name>Test Artist</name>
+      <playcount>12</playcount>
+      <tagcount>0</tagcount>
+      <mbid/>
+      <url>https://www.last.fm/music/Test+Artist</url>
+      <streamable>0</streamable>
+      <image size="small"/>
+      <image size="medium"/>
+      <image size="large"/>
+      <image size="extralarge"/>
+    </artist>
+  </artists>
+</lfm>

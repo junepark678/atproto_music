@@ -1,0 +1,21 @@
+{
+  // Solution root for `tsc -b` (npm run typecheck): builds every workspace
+  // project through its reference, then typechecks the Node-side tooling that
+  // no workspace project owns: the root configs, scripts/**/*.ts (including
+  // scripts/test) and the per-project vitest configs.
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "outDir": ".tsbuild",
+    "lib": ["es2024"],
+    "types": ["node"]
+  },
+  "include": ["*.ts", "scripts/**/*.ts", "packages/*/vitest.config.ts", "worker/vitest.*.config.ts"],
+  "references": [
+    { "path": "packages/core" },
+    { "path": "packages/atproto" },
+    { "path": "worker" },
+    { "path": "worker/test" },
+    { "path": "web" }
+  ]
+}

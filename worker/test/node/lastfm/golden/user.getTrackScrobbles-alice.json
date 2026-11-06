@@ -1,0 +1,85 @@
+{
+  "trackscrobbles": {
+    "track": [
+      {
+        "artist": {
+          "mbid": "",
+          "#text": "Björk"
+        },
+        "streamable": "0",
+        "image": [
+          {
+            "size": "small",
+            "#text": ""
+          },
+          {
+            "size": "medium",
+            "#text": ""
+          },
+          {
+            "size": "large",
+            "#text": ""
+          },
+          {
+            "size": "extralarge",
+            "#text": ""
+          }
+        ],
+        "mbid": "",
+        "album": {
+          "mbid": "",
+          "#text": "Homogenic"
+        },
+        "name": "Jóga",
+        "url": "https://www.last.fm/music/Bj%C3%B6rk/_/J%C3%B3ga",
+        "date": {
+          "uts": "1768474800",
+          "#text": "15 Jan 2026, 11:00"
+        }
+      },
+      {
+        "artist": {
+          "mbid": "",
+          "#text": "  BJÖRK  "
+        },
+        "streamable": "0",
+        "image": [
+          {
+            "size": "small",
+            "#text": ""
+          },
+          {
+            "size": "medium",
+            "#text": ""
+          },
+          {
+            "size": "large",
+            "#text": ""
+          },
+          {
+            "size": "extralarge",
+            "#text": ""
+          }
+        ],
+        "mbid": "",
+        "album": {
+          "mbid": "",
+          "#text": " HOMOGENIC "
+        },
+        "name": "jóga",
+        "url": "https://www.last.fm/music/++BJ%C3%96RK++/_/j%C3%B3ga",
+        "date": {
+          "uts": "1768388400",
+          "#text": "14 Jan 2026, 11:00"
+        }
+      }
+    ],
+    "@attr": {
+      "user": "alice",
+      "page": "1",
+      "perPage": "50",
+      "totalPages": "1",
+      "total": "2"
+    }
+  }
+}

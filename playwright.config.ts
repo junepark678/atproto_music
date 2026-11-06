@@ -1,0 +1,51 @@
+// Browser end-to-end tests (W6-03; ADR 0004 §10.1 "Browser"): `npm run test:e2e`.
+//
+// One stack per run (scripts/e2e/start-stack.ts as the webServer): the
+// Node e2e bundle, the SPA built into work/e2e/dist, and in-process fakes for
+// the AS, PLC, two PDSs, Jetstream, Last.fm and ListenBrainz. Chromium
+// reaches the fixture HTTPS hosts only through the stack's proxy; every
+// other destination is refused, so no test touches the real network.
+//
+// The suites share the stack and its state (the journey writes records), so
+// they run serially in one worker. Ports come from E2E_*_PORT (defaults in
+// scripts/e2e/dev-env.ts DEFAULT_PORTS).
+
+import { defineConfig, devices } from '@playwright/test';
+import { portsFromEnv, workerOrigin } from './scripts/e2e/dev-env';
+
+const ports = portsFromEnv();
+const origin = 'https://music.e2e.test';
+
+export default defineConfig({
+  testDir: 'web/tests',
+  testMatch: '*.spec.ts',
+  fullyParallel: false,
+  workers: 1,
+  retries: 0,
+  forbidOnly: true,
+  timeout: 120_000,
+  expect: { timeout: 15_000 },
+  outputDir: 'test-results/e2e',
+  reporter: [['list']],
+  use: {
+    baseURL: origin,
+    // Fixture hosts and the Node app use self-signed HTTPS through the allowlisted proxy.
+    proxy: { server: `http://127.0.0.1:${ports.proxy}`, bypass: '127.0.0.1' },
+    ignoreHTTPSErrors: true,
+    trace: 'retain-on-failure',
+    screenshot: 'only-on-failure',
+    acceptDownloads: true,
+  },
+  projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
+  webServer: {
+    command: 'npx tsx scripts/e2e/start-stack.ts',
+    // The fixture host is browser-only and resolves through the test proxy.
+    // Playwright's webServer readiness probe must use the loopback listener.
+    url: `${workerOrigin(ports)}/health/live`,
+    reuseExistingServer: false,
+    timeout: 240_000,
+    stdout: 'pipe',
+    stderr: 'pipe',
+    gracefulShutdown: { signal: 'SIGTERM', timeout: 15_000 },
+  },
+});

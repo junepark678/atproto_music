@@ -1,0 +1,40 @@
+{
+  "user": {
+    "name": "alice",
+    "realname": "",
+    "url": "https://music.214510.xyz/u/did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+    "country": "None",
+    "age": "0",
+    "gender": "n",
+    "subscriber": "0",
+    "playcount": "42",
+    "artist_count": "7",
+    "track_count": "20",
+    "album_count": "9",
+    "playlists": "0",
+    "bootstrap": "0",
+    "registered": {
+      "unixtime": "1767225600",
+      "#text": 1767225600
+    },
+    "type": "user",
+    "image": [
+      {
+        "size": "small",
+        "#text": ""
+      },
+      {
+        "size": "medium",
+        "#text": ""
+      },
+      {
+        "size": "large",
+        "#text": ""
+      },
+      {
+        "size": "extralarge",
+        "#text": ""
+      }
+    ]
+  }
+}

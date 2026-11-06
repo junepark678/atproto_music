@@ -1,0 +1,2452 @@
+[
+  {
+    "name": "minimal_scrobble_input",
+    "schema": "ScrobbleInput",
+    "valid": true,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z"
+    },
+    "reason": ""
+  },
+  {
+    "name": "raw_oversize_before_trim",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  ",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z"
+    },
+    "reason": ""
+  },
+  {
+    "name": "unicode_scalar_utf8_boundary",
+    "schema": "ScrobbleInput",
+    "valid": true,
+    "value": {
+      "artist": "𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z"
+    },
+    "reason": ""
+  },
+  {
+    "name": "unicode_scalar_oversize",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z"
+    },
+    "reason": ""
+  },
+  {
+    "name": "whitespace_artist",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": " \t\n",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z"
+    },
+    "reason": ""
+  },
+  {
+    "name": "omitted_optional_album",
+    "schema": "ScrobbleInput",
+    "valid": true,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z"
+    },
+    "reason": ""
+  },
+  {
+    "name": "empty_album",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z",
+      "album": ""
+    },
+    "reason": ""
+  },
+  {
+    "name": "null_album",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z",
+      "album": null
+    },
+    "reason": ""
+  },
+  {
+    "name": "wrong_artist_type",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": 42,
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z"
+    },
+    "reason": ""
+  },
+  {
+    "name": "duration_min",
+    "schema": "ScrobbleInput",
+    "valid": true,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z",
+      "durationSeconds": 1
+    },
+    "reason": ""
+  },
+  {
+    "name": "duration_max",
+    "schema": "ScrobbleInput",
+    "valid": true,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z",
+      "durationSeconds": 86400
+    },
+    "reason": ""
+  },
+  {
+    "name": "duration_zero",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z",
+      "durationSeconds": 0
+    },
+    "reason": ""
+  },
+  {
+    "name": "duration_over_max",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z",
+      "durationSeconds": 86401
+    },
+    "reason": ""
+  },
+  {
+    "name": "duration_fraction",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z",
+      "durationSeconds": 1.5
+    },
+    "reason": ""
+  },
+  {
+    "name": "duration_boolean",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z",
+      "durationSeconds": true
+    },
+    "reason": ""
+  },
+  {
+    "name": "invalid_mbid",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z",
+      "recordingMbid": "music-id"
+    },
+    "reason": ""
+  },
+  {
+    "name": "historical_lower_boundary",
+    "schema": "ScrobbleInput",
+    "valid": true,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "1970-01-01T00:00:00Z"
+    },
+    "reason": ""
+  },
+  {
+    "name": "historical_below_boundary",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "1969-12-31T23:59:59Z"
+    },
+    "reason": ""
+  },
+  {
+    "name": "future_boundary_300",
+    "schema": "ScrobbleInput",
+    "valid": true,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T12:05:00Z"
+    },
+    "reason": ""
+  },
+  {
+    "name": "future_rejected_301",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T12:05:01Z"
+    },
+    "reason": ""
+  },
+  {
+    "name": "utc_zero_offset",
+    "schema": "ScrobbleInput",
+    "valid": true,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00+00:00"
+    },
+    "reason": ""
+  },
+  {
+    "name": "non_utc_offset",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T12:00:00+01:00"
+    },
+    "reason": ""
+  },
+  {
+    "name": "unknown_offset",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00-00:00"
+    },
+    "reason": ""
+  },
+  {
+    "name": "timestamp_missing_offset",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00"
+    },
+    "reason": ""
+  },
+  {
+    "name": "invalid_calendar_date",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-02-30T11:00:00Z"
+    },
+    "reason": ""
+  },
+  {
+    "name": "valid_did_web",
+    "schema": "Did",
+    "valid": true,
+    "value": "did:web:music.example:users:alice",
+    "reason": ""
+  },
+  {
+    "name": "valid_did_plc",
+    "schema": "Did",
+    "valid": true,
+    "value": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+    "reason": ""
+  },
+  {
+    "name": "invalid_did_url",
+    "schema": "Did",
+    "valid": false,
+    "value": "https://music.example/alice",
+    "reason": ""
+  },
+  {
+    "name": "invalid_did_handle",
+    "schema": "Did",
+    "valid": false,
+    "value": "alice.test",
+    "reason": ""
+  },
+  {
+    "name": "invalid_uri_bare_rkey",
+    "schema": "AtUri",
+    "valid": false,
+    "value": "r01",
+    "reason": ""
+  },
+  {
+    "name": "invalid_uri_handle_authority",
+    "schema": "AtUri",
+    "valid": false,
+    "value": "at://alice.test/com.example.atmusic.scrobble/r01",
+    "reason": ""
+  },
+  {
+    "name": "invalid_uri_missing_key",
+    "schema": "AtUri",
+    "valid": false,
+    "value": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble",
+    "reason": ""
+  },
+  {
+    "name": "wrong_scrobble_count_type",
+    "schema": "Profile",
+    "valid": false,
+    "value": {
+      "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "handle": "alice.test",
+      "joinedAt": "2026-01-15T12:00:00Z",
+      "indexedAt": "2026-01-15T12:00:00Z",
+      "totalScrobbles": "1",
+      "followerCount": 0,
+      "followingCount": 1,
+      "indexing": {
+        "state": "current",
+        "caughtUp": true,
+        "lastIndexedAt": "2026-01-15T12:00:00Z",
+        "lagSeconds": 0
+      }
+    },
+    "reason": ""
+  },
+  {
+    "name": "negative_profile_count",
+    "schema": "Profile",
+    "valid": false,
+    "value": {
+      "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "handle": "alice.test",
+      "joinedAt": "2026-01-15T12:00:00Z",
+      "indexedAt": "2026-01-15T12:00:00Z",
+      "totalScrobbles": -1,
+      "followerCount": 0,
+      "followingCount": 1,
+      "indexing": {
+        "state": "current",
+        "caughtUp": true,
+        "lastIndexedAt": "2026-01-15T12:00:00Z",
+        "lagSeconds": 0
+      }
+    },
+    "reason": ""
+  },
+  {
+    "name": "closed_response_object",
+    "schema": "ScrobbleResult",
+    "valid": false,
+    "value": {
+      "scrobble": {
+        "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r01",
+        "cid": "bafyreieogjytekr7rpqty3rtkfjjglj35ub2ipqjh6ftn7rbxwqe5242jq",
+        "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+        "revision": "3mfixture",
+        "artist": "Björk",
+        "track": "Jóga",
+        "album": "Homogenic",
+        "listenedAt": "2026-01-15T11:00:00Z",
+        "createdAt": "2026-01-15T12:00:00Z",
+        "durationSeconds": 305,
+        "recordingMbid": "13f12616-51d7-4023-a70b-a288ced4693a",
+        "indexedAt": "2026-01-15T12:00:00Z"
+      },
+      "accessToken": "not-real"
+    },
+    "reason": ""
+  },
+  {
+    "name": "invalid_cid",
+    "schema": "Cid",
+    "valid": false,
+    "value": "not-a-content-id",
+    "reason": ""
+  },
+  {
+    "name": "empty_page",
+    "schema": "ScrobblePage",
+    "valid": true,
+    "value": {
+      "items": [],
+      "nextCursor": null,
+      "asOf": "2026-01-15T12:00:00Z",
+      "indexing": {
+        "state": "current",
+        "caughtUp": true,
+        "lastIndexedAt": "2026-01-15T12:00:00Z",
+        "lagSeconds": 0
+      }
+    },
+    "reason": ""
+  },
+  {
+    "name": "missing_page_indexing",
+    "schema": "ScrobblePage",
+    "valid": false,
+    "value": {
+      "items": [
+        {
+          "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r01",
+          "cid": "bafyreieogjytekr7rpqty3rtkfjjglj35ub2ipqjh6ftn7rbxwqe5242jq",
+          "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+          "revision": "3mfixture",
+          "artist": "Björk",
+          "track": "Jóga",
+          "album": "Homogenic",
+          "listenedAt": "2026-01-15T11:00:00Z",
+          "createdAt": "2026-01-15T12:00:00Z",
+          "durationSeconds": 305,
+          "recordingMbid": "13f12616-51d7-4023-a70b-a288ced4693a",
+          "indexedAt": "2026-01-15T12:00:00Z"
+        }
+      ],
+      "nextCursor": null,
+      "asOf": "2026-01-15T12:00:00Z"
+    },
+    "reason": ""
+  },
+  {
+    "name": "missing_artist",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z"
+    },
+    "reason": ""
+  },
+  {
+    "name": "missing_track",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "listenedAt": "2026-01-15T11:00:00Z"
+    },
+    "reason": ""
+  },
+  {
+    "name": "missing_listenedAt",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga"
+    },
+    "reason": ""
+  },
+  {
+    "name": "reject_client_type",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z",
+      "$type": "com.example.atmusic.scrobble"
+    },
+    "reason": ""
+  },
+  {
+    "name": "reject_client_did",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z",
+      "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "reason": ""
+  },
+  {
+    "name": "reject_client_owner",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z",
+      "owner": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "reason": ""
+  },
+  {
+    "name": "reject_client_createdAt",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z",
+      "createdAt": "2026-01-15T12:00:00Z"
+    },
+    "reason": ""
+  },
+  {
+    "name": "reject_client_uri",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z",
+      "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r01"
+    },
+    "reason": ""
+  },
+  {
+    "name": "reject_client_cid",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z",
+      "cid": "bafyreieogjytekr7rpqty3rtkfjjglj35ub2ipqjh6ftn7rbxwqe5242jq"
+    },
+    "reason": ""
+  },
+  {
+    "name": "reject_client_arbitrary",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z",
+      "arbitrary": true
+    },
+    "reason": ""
+  },
+  {
+    "name": "unicode_white_space_trim",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "  　",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z"
+    }
+  },
+  {
+    "name": "control_is_not_unicode_white_space",
+    "schema": "ScrobbleInput",
+    "valid": true,
+    "value": {
+      "artist": "\u001c",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z"
+    }
+  },
+  {
+    "name": "future_rejected_300_plus_nanosecond",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T12:05:00.000000001Z"
+    }
+  },
+  {
+    "name": "future_exact_fractional_boundary",
+    "schema": "ScrobbleInput",
+    "valid": true,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T12:05:00.000000000Z"
+    }
+  },
+  {
+    "name": "valid_generic_did_syntax",
+    "schema": "Did",
+    "valid": true,
+    "value": "did:example:fixture-identifier"
+  },
+  {
+    "name": "valid_percent_encoded_did_web",
+    "schema": "Did",
+    "valid": true,
+    "value": "did:web:music.example%3A8443:users:alice"
+  },
+  {
+    "name": "invalid_percent_encoded_did",
+    "schema": "Did",
+    "valid": false,
+    "value": "did:web:music%GGexample"
+  },
+  {
+    "name": "invalid_did_method_case",
+    "schema": "Did",
+    "valid": false,
+    "value": "did:Web:music.example"
+  },
+  {
+    "name": "valid_numeric_nsid_segment",
+    "schema": "AtUri",
+    "valid": true,
+    "value": "at://did:web:music.example/net.123.music.scrobble/r01"
+  },
+  {
+    "name": "duration_integral_decimal_rejected",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z",
+      "durationSeconds": 1.0
+    }
+  },
+  {
+    "name": "timestamp_lowercase_t_rejected",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15t11:00:00Z"
+    }
+  },
+  {
+    "name": "timestamp_lowercase_z_rejected",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00z"
+    }
+  },
+  {
+    "name": "timestamp_leap_second_rejected",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:60Z"
+    }
+  },
+  {
+    "name": "timestamp_arbitrary_fractional_precision",
+    "schema": "ScrobbleInput",
+    "valid": true,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00.12345678912345Z"
+    }
+  },
+  {
+    "name": "raw_boundary_with_trimming",
+    "schema": "ScrobbleInput",
+    "valid": true,
+    "value": {
+      "artist": "  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  ",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z"
+    }
+  },
+  {
+    "name": "notify_uri",
+    "schema": "NotifyInput",
+    "valid": true,
+    "value": {
+      "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r01"
+    }
+  },
+  {
+    "name": "notify_did",
+    "schema": "NotifyInput",
+    "valid": true,
+    "value": {
+      "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  },
+  {
+    "name": "notify_uri_and_did_rejected",
+    "schema": "NotifyInput",
+    "valid": false,
+    "value": {
+      "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r01",
+      "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  },
+  {
+    "name": "notify_empty_rejected",
+    "schema": "NotifyInput",
+    "valid": false,
+    "value": {}
+  },
+  {
+    "name": "notify_unknown_field_rejected",
+    "schema": "NotifyInput",
+    "valid": false,
+    "value": {
+      "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r01",
+      "priority": 1
+    }
+  },
+  {
+    "name": "notify_handle_authority_rejected",
+    "schema": "NotifyInput",
+    "valid": false,
+    "value": {
+      "uri": "at://alice.test/com.example.atmusic.scrobble/r01"
+    }
+  },
+  {
+    "name": "notify_handle_as_did_rejected",
+    "schema": "NotifyInput",
+    "valid": false,
+    "value": {
+      "did": "alice.test"
+    }
+  },
+  {
+    "name": "notify_accepted_queued",
+    "schema": "NotifyAccepted",
+    "valid": true,
+    "value": {
+      "state": "queued"
+    }
+  },
+  {
+    "name": "notify_accepted_only_queued",
+    "schema": "NotifyAccepted",
+    "valid": false,
+    "value": {
+      "state": "pending"
+    }
+  },
+  {
+    "name": "record_status_indexed",
+    "schema": "RecordStatus",
+    "valid": true,
+    "value": {
+      "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r01",
+      "state": "indexed",
+      "cid": "bafyreieogjytekr7rpqty3rtkfjjglj35ub2ipqjh6ftn7rbxwqe5242jq",
+      "revision": "3mfixture",
+      "indexing": {
+        "state": "current",
+        "caughtUp": true,
+        "lastIndexedAt": "2026-01-15T12:00:00Z",
+        "lagSeconds": 0
+      }
+    }
+  },
+  {
+    "name": "record_status_indexed_needs_cid",
+    "schema": "RecordStatus",
+    "valid": false,
+    "value": {
+      "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r01",
+      "state": "indexed",
+      "revision": "3mfixture",
+      "indexing": {
+        "state": "current",
+        "caughtUp": true,
+        "lastIndexedAt": "2026-01-15T12:00:00Z",
+        "lagSeconds": 0
+      }
+    }
+  },
+  {
+    "name": "record_status_pending",
+    "schema": "RecordStatus",
+    "valid": true,
+    "value": {
+      "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r01",
+      "state": "pending",
+      "indexing": {
+        "state": "current",
+        "caughtUp": true,
+        "lastIndexedAt": "2026-01-15T12:00:00Z",
+        "lagSeconds": 0
+      }
+    }
+  },
+  {
+    "name": "record_status_absent",
+    "schema": "RecordStatus",
+    "valid": true,
+    "value": {
+      "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r01",
+      "state": "absent",
+      "revision": "3mfixture",
+      "indexing": {
+        "state": "current",
+        "caughtUp": true,
+        "lastIndexedAt": "2026-01-15T12:00:00Z",
+        "lagSeconds": 0
+      }
+    }
+  },
+  {
+    "name": "record_status_excluded_with_reason",
+    "schema": "RecordStatus",
+    "valid": true,
+    "value": {
+      "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r01",
+      "state": "excluded",
+      "cid": "bafyreieogjytekr7rpqty3rtkfjjglj35ub2ipqjh6ftn7rbxwqe5242jq",
+      "revision": "3mfixture",
+      "reason": "future_listened_at",
+      "indexing": {
+        "state": "current",
+        "caughtUp": true,
+        "lastIndexedAt": "2026-01-15T12:00:00Z",
+        "lagSeconds": 0
+      }
+    }
+  },
+  {
+    "name": "record_status_excluded_needs_reason",
+    "schema": "RecordStatus",
+    "valid": false,
+    "value": {
+      "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r01",
+      "state": "excluded",
+      "revision": "3mfixture",
+      "indexing": {
+        "state": "current",
+        "caughtUp": true,
+        "lastIndexedAt": "2026-01-15T12:00:00Z",
+        "lagSeconds": 0
+      }
+    }
+  },
+  {
+    "name": "record_status_reason_only_when_excluded",
+    "schema": "RecordStatus",
+    "valid": false,
+    "value": {
+      "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r01",
+      "state": "absent",
+      "reason": "deleted",
+      "indexing": {
+        "state": "current",
+        "caughtUp": true,
+        "lastIndexedAt": "2026-01-15T12:00:00Z",
+        "lagSeconds": 0
+      }
+    }
+  },
+  {
+    "name": "record_status_unknown",
+    "schema": "RecordStatus",
+    "valid": true,
+    "value": {
+      "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r01",
+      "state": "unknown",
+      "indexing": {
+        "state": "current",
+        "caughtUp": true,
+        "lastIndexedAt": "2026-01-15T12:00:00Z",
+        "lagSeconds": 0
+      }
+    }
+  },
+  {
+    "name": "record_status_unknown_has_no_cid",
+    "schema": "RecordStatus",
+    "valid": false,
+    "value": {
+      "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r01",
+      "state": "unknown",
+      "cid": "bafyreieogjytekr7rpqty3rtkfjjglj35ub2ipqjh6ftn7rbxwqe5242jq",
+      "indexing": {
+        "state": "current",
+        "caughtUp": true,
+        "lastIndexedAt": "2026-01-15T12:00:00Z",
+        "lagSeconds": 0
+      }
+    }
+  },
+  {
+    "name": "record_status_invalid_state",
+    "schema": "RecordStatus",
+    "valid": false,
+    "value": {
+      "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r01",
+      "state": "queued",
+      "indexing": {
+        "state": "current",
+        "caughtUp": true,
+        "lastIndexedAt": "2026-01-15T12:00:00Z",
+        "lagSeconds": 0
+      }
+    }
+  },
+  {
+    "name": "record_status_missing_indexing",
+    "schema": "RecordStatus",
+    "valid": false,
+    "value": {
+      "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r01",
+      "state": "unknown"
+    }
+  },
+  {
+    "name": "record_status_closed_object",
+    "schema": "RecordStatus",
+    "valid": false,
+    "value": {
+      "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r01",
+      "state": "unknown",
+      "indexing": {
+        "state": "current",
+        "caughtUp": true,
+        "lastIndexedAt": "2026-01-15T12:00:00Z",
+        "lagSeconds": 0
+      },
+      "operationId": "x"
+    }
+  },
+  {
+    "name": "export_payload",
+    "schema": "Export",
+    "valid": true,
+    "value": {
+      "schemaVersion": 1,
+      "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "exportedAt": "2026-01-15T12:00:00Z",
+      "indexing": {
+        "state": "current",
+        "caughtUp": true,
+        "lastIndexedAt": "2026-01-15T12:00:00Z",
+        "lagSeconds": 0
+      },
+      "scrobbles": [
+        {
+          "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r07",
+          "cid": "bafyreieogjytekr7rpqty3rtkfjjglj35ub2ipqjh6ftn7rbxwqe5242jq",
+          "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+          "revision": "3mfixture",
+          "artist": "Radiohead",
+          "track": "No Surprises",
+          "album": "OK Computer",
+          "listenedAt": "2026-01-15T11:00:00Z",
+          "createdAt": "2026-01-15T11:00:00Z",
+          "indexedAt": "2026-01-15T12:00:00Z"
+        },
+        {
+          "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r01",
+          "cid": "bafyreieogjytekr7rpqty3rtkfjjglj35ub2ipqjh6ftn7rbxwqe5242jq",
+          "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+          "revision": "3mfixture",
+          "artist": "Björk",
+          "track": "Jóga",
+          "album": "Homogenic",
+          "listenedAt": "2026-01-15T11:00:00Z",
+          "createdAt": "2026-01-15T11:00:00Z",
+          "indexedAt": "2026-01-15T12:00:00Z"
+        }
+      ],
+      "follows": [
+        {
+          "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.follow/f9a71cc1369cb0ae7a6fa16d2b9ecdc8d3ba62a9c519fe9af11a322c90e9ef6f2",
+          "cid": "bafyreieogjytekr7rpqty3rtkfjjglj35ub2ipqjh6ftn7rbxwqe5242jq",
+          "actor": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+          "subject": "did:plc:bbbbbbbbbbbbbbbbbbbbbbbb",
+          "createdAt": "2026-01-15T12:00:00Z"
+        }
+      ]
+    }
+  },
+  {
+    "name": "export_schema_version_fixed",
+    "schema": "Export",
+    "valid": false,
+    "value": {
+      "schemaVersion": 2,
+      "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "exportedAt": "2026-01-15T12:00:00Z",
+      "indexing": {
+        "state": "current",
+        "caughtUp": true,
+        "lastIndexedAt": "2026-01-15T12:00:00Z",
+        "lagSeconds": 0
+      },
+      "scrobbles": [
+        {
+          "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r07",
+          "cid": "bafyreieogjytekr7rpqty3rtkfjjglj35ub2ipqjh6ftn7rbxwqe5242jq",
+          "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+          "revision": "3mfixture",
+          "artist": "Radiohead",
+          "track": "No Surprises",
+          "album": "OK Computer",
+          "listenedAt": "2026-01-15T11:00:00Z",
+          "createdAt": "2026-01-15T11:00:00Z",
+          "indexedAt": "2026-01-15T12:00:00Z"
+        },
+        {
+          "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r01",
+          "cid": "bafyreieogjytekr7rpqty3rtkfjjglj35ub2ipqjh6ftn7rbxwqe5242jq",
+          "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+          "revision": "3mfixture",
+          "artist": "Björk",
+          "track": "Jóga",
+          "album": "Homogenic",
+          "listenedAt": "2026-01-15T11:00:00Z",
+          "createdAt": "2026-01-15T11:00:00Z",
+          "indexedAt": "2026-01-15T12:00:00Z"
+        }
+      ],
+      "follows": [
+        {
+          "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.follow/f9a71cc1369cb0ae7a6fa16d2b9ecdc8d3ba62a9c519fe9af11a322c90e9ef6f2",
+          "cid": "bafyreieogjytekr7rpqty3rtkfjjglj35ub2ipqjh6ftn7rbxwqe5242jq",
+          "actor": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+          "subject": "did:plc:bbbbbbbbbbbbbbbbbbbbbbbb",
+          "createdAt": "2026-01-15T12:00:00Z"
+        }
+      ]
+    }
+  },
+  {
+    "name": "export_closed_object",
+    "schema": "Export",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "exportedAt": "2026-01-15T12:00:00Z",
+      "indexing": {
+        "state": "current",
+        "caughtUp": true,
+        "lastIndexedAt": "2026-01-15T12:00:00Z",
+        "lagSeconds": 0
+      },
+      "scrobbles": [
+        {
+          "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r07",
+          "cid": "bafyreieogjytekr7rpqty3rtkfjjglj35ub2ipqjh6ftn7rbxwqe5242jq",
+          "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+          "revision": "3mfixture",
+          "artist": "Radiohead",
+          "track": "No Surprises",
+          "album": "OK Computer",
+          "listenedAt": "2026-01-15T11:00:00Z",
+          "createdAt": "2026-01-15T11:00:00Z",
+          "indexedAt": "2026-01-15T12:00:00Z"
+        },
+        {
+          "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r01",
+          "cid": "bafyreieogjytekr7rpqty3rtkfjjglj35ub2ipqjh6ftn7rbxwqe5242jq",
+          "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+          "revision": "3mfixture",
+          "artist": "Björk",
+          "track": "Jóga",
+          "album": "Homogenic",
+          "listenedAt": "2026-01-15T11:00:00Z",
+          "createdAt": "2026-01-15T11:00:00Z",
+          "indexedAt": "2026-01-15T12:00:00Z"
+        }
+      ],
+      "follows": [
+        {
+          "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.follow/f9a71cc1369cb0ae7a6fa16d2b9ecdc8d3ba62a9c519fe9af11a322c90e9ef6f2",
+          "cid": "bafyreieogjytekr7rpqty3rtkfjjglj35ub2ipqjh6ftn7rbxwqe5242jq",
+          "actor": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+          "subject": "did:plc:bbbbbbbbbbbbbbbbbbbbbbbb",
+          "createdAt": "2026-01-15T12:00:00Z"
+        }
+      ],
+      "sessions": []
+    }
+  },
+  {
+    "name": "oauth_metadata_web_client",
+    "schema": "OAuthClientMetadata",
+    "valid": true,
+    "value": {
+      "client_id": "https://music.example/oauth/client-metadata.json",
+      "client_name": "AT Protocol Music",
+      "client_uri": "https://music.example",
+      "redirect_uris": [
+        "https://music.example/oauth/callback"
+      ],
+      "scope": "atproto repo:com.example.atmusic.scrobble repo:com.example.atmusic.follow repo:com.example.atmusic.settings",
+      "grant_types": [
+        "authorization_code",
+        "refresh_token"
+      ],
+      "response_types": [
+        "code"
+      ],
+      "token_endpoint_auth_method": "none",
+      "application_type": "web",
+      "dpop_bound_access_tokens": true
+    }
+  },
+  {
+    "name": "oauth_metadata_legacy_callback_rejected",
+    "schema": "OAuthClientMetadata",
+    "valid": false,
+    "value": {
+      "client_id": "https://music.example/oauth/client-metadata.json",
+      "client_name": "AT Protocol Music",
+      "client_uri": "https://music.example",
+      "redirect_uris": [
+        "https://music.example/api/v1/auth/callback"
+      ],
+      "scope": "atproto repo:com.example.atmusic.scrobble repo:com.example.atmusic.follow repo:com.example.atmusic.settings",
+      "grant_types": [
+        "authorization_code",
+        "refresh_token"
+      ],
+      "response_types": [
+        "code"
+      ],
+      "token_endpoint_auth_method": "none",
+      "application_type": "web",
+      "dpop_bound_access_tokens": true
+    }
+  },
+  {
+    "name": "oauth_metadata_native_rejected",
+    "schema": "OAuthClientMetadata",
+    "valid": false,
+    "value": {
+      "client_id": "https://music.example/oauth/client-metadata.json",
+      "client_name": "AT Protocol Music",
+      "client_uri": "https://music.example",
+      "redirect_uris": [
+        "https://music.example/oauth/callback"
+      ],
+      "scope": "atproto repo:com.example.atmusic.scrobble repo:com.example.atmusic.follow repo:com.example.atmusic.settings",
+      "grant_types": [
+        "authorization_code",
+        "refresh_token"
+      ],
+      "response_types": [
+        "code"
+      ],
+      "token_endpoint_auth_method": "none",
+      "application_type": "native",
+      "dpop_bound_access_tokens": true
+    }
+  },
+  {
+    "name": "oauth_metadata_confidential_rejected",
+    "schema": "OAuthClientMetadata",
+    "valid": false,
+    "value": {
+      "client_id": "https://music.example/oauth/client-metadata.json",
+      "client_name": "AT Protocol Music",
+      "client_uri": "https://music.example",
+      "redirect_uris": [
+        "https://music.example/oauth/callback"
+      ],
+      "scope": "atproto repo:com.example.atmusic.scrobble repo:com.example.atmusic.follow repo:com.example.atmusic.settings",
+      "grant_types": [
+        "authorization_code",
+        "refresh_token"
+      ],
+      "response_types": [
+        "code"
+      ],
+      "token_endpoint_auth_method": "private_key_jwt",
+      "application_type": "web",
+      "dpop_bound_access_tokens": true
+    }
+  },
+  {
+    "name": "oauth_metadata_missing_application_type",
+    "schema": "OAuthClientMetadata",
+    "valid": false,
+    "value": {
+      "client_id": "https://music.example/oauth/client-metadata.json",
+      "client_name": "AT Protocol Music",
+      "client_uri": "https://music.example",
+      "redirect_uris": [
+        "https://music.example/oauth/callback"
+      ],
+      "scope": "atproto repo:com.example.atmusic.scrobble repo:com.example.atmusic.follow repo:com.example.atmusic.settings",
+      "grant_types": [
+        "authorization_code",
+        "refresh_token"
+      ],
+      "response_types": [
+        "code"
+      ],
+      "token_endpoint_auth_method": "none",
+      "dpop_bound_access_tokens": true
+    }
+  },
+  {
+    "name": "oauth_metadata_generic_scope_rejected",
+    "schema": "OAuthClientMetadata",
+    "valid": false,
+    "value": {
+      "client_id": "https://music.example/oauth/client-metadata.json",
+      "client_name": "AT Protocol Music",
+      "client_uri": "https://music.example",
+      "redirect_uris": [
+        "https://music.example/oauth/callback"
+      ],
+      "scope": "atproto transition:generic",
+      "grant_types": [
+        "authorization_code",
+        "refresh_token"
+      ],
+      "response_types": [
+        "code"
+      ],
+      "token_endpoint_auth_method": "none",
+      "application_type": "web",
+      "dpop_bound_access_tokens": true
+    }
+  },
+  {
+    "name": "v12_input_all_optional_fields",
+    "schema": "ScrobbleInput",
+    "valid": true,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z",
+      "albumArtist": "Björk",
+      "trackNumber": 9999,
+      "artistMbids": [
+        "13f12616-51d7-4023-a70b-a288ced4693a",
+        "8a3c1f20-4b5d-4e6f-9a0b-1c2d3e4f5a6b"
+      ],
+      "releaseMbid": "13f12616-51d7-4023-a70b-a288ced4693a",
+      "releaseGroupMbid": "8a3c1f20-4b5d-4e6f-9a0b-1c2d3e4f5a6b",
+      "isrc": "USRC17607839",
+      "submissionClient": "Navidrome 0.53.3",
+      "musicService": "spotify.com"
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_input_track_number_zero",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z",
+      "trackNumber": 0
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_input_track_number_10000",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z",
+      "trackNumber": 10000
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_input_track_number_string",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z",
+      "trackNumber": "7"
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_input_artist_mbids_eleven",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z",
+      "artistMbids": [
+        "13f12616-51d7-4023-a70b-a288ced4693a",
+        "00000000-4b5d-4e6f-9a0b-1c2d3e4f5a6b",
+        "00000001-4b5d-4e6f-9a0b-1c2d3e4f5a6b",
+        "00000002-4b5d-4e6f-9a0b-1c2d3e4f5a6b",
+        "00000003-4b5d-4e6f-9a0b-1c2d3e4f5a6b",
+        "00000004-4b5d-4e6f-9a0b-1c2d3e4f5a6b",
+        "00000005-4b5d-4e6f-9a0b-1c2d3e4f5a6b",
+        "00000006-4b5d-4e6f-9a0b-1c2d3e4f5a6b",
+        "00000007-4b5d-4e6f-9a0b-1c2d3e4f5a6b",
+        "00000008-4b5d-4e6f-9a0b-1c2d3e4f5a6b",
+        "00000009-4b5d-4e6f-9a0b-1c2d3e4f5a6b"
+      ]
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_input_artist_mbids_ten",
+    "schema": "ScrobbleInput",
+    "valid": true,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z",
+      "artistMbids": [
+        "00000000-4b5d-4e6f-9a0b-1c2d3e4f5a6b",
+        "00000001-4b5d-4e6f-9a0b-1c2d3e4f5a6b",
+        "00000002-4b5d-4e6f-9a0b-1c2d3e4f5a6b",
+        "00000003-4b5d-4e6f-9a0b-1c2d3e4f5a6b",
+        "00000004-4b5d-4e6f-9a0b-1c2d3e4f5a6b",
+        "00000005-4b5d-4e6f-9a0b-1c2d3e4f5a6b",
+        "00000006-4b5d-4e6f-9a0b-1c2d3e4f5a6b",
+        "00000007-4b5d-4e6f-9a0b-1c2d3e4f5a6b",
+        "00000008-4b5d-4e6f-9a0b-1c2d3e4f5a6b",
+        "00000009-4b5d-4e6f-9a0b-1c2d3e4f5a6b"
+      ]
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_input_artist_mbids_duplicate",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z",
+      "artistMbids": [
+        "13f12616-51d7-4023-a70b-a288ced4693a",
+        "13f12616-51d7-4023-a70b-a288ced4693a"
+      ]
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_input_isrc_lowercase",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z",
+      "isrc": "usrc17607839"
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_input_isrc_short",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z",
+      "isrc": "USRC1760783"
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_input_release_mbid_not_uuid",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z",
+      "releaseMbid": "not-a-uuid"
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_input_submission_client_65_scalars",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z",
+      "submissionClient": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_input_submission_client_64_scalars",
+    "schema": "ScrobbleInput",
+    "valid": true,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z",
+      "submissionClient": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_input_submission_client_over_256_bytes",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z",
+      "submissionClient": "𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞𝄞é"
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_input_submission_client_blank",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z",
+      "submissionClient": "   "
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_input_music_service_uppercase",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z",
+      "musicService": "Spotify.com"
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_input_music_service_single_label",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z",
+      "musicService": "spotify"
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_input_album_artist_blank",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z",
+      "albumArtist": " "
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_input_rejects_created_at",
+    "schema": "ScrobbleInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z",
+      "createdAt": "2026-01-15T12:00:00Z"
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_scrobble_without_new_fields",
+    "schema": "Scrobble",
+    "valid": true,
+    "value": {
+      "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r01",
+      "cid": "bafyreieogjytekr7rpqty3rtkfjjglj35ub2ipqjh6ftn7rbxwqe5242jq",
+      "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "revision": "3mfixture",
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z",
+      "createdAt": "2026-01-15T12:00:00Z",
+      "indexedAt": "2026-01-15T12:00:00Z"
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_scrobble_with_new_fields",
+    "schema": "Scrobble",
+    "valid": true,
+    "value": {
+      "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r01",
+      "cid": "bafyreieogjytekr7rpqty3rtkfjjglj35ub2ipqjh6ftn7rbxwqe5242jq",
+      "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "revision": "3mfixture",
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z",
+      "createdAt": "2026-01-15T12:00:00Z",
+      "indexedAt": "2026-01-15T12:00:00Z",
+      "albumArtist": "Björk",
+      "trackNumber": 4,
+      "isrc": "GBAYE9700245"
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_scrobble_unknown_field",
+    "schema": "Scrobble",
+    "valid": false,
+    "value": {
+      "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r01",
+      "cid": "bafyreieogjytekr7rpqty3rtkfjjglj35ub2ipqjh6ftn7rbxwqe5242jq",
+      "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "revision": "3mfixture",
+      "artist": "Björk",
+      "track": "Jóga",
+      "listenedAt": "2026-01-15T11:00:00Z",
+      "createdAt": "2026-01-15T12:00:00Z",
+      "indexedAt": "2026-01-15T12:00:00Z",
+      "tags": [
+        "pop"
+      ]
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_operation_state_queued",
+    "schema": "Operation",
+    "valid": true,
+    "value": {
+      "id": "op1",
+      "kind": "love.put",
+      "origin": "listenbrainz",
+      "state": "queued",
+      "attempts": 0,
+      "createdAt": "2026-01-15T12:00:00Z",
+      "updatedAt": "2026-01-15T12:00:00Z"
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_operation_state_running",
+    "schema": "Operation",
+    "valid": true,
+    "value": {
+      "id": "op1",
+      "kind": "love.put",
+      "origin": "listenbrainz",
+      "state": "running",
+      "attempts": 0,
+      "createdAt": "2026-01-15T12:00:00Z",
+      "updatedAt": "2026-01-15T12:00:00Z"
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_operation_state_succeeded",
+    "schema": "Operation",
+    "valid": true,
+    "value": {
+      "id": "op1",
+      "kind": "love.put",
+      "origin": "listenbrainz",
+      "state": "succeeded",
+      "attempts": 0,
+      "createdAt": "2026-01-15T12:00:00Z",
+      "updatedAt": "2026-01-15T12:00:00Z"
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_operation_state_blocked",
+    "schema": "Operation",
+    "valid": true,
+    "value": {
+      "id": "op1",
+      "kind": "love.put",
+      "origin": "listenbrainz",
+      "state": "blocked",
+      "attempts": 0,
+      "createdAt": "2026-01-15T12:00:00Z",
+      "updatedAt": "2026-01-15T12:00:00Z"
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_operation_state_cancelled",
+    "schema": "Operation",
+    "valid": true,
+    "value": {
+      "id": "op1",
+      "kind": "love.put",
+      "origin": "listenbrainz",
+      "state": "cancelled",
+      "attempts": 0,
+      "createdAt": "2026-01-15T12:00:00Z",
+      "updatedAt": "2026-01-15T12:00:00Z"
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_operation_failed_with_error",
+    "schema": "Operation",
+    "valid": true,
+    "value": {
+      "id": "op1",
+      "kind": "love.put",
+      "origin": "listenbrainz",
+      "state": "failed",
+      "attempts": 10,
+      "createdAt": "2026-01-15T12:00:00Z",
+      "updatedAt": "2026-01-15T12:00:00Z",
+      "error": "remote_record_conflict"
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_operation_failed_without_error",
+    "schema": "Operation",
+    "valid": false,
+    "value": {
+      "id": "op1",
+      "kind": "love.put",
+      "origin": "listenbrainz",
+      "state": "failed",
+      "attempts": 10,
+      "createdAt": "2026-01-15T12:00:00Z",
+      "updatedAt": "2026-01-15T12:00:00Z"
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_operation_cancelled_with_error",
+    "schema": "Operation",
+    "valid": false,
+    "value": {
+      "id": "op1",
+      "kind": "love.put",
+      "origin": "listenbrainz",
+      "state": "cancelled",
+      "attempts": 0,
+      "createdAt": "2026-01-15T12:00:00Z",
+      "updatedAt": "2026-01-15T12:00:00Z",
+      "error": "x"
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_operation_state_done",
+    "schema": "Operation",
+    "valid": false,
+    "value": {
+      "id": "op1",
+      "kind": "love.put",
+      "origin": "listenbrainz",
+      "state": "done",
+      "attempts": 0,
+      "createdAt": "2026-01-15T12:00:00Z",
+      "updatedAt": "2026-01-15T12:00:00Z"
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_operation_eleven_attempts",
+    "schema": "Operation",
+    "valid": false,
+    "value": {
+      "id": "op1",
+      "kind": "love.put",
+      "origin": "listenbrainz",
+      "state": "running",
+      "attempts": 11,
+      "createdAt": "2026-01-15T12:00:00Z",
+      "updatedAt": "2026-01-15T12:00:00Z"
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_operation_unknown_kind",
+    "schema": "Operation",
+    "valid": false,
+    "value": {
+      "id": "op1",
+      "kind": "scrobble.update",
+      "origin": "listenbrainz",
+      "state": "queued",
+      "attempts": 0,
+      "createdAt": "2026-01-15T12:00:00Z",
+      "updatedAt": "2026-01-15T12:00:00Z"
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_operation_unknown_origin",
+    "schema": "Operation",
+    "valid": false,
+    "value": {
+      "id": "op1",
+      "kind": "love.put",
+      "origin": "browser",
+      "state": "queued",
+      "attempts": 0,
+      "createdAt": "2026-01-15T12:00:00Z",
+      "updatedAt": "2026-01-15T12:00:00Z"
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_accepted_wraps_operation",
+    "schema": "Accepted",
+    "valid": true,
+    "value": {
+      "operation": {
+        "id": "op1",
+        "kind": "love.put",
+        "origin": "listenbrainz",
+        "state": "queued",
+        "attempts": 0,
+        "createdAt": "2026-01-15T12:00:00Z",
+        "updatedAt": "2026-01-15T12:00:00Z"
+      }
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_accepted_bare_operation",
+    "schema": "Accepted",
+    "valid": false,
+    "value": {
+      "id": "op1",
+      "kind": "love.put",
+      "origin": "listenbrainz",
+      "state": "queued",
+      "attempts": 0,
+      "createdAt": "2026-01-15T12:00:00Z",
+      "updatedAt": "2026-01-15T12:00:00Z"
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_idempotency_key_128",
+    "schema": "IdempotencyKey",
+    "valid": true,
+    "value": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk",
+    "reason": ""
+  },
+  {
+    "name": "v12_idempotency_key_129",
+    "schema": "IdempotencyKey",
+    "valid": false,
+    "value": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk",
+    "reason": ""
+  },
+  {
+    "name": "v12_idempotency_key_empty",
+    "schema": "IdempotencyKey",
+    "valid": false,
+    "value": "",
+    "reason": ""
+  },
+  {
+    "name": "v12_idempotency_key_slash",
+    "schema": "IdempotencyKey",
+    "valid": false,
+    "value": "a/b",
+    "reason": ""
+  },
+  {
+    "name": "v12_idempotency_key_charset",
+    "schema": "IdempotencyKey",
+    "valid": true,
+    "value": "Az09._~-",
+    "reason": ""
+  },
+  {
+    "name": "v12_session_reauth_required",
+    "schema": "Session",
+    "valid": true,
+    "value": {
+      "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "handle": "alice.test",
+      "username": "alice",
+      "csrfToken": "abababababababababababababababababababababababababababababababab",
+      "status": "reauth_required",
+      "expiresAt": "2026-01-15T12:00:00Z"
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_session_short_csrf",
+    "schema": "Session",
+    "valid": false,
+    "value": {
+      "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "handle": "alice.test",
+      "username": "alice",
+      "csrfToken": "ababababababababababababababababababababababababababababababab",
+      "status": "reauth_required",
+      "expiresAt": "2026-01-15T12:00:00Z"
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_session_status_signed_out",
+    "schema": "Session",
+    "valid": false,
+    "value": {
+      "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "handle": "alice.test",
+      "username": "alice",
+      "csrfToken": "abababababababababababababababababababababababababababababababab",
+      "status": "signed_out",
+      "expiresAt": "2026-01-15T12:00:00Z"
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_account_minimum_share",
+    "schema": "Account",
+    "valid": true,
+    "value": {
+      "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "handle": null,
+      "username": "alice",
+      "oauthStatus": "reauth_required",
+      "shareNowPlaying": false,
+      "importSharePercent": 10,
+      "capabilities": []
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_account_share_9",
+    "schema": "Account",
+    "valid": false,
+    "value": {
+      "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "handle": null,
+      "username": "alice",
+      "oauthStatus": "reauth_required",
+      "shareNowPlaying": false,
+      "importSharePercent": 9,
+      "capabilities": []
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_account_share_91",
+    "schema": "Account",
+    "valid": false,
+    "value": {
+      "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "handle": null,
+      "username": "alice",
+      "oauthStatus": "reauth_required",
+      "shareNowPlaying": false,
+      "importSharePercent": 91,
+      "capabilities": []
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_account_unknown_capability",
+    "schema": "Account",
+    "valid": false,
+    "value": {
+      "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "handle": null,
+      "username": "alice",
+      "oauthStatus": "reauth_required",
+      "shareNowPlaying": false,
+      "importSharePercent": 10,
+      "capabilities": [
+        "admin"
+      ]
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_account_patch_empty",
+    "schema": "AccountPatch",
+    "valid": false,
+    "value": {},
+    "reason": ""
+  },
+  {
+    "name": "v12_account_patch_share_90",
+    "schema": "AccountPatch",
+    "valid": true,
+    "value": {
+      "importSharePercent": 90
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_username_dotted_syntax",
+    "schema": "Username",
+    "valid": true,
+    "value": "alice.test",
+    "reason": ""
+  },
+  {
+    "name": "v12_username_uppercase",
+    "schema": "Username",
+    "valid": false,
+    "value": "Alice",
+    "reason": ""
+  },
+  {
+    "name": "v12_username_one_char",
+    "schema": "Username",
+    "valid": false,
+    "value": "a",
+    "reason": ""
+  },
+  {
+    "name": "v12_username_leading_dot",
+    "schema": "Username",
+    "valid": false,
+    "value": ".alice",
+    "reason": ""
+  },
+  {
+    "name": "v12_love_input_minimal",
+    "schema": "LoveInput",
+    "valid": true,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga"
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_love_input_unknown_field",
+    "schema": "LoveInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk",
+      "track": "Jóga",
+      "createdAt": "2026-01-15T12:00:00Z"
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_love_input_missing_track",
+    "schema": "LoveInput",
+    "valid": false,
+    "value": {
+      "artist": "Björk"
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_app_password_base32",
+    "schema": "CreatedAppPassword",
+    "valid": true,
+    "value": {
+      "id": "ap1",
+      "label": "phone",
+      "password": "ABCDEFGHIJKLMNOPQRSTUVWX",
+      "createdAt": "2026-01-15T12:00:00Z"
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_app_password_lowercase",
+    "schema": "CreatedAppPassword",
+    "valid": false,
+    "value": {
+      "id": "ap1",
+      "label": "phone",
+      "password": "abcdefghijklmnopqrstuvwx",
+      "createdAt": "2026-01-15T12:00:00Z"
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_listenbrainz_token_not_v4",
+    "schema": "CreatedListenbrainzToken",
+    "valid": false,
+    "value": {
+      "id": "lb1",
+      "label": "nd",
+      "token": "2f4c1b9e-7d3a-1e6b-9a8c-5d1e0f2a3b4c",
+      "createdAt": "2026-01-15T12:00:00Z"
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_credentials_with_secret",
+    "schema": "Credentials",
+    "valid": false,
+    "value": {
+      "appPasswords": [
+        {
+          "id": "ap1",
+          "label": "x",
+          "createdAt": "2026-01-15T12:00:00Z",
+          "lastUsedAt": null,
+          "hash": "aa"
+        }
+      ],
+      "listenbrainzTokens": [],
+      "lastfmApps": [],
+      "lastfmSessions": []
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_lastfm_authorize_web_flow",
+    "schema": "LastfmAuthorizeInput",
+    "valid": true,
+    "value": {
+      "apiKey": "multi-scrobbler-key"
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_lastfm_authorize_bad_token",
+    "schema": "LastfmAuthorizeInput",
+    "valid": false,
+    "value": {
+      "apiKey": "k",
+      "token": "XYZ"
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_link_error_state",
+    "schema": "Link",
+    "valid": true,
+    "value": {
+      "id": "lk1",
+      "service": "lastfm",
+      "remoteUser": "alice_fm",
+      "forwardScrobbles": false,
+      "forwardNowPlaying": true,
+      "status": "error",
+      "lastError": "upstream_unavailable",
+      "createdAt": "2026-01-15T12:00:00Z",
+      "updatedAt": "2026-01-15T12:00:00Z"
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_link_with_credential",
+    "schema": "Link",
+    "valid": false,
+    "value": {
+      "id": "lk1",
+      "service": "lastfm",
+      "remoteUser": "alice_fm",
+      "forwardScrobbles": false,
+      "forwardNowPlaying": true,
+      "status": "error",
+      "lastError": "upstream_unavailable",
+      "createdAt": "2026-01-15T12:00:00Z",
+      "updatedAt": "2026-01-15T12:00:00Z",
+      "sessionKey": "secret"
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_link_patch_empty",
+    "schema": "LinkPatch",
+    "valid": false,
+    "value": {},
+    "reason": ""
+  },
+  {
+    "name": "v12_import_cancelled",
+    "schema": "ImportJob",
+    "valid": true,
+    "value": {
+      "id": "im1",
+      "source": "lastfm_json",
+      "remoteUser": null,
+      "state": "cancelled",
+      "fetched": 0,
+      "staged": 0,
+      "duplicates": 0,
+      "invalid": 0,
+      "written": 0,
+      "failed": 0,
+      "etaSeconds": null,
+      "error": null,
+      "createdAt": "2026-01-15T12:00:00Z",
+      "updatedAt": "2026-01-15T12:00:00Z"
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_import_unknown_state",
+    "schema": "ImportJob",
+    "valid": false,
+    "value": {
+      "id": "im1",
+      "source": "lastfm_json",
+      "remoteUser": null,
+      "state": "running",
+      "fetched": 0,
+      "staged": 0,
+      "duplicates": 0,
+      "invalid": 0,
+      "written": 0,
+      "failed": 0,
+      "etaSeconds": null,
+      "error": null,
+      "createdAt": "2026-01-15T12:00:00Z",
+      "updatedAt": "2026-01-15T12:00:00Z"
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_import_unknown_source",
+    "schema": "ImportJob",
+    "valid": false,
+    "value": {
+      "id": "im1",
+      "source": "spotify",
+      "remoteUser": null,
+      "state": "cancelled",
+      "fetched": 0,
+      "staged": 0,
+      "duplicates": 0,
+      "invalid": 0,
+      "written": 0,
+      "failed": 0,
+      "etaSeconds": null,
+      "error": null,
+      "createdAt": "2026-01-15T12:00:00Z",
+      "updatedAt": "2026-01-15T12:00:00Z"
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_import_input_zip_source",
+    "schema": "ImportInput",
+    "valid": false,
+    "value": {
+      "source": "listenbrainz_zip",
+      "username": "alice"
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_ignored_listen_preview_129",
+    "schema": "IgnoredListen",
+    "valid": false,
+    "value": {
+      "id": "il1",
+      "source": "listenbrainz",
+      "reason": "track_invalid",
+      "listenedAt": "2026-01-15T12:00:00Z",
+      "artistPreview": "a",
+      "trackPreview": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "createdAt": "2026-01-15T12:00:00Z"
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_confidential_metadata",
+    "schema": "ConfidentialClientMetadata",
+    "valid": true,
+    "value": {
+      "client_id": "https://music.example/oauth/client-metadata.json",
+      "client_name": "AT Protocol Music",
+      "client_uri": "https://music.example",
+      "application_type": "web",
+      "redirect_uris": [
+        "https://music.example/oauth/callback"
+      ],
+      "grant_types": [
+        "authorization_code",
+        "refresh_token"
+      ],
+      "response_types": [
+        "code"
+      ],
+      "scope": "atproto repo:com.example.atmusic.scrobble repo:com.example.atmusic.follow repo:com.example.atmusic.settings repo:com.example.atmusic.love",
+      "token_endpoint_auth_method": "private_key_jwt",
+      "token_endpoint_auth_signing_alg": "ES256",
+      "jwks_uri": "https://music.example/oauth/jwks.json",
+      "dpop_bound_access_tokens": true
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_confidential_metadata_transition_generic",
+    "schema": "ConfidentialClientMetadata",
+    "valid": true,
+    "value": {
+      "client_id": "https://music.example/oauth/client-metadata.json",
+      "client_name": "AT Protocol Music",
+      "client_uri": "https://music.example",
+      "application_type": "web",
+      "redirect_uris": [
+        "https://music.example/oauth/callback"
+      ],
+      "grant_types": [
+        "authorization_code",
+        "refresh_token"
+      ],
+      "response_types": [
+        "code"
+      ],
+      "scope": "atproto repo:com.example.atmusic.scrobble repo:com.example.atmusic.follow repo:com.example.atmusic.settings repo:com.example.atmusic.love transition:generic",
+      "token_endpoint_auth_method": "private_key_jwt",
+      "token_endpoint_auth_signing_alg": "ES256",
+      "jwks_uri": "https://music.example/oauth/jwks.json",
+      "dpop_bound_access_tokens": true
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_confidential_metadata_public_client",
+    "schema": "ConfidentialClientMetadata",
+    "valid": false,
+    "value": {
+      "client_id": "https://music.example/oauth/client-metadata.json",
+      "client_name": "AT Protocol Music",
+      "client_uri": "https://music.example",
+      "application_type": "web",
+      "redirect_uris": [
+        "https://music.example/oauth/callback"
+      ],
+      "grant_types": [
+        "authorization_code",
+        "refresh_token"
+      ],
+      "response_types": [
+        "code"
+      ],
+      "scope": "atproto repo:com.example.atmusic.scrobble repo:com.example.atmusic.follow repo:com.example.atmusic.settings repo:com.example.atmusic.love",
+      "token_endpoint_auth_method": "none",
+      "token_endpoint_auth_signing_alg": "ES256",
+      "jwks_uri": "https://music.example/oauth/jwks.json",
+      "dpop_bound_access_tokens": true
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_confidential_metadata_without_love_scope",
+    "schema": "ConfidentialClientMetadata",
+    "valid": false,
+    "value": {
+      "client_id": "https://music.example/oauth/client-metadata.json",
+      "client_name": "AT Protocol Music",
+      "client_uri": "https://music.example",
+      "application_type": "web",
+      "redirect_uris": [
+        "https://music.example/oauth/callback"
+      ],
+      "grant_types": [
+        "authorization_code",
+        "refresh_token"
+      ],
+      "response_types": [
+        "code"
+      ],
+      "scope": "atproto repo:com.example.atmusic.scrobble repo:com.example.atmusic.follow repo:com.example.atmusic.settings",
+      "token_endpoint_auth_method": "private_key_jwt",
+      "token_endpoint_auth_signing_alg": "ES256",
+      "jwks_uri": "https://music.example/oauth/jwks.json",
+      "dpop_bound_access_tokens": true
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_confidential_metadata_mixed_prefixes",
+    "schema": "ConfidentialClientMetadata",
+    "valid": false,
+    "value": {
+      "client_id": "https://music.example/oauth/client-metadata.json",
+      "client_name": "AT Protocol Music",
+      "client_uri": "https://music.example",
+      "application_type": "web",
+      "redirect_uris": [
+        "https://music.example/oauth/callback"
+      ],
+      "grant_types": [
+        "authorization_code",
+        "refresh_token"
+      ],
+      "response_types": [
+        "code"
+      ],
+      "scope": "atproto repo:com.example.atmusic.scrobble repo:org.other.follow repo:com.example.atmusic.settings repo:com.example.atmusic.love",
+      "token_endpoint_auth_method": "private_key_jwt",
+      "token_endpoint_auth_signing_alg": "ES256",
+      "jwks_uri": "https://music.example/oauth/jwks.json",
+      "dpop_bound_access_tokens": true
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_confidential_metadata_http_jwks",
+    "schema": "ConfidentialClientMetadata",
+    "valid": false,
+    "value": {
+      "client_id": "https://music.example/oauth/client-metadata.json",
+      "client_name": "AT Protocol Music",
+      "client_uri": "https://music.example",
+      "application_type": "web",
+      "redirect_uris": [
+        "https://music.example/oauth/callback"
+      ],
+      "grant_types": [
+        "authorization_code",
+        "refresh_token"
+      ],
+      "response_types": [
+        "code"
+      ],
+      "scope": "atproto repo:com.example.atmusic.scrobble repo:com.example.atmusic.follow repo:com.example.atmusic.settings repo:com.example.atmusic.love",
+      "token_endpoint_auth_method": "private_key_jwt",
+      "token_endpoint_auth_signing_alg": "ES256",
+      "jwks_uri": "http://music.example/oauth/jwks.json",
+      "dpop_bound_access_tokens": true
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_confidential_metadata_extra_field",
+    "schema": "ConfidentialClientMetadata",
+    "valid": false,
+    "value": {
+      "client_id": "https://music.example/oauth/client-metadata.json",
+      "client_name": "AT Protocol Music",
+      "client_uri": "https://music.example",
+      "application_type": "web",
+      "redirect_uris": [
+        "https://music.example/oauth/callback"
+      ],
+      "grant_types": [
+        "authorization_code",
+        "refresh_token"
+      ],
+      "response_types": [
+        "code"
+      ],
+      "scope": "atproto repo:com.example.atmusic.scrobble repo:com.example.atmusic.follow repo:com.example.atmusic.settings repo:com.example.atmusic.love",
+      "token_endpoint_auth_method": "private_key_jwt",
+      "token_endpoint_auth_signing_alg": "ES256",
+      "jwks_uri": "https://music.example/oauth/jwks.json",
+      "dpop_bound_access_tokens": true,
+      "jwks": {
+        "keys": []
+      }
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_jwks_public_key",
+    "schema": "Jwks",
+    "valid": true,
+    "value": {
+      "keys": [
+        {
+          "kty": "EC",
+          "crv": "P-256",
+          "x": "f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU",
+          "y": "x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0",
+          "kid": "k1",
+          "alg": "ES256",
+          "use": "sig"
+        }
+      ]
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_jwks_private_member",
+    "schema": "Jwks",
+    "valid": false,
+    "value": {
+      "keys": [
+        {
+          "kty": "EC",
+          "crv": "P-256",
+          "x": "f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU",
+          "y": "x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0",
+          "kid": "k1",
+          "alg": "ES256",
+          "use": "sig",
+          "d": "jpsQnnGQmL-YBIffH1136cspYG6-0iY7X1fCE9-E9LI"
+        }
+      ]
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_jwks_empty",
+    "schema": "Jwks",
+    "valid": false,
+    "value": {
+      "keys": []
+    },
+    "reason": ""
+  },
+  {
+    "name": "v12_jwks_rs256",
+    "schema": "Jwks",
+    "valid": false,
+    "value": {
+      "keys": [
+        {
+          "kty": "EC",
+          "crv": "P-256",
+          "x": "f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU",
+          "y": "x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0",
+          "kid": "k1",
+          "alg": "RS256",
+          "use": "sig"
+        }
+      ]
+    },
+    "reason": ""
+  }
+]

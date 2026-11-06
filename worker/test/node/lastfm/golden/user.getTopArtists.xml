@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<lfm status="ok">
+  <topartists user="alice" page="1" perPage="50" totalPages="1" total="2">
+    <artist rank="1">
+      <name>Test Artist</name>
+      <playcount>12</playcount>
+      <mbid/>
+      <url>https://www.last.fm/music/Test+Artist</url>
+      <streamable>0</streamable>
+      <image size="small"/>
+      <image size="medium"/>
+      <image size="large"/>
+      <image size="extralarge"/>
+    </artist>
+    <artist rank="2">
+      <name>Other Artist</name>
+      <playcount>5</playcount>
+      <mbid/>
+      <url>https://www.last.fm/music/Other+Artist</url>
+      <streamable>0</streamable>
+      <image size="small"/>
+      <image size="medium"/>
+      <image size="large"/>
+      <image size="extralarge"/>
+    </artist>
+  </topartists>
+</lfm>

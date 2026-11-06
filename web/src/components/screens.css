@@ -1,0 +1,124 @@
+/*
+ * Styles for the route screens and their components (W3-06). Classes only:
+ * the CSP forbids inline style attributes. Colours come from the custom
+ * properties in web/src/styles/base.css.
+ */
+
+.state {
+  margin: 1rem 0;
+  padding: 0.75rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+.state-error {
+  border-color: var(--focus);
+}
+
+.state-title {
+  font-weight: 600;
+  margin: 0 0 0.25rem;
+}
+
+.state-stale {
+  background: var(--surface);
+}
+
+.tabs {
+  display: flex;
+  gap: 0.5rem;
+  margin: 1rem 0;
+  flex-wrap: wrap;
+}
+
+.tabs [role="tab"] {
+  padding: 0.4rem 0.9rem;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--fg);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.tabs [role="tab"][aria-selected="true"] {
+  border-color: var(--accent);
+  font-weight: 600;
+}
+
+.scrobble-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.scrobble-list > li {
+  padding: 0.6rem 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.scrobble-meta {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.op-status {
+  display: inline-block;
+  margin-left: 0.5rem;
+  font-size: 0.9rem;
+}
+
+.op-status[data-op-state="failed"] {
+  color: var(--focus);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin: 0.75rem 0;
+  max-width: 32rem;
+}
+
+.field input {
+  padding: 0.4rem;
+  font: inherit;
+}
+
+.field-hint {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.field-error {
+  color: var(--focus);
+  font-size: 0.9rem;
+}
+
+.stats-totals {
+  display: flex;
+  gap: 2rem;
+  flex-wrap: wrap;
+}
+
+.stats-totals dt {
+  color: var(--muted);
+}
+
+.stats-totals dd {
+  margin: 0;
+  font-size: 1.4rem;
+}
+
+.confirm {
+  margin: 1rem 0;
+  padding: 1rem;
+  border: 2px solid var(--focus);
+  border-radius: 4px;
+}
+
+.actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin: 0.5rem 0;
+}

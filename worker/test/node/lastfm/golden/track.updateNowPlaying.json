@@ -1,0 +1,24 @@
+{
+  "nowplaying": {
+    "track": {
+      "corrected": "0",
+      "#text": "Test Track"
+    },
+    "artist": {
+      "corrected": "0",
+      "#text": "Test Artist"
+    },
+    "album": {
+      "corrected": "0",
+      "#text": "Test Album"
+    },
+    "albumArtist": {
+      "corrected": "0",
+      "#text": ""
+    },
+    "ignoredMessage": {
+      "code": "0",
+      "#text": ""
+    }
+  }
+}

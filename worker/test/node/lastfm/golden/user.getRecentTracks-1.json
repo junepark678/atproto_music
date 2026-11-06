@@ -1,0 +1,49 @@
+{
+  "recenttracks": {
+    "track": [
+      {
+        "artist": {
+          "mbid": "",
+          "#text": "Test Artist"
+        },
+        "streamable": "0",
+        "image": [
+          {
+            "size": "small",
+            "#text": ""
+          },
+          {
+            "size": "medium",
+            "#text": ""
+          },
+          {
+            "size": "large",
+            "#text": ""
+          },
+          {
+            "size": "extralarge",
+            "#text": ""
+          }
+        ],
+        "mbid": "00000000-0000-4000-8000-000000000001",
+        "album": {
+          "mbid": "",
+          "#text": "Test Album"
+        },
+        "name": "Test Track",
+        "url": "https://www.last.fm/music/Test+Artist/_/Test+Track",
+        "date": {
+          "uts": "1768474800",
+          "#text": "15 Jan 2026, 11:00"
+        }
+      }
+    ],
+    "@attr": {
+      "user": "alice",
+      "page": "1",
+      "perPage": "50",
+      "totalPages": "1",
+      "total": "1"
+    }
+  }
+}

@@ -1,0 +1,362 @@
+{
+  "description": "RFC 3339 input -> Rust validate_timestamp verdict (receipt 2026-01-15T12:00:00Z, listenedAt bounds) -> storage form (30-character YYYY-MM-DDTHH:MM:SS.nnnnnnnnnZ, chrono SecondsFormat::Nanos, the canonicalizer shared by cursor.rs and storage) -> DTO render. Rust DTOs serialize the stored column verbatim, so dto equals storage for every row-derived timestamp (listenedAt, createdAt, indexedAt, cursor asOf, statistics asOf).",
+  "entries": [
+    {
+      "accepted": true,
+      "dto": "2026-01-15T12:00:00.000000000Z",
+      "epochNs": "1768478400000000000",
+      "error": null,
+      "input": "2026-01-15T12:00:00Z",
+      "storage": "2026-01-15T12:00:00.000000000Z"
+    },
+    {
+      "accepted": true,
+      "dto": "2026-01-15T12:00:00.000000000Z",
+      "epochNs": "1768478400000000000",
+      "error": null,
+      "input": "2026-01-15T12:00:00+00:00",
+      "storage": "2026-01-15T12:00:00.000000000Z"
+    },
+    {
+      "accepted": true,
+      "dto": "2026-01-15T12:00:00.000000000Z",
+      "epochNs": "1768478400000000000",
+      "error": null,
+      "input": "2026-01-15T12:00:00.0Z",
+      "storage": "2026-01-15T12:00:00.000000000Z"
+    },
+    {
+      "accepted": true,
+      "dto": "2026-01-15T12:00:00.500000000Z",
+      "epochNs": "1768478400500000000",
+      "error": null,
+      "input": "2026-01-15T12:00:00.5Z",
+      "storage": "2026-01-15T12:00:00.500000000Z"
+    },
+    {
+      "accepted": true,
+      "dto": "2026-01-15T12:00:00.123000000Z",
+      "epochNs": "1768478400123000000",
+      "error": null,
+      "input": "2026-01-15T12:00:00.123Z",
+      "storage": "2026-01-15T12:00:00.123000000Z"
+    },
+    {
+      "accepted": true,
+      "dto": "2026-01-15T12:00:00.123456000Z",
+      "epochNs": "1768478400123456000",
+      "error": null,
+      "input": "2026-01-15T12:00:00.123456Z",
+      "storage": "2026-01-15T12:00:00.123456000Z"
+    },
+    {
+      "accepted": true,
+      "dto": "2026-01-15T12:00:00.123456789Z",
+      "epochNs": "1768478400123456789",
+      "error": null,
+      "input": "2026-01-15T12:00:00.123456789Z",
+      "storage": "2026-01-15T12:00:00.123456789Z"
+    },
+    {
+      "accepted": true,
+      "dto": "2026-01-15T12:00:00.123456789Z",
+      "epochNs": "1768478400123456789",
+      "error": null,
+      "input": "2026-01-15T12:00:00.1234567891Z",
+      "storage": "2026-01-15T12:00:00.123456789Z"
+    },
+    {
+      "accepted": true,
+      "dto": "2026-01-15T12:00:00.000000001Z",
+      "epochNs": "1768478400000000001",
+      "error": null,
+      "input": "2026-01-15T12:00:00.000000001Z",
+      "storage": "2026-01-15T12:00:00.000000001Z"
+    },
+    {
+      "accepted": true,
+      "dto": "2026-01-15T11:59:59.999999999Z",
+      "epochNs": "1768478399999999999",
+      "error": null,
+      "input": "2026-01-15T11:59:59.999999999Z",
+      "storage": "2026-01-15T11:59:59.999999999Z"
+    },
+    {
+      "accepted": true,
+      "dto": "2026-01-15T12:05:00.000000000Z",
+      "epochNs": "1768478700000000000",
+      "error": null,
+      "input": "2026-01-15T12:05:00Z",
+      "storage": "2026-01-15T12:05:00.000000000Z"
+    },
+    {
+      "accepted": false,
+      "dto": null,
+      "epochNs": null,
+      "error": {
+        "code": "invalid_field",
+        "field": "listenedAt",
+        "message": "timestamp must be between 1970-01-01 and receipt time plus 300 seconds"
+      },
+      "input": "2026-01-15T12:05:00.000000001Z",
+      "storage": null
+    },
+    {
+      "accepted": true,
+      "dto": "2026-01-15T11:00:00.000000000Z",
+      "epochNs": "1768474800000000000",
+      "error": null,
+      "input": "2026-01-15T11:00:00Z",
+      "storage": "2026-01-15T11:00:00.000000000Z"
+    },
+    {
+      "accepted": true,
+      "dto": "2026-01-14T11:00:00.000000000Z",
+      "epochNs": "1768388400000000000",
+      "error": null,
+      "input": "2026-01-14T11:00:00Z",
+      "storage": "2026-01-14T11:00:00.000000000Z"
+    },
+    {
+      "accepted": true,
+      "dto": "2026-01-08T12:00:00.000000000Z",
+      "epochNs": "1767873600000000000",
+      "error": null,
+      "input": "2026-01-08T12:00:00Z",
+      "storage": "2026-01-08T12:00:00.000000000Z"
+    },
+    {
+      "accepted": true,
+      "dto": "2025-12-16T12:00:00.000000000Z",
+      "epochNs": "1765886400000000000",
+      "error": null,
+      "input": "2025-12-16T12:00:00Z",
+      "storage": "2025-12-16T12:00:00.000000000Z"
+    },
+    {
+      "accepted": true,
+      "dto": "2025-01-15T12:00:00.000000000Z",
+      "epochNs": "1736942400000000000",
+      "error": null,
+      "input": "2025-01-15T12:00:00Z",
+      "storage": "2025-01-15T12:00:00.000000000Z"
+    },
+    {
+      "accepted": true,
+      "dto": "2025-01-14T11:00:00.000000000Z",
+      "epochNs": "1736852400000000000",
+      "error": null,
+      "input": "2025-01-14T11:00:00Z",
+      "storage": "2025-01-14T11:00:00.000000000Z"
+    },
+    {
+      "accepted": true,
+      "dto": "2024-02-29T23:59:59.999000000Z",
+      "epochNs": "1709251199999000000",
+      "error": null,
+      "input": "2024-02-29T23:59:59.999Z",
+      "storage": "2024-02-29T23:59:59.999000000Z"
+    },
+    {
+      "accepted": true,
+      "dto": "2000-01-01T00:00:00.000000000Z",
+      "epochNs": "946684800000000000",
+      "error": null,
+      "input": "2000-01-01T00:00:00Z",
+      "storage": "2000-01-01T00:00:00.000000000Z"
+    },
+    {
+      "accepted": true,
+      "dto": "1999-12-31T23:59:59.000000000Z",
+      "epochNs": "946684799000000000",
+      "error": null,
+      "input": "1999-12-31T23:59:59Z",
+      "storage": "1999-12-31T23:59:59.000000000Z"
+    },
+    {
+      "accepted": true,
+      "dto": "1970-01-01T00:00:00.000000000Z",
+      "epochNs": "0",
+      "error": null,
+      "input": "1970-01-01T00:00:00Z",
+      "storage": "1970-01-01T00:00:00.000000000Z"
+    },
+    {
+      "accepted": true,
+      "dto": "1970-01-01T00:00:00.000000001Z",
+      "epochNs": "1",
+      "error": null,
+      "input": "1970-01-01T00:00:00.000000001Z",
+      "storage": "1970-01-01T00:00:00.000000001Z"
+    },
+    {
+      "accepted": false,
+      "dto": null,
+      "epochNs": null,
+      "error": {
+        "code": "invalid_field",
+        "field": "listenedAt",
+        "message": "timestamp must be between 1970-01-01 and receipt time plus 300 seconds"
+      },
+      "input": "1969-12-31T23:59:59Z",
+      "storage": null
+    },
+    {
+      "accepted": false,
+      "dto": null,
+      "epochNs": null,
+      "error": {
+        "code": "invalid_field",
+        "field": "listenedAt",
+        "message": "expected an AT Protocol UTC datetime"
+      },
+      "input": "2026-01-15T12:00:00-00:00",
+      "storage": null
+    },
+    {
+      "accepted": false,
+      "dto": null,
+      "epochNs": null,
+      "error": {
+        "code": "invalid_field",
+        "field": "listenedAt",
+        "message": "expected an AT Protocol UTC datetime"
+      },
+      "input": "2026-01-15T13:00:00+01:00",
+      "storage": null
+    },
+    {
+      "accepted": false,
+      "dto": null,
+      "epochNs": null,
+      "error": {
+        "code": "invalid_field",
+        "field": "listenedAt",
+        "message": "expected an AT Protocol UTC datetime"
+      },
+      "input": "2026-01-15t12:00:00Z",
+      "storage": null
+    },
+    {
+      "accepted": false,
+      "dto": null,
+      "epochNs": null,
+      "error": {
+        "code": "invalid_field",
+        "field": "listenedAt",
+        "message": "expected an AT Protocol UTC datetime"
+      },
+      "input": "2026-01-15T12:00:00z",
+      "storage": null
+    },
+    {
+      "accepted": false,
+      "dto": null,
+      "epochNs": null,
+      "error": {
+        "code": "invalid_field",
+        "field": "listenedAt",
+        "message": "expected an AT Protocol UTC datetime"
+      },
+      "input": "2026-01-15 12:00:00Z",
+      "storage": null
+    },
+    {
+      "accepted": false,
+      "dto": null,
+      "epochNs": null,
+      "error": {
+        "code": "invalid_field",
+        "field": "listenedAt",
+        "message": "expected an AT Protocol UTC datetime"
+      },
+      "input": "2026-01-15T12:00Z",
+      "storage": null
+    },
+    {
+      "accepted": false,
+      "dto": null,
+      "epochNs": null,
+      "error": {
+        "code": "invalid_field",
+        "field": "listenedAt",
+        "message": "expected an AT Protocol UTC datetime"
+      },
+      "input": "2016-12-31T23:59:60Z",
+      "storage": null
+    },
+    {
+      "accepted": false,
+      "dto": null,
+      "epochNs": null,
+      "error": {
+        "code": "invalid_field",
+        "field": "listenedAt",
+        "message": "expected a UTC RFC3339 timestamp"
+      },
+      "input": "2026-13-01T00:00:00Z",
+      "storage": null
+    },
+    {
+      "accepted": false,
+      "dto": null,
+      "epochNs": null,
+      "error": {
+        "code": "invalid_field",
+        "field": "listenedAt",
+        "message": "expected an AT Protocol UTC datetime"
+      },
+      "input": "20260115T120000Z",
+      "storage": null
+    }
+  ],
+  "receiptTime": "2026-01-15T12:00:00Z",
+  "recordCreatedAtRenders": [
+    {
+      "epochNs": "1768478400000000000",
+      "receiptInstant": "2026-01-15T12:00:00Z",
+      "recordCreatedAt": "2026-01-15T12:00:00Z"
+    },
+    {
+      "epochNs": "1768478400500000000",
+      "receiptInstant": "2026-01-15T12:00:00.5Z",
+      "recordCreatedAt": "2026-01-15T12:00:00.500Z"
+    },
+    {
+      "epochNs": "1768478400123000000",
+      "receiptInstant": "2026-01-15T12:00:00.123Z",
+      "recordCreatedAt": "2026-01-15T12:00:00.123Z"
+    },
+    {
+      "epochNs": "1768478400123400000",
+      "receiptInstant": "2026-01-15T12:00:00.1234Z",
+      "recordCreatedAt": "2026-01-15T12:00:00.123400Z"
+    },
+    {
+      "epochNs": "1768478400123456000",
+      "receiptInstant": "2026-01-15T12:00:00.123456Z",
+      "recordCreatedAt": "2026-01-15T12:00:00.123456Z"
+    },
+    {
+      "epochNs": "1768478400123456700",
+      "receiptInstant": "2026-01-15T12:00:00.1234567Z",
+      "recordCreatedAt": "2026-01-15T12:00:00.123456700Z"
+    },
+    {
+      "epochNs": "1768478400123456789",
+      "receiptInstant": "2026-01-15T12:00:00.123456789Z",
+      "recordCreatedAt": "2026-01-15T12:00:00.123456789Z"
+    },
+    {
+      "epochNs": "1768478400000000001",
+      "receiptInstant": "2026-01-15T12:00:00.000000001Z",
+      "recordCreatedAt": "2026-01-15T12:00:00.000000001Z"
+    },
+    {
+      "epochNs": "0",
+      "receiptInstant": "1970-01-01T00:00:00Z",
+      "recordCreatedAt": "1970-01-01T00:00:00Z"
+    }
+  ],
+  "source": "crates/core/examples/export_goldens.rs"
+}

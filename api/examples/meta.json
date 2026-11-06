@@ -1,0 +1,19 @@
+{
+  "name": "atproto_music",
+  "version": "0.1.0",
+  "stage": "backend",
+  "capabilities": [
+    "read",
+    "stats",
+    "follows",
+    "notify",
+    "indexing"
+  ],
+  "lexiconPrefix": null,
+  "indexing": {
+    "state": "recovering",
+    "caughtUp": false,
+    "lastIndexedAt": null,
+    "lagSeconds": null
+  }
+}

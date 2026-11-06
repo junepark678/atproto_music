@@ -1,0 +1,15 @@
+{
+  "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+  "handle": "alice.test",
+  "joinedAt": "2026-01-15T12:00:00Z",
+  "indexedAt": "2026-01-15T12:00:00Z",
+  "totalScrobbles": 1,
+  "followerCount": 0,
+  "followingCount": 1,
+  "indexing": {
+    "state": "current",
+    "caughtUp": true,
+    "lastIndexedAt": "2026-01-15T12:00:00Z",
+    "lagSeconds": 0
+  }
+}

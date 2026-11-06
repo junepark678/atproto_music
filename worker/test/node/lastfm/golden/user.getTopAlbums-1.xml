@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<lfm status="ok">
+  <topalbums user="alice" page="1" perPage="50" totalPages="1" total="1">
+    <album rank="1">
+      <name>Test Album</name>
+      <playcount>4</playcount>
+      <mbid/>
+      <url>https://www.last.fm/music/Test+Artist/Test+Album</url>
+      <artist>
+        <name>Test Artist</name>
+        <mbid/>
+        <url>https://www.last.fm/music/Test+Artist</url>
+      </artist>
+      <image size="small"/>
+      <image size="medium"/>
+      <image size="large"/>
+      <image size="extralarge"/>
+    </album>
+  </topalbums>
+</lfm>
