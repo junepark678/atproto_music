@@ -489,3 +489,115 @@ Remaining limits (documented behavior, not waivers):
   invalidate statistics conservatively, even when no cutoff is crossed.
 - The full Node acceptance gate is reserved for the accepted final head and
   was not run here.
+
+## Unknown-send acceptance hardening (stacked on PR #163)
+
+Stacked on `t3/removal-unknown-send` at `de5abe1` (PR #163). This slice closes
+Astra's de5abe1 findings F1–F7 (ADR 0006 "Unknown sends", amendments after
+Astra de5abe1). Migrations 1–14 are unchanged and no migration was added.
+No live service, environment file, lexicon publication or PDS record was
+touched. The F6 cases corrupt locally persisted pins, so they test the
+fail-closed contract. They do not show a remote way to write that column.
+
+| Finding | Fix | Regression |
+| --- | --- | --- |
+| F1 a late original accepted at H arrives between the retry's head read (H) and its record read; a recreation R with another CID was read as proof that the original could never commit; the pin was cleared, the next send's refusal was taken as the original's, and the old intent removed R | a CID mismatch after a head equal to the root rejects the pin only inside a stable head/read/head bracket; a moved closing head holds `removal_send_uncertain`, an unavailable one `removal_send_unresolved`; no timeout | `uncertain-hardening.test.ts` › F1 $kind, $cid CID… (changed and identical CID × partial, whole, single: the only write after the mark is the late original, an identical CID adds only the exact pin refused by its own CAS, the pin, fence and recreation are kept across restarts, a fresh intent fenced at R resolves it), and › F1 %s control (stable-bracket rejection, after an unavailable closing head first holds) |
+| F2 a bodyless same-CID snapshot entry advanced only record_state: the projection stayed hidden below the `after` cutoff, statistics stayed stale, and the real hint at J became a false no-op | `reaffirmRecordTarget` writes what a live proof of the same bytes writes: record_state, every projection row's revision, verified membership (re-noted from the index's own verified version of those bytes), and the statistics bump | `after-reproof-stats.test.ts` › %s: a bodyless same-CID snapshot at J after a reopen… (cache filled after settlement, then a reopen; membership and rows equal those of the live drain on the same fixture; totals 2, 1 and 1, top artists, status, export, inactive-owner privacy; the real drain then reports `noop_older` and changes nothing), › …never invents container membership…, › …excluded container keeps the exclusion, its counter… |
+| F3 with an unknown send pinned, a failed or malformed target read and the read-only tenth reconcile at the original root became terminal failures | these hold bounded and read-only; a transient answer to the tenth send also holds instead of exhausting; reauth and classified scope handling are unchanged; removals without an unknown send keep their failure policy | › F3 $kind, tenth reconcile, $mode read… (503, malformed value and same root × 3: queued, attempts 10, pin unchanged, bounded backoff across restarts, then reauth, then supersession), › F3 %s execute at the root… (`removal_send_unresolved`, then the exact re-send), › F3 %s: a 5xx answer to the tenth send…, › F3 %s control… (ordinary removal still fails) |
+| F4 C (fresh, X) behind B (Z, admitted before A ran) behind A (X+Y, held): B and C never ran | READY ignores an existing edge from a removal to a same-key removal that holds read-only and never sends again (queued, `removal_send_uncertain`), also through another removal; a removal that may still re-send at its root, creates and ordinary writes keep binding | › F4: A (X, Y) holds… (B, then C, each one write; A keeps Y hidden; edges unchanged), › F4 control… (B waits for A's exact re-send at its root; ordinary same-key ordering) |
+| F5 the real ListenBrainz route answered 200 and admitted nothing for an externally created, verified recreation hidden by a held removal (no create receipt) | the route's lookup releases only an unsettled removal with an unknown send whose send fence is below the projection's verified revision (`visibleScrobblesFrom` option; the default SQL is byte-identical for every other reader) | `uncertain-lb-route.test.ts` › %s external record… (issued token, 401 without one, a repeat before R's proof absorbed, a fresh intent after it with no edges, a repeat of that absorbed, one write fenced at R), › a %s overlay still hides… (an ordinary failed removal, the held removal itself failed, an inactive owner) |
+| F6 a parseable pin without `swapCommit`, or naming another rkey, was sent | a pin is sendable only when it is exactly this removal's request (exact `{method, body, head}` envelope, CID/TID head, `swapCommit` equal to the head CID, CID `swapRecord`, its own repo, collection, rkey and method, and a valid retained container within limits for a partial put); invalid pins are never sent, replaced or released; new pins store `{cid, rev}`, and the `kind: 'head'`-tagged head of existing single-record pins stays valid | › F6 a pin with %s (%s)… (24 corruptions, including missing commit, missing swapRecord, a CID/head mismatch, malformed CIDs, a non-TID revision, another key, repo, collection or method, extra fields, array body or record, wrong `$type`, a retained target, no listens, and a put for a whole or single removal; each holds with no write at its still-current root, then supersession works), › F6 %s control… (valid and legacy-tagged pins re-sent byte-for-byte with unknown fields kept) |
+| F7 an executor superseded while its head read was suspended still sent; its settlement ignored the guarded row count | `pinSend` is the final synchronous gate (still this running attempt, not reached, the request valid and equal to any pin), with no await before dispatch; `finish` persists only a still-running attempt, so cleanup, create receipts and statistics run only after a successful guarded update | › F7 $kind, superseded while the retry awaits $at… (HEAD and GET × 3: every observed dispatch is the running successor's own, one write, `stats_version` +2 for admission and the successor only), › F7 %s: superseded after its request was transmitted… (that send keeps its own CAS; the stale completion leaves the receipt cancelled and unreached, the successor's listen removals intact and statistics unchanged; the successor then writes nothing, or for a single record only the PDS's no-op delete) |
+
+Intentional changes to existing expectations:
+- `apply-snapshot.test.ts` (three assertions): a projection row of an
+  unchanged snapshot entry now carries the snapshot head revision instead of
+  the revision of its first proof. Statistics do not move when the key has no
+  removal receipt, and guards and floors are unchanged.
+- In the prior probe rows, new single-record pins store `head` as
+  `{cid, rev}`. They no longer copy `checkedHead`'s `kind` tag.
+- `uncertain-send.test.ts` and `after-reproof-stats.test.ts`: `tsc -b` failed
+  at de5abe1 on reads of a proof's `cid`; the reads now narrow it.
+
+Evidence (every substantive command under `taskset -c 18,19 nice -n 15`,
+Vitest always `--maxWorkers=1`, fixture SQLite and in-process transport only):
+
+- The seven review probes from `/tmp/atmusic-review-de5abe1` were copied with
+  only their paths rewritten:
+  - `race-boundaries` 3/3 PASS, with 3 FAIL at de5abe1;
+  - `race-controls` 3/3 PASS;
+  - `snapshot-boundaries` 3/3 PASS, with 3 FAIL;
+  - `interaction-boundaries` 16/16 PASS (its F3, F6, F4 and weak cancellation rows);
+  - `dependency-boundaries` 1/1 PASS;
+  - `lb-boundaries` 5/5 PASS, with 3 FAIL;
+  - `cancel-boundaries` 3/3 PASS, with 3 FAIL.
+
+  The data rows were inspected, not just their PASS labels. In the race rows
+  the only write is the late original. In the cancel rows every dispatch is
+  the running successor's. In the dependency row B and C succeeded and A holds.
+  The snapshot rows show totals 2, 1 and 1, `stats_version` 5→6, and Y absent
+  at J. The LB rows show one fresh `listenbrainz` delete and one write fenced
+  at R.
+- The 19 earlier suites ran through a copy of `run-probes.py`. Every suite
+  exits 0 with no FAIL row and an empty stderr. Compared field by field with
+  the review's de5abe1 JSONL (volatile ids excluded), the only differences are
+  in 11 single-record rows. There, `removal_send_json`'s head no longer
+  carries `kind: "head"`.
+- The three new or extended test files were also run against de5abe1's
+  `worker/src`. 54 of 78 tests fail there. The 24 that pass are the intended
+  controls: identical-CID races, pins invalid already at de5abe1, the ordinary
+  failure policy, binding edges, valid pins, the failed and inactive overlays,
+  and the earlier live re-proof tests.
+- 20 mutation checks were run, and each one makes its targeted tests fail:
+  - unbracketed rejection;
+  - READY without the `last_error` condition;
+  - READY without the relaxation;
+  - the gate without its lifecycle check;
+  - `finish` ignoring its row count;
+  - a pin accepting `swapCommit` ≠ head;
+  - extra delete or put body fields;
+  - read failures failing as before;
+  - the reconcile not holding;
+  - the tenth transient exhausting;
+  - a snapshot skipping projection revisions, membership or the statistics bump;
+  - a snapshot inventing membership;
+  - the LB release ignoring the fence or releasing failed removals.
+
+  Two mutants survived the first cut: delete-body extra fields and a failed
+  held removal on the route. Tests were added for both.
+- Two `vitest run --maxWorkers=1` groups passed:
+  - worker/test/node/{outbox,imports,lastfm,listenbrainz,write,read,ingest}
+    and worker/test/{storage,write,read,ingest}: 95 files, 636 tests passed;
+  - worker/test/node/http, worker/test/node/{migrate-node,features}.test.ts
+    and worker/test/{http,harness,composition}: 20 files, 87 tests passed.
+- `npm run typecheck`, a Biome check of every changed file and
+  `git diff --check` all passed. `scripts/validate_contracts.py` passed, and
+  `scripts/validate_case_map.py --check-tests` passed with 258 cases.
+
+Operator notes:
+- A held removal now also holds through read failures and at its original
+  root during the tenth reconcile. Its overlay keeps its targets hidden. It
+  resolves as before: its targets are absent, they are verified absent after
+  the fence, or a covering later intent supersedes it.
+- `removal_send_unresolved` marks a hold whose root may still be current.
+  Removals admitted behind it keep waiting for its exact re-send.
+- Snapshots now rewrite the revision of unchanged projection rows to the
+  snapshot head.
+
+Remaining limits (documented behavior, not waivers):
+- A non-swap 4xx refusing an exact re-send (not the original) still ends the
+  attempt by the ordinary failure policy (`failed`). The pin is kept and the
+  failed overlay still hides the targets. No replay follows, but a failed row
+  is not superseded automatically.
+- A held removal at its root in the tenth reconcile holds until its head
+  moves, an absence or verified absence appears, or a covering intent
+  supersedes it. Removals behind it are not held back, because it never
+  sends again.
+- A bodyless snapshot entry of a container reaffirms membership only from the
+  index's own verified version with that CID. A projection older than
+  verified membership advances its revisions but gains no membership rows.
+- When a ListenBrainz repeat matches a listen with a local create receipt, it
+  still goes through that receipt's existing chain path. A repeat after a fresh
+  delete of such a listen may chain another delete, as before this slice.
+- The full Node acceptance gate is reserved for Sol on the accepted head and
+  was not run here.

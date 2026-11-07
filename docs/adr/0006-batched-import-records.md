@@ -304,7 +304,39 @@ intent was admitted. The rule is now:
   at a newer root cannot tell an unexecuted removal followed by unrelated
   commits from a completed one followed by an identical recreation, so the
   intent is never expanded to a newer root. A pinned swapRecord that does not
-  match the record at its own root can never commit, so it is released.
+  match the record read after a head equal to its root proves nothing by
+  itself: the original may have committed between the head read and the
+  record read, and the record been recreated since (amendment after Astra
+  de5abe1 F1). Only the same head read again after the record (a stable
+  bracket) shows the read saw exactly the root, where that request can never
+  commit; then it is released. A moved closing head holds as above; an
+  unavailable one holds (`removal_send_unresolved`) and reads again.
+- A read that cannot finish or answers a malformed value while a send is
+  unknown holds the same way (bounded, read-only), never fails the removal
+  (amendment after Astra de5abe1 F3); a sign-in failure still blocks it and a
+  classified scope denial keeps its own handling. The read-only reconcile of
+  an interrupted tenth attempt holds whenever a send is unknown, at its root
+  too (the original may still arrive), and never sends; a transient outcome
+  of the tenth attempt of such a removal holds instead of exhausting it.
+  Removals with no unknown send keep the ordinary failure policy.
+- A pin is only ever sent when it is fully this removal's request (amendment
+  after Astra de5abe1 F6): exactly `{method, body, head}`, a CID and TID
+  head, `swapCommit` equal to the head CID, a CID `swapRecord`, the
+  removal's own repo, collection and rkey, `deleteRecord` for a single record
+  or a whole container, and for a partial removal `deleteRecord` or a
+  `putRecord` of a valid retained container (its `$type`, 1–200 entries none
+  of which is a target, within the batch size limits; other fields are the
+  owner's bytes). An invalid pin is never sent, never replaced and never
+  released; it holds like any unknown send until resolved as below.
+- Pinning is the final gate before the write (amendment after Astra de5abe1
+  F7): one synchronous transaction checks that the operation is still this
+  running attempt (state and attempt count), not known reached, and that the
+  request is valid and equal to any existing pin; the write is initiated with
+  nothing awaited in between, and a denied gate sends nothing. A supersession
+  while the executor awaits its head or record read therefore stops it. A
+  request already transmitted cannot be retracted and stays subject to its
+  own CAS; its completion settles only a still-running operation, so a stale
+  success never cleans the successor's receipts or counts statistics.
 - Only a definite rejection of the pinned original send itself (a received
   4xx: InvalidSwap, RecordNotFound, a validation, scope or sign-in error, a
   rate limit) records `rejected`, after which a new fenced send may follow.
@@ -318,7 +350,11 @@ intent was admitted. The rule is now:
   pinned); any other head holds.
 - Resolution of an indefinite hold is a later explicit intent. A new removal
   on the key never waits behind a removal holding an unknown send (it is left
-  out of `operation_deps`). In the transaction that admits it, every earlier
+  out of `operation_deps`), and an edge that already binds a removal to a
+  removal of the same key that holds read-only and never sends again
+  (`removal_send_uncertain`), directly or through another removal, no longer
+  holds it back (amendment after Astra de5abe1 F4); a removal that may still
+  re-send at its root, creates and ordinary writes keep binding. In the transaction that admits it, every earlier
   such removal whose targets are all covered by removals admitted after it
   (`*` covers every listen; a single record is covered by any later removal
   of it) is cancelled `removal_superseded` with `removal_superseded_by`, so it
@@ -330,7 +366,10 @@ intent was admitted. The rule is now:
   and ListenBrainz delete-listen absorb a repeated request into the held
   removal while no verified projection of the target is newer than its fence
   (a repeat of the same intent), and admit a fresh intent once one is (a
-  provably newer verified incarnation); the web DELETE route is always an
+  provably newer verified incarnation, also one created outside this app
+  with no local create receipt: ListenBrainz looks through the held
+  removal's overlay, and only it, for a projection verified above its send
+  fence, amendment after Astra de5abe1 F5); the web DELETE route is always an
   explicit intent. Operators resolve a held removal the same way: no flag or
   timeout marks it complete. Durable reached knowledge still forbids every
   replay, as above.
@@ -352,7 +391,13 @@ removal receipt bumps `stats_version` in the proof's own transaction (single
 and batch, live proofs and snapshots; amendment after Astra a176da7 F2), so
 cached statistics filled after settlement converge with export, status and
 visibility; the cutoffs themselves never move, and the per-owner and per-URI
-revision guards are unchanged.
+revision guards are unchanged. A snapshot entry with the stored CID and no
+body re-proves the same bytes, so it writes what a live proof of them writes
+(amendment after Astra de5abe1 F2): record_state, every projection row's
+revision, verified membership re-noted from the index's own verified version
+of exactly those bytes (never invented without one), and that statistics
+bump; a later hint at the same head is then a true no-op. Excluded versions
+keep their exclusion and counters.
 That unresolved region is deliberate, not a waiver: a plain getRecord
 absence and a no-op answer carry no revision (the history H, D1 absent, B
 present, D2 absent, R present gives identical observations whichever absence
