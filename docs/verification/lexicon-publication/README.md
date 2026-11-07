@@ -40,6 +40,12 @@ validates only the shape of this reference.
 must not be edited to imply that a batch schema is live. No batch record has
 been published or retrieved by this repository.
 
+The candidate changed in N12-01: `listens.maxLength` went from 200 to 10,000
+(a resource ceiling; writers fill containers by bytes, see
+[batch capacity](../batch-capacity.md)), with a new description. A review or
+digest of the earlier candidate does not cover it; publish and verify this
+version.
+
 Before enabling batch writes, the owner must publish the production-ID form of
 the candidate and independently retrieve all **five** production schema
 records without authentication. Compare each returned record's canonical

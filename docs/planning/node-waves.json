@@ -1880,7 +1880,7 @@
      "worker/test/node/imports/writer.test.ts › rolls back child insertion and item repointing together when the split transaction faults",
      "worker/test/node/imports/writer.test.ts › rechecks a single that starts sending while async rebatch preparation is in flight",
      "worker/test/node/imports/writer.test.ts › rolls back old operations and mappings together when the rebatch transaction faults",
-     "worker/test/node/imports/writer.test.ts › packs 1,000 listens into five three-point containers and preserves a one-listen remainder container",
+     "worker/test/node/imports/writer.test.ts › fills containers by bytes past 200 and past the 1,000-item slice, with a short container only at the job end",
      "worker/test/node/imports/writer.test.ts › holds a batch lane on a missing-scope response without failing its imported listens",
      "worker/test/node/imports/writer.test.ts › checks the granted token scope before starting a batch write",
      "worker/test/node/imports/writer.test.ts › reads an attempted batch after a lost create success and never resends it",
@@ -2058,6 +2058,74 @@
      "worker/test/node/outbox/after-reproof-stats.test.ts › %s: a bodyless same-CID snapshot at J after a reopen releases R like the live proof; the real hint at J is a true no-op",
      "worker/test/node/outbox/after-reproof-stats.test.ts › a bodyless same-CID snapshot never invents container membership the index did not verify",
      "worker/test/node/outbox/after-reproof-stats.test.ts › a bodyless same-CID snapshot of an excluded container keeps the exclusion, its counter and no projection"
+    ]
+   }
+  ]
+ },
+ {
+  "wave": 12,
+  "packages": [
+   {
+    "id": "N12-01",
+    "title": "Byte-filled scrobbleBatch containers at verified PDS write limits",
+    "files": [
+     "packages/core/src/scrobble-batch.ts",
+     "packages/atproto/src/scrobble-batch-size.ts",
+     "packages/atproto/src/snapshot/getblocks-source.ts",
+     "lexicons/scrobbleBatch.json",
+     "scripts/validate_contracts.py",
+     "worker/src/imports/writer.ts",
+     "worker/src/imports/rebatch.ts",
+     "worker/src/imports/jobs.ts",
+     "worker/src/outbox/batch-ops.ts",
+     "worker/src/outbox/removal-fence.ts",
+     "worker/src/outbox/apply-writes.ts",
+     "worker/src/do/write/apply-record.ts",
+     "packages/core/test/scrobble-batch.test.ts",
+     "packages/atproto/test/scrobble-batch-size.test.ts",
+     "packages/atproto/test/record-proof.test.ts",
+     "packages/atproto/test/snapshot-walker.test.ts",
+     "worker/test/node/imports/batch-capacity.test.ts",
+     "worker/test/node/imports/writer.test.ts",
+     "worker/test/write/apply-batch.test.ts",
+     "worker/test/node/journey/import-journey.test.ts",
+     "docs/adr/0006-batched-import-records.md",
+     "docs/verification/batch-capacity.md",
+     "docs/verification/batch-import-slice-c.md",
+     "docs/verification/lexicon-publication/README.md",
+     "docs/planning/node-waves.json"
+    ],
+    "dependsOn": [
+     "N11-01"
+    ],
+    "description": "ADR 0006 Capacity amendment. Keep inline scrobbleBatch containers and fill them by bytes just below the reference PDS's verified write limits (bluesky-social/atproto fe343a1b, @atproto/pds 0.5.40: jsonLimit 1,000,000 decimal bytes on createRecord, putRecord and applyWrites, inclusive through body-parser/raw-body; applyWrites at most 200 writes; a commit's relevant blocks at most 2,000,000 bytes; no per-record CBOR cap). Every scrobbleBatch create or put body sent is at most 990,000 exact UTF-8 bytes (10,000-byte, 1 % margin); new containers pack to 989,454 so a partial-removal putRecord adding swapCommit and swapRecord (546 bytes reserved for 257-character CIDs) still fits; DAG-CBOR is checked at 990,000 and is below the JSON for validated entries; applyWrites bodies keep the 200-write limit and the same 990,000-byte ceiling, and containers never share applyWrites. The 1-200 entry bound becomes a 10,000-entry resource ceiling proven non-binding (the shortest valid entry is 118 JSON bytes: at most 8,403 valid entries under 1,000,000 bytes, 8,314 under our target). The packer takes an exact additive sizer (DAG-CBOR array header plus entries; JSON frame plus entries and commas) and verifies every group boundary against whole-group encoding, so packing is linear; the generic measure-only path keeps its semantics. The writer creates at most one container per slice from a scan of at most 10,001 staged items, the longest fitting prefix of the eligible listens; the listen that does not fit and everything after it stay staged, so only a job's last container is short; invalid items, duplicates and loves (at most the free room) met on the way settle in the same transaction, so every slice progresses; the WRITE_SLICE back-pressure on queued items is unchanged. Rebatch reads 10,001 candidates and keeps a short last group for the next pass. Ingest accepts verified containers up to 2,000,000 DAG-CBOR bytes. getBlocks bisects a batch whose response overflows the 8 MiB cap. ETA estimates containers by staged bytes. Representative ListenBrainz fixture through the real mapping, staging and writer: 507-byte entries, 1,947 per container (CBOR 889,868, body 989,297, next 989,805), 116,700 listens in 60 creates. No archive records, uploadBlob, lexicon publication, live PDS, service or web UI work; the batch publication gate stays closed until the owner publishes and verifies the new candidate.",
+    "tests": [
+     "packages/core/test/scrobble-batch.test.ts › derives every write bound from the verified 1,000,000-byte PDS limit with a 1 % margin",
+     "packages/core/test/scrobble-batch.test.ts › proves the shortest valid entry and that the 10,000-entry ceiling never binds before the byte limits",
+     "packages/core/test/scrobble-batch.test.ts › packs exactly like whole-group measuring, verifying each boundary with linear work",
+     "packages/core/test/scrobble-batch.test.ts › measures thousands of entries in linear work where whole-group measuring is quadratic",
+     "packages/core/test/scrobble-batch.test.ts › throws when the sizer disagrees with the encoded group, and on one entry too large by itself",
+     "packages/core/test/scrobble-batch.test.ts › BatchPrefix leaves its group unchanged when an entry does not fit",
+     "packages/core/test/scrobble-batch.test.ts › packs in stable order under both supplied exact size limits",
+     "packages/atproto/test/scrobble-batch-size.test.ts › uses inclusive exact bounds",
+     "packages/atproto/test/scrobble-batch-size.test.ts › checks independently encoded records immediately below and above each byte cap",
+     "packages/atproto/test/scrobble-batch-size.test.ts › the additive sizer equals whole-record encoding across every CBOR array-header width",
+     "packages/atproto/test/scrobble-batch-size.test.ts › a container of validated entries never has more DAG-CBOR than JSON",
+     "packages/atproto/test/scrobble-batch-size.test.ts › packs >1,000 escape-rich listens to the largest fitting prefix; the next listen is rejected",
+     "packages/atproto/test/record-proof.test.ts › a container packed to the write limit verifies inside the 1 MiB getRecord cap with a deep MST path",
+     "packages/atproto/test/snapshot-walker.test.ts › getBlocks bisects a batch of byte-filled scrobbleBatch containers that overflows the 8 MiB body cap",
+     "worker/test/node/imports/batch-capacity.test.ts › measures the representative fixture through mapping, staging and the writer",
+     "worker/test/node/imports/batch-capacity.test.ts › bounds per-container capacity with minimal and maximal fixtures and projects 1,000 and 116,700 representative listens",
+     "worker/test/node/imports/writer.test.ts › staged items become import-priority operations within the budget; written, duplicates and invalid counts are exact; cancel stops new operations",
+     "worker/test/node/imports/writer.test.ts › fills containers by bytes past 200 and past the 1,000-item slice, with a short container only at the job end",
+     "worker/test/node/imports/writer.test.ts › sends each full container as its own createRecord under the write ceiling, reads it back after a lost answer, and removes one entry with a swapped putRecord",
+     "worker/test/node/imports/writer.test.ts › a scan that ends at BATCH_SCAN_LIMIT settles what it read and leaves an unfilled container staged until the job end",
+     "worker/test/node/imports/writer.test.ts › love-heavy and duplicate-heavy windows progress every slice and never create a short container early",
+     "worker/test/node/imports/writer.test.ts › while diskLow reports true the writer creates no operations and the job reports paused with low_disk, and it continues from the same item when space returns",
+     "worker/test/node/imports/writer.test.ts › preserves 833 written items, finishes the uncertain legacy singles at their original rkeys and batches the staged rest",
+     "worker/test/write/apply-batch.test.ts › excludes a container when no entries validate or safe byte limits fail, removing old listens",
+     "worker/test/node/journey/import-journey.test.ts › a Last.fm API import of 1,050 listens and an overlapping ListenBrainz ZIP write each unique listen once within the budget and reach done after advancing the clock",
+     "worker/test/node/journey/import-journey.test.ts › closing and reopening the database and recomposing the app mid-journey loses and duplicates nothing"
     ]
    }
   ]

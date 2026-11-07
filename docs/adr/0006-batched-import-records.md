@@ -8,7 +8,8 @@ and imported loves continue to use their existing single-record collections.
 
 Add the candidate schema `com.example.atmusic.scrobbleBatch`, configured at
 runtime as `<prefix>.scrobbleBatch`. A batch is one repository record with a
-`createdAt` envelope timestamp and 1–200 `listens`. Every entry has a unique
+`createdAt` envelope timestamp and 1–10,000 `listens` (amended; see
+[Capacity](#capacity)). Every entry has a unique
 stable TID `id` and every field of a single scrobble except `$type`; this
 includes the entry's own required `createdAt`. The core remote validator
 reuses single-scrobble validation by synthesizing `<prefix>.scrobble` for each
@@ -16,10 +17,11 @@ entry. Invalid entries are dropped individually. Invalid envelope shape,
 count, or duplicate valid IDs excludes the container. Unknown remote fields
 remain ignored like single scrobbles.
 
-The writer must cap a record at **64,000 DAG-CBOR bytes** and its exact
-UTF-8-encoded `com.atproto.repo.createRecord` JSON body at **100,000 bytes**.
-The body size includes `repo`, `collection`, `rkey`, and `record`; JavaScript
-string length is not a byte count. `packages/core/src/scrobble-batch.ts`
+The writer fills a record by bytes up to the reference PDS's verified write
+limit (amended; see [Capacity](#capacity)). The original 64,000-byte DAG-CBOR,
+100,000-byte body and 200-entry caps are withdrawn. The body size includes
+`repo`, `collection`, `rkey`, and `record`; JavaScript string length is not a
+byte count. `packages/core/src/scrobble-batch.ts`
 exports the shared limits, record builder and validator, stable URI helpers,
 and a stable-order packer. `packages/atproto/src/scrobble-batch-size.ts`
 provides DAG-CBOR and exact request-body measurements for that packer.
@@ -332,7 +334,7 @@ intent was admitted. The rule is now:
   head, `swapCommit` equal to the head CID, a CID `swapRecord`, the
   removal's own repo, collection and rkey, `deleteRecord` for a single record
   or a whole container, and for a partial removal `deleteRecord` or a
-  `putRecord` of a valid retained container (its `$type`, 1–200 entries none
+  `putRecord` of a valid retained container (its `$type`, 1–10,000 entries none
   of which is a target, within the batch size limits; other fields are the
   owner's bytes). An invalid pin is never sent, never replaced and never
   released; it holds like any unknown send until resolved as below.
@@ -457,6 +459,58 @@ resolve pending or indexed batch listens. OAuth sessions created before the
 batch scope was enabled need reauthorization. The UI follow-up should advertise
 the batch capability and explain the extra scope request; this slice does not
 implement web UI changes.
+
+## Capacity
+
+Amendment N12-01 (evidence and source permalinks:
+[batch capacity](../verification/batch-capacity.md)). Containers remain inline
+records. The reference PDS (bluesky-social/atproto `fe343a1b`, `@atproto/pds`
+0.5.40) sets these limits:
+
+- `jsonLimit: 1_000_000` decimal bytes on `createRecord`, `putRecord` and
+  `applyWrites`; body-parser/raw-body refuse only a larger body;
+- at most 200 `applyWrites` operations;
+- at most 2,000,000 bytes of relevant blocks per commit;
+- no per-record CBOR cap.
+
+Accordingly:
+
+- **Write ceiling.** Every scrobbleBatch `createRecord` or `putRecord` body
+  sent is at most 990,000 exact UTF-8 bytes, a 10,000-byte (1 %) margin. The
+  `applyWrites` body (single scrobbles only; containers never share it) uses
+  the same ceiling and keeps the 200-write limit.
+- **Packing target.** New containers pack to 989,454 create-body bytes, so a
+  partial-removal `putRecord` still fits: it drops at least one entry and adds
+  `swapCommit` and `swapRecord` (546 bytes reserved for 257-character CIDs).
+  DAG-CBOR is checked exactly at 990,000. For validated entries it is always
+  smaller than the JSON.
+- **Entry count.** The 10,000-entry bound in the lexicon and validator is a
+  resource ceiling. The shortest valid entry is 118 JSON bytes, so a record
+  under 1,000,000 bytes holds at most 8,403 valid entries (ours at most
+  8,314), and the count never binds before the bytes.
+- **Ingest.** A verified container is accepted up to 2,000,000 DAG-CBOR bytes.
+- **Packer.** The packer sums exact additive sizes and verifies each group
+  boundary against the whole-group encoding (linear time).
+- **Writer.** Each slice creates at most one container, the longest fitting
+  prefix of the eligible staged listens, from a scan of at most 10,001 items.
+  The listen that does not fit stays staged, so only a job's last container is
+  short. The `WRITE_SLICE` back-pressure on queued items is unchanged.
+- **Snapshots.** `getBlocks` bisects a batch whose response overflows its
+  8 MiB cap.
+
+For a representative ListenBrainz listen (507-byte entry), a container holds
+1,947 listens. That is 3 points per 1,000 standalone, about 1.54 points per
+1,000 in a large import, and 60 creates for 116,700 listens.
+
+Unchanged by this amendment:
+
+- containers of at most 200 entries written earlier stay valid, sendable and
+  removable;
+- unknown-history singles finish at their original rkey;
+- written receipts are untouched.
+
+The lexicon candidate changed, so the owner must publish and verify the new
+candidate before the batch publication gate opens.
 
 ## Operator rollout and rollback
 
