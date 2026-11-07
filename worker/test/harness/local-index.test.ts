@@ -263,6 +263,7 @@ const SEED_ROWS: Record<string, Record<string, SqlParam>[]> = {
   range_stats_cache: [
     { did: ALICE, entity: 'artists', range_key: 'week', as_of: T0, version: 1, body: '{}', created_at_ms: NOW },
   ],
+  batch_entry_items: [{ operation_id: 'op1', entry_id: '3lb2aaaaaaa2a', job_id: 'j1', seq: 0 }],
   listen_removals: [
     {
       did: ALICE,
