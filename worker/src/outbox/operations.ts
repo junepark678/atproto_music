@@ -343,6 +343,16 @@ export function isUnsent(op: Pick<OperationRow, 'state' | 'attempts'>): boolean 
   return (op.state === 'queued' || op.state === 'blocked') && op.attempts === 0;
 }
 
+/** Legacy import keys need a read before either publication or rebatching. */
+export function legacyImportNeedsReconcile(db: Db, op: OperationRow): boolean {
+  return (
+    op.origin === 'import' &&
+    op.import_job_id !== null &&
+    op.send_state === 'unknown' &&
+    db.one("SELECT 1 FROM import_items WHERE operation_id = ? AND state = 'queued' LIMIT 1", op.id) !== null
+  );
+}
+
 /**
  * Withdraws an operation that was never sent: `cancelled`, its listen keys
  * deleted (so a deliberate re-scrobble is accepted again) and its unsent

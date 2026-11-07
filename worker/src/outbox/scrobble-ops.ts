@@ -22,6 +22,7 @@ import type { ModuleDeps } from '../do/contracts';
 import {
   type Idempotency,
   insertOperation,
+  legacyImportNeedsReconcile,
   newOperationId,
   outboxCollections,
   type Prepared,
@@ -203,7 +204,7 @@ export const scrobbleCreateExecutor: Executor = {
     // Migration-8 legacy rows have no trustworthy send history. Reconcile the
     // persisted key before any retry; a matching record settles without a
     // second create, while a conflict is terminal and never overwritten.
-    if (op.collection === ctx.collections.scrobble && op.send_state === 'unknown' && op.origin === 'import') {
+    if (op.collection === ctx.collections.scrobble && legacyImportNeedsReconcile(ctx.m.db, op)) {
       const found = await ctx.xrpc.getRecord(op.collection, op.rkey as string);
       if (found.kind === 'present')
         return (await sameDigest(op, found.value))
@@ -220,7 +221,10 @@ export const scrobbleCreateExecutor: Executor = {
           : failureOutcome(found.failure);
       // Absence is now established. Return to the import lane so it can be
       // packed into a batch on its next bounded bookkeep pass.
-      ctx.m.db.run("UPDATE operations SET send_state='unsent' WHERE id=? AND send_state='unknown'", op.id);
+      ctx.m.db.run(
+        "UPDATE operations SET send_state='unsent', send_started_at_ms=NULL, last_error=NULL WHERE id=? AND state='running' AND send_state='unknown'",
+        op.id,
+      );
       return { kind: 'deferred', untilMs: ctx.m.clock.nowMs() };
     }
     return createWithReconcile(op, ctx, (remote) => sameDigest(op, remote));

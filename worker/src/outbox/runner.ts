@@ -75,6 +75,7 @@ import {
   blockOperations,
   IMPORT_PRIORITY,
   insertOperation,
+  legacyImportNeedsReconcile,
   MAX_ATTEMPTS,
   newOperationId,
   type OutboxCollections,
@@ -387,7 +388,11 @@ class Run {
     const ops = this.readyOps(state.did, priority);
     const handled = new Set<string>();
     const batchable = ops.filter(
-      (o) => o.kind === 'scrobble.create' && o.collection === this.collections.scrobble && o.attempts < MAX_ATTEMPTS,
+      (o) =>
+        o.kind === 'scrobble.create' &&
+        o.collection === this.collections.scrobble &&
+        o.attempts < MAX_ATTEMPTS &&
+        !legacyImportNeedsReconcile(this.db, o),
     );
     if (batchable.length >= 2) {
       if (state.batched) {

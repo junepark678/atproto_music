@@ -747,6 +747,58 @@ describe('import writer', () => {
     });
   });
 
+  it('preserves 833 written items while reconciling and rebatching an in-flight legacy job', async () => {
+    await withHarness(async (h) => {
+      h.seedUser(h.alice);
+      const rt = runtime(h);
+      const id = 'job-legacy-live-shape';
+      const ops = await stageLegacySingles(
+        h,
+        rt,
+        id,
+        Array.from({ length: 836 }, (_, i) => listen(i)),
+      );
+      h.db.tx(() => {
+        for (const op of ops.slice(0, 833)) {
+          h.db.run(
+            "UPDATE operations SET state='succeeded', attempts=1, result_uri=?, result_cid='legacy-written', send_state='unknown' WHERE id=?",
+            `at://${h.alice}/${SCROBBLE}/${op.rkey}`,
+            op.id,
+          );
+          h.db.run("UPDATE import_items SET state='written' WHERE operation_id=?", op.id);
+        }
+        h.db.run('UPDATE import_jobs SET written=833 WHERE id=?', id);
+        for (const op of ops.slice(833)) h.db.run("UPDATE operations SET send_state='unknown' WHERE id=?", op.id);
+      });
+      const writtenBefore = h.db.all("SELECT * FROM operations WHERE state='succeeded' ORDER BY id");
+      const uncertain = ops[833]!;
+      await h.kit.externalPut('Alice', uncertain.collection, uncertain.rkey!, JSON.parse(uncertain.record_json!));
+
+      for (let i = 0; i < 6 && job(h, id).state !== 'done'; i++) {
+        await runImports(rt, h.kit.clock.nowMs());
+        await h.runUntilIdle();
+      }
+      await runImports(rt, h.kit.clock.nowMs());
+
+      expect(
+        job(h, id),
+        JSON.stringify(
+          h.db.all(
+            "SELECT id,state,attempts,send_state,send_started_at_ms,last_error FROM operations WHERE state != 'succeeded'",
+          ),
+        ),
+      ).toMatchObject({ state: 'done', written: 836, failed_items: 0 });
+      expect(h.db.all("SELECT * FROM operations WHERE result_cid='legacy-written' ORDER BY id")).toEqual(writtenBefore);
+      expect(await remoteRecords(h.kit, 'Alice', SCROBBLE)).toHaveLength(1);
+      const batches = await remoteRecords(h.kit, 'Alice', SCROBBLE_BATCH);
+      expect(batches).toHaveLength(1);
+      const entries = (batches[0]!.value as { listens: Array<{ id: string }> }).listens;
+      expect(entries.map((entry) => entry.id)).toEqual(ops.slice(834).map((op) => op.rkey));
+      expect(itemStates(h, id)).toEqual({ written: 836 });
+      expect(h.writers.sent.filter((send) => send.nsid === CREATE && send.body?.collection === SCROBBLE)).toEqual([]);
+    });
+  });
+
   it('holds uncertain legacy creates when their reconciliation read is unavailable', async () => {
     await withHarness(async (h) => {
       h.seedUser(h.alice);
@@ -767,6 +819,12 @@ describe('import writer', () => {
       });
       expect(report.nextDueMs).toBe(T0 + 5_000);
       expect(await remoteRecords(h.kit, 'Alice', SCROBBLE)).toHaveLength(0);
+      h.kit.clock.advance(5_000);
+      await h.runUntilIdle();
+      await runImports(rt, h.kit.clock.nowMs());
+      await h.runUntilIdle();
+      await runImports(rt, h.kit.clock.nowMs());
+      expect(job(h, 'job-legacy-read-failed')).toMatchObject({ state: 'done', written: 1, failed_items: 0 });
     });
   });
 
