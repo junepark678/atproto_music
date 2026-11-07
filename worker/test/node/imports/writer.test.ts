@@ -42,6 +42,7 @@ const SCROBBLE_BATCH = 'com.example.atmusic.scrobbleBatch';
 
 const T0S = Math.floor(T0 / 1000);
 const HOUR = 3_600_000;
+const DAY = 86_400_000;
 
 function runtime(h: Harness, diskLow: () => boolean = () => false): ImportRuntime {
   const transport = Object.assign(async (req: Request) => h.kit.transport(req), {
@@ -768,6 +769,70 @@ describe('import writer', () => {
       expect(await remoteRecords(h.kit, 'Alice', SCROBBLE)).toHaveLength(0);
     });
   });
+
+  it.each([
+    { window: 'hour', used: 2_499, resetMs: T0 + HOUR },
+    { window: 'day', used: 17_499, resetMs: T0 + DAY },
+  ] as const)(
+    'parks a partial batch delete with one import point left in the $window window',
+    async ({ window, used, resetMs }) => {
+      await withHarness(async (h) => {
+        h.seedUser(h.alice);
+        const rt = runtime(h);
+        uploadJob(h, `job-budget-${window}-partial-delete`, [listen(101), listen(102)]);
+        await parse(h, rt, `job-budget-${window}-partial-delete`);
+        await runImports(rt, h.kit.clock.nowMs());
+        const batch = h.ops()[0]!;
+        await h.runUntilIdle();
+        const entries = (JSON.parse(batch.record_json!) as { listens: Array<{ id: string }> }).listens;
+        const windowStart = window === 'hour' ? T0 : T0;
+        h.db.run(
+          `INSERT INTO pds_budget(did,window,window_start_ms,points) VALUES (?,?,?,?)
+         ON CONFLICT(did,window) DO UPDATE SET window_start_ms=excluded.window_start_ms,points=excluded.points,
+           limit_hint=NULL,remaining_hint=NULL,reset_at_ms=NULL`,
+          h.alice,
+          window,
+          windowStart,
+          used,
+        );
+        const partial = enqueueBatchListenDelete(h.m, {
+          did: h.alice,
+          uri: `at://${h.alice}/${SCROBBLE_BATCH}/${batch.rkey}`,
+          listenIds: [entries[0]!.id],
+          origin: 'import',
+        });
+
+        const parked = await h.run();
+
+        expect(parked.nextDueMs).toBe(resetMs);
+        expect(h.op(partial.id)).toMatchObject({ state: 'queued', attempts: 0 });
+        h.kit.clock.set(new Date(resetMs).toISOString());
+        await h.runUntilIdle();
+        expect(h.op(partial.id).state).toBe('succeeded');
+
+        const nextStart = h.kit.clock.nowMs();
+        h.db.run(
+          `INSERT INTO pds_budget(did,window,window_start_ms,points) VALUES (?,?,?,?)
+         ON CONFLICT(did,window) DO UPDATE SET window_start_ms=excluded.window_start_ms,points=excluded.points,
+           limit_hint=NULL,remaining_hint=NULL,reset_at_ms=NULL`,
+          h.alice,
+          window,
+          nextStart,
+          used,
+        );
+        const whole = enqueueBatchListenDelete(h.m, {
+          did: h.alice,
+          uri: `at://${h.alice}/${SCROBBLE_BATCH}/${batch.rkey}`,
+          listenIds: ['*'],
+          origin: 'import',
+        });
+        await h.runUntilIdle();
+
+        expect(h.op(whole.id)).toMatchObject({ state: 'succeeded', attempts: 1 });
+        expect(await remoteRecords(h.kit, 'Alice', SCROBBLE_BATCH)).toHaveLength(0);
+      });
+    },
+  );
 
   it('rolls back child insertion and item repointing together when the split transaction faults', async () => {
     await withHarness(async (h) => {
