@@ -502,12 +502,18 @@ it('a first absence whose head moved, then a recreation before the next read: co
     });
     await h.runUntilIdle();
     expect(writes(h)).toBe(0);
-    // Absent at some moment after D; R is later than that.
+    expect(r!.commit.rev > d.rev).toBe(true);
+    // The absence was read at D, but the head closing that read is R: the
+    // first head read after it. Absent at some version at or below R, so R
+    // (at, not below, the boundary) is a later incarnation. The re-read finds
+    // the target present, so the boundary stays `after`, never D.
     expect(h.op(removal.id)).toMatchObject({
       state: 'succeeded',
-      removal_done_rev: d.rev,
-      removal_done_basis: 'absent_after',
+      removal_reached: 'absent',
+      removal_done_rev: r!.commit.rev,
+      removal_done_basis: 'after',
     });
+    expect(h.writers.order()).toEqual([HEAD, GET, HEAD, GET]);
     expect(visible(h)).toEqual([TARGET, SIBLING]);
   });
 });
@@ -521,11 +527,15 @@ it('an unavailable head closing the bracket certifies nothing; the next ordered 
       h.kit.pds.Alice.fail({ nsid: HEAD }, { kind: 'status', status: 503, error: 'Unavailable', message: 'x' });
     });
     await h.runUntilIdle();
-    expect(h.writers.order()).toEqual([HEAD, GET, HEAD, HEAD, GET]);
-    expect(h.writers.sent.map((r) => r.status)).toEqual([200, 200, 503, 200, 200]);
+    // The absence is no-replay knowledge at once; the next head D is the
+    // first read after it (`after` D), and the stable bracket around the
+    // next read (D, absent, D) makes that exact at the same revision.
+    expect(h.writers.order()).toEqual([HEAD, GET, HEAD, HEAD, GET, HEAD]);
+    expect(h.writers.sent.map((r) => r.status)).toEqual([200, 200, 503, 200, 200, 200]);
     expect(writes(h)).toBe(0);
     expect(h.op(removal.id)).toMatchObject({
       state: 'succeeded',
+      removal_reached: 'absent',
       removal_done_rev: d.rev,
       removal_done_basis: 'absent',
     });

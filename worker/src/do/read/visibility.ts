@@ -10,21 +10,27 @@
 // - A scrobble is visible when its owner is visible and it has no queued,
 //   running, blocked or failed `scrobble.delete` operation. A pending or
 //   failed local intent hides whatever is projected for its targets.
-// - Succeeded removals (migration 12, outbox/removal-fence.ts): every
-//   current removal settles only with an ordered completion boundary
-//   `removal_done_rev`, a revision at or after which its targets were proven
-//   absent: the commit of a write whose swapCommit/swapRecord the PDS
-//   enforced, the head of a stable head/read/head bracket around an absent
-//   read (or a head read after an earlier completion), or a verified absence
-//   after the send fence. A projected target at a revision <= that boundary
-//   is the removed (or an already superseded) incarnation, whatever its CID:
-//   a delayed proof of an intermediate version this index never saw stays
-//   hidden, and so does one restored before the write. A target projected
-//   above the boundary is a later incarnation and is visible, at the same or
-//   a new CID, even when its proof arrived before local settlement. Neither
-//   settlement time nor CIDs order anything. The boundary is owner-PDS
-//   metadata of this receipt only: it never writes record_state or verified
-//   membership, and a successful `record_not_ours` receipt has none.
+// - Succeeded removals (migrations 12 and 13, outbox/removal-fence.ts):
+//   every current removal settles only with an ordered completion boundary
+//   `removal_done_rev`. Exact bases (`commit`: the enforced write; `absent`:
+//   a stable head/read/head bracket around an absent read; `verified`: a
+//   verified absence of every target after the send fence) hide a projected
+//   target at a revision <= the boundary: the removed (or an already
+//   superseded) incarnation, whatever its CID, so a delayed proof of an
+//   intermediate version this index never saw stays hidden, and so does one
+//   restored before the write. `after` is the first head read once the
+//   requested state was known reached (a no-op or metadata-free success, or an
+//   absence whose head moved): not an exact cutoff, so it hides a target
+//   strictly below it (pre-removal, or a later incarnation not yet proven at
+//   or above it: hidden until verified ingest re-proves it there). Above an
+//   exact boundary, or at or above `after`, a target is a later incarnation
+//   and is visible, at the same or a new CID, even when its proof arrived
+//   before local settlement. Neither settlement time nor CIDs order anything,
+//   and a sibling's presence never releases another target. The boundary is
+//   owner-PDS metadata of this receipt only: it never writes record_state or
+//   verified membership, and a successful `record_not_ours` receipt has none.
+//   A removal known reached but not yet ordered is still pending (queued,
+//   `removal_reached_unordered`), so the rule above hides all its targets.
 // - Receipts settled under migration 11 (a server-checked `removal_head_rev`,
 //   no `removal_done_rev`) keep its rule: hidden at or below that head, or
 //   below the reported `removal_commit_rev`.
@@ -68,13 +74,15 @@ function outlived(d: string, s: string): string {
 /**
  * The succeeded removal aliased `d` still suppresses the projected row `s`.
  * With an ordered completion boundary (migration 12): `s` was verified at or
- * below it. Settled under migration 11 (a server-checked head, no boundary):
+ * below it, or strictly below an `after` boundary (migration 13). Settled under migration 11 (a server-checked head, no boundary):
  * at or below that head (or below the reported commit). Without either
  * (settled before migration 11): `legacyMatch` (its CID evidence) and not
  * outlived.
  */
 function removedBy(d: string, s: string, legacyMatch: string): string {
-  return `(CASE WHEN ${d}.removal_done_rev IS NOT NULL THEN ${s}.revision <= ${d}.removal_done_rev
+  return `(CASE WHEN ${d}.removal_done_rev IS NOT NULL AND ${d}.removal_done_basis = 'after'
+      THEN ${s}.revision < ${d}.removal_done_rev
+    WHEN ${d}.removal_done_rev IS NOT NULL THEN ${s}.revision <= ${d}.removal_done_rev
     WHEN ${d}.removal_head_rev IS NOT NULL
       THEN (${s}.revision <= ${d}.removal_head_rev
         OR (${d}.removal_commit_rev IS NOT NULL AND ${s}.revision < ${d}.removal_commit_rev))

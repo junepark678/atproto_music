@@ -838,7 +838,7 @@ function finish(m: ModuleDeps, op: OperationRow, outcome: Outcome, now: number, 
         // Nothing of ours was removed: no repository boundary may suppress the key.
         db.run(
           `UPDATE operations SET removal_head_rev = NULL, removal_commit_rev = NULL, removal_done_rev = NULL,
-             removal_done_basis = NULL WHERE id = ?`,
+             removal_done_basis = NULL, removal_reached = NULL, removal_reached_at_ms = NULL WHERE id = ?`,
           op.id,
         );
       }
@@ -967,7 +967,7 @@ function finish(m: ModuleDeps, op: OperationRow, outcome: Outcome, now: number, 
       db.run(
         `UPDATE operations SET state='queued', attempts=attempts-?, due_at=?, last_error=?, updated_at_ms=?
          WHERE id=? AND state='running'`,
-        begun ? 1 : 0,
+        begun && outcome.counted !== true ? 1 : 0,
         outcome.untilMs,
         outcome.code ?? 'remote_state_unavailable',
         now,

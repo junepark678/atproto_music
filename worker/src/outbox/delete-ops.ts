@@ -44,13 +44,16 @@ import {
 import { failureOutcome, type Outcome, reportedCommitRev } from './pds-writer';
 import {
   afterSend,
+  answersRemoval,
   checkedHead,
   keepRemovalCommit,
   keepRemovalDone,
   keepRemovalHead,
+  markReached,
   observeRemoval,
   type RepoHeadRef,
   removalEstablished,
+  removalReached,
   type TargetRead,
 } from './removal-fence';
 import type { ExecContext, Executor } from './runner';
@@ -230,11 +233,14 @@ const RECORD_TARGET = ['*'] as const;
 
 /**
  * deleteRecord with swapCommit and swapRecord, reconciling InvalidSwap and
- * RecordNotFound against the owner's PDS. It settles only with an ordered
- * completion (removal-fence.ts): an enforced commit, or an absence ordered by
- * a head bracket. A success without a usable commit (the reference PDS's
- * no-op delete of an absent record checks no swap) is read back like a
- * failure. Once complete, no retry deletes again.
+ * RecordNotFound against the owner's PDS. A valid success answer (whatever
+ * its commit metadata) or an absence is durable no-replay knowledge, persisted
+ * before the read-back; it settles with an ordered boundary
+ * (removal-fence.ts): an enforced commit, a stable head bracket, a verified
+ * absence, or the first head read after the requested state was reached. A
+ * success without a usable commit (the reference PDS's no-op delete of an
+ * absent record checks no swap) is ordered by that read-back. Once reached,
+ * no retry deletes again.
  */
 async function deleteWithSwap(op: OperationRow, ctx: ExecContext, predecessors: OperationRow[]): Promise<Outcome> {
   const rkey = op.rkey as string;
@@ -245,10 +251,13 @@ async function deleteWithSwap(op: OperationRow, ctx: ExecContext, predecessors: 
   let swap = op.swap_cid;
   for (let tries = 0; tries < 5; tries++) {
     let head: RepoHeadRef;
-    if (removalEstablished(ctx.m.db, op.id, uri, RECORD_TARGET)) {
-      // Complete already (a lost answer whose completion is proven, or an
-      // ordered absence the previous try could not settle): never delete
-      // again; a present record is a later incarnation.
+    if (
+      removalEstablished(ctx.m.db, op.id, uri, RECORD_TARGET, ctx.m.clock.nowMs()) ||
+      removalReached(ctx.m.db, op.id)
+    ) {
+      // The requested state was reached already (an answered success, an
+      // absence, a verified absence after a lost answer): never delete again;
+      // a present record is a later incarnation. Read-only until ordered.
       const seen = await observe();
       if (seen.kind === 'outcome') return seen.outcome;
       return { kind: 'succeeded', uri, hints, ...(swap === null ? {} : { swapCid: swap }) };
@@ -284,23 +293,28 @@ async function deleteWithSwap(op: OperationRow, ctx: ExecContext, predecessors: 
       'delete',
     );
     if (result.ok) {
-      const commit = reportedCommitRev(result.body, head.rev);
-      if (commit !== null) {
-        keepRemovalCommit(ctx.m.db, op.id, commit);
-        keepRemovalDone(ctx.m.db, op.id, commit, 'commit');
-        return { kind: 'succeeded', uri, hints, swapCid: swap };
+      if (answersRemoval(result.body, { uri })) {
+        const commit = reportedCommitRev(result.body, head.rev);
+        // No-replay knowledge first, before anything else is awaited.
+        markReached(ctx.m.db, op.id, commit === null ? 'success' : 'commit', ctx.m.clock.nowMs());
+        if (commit !== null) {
+          keepRemovalCommit(ctx.m.db, op.id, commit);
+          keepRemovalDone(ctx.m.db, op.id, commit, 'commit');
+          return { kind: 'succeeded', uri, hints, swapCid: swap };
+        }
       }
-      // No usable commit: a no-op that checked no swap, or a write whose
-      // metadata was left out. Only an ordered absence completes it.
+      // No usable commit (a no-op that checked no swap, or a write whose
+      // metadata was left out): the read-back orders it, read-only. A body
+      // that does not answer this request is read back like a lost answer.
       const seen = await observe();
-      if (seen.kind === 'outcome') return afterSend(seen.outcome);
+      if (seen.kind === 'outcome') return afterSend(ctx.m.db, op.id, seen.outcome);
       if (seen.kind === 'settled') return { kind: 'succeeded', uri, hints, swapCid: swap };
       return { kind: 'transient', code: 'remote_delete_unconfirmed', swapCid: seen.found.cid };
     }
     const failure = result.failure;
     if (failure.code !== 'repository_changed' && failure.kind !== 'missing') return failureOutcome(failure);
     const seen = await observe();
-    if (seen.kind === 'outcome') return afterSend(seen.outcome);
+    if (seen.kind === 'outcome') return afterSend(ctx.m.db, op.id, seen.outcome);
     if (seen.kind === 'settled') return { kind: 'succeeded', uri, hints, swapCid: swap };
     // The record is unchanged and only the repository head moved: retry now
     // against a fresh head (no attempt spent on an unrelated commit).
@@ -344,8 +358,9 @@ export const scrobbleDeleteExecutor: Executor = {
 };
 
 /**
- * Read-only: absent on the owner's PDS completes a delete, once ordered (a
- * stable head bracket, or after an established completion; removal-fence.ts).
+ * Read-only: absent on the owner's PDS completes a delete (no-replay at once),
+ * settled once ordered (a stable head bracket, or the first head read after
+ * the absence; removal-fence.ts).
  */
 export async function lookupDeleted(op: OperationRow, ctx: ExecContext): Promise<Outcome> {
   const rkey = op.rkey as string;

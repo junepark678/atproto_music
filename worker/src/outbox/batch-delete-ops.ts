@@ -14,9 +14,11 @@ import {
 import { type Failure, failureOutcome, type Outcome, reportedCommitRev } from './pds-writer';
 import {
   afterSend,
+  answersRemoval,
   keepRemovalCommit,
   keepRemovalDone,
   keepRemovalHead,
+  markReached,
   observeRemoval,
   type TargetRead,
 } from './removal-fence';
@@ -440,10 +442,13 @@ function removalIds(db: Db, id: string): string[] {
 // Success outcomes never carry a post-write or post-removal CID: the persisted
 // `swap_cid` stays the last pre-CAS CID. Every write is fenced by the owner's
 // repository head (removal-fence.ts): `swapCommit` = the head read just before
-// the container, persisted as `removal_head_rev` before the send. Settlement
-// needs an ordered completion (`removal_done_rev`): an enforced commit, or an
-// absence ordered by a head/read/head bracket (`observeRemoval`). Once
-// complete, no retry writes again.
+// the container, persisted as `removal_head_rev` before the send. A valid
+// success answer (any commit metadata) or an absence is durable no-replay
+// knowledge, persisted before the read-back is awaited; settlement then needs
+// an ordered boundary (`removal_done_rev`): an enforced commit, a stable
+// head/read/head bracket, a verified absence, or the first head read after
+// the requested state was reached (`observeRemoval`). Once reached, no retry
+// writes again, whatever the read-back finds.
 async function removeIds(op: OperationRow, ctx: ExecContext): Promise<Outcome> {
   const collection = ctx.collections.scrobbleBatch;
   if (op.did !== ctx.xrpc.did || op.collection !== collection || !validRkey(op.rkey))
@@ -470,7 +475,8 @@ async function removeIds(op: OperationRow, ctx: ExecContext): Promise<Outcome> {
   for (let attempt = 0; attempt < 5; attempt++) {
     // Head first, then the container: the CAS below commits only while this
     // head is current, so the container read is the state the write replaces.
-    // An absence (or a completion already established) settles only ordered.
+    // Once the requested state is known to be reached this answers only
+    // `settled` or an outcome (a read-only hold): never a write.
     const seen = await observeRemoval(ctx, op.id, uri, ids, read);
     if (seen.kind === 'outcome') return seen.outcome;
     if (seen.kind === 'settled') return { kind: 'succeeded', uri, hints };
@@ -485,29 +491,36 @@ async function removeIds(op: OperationRow, ctx: ExecContext): Promise<Outcome> {
     recordRemovalEvidence(ctx.m.db, op.id, found.cid);
     keepRemovalHead(ctx.m.db, op.id, head.rev);
     ctx.persist({ swapCid: found.cid });
+    const record = kept.length === 0 ? undefined : { ...found.record, listens: kept };
     const body =
-      kept.length === 0
+      record === undefined
         ? { repo: op.did, collection: op.collection, rkey: op.rkey, swapCommit: head.cid, swapRecord: found.cid }
         : {
             repo: op.did,
             collection: op.collection,
             rkey: op.rkey,
-            record: { ...found.record, listens: kept },
+            record,
             swapCommit: head.cid,
             swapRecord: found.cid,
           };
-    const method = kept.length === 0 ? 'com.atproto.repo.deleteRecord' : 'com.atproto.repo.putRecord';
-    const result = await ctx.xrpc.procedure(method, body, kept.length === 0 ? 'delete' : 'put');
+    const method = record === undefined ? 'com.atproto.repo.deleteRecord' : 'com.atproto.repo.putRecord';
+    const result = await ctx.xrpc.procedure(method, body, record === undefined ? 'delete' : 'put');
     // InvalidSwap: something (this record or any other) was committed after
     // the head; nothing was written. Read a fresh head and container.
     if (!result.ok && result.failure.code === 'repository_changed') continue;
-    // Only a well-formed commit newer than the head proves the PDS enforced
-    // the swaps and wrote; a success without one (a no-op, or metadata left
-    // out) and any failure settle through an ordered absence instead.
-    const commit = result.ok ? reportedCommitRev(result.body, head.rev) : null;
-    if (commit !== null) {
-      keepRemovalCommit(ctx.m.db, op.id, commit);
-      keepRemovalDone(ctx.m.db, op.id, commit, 'commit');
+    // A valid success answer is no-replay knowledge at once, before anything
+    // else is awaited. Only a well-formed commit newer than the head also
+    // orders it (the PDS enforced the swaps and wrote); a no-op or metadata
+    // left out is ordered by the read-back. A body that does not answer this
+    // request certifies nothing and is read back like a lost answer.
+    const answered = result.ok && answersRemoval(result.body, record === undefined ? { uri } : { uri, record });
+    if (answered) {
+      const commit = reportedCommitRev(result.body, head.rev);
+      markReached(ctx.m.db, op.id, commit === null ? 'success' : 'commit', ctx.m.clock.nowMs());
+      if (commit !== null) {
+        keepRemovalCommit(ctx.m.db, op.id, commit);
+        keepRemovalDone(ctx.m.db, op.id, commit, 'commit');
+      }
     }
     // Always read back the owner-scoped URI before marking intent complete.
     const after = await observeRemoval(ctx, op.id, uri, ids, read);
@@ -515,10 +528,11 @@ async function removeIds(op: OperationRow, ctx: ExecContext): Promise<Outcome> {
       // A classified write failure decides first (a scope denial holds the
       // lane); otherwise the read-back failure does.
       if (!result.ok && isBatchScopeDenial(result.failure)) return batchFailure(result.failure);
-      return afterSend(after.outcome);
+      return afterSend(ctx.m.db, op.id, after.outcome);
     }
     if (after.kind === 'settled') return { kind: 'succeeded', uri, hints };
-    // The targets are still there: that CID is pre-removal evidence too.
+    // The targets are still there and nothing proves this write happened:
+    // that CID is pre-removal evidence too.
     recordRemovalEvidence(ctx.m.db, op.id, after.found.cid);
     if (result.ok) return { kind: 'transient', code: 'remote_delete_unconfirmed' };
     if (result.failure.kind === 'missing') continue;
@@ -539,9 +553,9 @@ export const batchDeleteExecutor: Executor = {
       return { kind: 'permanent', code: 'invalid_record_identity' };
     const uri = `at://${op.did}/${op.collection}/${op.rkey}`;
     const hints = [{ collection, rkey: op.rkey! }];
-    // Read-only: never a write. An absence settles only ordered (a stable
-    // head bracket, or after an established completion); a lost tenth send
-    // keeps the send fence persisted before it.
+    // Read-only: never a write. An absence is no-replay knowledge and settles
+    // once ordered (a stable bracket, or the first head read after it); a
+    // lost tenth send keeps the send fence persisted before it.
     const ids = removalIds(ctx.m.db, op.id);
     const seen = await observeRemoval(ctx, op.id, uri, ids, () => readTargets(op, ctx, uri, new Set(ids)));
     if (seen.kind === 'outcome') return seen.outcome;

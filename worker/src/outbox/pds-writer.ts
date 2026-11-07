@@ -386,8 +386,11 @@ export type Outcome =
   /**
    * A read could not establish remote state; retry later without spending a
    * write attempt. `code` names why (default `remote_state_unavailable`).
+   * `counted`: this attempt did send a write (it stays counted), and the
+   * operation now only holds read-only (a removal whose requested state was
+   * reached, outbox/removal-fence.ts), so it is never failed for attempts.
    */
-  | { kind: 'waiting'; untilMs: number; code?: string }
+  | { kind: 'waiting'; untilMs: number; code?: string; counted?: boolean }
   /** Definite record rejection: atomically replace this batch with durable children. */
   | {
       kind: 'split';
