@@ -233,7 +233,7 @@ class Run {
     this.collections = outboxCollections(prefix);
     this.eligibility = ` AND NOT (
         (o.origin = 'import' AND o.kind = 'scrobble.create' AND o.collection = '${this.collections.scrobble}'
-         AND o.attempts = 0 AND o.send_started_at_ms IS NULL
+         AND o.send_state = 'unsent'
          AND EXISTS (SELECT 1 FROM import_items i WHERE i.operation_id = o.id AND i.state = 'queued'))
         ${m.config.batchPublication ? '' : `OR o.collection = '${this.collections.scrobbleBatch}'`})`;
   }

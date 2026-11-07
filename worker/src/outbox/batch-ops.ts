@@ -46,7 +46,7 @@ export const batchCreateExecutor: Executor = {
     if (!valid(op, ctx)) return { kind: 'permanent', code: 'invalid_batch_record' };
     // Retried/uncertain creates must be read first. A failed read is not proof
     // of absence and therefore never authorizes another create or a split.
-    if (op.attempts > 1) {
+    if (op.attempts > 1 || op.send_state === 'unknown') {
       const found = await ctx.xrpc.getRecord(op.collection, op.rkey as string);
       if (found.kind === 'failed') return failureOutcome(found.failure);
       if (found.kind === 'present')

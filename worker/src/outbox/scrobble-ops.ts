@@ -200,6 +200,21 @@ export const scrobbleCreateExecutor: Executor = {
     if (expected === null || !hasIdentity(op, ctx, expected) || op.digest === null) {
       return { kind: 'permanent', code: 'invalid_record_identity' };
     }
+    // Migration-8 legacy rows have no trustworthy send history. Reconcile the
+    // persisted key before any retry; a matching record settles without a
+    // second create, while a conflict is terminal and never overwritten.
+    if (op.collection === ctx.collections.scrobble && op.send_state === 'unknown' && op.origin === 'import') {
+      const found = await ctx.xrpc.getRecord(op.collection, op.rkey as string);
+      if (found.kind === 'present')
+        return (await sameDigest(op, found.value))
+          ? { kind: 'succeeded', uri: found.uri, cid: found.cid, hints: [{ collection: op.collection, rkey: op.rkey as string }] }
+          : { kind: 'permanent', code: 'remote_record_conflict' };
+      if (found.kind === 'failed') return failureOutcome(found.failure);
+      // Absence is now established. Return to the import lane so it can be
+      // packed into a batch on its next bounded bookkeep pass.
+      ctx.m.db.run("UPDATE operations SET send_state='unsent' WHERE id=? AND send_state='unknown'", op.id);
+      return { kind: 'deferred', untilMs: ctx.m.clock.nowMs() };
+    }
     return createWithReconcile(op, ctx, (remote) => sameDigest(op, remote));
   },
   async reconcile(op, ctx) {
