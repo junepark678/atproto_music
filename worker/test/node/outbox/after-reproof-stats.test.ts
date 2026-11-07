@@ -165,7 +165,7 @@ it.each(['partial', 'whole', 'single'] as const)(
         removal_done_rev: j!.commit.rev,
         removal_done_basis: 'after',
       });
-      expect(r!.cid).toBe(j!.cid);
+      expect(r!.state === 'present' ? r!.cid : null).toBe(j!.state === 'present' ? j!.cid : null);
       expect(r!.commit.rev < j!.commit.rev).toBe(true);
       // Settlement queued the record's verify hint (source notify).
       expect(h.db.all('SELECT uri, source FROM hints')).toEqual([{ uri, source: 'notify' }]);
@@ -201,7 +201,7 @@ it.each(['partial', 'whole', 'single'] as const)(
       expect(h.db.all('SELECT uri FROM hints')).toEqual([]);
       expect(h.db.one('SELECT revision, cid FROM record_state WHERE uri = ?', uri)).toEqual({
         revision: j!.commit.rev,
-        cid: r!.cid,
+        cid: r!.state === 'present' ? r!.cid : null,
       });
 
       // Released at J: visible, indexed, exported; Y stays removed.

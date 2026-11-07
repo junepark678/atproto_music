@@ -236,7 +236,7 @@ it.each(
       expect(pin).toMatchObject({
         method: methodOf(kind),
         head: { cid: a.commit.cid, rev: a.commit.rev },
-        body: { swapCommit: a.commit.cid, swapRecord: a.cid },
+        body: { swapCommit: a.commit.cid, swapRecord: a.state === 'present' ? a.cid : null },
       });
       if (kind === 'partial') {
         expect((pin!.body.record as { listens: Array<{ id: string }> }).listens.map((l) => l.id)).toEqual([Z]);
