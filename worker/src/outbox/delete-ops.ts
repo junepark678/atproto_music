@@ -40,6 +40,7 @@ import { hasIdentity, validRkey } from './scrobble-ops';
 
 /** Splits `at://did/collection/rkey` when it names one record of `collection` owned by `did`. */
 export function ownRecordKey(uri: string, did: string, collection: string): string | null {
+  if (uri.includes('#')) return null;
   const prefix = `at://${did}/${collection}/`;
   if (!uri.startsWith(prefix)) return null;
   const rkey = uri.slice(prefix.length);
