@@ -152,6 +152,18 @@ export function estimatedCost(kind: OperationKind): number {
   }
 }
 
+/** A targeted batch-listen removal normally rewrites the container (2 points). */
+function estimatedOperationCost(db: Db, op: OperationRow): number {
+  if (op.kind === 'scrobble.delete' && op.collection.endsWith('.scrobbleBatch')) {
+    const ids = db.all<{ listen_id: string }>(
+      'SELECT listen_id FROM batch_delete_listens WHERE operation_id = ?',
+      op.id,
+    );
+    if (ids.length > 0 && !ids.some(({ listen_id }) => listen_id === '*')) return WRITE_COST.update;
+  }
+  return estimatedCost(op.kind);
+}
+
 // ---------------------------------------------------------------------------
 // The run
 
@@ -401,7 +413,7 @@ class Run {
         return;
       }
       if (op.attempts < MAX_ATTEMPTS) {
-        const budget = checkBudget(this.db, state.did, priority, estimatedCost(op.kind), this.now);
+        const budget = checkBudget(this.db, state.did, priority, estimatedOperationCost(this.db, op), this.now);
         if (!budget.ok) {
           // FIFO within the DID and priority: everything after it waits too.
           this.park(state.did, priority, budget.resumeAtMs);
@@ -559,7 +571,7 @@ class Run {
         if (outcome.kind === 'deferred') {
           // A smaller request may still fit (the next run sizes its batch by what is left);
           // otherwise the DID and priority wait for the binding window.
-          if (checkBudget(db, state.did, op.priority, estimatedCost(op.kind), now).ok) this.deferred = true;
+          if (checkBudget(db, state.did, op.priority, estimatedOperationCost(db, op), now).ok) this.deferred = true;
           else this.park(state.did, op.priority, outcome.untilMs);
         }
         if (
