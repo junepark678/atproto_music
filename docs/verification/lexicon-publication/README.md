@@ -32,3 +32,28 @@ The owner approved enabling writes. `NAMESPACE_PUBLICATION_REF` in the local
 After `atmusic.service` restarted, `GET /api/v1/meta` advertised the `publication` and `writes`
 capabilities with `lexiconPrefix: dev.pythonplayer123.music`. As ADR 0001 notes, the runtime
 validates only the shape of this reference.
+
+## Unpublished batch candidate
+
+`lexicons/scrobbleBatch.json` is a candidate fixture schema only. The checked-in
+`manifest.json` above remains a receipt for exactly four published schemas and
+must not be edited to imply that a batch schema is live. No batch record has
+been published or retrieved by this repository.
+
+Before enabling batch writes, the owner must publish the production-ID form of
+the candidate and independently retrieve all **five** production schema
+records without authentication. Compare each returned record's canonical
+content with the approved schema, record the URI, CID, retrieval URL, digest,
+and UTC verification time in a new copy of
+[`batch-manifest.template.json`](batch-manifest.template.json), and review the
+complete receipt. Only after that evidence exists may the operator set
+`NAMESPACE_BATCH_PUBLICATION_REF` to the SHA-256 of that reviewed five-record
+manifest. It must differ from `NAMESPACE_PUBLICATION_REF`; the old four-record
+digest alone keeps the batch capability and OAuth scope closed. The runtime
+checks reference format and distinctness only and does not verify remote
+publication itself. Existing sessions must re-consent to the added
+`repo:<prefix>.scrobbleBatch` scope.
+
+The candidate is intentionally absent from the production `manifest.json` and
+from `lexicons/published/`. This work performs no network access and makes no
+claim of publication or owner approval.
