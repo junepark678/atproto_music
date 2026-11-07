@@ -191,3 +191,90 @@ The late-commit legacy single constraint (an accepted pre-upgrade create
 landing after its chained delete) is unchanged. Single-record removals gain
 the fence too. The full Node acceptance gate is reserved for the accepted
 final head and was not run here.
+
+## Ordered-completion fixes (stacked on PR #160)
+
+Stacked on `t3/batch-delete-commit-fencing` at `79560fe` (PR #160). It closes
+the three Astra findings of the 79560fe review (F1–F3) by separating a
+removal's ordered completion boundary from its provisional send fence (ADR
+0006, migration 12). Migrations 1–11 are unchanged; migration 12 adds
+`operations.removal_done_rev` and `removal_done_basis`. No live service,
+environment file, lexicon publication or PDS record was touched.
+
+| Finding | Fix | Regression |
+| --- | --- | --- |
+| F1 a head read before an absent read was used as the boundary, so a delayed proof of B (committed after the head, removed at D before the read) resurfaced | every absent read is bracketed by a second head read; only a stable bracket (same CID and revision) or a read after an established completion fixes the boundary; a moved head records `absent_after` and reads again in the same attempt. Applies to execution, InvalidSwap, RecordNotFound, failed writes, unknown-index single deletes and read-only tenth reconciles, single and batch | `ordered-completion.test.ts` › F1 batch $mode $kind…, › F1 single %s…, › F1 a failed write ($error)… |
+| F2 a 2xx without commit was treated as an enforced CAS; the installed `@atproto/pds` 0.5.40 no-op delete (absent) and put (same bytes) skip `processWrites` and both swaps | only a well-formed `commit` newer than the checked head is `commit` evidence; a metadata-free success (no-op or omitted metadata) and a malformed commit settle only through an ordered absence. The fake PDS now answers both no-ops as the installed handlers do (200, no `commit`, no swap checked) | `ordered-completion.test.ts` › F2 %s…; `reference-noop.test.ts` (the installed handlers, then the fake, same scenarios) |
+| F3 recovery replayed a completed removal against a verified later recreation R and advanced its fence past R | completion is durable in `removal_done_rev` (known commit, ordered absence, or verified membership absent after the send fence); once set, a retry only reads back and settles, never writes; a fresh intent removes R | `ordered-completion.test.ts` › F3 %s… (known success and lost response with verified absence, each across restart, then a fresh delete), › F3 a known commit whose first read-back already sees the recreation R…, › F3 single… |
+
+The six recovery controls of the review (lost response, known commit with a
+failed read-back, tenth-attempt lost response; partial and whole; recreation
+after the recovery's absent read) are committed as › control $mode $kind… and
+pass on both heads. Also covered: a first unstable absence followed by a
+recreation (`absent_after`, no write, R visible), an unavailable head closing
+the bracket (certifies nothing; the next read does), a head behind the send
+fence (`repository_head_behind_fence`, no read, write or attempt), an
+unavailable head after a send (counted transient, never an uncounted wait),
+and the migration-11 rule for receipts without `removal_done_rev`. Existing
+tests whose request sequences now include the closing head read, or whose
+fake-PDS answer is now the reference no-op, were updated
+(`removal-fence.test.ts`, `delete.test.ts`, `recovery.test.ts`); the legacy
+receipt simulations also clear the migration 12 columns.
+
+Evidence (every substantive command under `taskset -c 18,19 nice -n 15`,
+Vitest always `--maxWorkers=1`, fixture SQLite and in-process transport only):
+
+- Astra's scripts from `/tmp/atmusic-review-79560fe`, with paths rewritten to
+  this worktree and the expected schema version set to 12 (`migration-833`,
+  `additional-boundaries`; no check weakened): `head-races` (10 FAIL at
+  79560fe), `noop-races` (3 FAIL) and `recovery-controls` (3 FAIL, 6 controls)
+  now report `{"summary":{"failed":[]}}`. Every data row was inspected: each F1
+  and F2 receipt settles with `removal_done_rev` = D (basis `absent`), the
+  delayed B proof is applied yet the target stays hidden, unindexed
+  (`unknown`) and unexported, statistics count only the sibling (or none) and
+  the remote holds only the sibling (or nothing); single deletes now read back
+  after the no-op `deleteRecord` 200. Each F3 row and control settles with no
+  further PUT/DELETE, R visible, indexed and exported, `removal_done_rev` = D
+  (basis `commit` or `verified`). `installed-api-noop` (2 rows) confirms the
+  installed handlers' `processWrites=0` and no `commit`. The eight earlier
+  suites (`original`, `adversarial`, `interactions`, `upgrade-boundaries`,
+  `settlement-cache`, `boundaries`, `additional-boundaries`, `migration-833`)
+  exit 0 with empty stderr, and their rows equal the review's output field by
+  field except the schema version (11 to 12); the schema-4 migration keeps all
+  836 operations, items and keys and the 833 written receipts.
+- The new tests on the reviewed head (79560fe sources, the new tests and fake
+  PDS copied in): 22 of 30 fail; the 8 passing are the six controls and the
+  two fidelity tests. With every `removal_done_*` expectation stripped, each F1
+  and F2 case still fails on the target resurfacing and each F3 case on an
+  extra write.
+- Mutation checks: treating every bracket as stable fails 8 of the 28
+  `ordered-completion` tests; never treating completion as established fails 12.
+- `npm run typecheck` passed. Biome check on every changed file passed.
+  `git diff --check` passed.
+- `vitest run --maxWorkers=1` over worker/test/node (all), worker/test/{write,read,ingest,http,acceptance,storage}
+  and packages: 156 files, 815 tests passed, none failed or skipped;
+  worker/test/{harness,composition}: 8 files, 22 tests passed; the read-model
+  bench project (query-plan pins, output redirected outside the repository):
+  2 files, 8 tests passed.
+- `/tmp/abatch-final/.venv/bin/python scripts/validate_contracts.py` and
+  `/usr/bin/python3.14 scripts/validate_case_map.py --check-tests` passed.
+
+Operator notes: the release applies migration 12 at startup (two nullable
+columns, no backfill). A removal now needs one more `getLatestCommit` after an
+absent read; a removal whose head keeps moving reads again at once and
+otherwise holds `repository_head_unstable` (no attempt spent) with its
+completion kept.
+
+Remaining limits: when the head moved during the only absent read and the
+next read already finds a recreation, the boundary stays at the first head; a
+delayed proof of a version committed between that head and the absence can be
+displayed until a newer proof of the present recreation replaces it (the
+listen is present on the PDS then, nothing is written). Verified-absence
+completion for a multi-target partial removal uses the oldest per-target
+verified absence. Heads, commits and no-op answers are the owner PDS's own
+metadata, not verified proofs; a PDS that misreports them changes only how its
+owner's removal is displayed here. The installed-handler test pins
+`@atproto/pds` 0.5.40 behaviour and must be revisited when that dependency
+moves. Receipts settled under migration 11 keep its head rule, so for them the
+F1 window remains. The full Node acceptance gate is reserved for the accepted
+final head and was not run here.

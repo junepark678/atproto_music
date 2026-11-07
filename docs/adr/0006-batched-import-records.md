@@ -206,20 +206,59 @@ listens and single records) is fenced by the owner's PDS itself:
    between the reads and the write (ABA) cannot slip through. An unrelated
    commit retries within the same attempt (at most five times);
 4. keep a success response's `commit.rev` (a TID newer than the checked head)
-   as `removal_commit_rev`. A lost or metadata-free response keeps the head.
+   as `removal_commit_rev`.
 
-A read that finds the target already gone after reading head H also fences at
-H: the target was absent at a moment after H was current, so every
-incarnation at or below H had been removed by then. This covers a restart
-after a lost response and the read-only reconcile of an interrupted tenth
-attempt, which never writes. A succeeded receipt then hides its targets at
-every projected revision at or below `removal_head_rev` (or below
-`removal_commit_rev`), whatever the CID: a delayed proof of an intermediate
+Migration 12 (additive: `operations.removal_done_rev`, `removal_done_basis`)
+separates completion from that provisional send fence. Two facts of the
+reference PDS (`@atproto/pds` 0.5.40, `api/com/atproto/repo`) decide it.
+First, a head read before an absent read does not order the absence: another
+writer can commit a target-containing B after the head and remove it at D
+before the read, so a boundary at the head would show a delayed proof of B.
+Second, a 2xx without commit metadata does not prove a compare-and-swap: its
+`deleteRecord` of an absent record and `putRecord` of the bytes already stored
+return before `processWrites`, the only place `swapCommit` and `swapRecord`
+are checked, and answer without `commit`. So a removal settles only with an
+ordered completion boundary `removal_done_rev`, a revision at or after which
+every target was proven absent, with its basis:
+
+- `commit`: the write's success carried a well-formed commit newer than the
+  checked head. Only `processWrites` returns one, after enforcing both swaps,
+  so that commit removed the targets;
+- `absent`: an absent read bracketed by the same head (CID and revision)
+  before and after it, so nothing was committed during it; or an absent read
+  that follows an earlier completion (its head is not behind the boundary);
+- `absent_after`: an absent read during which the head moved. The targets
+  were gone at some moment after the first head, which proves the intent
+  complete and bounds suppression at that head, but not exactly: the next
+  read (at once, in the same attempt) refines it, and a later absent read
+  makes it exact. A present read then is a later incarnation;
+- `verified`: after a send, verified membership (written only by verified
+  ingest) records every target absent at a revision newer than the send
+  fence `removal_head_rev`; the oldest such revision is the boundary.
+
+A success without a usable commit (a no-op, or metadata left out by a write
+that did commit), a failed write, a lost answer, an InvalidSwap or
+RecordNotFound, and the read-only reconcile of an interrupted tenth attempt
+all settle only through an ordered absence or a verified one; malformed and
+missing commit metadata are alike unusable. Once `removal_done_rev` is set
+(it never moves backwards), no retry of that intent writes again: a target
+present on a later read is a later incarnation, which a fresh intent removes
+normally. A known commit still needs a successful read-back before it settles
+(a failed read-back retries the read, never the write). No arbitrary delay,
+finite CID enumeration or settlement time is used as evidence.
+
+A succeeded receipt then hides its targets at every projected revision at or
+below `removal_done_rev`, whatever the CID: a delayed proof of an intermediate
 version this index never saw, or of an absence and identical restore that
 preceded the write, cannot resurface or retire it. A target projected above
 the boundary is a later incarnation and is visible at the same or a new CID,
 even when its proof arrived before local settlement, and Last.fm can remove it
-again. Neither settlement time, wall clock nor CIDs order anything.
+again. Neither settlement time, wall clock nor CIDs order anything. One
+documented limit: when the head moved during the only absent read and the next
+read already finds a recreation, the boundary stays at the first head, so a
+delayed proof of a version committed between that head and the absence (B
+above) can be displayed until a newer proof of the present recreation
+replaces it; the listen is present on the PDS then, and nothing is written.
 
 Trust and binding: the head is the owner's own PDS's report, checked for
 CID/TID syntax and bound to the owner by the session's own repository; it is
@@ -228,14 +267,19 @@ targets and never writes `record_state` or `verified_membership`; status
 endpoints keep reporting only verified state. The PDS enforces `swapCommit`
 atomically with the write, so an honest PDS cannot commit the removal at any
 other position; a PDS that lies about its head can only change how its own
-owner's removal is displayed here. Fail closed: a removal never writes without
-a well-formed head, or against a head older than the target's verified
-revision here (a repository that went backwards). It waits instead
-(`last_error` `repository_head_unavailable` or `repository_head_behind_index`,
-retried every 5 s, no attempt spent), and stays hidden while it waits. A
-`record_not_ours` receipt carries no head. Receipts that settled before
-migration 11 keep the migration 9/10 rules (CID evidence, verified-absence
-fence); `listen_removal_cids` is still recorded as forensic evidence.
+owner's removal is displayed here. Fail closed: a removal never writes or
+settles without a well-formed head, or against a head older than the target's
+verified revision here or its own `removal_head_rev`/`removal_done_rev` (a
+repository that went backwards). It waits instead (`last_error`
+`repository_head_unavailable`, `repository_head_behind_index` or
+`repository_head_behind_fence`, retried every 5 s, no attempt spent), and
+stays hidden while it waits; after a send the same condition is a counted
+transient failure, so a send is never uncounted. A `record_not_ours` receipt
+carries no head and no boundary. Receipts that settled under migration 11 (a
+head, no `removal_done_rev`) keep its rule (at or below `removal_head_rev`, or
+below `removal_commit_rev`); receipts that settled before migration 11 keep
+the migration 9/10 rules (CID evidence, verified-absence fence);
+`listen_removal_cids` is still recorded as forensic evidence.
 
 Record status for a listen fragment checks verified membership separately from
 the common visibility overlay. For a visible owner's present container whose
