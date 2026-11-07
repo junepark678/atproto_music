@@ -835,6 +835,32 @@ const MIGRATION_11: Migration = {
   ],
 };
 
+// Ordered removal completion (ADR 0006 amendment; outbox/removal-fence.ts).
+// A 2xx without a usable commit does not prove the swaps were enforced (the
+// reference PDS's no-op delete and put return before processWrites), and a
+// head read before an absent read does not order that absence. Completion is
+// therefore kept apart from the provisional send fence:
+// - `removal_done_rev`: a revision at or after which every target was proven
+//   absent: the reported commit of an enforced write, the head of a stable
+//   head/read/head bracket, a head read after an earlier completion, or a
+//   verified absence after the send fence. Once set, a retry never writes
+//   again; it never moves backwards. Present projections at or below it are
+//   suppressed, any above it is a later incarnation.
+// - `removal_done_basis`: commit | absent | absent_after (absent at a moment
+//   after that head; exact boundary not yet known) | verified.
+// Both are local receipt metadata, never verified proof. A receipt settled
+// without `removal_done_rev` keeps the migration 11 (or older) rule.
+const MIGRATION_12: Migration = {
+  version: 12,
+  name: 'removal_completion_boundary',
+  statements: [
+    'ALTER TABLE operations ADD COLUMN removal_done_rev TEXT',
+    // Values are enforced by outbox/removal-fence.ts keepRemovalDone (no
+    // CHECK on an added column; see the conventions above).
+    'ALTER TABLE operations ADD COLUMN removal_done_basis TEXT',
+  ],
+};
+
 export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_1,
   MIGRATION_2,
@@ -847,6 +873,7 @@ export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_9,
   MIGRATION_10,
   MIGRATION_11,
+  MIGRATION_12,
 ];
 
 /** The schema version this code expects. */

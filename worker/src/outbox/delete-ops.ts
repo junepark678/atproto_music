@@ -42,7 +42,17 @@ import {
   unsettledAt,
 } from './operations';
 import { failureOutcome, type Outcome, reportedCommitRev } from './pds-writer';
-import { checkedHead, keepRemovalCommit, keepRemovalHead } from './removal-fence';
+import {
+  afterSend,
+  checkedHead,
+  keepRemovalCommit,
+  keepRemovalDone,
+  keepRemovalHead,
+  observeRemoval,
+  type RepoHeadRef,
+  removalEstablished,
+  type TargetRead,
+} from './removal-fence';
 import type { ExecContext, Executor } from './runner';
 import { hasIdentity, validRkey } from './scrobble-ops';
 
@@ -207,15 +217,42 @@ function indexedCid(ctx: ExecContext, uri: string): string | null {
   return row !== null && row.state === 'present' ? row.cid : null;
 }
 
-/** deleteRecord with swapCommit and swapRecord, reconciling InvalidSwap and RecordNotFound against the owner's PDS. */
+/** The single record as a removal's target on the owner's PDS. */
+async function readRecord(ctx: ExecContext, collection: string, rkey: string): Promise<TargetRead<{ cid: string }>> {
+  const found = await ctx.xrpc.getRecord(collection, rkey);
+  if (found.kind === 'failed') return { kind: 'outcome', outcome: failureOutcome(found.failure) };
+  if (found.kind === 'absent') return { kind: 'absent' };
+  return { kind: 'present', found: { cid: found.cid } };
+}
+
+/** The verified-membership target of a single record removal: the record itself. */
+const RECORD_TARGET = ['*'] as const;
+
+/**
+ * deleteRecord with swapCommit and swapRecord, reconciling InvalidSwap and
+ * RecordNotFound against the owner's PDS. It settles only with an ordered
+ * completion (removal-fence.ts): an enforced commit, or an absence ordered by
+ * a head bracket. A success without a usable commit (the reference PDS's
+ * no-op delete of an absent record checks no swap) is read back like a
+ * failure. Once complete, no retry deletes again.
+ */
 async function deleteWithSwap(op: OperationRow, ctx: ExecContext, predecessors: OperationRow[]): Promise<Outcome> {
   const rkey = op.rkey as string;
   const uri = `at://${op.did}/${op.collection}/${rkey}`;
   const hints = [{ collection: op.collection, rkey }];
+  const read = () => readRecord(ctx, op.collection, rkey);
+  const observe = () => observeRemoval(ctx, op.id, uri, RECORD_TARGET, read);
   let swap = op.swap_cid;
   for (let tries = 0; tries < 5; tries++) {
-    const head = await checkedHead(ctx, uri);
-    if (head.kind === 'outcome') return head.outcome;
+    let head: RepoHeadRef;
+    if (removalEstablished(ctx.m.db, op.id, uri, RECORD_TARGET)) {
+      // Complete already (a lost answer whose completion is proven, or an
+      // ordered absence the previous try could not settle): never delete
+      // again; a present record is a later incarnation.
+      const seen = await observe();
+      if (seen.kind === 'outcome') return seen.outcome;
+      return { kind: 'succeeded', uri, hints, ...(swap === null ? {} : { swapCid: swap }) };
+    }
     if (swap === null) {
       swap = indexedCid(ctx, uri);
       if (swap === null) {
@@ -224,17 +261,21 @@ async function deleteWithSwap(op: OperationRow, ctx: ExecContext, predecessors: 
         );
         swap = ours?.result_cid ?? null;
       }
-      if (swap === null) {
-        const found = await ctx.xrpc.getRecord(op.collection, rkey);
-        if (found.kind === 'failed') return failureOutcome(found.failure);
-        // Nothing at the key on the owner's PDS: the delete is already complete.
-        if (found.kind === 'absent') {
-          keepRemovalHead(ctx.m.db, op.id, head.rev);
-          return { kind: 'succeeded', uri, hints };
-        }
-        swap = found.cid;
-      }
+    }
+    if (swap === null) {
+      // Nothing known locally: the owner's PDS decides. Gone there (ordered)
+      // completes the delete.
+      const seen = await observe();
+      if (seen.kind === 'outcome') return seen.outcome;
+      if (seen.kind === 'settled') return { kind: 'succeeded', uri, hints };
+      head = seen.head;
+      swap = seen.found.cid;
       ctx.persist({ swapCid: swap });
+    } else {
+      const checked = await checkedHead(ctx, uri, op.id);
+      if (checked.kind === 'outcome') return checked.outcome;
+      head = checked;
+      if (op.swap_cid !== swap) ctx.persist({ swapCid: swap });
     }
     keepRemovalHead(ctx.m.db, op.id, head.rev);
     const result = await ctx.xrpc.procedure(
@@ -243,21 +284,31 @@ async function deleteWithSwap(op: OperationRow, ctx: ExecContext, predecessors: 
       'delete',
     );
     if (result.ok) {
-      keepRemovalCommit(ctx.m.db, op.id, reportedCommitRev(result.body, head.rev));
-      return { kind: 'succeeded', uri, hints, swapCid: swap };
+      const commit = reportedCommitRev(result.body, head.rev);
+      if (commit !== null) {
+        keepRemovalCommit(ctx.m.db, op.id, commit);
+        keepRemovalDone(ctx.m.db, op.id, commit, 'commit');
+        return { kind: 'succeeded', uri, hints, swapCid: swap };
+      }
+      // No usable commit: a no-op that checked no swap, or a write whose
+      // metadata was left out. Only an ordered absence completes it.
+      const seen = await observe();
+      if (seen.kind === 'outcome') return afterSend(seen.outcome);
+      if (seen.kind === 'settled') return { kind: 'succeeded', uri, hints, swapCid: swap };
+      return { kind: 'transient', code: 'remote_delete_unconfirmed', swapCid: seen.found.cid };
     }
     const failure = result.failure;
     if (failure.code !== 'repository_changed' && failure.kind !== 'missing') return failureOutcome(failure);
-    const found = await ctx.xrpc.getRecord(op.collection, rkey);
-    if (found.kind === 'failed') return failureOutcome(found.failure);
-    if (found.kind === 'absent') return { kind: 'succeeded', uri, hints, swapCid: swap };
+    const seen = await observe();
+    if (seen.kind === 'outcome') return afterSend(seen.outcome);
+    if (seen.kind === 'settled') return { kind: 'succeeded', uri, hints, swapCid: swap };
     // The record is unchanged and only the repository head moved: retry now
     // against a fresh head (no attempt spent on an unrelated commit).
-    if (failure.code === 'repository_changed' && found.cid === swap) continue;
+    if (failure.code === 'repository_changed' && seen.found.cid === swap) continue;
     return {
       kind: 'transient',
       code: failure.code === 'repository_changed' ? 'repository_changed' : 'remote_delete_unconfirmed',
-      swapCid: found.cid,
+      swapCid: seen.found.cid,
     };
   }
   return { kind: 'transient', code: 'repository_changed', ...(swap === null ? {} : { swapCid: swap }) };
@@ -293,17 +344,14 @@ export const scrobbleDeleteExecutor: Executor = {
 };
 
 /**
- * Read-only: absent on the owner's PDS completes a delete. The head is read
- * first, so the absence also fences the receipt at it (removal-fence.ts).
+ * Read-only: absent on the owner's PDS completes a delete, once ordered (a
+ * stable head bracket, or after an established completion; removal-fence.ts).
  */
 export async function lookupDeleted(op: OperationRow, ctx: ExecContext): Promise<Outcome> {
   const rkey = op.rkey as string;
   const uri = `at://${op.did}/${op.collection}/${rkey}`;
-  const head = await checkedHead(ctx, uri);
-  if (head.kind === 'outcome') return head.outcome;
-  const found = await ctx.xrpc.getRecord(op.collection, rkey);
-  if (found.kind === 'failed') return failureOutcome(found.failure);
-  if (found.kind !== 'absent') return { kind: 'transient', code: 'remote_delete_unconfirmed' };
-  keepRemovalHead(ctx.m.db, op.id, head.rev);
+  const seen = await observeRemoval(ctx, op.id, uri, RECORD_TARGET, () => readRecord(ctx, op.collection, rkey));
+  if (seen.kind === 'outcome') return seen.outcome;
+  if (seen.kind === 'present') return { kind: 'transient', code: 'remote_delete_unconfirmed' };
   return { kind: 'succeeded', uri, hints: [{ collection: op.collection, rkey }] };
 }

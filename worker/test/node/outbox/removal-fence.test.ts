@@ -251,16 +251,22 @@ it('a commit to another record between the head read and the write retries in th
       await h.kit.externalPut('Alice', BATCH, OTHER, WITHOUT_TARGET);
     });
     await h.runUntilIdle();
-    expect(h.writers.order().filter((n) => n !== GET)).toEqual([HEAD, PUT, HEAD, PUT]);
+    // The second PUT committed (its commit is the boundary); the read-back
+    // after it reads the head before the container.
+    expect(h.writers.order().filter((n) => n !== GET)).toEqual([HEAD, PUT, HEAD, PUT, HEAD]);
     expect(h.writers.sent.filter((r) => r.nsid === PUT).map((r) => r.status)).toEqual([400, 200]);
     expect(h.op(removal.id)).toMatchObject({ state: 'succeeded', attempts: 1, last_error: null });
-    expect(h.op(removal.id).removal_commit_rev).toBe(h.kit.repos.Alice.head!.rev);
+    expect(h.op(removal.id)).toMatchObject({
+      removal_commit_rev: h.kit.repos.Alice.head!.rev,
+      removal_done_rev: h.kit.repos.Alice.head!.rev,
+      removal_done_basis: 'commit',
+    });
     // The target is gone from its container; the other record is untouched.
     expect((await remoteIds(h)).sort()).toEqual([SIBLING, SIBLING]);
   });
 });
 
-it('a success response without commit metadata keeps the pre-send head as the boundary', async () => {
+it('a committed write whose success answer omits commit metadata settles at the ordered absence after it', async () => {
   await withHarness(async (h) => {
     const { removal } = await admitted(h, [TARGET]);
     await h.kit.externalPut('Alice', BATCH, RKEY, { ...ORIGINAL, extra: 'B' });
@@ -281,11 +287,17 @@ it('a success response without commit metadata keeps the pre-send head as the bo
       },
     );
     await h.runUntilIdle();
+    // The send fence stays the pre-send head; without a usable commit the
+    // boundary is the head of the stable head/read/head bracket that found
+    // the target gone (the metadata-free commit itself).
     expect(h.op(removal.id)).toMatchObject({
       state: 'succeeded',
       removal_head_rev: head.rev,
       removal_commit_rev: null,
+      removal_done_rev: h.kit.repos.Alice.head!.rev,
+      removal_done_basis: 'absent',
     });
+    expect(h.writers.count(PUT)).toBe(1);
     expect(apply(h, b)).toBe('applied');
     expect(visible(h)).toEqual([SIBLING]);
   });
@@ -335,9 +347,15 @@ it('an interrupted tenth attempt reconciles read-only and keeps its persisted he
       removal.id,
     );
     await h.run();
-    expect(h.writers.order()).toEqual([HEAD, GET]);
+    // Read-only: the absence is ordered by the head read after it.
+    expect(h.writers.order()).toEqual([HEAD, GET, HEAD]);
     const op = h.op(removal.id);
-    expect(op).toMatchObject({ state: 'succeeded', attempts: 10 });
+    expect(op).toMatchObject({
+      state: 'succeeded',
+      attempts: 10,
+      removal_done_rev: h.kit.repos.Alice.head!.rev,
+      removal_done_basis: 'absent',
+    });
     expect(op.removal_head_rev! >= sentHead).toBe(true);
     expect(apply(h, b)).toBe('applied');
     expect(visible(h)).toEqual([SIBLING]);
@@ -487,7 +505,10 @@ it.each([
         expect(exported(h)).toContain(`${container(h)}#${TARGET}`);
         expect(total(h)).toBe(2);
         // A legacy receipt (no head fence) is retired by the same truthful membership.
-        h.db.run('UPDATE operations SET removal_head_rev = NULL, removal_commit_rev = NULL WHERE id = ?', removal.id);
+        h.db.run(
+          'UPDATE operations SET removal_head_rev = NULL, removal_commit_rev = NULL, removal_done_rev = NULL, removal_done_basis = NULL WHERE id = ?',
+          removal.id,
+        );
         expect(visible(h)).toEqual([TARGET, SIBLING]);
         expect(await removeTargetViaLastfm(h)).toHaveLength(1);
         await h.runUntilIdle();
@@ -519,7 +540,10 @@ it('N3: a partial removal before the first projection records the entry absent; 
     expect(apply(h, await proof(h))).toBe('applied');
     // The previous valid version B did not list it: that is its boundary.
     expect(membership(h, TARGET)).toEqual({ state: 'present', last_absent_revision: b.commit.rev });
-    h.db.run('UPDATE operations SET removal_head_rev = NULL, removal_commit_rev = NULL WHERE id = ?', removal.id);
+    h.db.run(
+      'UPDATE operations SET removal_head_rev = NULL, removal_commit_rev = NULL, removal_done_rev = NULL, removal_done_basis = NULL WHERE id = ?',
+      removal.id,
+    );
     expect(visible(h)).toEqual([TARGET, SIBLING]);
   });
 });

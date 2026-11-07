@@ -4,7 +4,10 @@
 // Reads:  com.atproto.sync.{getRecord,getBlocks,getRepo,getLatestCommit,getRepoStatus},
 //         com.atproto.repo.{getRecord,listRecords}
 // Writes: com.atproto.repo.{createRecord,putRecord,deleteRecord}, with swapRecord /
-//         swapCommit semantics and RecordAlreadyExists / InvalidSwap errors, and
+//         swapCommit semantics and RecordAlreadyExists / InvalidSwap errors
+//         (as the reference PDS, a delete of an absent record and a put of the
+//         stored bytes are no-ops answered without `commit` and without any
+//         swap check), and
 //         com.atproto.repo.applyWrites: atomic (one signed commit or nothing),
 //         at most 200 writes. Write bodies over 1,000,000 bytes are 413
 //         PayloadTooLarge, as the reference PDS's jsonLimit.
@@ -749,9 +752,16 @@ export class FakePds {
         ? body.collection
         : fail(400, 'InvalidRequest', 'collection is required');
     const head = tx.head!;
-    if (body.swapCommit !== undefined && body.swapCommit !== head.cid) {
-      fail(400, 'InvalidSwap', `Commit was at ${head.cid}`);
-    }
+    // The reference PDS (@atproto/pds 0.5.40 api/com/atproto/repo) checks
+    // swapCommit and swapRecord inside processWrites. Its deleteRecord of an
+    // absent record and its putRecord of the bytes already stored return
+    // before processWrites: a success without `commit`, no swap checked.
+    const checkSwapCommit = () => {
+      if (body.swapCommit !== undefined && body.swapCommit !== head.cid) {
+        fail(400, 'InvalidSwap', `Commit was at ${head.cid}`);
+      }
+    };
+    if (nsid === 'com.atproto.repo.createRecord') checkSwapCommit();
 
     let rkey: string;
     if (nsid === 'com.atproto.repo.createRecord') {
@@ -765,10 +775,12 @@ export class FakePds {
 
     if (nsid === 'com.atproto.repo.deleteRecord') {
       this.requireScope(authn, collection, 'delete');
-      if (body.swapRecord !== undefined && body.swapRecord !== (current?.cid ?? null)) {
-        fail(400, 'InvalidSwap', `Record was at ${current?.cid ?? 'null'}`);
-      }
+      // No-op: nothing to delete. No swap is checked and no commit is made.
       if (!current) return xrpcJson({});
+      checkSwapCommit();
+      if (body.swapRecord !== undefined && body.swapRecord !== current.cid) {
+        fail(400, 'InvalidSwap', `Record was at ${current.cid}`);
+      }
       const result = await tx.delete(collection, rkey);
       this.emit(authed, result);
       return xrpcJson({ commit: { cid: result.cid, rev: result.rev } });
@@ -785,8 +797,14 @@ export class FakePds {
     }
     if (nsid === 'com.atproto.repo.createRecord') {
       if (current) fail(400, 'RecordAlreadyExists', `Record already exists: ${uri}`);
-    } else if (body.swapRecord !== undefined && body.swapRecord !== (current?.cid ?? null)) {
-      fail(400, 'InvalidSwap', `Record was at ${current?.cid ?? 'null'}`);
+    } else {
+      // No-op: the stored bytes already are the requested record. No swap is
+      // checked and no commit is made; the answer carries no `commit`.
+      if (current && current.cid === cidOf(record)) return xrpcJson({ uri, cid: current.cid });
+      checkSwapCommit();
+      if (body.swapRecord !== undefined && body.swapRecord !== (current?.cid ?? null)) {
+        fail(400, 'InvalidSwap', `Record was at ${current?.cid ?? 'null'}`);
+      }
     }
     const result = await tx.put(collection, rkey, record);
     this.emit(authed, result);

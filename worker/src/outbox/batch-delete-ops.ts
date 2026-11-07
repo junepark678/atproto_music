@@ -12,7 +12,14 @@ import {
   unsettledAt,
 } from './operations';
 import { type Failure, failureOutcome, type Outcome, reportedCommitRev } from './pds-writer';
-import { checkedHead, keepRemovalCommit, keepRemovalHead } from './removal-fence';
+import {
+  afterSend,
+  keepRemovalCommit,
+  keepRemovalDone,
+  keepRemovalHead,
+  observeRemoval,
+  type TargetRead,
+} from './removal-fence';
 import type { ExecContext, Executor } from './runner';
 import { validRkey } from './scrobble-ops';
 
@@ -406,12 +413,37 @@ async function readContainer(op: OperationRow, ctx: ExecContext, uri: string): P
   };
 }
 
+type PresentContainer = Extract<ContainerRead, { kind: 'present' }>;
+
+/** The container read as a removal's targets: gone when absent or none of `wanted` is listed. */
+async function readTargets(
+  op: OperationRow,
+  ctx: ExecContext,
+  uri: string,
+  wanted: ReadonlySet<string>,
+): Promise<TargetRead<PresentContainer>> {
+  const found = await readContainer(op, ctx, uri);
+  if (found.kind === 'outcome') return found;
+  if (found.kind === 'absent' || !selectedIn(found.listens, wanted)) return { kind: 'absent' };
+  return { kind: 'present', found };
+}
+
+function removalIds(db: Db, id: string): string[] {
+  return db
+    .all<{ listen_id: string }>(
+      'SELECT listen_id FROM batch_delete_listens WHERE operation_id=? ORDER BY listen_id',
+      id,
+    )
+    .map((r) => r.listen_id);
+}
+
 // Success outcomes never carry a post-write or post-removal CID: the persisted
 // `swap_cid` stays the last pre-CAS CID. Every write is fenced by the owner's
 // repository head (removal-fence.ts): `swapCommit` = the head read just before
-// the container, persisted as `removal_head_rev` before the send, so the
-// removal is the next commit after it and every revision at or below it is
-// pre-removal, whatever its CID.
+// the container, persisted as `removal_head_rev` before the send. Settlement
+// needs an ordered completion (`removal_done_rev`): an enforced commit, or an
+// absence ordered by a head/read/head bracket (`observeRemoval`). Once
+// complete, no retry writes again.
 async function removeIds(op: OperationRow, ctx: ExecContext): Promise<Outcome> {
   const collection = ctx.collections.scrobbleBatch;
   if (op.did !== ctx.xrpc.did || op.collection !== collection || !validRkey(op.rkey))
@@ -431,26 +463,18 @@ async function removeIds(op: OperationRow, ctx: ExecContext): Promise<Outcome> {
   if (collidedCreate !== null) {
     return { kind: 'succeeded', uri, note: 'record_not_ours', hints };
   }
-  const ids = ctx.m.db
-    .all<{ listen_id: string }>(
-      'SELECT listen_id FROM batch_delete_listens WHERE operation_id=? ORDER BY listen_id',
-      op.id,
-    )
-    .map((r) => r.listen_id);
+  const ids = removalIds(ctx.m.db, op.id);
   if (ids.length === 0) return { kind: 'permanent', code: 'missing_batch_delete_intent' };
   const wanted = new Set(ids);
+  const read = () => readTargets(op, ctx, uri, wanted);
   for (let attempt = 0; attempt < 5; attempt++) {
     // Head first, then the container: the CAS below commits only while this
     // head is current, so the container read is the state the write replaces.
-    const head = await checkedHead(ctx, uri);
-    if (head.kind === 'outcome') return head.outcome;
-    const found = await readContainer(op, ctx, uri);
-    if (found.kind === 'outcome') return found.outcome;
-    if (found.kind === 'absent' || !selectedIn(found.listens, wanted)) {
-      // Gone after this head was current: every incarnation at or below it was removed.
-      keepRemovalHead(ctx.m.db, op.id, head.rev);
-      return { kind: 'succeeded', uri, hints };
-    }
+    // An absence (or a completion already established) settles only ordered.
+    const seen = await observeRemoval(ctx, op.id, uri, ids, read);
+    if (seen.kind === 'outcome') return seen.outcome;
+    if (seen.kind === 'settled') return { kind: 'succeeded', uri, hints };
+    const { head, found } = seen;
     const remoteListens = found.listens;
     const kept = wanted.has('*') ? [] : remoteListens.filter((item) => !selectedIn([item], wanted));
     const budget = ctx.afford(kept.length === 0 ? 1 : 2);
@@ -477,20 +501,25 @@ async function removeIds(op: OperationRow, ctx: ExecContext): Promise<Outcome> {
     // InvalidSwap: something (this record or any other) was committed after
     // the head; nothing was written. Read a fresh head and container.
     if (!result.ok && result.failure.code === 'repository_changed') continue;
-    if (result.ok) keepRemovalCommit(ctx.m.db, op.id, reportedCommitRev(result.body, head.rev));
-    // A success status can still contain no confirmation that the edit landed.
+    // Only a well-formed commit newer than the head proves the PDS enforced
+    // the swaps and wrote; a success without one (a no-op, or metadata left
+    // out) and any failure settle through an ordered absence instead.
+    const commit = result.ok ? reportedCommitRev(result.body, head.rev) : null;
+    if (commit !== null) {
+      keepRemovalCommit(ctx.m.db, op.id, commit);
+      keepRemovalDone(ctx.m.db, op.id, commit, 'commit');
+    }
     // Always read back the owner-scoped URI before marking intent complete.
-    const after = await readContainer(op, ctx, uri);
-    if (after.kind === 'absent') return { kind: 'succeeded', uri, hints };
+    const after = await observeRemoval(ctx, op.id, uri, ids, read);
     if (after.kind === 'outcome') {
       // A classified write failure decides first (a scope denial holds the
       // lane); otherwise the read-back failure does.
       if (!result.ok && isBatchScopeDenial(result.failure)) return batchFailure(result.failure);
-      return after.outcome;
+      return afterSend(after.outcome);
     }
-    if (!selectedIn(after.listens, wanted)) return { kind: 'succeeded', uri, hints };
+    if (after.kind === 'settled') return { kind: 'succeeded', uri, hints };
     // The targets are still there: that CID is pre-removal evidence too.
-    recordRemovalEvidence(ctx.m.db, op.id, after.cid);
+    recordRemovalEvidence(ctx.m.db, op.id, after.found.cid);
     if (result.ok) return { kind: 'transient', code: 'remote_delete_unconfirmed' };
     if (result.failure.kind === 'missing') continue;
     // A transient (5xx/transport) failure retries with backoff whatever its
@@ -510,22 +539,14 @@ export const batchDeleteExecutor: Executor = {
       return { kind: 'permanent', code: 'invalid_record_identity' };
     const uri = `at://${op.did}/${op.collection}/${op.rkey}`;
     const hints = [{ collection, rkey: op.rkey! }];
-    // Read-only: never a write. The head read first still fences an absence
-    // found after it; a lost tenth send keeps the head persisted before it.
-    const head = await checkedHead(ctx, uri);
-    if (head.kind === 'outcome') return head.outcome;
-    const found = await readContainer(op, ctx, uri);
-    if (found.kind === 'outcome') return found.outcome;
-    const ids = new Set(
-      ctx.m.db
-        .all<{ listen_id: string }>('SELECT listen_id FROM batch_delete_listens WHERE operation_id = ?', op.id)
-        .map((row) => row.listen_id),
-    );
-    if (found.kind === 'present' && selectedIn(found.listens, ids)) {
-      recordRemovalEvidence(ctx.m.db, op.id, found.cid);
-      return { kind: 'transient', code: 'batch_delete_unconfirmed' };
-    }
-    keepRemovalHead(ctx.m.db, op.id, head.rev);
-    return { kind: 'succeeded', uri, hints };
+    // Read-only: never a write. An absence settles only ordered (a stable
+    // head bracket, or after an established completion); a lost tenth send
+    // keeps the send fence persisted before it.
+    const ids = removalIds(ctx.m.db, op.id);
+    const seen = await observeRemoval(ctx, op.id, uri, ids, () => readTargets(op, ctx, uri, new Set(ids)));
+    if (seen.kind === 'outcome') return seen.outcome;
+    if (seen.kind === 'settled') return { kind: 'succeeded', uri, hints };
+    recordRemovalEvidence(ctx.m.db, op.id, seen.found.cid);
+    return { kind: 'transient', code: 'batch_delete_unconfirmed' };
   },
 };

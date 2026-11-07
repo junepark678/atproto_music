@@ -235,7 +235,10 @@ it('a legacy receipt (no server-checked head) keeps its migration 9/10 rule: wit
     const { admission, removal } = await admitted(h, ['*']);
     await h.runUntilIdle();
     // Settled before migration 11: no head fence was ever recorded.
-    h.db.run('UPDATE operations SET removal_head_rev = NULL, removal_commit_rev = NULL WHERE id = ?', removal.id);
+    h.db.run(
+      'UPDATE operations SET removal_head_rev = NULL, removal_commit_rev = NULL, removal_done_rev = NULL, removal_done_basis = NULL WHERE id = ?',
+      removal.id,
+    );
     await h.kit.externalPut('Alice', BATCH, RKEY, ORIGINAL);
     await applyCurrent(h);
     expect(h.db.one('SELECT cid FROM record_state WHERE uri = ?', container(h))).toEqual({

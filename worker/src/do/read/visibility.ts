@@ -10,19 +10,24 @@
 // - A scrobble is visible when its owner is visible and it has no queued,
 //   running, blocked or failed `scrobble.delete` operation. A pending or
 //   failed local intent hides whatever is projected for its targets.
-// - Succeeded removals (migration 11, outbox/removal-fence.ts): every
-//   current removal write is fenced by its owner's repository head, checked by
-//   the PDS through `swapCommit` and persisted before the send as
-//   `removal_head_rev`. The removal is the next commit after that head, so a
-//   projected target at a revision <= removal_head_rev (or below the reported
-//   `removal_commit_rev`) is the removed incarnation, whatever its CID: a
-//   delayed proof of an intermediate version this index never saw stays
+// - Succeeded removals (migration 12, outbox/removal-fence.ts): every
+//   current removal settles only with an ordered completion boundary
+//   `removal_done_rev`, a revision at or after which its targets were proven
+//   absent: the commit of a write whose swapCommit/swapRecord the PDS
+//   enforced, the head of a stable head/read/head bracket around an absent
+//   read (or a head read after an earlier completion), or a verified absence
+//   after the send fence. A projected target at a revision <= that boundary
+//   is the removed (or an already superseded) incarnation, whatever its CID:
+//   a delayed proof of an intermediate version this index never saw stays
 //   hidden, and so does one restored before the write. A target projected
 //   above the boundary is a later incarnation and is visible, at the same or
 //   a new CID, even when its proof arrived before local settlement. Neither
 //   settlement time nor CIDs order anything. The boundary is owner-PDS
 //   metadata of this receipt only: it never writes record_state or verified
 //   membership, and a successful `record_not_ours` receipt has none.
+// - Receipts settled under migration 11 (a server-checked `removal_head_rev`,
+//   no `removal_done_rev`) keep its rule: hidden at or below that head, or
+//   below the reported `removal_commit_rev`.
 // - Receipts settled before migration 11 (no `removal_head_rev`) keep their
 //   recorded rules: they hide a projection at the CID the delete used as
 //   `swapRecord` or at a batch removal's pre-write evidence CIDs
@@ -62,12 +67,15 @@ function outlived(d: string, s: string): string {
 
 /**
  * The succeeded removal aliased `d` still suppresses the projected row `s`.
- * With a server-checked head: `s` was verified at or below it (or below the
- * reported commit), i.e. before the removal. Without one (settled before
- * migration 11): `legacyMatch` (its CID evidence) and not outlived.
+ * With an ordered completion boundary (migration 12): `s` was verified at or
+ * below it. Settled under migration 11 (a server-checked head, no boundary):
+ * at or below that head (or below the reported commit). Without either
+ * (settled before migration 11): `legacyMatch` (its CID evidence) and not
+ * outlived.
  */
 function removedBy(d: string, s: string, legacyMatch: string): string {
-  return `(CASE WHEN ${d}.removal_head_rev IS NOT NULL
+  return `(CASE WHEN ${d}.removal_done_rev IS NOT NULL THEN ${s}.revision <= ${d}.removal_done_rev
+    WHEN ${d}.removal_head_rev IS NOT NULL
       THEN (${s}.revision <= ${d}.removal_head_rev
         OR (${d}.removal_commit_rev IS NOT NULL AND ${s}.revision < ${d}.removal_commit_rev))
       ELSE ((${legacyMatch}) AND NOT ${outlived(d, s)}) END)`;

@@ -836,7 +836,11 @@ function finish(m: ModuleDeps, op: OperationRow, outcome: Outcome, now: number, 
         db.run('DELETE FROM batch_delete_listens WHERE operation_id = ?', op.id);
         db.run('DELETE FROM listen_removal_cids WHERE operation_id = ?', op.id);
         // Nothing of ours was removed: no repository boundary may suppress the key.
-        db.run('UPDATE operations SET removal_head_rev = NULL, removal_commit_rev = NULL WHERE id = ?', op.id);
+        db.run(
+          `UPDATE operations SET removal_head_rev = NULL, removal_commit_rev = NULL, removal_done_rev = NULL,
+             removal_done_basis = NULL WHERE id = ?`,
+          op.id,
+        );
       }
       db.run(
         `UPDATE operations SET state = 'succeeded', result_uri = ?, result_cid = ?, swap_cid = coalesce(?, swap_cid),
@@ -897,8 +901,8 @@ function finish(m: ModuleDeps, op: OperationRow, outcome: Outcome, now: number, 
         }
         // Settlement adds no suppression evidence: local settlement time says
         // nothing about repository order, and the projection may already hold
-        // a verified later recreation. The receipt's boundary is the
-        // server-checked head persisted before its write (removal-fence.ts,
+        // a verified later recreation. The receipt's boundary is the ordered
+        // completion the executor persisted before settling (removal-fence.ts,
         // read/visibility); a legacy receipt keeps its pre-write CIDs.
         if (m.config.prefix !== null && op.collection === outboxCollections(m.config.prefix).scrobbleBatch) {
           db.run('UPDATE batch_entry_items SET removed_at_ms = ? WHERE removal_operation_id = ?', now, op.id);

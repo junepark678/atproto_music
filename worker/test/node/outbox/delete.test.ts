@@ -112,6 +112,8 @@ it('delete uses swapRecord from record_state; InvalidSwap re-fetches and reconci
       expect(h.writers.sent.slice(mark).map((s) => [s.nsid, s.status, s.body?.swapRecord])).toEqual([
         [HEAD, 200, undefined],
         [DELETE, 400, putOld.ops[0]!.cid],
+        // The read after InvalidSwap is ordered by a head read before it.
+        [HEAD, 200, undefined],
         [GET, 200, undefined],
       ]);
       expect(h.op(d2.id)).toMatchObject({
@@ -123,7 +125,7 @@ it('delete uses swapRecord from record_state; InvalidSwap re-fetches and reconci
       });
       h.kit.clock.advance(1_000);
       await h.runUntilIdle();
-      expect(h.writers.sent.slice(mark + 3).map((s) => [s.nsid, s.status, s.body?.swapRecord])).toEqual([
+      expect(h.writers.sent.slice(mark + 4).map((s) => [s.nsid, s.status, s.body?.swapRecord])).toEqual([
         [HEAD, 200, undefined],
         [DELETE, 200, putNew.ops[0]!.cid],
       ]);

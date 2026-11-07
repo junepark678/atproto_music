@@ -181,13 +181,23 @@ export interface OperationRow {
   /**
    * Migration 11, `scrobble.delete` only: the newest repository head revision
    * (com.atproto.sync.getLatestCommit) that a send of this removal was checked
-   * against with `swapCommit`, persisted before the send, or the head read just
-   * before a read that found the target already gone. Never moves backwards.
+   * against with `swapCommit`, persisted before the send (for a removal that
+   * never sent, the head of the ordered absence that settled it). Never moves
+   * backwards.
    * Owner-PDS metadata, not verified proof.
    */
   removal_head_rev: string | null;
   /** Migration 11: the commit revision the PDS reported for the removal write (newer than the checked head). */
   removal_commit_rev: string | null;
+  /**
+   * Migration 12, `scrobble.delete` only: the completion boundary, a revision
+   * at or after which every target was proven absent (outbox/removal-fence.ts).
+   * Once set the removal never writes again; it suppresses its targets at or
+   * below it. Never moves backwards. Owner-PDS metadata, not verified proof.
+   */
+  removal_done_rev: string | null;
+  /** Migration 12: how `removal_done_rev` was established. */
+  removal_done_basis: 'commit' | 'absent' | 'absent_after' | 'verified' | null;
   due_at: number;
   last_error: string | null;
   result_uri: string | null;
