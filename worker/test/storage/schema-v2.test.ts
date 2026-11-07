@@ -217,6 +217,8 @@ const NEW_TABLES: Record<string, ExpectedTable> = {
       removal_commit_rev: true,
       removal_done_rev: true,
       removal_done_basis: true,
+      removal_reached: true,
+      removal_reached_at_ms: true,
     }),
     pk: ['id'],
     unique: [['did', 'idempotency_key']],

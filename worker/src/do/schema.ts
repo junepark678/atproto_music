@@ -861,6 +861,36 @@ const MIGRATION_12: Migration = {
   ],
 };
 
+// Durable no-replay knowledge, kept apart from ordered visibility
+// (ADR 0006 amendment; outbox/removal-fence.ts). A received successful
+// desired-state answer, an observed absence of every target, an enforced
+// commit or a verified absence after the send fence proves that this
+// removal's requested state was reached; it must never write again, even
+// when nothing yet places that moment in repository order (a no-op answer
+// carries no revision, a getRecord absence has none, a closing head may be
+// unavailable). Ordering stays the job of `removal_done_rev`:
+// - `removal_reached`: commit | success | absent | verified. Set once, before
+//   any read-back is awaited, and never cleared except by `record_not_ours`
+//   (nothing of ours existed). While it is set and `removal_done_rev` is not,
+//   the removal holds read-only (queued, `removal_reached_unordered`): its
+//   pending overlay keeps every target hidden and it sends nothing.
+// - `removal_reached_at_ms`: when that was first recorded (bounds the
+//   read-only hold's backoff; local time, never an ordering fact).
+// Migration 12's `removal_done_basis` gains `after`: the first repository
+// head read after the requested state was reached. Projections strictly
+// below it are hidden (pre-removal, or a later incarnation not yet proven at
+// or above it), any at or above it is a later incarnation.
+const MIGRATION_13: Migration = {
+  version: 13,
+  name: 'removal_reached',
+  statements: [
+    // Values are enforced by outbox/removal-fence.ts markReached (no CHECK on
+    // an added column; see the conventions above).
+    'ALTER TABLE operations ADD COLUMN removal_reached TEXT',
+    'ALTER TABLE operations ADD COLUMN removal_reached_at_ms INTEGER',
+  ],
+};
+
 export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_1,
   MIGRATION_2,
@@ -874,6 +904,7 @@ export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_10,
   MIGRATION_11,
   MIGRATION_12,
+  MIGRATION_13,
 ];
 
 /** The schema version this code expects. */

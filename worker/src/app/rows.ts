@@ -196,8 +196,23 @@ export interface OperationRow {
    * below it. Never moves backwards. Owner-PDS metadata, not verified proof.
    */
   removal_done_rev: string | null;
-  /** Migration 12: how `removal_done_rev` was established. */
-  removal_done_basis: 'commit' | 'absent' | 'absent_after' | 'verified' | null;
+  /**
+   * Migration 12: how `removal_done_rev` was established. `after` (migration
+   * 13): the first head read after the requested state was reached, a strict
+   * bound (projections below it hidden, at or above it visible). `absent_after`
+   * is only on receipts left by the unreleased migration 12 rule.
+   */
+  removal_done_basis: 'commit' | 'absent' | 'after' | 'absent_after' | 'verified' | null;
+  /**
+   * Migration 13, `scrobble.delete` only: durable no-replay knowledge, why
+   * the requested state is known to have been reached (an enforced commit, a
+   * received successful answer, an observed absence, a verified absence). Once
+   * set the removal never writes again, whether or not `removal_done_rev`
+   * orders it yet. Owner-PDS metadata, not verified proof.
+   */
+  removal_reached: 'commit' | 'success' | 'absent' | 'verified' | null;
+  /** Migration 13: when `removal_reached` was first recorded (local time; the read-only hold's backoff). */
+  removal_reached_at_ms: number | null;
   due_at: number;
   last_error: string | null;
   result_uri: string | null;
