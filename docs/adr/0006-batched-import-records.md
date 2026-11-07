@@ -79,7 +79,12 @@ remove selected entries while spreading the envelope and retaining all
 untouched entry fields, including unknown remote fields. Removing the final
 entry uses `deleteRecord` with the same compare-and-swap CID. On
 `InvalidSwap`/repository change it re-reads and retries against the new CID;
-after an uncertain response it reads back before retrying. A different writer's
+the operation persists each read CID before its CAS write. If the process stops
+after the PDS commits a whole-container delete but before local settlement,
+read-only reconciliation completes from verified absence while retaining that
+CID in the receipt, so stale projected listens stay hidden until newer proof
+shows a later recreation. After an uncertain response it reads back before
+retrying. A different writer's
 record at a colliding rkey is never overwritten by a failed create path.
 
 For a queued import batch that has never started sending, removal prepares a
@@ -117,23 +122,45 @@ implement web UI changes.
 
 ## Operator rollout and rollback
 
-1. Publish and independently review all five production lexicons, including
-   `<prefix>.scrobbleBatch`; retain the existing four-schema receipt unchanged.
-2. Create the separately reviewed five-schema publication manifest and set
-   `NAMESPACE_BATCH_PUBLICATION_REF` to its digest alongside the existing
-   `NAMESPACE_PUBLICATION_REF`. Runtime checks digest format and distinctness;
-   the operator's reviewed manifest is the trust source, not an automatic
-   remote cryptographic verification.
-3. Back up the Node database, deploy the additive migrations, and verify schema
-   version 7 before enabling batch publication. Existing sessions must
-   reauthorize to receive the new repository scope.
-4. Enable the batch publication reference, then enable/schedule the batch
-   import job lane. Watch held jobs, batch scope errors, CAS retries, split
-   outcomes, per-listen counters, and container-level proof convergence.
-5. To roll back, first stop new batch imports and remove the batch publication
-   reference. Do not roll back the SQLite file or restore an older binary that
-   cannot read migration 7. Let already queued/running writes reconcile, then
-   deploy a compatible build with batch reads and removals retained. Published
-   batch records remain on user PDSs and require a current or future
-   batch-aware reader; rollback does not explode them into singles or delete
-   them remotely.
+1. Keep the four-schema `manifest.json` unchanged. Publish the production-ID
+   `<prefix>.scrobbleBatch` lexicon under the namespace authority DID, then
+   retrieve all five production schema records without authentication. Compare
+   canonical content with the approved lexicons and record each URI, CID,
+   retrieval URL, content digest, and UTC time in a reviewed, versioned copy of
+   `docs/verification/lexicon-publication/batch-manifest.template.json` kept in
+   the repository. Never make the rollout depend on a temporary file.
+2. Review the five-record receipt and run the repository's lexicon publication
+   checks. Its batch check must require exactly the four records in the
+   existing receipt plus the separately evidenced batch record. Compute the
+   SHA-256 from that reviewed file and set
+   `NAMESPACE_BATCH_PUBLICATION_REF=sha256:<digest>` alongside the existing
+   four-schema reference. Runtime validation checks syntax and distinctness;
+   the operator-reviewed receipt is the trust source, not remote verification
+   performed by the server.
+3. Back up the Node database and deploy the compatible release with additive
+   migrations while the batch gate remains closed. Confirm the schema version
+   reported by that release; do not assume a fixed version because later
+   additive migrations may be stacked. Confirm existing capabilities remain
+   available and `batchPublication` remains absent.
+4. Before closing an already-open batch gate, stop admitting new batch imports
+   and drain every queued/running batch create and delete to a terminal state.
+   The runner excludes **all** batch operations while the gate is closed, so
+   closing it with outstanding writes suspends them until the gate is reopened;
+   they cannot be drained after closure. Do not remove batch read and ingest
+   support as part of gate closure.
+5. Open the batch reference and restart/reload the service. Confirm `meta`
+   advertises `batchPublication`, then have every account whose grant predates
+   the batch scope re-consent to `repo:<prefix>.scrobbleBatch`. Verify the new
+   grant through the OAuth session before resuming that account's held work.
+   Only then enable the batch import writer/migrator. Unsent legacy import
+   singles are eligible for rebatching only through the transactional
+   eligibility checks; already-sent singles reconcile or finish as singles.
+6. Monitor held imports, `batch_scope_required`, CAS retries, split outcomes,
+   per-listen counters, and container-level proof convergence. A scope error
+   holds the affected batch lane until re-consent; it does not discard intent.
+7. To roll back, stop admitting new batch imports, drain all outstanding batch
+   creates and deletes while the gate remains open, then close the batch
+   reference. Do not roll back the SQLite file or install a binary that cannot
+   read the schema version reported by the release. Retain batch reads,
+   visibility and removal support. Published records remain on user PDSs;
+   rollback does not explode them into singles or delete them remotely.

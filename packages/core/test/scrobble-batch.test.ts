@@ -1,4 +1,5 @@
 import { FIXTURE_PREFIX } from '@atmusic/core/namespace';
+import { validateScrobbleRecord } from '@atmusic/core/scrobble';
 import {
   buildScrobbleBatchRecord,
   formatScrobbleBatchListenUri,
@@ -7,6 +8,7 @@ import {
   validateScrobbleBatchRecord,
 } from '@atmusic/core/scrobble-batch';
 import { fixedClock } from '@atmusic/core/test-support/clock';
+import * as fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
 
 const receipt = 1_768_478_400_000_000_000n;
@@ -44,6 +46,80 @@ describe('scrobbleBatch contract', () => {
       createdAt: '2026-01-15T11:00:00Z',
       durationSeconds: 60,
     });
+  });
+
+  it('property-checks single/batch parity across every optional scrobble field', () => {
+    const optionalValues: Record<string, unknown> = {
+      album: 'Album',
+      durationSeconds: 240,
+      recordingMbid: '3f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2d10',
+      albumArtist: 'Björk',
+      trackNumber: 7,
+      artistMbids: ['3f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2d10'],
+      releaseMbid: '3f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2d10',
+      releaseGroupMbid: '4f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2d10',
+      isrc: 'USRC17607839',
+      submissionClient: 'Pano Scrobbler',
+      musicService: 'spotify.com',
+    };
+    fc.assert(
+      fc.property(fc.subarray(Object.keys(optionalValues)), (fields) => {
+        const optional = Object.fromEntries(fields.map((field) => [field, optionalValues[field]]));
+        const entry = validEntry(optional);
+        const single = validateScrobbleRecord(
+          { $type: `${FIXTURE_PREFIX}.scrobble`, ...entry },
+          FIXTURE_PREFIX,
+          receipt,
+        );
+        const batch = validateScrobbleBatchRecord(envelope([entry]), FIXTURE_PREFIX, receipt);
+        expect(single.ok).toBe(true);
+        expect(batch.ok).toBe(true);
+        if (!single.ok || !batch.ok) return;
+        expect(batch.row.listens[0]?.row).toEqual(single.row);
+        expect(batch.row.record.listens[0]?.createdAt).toBe(entry.createdAt);
+      }),
+      { numRuns: 100 },
+    );
+  });
+
+  it('property-checks that invalid required or optional fields produce the same single failure and batch drop', () => {
+    const invalids: Array<[string, unknown]> = [
+      ['artist', ''],
+      ['track', 'x'.repeat(257)],
+      ['album', ' '],
+      ['durationSeconds', 0],
+      ['recordingMbid', 'not-a-uuid'],
+      ['albumArtist', ' '],
+      ['trackNumber', 10_000],
+      ['artistMbids', []],
+      ['releaseMbid', 'bad'],
+      ['releaseGroupMbid', 'bad'],
+      ['isrc', 'usrc17607839'],
+      ['submissionClient', ' '],
+      ['musicService', 'localhost'],
+    ];
+    fc.assert(
+      fc.property(fc.constantFrom(...invalids), ([field, value]) => {
+        const entry = validEntry({ [field]: value });
+        const single = validateScrobbleRecord(
+          { $type: `${FIXTURE_PREFIX}.scrobble`, ...entry },
+          FIXTURE_PREFIX,
+          receipt,
+        );
+        const batch = validateScrobbleBatchRecord(envelope([entry]), FIXTURE_PREFIX, receipt);
+        expect(batch.ok).toBe(true);
+        if (!batch.ok) return;
+        if (single.ok) {
+          expect(batch.row.dropped).toEqual([]);
+          expect(batch.row.listens[0]?.row.record).toEqual(single.row.record);
+          expect(batch.row.listens[0]?.row.dropped).toEqual(single.row.dropped);
+        } else {
+          expect(batch.row.dropped).toEqual([{ id: entry.id, reason: single.reason }]);
+          expect(batch.row.listens).toEqual([]);
+        }
+      }),
+      { numRuns: 100 },
+    );
   });
 
   it('drops only invalid entries while malformed envelope bounds reject the whole record', () => {

@@ -46,13 +46,36 @@ records without authentication. Compare each returned record's canonical
 content with the approved schema, record the URI, CID, retrieval URL, digest,
 and UTC verification time in a new copy of
 [`batch-manifest.template.json`](batch-manifest.template.json), and review the
-complete receipt. Only after that evidence exists may the operator set
+complete receipt. Store the reviewed copy as a versioned JSON artifact in this
+directory; do not make the gate depend on a temporary `/tmp` file. The
+publication receipt check requires exactly the existing four schema IDs plus
+`<prefix>.scrobbleBatch`, a successful content match for each, and complete
+public retrieval evidence. Run it against the reviewed artifact to validate
+the five-record set and print its digest:
+
+```sh
+npx tsx scripts/check-batch-publication.ts docs/verification/lexicon-publication/batch-manifest-YYYYMMDD.json
+```
+
+Only after that evidence exists may the operator set
 `NAMESPACE_BATCH_PUBLICATION_REF` to the SHA-256 of that reviewed five-record
 manifest. It must differ from `NAMESPACE_PUBLICATION_REF`; the old four-record
 digest alone keeps the batch capability and OAuth scope closed. The runtime
 checks reference format and distinctness only and does not verify remote
 publication itself. Existing sessions must re-consent to the added
 `repo:<prefix>.scrobbleBatch` scope.
+
+Deploy the additive database migrations with the batch reference unset, and
+verify the schema version reported by that release. Do not assume a fixed
+version because the migration may be stacked with later changes. After opening
+the reference, check `/api/v1/meta` for `batchPublication`, then have accounts
+with older grants re-consent before resuming held imports. Unsent legacy import
+singles may be converted only by the guarded transactional rebatcher; sent
+singles reconcile or complete using their original record. Before closing an
+already-open batch gate, stop new batch imports and drain queued/running batch
+creates and deletes first. The runner suspends every batch operation while the
+gate is closed, including deletes, so those intents cannot drain until it is
+reopened. Keep batch-aware reads, ingest and removal support deployed.
 
 The candidate is intentionally absent from the production `manifest.json` and
 from `lexicons/published/`. This work performs no network access and makes no
