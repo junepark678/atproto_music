@@ -34,6 +34,7 @@ import {
   newOperationId,
   outboxCollections,
   predecessorRows,
+  refreshRemovalFence,
   unsettledAt,
 } from './operations';
 import { failureOutcome, type Outcome } from './pds-writer';
@@ -224,6 +225,7 @@ async function deleteWithSwap(op: OperationRow, ctx: ExecContext, predecessors: 
     }
     ctx.persist({ swapCid: swap });
   }
+  refreshRemovalFence(ctx.m.db, op.id, uri);
   const result = await ctx.xrpc.procedure(
     'com.atproto.repo.deleteRecord',
     { repo: op.did, collection: op.collection, rkey, swapRecord: swap },

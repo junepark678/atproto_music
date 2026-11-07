@@ -362,6 +362,7 @@ it('v2 follow receipts migrate without data loss; legacy success refreshes conse
         send_started_at_ms: null,
         send_state: 'unknown',
         legacy_absent_at_ms: null,
+        removal_fence_rev: null,
       });
       expect(upgraded.one('SELECT min_compatible_version FROM schema_compat')).toEqual({ min_compatible_version: 2 });
       // No baseline was recorded by v2: a contradiction must cause a refresh
@@ -386,6 +387,7 @@ it('v2 follow receipts migrate without data loss; legacy success refreshes conse
           send_started_at_ms: null,
           send_state: 'unknown',
           legacy_absent_at_ms: null,
+          removal_fence_rev: null,
         });
       });
     },

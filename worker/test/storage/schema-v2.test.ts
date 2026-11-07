@@ -40,6 +40,7 @@ import type {
   RangeStatsCacheRow,
   SchemaCompatRow,
   ScrobbleV2Columns,
+  VerifiedMembershipRow,
   WebSessionRow,
 } from '../../src/app/rows';
 import type { Db, SqlParam } from '../../src/do/db';
@@ -100,6 +101,19 @@ const NEW_TABLES: Record<string, ExpectedTable> = {
   listen_removal_cids: {
     columns: ['operation_id', 'cid'],
     pk: ['operation_id', 'cid'],
+  },
+  verified_membership: {
+    columns: cols<VerifiedMembershipRow>({
+      record_uri: true,
+      listen_id: true,
+      did: true,
+      state: true,
+      revision: true,
+      cid: true,
+      reason: true,
+      last_absent_revision: true,
+    }),
+    pk: ['record_uri', 'listen_id'],
   },
   batch_entry_items: {
     columns: ['operation_id', 'entry_id', 'job_id', 'seq', 'removal_operation_id', 'removed_at_ms'],
@@ -198,6 +212,7 @@ const NEW_TABLES: Record<string, ExpectedTable> = {
       send_started_at_ms: true,
       send_state: true,
       legacy_absent_at_ms: true,
+      removal_fence_rev: true,
     }),
     pk: ['id'],
     unique: [['did', 'idempotency_key']],
@@ -505,6 +520,7 @@ const NEW_INDEXES: Record<string, [string, number, number, Array<[string, number
   ],
   listen_removals_container: ['listen_removals', 0, 0, [['record_uri', 0]]],
   scrobbles_record_uri: ['scrobbles', 0, 0, [['record_uri', 0]]],
+  verified_membership_did: ['verified_membership', 0, 0, [['did', 0]]],
   // Partial (WHERE recording_msid IS NOT NULL), so it never shadows the
   // per-DID time index while msids are NULL.
   scrobbles_msid: [
@@ -1199,6 +1215,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       "7|'batch_listen_removal_receipts'",
       "8|'outbox_send_certainty'",
       "9|'batch_removal_evidence'",
+      "10|'verified_listen_membership'",
     ]);
     // The new scrobble columns exist and are NULL on every migrated row.
     expect(after.newColumns).toHaveLength(expectedScrobbles);
@@ -1215,6 +1232,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       { version: 7, name: 'batch_listen_removal_receipts' },
       { version: 8, name: 'outbox_send_certainty' },
       { version: 9, name: 'batch_removal_evidence' },
+      { version: 10, name: 'verified_listen_membership' },
     ]);
     expect(after.compat).toEqual([{ singleton: 1, min_compatible_version: 2 }]);
     expect(after.newTablesEmpty).toEqual([]);
@@ -1446,6 +1464,8 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       'stats_cache',
       'loves',
       'range_stats_cache',
+      // Migration 10: rebuilt from verified proofs and snapshots.
+      'verified_membership',
     ];
     const entries = Object.entries(TABLE_CLASS);
     expect(

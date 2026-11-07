@@ -769,6 +769,46 @@ const MIGRATION_9: Migration = {
   ],
 };
 
+// Verified per-entry membership and incarnation boundaries (ADR 0006). One
+// row per batch entry TID (`listen_id`) of a container, plus `listen_id='*'`
+// for the record itself (every batch container; a single scrobble record
+// only once it has been proven absent). Written only by verified proofs and
+// snapshots behind the per-URI revision guard (do/write/apply-record), never
+// by local intent or write completion:
+// - `state`: present (valid, projected), excluded (a valid TID whose entry
+//   failed validation; `reason`), absent (missing from a verified container
+//   revision, or the container/record proven absent);
+// - `cid`/`revision`: the container version that last decided the row;
+// - `last_absent_revision`: the newest verified revision at which it was
+//   absent. A later present row is a new incarnation.
+// Membership is not public visibility (read/visibility applies that); it is
+// what fragment status consults to claim absence. `operations.removal_fence_rev`
+// is the verified revision of the target record when a scrobble removal was
+// admitted, refreshed just before each removal write: a succeeded removal
+// stops suppressing an entry once its membership proves an absence newer
+// than that fence, so a later recreation (same or new CID) is visible.
+// `operations.legacy_absent_at_ms` (migration 9) is no longer written or read
+// as a certainty transition; a row that carries it is never explicitly unsent.
+const MIGRATION_10: Migration = {
+  version: 10,
+  name: 'verified_listen_membership',
+  statements: [
+    `CREATE TABLE verified_membership (
+      record_uri TEXT NOT NULL,
+      listen_id TEXT NOT NULL,
+      did TEXT NOT NULL,
+      state TEXT NOT NULL CHECK(state IN ('present','excluded','absent')),
+      revision TEXT NOT NULL,
+      cid TEXT,
+      reason TEXT,
+      last_absent_revision TEXT,
+      PRIMARY KEY(record_uri,listen_id)
+    )`,
+    'CREATE INDEX verified_membership_did ON verified_membership(did)',
+    'ALTER TABLE operations ADD COLUMN removal_fence_rev TEXT',
+  ],
+};
+
 export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_1,
   MIGRATION_2,
@@ -779,6 +819,7 @@ export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_7,
   MIGRATION_8,
   MIGRATION_9,
+  MIGRATION_10,
 ];
 
 /** The schema version this code expects. */
@@ -840,6 +881,8 @@ export const TABLES = [
   'batch_delete_listens',
   'batch_delete_children',
   'listen_removal_cids',
+  // Migration 10.
+  'verified_membership',
 ] as const;
 
 export type TableName = (typeof TABLES)[number];
@@ -902,4 +945,5 @@ export const TABLE_CLASS: Readonly<Record<TableName, TableClass>> = {
   batch_delete_listens: 'non-derived',
   batch_delete_children: 'non-derived',
   listen_removal_cids: 'non-derived',
+  verified_membership: 'derived',
 };

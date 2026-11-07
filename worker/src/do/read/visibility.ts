@@ -12,13 +12,19 @@
 //   the row stays hidden while the verified projection still contains the CID
 //   that the delete used as `swapRecord`; a successful `record_not_ours` receipt
 //   has no such CID and cannot hide another writer's record. A batch listen
-//   removal also keeps every CID its targets were seen at before it settled
-//   (`listen_removal_cids`: the admission projection, each pre-CAS read, the
-//   projection at settlement), so neither a delayed older proof nor a
-//   projection that advanced before the write resurfaces the listen; a
-//   verified recreation at a new CID is visible. Proof-confirmed
-//   absence removes the projection row, so this query-time overlay never writes
-//   a false `record_state=absent` claim.
+//   removal also keeps every CID its targets were seen at before its write
+//   (`listen_removal_cids`: the admission projection, each pre-CAS read), so a
+//   delayed older proof does not resurface the listen; a verified recreation
+//   at a new CID is visible. Nothing is captured at settlement, whose timing
+//   says nothing about repository order.
+// - Incarnations (migration 10): a succeeded receipt suppresses only the
+//   incarnation it removed. Once verified membership records an absence of
+//   the entry (or single record) newer than the receipt's fence — the
+//   target's verified revision at admission and before each write — any
+//   present row is a later incarnation and is visible, even at the same CID.
+//   A pending or failed local intent still hides whatever is projected.
+//   Proof-confirmed absence removes the projection row, so this query-time
+//   overlay never writes a false `record_state=absent` claim.
 // - A follow edge is visible when its actor is a visible user and its subject
 //   is not hidden: the subject has no suppression row and no users row with
 //   active = 0 (the Rust oracle, crates/storage/src/repositories/follows.rs
@@ -32,6 +38,20 @@
 // strict identifier pattern; values are always bound parameters.
 
 const IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/**
+ * The removal operation aliased `d` has been outlived by the scrobble row
+ * aliased `s`: verified membership proves the entry (or single record) absent
+ * at a revision newer than the removal's fence, so the row is a later
+ * incarnation. A NULL fence (nothing verified when it was admitted or written)
+ * is outlived by any verified absence.
+ */
+function outlived(d: string, s: string): string {
+  return `EXISTS (SELECT 1 FROM verified_membership vm
+      WHERE vm.record_uri = coalesce(${s}.record_uri, ${s}.uri) AND vm.listen_id = coalesce(${s}.listen_id, '*')
+        AND vm.last_absent_revision IS NOT NULL
+        AND (${d}.removal_fence_rev IS NULL OR vm.last_absent_revision > ${d}.removal_fence_rev))`;
+}
 const COLUMN = /^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?$/;
 
 function ident(alias: string): string {
@@ -86,7 +106,8 @@ export function visibleScrobblesFrom(s = 's', u = 'u'): string {
         AND (
           d.state IN ('queued', 'running', 'blocked', 'failed')
           OR (d.state = 'succeeded' AND (d.swap_cid = ${sa}.cid
-            OR EXISTS (SELECT 1 FROM listen_removal_cids e WHERE e.operation_id = d.id AND e.cid = ${sa}.cid)))
+            OR EXISTS (SELECT 1 FROM listen_removal_cids e WHERE e.operation_id = d.id AND e.cid = ${sa}.cid))
+            AND NOT ${outlived('d', sa)})
         )
     )
     AND NOT EXISTS (
@@ -96,7 +117,8 @@ export function visibleScrobblesFrom(s = 's', u = 'u'): string {
         AND (lr.listen_id = ${sa}.listen_id OR lr.listen_id = '*')
         AND (ro.id IS NULL OR ro.state IN ('queued','running','blocked','failed')
           OR (ro.state = 'succeeded' AND (lr.removed_cid = ${sa}.cid
-            OR EXISTS (SELECT 1 FROM listen_removal_cids le WHERE le.operation_id = ro.id AND le.cid = ${sa}.cid))))
+            OR EXISTS (SELECT 1 FROM listen_removal_cids le WHERE le.operation_id = ro.id AND le.cid = ${sa}.cid))
+            AND NOT ${outlived('ro', sa)}))
     )
     AND (${sa}.listen_id IS NULL OR NOT EXISTS (
       SELECT 1 FROM scrobbles AS one
@@ -109,7 +131,8 @@ export function visibleScrobblesFrom(s = 's', u = 'u'): string {
           WHERE sd.did = one.did AND sd.rkey = one.rkey AND sd.kind = 'scrobble.delete'
             AND sd.collection = substr(one.uri, length('at://' || one.did || '/') + 1,
               instr(substr(one.uri, length('at://' || one.did || '/') + 1), '/') - 1)
-            AND (sd.state IN ('queued','running','blocked','failed') OR (sd.state = 'succeeded' AND sd.swap_cid = one.cid))
+            AND (sd.state IN ('queued','running','blocked','failed')
+              OR (sd.state = 'succeeded' AND sd.swap_cid = one.cid AND NOT ${outlived('sd', 'one')}))
         )
     ))`;
 }

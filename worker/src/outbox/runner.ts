@@ -60,7 +60,7 @@ import type { ModuleDeps } from '../do/contracts';
 import type { Db } from '../do/db';
 import { admit } from '../do/ingest/admission';
 import { enqueueHints, type HintInput } from '../do/ingest/hints';
-import { loadUser } from '../do/write/account-state';
+import { bumpStatsVersion, loadUser } from '../do/write/account-state';
 import { MAX_BATCH_WRITES, planBatch, sendCreateBatch } from './apply-writes';
 import { batchDeleteExecutor } from './batch-delete-ops';
 import { batchCreateExecutor } from './batch-ops';
@@ -851,6 +851,9 @@ function finish(m: ModuleDeps, op: OperationRow, outcome: Outcome, now: number, 
       // and request hash so retries still resolve to their original receipt
       // rather than republishing a deleted listen. Failed/unresolved deletes
       // never erase the payload needed for investigation/reconciliation.
+      // Success can change visibility (a fence already crossed by a verified
+      // absence and recreation makes the listen visible), so stats move.
+      if (op.kind === 'scrobble.delete') bumpStatsVersion(db, op.did);
       if (op.kind === 'scrobble.delete' && outcome.note !== 'record_not_ours') {
         const successfulCreates = db.all<{ id: string; record_json: string | null }>(
           `SELECT id, record_json FROM operations WHERE did = ? AND collection = ? AND rkey = ?
@@ -890,25 +893,12 @@ function finish(m: ModuleDeps, op: OperationRow, outcome: Outcome, now: number, 
             op.rkey,
           );
         }
+        // Settlement adds no suppression evidence: local settlement time says
+        // nothing about repository order, and the projection may already hold
+        // a verified later recreation. The receipt keeps only CIDs observed
+        // before its write (admission, pre-CAS reads) and its admission/write
+        // fence (read/visibility).
         if (m.config.prefix !== null && op.collection === outboxCollections(m.config.prefix).scrobbleBatch) {
-          db.run(
-            `UPDATE listen_removals SET removed_cid = COALESCE(removed_cid, (SELECT cid FROM scrobbles s
-            WHERE s.record_uri = listen_removals.record_uri AND s.listen_id = listen_removals.listen_id))
-            WHERE operation_id = ?`,
-            op.id,
-          );
-          // The PDS no longer holds the targets, so any CID the projection
-          // still shows them at predates this removal: keep it as evidence.
-          db.run(
-            `INSERT OR IGNORE INTO listen_removal_cids(operation_id, cid)
-             SELECT DISTINCT ?, s.cid FROM scrobbles s
-             WHERE s.did = ? AND s.record_uri = ? AND EXISTS (SELECT 1 FROM batch_delete_listens bd
-               WHERE bd.operation_id = ? AND (bd.listen_id = '*' OR bd.listen_id = s.listen_id))`,
-            op.id,
-            op.did,
-            `at://${op.did}/${op.collection}/${op.rkey}`,
-            op.id,
-          );
           db.run('UPDATE batch_entry_items SET removed_at_ms = ? WHERE removal_operation_id = ?', now, op.id);
           db.run(
             "UPDATE import_items SET removed_at_ms = ?, record_json = '{}' WHERE removal_operation_id = ?",

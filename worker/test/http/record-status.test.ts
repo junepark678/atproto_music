@@ -406,3 +406,92 @@ it('never reports a hidden batch listen as verified absent', async () => {
     expect(await status(item(id))).toMatchObject({ uri: item(id), state: 'absent', revision: deleted.commit.rev });
   }
 });
+
+it('reports a verified present invalid batch entry as excluded, never absent; only verified non-membership is absent', async () => {
+  const store = await openTestDb();
+  const clock = fixedClock();
+  const index = makeDbIndex({ db: store, clock }, { recordStatus: (m, uri) => recordStatus(m, uri) });
+  const ctx: RequestCtx = { env: HARNESS_ENV, index, requestId: REQUEST_ID, clock, cursorKey, clientIp: '' };
+  const inDo = <T>(fn: (db: Db) => T): Promise<T> => inTestDb(store, (db) => fn(db));
+  const status = async (uri: string) => {
+    const res = await statusRoute.handler(
+      new Request(`${ORIGIN}/api/v1/records/status?${new URLSearchParams({ uri })}`),
+      ctx,
+      {},
+    );
+    const body = JSON.parse(await res.text()) as JsonBody;
+    expect(res.status).toBe(200);
+    expect(schemas.RecordStatus(body)).toBe('valid');
+    return body;
+  };
+  const entry = (id: string, track: string, artist: unknown = 'Membership Artist') => ({
+    id,
+    artist,
+    track,
+    listenedAt: '2026-01-15T11:00:00Z',
+    createdAt: '2026-01-15T12:00:00Z',
+  });
+  const VALID = '3lb2memberaa2';
+  const INVALID = '3lb2memberab2';
+  const MISSING = '3lb2memberac2';
+  const rkey = '3lb2members22';
+  const alice = await repoFor('alice');
+  const record = (listens: unknown[]) => ({ $type: BATCH, createdAt: '2026-01-15T12:00:00Z', listens });
+  const both = await putProof(alice, BATCH, rkey, record([entry(VALID, 'Valid'), entry(INVALID, 'Invalid')]));
+  // The entry keeps its valid TID but its artist is invalid; a non-TID entry is dropped entirely.
+  const invalid = await putProof(
+    alice,
+    BATCH,
+    rkey,
+    record([entry(VALID, 'Valid'), entry(INVALID, 'Invalid', 42), entry('not-a-tid', 'Dropped')]),
+  );
+  const containerUri = uriOf(ALICE, BATCH, rkey);
+  const item = (id: string) => `${containerUri}#${id}`;
+  await inDo((db) => {
+    seedUser(db, ALICE);
+    db.tx(() => {
+      applyRecordProof(db, both, OPTS);
+      applyRecordProof(db, invalid, OPTS);
+    });
+  });
+  const revision = invalid.commit.rev;
+  expect(await status(item(VALID))).toMatchObject({ state: 'indexed', cid: cidOf(invalid), revision });
+  const excluded = await status(item(INVALID));
+  expect(excluded).toEqual({
+    uri: item(INVALID),
+    state: 'excluded',
+    cid: cidOf(invalid),
+    revision,
+    reason: expect.stringMatching(/^artist: /),
+    indexing: STALE_ALICE,
+  });
+  expect(await status(item(MISSING))).toEqual({ uri: item(MISSING), state: 'absent', revision, indexing: STALE_ALICE });
+
+  // A container projected before verified membership existed proves nothing about a missing id.
+  await inDo((db) => db.run('DELETE FROM verified_membership WHERE record_uri = ?', containerUri));
+  for (const id of [INVALID, MISSING]) {
+    expect(await status(item(id))).toEqual({ uri: item(id), state: 'unknown', indexing: STALE_ALICE });
+  }
+
+  // A newer verified version without the invalid entry proves it absent; its reinsertion is indexed.
+  const dropped = await putProof(alice, BATCH, rkey, record([entry(VALID, 'Valid')]));
+  const reinserted = await putProof(alice, BATCH, rkey, record([entry(VALID, 'Valid'), entry(INVALID, 'Again')]));
+  await inDo((db) => db.tx(() => applyRecordProof(db, dropped, OPTS)));
+  expect(await status(item(INVALID))).toEqual({
+    uri: item(INVALID),
+    state: 'absent',
+    revision: dropped.commit.rev,
+    indexing: STALE_ALICE,
+  });
+  await inDo((db) => db.tx(() => applyRecordProof(db, reinserted, OPTS)));
+  expect(await status(item(INVALID))).toMatchObject({ state: 'indexed', cid: cidOf(reinserted) });
+
+  // An inactive owner discloses neither exclusion nor absence.
+  const excludedAgain = await putProof(alice, BATCH, rkey, record([entry(VALID, 'Valid'), entry(INVALID, 'X', 42)]));
+  await inDo((db) => db.tx(() => applyRecordProof(db, excludedAgain, OPTS)));
+  expect(await status(item(INVALID))).toMatchObject({ state: 'excluded' });
+  await inDo((db) => markInactive(db, ALICE, 'deactivated'));
+  for (const id of [VALID, INVALID, MISSING]) {
+    expect(await status(item(id))).toEqual({ uri: item(id), state: 'unknown', indexing: expect.any(Object) });
+  }
+});

@@ -178,8 +178,11 @@ export function insertOperation(db: Db, op: NewOperation, now: number): Operatio
     const prepared = op.prepared ?? null;
     db.run(
       `INSERT INTO operations(id, did, kind, origin, priority, collection, rkey, record_json, digest, swap_cid,
-         state, attempts, due_at, idempotency_key, request_hash, import_job_id, created_at_ms, updated_at_ms, follow_proof_json, send_state)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, 'unsent')`,
+         state, attempts, due_at, idempotency_key, request_hash, import_job_id, created_at_ms, updated_at_ms, follow_proof_json, send_state,
+         removal_fence_rev)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, 'unsent',
+         CASE WHEN ? = 'scrobble.delete' AND ? IS NOT NULL
+           THEN (SELECT revision FROM record_state WHERE uri = 'at://' || ? || '/' || ? || '/' || ?) END)`,
       op.id,
       op.did,
       op.kind,
@@ -198,6 +201,11 @@ export function insertOperation(db: Db, op: NewOperation, now: number): Operatio
       now,
       now,
       op.followProofJson ?? null,
+      op.kind,
+      op.rkey,
+      op.did,
+      op.collection,
+      op.rkey,
     );
     for (const pred of new Set(op.predecessors ?? [])) {
       if (pred === op.id) continue;
@@ -383,6 +391,20 @@ export function legacyImportNeedsReconcile(db: Db, op: OperationRow): boolean {
     op.import_job_id !== null &&
     !explicitlyUnsent(op) &&
     db.one("SELECT 1 FROM import_items WHERE operation_id = ? AND state = 'queued' LIMIT 1", op.id) !== null
+  );
+}
+
+/**
+ * Just before a scrobble removal write: the fence moves to the target's
+ * current verified revision (never backwards). Every verified absence at or
+ * below it preceded the write, so only a newer one can end the receipt.
+ */
+export function refreshRemovalFence(db: Db, id: string, uri: string): void {
+  db.run(
+    `UPDATE operations SET removal_fence_rev = coalesce((SELECT revision FROM record_state WHERE uri = ?), removal_fence_rev)
+     WHERE id = ? AND state = 'running' AND kind = 'scrobble.delete'`,
+    uri,
+    id,
   );
 }
 

@@ -82,6 +82,18 @@ export interface ListenRemovalRow {
   created_at_ms: number;
 }
 
+/** Migration 10: verified membership of a batch entry (or `listen_id='*'`, the record itself). */
+export interface VerifiedMembershipRow {
+  record_uri: string;
+  listen_id: string;
+  did: string;
+  state: 'present' | 'excluded' | 'absent';
+  revision: string;
+  cid: string | null;
+  reason: string | null;
+  last_absent_revision: string | null;
+}
+
 export interface AccountRow {
   did: string;
   /** Lowercase `[a-z0-9][a-z0-9._-]{1,63}`, unique. */
@@ -159,6 +171,12 @@ export interface OperationRow {
    * treated as explicitly unsent.
    */
   legacy_absent_at_ms: number | null;
+  /**
+   * Migration 10, `scrobble.delete` only: the verified record_state revision of
+   * the target when admitted, refreshed before each removal write. A verified
+   * absence newer than it ends the receipt's suppression (read/visibility).
+   */
+  removal_fence_rev: string | null;
   due_at: number;
   last_error: string | null;
   result_uri: string | null;

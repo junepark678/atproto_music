@@ -19,6 +19,11 @@
 // - present and invalid: delete the row, record_state 'excluded' with the
 //   validation reason, counters('excluded', reason) += 1;
 // - absent (a proven exclusion): delete the row, record_state 'absent';
+// - scrobbles and batch containers also record verified membership
+//   (migration 10, keys.ts noteRecord*/noteBatchEntries): a valid container
+//   version lists every valid-TID entry present or excluded and marks the
+//   rest absent; an absent record marks itself and all its entries absent
+//   (`last_absent_revision`, the incarnation boundary of removal receipts);
 // - `users.stats_version` += 1 whenever a scrobble row was inserted, changed
 //   or deleted; `users.max_rev = max(max_rev, rev)`.
 // Validation uses the hint receipt time for the +300 s bound (`receiptNs`).
@@ -52,6 +57,7 @@ import {
   type ScrobbleBatchRecord,
   validateScrobbleBatchRecord,
 } from '@atmusic/core/scrobble-batch';
+import { isTid } from '@atmusic/core/syntax';
 import { toStorage } from '@atmusic/core/timestamp';
 import type { Db } from '../db';
 import { advanceUser, bumpStatsVersion, isSuppressed, loadUser } from './account-state';
@@ -62,7 +68,11 @@ import {
   EXCLUDED_COUNTER,
   guardRevision,
   incrementCounter,
+  type MembershipEntry,
   musicKeyColumns,
+  noteBatchEntries,
+  noteRecordAbsent,
+  noteRecordPresent,
   recordingMsidOf,
   recordUri,
   writeRecordState,
@@ -285,6 +295,13 @@ function batchVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, o: 
       const priorByUri = new Map(prior.map((row) => [row.uri, row]));
       db.run('DELETE FROM scrobbles WHERE record_uri = ?', t.uri);
       let changed = prior.length !== batch.listens.length;
+      // Verified membership keeps every valid-TID entry of this version,
+      // including one dropped by validation: exclusion is not absence.
+      const members: MembershipEntry[] = batch.dropped.flatMap((dropped) =>
+        dropped.id !== null && isTid(dropped.id)
+          ? [{ id: dropped.id, state: 'excluded' as const, reason: reasonText(dropped.reason) }]
+          : [],
+      );
       for (const listen of batch.listens) {
         const uri = `${t.uri}#${listen.id}`;
         const singleRecord = { ...listen.row.record, $type: `${o.prefix}.scrobble` };
@@ -297,7 +314,11 @@ function batchVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, o: 
           present: { cid, record: singleRecord },
         };
         const verdict = scrobbleVerdict(db, itemTarget, cid, singleRecord, o);
-        if (!verdict.ok) continue;
+        if (!verdict.ok) {
+          members.push({ id: listen.id, state: 'excluded', reason: verdict.reason });
+          continue;
+        }
+        members.push({ id: listen.id, state: 'present', reason: null });
         verdict.write();
         const old = priorByUri.get(uri);
         if (
@@ -309,6 +330,7 @@ function batchVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, o: 
         )
           changed = true;
       }
+      noteBatchEntries(db, t.did, t.uri, t.rev, cid, members);
       return changed;
     },
   };
@@ -409,6 +431,7 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
       reason: null,
       verified_at: verifiedAt,
     });
+    if (t.kind === 'scrobble' || t.kind === 'scrobbleBatch') noteRecordAbsent(db, t.did, t.uri, t.rev);
     out = { outcome: 'absent', statsChanged: (t.kind === 'scrobble' || t.kind === 'scrobbleBatch') && deleted };
   } else {
     const { cid, record } = t.present;
@@ -425,6 +448,13 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
         reason: null,
         verified_at: verifiedAt,
       });
+      if (t.kind === 'scrobble' || t.kind === 'scrobbleBatch') {
+        noteRecordPresent(
+          db,
+          { did: t.did, uri: t.uri, rev: t.rev, cid, state: 'present', reason: null },
+          t.kind === 'scrobbleBatch',
+        );
+      }
       out = { outcome: 'applied', statsChanged: (t.kind === 'scrobble' || t.kind === 'scrobbleBatch') && changed };
     } else {
       const deleted = deleteProjection(db, t.kind, t.uri);
@@ -439,6 +469,15 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
         verified_at: verifiedAt,
       });
       incrementCounter(db, EXCLUDED_COUNTER, verdict.reason);
+      // An excluded container keeps its entry rows: an invalid version proves
+      // no entry absent.
+      if (t.kind === 'scrobble' || t.kind === 'scrobbleBatch') {
+        noteRecordPresent(
+          db,
+          { did: t.did, uri: t.uri, rev: t.rev, cid, state: 'excluded', reason: verdict.reason },
+          t.kind === 'scrobbleBatch',
+        );
+      }
       out = {
         outcome: 'excluded',
         reason: verdict.reason,

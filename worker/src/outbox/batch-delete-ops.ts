@@ -9,6 +9,7 @@ import {
   newOperationId,
   outboxCollections,
   prepare as prepareBatchRecord,
+  refreshRemovalFence,
   unsettledAt,
 } from './operations';
 import { type Failure, failureOutcome, type Outcome } from './pds-writer';
@@ -32,11 +33,13 @@ function batchFailure(failure: Failure): Outcome {
 
 /**
  * Durable suppression evidence (migration 9): the targets of removal
- * `operationId` were observed present in the container at `cid` before the
- * removal settled. After success the removal keeps hiding a projection at any
- * such CID (a delayed older proof, or a projection that advanced between
- * admission and execution) while a verified recreation at a new CID becomes
- * visible again. Never a claim about record_state.
+ * `operationId` were observed present in the container at `cid` before its
+ * write (the admission projection, a pre-CAS read, a read-back that still
+ * showed them). After success the removal keeps hiding a projection at such a
+ * CID (a delayed older proof) until verified membership proves an absence
+ * newer than the removal's fence (migration 10): a later incarnation is then
+ * visible even at the same CID. Never recorded at settlement, and never a
+ * claim about record_state.
  */
 export function recordRemovalEvidence(db: Db, operationId: string, cid: string | null | undefined): void {
   if (typeof cid !== 'string' || cid.length === 0) return;
@@ -405,8 +408,9 @@ async function readContainer(op: OperationRow, ctx: ExecContext, uri: string): P
 
 // Success outcomes never carry a post-write or post-removal CID: the persisted
 // `swap_cid` stays the last pre-CAS CID and `listen_removal_cids` keeps every
-// CID at which the targets were seen, so a settled removal still hides a stale
-// projection at any of them.
+// CID at which the targets were seen before the write, so a settled removal
+// still hides a stale projection at any of them, until a verified absence
+// newer than its fence (refreshed before each write) starts a new incarnation.
 async function removeIds(op: OperationRow, ctx: ExecContext): Promise<Outcome> {
   const collection = ctx.collections.scrobbleBatch;
   if (op.did !== ctx.xrpc.did || op.collection !== collection || !validRkey(op.rkey))
@@ -447,6 +451,7 @@ async function removeIds(op: OperationRow, ctx: ExecContext): Promise<Outcome> {
     // PDS committed and the success response was lost; the evidence row keeps
     // it after a later retry moves swap_cid to a newer pre-CAS CID.
     recordRemovalEvidence(ctx.m.db, op.id, found.cid);
+    refreshRemovalFence(ctx.m.db, op.id, uri);
     ctx.persist({ swapCid: found.cid });
     const body =
       kept.length === 0
