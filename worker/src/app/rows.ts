@@ -53,6 +53,10 @@ export type BackupKind = (typeof BACKUP_KINDS)[number];
 
 /** The `scrobbles` columns migration 2 adds (ADR 0005 §6.2, §8.4); NULL until projected (N3-11). */
 export interface ScrobbleV2Columns {
+  /** Fragment-free batch container URI; NULL for single-record listens. */
+  record_uri?: string | null;
+  /** Batch-entry TID; NULL for single-record listens. */
+  listen_id?: string | null;
   album_artist: string | null;
   album_artist_key: string | null;
   /** 1–9999, bounded by the §6.2 validator and the N3-11 projection (no column CHECK). */
@@ -69,6 +73,14 @@ export interface ScrobbleV2Columns {
 
 /** A `scrobbles` row at schema version 2. */
 export interface ScrobbleRowV2 extends ScrobbleRow, ScrobbleV2Columns {}
+
+/** Persisted per-listen suppression intent consumed by the next deletion slice. */
+export interface ListenRemovalRow {
+  did: string;
+  record_uri: string;
+  listen_id: string;
+  created_at_ms: number;
+}
 
 export interface AccountRow {
   did: string;

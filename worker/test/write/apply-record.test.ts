@@ -79,6 +79,8 @@ describe('applyRecordProof', () => {
       expect(db.all('SELECT * FROM scrobbles')).toEqual([
         {
           uri,
+          record_uri: null,
+          listen_id: null,
           cid: cidOf(proof),
           did: ALICE,
           rkey: 'r02',

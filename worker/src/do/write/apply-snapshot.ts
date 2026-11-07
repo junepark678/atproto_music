@@ -253,10 +253,12 @@ export function applySnapshotChunk(db: Db, c: SnapshotChunk): ChunkResult {
   const hi = `at://${c.did}/${c.intervalHi}`;
   const candidates = db.all<{ uri: string }>(
     `SELECT uri FROM record_state WHERE did = ? AND uri > ? AND uri <= ? AND revision < ? AND state != 'absent'
-     UNION SELECT uri FROM scrobbles WHERE did = ? AND uri > ? AND uri <= ? AND revision < ?
+     UNION SELECT uri FROM scrobbles WHERE did = ? AND record_uri IS NULL AND uri > ? AND uri <= ? AND revision < ?
+     UNION SELECT record_uri AS uri FROM scrobbles WHERE did = ? AND record_uri IS NOT NULL AND record_uri > ? AND record_uri <= ? AND revision < ?
      UNION SELECT uri FROM follows WHERE actor = ? AND uri > ? AND uri <= ? AND revision < ?
      UNION SELECT uri FROM loves WHERE did = ? AND uri > ? AND uri <= ?
      ORDER BY uri`,
+    ...[c.did, lo, hi, c.headRev],
     ...[c.did, lo, hi, c.headRev],
     ...[c.did, lo, hi, c.headRev],
     ...[c.did, lo, hi, c.headRev],

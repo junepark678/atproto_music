@@ -40,11 +40,18 @@
 //   proven absence deletes it and records `absent`. Loves never touch
 //   `users.stats_version` (no /api/v1 stat reads them).
 
+import { measureScrobbleBatch } from '@atmusic/atproto/scrobble-batch-size';
 import type { RecordProof } from '@atmusic/atproto/verify/types';
 import { validateFollowRecord } from '@atmusic/core/follow';
 import { validateLoveRecord } from '@atmusic/core/love';
 import { MusicKeyError } from '@atmusic/core/music-key';
 import { reasonText, type ScrobbleRow, validateScrobbleRecord } from '@atmusic/core/scrobble';
+import {
+  MAX_CBOR_BYTES,
+  MAX_CREATE_BODY_BYTES,
+  type ScrobbleBatchRecord,
+  validateScrobbleBatchRecord,
+} from '@atmusic/core/scrobble-batch';
 import { toStorage } from '@atmusic/core/timestamp';
 import type { Db } from '../db';
 import { advanceUser, bumpStatsVersion, isSuppressed, loadUser } from './account-state';
@@ -97,6 +104,9 @@ export interface RecordTarget {
   collection: string;
   rkey: string;
   uri: string;
+  /** Present only for an item projected from a batch container. */
+  recordUri?: string;
+  listenId?: string;
   rev: string;
   /** null: proven absent at `rev`. */
   present: { cid: string; record: unknown } | null;
@@ -111,6 +121,7 @@ export interface TargetResult {
 
 const DELETE_PROJECTION: Readonly<Record<ProjectedKind, string>> = {
   scrobble: 'DELETE FROM scrobbles WHERE uri = ? RETURNING uri',
+  scrobbleBatch: 'DELETE FROM scrobbles WHERE record_uri = ? RETURNING uri',
   follow: 'DELETE FROM follows WHERE uri = ? RETURNING uri',
   love: 'DELETE FROM loves WHERE uri = ? RETURNING uri',
 };
@@ -191,12 +202,13 @@ function scrobbleVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, 
     write: () => {
       const before = db.one<{ cid: string }>('SELECT cid FROM scrobbles WHERE uri = ?', t.uri);
       db.run(
-        `INSERT INTO scrobbles(uri, cid, did, rkey, revision, artist, track, album, listened_at, created_at,
+        `INSERT INTO scrobbles(uri, record_uri, listen_id, cid, did, rkey, revision, artist, track, album, listened_at, created_at,
            duration_seconds, recording_mbid, indexed_at, artist_key, track_key, album_key,
            album_artist, album_artist_key, track_number, artist_mbids, release_mbid, release_group_mbid,
            isrc, submission_client, music_service, recording_msid)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(uri) DO UPDATE SET cid = excluded.cid, rkey = excluded.rkey, revision = excluded.revision,
+           record_uri = excluded.record_uri, listen_id = excluded.listen_id,
            artist = excluded.artist, track = excluded.track, album = excluded.album,
            listened_at = excluded.listened_at, created_at = excluded.created_at,
            duration_seconds = excluded.duration_seconds, recording_mbid = excluded.recording_mbid,
@@ -208,6 +220,8 @@ function scrobbleVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, 
            isrc = excluded.isrc, submission_client = excluded.submission_client,
            music_service = excluded.music_service, recording_msid = excluded.recording_msid`,
         t.uri,
+        t.recordUri ?? null,
+        t.listenId ?? null,
         cid,
         t.did,
         t.rkey,
@@ -235,6 +249,78 @@ function scrobbleVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, 
         fields.recording_msid,
       );
       return before === null || before.cid !== cid;
+    },
+  };
+}
+
+/** A batch container is replaced as one verified unit; invalid entries are isolated. */
+function batchVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, o: ApplyOptions): Verdict {
+  try {
+    const sizes = measureScrobbleBatch(record as ScrobbleBatchRecord, {
+      repo: t.did,
+      collection: t.collection,
+      rkey: t.rkey,
+    });
+    if (sizes.cborBytes > MAX_CBOR_BYTES || sizes.createBodyBytes > MAX_CREATE_BODY_BYTES) {
+      return { ok: false, reason: 'listens: batch record exceeds encoded size limits' };
+    }
+  } catch {
+    return { ok: false, reason: 'listens: batch record cannot be safely encoded' };
+  }
+  const validated = validateScrobbleBatchRecord(record, o.prefix, o.receiptNs);
+  if (!validated.ok) return { ok: false, reason: reasonText(validated.reason) };
+  const batch = validated.row;
+  for (const dropped of batch.dropped) incrementCounter(db, EXCLUDED_COUNTER, reasonText(dropped.reason));
+  if (batch.listens.length === 0) {
+    const reason = batch.dropped[0]?.reason;
+    return { ok: false, reason: reason ? reasonText(reason) : 'listens: no valid entries' };
+  }
+  return {
+    ok: true,
+    write: () => {
+      const prior = db.all<{ uri: string; cid: string; artist_key: string; track_key: string; listened_at: string }>(
+        'SELECT uri,cid,artist_key,track_key,listened_at FROM scrobbles WHERE record_uri = ?',
+        t.uri,
+      );
+      const priorByUri = new Map(prior.map((row) => [row.uri, row]));
+      db.run('DELETE FROM scrobbles WHERE record_uri = ?', t.uri);
+      let changed = prior.length !== batch.listens.length;
+      for (const listen of batch.listens) {
+        const uri = `${t.uri}#${listen.id}`;
+        if (
+          db.one(
+            'SELECT 1 AS x FROM listen_removals WHERE did = ? AND record_uri = ? AND listen_id = ?',
+            t.did,
+            t.uri,
+            listen.id,
+          )
+        ) {
+          if (priorByUri.has(uri)) changed = true;
+          continue;
+        }
+        const singleRecord = { ...listen.row.record, $type: `${o.prefix}.scrobble` };
+        const itemTarget: RecordTarget = {
+          ...t,
+          kind: 'scrobble',
+          uri,
+          recordUri: t.uri,
+          listenId: listen.id,
+          present: { cid, record: singleRecord },
+        };
+        const verdict = scrobbleVerdict(db, itemTarget, cid, singleRecord, o);
+        if (!verdict.ok) continue;
+        verdict.write();
+        const old = priorByUri.get(uri);
+        if (
+          old === undefined ||
+          old.cid !== cid ||
+          old.artist_key !== musicKeyColumns(listen.row.artist, listen.row.track, listen.row.album).artist_key ||
+          old.track_key !== musicKeyColumns(listen.row.artist, listen.row.track, listen.row.album).track_key ||
+          old.listened_at !== listen.row.listenedAt
+        )
+          changed = true;
+      }
+      return changed;
     },
   };
 }
@@ -309,6 +395,7 @@ type VerdictOf = (db: Db, t: RecordTarget, cid: string, record: unknown, o: Appl
 
 const VERDICTS: Readonly<Record<ProjectedKind, VerdictOf>> = {
   scrobble: scrobbleVerdict,
+  scrobbleBatch: batchVerdict,
   follow: followVerdict,
   love: loveVerdict,
 };
@@ -333,7 +420,7 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
       reason: null,
       verified_at: verifiedAt,
     });
-    out = { outcome: 'absent', statsChanged: t.kind === 'scrobble' && deleted };
+    out = { outcome: 'absent', statsChanged: (t.kind === 'scrobble' || t.kind === 'scrobbleBatch') && deleted };
   } else {
     const { cid, record } = t.present;
     const verdict = VERDICTS[t.kind](db, t, cid, record, o);
@@ -349,7 +436,7 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
         reason: null,
         verified_at: verifiedAt,
       });
-      out = { outcome: 'applied', statsChanged: t.kind === 'scrobble' && changed };
+      out = { outcome: 'applied', statsChanged: (t.kind === 'scrobble' || t.kind === 'scrobbleBatch') && changed };
     } else {
       const deleted = deleteProjection(db, t.kind, t.uri);
       writeRecordState(db, {
@@ -363,7 +450,11 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
         verified_at: verifiedAt,
       });
       incrementCounter(db, EXCLUDED_COUNTER, verdict.reason);
-      out = { outcome: 'excluded', reason: verdict.reason, statsChanged: t.kind === 'scrobble' && deleted };
+      out = {
+        outcome: 'excluded',
+        reason: verdict.reason,
+        statsChanged: (t.kind === 'scrobble' || t.kind === 'scrobbleBatch') && deleted,
+      };
     }
   }
   if (out.statsChanged) bumpStatsVersion(db, t.did);

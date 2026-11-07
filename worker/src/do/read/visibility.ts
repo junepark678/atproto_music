@@ -69,12 +69,35 @@ export function visibleScrobblesFrom(s = 's', u = 'u'): string {
     AND NOT EXISTS (
       SELECT 1 FROM operations AS d
       WHERE d.did = ${sa}.did AND d.rkey = ${sa}.rkey
+        AND d.collection = CASE WHEN ${sa}.record_uri IS NOT NULL
+          THEN substr(${sa}.record_uri, length('at://' || ${sa}.did || '/') + 1,
+            instr(substr(${sa}.record_uri, length('at://' || ${sa}.did || '/') + 1), '/') - 1)
+          ELSE substr(${sa}.uri, length('at://' || ${sa}.did || '/') + 1,
+            instr(substr(${sa}.uri, length('at://' || ${sa}.did || '/') + 1), '/') - 1) END
         AND d.kind = 'scrobble.delete'
         AND (
           d.state IN ('queued', 'running', 'blocked', 'failed')
           OR (d.state = 'succeeded' AND d.swap_cid = ${sa}.cid)
         )
-    )`;
+    )
+    AND NOT EXISTS (
+      SELECT 1 FROM listen_removals AS lr
+      WHERE lr.did = ${sa}.did AND lr.record_uri = ${sa}.record_uri AND lr.listen_id = ${sa}.listen_id
+    )
+    AND (${sa}.listen_id IS NULL OR NOT EXISTS (
+      SELECT 1 FROM scrobbles AS one
+      WHERE one.did = ${sa}.did AND one.record_uri IS NULL
+        AND one.artist_key = ${sa}.artist_key AND one.track_key = ${sa}.track_key
+        AND one.listened_at >= substr(${sa}.listened_at,1,19)
+        AND one.listened_at < substr(${sa}.listened_at,1,19) || 'Z'
+        AND NOT EXISTS (
+          SELECT 1 FROM operations AS sd
+          WHERE sd.did = one.did AND sd.rkey = one.rkey AND sd.kind = 'scrobble.delete'
+            AND sd.collection = substr(one.uri, length('at://' || one.did || '/') + 1,
+              instr(substr(one.uri, length('at://' || one.did || '/') + 1), '/') - 1)
+            AND (sd.state IN ('queued','running','blocked','failed') OR (sd.state = 'succeeded' AND sd.swap_cid = one.cid))
+        )
+    ))`;
 }
 
 /**

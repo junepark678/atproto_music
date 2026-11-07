@@ -24,7 +24,7 @@ import type { SqliteDb } from '../../../src/node/sqlite-db';
 import { withMigratedDb } from '../support/node-db';
 
 const P = 'com.example.atmusic';
-const FOUR = [`${P}.scrobble`, `${P}.follow`, `${P}.settings`, `${P}.love`];
+const FIVE = [`${P}.scrobble`, `${P}.follow`, `${P}.settings`, `${P}.love`, `${P}.scrobbleBatch`];
 const HOST = 'jetstream.example.test';
 const SUBSCRIBE_PATH = '/xrpc/network.bsky.jetstream.subscribeEvents';
 const ALICE = 'did:plc:aaaaaaaaaaaaaaaaaaaaaaaa';
@@ -94,15 +94,15 @@ const commitFrame = (collection: string, rkey: string, seq: number) => ({
 const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
 
 describe('jetstream collections', () => {
-  it('the Jetstream URL requests the four wantedCollections in a fixed order', async () => {
+  it('appends scrobbleBatch after the established collection order', async () => {
     await withMigratedDb(async (db) => {
       const m = deps(db);
-      expect(configuredCollections(m)).toEqual(FOUR);
+      expect(configuredCollections(m)).toEqual(FIVE);
 
       const js = scriptedConnector();
       const opened = await connect(m, js.connector, m.clock.nowMs());
       expect(opened).toMatchObject({ ok: true, hostIndex: 0, gap: 'no_cursor' });
-      // One connect, one URL: kinds=commit and the four collections, in order, nothing else.
+      // One connect, one URL: kinds=commit and all five collections in stable order.
       expect(js.urls).toHaveLength(1);
       const url = new URL(js.urls[0] as string);
       expect(`${url.protocol}//${url.host}${url.pathname}`).toBe(`https://${HOST}${SUBSCRIBE_PATH}`);
@@ -112,16 +112,17 @@ describe('jetstream collections', () => {
         'collections',
         'collections',
         'collections',
+        'collections',
       ]);
       expect(url.searchParams.getAll('kinds')).toEqual(['commit']);
-      expect(url.searchParams.getAll('collections')).toEqual(FOUR);
+      expect(url.searchParams.getAll('collections')).toEqual(FIVE);
 
       // The Node ws connector dials exactly that URL (wss://, same query).
       const target = jetstreamWsTarget(js.urls[0] as string, m.config.jetstreamUrls);
       expect(target.ok).toBe(true);
       if (target.ok) {
         expect(target.url.protocol).toBe('wss:');
-        expect(target.url.searchParams.getAll('collections')).toEqual(FOUR);
+        expect(target.url.searchParams.getAll('collections')).toEqual(FIVE);
       }
 
       // Frames of the subscribed love collection become hints; an unsubscribed one does not.
@@ -138,24 +139,25 @@ describe('jetstream collections', () => {
         cursor: 2,
       });
 
-      // A resumed connect keeps the same four collections and adds only the cursor.
+      // A resumed connect keeps the same collection order and adds only the cursor.
       closeSocket(m, m.clock.nowMs());
       const again = await connect(m, js.connector, m.clock.nowMs());
       expect(again).toMatchObject({ ok: true, gap: null });
       expect(js.urls).toHaveLength(2);
       const resumed = new URL(js.urls[1] as string);
       expect([...new Set(resumed.searchParams.keys())]).toEqual(['kinds', 'collections', 'cursor']);
-      expect(resumed.searchParams.getAll('collections')).toEqual(FOUR);
+      expect(resumed.searchParams.getAll('collections')).toEqual(FIVE);
       expect(resumed.searchParams.get('cursor')).toBe('2');
       closeSocket(m, m.clock.nowMs());
 
-      // Another valid prefix derives its own four, in the same order.
+      // Another valid prefix derives its own five, in the same order.
       const other = new URL(subscribeUrl(deps(db, 'org.example.other'), 0, null));
       expect(other.searchParams.getAll('collections')).toEqual([
         'org.example.other.scrobble',
         'org.example.other.follow',
         'org.example.other.settings',
         'org.example.other.love',
+        'org.example.other.scrobbleBatch',
       ]);
     });
   });

@@ -820,8 +820,8 @@ def query_bounds(spec, validator_type, checker):
         require(not bool(errors) == valid, f'query_bounds: wrong viewer acceptance {value!r}')
         count += 1
     status = {dereference(spec, p)['name']: dereference(spec, p) for p in found[('GET', '/api/v1/records/status')]['parameters']}
-    require(status['uri'].get('required') is True and status['uri']['schema'] == {'$ref': '#/components/schemas/AtUri'},
-            'query_bounds: records/status requires an AT URI')
+    require(status['uri'].get('required') is True and status['uri']['schema'] == {'$ref': '#/components/schemas/ListenUri'},
+            'query_bounds: records/status requires a ListenUri')
     body = found[('POST', '/api/v1/notify')]['requestBody']
     require(body.get('required') is True and body.get('x-maxBodyBytes') == NOTIFY_MAX_BODY_BYTES, 'query_bounds: notify body must be required and capped at 2 KiB (N1)')
     # v1.2: body caps (ADR 0005 §3.6), the Idempotency-Key syntax and the required query fields.
@@ -1444,7 +1444,7 @@ def main():
     print(f'PASS session_access: {sum(modes.values())} v1.2 routes ({", ".join(f"{n} {m}" for m, n in sorted(modes.items()))}); '
           f'{len(WRITE_ROUTES)} writes answer 202 Accepted and 503 publication_disabled; {len(REQUIRED_ERROR_CODES)} named error responses declared')
     count = query_bounds(spec, validator_type, checker)
-    print(f'PASS query_bounds: {count} limit/viewer/body/Idempotency-Key boundaries; defaults, cursor, window, scope, viewer, record URI, '
+    print(f'PASS query_bounds: {count} limit/viewer/body/Idempotency-Key boundaries; defaults, cursor, window, scope, viewer, ListenUri, '
           '2 KiB notify body, 64 KiB v1.2 bodies and the 64 MiB raw upload')
     validated = set()
     count, negative, requests = response_examples(spec, validator_type, checker, validated)

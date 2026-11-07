@@ -30,6 +30,7 @@ import { loveCollection } from '@atmusic/core/love';
 import { RECORDING_MSID_NAMESPACE } from '@atmusic/core/msid';
 import { albumKey, artistKey, trackKey } from '@atmusic/core/music-key';
 import { collectionsFor } from '@atmusic/core/namespace';
+import { scrobbleBatchCollection } from '@atmusic/core/scrobble-batch';
 import { formatAtUri } from '@atmusic/core/syntax';
 import type { Db } from '../db';
 
@@ -137,12 +138,13 @@ export function recordingMsidOf(artist_key: string, track_key: string): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
 }
 
-export type CollectionKind = 'scrobble' | 'follow' | 'settings' | 'love';
+export type CollectionKind = 'scrobble' | 'scrobbleBatch' | 'follow' | 'settings' | 'love';
 
 /** Which configured collection `collection` is under `prefix`, or null when it is none of the four. */
 export function collectionKind(prefix: string, collection: string): CollectionKind | null {
   const c = collectionsFor(prefix);
   if (collection === c.scrobble) return 'scrobble';
+  if (collection === scrobbleBatchCollection(prefix)) return 'scrobbleBatch';
   if (collection === c.follow) return 'follow';
   if (collection === c.settings) return 'settings';
   if (collection === loveCollection(prefix)) return 'love';

@@ -692,14 +692,15 @@ describe('migrate', () => {
 
   // ADR 0005 §3.2, §6.4 (N1-10): migration 2 makes the code version 2, and a
   // database at that version is ready for that code, across restarts.
-  // Migrations 3 and 4 are additive and keep the v2 compatibility floor.
-  it('SCHEMA_VERSION is 4; follow-proof and delete-target indexes are additive and keep v2 compatibility', async () => {
-    expect(SCHEMA_VERSION).toBe(4);
+  // Migration 3 is additive and keeps the v2 compatibility floor.
+  it('SCHEMA_VERSION includes additive batch provenance and remains compatible with v2 code', async () => {
+    expect(SCHEMA_VERSION).toBe(5);
     expect(MIGRATIONS.map((m) => [m.version, m.name])).toEqual([
       [1, 'initial_workers_schema'],
       [2, 'node_schema'],
       [3, 'follow_proof_baseline'],
       [4, 'scrobble_delete_target_index'],
+      [5, 'batch_listen_provenance'],
     ]);
 
     const name = 'migrate-v2-ready';
@@ -716,6 +717,7 @@ describe('migrate', () => {
         { version: 2, name: 'node_schema' },
         { version: 3, name: 'follow_proof_baseline' },
         { version: 4, name: 'scrobble_delete_target_index' },
+        { version: 5, name: 'batch_listen_provenance' },
       ]);
       expect(db.all('SELECT min_compatible_version FROM schema_compat')).toEqual([{ min_compatible_version: 2 }]);
       // A row in a migration-2 table survives reopening.

@@ -380,7 +380,7 @@ describe('ingest de-shim', () => {
       ],
       [
         'worker/test/ingest/jetstream-socket.test.ts › jetstream socket › subscribe URL has kinds=commit and the three collections only',
-        'worker/test/ingest/jetstream-socket.test.ts › jetstream socket › subscribe URL has kinds=commit and the four collections only',
+        'worker/test/ingest/jetstream-socket.test.ts › jetstream socket › subscribe URL has kinds=commit and the five collections only',
       ],
       [
         'worker/test/ingest/verify-drain.test.ts › verify drain › Paid drain works 200 cached-identity hints in one slice: 200 getRecord calls',
@@ -395,7 +395,7 @@ describe('ingest de-shim', () => {
     expect(
       undeclared(socket, {
         ancestors: ['jetstream socket'],
-        title: 'subscribe URL has kinds=commit and the four collections only',
+        title: 'subscribe URL has kinds=commit and the five collections only',
       }),
     ).toEqual([]);
     expect(

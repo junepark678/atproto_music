@@ -89,6 +89,15 @@ interface ExpectedTable {
 }
 
 const NEW_TABLES: Record<string, ExpectedTable> = {
+  listen_removals: {
+    columns: cols<{ did: true; record_uri: true; listen_id: true; created_at_ms: true }>({
+      did: true,
+      record_uri: true,
+      listen_id: true,
+      created_at_ms: true,
+    }),
+    pk: ['did', 'record_uri', 'listen_id'],
+  },
   accounts: {
     columns: cols<AccountRow>({
       did: true,
@@ -416,19 +425,36 @@ const NEW_SCROBBLE_COLUMNS = cols<ScrobbleV2Columns>({
   submission_client: true,
   music_service: true,
   recording_msid: true,
+  record_uri: true,
+  listen_id: true,
 });
 
 /** New named indexes: table, unique, partial, [column, desc] in key order. */
 const NEW_INDEXES: Record<string, [string, number, number, Array<[string, number]>]> = {
-  operations_scrobble_delete_target: [
-    'operations',
+  operations_scrobble_delete_target: ['operations', 0, 1, [['did', 0], ['rkey', 0]]],
+  scrobbles_batch_visibility: [
+    'scrobbles',
     0,
     1,
     [
       ['did', 0],
-      ['rkey', 0],
+      ['artist_key', 0],
+      ['track_key', 0],
+      ['listened_at', 0],
     ],
   ],
+  scrobbles_single_visibility: [
+    'scrobbles',
+    0,
+    1,
+    [
+      ['did', 0],
+      ['artist_key', 0],
+      ['track_key', 0],
+      ['listened_at', 0],
+    ],
+  ],
+  listen_removals_container: ['listen_removals', 0, 0, [['record_uri', 0]]],
   // Partial (WHERE recording_msid IS NOT NULL), so it never shadows the
   // per-DID time index while msids are NULL.
   scrobbles_msid: [
@@ -1118,6 +1144,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       "2|'node_schema'",
       "3|'follow_proof_baseline'",
       "4|'scrobble_delete_target_index'",
+      "5|'batch_listen_provenance'",
     ]);
     // The new scrobble columns exist and are NULL on every migrated row.
     expect(after.newColumns).toHaveLength(expectedScrobbles);
@@ -1129,6 +1156,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       { version: 2, name: 'node_schema' },
       { version: 3, name: 'follow_proof_baseline' },
       { version: 4, name: 'scrobble_delete_target_index' },
+      { version: 5, name: 'batch_listen_provenance' },
     ]);
     expect(after.compat).toEqual([{ singleton: 1, min_compatible_version: 2 }]);
     expect(after.newTablesEmpty).toEqual([]);

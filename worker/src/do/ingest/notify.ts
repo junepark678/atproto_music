@@ -58,6 +58,7 @@
 
 import type { Did, NotifyInput, RecordStatus } from '@atmusic/core/api-types';
 import type { Clock } from '@atmusic/core/deps';
+import { parseScrobbleBatchListenUri } from '@atmusic/core/scrobble-batch';
 import { isSupportedDid, parseRecordUri } from '@atmusic/core/syntax';
 import { BucketSet, DID_RATE, IP_RATE, MAX_BUCKET_KEYS, type RateDecision, type RateRule } from '../../http/limits';
 import type { ModuleDeps, NotifyOutcome } from '../contracts';
@@ -161,7 +162,8 @@ function notifyTarget(m: ModuleDeps, input: NotifyInput): Target {
   }
   if (keys[0] !== 'uri') throw new TypeError(`notify has an unknown field ${keys[0]}`);
   const raw = (input as { uri: unknown }).uri;
-  const uri = typeof raw === 'string' ? parseRecordUri(raw) : null;
+  const batch = typeof raw === 'string' ? parseScrobbleBatchListenUri(raw) : null;
+  const uri = typeof raw === 'string' ? parseRecordUri(batch?.containerUri ?? raw) : null;
   if (uri === null || !isSupportedDid(uri.did)) throw new TypeError('notify uri is not a record AT URI');
   const prefix = m.config.prefix;
   const kind = prefix === null ? null : collectionKind(prefix, uri.collection);
@@ -252,17 +254,24 @@ const VISIBLE_ROW = `
 /** N2: the indexing state of one record URI (see the header). */
 export function recordStatus(m: ModuleDeps, uri: string, now: number = m.clock.nowMs()): RecordStatus {
   assertEpochMs('now', now);
-  const parsed = typeof uri === 'string' ? parseRecordUri(uri) : null;
+  const batchItem = typeof uri === 'string' ? parseScrobbleBatchListenUri(uri) : null;
+  const containerUri = batchItem?.containerUri ?? uri;
+  const parsed = typeof uri === 'string' ? parseRecordUri(containerUri) : null;
   if (parsed === null) throw new RangeError('recordStatus needs a record AT URI');
+  if (batchItem !== null && parsed.collection !== `${m.config.prefix}.scrobbleBatch`)
+    throw new RangeError('recordStatus batch URI has the wrong namespace');
   const db = m.db;
   const did = parsed.did;
   const idx = indexing(db, now, { did, mode: m.config.ingestMode });
 
-  const row = db.one<VisibleRow>(VISIBLE_ROW, uri, uri, uri);
+  const row =
+    batchItem === null
+      ? db.one<VisibleRow>(VISIBLE_ROW, containerUri, containerUri, containerUri)
+      : db.one<VisibleRow>(VISIBLE_ROW, uri, uri, uri);
   if (row !== null) return { uri, state: 'indexed', cid: row.cid, revision: row.revision, indexing: idx };
 
   const pending =
-    db.one('SELECT 1 AS x FROM hints WHERE uri = ?', uri) !== null ||
+    db.one('SELECT 1 AS x FROM hints WHERE uri = ?', containerUri) !== null ||
     db.one(
       `SELECT 1 AS x FROM repo_jobs WHERE did = ? AND kind = 'snapshot' AND state IN ('pending','running','failed')`,
       did,
@@ -271,7 +280,7 @@ export function recordStatus(m: ModuleDeps, uri: string, now: number = m.clock.n
 
   const rs = db.one<{ state: string; cid: string | null; revision: string; reason: string | null }>(
     'SELECT state, cid, revision, reason FROM record_state WHERE uri = ?',
-    uri,
+    containerUri,
   );
   if (rs?.state === 'absent') return { uri, state: 'absent', revision: rs.revision, indexing: idx };
   if (rs?.state === 'excluded' && rs.cid !== null && rs.reason !== null) {

@@ -76,6 +76,9 @@ export interface UserRow {
 
 export interface ScrobbleRow {
   uri: string;
+  /** Fragment-free repository container for batch listens; NULL for singles. */
+  record_uri?: string | null;
+  listen_id?: string | null;
   cid: string;
   did: string;
   rkey: string;

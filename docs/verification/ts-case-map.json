@@ -26,8 +26,8 @@
     },
     {
       "case": "M1.1.1/version_policy",
-      "target": "worker/test/ingest/jetstream-socket.test.ts › subscribe URL has kinds=commit and the four collections only",
-      "note": "A10 adds `<prefix>.settings` and B12 `<prefix>.love` (N3-11 renamed the target from \"the three collections only\"), so a valid prefix derives exactly the scrobble, follow, settings and love collections.",
+      "target": "worker/test/node/ingest/jetstream-collections.test.ts › appends scrobbleBatch after the established collection order",
+      "note": "A10 adds `<prefix>.settings`, B12 adds `<prefix>.love`, and Slice B appends `<prefix>.scrobbleBatch` after the existing collection list to preserve numeric cursor compatibility.",
       "also": [
         "packages/core/test/scrobble-batch.test.ts › round trips a listen fragment and returns fragment-free proof target",
         "packages/core/test/scrobble-batch.test.ts › rejects malformed authority, non-batch collections and bad fragments"

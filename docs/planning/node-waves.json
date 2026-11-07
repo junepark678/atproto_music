@@ -1230,7 +1230,12 @@
      "worker/test/ingest/jetstream-socket.test.ts",
      "worker/src/http/notify.ts",
      "worker/src/do/ingest/notify.ts",
-     "docs/verification/node-port-inventory.json"
+     "docs/verification/node-port-inventory.json",
+     "worker/src/do/read/visibility.ts",
+     "worker/src/do/read/export.ts",
+     "worker/src/do/read/scrobble-fields.ts",
+     "worker/src/http/scrobbles-read.ts",
+     "worker/test/write/apply-batch.test.ts"
     ],
     "dependsOn": [
      "N2-02",
@@ -1238,14 +1243,17 @@
      "N1-11",
      "N1-12"
     ],
-    "description": "ADR 0005 §6.3, §6.5. config.collections gains love, and wantedCollections adds `<p>.love`. apply-record and apply-snapshot project the §6.2 columns, album_artist_key and recording_msid, and apply love records into `loves` behind the record_state guard. The /api/v1 stats grouping stays unchanged.\n\nhttp/notify.ts configuredCollections and ingest/notify.ts recordStatus learn the love collection and the loves table, so records/status and notify accept love URIs and a love reaches indexed. jetstream-socket.test.ts changes its three-collection expectation to four; node-port-inventory.json records the title change (\"the three collections only\" → \"the four collections only\").",
+    "description": "ADR 0005 §6.3, §6.5 and Slice B batch projection. Existing collection order remains stable and scrobbleBatch is appended last for Jetstream/discovery numeric cursor compatibility. apply-record and apply-snapshot project verified batch entries under fragment URIs while record_state remains container-keyed; common visibility gives a matching single precedence and restores a preserved batch row after single deletion. Public reads and export preserve optional recordUri/listenId provenance. Migration 4 adds nullable provenance, indexed cross-format visibility, and listen_removals for the following removal slice. Batch inputs use the shared DAG-CBOR and exact UTF-8 request size helper; invalid entries are isolated and an empty valid set excludes the container. The batch schema publication gate remains closed.",
     "tests": [
      "worker/test/config.test.ts › collections for an owned prefix are exactly scrobble, follow, settings and love",
-     "worker/test/node/ingest/jetstream-collections.test.ts › the Jetstream URL requests the four wantedCollections in a fixed order",
+     "worker/test/node/ingest/jetstream-collections.test.ts › appends scrobbleBatch after the established collection order",
+     "worker/test/write/apply-batch.test.ts › isolates invalid items, prefers visible singles, restores batches after single delete, and reaffirms exact snapshot keys",
+     "worker/test/write/apply-batch.test.ts › excludes a container when no entries validate or safe byte limits fail, removing old listens",
+     "worker/test/write/apply-batch.test.ts › applies partial item suppression and keeps delete intents collection-aware",
      "worker/test/node/write/apply-love.test.ts › a verified love record projects into loves; its verified absence removes it; an older revision never resurrects it",
      "worker/test/node/write/apply-fields.test.ts › a verified scrobble with the new fields fills the new columns, album_artist_key and recording_msid; one without them leaves them NULL and the v1 columns byte-identical",
      "worker/test/node/write/apply-fields.test.ts › /api/v1 stats for the shared fixture are unchanged after records gain albumArtist",
-     "worker/test/ingest/jetstream-socket.test.ts › subscribe URL has kinds=commit and the four collections only",
+     "worker/test/ingest/jetstream-socket.test.ts › subscribe URL has kinds=commit and the five collections only",
      "worker/test/node/write/apply-love.test.ts › a love URI passes /api/v1/records/status and /api/v1/notify validation and reports indexed after its proof"
     ]
    }

@@ -670,7 +670,28 @@ const MIGRATION_4: Migration = {
   statements: ["CREATE INDEX operations_scrobble_delete_target ON operations(did,rkey) WHERE kind = 'scrobble.delete'"],
 };
 
-export const MIGRATIONS: readonly Migration[] = [MIGRATION_1, MIGRATION_2, MIGRATION_3, MIGRATION_4];
+// Batch listen provenance and partial-removal intent. Additive only: fragment
+// identities are AppView rows; repository state remains keyed by container.
+const MIGRATION_5: Migration = {
+  version: 5,
+  name: 'batch_listen_provenance',
+  statements: [
+    'ALTER TABLE scrobbles ADD COLUMN record_uri TEXT',
+    'ALTER TABLE scrobbles ADD COLUMN listen_id TEXT',
+    'CREATE INDEX scrobbles_batch_visibility ON scrobbles(did,artist_key,track_key,listened_at) WHERE listen_id IS NOT NULL',
+    'CREATE INDEX scrobbles_single_visibility ON scrobbles(did,artist_key,track_key,listened_at) WHERE record_uri IS NULL',
+    `CREATE TABLE listen_removals (
+      did TEXT NOT NULL,
+      record_uri TEXT NOT NULL,
+      listen_id TEXT NOT NULL,
+      created_at_ms INTEGER NOT NULL,
+      PRIMARY KEY(did,record_uri,listen_id)
+    )`,
+    'CREATE INDEX listen_removals_container ON listen_removals(record_uri)',
+  ],
+};
+
+export const MIGRATIONS: readonly Migration[] = [MIGRATION_1, MIGRATION_2, MIGRATION_3, MIGRATION_4, MIGRATION_5];
 
 /** The schema version this code expects. */
 export const SCHEMA_VERSION: number = MIGRATIONS[MIGRATIONS.length - 1]?.version ?? 0;
@@ -726,6 +747,7 @@ export const TABLES = [
   'range_stats_cache',
   'backup_runs',
   'schema_compat',
+  'listen_removals',
 ] as const;
 
 export type TableName = (typeof TABLES)[number];
@@ -783,4 +805,5 @@ export const TABLE_CLASS: Readonly<Record<TableName, TableClass>> = {
   range_stats_cache: 'derived',
   backup_runs: 'non-derived',
   schema_compat: 'non-derived',
+  listen_removals: 'non-derived',
 };
