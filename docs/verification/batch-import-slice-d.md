@@ -392,3 +392,100 @@ PR #161 rule wrote it) keeps the at-or-below rule; migration-11 receipts keep
 their head rule and its F1 window. The installed-handler tests pin
 `@atproto/pds` 0.5.40. The full Node acceptance gate is reserved for the
 accepted final head and was not run here.
+
+## Unknown-send and same-CID statistics fixes (stacked on PR #162)
+
+Stacked on `t3/removal-no-replay` at `a176da7` (PR #162). It closes the two
+findings of the Astra a176da7 review (ADR 0006 "Unknown sends", migration 14).
+Migrations 1–13 are unchanged. Migration 14 adds `operations.removal_send_state`,
+`removal_send_json`, `removal_send_at_ms` and `removal_superseded_by`. No live
+service, environment file, lexicon publication or PDS record was touched.
+This supersedes the "completely lost answer" limit recorded above: an
+unknown send is no longer written again at a newer head.
+
+State transitions that changed (crash boundaries in brackets):
+
+| State | Durable fields | Next | Writes? |
+| --- | --- | --- | --- |
+| send pinned | `removal_send_state` `pending`, `removal_send_json` (method, body, head CID and revision), `removal_head_rev`, written in one transaction before the write is awaited | the answer decides [a crash leaves it pending] | the pinned request only |
+| send unknown, same root | pending, head still the pinned root | the exact pinned request is sent again (one CAS on that root) | yes, byte-identical |
+| send unknown, root moved | pending, any other head | absent → reached `absent`; verified absence after the fence → `verified`; present → read-only hold `removal_send_uncertain`: no attempt spent by the hold (an attempt that sent stays counted), wait doubling 5 s → 300 s, never exhausted [restart, reauth, unblock and the tenth reconcile resume the same hold] | never |
+| original refused | `rejected` (a received 4xx of the pinned send itself) | a new fenced send may follow | yes, new fence |
+| superseded | `cancelled`, `last_error` `removal_superseded`, `removal_superseded_by` | never runs again; later intents carry the hiding and the writes | never |
+
+A send fenced before migration 14 (a fence, no send state, not reached) is
+pending at its fence revision. At that revision a fresh read and send is
+pinned. At any other head it holds.
+
+| Finding | Fix | Regression |
+| --- | --- | --- |
+| F1 a crash after the PDS committed D, a lost response or an invalid `[]` success body, then R recreating the original bytes: the retry replaced its fence by R's root and removed R (9 cases) | the exact request is pinned before the await; an unknown outcome is re-sent only at its own root and otherwise holds read-only; only a 4xx of the pinned original clears it; a new removal never waits behind it and supersedes it once later intents cover its targets; Last.fm and ListenBrainz absorb a repeat until a verified projection is newer than the fence, then admit a fresh intent | `uncertain-send.test.ts` › F1 $kind, $mode… (crash, lost, invalid, 5xx × partial, whole, single: no write after restart, the pin unchanged, bounded hold, reauth and tenth read-only, fresh web intent alone removes R), and the same-root, late-original, rejection, partial-coverage, Last.fm, ListenBrainz and pre-migration-14 cases |
+| F2 a same-CID re-proof at J (real notify drain) released the recreation, but stats stayed cached (partial 1 instead of 2, whole 0 instead of 1, single 0 instead of 1) | applying unchanged scrobble bytes at a revision different from the stored one, for a record with a succeeded removal receipt, bumps `stats_version` in the proof's transaction (single and batch; snapshots share the path); cutoffs never move | `after-reproof-stats.test.ts` › %s: the real hint re-proves unchanged R at J… (production `drain`, fixture identity and DNS, sync.getRecord CAR with MST and signature verification; cache filled after settlement and before J; totals, top artists, visibility, status, export, inactive-owner privacy; Y stays removed), and a no-receipt control that keeps the cache |
+
+Intentional changes to existing expectations: `recovery.test.ts` (a crash
+after a committed single delete now only reads: one commit, no no-op resend)
+and `reached-order.test.ts` (an invalid put answer followed by a recreation
+holds `removal_send_uncertain` instead of `remote_delete_unconfirmed`). The
+migration ledger tests, the row-shape test and the v2 follow-receipt upgrade
+list migration 14.
+
+Evidence (every substantive command under `taskset -c 18,19 nice -n 15`,
+Vitest always `--maxWorkers=1`, fixture SQLite and in-process transport only):
+
+- Astra's `new-boundaries.mts` and `new-controls.mts` from
+  `/tmp/atmusic-review-a176da7`, copied with their paths rewritten to this
+  worktree and no assertion changed: `new-boundaries` 12/12 PASS (12 FAIL at
+  a176da7). Each ambiguous row ends `queued`, `removal_send_uncertain`,
+  `removal_send_state` `pending`, attempts 1. The restart sends only HEAD and
+  GET, and the remote X, Y, Z (or the single) are intact. Each cutoff row
+  bumps `stats_version` across the drain, and its totals are 2, 1 and 1.
+  `new-controls` 15/15 PASS.
+- The 17 prior suites through a copy of `run-probes.py` (output in the
+  scratch directory, not the review directory), with the schema
+  expectation set to 14 in `migration-833` and `additional-boundaries`.
+  All exit 0 with no FAIL row. Compared field by field with the review's
+  own JSONL after removing the four new columns, every row is identical
+  except the schema label (13 to 14).
+- The two new test files on the reviewed head (a176da7 `worker/src`):
+  33 of 36 fail. The 3 that pass are the no-receipt cache control and the
+  partial and whole late-original-before-retry cases.
+- Mutation checks over `uncertain-send` (32 tests) and `after-reproof-stats`:
+  - the stats bump disabled: 3 fail;
+  - the pin ignored when reading back: 20 fail;
+  - the pin written after the await: 3 fail;
+  - no supersession: 15 fail;
+  - held removals kept as predecessors: 17 fail;
+  - a re-send's refusal clearing the pin: 3 fail;
+  - Last.fm always absorbing: 3 fail;
+  - ListenBrainz always absorbing: 1 fails.
+- `vitest run --maxWorkers=1` over worker/test/node/{outbox,imports,lastfm,
+  listenbrainz,write,read,ingest} and worker/test/{storage,write,read,ingest}:
+  93 files, 559 tests passed. worker/test/node/http,
+  worker/test/node/{migrate-node,features}.test.ts and
+  worker/test/{http,harness,composition}: 20 files, 87 tests passed.
+- `npm run typecheck`, Biome check on every changed file, `git diff --check`,
+  `scripts/validate_contracts.py` and `scripts/validate_case_map.py
+  --check-tests` passed.
+
+Operator notes: the release applies migration 14 at startup (four nullable
+columns, no backfill). A removal held `removal_send_uncertain` reads one head
+and its targets per poll, up to every 300 s, and never spends an attempt. Its
+pending overlay keeps its targets hidden. Nothing resolves it on time,
+sign-in or unblocking. It resolves when its targets are absent, when they
+are verified absent after its fence, or when the owner deletes the listen
+(or record) again. That new intent is fenced by the current head and
+supersedes the held one once its targets are covered. No flag or timeout
+marks a held removal complete.
+
+Remaining limits (documented behavior, not waivers):
+- A held removal only partly covered by later intents keeps hiding its
+  remaining targets. Each later incarnation of them stays hidden too, until
+  those targets are covered, absent or verified absent.
+- A whole-container hold is covered only by a later whole-container intent.
+- The same-root test treats the owner PDS's head as authoritative. A PDS that
+  reports a stale head can only delay its own owner's removal: the re-sent
+  request is still one CAS on that root.
+- Re-proofs at a newer revision of a record with a succeeded removal receipt
+  invalidate statistics conservatively, even when no cutoff is crossed.
+- The full Node acceptance gate is reserved for the accepted final head and
+  was not run here.

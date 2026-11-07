@@ -276,11 +276,64 @@ the first head read after the requested state was reached; malformed and
 missing commit metadata never order anything. A known commit still needs a
 successful read-back before it settles (a failed read-back holds read-only,
 never writes). No arbitrary delay, finite CID enumeration, settlement time or
-"latest head" guess is used as evidence. A completely lost answer stays
-ambiguous (an unexecuted request versus an executed removal followed by an
-identical recreation): a read finding the targets present is written again
-under a fresh head and swapRecord, as before; verified evidence or a fresh
-intent is the only stronger resolution.
+"latest head" guess is used as evidence.
+
+Unknown sends (migration 14, amendment after Astra a176da7 F1). Server
+acknowledgement and local persistence are never atomic: a crash after the PDS
+committed but before `markReached` was durable, a lost response, a 5xx, or a
+2xx body that does not answer the request leaves no evidence whether the
+conditional write happened. Re-sending the intent under a newer head was a
+destructive replay: with D committed, R recreating the original bytes and the
+retry fenced by R's root, the old intent removed R although no fresh user
+intent was admitted. The rule is now:
+
+- Before each write is awaited, the exact request is pinned with its fence
+  (`removal_send_state = pending`, `removal_send_json` = {method, body
+  (swapCommit, swapRecord, record bytes), head CID and revision},
+  `removal_head_rev`), in one transaction.
+- While the requested state is not known reached, a pending send decides
+  every later attempt and the read-only reconcile: every target absent is
+  `absent` no-replay knowledge (ordered as above); verified membership proving
+  every target absent after the fence is `verified`; the head still at the
+  pinned root means nothing was committed since, so the very same request is
+  re-sent unchanged (one CAS on that root, so at most one of them can ever
+  commit, a late original included); any other head holds read-only
+  (`waiting`, `removal_send_uncertain`, no attempt spent by the hold itself,
+  an attempt that sent stays counted, its wait doubling with the time since
+  the pin from 5 s up to 300 s, never failed for attempts). A present target
+  at a newer root cannot tell an unexecuted removal followed by unrelated
+  commits from a completed one followed by an identical recreation, so the
+  intent is never expanded to a newer root. A pinned swapRecord that does not
+  match the record at its own root can never commit, so it is released.
+- Only a definite rejection of the pinned original send itself (a received
+  4xx: InvalidSwap, RecordNotFound, a validation, scope or sign-in error, a
+  rate limit) records `rejected`, after which a new fenced send may follow.
+  Elapsed time, reauth, unblocking, a budget refund, a present read, an
+  absence read that lacks ordering (it is reached, then ordered as above) or
+  a definite rejection of a later re-send never clear an unknown send. A
+  crash before the rejection was persisted stays unknown.
+- A send fenced before migration 14 (a `removal_head_rev`, no send state, not
+  reached) is pending with only its fence revision: at that same revision a
+  fresh read and send is equally a single CAS on the unchanged root (and is
+  pinned); any other head holds.
+- Resolution of an indefinite hold is a later explicit intent. A new removal
+  on the key never waits behind a removal holding an unknown send (it is left
+  out of `operation_deps`). In the transaction that admits it, every earlier
+  such removal whose targets are all covered by removals admitted after it
+  (`*` covers every listen; a single record is covered by any later removal
+  of it) is cancelled `removal_superseded` with `removal_superseded_by`, so it
+  never sends again and the later intent carries the hiding and the write;
+  one only partly covered keeps holding (and hiding) its remaining targets
+  until they are covered too, absent or verified absent. The later intent is
+  fenced by its own fresh head: it is the user's decision about whatever is
+  there now. Protocol repeats stay sensible: Last.fm library.removeScrobble
+  and ListenBrainz delete-listen absorb a repeated request into the held
+  removal while no verified projection of the target is newer than its fence
+  (a repeat of the same intent), and admit a fresh intent once one is (a
+  provably newer verified incarnation); the web DELETE route is always an
+  explicit intent. Operators resolve a held removal the same way: no flag or
+  timeout marks it complete. Durable reached knowledge still forbids every
+  replay, as above.
 
 A succeeded receipt with an exact basis hides its targets at every projected
 revision at or below `removal_done_rev`, whatever the CID: a delayed proof of
@@ -293,6 +346,13 @@ committed between the absence and that head cannot be told apart from a
 pre-removal version by revision, so it stays hidden until verified ingest
 proves the record at or above the boundary (a re-proof of unchanged bytes
 carries the newer revision, and settlement queues the record's verify hint).
+Because that re-proof changes visibility without changing content, applying
+unchanged scrobble bytes at a newer revision of a record that has a succeeded
+removal receipt bumps `stats_version` in the proof's own transaction (single
+and batch, live proofs and snapshots; amendment after Astra a176da7 F2), so
+cached statistics filled after settlement converge with export, status and
+visibility; the cutoffs themselves never move, and the per-owner and per-URI
+revision guards are unchanged.
 That unresolved region is deliberate, not a waiver: a plain getRecord
 absence and a no-op answer carry no revision (the history H, D1 absent, B
 present, D2 absent, R present gives identical observations whichever absence
