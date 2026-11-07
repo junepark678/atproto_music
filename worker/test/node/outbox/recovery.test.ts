@@ -17,6 +17,7 @@ import {
   FOLLOW,
   GET,
   type Harness,
+  HEAD,
   listenInput,
   PUT,
   remoteRecord,
@@ -105,11 +106,13 @@ it('crash before send, after PDS commit before local ack, after local commit, an
       const beforeDelete = h.writers.sent.length;
       await h.runUntilIdle();
       const resent = h.writers.sent.slice(beforeDelete);
+      // Resent against a fresh head; the record is gone, so InvalidSwap and an absent read.
       expect(resent.map((s) => [s.nsid, s.status])).toEqual([
+        [HEAD, 200],
         [DELETE, 400],
         [GET, 400],
       ]);
-      expect(resent[0]!.body).toMatchObject({ rkey: a.rkey, swapRecord: remoteA!.cid });
+      expect(resent[1]!.body).toMatchObject({ rkey: a.rkey, swapRecord: remoteA!.cid });
       expect(h.op(del.id)).toMatchObject({ state: 'succeeded', attempts: 2 });
       expect(committed(h, DELETE)).toBe(1);
       expect((await remoteRecords(h.kit, 'Alice', SCROBBLE)).map((r) => r.rkey)).toEqual([b.rkey]);

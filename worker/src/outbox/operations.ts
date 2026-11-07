@@ -395,20 +395,6 @@ export function legacyImportNeedsReconcile(db: Db, op: OperationRow): boolean {
 }
 
 /**
- * Just before a scrobble removal write: the fence moves to the target's
- * current verified revision (never backwards). Every verified absence at or
- * below it preceded the write, so only a newer one can end the receipt.
- */
-export function refreshRemovalFence(db: Db, id: string, uri: string): void {
-  db.run(
-    `UPDATE operations SET removal_fence_rev = coalesce((SELECT revision FROM record_state WHERE uri = ?), removal_fence_rev)
-     WHERE id = ? AND state = 'running' AND kind = 'scrobble.delete'`,
-    uri,
-    id,
-  );
-}
-
-/**
  * Withdraws an operation that was explicitly never sent: `cancelled`, its
  * listen keys deleted (so a deliberate re-scrobble is accepted again) and its
  * unsent forward rows deleted. Returns false (changing nothing) when it was

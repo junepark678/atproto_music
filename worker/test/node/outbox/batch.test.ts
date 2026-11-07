@@ -18,6 +18,7 @@ import {
   CREATE,
   GET,
   type Harness,
+  HEAD,
   listenInput,
   PUT,
   remoteRecords,
@@ -676,6 +677,11 @@ it('does not trust a wrong remote record URI or crash on a null batch entry', as
       m: h.m,
       xrpc: {
         did: h.alice,
+        latestCommit: async () => ({
+          kind: 'head',
+          cid: 'bafyreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy',
+          rev: '3lb2batchhead',
+        }),
         getRecord: async () => ({
           kind: 'present',
           uri: `at://${h.bob}/${BATCH}/${rkey}`,
@@ -768,7 +774,8 @@ it('reconciles an interrupted tenth batch delete attempt without an eleventh sen
     h.db.run("UPDATE operations SET state='running',attempts=10,send_started_at_ms=? WHERE id=?", T0, del.id);
     await h.run();
     expect(h.op(del.id)).toMatchObject({ state: 'failed', attempts: 10 });
-    expect(h.writers.sent.map((request) => request.nsid)).toEqual([GET]);
+    // Read-only: the head and the container, never a write.
+    expect(h.writers.sent.map((request) => request.nsid)).toEqual([HEAD, GET]);
     expect(await remoteRecords(h.kit, 'Alice', BATCH)).toHaveLength(1);
   });
 });

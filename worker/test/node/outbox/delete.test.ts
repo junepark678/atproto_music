@@ -14,6 +14,7 @@ import {
   DELETE,
   GET,
   type Harness,
+  HEAD,
   listenInput,
   remoteRecord,
   SCROBBLE,
@@ -73,11 +74,16 @@ it('delete uses swapRecord from record_state; InvalidSwap re-fetches and reconci
         versionBeforeDelete + 1,
       );
       await h.runUntilIdle();
-      expect(h.writers.sent.map((s) => [s.nsid, s.status])).toEqual([[DELETE, 200]]);
-      expect(h.writers.sent[0]!.body).toEqual({
+      // The repository head first, then the delete fenced by it (swapCommit).
+      expect(h.writers.sent.map((s) => [s.nsid, s.status])).toEqual([
+        [HEAD, 200],
+        [DELETE, 200],
+      ]);
+      expect(h.writers.sent[1]!.body).toEqual({
         repo: h.alice,
         collection: SCROBBLE,
         rkey: '3kaaaaaaaaa22',
+        swapCommit: put1.cid,
         swapRecord: put1.ops[0]!.cid,
       });
       expect(h.op(d1.id)).toMatchObject({
@@ -104,6 +110,7 @@ it('delete uses swapRecord from record_state; InvalidSwap re-fetches and reconci
       const mark = h.writers.sent.length;
       await h.run();
       expect(h.writers.sent.slice(mark).map((s) => [s.nsid, s.status, s.body?.swapRecord])).toEqual([
+        [HEAD, 200, undefined],
         [DELETE, 400, putOld.ops[0]!.cid],
         [GET, 200, undefined],
       ]);
@@ -116,7 +123,8 @@ it('delete uses swapRecord from record_state; InvalidSwap re-fetches and reconci
       });
       h.kit.clock.advance(1_000);
       await h.runUntilIdle();
-      expect(h.writers.sent.slice(mark + 2).map((s) => [s.nsid, s.status, s.body?.swapRecord])).toEqual([
+      expect(h.writers.sent.slice(mark + 3).map((s) => [s.nsid, s.status, s.body?.swapRecord])).toEqual([
+        [HEAD, 200, undefined],
         [DELETE, 200, putNew.ops[0]!.cid],
       ]);
       expect(h.op(d2.id)).toMatchObject({ state: 'succeeded', attempts: 2 });
@@ -143,6 +151,7 @@ it('delete uses swapRecord from record_state; InvalidSwap re-fetches and reconci
       expect(h.writers.sent.slice(mark3).map((s) => [s.nsid, s.status])).toEqual([
         [CREATE, 503],
         [CREATE, 200],
+        [HEAD, 200],
         [DELETE, 200],
       ]);
       // swapRecord is the CID our create published (nothing indexed yet).
@@ -214,7 +223,7 @@ it('a still-queued create cancelled at removal sends nothing to the PDS and dele
     await h.runUntilIdle();
     const created = h.op(again.id);
     expect(created.state).toBe('succeeded');
-    expect(h.writers.order()).toEqual([CREATE, DELETE]);
+    expect(h.writers.order()).toEqual([CREATE, HEAD, DELETE]);
     expect(h.writers.sent.at(-1)!.body).toMatchObject({ rkey: again.rkey, swapRecord: created.result_cid });
     expect(h.op(chained.delete.id)).toMatchObject({ state: 'succeeded', attempts: 1 });
     expect(await remoteRecord(h.kit, 'Alice', SCROBBLE, again.rkey!)).toBeNull();
@@ -231,7 +240,7 @@ it('delete behind an unsent or in-flight create runs after it and leaves no reco
       origin: 'web',
     });
     await h.runUntilIdle();
-    expect(h.writers.order()).toEqual([CREATE, DELETE]);
+    expect(h.writers.order()).toEqual([CREATE, HEAD, DELETE]);
     expect([h.op(create.id).state, h.op(del.id).state]).toEqual(['succeeded', 'succeeded']);
     expect(await remoteRecord(h.kit, 'Alice', SCROBBLE, create.rkey!)).toBeNull();
   });

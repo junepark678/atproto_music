@@ -809,6 +809,32 @@ const MIGRATION_10: Migration = {
   ],
 };
 
+// Server-enforced removal fences (ADR 0006 amendment). A scrobble removal
+// reads its owner's repository head (com.atproto.sync.getLatestCommit) and
+// sends its write with BOTH `swapCommit` (that head CID) and `swapRecord`, so
+// the PDS commits it only if nothing at all was committed in between:
+// - `removal_head_rev`: the newest head revision a send of this removal was
+//   checked against, persisted before the send (or the head read just before
+//   a read that found the target already gone). Every repository revision at
+//   or below it precedes the removal, so a present proof of the target at or
+//   below it is the removed incarnation, whatever its CID; one above it is a
+//   later incarnation. Never moved backwards.
+// - `removal_commit_rev`: the commit revision the PDS reported for the
+//   removal write, when it reported one newer than the checked head.
+// Both are local intent metadata reported by the owner's PDS, never verified
+// proof: they bound suppression of this removal's own targets only and never
+// touch record_state or verified_membership. A receipt without
+// `removal_head_rev` (settled before this migration) keeps the migration 9/10
+// CID-evidence and verified-absence rules.
+const MIGRATION_11: Migration = {
+  version: 11,
+  name: 'removal_commit_fence',
+  statements: [
+    'ALTER TABLE operations ADD COLUMN removal_head_rev TEXT',
+    'ALTER TABLE operations ADD COLUMN removal_commit_rev TEXT',
+  ],
+};
+
 export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_1,
   MIGRATION_2,
@@ -820,6 +846,7 @@ export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_8,
   MIGRATION_9,
   MIGRATION_10,
+  MIGRATION_11,
 ];
 
 /** The schema version this code expects. */

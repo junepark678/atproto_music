@@ -44,6 +44,8 @@ export const PUT = 'com.atproto.repo.putRecord';
 export const DELETE = 'com.atproto.repo.deleteRecord';
 export const APPLY = 'com.atproto.repo.applyWrites';
 export const GET = 'com.atproto.repo.getRecord';
+/** The repository head read that fences every scrobble removal write (outbox/removal-fence.ts). */
+export const HEAD = 'com.atproto.sync.getLatestCommit';
 export const LIST = 'com.atproto.repo.listRecords';
 
 /** A Random whose jitter is always zero (float() = 0); bytes stay seeded. */

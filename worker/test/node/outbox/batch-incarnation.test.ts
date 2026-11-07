@@ -1,10 +1,11 @@
 // Removal receipts and verified incarnations (ADR 0006; migration 10).
 //
 // A succeeded batch-listen removal suppresses only the incarnation it removed.
-// Settlement timing is not repository order: a recreation proved by a newer
-// verified absence followed by presence is visible (at a new or the same CID),
-// while a delayed older proof, a pending or failed local intent, or a present
-// proof with no verified absence in between stays hidden.
+// Settlement timing is not repository order: the removal's server-checked
+// head (migration 11) is. A recreation committed after it is visible (at a new
+// or the same CID), while a delayed older proof or a pending or failed local
+// intent stays hidden. A legacy receipt without a head keeps the migration 10
+// rule (a verified absence newer than its fence starts a new incarnation).
 
 import { expect, it } from 'vitest';
 import { recordStatus } from '../../../src/do/ingest/notify';
@@ -211,12 +212,30 @@ it('a partial removal is outlived by a verified entry absence and the reinsertio
   });
 });
 
-it('with no verified absence in between, a same-CID present proof stays in the removed incarnation', async () => {
+it('a byte-identical restore committed after the fenced removal is a later incarnation even with no verified absence in between', async () => {
   await withHarness(async (h) => {
-    const { admission } = await admitted(h, ['*']);
+    const { admission, removal } = await admitted(h, ['*']);
     await h.runUntilIdle();
+    const op = h.op(removal.id);
     // The owner restores identical bytes before this index observed the
-    // deletion: nothing verified separates the two incarnations.
+    // deletion. The removal's server-checked head orders the two incarnations.
+    await h.kit.externalPut('Alice', BATCH, RKEY, ORIGINAL);
+    const restored = await applyCurrent(h);
+    expect(restored.proof.state === 'present' && restored.proof.cid).toBe(
+      admission.state === 'present' && admission.cid,
+    );
+    expect(restored.proof.commit.rev > op.removal_head_rev!).toBe(true);
+    expect(visible(h)).toEqual([TARGET, SIBLING]);
+    expect(status(h, TARGET)).toMatchObject({ state: 'indexed', revision: restored.proof.commit.rev });
+  });
+});
+
+it('a legacy receipt (no server-checked head) keeps its migration 9/10 rule: with no verified absence, same-CID stays removed', async () => {
+  await withHarness(async (h) => {
+    const { admission, removal } = await admitted(h, ['*']);
+    await h.runUntilIdle();
+    // Settled before migration 11: no head fence was ever recorded.
+    h.db.run('UPDATE operations SET removal_head_rev = NULL, removal_commit_rev = NULL WHERE id = ?', removal.id);
     await h.kit.externalPut('Alice', BATCH, RKEY, ORIGINAL);
     await applyCurrent(h);
     expect(h.db.one('SELECT cid FROM record_state WHERE uri = ?', container(h))).toEqual({
@@ -312,17 +331,25 @@ it('privacy: an inactive owner discloses neither the restored listen nor its mem
   });
 });
 
-it('a delayed write after the fence does not move it: refreshing uses the verified revision before each write', async () => {
+it('the fence is the server-checked head of the write, not the verified revision; the commit revision is kept too', async () => {
   await withHarness(async (h) => {
     const { admission, removal } = await admitted(h, [TARGET]);
-    expect(h.op(removal.id).removal_fence_rev).toBe(admission.commit.rev);
-    // The owner edits the container (sibling field) and this index verifies it before the write.
+    expect(h.op(removal.id)).toMatchObject({ removal_fence_rev: admission.commit.rev, removal_head_rev: null });
+    // The owner edits the container (an envelope field); this index never sees it.
     await h.kit.externalPut('Alice', BATCH, RKEY, { ...ORIGINAL, remoteEnvelopeField: 'edited' });
-    const edited = await applyCurrent(h);
+    const edited = h.kit.repos.Alice.head!;
     await h.runUntilIdle();
-    expect(h.op(removal.id)).toMatchObject({ state: 'succeeded', removal_fence_rev: edited.proof.commit.rev });
+    const removed = h.kit.repos.Alice.head!;
+    expect(h.op(removal.id)).toMatchObject({
+      state: 'succeeded',
+      // Untouched local admission fence; the PDS-checked head and commit decide.
+      removal_fence_rev: admission.commit.rev,
+      removal_head_rev: edited.rev,
+      removal_commit_rev: removed.rev,
+    });
+    expect(h.writers.sent.find((r) => r.nsid === PUT)!.body).toMatchObject({ swapCommit: edited.cid });
     expect(h.writers.count(PUT)).toBe(1);
-    // The pre-removal edited version proved again later is the removed incarnation.
+    // The pre-removal edited version proved later is the removed incarnation.
     expect(visible(h)).toEqual([SIBLING]);
   });
 });

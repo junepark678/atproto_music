@@ -173,10 +173,21 @@ export interface OperationRow {
   legacy_absent_at_ms: number | null;
   /**
    * Migration 10, `scrobble.delete` only: the verified record_state revision of
-   * the target when admitted, refreshed before each removal write. A verified
-   * absence newer than it ends the receipt's suppression (read/visibility).
+   * the target when admitted. It decides only receipts settled without a
+   * server-checked head (`removal_head_rev` NULL, i.e. before migration 11): a
+   * verified absence newer than it ends their suppression (read/visibility).
    */
   removal_fence_rev: string | null;
+  /**
+   * Migration 11, `scrobble.delete` only: the newest repository head revision
+   * (com.atproto.sync.getLatestCommit) that a send of this removal was checked
+   * against with `swapCommit`, persisted before the send, or the head read just
+   * before a read that found the target already gone. Never moves backwards.
+   * Owner-PDS metadata, not verified proof.
+   */
+  removal_head_rev: string | null;
+  /** Migration 11: the commit revision the PDS reported for the removal write (newer than the checked head). */
+  removal_commit_rev: string | null;
   due_at: number;
   last_error: string | null;
   result_uri: string | null;

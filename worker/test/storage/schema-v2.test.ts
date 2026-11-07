@@ -213,6 +213,8 @@ const NEW_TABLES: Record<string, ExpectedTable> = {
       send_state: true,
       legacy_absent_at_ms: true,
       removal_fence_rev: true,
+      removal_head_rev: true,
+      removal_commit_rev: true,
     }),
     pk: ['id'],
     unique: [['did', 'idempotency_key']],
@@ -1216,6 +1218,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       "8|'outbox_send_certainty'",
       "9|'batch_removal_evidence'",
       "10|'verified_listen_membership'",
+      "11|'removal_commit_fence'",
     ]);
     // The new scrobble columns exist and are NULL on every migrated row.
     expect(after.newColumns).toHaveLength(expectedScrobbles);
@@ -1233,6 +1236,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       { version: 8, name: 'outbox_send_certainty' },
       { version: 9, name: 'batch_removal_evidence' },
       { version: 10, name: 'verified_listen_membership' },
+      { version: 11, name: 'removal_commit_fence' },
     ]);
     expect(after.compat).toEqual([{ singleton: 1, min_compatible_version: 2 }]);
     expect(after.newTablesEmpty).toEqual([]);

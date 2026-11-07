@@ -835,6 +835,8 @@ function finish(m: ModuleDeps, op: OperationRow, outcome: Outcome, now: number, 
         db.run('DELETE FROM listen_removals WHERE operation_id = ?', op.id);
         db.run('DELETE FROM batch_delete_listens WHERE operation_id = ?', op.id);
         db.run('DELETE FROM listen_removal_cids WHERE operation_id = ?', op.id);
+        // Nothing of ours was removed: no repository boundary may suppress the key.
+        db.run('UPDATE operations SET removal_head_rev = NULL, removal_commit_rev = NULL WHERE id = ?', op.id);
       }
       db.run(
         `UPDATE operations SET state = 'succeeded', result_uri = ?, result_cid = ?, swap_cid = coalesce(?, swap_cid),
@@ -959,10 +961,11 @@ function finish(m: ModuleDeps, op: OperationRow, outcome: Outcome, now: number, 
       return;
     case 'waiting':
       db.run(
-        `UPDATE operations SET state='queued', attempts=attempts-?, due_at=?, last_error='remote_state_unavailable', updated_at_ms=?
+        `UPDATE operations SET state='queued', attempts=attempts-?, due_at=?, last_error=?, updated_at_ms=?
          WHERE id=? AND state='running'`,
         begun ? 1 : 0,
         outcome.untilMs,
+        outcome.code ?? 'remote_state_unavailable',
         now,
         op.id,
       );

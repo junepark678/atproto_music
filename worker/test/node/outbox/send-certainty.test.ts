@@ -23,6 +23,7 @@ import {
   DELETE,
   GET,
   type Harness,
+  HEAD,
   listenInput,
   PREFIX,
   remoteRecords,
@@ -183,7 +184,7 @@ it('a schema-4 zero-attempt create whose send committed is removed through Last.
         ]);
         // The original-key create meets the committed record (RecordAlreadyExists),
         // is reconciled by digest, and the record is then deleted.
-        expect(h.writers.order()).toEqual([CREATE, GET, DELETE]);
+        expect(h.writers.order()).toEqual([CREATE, GET, HEAD, DELETE]);
         expect(h.kit.pds.Alice.calls.filter({ nsid: CREATE }).map((c) => c.status)).toEqual([400]);
         expect(await remoteRecords(h.kit, 'Alice', SCROBBLE)).toEqual([]);
       },

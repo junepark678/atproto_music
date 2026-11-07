@@ -9,8 +9,13 @@
 //   index), else the CID our own create of the URI published, else the CID the
 //   owner's PDS reports. The CID is persisted before the send, so a crash
 //   during the delete resumes with the same swapRecord.
+// - It also carries `swapCommit`: the owner's repository head, read just
+//   before and persisted as the receipt's `removal_head_rev` (removal-fence.ts),
+//   so every revision at or below it precedes the removal.
 // - InvalidSwap: re-fetch from the PDS and reconcile. Absent → done; present
-//   with another CID → retry (a counted attempt) with that CID.
+//   at the same CID (only another commit moved the head) → retry in the same
+//   attempt with a fresh head; present with another CID → retry (a counted
+//   attempt) with that CID.
 // - RecordNotFound (or a 404): look it up; absence completes the delete.
 // - Never another writer's record: a delete enqueued behind our own create of
 //   the URI whose create ended `remote_record_conflict` completes locally with
@@ -34,10 +39,10 @@ import {
   newOperationId,
   outboxCollections,
   predecessorRows,
-  refreshRemovalFence,
   unsettledAt,
 } from './operations';
-import { failureOutcome, type Outcome } from './pds-writer';
+import { failureOutcome, type Outcome, reportedCommitRev } from './pds-writer';
+import { checkedHead, keepRemovalCommit, keepRemovalHead } from './removal-fence';
 import type { ExecContext, Executor } from './runner';
 import { hasIdentity, validRkey } from './scrobble-ops';
 
@@ -202,48 +207,60 @@ function indexedCid(ctx: ExecContext, uri: string): string | null {
   return row !== null && row.state === 'present' ? row.cid : null;
 }
 
-/** deleteRecord with swapRecord, reconciling InvalidSwap and RecordNotFound against the owner's PDS. */
+/** deleteRecord with swapCommit and swapRecord, reconciling InvalidSwap and RecordNotFound against the owner's PDS. */
 async function deleteWithSwap(op: OperationRow, ctx: ExecContext, predecessors: OperationRow[]): Promise<Outcome> {
   const rkey = op.rkey as string;
   const uri = `at://${op.did}/${op.collection}/${rkey}`;
   const hints = [{ collection: op.collection, rkey }];
   let swap = op.swap_cid;
-  if (swap === null) {
-    swap = indexedCid(ctx, uri);
+  for (let tries = 0; tries < 5; tries++) {
+    const head = await checkedHead(ctx, uri);
+    if (head.kind === 'outcome') return head.outcome;
     if (swap === null) {
-      const ours = predecessors.find(
-        (p) => p.kind === 'scrobble.create' && p.rkey === rkey && p.state === 'succeeded' && p.result_cid !== null,
-      );
-      swap = ours?.result_cid ?? null;
+      swap = indexedCid(ctx, uri);
+      if (swap === null) {
+        const ours = predecessors.find(
+          (p) => p.kind === 'scrobble.create' && p.rkey === rkey && p.state === 'succeeded' && p.result_cid !== null,
+        );
+        swap = ours?.result_cid ?? null;
+      }
+      if (swap === null) {
+        const found = await ctx.xrpc.getRecord(op.collection, rkey);
+        if (found.kind === 'failed') return failureOutcome(found.failure);
+        // Nothing at the key on the owner's PDS: the delete is already complete.
+        if (found.kind === 'absent') {
+          keepRemovalHead(ctx.m.db, op.id, head.rev);
+          return { kind: 'succeeded', uri, hints };
+        }
+        swap = found.cid;
+      }
+      ctx.persist({ swapCid: swap });
     }
-    if (swap === null) {
-      const found = await ctx.xrpc.getRecord(op.collection, rkey);
-      if (found.kind === 'failed') return failureOutcome(found.failure);
-      // Nothing at the key on the owner's PDS: the delete is already complete.
-      if (found.kind === 'absent') return { kind: 'succeeded', uri, hints };
-      swap = found.cid;
+    keepRemovalHead(ctx.m.db, op.id, head.rev);
+    const result = await ctx.xrpc.procedure(
+      'com.atproto.repo.deleteRecord',
+      { repo: op.did, collection: op.collection, rkey, swapCommit: head.cid, swapRecord: swap },
+      'delete',
+    );
+    if (result.ok) {
+      keepRemovalCommit(ctx.m.db, op.id, reportedCommitRev(result.body, head.rev));
+      return { kind: 'succeeded', uri, hints, swapCid: swap };
     }
-    ctx.persist({ swapCid: swap });
-  }
-  refreshRemovalFence(ctx.m.db, op.id, uri);
-  const result = await ctx.xrpc.procedure(
-    'com.atproto.repo.deleteRecord',
-    { repo: op.did, collection: op.collection, rkey, swapRecord: swap },
-    'delete',
-  );
-  if (result.ok) return { kind: 'succeeded', uri, hints, swapCid: swap };
-  const failure = result.failure;
-  if (failure.code === 'repository_changed' || failure.kind === 'missing') {
+    const failure = result.failure;
+    if (failure.code !== 'repository_changed' && failure.kind !== 'missing') return failureOutcome(failure);
     const found = await ctx.xrpc.getRecord(op.collection, rkey);
     if (found.kind === 'failed') return failureOutcome(found.failure);
     if (found.kind === 'absent') return { kind: 'succeeded', uri, hints, swapCid: swap };
+    // The record is unchanged and only the repository head moved: retry now
+    // against a fresh head (no attempt spent on an unrelated commit).
+    if (failure.code === 'repository_changed' && found.cid === swap) continue;
     return {
       kind: 'transient',
       code: failure.code === 'repository_changed' ? 'repository_changed' : 'remote_delete_unconfirmed',
       swapCid: found.cid,
     };
   }
-  return failureOutcome(failure);
+  return { kind: 'transient', code: 'repository_changed', ...(swap === null ? {} : { swapCid: swap }) };
 }
 
 /** A create this delete waits for ended with proof that another writer holds the rkey. */
@@ -275,16 +292,18 @@ export const scrobbleDeleteExecutor: Executor = {
   },
 };
 
-/** Read-only: absent on the owner's PDS completes a delete. */
+/**
+ * Read-only: absent on the owner's PDS completes a delete. The head is read
+ * first, so the absence also fences the receipt at it (removal-fence.ts).
+ */
 export async function lookupDeleted(op: OperationRow, ctx: ExecContext): Promise<Outcome> {
   const rkey = op.rkey as string;
+  const uri = `at://${op.did}/${op.collection}/${rkey}`;
+  const head = await checkedHead(ctx, uri);
+  if (head.kind === 'outcome') return head.outcome;
   const found = await ctx.xrpc.getRecord(op.collection, rkey);
   if (found.kind === 'failed') return failureOutcome(found.failure);
-  return found.kind === 'absent'
-    ? {
-        kind: 'succeeded',
-        uri: `at://${op.did}/${op.collection}/${rkey}`,
-        hints: [{ collection: op.collection, rkey }],
-      }
-    : { kind: 'transient', code: 'remote_delete_unconfirmed' };
+  if (found.kind !== 'absent') return { kind: 'transient', code: 'remote_delete_unconfirmed' };
+  keepRemovalHead(ctx.m.db, op.id, head.rev);
+  return { kind: 'succeeded', uri, hints: [{ collection: op.collection, rkey }] };
 }
