@@ -109,48 +109,85 @@ row in the same transaction. A confirmed chained removal does the same after
 PDS success. Sibling mappings, keys, payloads and import outcome counters
 remain intact; removed items are excluded from queued-work counts and tracked
 by their removal timestamp. A queued/running/blocked/failed intent remains
-suppressed. A
-succeeded intent suppresses only the previously verified CID until a newer
-proof replaces the projection; if the owner deliberately restores the entry,
-the new CID makes it visible. Legacy removal rows without an operation remain
+suppressed. A succeeded intent suppresses only the incarnation it removed
+(migrations 9 and 10 below). Legacy removal rows without an operation remain
 conservatively suppressed. The existing four-schema publication receipt and
 migrations 1–6 are unchanged.
 
 Migration 8 distinguishes historical operations with unknown send status from
-new operations proven unsent. A legacy import single is read at its persisted
-rkey before it can enter either the write batcher or the rebatcher. A matching
-remote record settles that single; a conflict never overwrites it; an
-unavailable read waits. Absence is proven by two authoritative reads at least
-`LEGACY_ABSENCE_RECHECK_MS` (60 s, one import poll) apart, so a request a
-pre-upgrade process left in flight is found present and settles the single
-instead of being duplicated by a batch entry. The second absence read clears
-the conservative send marker; that explicit `unsent` transition, recorded with
-`legacy_absent_at_ms`, lets the rebatcher move the listen whatever its
-historical attempt count (kept on the cancelled single), including after an
-interrupted tenth attempt. The single itself is never sent again. Already-written import items and their
-receipts remain unchanged. Splitting also partitions pending removals among
-child containers, with the original removal receipt waiting for every child.
+new operations proven unsent. Every operation current code inserts carries the
+explicit `unsent` receipt; the first attempt makes it `unknown` before anything
+is sent, and nothing sets it back: not reauth, unblock, a budget deferral or an
+attempt refund, and not an absence read or elapsed time. An accepted PDS request
+can commit after any client deadline, so absence never proves a historical send
+unsent. Only an explicitly unsent row (its receipt, no attempt, no send
+timestamp) may be cancelled locally (`library.removeScrobble`, disconnect),
+rewritten as a never-sent batch, or rebatched.
+
+A legacy import single, or any import single attempted before, is read at its
+persisted rkey before any write and never enters the write batcher or the
+rebatcher. A matching remote record settles it; a conflict never overwrites
+it; an unavailable read waits. When the key is absent the single is created at
+that same original rkey: a late commit of the earlier request and this create
+cannot both land (createRecord never overwrites; an ambiguous answer is
+reconciled by digest). Retries stay bounded by the ten-attempt budget; an
+interrupted tenth attempt is only read, and absence then fails the item
+without an eleventh send. A removal of such a create chains a delete behind it
+instead of a local cancellation, and an unsent import single with a dependency
+runs in the normal lane, so neither side of a chain is stranded. On a live
+upgrade the queued unknown-history singles therefore finish as singles, while
+the staged majority and every new import are batched automatically.
+Already-written import items and their receipts remain unchanged. Splitting
+also partitions pending removals among child containers, with the original
+removal receipt waiting for every child.
 
 Migration 9 is additive. `listen_removal_cids(operation_id, cid)` records every
-container CID at which a removal's targets were observed present before it
-settled: the projected CID at admission, each pre-CAS read, a read-back that
-still holds the targets, and any projected CID at settlement. A succeeded
-partial or wildcard removal hides a listen whose projected container CID is
-`swap_cid`, `removed_cid` or one of these, so neither a delayed older proof nor
-a projection that advanced between admission and execution resurfaces it,
-while a deliberate restoration at a new CID is visible and a Last.fm
-`library.removeScrobble` of it admits a fresh intent. The table is local
-suppression evidence; it never writes `record_state` absence. A byte-identical
-restoration has the same CID and stays hidden by the old receipt; restoring
-with any change (such as a new envelope `createdAt`) is visible.
-`operations.legacy_absent_at_ms` is the first legacy absence read above.
+container CID at which a removal's targets were observed present before its
+write: the projected CID at admission, each pre-CAS read, and a read-back that
+still holds the targets. Nothing is captured at settlement, whose timing says
+nothing about repository order (the projection may already hold a verified
+later recreation). A succeeded partial or wildcard removal hides a listen whose
+projected container CID is `swap_cid`, `removed_cid` or one of these, so a
+delayed older proof does not resurface it, while a restoration at a new CID is
+visible and a Last.fm `library.removeScrobble` of it admits a fresh intent. The
+table is local suppression evidence; it never writes `record_state` absence.
+`operations.legacy_absent_at_ms` belonged to an unreleased two-read absence
+rule; it is no longer written or read, and a row carrying it is never treated
+as explicitly unsent.
+
+Migration 10 is additive. `verified_membership(record_uri, listen_id)` keeps
+the verified membership of each batch container version, apart from public
+visibility: every valid-TID entry is `present` or `excluded` (its fields failed
+validation; exclusion is not absence), an entry a newer verified version drops
+is `absent`, and a container proven absent marks itself (`listen_id='*'`) and
+all its entries absent. `last_absent_revision` keeps the newest verified
+revision of each absence across later present rows; it is the incarnation
+boundary. A single scrobble record gets a `*` row once proven absent. Rows are
+written only from verified proofs and snapshot entries/sweeps, behind the
+per-URI revision guard, guarded again by the stored revision; never from local
+intent or write completion, so a delayed older observation cannot move them.
+`operations.removal_fence_rev` is the target's verified revision when a
+scrobble removal is admitted, refreshed just before each removal write. A
+succeeded removal stops suppressing an entry or single once its membership
+records an absence newer than that fence: whatever is projected afterwards is a
+later incarnation and is visible, even with byte-identical bytes and the same
+CID, and Last.fm can remove it again. Every absence at or below the fence
+preceded the write. With no verified absence in between, a present proof stays
+in the removed incarnation (hidden) even at the same CID; a pending or failed
+intent always hides. Settlement bumps `stats_version`, since a fence already
+crossed can make the listen visible at that moment. The table is derived and
+is purged on disconnect; restoring an older backup only loses boundaries,
+which hides more, never less.
 
 Record status for a listen fragment checks verified membership separately from
-the common visibility overlay. A visible owner's present container that does
-not project the listen reports it `absent` at the container revision; a
-projected listen hidden by a local delete intent, removal evidence, a
-cross-format duplicate or a hidden owner reports `unknown`, as a hidden single
-does, and an inactive owner discloses neither membership nor absence.
+the common visibility overlay. For a visible owner's present container whose
+membership is recorded at the exact container CID, an entry the version does
+not hold is `absent` at the container revision and a held entry that failed
+validation is `excluded` (container CID, revision, reason). A held listen hidden
+by a local delete intent, a receipt, a cross-format duplicate or a hidden owner
+reports `unknown`, as a hidden single does; a container projected before
+migration 10 (no recorded membership) is `unknown` until re-proved; an inactive
+owner discloses neither membership, exclusion nor absence.
 
 The local outbox and read model define this AppView's result. PDS publication
 does not imply that another AppView has indexed the custom collection, and
@@ -195,9 +232,10 @@ implement web UI changes.
    The writer and migrator run automatically once the gate and grant permit
    them; no separate migration command or replacement import job is needed.
    Resume the existing job through its import resume API only if it remains
-   manually paused. Legacy import singles become eligible for rebatching only
-   after successful absence reconciliation and transactional eligibility
-   checks; already-published singles retain their original records.
+   manually paused. Queued legacy import singles with unknown send history
+   finish at their original rkeys (read first, then created there if absent);
+   only explicitly unsent singles are rebatched, and staged items are batched.
+   Already-published singles retain their original records.
 6. Monitor held imports, `batch_scope_required`, CAS retries, split outcomes,
    per-listen counters, and container-level proof convergence. A scope denial
    classified permanent (HTTP 403 or a 4xx `ScopeMissing`/`InsufficientScope`/

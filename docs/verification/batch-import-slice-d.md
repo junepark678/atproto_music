@@ -59,3 +59,59 @@ compatibility floor 2). Legacy import singles with unknown send history now
 wait one extra 60 s recheck before rebatching. No full Node acceptance suite
 or live check ran here; the final `scripts/acceptance/node-backend.sh` gate
 runs once on the accepted head.
+
+## Interaction fixes (stacked on PR #158)
+
+Stacked on `t3/batch-delete-security-fixes` at `97ded2b`. It closes the six
+Astra interaction findings against that head (review of 97ded2b, R1–R6) with
+the lead decision that an unknown historical send is never rebatched on
+absence or delay. It adds additive migration 10; migrations 1–9 keep their
+statements (only the migration-9 comment now says `legacy_absent_at_ms` is
+unused). No live service, environment file, lexicon publication or PDS record
+was touched.
+
+| Finding | Fix | Regression |
+| --- | --- | --- |
+| R1 legacy single with a chained removal stranded | no rebatch for unknown sends; the single is read, then created at its original rkey; an unsent single with a dependency runs in the normal lane | `send-certainty.test.ts` › an uncertain legacy import single ($name) with a chained Last.fm removal converges…; `writer.test.ts` › finishes an attempted legacy single…, › only reads an interrupted tenth legacy attempt… |
+| R2 accepted request committed after the 60 s rule | two-read rule removed; original-key create is idempotent against a late commit | `writer.test.ts` › an accepted pre-upgrade request that outlives its client abort and any delay, landing $landing… (before read / between read and create / after create) |
+| R3 zero-attempt unknown create cancelled locally | explicit `unsent` insertion receipt for every new operation; `cancelUnsent`, disconnect, rebatch and never-sent batch edits require it | `send-certainty.test.ts` › a schema-4 zero-attempt create whose send committed…, › the migrated zero-attempt import single shape…, › a new explicitly unsent create is still cancelled…, › a refunded reauth attempt and a later sign-in never restore certainty… |
+| R4 invalid entry reported absent | `verified_membership` keeps valid-TID entries present/excluded per container CID; status uses only it | `record-status.test.ts` › reports a verified present invalid batch entry as excluded, never absent… |
+| R5 settlement captured a recreated CID | settlement captures nothing; receipts end at a verified absence newer than `removal_fence_rev` | `batch-incarnation.test.ts` › a recreation at $name proved between the removal commit and its local settlement… |
+| R6 same-CID restore hidden forever | same incarnation fence, for containers and entries; snapshot sweeps set it too | `batch-incarnation.test.ts` › a whole-container removal is outlived…, › a partial removal is outlived…, › verified snapshot sweeps and entries… |
+
+Guards that already held and must keep holding: `batch-incarnation.test.ts`
+› with no verified absence in between, a same-CID present proof stays in the
+removed incarnation; › a $name local removal keeps hiding the target…; ›
+privacy: an inactive owner discloses neither…; › a delayed write after the
+fence does not move it…; and the existing `batch.test.ts` delayed-proof,
+tenth-attempt and new-CID recreation cases.
+
+Evidence:
+
+- Fail-old/pass-new: the new and rewritten tests were copied onto a detached
+  97ded2b worktree; 20 fail there (the privacy case fails on the missing table)
+  and all pass on this head.
+- The reviewer's scripts in `/tmp/atmusic-review-97ded2b` (paths rewritten to
+  this worktree): `original`, `upgrade-boundaries` and `interactions` pass
+  except one `interactions` case whose own assertion runs after its Last.fm
+  removal hides the listen again. Corrected copies (visibility captured before
+  that removal; the rejected rebatch expectation of `adversarial` replaced by
+  the original-key requirement; schema version 10 in `migration-833`) all pass.
+- `npm run typecheck` — passed. Biome check on every changed file — passed.
+- `npx vitest run --maxWorkers=1` over worker/test/node/{outbox,imports,lastfm,listenbrainz,journey,http},
+  worker/test/{write,read,ingest,http,storage,harness}, migrate-node and
+  fake-protocol-upstreams — 97 files, 522 tests passed; the read-model
+  bench project (query-plan pins) — 2 files, 8 tests passed.
+- `/tmp/abatch-final/.venv/bin/python scripts/validate_contracts.py` and
+  `/usr/bin/python3.14 scripts/validate_case_map.py --check-tests` — passed.
+
+Remaining limits: a recreation at the same CID with no verified absence
+observed in between stays hidden (nothing verified separates the
+incarnations). An unverified intermediate container version applied after
+settlement but before the post-removal proof can be shown briefly (until that
+proof lands). If an earlier request commits after the original-key create and
+the chained delete both succeeded, the record reappears at that rkey (same
+bytes, still hidden by the receipt's `swap_cid` until a verified absence);
+no client-side rule can fence a server that commits that late. Containers
+projected before migration 10 report fragment status `unknown` until re-proved.
+The full Node acceptance gate was not run here.

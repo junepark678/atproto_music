@@ -54,10 +54,12 @@
 //     verified record whose owner is hidden (inactive or suppressed) and a
 //     settings record, which has no projection row;
 //   - a batch listen URI (`<container>#<listenId>`, ADR 0006) resolves its
-//     container's proof: `absent` when the verified present container of a
-//     visible owner does not project that listen, `unknown` when it is
-//     projected but hidden (local delete intent, removal evidence,
-//     cross-format duplicate, hidden owner);
+//     container's proof and its verified membership (migration 10): for a
+//     visible owner's present container whose membership is recorded at
+//     that CID, `absent` when the version does not hold the listen and
+//     `excluded` when it holds it but the entry failed validation; `unknown`
+//     when it is held but hidden (local delete intent, receipt, cross-format
+//     duplicate), when membership is not recorded, or for a hidden owner;
 //   - `indexing` is the per-DID Indexing truth (status.ts), so a suppressed
 //     DID reports `indexing.state = 'suppressed'`.
 
