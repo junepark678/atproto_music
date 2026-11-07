@@ -94,20 +94,26 @@ export const batchCreateExecutor: Executor = {
           : { kind: 'permanent', code: 'remote_record_conflict' };
       return read.kind === 'absent' ? { kind: 'transient', code: 'batch_read_absent' } : failureOutcome(read.failure);
     }
+    // Transport classification wins over body text. Some PDS proxies return
+    // stale/rewritten InvalidRecord bodies with 5xx responses; those do not
+    // prove rejection and must never authorize bisection.
+    if (failure.kind === 'transient' || failure.kind === 'reauth') return failureOutcome(failure);
     const rejectionMessage = failure.message?.toLowerCase() ?? '';
     const sizeInvalidRequest =
       failure.error === 'InvalidRequest' && /size|large|payload|byte|length|too big/.test(rejectionMessage);
+    const definiteStatus = failure.status === 400 || failure.status === 413;
     const schemaRejection =
-      failure.status !== 413 &&
+      definiteStatus && failure.status !== 413 &&
       ((failure.error === 'InvalidRequest' && !sizeInvalidRequest) ||
         (failure.error === 'InvalidRecord' && /schema|lexicon|unknown collection|record type/.test(rejectionMessage)));
     if (schemaRejection)
       return { kind: 'permanent', code: 'batch_schema_required', remoteError: 'BatchSchemaRejected' };
     const recordRejection =
-      failure.status === 413 ||
-      failure.error === 'InvalidRecord' ||
-      sizeInvalidRequest ||
-      failure.error === 'PayloadTooLarge';
+      definiteStatus &&
+      (failure.status === 413 ||
+        failure.error === 'InvalidRecord' ||
+        sizeInvalidRequest ||
+        failure.error === 'PayloadTooLarge');
     if (recordRejection && record.listens.length > 1) {
       const middle = Math.ceil(record.listens.length / 2);
       const parts = [record.listens.slice(0, middle), record.listens.slice(middle)];

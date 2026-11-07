@@ -600,6 +600,29 @@ describe('import writer', () => {
     });
   });
 
+  it('does not split a transient 500 carrying InvalidRecord text', async () => {
+    await withHarness(async (h) => {
+      h.seedUser(h.alice);
+      const rt = runtime(h);
+      uploadJob(h, 'job-transient-invalid-record', [listen(81), listen(82)]);
+      await parse(h, rt, 'job-transient-invalid-record');
+      await runImports(rt, h.kit.clock.nowMs());
+      const parent = h.ops()[0]!;
+      h.kit.pds.Alice.fail(
+        { nsid: CREATE },
+        { kind: 'status', status: 500, error: 'InvalidRecord', message: 'temporary backend failure' },
+      );
+
+      await h.run();
+
+      expect(h.op(parent.id)).toMatchObject({ state: 'queued' });
+      expect(h.op(parent.id).last_error).not.toBe('batch_split');
+      expect(h.ops(`kind = 'scrobble.create' AND collection = '${SCROBBLE_BATCH}'`)).toHaveLength(1);
+      expect(h.db.all('SELECT entry_id FROM batch_entry_items WHERE operation_id = ?', parent.id)).toHaveLength(2);
+      expect(await remoteRecords(h.kit, 'Alice', SCROBBLE_BATCH)).toHaveLength(0);
+    });
+  });
+
   it('rolls back child insertion and item repointing together when the split transaction faults', async () => {
     await withHarness(async (h) => {
       h.seedUser(h.alice);
