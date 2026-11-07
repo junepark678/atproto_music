@@ -291,7 +291,8 @@ describe('link routes', () => {
     expect(LINK_STATE_TTL_MS).toBe(600_000);
 
     // The user approves on Last.fm; Last.fm redirects back with ?state&token.
-    const lfToken = w.lastfm.issueToken(undefined, API_KEY);
+    // A token shaped like the ones last.fm issues today: mixed case, digits, `-` and `_` (not hex).
+    const lfToken = w.lastfm.issueToken('Ab3dE9F2gh7JKl0m-NoP4qr_S-TuvwXy', API_KEY);
     w.lastfm.authorizeToken(lfToken, 'alice_fm');
     const callback = `/api/v1/links/lastfm/callback?state=${state}&token=${lfToken}`;
     const first = await w.app.fetch(callback, { headers: w.headers(token) });

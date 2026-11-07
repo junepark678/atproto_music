@@ -19,7 +19,7 @@
 // `start` stores a single-use state (forward/links.ts, 600 s) bound to the
 // SHA-256 of this session's token and returns
 // `LASTFM_AUTH_URL?api_key=<ours>&cb=<enc(PUBLIC_ORIGIN/api/v1/links/lastfm/callback?state=S)>`.
-// The callback checks `state` (64 hex) and `token` (32 hex) — a malformed one
+// The callback checks `state` (64 hex) and `token` (32 URL-safe characters) — a malformed one
 // is 400 — then consumes the state: unknown, used or expired is 400
 // `bad_request`; a state bound to another session is 403 `csrf_failed` and
 // leaves everything (the state included) unchanged. A good state is deleted
@@ -83,7 +83,20 @@ export const LINKS_SETTINGS_PATH = '/settings/links';
 export const LASTFM_CALLBACK_PATH = '/api/v1/links/lastfm/callback';
 
 const STATE_RE = /^[0-9a-f]{64}$/;
-const LASTFM_TOKEN_RE = /^[0-9a-f]{32}$/;
+// Last.fm web-auth tokens are 32 URL-safe characters (mixed case, digits, `-`, `_`), not hex.
+/** Attempts of auth.getSession in the link callback, and the base delay between them. */
+const LASTFM_SESSION_ATTEMPTS = 4;
+const LASTFM_SESSION_RETRY_MS = 750;
+
+/** A getSession failure worth retrying: transport, 5xx, or last.fm's own temporary errors (11, 16). */
+function transientLastfm(out: { kind: string; httpStatus?: number; code?: number }): boolean {
+  if (out.kind === 'network') return true;
+  if (out.kind === 'http') return (out.httpStatus ?? 0) >= 500;
+  if (out.kind === 'error') return out.code === 11 || out.code === 16;
+  return false;
+}
+
+const LASTFM_TOKEN_RE = /^[A-Za-z0-9_-]{32}$/;
 const MAX_LB_TOKEN_CHARS = 256;
 
 /** What the link routes need, built once per process (`linksFeature`). */
@@ -219,8 +232,31 @@ const lastfmCallback: Handler = async (req, ctx, service, session) => {
     }
     return errorResponse('bad_request', 400, ctx.requestId);
   }
-  const out = await service.lastfm.getSession(tokens[0] as string);
-  if (!out.ok) return errorResponse('upstream_error', 502, ctx.requestId);
+  // last.fm's auth.getSession intermittently answers 5xx (or error 11/16, service offline/temporary) for an
+  // approved token; the token stays valid until consumed, so retry a few times before giving up.
+  let out = await service.lastfm.getSession(tokens[0] as string);
+  for (let attempt = 1; attempt < LASTFM_SESSION_ATTEMPTS && !out.ok && transientLastfm(out); attempt += 1) {
+    service.forwarding.log.log('warn', 'lastfm_link.get_session_retry', {
+      requestId: ctx.requestId,
+      attempt,
+      kind: out.kind,
+      httpStatus: 'httpStatus' in out ? out.httpStatus : null,
+    });
+    await new Promise((resolve) => setTimeout(resolve, LASTFM_SESSION_RETRY_MS * attempt));
+    // Alternate the signed GET form with POST: last.fm documents both for auth.getSession.
+    out = await service.lastfm.getSession(tokens[0] as string, attempt % 2 === 1 ? 'GET' : 'POST');
+  }
+  if (!out.ok) {
+    // The outcome's kind and Last.fm error code only; never the token or a credential.
+    service.forwarding.log.log('warn', 'lastfm_link.get_session_failed', {
+      requestId: ctx.requestId,
+      kind: out.kind,
+      code: 'code' in out ? out.code : null,
+      httpStatus: 'httpStatus' in out ? out.httpStatus : null,
+      error: 'error' in out ? out.error : null,
+    });
+    return errorResponse('upstream_error', 502, ctx.requestId);
+  }
   writeInLiveSession(service.db, service.sessions, req, session, () =>
     saveLink(
       { db: service.db, clock: ctx.clock, random: service.forwarding.random, box: service.box },
