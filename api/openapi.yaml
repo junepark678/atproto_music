@@ -5635,7 +5635,7 @@
             "items": {
               "type": "string"
             },
-            "description": "Initialized capabilities: read, stats, follows, notify, indexing, publication (owned prefix only), and from v1.2 writes, lastfm, listenbrainz, imports and forwarding (ADR 0005 B14, B18)."
+            "description": "Initialized capabilities: read, stats, follows, notify, indexing, publication (owned prefix only), batchPublication (only with a distinct reviewed five-schema manifest), and from v1.2 writes, lastfm, listenbrainz, imports and forwarding (ADR 0005 B14, B18; ADR 0006)."
           },
           "lexiconPrefix": {
             "type": [

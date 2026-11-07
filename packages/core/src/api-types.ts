@@ -143,7 +143,15 @@ export const ACCOUNT_CAPABILITIES: readonly AccountCapability[] = [
  * A20: `publication` is advertised only with an owned (non-fixture) prefix.
  * v1.2 adds the `AccountCapability` values.
  */
-export type Capability = 'read' | 'stats' | 'follows' | 'notify' | 'indexing' | 'publication' | AccountCapability;
+export type Capability =
+  | 'read'
+  | 'stats'
+  | 'follows'
+  | 'notify'
+  | 'indexing'
+  | 'publication'
+  | 'batchPublication'
+  | AccountCapability;
 
 export interface Meta {
   name: 'atproto_music';

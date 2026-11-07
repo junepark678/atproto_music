@@ -13,6 +13,7 @@ const BASE: EnvVars = {
   LEXICON_PREFIX: '',
   NAMESPACE_OWNERSHIP_REF: '',
   NAMESPACE_PUBLICATION_REF: '',
+  NAMESPACE_BATCH_PUBLICATION_REF: '',
   INGEST_MODE: 'socket',
   JETSTREAM_URLS: 'wss://jetstream.us-east.bsky.network,wss://jetstream.us-west.bsky.network',
   JETSTREAM_LOOKBACK_HOURS: '24',
@@ -122,6 +123,29 @@ describe('parseConfig namespace gate', () => {
         }),
       ),
     ).toEqual(['NAMESPACE_PUBLICATION_REF']);
+  });
+
+  it('batch publication needs a distinct second reviewed manifest digest and the original publication gate', () => {
+    const owned = { ...BASE, LEXICON_PREFIX: 'org.example.music', NAMESPACE_OWNERSHIP_REF: 'owner-ref' };
+    const original = `sha256:${'a'.repeat(64)}`;
+    const next = `sha256:${'b'.repeat(64)}`;
+    expect(parseConfig({ ...owned, NAMESPACE_PUBLICATION_REF: original }).batchPublication).toBe(false);
+    expect(parseConfig({ ...owned, NAMESPACE_BATCH_PUBLICATION_REF: next }).batchPublication).toBe(false);
+    expect(
+      issuesOf(() =>
+        parseConfig({ ...owned, NAMESPACE_PUBLICATION_REF: original, NAMESPACE_BATCH_PUBLICATION_REF: original }),
+      ),
+    ).toContain('NAMESPACE_BATCH_PUBLICATION_REF');
+    expect(
+      parseConfig({ ...owned, NAMESPACE_PUBLICATION_REF: original, NAMESPACE_BATCH_PUBLICATION_REF: next }),
+    ).toMatchObject({
+      publication: true,
+      namespaceBatchPublicationRef: next,
+      batchPublication: true,
+    });
+    expect(issuesOf(() => parseConfig({ ...owned, NAMESPACE_BATCH_PUBLICATION_REF: 'approved' }))).toContain(
+      'NAMESPACE_BATCH_PUBLICATION_REF',
+    );
   });
 
   // ADR 0005 §6.3, B12 (N3-11): a valid prefix derives exactly four

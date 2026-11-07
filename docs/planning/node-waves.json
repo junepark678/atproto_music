@@ -1558,9 +1558,9 @@
      "scripts/e2e/start-stack.ts",
      "scripts/e2e/dev-env.ts",
      "playwright.config.ts",
-    "web/tests/fixtures.ts",
+     "web/tests/fixtures.ts",
      "web/tests/mvp.spec.ts",
-    "web/tests/restart.spec.ts",
+     "web/tests/restart.spec.ts",
      "web/tests/accessibility.spec.ts",
      "web/tests/settings.spec.ts",
      "web/tests/reauth.spec.ts",
@@ -1575,7 +1575,7 @@
     "description": "ADR 0005 §5.10, §15.1.\n\n**start-stack** builds the SPA and the e2e bundle (`scripts/build-server.ts --e2e`, worker/dist/node/e2e.mjs from worker/test/e2e/node-entry.ts) and runs it on 127.0.0.1. The entry injects the fixture-host transport, the `fixtureOrigins` config option and the test config; it is the only place fixture hostnames are mapped, and it is never part of main.mjs (ADR §3.9). The entry maps fixture hostnames to the fake AS, PDS, PLC, Jetstream, Last.fm and ListenBrainz served by the stack, behind the existing proxy. Chromium reaches nothing else.\n\n**Journeys:** sign-in through the fake AS authorize page, scrobble, indexed, delete, follow, same-account popup reauthentication across the real OAuth callback redirect with the draft retained in the parent tab, settings opt-out, and the new links, imports and credentials screens, with axe checks. A test-only loopback control port can SIGKILL and restart e2e.mjs against the same database and session-sealing keys while keeping fixture services alive.\n\n**Removed:** wrangler dev and the dev-env PDS from this stack. **Deleted:** worker/test/e2e/entry.ts and worker/test/e2e/wrangler.e2e.jsonc (the workerd e2e entry), replaced by worker/test/e2e/node-entry.ts; scripts/e2e/dev-env.ts loses every wrangler reference (its fake hosts are served to the Node stack). The dev-env interop moves to N6-02. Fake Last.fm and ListenBrainz come from worker/test/node/support (N1-13).",
     "tests": [
      "web/tests/mvp.spec.ts › sign-in through the fake AS, scrobble, indexed, delete and follow journeys pass against the Node stack",
-    "web/tests/restart.spec.ts › a Node process restart mid-journey keeps the browser session cookie and indexed data, and new writes still index",
+     "web/tests/restart.spec.ts › a Node process restart mid-journey keeps the browser session cookie and indexed data, and new writes still index",
      "web/tests/settings.spec.ts › creating an app password, linking ListenBrainz with a fake token, and starting a ListenBrainz import with visible progress",
      "web/tests/accessibility.spec.ts › signin, feed, profile, scrobble, settings/links, settings/imports, settings/credentials and lastfm/authorize have no axe violations",
      "web/tests/reauth.spec.ts › same-account OAuth reauthentication in a popup preserves the scrobble draft across the callback redirect",
@@ -1759,6 +1759,67 @@
      "scripts/e2e/scrobbler-e2e.ts › Pano-shaped unsigned GET reads with sk and api_key (user.getRecentTracks, user.getInfo) succeed against the e2e bundle and parse with zero-, one- and many-item pages",
      "scripts/e2e/scrobbler-e2e.ts › a Web Scrobbler ListenBrainz batch with one over-long artist name answers 200, the other listens become indexed records, and the ignored listen is listed by GET /api/v1/account/ignored-listens",
      "scripts/test/scrobbler-harness.test.ts › the pinned Last.fm client waits for parent-side app approval and reports no credentials"
+    ]
+   }
+  ]
+ },
+ {
+  "wave": 9,
+  "packages": [
+   {
+    "id": "N9-01",
+    "title": "Batched import foundation: record contract, exact sizing, independent publication gate and OAuth scope",
+    "files": [
+     "api/openapi.yaml",
+     "config/atmusic.env.example",
+     "config/atmusic.workers.example.jsonc",
+     "docs/adr/0006-batched-import-records.md",
+     "docs/deployment.md",
+     "docs/planning/AMENDMENTS-node.md",
+     "docs/planning/API.md",
+     "docs/planning/node-waves.json",
+     "docs/verification/lexicon-publication/README.md",
+     "docs/verification/lexicon-publication/batch-manifest.template.json",
+     "docs/verification/ts-case-map.json",
+     "lexicons/scrobbleBatch.json",
+     "packages/atproto/src/scrobble-batch-size.ts",
+     "packages/atproto/test/scrobble-batch-size.test.ts",
+     "packages/core/src/api-types.ts",
+     "packages/core/src/scrobble-batch.ts",
+     "packages/core/test/scrobble-batch.test.ts",
+     "scripts/validate_contracts.py",
+     "worker/src/bff/client-metadata.ts",
+     "worker/src/config.ts",
+     "worker/src/env.ts",
+     "worker/src/http/meta.ts",
+     "worker/src/http/types.ts",
+     "worker/src/node/compose.ts",
+     "worker/src/node/config.ts",
+     "worker/test/config.test.ts",
+     "worker/test/harness/wrangler.harness.jsonc",
+     "worker/test/http/health-meta.test.ts",
+     "worker/test/node/bff/client-metadata.test.ts",
+     "worker/test/node/config.test.ts",
+     "worker/wrangler.jsonc"
+    ],
+    "dependsOn": [
+     "N0-02"
+    ],
+    "description": "ADR 0006 foundation slice only. Define the unpublished five-schema scrobbleBatch candidate and a shared pure validator/builder/URI/packer API; measure actual DAG-CBOR and the exact UTF-8 createRecord JSON body in @atmusic/atproto. Bound lists to 1–200, records to 64,000 CBOR bytes and create bodies to 100,000 UTF-8 bytes. Preserve every single-scrobble field, including entry createdAt, and synthesize the single type for validation. Add NAMESPACE_BATCH_PUBLICATION_REF as an opt-in gate requiring the original publication gate and a distinct reviewed five-schema manifest receipt; expose batchPublication in meta and request the repository scope only when open. Keep existing four-schema publication evidence truthful and batch schema unpublished. No ingest, projection, migration, import writer, deletion, web UI, live env/service or network/PDS work is included.",
+    "tests": [
+     "packages/core/test/scrobble-batch.test.ts › validates each entry through the single scrobble validator and preserves createdAt",
+     "packages/core/test/scrobble-batch.test.ts › drops only invalid entries while malformed envelope bounds reject the whole record",
+     "packages/core/test/scrobble-batch.test.ts › builds a batch with stable TID entry ids and a separate envelope timestamp",
+     "packages/core/test/scrobble-batch.test.ts › round trips a listen fragment and returns fragment-free proof target",
+     "packages/core/test/scrobble-batch.test.ts › rejects malformed authority, non-batch collections and bad fragments",
+     "packages/core/test/scrobble-batch.test.ts › packs in stable order under both supplied exact size limits",
+     "packages/atproto/test/scrobble-batch-size.test.ts › counts DAG-CBOR and exact UTF-8 JSON request bytes",
+     "packages/atproto/test/scrobble-batch-size.test.ts › uses inclusive exact bounds",
+     "packages/atproto/test/scrobble-batch-size.test.ts › counts non-ASCII as UTF-8 bytes rather than JS string length",
+     "worker/test/config.test.ts › batch publication needs a distinct second reviewed manifest digest and the original publication gate",
+     "worker/test/http/health-meta.test.ts › advertises batchPublication only for a distinct batch manifest with the original gate open",
+     "worker/test/node/bff/client-metadata.test.ts › requests the batch collection only when the separate batch gate is open",
+     "worker/test/node/config.test.ts › INGEST_MODE=pulse, an operator-set PLAN (paid or free) and DO_LOCATION_HINT are each rejected with a message citing ADR 0005, and the embedded parseConfig receives PLAN paid and an empty DO_LOCATION_HINT"
     ]
    }
   ]

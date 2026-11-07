@@ -71,7 +71,7 @@ export const RECOVERING: Readonly<Indexing> = {
 };
 
 /** The namespace fields of AppConfig that meta reports. */
-export type NamespaceView = Pick<AppConfig, 'prefix' | 'publication'>;
+export type NamespaceView = Pick<AppConfig, 'prefix' | 'publication' | 'batchPublication'>;
 
 /**
  * The namespace exactly as parseConfig derives it, without refusing anything:
@@ -81,16 +81,22 @@ export type NamespaceView = Pick<AppConfig, 'prefix' | 'publication'>;
  * publication manifest reference.
  */
 export function namespaceView(
-  env: Pick<EnvVars, 'LEXICON_PREFIX' | 'NAMESPACE_OWNERSHIP_REF' | 'NAMESPACE_PUBLICATION_REF'>,
+  env: Pick<EnvVars, 'LEXICON_PREFIX' | 'NAMESPACE_OWNERSHIP_REF' | 'NAMESPACE_PUBLICATION_REF'> &
+    Partial<Pick<EnvVars, 'NAMESPACE_BATCH_PUBLICATION_REF'>>,
 ): NamespaceView {
   const raw = (env.LEXICON_PREFIX ?? '').trim();
   const prefix = raw !== '' && isValidPrefix(raw) ? raw : null;
   const ownershipEvidence = (env.NAMESPACE_OWNERSHIP_REF ?? '').trim() !== '';
   const publicationRef = (env.NAMESPACE_PUBLICATION_REF ?? '').trim();
   const publicationEvidence = /^sha256:[0-9a-f]{64}$/.test(publicationRef);
+  const batchPublicationRef = (env.NAMESPACE_BATCH_PUBLICATION_REF ?? '').trim();
+  const batchPublicationEvidence =
+    /^sha256:[0-9a-f]{64}$/.test(batchPublicationRef) && batchPublicationRef !== publicationRef;
+  const publication = prefix !== null && prefix !== FIXTURE_PREFIX && ownershipEvidence && publicationEvidence;
   return {
     prefix,
-    publication: prefix !== null && prefix !== FIXTURE_PREFIX && ownershipEvidence && publicationEvidence,
+    publication,
+    batchPublication: publication && batchPublicationEvidence,
   };
 }
 
@@ -116,6 +122,7 @@ export function buildMeta(
   }
   const capabilities: Capability[] = [...BASE_CAPABILITIES];
   if (namespace.publication) capabilities.push('publication');
+  if (namespace.batchPublication) capabilities.push('batchPublication');
   if (composition !== null) {
     for (const capability of ACCOUNT_CAPABILITIES) {
       if (composition.includes(capability)) capabilities.push(capability);

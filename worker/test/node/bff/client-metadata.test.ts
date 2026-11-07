@@ -16,6 +16,7 @@ import {
   jwksDocument,
   jwksResponse,
   OAUTH_DOCUMENT_CACHE_CONTROL,
+  oauthScope,
 } from '../../../src/bff/client-metadata';
 import { loadOAuthKeyset } from '../../../src/bff/keyset';
 import { type NodeEnv, parseNodeConfig } from '../../../src/node/config';
@@ -130,5 +131,12 @@ describe('client metadata and JWKS', () => {
     expect({ ...generic, scope: base }).toEqual(clientMetadataFor(config()));
     // Any other value is a configuration error, not a silent default.
     expect(() => config({ ATMUSIC_OAUTH_TRANSITION_GENERIC: 'yes' })).toThrow(/ATMUSIC_OAUTH_TRANSITION_GENERIC/);
+  });
+
+  it('requests the batch collection only when the separate batch gate is open', () => {
+    const base = `atproto repo:${FIXTURE_PREFIX}.scrobble repo:${FIXTURE_PREFIX}.follow repo:${FIXTURE_PREFIX}.settings repo:${FIXTURE_PREFIX}.love`;
+    expect(oauthScope(FIXTURE_PREFIX, false)).toBe(base);
+    expect(oauthScope(FIXTURE_PREFIX, false, true)).toBe(`${base} repo:${FIXTURE_PREFIX}.scrobbleBatch`);
+    expect(oauthScope(null, false, true)).toBe('atproto');
   });
 });

@@ -258,6 +258,7 @@ export function parseNodeConfig(env: NodeEnv, opts: ParseNodeConfigOptions = {})
         LEXICON_PREFIX: env.LEXICON_PREFIX ?? '',
         NAMESPACE_OWNERSHIP_REF: env.NAMESPACE_OWNERSHIP_REF ?? '',
         NAMESPACE_PUBLICATION_REF: env.NAMESPACE_PUBLICATION_REF ?? '',
+        NAMESPACE_BATCH_PUBLICATION_REF: env.NAMESPACE_BATCH_PUBLICATION_REF ?? '',
         INGEST_MODE: ingestMode,
         JETSTREAM_URLS: env.JETSTREAM_URLS ?? '',
         JETSTREAM_LOOKBACK_HOURS: env.JETSTREAM_LOOKBACK_HOURS ?? '',

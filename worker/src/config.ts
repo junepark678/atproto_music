@@ -77,8 +77,12 @@ export interface AppConfig {
   namespaceOwnershipRef: string | null;
   /** SHA-256 reference to the reviewed production schema publication manifest, or null while gated. */
   namespacePublicationRef: string | null;
+  /** Separate, reviewed five-schema manifest reference; null until batches are explicitly enabled. */
+  namespaceBatchPublicationRef: string | null;
   /** Owned, non-fixture prefix plus ownership evidence and reviewed schema-publication evidence. */
   publication: boolean;
+  /** Requires publication and a distinct batch-schema review reference. */
+  batchPublication: boolean;
   /** The configured INGEST_MODE. */
   configuredIngestMode: IngestMode;
   /** Effective mode: forced to `off` while the namespace gate is closed. */
@@ -188,6 +192,22 @@ export function parseConfig(env: EnvVars, options: ParseConfigOptions = {}): App
   if (validPublicationRef && (namespaceOwnershipRef === null || rawPrefix === '' || rawPrefix === FIXTURE_PREFIX)) {
     issue('NAMESPACE_PUBLICATION_REF', 'reviewed schema publication requires an owned, non-fixture LEXICON_PREFIX');
   }
+  const rawBatchPublicationRef = (env.NAMESPACE_BATCH_PUBLICATION_REF ?? '').trim();
+  const namespaceBatchPublicationRef = rawBatchPublicationRef === '' ? null : rawBatchPublicationRef;
+  const validBatchPublicationRef =
+    namespaceBatchPublicationRef !== null && /^sha256:[0-9a-f]{64}$/.test(namespaceBatchPublicationRef);
+  if (namespaceBatchPublicationRef !== null && !validBatchPublicationRef) {
+    issue(
+      'NAMESPACE_BATCH_PUBLICATION_REF',
+      'must be sha256:<64 lowercase hex digits> for the separately reviewed batch manifest',
+    );
+  }
+  if (validBatchPublicationRef && namespaceBatchPublicationRef === namespacePublicationRef) {
+    issue(
+      'NAMESPACE_BATCH_PUBLICATION_REF',
+      'must differ from NAMESPACE_PUBLICATION_REF and identify the reviewed five-schema manifest',
+    );
+  }
 
   const mode = env.INGEST_MODE ?? '';
   let configuredIngestMode: IngestMode = 'off';
@@ -234,7 +254,14 @@ export function parseConfig(env: EnvVars, options: ParseConfigOptions = {}): App
     collections: prefix === null ? null : collectionsOf(prefix),
     namespaceOwnershipRef,
     namespacePublicationRef,
+    namespaceBatchPublicationRef,
     publication: prefix !== null && !fixturePrefix && namespaceOwnershipRef !== null && validPublicationRef,
+    batchPublication:
+      prefix !== null &&
+      !fixturePrefix &&
+      namespaceOwnershipRef !== null &&
+      validPublicationRef &&
+      validBatchPublicationRef,
     configuredIngestMode,
     ingestMode: prefix === null ? 'off' : configuredIngestMode,
     jetstreamUrls,

@@ -42,6 +42,7 @@ function baseEnv(): Record<string, string | undefined> {
     LEXICON_PREFIX: FIXTURE_PREFIX,
     NAMESPACE_OWNERSHIP_REF: '',
     NAMESPACE_PUBLICATION_REF: '',
+    NAMESPACE_BATCH_PUBLICATION_REF: '',
     JETSTREAM_URLS: 'wss://jetstream.example.org',
     JETSTREAM_LOOKBACK_HOURS: '24',
     RELAY_URL: 'https://relay.example.org',
@@ -220,6 +221,7 @@ describe('parseNodeConfig', () => {
     expect(handed).not.toHaveProperty('DO_LOCATION_HINT');
     expect(handed?.INGEST_MODE).toBe('socket');
     expect(handed?.PUBLIC_ORIGIN).toBe('https://music.example.org');
+    expect(handed?.NAMESPACE_BATCH_PUBLICATION_REF).toBe('');
     expect(options).toEqual({ allowFixturePrefix: true });
     // The embedded config carries the fixed Node budget and no placement key.
     expect(cfg.app.budget).toEqual(NODE_BUDGET);

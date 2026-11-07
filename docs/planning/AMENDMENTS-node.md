@@ -521,3 +521,13 @@ bench passed both tests. The final renderer suites passed 10 tests and
 serialized feed, following-feed, history and lookup response bodies plus
 statistics across queued, running, blocked, failed, cancelled and succeeded
 matching/stale/NULL-CID deletes. Production read SQL and API code are unchanged.
+## Batch import foundation (ADR 0006)
+
+The Node implementation plan adds package **N9-01** in `node-waves.json` for the
+first, contract-only slice of batched imports. Its named tests are declared in
+that package and mapped to the existing namespace/scrobble cases in
+`ts-case-map.json`. This is a current Node acceptance addition; it does not
+reuse historical Workers evidence. Later implementation slices own ingest,
+projection, import outbox/rebatching, and removal. N9-01's four-schema
+publication evidence remains unchanged; the batch candidate has no publication
+receipt and no live batch gate.

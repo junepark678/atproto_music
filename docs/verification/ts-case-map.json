@@ -9,7 +9,13 @@
   "cases": [
     {
       "case": "M1.1.1/fixture_namespace",
-      "target": "packages/core/test/namespace.test.ts › fixture prefix blocks publication; owned prefix with ownership ref allows it"
+      "target": "packages/core/test/namespace.test.ts › fixture prefix blocks publication; owned prefix with ownership ref allows it",
+      "also": [
+        "worker/test/config.test.ts › batch publication needs a distinct second reviewed manifest digest and the original publication gate",
+        "worker/test/http/health-meta.test.ts › advertises batchPublication only for a distinct batch manifest with the original gate open",
+        "worker/test/node/bff/client-metadata.test.ts › requests the batch collection only when the separate batch gate is open",
+        "worker/test/node/config.test.ts › INGEST_MODE=pulse, an operator-set PLAN (paid or free) and DO_LOCATION_HINT are each rejected with a message citing ADR 0005, and the embedded parseConfig receives PLAN paid and an empty DO_LOCATION_HINT"
+      ]
     },
     {
       "case": "M1.1.1/invalid_namespace",
@@ -21,7 +27,11 @@
     {
       "case": "M1.1.1/version_policy",
       "target": "worker/test/ingest/jetstream-socket.test.ts › subscribe URL has kinds=commit and the four collections only",
-      "note": "A10 adds `<prefix>.settings` and B12 `<prefix>.love` (N3-11 renamed the target from \"the three collections only\"), so a valid prefix derives exactly the scrobble, follow, settings and love collections."
+      "note": "A10 adds `<prefix>.settings` and B12 `<prefix>.love` (N3-11 renamed the target from \"the three collections only\"), so a valid prefix derives exactly the scrobble, follow, settings and love collections.",
+      "also": [
+        "packages/core/test/scrobble-batch.test.ts › round trips a listen fragment and returns fragment-free proof target",
+        "packages/core/test/scrobble-batch.test.ts › rejects malformed authority, non-batch collections and bad fragments"
+      ]
     },
     {
       "case": "M1.1.2/unicode_limits",
@@ -40,7 +50,14 @@
       "case": "M1.1.2/optional_values",
       "target": "packages/core/test/scrobble.test.ts › duration 1 and 86400 accepted; 0, 86401 and 1.5 rejected; invalid MBID rejected; omitted album accepted",
       "also": [
-        "packages/core/test/scrobble.test.ts › validation.json vectors match Rust verdicts and reasons"
+        "packages/core/test/scrobble.test.ts › validation.json vectors match Rust verdicts and reasons",
+        "packages/core/test/scrobble-batch.test.ts › validates each entry through the single scrobble validator and preserves createdAt",
+        "packages/core/test/scrobble-batch.test.ts › drops only invalid entries while malformed envelope bounds reject the whole record",
+        "packages/core/test/scrobble-batch.test.ts › builds a batch with stable TID entry ids and a separate envelope timestamp",
+        "packages/core/test/scrobble-batch.test.ts › packs in stable order under both supplied exact size limits",
+        "packages/atproto/test/scrobble-batch-size.test.ts › counts DAG-CBOR and exact UTF-8 JSON request bytes",
+        "packages/atproto/test/scrobble-batch-size.test.ts › uses inclusive exact bounds",
+        "packages/atproto/test/scrobble-batch-size.test.ts › counts non-ASCII as UTF-8 bytes rather than JS string length"
       ]
     },
     {
