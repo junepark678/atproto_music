@@ -265,7 +265,8 @@ absent read; a removal whose head keeps moving reads again at once and
 otherwise holds `repository_head_unstable` (no attempt spent) with its
 completion kept.
 
-Remaining limits: when the head moved during the only absent read and the
+Remaining limits (superseded by the next section, which closes the first):
+when the head moved during the only absent read and the
 next read already finds a recreation, the boundary stays at the first head; a
 delayed proof of a version committed between that head and the absence can be
 displayed until a newer proof of the present recreation replaces it (the
@@ -278,3 +279,116 @@ owner's removal is displayed here. The installed-handler test pins
 moves. Receipts settled under migration 11 keep its head rule, so for them the
 F1 window remains. The full Node acceptance gate is reserved for the accepted
 final head and was not run here.
+
+## No-replay and reached-order fixes (stacked on PR #161)
+
+Stacked on `t3/ordered-removal-completion` at `5e18a99` (PR #161). It closes
+the two P1 findings of the Astra 5e18a99 review by keeping durable no-replay
+knowledge apart from ordered visibility (ADR 0006, migration 13).
+Migrations 1–12 are unchanged; migration 13 adds `operations.removal_reached`
+and `removal_reached_at_ms`. No live service, environment file, lexicon
+publication or PDS record was touched.
+
+State transitions of one removal (crash boundaries in brackets):
+
+| State | Durable fields | Next | Writes? |
+| --- | --- | --- | --- |
+| unsent | none | read head and targets; present: persist `removal_head_rev`, send [a crash leaves nothing to reconcile] | yes, under swapCommit/swapRecord |
+| send unknown | `removal_head_rev` | lost answer or crash: read; absent → reached `absent`; present → write again under a fresh head [nothing proves the earlier write] | yes (unchanged) |
+| received success | `removal_reached` `success` or `commit` (+ `removal_done_rev` for a commit), set before the read-back is awaited | read-back; first head read orders it | never |
+| absence captured | `removal_reached` `absent`, set at the absent read | stable bracket → `absent`; moved closing head → `after` (+ one refining read); unavailable closing head → next head read | never |
+| reached, unordered | `removal_reached`, no `removal_done_rev` | read-only hold: `waiting`, `removal_reached_unordered`, no attempt spent, wait doubling 5 s → 300 s; 401 blocks; pending overlay hides all targets [restart, reauth or a tenth reconcile resume the same hold] | never |
+| exactly ordered | `removal_done_rev` with `commit`, `absent` or `verified` | read-back settles; hidden at or below it | never |
+| ordered by the first head after | `removal_done_rev` with `after` | read-back settles; hidden strictly below it until verified ingest proves the record at or above it | never |
+
+| Finding | Fix | Regression |
+| --- | --- | --- |
+| F1 an absence whose closing head moved, or failed (503/401), was saved as `absent_after` at the head read before it; a present read then settled the whole intent there, so with B (X, Y present) after H, D removing both and R recreating only X, delayed B showed Y (removed, never recreated) | the absence is no-replay knowledge at once; ordering is the first head read after it (the moved closing head, or the next head after an unavailable one), never H; a stable bracket makes it exact; `removal_done_rev` is write-once (equal-revision `after` → `absent` only); `after` hides strictly below the boundary; a sibling's presence decides nothing | `reached-order.test.ts` › F1 $kind, closing head $closing… (partial and whole × moved, 503, 401 with restart and sign-in; delayed B hidden, R visible, fresh intent removes R) |
+| F2 a received success without usable commit (the installed reference no-op, or a committed write whose metadata was left out), then R recreated and proven before the read-back with D never ingested, was written again on retry | a semantically valid 2xx answer to the intent's own write persists `removal_reached` `success` before the read-back (deleteRecord: a JSON object; putRecord: the same URI and the CID of the bytes sent; commit metadata absent or malformed; unknown fields ignored); a reached intent only reads; a body that does not answer the request certifies nothing | `reached-order.test.ts` › F2 %s: the installed reference no-op answer…, › F2 %s: an actual commit answered without metadata… (partial, whole, single; no write after restart; fresh intent removes R) |
+
+Also covered: the read-only hold (one head read per poll, waits 5, 10, 20 s,
+attempts unchanged, verified R alone does not order it, the next readable head
+does), a tenth attempt answered by a no-op whose read-back head fails (held,
+counted, never `failed`; the read-only reconcile orders it), the strict `after`
+boundary (a recreation committed before an unrelated commit that moved the
+closing head stays hidden until a re-proof at the boundary releases it; the
+settlement queued the container's verify hint), and success-answer validation
+(other URI, other CID, no CID or an array certify nothing). Two
+`ordered-completion` expectations changed: a moved closing head followed by a
+recreation now settles `after` at R (was `absent_after` at D), and an
+unavailable closing head is refined to `absent` by one more closing head (one
+more request). The migration ledger tests and the v2 follow-receipt upgrade
+list the new migration and columns.
+
+Evidence (every substantive command under `taskset -c 18,19 nice -n 15`,
+Vitest always `--maxWorkers=1`, fixture SQLite and in-process transport only):
+
+- Astra's scripts from `/tmp/atmusic-review-5e18a99` (a superset of the
+  79560fe set; identical apart from the schema label), with paths rewritten to
+  this worktree and the expected schema version set to 13 (`migration-833`,
+  `additional-boundaries`); no assertion changed. `completion-boundaries`
+  (6 FAIL at 5e18a99), `installed-noop-replay` (3 FAIL) and `metadata-replay`
+  (3 FAIL) now report `{"summary":{"failed":[]}}`, as do
+  `completion-controls` (10), `established-absence` (1), `head-races` (10),
+  `noop-races` (3) and `recovery-controls` (9). Every data row was inspected:
+  each unstable case (partial and whole, moved, 503, 401 with restart) ends
+  `removal_reached` `absent`, `removal_done_rev` = R, basis `after`, no write;
+  delayed B keeps Y hidden before R is ingested and X is visible after it.
+  Each no-op and metadata-free case ends `success` → `after` R with zero
+  retry requests. The staggered verified case keeps `verified` D1; the
+  omitted/malformed-commit controls keep `verified` D with byte-identical
+  verified state; the known-commit controls keep `commit` D. The
+  established-absence row now proves its boundary: the read after J is
+  bracketed by J and J (three heads), so `absent` J is exact. Compared with
+  the review's own output, field by field: `installed-api-noop`, `original`,
+  `adversarial`, `noop-races`, `upgrade-boundaries`, `interactions`,
+  `settlement-cache` and `boundaries` are identical; `additional-boundaries`
+  and `migration-833` differ only in the schema label (12 to 13; all 836
+  operations, items and keys and the 833 written receipts kept);
+  `head-races` differs only in the request order (the refining read reuses
+  the moved closing head: HEAD, GET, HEAD, GET, HEAD) and in a never-sent
+  removal's fence being the head read before its absent read; and
+  `recovery-controls` only in a known commit's failed read-back waiting 5 s
+  read-only (attempt still counted) instead of a ~1 s transient retry.
+- The new tests on the reviewed head (5e18a99 sources, the new test file
+  copied in without the migration 13 field expectations and the validator
+  unit test): 15 of 19 fail, each on behavior (done at H as `absent_after`;
+  F2 left queued to write again; the tenth attempt `failed`); the 4 passing
+  are the invalid-answer controls.
+- Mutation checks over `reached-order` and `ordered-completion` (48 tests):
+  a non-strict `after` rule fails 16; success answers never certifying fails
+  18; the boundary at the head read before the absence fails 11; a reached
+  removal answering `present` fails 15; dropping the counted post-send hold
+  fails 1.
+- `npm run typecheck`, Biome check on every changed file and
+  `git diff --check` passed.
+- `vitest run --maxWorkers=1` over worker/test/node/{outbox,imports,storage,
+  lastfm,listenbrainz,read,http,write}, worker/test/node/{migrate-node,
+  features}.test.ts and worker/test/{storage,read,http,write}: 87 files, 509
+  tests passed, none failed or skipped; worker/test/{harness,composition}:
+  8 files, 22 tests; the read-model bench project (query-plan pins, output
+  outside the repository): 2 files, 8 tests.
+- `/tmp/abatch-final/.venv/bin/python scripts/validate_contracts.py` and
+  `/usr/bin/python3.14 scripts/validate_case_map.py --check-tests` passed.
+
+Operator notes: the release applies migration 13 at startup (two nullable
+columns, no backfill). A reached removal that cannot read a head holds
+`removal_reached_unordered` with a doubling wait capped at 300 s and one head
+read per poll; it never spends an attempt or fails for attempts.
+
+Remaining limits (documented behavior, not waivers): an `after` boundary
+hides a later incarnation committed between the absence (or the handling of
+a no-op) and the first head read after it until verified ingest proves the
+record at or above that head; settlement queues the verify hint, and an
+unchanged record re-proved there is released. A getRecord absence and a
+no-op answer carry no revision, so nothing finer exists without verified
+evidence. A completely lost answer is still ambiguous and a read that finds
+the targets present writes again under a fresh head and swapRecord.
+Verified-absence completion for a multi-target removal uses the oldest
+per-target verified absence, relying on ingest's per-URI revision guards.
+Heads, commits and answers are the owner PDS's metadata, not verified proofs.
+A receipt left with migration 12's `absent_after` basis (only the unreleased
+PR #161 rule wrote it) keeps the at-or-below rule; migration-11 receipts keep
+their head rule and its F1 window. The installed-handler tests pin
+`@atproto/pds` 0.5.40. The full Node acceptance gate is reserved for the
+accepted final head and was not run here.
