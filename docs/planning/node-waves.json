@@ -2050,6 +2050,7 @@
      "worker/test/node/outbox/uncertain-hardening.test.ts › F7 %s: superseded after its request was transmitted: that send keeps its CAS; its stale completion settles nothing",
      "worker/test/node/outbox/uncertain-hardening.test.ts › F4 control: removals of a key without a held removal keep their ordering",
      "worker/test/node/outbox/uncertain-hardening.test.ts › F3 $kind: the exact re-send refused ($refusal) while the original is unknown holds; the late original then commits, R is never removed",
+     "worker/test/node/outbox/uncertain-hardening.test.ts › R1 $kind: retry refusal $status retains the sign-in block when read-back fails",
      "worker/test/node/outbox/uncertain-hardening.test.ts › F3 $kind: the tenth send, an exact re-send refused ($refusal), holds; the reconcile never sends",
      "worker/test/node/outbox/uncertain-hardening.test.ts › F3 %s control: a refusal (InvalidRecord 400) of the ORIGINAL send is definite: rejected and failed as before",
      "worker/test/node/outbox/uncertain-lb-route.test.ts › %s external record: the real route absorbs a repeat, then admits a fresh delete once R is verified newer than the fence",

@@ -559,7 +559,8 @@ async function removeIds(op: OperationRow, ctx: ExecContext): Promise<Outcome> {
     if (after.kind === 'outcome') {
       // A classified write failure decides first (a scope denial holds the
       // lane); otherwise the read-back failure does.
-      if (!result.ok && isBatchScopeDenial(result.failure)) return batchFailure(result.failure);
+      if (!result.ok && (result.failure.kind === 'reauth' || isBatchScopeDenial(result.failure)))
+        return batchFailure(result.failure);
       return afterSend(ctx.m.db, op.id, after.outcome);
     }
     if (after.kind === 'settled') return { kind: 'succeeded', uri, hints };

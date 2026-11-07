@@ -643,3 +643,17 @@ Remaining limits (documented behavior, not waivers):
   delete of such a listen may chain another delete, as before this slice.
 - The full Node acceptance gate is reserved for Sol on the accepted head and
   was not run here.
+
+### R1: sign-in refusal takes precedence over a failed read-back
+
+The independent review at `52c7a93` found that an exact retry's batch 401 or
+single 403 could be masked by a subsequent 503 record read. The write's
+classified sign-in outcome now takes precedence over that unresolved read.
+Batch 403 retains the existing batch-scope hold; the unknown original pin and
+fence remain intact in every case. No later refusal rejects that original.
+
+The hardening suite includes all six partial/whole/single × 401/403 cases,
+including sign-in resume, late original completion and recreation preservation.
+All 96 hardening tests and the reviewer's six standalone refusal/read-failure
+cases passed. Workspace typecheck, scoped Biome and diff checks passed. The
+full Node gate remains pending independent acceptance of the corrected head.

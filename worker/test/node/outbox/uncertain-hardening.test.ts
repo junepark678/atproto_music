@@ -707,6 +707,51 @@ const REFUSALS = {
 type Refusal = keyof typeof REFUSALS;
 const REFUSAL_NAMES = Object.keys(REFUSALS) as Refusal[];
 
+it.each(KINDS.flatMap((kind) => [401, 403].map((status) => ({ kind, status }))))(
+  'R1 $kind: retry refusal $status retains the sign-in block when read-back fails',
+  async ({ kind, status }) => {
+    await withHarness(async (h) => {
+      const { removal, persisted, late } = await unknownSend(h, kind);
+      let refused = false;
+      let failedRead = false;
+      wrap(h, async (nsid, forward) => {
+        if (nsid === methodOf(kind) && !refused) {
+          refused = true;
+          return Response.json(
+            { error: status === 401 ? 'AuthRequired' : 'Forbidden', message: 'missing scope' },
+            { status },
+          );
+        }
+        if (nsid === GET && refused && !failedRead) {
+          failedRead = true;
+          return Response.json({ error: 'InternalServerError' }, { status: 503 });
+        }
+        return forward();
+      });
+      await poll(h, removal.id, 1);
+      const batchScope = status === 403 && kind !== 'single';
+      expect(h.op(removal.id)).toMatchObject({
+        state: 'blocked',
+        attempts: batchScope ? 2 : 1,
+        last_error: batchScope ? 'batch_scope_required' : status === 403 ? 'forbidden_scope' : 'reauth_required',
+        removal_send_state: 'pending',
+        removal_send_json: persisted.removal_send_json,
+        removal_head_rev: persisted.removal_head_rev,
+      });
+      expect(resumeAfterSignIn(h.m, h.alice)).toBe(1);
+      expect((await late()).status).toBe(200);
+      await h.kit.externalPut('Alice', collectionOf(kind), rkeyOf(kind), bytesOf(kind));
+      await poll(h, removal.id, 2);
+      expect(h.op(removal.id)).toMatchObject({
+        state: 'queued',
+        removal_send_json: persisted.removal_send_json,
+        removal_head_rev: persisted.removal_head_rev,
+      });
+      expect(await remoteTargets(h, kind)).toEqual(kind === 'single' ? ['*'] : [X, Y, Z]);
+    });
+  },
+);
+
 /** Every removal write dispatched from now on; the next `refuse` of them are answered by `refusal` without reaching the PDS. */
 function refuseWrites(h: Harness, kind: Kind, refusal: Refusal, refuse = 1) {
   const dispatched: unknown[] = [];

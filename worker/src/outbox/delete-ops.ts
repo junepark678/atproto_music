@@ -355,7 +355,15 @@ async function deleteWithSwap(op: OperationRow, ctx: ExecContext, predecessors: 
       return failureOutcome(failure);
     }
     const seen = await observe();
-    if (seen.kind === 'outcome') return afterSend(ctx.m.db, op.id, seen.outcome);
+    if (seen.kind === 'outcome') {
+      // A failed read-back cannot undo the write's classified sign-in denial.
+      // This remains a refusal of the retry, never of its unknown original.
+      if (refusedUnknown) {
+        const refusal = refusedWhileUnknown(ctx, op.id, failureOutcome(failure));
+        if (refusal.kind === 'reauth') return refusal;
+      }
+      return afterSend(ctx.m.db, op.id, seen.outcome);
+    }
     if (seen.kind === 'settled') return { kind: 'succeeded', uri, hints, swapCid: swap };
     if (refusedUnknown && failure.code !== 'repository_changed' && failure.kind !== 'missing') {
       return refusedWhileUnknown(ctx, op.id, failureOutcome(failure));
