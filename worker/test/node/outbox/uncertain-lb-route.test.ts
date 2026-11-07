@@ -155,7 +155,7 @@ it.each(['partial', 'whole', 'single'] as const)(
   },
 );
 
-it.each(['failed', 'inactive'] as const)(
+it.each(['failed', 'failed-held', 'inactive'] as const)(
   'a %s overlay still hides the newer projection from the real route',
   async (mode) => {
     await withHarness(async (h) => {
@@ -170,6 +170,9 @@ it.each(['failed', 'inactive'] as const)(
           origin: 'web',
         });
         h.db.run("UPDATE operations SET state = 'failed', last_error = 'upstream_unavailable' WHERE id = ?", failed.id);
+      } else if (mode === 'failed-held') {
+        // The held removal itself, failed: a failed overlay is never released.
+        h.db.run("UPDATE operations SET state = 'failed' WHERE id = ?", removal.id);
       } else {
         h.db.run('UPDATE users SET active = 0 WHERE did = ?', h.alice);
       }
@@ -177,7 +180,7 @@ it.each(['failed', 'inactive'] as const)(
       const call = await lbDelete(h);
       expect(await call()).toEqual({ status: 200, body: { status: 'ok' } });
       expect(deletes(h)).toHaveLength(before);
-      expect(h.op(removal.id).state).toBe('queued');
+      expect(h.op(removal.id).state).toBe(mode === 'failed-held' ? 'failed' : 'queued');
     });
   },
 );
