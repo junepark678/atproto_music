@@ -89,6 +89,10 @@ interface ExpectedTable {
 }
 
 const NEW_TABLES: Record<string, ExpectedTable> = {
+  batch_delete_children: {
+    columns: ['parent_operation_id', 'child_operation_id'],
+    pk: ['parent_operation_id', 'child_operation_id'],
+  },
   batch_delete_listens: {
     columns: ['operation_id', 'listen_id'],
     pk: ['operation_id', 'listen_id'],
@@ -451,6 +455,7 @@ const NEW_SCROBBLE_COLUMNS = cols<ScrobbleV2Columns>({
 
 /** New named indexes: table, unique, partial, [column, desc] in key order. */
 const NEW_INDEXES: Record<string, [string, number, number, Array<[string, number]>]> = {
+  batch_delete_children_child: ['batch_delete_children', 0, 0, [['child_operation_id', 0]]],
   batch_delete_listens_operation: ['batch_delete_listens', 0, 0, [['operation_id', 0]]],
   batch_entry_items_job: [
     'batch_entry_items',

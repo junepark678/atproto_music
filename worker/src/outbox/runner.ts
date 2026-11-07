@@ -154,6 +154,11 @@ export function estimatedCost(kind: OperationKind): number {
 
 /** A targeted batch-listen removal normally rewrites the container (2 points). */
 function estimatedOperationCost(db: Db, op: OperationRow): number {
+  if (
+    op.kind === 'scrobble.delete' &&
+    db.one('SELECT 1 AS x FROM batch_delete_children WHERE parent_operation_id=? LIMIT 1', op.id) !== null
+  )
+    return 0;
   if (op.kind === 'scrobble.delete' && op.collection.endsWith('.scrobbleBatch')) {
     const ids = db.all<{ listen_id: string }>(
       'SELECT listen_id FROM batch_delete_listens WHERE operation_id = ?',
@@ -458,6 +463,13 @@ class Run {
   }
 
   private async runSingle(state: Extract<DidState, { kind: 'ok' }>, op: OperationRow): Promise<void> {
+    if (
+      op.kind === 'scrobble.delete' &&
+      this.db.one('SELECT 1 AS x FROM batch_delete_children WHERE parent_operation_id = ? LIMIT 1', op.id) !== null
+    ) {
+      this.settleBatchDeleteAggregate(op);
+      return;
+    }
     if (op.collection === this.collections.scrobbleBatch && !this.m.config.batchPublication) return;
     const executor =
       op.kind === 'scrobble.create' && op.collection === this.collections.scrobbleBatch
@@ -497,6 +509,35 @@ class Run {
     if (started === undefined) return;
     const outcome = await this.safely(() => executor.execute(started, this.context(state, started)));
     this.settle(state, [[started, outcome]], true);
+  }
+
+  /** Settles a split-delete receipt after every durable child operation is terminal. */
+  private settleBatchDeleteAggregate(parent: OperationRow): void {
+    this.db.tx(() => {
+      const children = this.db.all<{ state: string }>(
+        `SELECT c.state FROM batch_delete_children r JOIN operations c ON c.id=r.child_operation_id
+         WHERE r.parent_operation_id=?`,
+        parent.id,
+      );
+      if (children.length === 0) {
+        this.db.run(
+          "UPDATE operations SET state='failed',last_error='batch_delete_children_missing',updated_at_ms=? WHERE id=? AND state IN ('queued','running')",
+          this.m.clock.nowMs(),
+          parent.id,
+        );
+        return;
+      }
+      if (children.some(({ state }) => state === 'queued' || state === 'running' || state === 'blocked')) return;
+      const failed = children.some(({ state }) => state !== 'succeeded');
+      this.db.run(
+        `UPDATE operations SET state=?,last_error=?,result_uri=?,updated_at_ms=? WHERE id=? AND state IN ('queued','running')`,
+        failed ? 'failed' : 'succeeded',
+        failed ? 'batch_delete_child_failed' : null,
+        failed || parent.rkey === null ? null : `at://${parent.did}/${parent.collection}/${parent.rkey}`,
+        this.m.clock.nowMs(),
+        parent.id,
+      );
+    });
   }
 
   private async runBatch(state: Extract<DidState, { kind: 'ok' }>, batch: OperationRow[]): Promise<void> {
@@ -612,6 +653,27 @@ class Run {
     );
     if (mapping.length === 0) throw new Error('batch split has no durable entry mapping');
     const assigned = new Set<string>();
+    const parentUri = `at://${parent.did}/${parent.collection}/${parent.rkey}`;
+    const parentDeletes =
+      parent.collection === this.collections.scrobbleBatch
+        ? db.all<OperationRow>(
+            "SELECT * FROM operations WHERE did=? AND collection=? AND kind='scrobble.delete' AND rkey=? AND state IN ('queued','blocked')",
+            parent.did,
+            parent.collection,
+            parent.rkey,
+          )
+        : [];
+    const parentIntents = new Map<string, string[]>();
+    for (const removal of parentDeletes) {
+      parentIntents.set(
+        removal.id,
+        db
+          .all<{ listen_id: string }>('SELECT listen_id FROM batch_delete_listens WHERE operation_id=?', removal.id)
+          .map(({ listen_id }) => listen_id),
+      );
+    }
+    for (const removal of parentDeletes)
+      db.run('DELETE FROM operation_deps WHERE op_id=? AND pred_id=?', removal.id, parent.id);
     for (const child of children) {
       const rows = mapping.filter((row) => child.entryIds.includes(row.entry_id));
       if (rows.length === 0) throw new Error('batch split child has no mapped entries');
@@ -632,6 +694,61 @@ class Run {
         },
         now,
       );
+      const childRemovalByParent = new Map<string, string>();
+      for (const removal of parentDeletes) {
+        const intents = parentIntents.get(removal.id) ?? [];
+        const wildcard = intents.includes('*');
+        const targeted = wildcard
+          ? child.entryIds
+          : child.entryIds.filter((entryId) => intents.includes(entryId));
+        if (targeted.length === 0) continue;
+        const childRemoval = insertOperation(
+          db,
+          {
+            id: newOperationId(this.m.random),
+            did: removal.did,
+            kind: 'scrobble.delete',
+            origin: removal.origin,
+            priority: removal.priority,
+            collection: removal.collection,
+            rkey: child.rkey,
+            dueAt: now,
+            predecessors: [created.id],
+          },
+          now,
+        );
+        childRemovalByParent.set(removal.id, childRemoval.id);
+        db.run(
+          'INSERT INTO batch_delete_children(parent_operation_id,child_operation_id) VALUES (?,?)',
+          removal.id,
+          childRemoval.id,
+        );
+        for (const id of wildcard ? ['*'] : targeted) {
+          db.run('INSERT INTO batch_delete_listens(operation_id,listen_id) VALUES (?,?)', childRemoval.id, id);
+        }
+        db.run('DELETE FROM batch_delete_listens WHERE operation_id=?', removal.id);
+        db.run('INSERT OR IGNORE INTO operation_deps(op_id,pred_id) VALUES (?,?)', removal.id, childRemoval.id);
+        if (wildcard) {
+          db.run(
+            'UPDATE listen_removals SET record_uri=?,operation_id=? WHERE operation_id=? AND record_uri=?',
+            `at://${parent.did}/${parent.collection}/${child.rkey}`,
+            childRemoval.id,
+            removal.id,
+            parentUri,
+          );
+        } else {
+          for (const id of targeted) {
+            db.run(
+              'UPDATE listen_removals SET record_uri=?,operation_id=? WHERE operation_id=? AND record_uri=? AND listen_id=?',
+              `at://${parent.did}/${parent.collection}/${child.rkey}`,
+              childRemoval.id,
+              removal.id,
+              parentUri,
+              id,
+            );
+          }
+        }
+      }
       for (const row of rows) {
         const item = db.run(
           "UPDATE import_items SET operation_id = ? WHERE job_id = ? AND seq = ? AND operation_id = ? AND state = 'queued'",
@@ -648,6 +765,15 @@ class Run {
           row.seq,
         );
         if (item.rowsWritten !== 1 || key.rowsWritten !== 1) throw new Error('batch split membership changed');
+        const removalOperationId =
+          (row.removal_operation_id !== null && childRemovalByParent.has(row.removal_operation_id)
+            ? row.removal_operation_id
+            : parentDeletes.find((candidate) => {
+                const intents = parentIntents.get(candidate.id) ?? [];
+                return intents.includes('*') || intents.includes(row.entry_id);
+              })?.id) ?? null;
+        const childRemovalId =
+          removalOperationId === null ? null : (childRemovalByParent.get(removalOperationId) ?? null);
         db.run(
           `INSERT INTO batch_entry_items(operation_id, entry_id, job_id, seq, removal_operation_id, removed_at_ms)
            VALUES (?, ?, ?, ?, ?, ?)`,
@@ -655,39 +781,16 @@ class Run {
           row.entry_id,
           row.job_id,
           row.seq,
-          row.removal_operation_id,
+          childRemovalId,
           row.removed_at_ms,
         );
-        if (row.removal_operation_id !== null) {
-          const target = db.one<{ listen_id: string }>(
-            'SELECT listen_id FROM batch_delete_listens WHERE operation_id = ? AND listen_id = ?',
-            row.removal_operation_id,
-            row.entry_id,
+        if (childRemovalId !== null)
+          db.run(
+            'UPDATE import_items SET removal_operation_id=? WHERE job_id=? AND seq=?',
+            childRemovalId,
+            row.job_id,
+            row.seq,
           );
-          if (target !== null) {
-            const oldUri = `at://${parent.did}/${parent.collection}/${parent.rkey}`;
-            const childUri = `at://${parent.did}/${parent.collection}/${child.rkey}`;
-            db.run(
-              "UPDATE operations SET rkey = ?, updated_at_ms = ? WHERE id = ? AND state IN ('queued','blocked')",
-              child.rkey,
-              now,
-              row.removal_operation_id,
-            );
-            db.run(
-              'UPDATE listen_removals SET record_uri = ? WHERE operation_id = ? AND did = ? AND record_uri = ? AND listen_id = ?',
-              childUri,
-              row.removal_operation_id,
-              parent.did,
-              oldUri,
-              row.entry_id,
-            );
-            db.run(
-              'INSERT OR IGNORE INTO operation_deps(op_id,pred_id) VALUES (?,?)',
-              row.removal_operation_id,
-              created.id,
-            );
-          }
-        }
       }
     }
     if (assigned.size !== mapping.length) throw new Error('batch split did not account for every entry');

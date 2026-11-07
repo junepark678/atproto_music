@@ -736,6 +736,12 @@ const MIGRATION_8: Migration = {
   name: 'outbox_send_certainty',
   statements: [
     "ALTER TABLE operations ADD COLUMN send_state TEXT NOT NULL DEFAULT 'unknown' CHECK(send_state IN ('unknown','unsent'))",
+    `CREATE TABLE batch_delete_children (
+      parent_operation_id TEXT NOT NULL,
+      child_operation_id TEXT NOT NULL,
+      PRIMARY KEY(parent_operation_id,child_operation_id)
+    )`,
+    'CREATE INDEX batch_delete_children_child ON batch_delete_children(child_operation_id)',
   ],
 };
 
@@ -807,6 +813,7 @@ export const TABLES = [
   'listen_removals',
   'batch_entry_items',
   'batch_delete_listens',
+  'batch_delete_children',
 ] as const;
 
 export type TableName = (typeof TABLES)[number];

@@ -124,6 +124,7 @@ describe('migrate over node:sqlite', () => {
           schema_migrations: before.tables.schema_migrations,
         };
         delete comparable.batch_delete_listens;
+        delete comparable.batch_delete_children;
         delete comparable.batch_entry_items;
         delete comparable.listen_removals;
         comparable.operations = (comparable.operations as string[]).map((row) => {

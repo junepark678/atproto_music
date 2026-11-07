@@ -34,7 +34,7 @@ import {
   enqueueBatchListenDelete,
   prepareUnsentBatchListenRemoval,
 } from '../../../src/outbox/batch-delete-ops';
-import { newOperationId } from '../../../src/outbox/operations';
+import { newOperationId, unblockOperations } from '../../../src/outbox/operations';
 import { insertScrobbleCreate, prepareScrobble } from '../../../src/outbox/scrobble-ops';
 import { APPLY, CREATE, GET, type Harness, remoteRecords, SCROBBLE, T0, withHarness } from '../outbox/support';
 
@@ -582,8 +582,11 @@ describe('import writer', () => {
       expect(new Set(children.map((child) => child.rkey)).size).toBe(2);
       const removedChild = children.find((child) => child.record_json?.includes(parentRecord.listens[0]!.id));
       expect(removedChild).toBeDefined();
-      expect(h.op(removal.id)).toMatchObject({ state: 'succeeded', rkey: removedChild!.rkey });
-      expect(h.db.one('SELECT record_uri FROM listen_removals WHERE operation_id = ?', removal.id)).toEqual({
+      expect(h.op(removal.id)).toMatchObject({ state: 'succeeded', rkey: parent.rkey });
+      expect(
+        h.ops(`kind = 'scrobble.delete' AND collection = '${SCROBBLE_BATCH}' AND id != '${removal.id}'`),
+      ).toHaveLength(1);
+      expect(h.db.one('SELECT record_uri FROM listen_removals WHERE listen_id = ?', parentRecord.listens[0]!.id)).toEqual({
         record_uri: `at://${h.alice}/${SCROBBLE_BATCH}/${removedChild!.rkey}`,
       });
       expect(
@@ -597,6 +600,99 @@ describe('import writer', () => {
       ]);
       expect(job(h, 'job-split')).toMatchObject({ written: 1, failed_items: 0 });
       expect(await remoteRecords(h.kit, 'Alice', SCROBBLE_BATCH)).toHaveLength(1);
+    });
+  });
+
+  it.each([{ name: 'wildcard', all: true }, { name: 'explicit ids spanning both children', all: false }])(
+    'partitions $name removal intent when a batch splits', async ({ all }) => {
+      await withHarness(async (h) => {
+        h.seedUser(h.alice);
+        const rt = runtime(h);
+        uploadJob(h, 'job-split-removal', [listen(41), listen(42)]);
+        await parse(h, rt, 'job-split-removal');
+        await runImports(rt, h.kit.clock.nowMs());
+        const parentBatch = h.ops()[0]!;
+        const entries = (JSON.parse(parentBatch.record_json!) as { listens: Array<{ id: string }> }).listens;
+        const intent = all ? ['*'] : entries.map((entry) => entry.id);
+        const receipt = enqueueBatchListenDelete(h.m, {
+          did: h.alice,
+          uri: `at://${h.alice}/${SCROBBLE_BATCH}/${parentBatch.rkey}`,
+          listenIds: intent,
+          origin: 'web',
+        });
+        h.kit.pds.Alice.serverError(CREATE, 413, 1);
+
+        await h.runUntilIdle();
+        await runImports(rt, h.kit.clock.nowMs());
+
+        expect(h.op(receipt.id).state).toBe('succeeded');
+        const removals = h.ops(
+          `kind = 'scrobble.delete' AND collection = '${SCROBBLE_BATCH}' AND id != '${receipt.id}'`,
+        );
+        expect(removals).toHaveLength(2);
+        expect(removals.every((operation) => operation.state === 'succeeded')).toBe(true);
+        expect(await remoteRecords(h.kit, 'Alice', SCROBBLE_BATCH)).toHaveLength(0);
+        expect(itemStates(h, 'job-split-removal')).toEqual({ written: 2 });
+      });
+    },
+  );
+
+  it('does not settle a split-delete receipt or item timestamp when one child removal fails', async () => {
+    await withHarness(async (h) => {
+      h.seedUser(h.alice);
+      const rt = runtime(h);
+      uploadJob(h, 'job-split-removal-failure', [listen(51), listen(52), listen(53), listen(54)]);
+      await parse(h, rt, 'job-split-removal-failure');
+      await runImports(rt, h.kit.clock.nowMs());
+      const batch = h.ops()[0]!;
+      const entries = (JSON.parse(batch.record_json!) as { listens: Array<{ id: string }> }).listens;
+      const receipt = enqueueBatchListenDelete(h.m, {
+        did: h.alice,
+        uri: `at://${h.alice}/${SCROBBLE_BATCH}/${batch.rkey}`,
+        listenIds: entries.map((entry) => entry.id),
+        origin: 'web',
+      });
+      h.kit.pds.Alice.serverError(CREATE, 413, 1);
+      h.kit.pds.Alice.fail(
+        { nsid: 'com.atproto.repo.putRecord' },
+        { kind: 'status', status: 400, error: 'InvalidRequest', message: 'rejected child update' },
+      );
+
+      await h.runUntilIdle();
+      await runImports(rt, h.kit.clock.nowMs());
+
+      expect(h.op(receipt.id)).toMatchObject({ state: 'failed', last_error: 'batch_delete_child_failed' });
+      const items = h.db.all<{ removed_at_ms: number | null }>(
+        'SELECT removed_at_ms FROM import_items WHERE job_id=? ORDER BY seq',
+        'job-split-removal-failure',
+      );
+      expect(items.filter((item) => item.removed_at_ms !== null)).toHaveLength(1);
+      expect(await remoteRecords(h.kit, 'Alice', SCROBBLE_BATCH)).toHaveLength(2);
+    });
+  });
+
+  it('preserves wildcard deletion through repeated recursive batch splits', async () => {
+    await withHarness(async (h) => {
+      h.seedUser(h.alice);
+      const rt = runtime(h);
+      uploadJob(h, 'job-recursive-split-removal', [listen(61), listen(62), listen(63), listen(64)]);
+      await parse(h, rt, 'job-recursive-split-removal');
+      await runImports(rt, h.kit.clock.nowMs());
+      const batch = h.ops()[0]!;
+      const receipt = enqueueBatchListenDelete(h.m, {
+        did: h.alice,
+        uri: `at://${h.alice}/${SCROBBLE_BATCH}/${batch.rkey}`,
+        listenIds: ['*'],
+        origin: 'web',
+      });
+      h.kit.pds.Alice.serverError(CREATE, 413, 3);
+
+      await h.runUntilIdle(20);
+      await runImports(rt, h.kit.clock.nowMs());
+
+      expect(h.op(receipt.id).state).toBe('succeeded');
+      expect(await remoteRecords(h.kit, 'Alice', SCROBBLE_BATCH)).toHaveLength(0);
+      expect(h.db.all('SELECT child_operation_id FROM batch_delete_children WHERE parent_operation_id=?', receipt.id)).toHaveLength(2);
     });
   });
 
@@ -620,6 +716,30 @@ describe('import writer', () => {
       expect(h.ops(`kind = 'scrobble.create' AND collection = '${SCROBBLE_BATCH}'`)).toHaveLength(1);
       expect(h.db.all('SELECT entry_id FROM batch_entry_items WHERE operation_id = ?', parent.id)).toHaveLength(2);
       expect(await remoteRecords(h.kit, 'Alice', SCROBBLE_BATCH)).toHaveLength(0);
+    });
+  });
+
+  it('reconciles a legacy zero-attempt reauth row before rebatching or resending it', async () => {
+    await withHarness(async (h) => {
+      h.seedUser(h.alice);
+      const rt = runtime(h);
+      const [legacy] = await stageLegacySingles(h, rt, 'job-legacy-uncertain', [listen(91)]);
+      const payload = JSON.parse(legacy!.record_json!) as Record<string, unknown>;
+      await h.kit.externalPut('Alice', legacy!.collection, legacy!.rkey!, payload);
+      h.db.run(
+        "UPDATE operations SET state='blocked',attempts=0,send_started_at_ms=NULL,send_state='unknown',last_error='reauth_required' WHERE id=?",
+        legacy!.id,
+      );
+      unblockOperations(h.db, h.alice, h.kit.clock.nowMs());
+
+      await runImports(rt, h.kit.clock.nowMs());
+      await h.runUntilIdle();
+      await runImports(rt, h.kit.clock.nowMs());
+
+      expect(h.op(legacy!.id)).toMatchObject({ state: 'succeeded', send_state: 'unknown' });
+      expect(h.ops(`collection = '${SCROBBLE_BATCH}'`)).toHaveLength(0);
+      expect(await remoteRecords(h.kit, 'Alice', SCROBBLE)).toHaveLength(1);
+      expect(job(h, 'job-legacy-uncertain')).toMatchObject({ written: 1, failed_items: 0 });
     });
   });
 
