@@ -139,7 +139,10 @@ export class LastfmClient {
           ? await this.fetch(`${this.apiRoot}?${signed}`, { method: 'GET', headers: { accept: 'application/json' } })
           : await this.fetch(this.apiRoot, {
               method: 'POST',
-              headers: { 'content-type': 'application/x-www-form-urlencoded; charset=utf-8', accept: 'application/json' },
+              headers: {
+                'content-type': 'application/x-www-form-urlencoded; charset=utf-8',
+                accept: 'application/json',
+              },
               body: signed,
             });
       text = await res.text();
