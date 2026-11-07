@@ -665,6 +665,17 @@ describe('DELETE /api/v1/scrobbles/{id}', () => {
     expect([denied.status, errorCode(denied)]).toEqual([404, 'not_found']);
     expect(w.count('operations', "kind = 'scrobble.delete'")).toBe(0);
 
+    for (const [invalid, status] of [
+      [`at://${ALICE}/${SCROBBLE}/3zzsinglelisten#3lb2batchidab`, 422],
+      [`at://${ALICE}/com.example.other.scrobbleBatch/3zzbatchcontainer#3lb2batchidab`, 404],
+      [`at://${ALICE}/${batch}/3zzbatchcontainer#bad`, 422],
+    ] as const) {
+      const refused = await w.send('DELETE', path(invalid), { as: alice });
+      expect(refused.status, invalid).toBe(status);
+      if (status === 422) expect(errorCode(refused)).toBe('validation_failed');
+    }
+    expect(w.count('operations', "kind = 'scrobble.delete'")).toBe(0);
+
     const item = await w.send('DELETE', path(itemUri), { as: alice });
     expect(item.status).toBe(202);
     const itemOp = opOf(item);

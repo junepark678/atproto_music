@@ -701,6 +701,30 @@
     }
   },
   {
+    "name": "notify_batch_listen_uri",
+    "schema": "NotifyInput",
+    "valid": true,
+    "value": {
+      "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobbleBatch/3lb2batchidab#3lb2batchidac"
+    }
+  },
+  {
+    "name": "notify_malformed_batch_fragment_rejected",
+    "schema": "NotifyInput",
+    "valid": false,
+    "value": {
+      "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobbleBatch/3lb2batchidab#bad"
+    }
+  },
+  {
+    "name": "notify_single_record_fragment_rejected",
+    "schema": "NotifyInput",
+    "valid": false,
+    "value": {
+      "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobble/r01#3lb2batchidac"
+    }
+  },
+  {
     "name": "notify_did",
     "schema": "NotifyInput",
     "valid": true,

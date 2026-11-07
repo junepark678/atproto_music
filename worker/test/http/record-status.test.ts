@@ -63,6 +63,7 @@ const ORIGIN = 'https://music.example.test';
 const T0 = Date.parse('2026-01-15T12:00:00Z');
 const DAVE = 'did:plc:dddddddddddddddddddddddd';
 const TID = /^[234567abcdefghij][234567abcdefghijklmnopqrstuvwxyz]{12}$/;
+const BATCH = 'com.example.atmusic.scrobbleBatch';
 
 /** INGEST_MODE=off in the harness: the global state is honestly `stale`, never caught up. */
 const STALE_ALICE = {
@@ -132,7 +133,7 @@ it('states indexed/pending/absent/excluded/unknown with cid and revision', async
     });
     markInactive(db, BOB, 'deactivated');
   });
-  const before = await inDo((db) => ({
+  let before = await inDo((db) => ({
     users: db.all('SELECT * FROM users ORDER BY did'),
     hints: db.all('SELECT * FROM hints'),
     jobs: db.all('SELECT * FROM repo_jobs'),
@@ -148,6 +149,47 @@ it('states indexed/pending/absent/excluded/unknown with cid and revision', async
     indexing: STALE_ALICE,
   });
   expect(r01.commit.rev).toMatch(TID);
+  const batchRkey = '3lb2batchidab';
+  const batchEntryId = '3lb2batchidac';
+  const batchProof = await putProof(alice, BATCH, batchRkey, {
+    $type: BATCH,
+    createdAt: '2026-01-15T12:00:00Z',
+    listens: [
+      {
+        id: batchEntryId,
+        artist: 'Batch Status Artist',
+        track: 'Batch Status Track',
+        listenedAt: '2026-01-15T11:00:00Z',
+        createdAt: '2026-01-15T12:00:00Z',
+      },
+    ],
+  });
+  await inDo((db) => db.tx(() => applyRecordProof(db, batchProof, OPTS)));
+  const batchItemUri = `at://${ALICE}/${BATCH}/${batchRkey}#${batchEntryId}`;
+  expect(await status(batchItemUri)).toMatchObject({
+    uri: batchItemUri,
+    state: 'indexed',
+    revision: batchProof.commit.rev,
+  });
+  const missingBatchItem = `at://${ALICE}/${BATCH}/${batchRkey}#3lb2batchidad`;
+  expect(await status(missingBatchItem)).toEqual({
+    uri: missingBatchItem,
+    state: 'absent',
+    revision: batchProof.commit.rev,
+    indexing: STALE_ALICE,
+  });
+  const deletedBatchProof = await deleteProof(alice, BATCH, batchRkey);
+  await inDo((db) => db.tx(() => applyRecordProof(db, deletedBatchProof, OPTS)));
+  expect(await status(batchItemUri)).toMatchObject({
+    uri: batchItemUri,
+    state: 'absent',
+    revision: deletedBatchProof.commit.rev,
+  });
+  before = await inDo((db) => ({
+    users: db.all('SELECT * FROM users ORDER BY did'),
+    hints: db.all('SELECT * FROM hints'),
+    jobs: db.all('SELECT * FROM repo_jobs'),
+  }));
   const followUri = uriOf(ALICE, FOLLOW, '3lfollowbob22');
   expect(await status(followUri)).toEqual({
     uri: followUri,
@@ -233,6 +275,10 @@ it('states indexed/pending/absent/excluded/unknown with cid and revision', async
     `uri=${encodeURIComponent(`at://${ALICE}/app.bsky.feed.post/3l2a`)}`,
     `uri=${encodeURIComponent(`at://${ALICE}/${SCROBBLE}`)}`,
     `uri=${encodeURIComponent(`at://alice.example.com/${SCROBBLE}/r01`)}`,
+    `uri=${encodeURIComponent(`at://did:example:remote/${SCROBBLE}/r01`)}`,
+    `uri=${encodeURIComponent(`at://${ALICE}/${BATCH}/3lb2batchidab#bad`)}`,
+    `uri=${encodeURIComponent(`at://${ALICE}/${SCROBBLE}/r01#3lb2batchidac`)}`,
+    `uri=${encodeURIComponent(`at://${ALICE}/com.example.other.scrobbleBatch/3lb2batchidab#3lb2batchidac`)}`,
     `uri=${encodeURIComponent('https://example.com/r01')}`,
     `uri=${encodeURIComponent(r01Uri)}&uri=${encodeURIComponent(r01Uri)}`,
     `uri=${encodeURIComponent(r01Uri)}&cid=x`,
@@ -249,6 +295,13 @@ it('states indexed/pending/absent/excluded/unknown with cid and revision', async
       fields: { uri: 'Expected a record AT URI in a configured collection.' },
     });
   }
-  expect(index.calls.length).toBe(callsBefore);
+  const batchListenUri = `at://${ALICE}/${BATCH}/3lb2batchidab#3lb2batchidac`;
+  expect(await status(batchListenUri)).toEqual({
+    uri: batchListenUri,
+    state: 'absent',
+    revision: deletedBatchProof.commit.rev,
+    indexing: STALE_ALICE,
+  });
+  expect(index.calls.length).toBe(callsBefore + 1);
   expect(index.networkAttempts).toEqual([]);
 });

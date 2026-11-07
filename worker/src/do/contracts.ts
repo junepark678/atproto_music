@@ -13,6 +13,7 @@ import type {
   Export,
   FeedScope,
   Indexing,
+  ListenUri,
   NotifyInput,
   Profile,
   RecordStatus,
@@ -223,7 +224,7 @@ export interface IndexRpc {
   feed(q: FeedQuery): Promise<RowsResult<ScrobbleRow>>;
   /** Null for unknown, inactive, excluded or absent records (404). */
   lookup(uri: AtUri): Promise<ScrobbleRow | null>;
-  recordStatus(uri: AtUri): Promise<RecordStatus>;
+  recordStatus(uri: ListenUri): Promise<RecordStatus>;
   /** Null for unknown or inactive users (404). */
   stats(q: StatsQuery): Promise<Statistics | null>;
   /** Null for unknown, inactive or suppressed users (404, before any identity request). */

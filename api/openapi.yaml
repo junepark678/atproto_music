@@ -321,7 +321,7 @@
       "delete": {
         "operationId": "scrobble_delete",
         "summary": "Delete a scrobble",
-        "description": "Queues a scrobble.delete for an own record (swapRecord from record_state; a pending create is its predecessor). Another DID's record is 404. Needs the cookie plus CSRF; with the publication gate closed it is 503 publication_disabled. Returns 202 with the queued operation (ADR 0005 §5.7, §5.8).",
+        "description": "Queues a scrobble.delete for an own single record or an exact scrobbleBatch listen identity; an unfragmented batch URI deletes the whole container. Single-record fragments and malformed batch fragments are 422; another DID or collection is 404. Needs the cookie plus CSRF; with the publication gate closed it is 503 publication_disabled. Returns 202 with the queued operation (ADR 0005 §5.7, §5.8; ADR 0006).",
         "x-contract": "1.2",
         "security": [
           {
@@ -6229,10 +6229,10 @@
               "uri": {
                 "allOf": [
                   {
-                    "$ref": "#/components/schemas/AtUri"
+                    "$ref": "#/components/schemas/ListenUri"
                   }
                 ],
-                "description": "A record in a configured collection (<prefix>.scrobble, .follow or .settings); other collections are 422."
+                "description": "A record in a configured collection, or a scrobbleBatch listen identity with its exact #listenId fragment; other fragments and collections are 422."
               }
             }
           },
@@ -6270,10 +6270,10 @@
           "state",
           "indexing"
         ],
-        "description": "Indexing state of one record (N2). indexed: a visible row with its verified cid and revision. pending: a hint or job exists. absent: verified absence. excluded: a verified record failed validation, with reason. unknown: nothing is known.",
+        "description": "Indexing state of one record or scrobbleBatch listen identity (N2). indexed: a visible row with its verified cid and revision. pending: a hint or job exists. absent: verified absence, including a missing item in a present verified batch at the container revision. excluded: a verified record failed validation, with reason. unknown: nothing is known.",
         "properties": {
           "uri": {
-            "$ref": "#/components/schemas/AtUri"
+            "$ref": "#/components/schemas/ListenUri"
           },
           "state": {
             "enum": [

@@ -26,6 +26,7 @@ import type {
   HealthLive,
   HealthReady,
   Indexing,
+  ListenUri,
   Meta,
   NotifyAccepted,
   NotifyInput,
@@ -971,7 +972,7 @@ export class ApiClient {
   }
 
   /** N2: indexing state of one record (no-store; the outbox polls it). */
-  recordStatus(uri: AtUri, o?: CallOptions): Promise<RecordStatus> {
+  recordStatus(uri: ListenUri, o?: CallOptions): Promise<RecordStatus> {
     return this.#call(
       {
         method: 'GET',

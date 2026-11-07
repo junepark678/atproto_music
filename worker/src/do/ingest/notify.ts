@@ -286,5 +286,10 @@ export function recordStatus(m: ModuleDeps, uri: string, now: number = m.clock.n
   if (rs?.state === 'excluded' && rs.cid !== null && rs.reason !== null) {
     return { uri, state: 'excluded', cid: rs.cid, revision: rs.revision, reason: rs.reason, indexing: idx };
   }
+  // A verified, present batch container proves that an item TID not found in
+  // its projection is absent at this revision; it is never a phantom indexed
+  // item or an unqualified unknown.
+  if (batchItem !== null && rs?.state === 'present')
+    return { uri, state: 'absent', revision: rs.revision, indexing: idx };
   return { uri, state: 'unknown', indexing: idx };
 }
