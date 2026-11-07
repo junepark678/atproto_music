@@ -424,12 +424,38 @@ const VERDICTS: Readonly<Record<ProjectedKind, VerdictOf>> = {
 };
 
 /**
+ * Whether re-proving unchanged scrobble bytes at a newer revision can still
+ * change what is visible: a succeeded removal of the same record decides by
+ * the projection's revision (read/visibility `removedBy`: an `after` cutoff
+ * releases a target proven at or above it, an exact one above it), so the
+ * same CID proven at a later revision may cross that cutoff. Conservative:
+ * any revision advance of a record with such a receipt invalidates
+ * statistics, in the proof's own transaction; the cutoffs never move.
+ */
+function revisionMayReveal(db: Db, t: RecordTarget, priorRevision: string | null): boolean {
+  if (priorRevision === t.rev) return false;
+  return (
+    db.one(
+      `SELECT 1 AS x FROM operations WHERE did = ? AND collection = ? AND rkey = ?
+         AND kind = 'scrobble.delete' AND state = 'succeeded' LIMIT 1`,
+      t.did,
+      t.collection,
+      t.rkey,
+    ) !== null
+  );
+}
+
+/**
  * Write one verified scrobble/follow/love version. No guards: the caller has
  * checked the owner, the per-DID floor (live proofs) and the per-URI guard.
- * Bumps `stats_version` when a scrobble row changed; does not touch max_rev.
+ * Bumps `stats_version` when a scrobble row changed, or when unchanged bytes
+ * move to a revision a succeeded removal's cutoff may decide differently
+ * (revisionMayReveal); does not touch max_rev.
  */
 export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): TargetResult {
   const verifiedAt = toStorage(o.nowNs);
+  const priorRevision =
+    db.one<{ revision: string }>('SELECT revision FROM record_state WHERE uri = ?', t.uri)?.revision ?? null;
   let out: TargetResult;
   if (t.present === null) {
     const deleted = deleteProjection(db, t.kind, t.uri);
@@ -467,7 +493,11 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
           t.kind === 'scrobbleBatch',
         );
       }
-      out = { outcome: 'applied', statsChanged: (t.kind === 'scrobble' || t.kind === 'scrobbleBatch') && changed };
+      out = {
+        outcome: 'applied',
+        statsChanged:
+          (t.kind === 'scrobble' || t.kind === 'scrobbleBatch') && (changed || revisionMayReveal(db, t, priorRevision)),
+      };
     } else {
       const deleted = deleteProjection(db, t.kind, t.uri);
       writeRecordState(db, {
