@@ -12,6 +12,7 @@ import {
   revokeLastfmSession,
   revokeListenbrainzToken,
 } from '../api/account';
+import { formatLocalDate } from '../components/format';
 import { EmptyState, ErrorState, LoadingState, SignInPrompt } from '../components/state-views';
 import { useAppState } from '../state/store';
 
@@ -142,7 +143,7 @@ export default function SettingsCredentials() {
           <ul>
             {credentials.appPasswords.map((item) => (
               <li key={item.id}>
-                {item.label} · created {new Date(item.createdAt).toLocaleDateString()}{' '}
+                {item.label} · created {formatLocalDate(item.createdAt)}{' '}
                 {canManage ? (
                   <button
                     type="button"
@@ -191,7 +192,7 @@ export default function SettingsCredentials() {
             <ul>
               {credentials.listenbrainzTokens.map((item) => (
                 <li key={item.id}>
-                  {item.label} · created {new Date(item.createdAt).toLocaleDateString()}{' '}
+                  {item.label} · created {formatLocalDate(item.createdAt)}{' '}
                   {canManage ? (
                     <button
                       type="button"
@@ -237,7 +238,7 @@ export default function SettingsCredentials() {
           <ul>
             {credentials.lastfmApps.map((app) => (
               <li key={app.apiKey}>
-                {app.name} · created {new Date(app.createdAt).toLocaleDateString()}
+                {app.name} · created {formatLocalDate(app.createdAt)}
               </li>
             ))}
           </ul>
@@ -249,7 +250,7 @@ export default function SettingsCredentials() {
           <ul>
             {credentials.lastfmSessions.map((item) => (
               <li key={item.id}>
-                {item.clientName} · created {new Date(item.createdAt).toLocaleDateString()}{' '}
+                {item.clientName} · created {formatLocalDate(item.createdAt)}{' '}
                 {canManage ? (
                   <button
                     type="button"

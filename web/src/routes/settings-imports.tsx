@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { cancelImport, type ImportJob, listImports, resumeImport, startImport, uploadImport } from '../api/account';
+import { scrubDids } from '../components/format';
 import { EmptyState, ErrorState, LoadingState, SignInPrompt } from '../components/state-views';
 import { useAppState } from '../state/store';
 
@@ -151,7 +152,7 @@ export default function SettingsImports() {
                       ? job.state
                       : `Estimated time remaining: ${Math.ceil(job.etaSeconds / 60)} minutes.`}
                 </p>
-                {job.error && <p role="alert">{job.error}</p>}
+                {job.error && <p role="alert">{scrubDids(job.error)}</p>}
                 {canManage && job.state === 'paused' ? (
                   <button
                     type="button"

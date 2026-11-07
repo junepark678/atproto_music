@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { approveLastfmAuthorization, listCredentials } from '../api/account';
+import { formatLocalTimeMs } from '../components/format';
 import { ErrorState, LoadingState, SignInPrompt } from '../components/state-views';
 import { useAppState } from '../state/store';
 
@@ -90,7 +91,7 @@ export default function LastfmAuthorize() {
               )}
             </dd>
             <dt>Requested</dt>
-            <dd>{new Date().toLocaleString()}</dd>
+            <dd>{formatLocalTimeMs(Date.now(), { zone: true })}</dd>
             <dt>Callback host</dt>
             <dd>
               <strong>{callbackHost}</strong>

@@ -16,7 +16,7 @@
 import type { Clock } from '@atmusic/core/deps';
 import { buildScrobbleRecord, MSG_DURATION } from '@atmusic/core/scrobble';
 import { useEffect, useRef, useState } from 'preact/hooks';
-import { describeFailure } from '../components/format';
+import { describeFailure, localInputToUtc, scrubDids, toLocalInput } from '../components/format';
 import { OperationStatus } from '../components/operation-status';
 import type { OutboxService } from '../components/outbox-service';
 import { useServices } from '../components/services';
@@ -38,9 +38,9 @@ const FIELDS: readonly { name: FieldName; label: string; required: boolean; hint
   { name: 'album', label: 'Album (optional)', required: false },
   {
     name: 'listenedAt',
-    label: 'Listened at (UTC)',
+    label: 'Listened at',
     required: true,
-    hint: 'An RFC 3339 UTC time such as 2026-01-15T11:58:00Z, at most 5 minutes in the future.',
+    hint: 'In your local time, at most 5 minutes in the future.',
   },
   { name: 'durationSeconds', label: 'Duration in seconds (optional)', required: false, hint: 'From 1 to 86400.' },
   {
@@ -66,7 +66,7 @@ export function emptyForm(clock: Clock): FormValues {
     artist: '',
     track: '',
     album: '',
-    listenedAt: isoSeconds(clock.nowMs()),
+    listenedAt: toLocalInput(clock.nowMs()),
     durationSeconds: '',
     recordingMbid: '',
   };
@@ -77,7 +77,7 @@ export function formInput(values: FormValues): { input: Record<string, unknown>;
   const input: Record<string, unknown> = {
     artist: values.artist,
     track: values.track,
-    listenedAt: values.listenedAt.trim(),
+    listenedAt: localInputToUtc(values.listenedAt),
   };
   const errors: FieldErrors = {};
   if (values.album !== '') input.album = values.album;
@@ -115,10 +115,10 @@ export function validateForm(values: FormValues, prefix: string, clock: Clock): 
     if (built.ok) break;
     const field = built.reason.field as FieldName;
     if (!FIELDS.some((f) => f.name === field) || errors[field] !== undefined) {
-      errors.form = `${built.reason.field}: ${built.reason.message}`;
+      errors.form = scrubDids(`${built.reason.field}: ${built.reason.message}`);
       break;
     }
-    errors[field] = built.reason.message;
+    errors[field] = scrubDids(built.reason.message);
     if (field in standIn) probe[field] = standIn[field];
     else delete probe[field];
   }
@@ -192,7 +192,7 @@ export function ScrobbleForm({ outbox }: { outbox: OutboxService }) {
     try {
       const result = await outbox.scrobble(formInput(current).input);
       if (!result.ok) {
-        setErrors({ [result.reason.field]: result.reason.message });
+        setErrors({ [result.reason.field]: scrubDids(result.reason.message) });
         return;
       }
       setSubmitted((ids) => [result.op.id, ...ids]);
@@ -241,8 +241,12 @@ export function ScrobbleForm({ outbox }: { outbox: OutboxService }) {
               <input
                 id={`field-${field.name}`}
                 name={field.name}
-                type="text"
-                inputMode={field.name === 'durationSeconds' ? 'numeric' : undefined}
+                {...(field.name === 'listenedAt'
+                  ? { type: 'datetime-local' as const, step: 1 }
+                  : {
+                      type: 'text' as const,
+                      inputMode: field.name === 'durationSeconds' ? ('numeric' as const) : undefined,
+                    })}
                 required={field.required}
                 aria-invalid={error ? 'true' : undefined}
                 aria-describedby={[hintId, errorId].filter(Boolean).join(' ') || undefined}

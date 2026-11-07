@@ -232,7 +232,7 @@ test('signin, feed, profile, scrobble, settings/links, settings/imports, setting
   await nav(page).getByRole('link', { name: 'Add scrobble' }).click();
   await settled(page, 'Add a scrobble');
   await expectAccessible(page, 'signed-in /scrobble');
-  await page.getByLabel('Listened at (UTC)').fill('');
+  await page.getByLabel('Listened at').fill('');
   await page.getByRole('button', { name: 'Publish scrobble' }).click();
   await expect(page.locator('[data-field-error]')).toHaveCount(3); // artist, track, listenedAt
   await expect(page.getByLabel('Artist')).toHaveAttribute('aria-invalid', 'true');
@@ -346,7 +346,7 @@ test('keyboard-only journey reaches sign-in, scrobble submit, window tabs, follo
   await page.keyboard.type('Cloudbusting');
   await tabTo(page, page.getByLabel('Album (optional)'), 'album field');
   await page.keyboard.type('Hounds of Love');
-  await tabTo(page, page.getByLabel('Listened at (UTC)'), 'listened-at field');
+  await tabTo(page, page.getByLabel('Listened at'), 'listened-at field');
   await page.keyboard.press('Control+A');
   await page.keyboard.type(new Date(net.fixtureNowMs - 60_000).toISOString().replace(/\.\d{3}Z$/, 'Z'));
   await tabTo(page, page.getByRole('button', { name: 'Publish scrobble' }), 'publish button');
