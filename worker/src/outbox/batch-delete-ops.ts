@@ -13,6 +13,12 @@ import { failureOutcome, type Outcome } from './pds-writer';
 import type { ExecContext, Executor } from './runner';
 import { validRkey } from './scrobble-ops';
 
+function batchFailure(failure: import('./pds-writer').Failure): Outcome {
+  return failure.code === 'forbidden_scope' || failure.error === 'ScopeMissing' || failure.error === 'InsufficientScope'
+    ? { kind: 'reauth', code: 'batch_scope_required' }
+    : failureOutcome(failure);
+}
+
 export interface BatchListenRemovalPlan {
   operationId: string;
   listenId: string;
@@ -327,6 +333,9 @@ export function enqueueBatchListenDelete(
 }
 
 async function removeIds(op: OperationRow, ctx: ExecContext): Promise<Outcome> {
+  const collection = ctx.collections.scrobbleBatch;
+  if (op.did !== ctx.xrpc.did || op.collection !== collection || !validRkey(op.rkey))
+    return { kind: 'permanent', code: 'invalid_record_identity' };
   const uri = `at://${op.did}/${op.collection}/${op.rkey}`;
   const collidedCreate = ctx.m.db.one<{ id: string }>(
     `SELECT p.id FROM operation_deps d JOIN operations p ON p.id = d.pred_id
@@ -351,21 +360,33 @@ async function removeIds(op: OperationRow, ctx: ExecContext): Promise<Outcome> {
   const wanted = new Set(ids);
   for (let attempt = 0; attempt < 5; attempt++) {
     const found = await ctx.xrpc.getRecord(op.collection!, op.rkey!);
-    if (found.kind === 'failed') return failureOutcome(found.failure);
+    if (found.kind === 'failed') return batchFailure(found.failure);
     if (found.kind === 'absent')
-      return { kind: 'succeeded', uri, hints: [{ collection: op.collection!, rkey: op.rkey! }] };
-    const record = found.value as { listens?: unknown[]; [key: string]: unknown };
-    if (!Array.isArray(record.listens)) return { kind: 'permanent', code: 'invalid_batch_record' };
-    const kept = record.listens.filter((item) => {
+      return { kind: 'succeeded', uri, swapCid: op.swap_cid ?? undefined, hints: [{ collection, rkey: op.rkey }] };
+    if (found.uri !== uri) return { kind: 'permanent', code: 'invalid_batch_record_identity' };
+    const record = found.value;
+    if (
+      record === null ||
+      typeof record !== 'object' ||
+      Array.isArray(record) ||
+      (record as Record<string, unknown>).$type !== collection ||
+      !Array.isArray((record as { listens?: unknown }).listens)
+    )
+      return { kind: 'permanent', code: 'invalid_batch_record' };
+    const remoteListens = (record as { listens: unknown[] }).listens;
+    const kept = remoteListens.filter((item) => {
       const selected =
         wanted.has('*') ||
         (item !== null && typeof item === 'object' && wanted.has(String((item as { id?: unknown }).id)));
       return !selected;
     });
-    if (kept.length === record.listens.length)
+    if (kept.length === remoteListens.length)
       return { kind: 'succeeded', uri, swapCid: found.cid, hints: [{ collection: op.collection!, rkey: op.rkey! }] };
     const budget = ctx.afford(kept.length === 0 ? 1 : 2);
     if (budget !== null) return budget;
+    // A restart after this write must retain the exact CAS target even if the
+    // PDS committed and the success response was lost.
+    ctx.persist({ swapCid: found.cid });
     const body =
       kept.length === 0
         ? { repo: op.did, collection: op.collection, rkey: op.rkey, swapRecord: found.cid }
@@ -378,13 +399,20 @@ async function removeIds(op: OperationRow, ctx: ExecContext): Promise<Outcome> {
           };
     const method = kept.length === 0 ? 'com.atproto.repo.deleteRecord' : 'com.atproto.repo.putRecord';
     const result = await ctx.xrpc.procedure(method, body, kept.length === 0 ? 'delete' : 'put');
-    if (result.ok)
-      return { kind: 'succeeded', uri, swapCid: found.cid, hints: [{ collection: op.collection!, rkey: op.rkey! }] };
-    if (result.failure.code === 'repository_changed') continue;
-    // A response can be lost after commit: prove whether the intended edit landed.
+    if (!result.ok && result.failure.code === 'repository_changed') continue;
+    // A success status can still contain no confirmation that the edit landed.
+    // Always read back the owner-scoped URI before marking intent complete.
     const after = await ctx.xrpc.getRecord(op.collection!, op.rkey!);
     if (after.kind === 'present') {
-      const afterListens = (after.value as { listens?: unknown[] }).listens;
+      if (after.uri !== uri) return { kind: 'permanent', code: 'invalid_batch_record_identity' };
+      if (
+        after.value === null ||
+        typeof after.value !== 'object' ||
+        Array.isArray(after.value) ||
+        (after.value as Record<string, unknown>).$type !== collection
+      )
+        return { kind: 'permanent', code: 'invalid_batch_record' };
+      const afterListens = (after.value as { listens?: unknown }).listens;
       if (!Array.isArray(afterListens)) return { kind: 'permanent', code: 'invalid_batch_record' };
       const remaining = wanted.has('*')
         ? afterListens
@@ -393,34 +421,62 @@ async function removeIds(op: OperationRow, ctx: ExecContext): Promise<Outcome> {
           );
       if (remaining.length === 0)
         return { kind: 'succeeded', uri, swapCid: after.cid, hints: [{ collection: op.collection!, rkey: op.rkey! }] };
+      if (result.ok) return { kind: 'transient', code: 'remote_delete_unconfirmed', swapCid: after.cid };
+      if (
+        result.failure.code === 'forbidden_scope' ||
+        result.failure.error === 'ScopeMissing' ||
+        result.failure.error === 'InsufficientScope'
+      )
+        return { kind: 'reauth', code: 'batch_scope_required' };
       if (result.failure.kind === 'transient' || result.failure.kind === 'missing') continue;
-      return failureOutcome(result.failure);
+      return batchFailure(result.failure);
     }
     if (after.kind === 'absent')
-      return { kind: 'succeeded', uri, hints: [{ collection: op.collection!, rkey: op.rkey! }] };
-    return failureOutcome(after.failure);
+      return { kind: 'succeeded', uri, swapCid: found.cid, hints: [{ collection: op.collection!, rkey: op.rkey! }] };
+    if (result.ok) return batchFailure(after.failure);
+    return batchFailure(after.failure);
   }
   return { kind: 'transient', code: 'repository_changed' };
 }
 
 export const batchDeleteExecutor: Executor = {
-  execute: removeIds,
+  async execute(op, ctx) {
+    return removeIds(op, ctx);
+  },
   async reconcile(op, ctx) {
+    const collection = ctx.collections.scrobbleBatch;
+    if (op.did !== ctx.xrpc.did || op.collection !== collection || !validRkey(op.rkey))
+      return { kind: 'permanent', code: 'invalid_record_identity' };
     const found = await ctx.xrpc.getRecord(op.collection!, op.rkey!);
-    if (found.kind === 'failed') return failureOutcome(found.failure);
+    if (found.kind === 'failed') return batchFailure(found.failure);
     const uri = `at://${op.did}/${op.collection}/${op.rkey}`;
     if (found.kind === 'absent')
-      return { kind: 'succeeded', uri, hints: [{ collection: op.collection!, rkey: op.rkey! }] };
+      return { kind: 'succeeded', uri, swapCid: op.swap_cid ?? undefined, hints: [{ collection, rkey: op.rkey! }] };
+    if (found.uri !== uri) return { kind: 'permanent', code: 'invalid_batch_record_identity' };
     const ids = new Set(
       ctx.m.db
         .all<{ listen_id: string }>('SELECT listen_id FROM batch_delete_listens WHERE operation_id = ?', op.id)
         .map((row) => row.listen_id),
     );
-    const listens = (found.value as { listens?: { id?: unknown }[] }).listens;
+    const value = found.value;
+    if (
+      value === null ||
+      typeof value !== 'object' ||
+      Array.isArray(value) ||
+      (value as Record<string, unknown>).$type !== collection
+    )
+      return { kind: 'permanent', code: 'invalid_batch_record' };
+    const listens = (value as { listens?: unknown }).listens;
     if (!Array.isArray(listens)) return { kind: 'permanent', code: 'invalid_batch_record' };
-    const remains = ids.has('*') || listens.some((item) => ids.has(String(item.id)));
+    const remains =
+      ids.has('*') ||
+      listens.some((item) => {
+        if (item === null || typeof item !== 'object' || Array.isArray(item)) return false;
+        const id = (item as { id?: unknown }).id;
+        return typeof id === 'string' && ids.has(id);
+      });
     return remains
       ? { kind: 'transient', code: 'batch_delete_unconfirmed' }
-      : { kind: 'succeeded', uri, swapCid: found.cid, hints: [{ collection: op.collection!, rkey: op.rkey! }] };
+      : { kind: 'succeeded', uri, swapCid: found.cid, hints: [{ collection, rkey: op.rkey! }] };
   },
 };
