@@ -48,7 +48,7 @@ export function ScrobbleText({
   scrobble,
   showActor = false,
 }: {
-  scrobble: Pick<Scrobble, 'artist' | 'track' | 'listenedAt' | 'did'> & { album?: string };
+  scrobble: Pick<Scrobble, 'artist' | 'track' | 'listenedAt' | 'did'> & { album?: string; handle?: string | null };
   showActor?: boolean;
 }) {
   return (
@@ -69,7 +69,7 @@ export function ScrobbleText({
           <>
             {' · '}
             <a href={`/u/${scrobble.did}`} class="actor">
-              Unknown account
+              {scrobble.handle ? `@${scrobble.handle}` : 'Unknown account'}
             </a>
           </>
         ) : null}

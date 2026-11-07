@@ -151,4 +151,28 @@ describe('web/test/routes/feed.test.tsx', () => {
     expect(staleApp.root.textContent).toContain('The index is behind');
     staleApp.cleanup();
   });
+
+  it('feed actors show their verified handle and fall back to "Unknown account", never the DID', async () => {
+    const pageOf = (handle: string | null) => {
+      const page = example<{ items: Record<string, unknown>[] }>('scrobble-page');
+      page.items = page.items.map((item) => ({ ...item, handle }));
+      return page;
+    };
+    for (const [handle, label] of [
+      ['alice.test', '@alice.test'],
+      [null, 'Unknown account'],
+    ] as const) {
+      const app = mount('/feed', async (input) =>
+        new URL(String(input), 'https://music.test').pathname === '/api/v1/feed'
+          ? Response.json(pageOf(handle))
+          : undefined,
+      );
+      await vi.waitFor(() => expect(app.root.querySelector('a.actor')).not.toBeNull());
+      const actor = app.root.querySelector('a.actor')!;
+      expect(actor.textContent?.trim()).toBe(label);
+      expect(actor.getAttribute('href')).toMatch(/^\/u\/did:/);
+      expect(app.root.textContent).not.toContain('did:');
+      app.cleanup();
+    }
+  });
 });

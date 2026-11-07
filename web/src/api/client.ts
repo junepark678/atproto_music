@@ -293,7 +293,7 @@ const scrobble: Decoder<Scrobble> = object(
     createdAt: timestamp,
     indexedAt: timestamp,
   },
-  { album: musicText, durationSeconds: int(1, 86_400), recordingMbid: uuid },
+  { album: musicText, durationSeconds: int(1, 86_400), recordingMbid: uuid, handle: nullable(handle) },
 );
 
 const follow: Decoder<Follow> = object({ uri: atUri, cid, actor: did, subject: did, createdAt: timestamp });
