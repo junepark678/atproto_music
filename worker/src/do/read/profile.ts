@@ -83,6 +83,16 @@ export async function verifiedHandle(identity: IdentityResolver, did: string): P
   }
 }
 
+/**
+ * IndexRpc.verifiedHandles: the verified handle (or null) of each distinct
+ * DID, resolved concurrently through the same cached resolver as profiles.
+ */
+export async function verifiedHandles(m: ModuleDeps, dids: readonly string[]): Promise<Record<string, string | null>> {
+  const unique = [...new Set(dids)];
+  const handles = await Promise.all(unique.map((did) => verifiedHandle(m.identity, did)));
+  return Object.fromEntries(unique.map((did, k) => [did, handles[k] ?? null]));
+}
+
 /** IndexRpc.profile: null (404) for unknown, inactive or suppressed users, before any identity request. */
 export async function profile(m: ModuleDeps, did: string): Promise<Profile | null> {
   const core = readProfileCore(m.db, did, m.clock.nowMs(), m.config.ingestMode);

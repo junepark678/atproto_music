@@ -51,6 +51,8 @@ export interface Scrobble {
   durationSeconds?: number;
   recordingMbid?: string;
   indexedAt: Timestamp;
+  /** The actor's verified handle (as Profile.handle); null when unverified. /api/v1 reads only. */
+  handle?: Handle | null;
   // v1.2 additive optional fields (ADR 0005 §6.2); omitted when the record has none.
   albumArtist?: string;
   /** 1–9999. */

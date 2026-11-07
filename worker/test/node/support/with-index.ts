@@ -414,6 +414,7 @@ const METHODS: Record<keyof IndexRpc, true> = {
   followers: true,
   exportUser: true,
   resolveHandle: true,
+  verifiedHandles: true,
   notify: true,
   ensureRunning: true,
   adminStatus: true,
