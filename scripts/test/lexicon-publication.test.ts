@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { batchManifestDigest, validateBatchManifest } from '../check-batch-publication';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const MANIFEST_PATH = 'docs/verification/lexicon-publication/manifest.json';
@@ -100,5 +101,36 @@ describe('published production Lexicon contract', () => {
     }
     required.push('contractMutation');
     expect(contentSha256(edited)).not.toBe(record?.contentSha256);
+  });
+});
+
+describe('batch publication receipt guard', () => {
+  it('requires the existing four schemas and scrobbleBatch with reviewed public evidence', () => {
+    const prefix = 'dev.pythonplayer123.music';
+    const receipt = {
+      authorityDid: 'did:plc:gsichz64a5qpjvmjktkltkw2',
+      ownershipRef: 'dns:_lexicon.music.pythonplayer123.dev TXT',
+      prefix,
+      verifiedAt: '2026-11-07T12:00:00Z',
+      records: [...COLLECTIONS, 'scrobbleBatch'].map((collection) => ({
+        nsid: `${prefix}.${collection}`,
+        uri: `at://did:plc:gsichz64a5qpjvmjktkltkw2/com.atproto.lexicon.schema/${prefix}.${collection}`,
+        cid: `bafyrei${'a'.repeat(52)}`,
+        contentSha256: 'a'.repeat(64),
+        publicRetrieval: `https://pds.example/xrpc/com.atproto.repo.getRecord?collection=${prefix}.${collection}`,
+        match: true,
+      })),
+    };
+    expect(() => validateBatchManifest(receipt)).not.toThrow();
+    expect(() => validateBatchManifest({ ...receipt, records: receipt.records.slice(0, 4) })).toThrow(/exactly five/);
+    expect(() =>
+      validateBatchManifest({
+        ...receipt,
+        records: receipt.records.map((record) =>
+          record.nsid.endsWith('.scrobbleBatch') ? { ...record, match: false } : record,
+        ),
+      }),
+    ).toThrow(/match=true/);
+    expect(batchManifestDigest(new TextEncoder().encode(JSON.stringify(receipt)))).toMatch(/^sha256:[a-f0-9]{64}$/);
   });
 });

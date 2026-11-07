@@ -14,8 +14,10 @@ import { MemoryRevocations } from '../../../src/app/revocations';
 import type { NowPlayingRow, OperationRow } from '../../../src/app/rows';
 import { ensureAccount } from '../../../src/credentials/accounts';
 import { createLbToken, revokeLbToken } from '../../../src/credentials/lb-tokens';
+import { readRoutes } from '../../../src/listenbrainz/read';
 import { createSubmitRoutes } from '../../../src/listenbrainz/submit';
 import { createTokenRoutes } from '../../../src/listenbrainz/token-routes';
+import { insertOperation, newOperationId, prepare } from '../../../src/outbox/operations';
 import { closeApps, startApp, type TestApp } from '../support/app';
 
 const NOW_MS = Date.parse('2026-01-15T12:00:00Z');
@@ -25,6 +27,7 @@ const BOB = 'did:plc:bob00000000000000000000';
 /** An owned test prefix with ownership evidence: the namespace gate allows publication (ADR §5.7). */
 const OWNED = 'org.example.music';
 const SCROBBLE = `${OWNED}.scrobble`;
+const BATCH = `${OWNED}.scrobbleBatch`;
 const OPEN_GATE = {
   LEXICON_PREFIX: OWNED,
   NAMESPACE_OWNERSHIP_REF: 'dns:_lexicon.music.example.org TXT',
@@ -51,7 +54,11 @@ interface Rig {
 
 async function rig(env: Record<string, string> = OPEN_GATE): Promise<Rig> {
   const clock = fixedClock();
-  const app = await startApp({ routes: [...createSubmitRoutes(), ...createTokenRoutes()], clock, env });
+  const app = await startApp({
+    routes: [...createSubmitRoutes(), ...createTokenRoutes(), ...readRoutes()],
+    clock,
+    env,
+  });
   const random = seededRandom(0x70c);
   const revocations = new MemoryRevocations(clock);
   return {
@@ -116,7 +123,87 @@ function seedScrobble(app: TestApp, did: string, rkey: string, listenedAt: strin
   );
 }
 
+function seedBatchListen(
+  app: TestApp,
+  did: string,
+  rkey: string,
+  listenId: string,
+  listenedAt: string,
+  artist: string,
+  track: string,
+) {
+  const [artistKey, trackKeyValue] = trackKey(artist, track);
+  const container = `at://${did}/${BATCH}/${rkey}`;
+  app.db.run(
+    `INSERT INTO scrobbles(uri,cid,did,rkey,revision,artist,track,listened_at,created_at,indexed_at,artist_key,track_key,record_uri,listen_id)
+     VALUES (?, 'bafyreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy', ?, ?, '3lbq2f7ff2c2a', ?, ?, ?,
+       '2026-01-15T11:00:00.000Z', '2026-01-15T11:00:01.000000000Z', ?, ?, ?, ?)`,
+    `${container}#${listenId}`,
+    did,
+    rkey,
+    artist,
+    track,
+    listenedAt,
+    artistKey,
+    trackKeyValue,
+    container,
+    listenId,
+  );
+}
+
 describe('ListenBrainz token routes (ADR §8.2, §8.6)', () => {
+  it('serves verified batch projection rows through the real ListenBrainz listens read route', async () => {
+    const r = await rig();
+    r.user(ALICE, 'alice.example.com');
+    const listenedAt = `${new Date((NOW_S - 900) * 1000).toISOString().slice(0, 19)}.000000000Z`;
+    seedBatchListen(r.app, ALICE, '3lbqbatchread01', '3lb2entryread1', listenedAt, 'Mount Eerie', 'Real Death');
+    const response = await r.app.fetch('/1/user/alice.example.com/listens');
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      payload: { count: number; listens: Array<{ track_metadata: { artist_name: string; track_name: string } }> };
+    };
+    expect(body.payload.count).toBe(1);
+    expect(body.payload.listens[0]?.track_metadata).toMatchObject({
+      artist_name: 'Mount Eerie',
+      track_name: 'Real Death',
+    });
+  });
+
+  it('delete-listen uses the single-over-batch visible winner in either indexed arrival order', async () => {
+    const r = await rig();
+    const alice = r.user(ALICE, 'alice.example.com');
+    const second = NOW_S - 900;
+    const listenedAt = `${new Date(second * 1000).toISOString().slice(0, 19)}.000000000Z`;
+    for (const [suffix, batchFirst] of [
+      ['one', false],
+      ['two', true],
+    ] as const) {
+      const artist = `Cross ${suffix}`;
+      const track = `Track ${suffix}`;
+      const seedSingle = () => seedScrobble(r.app, ALICE, `3lbqsingle${suffix}1`, listenedAt, artist, track);
+      const seedBatch = () =>
+        seedBatchListen(r.app, ALICE, `3lbqbatch${suffix}01`, `3lb2entry${suffix}01`, listenedAt, artist, track);
+      if (batchFirst) {
+        seedBatch();
+        seedSingle();
+      } else {
+        seedSingle();
+        seedBatch();
+      }
+      const msid = await recordingMsid(artist, track);
+      const response = await post(r.app, '/1/delete-listen', alice.token, {
+        listened_at: second,
+        recording_msid: msid,
+      });
+      expect(response.status).toBe(200);
+      expect(r.ops(ALICE).at(-1)).toMatchObject({
+        kind: 'scrobble.delete',
+        collection: SCROBBLE,
+        rkey: `3lbqsingle${suffix}1`,
+      });
+    }
+  });
+
   it("a valid header or ?token returns {code:200,message:'Token valid.',valid:true,user_name}; invalid returns 200 valid false; none is 400", async () => {
     const r = await rig();
     const alice = r.user(ALICE, 'alice.example.com');
@@ -251,6 +338,52 @@ describe('ListenBrainz token routes (ADR §8.2, §8.6)', () => {
     expect(cancel.status).toBe(200);
     expect(r.ops(ALICE)[1]).toMatchObject({ kind: 'scrobble.create', state: 'cancelled' });
     expect(r.app.db.one<{ n: number }>('SELECT count(*) AS n FROM listen_keys WHERE did = ?', ALICE)?.n).toBe(0);
+
+    // A pending batch entry is selected by its own timestamp and MSID, then
+    // the real ListenBrainz route chains a collection-scoped item removal.
+    const batchListenId = '3lb2batchidab';
+    const batchRecord = await prepare({
+      $type: BATCH,
+      createdAt: new Date(NOW_MS).toISOString(),
+      listens: [
+        {
+          id: batchListenId,
+          artist: 'Pending Batch Artist',
+          track: 'Pending Batch Track',
+          listenedAt: new Date((NOW_S - 40) * 1000).toISOString(),
+          createdAt: new Date(NOW_MS).toISOString(),
+        },
+      ],
+    });
+    const batchCreate = r.app.db.tx(() =>
+      insertOperation(
+        r.app.db,
+        {
+          id: newOperationId(r.random),
+          did: ALICE,
+          kind: 'scrobble.create',
+          origin: 'import',
+          collection: BATCH,
+          rkey: '3lbqbatchpending1',
+          prepared: batchRecord,
+          dueAt: NOW_MS,
+          importJobId: 'pending-batch',
+        },
+        NOW_MS,
+      ),
+    );
+    const batchMsid = await recordingMsid('Pending Batch Artist', 'Pending Batch Track');
+    const batchDelete = await post(r.app, '/1/delete-listen', alice.token, {
+      listened_at: NOW_S - 40,
+      recording_msid: batchMsid,
+    });
+    expect(batchDelete.status).toBe(200);
+    expect(r.ops(ALICE).find((op) => op.id === batchCreate.id)).toMatchObject({ collection: BATCH, state: 'queued' });
+    const batchRemoval = r.ops(ALICE).find((op) => op.kind === 'scrobble.delete' && op.collection === BATCH);
+    expect(batchRemoval).toMatchObject({ rkey: '3lbqbatchpending1', state: 'queued' });
+    expect(r.app.db.all('SELECT listen_id FROM batch_delete_listens WHERE operation_id = ?', batchRemoval!.id)).toEqual(
+      [{ listen_id: batchListenId }],
+    );
 
     // A closed publication gate (no lexicon prefix, or the fixture prefix
     // without NAMESPACE_OWNERSHIP_REF, ADR §5.7): the token is still checked

@@ -694,13 +694,22 @@ describe('migrate', () => {
   // database at that version is ready for that code, across restarts.
   // Migration 3 is additive and keeps the v2 compatibility floor.
   it('SCHEMA_VERSION includes additive batch provenance and remains compatible with v2 code', async () => {
-    expect(SCHEMA_VERSION).toBe(5);
+    expect(SCHEMA_VERSION).toBe(14);
     expect(MIGRATIONS.map((m) => [m.version, m.name])).toEqual([
       [1, 'initial_workers_schema'],
       [2, 'node_schema'],
       [3, 'follow_proof_baseline'],
       [4, 'scrobble_delete_target_index'],
       [5, 'batch_listen_provenance'],
+      [6, 'batch_outbox_recovery'],
+      [7, 'batch_listen_removal_receipts'],
+      [8, 'outbox_send_certainty'],
+      [9, 'batch_removal_evidence'],
+      [10, 'verified_listen_membership'],
+      [11, 'removal_commit_fence'],
+      [12, 'removal_completion_boundary'],
+      [13, 'removal_reached'],
+      [14, 'removal_send_pin'],
     ]);
 
     const name = 'migrate-v2-ready';
@@ -718,6 +727,15 @@ describe('migrate', () => {
         { version: 3, name: 'follow_proof_baseline' },
         { version: 4, name: 'scrobble_delete_target_index' },
         { version: 5, name: 'batch_listen_provenance' },
+        { version: 6, name: 'batch_outbox_recovery' },
+        { version: 7, name: 'batch_listen_removal_receipts' },
+        { version: 8, name: 'outbox_send_certainty' },
+        { version: 9, name: 'batch_removal_evidence' },
+        { version: 10, name: 'verified_listen_membership' },
+        { version: 11, name: 'removal_commit_fence' },
+        { version: 12, name: 'removal_completion_boundary' },
+        { version: 13, name: 'removal_reached' },
+        { version: 14, name: 'removal_send_pin' },
       ]);
       expect(db.all('SELECT min_compatible_version FROM schema_compat')).toEqual([{ min_compatible_version: 2 }]);
       // A row in a migration-2 table survives reopening.

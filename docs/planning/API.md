@@ -23,13 +23,14 @@ Scrobble = {uri: AT_URI, cid: CID, did: DID, revision: string,
             musicService?: string}   (the last eight are the optional v1.2 fields, ADR 0005 §6.2)
 Follow = {uri: AT_URI, cid: CID, actor: DID, subject: DID, createdAt: timestamp}
 Page<T> = {items: T[], nextCursor: string|null, asOf: timestamp, indexing: Indexing}
-NotifyInput = {uri: AT_URI} | {did: DID}
+ListenUri = AT_URI | (at://<did>/<prefix>.scrobbleBatch/<containerTid>#<listenTid>)
+NotifyInput = {uri: ListenUri} | {did: DID}
 NotifyAccepted = {state: "queued"}
-RecordStatus = {uri: AT_URI, state: "indexed"|"pending"|"absent"|"excluded"|"unknown",
+RecordStatus = {uri: ListenUri, state: "indexed"|"pending"|"absent"|"excluded"|"unknown",
                 cid?: CID, revision?: string, reason?: string, indexing: Indexing}
 ```
 
-`RecordStatus`: `indexed` is a visible row and carries its verified `cid` and `revision`. `pending` means a hint or job exists. `absent` is verified absence. `excluded` is a verified record that failed validation, and carries `reason`; `reason` appears only for `excluded`. `unknown` carries no `cid`, `revision` or `reason`.
+`RecordStatus`: `indexed` is a visible row and carries its verified `cid` and `revision`. `pending` means a hint or job exists. `absent` is verified absence; for a batch listen URI, a missing item in a present verified container is absent at that container revision. `excluded` is a verified record that failed validation, and carries `reason`; `reason` appears only for `excluded`. `unknown` carries no `cid`, `revision` or `reason`.
 
 Lists use default `limit=20`, maximum 100 and `cursor`. Statistics top lists use default `limit=10`, maximum 100, without cursor. `limit=0`, negative, noninteger or above maximum returns 422; do not silently clamp.
 
@@ -80,7 +81,7 @@ Statistics = {did:DID, window:"all"|"7d"|"30d"|"365d", asOf:timestamp,
 
 Rank arrays order by count descending, then normalized group tuple ascending. Display values use the newest record in each group with AT URI tie-break. Profile counts and follower edges use confirmed active state. For duplicate external follow records representing one edge, serialize the lexicographically smallest active AT URI as its representative; do not double-count it.
 
-Deletion clarification (A12, A13): deletes run in the SPA outbox against the owner's own PDS. A pending deletion hides the record in the owner's view immediately; public views change only once signed absence is verified, typically within seconds through notify. A failed delete stays visible to the owner as failed rather than claiming removal. Scrobble local absence alone cannot prove PDS absence. Deletes use the CID from `GET /api/v1/records/status` as `swapRecord`; `InvalidSwap` re-fetches and reconciles before retry. A delete queued behind a pending create waits for it. Unfollow lists the owner's own follow records from their PDS and deletes every record whose subject matches, each with `swapRecord`; an unrelated follow subject is retained. Alternating follow and unfollow intents retain separate operation identities and execute in order after their persisted predecessors. A follow whose deterministic record already exists with the same subject is success and keeps its original `createdAt` without overwriting it.
+Deletion clarification (A12, A13, ADR 0006): deletes run in the outbox against the owner's own PDS. A single-record delete URI cannot have a fragment; a batch URI may include one exact listen TID to remove only that item, while the unfragmented batch URI deletes its full container. A pending item deletion hides only that item in the owner's view immediately; public views change only once signed proof is applied. A failed delete stays visible as failed rather than claiming removal. Deletes use the container's current CID as `swapRecord`; `InvalidSwap` re-fetches and reconciles before retry. A delete queued behind a pending create waits for it. Unfollow lists the owner's own follow records from their PDS and deletes every record whose subject matches, each with `swapRecord`; an unrelated follow subject is retained. Alternating follow and unfollow intents retain separate operation identities and execute in order after their persisted predecessors. A follow whose deterministic record already exists with the same subject is success and keeps its original `createdAt` without overwriting it.
 
 Idempotency (A11, as written for v1.1; B6 amends it for v1.2 below): there is no server `Idempotency-Key`. The SPA allocates each record key (a TID, or the deterministic follow rkey) once, before the first attempt, and persists it with the canonical payload digest. An ambiguous create is resolved with `getRecord` and a digest comparison: equal is success; a different payload at that key is the client-side terminal `remote_record_conflict`, and the remote record is never overwritten.
 

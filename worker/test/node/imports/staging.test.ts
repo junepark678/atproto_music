@@ -27,7 +27,7 @@ import {
 import { fsUploadStore } from '../../../src/imports/uploads';
 import { bindPolicyFetch, createPolicyFetch } from '../../../src/node/policy-fetch';
 import { acceptListens } from '../../../src/outbox/ingress';
-import { type Harness, remoteRecords, SCROBBLE, T0, withHarness } from '../outbox/support';
+import { type Harness, PREFIX, remoteRecords, SCROBBLE, T0, withHarness } from '../outbox/support';
 import { FakeListenBrainz } from '../support/fake-listenbrainz';
 
 const T0S = Math.floor(T0 / 1000);
@@ -195,10 +195,12 @@ describe('import staging', () => {
       });
       await runImports(rt, h.kit.clock.nowMs());
       const imports = h.ops("origin = 'import'");
-      expect(imports.map((o) => (JSON.parse(o.record_json as string) as { track: string }).track)).toEqual([
-        'Twice',
-        'Only Once',
-      ]);
+      expect(
+        imports.flatMap((o) => {
+          const record = JSON.parse(o.record_json as string) as { track?: string; listens?: Array<{ track: string }> };
+          return record.listens?.map((listen) => listen.track) ?? (record.track === undefined ? [] : [record.track]);
+        }),
+      ).toEqual(['Twice', 'Only Once']);
       expect(
         imports.every((o) => o.kind === 'scrobble.create' && o.priority === 1 && o.import_job_id === 'job-dedupe'),
       ).toBe(true);
@@ -219,11 +221,15 @@ describe('import staging', () => {
       await h.runUntilIdle();
       await runUntil(h, rt, () => job(h, 'job-dedupe').state === 'done');
       expect(job(h, 'job-dedupe')).toMatchObject({ state: 'done', written: 2, failed_items: 0, duplicates: 5 });
-      const records = (await remoteRecords(h.kit, 'Alice', SCROBBLE)).map((r) => (r.value as { track: string }).track);
-      // One record per listen; nothing for the indexed one (never written by us).
+      const singles = (await remoteRecords(h.kit, 'Alice', SCROBBLE)).map((r) => (r.value as { track: string }).track);
+      const batches = (await remoteRecords(h.kit, 'Alice', `${PREFIX}.scrobbleBatch`)).flatMap((r) =>
+        (r.value as { listens: Array<{ track: string }> }).listens.map((listen) => listen.track),
+      );
+      const records = [...singles, ...batches];
+      // Batch containers project two imported listens; nothing for the indexed one (never written by us).
       expect(records.sort()).toEqual(['Arrives Live', 'Only Once', 'Twice', 'Via 1', 'Via 2.0']);
       const succeeded = h.db.all<OperationRow>("SELECT * FROM operations WHERE state = 'succeeded'");
-      expect(succeeded).toHaveLength(5);
+      expect(succeeded).toHaveLength(4);
     });
   });
 

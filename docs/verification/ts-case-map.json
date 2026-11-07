@@ -14,6 +14,7 @@
         "worker/test/config.test.ts › batch publication needs a distinct second reviewed manifest digest and the original publication gate",
         "worker/test/http/health-meta.test.ts › advertises batchPublication only for a distinct batch manifest with the original gate open",
         "worker/test/node/bff/client-metadata.test.ts › requests the batch collection only when the separate batch gate is open",
+        "worker/test/node/imports/writer.test.ts › keeps staged imported listens dormant without attempts or a polling alarm while publication is closed",
         "worker/test/node/config.test.ts › INGEST_MODE accepts socket and off only, ignores retired plan and placement variables, and embedded config has no tier or placement fields"
       ]
     },
@@ -327,7 +328,12 @@
     },
     {
       "case": "M2.2.1/scope_inventory",
-      "target": "worker/test/node/bff/client-metadata.test.ts › the metadata for https://music.214510.xyz equals the ADR 0005 §5.3 document with client_name AT Protocol Music and the four repo: scopes, and jwks.json has no private member"
+      "target": "worker/test/node/bff/client-metadata.test.ts › the metadata for https://music.214510.xyz equals the ADR 0005 §5.3 document with client_name AT Protocol Music and the four repo: scopes, and jwks.json has no private member",
+      "also": [
+        "worker/test/node/imports/writer.test.ts › checks the granted token scope before starting a batch write",
+        "worker/test/node/imports/writer.test.ts › holds a batch lane on a missing-scope response without failing its imported listens",
+        "packages/core/test/write-policy.test.ts › classifies ScopeMissing and InsufficientScope as explicit permanent scope errors"
+      ]
     },
     {
       "case": "M2.2.2/par_pkce",
@@ -517,7 +523,14 @@
     },
     {
       "case": "M3.2.1/rkey_persistence",
-      "target": "worker/test/node/outbox/recovery.test.ts › crash before send, after PDS commit before local ack, after local commit, and during delete (database reopened) each end with exactly one PDS outcome"
+      "target": "worker/test/node/outbox/recovery.test.ts › crash before send, after PDS commit before local ack, after local commit, and during delete (database reopened) each end with exactly one PDS outcome",
+      "also": [
+        "worker/test/node/imports/writer.test.ts › rebatches only queued never-sent import singles after rechecking all item and key links",
+        "worker/test/node/imports/writer.test.ts › splits a definitely rejected container into durable children and keeps entry identities and per-item removal outcomes",
+        "worker/test/node/imports/writer.test.ts › rolls back child insertion and item repointing together when the split transaction faults",
+        "worker/test/node/imports/writer.test.ts › rechecks a single that starts sending while async rebatch preparation is in flight",
+        "worker/test/node/imports/writer.test.ts › rolls back old operations and mappings together when the rebatch transaction faults"
+      ]
     },
     {
       "case": "M3.2.2/transient_schedule",
@@ -536,7 +549,11 @@
     },
     {
       "case": "M3.2.3/crash_after_remote",
-      "target": "worker/test/node/outbox/recovery.test.ts › crash before send, after PDS commit before local ack, after local commit, and during delete (database reopened) each end with exactly one PDS outcome"
+      "target": "worker/test/node/outbox/recovery.test.ts › crash before send, after PDS commit before local ack, after local commit, and during delete (database reopened) each end with exactly one PDS outcome",
+      "also": [
+        "worker/test/node/imports/writer.test.ts › a restart mid-batch reuses the allocated rkeys and the PDS ends with exactly one record per unique listen",
+        "worker/test/node/imports/writer.test.ts › reads an attempted batch after a lost create success and never resends it"
+      ]
     },
     {
       "case": "M3.2.3/conflicting_rkey",

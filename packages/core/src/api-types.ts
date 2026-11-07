@@ -219,7 +219,7 @@ export type FeedScope = 'global' | 'following';
 // ---------------------------------------------------------------------------
 
 /** N1 `POST /api/v1/notify`: exactly one of `uri` or `did`; unknown fields are 422. */
-export type NotifyInput = { uri: AtUri; did?: never } | { did: Did; uri?: never };
+export type NotifyInput = { uri: ListenUri; did?: never } | { did: Did; uri?: never };
 
 /** N1 success: 202. */
 export interface NotifyAccepted {

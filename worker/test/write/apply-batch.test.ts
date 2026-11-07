@@ -9,7 +9,7 @@ import { feed } from '../../src/do/read/feed';
 import { history } from '../../src/do/read/history';
 import { lookup } from '../../src/do/read/lookup';
 import { readProfileCore } from '../../src/do/read/profile';
-import { globalTrackCounts } from '../../src/do/read/range-stats';
+import { globalTrackCounts, rangeStatsWithCache } from '../../src/do/read/range-stats';
 import { listensByTimestamp, recentPage } from '../../src/do/read/recent';
 import { computeStatistics } from '../../src/do/read/stats';
 import { visibleScrobblesFrom } from '../../src/do/read/visibility';
@@ -51,6 +51,75 @@ const batchRecord = (...listens: Record<string, unknown>[]) => ({
 const apply = (db: Db, p: RecordProof) => db.tx(() => applyRecordProof(db, p, OPTS));
 
 describe('batch projection and visibility', () => {
+  it('projects a verified external batch through snapshot, update, delete, and recreation proofs', async () => {
+    const repo = await repoFor('alice');
+    const rkey = '3lbqbatch01ab';
+    const created = await putProof(repo, BATCH, rkey, batchRecord(listen(ID_A)));
+    if (created.state !== 'present') throw new Error('expected a present batch proof');
+    const snapshotRecord = await repo.getRecord(BATCH, rkey, { at: created.commit.cid });
+    expect(snapshotRecord).not.toBeNull();
+    const updated = await putProof(repo, BATCH, rkey, batchRecord(listen(ID_A), listen(ID_B, { track: 'Second' })));
+    const deleted = await deleteProof(repo, BATCH, rkey);
+    const recreated = await putProof(repo, BATCH, rkey, batchRecord(listen(ID_C, { track: 'Again' })));
+
+    await withMigratedDb((db) => {
+      const generation = seedUser(db, ALICE);
+      seedSnapshotJob(db, ALICE, generation);
+      const container = uriOf(ALICE, BATCH, rkey);
+      const byUri = () =>
+        db.all<{ uri: string }>('SELECT uri FROM scrobbles WHERE record_uri = ? ORDER BY uri', container);
+      const statsQuery = {
+        did: ALICE,
+        entity: 'tracks' as const,
+        lower: Date.parse('2026-01-14T00:00:00Z'),
+        upper: Date.parse('2026-01-16T00:00:00Z'),
+        limit: null,
+        offset: 0,
+        rangeKey: 'batch-lifecycle',
+      };
+      const stats = () => rangeStatsWithCache({ db, clock: { nowMs: () => 1768478400000 } }, statsQuery);
+      expect(
+        db.tx(() =>
+          applySnapshotChunk(db, {
+            did: ALICE,
+            generation,
+            headRev: created.commit.rev,
+            intervalLo: `${PREFIX}.`,
+            intervalHi: `${BATCH}/${rkey}`,
+            entries: [{ key: `${BATCH}/${rkey}`, cid: created.cid, record: snapshotRecord!.value }],
+            receiptNs: NOW_NS,
+            prefix: PREFIX,
+            nowNs: NOW_NS,
+          }),
+        ).outcome,
+      ).toBe('applied');
+      expect(byUri()).toEqual([{ uri: `${container}#${ID_A}` }]);
+      const afterCreate = stats();
+      expect([afterCreate.cache, afterCreate.stats?.totals.listens]).toEqual(['miss', 1]);
+      expect(apply(db, updated).outcome).toBe('applied');
+      expect(byUri()).toEqual([{ uri: `${container}#${ID_A}` }, { uri: `${container}#${ID_B}` }]);
+      const afterUpdate = stats();
+      expect([afterUpdate.cache, afterUpdate.stats?.totals.listens]).toEqual(['miss', 2]);
+      expect(apply(db, deleted).outcome).toBe('absent');
+      expect(byUri()).toEqual([]);
+      const afterDelete = stats();
+      expect([afterDelete.cache, afterDelete.stats?.totals.listens]).toEqual(['miss', 0]);
+      expect(apply(db, recreated).outcome).toBe('applied');
+      expect(byUri()).toEqual([{ uri: `${container}#${ID_C}` }]);
+      expect([stats().cache, stats().stats?.totals.listens]).toEqual(['miss', 1]);
+      expect(
+        exportUser(
+          {
+            db,
+            clock: { nowMs: () => 1768478400000 },
+            config: { ingestMode: 'off' },
+          } as unknown as ModuleDeps,
+          ALICE,
+        )?.scrobbles.map((row) => row.listenId),
+      ).toEqual([ID_C]);
+    });
+  });
+
   it('isolates invalid items, prefers visible singles, restores batches after single delete, and reaffirms exact snapshot keys', async () => {
     const repo = await repoFor('alice');
     const batch = await putProof(
@@ -185,6 +254,82 @@ describe('batch projection and visibility', () => {
     });
   });
 
+  it('sweeps a container absent from a newer signed snapshot, deleting every listen and invalidating stats', async () => {
+    const repo = await repoFor('alice');
+    const rkey = '3lbqsweep01ab';
+    const kept = '3lbqsweep02ab';
+    const created = await putProof(repo, BATCH, rkey, batchRecord(listen(ID_A), listen(ID_B, { track: 'Second' })));
+    if (created.state !== 'present') throw new Error('expected a present batch proof');
+    const keptProof = await putProof(repo, BATCH, kept, batchRecord(listen(ID_C, { track: 'Kept' })));
+    if (keptProof.state !== 'present') throw new Error('expected a present batch proof');
+    // The remote deletes the first container; only a snapshot (no live delete proof) reports it.
+    await repo.delete(BATCH, rkey);
+    const head = repo.head!;
+
+    await withMigratedDb((db) => {
+      const generation = seedUser(db, ALICE);
+      seedSnapshotJob(db, ALICE, generation);
+      expect(apply(db, created).outcome).toBe('applied');
+      expect(apply(db, keptProof).outcome).toBe('applied');
+      const container = uriOf(ALICE, BATCH, rkey);
+      const keptUri = uriOf(ALICE, BATCH, kept);
+      const visible = () =>
+        db
+          .all<{ uri: string }>(`SELECT s.uri FROM ${visibleScrobblesFrom()} WHERE s.did = ? ORDER BY s.uri`, ALICE)
+          .map((r) => r.uri);
+      expect(visible()).toEqual([`${container}#${ID_A}`, `${container}#${ID_B}`, `${keptUri}#${ID_C}`]);
+      const statsBefore = db.one<{ stats_version: number }>('SELECT stats_version FROM users WHERE did = ?', ALICE)!;
+
+      // A stale snapshot head below an applied container revision is refused by the per-URI guard.
+      const stale = db.tx(() =>
+        applySnapshotChunk(db, {
+          did: ALICE,
+          generation,
+          headRev: '2222222222222',
+          intervalLo: `${PREFIX}.`,
+          intervalHi: `${BATCH}/${kept}`,
+          entries: [],
+          receiptNs: NOW_NS,
+          prefix: PREFIX,
+          nowNs: NOW_NS,
+        }),
+      );
+      expect(stale).toMatchObject({ outcome: 'applied', deleted: 0 });
+      expect(visible()).toHaveLength(3);
+
+      // The kept container is unchanged (same CID, no body): reaffirmed, never swept.
+      const chunk = db.tx(() =>
+        applySnapshotChunk(db, {
+          did: ALICE,
+          generation,
+          headRev: head.rev,
+          intervalLo: `${PREFIX}.`,
+          intervalHi: `${BATCH}/${kept}`,
+          entries: [{ key: `${BATCH}/${kept}`, cid: keptProof.cid }],
+          receiptNs: NOW_NS,
+          prefix: PREFIX,
+          nowNs: NOW_NS,
+        }),
+      );
+      expect(chunk).toMatchObject({ outcome: 'applied', written: 0, unchanged: 1, deleted: 1 });
+      expect(db.all('SELECT uri FROM scrobbles WHERE record_uri = ?', container)).toEqual([]);
+      expect(db.one('SELECT state, revision FROM record_state WHERE uri = ?', container)).toEqual({
+        state: 'absent',
+        revision: head.rev,
+      });
+      // Fragment URIs never get a record_state row of their own.
+      expect(db.one('SELECT count(*) AS n FROM record_state WHERE uri LIKE ?', `${container}#%`)).toEqual({ n: 0 });
+      expect(db.one('SELECT revision FROM record_state WHERE uri = ?', keptUri)).toEqual({ revision: head.rev });
+      expect(visible()).toEqual([`${keptUri}#${ID_C}`]);
+      expect(
+        db.one<{ stats_version: number }>('SELECT stats_version FROM users WHERE did = ?', ALICE)!.stats_version,
+      ).toBe(statsBefore.stats_version + 1);
+      // An older live proof of the swept container cannot resurrect it.
+      expect(apply(db, created).outcome).not.toBe('applied');
+      expect(visible()).toEqual([`${keptUri}#${ID_C}`]);
+    });
+  });
+
   it('excludes a container when no entries validate or safe byte limits fail, removing old listens', async () => {
     const repo = await repoFor('alice');
     const first = await putProof(repo, BATCH, '5555555555555', batchRecord(listen(ID_A)));
@@ -200,9 +345,15 @@ describe('batch projection and visibility', () => {
       '5555555555555',
       batchRecord(listen(ID_B, { listenedAt: 'not-a-date' })),
     );
+    // Over the ingest bound (2,000,000 DAG-CBOR bytes, the PDS's commit block limit).
     const oversized = await putProof(repo, BATCH, '6666666666666', {
       ...batchRecord(listen(ID_A)),
-      unknown: 'x'.repeat(65_000),
+      unknown: 'x'.repeat(2_000_000),
+    });
+    // Above every write limit but within the ingest bound: a valid container another writer committed.
+    const large = await putProof(repo, BATCH, '6666666666667', {
+      ...batchRecord(listen(ID_A)),
+      unknown: 'x'.repeat(1_500_000),
     });
     const deletedRecord = await putProof(repo, BATCH, '7777777777777', batchRecord(listen(ID_A)));
     const deleted = await deleteProof(repo, BATCH, '7777777777777');
@@ -223,10 +374,15 @@ describe('batch projection and visibility', () => {
       ).toEqual({ state: 'excluded', collection: BATCH });
       expect(apply(db, oversized).outcome).toBe('excluded');
       expect(db.all('SELECT * FROM scrobbles WHERE record_uri = ?', uriOf(ALICE, BATCH, '6666666666666'))).toEqual([]);
+      expect(apply(db, large).outcome).toBe('applied');
+      expect(
+        db.all('SELECT listen_id FROM scrobbles WHERE record_uri = ?', uriOf(ALICE, BATCH, '6666666666667')),
+      ).toEqual([{ listen_id: ID_A }]);
       expect(apply(db, deletedRecord).outcome).toBe('applied');
       expect(apply(db, deleted).outcome).toBe('absent');
       expect(db.all('SELECT * FROM scrobbles WHERE record_uri = ?', uriOf(ALICE, BATCH, '7777777777777'))).toEqual([]);
-      expect(db.one('SELECT stats_version FROM users WHERE did = ?', ALICE)).toEqual({ stats_version: 5 });
+      // Five changes as before, plus the large container's projection.
+      expect(db.one('SELECT stats_version FROM users WHERE did = ?', ALICE)).toEqual({ stats_version: 6 });
     });
   });
 

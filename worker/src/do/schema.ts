@@ -691,7 +691,256 @@ const MIGRATION_5: Migration = {
   ],
 };
 
-export const MIGRATIONS: readonly Migration[] = [MIGRATION_1, MIGRATION_2, MIGRATION_3, MIGRATION_4, MIGRATION_5];
+const MIGRATION_6: Migration = {
+  version: 6,
+  name: 'batch_outbox_recovery',
+  statements: [
+    'ALTER TABLE operations ADD COLUMN send_started_at_ms INTEGER',
+    `CREATE TABLE batch_entry_items (
+      operation_id TEXT NOT NULL,
+      entry_id TEXT NOT NULL,
+      job_id TEXT NOT NULL,
+      seq INTEGER NOT NULL,
+      PRIMARY KEY(operation_id,entry_id,job_id,seq)
+    )`,
+    'CREATE INDEX batch_entry_items_job ON batch_entry_items(job_id,seq)',
+  ],
+};
+
+const MIGRATION_7: Migration = {
+  version: 7,
+  name: 'batch_listen_removal_receipts',
+  statements: [
+    'ALTER TABLE listen_removals ADD COLUMN operation_id TEXT',
+    'ALTER TABLE listen_removals ADD COLUMN removed_cid TEXT',
+    'ALTER TABLE import_items ADD COLUMN removal_operation_id TEXT',
+    'ALTER TABLE import_items ADD COLUMN removed_at_ms INTEGER',
+    'ALTER TABLE batch_entry_items ADD COLUMN removal_operation_id TEXT',
+    'ALTER TABLE batch_entry_items ADD COLUMN removed_at_ms INTEGER',
+    'CREATE INDEX scrobbles_record_uri ON scrobbles(record_uri)',
+    `CREATE TABLE batch_delete_listens (
+      operation_id TEXT NOT NULL,
+      listen_id TEXT NOT NULL,
+      PRIMARY KEY(operation_id,listen_id)
+    )`,
+    'CREATE INDEX batch_delete_listens_operation ON batch_delete_listens(operation_id)',
+  ],
+};
+
+// A NULL send timestamp from migration 6 cannot prove that a legacy create
+// was never sent: attempt accounting may have been refunded after reauth.
+// Existing operations therefore start unknown; new import singles explicitly
+// record their pre-send state at insertion.
+const MIGRATION_8: Migration = {
+  version: 8,
+  name: 'outbox_send_certainty',
+  statements: [
+    "ALTER TABLE operations ADD COLUMN send_state TEXT NOT NULL DEFAULT 'unknown'",
+    `CREATE TABLE batch_delete_children (
+      parent_operation_id TEXT NOT NULL,
+      child_operation_id TEXT NOT NULL,
+      PRIMARY KEY(parent_operation_id,child_operation_id)
+    )`,
+    'CREATE INDEX batch_delete_children_child ON batch_delete_children(child_operation_id)',
+  ],
+};
+
+// Durable removal evidence and the legacy absence certainty transition.
+// `listen_removal_cids` holds every container CID at which a batch removal's
+// targets were observed present before it settled (admission projection,
+// each pre-CAS read): a settled removal keeps hiding stale projections at any
+// of them, while a verified recreation at a new CID becomes visible. It is
+// local suppression evidence only; record_state stays verified proof.
+// `operations.legacy_absent_at_ms` recorded the first absence read of a
+// legacy import single whose send history is unknown (migration 8). It is
+// no longer used: absence and elapsed time never prove a legacy
+// send unsent (an accepted request can commit after any client deadline), so
+// such rows finish at their original rkey instead of being rebatched.
+const MIGRATION_9: Migration = {
+  version: 9,
+  name: 'batch_removal_evidence',
+  statements: [
+    `CREATE TABLE listen_removal_cids (
+      operation_id TEXT NOT NULL,
+      cid TEXT NOT NULL,
+      PRIMARY KEY(operation_id,cid)
+    )`,
+    'ALTER TABLE operations ADD COLUMN legacy_absent_at_ms INTEGER',
+  ],
+};
+
+// Verified per-entry membership and incarnation boundaries (ADR 0006). One
+// row per batch entry TID (`listen_id`) of a container, plus `listen_id='*'`
+// for the record itself (every batch container; a single scrobble record
+// only once it has been proven absent). Written only by verified proofs and
+// snapshots behind the per-URI revision guard (do/write/apply-record), never
+// by local intent or write completion:
+// - `state`: present (valid, projected), excluded (a valid TID whose entry
+//   failed validation; `reason`), absent (missing from a verified container
+//   revision, or the container/record proven absent);
+// - `cid`/`revision`: the container version that last decided the row;
+// - `last_absent_revision`: the newest verified revision at which it was
+//   absent. A later present row is a new incarnation.
+// Membership is not public visibility (read/visibility applies that); it is
+// what fragment status consults to claim absence. `operations.removal_fence_rev`
+// is the verified revision of the target record when a scrobble removal was
+// admitted, refreshed just before each removal write: a succeeded removal
+// stops suppressing an entry once its membership proves an absence newer
+// than that fence, so a later recreation (same or new CID) is visible.
+// `operations.legacy_absent_at_ms` (migration 9) is no longer written or read
+// as a certainty transition; a row that carries it is never explicitly unsent.
+const MIGRATION_10: Migration = {
+  version: 10,
+  name: 'verified_listen_membership',
+  statements: [
+    `CREATE TABLE verified_membership (
+      record_uri TEXT NOT NULL,
+      listen_id TEXT NOT NULL,
+      did TEXT NOT NULL,
+      state TEXT NOT NULL CHECK(state IN ('present','excluded','absent')),
+      revision TEXT NOT NULL,
+      cid TEXT,
+      reason TEXT,
+      last_absent_revision TEXT,
+      PRIMARY KEY(record_uri,listen_id)
+    )`,
+    'CREATE INDEX verified_membership_did ON verified_membership(did)',
+    'ALTER TABLE operations ADD COLUMN removal_fence_rev TEXT',
+  ],
+};
+
+// Server-enforced removal fences (ADR 0006 amendment). A scrobble removal
+// reads its owner's repository head (com.atproto.sync.getLatestCommit) and
+// sends its write with BOTH `swapCommit` (that head CID) and `swapRecord`, so
+// the PDS commits it only if nothing at all was committed in between:
+// - `removal_head_rev`: the newest head revision a send of this removal was
+//   checked against, persisted before the send (or the head read just before
+//   a read that found the target already gone). Every repository revision at
+//   or below it precedes the removal, so a present proof of the target at or
+//   below it is the removed incarnation, whatever its CID; one above it is a
+//   later incarnation. Never moved backwards.
+// - `removal_commit_rev`: the commit revision the PDS reported for the
+//   removal write, when it reported one newer than the checked head.
+// Both are local intent metadata reported by the owner's PDS, never verified
+// proof: they bound suppression of this removal's own targets only and never
+// touch record_state or verified_membership. A receipt without
+// `removal_head_rev` (settled before this migration) keeps the migration 9/10
+// CID-evidence and verified-absence rules.
+const MIGRATION_11: Migration = {
+  version: 11,
+  name: 'removal_commit_fence',
+  statements: [
+    'ALTER TABLE operations ADD COLUMN removal_head_rev TEXT',
+    'ALTER TABLE operations ADD COLUMN removal_commit_rev TEXT',
+  ],
+};
+
+// Ordered removal completion (ADR 0006 amendment; outbox/removal-fence.ts).
+// A 2xx without a usable commit does not prove the swaps were enforced (the
+// reference PDS's no-op delete and put return before processWrites), and a
+// head read before an absent read does not order that absence. Completion is
+// therefore kept apart from the provisional send fence:
+// - `removal_done_rev`: a revision at or after which every target was proven
+//   absent: the reported commit of an enforced write, the head of a stable
+//   head/read/head bracket, a head read after an earlier completion, or a
+//   verified absence after the send fence. Once set, a retry never writes
+//   again; it never moves backwards. Present projections at or below it are
+//   suppressed, any above it is a later incarnation.
+// - `removal_done_basis`: commit | absent | absent_after (absent at a moment
+//   after that head; exact boundary not yet known) | verified.
+// Both are local receipt metadata, never verified proof. A receipt settled
+// without `removal_done_rev` keeps the migration 11 (or older) rule.
+const MIGRATION_12: Migration = {
+  version: 12,
+  name: 'removal_completion_boundary',
+  statements: [
+    'ALTER TABLE operations ADD COLUMN removal_done_rev TEXT',
+    // Values are enforced by outbox/removal-fence.ts keepRemovalDone (no
+    // CHECK on an added column; see the conventions above).
+    'ALTER TABLE operations ADD COLUMN removal_done_basis TEXT',
+  ],
+};
+
+// Durable no-replay knowledge, kept apart from ordered visibility
+// (ADR 0006 amendment; outbox/removal-fence.ts). A received successful
+// desired-state answer, an observed absence of every target, an enforced
+// commit or a verified absence after the send fence proves that this
+// removal's requested state was reached; it must never write again, even
+// when nothing yet places that moment in repository order (a no-op answer
+// carries no revision, a getRecord absence has none, a closing head may be
+// unavailable). Ordering stays the job of `removal_done_rev`:
+// - `removal_reached`: commit | success | absent | verified. Set once, before
+//   any read-back is awaited, and never cleared except by `record_not_ours`
+//   (nothing of ours existed). While it is set and `removal_done_rev` is not,
+//   the removal holds read-only (queued, `removal_reached_unordered`): its
+//   pending overlay keeps every target hidden and it sends nothing.
+// - `removal_reached_at_ms`: when that was first recorded (bounds the
+//   read-only hold's backoff; local time, never an ordering fact).
+// Migration 12's `removal_done_basis` gains `after`: the first repository
+// head read after the requested state was reached. Projections strictly
+// below it are hidden (pre-removal, or a later incarnation not yet proven at
+// or above it), any at or above it is a later incarnation.
+const MIGRATION_13: Migration = {
+  version: 13,
+  name: 'removal_reached',
+  statements: [
+    // Values are enforced by outbox/removal-fence.ts markReached (no CHECK on
+    // an added column; see the conventions above).
+    'ALTER TABLE operations ADD COLUMN removal_reached TEXT',
+    'ALTER TABLE operations ADD COLUMN removal_reached_at_ms INTEGER',
+  ],
+};
+
+// The send of a removal whose outcome is unknown (ADR 0006 amendment;
+// outbox/removal-fence.ts). Server acknowledgement and local persistence are
+// never atomic: a crash after the PDS committed, a lost or invalid answer, or
+// a 5xx leaves no evidence whether the conditional write happened. Once the
+// owner's repository head moved past that send's swapCommit, a present target
+// cannot tell an unexecuted removal from a completed one followed by an
+// identical recreation, so the intent must never be re-sent at a newer head.
+// - `removal_send_state`: pending | rejected. `pending` is persisted, with the
+//   exact request, BEFORE the write is awaited and stays until the requested
+//   state is known reached; only a definite rejection (a received 4xx) of that
+//   same send makes it `rejected`, after which a new fenced send may be pinned.
+//   A row with a send fence (`removal_head_rev`) and no state was sent before
+//   this migration and is treated as pending with only its fence revision.
+// - `removal_send_json`: the pinned request {method, body, head:{cid,rev}}:
+//   swapCommit, swapRecord and the exact record bytes. A retry while the head
+//   is still that root re-sends it unchanged; any other head holds read-only.
+// - `removal_send_at_ms`: when it was pinned (the read-only hold's backoff;
+//   local time, never an ordering fact).
+// - `removal_superseded_by`: the later explicit removal intent on the same key
+//   whose targets cover this pending one; this one is then cancelled
+//   (`removal_superseded`) and never sends again.
+const MIGRATION_14: Migration = {
+  version: 14,
+  name: 'removal_send_pin',
+  statements: [
+    // Values are enforced by outbox/removal-fence.ts pinSend/rejectSend (no
+    // CHECK on an added column; see the conventions above).
+    'ALTER TABLE operations ADD COLUMN removal_send_state TEXT',
+    'ALTER TABLE operations ADD COLUMN removal_send_json TEXT',
+    'ALTER TABLE operations ADD COLUMN removal_send_at_ms INTEGER',
+    'ALTER TABLE operations ADD COLUMN removal_superseded_by TEXT',
+  ],
+};
+
+export const MIGRATIONS: readonly Migration[] = [
+  MIGRATION_1,
+  MIGRATION_2,
+  MIGRATION_3,
+  MIGRATION_4,
+  MIGRATION_5,
+  MIGRATION_6,
+  MIGRATION_7,
+  MIGRATION_8,
+  MIGRATION_9,
+  MIGRATION_10,
+  MIGRATION_11,
+  MIGRATION_12,
+  MIGRATION_13,
+  MIGRATION_14,
+];
 
 /** The schema version this code expects. */
 export const SCHEMA_VERSION: number = MIGRATIONS[MIGRATIONS.length - 1]?.version ?? 0;
@@ -748,6 +997,12 @@ export const TABLES = [
   'backup_runs',
   'schema_compat',
   'listen_removals',
+  'batch_entry_items',
+  'batch_delete_listens',
+  'batch_delete_children',
+  'listen_removal_cids',
+  // Migration 10.
+  'verified_membership',
 ] as const;
 
 export type TableName = (typeof TABLES)[number];
@@ -806,4 +1061,9 @@ export const TABLE_CLASS: Readonly<Record<TableName, TableClass>> = {
   backup_runs: 'non-derived',
   schema_compat: 'non-derived',
   listen_removals: 'non-derived',
+  batch_entry_items: 'non-derived',
+  batch_delete_listens: 'non-derived',
+  batch_delete_children: 'non-derived',
+  listen_removal_cids: 'non-derived',
+  verified_membership: 'derived',
 };

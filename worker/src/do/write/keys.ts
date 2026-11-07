@@ -243,3 +243,159 @@ export function incrementCounter(db: Db, name: string, label: string): void {
     label,
   );
 }
+
+// Verified membership (migration 10, `verified_membership`). Written only from
+// a verified proof or snapshot entry, after the per-URI revision guard, in the
+// same transaction as the projection: never from local intent or a write's
+// completion. `listen_id='*'` is the record itself. Every update is guarded by
+// the stored revision, so a delayed older observation cannot move a row back.
+// `last_absent_revision` survives later present rows: it is the incarnation
+// boundary a removal receipt's fence is compared with (read/visibility).
+
+/** One verified entry of a valid batch container version. */
+export interface MembershipEntry {
+  id: string;
+  state: 'present' | 'excluded';
+  reason: string | null;
+}
+
+/** The record (and, for a batch container, every entry it ever had) proven absent at `rev`. */
+export function noteRecordAbsent(db: Db, did: string, uri: string, rev: string): void {
+  db.run(
+    `INSERT INTO verified_membership(record_uri, listen_id, did, state, revision, cid, reason, last_absent_revision)
+     VALUES (?, '*', ?, 'absent', ?, NULL, NULL, ?)
+     ON CONFLICT(record_uri, listen_id) DO UPDATE SET state = 'absent', revision = excluded.revision, cid = NULL,
+       reason = NULL, last_absent_revision = excluded.revision
+     WHERE verified_membership.revision <= excluded.revision`,
+    uri,
+    did,
+    rev,
+    rev,
+  );
+  db.run(
+    `UPDATE verified_membership SET state = 'absent', revision = ?, cid = NULL, reason = NULL, last_absent_revision = ?
+     WHERE record_uri = ? AND listen_id != '*' AND revision <= ?`,
+    rev,
+    rev,
+    uri,
+    rev,
+  );
+}
+
+/**
+ * The record verified present (valid or excluded) at `rev` with `cid`. A batch
+ * container always keeps its `*` row (`track`: it marks the revision whose
+ * entries are recorded); a single record only updates a row its earlier
+ * absence created, so the table grows with removals, not with every listen.
+ */
+export function noteRecordPresent(
+  db: Db,
+  row: { did: string; uri: string; rev: string; cid: string; state: 'present' | 'excluded'; reason: string | null },
+  track: boolean,
+): void {
+  if (track) {
+    db.run(
+      `INSERT INTO verified_membership(record_uri, listen_id, did, state, revision, cid, reason, last_absent_revision)
+       VALUES (?, '*', ?, ?, ?, ?, ?, NULL)
+       ON CONFLICT(record_uri, listen_id) DO UPDATE SET state = excluded.state, revision = excluded.revision,
+         cid = excluded.cid, reason = excluded.reason
+       WHERE verified_membership.revision <= excluded.revision`,
+      row.uri,
+      row.did,
+      row.state,
+      row.rev,
+      row.cid,
+      row.reason,
+    );
+    return;
+  }
+  db.run(
+    `UPDATE verified_membership SET state = ?, revision = ?, cid = ?, reason = ?
+     WHERE record_uri = ? AND listen_id = '*' AND revision <= ?`,
+    row.state,
+    row.rev,
+    row.cid,
+    row.reason,
+    row.uri,
+    row.rev,
+  );
+}
+
+/**
+ * The raw valid-TID membership of a valid batch container version: listed
+ * entries present or excluded (a valid TID whose fields failed validation),
+ * every other entry seen before absent at `rev` (a partial removal).
+ *
+ * Verified nonmembership is never lost when an entry is tracked for the first
+ * time (a projection older than migration 10, or an entry first seen after
+ * its container was removed):
+ * - an entry newly listed here inherits, as `last_absent_revision`, the
+ *   container's own verified absence (`*`.last_absent_revision) and the
+ *   revision of the previous valid container version whose recorded
+ *   membership did not list it (`*` present below `rev`), whichever is newer;
+ * - `projected` names the entries the previous verified projection of this
+ *   container held (read before it was replaced); one this valid version does
+ *   not list is recorded absent at `rev` even when it had no row yet.
+ * An excluded or absent `*` version proves nothing about entries; only a
+ * valid version's exact membership does.
+ */
+export function noteBatchEntries(
+  db: Db,
+  did: string,
+  uri: string,
+  rev: string,
+  cid: string,
+  entries: readonly MembershipEntry[],
+  projected: readonly string[] = [],
+): void {
+  const container = db.one<{ state: string; revision: string; last_absent_revision: string | null }>(
+    `SELECT state, revision, last_absent_revision FROM verified_membership WHERE record_uri = ? AND listen_id = '*'`,
+    uri,
+  );
+  let inherited: string | null = null;
+  if (container !== null) {
+    const bounds = [container.last_absent_revision, container.state === 'present' ? container.revision : null].filter(
+      (r): r is string => r !== null && r < rev,
+    );
+    inherited = bounds.length === 0 ? null : bounds.reduce((a, b) => (a > b ? a : b));
+  }
+  for (const entry of entries) {
+    db.run(
+      `INSERT INTO verified_membership(record_uri, listen_id, did, state, revision, cid, reason, last_absent_revision)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(record_uri, listen_id) DO UPDATE SET state = excluded.state, revision = excluded.revision,
+         cid = excluded.cid, reason = excluded.reason
+       WHERE verified_membership.revision <= excluded.revision`,
+      uri,
+      entry.id,
+      did,
+      entry.state,
+      rev,
+      cid,
+      entry.reason,
+      inherited,
+    );
+  }
+  const listed = new Set(entries.map((entry) => entry.id));
+  for (const id of new Set(projected)) {
+    if (id === '*' || listed.has(id)) continue;
+    db.run(
+      `INSERT INTO verified_membership(record_uri, listen_id, did, state, revision, cid, reason, last_absent_revision)
+       VALUES (?, ?, ?, 'absent', ?, NULL, NULL, ?)
+       ON CONFLICT(record_uri, listen_id) DO NOTHING`,
+      uri,
+      id,
+      did,
+      rev,
+      rev,
+    );
+  }
+  db.run(
+    `UPDATE verified_membership SET state = 'absent', revision = ?, cid = NULL, reason = NULL, last_absent_revision = ?
+     WHERE record_uri = ? AND listen_id != '*' AND revision < ?`,
+    rev,
+    rev,
+    uri,
+    rev,
+  );
+}

@@ -19,6 +19,11 @@
 // - present and invalid: delete the row, record_state 'excluded' with the
 //   validation reason, counters('excluded', reason) += 1;
 // - absent (a proven exclusion): delete the row, record_state 'absent';
+// - scrobbles and batch containers also record verified membership
+//   (migration 10, keys.ts noteRecord*/noteBatchEntries): a valid container
+//   version lists every valid-TID entry present or excluded and marks the
+//   rest absent; an absent record marks itself and all its entries absent
+//   (`last_absent_revision`, the incarnation boundary of removal receipts);
 // - `users.stats_version` += 1 whenever a scrobble row was inserted, changed
 //   or deleted; `users.max_rev = max(max_rev, rev)`.
 // Validation uses the hint receipt time for the +300 s bound (`receiptNs`).
@@ -40,18 +45,14 @@
 //   proven absence deletes it and records `absent`. Loves never touch
 //   `users.stats_version` (no /api/v1 stat reads them).
 
-import { measureScrobbleBatch } from '@atmusic/atproto/scrobble-batch-size';
+import { encode } from '@atcute/cbor';
 import type { RecordProof } from '@atmusic/atproto/verify/types';
 import { validateFollowRecord } from '@atmusic/core/follow';
 import { validateLoveRecord } from '@atmusic/core/love';
 import { MusicKeyError } from '@atmusic/core/music-key';
 import { reasonText, type ScrobbleRow, validateScrobbleRecord } from '@atmusic/core/scrobble';
-import {
-  MAX_CBOR_BYTES,
-  MAX_CREATE_BODY_BYTES,
-  type ScrobbleBatchRecord,
-  validateScrobbleBatchRecord,
-} from '@atmusic/core/scrobble-batch';
+import { MAX_INGEST_CBOR_BYTES, validateScrobbleBatchRecord } from '@atmusic/core/scrobble-batch';
+import { isTid } from '@atmusic/core/syntax';
 import { toStorage } from '@atmusic/core/timestamp';
 import type { Db } from '../db';
 import { advanceUser, bumpStatsVersion, isSuppressed, loadUser } from './account-state';
@@ -62,7 +63,12 @@ import {
   EXCLUDED_COUNTER,
   guardRevision,
   incrementCounter,
+  type MembershipEntry,
   musicKeyColumns,
+  noteBatchEntries,
+  noteRecordAbsent,
+  noteRecordPresent,
+  readRecordState,
   recordingMsidOf,
   recordUri,
   writeRecordState,
@@ -255,13 +261,11 @@ function scrobbleVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, 
 
 /** A batch container is replaced as one verified unit; invalid entries are isolated. */
 function batchVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, o: ApplyOptions): Verdict {
+  // A resource bound, not a write limit: any container the PDS committed (one
+  // commit's blocks are at most 2,000,000 bytes) is accepted by size; the
+  // entry count is bounded by the validator.
   try {
-    const sizes = measureScrobbleBatch(record as ScrobbleBatchRecord, {
-      repo: t.did,
-      collection: t.collection,
-      rkey: t.rkey,
-    });
-    if (sizes.cborBytes > MAX_CBOR_BYTES || sizes.createBodyBytes > MAX_CREATE_BODY_BYTES) {
+    if (encode(record).byteLength > MAX_INGEST_CBOR_BYTES) {
       return { ok: false, reason: 'listens: batch record exceeds encoded size limits' };
     }
   } catch {
@@ -278,26 +282,26 @@ function batchVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, o: 
   return {
     ok: true,
     write: () => {
-      const prior = db.all<{ uri: string; cid: string; artist_key: string; track_key: string; listened_at: string }>(
-        'SELECT uri,cid,artist_key,track_key,listened_at FROM scrobbles WHERE record_uri = ?',
-        t.uri,
-      );
+      const prior = db.all<{
+        uri: string;
+        cid: string;
+        artist_key: string;
+        track_key: string;
+        listened_at: string;
+        listen_id: string | null;
+      }>('SELECT uri,cid,artist_key,track_key,listened_at,listen_id FROM scrobbles WHERE record_uri = ?', t.uri);
       const priorByUri = new Map(prior.map((row) => [row.uri, row]));
       db.run('DELETE FROM scrobbles WHERE record_uri = ?', t.uri);
       let changed = prior.length !== batch.listens.length;
+      // Verified membership keeps every valid-TID entry of this version,
+      // including one dropped by validation: exclusion is not absence.
+      const members: MembershipEntry[] = batch.dropped.flatMap((dropped) =>
+        dropped.id !== null && isTid(dropped.id)
+          ? [{ id: dropped.id, state: 'excluded' as const, reason: reasonText(dropped.reason) }]
+          : [],
+      );
       for (const listen of batch.listens) {
         const uri = `${t.uri}#${listen.id}`;
-        if (
-          db.one(
-            'SELECT 1 AS x FROM listen_removals WHERE did = ? AND record_uri = ? AND listen_id = ?',
-            t.did,
-            t.uri,
-            listen.id,
-          )
-        ) {
-          if (priorByUri.has(uri)) changed = true;
-          continue;
-        }
         const singleRecord = { ...listen.row.record, $type: `${o.prefix}.scrobble` };
         const itemTarget: RecordTarget = {
           ...t,
@@ -308,7 +312,11 @@ function batchVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, o: 
           present: { cid, record: singleRecord },
         };
         const verdict = scrobbleVerdict(db, itemTarget, cid, singleRecord, o);
-        if (!verdict.ok) continue;
+        if (!verdict.ok) {
+          members.push({ id: listen.id, state: 'excluded', reason: verdict.reason });
+          continue;
+        }
+        members.push({ id: listen.id, state: 'present', reason: null });
         verdict.write();
         const old = priorByUri.get(uri);
         if (
@@ -320,6 +328,15 @@ function batchVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, o: 
         )
           changed = true;
       }
+      noteBatchEntries(
+        db,
+        t.did,
+        t.uri,
+        t.rev,
+        cid,
+        members,
+        prior.flatMap((row) => (row.listen_id !== null && isTid(row.listen_id) ? [row.listen_id] : [])),
+      );
       return changed;
     },
   };
@@ -401,12 +418,38 @@ const VERDICTS: Readonly<Record<ProjectedKind, VerdictOf>> = {
 };
 
 /**
+ * Whether re-proving unchanged scrobble bytes at a newer revision can still
+ * change what is visible: a succeeded removal of the same record decides by
+ * the projection's revision (read/visibility `removedBy`: an `after` cutoff
+ * releases a target proven at or above it, an exact one above it), so the
+ * same CID proven at a later revision may cross that cutoff. Conservative:
+ * any revision advance of a record with such a receipt invalidates
+ * statistics, in the proof's own transaction; the cutoffs never move.
+ */
+function revisionMayReveal(db: Db, t: RecordTarget, priorRevision: string | null): boolean {
+  if (priorRevision === t.rev) return false;
+  return (
+    db.one(
+      `SELECT 1 AS x FROM operations WHERE did = ? AND collection = ? AND rkey = ?
+         AND kind = 'scrobble.delete' AND state = 'succeeded' LIMIT 1`,
+      t.did,
+      t.collection,
+      t.rkey,
+    ) !== null
+  );
+}
+
+/**
  * Write one verified scrobble/follow/love version. No guards: the caller has
  * checked the owner, the per-DID floor (live proofs) and the per-URI guard.
- * Bumps `stats_version` when a scrobble row changed; does not touch max_rev.
+ * Bumps `stats_version` when a scrobble row changed, or when unchanged bytes
+ * move to a revision a succeeded removal's cutoff may decide differently
+ * (revisionMayReveal); does not touch max_rev.
  */
 export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): TargetResult {
   const verifiedAt = toStorage(o.nowNs);
+  const priorRevision =
+    db.one<{ revision: string }>('SELECT revision FROM record_state WHERE uri = ?', t.uri)?.revision ?? null;
   let out: TargetResult;
   if (t.present === null) {
     const deleted = deleteProjection(db, t.kind, t.uri);
@@ -420,6 +463,7 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
       reason: null,
       verified_at: verifiedAt,
     });
+    if (t.kind === 'scrobble' || t.kind === 'scrobbleBatch') noteRecordAbsent(db, t.did, t.uri, t.rev);
     out = { outcome: 'absent', statsChanged: (t.kind === 'scrobble' || t.kind === 'scrobbleBatch') && deleted };
   } else {
     const { cid, record } = t.present;
@@ -436,7 +480,18 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
         reason: null,
         verified_at: verifiedAt,
       });
-      out = { outcome: 'applied', statsChanged: (t.kind === 'scrobble' || t.kind === 'scrobbleBatch') && changed };
+      if (t.kind === 'scrobble' || t.kind === 'scrobbleBatch') {
+        noteRecordPresent(
+          db,
+          { did: t.did, uri: t.uri, rev: t.rev, cid, state: 'present', reason: null },
+          t.kind === 'scrobbleBatch',
+        );
+      }
+      out = {
+        outcome: 'applied',
+        statsChanged:
+          (t.kind === 'scrobble' || t.kind === 'scrobbleBatch') && (changed || revisionMayReveal(db, t, priorRevision)),
+      };
     } else {
       const deleted = deleteProjection(db, t.kind, t.uri);
       writeRecordState(db, {
@@ -450,6 +505,15 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
         verified_at: verifiedAt,
       });
       incrementCounter(db, EXCLUDED_COUNTER, verdict.reason);
+      // An excluded container keeps its entry rows: an invalid version proves
+      // no entry absent.
+      if (t.kind === 'scrobble' || t.kind === 'scrobbleBatch') {
+        noteRecordPresent(
+          db,
+          { did: t.did, uri: t.uri, rev: t.rev, cid, state: 'excluded', reason: verdict.reason },
+          t.kind === 'scrobbleBatch',
+        );
+      }
       out = {
         outcome: 'excluded',
         reason: verdict.reason,
@@ -459,6 +523,102 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
   }
   if (out.statsChanged) bumpStatsVersion(db, t.did);
   return out;
+}
+
+/**
+ * Re-proves the stored bytes of a scrobble or batch container (a verified
+ * snapshot entry at `rev` whose CID equals the one stored, with no body) with
+ * everything a live proof of the same bytes at `rev` would write, in the
+ * caller's transaction: record_state, the revision of every projection row of
+ * the record (read/visibility decides succeeded removals by it), verified
+ * membership, and statistics when a succeeded removal's cutoff may now decide
+ * differently (revisionMayReveal). No guards: the caller checked the per-URI
+ * guard (rev above the stored revision).
+ *
+ * Membership is reaffirmed only from what the index verified for these exact
+ * bytes, never invented: a single record updates the `*` row an earlier
+ * absence created; a container's entries are re-noted at `rev` from its `*`
+ * row's last verified version when that row holds this CID and state
+ * (entries listed then keep their state, unlisted ones are absent at `rev`
+ * exactly as noteBatchEntries does for a live proof). Without such a row
+ * (a projection older than membership) the membership is left untouched.
+ * An excluded version keeps its exclusion (no projection rows, no counter:
+ * it was counted when first proven).
+ */
+export function reaffirmRecordTarget(
+  db: Db,
+  t: { did: string; kind: 'scrobble' | 'scrobbleBatch'; collection: string; rkey: string; uri: string; rev: string },
+  cid: string,
+  o: ApplyOptions,
+): void {
+  const prior = readRecordState(db, t.uri);
+  const state: 'present' | 'excluded' = prior?.state === 'excluded' ? 'excluded' : 'present';
+  const reason = state === 'excluded' ? (prior?.reason ?? null) : null;
+  const verifiedAt = toStorage(o.nowNs);
+  if (prior === null) {
+    writeRecordState(db, {
+      uri: t.uri,
+      did: t.did,
+      collection: t.collection,
+      revision: t.rev,
+      cid,
+      state: 'present',
+      reason: null,
+      verified_at: verifiedAt,
+    });
+  } else {
+    db.run(
+      'UPDATE record_state SET revision = ?, verified_at = ? WHERE uri = ? AND revision < ?',
+      t.rev,
+      verifiedAt,
+      t.uri,
+      t.rev,
+    );
+  }
+  const batch = t.kind === 'scrobbleBatch';
+  if (state === 'present') {
+    db.run(
+      batch
+        ? 'UPDATE scrobbles SET revision = ? WHERE record_uri = ? AND revision < ?'
+        : 'UPDATE scrobbles SET revision = ? WHERE uri = ? AND revision < ?',
+      t.rev,
+      t.uri,
+      t.rev,
+    );
+  }
+  const verified = { did: t.did, uri: t.uri, rev: t.rev, cid, state, reason };
+  if (!batch) {
+    noteRecordPresent(db, verified, false);
+  } else {
+    const container = db.one<{ state: string; revision: string; cid: string | null }>(
+      `SELECT state, revision, cid FROM verified_membership WHERE record_uri = ? AND listen_id = '*'`,
+      t.uri,
+    );
+    if (
+      container !== null &&
+      container.cid === cid &&
+      container.state === state &&
+      container.revision < t.rev &&
+      (prior === null || container.revision <= prior.revision)
+    ) {
+      if (state === 'present') {
+        const entries = db.all<MembershipEntry>(
+          `SELECT listen_id AS id, state, reason FROM verified_membership
+           WHERE record_uri = ? AND listen_id != '*' AND state IN ('present', 'excluded') AND revision = ?
+           ORDER BY listen_id`,
+          t.uri,
+          container.revision,
+        );
+        const projected = db
+          .all<{ listen_id: string | null }>('SELECT listen_id FROM scrobbles WHERE record_uri = ?', t.uri)
+          .flatMap((row) => (row.listen_id !== null && isTid(row.listen_id) ? [row.listen_id] : []));
+        noteBatchEntries(db, t.did, t.uri, t.rev, cid, entries, projected);
+      }
+      noteRecordPresent(db, verified, true);
+    }
+  }
+  const target: RecordTarget = { ...t, present: { cid, record: null } };
+  if (state === 'present' && revisionMayReveal(db, target, prior?.revision ?? null)) bumpStatsVersion(db, t.did);
 }
 
 /** Apply a verified getRecord proof (present or proven absent) at its commit's revision. */

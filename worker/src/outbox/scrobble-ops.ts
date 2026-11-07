@@ -22,6 +22,7 @@ import type { ModuleDeps } from '../do/contracts';
 import {
   type Idempotency,
   insertOperation,
+  legacyImportNeedsReconcile,
   newOperationId,
   outboxCollections,
   type Prepared,
@@ -191,13 +192,60 @@ export async function createWithReconcile(
 
 export const scrobbleCreateExecutor: Executor = {
   async execute(op, ctx) {
-    if (!hasIdentity(op, ctx, ctx.collections.scrobble) || op.digest === null) {
+    const expected =
+      op.collection === ctx.collections.scrobbleBatch
+        ? ctx.m.config.batchPublication
+          ? ctx.collections.scrobbleBatch
+          : null
+        : ctx.collections.scrobble;
+    if (expected === null || !hasIdentity(op, ctx, expected) || op.digest === null) {
       return { kind: 'permanent', code: 'invalid_record_identity' };
+    }
+    // An import single whose earlier send may have reached the PDS (migrated
+    // unknown history, or an earlier attempt) is read at its persisted key
+    // first: a matching record settles without a create, a conflict is
+    // terminal and never overwritten. Absence proves nothing about a request
+    // still in flight, so it never cancels or rebatches the row; the listen is
+    // created at the same original rkey, where a late commit of the earlier
+    // request and this one cannot both land (createRecord never overwrites,
+    // and an ambiguous answer is reconciled by digest).
+    if (op.collection === ctx.collections.scrobble && legacyImportNeedsReconcile(ctx.m.db, op)) {
+      const found = await ctx.xrpc.getRecord(op.collection, op.rkey as string);
+      if (found.kind === 'present')
+        return (await sameDigest(op, found.value))
+          ? {
+              kind: 'succeeded',
+              uri: found.uri,
+              cid: found.cid,
+              hints: [{ collection: op.collection, rkey: op.rkey as string }],
+            }
+          : { kind: 'permanent', code: 'remote_record_conflict' };
+      if (found.kind === 'failed')
+        return found.failure.kind === 'transient'
+          ? { kind: 'waiting', untilMs: ctx.m.clock.nowMs() + 5_000 }
+          : failureOutcome(found.failure);
     }
     return createWithReconcile(op, ctx, (remote) => sameDigest(op, remote));
   },
   async reconcile(op, ctx) {
-    if (!hasIdentity(op, ctx, ctx.collections.scrobble)) return { kind: 'permanent', code: 'invalid_record_identity' };
-    return lookupCreate(op, ctx, (remote) => sameDigest(op, remote), 'attempts_exhausted');
+    const expected =
+      op.collection === ctx.collections.scrobbleBatch ? ctx.collections.scrobbleBatch : ctx.collections.scrobble;
+    if (!hasIdentity(op, ctx, expected)) return { kind: 'permanent', code: 'invalid_record_identity' };
+    const found = await ctx.xrpc.getRecord(op.collection, op.rkey as string);
+    if (found.kind === 'failed')
+      return found.failure.kind === 'transient'
+        ? { kind: 'waiting', untilMs: ctx.m.clock.nowMs() + 5_000 }
+        : failureOutcome(found.failure);
+    // The interrupted tenth attempt is only read: absence ends the bounded
+    // retries at the original key (never an eleventh send, never a rebatch).
+    if (found.kind === 'absent') return { kind: 'permanent', code: 'attempts_exhausted' };
+    return (await sameDigest(op, found.value))
+      ? {
+          kind: 'succeeded',
+          uri: found.uri,
+          cid: found.cid,
+          hints: [{ collection: op.collection, rkey: op.rkey as string }],
+        }
+      : { kind: 'permanent', code: 'remote_record_conflict' };
   },
 };

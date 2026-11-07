@@ -82,6 +82,18 @@ export interface ListenRemovalRow {
   created_at_ms: number;
 }
 
+/** Migration 10: verified membership of a batch entry (or `listen_id='*'`, the record itself). */
+export interface VerifiedMembershipRow {
+  record_uri: string;
+  listen_id: string;
+  did: string;
+  state: 'present' | 'excluded' | 'absent';
+  revision: string;
+  cid: string | null;
+  reason: string | null;
+  last_absent_revision: string | null;
+}
+
 export interface AccountRow {
   did: string;
   /** Lowercase `[a-z0-9][a-z0-9._-]{1,63}`, unique. */
@@ -145,6 +157,74 @@ export interface OperationRow {
   state: OperationState;
   /** 0–10. */
   attempts: number;
+  /** Set conservatively before a send attempt; never cleared when attempt accounting is rolled back. */
+  send_started_at_ms: number | null;
+  /**
+   * `unsent` is the explicit insertion receipt of every operation written by
+   * current code; the first attempt makes it `unknown` and nothing ever sets it
+   * back. Migrated operations remain unknown.
+   */
+  send_state: 'unknown' | 'unsent';
+  /**
+   * Migration 9, no longer written or read as a certainty transition. A row
+   * that carries it (written by the unreleased two-read absence rule) is never
+   * treated as explicitly unsent.
+   */
+  legacy_absent_at_ms: number | null;
+  /**
+   * Migration 10, `scrobble.delete` only: the verified record_state revision of
+   * the target when admitted. It decides only receipts settled without a
+   * server-checked head (`removal_head_rev` NULL, i.e. before migration 11): a
+   * verified absence newer than it ends their suppression (read/visibility).
+   */
+  removal_fence_rev: string | null;
+  /**
+   * Migration 11, `scrobble.delete` only: the newest repository head revision
+   * (com.atproto.sync.getLatestCommit) that a send of this removal was checked
+   * against with `swapCommit`, persisted before the send (for a removal that
+   * never sent, the head of the ordered absence that settled it). Never moves
+   * backwards.
+   * Owner-PDS metadata, not verified proof.
+   */
+  removal_head_rev: string | null;
+  /** Migration 11: the commit revision the PDS reported for the removal write (newer than the checked head). */
+  removal_commit_rev: string | null;
+  /**
+   * Migration 12, `scrobble.delete` only: the completion boundary, a revision
+   * at or after which every target was proven absent (outbox/removal-fence.ts).
+   * Once set the removal never writes again; it suppresses its targets at or
+   * below it. Never moves backwards. Owner-PDS metadata, not verified proof.
+   */
+  removal_done_rev: string | null;
+  /**
+   * Migration 12: how `removal_done_rev` was established. `after` (migration
+   * 13): the first head read after the requested state was reached, a strict
+   * bound (projections below it hidden, at or above it visible). `absent_after`
+   * is only on receipts left by the unreleased migration 12 rule.
+   */
+  removal_done_basis: 'commit' | 'absent' | 'after' | 'absent_after' | 'verified' | null;
+  /**
+   * Migration 13, `scrobble.delete` only: durable no-replay knowledge, why
+   * the requested state is known to have been reached (an enforced commit, a
+   * received successful answer, an observed absence, a verified absence). Once
+   * set the removal never writes again, whether or not `removal_done_rev`
+   * orders it yet. Owner-PDS metadata, not verified proof.
+   */
+  removal_reached: 'commit' | 'success' | 'absent' | 'verified' | null;
+  /** Migration 13: when `removal_reached` was first recorded (local time; the read-only hold's backoff). */
+  removal_reached_at_ms: number | null;
+  /**
+   * Migration 14, `scrobble.delete` only: `pending` while a sent write's
+   * outcome is unknown (persisted with the exact request before it is
+   * awaited), `rejected` once that send was definitely refused.
+   */
+  removal_send_state: 'pending' | 'rejected' | null;
+  /** Migration 14: the pinned request {method, body, head:{cid,rev}} of a `pending` send. */
+  removal_send_json: string | null;
+  /** Migration 14: when the pending send was pinned (local time; the uncertain hold's backoff). */
+  removal_send_at_ms: number | null;
+  /** Migration 14: the later explicit removal that superseded this unresolved one. */
+  removal_superseded_by: string | null;
   due_at: number;
   last_error: string | null;
   result_uri: string | null;
@@ -331,6 +411,9 @@ export interface ImportItemRow {
   record_json: string;
   state: ImportItemState;
   operation_id: string | null;
+  /** Batch removal receipt; import outcome remains the original write result. */
+  removal_operation_id: string | null;
+  removed_at_ms: number | null;
 }
 
 export interface IgnoredListenRow {

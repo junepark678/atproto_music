@@ -203,16 +203,17 @@ describe('/api/v1/imports', () => {
     await r.tick(4);
     const progress = await r.call('GET', `/api/v1/imports/${id}`, { cookie: alice.cookie });
     expect(progress.status).toBe(200);
-    // ETA: 3 items × 3 points ÷ (50 % of 35,000 points a day = 729.17 points an hour) = 44.4 s → 45.
+    // Three listens fit in one durable batch create (3 points), so the ETA is batch-aware.
     expect(progress.body).toMatchObject({
       state: 'writing',
       fetched: 3,
       staged: 3,
       written: 0,
       duplicates: 0,
-      etaSeconds: 45,
+      etaSeconds: 15,
     });
-    expect(app.db.one("SELECT count(*) AS n FROM operations WHERE origin = 'import'")).toEqual({ n: 3 });
+    // Batch publication is closed in the fixture app, so listens remain staged without an operation.
+    expect(app.db.one("SELECT count(*) AS n FROM operations WHERE origin = 'import'")).toEqual({ n: 0 });
     // Another DID never sees it.
     const mallory = r.login(MALLORY);
     expect((await r.call('GET', `/api/v1/imports/${id}`, { cookie: mallory.cookie })).status).toBe(404);

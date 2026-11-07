@@ -8,12 +8,40 @@
 //   the users row and keeps a suppression marker; the NOT EXISTS keeps that
 //   rule explicit even for a row that somehow survived.
 // - A scrobble is visible when its owner is visible and it has no queued,
-//   running, blocked or failed `scrobble.delete` operation. After a PDS success,
-//   the row stays hidden while the verified projection still contains the CID
-//   that the delete used as `swapRecord`; a successful `record_not_ours` receipt
-//   has no such CID and cannot hide another writer's record. Proof-confirmed
-//   absence removes the projection row, so this query-time overlay never writes
-//   a false `record_state=absent` claim.
+//   running, blocked or failed `scrobble.delete` operation. A pending or
+//   failed local intent hides whatever is projected for its targets.
+// - Succeeded removals (migrations 12 and 13, outbox/removal-fence.ts):
+//   every current removal settles only with an ordered completion boundary
+//   `removal_done_rev`. Exact bases (`commit`: the enforced write; `absent`:
+//   a stable head/read/head bracket around an absent read; `verified`: a
+//   verified absence of every target after the send fence) hide a projected
+//   target at a revision <= the boundary: the removed (or an already
+//   superseded) incarnation, whatever its CID, so a delayed proof of an
+//   intermediate version this index never saw stays hidden, and so does one
+//   restored before the write. `after` is the first head read once the
+//   requested state was known reached (a no-op or metadata-free success, or an
+//   absence whose head moved): not an exact cutoff, so it hides a target
+//   strictly below it (pre-removal, or a later incarnation not yet proven at
+//   or above it: hidden until verified ingest re-proves it there). Above an
+//   exact boundary, or at or above `after`, a target is a later incarnation
+//   and is visible, at the same or a new CID, even when its proof arrived
+//   before local settlement. Neither settlement time nor CIDs order anything,
+//   and a sibling's presence never releases another target. The boundary is
+//   owner-PDS metadata of this receipt only: it never writes record_state or
+//   verified membership, and a successful `record_not_ours` receipt has none.
+//   A removal known reached but not yet ordered is still pending (queued,
+//   `removal_reached_unordered`), so the rule above hides all its targets.
+// - Receipts settled under migration 11 (a server-checked `removal_head_rev`,
+//   no `removal_done_rev`) keep its rule: hidden at or below that head, or
+//   below the reported `removal_commit_rev`.
+// - Receipts settled before migration 11 (no `removal_head_rev`) keep their
+//   recorded rules: they hide a projection at the CID the delete used as
+//   `swapRecord` or at a batch removal's pre-write evidence CIDs
+//   (`listen_removal_cids`), until verified membership records an absence of
+//   the entry (or single record) newer than their fence `removal_fence_rev`
+//   (migration 10), after which any present row is a later incarnation.
+//   Proof-confirmed absence removes the projection row, so this query-time
+//   overlay never writes a false `record_state=absent` claim.
 // - A follow edge is visible when its actor is a visible user and its subject
 //   is not hidden: the subject has no suppression row and no users row with
 //   active = 0 (the Rust oracle, crates/storage/src/repositories/follows.rs
@@ -27,6 +55,39 @@
 // strict identifier pattern; values are always bound parameters.
 
 const IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/**
+ * Legacy receipts only (no server-checked head): the removal operation aliased
+ * `d` has been outlived by the scrobble row aliased `s`: verified membership
+ * proves the entry (or single record) absent at a revision newer than the
+ * removal's fence, so the row is a later incarnation. A NULL fence (nothing
+ * verified when it was admitted or written) is outlived by any verified
+ * absence.
+ */
+function outlived(d: string, s: string): string {
+  return `EXISTS (SELECT 1 FROM verified_membership vm
+      WHERE vm.record_uri = coalesce(${s}.record_uri, ${s}.uri) AND vm.listen_id = coalesce(${s}.listen_id, '*')
+        AND vm.last_absent_revision IS NOT NULL
+        AND (${d}.removal_fence_rev IS NULL OR vm.last_absent_revision > ${d}.removal_fence_rev))`;
+}
+
+/**
+ * The succeeded removal aliased `d` still suppresses the projected row `s`.
+ * With an ordered completion boundary (migration 12): `s` was verified at or
+ * below it, or strictly below an `after` boundary (migration 13). Settled under migration 11 (a server-checked head, no boundary):
+ * at or below that head (or below the reported commit). Without either
+ * (settled before migration 11): `legacyMatch` (its CID evidence) and not
+ * outlived.
+ */
+function removedBy(d: string, s: string, legacyMatch: string): string {
+  return `(CASE WHEN ${d}.removal_done_rev IS NOT NULL AND ${d}.removal_done_basis = 'after'
+      THEN ${s}.revision < ${d}.removal_done_rev
+    WHEN ${d}.removal_done_rev IS NOT NULL THEN ${s}.revision <= ${d}.removal_done_rev
+    WHEN ${d}.removal_head_rev IS NOT NULL
+      THEN (${s}.revision <= ${d}.removal_head_rev
+        OR (${d}.removal_commit_rev IS NOT NULL AND ${s}.revision < ${d}.removal_commit_rev))
+      ELSE ((${legacyMatch}) AND NOT ${outlived(d, s)}) END)`;
+}
 const COLUMN = /^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?$/;
 
 function ident(alias: string): string {
@@ -51,19 +112,42 @@ export function visibleDid(didColumn: string, alias = 'v'): string {
   return `EXISTS (SELECT 1 FROM users ${a} WHERE ${a}.did = ${column(didColumn)} AND ${activeUser(a)})`;
 }
 
+/** Options of visibleScrobblesFrom. */
+export interface VisibilityOptions {
+  /**
+   * SQL over a removal operation aliased by the first argument and the
+   * projected row aliased by the second: when true, that removal's unsettled
+   * (queued, running, blocked) overlay does not hide the row. Only for an
+   * owner-scoped lookup of a provably later incarnation (ListenBrainz
+   * delete-listen); every public reader uses the default (nothing released).
+   * The predicate must itself exclude failed removals and only interpolate
+   * the aliases it is given.
+   */
+  release?: (removal: string, row: string) => string;
+}
+
 /**
  * `FROM` source of publicly visible scrobbles. A local delete intent hides its
  * target as soon as it is durably admitted, and remains hidden while queued,
- * running, blocked, or failed. After PDS success, it stays hidden only while
- * the projected CID still matches the persisted swap CID; this prevents an old
- * successful delete receipt from hiding a later recreation at the same rkey.
- * A failed PDS write is still not a public record; the operation endpoint is
- * the place to report its failure. The verified projection is unchanged until
- * remote proof confirms the deletion.
+ * running, blocked, or failed. After PDS success, it hides only projections
+ * of the incarnation it removed (`removedBy`): one verified at or below its
+ * server-checked head, or for a legacy receipt one at its evidence CIDs not
+ * yet outlived; a later recreation at the same rkey is visible. A failed PDS
+ * write is still not a public record; the operation endpoint is the place to
+ * report its failure. The verified projection is unchanged until remote proof
+ * confirms the deletion.
  */
-export function visibleScrobblesFrom(s = 's', u = 'u'): string {
+export function visibleScrobblesFrom(s = 's', u = 'u', options: VisibilityOptions = {}): string {
   const sa = ident(s);
   const ua = ident(u);
+  // An unsettled removal for which `release` holds does not hide (callers
+  // that look for a provably later incarnation; default: none is released).
+  // The default text is unchanged for every public reader.
+  const release = options.release;
+  const unsettled = (d: string, row: string, states: string) =>
+    release === undefined
+      ? `${d}.state IN ${states}`
+      : `(${d}.state IN ${states} AND NOT (${release(ident(d), ident(row))}))`;
   return `scrobbles ${sa} JOIN users ${ua}
     ON ${ua}.did = ${sa}.did AND ${activeUser(ua)}
     AND NOT EXISTS (
@@ -75,14 +159,31 @@ export function visibleScrobblesFrom(s = 's', u = 'u'): string {
           ELSE substr(${sa}.uri, length('at://' || ${sa}.did || '/') + 1,
             instr(substr(${sa}.uri, length('at://' || ${sa}.did || '/') + 1), '/') - 1) END
         AND d.kind = 'scrobble.delete'
+        AND (NOT EXISTS (SELECT 1 FROM batch_delete_listens bd WHERE bd.operation_id = d.id)
+          OR EXISTS (SELECT 1 FROM batch_delete_listens bd WHERE bd.operation_id = d.id
+            AND (bd.listen_id = '*' OR bd.listen_id = ${sa}.listen_id)))
         AND (
-          d.state IN ('queued', 'running', 'blocked', 'failed')
-          OR (d.state = 'succeeded' AND d.swap_cid = ${sa}.cid)
+          ${unsettled('d', sa, "('queued', 'running', 'blocked', 'failed')")}
+          OR (d.state = 'succeeded' AND ${removedBy(
+            'd',
+            sa,
+            `d.swap_cid = ${sa}.cid
+            OR EXISTS (SELECT 1 FROM listen_removal_cids e WHERE e.operation_id = d.id AND e.cid = ${sa}.cid)`,
+          )})
         )
     )
     AND NOT EXISTS (
       SELECT 1 FROM listen_removals AS lr
-      WHERE lr.did = ${sa}.did AND lr.record_uri = ${sa}.record_uri AND lr.listen_id = ${sa}.listen_id
+      LEFT JOIN operations AS ro ON ro.id = lr.operation_id
+      WHERE lr.did = ${sa}.did AND lr.record_uri = ${sa}.record_uri
+        AND (lr.listen_id = ${sa}.listen_id OR lr.listen_id = '*')
+        AND (ro.id IS NULL OR ${unsettled('ro', sa, "('queued','running','blocked','failed')")}
+          OR (ro.state = 'succeeded' AND ${removedBy(
+            'ro',
+            sa,
+            `lr.removed_cid = ${sa}.cid
+            OR EXISTS (SELECT 1 FROM listen_removal_cids le WHERE le.operation_id = ro.id AND le.cid = ${sa}.cid)`,
+          )}))
     )
     AND (${sa}.listen_id IS NULL OR NOT EXISTS (
       SELECT 1 FROM scrobbles AS one
@@ -95,7 +196,8 @@ export function visibleScrobblesFrom(s = 's', u = 'u'): string {
           WHERE sd.did = one.did AND sd.rkey = one.rkey AND sd.kind = 'scrobble.delete'
             AND sd.collection = substr(one.uri, length('at://' || one.did || '/') + 1,
               instr(substr(one.uri, length('at://' || one.did || '/') + 1), '/') - 1)
-            AND (sd.state IN ('queued','running','blocked','failed') OR (sd.state = 'succeeded' AND sd.swap_cid = one.cid))
+            AND (${unsettled('sd', 'one', "('queued','running','blocked','failed')")}
+              OR (sd.state = 'succeeded' AND ${removedBy('sd', 'one', 'sd.swap_cid = one.cid')}))
         )
     ))`;
 }

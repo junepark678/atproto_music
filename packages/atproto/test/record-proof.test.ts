@@ -405,3 +405,79 @@ describe('verifyRecordProof', () => {
     expect(bounded.blocks.get(s0.cid)!.buffer).not.toBe(car.buffer);
   });
 });
+
+describe('large scrobbleBatch container proofs', () => {
+  it('a container packed to the write limit verifies inside the 1 MiB getRecord cap with a deep MST path', async () => {
+    const big = new SignedRepo(ALICE, key, { clock: fixedClock('2026-01-15T12:00:00Z') });
+    const BATCH = `${P}.scrobbleBatch`;
+    // 20,000 filler records: an MST several levels deep around the container's key.
+    for (let start = 0; start < 20_000; start += 2_000) {
+      await big.writes(
+        Array.from({ length: 2_000 }, (_, i) => ({
+          action: 'put' as const,
+          collection: SCROBBLE,
+          rkey: `3l${String(start + i)
+            .padStart(11, '2')
+            .replace(/[0189]/g, 'a')}`,
+          record: { $type: SCROBBLE, artist: 'A', track: `T${start + i}`, listenedAt: '2026-01-15T10:00:00Z' } as never,
+        })),
+      );
+    }
+    // Entries of 256-character ASCII strings: DAG-CBOR within 1 % of the JSON, the worst case for the CAR.
+    const field = (c: string) => c.repeat(256);
+    const entry = (i: number) => ({
+      id: `3jzfcij${String(i)
+        .padStart(6, '2')
+        .replace(/[0189]/g, 'a')}`,
+      artist: field('a'),
+      track: field('t'),
+      album: field('b'),
+      albumArtist: field('r'),
+      listenedAt: '2026-01-15T11:59:00Z',
+      createdAt: '2026-01-15T12:00:00.000Z',
+    });
+    const listens: ReturnType<typeof entry>[] = [];
+    const utf8 = (v: unknown) => new TextEncoder().encode(JSON.stringify(v)).byteLength;
+    const empty = { $type: BATCH, createdAt: '2026-01-15T12:00:00.000Z', listens: [] };
+    let body = utf8({ repo: ALICE, collection: BATCH, rkey: '3jzfcijpj2z2a', record: empty });
+    for (;;) {
+      const next = entry(listens.length);
+      const grown = body + utf8(next) + (listens.length > 0 ? 1 : 0);
+      if (grown > 989_454) break;
+      listens.push(next);
+      body = grown;
+    }
+    const bodyOf = (n: number) =>
+      utf8({
+        repo: ALICE,
+        collection: BATCH,
+        rkey: '3jzfcijpj2z2a',
+        record: { ...empty, listens: listens.slice(0, n) },
+      });
+    expect(bodyOf(listens.length)).toBe(body);
+    const record = { $type: BATCH, createdAt: '2026-01-15T12:00:00.000Z', listens };
+    expect(bodyOf(listens.length)).toBeGreaterThan(989_454 - 1_200);
+    const recordBytes = encode(record).byteLength;
+    expect(recordBytes).toBeGreaterThan(970_000);
+    await big.put(BATCH, '3jzfcijpj2z2a', record);
+    const car = await big.getRecordCar(BATCH, '3jzfcijpj2z2a');
+    const proof = await verifyRecordProof(car, {
+      did: ALICE,
+      collection: BATCH,
+      rkey: '3jzfcijpj2z2a',
+      signingKey: key.didKey,
+    });
+    expect(proof.state).toBe('present');
+    // Measured: 843 listens, body 989,060 B, record block 972,068 B, CAR 976,102 B
+    // (commit, MST path and framing 4,034 B). The unchanged 1 MiB getRecord cap
+    // keeps more than 50 KiB beyond any container packed to MAX_CREATE_BODY_BYTES.
+    expect({ listens: listens.length, body, recordBytes, car: car.byteLength }).toEqual({
+      listens: 843,
+      body: 989_060,
+      recordBytes: 972_068,
+      car: 976_102,
+    });
+    expect(car.byteLength).toBeLessThanOrEqual(RECORD_PROOF_MAX_BYTES);
+    expect(RECORD_PROOF_MAX_BYTES - 989_454).toBeGreaterThan(50 * 1024);
+  }, 60_000);
+});

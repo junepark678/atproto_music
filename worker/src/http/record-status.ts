@@ -8,7 +8,9 @@
 // - One RPC, IndexRpc.recordStatus (worker/src/do/ingest/notify.ts), a single
 //   synchronous DO read: `indexed` (a visible row, with its cid and revision),
 //   `pending` (a hint or open snapshot job), `absent` or `excluded` (from
-//   record_state; `reason` only for excluded), else `unknown`; plus the per-DID
+//   record_state; `reason` only for excluded). For a batch item URI, a missing
+//   item in a present verified container is absent at that container revision;
+//   else `unknown`; plus the per-DID
 //   `indexing`. The read creates no user, hint or job.
 // - 200 `{uri, state, cid?, revision?, reason?, indexing}`, always
 //   `Cache-Control: no-store` (it changes as proofs apply).

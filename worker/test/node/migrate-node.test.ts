@@ -132,6 +132,31 @@ describe('migrate over node:sqlite', () => {
     );
   });
 
+  it('migration 8 upgrades a persisted zero-attempt reauth row as unknown, not unsent', async () => {
+    await withMigratedDb(
+      (db) => {
+        db.run(
+          `INSERT INTO operations(id,did,kind,origin,priority,collection,rkey,record_json,digest,state,attempts,
+             due_at,last_error,result_uri,import_job_id,created_at_ms,updated_at_ms,send_started_at_ms)
+           VALUES('legacy','did:plc:alice','scrobble.create','import',1,'com.example.atmusic.scrobble',
+             '3mchjvhag222q','{"$type":"com.example.atmusic.scrobble"}','legacy-digest','blocked',0,
+             1,'reauth_required',NULL,'legacy-job',1,1,NULL)`,
+        );
+        expect(migrate(db)).toEqual({ status: 'ready', version: SCHEMA_VERSION });
+        expect(
+          db.one('SELECT state,attempts,send_started_at_ms,last_error,send_state FROM operations WHERE id=?', 'legacy'),
+        ).toEqual({
+          state: 'blocked',
+          attempts: 0,
+          send_started_at_ms: null,
+          last_error: 'reauth_required',
+          send_state: 'unknown',
+        });
+      },
+      { migrations: MIGRATIONS.slice(0, 7) },
+    );
+  });
+
   it('a database with a newer schema version reports too_new and is not modified', async () => {
     await withMigratedDb(
       (db) => {

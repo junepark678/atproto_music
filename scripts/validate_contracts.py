@@ -94,6 +94,20 @@ def valid_at_uri(value):
             re.fullmatch(r'[A-Za-z0-9._~:-]+', parts[2]) is not None)
 
 
+def valid_listen_uri(value):
+    if not isinstance(value, str):
+        return False
+    if valid_at_uri(value):
+        return True
+    if value.count('#') != 1:
+        return False
+    container, listen_id = value.split('#', 1)
+    if not valid_at_uri(container) or not re.fullmatch(r'[234567abcdefghij][234567abcdefghijklmnopqrstuvwxyz]{12}', listen_id):
+        return False
+    collection = container.removeprefix('at://').split('/')[1]
+    return collection.endswith('.scrobbleBatch')
+
+
 def valid_cid(value):
     if not isinstance(value, str) or not re.fullmatch(r'b[a-z2-7]+', value):
         return False
@@ -134,6 +148,7 @@ def build_validator():
 
     checker.checks('at-did')(lambda value: not isinstance(value, str) or valid_did(value))
     checker.checks('at-record-uri')(lambda value: not isinstance(value, str) or valid_at_uri(value))
+    checker.checks('at-listen-uri')(lambda value: not isinstance(value, str) or valid_listen_uri(value))
     checker.checks('at-record-cid')(lambda value: not isinstance(value, str) or valid_cid(value))
     checker.checks('at-handle')(lambda value: not isinstance(value, str) or valid_handle(value))
 
@@ -1206,8 +1221,8 @@ def lexicons(override=None, published=None):
             'lexicons/scrobbleBatch.json: envelope createdAt must be a datetime')
     envelope_listens = batch_record['properties']['listens']
     require(envelope_listens.get('type') == 'array' and envelope_listens.get('minLength') == 1 and
-            envelope_listens.get('maxLength') == 200,
-            'lexicons/scrobbleBatch.json: listens must be bounded to 1–200 entries')
+            envelope_listens.get('maxLength') == 10000,
+            'lexicons/scrobbleBatch.json: listens must be bounded to 1–10,000 entries')
     item = envelope_listens.get('items', {})
     require(item.get('type') == 'object' and item.get('required') == ['id', 'artist', 'track', 'listenedAt', 'createdAt'] and
             isinstance(item.get('properties'), dict),

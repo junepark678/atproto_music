@@ -17,6 +17,7 @@ import {
   FOLLOW,
   GET,
   type Harness,
+  HEAD,
   listenInput,
   PUT,
   remoteRecord,
@@ -105,12 +106,26 @@ it('crash before send, after PDS commit before local ack, after local commit, an
       const beforeDelete = h.writers.sent.length;
       await h.runUntilIdle();
       const resent = h.writers.sent.slice(beforeDelete);
+      // Never resent: the exact delete was pinned (pending) before the send,
+      // so the restart only reads. The record is gone, which completes it
+      // through an absence ordered by the same head before and after the read.
       expect(resent.map((s) => [s.nsid, s.status])).toEqual([
-        [DELETE, 400],
+        [HEAD, 200],
         [GET, 400],
+        [HEAD, 200],
       ]);
-      expect(resent[0]!.body).toMatchObject({ rkey: a.rkey, swapRecord: remoteA!.cid });
-      expect(h.op(del.id)).toMatchObject({ state: 'succeeded', attempts: 2 });
+      expect(h.op(del.id)).toMatchObject({
+        state: 'succeeded',
+        attempts: 2,
+        removal_reached: 'absent',
+        removal_done_basis: 'absent',
+        removal_send_state: 'pending',
+      });
+      expect(JSON.parse(h.op(del.id).removal_send_json!)).toMatchObject({
+        method: DELETE,
+        body: { rkey: a.rkey, swapRecord: remoteA!.cid },
+      });
+      // One 200 answer: the lost commit.
       expect(committed(h, DELETE)).toBe(1);
       expect((await remoteRecords(h.kit, 'Alice', SCROBBLE)).map((r) => r.rkey)).toEqual([b.rkey]);
       // Never a putRecord.

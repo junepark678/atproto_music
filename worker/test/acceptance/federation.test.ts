@@ -262,7 +262,16 @@ describe('federation acceptance', () => {
     expect(rkeys(fresh.body)).toEqual(['x01', 'r07']);
     // The pre-rejection cursor still pages below its anchor: x01 arrived above it.
     const resumed = await a.request(`/api/v1/users/${ALICE}/scrobbles?limit=2&cursor=${enc(cursor)}`);
-    expect(pageBytes(resumed.body)).toBe(pageBytes(page2.body));
+    // The valid recovery snapshot reaffirms unchanged bytes at its newer
+    // signed head. Payloads, pagination and cursor stay identical; revisions
+    // now truthfully identify that verified version.
+    const priorPage = page2.body as Json;
+    expect(pageBytes(resumed.body)).toBe(
+      pageBytes({
+        ...priorPage,
+        items: (priorPage.items as Json[]).map((item) => ({ ...item, revision: put.rev })),
+      }),
+    );
     // Nothing invalid entered: the projection differs from `before` by exactly x01.
     const final = await a.inDo(projectionTables);
     expect((final.scrobbles as Array<{ uri: string }>).map((r) => r.uri).filter((u) => u !== x01)).toEqual(

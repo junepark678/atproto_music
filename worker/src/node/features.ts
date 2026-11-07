@@ -487,7 +487,9 @@ export async function productionFeatures(options: ProductionFeatureOptions): Pro
       if (!config.app.publication || !signInAllowed(config, did)) return null;
       if (!service.sessionStore.has(did)) return null;
       try {
-        return sessionWriter(await service.restore(did));
+        const session = await service.restore(did);
+        const { scope } = await session.getTokenInfo();
+        return { ...sessionWriter(session), scope };
       } catch (error) {
         if (error instanceof ReauthRequiredError || REAUTH_ERRORS.has(errorName(error))) return null;
         throw error;
