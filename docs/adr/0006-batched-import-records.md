@@ -112,6 +112,15 @@ the new CID makes it visible. Legacy removal rows without an operation remain
 conservatively suppressed. The existing four-schema publication receipt and
 migrations 1–6 are unchanged.
 
+Migration 8 distinguishes historical operations with unknown send status from
+new operations proven unsent. A legacy import single is read at its persisted
+rkey before it can enter either the write batcher or the rebatcher. A matching
+remote record settles that single; a conflict never overwrites it; an
+unavailable read waits. Proven absence clears the conservative send marker and
+allows transactional rebatching. Already-written import items and their
+receipts remain unchanged. Splitting also partitions pending removals among
+child containers, with the original removal receipt waiting for every child.
+
 The local outbox and read model define this AppView's result. PDS publication
 does not imply that another AppView has indexed the custom collection, and
 feedback clients must use this service's ListenBrainz/Last.fm endpoints to
@@ -152,9 +161,12 @@ implement web UI changes.
    advertises `batchPublication`, then have every account whose grant predates
    the batch scope re-consent to `repo:<prefix>.scrobbleBatch`. Verify the new
    grant through the OAuth session before resuming that account's held work.
-   Only then enable the batch import writer/migrator. Unsent legacy import
-   singles are eligible for rebatching only through the transactional
-   eligibility checks; already-sent singles reconcile or finish as singles.
+   The writer and migrator run automatically once the gate and grant permit
+   them; no separate migration command or replacement import job is needed.
+   Resume the existing job through its import resume API only if it remains
+   manually paused. Legacy import singles become eligible for rebatching only
+   after successful absence reconciliation and transactional eligibility
+   checks; already-published singles retain their original records.
 6. Monitor held imports, `batch_scope_required`, CAS retries, split outcomes,
    per-listen counters, and container-level proof convergence. A scope error
    holds the affected batch lane until re-consent; it does not discard intent.
