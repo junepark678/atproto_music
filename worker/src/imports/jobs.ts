@@ -68,6 +68,7 @@ import { budgetWindows, importSharePercent, WRITE_COST } from '../outbox/budget'
 import { accountNeedsSignIn } from '../outbox/operations';
 import { fetchLastfmPage, initialLastfmCursor, type LastfmCursor } from './lastfm-source';
 import { fetchListenBrainzPage, initialListenBrainzCursor, type ListenBrainzCursor } from './listenbrainz-source';
+import { rebatchUnsentImports } from './rebatch';
 import { type ParsedEntry, stageEntries } from './staging';
 import {
   deleteUpload,
@@ -184,6 +185,7 @@ export type JobAction =
   | 'page'
   | 'parsed'
   | 'wrote'
+  | 'batch_publication_pending'
   | 'paced'
   | 'backoff'
   | 'paused'
@@ -293,7 +295,29 @@ export function etaSeconds(db: Db, job: ImportJobRow, now: number): number | nul
   const windows = budgetWindows(db, job.did, now);
   const hour = windows.find((w) => w.window === 'hour')?.limit ?? 5_000;
   const day = windows.find((w) => w.window === 'day')?.limit ?? 35_000;
-  const points = remaining * WRITE_COST.create;
+  const queuedOperations =
+    db.one<{ n: number }>(
+      "SELECT count(DISTINCT operation_id) AS n FROM import_items WHERE job_id = ? AND state = 'queued' AND operation_id IS NOT NULL",
+      job.id,
+    )?.n ?? 0;
+  const staged = db.all<{ record_json: string }>(
+    "SELECT record_json FROM import_items WHERE job_id = ? AND state = 'staged'",
+    job.id,
+  );
+  let stagedListens = 0;
+  let stagedLoves = 0;
+  for (const item of staged) {
+    try {
+      const value = JSON.parse(item.record_json) as { kind?: unknown };
+      if (value.kind === 'listen') stagedListens += 1;
+      else if (value.kind === 'love') stagedLoves += 1;
+    } catch {
+      // Invalid staged JSON is still counted as one conservative single-write unit.
+      stagedLoves += 1;
+    }
+  }
+  const recordsLeft = queuedOperations + stagedLoves + Math.ceil(stagedListens / 200);
+  const points = recordsLeft * WRITE_COST.create;
   // points / (hour·share/100) h, or points / (day·share/100) days, whichever is longer.
   const byHour = Math.ceil((points * 3_600 * 100) / (hour * share));
   const byDay = Math.ceil((points * 86_400 * 100) / (day * share));
@@ -549,7 +573,7 @@ class ImportRun {
         // A backoff end, or the next pacer slot (at most one per second).
         this.wait(parseCursor(job).retry?.notBeforeMs ?? this.now + 1_000);
       } else if (
-        job.state === 'writing' ||
+        (job.state === 'writing' && this.shouldPollWriting(job)) ||
         job.state === 'waiting_index' ||
         job.state === 'paused' ||
         job.state === 'cancelled'
@@ -571,6 +595,10 @@ class ImportRun {
       syncOutcomes(db, job.id, this.now);
       job = loadJob(db, job.id) as ImportJobRow;
     }
+    if (job.state === 'writing' && this.rt.m.config.batchPublication) {
+      await rebatchUnsentImports(this.rt.m, job.id, job.did, this.now);
+      job = loadJob(db, job.id) as ImportJobRow;
+    }
     const cursor = parseCursor(job);
     if (job.state === 'waiting_index') {
       await this.waitingIndex(job, cursor);
@@ -580,6 +608,11 @@ class ImportRun {
       const resume =
         (job.error === 'low_disk' && !this.rt.diskLow()) ||
         (job.error === 'reauth_required' && !accountNeedsSignIn(db, job.did)) ||
+        (job.error === 'batch_scope_required' &&
+          (db.one<{ n: number }>(
+            "SELECT count(*) AS n FROM operations WHERE did = ? AND last_error = 'batch_scope_required' AND state = 'blocked'",
+            job.did,
+          )?.n ?? 0) === 0) ||
         (job.error === 'rate_limited' && (cursor.retry?.notBeforeMs ?? 0) <= this.now);
       if (resume) {
         resumePaused(db, job, this.now);
@@ -662,9 +695,32 @@ class ImportRun {
     const cursor = parseCursor(job);
     if (job.state === 'fetching') return !this.rt.diskLow() && (cursor.retry?.notBeforeMs ?? 0) <= this.now;
     if (job.state === 'writing') {
-      return !this.rt.diskLow() && stagedLeft(this.db, job.id) > 0 && outstanding(this.db, job.id) < WRITE_SLICE;
+      const staged = this.rt.m.config.batchPublication
+        ? stagedLeft(this.db, job.id)
+        : (this.db.one<{ n: number }>(
+            "SELECT count(*) AS n FROM import_items WHERE job_id = ? AND state = 'staged' AND json_extract(record_json, '$.kind') = 'love'",
+            job.id,
+          )?.n ?? 0);
+      return !this.rt.diskLow() && staged > 0 && outstanding(this.db, job.id) < WRITE_SLICE;
     }
     return false;
+  }
+
+  /** Dormant, never-sent imports do not arm a polling alarm while publication is closed. */
+  private shouldPollWriting(job: ImportJobRow): boolean {
+    if (this.rt.m.config.batchPublication) return true;
+    const loves =
+      this.db.one<{ n: number }>(
+        "SELECT count(*) AS n FROM import_items WHERE job_id = ? AND state = 'staged' AND json_extract(record_json, '$.kind') = 'love'",
+        job.id,
+      )?.n ?? 0;
+    const possiblySent =
+      this.db.one<{ n: number }>(
+        `SELECT count(*) AS n FROM import_items i JOIN operations o ON o.id = i.operation_id
+       WHERE i.job_id = ? AND i.state = 'queued' AND o.attempts > 0`,
+        job.id,
+      )?.n ?? 0;
+    return loves > 0 || possiblySent > 0;
   }
 
   /** Crash-loop guard: false (and the job failed) at CRASH_LOOP_ATTEMPTS; else attempts + 1, committed. */
@@ -931,6 +987,27 @@ class ImportRun {
       pauseJob(db, job, parseCursor(job), 'reauth_required', this.now);
       this.act(job.id, 'paused', { detail: 'reauth_required' });
       return;
+    }
+    const scopeHold = db.one<{ n: number }>(
+      "SELECT count(*) AS n FROM operations WHERE did = ? AND collection = ? AND last_error = 'batch_scope_required' AND state = 'blocked'",
+      job.did,
+      `${rt.m.config.prefix}.scrobbleBatch`,
+    );
+    if ((scopeHold?.n ?? 0) > 0) {
+      pauseJob(db, job, parseCursor(job), 'batch_scope_required', this.now);
+      this.act(job.id, 'paused', { detail: 'batch_scope_required' });
+      return;
+    }
+    if (!rt.m.config.batchPublication) {
+      const stagedLoves =
+        db.one<{ n: number }>(
+          "SELECT count(*) AS n FROM import_items WHERE job_id = ? AND state = 'staged' AND json_extract(record_json, '$.kind') = 'love'",
+          job.id,
+        )?.n ?? 0;
+      if (stagedLoves === 0) {
+        this.act(job.id, 'batch_publication_pending');
+        return;
+      }
     }
     if (stagedLeft(db, job.id) === 0 || outstanding(db, job.id) >= WRITE_SLICE) return;
     if (!(await this.beginSlice(job))) return;

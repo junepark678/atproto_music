@@ -9,6 +9,7 @@
 
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { measureScrobbleBatch } from '@atmusic/atproto/scrobble-batch-size';
 import type { Transport } from '@atmusic/atproto/transport';
 import { listenKey } from '@atmusic/core/listen-key';
 import { trackKey } from '@atmusic/core/music-key';
@@ -24,10 +25,15 @@ import {
   jobDto,
   runImports,
 } from '../../../src/imports/jobs';
+import { rebatchUnsentImports } from '../../../src/imports/rebatch';
 import { fsUploadStore } from '../../../src/imports/uploads';
 import { WRITE_SLICE, writeSlice } from '../../../src/imports/writer';
 import { bindPolicyFetch, createPolicyFetch } from '../../../src/node/policy-fetch';
-import { APPLY, type Harness, remoteRecords, SCROBBLE, T0, withHarness } from '../outbox/support';
+import { newOperationId } from '../../../src/outbox/operations';
+import { insertScrobbleCreate, prepareScrobble } from '../../../src/outbox/scrobble-ops';
+import { APPLY, CREATE, type Harness, remoteRecords, SCROBBLE, T0, withHarness } from '../outbox/support';
+
+const SCROBBLE_BATCH = 'com.example.atmusic.scrobbleBatch';
 
 const T0S = Math.floor(T0 / 1000);
 const HOUR = 3_600_000;
@@ -200,12 +206,12 @@ describe('import writer', () => {
       expect(job(h, 'job-w')).toMatchObject({ fetched: 1_015, staged: 1_010, duplicates: 3, invalid: 2 });
       expect(JSON.parse(job(h, 'job-w').invalid_reasons)).toEqual({ artist_invalid: 1, timestamp_invalid: 1 });
 
-      // One writer slice: exactly 1,000 operations, origin import, priority 1.
+      // One writer slice: 1,000 listens are packed into five durable records.
       const wrote = await runImports(rt, h.kit.clock.nowMs());
       expect(wrote.actions).toContainEqual({ jobId: 'job-w', action: 'wrote', detail: String(WRITE_SLICE) });
       expect(WRITE_SLICE).toBe(1_000);
       const ops = h.ops();
-      expect(ops).toHaveLength(1_000);
+      expect(ops).toHaveLength(5);
       expect(
         ops.every(
           (o) =>
@@ -214,59 +220,73 @@ describe('import writer', () => {
             o.priority === 1 &&
             o.import_job_id === 'job-w' &&
             o.state === 'queued' &&
-            o.collection === SCROBBLE,
+            o.collection === SCROBBLE_BATCH,
         ),
       ).toBe(true);
       expect(itemStates(h, 'job-w')).toEqual({ queued: 1_000, staged: 10 });
-      // Each queued item names its own operation; the records keep the item order.
+      // Each batch record holds 200 listens, and item rows preserve their shared operation mapping.
       const queued = h.db.all<ImportItemRow>(
         "SELECT * FROM import_items WHERE job_id = 'job-w' AND state = 'queued' ORDER BY seq",
       );
-      expect(queued.map((i) => i.operation_id)).toEqual(ops.map((o) => o.id));
-      expect(new Set(ops.map((o) => o.rkey)).size).toBe(1_000);
+      expect(new Set(queued.map((i) => i.operation_id))).toEqual(new Set(ops.map((o) => o.id)));
+      expect(ops.map((o) => (JSON.parse(o.record_json as string) as { listens: unknown[] }).listens.length)).toEqual([
+        200, 200, 200, 200, 200,
+      ]);
+      expect(ops.length * 3).toBe(15);
+      for (const op of ops) {
+        const record = JSON.parse(op.record_json as string) as Parameters<typeof measureScrobbleBatch>[0];
+        const sizes = measureScrobbleBatch(record, {
+          repo: h.alice,
+          collection: SCROBBLE_BATCH,
+          rkey: op.rkey as string,
+        });
+        expect(sizes.cborBytes).toBeLessThanOrEqual(64_000);
+        expect(sizes.createBodyBytes).toBeLessThanOrEqual(100_000);
+      }
+      expect(new Set(ops.map((o) => o.rkey)).size).toBe(5);
       expect(h.db.one('SELECT count(*) AS n FROM forward_outbox')).toEqual({ n: 0 });
 
       // A second run makes no operation while 1,000 are queued.
       await runImports(rt, h.kit.clock.nowMs());
-      expect(h.ops()).toHaveLength(1_000);
+      expect(h.ops()).toHaveLength(5);
 
       // The outbox sends what the import share allows: one batch of 3, then nothing
       // more this hour. (Explicit runs: with more than 250 due operations of one DID
       // the N2-05 runner reports itself due again at once even when the budget parks
       // them, so runUntilIdle would not settle; see the package report.)
-      expect((await h.run()).batches).toEqual([3]);
+      expect((await h.run()).attempted).toBe(3);
       for (let i = 0; i < 3; i++) expect((await h.run()).attempted).toBe(0);
-      expect(h.writers.count(APPLY)).toBe(1);
+      expect(h.writers.count(CREATE)).toBe(3);
       // The next run counts them and refills exactly the room they freed.
       const refill = await runImports(rt, h.kit.clock.nowMs());
-      expect(refill.actions).toContainEqual({ jobId: 'job-w', action: 'wrote', detail: '3' });
+      expect(refill.actions).toContainEqual({ jobId: 'job-w', action: 'wrote', detail: '10' });
       expect(job(h, 'job-w')).toMatchObject({
-        written: 3,
+        written: 600,
         failed_items: 0,
         duplicates: 3,
         invalid: 2,
         state: 'writing',
       });
-      expect(await remoteRecords(h.kit, 'Alice', SCROBBLE)).toHaveLength(3);
-      expect(jobDto(h.db, job(h, 'job-w'), h.kit.clock.nowMs())).toMatchObject({ written: 3, staged: 1_010 });
-      expect(h.ops()).toHaveLength(1_003);
-      expect(itemStates(h, 'job-w')).toEqual({ written: 3, queued: 1_000, staged: 7 });
+      expect(await remoteRecords(h.kit, 'Alice', SCROBBLE_BATCH)).toHaveLength(3);
+      expect(jobDto(h.db, job(h, 'job-w'), h.kit.clock.nowMs())).toMatchObject({ written: 600, staged: 1_010 });
+      expect(h.ops()).toHaveLength(6);
+      expect(itemStates(h, 'job-w')).toEqual({ written: 600, queued: 410 });
 
       // Cancel: no new operation, ever; the queued ones are not withdrawn.
       expect((await cancelJob(rt, h.alice, 'job-w', h.kit.clock.nowMs()))?.state).toBe('cancelled');
       await runImports(rt, h.kit.clock.nowMs());
-      expect(h.ops()).toHaveLength(1_003);
-      expect(opStates(h, "origin = 'import'")).toEqual({ succeeded: 3, queued: 1_000 });
+      expect(h.ops()).toHaveLength(6);
+      expect(opStates(h, "origin = 'import'")).toEqual({ succeeded: 3, queued: 3 });
       // The next hour: the queued operations keep going and keep counting, and
       // the room they free is never refilled.
       h.kit.clock.advance(HOUR);
       const next = await h.run();
-      expect(next.batches).toEqual([200]);
+      expect(next.attempted).toBe(3);
       await runImports(rt, h.kit.clock.nowMs());
-      expect(h.ops()).toHaveLength(1_003);
-      expect(itemStates(h, 'job-w')).toEqual({ written: 203, queued: 800, staged: 7 });
-      expect(job(h, 'job-w')).toMatchObject({ state: 'cancelled', written: 203, staged: 1_010 });
-      expect(await remoteRecords(h.kit, 'Alice', SCROBBLE)).toHaveLength(203);
+      expect(h.ops()).toHaveLength(6);
+      expect(itemStates(h, 'job-w')).toEqual({ written: 1_010 });
+      expect(job(h, 'job-w')).toMatchObject({ state: 'cancelled', written: 1_010, staged: 1_010 });
+      expect(await remoteRecords(h.kit, 'Alice', SCROBBLE_BATCH)).toHaveLength(6);
     });
   }, 60_000);
 
@@ -279,14 +299,14 @@ describe('import writer', () => {
       await parse(h, rt, 'job-r');
       await runImports(rt, h.kit.clock.nowMs());
       const before = h.ops();
-      expect(before).toHaveLength(5);
+      expect(before).toHaveLength(1);
       const rkeys = before.map((o) => o.rkey);
 
       // The applyWrites batch reaches the PDS, then the process dies before the answer is read.
-      const crashed = h.writers.crashOn(APPLY, 'after_commit');
+      const crashed = h.writers.crashOn(CREATE, 'after_commit');
       void h.run();
       await crashed;
-      expect(await remoteRecords(h.kit, 'Alice', SCROBBLE)).toHaveLength(5);
+      expect(await remoteRecords(h.kit, 'Alice', SCROBBLE_BATCH)).toHaveLength(1);
 
       h.restart();
       rt = runtime(h);
@@ -297,9 +317,9 @@ describe('import writer', () => {
       await h.runUntilIdle();
       for (let i = 0; i < 5 && job(h, 'job-r').state !== 'done'; i++) await runImports(rt, h.kit.clock.nowMs());
 
-      const records = await remoteRecords(h.kit, 'Alice', SCROBBLE);
+      const records = await remoteRecords(h.kit, 'Alice', SCROBBLE_BATCH);
       expect(records.map((r) => r.rkey).sort()).toEqual([...rkeys].sort());
-      expect(records.map((r) => (r.value as { track: string }).track).sort()).toEqual([
+      expect((records[0]!.value as { listens: Array<{ track: string }> }).listens.map((r) => r.track).sort()).toEqual([
         'Track 1',
         'Track 2',
         'Track 3',
@@ -336,7 +356,7 @@ describe('import writer', () => {
       const still = await runImports(rt, h.kit.clock.nowMs());
       expect(still.slices).toBe(0);
       expect(still.nextDueMs).toBe(h.kit.clock.nowMs() + 60_000);
-      expect(h.ops()).toHaveLength(2);
+      expect(h.ops()).toHaveLength(1);
       expect(itemStates(h, 'job-d')).toEqual({ queued: 2, staged: 3 });
 
       low = false;
@@ -347,16 +367,111 @@ describe('import writer', () => {
       expect(job(h, 'job-d')).toMatchObject({ state: 'writing', error: null });
       const items = h.db.all<ImportItemRow>("SELECT * FROM import_items WHERE job_id = 'job-d' ORDER BY seq");
       const ops = h.ops();
-      expect(ops).toHaveLength(5);
-      // Item by item in staging order, each with exactly one operation.
-      expect(items.map((i) => i.operation_id)).toEqual(ops.map((o) => o.id));
-      expect(ops.map((o) => (JSON.parse(o.record_json as string) as { track: string }).track)).toEqual([
-        'Track 1',
-        'Track 2',
-        'Track 3',
-        'Track 4',
-        'Track 5',
-      ]);
+      expect(ops).toHaveLength(2);
+      expect(new Set(items.map((i) => i.operation_id))).toEqual(new Set(ops.map((o) => o.id)));
+      expect(
+        ops
+          .flatMap((o) =>
+            (JSON.parse(o.record_json as string) as { listens: Array<{ track: string }> }).listens.map((r) => r.track),
+          )
+          .sort(),
+      ).toEqual(['Track 1', 'Track 2', 'Track 3', 'Track 4', 'Track 5']);
+    });
+  });
+
+  it('rebatches only queued never-sent import singles after rechecking all item and key links', async () => {
+    await withHarness(async (h) => {
+      h.seedUser(h.alice);
+      h.m.config = { ...h.m.config, batchPublication: false };
+      const rt = runtime(h);
+      uploadJob(h, 'job-rebatch', [listen(1), listen(2), listen(3), listen(4), listen(5)]);
+      await parse(h, rt, 'job-rebatch');
+      const staged = h.db.all<{ seq: number; dedupe_key: string; record_json: string }>(
+        "SELECT seq, dedupe_key, record_json FROM import_items WHERE job_id = 'job-rebatch' AND state = 'staged' ORDER BY seq",
+      );
+      for (const item of staged) {
+        const stagedRecord = JSON.parse(item.record_json) as { kind: 'listen'; input: unknown };
+        const prepared = await prepareScrobble(stagedRecord.input, h.m.config.prefix as string, h.kit.clock.nowMs());
+        expect(prepared.ok).toBe(true);
+        if (!prepared.ok) continue;
+        const id = newOperationId(h.m.random);
+        const op = insertScrobbleCreate(
+          h.m,
+          {
+            id,
+            did: h.alice,
+            origin: 'import',
+            prepared: prepared.prepared,
+            importJobId: 'job-rebatch',
+          },
+          h.kit.clock.nowMs(),
+        );
+        h.db.run(
+          "INSERT INTO listen_keys(did, dedupe_key, operation_id, source, created_at_ms) VALUES (?, ?, ?, 'import', ?)",
+          h.alice,
+          item.dedupe_key,
+          id,
+          h.kit.clock.nowMs(),
+        );
+        h.db.run(
+          "UPDATE import_items SET state = 'queued', operation_id = ? WHERE job_id = 'job-rebatch' AND seq = ?",
+          op.id,
+          item.seq,
+        );
+      }
+      const singles = h.ops();
+      expect(singles).toHaveLength(5);
+      h.db.run(
+        "UPDATE operations SET state = 'succeeded', result_uri = ? WHERE id = ?",
+        `at://${h.alice}/${SCROBBLE}/${singles[0]!.rkey}`,
+        singles[0]!.id,
+      );
+      h.db.run('UPDATE operations SET attempts = 1 WHERE id = ?', singles[1]!.id);
+      h.db.run('INSERT INTO operation_deps(op_id, pred_id) VALUES (?, ?)', singles[2]!.id, singles[1]!.id);
+      h.m.config = { ...h.m.config, batchPublication: true };
+
+      expect(await rebatchUnsentImports(h.m, 'job-rebatch', h.alice, h.kit.clock.nowMs())).toBe(2);
+      const batches = h.db.all<{ id: string; collection: string; record_json: string }>(
+        "SELECT id, collection, record_json FROM operations WHERE collection = ? AND origin = 'import'",
+        SCROBBLE_BATCH,
+      );
+      expect(batches).toHaveLength(1);
+      expect((JSON.parse(batches[0]?.record_json ?? '{}') as { listens: unknown[] }).listens).toHaveLength(2);
+      expect(
+        h.db.one("SELECT count(*) AS n FROM operations WHERE state = 'cancelled' AND last_error = 'rebatched'"),
+      ).toEqual({ n: 2 });
+      expect(
+        h.db.one(
+          "SELECT count(*) AS n FROM import_items WHERE job_id = 'job-rebatch' AND state = 'queued' AND operation_id = ?",
+          batches[0]!.id,
+        ),
+      ).toEqual({ n: 2 });
+      expect(
+        h.db.one("SELECT count(*) AS n FROM listen_keys WHERE operation_id = ? AND source = 'import'", batches[0]!.id),
+      ).toEqual({ n: 2 });
+      expect(h.db.one('SELECT state FROM operations WHERE id = ?', singles[0]!.id)).toEqual({ state: 'succeeded' });
+      expect(h.db.one('SELECT attempts FROM operations WHERE id = ?', singles[1]!.id)).toEqual({ attempts: 1 });
+      expect(h.db.one('SELECT state FROM operations WHERE id = ?', singles[2]!.id)).toEqual({ state: 'queued' });
+    });
+  });
+
+  it('keeps staged imported listens dormant without attempts or a polling alarm while publication is closed', async () => {
+    await withHarness(async (h) => {
+      h.seedUser(h.alice);
+      const rt = runtime(h);
+      uploadJob(h, 'job-held', [listen(1), listen(2)]);
+      await parse(h, rt, 'job-held');
+      h.m.config = { ...h.m.config, batchPublication: false };
+
+      const held = await runImports(rt, h.kit.clock.nowMs());
+      expect(held.nextDueMs).toBeNull();
+      expect(h.ops()).toEqual([]);
+      expect(itemStates(h, 'job-held')).toEqual({ staged: 2 });
+
+      h.m.config = { ...h.m.config, batchPublication: true };
+      const resumed = await runImports(rt, h.kit.clock.nowMs());
+      expect(resumed.actions).toContainEqual({ jobId: 'job-held', action: 'wrote', detail: '2' });
+      expect(h.ops()).toHaveLength(1);
     });
   });
 });

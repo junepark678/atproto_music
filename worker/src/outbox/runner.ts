@@ -62,6 +62,7 @@ import { admit } from '../do/ingest/admission';
 import { enqueueHints, type HintInput } from '../do/ingest/hints';
 import { loadUser } from '../do/write/account-state';
 import { MAX_BATCH_WRITES, planBatch, sendCreateBatch } from './apply-writes';
+import { batchCreateExecutor } from './batch-ops';
 import { chargePoints, checkBudget, observeRateLimit, WRITE_COST } from './budget';
 import { scrobbleDeleteExecutor } from './delete-ops';
 import { followDeleteExecutor, followPutExecutor } from './follow-ops';
@@ -215,16 +216,24 @@ class Run {
   }
 
   async run(): Promise<OutboxRunReport> {
+    // Never-sent import creates are eligible for slice-C rebatching. Once the
+    // reviewed collection gate opens they can be migrated; attempted singles
+    // remain eligible for normal reconciliation and completion.
+    const dormantImports = this.m.config.batchPublication
+      ? ''
+      : ` AND NOT (
+      (o.origin = 'import' AND o.kind = 'scrobble.create' AND o.collection = '${this.collections.scrobble}' AND o.attempts = 0)
+      OR (o.collection = '${this.collections.scrobbleBatch}' AND o.attempts = 0))`;
     const priorities = this.db
       .all<{ priority: number }>(
-        `SELECT DISTINCT o.priority FROM operations o WHERE ${DUE} AND o.due_at <= ? ORDER BY o.priority`,
+        `SELECT DISTINCT o.priority FROM operations o WHERE ${DUE} AND o.due_at <= ?${dormantImports} ORDER BY o.priority`,
         this.now,
       )
       .map((r) => r.priority);
     lanes: for (const priority of priorities) {
       const dids = this.db.all<{ did: string }>(
         `SELECT o.did, min(o.due_at) AS d FROM operations o
-         WHERE ${DUE} AND o.priority = ? AND o.due_at <= ? AND ${READY}
+         WHERE ${DUE} AND o.priority = ? AND o.due_at <= ?${dormantImports} AND ${READY}
          GROUP BY o.did ORDER BY d, o.did LIMIT ?`,
         priority,
         this.now,
@@ -285,12 +294,12 @@ class Run {
     const now = this.m.clock.nowMs();
     if (this.deferred) return now;
     const pending = this.db.all<{ did: string; priority: number }>(
-      `SELECT DISTINCT o.did, o.priority FROM operations o WHERE ${DUE} AND o.due_at <= ? AND ${READY}`,
+      `SELECT DISTINCT o.did, o.priority FROM operations o WHERE ${DUE} AND o.due_at <= ?${this.m.config.batchPublication ? '' : ` AND NOT ((o.origin = 'import' AND o.kind = 'scrobble.create' AND o.collection = '${this.collections.scrobble}' AND o.attempts = 0) OR (o.collection = '${this.collections.scrobbleBatch}' AND o.attempts = 0))`} AND ${READY}`,
       now,
     );
     if (pending.some((p) => !this.parked.has(`${p.did}|${p.priority}`) && !this.parked.has(`${p.did}|*`))) return now;
     const row = this.db.one<{ next: number | null }>(
-      `SELECT min(o.due_at) AS next FROM operations o WHERE ${DUE} AND o.due_at > ? AND ${READY}`,
+      `SELECT min(o.due_at) AS next FROM operations o WHERE ${DUE} AND o.due_at > ?${this.m.config.batchPublication ? '' : ` AND NOT ((o.origin = 'import' AND o.kind = 'scrobble.create' AND o.collection = '${this.collections.scrobble}' AND o.attempts = 0) OR (o.collection = '${this.collections.scrobbleBatch}' AND o.attempts = 0))`} AND ${READY}`,
       now,
     );
     const candidates = [...this.waits];
@@ -352,7 +361,9 @@ class Run {
   private async runDid(state: Extract<DidState, { kind: 'ok' }>, priority: number): Promise<void> {
     const ops = this.readyOps(state.did, priority);
     const handled = new Set<string>();
-    const batchable = ops.filter((o) => o.kind === 'scrobble.create' && o.attempts < MAX_ATTEMPTS);
+    const batchable = ops.filter(
+      (o) => o.kind === 'scrobble.create' && o.collection === this.collections.scrobble && o.attempts < MAX_ATTEMPTS,
+    );
     if (batchable.length >= 2) {
       if (state.batched) {
         // One applyWrites batch per DID per run: the rest go in the next run.
@@ -428,7 +439,10 @@ class Run {
   }
 
   private async runSingle(state: Extract<DidState, { kind: 'ok' }>, op: OperationRow): Promise<void> {
-    const executor = executorFor(op.kind);
+    const executor =
+      op.kind === 'scrobble.create' && op.collection === this.collections.scrobbleBatch
+        ? batchCreateExecutor
+        : executorFor(op.kind);
     this.report.attempted += 1;
     if (op.attempts >= MAX_ATTEMPTS) {
       // Only an interrupted tenth attempt leaves this (a crash, possibly then
@@ -585,9 +599,10 @@ function finish(m: ModuleDeps, op: OperationRow, outcome: Outcome, now: number, 
     case 'reauth':
       // Not failed, and the attempt does not count (ADR §5.8 Re-authentication).
       db.run(
-        `UPDATE operations SET state = 'blocked', attempts = attempts - ?, last_error = 'reauth_required',
+        `UPDATE operations SET state = 'blocked', attempts = attempts - ?, last_error = ?,
            updated_at_ms = ? WHERE id = ? AND state = 'running'`,
         begun ? 1 : 0,
+        outcome.code ?? 'reauth_required',
         now,
         op.id,
       );

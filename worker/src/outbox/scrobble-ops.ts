@@ -191,13 +191,21 @@ export async function createWithReconcile(
 
 export const scrobbleCreateExecutor: Executor = {
   async execute(op, ctx) {
-    if (!hasIdentity(op, ctx, ctx.collections.scrobble) || op.digest === null) {
+    const expected =
+      op.collection === ctx.collections.scrobbleBatch
+        ? ctx.m.config.batchPublication
+          ? ctx.collections.scrobbleBatch
+          : null
+        : ctx.collections.scrobble;
+    if (expected === null || !hasIdentity(op, ctx, expected) || op.digest === null) {
       return { kind: 'permanent', code: 'invalid_record_identity' };
     }
     return createWithReconcile(op, ctx, (remote) => sameDigest(op, remote));
   },
   async reconcile(op, ctx) {
-    if (!hasIdentity(op, ctx, ctx.collections.scrobble)) return { kind: 'permanent', code: 'invalid_record_identity' };
+    const expected =
+      op.collection === ctx.collections.scrobbleBatch ? ctx.collections.scrobbleBatch : ctx.collections.scrobble;
+    if (!hasIdentity(op, ctx, expected)) return { kind: 'permanent', code: 'invalid_record_identity' };
     return lookupCreate(op, ctx, (remote) => sameDigest(op, remote), 'attempts_exhausted');
   },
 };

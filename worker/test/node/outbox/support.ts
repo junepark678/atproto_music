@@ -68,7 +68,7 @@ export function testConfig() {
   );
   // Outbox suites opt into a fake-PDS-only publication state; the real parser
   // never opens the fixture namespace, and production uses AppConfig as-is.
-  return { ...config, publication: true };
+  return { ...config, publication: true, batchPublication: true };
 }
 
 export interface LogEntry {

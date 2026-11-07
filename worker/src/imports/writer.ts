@@ -31,8 +31,15 @@
 // (succeeded) or `failed` (failed or withdrawn) and adds them to the job's
 // `written` and `failed_items` counters.
 
+import { measureScrobbleBatch } from '@atmusic/atproto/scrobble-batch-size';
 import { buildLoveRecord } from '@atmusic/core/love';
 import { newTid } from '@atmusic/core/record-key';
+import {
+  packScrobbleBatchEntries,
+  type ScrobbleBatchEntry,
+  type ScrobbleBatchRecord,
+  scrobbleBatchCollection,
+} from '@atmusic/core/scrobble-batch';
 import { NS_PER_SECOND, parseRfc3339 } from '@atmusic/core/timestamp';
 import type { ModuleDeps } from '../do/contracts';
 import type { Db } from '../do/db';
@@ -105,6 +112,14 @@ type Plan =
   | { seq: number; kind: 'love'; prepared: Prepared<object>; loveKey: string }
   | { seq: number; kind: 'invalid' };
 
+interface BatchPlan {
+  seqs: number[];
+  entries: ScrobbleBatchEntry[];
+  operationId: string;
+  rkey: string;
+  prepared: Prepared<ScrobbleBatchRecord>;
+}
+
 /**
  * One writer slice for `job` (see the header). `limit` defaults to WRITE_SLICE.
  * Returns what it did; nothing is created while WRITE_SLICE items are queued.
@@ -124,8 +139,10 @@ export async function writeSlice(
       ? []
       : db.all<ItemRow>(
           `SELECT seq, dedupe_key, record_json FROM import_items WHERE job_id = ? AND state = 'staged'
+           AND (? = 1 OR json_extract(record_json, '$.kind') = 'love')
            ORDER BY seq LIMIT ?`,
           job.id,
+          m.config.batchPublication ? 1 : 0,
           room,
         );
 
@@ -165,6 +182,57 @@ export async function writeSlice(
     }
   }
 
+  // Precompute exact bounded batch records before opening the synchronous
+  // write transaction. The transaction rechecks every item for races; a
+  // partially invalidated packed group falls back to its prepared singles.
+  const batchPlans: BatchPlan[] = [];
+  if (m.config.batchPublication) {
+    const collection = scrobbleBatchCollection(prefix);
+    const candidates = plans.flatMap((plan) => {
+      if (plan.kind !== 'listen') return [];
+      if (knownListenKey(db, job.did, plan.key) || indexedAtSecond(db, job.did, plan.seconds, plan.artist, plan.track))
+        return [];
+      const { $type: _type, ...fields } = plan.prepared.record as Record<string, unknown>;
+      return [{ plan, entry: { id: newTid(clock, m.random), ...fields } }];
+    });
+    const packed = packScrobbleBatchEntries(
+      candidates.map((candidate) => candidate.entry),
+      {
+        measure: (entries) =>
+          measureScrobbleBatch(
+            {
+              $type: collection,
+              createdAt: new Date(now).toISOString(),
+              listens: [...entries] as ScrobbleBatchEntry[],
+            },
+            { repo: job.did, collection, rkey: '2222222222222' },
+          ),
+      },
+    );
+    let offset = 0;
+    for (const group of packed) {
+      const members = candidates.slice(offset, offset + group.entries.length);
+      offset += group.entries.length;
+      if (group.entries.length < 2) continue;
+      const rkey = newTid(clock, m.random);
+      const record: ScrobbleBatchRecord = {
+        $type: collection,
+        createdAt: new Date(now).toISOString(),
+        listens: [...group.entries] as ScrobbleBatchEntry[],
+      };
+      const sizes = measureScrobbleBatch(record, { repo: job.did, collection, rkey });
+      if (sizes.cborBytes !== group.cborBytes || sizes.createBodyBytes > 100_000)
+        throw new Error('batch sizing changed after key allocation');
+      batchPlans.push({
+        seqs: members.map(({ plan }) => plan.seq),
+        entries: [...group.entries] as ScrobbleBatchEntry[],
+        operationId: newOperationId(m.random),
+        rkey,
+        prepared: await prepare(record),
+      });
+    }
+  }
+
   const report: WriteSliceReport = { created: 0, duplicates: 0, invalid: 0, taken: plans.length };
   db.tx(() => {
     // Cancelled (or paused, failed) while the digests were computed: nothing new.
@@ -196,7 +264,48 @@ export async function writeSlice(
         seq,
       );
     };
+    const handledBatchSeqs = new Set<number>();
+    for (const batch of batchPlans) {
+      const members = plans.filter(
+        (plan): plan is Extract<Plan, { kind: 'listen' }> => plan.kind === 'listen' && batch.seqs.includes(plan.seq),
+      );
+      const eligible = members.filter(
+        (plan) =>
+          !knownListenKey(db, job.did, plan.key) &&
+          !indexedAtSecond(db, job.did, plan.seconds, plan.artist, plan.track),
+      );
+      if (eligible.length !== members.length) continue;
+      const op = insertOperation(
+        db,
+        {
+          id: batch.operationId,
+          did: job.did,
+          kind: 'scrobble.create',
+          origin: 'import',
+          priority: IMPORT_PRIORITY,
+          collection: scrobbleBatchCollection(prefix),
+          rkey: batch.rkey,
+          prepared: batch.prepared,
+          dueAt: now,
+          importJobId: job.id,
+        },
+        now,
+      );
+      for (const plan of members) {
+        db.run(
+          `INSERT INTO listen_keys(did, dedupe_key, operation_id, source, created_at_ms) VALUES (?, ?, ?, 'import', ?)`,
+          job.did,
+          plan.key,
+          op.id,
+          now,
+        );
+        setState(plan.seq, 'queued', op.id);
+        handledBatchSeqs.add(plan.seq);
+        report.created += 1;
+      }
+    }
     for (const plan of plans) {
+      if (handledBatchSeqs.has(plan.seq)) continue;
       if (plan.kind === 'invalid') {
         setState(plan.seq, 'invalid', null);
         report.invalid += 1;

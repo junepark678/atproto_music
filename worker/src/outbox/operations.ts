@@ -31,6 +31,7 @@ import { canonicalDigest } from '@atmusic/core/canonical';
 import type { Random } from '@atmusic/core/deps';
 import { loveCollection } from '@atmusic/core/love';
 import { collectionsFor } from '@atmusic/core/namespace';
+import { scrobbleBatchCollection } from '@atmusic/core/scrobble-batch';
 import { fromMs, toDto } from '@atmusic/core/timestamp';
 import { MAX_ATTEMPTS } from '@atmusic/core/write-policy';
 import type { OperationKind, OperationRow, OperationState, Origin } from '../app/rows';
@@ -62,13 +63,14 @@ export const UNSETTLED_SQL = `('queued','running','blocked')`;
 /** The four collections the outbox writes. */
 export interface OutboxCollections {
   scrobble: string;
+  scrobbleBatch: string;
   follow: string;
   settings: string;
   love: string;
 }
 
 export function outboxCollections(prefix: string): OutboxCollections {
-  return { ...collectionsFor(prefix), love: loveCollection(prefix) };
+  return { ...collectionsFor(prefix), scrobbleBatch: scrobbleBatchCollection(prefix), love: loveCollection(prefix) };
 }
 
 /** A UUIDv4 from the injected randomness (OpenAPI `OperationId`: `^[A-Za-z0-9_-]{1,64}$`). */
