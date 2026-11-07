@@ -105,13 +105,89 @@ Evidence:
 - `/tmp/abatch-final/.venv/bin/python scripts/validate_contracts.py` and
   `/usr/bin/python3.14 scripts/validate_case_map.py --check-tests` — passed.
 
-Remaining limits: a recreation at the same CID with no verified absence
-observed in between stays hidden (nothing verified separates the
-incarnations). An unverified intermediate container version applied after
-settlement but before the post-removal proof can be shown briefly (until that
-proof lands). If an earlier request commits after the original-key create and
+Remaining limits at that head (both superseded by the commit-fence fixes
+below for every receipt settled on migration 11): a recreation at the same CID
+with no verified absence observed in between stayed hidden, and a delayed
+proof of an unobserved intermediate container version could show the removed
+listen until a newer removal proof landed (Astra N1). If an earlier request commits after the original-key create and
 the chained delete both succeeded, the record reappears at that rkey (same
 bytes, still hidden by the receipt's `swap_cid` until a verified absence);
 no client-side rule can fence a server that commits that late. Containers
 projected before migration 10 report fragment status `unknown` until re-proved.
 The full Node acceptance gate was not run here.
+
+## Commit-fence fixes (stacked on PR #159)
+
+Stacked on `t3/batch-delete-interaction-fixes` at `52b5b08` (PR #160). It closes
+the three Astra findings of the 52b5b08 review (N1–N3) with server-enforced
+repository-commit fencing (ADR 0006, migration 11). Migrations 1–10 are
+unchanged; migration 11 adds `operations.removal_head_rev` and
+`removal_commit_rev`. No live service, environment file, lexicon publication
+or PDS record was touched.
+
+| Finding | Fix | Regression |
+| --- | --- | --- |
+| N1 unobserved intermediate version resurfaced the target | every removal write reads `sync.getLatestCommit`, persists the head before the send and sends `swapCommit` + `swapRecord`; a succeeded receipt hides its targets at every revision at or below that head, whatever the CID | `removal-fence.test.ts` › N1: a delayed proof of an unobserved intermediate version applied $when stays removed (before and after settlement) |
+| N2 delayed pre-write absence retired the receipt | the boundary is the server-checked head of the write, not `record_state` at send time; the legacy outlived rule applies only to receipts without a head | `removal-fence.test.ts` › N2: a delayed absence and byte-identical restore from before the write…, › N2 (single record)… |
+| N3 first-tracked entries lost verified absence | first rows inherit `*`.last_absent_revision and the previous valid version's nonmembership; previously projected entries a valid version drops are recorded absent | `removal-fence.test.ts` › N3: after a real v9 upgrade, a $kind removal… (whole/partial, reopen, Last.fm, legacy receipt), › N3: a partial removal before the first projection…, › N3: an excluded (invalid) container version proves no entry absent |
+
+Head CAS and recovery cases in `removal-fence.test.ts`: ABA (remove plus identical
+restore) between the head read and the write is InvalidSwap and then fenced at
+the fresh head; a commit to another record retries within the same attempt; a
+success without `commit` metadata keeps the pre-send head; a lost response
+keeps the persisted head across restart with no second write; an interrupted
+tenth attempt reconciles read-only; an unavailable (501), malformed or
+regressed head holds the removal without writing or spending an attempt;
+restores committed after the removal and proved before settlement are visible
+at the same and a new CID and Last.fm removes them; pending and failed intents
+still hide. `batch-incarnation.test.ts` replaces its same-CID-without-absence
+guard with › a byte-identical restore committed after the fenced removal is a
+later incarnation…, keeps the old rule as › a legacy receipt (no
+server-checked head)…, and replaces the local-fence refresh test with › the
+fence is the server-checked head of the write… The single-record delete path
+uses the same fence; its existing tests now expect the head read before each
+delete (`delete.test.ts`, `recovery.test.ts`, `send-certainty.test.ts`), and the
+production transport classifier (`features.test.ts`) admits
+`/xrpc/com.atproto.sync.getLatestCommit` on the pds-writer wire.
+
+Evidence:
+
+- Astra's scripts from `/tmp/atmusic-review-52b5b08`, with paths rewritten to
+  this worktree and the expected schema version set to 11: `boundaries`
+  (5 FAIL at 52b5b08) and `additional-boundaries` (3 FAIL at 52b5b08) now report
+  `{"summary":{"failed":[]}}`, with every case PASS in the JSONL rows. The
+  upgrade rows show the target's membership `last_absent_revision` equal to the
+  verified absence revision and Last.fm `delete_indexed`. `settlement-cache`,
+  `interactions` and `upgrade-boundaries` report no failures. `original`,
+  `adversarial` and `migration-833` exit 0, and their JSONL rows match the
+  review's output prefix by prefix. The 833-receipt schema-4 migration keeps
+  every operation, item, key and counter on the way to schema 11.
+- Mutation checks: removing `swapCommit` fails the ABA and unrelated-commit
+  tests; removing the head boundary from visibility fails 7 fence tests;
+  removing the inherited boundary fails both first-tracking N3 tests.
+- `npm run typecheck` passed. Biome check on every changed file passed.
+- `vitest run --maxWorkers=1` over worker/test/node/{outbox,imports,lastfm,listenbrainz,journey,http},
+  worker/test/{write,read,ingest,http,storage,harness}, migrate-node,
+  fake-protocol-upstreams and features: 99 files, 545 tests passed. The
+  read-model bench project (query-plan pins): 2 files, 8 tests passed.
+- `/tmp/abatch-final/.venv/bin/python scripts/validate_contracts.py` and
+  `/usr/bin/python3.14 scripts/validate_case_map.py --check-tests` passed.
+
+Operator notes: the release applies migration 11 at startup. Removals now
+require the owner's PDS to serve `com.atproto.sync.getLatestCommit` and to
+honour `swapCommit`. Otherwise they hold with `repository_head_unavailable`
+(or `repository_head_behind_index` for a repository behind the verified index),
+retry every 5 s, and are never sent unfenced (ADR 0006 rollout step 6).
+
+Remaining limits: the head and `commit.rev` are the owner PDS's own metadata,
+not verified proofs. A PDS that misreports them can change only how its
+owner's own removal is displayed here; status endpoints still report only
+verified state. A PDS without `getLatestCommit` holds removals until it serves
+the endpoint. Receipts that settled before migration 11 keep the migration
+9/10 rules, so for them the N1 intermediate-version window and the same-CID
+hidden case remain until a newer verified proof of the container lands. Containers projected
+before migration 10 still report fragment status `unknown` until re-proved.
+The late-commit legacy single constraint (an accepted pre-upgrade create
+landing after its chained delete) is unchanged. Single-record removals gain
+the fence too. The full Node acceptance gate is reserved for the accepted
+final head and was not run here.

@@ -167,17 +167,75 @@ written only from verified proofs and snapshot entries/sweeps, behind the
 per-URI revision guard, guarded again by the stored revision; never from local
 intent or write completion, so a delayed older observation cannot move them.
 `operations.removal_fence_rev` is the target's verified revision when a
-scrobble removal is admitted, refreshed just before each removal write. A
-succeeded removal stops suppressing an entry or single once its membership
-records an absence newer than that fence: whatever is projected afterwards is a
-later incarnation and is visible, even with byte-identical bytes and the same
-CID, and Last.fm can remove it again. Every absence at or below the fence
-preceded the write. With no verified absence in between, a present proof stays
-in the removed incarnation (hidden) even at the same CID; a pending or failed
-intent always hides. Settlement bumps `stats_version`, since a fence already
-crossed can make the listen visible at that moment. The table is derived and
-is purged on disconnect; restoring an older backup only loses boundaries,
-which hides more, never less.
+scrobble removal is admitted. Since migration 11 it decides only receipts that
+settled without a server-checked head (below): such a legacy receipt stops
+suppressing an entry or single once its membership records an absence newer
+than that fence, and with no verified absence in between a present proof at
+its evidence CIDs stays in the removed incarnation. A pending or failed intent
+always hides. Settlement bumps `stats_version`, since it can make a later
+incarnation visible at that moment. The table is derived and is purged on
+disconnect; restoring an older backup only loses boundaries, which hides more,
+never less.
+
+Verified nonmembership survives first tracking. A batch entry that gets its
+first membership row (a projection older than migration 10, or an entry first
+seen after its container was removed) inherits as `last_absent_revision` the
+container's own verified absence (`*`.last_absent_revision) and the revision
+of the previous valid container version whose recorded membership did not
+list it, whichever is newer. An entry the previous verified projection held
+that a valid version no longer lists is recorded absent at that version even
+without a row. Only a valid version's exact membership proves nonmembership:
+an excluded (invalid) or absent container version proves nothing about
+entries, and public visibility is never consulted.
+
+Migration 11 is additive: `operations.removal_head_rev` and
+`removal_commit_rev`. A locally observed revision is only a lower bound of the
+repository state a removal write met, and no finite set of observed CIDs can
+cover versions this index never saw, so every scrobble removal write (batch
+listens and single records) is fenced by the owner's PDS itself:
+
+1. read the repository head (`com.atproto.sync.getLatestCommit`, a public GET
+   over the authenticated writer transport, no write points), then the target;
+2. persist the head revision as `removal_head_rev` (never moved backwards)
+   before the send;
+3. send `putRecord`/`deleteRecord` with both `swapCommit` (that head CID) and
+   `swapRecord` (the CID just read). The PDS commits it only while that head
+   is current, so the removal is the next commit after it. Any intervening
+   commit, to this record or any other, is `InvalidSwap`: nothing was written,
+   and the next try reads a fresh head and record, so a remove-and-restore
+   between the reads and the write (ABA) cannot slip through. An unrelated
+   commit retries within the same attempt (at most five times);
+4. keep a success response's `commit.rev` (a TID newer than the checked head)
+   as `removal_commit_rev`. A lost or metadata-free response keeps the head.
+
+A read that finds the target already gone after reading head H also fences at
+H: the target was absent at a moment after H was current, so every
+incarnation at or below H had been removed by then. This covers a restart
+after a lost response and the read-only reconcile of an interrupted tenth
+attempt, which never writes. A succeeded receipt then hides its targets at
+every projected revision at or below `removal_head_rev` (or below
+`removal_commit_rev`), whatever the CID: a delayed proof of an intermediate
+version this index never saw, or of an absence and identical restore that
+preceded the write, cannot resurface or retire it. A target projected above
+the boundary is a later incarnation and is visible at the same or a new CID,
+even when its proof arrived before local settlement, and Last.fm can remove it
+again. Neither settlement time, wall clock nor CIDs order anything.
+
+Trust and binding: the head is the owner's own PDS's report, checked for
+CID/TID syntax and bound to the owner by the session's own repository; it is
+not a verified proof. It bounds only how this receipt suppresses its own
+targets and never writes `record_state` or `verified_membership`; status
+endpoints keep reporting only verified state. The PDS enforces `swapCommit`
+atomically with the write, so an honest PDS cannot commit the removal at any
+other position; a PDS that lies about its head can only change how its own
+owner's removal is displayed here. Fail closed: a removal never writes without
+a well-formed head, or against a head older than the target's verified
+revision here (a repository that went backwards). It waits instead
+(`last_error` `repository_head_unavailable` or `repository_head_behind_index`,
+retried every 5 s, no attempt spent), and stays hidden while it waits. A
+`record_not_ours` receipt carries no head. Receipts that settled before
+migration 11 keep the migration 9/10 rules (CID evidence, verified-absence
+fence); `listen_removal_cids` is still recorded as forensic evidence.
 
 Record status for a listen fragment checks verified membership separately from
 the common visibility overlay. For a visible owner's present container whose
@@ -236,13 +294,21 @@ implement web UI changes.
    finish at their original rkeys (read first, then created there if absent);
    only explicitly unsent singles are rebatched, and staged items are batched.
    Already-published singles retain their original records.
-6. Monitor held imports, `batch_scope_required`, CAS retries, split outcomes,
+6. Removals need the PDS to serve `com.atproto.sync.getLatestCommit` and to
+   honour `swapCommit` on `putRecord`/`deleteRecord` (the reference PDS does).
+   A removal whose head is unavailable or behind the index waits with
+   `repository_head_unavailable` / `repository_head_behind_index` and retries
+   every 5 s without writing; it is never sent unfenced. Watch for operations
+   held on these codes after deploy: they indicate a PDS without the standard
+   head endpoint or a repository that went backwards, and they are resolved
+   on the PDS side, not by editing rows.
+7. Monitor held imports, `batch_scope_required`, CAS retries, split outcomes,
    per-listen counters, and container-level proof convergence. A scope denial
    classified permanent (HTTP 403 or a 4xx `ScopeMissing`/`InsufficientScope`/
    `Forbidden`) holds the affected batch lane until re-consent; it does not
    discard intent. A 5xx or transport failure retries with backoff whatever
    error name its body carries and never asks for re-consent.
-7. To roll back, stop admitting new batch imports, drain all outstanding batch
+8. To roll back, stop admitting new batch imports, drain all outstanding batch
    creates and deletes while the gate remains open, then close the batch
    reference. Do not roll back the SQLite file or install a binary that cannot
    read the schema version reported by the release. Retain batch reads,

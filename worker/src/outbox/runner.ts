@@ -897,9 +897,9 @@ function finish(m: ModuleDeps, op: OperationRow, outcome: Outcome, now: number, 
         }
         // Settlement adds no suppression evidence: local settlement time says
         // nothing about repository order, and the projection may already hold
-        // a verified later recreation. The receipt keeps only CIDs observed
-        // before its write (admission, pre-CAS reads) and its admission/write
-        // fence (read/visibility).
+        // a verified later recreation. The receipt's boundary is the
+        // server-checked head persisted before its write (removal-fence.ts,
+        // read/visibility); a legacy receipt keeps its pre-write CIDs.
         if (m.config.prefix !== null && op.collection === outboxCollections(m.config.prefix).scrobbleBatch) {
           db.run('UPDATE batch_entry_items SET removed_at_ms = ? WHERE removal_operation_id = ?', now, op.id);
           db.run(
