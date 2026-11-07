@@ -527,7 +527,9 @@
       "also": [
         "worker/test/node/imports/writer.test.ts › rebatches only queued never-sent import singles after rechecking all item and key links",
         "worker/test/node/imports/writer.test.ts › splits a definitely rejected container into durable children and keeps entry identities and import counters",
-        "worker/test/node/imports/writer.test.ts › rolls back child insertion and item repointing together when the split transaction faults"
+        "worker/test/node/imports/writer.test.ts › rolls back child insertion and item repointing together when the split transaction faults",
+        "worker/test/node/imports/writer.test.ts › rechecks a single that starts sending while async rebatch preparation is in flight",
+        "worker/test/node/imports/writer.test.ts › rolls back old operations and mappings together when the rebatch transaction faults"
       ]
     },
     {

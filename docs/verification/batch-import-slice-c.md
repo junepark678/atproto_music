@@ -14,7 +14,7 @@ Base: `a9fcad5` (slice B). The change remains local to the Node outbox and impor
 ## Verification
 
 - `npm run typecheck -- --pretty false` — passed.
-- `npx vitest run --config vitest.node.config.ts test/node/imports test/node/outbox --maxWorkers=1` from `worker/` — 15 files, 76 tests passed.
+- `npx vitest run --config vitest.node.config.ts test/node/imports test/node/outbox --maxWorkers=1` from `worker/` — 15 files, 78 tests passed.
 - `npx vitest run --config vitest.config.ts test/write-policy.test.ts` from `packages/core/` — 1 file, 5 tests passed.
 - Biome formatting/check on owned TypeScript and Node test files — passed.
 - `python3.14 scripts/validate_case_map.py --check-tests --node-wave 10` (or `.venv/bin/python`) — passed with all 258 mapped cases and the new N10-01 targets.
@@ -22,5 +22,5 @@ Base: `a9fcad5` (slice B). The change remains local to the Node outbox and impor
 
 ## Remaining work / limits
 
-- Dedicated fault-injection coverage for the runner-versus-rebatch race remains open. The split transaction rollback is fault-injected; shared size tests cover exact UTF-8 sizing including non-ASCII values.
+- Async preparation races and split/rebatch transaction rollback are fault-injected; shared size tests cover exact UTF-8 sizing including non-ASCII values.
 - Individual batch-listen deletion remains owned by the next slice and was not changed here.

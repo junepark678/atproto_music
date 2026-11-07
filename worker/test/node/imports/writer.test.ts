@@ -15,7 +15,7 @@ import { listenKey } from '@atmusic/core/listen-key';
 import { trackKey } from '@atmusic/core/music-key';
 import { NS_PER_SECOND, toStorage } from '@atmusic/core/timestamp';
 import { describe, expect, it } from 'vitest';
-import type { ImportItemRow, ImportJobRow } from '../../../src/app/rows';
+import type { ImportItemRow, ImportJobRow, OperationRow } from '../../../src/app/rows';
 import {
   cancelJob,
   createJob,
@@ -122,6 +122,41 @@ function opStates(h: Harness, where: string): Record<string, number> {
 async function parse(h: Harness, rt: ImportRuntime, id: string): Promise<void> {
   for (let i = 0; i < 10 && job(h, id).state !== 'writing'; i++) await runImports(rt, h.kit.clock.nowMs());
   expect(job(h, id).state).toBe('writing');
+}
+
+async function stageLegacySingles(h: Harness, rt: ImportRuntime, id: string, rows: Row[]): Promise<OperationRow[]> {
+  uploadJob(h, id, rows);
+  await parse(h, rt, id);
+  const items = h.db.all<{ seq: number; dedupe_key: string; record_json: string }>(
+    "SELECT seq, dedupe_key, record_json FROM import_items WHERE job_id = ? AND state = 'staged' ORDER BY seq",
+    id,
+  );
+  const operations: OperationRow[] = [];
+  for (const item of items) {
+    const staged = JSON.parse(item.record_json) as { input: unknown };
+    const prepared = await prepareScrobble(staged.input, h.m.config.prefix!, h.kit.clock.nowMs());
+    if (!prepared.ok) throw new Error('fixture listen did not validate');
+    const operation = insertScrobbleCreate(
+      h.m,
+      { did: h.alice, origin: 'import', prepared: prepared.prepared, importJobId: id },
+      h.kit.clock.nowMs(),
+    );
+    h.db.run(
+      "INSERT INTO listen_keys(did, dedupe_key, operation_id, source, created_at_ms) VALUES (?, ?, ?, 'import', ?)",
+      h.alice,
+      item.dedupe_key,
+      operation.id,
+      h.kit.clock.nowMs(),
+    );
+    h.db.run(
+      "UPDATE import_items SET state = 'queued', operation_id = ? WHERE job_id = ? AND seq = ?",
+      operation.id,
+      id,
+      item.seq,
+    );
+    operations.push(operation);
+  }
+  return operations;
 }
 
 /** Writes by the user's other apps, straight to their PDS: `n` Bluesky likes (3 points each). */
@@ -552,6 +587,69 @@ describe('import writer', () => {
       expect(h.op(parent.id)).toMatchObject({ state: 'cancelled', last_error: 'batch_split' });
       expect(job(h, 'job-split-fault')).toMatchObject({ written: 2, failed_items: 0 });
       expect(await remoteRecords(h.kit, 'Alice', SCROBBLE_BATCH)).toHaveLength(2);
+    });
+  });
+
+  it('rechecks a single that starts sending while async rebatch preparation is in flight', async () => {
+    await withHarness(async (h) => {
+      h.seedUser(h.alice);
+      h.m.config = { ...h.m.config, batchPublication: true };
+      const rt = runtime(h);
+      const [single] = await stageLegacySingles(h, rt, 'job-rebatch-race', [listen(71)]);
+      const migration = rebatchUnsentImports(h.m, 'job-rebatch-race', h.alice, h.kit.clock.nowMs());
+      // rebatch yields in digest preparation; a concurrent dispatcher wins first.
+      h.db.run(
+        "UPDATE operations SET state = 'running', attempts = 1, send_started_at_ms = ? WHERE id = ?",
+        T0,
+        single!.id,
+      );
+
+      expect(await migration).toBe(0);
+      expect(h.op(single!.id)).toMatchObject({ state: 'running', attempts: 1, send_started_at_ms: T0 });
+      expect(
+        h.db.one('SELECT state, operation_id FROM import_items WHERE job_id = ? AND seq = 0', 'job-rebatch-race'),
+      ).toEqual({ state: 'queued', operation_id: single!.id });
+      expect(
+        h.db.one(
+          'SELECT operation_id FROM listen_keys WHERE did = ? AND dedupe_key = ?',
+          h.alice,
+          h.db.one<{ dedupe_key: string }>('SELECT dedupe_key FROM import_items WHERE job_id = ?', 'job-rebatch-race')!
+            .dedupe_key,
+        ),
+      ).toEqual({ operation_id: single!.id });
+      expect(h.ops(`collection = '${SCROBBLE_BATCH}'`)).toEqual([]);
+    });
+  });
+
+  it('rolls back old operations and mappings together when the rebatch transaction faults', async () => {
+    await withHarness(async (h) => {
+      h.seedUser(h.alice);
+      h.m.config = { ...h.m.config, batchPublication: true };
+      const rt = runtime(h);
+      const [single] = await stageLegacySingles(h, rt, 'job-rebatch-fault', [listen(81)]);
+      const migration = rebatchUnsentImports(h.m, 'job-rebatch-fault', h.alice, h.kit.clock.nowMs());
+      const originalTx = h.db.tx.bind(h.db);
+      h.db.tx = (fn) =>
+        originalTx(() => {
+          fn();
+          throw new Error('injected rebatch commit failure');
+        });
+      await expect(migration).rejects.toThrow('injected rebatch commit failure');
+      h.db.tx = originalTx;
+
+      expect(h.op(single!.id)).toMatchObject({ state: 'queued', attempts: 0 });
+      expect(
+        h.db.one('SELECT state, operation_id FROM import_items WHERE job_id = ? AND seq = 0', 'job-rebatch-fault'),
+      ).toEqual({ state: 'queued', operation_id: single!.id });
+      expect(
+        h.db.one(
+          'SELECT operation_id FROM listen_keys WHERE did = ? AND dedupe_key = ?',
+          h.alice,
+          h.db.one<{ dedupe_key: string }>('SELECT dedupe_key FROM import_items WHERE job_id = ?', 'job-rebatch-fault')!
+            .dedupe_key,
+        ),
+      ).toEqual({ operation_id: single!.id });
+      expect(h.ops(`collection = '${SCROBBLE_BATCH}'`)).toEqual([]);
     });
   });
 
