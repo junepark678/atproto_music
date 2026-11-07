@@ -85,6 +85,7 @@ import {
   unblockOperations,
 } from './operations';
 import { type HintTarget, type Outcome, type PdsWriterSource, PdsXrpc } from './pds-writer';
+import { exhaustedUncertain, heldRemovalEdgeSql } from './removal-fence';
 import { scrobbleCreateExecutor } from './scrobble-ops';
 import { settingsPutExecutor } from './settings-ops';
 
@@ -203,9 +204,14 @@ export interface OutboxRunReport {
   skipped: boolean;
 }
 
-/** Ready: no predecessor still queued, running or blocked. */
+/**
+ * Ready: no predecessor still queued, running or blocked, except a removal of
+ * the same key that holds an unknown send read-only and never sends again
+ * (removal-fence heldRemovalEdgeSql): an existing edge to it, direct or
+ * through another removal, never strands a later removal.
+ */
 const READY = `NOT EXISTS (SELECT 1 FROM operation_deps d JOIN operations p ON p.id = d.pred_id
-  WHERE d.op_id = o.id AND p.state IN ('queued','running','blocked'))`;
+  WHERE d.op_id = o.id AND p.state IN ('queued','running','blocked') AND NOT ${heldRemovalEdgeSql('o', 'p')})`;
 const DUE = `o.state IN ('queued','running')`;
 
 /**
@@ -535,7 +541,13 @@ class Run {
     }
     const [started] = beginAttempts(this.db, [op.id], this.m.clock.nowMs());
     if (started === undefined) return;
-    const outcome = await this.safely(() => executor.execute(started, this.context(state, started)));
+    const context = this.context(state, started);
+    let outcome = await this.safely(() => executor.execute(started, context));
+    // The last attempt of a removal whose send is still unknown holds instead
+    // of exhausting; its next look is the read-only reconcile.
+    if (started.kind === 'scrobble.delete' && started.attempts >= MAX_ATTEMPTS) {
+      outcome = exhaustedUncertain(context, started.id, outcome);
+    }
     this.settle(state, [[started, outcome]], true);
   }
 
@@ -631,7 +643,7 @@ class Run {
             this.collections.scrobbleBatch,
           ).rowsWritten;
         } else if (outcome.kind === 'split') this.splitBatch(op, outcome.children, now);
-        else finish(this.m, op, outcome, now, begun);
+        else if (!finish(this.m, op, outcome, now, begun)) continue;
         if (outcome.kind === 'succeeded') hints.push(...outcome.hints);
         if (outcome.kind === 'deferred') {
           // A smaller request may still fit (the next run sizes its batch by what is left);
@@ -826,11 +838,29 @@ class Run {
   }
 }
 
-/** Persists one outcome on a running operation (synchronous; inside the caller's tx). */
-function finish(m: ModuleDeps, op: OperationRow, outcome: Outcome, now: number, begun: boolean): void {
+/**
+ * Persists one outcome on a running operation (synchronous; inside the
+ * caller's tx). Answers whether it was persisted: an operation that is no
+ * longer this running attempt (cancelled or superseded while its executor was
+ * suspended) is left as it is, and so is everything a success would clean up
+ * or count (its cleanup, statistics and create receipts, which may now belong
+ * to the successor).
+ */
+function finish(m: ModuleDeps, op: OperationRow, outcome: Outcome, now: number, begun: boolean): boolean {
   const db = m.db;
   switch (outcome.kind) {
-    case 'succeeded':
+    case 'succeeded': {
+      const settled = db.run(
+        `UPDATE operations SET state = 'succeeded', result_uri = ?, result_cid = ?, swap_cid = coalesce(?, swap_cid),
+           last_error = ?, updated_at_ms = ? WHERE id = ? AND state = 'running'`,
+        outcome.uri ?? null,
+        outcome.cid ?? null,
+        outcome.swapCid ?? null,
+        outcome.note ?? null,
+        now,
+        op.id,
+      ).rowsWritten;
+      if (settled !== 1) return false;
       if (op.kind === 'scrobble.delete' && outcome.note === 'record_not_ours') {
         db.run('DELETE FROM listen_removals WHERE operation_id = ?', op.id);
         db.run('DELETE FROM batch_delete_listens WHERE operation_id = ?', op.id);
@@ -842,16 +872,6 @@ function finish(m: ModuleDeps, op: OperationRow, outcome: Outcome, now: number, 
           op.id,
         );
       }
-      db.run(
-        `UPDATE operations SET state = 'succeeded', result_uri = ?, result_cid = ?, swap_cid = coalesce(?, swap_cid),
-           last_error = ?, updated_at_ms = ? WHERE id = ? AND state = 'running'`,
-        outcome.uri ?? null,
-        outcome.cid ?? null,
-        outcome.swapCid ?? null,
-        outcome.note ?? null,
-        now,
-        op.id,
-      );
       // A confirmed scrobble removal no longer needs the listen payload in
       // succeeded create receipts. Keep identity, result CID, idempotency key
       // and request hash so retries still resolve to their original receipt
@@ -921,18 +941,22 @@ function finish(m: ModuleDeps, op: OperationRow, outcome: Outcome, now: number, 
           );
         }
       }
-      return;
+      return true;
+    }
     case 'transient':
       if (op.attempts >= MAX_ATTEMPTS) {
-        db.run(
-          `UPDATE operations SET state = 'failed', last_error = ?, swap_cid = coalesce(?, swap_cid), updated_at_ms = ?
+        return (
+          db.run(
+            `UPDATE operations SET state = 'failed', last_error = ?, swap_cid = coalesce(?, swap_cid), updated_at_ms = ?
            WHERE id = ? AND state = 'running'`,
-          outcome.code,
-          outcome.swapCid ?? null,
-          now,
-          op.id,
+            outcome.code,
+            outcome.swapCid ?? null,
+            now,
+            op.id,
+          ).rowsWritten === 1
         );
-      } else {
+      }
+      return (
         db.run(
           `UPDATE operations SET state = 'queued', last_error = ?, swap_cid = coalesce(?, swap_cid), due_at = ?,
              updated_at_ms = ? WHERE id = ? AND state = 'running'`,
@@ -941,51 +965,55 @@ function finish(m: ModuleDeps, op: OperationRow, outcome: Outcome, now: number, 
           now + nextDelayMs(op.attempts, m.random, outcome.retryAfterMs),
           now,
           op.id,
-        );
-      }
-      return;
-    case 'permanent':
-      db.run(
-        `UPDATE operations SET state = 'failed', last_error = ?, updated_at_ms = ? WHERE id = ? AND state = 'running'`,
-        outcome.code,
-        now,
-        op.id,
+        ).rowsWritten === 1
       );
-      return;
+    case 'permanent':
+      return (
+        db.run(
+          `UPDATE operations SET state = 'failed', last_error = ?, updated_at_ms = ? WHERE id = ? AND state = 'running'`,
+          outcome.code,
+          now,
+          op.id,
+        ).rowsWritten === 1
+      );
     case 'deferred':
       // The budget stopped the attempt before anything of it was left unconfirmed:
       // queued again at its due time, the attempt not counted; the run parks the DID.
-      db.run(
-        `UPDATE operations SET state = 'queued', attempts = attempts - ?, updated_at_ms = ?
+      return (
+        db.run(
+          `UPDATE operations SET state = 'queued', attempts = attempts - ?, updated_at_ms = ?
          WHERE id = ? AND state = 'running'`,
-        begun ? 1 : 0,
-        now,
-        op.id,
+          begun ? 1 : 0,
+          now,
+          op.id,
+        ).rowsWritten === 1
       );
-      return;
     case 'waiting':
-      db.run(
-        `UPDATE operations SET state='queued', attempts=attempts-?, due_at=?, last_error=?, updated_at_ms=?
+      return (
+        db.run(
+          `UPDATE operations SET state='queued', attempts=attempts-?, due_at=?, last_error=?, updated_at_ms=?
          WHERE id=? AND state='running'`,
-        begun && outcome.counted !== true ? 1 : 0,
-        outcome.untilMs,
-        outcome.code ?? 'remote_state_unavailable',
-        now,
-        op.id,
+          begun && outcome.counted !== true ? 1 : 0,
+          outcome.untilMs,
+          outcome.code ?? 'remote_state_unavailable',
+          now,
+          op.id,
+        ).rowsWritten === 1
       );
-      return;
     case 'reauth':
       // Not failed, and the attempt does not count (ADR §5.8 Re-authentication).
-      db.run(
-        `UPDATE operations SET state = 'blocked', attempts = attempts - ?, last_error = ?,
+      return (
+        db.run(
+          `UPDATE operations SET state = 'blocked', attempts = attempts - ?, last_error = ?,
            updated_at_ms = ? WHERE id = ? AND state = 'running'`,
-        begun ? 1 : 0,
-        outcome.code ?? 'reauth_required',
-        now,
-        op.id,
+          begun ? 1 : 0,
+          outcome.code ?? 'reauth_required',
+          now,
+          op.id,
+        ).rowsWritten === 1
       );
-      return;
   }
+  return false;
 }
 
 /**
