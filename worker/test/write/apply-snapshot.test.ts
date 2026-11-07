@@ -141,15 +141,18 @@ describe('applySnapshotChunk', () => {
       expect([...byUri.keys()]).toEqual([u('a1'), u('a3'), u('a4'), u('a5'), u('a6'), u('a7')]);
       expect(byUri.get(u('a6'))).toEqual({ uri: u('a6'), cid: entries[4]!.cid, revision: head.rev });
       expect(byUri.get(u('a7'))).toEqual({ uri: u('a7'), cid: cidOf(a7), revision: a7.commit.rev });
-      // Unchanged rows keep their projection rows and revisions, but their
-      // record_state is reaffirmed at the verified head (per-URI guard).
-      expect(byUri.get(u('a1'))?.revision).toBe(live[1]!.commit.rev);
+      // Unchanged rows keep their projection rows; like a live proof of the
+      // same bytes at the verified head, their projection revision and
+      // record_state are reaffirmed there (per-URI guard; read/visibility
+      // decides removal cutoffs by the projection revision). With no removal
+      // receipt on these keys, statistics do not move.
+      expect(byUri.get(u('a1'))).toEqual({ uri: u('a1'), cid: cidOf(live[1]!), revision: head.rev });
       for (const r of ['a1', 'a3', 'a4', 'a5']) {
         expect(recordState(db, u(r))).toMatchObject({ state: 'present', revision: head.rev });
       }
       expect(recordState(db, u('a7'))).toMatchObject({ state: 'present', revision: a7.commit.rev });
-      expect(byUri.get(u('a4'))).toEqual({ uri: u('a4'), cid: cidOf(live[4]!), revision: live[4]!.commit.rev });
-      expect(byUri.get(u('a5'))).toEqual({ uri: u('a5'), cid: cidOf(live[5]!), revision: live[5]!.commit.rev });
+      expect(byUri.get(u('a4'))).toEqual({ uri: u('a4'), cid: cidOf(live[4]!), revision: head.rev });
+      expect(byUri.get(u('a5'))).toEqual({ uri: u('a5'), cid: cidOf(live[5]!), revision: head.rev });
       expect(userRow(db, ALICE)?.stats_version).toBe(8);
 
       // Re-applying the same chunk is idempotent.
@@ -321,8 +324,9 @@ describe('applySnapshotChunk', () => {
         ),
       ).toEqual({ outcome: 'complete', active: true });
       expect(userRow(db, ALICE)).toMatchObject({ active: 1, indexing_state: 'current', max_rev: q2.commit.rev });
+      // a0 was reaffirmed at the snapshot head (unchanged bytes, verified there).
       expect(db.all('SELECT uri, revision FROM scrobbles ORDER BY uri')).toEqual([
-        { uri: u('a0'), revision: q0.commit.rev },
+        { uri: u('a0'), revision: head2.rev },
         { uri: u('a2'), revision: q2.commit.rev },
       ]);
       expect(recordState(db, u('a1'))).toBeNull();
@@ -397,7 +401,7 @@ describe('applySnapshotChunk', () => {
         deleted: 0,
       });
       expect(db.all('SELECT uri, cid, revision FROM scrobbles')).toEqual([
-        { uri: x, cid: cidOf(px), revision: px.commit.rev },
+        { uri: x, cid: cidOf(px), revision: h3.rev },
       ]);
       expect(recordState(db, x)).toMatchObject({ state: 'present', revision: h3.rev });
     });
