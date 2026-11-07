@@ -6,9 +6,9 @@
 // A user imports a Last.fm history through the Last.fm API (fake Last.fm,
 // paged backwards at the shared 1 rps pace) and then uploads a ListenBrainz
 // export ZIP that overlaps it. Every unique listen becomes exactly one PDS
-// record: the import writes at import priority inside the account's PDS
-// point budget (50 % of the 5,000-point hour), so the job only finishes once
-// the clock has moved past the first window. Closing the database and
+// batch entry: the import writes at import priority inside the account's PDS
+// point budget (50 % of the 5,000-point hour), with a few records covering
+// all listens in one window. Closing the database and
 // recomposing the process mid-journey changes none of that.
 
 import { zipSync } from 'fflate';
@@ -116,11 +116,14 @@ async function upload(w: World, session: Signed, zip: Uint8Array): Promise<strin
   return (res.body as { id: string }).id;
 }
 
-/** Exactly one PDS record and one succeeded operation per unique listen, and nothing else. */
+/** Expand durable PDS containers and prove each unique listen appears exactly once. */
 async function expectEachListenOnce(w: World, user: User, history: readonly LastfmListen[]): Promise<void> {
-  const records = await user.repo.list(SCROBBLE);
-  const keys = records.map((r) => {
-    const v = r.value as { artist: string; track: string; listenedAt: string };
+  expect(await user.repo.list(SCROBBLE)).toHaveLength(0);
+  const records = await user.repo.list(`${SCROBBLE}Batch`);
+  const entries = records.flatMap(
+    (r) => (r.value as { listens: Array<{ artist: string; track: string; listenedAt: string }> }).listens,
+  );
+  const keys = entries.map((v) => {
     return `${v.artist}|${v.track}|${Date.parse(v.listenedAt) / 1000}`;
   });
   expect(new Set(keys).size).toBe(keys.length);
@@ -130,8 +133,12 @@ async function expectEachListenOnce(w: World, user: User, history: readonly Last
   }
   expect(keys.length).toBe(UNIQUE);
   expect(new Set(keys)).toEqual(expected);
-  expect(w.count('operations', "kind = 'scrobble.create'")).toBe(UNIQUE);
-  expect(w.count('operations', "kind = 'scrobble.create' AND state = 'succeeded' AND origin = 'import'")).toBe(UNIQUE);
+  expect(records).toHaveLength(Math.ceil(LASTFM_COUNT / 200) + Math.ceil(LB_NEW / 200));
+  expect(w.count('operations', "kind = 'scrobble.create'")).toBe(records.length);
+  expect(w.count('operations', "kind = 'scrobble.create' AND state = 'succeeded' AND origin = 'import'")).toBe(
+    records.length,
+  );
+  expect(w.count('import_items', "state = 'written'")).toBe(UNIQUE);
   expect(w.count('listen_keys', 'did = ?', user.did)).toBe(UNIQUE);
   // The PDS never had to refuse a write: the outbox stayed inside the budget.
   expect(w.pds.calls.count({ status: 429 })).toBe(0);
@@ -161,19 +168,21 @@ async function bothImports(w: World, alice: User, restartMidway: boolean): Promi
     await untilDone(w, lastfmJob, budget, {
       stopWhen: () => {
         const n = w.count('operations', "kind = 'scrobble.create' AND state = 'succeeded'");
-        return n > 0 && n < LASTFM_COUNT;
+        return n > 0 && n < Math.ceil(LASTFM_COUNT / 200);
       },
     });
     expect(w.db.one<{ state: string }>('SELECT state FROM import_jobs WHERE id = ?', lastfmJob)?.state).toBe('writing');
-    const written = (await alice.repo.list(SCROBBLE)).length;
+    const written = (await alice.repo.list(`${SCROBBLE}Batch`)).flatMap(
+      (r) => (r.value as { listens: unknown[] }).listens,
+    ).length;
     expect(written).toBeGreaterThan(0);
     expect(written).toBeLessThan(LASTFM_COUNT);
     await w.restart();
   }
   const started = w.clock.nowMs();
   await untilDone(w, lastfmJob, budget);
-  // 1,050 creates are 3,150 points, more than the import share of one hour window: done only after it ended.
-  expect(w.clock.nowMs() - started).toBeGreaterThanOrEqual(restartMidway ? 0 : HOUR_MS - 120_000);
+  // Six bounded batch creates fit in one import-share window.
+  expect(w.clock.nowMs() - started).toBeLessThan(HOUR_MS);
   const lastfmDto = await w.send('GET', `/api/v1/imports/${lastfmJob}`, { as: session });
   expect(lastfmDto.status).toBe(200);
   expect(checkResponse('GET', `/api/v1/imports/${lastfmJob}`, lastfmDto)).toBe('valid');
@@ -192,7 +201,9 @@ async function bothImports(w: World, alice: User, restartMidway: boolean): Promi
       stopWhen: () =>
         (w.db.one<{ state: string }>('SELECT state FROM import_jobs WHERE id = ?', lbJob)?.state ?? '') === 'writing',
     });
-    expect((await alice.repo.list(SCROBBLE)).length).toBe(LASTFM_COUNT);
+    expect(
+      (await alice.repo.list(`${SCROBBLE}Batch`)).flatMap((r) => (r.value as { listens: unknown[] }).listens),
+    ).toHaveLength(LASTFM_COUNT);
     await w.restart();
   }
   await untilDone(w, lbJob, budget);
@@ -206,12 +217,12 @@ async function bothImports(w: World, alice: User, restartMidway: boolean): Promi
 
 describe('import journey', () => {
   it('a Last.fm API import of 1,050 listens and an overlapping ListenBrainz ZIP write each unique listen once within the budget and reach done after advancing the clock', async () => {
-    const { w, alice } = await startWorld();
+    const { w, alice } = await startWorld({ env: { NAMESPACE_BATCH_PUBLICATION_REF: `sha256:${'b'.repeat(64)}` } });
     await bothImports(w, alice, false);
   }, 120_000);
 
   it('closing and reopening the database and recomposing the app mid-journey loses and duplicates nothing', async () => {
-    const { w, alice } = await startWorld();
+    const { w, alice } = await startWorld({ env: { NAMESPACE_BATCH_PUBLICATION_REF: `sha256:${'b'.repeat(64)}` } });
     await bothImports(w, alice, true);
   }, 120_000);
 
