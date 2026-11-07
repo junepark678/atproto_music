@@ -112,6 +112,20 @@ export function visibleDid(didColumn: string, alias = 'v'): string {
   return `EXISTS (SELECT 1 FROM users ${a} WHERE ${a}.did = ${column(didColumn)} AND ${activeUser(a)})`;
 }
 
+/** Options of visibleScrobblesFrom. */
+export interface VisibilityOptions {
+  /**
+   * SQL over a removal operation aliased by the first argument and the
+   * projected row aliased by the second: when true, that removal's unsettled
+   * (queued, running, blocked) overlay does not hide the row. Only for an
+   * owner-scoped lookup of a provably later incarnation (ListenBrainz
+   * delete-listen); every public reader uses the default (nothing released).
+   * The predicate must itself exclude failed removals and only interpolate
+   * the aliases it is given.
+   */
+  release?: (removal: string, row: string) => string;
+}
+
 /**
  * `FROM` source of publicly visible scrobbles. A local delete intent hides its
  * target as soon as it is durably admitted, and remains hidden while queued,
@@ -123,9 +137,17 @@ export function visibleDid(didColumn: string, alias = 'v'): string {
  * report its failure. The verified projection is unchanged until remote proof
  * confirms the deletion.
  */
-export function visibleScrobblesFrom(s = 's', u = 'u'): string {
+export function visibleScrobblesFrom(s = 's', u = 'u', options: VisibilityOptions = {}): string {
   const sa = ident(s);
   const ua = ident(u);
+  // An unsettled removal for which `release` holds does not hide (callers
+  // that look for a provably later incarnation; default: none is released).
+  // The default text is unchanged for every public reader.
+  const release = options.release;
+  const unsettled = (d: string, row: string, states: string) =>
+    release === undefined
+      ? `${d}.state IN ${states}`
+      : `(${d}.state IN ${states} AND NOT (${release(ident(d), ident(row))}))`;
   return `scrobbles ${sa} JOIN users ${ua}
     ON ${ua}.did = ${sa}.did AND ${activeUser(ua)}
     AND NOT EXISTS (
@@ -141,7 +163,7 @@ export function visibleScrobblesFrom(s = 's', u = 'u'): string {
           OR EXISTS (SELECT 1 FROM batch_delete_listens bd WHERE bd.operation_id = d.id
             AND (bd.listen_id = '*' OR bd.listen_id = ${sa}.listen_id)))
         AND (
-          d.state IN ('queued', 'running', 'blocked', 'failed')
+          ${unsettled('d', sa, "('queued', 'running', 'blocked', 'failed')")}
           OR (d.state = 'succeeded' AND ${removedBy(
             'd',
             sa,
@@ -155,7 +177,7 @@ export function visibleScrobblesFrom(s = 's', u = 'u'): string {
       LEFT JOIN operations AS ro ON ro.id = lr.operation_id
       WHERE lr.did = ${sa}.did AND lr.record_uri = ${sa}.record_uri
         AND (lr.listen_id = ${sa}.listen_id OR lr.listen_id = '*')
-        AND (ro.id IS NULL OR ro.state IN ('queued','running','blocked','failed')
+        AND (ro.id IS NULL OR ${unsettled('ro', sa, "('queued','running','blocked','failed')")}
           OR (ro.state = 'succeeded' AND ${removedBy(
             'ro',
             sa,
@@ -174,7 +196,7 @@ export function visibleScrobblesFrom(s = 's', u = 'u'): string {
           WHERE sd.did = one.did AND sd.rkey = one.rkey AND sd.kind = 'scrobble.delete'
             AND sd.collection = substr(one.uri, length('at://' || one.did || '/') + 1,
               instr(substr(one.uri, length('at://' || one.did || '/') + 1), '/') - 1)
-            AND (sd.state IN ('queued','running','blocked','failed')
+            AND (${unsettled('sd', 'one', "('queued','running','blocked','failed')")}
               OR (sd.state = 'succeeded' AND ${removedBy('sd', 'one', 'sd.swap_cid = one.cid')}))
         )
     ))`;

@@ -50,7 +50,14 @@
 // second whose MSID matches gets a `scrobble.delete` operation (origin
 // listenbrainz; enqueueScrobbleDelete). The MSID of each candidate is the
 // stored `scrobbles.recording_msid`, else recomputed from its music keys (an
-// MSID is a pure function of them, §8.4). With no indexed match, the caller's
+// MSID is a pure function of them, §8.4). A projection hidden only by a
+// removal that holds an unknown send (outbox/removal-fence.ts) counts as
+// indexed when it was verified at a revision newer than that removal's send
+// fence: a provably later incarnation (also one created outside this app,
+// with no create receipt here), so the request is a fresh intent. Every other
+// overlay (a pending or failed ordinary removal, an ordered succeeded one)
+// still hides it, and one not proven newer is a repeat of the held removal,
+// absorbed below. With no indexed match, the caller's
 // own not-yet-indexed `scrobble.create` at that second with that MSID is removed
 // as library.removeScrobble does (never sent → cancelled; sent → a chained
 // delete). No match at all answers 200 `{"status":"ok"}` and writes nothing, as
@@ -88,7 +95,7 @@ import {
 } from '../outbox/batch-delete-ops';
 import { enqueueScrobbleDelete, removeScrobbleCreate } from '../outbox/delete-ops';
 import { outboxCollections } from '../outbox/operations';
-import { newerThanUncertain, uncertainCover } from '../outbox/removal-fence';
+import { newerThanUncertain, uncertainCover, uncertainSendSql } from '../outbox/removal-fence';
 import {
   type AuthHeaderFailure,
   LB_AUTH_MESSAGES,
@@ -310,6 +317,17 @@ type DeleteTarget =
   | { kind: 'pending'; operationId: string; listenId?: string }
   | { kind: 'none' };
 
+/**
+ * The release of findDeleteTarget's visibility: an unsettled removal that
+ * holds an unknown send no longer hides a projection verified at a revision
+ * newer than its send fence (newerThanUncertain over SQL). A failed removal
+ * is never released.
+ */
+function newerThanHeldRemoval(d: string, row: string): string {
+  return `(${d}.state IN ('queued','running','blocked') AND ${uncertainSendSql(d)}
+    AND ${d}.removal_head_rev IS NOT NULL AND ${row}.revision > ${d}.removal_head_rev)`;
+}
+
 /** The newest own scrobble at second `seconds` with MSID `msid` (module comment). */
 async function findDeleteTarget(m: ModuleDeps, did: string, seconds: bigint, msid: string): Promise<DeleteTarget> {
   const lowerNs = seconds * NS_PER_SECOND;
@@ -323,7 +341,8 @@ async function findDeleteTarget(m: ModuleDeps, did: string, seconds: bigint, msi
     track_key: string;
     recording_msid: string | null;
   }>(
-    `SELECT s.uri, s.record_uri, s.listen_id, s.artist_key, s.track_key, s.recording_msid FROM ${visibleScrobblesFrom('s', 'u')}
+    `SELECT s.uri, s.record_uri, s.listen_id, s.artist_key, s.track_key, s.recording_msid
+     FROM ${visibleScrobblesFrom('s', 'u', { release: newerThanHeldRemoval })}
      WHERE s.did = ? AND s.listened_at >= ? AND s.listened_at < ?
      ORDER BY s.listened_at DESC, s.uri DESC`,
     did,
