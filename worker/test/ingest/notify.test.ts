@@ -51,6 +51,7 @@ const REQUEST_ID = '0b7a6c5d-4e3f-4a2b-9c1d-0e9f8a7b6c5d';
 const ORIGIN = 'https://music.example.test';
 const URL_NOTIFY = `${ORIGIN}/api/v1/notify`;
 const SCROBBLE = 'com.example.atmusic.scrobble';
+const BATCH = 'com.example.atmusic.scrobbleBatch';
 const FOLLOW = 'com.example.atmusic.follow';
 const T0 = Date.parse('2026-01-15T12:00:00Z');
 const T0_STORAGE = '2026-01-15T12:00:00.000000000Z';
@@ -357,6 +358,14 @@ describe('notify', () => {
         ['unsupported DID method', { uri: uriOf('did:example:alice', SCROBBLE, 'r01') }, uri422],
         ['not a URI', { uri: 'https://example.com/r01' }, uri422],
         ['query in URI', { uri: `${uriOf(ALICE, SCROBBLE, 'r01')}?x=1` }, uri422],
+        ['malformed batch fragment', { uri: `${uriOf(ALICE, BATCH, '3lb2batchidab')}#bad` }, uri422],
+        ['single record fragment', { uri: `${uriOf(ALICE, SCROBBLE, 'r01')}#3lb2batchidac` }, uri422],
+        [
+          'wrong prefix batch fragment',
+          { uri: `at://${ALICE}/com.example.other.scrobbleBatch/3lb2batchidab#3lb2batchidac` },
+          uri422,
+        ],
+        ['wrong DID batch fragment', { uri: `at://did:example:remote/${BATCH}/3lb2batchidab#3lb2batchidac` }, uri422],
         ['non-string uri', { uri: 7 }, uri422],
         ['handle as did', { did: 'alice.example.com' }, did422],
         ['unsupported did', { did: 'did:example:alice' }, did422],
@@ -595,5 +604,15 @@ describe('notify', () => {
       expectQueued(await h.post(stream(padded(2048))));
       expect((await h.inDo(hintRows)).map((r: JsonBody) => r.uri)).toEqual([uriOf(ALICE, SCROBBLE, 'r01')]);
       expect(h.index.calls.length).toBe(2);
+    }));
+
+  it('accepts only a configured batch listen identity and queues its fragment-free container', () =>
+    withIngestIndex(async (i) => {
+      const h = harness(i);
+      const listenUri = `at://${ALICE}/${BATCH}/3lb2batchidab#3lb2batchidac`;
+      expectQueued(await h.postJson({ uri: listenUri }));
+      expect(await h.inDo((db) => db.all('SELECT uri,collection,rkey FROM hints'))).toEqual([
+        { uri: `at://${ALICE}/${BATCH}/3lb2batchidab`, collection: BATCH, rkey: '3lb2batchidab' },
+      ]);
     }));
 });

@@ -188,7 +188,12 @@ function classifyStatus(
     throw new RangeError(`classify is for failed writes; got success status ${status}`);
   }
   const operation = options.operation ?? 'create';
-  const named = body.error !== undefined ? { error: body.error } : {};
+  const named = {
+    ...(body.error === undefined ? {} : { error: body.error }),
+    ...((body.error !== 'InvalidRequest' && body.error !== 'InvalidRecord') || body.message === undefined
+      ? {}
+      : { message: body.message }),
+  };
 
   // "Already exists" on a create is checked before the 5xx rule: some PDS
   // implementations surface a duplicate rkey as a 500 with that message, and
@@ -222,6 +227,7 @@ function classifyStatus(
       return { kind: 'permanent', code: 'invalid_record', ...named };
     case 'Forbidden':
     case 'InsufficientScope':
+    case 'ScopeMissing':
       return { kind: 'permanent', code: 'forbidden_scope', ...named };
     case 'InvalidToken':
     case 'ExpiredToken':

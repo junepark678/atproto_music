@@ -77,11 +77,12 @@ import type { AccountCapability } from '@atmusic/core/api-types';
 import { canonicalJson } from '@atmusic/core/canonical';
 import { ApiError } from '@atmusic/core/errors';
 import type { ValidationFailure } from '@atmusic/core/scrobble';
-import { isDid } from '@atmusic/core/syntax';
+import { isDid, isTid } from '@atmusic/core/syntax';
 import type { OperationRow } from '../app/rows';
 import { createBox } from '../crypto/box';
 import type { ModuleDeps } from '../do/contracts';
 import type { Feature, FeatureContext } from '../node/compose';
+import { enqueueBatchListenDelete } from '../outbox/batch-delete-ops';
 import { enqueueScrobbleDelete } from '../outbox/delete-ops';
 import { enqueueFollow, enqueueUnfollow } from '../outbox/follow-ops';
 import { acceptListens, DAILY_CAP_WINDOW_MS } from '../outbox/ingress';
@@ -239,15 +240,26 @@ export function splitRecordUri(uri: string): { did: string; collection: string; 
 }
 
 export const deleteScrobble: CookieHandler = async (_req, ctx, params, session) => {
-  const uri = params.id ?? '';
+  const supplied = params.id ?? '';
+  const fragmentAt = supplied.indexOf('#');
+  const uri = fragmentAt < 0 ? supplied : supplied.slice(0, fragmentAt);
+  const listenId = fragmentAt < 0 ? null : supplied.slice(fragmentAt + 1);
   const parts = splitRecordUri(uri);
   if (parts === null) return validationFailed(ctx, 'id', 'Supply an encoded full scrobble AT URI.');
   const m = deps(ctx);
   const collection = outboxCollections(m.config.prefix).scrobble;
   // Another DID's record, or not a scrobble, is not found for this caller.
   if (parts.did !== session.did || parts.collection !== collection) {
-    return errorResponse('not_found', 404, ctx.requestId);
+    const batch = outboxCollections(m.config.prefix).scrobbleBatch;
+    if (parts.did !== session.did || parts.collection !== batch) return errorResponse('not_found', 404, ctx.requestId);
+    if (listenId === '' || (listenId !== null && !isTid(listenId)))
+      return validationFailed(ctx, 'id', 'A batch listen URI needs one valid listen TID fragment.');
+    const ids = listenId === null ? ['*'] : [listenId];
+    return accepted(
+      enqueueBatchListenDelete(m, { did: session.did, uri, listenIds: ids, origin: 'web', kick: kick(ctx) }),
+    );
   }
+  if (listenId !== null) return validationFailed(ctx, 'id', 'Fragments are only valid for scrobbleBatch listen URIs.');
   const op = enqueueScrobbleDelete(m, { did: session.did, uri, origin: 'web', kick: kick(ctx) });
   return accepted(op);
 };

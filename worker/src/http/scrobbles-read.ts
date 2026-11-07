@@ -42,9 +42,11 @@ import {
   pageCursor,
 } from '@atmusic/core/cursor';
 import { ApiError } from '@atmusic/core/errors';
+import { parseScrobbleBatchListenUri } from '@atmusic/core/scrobble-batch';
 import { isDid, parseRecordUri } from '@atmusic/core/syntax';
 import { fromMs, toStorage } from '@atmusic/core/timestamp';
 import type { KeysetQuery, RowsResult, ScrobbleRow } from '../do/contracts';
+import { scrobbleProvenance } from '../do/read/scrobble-fields';
 import { toErrorResponse } from './error';
 import { json } from './json';
 import { invalidField, LIST_LIMIT_DEFAULT, LIST_LIMIT_MAX, parseLimit, singleParam } from './params';
@@ -68,6 +70,7 @@ export const EXPECTED_RECORD_URI = 'Expected a URL-encoded AT URI.';
 export function scrobbleDto(row: ScrobbleRow): Scrobble {
   return {
     uri: row.uri,
+    ...scrobbleProvenance(row),
     cid: row.cid,
     did: row.did,
     revision: row.revision,
@@ -223,7 +226,8 @@ export async function history(req: Request, ctx: RequestCtx, params: Record<stri
 export async function lookup(req: Request, ctx: RequestCtx, params: Record<string, string>): Promise<Response> {
   try {
     const uri = pathValue(req, LOOKUP_PATTERN, 'id', params);
-    if (uri === null || parseRecordUri(uri) === null) throw invalidField('id', EXPECTED_RECORD_URI);
+    if (uri === null || (parseRecordUri(uri) === null && parseScrobbleBatchListenUri(uri) === null))
+      throw invalidField('id', EXPECTED_RECORD_URI);
     const row = await ctx.index.lookup(uri);
     if (row === null) throw new ApiError('not_found', 'scrobble not found');
     return json({ scrobble: scrobbleDto(row) }, 200);

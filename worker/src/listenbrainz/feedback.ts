@@ -55,6 +55,7 @@ import type { ModuleDeps } from '../do/contracts';
 import { lovedTracks } from '../do/read/loves';
 import { ownNowPlaying } from '../do/read/now-playing';
 import { storageToUnixSeconds } from '../do/read/recent';
+import { visibleScrobblesFrom } from '../do/read/visibility';
 import { readJsonBody } from '../http/params';
 import { need, type RequestCtx } from '../http/types';
 import { enqueueLove, enqueueUnlove } from '../outbox/love-ops';
@@ -195,21 +196,24 @@ function keysOfNames(artist: unknown, track: unknown): readonly [string, string]
 
 async function indexedByMsid(m: Pick<ModuleDeps, 'db'>, did: string, msid: string): Promise<FeedbackTarget | null> {
   const stored = m.db.one<TrackRow>(
-    `SELECT ${TRACK_COLUMNS} FROM scrobbles WHERE did = ? AND recording_msid = ?
-     ORDER BY listened_at DESC, uri DESC LIMIT 1`,
+    `SELECT s.artist, s.track, s.album, s.recording_mbid FROM ${visibleScrobblesFrom('s', 'u')} WHERE s.did = ? AND s.recording_msid = ?
+     ORDER BY s.listened_at DESC, s.uri DESC LIMIT 1`,
     did,
     msid,
   );
   if (stored !== null) return targetOf('indexed', stored);
   // Rows projected before the MSID column existed: recompute per distinct key.
   const groups = m.db.all<{ artist_key: string; track_key: string; newest: string }>(
-    `SELECT artist_key, track_key, max(listened_at || ' ' || uri) AS newest FROM scrobbles
-     WHERE did = ? AND recording_msid IS NULL GROUP BY artist_key, track_key`,
+    `SELECT s.artist_key, s.track_key, max(s.listened_at || ' ' || s.uri) AS newest FROM ${visibleScrobblesFrom('s', 'u')}
+     WHERE s.did = ? AND s.recording_msid IS NULL GROUP BY s.artist_key, s.track_key`,
     did,
   );
   for (const g of groups) {
     if ((await recordingMsidOfKey([g.artist_key, g.track_key])) !== msid) continue;
-    const row = m.db.one<TrackRow>(`SELECT ${TRACK_COLUMNS} FROM scrobbles WHERE uri = ?`, g.newest.slice(31));
+    const row = m.db.one<TrackRow>(
+      `SELECT s.artist, s.track, s.album, s.recording_mbid FROM ${visibleScrobblesFrom('s', 'u')} WHERE s.uri = ?`,
+      g.newest.slice(31),
+    );
     if (row !== null) return targetOf('indexed', row);
   }
   return null;
@@ -261,7 +265,15 @@ function pendingRecords(m: Pick<ModuleDeps, 'db'>, did: string, kind: PendingKin
   for (const row of rows) {
     try {
       const record = JSON.parse(row.record_json) as unknown;
-      if (record !== null && typeof record === 'object' && !Array.isArray(record)) out.push(record as PendingRecord);
+      if (record !== null && typeof record === 'object' && !Array.isArray(record)) {
+        const envelope = record as { listens?: unknown };
+        if (kind === 'scrobble.create' && Array.isArray(envelope.listens)) {
+          for (const listen of envelope.listens) {
+            if (listen !== null && typeof listen === 'object' && !Array.isArray(listen))
+              out.push(listen as PendingRecord);
+          }
+        } else out.push(record as PendingRecord);
+      }
     } catch {
       // A malformed stored record matches nothing.
     }
@@ -303,8 +315,8 @@ export async function resolveFeedbackTarget(
   if (ids.mbid !== null) {
     const mbid = ids.mbid;
     const indexed = m.db.one<TrackRow>(
-      `SELECT ${TRACK_COLUMNS} FROM scrobbles WHERE did = ? AND recording_mbid = ?
-       ORDER BY listened_at DESC, uri DESC LIMIT 1`,
+      `SELECT s.artist, s.track, s.album, s.recording_mbid FROM ${visibleScrobblesFrom('s', 'u')} WHERE s.did = ? AND s.recording_mbid = ?
+       ORDER BY s.listened_at DESC, s.uri DESC LIMIT 1`,
       did,
       mbid,
     );

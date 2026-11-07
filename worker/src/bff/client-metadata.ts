@@ -7,7 +7,7 @@
 //    "client_uri":"<origin>","application_type":"web",
 //    "redirect_uris":["<origin>/oauth/callback"],
 //    "grant_types":["authorization_code","refresh_token"],"response_types":["code"],
-//    "scope":"atproto repo:<p>.scrobble repo:<p>.follow repo:<p>.settings repo:<p>.love",
+//    "scope":"atproto repo:<p>.scrobble repo:<p>.follow repo:<p>.settings repo:<p>.love [repo:<p>.scrobbleBatch when separately approved]",
 //    "token_endpoint_auth_method":"private_key_jwt","token_endpoint_auth_signing_alg":"ES256",
 //    "jwks_uri":"<origin>/oauth/jwks.json","dpop_bound_access_tokens":true}
 //
@@ -57,12 +57,15 @@ export interface ClientMetadataInput {
   prefix: string | null;
   /** ATMUSIC_OAUTH_TRANSITION_GENERIC=1. */
   transitionGeneric: boolean;
+  /** Only true after the separately reviewed batch publication gate opens. */
+  batchPublication?: boolean;
 }
 
 /** The requested scope: `atproto` plus one `repo:` scope per collection, then `transition:generic` if enabled. */
-export function oauthScope(prefix: string | null, transitionGeneric: boolean): string {
+export function oauthScope(prefix: string | null, transitionGeneric: boolean, batchPublication = false): string {
   const parts = ['atproto'];
   if (prefix !== null) for (const c of OAUTH_REPO_COLLECTIONS) parts.push(`repo:${prefix}.${c}`);
+  if (prefix !== null && batchPublication) parts.push(`repo:${prefix}.scrobbleBatch`);
   if (transitionGeneric) parts.push(TRANSITION_GENERIC_SCOPE);
   return parts.join(' ');
 }
@@ -89,7 +92,7 @@ export function buildClientMetadata(input: ClientMetadataInput): ClientMetadataD
     redirect_uris: [`${origin}${OAUTH_CALLBACK_PATH}`],
     grant_types: ['authorization_code', 'refresh_token'],
     response_types: ['code'],
-    scope: oauthScope(input.prefix, input.transitionGeneric),
+    scope: oauthScope(input.prefix, input.transitionGeneric, input.batchPublication),
     token_endpoint_auth_method: 'private_key_jwt',
     token_endpoint_auth_signing_alg: 'ES256',
     jwks_uri: `${origin}${OAUTH_JWKS_PATH}`,
@@ -101,12 +104,13 @@ export function buildClientMetadata(input: ClientMetadataInput): ClientMetadataD
 export function clientMetadataFor(config: {
   publicOrigin: string;
   oauthTransitionGeneric: boolean;
-  app: { prefix: string | null };
+  app: { prefix: string | null; batchPublication?: boolean };
 }): ClientMetadataDocument {
   return buildClientMetadata({
     publicOrigin: config.publicOrigin,
     prefix: config.app.prefix,
     transitionGeneric: config.oauthTransitionGeneric,
+    batchPublication: config.app.batchPublication,
   });
 }
 

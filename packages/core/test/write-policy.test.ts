@@ -328,4 +328,14 @@ describe('failure classification', () => {
     );
     expect(big400Wait).toEqual({ kind: 'transient', code: 'upstream_transport_error' });
   });
+
+  it('classifies ScopeMissing and InsufficientScope as explicit permanent scope errors', () => {
+    for (const error of ['ScopeMissing', 'InsufficientScope']) {
+      expect(classify({ status: 403, body: { error, message: 'repository scope required' } })).toEqual({
+        kind: 'permanent',
+        code: 'forbidden_scope',
+        error,
+      });
+    }
+  });
 });

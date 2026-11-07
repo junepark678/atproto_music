@@ -634,7 +634,7 @@ it('fake PDS createRecord with existing rkey returns RecordAlreadyExists; delete
     post(
       HOST,
       'com.atproto.repo.putRecord',
-      { repo: ALICE, collection: SCROBBLE, rkey: 'r01', record: r01, swapRecord: null },
+      { repo: ALICE, collection: SCROBBLE, rkey: 'r01', record: recordOf('r02'), swapRecord: null },
       token,
     ),
   );

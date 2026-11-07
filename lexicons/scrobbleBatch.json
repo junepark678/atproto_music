@@ -1,0 +1,134 @@
+{
+  "lexicon": 1,
+  "id": "com.example.atmusic.scrobbleBatch",
+  "description": "Candidate schema for an unpublished container of completed listens. The production namespace must publish and review this schema separately before enabling batch writes.",
+  "defs": {
+    "main": {
+      "type": "record",
+      "key": "tid",
+      "description": "A container of listens. Writers fill it by bytes: its createRecord or putRecord JSON body stays under the PDS write limit, so the 10,000-entry bound is a resource ceiling that no record of valid entries reaches. Each entry has a stable TID id and every single-scrobble field, including its own createdAt. The envelope also has createdAt.",
+      "record": {
+        "type": "object",
+        "required": [
+          "createdAt",
+          "listens"
+        ],
+        "properties": {
+          "createdAt": {
+            "type": "string",
+            "format": "datetime",
+            "description": "Envelope creation time, validated against event receipt time."
+          },
+          "listens": {
+            "type": "array",
+            "minLength": 1,
+            "maxLength": 10000,
+            "items": {
+              "type": "object",
+              "required": [
+                "id",
+                "artist",
+                "track",
+                "listenedAt",
+                "createdAt"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "format": "tid",
+                  "description": "Stable unique TID listen id within this container."
+                },
+                "artist": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 1024,
+                  "description": "One credited display string; raw 1–256 Unicode scalar values, and nonempty after trimming. The scalar limit is enforced by the validator."
+                },
+                "track": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 1024,
+                  "description": "Raw 1–256 Unicode scalar values, and nonempty after trimming; enforced by the validator."
+                },
+                "album": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 1024,
+                  "description": "If present, raw 1–256 Unicode scalar values, and nonempty after trimming; enforced by the validator."
+                },
+                "listenedAt": {
+                  "type": "string",
+                  "format": "datetime",
+                  "description": "Explicit UTC RFC3339, from 1970-01-01 through event receipt time plus 300 seconds inclusive."
+                },
+                "createdAt": {
+                  "type": "string",
+                  "format": "datetime",
+                  "description": "Explicit UTC RFC3339, from 1970-01-01 through event receipt time plus 300 seconds inclusive."
+                },
+                "durationSeconds": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 86400
+                },
+                "recordingMbid": {
+                  "type": "string",
+                  "description": "Optional unverified recording UUID; runtime validates UUID syntax. Not a grouping key."
+                },
+                "albumArtist": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 1024,
+                  "description": "Optional album artist (Last.fm albumArtist, ListenBrainz release_artist_name); raw 1–256 Unicode scalar values, and nonempty after trimming; enforced by the validator."
+                },
+                "trackNumber": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9999,
+                  "description": "Optional position of the track on its release."
+                },
+                "artistMbids": {
+                  "type": "array",
+                  "maxLength": 10,
+                  "items": {
+                    "type": "string",
+                    "maxLength": 36
+                  },
+                  "description": "Optional unverified MusicBrainz artist UUIDs, at most 10 and distinct; runtime validates UUID syntax."
+                },
+                "releaseMbid": {
+                  "type": "string",
+                  "maxLength": 36,
+                  "description": "Optional unverified MusicBrainz release UUID; runtime validates UUID syntax."
+                },
+                "releaseGroupMbid": {
+                  "type": "string",
+                  "maxLength": 36,
+                  "description": "Optional unverified MusicBrainz release-group UUID; runtime validates UUID syntax."
+                },
+                "isrc": {
+                  "type": "string",
+                  "minLength": 12,
+                  "maxLength": 12,
+                  "description": "Optional ISRC, uppercase, matching ^[A-Z]{2}[A-Z0-9]{3}[0-9]{7}$; enforced by the validator."
+                },
+                "submissionClient": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256,
+                  "description": "Optional name (and version) of the submitting client; raw 1–64 Unicode scalar values and at most 256 UTF-8 bytes; enforced by the validator."
+                },
+                "musicService": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 253,
+                  "description": "Optional lowercase DNS name of the music service the listen came from (ListenBrainz music_service); enforced by the validator."
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

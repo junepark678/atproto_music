@@ -3,9 +3,12 @@
 // - Several due `scrobble.create` operations of one DID (an import slice, or
 //   a protocol batch of more than one listen) go as one
 //   `com.atproto.repo.applyWrites` call with at most MAX_BATCH_WRITES (200)
-//   writes and a JSON body of at most MAX_BATCH_BYTES (1,000,000) bytes, the
-//   reference PDS's limits. `planBatch` takes the longest FIFO prefix that
-//   fits; the bytes counted are exactly the bytes sent (`encodeBatch`).
+//   writes, the reference PDS's limit, and a JSON body of at most
+//   MAX_BATCH_BYTES (990,000) bytes: its 1,000,000-byte jsonLimit less the
+//   same 1 % safety margin every batch write keeps (ADR 0006 "Capacity").
+//   `planBatch` takes the longest FIFO prefix that fits; the bytes counted
+//   are exactly the bytes sent (`encodeBatch`). Only single scrobble records
+//   go this way: a scrobbleBatch container is always its own createRecord.
 // - Each write is a create at the operation's persisted TID rkey with its
 //   persisted record: a retried batch is the same batch.
 // - **Read before re-sending.** A member whose earlier attempt may have
@@ -31,6 +34,7 @@
 // - A success whose `results` do not name every expected URI is treated as
 //   unconfirmed (transient), never as success.
 
+import { MAX_WRITE_BODY_BYTES } from '@atmusic/core/scrobble-batch';
 import type { OperationRow } from '../app/rows';
 import { recordOf } from './operations';
 import { type Failure, failureOutcome, type Outcome, writePoints } from './pds-writer';
@@ -38,7 +42,7 @@ import type { ExecContext } from './runner';
 import { sameDigest } from './scrobble-ops';
 
 export const MAX_BATCH_WRITES = 200;
-export const MAX_BATCH_BYTES = 1_000_000;
+export const MAX_BATCH_BYTES = MAX_WRITE_BODY_BYTES;
 export const APPLY_WRITES = 'com.atproto.repo.applyWrites';
 const CREATE_TYPE = 'com.atproto.repo.applyWrites#create';
 

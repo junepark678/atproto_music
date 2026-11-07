@@ -27,6 +27,7 @@
 // rate-limit headers.
 
 import type { Clock } from '@atmusic/core/deps';
+import { isTid } from '@atmusic/core/syntax';
 import { classify, classifyResponse, type WriteOperation } from '@atmusic/core/write-policy';
 import { TokenInvalidError, TokenRefreshError, TokenRevokedError } from '@atproto/oauth-client-node';
 import { WRITE_COST } from './budget';
@@ -36,6 +37,8 @@ export const PDS_WRITER_CAPS = Object.freeze({ maxRequestBytes: 1_000_000, maxRe
 
 export interface PdsWriter {
   readonly did: string;
+  /** Granted OAuth scopes, when the provider exposes the saved token scope. */
+  readonly scope?: string;
   /** `OAuthSession.fetchHandler`: `pathname` is resolved against the session's PDS. */
   fetchHandler(pathname: string, init?: RequestInit): Promise<Response>;
 }
@@ -65,10 +68,12 @@ function isReauthError(error: unknown): boolean {
 /** Adapts an OAuth session (`{did, fetchHandler}`) to PdsWriter. */
 export function sessionWriter(session: {
   readonly did: string;
+  readonly tokenSet?: { readonly scope?: string };
   fetchHandler(pathname: string, init?: RequestInit): Promise<Response>;
 }): PdsWriter {
   return {
     did: session.did,
+    ...(typeof session.tokenSet?.scope === 'string' ? { scope: session.tokenSet.scope } : {}),
     fetchHandler: async (pathname, init) => {
       try {
         return await session.fetchHandler(pathname, init);
@@ -90,6 +95,7 @@ export interface Failure {
   status?: number;
   retryAfterMs?: number;
   error?: string;
+  message?: string;
 }
 
 export type XrpcResult = { ok: true; status: number; body: unknown } | { ok: false; failure: Failure };
@@ -98,6 +104,30 @@ export type RecordLookup =
   | { kind: 'present'; uri: string; cid: string; value: unknown }
   | { kind: 'absent' }
   | { kind: 'failed'; failure: Failure };
+
+/**
+ * The owner's repository head as its own PDS reports it
+ * (`com.atproto.sync.getLatestCommit`): the commit CID a write's `swapCommit`
+ * names and that commit's revision. Server metadata, not a verified proof.
+ */
+export type RepoHead = { kind: 'head'; cid: string; rev: string } | { kind: 'failed'; failure: Failure };
+
+/** A base32 CIDv1 string, as a PDS reports commit and record CIDs. */
+const CID_SYNTAX = /^b[a-z2-7]{8,256}$/;
+
+/**
+ * The commit revision a successful write response reports (`commit.rev`),
+ * when it is a TID newer than the head `checked` the write was sent against;
+ * otherwise null (absent, malformed, or not after the checked head).
+ */
+export function reportedCommitRev(body: unknown, checked: string): string | null {
+  if (body === null || typeof body !== 'object') return null;
+  const commit = (body as { commit?: unknown }).commit;
+  if (commit === null || typeof commit !== 'object') return null;
+  const { cid, rev } = commit as { cid?: unknown; rev?: unknown };
+  if (typeof cid !== 'string' || !CID_SYNTAX.test(cid) || typeof rev !== 'string' || !isTid(rev)) return null;
+  return rev > checked ? rev : null;
+}
 
 export interface ListedRecord {
   uri: string;
@@ -160,6 +190,10 @@ export class PdsXrpc {
 
   get did(): string {
     return this.writer.did;
+  }
+
+  get scope(): string | undefined {
+    return this.writer.scope;
   }
 
   /** POST a procedure. `operation` decides whether "already exists" is ambiguous. */
@@ -229,6 +263,28 @@ export class PdsXrpc {
       }
     }
     return { ok: true, status: response.status, body };
+  }
+
+  /**
+   * `com.atproto.sync.getLatestCommit` for the owner's own repository, over
+   * this authenticated writer transport (a public GET; no write points). Its
+   * CID and revision must be well-formed; nothing else about them is trusted.
+   */
+  async latestCommit(): Promise<RepoHead> {
+    const result = await this.query('com.atproto.sync.getLatestCommit', { did: this.did });
+    if (!result.ok) return { kind: 'failed', failure: result.failure };
+    const body = result.body as { cid?: unknown; rev?: unknown } | null;
+    if (
+      body === null ||
+      typeof body !== 'object' ||
+      typeof body.cid !== 'string' ||
+      !CID_SYNTAX.test(body.cid) ||
+      typeof body.rev !== 'string' ||
+      !isTid(body.rev)
+    ) {
+      return { kind: 'failed', failure: { kind: 'transient', code: 'invalid_repository_head' } };
+    }
+    return { kind: 'head', cid: body.cid, rev: body.rev };
   }
 
   /** `com.atproto.repo.getRecord` on the owner's own PDS. */
@@ -326,9 +382,22 @@ export type Outcome =
   /** Done. `note` is kept as the operation's `error` slug (e.g. `record_not_ours`); `hints` are notified. */
   | { kind: 'succeeded'; uri?: string; cid?: string; hints: HintTarget[]; note?: string; swapCid?: string }
   | { kind: 'transient'; code: string; retryAfterMs?: number; swapCid?: string }
-  | { kind: 'permanent'; code: string }
+  | { kind: 'permanent'; code: string; remoteError?: string; remoteMessage?: string; status?: number }
+  /**
+   * A read could not establish remote state; retry later without spending a
+   * write attempt. `code` names why (default `remote_state_unavailable`).
+   * `counted`: this attempt did send a write (it stays counted), and the
+   * operation now only holds read-only (a removal whose requested state was
+   * reached, outbox/removal-fence.ts), so it is never failed for attempts.
+   */
+  | { kind: 'waiting'; untilMs: number; code?: string; counted?: boolean }
+  /** Definite record rejection: atomically replace this batch with durable children. */
+  | {
+      kind: 'split';
+      children: Array<{ id: string; rkey: string; prepared: { record: object; digest: string }; entryIds: string[] }>;
+    }
   /** The session needs a new sign-in: the operation becomes `blocked` and the attempt is not counted. */
-  | { kind: 'reauth' }
+  | { kind: 'reauth'; code?: string }
   /**
    * The point budget cannot afford the next write of this attempt now, and
    * nothing of the operation is left unconfirmed: it waits until `untilMs`
@@ -344,7 +413,13 @@ export function failureOutcome(failure: Failure): Outcome {
         ? { kind: 'transient', code: failure.code, retryAfterMs: failure.retryAfterMs }
         : { kind: 'transient', code: failure.code };
     case 'permanent':
-      return { kind: 'permanent', code: failure.code };
+      return {
+        kind: 'permanent',
+        code: failure.code,
+        ...(failure.error === undefined ? {} : { remoteError: failure.error }),
+        ...(failure.message === undefined ? {} : { remoteMessage: failure.message }),
+        ...(failure.status === undefined ? {} : { status: failure.status }),
+      };
     case 'reauth':
       return { kind: 'reauth' };
     default:

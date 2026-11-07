@@ -41,6 +41,7 @@ import { closeApps, startApp, TEST_PUBLIC_ORIGIN, type TestApp } from '../suppor
 
 const PREFIX = 'com.example.atmusic';
 const SCROBBLE = `${PREFIX}.scrobble`;
+const BATCH = `${PREFIX}.scrobbleBatch`;
 const FOLLOW = `${PREFIX}.follow`;
 const LOVE = `${PREFIX}.love`;
 const ALICE = fixture.users.Alice.did;
@@ -164,6 +165,45 @@ afterEach(async () => {
 });
 
 describe('Last.fm user read methods', () => {
+  it('user.getRecentTracks returns a verified batch listen through the real Last.fm protocol route', async () => {
+    const app = await startApp({ routes: lastfmRoutes() });
+    const { alice } = await seedFixture(app.db);
+    const rkey = '3lbqbatchread001';
+    await alice.put(BATCH, rkey, {
+      $type: BATCH,
+      createdAt: NOW_ISO,
+      listens: [
+        {
+          id: '3lb2btchrdcab',
+          artist: 'Batch Artist',
+          track: 'Batch Protocol Read',
+          listenedAt: '2026-01-15T11:45:00Z',
+          createdAt: NOW_ISO,
+        },
+      ],
+    });
+    const proof = await verifyRecordProof(await alice.getRecordCar(BATCH, rkey), {
+      did: ALICE,
+      collection: BATCH,
+      rkey,
+      signingKey: alice.key.didKey,
+    });
+    // The single fixture history can advance beyond this independently
+    // composed batch commit; set the per-DID floor to this real proof revision.
+    app.db.run('UPDATE users SET max_rev = ? WHERE did = ?', proof.commit.rev, ALICE);
+    expect(app.db.tx(() => applyRecordProof(app.db, proof, OPTS)).outcome).toBe('applied');
+    const response = await get(app, { method: 'user.getRecentTracks', user: 'alice', limit: '1' });
+    expect(response.status).toBe(200);
+    expect(response.body.recenttracks.track).toMatchObject([
+      {
+        name: 'Batch Protocol Read',
+        artist: { '#text': 'Batch Artist' },
+        date: { uts: String(unix('2026-01-15T11:45:00Z')) },
+      },
+    ]);
+    expect(response.body.recenttracks['@attr'].total).toBe('8');
+  });
+
   it('user.getRecentTracks for Alice lists r07, r01, r02 ... newest first with date.uts; limit 2 gives totalPages 4; the nowplaying row appears on page 1 only', async () => {
     const app = await fixtureApp();
     const all = await get(app, { method: 'user.getRecentTracks', user: 'alice' });

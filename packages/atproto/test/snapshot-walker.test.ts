@@ -411,3 +411,44 @@ it('unchanged record CIDs are not fetched on re-snapshot', async () => {
   expect(third.reduce((n, s) => n + s.fetches, 0)).toBe(0);
   expect(env.pds.count(GET_BLOCKS)).toBe(0);
 }, 120_000);
+
+it('getBlocks bisects a batch of byte-filled scrobbleBatch containers that overflows the 8 MiB body cap', async () => {
+  // Twelve ~0.9 MB containers (the size the writer fills to): one 12-CID request
+  // would be ~10.7 MB, so it is split 6 + 6, each under the cap.
+  const container = (i: number) => ({
+    $type: `${FIXTURE_PREFIX}.scrobbleBatch`,
+    createdAt: '2026-01-15T12:00:00.000Z',
+    listens: Array.from({ length: 1_900 }, (_, k) => ({
+      id: tidFromMicros(BASE_MICROS + i * 10_000 + k),
+      artist: 'Radiohead',
+      track: 'Weird Fishes/Arpeggi',
+      album: 'In Rainbows',
+      listenedAt: '2026-01-14T12:00:00.000000000Z',
+      createdAt: '2026-01-15T12:00:00Z',
+      recordingMbid: `${String(k).padStart(8, '0')}-4b2c-4d1e-9f3a-1c2d3e4f5a6b`,
+      releaseMbid: '20000000-4b2c-4d1e-9f3a-1c2d3e4f5a6b',
+      releaseGroupMbid: '30000000-4b2c-4d1e-9f3a-1c2d3e4f5a6b',
+      artistMbids: ['40000000-4b2c-4d1e-9f3a-1c2d3e4f5a6b'],
+      durationSeconds: 318,
+      trackNumber: 4,
+      submissionClient: 'Pano Scrobbler 3.9.1',
+      musicService: 'spotify.com',
+    })),
+  });
+  const env = await setup(
+    Array.from({ length: 12 }, (_, i) => put(`${FIXTURE_PREFIX}.scrobbleBatch`, scrobbleRkey(i), container(i))),
+  );
+  const entries = await env.repo.entries();
+  expect(entries).toHaveLength(12);
+  const sizes = await Promise.all(entries.map(async (e) => (await env.repo.store.get(e.cid))!.byteLength));
+  expect(Math.min(...sizes)).toBeGreaterThan(850_000);
+  expect(sizes.reduce((a, b) => a + b, 0)).toBeGreaterThan(8 * 1024 * 1024);
+  env.pds.calls.reset();
+  const source = blocksOf(env);
+  const blocks = await source.get(entries.map((e) => e.cid));
+  expect([...blocks.keys()].sort()).toEqual(entries.map((e) => e.cid).sort());
+  for (const e of entries) expect(cborCid(blocks.get(e.cid)!)).toBe(e.cid);
+  // The overflowing 12-CID request, then its two halves.
+  expect(getBlocksRequests(env.pds).map((r) => r.length)).toEqual([12, 6, 6]);
+  expect(source.requests).toBe(3);
+}, 120_000);

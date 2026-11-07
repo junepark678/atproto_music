@@ -51,6 +51,7 @@ const DISCONNECT_DELETES: readonly string[] = [
   'DELETE FROM scrobbles WHERE did = ?',
   'DELETE FROM follows WHERE actor = ?',
   'DELETE FROM record_state WHERE did = ?',
+  'DELETE FROM verified_membership WHERE did = ?',
   'DELETE FROM hints WHERE did = ?',
   'DELETE FROM repo_jobs WHERE did = ?',
   'DELETE FROM stats_cache WHERE did = ?',

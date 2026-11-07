@@ -443,6 +443,7 @@ export async function compose(config: NodeConfig, secrets: Secrets, options: Com
       LEXICON_PREFIX: config.app.prefix ?? '',
       NAMESPACE_OWNERSHIP_REF: config.app.namespaceOwnershipRef ?? '',
       NAMESPACE_PUBLICATION_REF: config.app.namespacePublicationRef ?? '',
+      NAMESPACE_BATCH_PUBLICATION_REF: config.app.namespaceBatchPublicationRef ?? '',
     };
     const buildCtx = (request: Request, info: DispatchInfo, requestId: string): RequestCtx => ({
       env,

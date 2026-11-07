@@ -9,7 +9,14 @@
   "cases": [
     {
       "case": "M1.1.1/fixture_namespace",
-      "target": "packages/core/test/namespace.test.ts › fixture prefix blocks publication; owned prefix with ownership ref allows it"
+      "target": "packages/core/test/namespace.test.ts › fixture prefix blocks publication; owned prefix with ownership ref allows it",
+      "also": [
+        "worker/test/config.test.ts › batch publication needs a distinct second reviewed manifest digest and the original publication gate",
+        "worker/test/http/health-meta.test.ts › advertises batchPublication only for a distinct batch manifest with the original gate open",
+        "worker/test/node/bff/client-metadata.test.ts › requests the batch collection only when the separate batch gate is open",
+        "worker/test/node/imports/writer.test.ts › keeps staged imported listens dormant without attempts or a polling alarm while publication is closed",
+        "worker/test/node/config.test.ts › INGEST_MODE accepts socket and off only, ignores retired plan and placement variables, and embedded config has no tier or placement fields"
+      ]
     },
     {
       "case": "M1.1.1/invalid_namespace",
@@ -20,8 +27,12 @@
     },
     {
       "case": "M1.1.1/version_policy",
-      "target": "worker/test/ingest/jetstream-socket.test.ts › subscribe URL has kinds=commit and the four collections only",
-      "note": "A10 adds `<prefix>.settings` and B12 `<prefix>.love` (N3-11 renamed the target from \"the three collections only\"), so a valid prefix derives exactly the scrobble, follow, settings and love collections."
+      "target": "worker/test/node/ingest/jetstream-collections.test.ts › appends scrobbleBatch after the established collection order",
+      "note": "A10 adds `<prefix>.settings`, B12 adds `<prefix>.love`, and Slice B appends `<prefix>.scrobbleBatch` after the existing collection list to preserve numeric cursor compatibility.",
+      "also": [
+        "packages/core/test/scrobble-batch.test.ts › round trips a listen fragment and returns fragment-free proof target",
+        "packages/core/test/scrobble-batch.test.ts › rejects malformed authority, non-batch collections and bad fragments"
+      ]
     },
     {
       "case": "M1.1.2/unicode_limits",
@@ -40,7 +51,14 @@
       "case": "M1.1.2/optional_values",
       "target": "packages/core/test/scrobble.test.ts › duration 1 and 86400 accepted; 0, 86401 and 1.5 rejected; invalid MBID rejected; omitted album accepted",
       "also": [
-        "packages/core/test/scrobble.test.ts › validation.json vectors match Rust verdicts and reasons"
+        "packages/core/test/scrobble.test.ts › validation.json vectors match Rust verdicts and reasons",
+        "packages/core/test/scrobble-batch.test.ts › validates each entry through the single scrobble validator and preserves createdAt",
+        "packages/core/test/scrobble-batch.test.ts › drops only invalid entries while malformed envelope bounds reject the whole record",
+        "packages/core/test/scrobble-batch.test.ts › builds a batch with stable TID entry ids and a separate envelope timestamp",
+        "packages/core/test/scrobble-batch.test.ts › packs in stable order under both supplied exact size limits",
+        "packages/atproto/test/scrobble-batch-size.test.ts › counts DAG-CBOR and exact UTF-8 JSON request bytes",
+        "packages/atproto/test/scrobble-batch-size.test.ts › uses inclusive exact bounds",
+        "packages/atproto/test/scrobble-batch-size.test.ts › counts non-ASCII as UTF-8 bytes rather than JS string length"
       ]
     },
     {
@@ -310,7 +328,12 @@
     },
     {
       "case": "M2.2.1/scope_inventory",
-      "target": "worker/test/node/bff/client-metadata.test.ts › the metadata for https://music.214510.xyz equals the ADR 0005 §5.3 document with client_name AT Protocol Music and the four repo: scopes, and jwks.json has no private member"
+      "target": "worker/test/node/bff/client-metadata.test.ts › the metadata for https://music.214510.xyz equals the ADR 0005 §5.3 document with client_name AT Protocol Music and the four repo: scopes, and jwks.json has no private member",
+      "also": [
+        "worker/test/node/imports/writer.test.ts › checks the granted token scope before starting a batch write",
+        "worker/test/node/imports/writer.test.ts › holds a batch lane on a missing-scope response without failing its imported listens",
+        "packages/core/test/write-policy.test.ts › classifies ScopeMissing and InsufficientScope as explicit permanent scope errors"
+      ]
     },
     {
       "case": "M2.2.2/par_pkce",
@@ -500,7 +523,14 @@
     },
     {
       "case": "M3.2.1/rkey_persistence",
-      "target": "worker/test/node/outbox/recovery.test.ts › crash before send, after PDS commit before local ack, after local commit, and during delete (database reopened) each end with exactly one PDS outcome"
+      "target": "worker/test/node/outbox/recovery.test.ts › crash before send, after PDS commit before local ack, after local commit, and during delete (database reopened) each end with exactly one PDS outcome",
+      "also": [
+        "worker/test/node/imports/writer.test.ts › rebatches only queued never-sent import singles after rechecking all item and key links",
+        "worker/test/node/imports/writer.test.ts › splits a definitely rejected container into durable children and keeps entry identities and per-item removal outcomes",
+        "worker/test/node/imports/writer.test.ts › rolls back child insertion and item repointing together when the split transaction faults",
+        "worker/test/node/imports/writer.test.ts › rechecks a single that starts sending while async rebatch preparation is in flight",
+        "worker/test/node/imports/writer.test.ts › rolls back old operations and mappings together when the rebatch transaction faults"
+      ]
     },
     {
       "case": "M3.2.2/transient_schedule",
@@ -519,7 +549,11 @@
     },
     {
       "case": "M3.2.3/crash_after_remote",
-      "target": "worker/test/node/outbox/recovery.test.ts › crash before send, after PDS commit before local ack, after local commit, and during delete (database reopened) each end with exactly one PDS outcome"
+      "target": "worker/test/node/outbox/recovery.test.ts › crash before send, after PDS commit before local ack, after local commit, and during delete (database reopened) each end with exactly one PDS outcome",
+      "also": [
+        "worker/test/node/imports/writer.test.ts › a restart mid-batch reuses the allocated rkeys and the PDS ends with exactly one record per unique listen",
+        "worker/test/node/imports/writer.test.ts › reads an attempted batch after a lost create success and never resends it"
+      ]
     },
     {
       "case": "M3.2.3/conflicting_rkey",

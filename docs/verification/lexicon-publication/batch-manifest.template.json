@@ -1,0 +1,13 @@
+{
+  "authorityDid": "<owner-controlled-authority-did>",
+  "ownershipRef": "dns:<verified-lexicon-txt-record>",
+  "prefix": "<production-prefix>",
+  "verifiedAt": "<UTC timestamp after public reads>",
+  "records": [
+    { "nsid": "<prefix>.scrobble", "uri": "<publicly-read schema-record-uri>", "cid": "<publicly-read-cid>", "contentSha256": "<sha256-of-canonical-schema-content>", "publicRetrieval": "<unauthenticated-getRecord-url>", "match": false },
+    { "nsid": "<prefix>.follow", "uri": "<publicly-read schema-record-uri>", "cid": "<publicly-read-cid>", "contentSha256": "<sha256-of-canonical-schema-content>", "publicRetrieval": "<unauthenticated-getRecord-url>", "match": false },
+    { "nsid": "<prefix>.love", "uri": "<publicly-read schema-record-uri>", "cid": "<publicly-read-cid>", "contentSha256": "<sha256-of-canonical-schema-content>", "publicRetrieval": "<unauthenticated-getRecord-url>", "match": false },
+    { "nsid": "<prefix>.settings", "uri": "<publicly-read schema-record-uri>", "cid": "<publicly-read-cid>", "contentSha256": "<sha256-of-canonical-schema-content>", "publicRetrieval": "<unauthenticated-getRecord-url>", "match": false },
+    { "nsid": "<prefix>.scrobbleBatch", "uri": "<publicly-read schema-record-uri>", "cid": "<publicly-read-cid>", "contentSha256": "<sha256-of-canonical-schema-content>", "publicRetrieval": "<unauthenticated-getRecord-url>", "match": false }
+  ]
+}

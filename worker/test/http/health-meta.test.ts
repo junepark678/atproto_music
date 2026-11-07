@@ -29,7 +29,7 @@ import { migrate } from '../../src/do/migrate';
 import { MIGRATIONS } from '../../src/do/schema';
 import type { EnvVars } from '../../src/env';
 import { routes as healthRoutes } from '../../src/http/health';
-import { APP_VERSION, routes as metaRoutes, namespaceView } from '../../src/http/meta';
+import { APP_VERSION, buildMeta, routes as metaRoutes, namespaceView, RECOVERING } from '../../src/http/meta';
 import type { AppEnv, RequestCtx, RouteDef } from '../../src/http/types';
 import { openSqliteDb } from '../../src/node/sqlite-db';
 import { closeWorlds, T0, World } from '../node/journey/world';
@@ -60,9 +60,15 @@ const OWNED_ENV = {
   LEXICON_PREFIX: OWNED,
   NAMESPACE_OWNERSHIP_REF: 'dns:_lexicon.music.example.org',
   NAMESPACE_PUBLICATION_REF: PUBLICATION_REF,
+  NAMESPACE_BATCH_PUBLICATION_REF: '',
 };
 /** The harness namespace: the fixture prefix, no ownership or publication evidence (wrangler.harness.jsonc). */
-const FIXTURE_ENV = { LEXICON_PREFIX: FIXTURE_PREFIX, NAMESPACE_OWNERSHIP_REF: '', NAMESPACE_PUBLICATION_REF: '' };
+const FIXTURE_ENV = {
+  LEXICON_PREFIX: FIXTURE_PREFIX,
+  NAMESPACE_OWNERSHIP_REF: '',
+  NAMESPACE_PUBLICATION_REF: '',
+  NAMESPACE_BATCH_PUBLICATION_REF: '',
+};
 
 /** The Workers-era variables parseConfig reads (wrangler.harness.jsonc). */
 const VARS: EnvVars = {
@@ -70,6 +76,7 @@ const VARS: EnvVars = {
   LEXICON_PREFIX: FIXTURE_PREFIX,
   NAMESPACE_OWNERSHIP_REF: '',
   NAMESPACE_PUBLICATION_REF: '',
+  NAMESPACE_BATCH_PUBLICATION_REF: '',
   INGEST_MODE: 'off',
   JETSTREAM_URLS: 'wss://jetstream.example.test',
   JETSTREAM_LOOKBACK_HOURS: '24',
@@ -102,6 +109,8 @@ function ctxFor(index: IndexRpc, vars: Partial<AppEnv> = {}, app?: AppServices):
       LEXICON_PREFIX: vars.LEXICON_PREFIX ?? FIXTURE_ENV.LEXICON_PREFIX,
       NAMESPACE_OWNERSHIP_REF: vars.NAMESPACE_OWNERSHIP_REF ?? FIXTURE_ENV.NAMESPACE_OWNERSHIP_REF,
       NAMESPACE_PUBLICATION_REF: vars.NAMESPACE_PUBLICATION_REF ?? FIXTURE_ENV.NAMESPACE_PUBLICATION_REF,
+      NAMESPACE_BATCH_PUBLICATION_REF:
+        vars.NAMESPACE_BATCH_PUBLICATION_REF ?? FIXTURE_ENV.NAMESPACE_BATCH_PUBLICATION_REF,
     },
     index,
     requestId: REQUEST_ID,
@@ -160,11 +169,14 @@ function expectedMeta(vars: Partial<AppEnv>, app: AppServices | undefined) {
     LEXICON_PREFIX: vars.LEXICON_PREFIX ?? FIXTURE_ENV.LEXICON_PREFIX,
     NAMESPACE_OWNERSHIP_REF: vars.NAMESPACE_OWNERSHIP_REF ?? FIXTURE_ENV.NAMESPACE_OWNERSHIP_REF,
     NAMESPACE_PUBLICATION_REF: vars.NAMESPACE_PUBLICATION_REF ?? FIXTURE_ENV.NAMESPACE_PUBLICATION_REF,
+    NAMESPACE_BATCH_PUBLICATION_REF:
+      vars.NAMESPACE_BATCH_PUBLICATION_REF ?? FIXTURE_ENV.NAMESPACE_BATCH_PUBLICATION_REF,
   });
   const composed = app?.meta?.capabilities;
   const capabilities = [
     ...BASE_CAPS,
     ...(namespace.publication ? ['publication'] : []),
+    ...(namespace.batchPublication ? ['batchPublication'] : []),
     ...ACCOUNT_CAPABILITIES.filter((c) => composed?.includes(c) === true),
   ];
   const writes = composed === undefined ? namespace.publication : composed.includes('writes');
@@ -185,6 +197,20 @@ async function world(env: Record<string, string>, prepare?: (path: string) => vo
 const live = route(healthRoutes, '/health/live');
 const ready = route(healthRoutes, '/health/ready');
 const meta = route(metaRoutes, '/api/v1/meta');
+
+it('advertises batchPublication only for a distinct batch manifest with the original gate open', () => {
+  const original = `sha256:${'a'.repeat(64)}`;
+  const batch = `sha256:${'b'.repeat(64)}`;
+  const common = {
+    LEXICON_PREFIX: OWNED,
+    NAMESPACE_OWNERSHIP_REF: 'dns:_lexicon',
+    NAMESPACE_PUBLICATION_REF: original,
+  };
+  const closed = namespaceView({ ...common, NAMESPACE_BATCH_PUBLICATION_REF: original });
+  expect(buildMeta(closed, true, RECOVERING).capabilities).not.toContain('batchPublication');
+  const open = namespaceView({ ...common, NAMESPACE_BATCH_PUBLICATION_REF: batch });
+  expect(buildMeta(open, true, RECOVERING).capabilities).toContain('batchPublication');
+});
 
 it('live 200; ready 503 when index reports too_new; meta capabilities omit publication without owned prefix', async () => {
   expect(healthRoutes.map((r) => `${r.method} ${r.pattern}`)).toEqual(['GET /health/live', 'GET /health/ready']);
@@ -420,7 +446,11 @@ it('meta namespace equals the prefix and publication of every config parseConfig
           expect(
             namespaceView(vars),
             `${LEXICON_PREFIX}|${NAMESPACE_OWNERSHIP_REF}|${NAMESPACE_PUBLICATION_REF}|${allowFixturePrefix}`,
-          ).toEqual({ prefix: config.prefix, publication: config.publication });
+          ).toEqual({
+            prefix: config.prefix,
+            publication: config.publication,
+            batchPublication: config.batchPublication,
+          });
         }
         // The fixture prefix never publishes, whatever evidence appears beside it.
         if (LEXICON_PREFIX.trim() === FIXTURE_PREFIX) expect(namespaceView(vars).publication).toBe(false);
@@ -440,6 +470,7 @@ it('meta namespace equals the prefix and publication of every config parseConfig
     ).toEqual({
       prefix: null,
       publication: false,
+      batchPublication: false,
     });
   }
 

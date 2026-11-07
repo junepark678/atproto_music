@@ -321,7 +321,7 @@
       "delete": {
         "operationId": "scrobble_delete",
         "summary": "Delete a scrobble",
-        "description": "Queues a scrobble.delete for an own record (swapRecord from record_state; a pending create is its predecessor). Another DID's record is 404. Needs the cookie plus CSRF; with the publication gate closed it is 503 publication_disabled. Returns 202 with the queued operation (ADR 0005 §5.7, §5.8).",
+        "description": "Queues a scrobble.delete for an own single record or an exact scrobbleBatch listen identity; an unfragmented batch URI deletes the whole container. Single-record fragments and malformed batch fragments are 422; another DID or collection is 404. Needs the cookie plus CSRF; with the publication gate closed it is 503 publication_disabled. Returns 202 with the queued operation (ADR 0005 §5.7, §5.8; ADR 0006).",
         "x-contract": "1.2",
         "security": [
           {
@@ -5470,6 +5470,11 @@
         "format": "at-record-uri",
         "description": "Full record AT URI with DID authority, collection NSID and record key."
       },
+      "ListenUri": {
+        "type": "string",
+        "format": "at-listen-uri",
+        "description": "Indexed listen identity: a record AT URI or a scrobbleBatch container URI followed by # and an exact listen TID. The fragment is not a repository record URI."
+      },
       "Cid": {
         "type": "string",
         "format": "at-record-cid",
@@ -5635,7 +5640,7 @@
             "items": {
               "type": "string"
             },
-            "description": "Initialized capabilities: read, stats, follows, notify, indexing, publication (owned prefix only), and from v1.2 writes, lastfm, listenbrainz, imports and forwarding (ADR 0005 B14, B18)."
+            "description": "Initialized capabilities: read, stats, follows, notify, indexing, publication (owned prefix only), batchPublication (only with a distinct reviewed five-schema manifest), and from v1.2 writes, lastfm, listenbrainz, imports and forwarding (ADR 0005 B14, B18; ADR 0006)."
           },
           "lexiconPrefix": {
             "type": [
@@ -5746,7 +5751,16 @@
         ],
         "properties": {
           "uri": {
-            "$ref": "#/components/schemas/AtUri"
+            "$ref": "#/components/schemas/ListenUri"
+          },
+          "recordUri": {
+            "$ref": "#/components/schemas/AtUri",
+            "description": "Fragment-free batch container URI; present only for batch listens."
+          },
+          "listenId": {
+            "type": "string",
+            "format": "at-tid",
+            "description": "Exact TID of this listen inside recordUri; present only for batch listens."
           },
           "cid": {
             "$ref": "#/components/schemas/Cid"
@@ -6215,10 +6229,10 @@
               "uri": {
                 "allOf": [
                   {
-                    "$ref": "#/components/schemas/AtUri"
+                    "$ref": "#/components/schemas/ListenUri"
                   }
                 ],
-                "description": "A record in a configured collection (<prefix>.scrobble, .follow or .settings); other collections are 422."
+                "description": "A record in a configured collection, or a scrobbleBatch listen identity with its exact #listenId fragment; other fragments and collections are 422."
               }
             }
           },
@@ -6256,10 +6270,10 @@
           "state",
           "indexing"
         ],
-        "description": "Indexing state of one record (N2). indexed: a visible row with its verified cid and revision. pending: a hint or job exists. absent: verified absence. excluded: a verified record failed validation, with reason. unknown: nothing is known.",
+        "description": "Indexing state of one record or scrobbleBatch listen identity (N2). indexed: a visible row with its verified cid and revision. pending: a hint or job exists. absent: verified absence, including a missing item in a present verified batch at the container revision. excluded: a verified record failed validation, with reason. unknown: nothing is known.",
         "properties": {
           "uri": {
-            "$ref": "#/components/schemas/AtUri"
+            "$ref": "#/components/schemas/ListenUri"
           },
           "state": {
             "enum": [
@@ -7489,9 +7503,9 @@
         "in": "path",
         "required": true,
         "schema": {
-          "$ref": "#/components/schemas/AtUri"
+          "$ref": "#/components/schemas/ListenUri"
         },
-        "description": "URL-encoded full AT URI; not a bare record key or operation ID."
+        "description": "URL-encoded listen URI; a batch URI includes the exact listen id fragment. Not a bare record key or operation ID."
       },
       "ListLimit": {
         "name": "limit",
@@ -7572,9 +7586,9 @@
         "in": "query",
         "required": true,
         "schema": {
-          "$ref": "#/components/schemas/AtUri"
+          "$ref": "#/components/schemas/ListenUri"
         },
-        "description": "Full AT URI of a record in a configured collection; invalid is 422 fields.uri."
+        "description": "Record AT URI or an exact listen fragment in a configured scrobbleBatch container; invalid is 422 fields.uri."
       },
       "Origin": {
         "name": "Origin",

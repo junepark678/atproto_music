@@ -30,12 +30,14 @@ import { applyRecordProof } from '../../../src/do/write/apply-record';
 import { FEEDBACK_MESSAGES } from '../../../src/listenbrainz/feedback';
 import { listenBrainzRoutes } from '../../../src/listenbrainz/routes';
 import { acceptListens } from '../../../src/outbox/ingress';
+import { insertOperation, newOperationId, prepare } from '../../../src/outbox/operations';
 import { closeApps, startApp, type TestApp } from '../support/app';
 
 const PREFIX = 'org.example.music';
 const FIXTURE_PREFIX = 'com.example.atmusic';
 const SCROBBLE = `${FIXTURE_PREFIX}.scrobble`;
 const LOVE = `${PREFIX}.love`;
+const BATCH = `${PREFIX}.scrobbleBatch`;
 const OPEN_GATE = {
   LEXICON_PREFIX: PREFIX,
   NAMESPACE_OWNERSHIP_REF: 'dns:_lexicon.music.example.org TXT',
@@ -170,6 +172,45 @@ function seedForwardLink(db: Db): void {
 afterEach(closeApps);
 
 describe('ListenBrainz feedback (ADR §8.6)', () => {
+  it('recording-feedback resolves an indexed pending batch entry through the real ListenBrainz route', async () => {
+    const rig = await started();
+    const entry = {
+      id: '3lb2batchidab',
+      artist: 'Pending Batch Artist',
+      track: 'Pending Batch Feedback',
+      listenedAt: '2026-01-15T11:30:00Z',
+      createdAt: NOW_ISO,
+      recordingMbid: '8f3f5d5a-4b7a-4f96-a4c2-97f2c32dc9ab',
+    };
+    const prepared = await prepare({ $type: BATCH, createdAt: NOW_ISO, listens: [entry] });
+    rig.app.db.tx(() =>
+      insertOperation(
+        rig.app.db,
+        {
+          id: newOperationId(seededRandom(91)),
+          did: ALICE,
+          kind: 'scrobble.create',
+          origin: 'import',
+          collection: BATCH,
+          rkey: '3lbqbatchfeedback1',
+          prepared,
+          dueAt: Date.parse(NOW_ISO),
+          importJobId: 'pending-batch',
+        },
+        Date.parse(NOW_ISO),
+      ),
+    );
+
+    const response = await rig.post({ recording_msid: await recordingMsid(entry.artist, entry.track), score: 1 });
+    expect(response.status).toBe(200);
+    expect(rig.ops().at(-1)).toMatchObject({ kind: 'love.put', collection: LOVE });
+    expect(JSON.parse(rig.ops().at(-1)!.record_json!)).toMatchObject({
+      artist: entry.artist,
+      track: entry.track,
+      recordingMbid: entry.recordingMbid,
+    });
+  });
+
   it('requires the shared publication gate before reading feedback or queuing love operations', async () => {
     for (const prefix of ['com.example.atmusic', '']) {
       const rig = await started({ ...CLOSED_GATE, LEXICON_PREFIX: prefix });

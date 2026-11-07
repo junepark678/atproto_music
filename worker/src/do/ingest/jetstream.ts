@@ -46,7 +46,7 @@ export type MessageOutcome =
  */
 export function configuredCollections(m: Pick<ModuleDeps, 'config'>): string[] {
   const c = m.config.collections;
-  return c === null ? [] : [c.scrobble, c.follow, c.settings, c.love];
+  return c === null ? [] : [c.scrobble, c.follow, c.settings, c.love, `${m.config.prefix}.scrobbleBatch`];
 }
 
 export function onMessage(m: ModuleDeps, text: string, receiptMs: number): MessageOutcome {

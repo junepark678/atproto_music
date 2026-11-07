@@ -40,6 +40,7 @@ import type {
   RangeStatsCacheRow,
   SchemaCompatRow,
   ScrobbleV2Columns,
+  VerifiedMembershipRow,
   WebSessionRow,
 } from '../../src/app/rows';
 import type { Db, SqlParam } from '../../src/do/db';
@@ -89,6 +90,53 @@ interface ExpectedTable {
 }
 
 const NEW_TABLES: Record<string, ExpectedTable> = {
+  batch_delete_children: {
+    columns: ['parent_operation_id', 'child_operation_id'],
+    pk: ['parent_operation_id', 'child_operation_id'],
+  },
+  batch_delete_listens: {
+    columns: ['operation_id', 'listen_id'],
+    pk: ['operation_id', 'listen_id'],
+  },
+  listen_removal_cids: {
+    columns: ['operation_id', 'cid'],
+    pk: ['operation_id', 'cid'],
+  },
+  verified_membership: {
+    columns: cols<VerifiedMembershipRow>({
+      record_uri: true,
+      listen_id: true,
+      did: true,
+      state: true,
+      revision: true,
+      cid: true,
+      reason: true,
+      last_absent_revision: true,
+    }),
+    pk: ['record_uri', 'listen_id'],
+  },
+  batch_entry_items: {
+    columns: ['operation_id', 'entry_id', 'job_id', 'seq', 'removal_operation_id', 'removed_at_ms'],
+    pk: ['operation_id', 'entry_id', 'job_id', 'seq'],
+  },
+  listen_removals: {
+    columns: cols<{
+      did: true;
+      record_uri: true;
+      listen_id: true;
+      created_at_ms: true;
+      operation_id: true;
+      removed_cid: true;
+    }>({
+      did: true,
+      record_uri: true,
+      listen_id: true,
+      created_at_ms: true,
+      operation_id: true,
+      removed_cid: true,
+    }),
+    pk: ['did', 'record_uri', 'listen_id'],
+  },
   accounts: {
     columns: cols<AccountRow>({
       did: true,
@@ -161,6 +209,20 @@ const NEW_TABLES: Record<string, ExpectedTable> = {
       created_at_ms: true,
       updated_at_ms: true,
       follow_proof_json: true,
+      send_started_at_ms: true,
+      send_state: true,
+      legacy_absent_at_ms: true,
+      removal_fence_rev: true,
+      removal_head_rev: true,
+      removal_commit_rev: true,
+      removal_done_rev: true,
+      removal_done_basis: true,
+      removal_reached: true,
+      removal_reached_at_ms: true,
+      removal_send_state: true,
+      removal_send_json: true,
+      removal_send_at_ms: true,
+      removal_superseded_by: true,
     }),
     pk: ['id'],
     unique: [['did', 'idempotency_key']],
@@ -354,6 +416,8 @@ const NEW_TABLES: Record<string, ExpectedTable> = {
       record_json: true,
       state: true,
       operation_id: true,
+      removal_operation_id: true,
+      removed_at_ms: true,
     }),
     pk: ['job_id', 'seq'],
     unique: [['job_id', 'dedupe_key']],
@@ -416,10 +480,23 @@ const NEW_SCROBBLE_COLUMNS = cols<ScrobbleV2Columns>({
   submission_client: true,
   music_service: true,
   recording_msid: true,
+  record_uri: true,
+  listen_id: true,
 });
 
 /** New named indexes: table, unique, partial, [column, desc] in key order. */
 const NEW_INDEXES: Record<string, [string, number, number, Array<[string, number]>]> = {
+  batch_delete_children_child: ['batch_delete_children', 0, 0, [['child_operation_id', 0]]],
+  batch_delete_listens_operation: ['batch_delete_listens', 0, 0, [['operation_id', 0]]],
+  batch_entry_items_job: [
+    'batch_entry_items',
+    0,
+    0,
+    [
+      ['job_id', 0],
+      ['seq', 0],
+    ],
+  ],
   operations_scrobble_delete_target: [
     'operations',
     0,
@@ -429,6 +506,31 @@ const NEW_INDEXES: Record<string, [string, number, number, Array<[string, number
       ['rkey', 0],
     ],
   ],
+  scrobbles_batch_visibility: [
+    'scrobbles',
+    0,
+    1,
+    [
+      ['did', 0],
+      ['artist_key', 0],
+      ['track_key', 0],
+      ['listened_at', 0],
+    ],
+  ],
+  scrobbles_single_visibility: [
+    'scrobbles',
+    0,
+    1,
+    [
+      ['did', 0],
+      ['artist_key', 0],
+      ['track_key', 0],
+      ['listened_at', 0],
+    ],
+  ],
+  listen_removals_container: ['listen_removals', 0, 0, [['record_uri', 0]]],
+  scrobbles_record_uri: ['scrobbles', 0, 0, [['record_uri', 0]]],
+  verified_membership_did: ['verified_membership', 0, 0, [['did', 0]]],
   // Partial (WHERE recording_msid IS NOT NULL), so it never shadows the
   // per-DID time index while msids are NULL.
   scrobbles_msid: [
@@ -1118,6 +1220,16 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       "2|'node_schema'",
       "3|'follow_proof_baseline'",
       "4|'scrobble_delete_target_index'",
+      "5|'batch_listen_provenance'",
+      "6|'batch_outbox_recovery'",
+      "7|'batch_listen_removal_receipts'",
+      "8|'outbox_send_certainty'",
+      "9|'batch_removal_evidence'",
+      "10|'verified_listen_membership'",
+      "11|'removal_commit_fence'",
+      "12|'removal_completion_boundary'",
+      "13|'removal_reached'",
+      "14|'removal_send_pin'",
     ]);
     // The new scrobble columns exist and are NULL on every migrated row.
     expect(after.newColumns).toHaveLength(expectedScrobbles);
@@ -1129,6 +1241,16 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       { version: 2, name: 'node_schema' },
       { version: 3, name: 'follow_proof_baseline' },
       { version: 4, name: 'scrobble_delete_target_index' },
+      { version: 5, name: 'batch_listen_provenance' },
+      { version: 6, name: 'batch_outbox_recovery' },
+      { version: 7, name: 'batch_listen_removal_receipts' },
+      { version: 8, name: 'outbox_send_certainty' },
+      { version: 9, name: 'batch_removal_evidence' },
+      { version: 10, name: 'verified_listen_membership' },
+      { version: 11, name: 'removal_commit_fence' },
+      { version: 12, name: 'removal_completion_boundary' },
+      { version: 13, name: 'removal_reached' },
+      { version: 14, name: 'removal_send_pin' },
     ]);
     expect(after.compat).toEqual([{ singleton: 1, min_compatible_version: 2 }]);
     expect(after.newTablesEmpty).toEqual([]);
@@ -1360,6 +1482,8 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       'stats_cache',
       'loves',
       'range_stats_cache',
+      // Migration 10: rebuilt from verified proofs and snapshots.
+      'verified_membership',
     ];
     const entries = Object.entries(TABLE_CLASS);
     expect(

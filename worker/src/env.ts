@@ -11,6 +11,8 @@ export interface EnvVars {
   NAMESPACE_OWNERSHIP_REF: string;
   /** SHA-256 reference to the reviewed, publicly retrieved production schema manifest; absent keeps publication disabled. */
   NAMESPACE_PUBLICATION_REF: string;
+  /** Separate owner-reviewed five-schema manifest digest; absent keeps batch writes disabled. */
+  NAMESPACE_BATCH_PUBLICATION_REF?: string;
   /** `socket` | `off`. */
   INGEST_MODE: string;
   /** Comma-separated `wss://` Jetstream hosts, rotated on reconnect. */
@@ -33,6 +35,7 @@ export const ENV_VAR_NAMES: readonly (keyof EnvVars)[] = [
   'LEXICON_PREFIX',
   'NAMESPACE_OWNERSHIP_REF',
   'NAMESPACE_PUBLICATION_REF',
+  'NAMESPACE_BATCH_PUBLICATION_REF',
   'INGEST_MODE',
   'JETSTREAM_URLS',
   'JETSTREAM_LOOKBACK_HOURS',

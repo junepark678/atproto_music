@@ -3,7 +3,8 @@
 
 Contract v1.1 (ADR 0004 §9) is frozen inside v1.2 (ADR 0005 B14, B13): every v1.1 route, status matrix and
 payload shape is unchanged except the additive optional Scrobble fields, the v1.2 cookie routes are additive, and
-the lexicons only gain optional fields and the new love collection.
+the four published lexicons only gain optional fields and the new love collection. ADR 0006's unpublished
+scrobbleBatch candidate and five-schema receipt template are checked separately.
 """
 
 from __future__ import annotations
@@ -93,6 +94,20 @@ def valid_at_uri(value):
             re.fullmatch(r'[A-Za-z0-9._~:-]+', parts[2]) is not None)
 
 
+def valid_listen_uri(value):
+    if not isinstance(value, str):
+        return False
+    if valid_at_uri(value):
+        return True
+    if value.count('#') != 1:
+        return False
+    container, listen_id = value.split('#', 1)
+    if not valid_at_uri(container) or not re.fullmatch(r'[234567abcdefghij][234567abcdefghijklmnopqrstuvwxyz]{12}', listen_id):
+        return False
+    collection = container.removeprefix('at://').split('/')[1]
+    return collection.endswith('.scrobbleBatch')
+
+
 def valid_cid(value):
     if not isinstance(value, str) or not re.fullmatch(r'b[a-z2-7]+', value):
         return False
@@ -133,6 +148,7 @@ def build_validator():
 
     checker.checks('at-did')(lambda value: not isinstance(value, str) or valid_did(value))
     checker.checks('at-record-uri')(lambda value: not isinstance(value, str) or valid_at_uri(value))
+    checker.checks('at-listen-uri')(lambda value: not isinstance(value, str) or valid_listen_uri(value))
     checker.checks('at-record-cid')(lambda value: not isinstance(value, str) or valid_cid(value))
     checker.checks('at-handle')(lambda value: not isinstance(value, str) or valid_handle(value))
 
@@ -819,8 +835,8 @@ def query_bounds(spec, validator_type, checker):
         require(not bool(errors) == valid, f'query_bounds: wrong viewer acceptance {value!r}')
         count += 1
     status = {dereference(spec, p)['name']: dereference(spec, p) for p in found[('GET', '/api/v1/records/status')]['parameters']}
-    require(status['uri'].get('required') is True and status['uri']['schema'] == {'$ref': '#/components/schemas/AtUri'},
-            'query_bounds: records/status requires an AT URI')
+    require(status['uri'].get('required') is True and status['uri']['schema'] == {'$ref': '#/components/schemas/ListenUri'},
+            'query_bounds: records/status requires a ListenUri')
     body = found[('POST', '/api/v1/notify')]['requestBody']
     require(body.get('required') is True and body.get('x-maxBodyBytes') == NOTIFY_MAX_BODY_BYTES, 'query_bounds: notify body must be required and capped at 2 KiB (N1)')
     # v1.2: body caps (ADR 0005 §3.6), the Idempotency-Key syntax and the required query fields.
@@ -1145,7 +1161,8 @@ def additive_lexicon(published, current, label):
 
 def lexicons(override=None, published=None):
     """All lexicons share the fixture prefix: settings (literal:self), love (tid) and an additive-only scrobble."""
-    documents = override or {path.stem: load_json(path) for path in sorted((ROOT / 'lexicons').glob('*.json'))}
+    documents = override or {path.stem: load_json(path) for path in sorted((ROOT / 'lexicons').glob('*.json'))
+                             if path.stem in LEXICON_COLLECTIONS}
     require(set(documents) == LEXICON_COLLECTIONS, f'lexicons: expected {sorted(LEXICON_COLLECTIONS)}, found {sorted(documents)}')
     mains = {}
     for name, document in documents.items():
@@ -1187,6 +1204,43 @@ def lexicons(override=None, published=None):
     for name, document in published.items():
         require(name in documents, f'lexicons: published lexicon {name} was removed')
         additive_lexicon(document, documents[name], f'lexicons/{name}.json')
+    batch_document = load_json(ROOT / 'lexicons/scrobbleBatch.json')
+    require(isinstance(batch_document, dict) and batch_document.get('lexicon') == 1 and
+            batch_document.get('id') == f'{LEXICON_PREFIX}.scrobbleBatch' and
+            set(batch_document) <= {'lexicon', 'id', 'description', 'defs', 'revision'},
+            'lexicons/scrobbleBatch.json: id must be fixture-only and unpublished')
+    batch_main = batch_document.get('defs', {}).get('main', {})
+    require(batch_main.get('type') == 'record' and batch_main.get('key') == 'tid',
+            'lexicons/scrobbleBatch.json: defs.main must be a TID-keyed record')
+    batch_record = batch_main.get('record', {})
+    require(batch_record.get('type') == 'object' and batch_record.get('required') == ['createdAt', 'listens'] and
+            set(batch_record['properties']) == {'createdAt', 'listens'},
+            'lexicons/scrobbleBatch.json: envelope must require only createdAt and listens')
+    require(batch_record['properties']['createdAt'].get('type') == 'string' and
+            batch_record['properties']['createdAt'].get('format') == 'datetime',
+            'lexicons/scrobbleBatch.json: envelope createdAt must be a datetime')
+    envelope_listens = batch_record['properties']['listens']
+    require(envelope_listens.get('type') == 'array' and envelope_listens.get('minLength') == 1 and
+            envelope_listens.get('maxLength') == 10000,
+            'lexicons/scrobbleBatch.json: listens must be bounded to 1–10,000 entries')
+    item = envelope_listens.get('items', {})
+    require(item.get('type') == 'object' and item.get('required') == ['id', 'artist', 'track', 'listenedAt', 'createdAt'] and
+            isinstance(item.get('properties'), dict),
+            'lexicons/scrobbleBatch.json: entries require id and every single-scrobble required field')
+    item_properties = item.get('properties', {})
+    expected_batch_fields = set(SCROBBLE_V1_PROPERTIES) | SCROBBLE_V12_OPTIONAL | {'id'}
+    require(set(item_properties) == expected_batch_fields,
+            'lexicons/scrobbleBatch.json: entries must preserve every single-scrobble field plus id')
+    for name in set(SCROBBLE_V1_PROPERTIES) | SCROBBLE_V12_OPTIONAL:
+        require(item_properties[name] == mains['scrobble']['record']['properties'][name],
+                f'lexicons/scrobbleBatch.json: entry field {name} must match scrobble.json')
+    require(item_properties['id'].get('type') == 'string' and item_properties['id'].get('format') == 'tid',
+            'lexicons/scrobbleBatch.json: id must be a TID')
+    template = load_json(ROOT / 'docs/verification/lexicon-publication/batch-manifest.template.json')
+    expected_receipt_nsids = [f'<prefix>.{name}' for name in ('scrobble', 'follow', 'love', 'settings', 'scrobbleBatch')]
+    require(isinstance(template.get('records'), list) and
+            [row.get('nsid') for row in template['records'] if isinstance(row, dict)] == expected_receipt_nsids,
+            'batch publication receipt template must require all five schemas, including scrobbleBatch')
     count = 0
     t = '2026-01-15T12:00:00Z'
     for main, value, valid in [
@@ -1216,7 +1270,7 @@ def lexicons(override=None, published=None):
 
 
 def _lexicon_documents():
-    return {p.stem: load_json(p) for p in (ROOT / 'lexicons').glob('*.json')}
+    return {p.stem: load_json(p) for p in (ROOT / 'lexicons').glob('*.json') if p.stem in LEXICON_COLLECTIONS}
 
 
 def compatibility_controls(spec):
@@ -1405,7 +1459,7 @@ def main():
     print(f'PASS session_access: {sum(modes.values())} v1.2 routes ({", ".join(f"{n} {m}" for m, n in sorted(modes.items()))}); '
           f'{len(WRITE_ROUTES)} writes answer 202 Accepted and 503 publication_disabled; {len(REQUIRED_ERROR_CODES)} named error responses declared')
     count = query_bounds(spec, validator_type, checker)
-    print(f'PASS query_bounds: {count} limit/viewer/body/Idempotency-Key boundaries; defaults, cursor, window, scope, viewer, record URI, '
+    print(f'PASS query_bounds: {count} limit/viewer/body/Idempotency-Key boundaries; defaults, cursor, window, scope, viewer, ListenUri, '
           '2 KiB notify body, 64 KiB v1.2 bodies and the 64 MiB raw upload')
     validated = set()
     count, negative, requests = response_examples(spec, validator_type, checker, validated)
@@ -1423,7 +1477,8 @@ def main():
           f'vocabulary with the status each is served with ({defined} codes in errors.ts; {len(pending)} v1.2 codes pending there: '
           f'{", ".join(pending) or "none"}; {controls} mutations rejected)')
     documents, records, published = lexicons()
-    print(f'PASS lexicons: {documents} lexicons share {LEXICON_PREFIX}; settings literal:self, love tid with artist, track and createdAt '
+    print(f'PASS lexicons: {documents} published-contract lexicons share {LEXICON_PREFIX}; scrobbleBatch candidate is unpublished, '
+          f'has every scrobble field plus id and requires the five-schema receipt template; settings literal:self, love tid with artist, track and createdAt '
           f'required, scrobble requires exactly the four v1 fields with the §6.2 fields optional; {records} record cases; '
           f'{published or "no"} published copies (freeze point {"reached" if published else "not reached"})')
     shapes, statuses = v11_compatibility(spec)

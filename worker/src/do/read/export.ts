@@ -30,12 +30,13 @@ import type { ModuleDeps, ScrobbleRow } from '../contracts';
 import type { Db } from '../db';
 import { indexing } from '../status';
 import { allFollowing, followToDto } from './follows';
+import { SCROBBLE_PROVENANCE_COLUMNS, scrobbleProvenance } from './scrobble-fields';
 import { activeUser, visibleScrobblesFrom } from './visibility';
 
 export const EXPORT_SCHEMA_VERSION = 1;
 
 const SCROBBLE_COLUMNS =
-  's.uri, s.cid, s.did, s.rkey, s.revision, s.artist, s.track, s.album, s.listened_at, s.created_at, ' +
+  `s.uri, ${SCROBBLE_PROVENANCE_COLUMNS}, s.cid, s.did, s.rkey, s.revision, s.artist, s.track, s.album, s.listened_at, s.created_at, ` +
   's.duration_seconds, s.recording_mbid, s.indexed_at, s.artist_key, s.track_key, s.album_key';
 
 /** The public Scrobble DTO, field for field the Rust `ScrobbleRow` serialisation. */
@@ -43,6 +44,7 @@ export function scrobbleToDto(row: ScrobbleRow): Scrobble {
   // Rust field order; absent optionals are omitted (skip_serializing_if).
   return {
     uri: row.uri,
+    ...scrobbleProvenance(row),
     cid: row.cid,
     did: row.did,
     revision: row.revision,
