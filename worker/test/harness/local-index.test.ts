@@ -265,6 +265,7 @@ const SEED_ROWS: Record<string, Record<string, SqlParam>[]> = {
   ],
   batch_delete_children: [{ parent_operation_id: 'op2', child_operation_id: 'op1' }],
   batch_delete_listens: [{ operation_id: 'op2', listen_id: '*' }],
+  listen_removal_cids: [{ operation_id: 'op2', cid: 'bafyreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy' }],
   batch_entry_items: [{ operation_id: 'op1', entry_id: '3lb2aaaaaaa2a', job_id: 'j1', seq: 0 }],
   listen_removals: [
     {

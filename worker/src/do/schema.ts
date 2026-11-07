@@ -745,6 +745,28 @@ const MIGRATION_8: Migration = {
   ],
 };
 
+// Durable removal evidence and the legacy absence certainty transition.
+// `listen_removal_cids` holds every container CID at which a batch removal's
+// targets were observed present before it settled (admission projection,
+// each pre-CAS read): a settled removal keeps hiding stale projections at any
+// of them, while a verified recreation at a new CID becomes visible. It is
+// local suppression evidence only; record_state stays verified proof.
+// `operations.legacy_absent_at_ms` is the first authoritative absence read of
+// a legacy import single whose send history is unknown (migration 8); a
+// second absence read at least the recheck window later makes it unsent.
+const MIGRATION_9: Migration = {
+  version: 9,
+  name: 'batch_removal_evidence',
+  statements: [
+    `CREATE TABLE listen_removal_cids (
+      operation_id TEXT NOT NULL,
+      cid TEXT NOT NULL,
+      PRIMARY KEY(operation_id,cid)
+    )`,
+    'ALTER TABLE operations ADD COLUMN legacy_absent_at_ms INTEGER',
+  ],
+};
+
 export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_1,
   MIGRATION_2,
@@ -754,6 +776,7 @@ export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_6,
   MIGRATION_7,
   MIGRATION_8,
+  MIGRATION_9,
 ];
 
 /** The schema version this code expects. */
@@ -814,6 +837,7 @@ export const TABLES = [
   'batch_entry_items',
   'batch_delete_listens',
   'batch_delete_children',
+  'listen_removal_cids',
 ] as const;
 
 export type TableName = (typeof TABLES)[number];
@@ -875,4 +899,5 @@ export const TABLE_CLASS: Readonly<Record<TableName, TableClass>> = {
   batch_entry_items: 'non-derived',
   batch_delete_listens: 'non-derived',
   batch_delete_children: 'non-derived',
+  listen_removal_cids: 'non-derived',
 };

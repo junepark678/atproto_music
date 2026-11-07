@@ -97,6 +97,10 @@ const NEW_TABLES: Record<string, ExpectedTable> = {
     columns: ['operation_id', 'listen_id'],
     pk: ['operation_id', 'listen_id'],
   },
+  listen_removal_cids: {
+    columns: ['operation_id', 'cid'],
+    pk: ['operation_id', 'cid'],
+  },
   batch_entry_items: {
     columns: ['operation_id', 'entry_id', 'job_id', 'seq', 'removal_operation_id', 'removed_at_ms'],
     pk: ['operation_id', 'entry_id', 'job_id', 'seq'],
@@ -193,6 +197,7 @@ const NEW_TABLES: Record<string, ExpectedTable> = {
       follow_proof_json: true,
       send_started_at_ms: true,
       send_state: true,
+      legacy_absent_at_ms: true,
     }),
     pk: ['id'],
     unique: [['did', 'idempotency_key']],
@@ -1193,6 +1198,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       "6|'batch_outbox_recovery'",
       "7|'batch_listen_removal_receipts'",
       "8|'outbox_send_certainty'",
+      "9|'batch_removal_evidence'",
     ]);
     // The new scrobble columns exist and are NULL on every migrated row.
     expect(after.newColumns).toHaveLength(expectedScrobbles);
@@ -1208,6 +1214,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       { version: 6, name: 'batch_outbox_recovery' },
       { version: 7, name: 'batch_listen_removal_receipts' },
       { version: 8, name: 'outbox_send_certainty' },
+      { version: 9, name: 'batch_removal_evidence' },
     ]);
     expect(after.compat).toEqual([{ singleton: 1, min_compatible_version: 2 }]);
     expect(after.newTablesEmpty).toEqual([]);

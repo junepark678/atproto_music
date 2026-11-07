@@ -149,6 +149,12 @@ export interface OperationRow {
   send_started_at_ms: number | null;
   /** `unsent` is an explicit insertion receipt; migrated operations remain unknown. */
   send_state: 'unknown' | 'unsent';
+  /**
+   * Migration 9: when an authoritative read first found a legacy unknown-send
+   * import single absent. A second absence read at least the recheck window
+   * later is the explicit certainty transition to `unsent` (outbox/scrobble-ops).
+   */
+  legacy_absent_at_ms: number | null;
   due_at: number;
   last_error: string | null;
   result_uri: string | null;
