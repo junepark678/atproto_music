@@ -36,6 +36,8 @@ export const PDS_WRITER_CAPS = Object.freeze({ maxRequestBytes: 1_000_000, maxRe
 
 export interface PdsWriter {
   readonly did: string;
+  /** Granted OAuth scopes, when the provider exposes the saved token scope. */
+  readonly scope?: string;
   /** `OAuthSession.fetchHandler`: `pathname` is resolved against the session's PDS. */
   fetchHandler(pathname: string, init?: RequestInit): Promise<Response>;
 }
@@ -65,10 +67,12 @@ function isReauthError(error: unknown): boolean {
 /** Adapts an OAuth session (`{did, fetchHandler}`) to PdsWriter. */
 export function sessionWriter(session: {
   readonly did: string;
+  readonly tokenSet?: { readonly scope?: string };
   fetchHandler(pathname: string, init?: RequestInit): Promise<Response>;
 }): PdsWriter {
   return {
     did: session.did,
+    ...(typeof session.tokenSet?.scope === 'string' ? { scope: session.tokenSet.scope } : {}),
     fetchHandler: async (pathname, init) => {
       try {
         return await session.fetchHandler(pathname, init);
@@ -90,6 +94,7 @@ export interface Failure {
   status?: number;
   retryAfterMs?: number;
   error?: string;
+  message?: string;
 }
 
 export type XrpcResult = { ok: true; status: number; body: unknown } | { ok: false; failure: Failure };
@@ -160,6 +165,10 @@ export class PdsXrpc {
 
   get did(): string {
     return this.writer.did;
+  }
+
+  get scope(): string | undefined {
+    return this.writer.scope;
   }
 
   /** POST a procedure. `operation` decides whether "already exists" is ambiguous. */
@@ -326,7 +335,12 @@ export type Outcome =
   /** Done. `note` is kept as the operation's `error` slug (e.g. `record_not_ours`); `hints` are notified. */
   | { kind: 'succeeded'; uri?: string; cid?: string; hints: HintTarget[]; note?: string; swapCid?: string }
   | { kind: 'transient'; code: string; retryAfterMs?: number; swapCid?: string }
-  | { kind: 'permanent'; code: string }
+  | { kind: 'permanent'; code: string; remoteError?: string; remoteMessage?: string; status?: number }
+  /** Definite record rejection: atomically replace this batch with durable children. */
+  | {
+      kind: 'split';
+      children: Array<{ id: string; rkey: string; prepared: { record: object; digest: string }; entryIds: string[] }>;
+    }
   /** The session needs a new sign-in: the operation becomes `blocked` and the attempt is not counted. */
   | { kind: 'reauth'; code?: string }
   /**
@@ -344,7 +358,13 @@ export function failureOutcome(failure: Failure): Outcome {
         ? { kind: 'transient', code: failure.code, retryAfterMs: failure.retryAfterMs }
         : { kind: 'transient', code: failure.code };
     case 'permanent':
-      return { kind: 'permanent', code: failure.code };
+      return {
+        kind: 'permanent',
+        code: failure.code,
+        ...(failure.error === undefined ? {} : { remoteError: failure.error }),
+        ...(failure.message === undefined ? {} : { remoteMessage: failure.message }),
+        ...(failure.status === undefined ? {} : { status: failure.status }),
+      };
     case 'reauth':
       return { kind: 'reauth' };
     default:

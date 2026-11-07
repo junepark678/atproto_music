@@ -328,7 +328,12 @@
     },
     {
       "case": "M2.2.1/scope_inventory",
-      "target": "worker/test/node/bff/client-metadata.test.ts › the metadata for https://music.214510.xyz equals the ADR 0005 §5.3 document with client_name AT Protocol Music and the four repo: scopes, and jwks.json has no private member"
+      "target": "worker/test/node/bff/client-metadata.test.ts › the metadata for https://music.214510.xyz equals the ADR 0005 §5.3 document with client_name AT Protocol Music and the four repo: scopes, and jwks.json has no private member",
+      "also": [
+        "worker/test/node/imports/writer.test.ts › checks the granted token scope before starting a batch write",
+        "worker/test/node/imports/writer.test.ts › holds a batch lane on a missing-scope response without failing its imported listens",
+        "packages/core/test/write-policy.test.ts › classifies ScopeMissing and InsufficientScope as explicit permanent scope errors"
+      ]
     },
     {
       "case": "M2.2.2/par_pkce",
@@ -520,7 +525,9 @@
       "case": "M3.2.1/rkey_persistence",
       "target": "worker/test/node/outbox/recovery.test.ts › crash before send, after PDS commit before local ack, after local commit, and during delete (database reopened) each end with exactly one PDS outcome",
       "also": [
-        "worker/test/node/imports/writer.test.ts › rebatches only queued never-sent import singles after rechecking all item and key links"
+        "worker/test/node/imports/writer.test.ts › rebatches only queued never-sent import singles after rechecking all item and key links",
+        "worker/test/node/imports/writer.test.ts › splits a definitely rejected container into durable children and keeps entry identities and import counters",
+        "worker/test/node/imports/writer.test.ts › rolls back child insertion and item repointing together when the split transaction faults"
       ]
     },
     {
@@ -542,7 +549,8 @@
       "case": "M3.2.3/crash_after_remote",
       "target": "worker/test/node/outbox/recovery.test.ts › crash before send, after PDS commit before local ack, after local commit, and during delete (database reopened) each end with exactly one PDS outcome",
       "also": [
-        "worker/test/node/imports/writer.test.ts › a restart mid-batch reuses the allocated rkeys and the PDS ends with exactly one record per unique listen"
+        "worker/test/node/imports/writer.test.ts › a restart mid-batch reuses the allocated rkeys and the PDS ends with exactly one record per unique listen",
+        "worker/test/node/imports/writer.test.ts › reads an attempted batch after a lost create success and never resends it"
       ]
     },
     {

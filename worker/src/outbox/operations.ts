@@ -268,9 +268,10 @@ export function beginAttempts(db: Db, ids: readonly string[], now: number): Oper
     for (const part of chunks(ids)) {
       const marks = part.map(() => '?').join(',');
       const rows = db.all<OperationRow>(
-        `UPDATE operations SET state = 'running', attempts = attempts + 1, updated_at_ms = ?
+        `UPDATE operations SET state = 'running', attempts = attempts + 1, send_started_at_ms = coalesce(send_started_at_ms, ?), updated_at_ms = ?
          WHERE id IN (${marks}) AND state IN ('queued','running') AND attempts < ${MAX_ATTEMPTS}
          RETURNING *`,
+        now,
         now,
         ...part,
       );

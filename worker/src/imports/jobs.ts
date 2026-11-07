@@ -608,9 +608,9 @@ class ImportRun {
       const resume =
         (job.error === 'low_disk' && !this.rt.diskLow()) ||
         (job.error === 'reauth_required' && !accountNeedsSignIn(db, job.did)) ||
-        (job.error === 'batch_scope_required' &&
+        ((job.error === 'batch_scope_required' || job.error === 'batch_schema_required') &&
           (db.one<{ n: number }>(
-            "SELECT count(*) AS n FROM operations WHERE did = ? AND last_error = 'batch_scope_required' AND state = 'blocked'",
+            "SELECT count(*) AS n FROM operations WHERE did = ? AND last_error IN ('batch_scope_required','batch_schema_required') AND state = 'blocked'",
             job.did,
           )?.n ?? 0) === 0) ||
         (job.error === 'rate_limited' && (cursor.retry?.notBeforeMs ?? 0) <= this.now);
@@ -989,13 +989,19 @@ class ImportRun {
       return;
     }
     const scopeHold = db.one<{ n: number }>(
-      "SELECT count(*) AS n FROM operations WHERE did = ? AND collection = ? AND last_error = 'batch_scope_required' AND state = 'blocked'",
+      "SELECT count(*) AS n FROM operations WHERE did = ? AND collection = ? AND last_error IN ('batch_scope_required','batch_schema_required') AND state = 'blocked'",
       job.did,
       `${rt.m.config.prefix}.scrobbleBatch`,
     );
     if ((scopeHold?.n ?? 0) > 0) {
-      pauseJob(db, job, parseCursor(job), 'batch_scope_required', this.now);
-      this.act(job.id, 'paused', { detail: 'batch_scope_required' });
+      const error =
+        db.one<{ last_error: string }>(
+          "SELECT last_error FROM operations WHERE did = ? AND collection = ? AND state = 'blocked' AND last_error IN ('batch_scope_required','batch_schema_required') ORDER BY CASE last_error WHEN 'batch_scope_required' THEN 0 ELSE 1 END LIMIT 1",
+          job.did,
+          `${rt.m.config.prefix}.scrobbleBatch`,
+        )?.last_error ?? 'batch_scope_required';
+      pauseJob(db, job, parseCursor(job), error, this.now);
+      this.act(job.id, 'paused', { detail: error });
       return;
     }
     if (!rt.m.config.batchPublication) {

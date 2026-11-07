@@ -13,6 +13,7 @@ import type { OperationRow } from '../app/rows';
 import type { ModuleDeps } from '../do/contracts';
 import type { Db } from '../do/db';
 import { IMPORT_PRIORITY, insertOperation, newOperationId, type Prepared, prepare } from '../outbox/operations';
+import { WRITE_SLICE } from './writer';
 
 interface Candidate {
   operation: OperationRow;
@@ -26,11 +27,16 @@ interface PreparedGroup {
   operationId: string;
 }
 
-function safeCandidate(db: Db, op: OperationRow): boolean {
+function safeCandidate(db: Db, op: OperationRow, jobId: string, did: string, collection: string): boolean {
   if (
     op.kind !== 'scrobble.create' ||
     op.origin !== 'import' ||
+    op.did !== did ||
+    op.collection !== collection ||
+    op.import_job_id !== jobId ||
+    op.send_started_at_ms !== null ||
     op.attempts !== 0 ||
+    op.last_error !== null ||
     (op.state !== 'queued' && op.state !== 'blocked') ||
     op.result_uri !== null ||
     op.idempotency_key !== null ||
@@ -55,20 +61,23 @@ export async function rebatchUnsentImports(m: ModuleDeps, jobId: string, did: st
     `SELECT DISTINCT o.id AS op_id, i.job_id, i.seq, i.dedupe_key
      FROM import_items i JOIN operations o ON o.id = i.operation_id
      WHERE i.state = 'queued' AND o.did = ? AND o.origin = 'import' AND o.kind = 'scrobble.create'
-       AND o.collection = ? AND o.state IN ('queued','blocked') AND o.attempts = 0
-       AND o.result_uri IS NULL AND o.idempotency_key IS NULL
+       AND o.collection = ? AND o.import_job_id = ? AND o.state IN ('queued','blocked') AND o.attempts = 0
+       AND o.send_started_at_ms IS NULL
+       AND o.last_error IS NULL AND o.result_uri IS NULL AND o.idempotency_key IS NULL
        AND NOT EXISTS (SELECT 1 FROM operation_deps d WHERE d.op_id=o.id OR d.pred_id=o.id)
        AND i.job_id = ?
        AND NOT EXISTS (SELECT 1 FROM scrobbles s WHERE s.uri = 'at://' || o.did || '/' || o.collection || '/' || o.rkey)
-     ORDER BY o.rowid, i.job_id, i.seq`,
+     ORDER BY o.rowid, i.job_id, i.seq LIMIT ?`,
     did,
     `${prefix}.scrobble`,
     jobId,
+    jobId,
+    WRITE_SLICE,
   );
   const byId = new Map<string, Candidate>();
   for (const row of rows) {
     const op = db.one<OperationRow>('SELECT * FROM operations WHERE id = ?', row.op_id);
-    if (op === null || !safeCandidate(db, op)) continue;
+    if (op === null || !safeCandidate(db, op, jobId, did, `${prefix}.scrobble`)) continue;
     let candidate = byId.get(op.id);
     if (candidate === undefined) {
       let single: Record<string, unknown>;
@@ -85,7 +94,7 @@ export async function rebatchUnsentImports(m: ModuleDeps, jobId: string, did: st
     candidate.jobs.push({ jobId: row.job_id, seq: row.seq, dedupeKey: row.dedupe_key });
   }
   const candidates = [...byId.values()].filter((candidate) => candidate.jobs.length > 0);
-  if (candidates.length < 2) return 0;
+  if (candidates.length === 0) return 0;
   const collection = scrobbleBatchCollection(prefix);
   const packed = packScrobbleBatchEntries(
     candidates.map((candidate) => candidate.entry),
@@ -102,7 +111,6 @@ export async function rebatchUnsentImports(m: ModuleDeps, jobId: string, did: st
   for (const part of packed) {
     const members = candidates.slice(offset, offset + part.entries.length);
     offset += part.entries.length;
-    if (members.length < 2) continue;
     const record: ScrobbleBatchRecord = {
       $type: collection,
       createdAt: new Date(now).toISOString(),
@@ -122,7 +130,7 @@ export async function rebatchUnsentImports(m: ModuleDeps, jobId: string, did: st
           current === null ||
           current.state !== candidate.operation.state ||
           current.attempts !== 0 ||
-          !safeCandidate(db, current)
+          !safeCandidate(db, current, jobId, did, `${prefix}.scrobble`)
         )
           return false;
         if (
@@ -170,13 +178,33 @@ export async function rebatchUnsentImports(m: ModuleDeps, jobId: string, did: st
         now,
       );
       for (const candidate of group.candidates) {
-        db.run(
+        const cancelled = db.run(
           "UPDATE operations SET state = 'cancelled', last_error = 'rebatched', updated_at_ms = ? WHERE id = ? AND state IN ('queued','blocked') AND attempts = 0",
           now,
           candidate.operation.id,
         );
-        db.run('UPDATE import_items SET operation_id = ? WHERE operation_id = ?', batch.id, candidate.operation.id);
-        db.run('UPDATE listen_keys SET operation_id = ? WHERE operation_id = ?', batch.id, candidate.operation.id);
+        if (cancelled.rowsWritten !== 1) throw new Error('rebatch operation changed during transaction');
+        const repointedItems = db.run(
+          'UPDATE import_items SET operation_id = ? WHERE operation_id = ?',
+          batch.id,
+          candidate.operation.id,
+        );
+        const repointedKeys = db.run(
+          'UPDATE listen_keys SET operation_id = ? WHERE operation_id = ?',
+          batch.id,
+          candidate.operation.id,
+        );
+        if (repointedItems.rowsWritten !== candidate.jobs.length || repointedKeys.rowsWritten !== candidate.jobs.length)
+          throw new Error('rebatch membership changed during transaction');
+        for (const item of candidate.jobs) {
+          db.run(
+            'INSERT INTO batch_entry_items(operation_id, entry_id, job_id, seq) VALUES (?, ?, ?, ?)',
+            batch.id,
+            candidate.entry.id,
+            item.jobId,
+            item.seq,
+          );
+        }
         moved += candidate.jobs.length;
       }
     }

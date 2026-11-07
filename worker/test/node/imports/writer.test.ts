@@ -31,7 +31,7 @@ import { WRITE_SLICE, writeSlice } from '../../../src/imports/writer';
 import { bindPolicyFetch, createPolicyFetch } from '../../../src/node/policy-fetch';
 import { newOperationId } from '../../../src/outbox/operations';
 import { insertScrobbleCreate, prepareScrobble } from '../../../src/outbox/scrobble-ops';
-import { APPLY, CREATE, type Harness, remoteRecords, SCROBBLE, T0, withHarness } from '../outbox/support';
+import { APPLY, CREATE, GET, type Harness, remoteRecords, SCROBBLE, T0, withHarness } from '../outbox/support';
 
 const SCROBBLE_BATCH = 'com.example.atmusic.scrobbleBatch';
 
@@ -77,7 +77,7 @@ function lastfmExport(rows: Row[]): string {
   ]);
 }
 
-function uploadJob(h: Harness, id: string, rows: Row[]): void {
+function uploadJob(h: Harness, id: string, rows: Row[], did = h.alice): void {
   const dir = join(h.ctx.dir, 'imports');
   mkdirSync(dir, { recursive: true });
   const path = join(dir, `${id}.upload`);
@@ -85,7 +85,7 @@ function uploadJob(h: Harness, id: string, rows: Row[]): void {
   writeFileSync(path, body, { mode: 0o600 });
   createJob(h.db, {
     id,
-    did: h.alice,
+    did,
     source: 'lastfm_json',
     remoteUser: null,
     uploadPath: path,
@@ -472,6 +472,191 @@ describe('import writer', () => {
       const resumed = await runImports(rt, h.kit.clock.nowMs());
       expect(resumed.actions).toContainEqual({ jobId: 'job-held', action: 'wrote', detail: '2' });
       expect(h.ops()).toHaveLength(1);
+    });
+  });
+
+  it('splits a definitely rejected container into durable children and keeps entry identities and import counters', async () => {
+    await withHarness(async (h) => {
+      h.seedUser(h.alice);
+      const rt = runtime(h);
+      uploadJob(h, 'job-split', [listen(21), listen(22)]);
+      await parse(h, rt, 'job-split');
+      await runImports(rt, h.kit.clock.nowMs());
+      const parent = h.ops()[0]!;
+      const parentRecord = JSON.parse(parent.record_json!) as { listens: Array<{ id: string; artist: string }> };
+      expect(parentRecord.listens).toHaveLength(2);
+
+      h.kit.pds.Alice.serverError(CREATE, 413, 1);
+      await h.runUntilIdle();
+      await runImports(rt, h.kit.clock.nowMs());
+
+      expect(h.op(parent.id)).toMatchObject({ state: 'cancelled', last_error: 'batch_split' });
+      const children = h.ops(`collection = '${SCROBBLE_BATCH}' AND id != '${parent.id}'`);
+      expect(children).toHaveLength(2);
+      const childEntries = children.flatMap(
+        (child) => (JSON.parse(child.record_json!) as { listens: Array<{ id: string; artist: string }> }).listens,
+      );
+      expect(childEntries).toEqual(parentRecord.listens);
+      expect(new Set(children.map((child) => child.rkey)).size).toBe(2);
+      expect(
+        h.db
+          .all<{ state: string; operation_id: string }>(
+            'SELECT state, operation_id FROM import_items WHERE job_id = ? ORDER BY seq',
+            'job-split',
+          )
+          .map((row) => row.state),
+      ).toEqual(['written', 'written']);
+      expect(job(h, 'job-split')).toMatchObject({ written: 2, failed_items: 0 });
+      expect(await remoteRecords(h.kit, 'Alice', SCROBBLE_BATCH)).toHaveLength(2);
+    });
+  });
+
+  it('rolls back child insertion and item repointing together when the split transaction faults', async () => {
+    await withHarness(async (h) => {
+      h.seedUser(h.alice);
+      const rt = runtime(h);
+      uploadJob(h, 'job-split-fault', [listen(61), listen(62)]);
+      await parse(h, rt, 'job-split-fault');
+      await runImports(rt, h.kit.clock.nowMs());
+      const parent = h.ops()[0]!;
+      h.kit.pds.Alice.serverError(CREATE, 413, 2);
+      const paused = h.writers.pauseOn(CREATE);
+      const firstRun = h.run();
+      await paused.reached;
+      const originalTx = h.db.tx.bind(h.db);
+      let fail = true;
+      h.db.tx = (fn) =>
+        originalTx(() => {
+          const result = fn();
+          if (fail) {
+            fail = false;
+            throw new Error('injected split commit failure');
+          }
+          return result;
+        });
+      paused.release();
+      await expect(firstRun).rejects.toThrow('injected split commit failure');
+      h.db.tx = originalTx;
+
+      expect(h.op(parent.id)).toMatchObject({ state: 'running', attempts: 1 });
+      expect(
+        h.db.one(
+          'SELECT count(*) AS n FROM operations WHERE import_job_id = ? AND id != ?',
+          'job-split-fault',
+          parent.id,
+        ),
+      ).toEqual({ n: 0 });
+      expect(itemStates(h, 'job-split-fault')).toEqual({ queued: 2 });
+      await h.runUntilIdle();
+      await runImports(rt, h.kit.clock.nowMs());
+      expect(h.op(parent.id)).toMatchObject({ state: 'cancelled', last_error: 'batch_split' });
+      expect(job(h, 'job-split-fault')).toMatchObject({ written: 2, failed_items: 0 });
+      expect(await remoteRecords(h.kit, 'Alice', SCROBBLE_BATCH)).toHaveLength(2);
+    });
+  });
+
+  it('packs 1,000 listens into five three-point containers and preserves a one-listen remainder container', async () => {
+    await withHarness(async (h) => {
+      h.seedUser(h.alice);
+      h.seedUser(h.bob);
+      const rt = runtime(h);
+      uploadJob(
+        h,
+        'job-thousand',
+        Array.from({ length: 1_000 }, (_, i) => listen(i)),
+      );
+      await parse(h, rt, 'job-thousand');
+      await runImports(rt, h.kit.clock.nowMs());
+      const ops = h.ops("import_job_id = 'job-thousand'");
+      expect(ops).toHaveLength(5);
+      expect(ops.map((op) => (JSON.parse(op.record_json!) as { listens: unknown[] }).listens.length)).toEqual([
+        200, 200, 200, 200, 200,
+      ]);
+      expect(jobDto(h.db, job(h, 'job-thousand'), h.kit.clock.nowMs()).etaSeconds).toBe(75);
+
+      uploadJob(
+        h,
+        'job-remainder',
+        Array.from({ length: 201 }, (_, i) => listen(i + 2_000)),
+        h.bob,
+      );
+      await parse(h, rt, 'job-remainder');
+      await runImports(rt, h.kit.clock.nowMs());
+      const remainder = h.ops("import_job_id = 'job-remainder'");
+      expect(remainder).toHaveLength(2);
+      expect(remainder.map((op) => (JSON.parse(op.record_json!) as { listens: unknown[] }).listens.length)).toEqual([
+        200, 1,
+      ]);
+    });
+  });
+
+  it('holds a batch lane on a missing-scope response without failing its imported listens', async () => {
+    await withHarness(async (h) => {
+      h.seedUser(h.alice);
+      const rt = runtime(h);
+      uploadJob(h, 'job-scope', [listen(31), listen(32)]);
+      await parse(h, rt, 'job-scope');
+      await runImports(rt, h.kit.clock.nowMs());
+      h.kit.pds.Alice.fail(
+        { nsid: CREATE },
+        { kind: 'status', status: 403, error: 'ScopeMissing', message: 'missing scope' },
+      );
+
+      await h.run();
+      await runImports(rt, h.kit.clock.nowMs());
+      expect(job(h, 'job-scope')).toMatchObject({ state: 'paused', error: 'batch_scope_required', failed_items: 0 });
+      expect(itemStates(h, 'job-scope')).toEqual({ queued: 2 });
+      expect(
+        h
+          .ops("import_job_id = 'job-scope'")
+          .every((op) => op.last_error === 'batch_scope_required' && op.state === 'blocked'),
+      ).toBe(true);
+    });
+  });
+
+  it('checks the granted token scope before starting a batch write', async () => {
+    await withHarness(async (h) => {
+      h.seedUser(h.alice);
+      const rt = runtime(h);
+      uploadJob(h, 'job-scope-precheck', [listen(41), listen(42)]);
+      await parse(h, rt, 'job-scope-precheck');
+      await runImports(rt, h.kit.clock.nowMs());
+      h.writers.grantedScope = 'atproto';
+
+      const report = await h.run();
+      await runImports(rt, h.kit.clock.nowMs());
+      expect(report.attempted).toBe(0);
+      expect(h.writers.count(CREATE)).toBe(0);
+      expect(job(h, 'job-scope-precheck')).toMatchObject({
+        state: 'paused',
+        error: 'batch_scope_required',
+        failed_items: 0,
+      });
+      expect(
+        h.ops("import_job_id = 'job-scope-precheck'").every((op) => op.attempts === 0 && op.state === 'blocked'),
+      ).toBe(true);
+    });
+  });
+
+  it('reads an attempted batch after a lost create success and never resends it', async () => {
+    await withHarness(async (h) => {
+      h.seedUser(h.alice);
+      const rt = runtime(h);
+      uploadJob(h, 'job-lost-success', [listen(51), listen(52)]);
+      await parse(h, rt, 'job-lost-success');
+      await runImports(rt, h.kit.clock.nowMs());
+      const parent = h.ops()[0]!;
+      const crashed = h.writers.crashOn(CREATE, 'after_commit');
+      void h.run();
+      await crashed;
+      h.restart();
+
+      const mark = h.writers.sent.length;
+      await h.runUntilIdle();
+      const retried = h.writers.sent.slice(mark);
+      expect(retried.map((request) => request.nsid)).toEqual([GET]);
+      expect(h.op(parent.id)).toMatchObject({ state: 'succeeded', attempts: 2 });
+      expect(await remoteRecords(h.kit, 'Alice', SCROBBLE_BATCH)).toHaveLength(1);
     });
   });
 });

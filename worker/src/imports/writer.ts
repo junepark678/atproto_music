@@ -213,7 +213,6 @@ export async function writeSlice(
     for (const group of packed) {
       const members = candidates.slice(offset, offset + group.entries.length);
       offset += group.entries.length;
-      if (group.entries.length < 2) continue;
       const rkey = newTid(clock, m.random);
       const record: ScrobbleBatchRecord = {
         $type: collection,
@@ -274,7 +273,12 @@ export async function writeSlice(
           !knownListenKey(db, job.did, plan.key) &&
           !indexedAtSecond(db, job.did, plan.seconds, plan.artist, plan.track),
       );
-      if (eligible.length !== members.length) continue;
+      if (eligible.length !== members.length) {
+        // A race invalidated a packed group. Keep every still-eligible listen
+        // staged for the next slice; batch-enabled imports never fall back to
+        // single creates.
+        continue;
+      }
       const op = insertOperation(
         db,
         {
@@ -300,12 +304,31 @@ export async function writeSlice(
           now,
         );
         setState(plan.seq, 'queued', op.id);
+        const entry = batch.entries[members.indexOf(plan)];
+        if (entry !== undefined) {
+          db.run(
+            'INSERT INTO batch_entry_items(operation_id, entry_id, job_id, seq) VALUES (?, ?, ?, ?)',
+            op.id,
+            entry.id,
+            job.id,
+            plan.seq,
+          );
+        }
         handledBatchSeqs.add(plan.seq);
         report.created += 1;
       }
     }
     for (const plan of plans) {
       if (handledBatchSeqs.has(plan.seq)) continue;
+      if (
+        m.config.batchPublication &&
+        plan.kind === 'listen' &&
+        batchPlans.some((batch) => batch.seqs.includes(plan.seq))
+      ) {
+        // Its packed group was invalidated after async preparation. Leave it
+        // staged and retry next slice rather than creating a single record.
+        continue;
+      }
       if (plan.kind === 'invalid') {
         setState(plan.seq, 'invalid', null);
         report.invalid += 1;

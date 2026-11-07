@@ -101,6 +101,7 @@ type CrashPoint = 'before_send' | 'after_commit';
 
 /** The writers: one per fixture account, over policyFetch to the account's fake PDS. */
 export class TestWriters implements PdsWriterSource {
+  grantedScope: string | undefined = 'transition:generic';
   /** DIDs whose session needs a new sign-in (writerFor answers null). */
   readonly signedOut = new Set<string>();
   /** Every request a writer sent, with its parsed JSON body (POST) and the answer's status. */
@@ -149,6 +150,7 @@ export class TestWriters implements PdsWriterSource {
     if (user === undefined) return null;
     return {
       did,
+      ...(this.grantedScope === undefined ? {} : { scope: this.grantedScope }),
       fetchHandler: async (pathname, init) => {
         const nsid = new URL(pathname, user.origin).pathname.replace(/^\/xrpc\//, '');
         const body = typeof init?.body === 'string' ? (JSON.parse(init.body) as Record<string, unknown>) : null;

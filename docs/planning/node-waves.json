@@ -1830,5 +1830,52 @@
     ]
    }
   ]
+ },
+ {
+  "wave": 10,
+  "packages": [
+   {
+    "id": "N10-01",
+    "title": "Batched import writer, safe migration, and durable batch outbox recovery",
+    "files": [
+     "docs/planning/node-waves.json",
+     "docs/verification/batch-import-slice-c.md",
+     "docs/verification/ts-case-map.json",
+     "packages/core/src/write-policy.ts",
+     "packages/core/test/write-policy.test.ts",
+     "worker/src/app/rows.ts",
+     "worker/src/do/schema.ts",
+     "worker/src/imports/jobs.ts",
+     "worker/src/imports/rebatch.ts",
+     "worker/src/imports/writer.ts",
+     "worker/src/outbox/batch-ops.ts",
+     "worker/src/outbox/operations.ts",
+     "worker/src/outbox/pds-writer.ts",
+     "worker/src/outbox/runner.ts",
+     "worker/test/node/imports/writer.test.ts",
+     "worker/test/node/outbox/batch.test.ts",
+     "worker/test/node/outbox/follows.test.ts",
+     "worker/test/node/outbox/support.ts",
+     "worker/test/storage/schema-v2.test.ts"
+    ],
+    "dependsOn": [
+     "N9-01"
+    ],
+    "description": "ADR 0006 slice C. Pack every imported listen, including singleton/remainder groups, into bounded scrobbleBatch containers measured with exact CBOR and UTF-8 body sizes. Migrate at most WRITE_SLICE queued import items per pass after checking exact owner, collection, job, dependencies, result/idempotency state, last error, durable send marker, projections and all item/key memberships; preserve the former rkey and entry fields. Persist deterministic entry-to-item mappings for transactional child splitting after definite record rejection. Read digest before any retried create; never split ambiguous/network outcomes or overwrite a conflicting record. Block only the batch lane for missing scope and schema-level InvalidRequest; split size-related InvalidRequest, InvalidRecord and 413 outcomes. Centralize runner eligibility so gated batch operations and never-sent legacy import singles cannot run or spin alarms. Keep ETA in container write points and leave batch listen deletion to the next slice.",
+    "tests": [
+     "worker/test/node/imports/writer.test.ts › staged items become import-priority operations within the budget; written, duplicates and invalid counts are exact; cancel stops new operations",
+     "worker/test/node/imports/writer.test.ts › rebatches only queued never-sent import singles after rechecking all item and key links",
+     "worker/test/node/imports/writer.test.ts › splits a definitely rejected container into durable children and keeps entry identities and import counters",
+     "worker/test/node/imports/writer.test.ts › rolls back child insertion and item repointing together when the split transaction faults",
+     "worker/test/node/imports/writer.test.ts › packs 1,000 listens into five three-point containers and preserves a one-listen remainder container",
+     "worker/test/node/imports/writer.test.ts › holds a batch lane on a missing-scope response without failing its imported listens",
+     "worker/test/node/imports/writer.test.ts › checks the granted token scope before starting a batch write",
+     "worker/test/node/imports/writer.test.ts › reads an attempted batch after a lost create success and never resends it",
+     "worker/test/node/outbox/batch.test.ts › keeps legacy never-sent import singles dormant even with the batch gate open",
+     "worker/test/node/outbox/batch.test.ts › excludes attempted batch operations while the batch gate is closed without parking their DID"
+     ,"packages/core/test/write-policy.test.ts › classifies ScopeMissing and InsufficientScope as explicit permanent scope errors"
+    ]
+   }
+  ]
  }
 ]

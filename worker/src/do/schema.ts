@@ -691,7 +691,23 @@ const MIGRATION_5: Migration = {
   ],
 };
 
-export const MIGRATIONS: readonly Migration[] = [MIGRATION_1, MIGRATION_2, MIGRATION_3, MIGRATION_4, MIGRATION_5];
+const MIGRATION_6: Migration = {
+  version: 6,
+  name: 'batch_outbox_recovery',
+  statements: [
+    'ALTER TABLE operations ADD COLUMN send_started_at_ms INTEGER',
+    `CREATE TABLE batch_entry_items (
+      operation_id TEXT NOT NULL,
+      entry_id TEXT NOT NULL,
+      job_id TEXT NOT NULL,
+      seq INTEGER NOT NULL,
+      PRIMARY KEY(operation_id,entry_id,job_id,seq)
+    )`,
+    'CREATE INDEX batch_entry_items_job ON batch_entry_items(job_id,seq)',
+  ],
+};
+
+export const MIGRATIONS: readonly Migration[] = [MIGRATION_1, MIGRATION_2, MIGRATION_3, MIGRATION_4, MIGRATION_5, MIGRATION_6];
 
 /** The schema version this code expects. */
 export const SCHEMA_VERSION: number = MIGRATIONS[MIGRATIONS.length - 1]?.version ?? 0;
@@ -748,6 +764,7 @@ export const TABLES = [
   'backup_runs',
   'schema_compat',
   'listen_removals',
+  'batch_entry_items',
 ] as const;
 
 export type TableName = (typeof TABLES)[number];
@@ -806,4 +823,5 @@ export const TABLE_CLASS: Readonly<Record<TableName, TableClass>> = {
   backup_runs: 'non-derived',
   schema_compat: 'non-derived',
   listen_removals: 'non-derived',
+  batch_entry_items: 'non-derived',
 };

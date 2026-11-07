@@ -6,20 +6,21 @@ Base: `a9fcad5` (slice B). The change remains local to the Node outbox and impor
 
 - The Node import writer packs eligible listens in stable order into durable `scrobble.create` operations using the configured `.scrobbleBatch` collection. Each entry keeps the single record's fields and `createdAt`, with its stable TID stored as the entry id. Packing measures DAG-CBOR and exact UTF-8 createRecord bodies before persistence, with the 200-entry, 64,000-byte CBOR and 100,000-byte body limits.
 - Batch operations use `createRecord` and digest reconciliation, and do not enter `applyWrites` grouping. The existing 3-point create accounting therefore applies per container. Import items and listen keys point to their containing operation, so outcome sync counts individual listens.
-- Existing queued import singles can be migrated only when they are queued/blocked, have attempts zero, no result URI or idempotency key, no dependency on either side, and no indexed scrobble or record-state row. Preparation happens before the transaction; the transaction rechecks operation state and exact import-item/listen-key membership before cancelling old operations with `rebatched` and repointing all mappings.
-- With batch publication closed, staged listens and never-sent import singles remain dormant; loves can still be written as single records. The runner omits dormant writes from its due-work/alarm calculation while still reconciling operations that may have been sent. Scope rejection blocks the batch lane with `batch_scope_required` instead of failing import items.
-- Import ETA uses queued operation count and estimates staged listen containers in groups of 200. The Node wave record includes the new writer and migration evidence targets.
+- Existing queued import singles can be migrated only when they are queued/blocked, have attempts zero, no prior error or durable send marker, no result URI or idempotency key, no dependency on either side, and no indexed scrobble or record-state row. Preparation happens before the transaction; the transaction rechecks exact DID, collection, import job, operation state, every import-item/listen-key membership and affected row counts before cancelling old operations with `rebatched` and repointing all mappings. Selection and packing are bounded to `WRITE_SLICE`; a lone remainder is still a batch create.
+- Batch entries have a durable entry-id-to-import-item map. A definite per-record rejection splits into two child containers and transactionally repoints the original items and keys before settling the parent. Schema-level InvalidRequest and recognizable schema/lexicon InvalidRecord messages trip a batch circuit breaker; size-related InvalidRequest, other InvalidRecord, and 413 responses split. Ambiguous and transient responses never split. A retry reads the repository digest first; it resends only after an explicit absence, and a different digest is terminal.
+- With batch publication closed, staged listens, never-sent import singles and all batch operations remain dormant without a polling alarm; loves can still be written as single records, and attempted single operations can finish. The same eligibility predicate gates every runner selection and dispatch path. Batch scope is checked from the token before sending; `ScopeMissing` and `InsufficientScope` pause only the batch lane with `batch_scope_required` instead of failing import items.
+- Import ETA counts queued operation containers at three points each and staged listens in groups of 200. A 1,000-listen queue is five containers / 15 points; the 201-listen writer regression checks the one-listen remainder. Migration 5 adds the durable send marker and entry mapping table; migrations 1–4 remain unchanged.
 
 ## Verification
 
 - `npm run typecheck -- --pretty false` — passed.
-- `npx vitest run --config vitest.node.config.ts test/node/imports test/node/outbox --maxWorkers=1` from `worker/` — 15 files, 68 tests passed.
+- `npx vitest run --config vitest.node.config.ts test/node/imports test/node/outbox --maxWorkers=1` from `worker/` — 15 files, 76 tests passed.
+- `npx vitest run --config vitest.config.ts test/write-policy.test.ts` from `packages/core/` — 1 file, 5 tests passed.
 - Biome formatting/check on owned TypeScript and Node test files — passed.
-- `docs/planning/node-waves.json` parses as JSON. The Python case-map validator could not run in this environment because no Python interpreter is installed.
+- `python3.14 scripts/validate_case_map.py --check-tests --node-wave 10` (or `.venv/bin/python`) — passed with all 258 mapped cases and the new N10-01 targets.
+- `docs/planning/node-waves.json` and `docs/verification/ts-case-map.json` parse as JSON.
 
 ## Remaining work / limits
 
-- Definite batch-record rejection does not yet bisect into durable child operations; a rejected batch currently settles as a failed operation for its mapped listens. The schema-level circuit breaker is therefore not implemented.
-- Scope is handled reactively from the batch write response; the session token scope is not proactively inspected. `InsufficientScope` is covered by the existing classifier; distinct `ScopeMissing` naming needs an additional classification path.
-- Dedicated regression coverage for concurrent runner-versus-rebatch races, transactional fault injection, multibyte-heavy exact body-cap boundaries, and the requested 15-point / 1,000-listen fake-PDS scenario remains to be added.
+- Dedicated fault-injection coverage for the runner-versus-rebatch race remains open. The split transaction rollback is fault-injected; shared size tests cover exact UTF-8 sizing including non-ASCII values.
 - Individual batch-listen deletion remains owned by the next slice and was not changed here.

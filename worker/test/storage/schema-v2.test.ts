@@ -160,6 +160,7 @@ const NEW_TABLES: Record<string, ExpectedTable> = {
       swap_cid: true,
       state: true,
       attempts: true,
+      send_started_at_ms: true,
       due_at: true,
       last_error: true,
       result_uri: true,

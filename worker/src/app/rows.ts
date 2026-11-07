@@ -145,6 +145,8 @@ export interface OperationRow {
   state: OperationState;
   /** 0–10. */
   attempts: number;
+  /** Set conservatively before a send attempt; never cleared when attempt accounting is rolled back. */
+  send_started_at_ms: number | null;
   due_at: number;
   last_error: string | null;
   result_uri: string | null;

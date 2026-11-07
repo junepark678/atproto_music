@@ -3,9 +3,10 @@
 
 import { expect, it } from 'vitest';
 import type { OperationRow } from '../../../src/app/rows';
+import { createJob } from '../../../src/imports/jobs';
 import { encodeBatch, MAX_BATCH_BYTES } from '../../../src/outbox/apply-writes';
 import { acceptListens } from '../../../src/outbox/ingress';
-import { prepare } from '../../../src/outbox/operations';
+import { insertOperation, newOperationId, prepare } from '../../../src/outbox/operations';
 import { enqueueScrobbleCreates, insertScrobbleCreate } from '../../../src/outbox/scrobble-ops';
 import {
   APPLY,
@@ -19,6 +20,8 @@ import {
   withHarness,
   zeroJitter,
 } from './support';
+
+const BATCH = 'com.example.atmusic.scrobbleBatch';
 
 async function importCreates(h: Harness, n: number, did = h.alice): Promise<OperationRow[]> {
   const r = await enqueueScrobbleCreates(h.m, {
@@ -92,6 +95,69 @@ it('437 import creates go as applyWrites batches of 200, 200 and 37; a 250 KB-re
     expect(h.kit.pds.Bob.calls.filter({ nsid: APPLY }).map((c) => c.status)).toEqual([200, 200]);
     expect(bigOps.every((o) => h.op(o.id).state === 'succeeded')).toBe(true);
     expect(await remoteRecords(h.kit, 'Bob', SCROBBLE)).toHaveLength(6);
+  });
+});
+
+it('keeps legacy never-sent import singles dormant even with the batch gate open', async () => {
+  await withHarness(async (h) => {
+    const [op] = await importCreates(h, 1);
+    createJob(h.db, { id: 'job-1', did: h.alice, source: 'lastfm_json', remoteUser: null, now: T0 });
+    const record = JSON.parse(op!.record_json!) as { listenedAt: string };
+    h.db.run(
+      "INSERT INTO import_items(job_id, seq, dedupe_key, listened_at, record_json, state, operation_id) VALUES ('job-1', 0, 'legacy-key', ?, ?, 'queued', ?)",
+      record.listenedAt,
+      JSON.stringify({ kind: 'listen', input: listenInput(0) }),
+      op!.id,
+    );
+    h.m.config = { ...h.m.config, batchPublication: true };
+    const report = await h.run();
+    expect(report).toMatchObject({ attempted: 0, nextDueMs: null });
+    expect(h.writers.sent).toEqual([]);
+    expect(h.op(op!.id)).toMatchObject({ state: 'queued', attempts: 0, send_started_at_ms: null });
+  });
+});
+
+it('excludes attempted batch operations while the batch gate is closed without parking their DID', async () => {
+  await withHarness(async (h) => {
+    const record = {
+      $type: BATCH,
+      createdAt: '2026-01-15T12:00:00Z',
+      listens: [
+        {
+          id: '3lb2batchentry1',
+          artist: 'Artist',
+          track: 'Track',
+          listenedAt: '2026-01-14T12:00:00Z',
+          createdAt: '2026-01-15T12:00:00Z',
+        },
+      ],
+    };
+    const batch = h.db.tx(() =>
+      insertOperation(
+        h.db,
+        {
+          id: newOperationId(h.m.random),
+          did: h.alice,
+          kind: 'scrobble.create',
+          origin: 'import',
+          collection: BATCH,
+          rkey: '3lb2batchcontainer1',
+          prepared: { record, digest: 'digest' },
+          dueAt: T0,
+          importJobId: 'job-gated',
+        },
+        T0,
+      ),
+    );
+    h.db.run('UPDATE operations SET attempts = 1, send_started_at_ms = ? WHERE id = ?', T0, batch.id);
+    const live = await enqueueScrobbleCreates(h.m, { did: h.bob, origin: 'web', inputs: [listenInput(999)] });
+    expect(live.ok).toBe(true);
+    h.m.config = { ...h.m.config, batchPublication: false };
+
+    const report = await h.run();
+    expect(report.attempted).toBe(1);
+    expect(h.writers.sent.every((request) => request.did !== h.alice)).toBe(true);
+    expect(h.op(batch.id)).toMatchObject({ state: 'queued', attempts: 1 });
   });
 });
 
