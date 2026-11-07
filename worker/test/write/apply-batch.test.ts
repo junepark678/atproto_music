@@ -9,7 +9,7 @@ import { feed } from '../../src/do/read/feed';
 import { history } from '../../src/do/read/history';
 import { lookup } from '../../src/do/read/lookup';
 import { readProfileCore } from '../../src/do/read/profile';
-import { globalTrackCounts } from '../../src/do/read/range-stats';
+import { globalTrackCounts, rangeStatsWithCache } from '../../src/do/read/range-stats';
 import { listensByTimestamp, recentPage } from '../../src/do/read/recent';
 import { computeStatistics } from '../../src/do/read/stats';
 import { visibleScrobblesFrom } from '../../src/do/read/visibility';
@@ -51,6 +51,75 @@ const batchRecord = (...listens: Record<string, unknown>[]) => ({
 const apply = (db: Db, p: RecordProof) => db.tx(() => applyRecordProof(db, p, OPTS));
 
 describe('batch projection and visibility', () => {
+  it('projects a verified external batch through snapshot, update, delete, and recreation proofs', async () => {
+    const repo = await repoFor('alice');
+    const rkey = '3lbqbatch01ab';
+    const created = await putProof(repo, BATCH, rkey, batchRecord(listen(ID_A)));
+    if (created.state !== 'present') throw new Error('expected a present batch proof');
+    const snapshotRecord = await repo.getRecord(BATCH, rkey, { at: created.commit.cid });
+    expect(snapshotRecord).not.toBeNull();
+    const updated = await putProof(repo, BATCH, rkey, batchRecord(listen(ID_A), listen(ID_B, { track: 'Second' })));
+    const deleted = await deleteProof(repo, BATCH, rkey);
+    const recreated = await putProof(repo, BATCH, rkey, batchRecord(listen(ID_C, { track: 'Again' })));
+
+    await withMigratedDb((db) => {
+      const generation = seedUser(db, ALICE);
+      seedSnapshotJob(db, ALICE, generation);
+      const container = uriOf(ALICE, BATCH, rkey);
+      const byUri = () =>
+        db.all<{ uri: string }>('SELECT uri FROM scrobbles WHERE record_uri = ? ORDER BY uri', container);
+      const statsQuery = {
+        did: ALICE,
+        entity: 'tracks' as const,
+        lower: Date.parse('2026-01-14T00:00:00Z'),
+        upper: Date.parse('2026-01-16T00:00:00Z'),
+        limit: null,
+        offset: 0,
+        rangeKey: 'batch-lifecycle',
+      };
+      const stats = () => rangeStatsWithCache({ db, clock: { nowMs: () => 1768478400000 } }, statsQuery);
+      expect(
+        db.tx(() =>
+          applySnapshotChunk(db, {
+            did: ALICE,
+            generation,
+            headRev: created.commit.rev,
+            intervalLo: `${PREFIX}.`,
+            intervalHi: `${BATCH}/${rkey}`,
+            entries: [{ key: `${BATCH}/${rkey}`, cid: created.cid, record: snapshotRecord!.value }],
+            receiptNs: NOW_NS,
+            prefix: PREFIX,
+            nowNs: NOW_NS,
+          }),
+        ).outcome,
+      ).toBe('applied');
+      expect(byUri()).toEqual([{ uri: `${container}#${ID_A}` }]);
+      const afterCreate = stats();
+      expect([afterCreate.cache, afterCreate.stats?.totals.listens]).toEqual(['miss', 1]);
+      expect(apply(db, updated).outcome).toBe('applied');
+      expect(byUri()).toEqual([{ uri: `${container}#${ID_A}` }, { uri: `${container}#${ID_B}` }]);
+      const afterUpdate = stats();
+      expect([afterUpdate.cache, afterUpdate.stats?.totals.listens]).toEqual(['miss', 2]);
+      expect(apply(db, deleted).outcome).toBe('absent');
+      expect(byUri()).toEqual([]);
+      const afterDelete = stats();
+      expect([afterDelete.cache, afterDelete.stats?.totals.listens]).toEqual(['miss', 0]);
+      expect(apply(db, recreated).outcome).toBe('applied');
+      expect(byUri()).toEqual([{ uri: `${container}#${ID_C}` }]);
+      expect([stats().cache, stats().stats?.totals.listens]).toEqual(['miss', 1]);
+      expect(
+        exportUser(
+          {
+            db,
+            clock: { nowMs: () => 1768478400000 },
+            config: { ingestMode: 'off' },
+          } as unknown as ModuleDeps,
+          ALICE,
+        )?.scrobbles.map((row) => row.listenId),
+      ).toEqual([ID_C]);
+    });
+  });
+
   it('isolates invalid items, prefers visible singles, restores batches after single delete, and reaffirms exact snapshot keys', async () => {
     const repo = await repoFor('alice');
     const batch = await putProof(

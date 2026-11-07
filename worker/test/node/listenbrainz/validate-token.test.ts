@@ -14,6 +14,7 @@ import { MemoryRevocations } from '../../../src/app/revocations';
 import type { NowPlayingRow, OperationRow } from '../../../src/app/rows';
 import { ensureAccount } from '../../../src/credentials/accounts';
 import { createLbToken, revokeLbToken } from '../../../src/credentials/lb-tokens';
+import { readRoutes } from '../../../src/listenbrainz/read';
 import { createSubmitRoutes } from '../../../src/listenbrainz/submit';
 import { createTokenRoutes } from '../../../src/listenbrainz/token-routes';
 import { insertOperation, newOperationId, prepare } from '../../../src/outbox/operations';
@@ -53,7 +54,11 @@ interface Rig {
 
 async function rig(env: Record<string, string> = OPEN_GATE): Promise<Rig> {
   const clock = fixedClock();
-  const app = await startApp({ routes: [...createSubmitRoutes(), ...createTokenRoutes()], clock, env });
+  const app = await startApp({
+    routes: [...createSubmitRoutes(), ...createTokenRoutes(), ...readRoutes()],
+    clock,
+    env,
+  });
   const random = seededRandom(0x70c);
   const revocations = new MemoryRevocations(clock);
   return {
@@ -147,6 +152,23 @@ function seedBatchListen(
 }
 
 describe('ListenBrainz token routes (ADR §8.2, §8.6)', () => {
+  it('serves verified batch projection rows through the real ListenBrainz listens read route', async () => {
+    const r = await rig();
+    r.user(ALICE, 'alice.example.com');
+    const listenedAt = `${new Date((NOW_S - 900) * 1000).toISOString().slice(0, 19)}.000000000Z`;
+    seedBatchListen(r.app, ALICE, '3lbqbatchread01', '3lb2entryread1', listenedAt, 'Mount Eerie', 'Real Death');
+    const response = await r.app.fetch('/1/user/alice.example.com/listens');
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      payload: { count: number; listens: Array<{ track_metadata: { artist_name: string; track_name: string } }> };
+    };
+    expect(body.payload.count).toBe(1);
+    expect(body.payload.listens[0]?.track_metadata).toMatchObject({
+      artist_name: 'Mount Eerie',
+      track_name: 'Real Death',
+    });
+  });
+
   it('delete-listen uses the single-over-batch visible winner in either indexed arrival order', async () => {
     const r = await rig();
     const alice = r.user(ALICE, 'alice.example.com');
