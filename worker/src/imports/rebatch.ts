@@ -35,6 +35,7 @@ function safeCandidate(db: Db, op: OperationRow, jobId: string, did: string, col
     op.collection !== collection ||
     op.import_job_id !== jobId ||
     op.send_started_at_ms !== null ||
+    op.send_state !== 'unsent' ||
     op.attempts !== 0 ||
     op.last_error !== null ||
     (op.state !== 'queued' && op.state !== 'blocked') ||
@@ -63,6 +64,7 @@ export async function rebatchUnsentImports(m: ModuleDeps, jobId: string, did: st
      WHERE i.state = 'queued' AND i.removed_at_ms IS NULL AND o.did = ? AND o.origin = 'import' AND o.kind = 'scrobble.create'
        AND o.collection = ? AND o.import_job_id = ? AND o.state IN ('queued','blocked') AND o.attempts = 0
        AND o.send_started_at_ms IS NULL
+       AND o.send_state = 'unsent'
        AND o.last_error IS NULL AND o.result_uri IS NULL AND o.idempotency_key IS NULL
        AND NOT EXISTS (SELECT 1 FROM operation_deps d WHERE d.op_id=o.id OR d.pred_id=o.id)
        AND i.job_id = ?

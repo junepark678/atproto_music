@@ -727,6 +727,18 @@ const MIGRATION_7: Migration = {
   ],
 };
 
+// A NULL send timestamp from migration 6 cannot prove that a legacy create
+// was never sent: attempt accounting may have been refunded after reauth.
+// Existing operations therefore start unknown; new import singles explicitly
+// record their pre-send state at insertion.
+const MIGRATION_8: Migration = {
+  version: 8,
+  name: 'outbox_send_certainty',
+  statements: [
+    "ALTER TABLE operations ADD COLUMN send_state TEXT NOT NULL DEFAULT 'unknown' CHECK(send_state IN ('unknown','unsent'))",
+  ],
+};
+
 export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_1,
   MIGRATION_2,
@@ -735,6 +747,7 @@ export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_5,
   MIGRATION_6,
   MIGRATION_7,
+  MIGRATION_8,
 ];
 
 /** The schema version this code expects. */

@@ -171,8 +171,8 @@ export function insertOperation(db: Db, op: NewOperation, now: number): Operatio
     const prepared = op.prepared ?? null;
     db.run(
       `INSERT INTO operations(id, did, kind, origin, priority, collection, rkey, record_json, digest, swap_cid,
-         state, attempts, due_at, idempotency_key, request_hash, import_job_id, created_at_ms, updated_at_ms, follow_proof_json)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)`,
+         state, attempts, due_at, idempotency_key, request_hash, import_job_id, created_at_ms, updated_at_ms, follow_proof_json, send_state)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)`,
       op.id,
       op.did,
       op.kind,
@@ -191,6 +191,7 @@ export function insertOperation(db: Db, op: NewOperation, now: number): Operatio
       now,
       now,
       op.followProofJson ?? null,
+      op.origin === 'import' && op.kind === 'scrobble.create' ? 'unsent' : 'unknown',
     );
     for (const pred of new Set(op.predecessors ?? [])) {
       if (pred === op.id) continue;
@@ -268,7 +269,7 @@ export function beginAttempts(db: Db, ids: readonly string[], now: number): Oper
     for (const part of chunks(ids)) {
       const marks = part.map(() => '?').join(',');
       const rows = db.all<OperationRow>(
-        `UPDATE operations SET state = 'running', attempts = attempts + 1, send_started_at_ms = coalesce(send_started_at_ms, ?), updated_at_ms = ?
+        `UPDATE operations SET state = 'running', attempts = attempts + 1, send_started_at_ms = coalesce(send_started_at_ms, ?), send_state = 'unknown', updated_at_ms = ?
          WHERE id IN (${marks}) AND state IN ('queued','running') AND attempts < ${MAX_ATTEMPTS}
          RETURNING *`,
         now,

@@ -116,6 +116,7 @@ describe('migrate over node:sqlite', () => {
           { version: 5, name: 'batch_listen_provenance' },
           { version: 6, name: 'batch_outbox_recovery' },
           { version: 7, name: 'batch_listen_removal_receipts' },
+          { version: 8, name: 'outbox_send_certainty' },
         ]);
         const after = dumpDb(db);
         const comparable: Record<string, unknown> = {
@@ -128,6 +129,7 @@ describe('migrate over node:sqlite', () => {
         comparable.operations = (comparable.operations as string[]).map((row) => {
           const value = JSON.parse(row) as Record<string, unknown>;
           delete value.send_started_at_ms;
+          delete value.send_state;
           return JSON.stringify(value);
         });
         expect(comparable).toEqual(before.tables);
@@ -135,6 +137,7 @@ describe('migrate over node:sqlite', () => {
           sql: "CREATE INDEX operations_scrobble_delete_target ON operations(did,rkey) WHERE kind = 'scrobble.delete'",
         });
         expect(db.all('SELECT min_compatible_version FROM schema_compat')).toEqual([{ min_compatible_version: 2 }]);
+        expect(db.one("SELECT send_state FROM operations WHERE id='kept'")).toEqual({ send_state: 'unknown' });
         for (const oldVersion of [2, 3]) {
           expect(migrate(db, MIGRATIONS.slice(0, oldVersion))).toEqual({ status: 'ready', version: SCHEMA_VERSION });
           expect(dumpDb(db)).toEqual(after);

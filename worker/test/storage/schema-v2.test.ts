@@ -1186,6 +1186,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       "5|'batch_listen_provenance'",
       "6|'batch_outbox_recovery'",
       "7|'batch_listen_removal_receipts'",
+      "8|'outbox_send_certainty'",
     ]);
     // The new scrobble columns exist and are NULL on every migrated row.
     expect(after.newColumns).toHaveLength(expectedScrobbles);
@@ -1200,6 +1201,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       { version: 5, name: 'batch_listen_provenance' },
       { version: 6, name: 'batch_outbox_recovery' },
       { version: 7, name: 'batch_listen_removal_receipts' },
+      { version: 8, name: 'outbox_send_certainty' },
     ]);
     expect(after.compat).toEqual([{ singleton: 1, min_compatible_version: 2 }]);
     expect(after.newTablesEmpty).toEqual([]);

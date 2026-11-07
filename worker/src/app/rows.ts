@@ -147,6 +147,8 @@ export interface OperationRow {
   attempts: number;
   /** Set conservatively before a send attempt; never cleared when attempt accounting is rolled back. */
   send_started_at_ms: number | null;
+  /** `unsent` is an explicit insertion receipt; migrated operations remain unknown. */
+  send_state: 'unknown' | 'unsent';
   due_at: number;
   last_error: string | null;
   result_uri: string | null;
