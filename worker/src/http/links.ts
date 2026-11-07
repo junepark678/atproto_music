@@ -221,7 +221,17 @@ const lastfmCallback: Handler = async (req, ctx, service, session) => {
     return errorResponse('bad_request', 400, ctx.requestId);
   }
   const out = await service.lastfm.getSession(tokens[0] as string);
-  if (!out.ok) return errorResponse('upstream_error', 502, ctx.requestId);
+  if (!out.ok) {
+    // The outcome's kind and Last.fm error code only; never the token or a credential.
+    service.forwarding.log.log('warn', 'lastfm_link.get_session_failed', {
+      requestId: ctx.requestId,
+      kind: out.kind,
+      code: 'code' in out ? out.code : null,
+      httpStatus: 'httpStatus' in out ? out.httpStatus : null,
+      error: 'error' in out ? out.error : null,
+    });
+    return errorResponse('upstream_error', 502, ctx.requestId);
+  }
   writeInLiveSession(service.db, service.sessions, req, session, () =>
     saveLink(
       { db: service.db, clock: ctx.clock, random: service.forwarding.random, box: service.box },
