@@ -65,7 +65,11 @@ import { verifySessionKey } from '../credentials/lastfm-auth';
 import type { ModuleDeps } from '../do/contracts';
 import { upsertNowPlaying } from '../do/read/now-playing';
 import { musicKeyColumns } from '../do/write/keys';
-import { enqueueBatchListenDelete } from '../outbox/batch-delete-ops';
+import {
+  commitUnsentBatchListenRemoval,
+  enqueueBatchListenDelete,
+  prepareUnsentBatchListenRemoval,
+} from '../outbox/batch-delete-ops';
 import { enqueueScrobbleDelete, removeScrobbleCreate } from '../outbox/delete-ops';
 import { enqueueForwards } from '../outbox/forward-enqueue';
 import { acceptListens, type ListenResult } from '../outbox/ingress';
@@ -368,6 +372,7 @@ const unloveMethod: LastfmMethodDef = {
 
 export type RemoveMatch =
   | { kind: 'cancelled'; operationId: string }
+  | { kind: 'rewritten'; operationId: string }
   | { kind: 'delete_chained'; operationId: string; deleteId: string }
   | { kind: 'delete_indexed'; uri: string; deleteId: string }
   | { kind: 'delete_pending'; uri: string; deleteId: string };
@@ -463,6 +468,21 @@ export async function removeScrobble(m: ModuleDeps, args: RemoveScrobbleArgs): P
   }
   const lower = toStorage(BigInt(args.timestamp) * NS_PER_SECOND);
   const upper = toStorage(BigInt(args.timestamp + 1) * NS_PER_SECOND);
+  const unsentBatchPlans = new Map<string, NonNullable<Awaited<ReturnType<typeof prepareUnsentBatchListenRemoval>>>>();
+  for (const operationId of createsWithKey(m, args.did, key)) {
+    const candidate = loadOperation(m.db, operationId);
+    if (candidate?.collection !== collections.scrobbleBatch) continue;
+    const entryId = m.db.one<{ entry_id: string }>(
+      `SELECT b.entry_id FROM batch_entry_items b JOIN import_items i
+         ON i.job_id=b.job_id AND i.seq=b.seq
+       WHERE b.operation_id=? AND i.dedupe_key=? LIMIT 1`,
+      candidate.id,
+      key,
+    )?.entry_id;
+    if (entryId === undefined) continue;
+    const plan = await prepareUnsentBatchListenRemoval(m, { did: args.did, operationId, listenId: entryId });
+    if (plan !== null) unsentBatchPlans.set(operationId, plan);
+  }
   const matches = m.db.tx((): RemoveMatch[] => {
     const out: RemoveMatch[] = [];
     const handled = new Set<string>();
@@ -501,6 +521,11 @@ export async function removeScrobble(m: ModuleDeps, args: RemoveScrobbleArgs): P
             )?.entry_id
           : undefined;
       if (op.collection === collections.scrobbleBatch && batchEntry === undefined) continue;
+      const plan = unsentBatchPlans.get(op.id);
+      if (plan !== undefined && commitUnsentBatchListenRemoval(m, plan) !== null) {
+        out.push({ kind: 'rewritten', operationId: op.id });
+        continue;
+      }
       const removed = removeScrobbleCreate(m, {
         did: args.did,
         operationId: op.id,

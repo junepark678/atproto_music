@@ -78,7 +78,10 @@ export interface WriteSliceReport {
 /** Queued items of the job (operations created and not yet settled). */
 export function outstanding(db: Db, jobId: string): number {
   return (
-    db.one<{ n: number }>("SELECT count(*) AS n FROM import_items WHERE job_id = ? AND state = 'queued'", jobId)?.n ?? 0
+    db.one<{ n: number }>(
+      "SELECT count(*) AS n FROM import_items WHERE job_id = ? AND state = 'queued' AND removed_at_ms IS NULL",
+      jobId,
+    )?.n ?? 0
   );
 }
 
@@ -406,7 +409,7 @@ export function syncOutcomes(db: Db, jobId: string, now: number): SyncReport {
     const rows = db.all<{ state: string }>(
       `UPDATE import_items SET state = CASE o.state WHEN 'succeeded' THEN 'written' ELSE 'failed' END
        FROM operations AS o
-       WHERE import_items.job_id = ? AND import_items.state = 'queued' AND o.id = import_items.operation_id
+       WHERE import_items.job_id = ? AND import_items.state = 'queued' AND import_items.removed_at_ms IS NULL AND o.id = import_items.operation_id
          AND o.state IN ('succeeded', 'failed', 'cancelled')
        RETURNING import_items.state AS state`,
       jobId,

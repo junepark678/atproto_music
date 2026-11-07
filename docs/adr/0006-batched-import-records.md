@@ -82,12 +82,25 @@ entry uses `deleteRecord` with the same compare-and-swap CID. On
 after an uncertain response it reads back before retrying. A different writer's
 record at a colliding rkey is never overwritten by a failed create path.
 
+For a queued import batch that has never started sending, removal prepares a
+replacement record and digest asynchronously, then rechecks the exact operation
+snapshot and item/key memberships in one transaction before rewriting it. It
+keeps sibling entry IDs stable and cancels only when the batch becomes empty.
+If sending started, removal stays chained to the create and follows the item to
+a child container if a definite rejection splits the batch. A failed create
+with `remote_record_conflict` makes its dependent removal complete as
+`record_not_ours`; it never mutates the colliding record.
+
 Migration 7 is additive. It adds `listen_removals.operation_id` and
 `removed_cid`, a container lookup index, and the durable `batch_delete_listens`
 intent table. It also records `removal_operation_id`/`removed_at_ms` on the
-batch-entry and import-item mappings. Only a confirmed removal sets
-`removed_at_ms` and releases that item's `listen_keys` row; sibling mappings,
-keys and import outcome counters remain intact. A queued/running/blocked/failed intent remains suppressed. A
+batch-entry and import-item mappings. A never-sent rewrite records the removed
+item timestamp, clears its stored record payload, and releases its `listen_keys`
+row in the same transaction. A confirmed chained removal does the same after
+PDS success. Sibling mappings, keys, payloads and import outcome counters
+remain intact; removed items are excluded from queued-work counts and tracked
+by their removal timestamp. A queued/running/blocked/failed intent remains
+suppressed. A
 succeeded intent suppresses only the previously verified CID until a newer
 proof replaces the projection; if the owner deliberately restores the entry,
 the new CID makes it visible. Legacy removal rows without an operation remain

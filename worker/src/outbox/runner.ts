@@ -759,7 +759,11 @@ function finish(m: ModuleDeps, op: OperationRow, outcome: Outcome, now: number, 
             op.id,
           );
           db.run('UPDATE batch_entry_items SET removed_at_ms = ? WHERE removal_operation_id = ?', now, op.id);
-          db.run('UPDATE import_items SET removed_at_ms = ? WHERE removal_operation_id = ?', now, op.id);
+          db.run(
+            "UPDATE import_items SET removed_at_ms = ?, record_json = '{}' WHERE removal_operation_id = ?",
+            now,
+            op.id,
+          );
           db.run(
             `DELETE FROM listen_keys WHERE did = ?
                AND operation_id IN (SELECT operation_id FROM batch_entry_items WHERE removal_operation_id = ?)

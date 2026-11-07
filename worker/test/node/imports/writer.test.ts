@@ -29,7 +29,11 @@ import { rebatchUnsentImports } from '../../../src/imports/rebatch';
 import { fsUploadStore } from '../../../src/imports/uploads';
 import { WRITE_SLICE, writeSlice } from '../../../src/imports/writer';
 import { bindPolicyFetch, createPolicyFetch } from '../../../src/node/policy-fetch';
-import { enqueueBatchListenDelete } from '../../../src/outbox/batch-delete-ops';
+import {
+  commitUnsentBatchListenRemoval,
+  enqueueBatchListenDelete,
+  prepareUnsentBatchListenRemoval,
+} from '../../../src/outbox/batch-delete-ops';
 import { newOperationId } from '../../../src/outbox/operations';
 import { insertScrobbleCreate, prepareScrobble } from '../../../src/outbox/scrobble-ops';
 import { APPLY, CREATE, GET, type Harness, remoteRecords, SCROBBLE, T0, withHarness } from '../outbox/support';
@@ -189,6 +193,42 @@ async function otherAppLikes(h: Harness, n: number): Promise<void> {
 const listen = (i: number): Row => ({ artist: `Artist ${i}`, track: `Track ${i}`, uts: T0S - 86_400 - i * 60 });
 
 describe('import writer', () => {
+  it('rewrites a never-sent batch after async preparation, keeping siblings and releasing only the removed listen key', async () => {
+    await withHarness(async (h) => {
+      h.seedUser(h.alice);
+      const rt = runtime(h);
+      uploadJob(h, 'job-unsent-remove', [listen(31), listen(32)]);
+      await parse(h, rt, 'job-unsent-remove');
+      await runImports(rt, h.kit.clock.nowMs());
+      const parent = h.ops()[0]!;
+      const original = JSON.parse(parent.record_json!) as { listens: Array<{ id: string }> };
+      const removedId = original.listens[0]!.id;
+      const plan = await prepareUnsentBatchListenRemoval(h.m, {
+        did: h.alice,
+        operationId: parent.id,
+        listenId: removedId,
+      });
+      expect(plan).not.toBeNull();
+      const rewritten = commitUnsentBatchListenRemoval(h.m, plan!);
+      expect(rewritten).toMatchObject({ state: 'queued', attempts: 0, send_started_at_ms: null });
+      expect(JSON.parse(rewritten!.record_json!).listens).toHaveLength(1);
+      expect(
+        h.db.one<{ removed_at_ms: number | null }>(
+          'SELECT removed_at_ms FROM import_items WHERE job_id = ? AND seq = 0',
+          'job-unsent-remove',
+        )?.removed_at_ms,
+      ).toBe(T0);
+      expect(h.db.all('SELECT entry_id FROM batch_entry_items WHERE operation_id = ?', parent.id)).toHaveLength(1);
+      expect(h.db.all('SELECT operation_id FROM listen_keys WHERE operation_id = ?', parent.id)).toHaveLength(1);
+
+      await h.runUntilIdle();
+      await runImports(rt, h.kit.clock.nowMs());
+      expect(h.op(parent.id)).toMatchObject({ state: 'succeeded', attempts: 1 });
+      expect(await remoteRecords(h.kit, 'Alice', SCROBBLE_BATCH)).toHaveLength(1);
+      expect(job(h, 'job-unsent-remove')).toMatchObject({ written: 1, failed_items: 0 });
+    });
+  });
+
   it('staged items become import-priority operations within the budget; written, duplicates and invalid counts are exact; cancel stops new operations', async () => {
     await withHarness(async (h) => {
       h.seedUser(h.alice);
@@ -511,7 +551,7 @@ describe('import writer', () => {
     });
   });
 
-  it('splits a definitely rejected container into durable children and keeps entry identities and import counters', async () => {
+  it('splits a definitely rejected container into durable children and keeps entry identities and per-item removal outcomes', async () => {
     await withHarness(async (h) => {
       h.seedUser(h.alice);
       const rt = runtime(h);
@@ -547,14 +587,15 @@ describe('import writer', () => {
         record_uri: `at://${h.alice}/${SCROBBLE_BATCH}/${removedChild!.rkey}`,
       });
       expect(
-        h.db
-          .all<{ state: string; operation_id: string }>(
-            'SELECT state, operation_id FROM import_items WHERE job_id = ? ORDER BY seq',
-            'job-split',
-          )
-          .map((row) => row.state),
-      ).toEqual(['written', 'written']);
-      expect(job(h, 'job-split')).toMatchObject({ written: 2, failed_items: 0 });
+        h.db.all<{ state: string; removed_at_ms: number | null; record_json: string }>(
+          'SELECT state, removed_at_ms, record_json FROM import_items WHERE job_id = ? ORDER BY seq',
+          'job-split',
+        ),
+      ).toEqual([
+        { state: 'queued', removed_at_ms: T0, record_json: '{}' },
+        { state: 'written', removed_at_ms: null, record_json: expect.any(String) },
+      ]);
+      expect(job(h, 'job-split')).toMatchObject({ written: 1, failed_items: 0 });
       expect(await remoteRecords(h.kit, 'Alice', SCROBBLE_BATCH)).toHaveLength(1);
     });
   });

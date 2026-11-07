@@ -219,6 +219,195 @@ it('removes one indexed batch listen with CAS and preserves sibling and unknown 
   });
 });
 
+it('re-reads after InvalidSwap and preserves a concurrent remote edit while removing only its target', async () => {
+  await withHarness(async (h) => {
+    const rkey = '3lb2batchcontainer1';
+    const record = {
+      $type: BATCH,
+      createdAt: '2026-01-15T12:00:00Z',
+      listens: [
+        {
+          id: '3lb2batchidab',
+          artist: 'Artist',
+          track: 'Removed',
+          listenedAt: '2026-01-14T12:00:00Z',
+          createdAt: '2026-01-15T12:00:00Z',
+        },
+        {
+          id: '3lb2batchidac',
+          artist: 'Artist',
+          track: 'Sibling',
+          listenedAt: '2026-01-14T13:00:00Z',
+          createdAt: '2026-01-15T12:00:00Z',
+          siblingRemoteField: 'keep',
+        },
+      ],
+    };
+    await h.kit.externalPut('Alice', BATCH, rkey, record);
+    enqueueBatchListenDelete(h.m, {
+      did: h.alice,
+      uri: `at://${h.alice}/${BATCH}/${rkey}`,
+      listenIds: ['3lb2batchidab'],
+      origin: 'web',
+    });
+    h.kit.pds.Alice.fail(
+      { nsid: PUT },
+      {
+        kind: 'respond',
+        respond: async () => {
+          await h.kit.externalPut('Alice', BATCH, rkey, { ...record, concurrentRemoteField: { retained: true } });
+          return Response.json({ error: 'InvalidSwap', message: 'record revision changed' }, { status: 400 });
+        },
+      },
+    );
+
+    await h.runUntilIdle();
+
+    expect(h.writers.count(PUT)).toBe(2);
+    const current = (await remoteRecords(h.kit, 'Alice', BATCH)).find((item) => item.rkey === rkey);
+    expect(current!.value).toMatchObject({
+      concurrentRemoteField: { retained: true },
+      listens: [{ id: '3lb2batchidac', siblingRemoteField: 'keep' }],
+    });
+  });
+});
+
+it('serializes two independent listen removals for one container and keeps the third entry', async () => {
+  await withHarness(async (h) => {
+    const rkey = '3lb2batchcontainer1';
+    await h.kit.externalPut('Alice', BATCH, rkey, {
+      $type: BATCH,
+      createdAt: '2026-01-15T12:00:00Z',
+      listens: ['ab', 'ac', 'ad'].map((suffix, index) => ({
+        id: `3lb2batchid${suffix}`,
+        artist: 'Artist',
+        track: `Track ${index}`,
+        listenedAt: `2026-01-14T1${index}:00:00Z`,
+        createdAt: '2026-01-15T12:00:00Z',
+      })),
+    });
+    const first = enqueueBatchListenDelete(h.m, {
+      did: h.alice,
+      uri: `at://${h.alice}/${BATCH}/${rkey}`,
+      listenIds: ['3lb2batchidab'],
+      origin: 'web',
+    });
+    const second = enqueueBatchListenDelete(h.m, {
+      did: h.alice,
+      uri: `at://${h.alice}/${BATCH}/${rkey}`,
+      listenIds: ['3lb2batchidac'],
+      origin: 'web',
+    });
+
+    expect(h.db.one('SELECT pred_id FROM operation_deps WHERE op_id = ?', second.id)).toEqual({ pred_id: first.id });
+    await h.runUntilIdle();
+
+    expect(h.op(first.id)).toMatchObject({ state: 'succeeded' });
+    expect(h.op(second.id)).toMatchObject({ state: 'succeeded' });
+    expect(h.writers.count(PUT)).toBe(2);
+    expect((await remoteRecords(h.kit, 'Alice', BATCH)).find((item) => item.rkey === rkey)?.value).toMatchObject({
+      listens: [{ id: '3lb2batchidad' }],
+    });
+  });
+});
+
+it('recovers an ambiguous partial delete by reading the container before sending again', async () => {
+  await withHarness(async (h) => {
+    const rkey = '3lb2batchcontainer1';
+    await h.kit.externalPut('Alice', BATCH, rkey, {
+      $type: BATCH,
+      createdAt: '2026-01-15T12:00:00Z',
+      listens: [
+        {
+          id: '3lb2batchidab',
+          artist: 'Artist',
+          track: 'Removed',
+          listenedAt: '2026-01-14T12:00:00Z',
+          createdAt: '2026-01-15T12:00:00Z',
+        },
+        {
+          id: '3lb2batchidac',
+          artist: 'Artist',
+          track: 'Sibling',
+          listenedAt: '2026-01-14T13:00:00Z',
+          createdAt: '2026-01-15T12:00:00Z',
+        },
+      ],
+    });
+    const del = enqueueBatchListenDelete(h.m, {
+      did: h.alice,
+      uri: `at://${h.alice}/${BATCH}/${rkey}`,
+      listenIds: ['3lb2batchidab'],
+      origin: 'web',
+    });
+    const crashed = h.writers.crashOn(PUT, 'after_commit');
+    void h.run();
+    await crashed;
+    h.restart();
+
+    await h.runUntilIdle();
+
+    expect(h.op(del.id)).toMatchObject({ state: 'succeeded' });
+    expect(h.writers.count(PUT)).toBe(1);
+    const current = (await remoteRecords(h.kit, 'Alice', BATCH)).find((item) => item.rkey === rkey);
+    expect(current!.value).toMatchObject({ listens: [{ id: '3lb2batchidac' }] });
+  });
+});
+
+it('does not delete a colliding record after this batch create is rejected as remote_record_conflict', async () => {
+  await withHarness(async (h) => {
+    const entryId = '3lb2batchidab';
+    const rkey = '3lb2batchcontainer1';
+    const record = {
+      $type: BATCH,
+      createdAt: '2026-01-15T12:00:00Z',
+      listens: [
+        {
+          id: entryId,
+          artist: 'Artist',
+          track: 'Track',
+          listenedAt: '2026-01-14T12:00:00Z',
+          createdAt: '2026-01-15T12:00:00Z',
+        },
+      ],
+    };
+    const create = h.db.tx(() =>
+      insertOperation(
+        h.db,
+        {
+          id: newOperationId(h.m.random),
+          did: h.alice,
+          kind: 'scrobble.create',
+          origin: 'import',
+          collection: BATCH,
+          rkey,
+          prepared: { record, digest: 'different-digest' },
+          dueAt: T0,
+        },
+        T0,
+      ),
+    );
+    const other = { ...record, createdAt: '2020-01-01T00:00:00Z' };
+    const prior = await h.kit.externalPut('Alice', BATCH, rkey, other);
+    const del = enqueueBatchListenDelete(h.m, {
+      did: h.alice,
+      uri: `at://${h.alice}/${BATCH}/${rkey}`,
+      listenIds: [entryId],
+      origin: 'web',
+    });
+
+    await h.runUntilIdle();
+
+    expect(h.op(create.id)).toMatchObject({ state: 'failed', last_error: 'remote_record_conflict' });
+    expect(h.op(del.id)).toMatchObject({ state: 'succeeded', last_error: 'record_not_ours' });
+    expect(await remoteRecords(h.kit, 'Alice', BATCH)).toMatchObject([{ rkey, cid: prior.ops[0]!.cid, value: other }]);
+    expect(
+      h.writers.sent.filter((request) => request.nsid === PUT || request.nsid === 'com.atproto.repo.deleteRecord'),
+    ).toEqual([]);
+    expect(h.db.one('SELECT operation_id FROM listen_removals WHERE operation_id = ?', del.id)).toBeNull();
+  });
+});
+
 it('a batch failing because one rkey exists is bisected; the other 199 are written once and the existing one is reconciled by digest', async () => {
   await withHarness(async (h) => {
     const ops = await importCreates(h, 200);

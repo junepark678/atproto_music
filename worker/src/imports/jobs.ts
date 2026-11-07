@@ -276,7 +276,7 @@ export function createJob(db: Db, job: NewJob): ImportJobRow {
 export function remainingItems(db: Db, jobId: string): number {
   return (
     db.one<{ n: number }>(
-      "SELECT count(*) AS n FROM import_items WHERE job_id = ? AND state IN ('staged','queued')",
+      "SELECT count(*) AS n FROM import_items WHERE job_id = ? AND state IN ('staged','queued') AND removed_at_ms IS NULL",
       jobId,
     )?.n ?? 0
   );
@@ -297,7 +297,7 @@ export function etaSeconds(db: Db, job: ImportJobRow, now: number): number | nul
   const day = windows.find((w) => w.window === 'day')?.limit ?? 35_000;
   const queuedOperations =
     db.one<{ n: number }>(
-      "SELECT count(DISTINCT operation_id) AS n FROM import_items WHERE job_id = ? AND state = 'queued' AND operation_id IS NOT NULL",
+      "SELECT count(DISTINCT operation_id) AS n FROM import_items WHERE job_id = ? AND state = 'queued' AND removed_at_ms IS NULL AND operation_id IS NOT NULL",
       job.id,
     )?.n ?? 0;
   const staged = db.all<{ record_json: string }>(
@@ -546,7 +546,7 @@ class ImportRun {
   private jobs(): ImportJobRow[] {
     return this.db.all<ImportJobRow>(
       `SELECT * FROM import_jobs j WHERE state IN ${ACTIVE_SQL}
-         OR (state = 'cancelled' AND EXISTS (SELECT 1 FROM import_items i WHERE i.job_id = j.id AND i.state = 'queued'))
+         OR (state = 'cancelled' AND EXISTS (SELECT 1 FROM import_items i WHERE i.job_id = j.id AND i.state = 'queued' AND i.removed_at_ms IS NULL))
        ORDER BY updated_at_ms, created_at_ms, id`,
     );
   }
@@ -717,7 +717,7 @@ class ImportRun {
     const possiblySent =
       this.db.one<{ n: number }>(
         `SELECT count(*) AS n FROM import_items i JOIN operations o ON o.id = i.operation_id
-       WHERE i.job_id = ? AND i.state = 'queued' AND o.attempts > 0`,
+       WHERE i.job_id = ? AND i.state = 'queued' AND i.removed_at_ms IS NULL AND o.attempts > 0`,
         job.id,
       )?.n ?? 0;
     return loves > 0 || possiblySent > 0;

@@ -79,7 +79,11 @@ import { type VerifiedLbToken, verifyLbToken } from '../credentials/lb-tokens';
 import type { ModuleDeps } from '../do/contracts';
 import { clearNowPlaying } from '../do/read/now-playing';
 import { need, type RequestCtx, type RouteDef } from '../http/types';
-import { enqueueBatchListenDelete } from '../outbox/batch-delete-ops';
+import {
+  commitUnsentBatchListenRemoval,
+  enqueueBatchListenDelete,
+  prepareUnsentBatchListenRemoval,
+} from '../outbox/batch-delete-ops';
 import { enqueueScrobbleDelete, removeScrobbleCreate } from '../outbox/delete-ops';
 import { outboxCollections } from '../outbox/operations';
 import {
@@ -433,13 +437,20 @@ async function deleteListen(
       });
     else enqueueScrobbleDelete(m, { did, uri: target.uri, origin: 'listenbrainz', kick });
   } else if (target.kind === 'pending') {
-    removeScrobbleCreate(m, {
-      did,
-      operationId: target.operationId,
-      origin: 'listenbrainz',
-      ...(target.listenId ? { listenId: target.listenId } : {}),
-      kick,
-    });
+    const plan = target.listenId
+      ? await prepareUnsentBatchListenRemoval(m, { did, operationId: target.operationId, listenId: target.listenId })
+      : null;
+    const rewritten = plan === null ? null : commitUnsentBatchListenRemoval(m, plan);
+    if (rewritten !== null) kick();
+    else {
+      removeScrobbleCreate(m, {
+        did,
+        operationId: target.operationId,
+        origin: 'listenbrainz',
+        ...(target.listenId ? { listenId: target.listenId } : {}),
+        kick,
+      });
+    }
   }
   return lbJson({ status: 'ok' }, 200, headers);
 }

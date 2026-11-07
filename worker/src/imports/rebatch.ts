@@ -60,7 +60,7 @@ export async function rebatchUnsentImports(m: ModuleDeps, jobId: string, did: st
   const rows = db.all<{ op_id: string; job_id: string; seq: number; dedupe_key: string }>(
     `SELECT DISTINCT o.id AS op_id, i.job_id, i.seq, i.dedupe_key
      FROM import_items i JOIN operations o ON o.id = i.operation_id
-     WHERE i.state = 'queued' AND o.did = ? AND o.origin = 'import' AND o.kind = 'scrobble.create'
+     WHERE i.state = 'queued' AND i.removed_at_ms IS NULL AND o.did = ? AND o.origin = 'import' AND o.kind = 'scrobble.create'
        AND o.collection = ? AND o.import_job_id = ? AND o.state IN ('queued','blocked') AND o.attempts = 0
        AND o.send_started_at_ms IS NULL
        AND o.last_error IS NULL AND o.result_uri IS NULL AND o.idempotency_key IS NULL

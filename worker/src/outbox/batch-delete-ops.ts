@@ -2,10 +2,208 @@ import { isTid } from '@atmusic/core/syntax';
 import type { OperationRow, Origin } from '../app/rows';
 import type { ModuleDeps } from '../do/contracts';
 import { bumpStatsVersion } from '../do/write/account-state';
-import { insertOperation, newOperationId, outboxCollections, unsettledAt } from './operations';
+import {
+  insertOperation,
+  newOperationId,
+  outboxCollections,
+  prepare as prepareBatchRecord,
+  unsettledAt,
+} from './operations';
 import { failureOutcome, type Outcome } from './pds-writer';
 import type { ExecContext, Executor } from './runner';
 import { validRkey } from './scrobble-ops';
+
+export interface BatchListenRemovalPlan {
+  operationId: string;
+  listenId: string;
+  snapshot: Pick<
+    OperationRow,
+    | 'did'
+    | 'kind'
+    | 'origin'
+    | 'collection'
+    | 'rkey'
+    | 'state'
+    | 'attempts'
+    | 'send_started_at_ms'
+    | 'record_json'
+    | 'digest'
+    | 'updated_at_ms'
+  >;
+  replacement: { record: object; digest: string } | null;
+  members: Array<{ job_id: string; seq: number; dedupe_key: string }>;
+}
+
+/** Prepare a never-sent import batch edit outside a transaction. */
+export async function prepareUnsentBatchListenRemoval(
+  m: ModuleDeps,
+  args: { did: string; operationId: string; listenId: string },
+): Promise<BatchListenRemovalPlan | null> {
+  const op = m.db.one<OperationRow>('SELECT * FROM operations WHERE id = ?', args.operationId);
+  if (
+    op === null ||
+    op.did !== args.did ||
+    op.kind !== 'scrobble.create' ||
+    op.origin !== 'import' ||
+    op.collection !== (m.config.prefix === null ? null : outboxCollections(m.config.prefix).scrobbleBatch) ||
+    op.rkey === null ||
+    op.state !== 'queued' ||
+    op.attempts !== 0 ||
+    op.send_started_at_ms !== null ||
+    op.result_uri !== null ||
+    op.idempotency_key !== null ||
+    op.last_error !== null ||
+    op.record_json === null
+  )
+    return null;
+  const uri = `at://${op.did}/${op.collection}/${op.rkey}`;
+  if (
+    m.db.one('SELECT 1 AS x FROM operation_deps WHERE op_id = ? OR pred_id = ?', op.id, op.id) !== null ||
+    m.db.one('SELECT 1 AS x FROM record_state WHERE uri = ?', uri) !== null ||
+    m.db.one('SELECT 1 AS x FROM scrobbles WHERE record_uri = ?', uri) !== null
+  )
+    return null;
+  let record: { listens?: unknown[]; [key: string]: unknown };
+  try {
+    record = JSON.parse(op.record_json) as typeof record;
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(record.listens)) return null;
+  const matches = record.listens.filter(
+    (entry) => entry !== null && typeof entry === 'object' && (entry as { id?: unknown }).id === args.listenId,
+  );
+  if (matches.length !== 1) return null;
+  const mapped = m.db.all<{ job_id: string; seq: number; dedupe_key: string }>(
+    `SELECT i.job_id,i.seq,i.dedupe_key FROM batch_entry_items b JOIN import_items i
+       ON i.job_id=b.job_id AND i.seq=b.seq
+     WHERE b.operation_id=? AND b.entry_id=? AND i.operation_id=? AND i.state='queued' AND i.removed_at_ms IS NULL`,
+    op.id,
+    args.listenId,
+    op.id,
+  );
+  if (mapped.length === 0) return null;
+  const listens = record.listens.filter(
+    (entry) => !(entry !== null && typeof entry === 'object' && (entry as { id?: unknown }).id === args.listenId),
+  );
+  const replacement = listens.length === 0 ? null : await prepareBatchRecord({ ...record, listens });
+  return {
+    operationId: op.id,
+    listenId: args.listenId,
+    snapshot: {
+      did: op.did,
+      kind: op.kind,
+      origin: op.origin,
+      collection: op.collection,
+      rkey: op.rkey,
+      state: op.state,
+      attempts: op.attempts,
+      send_started_at_ms: op.send_started_at_ms,
+      record_json: op.record_json,
+      digest: op.digest,
+      updated_at_ms: op.updated_at_ms,
+    },
+    replacement,
+    members: mapped,
+  };
+}
+
+export function commitUnsentBatchListenRemoval(m: ModuleDeps, plan: BatchListenRemovalPlan): OperationRow | null {
+  const now = m.clock.nowMs();
+  return m.db.tx(() => {
+    const op = m.db.one<OperationRow>('SELECT * FROM operations WHERE id = ?', plan.operationId);
+    if (
+      op === null ||
+      op.did !== plan.snapshot.did ||
+      op.kind !== plan.snapshot.kind ||
+      op.origin !== plan.snapshot.origin ||
+      op.collection !== plan.snapshot.collection ||
+      op.rkey !== plan.snapshot.rkey ||
+      op.state !== plan.snapshot.state ||
+      op.attempts !== plan.snapshot.attempts ||
+      op.send_started_at_ms !== plan.snapshot.send_started_at_ms ||
+      op.record_json !== plan.snapshot.record_json ||
+      op.digest !== plan.snapshot.digest ||
+      op.updated_at_ms !== plan.snapshot.updated_at_ms ||
+      op.state !== 'queued' ||
+      op.attempts !== 0 ||
+      op.send_started_at_ms !== null ||
+      op.rkey === null ||
+      op.record_json === null ||
+      op.result_uri !== null ||
+      op.idempotency_key !== null ||
+      op.last_error !== null
+    )
+      return null;
+    const uri = `at://${op.did}/${op.collection}/${op.rkey}`;
+    if (
+      m.db.one('SELECT 1 AS x FROM operation_deps WHERE op_id = ? OR pred_id = ?', op.id, op.id) !== null ||
+      m.db.one('SELECT 1 AS x FROM record_state WHERE uri = ?', uri) !== null ||
+      m.db.one('SELECT 1 AS x FROM scrobbles WHERE record_uri = ?', uri) !== null
+    )
+      return null;
+    const actual = m.db.all<{ job_id: string; seq: number; dedupe_key: string }>(
+      `SELECT i.job_id,i.seq,i.dedupe_key FROM batch_entry_items b JOIN import_items i
+         ON i.job_id=b.job_id AND i.seq=b.seq
+       WHERE b.operation_id=? AND b.entry_id=? AND i.operation_id=? AND i.state='queued' AND i.removed_at_ms IS NULL`,
+      op.id,
+      plan.listenId,
+      op.id,
+    );
+    if (
+      actual.length !== plan.members.length ||
+      actual.some(
+        (member) =>
+          !plan.members.some(
+            (saved) =>
+              saved.job_id === member.job_id && saved.seq === member.seq && saved.dedupe_key === member.dedupe_key,
+          ),
+      )
+    )
+      return null;
+    m.db.run('DELETE FROM batch_entry_items WHERE operation_id = ? AND entry_id = ?', op.id, plan.listenId);
+    for (const member of plan.members) {
+      m.db.run(
+        `UPDATE import_items SET removal_operation_id = NULL, removed_at_ms = ?, record_json = '{}'
+         WHERE job_id = ? AND seq = ? AND operation_id = ? AND removed_at_ms IS NULL`,
+        now,
+        member.job_id,
+        member.seq,
+        op.id,
+      );
+      m.db.run(
+        'DELETE FROM listen_keys WHERE did = ? AND operation_id = ? AND dedupe_key = ?',
+        op.did,
+        op.id,
+        member.dedupe_key,
+      );
+    }
+    if (plan.replacement === null) {
+      if (
+        (m.db.one<{ n: number }>('SELECT count(*) AS n FROM batch_entry_items WHERE operation_id = ?', op.id)?.n ??
+          0) !== 0
+      ) {
+        throw new Error('empty batch removal left sibling mappings');
+      }
+      m.db.run(
+        `UPDATE operations SET state='cancelled',last_error='batch_item_removed_before_send',record_json=NULL,digest=NULL,updated_at_ms=?
+         WHERE id=? AND state='queued' AND attempts=0 AND send_started_at_ms IS NULL`,
+        now,
+        op.id,
+      );
+    } else {
+      m.db.run(
+        `UPDATE operations SET record_json=?,digest=?,updated_at_ms=?
+         WHERE id=? AND state='queued' AND attempts=0 AND send_started_at_ms IS NULL`,
+        JSON.stringify(plan.replacement.record),
+        plan.replacement.digest,
+        now,
+        op.id,
+      );
+    }
+    return m.db.one<OperationRow>('SELECT * FROM operations WHERE id = ?', op.id);
+  });
+}
 
 function batchUri(did: string, uri: string, collection: string): string | null {
   const prefix = `at://${did}/${collection}/`;
@@ -130,6 +328,19 @@ export function enqueueBatchListenDelete(
 
 async function removeIds(op: OperationRow, ctx: ExecContext): Promise<Outcome> {
   const uri = `at://${op.did}/${op.collection}/${op.rkey}`;
+  const collidedCreate = ctx.m.db.one<{ id: string }>(
+    `SELECT p.id FROM operation_deps d JOIN operations p ON p.id = d.pred_id
+     WHERE d.op_id = ? AND p.did = ? AND p.collection = ? AND p.rkey = ?
+       AND p.kind = 'scrobble.create' AND p.state = 'failed' AND p.last_error = 'remote_record_conflict'
+     LIMIT 1`,
+    op.id,
+    op.did,
+    op.collection,
+    op.rkey,
+  );
+  if (collidedCreate !== null) {
+    return { kind: 'succeeded', uri, note: 'record_not_ours', hints: [{ collection: op.collection!, rkey: op.rkey! }] };
+  }
   const ids = ctx.m.db
     .all<{ listen_id: string }>(
       'SELECT listen_id FROM batch_delete_listens WHERE operation_id=? ORDER BY listen_id',
