@@ -259,7 +259,8 @@ export async function discover(m: ModuleDeps, now: number, o: DiscoveryOptions =
     report.nextDueAt = db.tx(() => schedule(db, 'discovery', now + DISCOVERY_INTERVAL_MS, { force: true }));
     return report;
   }
-  const names = [collections.scrobble, collections.follow] as const;
+  // Keep existing numeric collection cursors stable: batch is appended last.
+  const names = [collections.scrobble, collections.follow, `${m.config.prefix}.scrobbleBatch`] as const;
   // The due time this run may replace: the claimed row is renamed by runDue, so
   // inside an alarm this is null unless someone scheduled during the run.
   const dueAtStart = dueAt(db, 'discovery');

@@ -298,6 +298,7 @@ describe('ingest de-shim', () => {
     expect(files.map((f) => relative(INGEST_DIR, f))).toEqual([
       'accounts.test.ts',
       'admission.test.ts',
+      'batch-wire.test.ts',
       'discovery.test.ts',
       'drain-support.ts',
       'gap-recovery.test.ts',
@@ -319,7 +320,7 @@ describe('ingest de-shim', () => {
     // The suites run over the Node harness instead: every DB-backed suite opens node-index.ts.
     const suites = files.filter((f) => f.endsWith('.test.ts'));
     const harnessed = suites.filter((f) => /from '\.\/node-index'/.test(read(f)));
-    expect(harnessed.length).toBe(15);
+    expect(harnessed.length).toBe(16);
     expect(read(`${INGEST_DIR}/node-index.ts`)).toMatch(
       /import \{ reopen, withMigratedDb \} from '\.\.\/node\/support\/node-db';/,
     );
@@ -380,7 +381,7 @@ describe('ingest de-shim', () => {
       ],
       [
         'worker/test/ingest/jetstream-socket.test.ts › jetstream socket › subscribe URL has kinds=commit and the three collections only',
-        'worker/test/ingest/jetstream-socket.test.ts › jetstream socket › subscribe URL has kinds=commit and the four collections only',
+        'worker/test/ingest/jetstream-socket.test.ts › jetstream socket › subscribe URL has kinds=commit and the five collections only',
       ],
       [
         'worker/test/ingest/verify-drain.test.ts › verify drain › Paid drain works 200 cached-identity hints in one slice: 200 getRecord calls',
@@ -395,7 +396,7 @@ describe('ingest de-shim', () => {
     expect(
       undeclared(socket, {
         ancestors: ['jetstream socket'],
-        title: 'subscribe URL has kinds=commit and the four collections only',
+        title: 'subscribe URL has kinds=commit and the five collections only',
       }),
     ).toEqual([]);
     expect(

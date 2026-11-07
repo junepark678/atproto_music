@@ -29,7 +29,11 @@
 // - Entries whose CID equals the stored CID keep their projection row, but
 //   their record_state revision is rewritten to headRev (the Rust oracle
 //   rewrites every snapshot row to the snapshot revision), so the per-URI
-//   guard covers the verified head for them too.
+//   guard covers the verified head for them too. A scrobble or batch
+//   container is reaffirmed like a live proof of the same bytes
+//   (apply-record reaffirmRecordTarget): its projection rows' revisions,
+//   verified membership and, across a succeeded removal's cutoff, statistics
+//   move to headRev with it, so a later hint at that head is a true no-op.
 // - Sweep: rows of the DID whose URI is in `(at://did/lo, at://did/hi]`, whose
 //   key is absent from the chunk and whose revision is < headRev are deleted
 //   and recorded `absent` at headRev.
@@ -47,6 +51,10 @@
 //   chunk no longer holds them); scrobble entries project the §6.2 columns,
 //   album_artist_key and recording_msid through apply-record. `loves` has no
 //   revision column: its record_state row is the per-URI guard.
+// - ADR 0006: a `<p>.scrobbleBatch` container is one record keyed by its
+//   fragment-free URI. Its listens' rows carry it in `record_uri`; the sweep
+//   deletes every listen of a container absent at headRev (bumping
+//   stats_version) exactly like a single, never by fragment URI.
 //
 // Completion (`completeSnapshot`): if `users.generation == generation`, the
 // DID is not suppressed and its snapshot job exists, then a `headRev` below
@@ -61,8 +69,9 @@ import { toMs, toStorage } from '@atmusic/core/timestamp';
 import type { Db } from '../db';
 import { noteIndexed } from '../status';
 import { isSuppressed, loadUser, raiseMaxRev } from './account-state';
-import { type ApplyOptions, applyRecordTarget } from './apply-record';
+import { type ApplyOptions, applyRecordTarget, reaffirmRecordTarget } from './apply-record';
 import {
+  type CollectionKind,
   collectionKind,
   guardRevision,
   readRecordState,
@@ -152,7 +161,25 @@ function raiseFloors(db: Db, did: string, headRev: string): void {
  * reason unchanged). A projection row without record_state is a verified
  * present record.
  */
-function reaffirm(db: Db, c: SnapshotChunk, uri: string, collection: string, cid: string): void {
+function reaffirm(
+  db: Db,
+  c: SnapshotChunk,
+  target: { uri: string; collection: string; rkey: string; kind: CollectionKind },
+  cid: string,
+): void {
+  const { uri, collection, rkey, kind } = target;
+  if (kind === 'scrobble' || kind === 'scrobbleBatch') {
+    // The same bytes at a newer revision: everything a live proof of them
+    // writes (projection revisions, membership, statistics), not only the
+    // per-URI revision, so a removal cutoff they cross is decided as it would
+    // be live and a later hint at this head is truly a no-op.
+    reaffirmRecordTarget(db, { did: c.did, kind, collection, rkey, uri, rev: c.headRev }, cid, {
+      receiptNs: c.receiptNs,
+      prefix: c.prefix,
+      nowNs: c.nowNs,
+    });
+    return;
+  }
   const verifiedAt = toStorage(c.nowNs);
   if (readRecordState(db, uri) === null) {
     writeRecordState(db, {
@@ -181,8 +208,9 @@ function storedCid(db: Db, uri: string): string | null {
   const state = readRecordState(db, uri);
   if (state !== null) return state.cid;
   const row = db.one<{ cid: string }>(
-    `SELECT cid FROM scrobbles WHERE uri = ? UNION ALL SELECT cid FROM follows WHERE uri = ?
-     UNION ALL SELECT cid FROM loves WHERE uri = ? LIMIT 1`,
+    `SELECT cid FROM scrobbles WHERE uri = ? UNION ALL SELECT cid FROM scrobbles WHERE record_uri = ?
+     UNION ALL SELECT cid FROM follows WHERE uri = ? UNION ALL SELECT cid FROM loves WHERE uri = ? LIMIT 1`,
+    uri,
     uri,
     uri,
     uri,
@@ -228,7 +256,7 @@ export function applySnapshotChunk(db: Db, c: SnapshotChunk): ChunkResult {
       throw new Error(`snapshot entry ${e.key} has no record body and an unknown CID`);
     }
     if (stored === e.cid) {
-      reaffirm(db, c, uri, collection, e.cid);
+      reaffirm(db, c, { uri, collection, rkey, kind }, e.cid);
       res.unchanged++;
       continue;
     }
@@ -253,10 +281,12 @@ export function applySnapshotChunk(db: Db, c: SnapshotChunk): ChunkResult {
   const hi = `at://${c.did}/${c.intervalHi}`;
   const candidates = db.all<{ uri: string }>(
     `SELECT uri FROM record_state WHERE did = ? AND uri > ? AND uri <= ? AND revision < ? AND state != 'absent'
-     UNION SELECT uri FROM scrobbles WHERE did = ? AND uri > ? AND uri <= ? AND revision < ?
+     UNION SELECT uri FROM scrobbles WHERE did = ? AND record_uri IS NULL AND uri > ? AND uri <= ? AND revision < ?
+     UNION SELECT record_uri AS uri FROM scrobbles WHERE did = ? AND record_uri IS NOT NULL AND record_uri > ? AND record_uri <= ? AND revision < ?
      UNION SELECT uri FROM follows WHERE actor = ? AND uri > ? AND uri <= ? AND revision < ?
      UNION SELECT uri FROM loves WHERE did = ? AND uri > ? AND uri <= ?
      ORDER BY uri`,
+    ...[c.did, lo, hi, c.headRev],
     ...[c.did, lo, hi, c.headRev],
     ...[c.did, lo, hi, c.headRev],
     ...[c.did, lo, hi, c.headRev],
@@ -269,7 +299,9 @@ export function applySnapshotChunk(db: Db, c: SnapshotChunk): ChunkResult {
     const collection = uriCollection(c.did, uri);
     const kind = collectionKind(c.prefix, collection);
     const rkey = uri.slice(`at://${c.did}/${collection}/`.length);
-    if (kind === 'scrobble' || kind === 'follow' || kind === 'love') {
+    if (kind === 'scrobble' || kind === 'scrobbleBatch' || kind === 'follow' || kind === 'love') {
+      // A batch container is swept as one record: every projected listen of
+      // it is deleted and stats_version moves (apply-record deleteProjection).
       applyRecordTarget(db, { did: c.did, kind, collection, rkey, uri, rev: c.headRev, present: null }, o);
     } else {
       // A settings record (or a row of a collection no longer configured):

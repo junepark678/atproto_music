@@ -32,6 +32,7 @@
 
 import type { NotifyAccepted, NotifyInput } from '@atmusic/core/api-types';
 import { ApiError } from '@atmusic/core/errors';
+import { parseScrobbleBatchListenUri } from '@atmusic/core/scrobble-batch';
 import { isSupportedDid, parseRecordUri } from '@atmusic/core/syntax';
 import { errorResponse, rateLimitedResponse, toErrorResponse } from './error';
 import { json } from './json';
@@ -102,7 +103,13 @@ function invalid(fields: Record<string, string>): ApiError {
 /** The configured collections for `prefix` (null: the namespace gate is closed). */
 export function configuredCollections(prefix: string | null): ReadonlySet<string> {
   if (prefix === null) return new Set();
-  return new Set([`${prefix}.scrobble`, `${prefix}.follow`, `${prefix}.settings`, `${prefix}.love`]);
+  return new Set([
+    `${prefix}.scrobble`,
+    `${prefix}.follow`,
+    `${prefix}.settings`,
+    `${prefix}.love`,
+    `${prefix}.scrobbleBatch`,
+  ]);
 }
 
 /** A record URI in one of `collections`, or null. */
@@ -111,8 +118,11 @@ export function configuredRecordUri(
   collections: ReadonlySet<string>,
 ): { did: string; collection: string } | null {
   if (typeof value !== 'string') return null;
-  const uri = parseRecordUri(value);
-  if (uri === null || !collections.has(uri.collection)) return null;
+  const item = parseScrobbleBatchListenUri(value);
+  if (value.includes('#') && item === null) return null;
+  const uri = parseRecordUri(item?.containerUri ?? value);
+  if (uri === null || !isSupportedDid(uri.did) || !collections.has(uri.collection)) return null;
+  if (item !== null && (!uri.collection.endsWith('.scrobbleBatch') || !collections.has(uri.collection))) return null;
   return { did: uri.did, collection: uri.collection };
 }
 

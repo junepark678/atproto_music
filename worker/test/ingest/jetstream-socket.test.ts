@@ -45,6 +45,7 @@ const S = `${P}.scrobble`;
 const F = `${P}.follow`;
 const SETTINGS = `${P}.settings`;
 const LOVE = `${P}.love`;
+const BATCH = `${P}.scrobbleBatch`;
 const ALICE = 'did:plc:aaaaaaaaaaaaaaaaaaaaaaaa';
 const REV = '3lbcdefghijkl';
 const CID = 'bafyreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy';
@@ -100,7 +101,7 @@ async function step(
 }
 
 describe('jetstream socket', () => {
-  it('subscribe URL has kinds=commit and the four collections only', async () => {
+  it('subscribe URL has kinds=commit and the five collections only', async () => {
     const clock = fixedClock();
     const server = jetstreamServer({ clock });
     await withIngestIndex(async (i) => {
@@ -114,11 +115,11 @@ describe('jetstream socket', () => {
       expect(first.url.pathname).toBe(SUBSCRIBE_PATH);
       expect([...new Set(first.url.searchParams.keys())]).toEqual(['kinds', 'collections']);
       expect(first.url.searchParams.getAll('kinds')).toEqual(['commit']);
-      expect(first.url.searchParams.getAll('collections')).toEqual([S, F, SETTINGS, LOVE]);
+      expect(first.url.searchParams.getAll('collections')).toEqual([S, F, SETTINGS, LOVE, BATCH]);
       // The fake saw the upgrade with exactly that subscription.
       expect(server.at('jetstream.example.test').calls.count({ status: 101 })).toBe(1);
       expect(server.last().kinds).toEqual(['commit']);
-      expect(server.last().collections).toEqual([S, F, SETTINGS, LOVE]);
+      expect(server.last().collections).toEqual([S, F, SETTINGS, LOVE, BATCH]);
       expect(checkpointRow(i.db)).toMatchObject({ connected: 1, mode: 'socket', host_index: 0 });
 
       // Only subscribed collections arrive: a post is filtered upstream; a love
@@ -130,10 +131,15 @@ describe('jetstream socket', () => {
         did: ALICE,
         commit: { rev: REV, operation: 'create', collection: SETTINGS, rkey: 'self', cid: CID },
       });
+      const batch = server.append(commit('2222222222222', undefined, BATCH));
       await flush();
-      expect(seqsSent(server)).toEqual([love.seq, settings.seq]);
-      expect(hintUris(i.db)).toEqual([`at://${ALICE}/${LOVE}/3lovelovelov2`, `at://${ALICE}/${SETTINGS}/self`]);
-      expect(checkpointRow(i.db)).toMatchObject({ cursor: settings.seq });
+      expect(seqsSent(server)).toEqual([love.seq, settings.seq, batch.seq]);
+      expect(hintUris(i.db)).toEqual([
+        `at://${ALICE}/${LOVE}/3lovelovelov2`,
+        `at://${ALICE}/${BATCH}/2222222222222`,
+        `at://${ALICE}/${SETTINGS}/self`,
+      ]);
+      expect(checkpointRow(i.db)).toMatchObject({ cursor: batch.seq });
 
       // A reconnect adds only the cursor.
       closeSocket(m, clock.nowMs());
@@ -141,10 +147,10 @@ describe('jetstream socket', () => {
       const second = server.attempts[1]!;
       expect([...new Set(second.url.searchParams.keys())]).toEqual(['kinds', 'collections', 'cursor']);
       expect(second.url.searchParams.getAll('kinds')).toEqual(['commit']);
-      expect(second.url.searchParams.getAll('collections')).toEqual([S, F, SETTINGS, LOVE]);
-      expect(second.cursor).toBe(settings.seq);
+      expect(second.url.searchParams.getAll('collections')).toEqual([S, F, SETTINGS, LOVE, BATCH]);
+      expect(second.cursor).toBe(batch.seq);
 
-      // Any valid prefix derives exactly its scrobble, follow, settings (A10) and love (B12) collections.
+      // Batch stays last, preserving the numeric cursor order of the four existing collections.
       const other = ingestDeps(i.db, clock, { mode: 'socket', prefix: 'org.example.other' });
       const url = new URL(subscribeUrl(other, 0, null));
       expect(url.searchParams.getAll('kinds')).toEqual(['commit']);
@@ -153,6 +159,7 @@ describe('jetstream socket', () => {
         'org.example.other.follow',
         'org.example.other.settings',
         'org.example.other.love',
+        'org.example.other.scrobbleBatch',
       ]);
       closeSocket(m, clock.nowMs());
     });

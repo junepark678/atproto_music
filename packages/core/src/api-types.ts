@@ -15,6 +15,8 @@ export type Timestamp = string;
 export type Did = string;
 /** Full record AT URI: at://<did>/<collection>/<rkey>. */
 export type AtUri = string;
+/** AppView identity: a record AT URI or a batch container URI plus listen-id fragment. */
+export type ListenUri = string;
 /** CIDv1 dag-cbor sha2-256 string. */
 export type Cid = string;
 /** AT Protocol handle. */
@@ -34,7 +36,10 @@ export interface Indexing {
 }
 
 export interface Scrobble {
-  uri: AtUri;
+  uri: ListenUri;
+  /** Batch provenance; the URI fragment names this listen inside recordUri. */
+  recordUri?: AtUri;
+  listenId?: string;
   cid: Cid;
   did: Did;
   revision: string;
@@ -214,7 +219,7 @@ export type FeedScope = 'global' | 'following';
 // ---------------------------------------------------------------------------
 
 /** N1 `POST /api/v1/notify`: exactly one of `uri` or `did`; unknown fields are 422. */
-export type NotifyInput = { uri: AtUri; did?: never } | { did: Did; uri?: never };
+export type NotifyInput = { uri: ListenUri; did?: never } | { did: Did; uri?: never };
 
 /** N1 success: 202. */
 export interface NotifyAccepted {
@@ -225,7 +230,7 @@ export type RecordStatusState = 'indexed' | 'pending' | 'absent' | 'excluded' | 
 
 /** N2 `GET /api/v1/records/status?uri=` (no-store). */
 export interface RecordStatus {
-  uri: AtUri;
+  uri: ListenUri;
   state: RecordStatusState;
   cid?: Cid;
   revision?: string;

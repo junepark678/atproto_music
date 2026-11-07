@@ -1,6 +1,12 @@
 // `com.atproto.sync.getBlocks` as a BlockSource (ADR 0004 §5.7 step 4).
 //
-// - At most 100 CIDs per request; a larger `get` is split into batches.
+// - At most 100 CIDs per request; a larger `get` is split into batches. A
+//   batch whose response exceeds the body cap (100 record blocks of
+//   byte-filled scrobbleBatch containers, each up to ~1 MB, ADR 0006
+//   "Capacity") is bisected and each half requested again, down to single
+//   CIDs; one block (at most 2,000,000 bytes, the PDS's commit block limit)
+//   always fits, and a single CID over the cap still fails. At most 2n − 1
+//   requests for a batch of n.
 // - Each request goes through SafeFetch kind `getBlocks` (8 MiB body cap,
 //   URL/DoH policy, no redirects, 10 s deadline).
 // - Each response CAR is framed, bounded and hash-checked by
@@ -144,6 +150,12 @@ export function getBlocksSource(o: GetBlocksSourceOptions): GetBlocksSource {
     try {
       ({ body } = await o.safeFetch(url, { kind: 'getBlocks' }));
     } catch (e) {
+      if (e instanceof SafeFetchError && e.code === 'body_too_large' && cids.length > 1) {
+        const half = Math.ceil(cids.length / 2);
+        await fetchBatch(cids.slice(0, half), out);
+        await fetchBatch(cids.slice(half), out);
+        return;
+      }
       throw classify(e, o.did);
     }
     // A well-behaved PDS returns exactly the requested blocks; allow slack, not an unbounded count.

@@ -480,9 +480,12 @@ describe('import uploads', () => {
       // The records the writer builds carry the additional_info MBIDs only.
       await runImports(rt, h.kit.clock.nowMs());
       await runImports(rt, h.kit.clock.nowMs());
-      const records = h
-        .ops("import_job_id = 'job-zip'")
-        .map((o) => JSON.parse(o.record_json as string) as Record<string, unknown>);
+      const records = h.ops("import_job_id = 'job-zip'").flatMap((o) => {
+        const record = JSON.parse(o.record_json as string) as Record<string, unknown> & {
+          listens?: Record<string, unknown>[];
+        };
+        return record.listens ?? [record];
+      });
       expect(records.map((r) => [r.track, r.recordingMbid ?? null, r.releaseMbid ?? null])).toEqual([
         ['Null Mapping', A, B],
         ['Object Mapping', null, null],

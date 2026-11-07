@@ -3,22 +3,32 @@
 
 import { expect, it } from 'vitest';
 import type { OperationRow } from '../../../src/app/rows';
+import { visibleScrobblesFrom } from '../../../src/do/read/visibility';
+import { applyRecordProof } from '../../../src/do/write/apply-record';
+import { createJob } from '../../../src/imports/jobs';
 import { encodeBatch, MAX_BATCH_BYTES } from '../../../src/outbox/apply-writes';
+import { batchDeleteExecutor, enqueueBatchListenDelete } from '../../../src/outbox/batch-delete-ops';
 import { acceptListens } from '../../../src/outbox/ingress';
-import { prepare } from '../../../src/outbox/operations';
+import { insertOperation, newOperationId, prepare } from '../../../src/outbox/operations';
+import type { ExecContext } from '../../../src/outbox/runner';
 import { enqueueScrobbleCreates, insertScrobbleCreate } from '../../../src/outbox/scrobble-ops';
+import { proofAt } from '../../write/support';
 import {
   APPLY,
   CREATE,
   GET,
   type Harness,
+  HEAD,
   listenInput,
+  PUT,
   remoteRecords,
   SCROBBLE,
   T0,
   withHarness,
   zeroJitter,
 } from './support';
+
+const BATCH = 'com.example.atmusic.scrobbleBatch';
 
 async function importCreates(h: Harness, n: number, did = h.alice): Promise<OperationRow[]> {
   const r = await enqueueScrobbleCreates(h.m, {
@@ -92,6 +102,735 @@ it('437 import creates go as applyWrites batches of 200, 200 and 37; a 250 KB-re
     expect(h.kit.pds.Bob.calls.filter({ nsid: APPLY }).map((c) => c.status)).toEqual([200, 200]);
     expect(bigOps.every((o) => h.op(o.id).state === 'succeeded')).toBe(true);
     expect(await remoteRecords(h.kit, 'Bob', SCROBBLE)).toHaveLength(6);
+  });
+});
+
+it('keeps legacy never-sent import singles dormant even with the batch gate open', async () => {
+  await withHarness(async (h) => {
+    const [op] = await importCreates(h, 1);
+    createJob(h.db, { id: 'job-1', did: h.alice, source: 'lastfm_json', remoteUser: null, now: T0 });
+    const record = JSON.parse(op!.record_json!) as { listenedAt: string };
+    h.db.run(
+      "INSERT INTO import_items(job_id, seq, dedupe_key, listened_at, record_json, state, operation_id) VALUES ('job-1', 0, 'legacy-key', ?, ?, 'queued', ?)",
+      record.listenedAt,
+      JSON.stringify({ kind: 'listen', input: listenInput(0) }),
+      op!.id,
+    );
+    h.m.config = { ...h.m.config, batchPublication: true };
+    const report = await h.run();
+    expect(report).toMatchObject({ attempted: 0, nextDueMs: null });
+    expect(h.writers.sent).toEqual([]);
+    expect(h.op(op!.id)).toMatchObject({ state: 'queued', attempts: 0, send_started_at_ms: null });
+  });
+});
+
+it('excludes attempted batch operations while the batch gate is closed without parking their DID', async () => {
+  await withHarness(async (h) => {
+    const record = {
+      $type: BATCH,
+      createdAt: '2026-01-15T12:00:00Z',
+      listens: [
+        {
+          id: '3lb2batchentry1',
+          artist: 'Artist',
+          track: 'Track',
+          listenedAt: '2026-01-14T12:00:00Z',
+          createdAt: '2026-01-15T12:00:00Z',
+        },
+      ],
+    };
+    const batch = h.db.tx(() =>
+      insertOperation(
+        h.db,
+        {
+          id: newOperationId(h.m.random),
+          did: h.alice,
+          kind: 'scrobble.create',
+          origin: 'import',
+          collection: BATCH,
+          rkey: '3lb2batchcontainer1',
+          prepared: { record, digest: 'digest' },
+          dueAt: T0,
+          importJobId: 'job-gated',
+        },
+        T0,
+      ),
+    );
+    h.db.run('UPDATE operations SET attempts = 1, send_started_at_ms = ? WHERE id = ?', T0, batch.id);
+    const live = await enqueueScrobbleCreates(h.m, { did: h.bob, origin: 'web', inputs: [listenInput(999)] });
+    expect(live.ok).toBe(true);
+    h.m.config = { ...h.m.config, batchPublication: false };
+
+    const report = await h.run();
+    expect(report.attempted).toBe(1);
+    expect(h.writers.sent.every((request) => request.did !== h.alice)).toBe(true);
+    expect(h.op(batch.id)).toMatchObject({ state: 'queued', attempts: 1 });
+  });
+});
+
+it('removes one indexed batch listen with CAS and preserves sibling and unknown remote fields', async () => {
+  await withHarness(async (h) => {
+    const uriKey = '3lb2batchcontainer1';
+    const record = {
+      $type: BATCH,
+      createdAt: '2026-01-15T12:00:00Z',
+      remoteEnvelopeField: { keep: true },
+      listens: [
+        {
+          id: '3lb2batchidab',
+          artist: 'Artist',
+          track: 'Removed',
+          listenedAt: '2026-01-14T12:00:00Z',
+          createdAt: '2026-01-15T12:00:00Z',
+          remoteEntryField: 'keep too',
+        },
+        {
+          id: '3lb2batchidac',
+          artist: 'Artist',
+          track: 'Sibling',
+          listenedAt: '2026-01-14T13:00:00Z',
+          createdAt: '2026-01-15T12:00:00Z',
+          remoteSiblingField: { exact: 'preserve' },
+        },
+      ],
+    };
+    await h.kit.externalPut('Alice', BATCH, uriKey, record);
+    const del = enqueueBatchListenDelete(h.m, {
+      did: h.alice,
+      uri: `at://${h.alice}/${BATCH}/${uriKey}`,
+      listenIds: ['3lb2batchidab'],
+      origin: 'web',
+    });
+    expect(h.db.one('SELECT listen_id FROM batch_delete_listens WHERE operation_id=?', del.id)).toEqual({
+      listen_id: '3lb2batchidab',
+    });
+    await h.runUntilIdle();
+    expect(h.op(del.id)).toMatchObject({ state: 'succeeded', collection: BATCH });
+    const value = (await remoteRecords(h.kit, 'Alice', BATCH)).find((item) => item.rkey === uriKey);
+    expect(value!.value).toMatchObject({
+      remoteEnvelopeField: { keep: true },
+      listens: [{ id: '3lb2batchidac', track: 'Sibling', remoteSiblingField: { exact: 'preserve' } }],
+    });
+    expect(h.writers.sent.filter((request) => request.nsid === PUT).map((request) => request.body)).toHaveLength(1);
+    const whole = enqueueBatchListenDelete(h.m, {
+      did: h.alice,
+      uri: `at://${h.alice}/${BATCH}/${uriKey}`,
+      listenIds: ['*'],
+      origin: 'web',
+    });
+    await h.runUntilIdle();
+    expect(h.op(whole.id)).toMatchObject({ state: 'succeeded' });
+    expect((await remoteRecords(h.kit, 'Alice', BATCH)).some((item) => item.rkey === uriKey)).toBe(false);
+  });
+});
+
+it('re-reads after InvalidSwap and preserves a concurrent remote edit while removing only its target', async () => {
+  await withHarness(async (h) => {
+    const rkey = '3lb2batchcontainer1';
+    const record = {
+      $type: BATCH,
+      createdAt: '2026-01-15T12:00:00Z',
+      listens: [
+        {
+          id: '3lb2batchidab',
+          artist: 'Artist',
+          track: 'Removed',
+          listenedAt: '2026-01-14T12:00:00Z',
+          createdAt: '2026-01-15T12:00:00Z',
+        },
+        {
+          id: '3lb2batchidac',
+          artist: 'Artist',
+          track: 'Sibling',
+          listenedAt: '2026-01-14T13:00:00Z',
+          createdAt: '2026-01-15T12:00:00Z',
+          siblingRemoteField: 'keep',
+        },
+      ],
+    };
+    await h.kit.externalPut('Alice', BATCH, rkey, record);
+    enqueueBatchListenDelete(h.m, {
+      did: h.alice,
+      uri: `at://${h.alice}/${BATCH}/${rkey}`,
+      listenIds: ['3lb2batchidab'],
+      origin: 'web',
+    });
+    h.kit.pds.Alice.fail(
+      { nsid: PUT },
+      {
+        kind: 'respond',
+        respond: async () => {
+          await h.kit.externalPut('Alice', BATCH, rkey, { ...record, concurrentRemoteField: { retained: true } });
+          return Response.json({ error: 'InvalidSwap', message: 'record revision changed' }, { status: 400 });
+        },
+      },
+    );
+
+    await h.runUntilIdle();
+
+    expect(h.writers.count(PUT)).toBe(2);
+    const current = (await remoteRecords(h.kit, 'Alice', BATCH)).find((item) => item.rkey === rkey);
+    expect(current!.value).toMatchObject({
+      concurrentRemoteField: { retained: true },
+      listens: [{ id: '3lb2batchidac', siblingRemoteField: 'keep' }],
+    });
+  });
+});
+
+it('serializes two independent listen removals for one container and keeps the third entry', async () => {
+  await withHarness(async (h) => {
+    const rkey = '3lb2batchcontainer1';
+    await h.kit.externalPut('Alice', BATCH, rkey, {
+      $type: BATCH,
+      createdAt: '2026-01-15T12:00:00Z',
+      listens: ['ab', 'ac', 'ad'].map((suffix, index) => ({
+        id: `3lb2batchid${suffix}`,
+        artist: 'Artist',
+        track: `Track ${index}`,
+        listenedAt: `2026-01-14T1${index}:00:00Z`,
+        createdAt: '2026-01-15T12:00:00Z',
+      })),
+    });
+    const first = enqueueBatchListenDelete(h.m, {
+      did: h.alice,
+      uri: `at://${h.alice}/${BATCH}/${rkey}`,
+      listenIds: ['3lb2batchidab'],
+      origin: 'web',
+    });
+    const second = enqueueBatchListenDelete(h.m, {
+      did: h.alice,
+      uri: `at://${h.alice}/${BATCH}/${rkey}`,
+      listenIds: ['3lb2batchidac'],
+      origin: 'web',
+    });
+
+    expect(h.db.one('SELECT pred_id FROM operation_deps WHERE op_id = ?', second.id)).toEqual({ pred_id: first.id });
+    await h.runUntilIdle();
+
+    expect(h.op(first.id)).toMatchObject({ state: 'succeeded' });
+    expect(h.op(second.id)).toMatchObject({ state: 'succeeded' });
+    expect(h.writers.count(PUT)).toBe(2);
+    expect((await remoteRecords(h.kit, 'Alice', BATCH)).find((item) => item.rkey === rkey)?.value).toMatchObject({
+      listens: [{ id: '3lb2batchidad' }],
+    });
+  });
+});
+
+it('recovers an ambiguous partial delete by reading the container before sending again', async () => {
+  await withHarness(async (h) => {
+    const rkey = '3lb2batchcontainer1';
+    await h.kit.externalPut('Alice', BATCH, rkey, {
+      $type: BATCH,
+      createdAt: '2026-01-15T12:00:00Z',
+      listens: [
+        {
+          id: '3lb2batchidab',
+          artist: 'Artist',
+          track: 'Removed',
+          listenedAt: '2026-01-14T12:00:00Z',
+          createdAt: '2026-01-15T12:00:00Z',
+        },
+        {
+          id: '3lb2batchidac',
+          artist: 'Artist',
+          track: 'Sibling',
+          listenedAt: '2026-01-14T13:00:00Z',
+          createdAt: '2026-01-15T12:00:00Z',
+        },
+      ],
+    });
+    const del = enqueueBatchListenDelete(h.m, {
+      did: h.alice,
+      uri: `at://${h.alice}/${BATCH}/${rkey}`,
+      listenIds: ['3lb2batchidab'],
+      origin: 'web',
+    });
+    const crashed = h.writers.crashOn(PUT, 'after_commit');
+    void h.run();
+    await crashed;
+    h.restart();
+
+    await h.runUntilIdle();
+
+    expect(h.op(del.id)).toMatchObject({ state: 'succeeded' });
+    expect(h.writers.count(PUT)).toBe(1);
+    const current = (await remoteRecords(h.kit, 'Alice', BATCH)).find((item) => item.rkey === rkey);
+    expect(current!.value).toMatchObject({ listens: [{ id: '3lb2batchidac' }] });
+  });
+});
+
+it('recovers a whole-container delete after a lost success and keeps the stale projection hidden', async () => {
+  await withHarness(async (h) => {
+    const rkey = '3lb2batchcontainer1';
+    const record = {
+      $type: BATCH,
+      createdAt: '2026-01-15T12:00:00Z',
+      listens: ['ab', 'ac'].map((suffix, index) => ({
+        id: `3lb2batchid${suffix}`,
+        artist: 'Artist',
+        track: `Track ${index}`,
+        listenedAt: `2026-01-14T1${index}:00:00Z`,
+        createdAt: '2026-01-15T12:00:00Z',
+      })),
+    };
+    h.seedUser(h.alice);
+    await h.kit.externalPut('Alice', BATCH, rkey, record);
+    const proof = await proofAt(h.kit.repos.Alice, BATCH, rkey);
+    const proofOptions = {
+      receiptNs: BigInt(T0) * 1_000_000n,
+      nowNs: BigInt(T0) * 1_000_000n,
+      prefix: 'com.example.atmusic',
+    };
+    h.db.tx(() => applyRecordProof(h.db, proof, proofOptions));
+    expect(h.db.all(`SELECT s.uri FROM ${visibleScrobblesFrom()}`)).toHaveLength(2);
+
+    const del = enqueueBatchListenDelete(h.m, {
+      did: h.alice,
+      uri: `at://${h.alice}/${BATCH}/${rkey}`,
+      listenIds: ['*'],
+      origin: 'web',
+    });
+    const originalCid = proof.state === 'present' ? proof.cid : null;
+    expect(originalCid).not.toBeNull();
+    const crashed = h.writers.crashOn('com.atproto.repo.deleteRecord', 'after_commit');
+    void h.run();
+    await crashed;
+    h.restart();
+    await h.runUntilIdle();
+
+    expect(h.op(del.id)).toMatchObject({ state: 'succeeded', swap_cid: originalCid });
+    expect(h.db.all(`SELECT s.uri FROM ${visibleScrobblesFrom()}`)).toHaveLength(0);
+    expect(h.writers.count('com.atproto.repo.deleteRecord')).toBe(1);
+
+    // A later verified recreation has a new CID and becomes visible again.
+    await h.kit.externalPut('Alice', BATCH, rkey, { ...record, createdAt: '2026-01-15T12:01:00Z' });
+    const recreated = await proofAt(h.kit.repos.Alice, BATCH, rkey);
+    h.db.tx(() => applyRecordProof(h.db, recreated, proofOptions));
+    expect(h.db.all(`SELECT s.uri FROM ${visibleScrobblesFrom()}`)).toHaveLength(2);
+  });
+});
+
+const REMOVED_ID = '3lb2batchidab';
+const SIBLING_ID = '3lb2batchidac';
+const twoListenRecord = (extra: Record<string, unknown> = {}) => ({
+  $type: BATCH,
+  createdAt: '2026-01-15T12:00:00Z',
+  ...extra,
+  listens: [
+    {
+      id: REMOVED_ID,
+      artist: 'Artist',
+      track: 'Removed',
+      listenedAt: '2026-01-14T12:00:00Z',
+      createdAt: '2026-01-15T12:00:00Z',
+      remoteEntryField: 'keep',
+    },
+    {
+      id: SIBLING_ID,
+      artist: 'Artist',
+      track: 'Sibling',
+      listenedAt: '2026-01-14T13:00:00Z',
+      createdAt: '2026-01-15T12:00:00Z',
+    },
+  ],
+});
+const PROOF_OPTIONS = {
+  receiptNs: BigInt(T0) * 1_000_000n,
+  nowNs: BigInt(T0) * 1_000_000n,
+  prefix: 'com.example.atmusic',
+};
+const cidOf = (proof: Awaited<ReturnType<typeof proofAt>>): string => {
+  if (proof.state !== 'present') throw new Error('expected a present proof');
+  return proof.cid;
+};
+const visibleUris = (h: Harness): string[] =>
+  h.db.all<{ uri: string }>(`SELECT s.uri FROM ${visibleScrobblesFrom()} ORDER BY s.uri`).map((row) => row.uri);
+
+it('keeps a settled partial removal hidden at its admission and pre-write CIDs, through a delayed older proof, until a verified recreation', async () => {
+  await withHarness(async (h) => {
+    const rkey = '3lb2batchcontainer1';
+    const container = `at://${h.alice}/${BATCH}/${rkey}`;
+    h.seedUser(h.alice);
+    await h.kit.externalPut('Alice', BATCH, rkey, twoListenRecord());
+    const admission = await proofAt(h.kit.repos.Alice, BATCH, rkey);
+    h.db.tx(() => applyRecordProof(h.db, admission, PROOF_OPTIONS));
+    expect(visibleUris(h)).toEqual([`${container}#${REMOVED_ID}`, `${container}#${SIBLING_ID}`]);
+
+    const del = enqueueBatchListenDelete(h.m, { did: h.alice, uri: container, listenIds: [REMOVED_ID], origin: 'web' });
+    expect(visibleUris(h)).toEqual([`${container}#${SIBLING_ID}`]);
+    // The owner edits the container elsewhere before the removal runs: the
+    // CAS write targets that newer CID, which this index has not verified yet.
+    await h.kit.externalPut('Alice', BATCH, rkey, twoListenRecord({ remoteEnvelopeField: 'edited elsewhere' }));
+    const prewrite = await proofAt(h.kit.repos.Alice, BATCH, rkey);
+    await h.runUntilIdle();
+
+    const written = (await remoteRecords(h.kit, 'Alice', BATCH)).find((item) => item.rkey === rkey)!;
+    expect(written.value).toMatchObject({
+      remoteEnvelopeField: 'edited elsewhere',
+      listens: [{ id: SIBLING_ID }],
+    });
+    expect(written.cid).not.toBe(cidOf(prewrite));
+    // The receipt keeps the pre-CAS CID, never the post-write one.
+    expect(h.op(del.id)).toMatchObject({ state: 'succeeded', swap_cid: cidOf(prewrite) });
+    expect(
+      h.db
+        .all<{ cid: string }>('SELECT cid FROM listen_removal_cids WHERE operation_id = ?', del.id)
+        .map((row) => row.cid)
+        .sort(),
+    ).toEqual([cidOf(admission), cidOf(prewrite)].sort());
+    // Projected at the admission CID after settlement: still hidden.
+    expect(visibleUris(h)).toEqual([`${container}#${SIBLING_ID}`]);
+    // A delayed older signed proof (the pre-write CID) arrives after the
+    // local delete settled: the listen stays hidden, the sibling visible.
+    expect(h.db.tx(() => applyRecordProof(h.db, prewrite, PROOF_OPTIONS)).outcome).toBe('applied');
+    expect(visibleUris(h)).toEqual([`${container}#${SIBLING_ID}`]);
+    // The proof of the removal's own write drops it from the projection; no
+    // record_state absence was fabricated for the container meanwhile.
+    expect(h.db.one('SELECT state FROM record_state WHERE uri = ?', container)).toEqual({ state: 'present' });
+    const removed = await proofAt(h.kit.repos.Alice, BATCH, rkey);
+    h.db.tx(() => applyRecordProof(h.db, removed, PROOF_OPTIONS));
+    expect(h.db.all('SELECT listen_id FROM scrobbles WHERE record_uri = ?', container)).toEqual([
+      { listen_id: SIBLING_ID },
+    ]);
+    // The owner deliberately restores the same listen id: a verified new CID is visible again.
+    await h.kit.externalPut('Alice', BATCH, rkey, twoListenRecord({ remoteEnvelopeField: 'restored' }));
+    const restored = await proofAt(h.kit.repos.Alice, BATCH, rkey);
+    h.db.tx(() => applyRecordProof(h.db, restored, PROOF_OPTIONS));
+    expect(visibleUris(h)).toEqual([`${container}#${REMOVED_ID}`, `${container}#${SIBLING_ID}`]);
+  });
+});
+
+it.each([
+  { name: 'partial', listenIds: [REMOVED_ID], method: PUT, hidden: [REMOVED_ID] },
+  { name: 'wildcard', listenIds: ['*'], method: 'com.atproto.repo.deleteRecord', hidden: [REMOVED_ID, SIBLING_ID] },
+])(
+  'a $name removal reconciled after its tenth attempt keeps the pre-CAS evidence and hides admission and delayed proofs',
+  async ({ listenIds, method, hidden }) => {
+    await withHarness(async (h) => {
+      const rkey = '3lb2batchcontainer1';
+      const container = `at://${h.alice}/${BATCH}/${rkey}`;
+      const all = [`${container}#${REMOVED_ID}`, `${container}#${SIBLING_ID}`];
+      const expectedVisible = all.filter((uri) => !hidden.some((id) => uri.endsWith(`#${id}`)));
+      h.seedUser(h.alice);
+      await h.kit.externalPut('Alice', BATCH, rkey, twoListenRecord());
+      const admission = await proofAt(h.kit.repos.Alice, BATCH, rkey);
+      h.db.tx(() => applyRecordProof(h.db, admission, PROOF_OPTIONS));
+      const del = enqueueBatchListenDelete(h.m, { did: h.alice, uri: container, listenIds, origin: 'web' });
+      await h.kit.externalPut('Alice', BATCH, rkey, twoListenRecord({ remoteEnvelopeField: 'edited elsewhere' }));
+      const prewrite = await proofAt(h.kit.repos.Alice, BATCH, rkey);
+      // The tenth attempt commits remotely and its answer is lost.
+      h.db.run('UPDATE operations SET attempts = 9 WHERE id = ?', del.id);
+      const crashed = h.writers.crashOn(method, 'after_commit');
+      void h.run();
+      await crashed;
+      h.restart();
+      await h.runUntilIdle();
+
+      expect(h.writers.count(method)).toBe(1);
+      expect(h.op(del.id)).toMatchObject({ state: 'succeeded', attempts: 10, swap_cid: cidOf(prewrite) });
+      expect(visibleUris(h)).toEqual(expectedVisible);
+      expect(h.db.tx(() => applyRecordProof(h.db, prewrite, PROOF_OPTIONS)).outcome).toBe('applied');
+      expect(visibleUris(h)).toEqual(expectedVisible);
+      // The verified result of the write, then a deliberate recreation at a new CID.
+      const result = await proofAt(h.kit.repos.Alice, BATCH, rkey);
+      h.db.tx(() => applyRecordProof(h.db, result, PROOF_OPTIONS));
+      expect(visibleUris(h)).toEqual(expectedVisible);
+      await h.kit.externalPut('Alice', BATCH, rkey, twoListenRecord({ remoteEnvelopeField: 'restored' }));
+      const restored = await proofAt(h.kit.repos.Alice, BATCH, rkey);
+      h.db.tx(() => applyRecordProof(h.db, restored, PROOF_OPTIONS));
+      expect(visibleUris(h)).toEqual(all);
+    });
+  },
+);
+
+it('holds a batch deletion on explicit scope denial and resumes its durable intent after re-consent', async () => {
+  await withHarness(async (h) => {
+    const rkey = '3lb2batchcontainer1';
+    await h.kit.externalPut('Alice', BATCH, rkey, {
+      $type: BATCH,
+      createdAt: '2026-01-15T12:00:00Z',
+      listens: ['ab', 'ac'].map((suffix, index) => ({
+        id: `3lb2batchid${suffix}`,
+        artist: 'Artist',
+        track: `Track ${index}`,
+        listenedAt: `2026-01-14T1${index}:00:00Z`,
+        createdAt: '2026-01-15T12:00:00Z',
+      })),
+    });
+    const del = enqueueBatchListenDelete(h.m, {
+      did: h.alice,
+      uri: `at://${h.alice}/${BATCH}/${rkey}`,
+      listenIds: ['3lb2batchidab'],
+      origin: 'web',
+    });
+    h.kit.pds.Alice.fail(
+      { nsid: GET },
+      { kind: 'status', status: 403, error: 'ScopeMissing', message: 'scope missing' },
+    );
+    await h.run();
+    expect(h.op(del.id)).toMatchObject({ state: 'blocked', last_error: 'batch_scope_required' });
+    expect(h.db.all('SELECT listen_id FROM batch_delete_listens WHERE operation_id=?', del.id)).toEqual([
+      { listen_id: '3lb2batchidab' },
+    ]);
+    expect(((await remoteRecords(h.kit, 'Alice', BATCH))[0]!.value as { listens: unknown[] }).listens).toHaveLength(2);
+
+    h.writers.grantedScope = `repo:${BATCH}`;
+    h.db.tx(() => h.db.run("UPDATE operations SET state='queued',last_error=NULL WHERE id=?", del.id));
+    await h.runUntilIdle();
+    expect(h.op(del.id).state).toBe('succeeded');
+    expect(((await remoteRecords(h.kit, 'Alice', BATCH))[0]!.value as { listens: unknown[] }).listens).toMatchObject([
+      { id: '3lb2batchidac' },
+    ]);
+  });
+});
+
+const DELETE_RECORD = 'com.atproto.repo.deleteRecord';
+
+it.each([
+  { nsid: GET, listenIds: [REMOVED_ID], writes: [] as string[] },
+  { nsid: PUT, listenIds: [REMOVED_ID], writes: [PUT] },
+  { nsid: DELETE_RECORD, listenIds: ['*'], writes: [DELETE_RECORD] },
+])(
+  'a 5xx $nsid whose body names a scope error stays retryable without a scope hold, resend loop or lost CAS evidence',
+  async ({ nsid, listenIds, writes }) => {
+    await withHarness(
+      async (h) => {
+        const rkey = '3lb2batchcontainer1';
+        const container = `at://${h.alice}/${BATCH}/${rkey}`;
+        const put = await h.kit.externalPut('Alice', BATCH, rkey, twoListenRecord());
+        const cid = put.ops[0]!.cid;
+        const del = enqueueBatchListenDelete(h.m, { did: h.alice, uri: container, listenIds, origin: 'web' });
+        h.kit.pds.Alice.fail(
+          { nsid },
+          { kind: 'status', status: 500, error: 'ScopeMissing', message: 'scope missing' },
+        );
+
+        await h.run();
+
+        const queued = h.op(del.id);
+        expect(queued).toMatchObject({ state: 'queued', attempts: 1, last_error: 'upstream_unavailable' });
+        expect(h.ops("state = 'blocked'")).toEqual([]);
+        // One write request per attempt: a transient answer is not resent in a loop.
+        for (const write of writes) expect(h.writers.count(write)).toBe(1);
+        if (writes.length > 0) {
+          expect(queued.swap_cid).toBe(cid);
+          expect(h.db.all('SELECT cid FROM listen_removal_cids WHERE operation_id = ?', del.id)).toEqual([{ cid }]);
+        }
+        expect(h.db.all('SELECT listen_id FROM batch_delete_listens WHERE operation_id = ?', del.id)).toEqual(
+          listenIds.map((listen_id) => ({ listen_id })),
+        );
+
+        h.kit.clock.advance(60_000);
+        await h.runUntilIdle();
+        expect(h.op(del.id)).toMatchObject({ state: 'succeeded', swap_cid: cid });
+      },
+      { random: zeroJitter() },
+    );
+  },
+);
+
+it.each([
+  { nsid: PUT, listenIds: [REMOVED_ID], error: 'ScopeMissing' },
+  { nsid: DELETE_RECORD, listenIds: ['*'], error: 'InsufficientScope' },
+  { nsid: PUT, listenIds: [REMOVED_ID], error: undefined },
+])(
+  'a classified 403 $error denial of $nsid holds the batch lane for re-consent and keeps the intent',
+  async ({ nsid, listenIds, error }) => {
+    await withHarness(async (h) => {
+      const rkey = '3lb2batchcontainer1';
+      const container = `at://${h.alice}/${BATCH}/${rkey}`;
+      const put = await h.kit.externalPut('Alice', BATCH, rkey, twoListenRecord());
+      const del = enqueueBatchListenDelete(h.m, { did: h.alice, uri: container, listenIds, origin: 'web' });
+      h.kit.pds.Alice.fail(
+        { nsid },
+        error === undefined
+          ? { kind: 'status', status: 403 }
+          : { kind: 'status', status: 403, error, message: 'denied' },
+      );
+
+      await h.run();
+
+      expect(h.op(del.id)).toMatchObject({ state: 'blocked', last_error: 'batch_scope_required' });
+      expect(h.op(del.id).swap_cid).toBe(put.ops[0]!.cid);
+      expect(h.writers.count(nsid)).toBe(1);
+      expect(h.db.all('SELECT listen_id FROM batch_delete_listens WHERE operation_id = ?', del.id)).toEqual(
+        listenIds.map((listen_id) => ({ listen_id })),
+      );
+      expect(((await remoteRecords(h.kit, 'Alice', BATCH))[0]!.value as { listens: unknown[] }).listens).toHaveLength(
+        2,
+      );
+    });
+  },
+);
+
+it('does not trust a wrong remote record URI or crash on a null batch entry', async () => {
+  await withHarness(async (h) => {
+    const rkey = '3lb2batchcontainer1';
+    const del = enqueueBatchListenDelete(h.m, {
+      did: h.alice,
+      uri: `at://${h.alice}/${BATCH}/${rkey}`,
+      listenIds: ['3lb2batchidab'],
+      origin: 'web',
+    });
+    const procedures: unknown[] = [];
+    const context = {
+      m: h.m,
+      xrpc: {
+        did: h.alice,
+        latestCommit: async () => ({
+          kind: 'head',
+          cid: 'bafyreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy',
+          rev: '3lb2batchhead',
+        }),
+        getRecord: async () => ({
+          kind: 'present',
+          uri: `at://${h.bob}/${BATCH}/${rkey}`,
+          cid: 'bafyreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy',
+          value: { $type: BATCH, listens: [{ id: '3lb2batchidab' }] },
+        }),
+        procedure: async (...args: unknown[]) => {
+          procedures.push(args);
+          return { ok: true };
+        },
+      },
+      collections: { scrobbleBatch: BATCH },
+      afford: () => null,
+      persist: () => undefined,
+      hint: () => undefined,
+      memo: (_key: string, build: () => unknown) => build(),
+    } as unknown as ExecContext;
+    expect(await batchDeleteExecutor.execute({ ...h.op(del.id), did: h.bob }, context)).toMatchObject({
+      kind: 'permanent',
+      code: 'invalid_record_identity',
+    });
+    expect(await batchDeleteExecutor.execute(h.op(del.id), context)).toMatchObject({
+      kind: 'permanent',
+      code: 'invalid_batch_record_identity',
+    });
+    expect(procedures).toEqual([]);
+
+    await h.kit.externalPut('Alice', BATCH, rkey, { $type: BATCH, listens: [null] });
+    const report = await h.run();
+    expect(report.attempted).toBe(1);
+    expect(h.op(del.id).state).toBe('succeeded');
+    expect(
+      h.writers.sent.filter((request) => request.nsid === PUT || request.nsid === 'com.atproto.repo.deleteRecord'),
+    ).toEqual([]);
+  });
+});
+
+it('verifies a 2xx batch delete by read-back before settling success', async () => {
+  await withHarness(async (h) => {
+    const rkey = '3lb2batchcontainer1';
+    await h.kit.externalPut('Alice', BATCH, rkey, {
+      $type: BATCH,
+      listens: [
+        { id: '3lb2batchidab', artist: 'A', track: 'T' },
+        { id: '3lb2batchidac', artist: 'A', track: 'S' },
+      ],
+    });
+    const del = enqueueBatchListenDelete(h.m, {
+      did: h.alice,
+      uri: `at://${h.alice}/${BATCH}/${rkey}`,
+      listenIds: ['3lb2batchidab'],
+      origin: 'web',
+    });
+    h.kit.pds.Alice.fail(
+      { nsid: PUT },
+      {
+        kind: 'respond',
+        respond: async () =>
+          Response.json({
+            uri: `at://${h.alice}/${BATCH}/${rkey}`,
+            cid: 'bafyreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy',
+          }),
+      },
+    );
+    await h.run();
+    expect(h.op(del.id)).toMatchObject({ state: 'queued', last_error: 'remote_delete_unconfirmed' });
+    expect((await remoteRecords(h.kit, 'Alice', BATCH))[0]!.value).toMatchObject({
+      listens: [{ id: '3lb2batchidab' }, { id: '3lb2batchidac' }],
+    });
+    h.kit.clock.advance(60_000);
+    await h.runUntilIdle();
+    expect(h.op(del.id).state).toBe('succeeded');
+    expect(h.writers.count(PUT)).toBe(2);
+  });
+});
+
+it('reconciles an interrupted tenth batch delete attempt without an eleventh send', async () => {
+  await withHarness(async (h) => {
+    const rkey = '3lb2batchcontainer1';
+    await h.kit.externalPut('Alice', BATCH, rkey, {
+      $type: BATCH,
+      listens: [{ id: '3lb2batchidab', artist: 'A', track: 'T' }],
+    });
+    const del = enqueueBatchListenDelete(h.m, {
+      did: h.alice,
+      uri: `at://${h.alice}/${BATCH}/${rkey}`,
+      listenIds: ['*'],
+      origin: 'web',
+    });
+    h.db.run("UPDATE operations SET state='running',attempts=10,send_started_at_ms=? WHERE id=?", T0, del.id);
+    await h.run();
+    expect(h.op(del.id)).toMatchObject({ state: 'failed', attempts: 10 });
+    // Read-only: the head and the container, never a write.
+    expect(h.writers.sent.map((request) => request.nsid)).toEqual([HEAD, GET]);
+    expect(await remoteRecords(h.kit, 'Alice', BATCH)).toHaveLength(1);
+  });
+});
+
+it('does not delete a colliding record after this batch create is rejected as remote_record_conflict', async () => {
+  await withHarness(async (h) => {
+    const entryId = '3lb2batchidab';
+    const rkey = '3lb2batchcontainer1';
+    const record = {
+      $type: BATCH,
+      createdAt: '2026-01-15T12:00:00Z',
+      listens: [
+        {
+          id: entryId,
+          artist: 'Artist',
+          track: 'Track',
+          listenedAt: '2026-01-14T12:00:00Z',
+          createdAt: '2026-01-15T12:00:00Z',
+        },
+      ],
+    };
+    const create = h.db.tx(() =>
+      insertOperation(
+        h.db,
+        {
+          id: newOperationId(h.m.random),
+          did: h.alice,
+          kind: 'scrobble.create',
+          origin: 'import',
+          collection: BATCH,
+          rkey,
+          prepared: { record, digest: 'different-digest' },
+          dueAt: T0,
+        },
+        T0,
+      ),
+    );
+    const other = { ...record, createdAt: '2020-01-01T00:00:00Z' };
+    const prior = await h.kit.externalPut('Alice', BATCH, rkey, other);
+    const del = enqueueBatchListenDelete(h.m, {
+      did: h.alice,
+      uri: `at://${h.alice}/${BATCH}/${rkey}`,
+      listenIds: [entryId],
+      origin: 'web',
+    });
+
+    await h.runUntilIdle();
+
+    expect(h.op(create.id)).toMatchObject({ state: 'failed', last_error: 'remote_record_conflict' });
+    expect(h.op(del.id)).toMatchObject({ state: 'succeeded', last_error: 'record_not_ours' });
+    expect(await remoteRecords(h.kit, 'Alice', BATCH)).toMatchObject([{ rkey, cid: prior.ops[0]!.cid, value: other }]);
+    expect(
+      h.writers.sent.filter((request) => request.nsid === PUT || request.nsid === 'com.atproto.repo.deleteRecord'),
+    ).toEqual([]);
+    expect(h.db.one('SELECT operation_id FROM listen_removals WHERE operation_id = ?', del.id)).toBeNull();
   });
 });
 

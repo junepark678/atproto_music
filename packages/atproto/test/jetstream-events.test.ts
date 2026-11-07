@@ -172,10 +172,10 @@ describe('parseJetstreamMessage', () => {
     // allowedCollections as a plain array behaves identically.
     expect(parse(v2(v2Commit()), [SCROBBLE])).toMatchObject({ kind: 'hint', collection: SCROBBLE, seq: 4_242 });
 
-    // Exactly 64 KiB is accepted (the bound is "over 64 KiB").
+    // Exactly the wire byte limit is accepted.
     const baseBytes = new TextEncoder().encode(v2(v2Commit({ pad: '' }))).length;
     const exact = v2(v2Commit({ pad: 'x'.repeat(MAX_JETSTREAM_MESSAGE_BYTES - baseBytes) }));
-    expect(new TextEncoder().encode(exact).length).toBe(65_536);
+    expect(new TextEncoder().encode(exact).length).toBe(MAX_JETSTREAM_MESSAGE_BYTES);
     expect(parse(exact)).toMatchObject({ kind: 'hint', rkey: 'r01', seq: 4_242 });
 
     // Pure: parsing never touches the network.
@@ -244,12 +244,12 @@ describe('parseJetstreamMessage', () => {
   it('oversize, malformed JSON, bad DID, unsafe integer are invalid', () => {
     const invalid = (reason: string) => ({ kind: 'invalid', reason });
 
-    // Oversize: one byte over 64 KiB, by ASCII length and by UTF-8 byte length.
+    // Oversize: one byte over the wire limit, and UTF-8 bytes rather than characters.
     const baseBytes = new TextEncoder().encode(v2(v2Commit({ pad: '' }))).length;
     const overByOne = v2(v2Commit({ pad: 'x'.repeat(MAX_JETSTREAM_MESSAGE_BYTES - baseBytes + 1) }));
-    expect(new TextEncoder().encode(overByOne).length).toBe(65_537);
+    expect(new TextEncoder().encode(overByOne).length).toBe(MAX_JETSTREAM_MESSAGE_BYTES + 1);
     expect(parse(overByOne)).toEqual(invalid('oversize'));
-    const multibyte = v2(v2Commit({ pad: 'é'.repeat(40_000) })); // 2 bytes each; < 65,536 UTF-16 units
+    const multibyte = v2(v2Commit({ pad: 'é'.repeat(Math.ceil(MAX_JETSTREAM_MESSAGE_BYTES / 2)) }));
     expect(multibyte.length).toBeLessThan(MAX_JETSTREAM_MESSAGE_BYTES);
     expect(parse(multibyte)).toEqual(invalid('oversize'));
     expect(parse(' '.repeat(10 * MAX_JETSTREAM_MESSAGE_BYTES))).toEqual(invalid('oversize'));

@@ -958,6 +958,7 @@ it('packaged_recovery: SIGKILL after create and delete commits reconciles durabl
       swap_cid: remote[0]!.cid,
     });
     expect((await w.repo.list(SCROBBLE)).map((r) => r.value)).toMatchObject([{ track: 'Hunter' }]);
+    const deletedHead = { ...w.repo.head };
     expect(await w.stop('SIGKILL')).toEqual({ code: null, signal: 'SIGKILL' });
     await deleting;
     await w.start();
@@ -1026,7 +1027,10 @@ it('packaged_recovery: SIGKILL after create and delete commits reconciles durabl
     expect(after.body.operation.id).toBe(id);
     expect((await w.inspect()).operations).toHaveLength(4);
     expect(w.pds.calls.count({ nsid: 'com.atproto.repo.createRecord', status: 200 })).toBe(3);
-    expect(w.pds.calls.count({ nsid: 'com.atproto.repo.deleteRecord', status: 200 })).toBe(1);
+    // Reconciliation may observe absence or make an idempotent no-op; neither
+    // may commit another repository version after the original deletion.
+    expect(w.pds.calls.count({ nsid: 'com.atproto.repo.deleteRecord', status: 200 })).toBeGreaterThanOrEqual(1);
+    expect(w.repo.head).toEqual(deletedHead);
     // The hide is asserted only after the PDS delete succeeded and before the signed absence proof applied.
     expect(await w.stop('SIGTERM')).toEqual({ code: 0, signal: null });
   } finally {

@@ -2382,8 +2382,8 @@
         "jetstream socket"
       ],
       "title": "subscribe URL has kinds=commit and the three collections only",
-      "replaced": "worker/test/ingest/jetstream-socket.test.ts › jetstream socket › subscribe URL has kinds=commit and the four collections only",
-      "reason": "ADR 0005 §6.3, B12 (N3-11): a valid prefix derives a fourth collection, `<p>.love`, which config.collections and the Jetstream subscription gain, so \"the three collections only\" no longer holds; the same test, in the same file, now asserts the four collections scrobble, follow, settings and love in that order (and that a love commit is hinted).",
+      "replaced": "worker/test/ingest/jetstream-socket.test.ts › jetstream socket › subscribe URL has kinds=commit and the five collections only",
+      "reason": "ADR 0005 §6.3, B12 (N3-11) added love as the fourth collection. Slice B appends scrobbleBatch as the fifth collection to preserve existing collection cursor numbers; the same test asserts stable order and a batch hint.",
       "package": "N3-11"
     },
     {

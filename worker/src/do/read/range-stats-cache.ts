@@ -36,6 +36,7 @@
 
 import type { Db } from '../db';
 import type { StatsUser } from './stats-cache';
+import { visibleScrobblesFrom } from './visibility';
 
 /** Bodies larger than this many UTF-8 bytes are never cached (ADR 0005 §10.3). */
 export const MAX_CACHED_BODY_BYTES = 4 * 1024 * 1024;
@@ -106,14 +107,14 @@ export function rangeCacheProbes(did: string, cached: StorageRange, current: Sto
   if (cached.upper !== current.upper) {
     const [lo, hi] = ordered(cached.upper, current.upper);
     probes.push({
-      sql: 'SELECT EXISTS (SELECT 1 FROM scrobbles WHERE did = ? AND listened_at >= ? AND listened_at < ?) AS hit',
+      sql: `SELECT EXISTS (SELECT 1 FROM ${visibleScrobblesFrom('s', 'u')} WHERE s.did = ? AND s.listened_at >= ? AND s.listened_at < ?) AS hit`,
       params: [did, lo, hi],
     });
   }
   if (cached.lower !== null && current.lower !== null && cached.lower !== current.lower) {
     const [lo, hi] = ordered(cached.lower, current.lower);
     probes.push({
-      sql: 'SELECT EXISTS (SELECT 1 FROM scrobbles WHERE did = ? AND listened_at >= ? AND listened_at < ?) AS hit',
+      sql: `SELECT EXISTS (SELECT 1 FROM ${visibleScrobblesFrom('s', 'u')} WHERE s.did = ? AND s.listened_at >= ? AND s.listened_at < ?) AS hit`,
       params: [did, lo, hi],
     });
   }

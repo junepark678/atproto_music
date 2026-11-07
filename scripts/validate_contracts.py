@@ -94,6 +94,20 @@ def valid_at_uri(value):
             re.fullmatch(r'[A-Za-z0-9._~:-]+', parts[2]) is not None)
 
 
+def valid_listen_uri(value):
+    if not isinstance(value, str):
+        return False
+    if valid_at_uri(value):
+        return True
+    if value.count('#') != 1:
+        return False
+    container, listen_id = value.split('#', 1)
+    if not valid_at_uri(container) or not re.fullmatch(r'[234567abcdefghij][234567abcdefghijklmnopqrstuvwxyz]{12}', listen_id):
+        return False
+    collection = container.removeprefix('at://').split('/')[1]
+    return collection.endswith('.scrobbleBatch')
+
+
 def valid_cid(value):
     if not isinstance(value, str) or not re.fullmatch(r'b[a-z2-7]+', value):
         return False
@@ -134,6 +148,7 @@ def build_validator():
 
     checker.checks('at-did')(lambda value: not isinstance(value, str) or valid_did(value))
     checker.checks('at-record-uri')(lambda value: not isinstance(value, str) or valid_at_uri(value))
+    checker.checks('at-listen-uri')(lambda value: not isinstance(value, str) or valid_listen_uri(value))
     checker.checks('at-record-cid')(lambda value: not isinstance(value, str) or valid_cid(value))
     checker.checks('at-handle')(lambda value: not isinstance(value, str) or valid_handle(value))
 
@@ -820,8 +835,8 @@ def query_bounds(spec, validator_type, checker):
         require(not bool(errors) == valid, f'query_bounds: wrong viewer acceptance {value!r}')
         count += 1
     status = {dereference(spec, p)['name']: dereference(spec, p) for p in found[('GET', '/api/v1/records/status')]['parameters']}
-    require(status['uri'].get('required') is True and status['uri']['schema'] == {'$ref': '#/components/schemas/AtUri'},
-            'query_bounds: records/status requires an AT URI')
+    require(status['uri'].get('required') is True and status['uri']['schema'] == {'$ref': '#/components/schemas/ListenUri'},
+            'query_bounds: records/status requires a ListenUri')
     body = found[('POST', '/api/v1/notify')]['requestBody']
     require(body.get('required') is True and body.get('x-maxBodyBytes') == NOTIFY_MAX_BODY_BYTES, 'query_bounds: notify body must be required and capped at 2 KiB (N1)')
     # v1.2: body caps (ADR 0005 §3.6), the Idempotency-Key syntax and the required query fields.
@@ -1206,8 +1221,8 @@ def lexicons(override=None, published=None):
             'lexicons/scrobbleBatch.json: envelope createdAt must be a datetime')
     envelope_listens = batch_record['properties']['listens']
     require(envelope_listens.get('type') == 'array' and envelope_listens.get('minLength') == 1 and
-            envelope_listens.get('maxLength') == 200,
-            'lexicons/scrobbleBatch.json: listens must be bounded to 1–200 entries')
+            envelope_listens.get('maxLength') == 10000,
+            'lexicons/scrobbleBatch.json: listens must be bounded to 1–10,000 entries')
     item = envelope_listens.get('items', {})
     require(item.get('type') == 'object' and item.get('required') == ['id', 'artist', 'track', 'listenedAt', 'createdAt'] and
             isinstance(item.get('properties'), dict),
@@ -1444,7 +1459,7 @@ def main():
     print(f'PASS session_access: {sum(modes.values())} v1.2 routes ({", ".join(f"{n} {m}" for m, n in sorted(modes.items()))}); '
           f'{len(WRITE_ROUTES)} writes answer 202 Accepted and 503 publication_disabled; {len(REQUIRED_ERROR_CODES)} named error responses declared')
     count = query_bounds(spec, validator_type, checker)
-    print(f'PASS query_bounds: {count} limit/viewer/body/Idempotency-Key boundaries; defaults, cursor, window, scope, viewer, record URI, '
+    print(f'PASS query_bounds: {count} limit/viewer/body/Idempotency-Key boundaries; defaults, cursor, window, scope, viewer, ListenUri, '
           '2 KiB notify body, 64 KiB v1.2 bodies and the 64 MiB raw upload')
     validated = set()
     count, negative, requests = response_examples(spec, validator_type, checker, validated)

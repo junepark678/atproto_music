@@ -64,12 +64,19 @@ import type { OperationRow } from '../app/rows';
 import { verifySessionKey } from '../credentials/lastfm-auth';
 import type { ModuleDeps } from '../do/contracts';
 import { upsertNowPlaying } from '../do/read/now-playing';
+import { visibleScrobblesFrom } from '../do/read/visibility';
 import { musicKeyColumns } from '../do/write/keys';
+import {
+  commitUnsentBatchListenRemoval,
+  enqueueBatchListenDelete,
+  prepareUnsentBatchListenRemoval,
+} from '../outbox/batch-delete-ops';
 import { enqueueScrobbleDelete, removeScrobbleCreate } from '../outbox/delete-ops';
 import { enqueueForwards } from '../outbox/forward-enqueue';
 import { acceptListens, type ListenResult } from '../outbox/ingress';
 import { enqueueLove, enqueueUnlove } from '../outbox/love-ops';
 import { loadOperation, outboxCollections, UNSETTLED_SQL } from '../outbox/operations';
+import { newerThanUncertain } from '../outbox/removal-fence';
 import type { LastfmCall, LastfmMethodDef, LastfmMethodTable } from './auth-methods';
 import { authFailure } from './auth-methods';
 import { type LfmDocument, type LfmElement, leaf, lfmOk, node } from './encode';
@@ -367,6 +374,7 @@ const unloveMethod: LastfmMethodDef = {
 
 export type RemoveMatch =
   | { kind: 'cancelled'; operationId: string }
+  | { kind: 'rewritten'; operationId: string }
   | { kind: 'delete_chained'; operationId: string; deleteId: string }
   | { kind: 'delete_indexed'; uri: string; deleteId: string }
   | { kind: 'delete_pending'; uri: string; deleteId: string };
@@ -378,26 +386,38 @@ function uriOf(op: Pick<OperationRow, 'did' | 'collection' | 'rkey'>): string {
 }
 
 /** An unsettled scrobble.delete of the DID at `rkey`, if any. */
-function pendingDelete(m: ModuleDeps, did: string, collection: string, rkey: string): string | null {
+function pendingDelete(m: ModuleDeps, did: string, collection: string, rkey: string, listenId?: string): string | null {
   return (
     m.db.one<{ id: string }>(
       `SELECT id FROM operations WHERE did = ? AND kind = 'scrobble.delete' AND collection = ? AND rkey = ?
-         AND state IN ${UNSETTLED_SQL} ORDER BY rowid DESC LIMIT 1`,
+         AND state IN ${UNSETTLED_SQL}
+         AND (? != ? OR EXISTS (SELECT 1 FROM batch_delete_listens bdl WHERE bdl.operation_id=operations.id
+           AND bdl.listen_id IN (?, '*')))
+       ORDER BY rowid DESC LIMIT 1`,
       did,
       collection,
       rkey,
+      collection,
+      collection.endsWith('.scrobbleBatch') ? collection : '',
+      listenId ?? '',
     )?.id ?? null
   );
 }
 
 /** True when a delete of ours already removed the record at `rkey`, or the index verified it absent. */
-function alreadyRemoved(m: ModuleDeps, did: string, collection: string, rkey: string): boolean {
+function alreadyRemoved(m: ModuleDeps, did: string, collection: string, rkey: string, listenId?: string): boolean {
   const deleted = m.db.one<{ one: number }>(
     `SELECT 1 AS one FROM operations WHERE did = ? AND kind = 'scrobble.delete' AND collection = ? AND rkey = ?
-       AND state = 'succeeded' LIMIT 1`,
+       AND state = 'succeeded'
+       AND (? != ? OR EXISTS (SELECT 1 FROM batch_delete_listens bdl WHERE bdl.operation_id=operations.id
+         AND bdl.listen_id IN (?, '*')))
+     LIMIT 1`,
     did,
     collection,
     rkey,
+    collection,
+    collection.endsWith('.scrobbleBatch') ? collection : '',
+    listenId ?? '',
   );
   if (deleted !== null) return true;
   const state = m.db.one<{ state: string }>(
@@ -443,7 +463,8 @@ export interface RemoveScrobbleArgs {
 export async function removeScrobble(m: ModuleDeps, args: RemoveScrobbleArgs): Promise<RemoveMatch[]> {
   const prefix = m.config.prefix;
   if (prefix === null) throw new RangeError('the namespace gate is closed: no lexicon prefix');
-  const collection = outboxCollections(prefix).scrobble;
+  const collections = outboxCollections(prefix);
+  const collection = collections.scrobble;
   let keys: ReturnType<typeof musicKeyColumns>;
   let key: string;
   try {
@@ -461,49 +482,145 @@ export async function removeScrobble(m: ModuleDeps, args: RemoveScrobbleArgs): P
   }
   const lower = toStorage(BigInt(args.timestamp) * NS_PER_SECOND);
   const upper = toStorage(BigInt(args.timestamp + 1) * NS_PER_SECOND);
+  const unsentBatchPlans = new Map<string, NonNullable<Awaited<ReturnType<typeof prepareUnsentBatchListenRemoval>>>>();
+  for (const operationId of createsWithKey(m, args.did, key)) {
+    const candidate = loadOperation(m.db, operationId);
+    if (candidate?.collection !== collections.scrobbleBatch) continue;
+    const entryId = m.db.one<{ entry_id: string }>(
+      `SELECT b.entry_id FROM batch_entry_items b JOIN import_items i
+         ON i.job_id=b.job_id AND i.seq=b.seq
+       WHERE b.operation_id=? AND i.dedupe_key=? LIMIT 1`,
+      candidate.id,
+      key,
+    )?.entry_id;
+    if (entryId === undefined) continue;
+    const plan = await prepareUnsentBatchListenRemoval(m, { did: args.did, operationId, listenId: entryId });
+    if (plan !== null) unsentBatchPlans.set(operationId, plan);
+  }
   const matches = m.db.tx((): RemoveMatch[] => {
     const out: RemoveMatch[] = [];
     const handled = new Set<string>();
-    const indexed = m.db.one<{ uri: string; rkey: string }>(
-      `SELECT uri, rkey FROM scrobbles WHERE did = ? AND artist_key = ? AND track_key = ?
-         AND listened_at >= ? AND listened_at < ? ORDER BY listened_at DESC, uri DESC LIMIT 1`,
+    const indexed = m.db.one<{ uri: string; rkey: string; record_uri: string | null; listen_id: string | null }>(
+      `SELECT s.uri, s.rkey, s.record_uri, s.listen_id FROM ${visibleScrobblesFrom('s', 'u')}
+       WHERE s.did = ? AND s.artist_key = ? AND s.track_key = ?
+         AND s.listened_at >= ? AND s.listened_at < ? ORDER BY s.listened_at DESC, s.uri DESC LIMIT 1`,
       args.did,
       keys.artist_key,
       keys.track_key,
       lower,
       upper,
     );
+    const rawIndexed =
+      indexed ??
+      m.db.one<{
+        uri: string;
+        rkey: string;
+        record_uri: string | null;
+        listen_id: string | null;
+      }>(
+        `SELECT uri,rkey,record_uri,listen_id FROM scrobbles WHERE did=? AND artist_key=? AND track_key=?
+       AND listened_at>=? AND listened_at<? ORDER BY listened_at DESC,uri DESC LIMIT 1`,
+        args.did,
+        keys.artist_key,
+        keys.track_key,
+        lower,
+        upper,
+      );
     const isIndexed = (uri: string) => m.db.one('SELECT 1 AS one FROM scrobbles WHERE uri = ?', uri) !== null;
+    const freshDelete = (row: { uri: string; record_uri: string | null; listen_id: string | null }) =>
+      row.record_uri !== null && row.listen_id !== null
+        ? enqueueBatchListenDelete(m, {
+            did: args.did,
+            uri: row.record_uri,
+            listenIds: [row.listen_id],
+            origin: 'lastfm',
+          })
+        : enqueueScrobbleDelete(m, { did: args.did, uri: row.uri, origin: 'lastfm' });
 
-    for (const id of createsWithKey(m, args.did, key)) {
+    // A visible indexed single wins over a pending batch with the same music
+    // key. If the visible row is a batch item, an exact pending single is the
+    // cross-format winner and must be removed on its own first.
+    const pendingIds = createsWithKey(m, args.did, key);
+    const pendingSingleIds = pendingIds.filter((id) => loadOperation(m.db, id)?.collection === collection);
+    const preferredPendingSingle = pendingSingleIds[0];
+    const indexedSingle = indexed !== null && indexed.record_uri === null;
+    const pendingSingleWins = indexed !== null && indexed.record_uri !== null && preferredPendingSingle !== undefined;
+
+    for (const id of pendingIds) {
       const op = loadOperation(m.db, id);
       if (op === null || op.did !== args.did || op.kind !== 'scrobble.create' || op.rkey === null) continue;
-      if (op.collection !== collection) continue;
+      if (op.collection !== collection && op.collection !== collections.scrobbleBatch) continue;
+      if (indexedSingle) continue;
+      if (pendingSingleWins && id !== preferredPendingSingle) continue;
+      if (!pendingSingleWins && indexed !== null) continue;
+      if (indexed === null && preferredPendingSingle !== undefined && id !== preferredPendingSingle) continue;
       if (op.state === 'failed' || op.state === 'cancelled') continue;
       const uri = uriOf(op);
       if (handled.has(uri) || isIndexed(uri)) continue; // the indexed path below handles it
       handled.add(uri);
-      const waiting = pendingDelete(m, args.did, op.collection, op.rkey);
+      const batchEntry =
+        op.collection === collections.scrobbleBatch
+          ? m.db.one<{ entry_id: string }>(
+              `SELECT b.entry_id FROM batch_entry_items b JOIN import_items i
+            ON i.job_id=b.job_id AND i.seq=b.seq WHERE b.operation_id=? AND i.dedupe_key=? LIMIT 1`,
+              op.id,
+              key,
+            )?.entry_id
+          : undefined;
+      if (op.collection === collections.scrobbleBatch && batchEntry === undefined) continue;
+      const waiting = pendingDelete(m, args.did, op.collection, op.rkey, batchEntry);
       if (waiting !== null) {
         out.push({ kind: 'delete_pending', uri, deleteId: waiting });
         continue;
       }
-      if (alreadyRemoved(m, args.did, op.collection, op.rkey)) continue;
-      const removed = removeScrobbleCreate(m, { did: args.did, operationId: op.id, origin: 'lastfm' });
+      if (alreadyRemoved(m, args.did, op.collection, op.rkey, batchEntry)) continue;
+      const plan = unsentBatchPlans.get(op.id);
+      if (plan !== undefined && commitUnsentBatchListenRemoval(m, plan) !== null) {
+        out.push({ kind: 'rewritten', operationId: op.id });
+        continue;
+      }
+      const removed = removeScrobbleCreate(m, {
+        did: args.did,
+        operationId: op.id,
+        origin: 'lastfm',
+        ...(batchEntry ? { listenId: batchEntry } : {}),
+      });
       if (removed.status === 'cancelled') out.push({ kind: 'cancelled', operationId: op.id });
       else if (removed.status === 'delete_chained') {
         out.push({ kind: 'delete_chained', operationId: op.id, deleteId: removed.delete.id });
       }
     }
 
-    if (indexed !== null && !handled.has(indexed.uri)) {
-      const waiting = pendingDelete(m, args.did, collection, indexed.rkey);
-      if (waiting !== null) {
+    if (indexed !== null && !handled.has(indexed.uri) && !pendingSingleWins) {
+      const targetCollection = indexed.record_uri !== null ? collections.scrobbleBatch : collection;
+      const targetRkey = indexed.record_uri !== null ? indexed.record_uri.split('/').at(-1)! : indexed.rkey;
+      // No historical receipt short-circuits a visible row: the shared
+      // overlay already hides every incarnation a delete of ours still covers
+      // (pending, or its swap/evidence CIDs), so a visible row is a newer
+      // verified incarnation (e.g. the owner restored the same listen id at a
+      // new CID) and needs a fresh delete intent.
+      const waiting = pendingDelete(m, args.did, targetCollection, targetRkey, indexed.listen_id ?? undefined);
+      if (waiting !== null && !newerThanUncertain(m.db, waiting, indexed.uri)) {
         out.push({ kind: 'delete_pending', uri: indexed.uri, deleteId: waiting });
       } else {
-        const del = enqueueScrobbleDelete(m, { did: args.did, uri: indexed.uri, origin: 'lastfm' });
-        out.push({ kind: 'delete_indexed', uri: indexed.uri, deleteId: del.id });
+        out.push({ kind: 'delete_indexed', uri: indexed.uri, deleteId: freshDelete(indexed).id });
       }
+    }
+    // A pending batch item is hidden from the shared read overlay immediately.
+    // Keep its exact intent discoverable to a repeated protocol delete without
+    // allowing a sibling item in that same container to satisfy the request.
+    if (indexed === null && rawIndexed !== null) {
+      const targetCollection = rawIndexed.record_uri !== null ? collections.scrobbleBatch : collection;
+      const targetRkey = rawIndexed.record_uri !== null ? rawIndexed.record_uri.split('/').at(-1)! : rawIndexed.rkey;
+      const waiting = pendingDelete(m, args.did, targetCollection, targetRkey, rawIndexed.listen_id ?? undefined);
+      // A removal holding an unknown send never writes into a later
+      // incarnation (outbox/removal-fence.ts). When the verified projection
+      // is provably newer than its fence, this request is a fresh intent, not
+      // a repeat of that one: admit it (it supersedes the old one when it
+      // covers its targets). Otherwise it is the same intent: absorbed.
+      if (waiting !== null && newerThanUncertain(m.db, waiting, rawIndexed.uri)) {
+        out.push({ kind: 'delete_indexed', uri: rawIndexed.uri, deleteId: freshDelete(rawIndexed).id });
+      } else if (waiting !== null) out.push({ kind: 'delete_pending', uri: rawIndexed.uri, deleteId: waiting });
     }
     return out;
   });

@@ -60,8 +60,10 @@ import type { ModuleDeps } from '../do/contracts';
 import type { Db } from '../do/db';
 import { admit } from '../do/ingest/admission';
 import { enqueueHints, type HintInput } from '../do/ingest/hints';
-import { loadUser } from '../do/write/account-state';
+import { bumpStatsVersion, loadUser } from '../do/write/account-state';
 import { MAX_BATCH_WRITES, planBatch, sendCreateBatch } from './apply-writes';
+import { batchDeleteExecutor } from './batch-delete-ops';
+import { batchCreateExecutor } from './batch-ops';
 import { chargePoints, checkBudget, observeRateLimit, WRITE_COST } from './budget';
 import { scrobbleDeleteExecutor } from './delete-ops';
 import { followDeleteExecutor, followPutExecutor } from './follow-ops';
@@ -71,13 +73,19 @@ import {
   beginAttempts,
   beginReconcile,
   blockOperations,
+  explicitlyUnsentSql,
+  IMPORT_PRIORITY,
+  insertOperation,
+  legacyImportNeedsReconcile,
   MAX_ATTEMPTS,
+  newOperationId,
   type OutboxCollections,
   outboxCollections,
   persistRunning,
   unblockOperations,
 } from './operations';
 import { type HintTarget, type Outcome, type PdsWriterSource, PdsXrpc } from './pds-writer';
+import { exhaustedUncertain, heldRemovalEdgeSql } from './removal-fence';
 import { scrobbleCreateExecutor } from './scrobble-ops';
 import { settingsPutExecutor } from './settings-ops';
 
@@ -148,6 +156,23 @@ export function estimatedCost(kind: OperationKind): number {
   }
 }
 
+/** A targeted batch-listen removal normally rewrites the container (2 points). */
+function estimatedOperationCost(db: Db, op: OperationRow): number {
+  if (
+    op.kind === 'scrobble.delete' &&
+    db.one('SELECT 1 AS x FROM batch_delete_children WHERE parent_operation_id=? LIMIT 1', op.id) !== null
+  )
+    return 0;
+  if (op.kind === 'scrobble.delete' && op.collection.endsWith('.scrobbleBatch')) {
+    const ids = db.all<{ listen_id: string }>(
+      'SELECT listen_id FROM batch_delete_listens WHERE operation_id = ?',
+      op.id,
+    );
+    if (ids.length > 0 && !ids.some(({ listen_id }) => listen_id === '*')) return WRITE_COST.update;
+  }
+  return estimatedCost(op.kind);
+}
+
 // ---------------------------------------------------------------------------
 // The run
 
@@ -179,10 +204,34 @@ export interface OutboxRunReport {
   skipped: boolean;
 }
 
-/** Ready: no predecessor still queued, running or blocked. */
+/**
+ * Ready: no predecessor still queued, running or blocked, except a removal of
+ * the same key that holds an unknown send read-only and never sends again
+ * (removal-fence heldRemovalEdgeSql): an existing edge to it, direct or
+ * through another removal, never strands a later removal.
+ */
 const READY = `NOT EXISTS (SELECT 1 FROM operation_deps d JOIN operations p ON p.id = d.pred_id
-  WHERE d.op_id = o.id AND p.state IN ('queued','running','blocked'))`;
+  WHERE d.op_id = o.id AND p.state IN ('queued','running','blocked') AND NOT ${heldRemovalEdgeSql('o', 'p')})`;
 const DUE = `o.state IN ('queued','running')`;
+
+/**
+ * A batch-lane scope hold: the executor's explicit `batch_scope_required`, or
+ * any batch read/write failure the transport classified as a permanent scope
+ * denial (403 / 4xx ScopeMissing, InsufficientScope, Forbidden). A 5xx or a
+ * transport failure is never one, whatever its body names (it is transient).
+ */
+function isBatchScopeHold(outcome: Outcome): boolean {
+  return (
+    (outcome.kind === 'reauth' && outcome.code === 'batch_scope_required') ||
+    (outcome.kind === 'permanent' && outcome.code === 'forbidden_scope')
+  );
+}
+
+function hasGrantedBatchScope(scope: string | undefined, prefix: string | null): boolean {
+  if (scope === undefined) return false;
+  const scopes = new Set(scope.split(/\s+/).filter(Boolean));
+  return scopes.has('transition:generic') || (prefix !== null && scopes.has(`repo:${prefix}.scrobbleBatch`));
+}
 
 const inFlight = new WeakSet<Db>();
 
@@ -201,6 +250,7 @@ class Run {
   private readonly memos = new Map<string, unknown>();
   private readonly dids = new Map<string, DidState>();
   private readonly collections: OutboxCollections;
+  private readonly eligibility: string;
 
   constructor(
     private readonly m: OutboxDeps,
@@ -208,6 +258,16 @@ class Run {
     prefix: string,
   ) {
     this.collections = outboxCollections(prefix);
+    // An explicitly unsent import single without dependencies waits for the
+    // rebatcher. Anything else runs: a row whose send is uncertain finishes at
+    // its original rkey, and a dependency (a chained removal) is never left
+    // waiting on a create that neither lane would move.
+    this.eligibility = ` AND NOT (
+        (o.origin = 'import' AND o.kind = 'scrobble.create' AND o.collection = '${this.collections.scrobble}'
+         AND ${explicitlyUnsentSql('o')}
+         AND NOT EXISTS (SELECT 1 FROM operation_deps dd WHERE dd.op_id = o.id OR dd.pred_id = o.id)
+         AND EXISTS (SELECT 1 FROM import_items i WHERE i.operation_id = o.id AND i.state = 'queued'))
+        ${m.config.batchPublication ? '' : `OR o.collection = '${this.collections.scrobbleBatch}'`})`;
   }
 
   get db(): Db {
@@ -217,14 +277,14 @@ class Run {
   async run(): Promise<OutboxRunReport> {
     const priorities = this.db
       .all<{ priority: number }>(
-        `SELECT DISTINCT o.priority FROM operations o WHERE ${DUE} AND o.due_at <= ? ORDER BY o.priority`,
+        `SELECT DISTINCT o.priority FROM operations o WHERE ${DUE} AND o.due_at <= ?${this.eligibility} ORDER BY o.priority`,
         this.now,
       )
       .map((r) => r.priority);
     lanes: for (const priority of priorities) {
       const dids = this.db.all<{ did: string }>(
         `SELECT o.did, min(o.due_at) AS d FROM operations o
-         WHERE ${DUE} AND o.priority = ? AND o.due_at <= ? AND ${READY}
+         WHERE ${DUE} AND o.priority = ? AND o.due_at <= ?${this.eligibility} AND ${READY}
          GROUP BY o.did ORDER BY d, o.did LIMIT ?`,
         priority,
         this.now,
@@ -261,7 +321,7 @@ class Run {
   private earlierLaneLeft(did: string, priority: number): boolean {
     return (
       this.db.one<{ x: number }>(
-        `SELECT 1 AS x FROM operations o WHERE o.did = ? AND o.priority < ? AND ${DUE} AND o.due_at <= ? AND ${READY}
+        `SELECT 1 AS x FROM operations o WHERE o.did = ? AND o.priority < ? AND ${DUE} AND o.due_at <= ?${this.eligibility} AND ${READY}
          LIMIT 1`,
         did,
         priority,
@@ -285,12 +345,12 @@ class Run {
     const now = this.m.clock.nowMs();
     if (this.deferred) return now;
     const pending = this.db.all<{ did: string; priority: number }>(
-      `SELECT DISTINCT o.did, o.priority FROM operations o WHERE ${DUE} AND o.due_at <= ? AND ${READY}`,
+      `SELECT DISTINCT o.did, o.priority FROM operations o WHERE ${DUE} AND o.due_at <= ?${this.eligibility} AND ${READY}`,
       now,
     );
     if (pending.some((p) => !this.parked.has(`${p.did}|${p.priority}`) && !this.parked.has(`${p.did}|*`))) return now;
     const row = this.db.one<{ next: number | null }>(
-      `SELECT min(o.due_at) AS next FROM operations o WHERE ${DUE} AND o.due_at > ? AND ${READY}`,
+      `SELECT min(o.due_at) AS next FROM operations o WHERE ${DUE} AND o.due_at > ?${this.eligibility} AND ${READY}`,
       now,
     );
     const candidates = [...this.waits];
@@ -338,7 +398,7 @@ class Run {
 
   private readyOps(did: string, priority: number): OperationRow[] {
     const ops = this.db.all<OperationRow>(
-      `SELECT o.* FROM operations o WHERE o.did = ? AND o.priority = ? AND ${DUE} AND o.due_at <= ? AND ${READY}
+      `SELECT o.* FROM operations o WHERE o.did = ? AND o.priority = ? AND ${DUE} AND o.due_at <= ?${this.eligibility} AND ${READY}
        ORDER BY o.due_at, o.rowid LIMIT ?`,
       did,
       priority,
@@ -352,7 +412,13 @@ class Run {
   private async runDid(state: Extract<DidState, { kind: 'ok' }>, priority: number): Promise<void> {
     const ops = this.readyOps(state.did, priority);
     const handled = new Set<string>();
-    const batchable = ops.filter((o) => o.kind === 'scrobble.create' && o.attempts < MAX_ATTEMPTS);
+    const batchable = ops.filter(
+      (o) =>
+        o.kind === 'scrobble.create' &&
+        o.collection === this.collections.scrobble &&
+        o.attempts < MAX_ATTEMPTS &&
+        !legacyImportNeedsReconcile(this.db, o),
+    );
     if (batchable.length >= 2) {
       if (state.batched) {
         // One applyWrites batch per DID per run: the rest go in the next run.
@@ -383,7 +449,7 @@ class Run {
         return;
       }
       if (op.attempts < MAX_ATTEMPTS) {
-        const budget = checkBudget(this.db, state.did, priority, estimatedCost(op.kind), this.now);
+        const budget = checkBudget(this.db, state.did, priority, estimatedOperationCost(this.db, op), this.now);
         if (!budget.ok) {
           // FIFO within the DID and priority: everything after it waits too.
           this.park(state.did, priority, budget.resumeAtMs);
@@ -428,7 +494,32 @@ class Run {
   }
 
   private async runSingle(state: Extract<DidState, { kind: 'ok' }>, op: OperationRow): Promise<void> {
-    const executor = executorFor(op.kind);
+    if (
+      op.kind === 'scrobble.delete' &&
+      this.db.one('SELECT 1 AS x FROM batch_delete_children WHERE parent_operation_id = ? LIMIT 1', op.id) !== null
+    ) {
+      this.settleBatchDeleteAggregate(op);
+      return;
+    }
+    if (op.collection === this.collections.scrobbleBatch && !this.m.config.batchPublication) return;
+    const executor =
+      op.kind === 'scrobble.create' && op.collection === this.collections.scrobbleBatch
+        ? batchCreateExecutor
+        : op.kind === 'scrobble.delete' && op.collection === this.collections.scrobbleBatch
+          ? batchDeleteExecutor
+          : executorFor(op.kind);
+    if (
+      op.collection === this.collections.scrobbleBatch &&
+      !hasGrantedBatchScope(state.xrpc.scope, this.m.config.prefix)
+    ) {
+      this.report.blocked += this.db.run(
+        "UPDATE operations SET state = 'blocked', last_error = 'batch_scope_required', updated_at_ms = ? WHERE did = ? AND collection = ? AND state IN ('queued','running')",
+        this.m.clock.nowMs(),
+        op.did,
+        this.collections.scrobbleBatch,
+      ).rowsWritten;
+      return;
+    }
     this.report.attempted += 1;
     if (op.attempts >= MAX_ATTEMPTS) {
       // Only an interrupted tenth attempt leaves this (a crash, possibly then
@@ -439,7 +530,10 @@ class Run {
       if (reconciling === null) return;
       const outcome = await this.safely(() => executor.reconcile(reconciling, this.context(state, reconciling)));
       const final: Outcome =
-        outcome.kind === 'succeeded' || outcome.kind === 'permanent' || outcome.kind === 'reauth'
+        outcome.kind === 'succeeded' ||
+        outcome.kind === 'permanent' ||
+        outcome.kind === 'reauth' ||
+        outcome.kind === 'waiting'
           ? outcome
           : { kind: 'permanent', code: reconciling.last_error ?? 'attempts_exhausted' };
       this.settle(state, [[reconciling, final]], false);
@@ -447,8 +541,43 @@ class Run {
     }
     const [started] = beginAttempts(this.db, [op.id], this.m.clock.nowMs());
     if (started === undefined) return;
-    const outcome = await this.safely(() => executor.execute(started, this.context(state, started)));
+    const context = this.context(state, started);
+    let outcome = await this.safely(() => executor.execute(started, context));
+    // The last attempt of a removal whose send is still unknown holds instead
+    // of exhausting; its next look is the read-only reconcile.
+    if (started.kind === 'scrobble.delete' && started.attempts >= MAX_ATTEMPTS) {
+      outcome = exhaustedUncertain(context, started.id, outcome);
+    }
     this.settle(state, [[started, outcome]], true);
+  }
+
+  /** Settles a split-delete receipt after every durable child operation is terminal. */
+  private settleBatchDeleteAggregate(parent: OperationRow): void {
+    this.db.tx(() => {
+      const children = this.db.all<{ state: string }>(
+        `SELECT c.state FROM batch_delete_children r JOIN operations c ON c.id=r.child_operation_id
+         WHERE r.parent_operation_id=?`,
+        parent.id,
+      );
+      if (children.length === 0) {
+        this.db.run(
+          "UPDATE operations SET state='failed',last_error='batch_delete_children_missing',updated_at_ms=? WHERE id=? AND state IN ('queued','running')",
+          this.m.clock.nowMs(),
+          parent.id,
+        );
+        return;
+      }
+      if (children.some(({ state }) => state === 'queued' || state === 'running' || state === 'blocked')) return;
+      const failed = children.some(({ state }) => state !== 'succeeded');
+      this.db.run(
+        `UPDATE operations SET state=?,last_error=?,result_uri=?,updated_at_ms=? WHERE id=? AND state IN ('queued','running')`,
+        failed ? 'failed' : 'succeeded',
+        failed ? 'batch_delete_child_failed' : null,
+        failed || parent.rkey === null ? null : `at://${parent.did}/${parent.collection}/${parent.rkey}`,
+        this.m.clock.nowMs(),
+        parent.id,
+      );
+    });
   }
 
   private async runBatch(state: Extract<DidState, { kind: 'ok' }>, batch: OperationRow[]): Promise<void> {
@@ -485,18 +614,49 @@ class Run {
     const db = this.db;
     const now = this.m.clock.nowMs();
     let reauth = false;
+    let batchScopeHold = false;
     db.tx(() => {
       const hints: HintTarget[] = [];
       for (const [op, outcome] of results) {
-        finish(this.m, op, outcome, now, begun);
+        if (op.collection === this.collections.scrobbleBatch && isBatchScopeHold(outcome)) {
+          batchScopeHold = true;
+          this.report.blocked += db.run(
+            "UPDATE operations SET state = 'blocked', last_error = 'batch_scope_required', updated_at_ms = ? WHERE did = ? AND collection = ? AND state IN ('queued','running')",
+            now,
+            op.did,
+            this.collections.scrobbleBatch,
+          ).rowsWritten;
+        } else if (
+          op.collection === this.collections.scrobbleBatch &&
+          outcome.kind === 'permanent' &&
+          (outcome.code === 'batch_schema_required' || outcome.remoteError === 'InvalidRequest')
+        ) {
+          db.run(
+            "UPDATE operations SET state = 'blocked', last_error = 'batch_schema_required', updated_at_ms = ? WHERE id = ? AND state = 'running'",
+            now,
+            op.id,
+          );
+          this.report.blocked += db.run(
+            "UPDATE operations SET state = 'blocked', last_error = 'batch_schema_required', updated_at_ms = ? WHERE did = ? AND collection = ? AND state = 'queued'",
+            now,
+            op.did,
+            this.collections.scrobbleBatch,
+          ).rowsWritten;
+        } else if (outcome.kind === 'split') this.splitBatch(op, outcome.children, now);
+        else if (!finish(this.m, op, outcome, now, begun)) continue;
         if (outcome.kind === 'succeeded') hints.push(...outcome.hints);
         if (outcome.kind === 'deferred') {
           // A smaller request may still fit (the next run sizes its batch by what is left);
           // otherwise the DID and priority wait for the binding window.
-          if (checkBudget(db, state.did, op.priority, estimatedCost(op.kind), now).ok) this.deferred = true;
+          if (checkBudget(db, state.did, op.priority, estimatedOperationCost(db, op), now).ok) this.deferred = true;
           else this.park(state.did, op.priority, outcome.untilMs);
         }
-        if (outcome.kind === 'reauth') reauth = true;
+        if (outcome.kind === 'waiting') this.park(state.did, op.priority, outcome.untilMs);
+        if (
+          outcome.kind === 'reauth' &&
+          !(op.collection === this.collections.scrobbleBatch && isBatchScopeHold(outcome))
+        )
+          reauth = true;
       }
       if (hints.length > 0 && queueHints(this.m, state.did, hints, now, this.collections)) this.hinted = true;
       if (reauth) {
@@ -508,15 +668,189 @@ class Run {
       state.blocked = true;
       this.dids.set(state.did, { kind: 'blocked' });
     }
+    if (batchScopeHold) state.blocked = false;
+  }
+
+  /** Replace a definitely rejected batch with durable child containers atomically. */
+  private splitBatch(
+    parent: OperationRow,
+    children: Array<{ id: string; rkey: string; prepared: { record: object; digest: string }; entryIds: string[] }>,
+    now: number,
+  ): void {
+    const db = this.db;
+    const mapping = db.all<{
+      entry_id: string;
+      job_id: string;
+      seq: number;
+      removal_operation_id: string | null;
+      removed_at_ms: number | null;
+    }>(
+      'SELECT entry_id, job_id, seq, removal_operation_id, removed_at_ms FROM batch_entry_items WHERE operation_id = ? ORDER BY job_id, seq',
+      parent.id,
+    );
+    if (mapping.length === 0) throw new Error('batch split has no durable entry mapping');
+    const assigned = new Set<string>();
+    const parentUri = `at://${parent.did}/${parent.collection}/${parent.rkey}`;
+    const parentDeletes =
+      parent.collection === this.collections.scrobbleBatch
+        ? db.all<OperationRow>(
+            "SELECT * FROM operations WHERE did=? AND collection=? AND kind='scrobble.delete' AND rkey=? AND state IN ('queued','blocked')",
+            parent.did,
+            parent.collection,
+            parent.rkey,
+          )
+        : [];
+    const parentIntents = new Map<string, string[]>();
+    for (const removal of parentDeletes) {
+      parentIntents.set(
+        removal.id,
+        db
+          .all<{ listen_id: string }>('SELECT listen_id FROM batch_delete_listens WHERE operation_id=?', removal.id)
+          .map(({ listen_id }) => listen_id),
+      );
+    }
+    for (const removal of parentDeletes)
+      db.run('DELETE FROM operation_deps WHERE op_id=? AND pred_id=?', removal.id, parent.id);
+    for (const child of children) {
+      const rows = mapping.filter((row) => child.entryIds.includes(row.entry_id));
+      if (rows.length === 0) throw new Error('batch split child has no mapped entries');
+      for (const row of rows) assigned.add(`${row.job_id}\u0000${row.seq}`);
+      const created = insertOperation(
+        db,
+        {
+          id: child.id,
+          did: parent.did,
+          kind: parent.kind,
+          origin: parent.origin,
+          priority: IMPORT_PRIORITY,
+          collection: parent.collection,
+          rkey: child.rkey,
+          prepared: child.prepared,
+          dueAt: now,
+          importJobId: parent.import_job_id,
+        },
+        now,
+      );
+      const childRemovalByParent = new Map<string, string>();
+      for (const removal of parentDeletes) {
+        const intents = parentIntents.get(removal.id) ?? [];
+        const wildcard = intents.includes('*');
+        const targeted = wildcard ? child.entryIds : child.entryIds.filter((entryId) => intents.includes(entryId));
+        if (targeted.length === 0) continue;
+        const childRemoval = insertOperation(
+          db,
+          {
+            id: newOperationId(this.m.random),
+            did: removal.did,
+            kind: 'scrobble.delete',
+            origin: removal.origin,
+            priority: removal.priority,
+            collection: removal.collection,
+            rkey: child.rkey,
+            dueAt: now,
+            predecessors: [created.id],
+          },
+          now,
+        );
+        childRemovalByParent.set(removal.id, childRemoval.id);
+        db.run(
+          'INSERT INTO batch_delete_children(parent_operation_id,child_operation_id) VALUES (?,?)',
+          removal.id,
+          childRemoval.id,
+        );
+        for (const id of wildcard ? ['*'] : targeted) {
+          db.run('INSERT INTO batch_delete_listens(operation_id,listen_id) VALUES (?,?)', childRemoval.id, id);
+        }
+        db.run('DELETE FROM batch_delete_listens WHERE operation_id=?', removal.id);
+        db.run('INSERT OR IGNORE INTO operation_deps(op_id,pred_id) VALUES (?,?)', removal.id, childRemoval.id);
+        if (wildcard) {
+          db.run(
+            'UPDATE listen_removals SET record_uri=?,operation_id=? WHERE operation_id=? AND record_uri=?',
+            `at://${parent.did}/${parent.collection}/${child.rkey}`,
+            childRemoval.id,
+            removal.id,
+            parentUri,
+          );
+        } else {
+          for (const id of targeted) {
+            db.run(
+              'UPDATE listen_removals SET record_uri=?,operation_id=? WHERE operation_id=? AND record_uri=? AND listen_id=?',
+              `at://${parent.did}/${parent.collection}/${child.rkey}`,
+              childRemoval.id,
+              removal.id,
+              parentUri,
+              id,
+            );
+          }
+        }
+      }
+      for (const row of rows) {
+        const item = db.run(
+          "UPDATE import_items SET operation_id = ? WHERE job_id = ? AND seq = ? AND operation_id = ? AND state = 'queued'",
+          created.id,
+          row.job_id,
+          row.seq,
+          parent.id,
+        );
+        const key = db.run(
+          'UPDATE listen_keys SET operation_id = ? WHERE operation_id = ? AND dedupe_key = (SELECT dedupe_key FROM import_items WHERE job_id = ? AND seq = ?)',
+          created.id,
+          parent.id,
+          row.job_id,
+          row.seq,
+        );
+        if (item.rowsWritten !== 1 || key.rowsWritten !== 1) throw new Error('batch split membership changed');
+        const removalOperationId =
+          (row.removal_operation_id !== null && childRemovalByParent.has(row.removal_operation_id)
+            ? row.removal_operation_id
+            : parentDeletes.find((candidate) => {
+                const intents = parentIntents.get(candidate.id) ?? [];
+                return intents.includes('*') || intents.includes(row.entry_id);
+              })?.id) ?? null;
+        const childRemovalId =
+          removalOperationId === null ? null : (childRemovalByParent.get(removalOperationId) ?? null);
+        db.run(
+          `INSERT INTO batch_entry_items(operation_id, entry_id, job_id, seq, removal_operation_id, removed_at_ms)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+          created.id,
+          row.entry_id,
+          row.job_id,
+          row.seq,
+          childRemovalId,
+          row.removed_at_ms,
+        );
+        if (childRemovalId !== null)
+          db.run(
+            'UPDATE import_items SET removal_operation_id=? WHERE job_id=? AND seq=?',
+            childRemovalId,
+            row.job_id,
+            row.seq,
+          );
+      }
+    }
+    if (assigned.size !== mapping.length) throw new Error('batch split did not account for every entry');
+    db.run(
+      "UPDATE operations SET state = 'cancelled', last_error = 'batch_split', updated_at_ms = ? WHERE id = ? AND state = 'running'",
+      now,
+      parent.id,
+    );
+    db.run('DELETE FROM batch_entry_items WHERE operation_id = ?', parent.id);
   }
 }
 
-/** Persists one outcome on a running operation (synchronous; inside the caller's tx). */
-function finish(m: ModuleDeps, op: OperationRow, outcome: Outcome, now: number, begun: boolean): void {
+/**
+ * Persists one outcome on a running operation (synchronous; inside the
+ * caller's tx). Answers whether it was persisted: an operation that is no
+ * longer this running attempt (cancelled or superseded while its executor was
+ * suspended) is left as it is, and so is everything a success would clean up
+ * or count (its cleanup, statistics and create receipts, which may now belong
+ * to the successor).
+ */
+function finish(m: ModuleDeps, op: OperationRow, outcome: Outcome, now: number, begun: boolean): boolean {
   const db = m.db;
   switch (outcome.kind) {
-    case 'succeeded':
-      db.run(
+    case 'succeeded': {
+      const settled = db.run(
         `UPDATE operations SET state = 'succeeded', result_uri = ?, result_cid = ?, swap_cid = coalesce(?, swap_cid),
            last_error = ?, updated_at_ms = ? WHERE id = ? AND state = 'running'`,
         outcome.uri ?? null,
@@ -525,33 +859,104 @@ function finish(m: ModuleDeps, op: OperationRow, outcome: Outcome, now: number, 
         outcome.note ?? null,
         now,
         op.id,
-      );
+      ).rowsWritten;
+      if (settled !== 1) return false;
+      if (op.kind === 'scrobble.delete' && outcome.note === 'record_not_ours') {
+        db.run('DELETE FROM listen_removals WHERE operation_id = ?', op.id);
+        db.run('DELETE FROM batch_delete_listens WHERE operation_id = ?', op.id);
+        db.run('DELETE FROM listen_removal_cids WHERE operation_id = ?', op.id);
+        // Nothing of ours was removed: no repository boundary may suppress the key.
+        db.run(
+          `UPDATE operations SET removal_head_rev = NULL, removal_commit_rev = NULL, removal_done_rev = NULL,
+             removal_done_basis = NULL, removal_reached = NULL, removal_reached_at_ms = NULL WHERE id = ?`,
+          op.id,
+        );
+      }
       // A confirmed scrobble removal no longer needs the listen payload in
       // succeeded create receipts. Keep identity, result CID, idempotency key
       // and request hash so retries still resolve to their original receipt
       // rather than republishing a deleted listen. Failed/unresolved deletes
       // never erase the payload needed for investigation/reconciliation.
+      // Success can change visibility (a fence already crossed by a verified
+      // absence and recreation makes the listen visible), so stats move.
+      if (op.kind === 'scrobble.delete') bumpStatsVersion(db, op.did);
       if (op.kind === 'scrobble.delete' && outcome.note !== 'record_not_ours') {
-        db.run(
-          `UPDATE operations SET record_json = NULL, digest = NULL
-           WHERE did = ? AND collection = ? AND rkey = ? AND kind = 'scrobble.create' AND state = 'succeeded'`,
+        const successfulCreates = db.all<{ id: string; record_json: string | null }>(
+          `SELECT id, record_json FROM operations WHERE did = ? AND collection = ? AND rkey = ?
+             AND kind = 'scrobble.create' AND state = 'succeeded'`,
           op.did,
           op.collection,
           op.rkey,
         );
+        if (m.config.prefix !== null && op.collection === outboxCollections(m.config.prefix).scrobbleBatch) {
+          const removed = new Set(
+            db
+              .all<{ listen_id: string }>('SELECT listen_id FROM batch_delete_listens WHERE operation_id = ?', op.id)
+              .map((row) => row.listen_id),
+          );
+          for (const create of successfulCreates) {
+            if (create.record_json === null) continue;
+            try {
+              const record = JSON.parse(create.record_json) as { listens?: { id?: unknown }[] };
+              if (Array.isArray(record.listens)) {
+                record.listens = removed.has('*') ? [] : record.listens.filter((item) => !removed.has(String(item.id)));
+                db.run(
+                  'UPDATE operations SET record_json = ?, digest = NULL WHERE id = ?',
+                  JSON.stringify(record),
+                  create.id,
+                );
+              }
+            } catch {
+              /* Leave an unparseable forensic payload untouched. */
+            }
+          }
+        } else {
+          db.run(
+            `UPDATE operations SET record_json = NULL, digest = NULL
+             WHERE did = ? AND collection = ? AND rkey = ? AND kind = 'scrobble.create' AND state = 'succeeded'`,
+            op.did,
+            op.collection,
+            op.rkey,
+          );
+        }
+        // Settlement adds no suppression evidence: local settlement time says
+        // nothing about repository order, and the projection may already hold
+        // a verified later recreation. The receipt's boundary is the ordered
+        // completion the executor persisted before settling (removal-fence.ts,
+        // read/visibility); a legacy receipt keeps its pre-write CIDs.
+        if (m.config.prefix !== null && op.collection === outboxCollections(m.config.prefix).scrobbleBatch) {
+          db.run('UPDATE batch_entry_items SET removed_at_ms = ? WHERE removal_operation_id = ?', now, op.id);
+          db.run(
+            "UPDATE import_items SET removed_at_ms = ?, record_json = '{}' WHERE removal_operation_id = ?",
+            now,
+            op.id,
+          );
+          db.run(
+            `DELETE FROM listen_keys WHERE did = ?
+               AND operation_id IN (SELECT operation_id FROM batch_entry_items WHERE removal_operation_id = ?)
+               AND dedupe_key IN (SELECT dedupe_key FROM import_items WHERE removal_operation_id = ?)`,
+            op.did,
+            op.id,
+            op.id,
+          );
+        }
       }
-      return;
+      return true;
+    }
     case 'transient':
       if (op.attempts >= MAX_ATTEMPTS) {
-        db.run(
-          `UPDATE operations SET state = 'failed', last_error = ?, swap_cid = coalesce(?, swap_cid), updated_at_ms = ?
+        return (
+          db.run(
+            `UPDATE operations SET state = 'failed', last_error = ?, swap_cid = coalesce(?, swap_cid), updated_at_ms = ?
            WHERE id = ? AND state = 'running'`,
-          outcome.code,
-          outcome.swapCid ?? null,
-          now,
-          op.id,
+            outcome.code,
+            outcome.swapCid ?? null,
+            now,
+            op.id,
+          ).rowsWritten === 1
         );
-      } else {
+      }
+      return (
         db.run(
           `UPDATE operations SET state = 'queued', last_error = ?, swap_cid = coalesce(?, swap_cid), due_at = ?,
              updated_at_ms = ? WHERE id = ? AND state = 'running'`,
@@ -560,39 +965,55 @@ function finish(m: ModuleDeps, op: OperationRow, outcome: Outcome, now: number, 
           now + nextDelayMs(op.attempts, m.random, outcome.retryAfterMs),
           now,
           op.id,
-        );
-      }
-      return;
-    case 'permanent':
-      db.run(
-        `UPDATE operations SET state = 'failed', last_error = ?, updated_at_ms = ? WHERE id = ? AND state = 'running'`,
-        outcome.code,
-        now,
-        op.id,
+        ).rowsWritten === 1
       );
-      return;
+    case 'permanent':
+      return (
+        db.run(
+          `UPDATE operations SET state = 'failed', last_error = ?, updated_at_ms = ? WHERE id = ? AND state = 'running'`,
+          outcome.code,
+          now,
+          op.id,
+        ).rowsWritten === 1
+      );
     case 'deferred':
       // The budget stopped the attempt before anything of it was left unconfirmed:
       // queued again at its due time, the attempt not counted; the run parks the DID.
-      db.run(
-        `UPDATE operations SET state = 'queued', attempts = attempts - ?, updated_at_ms = ?
+      return (
+        db.run(
+          `UPDATE operations SET state = 'queued', attempts = attempts - ?, updated_at_ms = ?
          WHERE id = ? AND state = 'running'`,
-        begun ? 1 : 0,
-        now,
-        op.id,
+          begun ? 1 : 0,
+          now,
+          op.id,
+        ).rowsWritten === 1
       );
-      return;
+    case 'waiting':
+      return (
+        db.run(
+          `UPDATE operations SET state='queued', attempts=attempts-?, due_at=?, last_error=?, updated_at_ms=?
+         WHERE id=? AND state='running'`,
+          begun && outcome.counted !== true ? 1 : 0,
+          outcome.untilMs,
+          outcome.code ?? 'remote_state_unavailable',
+          now,
+          op.id,
+        ).rowsWritten === 1
+      );
     case 'reauth':
       // Not failed, and the attempt does not count (ADR §5.8 Re-authentication).
-      db.run(
-        `UPDATE operations SET state = 'blocked', attempts = attempts - ?, last_error = 'reauth_required',
+      return (
+        db.run(
+          `UPDATE operations SET state = 'blocked', attempts = attempts - ?, last_error = ?,
            updated_at_ms = ? WHERE id = ? AND state = 'running'`,
-        begun ? 1 : 0,
-        now,
-        op.id,
+          begun ? 1 : 0,
+          outcome.code ?? 'reauth_required',
+          now,
+          op.id,
+        ).rowsWritten === 1
       );
-      return;
   }
+  return false;
 }
 
 /**

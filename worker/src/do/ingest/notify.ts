@@ -53,16 +53,24 @@
 //   - `unknown` otherwise (no cid, revision or reason), which also covers a
 //     verified record whose owner is hidden (inactive or suppressed) and a
 //     settings record, which has no projection row;
+//   - a batch listen URI (`<container>#<listenId>`, ADR 0006) resolves its
+//     container's proof and its verified membership (migration 10): for a
+//     visible owner's present container whose membership is recorded at
+//     that CID, `absent` when the version does not hold the listen and
+//     `excluded` when it holds it but the entry failed validation; `unknown`
+//     when it is held but hidden (local delete intent, receipt, cross-format
+//     duplicate), when membership is not recorded, or for a hidden owner;
 //   - `indexing` is the per-DID Indexing truth (status.ts), so a suppressed
 //     DID reports `indexing.state = 'suppressed'`.
 
 import type { Did, NotifyInput, RecordStatus } from '@atmusic/core/api-types';
 import type { Clock } from '@atmusic/core/deps';
+import { parseScrobbleBatchListenUri } from '@atmusic/core/scrobble-batch';
 import { isSupportedDid, parseRecordUri } from '@atmusic/core/syntax';
 import { BucketSet, DID_RATE, IP_RATE, MAX_BUCKET_KEYS, type RateDecision, type RateRule } from '../../http/limits';
 import type { ModuleDeps, NotifyOutcome } from '../contracts';
 import type { Db } from '../db';
-import { visibleDid, visibleScrobblesFrom } from '../read/visibility';
+import { activeUser, visibleDid, visibleScrobblesFrom } from '../read/visibility';
 import { indexing } from '../status';
 import { loadUser } from '../write/account-state';
 import { collectionKind } from '../write/keys';
@@ -161,7 +169,8 @@ function notifyTarget(m: ModuleDeps, input: NotifyInput): Target {
   }
   if (keys[0] !== 'uri') throw new TypeError(`notify has an unknown field ${keys[0]}`);
   const raw = (input as { uri: unknown }).uri;
-  const uri = typeof raw === 'string' ? parseRecordUri(raw) : null;
+  const batch = typeof raw === 'string' ? parseScrobbleBatchListenUri(raw) : null;
+  const uri = typeof raw === 'string' ? parseRecordUri(batch?.containerUri ?? raw) : null;
   if (uri === null || !isSupportedDid(uri.did)) throw new TypeError('notify uri is not a record AT URI');
   const prefix = m.config.prefix;
   const kind = prefix === null ? null : collectionKind(prefix, uri.collection);
@@ -252,17 +261,24 @@ const VISIBLE_ROW = `
 /** N2: the indexing state of one record URI (see the header). */
 export function recordStatus(m: ModuleDeps, uri: string, now: number = m.clock.nowMs()): RecordStatus {
   assertEpochMs('now', now);
-  const parsed = typeof uri === 'string' ? parseRecordUri(uri) : null;
+  const batchItem = typeof uri === 'string' ? parseScrobbleBatchListenUri(uri) : null;
+  const containerUri = batchItem?.containerUri ?? uri;
+  const parsed = typeof uri === 'string' ? parseRecordUri(containerUri) : null;
   if (parsed === null) throw new RangeError('recordStatus needs a record AT URI');
+  if (batchItem !== null && parsed.collection !== `${m.config.prefix}.scrobbleBatch`)
+    throw new RangeError('recordStatus batch URI has the wrong namespace');
   const db = m.db;
   const did = parsed.did;
   const idx = indexing(db, now, { did, mode: m.config.ingestMode });
 
-  const row = db.one<VisibleRow>(VISIBLE_ROW, uri, uri, uri);
+  const row =
+    batchItem === null
+      ? db.one<VisibleRow>(VISIBLE_ROW, containerUri, containerUri, containerUri)
+      : db.one<VisibleRow>(VISIBLE_ROW, uri, uri, uri);
   if (row !== null) return { uri, state: 'indexed', cid: row.cid, revision: row.revision, indexing: idx };
 
   const pending =
-    db.one('SELECT 1 AS x FROM hints WHERE uri = ?', uri) !== null ||
+    db.one('SELECT 1 AS x FROM hints WHERE uri = ?', containerUri) !== null ||
     db.one(
       `SELECT 1 AS x FROM repo_jobs WHERE did = ? AND kind = 'snapshot' AND state IN ('pending','running','failed')`,
       did,
@@ -271,11 +287,42 @@ export function recordStatus(m: ModuleDeps, uri: string, now: number = m.clock.n
 
   const rs = db.one<{ state: string; cid: string | null; revision: string; reason: string | null }>(
     'SELECT state, cid, revision, reason FROM record_state WHERE uri = ?',
-    uri,
+    containerUri,
   );
   if (rs?.state === 'absent') return { uri, state: 'absent', revision: rs.revision, indexing: idx };
   if (rs?.state === 'excluded' && rs.cid !== null && rs.reason !== null) {
     return { uri, state: 'excluded', cid: rs.cid, revision: rs.revision, reason: rs.reason, indexing: idx };
+  }
+  // A batch item of a verified, present container of a visible owner is
+  // decided only by the verified membership of that container version
+  // (migration 10), never by the valid or visible projection: an entry whose
+  // valid TID failed validation is `excluded` at the container revision; an
+  // entry the version does not hold is `absent`; an entry it holds but that
+  // is not visible (a pending/failed local delete, a receipt, a cross-format
+  // duplicate) is `unknown`, as a hidden single is. Without membership
+  // recorded for this exact container CID (a projection older than
+  // migration 10) nothing is claimed. A hidden owner's membership is not
+  // disclosed either way.
+  if (batchItem !== null && rs?.state === 'present' && rs.cid !== null) {
+    const ownerVisible = db.one(`SELECT 1 AS x FROM users u WHERE u.did = ? AND ${activeUser('u')}`, did) !== null;
+    const recorded =
+      db.one(
+        `SELECT 1 AS x FROM verified_membership WHERE record_uri = ? AND listen_id = '*' AND state = 'present' AND cid = ?`,
+        containerUri,
+        rs.cid,
+      ) !== null;
+    if (ownerVisible && recorded) {
+      const member = db.one<{ state: string; cid: string | null; reason: string | null }>(
+        'SELECT state, cid, reason FROM verified_membership WHERE record_uri = ? AND listen_id = ?',
+        containerUri,
+        batchItem.listenId,
+      );
+      const held = member !== null && member.state !== 'absent' && member.cid === rs.cid;
+      if (!held) return { uri, state: 'absent', revision: rs.revision, indexing: idx };
+      if (member.state === 'excluded' && member.reason !== null) {
+        return { uri, state: 'excluded', cid: rs.cid, revision: rs.revision, reason: member.reason, indexing: idx };
+      }
+    }
   }
   return { uri, state: 'unknown', indexing: idx };
 }

@@ -23,6 +23,7 @@ import { MemoryRevocations } from '../../../src/app/revocations';
 import type { OperationRow } from '../../../src/app/rows';
 import { type CredentialDeps, ensureAccount } from '../../../src/credentials/accounts';
 import { createSession, revokeLastfmSession } from '../../../src/credentials/lastfm-auth';
+import { visibleScrobblesFrom } from '../../../src/do/read/visibility';
 import { applyRecordProof } from '../../../src/do/write/apply-record';
 import { lastfmAuthFeature } from '../../../src/http/lastfm-authorize';
 import type { RouteDef } from '../../../src/http/types';
@@ -35,6 +36,7 @@ const ALICE = 'did:plc:aaaaaaaaaaaaaaaaaaaaaaaa';
 const ALICE_HANDLE = 'alice.test';
 const OWNED = 'org.example.music';
 const SCROBBLE = `${OWNED}.scrobble`;
+const BATCH = `${OWNED}.scrobbleBatch`;
 const OPEN_GATE = {
   LEXICON_PREFIX: OWNED,
   NAMESPACE_OWNERSHIP_REF: 'dns:_lexicon.music.example.org TXT',
@@ -567,6 +569,163 @@ describe('Last.fm write methods', () => {
     expect(deletes[1]).toMatchObject({ rkey: '3lbindexed22a', collection: SCROBBLE, state: 'queued' });
     expect(app.db.all('SELECT pred_id FROM operation_deps WHERE op_id = ?', deletes[1]!.id)).toEqual([]);
 
+    const batchListenId = '3lb2batchidab';
+    const batchRkey = '3lbqbatchindexed1';
+    const batchRecord = {
+      $type: BATCH,
+      createdAt: '2026-01-15T12:00:00Z',
+      listens: [
+        {
+          id: batchListenId,
+          artist: 'Batch Indexed Artist',
+          track: 'Batch Indexed Track',
+          listenedAt: '2026-01-15T10:00:00Z',
+          createdAt: '2026-01-15T10:00:05Z',
+        },
+      ],
+    };
+    await repo.put(BATCH, batchRkey, batchRecord);
+    const batchProof = await verifyRecordProof(await repo.getRecordCar(BATCH, batchRkey), {
+      did: ALICE,
+      collection: BATCH,
+      rkey: batchRkey,
+      signingKey: repo.key.didKey,
+    });
+    expect(
+      app.db.tx(() => applyRecordProof(app.db, batchProof, { receiptNs: nowNs, prefix: OWNED, nowNs })).outcome,
+    ).toBe('applied');
+    const batchResult = await remove({
+      artist: 'Batch Indexed Artist',
+      track: 'Batch Indexed Track',
+      timestamp: String(Date.parse('2026-01-15T10:00:00Z') / 1000),
+    });
+    expect(batchResult.status).toBe(200);
+    const batchDelete = operations(app, 'scrobble.delete').find((op) => op.collection === BATCH);
+    expect(batchDelete).toMatchObject({ rkey: batchRkey, state: 'queued' });
+    expect(app.db.all('SELECT listen_id FROM batch_delete_listens WHERE operation_id = ?', batchDelete!.id)).toEqual([
+      { listen_id: batchListenId },
+    ]);
+
+    const siblingRkey = '3lbqsiblings01';
+    const siblingIds = ['3lb2batchidac', '3lb2batchidad'];
+    const siblingSecond = '2026-01-15T08:00:00Z';
+    const siblingRecord = {
+      $type: BATCH,
+      createdAt: '2026-01-15T12:00:00Z',
+      listens: siblingIds.map((id, i) => ({
+        id,
+        artist: 'Sibling Artist',
+        track: `Sibling ${i}`,
+        listenedAt: siblingSecond,
+        createdAt: '2026-01-15T12:00:00Z',
+      })),
+    };
+    await repo.put(BATCH, siblingRkey, siblingRecord);
+    const siblingProof = await verifyRecordProof(await repo.getRecordCar(BATCH, siblingRkey), {
+      did: ALICE,
+      collection: BATCH,
+      rkey: siblingRkey,
+      signingKey: repo.key.didKey,
+    });
+    app.db.tx(() => applyRecordProof(app.db, siblingProof, { receiptNs: nowNs, prefix: OWNED, nowNs }));
+    const siblingTimestamp = String(Date.parse(siblingSecond) / 1000);
+    expect((await remove({ artist: 'Sibling Artist', track: 'Sibling 0', timestamp: siblingTimestamp })).status).toBe(
+      200,
+    );
+    expect((await remove({ artist: 'Sibling Artist', track: 'Sibling 1', timestamp: siblingTimestamp })).status).toBe(
+      200,
+    );
+    const siblingDeletes = operations(app, 'scrobble.delete').filter((op) => op.rkey === siblingRkey);
+    expect(siblingDeletes).toHaveLength(2);
+    expect(
+      siblingDeletes.map((op) => app.db.all('SELECT listen_id FROM batch_delete_listens WHERE operation_id=?', op.id)),
+    ).toEqual([[{ listen_id: siblingIds[0] }], [{ listen_id: siblingIds[1] }]]);
+    app.db.run(
+      "UPDATE operations SET state='succeeded',swap_cid=? WHERE id=?",
+      siblingProof.state === 'present' ? siblingProof.cid : null,
+      siblingDeletes[0]!.id,
+    );
+    expect((await remove({ artist: 'Sibling Artist', track: 'Sibling 1', timestamp: siblingTimestamp })).status).toBe(
+      200,
+    );
+    expect(operations(app, 'scrobble.delete').filter((op) => op.rkey === siblingRkey)).toHaveLength(2);
+
+    // Cross-format dedupe has the same visible single winner regardless of
+    // which repository record arrived first; Last.fm must remove that winner.
+    for (const [suffix, reverse] of [
+      ['first', false],
+      ['second', true],
+    ] as const) {
+      const artist = `Cross-format ${suffix}`;
+      const track = `Track ${suffix}`;
+      const listenedAt = `2026-01-15T09:0${suffix === 'first' ? '1' : '2'}:00Z`;
+      const singleRkey = suffix === 'first' ? '3lbqcrosssingle1' : '3lbqcrosssingle2';
+      const entryId = suffix === 'first' ? '3lb2crossentry1' : '3lb2crossentry2';
+      const batchRkey = suffix === 'first' ? '3lbqcrossbatch01' : '3lbqcrossbatch02';
+      const singleRecord = { $type: SCROBBLE, artist, track, listenedAt, createdAt: '2026-01-15T12:00:00Z' };
+      const batchRecord = {
+        $type: BATCH,
+        createdAt: '2026-01-15T12:00:00Z',
+        listens: [{ id: entryId, artist, track, listenedAt, createdAt: '2026-01-15T12:00:00Z' }],
+      };
+      const putSingle = async () => {
+        await repo.put(SCROBBLE, singleRkey, singleRecord);
+        const p = await verifyRecordProof(await repo.getRecordCar(SCROBBLE, singleRkey), {
+          did: ALICE,
+          collection: SCROBBLE,
+          rkey: singleRkey,
+          signingKey: repo.key.didKey,
+        });
+        app.db.tx(() => applyRecordProof(app.db, p, { receiptNs: nowNs, prefix: OWNED, nowNs }));
+      };
+      const putBatch = async () => {
+        await repo.put(BATCH, batchRkey, batchRecord);
+        const p = await verifyRecordProof(await repo.getRecordCar(BATCH, batchRkey), {
+          did: ALICE,
+          collection: BATCH,
+          rkey: batchRkey,
+          signingKey: repo.key.didKey,
+        });
+        app.db.tx(() => applyRecordProof(app.db, p, { receiptNs: nowNs, prefix: OWNED, nowNs }));
+      };
+      if (reverse) {
+        await putBatch();
+        await putSingle();
+      } else {
+        await putSingle();
+        await putBatch();
+      }
+      expect(
+        app.db.all(
+          `SELECT s.record_uri,s.listen_id FROM ${visibleScrobblesFrom('s', 'u')}
+        WHERE s.artist=? AND s.track=?`,
+          artist,
+          track,
+        ),
+      ).toEqual([{ record_uri: null, listen_id: null }]);
+      const timestamp = String(Date.parse(listenedAt) / 1000);
+      expect((await remove({ artist, track, timestamp })).status).toBe(200);
+      const targetDelete = operations(app, 'scrobble.delete').at(-1)!;
+      expect(targetDelete).toMatchObject({ collection: SCROBBLE, rkey: singleRkey });
+      const deleteCount = operations(app, 'scrobble.delete').length;
+      expect((await remove({ artist, track, timestamp })).status).toBe(200);
+      expect(operations(app, 'scrobble.delete')).toHaveLength(deleteCount);
+      const singleProof = await verifyRecordProof(await repo.getRecordCar(SCROBBLE, singleRkey), {
+        did: ALICE,
+        collection: SCROBBLE,
+        rkey: singleRkey,
+        signingKey: repo.key.didKey,
+      });
+      app.db.run(
+        "UPDATE operations SET state='succeeded',swap_cid=? WHERE id=?",
+        singleProof.state === 'present' ? singleProof.cid : null,
+        targetDelete.id,
+      );
+      const repeated = await remove({ artist, track, timestamp });
+      expect(repeated.status).toBe(400);
+      expect(repeated.json()).toMatchObject({ error: 7 });
+    }
+
     // 4. No match: another second, another track, or the already cancelled create.
     for (const entry of [
       {
@@ -589,6 +748,100 @@ describe('Last.fm write methods', () => {
     expect((await remove({ artist: running.artist, track: running.track, timestamp: running.timestamp })).status).toBe(
       200,
     );
-    expect(operations(app, 'scrobble.delete')).toHaveLength(2);
+    expect(operations(app, 'scrobble.delete')).toHaveLength(7);
+  });
+  it('library.removeScrobble removes a restored batch listen again instead of reusing the settled receipt', async () => {
+    const { app, sk } = await rig();
+    const keys = await fixtureKeys();
+    const repo = new SignedRepo(ALICE, keys.alice, { clock: fixedClock() });
+    const nowNs = fromMs(NOW_MS);
+    const rkey = '3lbqrestored01';
+    const container = `at://${ALICE}/${BATCH}/${rkey}`;
+    const listenedAt = '2026-01-15T07:00:00Z';
+    const timestamp = String(Date.parse(listenedAt) / 1000);
+    const record = (marker: string) => ({
+      $type: BATCH,
+      createdAt: '2026-01-15T12:00:00Z',
+      marker,
+      listens: [
+        {
+          id: '3lb2restoreab',
+          artist: 'Restored Artist',
+          track: 'Restored',
+          listenedAt,
+          createdAt: '2026-01-15T12:00:00Z',
+        },
+        {
+          id: '3lb2restoreac',
+          artist: 'Restored Artist',
+          track: 'Sibling',
+          listenedAt,
+          createdAt: '2026-01-15T12:00:00Z',
+        },
+      ],
+    });
+    const verifyAndApply = async (value: unknown) => {
+      await repo.put(BATCH, rkey, value);
+      const proof = await verifyRecordProof(await repo.getRecordCar(BATCH, rkey), {
+        did: ALICE,
+        collection: BATCH,
+        rkey,
+        signingKey: repo.key.didKey,
+      });
+      app.db.tx(() => applyRecordProof(app.db, proof, { receiptNs: nowNs, prefix: OWNED, nowNs }));
+      if (proof.state !== 'present') throw new Error('expected a present proof');
+      return proof.cid;
+    };
+    const visible = () =>
+      app.db
+        .all<{ listen_id: string }>(
+          `SELECT s.listen_id FROM ${visibleScrobblesFrom('s', 'u')} WHERE s.record_uri = ? ORDER BY s.listen_id`,
+          container,
+        )
+        .map((row) => row.listen_id);
+    const remove = () =>
+      post(app, { method: 'library.removeScrobble', sk, artist: 'Restored Artist', track: 'Restored', timestamp });
+    const removals = () =>
+      app.db.all<{ id: string; state: string }>(
+        "SELECT o.id, o.state FROM operations o JOIN batch_delete_listens b ON b.operation_id = o.id WHERE o.kind = 'scrobble.delete' AND o.rkey = ? AND b.listen_id = '3lb2restoreab' ORDER BY o.rowid",
+        rkey,
+      );
+
+    const original = await verifyAndApply(record('original'));
+    expect(visible()).toEqual(['3lb2restoreab', '3lb2restoreac']);
+    expect((await remove()).status).toBe(200);
+    const [first] = removals();
+    expect(first).toMatchObject({ state: 'queued' });
+    // A repeated request while it is pending dedupes onto the same intent.
+    expect((await remove()).status).toBe(200);
+    expect(removals()).toHaveLength(1);
+
+    // The PDS removal settles at the CAS target, and its verified result lands.
+    app.db.run("UPDATE operations SET state = 'succeeded', swap_cid = ? WHERE id = ?", original, first!.id);
+    expect(visible()).toEqual(['3lb2restoreac']);
+    const removed = await verifyAndApply({ ...record('removed'), listens: [record('removed').listens[1]] });
+    expect(removed).not.toBe(original);
+    expect(visible()).toEqual(['3lb2restoreac']);
+    // With the receipt settled and nothing visible, there is nothing to remove.
+    const nothing = await remove();
+    expect(nothing.status).toBe(400);
+    expect(nothing.json()).toMatchObject({ error: 7 });
+
+    // The owner restores the same listen id at a new CID: it is visible, and
+    // the old receipt no longer applies to it, so a fresh intent is admitted.
+    const restored = await verifyAndApply(record('restored'));
+    expect(restored).not.toBe(original);
+    expect(visible()).toEqual(['3lb2restoreab', '3lb2restoreac']);
+    const again = await remove();
+    expect(again.status).toBe(200);
+    const after = removals();
+    expect(after).toHaveLength(2);
+    expect(after[1]).toMatchObject({ state: 'queued' });
+    expect(app.db.all('SELECT listen_id FROM batch_delete_listens WHERE operation_id = ?', after[1]!.id)).toEqual([
+      { listen_id: '3lb2restoreab' },
+    ]);
+    expect(visible()).toEqual(['3lb2restoreac']);
+    expect((await remove()).status).toBe(200);
+    expect(removals()).toHaveLength(2);
   });
 });
