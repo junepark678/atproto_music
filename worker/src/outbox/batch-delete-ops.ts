@@ -1,6 +1,7 @@
 import { isTid } from '@atmusic/core/syntax';
 import type { OperationRow, Origin } from '../app/rows';
 import type { ModuleDeps } from '../do/contracts';
+import type { Db } from '../do/db';
 import { bumpStatsVersion } from '../do/write/account-state';
 import {
   insertOperation,
@@ -9,14 +10,48 @@ import {
   prepare as prepareBatchRecord,
   unsettledAt,
 } from './operations';
-import { failureOutcome, type Outcome } from './pds-writer';
+import { type Failure, failureOutcome, type Outcome } from './pds-writer';
 import type { ExecContext, Executor } from './runner';
 import { validRkey } from './scrobble-ops';
 
-function batchFailure(failure: import('./pds-writer').Failure): Outcome {
-  return failure.code === 'forbidden_scope' || failure.error === 'ScopeMissing' || failure.error === 'InsufficientScope'
-    ? { kind: 'reauth', code: 'batch_scope_required' }
-    : failureOutcome(failure);
+/**
+ * Transport classification decides first: only a failure classified as a
+ * permanent scope denial (403, or a 4xx ScopeMissing/InsufficientScope/
+ * Forbidden body, write-policy classify) holds the batch lane for re-consent.
+ * A 5xx or transport failure whose body merely names a scope error stays
+ * retryable; it never blocks the intent or asks the owner to sign in again.
+ */
+export function isBatchScopeDenial(failure: Failure): boolean {
+  return failure.kind === 'permanent' && failure.code === 'forbidden_scope';
+}
+
+function batchFailure(failure: Failure): Outcome {
+  return isBatchScopeDenial(failure) ? { kind: 'reauth', code: 'batch_scope_required' } : failureOutcome(failure);
+}
+
+/**
+ * Durable suppression evidence (migration 9): the targets of removal
+ * `operationId` were observed present in the container at `cid` before the
+ * removal settled. After success the removal keeps hiding a projection at any
+ * such CID (a delayed older proof, or a projection that advanced between
+ * admission and execution) while a verified recreation at a new CID becomes
+ * visible again. Never a claim about record_state.
+ */
+export function recordRemovalEvidence(db: Db, operationId: string, cid: string | null | undefined): void {
+  if (typeof cid !== 'string' || cid.length === 0) return;
+  db.run('INSERT OR IGNORE INTO listen_removal_cids(operation_id,cid) VALUES (?,?)', operationId, cid);
+}
+
+function selectedIn(listens: readonly unknown[], wanted: ReadonlySet<string>): boolean {
+  return listens.some(
+    (item) =>
+      wanted.has('*') ||
+      (item !== null &&
+        typeof item === 'object' &&
+        !Array.isArray(item) &&
+        typeof (item as { id?: unknown }).id === 'string' &&
+        wanted.has((item as { id: string }).id)),
+  );
 }
 
 export interface BatchListenRemovalPlan {
@@ -310,9 +345,14 @@ export function enqueueBatchListenDelete(
           );
         }
       }
+      // The admission CID: the item's projected container CID, or for a
+      // whole-container intent the container's projected CID.
       const cid =
-        m.db.one<{ cid: string }>('SELECT cid FROM scrobbles WHERE record_uri = ? AND listen_id = ?', args.uri, id)
-          ?.cid ?? null;
+        (id === '*'
+          ? m.db.one<{ cid: string }>('SELECT cid FROM scrobbles WHERE record_uri = ? LIMIT 1', args.uri)?.cid
+          : m.db.one<{ cid: string }>('SELECT cid FROM scrobbles WHERE record_uri = ? AND listen_id = ?', args.uri, id)
+              ?.cid) ?? null;
+      recordRemovalEvidence(m.db, inserted.id, cid);
       m.db.run(
         `INSERT INTO listen_removals(did,record_uri,listen_id,created_at_ms,operation_id,removed_cid)
         VALUES (?,?,?,?,?,?) ON CONFLICT(did,record_uri,listen_id) DO UPDATE SET
@@ -332,11 +372,48 @@ export function enqueueBatchListenDelete(
   return op;
 }
 
+/**
+ * The owner's current batch container at the operation's key, validated, or a
+ * terminal/retry outcome. Shared by execution and read-only reconciliation.
+ */
+type ContainerRead =
+  | { kind: 'absent' }
+  | { kind: 'present'; cid: string; record: Record<string, unknown>; listens: unknown[] }
+  | { kind: 'outcome'; outcome: Outcome };
+
+async function readContainer(op: OperationRow, ctx: ExecContext, uri: string): Promise<ContainerRead> {
+  const found = await ctx.xrpc.getRecord(op.collection!, op.rkey!);
+  if (found.kind === 'failed') return { kind: 'outcome', outcome: batchFailure(found.failure) };
+  if (found.kind === 'absent') return { kind: 'absent' };
+  if (found.uri !== uri)
+    return { kind: 'outcome', outcome: { kind: 'permanent', code: 'invalid_batch_record_identity' } };
+  const record = found.value;
+  if (
+    record === null ||
+    typeof record !== 'object' ||
+    Array.isArray(record) ||
+    (record as Record<string, unknown>).$type !== ctx.collections.scrobbleBatch ||
+    !Array.isArray((record as { listens?: unknown }).listens)
+  )
+    return { kind: 'outcome', outcome: { kind: 'permanent', code: 'invalid_batch_record' } };
+  return {
+    kind: 'present',
+    cid: found.cid,
+    record: record as Record<string, unknown>,
+    listens: (record as { listens: unknown[] }).listens,
+  };
+}
+
+// Success outcomes never carry a post-write or post-removal CID: the persisted
+// `swap_cid` stays the last pre-CAS CID and `listen_removal_cids` keeps every
+// CID at which the targets were seen, so a settled removal still hides a stale
+// projection at any of them.
 async function removeIds(op: OperationRow, ctx: ExecContext): Promise<Outcome> {
   const collection = ctx.collections.scrobbleBatch;
   if (op.did !== ctx.xrpc.did || op.collection !== collection || !validRkey(op.rkey))
     return { kind: 'permanent', code: 'invalid_record_identity' };
   const uri = `at://${op.did}/${op.collection}/${op.rkey}`;
+  const hints = [{ collection, rkey: op.rkey }];
   const collidedCreate = ctx.m.db.one<{ id: string }>(
     `SELECT p.id FROM operation_deps d JOIN operations p ON p.id = d.pred_id
      WHERE d.op_id = ? AND p.did = ? AND p.collection = ? AND p.rkey = ?
@@ -348,7 +425,7 @@ async function removeIds(op: OperationRow, ctx: ExecContext): Promise<Outcome> {
     op.rkey,
   );
   if (collidedCreate !== null) {
-    return { kind: 'succeeded', uri, note: 'record_not_ours', hints: [{ collection: op.collection!, rkey: op.rkey! }] };
+    return { kind: 'succeeded', uri, note: 'record_not_ours', hints };
   }
   const ids = ctx.m.db
     .all<{ listen_id: string }>(
@@ -359,33 +436,18 @@ async function removeIds(op: OperationRow, ctx: ExecContext): Promise<Outcome> {
   if (ids.length === 0) return { kind: 'permanent', code: 'missing_batch_delete_intent' };
   const wanted = new Set(ids);
   for (let attempt = 0; attempt < 5; attempt++) {
-    const found = await ctx.xrpc.getRecord(op.collection!, op.rkey!);
-    if (found.kind === 'failed') return batchFailure(found.failure);
-    if (found.kind === 'absent')
-      return { kind: 'succeeded', uri, swapCid: op.swap_cid ?? undefined, hints: [{ collection, rkey: op.rkey }] };
-    if (found.uri !== uri) return { kind: 'permanent', code: 'invalid_batch_record_identity' };
-    const record = found.value;
-    if (
-      record === null ||
-      typeof record !== 'object' ||
-      Array.isArray(record) ||
-      (record as Record<string, unknown>).$type !== collection ||
-      !Array.isArray((record as { listens?: unknown }).listens)
-    )
-      return { kind: 'permanent', code: 'invalid_batch_record' };
-    const remoteListens = (record as { listens: unknown[] }).listens;
-    const kept = remoteListens.filter((item) => {
-      const selected =
-        wanted.has('*') ||
-        (item !== null && typeof item === 'object' && wanted.has(String((item as { id?: unknown }).id)));
-      return !selected;
-    });
-    if (kept.length === remoteListens.length)
-      return { kind: 'succeeded', uri, swapCid: found.cid, hints: [{ collection: op.collection!, rkey: op.rkey! }] };
+    const found = await readContainer(op, ctx, uri);
+    if (found.kind === 'outcome') return found.outcome;
+    if (found.kind === 'absent') return { kind: 'succeeded', uri, hints };
+    const remoteListens = found.listens;
+    if (!selectedIn(remoteListens, wanted)) return { kind: 'succeeded', uri, hints };
+    const kept = wanted.has('*') ? [] : remoteListens.filter((item) => !selectedIn([item], wanted));
     const budget = ctx.afford(kept.length === 0 ? 1 : 2);
     if (budget !== null) return budget;
     // A restart after this write must retain the exact CAS target even if the
-    // PDS committed and the success response was lost.
+    // PDS committed and the success response was lost; the evidence row keeps
+    // it after a later retry moves swap_cid to a newer pre-CAS CID.
+    recordRemovalEvidence(ctx.m.db, op.id, found.cid);
     ctx.persist({ swapCid: found.cid });
     const body =
       kept.length === 0
@@ -394,7 +456,7 @@ async function removeIds(op: OperationRow, ctx: ExecContext): Promise<Outcome> {
             repo: op.did,
             collection: op.collection,
             rkey: op.rkey,
-            record: { ...record, listens: kept },
+            record: { ...found.record, listens: kept },
             swapRecord: found.cid,
           };
     const method = kept.length === 0 ? 'com.atproto.repo.deleteRecord' : 'com.atproto.repo.putRecord';
@@ -402,39 +464,22 @@ async function removeIds(op: OperationRow, ctx: ExecContext): Promise<Outcome> {
     if (!result.ok && result.failure.code === 'repository_changed') continue;
     // A success status can still contain no confirmation that the edit landed.
     // Always read back the owner-scoped URI before marking intent complete.
-    const after = await ctx.xrpc.getRecord(op.collection!, op.rkey!);
-    if (after.kind === 'present') {
-      if (after.uri !== uri) return { kind: 'permanent', code: 'invalid_batch_record_identity' };
-      if (
-        after.value === null ||
-        typeof after.value !== 'object' ||
-        Array.isArray(after.value) ||
-        (after.value as Record<string, unknown>).$type !== collection
-      )
-        return { kind: 'permanent', code: 'invalid_batch_record' };
-      const afterListens = (after.value as { listens?: unknown }).listens;
-      if (!Array.isArray(afterListens)) return { kind: 'permanent', code: 'invalid_batch_record' };
-      const remaining = wanted.has('*')
-        ? afterListens
-        : afterListens.filter(
-            (i) => i !== null && typeof i === 'object' && wanted.has(String((i as { id?: unknown }).id)),
-          );
-      if (remaining.length === 0)
-        return { kind: 'succeeded', uri, swapCid: after.cid, hints: [{ collection: op.collection!, rkey: op.rkey! }] };
-      if (result.ok) return { kind: 'transient', code: 'remote_delete_unconfirmed', swapCid: after.cid };
-      if (
-        result.failure.code === 'forbidden_scope' ||
-        result.failure.error === 'ScopeMissing' ||
-        result.failure.error === 'InsufficientScope'
-      )
-        return { kind: 'reauth', code: 'batch_scope_required' };
-      if (result.failure.kind === 'transient' || result.failure.kind === 'missing') continue;
-      return batchFailure(result.failure);
+    const after = await readContainer(op, ctx, uri);
+    if (after.kind === 'absent') return { kind: 'succeeded', uri, hints };
+    if (after.kind === 'outcome') {
+      // A classified write failure decides first (a scope denial holds the
+      // lane); otherwise the read-back failure does.
+      if (!result.ok && isBatchScopeDenial(result.failure)) return batchFailure(result.failure);
+      return after.outcome;
     }
-    if (after.kind === 'absent')
-      return { kind: 'succeeded', uri, swapCid: found.cid, hints: [{ collection: op.collection!, rkey: op.rkey! }] };
-    if (result.ok) return batchFailure(after.failure);
-    return batchFailure(after.failure);
+    if (!selectedIn(after.listens, wanted)) return { kind: 'succeeded', uri, hints };
+    // The targets are still there: that CID is pre-removal evidence too.
+    recordRemovalEvidence(ctx.m.db, op.id, after.cid);
+    if (result.ok) return { kind: 'transient', code: 'remote_delete_unconfirmed' };
+    if (result.failure.kind === 'missing') continue;
+    // A transient (5xx/transport) failure retries with backoff whatever its
+    // body names; only a classified permanent denial holds for re-consent.
+    return batchFailure(result.failure);
   }
   return { kind: 'transient', code: 'repository_changed' };
 }
@@ -447,36 +492,20 @@ export const batchDeleteExecutor: Executor = {
     const collection = ctx.collections.scrobbleBatch;
     if (op.did !== ctx.xrpc.did || op.collection !== collection || !validRkey(op.rkey))
       return { kind: 'permanent', code: 'invalid_record_identity' };
-    const found = await ctx.xrpc.getRecord(op.collection!, op.rkey!);
-    if (found.kind === 'failed') return batchFailure(found.failure);
     const uri = `at://${op.did}/${op.collection}/${op.rkey}`;
-    if (found.kind === 'absent')
-      return { kind: 'succeeded', uri, swapCid: op.swap_cid ?? undefined, hints: [{ collection, rkey: op.rkey! }] };
-    if (found.uri !== uri) return { kind: 'permanent', code: 'invalid_batch_record_identity' };
+    const hints = [{ collection, rkey: op.rkey! }];
+    const found = await readContainer(op, ctx, uri);
+    if (found.kind === 'outcome') return found.outcome;
+    if (found.kind === 'absent') return { kind: 'succeeded', uri, hints };
     const ids = new Set(
       ctx.m.db
         .all<{ listen_id: string }>('SELECT listen_id FROM batch_delete_listens WHERE operation_id = ?', op.id)
         .map((row) => row.listen_id),
     );
-    const value = found.value;
-    if (
-      value === null ||
-      typeof value !== 'object' ||
-      Array.isArray(value) ||
-      (value as Record<string, unknown>).$type !== collection
-    )
-      return { kind: 'permanent', code: 'invalid_batch_record' };
-    const listens = (value as { listens?: unknown }).listens;
-    if (!Array.isArray(listens)) return { kind: 'permanent', code: 'invalid_batch_record' };
-    const remains =
-      ids.has('*') ||
-      listens.some((item) => {
-        if (item === null || typeof item !== 'object' || Array.isArray(item)) return false;
-        const id = (item as { id?: unknown }).id;
-        return typeof id === 'string' && ids.has(id);
-      });
-    return remains
-      ? { kind: 'transient', code: 'batch_delete_unconfirmed' }
-      : { kind: 'succeeded', uri, swapCid: found.cid, hints: [{ collection, rkey: op.rkey! }] };
+    if (selectedIn(found.listens, ids)) {
+      recordRemovalEvidence(ctx.m.db, op.id, found.cid);
+      return { kind: 'transient', code: 'batch_delete_unconfirmed' };
+    }
+    return { kind: 'succeeded', uri, hints };
   },
 };

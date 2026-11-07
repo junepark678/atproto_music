@@ -409,6 +409,139 @@ it('recovers a whole-container delete after a lost success and keeps the stale p
   });
 });
 
+const REMOVED_ID = '3lb2batchidab';
+const SIBLING_ID = '3lb2batchidac';
+const twoListenRecord = (extra: Record<string, unknown> = {}) => ({
+  $type: BATCH,
+  createdAt: '2026-01-15T12:00:00Z',
+  ...extra,
+  listens: [
+    {
+      id: REMOVED_ID,
+      artist: 'Artist',
+      track: 'Removed',
+      listenedAt: '2026-01-14T12:00:00Z',
+      createdAt: '2026-01-15T12:00:00Z',
+      remoteEntryField: 'keep',
+    },
+    {
+      id: SIBLING_ID,
+      artist: 'Artist',
+      track: 'Sibling',
+      listenedAt: '2026-01-14T13:00:00Z',
+      createdAt: '2026-01-15T12:00:00Z',
+    },
+  ],
+});
+const PROOF_OPTIONS = {
+  receiptNs: BigInt(T0) * 1_000_000n,
+  nowNs: BigInt(T0) * 1_000_000n,
+  prefix: 'com.example.atmusic',
+};
+const cidOf = (proof: Awaited<ReturnType<typeof proofAt>>): string => {
+  if (proof.state !== 'present') throw new Error('expected a present proof');
+  return proof.cid;
+};
+const visibleUris = (h: Harness): string[] =>
+  h.db.all<{ uri: string }>(`SELECT s.uri FROM ${visibleScrobblesFrom()} ORDER BY s.uri`).map((row) => row.uri);
+
+it('keeps a settled partial removal hidden at its admission and pre-write CIDs, through a delayed older proof, until a verified recreation', async () => {
+  await withHarness(async (h) => {
+    const rkey = '3lb2batchcontainer1';
+    const container = `at://${h.alice}/${BATCH}/${rkey}`;
+    h.seedUser(h.alice);
+    await h.kit.externalPut('Alice', BATCH, rkey, twoListenRecord());
+    const admission = await proofAt(h.kit.repos.Alice, BATCH, rkey);
+    h.db.tx(() => applyRecordProof(h.db, admission, PROOF_OPTIONS));
+    expect(visibleUris(h)).toEqual([`${container}#${REMOVED_ID}`, `${container}#${SIBLING_ID}`]);
+
+    const del = enqueueBatchListenDelete(h.m, { did: h.alice, uri: container, listenIds: [REMOVED_ID], origin: 'web' });
+    expect(visibleUris(h)).toEqual([`${container}#${SIBLING_ID}`]);
+    // The owner edits the container elsewhere before the removal runs: the
+    // CAS write targets that newer CID, which this index has not verified yet.
+    await h.kit.externalPut('Alice', BATCH, rkey, twoListenRecord({ remoteEnvelopeField: 'edited elsewhere' }));
+    const prewrite = await proofAt(h.kit.repos.Alice, BATCH, rkey);
+    await h.runUntilIdle();
+
+    const written = (await remoteRecords(h.kit, 'Alice', BATCH)).find((item) => item.rkey === rkey)!;
+    expect(written.value).toMatchObject({
+      remoteEnvelopeField: 'edited elsewhere',
+      listens: [{ id: SIBLING_ID }],
+    });
+    expect(written.cid).not.toBe(cidOf(prewrite));
+    // The receipt keeps the pre-CAS CID, never the post-write one.
+    expect(h.op(del.id)).toMatchObject({ state: 'succeeded', swap_cid: cidOf(prewrite) });
+    expect(
+      h.db
+        .all<{ cid: string }>('SELECT cid FROM listen_removal_cids WHERE operation_id = ?', del.id)
+        .map((row) => row.cid)
+        .sort(),
+    ).toEqual([cidOf(admission), cidOf(prewrite)].sort());
+    // Projected at the admission CID after settlement: still hidden.
+    expect(visibleUris(h)).toEqual([`${container}#${SIBLING_ID}`]);
+    // A delayed older signed proof (the pre-write CID) arrives after the
+    // local delete settled: the listen stays hidden, the sibling visible.
+    expect(h.db.tx(() => applyRecordProof(h.db, prewrite, PROOF_OPTIONS)).outcome).toBe('applied');
+    expect(visibleUris(h)).toEqual([`${container}#${SIBLING_ID}`]);
+    // The proof of the removal's own write drops it from the projection; no
+    // record_state absence was fabricated for the container meanwhile.
+    expect(h.db.one('SELECT state FROM record_state WHERE uri = ?', container)).toEqual({ state: 'present' });
+    const removed = await proofAt(h.kit.repos.Alice, BATCH, rkey);
+    h.db.tx(() => applyRecordProof(h.db, removed, PROOF_OPTIONS));
+    expect(h.db.all('SELECT listen_id FROM scrobbles WHERE record_uri = ?', container)).toEqual([
+      { listen_id: SIBLING_ID },
+    ]);
+    // The owner deliberately restores the same listen id: a verified new CID is visible again.
+    await h.kit.externalPut('Alice', BATCH, rkey, twoListenRecord({ remoteEnvelopeField: 'restored' }));
+    const restored = await proofAt(h.kit.repos.Alice, BATCH, rkey);
+    h.db.tx(() => applyRecordProof(h.db, restored, PROOF_OPTIONS));
+    expect(visibleUris(h)).toEqual([`${container}#${REMOVED_ID}`, `${container}#${SIBLING_ID}`]);
+  });
+});
+
+it.each([
+  { name: 'partial', listenIds: [REMOVED_ID], method: PUT, hidden: [REMOVED_ID] },
+  { name: 'wildcard', listenIds: ['*'], method: 'com.atproto.repo.deleteRecord', hidden: [REMOVED_ID, SIBLING_ID] },
+])(
+  'a $name removal reconciled after its tenth attempt keeps the pre-CAS evidence and hides admission and delayed proofs',
+  async ({ listenIds, method, hidden }) => {
+    await withHarness(async (h) => {
+      const rkey = '3lb2batchcontainer1';
+      const container = `at://${h.alice}/${BATCH}/${rkey}`;
+      const all = [`${container}#${REMOVED_ID}`, `${container}#${SIBLING_ID}`];
+      const expectedVisible = all.filter((uri) => !hidden.some((id) => uri.endsWith(`#${id}`)));
+      h.seedUser(h.alice);
+      await h.kit.externalPut('Alice', BATCH, rkey, twoListenRecord());
+      const admission = await proofAt(h.kit.repos.Alice, BATCH, rkey);
+      h.db.tx(() => applyRecordProof(h.db, admission, PROOF_OPTIONS));
+      const del = enqueueBatchListenDelete(h.m, { did: h.alice, uri: container, listenIds, origin: 'web' });
+      await h.kit.externalPut('Alice', BATCH, rkey, twoListenRecord({ remoteEnvelopeField: 'edited elsewhere' }));
+      const prewrite = await proofAt(h.kit.repos.Alice, BATCH, rkey);
+      // The tenth attempt commits remotely and its answer is lost.
+      h.db.run('UPDATE operations SET attempts = 9 WHERE id = ?', del.id);
+      const crashed = h.writers.crashOn(method, 'after_commit');
+      void h.run();
+      await crashed;
+      h.restart();
+      await h.runUntilIdle();
+
+      expect(h.writers.count(method)).toBe(1);
+      expect(h.op(del.id)).toMatchObject({ state: 'succeeded', attempts: 10, swap_cid: cidOf(prewrite) });
+      expect(visibleUris(h)).toEqual(expectedVisible);
+      expect(h.db.tx(() => applyRecordProof(h.db, prewrite, PROOF_OPTIONS)).outcome).toBe('applied');
+      expect(visibleUris(h)).toEqual(expectedVisible);
+      // The verified result of the write, then a deliberate recreation at a new CID.
+      const result = await proofAt(h.kit.repos.Alice, BATCH, rkey);
+      h.db.tx(() => applyRecordProof(h.db, result, PROOF_OPTIONS));
+      expect(visibleUris(h)).toEqual(expectedVisible);
+      await h.kit.externalPut('Alice', BATCH, rkey, twoListenRecord({ remoteEnvelopeField: 'restored' }));
+      const restored = await proofAt(h.kit.repos.Alice, BATCH, rkey);
+      h.db.tx(() => applyRecordProof(h.db, restored, PROOF_OPTIONS));
+      expect(visibleUris(h)).toEqual(all);
+    });
+  },
+);
+
 it('holds a batch deletion on explicit scope denial and resumes its durable intent after re-consent', async () => {
   await withHarness(async (h) => {
     const rkey = '3lb2batchcontainer1';
@@ -449,6 +582,85 @@ it('holds a batch deletion on explicit scope denial and resumes its durable inte
     ]);
   });
 });
+
+const DELETE_RECORD = 'com.atproto.repo.deleteRecord';
+
+it.each([
+  { nsid: GET, listenIds: [REMOVED_ID], writes: [] as string[] },
+  { nsid: PUT, listenIds: [REMOVED_ID], writes: [PUT] },
+  { nsid: DELETE_RECORD, listenIds: ['*'], writes: [DELETE_RECORD] },
+])(
+  'a 5xx $nsid whose body names a scope error stays retryable without a scope hold, resend loop or lost CAS evidence',
+  async ({ nsid, listenIds, writes }) => {
+    await withHarness(
+      async (h) => {
+        const rkey = '3lb2batchcontainer1';
+        const container = `at://${h.alice}/${BATCH}/${rkey}`;
+        const put = await h.kit.externalPut('Alice', BATCH, rkey, twoListenRecord());
+        const cid = put.ops[0]!.cid;
+        const del = enqueueBatchListenDelete(h.m, { did: h.alice, uri: container, listenIds, origin: 'web' });
+        h.kit.pds.Alice.fail(
+          { nsid },
+          { kind: 'status', status: 500, error: 'ScopeMissing', message: 'scope missing' },
+        );
+
+        await h.run();
+
+        const queued = h.op(del.id);
+        expect(queued).toMatchObject({ state: 'queued', attempts: 1, last_error: 'upstream_unavailable' });
+        expect(h.ops("state = 'blocked'")).toEqual([]);
+        // One write request per attempt: a transient answer is not resent in a loop.
+        for (const write of writes) expect(h.writers.count(write)).toBe(1);
+        if (writes.length > 0) {
+          expect(queued.swap_cid).toBe(cid);
+          expect(h.db.all('SELECT cid FROM listen_removal_cids WHERE operation_id = ?', del.id)).toEqual([{ cid }]);
+        }
+        expect(h.db.all('SELECT listen_id FROM batch_delete_listens WHERE operation_id = ?', del.id)).toEqual(
+          listenIds.map((listen_id) => ({ listen_id })),
+        );
+
+        h.kit.clock.advance(60_000);
+        await h.runUntilIdle();
+        expect(h.op(del.id)).toMatchObject({ state: 'succeeded', swap_cid: cid });
+      },
+      { random: zeroJitter() },
+    );
+  },
+);
+
+it.each([
+  { nsid: PUT, listenIds: [REMOVED_ID], error: 'ScopeMissing' },
+  { nsid: DELETE_RECORD, listenIds: ['*'], error: 'InsufficientScope' },
+  { nsid: PUT, listenIds: [REMOVED_ID], error: undefined },
+])(
+  'a classified 403 $error denial of $nsid holds the batch lane for re-consent and keeps the intent',
+  async ({ nsid, listenIds, error }) => {
+    await withHarness(async (h) => {
+      const rkey = '3lb2batchcontainer1';
+      const container = `at://${h.alice}/${BATCH}/${rkey}`;
+      const put = await h.kit.externalPut('Alice', BATCH, rkey, twoListenRecord());
+      const del = enqueueBatchListenDelete(h.m, { did: h.alice, uri: container, listenIds, origin: 'web' });
+      h.kit.pds.Alice.fail(
+        { nsid },
+        error === undefined
+          ? { kind: 'status', status: 403 }
+          : { kind: 'status', status: 403, error, message: 'denied' },
+      );
+
+      await h.run();
+
+      expect(h.op(del.id)).toMatchObject({ state: 'blocked', last_error: 'batch_scope_required' });
+      expect(h.op(del.id).swap_cid).toBe(put.ops[0]!.cid);
+      expect(h.writers.count(nsid)).toBe(1);
+      expect(h.db.all('SELECT listen_id FROM batch_delete_listens WHERE operation_id = ?', del.id)).toEqual(
+        listenIds.map((listen_id) => ({ listen_id })),
+      );
+      expect(((await remoteRecords(h.kit, 'Alice', BATCH))[0]!.value as { listens: unknown[] }).listens).toHaveLength(
+        2,
+      );
+    });
+  },
+);
 
 it('does not trust a wrong remote record URI or crash on a null batch entry', async () => {
   await withHarness(async (h) => {

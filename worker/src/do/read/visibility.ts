@@ -11,7 +11,12 @@
 //   running, blocked or failed `scrobble.delete` operation. After a PDS success,
 //   the row stays hidden while the verified projection still contains the CID
 //   that the delete used as `swapRecord`; a successful `record_not_ours` receipt
-//   has no such CID and cannot hide another writer's record. Proof-confirmed
+//   has no such CID and cannot hide another writer's record. A batch listen
+//   removal also keeps every CID its targets were seen at before it settled
+//   (`listen_removal_cids`: the admission projection, each pre-CAS read, the
+//   projection at settlement), so neither a delayed older proof nor a
+//   projection that advanced before the write resurfaces the listen; a
+//   verified recreation at a new CID is visible. Proof-confirmed
 //   absence removes the projection row, so this query-time overlay never writes
 //   a false `record_state=absent` claim.
 // - A follow edge is visible when its actor is a visible user and its subject
@@ -80,15 +85,18 @@ export function visibleScrobblesFrom(s = 's', u = 'u'): string {
             AND (bd.listen_id = '*' OR bd.listen_id = ${sa}.listen_id)))
         AND (
           d.state IN ('queued', 'running', 'blocked', 'failed')
-          OR (d.state = 'succeeded' AND d.swap_cid = ${sa}.cid)
+          OR (d.state = 'succeeded' AND (d.swap_cid = ${sa}.cid
+            OR EXISTS (SELECT 1 FROM listen_removal_cids e WHERE e.operation_id = d.id AND e.cid = ${sa}.cid)))
         )
     )
     AND NOT EXISTS (
       SELECT 1 FROM listen_removals AS lr
       LEFT JOIN operations AS ro ON ro.id = lr.operation_id
-      WHERE lr.did = ${sa}.did AND lr.record_uri = ${sa}.record_uri AND lr.listen_id = ${sa}.listen_id
+      WHERE lr.did = ${sa}.did AND lr.record_uri = ${sa}.record_uri
+        AND (lr.listen_id = ${sa}.listen_id OR lr.listen_id = '*')
         AND (ro.id IS NULL OR ro.state IN ('queued','running','blocked','failed')
-          OR (ro.state = 'succeeded' AND lr.removed_cid = ${sa}.cid))
+          OR (ro.state = 'succeeded' AND (lr.removed_cid = ${sa}.cid
+            OR EXISTS (SELECT 1 FROM listen_removal_cids le WHERE le.operation_id = ro.id AND le.cid = ${sa}.cid))))
     )
     AND (${sa}.listen_id IS NULL OR NOT EXISTS (
       SELECT 1 FROM scrobbles AS one

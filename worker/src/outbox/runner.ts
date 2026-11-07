@@ -207,6 +207,19 @@ const READY = `NOT EXISTS (SELECT 1 FROM operation_deps d JOIN operations p ON p
   WHERE d.op_id = o.id AND p.state IN ('queued','running','blocked'))`;
 const DUE = `o.state IN ('queued','running')`;
 
+/**
+ * A batch-lane scope hold: the executor's explicit `batch_scope_required`, or
+ * any batch read/write failure the transport classified as a permanent scope
+ * denial (403 / 4xx ScopeMissing, InsufficientScope, Forbidden). A 5xx or a
+ * transport failure is never one, whatever its body names (it is transient).
+ */
+function isBatchScopeHold(outcome: Outcome): boolean {
+  return (
+    (outcome.kind === 'reauth' && outcome.code === 'batch_scope_required') ||
+    (outcome.kind === 'permanent' && outcome.code === 'forbidden_scope')
+  );
+}
+
 function hasGrantedBatchScope(scope: string | undefined, prefix: string | null): boolean {
   if (scope === undefined) return false;
   const scopes = new Set(scope.split(/\s+/).filter(Boolean));
@@ -587,11 +600,7 @@ class Run {
     db.tx(() => {
       const hints: HintTarget[] = [];
       for (const [op, outcome] of results) {
-        if (
-          op.collection === this.collections.scrobbleBatch &&
-          outcome.kind === 'reauth' &&
-          outcome.code === 'batch_scope_required'
-        ) {
+        if (op.collection === this.collections.scrobbleBatch && isBatchScopeHold(outcome)) {
           batchScopeHold = true;
           this.report.blocked += db.run(
             "UPDATE operations SET state = 'blocked', last_error = 'batch_scope_required', updated_at_ms = ? WHERE did = ? AND collection = ? AND state IN ('queued','running')",
@@ -627,7 +636,7 @@ class Run {
         if (outcome.kind === 'waiting') this.park(state.did, op.priority, outcome.untilMs);
         if (
           outcome.kind === 'reauth' &&
-          !(op.collection === this.collections.scrobbleBatch && outcome.code === 'batch_scope_required')
+          !(op.collection === this.collections.scrobbleBatch && isBatchScopeHold(outcome))
         )
           reauth = true;
       }
@@ -819,6 +828,7 @@ function finish(m: ModuleDeps, op: OperationRow, outcome: Outcome, now: number, 
       if (op.kind === 'scrobble.delete' && outcome.note === 'record_not_ours') {
         db.run('DELETE FROM listen_removals WHERE operation_id = ?', op.id);
         db.run('DELETE FROM batch_delete_listens WHERE operation_id = ?', op.id);
+        db.run('DELETE FROM listen_removal_cids WHERE operation_id = ?', op.id);
       }
       db.run(
         `UPDATE operations SET state = 'succeeded', result_uri = ?, result_cid = ?, swap_cid = coalesce(?, swap_cid),
@@ -879,6 +889,18 @@ function finish(m: ModuleDeps, op: OperationRow, outcome: Outcome, now: number, 
             `UPDATE listen_removals SET removed_cid = COALESCE(removed_cid, (SELECT cid FROM scrobbles s
             WHERE s.record_uri = listen_removals.record_uri AND s.listen_id = listen_removals.listen_id))
             WHERE operation_id = ?`,
+            op.id,
+          );
+          // The PDS no longer holds the targets, so any CID the projection
+          // still shows them at predates this removal: keep it as evidence.
+          db.run(
+            `INSERT OR IGNORE INTO listen_removal_cids(operation_id, cid)
+             SELECT DISTINCT ?, s.cid FROM scrobbles s
+             WHERE s.did = ? AND s.record_uri = ? AND EXISTS (SELECT 1 FROM batch_delete_listens bd
+               WHERE bd.operation_id = ? AND (bd.listen_id = '*' OR bd.listen_id = s.listen_id))`,
+            op.id,
+            op.did,
+            `at://${op.did}/${op.collection}/${op.rkey}`,
             op.id,
           );
           db.run('UPDATE batch_entry_items SET removed_at_ms = ? WHERE removal_operation_id = ?', now, op.id);
