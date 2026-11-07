@@ -39,14 +39,16 @@ test('same-account OAuth reauthentication in a popup preserves the scrobble draf
   const popupPromise = page.waitForEvent('popup');
   await page.getByRole('button', { name: 'Sign in' }).click();
   const popup = await popupPromise;
-  await expect(page.locator('.session-identity .did')).toHaveText(alice.did, { timeout: 30_000 });
+  await expect(page.locator('.session-identity')).toBeVisible({ timeout: 30_000 });
+  await expect(page.locator('.session-identity')).not.toContainText('did:');
   await expect(page.getByRole('link', { name: 'Return to your saved scrobble draft' })).toBeVisible();
   await expect.poll(() => popup.isClosed(), { timeout: 30_000 }).toBe(true);
   // A same-tab reload is not required for the popup flow, but the app keeps
   // this nonsecret draft in tab-scoped storage so an interrupted reload does
   // not discard the user's work.
   await page.reload();
-  await expect(page.locator('.session-identity .did')).toHaveText(alice.did, { timeout: 30_000 });
+  await expect(page.locator('.session-identity')).toBeVisible({ timeout: 30_000 });
+  await expect(page.locator('.session-identity')).not.toContainText('did:');
   await expect(page.getByRole('link', { name: 'Return to your saved scrobble draft' })).toBeVisible();
   await page.getByRole('link', { name: 'Return to your saved scrobble draft' }).click();
   await expect(page.locator('input[name="artist"]')).toHaveValue('Draft Artist');

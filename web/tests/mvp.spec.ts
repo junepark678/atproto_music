@@ -262,7 +262,8 @@ test('sign-in through the fake AS, scrobble, indexed, delete and follow journeys
     await expect(nav(page).getByRole('link', { name: 'My profile' })).toHaveAttribute('href', `/u/${alice.did}`);
     await expect(nav(page).getByRole('link', { name: 'Add scrobble' })).toBeVisible();
     await expect(nav(page).getByRole('link', { name: 'Sign in' })).toHaveCount(0);
-    await expect(page.locator('.session-identity .did')).toHaveText(alice.did);
+    await expect(page.locator('.session-identity')).toBeVisible();
+    await expect(page.locator('.session-identity')).not.toContainText('did:');
     // The callback's notify {did} admitted alice: a snapshot of her empty
     // repository makes her an indexed account with no scrobbles.
     await expect

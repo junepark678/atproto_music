@@ -16,7 +16,8 @@ test('a Node process restart mid-journey keeps the browser session cookie and in
   await page.getByRole('button', { name: 'Sign in' }).click();
   await authorizeOnFixtureAs(page, alice);
   await expect(page).toHaveURL(/\/feed$/);
-  await expect(page.locator('.session-identity .did')).toHaveText(alice.did);
+  await expect(page.locator('.session-identity')).toBeVisible();
+  await expect(page.locator('.session-identity')).not.toContainText('did:');
 
   const sessionCookie = async () => {
     const cookie = (await context.cookies()).find((item) => item.name === '__Host-atmusic_session');
@@ -52,7 +53,8 @@ test('a Node process restart mid-journey keeps the browser session cookie and in
   expect(restarted.generation).toBe(1);
 
   await page.goto('/feed');
-  await expect(page.locator('.session-identity .did')).toHaveText(alice.did);
+  await expect(page.locator('.session-identity')).toBeVisible();
+  await expect(page.locator('.session-identity')).not.toContainText('did:');
   const afterCookie = await sessionCookie();
   expect(afterCookie?.value).toBe(beforeCookie?.value);
   expect(afterCookie?.expires).toBe(beforeCookie?.expires);
