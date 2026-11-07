@@ -125,15 +125,23 @@ export class LastfmClient {
   }
 
   /** One signed POST; the body parsed as JSON and classified. */
-  async call(method: string, params: readonly (readonly [string, string])[]): Promise<LastfmOutcome<unknown>> {
+  async call(
+    method: string,
+    params: readonly (readonly [string, string])[],
+    httpMethod: 'POST' | 'GET' = 'POST',
+  ): Promise<LastfmOutcome<unknown>> {
     let res: Response;
     let text: string;
     try {
-      res = await this.fetch(this.apiRoot, {
-        method: 'POST',
-        headers: { 'content-type': 'application/x-www-form-urlencoded; charset=utf-8', accept: 'application/json' },
-        body: this.signedBody(method, params).toString(),
-      });
+      const signed = this.signedBody(method, params).toString();
+      res =
+        httpMethod === 'GET'
+          ? await this.fetch(`${this.apiRoot}?${signed}`, { method: 'GET', headers: { accept: 'application/json' } })
+          : await this.fetch(this.apiRoot, {
+              method: 'POST',
+              headers: { 'content-type': 'application/x-www-form-urlencoded; charset=utf-8', accept: 'application/json' },
+              body: signed,
+            });
       text = await res.text();
     } catch (error) {
       if (isTransportError(error)) return { ok: false, kind: 'network', error: error.code };
@@ -162,8 +170,8 @@ export class LastfmClient {
   }
 
   /** auth.getSession for a token the user approved on Last.fm (the link callback). */
-  async getSession(token: string): Promise<LastfmOutcome<LastfmSession>> {
-    const out = await this.call('auth.getSession', [['token', token]]);
+  async getSession(token: string, httpMethod: 'POST' | 'GET' = 'POST'): Promise<LastfmOutcome<LastfmSession>> {
+    const out = await this.call('auth.getSession', [['token', token]], httpMethod);
     if (!out.ok) return out;
     const session = (out.value as { session?: unknown }).session;
     if (!isObject(session) || typeof session.name !== 'string' || typeof session.key !== 'string') {

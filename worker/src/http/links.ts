@@ -84,6 +84,18 @@ export const LASTFM_CALLBACK_PATH = '/api/v1/links/lastfm/callback';
 
 const STATE_RE = /^[0-9a-f]{64}$/;
 // Last.fm web-auth tokens are 32 URL-safe characters (mixed case, digits, `-`, `_`), not hex.
+/** Attempts of auth.getSession in the link callback, and the base delay between them. */
+const LASTFM_SESSION_ATTEMPTS = 4;
+const LASTFM_SESSION_RETRY_MS = 750;
+
+/** A getSession failure worth retrying: transport, 5xx, or last.fm's own temporary errors (11, 16). */
+function transientLastfm(out: { kind: string; httpStatus?: number; code?: number }): boolean {
+  if (out.kind === 'network') return true;
+  if (out.kind === 'http') return (out.httpStatus ?? 0) >= 500;
+  if (out.kind === 'error') return out.code === 11 || out.code === 16;
+  return false;
+}
+
 const LASTFM_TOKEN_RE = /^[A-Za-z0-9_-]{32}$/;
 const MAX_LB_TOKEN_CHARS = 256;
 
@@ -220,7 +232,20 @@ const lastfmCallback: Handler = async (req, ctx, service, session) => {
     }
     return errorResponse('bad_request', 400, ctx.requestId);
   }
-  const out = await service.lastfm.getSession(tokens[0] as string);
+  // last.fm's auth.getSession intermittently answers 5xx (or error 11/16, service offline/temporary) for an
+  // approved token; the token stays valid until consumed, so retry a few times before giving up.
+  let out = await service.lastfm.getSession(tokens[0] as string);
+  for (let attempt = 1; attempt < LASTFM_SESSION_ATTEMPTS && !out.ok && transientLastfm(out); attempt += 1) {
+    service.forwarding.log.log('warn', 'lastfm_link.get_session_retry', {
+      requestId: ctx.requestId,
+      attempt,
+      kind: out.kind,
+      httpStatus: 'httpStatus' in out ? out.httpStatus : null,
+    });
+    await new Promise((resolve) => setTimeout(resolve, LASTFM_SESSION_RETRY_MS * attempt));
+    // Alternate the signed GET form with POST: last.fm documents both for auth.getSession.
+    out = await service.lastfm.getSession(tokens[0] as string, attempt % 2 === 1 ? 'GET' : 'POST');
+  }
   if (!out.ok) {
     // The outcome's kind and Last.fm error code only; never the token or a credential.
     service.forwarding.log.log('warn', 'lastfm_link.get_session_failed', {
