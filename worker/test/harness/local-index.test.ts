@@ -263,6 +263,14 @@ const SEED_ROWS: Record<string, Record<string, SqlParam>[]> = {
   range_stats_cache: [
     { did: ALICE, entity: 'artists', range_key: 'week', as_of: T0, version: 1, body: '{}', created_at_ms: NOW },
   ],
+  listen_removals: [
+    {
+      did: ALICE,
+      record_uri: `at://${ALICE}/${SCROBBLE}Batch/3lb2aaaaaaa2a`,
+      listen_id: '3lb2aaaaaaa2a',
+      created_at_ms: NOW,
+    },
+  ],
   backup_runs: [{ kind: 'manual', started_at_ms: NOW, finished_at_ms: NOW + 1, path: '/tmp/x.db', bytes: 1, ok: 1 }],
 };
 
