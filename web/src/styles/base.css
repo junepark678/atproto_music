@@ -117,11 +117,6 @@ main:focus-visible {
   color: var(--muted);
 }
 
-.session-identity .did {
-  font-size: 0.85em;
-  overflow-wrap: anywhere;
-}
-
 .notice {
   flex-basis: 100%;
   margin: 0;

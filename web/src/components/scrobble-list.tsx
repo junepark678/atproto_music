@@ -69,7 +69,7 @@ export function ScrobbleText({
           <>
             {' · '}
             <a href={`/u/${scrobble.did}`} class="actor">
-              {scrobble.did}
+              Unknown account
             </a>
           </>
         ) : null}

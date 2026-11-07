@@ -138,9 +138,7 @@ function AccountSection({ did, onSignedOut }: { did: Did; onSignedOut(): void })
   return (
     <section aria-labelledby="account-title">
       <h2 id="account-title">Account</h2>
-      <p>
-        Signed in as {handle ? <span class="handle">@{handle}</span> : null} <code>{did}</code>
-      </p>
+      <p>Signed in as {handle ? <span class="handle">@{handle}</span> : 'your account'}</p>
       <p data-session-expiry>
         {expiry === 'loading'
           ? 'Checking when your session ends…'

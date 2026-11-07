@@ -23,7 +23,8 @@ describe('web/test/routes/shell.test.tsx', () => {
     document.body.append(root);
     render(<App state={state} loadMetaOnMount={false} />, root);
     await vi.waitFor(() => expect(root.querySelector('.session-identity')).not.toBeNull());
-    expect(root.querySelector('.session-identity')?.textContent).toContain(state.session.value?.did);
+    expect(root.querySelector('.session-identity')?.textContent).toContain('Signed in as');
+    expect(root.querySelector('.session-identity')?.textContent).not.toContain('did:');
     expect(root.querySelector('[role="alert"]')?.textContent).toContain('Sign in again');
     render(null, root);
     root.remove();
