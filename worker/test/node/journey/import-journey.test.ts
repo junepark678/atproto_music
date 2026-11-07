@@ -11,6 +11,7 @@
 // all listens in one window. Closing the database and
 // recomposing the process mid-journey changes none of that.
 
+import { MAX_CREATE_BODY_BYTES } from '@atmusic/core/scrobble-batch';
 import { zipSync } from 'fflate';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DEFAULT_LIMITS } from '../../../src/outbox/budget';
@@ -35,15 +36,22 @@ const UNIQUE = LASTFM_COUNT + LB_NEW;
 /** The import share of the hour window (accounts.import_share_pct default 50 %). */
 const IMPORT_HOUR_POINTS = DEFAULT_LIMITS.hour / 2;
 
-/** The Last.fm history: 1,050 distinct listens, newest first, one every 4 minutes. */
+/**
+ * The Last.fm history: 1,050 distinct listens, newest first, one every 4
+ * minutes. Names carry 240 three-byte characters each, so the byte-filled
+ * containers (ADR 0006 "Capacity") hold a few hundred listens and the job
+ * spans several of them.
+ */
 function lastfmHistory(): LastfmListen[] {
   return Array.from({ length: LASTFM_COUNT }, (_, i) => ({
-    artist: `Artist ${i % 37}`,
-    track: `Track ${i}`,
-    album: `Album ${i % 11}`,
+    artist: `${'藝'.repeat(240)} ${i % 37}`,
+    track: `${'曲'.repeat(240)} ${i}`,
+    album: `${'盤'.repeat(240)} ${i % 11}`,
     uts: T0_S - 3600 - i * 240,
   }));
 }
+/** Containers the Last.fm job's listens fill (measured; the ListenBrainz job adds one). */
+const LASTFM_CONTAINERS = 3;
 
 /** A ListenBrainz export: OVERLAP listens equal to Last.fm ones, then LB_NEW new ones (older than all of them). */
 function listenbrainzZip(history: readonly LastfmListen[]): Uint8Array {
@@ -133,7 +141,10 @@ async function expectEachListenOnce(w: World, user: User, history: readonly Last
   }
   expect(keys.length).toBe(UNIQUE);
   expect(new Set(keys)).toEqual(expected);
-  expect(records).toHaveLength(Math.ceil(LASTFM_COUNT / 200) + Math.ceil(LB_NEW / 200));
+  expect(records).toHaveLength(LASTFM_CONTAINERS + 1);
+  // Only each job's last container is short: every other one is filled to the byte limit.
+  for (const r of records)
+    expect(new TextEncoder().encode(JSON.stringify(r.value)).byteLength).toBeLessThanOrEqual(MAX_CREATE_BODY_BYTES);
   expect(w.count('operations', "kind = 'scrobble.create'")).toBe(records.length);
   expect(w.count('operations', "kind = 'scrobble.create' AND state = 'succeeded' AND origin = 'import'")).toBe(
     records.length,
@@ -168,7 +179,7 @@ async function bothImports(w: World, alice: User, restartMidway: boolean): Promi
     await untilDone(w, lastfmJob, budget, {
       stopWhen: () => {
         const n = w.count('operations', "kind = 'scrobble.create' AND state = 'succeeded'");
-        return n > 0 && n < Math.ceil(LASTFM_COUNT / 200);
+        return n > 0 && n < LASTFM_CONTAINERS;
       },
     });
     expect(w.db.one<{ state: string }>('SELECT state FROM import_jobs WHERE id = ?', lastfmJob)?.state).toBe('writing');
@@ -181,7 +192,7 @@ async function bothImports(w: World, alice: User, restartMidway: boolean): Promi
   }
   const started = w.clock.nowMs();
   await untilDone(w, lastfmJob, budget);
-  // Six bounded batch creates fit in one import-share window.
+  // A few byte-filled batch creates fit in one import-share window.
   expect(w.clock.nowMs() - started).toBeLessThan(HOUR_MS);
   const lastfmDto = await w.send('GET', `/api/v1/imports/${lastfmJob}`, { as: session });
   expect(lastfmDto.status).toBe(200);

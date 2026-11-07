@@ -13,7 +13,7 @@ import { measureScrobbleBatch } from '@atmusic/atproto/scrobble-batch-size';
 import type { Transport } from '@atmusic/atproto/transport';
 import { listenKey } from '@atmusic/core/listen-key';
 import { trackKey } from '@atmusic/core/music-key';
-import { MAX_CREATE_BODY_BYTES } from '@atmusic/core/scrobble-batch';
+import { MAX_CREATE_BODY_BYTES, MAX_WRITE_BODY_BYTES } from '@atmusic/core/scrobble-batch';
 import { NS_PER_SECOND, toStorage } from '@atmusic/core/timestamp';
 import { describe, expect, it } from 'vitest';
 import type { ImportItemRow, ImportJobRow, OperationRow } from '../../../src/app/rows';
@@ -28,7 +28,7 @@ import {
 } from '../../../src/imports/jobs';
 import { rebatchUnsentImports } from '../../../src/imports/rebatch';
 import { fsUploadStore } from '../../../src/imports/uploads';
-import { WRITE_SLICE } from '../../../src/imports/writer';
+import { BATCH_SCAN_LIMIT, syncOutcomes, WRITE_SLICE, writeSlice } from '../../../src/imports/writer';
 import { bindPolicyFetch, createPolicyFetch } from '../../../src/node/policy-fetch';
 import {
   commitUnsentBatchListenRemoval,
@@ -1347,4 +1347,145 @@ describe('import writer', () => {
       expect(await remoteRecords(h.kit, 'Alice', SCROBBLE_BATCH)).toHaveLength(1);
     });
   });
+
+  it('sends each full container as its own createRecord under the write ceiling, reads it back after a lost answer, and removes one entry with a swapped putRecord', async () => {
+    await withHarness(async (h) => {
+      h.seedUser(h.alice);
+      const rt = runtime(h);
+      uploadJob(
+        h,
+        'job-full',
+        Array.from({ length: 700 }, (_, i) => bigListen(i)),
+      );
+      await parse(h, rt, 'job-full');
+      await runImports(rt, h.kit.clock.nowMs());
+      await runImports(rt, h.kit.clock.nowMs());
+      const [full, tail] = h.ops("import_job_id = 'job-full'");
+      expect([full, tail].map((op) => (JSON.parse(op!.record_json!) as { listens: unknown[] }).listens.length)).toEqual(
+        [PER_BIG_CONTAINER, 700 - PER_BIG_CONTAINER],
+      );
+      // The full container's first send commits but its answer is lost.
+      const crashed = h.writers.crashOn(CREATE, 'after_commit');
+      void h.run();
+      await crashed;
+      h.restart();
+      await h.runUntilIdle();
+      expect(h.op(full!.id)).toMatchObject({ state: 'succeeded', attempts: 2 });
+      expect(h.op(tail!.id)).toMatchObject({ state: 'succeeded' });
+      const creates = h.writers.sent.filter((request) => request.nsid === CREATE);
+      // Adjacent containers never share an applyWrites call; each create is one container.
+      expect(h.writers.count(APPLY)).toBe(0);
+      expect(creates).toHaveLength(2);
+      const bytes = (body: unknown) => new TextEncoder().encode(JSON.stringify(body)).byteLength;
+      for (const request of creates) expect(bytes(request.body)).toBeLessThanOrEqual(MAX_CREATE_BODY_BYTES);
+      expect(bytes(creates[0]!.body)).toBeGreaterThan(MAX_CREATE_BODY_BYTES - 2_000);
+      // The retry was a read (getRecord of the ~1 MB container), never a second create.
+      expect(h.writers.sent.filter((request) => request.nsid === GET).length).toBeGreaterThanOrEqual(1);
+      const remote = await remoteRecords(h.kit, 'Alice', SCROBBLE_BATCH);
+      expect(remote).toHaveLength(2);
+
+      // Remove one entry from the full container: a putRecord fenced by swapCommit and swapRecord.
+      const entries = (JSON.parse(full!.record_json!) as { listens: Array<{ id: string }> }).listens;
+      const receipt = enqueueBatchListenDelete(h.m, {
+        did: h.alice,
+        uri: `at://${h.alice}/${SCROBBLE_BATCH}/${full!.rkey}`,
+        listenIds: [entries[10]!.id],
+        origin: 'web',
+      });
+      await h.runUntilIdle();
+      expect(h.op(receipt.id).state).toBe('succeeded');
+      const puts = h.writers.sent.filter((request) => request.nsid === 'com.atproto.repo.putRecord');
+      expect(puts).toHaveLength(1);
+      const put = puts[0]!.body as Record<string, unknown>;
+      expect(Object.keys(put).sort()).toEqual(['collection', 'record', 'repo', 'rkey', 'swapCommit', 'swapRecord']);
+      expect(bytes(put)).toBeLessThanOrEqual(MAX_WRITE_BODY_BYTES);
+      const kept = (put.record as { listens: Array<{ id: string }> }).listens.map((entry) => entry.id);
+      expect(kept).toEqual(entries.filter((_, i) => i !== 10).map((entry) => entry.id));
+      const after = (await remoteRecords(h.kit, 'Alice', SCROBBLE_BATCH)).find((r) => r.rkey === full!.rkey) as
+        | { value: { listens: unknown[] } }
+        | undefined;
+      expect(after?.value.listens).toHaveLength(PER_BIG_CONTAINER - 1);
+    });
+  }, 60_000);
+
+  it('a scan that ends at BATCH_SCAN_LIMIT settles what it read and leaves an unfilled container staged until the job end', async () => {
+    await withHarness(async (h) => {
+      h.seedUser(h.alice);
+      const rt = runtime(h);
+      const total = 10_100;
+      uploadJob(
+        h,
+        'job-scan',
+        Array.from({ length: total }, (_, i) => listen(i)),
+      );
+      await parse(h, rt, 'job-scan');
+      // The first 9,800 staged items no longer parse: invalid when the writer reaches them.
+      h.db.run("UPDATE import_items SET record_json = '{}' WHERE job_id = 'job-scan' AND seq < 9800");
+      const now = h.kit.clock.nowMs();
+      const first = await writeSlice(h.m, { id: 'job-scan', did: h.alice }, now);
+      // 9,800 invalid + 201 listens read: the scan stopped at its limit with a container short of full.
+      expect(BATCH_SCAN_LIMIT).toBe(10_001);
+      expect(first).toEqual({ created: 0, duplicates: 0, invalid: 9_800, taken: 9_800 });
+      expect(h.ops()).toHaveLength(0);
+      const second = await writeSlice(h.m, { id: 'job-scan', did: h.alice }, now);
+      expect(second).toEqual({ created: 300, duplicates: 0, invalid: 0, taken: 300 });
+      expect(h.ops().map((op) => (JSON.parse(op.record_json!) as { listens: unknown[] }).listens.length)).toEqual([
+        300,
+      ]);
+      expect(itemStates(h, 'job-scan')).toEqual({ invalid: 9_800, queued: 300 });
+      expect(job(h, 'job-scan')).toMatchObject({ invalid: 9_800 });
+    });
+  }, 60_000);
+
+  it('love-heavy and duplicate-heavy windows progress every slice and never create a short container early', async () => {
+    await withHarness(async (h) => {
+      h.seedUser(h.alice);
+      const rt = runtime(h);
+      uploadJob(
+        h,
+        'job-mixed',
+        Array.from({ length: 2_000 }, (_, i) => listen(i)),
+      );
+      await parse(h, rt, 'job-mixed');
+      // 1,500 loves first (more than the 1,000-item room), then listens of which every tenth is
+      // already known (a duplicate) and every 25th no longer builds (invalid).
+      h.db.run(
+        `UPDATE import_items SET record_json = json_object('kind','love','input',json_object('artist','Loved','track','T' || seq))
+         WHERE job_id = 'job-mixed' AND seq < 1500`,
+      );
+      h.db.run(
+        `UPDATE import_items SET record_json = json_object('kind','listen','input',json_object('artist','','track','x','listenedAt','2026-01-01T00:00:00Z'))
+         WHERE job_id = 'job-mixed' AND seq >= 1500 AND seq % 25 = 0`,
+      );
+      const dupKeys = h.db.all<{ dedupe_key: string }>(
+        "SELECT dedupe_key FROM import_items WHERE job_id = 'job-mixed' AND seq >= 1500 AND seq % 10 = 1",
+      );
+      for (const { dedupe_key } of dupKeys)
+        h.db.run(
+          "INSERT INTO listen_keys(did, dedupe_key, operation_id, source, created_at_ms) VALUES (?, ?, NULL, 'lastfm', ?)",
+          h.alice,
+          dedupe_key,
+          T0,
+        );
+      const slice = () => writeSlice(h.m, { id: 'job-mixed', did: h.alice }, h.kit.clock.nowMs());
+      const batches = () => h.ops(`collection = '${SCROBBLE_BATCH}'`);
+      // Slice 1: the room's worth of loves, no container (the listens after them are not reached).
+      expect(await slice()).toEqual({ created: 1_000, duplicates: 0, invalid: 0, taken: 1_000 });
+      expect(batches()).toHaveLength(0);
+      // Back-pressure: nothing while 1,000 are queued.
+      expect(await slice()).toEqual({ created: 0, duplicates: 0, invalid: 0, taken: 0 });
+      await h.runUntilIdle();
+      syncOutcomes(h.db, 'job-mixed', h.kit.clock.nowMs());
+      // Slice 3 reaches the end: 500 loves, the duplicates and invalid items, one container of the rest.
+      const third = await slice();
+      const listens = 500 - 20 - 50;
+      expect(third).toEqual({ created: 500 + listens, duplicates: 50, invalid: 20, taken: 500 + listens + 70 });
+      expect(batches().map((op) => (JSON.parse(op.record_json!) as { listens: unknown[] }).listens.length)).toEqual([
+        listens,
+      ]);
+      expect(h.ops(`kind = 'scrobble.create' AND collection != '${SCROBBLE_BATCH}'`)).toHaveLength(0);
+      expect(await slice()).toEqual({ created: 0, duplicates: 0, invalid: 0, taken: 0 });
+      expect(itemStates(h, 'job-mixed')).toMatchObject({ duplicate: 50, invalid: 20 });
+    });
+  }, 60_000);
 });
