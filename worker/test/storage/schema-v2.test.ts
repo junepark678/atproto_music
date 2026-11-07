@@ -1224,6 +1224,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       "10|'verified_listen_membership'",
       "11|'removal_commit_fence'",
       "12|'removal_completion_boundary'",
+      "13|'removal_reached'",
     ]);
     // The new scrobble columns exist and are NULL on every migrated row.
     expect(after.newColumns).toHaveLength(expectedScrobbles);
@@ -1243,6 +1244,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       { version: 10, name: 'verified_listen_membership' },
       { version: 11, name: 'removal_commit_fence' },
       { version: 12, name: 'removal_completion_boundary' },
+      { version: 13, name: 'removal_reached' },
     ]);
     expect(after.compat).toEqual([{ singleton: 1, min_compatible_version: 2 }]);
     expect(after.newTablesEmpty).toEqual([]);
