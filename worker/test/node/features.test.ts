@@ -254,12 +254,19 @@ async function exercise(w: World, alice: User): Promise<void> {
       stepMs: 10_000,
     },
   );
-  expect((await alice.repo.list(SCROBBLE)).length).toBe(5);
+  expect((await alice.repo.list(SCROBBLE)).length).toBe(1);
+  const batches = await alice.repo.list(`${SCROBBLE}Batch`);
+  expect(batches).toHaveLength(2);
+  expect(batches.flatMap((batch) => (batch.value as { listens: unknown[] }).listens)).toHaveLength(4);
 }
 
 /** Starts a world on `spy`, with run() building its own Jetstream connector and a recording global fetch. */
 async function spiedWorld(spy: Spy): Promise<{ w: World; alice: User; unpinned: string[] }> {
-  const { w, alice } = await startWorld({ outbound: (router) => spy.source(router), connectJetstream: null });
+  const { w, alice } = await startWorld({
+    outbound: (router) => spy.source(router),
+    connectJetstream: null,
+    env: { NAMESPACE_BATCH_PUBLICATION_REF: `sha256:${'b'.repeat(64)}` },
+  });
   // run() installed the unpinned stub as globalThis.fetch; record every call to it.
   const stub = globalThis.fetch;
   const unpinned: string[] = [];
