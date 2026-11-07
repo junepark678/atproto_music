@@ -78,6 +78,8 @@ import type { AppConfig } from '../config';
 import { type VerifiedLbToken, verifyLbToken } from '../credentials/lb-tokens';
 import type { ModuleDeps } from '../do/contracts';
 import { clearNowPlaying } from '../do/read/now-playing';
+import { visibleScrobblesFrom } from '../do/read/visibility';
+import { musicKeyColumns } from '../do/write/keys';
 import { need, type RequestCtx, type RouteDef } from '../http/types';
 import {
   commitUnsentBatchListenRemoval,
@@ -320,22 +322,27 @@ async function findDeleteTarget(m: ModuleDeps, did: string, seconds: bigint, msi
     track_key: string;
     recording_msid: string | null;
   }>(
-    `SELECT uri, record_uri, listen_id, artist_key, track_key, recording_msid FROM scrobbles
-     WHERE did = ? AND listened_at >= ? AND listened_at < ?
-     ORDER BY listened_at DESC, uri DESC`,
+    `SELECT s.uri, s.record_uri, s.listen_id, s.artist_key, s.track_key, s.recording_msid FROM ${visibleScrobblesFrom('s', 'u')}
+     WHERE s.did = ? AND s.listened_at >= ? AND s.listened_at < ?
+     ORDER BY s.listened_at DESC, s.uri DESC`,
     did,
     toStorage(lowerNs),
     toStorage(upperNs),
   );
+  let indexedTarget: Extract<DeleteTarget, { kind: 'indexed' }> | null = null;
+  let indexedKeys: { artist_key: string; track_key: string } | null = null;
   for (const row of rows) {
     const candidate = row.recording_msid ?? (await recordingMsidOfKey([row.artist_key, row.track_key]));
-    if (candidate === msid)
-      return {
+    if (candidate === msid) {
+      indexedTarget = {
         kind: 'indexed',
         uri: row.uri,
         ...(row.record_uri ? { recordUri: row.record_uri } : {}),
         ...(row.listen_id ? { listenId: row.listen_id } : {}),
       };
+      indexedKeys = { artist_key: row.artist_key, track_key: row.track_key };
+      break;
+    }
   }
 
   const prefix = m.config.prefix;
@@ -344,8 +351,8 @@ async function findDeleteTarget(m: ModuleDeps, did: string, seconds: bigint, msi
   // Records carry the normalised UTC datetime (toRecordDatetime), so the
   // second is its first 19 characters; the exact bound is checked below.
   const second = toRecordDatetime(lowerNs).slice(0, 19);
-  const ops = m.db.all<Pick<OperationRow, 'id' | 'record_json'>>(
-    `SELECT id, record_json FROM operations
+  const ops = m.db.all<Pick<OperationRow, 'id' | 'record_json' | 'collection'>>(
+    `SELECT id, record_json, collection FROM operations
      WHERE did = ? AND kind = 'scrobble.create' AND collection IN (?, ?) AND record_json IS NOT NULL
        AND state IN ('queued','running','blocked','succeeded')
        AND (collection = ? OR substr(json_extract(record_json, '$.listenedAt'), 1, 19) = ?)
@@ -356,7 +363,14 @@ async function findDeleteTarget(m: ModuleDeps, did: string, seconds: bigint, msi
     collections.scrobbleBatch,
     second,
   );
-  let best: { ns: bigint; operationId: string; listenId?: string } | null = null;
+  let best: {
+    ns: bigint;
+    operationId: string;
+    collection: string;
+    artist_key: string;
+    track_key: string;
+    listenId?: string;
+  } | null = null;
   for (const op of ops) {
     let root: {
       listenedAt?: unknown;
@@ -384,16 +398,50 @@ async function findDeleteTarget(m: ModuleDeps, did: string, seconds: bigint, msi
       const ns = parseRfc3339(record.listenedAt);
       if (ns === null || ns < lowerNs || ns >= upperNs) continue;
       let candidate: string;
+      let musicKeys: { artist_key: string; track_key: string };
       try {
         candidate = await recordingMsid(record.artist, record.track);
+        musicKeys = musicKeyColumns(record.artist, record.track, null);
       } catch {
         continue;
       }
       // The newest listen of the second wins (the rows come newest submission first).
-      if (candidate === msid && (best === null || ns > best.ns))
-        best = { ns, operationId: op.id, ...(candidateRecord.listenId ? { listenId: candidateRecord.listenId } : {}) };
+      if (candidate === msid) {
+        const candidateBatch = op.collection === collections.scrobbleBatch;
+        const sameKey =
+          best !== null && best.artist_key === musicKeys.artist_key && best.track_key === musicKeys.track_key;
+        const singleWinsTie =
+          best !== null &&
+          ns === best.ns &&
+          sameKey &&
+          !candidateBatch &&
+          best.collection === collections.scrobbleBatch;
+        if (best === null || ns > best.ns || singleWinsTie)
+          best = {
+            ns,
+            operationId: op.id,
+            collection: op.collection!,
+            ...musicKeys,
+            ...(candidateRecord.listenId ? { listenId: candidateRecord.listenId } : {}),
+          };
+      }
     }
   }
+  if (
+    indexedTarget !== null &&
+    best !== null &&
+    indexedKeys !== null &&
+    indexedKeys.artist_key === best.artist_key &&
+    indexedKeys.track_key === best.track_key &&
+    indexedTarget.listenId !== best.listenId
+  ) {
+    const indexedBatch = indexedTarget.recordUri !== undefined;
+    const pendingBatch = best.collection === collections.scrobbleBatch;
+    // Same normalized listen: the visible single format wins in either arrival order.
+    if (indexedBatch && !pendingBatch) return { kind: 'pending', operationId: best.operationId };
+    if (!indexedBatch && pendingBatch) return indexedTarget;
+  }
+  if (indexedTarget !== null) return indexedTarget;
   return best === null
     ? { kind: 'none' }
     : { kind: 'pending', operationId: best.operationId, ...(best.listenId ? { listenId: best.listenId } : {}) };

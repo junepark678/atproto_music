@@ -64,6 +64,7 @@ import type { OperationRow } from '../app/rows';
 import { verifySessionKey } from '../credentials/lastfm-auth';
 import type { ModuleDeps } from '../do/contracts';
 import { upsertNowPlaying } from '../do/read/now-playing';
+import { visibleScrobblesFrom } from '../do/read/visibility';
 import { musicKeyColumns } from '../do/write/keys';
 import {
   commitUnsentBatchListenRemoval,
@@ -384,26 +385,38 @@ function uriOf(op: Pick<OperationRow, 'did' | 'collection' | 'rkey'>): string {
 }
 
 /** An unsettled scrobble.delete of the DID at `rkey`, if any. */
-function pendingDelete(m: ModuleDeps, did: string, collection: string, rkey: string): string | null {
+function pendingDelete(m: ModuleDeps, did: string, collection: string, rkey: string, listenId?: string): string | null {
   return (
     m.db.one<{ id: string }>(
       `SELECT id FROM operations WHERE did = ? AND kind = 'scrobble.delete' AND collection = ? AND rkey = ?
-         AND state IN ${UNSETTLED_SQL} ORDER BY rowid DESC LIMIT 1`,
+         AND state IN ${UNSETTLED_SQL}
+         AND (? != ? OR EXISTS (SELECT 1 FROM batch_delete_listens bdl WHERE bdl.operation_id=operations.id
+           AND bdl.listen_id IN (?, '*')))
+       ORDER BY rowid DESC LIMIT 1`,
       did,
       collection,
       rkey,
+      collection,
+      collection.endsWith('.scrobbleBatch') ? collection : '',
+      listenId ?? '',
     )?.id ?? null
   );
 }
 
 /** True when a delete of ours already removed the record at `rkey`, or the index verified it absent. */
-function alreadyRemoved(m: ModuleDeps, did: string, collection: string, rkey: string): boolean {
+function alreadyRemoved(m: ModuleDeps, did: string, collection: string, rkey: string, listenId?: string): boolean {
   const deleted = m.db.one<{ one: number }>(
     `SELECT 1 AS one FROM operations WHERE did = ? AND kind = 'scrobble.delete' AND collection = ? AND rkey = ?
-       AND state = 'succeeded' LIMIT 1`,
+       AND state = 'succeeded'
+       AND (? != ? OR EXISTS (SELECT 1 FROM batch_delete_listens bdl WHERE bdl.operation_id=operations.id
+         AND bdl.listen_id IN (?, '*')))
+     LIMIT 1`,
     did,
     collection,
     rkey,
+    collection,
+    collection.endsWith('.scrobbleBatch') ? collection : '',
+    listenId ?? '',
   );
   if (deleted !== null) return true;
   const state = m.db.one<{ state: string }>(
@@ -487,30 +500,54 @@ export async function removeScrobble(m: ModuleDeps, args: RemoveScrobbleArgs): P
     const out: RemoveMatch[] = [];
     const handled = new Set<string>();
     const indexed = m.db.one<{ uri: string; rkey: string; record_uri: string | null; listen_id: string | null }>(
-      `SELECT uri, rkey, record_uri, listen_id FROM scrobbles WHERE did = ? AND artist_key = ? AND track_key = ?
-         AND listened_at >= ? AND listened_at < ? ORDER BY listened_at DESC, uri DESC LIMIT 1`,
+      `SELECT s.uri, s.rkey, s.record_uri, s.listen_id FROM ${visibleScrobblesFrom('s', 'u')}
+       WHERE s.did = ? AND s.artist_key = ? AND s.track_key = ?
+         AND s.listened_at >= ? AND s.listened_at < ? ORDER BY s.listened_at DESC, s.uri DESC LIMIT 1`,
       args.did,
       keys.artist_key,
       keys.track_key,
       lower,
       upper,
     );
+    const rawIndexed =
+      indexed ??
+      m.db.one<{
+        uri: string;
+        rkey: string;
+        record_uri: string | null;
+        listen_id: string | null;
+      }>(
+        `SELECT uri,rkey,record_uri,listen_id FROM scrobbles WHERE did=? AND artist_key=? AND track_key=?
+       AND listened_at>=? AND listened_at<? ORDER BY listened_at DESC,uri DESC LIMIT 1`,
+        args.did,
+        keys.artist_key,
+        keys.track_key,
+        lower,
+        upper,
+      );
     const isIndexed = (uri: string) => m.db.one('SELECT 1 AS one FROM scrobbles WHERE uri = ?', uri) !== null;
 
-    for (const id of createsWithKey(m, args.did, key)) {
+    // A visible indexed single wins over a pending batch with the same music
+    // key. If the visible row is a batch item, an exact pending single is the
+    // cross-format winner and must be removed on its own first.
+    const pendingIds = createsWithKey(m, args.did, key);
+    const pendingSingleIds = pendingIds.filter((id) => loadOperation(m.db, id)?.collection === collection);
+    const preferredPendingSingle = pendingSingleIds[0];
+    const indexedSingle = indexed !== null && indexed.record_uri === null;
+    const pendingSingleWins = indexed !== null && indexed.record_uri !== null && preferredPendingSingle !== undefined;
+
+    for (const id of pendingIds) {
       const op = loadOperation(m.db, id);
       if (op === null || op.did !== args.did || op.kind !== 'scrobble.create' || op.rkey === null) continue;
       if (op.collection !== collection && op.collection !== collections.scrobbleBatch) continue;
+      if (indexedSingle) continue;
+      if (pendingSingleWins && id !== preferredPendingSingle) continue;
+      if (!pendingSingleWins && indexed !== null) continue;
+      if (indexed === null && preferredPendingSingle !== undefined && id !== preferredPendingSingle) continue;
       if (op.state === 'failed' || op.state === 'cancelled') continue;
       const uri = uriOf(op);
       if (handled.has(uri) || isIndexed(uri)) continue; // the indexed path below handles it
       handled.add(uri);
-      const waiting = pendingDelete(m, args.did, op.collection, op.rkey);
-      if (waiting !== null) {
-        out.push({ kind: 'delete_pending', uri, deleteId: waiting });
-        continue;
-      }
-      if (alreadyRemoved(m, args.did, op.collection, op.rkey)) continue;
       const batchEntry =
         op.collection === collections.scrobbleBatch
           ? m.db.one<{ entry_id: string }>(
@@ -521,6 +558,12 @@ export async function removeScrobble(m: ModuleDeps, args: RemoveScrobbleArgs): P
             )?.entry_id
           : undefined;
       if (op.collection === collections.scrobbleBatch && batchEntry === undefined) continue;
+      const waiting = pendingDelete(m, args.did, op.collection, op.rkey, batchEntry);
+      if (waiting !== null) {
+        out.push({ kind: 'delete_pending', uri, deleteId: waiting });
+        continue;
+      }
+      if (alreadyRemoved(m, args.did, op.collection, op.rkey, batchEntry)) continue;
       const plan = unsentBatchPlans.get(op.id);
       if (plan !== undefined && commitUnsentBatchListenRemoval(m, plan) !== null) {
         out.push({ kind: 'rewritten', operationId: op.id });
@@ -538,8 +581,11 @@ export async function removeScrobble(m: ModuleDeps, args: RemoveScrobbleArgs): P
       }
     }
 
-    if (indexed !== null && !handled.has(indexed.uri)) {
-      const waiting = pendingDelete(m, args.did, collection, indexed.rkey);
+    if (indexed !== null && !handled.has(indexed.uri) && !pendingSingleWins) {
+      const targetCollection = indexed.record_uri !== null ? collections.scrobbleBatch : collection;
+      const targetRkey = indexed.record_uri !== null ? indexed.record_uri.split('/').at(-1)! : indexed.rkey;
+      if (alreadyRemoved(m, args.did, targetCollection, targetRkey, indexed.listen_id ?? undefined)) return out;
+      const waiting = pendingDelete(m, args.did, targetCollection, targetRkey, indexed.listen_id ?? undefined);
       if (waiting !== null) {
         out.push({ kind: 'delete_pending', uri: indexed.uri, deleteId: waiting });
       } else {
@@ -554,6 +600,15 @@ export async function removeScrobble(m: ModuleDeps, args: RemoveScrobbleArgs): P
             : enqueueScrobbleDelete(m, { did: args.did, uri: indexed.uri, origin: 'lastfm' });
         out.push({ kind: 'delete_indexed', uri: indexed.uri, deleteId: del.id });
       }
+    }
+    // A pending batch item is hidden from the shared read overlay immediately.
+    // Keep its exact intent discoverable to a repeated protocol delete without
+    // allowing a sibling item in that same container to satisfy the request.
+    if (indexed === null && rawIndexed !== null) {
+      const targetCollection = rawIndexed.record_uri !== null ? collections.scrobbleBatch : collection;
+      const targetRkey = rawIndexed.record_uri !== null ? rawIndexed.record_uri.split('/').at(-1)! : rawIndexed.rkey;
+      const waiting = pendingDelete(m, args.did, targetCollection, targetRkey, rawIndexed.listen_id ?? undefined);
+      if (waiting !== null) out.push({ kind: 'delete_pending', uri: rawIndexed.uri, deleteId: waiting });
     }
     return out;
   });

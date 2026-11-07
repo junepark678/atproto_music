@@ -118,7 +118,70 @@ function seedScrobble(app: TestApp, did: string, rkey: string, listenedAt: strin
   );
 }
 
+function seedBatchListen(
+  app: TestApp,
+  did: string,
+  rkey: string,
+  listenId: string,
+  listenedAt: string,
+  artist: string,
+  track: string,
+) {
+  const [artistKey, trackKeyValue] = trackKey(artist, track);
+  const container = `at://${did}/${BATCH}/${rkey}`;
+  app.db.run(
+    `INSERT INTO scrobbles(uri,cid,did,rkey,revision,artist,track,listened_at,created_at,indexed_at,artist_key,track_key,record_uri,listen_id)
+     VALUES (?, 'bafyreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy', ?, ?, '3lbq2f7ff2c2a', ?, ?, ?,
+       '2026-01-15T11:00:00.000Z', '2026-01-15T11:00:01.000000000Z', ?, ?, ?, ?)`,
+    `${container}#${listenId}`,
+    did,
+    rkey,
+    artist,
+    track,
+    listenedAt,
+    artistKey,
+    trackKeyValue,
+    container,
+    listenId,
+  );
+}
+
 describe('ListenBrainz token routes (ADR §8.2, §8.6)', () => {
+  it('delete-listen uses the single-over-batch visible winner in either indexed arrival order', async () => {
+    const r = await rig();
+    const alice = r.user(ALICE, 'alice.example.com');
+    const second = NOW_S - 900;
+    const listenedAt = `${new Date(second * 1000).toISOString().slice(0, 19)}.000000000Z`;
+    for (const [suffix, batchFirst] of [
+      ['one', false],
+      ['two', true],
+    ] as const) {
+      const artist = `Cross ${suffix}`;
+      const track = `Track ${suffix}`;
+      const seedSingle = () => seedScrobble(r.app, ALICE, `3lbqsingle${suffix}1`, listenedAt, artist, track);
+      const seedBatch = () =>
+        seedBatchListen(r.app, ALICE, `3lbqbatch${suffix}01`, `3lb2entry${suffix}01`, listenedAt, artist, track);
+      if (batchFirst) {
+        seedBatch();
+        seedSingle();
+      } else {
+        seedSingle();
+        seedBatch();
+      }
+      const msid = await recordingMsid(artist, track);
+      const response = await post(r.app, '/1/delete-listen', alice.token, {
+        listened_at: second,
+        recording_msid: msid,
+      });
+      expect(response.status).toBe(200);
+      expect(r.ops(ALICE).at(-1)).toMatchObject({
+        kind: 'scrobble.delete',
+        collection: SCROBBLE,
+        rkey: `3lbqsingle${suffix}1`,
+      });
+    }
+  });
+
   it("a valid header or ?token returns {code:200,message:'Token valid.',valid:true,user_name}; invalid returns 200 valid false; none is 400", async () => {
     const r = await rig();
     const alice = r.user(ALICE, 'alice.example.com');
