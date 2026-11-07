@@ -584,11 +584,53 @@ Operator notes:
 - Snapshots now rewrite the revision of unchanged projection rows to the
   snapshot head.
 
+Follow-up on PR #164 (after `291142e`): a refusal of the exact re-send.
+A limit recorded at `291142e` let a non-swap 4xx of an exact re-send end the
+removal as `failed` while the original stayed unknown. That contradicted the
+F3 hold invariant, so it is fixed (`refusedWhileUnknown`, both executors):
+- A received 4xx of a send while the pin stays pending never fails the
+  removal. A sign-in failure blocks, and so does the batch lane's scope hold
+  (it counts its attempt, as before). A single record's scope denial blocks
+  for a sign-in (`forbidden_scope`, attempt refunded).
+- A 429 keeps its Retry-After wait for the owner's later writes too.
+- Any other refusal holds `removal_send_unresolved` with its attempt
+  counted. A batch 404 no longer re-sends in a loop within one attempt.
+- The single-record executor reads back after such a refusal, and a read
+  failure there holds as F3 requires.
+- The original's own definite 4xx still records `rejected` and fails by the
+  ordinary policy.
+
+Regressions in `uncertain-hardening.test.ts`:
+- › F3 $kind: the exact re-send refused ($refusal)…: InvalidRecord 400,
+  scope denial 403, rate limit 429 and RecordNotFound 404 × partial, whole and
+  single. Each case dispatches exactly the pinned request once and keeps the
+  pin and fence. The 403 case blocks and resumes, and the 429 case keeps its
+  backoff. The late original then commits and R recreates the record: three
+  restarts and polls send nothing, and a covering fresh intent fenced at R
+  resolves it.
+- › F3 $kind: the tenth send, an exact re-send refused…: 400, 429 and 404 ×
+  3. The tenth attempt holds and the reconcile never sends, across a
+  block/resume. A fresh intent supersedes it, and after a 429 that intent
+  waits out the Retry-After first.
+- › F3 %s control: the ORIGINAL send refused (400) is rejected and failed.
+
+11 of these fail on `291142e`'s `worker/src/outbox`. The 13 that pass there
+are cases that already held safely: the batch scope hold, 429, the single
+404, the tenth 429, and the controls.
+
+Evidence:
+- `uncertain-hardening` 90/90.
+- Outbox, imports, lastfm, listenbrainz and worker/test/write: 50 files, 462
+  tests passed. This includes the 833-receipt import writer test and the
+  original-versus-retry 4xx tests.
+- The seven de5abe1 probes still pass (3, 3, 3, 16, 1, 5, 3).
+  `new-boundaries` and `new-controls` have no FAIL row.
+- `npm run typecheck` passes; at `291142e` it failed on a test-only
+  possibly-undefined read in `after-reproof-stats.test.ts`, now fixed. Biome,
+  `git diff --check`, `validate_contracts.py` and `validate_case_map.py
+  --check-tests` pass.
+
 Remaining limits (documented behavior, not waivers):
-- A non-swap 4xx refusing an exact re-send (not the original) still ends the
-  attempt by the ordinary failure policy (`failed`). The pin is kept and the
-  failed overlay still hides the targets. No replay follows, but a failed row
-  is not superseded automatically.
 - A held removal at its root in the tenth reconcile holds until its head
   moves, an absence or verified absence appears, or a covering intent
   supersedes it. Removals behind it are not held back, because it never

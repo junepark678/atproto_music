@@ -913,6 +913,28 @@ function holdUnread(
 }
 
 /**
+ * The outcome of a received refusal (a 4xx answer) of a send while an earlier
+ * send's outcome is still unknown (the pin stays pending: this was the exact
+ * re-send, not the original, or the original's refusal could not be recorded).
+ * That refusal says nothing about the original, which may have committed: the
+ * removal never fails on it. A sign-in failure and the batch lane's scope hold
+ * keep blocking (resumable, the pin unchanged); a scope denial of a single
+ * record asks for a new sign-in the same way instead of failing. A rate limit
+ * or another transient answer keeps its retry and Retry-After accounting (the
+ * tenth attempt holds, exhaustedUncertain). Any other refusal (InvalidRecord,
+ * RecordNotFound, a validation error) holds, its attempt counted, so the exact
+ * request repeats only at its own root and at most until the read-only tenth
+ * reconcile; past the root the next look holds without sending. Without an
+ * unknown send `outcome` is returned unchanged (ordinary failure policy).
+ */
+export function refusedWhileUnknown(ctx: ExecContext, id: string, outcome: Outcome): Outcome {
+  if (uncertainSend(ctx.m.db, id) === null) return outcome;
+  if (outcome.kind !== 'permanent') return outcome;
+  if (outcome.code === 'forbidden_scope') return { kind: 'reauth', code: 'forbidden_scope' };
+  return { ...holdUnresolved(ctx, id), counted: true };
+}
+
+/**
  * A transient outcome of the final (tenth) attempt of a removal whose send is
  * still unknown would exhaust it: it holds instead (SEND_UNCERTAIN, the
  * attempt counted). The next look is the read-only reconcile, never a send.

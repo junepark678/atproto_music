@@ -59,6 +59,7 @@ import {
   type PinnedRequest,
   pinSend,
   type RepoHeadRef,
+  refusedWhileUnknown,
   rejectSend,
   removalEstablished,
   removalPredecessors,
@@ -345,10 +346,20 @@ async function deleteWithSwap(op: OperationRow, ctx: ExecContext, predecessors: 
       return { kind: 'transient', code: 'remote_delete_unconfirmed', swapCid: seen.found.cid };
     }
     const failure = result.failure;
-    if (failure.code !== 'repository_changed' && failure.kind !== 'missing') return failureOutcome(failure);
+    // A received refusal while an earlier send is still unknown (this was its
+    // exact re-send) proves nothing about that send: read back, and never fail
+    // on it (refusedWhileUnknown). A sign-in failure blocks at once.
+    const refusedUnknown =
+      failure.kind !== 'reauth' && definitelyRejected(result) && uncertainSend(ctx.m.db, op.id) !== null;
+    if (failure.code !== 'repository_changed' && failure.kind !== 'missing' && !refusedUnknown) {
+      return failureOutcome(failure);
+    }
     const seen = await observe();
     if (seen.kind === 'outcome') return afterSend(ctx.m.db, op.id, seen.outcome);
     if (seen.kind === 'settled') return { kind: 'succeeded', uri, hints, swapCid: swap };
+    if (refusedUnknown && failure.code !== 'repository_changed' && failure.kind !== 'missing') {
+      return refusedWhileUnknown(ctx, op.id, failureOutcome(failure));
+    }
     // The record is unchanged and only the repository head moved: retry now
     // against a fresh head (no attempt spent on an unrelated commit).
     if (failure.code === 'repository_changed' && seen.found.cid === swap) continue;

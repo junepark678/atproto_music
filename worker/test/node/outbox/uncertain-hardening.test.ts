@@ -686,3 +686,153 @@ it('F4 control: removals of a key without a held removal keep their ordering', a
     expect(writes(h)).toHaveLength(1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// F3 follow-up: a refusal of the exact re-send while the original is unknown.
+// The original was accepted for later delivery, so the later send's 400, 403,
+// 404 or 429 proves nothing about it: never a terminal failure, the pin and
+// fence unchanged, sign-in and the batch scope hold still block (resumable),
+// rate limits keep their backoff, and nothing is ever sent at a new root.
+
+const REFUSALS = {
+  'InvalidRecord 400': () => Response.json({ error: 'InvalidRecord', message: 'invalid record' }, { status: 400 }),
+  'scope denial 403': () => Response.json({ error: 'Forbidden', message: 'missing scope' }, { status: 403 }),
+  'rate limit 429': () =>
+    new Response(JSON.stringify({ error: 'RateLimitExceeded', message: 'slow down' }), {
+      status: 429,
+      headers: { 'content-type': 'application/json', 'retry-after': '120' },
+    }),
+  'RecordNotFound 404': () => Response.json({ error: 'RecordNotFound', message: 'not found' }, { status: 404 }),
+} as const;
+type Refusal = keyof typeof REFUSALS;
+const REFUSAL_NAMES = Object.keys(REFUSALS) as Refusal[];
+
+/** Every removal write dispatched from now on; the next `refuse` of them are answered by `refusal` without reaching the PDS. */
+function refuseWrites(h: Harness, kind: Kind, refusal: Refusal, refuse = 1) {
+  const dispatched: unknown[] = [];
+  wrap(h, async (nsid, forward, init) => {
+    if (nsid !== PUT && nsid !== DELETE) return forward();
+    dispatched.push(JSON.parse(String(init?.body)));
+    if (nsid === methodOf(kind) && refuse > 0) {
+      refuse -= 1;
+      return REFUSALS[refusal]();
+    }
+    return forward();
+  });
+  return dispatched;
+}
+
+it.each(REFUSAL_NAMES.flatMap((refusal) => KINDS.map((kind) => ({ refusal, kind }))))(
+  'F3 $kind: the exact re-send refused ($refusal) while the original is unknown holds; the late original then commits, R is never removed',
+  async ({ refusal, kind }) => {
+    await withHarness(async (h) => {
+      const { a, removal, persisted, late } = await unknownSend(h, kind);
+      const dispatched = refuseWrites(h, kind, refusal);
+      const before = h.kit.clock.nowMs();
+      const retry = await poll(h, removal.id, 1);
+      // Exactly the pinned request, once: no loop of re-sends within the attempt.
+      expect(dispatched).toEqual([pinOf(persisted).body]);
+      const row = h.op(removal.id);
+      expect(row).toMatchObject({
+        removal_send_state: 'pending',
+        removal_send_json: persisted.removal_send_json,
+        removal_head_rev: a.commit.rev,
+        removal_reached: null,
+      });
+      expect(row.state).not.toBe('failed');
+      if (refusal === 'scope denial 403') {
+        // The batch lane's scope hold (its attempt counted, as for any batch
+        // scope denial), or a sign-in for a single record (attempt refunded).
+        expect(row).toMatchObject({
+          state: 'blocked',
+          attempts: kind === 'single' ? 1 : 2,
+          last_error: kind === 'single' ? 'forbidden_scope' : 'batch_scope_required',
+        });
+        expect(resumeAfterSignIn(h.m, h.alice)).toBe(1);
+      } else if (refusal === 'rate limit 429') {
+        expect(retry[0]).toMatchObject({ state: 'queued', attempts: 2, code: 'upstream_rate_limited' });
+        expect(row.due_at - before).toBeGreaterThanOrEqual(120_000);
+      } else if (refusal === 'InvalidRecord 400') {
+        expect(retry[0]).toMatchObject({ state: 'queued', attempts: 2, code: UNRESOLVED });
+      } else {
+        expect(retry[0]).toMatchObject({ state: 'queued', attempts: 2 });
+      }
+      // The original arrives after all and commits D at H; R recreates it.
+      expect((await late()).status).toBe(200);
+      await h.kit.externalPut('Alice', collectionOf(kind), rkeyOf(kind), bytesOf(kind));
+      const r = head(h);
+      const polls = await poll(h, removal.id, 3);
+      expect(dispatched).toHaveLength(1);
+      expect(polls.every((p) => p.state === 'queued' && p.code === UNCERTAIN)).toBe(true);
+      expect(polls.every((p) => p.delay >= HEAD_RETRY_MS && p.delay <= HOLD_MAX_MS)).toBe(true);
+      expect(h.op(removal.id)).toMatchObject({
+        removal_send_json: persisted.removal_send_json,
+        removal_head_rev: a.commit.rev,
+      });
+      expect(await remoteTargets(h, kind)).toEqual(kind === 'single' ? ['*'] : [X, Y, Z]);
+      // Still supersedable: the owner's later intent alone removes R.
+      const fresh = await freshResolves(h, kind, removal.id);
+      expect(new Set(fresh.writes.map((w) => w.body?.swapCommit))).toEqual(new Set([r.cid]));
+    });
+  },
+);
+
+it.each(
+  (['InvalidRecord 400', 'rate limit 429', 'RecordNotFound 404'] as const).flatMap((refusal) =>
+    KINDS.map((kind) => ({ refusal, kind })),
+  ),
+)(
+  'F3 $kind: the tenth send, an exact re-send refused ($refusal), holds; the reconcile never sends',
+  async ({ refusal, kind }) => {
+    await withHarness(async (h) => {
+      const { removal, persisted } = await unknownSend(h, kind);
+      h.db.run('UPDATE operations SET attempts = 9 WHERE id = ?', removal.id);
+      const dispatched = refuseWrites(h, kind, refusal);
+      const tenth = await poll(h, removal.id, 1);
+      expect(dispatched).toEqual([pinOf(persisted).body]);
+      expect(tenth[0]).toMatchObject({ state: 'queued', attempts: 10 });
+      expect([UNCERTAIN, UNRESOLVED]).toContain(tenth[0]!.code);
+      const reconciled = await poll(h, removal.id, 3);
+      expect(reconciled.every((p) => p.state === 'queued' && p.attempts === 10 && p.code === UNCERTAIN)).toBe(true);
+      expect(dispatched).toHaveLength(1);
+      expect(h.op(removal.id)).toMatchObject({
+        removal_send_state: 'pending',
+        removal_send_json: persisted.removal_send_json,
+      });
+      // Resumable after a sign-in, and supersedable.
+      blockOperations(h.db, h.alice, h.kit.clock.nowMs());
+      expect(resumeAfterSignIn(h.m, h.alice)).toBe(1);
+      expect((await poll(h, removal.id, 1))[0]).toMatchObject({ state: 'queued', attempts: 10, code: UNCERTAIN });
+      expect(dispatched).toHaveLength(1);
+      if (refusal === 'rate limit 429') {
+        // The PDS's Retry-After still binds the owner's later writes.
+        const fresh = intent(h, kind);
+        await h.runUntilIdle(10);
+        expect(h.op(fresh.id)).toMatchObject({ state: 'queued', attempts: 0 });
+        h.kit.clock.advance(120_000);
+        await h.runUntilIdle(10);
+        expect(h.op(fresh.id).state).toBe('succeeded');
+        expect(h.op(removal.id)).toMatchObject({ state: 'cancelled', removal_superseded_by: fresh.id });
+      } else {
+        await freshResolves(h, kind, removal.id);
+      }
+    });
+  },
+);
+
+it.each(KINDS)(
+  'F3 %s control: a refusal (InvalidRecord 400) of the ORIGINAL send is definite: rejected and failed as before',
+  async (kind) => {
+    await withHarness(async (h) => {
+      const { removal } = await admit(h, kind);
+      const dispatched = refuseWrites(h, kind, 'InvalidRecord 400');
+      await h.runUntilIdle(10);
+      expect(dispatched).toHaveLength(1);
+      expect(h.op(removal.id)).toMatchObject({
+        state: 'failed',
+        removal_send_state: 'rejected',
+        removal_send_json: null,
+      });
+    });
+  },
+);

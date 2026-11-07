@@ -22,11 +22,13 @@ import {
   observeRemoval,
   type PinnedRequest,
   pinSend,
+  refusedWhileUnknown,
   rejectSend,
   removalPredecessors,
   sendDenied,
   supersedeUncertain,
   type TargetRead,
+  uncertainSend,
 } from './removal-fence';
 import type { ExecContext, Executor } from './runner';
 import { validRkey } from './scrobble-ops';
@@ -565,10 +567,14 @@ async function removeIds(op: OperationRow, ctx: ExecContext): Promise<Outcome> {
     // that CID is pre-removal evidence too.
     recordRemovalEvidence(ctx.m.db, op.id, after.found.cid);
     if (result.ok) return { kind: 'transient', code: 'remote_delete_unconfirmed' };
-    if (result.failure.kind === 'missing') continue;
+    // While an earlier send is still unknown (this was its exact re-send), a
+    // refusal proves nothing about it: never a terminal failure, and never a
+    // loop of re-sends within this attempt (refusedWhileUnknown).
+    const unknown = uncertainSend(ctx.m.db, op.id) !== null;
+    if (result.failure.kind === 'missing' && !unknown) continue;
     // A transient (5xx/transport) failure retries with backoff whatever its
     // body names; only a classified permanent denial holds for re-consent.
-    return batchFailure(result.failure);
+    return unknown ? refusedWhileUnknown(ctx, op.id, batchFailure(result.failure)) : batchFailure(result.failure);
   }
   return { kind: 'transient', code: 'repository_changed' };
 }

@@ -317,8 +317,16 @@ intent was admitted. The rule is now:
   classified scope denial keeps its own handling. The read-only reconcile of
   an interrupted tenth attempt holds whenever a send is unknown, at its root
   too (the original may still arrive), and never sends; a transient outcome
-  of the tenth attempt of such a removal holds instead of exhausting it.
-  Removals with no unknown send keep the ordinary failure policy.
+  of the tenth attempt of such a removal holds instead of exhausting it. A
+  received refusal (400, 403, 404, 429, …) of a later send, the exact re-send,
+  is no evidence about the unknown original either: the removal never fails
+  on it and keeps its pin and fence. A sign-in failure and the batch lane's
+  scope hold still block (resumable); a scope denial of a single record asks
+  for a new sign-in the same way; a rate limit keeps its Retry-After backoff;
+  any other refusal holds with its attempt counted, so the exact request
+  repeats only at its root and at most until the read-only tenth reconcile,
+  and never loops within an attempt. Removals with no unknown send, and the
+  definite refusal of an original send, keep the ordinary failure policy.
 - A pin is only ever sent when it is fully this removal's request (amendment
   after Astra de5abe1 F6): exactly `{method, body, head}`, a CID and TID
   head, `swapCommit` equal to the head CID, a CID `swapRecord`, the
