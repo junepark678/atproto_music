@@ -750,4 +750,98 @@ describe('Last.fm write methods', () => {
     );
     expect(operations(app, 'scrobble.delete')).toHaveLength(7);
   });
+  it('library.removeScrobble removes a restored batch listen again instead of reusing the settled receipt', async () => {
+    const { app, sk } = await rig();
+    const keys = await fixtureKeys();
+    const repo = new SignedRepo(ALICE, keys.alice, { clock: fixedClock() });
+    const nowNs = fromMs(NOW_MS);
+    const rkey = '3lbqrestored01';
+    const container = `at://${ALICE}/${BATCH}/${rkey}`;
+    const listenedAt = '2026-01-15T07:00:00Z';
+    const timestamp = String(Date.parse(listenedAt) / 1000);
+    const record = (marker: string) => ({
+      $type: BATCH,
+      createdAt: '2026-01-15T12:00:00Z',
+      marker,
+      listens: [
+        {
+          id: '3lb2restoreab',
+          artist: 'Restored Artist',
+          track: 'Restored',
+          listenedAt,
+          createdAt: '2026-01-15T12:00:00Z',
+        },
+        {
+          id: '3lb2restoreac',
+          artist: 'Restored Artist',
+          track: 'Sibling',
+          listenedAt,
+          createdAt: '2026-01-15T12:00:00Z',
+        },
+      ],
+    });
+    const verifyAndApply = async (value: unknown) => {
+      await repo.put(BATCH, rkey, value);
+      const proof = await verifyRecordProof(await repo.getRecordCar(BATCH, rkey), {
+        did: ALICE,
+        collection: BATCH,
+        rkey,
+        signingKey: repo.key.didKey,
+      });
+      app.db.tx(() => applyRecordProof(app.db, proof, { receiptNs: nowNs, prefix: OWNED, nowNs }));
+      if (proof.state !== 'present') throw new Error('expected a present proof');
+      return proof.cid;
+    };
+    const visible = () =>
+      app.db
+        .all<{ listen_id: string }>(
+          `SELECT s.listen_id FROM ${visibleScrobblesFrom('s', 'u')} WHERE s.record_uri = ? ORDER BY s.listen_id`,
+          container,
+        )
+        .map((row) => row.listen_id);
+    const remove = () =>
+      post(app, { method: 'library.removeScrobble', sk, artist: 'Restored Artist', track: 'Restored', timestamp });
+    const removals = () =>
+      app.db.all<{ id: string; state: string }>(
+        "SELECT o.id, o.state FROM operations o JOIN batch_delete_listens b ON b.operation_id = o.id WHERE o.kind = 'scrobble.delete' AND o.rkey = ? AND b.listen_id = '3lb2restoreab' ORDER BY o.rowid",
+        rkey,
+      );
+
+    const original = await verifyAndApply(record('original'));
+    expect(visible()).toEqual(['3lb2restoreab', '3lb2restoreac']);
+    expect((await remove()).status).toBe(200);
+    const [first] = removals();
+    expect(first).toMatchObject({ state: 'queued' });
+    // A repeated request while it is pending dedupes onto the same intent.
+    expect((await remove()).status).toBe(200);
+    expect(removals()).toHaveLength(1);
+
+    // The PDS removal settles at the CAS target, and its verified result lands.
+    app.db.run("UPDATE operations SET state = 'succeeded', swap_cid = ? WHERE id = ?", original, first!.id);
+    expect(visible()).toEqual(['3lb2restoreac']);
+    const removed = await verifyAndApply({ ...record('removed'), listens: [record('removed').listens[1]] });
+    expect(removed).not.toBe(original);
+    expect(visible()).toEqual(['3lb2restoreac']);
+    // With the receipt settled and nothing visible, there is nothing to remove.
+    const nothing = await remove();
+    expect(nothing.status).toBe(400);
+    expect(nothing.json()).toMatchObject({ error: 7 });
+
+    // The owner restores the same listen id at a new CID: it is visible, and
+    // the old receipt no longer applies to it, so a fresh intent is admitted.
+    const restored = await verifyAndApply(record('restored'));
+    expect(restored).not.toBe(original);
+    expect(visible()).toEqual(['3lb2restoreab', '3lb2restoreac']);
+    const again = await remove();
+    expect(again.status).toBe(200);
+    const after = removals();
+    expect(after).toHaveLength(2);
+    expect(after[1]).toMatchObject({ state: 'queued' });
+    expect(app.db.all('SELECT listen_id FROM batch_delete_listens WHERE operation_id = ?', after[1]!.id)).toEqual([
+      { listen_id: '3lb2restoreab' },
+    ]);
+    expect(visible()).toEqual(['3lb2restoreac']);
+    expect((await remove()).status).toBe(200);
+    expect(removals()).toHaveLength(2);
+  });
 });

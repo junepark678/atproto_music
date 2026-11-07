@@ -584,7 +584,11 @@ export async function removeScrobble(m: ModuleDeps, args: RemoveScrobbleArgs): P
     if (indexed !== null && !handled.has(indexed.uri) && !pendingSingleWins) {
       const targetCollection = indexed.record_uri !== null ? collections.scrobbleBatch : collection;
       const targetRkey = indexed.record_uri !== null ? indexed.record_uri.split('/').at(-1)! : indexed.rkey;
-      if (alreadyRemoved(m, args.did, targetCollection, targetRkey, indexed.listen_id ?? undefined)) return out;
+      // No historical receipt short-circuits a visible row: the shared
+      // overlay already hides every incarnation a delete of ours still covers
+      // (pending, or its swap/evidence CIDs), so a visible row is a newer
+      // verified incarnation (e.g. the owner restored the same listen id at a
+      // new CID) and needs a fresh delete intent.
       const waiting = pendingDelete(m, args.did, targetCollection, targetRkey, indexed.listen_id ?? undefined);
       if (waiting !== null) {
         out.push({ kind: 'delete_pending', uri: indexed.uri, deleteId: waiting });
