@@ -586,7 +586,9 @@ describe('import writer', () => {
       expect(
         h.ops(`kind = 'scrobble.delete' AND collection = '${SCROBBLE_BATCH}' AND id != '${removal.id}'`),
       ).toHaveLength(1);
-      expect(h.db.one('SELECT record_uri FROM listen_removals WHERE listen_id = ?', parentRecord.listens[0]!.id)).toEqual({
+      expect(
+        h.db.one('SELECT record_uri FROM listen_removals WHERE listen_id = ?', parentRecord.listens[0]!.id),
+      ).toEqual({
         record_uri: `at://${h.alice}/${SCROBBLE_BATCH}/${removedChild!.rkey}`,
       });
       expect(
@@ -603,39 +605,38 @@ describe('import writer', () => {
     });
   });
 
-  it.each([{ name: 'wildcard', all: true }, { name: 'explicit ids spanning both children', all: false }])(
-    'partitions $name removal intent when a batch splits', async ({ all }) => {
-      await withHarness(async (h) => {
-        h.seedUser(h.alice);
-        const rt = runtime(h);
-        uploadJob(h, 'job-split-removal', [listen(41), listen(42)]);
-        await parse(h, rt, 'job-split-removal');
-        await runImports(rt, h.kit.clock.nowMs());
-        const parentBatch = h.ops()[0]!;
-        const entries = (JSON.parse(parentBatch.record_json!) as { listens: Array<{ id: string }> }).listens;
-        const intent = all ? ['*'] : entries.map((entry) => entry.id);
-        const receipt = enqueueBatchListenDelete(h.m, {
-          did: h.alice,
-          uri: `at://${h.alice}/${SCROBBLE_BATCH}/${parentBatch.rkey}`,
-          listenIds: intent,
-          origin: 'web',
-        });
-        h.kit.pds.Alice.serverError(CREATE, 413, 1);
-
-        await h.runUntilIdle();
-        await runImports(rt, h.kit.clock.nowMs());
-
-        expect(h.op(receipt.id).state).toBe('succeeded');
-        const removals = h.ops(
-          `kind = 'scrobble.delete' AND collection = '${SCROBBLE_BATCH}' AND id != '${receipt.id}'`,
-        );
-        expect(removals).toHaveLength(2);
-        expect(removals.every((operation) => operation.state === 'succeeded')).toBe(true);
-        expect(await remoteRecords(h.kit, 'Alice', SCROBBLE_BATCH)).toHaveLength(0);
-        expect(itemStates(h, 'job-split-removal')).toEqual({ written: 2 });
+  it.each([
+    { name: 'wildcard', all: true },
+    { name: 'explicit ids spanning both children', all: false },
+  ])('partitions $name removal intent when a batch splits', async ({ all }) => {
+    await withHarness(async (h) => {
+      h.seedUser(h.alice);
+      const rt = runtime(h);
+      uploadJob(h, 'job-split-removal', [listen(41), listen(42)]);
+      await parse(h, rt, 'job-split-removal');
+      await runImports(rt, h.kit.clock.nowMs());
+      const parentBatch = h.ops()[0]!;
+      const entries = (JSON.parse(parentBatch.record_json!) as { listens: Array<{ id: string }> }).listens;
+      const intent = all ? ['*'] : entries.map((entry) => entry.id);
+      const receipt = enqueueBatchListenDelete(h.m, {
+        did: h.alice,
+        uri: `at://${h.alice}/${SCROBBLE_BATCH}/${parentBatch.rkey}`,
+        listenIds: intent,
+        origin: 'web',
       });
-    },
-  );
+      h.kit.pds.Alice.serverError(CREATE, 413, 1);
+
+      await h.runUntilIdle();
+      await runImports(rt, h.kit.clock.nowMs());
+
+      expect(h.op(receipt.id).state).toBe('succeeded');
+      const removals = h.ops(`kind = 'scrobble.delete' AND collection = '${SCROBBLE_BATCH}' AND id != '${receipt.id}'`);
+      expect(removals).toHaveLength(2);
+      expect(removals.every((operation) => operation.state === 'succeeded')).toBe(true);
+      expect(await remoteRecords(h.kit, 'Alice', SCROBBLE_BATCH)).toHaveLength(0);
+      expect(itemStates(h, 'job-split-removal')).toEqual({ queued: 2 });
+    });
+  });
 
   it('does not settle a split-delete receipt or item timestamp when one child removal fails', async () => {
     await withHarness(async (h) => {
@@ -649,13 +650,13 @@ describe('import writer', () => {
       const receipt = enqueueBatchListenDelete(h.m, {
         did: h.alice,
         uri: `at://${h.alice}/${SCROBBLE_BATCH}/${batch.rkey}`,
-        listenIds: entries.map((entry) => entry.id),
+        listenIds: [entries[0]!.id, entries[2]!.id],
         origin: 'web',
       });
       h.kit.pds.Alice.serverError(CREATE, 413, 1);
       h.kit.pds.Alice.fail(
         { nsid: 'com.atproto.repo.putRecord' },
-        { kind: 'status', status: 400, error: 'InvalidRequest', message: 'rejected child update' },
+        { kind: 'status', status: 422, error: 'Rejected', message: 'rejected child update' },
       );
 
       await h.runUntilIdle();
@@ -692,7 +693,9 @@ describe('import writer', () => {
 
       expect(h.op(receipt.id).state).toBe('succeeded');
       expect(await remoteRecords(h.kit, 'Alice', SCROBBLE_BATCH)).toHaveLength(0);
-      expect(h.db.all('SELECT child_operation_id FROM batch_delete_children WHERE parent_operation_id=?', receipt.id)).toHaveLength(2);
+      expect(
+        h.db.all('SELECT child_operation_id FROM batch_delete_children WHERE parent_operation_id=?', receipt.id),
+      ).toHaveLength(2);
     });
   });
 

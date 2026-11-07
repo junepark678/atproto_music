@@ -735,7 +735,7 @@ const MIGRATION_8: Migration = {
   version: 8,
   name: 'outbox_send_certainty',
   statements: [
-    "ALTER TABLE operations ADD COLUMN send_state TEXT NOT NULL DEFAULT 'unknown' CHECK(send_state IN ('unknown','unsent'))",
+    "ALTER TABLE operations ADD COLUMN send_state TEXT NOT NULL DEFAULT 'unknown'",
     `CREATE TABLE batch_delete_children (
       parent_operation_id TEXT NOT NULL,
       child_operation_id TEXT NOT NULL,
@@ -874,4 +874,5 @@ export const TABLE_CLASS: Readonly<Record<TableName, TableClass>> = {
   listen_removals: 'non-derived',
   batch_entry_items: 'non-derived',
   batch_delete_listens: 'non-derived',
+  batch_delete_children: 'non-derived',
 };

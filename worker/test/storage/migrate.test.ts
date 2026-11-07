@@ -723,6 +723,7 @@ describe('migrate', () => {
         { version: 5, name: 'batch_listen_provenance' },
         { version: 6, name: 'batch_outbox_recovery' },
         { version: 7, name: 'batch_listen_removal_receipts' },
+        { version: 8, name: 'outbox_send_certainty' },
       ]);
       expect(db.all('SELECT min_compatible_version FROM schema_compat')).toEqual([{ min_compatible_version: 2 }]);
       // A row in a migration-2 table survives reopening.

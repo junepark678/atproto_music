@@ -192,6 +192,7 @@ const NEW_TABLES: Record<string, ExpectedTable> = {
       updated_at_ms: true,
       follow_proof_json: true,
       send_started_at_ms: true,
+      send_state: true,
     }),
     pk: ['id'],
     unique: [['did', 'idempotency_key']],

@@ -103,7 +103,8 @@ export const batchCreateExecutor: Executor = {
       failure.error === 'InvalidRequest' && /size|large|payload|byte|length|too big/.test(rejectionMessage);
     const definiteStatus = failure.status === 400 || failure.status === 413;
     const schemaRejection =
-      definiteStatus && failure.status !== 413 &&
+      definiteStatus &&
+      failure.status !== 413 &&
       ((failure.error === 'InvalidRequest' && !sizeInvalidRequest) ||
         (failure.error === 'InvalidRecord' && /schema|lexicon|unknown collection|record type/.test(rejectionMessage)));
     if (schemaRejection)
@@ -134,21 +135,13 @@ export const batchCreateExecutor: Executor = {
       }
       return { kind: 'split', children };
     }
-    return failure.kind === 'reauth'
-      ? { kind: 'reauth' }
-      : failure.kind === 'transient'
-        ? {
-            kind: 'transient',
-            code: failure.code,
-            ...(failure.retryAfterMs === undefined ? {} : { retryAfterMs: failure.retryAfterMs }),
-          }
-        : {
-            kind: 'permanent',
-            code: failure.code,
-            ...(failure.error === undefined ? {} : { remoteError: failure.error }),
-            ...(failure.message === undefined ? {} : { remoteMessage: failure.message }),
-            ...(failure.status === undefined ? {} : { status: failure.status }),
-          };
+    return {
+      kind: 'permanent',
+      code: failure.code,
+      ...(failure.error === undefined ? {} : { remoteError: failure.error }),
+      ...(failure.message === undefined ? {} : { remoteMessage: failure.message }),
+      ...(failure.status === undefined ? {} : { status: failure.status }),
+    };
   },
   async reconcile(op, ctx) {
     if (!valid(op, ctx, false)) return { kind: 'permanent', code: 'invalid_batch_record' };

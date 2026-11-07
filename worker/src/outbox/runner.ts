@@ -76,6 +76,7 @@ import {
   IMPORT_PRIORITY,
   insertOperation,
   MAX_ATTEMPTS,
+  newOperationId,
   type OutboxCollections,
   outboxCollections,
   persistRunning,
@@ -698,9 +699,7 @@ class Run {
       for (const removal of parentDeletes) {
         const intents = parentIntents.get(removal.id) ?? [];
         const wildcard = intents.includes('*');
-        const targeted = wildcard
-          ? child.entryIds
-          : child.entryIds.filter((entryId) => intents.includes(entryId));
+        const targeted = wildcard ? child.entryIds : child.entryIds.filter((entryId) => intents.includes(entryId));
         if (targeted.length === 0) continue;
         const childRemoval = insertOperation(
           db,
