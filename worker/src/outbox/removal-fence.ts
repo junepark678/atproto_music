@@ -111,6 +111,14 @@
 
 import { createHash } from 'node:crypto';
 import { encode } from '@atcute/cbor';
+import { measureScrobbleBatch } from '@atmusic/atproto/scrobble-batch-size';
+import {
+  BATCH_MAX_LISTENS,
+  MAX_CBOR_BYTES,
+  MAX_CREATE_BODY_BYTES,
+  type ScrobbleBatchRecord,
+} from '@atmusic/core/scrobble-batch';
+import { isTid } from '@atmusic/core/syntax';
 import type { Db } from '../do/db';
 import { UNSETTLED_SQL } from './operations';
 import type { Outcome, XrpcResult } from './pds-writer';
@@ -169,6 +177,7 @@ export const HEAD_RETRY_MS = 5_000;
 export const HOLD_MAX_MS = 300_000;
 
 export type RepoHeadRef = { cid: string; rev: string };
+type WaitingOutcome = Extract<Outcome, { kind: 'waiting' }>;
 export type CheckedHead = ({ kind: 'head' } & RepoHeadRef) | { kind: 'outcome'; outcome: Outcome };
 
 /** How a removal's completion boundary (`removal_done_rev`) was established. */
@@ -393,6 +402,7 @@ export async function observeRemoval<T extends { cid: string }>(
   uri: string,
   targets: readonly string[],
   read: () => Promise<TargetRead<T>>,
+  mode: ObserveMode = 'execute',
 ): Promise<Observation<T>> {
   const db = ctx.m.db;
   const now = () => ctx.m.clock.nowMs();
@@ -408,7 +418,14 @@ export async function observeRemoval<T extends { cid: string }>(
     if (reached && !established) keepRemovalDone(db, operationId, head.rev, 'after');
     const found = await read();
     if (found.kind === 'outcome') {
-      if (!reached) return found;
+      if (!reached) {
+        // A read that cannot finish says nothing about an unknown send: it
+        // keeps holding (bounded, read-only), never fails terminally.
+        const pin = uncertainSend(db, operationId);
+        return pin === null
+          ? found
+          : { kind: 'outcome', outcome: holdUnread(ctx, operationId, pin, head, found.outcome, mode) };
+      }
       if (found.outcome.kind === 'permanent') return { kind: 'settled' };
       return { kind: 'outcome', outcome: holdReached(ctx, operationId, found.outcome) };
     }
@@ -421,15 +438,35 @@ export async function observeRemoval<T extends { cid: string }>(
       if (pin !== null) {
         // The head moved past an unknown send: never a new fence (holdUncertain).
         if (!sameRoot(pin, at)) return { kind: 'outcome', outcome: holdUncertain(ctx, operationId) };
+        // A read-only reconcile (the tenth attempt was interrupted) never
+        // sends: the original may still arrive, so it holds.
+        if (mode === 'reconcile') return { kind: 'outcome', outcome: holdUncertain(ctx, operationId) };
         if (pin.request !== null) {
           // Nothing was committed since the send, so it did not happen yet:
           // only the very same CAS on that root may go again.
           if (pin.request.body.swapRecord === found.found.cid) {
             return { kind: 'present', head: at, found: found.found, resend: pin.request };
           }
-          // The pinned swapRecord does not match the record at its own root:
-          // that request can never commit, so it changed nothing.
-          rejectSend(db, operationId);
+          // Another CID was read after a head equal to the root. Unbracketed,
+          // that is no observation AT the root: the original may have
+          // committed between the head read and the record read, and the
+          // record been recreated since. Only the same head read again proves
+          // the read saw exactly the root, where the pinned swapRecord cannot
+          // match, so that request can never commit and changed nothing.
+          const closing = await ctx.xrpc.latestCommit();
+          if (closing.kind === 'head' && closing.cid === at.cid && closing.rev === at.rev) {
+            rejectSend(db, operationId);
+            return { kind: 'present', head: at, found: found.found };
+          }
+          if (closing.kind === 'failed' && closing.failure.kind === 'reauth') {
+            return { kind: 'outcome', outcome: { kind: 'reauth' } };
+          }
+          // Moved: past the root now, so it holds like any unknown send.
+          // Unavailable: nothing is known; it holds and reads again.
+          return {
+            kind: 'outcome',
+            outcome: closing.kind === 'head' ? holdUncertain(ctx, operationId) : holdUnresolved(ctx, operationId),
+          };
         }
       }
       return { kind: 'present', head: at, found: found.found };
@@ -522,19 +559,38 @@ async function bracket<T>(
  * (counted, retried) instead.
  */
 export function afterSend(db: Db, id: string, outcome: Outcome): Outcome {
-  if (outcome.kind === 'waiting' && (removalReached(db, id) || outcome.code === SEND_UNCERTAIN)) {
-    return { ...outcome, counted: true };
-  }
-  return outcome.kind === 'waiting' ? { kind: 'transient', code: outcome.code ?? 'remote_state_unavailable' } : outcome;
+  if (outcome.kind !== 'waiting') return outcome;
+  if (removalReached(db, id) || isUnknownHold(outcome)) return { ...outcome, counted: true };
+  return { kind: 'transient', code: outcome.code ?? 'remote_state_unavailable' };
 }
 
 // ---------------------------------------------------------------------------
 // Unknown sends (migration 14)
 
-/** Why a removal holds read-only: an earlier send's outcome is unknown and the head moved past its root. */
+/**
+ * Why a removal holds read-only and will never send again: an earlier send's
+ * outcome is unknown and either the head moved past its root (that request can
+ * no longer commit) or this is the read-only tenth reconcile. A removal on the
+ * same key never waits for it (removalPredecessors, runner READY).
+ */
 export const SEND_UNCERTAIN = 'removal_send_uncertain';
+/**
+ * Why a removal holds while an earlier send's outcome is unknown and its root
+ * may still be current (a read that could not finish, a closing head that
+ * could not be read): it reads again and may still re-send exactly that
+ * request, so later removals on the key keep waiting for it.
+ */
+export const SEND_UNRESOLVED = 'removal_send_unresolved';
 /** Why an unresolved removal was cancelled: a later explicit removal on the key covers its targets. */
 export const SUPERSEDED = 'removal_superseded';
+
+/** Whether `outcome` is the read-only hold of a removal with an unknown send. */
+export function isUnknownHold(outcome: Outcome): boolean {
+  return outcome.kind === 'waiting' && (outcome.code === SEND_UNCERTAIN || outcome.code === SEND_UNRESOLVED);
+}
+
+/** Whether a removal observation may send (`execute`) or is the read-only tenth-attempt reconcile. */
+export type ObserveMode = 'execute' | 'reconcile';
 
 /** The exact request of a removal send: method, body (swapCommit, swapRecord, record) and the head it was fenced by. */
 export type PinnedRequest = { method: string; body: Record<string, unknown>; head: RepoHeadRef };
@@ -546,25 +602,106 @@ export type UnknownSend = {
   atMs: number | null;
 };
 
-function parsePinned(json: string | null): PinnedRequest | null {
-  if (json === null) return null;
+/** The removal a pinned request must belong to: its owner, record key and targets. */
+type PinOwner = { did: string; collection: string; rkey: string | null; targets: readonly string[] };
+
+const DELETE_METHOD = 'com.atproto.repo.deleteRecord';
+const PUT_METHOD = 'com.atproto.repo.putRecord';
+const PIN_KEYS = ['body', 'head', 'method'];
+const HEAD_KEYS = ['cid', 'rev'];
+const TAGGED_HEAD_KEYS = ['cid', 'kind', 'rev'];
+const DELETE_KEYS = ['collection', 'repo', 'rkey', 'swapCommit', 'swapRecord'];
+const PUT_KEYS = ['collection', 'record', 'repo', 'rkey', 'swapCommit', 'swapRecord'];
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function exactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  const own = Object.keys(value).sort();
+  return own.length === keys.length && own.every((key, i) => key === keys[i]);
+}
+
+/**
+ * Whether `record` is what a partial removal of `owner`'s targets may put: a
+ * container of that collection, 1..BATCH_MAX_LISTENS retained entries none of
+ * which is a target, encodable within the batch size limits. Unknown fields
+ * and retained entries are not otherwise judged: they are the owner's bytes.
+ */
+function validRetained(record: unknown, owner: PinOwner): boolean {
+  if (!isObject(record) || record.$type !== owner.collection || !Array.isArray(record.listens)) return false;
+  const listens = record.listens as unknown[];
+  if (listens.length < 1 || listens.length > BATCH_MAX_LISTENS) return false;
+  if (listens.some((item) => isObject(item) && typeof item.id === 'string' && owner.targets.includes(item.id))) {
+    return false;
+  }
+  if (recordCid(record) === null) return false;
   try {
-    const value = JSON.parse(json) as Partial<PinnedRequest> | null;
-    if (
-      value === null ||
-      typeof value !== 'object' ||
-      typeof value.method !== 'string' ||
-      value.body === null ||
-      typeof value.body !== 'object' ||
-      Array.isArray(value.body) ||
-      typeof value.head?.cid !== 'string' ||
-      typeof value.head?.rev !== 'string'
-    )
-      return null;
-    return { method: value.method, body: value.body, head: { cid: value.head.cid, rev: value.head.rev } };
+    const sizes = measureScrobbleBatch(record as unknown as ScrobbleBatchRecord, {
+      repo: owner.did,
+      collection: owner.collection,
+      rkey: owner.rkey ?? '',
+    });
+    return sizes.cborBytes <= MAX_CBOR_BYTES && sizes.createBodyBytes <= MAX_CREATE_BODY_BYTES;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * A persisted (or about to be persisted) removal request, only if it is fully
+ * the request this removal may send (fail closed): exactly `{method, body,
+ * head}`; the head a well-formed CID and TID revision; the body exactly the
+ * fields of its method, naming this removal's own repo, collection and rkey,
+ * with `swapCommit` equal to the head CID and a well-formed `swapRecord`. A
+ * single record and a whole-container removal only delete; a partial removal
+ * deletes, or puts a valid retained container (validRetained). Anything else
+ * (unparseable, an array, a missing or extra field, another key or method, a
+ * CID/head mismatch) is never sendable.
+ */
+function parsePinned(json: string | null, owner: PinOwner): PinnedRequest | null {
+  if (json === null || owner.rkey === null) return null;
+  let value: unknown;
+  try {
+    value = JSON.parse(json);
   } catch {
     return null;
   }
+  if (!isObject(value) || !exactKeys(value, PIN_KEYS)) return null;
+  const { method, body, head } = value;
+  // A single-record pin written before this check kept checkedHead's
+  // `kind: 'head'` tag beside the CID and revision; that exact shape is ours.
+  if (
+    !isObject(head) ||
+    !(exactKeys(head, HEAD_KEYS) || (exactKeys(head, TAGGED_HEAD_KEYS) && head.kind === 'head')) ||
+    typeof head.cid !== 'string' ||
+    !CID_SYNTAX.test(head.cid) ||
+    typeof head.rev !== 'string' ||
+    !isTid(head.rev)
+  )
+    return null;
+  if (
+    !isObject(body) ||
+    body.repo !== owner.did ||
+    body.collection !== owner.collection ||
+    body.rkey !== owner.rkey ||
+    body.swapCommit !== head.cid ||
+    typeof body.swapRecord !== 'string' ||
+    !CID_SYNTAX.test(body.swapRecord)
+  )
+    return null;
+  if (method === DELETE_METHOD) {
+    if (!exactKeys(body, DELETE_KEYS)) return null;
+  } else if (method === PUT_METHOD) {
+    if (
+      !owner.collection.endsWith('.scrobbleBatch') ||
+      owner.targets.includes('*') ||
+      !exactKeys(body, PUT_KEYS) ||
+      !validRetained(body.record, owner)
+    )
+      return null;
+  } else return null;
+  return { method, body, head: { cid: head.cid, rev: head.rev } };
 }
 
 /**
@@ -577,30 +714,46 @@ export function uncertainSendSql(d = 'd'): string {
     AND (${d}.removal_send_state IS 'pending' OR (${d}.removal_send_state IS NULL AND ${d}.removal_head_rev IS NOT NULL)))`;
 }
 
+type SendRow = {
+  did: string;
+  collection: string;
+  rkey: string | null;
+  state: string;
+  attempts: number;
+  removal_send_state: string | null;
+  removal_send_json: string | null;
+  removal_send_at_ms: number | null;
+  removal_head_rev: string | null;
+  removal_reached: string | null;
+  removal_done_rev: string | null;
+};
+
+function sendRow(db: Db, id: string): SendRow | null {
+  return db.one<SendRow>(
+    `SELECT did, collection, rkey, state, attempts, removal_send_state, removal_send_json, removal_send_at_ms,
+       removal_head_rev, removal_reached, removal_done_rev FROM operations WHERE id = ? AND kind = 'scrobble.delete'`,
+    id,
+  );
+}
+
+function ownerOf(db: Db, id: string, row: SendRow): PinOwner {
+  return { did: row.did, collection: row.collection, rkey: row.rkey, targets: removalTargets(db, id) };
+}
+
 /**
  * The send of removal `id` whose outcome is unknown, or null: none was sent,
  * the last one was definitely rejected, or the requested state is known
- * reached (which no unknown send can undo). A pinned request that cannot be
- * read keeps only the fence revision, so it can never be sent again.
+ * reached (which no unknown send can undo). A pinned request that is not fully
+ * valid for this removal (parsePinned) keeps only the fence revision and no
+ * root CID, so it never matches a head and can never be sent again.
  */
 export function uncertainSend(db: Db, id: string): UnknownSend | null {
-  const row = db.one<{
-    removal_send_state: string | null;
-    removal_send_json: string | null;
-    removal_send_at_ms: number | null;
-    removal_head_rev: string | null;
-    removal_reached: string | null;
-    removal_done_rev: string | null;
-  }>(
-    `SELECT removal_send_state, removal_send_json, removal_send_at_ms, removal_head_rev, removal_reached,
-       removal_done_rev FROM operations WHERE id = ? AND kind = 'scrobble.delete'`,
-    id,
-  );
+  const row = sendRow(db, id);
   if (row === null || row.removal_reached !== null || row.removal_done_rev !== null) return null;
   if (row.removal_send_state === 'pending') {
-    const request = parsePinned(row.removal_send_json);
+    const request = parsePinned(row.removal_send_json, ownerOf(db, id, row));
     if (request !== null) return { head: request.head, request, atMs: row.removal_send_at_ms };
-    // Unreadable: never sendable again; the fence (or nothing) is its root.
+    // Invalid: never sendable again; the fence (or nothing) is its root.
     return { head: { cid: '', rev: row.removal_head_rev ?? '' }, request: null, atMs: row.removal_send_at_ms };
   }
   if (row.removal_send_state === null && row.removal_head_rev !== null) {
@@ -615,36 +768,75 @@ function sameRoot(pin: UnknownSend, head: RepoHeadRef): boolean {
 }
 
 /**
- * Pins the exact request of a removal's next send and its send fence, before
- * the write is awaited (one transaction). Answers whether this is a new
- * ORIGINAL send (no unknown send before it), whose definite rejection may be
- * recorded (rejectSend). Under an existing unknown send (the exact re-send
- * at its root, or a pre-migration-14 send at its fence revision) it is not:
- * a refusal of a later send proves nothing about the earlier one.
+ * The final gate before a removal send. `original`: a new ORIGINAL send (no
+ * unknown send before it), whose definite rejection may be recorded
+ * (rejectSend); a refusal of a later send proves nothing about an earlier one.
+ * A denial means nothing may be sent: `not_running` (the operation was
+ * cancelled, superseded or otherwise left this attempt), `pin_conflict` (an
+ * unknown send is pinned that this request is not exactly), `invalid_request`
+ * (the request is not one this removal may send, parsePinned).
  */
-export function pinSend(db: Db, id: string, request: PinnedRequest, nowMs: number): boolean {
-  return db.tx(() => {
-    const row = db.one<{ state: string | null; json: string | null; fence: string | null }>(
-      `SELECT removal_send_state AS state, removal_send_json AS json, removal_head_rev AS fence
-       FROM operations WHERE id = ?`,
-      id,
-    );
-    const unknown = row !== null && (row.state === 'pending' || (row.state === null && row.fence !== null));
-    if (!(row?.state === 'pending' && parsePinned(row.json) !== null)) {
-      db.run(
-        `UPDATE operations SET removal_send_state = 'pending', removal_send_json = ?,
-           removal_send_at_ms = CASE WHEN ? THEN coalesce(removal_send_at_ms, ?) ELSE ? END
-         WHERE id = ? AND kind = 'scrobble.delete' AND state = 'running'`,
-        JSON.stringify(request),
-        unknown ? 1 : 0,
-        nowMs,
-        nowMs,
-        id,
-      );
+export type SendGate =
+  | { ok: true; original: boolean }
+  | { ok: false; reason: 'not_running' | 'pin_conflict' | 'invalid_request' };
+
+/**
+ * Pins the exact request of a removal's next send and its send fence, in one
+ * synchronous transaction that is the final gate before the write: the
+ * operation must still be this running attempt (`attempts`), not known
+ * reached, and the request valid for it. Under an existing unknown send, only
+ * exactly the pinned request (or, for a send fenced before migration 14, one
+ * at its fence revision) passes, and a pin is never replaced. The caller
+ * initiates the write with no await after a passed gate; a request already
+ * transmitted cannot be retracted and stays subject to its own CAS.
+ */
+export function pinSend(db: Db, op: { id: string; attempts: number }, request: PinnedRequest, nowMs: number): SendGate {
+  return db.tx((): SendGate => {
+    const row = sendRow(db, op.id);
+    if (row === null || row.state !== 'running' || row.attempts !== op.attempts) {
+      return { ok: false, reason: 'not_running' };
     }
-    keepRemovalHead(db, id, request.head.rev);
-    return !unknown;
+    if (row.removal_reached !== null || row.removal_done_rev !== null) return { ok: false, reason: 'pin_conflict' };
+    const owner = ownerOf(db, op.id, row);
+    const json = JSON.stringify(request);
+    const valid = parsePinned(json, owner);
+    if (valid === null) return { ok: false, reason: 'invalid_request' };
+    if (row.removal_send_state === 'pending') {
+      // Only the exact re-send of a valid pin; an invalid pin is never replaced.
+      const stored = parsePinned(row.removal_send_json, owner);
+      if (stored === null || JSON.stringify(stored) !== JSON.stringify(valid))
+        return { ok: false, reason: 'pin_conflict' };
+      keepRemovalHead(db, op.id, request.head.rev);
+      return { ok: true, original: false };
+    }
+    const legacy = row.removal_send_state === null && row.removal_head_rev !== null;
+    if (legacy && request.head.rev !== row.removal_head_rev) return { ok: false, reason: 'pin_conflict' };
+    const pinned = db.run(
+      `UPDATE operations SET removal_send_state = 'pending', removal_send_json = ?,
+         removal_send_at_ms = CASE WHEN ? THEN coalesce(removal_send_at_ms, ?) ELSE ? END
+       WHERE id = ? AND kind = 'scrobble.delete' AND state = 'running' AND attempts = ?`,
+      json,
+      legacy ? 1 : 0,
+      nowMs,
+      nowMs,
+      op.id,
+      op.attempts,
+    ).rowsWritten;
+    if (pinned !== 1) return { ok: false, reason: 'not_running' };
+    keepRemovalHead(db, op.id, request.head.rev);
+    return { ok: true, original: !legacy };
   });
+}
+
+/**
+ * The outcome of a send the gate denied (nothing was sent): a no-op for an
+ * operation no longer running (its settlement is guarded too), otherwise a
+ * hold while an unknown send is pinned, else an ordinary retry.
+ */
+export function sendDenied(ctx: ExecContext, id: string, gate: Extract<SendGate, { ok: false }>): Outcome {
+  if (gate.reason === 'not_running') return { kind: 'permanent', code: 'operation_not_running' };
+  if (uncertainSend(ctx.m.db, id) !== null) return holdUncertain(ctx, id);
+  return { kind: 'transient', code: 'invalid_removal_request' };
 }
 
 /**
@@ -663,36 +855,76 @@ export function definitelyRejected(result: XrpcResult): boolean {
 export function rejectSend(db: Db, id: string): void {
   db.run(
     `UPDATE operations SET removal_send_state = 'rejected', removal_send_json = NULL
-     WHERE id = ? AND kind = 'scrobble.delete' AND removal_send_state = 'pending'`,
+     WHERE id = ? AND kind = 'scrobble.delete' AND state = 'running' AND removal_send_state = 'pending'`,
     id,
   );
 }
 
 /**
- * The read-only hold of a removal whose unknown send the head moved past: a
- * `waiting` outcome whose delay doubles with the time since the send was
+ * The read-only hold of a removal whose unknown send cannot be resolved now:
+ * a `waiting` outcome whose delay doubles with the time since the send was
  * pinned, from HEAD_RETRY_MS up to HOLD_MAX_MS. Nothing but evidence about
  * the targets (an absence, a verified absence after the fence) or a covering
- * later intent (supersedeUncertain) ends it.
+ * later intent (supersedeUncertain) ends it. `code`: SEND_UNCERTAIN when it
+ * never sends again (the head moved past its root, or the tenth reconcile),
+ * SEND_UNRESOLVED when its root may still be current.
  */
-export function holdUncertain(ctx: ExecContext, id: string): Outcome {
+export function holdUncertain(ctx: ExecContext, id: string, code: string = SEND_UNCERTAIN): WaitingOutcome {
   const db = ctx.m.db;
   const now = ctx.m.clock.nowMs();
-  db.run('UPDATE operations SET removal_send_at_ms = ? WHERE id = ? AND removal_send_at_ms IS NULL', now, id);
+  db.run(
+    `UPDATE operations SET removal_send_at_ms = ? WHERE id = ? AND state = 'running' AND removal_send_at_ms IS NULL`,
+    now,
+    id,
+  );
   const at = db.one<{ at: number | null }>('SELECT removal_send_at_ms AS at FROM operations WHERE id = ?', id)?.at;
   const elapsed = at == null ? 0 : Math.max(0, now - at);
   return {
     kind: 'waiting',
     untilMs: now + Math.min(HOLD_MAX_MS, Math.max(HEAD_RETRY_MS, elapsed)),
-    code: SEND_UNCERTAIN,
+    code,
   };
 }
 
-/** An uncertain hold met after this attempt sent a write keeps that attempt counted. */
+/** The hold of an unknown send whose root may still be current (SEND_UNRESOLVED). */
+export function holdUnresolved(ctx: ExecContext, id: string): WaitingOutcome {
+  return holdUncertain(ctx, id, SEND_UNRESOLVED);
+}
+
+/**
+ * A target read that failed (an unavailable, malformed or unexpected answer)
+ * while an unknown send is pinned: a hold, never a terminal failure. A
+ * sign-in failure still blocks (reauth), and a classified scope denial keeps
+ * its own handling. Past the root, or in the read-only reconcile, it never
+ * sends again (SEND_UNCERTAIN); at the root it reads again (SEND_UNRESOLVED).
+ */
+function holdUnread(
+  ctx: ExecContext,
+  id: string,
+  pin: UnknownSend,
+  head: RepoHeadRef,
+  cause: Outcome,
+  mode: ObserveMode,
+): Outcome {
+  if (cause.kind === 'reauth') return cause;
+  if (cause.kind === 'permanent' && cause.code === 'forbidden_scope') return cause;
+  if (mode === 'reconcile' || !sameRoot(pin, head)) return holdUncertain(ctx, id);
+  return holdUnresolved(ctx, id);
+}
+
+/**
+ * A transient outcome of the final (tenth) attempt of a removal whose send is
+ * still unknown would exhaust it: it holds instead (SEND_UNCERTAIN, the
+ * attempt counted). The next look is the read-only reconcile, never a send.
+ */
+export function exhaustedUncertain(ctx: ExecContext, id: string, outcome: Outcome): Outcome {
+  if (outcome.kind !== 'transient' || uncertainSend(ctx.m.db, id) === null) return outcome;
+  return { ...holdUncertain(ctx, id), counted: true };
+}
+
+/** An unknown-send hold met after this attempt sent a write keeps that attempt counted. */
 export function countedIfSent(outcome: Outcome, sent: boolean): Outcome {
-  return sent && outcome.kind === 'waiting' && outcome.code === SEND_UNCERTAIN
-    ? { ...outcome, counted: true }
-    : outcome;
+  return sent && outcome.kind === 'waiting' && isUnknownHold(outcome) ? { ...outcome, counted: true } : outcome;
 }
 
 /**
@@ -711,6 +943,24 @@ export function removalPredecessors(db: Db, did: string, collection: string, rke
       rkey,
     )
     .map((r) => r.id);
+}
+
+/**
+ * SQL over a dependency edge from the operation aliased `o` to its
+ * predecessor aliased `p`: true when the edge no longer binds (runner READY).
+ * Only between two removals of the same owner and key, when `p` holds an
+ * unknown send read-only and will never send again (queued, SEND_UNCERTAIN:
+ * its root is passed, or it is in the tenth reconcile). Waiting for it could
+ * be indefinite and protects nothing, so a removal admitted behind it (and,
+ * transitively, one behind that) still runs. Every other edge binds: a create
+ * or ordinary write, a removal that is running, blocked, may still re-send its
+ * pinned request at its root (SEND_UNRESOLVED), or has no unknown send.
+ */
+export function heldRemovalEdgeSql(o = 'o', p = 'p'): string {
+  for (const alias of [o, p]) if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(alias)) throw new RangeError('invalid SQL alias');
+  return `(${o}.kind = 'scrobble.delete' AND ${p}.kind = 'scrobble.delete' AND ${p}.did = ${o}.did
+    AND ${p}.collection = ${o}.collection AND ${p}.rkey = ${o}.rkey AND ${p}.state = 'queued'
+    AND ${p}.last_error = '${SEND_UNCERTAIN}' AND ${uncertainSendSql(p)})`;
 }
 
 function removalTargets(db: Db, id: string): string[] {

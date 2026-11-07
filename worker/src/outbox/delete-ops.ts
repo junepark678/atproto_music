@@ -63,6 +63,7 @@ import {
   removalEstablished,
   removalPredecessors,
   removalReached,
+  sendDenied,
   supersedeUncertain,
   type TargetRead,
   uncertainSend,
@@ -305,7 +306,7 @@ async function deleteWithSwap(op: OperationRow, ctx: ExecContext, predecessors: 
     } else {
       const checked = await checkedHead(ctx, uri, op.id);
       if (checked.kind === 'outcome') return countedIfSent(checked.outcome, sent);
-      head = checked;
+      head = { cid: checked.cid, rev: checked.rev };
       if (op.swap_cid !== swap) ctx.persist({ swapCid: swap });
     }
     const request: PinnedRequest = resend ?? {
@@ -315,11 +316,15 @@ async function deleteWithSwap(op: OperationRow, ctx: ExecContext, predecessors: 
     };
     // Persisted before the send (with the fence): a crash, a lost or invalid
     // answer or a 5xx leaves exactly this request pending (removal-fence.ts).
-    const original = pinSend(ctx.m.db, op.id, request, ctx.m.clock.nowMs());
+    // The final gate (one synchronous transaction): still this running
+    // attempt, and exactly the request this removal may send. Nothing is
+    // awaited between a passed gate and the dispatch below.
+    const gate = pinSend(ctx.m.db, op, request, ctx.m.clock.nowMs());
+    if (!gate.ok) return countedIfSent(sendDenied(ctx, op.id, gate), sent);
     sent = true;
     const result = await ctx.xrpc.procedure(request.method, request.body, 'delete');
     // Only a received refusal of this very send proves it changed nothing.
-    if (original && definitelyRejected(result)) rejectSend(ctx.m.db, op.id);
+    if (gate.original && definitelyRejected(result)) rejectSend(ctx.m.db, op.id);
     if (result.ok) {
       if (answersRemoval(result.body, { uri })) {
         const commit = reportedCommitRev(result.body, head.rev);
@@ -393,7 +398,14 @@ export const scrobbleDeleteExecutor: Executor = {
 export async function lookupDeleted(op: OperationRow, ctx: ExecContext): Promise<Outcome> {
   const rkey = op.rkey as string;
   const uri = `at://${op.did}/${op.collection}/${rkey}`;
-  const seen = await observeRemoval(ctx, op.id, uri, RECORD_TARGET, () => readRecord(ctx, op.collection, rkey));
+  const seen = await observeRemoval(
+    ctx,
+    op.id,
+    uri,
+    RECORD_TARGET,
+    () => readRecord(ctx, op.collection, rkey),
+    'reconcile',
+  );
   if (seen.kind === 'outcome') return seen.outcome;
   if (seen.kind === 'present') return { kind: 'transient', code: 'remote_delete_unconfirmed' };
   return { kind: 'succeeded', uri, hints: [{ collection: op.collection, rkey }] };

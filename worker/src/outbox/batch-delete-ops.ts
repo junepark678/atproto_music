@@ -24,6 +24,7 @@ import {
   pinSend,
   rejectSend,
   removalPredecessors,
+  sendDenied,
   supersedeUncertain,
   type TargetRead,
 } from './removal-fence';
@@ -524,12 +525,16 @@ async function removeIds(op: OperationRow, ctx: ExecContext): Promise<Outcome> {
     // PDS committed and the success response was lost.
     recordRemovalEvidence(ctx.m.db, op.id, found.cid);
     ctx.persist({ swapCid: found.cid });
-    const original = pinSend(ctx.m.db, op.id, request, ctx.m.clock.nowMs());
+    // The final gate (one synchronous transaction): still this running
+    // attempt, and exactly the request this removal may send. Nothing is
+    // awaited between a passed gate and the dispatch below.
+    const gate = pinSend(ctx.m.db, op, request, ctx.m.clock.nowMs());
+    if (!gate.ok) return countedIfSent(sendDenied(ctx, op.id, gate), sent);
     sent = true;
     const result = await ctx.xrpc.procedure(request.method, request.body, record === undefined ? 'delete' : 'put');
     // Only a received refusal of this very send proves it changed nothing
     // (a refusal of a re-send says nothing about the first one).
-    if (original && definitelyRejected(result)) rejectSend(ctx.m.db, op.id);
+    if (gate.original && definitelyRejected(result)) rejectSend(ctx.m.db, op.id);
     // InvalidSwap: something (this record or any other) was committed after
     // the head; nothing was written. Read a fresh head and container.
     if (!result.ok && result.failure.code === 'repository_changed') continue;
@@ -582,7 +587,7 @@ export const batchDeleteExecutor: Executor = {
     // once ordered (a stable bracket, or the first head read after it); a
     // lost tenth send keeps the send fence persisted before it.
     const ids = removalIds(ctx.m.db, op.id);
-    const seen = await observeRemoval(ctx, op.id, uri, ids, () => readTargets(op, ctx, uri, new Set(ids)));
+    const seen = await observeRemoval(ctx, op.id, uri, ids, () => readTargets(op, ctx, uri, new Set(ids)), 'reconcile');
     if (seen.kind === 'outcome') return seen.outcome;
     if (seen.kind === 'settled') return { kind: 'succeeded', uri, hints };
     recordRemovalEvidence(ctx.m.db, op.id, seen.found.cid);
