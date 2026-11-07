@@ -53,6 +53,11 @@
 //   - `unknown` otherwise (no cid, revision or reason), which also covers a
 //     verified record whose owner is hidden (inactive or suppressed) and a
 //     settings record, which has no projection row;
+//   - a batch listen URI (`<container>#<listenId>`, ADR 0006) resolves its
+//     container's proof: `absent` when the verified present container of a
+//     visible owner does not project that listen, `unknown` when it is
+//     projected but hidden (local delete intent, removal evidence,
+//     cross-format duplicate, hidden owner);
 //   - `indexing` is the per-DID Indexing truth (status.ts), so a suppressed
 //     DID reports `indexing.state = 'suppressed'`.
 
@@ -63,7 +68,7 @@ import { isSupportedDid, parseRecordUri } from '@atmusic/core/syntax';
 import { BucketSet, DID_RATE, IP_RATE, MAX_BUCKET_KEYS, type RateDecision, type RateRule } from '../../http/limits';
 import type { ModuleDeps, NotifyOutcome } from '../contracts';
 import type { Db } from '../db';
-import { visibleDid, visibleScrobblesFrom } from '../read/visibility';
+import { activeUser, visibleDid, visibleScrobblesFrom } from '../read/visibility';
 import { indexing } from '../status';
 import { loadUser } from '../write/account-state';
 import { collectionKind } from '../write/keys';
@@ -286,10 +291,18 @@ export function recordStatus(m: ModuleDeps, uri: string, now: number = m.clock.n
   if (rs?.state === 'excluded' && rs.cid !== null && rs.reason !== null) {
     return { uri, state: 'excluded', cid: rs.cid, revision: rs.revision, reason: rs.reason, indexing: idx };
   }
-  // A verified, present batch container proves that an item TID not found in
-  // its projection is absent at this revision; it is never a phantom indexed
-  // item or an unqualified unknown.
-  if (batchItem !== null && rs?.state === 'present')
-    return { uri, state: 'absent', revision: rs.revision, indexing: idx };
+  // A verified, present batch container of a visible owner proves that an
+  // item TID missing from its verified projection is absent at this revision.
+  // Verified membership is checked apart from the common visibility overlay:
+  // an item that is projected but hidden (a queued/failed local delete, a
+  // settled removal's evidence, a cross-format duplicate, a hidden owner) is
+  // `unknown`, as a hidden single is; local state never proves absence, and a
+  // hidden owner's membership is not disclosed either way.
+  if (batchItem !== null && rs?.state === 'present') {
+    const projected =
+      db.one('SELECT 1 AS x FROM scrobbles WHERE uri = ? AND record_uri = ?', uri, containerUri) !== null;
+    const ownerVisible = db.one(`SELECT 1 AS x FROM users u WHERE u.did = ? AND ${activeUser('u')}`, did) !== null;
+    if (!projected && ownerVisible) return { uri, state: 'absent', revision: rs.revision, indexing: idx };
+  }
   return { uri, state: 'unknown', indexing: idx };
 }

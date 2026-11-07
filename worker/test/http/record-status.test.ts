@@ -305,3 +305,104 @@ it('states indexed/pending/absent/excluded/unknown with cid and revision', async
   expect(index.calls.length).toBe(callsBefore + 1);
   expect(index.networkAttempts).toEqual([]);
 });
+
+it('never reports a hidden batch listen as verified absent', async () => {
+  const store = await openTestDb();
+  const clock = fixedClock();
+  const index = makeDbIndex({ db: store, clock }, { recordStatus: (m, uri) => recordStatus(m, uri) });
+  const ctx: RequestCtx = { env: HARNESS_ENV, index, requestId: REQUEST_ID, clock, cursorKey, clientIp: '' };
+  const inDo = <T>(fn: (db: Db) => T): Promise<T> => inTestDb(store, (db) => fn(db));
+  const status = async (uri: string) => {
+    const res = await statusRoute.handler(
+      new Request(`${ORIGIN}/api/v1/records/status?${new URLSearchParams({ uri })}`),
+      ctx,
+      {},
+    );
+    const body = JSON.parse(await res.text()) as JsonBody;
+    expect(res.status).toBe(200);
+    expect(schemas.RecordStatus(body)).toBe('valid');
+    return body;
+  };
+  const entry = (id: string, track: string) => ({
+    id,
+    artist: 'Hidden Status Artist',
+    track,
+    listenedAt: '2026-01-15T11:00:00Z',
+    createdAt: '2026-01-15T12:00:00Z',
+  });
+  const QUEUED = '3lb2batchidaa';
+  const FAILED = '3lb2batchidab';
+  const DUPLICATE = '3lb2batchidac';
+  const PLAIN = '3lb2batchidad';
+  const MISSING = '3lb2batchidaf';
+  const rkey = '3lb2hiddenab2';
+  const alice = await repoFor('alice');
+  const container = await putProof(alice, BATCH, rkey, {
+    $type: BATCH,
+    createdAt: '2026-01-15T12:00:00Z',
+    listens: [entry(QUEUED, 'Queued'), entry(FAILED, 'Failed'), entry(DUPLICATE, 'Duplicate'), entry(PLAIN, 'Plain')],
+  });
+  // The same listen as a single: the cross-format winner hides the batch copy.
+  const single = await putProof(alice, SCROBBLE, '3lb2singleab2', {
+    $type: SCROBBLE,
+    artist: 'Hidden Status Artist',
+    track: 'Duplicate',
+    listenedAt: '2026-01-15T11:00:00Z',
+    createdAt: '2026-01-15T12:00:00Z',
+  });
+  const containerUri = uriOf(ALICE, BATCH, rkey);
+  const item = (id: string) => `${containerUri}#${id}`;
+  await inDo((db) => {
+    seedUser(db, ALICE);
+    db.tx(() => {
+      applyRecordProof(db, container, OPTS);
+      applyRecordProof(db, single, OPTS);
+    });
+    for (const [id, state] of [
+      [QUEUED, 'queued'],
+      [FAILED, 'failed'],
+    ] as const) {
+      db.run(
+        `INSERT INTO operations(id,did,kind,origin,priority,collection,rkey,state,due_at,created_at_ms,updated_at_ms)
+         VALUES(?,?,'scrobble.delete','web',0,?,?,?,1,1,1)`,
+        `delete-${id}`,
+        ALICE,
+        BATCH,
+        rkey,
+        state,
+      );
+      db.run('INSERT INTO batch_delete_listens(operation_id,listen_id) VALUES (?,?)', `delete-${id}`, id);
+    }
+  });
+  // Hints are drained: nothing is pending for the container.
+  expect(await inDo((db) => db.all('SELECT uri FROM hints'))).toEqual([]);
+  const revision = container.commit.rev;
+  const unknown = (uri: string) => ({ uri, state: 'unknown', indexing: STALE_ALICE });
+  expect(await status(item(PLAIN))).toEqual({
+    uri: item(PLAIN),
+    state: 'indexed',
+    cid: cidOf(container),
+    revision,
+    indexing: STALE_ALICE,
+  });
+  expect(await status(item(QUEUED))).toEqual(unknown(item(QUEUED)));
+  expect(await status(item(FAILED))).toEqual(unknown(item(FAILED)));
+  expect(await status(item(DUPLICATE))).toEqual(unknown(item(DUPLICATE)));
+  const singleUri = uriOf(ALICE, SCROBBLE, '3lb2singleab2');
+  expect(await status(singleUri)).toMatchObject({ uri: singleUri, state: 'indexed', cid: cidOf(single) });
+  // An entry the verified container does not hold is absent at its revision.
+  expect(await status(item(MISSING))).toEqual({ uri: item(MISSING), state: 'absent', revision, indexing: STALE_ALICE });
+
+  // An inactive owner discloses neither membership nor absence.
+  await inDo((db) => markInactive(db, ALICE, 'deactivated'));
+  for (const id of [PLAIN, MISSING]) {
+    expect(await status(item(id))).toMatchObject({ uri: item(id), state: 'unknown' });
+  }
+
+  // A verified container delete is absent for every listen.
+  const deleted = await deleteProof(alice, BATCH, rkey);
+  await inDo((db) => db.tx(() => applyRecordProof(db, deleted, OPTS)));
+  for (const id of [PLAIN, QUEUED, MISSING]) {
+    expect(await status(item(id))).toMatchObject({ uri: item(id), state: 'absent', revision: deleted.commit.rev });
+  }
+});
