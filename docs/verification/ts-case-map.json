@@ -14,7 +14,7 @@
         "worker/test/config.test.ts › batch publication needs a distinct second reviewed manifest digest and the original publication gate",
         "worker/test/http/health-meta.test.ts › advertises batchPublication only for a distinct batch manifest with the original gate open",
         "worker/test/node/bff/client-metadata.test.ts › requests the batch collection only when the separate batch gate is open",
-        "worker/test/node/config.test.ts › INGEST_MODE=pulse, an operator-set PLAN (paid or free) and DO_LOCATION_HINT are each rejected with a message citing ADR 0005, and the embedded parseConfig receives PLAN paid and an empty DO_LOCATION_HINT"
+        "worker/test/node/config.test.ts › INGEST_MODE accepts socket and off only, ignores retired plan and placement variables, and embedded config has no tier or placement fields"
       ]
     },
     {
