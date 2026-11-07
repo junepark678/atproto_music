@@ -6,7 +6,7 @@
 
 import type { Indexing } from '@atmusic/core/api-types';
 import type { ComponentChildren } from 'preact';
-import { describeFailure, formatUtc } from './format';
+import { describeFailure, formatLocalTime } from './format';
 import './screens.css';
 
 export function LoadingState({ label }: { label: string }) {
@@ -56,7 +56,7 @@ const STATE_TEXT: Record<Indexing['state'], string> = {
 /** Shown when the index is not current; null when it is current and caught up. */
 export function StaleNotice({ indexing }: { indexing: Indexing }) {
   if (indexing.state === 'current' && indexing.caughtUp) return null;
-  const last = indexing.lastIndexedAt !== null ? ` Last indexed ${formatUtc(indexing.lastIndexedAt)}.` : '';
+  const last = indexing.lastIndexedAt !== null ? ` Last indexed ${formatLocalTime(indexing.lastIndexedAt)}.` : '';
   const lag = indexing.lagSeconds !== null ? ` About ${Math.round(indexing.lagSeconds)} s behind.` : '';
   const tail = indexing.state === 'suppressed' ? '' : ' Recent scrobbles may be missing.';
   return (

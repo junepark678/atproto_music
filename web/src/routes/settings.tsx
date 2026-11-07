@@ -13,7 +13,7 @@
 import type { Did, RecordStatus } from '@atmusic/core/api-types';
 import { collectionsFor } from '@atmusic/core/namespace';
 import { useEffect, useState } from 'preact/hooks';
-import { describeFailure, formatUtcMs } from '../components/format';
+import { describeFailure, formatLocalTimeMs } from '../components/format';
 import { OperationStatus } from '../components/operation-status';
 import type { OutboxService } from '../components/outbox-service';
 import { useServices } from '../components/services';
@@ -143,7 +143,7 @@ function AccountSection({ did, onSignedOut }: { did: Did; onSignedOut(): void })
         {expiry === 'loading'
           ? 'Checking when your session ends…'
           : expiry?.sessionEndsAtMs != null
-            ? `Your session ends no later than ${formatUtcMs(expiry.sessionEndsAtMs)}; you will then need to sign in again.`
+            ? `Your session ends no later than ${formatLocalTimeMs(expiry.sessionEndsAtMs, { zone: true })}; you will then need to sign in again.`
             : 'Your session lasts at most 14 days from when you signed in; you will then need to sign in again.'}
       </p>
       {signOutError ? <p role="alert">Sign out did not complete. {signOutError}</p> : null}

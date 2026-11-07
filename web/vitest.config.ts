@@ -13,6 +13,7 @@ export default defineConfig({
     name: 'web',
     environment: 'happy-dom',
     include: ['test/**/*.test.ts', 'test/**/*.test.tsx'],
+    setupFiles: ['test/setup.ts'],
     restoreMocks: true,
     unstubGlobals: true,
   },

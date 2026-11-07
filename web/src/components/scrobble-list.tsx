@@ -7,7 +7,7 @@
 import type { Scrobble } from '@atmusic/core/api-types';
 import { useState } from 'preact/hooks';
 import type { LocalState } from '../outbox/overlay';
-import { describeFailure, formatUtc } from './format';
+import { describeFailure, formatLocalTime } from './format';
 import { OperationStatus } from './operation-status';
 
 export interface ListItem {
@@ -64,7 +64,7 @@ export function ScrobbleText({
       ) : null}
       <span class="scrobble-meta">
         {' · '}
-        <time dateTime={scrobble.listenedAt}>{formatUtc(scrobble.listenedAt)}</time>
+        <time dateTime={scrobble.listenedAt}>{formatLocalTime(scrobble.listenedAt)}</time>
         {showActor ? (
           <>
             {' · '}
