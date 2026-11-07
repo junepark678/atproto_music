@@ -107,7 +107,7 @@ describe('migrate over node:sqlite', () => {
         (id,did,kind,origin,priority,collection,rkey,state,due_at,created_at_ms,updated_at_ms,follow_proof_json)
         VALUES ('kept','did:plc:alice','scrobble.delete','web',0,'com.example.atmusic.scrobble','r01','failed',1,1,1,'[]')`);
         const before = dumpDb(db);
-        expect(migrate(db)).toEqual({ status: 'ready', version: 4 });
+        expect(migrate(db, MIGRATIONS.slice(0, 4))).toEqual({ status: 'ready', version: 4 });
         expect(ledger(db)).toEqual([
           { version: 1, name: 'initial_workers_schema' },
           { version: 2, name: 'node_schema' },
@@ -124,8 +124,8 @@ describe('migrate over node:sqlite', () => {
           expect(migrate(db, MIGRATIONS.slice(0, oldVersion))).toEqual({ status: 'ready', version: 4 });
           expect(dumpDb(db)).toEqual(after);
         }
-        const again = reopen(db);
-        expect(migrate(again)).toEqual({ status: 'ready', version: 4 });
+        const again = reopen(db, { migrate: false });
+        expect(migrate(again, MIGRATIONS.slice(0, 4))).toEqual({ status: 'ready', version: 4 });
         expect(dumpDb(again)).toEqual(after);
       },
       { migrations: MIGRATIONS.slice(0, 3) },
