@@ -287,17 +287,6 @@ function batchVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, o: 
       let changed = prior.length !== batch.listens.length;
       for (const listen of batch.listens) {
         const uri = `${t.uri}#${listen.id}`;
-        if (
-          db.one(
-            'SELECT 1 AS x FROM listen_removals WHERE did = ? AND record_uri = ? AND listen_id = ?',
-            t.did,
-            t.uri,
-            listen.id,
-          )
-        ) {
-          if (priorByUri.has(uri)) changed = true;
-          continue;
-        }
         const singleRecord = { ...listen.row.record, $type: `${o.prefix}.scrobble` };
         const itemTarget: RecordTarget = {
           ...t,

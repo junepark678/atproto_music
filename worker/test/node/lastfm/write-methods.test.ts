@@ -35,6 +35,7 @@ const ALICE = 'did:plc:aaaaaaaaaaaaaaaaaaaaaaaa';
 const ALICE_HANDLE = 'alice.test';
 const OWNED = 'org.example.music';
 const SCROBBLE = `${OWNED}.scrobble`;
+const BATCH = `${OWNED}.scrobbleBatch`;
 const OPEN_GATE = {
   LEXICON_PREFIX: OWNED,
   NAMESPACE_OWNERSHIP_REF: 'dns:_lexicon.music.example.org TXT',
@@ -567,6 +568,43 @@ describe('Last.fm write methods', () => {
     expect(deletes[1]).toMatchObject({ rkey: '3lbindexed22a', collection: SCROBBLE, state: 'queued' });
     expect(app.db.all('SELECT pred_id FROM operation_deps WHERE op_id = ?', deletes[1]!.id)).toEqual([]);
 
+    const batchListenId = '3lb2batchidab';
+    const batchRkey = '3lbqbatchindexed1';
+    const batchRecord = {
+      $type: BATCH,
+      createdAt: '2026-01-15T12:00:00Z',
+      listens: [
+        {
+          id: batchListenId,
+          artist: 'Batch Indexed Artist',
+          track: 'Batch Indexed Track',
+          listenedAt: '2026-01-15T10:00:00Z',
+          createdAt: '2026-01-15T10:00:05Z',
+        },
+      ],
+    };
+    await repo.put(BATCH, batchRkey, batchRecord);
+    const batchProof = await verifyRecordProof(await repo.getRecordCar(BATCH, batchRkey), {
+      did: ALICE,
+      collection: BATCH,
+      rkey: batchRkey,
+      signingKey: repo.key.didKey,
+    });
+    expect(
+      app.db.tx(() => applyRecordProof(app.db, batchProof, { receiptNs: nowNs, prefix: OWNED, nowNs })).outcome,
+    ).toBe('applied');
+    const batchResult = await remove({
+      artist: 'Batch Indexed Artist',
+      track: 'Batch Indexed Track',
+      timestamp: String(Date.parse('2026-01-15T10:00:00Z') / 1000),
+    });
+    expect(batchResult.status).toBe(200);
+    const batchDelete = operations(app, 'scrobble.delete').find((op) => op.collection === BATCH);
+    expect(batchDelete).toMatchObject({ rkey: batchRkey, state: 'queued' });
+    expect(app.db.all('SELECT listen_id FROM batch_delete_listens WHERE operation_id = ?', batchDelete!.id)).toEqual([
+      { listen_id: batchListenId },
+    ]);
+
     // 4. No match: another second, another track, or the already cancelled create.
     for (const entry of [
       {
@@ -589,6 +627,6 @@ describe('Last.fm write methods', () => {
     expect((await remove({ artist: running.artist, track: running.track, timestamp: running.timestamp })).status).toBe(
       200,
     );
-    expect(operations(app, 'scrobble.delete')).toHaveLength(2);
+    expect(operations(app, 'scrobble.delete')).toHaveLength(3);
   });
 });

@@ -62,6 +62,7 @@ import { admit } from '../do/ingest/admission';
 import { enqueueHints, type HintInput } from '../do/ingest/hints';
 import { loadUser } from '../do/write/account-state';
 import { MAX_BATCH_WRITES, planBatch, sendCreateBatch } from './apply-writes';
+import { batchDeleteExecutor } from './batch-delete-ops';
 import { batchCreateExecutor } from './batch-ops';
 import { chargePoints, checkBudget, observeRateLimit, WRITE_COST } from './budget';
 import { scrobbleDeleteExecutor } from './delete-ops';
@@ -449,7 +450,9 @@ class Run {
     const executor =
       op.kind === 'scrobble.create' && op.collection === this.collections.scrobbleBatch
         ? batchCreateExecutor
-        : executorFor(op.kind);
+        : op.kind === 'scrobble.delete' && op.collection === this.collections.scrobbleBatch
+          ? batchDeleteExecutor
+          : executorFor(op.kind);
     if (
       op.collection === this.collections.scrobbleBatch &&
       !hasGrantedBatchScope(state.xrpc.scope, this.m.config.prefix)
@@ -585,8 +588,14 @@ class Run {
     now: number,
   ): void {
     const db = this.db;
-    const mapping = db.all<{ entry_id: string; job_id: string; seq: number }>(
-      'SELECT entry_id, job_id, seq FROM batch_entry_items WHERE operation_id = ? ORDER BY job_id, seq',
+    const mapping = db.all<{
+      entry_id: string;
+      job_id: string;
+      seq: number;
+      removal_operation_id: string | null;
+      removed_at_ms: number | null;
+    }>(
+      'SELECT entry_id, job_id, seq, removal_operation_id, removed_at_ms FROM batch_entry_items WHERE operation_id = ? ORDER BY job_id, seq',
       parent.id,
     );
     if (mapping.length === 0) throw new Error('batch split has no durable entry mapping');
@@ -628,12 +637,45 @@ class Run {
         );
         if (item.rowsWritten !== 1 || key.rowsWritten !== 1) throw new Error('batch split membership changed');
         db.run(
-          'INSERT INTO batch_entry_items(operation_id, entry_id, job_id, seq) VALUES (?, ?, ?, ?)',
+          `INSERT INTO batch_entry_items(operation_id, entry_id, job_id, seq, removal_operation_id, removed_at_ms)
+           VALUES (?, ?, ?, ?, ?, ?)`,
           created.id,
           row.entry_id,
           row.job_id,
           row.seq,
+          row.removal_operation_id,
+          row.removed_at_ms,
         );
+        if (row.removal_operation_id !== null) {
+          const target = db.one<{ listen_id: string }>(
+            'SELECT listen_id FROM batch_delete_listens WHERE operation_id = ? AND listen_id = ?',
+            row.removal_operation_id,
+            row.entry_id,
+          );
+          if (target !== null) {
+            const oldUri = `at://${parent.did}/${parent.collection}/${parent.rkey}`;
+            const childUri = `at://${parent.did}/${parent.collection}/${child.rkey}`;
+            db.run(
+              "UPDATE operations SET rkey = ?, updated_at_ms = ? WHERE id = ? AND state IN ('queued','blocked')",
+              child.rkey,
+              now,
+              row.removal_operation_id,
+            );
+            db.run(
+              'UPDATE listen_removals SET record_uri = ? WHERE operation_id = ? AND did = ? AND record_uri = ? AND listen_id = ?',
+              childUri,
+              row.removal_operation_id,
+              parent.did,
+              oldUri,
+              row.entry_id,
+            );
+            db.run(
+              'INSERT OR IGNORE INTO operation_deps(op_id,pred_id) VALUES (?,?)',
+              row.removal_operation_id,
+              created.id,
+            );
+          }
+        }
       }
     }
     if (assigned.size !== mapping.length) throw new Error('batch split did not account for every entry');
@@ -651,6 +693,10 @@ function finish(m: ModuleDeps, op: OperationRow, outcome: Outcome, now: number, 
   const db = m.db;
   switch (outcome.kind) {
     case 'succeeded':
+      if (op.kind === 'scrobble.delete' && outcome.note === 'record_not_ours') {
+        db.run('DELETE FROM listen_removals WHERE operation_id = ?', op.id);
+        db.run('DELETE FROM batch_delete_listens WHERE operation_id = ?', op.id);
+      }
       db.run(
         `UPDATE operations SET state = 'succeeded', result_uri = ?, result_cid = ?, swap_cid = coalesce(?, swap_cid),
            last_error = ?, updated_at_ms = ? WHERE id = ? AND state = 'running'`,
@@ -667,13 +713,62 @@ function finish(m: ModuleDeps, op: OperationRow, outcome: Outcome, now: number, 
       // rather than republishing a deleted listen. Failed/unresolved deletes
       // never erase the payload needed for investigation/reconciliation.
       if (op.kind === 'scrobble.delete' && outcome.note !== 'record_not_ours') {
-        db.run(
-          `UPDATE operations SET record_json = NULL, digest = NULL
-           WHERE did = ? AND collection = ? AND rkey = ? AND kind = 'scrobble.create' AND state = 'succeeded'`,
+        const successfulCreates = db.all<{ id: string; record_json: string | null }>(
+          `SELECT id, record_json FROM operations WHERE did = ? AND collection = ? AND rkey = ?
+             AND kind = 'scrobble.create' AND state = 'succeeded'`,
           op.did,
           op.collection,
           op.rkey,
         );
+        if (m.config.prefix !== null && op.collection === outboxCollections(m.config.prefix).scrobbleBatch) {
+          const removed = new Set(
+            db
+              .all<{ listen_id: string }>('SELECT listen_id FROM batch_delete_listens WHERE operation_id = ?', op.id)
+              .map((row) => row.listen_id),
+          );
+          for (const create of successfulCreates) {
+            if (create.record_json === null) continue;
+            try {
+              const record = JSON.parse(create.record_json) as { listens?: { id?: unknown }[] };
+              if (Array.isArray(record.listens)) {
+                record.listens = removed.has('*') ? [] : record.listens.filter((item) => !removed.has(String(item.id)));
+                db.run(
+                  'UPDATE operations SET record_json = ?, digest = NULL WHERE id = ?',
+                  JSON.stringify(record),
+                  create.id,
+                );
+              }
+            } catch {
+              /* Leave an unparseable forensic payload untouched. */
+            }
+          }
+        } else {
+          db.run(
+            `UPDATE operations SET record_json = NULL, digest = NULL
+             WHERE did = ? AND collection = ? AND rkey = ? AND kind = 'scrobble.create' AND state = 'succeeded'`,
+            op.did,
+            op.collection,
+            op.rkey,
+          );
+        }
+        if (m.config.prefix !== null && op.collection === outboxCollections(m.config.prefix).scrobbleBatch) {
+          db.run(
+            `UPDATE listen_removals SET removed_cid = COALESCE(removed_cid, (SELECT cid FROM scrobbles s
+            WHERE s.record_uri = listen_removals.record_uri AND s.listen_id = listen_removals.listen_id))
+            WHERE operation_id = ?`,
+            op.id,
+          );
+          db.run('UPDATE batch_entry_items SET removed_at_ms = ? WHERE removal_operation_id = ?', now, op.id);
+          db.run('UPDATE import_items SET removed_at_ms = ? WHERE removal_operation_id = ?', now, op.id);
+          db.run(
+            `DELETE FROM listen_keys WHERE did = ?
+               AND operation_id IN (SELECT operation_id FROM batch_entry_items WHERE removal_operation_id = ?)
+               AND dedupe_key IN (SELECT dedupe_key FROM import_items WHERE removal_operation_id = ?)`,
+            op.did,
+            op.id,
+            op.id,
+          );
+        }
       }
       return;
     case 'transient':

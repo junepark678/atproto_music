@@ -265,7 +265,15 @@ function pendingRecords(m: Pick<ModuleDeps, 'db'>, did: string, kind: PendingKin
   for (const row of rows) {
     try {
       const record = JSON.parse(row.record_json) as unknown;
-      if (record !== null && typeof record === 'object' && !Array.isArray(record)) out.push(record as PendingRecord);
+      if (record !== null && typeof record === 'object' && !Array.isArray(record)) {
+        const envelope = record as { listens?: unknown };
+        if (kind === 'scrobble.create' && Array.isArray(envelope.listens)) {
+          for (const listen of envelope.listens) {
+            if (listen !== null && typeof listen === 'object' && !Array.isArray(listen))
+              out.push(listen as PendingRecord);
+          }
+        } else out.push(record as PendingRecord);
+      }
     } catch {
       // A malformed stored record matches nothing.
     }

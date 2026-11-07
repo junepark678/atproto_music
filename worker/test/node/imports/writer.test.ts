@@ -29,6 +29,7 @@ import { rebatchUnsentImports } from '../../../src/imports/rebatch';
 import { fsUploadStore } from '../../../src/imports/uploads';
 import { WRITE_SLICE, writeSlice } from '../../../src/imports/writer';
 import { bindPolicyFetch, createPolicyFetch } from '../../../src/node/policy-fetch';
+import { enqueueBatchListenDelete } from '../../../src/outbox/batch-delete-ops';
 import { newOperationId } from '../../../src/outbox/operations';
 import { insertScrobbleCreate, prepareScrobble } from '../../../src/outbox/scrobble-ops';
 import { APPLY, CREATE, GET, type Harness, remoteRecords, SCROBBLE, T0, withHarness } from '../outbox/support';
@@ -520,19 +521,31 @@ describe('import writer', () => {
       const parent = h.ops()[0]!;
       const parentRecord = JSON.parse(parent.record_json!) as { listens: Array<{ id: string; artist: string }> };
       expect(parentRecord.listens).toHaveLength(2);
+      const removal = enqueueBatchListenDelete(h.m, {
+        did: h.alice,
+        uri: `at://${h.alice}/${SCROBBLE_BATCH}/${parent.rkey}`,
+        listenIds: [parentRecord.listens[0]!.id],
+        origin: 'web',
+      });
 
       h.kit.pds.Alice.serverError(CREATE, 413, 1);
       await h.runUntilIdle();
       await runImports(rt, h.kit.clock.nowMs());
 
       expect(h.op(parent.id)).toMatchObject({ state: 'cancelled', last_error: 'batch_split' });
-      const children = h.ops(`collection = '${SCROBBLE_BATCH}' AND id != '${parent.id}'`);
+      const children = h.ops(`kind = 'scrobble.create' AND collection = '${SCROBBLE_BATCH}' AND id != '${parent.id}'`);
       expect(children).toHaveLength(2);
       const childEntries = children.flatMap(
         (child) => (JSON.parse(child.record_json!) as { listens: Array<{ id: string; artist: string }> }).listens,
       );
       expect(childEntries).toEqual(parentRecord.listens);
       expect(new Set(children.map((child) => child.rkey)).size).toBe(2);
+      const removedChild = children.find((child) => child.record_json?.includes(parentRecord.listens[0]!.id));
+      expect(removedChild).toBeDefined();
+      expect(h.op(removal.id)).toMatchObject({ state: 'succeeded', rkey: removedChild!.rkey });
+      expect(h.db.one('SELECT record_uri FROM listen_removals WHERE operation_id = ?', removal.id)).toEqual({
+        record_uri: `at://${h.alice}/${SCROBBLE_BATCH}/${removedChild!.rkey}`,
+      });
       expect(
         h.db
           .all<{ state: string; operation_id: string }>(
@@ -542,7 +555,7 @@ describe('import writer', () => {
           .map((row) => row.state),
       ).toEqual(['written', 'written']);
       expect(job(h, 'job-split')).toMatchObject({ written: 2, failed_items: 0 });
-      expect(await remoteRecords(h.kit, 'Alice', SCROBBLE_BATCH)).toHaveLength(2);
+      expect(await remoteRecords(h.kit, 'Alice', SCROBBLE_BATCH)).toHaveLength(1);
     });
   });
 

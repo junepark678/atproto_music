@@ -653,6 +653,42 @@ describe('POST /api/v1/scrobbles', () => {
 });
 
 describe('DELETE /api/v1/scrobbles/{id}', () => {
+  it('accepts an owner batch item fragment and whole batch URI, and hides another DID batch URI', async () => {
+    const w = await world();
+    const alice = w.signIn(ALICE, 'alice.test');
+    const batch = `${OWNED}.scrobbleBatch`;
+    const itemUri = `at://${ALICE}/${batch}/3zzbatchcontainer#3lb2batchidab`;
+    const other = `at://${BOB}/${batch}/3zzbatchcontainer`;
+    const path = (uri: string) => `/api/v1/scrobbles/${encodeURIComponent(uri)}`;
+
+    const denied = await w.send('DELETE', path(other), { as: alice });
+    expect([denied.status, errorCode(denied)]).toEqual([404, 'not_found']);
+    expect(w.count('operations', "kind = 'scrobble.delete'")).toBe(0);
+
+    const item = await w.send('DELETE', path(itemUri), { as: alice });
+    expect(item.status).toBe(202);
+    const itemOp = opOf(item);
+    expect(w.ops('id = ?', itemOp.id)[0]).toMatchObject({
+      kind: 'scrobble.delete',
+      collection: batch,
+      rkey: '3zzbatchcontainer',
+      state: 'queued',
+    });
+    expect(w.app.db.all('SELECT listen_id FROM batch_delete_listens WHERE operation_id = ?', itemOp.id)).toEqual([
+      { listen_id: '3lb2batchidab' },
+    ]);
+
+    const whole = await w.send('DELETE', path(`at://${ALICE}/${batch}/3zzwholebatch`), { as: alice });
+    expect(whole.status).toBe(202);
+    expect(w.app.db.all('SELECT listen_id FROM batch_delete_listens WHERE operation_id = ?', opOf(whole).id)).toEqual([
+      { listen_id: '*' },
+    ]);
+    expect(w.ops("kind = 'scrobble.delete'").map((op) => [op.collection, op.rkey])).toEqual([
+      [batch, '3zzbatchcontainer'],
+      [batch, '3zzwholebatch'],
+    ]);
+  });
+
   it("DELETE /api/v1/scrobbles/{id} of another DID's record is 404 and of an own record is 202 scrobble.delete", async () => {
     const w = await world();
     const alice = w.signIn(ALICE, 'alice.test');

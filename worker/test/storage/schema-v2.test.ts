@@ -89,16 +89,29 @@ interface ExpectedTable {
 }
 
 const NEW_TABLES: Record<string, ExpectedTable> = {
+  batch_delete_listens: {
+    columns: ['operation_id', 'listen_id'],
+    pk: ['operation_id', 'listen_id'],
+  },
   batch_entry_items: {
-    columns: ['operation_id', 'entry_id', 'job_id', 'seq'],
+    columns: ['operation_id', 'entry_id', 'job_id', 'seq', 'removal_operation_id', 'removed_at_ms'],
     pk: ['operation_id', 'entry_id', 'job_id', 'seq'],
   },
   listen_removals: {
-    columns: cols<{ did: true; record_uri: true; listen_id: true; created_at_ms: true }>({
+    columns: cols<{
+      did: true;
+      record_uri: true;
+      listen_id: true;
+      created_at_ms: true;
+      operation_id: true;
+      removed_cid: true;
+    }>({
       did: true,
       record_uri: true,
       listen_id: true,
       created_at_ms: true,
+      operation_id: true,
+      removed_cid: true,
     }),
     pk: ['did', 'record_uri', 'listen_id'],
   },
@@ -368,6 +381,8 @@ const NEW_TABLES: Record<string, ExpectedTable> = {
       record_json: true,
       state: true,
       operation_id: true,
+      removal_operation_id: true,
+      removed_at_ms: true,
     }),
     pk: ['job_id', 'seq'],
     unique: [['job_id', 'dedupe_key']],
@@ -436,6 +451,7 @@ const NEW_SCROBBLE_COLUMNS = cols<ScrobbleV2Columns>({
 
 /** New named indexes: table, unique, partial, [column, desc] in key order. */
 const NEW_INDEXES: Record<string, [string, number, number, Array<[string, number]>]> = {
+  batch_delete_listens_operation: ['batch_delete_listens', 0, 0, [['operation_id', 0]]],
   batch_entry_items_job: [
     'batch_entry_items',
     0,
@@ -477,6 +493,7 @@ const NEW_INDEXES: Record<string, [string, number, number, Array<[string, number
     ],
   ],
   listen_removals_container: ['listen_removals', 0, 0, [['record_uri', 0]]],
+  scrobbles_record_uri: ['scrobbles', 0, 0, [['record_uri', 0]]],
   // Partial (WHERE recording_msid IS NOT NULL), so it never shadows the
   // per-DID time index while msids are NULL.
   scrobbles_msid: [
@@ -1168,6 +1185,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       "4|'scrobble_delete_target_index'",
       "5|'batch_listen_provenance'",
       "6|'batch_outbox_recovery'",
+      "7|'batch_listen_removal_receipts'",
     ]);
     // The new scrobble columns exist and are NULL on every migrated row.
     expect(after.newColumns).toHaveLength(expectedScrobbles);
@@ -1181,6 +1199,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       { version: 4, name: 'scrobble_delete_target_index' },
       { version: 5, name: 'batch_listen_provenance' },
       { version: 6, name: 'batch_outbox_recovery' },
+      { version: 7, name: 'batch_listen_removal_receipts' },
     ]);
     expect(after.compat).toEqual([{ singleton: 1, min_compatible_version: 2 }]);
     expect(after.newTablesEmpty).toEqual([]);

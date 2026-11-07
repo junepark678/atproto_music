@@ -333,6 +333,9 @@ export interface ImportItemRow {
   record_json: string;
   state: ImportItemState;
   operation_id: string | null;
+  /** Batch removal receipt; import outcome remains the original write result. */
+  removal_operation_id: string | null;
+  removed_at_ms: number | null;
 }
 
 export interface IgnoredListenRow {

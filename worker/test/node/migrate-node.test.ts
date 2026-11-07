@@ -107,25 +107,40 @@ describe('migrate over node:sqlite', () => {
         (id,did,kind,origin,priority,collection,rkey,state,due_at,created_at_ms,updated_at_ms,follow_proof_json)
         VALUES ('kept','did:plc:alice','scrobble.delete','web',0,'com.example.atmusic.scrobble','r01','failed',1,1,1,'[]')`);
         const before = dumpDb(db);
-        expect(migrate(db)).toEqual({ status: 'ready', version: 4 });
+        expect(migrate(db)).toEqual({ status: 'ready', version: SCHEMA_VERSION });
         expect(ledger(db)).toEqual([
           { version: 1, name: 'initial_workers_schema' },
           { version: 2, name: 'node_schema' },
           { version: 3, name: 'follow_proof_baseline' },
           { version: 4, name: 'scrobble_delete_target_index' },
+          { version: 5, name: 'batch_listen_provenance' },
+          { version: 6, name: 'batch_outbox_recovery' },
+          { version: 7, name: 'batch_listen_removal_receipts' },
         ]);
         const after = dumpDb(db);
-        expect({ ...after.tables, schema_migrations: before.tables.schema_migrations }).toEqual(before.tables);
+        const comparable: Record<string, unknown> = {
+          ...after.tables,
+          schema_migrations: before.tables.schema_migrations,
+        };
+        delete comparable.batch_delete_listens;
+        delete comparable.batch_entry_items;
+        delete comparable.listen_removals;
+        comparable.operations = (comparable.operations as string[]).map((row) => {
+          const value = JSON.parse(row) as Record<string, unknown>;
+          delete value.send_started_at_ms;
+          return JSON.stringify(value);
+        });
+        expect(comparable).toEqual(before.tables);
         expect(db.one("SELECT sql FROM sqlite_master WHERE name='operations_scrobble_delete_target'")).toEqual({
           sql: "CREATE INDEX operations_scrobble_delete_target ON operations(did,rkey) WHERE kind = 'scrobble.delete'",
         });
         expect(db.all('SELECT min_compatible_version FROM schema_compat')).toEqual([{ min_compatible_version: 2 }]);
         for (const oldVersion of [2, 3]) {
-          expect(migrate(db, MIGRATIONS.slice(0, oldVersion))).toEqual({ status: 'ready', version: 4 });
+          expect(migrate(db, MIGRATIONS.slice(0, oldVersion))).toEqual({ status: 'ready', version: SCHEMA_VERSION });
           expect(dumpDb(db)).toEqual(after);
         }
         const again = reopen(db);
-        expect(migrate(again)).toEqual({ status: 'ready', version: 4 });
+        expect(migrate(again)).toEqual({ status: 'ready', version: SCHEMA_VERSION });
         expect(dumpDb(again)).toEqual(after);
       },
       { migrations: MIGRATIONS.slice(0, 3) },

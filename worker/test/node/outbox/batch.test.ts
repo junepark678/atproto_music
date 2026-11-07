@@ -5,6 +5,7 @@ import { expect, it } from 'vitest';
 import type { OperationRow } from '../../../src/app/rows';
 import { createJob } from '../../../src/imports/jobs';
 import { encodeBatch, MAX_BATCH_BYTES } from '../../../src/outbox/apply-writes';
+import { enqueueBatchListenDelete } from '../../../src/outbox/batch-delete-ops';
 import { acceptListens } from '../../../src/outbox/ingress';
 import { insertOperation, newOperationId, prepare } from '../../../src/outbox/operations';
 import { enqueueScrobbleCreates, insertScrobbleCreate } from '../../../src/outbox/scrobble-ops';
@@ -14,6 +15,7 @@ import {
   GET,
   type Harness,
   listenInput,
+  PUT,
   remoteRecords,
   SCROBBLE,
   T0,
@@ -158,6 +160,62 @@ it('excludes attempted batch operations while the batch gate is closed without p
     expect(report.attempted).toBe(1);
     expect(h.writers.sent.every((request) => request.did !== h.alice)).toBe(true);
     expect(h.op(batch.id)).toMatchObject({ state: 'queued', attempts: 1 });
+  });
+});
+
+it('removes one indexed batch listen with CAS and preserves sibling and unknown remote fields', async () => {
+  await withHarness(async (h) => {
+    const uriKey = '3lb2batchcontainer1';
+    const record = {
+      $type: BATCH,
+      createdAt: '2026-01-15T12:00:00Z',
+      remoteEnvelopeField: { keep: true },
+      listens: [
+        {
+          id: '3lb2batchidab',
+          artist: 'Artist',
+          track: 'Removed',
+          listenedAt: '2026-01-14T12:00:00Z',
+          createdAt: '2026-01-15T12:00:00Z',
+          remoteEntryField: 'keep too',
+        },
+        {
+          id: '3lb2batchidac',
+          artist: 'Artist',
+          track: 'Sibling',
+          listenedAt: '2026-01-14T13:00:00Z',
+          createdAt: '2026-01-15T12:00:00Z',
+          remoteSiblingField: { exact: 'preserve' },
+        },
+      ],
+    };
+    await h.kit.externalPut('Alice', BATCH, uriKey, record);
+    const del = enqueueBatchListenDelete(h.m, {
+      did: h.alice,
+      uri: `at://${h.alice}/${BATCH}/${uriKey}`,
+      listenIds: ['3lb2batchidab'],
+      origin: 'web',
+    });
+    expect(h.db.one('SELECT listen_id FROM batch_delete_listens WHERE operation_id=?', del.id)).toEqual({
+      listen_id: '3lb2batchidab',
+    });
+    await h.runUntilIdle();
+    expect(h.op(del.id)).toMatchObject({ state: 'succeeded', collection: BATCH });
+    const value = (await remoteRecords(h.kit, 'Alice', BATCH)).find((item) => item.rkey === uriKey);
+    expect(value!.value).toMatchObject({
+      remoteEnvelopeField: { keep: true },
+      listens: [{ id: '3lb2batchidac', track: 'Sibling', remoteSiblingField: { exact: 'preserve' } }],
+    });
+    expect(h.writers.sent.filter((request) => request.nsid === PUT).map((request) => request.body)).toHaveLength(1);
+    const whole = enqueueBatchListenDelete(h.m, {
+      did: h.alice,
+      uri: `at://${h.alice}/${BATCH}/${uriKey}`,
+      listenIds: ['*'],
+      origin: 'web',
+    });
+    await h.runUntilIdle();
+    expect(h.op(whole.id)).toMatchObject({ state: 'succeeded' });
+    expect((await remoteRecords(h.kit, 'Alice', BATCH)).some((item) => item.rkey === uriKey)).toBe(false);
   });
 });
 

@@ -707,6 +707,26 @@ const MIGRATION_6: Migration = {
   ],
 };
 
+const MIGRATION_7: Migration = {
+  version: 7,
+  name: 'batch_listen_removal_receipts',
+  statements: [
+    'ALTER TABLE listen_removals ADD COLUMN operation_id TEXT',
+    'ALTER TABLE listen_removals ADD COLUMN removed_cid TEXT',
+    'ALTER TABLE import_items ADD COLUMN removal_operation_id TEXT',
+    'ALTER TABLE import_items ADD COLUMN removed_at_ms INTEGER',
+    'ALTER TABLE batch_entry_items ADD COLUMN removal_operation_id TEXT',
+    'ALTER TABLE batch_entry_items ADD COLUMN removed_at_ms INTEGER',
+    'CREATE INDEX scrobbles_record_uri ON scrobbles(record_uri)',
+    `CREATE TABLE batch_delete_listens (
+      operation_id TEXT NOT NULL,
+      listen_id TEXT NOT NULL,
+      PRIMARY KEY(operation_id,listen_id)
+    )`,
+    'CREATE INDEX batch_delete_listens_operation ON batch_delete_listens(operation_id)',
+  ],
+};
+
 export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_1,
   MIGRATION_2,
@@ -714,6 +734,7 @@ export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_4,
   MIGRATION_5,
   MIGRATION_6,
+  MIGRATION_7,
 ];
 
 /** The schema version this code expects. */
@@ -772,6 +793,7 @@ export const TABLES = [
   'schema_compat',
   'listen_removals',
   'batch_entry_items',
+  'batch_delete_listens',
 ] as const;
 
 export type TableName = (typeof TABLES)[number];
@@ -831,4 +853,5 @@ export const TABLE_CLASS: Readonly<Record<TableName, TableClass>> = {
   schema_compat: 'non-derived',
   listen_removals: 'non-derived',
   batch_entry_items: 'non-derived',
+  batch_delete_listens: 'non-derived',
 };

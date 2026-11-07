@@ -21,6 +21,7 @@
 //   while one that is running or was already sent gets a `scrobble.delete`
 //   chained after it as a predecessor.
 
+import { isTid } from '@atmusic/core/syntax';
 import type { OperationRow, Origin } from '../app/rows';
 import type { ModuleDeps } from '../do/contracts';
 import { bumpStatsVersion } from '../do/write/account-state';
@@ -100,13 +101,68 @@ export type RemoveCreateResult =
  */
 export function removeScrobbleCreate(
   m: ModuleDeps,
-  args: { did: string; operationId: string; origin: Origin; kick?: () => void },
+  args: { did: string; operationId: string; origin: Origin; listenId?: string; kick?: () => void },
 ): RemoveCreateResult {
   const now = m.clock.nowMs();
   const result = m.db.tx((): RemoveCreateResult => {
     const op = loadOperation(m.db, args.operationId);
     if (op === null || op.did !== args.did || op.kind !== 'scrobble.create' || op.rkey === null) {
       return { status: 'not_found' };
+    }
+    if (op.collection?.endsWith('.scrobbleBatch')) {
+      // A batch create owns several listens. Never cancel it as though it were
+      // one scrobble; a caller must name the exact entry to chain its removal.
+      const id = args.listenId;
+      if (id === undefined || !isTid(id)) return { status: 'not_found' };
+      const del = insertOperation(
+        m.db,
+        {
+          id: newOperationId(m.random),
+          did: args.did,
+          kind: 'scrobble.delete',
+          origin: args.origin,
+          collection: op.collection,
+          rkey: op.rkey,
+          dueAt: now,
+          predecessors: [op.id, ...unsettledAt(m.db, args.did, op.collection, op.rkey)],
+        },
+        now,
+      );
+      m.db.run('INSERT INTO batch_delete_listens(operation_id,listen_id) VALUES (?,?)', del.id, id);
+      const membership = m.db.one<{ job_id: string; seq: number }>(
+        'SELECT job_id,seq FROM batch_entry_items WHERE operation_id = ? AND entry_id = ?',
+        op.id,
+        id,
+      );
+      if (membership !== null) {
+        m.db.run(
+          'UPDATE batch_entry_items SET removal_operation_id = ? WHERE operation_id = ? AND entry_id = ?',
+          del.id,
+          op.id,
+          id,
+        );
+        m.db.run(
+          'UPDATE import_items SET removal_operation_id = ? WHERE job_id = ? AND seq = ?',
+          del.id,
+          membership.job_id,
+          membership.seq,
+        );
+      }
+      const uri = `at://${args.did}/${op.collection}/${op.rkey}`;
+      const cid =
+        m.db.one<{ cid: string }>('SELECT cid FROM scrobbles WHERE record_uri=? AND listen_id=?', uri, id)?.cid ?? null;
+      m.db.run(
+        `INSERT INTO listen_removals(did,record_uri,listen_id,created_at_ms,operation_id,removed_cid)
+        VALUES (?,?,?,?,?,?) ON CONFLICT(did,record_uri,listen_id) DO UPDATE SET
+        created_at_ms=excluded.created_at_ms,operation_id=excluded.operation_id,removed_cid=excluded.removed_cid`,
+        args.did,
+        uri,
+        id,
+        now,
+        del.id,
+        cid,
+      );
+      return { status: 'delete_chained', operation: op, delete: del };
     }
     if (cancelUnsent(m.db, op.id, now)) return { status: 'cancelled', operation: loadOperation(m.db, op.id)! };
     if (op.state === 'failed' || op.state === 'cancelled') return { status: 'not_found' };

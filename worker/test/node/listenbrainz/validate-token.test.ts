@@ -16,6 +16,7 @@ import { ensureAccount } from '../../../src/credentials/accounts';
 import { createLbToken, revokeLbToken } from '../../../src/credentials/lb-tokens';
 import { createSubmitRoutes } from '../../../src/listenbrainz/submit';
 import { createTokenRoutes } from '../../../src/listenbrainz/token-routes';
+import { insertOperation, newOperationId, prepare } from '../../../src/outbox/operations';
 import { closeApps, startApp, type TestApp } from '../support/app';
 
 const NOW_MS = Date.parse('2026-01-15T12:00:00Z');
@@ -25,6 +26,7 @@ const BOB = 'did:plc:bob00000000000000000000';
 /** An owned test prefix with ownership evidence: the namespace gate allows publication (ADR §5.7). */
 const OWNED = 'org.example.music';
 const SCROBBLE = `${OWNED}.scrobble`;
+const BATCH = `${OWNED}.scrobbleBatch`;
 const OPEN_GATE = {
   LEXICON_PREFIX: OWNED,
   NAMESPACE_OWNERSHIP_REF: 'dns:_lexicon.music.example.org TXT',
@@ -251,6 +253,52 @@ describe('ListenBrainz token routes (ADR §8.2, §8.6)', () => {
     expect(cancel.status).toBe(200);
     expect(r.ops(ALICE)[1]).toMatchObject({ kind: 'scrobble.create', state: 'cancelled' });
     expect(r.app.db.one<{ n: number }>('SELECT count(*) AS n FROM listen_keys WHERE did = ?', ALICE)?.n).toBe(0);
+
+    // A pending batch entry is selected by its own timestamp and MSID, then
+    // the real ListenBrainz route chains a collection-scoped item removal.
+    const batchListenId = '3lb2batchidab';
+    const batchRecord = await prepare({
+      $type: BATCH,
+      createdAt: new Date(NOW_MS).toISOString(),
+      listens: [
+        {
+          id: batchListenId,
+          artist: 'Pending Batch Artist',
+          track: 'Pending Batch Track',
+          listenedAt: new Date((NOW_S - 40) * 1000).toISOString(),
+          createdAt: new Date(NOW_MS).toISOString(),
+        },
+      ],
+    });
+    const batchCreate = r.app.db.tx(() =>
+      insertOperation(
+        r.app.db,
+        {
+          id: newOperationId(r.random),
+          did: ALICE,
+          kind: 'scrobble.create',
+          origin: 'import',
+          collection: BATCH,
+          rkey: '3lbqbatchpending1',
+          prepared: batchRecord,
+          dueAt: NOW_MS,
+          importJobId: 'pending-batch',
+        },
+        NOW_MS,
+      ),
+    );
+    const batchMsid = await recordingMsid('Pending Batch Artist', 'Pending Batch Track');
+    const batchDelete = await post(r.app, '/1/delete-listen', alice.token, {
+      listened_at: NOW_S - 40,
+      recording_msid: batchMsid,
+    });
+    expect(batchDelete.status).toBe(200);
+    expect(r.ops(ALICE).find((op) => op.id === batchCreate.id)).toMatchObject({ collection: BATCH, state: 'queued' });
+    const batchRemoval = r.ops(ALICE).find((op) => op.kind === 'scrobble.delete' && op.collection === BATCH);
+    expect(batchRemoval).toMatchObject({ rkey: '3lbqbatchpending1', state: 'queued' });
+    expect(r.app.db.all('SELECT listen_id FROM batch_delete_listens WHERE operation_id = ?', batchRemoval!.id)).toEqual(
+      [{ listen_id: batchListenId }],
+    );
 
     // A closed publication gate (no lexicon prefix, or the fixture prefix
     // without NAMESPACE_OWNERSHIP_REF, ADR §5.7): the token is still checked

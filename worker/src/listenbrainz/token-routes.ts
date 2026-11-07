@@ -79,6 +79,7 @@ import { type VerifiedLbToken, verifyLbToken } from '../credentials/lb-tokens';
 import type { ModuleDeps } from '../do/contracts';
 import { clearNowPlaying } from '../do/read/now-playing';
 import { need, type RequestCtx, type RouteDef } from '../http/types';
+import { enqueueBatchListenDelete } from '../outbox/batch-delete-ops';
 import { enqueueScrobbleDelete, removeScrobbleCreate } from '../outbox/delete-ops';
 import { outboxCollections } from '../outbox/operations';
 import {
@@ -297,15 +298,25 @@ export function canonicalMsid(value: string): string | null {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
-type DeleteTarget = { kind: 'indexed'; uri: string } | { kind: 'pending'; operationId: string } | { kind: 'none' };
+type DeleteTarget =
+  | { kind: 'indexed'; uri: string; recordUri?: string; listenId?: string }
+  | { kind: 'pending'; operationId: string; listenId?: string }
+  | { kind: 'none' };
 
 /** The newest own scrobble at second `seconds` with MSID `msid` (module comment). */
 async function findDeleteTarget(m: ModuleDeps, did: string, seconds: bigint, msid: string): Promise<DeleteTarget> {
   const lowerNs = seconds * NS_PER_SECOND;
   const upperNs = lowerNs + NS_PER_SECOND;
   // listened_at is the fixed-width storage form, so string order is time order.
-  const rows = m.db.all<{ uri: string; artist_key: string; track_key: string; recording_msid: string | null }>(
-    `SELECT uri, artist_key, track_key, recording_msid FROM scrobbles
+  const rows = m.db.all<{
+    uri: string;
+    record_uri: string | null;
+    listen_id: string | null;
+    artist_key: string;
+    track_key: string;
+    recording_msid: string | null;
+  }>(
+    `SELECT uri, record_uri, listen_id, artist_key, track_key, recording_msid FROM scrobbles
      WHERE did = ? AND listened_at >= ? AND listened_at < ?
      ORDER BY listened_at DESC, uri DESC`,
     did,
@@ -314,52 +325,74 @@ async function findDeleteTarget(m: ModuleDeps, did: string, seconds: bigint, msi
   );
   for (const row of rows) {
     const candidate = row.recording_msid ?? (await recordingMsidOfKey([row.artist_key, row.track_key]));
-    if (candidate === msid) return { kind: 'indexed', uri: row.uri };
+    if (candidate === msid)
+      return {
+        kind: 'indexed',
+        uri: row.uri,
+        ...(row.record_uri ? { recordUri: row.record_uri } : {}),
+        ...(row.listen_id ? { listenId: row.listen_id } : {}),
+      };
   }
 
   const prefix = m.config.prefix;
   if (prefix === null) return { kind: 'none' };
-  const collection = outboxCollections(prefix).scrobble;
+  const collections = outboxCollections(prefix);
   // Records carry the normalised UTC datetime (toRecordDatetime), so the
   // second is its first 19 characters; the exact bound is checked below.
   const second = toRecordDatetime(lowerNs).slice(0, 19);
   const ops = m.db.all<Pick<OperationRow, 'id' | 'record_json'>>(
     `SELECT id, record_json FROM operations
-     WHERE did = ? AND kind = 'scrobble.create' AND collection = ? AND record_json IS NOT NULL
+     WHERE did = ? AND kind = 'scrobble.create' AND collection IN (?, ?) AND record_json IS NOT NULL
        AND state IN ('queued','running','blocked','succeeded')
-       AND substr(json_extract(record_json, '$.listenedAt'), 1, 19) = ?
+       AND (collection = ? OR substr(json_extract(record_json, '$.listenedAt'), 1, 19) = ?)
      ORDER BY created_at_ms DESC, id DESC`,
     did,
-    collection,
+    collections.scrobble,
+    collections.scrobbleBatch,
+    collections.scrobbleBatch,
     second,
   );
-  let best: { ns: bigint; operationId: string } | null = null;
+  let best: { ns: bigint; operationId: string; listenId?: string } | null = null;
   for (const op of ops) {
-    let record: { listenedAt?: unknown; artist?: unknown; track?: unknown };
+    let root: {
+      listenedAt?: unknown;
+      artist?: unknown;
+      track?: unknown;
+      listens?: { id?: unknown; listenedAt?: unknown; artist?: unknown; track?: unknown }[];
+    };
     try {
-      record = JSON.parse(op.record_json as string) as typeof record;
+      root = JSON.parse(op.record_json as string) as typeof root;
     } catch {
       continue;
     }
-    if (
-      typeof record.listenedAt !== 'string' ||
-      typeof record.artist !== 'string' ||
-      typeof record.track !== 'string'
-    ) {
-      continue;
+    const records = Array.isArray(root.listens)
+      ? root.listens.map((entry) => ({ record: entry, listenId: typeof entry.id === 'string' ? entry.id : undefined }))
+      : [{ record: root, listenId: undefined }];
+    for (const candidateRecord of records) {
+      const record = candidateRecord.record;
+      if (
+        typeof record.listenedAt !== 'string' ||
+        typeof record.artist !== 'string' ||
+        typeof record.track !== 'string'
+      ) {
+        continue;
+      }
+      const ns = parseRfc3339(record.listenedAt);
+      if (ns === null || ns < lowerNs || ns >= upperNs) continue;
+      let candidate: string;
+      try {
+        candidate = await recordingMsid(record.artist, record.track);
+      } catch {
+        continue;
+      }
+      // The newest listen of the second wins (the rows come newest submission first).
+      if (candidate === msid && (best === null || ns > best.ns))
+        best = { ns, operationId: op.id, ...(candidateRecord.listenId ? { listenId: candidateRecord.listenId } : {}) };
     }
-    const ns = parseRfc3339(record.listenedAt);
-    if (ns === null || ns < lowerNs || ns >= upperNs) continue;
-    let candidate: string;
-    try {
-      candidate = await recordingMsid(record.artist, record.track);
-    } catch {
-      continue;
-    }
-    // The newest listen of the second wins (the rows come newest submission first).
-    if (candidate === msid && (best === null || ns > best.ns)) best = { ns, operationId: op.id };
   }
-  return best === null ? { kind: 'none' } : { kind: 'pending', operationId: best.operationId };
+  return best === null
+    ? { kind: 'none' }
+    : { kind: 'pending', operationId: best.operationId, ...(best.listenId ? { listenId: best.listenId } : {}) };
 }
 
 async function deleteListen(
@@ -390,9 +423,23 @@ async function deleteListen(
   const target = msid === null || !inRange ? { kind: 'none' as const } : await findDeleteTarget(m, did, seconds, msid);
   const kick = () => kickOutbox(ctx);
   if (target.kind === 'indexed') {
-    enqueueScrobbleDelete(m, { did, uri: target.uri, origin: 'listenbrainz', kick });
+    if (target.recordUri && target.listenId)
+      enqueueBatchListenDelete(m, {
+        did,
+        uri: target.recordUri,
+        listenIds: [target.listenId],
+        origin: 'listenbrainz',
+        kick,
+      });
+    else enqueueScrobbleDelete(m, { did, uri: target.uri, origin: 'listenbrainz', kick });
   } else if (target.kind === 'pending') {
-    removeScrobbleCreate(m, { did, operationId: target.operationId, origin: 'listenbrainz', kick });
+    removeScrobbleCreate(m, {
+      did,
+      operationId: target.operationId,
+      origin: 'listenbrainz',
+      ...(target.listenId ? { listenId: target.listenId } : {}),
+      kick,
+    });
   }
   return lbJson({ status: 'ok' }, 200, headers);
 }

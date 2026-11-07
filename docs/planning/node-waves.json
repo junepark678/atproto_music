@@ -345,6 +345,7 @@
      "worker/src/do/schema.ts",
      "worker/src/app/rows.ts",
      "worker/test/storage/migrate.test.ts",
+     "worker/test/storage/migrate.test.ts",
      "worker/test/storage/schema-v2.test.ts",
      "worker/test/harness/isolation-probe.ts",
      "worker/test/storage/timers.test.ts",
@@ -857,6 +858,11 @@
      "worker/src/http/operations.ts",
      "worker/src/http/account.ts",
      "worker/test/node/http/writes.test.ts",
+     "worker/test/node/imports/writer.test.ts",
+     "worker/test/node/lastfm/write-methods.test.ts",
+     "worker/test/node/lastfm/read-user.test.ts",
+     "worker/test/node/listenbrainz/validate-token.test.ts",
+     "worker/test/node/listenbrainz/feedback.test.ts",
      "worker/test/node/http/account.test.ts"
     ],
     "dependsOn": [
@@ -1856,6 +1862,7 @@
      "worker/test/node/outbox/batch.test.ts",
      "worker/test/node/outbox/follows.test.ts",
      "worker/test/node/outbox/support.ts",
+     "worker/test/storage/migrate.test.ts",
      "worker/test/storage/schema-v2.test.ts"
     ],
     "dependsOn": [
@@ -1866,6 +1873,10 @@
      "worker/test/node/imports/writer.test.ts › staged items become import-priority operations within the budget; written, duplicates and invalid counts are exact; cancel stops new operations",
      "worker/test/node/imports/writer.test.ts › rebatches only queued never-sent import singles after rechecking all item and key links",
      "worker/test/node/imports/writer.test.ts › splits a definitely rejected container into durable children and keeps entry identities and import counters",
+     "worker/test/node/lastfm/write-methods.test.ts › library.removeScrobble cancels a still-queued create at that second, chains a delete after a running one, deletes an indexed record, and answers 7 'Invalid resource specified' when nothing matches",
+     "worker/test/node/lastfm/read-user.test.ts › user.getRecentTracks returns a verified batch listen through the real Last.fm protocol route",
+     "worker/test/node/listenbrainz/feedback.test.ts › recording-feedback resolves an indexed pending batch entry through the real ListenBrainz route",
+     "worker/test/node/listenbrainz/validate-token.test.ts › delete-listen and playing-now/delete require a token and act only on the token owner's data; a client mismatch is 404",
      "worker/test/node/imports/writer.test.ts › rolls back child insertion and item repointing together when the split transaction faults",
      "worker/test/node/imports/writer.test.ts › rechecks a single that starts sending while async rebatch preparation is in flight",
      "worker/test/node/imports/writer.test.ts › rolls back old operations and mappings together when the rebatch transaction faults",
@@ -1876,6 +1887,49 @@
      "worker/test/node/outbox/batch.test.ts › keeps legacy never-sent import singles dormant even with the batch gate open",
      "worker/test/node/outbox/batch.test.ts › excludes attempted batch operations while the batch gate is closed without parking their DID"
      ,"packages/core/test/write-policy.test.ts › classifies ScopeMissing and InsufficientScope as explicit permanent scope errors"
+    ]
+   }
+  ]
+ },
+ {
+  "wave": 11,
+  "packages": [
+   {
+    "id": "N11-01",
+    "title": "Batched import per-listen deletion and compatibility dispatch",
+    "files": [
+     "docs/adr/0006-batched-import-records.md",
+     "docs/planning/node-waves.json",
+     "docs/verification/batch-import-slice-d.md",
+     "worker/src/app/rows.ts",
+     "worker/src/do/schema.ts",
+     "worker/src/do/read/visibility.ts",
+     "worker/src/do/write/apply-record.ts",
+     "worker/src/http/writes.ts",
+     "worker/src/lastfm/write-methods.ts",
+     "worker/src/listenbrainz/feedback.ts",
+     "worker/src/listenbrainz/token-routes.ts",
+     "worker/src/outbox/batch-delete-ops.ts",
+     "worker/src/outbox/delete-ops.ts",
+     "worker/src/outbox/runner.ts",
+     "worker/test/node/http/writes.test.ts",
+     "worker/test/node/imports/writer.test.ts",
+     "worker/test/node/lastfm/write-methods.test.ts",
+     "worker/test/node/listenbrainz/validate-token.test.ts",
+     "worker/test/node/migrate-node.test.ts",
+     "worker/test/node/outbox/batch.test.ts",
+     "worker/test/storage/migrate.test.ts",
+     "worker/test/storage/schema-v2.test.ts"
+    ],
+    "dependsOn": ["N10-01"],
+    "description": "ADR 0006 slice D. Support owner-only item fragment and whole-container deletion for scrobbleBatch through durable per-listen intents, same-container serialization, read/CAS putRecord or final deleteRecord, ambiguous response readback, and immediate collection-aware suppression. Keep verified projection rows so later proofs can replace or restore them. Route Last.fm and ListenBrainz indexed/pending batch lookups to exact item targets; add migration 7 removal outcome mapping and record_uri lookup index. Confirmed removals release only the removed listen key and preserve sibling import counters. Document AppView interoperability limits, exact publication/scope rollout, migration and rollback. No web/UI work or live publication/PDS activity.",
+    "tests": [
+     "worker/test/node/outbox/batch.test.ts › removes one indexed batch listen with CAS and preserves sibling and unknown remote fields",
+     "worker/test/node/imports/writer.test.ts › splits a definitely rejected container into durable children and keeps entry identities and import counters",
+     "worker/test/node/lastfm/write-methods.test.ts › library.removeScrobble cancels a still-queued create at that second, chains a delete after a running one, deletes an indexed record, and answers 7 'Invalid resource specified' when nothing matches",
+     "worker/test/node/listenbrainz/validate-token.test.ts › delete-listen and playing-now/delete require a token and act only on the token owner's data; a client mismatch is 404",
+     "worker/test/node/migrate-node.test.ts › migration 4 adds the delete target index to a populated v3 file without changing rows or the compatibility floor",
+     "worker/test/storage/schema-v2.test.ts › migration 2 creates exactly the ADR 0005 §6.4 tables, scrobbles columns and indexes, and TABLES lists every table"
     ]
    }
   ]

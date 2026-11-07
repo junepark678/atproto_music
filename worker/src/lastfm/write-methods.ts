@@ -65,6 +65,7 @@ import { verifySessionKey } from '../credentials/lastfm-auth';
 import type { ModuleDeps } from '../do/contracts';
 import { upsertNowPlaying } from '../do/read/now-playing';
 import { musicKeyColumns } from '../do/write/keys';
+import { enqueueBatchListenDelete } from '../outbox/batch-delete-ops';
 import { enqueueScrobbleDelete, removeScrobbleCreate } from '../outbox/delete-ops';
 import { enqueueForwards } from '../outbox/forward-enqueue';
 import { acceptListens, type ListenResult } from '../outbox/ingress';
@@ -443,7 +444,8 @@ export interface RemoveScrobbleArgs {
 export async function removeScrobble(m: ModuleDeps, args: RemoveScrobbleArgs): Promise<RemoveMatch[]> {
   const prefix = m.config.prefix;
   if (prefix === null) throw new RangeError('the namespace gate is closed: no lexicon prefix');
-  const collection = outboxCollections(prefix).scrobble;
+  const collections = outboxCollections(prefix);
+  const collection = collections.scrobble;
   let keys: ReturnType<typeof musicKeyColumns>;
   let key: string;
   try {
@@ -464,8 +466,8 @@ export async function removeScrobble(m: ModuleDeps, args: RemoveScrobbleArgs): P
   const matches = m.db.tx((): RemoveMatch[] => {
     const out: RemoveMatch[] = [];
     const handled = new Set<string>();
-    const indexed = m.db.one<{ uri: string; rkey: string }>(
-      `SELECT uri, rkey FROM scrobbles WHERE did = ? AND artist_key = ? AND track_key = ?
+    const indexed = m.db.one<{ uri: string; rkey: string; record_uri: string | null; listen_id: string | null }>(
+      `SELECT uri, rkey, record_uri, listen_id FROM scrobbles WHERE did = ? AND artist_key = ? AND track_key = ?
          AND listened_at >= ? AND listened_at < ? ORDER BY listened_at DESC, uri DESC LIMIT 1`,
       args.did,
       keys.artist_key,
@@ -478,7 +480,7 @@ export async function removeScrobble(m: ModuleDeps, args: RemoveScrobbleArgs): P
     for (const id of createsWithKey(m, args.did, key)) {
       const op = loadOperation(m.db, id);
       if (op === null || op.did !== args.did || op.kind !== 'scrobble.create' || op.rkey === null) continue;
-      if (op.collection !== collection) continue;
+      if (op.collection !== collection && op.collection !== collections.scrobbleBatch) continue;
       if (op.state === 'failed' || op.state === 'cancelled') continue;
       const uri = uriOf(op);
       if (handled.has(uri) || isIndexed(uri)) continue; // the indexed path below handles it
@@ -489,7 +491,22 @@ export async function removeScrobble(m: ModuleDeps, args: RemoveScrobbleArgs): P
         continue;
       }
       if (alreadyRemoved(m, args.did, op.collection, op.rkey)) continue;
-      const removed = removeScrobbleCreate(m, { did: args.did, operationId: op.id, origin: 'lastfm' });
+      const batchEntry =
+        op.collection === collections.scrobbleBatch
+          ? m.db.one<{ entry_id: string }>(
+              `SELECT b.entry_id FROM batch_entry_items b JOIN import_items i
+            ON i.job_id=b.job_id AND i.seq=b.seq WHERE b.operation_id=? AND i.dedupe_key=? LIMIT 1`,
+              op.id,
+              key,
+            )?.entry_id
+          : undefined;
+      if (op.collection === collections.scrobbleBatch && batchEntry === undefined) continue;
+      const removed = removeScrobbleCreate(m, {
+        did: args.did,
+        operationId: op.id,
+        origin: 'lastfm',
+        ...(batchEntry ? { listenId: batchEntry } : {}),
+      });
       if (removed.status === 'cancelled') out.push({ kind: 'cancelled', operationId: op.id });
       else if (removed.status === 'delete_chained') {
         out.push({ kind: 'delete_chained', operationId: op.id, deleteId: removed.delete.id });
@@ -501,7 +518,15 @@ export async function removeScrobble(m: ModuleDeps, args: RemoveScrobbleArgs): P
       if (waiting !== null) {
         out.push({ kind: 'delete_pending', uri: indexed.uri, deleteId: waiting });
       } else {
-        const del = enqueueScrobbleDelete(m, { did: args.did, uri: indexed.uri, origin: 'lastfm' });
+        const del =
+          indexed.record_uri !== null && indexed.listen_id !== null
+            ? enqueueBatchListenDelete(m, {
+                did: args.did,
+                uri: indexed.record_uri,
+                listenIds: [indexed.listen_id],
+                origin: 'lastfm',
+              })
+            : enqueueScrobbleDelete(m, { did: args.did, uri: indexed.uri, origin: 'lastfm' });
         out.push({ kind: 'delete_indexed', uri: indexed.uri, deleteId: del.id });
       }
     }

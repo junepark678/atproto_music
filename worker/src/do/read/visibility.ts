@@ -75,6 +75,9 @@ export function visibleScrobblesFrom(s = 's', u = 'u'): string {
           ELSE substr(${sa}.uri, length('at://' || ${sa}.did || '/') + 1,
             instr(substr(${sa}.uri, length('at://' || ${sa}.did || '/') + 1), '/') - 1) END
         AND d.kind = 'scrobble.delete'
+        AND (NOT EXISTS (SELECT 1 FROM batch_delete_listens bd WHERE bd.operation_id = d.id)
+          OR EXISTS (SELECT 1 FROM batch_delete_listens bd WHERE bd.operation_id = d.id
+            AND (bd.listen_id = '*' OR bd.listen_id = ${sa}.listen_id)))
         AND (
           d.state IN ('queued', 'running', 'blocked', 'failed')
           OR (d.state = 'succeeded' AND d.swap_cid = ${sa}.cid)
@@ -82,7 +85,10 @@ export function visibleScrobblesFrom(s = 's', u = 'u'): string {
     )
     AND NOT EXISTS (
       SELECT 1 FROM listen_removals AS lr
+      LEFT JOIN operations AS ro ON ro.id = lr.operation_id
       WHERE lr.did = ${sa}.did AND lr.record_uri = ${sa}.record_uri AND lr.listen_id = ${sa}.listen_id
+        AND (ro.id IS NULL OR ro.state IN ('queued','running','blocked','failed')
+          OR (ro.state = 'succeeded' AND lr.removed_cid = ${sa}.cid))
     )
     AND (${sa}.listen_id IS NULL OR NOT EXISTS (
       SELECT 1 FROM scrobbles AS one
