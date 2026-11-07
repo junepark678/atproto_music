@@ -152,6 +152,12 @@ function consumerOf(r: SpyRequest, asHost: string, dohHost: string, plcHost: str
     case 'oauth':
       if (r.host === asHost) return 'oauth-client';
       if (r.host === PDS_HOST && r.method === 'POST' && PDS_WRITE_PATHS.has(r.path)) return 'pds-writer';
+      if (
+        r.host === PDS_HOST &&
+        r.method === 'GET' &&
+        (r.path === '/xrpc/com.atproto.repo.getRecord' || r.path === '/xrpc/com.atproto.repo.listRecords')
+      )
+        return 'pds-writer';
       if (r.host === PDS_HOST && r.path.startsWith('/.well-known/')) return 'oauth-client';
       return null;
     case 'forward':
