@@ -658,7 +658,7 @@ describe('scripts/check-ts.sh', () => {
       expect(declared.length).toBeGreaterThanOrEqual(13);
       expect(core?.files).toEqual(declared);
 
-      // An actual run in a disposable copy executes every one of its 47 tests,
+      // An actual run in a disposable copy executes all declared tests,
       // all passing, none skipped, in every test file.
       const copy = disposableCopy({ linkNodeModules: true });
       const run = copy.run(
@@ -677,8 +677,8 @@ describe('scripts/check-ts.sh', () => {
         numTodoTests: number;
       };
       expect(report.success).toBe(true);
-      expect(report.numTotalTests).toBe(47);
-      expect(report.numPassedTests).toBe(47);
+      expect(report.numTotalTests).toBeGreaterThanOrEqual(47);
+      expect(report.numPassedTests).toBe(report.numTotalTests);
       expect(report.numFailedTests).toBe(0);
       expect(report.numPendingTests).toBe(0);
       expect(report.numTodoTests).toBe(0);

@@ -372,6 +372,7 @@ describe('compose', () => {
         LEXICON_PREFIX: 'com.example.atmusic',
         NAMESPACE_OWNERSHIP_REF: '',
         NAMESPACE_PUBLICATION_REF: '',
+        NAMESPACE_BATCH_PUBLICATION_REF: '',
       });
       expect(ctx.requestId).toBe(answers[i]?.headers.get('x-request-id'));
       expect(ctx.cursorKey.algorithm.name).toBe('HMAC');
