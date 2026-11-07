@@ -18,7 +18,7 @@ import { useCallback, useEffect, useRef, useState } from 'preact/hooks';
 import { useRoute } from 'preact-iso';
 import { isDid } from '../api/client';
 import { FollowButton, type FollowEdge } from '../components/follow-button';
-import { formatUtc, isNotFound } from '../components/format';
+import { formatLocalDate, formatLocalTime, isNotFound } from '../components/format';
 import { isPending, OperationStatus, withDueAt } from '../components/operation-status';
 import type { OutboxService } from '../components/outbox-service';
 import { usePaged } from '../components/paged';
@@ -53,14 +53,11 @@ function NotFoundProfile({ did, reason }: { did: string; reason: 'invalid' | 'un
       {reason === 'invalid' ? (
         <p>This address does not contain a valid DID.</p>
       ) : own ? (
-        <p>
-          Your account (<code>{did}</code>) is not in the index yet. Records you publish appear here once the index has
-          verified them.
-        </p>
+        <p>Your account is not in the index yet. Records you publish appear here once the index has verified them.</p>
       ) : (
         <p>
-          The index has no active account for <code>{did}</code>. It may not have published any music records yet, it
-          may have opted out of indexing, or the DID may be wrong.
+          The index has no active account at this address. It may not have published any music records yet, it may have
+          opted out of indexing, or the DID may be wrong.
         </p>
       )}
       <p>
@@ -165,10 +162,7 @@ function ProfileView({ profile, refreshing, refreshError, onRefresh }: ProfileVi
   return (
     <section aria-labelledby="page-title" class="profile">
       <header class="profile-header">
-        <h1 id="page-title">{profile.handle !== null ? `@${profile.handle}` : 'Handle not verified'}</h1>
-        <p class="profile-did">
-          <code>{profile.did}</code>
-        </p>
+        <h1 id="page-title">{profile.handle !== null ? `@${profile.handle}` : 'Unknown account'}</h1>
         <dl class="stats-totals profile-counts">
           <div>
             <dt>Scrobbles</dt>
@@ -184,10 +178,10 @@ function ProfileView({ profile, refreshing, refreshError, onRefresh }: ProfileVi
           </div>
         </dl>
         <p class="scrobble-meta">
-          Joined <time dateTime={profile.joinedAt}>{formatUtc(profile.joinedAt)}</time>
+          Joined <time dateTime={profile.joinedAt}>{formatLocalDate(profile.joinedAt)}</time>
           {profile.indexedAt !== null ? (
             <>
-              {' · '}last indexed <time dateTime={profile.indexedAt}>{formatUtc(profile.indexedAt)}</time>
+              {' · '}last indexed <time dateTime={profile.indexedAt}>{formatLocalTime(profile.indexedAt)}</time>
             </>
           ) : null}
         </p>

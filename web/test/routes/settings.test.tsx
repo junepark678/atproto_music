@@ -16,7 +16,7 @@ describe('web/test/routes/settings.test.tsx', () => {
     const app = mount('/settings');
     app.state.session.value = SESSION;
     await vi.waitFor(() => expect(app.root.querySelector('a.export-link')).not.toBeNull());
-    expect(app.root.textContent).toContain(SESSION.did);
+    expect(app.root.textContent).toContain('Signed in as');
     expect(app.root.querySelector('a.export-link')?.getAttribute('href')).toContain(
       `/api/v1/users/${SESSION.did}/export`,
     );
@@ -111,7 +111,7 @@ describe('web/test/routes/settings.test.tsx', () => {
       </AppStateContext.Provider>,
       root,
     );
-    await vi.waitFor(() => expect(root.textContent).toContain(SESSION.did));
+    await vi.waitFor(() => expect(root.textContent).toContain('Signed in as'));
     [...root.querySelectorAll('button')].find((button) => button.textContent === 'Sign out')!.click();
     await vi.waitFor(() => expect(root.textContent).toContain('You have signed out'));
     expect(signOut).toHaveBeenCalledOnce();
@@ -148,12 +148,13 @@ describe('web/test/routes/settings.test.tsx', () => {
       </AppStateContext.Provider>,
       root,
     );
-    await vi.waitFor(() => expect(root.textContent).toContain(SESSION.did));
+    await vi.waitFor(() => expect(root.textContent).toContain('Signed in as'));
     [...root.querySelectorAll('button')].find((button) => button.textContent === 'Sign out')!.click();
     await vi.waitFor(() => expect(signOut).toHaveBeenCalledOnce());
     setSession(state, other);
     finishSignOut();
-    await vi.waitFor(() => expect(root.textContent).toContain(other.did));
+    await vi.waitFor(() => expect(root.textContent).toContain('Signed in as'));
+    expect(root.textContent).not.toContain('did:');
     expect(root.textContent).not.toContain('You have signed out');
     render(null, root);
     root.remove();

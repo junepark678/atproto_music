@@ -268,6 +268,18 @@ function isMusicText(value: string): boolean {
 const timestamp = refine(str, isTimestamp, 'must be a UTC RFC 3339 timestamp at or after 1970');
 const did = refine(str, isDid, 'must be a DID');
 const atUri = refine(str, isRecordUri, 'must be a record AT URI');
+const TID_RE = /^[234567abcdefghij][234567abcdefghijklmnopqrstuvwxyz]{12}$/;
+/** A scrobble's identity: a record URI, or a scrobbleBatch record URI with its `#<listen TID>` fragment. */
+export function isListenUri(value: string): boolean {
+  const hash = value.indexOf('#');
+  if (hash === -1) return isRecordUri(value);
+  const base = value.slice(0, hash);
+  return (
+    isRecordUri(base) && base.split('/')[3]?.endsWith('.scrobbleBatch') === true && TID_RE.test(value.slice(hash + 1))
+  );
+}
+const listenUri = refine(str, isListenUri, 'must be a record AT URI or a batch listen URI');
+const listenId = refine(str, (v) => TID_RE.test(v), 'must be a TID');
 const cid = refine(str, (v) => CID_RE.test(v), 'must be a CIDv1 dag-cbor sha2-256 string');
 const handle = refine(str, isHandle, 'must be a handle');
 const uuid = refine(str, (v) => UUID_RE.test(v), 'must be a UUID');
@@ -283,7 +295,7 @@ const indexing: Decoder<Indexing> = object({
 
 const scrobble: Decoder<Scrobble> = object(
   {
-    uri: atUri,
+    uri: listenUri,
     cid,
     did,
     revision: str,
@@ -293,7 +305,14 @@ const scrobble: Decoder<Scrobble> = object(
     createdAt: timestamp,
     indexedAt: timestamp,
   },
-  { album: musicText, durationSeconds: int(1, 86_400), recordingMbid: uuid },
+  {
+    album: musicText,
+    durationSeconds: int(1, 86_400),
+    recordingMbid: uuid,
+    handle: nullable(handle),
+    recordUri: atUri,
+    listenId,
+  },
 );
 
 const follow: Decoder<Follow> = object({ uri: atUri, cid, actor: did, subject: did, createdAt: timestamp });

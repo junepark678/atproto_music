@@ -588,7 +588,10 @@ it('federation_process_recovery: second-PDS create/update/delete survive SIGKILL
     };
     for (const page of [feed, history]) {
       expect(page.body.items).toHaveLength(1);
-      expect(page.body.items[0]).toEqual(expectedDto);
+      // /api/v1 scrobbles carry the actor's verified handle (null until verified).
+      const { handle, ...dto } = page.body.items[0] as Record<string, unknown>;
+      expect(handle === null || handle === 'bob.test').toBe(true);
+      expect(dto).toEqual(expectedDto);
       expect(page.body.nextCursor).toBeNull();
     }
     expect(stats.body.totalScrobbles).toBe(1);

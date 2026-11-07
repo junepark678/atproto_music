@@ -5798,6 +5798,17 @@
           "indexedAt": {
             "$ref": "#/components/schemas/Timestamp"
           },
+          "handle": {
+            "description": "The actor's handle, verified in both directions exactly as Profile.handle; null when unverified. Present on /api/v1 scrobble reads (history, feed, lookup); never on Last.fm or ListenBrainz payloads.",
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Handle"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "albumArtist": {
             "$ref": "#/components/schemas/MusicText"
           },

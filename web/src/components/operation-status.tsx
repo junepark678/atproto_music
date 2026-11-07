@@ -8,6 +8,7 @@
 // never says the record is gone.
 
 import type { LocalState, OperationKind, OperationState, OutboxOperation } from '../outbox/overlay';
+import { scrubDids } from './format';
 
 export interface StatusInput {
   kind: OperationKind;
@@ -63,6 +64,11 @@ export function withDueAt<T extends LocalState>(
 }
 
 export function describeOperation(op: StatusInput): { text: string; tone: Tone } {
+  const described = describeOperationText(op);
+  return { ...described, text: scrubDids(described.text) };
+}
+
+function describeOperationText(op: StatusInput): { text: string; tone: Tone } {
   const noun = NOUN[op.kind];
   switch (op.state) {
     case 'queued': {

@@ -18,6 +18,7 @@
 // file (node-harness.ts openTestDb, over node-db's withMigratedDb), closed
 // and removed after the test file.
 
+import type { IdentityResolver } from '@atmusic/atproto/identity/types';
 import {
   createFixtureKit,
   FIXTURE_USERS,
@@ -39,6 +40,7 @@ import type { Db } from '../../src/do/db';
 import { feed } from '../../src/do/read/feed';
 import { history } from '../../src/do/read/history';
 import { lookup } from '../../src/do/read/lookup';
+import { verifiedHandles } from '../../src/do/read/profile';
 import { type ApplyResult, applyRecordProof } from '../../src/do/write/apply-record';
 import { routes as feedRoutes } from '../../src/http/feed';
 import { routes as scrobbleRoutes } from '../../src/http/scrobbles-read';
@@ -113,7 +115,7 @@ function userByDid(kit: FixtureKit, did: string): FixtureUser {
  * A fresh database seeded with read_models.json through verify → apply.
  * `name` labelled the harness DO; every call now gets its own database file.
  */
-export async function readFixture(_name: string): Promise<ReadFixture> {
+export async function readFixture(_name: string, options: { identity?: IdentityResolver } = {}): Promise<ReadFixture> {
   const kit = await createFixtureKit();
   const seed = await seedReadModels(kit);
   const db = await openTestDb();
@@ -153,7 +155,10 @@ export async function readFixture(_name: string): Promise<ReadFixture> {
   };
   await drain();
 
-  const index = makeDbIndex({ db, clock: fixedClock() }, { history, feed, lookup });
+  const index = makeDbIndex(
+    { db, clock: fixedClock(), ...(options.identity === undefined ? {} : { identity: options.identity }) },
+    { history, feed, lookup, verifiedHandles },
+  );
   return { kit, seed, db, index, outcomes, drain, inDb };
 }
 
@@ -257,4 +262,9 @@ export async function traverse(ctx: RequestCtx, first: string): Promise<string[]
     if (next === null) return pages;
   }
   throw new Error('traversal did not terminate');
+}
+
+/** The page/lookup RPCs a read made, without the batched handle lookup that decorates every page. */
+export function readCalls(index: LocalIndex): LocalIndex['calls'] {
+  return index.calls.filter((call) => call.method !== 'verifiedHandles');
 }

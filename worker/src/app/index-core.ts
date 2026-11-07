@@ -110,7 +110,7 @@ import { feed } from '../do/read/feed';
 import { followers, following } from '../do/read/follows';
 import { history } from '../do/read/history';
 import { lookup } from '../do/read/lookup';
-import { profile, resolveHandle } from '../do/read/profile';
+import { profile, resolveHandle, verifiedHandles } from '../do/read/profile';
 import { stats } from '../do/read/stats';
 import { indexing, internalStatus } from '../do/status';
 import {
@@ -640,6 +640,10 @@ export class IndexCore implements IndexRpc, AdminRpc {
 
   async profile(did: Did): Promise<Profile | null> {
     return this.#rpc('profile', () => profile(this.live(), did));
+  }
+
+  async verifiedHandles(dids: readonly Did[]): Promise<Record<string, string | null>> {
+    return this.#rpc('verifiedHandles', () => verifiedHandles(this.live(), dids));
   }
 
   async following(q: FollowListQuery): Promise<RowsResult<FollowRow>> {

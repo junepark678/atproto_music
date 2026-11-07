@@ -179,7 +179,8 @@ async function publishScrobble(
   await page.getByLabel('Artist').fill(fields.artist);
   await page.getByLabel('Track').fill(fields.track);
   await page.getByLabel('Album (optional)').fill(fields.album);
-  await page.getByLabel('Listened at (UTC)').fill(fields.listenedAt);
+  // datetime-local takes the browser-local (pinned UTC) wall time without a zone suffix.
+  await page.getByLabel('Listened at').fill(fields.listenedAt.replace(/Z$/, ''));
   await page.getByRole('button', { name: 'Publish scrobble' }).click();
   return page.locator('li[data-op-id]').filter({ hasText: fields.track });
 }
@@ -262,7 +263,8 @@ test('sign-in through the fake AS, scrobble, indexed, delete and follow journeys
     await expect(nav(page).getByRole('link', { name: 'My profile' })).toHaveAttribute('href', `/u/${alice.did}`);
     await expect(nav(page).getByRole('link', { name: 'Add scrobble' })).toBeVisible();
     await expect(nav(page).getByRole('link', { name: 'Sign in' })).toHaveCount(0);
-    await expect(page.locator('.session-identity .did')).toHaveText(alice.did);
+    await expect(page.locator('.session-identity')).toBeVisible();
+    await expect(page.locator('.session-identity')).not.toContainText('did:');
     // The callback's notify {did} admitted alice: a snapshot of her empty
     // repository makes her an indexed account with no scrobbles.
     await expect

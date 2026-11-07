@@ -16,7 +16,8 @@ test('a Node process restart mid-journey keeps the browser session cookie and in
   await page.getByRole('button', { name: 'Sign in' }).click();
   await authorizeOnFixtureAs(page, alice);
   await expect(page).toHaveURL(/\/feed$/);
-  await expect(page.locator('.session-identity .did')).toHaveText(alice.did);
+  await expect(page.locator('.session-identity')).toBeVisible();
+  await expect(page.locator('.session-identity')).not.toContainText('did:');
 
   const sessionCookie = async () => {
     const cookie = (await context.cookies()).find((item) => item.name === '__Host-atmusic_session');
@@ -32,9 +33,7 @@ test('a Node process restart mid-journey keeps the browser session cookie and in
     await form.getByLabel('Artist').fill('Restart Fixture Artist');
     await form.getByLabel('Track').fill(track);
     await form.getByLabel('Album (optional)').fill('Persistent Session');
-    await form
-      .getByLabel('Listened at (UTC)')
-      .fill(`${new Date(network.fixtureNowMs - 60_000).toISOString().slice(0, 19)}Z`);
+    await form.getByLabel('Listened at').fill(new Date(network.fixtureNowMs - 60_000).toISOString().slice(0, 19));
     await page.getByRole('button', { name: 'Publish scrobble' }).click();
     const item = page.locator('li[data-op-id]').filter({ hasText: track });
     await expect(item.locator('.op-status')).toHaveAttribute('data-op-state', waitForIndex ? 'indexed' : 'queued', {
@@ -52,7 +51,8 @@ test('a Node process restart mid-journey keeps the browser session cookie and in
   expect(restarted.generation).toBe(1);
 
   await page.goto('/feed');
-  await expect(page.locator('.session-identity .did')).toHaveText(alice.did);
+  await expect(page.locator('.session-identity')).toBeVisible();
+  await expect(page.locator('.session-identity')).not.toContainText('did:');
   const afterCookie = await sessionCookie();
   expect(afterCookie?.value).toBe(beforeCookie?.value);
   expect(afterCookie?.expires).toBe(beforeCookie?.expires);

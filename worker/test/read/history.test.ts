@@ -16,6 +16,7 @@ import {
   harnessCursorKey,
   NOW_DTO,
   pageRkeys,
+  readCalls,
   readFixture,
   rkeyOf,
   SCROBBLE,
@@ -57,6 +58,7 @@ describe('history', () => {
       'listenedAt',
       'createdAt',
       'indexedAt',
+      'handle',
     ]);
     expect(r07).toEqual({
       uri: uriOf(ALICE, 'r07'),
@@ -69,13 +71,14 @@ describe('history', () => {
       listenedAt: '2026-01-15T11:00:00.000000000Z',
       createdAt: '2026-01-15T11:00:00.000000000Z',
       indexedAt: NOW_DTO,
+      handle: null,
     });
     // r05 has no album: the field is omitted, never null.
     const r05 = r.body.items.find((i: { uri: string }) => rkeyOf(i.uri) === 'r05');
     expect('album' in r05).toBe(false);
 
     // One RPC, a first page: no keyset bounds.
-    expect(f.index.calls).toEqual([{ method: 'history', args: [{ did: ALICE, limit: 20 }] }]);
+    expect(readCalls(f.index)).toEqual([{ method: 'history', args: [{ did: ALICE, limit: 20 }] }]);
 
     // Storage: seven visible Alice rows, r08 only as an absent record_state.
     const db = await f.inDb((d) => ({
@@ -89,7 +92,7 @@ describe('history', () => {
     for (const bad of ['alice.test', 'did:plc', 'not%20a%20did']) {
       expectError(await get(ctx, historyPath(bad)), 422, 'validation_failed', { did: 'Expected a DID.' });
     }
-    expect(f.index.calls).toHaveLength(1);
+    expect(readCalls(f.index)).toHaveLength(1);
 
     // Bob's history is his own record only.
     expect(pageRkeys(await get(ctx, historyPath(BOB)))).toEqual(['r09']);
@@ -106,7 +109,7 @@ describe('history', () => {
 
     // The traversal kept the first page's anchor (r07) and advanced `last` each page.
     const r07 = { t: '2026-01-15T11:00:00.000000000Z', uri: uriOf(ALICE, 'r07') };
-    expect(f.index.calls.map((c) => c.args[0])).toEqual([
+    expect(readCalls(f.index).map((c) => c.args[0])).toEqual([
       { did: ALICE, limit: 2 },
       { did: ALICE, upper: r07, last: { t: '2026-01-15T11:00:00.000000000Z', uri: uriOf(ALICE, 'r01') }, limit: 2 },
       { did: ALICE, upper: r07, last: { t: '2026-01-08T12:00:00.000000000Z', uri: uriOf(ALICE, 'r03') }, limit: 2 },
@@ -130,13 +133,13 @@ describe('history', () => {
     expect(rest.body.nextCursor).toBeNull();
 
     // Limits are never clamped: 422 fields.limit and no RPC.
-    const before = f.index.calls.length;
+    const before = readCalls(f.index).length;
     for (const limit of ['0', '101', '1.5', '-1', 'abc']) {
       expectError(await get(ctx, historyPath(ALICE, `?limit=${limit}`)), 422, 'validation_failed', {
         limit: 'Expected an integer between 1 and 100.',
       });
     }
-    expect(f.index.calls).toHaveLength(before);
+    expect(readCalls(f.index)).toHaveLength(before);
   });
 
   it('r08 deleted never appears; lookup of r08 is 404', async () => {
@@ -162,11 +165,11 @@ describe('history', () => {
       expect((await traverse(ctx, `/api/v1/feed?limit=${limit}`)).flat()).not.toContain('r08');
     }
 
-    const before = f.index.calls.length;
+    const before = readCalls(f.index).length;
     const res = await get(ctx, lookupPath(r08));
     expectError(res, 404, 'not_found');
     expect(res.body.error.message).toBe('The resource is absent or inactive.');
-    expect(f.index.calls.slice(before)).toEqual([{ method: 'lookup', args: [r08] }]);
+    expect(readCalls(f.index).slice(before)).toEqual([{ method: 'lookup', args: [r08] }]);
   });
 
   it('lookup of encoded r01 AT URI returns the exact Scrobble; unknown URI → 404', async () => {
@@ -191,12 +194,13 @@ describe('history', () => {
         listenedAt: '2026-01-15T11:00:00.000000000Z',
         createdAt: '2026-01-15T11:00:00.000000000Z',
         indexedAt: NOW_DTO,
+        handle: null,
       },
     });
     // It is the same DTO the history page serves.
     const page = await get(ctx, historyPath(ALICE));
     expect(page.body.items.find((i: { uri: string }) => i.uri === r01)).toEqual(ok.body.scrobble);
-    expect(f.index.calls[0]).toEqual({ method: 'lookup', args: [r01] });
+    expect(readCalls(f.index)[0]).toEqual({ method: 'lookup', args: [r01] });
 
     // Unknown URIs (well-formed, never indexed) are 404.
     for (const unknown of [uriOf(ALICE, 'absent'), uriOf(BOB, 'r01'), `at://${ALICE}/${SCROBBLE}.other/r01`]) {
@@ -223,7 +227,7 @@ describe('history', () => {
     ).toEqual({ state: 'excluded' });
 
     // A value that is not a record AT URI, or does not percent-decode, is 422 fields.id; no RPC.
-    const calls = f.index.calls.length;
+    const calls = readCalls(f.index).length;
     for (const bad of [
       'r01',
       encodeURIComponent(`at://${ALICE}`),
@@ -234,7 +238,7 @@ describe('history', () => {
         id: 'Expected a URL-encoded AT URI.',
       });
     }
-    expect(f.index.calls).toHaveLength(calls);
+    expect(readCalls(f.index)).toHaveLength(calls);
 
     // An inactive owner hides the record: 404, and the history is empty.
     await f.inDb((d) => d.tx(() => markInactive(d, ALICE, 'deactivated')));

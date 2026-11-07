@@ -83,7 +83,7 @@ export function Shell() {
         {session ? (
           <p class="session-identity">
             <span class="visually-hidden">Signed in as </span>
-            {handle ? <span class="handle">@{handle}</span> : null} <code class="did">{session.did}</code>
+            {handle ? <span class="handle">@{handle}</span> : <span class="handle">your account</span>}
           </p>
         ) : null}
         {state.reauthRequired.value ? (

@@ -72,6 +72,7 @@ const KIND: Record<keyof IndexRpc, 'read' | 'write'> = {
   followers: 'read',
   exportUser: 'read',
   resolveHandle: 'read',
+  verifiedHandles: 'read',
   adminStatus: 'read',
   notify: 'write',
   ensureRunning: 'write',
@@ -217,6 +218,14 @@ it('every IndexRpc read method returns the same body through its HTTP or admin-s
     expected: (direct: unknown) => Seen;
   }
   const get = (target: string) => () => h.request(target);
+  // Scrobble DTOs carry each actor's verified handle (the same lookup the profile uses).
+  const handles = await h.core.verifiedHandles([
+    ALICE,
+    BOB,
+    DAVE,
+    ...(await h.core.feed({ scope: 'global', limit: 100 })).rows.map((row) => row.did),
+  ]);
+  const dto = (row: never) => scrobbleDto(row as ScrobbleRow, handles);
   const cases: Case[] = [
     {
       method: 'ready',
@@ -238,36 +247,35 @@ it('every IndexRpc read method returns the same body through its HTTP or admin-s
       args: [{ did: ALICE, limit: 3 }],
       route: get(`/api/v1/users/${ALICE}/scrobbles?limit=3`),
       seen: listView,
-      expected: rowsView(scrobbleDto as (row: never) => unknown, 3),
+      expected: rowsView(dto, 3),
     },
     {
       method: 'history',
       args: [{ did: BOB, limit: 50 }],
       route: get(`/api/v1/users/${BOB}/scrobbles?limit=50`),
       seen: listView,
-      expected: rowsView(scrobbleDto as (row: never) => unknown, 50),
+      expected: rowsView(dto, 50),
     },
     {
       method: 'feed',
       args: [{ scope: 'global', limit: 5 }],
       route: get('/api/v1/feed?scope=global&limit=5'),
       seen: listView,
-      expected: rowsView(scrobbleDto as (row: never) => unknown, 5),
+      expected: rowsView(dto, 5),
     },
     {
       method: 'feed',
       args: [{ scope: 'following', viewer: ALICE, limit: 5 }],
       route: get(`/api/v1/feed?scope=following&viewer=${enc(ALICE)}&limit=5`),
       seen: listView,
-      expected: rowsView(scrobbleDto as (row: never) => unknown, 5),
+      expected: rowsView(dto, 5),
     },
     {
       method: 'lookup',
       args: [r01],
       route: get(`/api/v1/scrobbles/${enc(r01)}`),
       seen: whole,
-      expected: (v) =>
-        nullIs404(v, (row) => ({ status: 200, body: json({ scrobble: scrobbleDto(row as ScrobbleRow) }) })),
+      expected: (v) => nullIs404(v, (row) => ({ status: 200, body: json({ scrobble: dto(row as never) }) })),
     },
     {
       method: 'lookup',
@@ -359,6 +367,16 @@ it('every IndexRpc read method returns the same body through its HTTP or admin-s
       },
     },
     {
+      method: 'verifiedHandles',
+      args: [[ALICE]],
+      route: get(`/api/v1/users/${ALICE}/scrobbles?limit=1`),
+      seen: (r) => ({
+        status: r.status,
+        body: { [ALICE]: (r.body as { items: { handle: unknown }[] }).items[0]?.handle },
+      }),
+      expected: (v) => ({ status: 200, body: json(v) }),
+    },
+    {
       method: 'adminStatus',
       args: [],
       route: () => viaSocket(SOCKET_STATUS_PATH),
@@ -396,7 +414,7 @@ it('every IndexRpc read method returns the same body through its HTTP or admin-s
   ).toBeGreaterThan(0);
   expect(byName('profile(["did:plc:dddd').route).toEqual({ status: 404, code: 'not_found' });
   expect((byName('following').route.body as { items: unknown[] }).items.length).toBeGreaterThan(0);
-  const bobPage = rowsView(scrobbleDto as (row: never) => unknown, 50)(await h.core.history({ did: BOB, limit: 50 }));
+  const bobPage = rowsView(dto, 50)(await h.core.history({ did: BOB, limit: 50 }));
   expect((bobPage.body.items as unknown[]).length).toBeGreaterThan(0);
   expect(listView(await h.request(`/api/v1/users/${ALICE}/scrobbles?limit=50`))).not.toEqual(bobPage);
 

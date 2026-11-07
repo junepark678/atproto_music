@@ -67,7 +67,7 @@ export const EXPECTED_RECORD_URI = 'Expected a URL-encoded AT URI.';
  * (field order kept, absent optionals omitted, private key columns dropped,
  * stored timestamps rendered verbatim, tests/goldens/timestamps.json).
  */
-export function scrobbleDto(row: ScrobbleRow): Scrobble {
+export function scrobbleDto(row: ScrobbleRow, handles?: Record<string, string | null>): Scrobble {
   return {
     uri: row.uri,
     ...scrobbleProvenance(row),
@@ -82,7 +82,13 @@ export function scrobbleDto(row: ScrobbleRow): Scrobble {
     ...(row.duration_seconds === null ? {} : { durationSeconds: row.duration_seconds }),
     ...(row.recording_mbid === null ? {} : { recordingMbid: row.recording_mbid }),
     indexedAt: row.indexed_at,
+    ...(handles === undefined ? {} : { handle: handles[row.did] ?? null }),
   };
+}
+
+/** The actors' verified handles for a set of rows: one batched lookup. */
+export function handlesFor(rows: readonly ScrobbleRow[], ctx: RequestCtx): Promise<Record<string, string | null>> {
+  return ctx.index.verifiedHandles(rows.map((row) => row.did));
 }
 
 // ---------------------------------------------------------------------------
@@ -168,8 +174,9 @@ export async function scrobblePage(
   result: RowsResult<ScrobbleRow>,
   ctx: RequestCtx,
 ): Promise<ScrobblePage> {
+  const handles = await handlesFor(result.rows, ctx);
   return {
-    items: result.rows.map(scrobbleDto),
+    items: result.rows.map((row) => scrobbleDto(row, handles)),
     nextCursor: await nextCursorFor(req, result.rows, result.hasMore, ctx),
     asOf: req.asOf,
     indexing: result.indexing,
@@ -230,7 +237,7 @@ export async function lookup(req: Request, ctx: RequestCtx, params: Record<strin
       throw invalidField('id', EXPECTED_RECORD_URI);
     const row = await ctx.index.lookup(uri);
     if (row === null) throw new ApiError('not_found', 'scrobble not found');
-    return json({ scrobble: scrobbleDto(row) }, 200);
+    return json({ scrobble: scrobbleDto(row, await handlesFor([row], ctx)) }, 200);
   } catch (error) {
     return toErrorResponse(error, ctx.requestId);
   }
