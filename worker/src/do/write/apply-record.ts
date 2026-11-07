@@ -288,10 +288,14 @@ function batchVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, o: 
   return {
     ok: true,
     write: () => {
-      const prior = db.all<{ uri: string; cid: string; artist_key: string; track_key: string; listened_at: string }>(
-        'SELECT uri,cid,artist_key,track_key,listened_at FROM scrobbles WHERE record_uri = ?',
-        t.uri,
-      );
+      const prior = db.all<{
+        uri: string;
+        cid: string;
+        artist_key: string;
+        track_key: string;
+        listened_at: string;
+        listen_id: string | null;
+      }>('SELECT uri,cid,artist_key,track_key,listened_at,listen_id FROM scrobbles WHERE record_uri = ?', t.uri);
       const priorByUri = new Map(prior.map((row) => [row.uri, row]));
       db.run('DELETE FROM scrobbles WHERE record_uri = ?', t.uri);
       let changed = prior.length !== batch.listens.length;
@@ -330,7 +334,15 @@ function batchVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, o: 
         )
           changed = true;
       }
-      noteBatchEntries(db, t.did, t.uri, t.rev, cid, members);
+      noteBatchEntries(
+        db,
+        t.did,
+        t.uri,
+        t.rev,
+        cid,
+        members,
+        prior.flatMap((row) => (row.listen_id !== null && isTid(row.listen_id) ? [row.listen_id] : [])),
+      );
       return changed;
     },
   };

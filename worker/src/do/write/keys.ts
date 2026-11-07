@@ -325,6 +325,19 @@ export function noteRecordPresent(
  * The raw valid-TID membership of a valid batch container version: listed
  * entries present or excluded (a valid TID whose fields failed validation),
  * every other entry seen before absent at `rev` (a partial removal).
+ *
+ * Verified nonmembership is never lost when an entry is tracked for the first
+ * time (a projection older than migration 10, or an entry first seen after
+ * its container was removed):
+ * - an entry newly listed here inherits, as `last_absent_revision`, the
+ *   container's own verified absence (`*`.last_absent_revision) and the
+ *   revision of the previous valid container version whose recorded
+ *   membership did not list it (`*` present below `rev`), whichever is newer;
+ * - `projected` names the entries the previous verified projection of this
+ *   container held (read before it was replaced); one this valid version does
+ *   not list is recorded absent at `rev` even when it had no row yet.
+ * An excluded or absent `*` version proves nothing about entries; only a
+ * valid version's exact membership does.
  */
 export function noteBatchEntries(
   db: Db,
@@ -333,11 +346,23 @@ export function noteBatchEntries(
   rev: string,
   cid: string,
   entries: readonly MembershipEntry[],
+  projected: readonly string[] = [],
 ): void {
+  const container = db.one<{ state: string; revision: string; last_absent_revision: string | null }>(
+    `SELECT state, revision, last_absent_revision FROM verified_membership WHERE record_uri = ? AND listen_id = '*'`,
+    uri,
+  );
+  let inherited: string | null = null;
+  if (container !== null) {
+    const bounds = [container.last_absent_revision, container.state === 'present' ? container.revision : null].filter(
+      (r): r is string => r !== null && r < rev,
+    );
+    inherited = bounds.length === 0 ? null : bounds.reduce((a, b) => (a > b ? a : b));
+  }
   for (const entry of entries) {
     db.run(
       `INSERT INTO verified_membership(record_uri, listen_id, did, state, revision, cid, reason, last_absent_revision)
-       VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(record_uri, listen_id) DO UPDATE SET state = excluded.state, revision = excluded.revision,
          cid = excluded.cid, reason = excluded.reason
        WHERE verified_membership.revision <= excluded.revision`,
@@ -348,6 +373,21 @@ export function noteBatchEntries(
       rev,
       cid,
       entry.reason,
+      inherited,
+    );
+  }
+  const listed = new Set(entries.map((entry) => entry.id));
+  for (const id of new Set(projected)) {
+    if (id === '*' || listed.has(id)) continue;
+    db.run(
+      `INSERT INTO verified_membership(record_uri, listen_id, did, state, revision, cid, reason, last_absent_revision)
+       VALUES (?, ?, ?, 'absent', ?, NULL, NULL, ?)
+       ON CONFLICT(record_uri, listen_id) DO NOTHING`,
+      uri,
+      id,
+      did,
+      rev,
+      rev,
     );
   }
   db.run(
