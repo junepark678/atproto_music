@@ -1,7 +1,11 @@
 // Owner rule: a DID is never shown to the user outside of URLs. These routes
 // render with fixture DIDs; no visible text or accessible-name attribute may
 // contain one (hrefs and other URL attributes are allowed).
+import { render } from 'preact';
 import { describe, expect, it, vi } from 'vitest';
+import { OperationStatus } from '../../src/components/operation-status';
+import SettingsImports from '../../src/routes/settings-imports';
+import { AppStateContext, createAppState, setSession } from '../../src/state/store';
 import { DID, example, mount, SESSION } from './support';
 
 const NAME_ATTRIBUTES = ['title', 'aria-label', 'aria-description', 'alt', 'placeholder', 'value'];
@@ -55,5 +59,55 @@ describe('web/test/routes/no-dids.test.tsx', () => {
     await vi.waitFor(() => expect(settings.root.querySelector('a.export-link')).not.toBeNull());
     assertNoDid(settings.root);
     settings.cleanup();
+  });
+
+  it('server-provided messages (import job errors, operation retry and failure reasons) never show a DID', async () => {
+    const leak = `could not resolve ${DID} via did:web:music.example.com`;
+    const op = document.createElement('div');
+    render(<OperationStatus op={{ kind: 'scrobble_create', state: 'queued', lastError: leak }} />, op);
+    expect(op.textContent).toContain('an account');
+    assertNoDid(op);
+    render(<OperationStatus op={{ kind: 'scrobble_create', state: 'failed', reason: leak, failureCode: 'x' }} />, op);
+    assertNoDid(op);
+    render(null, op);
+
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL) => {
+      const url = new URL(String(input), 'https://music.test');
+      if (url.pathname === '/api/v1/auth/session') return Response.json(SESSION);
+      if (url.pathname === '/api/v1/imports')
+        return Response.json({
+          items: [
+            {
+              id: 'job-1',
+              source: 'lastfm_api',
+              remoteUser: 'alice',
+              state: 'failed',
+              fetched: 0,
+              staged: 0,
+              duplicates: 0,
+              invalid: 0,
+              written: 0,
+              failed: 0,
+              etaSeconds: null,
+              error: leak,
+              createdAt: '2026-01-01T00:00:00Z',
+              updatedAt: '2026-01-01T00:00:00Z',
+            },
+          ],
+        });
+      return Response.json({ items: [] });
+    });
+    const state = createAppState();
+    setSession(state, SESSION);
+    const root = document.createElement('div');
+    render(
+      <AppStateContext.Provider value={state}>
+        <SettingsImports />
+      </AppStateContext.Provider>,
+      root,
+    );
+    await vi.waitFor(() => expect(root.textContent).toContain('could not resolve an account'));
+    assertNoDid(root);
+    render(null, root);
   });
 });

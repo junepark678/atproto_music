@@ -29,6 +29,8 @@ export default defineConfig({
   reporter: [['list']],
   use: {
     baseURL: origin,
+    // The scrobble form takes local datetime-local values; pin the zone so specs are deterministic.
+    timezoneId: 'UTC',
     // Fixture hosts and the Node app use self-signed HTTPS through the allowlisted proxy.
     proxy: { server: `http://127.0.0.1:${ports.proxy}`, bypass: '127.0.0.1' },
     ignoreHTTPSErrors: true,

@@ -8,7 +8,7 @@
 import type { Did, Statistics, StatsWindow } from '@atmusic/core/api-types';
 import { useEffect, useRef, useState } from 'preact/hooks';
 import type { ApiClient } from '../api/client';
-import { formatUtc, plural } from './format';
+import { formatLocalTime, plural } from './format';
 import { EmptyState, ErrorState, LoadingState } from './state-views';
 
 export const WINDOWS: readonly { id: StatsWindow; label: string }[] = [
@@ -92,8 +92,8 @@ function StatsBody({ stats }: { stats: Statistics }) {
   return (
     <div class="stats-body" data-window={stats.window}>
       <p class="stats-asof">
-        {windowLabel}, as of <time dateTime={stats.asOf}>{formatUtc(stats.asOf)}</time>.{' '}
-        {stats.window === 'all' ? '' : 'Windows count back from that instant in UTC.'}
+        {windowLabel}, as of <time dateTime={stats.asOf}>{formatLocalTime(stats.asOf, { zone: true })}</time>.{' '}
+        {stats.window === 'all' ? '' : 'The window counts back from that moment.'}
       </p>
       <dl class="stats-totals">
         <div>

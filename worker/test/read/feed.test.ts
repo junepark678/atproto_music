@@ -19,6 +19,7 @@ import {
   harnessCursorKey,
   NOW_DTO,
   pageRkeys,
+  readCalls,
   readFixture,
   SCROBBLE,
   traverse,
@@ -41,7 +42,7 @@ describe('feed', () => {
       // Cross-user: Bob's r09, Carol's external r10, then Alice's own records.
       expect(r.body.items.map((i: { did: string }) => i.did)).toEqual([BOB, CAROL, ...Array(7).fill(ALICE)]);
     }
-    expect(f.index.calls).toEqual([
+    expect(readCalls(f.index)).toEqual([
       { method: 'feed', args: [{ scope: 'global', limit: 20 }] },
       { method: 'feed', args: [{ scope: 'global', limit: 20 }] },
     ]);
@@ -49,7 +50,7 @@ describe('feed', () => {
     // A viewer neither filters nor binds the global feed.
     const withViewer = await get(ctx, `/api/v1/feed?scope=global&viewer=${encodeURIComponent(ALICE)}&limit=4`);
     expect(pageRkeys(withViewer)).toEqual(['r09', 'r10', 'r07', 'r01']);
-    expect(f.index.calls.at(-1)).toEqual({ method: 'feed', args: [{ scope: 'global', limit: 4 }] });
+    expect(readCalls(f.index).at(-1)).toEqual({ method: 'feed', args: [{ scope: 'global', limit: 4 }] });
     const token = await decodeCursor(await harnessCursorKey(), withViewer.body.nextCursor, cursorBindings.globalFeed());
     expect(token.binding).toEqual({ query: 'feed', did: null, scope: 'global', viewer: null });
 
@@ -233,7 +234,7 @@ describe('feed', () => {
     expect(r.body.nextCursor).toBeNull();
     expect(r.body.asOf).toBe(NOW_DTO);
     expect(r.body.indexing).toEqual(HARNESS_INDEXING);
-    expect(f.index.calls).toEqual([{ method: 'feed', args: [{ scope: 'following', viewer: ALICE, limit: 20 }] }]);
+    expect(readCalls(f.index)).toEqual([{ method: 'feed', args: [{ scope: 'following', viewer: ALICE, limit: 20 }] }]);
 
     // The edge is Alice→Bob only; Alice's own seven records and Carol's r10 are not followed.
     const edges = await f.inDb((d) => d.all<{ actor: string; subject: string }>('SELECT actor, subject FROM follows'));
@@ -323,12 +324,12 @@ describe('feed', () => {
       scope: 'Expected global or following.',
     });
     // No rejected request reached the index.
-    expect(f.index.calls).toEqual([]);
+    expect(readCalls(f.index)).toEqual([]);
 
     // With the viewer the same request succeeds.
     expect(pageRkeys(await get(ctx, `/api/v1/feed?scope=following&viewer=${encodeURIComponent(ALICE)}`))).toEqual([
       'r09',
     ]);
-    expect(f.index.calls).toHaveLength(1);
+    expect(readCalls(f.index)).toHaveLength(1);
   });
 });

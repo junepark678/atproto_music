@@ -179,7 +179,8 @@ async function publishScrobble(
   await page.getByLabel('Artist').fill(fields.artist);
   await page.getByLabel('Track').fill(fields.track);
   await page.getByLabel('Album (optional)').fill(fields.album);
-  await page.getByLabel('Listened at (UTC)').fill(fields.listenedAt);
+  // datetime-local takes the browser-local (pinned UTC) wall time without a zone suffix.
+  await page.getByLabel('Listened at').fill(fields.listenedAt.replace(/Z$/, ''));
   await page.getByRole('button', { name: 'Publish scrobble' }).click();
   return page.locator('li[data-op-id]').filter({ hasText: fields.track });
 }
