@@ -207,7 +207,12 @@ export const scrobbleCreateExecutor: Executor = {
       const found = await ctx.xrpc.getRecord(op.collection, op.rkey as string);
       if (found.kind === 'present')
         return (await sameDigest(op, found.value))
-          ? { kind: 'succeeded', uri: found.uri, cid: found.cid, hints: [{ collection: op.collection, rkey: op.rkey as string }] }
+          ? {
+              kind: 'succeeded',
+              uri: found.uri,
+              cid: found.cid,
+              hints: [{ collection: op.collection, rkey: op.rkey as string }],
+            }
           : { kind: 'permanent', code: 'remote_record_conflict' };
       if (found.kind === 'failed') return failureOutcome(found.failure);
       // Absence is now established. Return to the import lane so it can be
