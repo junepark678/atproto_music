@@ -694,7 +694,7 @@ describe('migrate', () => {
   // database at that version is ready for that code, across restarts.
   // Migration 3 is additive and keeps the v2 compatibility floor.
   it('SCHEMA_VERSION includes additive batch provenance and remains compatible with v2 code', async () => {
-    expect(SCHEMA_VERSION).toBe(6);
+    expect(SCHEMA_VERSION).toBe(7);
     expect(MIGRATIONS.map((m) => [m.version, m.name])).toEqual([
       [1, 'initial_workers_schema'],
       [2, 'node_schema'],
@@ -702,6 +702,7 @@ describe('migrate', () => {
       [4, 'scrobble_delete_target_index'],
       [5, 'batch_listen_provenance'],
       [6, 'batch_outbox_recovery'],
+      [7, 'batch_listen_removal_receipts'],
     ]);
 
     const name = 'migrate-v2-ready';
