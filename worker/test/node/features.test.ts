@@ -155,7 +155,10 @@ function consumerOf(r: SpyRequest, asHost: string, dohHost: string, plcHost: str
       if (
         r.host === PDS_HOST &&
         r.method === 'GET' &&
-        (r.path === '/xrpc/com.atproto.repo.getRecord' || r.path === '/xrpc/com.atproto.repo.listRecords')
+        (r.path === '/xrpc/com.atproto.repo.getRecord' ||
+          r.path === '/xrpc/com.atproto.repo.listRecords' ||
+          // The repository head every scrobble removal is fenced by (outbox/removal-fence.ts).
+          r.path === '/xrpc/com.atproto.sync.getLatestCommit')
       )
         return 'pds-writer';
       if (r.host === PDS_HOST && r.path.startsWith('/.well-known/')) return 'oauth-client';

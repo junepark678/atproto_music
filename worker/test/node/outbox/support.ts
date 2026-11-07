@@ -26,6 +26,7 @@ import type { OperationRow } from '../../../src/app/rows';
 import { parseConfig } from '../../../src/config';
 import type { Logger, LogLevel } from '../../../src/do/contracts';
 import { cachedIdentityResolver } from '../../../src/do/ingest/identity-cache';
+import type { Migration } from '../../../src/do/schema';
 import { bindPolicyFetch, createPolicyFetch } from '../../../src/node/policy-fetch';
 import type { SqliteDb } from '../../../src/node/sqlite-db';
 import { PDS_WRITER_CAPS, type PdsWriter, type PdsWriterSource } from '../../../src/outbox/pds-writer';
@@ -231,6 +232,8 @@ export interface Harness {
 export interface HarnessOptions {
   random?: Random;
   kit?: FixtureKit;
+  /** Start from the database these migrations build (an older schema); `restart()` upgrades it. */
+  migrations?: readonly Migration[];
 }
 
 /** Runs `fn` over a fresh harness; the database and its directory are removed afterwards. */
@@ -256,102 +259,105 @@ export async function withHarness(fn: (h: Harness) => Promise<void>, o: HarnessO
   );
   const fetch = bindPolicyFetch(createPolicyFetch({ transport: spy }), PDS_WRITER_CAPS);
   const writers = new TestWriters(kit, fetch);
-  await withMigratedDb(async (first, ctx) => {
-    const depsFor = (db: SqliteDb, selectedConfig = config): OutboxDeps => ({
-      db,
-      clock: kit.clock,
-      random,
-      transport: kit.transport,
-      identity: cachedIdentityResolver(db, { transport: kit.transport, clock: kit.clock }),
-      config: selectedConfig,
-      log,
-      writers,
-    });
-    const h: Harness = {
-      kit,
-      ctx,
-      m: depsFor(first),
-      db: first,
-      writers,
-      log,
-      seen,
-      alice: kit.users.Alice.did,
-      bob: kit.users.Bob.did,
-      run: () => runOutbox(h.m, kit.clock.nowMs()),
-      async runUntilIdle(maxRuns = 200) {
-        const reports: OutboxRunReport[] = [];
-        for (let i = 0; i < maxRuns; i++) {
-          const report = await h.run();
-          reports.push(report);
-          if (report.nextDueMs === null || report.nextDueMs > kit.clock.nowMs()) return reports;
-        }
-        throw new Error(`outbox still busy after ${maxRuns} runs`);
-      },
-      restart() {
-        const next = reopen(ctx.current);
-        h.db = next;
-        h.m = depsFor(next, h.m.config);
-      },
-      op(id) {
-        const row = h.db.one<OperationRow>('SELECT * FROM operations WHERE id = ?', id);
-        if (row === null) throw new Error(`no operation ${id}`);
-        return row;
-      },
-      ops(where = '1') {
-        return h.db.all<OperationRow>(`SELECT * FROM operations WHERE ${where} ORDER BY rowid`);
-      },
-      account(did, fields = {}) {
-        const username = `u${h.db.one<{ n: number }>('SELECT count(*) AS n FROM accounts')!.n + 1}`;
-        h.db.run(
-          `INSERT INTO accounts(did, username, oauth_status, import_share_pct, daily_listen_cap, created_at_ms, updated_at_ms)
+  await withMigratedDb(
+    async (first, ctx) => {
+      const depsFor = (db: SqliteDb, selectedConfig = config): OutboxDeps => ({
+        db,
+        clock: kit.clock,
+        random,
+        transport: kit.transport,
+        identity: cachedIdentityResolver(db, { transport: kit.transport, clock: kit.clock }),
+        config: selectedConfig,
+        log,
+        writers,
+      });
+      const h: Harness = {
+        kit,
+        ctx,
+        m: depsFor(first),
+        db: first,
+        writers,
+        log,
+        seen,
+        alice: kit.users.Alice.did,
+        bob: kit.users.Bob.did,
+        run: () => runOutbox(h.m, kit.clock.nowMs()),
+        async runUntilIdle(maxRuns = 200) {
+          const reports: OutboxRunReport[] = [];
+          for (let i = 0; i < maxRuns; i++) {
+            const report = await h.run();
+            reports.push(report);
+            if (report.nextDueMs === null || report.nextDueMs > kit.clock.nowMs()) return reports;
+          }
+          throw new Error(`outbox still busy after ${maxRuns} runs`);
+        },
+        restart() {
+          const next = reopen(ctx.current);
+          h.db = next;
+          h.m = depsFor(next, h.m.config);
+        },
+        op(id) {
+          const row = h.db.one<OperationRow>('SELECT * FROM operations WHERE id = ?', id);
+          if (row === null) throw new Error(`no operation ${id}`);
+          return row;
+        },
+        ops(where = '1') {
+          return h.db.all<OperationRow>(`SELECT * FROM operations WHERE ${where} ORDER BY rowid`);
+        },
+        account(did, fields = {}) {
+          const username = `u${h.db.one<{ n: number }>('SELECT count(*) AS n FROM accounts')!.n + 1}`;
+          h.db.run(
+            `INSERT INTO accounts(did, username, oauth_status, import_share_pct, daily_listen_cap, created_at_ms, updated_at_ms)
            VALUES (?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(did) DO UPDATE SET oauth_status = excluded.oauth_status,
              import_share_pct = excluded.import_share_pct, daily_listen_cap = excluded.daily_listen_cap,
              updated_at_ms = excluded.updated_at_ms`,
-          did,
-          username,
-          fields.oauth_status ?? 'active',
-          fields.import_share_pct ?? 50,
-          fields.daily_listen_cap ?? 3000,
-          T0,
-          T0,
-        );
-      },
-      link(did, service, fields = {}) {
-        const id = `link-${service}-${h.db.one<{ n: number }>('SELECT count(*) AS n FROM linked_accounts')!.n + 1}`;
-        h.db.run(
-          `INSERT INTO linked_accounts(id, did, service, remote_user, credential_ciphertext, key_id, forward_scrobbles,
+            did,
+            username,
+            fields.oauth_status ?? 'active',
+            fields.import_share_pct ?? 50,
+            fields.daily_listen_cap ?? 3000,
+            T0,
+            T0,
+          );
+        },
+        link(did, service, fields = {}) {
+          const id = `link-${service}-${h.db.one<{ n: number }>('SELECT count(*) AS n FROM linked_accounts')!.n + 1}`;
+          h.db.run(
+            `INSERT INTO linked_accounts(id, did, service, remote_user, credential_ciphertext, key_id, forward_scrobbles,
              forward_now_playing, status, created_at_ms, updated_at_ms)
            VALUES (?, ?, ?, ?, ?, 'e1', ?, ?, ?, ?, ?)`,
-          id,
-          did,
-          service,
-          `remote-${service}`,
-          new Uint8Array([1, 2, 3]).buffer,
-          fields.forward_scrobbles ?? 1,
-          fields.forward_now_playing ?? 1,
-          fields.status ?? 'active',
-          T0,
-          T0,
-        );
-        return id;
-      },
-      seedUser(did) {
-        const row = h.db.one<{ last_generation: number }>(
-          'UPDATE backfill_generation SET last_generation = last_generation + 1 WHERE singleton = 1 RETURNING last_generation',
-        )!;
-        h.db.run(
-          `INSERT INTO users(did, joined_at, active, account_status, indexing_state, generation)
+            id,
+            did,
+            service,
+            `remote-${service}`,
+            new Uint8Array([1, 2, 3]).buffer,
+            fields.forward_scrobbles ?? 1,
+            fields.forward_now_playing ?? 1,
+            fields.status ?? 'active',
+            T0,
+            T0,
+          );
+          return id;
+        },
+        seedUser(did) {
+          const row = h.db.one<{ last_generation: number }>(
+            'UPDATE backfill_generation SET last_generation = last_generation + 1 WHERE singleton = 1 RETURNING last_generation',
+          )!;
+          h.db.run(
+            `INSERT INTO users(did, joined_at, active, account_status, indexing_state, generation)
            VALUES (?, '2026-01-15T12:00:00.000000000Z', 1, 'active', 'current', ?)`,
-          did,
-          row.last_generation,
-        );
-      },
-    };
-    h.account(h.alice);
-    h.account(h.bob);
-    await fn(h);
-  });
+            did,
+            row.last_generation,
+          );
+        },
+      };
+      h.account(h.alice);
+      h.account(h.bob);
+      await fn(h);
+    },
+    o.migrations === undefined ? {} : { migrations: o.migrations },
+  );
 }
 
 /** A valid live listen input `i` minutes before T0. */
