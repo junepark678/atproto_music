@@ -6,7 +6,7 @@
     "main": {
       "type": "record",
       "key": "tid",
-      "description": "A container of 1–200 listens. Each entry has a stable TID id and every single-scrobble field, including its own createdAt. The envelope also has createdAt.",
+      "description": "A container of listens. Writers fill it by bytes: its createRecord or putRecord JSON body stays under the PDS write limit, so the 10,000-entry bound is a resource ceiling that no record of valid entries reaches. Each entry has a stable TID id and every single-scrobble field, including its own createdAt. The envelope also has createdAt.",
       "record": {
         "type": "object",
         "required": [
@@ -22,7 +22,7 @@
           "listens": {
             "type": "array",
             "minLength": 1,
-            "maxLength": 200,
+            "maxLength": 10000,
             "items": {
               "type": "object",
               "required": [

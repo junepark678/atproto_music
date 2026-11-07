@@ -111,13 +111,8 @@
 
 import { createHash } from 'node:crypto';
 import { encode } from '@atcute/cbor';
-import { measureScrobbleBatch } from '@atmusic/atproto/scrobble-batch-size';
-import {
-  BATCH_MAX_LISTENS,
-  MAX_CBOR_BYTES,
-  MAX_CREATE_BODY_BYTES,
-  type ScrobbleBatchRecord,
-} from '@atmusic/core/scrobble-batch';
+import { jsonBodyBytes } from '@atmusic/atproto/scrobble-batch-size';
+import { BATCH_MAX_LISTENS, MAX_CBOR_BYTES, MAX_WRITE_BODY_BYTES } from '@atmusic/core/scrobble-batch';
 import { isTid } from '@atmusic/core/syntax';
 import type { Db } from '../do/db';
 import { UNSETTLED_SQL } from './operations';
@@ -129,6 +124,15 @@ const CID_SYNTAX = /^b[a-z2-7]{8,256}$/;
 const BASE32 = 'abcdefghijklmnopqrstuvwxyz234567';
 
 /** The CIDv1 (dag-cbor, sha2-256) of a JSON record, or null when it has no dag-cbor encoding. */
+/** DAG-CBOR byte length of `record`, or null when it does not encode. */
+function recordBlockBytes(record: unknown): number | null {
+  try {
+    return encode(record).byteLength;
+  } catch {
+    return null;
+  }
+}
+
 function recordCid(record: unknown): string | null {
   let bytes: Uint8Array;
   try {
@@ -623,26 +627,26 @@ function exactKeys(value: Record<string, unknown>, keys: readonly string[]): boo
 }
 
 /**
- * Whether `record` is what a partial removal of `owner`'s targets may put: a
- * container of that collection, 1..BATCH_MAX_LISTENS retained entries none of
- * which is a target, encodable within the batch size limits. Unknown fields
- * and retained entries are not otherwise judged: they are the owner's bytes.
+ * Whether `body` is a putRecord a partial removal of `owner`'s targets may
+ * send: its record a container of that collection, 1..BATCH_MAX_LISTENS
+ * retained entries none of which is a target, its DAG-CBOR within
+ * MAX_CBOR_BYTES and the exact UTF-8 JSON of the whole body (swapCommit and
+ * swapRecord included, the bytes PdsXrpc.procedure sends) within
+ * MAX_WRITE_BODY_BYTES. Unknown fields and retained entries are not otherwise
+ * judged: they are the owner's bytes.
  */
-function validRetained(record: unknown, owner: PinOwner): boolean {
+function validRetained(body: Record<string, unknown>, owner: PinOwner): boolean {
+  const record = body.record;
   if (!isObject(record) || record.$type !== owner.collection || !Array.isArray(record.listens)) return false;
   const listens = record.listens as unknown[];
   if (listens.length < 1 || listens.length > BATCH_MAX_LISTENS) return false;
   if (listens.some((item) => isObject(item) && typeof item.id === 'string' && owner.targets.includes(item.id))) {
     return false;
   }
-  if (recordCid(record) === null) return false;
   try {
-    const sizes = measureScrobbleBatch(record as unknown as ScrobbleBatchRecord, {
-      repo: owner.did,
-      collection: owner.collection,
-      rkey: owner.rkey ?? '',
-    });
-    return sizes.cborBytes <= MAX_CBOR_BYTES && sizes.createBodyBytes <= MAX_CREATE_BODY_BYTES;
+    if (jsonBodyBytes(body) > MAX_WRITE_BODY_BYTES) return false;
+    const bytes = recordBlockBytes(record);
+    return bytes !== null && bytes <= MAX_CBOR_BYTES;
   } catch {
     return false;
   }
@@ -697,7 +701,7 @@ function parsePinned(json: string | null, owner: PinOwner): PinnedRequest | null
       !owner.collection.endsWith('.scrobbleBatch') ||
       owner.targets.includes('*') ||
       !exactKeys(body, PUT_KEYS) ||
-      !validRetained(body.record, owner)
+      !validRetained(body, owner)
     )
       return null;
   } else return null;

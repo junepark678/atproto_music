@@ -1,13 +1,7 @@
 // Durable createRecord execution for import scrobbleBatch containers.
-import { measureScrobbleBatch } from '@atmusic/atproto/scrobble-batch-size';
+import { measureScrobbleBatch, sendableScrobbleBatch } from '@atmusic/atproto/scrobble-batch-size';
 import { newTid } from '@atmusic/core/record-key';
-import {
-  BATCH_MAX_LISTENS,
-  MAX_CBOR_BYTES,
-  MAX_CREATE_BODY_BYTES,
-  type ScrobbleBatchRecord,
-  scrobbleBatchCollection,
-} from '@atmusic/core/scrobble-batch';
+import { BATCH_MAX_LISTENS, type ScrobbleBatchRecord, scrobbleBatchCollection } from '@atmusic/core/scrobble-batch';
 import type { OperationRow } from '../app/rows';
 import { newOperationId, prepare, recordOf } from './operations';
 import { failureOutcome } from './pds-writer';
@@ -34,8 +28,10 @@ function valid(op: OperationRow, ctx: ExecContext, forSend = true): boolean {
   const record = recordOf(op);
   if (!isBatchRecord(record, collection)) return false;
   try {
-    const sizes = measureScrobbleBatch(record, { repo: op.did, collection, rkey: op.rkey as string });
-    return sizes.cborBytes <= MAX_CBOR_BYTES && sizes.createBodyBytes <= MAX_CREATE_BODY_BYTES;
+    // Containers are packed to MAX_CREATE_BODY_BYTES; any durable one (older
+    // 200-entry containers and split children included) is sendable while its
+    // exact body is within the hard write ceiling MAX_WRITE_BODY_BYTES.
+    return sendableScrobbleBatch(measureScrobbleBatch(record, { repo: op.did, collection, rkey: op.rkey as string }));
   } catch {
     return false;
   }
@@ -63,11 +59,9 @@ export const batchCreateExecutor: Executor = {
           : { kind: 'permanent', code: 'remote_record_conflict' };
     }
     const record = recordOf(op) as unknown as ScrobbleBatchRecord;
-    const result = await ctx.xrpc.procedure(
-      'com.atproto.repo.createRecord',
-      { repo: op.did, collection: op.collection, rkey: op.rkey, record },
-      'create',
-    );
+    const body = { repo: op.did, collection: op.collection, rkey: op.rkey, record };
+    // The exact bytes `valid` measured are the bytes sent.
+    const result = await ctx.xrpc.procedure('com.atproto.repo.createRecord', body, 'create', JSON.stringify(body));
     if (result.ok) {
       const body = result.body as { uri?: unknown; cid?: unknown } | null;
       const uri = `at://${op.did}/${op.collection}/${op.rkey}`;

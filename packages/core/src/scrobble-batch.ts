@@ -21,9 +21,63 @@ import {
 import { isDid, isNsid, isTid } from './syntax';
 import { nowNs, toRecordDatetime, validateTimestamp } from './timestamp';
 
-export const BATCH_MAX_LISTENS = 200;
-export const MAX_CBOR_BYTES = 64_000;
-export const MAX_CREATE_BODY_BYTES = 100_000;
+// Size limits (ADR 0006 "Capacity"; docs/verification/batch-capacity.md).
+//
+// The reference PDS (bluesky-social/atproto fe343a1b, @atproto/pds 0.5.40)
+// sets `jsonLimit: 1_000_000` on createRecord, putRecord and applyWrites; the
+// xrpc-server passes it to body-parser, which answers 413 only for a body of
+// MORE than that many bytes. It has no separate per-record byte cap; a commit's
+// relevant blocks are capped at 2,000,000 bytes (actor-store transactor).
+
+/** The reference PDS's JSON request body limit (decimal bytes, inclusive). */
+export const PDS_JSON_BODY_LIMIT_BYTES = 1_000_000;
+/** Safety margin (1 %) kept below that limit for every batch write request we send. */
+export const WRITE_SAFETY_MARGIN_BYTES = 10_000;
+/** No scrobbleBatch createRecord or putRecord body we send exceeds this (exact UTF-8 bytes). */
+export const MAX_WRITE_BODY_BYTES = PDS_JSON_BODY_LIMIT_BYTES - WRITE_SAFETY_MARGIN_BYTES;
+/** Longest CID string a removal may send as swapCommit/swapRecord (`/^b[a-z2-7]{8,256}$/`). */
+export const MAX_SWAP_CID_CHARS = 257;
+/**
+ * Bytes a partial-removal putRecord body adds to the create body of the same
+ * record: `,"swapCommit":"<cid>"` and `,"swapRecord":"<cid>"` (16 bytes plus
+ * the CID each). Removing at least one entry only shrinks the rest.
+ */
+export const PUT_SWAP_RESERVE_BYTES = 2 * (16 + MAX_SWAP_CID_CHARS);
+/**
+ * Packing target for a new container's exact createRecord JSON body, so a
+ * later partial-removal putRecord of it (swaps included) still fits
+ * MAX_WRITE_BODY_BYTES.
+ */
+export const MAX_CREATE_BODY_BYTES = MAX_WRITE_BODY_BYTES - PUT_SWAP_RESERVE_BYTES;
+/**
+ * DAG-CBOR record bound for writes. A container of validated entries encodes
+ * to less DAG-CBOR than its JSON (every field's CBOR key and value headers are
+ * shorter than its JSON quotes, colon and comma; property-checked in
+ * packages/atproto/test/scrobble-batch-size.test.ts), so for our containers
+ * this never binds before the body limit. It is checked exactly anyway, also
+ * for retained owner bytes a removal puts back, where that need not hold.
+ */
+export const MAX_CBOR_BYTES = MAX_WRITE_BODY_BYTES;
+/**
+ * Ingest bound on a verified container's DAG-CBOR: the PDS caps one commit's
+ * relevant blocks (record included) at 2,000,000 bytes, so no committed record
+ * is larger. Read caps (SafeFetch) bound what is fetched before this.
+ */
+export const MAX_INGEST_CBOR_BYTES = 2_000_000;
+/**
+ * Shortest JSON a valid entry can have: a 13-character TID id, a one-byte
+ * artist and track, and two 20-character RFC 3339 datetimes:
+ * `{"id":"…","artist":"a","track":"a","listenedAt":"…","createdAt":"…"}`.
+ */
+export const MIN_ENTRY_JSON_BYTES = 118;
+/**
+ * A resource ceiling on entries, not a packing bound. Any record written
+ * through the JSON write API is under 1,000,000 bytes, and its entries are
+ * MIN_ENTRY_JSON_BYTES plus a comma each at least, so a container whose
+ * entries are all valid holds at most 8,403 of them (ours, packed to
+ * MAX_CREATE_BODY_BYTES, at most 8,314): the byte limit always binds first.
+ */
+export const BATCH_MAX_LISTENS = 10_000;
 export const SCROBBLE_BATCH_COLLECTION_SUFFIX = '.scrobbleBatch';
 
 export interface ScrobbleBatchEntry extends Omit<ScrobbleRecord, '$type'> {
@@ -155,12 +209,40 @@ export function buildScrobbleBatchRecord(
   return { ok: true, record: { $type: collection, createdAt: toRecordDatetime(nowNs(clock)), listens } };
 }
 
+export interface BatchSizes {
+  cborBytes: number;
+  createBodyBytes: number;
+}
+
+/**
+ * An exact additive decomposition of `measure`: for every group `xs`,
+ * `measure(xs)` equals `frame(xs.length)` plus the sum of `entry(x)`. That
+ * holds for DAG-CBOR (an array is its header followed by its items) and for
+ * JSON (items joined by commas inside fixed text) when entries encode
+ * independently of their neighbours.
+ */
+export interface AdditiveBatchSizer<T> {
+  /** Sizes of everything but the entries' own bytes, for `count` entries (array header, commas). */
+  frame(count: number): BatchSizes;
+  /** One entry's own encoded bytes. */
+  entry(item: T): BatchSizes;
+}
+
 export interface BatchPackOptions<T> {
   maxCount?: number;
   maxCborBytes?: number;
   maxCreateBodyBytes?: number;
   /** Return exact encoded byte sizes for one candidate group. */
-  measure(entries: readonly T[]): { cborBytes: number; createBodyBytes: number };
+  measure(entries: readonly T[]): BatchSizes;
+  /**
+   * Exact additive sizes of the same encoding. When given, packing is linear:
+   * candidates are sized by their sum, and each group boundary is checked
+   * with `measure` (the group fits and equals the sum; the group plus the
+   * next entry does not fit). A disagreement throws. Without it every
+   * candidate group is measured whole (quadratic; small inputs only), and no
+   * monotonicity of `measure` is assumed.
+   */
+  sizer?: AdditiveBatchSizer<T>;
 }
 
 export interface PackedBatch<T> {
@@ -169,8 +251,13 @@ export interface PackedBatch<T> {
   createBodyBytes: number;
 }
 
-/** Greedy stable-order packer. An entry that cannot fit by itself is an error. */
-export function packScrobbleBatchEntries<T>(entries: readonly T[], options: BatchPackOptions<T>): PackedBatch<T>[] {
+interface PackLimits {
+  maxCount: number;
+  maxCborBytes: number;
+  maxCreateBodyBytes: number;
+}
+
+function packLimits<T>(options: BatchPackOptions<T>): PackLimits {
   const maxCount = options.maxCount ?? BATCH_MAX_LISTENS;
   const maxCborBytes = options.maxCborBytes ?? MAX_CBOR_BYTES;
   const maxCreateBodyBytes = options.maxCreateBodyBytes ?? MAX_CREATE_BODY_BYTES;
@@ -180,34 +267,144 @@ export function packScrobbleBatchEntries<T>(entries: readonly T[], options: Batc
     throw new RangeError('maxCborBytes may only lower the hard limit');
   if (!Number.isInteger(maxCreateBodyBytes) || maxCreateBodyBytes < 1 || maxCreateBodyBytes > MAX_CREATE_BODY_BYTES)
     throw new RangeError('maxCreateBodyBytes may only lower the hard limit');
-  const measure = (candidate: readonly T[]) => {
-    const sizes = options.measure(candidate);
-    if (
-      !Number.isSafeInteger(sizes.cborBytes) ||
-      sizes.cborBytes < 0 ||
-      !Number.isSafeInteger(sizes.createBodyBytes) ||
-      sizes.createBodyBytes < 0
-    ) {
-      throw new RangeError('measure must return non-negative safe integer byte counts');
-    }
-    return sizes;
-  };
+  return { maxCount, maxCborBytes, maxCreateBodyBytes };
+}
+
+function checkedSizes(sizes: BatchSizes, what: string): BatchSizes {
+  if (
+    !Number.isSafeInteger(sizes.cborBytes) ||
+    sizes.cborBytes < 0 ||
+    !Number.isSafeInteger(sizes.createBodyBytes) ||
+    sizes.createBodyBytes < 0
+  ) {
+    throw new RangeError(`${what} must return non-negative safe integer byte counts`);
+  }
+  return sizes;
+}
+
+function within(sizes: BatchSizes, count: number, limits: PackLimits): boolean {
+  return (
+    count <= limits.maxCount &&
+    sizes.cborBytes <= limits.maxCborBytes &&
+    sizes.createBodyBytes <= limits.maxCreateBodyBytes
+  );
+}
+
+/**
+ * Greedy stable-order packer: each group is the longest run of the remaining
+ * entries that fits, so every group but the last is full (its next entry did
+ * not fit). An entry that cannot fit by itself is an error.
+ */
+export function packScrobbleBatchEntries<T>(entries: readonly T[], options: BatchPackOptions<T>): PackedBatch<T>[] {
+  const limits = packLimits(options);
+  const measure = (candidate: readonly T[]) => checkedSizes(options.measure(candidate), 'measure');
+  if (options.sizer !== undefined) return packAdditive(entries, limits, measure, options.sizer);
   const packed: PackedBatch<T>[] = [];
   let current: T[] = [];
   for (const entry of entries) {
     const candidate = [...current, entry];
     const sizes = measure(candidate);
-    if (candidate.length > maxCount || sizes.cborBytes > maxCborBytes || sizes.createBodyBytes > maxCreateBodyBytes) {
+    if (!within(sizes, candidate.length, limits)) {
       if (current.length === 0) throw new RangeError('one listen exceeds the scrobbleBatch byte limits');
       const previous = measure(current);
       packed.push({ entries: current, ...previous });
       current = [entry];
-      const single = measure(current);
-      if (single.cborBytes > maxCborBytes || single.createBodyBytes > maxCreateBodyBytes) {
+      if (!within(measure(current), 1, limits))
         throw new RangeError('one listen exceeds the scrobbleBatch byte limits');
-      }
     } else current = candidate;
   }
   if (current.length > 0) packed.push({ entries: current, ...measure(current) });
+  return packed;
+}
+
+/** Incremental exact sizing of one growing group (AdditiveBatchSizer). */
+export class BatchPrefix<T> {
+  private readonly items: T[] = [];
+  private cbor = 0;
+  private body = 0;
+
+  constructor(
+    private readonly sizer: AdditiveBatchSizer<T>,
+    private readonly limits: PackLimits,
+  ) {}
+
+  get entries(): readonly T[] {
+    return this.items;
+  }
+
+  /** Sizes of the group as it stands. */
+  sizes(): BatchSizes {
+    const frame = checkedSizes(this.sizer.frame(this.items.length), 'frame');
+    return { cborBytes: frame.cborBytes + this.cbor, createBodyBytes: frame.createBodyBytes + this.body };
+  }
+
+  /** Appends `item` when the group with it still fits; otherwise leaves the group unchanged. */
+  tryAdd(item: T): boolean {
+    const own = checkedSizes(this.sizer.entry(item), 'entry');
+    const count = this.items.length + 1;
+    const frame = checkedSizes(this.sizer.frame(count), 'frame');
+    const next = {
+      cborBytes: frame.cborBytes + this.cbor + own.cborBytes,
+      createBodyBytes: frame.createBodyBytes + this.body + own.createBodyBytes,
+    };
+    if (!within(next, count, this.limits)) return false;
+    this.items.push(item);
+    this.cbor += own.cborBytes;
+    this.body += own.createBodyBytes;
+    return true;
+  }
+}
+
+/** A BatchPrefix under the default (or lowered) hard limits of `options`. */
+export function newBatchPrefix<T>(
+  sizer: AdditiveBatchSizer<T>,
+  options: Omit<BatchPackOptions<T>, 'measure' | 'sizer'> = {},
+): BatchPrefix<T> {
+  return new BatchPrefix(sizer, packLimits({ ...options, measure: () => ({ cborBytes: 0, createBodyBytes: 0 }) }));
+}
+
+/**
+ * Checks one group boundary with the whole-group `measure`: `group` fits and
+ * has exactly the additive `sizes`; with `next` appended it does not fit.
+ */
+export function verifyBatchBoundary<T>(
+  group: readonly T[],
+  sizes: BatchSizes,
+  next: T | undefined,
+  options: Pick<BatchPackOptions<T>, 'measure' | 'maxCount' | 'maxCborBytes' | 'maxCreateBodyBytes'>,
+): BatchSizes {
+  const limits = packLimits({ ...options });
+  const whole = checkedSizes(options.measure(group), 'measure');
+  if (whole.cborBytes !== sizes.cborBytes || whole.createBodyBytes !== sizes.createBodyBytes)
+    throw new Error('additive batch sizes disagree with the encoded group');
+  if (!within(whole, group.length, limits)) throw new Error('packed batch exceeds its limits');
+  if (next !== undefined && group.length + 1 <= limits.maxCount) {
+    const grown = checkedSizes(options.measure([...group, next]), 'measure');
+    if (within(grown, group.length + 1, limits)) throw new Error('packed batch stopped before a fitting entry');
+  }
+  return whole;
+}
+
+function packAdditive<T>(
+  entries: readonly T[],
+  limits: PackLimits,
+  measure: (candidate: readonly T[]) => BatchSizes,
+  sizer: AdditiveBatchSizer<T>,
+): PackedBatch<T>[] {
+  const packed: PackedBatch<T>[] = [];
+  const options = { ...limits, measure };
+  let prefix = new BatchPrefix(sizer, limits);
+  const flush = (next: T | undefined) => {
+    const group = [...prefix.entries];
+    packed.push({ entries: group, ...verifyBatchBoundary(group, prefix.sizes(), next, options) });
+  };
+  for (const entry of entries) {
+    if (prefix.tryAdd(entry)) continue;
+    if (prefix.entries.length === 0) throw new RangeError('one listen exceeds the scrobbleBatch byte limits');
+    flush(entry);
+    prefix = new BatchPrefix(sizer, limits);
+    if (!prefix.tryAdd(entry)) throw new RangeError('one listen exceeds the scrobbleBatch byte limits');
+  }
+  if (prefix.entries.length > 0) flush(undefined);
   return packed;
 }
