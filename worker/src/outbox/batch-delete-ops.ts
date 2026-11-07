@@ -4,6 +4,7 @@ import type { ModuleDeps } from '../do/contracts';
 import type { Db } from '../do/db';
 import { bumpStatsVersion } from '../do/write/account-state';
 import {
+  explicitlyUnsent,
   insertOperation,
   newOperationId,
   outboxCollections,
@@ -89,8 +90,7 @@ export async function prepareUnsentBatchListenRemoval(
     op.collection !== (m.config.prefix === null ? null : outboxCollections(m.config.prefix).scrobbleBatch) ||
     op.rkey === null ||
     op.state !== 'queued' ||
-    op.attempts !== 0 ||
-    op.send_started_at_ms !== null ||
+    !explicitlyUnsent(op) ||
     op.result_uri !== null ||
     op.idempotency_key !== null ||
     op.last_error !== null ||
@@ -167,8 +167,7 @@ export function commitUnsentBatchListenRemoval(m: ModuleDeps, plan: BatchListenR
       op.digest !== plan.snapshot.digest ||
       op.updated_at_ms !== plan.snapshot.updated_at_ms ||
       op.state !== 'queued' ||
-      op.attempts !== 0 ||
-      op.send_started_at_ms !== null ||
+      !explicitlyUnsent(op) ||
       op.rkey === null ||
       op.record_json === null ||
       op.result_uri !== null ||

@@ -73,6 +73,7 @@ import {
   beginAttempts,
   beginReconcile,
   blockOperations,
+  explicitlyUnsentSql,
   IMPORT_PRIORITY,
   insertOperation,
   legacyImportNeedsReconcile,
@@ -251,9 +252,14 @@ class Run {
     prefix: string,
   ) {
     this.collections = outboxCollections(prefix);
+    // An explicitly unsent import single without dependencies waits for the
+    // rebatcher. Anything else runs: a row whose send is uncertain finishes at
+    // its original rkey, and a dependency (a chained removal) is never left
+    // waiting on a create that neither lane would move.
     this.eligibility = ` AND NOT (
         (o.origin = 'import' AND o.kind = 'scrobble.create' AND o.collection = '${this.collections.scrobble}'
-         AND o.send_state = 'unsent'
+         AND ${explicitlyUnsentSql('o')}
+         AND NOT EXISTS (SELECT 1 FROM operation_deps dd WHERE dd.op_id = o.id OR dd.pred_id = o.id)
          AND EXISTS (SELECT 1 FROM import_items i WHERE i.operation_id = o.id AND i.state = 'queued'))
         ${m.config.batchPublication ? '' : `OR o.collection = '${this.collections.scrobbleBatch}'`})`;
   }
@@ -517,17 +523,11 @@ class Run {
       const reconciling = beginReconcile(this.db, op.id, this.m.clock.nowMs());
       if (reconciling === null) return;
       const outcome = await this.safely(() => executor.reconcile(reconciling, this.context(state, reconciling)));
-      // A legacy import single's proven absence (`deferred`, scrobble-ops
-      // legacyAbsent) hands it to the rebatcher; it is never sent again.
       const final: Outcome =
         outcome.kind === 'succeeded' ||
         outcome.kind === 'permanent' ||
         outcome.kind === 'reauth' ||
-        outcome.kind === 'waiting' ||
-        (outcome.kind === 'deferred' &&
-          reconciling.kind === 'scrobble.create' &&
-          reconciling.collection === this.collections.scrobble &&
-          legacyImportNeedsReconcile(this.db, reconciling))
+        outcome.kind === 'waiting'
           ? outcome
           : { kind: 'permanent', code: reconciling.last_error ?? 'attempts_exhausted' };
       this.settle(state, [[reconciling, final]], false);

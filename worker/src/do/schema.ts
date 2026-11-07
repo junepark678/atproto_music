@@ -751,9 +751,11 @@ const MIGRATION_8: Migration = {
 // each pre-CAS read): a settled removal keeps hiding stale projections at any
 // of them, while a verified recreation at a new CID becomes visible. It is
 // local suppression evidence only; record_state stays verified proof.
-// `operations.legacy_absent_at_ms` is the first authoritative absence read of
-// a legacy import single whose send history is unknown (migration 8); a
-// second absence read at least the recheck window later makes it unsent.
+// `operations.legacy_absent_at_ms` recorded the first absence read of a
+// legacy import single whose send history is unknown (migration 8). It is
+// no longer used: absence and elapsed time never prove a legacy
+// send unsent (an accepted request can commit after any client deadline), so
+// such rows finish at their original rkey instead of being rebatched.
 const MIGRATION_9: Migration = {
   version: 9,
   name: 'batch_removal_evidence',

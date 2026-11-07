@@ -18,6 +18,13 @@
 // - States: queued → running → succeeded | failed; `blocked` while the DID's
 //   OAuth session needs a new sign-in (attempts unchanged); `cancelled` for a
 //   create that was never sent and was withdrawn (library.removeScrobble).
+// - Send certainty (`send_state`): every row current code inserts carries the
+//   explicit `unsent` receipt; the first attempt makes it `unknown` before
+//   anything is sent, and nothing sets it back (no reauth, unblock, budget
+//   deferral or attempt refund; no absence read or elapsed time). Only an
+//   explicitly unsent row (`explicitlyUnsent`) may be cancelled locally or
+//   rebatched; any other create is reconciled and written at its original
+//   rkey, where createRecord is idempotent against a late commit.
 // - Predecessors (`operation_deps`): an operation runs only once every
 //   predecessor is settled (succeeded, failed or cancelled). A delete waits
 //   for the create of the same URI; follow, love and settings intents of one
@@ -172,7 +179,7 @@ export function insertOperation(db: Db, op: NewOperation, now: number): Operatio
     db.run(
       `INSERT INTO operations(id, did, kind, origin, priority, collection, rkey, record_json, digest, swap_cid,
          state, attempts, due_at, idempotency_key, request_hash, import_job_id, created_at_ms, updated_at_ms, follow_proof_json, send_state)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, 'unsent')`,
       op.id,
       op.did,
       op.kind,
@@ -191,7 +198,6 @@ export function insertOperation(db: Db, op: NewOperation, now: number): Operatio
       now,
       now,
       op.followProofJson ?? null,
-      op.origin === 'import' && op.kind === 'scrobble.create' ? 'unsent' : 'unknown',
     );
     for (const pred of new Set(op.predecessors ?? [])) {
       if (pred === op.id) continue;
@@ -338,45 +344,53 @@ export function unblockOperations(db: Db, did: string, now: number): number {
   ).rowsWritten;
 }
 
-/** An unsent operation: queued or blocked, never attempted. */
-export function isUnsent(op: Pick<OperationRow, 'state' | 'attempts'>): boolean {
-  return (op.state === 'queued' || op.state === 'blocked') && op.attempts === 0;
-}
-
 /**
- * How long after its first authoritative absence read a legacy import single
- * is read again before it may be rebatched (scrobble-ops `legacyAbsent`).
- * Longer than any PDS write request a pre-upgrade process could have left
- * in flight; equal to the import poll interval, so a job waits one poll.
+ * Explicit certainty that no request for this row was ever started: its
+ * insertion receipt (`unsent`), no attempt, no send timestamp, and no mark
+ * of the unreleased two-read absence rule. Attempt counts alone prove
+ * nothing: a migrated or refunded row can show 0 after a committed send.
  */
-export const LEGACY_ABSENCE_RECHECK_MS = 60_000;
-
-/**
- * An import single the rebatcher may move: proven unsent by its insertion
- * receipt (attempts 0), or by the legacy two-read absence transition (its
- * historical attempts are kept on the cancelled row). Any later attempt
- * would have reset `send_state` to `unknown` (beginAttempts).
- */
-export function rebatchableSendState(
-  op: Pick<OperationRow, 'send_state' | 'attempts' | 'legacy_absent_at_ms'>,
+export function explicitlyUnsent(
+  op: Pick<OperationRow, 'send_state' | 'attempts' | 'send_started_at_ms' | 'legacy_absent_at_ms'>,
 ): boolean {
-  return op.send_state === 'unsent' && (op.attempts === 0 || op.legacy_absent_at_ms !== null);
+  return (
+    op.send_state === 'unsent' && op.attempts === 0 && op.send_started_at_ms === null && op.legacy_absent_at_ms === null
+  );
 }
 
-/** Legacy import keys need a read before either publication or rebatching. */
+/** `explicitlyUnsent` as SQL over the operations alias `o`. */
+export function explicitlyUnsentSql(o = 'o'): string {
+  if (!/^[a-z_]+$/.test(o)) throw new RangeError('invalid alias');
+  return `(${o}.send_state = 'unsent' AND ${o}.attempts = 0 AND ${o}.send_started_at_ms IS NULL AND ${o}.legacy_absent_at_ms IS NULL)`;
+}
+
+/** An unsent operation: queued or blocked and explicitly never sent. */
+export function isUnsent(
+  op: Pick<OperationRow, 'state' | 'attempts' | 'send_state' | 'send_started_at_ms' | 'legacy_absent_at_ms'>,
+): boolean {
+  return (op.state === 'queued' || op.state === 'blocked') && explicitlyUnsent(op);
+}
+
+/**
+ * An import single whose send may have reached the PDS (a migrated row, or
+ * one attempted before): it is read at its original rkey before any write and
+ * is never rebatched or sent in an applyWrites batch; an absent key is then
+ * created at that same rkey (scrobble-ops), which a late commit cannot duplicate.
+ */
 export function legacyImportNeedsReconcile(db: Db, op: OperationRow): boolean {
   return (
     op.origin === 'import' &&
     op.import_job_id !== null &&
-    op.send_state === 'unknown' &&
+    !explicitlyUnsent(op) &&
     db.one("SELECT 1 FROM import_items WHERE operation_id = ? AND state = 'queued' LIMIT 1", op.id) !== null
   );
 }
 
 /**
- * Withdraws an operation that was never sent: `cancelled`, its listen keys
- * deleted (so a deliberate re-scrobble is accepted again) and its unsent
- * forward rows deleted. Returns false (changing nothing) when it was sent.
+ * Withdraws an operation that was explicitly never sent: `cancelled`, its
+ * listen keys deleted (so a deliberate re-scrobble is accepted again) and its
+ * unsent forward rows deleted. Returns false (changing nothing) when it was
+ * sent or its send state is unknown: the caller reconciles and chains a delete.
  */
 export function cancelUnsent(db: Db, id: string, now: number): boolean {
   return db.tx(() => {
@@ -407,12 +421,13 @@ export function cancelUnsent(db: Db, id: string, now: number): boolean {
   });
 }
 
-/** Account disconnect (ADR §5.7): every never-sent operation of `did` is cancelled. Returns the ids. */
+/** Account disconnect (ADR §5.7): every explicitly never-sent operation of `did` is cancelled. Returns the ids. */
 export function cancelUnsentForDid(db: Db, did: string, now: number): string[] {
   return db.tx(() => {
     const ids = db
       .all<{ id: string }>(
-        `SELECT id FROM operations WHERE did = ? AND state IN ('queued','blocked') AND attempts = 0 ORDER BY rowid`,
+        `SELECT id FROM operations o WHERE o.did = ? AND o.state IN ('queued','blocked') AND ${explicitlyUnsentSql('o')}
+         ORDER BY o.rowid`,
         did,
       )
       .map((r) => r.id);

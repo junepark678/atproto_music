@@ -34,7 +34,7 @@ import {
   enqueueBatchListenDelete,
   prepareUnsentBatchListenRemoval,
 } from '../../../src/outbox/batch-delete-ops';
-import { LEGACY_ABSENCE_RECHECK_MS, newOperationId, unblockOperations } from '../../../src/outbox/operations';
+import { newOperationId, unblockOperations } from '../../../src/outbox/operations';
 import { insertScrobbleCreate, prepareScrobble } from '../../../src/outbox/scrobble-ops';
 import { APPLY, CREATE, GET, type Harness, remoteRecords, SCROBBLE, T0, withHarness } from '../outbox/support';
 
@@ -130,12 +130,19 @@ async function parse(h: Harness, rt: ImportRuntime, id: string): Promise<void> {
   expect(job(h, id).state).toBe('writing');
 }
 
-async function stageLegacySingles(h: Harness, rt: ImportRuntime, id: string, rows: Row[]): Promise<OperationRow[]> {
+async function stageLegacySingles(
+  h: Harness,
+  rt: ImportRuntime,
+  id: string,
+  rows: Row[],
+  convert = rows.length,
+): Promise<OperationRow[]> {
   uploadJob(h, id, rows);
   await parse(h, rt, id);
   const items = h.db.all<{ seq: number; dedupe_key: string; record_json: string }>(
-    "SELECT seq, dedupe_key, record_json FROM import_items WHERE job_id = ? AND state = 'staged' ORDER BY seq",
+    "SELECT seq, dedupe_key, record_json FROM import_items WHERE job_id = ? AND state = 'staged' ORDER BY seq LIMIT ?",
     id,
+    convert,
   );
   const operations: OperationRow[] = [];
   for (const item of items) {
@@ -747,16 +754,19 @@ describe('import writer', () => {
     });
   });
 
-  it('preserves 833 written items while reconciling and rebatching an in-flight legacy job', async () => {
+  it('preserves 833 written items, finishes the uncertain legacy singles at their original rkeys and batches the staged rest', async () => {
     await withHarness(async (h) => {
       h.seedUser(h.alice);
       const rt = runtime(h);
       const id = 'job-legacy-live-shape';
+      // The live shape: 836 legacy singles queued before the upgrade (833
+      // written, 3 with unknown send history) and listens still staged.
       const ops = await stageLegacySingles(
         h,
         rt,
         id,
-        Array.from({ length: 836 }, (_, i) => listen(i)),
+        Array.from({ length: 846 }, (_, i) => listen(i)),
+        836,
       );
       h.db.tx(() => {
         for (const op of ops.slice(0, 833)) {
@@ -772,13 +782,14 @@ describe('import writer', () => {
       });
       const writtenBefore = h.db.all("SELECT * FROM operations WHERE state='succeeded' ORDER BY id");
       const uncertain = ops[833]!;
+      // One pre-upgrade send had already committed remotely.
       await h.kit.externalPut('Alice', uncertain.collection, uncertain.rkey!, JSON.parse(uncertain.record_json!));
+      expect(await rebatchUnsentImports(h.m, id, h.alice, h.kit.clock.nowMs())).toBe(0);
 
       for (let i = 0; i < 6 && job(h, id).state !== 'done'; i++) {
         await runImports(rt, h.kit.clock.nowMs());
         await h.runUntilIdle();
-        // Proven absence needs a second read one recheck window later.
-        h.kit.clock.advance(LEGACY_ABSENCE_RECHECK_MS);
+        h.kit.clock.advance(60_000);
       }
       await runImports(rt, h.kit.clock.nowMs());
 
@@ -789,117 +800,205 @@ describe('import writer', () => {
             "SELECT id,state,attempts,send_state,send_started_at_ms,last_error FROM operations WHERE state != 'succeeded'",
           ),
         ),
-      ).toMatchObject({ state: 'done', written: 836, failed_items: 0 });
+      ).toMatchObject({ state: 'done', written: 846, failed_items: 0 });
       expect(h.db.all("SELECT * FROM operations WHERE result_cid='legacy-written' ORDER BY id")).toEqual(writtenBefore);
-      expect(await remoteRecords(h.kit, 'Alice', SCROBBLE)).toHaveLength(1);
+      // The uncertain three finish as singles at their persisted keys: the
+      // committed one is only read, the absent two are created there.
+      for (const op of ops.slice(833)) expect(h.op(op.id)).toMatchObject({ state: 'succeeded', last_error: null });
+      expect((await remoteRecords(h.kit, 'Alice', SCROBBLE)).map((r) => r.rkey).sort()).toEqual(
+        ops
+          .slice(833)
+          .map((op) => op.rkey)
+          .sort(),
+      );
+      expect(
+        h.writers.sent
+          .filter((send) => send.nsid === CREATE && send.body?.collection === SCROBBLE)
+          .map((send) => send.body?.rkey),
+      ).toEqual(ops.slice(834).map((op) => op.rkey));
+      // The staged majority is batched automatically.
       const batches = await remoteRecords(h.kit, 'Alice', SCROBBLE_BATCH);
       expect(batches).toHaveLength(1);
-      const entries = (batches[0]!.value as { listens: Array<{ id: string }> }).listens;
-      expect(entries.map((entry) => entry.id)).toEqual(ops.slice(834).map((op) => op.rkey));
-      expect(itemStates(h, id)).toEqual({ written: 836 });
-      expect(h.writers.sent.filter((send) => send.nsid === CREATE && send.body?.collection === SCROBBLE)).toEqual([]);
+      expect((batches[0]!.value as { listens: unknown[] }).listens).toHaveLength(10);
+      expect(itemStates(h, id)).toEqual({ written: 846 });
+      expect((await h.run()).nextDueMs).toBeNull();
+    });
+  });
+
+  it('finishes an attempted legacy single at its original rkey and never rebatches it', async () => {
+    await withHarness(async (h) => {
+      h.seedUser(h.alice);
+      const rt = runtime(h);
+      const id = 'job-legacy-attempted';
+      const [legacy, sibling] = await stageLegacySingles(h, rt, id, [listen(93), listen(94)]);
+      h.db.run(
+        "UPDATE operations SET state='queued', attempts=3, send_started_at_ms=?, send_state='unknown' WHERE import_job_id=?",
+        T0 - HOUR,
+        id,
+      );
+      expect(await rebatchUnsentImports(h.m, id, h.alice, h.kit.clock.nowMs())).toBe(0);
+
+      for (let i = 0; i < 4 && job(h, id).state !== 'done'; i++) {
+        await runImports(rt, h.kit.clock.nowMs());
+        await h.runUntilIdle();
+      }
+
+      expect(job(h, id)).toMatchObject({ state: 'done', written: 2, failed_items: 0 });
+      for (const op of [legacy!, sibling!]) expect(h.op(op.id)).toMatchObject({ state: 'succeeded', attempts: 4 });
+      expect(h.ops(`collection = '${SCROBBLE_BATCH}'`)).toEqual([]);
+      // One read, then one create, per listen, at the persisted key.
+      expect(
+        h.writers.sent.filter((send) => send.nsid === CREATE).map((send) => [send.body?.collection, send.body?.rkey]),
+      ).toEqual([
+        [SCROBBLE, legacy!.rkey],
+        [SCROBBLE, sibling!.rkey],
+      ]);
+      expect((await remoteRecords(h.kit, 'Alice', SCROBBLE)).map((r) => r.rkey).sort()).toEqual(
+        [legacy!.rkey, sibling!.rkey].sort(),
+      );
+      expect(await remoteRecords(h.kit, 'Alice', SCROBBLE_BATCH)).toEqual([]);
+      expect((await h.run()).nextDueMs).toBeNull();
+    });
+  });
+
+  it('only reads an interrupted tenth legacy attempt: present settles, absent fails without an eleventh send or a batch', async () => {
+    await withHarness(async (h) => {
+      h.seedUser(h.alice);
+      const rt = runtime(h);
+      const id = 'job-legacy-tenth';
+      const [landed, absent] = await stageLegacySingles(h, rt, id, [listen(95), listen(96)]);
+      h.db.run(
+        "UPDATE operations SET state='running', attempts=10, send_started_at_ms=?, send_state='unknown' WHERE import_job_id=?",
+        T0 - HOUR,
+        id,
+      );
+      await h.kit.externalPut('Alice', landed!.collection, landed!.rkey!, JSON.parse(landed!.record_json!));
+      expect(await rebatchUnsentImports(h.m, id, h.alice, h.kit.clock.nowMs())).toBe(0);
+
+      await h.runUntilIdle();
+      await runImports(rt, h.kit.clock.nowMs());
+
+      expect(h.op(landed!.id)).toMatchObject({ state: 'succeeded', attempts: 10 });
+      expect(h.op(absent!.id)).toMatchObject({ state: 'failed', attempts: 10, last_error: 'attempts_exhausted' });
+      expect(h.writers.count(CREATE)).toBe(0);
+      expect(h.ops(`collection = '${SCROBBLE_BATCH}'`)).toEqual([]);
+      expect(job(h, id)).toMatchObject({ state: 'done', written: 1, failed_items: 1 });
+      expect((await h.run()).nextDueMs).toBeNull();
     });
   });
 
   it.each([
-    { name: 'three earlier attempts', state: 'queued', attempts: 3 },
-    { name: 'an interrupted tenth attempt', state: 'running', attempts: 10 },
-  ])(
-    'rebatches a proven-absent legacy single after $name without resending it or stalling',
-    async ({ state, attempts }) => {
+    { landing: 'before the reconciliation read' },
+    { landing: 'between the read and the create' },
+    { landing: 'after the original-key create' },
+  ] as const)(
+    'an accepted pre-upgrade request that outlives its client abort and any delay, landing $landing, leaves one record at the original rkey',
+    async ({ landing }) => {
       await withHarness(async (h) => {
         h.seedUser(h.alice);
         const rt = runtime(h);
-        const id = `job-legacy-attempted-${attempts}`;
-        const [legacy] = await stageLegacySingles(h, rt, id, [listen(93), listen(94)]);
-        const [, sibling] = h.ops(`import_job_id = '${id}'`);
-        h.db.run(
-          "UPDATE operations SET state=?, attempts=?, send_started_at_ms=?, send_state='unknown' WHERE import_job_id=?",
-          state,
-          attempts,
-          T0 - HOUR,
-          id,
+        const id = 'job-legacy-accepted';
+        const [legacy] = await stageLegacySingles(h, rt, id, [listen(97)]);
+        h.db.run("UPDATE operations SET attempts=1, send_state='unknown' WHERE id=?", legacy!.id);
+        const record = JSON.parse(legacy!.record_json!) as Record<string, unknown>;
+        // The PDS accepts the pre-upgrade createRecord but holds its commit.
+        let accepted!: () => void;
+        const began = new Promise<void>((resolve) => {
+          accepted = resolve;
+        });
+        let release!: () => void;
+        const gate = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        let committed!: () => void;
+        const done = new Promise<void>((resolve) => {
+          committed = resolve;
+        });
+        h.kit.pds.Alice.fail(
+          { nsid: CREATE },
+          {
+            kind: 'respond',
+            respond: async () => {
+              accepted();
+              await gate;
+              const commit = await h.kit.repos.Alice.put(legacy!.collection, legacy!.rkey!, record);
+              committed();
+              return Response.json({
+                uri: `at://${h.alice}/${legacy!.collection}/${legacy!.rkey}`,
+                cid: commit.ops[0]!.cid,
+              });
+            },
+          },
         );
-
-        const first = await h.run();
-        // One absence read only starts the recheck window: nothing sent,
-        // attempts unchanged, and a bounded wake-up rather than a stall.
-        expect(h.op(legacy!.id)).toMatchObject({
-          state: 'queued',
-          attempts,
-          send_state: 'unknown',
-          legacy_absent_at_ms: T0,
-          due_at: T0 + LEGACY_ABSENCE_RECHECK_MS,
-        });
-        expect([first.nextDueMs, (await h.run()).nextDueMs]).toContain(T0 + LEGACY_ABSENCE_RECHECK_MS);
-        expect(await rebatchUnsentImports(h.m, id, h.alice, h.kit.clock.nowMs())).toBe(0);
-
-        h.kit.clock.advance(LEGACY_ABSENCE_RECHECK_MS);
-        await h.runUntilIdle();
-        expect(h.op(legacy!.id)).toMatchObject({
-          state: 'queued',
-          attempts,
-          send_state: 'unsent',
-          send_started_at_ms: null,
-          last_error: null,
-        });
-        expect(h.op(sibling!.id)).toMatchObject({ send_state: 'unsent', attempts });
+        const writer = (await h.writers.writerFor(h.alice))!;
+        const abort = new AbortController();
+        const old = writer
+          .fetchHandler(`/xrpc/${CREATE}`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ repo: h.alice, collection: legacy!.collection, rkey: legacy!.rkey, record }),
+            signal: abort.signal,
+          })
+          .then(
+            () => 'answered',
+            () => 'aborted',
+          );
+        await began;
+        abort.abort(new DOMException('old process ended', 'AbortError'));
+        expect(await old).toBe('aborted');
+        const mark = h.writers.sent.length;
+        // Far beyond any client deadline or recheck window.
+        h.kit.clock.advance(10 * 60_000);
+        if (landing === 'before the reconciliation read') {
+          release();
+          await done;
+        }
+        if (landing === 'between the read and the create') {
+          const writerFor = h.writers.writerFor.bind(h.writers);
+          h.writers.writerFor = async (did: string) => {
+            const inner = (await writerFor(did))!;
+            return {
+              ...inner,
+              fetchHandler: async (path: string, init: RequestInit) => {
+                const response = await inner.fetchHandler(path, init);
+                if (path.includes(GET)) {
+                  release();
+                  await done;
+                }
+                return response;
+              },
+            };
+          };
+        }
 
         for (let i = 0; i < 4 && job(h, id).state !== 'done'; i++) {
+          expect(await rebatchUnsentImports(h.m, id, h.alice, h.kit.clock.nowMs())).toBe(0);
           await runImports(rt, h.kit.clock.nowMs());
           await h.runUntilIdle();
         }
-        expect(job(h, id)).toMatchObject({ state: 'done', written: 2, failed_items: 0 });
-        // Historical attempts stay on the cancelled single; no detached rows.
-        expect(h.op(legacy!.id)).toMatchObject({ state: 'cancelled', last_error: 'rebatched', attempts });
+        if (landing === 'after the original-key create') {
+          release();
+          await done;
+        }
+
+        const singles = await remoteRecords(h.kit, 'Alice', SCROBBLE);
+        expect(singles.map((r) => r.rkey)).toEqual([legacy!.rkey]);
+        expect(await remoteRecords(h.kit, 'Alice', SCROBBLE_BATCH)).toEqual([]);
+        expect(h.ops(`collection = '${SCROBBLE_BATCH}'`)).toEqual([]);
+        expect(h.op(legacy!.id)).toMatchObject({ state: 'succeeded', result_cid: singles[0]!.cid });
+        expect(job(h, id)).toMatchObject({ state: 'done', written: 1, failed_items: 0 });
+        // Every create the outbox sent named the original key.
         expect(
-          h.db.all(
-            `SELECT i.seq FROM import_items i JOIN operations o ON o.id = i.operation_id
-             WHERE i.job_id = ? AND o.state = 'cancelled'`,
-            id,
-          ),
-        ).toEqual([]);
-        expect(
-          h.db.all(
-            "SELECT k.dedupe_key FROM listen_keys k JOIN operations o ON o.id = k.operation_id WHERE o.state = 'cancelled'",
-          ),
-        ).toEqual([]);
-        expect(h.writers.sent.filter((send) => send.nsid === CREATE && send.body?.collection === SCROBBLE)).toEqual([]);
-        expect(await remoteRecords(h.kit, 'Alice', SCROBBLE)).toEqual([]);
-        const batches = await remoteRecords(h.kit, 'Alice', SCROBBLE_BATCH);
-        expect((batches[0]!.value as { listens: Array<{ id: string }> }).listens.map((entry) => entry.id)).toEqual([
-          legacy!.rkey,
-          sibling!.rkey,
-        ]);
-        expect((await h.run()).nextDueMs).toBeNull();
+          h.writers.sent
+            .slice(mark)
+            .filter((send) => send.nsid === CREATE)
+            .map((send) => send.body?.rkey),
+        ).toEqual(landing === 'before the reconciliation read' ? [] : [legacy!.rkey]);
       });
     },
   );
 
-  it('settles only the single when a legacy send lands between its two absence reads', async () => {
-    await withHarness(async (h) => {
-      h.seedUser(h.alice);
-      const rt = runtime(h);
-      const id = 'job-legacy-late-landing';
-      const [legacy] = await stageLegacySingles(h, rt, id, [listen(95)]);
-      h.db.run("UPDATE operations SET attempts=2, send_state='unknown' WHERE id=?", legacy!.id);
-
-      await h.run();
-      expect(h.op(legacy!.id)).toMatchObject({ send_state: 'unknown', legacy_absent_at_ms: T0 });
-      // The pre-upgrade request commits after the first read.
-      await h.kit.externalPut('Alice', legacy!.collection, legacy!.rkey!, JSON.parse(legacy!.record_json!));
-      h.kit.clock.advance(LEGACY_ABSENCE_RECHECK_MS);
-      await h.runUntilIdle();
-      await runImports(rt, h.kit.clock.nowMs());
-
-      expect(h.op(legacy!.id)).toMatchObject({ state: 'succeeded', send_state: 'unknown' });
-      expect(h.ops(`collection = '${SCROBBLE_BATCH}'`)).toHaveLength(0);
-      expect(await remoteRecords(h.kit, 'Alice', SCROBBLE)).toHaveLength(1);
-      expect(job(h, id)).toMatchObject({ written: 1, failed_items: 0 });
-    });
-  });
-
-  it('holds uncertain legacy creates when their reconciliation read is unavailable', async () => {
+  it('holds uncertain legacy creates when their reconciliation read is unavailable, then finishes them at their original rkey', async () => {
     await withHarness(async (h) => {
       h.seedUser(h.alice);
       const rt = runtime(h);
@@ -918,22 +1017,14 @@ describe('import writer', () => {
         due_at: T0 + 5_000,
       });
       expect(report.nextDueMs).toBe(T0 + 5_000);
-      expect(await remoteRecords(h.kit, 'Alice', SCROBBLE)).toHaveLength(0);
+      expect(h.writers.count(CREATE)).toBe(0);
+      expect(await rebatchUnsentImports(h.m, 'job-legacy-read-failed', h.alice, h.kit.clock.nowMs())).toBe(0);
       h.kit.clock.advance(5_000);
       await h.runUntilIdle();
-      // The first absence read only starts the recheck window.
-      expect(h.op(legacy!.id)).toMatchObject({
-        state: 'queued',
-        attempts: 0,
-        send_state: 'unknown',
-        legacy_absent_at_ms: T0 + 5_000,
-        due_at: T0 + 5_000 + LEGACY_ABSENCE_RECHECK_MS,
-      });
-      h.kit.clock.advance(LEGACY_ABSENCE_RECHECK_MS);
-      await h.runUntilIdle();
       await runImports(rt, h.kit.clock.nowMs());
-      await h.runUntilIdle();
-      await runImports(rt, h.kit.clock.nowMs());
+      expect(h.op(legacy!.id)).toMatchObject({ state: 'succeeded', attempts: 1, send_state: 'unknown' });
+      expect((await remoteRecords(h.kit, 'Alice', SCROBBLE)).map((r) => r.rkey)).toEqual([legacy!.rkey]);
+      expect(h.ops(`collection = '${SCROBBLE_BATCH}'`)).toEqual([]);
       expect(job(h, 'job-legacy-read-failed')).toMatchObject({ state: 'done', written: 1, failed_items: 0 });
     });
   });

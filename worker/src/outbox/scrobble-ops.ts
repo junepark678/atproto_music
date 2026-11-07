@@ -22,7 +22,6 @@ import type { ModuleDeps } from '../do/contracts';
 import {
   type Idempotency,
   insertOperation,
-  LEGACY_ABSENCE_RECHECK_MS,
   legacyImportNeedsReconcile,
   newOperationId,
   outboxCollections,
@@ -191,41 +190,6 @@ export async function createWithReconcile(
   return failureOutcome(failure);
 }
 
-/**
- * Authoritative absence of a legacy import single (migration 8 `unknown` send
- * history), inside its running attempt or tenth-attempt reconcile. A send made
- * by a pre-upgrade process could still be committing when the first read runs,
- * so one absence read is not enough: the first records `legacy_absent_at_ms`
- * and asks to look again LEGACY_ABSENCE_RECHECK_MS later; a request that lands
- * meanwhile is then found present and settles the single. A second absence
- * read at least that long after the first is the explicit certainty
- * transition to `send_state='unsent'`, which the rebatcher accepts whatever
- * the historical attempt count (rebatch.ts); the row itself is never sent
- * again (the runner keeps unsent import singles out of the write lane). The
- * returned `deferred` refunds this read-only attempt and leaves `due_at`.
- */
-function legacyAbsent(op: OperationRow, ctx: ExecContext): Outcome {
-  const now = ctx.m.clock.nowMs();
-  const first = op.legacy_absent_at_ms;
-  if (first === null || now < first + LEGACY_ABSENCE_RECHECK_MS) {
-    const since = first ?? now;
-    const due = since + LEGACY_ABSENCE_RECHECK_MS;
-    ctx.m.db.run(
-      "UPDATE operations SET legacy_absent_at_ms=?, due_at=? WHERE id=? AND state='running' AND send_state='unknown'",
-      since,
-      due,
-      op.id,
-    );
-    return { kind: 'deferred', untilMs: due };
-  }
-  ctx.m.db.run(
-    "UPDATE operations SET send_state='unsent', send_started_at_ms=NULL, last_error=NULL, due_at=? WHERE id=? AND state='running' AND send_state='unknown'",
-    now,
-    op.id,
-  );
-  return { kind: 'deferred', untilMs: now };
-}
-
 export const scrobbleCreateExecutor: Executor = {
   async execute(op, ctx) {
     const expected =
@@ -237,9 +201,14 @@ export const scrobbleCreateExecutor: Executor = {
     if (expected === null || !hasIdentity(op, ctx, expected) || op.digest === null) {
       return { kind: 'permanent', code: 'invalid_record_identity' };
     }
-    // Migration-8 legacy rows have no trustworthy send history. Reconcile the
-    // persisted key before any retry; a matching record settles without a
-    // second create, while a conflict is terminal and never overwritten.
+    // An import single whose earlier send may have reached the PDS (migrated
+    // unknown history, or an earlier attempt) is read at its persisted key
+    // first: a matching record settles without a create, a conflict is
+    // terminal and never overwritten. Absence proves nothing about a request
+    // still in flight, so it never cancels or rebatches the row; the listen is
+    // created at the same original rkey, where a late commit of the earlier
+    // request and this one cannot both land (createRecord never overwrites,
+    // and an ambiguous answer is reconciled by digest).
     if (op.collection === ctx.collections.scrobble && legacyImportNeedsReconcile(ctx.m.db, op)) {
       const found = await ctx.xrpc.getRecord(op.collection, op.rkey as string);
       if (found.kind === 'present')
@@ -255,7 +224,6 @@ export const scrobbleCreateExecutor: Executor = {
         return found.failure.kind === 'transient'
           ? { kind: 'waiting', untilMs: ctx.m.clock.nowMs() + 5_000 }
           : failureOutcome(found.failure);
-      return legacyAbsent(op, ctx);
     }
     return createWithReconcile(op, ctx, (remote) => sameDigest(op, remote));
   },
@@ -268,13 +236,9 @@ export const scrobbleCreateExecutor: Executor = {
       return found.failure.kind === 'transient'
         ? { kind: 'waiting', untilMs: ctx.m.clock.nowMs() + 5_000 }
         : failureOutcome(found.failure);
-    if (found.kind === 'absent') {
-      // A legacy import single never sends again (it is only read); proven
-      // absence moves it to the rebatcher instead of failing the listen.
-      if (op.collection === ctx.collections.scrobble && legacyImportNeedsReconcile(ctx.m.db, op))
-        return legacyAbsent(op, ctx);
-      return { kind: 'permanent', code: 'attempts_exhausted' };
-    }
+    // The interrupted tenth attempt is only read: absence ends the bounded
+    // retries at the original key (never an eleventh send, never a rebatch).
+    if (found.kind === 'absent') return { kind: 'permanent', code: 'attempts_exhausted' };
     return (await sameDigest(op, found.value))
       ? {
           kind: 'succeeded',

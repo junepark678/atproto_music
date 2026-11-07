@@ -16,10 +16,12 @@
 //   the URI whose create ended `remote_record_conflict` completes locally with
 //   no PDS request (`record_not_ours`), since our listen never existed there.
 // - Removal of a create that is not indexed yet (library.removeScrobble):
-//   one never sent (queued or blocked, no attempt) is `cancelled` — nothing
-//   reaches the PDS, its listen key and its unsent forward rows are deleted —
-//   while one that is running or was already sent gets a `scrobble.delete`
-//   chained after it as a predecessor.
+//   one explicitly never sent (its `unsent` insertion receipt, no attempt) is
+//   `cancelled` — nothing reaches the PDS, its listen key and its unsent
+//   forward rows are deleted — while one that is running, was sent, or whose
+//   send state is unknown (a migrated or refunded row, even at 0 attempts)
+//   gets a `scrobble.delete` chained after it as a predecessor: the create is
+//   reconciled at its original rkey and the delete then removes the record.
 
 import { isTid } from '@atmusic/core/syntax';
 import type { OperationRow, Origin } from '../app/rows';

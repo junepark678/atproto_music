@@ -147,12 +147,16 @@ export interface OperationRow {
   attempts: number;
   /** Set conservatively before a send attempt; never cleared when attempt accounting is rolled back. */
   send_started_at_ms: number | null;
-  /** `unsent` is an explicit insertion receipt; migrated operations remain unknown. */
+  /**
+   * `unsent` is the explicit insertion receipt of every operation written by
+   * current code; the first attempt makes it `unknown` and nothing ever sets it
+   * back. Migrated operations remain unknown.
+   */
   send_state: 'unknown' | 'unsent';
   /**
-   * Migration 9: when an authoritative read first found a legacy unknown-send
-   * import single absent. A second absence read at least the recheck window
-   * later is the explicit certainty transition to `unsent` (outbox/scrobble-ops).
+   * Migration 9, no longer written or read as a certainty transition. A row
+   * that carries it (written by the unreleased two-read absence rule) is never
+   * treated as explicitly unsent.
    */
   legacy_absent_at_ms: number | null;
   due_at: number;
