@@ -707,7 +707,14 @@ const MIGRATION_6: Migration = {
   ],
 };
 
-export const MIGRATIONS: readonly Migration[] = [MIGRATION_1, MIGRATION_2, MIGRATION_3, MIGRATION_4, MIGRATION_5, MIGRATION_6];
+export const MIGRATIONS: readonly Migration[] = [
+  MIGRATION_1,
+  MIGRATION_2,
+  MIGRATION_3,
+  MIGRATION_4,
+  MIGRATION_5,
+  MIGRATION_6,
+];
 
 /** The schema version this code expects. */
 export const SCHEMA_VERSION: number = MIGRATIONS[MIGRATIONS.length - 1]?.version ?? 0;
