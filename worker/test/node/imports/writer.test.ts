@@ -746,6 +746,29 @@ describe('import writer', () => {
     });
   });
 
+  it('holds uncertain legacy creates when their reconciliation read is unavailable', async () => {
+    await withHarness(async (h) => {
+      h.seedUser(h.alice);
+      const rt = runtime(h);
+      const [legacy] = await stageLegacySingles(h, rt, 'job-legacy-read-failed', [listen(92)]);
+      h.db.run("UPDATE operations SET send_state='unknown' WHERE id=?", legacy!.id);
+      await runImports(rt, h.kit.clock.nowMs());
+      h.kit.pds.Alice.fail({ nsid: GET }, { kind: 'status', status: 503, error: 'Unavailable' });
+
+      const report = await h.run();
+
+      expect(h.op(legacy!.id)).toMatchObject({
+        state: 'queued',
+        attempts: 0,
+        send_state: 'unknown',
+        last_error: 'remote_state_unavailable',
+        due_at: T0 + 5_000,
+      });
+      expect(report.nextDueMs).toBe(T0 + 5_000);
+      expect(await remoteRecords(h.kit, 'Alice', SCROBBLE)).toHaveLength(0);
+    });
+  });
+
   it('rolls back child insertion and item repointing together when the split transaction faults', async () => {
     await withHarness(async (h) => {
       h.seedUser(h.alice);

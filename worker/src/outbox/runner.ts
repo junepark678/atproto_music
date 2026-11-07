@@ -500,7 +500,10 @@ class Run {
       if (reconciling === null) return;
       const outcome = await this.safely(() => executor.reconcile(reconciling, this.context(state, reconciling)));
       const final: Outcome =
-        outcome.kind === 'succeeded' || outcome.kind === 'permanent' || outcome.kind === 'reauth'
+        outcome.kind === 'succeeded' ||
+        outcome.kind === 'permanent' ||
+        outcome.kind === 'reauth' ||
+        outcome.kind === 'waiting'
           ? outcome
           : { kind: 'permanent', code: reconciling.last_error ?? 'attempts_exhausted' };
       this.settle(state, [[reconciling, final]], false);
@@ -616,6 +619,7 @@ class Run {
           if (checkBudget(db, state.did, op.priority, estimatedOperationCost(db, op), now).ok) this.deferred = true;
           else this.park(state.did, op.priority, outcome.untilMs);
         }
+        if (outcome.kind === 'waiting') this.park(state.did, op.priority, outcome.untilMs);
         if (
           outcome.kind === 'reauth' &&
           !(op.collection === this.collections.scrobbleBatch && outcome.code === 'batch_scope_required')
@@ -926,6 +930,16 @@ function finish(m: ModuleDeps, op: OperationRow, outcome: Outcome, now: number, 
         `UPDATE operations SET state = 'queued', attempts = attempts - ?, updated_at_ms = ?
          WHERE id = ? AND state = 'running'`,
         begun ? 1 : 0,
+        now,
+        op.id,
+      );
+      return;
+    case 'waiting':
+      db.run(
+        `UPDATE operations SET state='queued', attempts=attempts-?, due_at=?, last_error='remote_state_unavailable', updated_at_ms=?
+         WHERE id=? AND state='running'`,
+        begun ? 1 : 0,
+        outcome.untilMs,
         now,
         op.id,
       );

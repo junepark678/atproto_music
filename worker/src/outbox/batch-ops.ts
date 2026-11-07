@@ -48,7 +48,10 @@ export const batchCreateExecutor: Executor = {
     // of absence and therefore never authorizes another create or a split.
     if (op.attempts > 1 || op.send_state === 'unknown') {
       const found = await ctx.xrpc.getRecord(op.collection, op.rkey as string);
-      if (found.kind === 'failed') return failureOutcome(found.failure);
+      if (found.kind === 'failed')
+        return found.failure.kind === 'transient'
+          ? { kind: 'waiting', untilMs: ctx.m.clock.nowMs() + 5_000 }
+          : failureOutcome(found.failure);
       if (found.kind === 'present')
         return (await sameDigest(op, found.value))
           ? {
@@ -145,6 +148,19 @@ export const batchCreateExecutor: Executor = {
   },
   async reconcile(op, ctx) {
     if (!valid(op, ctx, false)) return { kind: 'permanent', code: 'invalid_batch_record' };
-    return lookupCreate(op, ctx, (remote) => sameDigest(op, remote), 'attempts_exhausted');
+    const found = await ctx.xrpc.getRecord(op.collection, op.rkey as string);
+    if (found.kind === 'failed')
+      return found.failure.kind === 'transient'
+        ? { kind: 'waiting', untilMs: ctx.m.clock.nowMs() + 5_000 }
+        : failureOutcome(found.failure);
+    if (found.kind === 'absent') return { kind: 'permanent', code: 'attempts_exhausted' };
+    return (await sameDigest(op, found.value))
+      ? {
+          kind: 'succeeded',
+          uri: found.uri,
+          cid: found.cid,
+          hints: [{ collection: op.collection, rkey: op.rkey as string }],
+        }
+      : { kind: 'permanent', code: 'remote_record_conflict' };
   },
 };

@@ -336,6 +336,8 @@ export type Outcome =
   | { kind: 'succeeded'; uri?: string; cid?: string; hints: HintTarget[]; note?: string; swapCid?: string }
   | { kind: 'transient'; code: string; retryAfterMs?: number; swapCid?: string }
   | { kind: 'permanent'; code: string; remoteError?: string; remoteMessage?: string; status?: number }
+  /** A read could not establish remote state; retry later without spending a write attempt. */
+  | { kind: 'waiting'; untilMs: number }
   /** Definite record rejection: atomically replace this batch with durable children. */
   | {
       kind: 'split';

@@ -214,7 +214,10 @@ export const scrobbleCreateExecutor: Executor = {
               hints: [{ collection: op.collection, rkey: op.rkey as string }],
             }
           : { kind: 'permanent', code: 'remote_record_conflict' };
-      if (found.kind === 'failed') return failureOutcome(found.failure);
+      if (found.kind === 'failed')
+        return found.failure.kind === 'transient'
+          ? { kind: 'waiting', untilMs: ctx.m.clock.nowMs() + 5_000 }
+          : failureOutcome(found.failure);
       // Absence is now established. Return to the import lane so it can be
       // packed into a batch on its next bounded bookkeep pass.
       ctx.m.db.run("UPDATE operations SET send_state='unsent' WHERE id=? AND send_state='unknown'", op.id);
@@ -226,6 +229,19 @@ export const scrobbleCreateExecutor: Executor = {
     const expected =
       op.collection === ctx.collections.scrobbleBatch ? ctx.collections.scrobbleBatch : ctx.collections.scrobble;
     if (!hasIdentity(op, ctx, expected)) return { kind: 'permanent', code: 'invalid_record_identity' };
-    return lookupCreate(op, ctx, (remote) => sameDigest(op, remote), 'attempts_exhausted');
+    const found = await ctx.xrpc.getRecord(op.collection, op.rkey as string);
+    if (found.kind === 'failed')
+      return found.failure.kind === 'transient'
+        ? { kind: 'waiting', untilMs: ctx.m.clock.nowMs() + 5_000 }
+        : failureOutcome(found.failure);
+    if (found.kind === 'absent') return { kind: 'permanent', code: 'attempts_exhausted' };
+    return (await sameDigest(op, found.value))
+      ? {
+          kind: 'succeeded',
+          uri: found.uri,
+          cid: found.cid,
+          hints: [{ collection: op.collection, rkey: op.rkey as string }],
+        }
+      : { kind: 'permanent', code: 'remote_record_conflict' };
   },
 };
