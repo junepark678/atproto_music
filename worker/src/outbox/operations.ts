@@ -343,6 +343,26 @@ export function isUnsent(op: Pick<OperationRow, 'state' | 'attempts'>): boolean 
   return (op.state === 'queued' || op.state === 'blocked') && op.attempts === 0;
 }
 
+/**
+ * How long after its first authoritative absence read a legacy import single
+ * is read again before it may be rebatched (scrobble-ops `legacyAbsent`).
+ * Longer than any PDS write request a pre-upgrade process could have left
+ * in flight; equal to the import poll interval, so a job waits one poll.
+ */
+export const LEGACY_ABSENCE_RECHECK_MS = 60_000;
+
+/**
+ * An import single the rebatcher may move: proven unsent by its insertion
+ * receipt (attempts 0), or by the legacy two-read absence transition (its
+ * historical attempts are kept on the cancelled row). Any later attempt
+ * would have reset `send_state` to `unknown` (beginAttempts).
+ */
+export function rebatchableSendState(
+  op: Pick<OperationRow, 'send_state' | 'attempts' | 'legacy_absent_at_ms'>,
+): boolean {
+  return op.send_state === 'unsent' && (op.attempts === 0 || op.legacy_absent_at_ms !== null);
+}
+
 /** Legacy import keys need a read before either publication or rebatching. */
 export function legacyImportNeedsReconcile(db: Db, op: OperationRow): boolean {
   return (

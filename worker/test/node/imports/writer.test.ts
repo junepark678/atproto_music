@@ -34,7 +34,7 @@ import {
   enqueueBatchListenDelete,
   prepareUnsentBatchListenRemoval,
 } from '../../../src/outbox/batch-delete-ops';
-import { newOperationId, unblockOperations } from '../../../src/outbox/operations';
+import { LEGACY_ABSENCE_RECHECK_MS, newOperationId, unblockOperations } from '../../../src/outbox/operations';
 import { insertScrobbleCreate, prepareScrobble } from '../../../src/outbox/scrobble-ops';
 import { APPLY, CREATE, GET, type Harness, remoteRecords, SCROBBLE, T0, withHarness } from '../outbox/support';
 
@@ -777,6 +777,8 @@ describe('import writer', () => {
       for (let i = 0; i < 6 && job(h, id).state !== 'done'; i++) {
         await runImports(rt, h.kit.clock.nowMs());
         await h.runUntilIdle();
+        // Proven absence needs a second read one recheck window later.
+        h.kit.clock.advance(LEGACY_ABSENCE_RECHECK_MS);
       }
       await runImports(rt, h.kit.clock.nowMs());
 
@@ -796,6 +798,104 @@ describe('import writer', () => {
       expect(entries.map((entry) => entry.id)).toEqual(ops.slice(834).map((op) => op.rkey));
       expect(itemStates(h, id)).toEqual({ written: 836 });
       expect(h.writers.sent.filter((send) => send.nsid === CREATE && send.body?.collection === SCROBBLE)).toEqual([]);
+    });
+  });
+
+  it.each([
+    { name: 'three earlier attempts', state: 'queued', attempts: 3 },
+    { name: 'an interrupted tenth attempt', state: 'running', attempts: 10 },
+  ])(
+    'rebatches a proven-absent legacy single after $name without resending it or stalling',
+    async ({ state, attempts }) => {
+      await withHarness(async (h) => {
+        h.seedUser(h.alice);
+        const rt = runtime(h);
+        const id = `job-legacy-attempted-${attempts}`;
+        const [legacy] = await stageLegacySingles(h, rt, id, [listen(93), listen(94)]);
+        const [, sibling] = h.ops(`import_job_id = '${id}'`);
+        h.db.run(
+          "UPDATE operations SET state=?, attempts=?, send_started_at_ms=?, send_state='unknown' WHERE import_job_id=?",
+          state,
+          attempts,
+          T0 - HOUR,
+          id,
+        );
+
+        const first = await h.run();
+        // One absence read only starts the recheck window: nothing sent,
+        // attempts unchanged, and a bounded wake-up rather than a stall.
+        expect(h.op(legacy!.id)).toMatchObject({
+          state: 'queued',
+          attempts,
+          send_state: 'unknown',
+          legacy_absent_at_ms: T0,
+          due_at: T0 + LEGACY_ABSENCE_RECHECK_MS,
+        });
+        expect([first.nextDueMs, (await h.run()).nextDueMs]).toContain(T0 + LEGACY_ABSENCE_RECHECK_MS);
+        expect(await rebatchUnsentImports(h.m, id, h.alice, h.kit.clock.nowMs())).toBe(0);
+
+        h.kit.clock.advance(LEGACY_ABSENCE_RECHECK_MS);
+        await h.runUntilIdle();
+        expect(h.op(legacy!.id)).toMatchObject({
+          state: 'queued',
+          attempts,
+          send_state: 'unsent',
+          send_started_at_ms: null,
+          last_error: null,
+        });
+        expect(h.op(sibling!.id)).toMatchObject({ send_state: 'unsent', attempts });
+
+        for (let i = 0; i < 4 && job(h, id).state !== 'done'; i++) {
+          await runImports(rt, h.kit.clock.nowMs());
+          await h.runUntilIdle();
+        }
+        expect(job(h, id)).toMatchObject({ state: 'done', written: 2, failed_items: 0 });
+        // Historical attempts stay on the cancelled single; no detached rows.
+        expect(h.op(legacy!.id)).toMatchObject({ state: 'cancelled', last_error: 'rebatched', attempts });
+        expect(
+          h.db.all(
+            `SELECT i.seq FROM import_items i JOIN operations o ON o.id = i.operation_id
+             WHERE i.job_id = ? AND o.state = 'cancelled'`,
+            id,
+          ),
+        ).toEqual([]);
+        expect(
+          h.db.all(
+            "SELECT k.dedupe_key FROM listen_keys k JOIN operations o ON o.id = k.operation_id WHERE o.state = 'cancelled'",
+          ),
+        ).toEqual([]);
+        expect(h.writers.sent.filter((send) => send.nsid === CREATE && send.body?.collection === SCROBBLE)).toEqual([]);
+        expect(await remoteRecords(h.kit, 'Alice', SCROBBLE)).toEqual([]);
+        const batches = await remoteRecords(h.kit, 'Alice', SCROBBLE_BATCH);
+        expect((batches[0]!.value as { listens: Array<{ id: string }> }).listens.map((entry) => entry.id)).toEqual([
+          legacy!.rkey,
+          sibling!.rkey,
+        ]);
+        expect((await h.run()).nextDueMs).toBeNull();
+      });
+    },
+  );
+
+  it('settles only the single when a legacy send lands between its two absence reads', async () => {
+    await withHarness(async (h) => {
+      h.seedUser(h.alice);
+      const rt = runtime(h);
+      const id = 'job-legacy-late-landing';
+      const [legacy] = await stageLegacySingles(h, rt, id, [listen(95)]);
+      h.db.run("UPDATE operations SET attempts=2, send_state='unknown' WHERE id=?", legacy!.id);
+
+      await h.run();
+      expect(h.op(legacy!.id)).toMatchObject({ send_state: 'unknown', legacy_absent_at_ms: T0 });
+      // The pre-upgrade request commits after the first read.
+      await h.kit.externalPut('Alice', legacy!.collection, legacy!.rkey!, JSON.parse(legacy!.record_json!));
+      h.kit.clock.advance(LEGACY_ABSENCE_RECHECK_MS);
+      await h.runUntilIdle();
+      await runImports(rt, h.kit.clock.nowMs());
+
+      expect(h.op(legacy!.id)).toMatchObject({ state: 'succeeded', send_state: 'unknown' });
+      expect(h.ops(`collection = '${SCROBBLE_BATCH}'`)).toHaveLength(0);
+      expect(await remoteRecords(h.kit, 'Alice', SCROBBLE)).toHaveLength(1);
+      expect(job(h, id)).toMatchObject({ written: 1, failed_items: 0 });
     });
   });
 
@@ -820,6 +920,16 @@ describe('import writer', () => {
       expect(report.nextDueMs).toBe(T0 + 5_000);
       expect(await remoteRecords(h.kit, 'Alice', SCROBBLE)).toHaveLength(0);
       h.kit.clock.advance(5_000);
+      await h.runUntilIdle();
+      // The first absence read only starts the recheck window.
+      expect(h.op(legacy!.id)).toMatchObject({
+        state: 'queued',
+        attempts: 0,
+        send_state: 'unknown',
+        legacy_absent_at_ms: T0 + 5_000,
+        due_at: T0 + 5_000 + LEGACY_ABSENCE_RECHECK_MS,
+      });
+      h.kit.clock.advance(LEGACY_ABSENCE_RECHECK_MS);
       await h.runUntilIdle();
       await runImports(rt, h.kit.clock.nowMs());
       await h.runUntilIdle();

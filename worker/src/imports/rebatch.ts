@@ -1,5 +1,8 @@
 // Atomically replace definitely-never-sent import single creates with durable
-// batch create operations. Async digest/size work is deliberately outside tx;
+// batch create operations. "Never sent" is the explicit `send_state='unsent'`
+// receipt: set at insertion (attempts 0) or by the legacy two-read absence
+// transition (outbox/scrobble-ops legacyAbsent, `legacy_absent_at_ms` set,
+// historical attempts kept on the cancelled row). Async digest/size work is deliberately outside tx;
 // all eligibility and memberships are rechecked before any row is changed.
 import { measureScrobbleBatch } from '@atmusic/atproto/scrobble-batch-size';
 import { newTid } from '@atmusic/core/record-key';
@@ -12,7 +15,14 @@ import {
 import type { OperationRow } from '../app/rows';
 import type { ModuleDeps } from '../do/contracts';
 import type { Db } from '../do/db';
-import { IMPORT_PRIORITY, insertOperation, newOperationId, type Prepared, prepare } from '../outbox/operations';
+import {
+  IMPORT_PRIORITY,
+  insertOperation,
+  newOperationId,
+  type Prepared,
+  prepare,
+  rebatchableSendState,
+} from '../outbox/operations';
 import { WRITE_SLICE } from './writer';
 
 interface Candidate {
@@ -35,8 +45,7 @@ function safeCandidate(db: Db, op: OperationRow, jobId: string, did: string, col
     op.collection !== collection ||
     op.import_job_id !== jobId ||
     op.send_started_at_ms !== null ||
-    op.send_state !== 'unsent' ||
-    op.attempts !== 0 ||
+    !rebatchableSendState(op) ||
     op.last_error !== null ||
     (op.state !== 'queued' && op.state !== 'blocked') ||
     op.result_uri !== null ||
@@ -62,7 +71,8 @@ export async function rebatchUnsentImports(m: ModuleDeps, jobId: string, did: st
     `SELECT DISTINCT o.id AS op_id, i.job_id, i.seq, i.dedupe_key
      FROM import_items i JOIN operations o ON o.id = i.operation_id
      WHERE i.state = 'queued' AND i.removed_at_ms IS NULL AND o.did = ? AND o.origin = 'import' AND o.kind = 'scrobble.create'
-       AND o.collection = ? AND o.import_job_id = ? AND o.state IN ('queued','blocked') AND o.attempts = 0
+       AND o.collection = ? AND o.import_job_id = ? AND o.state IN ('queued','blocked')
+       AND (o.attempts = 0 OR o.legacy_absent_at_ms IS NOT NULL)
        AND o.send_started_at_ms IS NULL
        AND o.send_state = 'unsent'
        AND o.last_error IS NULL AND o.result_uri IS NULL AND o.idempotency_key IS NULL
@@ -131,7 +141,7 @@ export async function rebatchUnsentImports(m: ModuleDeps, jobId: string, did: st
         if (
           current === null ||
           current.state !== candidate.operation.state ||
-          current.attempts !== 0 ||
+          current.attempts !== candidate.operation.attempts ||
           !safeCandidate(db, current, jobId, did, `${prefix}.scrobble`)
         )
           return false;
@@ -181,7 +191,9 @@ export async function rebatchUnsentImports(m: ModuleDeps, jobId: string, did: st
       );
       for (const candidate of group.candidates) {
         const cancelled = db.run(
-          "UPDATE operations SET state = 'cancelled', last_error = 'rebatched', updated_at_ms = ? WHERE id = ? AND state IN ('queued','blocked') AND attempts = 0",
+          `UPDATE operations SET state = 'cancelled', last_error = 'rebatched', updated_at_ms = ?
+           WHERE id = ? AND state IN ('queued','blocked') AND send_state = 'unsent' AND send_started_at_ms IS NULL
+             AND (attempts = 0 OR legacy_absent_at_ms IS NOT NULL)`,
           now,
           candidate.operation.id,
         );

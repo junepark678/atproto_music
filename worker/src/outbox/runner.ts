@@ -517,11 +517,17 @@ class Run {
       const reconciling = beginReconcile(this.db, op.id, this.m.clock.nowMs());
       if (reconciling === null) return;
       const outcome = await this.safely(() => executor.reconcile(reconciling, this.context(state, reconciling)));
+      // A legacy import single's proven absence (`deferred`, scrobble-ops
+      // legacyAbsent) hands it to the rebatcher; it is never sent again.
       const final: Outcome =
         outcome.kind === 'succeeded' ||
         outcome.kind === 'permanent' ||
         outcome.kind === 'reauth' ||
-        outcome.kind === 'waiting'
+        outcome.kind === 'waiting' ||
+        (outcome.kind === 'deferred' &&
+          reconciling.kind === 'scrobble.create' &&
+          reconciling.collection === this.collections.scrobble &&
+          legacyImportNeedsReconcile(this.db, reconciling))
           ? outcome
           : { kind: 'permanent', code: reconciling.last_error ?? 'attempts_exhausted' };
       this.settle(state, [[reconciling, final]], false);
