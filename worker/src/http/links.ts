@@ -19,7 +19,7 @@
 // `start` stores a single-use state (forward/links.ts, 600 s) bound to the
 // SHA-256 of this session's token and returns
 // `LASTFM_AUTH_URL?api_key=<ours>&cb=<enc(PUBLIC_ORIGIN/api/v1/links/lastfm/callback?state=S)>`.
-// The callback checks `state` (64 hex) and `token` (32 hex) — a malformed one
+// The callback checks `state` (64 hex) and `token` (32 URL-safe characters) — a malformed one
 // is 400 — then consumes the state: unknown, used or expired is 400
 // `bad_request`; a state bound to another session is 403 `csrf_failed` and
 // leaves everything (the state included) unchanged. A good state is deleted
@@ -83,7 +83,8 @@ export const LINKS_SETTINGS_PATH = '/settings/links';
 export const LASTFM_CALLBACK_PATH = '/api/v1/links/lastfm/callback';
 
 const STATE_RE = /^[0-9a-f]{64}$/;
-const LASTFM_TOKEN_RE = /^[0-9a-f]{32}$/;
+// Last.fm web-auth tokens are 32 URL-safe characters (mixed case, digits, `-`, `_`), not hex.
+const LASTFM_TOKEN_RE = /^[A-Za-z0-9_-]{32}$/;
 const MAX_LB_TOKEN_CHARS = 256;
 
 /** What the link routes need, built once per process (`linksFeature`). */
