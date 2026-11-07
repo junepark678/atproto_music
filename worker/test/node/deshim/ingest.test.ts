@@ -298,6 +298,7 @@ describe('ingest de-shim', () => {
     expect(files.map((f) => relative(INGEST_DIR, f))).toEqual([
       'accounts.test.ts',
       'admission.test.ts',
+      'batch-wire.test.ts',
       'discovery.test.ts',
       'drain-support.ts',
       'gap-recovery.test.ts',
@@ -319,7 +320,7 @@ describe('ingest de-shim', () => {
     // The suites run over the Node harness instead: every DB-backed suite opens node-index.ts.
     const suites = files.filter((f) => f.endsWith('.test.ts'));
     const harnessed = suites.filter((f) => /from '\.\/node-index'/.test(read(f)));
-    expect(harnessed.length).toBe(15);
+    expect(harnessed.length).toBe(16);
     expect(read(`${INGEST_DIR}/node-index.ts`)).toMatch(
       /import \{ reopen, withMigratedDb \} from '\.\.\/node\/support\/node-db';/,
     );
