@@ -1221,8 +1221,8 @@ def lexicons(override=None, published=None):
             'lexicons/scrobbleBatch.json: envelope createdAt must be a datetime')
     envelope_listens = batch_record['properties']['listens']
     require(envelope_listens.get('type') == 'array' and envelope_listens.get('minLength') == 1 and
-            envelope_listens.get('maxLength') == 200,
-            'lexicons/scrobbleBatch.json: listens must be bounded to 1–200 entries')
+            envelope_listens.get('maxLength') == 10000,
+            'lexicons/scrobbleBatch.json: listens must be bounded to 1–10,000 entries')
     item = envelope_listens.get('items', {})
     require(item.get('type') == 'object' and item.get('required') == ['id', 'artist', 'track', 'listenedAt', 'createdAt'] and
             isinstance(item.get('properties'), dict),

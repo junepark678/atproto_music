@@ -345,9 +345,15 @@ describe('batch projection and visibility', () => {
       '5555555555555',
       batchRecord(listen(ID_B, { listenedAt: 'not-a-date' })),
     );
+    // Over the ingest bound (2,000,000 DAG-CBOR bytes, the PDS's commit block limit).
     const oversized = await putProof(repo, BATCH, '6666666666666', {
       ...batchRecord(listen(ID_A)),
-      unknown: 'x'.repeat(65_000),
+      unknown: 'x'.repeat(2_000_000),
+    });
+    // Above every write limit but within the ingest bound: a valid container another writer committed.
+    const large = await putProof(repo, BATCH, '6666666666667', {
+      ...batchRecord(listen(ID_A)),
+      unknown: 'x'.repeat(1_500_000),
     });
     const deletedRecord = await putProof(repo, BATCH, '7777777777777', batchRecord(listen(ID_A)));
     const deleted = await deleteProof(repo, BATCH, '7777777777777');
@@ -368,10 +374,15 @@ describe('batch projection and visibility', () => {
       ).toEqual({ state: 'excluded', collection: BATCH });
       expect(apply(db, oversized).outcome).toBe('excluded');
       expect(db.all('SELECT * FROM scrobbles WHERE record_uri = ?', uriOf(ALICE, BATCH, '6666666666666'))).toEqual([]);
+      expect(apply(db, large).outcome).toBe('applied');
+      expect(
+        db.all('SELECT listen_id FROM scrobbles WHERE record_uri = ?', uriOf(ALICE, BATCH, '6666666666667')),
+      ).toEqual([{ listen_id: ID_A }]);
       expect(apply(db, deletedRecord).outcome).toBe('applied');
       expect(apply(db, deleted).outcome).toBe('absent');
       expect(db.all('SELECT * FROM scrobbles WHERE record_uri = ?', uriOf(ALICE, BATCH, '7777777777777'))).toEqual([]);
-      expect(db.one('SELECT stats_version FROM users WHERE did = ?', ALICE)).toEqual({ stats_version: 5 });
+      // Five changes as before, plus the large container's projection.
+      expect(db.one('SELECT stats_version FROM users WHERE did = ?', ALICE)).toEqual({ stats_version: 6 });
     });
   });
 

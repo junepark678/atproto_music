@@ -45,18 +45,13 @@
 //   proven absence deletes it and records `absent`. Loves never touch
 //   `users.stats_version` (no /api/v1 stat reads them).
 
-import { measureScrobbleBatch } from '@atmusic/atproto/scrobble-batch-size';
+import { encode } from '@atcute/cbor';
 import type { RecordProof } from '@atmusic/atproto/verify/types';
 import { validateFollowRecord } from '@atmusic/core/follow';
 import { validateLoveRecord } from '@atmusic/core/love';
 import { MusicKeyError } from '@atmusic/core/music-key';
 import { reasonText, type ScrobbleRow, validateScrobbleRecord } from '@atmusic/core/scrobble';
-import {
-  MAX_CBOR_BYTES,
-  MAX_CREATE_BODY_BYTES,
-  type ScrobbleBatchRecord,
-  validateScrobbleBatchRecord,
-} from '@atmusic/core/scrobble-batch';
+import { MAX_INGEST_CBOR_BYTES, validateScrobbleBatchRecord } from '@atmusic/core/scrobble-batch';
 import { isTid } from '@atmusic/core/syntax';
 import { toStorage } from '@atmusic/core/timestamp';
 import type { Db } from '../db';
@@ -266,13 +261,11 @@ function scrobbleVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, 
 
 /** A batch container is replaced as one verified unit; invalid entries are isolated. */
 function batchVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, o: ApplyOptions): Verdict {
+  // A resource bound, not a write limit: any container the PDS committed (one
+  // commit's blocks are at most 2,000,000 bytes) is accepted by size; the
+  // entry count is bounded by the validator.
   try {
-    const sizes = measureScrobbleBatch(record as ScrobbleBatchRecord, {
-      repo: t.did,
-      collection: t.collection,
-      rkey: t.rkey,
-    });
-    if (sizes.cborBytes > MAX_CBOR_BYTES || sizes.createBodyBytes > MAX_CREATE_BODY_BYTES) {
+    if (encode(record).byteLength > MAX_INGEST_CBOR_BYTES) {
       return { ok: false, reason: 'listens: batch record exceeds encoded size limits' };
     }
   } catch {

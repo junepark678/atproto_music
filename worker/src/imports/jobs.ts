@@ -55,6 +55,7 @@
 // (the transport behind `fetch`, the pacers, `diskLow`, the UploadStore).
 
 import type { ImportJob } from '@atmusic/core/api-types';
+import { MAX_CREATE_BODY_BYTES } from '@atmusic/core/scrobble-batch';
 import { fromMs, toDto } from '@atmusic/core/timestamp';
 import type { CoreExtension } from '../app/host';
 import { errorName } from '../app/index-core';
@@ -283,6 +284,14 @@ export function remainingItems(db: Db, jobId: string): number {
 }
 
 /**
+ * Estimated entry JSON bytes beyond a listen's staged JSON
+ * (`{"kind":"listen","input":{…}}`): the entry adds `"id":"<TID>",` and its
+ * `createdAt` and drops the wrapper; rounded up so the estimate errs towards
+ * more containers.
+ */
+const ETA_ENTRY_OVERHEAD_BYTES = 64;
+
+/**
  * ETA (ADR §11.4) = remaining items × 3 points ÷ the current import points
  * per hour: the account's import share of the tighter of the hour window and
  * the day window spread over 24 h. Null for a finished job or nothing left.
@@ -300,23 +309,24 @@ export function etaSeconds(db: Db, job: ImportJobRow, now: number): number | nul
       "SELECT count(DISTINCT operation_id) AS n FROM import_items WHERE job_id = ? AND state = 'queued' AND removed_at_ms IS NULL AND operation_id IS NOT NULL",
       job.id,
     )?.n ?? 0;
-  const staged = db.all<{ record_json: string }>(
-    "SELECT record_json FROM import_items WHERE job_id = ? AND state = 'staged'",
+  const staged = db.all<{ record_json: string; bytes: number }>(
+    "SELECT record_json, length(CAST(record_json AS BLOB)) AS bytes FROM import_items WHERE job_id = ? AND state = 'staged'",
     job.id,
   );
-  let stagedListens = 0;
+  let stagedListenBytes = 0;
   let stagedLoves = 0;
   for (const item of staged) {
     try {
       const value = JSON.parse(item.record_json) as { kind?: unknown };
-      if (value.kind === 'listen') stagedListens += 1;
+      if (value.kind === 'listen') stagedListenBytes += item.bytes + ETA_ENTRY_OVERHEAD_BYTES;
       else if (value.kind === 'love') stagedLoves += 1;
     } catch {
       // Invalid staged JSON is still counted as one conservative single-write unit.
       stagedLoves += 1;
     }
   }
-  const recordsLeft = queuedOperations + stagedLoves + Math.ceil(stagedListens / 200);
+  // Containers are filled by bytes: estimate each listen's entry by its staged JSON.
+  const recordsLeft = queuedOperations + stagedLoves + Math.ceil(stagedListenBytes / MAX_CREATE_BODY_BYTES);
   const points = recordsLeft * WRITE_COST.create;
   // points / (hour·share/100) h, or points / (day·share/100) days, whichever is longer.
   const byHour = Math.ceil((points * 3_600 * 100) / (hour * share));

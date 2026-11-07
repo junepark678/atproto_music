@@ -74,6 +74,7 @@ const DIGEST_RECORDS: Readonly<Record<string, 'manifest' | 'labelled' | 'node-ba
   'docs/verification/backend-node.md': 'labelled',
   'docs/verification/lexicon-publication/README.md': 'labelled',
   'docs/verification/lexicon-publication/manifest.json': 'labelled',
+  'docs/verification/lexicon-publication/batch-manifest-20261107.json': 'labelled',
   'docs/verification/receipts/node-backend-461e7a9-summary.json': 'node-backend-receipt',
   'docs/verification/receipts/node-backend-396de2d-summary.json': 'node-backend-receipt',
   'docs/verification/receipts/node-backend-14f6ee3-summary.json': 'node-backend-receipt',
@@ -119,6 +120,7 @@ function credentialShaped(value: string): boolean {
   if (!/^[A-Za-z0-9+/=_.-]+$/.test(v)) return false; // <placeholder>, $VAR, $(cmd), URLs, did:key
   if (/\.(?:json|jsonc|md|ts|tsx|js|rs|sh|py|toml|ya?ml|txt|example)$/i.test(v)) return false; // file paths
   if (/^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)+$/.test(v) && !/\d{4,}/.test(v)) return false; // dotted/kebab identifiers
+  if (/^[a-z][a-z0-9]*(?:\.[a-z][a-z0-9]*){2,}\.[a-z][A-Za-z0-9]*$/.test(v) && !/\d{4,}/.test(v)) return false; // NSIDs (camelCase name segment)
   // Random-looking: digits mixed with letters, long or in both cases.
   const upper = /[A-Z]/.test(v);
   const lower = /[a-z]/.test(v);

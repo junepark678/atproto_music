@@ -33,12 +33,39 @@ After `atmusic.service` restarted, `GET /api/v1/meta` advertised the `publicatio
 capabilities with `lexiconPrefix: dev.pythonplayer123.music`. As ADR 0001 notes, the runtime
 validates only the shape of this reference.
 
-## Unpublished batch candidate
+## Batch schema publication (2026-11-07)
+
+The owner published the production form of `lexicons/scrobbleBatch.json` (only `id`
+changed to `dev.pythonplayer123.music.scrobbleBatch`) on 2026-11-07, with the same
+method as above: a single-use app password session and `putRecord`. The app password
+file was destroyed afterwards.
+
+| NSID | CID |
+| --- | --- |
+| dev.pythonplayer123.music.scrobbleBatch | bafyreih44ggw7u5hetmjoa4uhl5lzrhsq4tqkgi7fqrupcqhxuo6j62sly |
+
+All five production schema records were then read back without authentication and
+matched the local documents after canonical key ordering. The five-record receipt is
+[`batch-manifest-20261107.json`](batch-manifest-20261107.json), and
+`npx tsx scripts/check-batch-publication.ts` accepts it with digest:
+
+    sha256:01220c67f52fbbce0fa2fdf01858d06ffeebc93fe326a3b915aa71ce87440e58
+
+That digest is `NAMESPACE_BATCH_PUBLICATION_REF`. The four-record `manifest.json` is
+unchanged.
+
+## Batch candidate (historical notes)
 
 `lexicons/scrobbleBatch.json` is a candidate fixture schema only. The checked-in
 `manifest.json` above remains a receipt for exactly four published schemas and
 must not be edited to imply that a batch schema is live. No batch record has
 been published or retrieved by this repository.
+
+The candidate changed in N12-01: `listens.maxLength` went from 200 to 10,000
+(a resource ceiling; writers fill containers by bytes, see
+[batch capacity](../batch-capacity.md)), with a new description. A review or
+digest of the earlier candidate does not cover it; publish and verify this
+version.
 
 Before enabling batch writes, the owner must publish the production-ID form of
 the candidate and independently retrieve all **five** production schema

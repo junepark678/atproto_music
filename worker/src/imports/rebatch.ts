@@ -7,9 +7,16 @@
 // its original rkey (outbox/scrobble-ops). Async digest/size work is
 // deliberately outside tx; all eligibility and memberships are rechecked
 // before any row is changed.
-import { measureScrobbleBatch } from '@atmusic/atproto/scrobble-batch-size';
+//
+// A pass reads at most REBATCH_WINDOW candidates, one more than a container
+// can hold, and packs them into byte-filled containers (ADR 0006
+// "Capacity"). When the window may not hold every candidate, its last group
+// (possibly short) is left as singles for the next pass, unless it is the
+// only group, so every pass that finds candidates moves some of them.
+import { measureScrobbleBatch, scrobbleBatchSizer } from '@atmusic/atproto/scrobble-batch-size';
 import { newTid } from '@atmusic/core/record-key';
 import {
+  BATCH_MAX_LISTENS,
   packScrobbleBatchEntries,
   type ScrobbleBatchEntry,
   type ScrobbleBatchRecord,
@@ -27,7 +34,9 @@ import {
   type Prepared,
   prepare,
 } from '../outbox/operations';
-import { WRITE_SLICE } from './writer';
+
+/** Import items one rebatch pass reads at most. */
+export const REBATCH_WINDOW = BATCH_MAX_LISTENS + 1;
 
 interface Candidate {
   operation: OperationRow;
@@ -85,7 +94,7 @@ export async function rebatchUnsentImports(m: ModuleDeps, jobId: string, did: st
     `${prefix}.scrobble`,
     jobId,
     jobId,
-    WRITE_SLICE,
+    REBATCH_WINDOW,
   );
   const byId = new Map<string, Candidate>();
   for (const row of rows) {
@@ -109,29 +118,30 @@ export async function rebatchUnsentImports(m: ModuleDeps, jobId: string, did: st
   const candidates = [...byId.values()].filter((candidate) => candidate.jobs.length > 0);
   if (candidates.length === 0) return 0;
   const collection = scrobbleBatchCollection(prefix);
+  const envelope = { $type: collection, createdAt: new Date(now).toISOString() };
+  // Every rkey is a 13-character TID, so sizes do not depend on which one.
+  const rkeys: string[] = [];
+  const sizingRequest = { repo: did, collection, rkey: newTid(m.clock, m.random) };
+  rkeys.push(sizingRequest.rkey);
   const packed = packScrobbleBatchEntries(
     candidates.map((candidate) => candidate.entry),
     {
+      sizer: scrobbleBatchSizer(envelope, sizingRequest),
       measure: (entries) =>
-        measureScrobbleBatch(
-          { $type: collection, createdAt: new Date(now).toISOString(), listens: [...entries] as ScrobbleBatchEntry[] },
-          { repo: did, collection, rkey: '2222222222222' },
-        ),
+        measureScrobbleBatch({ ...envelope, listens: [...entries] as ScrobbleBatchEntry[] }, sizingRequest),
     },
   );
+  // The window may have cut the candidates short: keep a short last group for the next pass.
+  if (rows.length >= REBATCH_WINDOW && packed.length > 1) packed.pop();
   const groups: PreparedGroup[] = [];
   let offset = 0;
-  for (const part of packed) {
+  for (const [index, part] of packed.entries()) {
     const members = candidates.slice(offset, offset + part.entries.length);
     offset += part.entries.length;
-    const record: ScrobbleBatchRecord = {
-      $type: collection,
-      createdAt: new Date(now).toISOString(),
-      listens: [...part.entries] as ScrobbleBatchEntry[],
-    };
-    const rkey = newTid(m.clock, m.random);
+    const record: ScrobbleBatchRecord = { ...envelope, listens: [...part.entries] as ScrobbleBatchEntry[] };
+    const rkey = rkeys[index] ?? newTid(m.clock, m.random);
     const sizes = measureScrobbleBatch(record, { repo: did, collection, rkey });
-    if (sizes.cborBytes !== part.cborBytes || sizes.createBodyBytes > 100_000) continue;
+    if (sizes.cborBytes !== part.cborBytes || sizes.createBodyBytes !== part.createBodyBytes) continue;
     groups.push({ candidates: members, prepared: await prepare(record), rkey, operationId: newOperationId(m.random) });
   }
   let moved = 0;

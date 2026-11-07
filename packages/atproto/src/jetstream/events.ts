@@ -25,8 +25,8 @@
 // are not subscribed (buildSubscribeUrl always sends kinds=commit) and account
 // state comes from errors and the getRepoStatus sweep (ADR F1, A17).
 
-/** Messages over 64 KiB (UTF-8 bytes) are dropped and counted (ADR §5.4). */
-export const MAX_JETSTREAM_MESSAGE_BYTES = 64 * 1024;
+/** Bounded UTF-8 wire allowance for a 990 KB inline record plus its event envelope (ADR 0006). */
+export const MAX_JETSTREAM_MESSAGE_BYTES = 1024 * 1024;
 
 export const JETSTREAM_SUBSCRIBE_NSID = 'network.bsky.jetstream.subscribeEvents';
 
