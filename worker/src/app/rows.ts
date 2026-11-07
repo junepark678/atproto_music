@@ -213,6 +213,18 @@ export interface OperationRow {
   removal_reached: 'commit' | 'success' | 'absent' | 'verified' | null;
   /** Migration 13: when `removal_reached` was first recorded (local time; the read-only hold's backoff). */
   removal_reached_at_ms: number | null;
+  /**
+   * Migration 14, `scrobble.delete` only: `pending` while a sent write's
+   * outcome is unknown (persisted with the exact request before it is
+   * awaited), `rejected` once that send was definitely refused.
+   */
+  removal_send_state: 'pending' | 'rejected' | null;
+  /** Migration 14: the pinned request {method, body, head:{cid,rev}} of a `pending` send. */
+  removal_send_json: string | null;
+  /** Migration 14: when the pending send was pinned (local time; the uncertain hold's backoff). */
+  removal_send_at_ms: number | null;
+  /** Migration 14: the later explicit removal that superseded this unresolved one. */
+  removal_superseded_by: string | null;
   due_at: number;
   last_error: string | null;
   result_uri: string | null;

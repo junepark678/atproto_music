@@ -891,6 +891,40 @@ const MIGRATION_13: Migration = {
   ],
 };
 
+// The send of a removal whose outcome is unknown (ADR 0006 amendment;
+// outbox/removal-fence.ts). Server acknowledgement and local persistence are
+// never atomic: a crash after the PDS committed, a lost or invalid answer, or
+// a 5xx leaves no evidence whether the conditional write happened. Once the
+// owner's repository head moved past that send's swapCommit, a present target
+// cannot tell an unexecuted removal from a completed one followed by an
+// identical recreation, so the intent must never be re-sent at a newer head.
+// - `removal_send_state`: pending | rejected. `pending` is persisted, with the
+//   exact request, BEFORE the write is awaited and stays until the requested
+//   state is known reached; only a definite rejection (a received 4xx) of that
+//   same send makes it `rejected`, after which a new fenced send may be pinned.
+//   A row with a send fence (`removal_head_rev`) and no state was sent before
+//   this migration and is treated as pending with only its fence revision.
+// - `removal_send_json`: the pinned request {method, body, head:{cid,rev}}:
+//   swapCommit, swapRecord and the exact record bytes. A retry while the head
+//   is still that root re-sends it unchanged; any other head holds read-only.
+// - `removal_send_at_ms`: when it was pinned (the read-only hold's backoff;
+//   local time, never an ordering fact).
+// - `removal_superseded_by`: the later explicit removal intent on the same key
+//   whose targets cover this pending one; this one is then cancelled
+//   (`removal_superseded`) and never sends again.
+const MIGRATION_14: Migration = {
+  version: 14,
+  name: 'removal_send_pin',
+  statements: [
+    // Values are enforced by outbox/removal-fence.ts pinSend/rejectSend (no
+    // CHECK on an added column; see the conventions above).
+    'ALTER TABLE operations ADD COLUMN removal_send_state TEXT',
+    'ALTER TABLE operations ADD COLUMN removal_send_json TEXT',
+    'ALTER TABLE operations ADD COLUMN removal_send_at_ms INTEGER',
+    'ALTER TABLE operations ADD COLUMN removal_superseded_by TEXT',
+  ],
+};
+
 export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_1,
   MIGRATION_2,
@@ -905,6 +939,7 @@ export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_11,
   MIGRATION_12,
   MIGRATION_13,
+  MIGRATION_14,
 ];
 
 /** The schema version this code expects. */

@@ -76,6 +76,7 @@ import { enqueueForwards } from '../outbox/forward-enqueue';
 import { acceptListens, type ListenResult } from '../outbox/ingress';
 import { enqueueLove, enqueueUnlove } from '../outbox/love-ops';
 import { loadOperation, outboxCollections, UNSETTLED_SQL } from '../outbox/operations';
+import { newerThanUncertain } from '../outbox/removal-fence';
 import type { LastfmCall, LastfmMethodDef, LastfmMethodTable } from './auth-methods';
 import { authFailure } from './auth-methods';
 import { type LfmDocument, type LfmElement, leaf, lfmOk, node } from './encode';
@@ -526,6 +527,15 @@ export async function removeScrobble(m: ModuleDeps, args: RemoveScrobbleArgs): P
         upper,
       );
     const isIndexed = (uri: string) => m.db.one('SELECT 1 AS one FROM scrobbles WHERE uri = ?', uri) !== null;
+    const freshDelete = (row: { uri: string; record_uri: string | null; listen_id: string | null }) =>
+      row.record_uri !== null && row.listen_id !== null
+        ? enqueueBatchListenDelete(m, {
+            did: args.did,
+            uri: row.record_uri,
+            listenIds: [row.listen_id],
+            origin: 'lastfm',
+          })
+        : enqueueScrobbleDelete(m, { did: args.did, uri: row.uri, origin: 'lastfm' });
 
     // A visible indexed single wins over a pending batch with the same music
     // key. If the visible row is a batch item, an exact pending single is the
@@ -590,19 +600,10 @@ export async function removeScrobble(m: ModuleDeps, args: RemoveScrobbleArgs): P
       // verified incarnation (e.g. the owner restored the same listen id at a
       // new CID) and needs a fresh delete intent.
       const waiting = pendingDelete(m, args.did, targetCollection, targetRkey, indexed.listen_id ?? undefined);
-      if (waiting !== null) {
+      if (waiting !== null && !newerThanUncertain(m.db, waiting, indexed.uri)) {
         out.push({ kind: 'delete_pending', uri: indexed.uri, deleteId: waiting });
       } else {
-        const del =
-          indexed.record_uri !== null && indexed.listen_id !== null
-            ? enqueueBatchListenDelete(m, {
-                did: args.did,
-                uri: indexed.record_uri,
-                listenIds: [indexed.listen_id],
-                origin: 'lastfm',
-              })
-            : enqueueScrobbleDelete(m, { did: args.did, uri: indexed.uri, origin: 'lastfm' });
-        out.push({ kind: 'delete_indexed', uri: indexed.uri, deleteId: del.id });
+        out.push({ kind: 'delete_indexed', uri: indexed.uri, deleteId: freshDelete(indexed).id });
       }
     }
     // A pending batch item is hidden from the shared read overlay immediately.
@@ -612,7 +613,14 @@ export async function removeScrobble(m: ModuleDeps, args: RemoveScrobbleArgs): P
       const targetCollection = rawIndexed.record_uri !== null ? collections.scrobbleBatch : collection;
       const targetRkey = rawIndexed.record_uri !== null ? rawIndexed.record_uri.split('/').at(-1)! : rawIndexed.rkey;
       const waiting = pendingDelete(m, args.did, targetCollection, targetRkey, rawIndexed.listen_id ?? undefined);
-      if (waiting !== null) out.push({ kind: 'delete_pending', uri: rawIndexed.uri, deleteId: waiting });
+      // A removal holding an unknown send never writes into a later
+      // incarnation (outbox/removal-fence.ts). When the verified projection
+      // is provably newer than its fence, this request is a fresh intent, not
+      // a repeat of that one: admit it (it supersedes the old one when it
+      // covers its targets). Otherwise it is the same intent: absorbed.
+      if (waiting !== null && newerThanUncertain(m.db, waiting, rawIndexed.uri)) {
+        out.push({ kind: 'delete_indexed', uri: rawIndexed.uri, deleteId: freshDelete(rawIndexed).id });
+      } else if (waiting !== null) out.push({ kind: 'delete_pending', uri: rawIndexed.uri, deleteId: waiting });
     }
     return out;
   });

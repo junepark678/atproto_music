@@ -88,6 +88,7 @@ import {
 } from '../outbox/batch-delete-ops';
 import { enqueueScrobbleDelete, removeScrobbleCreate } from '../outbox/delete-ops';
 import { outboxCollections } from '../outbox/operations';
+import { newerThanUncertain, uncertainCover } from '../outbox/removal-fence';
 import {
   type AuthHeaderFailure,
   LB_AUTH_MESSAGES,
@@ -447,6 +448,71 @@ async function findDeleteTarget(m: ModuleDeps, did: string, seconds: bigint, msi
     : { kind: 'pending', operationId: best.operationId, ...(best.listenId ? { listenId: best.listenId } : {}) };
 }
 
+/**
+ * Whether this delete only repeats an earlier removal of the same listen that
+ * holds an unknown send (outbox/removal-fence.ts): it is absorbed, since no
+ * verified incarnation newer than that removal's fence exists. With a
+ * provably newer verified one, the request is a fresh intent, admitted (it
+ * never waits behind, and may supersede, the unresolved removal).
+ */
+function repeatsUncertainRemoval(m: ModuleDeps, did: string, createId: string, listenId?: string): boolean {
+  const create = m.db.one<{ collection: string; rkey: string | null }>(
+    'SELECT collection, rkey FROM operations WHERE id = ? AND did = ?',
+    createId,
+    did,
+  );
+  if (create === null || create.rkey === null) return false;
+  const cover = uncertainCover(m.db, did, create.collection, create.rkey, listenId);
+  if (cover === null) return false;
+  const projection = `at://${did}/${create.collection}/${create.rkey}${listenId === undefined ? '' : `#${listenId}`}`;
+  return !newerThanUncertain(m.db, cover, projection);
+}
+
+/**
+ * The admission behind POST /1/delete-listen for an authenticated `did`: the
+ * newest own listen at that second with that MSID gets a removal intent (an
+ * indexed one a fresh delete; a pending create its unsent rewrite, its
+ * cancellation or a chained delete). A repeat of a removal that holds an
+ * unknown send is absorbed (repeatsUncertainRemoval).
+ */
+export async function admitListenDelete(
+  m: ModuleDeps,
+  did: string,
+  seconds: bigint,
+  msid: string | null,
+  kick: () => void,
+): Promise<void> {
+  // A timestamp outside the storable range cannot name any record.
+  const inRange = seconds >= 0n && seconds <= 253_402_300_799n;
+  const target = msid === null || !inRange ? { kind: 'none' as const } : await findDeleteTarget(m, did, seconds, msid);
+  if (target.kind === 'indexed') {
+    if (target.recordUri && target.listenId)
+      enqueueBatchListenDelete(m, {
+        did,
+        uri: target.recordUri,
+        listenIds: [target.listenId],
+        origin: 'listenbrainz',
+        kick,
+      });
+    else enqueueScrobbleDelete(m, { did, uri: target.uri, origin: 'listenbrainz', kick });
+  } else if (target.kind === 'pending') {
+    const plan = target.listenId
+      ? await prepareUnsentBatchListenRemoval(m, { did, operationId: target.operationId, listenId: target.listenId })
+      : null;
+    const rewritten = plan === null ? null : commitUnsentBatchListenRemoval(m, plan);
+    if (rewritten !== null) kick();
+    else if (!repeatsUncertainRemoval(m, did, target.operationId, target.listenId)) {
+      removeScrobbleCreate(m, {
+        did,
+        operationId: target.operationId,
+        origin: 'listenbrainz',
+        ...(target.listenId ? { listenId: target.listenId } : {}),
+        kick,
+      });
+    }
+  }
+}
+
 async function deleteListen(
   req: Request,
   ctx: RequestCtx,
@@ -469,37 +535,7 @@ async function deleteListen(
   if (!isPythonUuid(rawMsid)) return lbError(400, LB_DELETE_MESSAGES.msidInvalid(pyStr(rawMsid)), headers);
   const msid = canonicalMsid(rawMsid as string);
 
-  const did = guard.token.did;
-  // A timestamp outside the storable range cannot name any record.
-  const inRange = seconds >= 0n && seconds <= 253_402_300_799n;
-  const target = msid === null || !inRange ? { kind: 'none' as const } : await findDeleteTarget(m, did, seconds, msid);
-  const kick = () => kickOutbox(ctx);
-  if (target.kind === 'indexed') {
-    if (target.recordUri && target.listenId)
-      enqueueBatchListenDelete(m, {
-        did,
-        uri: target.recordUri,
-        listenIds: [target.listenId],
-        origin: 'listenbrainz',
-        kick,
-      });
-    else enqueueScrobbleDelete(m, { did, uri: target.uri, origin: 'listenbrainz', kick });
-  } else if (target.kind === 'pending') {
-    const plan = target.listenId
-      ? await prepareUnsentBatchListenRemoval(m, { did, operationId: target.operationId, listenId: target.listenId })
-      : null;
-    const rewritten = plan === null ? null : commitUnsentBatchListenRemoval(m, plan);
-    if (rewritten !== null) kick();
-    else {
-      removeScrobbleCreate(m, {
-        did,
-        operationId: target.operationId,
-        origin: 'listenbrainz',
-        ...(target.listenId ? { listenId: target.listenId } : {}),
-        kick,
-      });
-    }
-  }
+  await admitListenDelete(m, guard.token.did, seconds, msid, () => kickOutbox(ctx));
   return lbJson({ status: 'ok' }, 200, headers);
 }
 

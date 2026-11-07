@@ -595,11 +595,16 @@ it.each([
         },
       );
       await h.run();
+      // The answer certifies nothing and the head moved past the pinned
+      // send: a present X cannot tell an unexecuted put from a completed one
+      // followed by a recreation, so it holds read-only (removal-fence.ts).
       expect(h.op(removal.id)).toMatchObject({
         state: 'queued',
-        last_error: 'remote_delete_unconfirmed',
+        attempts: 1,
+        last_error: 'removal_send_uncertain',
         removal_reached: null,
         removal_done_rev: null,
+        removal_send_state: 'pending',
       });
       expect(visible(h)).toEqual([Y, Z]);
     });

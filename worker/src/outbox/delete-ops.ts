@@ -17,6 +17,11 @@
 //   attempt with a fresh head; present with another CID → retry (a counted
 //   attempt) with that CID.
 // - RecordNotFound (or a 404): look it up; absence completes the delete.
+// - An unknown outcome (a crash after the send, a lost or invalid answer, a
+//   5xx) leaves the exact request pinned (migration 14): it is re-sent only
+//   while the head is still its root, and otherwise holds read-only until an
+//   absence, a verified absence or a later explicit intent resolves it
+//   (removal-fence.ts). Only a received 4xx of that same send allows a new fence.
 // - Never another writer's record: a delete enqueued behind our own create of
 //   the URI whose create ended `remote_record_conflict` completes locally with
 //   no PDS request (`record_not_ours`), since our listen never existed there.
@@ -39,22 +44,28 @@ import {
   newOperationId,
   outboxCollections,
   predecessorRows,
-  unsettledAt,
 } from './operations';
 import { failureOutcome, type Outcome, reportedCommitRev } from './pds-writer';
 import {
   afterSend,
   answersRemoval,
   checkedHead,
+  countedIfSent,
+  definitelyRejected,
   keepRemovalCommit,
   keepRemovalDone,
-  keepRemovalHead,
   markReached,
   observeRemoval,
+  type PinnedRequest,
+  pinSend,
   type RepoHeadRef,
+  rejectSend,
   removalEstablished,
+  removalPredecessors,
   removalReached,
+  supersedeUncertain,
   type TargetRead,
+  uncertainSend,
 } from './removal-fence';
 import type { ExecContext, Executor } from './runner';
 import { hasIdentity, validRkey } from './scrobble-ops';
@@ -97,10 +108,13 @@ export function enqueueScrobbleDelete(
         collection,
         rkey,
         dueAt: now,
-        predecessors: unsettledAt(m.db, args.did, collection, rkey),
+        // Never behind a removal holding an unknown send (removal-fence.ts).
+        predecessors: removalPredecessors(m.db, args.did, collection, rkey),
       },
       now,
     );
+    // An earlier unresolved removal of the record never sends again.
+    supersedeUncertain(m.db, inserted.id, now);
     // A newly admitted local tombstone changes public stats before the PDS
     // proof removes the verified projection row.
     bumpStatsVersion(m.db, args.did);
@@ -146,11 +160,12 @@ export function removeScrobbleCreate(
           collection: op.collection,
           rkey: op.rkey,
           dueAt: now,
-          predecessors: [op.id, ...unsettledAt(m.db, args.did, op.collection, op.rkey)],
+          predecessors: [op.id, ...removalPredecessors(m.db, args.did, op.collection, op.rkey)],
         },
         now,
       );
       m.db.run('INSERT INTO batch_delete_listens(operation_id,listen_id) VALUES (?,?)', del.id, id);
+      supersedeUncertain(m.db, del.id, now);
       const membership = m.db.one<{ job_id: string; seq: number }>(
         'SELECT job_id,seq FROM batch_entry_items WHERE operation_id = ? AND entry_id = ?',
         op.id,
@@ -198,10 +213,11 @@ export function removeScrobbleCreate(
         collection: op.collection,
         rkey: op.rkey,
         dueAt: now,
-        predecessors: [op.id, ...unsettledAt(m.db, args.did, op.collection, op.rkey)],
+        predecessors: [op.id, ...removalPredecessors(m.db, args.did, op.collection, op.rkey)],
       },
       now,
     );
+    supersedeUncertain(m.db, del.id, now);
     return { status: 'delete_chained', operation: op, delete: del };
   });
   if (result.status !== 'not_found') args.kick?.();
@@ -249,6 +265,7 @@ async function deleteWithSwap(op: OperationRow, ctx: ExecContext, predecessors: 
   const read = () => readRecord(ctx, op.collection, rkey);
   const observe = () => observeRemoval(ctx, op.id, uri, RECORD_TARGET, read);
   let swap = op.swap_cid;
+  let sent = false;
   for (let tries = 0; tries < 5; tries++) {
     let head: RepoHeadRef;
     if (
@@ -262,6 +279,7 @@ async function deleteWithSwap(op: OperationRow, ctx: ExecContext, predecessors: 
       if (seen.kind === 'outcome') return seen.outcome;
       return { kind: 'succeeded', uri, hints, ...(swap === null ? {} : { swapCid: swap }) };
     }
+    let resend: PinnedRequest | undefined;
     if (swap === null) {
       swap = indexedCid(ctx, uri);
       if (swap === null) {
@@ -271,27 +289,37 @@ async function deleteWithSwap(op: OperationRow, ctx: ExecContext, predecessors: 
         swap = ours?.result_cid ?? null;
       }
     }
-    if (swap === null) {
-      // Nothing known locally: the owner's PDS decides. Gone there (ordered)
-      // completes the delete.
+    if (swap === null || uncertainSend(ctx.m.db, op.id) !== null) {
+      // Nothing known locally, or an earlier send's outcome is unknown: the
+      // owner's PDS decides. Gone there (ordered) completes the delete; with
+      // an unknown send only its exact request may go again, at its own root.
       const seen = await observe();
-      if (seen.kind === 'outcome') return seen.outcome;
-      if (seen.kind === 'settled') return { kind: 'succeeded', uri, hints };
+      if (seen.kind === 'outcome') return countedIfSent(seen.outcome, sent);
+      if (seen.kind === 'settled')
+        return { kind: 'succeeded', uri, hints, ...(swap === null ? {} : { swapCid: swap }) };
       head = seen.head;
-      swap = seen.found.cid;
-      ctx.persist({ swapCid: swap });
+      resend = seen.resend;
+      if (resend !== undefined) swap = String(resend.body.swapRecord);
+      else if (swap === null) swap = seen.found.cid;
+      if (op.swap_cid !== swap) ctx.persist({ swapCid: swap });
     } else {
       const checked = await checkedHead(ctx, uri, op.id);
-      if (checked.kind === 'outcome') return checked.outcome;
+      if (checked.kind === 'outcome') return countedIfSent(checked.outcome, sent);
       head = checked;
       if (op.swap_cid !== swap) ctx.persist({ swapCid: swap });
     }
-    keepRemovalHead(ctx.m.db, op.id, head.rev);
-    const result = await ctx.xrpc.procedure(
-      'com.atproto.repo.deleteRecord',
-      { repo: op.did, collection: op.collection, rkey, swapCommit: head.cid, swapRecord: swap },
-      'delete',
-    );
+    const request: PinnedRequest = resend ?? {
+      method: 'com.atproto.repo.deleteRecord',
+      body: { repo: op.did, collection: op.collection, rkey, swapCommit: head.cid, swapRecord: swap },
+      head,
+    };
+    // Persisted before the send (with the fence): a crash, a lost or invalid
+    // answer or a 5xx leaves exactly this request pending (removal-fence.ts).
+    const original = pinSend(ctx.m.db, op.id, request, ctx.m.clock.nowMs());
+    sent = true;
+    const result = await ctx.xrpc.procedure(request.method, request.body, 'delete');
+    // Only a received refusal of this very send proves it changed nothing.
+    if (original && definitelyRejected(result)) rejectSend(ctx.m.db, op.id);
     if (result.ok) {
       if (answersRemoval(result.body, { uri })) {
         const commit = reportedCommitRev(result.body, head.rev);

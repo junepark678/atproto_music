@@ -66,10 +66,30 @@
 //
 // The reachable states of one removal and their crash boundaries:
 // - unsent: no fence; a crash leaves nothing to reconcile.
-// - send unknown: `removal_head_rev` persisted, then the write; a crash or
-//   lost answer is reconciled by reading (an absence is `absent`; present
-//   targets are written again under a fresh head and swapRecord, since
-//   nothing proves the earlier write happened).
+// - send unknown (migration 14): the exact request (swapCommit head CID and
+//   revision, swapRecord, record bytes) is pinned as `removal_send_state =
+//   pending` together with the send fence `removal_head_rev`, BEFORE the
+//   write is awaited. A crash after the PDS committed, a lost answer, a 5xx or
+//   a 2xx body that does not answer the request leaves it pending: nothing
+//   says whether the write happened. A read then decides:
+//   - every target absent: `absent` (reached, ordered as below);
+//   - the head is still the pinned root: nothing was committed since, so the
+//     write did not happen; the very same request is sent again (one CAS on
+//     that root, so at most one of them can ever commit);
+//   - the head moved: a present target cannot tell an unexecuted removal
+//     followed by unrelated commits from a completed one followed by an
+//     identical recreation. The intent is never expanded to a newer root: it
+//     holds read-only (`waiting`, `removal_send_uncertain`, no attempt spent
+//     by the hold itself, backoff doubling up to HOLD_MAX_MS) until verified
+//     membership proves every target absent after the fence (`verified`), a
+//     read finds them absent, or a later explicit removal on the key covers
+//     its targets and supersedes it (`removal_superseded`, cancelled). Time,
+//     sign-in, unblocking, a budget refund, a later send's rejection or a
+//     present read never resolve it.
+//   Only a definite rejection (a received 4xx) of the pinned send itself
+//   records `rejected`, after which a new fenced send may follow. A send
+//   before migration 14 (a fence, no state) is pending with only its fence
+//   revision: at that same root a fresh read and send is equally a single CAS.
 // - reached, unordered: `removal_reached` set, no `removal_done_rev` (the
 //   closing head of the absent read, or every head read since the answer,
 //   failed). It holds read-only (`waiting`, `removal_reached_unordered`, no
@@ -92,7 +112,8 @@
 import { createHash } from 'node:crypto';
 import { encode } from '@atcute/cbor';
 import type { Db } from '../do/db';
-import type { Outcome } from './pds-writer';
+import { UNSETTLED_SQL } from './operations';
+import type { Outcome, XrpcResult } from './pds-writer';
 import type { ExecContext } from './runner';
 
 /** A base32 CIDv1 string, as a PDS reports record CIDs (pds-writer CID_SYNTAX). */
@@ -317,9 +338,11 @@ export type Observation<T> =
   | { kind: 'settled' }
   /**
    * The targets are present and the requested state was never known to be
-   * reached: `head` was read just before them, and a write may be sent.
+   * reached: `head` was read just before them, and a write may be sent. With
+   * `resend`, an earlier send at this very root has an unknown outcome: only
+   * exactly that request may be sent again.
    */
-  | { kind: 'present'; head: RepoHeadRef; found: T }
+  | { kind: 'present'; head: RepoHeadRef; found: T; resend?: PinnedRequest }
   | { kind: 'outcome'; outcome: Outcome };
 
 /**
@@ -364,7 +387,7 @@ export function holdReached(ctx: ExecContext, id: string, cause: Outcome): Outco
  *   incarnation. Nothing ever moves a boundary (keepRemovalDone).
  * - Reached and the read cannot finish: a read-only hold (holdReached).
  */
-export async function observeRemoval<T>(
+export async function observeRemoval<T extends { cid: string }>(
   ctx: ExecContext,
   operationId: string,
   uri: string,
@@ -393,7 +416,23 @@ export async function observeRemoval<T>(
       // After the requested state was reached, a present target is a later
       // incarnation: settled at the boundary already persisted, never written.
       if (reached) return { kind: 'settled' };
-      return { kind: 'present', head: { cid: head.cid, rev: head.rev }, found: found.found };
+      const at = { cid: head.cid, rev: head.rev };
+      const pin = uncertainSend(db, operationId);
+      if (pin !== null) {
+        // The head moved past an unknown send: never a new fence (holdUncertain).
+        if (!sameRoot(pin, at)) return { kind: 'outcome', outcome: holdUncertain(ctx, operationId) };
+        if (pin.request !== null) {
+          // Nothing was committed since the send, so it did not happen yet:
+          // only the very same CAS on that root may go again.
+          if (pin.request.body.swapRecord === found.found.cid) {
+            return { kind: 'present', head: at, found: found.found, resend: pin.request };
+          }
+          // The pinned swapRecord does not match the record at its own root:
+          // that request can never commit, so it changed nothing.
+          rejectSend(db, operationId);
+        }
+      }
+      return { kind: 'present', head: at, found: found.found };
     }
     // Every target is absent: the requested state is reached (persisted now).
     if (!reached) {
@@ -483,6 +522,293 @@ async function bracket<T>(
  * (counted, retried) instead.
  */
 export function afterSend(db: Db, id: string, outcome: Outcome): Outcome {
-  if (outcome.kind === 'waiting' && removalReached(db, id)) return { ...outcome, counted: true };
+  if (outcome.kind === 'waiting' && (removalReached(db, id) || outcome.code === SEND_UNCERTAIN)) {
+    return { ...outcome, counted: true };
+  }
   return outcome.kind === 'waiting' ? { kind: 'transient', code: outcome.code ?? 'remote_state_unavailable' } : outcome;
+}
+
+// ---------------------------------------------------------------------------
+// Unknown sends (migration 14)
+
+/** Why a removal holds read-only: an earlier send's outcome is unknown and the head moved past its root. */
+export const SEND_UNCERTAIN = 'removal_send_uncertain';
+/** Why an unresolved removal was cancelled: a later explicit removal on the key covers its targets. */
+export const SUPERSEDED = 'removal_superseded';
+
+/** The exact request of a removal send: method, body (swapCommit, swapRecord, record) and the head it was fenced by. */
+export type PinnedRequest = { method: string; body: Record<string, unknown>; head: RepoHeadRef };
+
+/** A send of a removal whose outcome is unknown. `request` is null for a send before migration 14 (fence revision only). */
+export type UnknownSend = {
+  head: { cid: string | null; rev: string };
+  request: PinnedRequest | null;
+  atMs: number | null;
+};
+
+function parsePinned(json: string | null): PinnedRequest | null {
+  if (json === null) return null;
+  try {
+    const value = JSON.parse(json) as Partial<PinnedRequest> | null;
+    if (
+      value === null ||
+      typeof value !== 'object' ||
+      typeof value.method !== 'string' ||
+      value.body === null ||
+      typeof value.body !== 'object' ||
+      Array.isArray(value.body) ||
+      typeof value.head?.cid !== 'string' ||
+      typeof value.head?.rev !== 'string'
+    )
+      return null;
+    return { method: value.method, body: value.body, head: { cid: value.head.cid, rev: value.head.rev } };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * SQL over the operations row aliased `d`: a removal with a send whose outcome
+ * is unknown and whose requested state is not known reached (uncertainSend).
+ */
+export function uncertainSendSql(d = 'd'): string {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(d)) throw new RangeError('invalid SQL alias');
+  return `(${d}.kind = 'scrobble.delete' AND ${d}.removal_reached IS NULL AND ${d}.removal_done_rev IS NULL
+    AND (${d}.removal_send_state IS 'pending' OR (${d}.removal_send_state IS NULL AND ${d}.removal_head_rev IS NOT NULL)))`;
+}
+
+/**
+ * The send of removal `id` whose outcome is unknown, or null: none was sent,
+ * the last one was definitely rejected, or the requested state is known
+ * reached (which no unknown send can undo). A pinned request that cannot be
+ * read keeps only the fence revision, so it can never be sent again.
+ */
+export function uncertainSend(db: Db, id: string): UnknownSend | null {
+  const row = db.one<{
+    removal_send_state: string | null;
+    removal_send_json: string | null;
+    removal_send_at_ms: number | null;
+    removal_head_rev: string | null;
+    removal_reached: string | null;
+    removal_done_rev: string | null;
+  }>(
+    `SELECT removal_send_state, removal_send_json, removal_send_at_ms, removal_head_rev, removal_reached,
+       removal_done_rev FROM operations WHERE id = ? AND kind = 'scrobble.delete'`,
+    id,
+  );
+  if (row === null || row.removal_reached !== null || row.removal_done_rev !== null) return null;
+  if (row.removal_send_state === 'pending') {
+    const request = parsePinned(row.removal_send_json);
+    if (request !== null) return { head: request.head, request, atMs: row.removal_send_at_ms };
+    // Unreadable: never sendable again; the fence (or nothing) is its root.
+    return { head: { cid: '', rev: row.removal_head_rev ?? '' }, request: null, atMs: row.removal_send_at_ms };
+  }
+  if (row.removal_send_state === null && row.removal_head_rev !== null) {
+    return { head: { cid: null, rev: row.removal_head_rev }, request: null, atMs: row.removal_send_at_ms };
+  }
+  return null;
+}
+
+/** Whether `head` is still the root an unknown send was fenced by (nothing committed since). */
+function sameRoot(pin: UnknownSend, head: RepoHeadRef): boolean {
+  return pin.head.rev === head.rev && (pin.head.cid === null || pin.head.cid === head.cid);
+}
+
+/**
+ * Pins the exact request of a removal's next send and its send fence, before
+ * the write is awaited (one transaction). Answers whether this is a new
+ * ORIGINAL send (no unknown send before it), whose definite rejection may be
+ * recorded (rejectSend). Under an existing unknown send (the exact re-send
+ * at its root, or a pre-migration-14 send at its fence revision) it is not:
+ * a refusal of a later send proves nothing about the earlier one.
+ */
+export function pinSend(db: Db, id: string, request: PinnedRequest, nowMs: number): boolean {
+  return db.tx(() => {
+    const row = db.one<{ state: string | null; json: string | null; fence: string | null }>(
+      `SELECT removal_send_state AS state, removal_send_json AS json, removal_head_rev AS fence
+       FROM operations WHERE id = ?`,
+      id,
+    );
+    const unknown = row !== null && (row.state === 'pending' || (row.state === null && row.fence !== null));
+    if (!(row?.state === 'pending' && parsePinned(row.json) !== null)) {
+      db.run(
+        `UPDATE operations SET removal_send_state = 'pending', removal_send_json = ?,
+           removal_send_at_ms = CASE WHEN ? THEN coalesce(removal_send_at_ms, ?) ELSE ? END
+         WHERE id = ? AND kind = 'scrobble.delete' AND state = 'running'`,
+        JSON.stringify(request),
+        unknown ? 1 : 0,
+        nowMs,
+        nowMs,
+        id,
+      );
+    }
+    keepRemovalHead(db, id, request.head.rev);
+    return !unknown;
+  });
+}
+
+/**
+ * A received refusal: the PDS answered this write with a 4xx (InvalidSwap,
+ * RecordNotFound, a validation, scope or sign-in error, a rate limit), so it
+ * changed nothing. A 5xx, a transport failure or abort, or a 2xx whose body
+ * does not answer the request is unknown.
+ */
+export function definitelyRejected(result: XrpcResult): boolean {
+  if (result.ok) return false;
+  const status = result.failure.status;
+  return typeof status === 'number' && status >= 400 && status < 500;
+}
+
+/** Records that the pinned original send was definitely rejected: a new fenced send may follow. */
+export function rejectSend(db: Db, id: string): void {
+  db.run(
+    `UPDATE operations SET removal_send_state = 'rejected', removal_send_json = NULL
+     WHERE id = ? AND kind = 'scrobble.delete' AND removal_send_state = 'pending'`,
+    id,
+  );
+}
+
+/**
+ * The read-only hold of a removal whose unknown send the head moved past: a
+ * `waiting` outcome whose delay doubles with the time since the send was
+ * pinned, from HEAD_RETRY_MS up to HOLD_MAX_MS. Nothing but evidence about
+ * the targets (an absence, a verified absence after the fence) or a covering
+ * later intent (supersedeUncertain) ends it.
+ */
+export function holdUncertain(ctx: ExecContext, id: string): Outcome {
+  const db = ctx.m.db;
+  const now = ctx.m.clock.nowMs();
+  db.run('UPDATE operations SET removal_send_at_ms = ? WHERE id = ? AND removal_send_at_ms IS NULL', now, id);
+  const at = db.one<{ at: number | null }>('SELECT removal_send_at_ms AS at FROM operations WHERE id = ?', id)?.at;
+  const elapsed = at == null ? 0 : Math.max(0, now - at);
+  return {
+    kind: 'waiting',
+    untilMs: now + Math.min(HOLD_MAX_MS, Math.max(HEAD_RETRY_MS, elapsed)),
+    code: SEND_UNCERTAIN,
+  };
+}
+
+/** An uncertain hold met after this attempt sent a write keeps that attempt counted. */
+export function countedIfSent(outcome: Outcome, sent: boolean): Outcome {
+  return sent && outcome.kind === 'waiting' && outcome.code === SEND_UNCERTAIN
+    ? { ...outcome, counted: true }
+    : outcome;
+}
+
+/**
+ * The unsettled operations a new removal on a key waits for: all of them
+ * except removals holding an unknown send. Those never write into a later
+ * incarnation and may hold indefinitely, so an explicit later intent must not
+ * be stranded behind them.
+ */
+export function removalPredecessors(db: Db, did: string, collection: string, rkey: string): string[] {
+  return db
+    .all<{ id: string }>(
+      `SELECT d.id FROM operations d WHERE d.did = ? AND d.collection = ? AND d.rkey = ? AND d.state IN ${UNSETTLED_SQL}
+         AND NOT ${uncertainSendSql('d')} ORDER BY d.rowid`,
+      did,
+      collection,
+      rkey,
+    )
+    .map((r) => r.id);
+}
+
+function removalTargets(db: Db, id: string): string[] {
+  const ids = db
+    .all<{ listen_id: string }>('SELECT listen_id FROM batch_delete_listens WHERE operation_id = ?', id)
+    .map((r) => r.listen_id);
+  return ids.length === 0 ? ['*'] : ids;
+}
+
+/**
+ * Called in the transaction that admits the explicit removal `freshId`:
+ * every earlier unsettled removal on the same key that holds an unknown send
+ * and whose targets are all covered by removals admitted after it (this one
+ * included; `*` covers every listen) is superseded: cancelled
+ * (`removal_superseded`, `removal_superseded_by`), so it never sends again,
+ * while the later intents carry the hiding and the writes. One only partly
+ * covered keeps holding its targets. Returns the superseded ids.
+ */
+export function supersedeUncertain(db: Db, freshId: string, nowMs: number): string[] {
+  const fresh = db.one<{ did: string; collection: string; rkey: string | null; seq: number }>(
+    `SELECT did, collection, rkey, rowid AS seq FROM operations WHERE id = ? AND kind = 'scrobble.delete'`,
+    freshId,
+  );
+  if (fresh === null || fresh.rkey === null) return [];
+  const olds = db.all<{ id: string; seq: number }>(
+    `SELECT d.id, d.rowid AS seq FROM operations d
+     WHERE d.did = ? AND d.collection = ? AND d.rkey = ? AND d.rowid < ? AND d.state IN ${UNSETTLED_SQL}
+       AND ${uncertainSendSql('d')} ORDER BY d.rowid`,
+    fresh.did,
+    fresh.collection,
+    fresh.rkey,
+    fresh.seq,
+  );
+  const superseded: string[] = [];
+  for (const old of olds) {
+    const covered = new Set(
+      db
+        .all<{ id: string }>(
+          `SELECT id FROM operations WHERE did = ? AND collection = ? AND rkey = ? AND kind = 'scrobble.delete'
+             AND rowid > ? AND state IN ('queued','running','blocked','succeeded')`,
+          fresh.did,
+          fresh.collection,
+          fresh.rkey,
+          old.seq,
+        )
+        .flatMap((later) => removalTargets(db, later.id)),
+    );
+    if (!covered.has('*') && !removalTargets(db, old.id).every((target) => covered.has(target))) continue;
+    const cancelled = db.run(
+      `UPDATE operations SET state = 'cancelled', last_error = ?, removal_superseded_by = ?, updated_at_ms = ?
+       WHERE id = ? AND state IN ${UNSETTLED_SQL}`,
+      SUPERSEDED,
+      freshId,
+      nowMs,
+      old.id,
+    ).rowsWritten;
+    if (cancelled === 1) superseded.push(old.id);
+  }
+  return superseded;
+}
+
+/**
+ * Whether the verified projection `projectionUri` holds a version newer than
+ * the fence of removal `id`, which holds an unknown send: a provably later
+ * verified incarnation, so a repeated removal request of it is a new intent,
+ * not a duplicate to absorb into that unresolved one.
+ */
+export function newerThanUncertain(db: Db, id: string, projectionUri: string): boolean {
+  const pin = uncertainSend(db, id);
+  if (pin === null) return false;
+  const row = db.one<{ revision: string }>('SELECT revision FROM scrobbles WHERE uri = ?', projectionUri);
+  return row !== null && row.revision > pin.head.rev;
+}
+
+/**
+ * The newest unsettled removal on a key that covers `listenId` (or the
+ * single record) and holds an unknown send, or null.
+ */
+export function uncertainCover(
+  db: Db,
+  did: string,
+  collection: string,
+  rkey: string,
+  listenId?: string,
+): string | null {
+  const batch = collection.endsWith('.scrobbleBatch');
+  return (
+    db.one<{ id: string }>(
+      `SELECT d.id FROM operations d WHERE d.did = ? AND d.collection = ? AND d.rkey = ? AND d.state IN ${UNSETTLED_SQL}
+         AND ${uncertainSendSql('d')}
+         AND (? = 0 OR EXISTS (SELECT 1 FROM batch_delete_listens b WHERE b.operation_id = d.id
+           AND b.listen_id IN (?, '*')))
+       ORDER BY d.rowid DESC LIMIT 1`,
+      did,
+      collection,
+      rkey,
+      batch ? 1 : 0,
+      listenId ?? '',
+    )?.id ?? null
+  );
 }

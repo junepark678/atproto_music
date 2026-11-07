@@ -9,17 +9,22 @@ import {
   newOperationId,
   outboxCollections,
   prepare as prepareBatchRecord,
-  unsettledAt,
 } from './operations';
 import { type Failure, failureOutcome, type Outcome, reportedCommitRev } from './pds-writer';
 import {
   afterSend,
   answersRemoval,
+  countedIfSent,
+  definitelyRejected,
   keepRemovalCommit,
   keepRemovalDone,
-  keepRemovalHead,
   markReached,
   observeRemoval,
+  type PinnedRequest,
+  pinSend,
+  rejectSend,
+  removalPredecessors,
+  supersedeUncertain,
   type TargetRead,
 } from './removal-fence';
 import type { ExecContext, Executor } from './runner';
@@ -300,7 +305,8 @@ export function enqueueBatchListenDelete(
         collection,
         rkey,
         dueAt: now,
-        predecessors: unsettledAt(m.db, args.did, collection, rkey),
+        // Never behind a removal holding an unknown send (removal-fence.ts).
+        predecessors: removalPredecessors(m.db, args.did, collection, rkey),
       },
       now,
     );
@@ -376,6 +382,9 @@ export function enqueueBatchListenDelete(
         cid,
       );
     }
+    // An earlier unresolved removal whose targets this intent covers never
+    // sends again; this one carries the hiding and the write.
+    supersedeUncertain(m.db, inserted.id, now);
     bumpStatsVersion(m.db, args.did);
     return inserted;
   });
@@ -472,39 +481,55 @@ async function removeIds(op: OperationRow, ctx: ExecContext): Promise<Outcome> {
   if (ids.length === 0) return { kind: 'permanent', code: 'missing_batch_delete_intent' };
   const wanted = new Set(ids);
   const read = () => readTargets(op, ctx, uri, wanted);
+  let sent = false;
   for (let attempt = 0; attempt < 5; attempt++) {
     // Head first, then the container: the CAS below commits only while this
     // head is current, so the container read is the state the write replaces.
     // Once the requested state is known to be reached this answers only
-    // `settled` or an outcome (a read-only hold): never a write.
+    // `settled` or an outcome (a read-only hold): never a write. An earlier
+    // send with an unknown outcome allows only its own exact request, and
+    // only while the head is still its root (removal-fence.ts).
     const seen = await observeRemoval(ctx, op.id, uri, ids, read);
-    if (seen.kind === 'outcome') return seen.outcome;
+    if (seen.kind === 'outcome') return countedIfSent(seen.outcome, sent);
     if (seen.kind === 'settled') return { kind: 'succeeded', uri, hints };
     const { head, found } = seen;
-    const remoteListens = found.listens;
-    const kept = wanted.has('*') ? [] : remoteListens.filter((item) => !selectedIn([item], wanted));
-    const budget = ctx.afford(kept.length === 0 ? 1 : 2);
-    if (budget !== null) return budget;
+    let request: PinnedRequest;
+    if (seen.resend !== undefined) {
+      request = seen.resend;
+    } else {
+      const remoteListens = found.listens;
+      const kept = wanted.has('*') ? [] : remoteListens.filter((item) => !selectedIn([item], wanted));
+      const record = kept.length === 0 ? undefined : { ...found.record, listens: kept };
+      request = {
+        method: record === undefined ? 'com.atproto.repo.deleteRecord' : 'com.atproto.repo.putRecord',
+        body:
+          record === undefined
+            ? { repo: op.did, collection: op.collection, rkey: op.rkey, swapCommit: head.cid, swapRecord: found.cid }
+            : {
+                repo: op.did,
+                collection: op.collection,
+                rkey: op.rkey,
+                record,
+                swapCommit: head.cid,
+                swapRecord: found.cid,
+              },
+        head,
+      };
+    }
+    const record = request.body.record as object | undefined;
+    const budget = ctx.afford(record === undefined ? 1 : 2);
+    if (budget !== null) return countedIfSent(budget, sent);
     // Persisted before the send: a restart after this write keeps the exact
-    // CAS target and its head fence even if the PDS committed and the success
-    // response was lost.
+    // request (swapCommit, swapRecord, bytes) and its head fence even if the
+    // PDS committed and the success response was lost.
     recordRemovalEvidence(ctx.m.db, op.id, found.cid);
-    keepRemovalHead(ctx.m.db, op.id, head.rev);
     ctx.persist({ swapCid: found.cid });
-    const record = kept.length === 0 ? undefined : { ...found.record, listens: kept };
-    const body =
-      record === undefined
-        ? { repo: op.did, collection: op.collection, rkey: op.rkey, swapCommit: head.cid, swapRecord: found.cid }
-        : {
-            repo: op.did,
-            collection: op.collection,
-            rkey: op.rkey,
-            record,
-            swapCommit: head.cid,
-            swapRecord: found.cid,
-          };
-    const method = record === undefined ? 'com.atproto.repo.deleteRecord' : 'com.atproto.repo.putRecord';
-    const result = await ctx.xrpc.procedure(method, body, record === undefined ? 'delete' : 'put');
+    const original = pinSend(ctx.m.db, op.id, request, ctx.m.clock.nowMs());
+    sent = true;
+    const result = await ctx.xrpc.procedure(request.method, request.body, record === undefined ? 'delete' : 'put');
+    // Only a received refusal of this very send proves it changed nothing
+    // (a refusal of a re-send says nothing about the first one).
+    if (original && definitelyRejected(result)) rejectSend(ctx.m.db, op.id);
     // InvalidSwap: something (this record or any other) was committed after
     // the head; nothing was written. Read a fresh head and container.
     if (!result.ok && result.failure.code === 'repository_changed') continue;
