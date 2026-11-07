@@ -363,7 +363,7 @@
      "worker/test/storage/schema-v2.test.ts › deleting a users row cascades its loves and deleting a linked_accounts row cascades its forward_outbox rows",
      "worker/test/storage/schema-v2.test.ts › a v1 database seeded with the read-model fixture migrates to v2 with every v1 row byte-identical and the new scrobbles columns NULL",
      "worker/test/storage/schema-v2.test.ts › EXPLAIN QUERY PLAN for loves by owner, due operations, due forward rows and import items by job uses the new indexes",
-     "worker/test/storage/migrate.test.ts › SCHEMA_VERSION is 4; follow-proof and delete-target indexes are additive and keep v2 compatibility",
+     "worker/test/storage/migrate.test.ts › SCHEMA_VERSION includes additive batch provenance and remains compatible with v2 code",
      "worker/test/storage/schema-v2.test.ts › schema_compat holds one row with min_compatible_version 2",
      "worker/test/storage/schema-v2.test.ts › every migration after 2 contains only CREATE TABLE, CREATE INDEX and ALTER TABLE ADD COLUMN statements",
      "worker/test/harness/local-index.test.ts › the ready status and the schema_migrations ledger equal SCHEMA_VERSION and one row per entry of MIGRATIONS",
@@ -1243,7 +1243,7 @@
      "N1-11",
      "N1-12"
     ],
-    "description": "ADR 0005 §6.3, §6.5 and Slice B batch projection. Existing collection order remains stable and scrobbleBatch is appended last for Jetstream/discovery numeric cursor compatibility. apply-record and apply-snapshot project verified batch entries under fragment URIs while record_state remains container-keyed; common visibility gives a matching single precedence and restores a preserved batch row after single deletion. Public reads and export preserve optional recordUri/listenId provenance. Migration 4 adds nullable provenance, indexed cross-format visibility, and listen_removals for the following removal slice. Batch inputs use the shared DAG-CBOR and exact UTF-8 request size helper; invalid entries are isolated and an empty valid set excludes the container. The batch schema publication gate remains closed.",
+    "description": "ADR 0005 §6.3, §6.5 and Slice B batch projection. Existing collection order remains stable and scrobbleBatch is appended last for Jetstream/discovery numeric cursor compatibility. apply-record and apply-snapshot project verified batch entries under fragment URIs while record_state remains container-keyed; common visibility gives a matching single precedence and restores a preserved batch row after single deletion. Public reads and export preserve optional recordUri/listenId provenance. Migration 5 adds nullable provenance, indexed cross-format visibility, and listen_removals for the following removal slice. Batch inputs use the shared DAG-CBOR and exact UTF-8 request size helper; invalid entries are isolated and an empty valid set excludes the container. The batch schema publication gate remains closed.",
     "tests": [
      "worker/test/config.test.ts › collections for an owned prefix are exactly scrobble, follow, settings and love",
      "worker/test/node/ingest/jetstream-collections.test.ts › appends scrobbleBatch after the established collection order",
