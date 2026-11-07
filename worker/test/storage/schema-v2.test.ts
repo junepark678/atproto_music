@@ -431,7 +431,15 @@ const NEW_SCROBBLE_COLUMNS = cols<ScrobbleV2Columns>({
 
 /** New named indexes: table, unique, partial, [column, desc] in key order. */
 const NEW_INDEXES: Record<string, [string, number, number, Array<[string, number]>]> = {
-  operations_scrobble_delete_target: ['operations', 0, 1, [['did', 0], ['rkey', 0]]],
+  operations_scrobble_delete_target: [
+    'operations',
+    0,
+    1,
+    [
+      ['did', 0],
+      ['rkey', 0],
+    ],
+  ],
   scrobbles_batch_visibility: [
     'scrobbles',
     0,
