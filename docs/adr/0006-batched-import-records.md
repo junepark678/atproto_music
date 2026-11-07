@@ -489,6 +489,11 @@ Accordingly:
   under 1,000,000 bytes holds at most 8,403 valid entries (ours at most
   8,314), and the count never binds before the bytes.
 - **Ingest.** A verified container is accepted up to 2,000,000 DAG-CBOR bytes.
+- **Jetstream.** The UTF-8 wire allowance is 1 MiB, enough for supported
+  full containers and their event envelopes. Only validated identity fields
+  become hints; the record body is never authoritative. Signed proof
+  verification applies external creates and updates without needing a local
+  write hint or snapshot. Larger or malformed frames remain rejected.
 - **Packer.** The packer sums exact additive sizes and verifies each group
   boundary against the whole-group encoding (linear time).
 - **Writer.** Each slice creates at most one container, the longest fitting

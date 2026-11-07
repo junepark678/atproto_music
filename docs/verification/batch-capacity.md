@@ -108,10 +108,10 @@ TIDs now come from the module clock, so they stay strictly increasing across sli
 - **Partial removal** (`putRecord` with `swapCommit` and `swapRecord`):
   - The pin gate now measures the exact put body (≤ 990,000) and the record's DAG-CBOR (≤ 990,000).
   - Tested on a full container: the put carried both swaps, stayed under the ceiling, and kept every other entry id in order.
-- **Jetstream** (ingest parser drops messages over 64 KiB as `oversize`):
-  - A full container's create or update event (about 1 MB of record JSON) is always dropped there. This already held for containers whose JSON passed 64 KiB under the old 100,000-byte body limit.
-  - Our own writes do not depend on it: outbox success queues local verify hints (`outbox/runner.ts` `queueHints`).
-  - Deletes are small events and still arrive. Other clients' edits of large containers are seen through snapshots.
+- **Jetstream** (1 MiB UTF-8 wire cap):
+  - A supported container's create/update event fits with its envelope. The parser retains only validated hint identity and cursor fields, never the untrusted record body.
+  - External full-container creates and updates queue verification without local-write hints or snapshots. A signed owner proof supplies the actual listen fields, including when the event body lies about them.
+  - Exact-limit frames are accepted; one-byte-over and multibyte-over frames are rejected before JSON parsing. Malformed frames cannot advance the checkpoint or queue hints. The cap remains finite, and collection/DID/key validation is unchanged.
 - **Adjacent containers**: containers always go as their own `createRecord`, never in `applyWrites` (the runner batches only the single scrobble collection). Tested: two full containers sent as two creates, zero `applyWrites`.
 
 ## Representative measurements
@@ -160,6 +160,12 @@ Focused runs used `nice -n 15 taskset -c 18,19 npx vitest run … --maxWorkers 1
 - `worker/test/write/apply-batch.test.ts`: a 1.5 MB verified container applies; over 2,000,000 bytes is excluded.
 - `worker/test/node/journey/import-journey.test.ts`: 1,050 long-name listens in three containers, including the mid-write restart.
 - `worker/test/node/outbox/*` batch, removal, uncertain-send and ordering suites: unchanged and passing.
+- `worker/test/ingest/batch-wire.test.ts`: a byte-filled external create and update
+  converge through production `onMessage` and signed-proof drain without snapshots
+  or local-write hints. A forged wire track is ignored; malformed and over-limit
+  frames queue no hints and leave the checkpoint unchanged. The targeted
+  Jetstream/socket set passed 24 tests across seven files; typecheck, scoped
+  Biome, contracts, case-map validation and diff checks passed.
 
 ## Migration and gate implications
 
@@ -176,5 +182,7 @@ Focused runs used `nice -n 15 taskset -c 18,19 npx vitest run … --maxWorkers 1
 - **Margin and proxies.** The 1 % margin assumes no intermediary rewrites or re-encodes bodies. A proxy with a lower body limit than the PDS would reject full containers with 413. That is a definite rejection, so the container is split into halves, as before.
 - **`getRepo` fallback (32 MiB).** It cannot hold the repository of a very large import (about 116,700 representative listens are about 53 MB of record blocks). This depends on total listen bytes, not container size, so it also held under the old packing. `getBlocks` (bisected) remains the primary path.
 - **Records over 1 MiB.** Containers by other writers between about 1,048,000 and 2,000,000 bytes (only via non-JSON paths such as `importRepo`) cannot be proof-read under the 1 MiB `getRecord` cap. They are projected only through snapshots.
-- **Jetstream.** Full-container events are always dropped as oversize (see above).
+- **Jetstream.** Frames over 1 MiB remain rejected. This bounded allowance covers
+  supported JSON-written containers and their envelopes; larger non-JSON import
+  records retain the snapshot-only limitations described above.
 - **Representative fixture.** It is not a measurement of real users. Longer metadata lowers listens per container, down to 234 at the maximal fixture.

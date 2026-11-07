@@ -2069,6 +2069,9 @@
     "id": "N12-01",
     "title": "Byte-filled scrobbleBatch containers at verified PDS write limits",
     "files": [
+     "packages/atproto/src/jetstream/events.ts",
+     "packages/atproto/test/jetstream-events.test.ts",
+     "worker/test/ingest/batch-wire.test.ts",
      "packages/core/src/scrobble-batch.ts",
      "packages/atproto/src/scrobble-batch-size.ts",
      "packages/atproto/src/snapshot/getblocks-source.ts",
@@ -2115,6 +2118,7 @@
      "packages/atproto/test/record-proof.test.ts › a container packed to the write limit verifies inside the 1 MiB getRecord cap with a deep MST path",
      "packages/atproto/test/snapshot-walker.test.ts › getBlocks bisects a batch of byte-filled scrobbleBatch containers that overflows the 8 MiB body cap",
      "worker/test/node/imports/batch-capacity.test.ts › measures the representative fixture through mapping, staging and the writer",
+     "worker/test/ingest/batch-wire.test.ts › full external batch create and update queue hints and verify without snapshots or local writes",
      "worker/test/node/imports/batch-capacity.test.ts › bounds per-container capacity with minimal and maximal fixtures and projects 1,000 and 116,700 representative listens",
      "worker/test/node/imports/writer.test.ts › staged items become import-priority operations within the budget; written, duplicates and invalid counts are exact; cancel stops new operations",
      "worker/test/node/imports/writer.test.ts › fills containers by bytes past 200 and past the 1,000-item slice, with a short container only at the job end",
