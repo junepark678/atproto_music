@@ -29,7 +29,11 @@
 // - Entries whose CID equals the stored CID keep their projection row, but
 //   their record_state revision is rewritten to headRev (the Rust oracle
 //   rewrites every snapshot row to the snapshot revision), so the per-URI
-//   guard covers the verified head for them too.
+//   guard covers the verified head for them too. A scrobble or batch
+//   container is reaffirmed like a live proof of the same bytes
+//   (apply-record reaffirmRecordTarget): its projection rows' revisions,
+//   verified membership and, across a succeeded removal's cutoff, statistics
+//   move to headRev with it, so a later hint at that head is a true no-op.
 // - Sweep: rows of the DID whose URI is in `(at://did/lo, at://did/hi]`, whose
 //   key is absent from the chunk and whose revision is < headRev are deleted
 //   and recorded `absent` at headRev.
@@ -65,8 +69,9 @@ import { toMs, toStorage } from '@atmusic/core/timestamp';
 import type { Db } from '../db';
 import { noteIndexed } from '../status';
 import { isSuppressed, loadUser, raiseMaxRev } from './account-state';
-import { type ApplyOptions, applyRecordTarget } from './apply-record';
+import { type ApplyOptions, applyRecordTarget, reaffirmRecordTarget } from './apply-record';
 import {
+  type CollectionKind,
   collectionKind,
   guardRevision,
   readRecordState,
@@ -156,7 +161,25 @@ function raiseFloors(db: Db, did: string, headRev: string): void {
  * reason unchanged). A projection row without record_state is a verified
  * present record.
  */
-function reaffirm(db: Db, c: SnapshotChunk, uri: string, collection: string, cid: string): void {
+function reaffirm(
+  db: Db,
+  c: SnapshotChunk,
+  target: { uri: string; collection: string; rkey: string; kind: CollectionKind },
+  cid: string,
+): void {
+  const { uri, collection, rkey, kind } = target;
+  if (kind === 'scrobble' || kind === 'scrobbleBatch') {
+    // The same bytes at a newer revision: everything a live proof of them
+    // writes (projection revisions, membership, statistics), not only the
+    // per-URI revision, so a removal cutoff they cross is decided as it would
+    // be live and a later hint at this head is truly a no-op.
+    reaffirmRecordTarget(db, { did: c.did, kind, collection, rkey, uri, rev: c.headRev }, cid, {
+      receiptNs: c.receiptNs,
+      prefix: c.prefix,
+      nowNs: c.nowNs,
+    });
+    return;
+  }
   const verifiedAt = toStorage(c.nowNs);
   if (readRecordState(db, uri) === null) {
     writeRecordState(db, {
@@ -233,7 +256,7 @@ export function applySnapshotChunk(db: Db, c: SnapshotChunk): ChunkResult {
       throw new Error(`snapshot entry ${e.key} has no record body and an unknown CID`);
     }
     if (stored === e.cid) {
-      reaffirm(db, c, uri, collection, e.cid);
+      reaffirm(db, c, { uri, collection, rkey, kind }, e.cid);
       res.unchanged++;
       continue;
     }
