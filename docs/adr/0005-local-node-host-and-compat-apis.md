@@ -296,7 +296,7 @@ The Workers adapter is **retired** (wave 7, N7-01). Everything runs on Node 26. 
 7. `listen`.
 8. `systemd-notify --ready`.
 
-**Exit codes:** 0 after SIGTERM, 78 for configuration (never restarted: `RestartPreventExitStatus=78 75`), 75 when the database is locked by another instance, 1 otherwise.
+**Exit codes:** 0 after SIGTERM, 78 for configuration (never restarted: `RestartPreventExitStatus=78`), 75 when the database is locked by another instance (restarted with backoff, so a replacement starts once a stuck predecessor releases the lock), 1 otherwise.
 
 **Request logs** record method, route pattern, status, duration and request id. They **never contain a query string or body on any route**; the only request parameter logged is the Last.fm `method` value on `/2.0`, from a fixed allowlist of method names.
 
@@ -1230,7 +1230,7 @@ RuntimeDirectory=atmusic
 RuntimeDirectoryMode=0700
 LoadCredentialEncrypted=secrets:%E/atmusic/secrets.cred
 Restart=on-failure
-RestartPreventExitStatus=78 75
+RestartPreventExitStatus=78
 RestartSec=2s
 RestartSteps=5
 RestartMaxDelaySec=2min
@@ -1278,7 +1278,7 @@ WantedBy=default.target
 
 **Optional `atmusic.socket`** (`ListenStream=127.2.0.1:8888`, `Accept=no`) keeps the port open across restarts, so a tunnel sees queued connections instead of 502s. Because an inbound connection starts the service, every tool that must keep the service stopped (restore, §14.5) stops the socket unit first.
 
-**Exit codes and restarts:** 78 (configuration) and 75 (database locked by another instance) are never restarted; `TimeoutStartSec=15min` plus `EXTEND_TIMEOUT_USEC` covers a long pre-migration backup and migration (§3.10).
+**Exit codes and restarts:** 78 (configuration) is never restarted; 75 (database locked by another instance) is restarted with the normal backoff and start limit, so a replacement starts once a predecessor stuck after a watchdog kill releases the lock; `TimeoutStartSec=15min` plus `EXTEND_TIMEOUT_USEC` covers a long pre-migration backup and migration (§3.10).
 
 **Linger:** `loginctl enable-linger` is required. It is allowed for self without authentication on this host (polkit `set-self-linger`). With linger, the user manager starts at boot without the Plasma session environment, so the unit sets everything it needs and does not depend on `graphical-session.target`.
 
@@ -1675,7 +1675,7 @@ Taken in this round, because each was cheap and touched a section already being 
 - `recording-feedback` resolving MSIDs through now playing and queued operations, and 200 for an unknown MSID (§8.6; N3-06).
 - Last.fm ignored code 5 re-queued at the next UTC day, and ListenBrainz rows with their own 30-day expiry (§12.3; N3-08).
 - `getMobileSession` limit keyed by (username, IP), so no targeted lockout (§7.3, §13; N3-03).
-- `RestartPreventExitStatus=78 75` and the distinct exit code 75 (§3.10, §14.1; N4-02).
+- `RestartPreventExitStatus=78` and the distinct exit code 75, which is restarted with backoff (§3.10, §14.1; N4-02).
 - AAD for linked credentials and issued app secrets (§3.8; N1-08). The admin **reseal** command stays deferred.
 - Same-UID exposure documented, dedicated-user option, `npm ci --ignore-scripts` (§13, §14.3; N4-02).
 - Approval page labels unverified client names and shows the request time (§7.3; N5-01).
