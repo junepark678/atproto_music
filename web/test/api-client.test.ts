@@ -461,3 +461,40 @@ it('every api/examples response decodes and a changed field type is rejected', a
   expect(decoded).toBe(51);
   expect(rejected).toBeGreaterThan(300);
 });
+
+const INDEXING = { state: 'current', caughtUp: true, lastIndexedAt: '2026-11-07T15:25:53.327000000Z', lagSeconds: 280 };
+
+it('decodes scrobbleBatch listens (uri with #listenId fragment, recordUri, listenId) and rejects other fragments', async () => {
+  const recordUri = `at://${ALICE}/dev.example.music.scrobbleBatch/3mzq7fxmglkbz`;
+  const listen = {
+    uri: `${recordUri}#3mzq7fxnvhybz`,
+    recordUri,
+    listenId: '3mzq7fxnvhybz',
+    cid: 'bafyreifq3iqtuottueavzumibkvopa4fk2xu25fhwl5nzj6hzg3xi3krta',
+    did: ALICE,
+    revision: '3mzq7g3kvd42g',
+    artist: 'Say Anything',
+    track: 'Slowly, Through a Vector',
+    album: '...is a Real Boy',
+    listenedAt: '2026-11-07T12:51:11.000000000Z',
+    createdAt: '2026-11-07T15:25:47.895000000Z',
+    durationSeconds: 281,
+    indexedAt: '2026-11-07T15:25:53.327000000Z',
+  };
+  const ok = fakeServer(() =>
+    json(200, { items: [listen], nextCursor: null, asOf: '2026-11-07T15:29:29.348000000Z', indexing: INDEXING }),
+  );
+  const page = await ok.client.feed({ scope: 'global' });
+  expect(page.items[0]).toEqual(listen);
+
+  const single = `at://${ALICE}/dev.example.music.scrobble/3mzq7fxmglkbz#3mzq7fxnvhybz`;
+  const bad = fakeServer(() =>
+    json(200, {
+      items: [{ ...listen, uri: single }],
+      nextCursor: null,
+      asOf: '2026-11-07T15:29:29.348000000Z',
+      indexing: INDEXING,
+    }),
+  );
+  await expect(bad.client.feed({ scope: 'global' })).rejects.toBeInstanceOf(ApiDecodeError);
+});
