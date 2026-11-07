@@ -1912,7 +1912,14 @@
      "worker/src/listenbrainz/token-routes.ts",
      "worker/src/outbox/batch-delete-ops.ts",
      "worker/src/outbox/delete-ops.ts",
+     "worker/src/outbox/operations.ts",
      "worker/src/outbox/runner.ts",
+     "worker/src/outbox/scrobble-ops.ts",
+     "worker/src/imports/rebatch.ts",
+     "worker/src/do/write/apply-snapshot.ts",
+     "worker/src/do/ingest/notify.ts",
+     "worker/test/write/apply-batch.test.ts",
+     "worker/test/http/record-status.test.ts",
      "worker/test/node/http/writes.test.ts",
      "worker/test/node/imports/writer.test.ts",
      "worker/test/node/lastfm/write-methods.test.ts",
@@ -1923,7 +1930,7 @@
      "worker/test/storage/schema-v2.test.ts"
     ],
     "dependsOn": ["N10-01"],
-    "description": "ADR 0006 slice D. Support owner-only item fragment and whole-container deletion for scrobbleBatch through durable per-listen intents, same-container serialization, read/CAS putRecord or final deleteRecord, ambiguous response readback, and immediate collection-aware suppression. Keep verified projection rows so later proofs can replace or restore them. Route Last.fm and ListenBrainz indexed/pending batch lookups to exact item targets; add migration 7 removal outcome mapping and record_uri lookup index. Rewrite never-sent batches after async preparation and exact snapshot recheck; chain running removals across child splits and protect colliding records. Clear only removed-item payload/key state and account for removal timestamps without changing sibling counters. Document AppView interoperability limits, exact publication/scope rollout, migration and rollback. No web/UI work or live publication/PDS activity.",
+    "description": "ADR 0006 slice D. Support owner-only item fragment and whole-container deletion for scrobbleBatch through durable per-listen intents, same-container serialization, read/CAS putRecord or final deleteRecord, ambiguous response readback, and immediate collection-aware suppression. Keep verified projection rows so later proofs can replace or restore them. Route Last.fm and ListenBrainz indexed/pending batch lookups to exact item targets; add migration 7 removal outcome mapping and record_uri lookup index. Rewrite never-sent batches after async preparation and exact snapshot recheck; chain running removals across child splits and protect colliding records. Clear only removed-item payload/key state and account for removal timestamps without changing sibling counters. Document AppView interoperability limits, exact publication/scope rollout, migration and rollback. Acceptance fixes: snapshots sweep absent containers with stats invalidation; additive migration 9 keeps durable removal CID evidence (admission, pre-CAS, unconfirmed read-back, settlement projection) so settled removals stay hidden through delayed proofs while verified recreations reappear; legacy unknown-send import singles rebatch only after two absence reads one recheck window apart; fragment status never derives absence from local suppression; Last.fm removal ignores receipts that no longer cover a visible incarnation; only a classified permanent scope denial holds the batch lane. No web/UI work or live publication/PDS activity.",
     "tests": [
      "worker/test/node/outbox/batch.test.ts › removes one indexed batch listen with CAS and preserves sibling and unknown remote fields",
      "worker/test/node/outbox/batch.test.ts › re-reads after InvalidSwap and preserves a concurrent remote edit while removing only its target",
@@ -1935,7 +1942,16 @@
      "worker/test/node/lastfm/write-methods.test.ts › library.removeScrobble cancels a still-queued create at that second, chains a delete after a running one, deletes an indexed record, and answers 7 'Invalid resource specified' when nothing matches",
      "worker/test/node/listenbrainz/validate-token.test.ts › delete-listen and playing-now/delete require a token and act only on the token owner's data; a client mismatch is 404",
      "worker/test/node/migrate-node.test.ts › migration 4 adds the delete target index to a populated v3 file without changing rows or the compatibility floor",
-     "worker/test/storage/schema-v2.test.ts › migration 2 creates exactly the ADR 0005 §6.4 tables, scrobbles columns and indexes, and TABLES lists every table"
+     "worker/test/storage/schema-v2.test.ts › migration 2 creates exactly the ADR 0005 §6.4 tables, scrobbles columns and indexes, and TABLES lists every table",
+     "worker/test/write/apply-batch.test.ts › sweeps a container absent from a newer signed snapshot, deleting every listen and invalidating stats",
+     "worker/test/node/outbox/batch.test.ts › keeps a settled partial removal hidden at its admission and pre-write CIDs, through a delayed older proof, until a verified recreation",
+     "worker/test/node/outbox/batch.test.ts › a $name removal reconciled after its tenth attempt keeps the pre-CAS evidence and hides admission and delayed proofs",
+     "worker/test/node/outbox/batch.test.ts › a 5xx $nsid whose body names a scope error stays retryable without a scope hold, resend loop or lost CAS evidence",
+     "worker/test/node/outbox/batch.test.ts › a classified 403 $error denial of $nsid holds the batch lane for re-consent and keeps the intent",
+     "worker/test/node/imports/writer.test.ts › rebatches a proven-absent legacy single after $name without resending it or stalling",
+     "worker/test/node/imports/writer.test.ts › settles only the single when a legacy send lands between its two absence reads",
+     "worker/test/http/record-status.test.ts › never reports a hidden batch listen as verified absent",
+     "worker/test/node/lastfm/write-methods.test.ts › library.removeScrobble removes a restored batch listen again instead of reusing the settled receipt"
     ]
    }
   ]

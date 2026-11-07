@@ -67,7 +67,10 @@ revision. Individual entries are validated through the single-scrobble rules;
 invalid entries are counted and excluded. Repository deletion removes every
 projected entry. Batch provenance is stored in `scrobbles.record_uri` and
 `listen_id`; the item URI is `record_uri || '#' || listen_id`. Snapshot and
-Jetstream verification stay keyed by the container.
+Jetstream verification stay keyed by the container. A snapshot that no longer
+holds a container sweeps it like a single: every projected listen is deleted,
+the container is recorded absent at the snapshot head and `stats_version`
+moves.
 
 Removing a batch item admits a `scrobble.delete` operation with the batch
 collection and durable entry-id intent. The visibility overlay hides only the
@@ -79,7 +82,8 @@ remove selected entries while spreading the envelope and retaining all
 untouched entry fields, including unknown remote fields. Removing the final
 entry uses `deleteRecord` with the same compare-and-swap CID. On
 `InvalidSwap`/repository change it re-reads and retries against the new CID;
-the operation persists each read CID before its CAS write. If the process stops
+the operation persists each read CID before its CAS write. A success outcome
+never replaces that pre-CAS `swap_cid` with a post-write CID. If the process stops
 after the PDS commits a whole-container delete but before local settlement,
 read-only reconciliation completes from verified absence while retaining that
 CID in the receipt, so stale projected listens stay hidden until newer proof
@@ -116,10 +120,37 @@ Migration 8 distinguishes historical operations with unknown send status from
 new operations proven unsent. A legacy import single is read at its persisted
 rkey before it can enter either the write batcher or the rebatcher. A matching
 remote record settles that single; a conflict never overwrites it; an
-unavailable read waits. Proven absence clears the conservative send marker and
-allows transactional rebatching. Already-written import items and their
+unavailable read waits. Absence is proven by two authoritative reads at least
+`LEGACY_ABSENCE_RECHECK_MS` (60 s, one import poll) apart, so a request a
+pre-upgrade process left in flight is found present and settles the single
+instead of being duplicated by a batch entry. The second absence read clears
+the conservative send marker; that explicit `unsent` transition, recorded with
+`legacy_absent_at_ms`, lets the rebatcher move the listen whatever its
+historical attempt count (kept on the cancelled single), including after an
+interrupted tenth attempt. The single itself is never sent again. Already-written import items and their
 receipts remain unchanged. Splitting also partitions pending removals among
 child containers, with the original removal receipt waiting for every child.
+
+Migration 9 is additive. `listen_removal_cids(operation_id, cid)` records every
+container CID at which a removal's targets were observed present before it
+settled: the projected CID at admission, each pre-CAS read, a read-back that
+still holds the targets, and any projected CID at settlement. A succeeded
+partial or wildcard removal hides a listen whose projected container CID is
+`swap_cid`, `removed_cid` or one of these, so neither a delayed older proof nor
+a projection that advanced between admission and execution resurfaces it,
+while a deliberate restoration at a new CID is visible and a Last.fm
+`library.removeScrobble` of it admits a fresh intent. The table is local
+suppression evidence; it never writes `record_state` absence. A byte-identical
+restoration has the same CID and stays hidden by the old receipt; restoring
+with any change (such as a new envelope `createdAt`) is visible.
+`operations.legacy_absent_at_ms` is the first legacy absence read above.
+
+Record status for a listen fragment checks verified membership separately from
+the common visibility overlay. A visible owner's present container that does
+not project the listen reports it `absent` at the container revision; a
+projected listen hidden by a local delete intent, removal evidence, a
+cross-format duplicate or a hidden owner reports `unknown`, as a hidden single
+does, and an inactive owner discloses neither membership nor absence.
 
 The local outbox and read model define this AppView's result. PDS publication
 does not imply that another AppView has indexed the custom collection, and
@@ -168,8 +199,11 @@ implement web UI changes.
    after successful absence reconciliation and transactional eligibility
    checks; already-published singles retain their original records.
 6. Monitor held imports, `batch_scope_required`, CAS retries, split outcomes,
-   per-listen counters, and container-level proof convergence. A scope error
-   holds the affected batch lane until re-consent; it does not discard intent.
+   per-listen counters, and container-level proof convergence. A scope denial
+   classified permanent (HTTP 403 or a 4xx `ScopeMissing`/`InsufficientScope`/
+   `Forbidden`) holds the affected batch lane until re-consent; it does not
+   discard intent. A 5xx or transport failure retries with backoff whatever
+   error name its body carries and never asks for re-consent.
 7. To roll back, stop admitting new batch imports, drain all outstanding batch
    creates and deletes while the gate remains open, then close the batch
    reference. Do not roll back the SQLite file or install a binary that cannot
