@@ -33,9 +33,7 @@ test('a Node process restart mid-journey keeps the browser session cookie and in
     await form.getByLabel('Artist').fill('Restart Fixture Artist');
     await form.getByLabel('Track').fill(track);
     await form.getByLabel('Album (optional)').fill('Persistent Session');
-    await form
-      .getByLabel('Listened at (UTC)')
-      .fill(`${new Date(network.fixtureNowMs - 60_000).toISOString().slice(0, 19)}Z`);
+    await form.getByLabel('Listened at').fill(new Date(network.fixtureNowMs - 60_000).toISOString().slice(0, 19));
     await page.getByRole('button', { name: 'Publish scrobble' }).click();
     const item = page.locator('li[data-op-id]').filter({ hasText: track });
     await expect(item.locator('.op-status')).toHaveAttribute('data-op-state', waitForIndex ? 'indexed' : 'queued', {
