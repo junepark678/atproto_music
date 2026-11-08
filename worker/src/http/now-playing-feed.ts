@@ -1,8 +1,8 @@
 import type { NowPlayingFeed } from '@atmusic/core/api-types';
 import { fromMs, toDto } from '@atmusic/core/timestamp';
-import { nowPlayingDto } from './profile';
 import { json } from './json';
-import { cookieRoute, type CookieHandler } from './operations';
+import { type CookieHandler, cookieRoute } from './operations';
+import { nowPlayingDto } from './profile';
 import type { RouteDef } from './types';
 
 export const NOW_PLAYING_FEED_PATTERN = '/api/v1/feed/now-playing';

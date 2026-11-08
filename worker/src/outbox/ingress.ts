@@ -207,15 +207,26 @@ export async function acceptListens(m: ModuleDeps, args: AcceptListensArgs): Pro
       );
       const playing = db.one<{ artist: string; track: string; started_at_ms: number; duration_seconds: number | null }>(
         'SELECT artist, track, started_at_ms, duration_seconds FROM now_playing WHERE did = ? AND expires_at_ms > ?',
-        args.did, now,
+        args.did,
+        now,
       );
-      if (playing !== null && artistKey(playing.artist) === artistKey(prep.prepared.record.artist) && trackKey(playing.artist, playing.track)[1] === trackKey(prep.prepared.record.artist, prep.prepared.record.track)[1]) {
+      if (
+        playing !== null &&
+        artistKey(playing.artist) === artistKey(prep.prepared.record.artist) &&
+        trackKey(playing.artist, playing.track)[1] ===
+          trackKey(prep.prepared.record.artist, prep.prepared.record.track)[1]
+      ) {
         const listenedAtNs = parseRfc3339(prep.prepared.record.listenedAt);
         if (listenedAtNs !== null) {
           const listenedAtMs = Number(listenedAtNs / 1_000_000n);
           const windowMs = (playing.duration_seconds ?? 600) * 1000;
           if (listenedAtMs < playing.started_at_ms && playing.started_at_ms - listenedAtMs <= windowMs) {
-            db.run('UPDATE now_playing SET scrobbled_at_ms = ?, started_at_ms = ? WHERE did = ?', listenedAtMs, listenedAtMs, args.did);
+            db.run(
+              'UPDATE now_playing SET scrobbled_at_ms = ?, started_at_ms = ? WHERE did = ?',
+              listenedAtMs,
+              listenedAtMs,
+              args.did,
+            );
           } else {
             db.run('UPDATE now_playing SET scrobbled_at_ms = ? WHERE did = ?', listenedAtMs, args.did);
           }
