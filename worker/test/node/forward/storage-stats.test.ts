@@ -11,15 +11,17 @@ import { reopen, withMigratedDb } from '../../node/support/node-db';
 
 const DID = 'did:plc:aaaaaaaaaaaaaaaaaaaaaaaa';
 
-function trace(db: Db, queries: string[]): Db {
+function trace(db: Db, queries: string[], limits: SqlParam[]): Db {
   return {
     all<T>(sql: string, ...params: SqlParam[]): T[] {
       if (
         /SELECT .* FROM forward_(admissions|outbox)|SELECT .* FROM love_(incarnations|delete_bridges|import_bridges)/s.test(
           sql,
         )
-      )
+      ) {
         queries.push(sql);
+        limits.push(params.at(-1) ?? null);
+      }
       return db.all<T>(sql, ...params);
     },
     one: db.one.bind(db),
@@ -34,6 +36,7 @@ describe('forward storage statistics refresh', () => {
       const clock = fixedClock();
       const now = clock.nowMs();
       const queries: string[] = [];
+      const limits: SqlParam[] = [];
       let db = initial;
       for (let seq = 0; seq < FORWARD_STORAGE_STATS_SLICE_SIZE * 2 + 5; seq++) {
         db.run(
@@ -46,7 +49,7 @@ describe('forward storage statistics refresh', () => {
         );
       }
 
-      const scan = () => refreshForwardStorageStats(trace(db, queries), clock.nowMs());
+      const scan = () => refreshForwardStorageStats(trace(db, queries, limits), clock.nowMs());
       expect(scan()).toBe(false);
       expect(db.one('SELECT rows_seen FROM forward_storage_scan WHERE table_key=?', 'forward_admissions')).toEqual({
         rows_seen: FORWARD_STORAGE_STATS_SLICE_SIZE,
@@ -86,6 +89,8 @@ describe('forward storage statistics refresh', () => {
       const pageQueries = queries.filter((sql) => sql.includes('FROM forward_admissions'));
       expect(pageQueries).toHaveLength(3);
       expect(pageQueries.every((sql) => sql.includes('LIMIT ?'))).toBe(true);
+      expect(limits.length).toBeGreaterThan(0);
+      expect(limits.every((limit) => limit === FORWARD_STORAGE_STATS_SLICE_SIZE)).toBe(true);
       expect(pageQueries.slice(1).every((sql) => sql.includes('WHERE (did,identity_key) > (?,?)'))).toBe(true);
       expect(pageQueries.every((sql) => !/count\s*\(|sum\s*\(/i.test(sql))).toBe(true);
 

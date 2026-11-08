@@ -85,10 +85,12 @@ function scanTablePage(db: Db, table: (typeof TABLES)[number], progress: Progres
     `SELECT ${columns.join(',')},(${bytes}) AS logical_bytes_estimate FROM ${table.key}
      ${keyset} ORDER BY ${columns.join(',')} LIMIT ?`,
     ...(cursor ?? []),
-    FORWARD_STORAGE_STATS_SLICE_SIZE + 1,
+    FORWARD_STORAGE_STATS_SLICE_SIZE,
   );
   const consumed = rows.slice(0, FORWARD_STORAGE_STATS_SLICE_SIZE);
-  const hasMore = rows.length > FORWARD_STORAGE_STATS_SLICE_SIZE;
+  // A full page defers completion detection to the next visit; even the
+  // lookahead must fit the timer's row budget.
+  const hasMore = rows.length === FORWARD_STORAGE_STATS_SLICE_SIZE;
   const last = consumed.at(-1);
   const nextCursor = last === undefined ? cursor : columns.map((column) => last[column]);
   const rowsSeen = progress.rows_seen + consumed.length;
