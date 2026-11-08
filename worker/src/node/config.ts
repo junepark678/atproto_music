@@ -57,6 +57,9 @@ export const DEFAULT_LISTENBRAINZ_API_ROOT = 'https://api.listenbrainz.org/';
 export const DEFAULT_COVER_ART_ARCHIVE_ROOT = 'https://coverartarchive.org/';
 export const DEFAULT_COVER_ART_CACHE_MB = 200;
 export const DEFAULT_MUSICBRAINZ_API_ROOT = 'https://musicbrainz.org/ws/2/';
+export const DEFAULT_LINKED_PULL_INTERVAL_MS = 600_000;
+export const MIN_LINKED_PULL_INTERVAL_MS = 60_000;
+export const MAX_LINKED_PULL_INTERVAL_MS = 86_400_000;
 export const DEFAULT_LASTFM_KNOWN_CLIENTS = 'panoScrobbler:panoScrobbler:Pano Scrobbler';
 
 /**
@@ -138,6 +141,7 @@ export interface NodeConfig {
   listenbrainzApiRoot: string;
   musicbrainzApiRoot: string;
   musicbrainzEnabled: boolean;
+  linkedPullIntervalMs: number;
   coverArtArchiveRoot: string;
   coverArtCacheMb: number;
   lastfmKnownClients: readonly LastfmKnownClient[];
@@ -394,6 +398,14 @@ export function parseNodeConfig(env: NodeEnv, opts: ParseNodeConfigOptions = {})
   if (musicbrainzEnabledRaw !== 'true' && musicbrainzEnabledRaw !== 'false') {
     issue('MUSICBRAINZ_ENABLED', 'must be true or false');
   }
+  const linkedPullIntervalRaw = env.LINKED_PULL_INTERVAL_MS ?? String(DEFAULT_LINKED_PULL_INTERVAL_MS);
+  const linkedPullIntervalMs = POSITIVE_INT.test(linkedPullIntervalRaw) ? Number(linkedPullIntervalRaw) : Number.NaN;
+  if (
+    !Number.isSafeInteger(linkedPullIntervalMs) ||
+    linkedPullIntervalMs < MIN_LINKED_PULL_INTERVAL_MS ||
+    linkedPullIntervalMs > MAX_LINKED_PULL_INTERVAL_MS
+  )
+    issue('LINKED_PULL_INTERVAL_MS', 'must be a safe integer from 60000 through 86400000');
 
   // --- Last.fm known public clients (ADR §7.4) --------------------------------
   const lastfmKnownClients: LastfmKnownClient[] = [];
@@ -436,6 +448,7 @@ export function parseNodeConfig(env: NodeEnv, opts: ParseNodeConfigOptions = {})
     listenbrainzApiRoot,
     musicbrainzApiRoot,
     musicbrainzEnabled: musicbrainzEnabledRaw === 'true',
+    linkedPullIntervalMs,
     coverArtArchiveRoot,
     coverArtCacheMb,
     lastfmKnownClients,

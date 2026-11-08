@@ -1269,6 +1269,24 @@ const MIGRATION_S3_LISTEN_SECOND_RECOVERY: Migration = {
   ],
 };
 
+const MIGRATION_S3_PULL_POLLING: Migration = {
+  version: 35,
+  name: 'linked_pull_persisted_poll_rounds',
+  statements: [
+    'ALTER TABLE linked_pull_state ADD COLUMN poll_next_at_ms INTEGER',
+    'ALTER TABLE linked_pull_state ADD COLUMN listen_round_upper_ms INTEGER',
+    'ALTER TABLE linked_pull_state ADD COLUMN listen_round_floor_ms INTEGER',
+    'ALTER TABLE linked_pull_state ADD COLUMN listen_round_page INTEGER',
+    'ALTER TABLE linked_pull_state ADD COLUMN love_round_upper_ms INTEGER',
+    'ALTER TABLE linked_pull_state ADD COLUMN love_round_page INTEGER',
+    'ALTER TABLE linked_pull_state ADD COLUMN love_round_floor_ms INTEGER',
+    "ALTER TABLE linked_pull_state ADD COLUMN poll_phase TEXT NOT NULL DEFAULT 'listen'",
+    'ALTER TABLE linked_pull_state ADD COLUMN skipped_count INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE linked_pull_state ADD COLUMN listen_floor_at_ms INTEGER',
+    'ALTER TABLE linked_pull_state ADD COLUMN love_floor_at_ms INTEGER',
+  ],
+};
+
 export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_1,
   MIGRATION_2,
@@ -1304,6 +1322,7 @@ export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_S3_LOVE_PULL_CURSOR,
   MIGRATION_S3_LOVE_INTENT_FENCE,
   MIGRATION_S3_LISTEN_SECOND_RECOVERY,
+  MIGRATION_S3_PULL_POLLING,
 ];
 
 /** The schema version this code expects. */

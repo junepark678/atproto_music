@@ -52,6 +52,19 @@ export interface LastfmFetchDeps {
   sharedSecret: string;
 }
 
+export interface LastfmPullPageDeps {
+  fetch: BoundPolicyFetch;
+  apiRoot: string;
+  apiKey: string;
+  sharedSecret: string;
+}
+
+export type LastfmPullPage =
+  | { kind: 'page'; tracks: unknown[]; page: number; totalPages: number }
+  | { kind: 'reauth' }
+  | { kind: 'retry'; reason: string }
+  | { kind: 'fail'; reason: 'remote_user_not_found' | 'lastfm_key_rejected' | 'lastfm_error' };
+
 /** The cursor of a job started at `nowMs`. */
 export function initialLastfmCursor(nowMs: number): LastfmCursor {
   return { to: Math.floor(nowMs / 1000) + 1, boundary: null };
@@ -61,6 +74,65 @@ type Json = Record<string, unknown>;
 
 function obj(value: unknown): Json | null {
   return value !== null && typeof value === 'object' && !Array.isArray(value) ? (value as Json) : null;
+}
+
+/** Signed, read-only linked pull request through the caller's pinned transport. */
+export async function fetchLastfmPullPage(
+  deps: LastfmPullPageDeps,
+  args: {
+    method: 'user.getRecentTracks' | 'user.getLovedTracks';
+    user: string;
+    sk: string;
+    page: number;
+    from?: number;
+    to?: number;
+  },
+): Promise<LastfmPullPage> {
+  const params: [string, string][] = [
+    ['method', args.method],
+    ['user', args.user],
+    ['limit', String(LASTFM_PAGE_LIMIT)],
+    ['page', String(args.page)],
+    ['api_key', deps.apiKey],
+    ['sk', args.sk],
+  ];
+  if (args.from !== undefined) params.push(['from', String(args.from)]);
+  if (args.to !== undefined) params.push(['to', String(args.to)]);
+  params.push(['api_sig', computeSignature(params, deps.sharedSecret)], ['format', 'json']);
+  const url = new URL(deps.apiRoot);
+  for (const [key, value] of params) url.searchParams.append(key, value);
+
+  let response: Response;
+  let body: unknown;
+  try {
+    response = await deps.fetch(url.href, { method: 'GET', headers: { accept: 'application/json' } });
+    const raw = await response.text();
+    try {
+      body = JSON.parse(raw);
+    } catch {
+      body = null;
+    }
+  } catch {
+    return { kind: 'retry', reason: 'network' };
+  }
+  const envelope = obj(body);
+  const code = envelope !== null && typeof envelope.error === 'number' ? envelope.error : null;
+  if (code === 9 || code === 4 || code === 17) return { kind: 'reauth' };
+  if (code === 6) return { kind: 'fail', reason: 'remote_user_not_found' };
+  if (code === 10 || code === 26) return { kind: 'fail', reason: 'lastfm_key_rejected' };
+  if (code !== null) return { kind: 'retry', reason: code === 29 ? 'rate_limited' : `lastfm_${code}` };
+  if (response.status !== 200 || envelope === null) return { kind: 'retry', reason: `http_${response.status}` };
+
+  const root = obj(envelope[args.method === 'user.getRecentTracks' ? 'recenttracks' : 'lovedtracks']);
+  if (root === null) return { kind: 'retry', reason: 'invalid_response' };
+  const rawTracks = root.track;
+  const tracks = Array.isArray(rawTracks) ? rawTracks : obj(rawTracks) !== null ? [rawTracks] : [];
+  const attrs = obj(root['@attr']);
+  const page = attrs?.page !== undefined ? Number(attrs.page) : args.page;
+  const totalPages = attrs?.totalPages !== undefined ? Number(attrs.totalPages) : page;
+  if (!Number.isSafeInteger(page) || !Number.isSafeInteger(totalPages) || totalPages < 0)
+    return { kind: 'retry', reason: 'invalid_response' };
+  return { kind: 'page', tracks, page, totalPages };
 }
 
 /** A Last.fm text node: a string, or an object's `#text` (or `name` for extended artists). */

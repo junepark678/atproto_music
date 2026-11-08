@@ -34,7 +34,16 @@ export type PullHoldReason =
   | 'publication_disabled'
   | 'scope_insufficient'
   | 'session_restore_transient'
-  | 'legacy_dedupe_coverage';
+  | 'legacy_dedupe_coverage'
+  | 'staging_capacity'
+  | 'credential_unavailable'
+  | 'lastfm_not_configured'
+  | 'upstream_unauthorized'
+  | 'upstream_retry'
+  | 'retry_exhausted'
+  | 'remote_user_not_found'
+  | 'lastfm_key_rejected'
+  | 'lastfm_error';
 export type PullWriterAvailability = { available: true } | { available: false; reason: PullHoldReason };
 export type PullWriterAvailabilitySource = (did: string) => Promise<PullWriterAvailability>;
 export const PULL_WRITE_SLICE = 100;
@@ -71,11 +80,12 @@ type Link = {
   pull_enabled: number;
   service: string;
   remote_user: string;
+  credential_ciphertext: ArrayBuffer | Uint8Array;
 };
 
 function linkSnapshot(db: ModuleDeps['db'], linkId: string): Link | null {
   return db.one<Link>(
-    'SELECT did,generation,status,pull_enabled,service,remote_user FROM linked_accounts WHERE id=?',
+    'SELECT did,generation,status,pull_enabled,service,remote_user,credential_ciphertext FROM linked_accounts WHERE id=?',
     linkId,
   );
 }
@@ -87,6 +97,7 @@ function stillCurrent(
   did: string,
   service: string,
   account: string,
+  credentialCiphertext?: Uint8Array,
 ): boolean {
   const link = linkSnapshot(m.db, linkId);
   const state = m.db.one<{ source_service: string; source_account: string }>(
@@ -96,6 +107,7 @@ function stillCurrent(
   );
   return (
     !!link &&
+    (credentialCiphertext === undefined || sameCredential(link.credential_ciphertext, credentialCiphertext)) &&
     link.did === did &&
     link.generation === generation &&
     link.status === 'active' &&
@@ -106,6 +118,11 @@ function stillCurrent(
     state.source_service === service &&
     state.source_account === account
   );
+}
+
+function sameCredential(a: ArrayBuffer | Uint8Array, b: Uint8Array): boolean {
+  const left = a instanceof Uint8Array ? a : new Uint8Array(a);
+  return left.length === b.length && left.every((value, index) => value === b[index]);
 }
 
 function setHold(m: ModuleDeps, linkId: string, generation: number, reason: PullHoldReason | null, now: number): void {
@@ -136,7 +153,13 @@ function hasLocalLoveIntent(db: ModuleDeps['db'], did: string, key: string): boo
 /** Process at most one bounded slice. A durable hold leaves every staged item intact. */
 export async function writePullSlice(
   m: ModuleDeps,
-  args: { linkId: string; generation: number; available: PullWriterAvailabilitySource; limit?: number },
+  args: {
+    linkId: string;
+    generation: number;
+    available: PullWriterAvailabilitySource;
+    limit?: number;
+    credentialCiphertext?: Uint8Array;
+  },
 ): Promise<{ accepted: number; duplicate: number; tombstoned: number; invalid: number; held: PullHoldReason | null }> {
   const now = m.clock.nowMs();
   const link = linkSnapshot(m.db, args.linkId);
@@ -150,6 +173,10 @@ export async function writePullSlice(
   if (!state || state.source_service !== link.service || state.source_account !== link.remote_user)
     return { accepted: 0, duplicate: 0, tombstoned: 0, invalid: 0, held: null };
   const availability = await args.available(link.did);
+  if (
+    !stillCurrent(m, args.linkId, args.generation, link.did, link.service, link.remote_user, args.credentialCiphertext)
+  )
+    return { accepted: 0, duplicate: 0, tombstoned: 0, invalid: 0, held: null };
   if (!availability.available) {
     setHold(m, args.linkId, args.generation, availability.reason, now);
     return { accepted: 0, duplicate: 0, tombstoned: 0, invalid: 0, held: availability.reason };
@@ -242,7 +269,18 @@ export async function writePullSlice(
       : null;
   const report = { accepted: 0, duplicate: 0, tombstoned: 0, invalid: 0, held: null as PullHoldReason | null };
   m.db.tx(() => {
-    if (!stillCurrent(m, args.linkId, args.generation, link.did, link.service, link.remote_user)) return;
+    if (
+      !stillCurrent(
+        m,
+        args.linkId,
+        args.generation,
+        link.did,
+        link.service,
+        link.remote_user,
+        args.credentialCiphertext,
+      )
+    )
+      return;
     const currentRows = new Map<string, Staged>();
     for (const plan of plans) {
       const current = m.db.one<Staged>(

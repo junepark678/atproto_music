@@ -281,7 +281,15 @@ interface UserState {
   registeredS: number;
   history: LastfmListen[];
   loves: Set<string>;
+  lovedTracks: LastfmLoved[];
   nowPlaying: { listen: Omit<LastfmListen, 'uts'>; expiresAtMs: number } | null;
+}
+
+export interface LastfmLoved {
+  artist: string;
+  track: string;
+  uts: number;
+  mbid?: string;
 }
 
 interface TokenState {
@@ -389,6 +397,7 @@ export class FakeLastfm implements Routable {
       registeredS: opts.registeredS ?? Math.floor(this.clock.nowMs() / 1000),
       history: [],
       loves: new Set(),
+      lovedTracks: [],
       nowPlaying: null,
     });
   }
@@ -427,6 +436,14 @@ export class FakeLastfm implements Routable {
   seedHistory(user: string, listens: readonly LastfmListen[]): void {
     this.addUser(user);
     this.userState(user)!.history.push(...listens.map((l) => ({ ...l })));
+  }
+
+  /** Replace the public API's timestamped loves in upstream newest-first order. */
+  seedLoved(user: string, loves: readonly LastfmLoved[]): void {
+    this.addUser(user);
+    const state = this.userState(user)!;
+    state.lovedTracks = loves.map((love) => ({ ...love }));
+    state.loves = new Set(loves.map((love) => loveKey(love.artist, love.track)));
   }
 
   /** Set the user's now-playing track, current for `ttlMs` from the clock. */
@@ -519,18 +536,28 @@ export class FakeLastfm implements Routable {
   private handle(httpMethod: string, method: string, params: Map<string, string>): Record<string, Json> {
     const apiKey = params.get('api_key');
     if (!apiKey || apiKey !== this.apiKey) throw new LastfmError(10);
-    const known = SIGNED_METHODS.has(method) || method === 'user.getRecentTracks' || method === 'user.getInfo';
+    const known =
+      SIGNED_METHODS.has(method) ||
+      method === 'user.getRecentTracks' ||
+      method === 'user.getLovedTracks' ||
+      method === 'user.getInfo';
     if (!known) throw new LastfmError(3);
     if (POST_ONLY.has(method) && httpMethod !== 'POST') {
       throw new LastfmError(3, 'Invalid Method - this method must be called with POST');
     }
-    if (SIGNED_METHODS.has(method)) {
+    if (SIGNED_METHODS.has(method) || (method === 'user.getRecentTracks' && params.has('sk')) || method === 'user.getLovedTracks') {
       const sig = (params.get('api_sig') ?? '').toLowerCase();
       if (!/^[0-9a-f]{32}$/.test(sig) || sig !== lastfmSignature(params, this.secret)) throw new LastfmError(13);
     }
     let user = '';
     let sk = '';
     if (SESSION_METHODS.has(method)) {
+      sk = params.get('sk') ?? '';
+      const owner = this.sessions.get(sk);
+      if (owner === undefined) throw new LastfmError(9);
+      user = owner;
+    }
+    if (method === 'user.getLovedTracks') {
       sk = params.get('sk') ?? '';
       const owner = this.sessions.get(sk);
       if (owner === undefined) throw new LastfmError(9);
@@ -552,6 +579,8 @@ export class FakeLastfm implements Routable {
         return this.love(method, params, user, sk);
       case 'user.getRecentTracks':
         return this.getRecentTracks(params);
+      case 'user.getLovedTracks':
+        return this.getLovedTracks(params);
       default:
         return this.getInfo(params);
     }
@@ -692,8 +721,14 @@ export class FakeLastfm implements Routable {
     if (!artist || !track) throw new LastfmError(6);
     this.loveCalls.push({ user, sk, method, artist, track });
     const loves = this.userState(user)!.loves;
-    if (method === 'track.love') loves.add(loveKey(artist, track));
-    else loves.delete(loveKey(artist, track));
+    const state = this.userState(user)!;
+    if (method === 'track.love') {
+      loves.add(loveKey(artist, track));
+      state.lovedTracks.push({ artist, track, uts: Math.floor(this.clock.nowMs() / 1000) });
+    } else {
+      loves.delete(loveKey(artist, track));
+      state.lovedTracks = state.lovedTracks.filter((row) => loveKey(row.artist, row.track) !== loveKey(artist, track));
+    }
     return {};
   }
 
@@ -731,6 +766,29 @@ export class FakeLastfm implements Routable {
           totalPages: String(totalPages),
           total: String(total),
         },
+      },
+    };
+  }
+
+  private getLovedTracks(params: Map<string, string>): Record<string, Json> {
+    const name = params.get('user');
+    if (!name) throw new LastfmError(6);
+    const state = this.userState(name);
+    if (!state) throw new LastfmError(6, 'User not found');
+    const limit = Math.min(200, Math.max(1, intParam(params.get('limit'), 50)));
+    const page = intParam(params.get('page'), 1);
+    if (page < 1) throw new LastfmError(6);
+    const tracks = [...state.lovedTracks].sort((a, b) => b.uts - a.uts);
+    const totalPages = Math.ceil(tracks.length / limit);
+    return {
+      lovedtracks: {
+        track: tracks.slice((page - 1) * limit, page * limit).map((love) => ({
+          artist: { name: love.artist },
+          name: love.track,
+          mbid: love.mbid ?? '',
+          date: { uts: String(love.uts), '#text': lastfmDateText(love.uts) },
+        })),
+        '@attr': { user: state.name, page: String(page), perPage: String(limit), totalPages: String(totalPages), total: String(tracks.length) },
       },
     };
   }

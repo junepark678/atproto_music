@@ -122,7 +122,7 @@ Account   = {did, handle: string|null, username, oauthStatus: "active"|"reauth_r
 Link      = {id, service: "lastfm"|"listenbrainz", remoteUser, forwardScrobbles, forwardNowPlaying,
              status: "active"|"revoked"|"error", lastError: code|null, createdAt, updatedAt,
              sync?: {backfill:{state:"pending"|"running"|"done"|"skipped",done,total,lastError?:"retry_exhausted"}, pullEnabled,
-                     holdReason?:"session_missing"|"reauth_required"|"publication_disabled"|"scope_insufficient"|"session_restore_transient",
+                     holdReason?:"session_missing"|"reauth_required"|"publication_disabled"|"scope_insufficient"|"session_restore_transient"|"legacy_dedupe_coverage"|"staging_capacity"|"credential_unavailable"|"lastfm_not_configured"|"upstream_unauthorized"|"upstream_retry"|"retry_exhausted"|"remote_user_not_found"|"lastfm_key_rejected"|"lastfm_error",
                      needsReauth?:boolean, lastSuccessAt?, lastFailureAt?, lastError?, lastPulledAt?, queued, failed}}
 ImportJob = {id, source: "lastfm_api"|"lastfm_json"|"listenbrainz_api"|"listenbrainz_zip", remoteUser: string|null,
              state: "waiting_index"|"fetching"|"writing"|"paused"|"done"|"failed"|"cancelled",

@@ -446,7 +446,17 @@ export interface Link {
       | 'reauth_required'
       | 'publication_disabled'
       | 'scope_insufficient'
-      | 'session_restore_transient';
+      | 'session_restore_transient'
+      | 'legacy_dedupe_coverage'
+      | 'staging_capacity'
+      | 'credential_unavailable'
+      | 'lastfm_not_configured'
+      | 'upstream_unauthorized'
+      | 'upstream_retry'
+      | 'retry_exhausted'
+      | 'remote_user_not_found'
+      | 'lastfm_key_rejected'
+      | 'lastfm_error';
     /** True only when OAuth sign-in or refresh is required. */
     needsReauth?: boolean;
     lastSuccessAt?: Timestamp;

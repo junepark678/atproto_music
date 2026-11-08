@@ -29,6 +29,11 @@ export type StageOutcome = 'accepted' | 'duplicate' | 'tombstoned';
 
 export type PendingSecondCoverage = { complete: true; matches: boolean } | { complete: false; matches: false };
 
+function sameCredential(a: ArrayBuffer | Uint8Array, b: Uint8Array): boolean {
+  const left = a instanceof Uint8Array ? a : new Uint8Array(a);
+  return left.length === b.length && left.every((value, index) => value === b[index]);
+}
+
 function normalizedLoveKey(artist: string, track: string): string | null {
   try {
     const [a, t] = trackKey(artist, track);
@@ -85,6 +90,9 @@ export function stagePullPage(
     proposedWatermarkMs: number;
     nowMs: number;
     items: readonly PulledListen[];
+    credentialCiphertext?: Uint8Array;
+    listenRound?: { upperMs: number | null; floorMs: number | null; nextPage: number | null };
+    skippedCount?: number;
   },
 ): StageOutcome[] {
   if (args.items.length > PULL_PAGE_MAX_ITEMS) throw new RangeError('pull page exceeds item limit');
@@ -100,7 +108,11 @@ export function stagePullPage(
       service: string;
       remote_user: string;
       did: string;
-    }>('SELECT generation,status,pull_enabled,service,remote_user,did FROM linked_accounts WHERE id=?', args.linkId);
+      credential_ciphertext: ArrayBuffer | Uint8Array;
+    }>(
+      'SELECT generation,status,pull_enabled,service,remote_user,did,credential_ciphertext FROM linked_accounts WHERE id=?',
+      args.linkId,
+    );
     if (
       !link ||
       link.generation !== args.generation ||
@@ -108,7 +120,9 @@ export function stagePullPage(
       link.pull_enabled !== 1 ||
       link.service !== args.sourceService ||
       link.remote_user !== args.sourceAccount ||
-      link.did !== args.did
+      link.did !== args.did ||
+      (args.credentialCiphertext !== undefined &&
+        !sameCredential(link.credential_ciphertext, args.credentialCiphertext))
     )
       throw new Error('stale or disabled pull generation');
     const current = db.one<{ generation: number; source_service: string; source_account: string }>(
@@ -181,6 +195,24 @@ export function stagePullPage(
       args.linkId,
       args.generation,
     );
+    if (args.listenRound !== undefined)
+      db.run(
+        `UPDATE linked_pull_state SET listen_round_upper_ms=?,listen_round_floor_ms=?,listen_round_page=?
+         WHERE link_id=? AND generation=?`,
+        args.listenRound.upperMs,
+        args.listenRound.floorMs,
+        args.listenRound.nextPage,
+        args.linkId,
+        args.generation,
+      );
+    if (args.skippedCount) {
+      db.run(
+        'UPDATE linked_pull_state SET skipped_count=skipped_count+? WHERE link_id=? AND generation=?',
+        args.skippedCount,
+        args.linkId,
+        args.generation,
+      );
+    }
     return outcomes;
   });
 }
@@ -199,6 +231,14 @@ export function stageLovePage(
     proposedBoundaryKey: string | null;
     nowMs: number;
     items: readonly PulledLove[];
+    credentialCiphertext?: Uint8Array;
+    loveRound?: {
+      upperMs: number | null;
+      floorMs: number | null;
+      nextPage: number | null;
+      committedBoundaryMs: number | null;
+      committedBoundaryKey: string | null;
+    };
   },
 ): Array<'accepted' | 'duplicate' | 'tombstoned' | 'unresolved'> {
   if (args.items.length > PULL_PAGE_MAX_ITEMS) throw new RangeError('pull page exceeds item limit');
@@ -210,7 +250,11 @@ export function stageLovePage(
       service: string;
       remote_user: string;
       did: string;
-    }>('SELECT generation,status,pull_enabled,service,remote_user,did FROM linked_accounts WHERE id=?', args.linkId);
+      credential_ciphertext: ArrayBuffer | Uint8Array;
+    }>(
+      'SELECT generation,status,pull_enabled,service,remote_user,did,credential_ciphertext FROM linked_accounts WHERE id=?',
+      args.linkId,
+    );
     if (
       !link ||
       link.generation !== args.generation ||
@@ -218,7 +262,9 @@ export function stageLovePage(
       link.pull_enabled !== 1 ||
       link.service !== args.sourceService ||
       link.remote_user !== args.sourceAccount ||
-      link.did !== args.did
+      link.did !== args.did ||
+      (args.credentialCiphertext !== undefined &&
+        !sameCredential(link.credential_ciphertext, args.credentialCiphertext))
     )
       throw new Error('stale or disabled pull generation');
     const state = db.one<{ source_service: string; source_account: string }>(
@@ -323,14 +369,35 @@ export function stageLovePage(
       outcomes.push('accepted');
     }
     db.run(
-      "UPDATE linked_pull_state SET page_kind='love',love_cursor=?,love_boundary_ms=?,love_boundary_key=?,updated_at_ms=? WHERE link_id=? AND generation=?",
+      "UPDATE linked_pull_state SET page_kind='love',love_cursor=?,updated_at_ms=? WHERE link_id=? AND generation=?",
       args.proposedCursor,
-      args.proposedBoundaryMs,
-      args.proposedBoundaryKey,
       args.nowMs,
       args.linkId,
       args.generation,
     );
+    if (args.loveRound !== undefined) {
+      db.run(
+        `UPDATE linked_pull_state SET love_round_upper_ms=?,love_round_floor_ms=?,love_round_page=?,
+          love_boundary_ms=coalesce(?,love_boundary_ms),love_boundary_key=coalesce(?,love_boundary_key),
+          skipped_count=skipped_count+? WHERE link_id=? AND generation=?`,
+        args.loveRound.upperMs,
+        args.loveRound.floorMs,
+        args.loveRound.nextPage,
+        args.loveRound.committedBoundaryMs,
+        args.loveRound.committedBoundaryKey,
+        outcomes.filter((outcome) => outcome === 'unresolved').length,
+        args.linkId,
+        args.generation,
+      );
+    } else {
+      db.run(
+        'UPDATE linked_pull_state SET love_boundary_ms=?,love_boundary_key=? WHERE link_id=? AND generation=?',
+        args.proposedBoundaryMs,
+        args.proposedBoundaryKey,
+        args.linkId,
+        args.generation,
+      );
+    }
     return outcomes;
   });
 }

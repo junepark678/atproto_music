@@ -555,6 +555,21 @@ receipt and no live batch gate.
 “Never forwarded” clause in ADR 0005 §11.2.5 and the “Not forwarded” list in
 §12.2. The base ADR paragraphs remain unchanged until this draft is published.
 
+**Track S3 operational addition (draft).** Linked pulls run only on the closed
+`linked-pull` extension timer through the pinned Last.fm transport. They persist
+per-generation listen/love page rounds, continuation and next-due time, use a
+configurable ten-minute interval with jitter, share Last.fm pacing with the
+forward lane, and stop requesting at durable staging caps. Relink, account,
+credential and pause state are rechecked before accepting a response. A staged
+item is accepted by the existing origin=`import` writer and outbox; cursor
+progress does not pass an unstaged page. Operational holds distinguish a
+missing session, required reauthentication, publication disabled, insufficient
+scope, temporary session restore, legacy dedupe coverage, staging capacity,
+credential availability, upstream retry and permanent upstream errors.
+`needsReauth` is true only when the actual stored OAuth session is missing or
+expired. These clauses describe the current Last.fm slice; ListenBrainz polling
+and the remaining S3 acceptance gate are still pending.
+
 > Forwarding suppression = the indexer's own resurrection suppression.
 
 The proposed rule gives each canonical listen identity and love transition a
