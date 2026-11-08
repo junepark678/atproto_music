@@ -580,7 +580,7 @@ describe('worker/test/harness', () => {
   it('the migration ledger is ordered across the N/M, M4, S1, S2 and S3 stack', async () => {
     const versions = MIGRATIONS.map((m) => m.version);
     expect(versions.slice(0, 14)).toEqual(Array.from({ length: 14 }, (_, i) => i + 1));
-    expect(versions.slice(-11)).toEqual([26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36]);
+    expect(versions.slice(-12)).toEqual([26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37]);
     expect(versions.every((version, index) => index === 0 || version > (versions[index - 1] ?? 0))).toBe(true);
     expect(SCHEMA_VERSION).toBe(MIGRATIONS[MIGRATIONS.length - 1]?.version);
     expect(MIGRATIONS.length).toBeGreaterThanOrEqual(2);
@@ -665,6 +665,9 @@ describe('worker/test/harness', () => {
       );
       db.run(
         "INSERT INTO linked_love_intents(did,love_key,intent,operation_id,updated_at_ms) VALUES('did:plc:seed','k','love','op',0)",
+      );
+      db.run(
+        "INSERT INTO linked_pull_love_admissions(did,link_id,generation,operation_id,love_key,recording_mbid,source_service,source_account,state,updated_at_ms) VALUES('did:plc:seed','seed-link',1,'seed-love-op','seed-love-key',NULL,'listenbrainz','seed','accepted',0)",
       );
       for (const table of TABLES) {
         if (
