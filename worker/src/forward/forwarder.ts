@@ -812,7 +812,7 @@ export function forwardExtension(runtime: () => ForwardRuntime | null): CoreExte
         if (report.skipped) return;
         const deleteDue =
           rt.db.one<{ due: number | null }>(
-            `SELECT min(q.due_at) AS due FROM listenbrainz_deletes q
+            `SELECT min(CASE WHEN q.deadline_at<q.due_at THEN q.deadline_at ELSE q.due_at END) AS due FROM listenbrainz_deletes q
            JOIN linked_accounts l ON l.id=q.link_id AND l.generation=q.generation
            WHERE q.state='queued' AND l.status='active'`,
           )?.due ?? deleteNextDue;

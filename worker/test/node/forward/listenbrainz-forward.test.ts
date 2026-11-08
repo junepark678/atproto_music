@@ -9,6 +9,10 @@
 // ListenBrainz is the fake at listenbrainz.test behind the fixture router; it
 // accepts a submission only with a registered `Token`.
 
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import * as sqlite from 'node:sqlite';
 import { routerTransport } from '@atmusic/atproto/test-support/router-transport';
 import { trackKey } from '@atmusic/core/music-key';
 import { type FixedClock, fixedClock } from '@atmusic/core/test-support/clock';
@@ -17,12 +21,15 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { MemoryRevocations } from '../../../src/app/revocations';
 import type { ForwardOutboxRow } from '../../../src/app/rows';
 import { ensureAccount } from '../../../src/credentials/accounts';
+import { migrate } from '../../../src/do/migrate';
 import { runDeleteSlice } from '../../../src/forward/delete-forwarder';
 import { LASTFM_EXPIRY_MS, LISTENBRAINZ_EXPIRY_MS } from '../../../src/forward/forward-outbox';
 import { type ForwardRuntime, runForward } from '../../../src/forward/forwarder';
 import { saveLink } from '../../../src/forward/links';
+import { UpstreamPacing } from '../../../src/forward/upstream-pacing';
 import { type LinksService, linksFeature } from '../../../src/http/links';
 import { parseSecrets } from '../../../src/node/secrets';
+import { openSqliteDb, type SqliteDb } from '../../../src/node/sqlite-db';
 import { enqueueForwards, type ForwardItem } from '../../../src/outbox/forward-enqueue';
 import { enqueueLove, enqueueUnlove } from '../../../src/outbox/love-ops';
 import { closeApps, startApp, type TestApp, testSecretsDocument } from '../support/app';
@@ -242,6 +249,86 @@ describe('ListenBrainz forwarding', () => {
     ).toEqual({ state: 'sent', target_msid: msid, target_listened_at: listenedAt });
   });
 
+  it('reopens durable lookup target and reuses the exact candidate after a transient POST failure', async () => {
+    const w = await world();
+    const linkId = w.link();
+    const listenedAt = 1768392000;
+    const msid = '12121212-1212-4212-8212-121212121212';
+    w.lb.seedListens('alice_lb', [
+      {
+        listened_at: listenedAt + 1,
+        recording_msid: msid,
+        track_metadata: { artist_name: 'Restart Artist', track_name: 'Restart Track' },
+      },
+    ]);
+    queueDelete(w, linkId, 'restart-delete', listenedAt, 'Restart Artist', 'Restart Track');
+    const initialDeps = {
+      db: w.app.db,
+      clock: w.clock,
+      random: w.rt.random,
+      box: w.rt.box,
+      client: w.rt.listenbrainz,
+      pacing: w.rt.pacing,
+    };
+    expect((await runDeleteSlice(initialDeps)).state).toBe('target_persisted');
+    const dir = mkdtempSync(join(tmpdir(), 'atmusic-delete-restart-'));
+    const path = join(dir, 'restart.db');
+    await sqlite.backup(w.app.db.raw, path);
+    await w.app.close();
+    let db: SqliteDb | null = openSqliteDb(path, { busyTimeoutMs: 200 });
+    try {
+      expect(migrate(db)).toEqual({ status: 'ready', version: 42 });
+      expect(
+        db.one('SELECT target_msid,target_listened_at FROM listenbrainz_deletes WHERE id=?', 'restart-delete'),
+      ).toEqual({
+        target_msid: msid,
+        target_listened_at: listenedAt + 1,
+      });
+      const dependencies = {
+        db,
+        clock: w.clock,
+        random: w.rt.random,
+        box: w.rt.box,
+        client: w.rt.listenbrainz,
+        pacing: new UpstreamPacing(w.clock),
+      };
+      w.clock.advance(1000);
+      w.lb.fail({ status: 503, path: '/1/delete-listen' });
+      expect((await runDeleteSlice(dependencies)).state).toBe('retry');
+      const retry = db.one<{ target_msid: string; target_listened_at: number; due_at: number }>(
+        'SELECT target_msid,target_listened_at,due_at FROM listenbrainz_deletes WHERE id=?',
+        'restart-delete',
+      );
+      expect(retry).toMatchObject({ target_msid: msid, target_listened_at: listenedAt + 1 });
+      db.close();
+      db = openSqliteDb(path, { busyTimeoutMs: 200 });
+      expect(migrate(db)).toEqual({ status: 'ready', version: 42 });
+      w.clock.set(new Date(retry!.due_at).toISOString());
+      expect(
+        (
+          await runDeleteSlice({
+            ...dependencies,
+            db,
+            pacing: new UpstreamPacing(w.clock),
+          })
+        ).state,
+      ).toBe('sent');
+      expect(w.lb.deletions).toEqual([
+        { user: 'alice_lb', token: TOKEN, scheme: 'Token', listened_at: listenedAt + 1, recording_msid: msid },
+      ]);
+      expect(
+        db.one('SELECT state,target_msid,target_listened_at FROM listenbrainz_deletes WHERE id=?', 'restart-delete'),
+      ).toEqual({
+        state: 'sent',
+        target_msid: msid,
+        target_listened_at: listenedAt + 1,
+      });
+    } finally {
+      db?.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('production forward timer dispatches queued deletion work after live forward priority', async () => {
     const w = await world();
     const linkId = w.link();
@@ -290,6 +377,24 @@ describe('ListenBrainz forwarding', () => {
     });
   });
 
+  it('production timer wakes at the retry deadline when persisted backoff is later', async () => {
+    const w = await world();
+    const linkId = w.link();
+    const now = w.clock.nowMs();
+    queueDelete(w, linkId, 'deadline-wakeup', 1768392000, 'Deadline Artist', 'Deadline Track');
+    const deadline = now + 5_000;
+    w.app.db.run(
+      "UPDATE listenbrainz_deletes SET due_at=?,deadline_at=? WHERE id='deadline-wakeup'",
+      now + 60_000,
+      deadline,
+    );
+    const core = w.app.composed.core;
+    core.extensionTimers.kick('forward');
+    await core.tick('extension');
+    expect(w.seen).toEqual([]);
+    expect(w.app.db.one("SELECT due_at FROM timers WHERE name='forward'")).toEqual({ due_at: deadline });
+  });
+
   it('ignores saturated same-second pages even when one visible near candidate looks usable', async () => {
     const w = await world();
     const linkId = w.link();
@@ -298,7 +403,7 @@ describe('ListenBrainz forwarding', () => {
     const [artist, track] = trackKey('Flood Artist', 'Flood Track');
     w.lb.seedListens(
       'alice_lb',
-      Array.from({ length: 1000 }, (_, i) => ({
+      Array.from({ length: 1001 }, (_, i) => ({
         listened_at: listenedAt - 1,
         recording_msid: i === 0 ? exactCandidateMsid : `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`,
         track_metadata: {
@@ -336,6 +441,9 @@ describe('ListenBrainz forwarding', () => {
       last_error: 'ambiguous_saturated',
     });
     expect(w.lb.deletions).toEqual([]);
+    expect(w.lb.calls.filter({ path: '/1/user/alice_lb/listens' }).map((call) => call.params)).toEqual([
+      { min_ts: ['1768391998'], count: ['1000'] },
+    ]);
   });
 
   it('never substitutes an MBID for a missing recording_msid and enforces the seven-day deadline before egress', async () => {
