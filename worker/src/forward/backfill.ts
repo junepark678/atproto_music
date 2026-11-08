@@ -17,6 +17,15 @@ const BACKFILL_RETRY_MAX_MS = 300_000;
 const LASTFM_WINDOW_MS = 13 * 86_400_000;
 
 type Cursor = { at: string; uri: string };
+type AttemptFence = Pick<LinkedAccountRow, 'id' | 'generation' | 'backfill_run_revision'>;
+class BackfillAttemptFailure extends Error {
+  constructor(
+    readonly attempt: AttemptFence,
+    readonly originalError: unknown,
+  ) {
+    super('linked history backfill page failed');
+  }
+}
 type HistoryRow = {
   kind: 'scrobble' | 'love';
   uri: string;
@@ -168,69 +177,89 @@ export async function runLinkBackfill(
   chunkSize = BACKFILL_CHUNK_SIZE,
 ): Promise<number> {
   const link = db.one<LinkedAccountRow>(
-    "SELECT * FROM linked_accounts WHERE status='active' AND forward_scrobbles=1 AND backfill_state IN ('pending','running') AND coalesce(backfill_next_attempt_ms,0)<=? ORDER BY created_at_ms,id LIMIT 1",
+    `SELECT la.* FROM linked_accounts la JOIN users u ON u.did=la.did
+     WHERE la.status='active' AND la.forward_scrobbles=1 AND la.backfill_state IN ('pending','running')
+       AND coalesce(la.backfill_next_attempt_ms,0)<=? AND u.indexing_state='current'
+     ORDER BY la.created_at_ms,la.id LIMIT 1`,
     now,
   );
   if (link === null) return 0;
   if (link.backfill_state === 'pending') {
-    db.run(
-      "UPDATE linked_accounts SET backfill_state='running',backfill_total=?,backfill_done=0,backfill_cursor=NULL WHERE id=? AND generation=?",
+    const started = db.run(
+      "UPDATE linked_accounts SET backfill_state='running',backfill_total=?,backfill_done=0,backfill_cursor=NULL WHERE id=? AND generation=? AND backfill_run_revision=? AND status='active' AND forward_scrobbles=1 AND backfill_state='pending'",
       totalRows(db, link, now),
       link.id,
       link.generation,
+      link.backfill_run_revision,
+    );
+    if (started.rowsWritten === 0) return 0;
+  }
+  try {
+    const page = candidates(db, link, now, chunkSize);
+    const admitted: Array<{ row: HistoryRow; key: string; payload: unknown }> = [];
+    for (const row of page) {
+      const result = await admitHistoryRow(db, link, row);
+      if (result !== null) admitted.push({ row, ...result });
+    }
+    const last = page.at(-1);
+    const committed = db.tx(() => {
+      const current = db.one<{
+        generation: number;
+        backfill_run_revision: number;
+        backfill_state: string;
+        status: string;
+        forward_scrobbles: number;
+      }>('SELECT generation,backfill_run_revision,backfill_state,status,forward_scrobbles FROM linked_accounts WHERE id=?', link.id);
+      if (
+        current === null ||
+        current.generation !== link.generation ||
+        current.backfill_run_revision !== link.backfill_run_revision ||
+        current.backfill_state !== 'running' ||
+        current.status !== 'active' ||
+        current.forward_scrobbles !== 1
+      )
+        return false;
+      for (const item of admitted) {
+        enqueueForwards(db, {
+          did: link.did,
+          linkId: link.id,
+          priority: 1,
+          now,
+          random,
+          items:
+            item.row.kind === 'scrobble'
+              ? [{ kind: 'scrobble', listenKey: item.key, payload: item.payload }]
+              : [{ kind: 'love', operationId: item.key, payload: item.payload }],
+        });
+      }
+      if (last === undefined) {
+        db.run(
+          "UPDATE linked_accounts SET backfill_state='done',backfill_cursor=NULL,backfill_failures=0,backfill_next_attempt_ms=NULL WHERE id=? AND generation=? AND backfill_run_revision=? AND status='active' AND forward_scrobbles=1 AND backfill_state='running'",
+          link.id,
+          link.generation,
+          link.backfill_run_revision,
+        );
+      } else {
+        const nextState = page.length < chunkSize ? 'done' : 'running';
+        db.run(
+          "UPDATE linked_accounts SET backfill_state=?,backfill_cursor=?,backfill_done=backfill_done+?,backfill_failures=0,backfill_next_attempt_ms=NULL WHERE id=? AND generation=? AND backfill_run_revision=? AND status='active' AND forward_scrobbles=1 AND backfill_state='running'",
+          nextState,
+          JSON.stringify({ at: last.event_at, uri: last.uri }),
+          page.length,
+          link.id,
+          link.generation,
+          link.backfill_run_revision,
+        );
+      }
+      return true;
+    });
+    return committed ? page.length : 0;
+  } catch (error) {
+    throw new BackfillAttemptFailure(
+      { id: link.id, generation: link.generation, backfill_run_revision: link.backfill_run_revision },
+      error,
     );
   }
-  const page = candidates(db, link, now, chunkSize);
-  const admitted: Array<{ row: HistoryRow; key: string; payload: unknown }> = [];
-  for (const row of page) {
-    const result = await admitHistoryRow(db, link, row);
-    if (result !== null) admitted.push({ row, ...result });
-  }
-  const last = page.at(-1);
-  db.tx(() => {
-    const current = db.one<{ generation: number; status: string; forward_scrobbles: number }>(
-      'SELECT generation,status,forward_scrobbles FROM linked_accounts WHERE id=?',
-      link.id,
-    );
-    if (
-      current === null ||
-      current.generation !== link.generation ||
-      current.status !== 'active' ||
-      current.forward_scrobbles !== 1
-    )
-      return;
-    for (const item of admitted) {
-      enqueueForwards(db, {
-        did: link.did,
-        linkId: link.id,
-        priority: 1,
-        now,
-        random,
-        items:
-          item.row.kind === 'scrobble'
-            ? [{ kind: 'scrobble', listenKey: item.key, payload: item.payload }]
-            : [{ kind: 'love', operationId: item.key, payload: item.payload }],
-      });
-    }
-    if (last === undefined) {
-      db.run(
-        "UPDATE linked_accounts SET backfill_state='done',backfill_cursor=NULL,backfill_failures=0,backfill_next_attempt_ms=NULL WHERE id=? AND generation=?",
-        link.id,
-        link.generation,
-      );
-    } else {
-      const nextState = page.length < chunkSize ? 'done' : 'running';
-      db.run(
-        'UPDATE linked_accounts SET backfill_state=?,backfill_cursor=?,backfill_done=backfill_done+?,backfill_failures=0,backfill_next_attempt_ms=NULL WHERE id=? AND generation=?',
-        nextState,
-        JSON.stringify({ at: last.event_at, uri: last.uri }),
-        page.length,
-        link.id,
-        link.generation,
-      );
-    }
-  });
-  return page.length;
 }
 
 export function linkBackfillExtension(runtime: () => ForwardRuntime | null): CoreExtension {
@@ -255,24 +284,29 @@ export function linkBackfillExtension(runtime: () => ForwardRuntime | null): Cor
             );
           }
         } catch (error) {
-          const link = rt.db.one<{ id: string; generation: number; backfill_failures: number }>(
-            "SELECT id,generation,backfill_failures FROM linked_accounts WHERE status='active' AND forward_scrobbles=1 AND backfill_state IN ('pending','running') AND coalesce(backfill_next_attempt_ms,0)<=? ORDER BY created_at_ms,id LIMIT 1",
-            now,
+          if (!(error instanceof BackfillAttemptFailure)) throw error;
+          const link = rt.db.one<{ backfill_failures: number }>(
+            `SELECT backfill_failures FROM linked_accounts WHERE id=? AND generation=? AND backfill_run_revision=?
+             AND status='active' AND forward_scrobbles=1 AND backfill_state='running'`,
+            error.attempt.id,
+            error.attempt.generation,
+            error.attempt.backfill_run_revision,
           );
-          if (link === null) throw error;
+          if (link === null) return;
           const failures = link.backfill_failures + 1;
           const delay = Math.min(BACKFILL_RETRY_MAX_MS, BACKFILL_RETRY_BASE_MS * 2 ** Math.min(failures - 1, 10));
           const retryAt = now + delay;
           rt.db.run(
-            'UPDATE linked_accounts SET backfill_failures=?,backfill_next_attempt_ms=? WHERE id=? AND generation=?',
+            "UPDATE linked_accounts SET backfill_failures=?,backfill_next_attempt_ms=? WHERE id=? AND generation=? AND backfill_run_revision=? AND status='active' AND forward_scrobbles=1 AND backfill_state='running'",
             failures,
             retryAt,
-            link.id,
-            link.generation,
+            error.attempt.id,
+            error.attempt.generation,
+            error.attempt.backfill_run_revision,
           );
           ctx.schedule('link-backfill', retryAt, { force: true });
           rt.log.log('warn', 'forward.backfill_retry', {
-            generation: link.generation,
+            generation: error.attempt.generation,
             delayMs: delay,
             error: error instanceof Error ? error.name : 'UnknownError',
           });

@@ -467,6 +467,7 @@ const NEW_TABLES: Record<string, ExpectedTable> = {
       sync_remote_user: true,
       backfill_failures: true,
       backfill_next_attempt_ms: true,
+      backfill_run_revision: true,
     }),
     pk: ['id'],
     unique: [['did', 'service']],
@@ -1484,6 +1485,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       "24|'linked_account_backfill_and_pull_state'",
       "25|'forward_backfill_priority'",
       "26|'forward_backfill_retry_state'",
+      "27|'linked_account_backfill_run_revision'",
     ]);
     // The new scrobble columns exist and are NULL on every migrated row.
     expect(after.newColumns).toHaveLength(expectedScrobbles);
@@ -1517,6 +1519,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       { version: 24, name: 'linked_account_backfill_and_pull_state' },
       { version: 25, name: 'forward_backfill_priority' },
       { version: 26, name: 'forward_backfill_retry_state' },
+      { version: 27, name: 'linked_account_backfill_run_revision' },
     ]);
     expect(after.compat).toEqual([{ singleton: 1, min_compatible_version: 2 }]);
     expect(after.newTablesEmpty).toEqual(['mb_cover_art_usage']);

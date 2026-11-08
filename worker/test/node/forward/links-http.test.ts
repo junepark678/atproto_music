@@ -27,9 +27,11 @@ import { csrfToken } from '../../../src/bff/csrf';
 import { createWebSessions, SESSION_COOKIE, type WebSessions } from '../../../src/bff/sessions';
 import { ensureAccount } from '../../../src/credentials/accounts';
 import { type Box, BoxError, createBox, linkedAad } from '../../../src/crypto/box';
+import { completeSnapshot } from '../../../src/do/write/apply-snapshot';
 import { runLinkBackfill } from '../../../src/forward/backfill';
 import { dueRows } from '../../../src/forward/forward-outbox';
-import { LINK_STATE_TTL_MS, saveLink, sweepExpiredLinkStates } from '../../../src/forward/links';
+import { LINK_STATE_TTL_MS, patchLink, saveLink, sweepExpiredLinkStates } from '../../../src/forward/links';
+import { admitForwardIdentity, projectionListenKey } from '../../../src/forward/projection';
 import { linksFeature } from '../../../src/http/links';
 import { parseSecrets } from '../../../src/node/secrets';
 import { openSqliteDb } from '../../../src/node/sqlite-db';
@@ -119,6 +121,28 @@ async function call(w: World, method: string, path: string, init: { token: strin
   return { res, body };
 }
 
+function seedBackfillScrobble(w: World, i: number): void {
+  const at = `2026-01-10T00:00:0${i}.000000000Z`;
+  const [artistKey, trackValue] = trackKey('A', `T${i}`);
+  w.app.db.run('INSERT OR IGNORE INTO users(did,joined_at) VALUES(?,?)', ALICE, at);
+  w.app.db.run(
+    `INSERT INTO scrobbles(uri,cid,did,rkey,revision,artist,track,listened_at,created_at,indexed_at,artist_key,track_key)
+     VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+    `at://${ALICE}/com.example.atmusic.scrobble/r${i}`,
+    `cid-${i}`,
+    ALICE,
+    `r${i}`,
+    `rev-${i}`,
+    'A',
+    `T${i}`,
+    at,
+    at,
+    at,
+    artistKey,
+    trackValue,
+  );
+}
+
 function links(w: World): LinkedAccountRow[] {
   return w.app.db.all<LinkedAccountRow>('SELECT * FROM linked_accounts ORDER BY created_at_ms, id');
 }
@@ -156,6 +180,15 @@ describe('link routes', () => {
       { db: w.app.db, clock: w.clock, random: seededRandom(101), box: w.box },
       { did: ALICE, service: 'listenbrainz', remoteUser: 'alice_lb', credential: 'lb-token' },
     );
+    w.app.db.run('INSERT OR IGNORE INTO users(did,joined_at) VALUES(?,?)', ALICE, '2026-01-01T00:00:00.000000000Z');
+    w.app.db.run("UPDATE users SET indexing_state='current' WHERE did=?", ALICE);
+    expect(w.app.db.one('SELECT indexing_state FROM users WHERE did=?', ALICE)).toEqual({ indexing_state: 'current' });
+    expect(w.app.db.one('SELECT status,forward_scrobbles,backfill_state,backfill_run_revision FROM linked_accounts WHERE id=?', linked.link.id)).toMatchObject({
+      status: 'active',
+      forward_scrobbles: 1,
+      backfill_state: 'pending',
+      backfill_run_revision: 1,
+    });
     w.app.db.run('INSERT OR IGNORE INTO users(did,joined_at) VALUES(?,?)', ALICE, '2026-01-01T00:00:00.000000000Z');
     const batch = 501;
     for (let i = 1; i <= batch; i++) {
@@ -258,6 +291,7 @@ describe('link routes', () => {
       { did: ALICE, service: 'listenbrainz', remoteUser: 'alice_lb', credential: 'lb-token' },
     );
     w.app.db.run('INSERT OR IGNORE INTO users(did,joined_at) VALUES(?,?)', ALICE, '2026-01-01T00:00:00.000000000Z');
+    w.app.db.run("UPDATE users SET indexing_state='current' WHERE did=?", ALICE);
     const [artistKey, trackKeyValue] = trackKey('Matched Artist', 'Matched Song');
     const [, matchedAlbumKey] = albumKey('Matched Artist', 'Album') as [string, string];
     const incarnationKey = 'love:matched-incarnation';
@@ -350,6 +384,7 @@ describe('link routes', () => {
       { did: ALICE, service: 'lastfm', remoteUser: 'alice_fm', credential: sk },
     );
     w.app.db.run('INSERT OR IGNORE INTO users(did,joined_at) VALUES(?,?)', ALICE, '2026-01-01T00:00:00.000000000Z');
+    w.app.db.run("UPDATE users SET indexing_state='current' WHERE did=?", ALICE);
     for (const [suffix, listenedAt] of [
       ['old', '2025-12-31T00:00:00.000Z'],
       ['recent', '2026-01-10T00:00:00.000Z'],
@@ -412,6 +447,80 @@ describe('link routes', () => {
     expect(rows.map((row) => row.kind).sort()).toEqual(['love', 'scrobble']);
     expect(rows.map((row) => row.payload_json).join('\n')).not.toContain('Song old');
     expect(w.lastfm.calls.count()).toBe(0);
+  });
+
+  it('waits for initial indexing and rescans after a completed later snapshot', async () => {
+    const w = await world();
+    const linked = saveLink(
+      { db: w.app.db, clock: w.clock, random: seededRandom(301), box: w.box },
+      { did: ALICE, service: 'listenbrainz', remoteUser: 'late_snapshot', credential: 'lb-token' },
+    ).link;
+    expect(await runLinkBackfill(w.app.db, seededRandom(302), w.clock.nowMs())).toBe(0);
+    expect(w.app.db.one<{ backfill_state: string }>('SELECT backfill_state FROM linked_accounts WHERE id=?', linked.id))
+      .toEqual({ backfill_state: 'pending' });
+
+    const addSnapshotRecord = async (i: number, rev: string) => {
+      seedBackfillScrobble(w, i);
+      const at = `2026-01-10T00:00:0${i}.000000000Z`;
+      const key = projectionListenKey(ALICE, at, 'a', `t${i}`);
+      admitForwardIdentity(w.app.db, { did: ALICE, identityKey: key, path: 'snapshot', now: w.clock.nowMs() });
+      const generation = w.app.db.one<{ generation: number }>('SELECT generation FROM users WHERE did=?', ALICE)!.generation;
+      w.app.db.run(
+        `INSERT INTO repo_jobs(did,kind,generation,head_rev,due_at,updated_at_ms)
+         VALUES(?,'snapshot',?,?,?,?) ON CONFLICT(did,kind) DO UPDATE SET generation=excluded.generation,
+         head_rev=excluded.head_rev,due_at=excluded.due_at,updated_at_ms=excluded.updated_at_ms`,
+        ALICE,
+        generation,
+        rev,
+        w.clock.nowMs(),
+        w.clock.nowMs(),
+      );
+      expect(
+        completeSnapshot(w.app.db, {
+          did: ALICE,
+          generation,
+          headRev: rev,
+          accountActive: true,
+          nowNs: BigInt(w.clock.nowMs()) * 1_000_000n,
+        }).outcome,
+      ).toBe('complete');
+    };
+
+    await addSnapshotRecord(1, 'rev1');
+    expect(await runLinkBackfill(w.app.db, seededRandom(303), w.clock.nowMs())).toBe(1);
+    expect(w.app.db.one('SELECT backfill_state FROM linked_accounts WHERE id=?', linked.id)).toEqual({ backfill_state: 'done' });
+
+    await addSnapshotRecord(2, 'rev2');
+    expect(w.app.db.one('SELECT backfill_state,backfill_cursor FROM linked_accounts WHERE id=?', linked.id)).toEqual({
+      backfill_state: 'pending',
+      backfill_cursor: null,
+    });
+    expect(await runLinkBackfill(w.app.db, seededRandom(304), w.clock.nowMs())).toBe(2);
+    expect(w.app.db.one('SELECT count(*) AS n FROM forward_outbox WHERE link_id=?', linked.id)).toEqual({ n: 2 });
+  });
+
+  it('an async page cannot enqueue or overwrite cursor after an off/on reset in the same generation', async () => {
+    const w = await world();
+    w.app.db.run('INSERT OR IGNORE INTO users(did,joined_at) VALUES(?,?)', ALICE, '2026-01-01T00:00:00.000000000Z');
+    w.app.db.run("UPDATE users SET indexing_state='current' WHERE did=?", ALICE);
+    const linked = saveLink(
+      { db: w.app.db, clock: w.clock, random: seededRandom(311), box: w.box },
+      { did: ALICE, service: 'listenbrainz', remoteUser: 'reset_race', credential: 'lb-token' },
+    ).link;
+    seedBackfillScrobble(w, 1);
+    seedBackfillScrobble(w, 2);
+    const oldPage = runLinkBackfill(w.app.db, seededRandom(312), w.clock.nowMs(), 1);
+    expect(patchLink({ db: w.app.db, clock: w.clock }, ALICE, linked.id, { forwardScrobbles: false })).not.toBeNull();
+    expect(patchLink({ db: w.app.db, clock: w.clock }, ALICE, linked.id, { forwardScrobbles: true })).not.toBeNull();
+    seedBackfillScrobble(w, 3);
+    await oldPage;
+    expect(w.app.db.one('SELECT count(*) AS n FROM forward_outbox WHERE link_id=?', linked.id)).toEqual({ n: 0 });
+    expect(w.app.db.one('SELECT backfill_state,backfill_cursor FROM linked_accounts WHERE id=?', linked.id)).toEqual({
+      backfill_state: 'pending',
+      backfill_cursor: null,
+    });
+    expect(await runLinkBackfill(w.app.db, seededRandom(313), w.clock.nowMs(), 10)).toBe(3);
+    expect(w.app.db.one('SELECT count(*) AS n FROM forward_outbox WHERE link_id=?', linked.id)).toEqual({ n: 3 });
   });
 
   it.each(['logout', 'logout-all', 'disconnect', 'expiry'] as const)(

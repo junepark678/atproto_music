@@ -1125,6 +1125,12 @@ const MIGRATION_S2_BACKFILL_RETRY: Migration = {
   ],
 };
 
+const MIGRATION_S2_BACKFILL_RUN_REVISION: Migration = {
+  version: 27,
+  name: 'linked_account_backfill_run_revision',
+  statements: ['ALTER TABLE linked_accounts ADD COLUMN backfill_run_revision INTEGER NOT NULL DEFAULT 1'],
+};
+
 export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_1,
   MIGRATION_2,
@@ -1152,6 +1158,7 @@ export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_S2_SYNC,
   MIGRATION_S2_BACKFILL_PRIORITY,
   MIGRATION_S2_BACKFILL_RETRY,
+  MIGRATION_S2_BACKFILL_RUN_REVISION,
 ];
 
 /** The schema version this code expects. */

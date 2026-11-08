@@ -382,6 +382,8 @@ export interface LinkedAccountRow {
   sync_remote_user: string | null;
   backfill_failures: number;
   backfill_next_attempt_ms: number | null;
+  /** Fences any async scan page from a reset/re-schedule of this generation. */
+  backfill_run_revision: number;
 }
 
 export interface LinkStateRow {
