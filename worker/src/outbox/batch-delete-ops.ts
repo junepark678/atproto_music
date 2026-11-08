@@ -1,3 +1,4 @@
+import { trackKey } from '@atmusic/core/music-key';
 import { isTid } from '@atmusic/core/syntax';
 import type { OperationRow, Origin } from '../app/rows';
 import type { ModuleDeps } from '../do/contracts';
@@ -224,6 +225,26 @@ export function commitUnsentBatchListenRemoval(m: ModuleDeps, plan: BatchListenR
       )
     )
       return null;
+    const original = JSON.parse(op.record_json) as {
+      listens?: Array<{ id?: unknown; artist?: unknown; track?: unknown; listenedAt?: unknown }>;
+    };
+    const removed = original.listens?.find((item) => item.id === plan.listenId);
+    if (
+      removed &&
+      typeof removed.artist === 'string' &&
+      typeof removed.track === 'string' &&
+      typeof removed.listenedAt === 'string'
+    ) {
+      const [artistKey, trackKeyValue] = trackKey(removed.artist, removed.track);
+      tombstoneListen(m.db, {
+        did: op.did,
+        identity: `pending-batch:${op.id}:${plan.listenId}`,
+        second: Math.floor(Date.parse(removed.listenedAt) / 1000),
+        artistKey,
+        trackKey: trackKeyValue,
+        nowMs: now,
+      });
+    }
     m.db.run('DELETE FROM batch_entry_items WHERE operation_id = ? AND entry_id = ?', op.id, plan.listenId);
     for (const member of plan.members) {
       m.db.run(

@@ -1229,6 +1229,27 @@ const MIGRATION_S3_PULL_TOMBSTONES: Migration = {
   ],
 };
 
+const MIGRATION_S3_LOVE_PULL_CURSOR: Migration = {
+  version: 32,
+  name: 'linked_love_pull_cursor',
+  statements: ['ALTER TABLE linked_pull_state ADD COLUMN love_cursor TEXT'],
+};
+
+const MIGRATION_S3_LOVE_INTENT_FENCE: Migration = {
+  version: 33,
+  name: 'linked_love_user_intent_fence',
+  statements: [
+    `CREATE TABLE linked_love_intents (
+    did TEXT NOT NULL,
+    love_key TEXT NOT NULL,
+    intent TEXT NOT NULL,
+    operation_id TEXT NOT NULL,
+    updated_at_ms INTEGER NOT NULL,
+    PRIMARY KEY(did,love_key)
+  )`,
+  ],
+};
+
 export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_1,
   MIGRATION_2,
@@ -1261,6 +1282,8 @@ export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_S2_BACKFILL_MEMBERSHIP,
   MIGRATION_S3_PULL_FOUNDATION,
   MIGRATION_S3_PULL_TOMBSTONES,
+  MIGRATION_S3_LOVE_PULL_CURSOR,
+  MIGRATION_S3_LOVE_INTENT_FENCE,
 ];
 
 /** The schema version this code expects. */
@@ -1344,6 +1367,7 @@ export const TABLES = [
   'linked_pull_state',
   'linked_pull_items',
   'linked_pull_tombstones',
+  'linked_love_intents',
 ] as const;
 
 export type TableName = (typeof TABLES)[number];
@@ -1426,4 +1450,5 @@ export const TABLE_CLASS: Readonly<Record<TableName, TableClass>> = {
   linked_pull_state: 'non-derived',
   linked_pull_items: 'non-derived',
   linked_pull_tombstones: 'non-derived',
+  linked_love_intents: 'non-derived',
 };

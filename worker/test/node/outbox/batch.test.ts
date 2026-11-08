@@ -465,6 +465,49 @@ const PROOF_OPTIONS = {
   nowNs: BigInt(T0) * 1_000_000n,
   prefix: 'com.example.atmusic',
 };
+
+it('live batch replacement tombstones removed members only; snapshot replacement does not', async () => {
+  await withHarness(async (h) => {
+    h.seedUser(h.alice);
+    const rkey = '3lb2batchcontainer1',
+      uri = `at://${h.alice}/${BATCH}/${rkey}`;
+    await h.kit.externalPut('Alice', BATCH, rkey, twoListenRecord());
+    let proof = await proofAt(h.kit.repos.Alice, BATCH, rkey);
+    h.db.tx(() => applyRecordProof(h.db, proof, { ...PROOF_OPTIONS, forwarding: { random: h.m.random } }));
+    const member = h.db.one<{ listened_at: string }>(
+      'SELECT listened_at FROM scrobbles WHERE record_uri=? AND listen_id=?',
+      uri,
+      REMOVED_ID,
+    )!;
+    const sibling = h.db.one<{ listened_at: string }>(
+      'SELECT listened_at FROM scrobbles WHERE record_uri=? AND listen_id=?',
+      uri,
+      SIBLING_ID,
+    )!;
+    const removedSecond = Math.floor(Date.parse(member.listened_at) / 1000),
+      retainedSecond = Math.floor(Date.parse(sibling.listened_at) / 1000);
+    const replacement = twoListenRecord();
+    replacement.listens = replacement.listens.filter((item) => item.id === SIBLING_ID);
+    await h.kit.externalPut('Alice', BATCH, rkey, replacement);
+    proof = await proofAt(h.kit.repos.Alice, BATCH, rkey);
+    h.db.tx(() => applyRecordProof(h.db, proof, { ...PROOF_OPTIONS, forwarding: { random: h.m.random } }));
+    expect(
+      h.db.one(
+        "SELECT count(*) AS n FROM linked_pull_tombstones WHERE did=? AND kind='listen' AND listen_second=?",
+        h.alice,
+        removedSecond,
+      ),
+    ).toEqual({ n: 1 });
+    expect(
+      h.db.one(
+        "SELECT count(*) AS n FROM linked_pull_tombstones WHERE did=? AND kind='listen' AND listen_second=?",
+        h.alice,
+        retainedSecond,
+      ),
+    ).toEqual({ n: 0 });
+  });
+});
+
 const cidOf = (proof: Awaited<ReturnType<typeof proofAt>>): string => {
   if (proof.state !== 'present') throw new Error('expected a present proof');
   return proof.cid;

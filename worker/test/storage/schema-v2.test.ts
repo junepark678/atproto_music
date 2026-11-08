@@ -106,6 +106,7 @@ const NEW_TABLES: Record<string, ExpectedTable> = {
       'retry_at_ms',
       'failures',
       'updated_at_ms',
+      'love_cursor',
     ],
     pk: ['link_id', 'generation'],
   },
@@ -139,6 +140,10 @@ const NEW_TABLES: Record<string, ExpectedTable> = {
       'created_at_ms',
     ],
     pk: ['did', 'kind', 'identity_key'],
+  },
+  linked_love_intents: {
+    columns: ['did', 'love_key', 'intent', 'operation_id', 'updated_at_ms'],
+    pk: ['did', 'love_key'],
   },
   forward_admissions: {
     columns: ['did', 'identity_key', 'path', 'source_service', 'created_at_ms', 'admission_seq'],
@@ -1630,6 +1635,8 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       "29|'link_backfill_staged_membership'",
       "30|'linked_service_pull_foundation'",
       "31|'linked_pull_deletion_tombstones'",
+      "32|'linked_love_pull_cursor'",
+      "33|'linked_love_user_intent_fence'",
     ]);
     // The new scrobble columns exist and are NULL on every migrated row.
     expect(after.newColumns).toHaveLength(expectedScrobbles);
@@ -1668,6 +1675,8 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       { version: 29, name: 'link_backfill_staged_membership' },
       { version: 30, name: 'linked_service_pull_foundation' },
       { version: 31, name: 'linked_pull_deletion_tombstones' },
+      { version: 32, name: 'linked_love_pull_cursor' },
+      { version: 33, name: 'linked_love_user_intent_fence' },
     ]);
     expect(after.compat).toEqual([{ singleton: 1, min_compatible_version: 2 }]);
     expect(after.newTablesEmpty).toEqual(['mb_cover_art_usage']);

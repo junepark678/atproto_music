@@ -106,6 +106,15 @@ export async function enqueueLove(m: ModuleDeps, args: EnqueueLoveArgs): Promise
       },
       now,
     );
+    if (args.origin !== 'import')
+      m.db.run(
+        `INSERT INTO linked_love_intents(did,love_key,intent,operation_id,updated_at_ms) VALUES(?,?,'love',?,?)
+        ON CONFLICT(did,love_key) DO UPDATE SET intent='love',operation_id=excluded.operation_id,updated_at_ms=excluded.updated_at_ms`,
+        args.did,
+        key,
+        op.id,
+        now,
+      );
     admitForwardIdentity(m.db, {
       did: args.did,
       identityKey: `love-uri:${args.did}:${outboxCollections(prefix).love}:${op.rkey}`,
@@ -155,16 +164,18 @@ export async function enqueueUnlove(
       artistKeyValue,
       trackKeyValue,
     );
-    tombstoneLove(m.db, { did: args.did, identity: `key:${key}`, loveKey: key, recordingMbid: null, nowMs: now });
-    for (const [i, row] of mbids.entries())
-      if (row.recording_mbid)
-        tombstoneLove(m.db, {
-          did: args.did,
-          identity: `mbid:${row.recording_mbid}`,
-          loveKey: key,
-          recordingMbid: row.recording_mbid,
-          nowMs: now + i,
-        });
+    if (args.origin !== 'import') {
+      tombstoneLove(m.db, { did: args.did, identity: `key:${key}`, loveKey: key, recordingMbid: null, nowMs: now });
+      for (const [i, row] of mbids.entries())
+        if (row.recording_mbid)
+          tombstoneLove(m.db, {
+            did: args.did,
+            identity: `mbid:${row.recording_mbid}`,
+            loveKey: key,
+            recordingMbid: row.recording_mbid,
+            nowMs: now + i,
+          });
+    }
     const op = insertOperation(
       m.db,
       {
@@ -180,6 +191,15 @@ export async function enqueueUnlove(
       },
       now,
     );
+    if (args.origin !== 'import')
+      m.db.run(
+        `INSERT INTO linked_love_intents(did,love_key,intent,operation_id,updated_at_ms) VALUES(?,?,'unlove',?,?)
+        ON CONFLICT(did,love_key) DO UPDATE SET intent='unlove',operation_id=excluded.operation_id,updated_at_ms=excluded.updated_at_ms`,
+        args.did,
+        key,
+        op.id,
+        now,
+      );
     if (args.origin !== 'import') {
       enqueueForwards(m.db, {
         did: args.did,

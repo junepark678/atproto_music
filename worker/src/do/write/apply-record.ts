@@ -389,6 +389,20 @@ function batchVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, o: 
       }>('SELECT uri,cid,artist_key,track_key,listened_at,listen_id FROM scrobbles WHERE record_uri = ?', t.uri);
       const priorByUri = new Map(prior.map((row) => [row.uri, row]));
       const now = Number(o.nowNs / 1_000_000n);
+      if (o.forwarding) {
+        const retainedIds = new Set(batch.listens.map((listen) => listen.id));
+        for (const old of prior) {
+          if (old.listen_id !== null && retainedIds.has(old.listen_id)) continue;
+          tombstoneListen(db, {
+            did: t.did,
+            identity: `batch-replaced:${old.uri}:${cid}`,
+            second: Math.floor(Date.parse(old.listened_at) / 1000),
+            artistKey: old.artist_key,
+            trackKey: old.track_key,
+            nowMs: now,
+          });
+        }
+      }
       const provenance = retainedRecordProvenance(db, t.did, t.collection, t.rkey);
       for (const old of prior) {
         admitProjectedIdentity(db, {
@@ -741,7 +755,15 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
             priorLove.track,
           ) !== null
         : false;
-    if (o.forwarding && t.kind === 'love' && priorLove && !newerLoveIntent) {
+    const [priorArtistKey, priorTrackKey] = priorLove ? trackKey(priorLove.artist, priorLove.track) : ['', ''];
+    const locallyReloved =
+      priorLove !== null &&
+      db.one(
+        "SELECT 1 FROM linked_love_intents WHERE did=? AND love_key=? AND intent='love' LIMIT 1",
+        t.did,
+        `${priorArtistKey}\u0000${priorTrackKey}`,
+      ) !== null;
+    if (o.forwarding && t.kind === 'love' && priorLove && !newerLoveIntent && !locallyReloved) {
       const [artistKeyValue, trackKeyValue] = trackKey(priorLove.artist, priorLove.track);
       const key = `${artistKeyValue}\u0000${trackKeyValue}`;
       tombstoneLove(db, {

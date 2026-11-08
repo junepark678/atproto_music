@@ -75,7 +75,7 @@ describe('migrate over node:sqlite', () => {
   it('migration 30 creates durable per-generation pull state, staging and tombstone tables', () => {
     const db = freshDb();
     migrate(db);
-    expect(SCHEMA_VERSION).toBe(31);
+    expect(SCHEMA_VERSION).toBe(33);
     for (const table of ['linked_pull_state', 'linked_pull_items'] as const) {
       expect(TABLES).toContain(table);
       expect(db.one<{ name: string }>("SELECT name FROM sqlite_master WHERE type='table' AND name=?", table)).toEqual({
