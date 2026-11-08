@@ -1329,6 +1329,15 @@ const MIGRATION_S3_LOVE_PULL_ADMISSIONS: Migration = {
   ],
 };
 
+// A successful repo.deleteRecord response carries the repository revision
+// that orders the deletion before a same-URI recreation, even when its CID is
+// byte-identical. Null remains conservative for legacy or malformed replies.
+const MIGRATION_S3_LOVE_DELETE_REVISION: Migration = {
+  version: 38,
+  name: 'love_delete_bridge_commit_revision',
+  statements: ['ALTER TABLE love_delete_bridges ADD COLUMN delete_rev TEXT'],
+};
+
 export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_1,
   MIGRATION_2,
@@ -1367,6 +1376,7 @@ export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_S3_PULL_POLLING,
   MIGRATION_S3_LISTENBRAINZ_PULL,
   MIGRATION_S3_LOVE_PULL_ADMISSIONS,
+  MIGRATION_S3_LOVE_DELETE_REVISION,
 ];
 
 /** The schema version this code expects. */

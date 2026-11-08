@@ -717,6 +717,16 @@ describe('restore.ts', () => {
         incarnationKey,
         world.clock.nowMs(),
       );
+      expect(TABLE_CLASS.love_delete_bridges).toBe('non-derived');
+      db.run(
+        `INSERT INTO love_delete_bridges(
+           did,uri,incarnation_key,expected_cid,operation_id,state,created_at_ms,delete_rev
+         ) VALUES(?,?,?,'bafyreitest','restore-delete-op','succeeded',?,'3lb2aaaaaaa2a')`,
+        DID_A,
+        uri,
+        incarnationKey,
+        world.clock.nowMs(),
+      );
     } finally {
       db.close();
     }
@@ -754,8 +764,10 @@ describe('restore.ts', () => {
     expect(restored.stdout).toMatch(/love_incarnations\s+1\s+live/);
     expect(restored.stdout).toMatch(/love_import_bridges\s+1\s+live/);
     expect(restored.stdout).toMatch(/linked_pull_love_admissions\s+1\s+live/);
+    expect(restored.stdout).toMatch(/love_delete_bridges\s+1\s+live/);
     expect(TABLE_CLASS.love_import_bridges).toBe('non-derived');
     expect(TABLE_CLASS.linked_pull_love_admissions).toBe('non-derived');
+    expect(TABLE_CLASS.love_delete_bridges).toBe('non-derived');
     expect(query(world.dbPath, 'SELECT source_service,state FROM love_import_bridges')).toEqual([
       { source_service: 'listenbrainz', state: 'bound' },
     ]);
@@ -773,6 +785,9 @@ describe('restore.ts', () => {
         state: 'present',
         uri,
       },
+    ]);
+    expect(query(world.dbPath, 'SELECT state,delete_rev FROM love_delete_bridges')).toEqual([
+      { state: 'succeeded', delete_rev: '3lb2aaaaaaa2a' },
     ]);
     expect(query(world.dbPath, "SELECT count(*) AS n FROM forward_outbox WHERE kind='love'")).toEqual([{ n: 1 }]);
     expect(

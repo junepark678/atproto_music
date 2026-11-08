@@ -325,7 +325,7 @@ function existingLove(op: OperationRow, ctx: ExecContext, key: string): Existing
       db.one(
         `SELECT 1 AS hit FROM loves l JOIN record_state r ON r.uri=l.uri AND r.cid=l.cid AND r.state='present'
        JOIN love_delete_bridges b ON b.did=l.did AND b.uri=l.uri
-       WHERE l.did=? AND b.state='obsolete' AND b.expected_cid<>l.cid
+       WHERE l.did=? AND b.state='obsolete' AND b.delete_rev IS NOT NULL AND r.revision>b.delete_rev
          AND l.artist_key=? AND l.track_key=? LIMIT 1`,
         op.did,
         ...trackKey(recordOf(op)?.artist as string, recordOf(op)?.track as string),
@@ -338,12 +338,9 @@ function existingLove(op: OperationRow, ctx: ExecContext, key: string): Existing
         const fencedDelete =
           db.one(
             `SELECT 1 AS hit FROM love_delete_bridges WHERE did=? AND uri=?
-             AND expected_cid=coalesce((SELECT cid FROM record_state WHERE uri=? AND state='present'),?)
              AND state IN ('pending','succeeded') LIMIT 1`,
             op.did,
             last.uri,
-            last.uri,
-            last.cid,
           ) !== null;
         const state = db.one<{ cid: string | null; state: string }>(
           `SELECT cid, state FROM record_state WHERE uri = ?`,
@@ -387,8 +384,7 @@ function existingLove(op: OperationRow, ctx: ExecContext, key: string): Existing
      WHERE did = ? AND artist_key = ? AND track_key = ?
        AND NOT EXISTS (
          SELECT 1 FROM love_delete_bridges AS bridge
-         WHERE bridge.did=loves.did AND bridge.uri=loves.uri AND bridge.expected_cid=loves.cid
-           AND bridge.state IN ('pending','succeeded')
+         WHERE bridge.did=loves.did AND bridge.uri=loves.uri AND bridge.state IN ('pending','succeeded')
        )
      ORDER BY created_at, uri LIMIT 1`,
     op.did,
@@ -533,9 +529,9 @@ export const loveDeleteExecutor: Executor = {
         );
       }
       ctx.m.db.run(
-        `INSERT INTO love_delete_bridges(did,uri,incarnation_key,expected_cid,operation_id,state,created_at_ms)
-         VALUES (?,?,?,?,?,'pending',?) ON CONFLICT(did,uri,incarnation_key,operation_id)
-         DO UPDATE SET expected_cid=excluded.expected_cid,state='pending'`,
+        `INSERT INTO love_delete_bridges(did,uri,incarnation_key,expected_cid,operation_id,state,created_at_ms,delete_rev)
+         VALUES (?,?,?,?,?,'pending',?,NULL) ON CONFLICT(did,uri,incarnation_key,operation_id)
+         DO UPDATE SET expected_cid=excluded.expected_cid,state='pending',delete_rev=NULL`,
         op.did,
         uri,
         incarnationKey,
@@ -553,7 +549,26 @@ export const loveDeleteExecutor: Executor = {
         op.id,
       );
     };
-    const outcome = await deleteMatching(op, ctx, loveMatches(key), [], bridgeBeforeDelete, bridgeFailed);
+    const deleteSucceeded = ({ uri, cid }: { uri: string; cid: string }, commitRev: string | null) => {
+      ctx.m.db.run(
+        `UPDATE love_delete_bridges SET delete_rev=coalesce(?,delete_rev)
+         WHERE did=? AND uri=? AND expected_cid=? AND operation_id=? AND state='pending'`,
+        commitRev,
+        op.did,
+        uri,
+        cid,
+        op.id,
+      );
+    };
+    const outcome = await deleteMatching(
+      op,
+      ctx,
+      loveMatches(key),
+      [],
+      bridgeBeforeDelete,
+      bridgeFailed,
+      deleteSucceeded,
+    );
     if (outcome.kind === 'succeeded') {
       ctx.m.db.run(
         "UPDATE love_delete_bridges SET state='succeeded' WHERE did=? AND operation_id=? AND state='pending'",

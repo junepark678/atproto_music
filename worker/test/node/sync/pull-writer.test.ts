@@ -286,6 +286,236 @@ describe('linked pull staged writer', () => {
     },
   );
 
+  it.each([false, true])(
+    'a byte-identical signed love recreated after deletion starts a reusable new incarnation (all prior operations collected=%s)',
+    async (collectAllOperations) => {
+      await withHarness(async (h) => {
+        const { did, linkId } = await setup(h, h.alice);
+        const targetLink = h.link(did, 'lastfm');
+        stageLovePage(h.db, {
+          linkId,
+          generation: 1,
+          sourceService: 'listenbrainz',
+          sourceAccount: 'remote',
+          did,
+          proposedCursor: null,
+          proposedBoundaryMs: 100,
+          proposedBoundaryKey: null,
+          nowMs: 2,
+          items: [
+            { itemKey: 'pulled', artist: 'Artist', track: 'Track', payload: { artist: 'Artist', track: 'Track' } },
+          ],
+        });
+        await writePullSlice(h.m, { linkId, generation: 1, available: async () => ({ available: true }) });
+        await h.runUntilIdle();
+
+        const original = (await remoteRecords(h.kit, 'Alice', LOVE))[0]!;
+        const originalRecord = original.value as Record<string, unknown>;
+        const oldProof = await verifyRecordProof(await h.kit.repos.Alice.getRecordCar(LOVE, original.rkey), {
+          did,
+          collection: LOVE,
+          rkey: original.rkey,
+          signingKey: h.kit.users.Alice.key.didKey,
+        });
+        const oldUri = `at://${did}/${LOVE}/${original.rkey}`;
+        const unlove = await enqueueUnlove(h.m, { did, artist: 'Artist', track: 'Track', origin: 'web' });
+        if (!unlove.ok) throw new Error('unlove was not admitted');
+        await h.runUntilIdle();
+        const fence = h.db.one<{ delete_rev: string | null; state: string }>(
+          'SELECT delete_rev,state FROM love_delete_bridges WHERE did=? AND uri=?',
+          did,
+          oldUri,
+        );
+        expect(fence?.state).toBe('succeeded');
+        expect(fence?.delete_rev).toBeTruthy();
+
+        if (collectAllOperations) h.db.run('DELETE FROM operations WHERE did=?', did);
+        else h.db.run('DELETE FROM operations WHERE id=?', unlove.operation.id);
+        cleanupForwardAdmissionsForSuppression(h.db, did);
+        h.restart();
+        expect(
+          h.db.one<{ delete_rev: string | null; state: string }>(
+            'SELECT delete_rev,state FROM love_delete_bridges WHERE did=? AND uri=?',
+            did,
+            oldUri,
+          ),
+        ).toEqual(fence);
+
+        // A valid old signed proof after deletion cannot resurrect the removed incarnation.
+        const oldNow = fromMs(h.m.clock.nowMs());
+        expect(
+          h.db.tx(() =>
+            applyRecordProof(h.db, oldProof, {
+              prefix: h.m.config.prefix!,
+              nowNs: oldNow,
+              receiptNs: oldNow,
+              forwarding: { random: seededRandom(0x72) },
+            }),
+          ).outcome,
+        ).toBe('noop_older');
+        expect(h.db.one('SELECT 1 AS hit FROM loves WHERE uri=?', oldUri)).toBeNull();
+
+        // Recreate the same URI with the same record bytes and CID. Only its
+        // newer signed repo revision proves that this is a new incarnation.
+        await h.kit.repos.Alice.put(LOVE, original.rkey, originalRecord);
+        const newProof = await verifyRecordProof(await h.kit.repos.Alice.getRecordCar(LOVE, original.rkey), {
+          did,
+          collection: LOVE,
+          rkey: original.rkey,
+          signingKey: h.kit.users.Alice.key.didKey,
+        });
+        expect(newProof.state).toBe('present');
+        expect(oldProof.state).toBe('present');
+        if (newProof.state !== 'present' || oldProof.state !== 'present') throw new Error('expected present proof');
+        expect(newProof.cid).toBe(oldProof.cid);
+        expect(newProof.commit.rev > fence!.delete_rev!).toBe(true);
+        const freshNow = fromMs(h.kit.clock.nowMs());
+        expect(
+          h.db.tx(() =>
+            applyRecordProof(h.db, newProof, {
+              prefix: h.m.config.prefix!,
+              nowNs: freshNow,
+              receiptNs: freshNow,
+              forwarding: { random: seededRandom(0x73) },
+            }),
+          ).outcome,
+        ).toBe('applied');
+        expect(h.db.one('SELECT state FROM love_delete_bridges WHERE did=? AND uri=?', did, oldUri)).toEqual({
+          state: 'obsolete',
+        });
+        expect(h.db.one('SELECT state FROM linked_pull_love_admissions WHERE did=?', did)).toEqual({
+          state: 'superseded',
+        });
+        expect(
+          h.db.one<{ path: string; incarnation_key: string }>(
+            'SELECT path,incarnation_key FROM love_incarnations WHERE uri=?',
+            oldUri,
+          ),
+        ).toEqual({ path: 'live', incarnation_key: `love:${oldUri}:${newProof.commit.rev}` });
+        const forwardedAfterReplacement = h.db.one<{ n: number }>(
+          "SELECT count(*) AS n FROM forward_outbox WHERE did=? AND link_id=? AND kind='love'",
+          did,
+          targetLink,
+        )?.n;
+        expect(forwardedAfterReplacement).toBe(2);
+
+        h.restart();
+        const relove = await enqueueLove(h.m, { did, input: { artist: 'artist', track: 'TRACK' }, origin: 'web' });
+        if (!relove.ok) throw new Error('re-love was not admitted');
+        await h.runUntilIdle();
+        expect(h.op(relove.operation.id)).toMatchObject({ state: 'succeeded', result_uri: oldUri });
+        expect(h.writers.order()).toEqual([CREATE, LIST, DELETE]);
+        expect(await remoteRecords(h.kit, 'Alice', LOVE)).toHaveLength(1);
+        expect(
+          h.db.one<{ n: number }>(
+            "SELECT count(*) AS n FROM forward_outbox WHERE did=? AND link_id=? AND kind='love'",
+            did,
+            targetLink,
+          )?.n,
+        ).toBe(3);
+      });
+    },
+  );
+
+  it('a missing delete commit receipt keeps same-CID present proofs fenced until a verified absence arrives', async () => {
+    await withHarness(async (h) => {
+      const { did, linkId } = await setup(h, h.alice);
+      stageLovePage(h.db, {
+        linkId,
+        generation: 1,
+        sourceService: 'listenbrainz',
+        sourceAccount: 'remote',
+        did,
+        proposedCursor: null,
+        proposedBoundaryMs: 100,
+        proposedBoundaryKey: null,
+        nowMs: 2,
+        items: [{ itemKey: 'pulled', artist: 'Artist', track: 'Track', payload: { artist: 'Artist', track: 'Track' } }],
+      });
+      await writePullSlice(h.m, { linkId, generation: 1, available: async () => ({ available: true }) });
+      await h.runUntilIdle();
+      const remote = (await remoteRecords(h.kit, 'Alice', LOVE))[0]!;
+      const uri = `at://${did}/${LOVE}/${remote.rkey}`;
+      const oldProof = await verifyRecordProof(await h.kit.repos.Alice.getRecordCar(LOVE, remote.rkey), {
+        did,
+        collection: LOVE,
+        rkey: remote.rkey,
+        signingKey: h.kit.users.Alice.key.didKey,
+      });
+      const unlove = await enqueueUnlove(h.m, { did, artist: 'Artist', track: 'Track', origin: 'web' });
+      if (!unlove.ok) throw new Error('unlove was not admitted');
+      await h.runUntilIdle();
+      const absenceProof = await verifyRecordProof(await h.kit.repos.Alice.getRecordCar(LOVE, remote.rkey), {
+        did,
+        collection: LOVE,
+        rkey: remote.rkey,
+        signingKey: h.kit.users.Alice.key.didKey,
+      });
+      expect(absenceProof.state).toBe('absent');
+      // Model a successful delete whose response omitted/malformed its commit receipt.
+      h.db.run('UPDATE love_delete_bridges SET delete_rev=NULL WHERE did=? AND uri=?', did, uri);
+      h.restart();
+
+      await h.kit.repos.Alice.put(LOVE, remote.rkey, remote.value as Record<string, unknown>);
+      const recreatedProof = await verifyRecordProof(await h.kit.repos.Alice.getRecordCar(LOVE, remote.rkey), {
+        did,
+        collection: LOVE,
+        rkey: remote.rkey,
+        signingKey: h.kit.users.Alice.key.didKey,
+      });
+      expect(recreatedProof.state).toBe('present');
+      const fencedNow = fromMs(h.m.clock.nowMs());
+      expect(
+        h.db.tx(() =>
+          applyRecordProof(h.db, recreatedProof, {
+            prefix: h.m.config.prefix!,
+            nowNs: fencedNow,
+            receiptNs: fencedNow,
+          }),
+        ).outcome,
+      ).toBe('noop_older');
+      expect(h.db.one('SELECT 1 AS hit FROM loves WHERE uri=?', uri)).toBeNull();
+
+      const noBoundaryNow = fromMs(h.m.clock.nowMs());
+      expect(
+        h.db.tx(() =>
+          applyRecordProof(h.db, oldProof, {
+            prefix: h.m.config.prefix!,
+            nowNs: noBoundaryNow,
+            receiptNs: noBoundaryNow,
+          }),
+        ).outcome,
+      ).toBe('noop_older');
+      expect(h.db.one('SELECT 1 AS hit FROM loves WHERE uri=?', uri)).toBeNull();
+
+      const absentNow = fromMs(h.m.clock.nowMs());
+      expect(
+        h.db.tx(() =>
+          applyRecordProof(h.db, absenceProof, {
+            prefix: h.m.config.prefix!,
+            nowNs: absentNow,
+            receiptNs: absentNow,
+          }),
+        ).outcome,
+      ).toBe('absent');
+      expect(h.db.one('SELECT state FROM love_delete_bridges WHERE did=? AND uri=?', did, uri)).toEqual({
+        state: 'consumed',
+      });
+
+      const recreatedNow = fromMs(h.m.clock.nowMs());
+      expect(
+        h.db.tx(() =>
+          applyRecordProof(h.db, recreatedProof, {
+            prefix: h.m.config.prefix!,
+            nowNs: recreatedNow,
+            receiptNs: recreatedNow,
+          }),
+        ).outcome,
+      ).toBe('applied');
+      expect(h.db.one('SELECT 1 AS hit FROM loves WHERE uri=?', uri)).toEqual({ hit: 1 });
+    });
+  });
+
   it('lets explicit local unlove tombstone the accepted aliases and explicit re-love create a new intent', async () => {
     await withHarness(async (h) => {
       const { did, linkId } = await setup(h, h.alice);

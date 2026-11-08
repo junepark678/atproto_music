@@ -121,12 +121,18 @@ const CID_SYNTAX = /^b[a-z2-7]{8,256}$/;
  * otherwise null (absent, malformed, or not after the checked head).
  */
 export function reportedCommitRev(body: unknown, checked: string): string | null {
+  const rev = writeCommitRev(body);
+  return rev !== null && rev > checked ? rev : null;
+}
+
+/** A successful write's repository commit revision, or null for an invalid/absent commit receipt. */
+export function writeCommitRev(body: unknown): string | null {
   if (body === null || typeof body !== 'object') return null;
   const commit = (body as { commit?: unknown }).commit;
   if (commit === null || typeof commit !== 'object') return null;
   const { cid, rev } = commit as { cid?: unknown; rev?: unknown };
   if (typeof cid !== 'string' || !CID_SYNTAX.test(cid) || typeof rev !== 'string' || !isTid(rev)) return null;
-  return rev > checked ? rev : null;
+  return rev;
 }
 
 export interface ListedRecord {

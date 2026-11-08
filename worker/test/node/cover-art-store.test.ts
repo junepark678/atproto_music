@@ -27,7 +27,7 @@ describe('cover art durable cache', () => {
   it('keeps M4 at migration 21 before the additive S1 migrations and classifies its tables as non-derived', () => {
     expect(MIGRATIONS.map((m) => m.version)).toEqual(Array.from({ length: SCHEMA_VERSION }, (_, i) => i + 1));
     expect(MIGRATIONS[20]?.name).toBe('cover_art_cache_and_jobs');
-    expect(SCHEMA_VERSION).toBe(37);
+    expect(SCHEMA_VERSION).toBe(38);
     for (const table of ['mb_cover_art', 'mb_cover_art_jobs', 'mb_cover_art_usage'] as const) {
       expect(TABLES).toContain(table);
       expect(TABLE_CLASS[table]).toBe('non-derived');

@@ -199,7 +199,7 @@ const NEW_TABLES: Record<string, ExpectedTable> = {
     pk: ['uri'],
   },
   love_delete_bridges: {
-    columns: ['did', 'uri', 'incarnation_key', 'expected_cid', 'operation_id', 'state', 'created_at_ms'],
+    columns: ['did', 'uri', 'incarnation_key', 'expected_cid', 'operation_id', 'state', 'created_at_ms', 'delete_rev'],
     pk: ['did', 'uri', 'incarnation_key', 'operation_id'],
   },
   love_import_bridges: {
@@ -1731,6 +1731,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       "35|'linked_pull_persisted_poll_rounds'",
       "36|'linked_listenbrainz_pull_round_guards'",
       "37|'linked_pull_love_acceptance_admissions'",
+      "38|'love_delete_bridge_commit_revision'",
     ]);
     // The new scrobble columns exist and are NULL on every migrated row.
     expect(after.newColumns).toHaveLength(expectedScrobbles);
@@ -1775,6 +1776,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       { version: 35, name: 'linked_pull_persisted_poll_rounds' },
       { version: 36, name: 'linked_listenbrainz_pull_round_guards' },
       { version: 37, name: 'linked_pull_love_acceptance_admissions' },
+      { version: 38, name: 'love_delete_bridge_commit_revision' },
     ]);
     expect(after.compat).toEqual([{ singleton: 1, min_compatible_version: 2 }]);
     expect(after.newTablesEmpty).toEqual(['mb_cover_art_usage']);

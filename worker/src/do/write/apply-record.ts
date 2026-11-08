@@ -530,15 +530,20 @@ function loveVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, o: A
       const replacementAfterDelete =
         db.run(
           `UPDATE love_delete_bridges SET state='obsolete'
-         WHERE did=? AND uri=? AND state='succeeded' AND expected_cid<>?`,
+         WHERE did=? AND uri=? AND state IN ('pending','succeeded')
+           AND delete_rev IS NOT NULL AND delete_rev < ?`,
           t.did,
           t.uri,
-          cid,
+          t.rev,
         ).rowsWritten > 0;
       if (replacementAfterDelete) {
-        // A verified replacement with different bytes supersedes the exact
-        // record whose deletion succeeded, even if its absence proof was missed.
-        db.run("UPDATE love_incarnations SET state='absent' WHERE uri=?", t.uri);
+        // A verified post-delete revision starts a new incarnation even when
+        // the recreated record has byte-identical content and the same CID.
+        db.run(
+          "UPDATE love_incarnations SET state='absent',updated_at_ms=? WHERE uri=?",
+          Number(o.nowNs / 1_000_000n),
+          t.uri,
+        );
         retirePullLoveAdmissionUri(db, { did: t.did, uri: t.uri, nowMs: Number(o.nowNs / 1_000_000n) });
       }
       const previousRecordState = db.one<{ state: string; cid: string | null }>(
@@ -1090,6 +1095,20 @@ export function applyRecordProof(db: Db, proof: RecordProof, o: ApplyOptions): A
   const user = loadUser(db, did);
   if (user === null) return result('ignored');
   if (user.max_rev !== null && rev < user.max_rev) return result('stale_head');
+  if (kind === 'love' && proof.state === 'present') {
+    const deletion = db.one(
+      `SELECT 1 AS hit FROM love_delete_bridges
+       WHERE did=? AND uri=? AND state IN ('pending','succeeded')
+         AND (delete_rev IS NULL OR delete_rev>=?) LIMIT 1`,
+      did,
+      uri,
+      rev,
+    );
+    // A present proof at or before a confirmed delete boundary is stale. A
+    // legacy/ambiguous delete without a commit revision remains fenced until
+    // a verified absence or a revisioned post-delete present proof arrives.
+    if (deletion !== null) return result('noop_older');
+  }
   const guard = guardRevision(db, uri);
   if (guard !== null && guard >= rev) return result('noop_older');
 
