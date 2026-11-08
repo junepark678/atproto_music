@@ -12,9 +12,10 @@
       "updatedAt": "2026-01-15T12:00:00Z",
       "sync": {
         "backfill": {
-          "state": "pending",
+          "state": "skipped",
           "done": 0,
-          "total": 0
+          "total": 0,
+          "lastError": "retry_exhausted"
         },
         "pullEnabled": true,
         "queued": 0,

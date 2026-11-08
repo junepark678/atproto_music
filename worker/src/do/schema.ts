@@ -1131,6 +1131,19 @@ const MIGRATION_S2_BACKFILL_RUN_REVISION: Migration = {
   statements: ['ALTER TABLE linked_accounts ADD COLUMN backfill_run_revision INTEGER NOT NULL DEFAULT 1'],
 };
 
+const MIGRATION_S2_BACKFILL_BUDGET: Migration = {
+  version: 28,
+  name: 'bounded_link_backfill_progress_and_fairness',
+  statements: [
+    'ALTER TABLE linked_accounts ADD COLUMN backfill_discovery_cursor TEXT',
+    'ALTER TABLE linked_accounts ADD COLUMN backfill_discovery_done INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE linked_accounts ADD COLUMN backfill_last_serviced_seq INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE linked_accounts ADD COLUMN backfill_last_error TEXT',
+    'CREATE INDEX linked_accounts_backfill_fair ON linked_accounts(status,forward_scrobbles,backfill_state,backfill_next_attempt_ms,backfill_last_serviced_seq,created_at_ms,id)',
+    'CREATE INDEX forward_outbox_history_state ON forward_outbox(priority,state)',
+  ],
+};
+
 export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_1,
   MIGRATION_2,
@@ -1159,6 +1172,7 @@ export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_S2_BACKFILL_PRIORITY,
   MIGRATION_S2_BACKFILL_RETRY,
   MIGRATION_S2_BACKFILL_RUN_REVISION,
+  MIGRATION_S2_BACKFILL_BUDGET,
 ];
 
 /** The schema version this code expects. */

@@ -431,7 +431,12 @@ export interface Link {
   updatedAt: Timestamp;
   /** Best-effort synchronization status; absent on older servers. */
   sync?: {
-    backfill: { state: 'pending' | 'running' | 'done' | 'skipped'; done: number; total: number };
+    backfill: {
+      state: 'pending' | 'running' | 'done' | 'skipped';
+      done: number;
+      total: number;
+      lastError?: 'retry_exhausted';
+    };
     pullEnabled: boolean;
     lastSuccessAt?: Timestamp;
     lastFailureAt?: Timestamp;

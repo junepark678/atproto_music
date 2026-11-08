@@ -384,6 +384,10 @@ export interface LinkedAccountRow {
   backfill_next_attempt_ms: number | null;
   /** Fences any async scan page from a reset/re-schedule of this generation. */
   backfill_run_revision: number;
+  backfill_discovery_cursor: string | null;
+  backfill_discovery_done: 0 | 1;
+  backfill_last_serviced_seq: number;
+  backfill_last_error: string | null;
 }
 
 export interface LinkStateRow {

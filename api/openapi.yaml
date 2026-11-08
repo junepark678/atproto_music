@@ -7686,7 +7686,7 @@
             "type": "object", "additionalProperties": false,
             "required": ["backfill", "pullEnabled", "queued", "failed"],
             "properties": {
-              "backfill": {"type": "object", "additionalProperties": false, "required": ["state", "done", "total"], "properties": {"state": {"enum": ["pending", "running", "done", "skipped"]}, "done": {"type": "integer", "minimum": 0}, "total": {"type": "integer", "minimum": 0}}},
+              "backfill": {"type": "object", "additionalProperties": false, "required": ["state", "done", "total"], "properties": {"state": {"enum": ["pending", "running", "done", "skipped"]}, "done": {"type": "integer", "minimum": 0}, "total": {"type": "integer", "minimum": 0}, "lastError": {"enum": ["retry_exhausted"]}}},
               "pullEnabled": {"type": "boolean"}, "lastSuccessAt": {"$ref": "#/components/schemas/Timestamp"},
               "lastFailureAt": {"$ref": "#/components/schemas/Timestamp"}, "lastError": {"type": ["string", "null"], "pattern": "^[a-z0-9_]{1,64}$"},
               "lastPulledAt": {"$ref": "#/components/schemas/Timestamp"}, "queued": {"type": "integer", "minimum": 0}, "failed": {"type": "integer", "minimum": 0}

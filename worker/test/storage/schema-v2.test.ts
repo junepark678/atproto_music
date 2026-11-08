@@ -468,6 +468,10 @@ const NEW_TABLES: Record<string, ExpectedTable> = {
       backfill_failures: true,
       backfill_next_attempt_ms: true,
       backfill_run_revision: true,
+      backfill_discovery_cursor: true,
+      backfill_discovery_done: true,
+      backfill_last_serviced_seq: true,
+      backfill_last_error: true,
     }),
     pk: ['id'],
     unique: [['did', 'service']],
@@ -681,6 +685,29 @@ const NEW_INDEXES: Record<string, [string, number, number, Array<[string, number
       ['state', 0],
       ['due_at', 0],
       ['created_at_ms', 0],
+    ],
+  ],
+  forward_outbox_history_state: [
+    'forward_outbox',
+    0,
+    0,
+    [
+      ['priority', 0],
+      ['state', 0],
+    ],
+  ],
+  linked_accounts_backfill_fair: [
+    'linked_accounts',
+    0,
+    0,
+    [
+      ['status', 0],
+      ['forward_scrobbles', 0],
+      ['backfill_state', 0],
+      ['backfill_next_attempt_ms', 0],
+      ['backfill_last_serviced_seq', 0],
+      ['created_at_ms', 0],
+      ['id', 0],
     ],
   ],
   love_delete_bridges_pending: [
@@ -1486,6 +1513,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       "25|'forward_backfill_priority'",
       "26|'forward_backfill_retry_state'",
       "27|'linked_account_backfill_run_revision'",
+      "28|'bounded_link_backfill_progress_and_fairness'",
     ]);
     // The new scrobble columns exist and are NULL on every migrated row.
     expect(after.newColumns).toHaveLength(expectedScrobbles);
@@ -1520,6 +1548,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       { version: 25, name: 'forward_backfill_priority' },
       { version: 26, name: 'forward_backfill_retry_state' },
       { version: 27, name: 'linked_account_backfill_run_revision' },
+      { version: 28, name: 'bounded_link_backfill_progress_and_fairness' },
     ]);
     expect(after.compat).toEqual([{ singleton: 1, min_compatible_version: 2 }]);
     expect(after.newTablesEmpty).toEqual(['mb_cover_art_usage']);
