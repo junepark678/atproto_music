@@ -161,27 +161,6 @@ const SEED_ROWS: Record<string, Record<string, SqlParam>[]> = {
       created_at_ms: NOW,
     },
   ],
-  mb_cover_art: [
-    {
-      release_mbid: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
-      mime_type: 'image/png',
-      image_bytes: blob(15, 3),
-      byte_size: 3,
-      created_at_ms: NOW,
-      fetched_at_ms: NOW,
-      last_access_ms: NOW,
-    },
-  ],
-  mb_cover_art_jobs: [
-    {
-      release_mbid: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
-      release_group_mbid: null,
-      status: 'pending',
-      attempts: 0,
-      next_due_ms: NOW,
-      created_at_ms: NOW,
-    },
-  ],
   mb_pacing: [{ singleton: 1, available_at_ms: NOW }],
   mb_seed_state: [{ singleton: 1, cursor_uri: '', complete: 0 }],
   counters: [{ name: 'events', label: 'commit', value: 3 }],
