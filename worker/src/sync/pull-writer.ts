@@ -24,6 +24,7 @@ import {
   unsettledOfKinds,
 } from '../outbox/operations';
 import { insertScrobbleCreate, prepareScrobble } from '../outbox/scrobble-ops';
+import { hasListenAtSecond, legacyPendingSeconds } from './pull-staging';
 import { isListenTombstoned, isLoveTombstoned } from './tombstones';
 
 export type PullHoldReason =
@@ -31,7 +32,8 @@ export type PullHoldReason =
   | 'reauth_required'
   | 'publication_disabled'
   | 'scope_insufficient'
-  | 'session_restore_transient';
+  | 'session_restore_transient'
+  | 'legacy_dedupe_coverage';
 export type PullWriterAvailability = { available: true } | { available: false; reason: PullHoldReason };
 export type PullWriterAvailabilitySource = (did: string) => Promise<PullWriterAvailability>;
 export const PULL_WRITE_SLICE = 100;
@@ -257,6 +259,16 @@ export async function writePullSlice(
       )
         currentRows.set(current.item_key, current);
     }
+    const legacy = plans.some((plan) => plan.second !== undefined) ? legacyPendingSeconds(m.db, link.did) : null;
+    for (const plan of plans) {
+      if (!currentRows.has(plan.row.item_key) || plan.second === undefined) continue;
+      const coverage = hasListenAtSecond(m.db, { did: link.did, second: plan.second, legacy: legacy! });
+      if (!coverage.complete) {
+        report.held = 'legacy_dedupe_coverage';
+        setHold(m, args.linkId, args.generation, report.held, now);
+        return;
+      }
+    }
     const acceptBatch =
       packed !== null &&
       packed.prepared !== null &&
@@ -266,12 +278,7 @@ export async function writePullSlice(
           current !== undefined &&
           plan.second !== undefined &&
           !isListenTombstoned(m.db, link.did, plan.second, plan.artistKey, plan.trackKey) &&
-          !m.db.one(
-            "SELECT 1 AS hit FROM scrobbles WHERE did=? AND substr(listened_at,1,19)=strftime('%Y-%m-%dT%H:%M:%S',?,'unixepoch') LIMIT 1",
-            link.did,
-            plan.second,
-          ) &&
-          !m.db.one('SELECT 1 AS hit FROM listen_keys WHERE did=? AND listen_second=? LIMIT 1', link.did, plan.second)
+          !hasListenAtSecond(m.db, { did: link.did, second: plan.second, legacy: legacy! }).matches
         );
       });
     if (acceptBatch && packed !== null) {
@@ -324,12 +331,7 @@ export async function writePullSlice(
               report.tombstoned++;
             } else if (
               second !== undefined &&
-              (m.db.one(
-                "SELECT 1 AS hit FROM scrobbles WHERE did=? AND substr(listened_at,1,19)=strftime('%Y-%m-%dT%H:%M:%S',?,'unixepoch') LIMIT 1",
-                link.did,
-                second,
-              ) ||
-                m.db.one('SELECT 1 AS hit FROM listen_keys WHERE did=? AND listen_second=? LIMIT 1', link.did, second))
+              hasListenAtSecond(m.db, { did: link.did, second, legacy: legacy! }).matches
             ) {
               m.db.run(
                 'DELETE FROM linked_pull_items WHERE link_id=? AND generation=? AND item_key=?',
@@ -353,17 +355,7 @@ export async function writePullSlice(
           report.tombstoned++;
           continue;
         }
-        const indexed = m.db.one(
-          "SELECT 1 FROM scrobbles WHERE did=? AND substr(listened_at,1,19)=strftime('%Y-%m-%dT%H:%M:%S',?,'unixepoch') LIMIT 1",
-          link.did,
-          second,
-        );
-        const accepted = m.db.one(
-          'SELECT 1 FROM listen_keys WHERE did=? AND listen_second=? LIMIT 1',
-          link.did,
-          second,
-        );
-        if (indexed || accepted) {
+        if (hasListenAtSecond(m.db, { did: link.did, second, legacy: legacy! }).matches) {
           m.db.run(
             'DELETE FROM linked_pull_items WHERE link_id=? AND generation=? AND item_key=?',
             args.linkId,

@@ -1,12 +1,15 @@
 import { listenKey } from '@atmusic/core/listen-key';
+import { trackKey } from '@atmusic/core/music-key';
 import { describe, expect, it } from 'vitest';
 import type { LinkedAccountRow } from '../../../src/app/rows';
 import { linkDto } from '../../../src/forward/links';
 import { retainedForwardProvenance } from '../../../src/forward/projection';
+import { removeScrobbleCreate } from '../../../src/outbox/delete-ops';
 import { enqueueUnlove } from '../../../src/outbox/love-ops';
+import { insertOperation, newOperationId, outboxCollections, prepare } from '../../../src/outbox/operations';
 import { stageLovePage, stagePullPage } from '../../../src/sync/pull-staging';
 import { writePullSlice } from '../../../src/sync/pull-writer';
-import { tombstoneListen } from '../../../src/sync/tombstones';
+import { isListenTombstoned, tombstoneListen } from '../../../src/sync/tombstones';
 import { withHarness } from '../outbox/support';
 
 async function setup(h: Parameters<Parameters<typeof withHarness>[0]>[0]) {
@@ -23,6 +26,153 @@ async function setup(h: Parameters<Parameters<typeof withHarness>[0]>[0]) {
 }
 
 describe('linked pull staged writer', () => {
+  it('rechecks legacy pending single and batch member seconds before accepting staged pulls', async () => {
+    await withHarness(async (h) => {
+      const { did, linkId } = await setup(h);
+      h.m.config.batchPublication = true;
+      stagePullPage(h.db, {
+        linkId,
+        generation: 1,
+        sourceService: 'listenbrainz',
+        sourceAccount: 'remote',
+        did,
+        proposedCursor: 'page',
+        proposedWatermarkMs: 200000,
+        nowMs: 2,
+        items: [
+          {
+            itemKey: 'single-echo',
+            listenedAtMs: 100000,
+            payload: { artist: 'Different', track: 'Single', listenedAt: '1970-01-01T00:01:40Z' },
+          },
+          {
+            itemKey: 'batch-echo',
+            listenedAtMs: 200000,
+            payload: { artist: 'Different', track: 'Batch', listenedAt: '1970-01-01T00:03:20Z' },
+          },
+        ],
+      });
+      const prefix = h.m.config.prefix!;
+      const singleId = newOperationId(h.m.random);
+      const single = await prepare({
+        $type: `${prefix}.scrobble`,
+        artist: 'Legacy',
+        track: 'Single',
+        listenedAt: '1970-01-01T00:01:40Z',
+        createdAt: new Date(3).toISOString(),
+      });
+      insertOperation(
+        h.db,
+        {
+          id: singleId,
+          did,
+          kind: 'scrobble.create',
+          origin: 'web',
+          collection: outboxCollections(prefix).scrobble,
+          rkey: '3klegacysingle01',
+          prepared: single,
+          dueAt: 3,
+        },
+        3,
+      );
+      h.db.run(
+        "INSERT INTO listen_keys(did,dedupe_key,operation_id,source,created_at_ms,listen_second) VALUES(?,'legacy-single',?,'web',3,NULL)",
+        did,
+        singleId,
+      );
+      const batchId = newOperationId(h.m.random);
+      const batch = await prepare({
+        $type: `${prefix}.scrobbleBatch`,
+        createdAt: new Date(3).toISOString(),
+        listens: [{ id: '3klegacyentry001', artist: 'Legacy', track: 'Batch', listenedAt: '1970-01-01T00:03:20Z' }],
+      });
+      insertOperation(
+        h.db,
+        {
+          id: batchId,
+          did,
+          kind: 'scrobble.create',
+          origin: 'import',
+          collection: outboxCollections(prefix).scrobbleBatch,
+          rkey: '3klegacybatch001',
+          prepared: batch,
+          dueAt: 3,
+        },
+        3,
+      );
+      h.db.run(
+        "INSERT INTO listen_keys(did,dedupe_key,operation_id,source,created_at_ms,listen_second) VALUES(?,'legacy-batch',?,'import',3,NULL)",
+        did,
+        batchId,
+      );
+      const result = await writePullSlice(h.m, { linkId, generation: 1, available: async () => ({ available: true }) });
+      expect(result.duplicate).toBe(2);
+      expect(result.accepted).toBe(0);
+      expect(h.db.one('SELECT count(*) AS n FROM linked_pull_items WHERE link_id=?', linkId)).toEqual({ n: 0 });
+    });
+  });
+
+  it('holds staged acceptance when legacy pending-second coverage cannot be established', async () => {
+    await withHarness(async (h) => {
+      const { did, linkId } = await setup(h);
+      stagePullPage(h.db, {
+        linkId,
+        generation: 1,
+        sourceService: 'listenbrainz',
+        sourceAccount: 'remote',
+        did,
+        proposedCursor: 'page',
+        proposedWatermarkMs: 100000,
+        nowMs: 2,
+        items: [
+          {
+            itemKey: 'staged',
+            listenedAtMs: 100000,
+            payload: { artist: 'Artist', track: 'Track', listenedAt: '1970-01-01T00:01:40Z' },
+          },
+        ],
+      });
+      const opId = newOperationId(h.m.random);
+      const prepared = await prepare({
+        $type: `${h.m.config.prefix}.scrobble`,
+        artist: 'Legacy',
+        track: 'Unreadable',
+        listenedAt: '1970-01-01T00:08:20Z',
+        createdAt: new Date(3).toISOString(),
+      });
+      insertOperation(
+        h.db,
+        {
+          id: opId,
+          did,
+          kind: 'scrobble.create',
+          origin: 'web',
+          collection: outboxCollections(h.m.config.prefix!).scrobble,
+          rkey: '3klegacyunreadable',
+          prepared,
+          dueAt: 3,
+        },
+        3,
+      );
+      h.db.run(
+        "INSERT INTO listen_keys(did,dedupe_key,operation_id,source,created_at_ms,listen_second) VALUES(?,'legacy-unknown-second',?,'web',3,NULL)",
+        did,
+        opId,
+      );
+      h.db.run("UPDATE operations SET record_json='not-json' WHERE id=?", opId);
+      const result = await writePullSlice(h.m, {
+        linkId,
+        generation: 1,
+        available: async () => ({ available: true }),
+      });
+      expect(result.held).toBe('legacy_dedupe_coverage');
+      expect(h.db.one('SELECT count(*) AS n FROM linked_pull_items WHERE link_id=?', linkId)).toEqual({ n: 1 });
+      expect(h.db.one('SELECT hold_reason FROM linked_pull_state WHERE link_id=?', linkId)).toEqual({
+        hold_reason: 'legacy_dedupe_coverage',
+      });
+    });
+  });
+
   it('holds staged pages on absent session and resumes once when the real writer becomes available', async () => {
     await withHarness(async (h) => {
       const { did, linkId } = await setup(h);
@@ -245,6 +395,54 @@ describe('linked pull staged writer', () => {
         ),
       ).toEqual({ n: 5 });
       expect(h.db.one('SELECT count(*) AS n FROM linked_pull_items WHERE link_id=?', linkId)).toEqual({ n: 0 });
+    });
+  });
+
+  it('tombstones the exact selected pending batch member instead of an arbitrary sibling', async () => {
+    await withHarness(async (h) => {
+      const { did, linkId } = await setup(h);
+      h.m.config.batchPublication = true;
+      stagePullPage(h.db, {
+        linkId,
+        generation: 1,
+        sourceService: 'listenbrainz',
+        sourceAccount: 'remote',
+        did,
+        proposedCursor: null,
+        proposedWatermarkMs: 200000,
+        nowMs: 2,
+        items: [
+          {
+            itemKey: 'first',
+            listenedAtMs: 100000,
+            payload: { artist: 'Artist', track: 'First', listenedAt: '1970-01-01T00:01:40Z' },
+          },
+          {
+            itemKey: 'second',
+            listenedAtMs: 200000,
+            payload: { artist: 'Artist', track: 'Second', listenedAt: '1970-01-01T00:03:20Z' },
+          },
+        ],
+      });
+      await writePullSlice(h.m, { linkId, generation: 1, available: async () => ({ available: true }) });
+      const operation = h.db.one<{ id: string; record_json: string }>(
+        "SELECT id,record_json FROM operations WHERE did=? AND collection LIKE '%scrobbleBatch'",
+        did,
+      )!;
+      const listens = (
+        JSON.parse(operation.record_json) as {
+          listens: Array<{ id: string; artist: string; track: string; listenedAt: string }>;
+        }
+      ).listens;
+      const selected = listens[1]!;
+      const sibling = listens[0]!;
+      const [selectedArtist, selectedTrack] = trackKey(selected.artist, selected.track);
+      const [siblingArtist, siblingTrack] = trackKey(sibling.artist, sibling.track);
+      expect(
+        removeScrobbleCreate(h.m, { did, operationId: operation.id, listenId: selected.id, origin: 'web' }).status,
+      ).toBe('delete_chained');
+      expect(isListenTombstoned(h.db, did, 200, selectedArtist, selectedTrack)).toBe(true);
+      expect(isListenTombstoned(h.db, did, 100, siblingArtist, siblingTrack)).toBe(false);
     });
   });
 

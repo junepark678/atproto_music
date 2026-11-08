@@ -33,6 +33,7 @@
 //   gets a `scrobble.delete` chained after it as a predecessor: the create is
 //   reconciled at its original rkey and the delete then removes the record.
 
+import { trackKey } from '@atmusic/core/music-key';
 import { isTid } from '@atmusic/core/syntax';
 import type { OperationRow, Origin } from '../app/rows';
 import type { ModuleDeps } from '../do/contracts';
@@ -180,19 +181,38 @@ export function removeScrobbleCreate(
         batchUri,
         id,
       );
+      let exact: { listenedAt?: unknown; artist?: unknown; track?: unknown } | null = null;
+      try {
+        const parsed = op.record_json === null ? null : (JSON.parse(op.record_json) as { listens?: unknown });
+        const listens = parsed && Array.isArray(parsed.listens) ? parsed.listens : [];
+        const matches = listens.filter(
+          (entry): entry is { id?: unknown; listenedAt?: unknown; artist?: unknown; track?: unknown } =>
+            entry !== null && typeof entry === 'object' && (entry as { id?: unknown }).id === id,
+        );
+        if (matches.length === 1) exact = matches[0]!;
+      } catch {
+        exact = null;
+      }
+      if (!row && (!exact || typeof exact.listenedAt !== 'string')) return { status: 'not_found' };
       const second = row
         ? Math.floor(Date.parse(row.listened_at) / 1000)
-        : (m.db.one<{ listen_second: number | null }>(
-            'SELECT listen_second FROM listen_keys WHERE did=? AND operation_id=? AND listen_second IS NOT NULL LIMIT 1',
-            args.did,
-            op.id,
-          )?.listen_second ?? null);
+        : Math.floor(Date.parse(exact!.listenedAt as string) / 1000);
+      let artistKey = row?.artist_key ?? null;
+      let trackKeyValue = row?.track_key ?? null;
+      if (artistKey === null && typeof exact?.artist === 'string' && typeof exact.track === 'string') {
+        try {
+          [artistKey, trackKeyValue] = trackKey(exact.artist, exact.track);
+        } catch {
+          artistKey = null;
+          trackKeyValue = null;
+        }
+      }
       tombstoneListen(m.db, {
         did: args.did,
         identity: `batch:${op.id}:${id}`,
         second,
-        artistKey: row?.artist_key ?? null,
-        trackKey: row?.track_key ?? null,
+        artistKey,
+        trackKey: trackKeyValue,
         nowMs: now,
       });
       const del = insertOperation(
@@ -245,6 +265,35 @@ export function removeScrobbleCreate(
         cid,
       );
       return { status: 'delete_chained', operation: op, delete: del };
+    }
+    // Persist the exact pending listen identity before cancellation removes
+    // its listen_keys receipt and payload. This tombstone suppresses a stale
+    // upstream echo after the operation itself is collected.
+    try {
+      const record = op.record_json === null ? null : (JSON.parse(op.record_json) as Record<string, unknown>);
+      if (record && typeof record.listenedAt === 'string') {
+        let artistKey: string | null = null;
+        let trackKeyValue: string | null = null;
+        if (typeof record.artist === 'string' && typeof record.track === 'string') {
+          try {
+            [artistKey, trackKeyValue] = trackKey(record.artist, record.track);
+          } catch {
+            artistKey = null;
+            trackKeyValue = null;
+          }
+        }
+        tombstoneListen(m.db, {
+          did: args.did,
+          identity: `pending-single:${op.id}`,
+          second: Math.floor(Date.parse(record.listenedAt) / 1000),
+          artistKey,
+          trackKey: trackKeyValue,
+          nowMs: now,
+        });
+      }
+    } catch {
+      // The persisted operation payload is validated at insertion. Keep the
+      // remove path safe if a damaged legacy row cannot be parsed.
     }
     if (cancelUnsent(m.db, op.id, now)) return { status: 'cancelled', operation: loadOperation(m.db, op.id)! };
     if (op.state === 'failed' || op.state === 'cancelled') return { status: 'not_found' };

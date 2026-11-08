@@ -175,6 +175,18 @@ export async function enqueueUnlove(
             recordingMbid: row.recording_mbid,
             nowMs: now + i,
           });
+      for (const pending of unsettledOfKinds(m.db, args.did, ['love.put'])) {
+        const record = recordOf(pending);
+        if (!record || loveKeyOf(record.artist, record.track) !== key || typeof record.recordingMbid !== 'string')
+          continue;
+        tombstoneLove(m.db, {
+          did: args.did,
+          identity: `mbid:${record.recordingMbid}`,
+          loveKey: key,
+          recordingMbid: record.recordingMbid,
+          nowMs: now,
+        });
+      }
     }
     const op = insertOperation(
       m.db,
