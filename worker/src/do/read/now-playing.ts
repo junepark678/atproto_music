@@ -112,6 +112,9 @@ export function upsertNowPlaying(m: Pick<ModuleDeps, 'db' | 'clock'>, input: Now
     if (existing !== null && existing.expires_at_ms > now && sameTrack(existing, input.artist, input.track)) {
       if (input.sameTrack === 'keep') return { outcome: 'unchanged' as const, row: existing };
       const expires = now + ttlMs;
+      const musicTrackKey = trackKey(input.artist, input.track);
+      const musicAlbumKey = albumKey(input.artist, input.album ?? existing.album);
+      enqueueTrack(db, { artistKey: artistKey(input.artist), trackKey: musicTrackKey[1], albumKey: musicAlbumKey?.[1] ?? '' }, now, 10, input.recordingMbid);
       db.run(
         'UPDATE now_playing SET duration_seconds = ?, expires_at_ms = ? WHERE did = ?',
         durationSeconds,

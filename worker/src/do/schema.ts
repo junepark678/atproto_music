@@ -965,6 +965,13 @@ const MIGRATION_16: Migration = {
     'CREATE TABLE mb_pacing (singleton INTEGER PRIMARY KEY NOT NULL, available_at_ms INTEGER NOT NULL DEFAULT 0)',
   ],
 };
+const MIGRATION_17: Migration = {
+  version: 17,
+  name: 'musicbrainz_seed_cursor',
+  statements: [
+    "CREATE TABLE mb_seed_state (singleton INTEGER PRIMARY KEY NOT NULL, cursor_uri TEXT NOT NULL DEFAULT '', complete INTEGER NOT NULL DEFAULT 0)",
+  ],
+};
 
 export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_1,
@@ -983,6 +990,7 @@ export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_14,
   MIGRATION_15,
   MIGRATION_16,
+  MIGRATION_17,
 ];
 
 /** The schema version this code expects. */
@@ -1048,6 +1056,7 @@ export const TABLES = [
   'verified_membership',
   'mb_tracks',
   'mb_pacing',
+  'mb_seed_state',
 ] as const;
 
 export type TableName = (typeof TABLES)[number];
@@ -1113,4 +1122,5 @@ export const TABLE_CLASS: Readonly<Record<TableName, TableClass>> = {
   verified_membership: 'derived',
   mb_tracks: 'non-derived',
   mb_pacing: 'non-derived',
+  mb_seed_state: 'non-derived',
 };

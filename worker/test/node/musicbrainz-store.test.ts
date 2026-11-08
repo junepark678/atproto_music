@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { migrate } from '../../src/do/migrate';
 import { MIGRATIONS, SCHEMA_VERSION, TABLE_CLASS, TABLES } from '../../src/do/schema';
 import { openSqliteDb } from '../../src/node/sqlite-db';
-import { enqueueTrack, matchedRecordingMbid, recordingByMbid } from '../../src/musicbrainz/store';
+import { enqueueTrack, matchedRecordingMbid, recordingByMbid, seedHistoricalTracks } from '../../src/musicbrainz/store';
 
 const dirs: string[] = [];
 afterEach(() => dirs.splice(0).forEach((dir) => rmSync(dir, { recursive: true, force: true })));
@@ -50,5 +50,39 @@ describe('MusicBrainz storage', () => {
       expect(recordingByMbid(db, uuid)).toEqual({ title: 'Song', artistCredit: 'Artist' });
       expect(recordingByMbid(db, 'bad')).toBeNull();
     } finally { db.close(); }
+  });
+
+  it('seeds bounded distinct history with an atomic cursor that resumes after reopening and preserves live priority', () => {
+    const db = database();
+    const path = join(dirs[dirs.length - 1]!, 'db.sqlite');
+    try {
+      db.run("INSERT INTO users(did,joined_at) VALUES ('did:plc:aaaaaaaaaaaaaaaaaaaaaaaa','2026-01-01T00:00:00Z')");
+      const insert = (uri: string, artist: string, track: string, album: string | null) => db.run(
+        `INSERT INTO scrobbles(uri,cid,did,rkey,revision,artist,track,album,listened_at,created_at,indexed_at,artist_key,track_key,album_key)
+         VALUES(?,?,?,'r','3l','Artist','Track',?,'2026-01-15T12:00:00.000000000Z','2026-01-15T12:00:00Z','2026-01-15T12:00:00Z',?,?,?)`,
+        uri, 'cid', 'did:plc:aaaaaaaaaaaaaaaaaaaaaaaa', album, artist.toLowerCase(), track.toLowerCase(), album?.toLowerCase() ?? null,
+      );
+      insert('at://a/1', 'Artist', 'One', null);
+      insert('at://a/2', 'Artist', 'One', null);
+      insert('at://a/3', 'Artist', 'Two', 'Album');
+      insert('at://a/4', 'Artist', 'Three', null);
+      insert('at://a/5', 'Artist', 'Four', null);
+      enqueueTrack(db, { artistKey: 'artist', trackKey: 'one' }, 5, 10);
+      expect(seedHistoricalTracks(db, 10, 2)).toEqual({ insertedCandidates: 2, complete: false });
+      expect(db.all('SELECT track_key FROM mb_tracks ORDER BY track_key')).toEqual([{ track_key: 'one' }]);
+    } finally { db.close(); }
+    const reopened = openSqliteDb(path, { busyTimeoutMs: 200 });
+    try {
+      expect(seedHistoricalTracks(reopened, 20, 2)).toEqual({ insertedCandidates: 2, complete: false });
+      expect(reopened.all('SELECT track_key,album_key,priority FROM mb_tracks ORDER BY track_key')).toEqual([
+        { track_key: 'one', album_key: '', priority: 10 },
+        { track_key: 'three', album_key: '', priority: 0 },
+        { track_key: 'two', album_key: 'album', priority: 0 },
+      ]);
+      expect(seedHistoricalTracks(reopened, 30, 2)).toEqual({ insertedCandidates: 1, complete: false });
+      expect(reopened.all("SELECT track_key FROM mb_tracks WHERE track_key='four'")).toEqual([{ track_key: 'four' }]);
+      expect(seedHistoricalTracks(reopened, 40, 2)).toEqual({ insertedCandidates: 0, complete: true });
+      expect(seedHistoricalTracks(reopened, 50, 2)).toEqual({ insertedCandidates: 0, complete: true });
+    } finally { reopened.close(); }
   });
 });

@@ -3,6 +3,7 @@ import { artistKey as normalizeArtist, artistKey as normalizeTrack } from '@atmu
 import type { Db } from '../do/db';
 import type { MusicBrainzOutcome } from './client';
 import type { TrackKey } from './store';
+import { seedHistoricalTracks } from './store';
 import { musicKeyId } from '@atmusic/core/music-key';
 import type { CoreExtension } from '../app/host';
 
@@ -90,6 +91,7 @@ export function createMusicBrainzResolver(options: { db: Db; client: ResolverCli
   async function run(): Promise<{ requests: number; availableAt: number }> {
     if (options.enabled === false) return { requests: 0, availableAt: availableAt() };
     let requests = 0;
+    seedHistoricalTracks(db, clock.nowMs());
     while (requests < MAX_RUN_REQUESTS) {
       const now = clock.nowMs();
       if (availableAt() > now) break;
