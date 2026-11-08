@@ -13,6 +13,8 @@ function love(artist: string, track: string) {
   return { $type: LOVE, artist, track, createdAt: '2026-01-15T11:00:00Z' };
 }
 
+const projectionRandom = seededRandom(27);
+
 /** Applies a fake-PDS commit through the production record-proof verifier and projector. */
 async function projectLove(h: Harness, rkey: string, live = false) {
   const car = await h.kit.repos.Alice.getRecordCar(LOVE, rkey);
@@ -28,7 +30,7 @@ async function projectLove(h: Harness, rkey: string, live = false) {
       prefix: 'com.example.atmusic',
       nowNs,
       receiptNs: nowNs,
-      ...(live ? { forwarding: { random: seededRandom(27) } } : {}),
+      ...(live ? { forwarding: { random: projectionRandom } } : {}),
     }),
   );
 }
@@ -109,6 +111,65 @@ it('a second love for the same (artist_key, track_key) succeeds without a new re
       { state: 'consumed' },
       { state: 'consumed' },
     ]);
+  });
+});
+
+it('an API unlove accepted remotely with a lost answer consumes durable target bridges on retry echo', async () => {
+  await withHarness(async (h) => {
+    h.seedUser(h.alice);
+    h.link(h.alice, 'lastfm');
+    await h.kit.externalPut('Alice', LOVE, '3kbridge001', love('Björk', 'Jóga'));
+    await projectLove(h, '3kbridge001', true);
+    const unlove = await enqueueUnlove(h.m, { did: h.alice, artist: 'Björk', track: 'Jóga', origin: 'web' });
+    if (!unlove.ok) throw new Error(JSON.stringify(unlove.reason));
+    const lost = h.writers.crashOn(DELETE, 'after_commit');
+    void h.run();
+    await lost;
+    expect(await remoteRecords(h.kit, 'Alice', LOVE)).toHaveLength(0);
+    expect(h.db.all('SELECT state FROM love_delete_bridges WHERE operation_id=?', unlove.operation.id)).toEqual([
+      { state: 'pending' },
+    ]);
+    h.restart();
+    await h.runUntilIdle();
+    expect(h.op(unlove.operation.id).state).toBe('succeeded');
+    h.db.run('DELETE FROM operations WHERE id=?', unlove.operation.id);
+    h.db.run('DELETE FROM forward_outbox');
+    expect((await projectLove(h, '3kbridge001', true)).outcome).toBe('absent');
+    expect(h.db.all('SELECT * FROM forward_outbox')).toHaveLength(0);
+    expect(h.db.all('SELECT state FROM love_delete_bridges WHERE operation_id=?', unlove.operation.id)).toEqual([
+      { state: 'consumed' },
+    ]);
+  });
+});
+
+it('an InvalidSwap obsoletes the old target bridge and does not suppress a later same-URI love lifecycle', async () => {
+  await withHarness(async (h) => {
+    h.seedUser(h.alice);
+    h.link(h.alice, 'lastfm');
+    const rkey = '3kbridge002';
+    await h.kit.externalPut('Alice', LOVE, rkey, love('Artist', 'Song'));
+    await projectLove(h, rkey, true);
+    const unlove = await enqueueUnlove(h.m, { did: h.alice, artist: 'Artist', track: 'Song', origin: 'web' });
+    if (!unlove.ok) throw new Error(JSON.stringify(unlove.reason));
+    const pause = h.writers.pauseOn(LIST);
+    const pending = h.run();
+    await pause.reached;
+    await h.kit.externalPut('Alice', LOVE, rkey, { ...love('Artist', 'Song'), album: 'New CID' });
+    pause.release();
+    await pending;
+    expect(h.db.all('SELECT state FROM love_delete_bridges WHERE operation_id=?', unlove.operation.id)).toEqual([
+      { state: 'obsolete' },
+    ]);
+    h.db.run('DELETE FROM forward_outbox');
+    await h.kit.externalDelete('Alice', LOVE, rkey);
+    expect((await projectLove(h, rkey, true)).outcome).toBe('absent');
+    await h.kit.externalPut('Alice', LOVE, rkey, love('Artist', 'Song'));
+    expect((await projectLove(h, rkey, true)).outcome).toBe('applied');
+    await h.kit.externalDelete('Alice', LOVE, rkey);
+    expect((await projectLove(h, rkey, true)).outcome).toBe('absent');
+    expect(
+      h.db.all<{ kind: string }>("SELECT kind FROM forward_outbox WHERE kind IN ('love','unlove') ORDER BY rowid"),
+    ).toEqual([{ kind: 'unlove' }, { kind: 'love' }, { kind: 'unlove' }]);
   });
 });
 
