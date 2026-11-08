@@ -504,7 +504,8 @@ async function runListenbrainzListenPage(
   if (response.kind === 'rate_limited') {
     if (response.untilMs !== null) pacer.holdUntil(response.untilMs);
     const retryDue = retry(deps.db, link, state, 'upstream_retry', now);
-    const due = Math.max(retryDue ?? now + deps.intervalMs, response.untilMs ?? now + 60_000);
+    if (retryDue === null) return { requested: 1, staged: 0, held: 'retry_exhausted', nextDueMs: null };
+    const due = Math.max(retryDue, response.untilMs ?? now + 60_000);
     deps.db.run(
       'UPDATE linked_pull_state SET poll_next_at_ms=?,retry_at_ms=? WHERE link_id=? AND generation=?',
       due,
@@ -668,7 +669,8 @@ async function runListenbrainzFeedbackPage(
   if (response.kind === 'rate_limited') {
     if (response.untilMs !== null) pacer.holdUntil(response.untilMs);
     const retryDue = retry(deps.db, link, state, 'upstream_retry', now);
-    const due = Math.max(retryDue ?? now + deps.intervalMs, response.untilMs ?? now + 60_000);
+    if (retryDue === null) return { requested: 1, staged: 0, held: 'retry_exhausted', nextDueMs: null };
+    const due = Math.max(retryDue, response.untilMs ?? now + 60_000);
     deps.db.run(
       'UPDATE linked_pull_state SET poll_next_at_ms=?,retry_at_ms=? WHERE link_id=? AND generation=?',
       due,
@@ -791,13 +793,14 @@ async function runLovePage(
   let upper = state.love_round_upper_ms;
   let floor = state.love_round_floor_ms;
   let page = state.love_round_page ?? 1;
+  let newestMs = state.love_round_newest_ms;
   if (upper === null || floor === null) {
     upper = now;
     floor = Math.max(state.love_floor_at_ms ?? link.updated_at_ms, state.love_boundary_ms ?? 0);
     deps.db.tx(() => {
       if (!current(deps.db, link)) return;
       deps.db.run(
-        `UPDATE linked_pull_state SET love_round_upper_ms=?,love_round_floor_ms=?,love_round_page=1,
+        `UPDATE linked_pull_state SET love_round_upper_ms=?,love_round_floor_ms=?,love_round_page=1,love_round_newest_ms=NULL,
           poll_next_at_ms=?,updated_at_ms=? WHERE link_id=? AND generation=?`,
         upper,
         floor,
@@ -808,6 +811,7 @@ async function runLovePage(
       );
     });
     page = 1;
+    newestMs = null;
   }
   const paceAt = deps.pacer.take(now);
   if (paceAt !== null) {
@@ -841,6 +845,14 @@ async function runLovePage(
     .map((raw) => mapLastfmRow(raw).second)
     .filter((second): second is number => second !== null);
   const items = pullLoveItems(response.tracks, floor, upper, deps.db);
+  // A completed boundary belongs to upstream love timestamps, not the local
+  // poll clock. Keep the maximum across pages so later arrivals at that
+  // second remain inside the next scan, including after a restart.
+  newestMs =
+    validSeconds.reduce(
+      (newest, second) => (second * 1000 >= floor && second * 1000 <= upper ? Math.max(newest, second * 1000) : newest),
+      newestMs ?? 0,
+    ) || null;
   // Loved tracks are newest first. Fetch through the prior completed boundary,
   // including every page at that second; known local loves never end the scan.
   const crossedFloor = validSeconds.some((second) => second * 1000 < floor);
@@ -861,8 +873,9 @@ async function runLovePage(
       upperMs: complete ? null : upper,
       floorMs: complete ? null : floor,
       nextPage: complete ? null : page + 1,
-      committedBoundaryMs: complete ? upper : null,
+      committedBoundaryMs: complete ? Math.max(state.love_boundary_ms ?? floor, newestMs ?? floor) : null,
       committedBoundaryKey: complete ? null : null,
+      newestMs: complete ? null : newestMs,
     },
   });
   const due = complete ? now + dueJitter(deps.random, deps.intervalMs) : now + 1;

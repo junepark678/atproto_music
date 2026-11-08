@@ -134,7 +134,7 @@ describe('linked Last.fm timer poller', () => {
       expect(
         h.db.one('SELECT love_boundary_ms,love_round_page,poll_phase FROM linked_pull_state WHERE link_id=?', linkId),
       ).toEqual({
-        love_boundary_ms: T0 + 2000,
+        love_boundary_ms: T0, // Newest upstream love, independent of the round's receive time.
         love_round_page: null,
         poll_phase: 'listen',
       });
@@ -283,3 +283,34 @@ describe('linked Last.fm timer poller', () => {
     });
   });
 });
+
+it('completed Lastfm love boundary retains upstream second ties across restart', async () =>
+  withHarness(async (h) => {
+    const { linkId, remote, deps } = await setup(h);
+    const second = Math.floor(h.m.clock.nowMs() / 1000) - 30;
+    const first = { artist: 'Artist', track: 'One', uts: second };
+    remote.seedLoved('remote', [first]);
+    h.db.run("UPDATE linked_pull_state SET poll_phase='love' WHERE link_id=?", linkId);
+    await runLinkedLastfmPull(deps());
+    expect
+      .soft(
+        h.db.one<{ love_boundary_ms: number }>('SELECT love_boundary_ms FROM linked_pull_state WHERE link_id=?', linkId)
+          ?.love_boundary_ms,
+      )
+      .toBe(second * 1000);
+    h.restart();
+    h.kit.clock.advance(600000);
+    remote.seedLoved('remote', [first, { artist: 'Artist', track: 'Tied arrival', uts: second }]);
+    h.db.run(
+      "UPDATE linked_pull_state SET poll_phase='love',poll_next_at_ms=? WHERE link_id=?",
+      h.m.clock.nowMs(),
+      linkId,
+    );
+    await runLinkedLastfmPull(deps());
+    expect
+      .soft(
+        h.db.one<{ n: number }>("SELECT count(*) n FROM linked_pull_items WHERE payload_json LIKE '%Tied arrival%'")?.n,
+      )
+      .toBe(1);
+    expect(remote.calls.entries.length).toBe(2);
+  }));
