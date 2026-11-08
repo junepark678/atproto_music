@@ -220,15 +220,15 @@ export async function acceptListens(m: ModuleDeps, args: AcceptListensArgs): Pro
         if (listenedAtNs !== null) {
           const listenedAtMs = Number(listenedAtNs / 1_000_000n);
           const windowMs = (playing.duration_seconds ?? 600) * 1000;
-          if (listenedAtMs < playing.started_at_ms && playing.started_at_ms - listenedAtMs <= windowMs) {
+          if (listenedAtMs >= playing.started_at_ms - windowMs && listenedAtMs < playing.started_at_ms) {
             db.run(
               'UPDATE now_playing SET scrobbled_at_ms = ?, started_at_ms = ? WHERE did = ?',
-              listenedAtMs,
+              now,
               listenedAtMs,
               args.did,
             );
-          } else {
-            db.run('UPDATE now_playing SET scrobbled_at_ms = ? WHERE did = ?', listenedAtMs, args.did);
+          } else if (listenedAtMs >= playing.started_at_ms) {
+            db.run('UPDATE now_playing SET scrobbled_at_ms = ? WHERE did = ?', now, args.did);
           }
         }
       }
