@@ -170,6 +170,18 @@ Retired cases (true on Node):
 
 **Amendment text:** Sign-in is restricted to `ATMUSIC_SIGNIN_DIDS` unless `ATMUSIC_SIGNIN_POLICY=open`, and the policy is reconciled at startup and on every 10-minute expiry sweep: a removed DID loses its OAuth session, web sessions and protocol credentials, its links are revoked and its operations blocked. OAuth sessions are kept alive only while the DID is in use (a live web session, a protocol credential used within 90 days, an active link, pending operations or an unfinished import). Users can disconnect with `DELETE /api/v1/account/connection`. The OAuth callback is protected against login CSRF by the `__Host-atmusic_oauth` cookie bound to the state.
 
+### B23 MusicBrainz enrichment (DRAFT; not published)
+
+**Status:** Draft only. This amendment has not been accepted into ADR 0005 and has not been published to a GitHub issue.
+
+**Demonstrated gap:** `/api/v1` read DTOs and statistics currently expose only submitted metadata. M1 now stores canonical MusicBrainz matches locally, but that enrichment and its restart-safe resolver policy need a stable contract and operator documentation. A returned arbitrary ID would be misleading when the stored matches conflict.
+
+**Amendment text:** Add the optional `musicbrainz` object to Scrobble and Love read DTOs with the exact fields `recordingMbid`, `title`, `artistCredit`, `artistMbids`, optional `releaseMbid`, `releaseTitle`, `releaseGroupMbid`, optional `durationSeconds`, `matchedBy` (`mbid` or `search`) and `syncedAt`. Statistics top artists, tracks and albums may carry `artistMbid`, `recordingMbid`, `releaseMbid` and `releaseGroupMbid` respectively, only when the matched local rows make each value unambiguous. All joins use normalized keys and matched `mb_tracks` rows; submitted names, counts, ranks, PDS records and read-path network behavior remain unchanged. `NowPlaying.musicbrainz` is explicitly deferred to M2 after the N1 now-playing branch is integrated.
+
+The background resolver is controlled by `MUSICBRAINZ_ENABLED` (default `true`) and `MUSICBRAINZ_API_ROOT` (default `https://musicbrainz.org/ws/2/`). Validate the root using the existing HTTPS/DNS/default-port/trailing-slash rule. Every request must use the pinned `policyFetch` transport with `MB_CAPS` (zero request body, 1 MiB response), and the User-Agent `atmusic/<version> ( https://github.com/junepark678/atproto_music )`; send no user identity or contact email. The persistent global lane permits one request per second, honors numeric or HTTP-date 503 `Retry-After`, never sleeps, and is resumed by the timer. Reads and projection writes enqueue only local work; historical seeding is bounded and chunked. Successful matches refresh after 90 days at lowest priority, unmatched rows retry after 30 days, transient 5xx/network failures back off from 60 seconds exponentially up to 24 hours, and eight failures schedule a 30-day retry.
+
+Class `mb_tracks`, `mb_pacing` and `mb_seed_state` as non-derived. They are part of online backups, while disaster restore preserves their live rows because they cannot be reconstructed from PDS records. The kill switch stops egress without deleting this state. The MBID used later for forwarding must come from the stored matched recording or the submitted recording ID; this draft does not add the parallel M2 retry hook for fresh ListenBrainz love failures.
+
 ## Leaf amendments
 
 Each section lists the cases of one leaf whose ADR 0004 retirement cited a superseded amendment, with their disposition in [`docs/verification/ts-case-map.json`](../verification/ts-case-map.json). A mapped case names its target test and the node-waves package that declares it; with `--check-tests --node-wave <n>` a target of a later wave is pending until that wave.

@@ -421,6 +421,15 @@ V11_SHAPES = {
     'NotifyAccepted': {'': (['state'], ['state'])},
     'RecordStatus': {'': (['cid', 'indexing', 'reason', 'revision', 'state', 'uri'], ['indexing', 'state', 'uri'])},
 }
+M1_OPTIONAL_SHAPES = {
+    'Scrobble': {'': ['musicbrainz']},
+    'Love': {'': ['musicbrainz']},
+    'Statistics': {
+        '.topArtists[]': ['artistMbid'],
+        '.topTracks[]': ['recordingMbid'],
+        '.topAlbums[]': ['releaseMbid', 'releaseGroupMbid'],
+    },
+}
 # The response schema of every v1.1 operation status, from the 1.1.0 document. B14 re-binds only
 # the client metadata document (static public client -> dynamic confidential client).
 V11_REBOUND = {('GET', '/oauth/client-metadata.json', 200): 'ConfidentialClientMetadata'}
@@ -445,7 +454,7 @@ def object_shapes(schema, path=''):
 
 
 def v11_compatibility(spec):
-    """Every v1.1 schema keeps every property and its required set; v1.1 routes keep their response schemas (B14)."""
+    """Keep frozen v1.1 shapes plus the optional draft B23 MusicBrainz additions."""
     schemas = spec['components']['schemas']
     for name, frozen in V11_SHAPES.items():
         require(name in schemas, f'v1.1 compatibility: schema {name} was removed')
@@ -461,6 +470,16 @@ def v11_compatibility(spec):
                 # Every v1.1 object stays closed; only the legacy client metadata admits extension fields.
                 require(schemas[name].get('additionalProperties') is (name == 'OAuthClientMetadata'),
                         f'v1.1 compatibility: {name} changed additionalProperties')
+    for name, paths in M1_OPTIONAL_SHAPES.items():
+        require(name in schemas, f'M1 MusicBrainz contract: schema {name} is missing')
+        current = object_shapes(schemas[name])
+        for path, optional in paths.items():
+            require(path in current, f'M1 MusicBrainz contract: {name}{path} is not an object')
+            properties, required = current[path]
+            missing = sorted(set(optional) - set(properties))
+            require(not missing, f'M1 MusicBrainz contract: {name}{path} lost optional fields {missing}')
+            required_now = sorted(set(optional) & set(required))
+            require(not required_now, f'M1 MusicBrainz contract: {name}{path} made optional fields required {required_now}')
     found = operations(spec)
     checked = 0
     for (method, path), statuses in V11_STATUSES.items():
@@ -1329,6 +1348,8 @@ def compatibility_controls(spec):
          "v1.1 compatibility: Statistics.topAlbums[] lost properties ['album']"),
         ('Scrobble makes albumArtist required', lambda: v11_compatibility(spec_with(lambda s: s['Scrobble']['required'].append('albumArtist'))),
          'v1.1 compatibility: Scrobble changed its required set'),
+        ('Scrobble loses MusicBrainz contract field', lambda: v11_compatibility(spec_with(lambda s: s['Scrobble']['properties'].pop('musicbrainz'))),
+         "M1 MusicBrainz contract: Scrobble lost optional fields ['musicbrainz']"),
         ('Error envelope loses requestId', lambda: v11_compatibility(spec_with(
             lambda s: (s['Error']['properties']['error']['properties'].pop('requestId'),
                        s['Error']['properties']['error']['required'].remove('requestId')))),
@@ -1470,7 +1491,7 @@ def main():
           f'({V11_CASES} and {V12_CASES}), {negative} rejected wrong-type responses, {requests} request, {queries} query and {components} component fixtures')
     accepted, rejected_cases = schema_cases(spec, validator_type, checker)
     print(f'PASS schema_cases: {accepted} accepted and {rejected_cases} rejected UTF-8/scalar, timestamp, identifier, notify, record-status, export, '
-          'client-metadata and v1.2 (optional scrobble fields, operations, sessions, accounts, credentials, links, imports, JWKS) cases')
+          'client-metadata and v1.2 (optional scrobble fields, MusicBrainz DTOs, statistics MBIDs, operations, sessions, accounts, credentials, links, imports, JWKS) cases')
     used, defined, pending = error_codes(spec)
     controls = error_code_controls(spec)
     print(f'PASS error_codes: the {used} codes of api/examples error envelopes are defined in packages/core/src/errors.ts or the v1.2 '

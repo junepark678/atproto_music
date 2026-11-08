@@ -1,7 +1,8 @@
 // TypeScript shapes of every API payload in docs/planning/API.md as amended by
 // ADR 0004 §9 (api/openapi.yaml 1.1.0). Frozen in Wave 0. ADR 0005 B14
-// (api/openapi.yaml 1.2.0) adds, additively only, the optional Scrobble
-// fields, the extended Capability union and the v1.2 DTOs at the end.
+// (api/openapi.yaml 1.2.0) adds the optional Scrobble fields, extended
+// Capability union and v1.2 DTOs. Draft B23 adds optional MusicBrainz DTO and
+// statistics fields without changing required fields or existing values.
 //
 // Kept DTOs are byte-for-byte the v1 shapes: every object is closed, and an
 // absent optional field is omitted, never null or "". Timestamps in responses
@@ -80,6 +81,19 @@ export interface MusicBrainzMatch {
   durationSeconds?: number;
   matchedBy: 'mbid' | 'search';
   syncedAt: Timestamp;
+}
+
+export interface Love {
+  uri: AtUri;
+  cid: Cid;
+  did: Did;
+  artist: string;
+  track: string;
+  album?: string;
+  recordingMbid?: string;
+  createdAt: Timestamp;
+  indexedAt: Timestamp;
+  musicbrainz?: MusicBrainzMatch;
 }
 
 /** `GET /api/v1/scrobbles/{id}`. */
