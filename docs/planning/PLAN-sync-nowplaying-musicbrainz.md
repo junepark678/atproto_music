@@ -59,6 +59,12 @@ Owner request:
   - Append-only. Never edit an applied migration.
   - Add every new table to `TABLES` and `TABLE_CLASS`.
   - The tracks run in parallel, so the slice that lands second renumbers its migration when it rebases.
+  - **No table rebuilds, and no relaxing of the additive guard** (planner ruling, 2026-11-08). The rule in `worker/test/storage/schema-v2.test.ts` stays as it is: every migration after 2 may only `CREATE TABLE`, `CREATE INDEX` or `ADD COLUMN`. A changed uniqueness rule must be expressed additively. For example, keep `forward_outbox` UNIQUE(`link_id`, `kind`, `dedupe_key`), add `generation INTEGER NOT NULL DEFAULT 1`, and prefix the dedupe key with the generation (`g<n>:`) for generations above 1.
+  - **Squash unmerged migrations** before readiness, down to the fewest that the logical changes need.
+  - **Assigned numbers:**
+    - Tracks N and M hold 15–20: N1 15, M1 16–18, M2 19–20.
+    - Track S starts at 21 when it rebases onto them.
+    - The stack merges linearly: #173, #175, #176, #177, #178, #179, then the S slices.
 - **Tests.**
   - Use `fixedClock` and `seededRandom`. Fake upstreams sit on reserved `.test` hosts, wired through `routerTransport` and fakes beside `worker/test/node/support/fake-{lastfm,listenbrainz}.ts`.
   - Extend the features test so each new client provably gets the pinned transport.
