@@ -15,7 +15,9 @@ export interface CoverArtRow {
 export function enqueueCoverArt(db: Db, releaseMbid: string, releaseGroupMbid: string | null, nowMs: number): void {
   db.run(
     `INSERT INTO mb_cover_art_jobs(release_mbid,release_group_mbid,status,attempts,next_due_ms,created_at_ms)
-    VALUES(?,?,'pending',0,?,?) ON CONFLICT(release_mbid) DO UPDATE SET release_group_mbid=excluded.release_group_mbid`,
+    VALUES(?,?,'pending',0,?,?) ON CONFLICT(release_mbid) DO UPDATE SET release_group_mbid=excluded.release_group_mbid,
+      status=CASE WHEN mb_cover_art_jobs.status='complete' AND NOT EXISTS(SELECT 1 FROM mb_cover_art WHERE release_mbid=excluded.release_mbid) THEN 'pending' ELSE mb_cover_art_jobs.status END,
+      next_due_ms=CASE WHEN mb_cover_art_jobs.status='complete' AND NOT EXISTS(SELECT 1 FROM mb_cover_art WHERE release_mbid=excluded.release_mbid) THEN excluded.next_due_ms ELSE mb_cover_art_jobs.next_due_ms END`,
     releaseMbid,
     releaseGroupMbid,
     nowMs,
@@ -92,11 +94,13 @@ export interface CoverArtJob {
   attempts: number;
 }
 export function dueCoverArtJobs(db: Db, nowMs: number, limit: number): CoverArtJob[] {
-  return db.all<CoverArtJob>(
-    "SELECT release_mbid AS releaseMbid,release_group_mbid AS releaseGroupMbid,attempts FROM mb_cover_art_jobs WHERE status='pending' AND next_due_ms<=? ORDER BY next_due_ms,release_mbid LIMIT ?",
+  const jobs = db.all<CoverArtJob>(
+    "SELECT release_mbid AS releaseMbid,release_group_mbid AS releaseGroupMbid,attempts FROM mb_cover_art_jobs WHERE status IN ('pending','failed') AND next_due_ms<=? ORDER BY next_due_ms,release_mbid LIMIT ?",
     nowMs,
     limit,
   );
+  db.run("UPDATE mb_cover_art_jobs SET status='pending',attempts=0 WHERE status='failed' AND next_due_ms<=?", nowMs);
+  return jobs;
 }
 export function completeCoverArtJob(db: Db, releaseMbid: string): void {
   db.run("UPDATE mb_cover_art_jobs SET status='complete' WHERE release_mbid=?", releaseMbid);
@@ -115,8 +119,9 @@ export function retryCoverArtJob(db: Db, job: CoverArtJob, nowMs: number): numbe
 }
 export function nextCoverArtDue(db: Db): number | null {
   return (
-    db.one<{ due: number | null }>("SELECT MIN(next_due_ms) AS due FROM mb_cover_art_jobs WHERE status='pending'")
-      ?.due ?? null
+    db.one<{ due: number | null }>(
+      "SELECT MIN(next_due_ms) AS due FROM mb_cover_art_jobs WHERE status IN ('pending','failed')",
+    )?.due ?? null
   );
 }
 

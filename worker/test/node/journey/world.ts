@@ -226,6 +226,10 @@ export class World {
         [APP_HOST]: self,
         'lastfm.test': this.lastfm,
         'listenbrainz.test': this.lb,
+        'coverartarchive.test': (_req: Request) =>
+          new Response(null, { status: 302, headers: { location: 'https://ia800.archive.org/image' } }),
+        'ia800.archive.org': () =>
+          new Response(new Uint8Array([1, 2, 3]), { headers: { 'content-type': 'image/jpeg' } }),
       },
     });
     this.as.connect(this.router);

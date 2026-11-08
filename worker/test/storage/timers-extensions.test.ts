@@ -194,6 +194,7 @@ it("TIMER_NAMES is the seven core names, EXTENSION_TIMER_NAMES the six extension
     'expiry-sweep',
     'backup',
     'musicbrainz',
+    'cover-art',
   ]);
   expect(CORE_LANE.names).toBe(TIMER_NAMES);
   expect(EXTENSION_LANE.names).toBe(EXTENSION_TIMER_NAMES);
@@ -254,6 +255,7 @@ it('runDue with a names subset claims only those timers, and two lanes over two 
     expect(calls).toEqual(['drain', 'gc', 'forward']);
     expect(timerRows(db).map((r) => r.name)).toEqual([
       'backup',
+      'cover-art',
       'discovery',
       'expiry-sweep',
       'identity-sweep',
@@ -273,6 +275,7 @@ it('runDue with a names subset claims only those timers, and two lanes over two 
     expect(coreRun.ran).toEqual(['snapshot', 'jetstream-watchdog', 'status-sweep', 'identity-sweep', 'discovery']);
     expect(timerRows(db).map((r) => r.name)).toEqual([
       'backup',
+      'cover-art',
       'expiry-sweep',
       'import',
       'musicbrainz',
@@ -290,7 +293,15 @@ it('runDue with a names subset claims only those timers, and two lanes over two 
     await settle();
     expect(calls).toEqual(['snapshot']);
     const extRun = await runDue(extAlarm.storage, db, NOW, extensionHandlers(calls), UNLIMITED, EXTENSION_LANE);
-    expect(extRun.ran).toEqual(['outbox', 'import', 'oauth-keepalive', 'expiry-sweep', 'backup', 'musicbrainz']);
+    expect(extRun.ran).toEqual([
+      'outbox',
+      'import',
+      'oauth-keepalive',
+      'expiry-sweep',
+      'backup',
+      'musicbrainz',
+      'cover-art',
+    ]);
     expect(extRun.recovered).toEqual([]);
     // The core claim is untouched by the extension run.
     expect(timerRows(db)).toEqual([{ name: '~running:snapshot', due_at: NOW - MINUTE }]);
@@ -371,6 +382,7 @@ it('extension handlers run on the extension lane in the order outbox, forward, i
       forward: record('forward'),
       'oauth-keepalive': record('oauth-keepalive'),
       musicbrainz: record('musicbrainz'),
+      'cover-art': record('cover-art'),
     });
     const k = coreKit(db, [a, b]);
     expect(k.core.extensionLane.names).toEqual([...EXTENSION_TIMER_NAMES]);

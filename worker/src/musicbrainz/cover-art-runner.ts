@@ -1,5 +1,6 @@
 import type { Clock } from '@atmusic/core/deps';
 import type { Db } from '../do/db';
+import { CoverArtTransientError } from '../node/cover-art-client';
 import {
   completeCoverArtJob,
   dueCoverArtJobs,
@@ -54,8 +55,15 @@ export async function runCoverArtJobs(
         db.run('UPDATE mb_cover_art_jobs SET next_due_ms=? WHERE release_mbid=?', now + 60_000, job.releaseMbid);
         cleanupPending = true;
       }
-    } catch {
-      retryCoverArtJob(db, job, clock.nowMs());
+    } catch (error) {
+      const due = retryCoverArtJob(db, job, clock.nowMs());
+      if (error instanceof CoverArtTransientError && error.retryAfterMs !== undefined) {
+        db.run(
+          'UPDATE mb_cover_art_jobs SET next_due_ms=? WHERE release_mbid=?',
+          Math.max(due, clock.nowMs() + error.retryAfterMs),
+          job.releaseMbid,
+        );
+      }
       processed++;
     }
   }

@@ -82,6 +82,7 @@ export const EXTENSION_TIMER_NAMES = [
   'expiry-sweep',
   'backup',
   'musicbrainz',
+  'cover-art',
 ] as const;
 
 export type ExtensionTimerName = (typeof EXTENSION_TIMER_NAMES)[number];

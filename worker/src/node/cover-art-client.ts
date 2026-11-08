@@ -4,6 +4,11 @@ import type { PolicyFetch } from './policy-fetch';
 export const COVER_ART_MAX_BYTES = 512 * 1024;
 const IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
 const MBID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+export class CoverArtTransientError extends Error {
+  constructor(readonly retryAfterMs?: number) {
+    super('Cover Art Archive temporary failure');
+  }
+}
 
 function permitted(url: URL): boolean {
   return (
@@ -36,13 +41,22 @@ export function createCoverArtClient({ policyFetch, root }: CoverArtClientOption
     throw new TypeError('invalid Cover Art Archive root');
   }
 
-  async function fetchFront(kind: 'release' | 'release-group', mbid: string): Promise<Uint8Array | null> {
+  async function fetchFront(
+    kind: 'release' | 'release-group',
+    mbid: string,
+    redirects: { count: number },
+  ): Promise<Uint8Array | null> {
     if (!MBID.test(mbid)) throw new TypeError('invalid MusicBrainz identifier');
     let url = new URL(`${kind}/${mbid}/front-250`, rootUrl);
-    for (let redirects = 0; ; redirects++) {
+    for (;;) {
       const response = await policyFetch(
         url,
-        { headers: { accept: 'image/jpeg, image/png, image/webp' } },
+        {
+          headers: {
+            accept: 'image/jpeg, image/png, image/webp',
+            'user-agent': 'atmusic/0.0.0 ( https://github.com/junepark678/atproto_music )',
+          },
+        },
         {
           caps: { maxRequestBytes: 0, maxResponseBytes: COVER_ART_MAX_BYTES },
           allowManualRedirectResponse: true,
@@ -51,12 +65,13 @@ export function createCoverArtClient({ policyFetch, root }: CoverArtClientOption
       if (response.status >= 300 && response.status < 400) {
         const location = response.headers.get('location');
         response.body?.cancel().catch(() => {});
-        if (redirects >= 2 || !location)
+        if (redirects.count >= 2 || !location)
           throw new TransportError('redirect', 'Cover Art Archive redirect refused', { reason: 'redirect_limit' });
         const next = new URL(location, url);
         if (!permitted(next))
           throw new TransportError('redirect', 'Cover Art Archive redirect refused', { reason: 'redirect_host' });
         url = next;
+        redirects.count++;
         continue;
       }
       if (response.status === 404) {
@@ -65,7 +80,8 @@ export function createCoverArtClient({ policyFetch, root }: CoverArtClientOption
       }
       if (!response.ok) {
         response.body?.cancel().catch(() => {});
-        return null;
+        const retryAfter = Number(response.headers.get('retry-after'));
+        throw new CoverArtTransientError(Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : undefined);
       }
       const type = response.headers.get('content-type')?.trim().toLowerCase();
       if (!type || !IMAGE_TYPES.has(type)) {
@@ -104,8 +120,9 @@ export function createCoverArtClient({ policyFetch, root }: CoverArtClientOption
   }
 
   return async (releaseMbid: string, releaseGroupMbid?: string): Promise<Uint8Array | null> => {
-    const image = await fetchFront('release', releaseMbid);
+    const redirects = { count: 0 };
+    const image = await fetchFront('release', releaseMbid, redirects);
     if (image || !releaseGroupMbid) return image;
-    return fetchFront('release-group', releaseGroupMbid);
+    return fetchFront('release-group', releaseGroupMbid, redirects);
   };
 }

@@ -37,6 +37,7 @@ import { createAppPassword } from '../../src/credentials/app-passwords';
 import { createLbToken } from '../../src/credentials/lb-tokens';
 import { migrate } from '../../src/do/migrate';
 import { EXTENSION_TIMER_NAMES } from '../../src/do/timers';
+import { enqueueCoverArt } from '../../src/musicbrainz/cover-art-store';
 import { enqueueTrack } from '../../src/musicbrainz/store';
 import { nodeTimers } from '../../src/node/alarm';
 import {
@@ -178,6 +179,8 @@ function consumerOf(r: SpyRequest, asHost: string, dohHost: string, plcHost: str
       return null;
     case 'musicbrainz':
       return r.host === 'musicbrainz.test' ? 'musicbrainz' : null;
+    case 'cover-art':
+      return ['coverartarchive.test', 'ia800.archive.org'].includes(r.host) ? 'cover-art' : null;
   }
 }
 
@@ -282,6 +285,7 @@ async function spiedWorld(spy: Spy, enableMusicbrainz = false): Promise<{ w: Wor
     env: {
       NAMESPACE_BATCH_PUBLICATION_REF: `sha256:${'b'.repeat(64)}`,
       ...(enableMusicbrainz ? { MUSICBRAINZ_API_ROOT: 'https://musicbrainz.test/ws/2/' } : {}),
+      ...(enableMusicbrainz ? { COVER_ART_ARCHIVE_ROOT: 'https://coverartarchive.test/' } : {}),
     },
   });
   // run() installed the unpinned stub as globalThis.fetch; record every call to it.
@@ -300,6 +304,12 @@ async function exerciseMusicbrainz(w: World): Promise<void> {
   await w.core.tick('extension');
 }
 
+async function exerciseCoverArt(w: World): Promise<void> {
+  enqueueCoverArt(w.db, '01234567-89ab-4cde-8fab-0123456789ab', null, w.clock.nowMs());
+  w.core.extensionTimers.kick('cover-art');
+  await w.core.tick('extension');
+}
+
 describe('production features', () => {
   it('every outbound consumer of the production composition receives the injected spy transport, and leaving it out of any one consumer makes the test fail', async () => {
     // With the spy on every wire.
@@ -308,6 +318,7 @@ describe('production features', () => {
     expect(new Set(spy.handed)).toEqual(new Set(WIRES));
     await exercise(w, alice);
     await exerciseMusicbrainz(w);
+    await exerciseCoverArt(w);
     const full = coverage(w, spy);
     expect(full.missing).toEqual([]);
     expect(full.unclassified).toEqual([]);
@@ -315,6 +326,14 @@ describe('production features', () => {
     const mbRequest = spy.requests.find((r) => r.wire === 'musicbrainz');
     expect(mbRequest).toMatchObject({ host: 'musicbrainz.test', path: '/ws/2/recording' });
     expect(mbRequest?.userAgent).toBe('atmusic/0.0.0 ( https://github.com/junepark678/atproto_music )');
+    const coverRequests = spy.requests.filter((r) => r.wire === 'cover-art');
+    expect(coverRequests.map((r) => [r.host, r.path])).toEqual([
+      ['coverartarchive.test', '/release/01234567-89ab-4cde-8fab-0123456789ab/front-250'],
+      ['ia800.archive.org', '/image'],
+    ]);
+    expect(
+      coverRequests.every((r) => r.userAgent === 'atmusic/0.0.0 ( https://github.com/junepark678/atproto_music )'),
+    ).toBe(true);
     // The Jetstream connector dialled through the pinned lookup, which refused the private answer: no socket.
     expect(spy.lookups.filter((l) => l.wire === 'jetstream').map((l) => l.hostname)).toContain(JETSTREAM_HOST);
     expect(w.log.logs.some((l) => l.event === 'jetstream_connected')).toBe(false);
@@ -348,6 +367,7 @@ describe('production features', () => {
       const run = await spiedWorld(partial, true);
       await exercise(run.w, run.alice);
       await exerciseMusicbrainz(run.w);
+      await exerciseCoverArt(run.w);
       const result = coverage(run.w, partial);
       expect(result.missing, `spy left out of ${wire}`).toEqual(
         OUTBOUND_CONSUMERS.filter((c) => (OUTBOUND_WIRES[wire] as readonly OutboundConsumer[]).includes(c)),
@@ -440,6 +460,7 @@ describe('production features', () => {
       'expiry-sweep',
       'backup',
       'musicbrainz',
+      'cover-art',
     ]);
     const stored = w.db.all<{ name: string }>('SELECT name FROM timers ORDER BY name').map((r) => r.name);
     for (const name of EXTENSION_TIMER_NAMES) expect(stored).toContain(name);
@@ -457,6 +478,7 @@ describe('production features', () => {
       'oauth-keepalive',
       'expiry-sweep',
       'musicbrainz',
+      'cover-art',
       'meta',
       'backup',
     ]);
