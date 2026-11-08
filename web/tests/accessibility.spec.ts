@@ -60,6 +60,38 @@ test.beforeAll(async () => {
     .toBe(200);
 });
 
+test('public profile now-playing card is rendered and accessible', async ({ page }) => {
+  await page.route('**/api/v1/users/*/now-playing', (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        nowPlaying: {
+          artist: 'Björk',
+          track: 'Jóga',
+          album: 'Homogenic',
+          startedAt: '2026-01-15T11:58:00Z',
+          updatedAt: '2026-01-15T11:58:00Z',
+          expiresAt: '2026-01-15T12:03:00Z',
+          durationSeconds: 180,
+          source: 'web',
+          shared: true,
+        },
+        serverTime: '2026-01-15T12:00:00Z',
+      }),
+    }),
+  );
+  await page.goto(`/u/${bob.did}`);
+  await settled(page, `@${bob.handle}`);
+  await expect(page.getByRole('article', { name: 'Now playing' })).toContainText('Jóga');
+  await expect(page.getByRole('progressbar', { name: 'Track progress' })).toHaveAttribute('max', '180');
+  await expect(page.getByRole('progressbar', { name: 'Track progress' })).toHaveAttribute(
+    'aria-valuetext',
+    /^\d:\d{2} \/ 3:00$/,
+  );
+  await expectAccessible(page, 'public profile with now-playing card');
+});
+
 // ---------------------------------------------------------------------------
 // Helpers
 
