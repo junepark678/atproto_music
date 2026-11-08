@@ -254,11 +254,12 @@ export async function writeSlice(
         }
         const operationId = newOperationId(m.random);
         db.run(
-          `INSERT INTO listen_keys(did, dedupe_key, operation_id, source, created_at_ms) VALUES (?, ?, ?, 'import', ?)`,
+          `INSERT INTO listen_keys(did, dedupe_key, operation_id, source, created_at_ms, listen_second) VALUES (?, ?, ?, 'import', ?, ?)`,
           job.did,
           plan.key,
           operationId,
           now,
+          plan.seconds,
         );
         const sourceService = importService(db, job.id);
         const firstAdmission = admitForwardIdentity(db, {
@@ -525,11 +526,12 @@ async function writeBatchSlice(
       const sourceService = importService(db, job.id);
       for (const [i, member] of members.entries()) {
         db.run(
-          `INSERT INTO listen_keys(did, dedupe_key, operation_id, source, created_at_ms) VALUES (?, ?, ?, 'import', ?)`,
+          `INSERT INTO listen_keys(did, dedupe_key, operation_id, source, created_at_ms, listen_second) VALUES (?, ?, ?, 'import', ?, ?)`,
           job.did,
           member.key,
           op.id,
           now,
+          member.seconds,
         );
         const firstAdmission = admitForwardIdentity(db, {
           did: job.did,

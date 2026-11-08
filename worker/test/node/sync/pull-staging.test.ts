@@ -49,6 +49,37 @@ describe('linked pull staging', () => {
       expect(h.db.one('SELECT page_cursor,listen_watermark_ms FROM linked_pull_state WHERE link_id=?', linkId)).toEqual(
         { page_cursor: 'next', listen_watermark_ms: 120000 },
       );
+      h.restart();
+      expect(h.db.one('SELECT item_key FROM linked_pull_items WHERE link_id=?', linkId)).toEqual({ item_key: 'b' });
+      h.db.run("UPDATE linked_accounts SET remote_user='changed' WHERE id=?", linkId);
+      expect(() =>
+        stagePullPage(h.db, {
+          ...args,
+          proposedCursor: 'wrong-source',
+          proposedWatermarkMs: 200000,
+          items: [{ itemKey: 'd', listenedAtMs: 102000, payload: {} }],
+        }),
+      ).toThrow(/stale/);
+      expect(h.db.one('SELECT page_cursor,listen_watermark_ms FROM linked_pull_state WHERE link_id=?', linkId)).toEqual(
+        { page_cursor: 'next', listen_watermark_ms: 120000 },
+      );
+      h.db.run("UPDATE linked_accounts SET remote_user='remote' WHERE id=?", linkId);
+      h.db.run(
+        "INSERT INTO linked_pull_items(link_id,generation,item_key,kind,source_service,source_account,payload_json,payload_bytes,staged_at_ms) VALUES(?,1,'near-cap','listen','listenbrainz','remote','{}',?,3)",
+        linkId,
+        32 * 1024 * 1024,
+      );
+      expect(() =>
+        stagePullPage(h.db, {
+          ...args,
+          proposedCursor: 'cap',
+          proposedWatermarkMs: 300000,
+          items: [{ itemKey: 'cap-trigger', listenedAtMs: 102000, payload: {} }],
+        }),
+      ).toThrow(/capacity/);
+      expect(h.db.one('SELECT page_cursor,listen_watermark_ms FROM linked_pull_state WHERE link_id=?', linkId)).toEqual(
+        { page_cursor: 'next', listen_watermark_ms: 120000 },
+      );
     });
   });
 });

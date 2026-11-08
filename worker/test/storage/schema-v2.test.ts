@@ -90,6 +90,42 @@ interface ExpectedTable {
 }
 
 const NEW_TABLES: Record<string, ExpectedTable> = {
+  linked_pull_state: {
+    columns: [
+      'link_id',
+      'generation',
+      'source_service',
+      'source_account',
+      'listen_watermark_ms',
+      'love_boundary_ms',
+      'love_boundary_key',
+      'page_kind',
+      'page_cursor',
+      'page_started_at_ms',
+      'hold_reason',
+      'retry_at_ms',
+      'failures',
+      'updated_at_ms',
+    ],
+    pk: ['link_id', 'generation'],
+  },
+  linked_pull_items: {
+    columns: [
+      'link_id',
+      'generation',
+      'item_key',
+      'kind',
+      'source_service',
+      'source_account',
+      'listened_at_ms',
+      'love_key',
+      'recording_mbid',
+      'payload_json',
+      'payload_bytes',
+      'staged_at_ms',
+    ],
+    pk: ['link_id', 'generation', 'item_key'],
+  },
   forward_admissions: {
     columns: ['did', 'identity_key', 'path', 'source_service', 'created_at_ms', 'admission_seq'],
     pk: ['did', 'identity_key'],
@@ -321,7 +357,14 @@ const NEW_TABLES: Record<string, ExpectedTable> = {
   },
   operation_deps: { columns: cols<OperationDepRow>({ op_id: true, pred_id: true }), pk: ['op_id', 'pred_id'] },
   listen_keys: {
-    columns: cols<ListenKeyRow>({ did: true, dedupe_key: true, operation_id: true, source: true, created_at_ms: true }),
+    columns: cols<ListenKeyRow>({
+      did: true,
+      dedupe_key: true,
+      operation_id: true,
+      source: true,
+      created_at_ms: true,
+      listen_second: true,
+    }),
     pk: ['did', 'dedupe_key'],
   },
   pds_budget: {
@@ -616,6 +659,27 @@ const NEW_SCROBBLE_COLUMNS = cols<ScrobbleV2Columns>({
 
 /** New named indexes: table, unique, partial, [column, desc] in key order. */
 const NEW_INDEXES: Record<string, [string, number, number, Array<[string, number]>]> = {
+  linked_pull_items_pending: [
+    'linked_pull_items',
+    0,
+    0,
+    [
+      ['link_id', 0],
+      ['generation', 0],
+      ['kind', 0],
+      ['staged_at_ms', 0],
+      ['item_key', 0],
+    ],
+  ],
+  listen_keys_did_second: [
+    'listen_keys',
+    0,
+    1,
+    [
+      ['did', 0],
+      ['listen_second', 0],
+    ],
+  ],
   mb_cover_art_lru: [
     'mb_cover_art',
     0,
@@ -1531,6 +1595,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       "27|'linked_account_backfill_run_revision'",
       "28|'bounded_link_backfill_progress_and_fairness'",
       "29|'link_backfill_staged_membership'",
+      "30|'linked_service_pull_foundation'",
     ]);
     // The new scrobble columns exist and are NULL on every migrated row.
     expect(after.newColumns).toHaveLength(expectedScrobbles);
@@ -1567,6 +1632,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       { version: 27, name: 'linked_account_backfill_run_revision' },
       { version: 28, name: 'bounded_link_backfill_progress_and_fairness' },
       { version: 29, name: 'link_backfill_staged_membership' },
+      { version: 30, name: 'linked_service_pull_foundation' },
     ]);
     expect(after.compat).toEqual([{ singleton: 1, min_compatible_version: 2 }]);
     expect(after.newTablesEmpty).toEqual(['mb_cover_art_usage']);

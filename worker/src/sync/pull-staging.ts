@@ -29,14 +29,8 @@ export function hasListenAtSecond(
     return true;
   if (db.one('SELECT 1 AS hit FROM listen_keys WHERE did=? AND listen_second=? LIMIT 1', args.did, args.second))
     return true;
-  if (
-    db.one(
-      "SELECT 1 AS hit FROM operations WHERE did=? AND state IN ('queued','blocked','sending','uncertain') AND kind='scrobble.create' AND CAST(json_extract(record_json,'$.value.createdAt') AS TEXT) LIKE ? LIMIT 1",
-      args.did,
-      `${new Date(args.second * 1000).toISOString().slice(0, 19)}%`,
-    )
-  )
-    return true;
+  // listen_keys is the indexed durable acceptance seam for pending singles
+  // and batch members, and survives operation cleanup.
   if (
     args.linkId !== undefined &&
     args.generation !== undefined &&
@@ -88,12 +82,13 @@ export function stagePullPage(
       link.remote_user !== args.sourceAccount
     )
       throw new Error('stale or disabled pull generation');
-    const current = db.one<{ generation: number }>(
-      'SELECT generation FROM linked_pull_state WHERE link_id=? AND generation=?',
+    const current = db.one<{ generation: number; source_service: string; source_account: string }>(
+      'SELECT generation,source_service,source_account FROM linked_pull_state WHERE link_id=? AND generation=?',
       args.linkId,
       args.generation,
     );
-    if (!current) throw new Error('pull state is not initialized');
+    if (!current || current.source_service !== args.sourceService || current.source_account !== args.sourceAccount)
+      throw new Error('pull state source changed');
     const counts = db.one<{ n: number; bytes: number }>(
       'SELECT count(*) AS n, coalesce(sum(payload_bytes),0) AS bytes FROM linked_pull_items WHERE link_id=? AND generation=?',
       args.linkId,

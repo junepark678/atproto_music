@@ -250,6 +250,7 @@ export interface ListenKeyRow {
   operation_id: string | null;
   source: Origin;
   created_at_ms: number;
+  listen_second: number | null;
 }
 
 export interface PdsBudgetRow {

@@ -580,7 +580,7 @@ describe('worker/test/harness', () => {
   it('the migration ledger is ordered across the N/M, M4, S1 and S2 stack', async () => {
     const versions = MIGRATIONS.map((m) => m.version);
     expect(versions.slice(0, 14)).toEqual(Array.from({ length: 14 }, (_, i) => i + 1));
-    expect(versions.slice(-6)).toEqual([24, 25, 26, 27, 28, 29]);
+    expect(versions.slice(-7)).toEqual([24, 25, 26, 27, 28, 29, 30]);
     expect(versions.every((version, index) => index === 0 || version > (versions[index - 1] ?? 0))).toBe(true);
     expect(SCHEMA_VERSION).toBe(MIGRATIONS[MIGRATIONS.length - 1]?.version);
     expect(MIGRATIONS.length).toBeGreaterThanOrEqual(2);
@@ -654,6 +654,12 @@ describe('worker/test/harness', () => {
       // reopen: every table and its rows survive close and reopen of the same file.
       for (const [table, rows] of Object.entries(SEED_ROWS)) for (const row of rows) insertRow(db, table, row);
       db.run('UPDATE forward_admission_clock SET next_seq=1 WHERE singleton=1');
+      db.run(
+        "INSERT INTO linked_pull_state(link_id,generation,source_service,source_account,listen_watermark_ms,updated_at_ms) VALUES('seed-link',1,'listenbrainz','seed',0,0)",
+      );
+      db.run(
+        "INSERT INTO linked_pull_items(link_id,generation,item_key,kind,source_service,source_account,listened_at_ms,payload_json,payload_bytes,staged_at_ms) VALUES('seed-link',1,'seed-item','listen','listenbrainz','seed',1000,'{}',2,0)",
+      );
       for (const table of TABLES) {
         if (table === 'mb_cover_art_usage') continue; // Migration 21 seeds its singleton usage counter.
         expect([table, rowCount(db, table)]).not.toEqual([table, 0]);
