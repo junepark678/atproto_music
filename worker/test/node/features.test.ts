@@ -544,11 +544,12 @@ describe('production features', () => {
     expect(events.indexOf('sqlite.opened')).toBeGreaterThanOrEqual(0);
     expect(events.indexOf('run.signin_reconciled')).toBeGreaterThan(events.indexOf('sqlite.opened'));
 
-    // The six extension timers, in their fixed order, each with a handler and a stored due time.
+    // The registered extension timers, in their fixed order, each with a handler and a stored due time.
     expect([...server.app.core.extensionLane.names]).toEqual([...EXTENSION_TIMER_NAMES]);
     expect(EXTENSION_TIMER_NAMES).toEqual([
       'outbox',
       'forward',
+      'link-backfill',
       'import',
       'oauth-keepalive',
       'expiry-sweep',

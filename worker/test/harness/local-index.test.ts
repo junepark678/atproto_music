@@ -564,10 +564,10 @@ describe('worker/test/harness', () => {
   });
 
   // N1-10: suites that pinned schema version 1 derive it from the schema.
-  it('the migration ledger is ordered across the N/M, M4, and S1 stack', async () => {
+  it('the migration ledger is ordered across the N/M, M4, S1 and S2 stack', async () => {
     const versions = MIGRATIONS.map((m) => m.version);
     expect(versions.slice(0, 14)).toEqual(Array.from({ length: 14 }, (_, i) => i + 1));
-    expect(versions.slice(-2)).toEqual([22, 23]);
+    expect(versions.slice(-4)).toEqual([23, 24, 25, 26]);
     expect(versions.every((version, index) => index === 0 || version > (versions[index - 1] ?? 0))).toBe(true);
     expect(SCHEMA_VERSION).toBe(MIGRATIONS[MIGRATIONS.length - 1]?.version);
     expect(MIGRATIONS.length).toBeGreaterThanOrEqual(2);
