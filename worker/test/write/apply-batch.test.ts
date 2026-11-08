@@ -94,10 +94,17 @@ describe('batch projection and visibility', () => {
         ).outcome,
       ).toBe('applied');
       expect(byUri()).toEqual([{ uri: `${container}#${ID_A}` }]);
+      expect(db.all('SELECT artist_key,track_key,album_key FROM mb_tracks')).toEqual([
+        { artist_key: 'artist', track_key: 'track', album_key: '' },
+      ]);
       const afterCreate = stats();
       expect([afterCreate.cache, afterCreate.stats?.totals.listens]).toEqual(['miss', 1]);
       expect(apply(db, updated).outcome).toBe('applied');
       expect(byUri()).toEqual([{ uri: `${container}#${ID_A}` }, { uri: `${container}#${ID_B}` }]);
+      expect(db.all('SELECT artist_key,track_key,album_key FROM mb_tracks ORDER BY track_key')).toEqual([
+        { artist_key: 'artist', track_key: 'second', album_key: '' },
+        { artist_key: 'artist', track_key: 'track', album_key: '' },
+      ]);
       const afterUpdate = stats();
       expect([afterUpdate.cache, afterUpdate.stats?.totals.listens]).toEqual(['miss', 2]);
       expect(apply(db, deleted).outcome).toBe('absent');

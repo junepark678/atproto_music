@@ -32,7 +32,8 @@
 // - Expired rows are deleted by `deleteExpiredNowPlaying` (the expiry-sweep
 //   timer, §3.3); reads never depend on that sweep.
 
-import { artistKey, trackKey } from '@atmusic/core/music-key';
+import { albumKey, artistKey, trackKey } from '@atmusic/core/music-key';
+import { enqueueTrack } from '../../musicbrainz/store';
 import type { NowPlayingRow, NowPlayingSource } from '../../app/rows';
 import type { ModuleDeps } from '../contracts';
 import { NOW_PLAYING_SOURCES } from '../schema';
@@ -155,6 +156,13 @@ export function upsertNowPlaying(m: Pick<ModuleDeps, 'db' | 'clock'>, input: Now
       row.started_at_ms,
       row.expires_at_ms,
     );
+    const musicTrackKey = trackKey(row.artist, row.track);
+    const musicAlbumKey = albumKey(row.artist, row.album);
+    enqueueTrack(db, {
+      artistKey: artistKey(row.artist),
+      trackKey: musicTrackKey[1],
+      albumKey: musicAlbumKey?.[1] ?? '',
+    }, now, 10, row.recording_mbid);
     return { outcome: 'stored' as const, row };
   });
 }

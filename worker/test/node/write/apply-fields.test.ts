@@ -177,6 +177,9 @@ describe('scrobble field projection', () => {
       for (const proof of [withProof, withoutProof, droppedProof]) {
         expect(db.tx(() => applyRecordProof(db, proof, OPTS))).toMatchObject({ outcome: 'applied' });
       }
+      expect(db.all('SELECT artist_key,track_key,album_key,submitted_recording_mbid FROM mb_tracks ORDER BY track_key')).toEqual([
+        { artist_key: 'björk', track_key: 'jóga', album_key: 'homogenic', submitted_recording_mbid: '8f3471b5-7e6a-48da-86a9-c1c07a0f47ae' },
+      ]);
 
       // With the fields: every new column filled, remote spelling kept.
       expect(fieldsOf(db, withUri)).toEqual({
