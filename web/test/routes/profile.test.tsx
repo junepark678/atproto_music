@@ -32,7 +32,13 @@ describe('web/test/routes/profile.test.tsx', () => {
           ...stats,
           window: url.searchParams.get('window') ?? 'all',
           totalScrobbles: 7,
-          topArtists: [{ artist: 'Server ranked artist', scrobbleCount: 7 }],
+          topArtists: [
+            {
+              artist: 'Server ranked artist',
+              scrobbleCount: 7,
+              artistMbid: '87c5dedd-371d-4a53-9f7f-80522fb7f3cb',
+            },
+          ],
         });
       }
       return undefined;
@@ -42,6 +48,16 @@ describe('web/test/routes/profile.test.tsx', () => {
     await vi.waitFor(() => expect(requested).toContain('7d'));
     await vi.waitFor(() => expect(app.root.textContent).toContain('Server ranked artist'));
     expect(app.root.textContent).toContain('7 scrobbles');
+    expect(app.root.querySelector('.top-artists a')?.getAttribute('href')).toBe(
+      'https://musicbrainz.org/artist/87c5dedd-371d-4a53-9f7f-80522fb7f3cb',
+    );
+    expect(app.root.querySelector('.top-artists a')?.getAttribute('rel')).toBe('noopener noreferrer');
+    expect(app.root.querySelector('.top-tracks a')?.getAttribute('href')).toBe(
+      'https://musicbrainz.org/recording/3f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2d10',
+    );
+    expect(app.root.querySelector('.top-albums a')?.getAttribute('href')).toBe(
+      'https://musicbrainz.org/release/d2e7a5b1-1c3f-4b8e-9a6d-0f1e2d3c4b5a',
+    );
     app.cleanup();
   });
 
