@@ -58,12 +58,12 @@ These follow from listens becoming signed records on your own PDS. **None of the
 - **Names ListenBrainz accepts but our validator refuses** (for example more than 256 characters, or malformed text) are answered 200 and **not written**. Each such listen is listed for 30 days under `GET /api/v1/account/ignored-listens` (Settings) with the reason and the first 128 characters of the names; the other listens of the request are processed normally. A batch of three with one over-long name answers 200, writes two and lists one.
 - **`return_msid`** is honoured for `playing_now` only, as ListenBrainz does: `{"status":"ok","recording_msid":"<msid>"}`. For `single` and `import` it is ignored and the answer is `{"status":"ok"}`.
 - **Feedback score -1 ("hate") clears a love**; we have no hate state.
-- MSIDs are a pure function of the normalised artist and track (UUIDv5), so equal metadata always has the same `recording_msid`. There is no MusicBrainz mapping: `mbid_mapping` is never returned.
+- MSIDs are a pure function of the normalised artist and track (UUIDv5), so equal metadata always has the same `recording_msid`. Listen reads may include `track_metadata.mbid_mapping` with unambiguous locally matched `recording_mbid`, `release_mbid` and `artist_mbids`; submitted IDs in `additional_info` remain unchanged. Unmatched or conflicting local metadata is omitted. Reads use SQLite only and never call MusicBrainz.
 - Statistics are computed on read and anchored on now, so ListenBrainz's "if today is Monday, use last week" behaviour does not occur.
 
 ## Reads
 
-Reads show only indexed, proof-verified listens. `{user}` is a DID, a username or a verified handle; unknown users are 404 `{"code":404,"error":"Cannot find user: <user>"}`, and `user_id` echoes the path as typed.
+Reads show only indexed, proof-verified listens. `{user}` is a DID, a username or a verified handle; unknown users are 404 `{"code":404,"error":"Cannot find user: <user>"}`, and `user_id` echoes the path as typed. A listen's `mbid_mapping` is optional and comes from the exact local matched artist/track/album tuple; it does not rewrite `additional_info` or the submitted display names.
 
 | Endpoint | Notes |
 | --- | --- |
@@ -83,6 +83,8 @@ Not implemented (404): `artist-map`, `era-activity`, `genre-activity`, `artist-e
 - `POST /1/feedback/recording-feedback {recording_msid | recording_mbid, score}`: 1 loves, 0 unloves, -1 clears a love. An MSID is resolved through your indexed listens, your current now playing and your scrobbles not yet indexed, so a love right after a scrobble works; an MSID with nothing to match answers 200 `{"status":"ok"}` and stores nothing.
 - `POST /1/delete-listen {listened_at, recording_msid}`: deletes your newest matching record at that second; `{"status":"ok"}`.
 - `POST /1/playing-now/delete {client?}`: no current entry is 200 "Playing now already cleared"; an entry from a different stored client is 404; otherwise the entry is cleared, 200 "Playing now cleared successfully".
+
+ListenBrainz love and unlove forwarding uses a submitted recording MBID when present, otherwise a local matched recording MBID. A pending local match is deferred for up to 24 hours; a still-pending or terminally failed lookup is ignored as `mbid_unresolved`, while a resolved unmatched track is ignored as `no_recording_mbid`. A later match retries the latest love/unlove state once for each affected linked-account generation. Reads and the forwarder make no MusicBrainz request.
 
 ## Rate limits
 

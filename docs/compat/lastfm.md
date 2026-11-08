@@ -96,6 +96,8 @@ Any other method, or a missing `method`, is error **3** (this covers `geo.*`, `c
 
 Reads show only data that has been indexed after its signed proof. A scrobble you just sent appears once it is on your PDS and indexed; pending operations and staged imports are never shown. Unknown, inactive or suppressed users are **6** "User not found". The `user` parameter is a DID, a username, or a verified handle; a dotted value is a username only while it is still its owner's verified handle. User URLs are `https://music.214510.xyz/u/<did>`; artist, track and album URLs are Last.fm-style `https://www.last.fm/music/…` links; images are the four sizes with empty text.
 
+When the submitted value is empty, `track.getInfo` fills the track, nested artist and album MBID leaves and the duration from an unambiguous local MusicBrainz match. Artist and album info methods can likewise fill an empty MBID from a unique local match. Non-empty submitted values remain authoritative; ambiguous or unmatched local IDs stay empty. These compatibility reads never contact MusicBrainz.
+
 ### track.scrobble
 
 - Entries are indexed `[0]` to `[49]`, or one unindexed set. Mixing both forms, an index of 50 or more, or more than 50 entries is **6**; a missing `artist`, `track` or `timestamp` in any entry is **6** and nothing is stored.
