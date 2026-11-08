@@ -59,6 +59,7 @@ import { routes as feedRoutes } from './feed';
 import { routes as followsReadRoutes } from './follows-read';
 import { routes as healthRoutes } from './health';
 import { routes as metaRoutes } from './meta';
+import { routes as nowPlayingFeedRoutes } from './now-playing-feed';
 import { routes as notifyRoutes } from './notify';
 import { routes as profileRoutes } from './profile';
 import { routes as recordStatusRoutes } from './record-status';
@@ -77,6 +78,7 @@ export const ROUTES: readonly RouteDef[] = [
   ...resolveRoutes,
   ...scrobblesReadRoutes,
   ...feedRoutes,
+  ...nowPlayingFeedRoutes,
   ...profileRoutes,
   ...statsRoutes,
   ...followsReadRoutes,

@@ -109,6 +109,8 @@ export interface NowPlaying {
   client?: { name: string; version?: string }; musicService?: string; mediaPlayer?: string;
   source: 'lastfm' | 'listenbrainz' | 'web'; shared?: boolean;
 }
+export interface NowPlayingFeedItem { did: Did; handle: Handle | null; nowPlaying: NowPlaying }
+export interface NowPlayingFeed { items: NowPlayingFeedItem[]; serverTime: Timestamp }
 
 export type StatsWindow = 'all' | '7d' | '30d' | '365d';
 export const STATS_WINDOWS: readonly StatsWindow[] = ['all', '7d', '30d', '365d'];

@@ -37,6 +37,7 @@ import type { NowPlayingRow, NowPlayingSource } from '../../app/rows';
 import type { ModuleDeps } from '../contracts';
 import { NOW_PLAYING_SOURCES } from '../schema';
 import { activeUser } from './visibility';
+import { visibleFollowEdge } from './visibility';
 
 export const NOW_PLAYING_DEFAULT_TTL_SECONDS = 600;
 /** Last.fm durations outside this range fall back to the default TTL (§7.8). */
@@ -210,6 +211,18 @@ export function currentNowPlaying(m: Pick<ModuleDeps, 'db' | 'clock'>, did: stri
 /** The owner's own current entry, regardless of the share flag. */
 export function ownNowPlaying(m: Pick<ModuleDeps, 'db' | 'clock'>, did: string): NowPlayingRow | null {
   return m.db.one<NowPlayingRow>('SELECT * FROM now_playing WHERE did = ? AND expires_at_ms > ?', did, m.clock.nowMs());
+}
+
+/** Current shared rows for accounts the viewer follows, newest refresh first, capped at 50. */
+export function followedNowPlaying(m: Pick<ModuleDeps, 'db' | 'clock'>, did: string): Array<{ did: string; row: NowPlayingRow }> {
+  const rows = m.db.all<NowPlayingRow & { followed_did: string }>(
+    `SELECT n.*, n.did AS followed_did FROM follows f JOIN now_playing n ON n.did=f.subject
+     JOIN accounts a ON a.did=n.did AND a.share_now_playing=1 JOIN users u ON u.did=n.did AND ${activeUser('u')}
+     WHERE f.actor=? AND n.expires_at_ms>? AND ${visibleFollowEdge('f')}
+       AND f.uri=(SELECT min(g.uri) FROM follows g WHERE g.actor=f.actor AND g.subject=f.subject)
+     ORDER BY coalesce(n.updated_at_ms,n.started_at_ms) DESC, n.did ASC LIMIT 50`, did, m.clock.nowMs(),
+  );
+  return rows.map(({ followed_did, ...row }) => ({ did: followed_did, row }));
 }
 
 export type ClearNowPlayingOutcome = 'already_cleared' | 'client_mismatch' | 'cleared';

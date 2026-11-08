@@ -69,6 +69,7 @@ const KIND: Record<keyof IndexRpc, 'read' | 'write'> = {
   stats: 'read',
   profile: 'read',
   nowPlaying: 'read',
+  followedNowPlaying: 'read',
   following: 'read',
   followers: 'read',
   exportUser: 'read',

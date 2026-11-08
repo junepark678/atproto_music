@@ -23,7 +23,7 @@ import { webWrites } from './operations';
 export const PROFILE_PATTERN = '/api/v1/users/{did}/profile';
 export const NOW_PLAYING_PATTERN = '/api/v1/users/{did}/now-playing';
 
-function nowPlayingDto(row: NowPlayingRow, shared?: boolean): NowPlaying {
+export function nowPlayingDto(row: NowPlayingRow, shared?: boolean): NowPlaying {
   const dto: NowPlaying = { artist: row.artist, track: row.track, startedAt: toDto(fromMs(row.started_at_ms)),
     updatedAt: toDto(fromMs(row.updated_at_ms ?? row.started_at_ms)), expiresAt: toDto(fromMs(row.expires_at_ms)), source: row.source };
   if (row.album !== null) dto.album = row.album;
