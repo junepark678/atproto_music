@@ -23,6 +23,7 @@ import { collectionsFor } from '@atmusic/core/namespace';
 import { reasonText } from '@atmusic/core/scrobble';
 import { SETTINGS_RKEY, validateSettingsRecord } from '@atmusic/core/settings';
 import { toStorage } from '@atmusic/core/timestamp';
+import { cleanupForwardAdmissionsForSuppression } from '../../forward/projection';
 import type { Db } from '../db';
 import { advanceUser, loadUser } from './account-state';
 import type { ApplyOptions, ApplyOutcome, ApplyResult } from './apply-record';
@@ -72,6 +73,7 @@ export interface DisconnectInput {
 export function disconnectLocalData(db: Db, did: string, input: DisconnectInput): void {
   if (did === 'global') throw new RangeError('refusing to disconnect the global indexing scope');
   for (const sql of DISCONNECT_DELETES) db.run(sql, did);
+  cleanupForwardAdmissionsForSuppression(db, did);
   db.run(
     `INSERT INTO suppression(did, suppressed_at, settings_uri, settings_rev) VALUES (?, ?, ?, ?)
      ON CONFLICT(did) DO UPDATE SET suppressed_at = excluded.suppressed_at,

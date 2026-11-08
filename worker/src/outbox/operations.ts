@@ -44,6 +44,7 @@ import { MAX_ATTEMPTS } from '@atmusic/core/write-policy';
 import type { OperationKind, OperationRow, OperationState, Origin } from '../app/rows';
 import type { Db } from '../do/db';
 import { bumpStatsVersion } from '../do/write/account-state';
+import { releaseForwardAdmission } from '../forward/projection';
 
 export { MAX_ATTEMPTS };
 
@@ -425,6 +426,9 @@ export function cancelUnsent(db: Db, id: string, now: number): boolean {
       id,
     );
     db.run('DELETE FROM listen_keys WHERE did = ? AND operation_id = ?', op.did, id);
+    for (const { dedupe_key } of keys) releaseForwardAdmission(db, op.did, dedupe_key);
+    if (op.kind === 'love.put' && op.rkey !== null)
+      releaseForwardAdmission(db, op.did, `love-uri:${op.did}:${op.collection}:${op.rkey}`);
     return true;
   });
 }
