@@ -32,7 +32,7 @@ function setup(enabled = true) {
   );
   const client = createMusicBrainzClient({ fetch, apiRoot: `https://${MUSICBRAINZ_HOST}/ws/2/`, version: 'test' });
   const resolver = createMusicBrainzResolver({ db, client, clock, enabled });
-  return { db, clock, fake, resolver };
+  return { db, clock, fake, resolver, path: join(dir, 'db.sqlite') };
 }
 const uuid = '3f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2d10';
 const candidate = (score = 95, artistName = 'Artist') => ({
@@ -192,4 +192,78 @@ it('a resolver match atomically revives an ignored love, and rollback leaves no 
   expect(y.db.one("SELECT status FROM mb_tracks WHERE artist_key='artist'")).toEqual({ status: 'pending' });
   expect(y.db.all('SELECT * FROM mb_love_revive_jobs')).toEqual([]);
   expect(y.db.one("SELECT count(*) AS n FROM forward_outbox WHERE dedupe_key LIKE 'mb-match:%'")).toEqual({ n: 0 });
+});
+
+it('drains >100 revival targets across a SQLite restart under the total run budget without another MB request', async () => {
+  const x = setup();
+  enqueueTrack(x.db, { artistKey: 'artist', trackKey: 'track' }, x.clock.nowMs());
+  for (let i = 0; i < 101; i++) {
+    const suffix = String(i).padStart(2, '0');
+    const did = `did:plc:${String(i).padStart(24, 'a')}`;
+    const link = `lb-${suffix}`;
+    x.db.run(
+      "INSERT INTO linked_accounts(id,did,service,remote_user,credential_ciphertext,key_id,created_at_ms,updated_at_ms) VALUES(?,?,'listenbrainz','user',x'00','key',1,1)",
+      link,
+      did,
+    );
+    x.db.run(
+      "INSERT INTO operations(id,did,kind,origin,priority,collection,record_json,digest,state,due_at,created_at_ms,updated_at_ms) VALUES(?,?,'love.put','listenbrainz',0,'com.example.atmusic.love',?,zeroblob(32),'succeeded',0,1,1)",
+      `op-${suffix}`,
+      did,
+      JSON.stringify({ artist: 'Artist', track: 'Track' }),
+    );
+    x.db.run(
+      "INSERT INTO forward_outbox(id,link_id,did,kind,dedupe_key,payload_json,state,attempts,due_at,last_error,created_at_ms,updated_at_ms) VALUES(?,?,?,'love',?,?, 'ignored',0,0,?,?,?)",
+      `old-${suffix}`,
+      link,
+      did,
+      `old-${suffix}`,
+      JSON.stringify({ artist: 'Artist', track: 'Track' }),
+      i % 2 ? 'mbid_unresolved' : 'no_recording_mbid',
+      i + 1,
+      i + 1,
+    );
+  }
+  x.fake.response = { status: 200, body: { recordings: [candidate()] } };
+  expect((await x.resolver.run()).requests).toBe(1);
+  const afterMatch = x.db.one<{ n: number }>(
+    "SELECT count(*) AS n FROM forward_outbox WHERE dedupe_key LIKE 'mb-match:%'",
+  )!.n;
+  expect(afterMatch).toBe(100);
+  expect(afterMatch).toBeLessThanOrEqual(100);
+  expect(x.db.one<{ n: number }>('SELECT count(*) AS n FROM mb_love_revive_jobs')!.n).toBe(1);
+  expect(x.resolver.availableAt()).toBeGreaterThan(x.clock.nowMs());
+  x.db.close();
+  const reopened = openSqliteDb(x.path, { busyTimeoutMs: 200 });
+  const resumed = setupResolverOnExistingDb(reopened, x.clock, x.fake);
+  const didLast = `did:plc:${String(99).padStart(24, 'a')}`;
+  reopened.run(
+    "INSERT INTO operations(id,did,kind,origin,priority,collection,record_json,digest,state,due_at,created_at_ms,updated_at_ms) VALUES('op-last-unlove',?,'love.delete','listenbrainz',0,'com.example.atmusic.love',?,zeroblob(32),'succeeded',0,2,2)",
+    didLast,
+    JSON.stringify({ artist: 'Artist', track: 'Track' }),
+  );
+  const beforeCalls = x.fake.requests.length;
+  const second = await resumed.run();
+  expect(second.requests).toBe(0);
+  expect(x.fake.requests).toHaveLength(beforeCalls);
+  const rows = reopened.all<{ n: number }>(
+    "SELECT count(*) AS n FROM forward_outbox WHERE dedupe_key LIKE 'mb-match:%'",
+  );
+  expect(rows[0]?.n).toBe(101);
+  expect(reopened.one<{ n: number }>('SELECT count(*) AS n FROM mb_love_revive_jobs')!.n).toBe(0);
+  const lastPayload = reopened.one<{ kind: string; payload_json: string }>(
+    "SELECT kind,payload_json FROM forward_outbox WHERE link_id='lb-99' AND dedupe_key LIKE 'mb-match:%'",
+  );
+  expect(lastPayload?.kind).toBe('unlove');
+  expect(JSON.parse(lastPayload!.payload_json)).toMatchObject({
+    artist: 'Artist',
+    track: 'Track',
+    recordingMbid: uuid,
+  });
+  expect(
+    reopened.one<{ n: number }>(
+      "SELECT count(DISTINCT link_id) AS n FROM forward_outbox WHERE dedupe_key LIKE 'mb-match:%'",
+    )!.n,
+  ).toBe(101);
+  reopened.close();
 });
