@@ -161,6 +161,43 @@ afterEach(async () => {
 const statesOf = (rows: readonly ForwardOutboxRow[]) => rows.map((r) => r.state);
 
 describe('Last.fm forwarding', () => {
+  it('keeps love toggle identities independent after sent-ledger reliance is removed', async () => {
+    const w = await world();
+    w.linkLastfm(ALICE, 'alice_fm');
+    w.linkLastfm(BOB, 'bob_fm');
+    const item: ForwardItem = {
+      kind: 'scrobble',
+      listenKey: 'stable-listen-key',
+      payload: { listen: { artist: 'Artist', track: 'Track', listenedAt: '2026-01-14T00:00:00Z' }, origin: 'lastfm' },
+    };
+    expect(enqueueForwards(w.app.db, { did: ALICE, items: [item], now: w.clock.nowMs(), random: enqueueRandom })).toBe(
+      1,
+    );
+    expect(enqueueForwards(w.app.db, { did: BOB, items: [item], now: w.clock.nowMs(), random: enqueueRandom })).toBe(1);
+    await w.run();
+    w.clock.advance(SECOND);
+    await w.run();
+    w.app.db.run("DELETE FROM forward_outbox WHERE kind='scrobble'");
+    expect(enqueueForwards(w.app.db, { did: ALICE, items: [item], now: w.clock.nowMs(), random: enqueueRandom })).toBe(
+      1,
+    );
+
+    const loveItems: ForwardItem[] = [
+      { kind: 'love', operationId: 'op-love-1', payload: { artist: 'Artist', track: 'Track' } },
+      { kind: 'unlove', operationId: 'op-unlove', payload: { artist: 'Artist', track: 'Track' } },
+      { kind: 'love', operationId: 'op-love-2', payload: { artist: 'Artist', track: 'Track' } },
+    ];
+    expect(
+      enqueueForwards(w.app.db, { did: ALICE, items: loveItems, now: w.clock.nowMs(), random: enqueueRandom }),
+    ).toBe(3);
+    expect(
+      w
+        .rows(ALICE)
+        .filter((row) => row.kind === 'love' || row.kind === 'unlove')
+        .map((row) => row.kind),
+    ).toEqual(['love', 'unlove', 'love']);
+  });
+
   it('queued scrobbles are sent oldest first as signed track.scrobble batches of at most 50, at least 1 s apart, and fake Last.fm verifies the signature', async () => {
     const w = await world();
     const { sk } = w.linkLastfm(ALICE, 'alice_fm');

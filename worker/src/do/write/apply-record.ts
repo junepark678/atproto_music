@@ -646,6 +646,16 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
           });
       }
     }
+    if (t.kind === 'love' && !priorLove) {
+      // API deletes can target a remote love the index never projected. A
+      // successful, matching absence still consumes the pre-send bridge.
+      db.run("UPDATE love_delete_bridges SET state='consumed' WHERE did=? AND uri=? AND state='pending'", t.did, t.uri);
+      db.run(
+        "UPDATE love_incarnations SET state='absent',updated_at_ms=? WHERE uri=?",
+        Number(o.nowNs / 1_000_000n),
+        t.uri,
+      );
+    }
     writeRecordState(db, {
       uri: t.uri,
       did: t.did,

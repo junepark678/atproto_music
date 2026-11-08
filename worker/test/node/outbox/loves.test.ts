@@ -2,6 +2,7 @@
 // love per (artist_key, track_key), and unlove mirrors unfollow.
 
 import { verifyRecordProof } from '@atmusic/atproto/verify/record-proof';
+import { seededRandom } from '@atmusic/core/test-support/random';
 import { fromMs } from '@atmusic/core/timestamp';
 import { expect, it } from 'vitest';
 import { applyRecordProof } from '../../../src/do/write/apply-record';
@@ -13,7 +14,7 @@ function love(artist: string, track: string) {
 }
 
 /** Applies a fake-PDS commit through the production record-proof verifier and projector. */
-async function projectLove(h: Harness, rkey: string) {
+async function projectLove(h: Harness, rkey: string, live = false) {
   const car = await h.kit.repos.Alice.getRecordCar(LOVE, rkey);
   const proof = await verifyRecordProof(car, {
     did: h.alice,
@@ -22,7 +23,14 @@ async function projectLove(h: Harness, rkey: string) {
     signingKey: h.kit.users.Alice.key.didKey,
   });
   const nowNs = fromMs(h.kit.clock.nowMs());
-  return h.db.tx(() => applyRecordProof(h.db, proof, { prefix: 'com.example.atmusic', nowNs, receiptNs: nowNs }));
+  return h.db.tx(() =>
+    applyRecordProof(h.db, proof, {
+      prefix: 'com.example.atmusic',
+      nowNs,
+      receiptNs: nowNs,
+      ...(live ? { forwarding: { random: seededRandom(27) } } : {}),
+    }),
+  );
 }
 
 it('a second love for the same (artist_key, track_key) succeeds without a new record; unlove deletes every matching listed love', async () => {
@@ -39,6 +47,10 @@ it('a second love for the same (artist_key, track_key) succeeds without a new re
     const created = h.op(first.operation.id);
     expect(created).toMatchObject({ state: 'succeeded', result_uri: `at://${h.alice}/${LOVE}/${created.rkey}` });
     expect((await remoteRecords(h.kit, 'Alice', LOVE)).map((r) => r.rkey)).toEqual([created.rkey]);
+    expect((await projectLove(h, created.rkey!, true)).outcome).toBe('applied');
+    expect(
+      h.db.one<{ path: string }>('SELECT path FROM love_incarnations WHERE uri=?', created.result_uri!)?.path,
+    ).toBe('api');
 
     // The same key with other case and spacing: success with the existing record, nothing sent at all.
     const second = await enqueueLove(h.m, {
@@ -79,6 +91,24 @@ it('a second love for the same (artist_key, track_key) succeeds without a new re
     ).toHaveLength(2);
     expect(h.op(unlove.operation.id)).toMatchObject({ state: 'succeeded', attempts: 1 });
     expect((await remoteRecords(h.kit, 'Alice', LOVE)).map((r) => r.rkey)).toEqual(['3kunrelated22']);
+    // The API delete bridge survives operation and outbox pruning; delayed
+    // live proof echoes consume it without adding per-target unlove rows.
+    const bridgeTargets = h.db.all<{ uri: string }>(
+      'SELECT uri FROM love_delete_bridges WHERE operation_id=? ORDER BY uri',
+      unlove.operation.id,
+    );
+    expect(bridgeTargets).toHaveLength(2);
+    h.db.run('DELETE FROM operations WHERE id=?', unlove.operation.id);
+    h.db.run('DELETE FROM forward_outbox');
+    for (const target of bridgeTargets) {
+      const rkey = target.uri.split('/').at(-1)!;
+      expect((await projectLove(h, rkey, true)).outcome).toBe('absent');
+    }
+    expect(h.db.all('SELECT * FROM forward_outbox')).toHaveLength(0);
+    expect(h.db.all('SELECT state FROM love_delete_bridges WHERE operation_id=?', unlove.operation.id)).toEqual([
+      { state: 'consumed' },
+      { state: 'consumed' },
+    ]);
   });
 });
 
@@ -156,6 +186,8 @@ it('love.put decides from local state, never listing: an indexed love from anoth
       result_cid: otherCid,
     });
     expect(h.db.all('SELECT uri, source FROM hints')).toEqual([{ uri: otherUri, source: 'notify' }]);
+    expect((await projectLove(h, '3kotherapp222', true)).outcome).toBe('applied');
+    expect(h.db.all('SELECT * FROM forward_outbox')).toHaveLength(0);
 
     // love, unlove, love of one key, each settled before the next is enqueued (the index has not run):
     // the third must not be taken for the first, which the unlove deleted.
