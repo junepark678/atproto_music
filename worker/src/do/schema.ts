@@ -1086,6 +1086,26 @@ const MIGRATION_S1_GENERATIONS: Migration = {
   ],
 };
 
+// S2 linked-service synchronization state. Additive only: preserve the S1
+// generation/admission history so backfill can partition live admissions.
+// As in migration 2, ADD COLUMN clauses intentionally omit CHECK constraints:
+// SQLite runs an internal pragma_quick_check when validating one, and the
+// Node authorizer rejects that pragma. Validate enum/count values in code.
+const MIGRATION_S2_SYNC: Migration = {
+  version: 24,
+  name: 'linked_account_backfill_and_pull_state',
+  statements: [
+    "ALTER TABLE linked_accounts ADD COLUMN backfill_state TEXT NOT NULL DEFAULT 'pending'",
+    'ALTER TABLE linked_accounts ADD COLUMN backfill_cursor TEXT',
+    'ALTER TABLE linked_accounts ADD COLUMN backfill_total INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE linked_accounts ADD COLUMN backfill_done INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE linked_accounts ADD COLUMN pull_enabled INTEGER NOT NULL DEFAULT 1',
+    'ALTER TABLE linked_accounts ADD COLUMN pull_watermark_ms INTEGER',
+    'ALTER TABLE linked_accounts ADD COLUMN last_pull_ms INTEGER',
+    'ALTER TABLE linked_accounts ADD COLUMN sync_remote_user TEXT',
+  ],
+};
+
 export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_1,
   MIGRATION_2,
@@ -1110,6 +1130,7 @@ export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_21,
   MIGRATION_S1_ADMISSIONS,
   MIGRATION_S1_GENERATIONS,
+  MIGRATION_S2_SYNC,
 ];
 
 /** The schema version this code expects. */

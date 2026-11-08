@@ -358,6 +358,7 @@ describe('link routes', () => {
           forwardNowPlaying: true,
           status: 'active',
           lastError: null,
+          sync: { backfill: { state: 'pending', done: 0, total: 0 }, pullEnabled: true, queued: 0, failed: 0 },
           createdAt: '2026-01-15T12:00:00.000Z',
           updatedAt: '2026-01-15T12:00:00.000Z',
         },
@@ -398,6 +399,7 @@ describe('link routes', () => {
       status: 'active',
       forwardScrobbles: true,
       forwardNowPlaying: true,
+      sync: { backfill: { state: 'pending', done: 0, total: 0 }, pullEnabled: true, queued: 0, failed: 0 },
     });
     expect(w.lb.calls.filter({ path: '/1/validate-token' }).map((c) => c.status)).toEqual([200, 200]);
 
@@ -432,6 +434,7 @@ describe('link routes', () => {
     w.lb.addToken('alice', 'lb-token-1');
     const created = await call(w, 'POST', '/api/v1/links/listenbrainz', { token, body: { token: 'lb-token-1' } });
     const id = created.body?.id as string;
+    expect(created.body).toMatchObject({ sync: { backfill: { state: 'pending' }, pullEnabled: true } });
 
     const patched = await call(w, 'PATCH', `/api/v1/links/${id}`, { token, body: { forwardScrobbles: false } });
     expect(patched.res.status).toBe(200);
@@ -440,6 +443,40 @@ describe('link routes', () => {
     ).toBe('valid');
     expect(patched.body).toMatchObject({ id, forwardScrobbles: false, forwardNowPlaying: true });
     expect(links(w)[0]).toMatchObject({ forward_scrobbles: 0, forward_now_playing: 1 });
+    w.app.db.run(
+      "UPDATE linked_accounts SET backfill_state='running',backfill_cursor='cursor-x',backfill_done=12,backfill_total=30 WHERE id=?",
+      id,
+    );
+    const togglePull = await call(w, 'PATCH', `/api/v1/links/${id}`, { token, body: { pullEnabled: false } });
+    expect(togglePull.res.status).toBe(200);
+    expect(togglePull.body).toMatchObject({
+      forwardScrobbles: false,
+      forwardNowPlaying: true,
+      sync: { pullEnabled: false, backfill: { state: 'running', done: 12, total: 30 } },
+    });
+    const sameRemote = saveLink(
+      { db: w.app.db, clock: w.clock, random: seededRandom(11), box: w.box },
+      { did: ALICE, service: 'listenbrainz', remoteUser: 'alice', credential: 'lb-token-2' },
+    );
+    expect(sameRemote.link).toMatchObject({
+      backfill_state: 'running',
+      backfill_cursor: 'cursor-x',
+      backfill_done: 12,
+      backfill_total: 30,
+      pull_enabled: 0,
+    });
+    const newRemote = saveLink(
+      { db: w.app.db, clock: w.clock, random: seededRandom(12), box: w.box },
+      { did: ALICE, service: 'listenbrainz', remoteUser: 'alice2', credential: 'lb-token-3' },
+    );
+    expect(newRemote.link).toMatchObject({
+      backfill_state: 'pending',
+      backfill_cursor: null,
+      backfill_done: 0,
+      backfill_total: 0,
+      pull_watermark_ms: w.clock.nowMs(),
+      sync_remote_user: 'alice2',
+    });
 
     // The flags decide which rows enqueueForwards (N2-05) creates.
     const random = seededRandom(5);
@@ -463,6 +500,19 @@ describe('link routes', () => {
     expect(restored.body).toMatchObject({ forwardScrobbles: true, forwardNowPlaying: true });
     expect(enqueueForwards(w.app.db, { did: ALICE, items: [scrobble], now, random })).toBe(1);
     expect(w.app.db.one<{ n: number }>('SELECT count(*) AS n FROM forward_outbox WHERE link_id = ?', id)?.n).toBe(2);
+    w.app.db.run(
+      "UPDATE linked_accounts SET backfill_state='running',backfill_cursor='cursor-y',backfill_done=7,backfill_total=20 WHERE id=?",
+      id,
+    );
+    await call(w, 'PATCH', `/api/v1/links/${id}`, { token, body: { forwardScrobbles: false } });
+    const enabledAgain = await call(w, 'PATCH', `/api/v1/links/${id}`, {
+      token,
+      body: { forwardScrobbles: true },
+    });
+    expect(enabledAgain.body).toMatchObject({
+      sync: { backfill: { state: 'pending', done: 0, total: 0 } },
+    });
+    expect(links(w)[0]).toMatchObject({ backfill_state: 'pending', backfill_cursor: null });
 
     // Invalid patches and other owners' links.
     expect(

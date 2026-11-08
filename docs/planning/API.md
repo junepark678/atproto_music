@@ -120,7 +120,9 @@ Session   = {did, handle: string|null, username, csrfToken: 64 hex, status: "act
 Account   = {did, handle: string|null, username, oauthStatus: "active"|"reauth_required"|"signed_out",
              shareNowPlaying: boolean, importSharePercent: 10..90, capabilities: string[]}
 Link      = {id, service: "lastfm"|"listenbrainz", remoteUser, forwardScrobbles, forwardNowPlaying,
-             status: "active"|"revoked"|"error", lastError: code|null, createdAt, updatedAt}
+             status: "active"|"revoked"|"error", lastError: code|null, createdAt, updatedAt,
+             sync?: {backfill:{state:"pending"|"running"|"done"|"skipped",done,total}, pullEnabled,
+                     lastSuccessAt?, lastFailureAt?, lastError?, lastPulledAt?, queued, failed}}
 ImportJob = {id, source: "lastfm_api"|"lastfm_json"|"listenbrainz_api"|"listenbrainz_zip", remoteUser: string|null,
              state: "waiting_index"|"fetching"|"writing"|"paused"|"done"|"failed"|"cancelled",
              fetched, staged, duplicates, invalid, written, failed, etaSeconds: integer|null, error: code|null,
@@ -161,7 +163,7 @@ Credentials = {appPasswords: [{id, label, createdAt, lastUsedAt}], listenbrainzT
 | POST `/api/v1/links/lastfm/start` | session + CSRF | none | 200 `{authorizeUrl}`; 503 `lastfm_not_configured` |
 | GET `/api/v1/links/lastfm/callback` | session | `state`, `token` | 303 to `/settings/links`; a state not bound to this session 403 `csrf_failed`; a malformed query or an unknown, used or expired state 400 `bad_request`; 503 `lastfm_not_configured`; nothing stored on any refusal |
 | POST `/api/v1/links/listenbrainz` | session + CSRF | `{token}` | 201 Link; an invalid token 422 `fields.token` |
-| PATCH `/api/v1/links/{id}` | session + CSRF | `{forwardScrobbles?, forwardNowPlaying?}` | 200 Link |
+| PATCH `/api/v1/links/{id}` | session + CSRF | `{forwardScrobbles?, forwardNowPlaying?, pullEnabled?}` | 200 Link |
 | DELETE `/api/v1/links/{id}` | session + CSRF | id | 204 (credential and queued forward rows deleted) |
 | GET `/api/v1/imports` | session | none | 200 `{items: ImportJob[]}` |
 | POST `/api/v1/imports` | session + CSRF | `{source: "lastfm" or "listenbrainz", username}` | 202 ImportJob; 409 `import_active`; 503 `lastfm_not_configured` or `publication_disabled` |

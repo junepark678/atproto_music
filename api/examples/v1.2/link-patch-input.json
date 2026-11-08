@@ -1,3 +1,4 @@
 {
-  "forwardNowPlaying": false
+  "forwardNowPlaying": false,
+  "pullEnabled": false
 }

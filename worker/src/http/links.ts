@@ -34,7 +34,7 @@
 // token is stored sealed with `remote_user` = user_name (201 Link). An
 // upstream failure is 502.
 //
-// **PATCH** sets `forwardScrobbles` / `forwardNowPlaying` (a closed object of
+// **PATCH** sets `forwardScrobbles` / `forwardNowPlaying` / `pullEnabled` (a closed object of
 // booleans, at least one); they decide which new rows enqueueForwards
 // (N2-05) creates. Rows already queued are still delivered. **DELETE**
 // journals the link (ADR §14.5) and deletes it with its credential and every
@@ -193,7 +193,7 @@ function fieldError(field: string, reason: string): ApiError {
 }
 
 const listRoute: Handler = async (_req, _ctx, service, session) =>
-  json({ items: listLinks(service.db, session.did).map(linkDto) });
+  json({ items: listLinks(service.db, session.did).map((row) => linkDto(row, service.db)) });
 
 const lastfmStart: Handler = async (_req, ctx, service, session) => {
   if (service.lastfm === null) return notConfigured(ctx.requestId);
@@ -285,7 +285,7 @@ const listenbrainzLink: Handler = async (req, ctx, service, session) => {
       { did: session.did, service: 'listenbrainz', remoteUser, credential: token },
     ),
   );
-  return json(linkDto(saved.link), 201);
+  return json(linkDto(saved.link, service.db), 201);
 };
 
 const patchRoute: Handler = async (req, ctx, service, session, params) => {
@@ -297,14 +297,15 @@ const patchRoute: Handler = async (req, ctx, service, session, params) => {
     throw new ApiError('validation_failed', 'empty patch', { body: 'Expected at least one field.' });
   const patch: LinkPatch = {};
   for (const key of keys) {
-    if (key !== 'forwardScrobbles' && key !== 'forwardNowPlaying') throw fieldError(key, 'Unknown field.');
+    if (key !== 'forwardScrobbles' && key !== 'forwardNowPlaying' && key !== 'pullEnabled')
+      throw fieldError(key, 'Unknown field.');
     const value = body[key];
     if (typeof value !== 'boolean') throw fieldError(key, 'Expected a boolean.');
     patch[key] = value;
   }
   const row = patchLink({ db: service.db, clock: ctx.clock }, session.did, params.id as string, patch);
   if (row === null) return errorResponse('not_found', 404, ctx.requestId);
-  return json(linkDto(row));
+  return json(linkDto(row, service.db));
 };
 
 const deleteRoute: Handler = async (_req, ctx, service, session, params) => {

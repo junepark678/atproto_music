@@ -429,6 +429,17 @@ export interface Link {
   lastError: ErrorSlug | null;
   createdAt: Timestamp;
   updatedAt: Timestamp;
+  /** Best-effort synchronization status; absent on older servers. */
+  sync?: {
+    backfill: { state: 'pending' | 'running' | 'done' | 'skipped'; done: number; total: number };
+    pullEnabled: boolean;
+    lastSuccessAt?: Timestamp;
+    lastFailureAt?: Timestamp;
+    lastError?: ErrorSlug | null;
+    lastPulledAt?: Timestamp;
+    queued: number;
+    failed: number;
+  };
 }
 
 export type ImportSource = 'lastfm_api' | 'lastfm_json' | 'listenbrainz_api' | 'listenbrainz_zip';

@@ -372,6 +372,14 @@ export interface LinkedAccountRow {
   last_success_ms: number | null;
   last_failure_ms: number | null;
   consecutive_failures: number;
+  backfill_state: 'pending' | 'running' | 'done' | 'skipped';
+  backfill_cursor: string | null;
+  backfill_total: number;
+  backfill_done: number;
+  pull_enabled: Flag;
+  pull_watermark_ms: number | null;
+  last_pull_ms: number | null;
+  sync_remote_user: string | null;
 }
 
 export interface LinkStateRow {
