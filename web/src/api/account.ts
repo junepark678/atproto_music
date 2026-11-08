@@ -1,29 +1,7 @@
-import type { Did } from '@atmusic/core/api-types';
+import type { Did, Link as LinkDto } from '@atmusic/core/api-types';
 import { sessionClient, sessionFetch } from '../session/client';
 
-export type Link = {
-  id: string;
-  service: 'lastfm' | 'listenbrainz';
-  remoteUser: string;
-  forwardScrobbles: boolean;
-  forwardNowPlaying: boolean;
-  status: 'active' | 'revoked' | 'error';
-  lastError: string | null;
-  createdAt: string;
-  updatedAt: string;
-  sync?: {
-    backfill: { state: 'pending' | 'running' | 'done' | 'skipped'; done: number; total: number };
-    pullEnabled: boolean;
-    lastSuccessAt?: string;
-    lastFailureAt?: string;
-    lastError?: string | null;
-    lastPulledAt?: string;
-    queued: number;
-    failed: number;
-    /** Exposed by the continuous-pull implementation when its OAuth session has expired. */
-    needsReauth?: boolean;
-  };
-};
+export type Link = LinkDto;
 export type ImportJob = {
   id: string;
   source: 'lastfm_api' | 'lastfm_json' | 'listenbrainz_api' | 'listenbrainz_zip';

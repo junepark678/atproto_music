@@ -142,8 +142,9 @@ it('shows reconnect guidance and scrubs DIDs from the server error', async () =>
   stubLinks([
     link({
       sync: {
-        backfill: { state: 'done', done: 10, total: 10 },
+        backfill: { state: 'done', done: 10, total: 10, lastError: 'retry_exhausted' },
         pullEnabled: true,
+        holdReason: 'reauth_required',
         lastError: 'Unable to sync did:plc:aaaaaaaaaaaaaaaaaaaaaaaa',
         needsReauth: true,
         queued: 0,

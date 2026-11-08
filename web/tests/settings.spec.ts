@@ -27,6 +27,7 @@ test('creating an app password, linking ListenBrainz with a fake token, and star
   await expect(page.getByRole('status')).toHaveText('ListenBrainz connected.');
   await expect(page.locator('.link-status-pill')).toHaveText('Active');
   await expect(page.getByRole('button', { name: 'Disconnect ListenBrainz' })).toBeVisible();
+  await expect(page.locator('.link-last-synced')).toContainText('Not yet');
   await expect(page.getByRole('checkbox', { name: 'Send scrobbles and loves' })).toBeChecked();
   await expect(page.getByRole('checkbox', { name: 'Send now playing' })).toBeChecked();
   const pullListenBrainz = page.getByRole('checkbox', { name: 'Bring in new scrobbles from ListenBrainz' });
