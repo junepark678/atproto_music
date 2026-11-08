@@ -137,6 +137,8 @@ export interface ForwardRuntime {
   /** Null without the owner's Last.fm key: Last.fm rows wait (and expire). */
   lastfm: LastfmClient | null;
   listenbrainz: ListenbrainzClient;
+  /** Actual OAuth restore/scope availability used before staged pull acceptance. */
+  pullWriterAvailability?: (did: string) => Promise<import('../sync/pull-writer').PullWriterAvailability>;
 }
 
 export interface ForwardReport {
@@ -764,6 +766,30 @@ export function forwardExtension(runtime: () => ForwardRuntime | null): CoreExte
         const rt = runtime();
         if (rt === null) return;
         const report = await runForward(rt, now);
+        // Pull polling remains a separate future increment. This only drains
+        // pages already committed to durable local staging.
+        const pullLinks = rt.db.all<{ id: string; generation: number }>(
+          `SELECT l.id,l.generation FROM linked_accounts l JOIN linked_pull_items p ON p.link_id=l.id AND p.generation=l.generation
+           WHERE l.status='active' AND l.pull_enabled=1 GROUP BY l.id,l.generation ORDER BY min(p.staged_at_ms),l.id LIMIT 20`,
+        );
+        for (const link of pullLinks) {
+          if (!rt.pullWriterAvailability) continue;
+          try {
+            const { writePullSlice } = await import('../sync/pull-writer');
+            await writePullSlice(ctx.deps, {
+              linkId: link.id,
+              generation: link.generation,
+              available: rt.pullWriterAvailability,
+              limit: 100,
+            });
+          } catch (error) {
+            rt.log.log('warn', 'linked_pull.writer_failed', {
+              linkId: link.id,
+              generation: link.generation,
+              error: error instanceof Error ? error.name : 'Error',
+            });
+          }
+        }
         refreshForwardStorageStats(rt.db, rt.clock.nowMs());
         if (report.skipped) return;
         const poll = now + FORWARD_IDLE_POLL_MS;

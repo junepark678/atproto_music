@@ -123,6 +123,7 @@ import { createCoverArtClient } from './cover-art-client';
 import { createJetstreamWsConnector, jetstreamWsTarget, type WsClientCtor } from './jetstream-ws';
 import { type PinnedLookup, TransportError } from './pinned-transport';
 import { bindPolicyFetch, createPolicyFetch } from './policy-fetch';
+import { pullWriterAvailability as resolvePullWriterAvailability } from './pull-writer-availability';
 import type { Secrets } from './secrets';
 
 // ---------------------------------------------------------------------------
@@ -555,8 +556,21 @@ export async function productionFeatures(options: ProductionFeatureOptions): Pro
     }),
   };
 
+  const pullWriterAvailability = (did: string) => {
+    const service = oauthService();
+    return resolvePullWriterAvailability({
+      did,
+      publicationEnabled: config.app.publication,
+      batchPublicationEnabled: config.app.batchPublication,
+      signInAllowed: signInAllowed(config, did),
+      prefix: config.app.prefix,
+      sessionStore: service.sessionStore,
+      restore: (accountDid) => service.restore(accountDid),
+    });
+  };
+
   const links = onWire(
-    linksFeature({ revocations, pacing, sessions: sharedSessions }),
+    linksFeature({ revocations, pacing, sessions: sharedSessions, pullWriterAvailability }),
     outbound.transportFor('forward'),
   );
 

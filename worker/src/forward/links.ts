@@ -60,6 +60,13 @@ function iso(ms: number): string {
 
 /** The contract's Link (api/openapi.yaml v1.2). Never carries the credential. */
 export function linkDto(row: LinkedAccountRow, db: Db): Link {
+  const pullState = db.one<{ hold_reason: string | null }>(
+    'SELECT hold_reason FROM linked_pull_state WHERE link_id=? AND generation=?',
+    row.id,
+    row.generation,
+  );
+  const holdReason = pullState?.hold_reason;
+  const needsReauth = holdReason === 'session_missing' || holdReason === 'reauth_required';
   const queue = {
     queued:
       db.one<{ n: number }>(
@@ -92,6 +99,10 @@ export function linkDto(row: LinkedAccountRow, db: Db): Link {
         ...(row.backfill_last_error === 'retry_exhausted' ? { lastError: 'retry_exhausted' as const } : {}),
       },
       pullEnabled: row.pull_enabled === 1,
+      ...(holdReason === null || holdReason === undefined
+        ? {}
+        : { holdReason: holdReason as NonNullable<Link['sync']>['holdReason'] }),
+      ...(holdReason === null || holdReason === undefined ? {} : { needsReauth }),
       ...(row.last_success_ms === null ? {} : { lastSuccessAt: iso(row.last_success_ms) }),
       ...(row.last_failure_ms === null ? {} : { lastFailureAt: iso(row.last_failure_ms) }),
       ...(row.last_error === null ? {} : { lastError: row.last_error as Link['lastError'] }),

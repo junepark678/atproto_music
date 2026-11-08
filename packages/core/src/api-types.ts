@@ -440,6 +440,15 @@ export interface Link {
       lastError?: 'retry_exhausted';
     };
     pullEnabled: boolean;
+    /** Current durable pull-writer hold; absent until the first staged pull page. */
+    holdReason?:
+      | 'session_missing'
+      | 'reauth_required'
+      | 'publication_disabled'
+      | 'scope_insufficient'
+      | 'session_restore_transient';
+    /** True only when OAuth sign-in or refresh is required. */
+    needsReauth?: boolean;
     lastSuccessAt?: Timestamp;
     lastFailureAt?: Timestamp;
     lastError?: ErrorSlug | null;

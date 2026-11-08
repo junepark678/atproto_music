@@ -262,6 +262,11 @@ export function stageLovePage(
         item.recordingMbid ?? null,
         item.recordingMbid ?? null,
       );
+      const localIntent = db.one<{ intent: string }>(
+        'SELECT intent FROM linked_love_intents WHERE did=? AND love_key=?',
+        args.did,
+        key,
+      );
       const staged = db.one(
         "SELECT 1 FROM linked_pull_items p JOIN linked_accounts l ON l.id=p.link_id WHERE l.did=? AND p.kind='love' AND (p.love_key=? OR (? IS NOT NULL AND p.recording_mbid=?)) LIMIT 1",
         args.did,
@@ -269,11 +274,11 @@ export function stageLovePage(
         item.recordingMbid ?? null,
         item.recordingMbid ?? null,
       );
-      if (pending?.kind === 'love.delete') {
+      if (pending?.kind === 'love.delete' || localIntent?.intent === 'unlove') {
         outcomes.push('tombstoned');
         continue;
       }
-      if (indexed || pending?.kind === 'love.put' || staged) {
+      if (indexed || pending?.kind === 'love.put' || localIntent?.intent === 'love' || staged) {
         outcomes.push('duplicate');
         continue;
       }
