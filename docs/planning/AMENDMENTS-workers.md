@@ -894,7 +894,7 @@ Amendment ids: A1–A20 are ADR 0004 §9.2, N1–N4 are §9.4, and D is the §9.
 
 | Case | Disposition |
 | --- | --- |
-| `contract_drift` | `web/test/api-client.test.ts › every api/examples response decodes and a changed field type is rejected` (required wave amendment, W1-10); also `web/test/api-client.test.ts › decodes Page<Scrobble> and passes nextCursor unchanged` |
+| `contract_drift` | `web/test/api-client.test.ts › every typed JSON api/examples response decodes and a changed field type is rejected` (required wave amendment, W1-10); also `web/test/api-client.test.ts › decodes Page<Scrobble> and passes nextCursor unchanged` |
 | `csrf_client` | `retired:D`: CSRF and Origin rules are dropped (ADR 0004 §9.3); the SPA sends no server mutation. |
 | `session_loss` | `web/test/oauth/session.test.ts › expired/refresh-failed session surfaces re-auth state` |
 
@@ -1138,7 +1138,7 @@ Some cases have no wave test whose title asserts their outcome. For each one, th
 
 **W1-10**
 
-- `web/test/api-client.test.ts › every api/examples response decodes and a changed field type is rejected` — covers `M7.1.2/contract_drift`
+- `web/test/api-client.test.ts › every typed JSON api/examples response decodes and a changed field type is rejected` — covers `M7.1.2/contract_drift`
 
 **W2-04**
 
