@@ -121,6 +121,113 @@
   font-size: 0.9rem;
 }
 
+.link-card-list {
+  display: grid;
+  gap: 1rem;
+  list-style: none;
+  margin: 1rem 0;
+  padding: 0;
+}
+
+.link-card {
+  min-width: 0;
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+}
+
+.link-card-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.link-card-heading h2 {
+  margin: 0;
+}
+
+.link-account,
+.link-last-synced,
+.link-limit-note,
+.link-backfill p {
+  margin: 0.5rem 0;
+}
+
+.link-account,
+.link-last-synced,
+.link-limit-note {
+  color: var(--muted);
+}
+
+.link-status-pill {
+  flex: 0 0 auto;
+  padding: 0.2rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 0.875rem;
+}
+
+.link-status-pill[data-status="active"] {
+  border-color: var(--accent);
+}
+
+.link-status-pill[data-status="reconnect"],
+.link-status-pill[data-status="error"],
+.link-error {
+  color: var(--focus);
+}
+
+.link-backfill {
+  margin: 0.75rem 0;
+}
+
+.link-progress {
+  display: block;
+  width: 100%;
+  max-width: 32rem;
+}
+
+.link-settings {
+  display: grid;
+  gap: 0.5rem;
+  min-width: 0;
+  margin: 0.75rem 0;
+  padding: 0;
+  border: 0;
+}
+
+.link-settings legend {
+  margin-bottom: 0.4rem;
+  font-weight: 600;
+}
+
+.link-settings label {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+}
+
+.link-settings input {
+  flex: 0 0 auto;
+  margin-top: 0.2rem;
+}
+
+.link-error {
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 32rem) {
+  .link-card {
+    padding: 0.75rem;
+  }
+
+  .link-card-heading {
+    flex-wrap: wrap;
+  }
+}
+
 .stats-totals {
   display: flex;
   gap: 2rem;

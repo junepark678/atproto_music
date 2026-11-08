@@ -25,6 +25,13 @@ test('creating an app password, linking ListenBrainz with a fake token, and star
   await page.getByLabel('ListenBrainz user token').fill(E2E_LISTENBRAINZ_TOKEN);
   await page.getByRole('button', { name: 'Connect ListenBrainz' }).click();
   await expect(page.getByRole('status')).toHaveText('ListenBrainz connected.');
+  await expect(page.locator('.link-status-pill')).toHaveText('Active');
+  await expect(page.getByRole('checkbox', { name: 'Send scrobbles and loves' })).toBeChecked();
+  await expect(page.getByRole('checkbox', { name: 'Send now playing' })).toBeChecked();
+  const pullListenBrainz = page.getByRole('checkbox', { name: 'Bring in new scrobbles from ListenBrainz' });
+  await expect(pullListenBrainz).toBeChecked();
+  await pullListenBrainz.uncheck();
+  await expect(pullListenBrainz).not.toBeChecked();
 
   await page.goto('/settings/imports');
   await expect(page.getByRole('heading', { level: 1 })).toHaveText('Import listening history');

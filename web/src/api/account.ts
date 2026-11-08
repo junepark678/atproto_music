@@ -11,6 +11,18 @@ export type Link = {
   lastError: string | null;
   createdAt: string;
   updatedAt: string;
+  sync?: {
+    backfill: { state: 'pending' | 'running' | 'done' | 'skipped'; done: number; total: number };
+    pullEnabled: boolean;
+    lastSuccessAt?: string;
+    lastFailureAt?: string;
+    lastError?: string | null;
+    lastPulledAt?: string;
+    queued: number;
+    failed: number;
+    /** Exposed by the continuous-pull implementation when its OAuth session has expired. */
+    needsReauth?: boolean;
+  };
 };
 export type ImportJob = {
   id: string;
@@ -58,6 +70,11 @@ async function mutate<T = void>(path: string, method: string, expectedDid: Did, 
 }
 const segment = (s: string) => encodeURIComponent(s);
 export const listLinks = () => get<{ items: Link[] }>('/api/v1/links');
+export const patchLink = (
+  id: string,
+  patch: Partial<Pick<Link, 'forwardScrobbles' | 'forwardNowPlaying'>> & { pullEnabled?: boolean },
+  expectedDid: Did,
+) => mutate<Link>(`/api/v1/links/${segment(id)}`, 'PATCH', expectedDid, patch);
 export const startLastfmLink = (expectedDid: Did) =>
   mutate<{ authorizeUrl: string }>('/api/v1/links/lastfm/start', 'POST', expectedDid);
 export const addListenbrainzLink = (token: string, expectedDid: Did) =>
