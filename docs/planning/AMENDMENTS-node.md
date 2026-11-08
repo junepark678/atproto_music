@@ -7,7 +7,7 @@ The format follows [AMENDMENTS-workers.md](AMENDMENTS-workers.md), which stays i
 - it rejects every case-map retirement that cites an id listed under [Superseded ADR 0004 amendments](#superseded-adr-0004-amendments), reporting the case and the superseding B id;
 - it accepts `retired:B<n>` only when the `### B<n>` section below names the case (as `` `<leaf>/<case>` ``).
 
-Amendment ids: B1–B20 are ADR 0005 §16. A1–A20, N1–N4 and D keep their ADR 0004 meaning in AMENDMENTS-workers.md.
+Amendment ids: B1–B22 are ADR 0005 §16. A1–A20, N1–N4 and D keep their ADR 0004 meaning in AMENDMENTS-workers.md.
 
 ## Superseded ADR 0004 amendments
 
@@ -181,6 +181,11 @@ Retired cases (true on Node):
 The background resolver is controlled by `MUSICBRAINZ_ENABLED` (default `true`) and `MUSICBRAINZ_API_ROOT` (default `https://musicbrainz.org/ws/2/`). Validate the root using the existing HTTPS/DNS/default-port/trailing-slash rule. Every request must use the pinned `policyFetch` transport with `MB_CAPS` (zero request body, 1 MiB response), and the User-Agent `atmusic/<version> ( https://github.com/junepark678/atproto_music )`; send no user identity or contact email. The persistent global lane permits one request per second, honors numeric or HTTP-date 503 `Retry-After`, never sleeps, and is resumed by the timer. Reads and projection writes enqueue only local work; historical seeding is bounded and chunked. Successful matches refresh after 90 days at lowest priority, unmatched rows retry after 30 days, transient 5xx/network failures back off from 60 seconds exponentially up to 24 hours, and eight failures schedule a 30-day retry.
 
 Class `mb_tracks`, `mb_pacing` and `mb_seed_state` as non-derived. They are part of online backups, while disaster restore preserves their live rows because they cannot be reconstructed from PDS records. The kill switch stops egress without deleting this state. The MBID used later for forwarding must come from the stored matched recording or the submitted recording ID; this draft does not add the parallel M2 retry hook for fresh ListenBrainz love failures.
+### B22 Detailed now-playing reads (new, DRAFT — not published)
+
+**Demonstrated gap:** the fixed API contract has no way to read detailed current playback or the followed accounts' current playback, although the Node service persists these fields and enforces the owner sharing preference.
+
+**Amendment text (DRAFT):** Add `NowPlaying` and `NowPlayingFeed` as additive DTOs. `GET /api/v1/users/{did}/now-playing` returns `{nowPlaying,serverTime}` with ISO timestamps and `Cache-Control: no-store`; visitors see only an active, unexpired row when sharing is enabled, while the owner may read their own unexpired row with `shared:false` when sharing is disabled. `GET /api/v1/feed/now-playing` requires a valid session and returns at most 50 followed active accounts with verified handles and only shared, unexpired rows, ordered by latest refresh and DID. No DID is intended as UI display text. The OpenAPI 1.2 document adds these routes and closed schemas without changing existing payloads. This amendment remains a draft and is not published.
 
 ## Leaf amendments
 

@@ -927,6 +927,22 @@ const MIGRATION_14: Migration = {
 
 const MIGRATION_15: Migration = {
   version: 15,
+  name: 'detailed_now_playing',
+  statements: [
+    'ALTER TABLE now_playing ADD COLUMN updated_at_ms INTEGER',
+    'ALTER TABLE now_playing ADD COLUMN track_number INTEGER',
+    'ALTER TABLE now_playing ADD COLUMN release_mbid TEXT',
+    'ALTER TABLE now_playing ADD COLUMN release_group_mbid TEXT',
+    'ALTER TABLE now_playing ADD COLUMN artist_mbids TEXT',
+    'ALTER TABLE now_playing ADD COLUMN isrc TEXT',
+    'ALTER TABLE now_playing ADD COLUMN submission_client_version TEXT',
+    'ALTER TABLE now_playing ADD COLUMN music_service TEXT',
+    'ALTER TABLE now_playing ADD COLUMN media_player TEXT',
+    'ALTER TABLE now_playing ADD COLUMN scrobbled_at_ms INTEGER',
+  ],
+};
+const MIGRATION_16: Migration = {
+  version: 16,
   name: 'musicbrainz_track_matches',
   statements: [
     `CREATE TABLE mb_tracks (
@@ -958,15 +974,15 @@ const MIGRATION_15: Migration = {
     'CREATE INDEX mb_tracks_due ON mb_tracks(status,next_attempt_ms,priority)',
   ],
 };
-const MIGRATION_16: Migration = {
-  version: 16,
+const MIGRATION_17: Migration = {
+  version: 17,
   name: 'musicbrainz_global_pacing',
   statements: [
     'CREATE TABLE mb_pacing (singleton INTEGER PRIMARY KEY NOT NULL, available_at_ms INTEGER NOT NULL DEFAULT 0)',
   ],
 };
-const MIGRATION_17: Migration = {
-  version: 17,
+const MIGRATION_18: Migration = {
+  version: 18,
   name: 'musicbrainz_seed_cursor',
   statements: [
     "CREATE TABLE mb_seed_state (singleton INTEGER PRIMARY KEY NOT NULL, cursor_uri TEXT NOT NULL DEFAULT '', complete INTEGER NOT NULL DEFAULT 0)",
@@ -991,6 +1007,7 @@ export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_15,
   MIGRATION_16,
   MIGRATION_17,
+  MIGRATION_18,
 ];
 
 /** The schema version this code expects. */

@@ -258,6 +258,8 @@ V11_STATUSES = {
 # ADR 0005 §5.7, §11.4, §12.1 and B14: the v1.2 cookie, write, account,
 # credential, link and import routes, and the JWKS document.
 V12_STATUSES = {
+    ('GET', '/api/v1/users/{did}/now-playing'): {200, 422, 429},
+    ('GET', '/api/v1/feed/now-playing'): {200, 401, 429},
     ('GET', '/oauth/jwks.json'): {200},
     ('POST', '/api/v1/auth/start'): {200, 400, 403, 413, 422, 429, 502},
     ('GET', '/oauth/callback'): {303, 403, 502},
@@ -807,6 +809,10 @@ def session_access(spec):
                     'session_access: only /oauth/callback is bound to the __Host-atmusic_oauth cookie')
         elif mode == 'public':
             require(key == ('GET', '/oauth/jwks.json') and operation.get('security') == [], f'session_access: {key} may not be public')
+        elif mode == 'public-owner-session':
+            require(key == ('GET', '/api/v1/users/{did}/now-playing') and operation.get('security') == []
+                    and 401 not in statuses and 403 not in statuses,
+                    f'session_access: {key} is public with optional owner-session visibility and must not require authentication')
         else:
             raise ContractError(f'session_access: {key} has unknown x-auth-mode {mode!r}')
         counts[mode] = counts.get(mode, 0) + 1

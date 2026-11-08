@@ -346,6 +346,16 @@ const NEW_TABLES: Record<string, ExpectedTable> = {
       source: true,
       started_at_ms: true,
       expires_at_ms: true,
+      updated_at_ms: true,
+      track_number: true,
+      release_mbid: true,
+      release_group_mbid: true,
+      artist_mbids: true,
+      isrc: true,
+      submission_client_version: true,
+      music_service: true,
+      media_player: true,
+      scrobbled_at_ms: true,
     }),
     pk: ['did'],
   },
@@ -1270,9 +1280,10 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       "12|'removal_completion_boundary'",
       "13|'removal_reached'",
       "14|'removal_send_pin'",
-      "15|'musicbrainz_track_matches'",
-      "16|'musicbrainz_global_pacing'",
-      "17|'musicbrainz_seed_cursor'",
+      "15|'detailed_now_playing'",
+      "16|'musicbrainz_track_matches'",
+      "17|'musicbrainz_global_pacing'",
+      "18|'musicbrainz_seed_cursor'",
     ]);
     // The new scrobble columns exist and are NULL on every migrated row.
     expect(after.newColumns).toHaveLength(expectedScrobbles);
@@ -1294,9 +1305,10 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       { version: 12, name: 'removal_completion_boundary' },
       { version: 13, name: 'removal_reached' },
       { version: 14, name: 'removal_send_pin' },
-      { version: 15, name: 'musicbrainz_track_matches' },
-      { version: 16, name: 'musicbrainz_global_pacing' },
-      { version: 17, name: 'musicbrainz_seed_cursor' },
+      { version: 15, name: 'detailed_now_playing' },
+      { version: 16, name: 'musicbrainz_track_matches' },
+      { version: 17, name: 'musicbrainz_global_pacing' },
+      { version: 18, name: 'musicbrainz_seed_cursor' },
     ]);
     expect(after.compat).toEqual([{ singleton: 1, min_compatible_version: 2 }]);
     expect(after.newTablesEmpty).toEqual([]);
