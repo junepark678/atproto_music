@@ -349,7 +349,7 @@ describe('POST /1/submit-listens (ADR §8.3)', () => {
     expect(r.count('SELECT count(*) AS n FROM listen_keys')).toBe(0);
     expect(r.count("SELECT count(*) AS n FROM forward_outbox WHERE did = ? AND kind = 'nowplaying'", ALICE)).toBe(1);
 
-    // An identical current track is ignored but still answers ok; without return_msid there is no msid.
+    // An identical current track refreshes expiry/updatedAt but still answers ok.
     const again = await submit(
       r.app,
       token,
@@ -357,7 +357,11 @@ describe('POST /1/submit-listens (ADR §8.3)', () => {
     );
     expect(again.status).toBe(200);
     expect(await again.json()).toEqual({ status: 'ok' });
-    expect(r.app.db.one<NowPlayingRow>('SELECT * FROM now_playing WHERE did = ?', ALICE)).toEqual(row);
+    expect(r.app.db.one<NowPlayingRow>('SELECT * FROM now_playing WHERE did = ?', ALICE)).toMatchObject({
+      started_at_ms: row?.started_at_ms,
+      updated_at_ms: NOW_MS,
+      expires_at_ms: NOW_MS + 600_000,
+    });
     expect(r.count("SELECT count(*) AS n FROM forward_outbox WHERE did = ? AND kind = 'nowplaying'", ALICE)).toBe(1);
     expect(r.count('SELECT count(*) AS n FROM operations')).toBe(0);
   });
@@ -433,7 +437,7 @@ describe('POST /1/submit-listens (ADR §8.3)', () => {
       },
       {
         file: 'web-scrobbler-playing-now.body',
-        sha256: '8d2d70d7da62babc84520bc2e5f8ebd3df71b6473f9af98d9d9b75ea5caa9fdf',
+        sha256: '9a3d820afa3035ca72af7ef7a44903416aecfe702abfe580d0bde795323f17b6',
         headers: { authorization: `Token ${token}`, 'content-type': 'application/json; charset=utf-8' },
       },
       {
@@ -493,6 +497,14 @@ describe('POST /1/submit-listens (ADR §8.3)', () => {
       track: 'Glósóli',
       album: 'Takk...',
       client: 'Web Scrobbler',
+      track_number: 1,
+      release_mbid: '00000000-0000-4000-8000-000000000001',
+      release_group_mbid: '00000000-0000-4000-8000-000000000002',
+      artist_mbids: '["00000000-0000-4000-8000-000000000003"]',
+      isrc: 'ISRC12345678',
+      submission_client_version: '3.15.0',
+      music_service: 'YouTube Music',
+      media_player: 'Chrome',
       expires_at_ms: NOW_MS + 375_000,
     });
     expect(r.count('SELECT count(*) AS n FROM listen_keys WHERE did = ?', ALICE)).toBe(3);
