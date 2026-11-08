@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { migrate } from '../../src/do/migrate';
 import { runCoverArtJobs } from '../../src/musicbrainz/cover-art-runner';
-import { enqueueCoverArt, getCoverArt } from '../../src/musicbrainz/cover-art-store';
+import { enqueueCoverArt, getCoverArt, putCoverArt } from '../../src/musicbrainz/cover-art-store';
 import { openSqliteDb } from '../../src/node/sqlite-db';
 
 const dirs: string[] = [];
@@ -68,6 +68,54 @@ describe('Cover Art background runner', () => {
       reopened.close();
     }
   });
+  it('after eight failures waits 30 days, then resumes at attempt one across restart', async () => {
+    const { db, path } = setup();
+    enqueueCoverArt(db, 'cycle', null, 0);
+    try {
+      for (let attempt = 0; attempt < 8; attempt++) {
+        const due =
+          db.one<{ next_due_ms: number }>('SELECT next_due_ms FROM mb_cover_art_jobs WHERE release_mbid=?', 'cycle')
+            ?.next_due_ms ?? 0;
+        await runCoverArtJobs({
+          db,
+          clock: fixedClock(due),
+          client: vi.fn().mockRejectedValue(new Error('network')),
+          cacheBudgetBytes: 100,
+          enabled: true,
+        });
+      }
+      expect(
+        db.one<{ status: string; attempts: number }>(
+          'SELECT status,attempts FROM mb_cover_art_jobs WHERE release_mbid=?',
+          'cycle',
+        ),
+      ).toEqual({ status: 'failed', attempts: 8 });
+    } finally {
+      db.close();
+    }
+    const reopened = openSqliteDb(path, { busyTimeoutMs: 200 });
+    try {
+      const due = reopened.one<{ next_due_ms: number }>(
+        'SELECT next_due_ms FROM mb_cover_art_jobs WHERE release_mbid=?',
+        'cycle',
+      )!.next_due_ms;
+      await runCoverArtJobs({
+        db: reopened,
+        clock: fixedClock(due),
+        client: vi.fn().mockRejectedValue(new Error('again')),
+        cacheBudgetBytes: 100,
+        enabled: true,
+      });
+      expect(
+        reopened.one<{ status: string; attempts: number; next_due_ms: number }>(
+          'SELECT status,attempts,next_due_ms FROM mb_cover_art_jobs WHERE release_mbid=?',
+          'cycle',
+        ),
+      ).toEqual({ status: 'pending', attempts: 1, next_due_ms: due + 60_000 });
+    } finally {
+      reopened.close();
+    }
+  });
   it('disabled is egress-free and capacity defers work without exceeding byte budget', async () => {
     const { db } = setup();
     try {
@@ -84,6 +132,42 @@ describe('Cover Art background runner', () => {
       );
     } finally {
       db.close();
+    }
+  });
+  it('trims an over-budget idle cache in bounded batches while disabled and with no jobs', async () => {
+    const { db, path } = setup();
+    try {
+      for (let i = 0; i < 20; i++)
+        putCoverArt(db, {
+          releaseMbid: `idle-${i}`,
+          mimeType: 'image/png',
+          bytes: new Uint8Array([1]),
+          nowMs: i,
+          budgetBytes: 100,
+        });
+      const client = vi.fn();
+      for (let pass = 0; pass < 2; pass++) {
+        const result = await runCoverArtJobs({
+          db,
+          clock: fixedClock(pass * 60_000),
+          client,
+          cacheBudgetBytes: 4,
+          enabled: false,
+        });
+        expect(result.cleanupPending).toBe(pass === 0);
+        expect(
+          db.one<{ used_bytes: number }>('SELECT used_bytes FROM mb_cover_art_usage')?.used_bytes,
+        ).toBeLessThanOrEqual(pass === 0 ? 12 : 4);
+      }
+      expect(client).not.toHaveBeenCalled();
+    } finally {
+      db.close();
+    }
+    const reopened = openSqliteDb(path, { busyTimeoutMs: 200 });
+    try {
+      expect(reopened.one<{ used_bytes: number }>('SELECT used_bytes FROM mb_cover_art_usage')?.used_bytes).toBe(4);
+    } finally {
+      reopened.close();
     }
   });
 });

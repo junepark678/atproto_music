@@ -452,11 +452,10 @@ export async function productionFeatures(options: ProductionFeatureOptions): Pro
           'cover-art': async (now, ctx) => {
             const result = await coverArtRun?.();
             const due = result?.nextDueAt;
+            const cleanupDue = result?.cleanupPending ? now + 60_000 : Number.POSITIVE_INFINITY;
             ctx.schedule(
               'cover-art',
-              due !== null && due !== undefined && due > now
-                ? due
-                : now + (result?.cleanupPending ? 60_000 : 3_600_000),
+              Math.min(due !== null && due !== undefined && due > now ? due : now + 3_600_000, cleanupDue),
             );
           },
         },
@@ -468,8 +467,7 @@ export async function productionFeatures(options: ProductionFeatureOptions): Pro
           db: ctx.deps.db,
           clock: ctx.deps.clock,
           client: async (release, group) => {
-            const bytes = await coverArtClient(release, group);
-            return bytes ? { bytes, mimeType: 'image/jpeg' } : null;
+            return coverArtClient(release, group);
           },
           cacheBudgetBytes: config.coverArtCacheMb * 1024 * 1024,
           enabled: config.musicbrainzEnabled,

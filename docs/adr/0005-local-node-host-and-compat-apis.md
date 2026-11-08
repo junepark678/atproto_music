@@ -167,6 +167,7 @@ The Workers adapter is **retired** (wave 7, N7-01). Everything runs on Node 26. 
 - **Two request paths share the pinned Agent.**
   - **`SafeFetch`** (`packages/atproto/src/net/safe-fetch.ts`) is **unchanged**: GET only, read kinds only, and it **keeps its DoH A/AAAA pre-check**. That check is redundant with pinning but costs one cached DoH query per host and is not worth a change to a verified module; this ADR does not touch `safe-fetch.ts`. Identity, record and block reads use it.
   - **`policyFetch(input, init)`** (`worker/src/node/policy-fetch.ts`, N1-05) is a fetch-shaped function for every other request, including POST: the OAuth client (PAR, token, revoke, metadata), `PdsWriter`, the forward clients and the import sources. It applies the same rules as SafeFetch: the URL policy (https only, default port, no IP literals, forbidden suffixes), `redirect: 'manual'` with every 3xx an error, a 10 s deadline, a request-body cap and a response-body cap per caller, and `TransportError` for every failure. It does no DoH pre-check; pinning is its address check.
+- **Cover Art Archive exception (M4).** Only the CAA client sets `allowManualRedirectResponse: true` on `policyFetch`; the default for every other consumer remains to reject all 3xx. Each CAA hop still passes through the policy URL check, pinned transport, deadline and 512 KiB response cap. The client permits at most two redirects total per release-plus-release-group attempt, to HTTPS `archive.org` or a subdomain only, with no credentials, fragments or non-default ports. It sends no user identity and uses the repository URL User-Agent.
 - Network failures reject with `TransportError {code}`, never a raw `TypeError`. `@atproto/oauth-client` deletes sessions on `TypeError` (`session-getter.js:60-68`), and a network blip must not sign anyone out.
 - Fixed upstreams (`ws.audioscrobbler.com`, `api.listenbrainz.org`) use the same path. Tests inject the router transport, which is test-support only.
 - **No unpinned fallback.** `createIdentityResolver` (`identity/resolver.ts:52`), `createHandleResolver` (`identity/handle.ts:96`), `createSafeFetch` and `IndexDO.buildDeps` (`index-do.ts:328`) fall back to `fetchTransport`, which is the global `fetch` (undici without pinning on Node). Three rules close this:
@@ -241,7 +242,7 @@ The Workers adapter is **retired** (wave 7, N7-01). Everything runs on Node 26. 
 | `LASTFM_AUTH_URL` | `https://www.last.fm/api/auth/` | https, DNS name, default port |
 | `LISTENBRAINZ_API_ROOT` | `https://api.listenbrainz.org/` | https, DNS name, default port |
 | `MUSICBRAINZ_API_ROOT` | `https://musicbrainz.org/ws/2/` | https, DNS name, default port, validated root ending in `/` |
-| `MUSICBRAINZ_ENABLED` | `true` | `true` or `false`; `false` disables MusicBrainz timer egress and preserves local queued state |
+| `MUSICBRAINZ_ENABLED` | `true` | `true` or `false`; `false` disables MusicBrainz and Cover Art Archive timer egress and preserves local queued state |
 | `COVER_ART_ARCHIVE_ROOT` | `https://coverartarchive.org/` | HTTPS DNS root, default port, trailing slash; Cover Art Archive client only |
 | `COVER_ART_CACHE_MB` | `200` | Safe integer MiB from 1 through 10000; reserved budget for cover-art cache |
 | `ATMUSIC_LASTFM_KNOWN_CLIENTS` | `panoScrobbler:panoScrobbler:Pano Scrobbler` | Public key:secret:name triples (§7.4) |

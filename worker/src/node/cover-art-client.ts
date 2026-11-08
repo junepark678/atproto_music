@@ -45,7 +45,7 @@ export function createCoverArtClient({ policyFetch, root }: CoverArtClientOption
     kind: 'release' | 'release-group',
     mbid: string,
     redirects: { count: number },
-  ): Promise<Uint8Array | null> {
+  ): Promise<{ bytes: Uint8Array; mimeType: string } | null> {
     if (!MBID.test(mbid)) throw new TypeError('invalid MusicBrainz identifier');
     let url = new URL(`${kind}/${mbid}/front-250`, rootUrl);
     for (;;) {
@@ -88,7 +88,7 @@ export function createCoverArtClient({ policyFetch, root }: CoverArtClientOption
         response.body?.cancel().catch(() => {});
         throw new TypeError('unsupported cover art content type');
       }
-      if (!response.body) return new Uint8Array();
+      if (!response.body) return { bytes: new Uint8Array(), mimeType: type };
       const reader = response.body.getReader();
       const chunks: Uint8Array[] = [];
       let total = 0;
@@ -115,11 +115,14 @@ export function createCoverArtClient({ policyFetch, root }: CoverArtClientOption
         bytes.set(chunk, offset);
         offset += chunk.byteLength;
       }
-      return bytes;
+      return { bytes, mimeType: type };
     }
   }
 
-  return async (releaseMbid: string, releaseGroupMbid?: string): Promise<Uint8Array | null> => {
+  return async (
+    releaseMbid: string,
+    releaseGroupMbid?: string,
+  ): Promise<{ bytes: Uint8Array; mimeType: string } | null> => {
     const redirects = { count: 0 };
     const image = await fetchFront('release', releaseMbid, redirects);
     if (image || !releaseGroupMbid) return image;

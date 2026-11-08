@@ -9,7 +9,7 @@ describe('Cover Art Archive client', () => {
       .mockResolvedValueOnce(new Response(null, { status: 404 }))
       .mockResolvedValueOnce(new Response(new Uint8Array([1, 2]), { headers: { 'content-type': 'image/png' } }));
     const fetchArt = createCoverArtClient({ policyFetch: policyFetch as never, root: 'https://coverartarchive.test/' });
-    expect(Array.from((await fetchArt(id, id)) ?? [])).toEqual([1, 2]);
+    expect(await fetchArt(id, id)).toMatchObject({ bytes: new Uint8Array([1, 2]), mimeType: 'image/png' });
     expect(String(policyFetch.mock.calls[0]?.[0])).toContain(`/release/${id}/front-250`);
     expect(String(policyFetch.mock.calls[1]?.[0])).toContain(`/release-group/${id}/front-250`);
   });
@@ -21,7 +21,7 @@ describe('Cover Art Archive client', () => {
       .mockResolvedValueOnce(new Response(null, { status: 302, headers: { location: 'https://ia800.archive.org/b' } }))
       .mockResolvedValueOnce(new Response(new Uint8Array([8]), { headers: { 'content-type': 'image/jpeg' } }));
     const run = createCoverArtClient({ policyFetch: policyFetch as never, root: 'https://coverartarchive.test/' });
-    expect(Array.from((await run(id)) ?? [])).toEqual([8]);
+    expect(await run(id)).toMatchObject({ bytes: new Uint8Array([8]), mimeType: 'image/jpeg' });
     expect(policyFetch).toHaveBeenCalledTimes(3);
     const third = vi
       .fn()
@@ -59,20 +59,16 @@ describe('Cover Art Archive client', () => {
       .fn()
       .mockResolvedValue(new Response(new Uint8Array([1]), { headers: { 'content-type': type } }));
     expect(
-      Array.from(
-        (await createCoverArtClient({ policyFetch: policyFetch as never, root: 'https://coverartarchive.test/' })(
-          id,
-        )) ?? [],
-      ),
-    ).toEqual([1]);
+      await createCoverArtClient({ policyFetch: policyFetch as never, root: 'https://coverartarchive.test/' })(id),
+    ).toMatchObject({ bytes: new Uint8Array([1]), mimeType: type });
   });
 
   it('accepts exactly 512 KiB and rejects a stream one byte over', async () => {
     const response = (size: number) => new Response(new Uint8Array(size), { headers: { 'content-type': 'image/png' } });
     const exact = vi.fn().mockResolvedValue(response(512 * 1024));
     expect(
-      (await createCoverArtClient({ policyFetch: exact as never, root: 'https://coverartarchive.test/' })(id))
-        ?.byteLength,
+      (await createCoverArtClient({ policyFetch: exact as never, root: 'https://coverartarchive.test/' })(id))?.bytes
+        .byteLength,
     ).toBe(512 * 1024);
     const over = vi.fn().mockResolvedValue(response(512 * 1024 + 1));
     await expect(

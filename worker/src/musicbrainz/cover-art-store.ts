@@ -94,13 +94,48 @@ export interface CoverArtJob {
   attempts: number;
 }
 export function dueCoverArtJobs(db: Db, nowMs: number, limit: number): CoverArtJob[] {
-  const jobs = db.all<CoverArtJob>(
-    "SELECT release_mbid AS releaseMbid,release_group_mbid AS releaseGroupMbid,attempts FROM mb_cover_art_jobs WHERE status IN ('pending','failed') AND next_due_ms<=? ORDER BY next_due_ms,release_mbid LIMIT ?",
+  const pending = db.all<CoverArtJob & { next_due_ms: number }>(
+    "SELECT release_mbid AS releaseMbid,release_group_mbid AS releaseGroupMbid,attempts,next_due_ms FROM mb_cover_art_jobs WHERE status='pending' AND next_due_ms<=? ORDER BY next_due_ms,release_mbid LIMIT ?",
     nowMs,
     limit,
   );
-  db.run("UPDATE mb_cover_art_jobs SET status='pending',attempts=0 WHERE status='failed' AND next_due_ms<=?", nowMs);
+  const failed = db.all<CoverArtJob & { next_due_ms: number }>(
+    "SELECT release_mbid AS releaseMbid,release_group_mbid AS releaseGroupMbid,attempts,next_due_ms FROM mb_cover_art_jobs WHERE status='failed' AND next_due_ms<=? ORDER BY next_due_ms,release_mbid LIMIT ?",
+    nowMs,
+    limit,
+  );
+  const jobs = [...pending, ...failed]
+    .sort((a, b) => a.next_due_ms - b.next_due_ms || a.releaseMbid.localeCompare(b.releaseMbid))
+    .slice(0, limit);
+  for (const job of jobs) {
+    if (failed.some((candidate) => candidate.releaseMbid === job.releaseMbid)) {
+      db.run(
+        "UPDATE mb_cover_art_jobs SET status='pending',attempts=0 WHERE release_mbid=? AND status='failed'",
+        job.releaseMbid,
+      );
+      job.attempts = 0;
+    }
+  }
   return jobs;
+}
+
+/** Bounded LRU trimming, also used while fetch egress is disabled after an operator lowers the budget. */
+export function cleanupCoverArt(db: Db, budgetBytes: number, limit = COVER_ART_EVICTION_BATCH): boolean {
+  return db.tx(() => {
+    let used =
+      db.one<{ used_bytes: number }>('SELECT used_bytes FROM mb_cover_art_usage WHERE singleton=1')?.used_bytes ?? 0;
+    if (used <= budgetBytes) return false;
+    const victims = db.all<{ release_mbid: string; byte_size: number }>(
+      'SELECT release_mbid,byte_size FROM mb_cover_art ORDER BY last_access_ms,release_mbid LIMIT ?',
+      Math.min(COVER_ART_EVICTION_BATCH, Math.max(0, limit)),
+    );
+    for (const victim of victims) {
+      db.run('DELETE FROM mb_cover_art WHERE release_mbid=?', victim.release_mbid);
+      used -= victim.byte_size;
+    }
+    db.run('UPDATE mb_cover_art_usage SET used_bytes=? WHERE singleton=1', used);
+    return used > budgetBytes;
+  });
 }
 export function completeCoverArtJob(db: Db, releaseMbid: string): void {
   db.run("UPDATE mb_cover_art_jobs SET status='complete' WHERE release_mbid=?", releaseMbid);

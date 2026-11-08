@@ -29,6 +29,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { FileRevocations } from '../../src/app/revocations';
 import { migrate } from '../../src/do/migrate';
 import { MIGRATIONS } from '../../src/do/schema';
+import { enqueueCoverArt, putCoverArt } from '../../src/musicbrainz/cover-art-store';
 import { backupFiles, backupStamp, createBackups, integrityCheckInWorker, retentionPlan } from '../../src/node/backup';
 import { readSchemaState } from '../../src/node/compose';
 import type { StatfsFn } from '../../src/node/disk';
@@ -172,6 +173,14 @@ describe('backups', () => {
   it('a backup is written by node:sqlite backup() as .tmp, passes integrity_check in a worker thread on the copy, is renamed to atmusic-YYYYMMDDTHHMMZ.db with mode 0600 and recorded in backup_runs', async () => {
     await withMigratedDb(async (db, ctx) => {
       db.run("INSERT INTO counters(name, label, value) VALUES ('before_backup', '', 7)");
+      putCoverArt(db, {
+        releaseMbid: 'release-cover',
+        mimeType: 'image/webp',
+        bytes: new Uint8Array([1, 2, 3]),
+        nowMs: 10,
+        budgetBytes: 10,
+      });
+      enqueueCoverArt(db, 'pending-cover', 'group-cover', 11);
       const dir = join(ctx.dir, 'backups');
       const clock = fixedClock();
       const final = join(dir, 'atmusic-20260115T1200Z.db');
@@ -218,6 +227,21 @@ describe('backups', () => {
       // The copy is the database, and passes integrity_check.
       expect(readCopy<{ value: number }>(final, "SELECT value FROM counters WHERE name = 'before_backup'")).toEqual([
         { value: 7 },
+      ]);
+      expect(
+        readCopy<{ mime_type: string; byte_size: number; payload: string }>(
+          final,
+          "SELECT mime_type,byte_size,hex(image_bytes) AS payload FROM mb_cover_art WHERE release_mbid='release-cover'",
+        ),
+      ).toEqual([{ mime_type: 'image/webp', byte_size: 3, payload: '010203' }]);
+      expect(
+        readCopy<{ release_group_mbid: string; status: string }>(
+          final,
+          "SELECT release_group_mbid,status FROM mb_cover_art_jobs WHERE release_mbid='pending-cover'",
+        ),
+      ).toEqual([{ release_group_mbid: 'group-cover', status: 'pending' }]);
+      expect(readCopy<{ used_bytes: number }>(final, 'SELECT used_bytes FROM mb_cover_art_usage')).toEqual([
+        { used_bytes: 3 },
       ]);
       expect(await integrityCheckInWorker(final)).toEqual(['ok']);
       expect(

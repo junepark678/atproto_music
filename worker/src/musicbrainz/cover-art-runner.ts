@@ -2,6 +2,7 @@ import type { Clock } from '@atmusic/core/deps';
 import type { Db } from '../do/db';
 import { CoverArtTransientError } from '../node/cover-art-client';
 import {
+  cleanupCoverArt,
   completeCoverArtJob,
   dueCoverArtJobs,
   nextCoverArtDue,
@@ -27,11 +28,12 @@ export async function runCoverArtJobs(
   maxJobs = 2,
 ): Promise<{ processed: number; nextDueAt: number | null; cleanupPending: boolean }> {
   const { db, clock } = options;
-  if (!options.enabled) return { processed: 0, nextDueAt: nextCoverArtDue(db), cleanupPending: false };
+  const cleanupPending = cleanupCoverArt(db, options.cacheBudgetBytes);
+  if (!options.enabled) return { processed: 0, nextDueAt: nextCoverArtDue(db), cleanupPending };
   const now = clock.nowMs();
   const jobs = dueCoverArtJobs(db, now, Math.max(0, Math.min(2, Math.trunc(maxJobs))));
   let processed = 0;
-  let cleanupPending = false;
+  let cleanupStillPending = cleanupPending;
   for (const job of jobs) {
     try {
       const image = await options.client(job.releaseMbid, job.releaseGroupMbid ?? undefined);
@@ -53,7 +55,7 @@ export async function runCoverArtJobs(
       } else {
         // A failed put can have evicted one fixed batch. Requeue without incrementing network attempts.
         db.run('UPDATE mb_cover_art_jobs SET next_due_ms=? WHERE release_mbid=?', now + 60_000, job.releaseMbid);
-        cleanupPending = true;
+        cleanupStillPending = true;
       }
     } catch (error) {
       const due = retryCoverArtJob(db, job, clock.nowMs());
@@ -67,5 +69,5 @@ export async function runCoverArtJobs(
       processed++;
     }
   }
-  return { processed, nextDueAt: nextCoverArtDue(db), cleanupPending };
+  return { processed, nextDueAt: nextCoverArtDue(db), cleanupPending: cleanupStillPending };
 }
