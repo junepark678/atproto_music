@@ -79,15 +79,15 @@ it('suppression clears index-only forwarding state but retains markers backed by
     const liveKey = 'external-live-listen-marker';
     const loveUri = `at://${h.alice}/com.example.atmusic.love/3kcleanup001`;
     h.db.run(
-      `INSERT INTO forward_admissions(did,identity_key,path,source_service,created_at_ms)
-       VALUES (?,?,'live',NULL,?)`,
+      `INSERT INTO forward_admissions(did,identity_key,path,source_service,created_at_ms,admission_seq)
+       VALUES (?,?,'live',NULL,?,100)`,
       h.alice,
       liveKey,
       T0,
     );
     h.db.run(
-      `INSERT INTO forward_admissions(did,identity_key,path,source_service,created_at_ms)
-       VALUES (?,?,'live',NULL,?)`,
+      `INSERT INTO forward_admissions(did,identity_key,path,source_service,created_at_ms,admission_seq)
+       VALUES (?,?,'live',NULL,?,101)`,
       h.alice,
       `love:${loveUri}:3`,
       T0,

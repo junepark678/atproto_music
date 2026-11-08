@@ -141,7 +141,7 @@ describe('applyRecordProof', () => {
         NOW_MS,
       );
       db.run(
-        "INSERT INTO forward_admissions(did,identity_key,path,source_service,created_at_ms,admission_seq) VALUES (?,?,'api',NULL,?,NULL)",
+        "INSERT INTO forward_admissions(did,identity_key,path,source_service,created_at_ms,admission_seq) VALUES (?,?,'api',NULL,?,100)",
         ALICE,
         `love-uri:${ALICE}:${collection}:3lbqlove02ab`,
         NOW_MS,
@@ -201,7 +201,7 @@ describe('applyRecordProof', () => {
       const [artistKey, trackMusicKey] = trackKey(String(record.artist), String(record.track));
       const key = projectionListenKey(ALICE, recordListenAt, artistKey, trackMusicKey);
       initial.run(
-        "INSERT INTO forward_admissions(did,identity_key,path,source_service,created_at_ms,admission_seq) VALUES (?,?,'api',NULL,?,NULL)",
+        "INSERT INTO forward_admissions(did,identity_key,path,source_service,created_at_ms,admission_seq) VALUES (?,?,'api',NULL,?,100)",
         ALICE,
         key,
         NOW_MS,

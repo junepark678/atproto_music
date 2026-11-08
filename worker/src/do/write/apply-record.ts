@@ -55,7 +55,6 @@ import { reasonText, type ScrobbleRow, validateScrobbleRecord } from '@atmusic/c
 import { MAX_INGEST_CBOR_BYTES, validateScrobbleBatchRecord } from '@atmusic/core/scrobble-batch';
 import { isTid } from '@atmusic/core/syntax';
 import { toStorage } from '@atmusic/core/timestamp';
-import { enqueueTrack } from '../../musicbrainz/store';
 import {
   admitForwardIdentity,
   admitProjectedIdentity,
@@ -63,6 +62,7 @@ import {
   retainedForwardProvenance,
   retainedRecordProvenance,
 } from '../../forward/projection';
+import { enqueueTrack } from '../../musicbrainz/store';
 import { enqueueForwards } from '../../outbox/forward-enqueue';
 import type { Db } from '../db';
 import { advanceUser, bumpStatsVersion, isSuppressed, loadUser } from './account-state';

@@ -136,8 +136,8 @@ it('forwards a live deletion of an API-created love, and routes imported love de
     const importedRkey = '3kimported01';
     await h.kit.externalPut('Alice', LOVE, importedRkey, love('Imported artist', 'Imported track'));
     h.db.run(
-      `INSERT INTO forward_admissions(did,identity_key,path,source_service,created_at_ms)
-       VALUES (?,?,'import','lastfm',?)`,
+      `INSERT INTO forward_admissions(did,identity_key,path,source_service,created_at_ms,admission_seq)
+       VALUES (?,?,'import','lastfm',?,101)`,
       h.alice,
       `love-uri:${h.alice}:${LOVE}:${importedRkey}`,
       h.kit.clock.nowMs(),
@@ -155,8 +155,8 @@ it('forwards a live deletion of an API-created love, and routes imported love de
     const unknownRkey = '3kunknown001';
     await h.kit.externalPut('Alice', LOVE, unknownRkey, love('Unknown source', 'Unknown track'));
     h.db.run(
-      `INSERT INTO forward_admissions(did,identity_key,path,source_service,created_at_ms)
-       VALUES (?,?,'import',NULL,?)`,
+      `INSERT INTO forward_admissions(did,identity_key,path,source_service,created_at_ms,admission_seq)
+       VALUES (?,?,'import',NULL,?,102)`,
       h.alice,
       `love-uri:${h.alice}:${LOVE}:${unknownRkey}`,
       h.kit.clock.nowMs(),
@@ -250,8 +250,8 @@ it('does not enqueue a love when the canonical live admission already exists wit
     const put = await h.kit.externalPut('Alice', LOVE, rkey, love('Already admitted', 'Jóga'));
     const uri = `at://${h.alice}/${LOVE}/${rkey}`;
     h.db.run(
-      `INSERT INTO forward_admissions(did,identity_key,path,source_service,created_at_ms)
-       VALUES (?,?,'live',NULL,?)`,
+      `INSERT INTO forward_admissions(did,identity_key,path,source_service,created_at_ms,admission_seq)
+       VALUES (?,?,'live',NULL,?,103)`,
       h.alice,
       `love:${uri}:${put.rev}`,
       h.kit.clock.nowMs(),

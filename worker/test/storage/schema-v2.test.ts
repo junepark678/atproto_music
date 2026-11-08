@@ -647,6 +647,27 @@ const NEW_INDEXES: Record<string, [string, number, number, Array<[string, number
       ['created_at_ms', 0],
     ],
   ],
+  love_delete_bridges_pending: [
+    'love_delete_bridges',
+    0,
+    0,
+    [
+      ['did', 0],
+      ['uri', 0],
+      ['state', 0],
+    ],
+  ],
+  love_import_bridges_incarnation: [
+    'love_import_bridges',
+    0,
+    0,
+    [
+      ['did', 0],
+      ['uri', 0],
+      ['incarnation_key', 0],
+      ['state', 0],
+    ],
+  ],
   mb_love_revive_jobs_due: [
     'mb_love_revive_jobs',
     0,
