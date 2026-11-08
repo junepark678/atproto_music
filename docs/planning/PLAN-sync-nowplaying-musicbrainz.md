@@ -203,7 +203,15 @@ The owner's word is "synced". Our definition: canonical MusicBrainz data is reso
 - **Forwarding.**
   - A ListenBrainz love or unlove with no submitted MBID falls back to the matched recording MBID.
   - If the lookup is still pending, defer the row for up to 24 h. Do not ignore it.
+  - A deferred row must not block loves or unloves for other tracks. Strict ordering only has to hold per link and per love key.
   - Rows are marked `ignored` with `no_recording_mbid` only after the track resolves as unmatched.
+  - **The 24 h deadline** (planner ruling, 2026-11-08): if the track is still `pending` or `failed` after 24 h, the row becomes terminal `ignored` with the distinct reason `mbid_unresolved`.
+    - It is not marked `failed`: the user can do nothing about it, so it must not count as a sync failure.
+    - It does not stay retryable forever, because it would occupy the queue indefinitely.
+  - **A later match retries automatically.** When a track key later becomes `matched` (a 30-day re-lookup or a refresh), enqueue one fresh row per affected link generation. Affected links are those whose latest row for that love key was ignored as `mbid_unresolved` or `no_recording_mbid`.
+    - The fresh row carries the *current* love state, love or unlove. The latest state wins and history is not replayed.
+    - It has its own dedupe key.
+    - The work is bounded per resolver run.
 - **Now playing.** `NowPlaying.musicbrainz`, if M1 didn't already add it.
 
 ### M3 Web display (base: M2)
