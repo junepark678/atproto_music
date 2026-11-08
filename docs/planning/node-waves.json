@@ -367,7 +367,7 @@
      "worker/test/storage/migrate.test.ts › SCHEMA_VERSION includes additive batch provenance and remains compatible with v2 code",
      "worker/test/storage/schema-v2.test.ts › schema_compat holds one row with min_compatible_version 2",
      "worker/test/storage/schema-v2.test.ts › every migration after 2 contains only CREATE TABLE, CREATE INDEX and ALTER TABLE ADD COLUMN statements",
-     "worker/test/harness/local-index.test.ts › the migration ledger is ordered across the N/M, M4, S1, S2 and S3 stack",
+     "worker/test/harness/local-index.test.ts › the migration ledger is ordered across the N/M, M4, S1, S2, S3 and S4 stack",
      "worker/test/storage/schema-v2.test.ts › every table in TABLES has exactly one TABLE_CLASS entry and the test names any table that has none",
      "worker/test/storage/schema-v2.test.ts › ignored_listens accepts reasons artist_invalid and track_invalid only and is listed newest first by its (did, created_at_ms DESC) index"
     ]
