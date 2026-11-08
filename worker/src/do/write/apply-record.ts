@@ -442,9 +442,30 @@ function batchVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, o: 
       const priorByUri = new Map(prior.map((row) => [row.uri, row]));
       const now = Number(o.nowNs / 1_000_000n);
       if (o.forwarding) {
-        const retainedIds = new Set(batch.listens.map((listen) => listen.id));
+        const retainedIdentities = new Set(
+          batch.listens.map((listen) => {
+            const keys = musicKeyColumns(listen.row.artist, listen.row.track, listen.row.album);
+            return projectionListenKey(t.did, listen.row.listenedAt, keys.artist_key, keys.track_key);
+          }),
+        );
+        // An excluded member is not verified absence of its previous listen.
+        const excludedIds = new Set(batch.dropped.map((entry) => entry.id));
         for (const old of prior) {
-          if (old.listen_id !== null && retainedIds.has(old.listen_id)) continue;
+          const identityKey = projectionListenKey(t.did, old.listened_at, old.artist_key, old.track_key);
+          if (retainedIdentities.has(identityKey) || (old.listen_id !== null && excludedIds.has(old.listen_id)))
+            continue;
+          const second = BigInt(Math.floor(Date.parse(old.listened_at) / 1000)) * 1_000_000_000n;
+          const retained = db.one(
+            `SELECT 1 FROM scrobbles WHERE did=? AND artist_key=? AND track_key=?
+             AND listened_at>=? AND listened_at<? AND (record_uri IS NULL OR record_uri<>?) LIMIT 1`,
+            t.did,
+            old.artist_key,
+            old.track_key,
+            toStorage(second),
+            toStorage(second + 1_000_000_000n),
+            t.uri,
+          );
+          if (retained !== null) continue;
           tombstoneListen(db, {
             did: t.did,
             identity: `batch-replaced:${old.uri}:${cid}`,
@@ -453,7 +474,6 @@ function batchVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, o: 
             trackKey: old.track_key,
             nowMs: now,
           });
-          const identityKey = projectionListenKey(t.did, old.listened_at, old.artist_key, old.track_key);
           enqueueListenDelete(db, {
             did: t.did,
             identityKey,

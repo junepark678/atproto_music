@@ -112,3 +112,34 @@ describe('S4 generation and single replacement', () => {
     });
   });
 });
+
+describe('S4 canonical batch replacement', () => {
+  it.each(['changed-canonical', 'retained-copy', 'renamed-id'] as const)('%s', async (mode) => {
+    const repo = await repoFor('alice');
+    const BATCH = `${SCROBBLE}Batch`;
+    const { $type, ...entry } = record;
+    const batch = { $type: BATCH, createdAt: record.createdAt, listens: [{ ...entry, id: '2222222222222' }] };
+    const original = await putProof(repo, BATCH, 'batchreplace', batch);
+    const copy = await putProof(repo, SCROBBLE, 'copy', record);
+    const replacement = await putProof(repo, BATCH, 'batchreplace', {
+      ...batch,
+      listens: [
+        {
+          ...entry,
+          id: mode === 'changed-canonical' ? '2222222222222' : '3333333333333',
+          track: mode === 'renamed-id' ? record.track : 'Hyperballad',
+        },
+      ],
+    });
+    await withMigratedDb((db) => {
+      seedLink(db);
+      expect(db.tx(() => applyRecordProof(db, original, OPTS)).outcome).toBe('applied');
+      if (mode === 'retained-copy') db.tx(() => applyRecordProof(db, copy, OPTS));
+      delivered(db);
+      expect(db.tx(() => applyRecordProof(db, replacement, live)).outcome).toBe('applied');
+      const expected = mode === 'changed-canonical' ? 1 : 0;
+      expect(db.all('SELECT identity_key FROM listenbrainz_deletes')).toHaveLength(expected);
+      expect(db.all('SELECT identity_key FROM linked_pull_tombstones')).toHaveLength(expected);
+    });
+  });
+});
