@@ -59,6 +59,7 @@ import {
 import { NS_PER_SECOND, parseRfc3339 } from '@atmusic/core/timestamp';
 import type { ModuleDeps } from '../do/contracts';
 import type { Db } from '../do/db';
+import { admitForwardIdentity } from '../forward/projection';
 import { loveKeyOf } from '../outbox/love-ops';
 import {
   IMPORT_PRIORITY,
@@ -256,6 +257,17 @@ export async function writeSlice(
           operationId,
           now,
         );
+        admitForwardIdentity(db, {
+          did: job.did,
+          identityKey: plan.key,
+          path: 'import',
+          sourceService: (
+            db.one<{ source: string }>('SELECT source FROM import_jobs WHERE id=?', job.id)?.source ?? ''
+          ).startsWith('lastfm')
+            ? 'lastfm'
+            : 'listenbrainz',
+          now,
+        });
         insertScrobbleCreate(
           { ...m, clock },
           { id: operationId, did: job.did, origin: 'import', prepared: plan.prepared, dueAt: now, importJobId: job.id },
@@ -459,6 +471,17 @@ async function writeBatchSlice(
           op.id,
           now,
         );
+        admitForwardIdentity(db, {
+          did: job.did,
+          identityKey: member.key,
+          path: 'import',
+          sourceService: (
+            db.one<{ source: string }>('SELECT source FROM import_jobs WHERE id=?', job.id)?.source ?? ''
+          ).startsWith('lastfm')
+            ? 'lastfm'
+            : 'listenbrainz',
+          now,
+        });
         setState(member.seq, 'queued', op.id);
         db.run(
           'INSERT INTO batch_entry_items(operation_id, entry_id, job_id, seq) VALUES (?, ?, ?, ?)',

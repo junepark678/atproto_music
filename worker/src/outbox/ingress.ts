@@ -194,7 +194,7 @@ export async function acceptListens(m: ModuleDeps, args: AcceptListensArgs): Pro
         args.origin,
         now,
       );
-      admitForwardIdentity(db, {
+      const firstAdmission = admitForwardIdentity(db, {
         did: args.did,
         identityKey: prep.key,
         path: 'api',
@@ -239,13 +239,14 @@ export async function acceptListens(m: ModuleDeps, args: AcceptListensArgs): Pro
           }
         }
       }
-      enqueueForwards(db, {
-        did: args.did,
-        items: [{ kind: 'scrobble', listenKey: prep.key, payload: { listen: prep.forward, origin: args.origin } }],
-        dueAt: prep.dueAt,
-        now,
-        random: m.random,
-      });
+      if (firstAdmission)
+        enqueueForwards(db, {
+          did: args.did,
+          items: [{ kind: 'scrobble', listenKey: prep.key, payload: { listen: prep.forward, origin: args.origin } }],
+          dueAt: prep.dueAt,
+          now,
+          random: m.random,
+        });
       seen.set(prep.key, op.id);
       used += 1;
       created += 1;

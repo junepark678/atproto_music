@@ -541,6 +541,20 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
       };
     }
   }
+  if (t.kind === 'scrobble' && out.outcome === 'applied') {
+    const projected = db.one<{ listened_at: string; artist_key: string; track_key: string }>(
+      'SELECT listened_at,artist_key,track_key FROM scrobbles WHERE uri=?',
+      t.uri,
+    );
+    if (projected) {
+      admitForwardIdentity(db, {
+        did: t.did,
+        identityKey: projectionListenKey(t.did, projected.listened_at, projected.artist_key, projected.track_key),
+        path: o.forwarding ? 'live' : 'snapshot',
+        now: Number(o.nowNs / 1_000_000n),
+      });
+    }
+  }
   if (out.statsChanged) bumpStatsVersion(db, t.did);
   return out;
 }
@@ -707,13 +721,12 @@ export function applyRecordProof(db: Db, proof: RecordProof, o: ApplyOptions): A
         // Existing listen_keys preserve API/import identity across operation
         // cleanup; admissions preserve first path across outbox pruning.
         const knownListen = db.one('SELECT source FROM listen_keys WHERE did=? AND dedupe_key=?', did, key);
-        const admitted = db.one('SELECT path FROM forward_admissions WHERE did=? AND identity_key=?', did, key);
-        if (
-          knownListen === null &&
-          admitted === null &&
-          local?.origin !== 'import' &&
-          admitForwardIdentity(db, { did, identityKey: key, path: 'live', now: Number(o.nowNs / 1_000_000n) })
-        ) {
+        const admitted = db.one<{ path: string }>(
+          'SELECT path FROM forward_admissions WHERE did=? AND identity_key=?',
+          did,
+          key,
+        );
+        if (knownListen === null && admitted?.path === 'live' && local?.origin !== 'import') {
           enqueueForwards(db, {
             did,
             items: [
