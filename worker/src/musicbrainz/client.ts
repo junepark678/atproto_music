@@ -7,7 +7,7 @@ export const MB_CAPS = Object.freeze({ maxRequestBytes: 0, maxResponseBytes: 1_0
 export type MusicBrainzOutcome<T> =
   | { kind: 'ok'; value: T }
   | { kind: 'not_found' }
-  | { kind: 'status'; status: number }
+  | { kind: 'status'; status: number; retryAfterMs?: number }
   | { kind: 'network' }
   | { kind: 'malformed' };
 
@@ -60,7 +60,12 @@ export function createMusicBrainzClient(options: MusicBrainzClientOptions) {
       return { kind: 'network' };
     }
     if (response.status === 404) return { kind: 'not_found' };
-    if (!response.ok) return { kind: 'status', status: response.status };
+    if (!response.ok) {
+      const raw = response.headers.get('retry-after');
+      const seconds = raw !== null && /^\d{1,9}$/.test(raw) ? Number(raw) : null;
+      const retryAfterMs = seconds !== null ? Math.min(seconds * 1000, 86_400_000) : undefined;
+      return { kind: 'status', status: response.status, ...(retryAfterMs === undefined ? {} : { retryAfterMs }) };
+    }
     try {
       const value: unknown = await response.json();
       return valid(value) ? { kind: 'ok', value } : { kind: 'malformed' };

@@ -925,6 +925,40 @@ const MIGRATION_14: Migration = {
   ],
 };
 
+const MIGRATION_15: Migration = {
+  version: 15,
+  name: 'musicbrainz_track_matches',
+  statements: [
+    `CREATE TABLE mb_tracks (
+      artist_key TEXT NOT NULL,
+      track_key TEXT NOT NULL,
+      album_key TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'pending',
+      priority INTEGER NOT NULL DEFAULT 0,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      next_attempt_ms INTEGER NOT NULL DEFAULT 0,
+      last_attempt_ms INTEGER,
+      submitted_recording_mbid TEXT,
+      matched_by TEXT,
+      score INTEGER,
+      recording_mbid TEXT,
+      title TEXT,
+      artist_credit TEXT,
+      artist_mbids TEXT,
+      release_mbid TEXT,
+      release_title TEXT,
+      release_group_mbid TEXT,
+      duration_ms INTEGER,
+      isrcs TEXT,
+      first_release_date TEXT,
+      synced_at_ms INTEGER,
+      created_at_ms INTEGER NOT NULL,
+      PRIMARY KEY (artist_key, track_key, album_key)
+    )`,
+    'CREATE INDEX mb_tracks_due ON mb_tracks(status,next_attempt_ms,priority)',
+  ],
+};
+
 export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_1,
   MIGRATION_2,
@@ -940,6 +974,7 @@ export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_12,
   MIGRATION_13,
   MIGRATION_14,
+  MIGRATION_15,
 ];
 
 /** The schema version this code expects. */
@@ -1003,6 +1038,7 @@ export const TABLES = [
   'listen_removal_cids',
   // Migration 10.
   'verified_membership',
+  'mb_tracks',
 ] as const;
 
 export type TableName = (typeof TABLES)[number];
@@ -1066,4 +1102,5 @@ export const TABLE_CLASS: Readonly<Record<TableName, TableClass>> = {
   batch_delete_children: 'non-derived',
   listen_removal_cids: 'non-derived',
   verified_membership: 'derived',
+  mb_tracks: 'non-derived',
 };
