@@ -22,6 +22,7 @@ import { ErrorState, LoadingState, SignInPrompt } from '../components/state-view
 import { useOutbox, useOutboxOps } from '../components/use-outbox';
 import type { OutboxOperation } from '../outbox/overlay';
 import { useAppState } from '../state/store';
+import { detectedTimeZone, setTimeZonePreference, supportedTimeZones, timeZonePreference } from '../state/time-zone';
 
 export const EXPORT_FILENAME = 'music-export.json';
 
@@ -34,6 +35,7 @@ export default function Settings() {
   return (
     <section aria-labelledby="page-title">
       <h1 id="page-title">Settings</h1>
+      <TimeZoneSection />
       <nav aria-label="Settings sections">
         <ul>
           <li>
@@ -57,6 +59,36 @@ export default function Settings() {
       ) : (
         <SignedInSettings did={session.did} onSignedOut={() => setSignedOut(true)} />
       )}
+    </section>
+  );
+}
+
+export function TimeZoneSection() {
+  const preference = timeZonePreference.value;
+  const detected = detectedTimeZone();
+  const now = Date.now();
+  const timeZone = preference === 'auto' ? undefined : preference;
+  const clock = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short', timeZone }).format(now);
+  const zone = new Intl.DateTimeFormat(undefined, { timeZone, timeZoneName: 'short' })
+    .formatToParts(now)
+    .find((part) => part.type === 'timeZoneName')?.value;
+  const zones = supportedTimeZones();
+  return (
+    <section aria-labelledby="time-zone-title">
+      <h2 id="time-zone-title">Time zone</h2>
+      <label for="time-zone">Display time zone</label>
+      <select id="time-zone" value={preference} onChange={(event) => setTimeZonePreference(event.currentTarget.value)}>
+        <option value="auto">Automatic (browser: {detected})</option>
+        {zones.map((zone) => (
+          <option value={zone} key={zone}>
+            {zone}
+          </option>
+        ))}
+      </select>
+      <p>Times across the app are shown in this zone. Saved in this browser only.</p>
+      <p role="status">
+        Now: {clock} {zone}
+      </p>
     </section>
   );
 }

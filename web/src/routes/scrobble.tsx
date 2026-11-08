@@ -16,7 +16,7 @@
 import type { Clock } from '@atmusic/core/deps';
 import { buildScrobbleRecord, MSG_DURATION } from '@atmusic/core/scrobble';
 import { useEffect, useRef, useState } from 'preact/hooks';
-import { describeFailure, localInputToUtc, scrubDids, toLocalInput } from '../components/format';
+import { describeFailure, localInputToUtc, scrubDids, toLocalInput, zoneName } from '../components/format';
 import { OperationStatus } from '../components/operation-status';
 import type { OutboxService } from '../components/outbox-service';
 import { useServices } from '../components/services';
@@ -25,6 +25,7 @@ import { ErrorState, LoadingState, PublishingUnavailable, SignInPrompt } from '.
 import { useOutbox, useOutboxOps } from '../components/use-outbox';
 import type { OutboxOperation } from '../outbox/overlay';
 import { clearScrobbleDraft, type ScrobbleDraftValues, setScrobbleDraft, useAppState } from '../state/store';
+import { detectedTimeZone } from '../state/time-zone';
 
 export type FieldName = 'artist' | 'track' | 'album' | 'listenedAt' | 'durationSeconds' | 'recordingMbid';
 
@@ -237,7 +238,11 @@ export function ScrobbleForm({ outbox }: { outbox: OutboxService }) {
           const errorId = error ? `${field.name}-error` : undefined;
           return (
             <div class="field" key={field.name}>
-              <label for={`field-${field.name}`}>{field.label}</label>
+              <label for={`field-${field.name}`}>
+                {field.name === 'listenedAt'
+                  ? `${field.label} (${zoneName(Date.now()) || detectedTimeZone()})`
+                  : field.label}
+              </label>
               <input
                 id={`field-${field.name}`}
                 name={field.name}
