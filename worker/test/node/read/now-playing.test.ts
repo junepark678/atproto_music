@@ -45,6 +45,144 @@ const rowOf = (db: Db, did: string) => db.one<NowPlayingRow>('SELECT * FROM now_
 const count = (db: Db) => db.one<{ n: number }>('SELECT count(*) AS n FROM now_playing')!.n;
 
 describe('now playing', () => {
+  it.each(['lastfm', 'listenbrainz'] as const)(
+    '%s same-track refresh without a duration does not shorten a long expiry',
+    async (source) => {
+      await withMigratedDb((db) => {
+        const clock = fixedClock();
+        upsertNowPlaying(
+          { db, clock },
+          { did: ALICE, artist: 'Radiohead', track: 'Reckoner', durationSeconds: 1800, source },
+        );
+        clock.advance(1_000);
+        const refreshed = upsertNowPlaying(
+          { db, clock },
+          { did: ALICE, artist: 'Radiohead', track: 'Reckoner', durationSeconds: null, source },
+        );
+        expect(refreshed.row.duration_seconds).toBe(1800);
+        expect(refreshed.row.expires_at_ms).toBe(T0 + 1_801_000);
+      });
+    },
+  );
+  it('ListenBrainz keeps a valid duration above the storage limit through repeated and omitted-duration refreshes', async () => {
+    await withMigratedDb((db) => {
+      const clock = fixedClock();
+      const m = { db, clock };
+      const initial = upsertNowPlaying(m, {
+        did: ALICE,
+        artist: 'Radiohead',
+        track: 'Reckoner',
+        durationSeconds: 1800,
+        source: 'listenbrainz',
+      });
+      expect(initial.row.duration_seconds).toBe(1800);
+      expect(initial.row.expires_at_ms).toBe(T0 + 1_800_000);
+
+      clock.advance(1_000);
+      const repeated = upsertNowPlaying(m, {
+        did: ALICE,
+        artist: 'Radiohead',
+        track: 'Reckoner',
+        durationSeconds: 90_000,
+        source: 'listenbrainz',
+      });
+      expect(repeated.row.duration_seconds).toBe(1800);
+      expect(repeated.row.expires_at_ms).toBe(T0 + 1_000 + 90_000_000);
+
+      clock.advance(1_000);
+      const omitted = upsertNowPlaying(m, {
+        did: ALICE,
+        artist: 'Radiohead',
+        track: 'Reckoner',
+        source: 'listenbrainz',
+      });
+      expect(omitted.row.duration_seconds).toBe(1800);
+      expect(omitted.row.expires_at_ms).toBe(T0 + 2_000 + 90_000_000);
+    });
+  });
+  it.each(['lastfm', 'listenbrainz'] as const)(
+    '%s omitted or null duration retains the effective TTL after an ordinary duration update',
+    async (source) => {
+      await withMigratedDb((db) => {
+        const clock = fixedClock();
+        const m = { db, clock };
+        upsertNowPlaying(m, {
+          did: ALICE,
+          artist: 'Radiohead',
+          track: 'Reckoner',
+          durationSeconds: 1800,
+          source,
+        });
+        clock.advance(1_000);
+        const updated = upsertNowPlaying(m, {
+          did: ALICE,
+          artist: 'Radiohead',
+          track: 'Reckoner',
+          durationSeconds: 2400,
+          source,
+        });
+        expect(updated.row.duration_seconds).toBe(2400);
+        expect(updated.row.expires_at_ms).toBe(T0 + 1_000 + 2_400_000);
+
+        clock.advance(1_000);
+        const omitted = upsertNowPlaying(m, {
+          did: ALICE,
+          artist: 'Radiohead',
+          track: 'Reckoner',
+          durationSeconds: null,
+          source,
+        });
+        expect(omitted.row.duration_seconds).toBe(2400);
+        expect(omitted.row.expires_at_ms).toBe(T0 + 2_000 + 2_400_000);
+      });
+    },
+  );
+  it.each(['lastfm', 'listenbrainz'] as const)(
+    '%s same-track refresh merges non-null detail fields',
+    async (source) => {
+      await withMigratedDb((db) => {
+        const clock = fixedClock();
+        const initial = upsertNowPlaying(
+          { db, clock },
+          {
+            did: ALICE,
+            artist: 'Radiohead',
+            track: 'Reckoner',
+            source,
+            trackNumber: 3,
+            releaseMbid: 'release-1',
+            artistMbids: ['artist-1'],
+          },
+        );
+        clock.advance(1_000);
+        const refreshed = upsertNowPlaying(
+          { db, clock },
+          {
+            did: ALICE,
+            artist: 'Radiohead',
+            track: 'Reckoner',
+            source,
+            releaseGroupMbid: 'group-1',
+            isrc: 'GBAYE0601472',
+            mediaPlayer: 'player',
+          },
+        );
+        expect(refreshed.outcome).toBe('refreshed');
+        expect(refreshed.row.started_at_ms).toBe(initial.row.started_at_ms);
+        expect(refreshed.row.updated_at_ms).toBe(clock.nowMs());
+        expect(refreshed.row.expires_at_ms).toBe(clock.nowMs() + 600_000);
+        expect(refreshed.row).toMatchObject({
+          track_number: 3,
+          release_mbid: 'release-1',
+          release_group_mbid: 'group-1',
+          artist_mbids: '["artist-1"]',
+          isrc: 'GBAYE0601472',
+          media_player: 'player',
+        });
+      });
+    },
+  );
+
   it('an entry expires at started+duration (or +600 s without duration); the same track refreshes it; share_now_playing=0 hides it', async () => {
     await withMigratedDb((db) => {
       seedAccount(db, ALICE, 'alice');
@@ -63,7 +201,10 @@ describe('now playing', () => {
       });
       expect(stored.outcome).toBe('stored');
       expect(db.one('SELECT artist_key,track_key,album_key,priority FROM mb_tracks')).toEqual({
-        artist_key: 'radiohead', track_key: 'reckoner', album_key: 'in rainbows', priority: 10,
+        artist_key: 'radiohead',
+        track_key: 'reckoner',
+        album_key: 'in rainbows',
+        priority: 10,
       });
       expect(rowOf(db, ALICE)).toEqual({
         did: ALICE,
@@ -77,6 +218,16 @@ describe('now playing', () => {
         source: 'lastfm',
         started_at_ms: T0,
         expires_at_ms: T0 + 290_000,
+        updated_at_ms: T0,
+        track_number: null,
+        release_mbid: null,
+        release_group_mbid: null,
+        artist_mbids: null,
+        isrc: null,
+        submission_client_version: null,
+        music_service: null,
+        media_player: null,
+        scrobbled_at_ms: null,
       });
       expect(currentNowPlaying(m, ALICE)?.track).toBe('Reckoner');
 
@@ -92,7 +243,8 @@ describe('now playing', () => {
       });
       expect(refreshed.outcome).toBe('refreshed');
       expect(db.one("SELECT priority,submitted_recording_mbid FROM mb_tracks WHERE track_key='reckoner'")).toEqual({
-        priority: 10, submitted_recording_mbid: '3f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2d10',
+        priority: 10,
+        submitted_recording_mbid: '3f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2d10',
       });
       expect(rowOf(db, ALICE)).toMatchObject({
         artist: 'Radiohead',
@@ -101,7 +253,7 @@ describe('now playing', () => {
         started_at_ms: T0,
         expires_at_ms: T0 + 100_000 + 290_000,
       });
-      // ListenBrainz's "identical current track is ignored" leaves the row as it is.
+      // ListenBrainz refreshes the current track and retains submitted metadata.
       const kept = upsertNowPlaying(m, {
         did: ALICE,
         artist: 'Radiohead',
@@ -109,7 +261,7 @@ describe('now playing', () => {
         source: 'listenbrainz',
         sameTrack: 'keep',
       });
-      expect(kept.outcome).toBe('unchanged');
+      expect(kept.outcome).toBe('refreshed');
       expect(rowOf(db, ALICE)!.expires_at_ms).toBe(T0 + 390_000);
       expect(count(db)).toBe(1);
 
@@ -231,9 +383,9 @@ describe('now playing', () => {
       const none = upsertNowPlaying(m, { did: ALICE, artist: 'Radiohead', track: 'Reckoner', source: 'lastfm' });
       expect(none.outcome).toBe('refreshed');
       expect(rowOf(db, ALICE)).toMatchObject({
-        duration_seconds: null,
+        duration_seconds: 120,
         started_at_ms: T0,
-        expires_at_ms: T0 + 20_000 + 600_000,
+        expires_at_ms: T0 + 20_000 + 120_000,
       });
 
       // A non-finite duration is refused and leaves the row untouched.

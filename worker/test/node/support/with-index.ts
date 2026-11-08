@@ -410,6 +410,8 @@ const METHODS: Record<keyof IndexRpc, true> = {
   recordStatus: true,
   stats: true,
   profile: true,
+  nowPlaying: true,
+  followedNowPlaying: true,
   following: true,
   followers: true,
   exportUser: true,

@@ -30,7 +30,9 @@ import hostSource from '../../src/app/host.ts?raw';
 import * as coreModule from '../../src/app/index-core';
 import { IndexCore } from '../../src/app/index-core';
 import indexCoreSource from '../../src/app/index-core.ts?raw';
+import { MemoryRevocations } from '../../src/app/revocations';
 import servicesSource from '../../src/app/services.ts?raw';
+import { createWebSessions, SESSION_COOKIE } from '../../src/bff/sessions';
 import type { IndexRpc, LogLevel, ScrobbleRow } from '../../src/do/contracts';
 import type { Db, SqlParam } from '../../src/do/db';
 import { migrate } from '../../src/do/migrate';
@@ -39,6 +41,7 @@ import { markConnected } from '../../src/do/status';
 import { type AlarmStorage, nextDue, TIMER_NAMES } from '../../src/do/timers';
 import { SOCKET_STATUS_PATH, socketAdminHandler } from '../../src/http/admin';
 import { scrobbleDto } from '../../src/http/scrobbles-read';
+import { writesFeature } from '../../src/http/writes';
 import {
   ALICE,
   BOB,
@@ -68,6 +71,8 @@ const KIND: Record<keyof IndexRpc, 'read' | 'write'> = {
   recordStatus: 'read',
   stats: 'read',
   profile: 'read',
+  nowPlaying: 'read',
+  followedNowPlaying: 'read',
   following: 'read',
   followers: 'read',
   exportUser: 'read',
@@ -155,7 +160,20 @@ function dumpAll(db: Db): Record<string, unknown[]> {
 
 it('every IndexRpc read method returns the same body through its HTTP or admin-socket route as through a direct IndexCore call over the same database', async () => {
   const kit = await kitControl();
-  const h = await harness('core-reads');
+  let sessions: ReturnType<typeof createWebSessions> | null = null;
+  const h = await harness('core-reads', {
+    features: [
+      writesFeature({
+        sessions: (c) =>
+          (sessions = createWebSessions({
+            db: c.deps.db,
+            clock: c.deps.clock,
+            random: c.deps.random,
+            revocations: new MemoryRevocations(c.deps.clock),
+          })),
+      }),
+    ],
+  });
   await ingestFixture(h, kit);
   const asOfNs = fromMs(control.clock.nowMs());
   const r01 = uriOf(ALICE, 'r01');
@@ -325,6 +343,23 @@ it('every IndexRpc read method returns the same body through its HTTP or admin-s
       route: get(`/api/v1/users/${DAVE}/profile`),
       seen: errorCode,
       expected: (v) => nullIs404(v, () => ({ status: 200 })),
+    },
+    {
+      method: 'nowPlaying',
+      args: [ALICE, false],
+      route: get(`/api/v1/users/${ALICE}/now-playing`),
+      seen: (r) => ({ status: r.status, body: { nowPlaying: (r.body as { nowPlaying: unknown }).nowPlaying } }),
+      expected: (v) => ({ status: 200, body: { nowPlaying: v === null ? null : json(v) } }),
+    },
+    {
+      method: 'followedNowPlaying',
+      args: [ALICE],
+      route: () =>
+        h.request('/api/v1/feed/now-playing', {
+          headers: { cookie: `${SESSION_COOKIE}=${sessions!.create(ALICE).token}` },
+        }),
+      seen: (r) => ({ status: r.status, body: { items: (r.body as { items: unknown[] }).items } }),
+      expected: (v) => ({ status: 200, body: { items: json(v) } }),
     },
     {
       method: 'following',

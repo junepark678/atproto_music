@@ -204,7 +204,7 @@ The owner's word is "synced". Our definition: canonical MusicBrainz data is reso
   - A ListenBrainz love or unlove with no submitted MBID falls back to the matched recording MBID.
   - If the lookup is still pending, defer the row for up to 24 h. Do not ignore it.
   - Rows are marked `ignored` with `no_recording_mbid` only after the track resolves as unmatched.
-- **Now playing.** `NowPlaying.musicbrainz`, if M1 didn't already add it.
+- **Now playing.** Add `NowPlaying.musicbrainz` from the exact local matched tuple on profile and followed-feed reads after visibility filtering. Batch the feed lookup, make no upstream request on reads, and preserve submitted values and existing sharing behavior.
 
 ### M3 Web display (base: M2)
 

@@ -927,49 +927,55 @@ const MIGRATION_14: Migration = {
 
 const MIGRATION_15: Migration = {
   version: 15,
+  name: 'detailed_now_playing',
+  statements: [
+    'ALTER TABLE now_playing ADD COLUMN updated_at_ms INTEGER',
+    'ALTER TABLE now_playing ADD COLUMN track_number INTEGER',
+    'ALTER TABLE now_playing ADD COLUMN release_mbid TEXT',
+    'ALTER TABLE now_playing ADD COLUMN release_group_mbid TEXT',
+    'ALTER TABLE now_playing ADD COLUMN artist_mbids TEXT',
+    'ALTER TABLE now_playing ADD COLUMN isrc TEXT',
+    'ALTER TABLE now_playing ADD COLUMN submission_client_version TEXT',
+    'ALTER TABLE now_playing ADD COLUMN music_service TEXT',
+    'ALTER TABLE now_playing ADD COLUMN media_player TEXT',
+    'ALTER TABLE now_playing ADD COLUMN scrobbled_at_ms INTEGER',
+  ],
+};
+const MIGRATION_16: Migration = {
+  version: 16,
   name: 'musicbrainz_track_matches',
   statements: [
     `CREATE TABLE mb_tracks (
-      artist_key TEXT NOT NULL,
-      track_key TEXT NOT NULL,
-      album_key TEXT NOT NULL DEFAULT '',
-      status TEXT NOT NULL DEFAULT 'pending',
-      priority INTEGER NOT NULL DEFAULT 0,
-      attempts INTEGER NOT NULL DEFAULT 0,
-      next_attempt_ms INTEGER NOT NULL DEFAULT 0,
-      last_attempt_ms INTEGER,
-      submitted_recording_mbid TEXT,
-      matched_by TEXT,
-      score INTEGER,
-      recording_mbid TEXT,
-      title TEXT,
-      artist_credit TEXT,
-      artist_mbids TEXT,
-      release_mbid TEXT,
-      release_title TEXT,
-      release_group_mbid TEXT,
-      duration_ms INTEGER,
-      isrcs TEXT,
-      first_release_date TEXT,
-      synced_at_ms INTEGER,
-      created_at_ms INTEGER NOT NULL,
+      artist_key TEXT NOT NULL, track_key TEXT NOT NULL, album_key TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'pending', priority INTEGER NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0,
+      next_attempt_ms INTEGER NOT NULL DEFAULT 0, last_attempt_ms INTEGER, submitted_recording_mbid TEXT, matched_by TEXT, score INTEGER,
+      recording_mbid TEXT, title TEXT, artist_credit TEXT, artist_mbids TEXT, release_mbid TEXT, release_title TEXT, release_group_mbid TEXT,
+      duration_ms INTEGER, isrcs TEXT, first_release_date TEXT, synced_at_ms INTEGER, created_at_ms INTEGER NOT NULL,
       PRIMARY KEY (artist_key, track_key, album_key)
     )`,
     'CREATE INDEX mb_tracks_due ON mb_tracks(status,next_attempt_ms,priority)',
   ],
 };
-const MIGRATION_16: Migration = {
-  version: 16,
+const MIGRATION_17: Migration = {
+  version: 17,
   name: 'musicbrainz_global_pacing',
   statements: [
     'CREATE TABLE mb_pacing (singleton INTEGER PRIMARY KEY NOT NULL, available_at_ms INTEGER NOT NULL DEFAULT 0)',
   ],
 };
-const MIGRATION_17: Migration = {
-  version: 17,
+const MIGRATION_18: Migration = {
+  version: 18,
   name: 'musicbrainz_seed_cursor',
   statements: [
     "CREATE TABLE mb_seed_state (singleton INTEGER PRIMARY KEY NOT NULL, cursor_uri TEXT NOT NULL DEFAULT '', complete INTEGER NOT NULL DEFAULT 0)",
+  ],
+};
+const MIGRATION_19: Migration = {
+  version: 19,
+  name: 'musicbrainz_love_revival_jobs',
+  statements: [
+    `CREATE TABLE mb_love_revive_jobs (artist_key TEXT NOT NULL,track_key TEXT NOT NULL,album_key TEXT NOT NULL DEFAULT '',recording_mbid TEXT NOT NULL,matched_at_ms INTEGER NOT NULL,created_at_ms INTEGER NOT NULL,cursor_link_id TEXT NOT NULL DEFAULT '',PRIMARY KEY (artist_key,track_key,album_key))`,
+    'CREATE INDEX mb_love_revive_jobs_due ON mb_love_revive_jobs(matched_at_ms,artist_key,track_key,album_key)',
   ],
 };
 
@@ -991,6 +997,8 @@ export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_15,
   MIGRATION_16,
   MIGRATION_17,
+  MIGRATION_18,
+  MIGRATION_19,
 ];
 
 /** The schema version this code expects. */
@@ -1057,6 +1065,7 @@ export const TABLES = [
   'mb_tracks',
   'mb_pacing',
   'mb_seed_state',
+  'mb_love_revive_jobs',
 ] as const;
 
 export type TableName = (typeof TABLES)[number];
@@ -1123,4 +1132,5 @@ export const TABLE_CLASS: Readonly<Record<TableName, TableClass>> = {
   mb_tracks: 'non-derived',
   mb_pacing: 'non-derived',
   mb_seed_state: 'non-derived',
+  mb_love_revive_jobs: 'non-derived',
 };

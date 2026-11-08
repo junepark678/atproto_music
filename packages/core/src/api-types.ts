@@ -1,7 +1,8 @@
 // TypeScript shapes of every API payload in docs/planning/API.md as amended by
 // ADR 0004 §9 (api/openapi.yaml 1.1.0). Frozen in Wave 0. ADR 0005 B14
-// (api/openapi.yaml 1.2.0) adds, additively only, the optional Scrobble
-// fields, the extended Capability union and the v1.2 DTOs at the end.
+// (api/openapi.yaml 1.2.0) adds the optional Scrobble fields, extended
+// Capability union and v1.2 DTOs. Draft B23 adds optional MusicBrainz DTO and
+// statistics fields without changing required fields or existing values.
 //
 // Kept DTOs are byte-for-byte the v1 shapes: every object is closed, and an
 // absent optional field is omitted, never null or "". Timestamps in responses
@@ -82,6 +83,19 @@ export interface MusicBrainzMatch {
   syncedAt: Timestamp;
 }
 
+export interface Love {
+  uri: AtUri;
+  cid: Cid;
+  did: Did;
+  artist: string;
+  track: string;
+  album?: string;
+  recordingMbid?: string;
+  createdAt: Timestamp;
+  indexedAt: Timestamp;
+  musicbrainz?: MusicBrainzMatch;
+}
+
 /** `GET /api/v1/scrobbles/{id}`. */
 export interface ScrobbleResult {
   scrobble: Scrobble;
@@ -114,6 +128,39 @@ export interface Profile {
   followerCount: number;
   followingCount: number;
   indexing: Indexing;
+}
+
+export interface NowPlaying {
+  artist: string;
+  track: string;
+  album?: string;
+  albumArtist?: string;
+  trackNumber?: number;
+  durationSeconds?: number;
+  recordingMbid?: string;
+  releaseMbid?: string;
+  releaseGroupMbid?: string;
+  artistMbids?: string[];
+  isrc?: string;
+  startedAt: Timestamp;
+  updatedAt: Timestamp;
+  expiresAt: Timestamp;
+  scrobbledAt?: Timestamp;
+  client?: { name: string; version?: string };
+  musicService?: string;
+  mediaPlayer?: string;
+  musicbrainz?: MusicBrainzMatch;
+  source: 'lastfm' | 'listenbrainz' | 'web';
+  shared?: boolean;
+}
+export interface NowPlayingFeedItem {
+  did: Did;
+  handle: Handle | null;
+  nowPlaying: NowPlaying;
+}
+export interface NowPlayingFeed {
+  items: NowPlayingFeedItem[];
+  serverTime: Timestamp;
 }
 
 export type StatsWindow = 'all' | '7d' | '30d' | '365d';

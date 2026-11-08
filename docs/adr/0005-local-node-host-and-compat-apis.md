@@ -240,10 +240,14 @@ The Workers adapter is **retired** (wave 7, N7-01). Everything runs on Node 26. 
 | `LASTFM_API_ROOT` | `https://ws.audioscrobbler.com/2.0/` | https, DNS name, default port |
 | `LASTFM_AUTH_URL` | `https://www.last.fm/api/auth/` | https, DNS name, default port |
 | `LISTENBRAINZ_API_ROOT` | `https://api.listenbrainz.org/` | https, DNS name, default port |
+| `MUSICBRAINZ_API_ROOT` | `https://musicbrainz.org/ws/2/` | https, DNS name, default port, validated root ending in `/` |
+| `MUSICBRAINZ_ENABLED` | `true` | `true` or `false`; `false` disables MusicBrainz timer egress and preserves local queued state |
 | `ATMUSIC_LASTFM_KNOWN_CLIENTS` | `panoScrobbler:panoScrobbler:Pano Scrobbler` | Public key:secret:name triples (§7.4) |
 | `ATMUSIC_OAUTH_TRANSITION_GENERIC` | `0` | ADR 0004 Q5 flag, off |
 
 `parseNodeConfig(env, opts)` has no environment variable that relaxes any rule. Only the e2e entry (§3.9) passes the test-only option `{fixtureOrigins: true}`; `main.ts` never does.
+
+**MusicBrainz transport (draft B23).** `MUSICBRAINZ_API_ROOT` uses the same `upstream()` validation as the other HTTP roots: HTTPS, DNS hostname, default port and a trailing slash. The timer-only client is created over `bindPolicyFetch(createPolicyFetch({transport: outbound.transportFor('musicbrainz')}), MB_CAPS)`; `MB_CAPS` caps requests at zero body bytes and responses at 1 MiB. The pinned connection and `policyFetch` URL rules apply. The client sends the repository-only User-Agent `atmusic/<version> ( https://github.com/junepark678/atproto_music )`; it does not send a contact email or user identity. A persisted global lane allows at most one request per second, honors 503 `Retry-After`, and is re-armed by the timer without sleeping. `MUSICBRAINZ_ENABLED=false` suppresses resolver egress while leaving queued state available for a later restart.
 
 **Workers-era variables.** `parseNodeConfig` embeds `parseConfig` from `worker/src/config.ts`, which still requires `PLAN` (`paid` or `free`) and `DO_LOCATION_HINT` and builds its slice budget from `BUDGETS[plan]`. Until N7-01 removes them, `parseNodeConfig` passes `PLAN='paid'` and `DO_LOCATION_HINT=''` internally and rejects any operator-set `PLAN` or `DO_LOCATION_HINT` with a ConfigError citing ADR 0005 (N1-07).
 
@@ -1472,6 +1476,8 @@ Each test file gets its own database file, through the shim and after it.
 ## 16. Amendments (B-series)
 N0-02 writes the issue-amendment texts in `docs/planning/AMENDMENTS-node.md`, in the style of AMENDMENTS-workers.md.
 
+**B23 is a draft, not an accepted ADR amendment and not published to an issue.** Its implementation evidence and final wording remain subject to review.
+
 | Id | Amends | Text |
 |---|---|---|
 | **B1** | A1 deployment | One Node 26 process (systemd user unit, `127.2.0.1:8888`), one SQLite file, secrets as a systemd credential, public origin unchanged, exposure owner-chosen. Single instance; multi-writer stays deferred. |
@@ -1494,6 +1500,8 @@ N0-02 writes the issue-amendment texts in `docs/planning/AMENDMENTS-node.md`, in
 | **B18** | A20 meta | `stage` reflects the Node composition, and the capabilities follow B14. |
 | **B19** | Case map (ADR 0004 §10.4) | A retirement citing an amendment superseded by this ADR (A1, A2, A3, A4, A5, A11, A12, A15, A16, A18, A19, or D where B16 restores the item) is invalid; `retired:B<n>` is allowed when B*n* names the case. |
 | **B20** | Sign-in (new) | Sign-in is restricted to `ATMUSIC_SIGNIN_DIDS` unless `ATMUSIC_SIGNIN_POLICY=open`, and the policy is reconciled at startup and every 10 minutes (a removed DID loses its OAuth session, web sessions and credentials). OAuth sessions are kept alive only while the DID is in use. Users can disconnect with `DELETE /api/v1/account/connection`. The OAuth callback is protected against login CSRF by the `__Host-atmusic_oauth` cookie. |
+| **B23 (draft)** | MusicBrainz enrichment | Optional MusicBrainz metadata on Scrobble and Love read DTOs and unambiguous MBIDs on statistics top lists; normalized-key joins use only stored matches and never replace submitted display values. A local-only queue and timer use a validated HTTPS root, pinned `policyFetch`, repository User-Agent, 1 request/second global pacing, persisted retry state and a kill switch. Enrichment and pacing/seed tables are non-derived and restore keeps live rows. `NowPlaying.musicbrainz` is deferred to M2 after N1 integration. |
+| **B22 (DRAFT; not published)** | Detailed now-playing reads (new) | Add the closed `NowPlaying` and `NowPlayingFeed` DTOs and GET `/api/v1/users/{did}/now-playing` plus signed-in GET `/api/v1/feed/now-playing`. The user route exposes only current shared playback to visitors and permits the owner to read a private current row with `shared:false`; the feed is capped at 50 followed, active, shared, unexpired rows with verified handles. Responses use ISO timestamps and `Cache-Control: no-store`. This amendment is a draft and is not published. |
 
 ---
 

@@ -1199,5 +1199,59 @@
     "path": "/api/v1/imports/{id}/resume",
     "status": 404,
     "example": "error-404"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/feed/now-playing",
+    "status": 200,
+    "example": "v1.2-now-playing-feed",
+    "headers": {
+      "Cache-Control": "no-store"
+    }
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/feed/now-playing",
+    "status": 401,
+    "example": "v1.2-error-401",
+    "headers": {
+      "Cache-Control": "no-store"
+    }
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/feed/now-playing",
+    "status": 429,
+    "example": "error-429",
+    "headers": {
+      "Cache-Control": "no-store"
+    }
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/users/{did}/now-playing",
+    "status": 200,
+    "example": "v1.2-now-playing-response",
+    "headers": {
+      "Cache-Control": "no-store"
+    }
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/users/{did}/now-playing",
+    "status": 422,
+    "example": "error-422",
+    "headers": {
+      "Cache-Control": "no-store"
+    }
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/users/{did}/now-playing",
+    "status": 429,
+    "example": "error-429",
+    "headers": {
+      "Cache-Control": "no-store"
+    }
   }
 ]
