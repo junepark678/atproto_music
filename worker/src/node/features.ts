@@ -94,6 +94,8 @@ import { type ConnectJetstream, JetstreamConnectError } from '../do/ingest/jetst
 import { deleteExpiredNowPlaying } from '../do/read/now-playing';
 import { sweepExpiredLinkStates } from '../forward/links';
 import { UpstreamPacing } from '../forward/upstream-pacing';
+import { createMusicBrainzClient, MB_CAPS } from '../musicbrainz/client';
+import { createMusicBrainzResolver } from '../musicbrainz/resolver';
 import { IGNORED_LISTEN_RETENTION_MS } from '../http/account';
 import { authFeature } from '../http/auth';
 import { credentialsFeature } from '../http/credentials';
@@ -117,7 +119,7 @@ import type { Feature, FeatureContext } from './compose';
 import type { NodeConfig } from './config';
 import { createJetstreamWsConnector, jetstreamWsTarget, type WsClientCtor } from './jetstream-ws';
 import { type PinnedLookup, TransportError } from './pinned-transport';
-import { createPolicyFetch } from './policy-fetch';
+import { bindPolicyFetch, createPolicyFetch } from './policy-fetch';
 import type { Secrets } from './secrets';
 
 // ---------------------------------------------------------------------------
@@ -135,6 +137,7 @@ export const OUTBOUND_CONSUMERS = [
   'lastfm-import',
   'listenbrainz-import',
   'jetstream',
+  'musicbrainz',
 ] as const;
 export type OutboundConsumer = (typeof OUTBOUND_CONSUMERS)[number];
 
@@ -146,6 +149,7 @@ export const OUTBOUND_WIRES = Object.freeze({
   forward: ['lastfm-forward', 'listenbrainz-forward'],
   imports: ['lastfm-import', 'listenbrainz-import'],
   jetstream: ['jetstream'],
+  musicbrainz: ['musicbrainz'],
 } as const satisfies Record<string, readonly OutboundConsumer[]>);
 export type OutboundWire = keyof typeof OUTBOUND_WIRES;
 
@@ -381,6 +385,26 @@ const REAUTH_ERRORS = new Set(['TokenRefreshError', 'TokenRevokedError', 'TokenI
 export async function productionFeatures(options: ProductionFeatureOptions): Promise<ProductionFeatures> {
   const { config, secrets, revocations, outbound } = options;
   const pacing = new UpstreamPacing(options.clock);
+  let musicBrainzResolver: ReturnType<typeof createMusicBrainzResolver> | null = null;
+  const musicBrainzClient = createMusicBrainzClient({
+    fetch: bindPolicyFetch(createPolicyFetch({ transport: outbound.transportFor('musicbrainz'), ...(options.timer === undefined ? {} : { timer: options.timer }) }), MB_CAPS),
+    apiRoot: config.musicbrainzApiRoot,
+    version: '0.0.0',
+  });
+  const musicbrainzFeature: Feature = {
+    name: 'musicbrainz',
+    extensions: [{ name: 'musicbrainz', start(ctx, now) { ctx.schedule('musicbrainz', now); }, timers: { musicbrainz: async (now, ctx) => {
+      const resolver = musicBrainzResolver;
+      if (resolver) {
+        const result = await resolver.run();
+        ctx.schedule('musicbrainz', result.availableAt > now ? result.availableAt : now + 300_000);
+      } else ctx.schedule('musicbrainz', now + 300_000);
+    } } }],
+    services(ctx) {
+      musicBrainzResolver = createMusicBrainzResolver({ db: ctx.deps.db, client: musicBrainzClient, clock: ctx.deps.clock, enabled: config.musicbrainzEnabled });
+      return {};
+    },
+  };
 
   let context: FeatureContext | null = null;
   let sessions: WebSessions | null = null;
@@ -618,6 +642,7 @@ export async function productionFeatures(options: ProductionFeatureOptions): Pro
     outbox,
     keepalive,
     expiry,
+    musicbrainzFeature,
     meta,
   ];
   if (options.backups !== undefined) features.push({ name: 'backup', extensions: [backupExtension(options.backups)] });

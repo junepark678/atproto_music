@@ -4,6 +4,7 @@ import type { Db } from '../do/db';
 import type { MusicBrainzOutcome } from './client';
 import type { TrackKey } from './store';
 import { musicKeyId } from '@atmusic/core/music-key';
+import type { CoreExtension } from '../app/host';
 
 const DAY = 86_400_000;
 const MAX_RUN_REQUESTS = 3;
@@ -142,4 +143,18 @@ export function createMusicBrainzResolver(options: { db: Db; client: ResolverCli
     db.run(`UPDATE mb_tracks SET status=?,attempts=?,next_attempt_ms=?,last_attempt_ms=? WHERE artist_key=? AND track_key=? AND album_key=?`, failed ? 'failed' : 'pending', attempts, now+delay, now, row.artist_key,row.track_key,row.album_key);
   }
   return { run, availableAt };
+}
+
+export function musicBrainzExtension(resolver: ReturnType<typeof createMusicBrainzResolver>): CoreExtension {
+  return {
+    name: 'musicbrainz',
+    start(ctx, now) { ctx.schedule('musicbrainz', now); },
+    timers: {
+      musicbrainz: async (now, ctx) => {
+        const result = await resolver.run();
+        const due = result.availableAt > now ? result.availableAt : now + 300_000;
+        ctx.schedule('musicbrainz', due);
+      },
+    },
+  };
 }

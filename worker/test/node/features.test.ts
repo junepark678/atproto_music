@@ -37,6 +37,7 @@ import { createAppPassword } from '../../src/credentials/app-passwords';
 import { createLbToken } from '../../src/credentials/lb-tokens';
 import { migrate } from '../../src/do/migrate';
 import { EXTENSION_TIMER_NAMES } from '../../src/do/timers';
+import { enqueueTrack } from '../../src/musicbrainz/store';
 import { nodeTimers } from '../../src/node/alarm';
 import {
   checkedLookup,
@@ -73,6 +74,7 @@ interface SpyRequest {
   path: string;
   /** The DoH query name, for DoH requests. */
   dnsName: string | null;
+  userAgent?: string | null;
 }
 
 interface Spy {
@@ -112,6 +114,7 @@ function spySource(bypass: OutboundWire | null = null): Spy {
                 host: url.hostname,
                 path: url.pathname,
                 dnsName: url.pathname === '/dns-query' ? url.searchParams.get('name') : null,
+                userAgent: req.headers.get('user-agent'),
               });
               return router(req);
             },
@@ -173,6 +176,8 @@ function consumerOf(r: SpyRequest, asHost: string, dohHost: string, plcHost: str
       return null;
     case 'jetstream':
       return null;
+    case 'musicbrainz':
+      return r.host === 'musicbrainz.test' ? 'musicbrainz' : null;
   }
 }
 
@@ -270,11 +275,11 @@ async function exercise(w: World, alice: User): Promise<void> {
 }
 
 /** Starts a world on `spy`, with run() building its own Jetstream connector and a recording global fetch. */
-async function spiedWorld(spy: Spy): Promise<{ w: World; alice: User; unpinned: string[] }> {
+async function spiedWorld(spy: Spy, enableMusicbrainz = false): Promise<{ w: World; alice: User; unpinned: string[] }> {
   const { w, alice } = await startWorld({
     outbound: (router) => spy.source(router),
     connectJetstream: null,
-    env: { NAMESPACE_BATCH_PUBLICATION_REF: `sha256:${'b'.repeat(64)}` },
+    env: { NAMESPACE_BATCH_PUBLICATION_REF: `sha256:${'b'.repeat(64)}`, ...(enableMusicbrainz ? { MUSICBRAINZ_API_ROOT: 'https://musicbrainz.test/ws/2/' } : {}) },
   });
   // run() installed the unpinned stub as globalThis.fetch; record every call to it.
   const stub = globalThis.fetch;
@@ -286,17 +291,27 @@ async function spiedWorld(spy: Spy): Promise<{ w: World; alice: User; unpinned: 
   return { w, alice, unpinned };
 }
 
+async function exerciseMusicbrainz(w: World): Promise<void> {
+  enqueueTrack(w.db, { artistKey: 'artist', trackKey: 'track' }, w.clock.nowMs());
+  w.core.extensionTimers.kick('musicbrainz');
+  await w.core.tick('extension');
+}
+
 describe('production features', () => {
   it('every outbound consumer of the production composition receives the injected spy transport, and leaving it out of any one consumer makes the test fail', async () => {
     // With the spy on every wire.
     const spy = spySource();
-    const { w, alice, unpinned } = await spiedWorld(spy);
+    const { w, alice, unpinned } = await spiedWorld(spy, true);
     expect(new Set(spy.handed)).toEqual(new Set(WIRES));
     await exercise(w, alice);
+    await exerciseMusicbrainz(w);
     const full = coverage(w, spy);
     expect(full.missing).toEqual([]);
     expect(full.unclassified).toEqual([]);
     expect(unpinned).toEqual([]);
+    const mbRequest = spy.requests.find((r) => r.wire === 'musicbrainz');
+    expect(mbRequest).toMatchObject({ host: 'musicbrainz.test', path: '/ws/2/recording' });
+    expect(mbRequest?.userAgent).toBe('atmusic/0.0.0 ( https://github.com/junepark678/atproto_music )');
     // The Jetstream connector dialled through the pinned lookup, which refused the private answer: no socket.
     expect(spy.lookups.filter((l) => l.wire === 'jetstream').map((l) => l.hostname)).toContain(JETSTREAM_HOST);
     expect(w.log.logs.some((l) => l.event === 'jetstream_connected')).toBe(false);
@@ -327,8 +342,9 @@ describe('production features', () => {
     // The spy left out of one wire at a time: everything still works, and the check names that wire's consumers.
     for (const wire of WIRES) {
       const partial = spySource(wire);
-      const run = await spiedWorld(partial);
+      const run = await spiedWorld(partial, true);
       await exercise(run.w, run.alice);
+      await exerciseMusicbrainz(run.w);
       const result = coverage(run.w, partial);
       expect(result.missing, `spy left out of ${wire}`).toEqual(
         OUTBOUND_CONSUMERS.filter((c) => (OUTBOUND_WIRES[wire] as readonly OutboundConsumer[]).includes(c)),
@@ -339,7 +355,7 @@ describe('production features', () => {
     }
   }, 180_000);
 
-  it('the production features register the six extension timers in EXTENSION_TIMER_NAMES order and run reconcileSignInPolicy once at startup before listen', async () => {
+  it('the production features register the extension timers in EXTENSION_TIMER_NAMES order and run reconcileSignInPolicy once at startup before listen', async () => {
     const REFUSED = 'did:plc:cccccccccccccccccccccccc';
     const w = new World({
       env: { ATMUSIC_SIGNIN_DIDS: ALICE },
@@ -413,7 +429,7 @@ describe('production features', () => {
 
     // The six extension timers, in their fixed order, each with a handler and a stored due time.
     expect([...server.app.core.extensionLane.names]).toEqual([...EXTENSION_TIMER_NAMES]);
-    expect(EXTENSION_TIMER_NAMES).toEqual(['outbox', 'forward', 'import', 'oauth-keepalive', 'expiry-sweep', 'backup']);
+    expect(EXTENSION_TIMER_NAMES).toEqual(['outbox', 'forward', 'import', 'oauth-keepalive', 'expiry-sweep', 'backup', 'musicbrainz']);
     const stored = w.db.all<{ name: string }>('SELECT name FROM timers ORDER BY name').map((r) => r.name);
     for (const name of EXTENSION_TIMER_NAMES) expect(stored).toContain(name);
     expect(server.features.features.map((f) => f.name)).toEqual([
@@ -429,6 +445,7 @@ describe('production features', () => {
       'outbox',
       'oauth-keepalive',
       'expiry-sweep',
+      'musicbrainz',
       'meta',
       'backup',
     ]);
