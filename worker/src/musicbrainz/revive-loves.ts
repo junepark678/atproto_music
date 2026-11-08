@@ -1,5 +1,6 @@
 import { MusicKeyError, trackKey } from '@atmusic/core/music-key';
 import type { Db } from '../do/db';
+import { storedForwardDedupeKey } from '../outbox/forward-key';
 
 const MAX_SCAN = 100;
 type Key = { artistKey: string; trackKey: string };
@@ -74,10 +75,11 @@ export function enqueueRevivedLoves(
     payload_json: string;
     state: string;
     last_error: string | null;
+    generation: number;
   }>(
-    `SELECT f.rowid,f.link_id,f.did,f.kind,f.dedupe_key,f.payload_json,f.state,f.last_error
+    `SELECT f.rowid,f.link_id,f.did,f.kind,f.dedupe_key,f.payload_json,f.state,f.last_error,f.generation
        FROM mb_forward_love_current c JOIN forward_outbox f ON f.rowid=c.forward_rowid
-       JOIN linked_accounts l ON l.id=c.link_id AND l.service='listenbrainz'
+       JOIN linked_accounts l ON l.id=c.link_id AND l.service='listenbrainz' AND l.generation=f.generation
       WHERE c.love_artist_key=? AND c.love_track_key=? AND c.link_id>? AND f.kind IN ('love','unlove')
       ORDER BY c.link_id LIMIT ?`,
     key.artistKey,
@@ -104,10 +106,13 @@ export function enqueueRevivedLoves(
       kind === 'love'
         ? { ...body, recordingMbid: body.recordingMbid || matchedMbid, origin: 'listenbrainz' }
         : { artist: body.artist, track: body.track, recordingMbid: matchedMbid, origin: 'listenbrainz' };
-    const dedupe = `mb-match:${matchedMbid}:${row.link_id}:${key.artistKey}:${key.trackKey}`;
+    const dedupe = storedForwardDedupeKey(
+      row.generation,
+      `mb-match:${matchedMbid}:${row.link_id}:${key.artistKey}:${key.trackKey}`,
+    );
     const insertedCount = db.run(
-      `INSERT INTO forward_outbox(id,link_id,did,kind,dedupe_key,payload_json,state,attempts,due_at,created_at_ms,updated_at_ms,love_artist_key,love_track_key)
-       VALUES(?,?,?,?,?,?,'queued',0,?,?,?,?,?) ON CONFLICT(link_id,kind,dedupe_key) DO NOTHING`,
+      `INSERT INTO forward_outbox(id,link_id,did,kind,dedupe_key,payload_json,state,attempts,due_at,created_at_ms,updated_at_ms,love_artist_key,love_track_key,generation)
+       VALUES(?,?,?,?,?,?,'queued',0,?,?,?,?,?,?) ON CONFLICT(link_id,kind,dedupe_key) DO NOTHING`,
       crypto.randomUUID().replaceAll('-', '').slice(0, 32),
       row.link_id,
       row.did,
@@ -119,6 +124,7 @@ export function enqueueRevivedLoves(
       now,
       key.artistKey,
       key.trackKey,
+      row.generation,
     ).rowsWritten;
     enqueued += insertedCount;
     if (insertedCount === 1) {
