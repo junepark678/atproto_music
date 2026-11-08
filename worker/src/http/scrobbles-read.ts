@@ -67,7 +67,18 @@ export const EXPECTED_RECORD_URI = 'Expected a URL-encoded AT URI.';
  * (field order kept, absent optionals omitted, private key columns dropped,
  * stored timestamps rendered verbatim, tests/goldens/timestamps.json).
  */
-export function scrobbleDto(row: ScrobbleRow, handles?: Record<string, string | null>): Scrobble {
+type ScrobbleDtoRow = ScrobbleRow & {
+  album_artist?: string | null;
+  track_number?: number | null;
+  artist_mbids?: string | null;
+  release_mbid?: string | null;
+  release_group_mbid?: string | null;
+  isrc?: string | null;
+  submission_client?: string | null;
+  music_service?: string | null;
+};
+
+export function scrobbleDto(row: ScrobbleDtoRow, handles?: Record<string, string | null>): Scrobble {
   return {
     uri: row.uri,
     ...scrobbleProvenance(row),
@@ -82,6 +93,14 @@ export function scrobbleDto(row: ScrobbleRow, handles?: Record<string, string | 
     ...(row.duration_seconds === null ? {} : { durationSeconds: row.duration_seconds }),
     ...(row.recording_mbid === null ? {} : { recordingMbid: row.recording_mbid }),
     indexedAt: row.indexed_at,
+    ...(row.album_artist == null ? {} : { albumArtist: row.album_artist }),
+    ...(row.track_number == null ? {} : { trackNumber: row.track_number }),
+    ...(row.artist_mbids == null ? {} : { artistMbids: JSON.parse(row.artist_mbids) as string[] }),
+    ...(row.release_mbid == null ? {} : { releaseMbid: row.release_mbid }),
+    ...(row.release_group_mbid == null ? {} : { releaseGroupMbid: row.release_group_mbid }),
+    ...(row.isrc == null ? {} : { isrc: row.isrc }),
+    ...(row.submission_client == null ? {} : { submissionClient: row.submission_client }),
+    ...(row.music_service == null ? {} : { musicService: row.music_service }),
     ...(handles === undefined ? {} : { handle: handles[row.did] ?? null }),
   };
 }
