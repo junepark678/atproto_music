@@ -1496,7 +1496,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       'INSERT INTO mb_cover_art(release_mbid,mime_type,image_bytes,byte_size,created_at_ms,fetched_at_ms,last_access_ms) VALUES (?,?,?,?,?,?,?)',
       'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
       'image/jpeg',
-      new Uint8Array([1, 2, 3]),
+      new Uint8Array([1, 2, 3]).buffer,
       3,
       T0,
       T0,
@@ -1512,25 +1512,31 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       T0,
     );
     const prior = {
-      art: db.all('SELECT release_mbid,mime_type,image_bytes,byte_size,created_at_ms,fetched_at_ms,last_access_ms FROM mb_cover_art'),
-      jobs: db.all('SELECT release_mbid,release_group_mbid,status,attempts,next_due_ms,created_at_ms FROM mb_cover_art_jobs'),
+      art: db.all(
+        'SELECT release_mbid,mime_type,image_bytes,byte_size,created_at_ms,fetched_at_ms,last_access_ms FROM mb_cover_art',
+      ),
+      jobs: db.all(
+        'SELECT release_mbid,release_group_mbid,status,attempts,next_due_ms,created_at_ms FROM mb_cover_art_jobs',
+      ),
       usage: db.all('SELECT singleton,used_bytes FROM mb_cover_art_usage'),
     };
 
     expect(migrate(db)).toEqual({ status: 'ready', version: SCHEMA_VERSION });
     expect(
-      db.all('SELECT release_mbid,mime_type,image_bytes,byte_size,created_at_ms,fetched_at_ms,last_access_ms FROM mb_cover_art'),
+      db.all(
+        'SELECT release_mbid,mime_type,image_bytes,byte_size,created_at_ms,fetched_at_ms,last_access_ms FROM mb_cover_art',
+      ),
     ).toEqual(prior.art);
-    expect(db.all('SELECT release_mbid,release_group_mbid,status,attempts,next_due_ms,created_at_ms FROM mb_cover_art_jobs')).toEqual(
-      prior.jobs,
-    );
+    expect(
+      db.all('SELECT release_mbid,release_group_mbid,status,attempts,next_due_ms,created_at_ms FROM mb_cover_art_jobs'),
+    ).toEqual(prior.jobs);
     expect(db.all('SELECT singleton,used_bytes FROM mb_cover_art_usage')).toEqual(prior.usage);
     expect(db.all('SELECT version,name FROM schema_migrations ORDER BY version')).toEqual(
       MIGRATIONS.map(({ version, name: migrationName }) => ({ version, name: migrationName })),
     );
-    expect(db.all("SELECT name FROM sqlite_master WHERE type='index' AND name=?", 'forward_outbox_due_generation')).toEqual([
-      { name: 'forward_outbox_due_generation' },
-    ]);
+    expect(
+      db.all("SELECT name FROM sqlite_master WHERE type='index' AND name=?", 'forward_outbox_due_generation'),
+    ).toEqual([{ name: 'forward_outbox_due_generation' }]);
   });
 
   it('EXPLAIN QUERY PLAN for loves by owner, due operations, due forward rows and import items by job uses the new indexes', async () => {
