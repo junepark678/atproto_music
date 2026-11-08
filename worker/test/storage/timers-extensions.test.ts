@@ -176,7 +176,7 @@ function extension(
   return { name, timers };
 }
 
-it("TIMER_NAMES is the seven core names, EXTENSION_TIMER_NAMES the six extension names, and nextDue for one lane ignores the other lane's due rows", async () => {
+it("TIMER_NAMES is the seven core names, EXTENSION_TIMER_NAMES the ten extension names, and nextDue for one lane ignores the other lane's due rows", async () => {
   expect([...TIMER_NAMES]).toEqual([
     'drain',
     'snapshot',
@@ -189,6 +189,7 @@ it("TIMER_NAMES is the seven core names, EXTENSION_TIMER_NAMES the six extension
   expect([...EXTENSION_TIMER_NAMES]).toEqual([
     'outbox',
     'forward',
+    'linked-pull',
     'link-backfill',
     'import',
     'oauth-keepalive',
@@ -263,6 +264,7 @@ it('runDue with a names subset claims only those timers, and two lanes over two 
       'import',
       'jetstream-watchdog',
       'link-backfill',
+      'linked-pull',
       'musicbrainz',
       'oauth-keepalive',
       'outbox',
@@ -281,6 +283,7 @@ it('runDue with a names subset claims only those timers, and two lanes over two 
       'expiry-sweep',
       'import',
       'link-backfill',
+      'linked-pull',
       'musicbrainz',
       'oauth-keepalive',
       'outbox',
@@ -298,6 +301,7 @@ it('runDue with a names subset claims only those timers, and two lanes over two 
     const extRun = await runDue(extAlarm.storage, db, NOW, extensionHandlers(calls), UNLIMITED, EXTENSION_LANE);
     expect(extRun.ran).toEqual([
       'outbox',
+      'linked-pull',
       'link-backfill',
       'import',
       'oauth-keepalive',
@@ -373,7 +377,7 @@ it('a core runDue started while outbox is claimed leaves ~running:outbox untouch
   });
 });
 
-it('extension handlers run on the extension lane in the order outbox, forward, import, oauth-keepalive, expiry-sweep, backup', async () => {
+it('extension handlers run on the extension lane in the order outbox, forward, linked-pull, link-backfill, import, oauth-keepalive, expiry-sweep, backup', async () => {
   await withIndex(async (db) => {
     const calls: string[] = [];
     const record = (name: string) => async () => {
@@ -384,6 +388,7 @@ it('extension handlers run on the extension lane in the order outbox, forward, i
     const b = extension('b', {
       'expiry-sweep': record('expiry-sweep'),
       forward: record('forward'),
+      'linked-pull': record('linked-pull'),
       'link-backfill': record('link-backfill'),
       'oauth-keepalive': record('oauth-keepalive'),
       musicbrainz: record('musicbrainz'),
