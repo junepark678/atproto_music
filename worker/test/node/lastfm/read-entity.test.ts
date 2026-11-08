@@ -155,6 +155,44 @@ describe('Last.fm entity read methods', () => {
     expect(unknownUser.body).toEqual({ error: 6, message: 'User not found' });
   });
 
+  it('track.getInfo fills only missing recording MBID and duration from a local matched row', async () => {
+    const app = await entityApp();
+    const keys = [artistKey('Björk'), trackKey('Björk', 'Jóga')[1]];
+    const albumKey =
+      app.db.one<{ album_key: string | null }>(
+        'SELECT album_key FROM scrobbles WHERE artist_key=? AND track_key=? ORDER BY listened_at DESC LIMIT 1',
+        ...keys,
+      )?.album_key ?? '';
+    app.db.run(
+      'UPDATE scrobbles SET recording_mbid=NULL,duration_seconds=NULL WHERE artist_key=? AND track_key=?',
+      ...keys,
+    );
+    app.db.run(
+      `UPDATE mb_tracks SET status='matched',recording_mbid=?,title='Jóga',artist_credit='Björk',duration_ms=240000
+      WHERE artist_key=? AND track_key=? AND album_key=?`,
+      JOGA_MBID,
+      ...keys,
+      albumKey,
+    );
+    const filled = await get(app, { method: 'track.getInfo', artist: 'Björk', track: 'Jóga' });
+    expect([filled.body.track.mbid, filled.body.track.duration]).toEqual([JOGA_MBID, '240000']);
+
+    app.db.run(
+      'UPDATE scrobbles SET recording_mbid=?,duration_seconds=305 WHERE artist_key=? AND track_key=? AND album_key=?',
+      '00000000-0000-4000-8000-000000000111',
+      ...keys,
+      albumKey,
+    );
+    const retained = await get(app, { method: 'track.getInfo', artist: 'Björk', track: 'Jóga' });
+    expect([retained.body.track.mbid, retained.body.track.duration]).toEqual([
+      '00000000-0000-4000-8000-000000000111',
+      '305000',
+    ]);
+
+    const unmatched = await get(app, { method: 'track.getInfo', artist: 'Radiohead', track: 'Karma Police' });
+    expect([unmatched.body.track.mbid, unmatched.body.track.duration]).toEqual(['', '0']);
+  });
+
   it('artist.getInfo and album.getInfo report stats over every listener and the getTopTags family answers empty lists', async () => {
     const app = await entityApp();
     const artist = await get(app, { method: 'artist.getInfo', artist: 'radiohead', username: 'alice' });
