@@ -15,6 +15,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { parseRevocationLog } from '../../src/app/revocations';
 import { constantTimeEqual } from '../../src/crypto/constant-time';
 import { SCHEMA_VERSION } from '../../src/do/schema';
+import { FORWARD_STORAGE_STATS_REFRESH_MS, refreshForwardStorageStats } from '../../src/forward/storage-stats';
 import { socketAdminHandler } from '../../src/http/admin';
 import { bindAdminSocket } from '../../src/node/admin-socket';
 import { BACKUP_FILE } from '../../src/node/backup';
@@ -138,6 +139,126 @@ function insertOperation(s: RunningServer, id: string, state: string): void {
 }
 
 describe('admin socket', () => {
+  it('reports cached forwarding marker and outbox counts and logical-byte estimates only on the admin socket', async () => {
+    const { server, clock } = await startServer();
+    const did = 'did:plc:storage-metrics-owner';
+    const uri = `at://${did}/com.example.atmusic.love/love1`;
+    server.db.run(
+      `INSERT INTO linked_accounts(id,did,service,remote_user,credential_ciphertext,key_id,created_at_ms,updated_at_ms)
+       VALUES ('metric-link',?,'lastfm','metric-user',X'00','test',?,?)`,
+      did,
+      clock.nowMs(),
+      clock.nowMs(),
+    );
+    server.db.run(
+      `INSERT INTO forward_admissions(did,identity_key,path,source_service,created_at_ms,admission_seq)
+       VALUES (?,'listen:key','api',NULL,?,1)`,
+      did,
+      clock.nowMs(),
+    );
+    server.db.run(
+      `INSERT INTO love_incarnations(uri,incarnation_key,state,path,source_service,updated_at_ms)
+       VALUES (?,'love-incarnation','present','live',NULL,?)`,
+      uri,
+      clock.nowMs(),
+    );
+    server.db.run(
+      `INSERT INTO love_delete_bridges(did,uri,incarnation_key,expected_cid,operation_id,state,created_at_ms)
+       VALUES (?,?,?,'cid-delete','delete-operation','pending',?)`,
+      did,
+      uri,
+      'love-incarnation',
+      clock.nowMs(),
+    );
+    server.db.run(
+      `INSERT INTO love_import_bridges(did,operation_id,uri,incarnation_key,source_service,state,created_at_ms)
+       VALUES (?,'import-operation',?,'love-incarnation','lastfm','bound',?)`,
+      did,
+      uri,
+      clock.nowMs(),
+    );
+    const payload = JSON.stringify({ artist: 'Björk', track: 'Jóga' });
+    server.db.run(
+      `INSERT INTO forward_outbox(id,link_id,generation,did,kind,dedupe_key,payload_json,state,attempts,due_at,
+         created_at_ms,updated_at_ms)
+       VALUES ('metric-row','metric-link',1,?,'scrobble','metric-listen',?,'queued',0,?,?,?)`,
+      did,
+      payload,
+      clock.nowMs(),
+      clock.nowMs(),
+      clock.nowMs(),
+    );
+
+    expect(refreshForwardStorageStats(server.db, clock.nowMs())).toBe(true);
+    expect(refreshForwardStorageStats(server.db, clock.nowMs() + FORWARD_STORAGE_STATS_REFRESH_MS - 1)).toBe(false);
+    const response = await request({ socketPath: server.adminSocket }, 'GET', '/admin/status');
+    expect(response.status).toBe(200);
+    const stats = response.json.forwardStorage as {
+      refreshedAtMs: number;
+      refreshIntervalMs: number;
+      markers: { rows: number; logicalBytesEstimate: number };
+      forwardOutbox: { rows: number; logicalBytesEstimate: number };
+      tables: Record<string, { rows: number; logicalBytesEstimate: number }>;
+    };
+    const byteLength = (...parts: Array<string | null>) =>
+      parts.reduce((total, part) => total + (part === null ? 0 : Buffer.byteLength(part)), 0);
+    const admissionsBytes = byteLength(did, 'listen:key', 'api', null);
+    const incarnationBytes = byteLength(uri, 'love-incarnation', 'present', 'live', null);
+    const deleteBridgeBytes = byteLength(did, uri, 'love-incarnation', 'cid-delete', 'delete-operation', 'pending');
+    const importBridgeBytes = byteLength(did, 'import-operation', uri, 'love-incarnation', 'lastfm', 'bound');
+    const outboxBytes = byteLength(
+      'metric-row',
+      'metric-link',
+      did,
+      'scrobble',
+      'metric-listen',
+      payload,
+      'queued',
+      null,
+    );
+    expect(stats).toEqual({
+      refreshedAtMs: clock.nowMs(),
+      refreshIntervalMs: FORWARD_STORAGE_STATS_REFRESH_MS,
+      markers: {
+        rows: 4,
+        logicalBytesEstimate: admissionsBytes + incarnationBytes + deleteBridgeBytes + importBridgeBytes,
+      },
+      forwardOutbox: { rows: 1, logicalBytesEstimate: outboxBytes },
+      tables: {
+        forward_admissions: { rows: 1, logicalBytesEstimate: admissionsBytes },
+        love_incarnations: { rows: 1, logicalBytesEstimate: incarnationBytes },
+        love_delete_bridges: { rows: 1, logicalBytesEstimate: deleteBridgeBytes },
+        love_import_bridges: { rows: 1, logicalBytesEstimate: importBridgeBytes },
+        forward_outbox: { rows: 1, logicalBytesEstimate: outboxBytes },
+      },
+    });
+    expect(response.json.counters).toContainEqual({
+      name: 'forward_storage',
+      label: 'forward_outbox_logical_bytes_estimate',
+      value: outboxBytes,
+    });
+    expect(JSON.stringify(stats)).not.toContain(did);
+    expect((await request({ port: server.address.port }, 'GET', '/admin/status')).status).toBe(404);
+
+    server.db.run(
+      `INSERT INTO forward_admissions(did,identity_key,path,source_service,created_at_ms,admission_seq)
+       VALUES (?,'listen:key:second','live',NULL,?,2)`,
+      did,
+      clock.nowMs(),
+    );
+    clock.advance(FORWARD_STORAGE_STATS_REFRESH_MS - 1);
+    expect(refreshForwardStorageStats(server.db, clock.nowMs())).toBe(false);
+    const stillCached = await request({ socketPath: server.adminSocket }, 'GET', '/admin/status');
+    expect((stillCached.json.forwardStorage as { markers: { rows: number } }).markers.rows).toBe(4);
+    clock.advance(1);
+    expect(refreshForwardStorageStats(server.db, clock.nowMs())).toBe(true);
+    const refreshed = await request({ socketPath: server.adminSocket }, 'GET', '/admin/status');
+    expect(refreshed.json.forwardStorage).toMatchObject({
+      refreshedAtMs: clock.nowMs(),
+      markers: { rows: 5 },
+    });
+  });
+
   it('GET /admin/status over the 0600 unix socket returns adminStatus with backup age and queue depths; POST /admin/backup creates a backup', async () => {
     const { server, clock, dir } = await startServer();
     const socketPath = server.adminSocket;

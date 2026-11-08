@@ -548,3 +548,55 @@ reuse historical Workers evidence. Later implementation slices own ingest,
 projection, import outbox/rebatching, and removal. N9-01's four-schema
 publication evidence remains unchanged; the batch candidate has no publication
 receipt and no live batch gate.
+
+## B21 draft — linked-account forwarding admission and operations
+
+**Status: DRAFT. Owner publication is required.** Explicitly amends the blanket
+“Never forwarded” clause in ADR 0005 §11.2.5 and the “Not forwarded” list in
+§12.2. The base ADR paragraphs remain unchanged until this draft is published.
+
+> Forwarding suppression = the indexer's own resurrection suppression.
+
+The proposed rule gives each canonical listen identity and love transition a
+durable first-admission marker for exactly the lifetime of its retained
+acceptance/index identity or tombstone. The first path (`api`, `import`, `live`
+or `snapshot`) and trusted import source are preserved. API acceptance and a
+live Jetstream echo share the canonical identity; replay after arbitrary delay,
+operation cleanup, outbox pruning or restart does not create another local
+forward. Snapshot/repair/discovery projection records identity state but does
+not forward; S2 backfill owns historical and pre-generation identities. Import
+source comes only from trusted `import_jobs.source`, not compatibility API
+`origin`: a known-source listen or love can cross-forward to another linked
+service, never its source, and unknown-source items remain excluded.
+
+Love transitions use durable URI/incarnation and API-operation bridges. They
+pair API create/delete acceptance with its Jetstream echo, retain source
+provenance, and distinguish a later delete/re-create. Live verified deletes
+enqueue `unlove` in love-head order; snapshot absence cannot invent one.
+
+Each linked remote account has an immutable generation and explicit admission
+sequence boundary. Same-remote relink preserves it and resumes held rows;
+different-remote relink rotates it, expires queued/held old-generation rows,
+and prevents old asynchronous settlement, retry, revocation or health writes
+from changing the new generation. The generation participates in outbox
+dedupe so S2 backfill can deliver an older identity to a replacement remote.
+Requests already sent upstream before relinking are best-effort and cannot be
+recalled. Local enqueue is exactly once; upstream delivery remains at least
+once because neither service supports idempotency keys across ambiguous
+crashes.
+
+Per-link `last_success_ms`, `last_failure_ms` and consecutive failures persist
+across restart. Transient errors surface after three consecutive failures;
+rejected credentials and permanent bad payloads surface immediately, and a
+successful response clears the error. Retryable rows stop after eight actual
+attempts; an upstream 429 counts, while local pacing waits do not. Admission
+and replay have no age cutoff; Last.fm retains its 13-day send limit, and the
+existing queue-expiry behavior is otherwise unchanged.
+
+Operator metrics and the Unix admin socket expose marker and forward-outbox
+counts plus a five-minute cached logical text-byte estimate. The estimate is
+not SQLite physical size. There is no hard quota or automatic marker cleanup;
+database/free-space reporting and the existing backup disk floor remain the
+operator's storage safeguards. The previously drafted `forward_sent` table
+was discarded before deployment; current migrations 15–20 contain no sent
+ledger or per-destination sent retention.

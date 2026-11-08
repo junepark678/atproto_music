@@ -108,6 +108,7 @@ import {
   type ListenType,
   type TrackMetadata,
 } from './listenbrainz-client';
+import { refreshForwardStorageStats } from './storage-stats';
 import { LASTFM_MIN_INTERVAL_MS, type UpstreamPacing } from './upstream-pacing';
 
 /** Upstream requests per `forward` run (ADR §3.3). */
@@ -754,6 +755,7 @@ export function forwardExtension(runtime: () => ForwardRuntime | null): CoreExte
         const rt = runtime();
         if (rt === null) return;
         const report = await runForward(rt, now);
+        refreshForwardStorageStats(rt.db, rt.clock.nowMs());
         if (report.skipped) return;
         const poll = now + FORWARD_IDLE_POLL_MS;
         ctx.schedule('forward', report.nextDueMs === null ? poll : Math.min(poll, report.nextDueMs), { force: true });

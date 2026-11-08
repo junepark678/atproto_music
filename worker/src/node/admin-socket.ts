@@ -36,6 +36,7 @@ import { errorName } from '../app/index-core';
 import type { Revocations } from '../app/revocations';
 import type { Logger } from '../do/contracts';
 import type { Db } from '../do/db';
+import { readForwardStorageStats } from '../forward/storage-stats';
 import { ADMIN_MAX_BODY_BYTES, type PruneKidOutcome } from '../http/admin';
 import { errorResponse } from '../http/error';
 import { newRequestId } from '../http/request-id';
@@ -305,6 +306,7 @@ export async function hostStatus(deps: HostStatusDeps): Promise<Record<string, u
   return {
     backup: { ...backup, ageMs: backup.lastSuccess?.ageMs ?? null },
     queues,
+    forwardStorage: readForwardStorageStats(db),
     links,
     oauthSessions,
     uploads: { dir: deps.uploadDir, bytes: directoryBytes(deps.uploadDir) },
