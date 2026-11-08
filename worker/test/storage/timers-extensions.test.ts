@@ -189,6 +189,7 @@ it("TIMER_NAMES is the seven core names, EXTENSION_TIMER_NAMES the six extension
   expect([...EXTENSION_TIMER_NAMES]).toEqual([
     'outbox',
     'forward',
+    'link-backfill',
     'import',
     'oauth-keepalive',
     'expiry-sweep',
@@ -261,6 +262,7 @@ it('runDue with a names subset claims only those timers, and two lanes over two 
       'identity-sweep',
       'import',
       'jetstream-watchdog',
+      'link-backfill',
       'musicbrainz',
       'oauth-keepalive',
       'outbox',
@@ -278,6 +280,7 @@ it('runDue with a names subset claims only those timers, and two lanes over two 
       'cover-art',
       'expiry-sweep',
       'import',
+      'link-backfill',
       'musicbrainz',
       'oauth-keepalive',
       'outbox',
@@ -295,6 +298,7 @@ it('runDue with a names subset claims only those timers, and two lanes over two 
     const extRun = await runDue(extAlarm.storage, db, NOW, extensionHandlers(calls), UNLIMITED, EXTENSION_LANE);
     expect(extRun.ran).toEqual([
       'outbox',
+      'link-backfill',
       'import',
       'oauth-keepalive',
       'expiry-sweep',
@@ -380,6 +384,7 @@ it('extension handlers run on the extension lane in the order outbox, forward, i
     const b = extension('b', {
       'expiry-sweep': record('expiry-sweep'),
       forward: record('forward'),
+      'link-backfill': record('link-backfill'),
       'oauth-keepalive': record('oauth-keepalive'),
       musicbrainz: record('musicbrainz'),
       'cover-art': record('cover-art'),

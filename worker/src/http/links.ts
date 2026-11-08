@@ -53,6 +53,7 @@ import { CredentialError } from '../credentials/accounts';
 import { type Box, createBox } from '../crypto/box';
 import { hashToken } from '../crypto/tokens';
 import type { Db } from '../do/db';
+import { linkBackfillExtension } from '../forward/backfill';
 import type { ForwardRuntime } from '../forward/forwarder';
 import { forwardExtension } from '../forward/forwarder';
 import { LASTFM_CAPS, LastfmClient } from '../forward/lastfm-client';
@@ -387,7 +388,7 @@ export function linksFeature(options: LinksFeatureOptions): Feature {
   return {
     name: 'links',
     routes,
-    extensions: [forwardExtension(() => runtime)],
+    extensions: [forwardExtension(() => runtime), linkBackfillExtension(() => runtime)],
     services(context) {
       const service = buildLinksService(context, options);
       runtime = service.forwarding;

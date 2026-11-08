@@ -380,6 +380,8 @@ export interface LinkedAccountRow {
   pull_watermark_ms: number | null;
   last_pull_ms: number | null;
   sync_remote_user: string | null;
+  backfill_failures: number;
+  backfill_next_attempt_ms: number | null;
 }
 
 export interface LinkStateRow {
@@ -408,6 +410,8 @@ export interface ForwardOutboxRow {
   love_track_key: string | null;
   /** Destination generation captured when this forward was admitted. */
   generation: number;
+  /** 0 live; 1 historical backfill. */
+  priority: number;
 }
 
 export interface ImportJobRow {

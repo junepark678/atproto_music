@@ -15,8 +15,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as sqlite from 'node:sqlite';
 import { routerTransport } from '@atmusic/atproto/test-support/router-transport';
+import { listenKey } from '@atmusic/core/listen-key';
+import { albumKey, trackKey } from '@atmusic/core/music-key';
 import { type FixedClock, fixedClock } from '@atmusic/core/test-support/clock';
 import { seededRandom } from '@atmusic/core/test-support/random';
+import { parseRfc3339 } from '@atmusic/core/timestamp';
 import { afterEach, describe, expect, it } from 'vitest';
 import { MemoryRevocations } from '../../../src/app/revocations';
 import type { LinkedAccountRow } from '../../../src/app/rows';
@@ -24,6 +27,8 @@ import { csrfToken } from '../../../src/bff/csrf';
 import { createWebSessions, SESSION_COOKIE, type WebSessions } from '../../../src/bff/sessions';
 import { ensureAccount } from '../../../src/credentials/accounts';
 import { type Box, BoxError, createBox, linkedAad } from '../../../src/crypto/box';
+import { runLinkBackfill } from '../../../src/forward/backfill';
+import { dueRows } from '../../../src/forward/forward-outbox';
 import { LINK_STATE_TTL_MS, saveLink, sweepExpiredLinkStates } from '../../../src/forward/links';
 import { linksFeature } from '../../../src/http/links';
 import { parseSecrets } from '../../../src/node/secrets';
@@ -145,6 +150,270 @@ async function startLastfm(w: World, token: string): Promise<{ state: string; au
 }
 
 describe('link routes', () => {
+  it('backfill scans indexed history newest-first in bounded resumable chunks without upstream calls', async () => {
+    const w = await world();
+    const linked = saveLink(
+      { db: w.app.db, clock: w.clock, random: seededRandom(101), box: w.box },
+      { did: ALICE, service: 'listenbrainz', remoteUser: 'alice_lb', credential: 'lb-token' },
+    );
+    w.app.db.run('INSERT OR IGNORE INTO users(did,joined_at) VALUES(?,?)', ALICE, '2026-01-01T00:00:00.000000000Z');
+    const batch = 501;
+    for (let i = 1; i <= batch; i++) {
+      const artist = `Backfill Artist ${i}`;
+      const track = `Backfill Track ${i}`;
+      const listenedAt = new Date(Date.parse('2026-01-10T00:00:00Z') + i * 1000).toISOString();
+      const ns = parseRfc3339(listenedAt);
+      const [artistKey, trackValue] = trackKey(artist, track);
+      const key = await listenKey({ did: ALICE, listenedAtNs: ns as bigint, artist, track });
+      w.app.db.run(
+        `INSERT INTO scrobbles(uri,cid,did,rkey,revision,artist,track,album,listened_at,created_at,duration_seconds,
+          recording_mbid,indexed_at,artist_key,track_key,album_key) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        `at://${ALICE}/com.example.atmusic.scrobble/r${i}`,
+        `cid-${i}`,
+        ALICE,
+        `r${i}`,
+        `rev-${i}`,
+        artist,
+        track,
+        null,
+        listenedAt.replace(/\.\d{3}Z$/, '.000000000Z'),
+        listenedAt.replace(/\.\d{3}Z$/, '.000000000Z'),
+        null,
+        null,
+        listenedAt.replace(/\.\d{3}Z$/, '.000000000Z'),
+        artistKey,
+        trackValue,
+        null,
+      );
+      if (i <= 2) {
+        w.app.db.run(
+          'INSERT INTO forward_admissions(did,identity_key,path,source_service,created_at_ms,admission_seq) VALUES(?,?,?,?,?,?)',
+          ALICE,
+          key,
+          i === 1 ? 'live' : 'snapshot',
+          null,
+          w.clock.nowMs(),
+          i,
+        );
+      }
+      expect(key).toHaveLength(64);
+    }
+    expect(await runLinkBackfill(w.app.db, seededRandom(102), w.clock.nowMs())).toBe(500);
+    expect(
+      w.app.db.one(
+        'SELECT backfill_state,backfill_done,backfill_total FROM linked_accounts WHERE id=?',
+        linked.link.id,
+      ),
+    ).toEqual({ backfill_state: 'running', backfill_done: 500, backfill_total: batch });
+    expect(w.app.db.one('SELECT count(*) AS n FROM forward_outbox WHERE link_id=?', linked.link.id)).toEqual({
+      n: 500,
+    });
+    expect(
+      w.app.db.one('SELECT priority FROM forward_outbox WHERE link_id=? ORDER BY rowid LIMIT 1', linked.link.id),
+    ).toEqual({ priority: 1 });
+    const first = JSON.parse(
+      w.app.db.one<{ payload_json: string }>(
+        'SELECT payload_json FROM forward_outbox WHERE link_id=? ORDER BY rowid LIMIT 1',
+        linked.link.id,
+      )?.payload_json ?? '{}',
+    ) as { listen?: { track?: string } };
+    expect(first.listen?.track).toBe('Backfill Track 501');
+    enqueueForwards(w.app.db, {
+      did: ALICE,
+      now: w.clock.nowMs(),
+      random: seededRandom(106),
+      items: [
+        {
+          kind: 'scrobble',
+          listenKey: 'live-priority-key',
+          payload: { listen: { artist: 'Live', track: 'Now', timestamp: 1 } },
+        },
+      ],
+    });
+    const due = dueRows(w.app.db, linked.link.id, linked.link.generation, 'scrobble', w.clock.nowMs(), 10);
+    expect(due[0]).toMatchObject({ priority: 0, dedupe_key: 'live-priority-key' });
+    expect(await runLinkBackfill(w.app.db, seededRandom(103), w.clock.nowMs())).toBe(1);
+    expect(
+      w.app.db.one(
+        'SELECT backfill_state,backfill_done,backfill_total FROM linked_accounts WHERE id=?',
+        linked.link.id,
+      ),
+    ).toEqual({ backfill_state: 'done', backfill_done: 501, backfill_total: batch });
+    const liveKey = await listenKey({
+      did: ALICE,
+      listenedAtNs: parseRfc3339('2026-01-10T00:00:01.000Z') as bigint,
+      artist: 'Backfill Artist 1',
+      track: 'Backfill Track 1',
+    });
+    expect(
+      w.app.db.one('SELECT 1 AS yes FROM forward_outbox WHERE link_id=? AND dedupe_key=?', linked.link.id, liveKey),
+    ).toBeNull();
+    expect(w.lb.calls.count()).toBe(0);
+  });
+
+  it('ListenBrainz backfill imports only known indexed loves with a submitted or matched MBID', async () => {
+    const w = await world();
+    const linked = saveLink(
+      { db: w.app.db, clock: w.clock, random: seededRandom(104), box: w.box },
+      { did: ALICE, service: 'listenbrainz', remoteUser: 'alice_lb', credential: 'lb-token' },
+    );
+    w.app.db.run('INSERT OR IGNORE INTO users(did,joined_at) VALUES(?,?)', ALICE, '2026-01-01T00:00:00.000000000Z');
+    const [artistKey, trackKeyValue] = trackKey('Matched Artist', 'Matched Song');
+    const [, matchedAlbumKey] = albumKey('Matched Artist', 'Album') as [string, string];
+    const incarnationKey = 'love:matched-incarnation';
+    const loveUri = `at://${ALICE}/com.example.atmusic.love/love-matched`;
+    w.app.db.run(
+      `INSERT INTO loves(uri,did,rkey,cid,artist,track,album,artist_key,track_key,recording_mbid,created_at,indexed_at)
+       VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+      loveUri,
+      ALICE,
+      'love-matched',
+      'cid-love',
+      'Matched Artist',
+      'Matched Song',
+      'Album',
+      artistKey,
+      trackKeyValue,
+      null,
+      '2026-01-14T00:00:00.000000000Z',
+      '2026-01-15T12:00:00.000000000Z',
+    );
+    w.app.db.run(
+      `INSERT INTO love_incarnations(uri,incarnation_key,state,path,source_service,updated_at_ms)
+       VALUES(?,?,'present','snapshot',NULL,?)`,
+      loveUri,
+      incarnationKey,
+      w.clock.nowMs(),
+    );
+    w.app.db.run(
+      'INSERT INTO forward_admissions(did,identity_key,path,source_service,created_at_ms,admission_seq) VALUES(?,?,?,?,?,?)',
+      ALICE,
+      incarnationKey,
+      'snapshot',
+      null,
+      w.clock.nowMs(),
+      1,
+    );
+    w.app.db.run(
+      `INSERT INTO mb_tracks(artist_key,track_key,album_key,status,recording_mbid,created_at_ms)
+       VALUES(?,?,?,'matched','aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',?)`,
+      artistKey,
+      trackKeyValue,
+      matchedAlbumKey,
+      w.clock.nowMs(),
+    );
+    const importedUri = `at://${ALICE}/com.example.atmusic.love/love-imported-unknown`;
+    w.app.db.run(
+      `INSERT INTO loves(uri,did,rkey,cid,artist,track,album,artist_key,track_key,recording_mbid,created_at,indexed_at)
+       VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+      importedUri,
+      ALICE,
+      'love-imported-unknown',
+      'cid-imported',
+      'Unknown Artist',
+      'Unknown Song',
+      null,
+      'unknown-artist',
+      'unknown-track',
+      null,
+      '2026-01-14T00:00:00.000000000Z',
+      '2026-01-15T12:00:00.000000000Z',
+    );
+    w.app.db.run(
+      `INSERT INTO love_incarnations(uri,incarnation_key,state,path,source_service,updated_at_ms)
+       VALUES(?,?,'present','import',NULL,?)`,
+      importedUri,
+      'love:unknown-import',
+      w.clock.nowMs(),
+    );
+
+    expect(await runLinkBackfill(w.app.db, seededRandom(105), w.clock.nowMs())).toBe(2);
+    const rows = w.app.db.all<{ kind: string; payload_json: string }>(
+      'SELECT kind,payload_json FROM forward_outbox WHERE link_id=?',
+      linked.link.id,
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.kind).toBe('love');
+    expect(JSON.parse(rows[0]?.payload_json ?? '{}')).toMatchObject({
+      artist: 'Matched Artist',
+      track: 'Matched Song',
+      recordingMbid: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    });
+    expect(w.lb.calls.count()).toBe(0);
+  });
+
+  it('Last.fm backfill keeps the 13-day listen window while retaining older loves', async () => {
+    const w = await world();
+    const sk = w.lastfm.addSession('alice_fm');
+    const linked = saveLink(
+      { db: w.app.db, clock: w.clock, random: seededRandom(107), box: w.box },
+      { did: ALICE, service: 'lastfm', remoteUser: 'alice_fm', credential: sk },
+    );
+    w.app.db.run('INSERT OR IGNORE INTO users(did,joined_at) VALUES(?,?)', ALICE, '2026-01-01T00:00:00.000000000Z');
+    for (const [suffix, listenedAt] of [
+      ['old', '2025-12-31T00:00:00.000Z'],
+      ['recent', '2026-01-10T00:00:00.000Z'],
+    ] as const) {
+      const artist = `Age ${suffix}`;
+      const track = `Song ${suffix}`;
+      const [artistKey, trackValue] = trackKey(artist, track);
+      const storageTime = listenedAt.replace(/\.\d{3}Z$/, '.000000000Z');
+      w.app.db.run(
+        `INSERT INTO scrobbles(uri,cid,did,rkey,revision,artist,track,album,listened_at,created_at,duration_seconds,
+          recording_mbid,indexed_at,artist_key,track_key,album_key) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        `at://${ALICE}/com.example.atmusic.scrobble/${suffix}`,
+        `cid-${suffix}`,
+        ALICE,
+        suffix,
+        `rev-${suffix}`,
+        artist,
+        track,
+        null,
+        storageTime,
+        storageTime,
+        null,
+        null,
+        storageTime,
+        artistKey,
+        trackValue,
+        null,
+      );
+    }
+    const [artistKey, trackValue] = trackKey('Older Love', 'Loved Track');
+    const loveUri = `at://${ALICE}/com.example.atmusic.love/old-love`;
+    w.app.db.run(
+      `INSERT INTO loves(uri,did,rkey,cid,artist,track,album,artist_key,track_key,recording_mbid,created_at,indexed_at)
+       VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+      loveUri,
+      ALICE,
+      'old-love',
+      'cid-love',
+      'Older Love',
+      'Loved Track',
+      null,
+      artistKey,
+      trackValue,
+      null,
+      '2020-01-01T00:00:00.000000000Z',
+      '2026-01-15T12:00:00.000000000Z',
+    );
+    w.app.db.run(
+      `INSERT INTO love_incarnations(uri,incarnation_key,state,path,source_service,updated_at_ms)
+       VALUES(?,?,'present','snapshot',NULL,?)`,
+      loveUri,
+      'love:old-love',
+      w.clock.nowMs(),
+    );
+    expect(await runLinkBackfill(w.app.db, seededRandom(108), w.clock.nowMs())).toBe(2);
+    const rows = w.app.db.all<{ kind: string; payload_json: string }>(
+      'SELECT kind,payload_json FROM forward_outbox WHERE link_id=?',
+      linked.link.id,
+    );
+    expect(rows.map((row) => row.kind).sort()).toEqual(['love', 'scrobble']);
+    expect(rows.map((row) => row.payload_json).join('\n')).not.toContain('Song old');
+    expect(w.lastfm.calls.count()).toBe(0);
+  });
+
   it.each(['logout', 'logout-all', 'disconnect', 'expiry'] as const)(
     'Last.fm callback cannot relink after %s while auth.getSession is in flight, even with a new same-DID cookie',
     async (revocation) => {
@@ -505,6 +774,15 @@ describe('link routes', () => {
       id,
     );
     await call(w, 'PATCH', `/api/v1/links/${id}`, { token, body: { forwardScrobbles: false } });
+    w.app.db.run(
+      'INSERT INTO forward_admissions(did,identity_key,path,source_service,created_at_ms,admission_seq) VALUES(?,?,?,?,?,?)',
+      ALICE,
+      'listen-admitted-while-disabled',
+      'live',
+      null,
+      w.clock.nowMs(),
+      42,
+    );
     const enabledAgain = await call(w, 'PATCH', `/api/v1/links/${id}`, {
       token,
       body: { forwardScrobbles: true },
@@ -513,6 +791,7 @@ describe('link routes', () => {
       sync: { backfill: { state: 'pending', done: 0, total: 0 } },
     });
     expect(links(w)[0]).toMatchObject({ backfill_state: 'pending', backfill_cursor: null });
+    expect(links(w)[0]?.generation_start_seq).toBe(42);
 
     // Invalid patches and other owners' links.
     expect(

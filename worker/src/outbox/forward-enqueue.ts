@@ -94,6 +94,10 @@ export interface EnqueueForwardsArgs {
   excludeSourceServices?: readonly ('lastfm' | 'listenbrainz')[];
   /** Earliest delivery time (epoch ms); defaults to receipt time. */
   dueAt?: number;
+  /** Targets one link when backfill admits historical rows. */
+  linkId?: string;
+  /** Low-priority historical row; live admissions always use 0. */
+  priority?: 0 | 1;
   now: number;
   /** Ids for new rows (the injected randomness). */
   random: Random;
@@ -119,8 +123,8 @@ export function enqueueForwards(db: Db, args: EnqueueForwardsArgs): number {
       forward_now_playing: number;
     }>(
       `SELECT id,generation,service,forward_scrobbles,forward_now_playing FROM linked_accounts
-       WHERE did = ? AND status = 'active' ORDER BY created_at_ms, id`,
-      args.did,
+       WHERE did = ? AND status = 'active'${args.linkId === undefined ? '' : ' AND id=?'} ORDER BY created_at_ms, id`,
+      ...(args.linkId === undefined ? [args.did] : [args.did, args.linkId]),
     );
     let created = 0;
     for (const item of args.items) {
@@ -150,11 +154,17 @@ export function enqueueForwards(db: Db, args: EnqueueForwardsArgs): number {
           continue;
         if (link[flagColumn(item.kind)] !== 1) continue;
         const id = newOperationId(args.random);
-        const inserted = db.run(
-          `INSERT INTO forward_outbox(id,link_id,generation,did,kind,dedupe_key,payload_json,state,attempts,due_at,
-             created_at_ms, updated_at_ms, love_artist_key, love_track_key)
-           VALUES (?,?,?,?,?,?,?,'queued',0,?,?,?,?,?)
-           ON CONFLICT(link_id,kind,dedupe_key) DO NOTHING`,
+        const insertSql =
+          args.priority === undefined
+            ? `INSERT INTO forward_outbox(id,link_id,generation,did,kind,dedupe_key,payload_json,state,attempts,due_at,
+               created_at_ms, updated_at_ms, love_artist_key, love_track_key)
+             VALUES (?,?,?,?,?,?,?,'queued',0,?,?,?,?,?)
+             ON CONFLICT(link_id,kind,dedupe_key) DO NOTHING`
+            : `INSERT INTO forward_outbox(id,link_id,generation,did,kind,dedupe_key,payload_json,state,attempts,due_at,
+               created_at_ms, updated_at_ms, love_artist_key, love_track_key,priority)
+             VALUES (?,?,?,?,?,?,?,'queued',0,?,?,?,?,?,?)
+             ON CONFLICT(link_id,kind,dedupe_key) DO NOTHING`;
+        const params = [
           id,
           link.id,
           link.generation,
@@ -167,7 +177,9 @@ export function enqueueForwards(db: Db, args: EnqueueForwardsArgs): number {
           args.now,
           loveArtistKey,
           loveTrackKey,
-        ).rowsWritten;
+          ...(args.priority === undefined ? [] : [args.priority]),
+        ];
+        const inserted = db.run(insertSql, ...params).rowsWritten;
         created += inserted;
         if (inserted === 1 && loveArtistKey !== null && loveTrackKey !== null) {
           const row = db.one<{ rowid: number }>('SELECT rowid FROM forward_outbox WHERE id=?', id);

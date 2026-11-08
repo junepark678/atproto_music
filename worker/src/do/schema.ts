@@ -1106,6 +1106,25 @@ const MIGRATION_S2_SYNC: Migration = {
   ],
 };
 
+const MIGRATION_S2_BACKFILL_PRIORITY: Migration = {
+  version: 25,
+  name: 'forward_backfill_priority',
+  statements: [
+    'ALTER TABLE forward_outbox ADD COLUMN priority INTEGER NOT NULL DEFAULT 0',
+    'CREATE INDEX forward_outbox_priority_due ON forward_outbox(link_id,generation,priority,state,due_at,created_at_ms)',
+  ],
+};
+
+const MIGRATION_S2_BACKFILL_RETRY: Migration = {
+  version: 26,
+  name: 'forward_backfill_retry_state',
+  statements: [
+    'ALTER TABLE linked_accounts ADD COLUMN backfill_failures INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE linked_accounts ADD COLUMN backfill_next_attempt_ms INTEGER',
+    'CREATE INDEX linked_accounts_backfill_due ON linked_accounts(backfill_state,backfill_next_attempt_ms,created_at_ms,id)',
+  ],
+};
+
 export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_1,
   MIGRATION_2,
@@ -1131,6 +1150,8 @@ export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_S1_ADMISSIONS,
   MIGRATION_S1_GENERATIONS,
   MIGRATION_S2_SYNC,
+  MIGRATION_S2_BACKFILL_PRIORITY,
+  MIGRATION_S2_BACKFILL_RETRY,
 ];
 
 /** The schema version this code expects. */

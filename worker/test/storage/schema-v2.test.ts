@@ -465,6 +465,8 @@ const NEW_TABLES: Record<string, ExpectedTable> = {
       pull_watermark_ms: true,
       last_pull_ms: true,
       sync_remote_user: true,
+      backfill_failures: true,
+      backfill_next_attempt_ms: true,
     }),
     pk: ['id'],
     unique: [['did', 'service']],
@@ -496,6 +498,7 @@ const NEW_TABLES: Record<string, ExpectedTable> = {
       love_artist_key: true,
       love_track_key: true,
       generation: true,
+      priority: true,
     }),
     pk: ['id'],
     unique: [['link_id', 'kind', 'dedupe_key']],
@@ -652,6 +655,30 @@ const NEW_INDEXES: Record<string, [string, number, number, Array<[string, number
       ['link_id', 0],
       ['generation', 0],
       ['state', 0],
+      ['created_at_ms', 0],
+    ],
+  ],
+  linked_accounts_backfill_due: [
+    'linked_accounts',
+    0,
+    0,
+    [
+      ['backfill_state', 0],
+      ['backfill_next_attempt_ms', 0],
+      ['created_at_ms', 0],
+      ['id', 0],
+    ],
+  ],
+  forward_outbox_priority_due: [
+    'forward_outbox',
+    0,
+    0,
+    [
+      ['link_id', 0],
+      ['generation', 0],
+      ['priority', 0],
+      ['state', 0],
+      ['due_at', 0],
       ['created_at_ms', 0],
     ],
   ],
@@ -1455,6 +1482,8 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       "22|'forward_admissions_and_love_provenance'",
       "23|'forward_link_generations_and_health'",
       "24|'linked_account_backfill_and_pull_state'",
+      "25|'forward_backfill_priority'",
+      "26|'forward_backfill_retry_state'",
     ]);
     // The new scrobble columns exist and are NULL on every migrated row.
     expect(after.newColumns).toHaveLength(expectedScrobbles);
@@ -1486,6 +1515,8 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       { version: 22, name: 'forward_admissions_and_love_provenance' },
       { version: 23, name: 'forward_link_generations_and_health' },
       { version: 24, name: 'linked_account_backfill_and_pull_state' },
+      { version: 25, name: 'forward_backfill_priority' },
+      { version: 26, name: 'forward_backfill_retry_state' },
     ]);
     expect(after.compat).toEqual([{ singleton: 1, min_compatible_version: 2 }]);
     expect(after.newTablesEmpty).toEqual(['mb_cover_art_usage']);

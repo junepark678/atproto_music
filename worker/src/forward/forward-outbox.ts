@@ -200,9 +200,9 @@ export function lovePayload(row: Pick<ForwardOutboxRow, 'payload_json'>): Forwar
 export type QueuedRow = ForwardOutboxRow & { seq: number };
 
 const ROW_COLUMNS =
-  'rowid AS seq,id,link_id,generation,did,kind,dedupe_key,payload_json,state,attempts,due_at,last_error,created_at_ms,updated_at_ms';
+  'rowid AS seq,id,link_id,generation,did,kind,dedupe_key,payload_json,state,attempts,due_at,last_error,created_at_ms,updated_at_ms,priority';
 
-/** Due queued rows of `link` of `kind`, oldest first. */
+/** Due queued rows of `link` of `kind`, live priority before history. */
 export function dueRows(
   db: Db,
   linkId: string,
@@ -214,7 +214,7 @@ export function dueRows(
   return db.all<QueuedRow>(
     `SELECT ${ROW_COLUMNS} FROM forward_outbox
      WHERE link_id = ? AND generation=? AND kind=? AND state='queued' AND due_at<=?
-     ORDER BY created_at_ms, rowid LIMIT ?`,
+     ORDER BY priority, created_at_ms, rowid LIMIT ?`,
     linkId,
     generation,
     kind,
