@@ -126,6 +126,20 @@ const NEW_TABLES: Record<string, ExpectedTable> = {
     ],
     pk: ['link_id', 'generation', 'item_key'],
   },
+  linked_pull_tombstones: {
+    columns: [
+      'did',
+      'kind',
+      'identity_key',
+      'listen_second',
+      'artist_key',
+      'track_key',
+      'love_key',
+      'recording_mbid',
+      'created_at_ms',
+    ],
+    pk: ['did', 'kind', 'identity_key'],
+  },
   forward_admissions: {
     columns: ['did', 'identity_key', 'path', 'source_service', 'created_at_ms', 'admission_seq'],
     pk: ['did', 'identity_key'],
@@ -678,6 +692,25 @@ const NEW_INDEXES: Record<string, [string, number, number, Array<[string, number
     [
       ['did', 0],
       ['listen_second', 0],
+    ],
+  ],
+  linked_pull_tombstones_listen_second: [
+    'linked_pull_tombstones',
+    0,
+    1,
+    [
+      ['did', 0],
+      ['listen_second', 0],
+    ],
+  ],
+  linked_pull_tombstones_love_key: [
+    'linked_pull_tombstones',
+    0,
+    1,
+    [
+      ['did', 0],
+      ['love_key', 0],
+      ['recording_mbid', 0],
     ],
   ],
   mb_cover_art_lru: [
@@ -1596,6 +1629,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       "28|'bounded_link_backfill_progress_and_fairness'",
       "29|'link_backfill_staged_membership'",
       "30|'linked_service_pull_foundation'",
+      "31|'linked_pull_deletion_tombstones'",
     ]);
     // The new scrobble columns exist and are NULL on every migrated row.
     expect(after.newColumns).toHaveLength(expectedScrobbles);
@@ -1633,6 +1667,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       { version: 28, name: 'bounded_link_backfill_progress_and_fairness' },
       { version: 29, name: 'link_backfill_staged_membership' },
       { version: 30, name: 'linked_service_pull_foundation' },
+      { version: 31, name: 'linked_pull_deletion_tombstones' },
     ]);
     expect(after.compat).toEqual([{ singleton: 1, min_compatible_version: 2 }]);
     expect(after.newTablesEmpty).toEqual(['mb_cover_art_usage']);

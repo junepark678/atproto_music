@@ -35,6 +35,7 @@ import { validateDisplayString } from '@atmusic/core/scrobble';
 import type { OperationRow, Origin } from '../app/rows';
 import type { ModuleDeps } from '../do/contracts';
 import { admitForwardIdentity } from '../forward/projection';
+import { tombstoneLove } from '../sync/tombstones';
 import { ownRecordKey } from './delete-ops';
 import { deleteMatching, type EnqueueResult, noneMatching } from './follow-ops';
 import { enqueueForwards } from './forward-enqueue';
@@ -143,6 +144,23 @@ export async function enqueueUnlove(
   const prepared = await prepare(intent);
   const now = m.clock.nowMs();
   const operation = m.db.tx(() => {
+    const [artistKeyValue, trackKeyValue] = trackKey(intent.artist, intent.track);
+    const mbids = m.db.all<{ recording_mbid: string | null }>(
+      'SELECT recording_mbid FROM loves WHERE did=? AND artist_key=? AND track_key=?',
+      args.did,
+      artistKeyValue,
+      trackKeyValue,
+    );
+    tombstoneLove(m.db, { did: args.did, identity: `key:${key}`, loveKey: key, recordingMbid: null, nowMs: now });
+    for (const [i, row] of mbids.entries())
+      if (row.recording_mbid)
+        tombstoneLove(m.db, {
+          did: args.did,
+          identity: `mbid:${row.recording_mbid}`,
+          loveKey: key,
+          recordingMbid: row.recording_mbid,
+          nowMs: now + i,
+        });
     const op = insertOperation(
       m.db,
       {

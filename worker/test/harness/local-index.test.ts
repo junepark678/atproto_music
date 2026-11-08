@@ -580,7 +580,7 @@ describe('worker/test/harness', () => {
   it('the migration ledger is ordered across the N/M, M4, S1 and S2 stack', async () => {
     const versions = MIGRATIONS.map((m) => m.version);
     expect(versions.slice(0, 14)).toEqual(Array.from({ length: 14 }, (_, i) => i + 1));
-    expect(versions.slice(-7)).toEqual([24, 25, 26, 27, 28, 29, 30]);
+    expect(versions.slice(-8)).toEqual([24, 25, 26, 27, 28, 29, 30, 31]);
     expect(versions.every((version, index) => index === 0 || version > (versions[index - 1] ?? 0))).toBe(true);
     expect(SCHEMA_VERSION).toBe(MIGRATIONS[MIGRATIONS.length - 1]?.version);
     expect(MIGRATIONS.length).toBeGreaterThanOrEqual(2);
@@ -659,6 +659,9 @@ describe('worker/test/harness', () => {
       );
       db.run(
         "INSERT INTO linked_pull_items(link_id,generation,item_key,kind,source_service,source_account,listened_at_ms,payload_json,payload_bytes,staged_at_ms) VALUES('seed-link',1,'seed-item','listen','listenbrainz','seed',1000,'{}',2,0)",
+      );
+      db.run(
+        "INSERT INTO linked_pull_tombstones(did,kind,identity_key,listen_second,created_at_ms) VALUES('did:plc:seed','listen','seed-listen',1,0)",
       );
       for (const table of TABLES) {
         if (table === 'mb_cover_art_usage') continue; // Migration 21 seeds its singleton usage counter.

@@ -50,7 +50,7 @@ import type { RecordProof } from '@atmusic/atproto/verify/types';
 import type { Random } from '@atmusic/core/deps';
 import { validateFollowRecord } from '@atmusic/core/follow';
 import { validateLoveRecord } from '@atmusic/core/love';
-import { MusicKeyError } from '@atmusic/core/music-key';
+import { MusicKeyError, trackKey } from '@atmusic/core/music-key';
 import { reasonText, type ScrobbleRow, validateScrobbleRecord } from '@atmusic/core/scrobble';
 import { MAX_INGEST_CBOR_BYTES, validateScrobbleBatchRecord } from '@atmusic/core/scrobble-batch';
 import { isTid } from '@atmusic/core/syntax';
@@ -64,6 +64,7 @@ import {
 } from '../../forward/projection';
 import { enqueueTrack } from '../../musicbrainz/store';
 import { enqueueForwards } from '../../outbox/forward-enqueue';
+import { tombstoneListen, tombstoneLove } from '../../sync/tombstones';
 import type { Db } from '../db';
 import { advanceUser, bumpStatsVersion, isSuppressed, loadUser } from './account-state';
 import {
@@ -713,6 +714,34 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
             loveIncarnation.incarnation_key,
           )
         : [];
+    if (o.forwarding && (t.kind === 'scrobble' || t.kind === 'scrobbleBatch')) {
+      const listens = db.all<{ uri: string; listened_at: string; artist_key: string; track_key: string }>(
+        'SELECT uri,listened_at,artist_key,track_key FROM scrobbles WHERE did=? AND (uri=? OR record_uri=?)',
+        t.did,
+        t.uri,
+        t.uri,
+      );
+      for (const listen of listens)
+        tombstoneListen(db, {
+          did: t.did,
+          identity: `live:${listen.uri}`,
+          second: Math.floor(Date.parse(listen.listened_at) / 1000),
+          artistKey: listen.artist_key,
+          trackKey: listen.track_key,
+          nowMs: Number(o.nowNs / 1_000_000n),
+        });
+    }
+    if (o.forwarding && t.kind === 'love' && priorLove) {
+      const [artistKeyValue, trackKeyValue] = trackKey(priorLove.artist, priorLove.track);
+      const key = `${artistKeyValue}\u0000${trackKeyValue}`;
+      tombstoneLove(db, {
+        did: t.did,
+        identity: `live:${t.uri}`,
+        loveKey: key,
+        recordingMbid: priorLove.recording_mbid,
+        nowMs: Number(o.nowNs / 1_000_000n),
+      });
+    }
     const deleted = deleteProjection(db, t.kind, t.uri);
     if (t.kind === 'love' && priorLove && loveIncarnation?.state === 'present') {
       const identityKey = `love-delete:${loveIncarnation.incarnation_key}`;

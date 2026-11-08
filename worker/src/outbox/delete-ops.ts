@@ -37,6 +37,7 @@ import { isTid } from '@atmusic/core/syntax';
 import type { OperationRow, Origin } from '../app/rows';
 import type { ModuleDeps } from '../do/contracts';
 import { bumpStatsVersion } from '../do/write/account-state';
+import { tombstoneListen } from '../sync/tombstones';
 import {
   cancelUnsent,
   insertOperation,
@@ -100,6 +101,27 @@ export function enqueueScrobbleDelete(
   if (rkey === null) throw new NotOwnRecordError();
   const now = m.clock.nowMs();
   const op = m.db.tx(() => {
+    const rows = m.db.all<{
+      uri: string;
+      listened_at: string;
+      artist_key: string;
+      track_key: string;
+      listen_id: string | null;
+    }>(
+      'SELECT uri,listened_at,artist_key,track_key,listen_id FROM scrobbles WHERE did=? AND (uri=? OR record_uri=?)',
+      args.did,
+      args.uri,
+      args.uri,
+    );
+    for (const row of rows)
+      tombstoneListen(m.db, {
+        did: args.did,
+        identity: `uri:${row.uri}`,
+        second: Math.floor(Date.parse(row.listened_at) / 1000),
+        artistKey: row.artist_key,
+        trackKey: row.track_key,
+        nowMs: now,
+      });
     const inserted = insertOperation(
       m.db,
       {
@@ -152,6 +174,27 @@ export function removeScrobbleCreate(
       // one scrobble; a caller must name the exact entry to chain its removal.
       const id = args.listenId;
       if (id === undefined || !isTid(id)) return { status: 'not_found' };
+      const batchUri = `at://${args.did}/${op.collection}/${op.rkey}`;
+      const row = m.db.one<{ listened_at: string; artist_key: string; track_key: string }>(
+        'SELECT listened_at,artist_key,track_key FROM scrobbles WHERE record_uri=? AND listen_id=?',
+        batchUri,
+        id,
+      );
+      const second = row
+        ? Math.floor(Date.parse(row.listened_at) / 1000)
+        : (m.db.one<{ listen_second: number | null }>(
+            'SELECT listen_second FROM listen_keys WHERE did=? AND operation_id=? AND listen_second IS NOT NULL LIMIT 1',
+            args.did,
+            op.id,
+          )?.listen_second ?? null);
+      tombstoneListen(m.db, {
+        did: args.did,
+        identity: `batch:${op.id}:${id}`,
+        second,
+        artistKey: row?.artist_key ?? null,
+        trackKey: row?.track_key ?? null,
+        nowMs: now,
+      });
       const del = insertOperation(
         m.db,
         {

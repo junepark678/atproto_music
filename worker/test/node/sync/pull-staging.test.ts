@@ -1,6 +1,9 @@
+import { trackKey } from '@atmusic/core/music-key';
+import { NS_PER_SECOND, toStorage } from '@atmusic/core/timestamp';
 import { describe, expect, it } from 'vitest';
+import { enqueueScrobbleDelete } from '../../../src/outbox/delete-ops';
 import { hasListenAtSecond, stagePullPage } from '../../../src/sync/pull-staging';
-import { withHarness } from '../outbox/support';
+import { SCROBBLE, withHarness } from '../outbox/support';
 
 describe('linked pull staging', () => {
   it('stages atomically, dedupes by second across retained keys and prior staging, and rejects stale generations', async () => {
@@ -80,6 +83,60 @@ describe('linked pull staging', () => {
       expect(h.db.one('SELECT page_cursor,listen_watermark_ms FROM linked_pull_state WHERE link_id=?', linkId)).toEqual(
         { page_cursor: 'next', listen_watermark_ms: 120000 },
       );
+    });
+  });
+
+  it('API scrobble deletion durably tombstones its indexed second before pull staging', async () => {
+    await withHarness(async (h) => {
+      const did = 'did:plc:tombstone';
+      h.seedUser(did);
+      h.account(did);
+      const uri = `at://${did}/${SCROBBLE}/record`;
+      const [artistKey, trackKeyValue] = trackKey('Artist', 'Track');
+      const at = toStorage(100n * NS_PER_SECOND);
+      h.db.run(
+        `INSERT INTO scrobbles(uri,cid,did,rkey,revision,artist,track,listened_at,created_at,indexed_at,artist_key,track_key)
+        VALUES(?,? ,?,'record','rev','Artist','Track',?,?,?, ?,?)`,
+        uri,
+        'cid',
+        did,
+        at,
+        at,
+        at,
+        artistKey,
+        trackKeyValue,
+      );
+      enqueueScrobbleDelete(h.m, { did, uri, origin: 'web' });
+      const linkId = h.link(did, 'listenbrainz');
+      h.db.run("UPDATE linked_accounts SET remote_user='remote' WHERE id=?", linkId);
+      h.db.run(
+        "INSERT INTO linked_pull_state(link_id,generation,source_service,source_account,listen_watermark_ms,updated_at_ms) VALUES(?,1,'listenbrainz','remote',0,1)",
+        linkId,
+      );
+      expect(
+        stagePullPage(h.db, {
+          linkId,
+          generation: 1,
+          sourceService: 'listenbrainz',
+          sourceAccount: 'remote',
+          did,
+          proposedCursor: 'next',
+          proposedWatermarkMs: 100001,
+          nowMs: 2,
+          items: [
+            {
+              itemKey: 'echo',
+              listenedAtMs: 100000,
+              artistKey,
+              trackKey: trackKeyValue,
+              payload: { artist: 'Artist', track: 'Track' },
+            },
+          ],
+        }),
+      ).toEqual(['tombstoned']);
+      expect(h.db.one("SELECT count(*) AS n FROM linked_pull_tombstones WHERE did=? AND kind='listen'", did)).toEqual({
+        n: 1,
+      });
     });
   });
 });

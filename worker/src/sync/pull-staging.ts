@@ -1,4 +1,5 @@
 import type { Db } from '../do/db';
+import { isListenTombstoned } from './tombstones';
 
 export const PULL_PAGE_MAX_ITEMS = 1000;
 export const PULL_LINK_MAX_ITEMS = 5000;
@@ -10,9 +11,11 @@ export interface PulledListen {
   itemKey: string;
   listenedAtMs: number;
   payload: unknown;
+  artistKey?: string | null;
+  trackKey?: string | null;
 }
 
-export type StageOutcome = 'accepted' | 'duplicate';
+export type StageOutcome = 'accepted' | 'duplicate' | 'tombstoned';
 
 /** Broad pull echo suppression; deliberately separate from canonical import/forward identities. */
 export function hasListenAtSecond(
@@ -102,6 +105,10 @@ export function stagePullPage(
       addBytes = 0;
     for (const item of args.items) {
       const second = Math.floor(item.listenedAtMs / 1000);
+      if (isListenTombstoned(db, args.did, second, item.artistKey, item.trackKey)) {
+        outcomes.push('tombstoned');
+        continue;
+      }
       if (hasListenAtSecond(db, { did: args.did, second, linkId: args.linkId, generation: args.generation })) {
         outcomes.push('duplicate');
         continue;

@@ -1208,6 +1208,27 @@ const MIGRATION_S3_PULL_FOUNDATION: Migration = {
   ],
 };
 
+const MIGRATION_S3_PULL_TOMBSTONES: Migration = {
+  version: 31,
+  name: 'linked_pull_deletion_tombstones',
+  statements: [
+    `CREATE TABLE linked_pull_tombstones (
+      did TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      identity_key TEXT NOT NULL,
+      listen_second INTEGER,
+      artist_key TEXT,
+      track_key TEXT,
+      love_key TEXT,
+      recording_mbid TEXT,
+      created_at_ms INTEGER NOT NULL,
+      PRIMARY KEY(did,kind,identity_key)
+    )`,
+    "CREATE INDEX linked_pull_tombstones_listen_second ON linked_pull_tombstones(did,listen_second) WHERE kind = 'listen'",
+    "CREATE INDEX linked_pull_tombstones_love_key ON linked_pull_tombstones(did,love_key,recording_mbid) WHERE kind = 'love'",
+  ],
+};
+
 export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_1,
   MIGRATION_2,
@@ -1239,6 +1260,7 @@ export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_S2_BACKFILL_BUDGET,
   MIGRATION_S2_BACKFILL_MEMBERSHIP,
   MIGRATION_S3_PULL_FOUNDATION,
+  MIGRATION_S3_PULL_TOMBSTONES,
 ];
 
 /** The schema version this code expects. */
@@ -1321,6 +1343,7 @@ export const TABLES = [
   // Migration 30.
   'linked_pull_state',
   'linked_pull_items',
+  'linked_pull_tombstones',
 ] as const;
 
 export type TableName = (typeof TABLES)[number];
@@ -1402,4 +1425,5 @@ export const TABLE_CLASS: Readonly<Record<TableName, TableClass>> = {
   mb_cover_art_usage: 'non-derived',
   linked_pull_state: 'non-derived',
   linked_pull_items: 'non-derived',
+  linked_pull_tombstones: 'non-derived',
 };
