@@ -9,9 +9,34 @@ import SettingsCredentials from '../../src/routes/settings-credentials';
 import SettingsImports from '../../src/routes/settings-imports';
 import SettingsLinks from '../../src/routes/settings-links';
 import { AppStateContext, createAppState, setSession } from '../../src/state/store';
+import { refreshTimeZonePreference, TIME_ZONE_STORAGE_KEY } from '../../src/state/time-zone';
 import { META, mount, SESSION } from './support';
 
 describe('web/test/routes/settings.test.tsx', () => {
+  it('shows the browser timezone setting signed out, persists selection, and refreshes its example', async () => {
+    localStorage.removeItem(TIME_ZONE_STORAGE_KEY);
+    refreshTimeZonePreference();
+    const app = mount('/settings');
+    await vi.waitFor(() => expect(app.root.querySelector('#time-zone')).not.toBeNull());
+    const select = app.root.querySelector<HTMLSelectElement>('#time-zone')!;
+    expect(app.root.textContent).toContain('Times across the app are shown in this zone. Saved in this browser only.');
+    select.value = 'Asia/Tokyo';
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+    await vi.waitFor(() => expect(localStorage.getItem(TIME_ZONE_STORAGE_KEY)).toBe('Asia/Tokyo'));
+    expect(app.root.querySelector('[role="status"]')?.textContent).toMatch(/GMT\+9|JST/);
+    app.cleanup();
+  });
+
+  it('treats an invalid stored timezone as automatic', async () => {
+    localStorage.setItem(TIME_ZONE_STORAGE_KEY, 'Mars/Olympus_Mons');
+    refreshTimeZonePreference();
+    const app = mount('/settings');
+    await vi.waitFor(() => expect(app.root.querySelector<HTMLSelectElement>('#time-zone')?.value).toBe('auto'));
+    app.cleanup();
+    localStorage.removeItem(TIME_ZONE_STORAGE_KEY);
+    refreshTimeZonePreference();
+  });
+
   it('shows server session identity and the public export link without a local browser outbox', async () => {
     const app = mount('/settings');
     app.state.session.value = SESSION;

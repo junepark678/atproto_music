@@ -2,12 +2,14 @@ import { describe, expect, it } from 'vitest';
 import {
   formatLocalDate,
   formatLocalTime,
+  formatLocalTimeMs,
   localInputToUtc,
   scrubDids,
   toLocalInput,
   zoneName,
 } from '../../src/components/format';
 import { emptyForm, formInput, validateForm } from '../../src/routes/scrobble';
+import { setTimeZonePreference } from '../../src/state/time-zone';
 import { setTimeZone } from '../setup';
 
 const AT = Date.UTC(2026, 0, 15, 11, 0, 0); // 2026-01-15T11:00:00Z
@@ -55,6 +57,24 @@ describe('web/test/components/local-time.test.ts', () => {
   it('scrubs DIDs from server-provided text', () => {
     expect(scrubDids('cannot follow did:plc:aaaaaaaaaaaaaaaaaaaaaaaa or did:web:music.example.com.')).toBe(
       'cannot follow an account or an account.',
+    );
+  });
+
+  it.each([
+    ['Asia/Tokyo', '2026-01-15T20:00:00', '2026-01-15T11:00:00Z'],
+    ['America/New_York', '2026-03-08T03:30:00', '2026-03-08T07:30:00Z'],
+    ['UTC', '2026-01-15T11:00:00', '2026-01-15T11:00:00Z'],
+  ])('formats and round-trips in %s', (zone, local, instant) => {
+    setTimeZonePreference(zone);
+    const ms = Date.parse(instant);
+    expect(toLocalInput(ms)).toBe(local);
+    expect(localInputToUtc(local)).toBe(instant);
+    expect(formatLocalTimeMs(ms)).toBe(
+      new Intl.DateTimeFormat(undefined, {
+        dateStyle: 'medium',
+        timeStyle: 'short',
+        timeZone: zone,
+      }).format(ms),
     );
   });
 });
