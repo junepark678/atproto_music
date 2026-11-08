@@ -79,7 +79,7 @@ import type { Db } from '../do/db';
 import { enqueueTrack, matchedRecordingMbid } from '../musicbrainz/store';
 import { canonicalForwardDedupeKey } from '../outbox/forward-key';
 import { loveKeyOf } from '../outbox/love-ops';
-import { runDeleteSlice } from './delete-forwarder';
+import { nextDeleteWakeAt, runDeleteSlice } from './delete-forwarder';
 import {
   backoffRows,
   clearLastfmKeyRejected,
@@ -147,6 +147,8 @@ export interface ForwardReport {
   skipped: boolean;
   /** Upstream requests sent. */
   requests: number;
+  /** ListenBrainz links that used the shared bucket for a live request this run. */
+  listenbrainzLinkIds: ReadonlySet<string>;
   expired: ExpiryReport | null;
   /** When to run next (epoch ms), or null when nothing is queued. */
   nextDueMs: number | null;
@@ -726,7 +728,8 @@ export async function runForward(
   now: number = rt.clock.nowMs(),
   options: { maxRequests?: number } = {},
 ): Promise<ForwardReport> {
-  if (inFlight.has(rt.db)) return { skipped: true, requests: 0, expired: null, nextDueMs: null };
+  if (inFlight.has(rt.db))
+    return { skipped: true, requests: 0, listenbrainzLinkIds: new Set(), expired: null, nextDueMs: null };
   inFlight.add(rt.db);
   try {
     const max = options.maxRequests ?? MAX_REQUESTS_PER_RUN;
@@ -736,18 +739,22 @@ export async function runForward(
     let at = Math.max(now, rt.clock.nowMs());
     const expired = expireRows(rt.db, at);
     let requests = 0;
+    const listenbrainzLinkIds = new Set<string>();
     // A pick that sends nothing (an unreadable credential revokes its link) still counts against this bound.
     for (let picks = 0; requests < max && picks < max * 4; picks++) {
       const job = pickJob(rt, at);
       if (job === null) break;
       const sent = await execute(rt, job, at);
-      if (sent) requests += 1;
+      if (sent) {
+        requests += 1;
+        if (job.link.service === 'listenbrainz') listenbrainzLinkIds.add(job.link.id);
+      }
       at = Math.max(at, rt.clock.nowMs());
     }
     let next = nextForwardDue(rt, at);
     // Work left that this run could not send (a bound, or rows that turned unsendable): try again shortly.
     if (next !== null && next <= at && requests < max) next = at + LASTFM_MIN_INTERVAL_MS;
-    return { skipped: false, requests, expired, nextDueMs: next };
+    return { skipped: false, requests, listenbrainzLinkIds, expired, nextDueMs: next };
   } finally {
     inFlight.delete(rt.db);
   }
@@ -767,11 +774,10 @@ export function forwardExtension(runtime: () => ForwardRuntime | null): CoreExte
         const rt = runtime();
         if (rt === null) return;
         const report = await runForward(rt, now);
-        let deleteNextDue: number | null = null;
-        // Live forwarding keeps priority. Deletion work consumes at most one
-        // shared ListenBrainz pacing permit only when this tick sent no live row.
-        if (!report.skipped && report.requests === 0) {
-          const deleted = await runDeleteSlice(
+        if (!report.skipped) {
+          // Live work has per-account priority; it does not block unrelated
+          // accounts. The delete lane still takes at most one request here.
+          await runDeleteSlice(
             {
               db: rt.db,
               clock: rt.clock,
@@ -781,8 +787,8 @@ export function forwardExtension(runtime: () => ForwardRuntime | null): CoreExte
               pacing: rt.pacing,
             },
             rt.clock.nowMs(),
+            { livePriorityLinkIds: report.listenbrainzLinkIds },
           );
-          deleteNextDue = deleted.nextDueMs;
         }
         // Pull polling remains a separate future increment. This only drains
         // pages already committed to durable local staging.
@@ -810,12 +816,7 @@ export function forwardExtension(runtime: () => ForwardRuntime | null): CoreExte
         }
         refreshForwardStorageStats(rt.db, rt.clock.nowMs());
         if (report.skipped) return;
-        const deleteDue =
-          rt.db.one<{ due: number | null }>(
-            `SELECT min(CASE WHEN q.deadline_at<q.due_at THEN q.deadline_at ELSE q.due_at END) AS due FROM listenbrainz_deletes q
-           JOIN linked_accounts l ON l.id=q.link_id AND l.generation=q.generation
-           WHERE q.state='queued' AND l.status='active'`,
-          )?.due ?? deleteNextDue;
+        const deleteDue = nextDeleteWakeAt({ db: rt.db, pacing: rt.pacing }, rt.clock.nowMs());
         const due = [report.nextDueMs, deleteDue]
           .filter((v): v is number => v !== null)
           .reduce<number | null>((a, v) => (a === null ? v : Math.min(a, v)), null);

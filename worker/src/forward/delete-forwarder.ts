@@ -3,7 +3,7 @@ import { trackKey } from '@atmusic/core/music-key';
 import type { LinkedAccountRow } from '../app/rows';
 import type { Box } from '../crypto/box';
 import type { Db } from '../do/db';
-import { openLinkCredential, revokeLink } from './links';
+import { noteLinkError, noteLinkSuccess, openLinkCredential, revokeLink } from './links';
 import type { ListenbrainzClient, ListenWindowEntry } from './listenbrainz-client';
 import type { UpstreamPacing } from './upstream-pacing';
 import { listenbrainzPacingKey } from './upstream-pacing';
@@ -12,6 +12,8 @@ export const DELETE_MAX_ATTEMPTS = 32;
 export const DELETE_MAX_REQUESTS_PER_RUN = 1;
 const PAGE_SIZE = 1000;
 const MAX_LOOKUP_CANDIDATES = 4000;
+const MAX_DELETE_ACCOUNT_CANDIDATES = 24;
+const deleteAccountCursor = new WeakMap<Db, string>();
 type Candidate = ListenWindowEntry;
 function sameCredential(db: Db, row: LinkedAccountRow): boolean {
   const live = db.one<{ generation: number; credential_ciphertext: ArrayBuffer; key_id: string; status: string }>(
@@ -67,41 +69,146 @@ export interface DeleteForwardReport {
   nextDueMs: number | null;
 }
 
-/** One durable lookup or delete request at most. Each network result is fenced by current generation and credential. */
-export async function runDeleteSlice(deps: DeleteForwardDeps, now = deps.clock.nowMs()): Promise<DeleteForwardReport> {
-  const row = deps.db.one<{
-    id: string;
-    link_id: string;
-    generation: number;
-    did: string;
-    identity_key: string;
-    listened_at: number;
-    artist_key: string;
-    track_key: string;
-    artist: string;
-    track: string;
-    attempts: number;
-    due_at: number;
-    deadline_at: number;
-    target_msid: string | null;
-    target_listened_at: number | null;
-    last_error: string | null;
-    lookup_min_ts: number | null;
-    lookup_candidates: string | null;
-    lookup_last_earliest: number | null;
-    lookup_last_max: number | null;
-  }>(
-    "SELECT q.* FROM listenbrainz_deletes q JOIN linked_accounts l ON l.id=q.link_id AND l.generation=q.generation WHERE q.state='queued' AND q.due_at<=? AND l.status='active' ORDER BY q.due_at,q.created_at_ms LIMIT 1",
+interface QueuedDeleteHead {
+  id: string;
+  link_id: string;
+  generation: number;
+  due_at: number;
+  deadline_at: number;
+}
+
+interface QueuedDeleteRow extends QueuedDeleteHead {
+  did: string;
+  identity_key: string;
+  listened_at: number;
+  artist_key: string;
+  track_key: string;
+  artist: string;
+  track: string;
+  attempts: number;
+  target_msid: string | null;
+  target_listened_at: number | null;
+  last_error: string | null;
+  lookup_min_ts: number | null;
+  lookup_candidates: string | null;
+  lookup_last_earliest: number | null;
+  lookup_last_max: number | null;
+}
+
+/**
+ * Bound each timer pass to a rotating set of accounts. The keyset cursor is
+ * process-local like the shared pacing buckets; rotation continues even when
+ * every examined account is currently paced, so later accounts cannot starve.
+ */
+function candidateAccountIds(db: Db): string[] {
+  const cursor = deleteAccountCursor.get(db) ?? '';
+  const after = db.all<{ link_id: string }>(
+    `SELECT q.link_id FROM listenbrainz_deletes q
+     JOIN linked_accounts l ON l.id=q.link_id AND l.generation=q.generation
+     WHERE q.state='queued' AND l.status='active' AND q.link_id>?
+     GROUP BY q.link_id ORDER BY q.link_id LIMIT ?`,
+    cursor,
+    MAX_DELETE_ACCOUNT_CANDIDATES,
+  );
+  const result = after.map((r) => r.link_id);
+  if (result.length < MAX_DELETE_ACCOUNT_CANDIDATES) {
+    const before = db.all<{ link_id: string }>(
+      `SELECT q.link_id FROM listenbrainz_deletes q
+       JOIN linked_accounts l ON l.id=q.link_id AND l.generation=q.generation
+       WHERE q.state='queued' AND l.status='active' AND q.link_id<=?
+       GROUP BY q.link_id ORDER BY q.link_id LIMIT ?`,
+      cursor,
+      MAX_DELETE_ACCOUNT_CANDIDATES - result.length,
+    );
+    result.push(...before.map((r) => r.link_id));
+  }
+  return result;
+}
+
+function deleteHead(db: Db, linkId: string, now: number): QueuedDeleteHead | null {
+  return db.one<QueuedDeleteHead>(
+    `SELECT q.id,q.link_id,q.generation,q.due_at,q.deadline_at FROM listenbrainz_deletes q
+     JOIN linked_accounts l ON l.id=q.link_id AND l.generation=q.generation
+     WHERE q.link_id=? AND q.state='queued' AND l.status='active'
+     ORDER BY CASE WHEN q.deadline_at<=? THEN 0 ELSE 1 END,
+       CASE WHEN q.deadline_at<q.due_at THEN q.deadline_at ELSE q.due_at END,q.created_at_ms LIMIT 1`,
+    linkId,
     now,
   );
-  if (!row) return { requests: 0, state: null, nextDueMs: null };
+}
+
+/** Earliest bounded action time, including rate holds and independent deadlines. */
+export function nextDeleteWakeAt(deps: Pick<DeleteForwardDeps, 'db' | 'pacing'>, now: number): number | null {
+  let next: number | null = null;
+  for (const linkId of candidateAccountIds(deps.db)) {
+    const head = deleteHead(deps.db, linkId, now);
+    if (head === null) continue;
+    const link = deps.db.one<{ id: string; generation: number }>(
+      "SELECT id,generation FROM linked_accounts WHERE id=? AND generation=? AND status='active'",
+      linkId,
+      head.generation,
+    );
+    if (link === null) continue;
+    const available = deps.pacing.listenbrainzAvailableAt(listenbrainzPacingKey(link));
+    const actionAt = head.deadline_at <= now ? now : Math.min(head.deadline_at, Math.max(head.due_at, available));
+    next = next === null ? actionAt : Math.min(next, actionAt);
+  }
+  return next;
+}
+
+/** One durable lookup or delete request at most. Each network result is fenced by current generation and credential. */
+export async function runDeleteSlice(
+  deps: DeleteForwardDeps,
+  now = deps.clock.nowMs(),
+  options: { livePriorityLinkIds?: ReadonlySet<string> } = {},
+): Promise<DeleteForwardReport> {
+  let row: QueuedDeleteRow | null = null;
+  let nextCandidateAt: number | null = null;
+  for (const linkId of candidateAccountIds(deps.db)) {
+    deleteAccountCursor.set(deps.db, linkId);
+    if (options.livePriorityLinkIds?.has(linkId)) {
+      const head = deleteHead(deps.db, linkId, now);
+      if (head !== null) {
+        const link = deps.db.one<{ id: string; generation: number }>(
+          "SELECT id,generation FROM linked_accounts WHERE id=? AND generation=? AND status='active'",
+          linkId,
+          head.generation,
+        );
+        if (link !== null) {
+          const pacingAt = deps.pacing.listenbrainzAvailableAt(listenbrainzPacingKey(link));
+          const at = head.deadline_at <= now ? now : Math.min(head.deadline_at, Math.max(head.due_at, pacingAt));
+          nextCandidateAt = nextCandidateAt === null ? at : Math.min(nextCandidateAt, at);
+        }
+      }
+      continue;
+    }
+    const head = deleteHead(deps.db, linkId, now);
+    if (head === null) continue;
+    if (head.deadline_at <= now) {
+      row = deps.db.one<QueuedDeleteRow>("SELECT * FROM listenbrainz_deletes WHERE id=? AND state='queued'", head.id);
+      break;
+    }
+    const link = deps.db.one<{ id: string; generation: number }>(
+      "SELECT id,generation FROM linked_accounts WHERE id=? AND generation=? AND status='active'",
+      linkId,
+      head.generation,
+    );
+    if (link === null) continue;
+    const pacingAt = deps.pacing.listenbrainzAvailableAt(listenbrainzPacingKey(link));
+    const availableAt = Math.max(head.due_at, pacingAt);
+    nextCandidateAt = nextCandidateAt === null ? availableAt : Math.min(nextCandidateAt, availableAt);
+    if (head.due_at > now || pacingAt > now) continue;
+    row = deps.db.one<QueuedDeleteRow>("SELECT * FROM listenbrainz_deletes WHERE id=? AND state='queued'", head.id);
+    if (row !== null) break;
+  }
+  if (!row) return { requests: 0, state: null, nextDueMs: nextCandidateAt ?? nextDeleteWakeAt(deps, now) };
   if (row.deadline_at <= now) {
     deps.db.run(
       "UPDATE listenbrainz_deletes SET state='expired',last_error='retry_deadline',updated_at_ms=? WHERE id=? AND state='queued'",
       now,
       row.id,
     );
-    return { requests: 0, state: 'expired', nextDueMs: null };
+    return { requests: 0, state: 'expired', nextDueMs: nextDeleteWakeAt(deps, now) };
   }
   if (row.attempts >= DELETE_MAX_ATTEMPTS) {
     deps.db.run(
@@ -134,14 +241,13 @@ export async function runDeleteSlice(deps: DeleteForwardDeps, now = deps.clock.n
   }
   const after = (rate: { remaining: number | null; resetInS: number | null }, exhausted = false) =>
     deps.pacing.observeListenbrainz(pacerKey, deps.clock.nowMs(), rate, exhausted);
-  const finishRequest = (rate: { remaining: number | null; resetInS: number | null }) => {
+  const countAttempt = () => {
     deps.db.run(
       'UPDATE listenbrainz_deletes SET attempts=attempts+1,updated_at_ms=? WHERE id=? AND generation=?',
       deps.clock.nowMs(),
       row.id,
       row.generation,
     );
-    after(rate);
   };
   if (row.target_msid !== null && row.target_listened_at !== null) {
     const out = await deps.client.deleteListen(token, {
@@ -150,7 +256,9 @@ export async function runDeleteSlice(deps: DeleteForwardDeps, now = deps.clock.n
     });
     if (!sameCredential(deps.db, link)) return { requests: 1, state: 'stale_response', nextDueMs: null };
     if (out.ok) {
-      finishRequest(out.rate);
+      countAttempt();
+      after(out.rate);
+      noteLinkSuccess(deps.db, link, deps.clock.nowMs());
       deps.db.run(
         "UPDATE listenbrainz_deletes SET state='sent',last_error=NULL,updated_at_ms=? WHERE id=? AND generation=? AND target_msid=? AND target_listened_at=?",
         deps.clock.nowMs(),
@@ -161,30 +269,37 @@ export async function runDeleteSlice(deps: DeleteForwardDeps, now = deps.clock.n
       );
       return { requests: 1, state: 'sent', nextDueMs: null };
     }
+    countAttempt();
     let resultState = 'retry';
+    const holdUntil = out.kind === 'network' ? null : after(out.rate, out.kind === 'status' && out.status === 429);
     if (out.kind === 'status') {
-      after(out.rate, out.status === 429);
       if (out.status === 401) {
         if (revokeLink(deps.db, link, 'credential_revoked', deps.clock.nowMs()))
           deps.db.run(
-            "UPDATE listenbrainz_deletes SET state='failed',attempts=attempts+1,last_error='credential_revoked',updated_at_ms=? WHERE id=? AND generation=?",
+            "UPDATE listenbrainz_deletes SET state='failed',last_error='credential_revoked',updated_at_ms=? WHERE id=? AND generation=?",
             deps.clock.nowMs(),
             row.id,
             row.generation,
           );
         resultState = 'failed';
       } else if (out.status === 400) {
+        noteLinkError(deps.db, link, 'http_400', deps.clock.nowMs(), true);
         deps.db.run(
-          "UPDATE listenbrainz_deletes SET state='failed',attempts=attempts+1,last_error='upstream_400',updated_at_ms=? WHERE id=? AND generation=?",
+          "UPDATE listenbrainz_deletes SET state='failed',last_error='upstream_400',updated_at_ms=? WHERE id=? AND generation=?",
           deps.clock.nowMs(),
           row.id,
           row.generation,
         );
         resultState = 'failed';
       } else {
-        const due = retryAt(deps.clock.nowMs(), row.attempts, deps.random);
+        const error = out.status === 429 ? 'rate_limited' : `http_${out.status}`;
+        noteLinkError(deps.db, link, error, deps.clock.nowMs());
+        const due = Math.max(
+          retryAt(deps.clock.nowMs(), row.attempts, deps.random),
+          holdUntil ?? Number.NEGATIVE_INFINITY,
+        );
         deps.db.run(
-          'UPDATE listenbrainz_deletes SET attempts=attempts+1,due_at=?,last_error=?,updated_at_ms=? WHERE id=? AND generation=? AND deadline_at>?',
+          'UPDATE listenbrainz_deletes SET due_at=?,last_error=?,updated_at_ms=? WHERE id=? AND generation=? AND deadline_at>?',
           due,
           out.status === 429 ? 'rate_limited' : `http_${out.status}`,
           deps.clock.nowMs(),
@@ -194,10 +309,13 @@ export async function runDeleteSlice(deps: DeleteForwardDeps, now = deps.clock.n
         );
       }
     } else {
+      const error = out.kind === 'malformed' ? 'malformed_response' : 'network_error';
+      noteLinkError(deps.db, link, error, deps.clock.nowMs());
       const due = retryAt(deps.clock.nowMs(), row.attempts, deps.random);
       deps.db.run(
-        "UPDATE listenbrainz_deletes SET attempts=attempts+1,due_at=?,last_error='network',updated_at_ms=? WHERE id=? AND generation=? AND deadline_at>?",
+        'UPDATE listenbrainz_deletes SET due_at=?,last_error=?,updated_at_ms=? WHERE id=? AND generation=? AND deadline_at>?',
         due,
+        out.kind === 'malformed' ? 'malformed_response' : 'network',
         deps.clock.nowMs(),
         row.id,
         row.generation,
@@ -229,26 +347,53 @@ export async function runDeleteSlice(deps: DeleteForwardDeps, now = deps.clock.n
   const out = await deps.client.listWindowPage(link.remote_user, token, minTs, PAGE_SIZE);
   if (!sameCredential(deps.db, link)) return { requests: 1, state: 'stale_response', nextDueMs: null };
   if (!out.ok) {
+    deps.db.run(
+      'UPDATE listenbrainz_deletes SET attempts=attempts+1,updated_at_ms=? WHERE id=? AND generation=?',
+      deps.clock.nowMs(),
+      row.id,
+      row.generation,
+    );
+    const holdUntil = out.kind === 'network' ? null : after(out.rate, out.kind === 'status' && out.status === 429);
     if (out.kind === 'status' && out.status === 401) {
       if (revokeLink(deps.db, link, 'credential_revoked', deps.clock.nowMs()))
         deps.db.run(
-          "UPDATE listenbrainz_deletes SET state='failed',attempts=attempts+1,last_error='credential_revoked',updated_at_ms=? WHERE id=? AND generation=?",
+          "UPDATE listenbrainz_deletes SET state='failed',last_error='credential_revoked',updated_at_ms=? WHERE id=? AND generation=?",
           deps.clock.nowMs(),
           row.id,
           row.generation,
         );
     } else if (out.kind === 'status' && out.status === 400) {
+      noteLinkError(deps.db, link, 'http_400', deps.clock.nowMs(), true);
       deps.db.run(
-        "UPDATE listenbrainz_deletes SET state='failed',attempts=attempts+1,last_error='upstream_400',updated_at_ms=? WHERE id=? AND generation=?",
+        "UPDATE listenbrainz_deletes SET state='failed',last_error='upstream_400',updated_at_ms=? WHERE id=? AND generation=?",
         deps.clock.nowMs(),
         row.id,
         row.generation,
       );
     } else {
-      const due = retryAt(deps.clock.nowMs(), row.attempts, deps.random);
+      const error =
+        out.kind === 'malformed'
+          ? 'malformed_response'
+          : out.kind === 'network'
+            ? 'network_error'
+            : out.status === 429
+              ? 'rate_limited'
+              : `http_${out.status}`;
+      noteLinkError(deps.db, link, error, deps.clock.nowMs());
+      const due = Math.max(
+        retryAt(deps.clock.nowMs(), row.attempts, deps.random),
+        holdUntil ?? Number.NEGATIVE_INFINITY,
+      );
       deps.db.run(
-        "UPDATE listenbrainz_deletes SET attempts=attempts+1,due_at=?,last_error='lookup_retry',updated_at_ms=? WHERE id=? AND generation=?",
+        'UPDATE listenbrainz_deletes SET due_at=?,last_error=?,updated_at_ms=? WHERE id=? AND generation=?',
         due,
+        out.kind === 'malformed'
+          ? 'malformed_response'
+          : out.kind === 'network'
+            ? 'network'
+            : out.status === 429
+              ? 'rate_limited'
+              : `http_${out.status}`,
         deps.clock.nowMs(),
         row.id,
         row.generation,
@@ -261,7 +406,14 @@ export async function runDeleteSlice(deps: DeleteForwardDeps, now = deps.clock.n
         deps.db.one<{ due_at: number }>('SELECT due_at FROM listenbrainz_deletes WHERE id=?', row.id)?.due_at ?? null,
     };
   }
-  finishRequest(out.rate);
+  deps.db.run(
+    'UPDATE listenbrainz_deletes SET attempts=attempts+1,updated_at_ms=? WHERE id=? AND generation=?',
+    deps.clock.nowMs(),
+    row.id,
+    row.generation,
+  );
+  after(out.rate);
+  noteLinkSuccess(deps.db, link, deps.clock.nowMs());
   const candidates = [...priorCandidates];
   const seen = new Set(candidates.map((c) => `${c.listenedAt}\0${c.recordingMsid ?? ''}`));
   for (const c of out.value) {

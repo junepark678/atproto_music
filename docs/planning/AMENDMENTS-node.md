@@ -631,11 +631,21 @@ cannot be advanced safely without offset paging. It uses core normalized music k
 `POST /1/delete-listen` HTTP 200 with `status:ok` is accepted asynchronous work,
 not confirmation of absence; S3 pull tombstones remain the resurrection fence.
 The delete lane shares the live ListenBrainz per-link generation bucket, makes
-at most one request per timer visit, yields to live forwarding, and retries
-transient failures with persisted jittered backoff, rate-header pacing, a 32
-actual-attempt ceiling, and a seven-day deadline. Last.fm deliveries are
-recorded as unsupported without egress. Same-remote relink resumes a queue;
-different-remote relink expires old-generation queued rows. Primary API
+at most one request per timer visit, gives live work priority on that same
+account, and continues eligible work for other accounts. It rotates through a
+bounded candidate set so a paced account cannot block available accounts.
+Rate observations from every current-credential HTTP response update the shared
+bucket; a 429 retry is persisted no earlier than the advertised reset time.
+Transient failures use persisted jittered backoff, a 32 actual-attempt ceiling,
+and a seven-day deadline. Expiration is independent of retry due time. Link
+health records transient errors after three failures and clears on a later
+successful response; permanent 400 and current-credential 401 outcomes surface
+immediately. Last.fm deliveries are recorded as unsupported without egress.
+Same-remote relink resumes a queue; different-remote relink expires
+old-generation queued rows. Current terminal forward receipts remain retained
+because they prove past delivery for later local deletion eligibility. Any
+future receipt cleanup must preserve equivalent durable evidence before
+removing them. Primary API
 references: [ListenBrainz Core API](https://listenbrainz.readthedocs.io/en/latest/users/api/core.html).
 The additive S4 schema currently advances the post-S3 version 38 through
 version 42; the delete queue is registered as non-derived restore state.

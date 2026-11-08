@@ -15,7 +15,7 @@
       "total": 0
     },
     "pullEnabled": true,
-    "queued": 0,
+    "queued": 1,
     "failed": 0
   }
 }

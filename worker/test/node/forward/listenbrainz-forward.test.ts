@@ -616,7 +616,7 @@ describe('ListenBrainz forwarding', () => {
       w.app.db.one('SELECT state,last_error,attempts FROM listenbrainz_deletes WHERE id=?', 'malformed-lookup'),
     ).toEqual({
       state: 'queued',
-      last_error: 'lookup_retry',
+      last_error: 'malformed_response',
       attempts: 1,
     });
   });
@@ -695,10 +695,14 @@ describe('ListenBrainz forwarding', () => {
     const responseGate = new Promise<void>((resolve) => {
       release = resolve;
     });
+    const requestStartedAt = w.clock.nowMs();
     w.intercept(async () => {
       entered();
       await responseGate;
-      return Response.json({ status: 'ok' });
+      return Response.json(
+        { status: 'ok' },
+        { headers: { 'X-RateLimit-Remaining': '0', 'X-RateLimit-Reset-In': '600' } },
+      );
     });
     const inflight = runDeleteSlice(deps);
     await requestEntered;
@@ -717,6 +721,14 @@ describe('ListenBrainz forwarding', () => {
       remote_user: 'new_remote',
       status: 'active',
     });
+    expect(w.rt.pacing.listenbrainzAvailableAt(`link:${linkId}:generation:1`)).toBe(requestStartedAt + 1000);
+    expect(w.rt.pacing.listenbrainzAvailableAt(`link:${linkId}:generation:2`)).toBe(Number.NEGATIVE_INFINITY);
+    expect(
+      w.app.db.one(
+        'SELECT last_success_ms,last_failure_ms,last_error,consecutive_failures FROM linked_accounts WHERE id=?',
+        linkId,
+      ),
+    ).toEqual({ last_success_ms: null, last_failure_ms: null, last_error: null, consecutive_failures: 0 });
   });
   it('delete client uses the pinned policy fetch, parses top-level MSID separately from MBID, and accepts async delete 200', async () => {
     const w = await world();

@@ -134,6 +134,10 @@ Credentials = {appPasswords: [{id, label, createdAt, lastUsedAt}], listenbrainzT
 
 `Link.sync.backfill.done` counts eligible indexed-history items settled by enqueue or skip; `total` counts eligible candidate work discovered so far (including duplicate skips) and can grow while the state is `running`. These describe queue work considered, not confirmed upstream deliveries.
 
+`Link.sync.queued` and `failed` remain the counts for the current link generation. They include durable ListenBrainz delete work alongside forward submissions: queued deletes count as `queued`, and terminal delete errors count as `failed`. A delete marked sent means ListenBrainz accepted the asynchronous delete request; it does not confirm remote absence. S3 pull tombstones continue to prevent a deleted listen from being recreated while upstream deletion settles. Existing terminal forward receipts are retained because later local deletion eligibility depends on delivery evidence; any future receipt cleanup must first preserve equivalent evidence.
+
+The existing [`link.json`](../../api/examples/v1.2/link.json) fixture shows a current-generation link with one queued delete.
+
 | Route | Auth | Request | Success payload / status |
 | --- | --- | --- | --- |
 | GET `/oauth/jwks.json` | none | none | 200 `{keys: [{kty:"EC", crv:"P-256", x, y, kid, alg:"ES256", use:"sig"}]}`, never `d` (§5.4) |
