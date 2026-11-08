@@ -95,6 +95,13 @@ export function nowPlayingTtlSeconds(source: NowPlayingSource, durationSeconds: 
   return d >= LASTFM_MIN_DURATION_SECONDS && d <= LASTFM_MAX_DURATION_SECONDS ? d : NOW_PLAYING_DEFAULT_TTL_SECONDS;
 }
 
+function hasValidTtlDuration(source: NowPlayingSource, durationSeconds: number | null | undefined): boolean {
+  const d = wholeSeconds(durationSeconds);
+  return (
+    d !== null && (source === 'listenbrainz' || (d >= LASTFM_MIN_DURATION_SECONDS && d <= LASTFM_MAX_DURATION_SECONDS))
+  );
+}
+
 function sameTrack(row: NowPlayingRow, artist: string, track: string): boolean {
   if (artistKey(row.artist) !== artistKey(artist)) return false;
   return trackKey(row.artist, row.track)[1] === trackKey(artist, track)[1];
@@ -116,25 +123,16 @@ export function upsertNowPlaying(m: Pick<ModuleDeps, 'db' | 'clock'>, input: Now
   return db.tx(() => {
     const existing = db.one<NowPlayingRow>('SELECT * FROM now_playing WHERE did = ?', input.did);
     if (existing !== null && existing.expires_at_ms > now && sameTrack(existing, input.artist, input.track)) {
-      const refreshTtlSeconds =
-        input.durationSeconds != null
-          ? nowPlayingTtlSeconds(input.source, input.durationSeconds)
-          : existing.duration_seconds !== null
-            ? nowPlayingTtlSeconds(input.source, existing.duration_seconds)
-            : Math.max(
-                1,
-                Math.round((existing.expires_at_ms - (existing.updated_at_ms ?? existing.started_at_ms)) / 1000),
-              );
+      const refreshTtlSeconds = hasValidTtlDuration(input.source, input.durationSeconds)
+        ? nowPlayingTtlSeconds(input.source, input.durationSeconds)
+        : Math.max(1, Math.round((existing.expires_at_ms - (existing.updated_at_ms ?? existing.started_at_ms)) / 1000));
       const expires = now + refreshTtlSeconds * 1000;
       if (!Number.isSafeInteger(expires)) throw new RangeError('now-playing duration overflows the expiry');
       const merge = <T>(incoming: T | null | undefined, previous: T | null): T | null => incoming ?? previous;
       const fields = {
         album: merge(input.album, existing.album),
         album_artist: merge(input.albumArtist, existing.album_artist),
-        duration_seconds: merge(
-          input.durationSeconds === undefined ? undefined : durationSeconds,
-          existing.duration_seconds,
-        ),
+        duration_seconds: merge(durationSeconds, existing.duration_seconds),
         recording_mbid: merge(input.recordingMbid, existing.recording_mbid),
         client: merge(input.client, existing.client),
         track_number: merge(input.trackNumber, existing.track_number),
