@@ -294,19 +294,47 @@ export const lovePutExecutor: Executor = {
         "SELECT incarnation_key FROM love_incarnations WHERE uri=? AND state='present'",
         existing.uri,
       );
+      let incarnationKey = currentIncarnation?.incarnation_key ?? null;
       if (currentIncarnation === null) {
-        const incarnationKey = `love:${existing.uri}:api:${op.id}`;
+        const accepted = ctx.m.db.one<{ path: string; source_service: string | null }>(
+          'SELECT path,source_service FROM forward_admissions WHERE did=? AND identity_key=?',
+          op.did,
+          `love-uri:${op.did}:${op.collection}:${op.rkey}`,
+        );
+        const isImport = accepted?.path === 'import';
+        incarnationKey = `love:${existing.uri}:${isImport ? `import:${op.id}` : `api:${op.id}`}`;
         admitForwardIdentity(ctx.m.db, {
           did: op.did,
           identityKey: incarnationKey,
-          path: 'api',
+          path: isImport ? 'import' : 'api',
+          ...(isImport && accepted?.source_service !== null ? { sourceService: accepted?.source_service } : {}),
           now: ctx.m.clock.nowMs(),
         });
         ctx.m.db.run(
-          `INSERT INTO love_incarnations(uri,incarnation_key,state,path,source_service,updated_at_ms) VALUES (?,?,'present','api',NULL,?)
+          `INSERT INTO love_incarnations(uri,incarnation_key,state,path,source_service,updated_at_ms) VALUES (?,?,'present',?,?,?)
            ON CONFLICT(uri) DO NOTHING`,
           existing.uri,
           incarnationKey,
+          isImport ? 'import' : 'api',
+          isImport ? (accepted?.source_service ?? null) : null,
+          ctx.m.clock.nowMs(),
+        );
+      }
+      const accepted = ctx.m.db.one<{ path: string; source_service: string | null }>(
+        'SELECT path,source_service FROM forward_admissions WHERE did=? AND identity_key=?',
+        op.did,
+        `love-uri:${op.did}:${op.collection}:${op.rkey}`,
+      );
+      if (accepted?.path === 'import' && incarnationKey !== null) {
+        ctx.m.db.run(
+          `INSERT INTO love_import_bridges(did,operation_id,uri,incarnation_key,source_service,state,created_at_ms)
+           VALUES (?,?,?,?,?,'bound',?) ON CONFLICT(did,operation_id) DO UPDATE SET
+             uri=excluded.uri,incarnation_key=excluded.incarnation_key,source_service=excluded.source_service,state='bound'`,
+          op.did,
+          op.id,
+          existing.uri,
+          incarnationKey,
+          accepted.source_service,
           ctx.m.clock.nowMs(),
         );
       }
@@ -349,7 +377,7 @@ export const loveDeleteExecutor: Executor = {
         uri,
       );
       const incarnationKey = incarnation?.state === 'present' ? incarnation.incarnation_key : `love:${uri}:cid:${cid}`;
-      if (!incarnation || incarnation.state !== 'present') {
+      if (incarnation?.state !== 'present') {
         ctx.m.db.run(
           `INSERT INTO love_incarnations(uri,incarnation_key,state,path,source_service,updated_at_ms)
            VALUES (?,?,'present','api',NULL,?) ON CONFLICT(uri) DO NOTHING`,

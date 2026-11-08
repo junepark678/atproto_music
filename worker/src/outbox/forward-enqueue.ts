@@ -88,6 +88,8 @@ export interface EnqueueForwardsArgs {
   items: readonly ForwardItem[];
   /** Excludes the known import source without changing the account's link settings. */
   excludeSourceService?: 'lastfm' | 'listenbrainz';
+  /** Excludes every known source bound to one love incarnation. */
+  excludeSourceServices?: readonly ('lastfm' | 'listenbrainz')[];
   /** Earliest delivery time (epoch ms); defaults to receipt time. */
   dueAt?: number;
   now: number;
@@ -138,7 +140,11 @@ export function enqueueForwards(db: Db, args: EnqueueForwardsArgs): number {
         }
       }
       for (const link of links) {
-        if (args.excludeSourceService !== undefined && link.service === args.excludeSourceService) continue;
+        if (
+          (args.excludeSourceService !== undefined && link.service === args.excludeSourceService) ||
+          args.excludeSourceServices?.includes(link.service) === true
+        )
+          continue;
         if (link[flagColumn(item.kind)] !== 1) continue;
         const id = newOperationId(args.random);
         const inserted = db.run(

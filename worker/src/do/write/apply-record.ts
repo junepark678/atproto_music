@@ -475,7 +475,7 @@ function loveVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, o: A
       const sourceService = current?.state === 'present' ? current.source_service : (apiBridge?.source_service ?? null);
       if (path === null) path = o.forwarding ? 'live' : 'snapshot';
       if (current?.state !== 'present') {
-        admitForwardIdentity(db, {
+        const firstAdmission = admitForwardIdentity(db, {
           did: t.did,
           identityKey,
           path: path as 'api' | 'import' | 'live' | 'snapshot',
@@ -497,7 +497,7 @@ function loveVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, o: A
             t.did,
             `love-uri:${t.did}:${t.collection}:${t.rkey}`,
           );
-        if (o.forwarding && path === 'live') {
+        if (o.forwarding && firstAdmission && path === 'live') {
           const local = db.one<{ origin: string }>(
             'SELECT origin FROM operations WHERE did=? AND collection=? AND rkey=? ORDER BY created_at_ms DESC LIMIT 1',
             t.did,
@@ -593,6 +593,16 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
             t.uri,
           )
         : null;
+    const importLoveBridges =
+      t.kind === 'love' && loveIncarnation?.state === 'present'
+        ? db.all<{ source_service: string | null }>(
+            `SELECT source_service FROM love_import_bridges
+             WHERE did=? AND uri=? AND incarnation_key=? AND state='bound' ORDER BY created_at_ms,operation_id`,
+            t.did,
+            t.uri,
+            loveIncarnation.incarnation_key,
+          )
+        : [];
     const deleted = deleteProjection(db, t.kind, t.uri);
     if (t.kind === 'love' && priorLove && loveIncarnation?.state === 'present') {
       const identityKey = `love-delete:${loveIncarnation.incarnation_key}`;
@@ -628,6 +638,13 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
           loveIncarnation.incarnation_key,
         );
       db.run(
+        `UPDATE love_import_bridges SET state='consumed'
+         WHERE did=? AND uri=? AND incarnation_key=? AND state='bound'`,
+        t.did,
+        t.uri,
+        loveIncarnation.incarnation_key,
+      );
+      db.run(
         "UPDATE love_incarnations SET state='absent',updated_at_ms=? WHERE uri=?",
         Number(o.nowNs / 1_000_000n),
         t.uri,
@@ -639,9 +656,18 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
           t.collection,
           t.rkey,
         );
-        const importMayForward = loveIncarnation.path === 'import' && loveIncarnation.source_service !== null;
+        const importSources = new Set<'lastfm' | 'listenbrainz'>();
+        if (loveIncarnation.source_service === 'lastfm' || loveIncarnation.source_service === 'listenbrainz')
+          importSources.add(loveIncarnation.source_service);
+        let unknownImportSource = loveIncarnation.path === 'import' && loveIncarnation.source_service === null;
+        for (const bridge of importLoveBridges) {
+          if (bridge.source_service === 'lastfm' || bridge.source_service === 'listenbrainz')
+            importSources.add(bridge.source_service);
+          else unknownImportSource = true;
+        }
+        const importMayForward = importSources.size > 0;
         const eligiblePath = loveIncarnation.path === 'live' || loveIncarnation.path === 'api' || importMayForward;
-        if (eligiblePath && (local?.origin !== 'import' || importMayForward))
+        if (!unknownImportSource && eligiblePath && (local?.origin !== 'import' || importMayForward))
           enqueueForwards(db, {
             did: t.did,
             items: [
@@ -651,9 +677,7 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
                 payload: { artist: priorLove.artist, track: priorLove.track, origin: 'web' },
               },
             ],
-            ...(loveIncarnation.path === 'import'
-              ? { excludeSourceService: loveIncarnation.source_service as 'lastfm' | 'listenbrainz' }
-              : {}),
+            ...(importSources.size > 0 ? { excludeSourceServices: [...importSources] } : {}),
             now: Number(o.nowNs / 1_000_000n),
             random: o.forwarding.random,
           });
@@ -663,6 +687,7 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
       // API deletes can target a remote love the index never projected. A
       // successful, matching absence still consumes the pre-send bridge.
       db.run("UPDATE love_delete_bridges SET state='consumed' WHERE did=? AND uri=? AND state='pending'", t.did, t.uri);
+      db.run("UPDATE love_import_bridges SET state='consumed' WHERE did=? AND uri=? AND state='bound'", t.did, t.uri);
       db.run(
         "UPDATE love_incarnations SET state='absent',updated_at_ms=? WHERE uri=?",
         Number(o.nowNs / 1_000_000n),

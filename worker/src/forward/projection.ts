@@ -107,4 +107,10 @@ export function cleanupForwardAdmissionsForSuppression(db: Db, did: string): voi
      )`,
     did,
   );
+  db.run(
+    `DELETE FROM love_import_bridges AS bridge WHERE bridge.did=? AND NOT EXISTS (
+       SELECT 1 FROM operations AS op WHERE op.id=bridge.operation_id AND op.state!='cancelled'
+     )`,
+    did,
+  );
 }

@@ -6,6 +6,7 @@ import { seededRandom } from '@atmusic/core/test-support/random';
 import { fromMs } from '@atmusic/core/timestamp';
 import { expect, it } from 'vitest';
 import { applyRecordProof } from '../../../src/do/write/apply-record';
+import { enqueueForwards } from '../../../src/outbox/forward-enqueue';
 import { enqueueLove, enqueueUnlove } from '../../../src/outbox/love-ops';
 import { CREATE, DELETE, GET, type Harness, LIST, LOVE, remoteRecords, withHarness } from './support';
 
@@ -174,6 +175,91 @@ it('forwards a live deletion of an API-created love, and routes imported love de
       { link_id: listenbrainz, kind: 'unlove' },
       { link_id: listenbrainz, kind: 'unlove' },
     ]);
+  });
+});
+
+it('binds imported love source to the actual reused URI and preserves it after operation/outbox cleanup', async () => {
+  await withHarness(async (h) => {
+    h.seedUser(h.alice);
+    const lastfm = h.link(h.alice, 'lastfm');
+    const listenbrainz = h.link(h.alice, 'listenbrainz');
+    const existingRkey = '3kreusedlove1';
+    await h.kit.externalPut('Alice', LOVE, existingRkey, love('Imported artist', 'Reused track'));
+    expect((await projectLove(h, existingRkey, true)).outcome).toBe('applied');
+
+    const accepted = await enqueueLove(h.m, {
+      did: h.alice,
+      input: { artist: 'Imported artist', track: 'Reused track' },
+      origin: 'import',
+    });
+    if (!accepted.ok) throw new Error(JSON.stringify(accepted.reason));
+    h.db.run(
+      'UPDATE forward_admissions SET source_service=? WHERE did=? AND identity_key=?',
+      'lastfm',
+      h.alice,
+      `love-uri:${h.alice}:${LOVE}:${accepted.operation.rkey}`,
+    );
+    enqueueForwards(h.db, {
+      did: h.alice,
+      items: [
+        {
+          kind: 'love',
+          operationId: accepted.operation.id,
+          payload: { artist: 'Imported artist', track: 'Reused track', origin: 'import' },
+        },
+      ],
+      excludeSourceService: 'lastfm',
+      now: h.kit.clock.nowMs(),
+      random: h.m.random,
+    });
+    await h.runUntilIdle();
+    expect(h.op(accepted.operation.id)).toMatchObject({ result_uri: `at://${h.alice}/${LOVE}/${existingRkey}` });
+    expect(
+      h.db.one<{ uri: string; source_service: string | null; state: string }>(
+        'SELECT uri,source_service,state FROM love_import_bridges WHERE did=? AND operation_id=?',
+        h.alice,
+        accepted.operation.id,
+      ),
+    ).toEqual({ uri: `at://${h.alice}/${LOVE}/${existingRkey}`, source_service: 'lastfm', state: 'bound' });
+
+    h.db.run('DELETE FROM operations WHERE id=?', accepted.operation.id);
+    h.db.run('DELETE FROM forward_outbox');
+    await h.kit.externalPut('Alice', LOVE, existingRkey, {
+      ...love('Imported artist', 'Reused track'),
+      album: 'Changed',
+    });
+    expect((await projectLove(h, existingRkey, true)).outcome).toBe('applied');
+    expect(h.db.all('SELECT * FROM forward_outbox')).toEqual([]);
+
+    await h.kit.externalDelete('Alice', LOVE, existingRkey);
+    expect((await projectLove(h, existingRkey, true)).outcome).toBe('absent');
+    expect(
+      h.db.all<{ link_id: string; kind: string }>(
+        "SELECT link_id,kind FROM forward_outbox WHERE kind='unlove' ORDER BY rowid",
+      ),
+    ).toEqual([{ link_id: listenbrainz, kind: 'unlove' }]);
+    expect(h.db.all("SELECT 1 AS hit FROM forward_outbox WHERE link_id=? AND kind='unlove'", lastfm)).toEqual([]);
+  });
+});
+
+it('does not enqueue a love when the canonical live admission already exists without an incarnation row', async () => {
+  await withHarness(async (h) => {
+    h.seedUser(h.alice);
+    h.link(h.alice, 'lastfm');
+    const rkey = '3kpreexisting01';
+    const put = await h.kit.externalPut('Alice', LOVE, rkey, love('Already admitted', 'Jóga'));
+    const uri = `at://${h.alice}/${LOVE}/${rkey}`;
+    h.db.run(
+      `INSERT INTO forward_admissions(did,identity_key,path,source_service,created_at_ms)
+       VALUES (?,?,'live',NULL,?)`,
+      h.alice,
+      `love:${uri}:${put.rev}`,
+      h.kit.clock.nowMs(),
+    );
+
+    expect((await projectLove(h, rkey, true)).outcome).toBe('applied');
+    expect(h.db.all('SELECT * FROM forward_outbox')).toEqual([]);
+    expect(h.db.one('SELECT path FROM love_incarnations WHERE uri=?', uri)).toEqual({ path: 'live' });
   });
 });
 

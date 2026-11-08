@@ -36,9 +36,13 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import * as sqlite from 'node:sqlite';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fixtureKeys } from '@atmusic/atproto/test-support/keys';
 import { type FixtureTransport, routerTransport } from '@atmusic/atproto/test-support/router-transport';
+import { SignedRepo } from '@atmusic/atproto/test-support/signed-repo';
+import { verifyRecordProof } from '@atmusic/atproto/verify/record-proof';
 import { type FixedClock, fixedClock } from '@atmusic/core/test-support/clock';
 import { seededRandom } from '@atmusic/core/test-support/random';
+import { fromMs } from '@atmusic/core/timestamp';
 import { build } from 'esbuild';
 import { afterEach, describe, expect, it } from 'vitest';
 import { FileRevocations, revocationLogPath } from '../../worker/src/app/revocations.ts';
@@ -49,6 +53,7 @@ import { createAppPassword, revokeAppPassword, verifyAppPassword } from '../../w
 import { type Box, createBox } from '../../worker/src/crypto/box.ts';
 import { migrate } from '../../worker/src/do/migrate.ts';
 import { SCHEMA_VERSION, TABLE_CLASS } from '../../worker/src/do/schema.ts';
+import { applyRecordProof } from '../../worker/src/do/write/apply-record.ts';
 import { deleteLink, getLinkById, openLinkCredential, saveLink } from '../../worker/src/forward/links.ts';
 import { enqueueCoverArt, putCoverArt } from '../../worker/src/musicbrainz/cover-art-store.ts';
 import { createBackups } from '../../worker/src/node/backup.ts';
@@ -643,6 +648,114 @@ describe('restore.ts', () => {
       expect(db.all('SELECT rkey FROM scrobbles ORDER BY rkey')).toEqual([{ rkey: 's1' }]);
     } finally {
       db.close();
+    }
+  }, 30_000);
+
+  it('the actual restore CLI keeps love incarnation admissions from live, so reprojecting the same love does not forward a duplicate', async () => {
+    const world = await buildWorld();
+    const keys = await fixtureKeys();
+    const repo = new SignedRepo(DID_A, keys.alice, { clock: world.clock });
+    const collection = `${PREFIX}.love`;
+    const rkey = '3krestorelove';
+    const uri = `at://${DID_A}/${collection}/${rkey}`;
+    const love = {
+      $type: collection,
+      artist: 'Björk',
+      track: 'Jóga',
+      album: 'Homogenic',
+      createdAt: '2026-01-15T11:00:00Z',
+    };
+    const proof = async () =>
+      verifyRecordProof(await repo.getRecordCar(collection, rkey), {
+        did: DID_A,
+        collection,
+        rkey,
+        signingKey: repo.key.didKey,
+      });
+    const db = openSqliteDb(world.dbPath, { busyTimeoutMs: BUSY_MS });
+    const project = (recordProof: Awaited<ReturnType<typeof proof>>) => {
+      const nowNs = fromMs(world.clock.nowMs());
+      return db.tx(() =>
+        applyRecordProof(db, recordProof, {
+          prefix: PREFIX,
+          nowNs,
+          receiptNs: nowNs,
+          forwarding: { random: seededRandom(0x51) },
+        }),
+      );
+    };
+    try {
+      await repo.put(collection, rkey, love);
+      expect(project(await proof()).outcome).toBe('applied');
+      expect(TABLE_CLASS.love_incarnations).toBe('non-derived');
+      expect(db.one('SELECT count(*) AS n FROM love_incarnations WHERE uri=?', uri)).toEqual({ n: 1 });
+      expect(db.one("SELECT count(*) AS n FROM forward_outbox WHERE kind='love'")).toEqual({ n: 1 });
+      const incarnationKey = db.one<{ incarnation_key: string }>(
+        'SELECT incarnation_key FROM love_incarnations WHERE uri=?',
+        uri,
+      )!.incarnation_key;
+      db.run(
+        `INSERT INTO love_import_bridges(did,operation_id,uri,incarnation_key,source_service,state,created_at_ms)
+         VALUES (?,'restore-import-op',?,?,?,'bound',?)`,
+        DID_A,
+        uri,
+        incarnationKey,
+        'listenbrainz',
+        world.clock.nowMs(),
+      );
+    } finally {
+      db.close();
+    }
+    expect(query(world.backupPath, 'SELECT count(*) AS n FROM loves')).toEqual([{ n: 0 }]);
+
+    const systemd = new FakeSystemd(world, { servicePort: null });
+    await systemd.boot();
+    const restored = await restoreCli(world, systemd, [...baseArgs(world), '--no-ready-check']);
+    expect(restored.code, `${restored.stdout}\n${restored.stderr}`).toBe(0);
+    expect(restored.stdout).toMatch(/love_incarnations\s+1\s+live/);
+    expect(restored.stdout).toMatch(/love_import_bridges\s+1\s+live/);
+    expect(TABLE_CLASS.love_import_bridges).toBe('non-derived');
+    expect(query(world.dbPath, 'SELECT source_service,state FROM love_import_bridges')).toEqual([
+      { source_service: 'listenbrainz', state: 'bound' },
+    ]);
+    expect(query(world.dbPath, "SELECT count(*) AS n FROM forward_outbox WHERE kind='love'")).toEqual([{ n: 1 }]);
+
+    const restoredDb = openSqliteDb(world.dbPath, { busyTimeoutMs: BUSY_MS });
+    try {
+      const nowNs = fromMs(world.clock.nowMs());
+      const projectionRandom = seededRandom(0x52);
+      const apply = (recordProof: Awaited<ReturnType<typeof proof>>) =>
+        restoredDb.tx(() =>
+          applyRecordProof(restoredDb, recordProof, {
+            prefix: PREFIX,
+            nowNs,
+            receiptNs: nowNs,
+            forwarding: { random: projectionRandom },
+          }),
+        );
+      expect(apply(await proof()).outcome).toBe('applied');
+      expect(restoredDb.one("SELECT count(*) AS n FROM forward_outbox WHERE kind='love'")).toEqual({ n: 1 });
+
+      await repo.put(collection, rkey, { ...love, album: 'Metadata update' });
+      expect(apply(await proof()).outcome).toBe('applied');
+      expect(restoredDb.one("SELECT count(*) AS n FROM forward_outbox WHERE kind='love'")).toEqual({ n: 1 });
+
+      await repo.delete(collection, rkey);
+      expect(apply(await proof()).outcome).toBe('absent');
+      expect(restoredDb.one("SELECT count(*) AS n FROM forward_outbox WHERE kind='unlove'")).toEqual({ n: 1 });
+      const oldIncarnation = restoredDb.one<{ incarnation_key: string }>(
+        'SELECT incarnation_key FROM love_incarnations WHERE uri=?',
+        uri,
+      )!.incarnation_key;
+      await repo.put(collection, rkey, love);
+      expect(apply(await proof()).outcome).toBe('applied');
+      expect(restoredDb.one("SELECT count(*) AS n FROM forward_outbox WHERE kind='love'")).toEqual({ n: 2 });
+      expect(
+        restoredDb.one<{ incarnation_key: string }>('SELECT incarnation_key FROM love_incarnations WHERE uri=?', uri)
+          ?.incarnation_key,
+      ).not.toBe(oldIncarnation);
+    } finally {
+      restoredDb.close();
     }
   }, 30_000);
 
