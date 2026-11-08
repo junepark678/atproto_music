@@ -3,6 +3,7 @@ import { musicKeyId, artistKey as normalizeArtist, artistKey as normalizeTrack }
 import type { CoreExtension } from '../app/host';
 import type { Db } from '../do/db';
 import type { MusicBrainzOutcome } from './client';
+import { enqueueCoverArt } from './cover-art-store';
 import { backfillLoveReviveKeys, enqueueRevivedLoves } from './revive-loves';
 import type { TrackKey } from './store';
 import {
@@ -214,6 +215,9 @@ function storeMatch(
     const key = { artistKey: row.artist_key, trackKey: row.track_key, albumKey: row.album_key };
     const mbid = recording.id as string;
     stageLoveReviveJob(db, key, mbid, now);
+    const releaseMbid = typeof rel?.id === 'string' && validMbid(rel.id) ? rel.id : null;
+    const releaseGroupMbid = typeof group?.id === 'string' && validMbid(group.id) ? group.id : null;
+    if (releaseMbid) enqueueCoverArt(db, releaseMbid, releaseGroupMbid, now);
     if (revivalLimit <= 0) return 0;
     const slice = enqueueRevivedLoves(db, key, mbid, now, revivalLimit);
     if (slice.complete) deleteLoveReviveJob(db, key);
