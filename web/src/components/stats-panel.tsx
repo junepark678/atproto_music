@@ -9,6 +9,7 @@ import type { Did, Statistics, StatsWindow } from '@atmusic/core/api-types';
 import { useEffect, useRef, useState } from 'preact/hooks';
 import type { ApiClient } from '../api/client';
 import { formatLocalTime, plural } from './format';
+import { MusicBrainzLink } from './musicbrainz-links';
 import { EmptyState, ErrorState, LoadingState } from './state-views';
 
 export const WINDOWS: readonly { id: StatsWindow; label: string }[] = [
@@ -87,7 +88,7 @@ export function StatsPanel({ api, did }: { api: ApiClient; did: Did }) {
   );
 }
 
-function StatsBody({ stats }: { stats: Statistics }) {
+export function StatsBody({ stats }: { stats: Statistics }) {
   const windowLabel = WINDOWS.find((w) => w.id === stats.window)?.label ?? stats.window;
   return (
     <div class="stats-body" data-window={stats.window}>
@@ -117,7 +118,12 @@ function StatsBody({ stats }: { stats: Statistics }) {
           <ol aria-labelledby="top-artists" class="top-artists">
             {stats.topArtists.map((a, i) => (
               <li key={`${i}`}>
-                <span class="artist">{a.artist}</span> — {plural(a.scrobbleCount, 'scrobble')}
+                <span class="artist">
+                  <MusicBrainzLink kind="artist" mbid={a.artistMbid}>
+                    {a.artist}
+                  </MusicBrainzLink>
+                </span>{' '}
+                — {plural(a.scrobbleCount, 'scrobble')}
               </li>
             ))}
           </ol>
@@ -125,8 +131,12 @@ function StatsBody({ stats }: { stats: Statistics }) {
           <ol aria-labelledby="top-tracks" class="top-tracks">
             {stats.topTracks.map((t, i) => (
               <li key={`${i}`}>
-                <span class="track">{t.track}</span> by <span class="artist">{t.artist}</span> —{' '}
-                {plural(t.scrobbleCount, 'scrobble')}
+                <span class="track">
+                  <MusicBrainzLink kind="recording" mbid={t.recordingMbid}>
+                    {t.track}
+                  </MusicBrainzLink>
+                </span>{' '}
+                by <span class="artist">{t.artist}</span> — {plural(t.scrobbleCount, 'scrobble')}
               </li>
             ))}
           </ol>
@@ -137,8 +147,12 @@ function StatsBody({ stats }: { stats: Statistics }) {
             <ol aria-labelledby="top-albums" class="top-albums">
               {stats.topAlbums.map((a, i) => (
                 <li key={`${i}`}>
-                  <span class="album">{a.album}</span> by <span class="artist">{a.artist}</span> —{' '}
-                  {plural(a.scrobbleCount, 'scrobble')}
+                  <span class="album">
+                    <MusicBrainzLink kind="release" mbid={a.releaseMbid}>
+                      {a.album}
+                    </MusicBrainzLink>
+                  </span>{' '}
+                  by <span class="artist">{a.artist}</span> — {plural(a.scrobbleCount, 'scrobble')}
                 </li>
               ))}
             </ol>
