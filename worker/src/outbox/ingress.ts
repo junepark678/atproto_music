@@ -30,6 +30,7 @@
 // (they are not forwarded and not capped, ADR §11.2).
 
 import { listenKey } from '@atmusic/core/listen-key';
+import { artistKey, trackKey } from '@atmusic/core/music-key';
 import type { ScrobbleRecord, ValidationFailure } from '@atmusic/core/scrobble';
 import { parseRfc3339 } from '@atmusic/core/timestamp';
 import type { Origin } from '../app/rows';
@@ -204,6 +205,22 @@ export async function acceptListens(m: ModuleDeps, args: AcceptListensArgs): Pro
         },
         now,
       );
+      const playing = db.one<{ artist: string; track: string; started_at_ms: number; duration_seconds: number | null }>(
+        'SELECT artist, track, started_at_ms, duration_seconds FROM now_playing WHERE did = ? AND expires_at_ms > ?',
+        args.did, now,
+      );
+      if (playing !== null && artistKey(playing.artist) === artistKey(prep.prepared.record.artist) && trackKey(playing.artist, playing.track)[1] === trackKey(prep.prepared.record.artist, prep.prepared.record.track)[1]) {
+        const listenedAtNs = parseRfc3339(prep.prepared.record.listenedAt);
+        if (listenedAtNs !== null) {
+          const listenedAtMs = Number(listenedAtNs / 1_000_000n);
+          const windowMs = (playing.duration_seconds ?? 600) * 1000;
+          if (listenedAtMs < playing.started_at_ms && playing.started_at_ms - listenedAtMs <= windowMs) {
+            db.run('UPDATE now_playing SET scrobbled_at_ms = ?, started_at_ms = ? WHERE did = ?', listenedAtMs, listenedAtMs, args.did);
+          } else {
+            db.run('UPDATE now_playing SET scrobbled_at_ms = ? WHERE did = ?', listenedAtMs, args.did);
+          }
+        }
+      }
       enqueueForwards(db, {
         did: args.did,
         items: [{ kind: 'scrobble', listenKey: prep.key, payload: { listen: prep.forward, origin: args.origin } }],
