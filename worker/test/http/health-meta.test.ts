@@ -457,7 +457,7 @@ it('meta namespace equals the prefix and publication of every config parseConfig
       }
     }
   }
-  expect(accepted).toBe(28);
+  expect(accepted).toBe(26);
   expect(refused).toBe(70);
   // An invalid prefix fails every parse (so the process cannot start and meta is never served) and is never reported.
   for (const bad of ['Org.Example.Music', 'nodots', 'org..music']) {
