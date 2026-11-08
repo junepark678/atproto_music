@@ -89,7 +89,7 @@ export function NowPlayingCard({ api, did, owner }: { api: ApiClient; did: Did; 
   if (item === null) return owner ? <p class="now-playing-empty">Nothing playing right now</p> : null;
   const started = Date.parse(item.startedAt);
   const elapsed = Math.max(0, Math.floor((now + currentSnapshot.skew - started) / 1000));
-  const duration = item.durationSeconds;
+  const duration = item.durationSeconds ?? item.musicbrainz?.durationSeconds;
   const progress = duration === undefined ? null : Math.min(duration, elapsed);
   const album = item.album ?? item.musicbrainz?.releaseTitle;
   const artistMbid = unambiguousMbid(item.artistMbids) ?? unambiguousMbid(item.musicbrainz?.artistMbids);

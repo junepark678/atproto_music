@@ -231,7 +231,20 @@ it('omits progress when duration is unknown', async () => {
   vi.useFakeTimers();
   vi.setSystemTime(new Date('2026-01-15T12:00:00Z'));
   const { durationSeconds: _durationSeconds, ...withoutDuration } = item;
-  const app = setup({ nowPlaying: withoutDuration, serverTime: response.serverTime });
+  const app = setup({
+    nowPlaying: {
+      ...withoutDuration,
+      musicbrainz: {
+        recordingMbid,
+        title: 'Resolved track title',
+        artistCredit: 'Resolved artist',
+        artistMbids: [artistMbid],
+        matchedBy: 'search',
+        syncedAt: '2026-01-15T11:59:00Z',
+      },
+    },
+    serverTime: response.serverTime,
+  });
   await vi.waitFor(() => expect(app.root.textContent).toContain('Jóga'));
   expect(app.root.querySelector('[role="progressbar"]')).toBeNull();
   app.cleanup();
@@ -255,9 +268,10 @@ it('fills an absent submitted album with a muted MusicBrainz release title', asy
   vi.useFakeTimers();
   vi.setSystemTime(new Date('2026-01-15T12:00:00Z'));
   const { album: _album, ...withoutAlbum } = item;
+  const { durationSeconds: _duration, ...withoutDuration } = withoutAlbum;
   const app = setup({
     nowPlaying: {
-      ...withoutAlbum,
+      ...withoutDuration,
       musicbrainz: {
         recordingMbid,
         title: 'Resolved track title',
@@ -265,6 +279,7 @@ it('fills an absent submitted album with a muted MusicBrainz release title', asy
         artistMbids: [artistMbid],
         releaseMbid,
         releaseTitle: 'Resolved release title',
+        durationSeconds: 225,
         matchedBy: 'search',
         syncedAt: '2026-01-15T11:59:00Z',
       },
@@ -274,6 +289,8 @@ it('fills an absent submitted album with a muted MusicBrainz release title', asy
   await vi.waitFor(() => expect(app.root.textContent).toContain('Resolved release title'));
   expect(app.root.querySelector('[title="From MusicBrainz"]')?.textContent).toContain('Resolved release title');
   expect(app.root.querySelector('.now-playing-track')?.textContent).toContain('Jóga');
+  expect(app.root.querySelector('progress')?.max).toBe(225);
+  expect(app.root.querySelector('progress')?.getAttribute('aria-valuetext')).toBe('3:45 / 3:45');
   app.cleanup();
 });
 
@@ -290,6 +307,7 @@ it('keeps submitted album text ahead of the matched MusicBrainz release title', 
         artistMbids: [artistMbid],
         releaseMbid,
         releaseTitle: 'Resolved release title',
+        durationSeconds: 225,
         matchedBy: 'search',
         syncedAt: '2026-01-15T11:59:00Z',
       },
@@ -300,6 +318,8 @@ it('keeps submitted album text ahead of the matched MusicBrainz release title', 
   expect(app.root.querySelector('.now-playing-byline')?.textContent).toContain('Homogenic');
   expect(app.root.querySelector('.now-playing-byline')?.textContent).not.toContain('Resolved release title');
   expect(app.root.querySelector('[title="From MusicBrainz"]')).toBeNull();
+  expect(app.root.querySelector('progress')?.max).toBe(180);
+  expect(app.root.querySelector('progress')?.getAttribute('aria-valuetext')).toBe('3:00 / 3:00');
   app.cleanup();
 });
 
