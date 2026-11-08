@@ -71,6 +71,26 @@ function artistCounts(db: Db, did: string): Array<[string, number]> {
 }
 
 describe('applyRecordProof', () => {
+  it('suppresses legacy canonical listens replayed through another URI', async () => {
+    const repo = await repoFor('alice');
+    const old = await putProof(repo, SCROBBLE, 'r02', fixtureScrobble('r02'));
+    const replay = await putProof(repo, SCROBBLE, 'other-uri', fixtureScrobble('r02'));
+    await withMigratedDb((db) => {
+      seedUser(db, ALICE);
+      db.run(
+        `INSERT INTO linked_accounts(id,did,service,remote_user,credential_ciphertext,key_id,created_at_ms,updated_at_ms)
+        VALUES ('legacy-canonical',?,'lastfm','alice',X'00','test',?,?)`,
+        ALICE,
+        NOW_MS,
+        NOW_MS,
+      );
+      db.tx(() => applyRecordProof(db, old, OPTS));
+      db.run('DELETE FROM forward_admissions');
+      db.tx(() => applyRecordProof(db, replay, { ...OPTS, forwarding: { random: seededRandom(911) } }));
+      expect(db.all('SELECT * FROM forward_outbox')).toHaveLength(0);
+    });
+  });
+
   it('forwards live love, unlove and recreated love as three ordered transitions', async () => {
     const repo = await repoFor('alice');
     const loveRecord = { $type: `${PREFIX}.love`, artist: 'Björk', track: 'Jóga', createdAt: '2026-01-15T11:00:00Z' };

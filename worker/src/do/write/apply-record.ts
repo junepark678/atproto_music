@@ -233,10 +233,30 @@ function scrobbleVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, 
       const priorIdentityKey = before
         ? projectionListenKey(t.did, before.listened_at, before.artist_key, before.track_key)
         : undefined;
+      // Admission belongs to the canonical listen, including copies at other
+      // record/container URIs and subsecond variants of the same listen key.
+      const second = BigInt(Math.floor(Date.parse(row.listenedAt) / 1000)) * 1_000_000_000n;
+      const canonical = db.one<{ uri: string; record_uri: string | null; rkey: string }>(
+        `SELECT uri,record_uri,rkey FROM scrobbles
+         WHERE did=? AND artist_key=? AND track_key=? AND listened_at>=? AND listened_at<? LIMIT 1`,
+        t.did,
+        keys.artist_key,
+        keys.track_key,
+        toStorage(second),
+        toStorage(second + 1_000_000_000n),
+      );
       const legacyPresent =
-        before !== null || db.one('SELECT 1 AS hit FROM record_state WHERE uri=? LIMIT 1', t.uri) !== null;
+        canonical !== null ||
+        before !== null ||
+        db.one('SELECT 1 AS hit FROM record_state WHERE uri=? LIMIT 1', t.uri) !== null;
       const now = Number(o.nowNs / 1_000_000n);
-      const provenance = legacyPresent ? retainedRecordProvenance(db, t.did, t.collection, t.rkey) : null;
+      const canonicalCollection = (canonical?.record_uri ?? canonical?.uri)?.split('/')[3];
+      const provenance =
+        canonical && canonicalCollection
+          ? retainedRecordProvenance(db, t.did, canonicalCollection, canonical.rkey)
+          : legacyPresent
+            ? retainedRecordProvenance(db, t.did, t.collection, t.rkey)
+            : null;
       const firstAdmission = admitProjectedIdentity(db, {
         did: t.did,
         identityKey,
@@ -764,7 +784,12 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
               {
                 kind: 'unlove',
                 operationId: identityKey,
-                payload: { artist: priorLove.artist, track: priorLove.track, origin: 'web' },
+                payload: {
+                  artist: priorLove.artist,
+                  track: priorLove.track,
+                  recordingMbid: priorLove.recording_mbid ?? undefined,
+                  origin: 'web',
+                },
               },
             ],
             ...(importSources.size > 0 ? { excludeSourceServices: [...importSources] } : {}),

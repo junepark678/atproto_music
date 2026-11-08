@@ -641,3 +641,32 @@ describe('ListenBrainz forwarding', () => {
     expect(byLink('late').lb).toMatchObject({ state: 'expired', last_error: 'expired', attempts: 1 });
   });
 });
+
+it('review: external unlove retains its known MBID after terminal forward GC', async () => {
+  const { SignedRepo } = await import('@atmusic/atproto/test-support/signed-repo');
+  const { fixtureKeys } = await import('@atmusic/atproto/test-support/keys');
+  const { applyRecordProof } = await import('../../../src/do/write/apply-record');
+  const { seedUser, putProof, deleteProof, OPTS, PREFIX } = await import('../../write/support');
+  const w = await world();
+  w.link();
+  seedUser(w.app.db, ALICE);
+  const repo = new SignedRepo(ALICE, (await fixtureKeys()).alice, { clock: w.clock });
+  const opts = { ...OPTS, forwarding: { random: seededRandom(999) } };
+  const p = await putProof(repo, `${PREFIX}.love`, 'review-love', {
+    $type: `${PREFIX}.love`,
+    artist: 'Review artist',
+    track: 'Review track',
+    recordingMbid: MBID,
+    createdAt: '2026-01-15T11:00:00Z',
+  });
+  w.app.db.tx(() => applyRecordProof(w.app.db, p, opts));
+  await w.run();
+  expect(w.rows().filter((r) => r.kind === 'love' && r.state === 'sent')).toHaveLength(1);
+  w.app.db.run("DELETE FROM forward_outbox WHERE state='sent'");
+  w.clock.advance(2000);
+  const d = await deleteProof(repo, `${PREFIX}.love`, 'review-love');
+  w.app.db.tx(() => applyRecordProof(w.app.db, d, opts));
+  await w.run();
+  expect(w.rows().filter((r) => r.kind === 'unlove')).toHaveLength(1);
+  expect(w.rows().find((r) => r.kind === 'unlove')?.state).toBe('sent');
+});
