@@ -1,9 +1,9 @@
 import type { Did, NowPlaying } from '@atmusic/core/api-types';
-import { useCallback, useEffect, useState } from 'preact/hooks';
+import { useEffect, useState } from 'preact/hooks';
 import type { ApiClient } from '../api/client';
 import { formatLocalClock } from './format';
 
-type Snapshot = { nowPlaying: NowPlaying | null; serverTime: string; skew: number };
+type Snapshot = { api: ApiClient; did: Did; nowPlaying: NowPlaying | null; serverTime: string; skew: number };
 const durationLabel = (seconds: number) => `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
 const elapsedLabel = (seconds: number) => (seconds < 60 ? `${seconds} sec` : `${Math.floor(seconds / 60)} min`);
 
@@ -11,22 +11,37 @@ export function NowPlayingCard({ api, did, owner }: { api: ApiClient; did: Did; 
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [now, setNow] = useState(Date.now());
   const [error, setError] = useState(false);
-  const refresh = useCallback(async () => {
-    try {
-      const response = await api.nowPlaying(did);
-      setSnapshot({ ...response, skew: Date.parse(response.serverTime) - Date.now() });
-      setError(false);
-    } catch {
-      setError(true);
-    }
-  }, [api, did]);
   useEffect(() => {
+    let active = true;
+    let ticker: number | undefined;
+    setSnapshot(null);
+    setError(false);
+    const refresh = async () => {
+      try {
+        const response = await api.nowPlaying(did);
+        if (!active) return;
+        setSnapshot({ api, did, ...response, skew: Date.parse(response.serverTime) - Date.now() });
+        setError(false);
+      } catch {
+        if (active) setError(true);
+      }
+    };
+    const syncTicker = () => {
+      if (document.visibilityState === 'visible') {
+        if (ticker === undefined) ticker = window.setInterval(() => setNow(Date.now()), 15_000);
+      } else if (ticker !== undefined) {
+        clearInterval(ticker);
+        ticker = undefined;
+      }
+    };
     if (document.visibilityState === 'visible') void refresh();
+    syncTicker();
     const onVisibility = () => {
       if (document.visibilityState === 'visible') {
         setNow(Date.now());
         void refresh();
       }
+      syncTicker();
     };
     document.addEventListener('visibilitychange', onVisibility);
     const interval = window.setInterval(() => {
@@ -35,23 +50,24 @@ export function NowPlayingCard({ api, did, owner }: { api: ApiClient; did: Did; 
         void refresh();
       }
     }, 30_000);
-    const ticker = window.setInterval(() => setNow(Date.now()), 15_000);
     return () => {
       document.removeEventListener('visibilitychange', onVisibility);
       clearInterval(interval);
-      clearInterval(ticker);
+      if (ticker !== undefined) clearInterval(ticker);
+      active = false;
     };
-  }, [refresh]);
-  if (snapshot === null)
+  }, [api, did]);
+  const currentSnapshot = snapshot?.api === api && snapshot.did === did ? snapshot : null;
+  if (currentSnapshot === null)
     return owner ? (
       <p class="now-playing-empty" aria-live="polite">
         {error ? 'Now playing is unavailable.' : 'Loading now playing…'}
       </p>
     ) : null;
-  const item = snapshot.nowPlaying;
+  const item = currentSnapshot.nowPlaying;
   if (item === null) return owner ? <p class="now-playing-empty">Nothing playing right now</p> : null;
   const started = Date.parse(item.startedAt);
-  const elapsed = Math.max(0, Math.floor((now + snapshot.skew - started) / 1000));
+  const elapsed = Math.max(0, Math.floor((now + currentSnapshot.skew - started) / 1000));
   const duration = item.durationSeconds;
   const progress = duration === undefined ? null : Math.min(duration, elapsed);
   return (
@@ -95,7 +111,11 @@ export function NowPlayingCard({ api, did, owner }: { api: ApiClient; did: Did; 
               {durationLabel(progress)} / {durationLabel(duration)}
             </span>
             <progress
+              // biome-ignore lint/a11y/noRedundantRoles: the progressbar role is explicit in the accessibility contract
+              role="progressbar"
               aria-label="Track progress"
+              aria-valuenow={progress}
+              aria-valuemax={duration}
               aria-valuetext={`${durationLabel(progress)} / ${durationLabel(duration)}`}
               value={progress}
               max={duration}

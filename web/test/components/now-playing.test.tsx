@@ -19,15 +19,17 @@ const item: NowPlaying = {
   shared: false,
 };
 const response = { nowPlaying: item, serverTime: '2026-01-15T12:00:00Z' };
-function setup(value: typeof response = response) {
+function setup(value: typeof response = response, profileDid: Did = did) {
   const nowPlaying = vi.fn(async () => ({ ...value, serverTime: new Date().toISOString() }));
   const api = { nowPlaying } as unknown as ApiClient;
   const root = document.createElement('div');
   document.body.append(root);
-  render(<NowPlayingCard api={api} did={did} owner />, root);
+  const renderProfile = (nextDid: Did) => render(<NowPlayingCard api={api} did={nextDid} owner />, root);
+  renderProfile(profileDid);
   return {
     root,
     nowPlaying,
+    renderProfile,
     cleanup: () => {
       render(null, root);
       root.remove();
@@ -52,12 +54,43 @@ it('ticks elapsed time against the server clock skew and refreshes on visibility
   Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
   document.dispatchEvent(new Event('visibilitychange'));
   const calls = app.nowPlaying.mock.calls.length;
+  const elapsedBeforeHidden = app.root.querySelector('.now-playing-meta')?.textContent;
   await vi.advanceTimersByTimeAsync(60_000);
   expect(app.nowPlaying).toHaveBeenCalledTimes(calls);
+  expect(app.root.querySelector('.now-playing-meta')?.textContent).toBe(elapsedBeforeHidden);
   Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
   document.dispatchEvent(new Event('visibilitychange'));
   await vi.waitFor(() => expect(app.nowPlaying.mock.calls.length).toBe(calls + 1));
   app.cleanup();
+});
+
+it('drops the previous profile immediately and ignores its deferred response after switching DID', async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date('2026-01-15T12:00:00Z'));
+  const oldDid = did;
+  const nextDid = 'did:plc:bbbbbbbbbbbbbbbbbbbbbbbb' as Did;
+  let resolveOld!: (value: typeof response) => void;
+  let resolveNext!: (value: typeof response) => void;
+  const oldResponse = new Promise<typeof response>((resolve) => (resolveOld = resolve));
+  const nextResponse = new Promise<typeof response>((resolve) => (resolveNext = resolve));
+  const nowPlaying = vi.fn((profileDid: Did) => (profileDid === oldDid ? oldResponse : nextResponse));
+  const api = { nowPlaying } as unknown as ApiClient;
+  const root = document.createElement('div');
+  document.body.append(root);
+  const renderProfile = (profileDid: Did) => render(<NowPlayingCard api={api} did={profileDid} owner />, root);
+  renderProfile(oldDid);
+  await vi.waitFor(() => expect(nowPlaying).toHaveBeenCalledWith(oldDid));
+  resolveOld({ ...response, nowPlaying: { ...item, track: 'Old private track' } });
+  await vi.waitFor(() => expect(root.textContent).toContain('Old private track'));
+
+  renderProfile(nextDid);
+  expect(root.textContent).not.toContain('Old private track');
+  await vi.waitFor(() => expect(nowPlaying).toHaveBeenCalledWith(nextDid));
+  resolveNext({ ...response, nowPlaying: { ...item, track: 'New profile track' } });
+  await vi.waitFor(() => expect(root.textContent).toContain('New profile track'));
+  expect(root.textContent).not.toContain('Old private track');
+  render(null, root);
+  root.remove();
 });
 
 it('clamps progress, exposes progress values, and displays private sharing without DID text', async () => {
@@ -68,6 +101,9 @@ it('clamps progress, exposes progress values, and displays private sharing witho
   const bar = app.root.querySelector('progress')!;
   expect(bar.value).toBe(180);
   expect(bar.max).toBe(180);
+  expect(bar.getAttribute('role')).toBe('progressbar');
+  expect(bar.getAttribute('aria-valuenow')).toBe('180');
+  expect(bar.getAttribute('aria-valuemax')).toBe('180');
   expect(bar.getAttribute('aria-valuetext')).toBe('3:00 / 3:00');
   expect(app.root.textContent).toContain('Only you can see this');
   expect(app.root.textContent).not.toContain(did);
