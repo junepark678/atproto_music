@@ -11,15 +11,22 @@ export interface TrackKey {
 
 // Local SQLite seam only: these operations never call MusicBrainz or any other
 // upstream. Resolution and pacing belong to the timer layer.
-export function enqueueTrack(db: Db, key: TrackKey, nowMs: number, priority = 0): void {
+export function enqueueTrack(
+  db: Db,
+  key: TrackKey,
+  nowMs: number,
+  priority = 0,
+  submittedRecordingMbid?: string | null,
+): void {
   db.run(
-    `INSERT OR IGNORE INTO mb_tracks(artist_key,track_key,album_key,created_at_ms,priority)
-     VALUES(?,?,?,?,?)`,
+    `INSERT OR IGNORE INTO mb_tracks(artist_key,track_key,album_key,created_at_ms,priority,submitted_recording_mbid)
+     VALUES(?,?,?,?,?,?)`,
     key.artistKey,
     key.trackKey,
     key.albumKey ?? '',
     nowMs,
     priority,
+    submittedRecordingMbid ?? null,
   );
   if (priority > 0) {
     db.run(
@@ -30,6 +37,16 @@ export function enqueueTrack(db: Db, key: TrackKey, nowMs: number, priority = 0)
       key.trackKey,
       key.albumKey ?? '',
       priority,
+    );
+  }
+  if (submittedRecordingMbid != null) {
+    db.run(
+      `UPDATE mb_tracks SET submitted_recording_mbid = ? WHERE artist_key = ? AND track_key = ? AND album_key = ?
+       AND status = 'pending' AND submitted_recording_mbid IS NULL`,
+      submittedRecordingMbid,
+      key.artistKey,
+      key.trackKey,
+      key.albumKey ?? '',
     );
   }
 }
