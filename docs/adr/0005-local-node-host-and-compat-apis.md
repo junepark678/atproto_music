@@ -242,6 +242,8 @@ The Workers adapter is **retired** (wave 7, N7-01). Everything runs on Node 26. 
 | `LISTENBRAINZ_API_ROOT` | `https://api.listenbrainz.org/` | https, DNS name, default port |
 | `MUSICBRAINZ_API_ROOT` | `https://musicbrainz.org/ws/2/` | https, DNS name, default port, validated root ending in `/` |
 | `MUSICBRAINZ_ENABLED` | `true` | `true` or `false`; `false` disables MusicBrainz timer egress and preserves local queued state |
+| `COVER_ART_ARCHIVE_ROOT` | `https://coverartarchive.org/` | HTTPS DNS root, default port, trailing slash; Cover Art Archive client only |
+| `COVER_ART_CACHE_MB` | `200` | Safe integer MiB from 1 through 10000; reserved budget for cover-art cache |
 | `ATMUSIC_LASTFM_KNOWN_CLIENTS` | `panoScrobbler:panoScrobbler:Pano Scrobbler` | Public key:secret:name triples (§7.4) |
 | `ATMUSIC_OAUTH_TRANSITION_GENERIC` | `0` | ADR 0004 Q5 flag, off |
 

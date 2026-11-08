@@ -54,6 +54,8 @@ export const DEFAULT_MIN_FREE_BYTES = 2_147_483_648; // 2 GiB
 export const DEFAULT_LASTFM_API_ROOT = 'https://ws.audioscrobbler.com/2.0/';
 export const DEFAULT_LASTFM_AUTH_URL = 'https://www.last.fm/api/auth/';
 export const DEFAULT_LISTENBRAINZ_API_ROOT = 'https://api.listenbrainz.org/';
+export const DEFAULT_COVER_ART_ARCHIVE_ROOT = 'https://coverartarchive.org/';
+export const DEFAULT_COVER_ART_CACHE_MB = 200;
 export const DEFAULT_MUSICBRAINZ_API_ROOT = 'https://musicbrainz.org/ws/2/';
 export const DEFAULT_LASTFM_KNOWN_CLIENTS = 'panoScrobbler:panoScrobbler:Pano Scrobbler';
 
@@ -136,6 +138,8 @@ export interface NodeConfig {
   listenbrainzApiRoot: string;
   musicbrainzApiRoot: string;
   musicbrainzEnabled: boolean;
+  coverArtArchiveRoot: string;
+  coverArtCacheMb: number;
   lastfmKnownClients: readonly LastfmKnownClient[];
   oauthTransitionGeneric: boolean;
   /** SQLite busy timeout; production PRODUCTION_BUSY_TIMEOUT_MS. */
@@ -381,6 +385,11 @@ export function parseNodeConfig(env: NodeEnv, opts: ParseNodeConfigOptions = {})
   const lastfmAuthUrl = upstream('LASTFM_AUTH_URL', DEFAULT_LASTFM_AUTH_URL);
   const listenbrainzApiRoot = upstream('LISTENBRAINZ_API_ROOT', DEFAULT_LISTENBRAINZ_API_ROOT);
   const musicbrainzApiRoot = upstream('MUSICBRAINZ_API_ROOT', DEFAULT_MUSICBRAINZ_API_ROOT);
+  const coverArtArchiveRoot = upstream('COVER_ART_ARCHIVE_ROOT', DEFAULT_COVER_ART_ARCHIVE_ROOT);
+  const coverArtCacheMb = Number(env.COVER_ART_CACHE_MB ?? DEFAULT_COVER_ART_CACHE_MB);
+  if (!Number.isSafeInteger(coverArtCacheMb) || coverArtCacheMb < 1 || coverArtCacheMb > 10_000) {
+    issue('COVER_ART_CACHE_MB', 'must be a safe integer from 1 through 10000');
+  }
   const musicbrainzEnabledRaw = env.MUSICBRAINZ_ENABLED ?? 'true';
   if (musicbrainzEnabledRaw !== 'true' && musicbrainzEnabledRaw !== 'false') {
     issue('MUSICBRAINZ_ENABLED', 'must be true or false');
@@ -427,6 +436,8 @@ export function parseNodeConfig(env: NodeEnv, opts: ParseNodeConfigOptions = {})
     listenbrainzApiRoot,
     musicbrainzApiRoot,
     musicbrainzEnabled: musicbrainzEnabledRaw === 'true',
+    coverArtArchiveRoot,
+    coverArtCacheMb,
     lastfmKnownClients,
     oauthTransitionGeneric: genericRaw === '1',
     busyTimeoutMs: PRODUCTION_BUSY_TIMEOUT_MS,
