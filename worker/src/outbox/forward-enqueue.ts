@@ -35,7 +35,7 @@
 
 import { createHash } from 'node:crypto';
 import type { Random } from '@atmusic/core/deps';
-import { trackKey } from '@atmusic/core/music-key';
+import { MusicKeyError, trackKey } from '@atmusic/core/music-key';
 import type { ForwardKind } from '../app/rows';
 import type { Db } from '../do/db';
 import { newOperationId } from './operations';
@@ -114,14 +114,31 @@ export function enqueueForwards(db: Db, args: EnqueueForwardsArgs): number {
     for (const item of args.items) {
       const key = dedupeKey(args.did, item);
       const payload = JSON.stringify(item.payload ?? null);
+      let loveArtistKey: string | null = null;
+      let loveTrackKey: string | null = null;
+      if (
+        (item.kind === 'love' || item.kind === 'unlove') &&
+        item.payload !== null &&
+        typeof item.payload === 'object'
+      ) {
+        const body = item.payload as Record<string, unknown>;
+        if (typeof body.artist === 'string' && typeof body.track === 'string') {
+          try {
+            [loveArtistKey, loveTrackKey] = trackKey(body.artist, body.track);
+          } catch (error) {
+            if (!(error instanceof MusicKeyError)) throw error;
+          }
+        }
+      }
       for (const link of links) {
         if (link[flagColumn(item.kind)] !== 1) continue;
-        created += db.run(
+        const id = newOperationId(args.random);
+        const inserted = db.run(
           `INSERT INTO forward_outbox(id, link_id, did, kind, dedupe_key, payload_json, state, attempts, due_at,
-             created_at_ms, updated_at_ms)
-           VALUES (?, ?, ?, ?, ?, ?, 'queued', 0, ?, ?, ?)
+             created_at_ms, updated_at_ms, love_artist_key, love_track_key)
+           VALUES (?, ?, ?, ?, ?, ?, 'queued', 0, ?, ?, ?, ?, ?)
            ON CONFLICT(link_id, kind, dedupe_key) DO NOTHING`,
-          newOperationId(args.random),
+          id,
           link.id,
           args.did,
           item.kind,
@@ -130,7 +147,24 @@ export function enqueueForwards(db: Db, args: EnqueueForwardsArgs): number {
           dueAt,
           args.now,
           args.now,
+          loveArtistKey,
+          loveTrackKey,
         ).rowsWritten;
+        created += inserted;
+        if (inserted === 1 && loveArtistKey !== null && loveTrackKey !== null) {
+          const row = db.one<{ rowid: number }>('SELECT rowid FROM forward_outbox WHERE id=?', id);
+          if (row) {
+            db.run(
+              `INSERT INTO mb_forward_love_current(link_id,love_artist_key,love_track_key,forward_rowid) VALUES(?,?,?,?)
+               ON CONFLICT(link_id,love_artist_key,love_track_key) DO UPDATE SET forward_rowid=excluded.forward_rowid
+               WHERE excluded.forward_rowid>mb_forward_love_current.forward_rowid`,
+              link.id,
+              loveArtistKey,
+              loveTrackKey,
+              row.rowid,
+            );
+          }
+        }
       }
     }
     return created;

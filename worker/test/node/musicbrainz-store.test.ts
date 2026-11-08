@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { migrate } from '../../src/do/migrate';
 import { MIGRATIONS, SCHEMA_VERSION, TABLE_CLASS, TABLES } from '../../src/do/schema';
-import { enqueueRevivedLoves } from '../../src/musicbrainz/revive-loves';
+import { backfillLoveReviveKeys, enqueueRevivedLoves } from '../../src/musicbrainz/revive-loves';
 import {
   advanceLoveReviveJob,
   deleteLoveReviveJob,
@@ -113,6 +113,7 @@ describe('MusicBrainz storage', () => {
       addRow('other-generation', 'link-b', 'love', 'Artist', 'Track', 'ignored', 'mbid_unresolved', 3);
       addRow('already-sent', 'link-b', 'unlove', 'Artist', 'Track', 'sent', null, 4);
       addOp('op-delete', 'love.delete', { artist: 'Artist', track: 'Track' });
+      expect(backfillLoveReviveKeys(db, 100).scanned).toBe(4);
       // Current latest operation is love; update link B's latest row to sent to prove no revival there.
       const key = { artistKey: 'artist', trackKey: 'track' };
       expect(enqueueRevivedLoves(db, key, '3f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2d10', 10, 1).enqueued).toBe(1);
@@ -126,6 +127,42 @@ describe('MusicBrainz storage', () => {
         recordingMbid: '3f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2d10',
       });
       expect(enqueueRevivedLoves(db, key, '3f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2d10', 11, 1).enqueued).toBe(0);
+    } finally {
+      db.close();
+    }
+  });
+  it('bounds candidate rows scanned even when every latest link-generation row is ineligible', () => {
+    const db = database();
+    try {
+      for (let i = 0; i < 205; i++) {
+        const did = `did:plc:${String(i).padStart(24, 'b')}`;
+        const link = `ineligible-${String(i).padStart(3, '0')}`;
+        db.run(
+          `INSERT INTO linked_accounts(id,did,service,remote_user,credential_ciphertext,key_id,created_at_ms,updated_at_ms)
+           VALUES(?,?,'listenbrainz','user',x'00','key',1,1)`,
+          link,
+          did,
+        );
+        db.run(
+          `INSERT INTO forward_outbox(id,link_id,did,kind,dedupe_key,payload_json,state,attempts,due_at,created_at_ms,updated_at_ms,love_artist_key,love_track_key)
+           VALUES(?,?,?,'love',?,?,'sent',0,0,1,1,'artist','track')`,
+          `sent-${i}`,
+          link,
+          did,
+          `sent-${i}`,
+          JSON.stringify({ artist: 'Artist', track: 'Track' }),
+        );
+      }
+      let backfill = backfillLoveReviveKeys(db, 100);
+      while (!backfill.complete) backfill = backfillLoveReviveKeys(db, 100);
+      const key = { artistKey: 'artist', trackKey: 'track' };
+      const one = enqueueRevivedLoves(db, key, '3f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2d10', 10, 100);
+      expect(one).toMatchObject({ enqueued: 0, scanned: 100, complete: false });
+      const two = enqueueRevivedLoves(db, key, '3f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2d10', 11, 100, one.cursorLinkId);
+      expect(two).toMatchObject({ enqueued: 0, scanned: 100, complete: false });
+      const three = enqueueRevivedLoves(db, key, '3f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2d10', 12, 100, two.cursorLinkId);
+      expect(three).toMatchObject({ enqueued: 0, scanned: 5, complete: true });
+      expect(new Set([one.cursorLinkId, two.cursorLinkId, three.cursorLinkId]).size).toBe(3);
     } finally {
       db.close();
     }

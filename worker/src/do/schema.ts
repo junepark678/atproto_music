@@ -978,6 +978,19 @@ const MIGRATION_19: Migration = {
     'CREATE INDEX mb_love_revive_jobs_due ON mb_love_revive_jobs(matched_at_ms,artist_key,track_key,album_key)',
   ],
 };
+const MIGRATION_20: Migration = {
+  version: 20,
+  name: 'bounded_love_revival_scan',
+  statements: [
+    'ALTER TABLE forward_outbox ADD COLUMN love_artist_key TEXT',
+    'ALTER TABLE forward_outbox ADD COLUMN love_track_key TEXT',
+    `CREATE TABLE mb_forward_love_current (link_id TEXT NOT NULL, love_artist_key TEXT NOT NULL, love_track_key TEXT NOT NULL,
+      forward_rowid INTEGER NOT NULL, PRIMARY KEY(link_id,love_artist_key,love_track_key),
+      FOREIGN KEY(link_id) REFERENCES linked_accounts(id) ON DELETE CASCADE)`,
+    'CREATE INDEX mb_forward_love_current_key ON mb_forward_love_current(love_artist_key,love_track_key,link_id)',
+    'CREATE TABLE mb_love_revival_state (singleton INTEGER PRIMARY KEY NOT NULL, cursor_rowid INTEGER NOT NULL DEFAULT 0, complete INTEGER NOT NULL DEFAULT 0)',
+  ],
+};
 
 export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_1,
@@ -999,6 +1012,7 @@ export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_17,
   MIGRATION_18,
   MIGRATION_19,
+  MIGRATION_20,
 ];
 
 /** The schema version this code expects. */
@@ -1066,6 +1080,8 @@ export const TABLES = [
   'mb_pacing',
   'mb_seed_state',
   'mb_love_revive_jobs',
+  'mb_love_revival_state',
+  'mb_forward_love_current',
 ] as const;
 
 export type TableName = (typeof TABLES)[number];
@@ -1133,4 +1149,6 @@ export const TABLE_CLASS: Readonly<Record<TableName, TableClass>> = {
   mb_pacing: 'non-derived',
   mb_seed_state: 'non-derived',
   mb_love_revive_jobs: 'non-derived',
+  mb_love_revival_state: 'non-derived',
+  mb_forward_love_current: 'derived',
 };

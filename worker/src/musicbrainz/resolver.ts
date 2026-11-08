@@ -3,7 +3,7 @@ import { musicKeyId, artistKey as normalizeArtist, artistKey as normalizeTrack }
 import type { CoreExtension } from '../app/host';
 import type { Db } from '../do/db';
 import type { MusicBrainzOutcome } from './client';
-import { enqueueRevivedLoves } from './revive-loves';
+import { backfillLoveReviveKeys, enqueueRevivedLoves } from './revive-loves';
 import type { TrackKey } from './store';
 import {
   advanceLoveReviveJob,
@@ -108,13 +108,14 @@ function storeMatch(
   matchedBy: string,
   score: number,
   now: number,
-): void {
+  revivalLimit: number,
+): number {
   const names = credits(recording['artist-credit']);
   const rel = selectedRelease(Array.isArray(recording.releases) ? recording.releases : [], row.album_key);
   const group = rel?.['release-group'] as Record<string, unknown> | undefined;
   const ids = names.flatMap((c) => (c.mbid ? [c.mbid] : []));
   const firstDate = rel ? dateOf(rel) : null;
-  db.tx(() => {
+  return db.tx(() => {
     db.run(
       `UPDATE mb_tracks SET status='matched',priority=-1,attempts=0,next_attempt_ms=?,last_attempt_ms=?,
     matched_by=?,score=?,recording_mbid=?,title=?,artist_credit=?,artist_mbids=?,release_mbid=?,release_title=?,
@@ -142,9 +143,13 @@ function storeMatch(
     const key = { artistKey: row.artist_key, trackKey: row.track_key, albumKey: row.album_key };
     const mbid = recording.id as string;
     stageLoveReviveJob(db, key, mbid, now);
-    const slice = enqueueRevivedLoves(db, key, mbid, now, 100);
-    if (slice.complete) deleteLoveReviveJob(db, key);
-    else advanceLoveReviveJob(db, key, slice.cursorLinkId);
+    if (revivalLimit > 0) {
+      const slice = enqueueRevivedLoves(db, key, mbid, now, revivalLimit);
+      if (slice.complete) deleteLoveReviveJob(db, key);
+      else advanceLoveReviveJob(db, key, slice.cursorLinkId);
+      return slice.scanned;
+    }
+    return 0;
   });
 }
 
@@ -165,25 +170,23 @@ export function createMusicBrainzResolver(options: {
   async function run(): Promise<{ requests: number; availableAt: number }> {
     if (options.enabled === false) return { requests: 0, availableAt: availableAt() };
     let requests = 0;
-    const revivalBudget = 100;
-    let revived = 0;
-    for (const job of loveReviveJobs(db, 100)) {
-      const slice = enqueueRevivedLoves(
-        db,
-        job,
-        job.recordingMbid,
-        clock.nowMs(),
-        Math.max(1, revivalBudget - revived),
-        job.cursorLinkId,
-      );
-      revived += slice.enqueued;
+    let localWork = 0;
+    const backfill = backfillLoveReviveKeys(db, 100);
+    localWork += backfill.scanned;
+    if (!backfill.complete || localWork >= 100) return { requests: 0, availableAt: clock.nowMs() + 1 };
+    for (const job of loveReviveJobs(db, Math.min(100, 100 - localWork))) {
+      if (localWork >= 100) break;
+      const remaining = 100 - localWork;
+      const scanLimit = Math.max(1, remaining - 1);
+      const slice = enqueueRevivedLoves(db, job, job.recordingMbid, clock.nowMs(), scanLimit, job.cursorLinkId);
+      localWork += Math.max(1, slice.scanned);
       if (slice.complete) deleteLoveReviveJob(db, job);
       else advanceLoveReviveJob(db, job, slice.cursorLinkId);
-      if (revived >= revivalBudget) break;
+      if (localWork >= 100) break;
     }
-    if (revived > 0) return { requests: 0, availableAt: clock.nowMs() + 1 };
+    if (localWork >= 100 || loveReviveJobs(db, 1).length > 0) return { requests: 0, availableAt: clock.nowMs() + 1 };
     seedHistoricalTracks(db, clock.nowMs());
-    while (requests < MAX_RUN_REQUESTS) {
+    while (requests < MAX_RUN_REQUESTS && localWork < 100) {
       const now = clock.nowMs();
       if (availableAt() > now) break;
       const row = db.one<Row & { matched_by: string | null }>(
@@ -249,8 +252,10 @@ export function createMusicBrainzResolver(options: {
         const top = (outcome as { kind: 'ok'; value: { recordings: unknown[] } }).value.recordings[0];
         if (top && typeof top === 'object' && validRecording(top as Record<string, unknown>, row, 90))
           recording = top as Record<string, unknown>;
-        if (recording) storeMatch(db, row, recording, matchedBy, Number(recording.score), now);
-        else
+        if (recording) {
+          const revivalLimit = 100 - localWork - 1;
+          localWork += 1 + storeMatch(db, row, recording, matchedBy, Number(recording.score), now, revivalLimit);
+        } else
           db.run(
             `UPDATE mb_tracks SET status='unmatched',attempts=0,next_attempt_ms=?,last_attempt_ms=? WHERE artist_key=? AND track_key=? AND album_key=?`,
             now + 30 * DAY,
@@ -259,9 +264,15 @@ export function createMusicBrainzResolver(options: {
             row.track_key,
             row.album_key,
           );
-      } else storeMatch(db, row, recording, matchedBy, Number(recording.score ?? 100), now);
+      } else {
+        const revivalLimit = 100 - localWork - 1;
+        localWork += 1 + storeMatch(db, row, recording, matchedBy, Number(recording.score ?? 100), now, revivalLimit);
+      }
     }
-    return { requests, availableAt: availableAt() };
+    return {
+      requests,
+      availableAt: loveReviveJobs(db, 1).length > 0 ? clock.nowMs() + 1 : availableAt(),
+    };
   }
   async function retry(outcome: MusicBrainzOutcome<unknown>, row: Row, now: number): Promise<void> {
     const attempts = row.attempts + 1;

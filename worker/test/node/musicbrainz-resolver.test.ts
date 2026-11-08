@@ -8,6 +8,7 @@ import { migrate } from '../../src/do/migrate';
 import { SCHEMA_VERSION } from '../../src/do/schema';
 import { createMusicBrainzClient, MB_CAPS } from '../../src/musicbrainz/client';
 import { createMusicBrainzResolver } from '../../src/musicbrainz/resolver';
+import { backfillLoveReviveKeys } from '../../src/musicbrainz/revive-loves';
 import { enqueueTrack } from '../../src/musicbrainz/store';
 import { bindPolicyFetch, createPolicyFetch } from '../../src/node/policy-fetch';
 import { openSqliteDb } from '../../src/node/sqlite-db';
@@ -225,11 +226,13 @@ it('drains >100 revival targets across a SQLite restart under the total run budg
     );
   }
   x.fake.response = { status: 200, body: { recordings: [candidate()] } };
+  const backfillRun = await x.resolver.run();
+  expect(backfillRun.requests).toBe(0);
   expect((await x.resolver.run()).requests).toBe(1);
   const afterMatch = x.db.one<{ n: number }>(
     "SELECT count(*) AS n FROM forward_outbox WHERE dedupe_key LIKE 'mb-match:%'",
   )!.n;
-  expect(afterMatch).toBe(100);
+  expect(afterMatch).toBe(98);
   expect(afterMatch).toBeLessThanOrEqual(100);
   expect(x.db.one<{ n: number }>('SELECT count(*) AS n FROM mb_love_revive_jobs')!.n).toBe(1);
   expect(x.resolver.availableAt()).toBeGreaterThan(x.clock.nowMs());
@@ -240,6 +243,10 @@ it('drains >100 revival targets across a SQLite restart under the total run budg
   reopened.run(
     "INSERT INTO operations(id,did,kind,origin,priority,collection,record_json,digest,state,due_at,created_at_ms,updated_at_ms) VALUES('op-last-unlove',?,'love.delete','listenbrainz',0,'com.example.atmusic.love',?,zeroblob(32),'succeeded',0,2,2)",
     didLast,
+    JSON.stringify({ artist: 'Artist', track: 'Track' }),
+  );
+  reopened.run(
+    "UPDATE forward_outbox SET kind='unlove',payload_json=?,created_at_ms=200,updated_at_ms=200 WHERE link_id='lb-99' AND dedupe_key='old-99'",
     JSON.stringify({ artist: 'Artist', track: 'Track' }),
   );
   const beforeCalls = x.fake.requests.length;
@@ -266,4 +273,59 @@ it('drains >100 revival targets across a SQLite restart under the total run budg
     )!.n,
   ).toBe(101);
   reopened.close();
+});
+
+it('charges match-triggered revival to one total 100-row budget across three same-run matches', async () => {
+  const x = setup();
+  const tracks = ['song 0', 'song 1', 'song 2'];
+  for (const track of tracks) enqueueTrack(x.db, { artistKey: 'artist', trackKey: track }, x.clock.nowMs());
+  for (let i = 0; i < 60; i++) {
+    const did = `did:plc:${String(i).padStart(24, 'c')}`;
+    const link = `budget-${String(i).padStart(2, '0')}`;
+    x.db.run(
+      "INSERT INTO linked_accounts(id,did,service,remote_user,credential_ciphertext,key_id,created_at_ms,updated_at_ms) VALUES(?,?,'listenbrainz','user',x'00','key',1,1)",
+      link,
+      did,
+    );
+    for (let j = 0; j < tracks.length; j++) {
+      const track = tracks[j]!;
+      x.db.run(
+        `INSERT INTO forward_outbox(id,link_id,did,kind,dedupe_key,payload_json,state,attempts,due_at,last_error,created_at_ms,updated_at_ms,love_artist_key,love_track_key)
+         VALUES(?,?,?,'love',?,?,'ignored',0,0,'mbid_unresolved',1,1,'artist',?)`,
+        `budget-${i}-${j}`,
+        link,
+        did,
+        `budget-${i}-${j}`,
+        JSON.stringify({ artist: 'Artist', track }),
+        track,
+      );
+    }
+  }
+  while (!backfillLoveReviveKeys(x.db, 100).complete) {}
+  let responseIndex = 0;
+  x.fake.onRequest = () => {
+    const n = responseIndex++;
+    x.clock.advance(1100);
+    const track = tracks[n] ?? tracks[2]!;
+    return {
+      status: 200,
+      body: {
+        recordings: [
+          {
+            ...candidate(),
+            title: track,
+            'artist-credit': [{ name: 'Artist', artist: { id: uuid, name: 'Artist' }, joinphrase: '' }],
+          },
+        ],
+      },
+    };
+  };
+  const result = await x.resolver.run();
+  expect(result.requests).toBe(2);
+  const revived = x.db.one<{ n: number }>(
+    "SELECT count(*) AS n FROM forward_outbox WHERE dedupe_key LIKE 'mb-match:%'",
+  )!.n;
+  expect(revived).toBe(98);
+  expect(revived).toBeLessThanOrEqual(100);
+  expect(x.db.one<{ n: number }>("SELECT count(*) AS n FROM mb_tracks WHERE status='matched'")!.n).toBe(2);
 });

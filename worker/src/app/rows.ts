@@ -389,6 +389,8 @@ export interface ForwardOutboxRow {
   last_error: string | null;
   created_at_ms: number;
   updated_at_ms: number;
+  love_artist_key: string | null;
+  love_track_key: string | null;
 }
 
 export interface ImportJobRow {
