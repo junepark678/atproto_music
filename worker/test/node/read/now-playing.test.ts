@@ -72,11 +72,11 @@ describe('now playing', () => {
         did: ALICE,
         artist: 'Radiohead',
         track: 'Reckoner',
-        durationSeconds: 90_000,
+        durationSeconds: 1800,
         source: 'listenbrainz',
       });
-      expect(initial.row.duration_seconds).toBeNull();
-      expect(initial.row.expires_at_ms).toBe(T0 + 90_000_000);
+      expect(initial.row.duration_seconds).toBe(1800);
+      expect(initial.row.expires_at_ms).toBe(T0 + 1_800_000);
 
       clock.advance(1_000);
       const repeated = upsertNowPlaying(m, {
@@ -86,7 +86,7 @@ describe('now playing', () => {
         durationSeconds: 90_000,
         source: 'listenbrainz',
       });
-      expect(repeated.row.duration_seconds).toBeNull();
+      expect(repeated.row.duration_seconds).toBe(1800);
       expect(repeated.row.expires_at_ms).toBe(T0 + 1_000 + 90_000_000);
 
       clock.advance(1_000);
@@ -96,10 +96,47 @@ describe('now playing', () => {
         track: 'Reckoner',
         source: 'listenbrainz',
       });
-      expect(omitted.row.duration_seconds).toBeNull();
+      expect(omitted.row.duration_seconds).toBe(1800);
       expect(omitted.row.expires_at_ms).toBe(T0 + 2_000 + 90_000_000);
     });
   });
+  it.each(['lastfm', 'listenbrainz'] as const)(
+    '%s omitted or null duration retains the effective TTL after an ordinary duration update',
+    async (source) => {
+      await withMigratedDb((db) => {
+        const clock = fixedClock();
+        const m = { db, clock };
+        upsertNowPlaying(m, {
+          did: ALICE,
+          artist: 'Radiohead',
+          track: 'Reckoner',
+          durationSeconds: 1800,
+          source,
+        });
+        clock.advance(1_000);
+        const updated = upsertNowPlaying(m, {
+          did: ALICE,
+          artist: 'Radiohead',
+          track: 'Reckoner',
+          durationSeconds: 2400,
+          source,
+        });
+        expect(updated.row.duration_seconds).toBe(2400);
+        expect(updated.row.expires_at_ms).toBe(T0 + 1_000 + 2_400_000);
+
+        clock.advance(1_000);
+        const omitted = upsertNowPlaying(m, {
+          did: ALICE,
+          artist: 'Radiohead',
+          track: 'Reckoner',
+          durationSeconds: null,
+          source,
+        });
+        expect(omitted.row.duration_seconds).toBe(2400);
+        expect(omitted.row.expires_at_ms).toBe(T0 + 2_000 + 2_400_000);
+      });
+    },
+  );
   it.each(['lastfm', 'listenbrainz'] as const)(
     '%s same-track refresh merges non-null detail fields',
     async (source) => {
