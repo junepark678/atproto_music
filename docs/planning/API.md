@@ -49,6 +49,8 @@ No v1.1 read route reads a session, cookie, CSRF token or Origin header, so no v
 | GET `/api/v1/users/{did}/scrobbles` | `limit`, `cursor` | 200 Page<Scrobble> |
 | GET `/api/v1/feed` | `scope=global\|following`, `viewer`, `limit`, `cursor` | 200 Page<Scrobble>; following requires `viewer=<did>`: 422 `fields.viewer` if missing or invalid, the following cursor binds the viewer (the global binding keeps `viewer` null), an unknown viewer gets an empty page (A8) |
 | GET `/api/v1/users/{did}/profile` | DID | 200 Profile below; unknown/inactive 404 |
+| GET `/api/v1/users/{did}/now-playing` | DID; optional owner session | 200 `{nowPlaying:NowPlaying|null,serverTime}`; public callers see only shared, current rows; owner sees a private current row with `shared:false`; 422 invalid DID; `Cache-Control: no-store` |
+| GET `/api/v1/feed/now-playing` | session | 200 `{items:[{did,handle,nowPlaying}],serverTime}`; followed active accounts only, shared and current entries, at most 50, newest refresh first then DID; 401 without a valid session; `Cache-Control: no-store` |
 | GET `/api/v1/users/{did}/stats` | `window=all\|7d\|30d\|365d`, `limit` | 200 Statistics below; default window all |
 | GET `/api/v1/users/{did}/following` | `limit`, `cursor` | 200 Page<Follow> |
 | GET `/api/v1/users/{did}/followers` | `limit`, `cursor` | 200 Page<Follow> |
@@ -72,6 +74,11 @@ The scrobble form (A2, A12) accepts only `artist`, `track`, `listenedAt`, option
 Profile = {did:DID, handle:string|null, joinedAt:timestamp, indexedAt:timestamp|null,
            totalScrobbles:integer, followerCount:integer, followingCount:integer,
            indexing:Indexing}
+NowPlaying = {artist, track, album?, albumArtist?, trackNumber?, durationSeconds?, recordingMbid?,
+             releaseMbid?, releaseGroupMbid?, artistMbids?, isrc?, startedAt, updatedAt, expiresAt,
+             scrobbledAt?, client?:{name,version?}, musicService?, mediaPlayer?,
+             source:"lastfm"|"listenbrainz"|"web", shared?}
+NowPlayingFeed = {items:[{did:DID,handle:string|null,nowPlaying:NowPlaying}],serverTime:timestamp}
 Statistics = {did:DID, window:"all"|"7d"|"30d"|"365d", asOf:timestamp,
               totalScrobbles:integer, distinctArtists:integer, distinctTracks:integer,
               topArtists:[{artist:string,scrobbleCount:integer}],
