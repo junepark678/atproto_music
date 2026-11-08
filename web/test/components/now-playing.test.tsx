@@ -1,5 +1,6 @@
 import type { Did, NowPlaying } from '@atmusic/core/api-types';
 import { render } from 'preact';
+import { act } from 'preact/test-utils';
 import { afterEach, expect, it, vi } from 'vitest';
 import type { ApiClient } from '../../src/api/client';
 import { ListeningNow, NowPlayingCard } from '../../src/components/now-playing';
@@ -122,10 +123,15 @@ it('ignores an older card refresh when a newer visibility refresh returns empty'
   await vi.waitFor(() => expect(nowPlaying).toHaveBeenCalledTimes(1));
   document.dispatchEvent(new Event('visibilitychange'));
   await vi.waitFor(() => expect(nowPlaying).toHaveBeenCalledTimes(2));
-  newer.resolve({ nowPlaying: null, serverTime: response.serverTime });
-  await vi.waitFor(() => expect(root.textContent).toContain('Nothing playing right now'));
-  older.resolve({ ...response, nowPlaying: { ...item, track: 'Old stale track' } });
-  await Promise.resolve();
+  await act(async () => {
+    newer.resolve({ nowPlaying: null, serverTime: response.serverTime });
+    await newer.promise;
+  });
+  expect(root.textContent).toContain('Nothing playing right now');
+  await act(async () => {
+    older.resolve({ ...response, nowPlaying: { ...item, track: 'Old stale track' } });
+    await older.promise;
+  });
   expect(root.textContent).toContain('Nothing playing right now');
   expect(root.textContent).not.toContain('Old stale track');
   render(null, root);
@@ -175,10 +181,14 @@ it('keeps the newer empty listening feed when an older request completes later',
   await vi.waitFor(() => expect(nowPlayingFeed).toHaveBeenCalledTimes(1));
   document.dispatchEvent(new Event('visibilitychange'));
   await vi.waitFor(() => expect(nowPlayingFeed).toHaveBeenCalledTimes(2));
-  newer.resolve({ items: [] });
-  await Promise.resolve();
-  older.resolve({ items: [feedItem] });
-  await Promise.resolve();
+  await act(async () => {
+    newer.resolve({ items: [] });
+    await newer.promise;
+  });
+  await act(async () => {
+    older.resolve({ items: [feedItem] });
+    await older.promise;
+  });
   expect(root.querySelector('.listening-now')).toBeNull();
   render(null, root);
   root.remove();
