@@ -234,7 +234,7 @@ describe('run()', () => {
     const beforeMigration = attempts.filter((a) => !a.migrated);
     expect(beforeMigration.every((a) => !a.accepted)).toBe(true);
     // After ready the database is at the latest version and the port answers.
-    expect(readSchemaState(server.db)).toEqual({ status: 'ready', version: MIGRATIONS.length });
+    expect(readSchemaState(server.db)).toEqual({ status: 'ready', version: MIGRATIONS.at(-1)?.version });
     expect(server.address.port).toBe(port);
     const ready = await get(port, '/health/ready');
     expect([ready.status, JSON.parse(ready.body)]).toEqual([200, { status: 'ready' }]);
@@ -388,7 +388,7 @@ process.exit(code);
     const created = start(f.env, ['--init']);
     const server = await created.server;
     expect(statSync(f.dbPath).mode & 0o777).toBe(0o600);
-    expect(readSchemaState(server.db)).toEqual({ status: 'ready', version: MIGRATIONS.length });
+    expect(readSchemaState(server.db)).toEqual({ status: 'ready', version: MIGRATIONS.at(-1)?.version });
     expect(
       server.db
         .all<{ version: number }>('SELECT version FROM schema_migrations ORDER BY version')

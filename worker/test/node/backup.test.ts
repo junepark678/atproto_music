@@ -355,7 +355,7 @@ describe('backups', () => {
       { value: 41 },
     ]);
     // The live database is migrated, and the backup recorded once the table existed.
-    expect(readSchemaState(server.db)).toEqual({ status: 'ready', version: MIGRATIONS.length });
+    expect(readSchemaState(server.db)).toEqual({ status: 'ready', version: MIGRATIONS.at(-1)?.version });
     expect(server.db.all('SELECT kind, ok, path FROM backup_runs')).toEqual([
       { kind: 'pre_migration', ok: 1, path: copy },
     ]);

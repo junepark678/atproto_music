@@ -469,7 +469,9 @@ async function projectedAtV9(h: Harness): Promise<void> {
   });
   expect(h.db.one("SELECT name FROM sqlite_master WHERE name = 'verified_membership'")).toBeNull();
   h.restart();
-  expect(h.db.one<{ v: number }>('SELECT max(version) AS v FROM schema_migrations')!.v).toBe(MIGRATIONS.length);
+  expect(h.db.one<{ v: number }>('SELECT max(version) AS v FROM schema_migrations')!.v).toBe(
+    MIGRATIONS.at(-1)?.version,
+  );
   expect(visible(h)).toEqual([TARGET, SIBLING]);
 }
 
