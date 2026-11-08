@@ -1,5 +1,7 @@
 import type { RecordProof } from '@atmusic/atproto/verify/types';
 import { recordingMsid } from '@atmusic/core/msid';
+import { trackKey } from '@atmusic/core/music-key';
+import { seededRandom } from '@atmusic/core/test-support/random';
 import { describe, expect, it } from 'vitest';
 import type { ModuleDeps } from '../../src/do/contracts';
 import type { Db } from '../../src/do/db';
@@ -15,6 +17,7 @@ import { computeStatistics } from '../../src/do/read/stats';
 import { visibleScrobblesFrom } from '../../src/do/read/visibility';
 import { applyRecordProof } from '../../src/do/write/apply-record';
 import { applySnapshotChunk } from '../../src/do/write/apply-snapshot';
+import { projectionListenKey } from '../../src/forward/projection';
 import { scrobbleDto } from '../../src/http/scrobbles-read';
 import { resolveFeedbackTarget } from '../../src/listenbrainz/feedback';
 import { withMigratedDb } from '../node/support/node-db';
@@ -51,6 +54,111 @@ const batchRecord = (...listens: Record<string, unknown>[]) => ({
 const apply = (db: Db, p: RecordProof) => db.tx(() => applyRecordProof(db, p, OPTS));
 
 describe('batch projection and visibility', () => {
+  it('forwards each first-admitted live batch member once across replacement and container moves', async () => {
+    const repo = await repoFor('alice');
+    const first = await putProof(
+      repo,
+      BATCH,
+      '3lbqbatch01ab',
+      batchRecord(listen(ID_A), listen(ID_B, { track: 'Second' })),
+    );
+    const moved = await putProof(
+      repo,
+      BATCH,
+      '3lbqbatch02ab',
+      batchRecord(listen(ID_A), listen(ID_B, { track: 'Second' })),
+    );
+    const added = await putProof(
+      repo,
+      BATCH,
+      '3lbqbatch01ab',
+      batchRecord(listen(ID_A), listen(ID_B, { track: 'Second' }), listen(ID_C, { track: 'Third' })),
+    );
+    await withMigratedDb((db) => {
+      seedUser(db, ALICE);
+      db.run(
+        `INSERT INTO linked_accounts(id,did,service,remote_user,credential_ciphertext,key_id,created_at_ms,updated_at_ms)
+        VALUES ('batch-link',?,'lastfm','alice',X'00','test',?,?)`,
+        ALICE,
+        Date.parse('2026-01-15T12:00:00Z'),
+        Date.parse('2026-01-15T12:00:00Z'),
+      );
+      const opts = { ...OPTS, forwarding: { random: seededRandom(14) } };
+      db.tx(() => applyRecordProof(db, first, opts));
+      expect(db.all("SELECT * FROM forward_outbox WHERE kind='scrobble'")).toHaveLength(2);
+      db.tx(() => applyRecordProof(db, moved, opts));
+      expect(db.all("SELECT * FROM forward_outbox WHERE kind='scrobble'")).toHaveLength(2);
+      db.tx(() => applyRecordProof(db, added, opts));
+      expect(db.all("SELECT * FROM forward_outbox WHERE kind='scrobble'")).toHaveLength(3);
+    });
+  });
+
+  it('snapshot batch admissions do not forward, including a later live revision', async () => {
+    const repo = await repoFor('alice');
+    const first = await putProof(
+      repo,
+      BATCH,
+      '3lbqbatch03ab',
+      batchRecord(listen(ID_A), listen(ID_B, { track: 'Second' })),
+    );
+    const later = await putProof(
+      repo,
+      BATCH,
+      '3lbqbatch03ab',
+      batchRecord(listen(ID_A), listen(ID_B, { track: 'Second' }), listen(ID_C, { track: 'Third' })),
+    );
+    await withMigratedDb((db) => {
+      seedUser(db, ALICE);
+      db.run(
+        `INSERT INTO linked_accounts(id,did,service,remote_user,credential_ciphertext,key_id,created_at_ms,updated_at_ms)
+        VALUES ('snapshot-link',?,'lastfm','alice',X'00','test',?,?)`,
+        ALICE,
+        Date.parse('2026-01-15T12:00:00Z'),
+        Date.parse('2026-01-15T12:00:00Z'),
+      );
+      db.tx(() => applyRecordProof(db, first, OPTS));
+      expect(db.all('SELECT * FROM forward_outbox')).toHaveLength(0);
+      expect(db.all("SELECT * FROM forward_admissions WHERE path='snapshot'")).toHaveLength(2);
+      db.tx(() => applyRecordProof(db, later, { ...OPTS, forwarding: { random: seededRandom(15) } }));
+      expect(db.all('SELECT * FROM forward_outbox')).toHaveLength(1);
+    });
+  });
+
+  it('honors existing API/import member admissions and excludes invalid batch members', async () => {
+    const repo = await repoFor('alice');
+    const proof = await putProof(
+      repo,
+      BATCH,
+      '3lbqbatch04ab',
+      batchRecord(listen(ID_A), listen(ID_B, { track: 'Second' }), listen(ID_C, { track: '   ' })),
+    );
+    await withMigratedDb((db) => {
+      seedUser(db, ALICE);
+      db.run(
+        `INSERT INTO linked_accounts(id,did,service,remote_user,credential_ciphertext,key_id,created_at_ms,updated_at_ms)
+        VALUES ('marker-link',?,'lastfm','alice',X'00','test',?,?)`,
+        ALICE,
+        Date.parse('2026-01-15T12:00:00Z'),
+        Date.parse('2026-01-15T12:00:00Z'),
+      );
+      for (const [track, source] of [
+        ['Track', 'web'],
+        ['Second', 'import'],
+      ] as const) {
+        const [artistKey, trackKeyValue] = trackKey('Artist', track);
+        const key = projectionListenKey(ALICE, LISTENED_AT, artistKey, trackKeyValue);
+        db.run(
+          'INSERT INTO listen_keys(did,dedupe_key,operation_id,source,created_at_ms) VALUES (?,?,NULL,?,?)',
+          ALICE,
+          key,
+          source,
+          Date.parse('2026-01-15T12:00:00Z'),
+        );
+      }
+      db.tx(() => applyRecordProof(db, proof, { ...OPTS, forwarding: { random: seededRandom(16) } }));
+      expect(db.all('SELECT * FROM forward_outbox')).toHaveLength(0);
+    });
+  });
   it('projects a verified external batch through snapshot, update, delete, and recreation proofs', async () => {
     const repo = await repoFor('alice');
     const rkey = '3lbqbatch01ab';

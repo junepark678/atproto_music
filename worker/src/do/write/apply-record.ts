@@ -267,6 +267,44 @@ function scrobbleVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, 
         fields.music_service,
         fields.recording_msid,
       );
+      const identityKey = projectionListenKey(t.did, row.listenedAt, keys.artist_key, keys.track_key);
+      const firstAdmission = admitForwardIdentity(db, {
+        did: t.did,
+        identityKey,
+        path: o.forwarding ? 'live' : 'snapshot',
+        now: Number(o.nowNs / 1_000_000n),
+      });
+      const localOperation = db.one<{ origin: string }>(
+        'SELECT origin FROM operations WHERE did=? AND collection=? AND rkey=? ORDER BY created_at_ms DESC LIMIT 1',
+        t.did,
+        t.collection,
+        t.rkey,
+      );
+      const knownListen = db.one('SELECT 1 AS hit FROM listen_keys WHERE did=? AND dedupe_key=?', t.did, identityKey);
+      if (firstAdmission && o.forwarding && knownListen === null && localOperation?.origin !== 'import') {
+        enqueueForwards(db, {
+          did: t.did,
+          items: [
+            {
+              kind: 'scrobble',
+              listenKey: identityKey,
+              payload: {
+                listen: {
+                  artist: row.artist,
+                  track: row.track,
+                  album: row.album ?? undefined,
+                  listenedAt: row.listenedAt,
+                  durationSeconds: row.durationSeconds ?? undefined,
+                  recordingMbid: row.recordingMbid ?? undefined,
+                },
+                origin: 'web',
+              },
+            },
+          ],
+          now: Number(o.nowNs / 1_000_000n),
+          random: o.forwarding.random,
+        });
+      }
       return before === null || before.cid !== cid;
     },
   };
@@ -541,20 +579,6 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
       };
     }
   }
-  if (t.kind === 'scrobble' && out.outcome === 'applied') {
-    const projected = db.one<{ listened_at: string; artist_key: string; track_key: string }>(
-      'SELECT listened_at,artist_key,track_key FROM scrobbles WHERE uri=?',
-      t.uri,
-    );
-    if (projected) {
-      admitForwardIdentity(db, {
-        did: t.did,
-        identityKey: projectionListenKey(t.did, projected.listened_at, projected.artist_key, projected.track_key),
-        path: o.forwarding ? 'live' : 'snapshot',
-        now: Number(o.nowNs / 1_000_000n),
-      });
-    }
-  }
   if (out.statsChanged) bumpStatsVersion(db, t.did);
   return out;
 }
@@ -695,64 +719,6 @@ export function applyRecordProof(db: Db, proof: RecordProof, o: ApplyOptions): A
     },
     o,
   );
-  if (o.forwarding && kind === 'scrobble' && applied.outcome === 'applied' && proof.state === 'present') {
-    const local = db.one<{ origin: string }>(
-      'SELECT origin FROM operations WHERE did=? AND collection=? AND rkey=? ORDER BY created_at_ms DESC LIMIT 1',
-      did,
-      proof.collection,
-      proof.rkey,
-    );
-    if (local?.origin !== 'import') {
-      const row = db.one<{
-        artist: string;
-        track: string;
-        album: string | null;
-        listened_at: string;
-        artist_key: string;
-        track_key: string;
-        duration_seconds: number | null;
-        recording_mbid: string | null;
-      }>(
-        'SELECT artist,track,album,listened_at,artist_key,track_key,duration_seconds,recording_mbid FROM scrobbles WHERE uri=?',
-        uri,
-      );
-      if (row) {
-        const key = projectionListenKey(did, row.listened_at, row.artist_key, row.track_key);
-        // Existing listen_keys preserve API/import identity across operation
-        // cleanup; admissions preserve first path across outbox pruning.
-        const knownListen = db.one('SELECT source FROM listen_keys WHERE did=? AND dedupe_key=?', did, key);
-        const admitted = db.one<{ path: string }>(
-          'SELECT path FROM forward_admissions WHERE did=? AND identity_key=?',
-          did,
-          key,
-        );
-        if (knownListen === null && admitted?.path === 'live' && local?.origin !== 'import') {
-          enqueueForwards(db, {
-            did,
-            items: [
-              {
-                kind: 'scrobble',
-                listenKey: key,
-                payload: {
-                  listen: {
-                    artist: row.artist,
-                    track: row.track,
-                    album: row.album ?? undefined,
-                    listenedAt: row.listened_at,
-                    durationSeconds: row.duration_seconds ?? undefined,
-                    recordingMbid: row.recording_mbid ?? undefined,
-                  },
-                  origin: 'web',
-                },
-              },
-            ],
-            now: Number(o.nowNs / 1_000_000n),
-            random: o.forwarding.random,
-          });
-        }
-      }
-    }
-  }
   advanceUser(db, did, rev, o.nowNs);
   return result(applied.outcome, applied.reason === undefined ? {} : { reason: applied.reason });
 }
