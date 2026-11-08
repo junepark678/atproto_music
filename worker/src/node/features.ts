@@ -452,11 +452,9 @@ export async function productionFeatures(options: ProductionFeatureOptions): Pro
           'cover-art': async (now, ctx) => {
             const result = await coverArtRun?.();
             const due = result?.nextDueAt;
+            const nextRun = due === null || due === undefined ? now + 3_600_000 : due <= now ? now + 1_000 : due;
             const cleanupDue = result?.cleanupPending ? now + 60_000 : Number.POSITIVE_INFINITY;
-            ctx.schedule(
-              'cover-art',
-              Math.min(due !== null && due !== undefined && due > now ? due : now + 3_600_000, cleanupDue),
-            );
+            ctx.schedule('cover-art', Math.min(nextRun, cleanupDue));
           },
         },
       },

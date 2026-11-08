@@ -410,6 +410,68 @@ describe('production features', () => {
     }
   });
 
+  it('continues bounded due cover-art slices from the armed alarm without a hot loop and waits for future retries', async () => {
+    const { w } = await startWorld({
+      connectJetstream: null,
+      env: { COVER_ART_ARCHIVE_ROOT: 'https://coverartarchive.test/' },
+    });
+    const ids = [
+      '11111111-1111-4111-8111-111111111111',
+      '22222222-2222-4222-8222-222222222222',
+      '33333333-3333-4333-8333-333333333333',
+      '44444444-4444-4444-8444-444444444444',
+      '55555555-5555-4555-8555-555555555555',
+    ];
+    for (const id of ids) enqueueCoverArt(w.db, id, null, w.clock.nowMs());
+
+    const requests = () =>
+      w.outbound.filter((request) => ['coverartarchive.test', 'ia800.archive.org'].includes(request.host));
+    const complete = () =>
+      w.db.one<{ n: number }>("SELECT count(*) AS n FROM mb_cover_art_jobs WHERE status='complete'")?.n;
+    w.core.extensionTimers.kick('cover-art');
+    await w.core.extensionAlarm();
+    await w.settle();
+    expect(complete()).toBe(2);
+    expect(requests()).toHaveLength(4);
+
+    const firstDue = w.db.one<{ due_at: number }>("SELECT due_at FROM timers WHERE name='cover-art'")?.due_at;
+    expect(firstDue).toBe(w.clock.nowMs() + 1_000);
+    await w.core.extensionAlarm();
+    await w.settle();
+    expect(complete()).toBe(2);
+    expect(requests()).toHaveLength(4);
+
+    w.advance(firstDue! - w.clock.nowMs());
+    await w.core.extensionAlarm();
+    await w.settle();
+    expect(complete()).toBe(4);
+    expect(requests()).toHaveLength(8);
+
+    const secondDue = w.db.one<{ due_at: number }>("SELECT due_at FROM timers WHERE name='cover-art'")?.due_at;
+    expect(secondDue).toBe(w.clock.nowMs() + 1_000);
+    w.advance(secondDue! - w.clock.nowMs());
+    await w.core.extensionAlarm();
+    await w.settle();
+    expect(complete()).toBe(5);
+    expect(requests()).toHaveLength(10);
+
+    // A future retry deadline is armed exactly; firing before it does not fetch early.
+    enqueueCoverArt(w.db, '66666666-6666-4666-8666-666666666666', null, w.clock.nowMs());
+    w.db.run(
+      "UPDATE mb_cover_art_jobs SET status='pending',next_due_ms=? WHERE release_mbid=?",
+      w.clock.nowMs() + 60_000,
+      '66666666-6666-4666-8666-666666666666',
+    );
+    w.core.extensionTimers.kick('cover-art');
+    await w.core.extensionAlarm();
+    await w.settle();
+    const retryDue = w.db.one<{ due_at: number }>("SELECT due_at FROM timers WHERE name='cover-art'")?.due_at;
+    expect(retryDue).toBe(w.clock.nowMs() + 60_000);
+    await w.core.extensionAlarm();
+    await w.settle();
+    expect(requests()).toHaveLength(10);
+  });
+
   it('the production features register the extension timers in EXTENSION_TIMER_NAMES order and run reconcileSignInPolicy once at startup before listen', async () => {
     const REFUSED = 'did:plc:cccccccccccccccccccccccc';
     const w = new World({
