@@ -412,8 +412,8 @@ it('notify posts {uri} and returns queued', async () => {
   expect(full.calls[0]!.method).toBe('POST');
 });
 
-it('every api/examples response decodes and a changed field type is rejected', async () => {
-  // Every remaining route has a client method, and every response fixture is exercised.
+it('every typed JSON api/examples response decodes and a changed field type is rejected', async () => {
+  // Every JSON route has a client method; binary cover-art fixtures are checked below.
   const routes = new Set(RESPONSE_CASES.map((c) => `${c.method} ${c.path}`));
   // Binary image responses deliberately do not use the JSON-decoding ApiClient.
   expect([...routes].filter((route) => route !== 'GET /api/v1/cover-art/{releaseMbid}').sort()).toEqual(
