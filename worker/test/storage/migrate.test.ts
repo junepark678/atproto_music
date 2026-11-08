@@ -745,6 +745,10 @@ describe('migrate', () => {
       [36, 'linked_listenbrainz_pull_round_guards'],
       [37, 'linked_pull_love_acceptance_admissions'],
       [38, 'love_delete_bridge_commit_revision'],
+      [39, 'listenbrainz_delete_queue'],
+      [40, 'listenbrainz_delete_lookup_progress'],
+      [41, 'listenbrainz_delete_lookup_tie_fence'],
+      [42, 'listenbrainz_delete_lookup_page_boundary'],
     ]);
 
     const name = 'migrate-v2-ready';
@@ -795,6 +799,10 @@ describe('migrate', () => {
         { version: 36, name: 'linked_listenbrainz_pull_round_guards' },
         { version: 37, name: 'linked_pull_love_acceptance_admissions' },
         { version: 38, name: 'love_delete_bridge_commit_revision' },
+        { version: 39, name: 'listenbrainz_delete_queue' },
+        { version: 40, name: 'listenbrainz_delete_lookup_progress' },
+        { version: 41, name: 'listenbrainz_delete_lookup_tie_fence' },
+        { version: 42, name: 'listenbrainz_delete_lookup_page_boundary' },
       ]);
       expect(db.all('SELECT min_compatible_version FROM schema_compat')).toEqual([{ min_compatible_version: 2 }]);
       // A row in a migration-2 table survives reopening.
