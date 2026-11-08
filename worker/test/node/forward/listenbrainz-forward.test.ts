@@ -264,6 +264,13 @@ describe('ListenBrainz forwarding', () => {
     // 4. A love without an MBID, and its unlove: no MBID is known anywhere.
     await love({ artist: 'Nobody', track: 'Knows' });
     await unlove('Nobody', 'Knows');
+    const [nobodyArtist, nobodyTrack] = trackKey('Nobody', 'Knows');
+    w.app.db.run(
+      "INSERT INTO mb_tracks(artist_key,track_key,album_key,status,created_at_ms) VALUES(?,?,'','unmatched',?)",
+      nobodyArtist,
+      nobodyTrack,
+      w.clock.nowMs(),
+    );
 
     const queued = w.rows();
     expect(queued.map((r) => r.kind)).toEqual(['love', 'unlove', 'unlove', 'unlove', 'love', 'unlove']);
@@ -300,6 +307,62 @@ describe('ListenBrainz forwarding', () => {
       undefined,
     ]);
     expect(w.seen.map(([meth, p]) => `${meth} ${p}`)).toEqual(Array(4).fill('POST /1/feedback/recording-feedback'));
+  });
+
+  it('defers a pending key persistently, lets another key pass, then forwards on match; unresolved expires as mbid_unresolved', async () => {
+    const w = await world();
+    const link = w.link();
+    const m = w.app.composed.core.deps;
+    const addLove = async (artist: string, track: string) =>
+      enqueueLove(m, { did: ALICE, input: { artist, track }, origin: 'listenbrainz' });
+    await addLove('Pending Artist', 'Pending Song');
+    const [pendingArtist, pendingTrack] = trackKey('Pending Artist', 'Pending Song');
+    const rowA = w.rows()[0]!;
+    await w.run();
+    expect(w.rows()[0]).toMatchObject({ state: 'queued', attempts: 0 });
+    expect(w.seen).toHaveLength(0);
+    expect(w.rows()[0]!.due_at).toBeGreaterThan(w.clock.nowMs());
+
+    await addLove('Ready Artist', 'Ready Song');
+    const [readyArtist, readyTrack] = trackKey('Ready Artist', 'Ready Song');
+    const recording = '77777777-7777-4777-8777-777777777777';
+    w.app.db.run(
+      "INSERT INTO mb_tracks(artist_key,track_key,album_key,status,recording_mbid,created_at_ms) VALUES(?,?,'','matched',?,?)",
+      readyArtist,
+      readyTrack,
+      recording,
+      w.clock.nowMs(),
+    );
+    await w.run();
+    expect(w.lb.feedback.map((f) => f.json)).toEqual([{ recording_mbid: recording, score: 1 }]);
+    expect(w.rows().find((r) => r.id === rowA.id)?.state).toBe('queued');
+
+    const resolved = '88888888-8888-4888-8888-888888888888';
+    w.app.db.run(
+      "UPDATE mb_tracks SET status='matched',recording_mbid=? WHERE artist_key=? AND track_key=?",
+      resolved,
+      pendingArtist,
+      pendingTrack,
+    );
+    w.clock.advance(MINUTE);
+    await w.run();
+    expect(w.lb.feedback.map((f) => f.json)).toEqual([
+      { recording_mbid: recording, score: 1 },
+      { recording_mbid: resolved, score: 1 },
+    ]);
+    expect(w.rows().find((r) => r.id === rowA.id)?.state).toBe('sent');
+
+    await addLove('Never Artist', 'Never Song');
+    const never = w.rows().at(-1)!;
+    const [neverArtist, neverTrack] = trackKey('Never Artist', 'Never Song');
+    w.app.db.run("UPDATE mb_tracks SET status='pending' WHERE artist_key=? AND track_key=?", neverArtist, neverTrack);
+    await w.run();
+    expect(w.rows().at(-1)?.state).toBe('queued');
+    w.clock.advance(DAY);
+    await w.run();
+    expect(w.rows().find((r) => r.id === never.id)).toMatchObject({ state: 'ignored', last_error: 'mbid_unresolved' });
+    expect(w.seen.every(([, path]) => path === '/1/feedback/recording-feedback')).toBe(true);
+    expect(w.rows().find((r) => r.id === never.id)?.link_id).toBe(link);
   });
 
   it('401 revokes the link; 429 waits X-RateLimit-Reset-In; 400 marks the row failed with the upstream error and does not retry', async () => {

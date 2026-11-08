@@ -66,11 +66,13 @@
 // production.
 
 import type { Clock, Random } from '@atmusic/core/deps';
+import { albumKey, artistKey, trackKey } from '@atmusic/core/music-key';
 import type { CoreExtension } from '../app/host';
 import type { LinkedAccountRow } from '../app/rows';
 import type { Box } from '../crypto/box';
 import type { Logger } from '../do/contracts';
 import type { Db } from '../do/db';
+import { enqueueTrack, matchedRecordingMbid } from '../musicbrainz/store';
 import { loveKeyOf } from '../outbox/love-ops';
 import {
   backoffRows,
@@ -235,20 +237,53 @@ function scrobbleJob(rt: ForwardRuntime, link: LinkRow, now: number): Job | null
 
 function loveJob(rt: ForwardRuntime, link: LinkRow, now: number): Job | null {
   for (;;) {
-    const head = loveHead(rt.db, link.id);
-    if (head === null || head.due_at > now) return null;
+    const head = rt.db.one<QueuedRow>(
+      `SELECT f.*,f.rowid AS seq FROM forward_outbox f WHERE f.link_id=? AND f.kind IN ('love','unlove') AND f.state='queued' AND f.due_at<=?
+       AND NOT EXISTS (SELECT 1 FROM forward_outbox older WHERE older.link_id=f.link_id AND older.dedupe_key=f.dedupe_key
+         AND older.kind IN ('love','unlove') AND older.state='queued' AND (older.created_at_ms<f.created_at_ms OR (older.created_at_ms=f.created_at_ms AND older.rowid<f.rowid)))
+       ORDER BY f.created_at_ms,f.rowid LIMIT 1`,
+      link.id,
+      now,
+    );
+    if (head === null) return null;
     const [entry] = parsed(rt, [head], lovePayload, now);
     if (entry === undefined) continue;
     if (link.service === 'listenbrainz' && entry[1].recordingMbid === undefined) {
       // An unlove names only the track; the MBID its love was sent with is known locally.
       const mbid = head.kind === 'unlove' ? knownRecordingMbid(rt.db, head, entry[1]) : null;
-      if (mbid === null) {
-        // ListenBrainz feedback needs a recording MBID; without one it is not forwarded.
-        settleRows(rt.db, [head.id], 'ignored', now, 'no_recording_mbid', false);
+      const key = {
+        artistKey: artistKey(entry[1].artist),
+        trackKey: trackKey(entry[1].artist, entry[1].track)[1],
+        albumKey: entry[1].album ? albumKey(entry[1].artist, entry[1].album)?.[1] : '',
+      };
+      const local = mbid ?? matchedRecordingMbid(rt.db, key);
+      if (local === null) {
+        const resolved = rt.db.one<{ status: string }>(
+          'SELECT status FROM mb_tracks WHERE artist_key=? AND track_key=? AND album_key=?',
+          key.artistKey,
+          key.trackKey,
+          key.albumKey ?? '',
+        );
+        if (resolved?.status === 'unmatched') {
+          settleRows(rt.db, [head.id], 'ignored', now, 'no_recording_mbid', false);
+          continue;
+        }
+        enqueueTrack(rt.db, key, now);
+        const deadline = head.created_at_ms + 24 * 60 * 60 * 1000;
+        if (now >= deadline) {
+          settleRows(rt.db, [head.id], 'ignored', now, 'mbid_unresolved', false);
+          continue;
+        }
+        rt.db.run(
+          "UPDATE forward_outbox SET due_at=?,updated_at_ms=? WHERE id=? AND state='queued'",
+          Math.min(deadline, now + 60_000),
+          now,
+          head.id,
+        );
         continue;
       }
-      entry[1].recordingMbid = mbid;
-      withRecordingMbid(rt.db, head, mbid);
+      entry[1].recordingMbid = local;
+      withRecordingMbid(rt.db, head, local);
     }
     return { link, kind: head.kind as 'love' | 'unlove', rows: [head], track: entry[1] };
   }
