@@ -12,6 +12,7 @@ import type { ModuleDeps } from '../do/contracts';
 import { admitForwardIdentity } from '../forward/projection';
 import { acceptImportBatch, prepareImportBatchPrefix } from '../imports/batch-acceptance';
 import { enqueueForwards } from '../outbox/forward-enqueue';
+import { hasUnknownListenSecond } from '../outbox/listen-second-receipts';
 import { loveKeyOf } from '../outbox/love-ops';
 import {
   IMPORT_PRIORITY,
@@ -24,7 +25,7 @@ import {
   unsettledOfKinds,
 } from '../outbox/operations';
 import { insertScrobbleCreate, prepareScrobble } from '../outbox/scrobble-ops';
-import { hasListenAtSecond, legacyPendingSeconds } from './pull-staging';
+import { hasListenAtSecond } from './pull-staging';
 import { isListenTombstoned, isLoveTombstoned } from './tombstones';
 
 export type PullHoldReason =
@@ -259,15 +260,13 @@ export async function writePullSlice(
       )
         currentRows.set(current.item_key, current);
     }
-    const legacy = plans.some((plan) => plan.second !== undefined) ? legacyPendingSeconds(m.db, link.did) : null;
-    for (const plan of plans) {
-      if (!currentRows.has(plan.row.item_key) || plan.second === undefined) continue;
-      const coverage = hasListenAtSecond(m.db, { did: link.did, second: plan.second, legacy: legacy! });
-      if (!coverage.complete) {
-        report.held = 'legacy_dedupe_coverage';
-        setHold(m, args.linkId, args.generation, report.held, now);
-        return;
-      }
+    if (
+      plans.some((plan) => currentRows.has(plan.row.item_key) && plan.second !== undefined) &&
+      hasUnknownListenSecond(m.db, link.did)
+    ) {
+      report.held = 'legacy_dedupe_coverage';
+      setHold(m, args.linkId, args.generation, report.held, now);
+      return;
     }
     const acceptBatch =
       packed !== null &&
@@ -278,7 +277,7 @@ export async function writePullSlice(
           current !== undefined &&
           plan.second !== undefined &&
           !isListenTombstoned(m.db, link.did, plan.second, plan.artistKey, plan.trackKey) &&
-          !hasListenAtSecond(m.db, { did: link.did, second: plan.second, legacy: legacy! }).matches
+          !hasListenAtSecond(m.db, { did: link.did, second: plan.second }).matches
         );
       });
     if (acceptBatch && packed !== null) {
@@ -329,10 +328,7 @@ export async function writePullSlice(
                 plan.row.item_key,
               );
               report.tombstoned++;
-            } else if (
-              second !== undefined &&
-              hasListenAtSecond(m.db, { did: link.did, second, legacy: legacy! }).matches
-            ) {
+            } else if (second !== undefined && hasListenAtSecond(m.db, { did: link.did, second }).matches) {
               m.db.run(
                 'DELETE FROM linked_pull_items WHERE link_id=? AND generation=? AND item_key=?',
                 args.linkId,
@@ -355,7 +351,7 @@ export async function writePullSlice(
           report.tombstoned++;
           continue;
         }
-        if (hasListenAtSecond(m.db, { did: link.did, second, legacy: legacy! }).matches) {
+        if (hasListenAtSecond(m.db, { did: link.did, second }).matches) {
           m.db.run(
             'DELETE FROM linked_pull_items WHERE link_id=? AND generation=? AND item_key=?',
             args.linkId,

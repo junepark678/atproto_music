@@ -1,10 +1,12 @@
 import { listenKey } from '@atmusic/core/listen-key';
 import { trackKey } from '@atmusic/core/music-key';
+import { NS_PER_SECOND } from '@atmusic/core/timestamp';
 import { describe, expect, it } from 'vitest';
 import type { LinkedAccountRow } from '../../../src/app/rows';
 import { linkDto } from '../../../src/forward/links';
 import { retainedForwardProvenance } from '../../../src/forward/projection';
 import { removeScrobbleCreate } from '../../../src/outbox/delete-ops';
+import { seedLegacyListenSecondSlice } from '../../../src/outbox/listen-second-receipts';
 import { enqueueUnlove } from '../../../src/outbox/love-ops';
 import { insertOperation, newOperationId, outboxCollections, prepare } from '../../../src/outbox/operations';
 import { stageLovePage, stagePullPage } from '../../../src/sync/pull-staging';
@@ -75,9 +77,16 @@ describe('linked pull staged writer', () => {
         },
         3,
       );
-      h.db.run(
-        "INSERT INTO listen_keys(did,dedupe_key,operation_id,source,created_at_ms,listen_second) VALUES(?,'legacy-single',?,'web',3,NULL)",
+      const singleReceipt = await listenKey({
         did,
+        listenedAtNs: 100n * NS_PER_SECOND,
+        artist: 'Legacy',
+        track: 'Single',
+      });
+      h.db.run(
+        "INSERT INTO listen_keys(did,dedupe_key,operation_id,source,created_at_ms,listen_second) VALUES(?,?,?,'web',3,NULL)",
+        did,
+        singleReceipt,
         singleId,
       );
       const batchId = newOperationId(h.m.random);
@@ -100,11 +109,22 @@ describe('linked pull staged writer', () => {
         },
         3,
       );
-      h.db.run(
-        "INSERT INTO listen_keys(did,dedupe_key,operation_id,source,created_at_ms,listen_second) VALUES(?,'legacy-batch',?,'import',3,NULL)",
+      const batchReceipt = await listenKey({
         did,
+        listenedAtNs: 200n * NS_PER_SECOND,
+        artist: 'Legacy',
+        track: 'Batch',
+      });
+      h.db.run(
+        "INSERT INTO listen_keys(did,dedupe_key,operation_id,source,created_at_ms,listen_second) VALUES(?,?,?,'import',3,NULL)",
+        did,
+        batchReceipt,
         batchId,
       );
+      for (let i = 0; i < 4; i++) {
+        const seeded = await seedLegacyListenSecondSlice(h.db, 4 + i);
+        if (!seeded.more) break;
+      }
       const result = await writePullSlice(h.m, { linkId, generation: 1, available: async () => ({ available: true }) });
       expect(result.duplicate).toBe(2);
       expect(result.accepted).toBe(0);

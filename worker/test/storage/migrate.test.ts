@@ -389,7 +389,16 @@ describe('migrate', () => {
       expectMigration1Seeds(db);
       expect(db.all('SELECT singleton,next_seq FROM forward_admission_clock')).toEqual([]);
       for (const table of TABLES) {
-        if ([...SEEDED_BY_MIGRATION_1, 'schema_migrations', 'schema_compat', 'mb_cover_art_usage'].includes(table))
+        if (
+          [
+            ...SEEDED_BY_MIGRATION_1,
+            'schema_migrations',
+            'schema_compat',
+            'mb_cover_art_usage',
+            'linked_pull_receipt_seed',
+            'linked_pull_projection_scan',
+          ].includes(table)
+        )
           continue;
         expect([table, db.one<{ n: number }>(`SELECT count(*) AS n FROM ${table}`)]).toEqual([table, { n: 0 }]);
       }
@@ -696,7 +705,7 @@ describe('migrate', () => {
   // database at that version is ready for that code, across restarts.
   // Later additive migrations keep the v2 compatibility floor.
   it('SCHEMA_VERSION includes additive batch provenance and remains compatible with v2 code', async () => {
-    expect(SCHEMA_VERSION).toBe(33);
+    expect(SCHEMA_VERSION).toBe(34);
     expect(MIGRATIONS.map((m) => [m.version, m.name])).toEqual([
       [1, 'initial_workers_schema'],
       [2, 'node_schema'],
@@ -731,6 +740,7 @@ describe('migrate', () => {
       [31, 'linked_pull_deletion_tombstones'],
       [32, 'linked_love_pull_cursor'],
       [33, 'linked_love_user_intent_fence'],
+      [34, 'linked_pull_legacy_listen_second_recovery'],
     ]);
 
     const name = 'migrate-v2-ready';
@@ -776,6 +786,7 @@ describe('migrate', () => {
         { version: 31, name: 'linked_pull_deletion_tombstones' },
         { version: 32, name: 'linked_love_pull_cursor' },
         { version: 33, name: 'linked_love_user_intent_fence' },
+        { version: 34, name: 'linked_pull_legacy_listen_second_recovery' },
       ]);
       expect(db.all('SELECT min_compatible_version FROM schema_compat')).toEqual([{ min_compatible_version: 2 }]);
       // A row in a migration-2 table survives reopening.

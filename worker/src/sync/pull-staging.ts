@@ -1,5 +1,6 @@
 import { MusicKeyError, trackKey } from '@atmusic/core/music-key';
 import type { Db } from '../do/db';
+import { hasUnknownListenSecond } from '../outbox/listen-second-receipts';
 import { isListenTombstoned, isLoveTombstoned } from './tombstones';
 
 export const PULL_PAGE_MAX_ITEMS = 1000;
@@ -27,9 +28,6 @@ export interface PulledLove {
 export type StageOutcome = 'accepted' | 'duplicate' | 'tombstoned';
 
 export type PendingSecondCoverage = { complete: true; matches: boolean } | { complete: false; matches: false };
-export type LegacyPendingSeconds =
-  | { complete: true; seconds: ReadonlySet<number> }
-  | { complete: false; seconds: ReadonlySet<number> };
 
 function normalizedLoveKey(artist: string, track: string): string | null {
   try {
@@ -44,7 +42,7 @@ function normalizedLoveKey(artist: string, track: string): string | null {
 /** Broad pull echo suppression; deliberately separate from canonical import/forward identities. */
 export function hasListenAtSecond(
   db: Db,
-  args: { did: string; second: number; linkId?: string; generation?: number; legacy?: LegacyPendingSeconds },
+  args: { did: string; second: number; linkId?: string; generation?: number },
 ): PendingSecondCoverage {
   if (
     db.one(
@@ -69,39 +67,9 @@ export function hasListenAtSecond(
     )
   )
     return { complete: true, matches: true };
-  const legacy = args.legacy ?? legacyPendingSeconds(db, args.did);
-  if (!legacy.complete) return { complete: false, matches: false };
-  return { complete: true, matches: legacy.seconds.has(args.second) };
-}
-
-/** Bounded fallback for migration-30 pending rows without listen_second receipts. */
-export function legacyPendingSeconds(db: Db, did: string): LegacyPendingSeconds {
-  const rows = db.all<{ record_json: string | null }>(
-    `SELECT o.record_json FROM operations o
-     WHERE o.did=? AND o.kind='scrobble.create' AND o.state IN ('queued','blocked','running')
-       AND o.record_json IS NOT NULL
-       AND NOT EXISTS (SELECT 1 FROM listen_keys k WHERE k.did=o.did AND k.operation_id=o.id AND k.listen_second IS NOT NULL)
-     ORDER BY o.rowid DESC LIMIT 501`,
-    did,
-  );
-  if (rows.length > 500) return { complete: false, seconds: new Set() };
-  const seconds = new Set<number>();
-  for (const row of rows) {
-    try {
-      const record = JSON.parse(row.record_json!) as { listenedAt?: unknown; listens?: unknown };
-      const listens = Array.isArray(record.listens) ? record.listens : [record];
-      for (const listen of listens) {
-        if (listen === null || typeof listen !== 'object') continue;
-        const listenedAt = (listen as { listenedAt?: unknown }).listenedAt;
-        if (typeof listenedAt !== 'string' || !Number.isFinite(Date.parse(listenedAt)))
-          return { complete: false, seconds: new Set() };
-        seconds.add(Math.floor(Date.parse(listenedAt) / 1000));
-      }
-    } catch {
-      return { complete: false, seconds: new Set() };
-    }
-  }
-  return { complete: true, seconds };
+  return hasUnknownListenSecond(db, args.did)
+    ? { complete: false, matches: false }
+    : { complete: true, matches: false };
 }
 
 /** Stage one upstream page and its progress marker atomically. Call within no outer async transaction. */
@@ -150,6 +118,7 @@ export function stagePullPage(
     );
     if (!current || current.source_service !== args.sourceService || current.source_account !== args.sourceAccount)
       throw new Error('pull state source changed');
+    if (hasUnknownListenSecond(db, args.did)) throw new Error('legacy listen-second coverage incomplete');
     const counts = db.one<{ n: number; bytes: number }>(
       'SELECT count(*) AS n, coalesce(sum(payload_bytes),0) AS bytes FROM linked_pull_items WHERE link_id=? AND generation=?',
       args.linkId,
@@ -159,7 +128,6 @@ export function stagePullPage(
       'SELECT count(*) AS n, coalesce(sum(payload_bytes),0) AS bytes FROM linked_pull_items',
     )!;
     const outcomes: StageOutcome[] = [];
-    const legacy = legacyPendingSeconds(db, args.did);
     let addN = 0,
       addBytes = 0;
     for (const item of args.items) {
@@ -173,7 +141,6 @@ export function stagePullPage(
         second,
         linkId: args.linkId,
         generation: args.generation,
-        legacy,
       });
       if (!accepted.complete) throw new Error('legacy listen-second coverage incomplete');
       if (accepted.matches) {

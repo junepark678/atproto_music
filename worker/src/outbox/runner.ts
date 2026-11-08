@@ -67,6 +67,7 @@ import { batchCreateExecutor } from './batch-ops';
 import { chargePoints, checkBudget, observeRateLimit, WRITE_COST } from './budget';
 import { scrobbleDeleteExecutor } from './delete-ops';
 import { followDeleteExecutor, followPutExecutor } from './follow-ops';
+import { persistListenSecondReceipts, prepareListenSecondReceipts } from './listen-second-receipts';
 import { loveDeleteExecutor, lovePutExecutor } from './love-ops';
 import {
   accountNeedsSignIn,
@@ -536,7 +537,7 @@ class Run {
         outcome.kind === 'waiting'
           ? outcome
           : { kind: 'permanent', code: reconciling.last_error ?? 'attempts_exhausted' };
-      this.settle(state, [[reconciling, final]], false);
+      await this.settle(state, [[reconciling, final]], false);
       return;
     }
     const [started] = beginAttempts(this.db, [op.id], this.m.clock.nowMs());
@@ -548,7 +549,7 @@ class Run {
     if (started.kind === 'scrobble.delete' && started.attempts >= MAX_ATTEMPTS) {
       outcome = exhaustedUncertain(context, started.id, outcome);
     }
-    this.settle(state, [[started, outcome]], true);
+    await this.settle(state, [[started, outcome]], true);
   }
 
   /** Settles a split-delete receipt after every durable child operation is terminal. */
@@ -599,7 +600,7 @@ class Run {
       this.m.log.log('error', 'outbox.internal_error', { error: error instanceof Error ? error.name : 'unknown' });
       outcomes = new Map(started.map((op) => [op.id, { kind: 'permanent', code: 'outbox_internal_error' }]));
     }
-    this.settle(
+    await this.settle(
       state,
       started.map((op): [OperationRow, Outcome] => [
         op,
@@ -610,11 +611,24 @@ class Run {
   }
 
   /** Persists outcomes and their hints in one transaction. `begun`: an attempt was counted for them now. */
-  private settle(state: Extract<DidState, { kind: 'ok' }>, results: [OperationRow, Outcome][], begun: boolean): void {
+  private async settle(
+    state: Extract<DidState, { kind: 'ok' }>,
+    results: [OperationRow, Outcome][],
+    begun: boolean,
+  ): Promise<void> {
     const db = this.db;
     const now = this.m.clock.nowMs();
     let reauth = false;
     let batchScopeHold = false;
+    const receiptBackfills = new Map<string, Awaited<ReturnType<typeof prepareListenSecondReceipts>> | null>();
+    for (const [op, outcome] of results) {
+      if (op.kind !== 'scrobble.create' || outcome.kind !== 'succeeded' || op.record_json === null) continue;
+      try {
+        receiptBackfills.set(op.id, await prepareListenSecondReceipts(op.did, op.record_json));
+      } catch {
+        receiptBackfills.set(op.id, null);
+      }
+    }
     db.tx(() => {
       const hints: HintTarget[] = [];
       for (const [op, outcome] of results) {
@@ -643,7 +657,19 @@ class Run {
             this.collections.scrobbleBatch,
           ).rowsWritten;
         } else if (outcome.kind === 'split') this.splitBatch(op, outcome.children, now);
-        else if (!finish(this.m, op, outcome, now, begun)) continue;
+        else {
+          const receipts = receiptBackfills.get(op.id);
+          const current =
+            outcome.kind === 'succeeded' && op.kind === 'scrobble.create'
+              ? db.one<{ record_json: string | null }>(
+                  "SELECT record_json FROM operations WHERE id=? AND state='running'",
+                  op.id,
+                )
+              : null;
+          if (current?.record_json === op.record_json && receipts !== undefined && receipts !== null)
+            persistListenSecondReceipts(db, { did: op.did, operationId: op.id, receipts });
+          if (!finish(this.m, op, outcome, now, begun)) continue;
+        }
         if (outcome.kind === 'succeeded') hints.push(...outcome.hints);
         if (outcome.kind === 'deferred') {
           // A smaller request may still fit (the next run sizes its batch by what is left);

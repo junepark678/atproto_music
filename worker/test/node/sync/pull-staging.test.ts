@@ -1,8 +1,10 @@
+import { listenKey } from '@atmusic/core/listen-key';
 import { trackKey } from '@atmusic/core/music-key';
 import { NS_PER_SECOND, toStorage } from '@atmusic/core/timestamp';
 import { describe, expect, it } from 'vitest';
 import { applyRecordTarget } from '../../../src/do/write/apply-record';
 import { enqueueScrobbleDelete } from '../../../src/outbox/delete-ops';
+import { seedLegacyListenSecondSlice } from '../../../src/outbox/listen-second-receipts';
 import { enqueueLove, enqueueUnlove } from '../../../src/outbox/love-ops';
 import { insertOperation, newOperationId, outboxCollections, prepare } from '../../../src/outbox/operations';
 import { hasListenAtSecond, stageLovePage, stagePullPage } from '../../../src/sync/pull-staging';
@@ -44,9 +46,16 @@ describe('linked pull staging', () => {
         },
         2,
       );
-      h.db.run(
-        "INSERT INTO listen_keys(did,dedupe_key,operation_id,source,created_at_ms,listen_second) VALUES(?,'legacy-single',?,'web',2,NULL)",
+      const singleReceipt = await listenKey({
         did,
+        listenedAtNs: 100n * NS_PER_SECOND,
+        artist: 'Legacy',
+        track: 'single',
+      });
+      h.db.run(
+        "INSERT INTO listen_keys(did,dedupe_key,operation_id,source,created_at_ms,listen_second) VALUES(?,?,?,'web',2,NULL)",
+        did,
+        singleReceipt,
         singleId,
       );
       const batchId = newOperationId(h.m.random);
@@ -69,11 +78,22 @@ describe('linked pull staging', () => {
         },
         2,
       );
-      h.db.run(
-        "INSERT INTO listen_keys(did,dedupe_key,operation_id,source,created_at_ms,listen_second) VALUES(?,'legacy-batch',?,'import',2,NULL)",
+      const batchReceipt = await listenKey({
         did,
+        listenedAtNs: 200n * NS_PER_SECOND,
+        artist: 'Legacy',
+        track: 'batch',
+      });
+      h.db.run(
+        "INSERT INTO listen_keys(did,dedupe_key,operation_id,source,created_at_ms,listen_second) VALUES(?,?,?,'import',2,NULL)",
+        did,
+        batchReceipt,
         batchId,
       );
+      for (let i = 0; i < 4; i++) {
+        const seeded = await seedLegacyListenSecondSlice(h.db, 4 + i);
+        if (!seeded.more) break;
+      }
       const args = {
         linkId,
         generation: 1,
@@ -94,6 +114,7 @@ describe('linked pull staging', () => {
         }),
       ).toEqual(['duplicate', 'duplicate']);
       h.db.run("UPDATE operations SET record_json='not-json' WHERE id=?", singleId);
+      h.db.run('UPDATE listen_keys SET listen_second=NULL WHERE did=? AND operation_id=?', did, singleId);
       expect(() =>
         stagePullPage(h.db, {
           ...args,

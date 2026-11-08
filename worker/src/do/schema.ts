@@ -1250,6 +1250,25 @@ const MIGRATION_S3_LOVE_INTENT_FENCE: Migration = {
   ],
 };
 
+const MIGRATION_S3_LISTEN_SECOND_RECOVERY: Migration = {
+  version: 34,
+  name: 'linked_pull_legacy_listen_second_recovery',
+  statements: [
+    `CREATE TABLE linked_pull_receipt_seed (
+      singleton INTEGER PRIMARY KEY NOT NULL,
+      last_rowid INTEGER NOT NULL DEFAULT 0,
+      member_offset INTEGER NOT NULL DEFAULT 0,
+      done INTEGER NOT NULL DEFAULT 0,
+      updated_at_ms INTEGER NOT NULL
+    )`,
+    `CREATE TABLE linked_pull_projection_scan (
+      did TEXT PRIMARY KEY NOT NULL,
+      rowid_cursor INTEGER NOT NULL DEFAULT 0,
+      updated_at_ms INTEGER NOT NULL
+    )`,
+  ],
+};
+
 export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_1,
   MIGRATION_2,
@@ -1284,6 +1303,7 @@ export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_S3_PULL_TOMBSTONES,
   MIGRATION_S3_LOVE_PULL_CURSOR,
   MIGRATION_S3_LOVE_INTENT_FENCE,
+  MIGRATION_S3_LISTEN_SECOND_RECOVERY,
 ];
 
 /** The schema version this code expects. */
@@ -1368,6 +1388,8 @@ export const TABLES = [
   'linked_pull_items',
   'linked_pull_tombstones',
   'linked_love_intents',
+  'linked_pull_receipt_seed',
+  'linked_pull_projection_scan',
 ] as const;
 
 export type TableName = (typeof TABLES)[number];
@@ -1451,4 +1473,6 @@ export const TABLE_CLASS: Readonly<Record<TableName, TableClass>> = {
   linked_pull_items: 'non-derived',
   linked_pull_tombstones: 'non-derived',
   linked_love_intents: 'non-derived',
+  linked_pull_receipt_seed: 'non-derived',
+  linked_pull_projection_scan: 'non-derived',
 };
