@@ -320,15 +320,30 @@ function existingLove(op: OperationRow, ctx: ExecContext, key: string): Existing
   if (last !== undefined) {
     // A completed unlove supersedes the still-visible projection until its
     // deletion hint is verified. Re-loving must write its new persisted key.
-    if (last.kind === 'love.delete') return null;
+    if (
+      last.kind === 'love.delete' &&
+      db.one(
+        `SELECT 1 AS hit FROM loves l JOIN record_state r ON r.uri=l.uri AND r.cid=l.cid AND r.state='present'
+       JOIN love_delete_bridges b ON b.did=l.did AND b.uri=l.uri
+       WHERE l.did=? AND b.state='obsolete' AND b.expected_cid<>l.cid
+         AND l.artist_key=? AND l.track_key=? LIMIT 1`,
+        op.did,
+        ...trackKey(recordOf(op)?.artist as string, recordOf(op)?.track as string),
+      ) === null
+    )
+      return null;
     if (last.kind === 'love.put' && last.uri !== null && last.cid !== null) {
       const rkey = ownRecordKey(last.uri, op.did, op.collection);
       if (rkey !== null) {
         const fencedDelete =
           db.one(
-            "SELECT 1 AS hit FROM love_delete_bridges WHERE did=? AND uri=? AND state IN ('pending','succeeded') LIMIT 1",
+            `SELECT 1 AS hit FROM love_delete_bridges WHERE did=? AND uri=?
+             AND expected_cid=coalesce((SELECT cid FROM record_state WHERE uri=? AND state='present'),?)
+             AND state IN ('pending','succeeded') LIMIT 1`,
             op.did,
             last.uri,
+            last.uri,
+            last.cid,
           ) !== null;
         const state = db.one<{ cid: string | null; state: string }>(
           `SELECT cid, state FROM record_state WHERE uri = ?`,
@@ -372,7 +387,8 @@ function existingLove(op: OperationRow, ctx: ExecContext, key: string): Existing
      WHERE did = ? AND artist_key = ? AND track_key = ?
        AND NOT EXISTS (
          SELECT 1 FROM love_delete_bridges AS bridge
-         WHERE bridge.did=loves.did AND bridge.uri=loves.uri AND bridge.state IN ('pending','succeeded')
+         WHERE bridge.did=loves.did AND bridge.uri=loves.uri AND bridge.expected_cid=loves.cid
+           AND bridge.state IN ('pending','succeeded')
        )
      ORDER BY created_at, uri LIMIT 1`,
     op.did,

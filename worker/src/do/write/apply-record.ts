@@ -527,6 +527,20 @@ function loveVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, o: A
     ok: true,
     write: () => {
       const priorLove = db.one<{ cid: string }>('SELECT cid FROM loves WHERE uri=?', t.uri);
+      const replacementAfterDelete =
+        db.run(
+          `UPDATE love_delete_bridges SET state='obsolete'
+         WHERE did=? AND uri=? AND state='succeeded' AND expected_cid<>?`,
+          t.did,
+          t.uri,
+          cid,
+        ).rowsWritten > 0;
+      if (replacementAfterDelete) {
+        // A verified replacement with different bytes supersedes the exact
+        // record whose deletion succeeded, even if its absence proof was missed.
+        db.run("UPDATE love_incarnations SET state='absent' WHERE uri=?", t.uri);
+        retirePullLoveAdmissionUri(db, { did: t.did, uri: t.uri, nowMs: Number(o.nowNs / 1_000_000n) });
+      }
       const previousRecordState = db.one<{ state: string; cid: string | null }>(
         'SELECT state,cid FROM record_state WHERE uri=?',
         t.uri,
@@ -566,12 +580,14 @@ function loveVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, o: A
       const identityKey = current?.state === 'present' ? current.incarnation_key : `love:${t.uri}:${t.rev}`;
       const acceptanceKey = `love-uri:${t.did}:${t.collection}:${t.rkey}`;
       const pullAdmission = pullLoveAdmissionForUri(db, { did: t.did, uri: t.uri });
-      const apiBridge =
-        retainedForwardProvenance(db, t.did, acceptanceKey) ??
-        (priorLove !== null ? retainedRecordProvenance(db, t.did, t.collection, t.rkey) : null) ??
-        (pullAdmission === null ? null : { path: 'import' as const, sourceService: pullAdmission.source_service });
+      const apiBridge = replacementAfterDelete
+        ? null
+        : (retainedForwardProvenance(db, t.did, acceptanceKey) ??
+          (priorLove !== null ? retainedRecordProvenance(db, t.did, t.collection, t.rkey) : null) ??
+          (pullAdmission === null ? null : { path: 'import' as const, sourceService: pullAdmission.source_service }));
       const legacyPresent =
-        current?.state === 'present' || priorLove !== null || previousRecordState?.state === 'present';
+        !replacementAfterDelete &&
+        (current?.state === 'present' || priorLove !== null || previousRecordState?.state === 'present');
       const provenancePath = apiBridge?.path ?? (legacyPresent ? 'snapshot' : o.forwarding ? 'live' : 'snapshot');
       const path = current?.state === 'present' ? current.path : provenancePath;
       const sourceService = current?.state === 'present' ? current.source_service : (apiBridge?.sourceService ?? null);
@@ -607,7 +623,7 @@ function loveVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, o: A
             t.collection,
             t.rkey,
           );
-          if (local?.origin !== 'import')
+          if (replacementAfterDelete || local?.origin !== 'import')
             enqueueForwards(db, {
               did: t.did,
               items: [
