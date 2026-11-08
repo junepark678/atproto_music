@@ -87,6 +87,10 @@ export async function enqueueLove(m: ModuleDeps, args: EnqueueLoveArgs): Promise
   const prepared = await prepare(record);
   const now = m.clock.nowMs();
   const operation = m.db.tx(() => {
+    // A fresh explicit API love is a new user intent and supersedes prior
+    // unlove tombstones. Imported/pulled loves cannot clear them.
+    if (args.origin !== 'import')
+      m.db.run("DELETE FROM linked_pull_tombstones WHERE did=? AND kind='love' AND love_key=?", args.did, key);
     const op = insertOperation(
       m.db,
       {

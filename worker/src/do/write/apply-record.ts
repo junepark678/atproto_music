@@ -731,7 +731,17 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
           nowMs: Number(o.nowNs / 1_000_000n),
         });
     }
-    if (o.forwarding && t.kind === 'love' && priorLove) {
+    const newerLoveIntent =
+      o.forwarding && t.kind === 'love' && priorLove
+        ? db.one(
+            `SELECT 1 FROM operations WHERE did=? AND kind='love.put' AND state IN ('queued','blocked','running')
+             AND json_extract(record_json,'$.artist')=? AND json_extract(record_json,'$.track')=? LIMIT 1`,
+            t.did,
+            priorLove.artist,
+            priorLove.track,
+          ) !== null
+        : false;
+    if (o.forwarding && t.kind === 'love' && priorLove && !newerLoveIntent) {
       const [artistKeyValue, trackKeyValue] = trackKey(priorLove.artist, priorLove.track);
       const key = `${artistKeyValue}\u0000${trackKeyValue}`;
       tombstoneLove(db, {

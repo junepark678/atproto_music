@@ -1,8 +1,11 @@
 import { trackKey } from '@atmusic/core/music-key';
 import { NS_PER_SECOND, toStorage } from '@atmusic/core/timestamp';
 import { describe, expect, it } from 'vitest';
+import { applyRecordTarget } from '../../../src/do/write/apply-record';
 import { enqueueScrobbleDelete } from '../../../src/outbox/delete-ops';
+import { enqueueLove, enqueueUnlove } from '../../../src/outbox/love-ops';
 import { hasListenAtSecond, stagePullPage } from '../../../src/sync/pull-staging';
+import { isLoveTombstoned } from '../../../src/sync/tombstones';
 import { SCROBBLE, withHarness } from '../outbox/support';
 
 describe('linked pull staging', () => {
@@ -137,6 +140,70 @@ describe('linked pull staging', () => {
       expect(h.db.one("SELECT count(*) AS n FROM linked_pull_tombstones WHERE did=? AND kind='listen'", did)).toEqual({
         n: 1,
       });
+    });
+  });
+
+  it('an explicit re-love clears the local unlove tombstone while imported loves cannot clear it', async () => {
+    await withHarness(async (h) => {
+      const did = 'did:plc:lovefence';
+      h.seedUser(did);
+      h.account(did);
+      const result = await enqueueUnlove(h.m, { did, artist: 'Artist', track: 'Track', origin: 'web' });
+      expect(result.ok).toBe(true);
+      const tombstone = h.db.one<{ love_key: string }>(
+        "SELECT love_key FROM linked_pull_tombstones WHERE did=? AND kind='love'",
+        did,
+      );
+      expect(tombstone).not.toBeNull();
+      expect(isLoveTombstoned(h.db, did, tombstone!.love_key, 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa')).toBe(true);
+      await enqueueLove(h.m, { did, input: { artist: 'Artist', track: 'Track' }, origin: 'import' });
+      expect(isLoveTombstoned(h.db, did, tombstone!.love_key, null)).toBe(true);
+      await enqueueLove(h.m, { did, input: { artist: 'Artist', track: 'Track' }, origin: 'web' });
+      expect(isLoveTombstoned(h.db, did, tombstone!.love_key, null)).toBe(false);
+    });
+  });
+
+  it('a live projection removal tombstones before deleting, while snapshot absence does not', async () => {
+    await withHarness(async (h) => {
+      const did = 'did:plc:projection';
+      h.seedUser(did);
+      const [artistKey, trackKeyValue] = trackKey('Artist', 'Track');
+      const at = toStorage(200n * NS_PER_SECOND);
+      for (const [owner, rkey] of [
+        [did, 'live'],
+        ['did:plc:snapshot', 'snapshot'],
+      ] as const) {
+        if (owner !== did) h.seedUser(owner);
+        const uri = `at://${owner}/${SCROBBLE}/${rkey}`;
+        h.db.run(
+          `INSERT INTO scrobbles(uri,cid,did,rkey,revision,artist,track,listened_at,created_at,indexed_at,artist_key,track_key)
+          VALUES(?, 'cid', ?, ?, 'rev','Artist','Track',?,?,?, ?,?)`,
+          uri,
+          owner,
+          rkey,
+          at,
+          at,
+          at,
+          artistKey,
+          trackKeyValue,
+        );
+        applyRecordTarget(
+          h.db,
+          { did: owner, kind: 'scrobble', collection: SCROBBLE, rkey, uri, rev: '3lbkzzzzzzz22', present: null },
+          {
+            receiptNs: 200n * NS_PER_SECOND,
+            prefix: 'com.example.atmusic',
+            nowNs: 200n * NS_PER_SECOND,
+            ...(owner === did ? { forwarding: { random: h.m.random } } : {}),
+          },
+        );
+      }
+      expect(h.db.one("SELECT count(*) AS n FROM linked_pull_tombstones WHERE did=? AND kind='listen'", did)).toEqual({
+        n: 1,
+      });
+      expect(
+        h.db.one("SELECT count(*) AS n FROM linked_pull_tombstones WHERE did='did:plc:snapshot' AND kind='listen'"),
+      ).toEqual({ n: 0 });
     });
   });
 });
