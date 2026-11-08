@@ -12,18 +12,6 @@
     "durationSeconds": 305,
     "recordingMbid": "13f12616-51d7-4023-a70b-a288ced4693a",
     "indexedAt": "2026-01-15T12:00:00Z",
-    "handle": "alice.test",
-    "musicbrainz": {
-      "recordingMbid": "3f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2d10",
-      "title": "Jóga",
-      "artistCredit": "Björk",
-      "artistMbids": ["87c5dedd-371d-4a53-9f7f-80522fb7f3cb"],
-      "releaseMbid": "d2e7a5b1-1c3f-4b8e-9a6d-0f1e2d3c4b5a",
-      "releaseTitle": "Homogenic",
-      "releaseGroupMbid": "0c9d0b0e-2f6a-4c3b-8d7e-6f5a4b3c2d1e",
-      "durationSeconds": 305,
-      "matchedBy": "search",
-      "syncedAt": "2026-01-15T12:00:00Z"
-    }
+    "handle": "alice.test"
   }
 }

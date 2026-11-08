@@ -32,6 +32,22 @@ describe('web/test/routes/profile.test.tsx', () => {
           ...stats,
           window: url.searchParams.get('window') ?? 'all',
           totalScrobbles: 7,
+          topTracks: [
+            {
+              artist: 'Björk',
+              track: 'Jóga',
+              scrobbleCount: 7,
+              recordingMbid: '3f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2d10',
+            },
+          ],
+          topAlbums: [
+            {
+              artist: 'Björk',
+              album: 'Homogenic',
+              scrobbleCount: 7,
+              releaseMbid: 'd2e7a5b1-1c3f-4b8e-9a6d-0f1e2d3c4b5a',
+            },
+          ],
           topArtists: [
             {
               artist: 'Server ranked artist',

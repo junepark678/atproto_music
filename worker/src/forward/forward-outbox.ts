@@ -20,10 +20,10 @@
 //
 // Order. Rows are read oldest first: `created_at_ms`, then `rowid` (the
 // insertion order, which breaks ties between rows accepted in the same
-// millisecond). Love and unlove rows of a link go strictly one at a time in
-// that order — a row waits while an older love/unlove of its link is still
-// queued — so love, unlove, love reach the upstream in order even across
-// retries.
+// millisecond). For love/unlove, the oldest queued row for each normalized
+// love key is eligible; a backoff blocks later toggles of that same key, but
+// does not block another track. Thus each track's toggles reach upstream in
+// order even across retries.
 //
 // Retry (ADR §12.3): `forwardBackoffMs(n)` = 30 s·2^n + U[0, 25%] of it,
 // capped at 6 h, with n the row's attempts before this one. A Last.fm

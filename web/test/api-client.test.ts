@@ -39,6 +39,7 @@ interface ResponseCase {
 const RESPONSE_CASES = example<ResponseCase[]>('response-cases');
 // `love.json` documents a closed DTO schema but no public route returns Love.
 const DTO_ONLY_FIXTURES = new Set(['love']);
+const COMPONENT_CASES = example<Record<string, string>>('component-cases');
 
 const BASE = 'https://music.example.org';
 const ALICE = 'did:plc:aaaaaaaaaaaaaaaaaaaaaaaa';
@@ -416,7 +417,14 @@ it('every api/examples response decodes and a changed field type is rejected', a
   expect([...routes].sort()).toEqual(Object.keys(ROUTE_CALLS).sort());
   const responseFixtures = Object.keys(exampleFiles)
     .map((file) => file.replace('../../api/examples/', '').replace('.json', ''))
-    .filter((name) => !name.endsWith('-input') && !name.endsWith('-cases') && !DTO_ONLY_FIXTURES.has(name));
+    .filter(
+      (name) =>
+        !name.endsWith('-input') &&
+        !name.endsWith('-cases') &&
+        !DTO_ONLY_FIXTURES.has(name) &&
+        !Object.values(COMPONENT_CASES).includes(name),
+    );
+  expect(Object.values(COMPONENT_CASES).sort()).toEqual(['love', 'scrobble-musicbrainz', 'stats-musicbrainz']);
   expect([...new Set(RESPONSE_CASES.map((c) => c.example))].sort()).toEqual(responseFixtures.sort());
 
   let decoded = 0;
@@ -472,7 +480,7 @@ it('every api/examples response decodes and a changed field type is rejected', a
 });
 
 it('decodes complete MusicBrainz read DTO examples and statistics MBIDs', () => {
-  const scrobbleResult = decoders.ScrobbleResult(example('scrobble'), '$');
+  const scrobbleResult = decoders.ScrobbleResult({ scrobble: example('scrobble-musicbrainz') }, '$');
   expect(scrobbleResult.scrobble.musicbrainz?.recordingMbid).toBe('3f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2d10');
 
   const love = decoders.Love(example('love'), '$');
@@ -481,14 +489,14 @@ it('decodes complete MusicBrainz read DTO examples and statistics MBIDs', () => 
   const nowPlaying = v12Example<{ nowPlaying: unknown }>('now-playing-response');
   expect(decoders.NowPlaying(nowPlaying.nowPlaying, '$').musicbrainz?.durationSeconds).toBe(202);
 
-  const statistics = decoders.Statistics(example('stats'), '$');
+  const statistics = decoders.Statistics(example('stats-musicbrainz'), '$');
   expect(statistics.topArtists[0]?.artistMbid).toBe('87c5dedd-371d-4a53-9f7f-80522fb7f3cb');
   expect(statistics.topTracks[0]?.recordingMbid).toBe('3f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2d10');
   expect(statistics.topAlbums[0]?.releaseMbid).toBe('d2e7a5b1-1c3f-4b8e-9a6d-0f1e2d3c4b5a');
 });
 
 it('rejects malformed MusicBrainz UUIDs and durations while keeping DTOs closed', () => {
-  const scrobbleResult = example<{ scrobble: Record<string, unknown> }>('scrobble');
+  const scrobbleResult = { scrobble: example<Record<string, unknown>>('scrobble-musicbrainz') };
   (scrobbleResult.scrobble.musicbrainz as Record<string, unknown>).recordingMbid = 'not-a-uuid';
   expect(() => decoders.ScrobbleResult(scrobbleResult, '$')).toThrow('$.scrobble.musicbrainz.recordingMbid');
 
@@ -496,7 +504,7 @@ it('rejects malformed MusicBrainz UUIDs and durations while keeping DTOs closed'
   (nowPlaying.nowPlaying.musicbrainz as Record<string, unknown>).durationSeconds = '202';
   expect(() => decoders.NowPlaying(nowPlaying.nowPlaying, '$')).toThrow('$.musicbrainz.durationSeconds');
 
-  const statistics = example<Record<string, unknown>>('stats');
+  const statistics = example<Record<string, unknown>>('stats-musicbrainz');
   (statistics.topArtists as Array<Record<string, unknown>>)[0]!.artistMbid = 'not-a-uuid';
   expect(() => decoders.Statistics(statistics, '$')).toThrow('$.topArtists[0].artistMbid');
   expect(() => decoders.Love({ ...example<Record<string, unknown>>('love'), extra: true }, '$')).toThrow('$.extra');

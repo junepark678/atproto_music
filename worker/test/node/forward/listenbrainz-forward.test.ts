@@ -309,6 +309,116 @@ describe('ListenBrainz forwarding', () => {
     expect(w.seen.map(([meth, p]) => `${meth} ${p}`)).toEqual(Array(4).fill('POST /1/feedback/recording-feedback'));
   });
 
+  it('keeps same-key love toggles FIFO through backoff while a different track proceeds', async () => {
+    const w = await world();
+    w.link();
+    const addLove = async (artist: string, track: string, mbid: string) =>
+      expect(
+        (
+          await enqueueLove(w.app.composed.core.deps, {
+            did: ALICE,
+            input: { artist, track, recordingMbid: mbid },
+            origin: 'listenbrainz',
+          })
+        ).ok,
+      ).toBe(true);
+    const addUnlove = async (artist: string, track: string) =>
+      expect(
+        (await enqueueUnlove(w.app.composed.core.deps, { did: ALICE, artist, track, origin: 'listenbrainz' })).ok,
+      ).toBe(true);
+
+    await addLove('Band', 'Song', MBID);
+    await addUnlove('BAND', ' song ');
+    const otherMbid = '77777777-7777-4777-8777-777777777777';
+    await addLove('Other Band', 'Other Song', otherMbid);
+    w.lb.fail({ status: 503, path: '/1/feedback/recording-feedback' });
+    await w.run();
+    const deferredLove = w.rows().find((row) => row.kind === 'love')!;
+    const delayedUnlove = w.rows().find((row) => row.kind === 'unlove')!;
+    expect(deferredLove).toMatchObject({ state: 'queued', attempts: 1 });
+    expect(deferredLove.due_at).toBeGreaterThan(w.clock.nowMs());
+
+    w.clock.advance(SECOND);
+    await w.run();
+    expect(w.lb.feedback.map((f) => f.json)).toEqual([{ recording_mbid: otherMbid, score: 1 }]);
+    expect(w.rows().find((row) => row.id === delayedUnlove.id)?.state).toBe('queued');
+
+    w.clock.set(new Date(deferredLove.due_at).toISOString());
+    await w.run();
+    expect(w.lb.feedback.map((f) => f.json)).toEqual([
+      { recording_mbid: otherMbid, score: 1 },
+      { recording_mbid: MBID, score: 1 },
+    ]);
+    w.clock.advance(SECOND);
+    await w.run();
+    expect(w.lb.feedback.map((f) => f.json)).toEqual([
+      { recording_mbid: otherMbid, score: 1 },
+      { recording_mbid: MBID, score: 1 },
+      { recording_mbid: MBID, score: 0 },
+    ]);
+    expect(
+      w
+        .rows()
+        .filter((row) => row.kind === 'love' || row.kind === 'unlove')
+        .map((row) => row.state),
+    ).toEqual(['sent', 'sent', 'sent']);
+  });
+
+  it('keeps a newer love behind a backoff unlove so the latest state wins', async () => {
+    const w = await world();
+    w.link();
+    const m = w.app.composed.core.deps;
+    expect(
+      (
+        await enqueueLove(m, {
+          did: ALICE,
+          input: { artist: 'Band', track: 'Song', recordingMbid: MBID },
+          origin: 'listenbrainz',
+        })
+      ).ok,
+    ).toBe(true);
+    await w.run();
+    expect(w.lb.feedback.map((f) => f.json)).toEqual([{ recording_mbid: MBID, score: 1 }]);
+
+    expect((await enqueueUnlove(m, { did: ALICE, artist: 'Band', track: 'Song', origin: 'listenbrainz' })).ok).toBe(
+      true,
+    );
+    expect(
+      (
+        await enqueueLove(m, {
+          did: ALICE,
+          input: { artist: 'BAND', track: ' song ', recordingMbid: MBID },
+          origin: 'listenbrainz',
+        })
+      ).ok,
+    ).toBe(true);
+    w.clock.advance(SECOND);
+    w.lb.fail({ status: 503, path: '/1/feedback/recording-feedback' });
+    await w.run();
+    const delayedUnlove = w.rows().find((row) => row.kind === 'unlove' && row.state === 'queued')!;
+    const newerLove = w
+      .rows()
+      .filter((row) => row.kind === 'love')
+      .at(-1)!;
+    expect(delayedUnlove).toMatchObject({ attempts: 1, state: 'queued' });
+    expect(newerLove.state).toBe('queued');
+
+    w.clock.advance(SECOND);
+    await w.run();
+    expect(newerLove.state).toBe('queued');
+    expect(w.lb.feedback.map((f) => f.json)).toEqual([{ recording_mbid: MBID, score: 1 }]);
+
+    w.clock.set(new Date(delayedUnlove.due_at).toISOString());
+    await w.run();
+    w.clock.advance(SECOND);
+    await w.run();
+    expect(w.lb.feedback.map((f) => f.json)).toEqual([
+      { recording_mbid: MBID, score: 1 },
+      { recording_mbid: MBID, score: 0 },
+      { recording_mbid: MBID, score: 1 },
+    ]);
+  });
+
   it('defers a pending key persistently, lets another key pass, then forwards on match; unresolved expires as mbid_unresolved', async () => {
     const w = await world();
     const link = w.link();

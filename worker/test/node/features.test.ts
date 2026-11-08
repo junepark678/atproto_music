@@ -279,7 +279,10 @@ async function spiedWorld(spy: Spy, enableMusicbrainz = false): Promise<{ w: Wor
   const { w, alice } = await startWorld({
     outbound: (router) => spy.source(router),
     connectJetstream: null,
-    env: { NAMESPACE_BATCH_PUBLICATION_REF: `sha256:${'b'.repeat(64)}`, ...(enableMusicbrainz ? { MUSICBRAINZ_API_ROOT: 'https://musicbrainz.test/ws/2/' } : {}) },
+    env: {
+      NAMESPACE_BATCH_PUBLICATION_REF: `sha256:${'b'.repeat(64)}`,
+      ...(enableMusicbrainz ? { MUSICBRAINZ_API_ROOT: 'https://musicbrainz.test/ws/2/' } : {}),
+    },
   });
   // run() installed the unpinned stub as globalThis.fetch; record every call to it.
   const stub = globalThis.fetch;
@@ -429,7 +432,15 @@ describe('production features', () => {
 
     // The six extension timers, in their fixed order, each with a handler and a stored due time.
     expect([...server.app.core.extensionLane.names]).toEqual([...EXTENSION_TIMER_NAMES]);
-    expect(EXTENSION_TIMER_NAMES).toEqual(['outbox', 'forward', 'import', 'oauth-keepalive', 'expiry-sweep', 'backup', 'musicbrainz']);
+    expect(EXTENSION_TIMER_NAMES).toEqual([
+      'outbox',
+      'forward',
+      'import',
+      'oauth-keepalive',
+      'expiry-sweep',
+      'backup',
+      'musicbrainz',
+    ]);
     const stored = w.db.all<{ name: string }>('SELECT name FROM timers ORDER BY name').map((r) => r.name);
     for (const name of EXTENSION_TIMER_NAMES) expect(stored).toContain(name);
     expect(server.features.features.map((f) => f.name)).toEqual([

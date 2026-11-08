@@ -20,8 +20,8 @@ import { isDid } from '@atmusic/core/syntax';
 import type { FeedQuery, ModuleDeps, RowsResult, ScrobbleRow } from '../contracts';
 import { indexing } from '../status';
 import { checkKeyset, keysetWhere, splitPage } from './history';
-import { visibleFollowEdge, visibleScrobblesFrom } from './visibility';
 import { MUSICBRAINZ_SCROBBLE_COLUMNS, MUSICBRAINZ_SCROBBLE_JOIN } from './musicbrainz-join';
+import { visibleFollowEdge, visibleScrobblesFrom } from './visibility';
 
 export function feed(m: ModuleDeps, q: FeedQuery): RowsResult<ScrobbleRow> {
   checkKeyset(q);

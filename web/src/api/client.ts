@@ -317,7 +317,7 @@ const musicBrainzMatch: Decoder<MusicBrainzMatch> = object(
   {
     recordingMbid: uuid,
     title: musicText,
-    artistCredit: str,
+    artistCredit: musicText,
     artistMbids: array(uuid),
     matchedBy: oneOf(['mbid', 'search'] as const),
     syncedAt: timestamp,
@@ -326,7 +326,7 @@ const musicBrainzMatch: Decoder<MusicBrainzMatch> = object(
     releaseMbid: uuid,
     releaseTitle: musicText,
     releaseGroupMbid: uuid,
-    durationSeconds: int(1),
+    durationSeconds: int(1, 86_400),
   },
 );
 

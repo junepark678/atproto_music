@@ -148,6 +148,20 @@ const SEED_ROWS: Record<string, Record<string, SqlParam>[]> = {
   admission: [{ window_start_ms: NOW, admitted: 2 }],
   timers: [{ name: 'outbox', due_at: NOW + DAY }],
   stats_cache: [{ did: ALICE, win: 'all', lim: 10, as_of: T0, version: 1, body: '{}' }],
+  mb_tracks: [
+    {
+      artist_key: 'björk',
+      track_key: 'jóga',
+      album_key: 'homogenic',
+      status: 'pending',
+      priority: 0,
+      attempts: 0,
+      next_attempt_ms: NOW,
+      created_at_ms: NOW,
+    },
+  ],
+  mb_pacing: [{ singleton: 1, available_at_ms: NOW }],
+  mb_seed_state: [{ singleton: 1, cursor_uri: '', complete: 0 }],
   counters: [{ name: 'events', label: 'commit', value: 3 }],
   accounts: [{ did: ALICE, username: 'alice', created_at_ms: NOW, updated_at_ms: NOW }],
   web_sessions: [{ token_hash: blob(1), did: ALICE, created_at_ms: NOW, expires_at_ms: NOW + DAY, last_seen_ms: NOW }],
@@ -286,6 +300,19 @@ const SEED_ROWS: Record<string, Record<string, SqlParam>[]> = {
     },
   ],
   backup_runs: [{ kind: 'manual', started_at_ms: NOW, finished_at_ms: NOW + 1, path: '/tmp/x.db', bytes: 1, ok: 1 }],
+  mb_love_revive_jobs: [
+    {
+      artist_key: 'björk',
+      track_key: 'jóga',
+      album_key: 'homogenic',
+      recording_mbid: '3f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2d10',
+      matched_at_ms: NOW,
+      created_at_ms: NOW,
+      cursor_link_id: '',
+    },
+  ],
+  mb_love_revival_state: [{ singleton: 1, cursor_rowid: 0, complete: 0 }],
+  mb_forward_love_current: [{ link_id: 'l1', love_artist_key: 'björk', love_track_key: 'jóga', forward_rowid: 1 }],
 };
 
 function insertRow(db: SqliteDb, table: string, row: Record<string, SqlParam>): void {

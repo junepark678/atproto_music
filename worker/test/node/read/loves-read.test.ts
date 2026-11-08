@@ -62,13 +62,19 @@ describe('loved tracks', () => {
       const m = { db };
 
       const bjork = db.one<{ artist_key: string; track_key: string }>(
-        `SELECT artist_key, track_key FROM loves WHERE did=? AND artist='Björk'`, ALICE,
+        `SELECT artist_key, track_key FROM loves WHERE did=? AND artist='Björk'`,
+        ALICE,
       )!;
-      db.run(`INSERT INTO mb_tracks(artist_key,track_key,album_key,status,recording_mbid,title,artist_credit,artist_mbids,
+      db.run(
+        `INSERT INTO mb_tracks(artist_key,track_key,album_key,status,recording_mbid,title,artist_credit,artist_mbids,
         release_mbid,release_title,release_group_mbid,duration_ms,isrcs,matched_by,score,synced_at_ms,created_at_ms)
         VALUES(?,?,?,'matched','3f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2d10','Enriched title','Credit feat. Guest',
         '["3f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2d10"]','3f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2d10','Release title',
-        '3f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2d10',123000,'[]','search',95,1768478400000,1)`, bjork.artist_key, bjork.track_key, '');
+        '3f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2d10',123000,'[]','search',95,1768478400000,1)`,
+        bjork.artist_key,
+        bjork.track_key,
+        '',
+      );
 
       const page1 = lovedTracks(m, { did: ALICE, limit: 3 })!;
       expect(rkeys(page1.rows)).toEqual(['3laaaaaaaaaa3', '3laaaaaaaaaa2', '3laaaaaaaaaa1']);
@@ -77,13 +83,22 @@ describe('loved tracks', () => {
       expect([rkeys(page2.rows), page2.offset]).toEqual([['3laaaaaaaaaa4'], 3]);
       expect(page1.rows[0]).toMatchObject({ artist: 'Kate Bush', track: 'Cloudbusting', did: ALICE });
       const enriched = page1.rows.find((row) => row.artist === 'Björk')!;
-      expect(enriched).toMatchObject({ artist: 'Björk', track: 'Jóga', musicbrainz: {
-        recordingMbid: '3f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2d10', title: 'Enriched title',
-        artistCredit: 'Credit feat. Guest', artistMbids: ['3f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2d10'],
-        releaseMbid: '3f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2d10', releaseTitle: 'Release title',
-        releaseGroupMbid: '3f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2d10', durationSeconds: 123,
-        matchedBy: 'search', syncedAt: '2026-01-15T12:00:00.000000000Z',
-      }});
+      expect(enriched).toMatchObject({
+        artist: 'Björk',
+        track: 'Jóga',
+        musicbrainz: {
+          recordingMbid: '3f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2d10',
+          title: 'Enriched title',
+          artistCredit: 'Credit feat. Guest',
+          artistMbids: ['3f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2d10'],
+          releaseMbid: '3f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2d10',
+          releaseTitle: 'Release title',
+          releaseGroupMbid: '3f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2d10',
+          durationSeconds: 123,
+          matchedBy: 'search',
+          syncedAt: '2026-01-15T12:00:00.000000000Z',
+        },
+      });
       expect(page1.rows.find((row) => row.artist === 'Radiohead')?.musicbrainz).toBeUndefined();
       expect(rkeys(lovedTracks(m, { did: BOB, limit: 50 })!.rows)).toEqual(['3lbbbbbbbbbb1']);
 

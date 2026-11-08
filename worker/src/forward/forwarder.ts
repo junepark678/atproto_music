@@ -13,8 +13,8 @@
 //    link's own 1 request/s token and no rate-limit hold. For that link it
 //    sends, in this order of preference:
 //    - its newest due now playing (older ones are superseded), once;
-//    - otherwise whichever is older of its due scrobbles and its love/unlove
-//      head (forward-outbox.ts `loveHead`: love toggles go strictly in order).
+//    - otherwise whichever is older of its due scrobbles and the next due
+//      love/unlove head for any love key (toggles stay ordered per track).
 //      Last.fm scrobbles go as one signed track.scrobble of ≤ 50 rows, oldest
 //      first; ListenBrainz sends one due listen as `single` and a backlog as
 //      `import` of ≤ 100; a row whose import was refused with 400 is retried
@@ -84,7 +84,6 @@ import {
   type ForwardTrack,
   holdLinkRows,
   lastfmKeyRejectedAt,
-  loveHead,
   lovePayload,
   markLastfmKeyRejected,
   nextUtcMidnight,
@@ -235,17 +234,30 @@ function scrobbleJob(rt: ForwardRuntime, link: LinkRow, now: number): Job | null
   }
 }
 
+/** First queued row for each normalized love key, preserving FIFO across backoff. */
+function queuedLoveHeads(db: Db, linkId: string): QueuedRow[] {
+  const rows = db.all<QueuedRow>(
+    `SELECT f.*,f.rowid AS seq FROM forward_outbox f
+     WHERE f.link_id=? AND f.kind IN ('love','unlove') AND f.state='queued'
+     ORDER BY f.created_at_ms,f.rowid`,
+    linkId,
+  );
+  const seen = new Set<string>();
+  const heads: QueuedRow[] = [];
+  for (const row of rows) {
+    const track = lovePayload(row);
+    const key = track === null ? `invalid:${row.id}` : (loveKeyOf(track.artist, track.track) ?? `invalid:${row.id}`);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    heads.push(row);
+  }
+  return heads;
+}
+
 function loveJob(rt: ForwardRuntime, link: LinkRow, now: number): Job | null {
   for (;;) {
-    const head = rt.db.one<QueuedRow>(
-      `SELECT f.*,f.rowid AS seq FROM forward_outbox f WHERE f.link_id=? AND f.kind IN ('love','unlove') AND f.state='queued' AND f.due_at<=?
-       AND NOT EXISTS (SELECT 1 FROM forward_outbox older WHERE older.link_id=f.link_id AND older.dedupe_key=f.dedupe_key
-         AND older.kind IN ('love','unlove') AND older.state='queued' AND (older.created_at_ms<f.created_at_ms OR (older.created_at_ms=f.created_at_ms AND older.rowid<f.rowid)))
-       ORDER BY f.created_at_ms,f.rowid LIMIT 1`,
-      link.id,
-      now,
-    );
-    if (head === null) return null;
+    const head = queuedLoveHeads(rt.db, link.id).find((row) => row.due_at <= now);
+    if (head === undefined) return null;
     const [entry] = parsed(rt, [head], lovePayload, now);
     if (entry === undefined) continue;
     if (link.service === 'listenbrainz' && entry[1].recordingMbid === undefined) {
@@ -617,8 +629,11 @@ export function nextForwardDue(rt: ForwardRuntime, now: number): number | null {
   let lastfmBacklog = false;
   for (const link of links) {
     if (link.service === 'lastfm' && rt.lastfm === null) continue;
-    const head = loveHead(rt.db, link.id);
-    const due = Math.min(link.due ?? Number.POSITIVE_INFINITY, head?.due_at ?? Number.POSITIVE_INFINITY);
+    const loveDue = queuedLoveHeads(rt.db, link.id).reduce(
+      (dueAt, row) => Math.min(dueAt, row.due_at),
+      Number.POSITIVE_INFINITY,
+    );
+    const due = Math.min(link.due ?? Number.POSITIVE_INFINITY, loveDue);
     if (due === Number.POSITIVE_INFINITY) continue;
     if (link.service === 'lastfm' && due <= now) lastfmBacklog = true;
     const at = Math.max(due, upstreamFreeAt(rt, link, now));

@@ -9,12 +9,15 @@
 
 import { parseScrobbleBatchListenUri } from '@atmusic/core/scrobble-batch';
 import type { ModuleDeps, ScrobbleRow } from '../contracts';
-import { visibleScrobblesFrom } from './visibility';
 import { MUSICBRAINZ_SCROBBLE_COLUMNS, MUSICBRAINZ_SCROBBLE_JOIN } from './musicbrainz-join';
+import { visibleScrobblesFrom } from './visibility';
 
 export function lookup(m: ModuleDeps, uri: string): ScrobbleRow | null {
   if (typeof uri !== 'string') throw new RangeError('lookup needs an AT URI string');
   const parsedBatch = parseScrobbleBatchListenUri(uri);
   if (uri.includes('#') && parsedBatch === null) return null;
-  return m.db.one<ScrobbleRow>(`SELECT s.*, ${MUSICBRAINZ_SCROBBLE_COLUMNS} FROM ${visibleScrobblesFrom('s', 'u')} ${MUSICBRAINZ_SCROBBLE_JOIN} WHERE s.uri = ?`, uri);
+  return m.db.one<ScrobbleRow>(
+    `SELECT s.*, ${MUSICBRAINZ_SCROBBLE_COLUMNS} FROM ${visibleScrobblesFrom('s', 'u')} ${MUSICBRAINZ_SCROBBLE_JOIN} WHERE s.uri = ?`,
+    uri,
+  );
 }

@@ -302,7 +302,7 @@ const STATS_FOLLOW_UP_MS = 50;
 /** Hit request offset: every listen is at a half second, so a 250 ms shift of either bound crosses no row. */
 const HIT_SHIFT_NS = 250_000_000n;
 const NOW_ISO = '2026-01-15T12:00:00Z';
-/** Cached-hit probe budgets (ADR 0004 §15 Q10): users row + cache row + ≤ 2 EXISTS (1 for `all`). */
+/** Cached-hit probes: users row, cache row, and one/two EXISTS checks (ADR 0004 §15 Q10). */
 const STATS_PROBES_ALL = 3;
 const STATS_PROBES_WINDOWED = 4;
 const probeBudget = (w: StatsWindow) => (w === 'all' ? STATS_PROBES_ALL : STATS_PROBES_WINDOWED);
@@ -880,7 +880,7 @@ async function measureRead(h: Harness, spec: ReadSpec): Promise<MeasuredRead> {
   const result = run();
   const coldMs = performance.now() - t0;
   const pageStatement = trace[0] as Trace;
-  if (!pageStatement.sql.trimStart().startsWith('SELECT s.* FROM scrobbles s')) {
+  if (!pageStatement.sql.trimStart().startsWith('SELECT s.*') || !pageStatement.sql.includes('FROM scrobbles s')) {
     throw new Error(`${spec.name}: unexpected first statement ${pageStatement.sql}`);
   }
   const statements = trace.length;
@@ -1096,9 +1096,11 @@ async function measureStats(
       ? 'users'
       : /FROM stats_cache/.test(p.sql)
         ? 'cache'
-        : /EXISTS/.test(p.sql)
-          ? 'exists'
-          : 'other',
+        : /WITH requested AS/.test(p.sql)
+          ? 'musicbrainz'
+          : /EXISTS/.test(p.sql)
+            ? 'exists'
+            : 'other',
   );
   const probesIndexed = probes.every((p) => {
     const plan = planOf(plain, p);
@@ -1759,9 +1761,7 @@ describe('read-model benchmark', () => {
         topAlbumCounts: e.topAlbumCounts,
       });
 
-      // ADR 0004 §15 Q10, hard: every statement of the hit is an indexed
-      // probe: the users row, the cache row, then one EXISTS (`all` has no
-      // lower bound) or two (a window).
+      // The cache/visibility check uses users, cache and one/two EXISTS probes.
       const budget = s.window === 'all' ? 3 : 4;
       expect(s.cached.probeKinds, name).toEqual(
         s.window === 'all' ? ['users', 'cache', 'exists'] : ['users', 'cache', 'exists', 'exists'],
@@ -1775,8 +1775,9 @@ describe('read-model benchmark', () => {
       // and equals it as well.
       expect(s.equalsUncached, name).toBe(true);
       expect(s.afterVersionBump, name).toEqual({ cache: 'miss', equalsUncached: true });
-      // Uncached: user, cache, totals, artists, tracks, albums, store.
-      expect(s.uncached.statements, name).toBe(7);
+      // Uncached: user, cache, totals, artists, tracks, albums, store and
+      // one bounded local metadata lookup for each populated top-list group.
+      expect(s.uncached.statements, name).toBe(10);
       expect(s.withinBudget, name).toBe(true);
     }
   });

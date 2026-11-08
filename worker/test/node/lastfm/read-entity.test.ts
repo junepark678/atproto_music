@@ -227,6 +227,40 @@ describe('Last.fm entity read methods', () => {
     ).toBe(other);
   });
 
+  it('scopes release fallback to the artist and shared album title tuple on track and album reads', async () => {
+    const app = await entityApp();
+    const releaseForBjork = '44444444-4444-4444-8444-444444444444';
+    const releaseForRadiohead = '55555555-5555-4555-8555-555555555555';
+    const sharedAlbumKey = 'greatest hits';
+    const cases = [
+      { artist: 'Björk', track: 'Jóga', release: releaseForBjork },
+      { artist: 'Radiohead', track: 'Karma Police', release: releaseForRadiohead },
+    ];
+    for (const item of cases) {
+      const [ak, tk] = trackKey(item.artist, item.track);
+      app.db.run(
+        'UPDATE scrobbles SET album=?,album_key=?,release_mbid=NULL WHERE artist_key=? AND track_key=?',
+        'Greatest Hits',
+        sharedAlbumKey,
+        ak,
+        tk,
+      );
+      app.db.run(
+        `UPDATE mb_tracks SET status='matched',album_key=?,release_mbid=? WHERE artist_key=? AND track_key=?`,
+        sharedAlbumKey,
+        item.release,
+        ak,
+        tk,
+      );
+    }
+    for (const item of cases) {
+      const track = await get(app, { method: 'track.getInfo', artist: item.artist, track: item.track });
+      const album = await get(app, { method: 'album.getInfo', artist: item.artist, album: 'Greatest Hits' });
+      expect(track.body.track.album.mbid).toBe(item.release);
+      expect(album.body.album.mbid).toBe(item.release);
+    }
+  });
+
   it('artist.getInfo and album.getInfo report stats over every listener and the getTopTags family answers empty lists', async () => {
     const app = await entityApp();
     const artist = await get(app, { method: 'artist.getInfo', artist: 'radiohead', username: 'alice' });
