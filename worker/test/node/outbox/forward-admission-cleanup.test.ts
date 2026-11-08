@@ -64,7 +64,7 @@ it('keeps a listen admission when cancellation is backed by an indexed tombstone
   });
 });
 
-it('suppression clears index-only forwarding state but retains markers backed by API acceptance', async () => {
+it('suppression clears index-only forwarding state but retains API acceptance and pending delete fences', async () => {
   await withHarness(async (h) => {
     h.account(h.alice);
     const accepted = await acceptListens(h.m, {
@@ -125,7 +125,7 @@ it('suppression clears index-only forwarding state but retains markers backed by
     expect(
       h.db.one('SELECT 1 AS hit FROM forward_admissions WHERE did=? AND identity_key=?', h.alice, `love:${loveUri}:3`),
     ).toBeNull();
-    expect(h.db.one('SELECT 1 AS hit FROM love_incarnations WHERE uri=?', loveUri)).toBeNull();
-    expect(h.db.one('SELECT 1 AS hit FROM love_delete_bridges WHERE uri=?', loveUri)).toBeNull();
+    expect(h.db.one('SELECT state FROM love_incarnations WHERE uri=?', loveUri)).toEqual({ state: 'present' });
+    expect(h.db.one('SELECT state FROM love_delete_bridges WHERE uri=?', loveUri)).toEqual({ state: 'pending' });
   });
 });
