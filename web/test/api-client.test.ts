@@ -30,6 +30,7 @@ interface ResponseCase {
 }
 
 const RESPONSE_CASES = example<ResponseCase[]>('response-cases');
+const COMPONENT_CASES = example<Record<string, string>>('component-cases');
 
 const BASE = 'https://music.example.org';
 const ALICE = 'did:plc:aaaaaaaaaaaaaaaaaaaaaaaa';
@@ -407,7 +408,10 @@ it('every api/examples response decodes and a changed field type is rejected', a
   expect([...routes].sort()).toEqual(Object.keys(ROUTE_CALLS).sort());
   const responseFixtures = Object.keys(exampleFiles)
     .map((file) => file.replace('../../api/examples/', '').replace('.json', ''))
-    .filter((name) => !name.endsWith('-input') && !name.endsWith('-cases') && name !== 'love');
+    .filter(
+      (name) => !name.endsWith('-input') && !name.endsWith('-cases') && !Object.values(COMPONENT_CASES).includes(name),
+    );
+  expect(Object.values(COMPONENT_CASES).sort()).toEqual(['love', 'scrobble-musicbrainz', 'stats-musicbrainz']);
   expect([...new Set(RESPONSE_CASES.map((c) => c.example))].sort()).toEqual(responseFixtures.sort());
 
   let decoded = 0;
