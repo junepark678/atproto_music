@@ -274,9 +274,16 @@ export async function hostStatus(deps: HostStatusDeps): Promise<Record<string, u
     ['forward', 'forward_outbox'],
     ['imports', 'import_jobs'],
   ] as const) {
-    queues[name] = tableExists(db, table)
-      ? countsBy(db, `SELECT state AS k, count(*) AS n FROM ${table} GROUP BY state ORDER BY state`)
-      : {};
+    queues[name] = !tableExists(db, table)
+      ? {}
+      : name === 'forward'
+        ? countsBy(
+            db,
+            `SELECT f.state AS k,count(*) AS n FROM forward_outbox AS f
+             JOIN linked_accounts AS link ON link.id=f.link_id AND link.generation=f.generation
+             GROUP BY f.state ORDER BY f.state`,
+          )
+        : countsBy(db, `SELECT state AS k,count(*) AS n FROM ${table} GROUP BY state ORDER BY state`);
   }
   const links = tableExists(db, 'linked_accounts')
     ? countsBy(db, 'SELECT status AS k, count(*) AS n FROM linked_accounts GROUP BY status ORDER BY status')

@@ -56,6 +56,7 @@ import { SCHEMA_VERSION, TABLE_CLASS } from '../../worker/src/do/schema.ts';
 import { applyRecordProof } from '../../worker/src/do/write/apply-record.ts';
 import { deleteLink, getLinkById, openLinkCredential, saveLink } from '../../worker/src/forward/links.ts';
 import { enqueueCoverArt, putCoverArt } from '../../worker/src/musicbrainz/cover-art-store.ts';
+import { admitForwardIdentity } from '../../worker/src/forward/projection.ts';
 import { createBackups } from '../../worker/src/node/backup.ts';
 import { type ExitCode, type RunningServer, run } from '../../worker/src/node/run.ts';
 import { parseSecrets, type Secrets } from '../../worker/src/node/secrets.ts';
@@ -708,6 +709,31 @@ describe('restore.ts', () => {
     }
     expect(query(world.backupPath, 'SELECT count(*) AS n FROM loves')).toEqual([{ n: 0 }]);
 
+    // The post-backup live link generation and its admission clock are
+    // non-derived restore state. Rotate at the same fixed time as the
+    // admission to prove the boundary is sequence-based, not timestamp-based.
+    const generationDb = openSqliteDb(world.dbPath, { busyTimeoutMs: BUSY_MS });
+    let generationBoundary = 0;
+    try {
+      const restoreBox = createBox(parseSecrets(world.secretsDoc).encryptionKeys, seededRandom(0x75));
+      admitForwardIdentity(generationDb, {
+        did: DID_A,
+        identityKey: 'restore-generation-admission',
+        path: 'api',
+        now: world.clock.nowMs(),
+      });
+      generationBoundary = generationDb.one<{ boundary: number }>(
+        'SELECT max(admission_seq) AS boundary FROM forward_admissions',
+      )!.boundary;
+      const rotated = saveLink(
+        { db: generationDb, clock: world.clock, random: seededRandom(0x76), box: restoreBox },
+        { did: DID_A, service: 'lastfm', remoteUser: 'alice-v2', credential: LASTFM_SK },
+      );
+      expect(rotated.link).toMatchObject({ generation: 2, generation_start_seq: generationBoundary });
+    } finally {
+      generationDb.close();
+    }
+
     const systemd = new FakeSystemd(world, { servicePort: null });
     await systemd.boot();
     const restored = await restoreCli(world, systemd, [...baseArgs(world), '--no-ready-check']);
@@ -719,6 +745,12 @@ describe('restore.ts', () => {
       { source_service: 'listenbrainz', state: 'bound' },
     ]);
     expect(query(world.dbPath, "SELECT count(*) AS n FROM forward_outbox WHERE kind='love'")).toEqual([{ n: 1 }]);
+    expect(
+      query(world.dbPath, 'SELECT generation,generation_start_seq FROM linked_accounts WHERE id=?', world.ids.link!),
+    ).toEqual([{ generation: 2, generation_start_seq: generationBoundary }]);
+    expect(query(world.dbPath, 'SELECT next_seq FROM forward_admission_clock')).toEqual([
+      { next_seq: generationBoundary },
+    ]);
 
     const restoredDb = openSqliteDb(world.dbPath, { busyTimeoutMs: BUSY_MS });
     try {

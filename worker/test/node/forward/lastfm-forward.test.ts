@@ -27,10 +27,12 @@ import {
   LASTFM_EXPIRY_MS,
   LASTFM_KEY_REJECTED,
   resumeHeldRows,
+  rowStates,
 } from '../../../src/forward/forward-outbox';
 import { type ForwardRuntime, KEY_REJECTED_PROBE_MS, runForward } from '../../../src/forward/forwarder';
 import { LASTFM_CAPS, LastfmClient } from '../../../src/forward/lastfm-client';
 import { saveLink } from '../../../src/forward/links';
+import { admitForwardIdentity } from '../../../src/forward/projection';
 import { UpstreamPacing } from '../../../src/forward/upstream-pacing';
 import { type LinksService, linksFeature } from '../../../src/http/links';
 import { bindPolicyFetch, createPolicyFetch } from '../../../src/node/policy-fetch';
@@ -63,7 +65,7 @@ interface World {
   /** Every request the router saw: [host, path, clock ms]. */
   seen: Array<[string, string, number]>;
   /** Links a Last.fm account for `did` with a fresh fake session; returns the link id and the sk. */
-  linkLastfm(did: string, user: string): { id: string; sk: string };
+  linkLastfm(did: string, user: string): { id: string; sk: string; generation: number; generation_start_seq: number };
   /** Queues scrobbles for `did` (listen times 1 min apart, oldest first). */
   scrobbles(did: string, n: number, tag?: string): void;
   rows(did?: string): ForwardOutboxRow[];
@@ -120,7 +122,12 @@ async function world(
         { db: app.db, clock, random: rt.random, box: rt.box },
         { did, service: 'lastfm', remoteUser: user, credential: sk },
       );
-      return { id: saved.link.id, sk };
+      return {
+        id: saved.link.id,
+        sk,
+        generation: saved.link.generation,
+        generation_start_seq: saved.link.generation_start_seq,
+      };
     },
     scrobbles(did, n, tag = 's') {
       const items: ForwardItem[] = [];
@@ -161,6 +168,139 @@ afterEach(async () => {
 const statesOf = (rows: readonly ForwardOutboxRow[]) => rows.map((r) => r.state);
 
 describe('Last.fm forwarding', () => {
+  it('same-remote relink preserves generation and resumes only its held rows', async () => {
+    const w = await world();
+    const link = w.linkLastfm(ALICE, 'alice_fm');
+    w.scrobbles(ALICE, 1, 'same-remote');
+    const old = w.rows(ALICE)[0]!;
+    expect(old.generation).toBe(link.generation);
+    holdLinkRows(w.app.db, link.id, w.clock.nowMs());
+
+    const saved = saveLink(
+      { db: w.app.db, clock: w.clock, random: w.rt.random, box: w.rt.box },
+      { did: ALICE, service: 'lastfm', remoteUser: 'alice_fm', credential: w.lastfm.addSession('alice_fm') },
+    );
+    expect(saved).toMatchObject({ created: false, resumed: 1, link: { id: link.id, generation: link.generation } });
+    expect(w.rows(ALICE)[0]).toMatchObject({ generation: link.generation, state: 'queued' });
+  });
+
+  it('remote replacement rotates generation, expires old work, and permits the same identity in the new generation', async () => {
+    const w = await world();
+    const oldLink = w.linkLastfm(ALICE, 'alice_fm');
+    w.scrobbles(ALICE, 1, 'generation-replay');
+    const old = w.rows(ALICE)[0]!;
+    const replacementCredential = w.lastfm.addSession('replacement_fm');
+    const saved = saveLink(
+      { db: w.app.db, clock: w.clock, random: w.rt.random, box: w.rt.box },
+      { did: ALICE, service: 'lastfm', remoteUser: 'replacement_fm', credential: replacementCredential },
+    );
+    expect(saved.link.generation).toBe(oldLink.generation + 1);
+    expect(saved.link.generation_start_seq).toBe(
+      w.app.db.one<{ boundary: number }>('SELECT coalesce(max(admission_seq),0) AS boundary FROM forward_admissions')!
+        .boundary,
+    );
+    expect(w.rows(ALICE).find((row) => row.id === old.id)).toMatchObject({
+      state: 'expired',
+      last_error: 'account_changed',
+    });
+    expect(rowStates(w.app.db, oldLink.id)).toEqual({});
+
+    enqueueForwards(w.app.db, {
+      did: ALICE,
+      items: [
+        {
+          kind: 'scrobble',
+          listenKey: old.dedupe_key,
+          payload: JSON.parse(old.payload_json),
+        },
+      ],
+      now: w.clock.nowMs(),
+      random: enqueueRandom,
+    });
+    expect(w.rows(ALICE).filter((row) => row.dedupe_key === old.dedupe_key)).toMatchObject([
+      { generation: oldLink.generation, state: 'expired' },
+      { generation: saved.link.generation, state: 'queued' },
+    ]);
+    expect(rowStates(w.app.db, oldLink.id)).toEqual({ queued: 1 });
+  });
+
+  it.each(['success', 'unauthorized', 'transient'] as const)(
+    'a %s response from a replaced remote cannot settle or mutate the new generation',
+    async (outcome) => {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      let arrived!: () => void;
+      const inFlight = new Promise<void>((resolve) => (arrived = resolve));
+      const w = await world({
+        transportWrap: (fake) => async (request) => {
+          arrived();
+          await gate;
+          if (outcome === 'transient') return new Response('', { status: 503 });
+          return fake.fetch(request);
+        },
+      });
+      const oldLink = w.linkLastfm(ALICE, 'alice_fm');
+      w.scrobbles(ALICE, 1, `race-${outcome}`);
+      const [oldRow] = w.rows(ALICE);
+      const running = w.run();
+      await inFlight;
+
+      const replacementCredential = w.lastfm.addSession('replacement_fm');
+      saveLink(
+        { db: w.app.db, clock: w.clock, random: w.rt.random, box: w.rt.box },
+        { did: ALICE, service: 'lastfm', remoteUser: 'replacement_fm', credential: replacementCredential },
+      );
+      if (outcome === 'unauthorized') w.lastfm.revokeSession(oldLink.sk);
+      enqueueForwards(w.app.db, {
+        did: ALICE,
+        items: [
+          {
+            kind: 'scrobble',
+            listenKey: oldRow!.dedupe_key,
+            payload: JSON.parse(oldRow!.payload_json),
+          },
+        ],
+        now: w.clock.nowMs(),
+        random: enqueueRandom,
+      });
+      release();
+      await running;
+
+      const rows = w.rows(ALICE).filter((row) => row.dedupe_key === oldRow!.dedupe_key);
+      expect(rows).toMatchObject([
+        { generation: oldLink.generation, state: 'expired', attempts: 0 },
+        { generation: oldLink.generation + 1, state: 'queued', attempts: 0, last_error: null },
+      ]);
+      expect(
+        w.app.db.one('SELECT remote_user,generation,status,last_error FROM linked_accounts WHERE id=?', oldLink.id),
+      ).toEqual({
+        remote_user: 'replacement_fm',
+        generation: oldLink.generation + 1,
+        status: 'active',
+        last_error: null,
+      });
+    },
+  );
+
+  it('same-clock admissions receive durable increasing sequence numbers for generation boundaries', async () => {
+    const w = await world();
+    const now = w.clock.nowMs();
+    admitForwardIdentity(w.app.db, { did: ALICE, identityKey: 'boundary-before-link', path: 'api', now });
+    const link = w.linkLastfm(ALICE, 'alice_fm');
+    admitForwardIdentity(w.app.db, { did: ALICE, identityKey: 'boundary-after-link', path: 'api', now });
+    const replacement = saveLink(
+      { db: w.app.db, clock: w.clock, random: w.rt.random, box: w.rt.box },
+      { did: ALICE, service: 'lastfm', remoteUser: 'alice_fm-v2', credential: w.lastfm.addSession('alice_fm-v2') },
+    ).link;
+    const seqs = w.app.db.all<{ identity_key: string; admission_seq: number }>(
+      'SELECT identity_key,admission_seq FROM forward_admissions ORDER BY admission_seq',
+    );
+    expect(seqs.map((row) => row.admission_seq)).toEqual([1, 2]);
+    expect(link.generation_start_seq).toBe(1);
+    expect(replacement.generation_start_seq).toBe(2);
+    expect(replacement.generation).toBe(2);
+  });
+
   it('keeps love toggle identities independent after sent-ledger reliance is removed', async () => {
     const w = await world();
     w.linkLastfm(ALICE, 'alice_fm');
@@ -308,11 +448,18 @@ describe('Last.fm forwarding', () => {
     try {
       ensureAccount({ db: app.db, clock }, { did: ALICE, verifiedHandle: null });
       const service = (app.composed.app as unknown as { links: LinksService }).links;
+      admitForwardIdentity(app.db, {
+        did: ALICE,
+        identityKey: 'restart-generation-boundary',
+        path: 'api',
+        now: clock.nowMs(),
+      });
       const sk = lastfm.addSession('restart_user');
-      saveLink(
+      const saved = saveLink(
         { db: app.db, clock, random: service.forwarding.random, box: service.forwarding.box },
         { did: ALICE, service: 'lastfm', remoteUser: 'restart_user', credential: sk },
       );
+      expect(saved.link).toMatchObject({ generation: 1, generation_start_seq: 1 });
       const receipt = clock.nowMs();
       const dueAt = receipt + 25 * MINUTE;
       const listenedAt = dueAt + 5 * MINUTE;
@@ -336,6 +483,12 @@ describe('Last.fm forwarding', () => {
       clock.set(new Date(dueAt - 1).toISOString());
       app = await startApp(appOptions());
       const restartedService = (app.composed.app as unknown as { links: LinksService }).links;
+      expect(app.db.one('SELECT generation,generation_start_seq FROM linked_accounts')).toEqual({
+        generation: 1,
+        generation_start_seq: 1,
+      });
+      expect(app.db.one('SELECT next_seq FROM forward_admission_clock')).toEqual({ next_seq: 1 });
+      expect(app.db.one('SELECT generation FROM forward_outbox')).toEqual({ generation: 1 });
       expect(app.db.one('SELECT state, due_at, created_at_ms, updated_at_ms FROM forward_outbox')).toEqual({
         state: 'queued',
         due_at: dueAt,

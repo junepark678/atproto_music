@@ -365,6 +365,10 @@ export interface LinkedAccountRow {
   last_error: string | null;
   created_at_ms: number;
   updated_at_ms: number;
+  /** Immutable for one remote account incarnation; rotates only when remote_user changes. */
+  generation: number;
+  /** Exclusive durable admission sequence boundary for this generation. */
+  generation_start_seq: number;
 }
 
 export interface LinkStateRow {
@@ -379,6 +383,8 @@ export interface LinkStateRow {
 export interface ForwardOutboxRow {
   id: string;
   link_id: string;
+  /** Destination generation captured when this forward was admitted. */
+  generation: number;
   did: string;
   kind: ForwardKind;
   dedupe_key: string;

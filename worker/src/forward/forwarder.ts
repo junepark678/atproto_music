@@ -149,10 +149,39 @@ type Job =
   | { link: LinkRow; kind: 'scrobble'; rows: QueuedRow[]; listens: ForwardListen[] }
   | { link: LinkRow; kind: 'love' | 'unlove'; rows: [QueuedRow]; track: ForwardTrack };
 
-const lbKey = (link: Pick<LinkRow, 'id'>): string => `link:${link.id}`;
+const lbKey = (link: Pick<LinkRow, 'id' | 'generation'>): string => `link:${link.id}:generation:${link.generation}`;
+
+function generationIsCurrent(db: Db, link: LinkRow): boolean {
+  return (
+    db.one<{ generation: number }>('SELECT generation FROM linked_accounts WHERE id=?', link.id)?.generation ===
+    link.generation
+  );
+}
 
 function ids(rows: readonly QueuedRow[]): string[] {
   return rows.map((r) => r.id);
+}
+
+function settleJobRows(
+  db: Db,
+  job: Job,
+  state: 'sent' | 'ignored' | 'failed' | 'expired',
+  now: number,
+  error: string | null = null,
+  countAttempt = true,
+): void {
+  settleRows(db, ids(job.rows), state, now, error, countAttempt, job.link.generation);
+}
+
+function requeueJobRows(
+  db: Db,
+  job: Job,
+  dueAt: number,
+  now: number,
+  error: string | null,
+  countAttempt: boolean,
+): void {
+  requeueRows(db, ids(job.rows), dueAt, now, error, countAttempt, job.link.generation);
 }
 
 /**
@@ -163,7 +192,7 @@ function ids(rows: readonly QueuedRow[]): string[] {
  * old credential and the fresh link and its rows are left as they are.
  */
 function revokeAndHold(db: Db, link: LinkRow, error: string, now: number): void {
-  if (revokeLink(db, link, error, now)) holdLinkRows(db, link.id, now);
+  if (revokeLink(db, link, error, now)) holdLinkRows(db, link.id, now, link.generation);
 }
 
 // ---------------------------------------------------------------------------
@@ -209,7 +238,7 @@ function parsed<T>(
 }
 
 function nowPlayingJob(rt: ForwardRuntime, link: LinkRow, now: number): Job | null {
-  const rows = dueRows(rt.db, link.id, 'nowplaying', now, 50);
+  const rows = dueRows(rt.db, link.id, link.generation, 'nowplaying', now, 50);
   if (rows.length === 0) return null;
   // Only the newest is current; older ones are superseded.
   const newest = rows[rows.length - 1] as QueuedRow;
@@ -221,7 +250,7 @@ function nowPlayingJob(rt: ForwardRuntime, link: LinkRow, now: number): Job | nu
 function scrobbleJob(rt: ForwardRuntime, link: LinkRow, now: number): Job | null {
   const limit = link.service === 'lastfm' ? LASTFM_MAX_BATCH : LISTENBRAINZ_MAX_IMPORT;
   for (;;) {
-    const rows = dueRows(rt.db, link.id, 'scrobble', now, limit);
+    const rows = dueRows(rt.db, link.id, link.generation, 'scrobble', now, limit);
     if (rows.length === 0) return null;
     let batch = rows;
     if (link.service === 'listenbrainz') {
@@ -235,12 +264,13 @@ function scrobbleJob(rt: ForwardRuntime, link: LinkRow, now: number): Job | null
 }
 
 /** First queued row for each normalized love key, preserving FIFO across backoff. */
-function queuedLoveHeads(db: Db, linkId: string): QueuedRow[] {
+function queuedLoveHeads(db: Db, linkId: string, generation: number): QueuedRow[] {
   const rows = db.all<QueuedRow>(
     `SELECT f.*,f.rowid AS seq FROM forward_outbox f
-     WHERE f.link_id=? AND f.kind IN ('love','unlove') AND f.state='queued'
+     WHERE f.link_id=? AND f.generation=? AND f.kind IN ('love','unlove') AND f.state='queued'
      ORDER BY f.created_at_ms,f.rowid`,
     linkId,
+    generation,
   );
   const seen = new Set<string>();
   const heads: QueuedRow[] = [];
@@ -256,7 +286,8 @@ function queuedLoveHeads(db: Db, linkId: string): QueuedRow[] {
 
 function loveJob(rt: ForwardRuntime, link: LinkRow, now: number): Job | null {
   for (;;) {
-    const head = queuedLoveHeads(rt.db, link.id).find((row) => row.due_at <= now);
+<<<<<<< HEAD
+    const head = queuedLoveHeads(rt.db, link.id, link.generation).find((row) => row.due_at <= now);
     if (head === undefined) return null;
     const [entry] = parsed(rt, [head], lovePayload, now);
     if (entry === undefined) continue;
@@ -401,7 +432,7 @@ function pickJob(rt: ForwardRuntime, now: number): Job | null {
   const candidates = rt.db.all<LinkRow & { oldest: number }>(
     `SELECT l.*, min(f.created_at_ms) AS oldest FROM linked_accounts l
      JOIN forward_outbox f ON f.link_id = l.id
-     WHERE l.status = 'active' AND f.state = 'queued' AND f.due_at <= ?
+     WHERE l.status='active' AND f.generation=l.generation AND f.state='queued' AND f.due_at<=?
      GROUP BY l.id ORDER BY oldest, l.id`,
     now,
   );
@@ -443,18 +474,19 @@ function lastfmErrorText(out: LastfmFailure): string {
 
 /** Applies a failed Last.fm request to its rows, its link and the global pause. */
 function lastfmFailed(rt: ForwardRuntime, job: Job, out: LastfmFailure, now: number): void {
+  if (!generationIsCurrent(rt.db, job.link)) return;
   const db = rt.db;
   const once = job.kind === 'nowplaying';
   const error = lastfmErrorText(out);
   db.tx(() => {
     if (out.kind === 'error' && REVOKING_LASTFM_CODES.has(out.code)) {
-      if (once) settleRows(db, ids(job.rows), 'failed', now, error);
+      if (once) settleJobRows(db, job, 'failed', now, error);
       revokeAndHold(db, job.link, 'session_revoked', now);
       return;
     }
     if (out.kind === 'error' && KEY_LASTFM_CODES.has(out.code)) {
       markLastfmKeyRejected(db, now);
-      if (once) settleRows(db, ids(job.rows), 'failed', now, error);
+      if (once) settleJobRows(db, job, 'failed', now, error);
       return;
     }
     const retryable =
@@ -463,7 +495,7 @@ function lastfmFailed(rt: ForwardRuntime, job: Job, out: LastfmFailure, now: num
       out.kind === 'network' ||
       out.kind === 'malformed';
     if (!retryable || once) {
-      settleRows(db, ids(job.rows), 'failed', now, error);
+      settleJobRows(db, job, 'failed', now, error);
       return;
     }
     const rateLimited = (out.kind === 'error' && out.code === 29) || (out.kind === 'http' && out.httpStatus === 429);
@@ -484,14 +516,16 @@ async function sendLastfm(rt: ForwardRuntime, job: Job, sk: string): Promise<voi
       job.listens.map((l) => ({ ...lastfmTrack(l), timestamp: l.timestamp })),
     );
     const at = rt.clock.nowMs();
+    if (!generationIsCurrent(db, job.link)) return;
     if (!out.ok) return lastfmFailed(rt, job, out, at);
     db.tx(() => {
       clearLastfmKeyRejected(db);
       job.rows.forEach((row, i) => {
         const code = out.value[i] as number;
-        if (code === 0) settleRows(db, [row.id], 'sent', at);
-        else if (code === 5) requeueRows(db, [row.id], nextUtcMidnight(at), at, 'ignored_5', false);
-        else settleRows(db, [row.id], 'ignored', at, `ignored_${code}`);
+        if (code === 0) settleRows(db, [row.id], 'sent', at, null, true, job.link.generation);
+        else if (code === 5)
+          requeueRows(db, [row.id], nextUtcMidnight(at), at, 'ignored_5', false, job.link.generation);
+        else settleRows(db, [row.id], 'ignored', at, `ignored_${code}`, true, job.link.generation);
       });
     });
     return;
@@ -501,10 +535,11 @@ async function sendLastfm(rt: ForwardRuntime, job: Job, sk: string): Promise<voi
       ? await client.updateNowPlaying(sk, lastfmTrack(job.track))
       : await client.love(sk, job.kind === 'love' ? 'track.love' : 'track.unlove', job.track.artist, job.track.track);
   const at = rt.clock.nowMs();
+  if (!generationIsCurrent(db, job.link)) return;
   if (!out.ok) return lastfmFailed(rt, job, out, at);
   db.tx(() => {
     clearLastfmKeyRejected(db);
-    settleRows(db, ids(job.rows), 'sent', at);
+    settleJobRows(db, job, 'sent', at);
   });
 }
 
@@ -548,16 +583,17 @@ async function sendListenbrainz(rt: ForwardRuntime, job: Job, token: string): Pr
   }
   const at = rt.clock.nowMs();
   const db = rt.db;
+  if (!generationIsCurrent(db, job.link)) return;
   const key = lbKey(job.link);
   const once = job.kind === 'nowplaying';
   if (out.ok) {
     rt.pacing.observeListenbrainz(key, at, out.rate);
-    settleRows(db, ids(job.rows), 'sent', at);
+    settleJobRows(db, job, 'sent', at);
     return;
   }
   if (out.kind === 'network') {
     const error = `network_${out.error}`;
-    if (once) settleRows(db, ids(job.rows), 'failed', at, error);
+    if (once) settleJobRows(db, job, 'failed', at, error);
     else backoffRows(db, job.rows, at, rt.random, error);
     rt.log.log('warn', 'forward.failed', { service: 'listenbrainz', kind: job.kind, rows: job.rows.length, error });
     return;
@@ -565,14 +601,14 @@ async function sendListenbrainz(rt: ForwardRuntime, job: Job, token: string): Pr
   const error = `http_${out.status}: ${out.error}`;
   db.tx(() => {
     if (out.status === 401) {
-      if (once) settleRows(db, ids(job.rows), 'failed', at, error);
+      if (once) settleJobRows(db, job, 'failed', at, error);
       revokeAndHold(db, job.link, 'token_revoked', at);
       return;
     }
     if (out.status === 429) {
       const until = rt.pacing.observeListenbrainz(key, at, out.rate, true) as number;
-      if (once) settleRows(db, ids(job.rows), 'failed', at, error);
-      else requeueRows(db, ids(job.rows), until, at, 'rate_limited', false);
+      if (once) settleJobRows(db, job, 'failed', at, error);
+      else requeueJobRows(db, job, until, at, 'rate_limited', false);
       return;
     }
     rt.pacing.observeListenbrainz(key, at, out.rate);
@@ -582,10 +618,10 @@ async function sendListenbrainz(rt: ForwardRuntime, job: Job, token: string): Pr
     }
     if (out.status === 400 && listenType === 'import') {
       // One listen may be the cause: each is retried alone, without an attempt counted.
-      requeueRows(db, ids(job.rows), at, at, BATCH_REJECTED, false);
+      requeueJobRows(db, job, at, at, BATCH_REJECTED, false);
       return;
     }
-    settleRows(db, ids(job.rows), 'failed', at, error);
+    settleJobRows(db, job, 'failed', at, error);
   });
   rt.log.log('warn', 'forward.failed', {
     service: 'listenbrainz',
@@ -622,14 +658,16 @@ async function execute(rt: ForwardRuntime, job: Job, now: number): Promise<boole
 export function nextForwardDue(rt: ForwardRuntime, now: number): number | null {
   const links = rt.db.all<LinkRow & { due: number | null }>(
     `SELECT l.*, (SELECT min(f.due_at) FROM forward_outbox f
-                  WHERE f.link_id = l.id AND f.state = 'queued' AND f.kind IN ('scrobble', 'nowplaying')) AS due
+                  WHERE f.link_id=l.id AND f.generation=l.generation AND f.state='queued'
+                    AND f.kind IN ('scrobble','nowplaying')) AS due
      FROM linked_accounts l WHERE l.status = 'active'`,
   );
   let next: number | null = null;
   let lastfmBacklog = false;
   for (const link of links) {
     if (link.service === 'lastfm' && rt.lastfm === null) continue;
-    const loveDue = queuedLoveHeads(rt.db, link.id).reduce(
+<<<<<<< HEAD
+    const loveDue = queuedLoveHeads(rt.db, link.id, link.generation).reduce(
       (dueAt, row) => Math.min(dueAt, row.due_at),
       Number.POSITIVE_INFINITY,
     );

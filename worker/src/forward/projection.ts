@@ -125,17 +125,26 @@ export function admitForwardIdentity(
     now: number;
   },
 ): boolean {
-  return (
-    db.run(
-      `INSERT INTO forward_admissions(did,identity_key,path,source_service,created_at_ms) VALUES (?,?,?,?,?)
-     ON CONFLICT(did,identity_key) DO NOTHING`,
-      args.did,
-      args.identityKey,
-      args.path,
-      args.sourceService ?? null,
-      args.now,
-    ).rowsWritten === 1
-  );
+  return db.tx(() => {
+    if (db.one('SELECT 1 AS hit FROM forward_admissions WHERE did=? AND identity_key=?', args.did, args.identityKey))
+      return false;
+    const sequence = db.one<{ next_seq: number }>(
+      'UPDATE forward_admission_clock SET next_seq=next_seq+1 WHERE singleton=1 RETURNING next_seq',
+    );
+    if (sequence === null) throw new Error('forward admission sequence clock is missing');
+    return (
+      db.run(
+        `INSERT INTO forward_admissions(did,identity_key,path,source_service,created_at_ms,admission_seq)
+         VALUES (?,?,?,?,?,?) ON CONFLICT(did,identity_key) DO NOTHING`,
+        args.did,
+        args.identityKey,
+        args.path,
+        args.sourceService ?? null,
+        args.now,
+        sequence.next_seq,
+      ).rowsWritten === 1
+    );
+  });
 }
 
 /**

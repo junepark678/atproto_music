@@ -8,7 +8,7 @@
 //
 // One row per active link of the DID whose flag allows the kind:
 // `forward_scrobbles` for scrobble, love and unlove, `forward_now_playing`
-// for nowplaying. `dedupe_key` is unique per (link_id, kind, dedupe_key) and
+// for nowplaying. `dedupe_key` is unique per (link_id, generation, kind, dedupe_key) and
 // is defined per kind (ADR §12.2):
 //
 // | kind               | dedupe_key                                             |
@@ -98,8 +98,8 @@ export interface EnqueueForwardsArgs {
 }
 
 /**
- * Queues one row per (item, active link with the matching flag); an existing
- * (link, kind, dedupe_key) is left alone. Returns the number of rows created.
+ * Queues one row per (item, active link generation with the matching flag); an existing
+ * (link, generation, kind, dedupe_key) is left alone. Returns the number of rows created.
  * Runs inside the caller's transaction (or as its own).
  */
 export function enqueueForwards(db: Db, args: EnqueueForwardsArgs): number {
@@ -111,11 +111,12 @@ export function enqueueForwards(db: Db, args: EnqueueForwardsArgs): number {
   return db.tx(() => {
     const links = db.all<{
       id: string;
+      generation: number;
       service: 'lastfm' | 'listenbrainz';
       forward_scrobbles: number;
       forward_now_playing: number;
     }>(
-      `SELECT id, service, forward_scrobbles, forward_now_playing FROM linked_accounts
+      `SELECT id,generation,service,forward_scrobbles,forward_now_playing FROM linked_accounts
        WHERE did = ? AND status = 'active' ORDER BY created_at_ms, id`,
       args.did,
     );
@@ -148,12 +149,13 @@ export function enqueueForwards(db: Db, args: EnqueueForwardsArgs): number {
         if (link[flagColumn(item.kind)] !== 1) continue;
         const id = newOperationId(args.random);
         const inserted = db.run(
-          `INSERT INTO forward_outbox(id, link_id, did, kind, dedupe_key, payload_json, state, attempts, due_at,
+          `INSERT INTO forward_outbox(id,link_id,generation,did,kind,dedupe_key,payload_json,state,attempts,due_at,
              created_at_ms, updated_at_ms, love_artist_key, love_track_key)
-           VALUES (?, ?, ?, ?, ?, ?, 'queued', 0, ?, ?, ?, ?, ?)
-           ON CONFLICT(link_id, kind, dedupe_key) DO NOTHING`,
+           VALUES (?,?,?,?,?,?,?,'queued',0,?,?,?,?,?)
+           ON CONFLICT(link_id,generation,kind,dedupe_key) DO NOTHING`,
           id,
           link.id,
+          link.generation,
           args.did,
           item.kind,
           key,
