@@ -25,6 +25,7 @@ export function MusicBrainzLink({
   return (
     <a class="musicbrainz-link" href={`https://musicbrainz.org/${kind}/${mbid}`} rel="noopener noreferrer">
       {children}
+      <span class="visually-hidden"> (MusicBrainz)</span>
       <span class="external-link" aria-hidden="true">
         {' '}
         ↗

@@ -72,6 +72,16 @@
   color: var(--muted);
   font-size: 0.75em;
   text-decoration: none;
+  opacity: 0;
+}
+
+.now-playing-card .external-link {
+  opacity: 1;
+}
+
+.musicbrainz-link:hover .external-link,
+.musicbrainz-link:focus-visible .external-link {
+  opacity: 1;
 }
 
 .album-muted {

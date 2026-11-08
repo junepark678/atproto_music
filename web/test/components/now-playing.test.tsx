@@ -359,5 +359,14 @@ it('links current track, artist and release with validated IDs and safe external
     expect(link.getAttribute('rel')).toBe('noopener noreferrer');
     expect(link.querySelector('.external-link')?.getAttribute('aria-hidden')).toBe('true');
   }
+  const trackLink = app.root.querySelector('.now-playing-track a.musicbrainz-link');
+  expect(trackLink).not.toBeNull();
+  const accessibleName = [...(trackLink?.childNodes ?? [])]
+    .filter((node) => !(node instanceof Element && node.getAttribute('aria-hidden') === 'true'))
+    .map((node) => node.textContent)
+    .join('')
+    .replace(/\s+/g, ' ')
+    .trim();
+  expect(accessibleName).toBe('Jóga (MusicBrainz)');
   app.cleanup();
 });
