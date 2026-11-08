@@ -44,7 +44,8 @@ Owner request:
 - **Egress.**
   - Every new request goes through `policyFetch` and the pinned transport, with its own caps.
   - New roots are validated with `upstream()` and documented in `config/atmusic.env.example`, `docs/operations.md` and ADR 0005 §3.8.
-  - Requests carry no user identity: no DID, handle, token or IP.
+  - Enrichment requests (MusicBrainz, Cover Art Archive) carry no user identity: no DID, handle, token or IP.
+  - Sync requests to a linked service carry only what that service requires: the remote username and the link's own credentials. They never carry the atproto DID, the handle or a viewer's IP.
   - User-Agent text names the repository URL, never a personal email.
 - **UI.** Never render a DID as text; show handles, and DIDs may appear only in hrefs. Use the `web/src/components/format.ts` helpers for local time. Pass server error text through `scrubDids`. No new runtime dependencies.
 - **Contracts.**
@@ -287,10 +288,11 @@ The owner's word is "synced". Our definition: canonical MusicBrainz data is reso
   - New links default to on, and existing links switch on at rollout.
 - **Last.fm.**
   - `user.getRecentTracks` from the watermark minus a 1 h overlap, skipping the now-playing item.
-  - `user.getLovedTracks` newest first, stopping at the first known love. Loves are creates only; Last.fm unloves cannot be detected incrementally.
+  - `user.getLovedTracks` newest first, scanning down to the boundary of the last *completed* scan: the upstream timestamp of the newest love that scan saw, ties at that timestamp included. A love we already know locally is not a stopping point, because it may have been created here and forwarded. Loves are creates only; Last.fm unloves cannot be detected incrementally.
 - **ListenBrainz.**
-  - `/1/user/{name}/listens?min_ts=` the watermark minus 3600.
-  - `/1/feedback/user/{name}/get-feedback?score=1`, newest first, stopping at a known love.
+  - `/1/user/{name}/listens?min_ts=` the watermark minus 3600. With `min_ts`, ListenBrainz returns the earliest page first and lists it in descending order, so page forward until caught up.
+  - `/1/feedback/user/{name}/get-feedback?score=1`, using the same completed-scan boundary as Last.fm, with metadata requested. If an item still has no artist and track, resolve it through the MusicBrainz recording seam when M1 or M2 provides one. Otherwise skip it and count it, and never create a love without artist and track.
+- **Tombstones.** A listen or love deleted locally is recorded as a tombstone: the DID, the listen second and keys, or the love key or MBID. A pull never recreates a tombstoned item, including one that Last.fm cannot delete, or that ListenBrainz has not finished deleting.
 - **Echo prevention.**
   - A pulled listen is a duplicate when the DID already has **any** listen at the same `listenedAt` second, whatever its artist and track keys. The listen may be indexed, pending in the outbox or in `listen_keys`. This covers Last.fm corrections.
   - Loves match on the love key or the recording MBID.
@@ -313,8 +315,9 @@ The owner's word is "synced". Our definition: canonical MusicBrainz data is reso
 
 - **What triggers it.** A scrobble or batch listen that is deleted, through our API or a Jetstream delete, and that went to a ListenBrainz link.
 - **Lookup.** Find the `recording_msid` via `/1/user/{name}/listens` within ±1 s of the listen time, matched on the artist and track keys.
-- **Delete.** Send `POST /1/delete-listen {listened_at, recording_msid}`.
-- **Retries.** Back off and retry for up to 7 days. If nothing matches, mark the row `ignored`.
+- **Delete.** Send `POST /1/delete-listen {listened_at, recording_msid}`. ListenBrainz deletes asynchronously: HTTP 200 only means the request was accepted, so mark the row `sent` and don't poll to confirm. S3 tombstones stop the listen from being pulled back meanwhile.
+- **Ambiguity.** If the lookup finds more than one candidate, or none, mark the row `ignored`. Never delete an arbitrary match.
+- **Retries.** Back off on transport failures and retry for up to 7 days.
 - **Last.fm.** Record `unsupported`, since there is no API.
 - **Before implementing.** Check the live ListenBrainz API documentation for `delete-listen` and the listens response shape. If they differ from this description, report back rather than guessing.
 
