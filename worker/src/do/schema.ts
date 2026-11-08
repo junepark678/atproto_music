@@ -991,6 +991,24 @@ const MIGRATION_20: Migration = {
     'CREATE TABLE mb_love_revival_state (singleton INTEGER PRIMARY KEY NOT NULL, cursor_rowid INTEGER NOT NULL DEFAULT 0, complete INTEGER NOT NULL DEFAULT 0)',
   ],
 };
+const MIGRATION_21: Migration = {
+  version: 21,
+  name: 'cover_art_cache_and_jobs',
+  statements: [
+    `CREATE TABLE mb_cover_art (
+      release_mbid TEXT PRIMARY KEY NOT NULL, mime_type TEXT NOT NULL, image_bytes BLOB NOT NULL,
+      byte_size INTEGER NOT NULL, created_at_ms INTEGER NOT NULL, fetched_at_ms INTEGER NOT NULL, last_access_ms INTEGER NOT NULL
+    )`,
+    'CREATE INDEX mb_cover_art_lru ON mb_cover_art(last_access_ms,release_mbid)',
+    `CREATE TABLE mb_cover_art_jobs (
+      release_mbid TEXT PRIMARY KEY NOT NULL, release_group_mbid TEXT, status TEXT NOT NULL DEFAULT 'pending',
+      attempts INTEGER NOT NULL DEFAULT 0, next_due_ms INTEGER NOT NULL DEFAULT 0, created_at_ms INTEGER NOT NULL
+    )`,
+    'CREATE INDEX mb_cover_art_jobs_due ON mb_cover_art_jobs(status,next_due_ms,release_mbid)',
+    'CREATE TABLE mb_cover_art_usage (singleton INTEGER PRIMARY KEY NOT NULL, used_bytes INTEGER NOT NULL DEFAULT 0)',
+    'INSERT INTO mb_cover_art_usage(singleton,used_bytes) VALUES(1,0)',
+  ],
+};
 
 export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_1,
@@ -1013,6 +1031,7 @@ export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_18,
   MIGRATION_19,
   MIGRATION_20,
+  MIGRATION_21,
 ];
 
 /** The schema version this code expects. */
@@ -1082,6 +1101,9 @@ export const TABLES = [
   'mb_love_revive_jobs',
   'mb_love_revival_state',
   'mb_forward_love_current',
+  'mb_cover_art',
+  'mb_cover_art_jobs',
+  'mb_cover_art_usage',
 ] as const;
 
 export type TableName = (typeof TABLES)[number];
@@ -1151,4 +1173,7 @@ export const TABLE_CLASS: Readonly<Record<TableName, TableClass>> = {
   mb_love_revive_jobs: 'non-derived',
   mb_love_revival_state: 'non-derived',
   mb_forward_love_current: 'derived',
+  mb_cover_art: 'non-derived',
+  mb_cover_art_jobs: 'non-derived',
+  mb_cover_art_usage: 'non-derived',
 };
