@@ -29,7 +29,7 @@
 // so the result does not depend on whether the router decodes `{name}`
 // segments; `params` is used only when the URL does not have the route's shape.
 
-import type { Scrobble, ScrobblePage } from '@atmusic/core/api-types';
+import type { MusicBrainzMatch, Scrobble, ScrobblePage } from '@atmusic/core/api-types';
 import {
   advanceCursor,
   type CursorBindingInput,
@@ -44,7 +44,7 @@ import {
 import { ApiError } from '@atmusic/core/errors';
 import { parseScrobbleBatchListenUri } from '@atmusic/core/scrobble-batch';
 import { isDid, parseRecordUri } from '@atmusic/core/syntax';
-import { fromMs, toStorage } from '@atmusic/core/timestamp';
+import { fromMs, toDto, toStorage } from '@atmusic/core/timestamp';
 import type { KeysetQuery, RowsResult, ScrobbleRow } from '../do/contracts';
 import { scrobbleProvenance } from '../do/read/scrobble-fields';
 import { toErrorResponse } from './error';
@@ -79,6 +79,7 @@ type ScrobbleDtoRow = ScrobbleRow & {
 };
 
 export function scrobbleDto(row: ScrobbleDtoRow, handles?: Record<string, string | null>): Scrobble {
+  const musicbrainz = musicBrainzOf(row);
   return {
     uri: row.uri,
     ...scrobbleProvenance(row),
@@ -102,6 +103,28 @@ export function scrobbleDto(row: ScrobbleDtoRow, handles?: Record<string, string
     ...(row.submission_client == null ? {} : { submissionClient: row.submission_client }),
     ...(row.music_service == null ? {} : { musicService: row.music_service }),
     ...(handles === undefined ? {} : { handle: handles[row.did] ?? null }),
+    ...(musicbrainz === null ? {} : { musicbrainz }),
+  };
+}
+
+function musicBrainzOf(row: ScrobbleRow): MusicBrainzMatch | null {
+  if (!row.mb_recording_mbid || !row.mb_title || !row.mb_artist_credit || !row.mb_matched_by || row.mb_synced_at_ms == null) return null;
+  let artistMbids: string[];
+  try {
+    const parsed: unknown = JSON.parse(row.mb_artist_mbids ?? '[]');
+    if (!Array.isArray(parsed) || !parsed.every((mbid) => typeof mbid === 'string')) return null;
+    artistMbids = parsed;
+  } catch {
+    return null;
+  }
+  return {
+    recordingMbid: row.mb_recording_mbid, title: row.mb_title, artistCredit: row.mb_artist_credit,
+    artistMbids,
+    ...(row.mb_release_mbid == null ? {} : { releaseMbid: row.mb_release_mbid }),
+    ...(row.mb_release_title == null ? {} : { releaseTitle: row.mb_release_title }),
+    ...(row.mb_release_group_mbid == null ? {} : { releaseGroupMbid: row.mb_release_group_mbid }),
+    ...(row.mb_duration_ms == null ? {} : { durationSeconds: Math.round(row.mb_duration_ms / 1000) }),
+    matchedBy: row.mb_matched_by as 'mbid' | 'search', syncedAt: toDto(fromMs(row.mb_synced_at_ms)),
   };
 }
 

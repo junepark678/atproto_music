@@ -66,6 +66,20 @@ export interface Scrobble {
   submissionClient?: string;
   /** Lowercase DNS name. */
   musicService?: string;
+  musicbrainz?: MusicBrainzMatch;
+}
+
+export interface MusicBrainzMatch {
+  recordingMbid: string;
+  title: string;
+  artistCredit: string;
+  artistMbids: string[];
+  releaseMbid?: string;
+  releaseTitle?: string;
+  releaseGroupMbid?: string;
+  durationSeconds?: number;
+  matchedBy: 'mbid' | 'search';
+  syncedAt: Timestamp;
 }
 
 /** `GET /api/v1/scrobbles/{id}`. */

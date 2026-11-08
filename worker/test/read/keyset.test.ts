@@ -201,7 +201,8 @@ function reader(plain: Db): Reader {
       const trace: Traced[] = [];
       const r = history(deps(tracingDb(plain, trace)), { did: DID, ...q });
       const statement = trace[0]!;
-      expect(statement.sql.trimStart().startsWith('SELECT s.* FROM scrobbles s')).toBe(true);
+      expect(statement.sql.trimStart().startsWith('SELECT s.*,')).toBe(true);
+      expect(statement.sql).toContain('FROM scrobbles s');
       return { uris: r.rows.map((x) => x.uri), hasMore: r.hasMore, statement };
     },
     reference(sql, params) {
@@ -379,7 +380,7 @@ describe('keysetWhere', () => {
       const traced = (run: (m: ModuleDeps) => { rows: Array<{ uri: string }>; hasMore: boolean }) => {
         const trace: Traced[] = [];
         const page = run(deps(tracingDb(db, trace)));
-        const statement = trace.find((t) => t.sql.trimStart().startsWith('SELECT s.* FROM scrobbles s'));
+        const statement = trace.find((t) => t.sql.trimStart().startsWith('SELECT s.*,'));
         expect(statement).toBeDefined();
         return { uris: page.rows.map((x) => x.uri), hasMore: page.hasMore, statement: statement! };
       };

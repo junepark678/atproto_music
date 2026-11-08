@@ -21,6 +21,7 @@ import type { FeedQuery, ModuleDeps, RowsResult, ScrobbleRow } from '../contract
 import { indexing } from '../status';
 import { checkKeyset, keysetWhere, splitPage } from './history';
 import { visibleFollowEdge, visibleScrobblesFrom } from './visibility';
+import { MUSICBRAINZ_SCROBBLE_COLUMNS, MUSICBRAINZ_SCROBBLE_JOIN } from './musicbrainz-join';
 
 export function feed(m: ModuleDeps, q: FeedQuery): RowsResult<ScrobbleRow> {
   checkKeyset(q);
@@ -28,7 +29,7 @@ export function feed(m: ModuleDeps, q: FeedQuery): RowsResult<ScrobbleRow> {
   let rows: ScrobbleRow[];
   if (q.scope === 'global') {
     rows = m.db.all<ScrobbleRow>(
-      `SELECT s.* FROM ${visibleScrobblesFrom('s', 'u')}
+      `SELECT s.*, ${MUSICBRAINZ_SCROBBLE_COLUMNS} FROM ${visibleScrobblesFrom('s', 'u')} ${MUSICBRAINZ_SCROBBLE_JOIN}
        WHERE 1 = 1${keyset.sql}
        ORDER BY s.listened_at DESC, s.uri DESC
        LIMIT ?`,
@@ -39,7 +40,7 @@ export function feed(m: ModuleDeps, q: FeedQuery): RowsResult<ScrobbleRow> {
     const viewer = q.viewer;
     if (typeof viewer !== 'string' || !isDid(viewer)) throw new RangeError('the following feed needs a viewer DID');
     rows = m.db.all<ScrobbleRow>(
-      `SELECT s.* FROM ${visibleScrobblesFrom('s', 'u')}
+      `SELECT s.*, ${MUSICBRAINZ_SCROBBLE_COLUMNS} FROM ${visibleScrobblesFrom('s', 'u')} ${MUSICBRAINZ_SCROBBLE_JOIN}
        WHERE s.did IN (SELECT f.subject FROM follows f WHERE f.actor = ? AND ${visibleFollowEdge('f')})${keyset.sql}
        ORDER BY s.listened_at DESC, s.uri DESC
        LIMIT ?`,

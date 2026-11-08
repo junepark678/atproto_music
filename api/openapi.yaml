@@ -5832,9 +5832,29 @@
           },
           "musicService": {
             "$ref": "#/components/schemas/MusicService"
+          },
+          "musicbrainz": {
+            "$ref": "#/components/schemas/MusicBrainzMatch"
           }
         },
         "description": "An indexed, proof-verified scrobble. The fields albumArtist through musicService are additive optional v1.2 fields (ADR 0005 §6.2); they are omitted when the record has none."
+      },
+      "MusicBrainzMatch": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["recordingMbid", "title", "artistCredit", "artistMbids", "matchedBy", "syncedAt"],
+        "properties": {
+          "recordingMbid": { "$ref": "#/components/schemas/Uuid" },
+          "title": { "$ref": "#/components/schemas/MusicText" },
+          "artistCredit": { "type": "string" },
+          "artistMbids": { "type": "array", "items": { "$ref": "#/components/schemas/Uuid" } },
+          "releaseMbid": { "$ref": "#/components/schemas/Uuid" },
+          "releaseTitle": { "$ref": "#/components/schemas/MusicText" },
+          "releaseGroupMbid": { "$ref": "#/components/schemas/Uuid" },
+          "durationSeconds": { "type": "integer", "minimum": 1 },
+          "matchedBy": { "type": "string", "enum": ["mbid", "search"] },
+          "syncedAt": { "$ref": "#/components/schemas/Timestamp" }
+        }
       },
       "Follow": {
         "type": "object",

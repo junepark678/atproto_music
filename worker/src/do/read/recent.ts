@@ -30,6 +30,7 @@ import type { ScrobbleRowV2 } from '../../app/rows';
 import type { ModuleDeps } from '../contracts';
 import type { Db, SqlParam } from '../db';
 import { activeUser, visibleScrobblesFrom } from './visibility';
+import { MUSICBRAINZ_SCROBBLE_COLUMNS, MUSICBRAINZ_SCROBBLE_JOIN } from './musicbrainz-join';
 
 /** 9999-12-31T23:59:59Z, the last second the storage form can hold. */
 export const MAX_UNIX_SECONDS = 253_402_300_799;
@@ -198,7 +199,7 @@ export function recentPage(m: Pick<ModuleDeps, 'db'>, q: RecentPageQuery): Recen
     0;
   if (total === 0) return empty;
   const rows = db.all<ScrobbleRowV2>(
-    `SELECT s.* FROM ${visibleScrobblesFrom('s', 'u')} WHERE ${where}
+    `SELECT s.*, ${MUSICBRAINZ_SCROBBLE_COLUMNS} FROM ${visibleScrobblesFrom('s', 'u')} ${MUSICBRAINZ_SCROBBLE_JOIN} WHERE ${where}
      ORDER BY s.listened_at DESC, s.uri DESC LIMIT ? OFFSET ?`,
     ...params,
     q.limit,
@@ -239,7 +240,7 @@ export function listensByTimestamp(m: Pick<ModuleDeps, 'db'>, q: ListensQuery): 
     const bounds = secondsWhere(minTs, maxTs);
     const ascending = minTs !== null;
     rows = db.all<ScrobbleRowV2>(
-      `SELECT s.* FROM ${visibleScrobblesFrom('s', 'u')} WHERE s.did = ?${bounds.sql}
+      `SELECT s.*, ${MUSICBRAINZ_SCROBBLE_COLUMNS} FROM ${visibleScrobblesFrom('s', 'u')} ${MUSICBRAINZ_SCROBBLE_JOIN} WHERE s.did = ?${bounds.sql}
        ORDER BY s.listened_at ${ascending ? 'ASC' : 'DESC'}, s.uri ${ascending ? 'ASC' : 'DESC'} LIMIT ?`,
       q.did,
       ...bounds.params,
