@@ -60,6 +60,7 @@ import { NS_PER_SECOND, parseRfc3339 } from '@atmusic/core/timestamp';
 import type { ModuleDeps } from '../do/contracts';
 import type { Db } from '../do/db';
 import { admitForwardIdentity } from '../forward/projection';
+import { enqueueForwards } from '../outbox/forward-enqueue';
 import { loveKeyOf } from '../outbox/love-ops';
 import {
   IMPORT_PRIORITY,
@@ -136,6 +137,7 @@ type Plan =
       seconds: number;
       artist: string;
       track: string;
+      forward: Record<string, unknown>;
     }
   | { seq: number; kind: 'love'; prepared: Prepared<object>; loveKey: string }
   | { seq: number; kind: 'invalid' };
@@ -188,6 +190,7 @@ export async function writeSlice(
         kind: 'listen',
         key: item.dedupe_key,
         prepared: built.prepared,
+        forward: forwardListen(built.prepared.record as unknown as Record<string, unknown>),
         seconds: Number(ns / NS_PER_SECOND),
         artist: built.prepared.record.artist,
         track: built.prepared.record.track,
@@ -257,15 +260,12 @@ export async function writeSlice(
           operationId,
           now,
         );
-        admitForwardIdentity(db, {
+        const sourceService = importService(db, job.id);
+        const firstAdmission = admitForwardIdentity(db, {
           did: job.did,
           identityKey: plan.key,
           path: 'import',
-          sourceService: (
-            db.one<{ source: string }>('SELECT source FROM import_jobs WHERE id=?', job.id)?.source ?? ''
-          ).startsWith('lastfm')
-            ? 'lastfm'
-            : 'listenbrainz',
+          sourceService: sourceService ?? undefined,
           now,
         });
         insertScrobbleCreate(
@@ -273,6 +273,14 @@ export async function writeSlice(
           { id: operationId, did: job.did, origin: 'import', prepared: plan.prepared, dueAt: now, importJobId: job.id },
           now,
         );
+        if (firstAdmission && sourceService !== null)
+          enqueueForwards(db, {
+            did: job.did,
+            items: [{ kind: 'scrobble', listenKey: plan.key, payload: { listen: plan.forward, origin: 'import' } }],
+            excludeSourceService: sourceService,
+            now,
+            random: m.random,
+          });
         setState(plan.seq, 'queued', operationId);
         report.created += 1;
         continue;
@@ -294,6 +302,24 @@ export async function writeSlice(
         },
         now,
       );
+      const sourceService = importService(db, job.id);
+      const identityKey = `love-uri:${job.did}:${op.collection}:${op.rkey}`;
+      const firstAdmission = admitForwardIdentity(db, {
+        did: job.did,
+        identityKey,
+        path: 'import',
+        sourceService: sourceService ?? undefined,
+        now,
+      });
+      const { $type: _type, createdAt: _createdAt, ...lovePayload } = plan.prepared.record as Record<string, unknown>;
+      if (firstAdmission && sourceService !== null)
+        enqueueForwards(db, {
+          did: job.did,
+          items: [{ kind: 'love', operationId: op.id, payload: { ...lovePayload, origin: 'import' } }],
+          excludeSourceService: sourceService,
+          now,
+          random: m.random,
+        });
       loveIndex().set(plan.loveKey, [...(loveIndex().get(plan.loveKey) ?? []), op.id]);
       setState(plan.seq, 'queued', op.id);
       report.created += 1;
@@ -312,7 +338,39 @@ export async function writeSlice(
   return report;
 }
 
-type ListenMember = { seq: number; key: string; seconds: number; artist: string; track: string };
+type ListenMember = {
+  seq: number;
+  key: string;
+  seconds: number;
+  artist: string;
+  track: string;
+  forward: Record<string, unknown>;
+};
+
+function importService(db: Db, jobId: string): 'lastfm' | 'listenbrainz' | null {
+  const source = db.one<{ source: string }>('SELECT source FROM import_jobs WHERE id=?', jobId)?.source;
+  switch (source) {
+    case 'lastfm_api':
+    case 'lastfm_json':
+      return 'lastfm';
+    case 'listenbrainz_api':
+    case 'listenbrainz_zip':
+      return 'listenbrainz';
+    default:
+      return null;
+  }
+}
+
+function forwardListen(record: Record<string, unknown>): Record<string, unknown> {
+  return {
+    artist: record.artist,
+    track: record.track,
+    ...(typeof record.album === 'string' ? { album: record.album } : {}),
+    listenedAt: record.listenedAt,
+    ...(typeof record.durationSeconds === 'number' ? { durationSeconds: record.durationSeconds } : {}),
+    ...(typeof record.recordingMbid === 'string' ? { recordingMbid: record.recordingMbid } : {}),
+  };
+}
 type Settled =
   | { seq: number; kind: 'invalid' }
   | ({ kind: 'duplicate' } & ListenMember)
@@ -374,6 +432,7 @@ async function writeBatchSlice(
             seconds: Number(ns / NS_PER_SECOND),
             artist: built.record.artist,
             track: built.record.track,
+            forward: forwardListen(built.record as unknown as Record<string, unknown>),
           };
           if (
             knownListenKey(db, job.did, member.key) ||
@@ -463,6 +522,7 @@ async function writeBatchSlice(
         },
         now,
       );
+      const sourceService = importService(db, job.id);
       for (const [i, member] of members.entries()) {
         db.run(
           `INSERT INTO listen_keys(did, dedupe_key, operation_id, source, created_at_ms) VALUES (?, ?, ?, 'import', ?)`,
@@ -471,17 +531,21 @@ async function writeBatchSlice(
           op.id,
           now,
         );
-        admitForwardIdentity(db, {
+        const firstAdmission = admitForwardIdentity(db, {
           did: job.did,
           identityKey: member.key,
           path: 'import',
-          sourceService: (
-            db.one<{ source: string }>('SELECT source FROM import_jobs WHERE id=?', job.id)?.source ?? ''
-          ).startsWith('lastfm')
-            ? 'lastfm'
-            : 'listenbrainz',
+          sourceService: sourceService ?? undefined,
           now,
         });
+        if (firstAdmission && sourceService !== null)
+          enqueueForwards(db, {
+            did: job.did,
+            items: [{ kind: 'scrobble', listenKey: member.key, payload: { listen: member.forward, origin: 'import' } }],
+            excludeSourceService: sourceService,
+            now,
+            random: m.random,
+          });
         setState(member.seq, 'queued', op.id);
         db.run(
           'INSERT INTO batch_entry_items(operation_id, entry_id, job_id, seq) VALUES (?, ?, ?, ?)',
@@ -529,6 +593,24 @@ async function writeBatchSlice(
           },
           now,
         );
+        const sourceService = importService(db, job.id);
+        const identityKey = `love-uri:${job.did}:${op.collection}:${op.rkey}`;
+        const firstAdmission = admitForwardIdentity(db, {
+          did: job.did,
+          identityKey,
+          path: 'import',
+          sourceService: sourceService ?? undefined,
+          now,
+        });
+        const { $type: _type, createdAt: _createdAt, ...lovePayload } = plan.prepared.record as Record<string, unknown>;
+        if (firstAdmission && sourceService !== null)
+          enqueueForwards(db, {
+            did: job.did,
+            items: [{ kind: 'love', operationId: op.id, payload: { ...lovePayload, origin: 'import' } }],
+            excludeSourceService: sourceService,
+            now,
+            random: m.random,
+          });
         loveIndex.set(plan.loveKey, [...(loveIndex.get(plan.loveKey) ?? []), op.id]);
         setState(plan.seq, 'queued', op.id);
         report.created += 1;

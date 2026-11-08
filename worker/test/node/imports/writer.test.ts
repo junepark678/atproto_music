@@ -1488,4 +1488,99 @@ describe('import writer', () => {
       expect(itemStates(h, 'job-mixed')).toMatchObject({ duplicate: 50, invalid: 20 });
     });
   }, 60_000);
+
+  it.each([
+    { source: 'lastfm_json', expected: ['listenbrainz'] },
+    { source: 'listenbrainz_zip', expected: ['lastfm'] },
+  ])('routes imported listens from $source only to known other services', async ({ source, expected }) => {
+    await withHarness(async (h) => {
+      h.seedUser(h.alice);
+      const lastfm = h.link(h.alice, 'lastfm');
+      const listenbrainz = h.link(h.alice, 'listenbrainz');
+      h.m.config = { ...h.m.config, batchPublication: true };
+      const rt = runtime(h);
+      uploadJob(h, 'job-source-listen', [listen(1)]);
+      await parse(h, rt, 'job-source-listen');
+      h.db.run('UPDATE import_jobs SET source = ? WHERE id = ?', source, 'job-source-listen');
+      const staged = h.db.one<{ dedupe_key: string; record_json: string }>(
+        "SELECT dedupe_key,record_json FROM import_items WHERE job_id='job-source-listen' AND state='staged'",
+      )!;
+      const stagedRecord = JSON.parse(staged.record_json) as { kind: 'listen'; input: Record<string, unknown> };
+      stagedRecord.input.recordingMbid = '3c4f9c1e-5a2b-4d8e-9f10-2a7c3b9d0e45';
+      h.db.run(
+        'UPDATE import_items SET record_json=? WHERE job_id=?',
+        JSON.stringify(stagedRecord),
+        'job-source-listen',
+      );
+
+      expect(await writeSlice(h.m, { id: 'job-source-listen', did: h.alice }, h.kit.clock.nowMs())).toMatchObject({
+        created: 1,
+      });
+      const rows = h.db.all<{ service: string; payload_json: string }>(
+        `SELECT linked_accounts.service,forward_outbox.payload_json FROM forward_outbox
+         JOIN linked_accounts ON linked_accounts.id=forward_outbox.link_id ORDER BY linked_accounts.service`,
+      );
+      expect(rows.map((row) => row.service)).toEqual(expected);
+      expect(
+        h.db.one<{ source_service: string | null }>(
+          'SELECT source_service FROM forward_admissions WHERE did=? AND identity_key=?',
+          h.alice,
+          staged.dedupe_key,
+        ),
+      ).toEqual({
+        source_service: source === 'lastfm_json' ? 'lastfm' : source === 'listenbrainz_zip' ? 'listenbrainz' : null,
+      });
+      if (expected.length > 0) {
+        const payload = JSON.parse(rows[0]!.payload_json) as { listen: { recordingMbid?: string }; origin: string };
+        expect(payload).toMatchObject({
+          origin: 'import',
+          listen: { recordingMbid: '3c4f9c1e-5a2b-4d8e-9f10-2a7c3b9d0e45' },
+        });
+      }
+      expect([lastfm, listenbrainz]).toHaveLength(2);
+    });
+  });
+
+  it.each([
+    { source: 'lastfm_api', expected: ['listenbrainz'], mapped: 'lastfm' },
+    { source: 'listenbrainz_api', expected: ['lastfm'], mapped: 'listenbrainz' },
+  ])('routes imported loves from $source only to known other services', async ({ source, expected, mapped }) => {
+    await withHarness(async (h) => {
+      h.seedUser(h.alice);
+      h.link(h.alice, 'lastfm');
+      h.link(h.alice, 'listenbrainz');
+      h.m.config = { ...h.m.config, batchPublication: false };
+      const rt = runtime(h);
+      uploadJob(h, 'job-source-love', [listen(2)]);
+      await parse(h, rt, 'job-source-love');
+      h.db.run('UPDATE import_jobs SET source = ? WHERE id = ?', source, 'job-source-love');
+      h.db.run(
+        `UPDATE import_items SET record_json=json_object('kind','love','input',json_object(
+          'artist','Björk','track','Jóga','recordingMbid','3c4f9c1e-5a2b-4d8e-9f10-2a7c3b9d0e45'))
+         WHERE job_id='job-source-love'`,
+      );
+
+      expect(await writeSlice(h.m, { id: 'job-source-love', did: h.alice }, h.kit.clock.nowMs())).toMatchObject({
+        created: 1,
+      });
+      const row = h.db.one<{ did: string; identity_key: string; source_service: string | null }>(
+        "SELECT did,identity_key,source_service FROM forward_admissions WHERE path='import' AND identity_key LIKE 'love-uri:%'",
+      );
+      expect(row?.source_service ?? null).toBe(mapped);
+      const rows = h.db.all<{ service: string; payload_json: string }>(
+        `SELECT linked_accounts.service,forward_outbox.payload_json FROM forward_outbox
+         JOIN linked_accounts ON linked_accounts.id=forward_outbox.link_id ORDER BY linked_accounts.service`,
+      );
+      expect(rows.map((item) => item.service)).toEqual(expected);
+      if (expected.length > 0) {
+        const payload = JSON.parse(rows[0]!.payload_json) as { recordingMbid?: string; origin: string };
+        expect(payload).toMatchObject({
+          origin: 'import',
+          artist: 'Björk',
+          track: 'Jóga',
+          recordingMbid: '3c4f9c1e-5a2b-4d8e-9f10-2a7c3b9d0e45',
+        });
+      }
+    });
+  });
 });

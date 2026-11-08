@@ -114,6 +114,69 @@ it('a second love for the same (artist_key, track_key) succeeds without a new re
   });
 });
 
+it('forwards a live deletion of an API-created love, and routes imported love deletion away from its source', async () => {
+  await withHarness(async (h) => {
+    h.seedUser(h.alice);
+    const lastfm = h.link(h.alice, 'lastfm');
+    const listenbrainz = h.link(h.alice, 'listenbrainz');
+
+    const apiPut = await enqueueLove(h.m, {
+      did: h.alice,
+      input: { artist: 'API artist', track: 'API track' },
+      origin: 'web',
+    });
+    if (!apiPut.ok) throw new Error(JSON.stringify(apiPut.reason));
+    await h.runUntilIdle();
+    const apiRecord = h.op(apiPut.operation.id);
+    expect((await projectLove(h, apiRecord.rkey!, true)).outcome).toBe('applied');
+    await h.kit.externalDelete('Alice', LOVE, apiRecord.rkey!);
+    expect((await projectLove(h, apiRecord.rkey!, true)).outcome).toBe('absent');
+
+    const importedRkey = '3kimported01';
+    await h.kit.externalPut('Alice', LOVE, importedRkey, love('Imported artist', 'Imported track'));
+    h.db.run(
+      `INSERT INTO forward_admissions(did,identity_key,path,source_service,created_at_ms)
+       VALUES (?,?,'import','lastfm',?)`,
+      h.alice,
+      `love-uri:${h.alice}:${LOVE}:${importedRkey}`,
+      h.kit.clock.nowMs(),
+    );
+    expect((await projectLove(h, importedRkey, true)).outcome).toBe('applied');
+    expect(
+      h.db.one<{ source_service: string | null }>(
+        'SELECT source_service FROM love_incarnations WHERE uri=?',
+        `at://${h.alice}/${LOVE}/${importedRkey}`,
+      ),
+    ).toEqual({ source_service: 'lastfm' });
+    await h.kit.externalDelete('Alice', LOVE, importedRkey);
+    expect((await projectLove(h, importedRkey, true)).outcome).toBe('absent');
+
+    const unknownRkey = '3kunknown001';
+    await h.kit.externalPut('Alice', LOVE, unknownRkey, love('Unknown source', 'Unknown track'));
+    h.db.run(
+      `INSERT INTO forward_admissions(did,identity_key,path,source_service,created_at_ms)
+       VALUES (?,?,'import',NULL,?)`,
+      h.alice,
+      `love-uri:${h.alice}:${LOVE}:${unknownRkey}`,
+      h.kit.clock.nowMs(),
+    );
+    expect((await projectLove(h, unknownRkey, true)).outcome).toBe('applied');
+    await h.kit.externalDelete('Alice', LOVE, unknownRkey);
+    expect((await projectLove(h, unknownRkey, true)).outcome).toBe('absent');
+
+    const forwards = h.db.all<{ link_id: string; kind: string }>(
+      "SELECT link_id,kind FROM forward_outbox WHERE kind IN ('love','unlove') ORDER BY rowid",
+    );
+    expect(forwards).toEqual([
+      { link_id: lastfm, kind: 'love' },
+      { link_id: listenbrainz, kind: 'love' },
+      { link_id: lastfm, kind: 'unlove' },
+      { link_id: listenbrainz, kind: 'unlove' },
+      { link_id: listenbrainz, kind: 'unlove' },
+    ]);
+  });
+});
+
 it('an API unlove accepted remotely with a lost answer consumes durable target bridges on retry echo', async () => {
   await withHarness(async (h) => {
     h.seedUser(h.alice);
