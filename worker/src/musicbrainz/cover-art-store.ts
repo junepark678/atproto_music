@@ -67,6 +67,7 @@ export function putCoverArt(
         needed -= victim.byte_size;
         if (needed <= 0) break;
       }
+      db.run('UPDATE mb_cover_art_usage SET used_bytes=? WHERE singleton=1', used);
       if (needed > 0) return false;
     }
     db.run(
@@ -83,6 +84,40 @@ export function putCoverArt(
     db.run('UPDATE mb_cover_art_usage SET used_bytes=? WHERE singleton=1', used - prior + input.bytes.byteLength);
     return true;
   });
+}
+
+export interface CoverArtJob {
+  releaseMbid: string;
+  releaseGroupMbid: string | null;
+  attempts: number;
+}
+export function dueCoverArtJobs(db: Db, nowMs: number, limit: number): CoverArtJob[] {
+  return db.all<CoverArtJob>(
+    "SELECT release_mbid AS releaseMbid,release_group_mbid AS releaseGroupMbid,attempts FROM mb_cover_art_jobs WHERE status='pending' AND next_due_ms<=? ORDER BY next_due_ms,release_mbid LIMIT ?",
+    nowMs,
+    limit,
+  );
+}
+export function completeCoverArtJob(db: Db, releaseMbid: string): void {
+  db.run("UPDATE mb_cover_art_jobs SET status='complete' WHERE release_mbid=?", releaseMbid);
+}
+export function retryCoverArtJob(db: Db, job: CoverArtJob, nowMs: number): number {
+  const attempts = job.attempts + 1;
+  const nextDue = attempts >= 8 ? nowMs + 30 * 86_400_000 : nowMs + Math.min(60_000 * 2 ** (attempts - 1), 86_400_000);
+  db.run(
+    'UPDATE mb_cover_art_jobs SET status=?,attempts=?,next_due_ms=? WHERE release_mbid=?',
+    attempts >= 8 ? 'failed' : 'pending',
+    attempts,
+    nextDue,
+    job.releaseMbid,
+  );
+  return nextDue;
+}
+export function nextCoverArtDue(db: Db): number | null {
+  return (
+    db.one<{ due: number | null }>("SELECT MIN(next_due_ms) AS due FROM mb_cover_art_jobs WHERE status='pending'")
+      ?.due ?? null
+  );
 }
 
 export function deleteCoverArt(db: Db, releaseMbid: string): void {
