@@ -17,6 +17,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { MemoryRevocations } from '../../../src/app/revocations';
 import type { ForwardOutboxRow } from '../../../src/app/rows';
 import { ensureAccount } from '../../../src/credentials/accounts';
+import { runDeleteSlice } from '../../../src/forward/delete-forwarder';
 import { LASTFM_EXPIRY_MS, LISTENBRAINZ_EXPIRY_MS } from '../../../src/forward/forward-outbox';
 import { type ForwardRuntime, runForward } from '../../../src/forward/forwarder';
 import { saveLink } from '../../../src/forward/links';
@@ -133,6 +134,66 @@ const listensOf = (s: LbSubmission) =>
   (s.json as { payload: Array<{ track_metadata: { track_name: string } }> }).payload;
 
 describe('ListenBrainz forwarding', () => {
+  it('persists the matched upstream target, then deletes that exact listen on a later paced invocation', async () => {
+    const w = await world();
+    const linkId = w.link();
+    const listenedAt = 1768392000;
+    const msid = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    w.lb.seedListens('alice_lb', [
+      {
+        listened_at: listenedAt,
+        recording_msid: msid,
+        track_metadata: {
+          artist_name: 'Artist',
+          track_name: 'Target track',
+          additional_info: { recording_mbid: MBID },
+        },
+      },
+    ]);
+    w.app.db.run(
+      `INSERT INTO listenbrainz_deletes
+      (id,event_key,link_id,generation,did,identity_key,listened_at,artist_key,track_key,artist,track,source_path,state,attempts,due_at,deadline_at,created_at_ms,updated_at_ms)
+      VALUES('delete-test','event-1',?,1,?,'identity-1',?, 'artist-key','track-key','Artist','Target track','api','queued',0,?,?,?,?)`,
+      linkId,
+      ALICE,
+      listenedAt,
+      w.clock.nowMs(),
+      w.clock.nowMs() + DAY,
+      w.clock.nowMs(),
+      w.clock.nowMs(),
+    );
+
+    const first = await runDeleteSlice({
+      db: w.app.db,
+      clock: w.clock,
+      random: w.rt.random,
+      box: w.rt.box,
+      client: w.rt.listenbrainz,
+      pacing: w.rt.pacing,
+    });
+    expect(first.state).toBe('target_persisted');
+    expect(
+      w.app.db.one('SELECT target_msid,target_listened_at,state FROM listenbrainz_deletes WHERE id=?', 'delete-test'),
+    ).toEqual({ target_msid: msid, target_listened_at: listenedAt, state: 'queued' });
+    expect(w.lb.deletions).toEqual([]);
+    w.clock.advance(1000);
+    const second = await runDeleteSlice({
+      db: w.app.db,
+      clock: w.clock,
+      random: w.rt.random,
+      box: w.rt.box,
+      client: w.rt.listenbrainz,
+      pacing: w.rt.pacing,
+    });
+    expect(second.state).toBe('sent');
+    expect(w.lb.deletions).toEqual([
+      { user: 'alice_lb', token: TOKEN, scheme: 'Token', listened_at: listenedAt, recording_msid: msid },
+    ]);
+    expect(w.lb.listens('alice_lb')).toHaveLength(1); // HTTP 200 is async acceptance, not absence confirmation.
+    expect(
+      w.app.db.one('SELECT state,target_msid,target_listened_at FROM listenbrainz_deletes WHERE id=?', 'delete-test'),
+    ).toEqual({ state: 'sent', target_msid: msid, target_listened_at: listenedAt });
+  });
   it('delete client uses the pinned policy fetch, parses top-level MSID separately from MBID, and accepts async delete 200', async () => {
     const w = await world();
     w.link();
