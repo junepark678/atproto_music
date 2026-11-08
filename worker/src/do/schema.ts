@@ -1010,6 +1010,82 @@ const MIGRATION_21: Migration = {
   ],
 };
 
+// S1 replay admissions, per-identity love provenance and bounded storage-scan
+// progress share one durable-state migration. Sequence rows initialize lazily.
+const MIGRATION_S1_ADMISSIONS: Migration = {
+  version: 22,
+  name: 'forward_admissions_and_love_provenance',
+  statements: [
+    `CREATE TABLE forward_admissions (
+      did TEXT NOT NULL,
+      identity_key TEXT NOT NULL,
+      path TEXT NOT NULL,
+      source_service TEXT,
+      created_at_ms INTEGER NOT NULL,
+      admission_seq INTEGER NOT NULL UNIQUE,
+      PRIMARY KEY(did,identity_key)
+    )`,
+    `CREATE TABLE forward_admission_clock (
+      singleton INTEGER PRIMARY KEY NOT NULL CHECK(singleton=1),
+      next_seq INTEGER NOT NULL CHECK(typeof(next_seq)='integer' AND next_seq>=0)
+    )`,
+    `CREATE TABLE love_incarnations (
+      uri TEXT PRIMARY KEY NOT NULL,
+      incarnation_key TEXT NOT NULL,
+      state TEXT NOT NULL,
+      path TEXT NOT NULL,
+      source_service TEXT,
+      updated_at_ms INTEGER NOT NULL
+    )`,
+    `CREATE TABLE love_delete_bridges (
+      did TEXT NOT NULL,
+      uri TEXT NOT NULL,
+      incarnation_key TEXT NOT NULL,
+      expected_cid TEXT NOT NULL,
+      operation_id TEXT NOT NULL,
+      state TEXT NOT NULL,
+      created_at_ms INTEGER NOT NULL,
+      PRIMARY KEY(did,uri,incarnation_key,operation_id)
+    )`,
+    'CREATE INDEX love_delete_bridges_pending ON love_delete_bridges(did,uri,state)',
+    `CREATE TABLE love_import_bridges (
+      did TEXT NOT NULL,
+      operation_id TEXT NOT NULL,
+      uri TEXT NOT NULL,
+      incarnation_key TEXT NOT NULL,
+      source_service TEXT,
+      state TEXT NOT NULL,
+      created_at_ms INTEGER NOT NULL,
+      PRIMARY KEY(did,operation_id)
+    )`,
+    'CREATE INDEX love_import_bridges_incarnation ON love_import_bridges(did,uri,incarnation_key,state)',
+    `CREATE TABLE forward_storage_scan (
+      table_key TEXT PRIMARY KEY NOT NULL,
+      cursor_json TEXT,
+      rows_seen INTEGER NOT NULL DEFAULT 0 CHECK(typeof(rows_seen)='integer' AND rows_seen>=0),
+      logical_bytes_seen INTEGER NOT NULL DEFAULT 0 CHECK(typeof(logical_bytes_seen)='integer' AND logical_bytes_seen>=0),
+      complete INTEGER NOT NULL DEFAULT 0 CHECK(complete IN (0,1))
+    )`,
+  ],
+};
+
+// Append-only destination generation, health and outbox scan indexes. Existing
+// generation-1 dedupe keys and the legacy unique constraint stay unchanged.
+const MIGRATION_S1_GENERATIONS: Migration = {
+  version: 23,
+  name: 'forward_link_generations_and_health',
+  statements: [
+    'ALTER TABLE linked_accounts ADD COLUMN generation INTEGER NOT NULL DEFAULT 1',
+    'ALTER TABLE linked_accounts ADD COLUMN generation_start_seq INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE linked_accounts ADD COLUMN last_success_ms INTEGER',
+    'ALTER TABLE linked_accounts ADD COLUMN last_failure_ms INTEGER',
+    'ALTER TABLE linked_accounts ADD COLUMN consecutive_failures INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE forward_outbox ADD COLUMN generation INTEGER NOT NULL DEFAULT 1',
+    'CREATE INDEX forward_outbox_due_generation ON forward_outbox(link_id,generation,state,due_at)',
+    'CREATE INDEX forward_outbox_order_generation ON forward_outbox(link_id,generation,state,created_at_ms)',
+  ],
+};
+
 export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_1,
   MIGRATION_2,
@@ -1032,6 +1108,8 @@ export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_19,
   MIGRATION_20,
   MIGRATION_21,
+  MIGRATION_S1_ADMISSIONS,
+  MIGRATION_S1_GENERATIONS,
 ];
 
 /** The schema version this code expects. */
@@ -1082,6 +1160,12 @@ export const TABLES = [
   'linked_accounts',
   'link_states',
   'forward_outbox',
+  'forward_admissions',
+  'forward_admission_clock',
+  'love_incarnations',
+  'love_delete_bridges',
+  'love_import_bridges',
+  'forward_storage_scan',
   'import_jobs',
   'import_items',
   'ignored_listens',
@@ -1155,6 +1239,12 @@ export const TABLE_CLASS: Readonly<Record<TableName, TableClass>> = {
   linked_accounts: 'non-derived',
   link_states: 'non-derived',
   forward_outbox: 'non-derived',
+  forward_admissions: 'non-derived',
+  forward_admission_clock: 'non-derived',
+  love_incarnations: 'non-derived',
+  love_delete_bridges: 'non-derived',
+  love_import_bridges: 'non-derived',
+  forward_storage_scan: 'derived',
   import_jobs: 'non-derived',
   import_items: 'non-derived',
   ignored_listens: 'non-derived',

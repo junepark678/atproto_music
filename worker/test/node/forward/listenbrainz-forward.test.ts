@@ -309,7 +309,6 @@ describe('ListenBrainz forwarding', () => {
     expect(w.seen.map(([meth, p]) => `${meth} ${p}`)).toEqual(Array(4).fill('POST /1/feedback/recording-feedback'));
   });
 
-<<<<<<< HEAD
   it('keeps same-key love toggles FIFO through backoff while a different track proceeds', async () => {
     const w = await world();
     w.link();

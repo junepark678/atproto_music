@@ -321,7 +321,6 @@ function columns(db: Db, table: string): string[] {
 }
 
 const SEEDED_BY_MIGRATION_1 = ['indexing_status', 'backfill_generation', 'ingest_checkpoint'];
-const SEEDED_BY_MIGRATION_19 = ['forward_admission_clock'];
 
 /** The ledger a database fully migrated by this code holds: one row per migration. */
 const LEDGER = MIGRATIONS.map((m) => ({ version: m.version, name: m.name }));
@@ -376,8 +375,8 @@ describe('migrate', () => {
     expect(await res.json()).toEqual({ status: 'ready' });
 
     // The open applied every migration, migration 1 first, and
-    // migration 1 seeded its three singleton rows. Migration 19 seeds the
-    // admission sequence clock; schema_compat holds migration 2's row.
+    // migration 1 seeded its three singleton rows. Forward clocks and scan
+    // progress initialize lazily; schema_compat holds migration 2's row.
     {
       expect(lastMigration('migrate-fresh')).toEqual({ status: 'ready', version: SCHEMA_VERSION });
       const ledger = db.all('SELECT version, name FROM schema_migrations ORDER BY version');
@@ -388,13 +387,9 @@ describe('migrate', () => {
       expect(EXPECTED_TABLES.filter((t) => !names('table').includes(t))).toEqual([]);
       expect(EXPECTED_INDEXES.filter((i) => !names('index').includes(i))).toEqual([]);
       expectMigration1Seeds(db);
-      expect(db.all('SELECT singleton,next_seq FROM forward_admission_clock')).toEqual([{ singleton: 1, next_seq: 0 }]);
+      expect(db.all('SELECT singleton,next_seq FROM forward_admission_clock')).toEqual([]);
       for (const table of TABLES) {
-        if (
-          [...SEEDED_BY_MIGRATION_1, ...SEEDED_BY_MIGRATION_19, 'schema_migrations', 'schema_compat', 'mb_cover_art_usage'].includes(
-            table,
-          )
-        )
+        if ([...SEEDED_BY_MIGRATION_1, 'schema_migrations', 'schema_compat', 'mb_cover_art_usage'].includes(table))
           continue;
         expect([table, db.one<{ n: number }>(`SELECT count(*) AS n FROM ${table}`)]).toEqual([table, { n: 0 }]);
       }
@@ -701,7 +696,7 @@ describe('migrate', () => {
   // database at that version is ready for that code, across restarts.
   // Later additive migrations keep the v2 compatibility floor.
   it('SCHEMA_VERSION includes additive batch provenance and remains compatible with v2 code', async () => {
-    expect(SCHEMA_VERSION).toBe(21);
+    expect(SCHEMA_VERSION).toBe(23);
     expect(MIGRATIONS.map((m) => [m.version, m.name])).toEqual([
       [1, 'initial_workers_schema'],
       [2, 'node_schema'],
@@ -724,6 +719,8 @@ describe('migrate', () => {
       [19, 'musicbrainz_love_revival_jobs'],
       [20, 'bounded_love_revival_scan'],
       [21, 'cover_art_cache_and_jobs'],
+      [22, 'forward_admissions_and_love_provenance'],
+      [23, 'forward_link_generations_and_health'],
     ]);
 
     const name = 'migrate-v2-ready';
@@ -757,6 +754,8 @@ describe('migrate', () => {
         { version: 19, name: 'musicbrainz_love_revival_jobs' },
         { version: 20, name: 'bounded_love_revival_scan' },
         { version: 21, name: 'cover_art_cache_and_jobs' },
+        { version: 22, name: 'forward_admissions_and_love_provenance' },
+        { version: 23, name: 'forward_link_generations_and_health' },
       ]);
       expect(db.all('SELECT min_compatible_version FROM schema_compat')).toEqual([{ min_compatible_version: 2 }]);
       // A row in a migration-2 table survives reopening.

@@ -12,7 +12,7 @@ function sourceServiceOf(source: string | null | undefined): string | null {
   return null;
 }
 
-/** Existing durable acceptance/provenance, if this canonical identity was admitted before migration 15. */
+/** Existing durable acceptance/provenance, if this canonical identity predates the S1 admission migration. */
 export function retainedForwardProvenance(db: Db, did: string, identityKey: string): ForwardProvenance | null {
   const admission = db.one<ForwardProvenance>(
     'SELECT path,source_service AS sourceService FROM forward_admissions WHERE did=? AND identity_key=?',
@@ -128,6 +128,7 @@ export function admitForwardIdentity(
   return db.tx(() => {
     if (db.one('SELECT 1 AS hit FROM forward_admissions WHERE did=? AND identity_key=?', args.did, args.identityKey))
       return false;
+    db.run('INSERT OR IGNORE INTO forward_admission_clock(singleton,next_seq) VALUES (1,0)');
     const sequence = db.one<{ next_seq: number }>(
       'UPDATE forward_admission_clock SET next_seq=next_seq+1 WHERE singleton=1 RETURNING next_seq',
     );

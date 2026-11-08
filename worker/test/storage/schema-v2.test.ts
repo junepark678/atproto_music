@@ -90,6 +90,31 @@ interface ExpectedTable {
 }
 
 const NEW_TABLES: Record<string, ExpectedTable> = {
+  forward_admissions: {
+    columns: ['did', 'identity_key', 'path', 'source_service', 'created_at_ms', 'admission_seq'],
+    pk: ['did', 'identity_key'],
+    unique: [['admission_seq']],
+  },
+  forward_admission_clock: {
+    columns: ['singleton', 'next_seq'],
+    pk: ['singleton'],
+  },
+  love_incarnations: {
+    columns: ['uri', 'incarnation_key', 'state', 'path', 'source_service', 'updated_at_ms'],
+    pk: ['uri'],
+  },
+  love_delete_bridges: {
+    columns: ['did', 'uri', 'incarnation_key', 'expected_cid', 'operation_id', 'state', 'created_at_ms'],
+    pk: ['did', 'uri', 'incarnation_key', 'operation_id'],
+  },
+  love_import_bridges: {
+    columns: ['did', 'operation_id', 'uri', 'incarnation_key', 'source_service', 'state', 'created_at_ms'],
+    pk: ['did', 'operation_id'],
+  },
+  forward_storage_scan: {
+    columns: ['table_key', 'cursor_json', 'rows_seen', 'logical_bytes_seen', 'complete'],
+    pk: ['table_key'],
+  },
   batch_delete_children: {
     columns: ['parent_operation_id', 'child_operation_id'],
     pk: ['parent_operation_id', 'child_operation_id'],
@@ -462,6 +487,7 @@ const NEW_TABLES: Record<string, ExpectedTable> = {
       updated_at_ms: true,
       love_artist_key: true,
       love_track_key: true,
+      generation: true,
     }),
     pk: ['id'],
     unique: [['link_id', 'kind', 'dedupe_key']],
@@ -597,6 +623,28 @@ const NEW_INDEXES: Record<string, [string, number, number, Array<[string, number
       ['love_artist_key', 0],
       ['love_track_key', 0],
       ['link_id', 0],
+    ],
+  ],
+  forward_outbox_due_generation: [
+    'forward_outbox',
+    0,
+    0,
+    [
+      ['link_id', 0],
+      ['generation', 0],
+      ['state', 0],
+      ['due_at', 0],
+    ],
+  ],
+  forward_outbox_order_generation: [
+    'forward_outbox',
+    0,
+    0,
+    [
+      ['link_id', 0],
+      ['generation', 0],
+      ['state', 0],
+      ['created_at_ms', 0],
     ],
   ],
   mb_love_revive_jobs_due: [
@@ -1136,7 +1184,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
     expect(result.s0).toEqual({ state: 'queued' });
   });
 
-  it('UNIQUE(did, idempotency_key), listen_keys PK, forward_outbox (link_id, kind, dedupe_key) and lastfm_sessions.sk_hash are enforced', async () => {
+  it('UNIQUE(did, idempotency_key), listen_keys PK, legacy forward key and lastfm_sessions.sk_hash are enforced', async () => {
     const r = await inDb('schema-v2-unique', (db) => {
       const errors: string[] = [];
       const attempt = (f: () => void) => {
@@ -1172,6 +1220,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       attempt(() => insert(db, 'forward_outbox', forward('f2', 'l1', { dedupe_key: 'lk-1' })));
       insert(db, 'forward_outbox', forward('f3', 'l1', { kind: 'nowplaying', dedupe_key: 'lk-1' }));
       insert(db, 'forward_outbox', forward('f4', 'l2', { dedupe_key: 'lk-1' }));
+      insert(db, 'forward_outbox', forward('f5', 'l1', { generation: 2, dedupe_key: 'g2:lk-1' }));
 
       // A session key hash names one session.
       const session = {
@@ -1190,7 +1239,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
         ignoredResend: ignoredResend.rowsWritten,
         operations: db.all('SELECT id, did, idempotency_key FROM operations ORDER BY id'),
         listenKeys: db.all('SELECT did, dedupe_key, operation_id, source FROM listen_keys ORDER BY did'),
-        forwards: db.all('SELECT id, link_id, kind FROM forward_outbox ORDER BY id'),
+        forwards: db.all('SELECT id, link_id, kind, generation, dedupe_key FROM forward_outbox ORDER BY id'),
         sessions: db.all('SELECT id, did FROM lastfm_sessions ORDER BY id'),
       };
     });
@@ -1214,9 +1263,10 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       { did: BOB, dedupe_key: 'lk-1', operation_id: 'o1', source: 'lastfm' },
     ]);
     expect(r.forwards).toEqual([
-      { id: 'f1', link_id: 'l1', kind: 'scrobble' },
-      { id: 'f3', link_id: 'l1', kind: 'nowplaying' },
-      { id: 'f4', link_id: 'l2', kind: 'scrobble' },
+      { id: 'f1', link_id: 'l1', kind: 'scrobble', generation: 1, dedupe_key: 'lk-1' },
+      { id: 'f3', link_id: 'l1', kind: 'nowplaying', generation: 1, dedupe_key: 'lk-1' },
+      { id: 'f4', link_id: 'l2', kind: 'scrobble', generation: 1, dedupe_key: 'lk-1' },
+      { id: 'f5', link_id: 'l1', kind: 'scrobble', generation: 2, dedupe_key: 'g2:lk-1' },
     ]);
     expect(r.sessions).toEqual([
       { id: 's1', did: ALICE },
@@ -1339,6 +1389,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       newColumns: db.all(`SELECT uri, ${NEW_SCROBBLE_COLUMNS.join(', ')} FROM scrobbles ORDER BY uri`),
       ledger: db.all('SELECT version, name FROM schema_migrations ORDER BY version'),
       compat: db.all('SELECT * FROM schema_compat'),
+      admissionClock: db.all('SELECT singleton,next_seq FROM forward_admission_clock'),
       newTablesEmpty: Object.keys(NEW_TABLES)
         .filter((t) => t !== 'schema_compat')
         .filter((t) => count(db, t) !== 0),
@@ -1372,6 +1423,8 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       "19|'musicbrainz_love_revival_jobs'",
       "20|'bounded_love_revival_scan'",
       "21|'cover_art_cache_and_jobs'",
+      "22|'forward_admissions_and_love_provenance'",
+      "23|'forward_link_generations_and_health'",
     ]);
     // The new scrobble columns exist and are NULL on every migrated row.
     expect(after.newColumns).toHaveLength(expectedScrobbles);
@@ -1400,14 +1453,63 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       { version: 19, name: 'musicbrainz_love_revival_jobs' },
       { version: 20, name: 'bounded_love_revival_scan' },
       { version: 21, name: 'cover_art_cache_and_jobs' },
+      { version: 22, name: 'forward_admissions_and_love_provenance' },
+      { version: 23, name: 'forward_link_generations_and_health' },
     ]);
     expect(after.compat).toEqual([{ singleton: 1, min_compatible_version: 2 }]);
     expect(after.newTablesEmpty).toEqual(['mb_cover_art_usage']);
+    expect(after.admissionClock).toEqual([]);
 
     // The production history module still reads the migrated rows.
     const migrated = nodeIndex(fileIndexes().get(name), { history }, { clock: fixedClock() });
     const page = await migrated.history({ did: fixture.users.Alice.did, limit: 50 });
     expect(page.rows.map((r) => r.rkey)).toEqual(fixture.expected.aliceHistory);
+  });
+
+  it('upgrades the real M4 migration-21 schema to S1 without changing cover-art state', () => {
+    const name = 'schema-m4-to-s1-upgrade';
+    const db = fileIndexes().reset(name);
+    expect(migrate(db, MIGRATIONS.slice(0, 21))).toEqual({ status: 'ready', version: 21 });
+
+    db.run(
+      'INSERT INTO mb_cover_art(release_mbid,mime_type,image_bytes,byte_size,created_at_ms,fetched_at_ms,last_access_ms) VALUES (?,?,?,?,?,?,?)',
+      'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      'image/jpeg',
+      new Uint8Array([1, 2, 3]),
+      3,
+      T0,
+      T0,
+      T0,
+    );
+    db.run(
+      'INSERT INTO mb_cover_art_jobs(release_mbid,release_group_mbid,status,attempts,next_due_ms,created_at_ms) VALUES (?,?,?,?,?,?)',
+      'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+      null,
+      'pending',
+      0,
+      T0,
+      T0,
+    );
+    const prior = {
+      art: db.all('SELECT release_mbid,mime_type,image_bytes,byte_size,created_at_ms,fetched_at_ms,last_access_ms FROM mb_cover_art'),
+      jobs: db.all('SELECT release_mbid,release_group_mbid,status,attempts,next_due_ms,created_at_ms FROM mb_cover_art_jobs'),
+      usage: db.all('SELECT singleton,used_bytes FROM mb_cover_art_usage'),
+    };
+
+    expect(migrate(db)).toEqual({ status: 'ready', version: SCHEMA_VERSION });
+    expect(
+      db.all('SELECT release_mbid,mime_type,image_bytes,byte_size,created_at_ms,fetched_at_ms,last_access_ms FROM mb_cover_art'),
+    ).toEqual(prior.art);
+    expect(db.all('SELECT release_mbid,release_group_mbid,status,attempts,next_due_ms,created_at_ms FROM mb_cover_art_jobs')).toEqual(
+      prior.jobs,
+    );
+    expect(db.all('SELECT singleton,used_bytes FROM mb_cover_art_usage')).toEqual(prior.usage);
+    expect(db.all('SELECT version,name FROM schema_migrations ORDER BY version')).toEqual(
+      MIGRATIONS.map(({ version, name: migrationName }) => ({ version, name: migrationName })),
+    );
+    expect(db.all("SELECT name FROM sqlite_master WHERE type='index' AND name=?", 'forward_outbox_due_generation')).toEqual([
+      { name: 'forward_outbox_due_generation' },
+    ]);
   });
 
   it('EXPLAIN QUERY PLAN for loves by owner, due operations, due forward rows and import items by job uses the new indexes', async () => {
@@ -1629,6 +1731,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       'admission',
       'timers',
       'stats_cache',
+      'forward_storage_scan',
       'loves',
       'range_stats_cache',
       // Migration 10: rebuilt from verified proofs and snapshots.

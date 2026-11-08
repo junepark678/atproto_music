@@ -386,8 +386,6 @@ export interface LinkStateRow {
 export interface ForwardOutboxRow {
   id: string;
   link_id: string;
-  /** Destination generation captured when this forward was admitted. */
-  generation: number;
   did: string;
   kind: ForwardKind;
   dedupe_key: string;
@@ -400,6 +398,8 @@ export interface ForwardOutboxRow {
   updated_at_ms: number;
   love_artist_key: string | null;
   love_track_key: string | null;
+  /** Destination generation captured when this forward was admitted. */
+  generation: number;
 }
 
 export interface ImportJobRow {

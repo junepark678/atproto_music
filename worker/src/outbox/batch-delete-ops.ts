@@ -4,6 +4,7 @@ import type { ModuleDeps } from '../do/contracts';
 import type { Db } from '../do/db';
 import { bumpStatsVersion } from '../do/write/account-state';
 import { releaseForwardAdmission } from '../forward/projection';
+import { deleteQueuedForwardIdentity } from './forward-key';
 import {
   explicitlyUnsent,
   insertOperation,
@@ -238,11 +239,7 @@ export function commitUnsentBatchListenRemoval(m: ModuleDeps, plan: BatchListenR
         op.id,
         member.dedupe_key,
       );
-      m.db.run(
-        `DELETE FROM forward_outbox WHERE did=? AND kind='scrobble' AND dedupe_key=? AND state IN ('queued','held')`,
-        op.did,
-        member.dedupe_key,
-      );
+      deleteQueuedForwardIdentity(m.db, op.did, ['scrobble'], member.dedupe_key);
       releaseForwardAdmission(m.db, op.did, member.dedupe_key);
     }
     if (plan.replacement === null) {

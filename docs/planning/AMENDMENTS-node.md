@@ -578,8 +578,11 @@ Each linked remote account has an immutable generation and explicit admission
 sequence boundary. Same-remote relink preserves it and resumes held rows;
 different-remote relink rotates it, expires queued/held old-generation rows,
 and prevents old asynchronous settlement, retry, revocation or health writes
-from changing the new generation. The generation participates in outbox
-dedupe so S2 backfill can deliver an older identity to a replacement remote.
+from changing the new generation. The legacy `UNIQUE(link_id,kind,dedupe_key)`
+remains unchanged: generation 1 stores its canonical key unchanged, while
+later generations store `g<n>:` followed by that key. One checked encoder and
+decoder preserve canonical keys that themselves begin with `g<n>:`. This lets
+S2 backfill deliver an older identity to a replacement remote.
 Requests already sent upstream before relinking are best-effort and cannot be
 recalled. Local enqueue is exactly once; upstream delivery remains at least
 once because neither service supports idempotency keys across ambiguous
@@ -594,9 +597,15 @@ and replay have no age cutoff; Last.fm retains its 13-day send limit, and the
 existing queue-expiry behavior is otherwise unchanged.
 
 Operator metrics and the Unix admin socket expose marker and forward-outbox
-counts plus a five-minute cached logical text-byte estimate. The estimate is
+counts plus a five-minute cached logical text-byte estimate. The extension
+timer advances persisted primary-key cursors by at most 100 rows per table per
+visit and publishes the five table totals together only after a complete scan
+cycle. Concurrent writes or deletes during that multi-visit cycle can make the
+estimate approximate; admin reads never scan source tables. The estimate is
 not SQLite physical size. There is no hard quota or automatic marker cleanup;
 database/free-space reporting and the existing backup disk floor remain the
 operator's storage safeguards. The previously drafted `forward_sent` table
-was discarded before deployment; current migrations 15–20 contain no sent
-ledger or per-destination sent retention.
+was discarded before deployment. S1 migrations take the next free versions
+after final N/M/M4: currently planned as 22–23 because M4 reserves 21; if M4
+is deferred, S1 uses 21–22. There is no sent ledger or per-destination sent
+retention.

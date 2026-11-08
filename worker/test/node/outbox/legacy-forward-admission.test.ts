@@ -216,7 +216,7 @@ it('upgrades a migration-14 database and conservatively seeds old single, batch,
       // The target really is an old-schema database: migration 14 has no admission or incarnation tables.
       expect(h.db.one('SELECT max(version) AS version FROM schema_migrations')).toEqual({ version: 14 });
       h.restart();
-      expect(h.db.one('SELECT max(version) AS version FROM schema_migrations')).toEqual({ version: 20 });
+      expect(h.db.one('SELECT max(version) AS version FROM schema_migrations')).toEqual({ version: 23 });
 
       await h.kit.externalPut('Alice', SCROBBLE, singleRkey, { ...single, album: 'Metadata only' });
       expect(apply(h, await proofFor(h, SCROBBLE, singleRkey)).outcome).toBe('applied');

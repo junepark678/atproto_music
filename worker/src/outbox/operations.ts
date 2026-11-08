@@ -45,6 +45,7 @@ import type { OperationKind, OperationRow, OperationState, Origin } from '../app
 import type { Db } from '../do/db';
 import { bumpStatsVersion } from '../do/write/account-state';
 import { releaseForwardAdmission } from '../forward/projection';
+import { deleteQueuedForwardIdentity } from './forward-key';
 
 export { MAX_ATTEMPTS };
 
@@ -413,18 +414,10 @@ export function cancelUnsent(db: Db, id: string, now: number): boolean {
       id,
     );
     for (const { dedupe_key } of keys) {
-      db.run(
-        `DELETE FROM forward_outbox WHERE did = ? AND kind = 'scrobble' AND dedupe_key = ? AND state IN ('queued','held')`,
-        op.did,
-        dedupe_key,
-      );
+      deleteQueuedForwardIdentity(db, op.did, ['scrobble'], dedupe_key);
     }
     // A love or unlove forward is keyed by the operation id (ADR §12.2).
-    db.run(
-      `DELETE FROM forward_outbox WHERE did = ? AND kind IN ('love','unlove') AND dedupe_key = ? AND state IN ('queued','held')`,
-      op.did,
-      id,
-    );
+    deleteQueuedForwardIdentity(db, op.did, ['love', 'unlove'], id);
     db.run('DELETE FROM listen_keys WHERE did = ? AND operation_id = ?', op.did, id);
     for (const { dedupe_key } of keys) releaseForwardAdmission(db, op.did, dedupe_key);
     if (op.kind === 'love.put' && op.rkey !== null)

@@ -39,6 +39,11 @@ import { type LinksService, linksFeature } from '../../../src/http/links';
 import { bindPolicyFetch, createPolicyFetch } from '../../../src/node/policy-fetch';
 import { parseSecrets } from '../../../src/node/secrets';
 import { enqueueForwards, type ForwardItem } from '../../../src/outbox/forward-enqueue';
+import {
+  canonicalForwardDedupeKey,
+  deleteQueuedForwardIdentity,
+  storedForwardDedupeKey,
+} from '../../../src/outbox/forward-key';
 import { enqueueLove, enqueueUnlove } from '../../../src/outbox/love-ops';
 import { closeApps, startApp, type TestApp, testSecretsDocument } from '../support/app';
 import { FakeLastfm } from '../support/fake-lastfm';
@@ -218,7 +223,9 @@ describe('Last.fm forwarding', () => {
       now: w.clock.nowMs(),
       random: enqueueRandom,
     });
-    expect(w.rows(ALICE).filter((row) => row.dedupe_key === old.dedupe_key)).toMatchObject([
+    expect(
+      w.rows(ALICE).filter((row) => canonicalForwardDedupeKey(row.generation, row.dedupe_key) === old.dedupe_key),
+    ).toMatchObject([
       { generation: oldLink.generation, state: 'expired' },
       { generation: saved.link.generation, state: 'queued' },
     ]);
@@ -267,7 +274,9 @@ describe('Last.fm forwarding', () => {
       release();
       await running;
 
-      const rows = w.rows(ALICE).filter((row) => row.dedupe_key === oldRow!.dedupe_key);
+      const rows = w
+        .rows(ALICE)
+        .filter((row) => canonicalForwardDedupeKey(row.generation, row.dedupe_key) === oldRow!.dedupe_key);
       expect(rows).toMatchObject([
         { generation: oldLink.generation, state: 'expired', attempts: 0 },
         { generation: oldLink.generation + 1, state: 'queued', attempts: 0, last_error: null },
@@ -306,6 +315,54 @@ describe('Last.fm forwarding', () => {
     expect(link.generation_start_seq).toBe(1);
     expect(replacement.generation_start_seq).toBe(2);
     expect(replacement.generation).toBe(2);
+  });
+
+  it('keeps legacy generation-1 keys and namespaces later generations without ambiguous stripping', async () => {
+    const w = await world();
+    w.linkLastfm(ALICE, 'generation_one');
+    const canonicalKey = 'g2:listen-key';
+    const item: ForwardItem = {
+      kind: 'scrobble',
+      listenKey: canonicalKey,
+      payload: { listen: { artist: 'Generation Artist', track: 'Generation Track' }, origin: 'lastfm' },
+    };
+    expect(enqueueForwards(w.app.db, { did: ALICE, items: [item], now: w.clock.nowMs(), random: enqueueRandom })).toBe(
+      1,
+    );
+    expect(w.app.db.one('SELECT generation,dedupe_key FROM forward_outbox')).toEqual({
+      generation: 1,
+      dedupe_key: canonicalKey,
+    });
+
+    const rotated = saveLink(
+      { db: w.app.db, clock: w.clock, random: w.rt.random, box: w.rt.box },
+      {
+        did: ALICE,
+        service: 'lastfm',
+        remoteUser: 'generation_two',
+        credential: w.lastfm.addSession('generation_two'),
+      },
+    ).link;
+    expect(rotated.generation).toBe(2);
+    expect(enqueueForwards(w.app.db, { did: ALICE, items: [item], now: w.clock.nowMs(), random: enqueueRandom })).toBe(
+      1,
+    );
+    const rows = w.app.db.all<{ generation: number; dedupe_key: string; state: string }>(
+      'SELECT generation,dedupe_key,state FROM forward_outbox ORDER BY generation',
+    );
+    expect(rows).toEqual([
+      { generation: 1, dedupe_key: canonicalKey, state: 'expired' },
+      { generation: 2, dedupe_key: 'g2:g2:listen-key', state: 'queued' },
+    ]);
+    expect(storedForwardDedupeKey(2, canonicalKey)).toBe('g2:g2:listen-key');
+    expect(canonicalForwardDedupeKey(1, 'g2:listen-key')).toBe(canonicalKey);
+    expect(canonicalForwardDedupeKey(2, 'g2:g2:listen-key')).toBe(canonicalKey);
+    expect(canonicalForwardDedupeKey(3, 'g2:g2:listen-key')).toBeNull();
+
+    deleteQueuedForwardIdentity(w.app.db, ALICE, ['scrobble'], canonicalKey);
+    expect(w.app.db.all('SELECT generation,dedupe_key,state FROM forward_outbox ORDER BY generation')).toEqual([
+      { generation: 1, dedupe_key: canonicalKey, state: 'expired' },
+    ]);
   });
 
   it('keeps love toggle identities independent after sent-ledger reliance is removed', async () => {

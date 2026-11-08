@@ -77,6 +77,7 @@ import type { Box } from '../crypto/box';
 import type { Logger } from '../do/contracts';
 import type { Db } from '../do/db';
 import { enqueueTrack, matchedRecordingMbid } from '../musicbrainz/store';
+import { canonicalForwardDedupeKey } from '../outbox/forward-key';
 import { loveKeyOf } from '../outbox/love-ops';
 import {
   backoffRows,
@@ -401,18 +402,21 @@ function knownRecordingMbid(db: Db, unlove: QueuedRow, track: ForwardTrack): str
     const mbid = mbidOfLove(row.payload_json, key);
     if (mbid !== null) return mbid;
   }
-  const intents = db.all<{ record_json: string | null }>(
-    `SELECT record_json FROM operations
-     WHERE did = ? AND kind = 'love.put' AND ${MBID_OF('record_json')} IS NOT NULL
-       AND rowid < coalesce((SELECT rowid FROM operations WHERE id = ? AND did = ?), 9223372036854775807)
-     ORDER BY created_at_ms DESC, rowid DESC`,
-    unlove.did,
-    unlove.dedupe_key,
-    unlove.did,
-  );
-  for (const row of intents) {
-    const mbid = mbidOfLove(row.record_json, key);
-    if (mbid !== null) return mbid;
+  const operationId = canonicalForwardDedupeKey(unlove.generation, unlove.dedupe_key);
+  if (operationId !== null) {
+    const intents = db.all<{ record_json: string | null }>(
+      `SELECT record_json FROM operations
+       WHERE did = ? AND kind = 'love.put' AND ${MBID_OF('record_json')} IS NOT NULL
+         AND rowid < coalesce((SELECT rowid FROM operations WHERE id = ? AND did = ?), 9223372036854775807)
+       ORDER BY created_at_ms DESC, rowid DESC`,
+      unlove.did,
+      operationId,
+      unlove.did,
+    );
+    for (const row of intents) {
+      const mbid = mbidOfLove(row.record_json, key);
+      if (mbid !== null) return mbid;
+    }
   }
   const [artistKey, trackKeyPart] = key.split('\u0000') as [string, string];
   return (
@@ -691,7 +695,6 @@ export function nextForwardDue(rt: ForwardRuntime, now: number): number | null {
   let lastfmBacklog = false;
   for (const link of links) {
     if (link.service === 'lastfm' && rt.lastfm === null) continue;
-<<<<<<< HEAD
     const loveDue = queuedLoveHeads(rt.db, link.id, link.generation).reduce(
       (dueAt, row) => Math.min(dueAt, row.due_at),
       Number.POSITIVE_INFINITY,

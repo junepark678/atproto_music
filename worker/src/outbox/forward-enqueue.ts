@@ -8,8 +8,9 @@
 //
 // One row per active link of the DID whose flag allows the kind:
 // `forward_scrobbles` for scrobble, love and unlove, `forward_now_playing`
-// for nowplaying. `dedupe_key` is unique per (link_id, generation, kind, dedupe_key) and
-// is defined per kind (ADR §12.2):
+// for nowplaying. The legacy UNIQUE(link_id,kind,dedupe_key) remains in place;
+// generation > 1 stores a generation-prefixed key while the logical key stays
+// canonical (ADR §12.2):
 //
 // | kind               | dedupe_key                                             |
 // |--------------------|--------------------------------------------------------|
@@ -38,6 +39,7 @@ import type { Random } from '@atmusic/core/deps';
 import { MusicKeyError, trackKey } from '@atmusic/core/music-key';
 import type { ForwardKind } from '../app/rows';
 import type { Db } from '../do/db';
+import { storedForwardDedupeKey } from './forward-key';
 import { newOperationId } from './operations';
 
 export const NOW_PLAYING_KEY_DOMAIN = 'atmusic:nowplaying-key:v1';
@@ -99,7 +101,7 @@ export interface EnqueueForwardsArgs {
 
 /**
  * Queues one row per (item, active link generation with the matching flag); an existing
- * (link, generation, kind, dedupe_key) is left alone. Returns the number of rows created.
+ * (link, kind, stored generation key) is left alone. Returns the number of rows created.
  * Runs inside the caller's transaction (or as its own).
  */
 export function enqueueForwards(db: Db, args: EnqueueForwardsArgs): number {
@@ -152,13 +154,13 @@ export function enqueueForwards(db: Db, args: EnqueueForwardsArgs): number {
           `INSERT INTO forward_outbox(id,link_id,generation,did,kind,dedupe_key,payload_json,state,attempts,due_at,
              created_at_ms, updated_at_ms, love_artist_key, love_track_key)
            VALUES (?,?,?,?,?,?,?,'queued',0,?,?,?,?,?)
-           ON CONFLICT(link_id,generation,kind,dedupe_key) DO NOTHING`,
+           ON CONFLICT(link_id,kind,dedupe_key) DO NOTHING`,
           id,
           link.id,
           link.generation,
           args.did,
           item.kind,
-          key,
+          storedForwardDedupeKey(link.generation, key),
           payload,
           dueAt,
           args.now,
