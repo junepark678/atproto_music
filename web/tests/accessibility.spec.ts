@@ -26,6 +26,7 @@ import {
   readNetwork,
   workerOrigin,
 } from '../../scripts/e2e/dev-env';
+import { toLocalInput } from '../src/components/format';
 import { expect, test } from './fixtures';
 
 let net: E2eNetwork;
@@ -378,9 +379,11 @@ test('keyboard-only journey reaches sign-in, scrobble submit, window tabs, follo
   await page.keyboard.type('Cloudbusting');
   await tabTo(page, page.getByLabel('Album (optional)'), 'album field');
   await page.keyboard.type('Hounds of Love');
-  await tabTo(page, page.getByLabel('Listened at'), 'listened-at field');
-  await page.keyboard.press('Control+A');
-  await page.keyboard.type(new Date(net.fixtureNowMs - 60_000).toISOString().replace(/\.\d{3}Z$/, 'Z'));
+  const listenedAt = page.getByLabel('Listened at');
+  await tabTo(page, listenedAt, 'listened-at field');
+  const validLocalDateTime = toLocalInput(net.fixtureNowMs - 60_000, 'UTC').slice(0, 16);
+  await listenedAt.fill(validLocalDateTime);
+  await expect(listenedAt).toHaveValue(validLocalDateTime);
   await tabTo(page, page.getByRole('button', { name: 'Publish scrobble' }), 'publish button');
   await page.keyboard.press('Enter');
   const submitted = page.locator('li[data-op-id]').filter({ hasText: 'Cloudbusting' }).locator('.op-status');

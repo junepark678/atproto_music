@@ -43,6 +43,7 @@ describe('web/test/components/local-time.test.ts', () => {
 
     // The form is prefilled with local now and sends the UTC instant.
     expect(emptyForm(clock).listenedAt).toBe('2026-01-15T20:00:00');
+    expect(toLocalInput(AT, 'UTC')).toBe('2026-01-15T11:00:00');
     expect(formInput(values('2026-01-15T20:00:00')).input.listenedAt).toBe('2026-01-15T11:00:00Z');
     expect(formInput(values('2026-01-15T20:00')).input.listenedAt).toBe('2026-01-15T11:00:00Z');
     expect(localInputToUtc('2026-01-15T11:00:00Z')).toBe('2026-01-15T11:00:00Z');

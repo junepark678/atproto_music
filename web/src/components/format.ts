@@ -47,7 +47,24 @@ export function zoneName(ms: number): string {
 const pad = (n: number) => String(n).padStart(2, '0');
 
 /** Epoch ms → a `datetime-local` input value in the viewer's zone (`2026-01-15T20:00:00`). */
-export function toLocalInput(ms: number): string {
+export function toLocalInput(ms: number, timeZone?: string): string {
+  if (timeZone !== undefined) {
+    const parts = Object.fromEntries(
+      new Intl.DateTimeFormat('en-US', {
+        timeZone,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hourCycle: 'h23',
+      })
+        .formatToParts(ms)
+        .map(({ type, value }) => [type, value]),
+    );
+    return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}:${parts.second}`;
+  }
   const d = new Date(ms);
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
