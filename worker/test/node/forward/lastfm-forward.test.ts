@@ -26,6 +26,7 @@ import {
   holdLinkRows,
   LASTFM_EXPIRY_MS,
   LASTFM_KEY_REJECTED,
+  MAX_FORWARD_ATTEMPTS,
   resumeHeldRows,
   rowStates,
 } from '../../../src/forward/forward-outbox';
@@ -279,6 +280,12 @@ describe('Last.fm forwarding', () => {
         status: 'active',
         last_error: null,
       });
+      expect(
+        w.app.db.one(
+          'SELECT last_success_ms,last_failure_ms,consecutive_failures FROM linked_accounts WHERE id=?',
+          oldLink.id,
+        ),
+      ).toEqual({ last_success_ms: null, last_failure_ms: null, consecutive_failures: 0 });
     },
   );
 
@@ -523,6 +530,216 @@ describe('Last.fm forwarding', () => {
     }
   });
 
+  it('persists three transient failures across restart and clears link diagnostics on success', async () => {
+    const clock = fixedClock();
+    const lastfm = new FakeLastfm({ clock, apiKey: API_KEY, secret: SECRET });
+    const secrets = parseSecrets({ ...testSecretsDocument(), lastfm: { apiKey: API_KEY, sharedSecret: SECRET } });
+    const stateDir = mkdtempSync(join(tmpdir(), 'atmusic-forward-health-'));
+    const appOptions = () => ({
+      clock,
+      secrets,
+      transport: routerTransport({ hosts: { 'lastfm.test': lastfm } }),
+      features: [linksFeature({ revocations: new MemoryRevocations(clock) })],
+      env: { ...UPSTREAM_ENV, STATE_DIRECTORY: stateDir },
+    });
+    let app = await startApp(appOptions());
+    try {
+      ensureAccount({ db: app.db, clock }, { did: ALICE, verifiedHandle: null });
+      const service = (app.composed.app as unknown as { links: LinksService }).links;
+      const link = saveLink(
+        { db: app.db, clock, random: service.forwarding.random, box: service.forwarding.box },
+        { did: ALICE, service: 'lastfm', remoteUser: 'health_user', credential: lastfm.addSession('health_user') },
+      ).link;
+      const accepted = enqueueForwards(app.db, {
+        did: ALICE,
+        now: clock.nowMs(),
+        random: seededRandom(79),
+        items: [
+          {
+            kind: 'scrobble',
+            listenKey: 'persistent-health-key',
+            payload: {
+              listen: { artist: 'Health Artist', track: 'Health Track', listenedAt: '2026-01-15T11:00:00Z' },
+              origin: 'lastfm',
+            },
+          },
+        ],
+      });
+      expect(accepted).toBe(1);
+
+      let thirdFailureAt = 0;
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        lastfm.fail({ httpStatus: 503, method: 'track.scrobble' });
+        expect((await runForward(service.forwarding)).requests).toBe(1);
+        const row = app.db.one<{ due_at: number; attempts: number; state: string }>(
+          'SELECT due_at,attempts,state FROM forward_outbox WHERE dedupe_key=?',
+          'persistent-health-key',
+        )!;
+        expect(row).toMatchObject({ attempts: attempt, state: 'queued' });
+        if (attempt === 3) thirdFailureAt = clock.nowMs();
+        expect(
+          app.db.one(
+            'SELECT last_success_ms,last_failure_ms,consecutive_failures,last_error FROM linked_accounts WHERE id=?',
+            link.id,
+          ),
+        ).toEqual({
+          last_success_ms: null,
+          last_failure_ms: clock.nowMs(),
+          consecutive_failures: attempt,
+          last_error: attempt === 3 ? 'http_503' : null,
+        });
+        if (attempt < 3) clock.set(new Date(row.due_at).toISOString());
+      }
+
+      const dueAt = app.db.one<{ due_at: number }>(
+        'SELECT due_at FROM forward_outbox WHERE dedupe_key=?',
+        'persistent-health-key',
+      )!.due_at;
+      await app.close();
+      clock.set(new Date(dueAt).toISOString());
+      app = await startApp(appOptions());
+      const restartedService = (app.composed.app as unknown as { links: LinksService }).links;
+      expect(
+        app.db.one(
+          'SELECT last_success_ms,last_failure_ms,consecutive_failures,last_error FROM linked_accounts WHERE id=?',
+          link.id,
+        ),
+      ).toEqual({
+        last_success_ms: null,
+        last_failure_ms: thirdFailureAt,
+        consecutive_failures: 3,
+        last_error: 'http_503',
+      });
+
+      expect((await runForward(restartedService.forwarding)).requests).toBe(1);
+      expect(
+        app.db.one(
+          'SELECT last_success_ms,last_failure_ms,consecutive_failures,last_error FROM linked_accounts WHERE id=?',
+          link.id,
+        ),
+      ).toEqual({
+        last_success_ms: clock.nowMs(),
+        last_failure_ms: thirdFailureAt,
+        consecutive_failures: 0,
+        last_error: null,
+      });
+      expect(
+        app.db.one('SELECT state,attempts FROM forward_outbox WHERE dedupe_key=?', 'persistent-health-key'),
+      ).toEqual({
+        state: 'sent',
+        attempts: 4,
+      });
+    } finally {
+      await app.close();
+      rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it('persists the transient error threshold across restart and clears it on the next successful response', async () => {
+    const clock = fixedClock();
+    const lastfm = new FakeLastfm({ clock, apiKey: API_KEY, secret: SECRET });
+    const secrets = parseSecrets({ ...testSecretsDocument(), lastfm: { apiKey: API_KEY, sharedSecret: SECRET } });
+    const stateDir = mkdtempSync(join(tmpdir(), 'atmusic-forward-health-'));
+    const appOptions = () => ({
+      clock,
+      secrets,
+      transport: routerTransport({ hosts: { 'lastfm.test': lastfm } }),
+      features: [linksFeature({ revocations: new MemoryRevocations(clock) })],
+      env: { ...UPSTREAM_ENV, STATE_DIRECTORY: stateDir },
+    });
+    let app = await startApp(appOptions());
+    try {
+      ensureAccount({ db: app.db, clock }, { did: ALICE, verifiedHandle: null });
+      const service = (app.composed.app as unknown as { links: LinksService }).links;
+      const link = saveLink(
+        { db: app.db, clock, random: service.forwarding.random, box: service.forwarding.box },
+        { did: ALICE, service: 'lastfm', remoteUser: 'health_user', credential: lastfm.addSession('health_user') },
+      ).link;
+      const accepted = enqueueForwards(app.db, {
+        did: ALICE,
+        now: clock.nowMs(),
+        random: seededRandom(79),
+        items: [
+          {
+            kind: 'scrobble',
+            listenKey: 'persistent-health-key',
+            payload: {
+              listen: { artist: 'Health Artist', track: 'Health Track', listenedAt: '2026-01-15T11:00:00Z' },
+              origin: 'lastfm',
+            },
+          },
+        ],
+      });
+      expect(accepted).toBe(1);
+
+      let thirdFailureAt = 0;
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        lastfm.fail({ httpStatus: 503, method: 'track.scrobble' });
+        expect((await runForward(service.forwarding)).requests).toBe(1);
+        const row = app.db.one<{ due_at: number; attempts: number; state: string }>(
+          'SELECT due_at,attempts,state FROM forward_outbox WHERE dedupe_key=?',
+          'persistent-health-key',
+        )!;
+        expect(row).toMatchObject({ attempts: attempt, state: 'queued' });
+        if (attempt === 3) thirdFailureAt = clock.nowMs();
+        expect(
+          app.db.one(
+            'SELECT last_success_ms,last_failure_ms,consecutive_failures,last_error FROM linked_accounts WHERE id=?',
+            link.id,
+          ),
+        ).toEqual({
+          last_success_ms: null,
+          last_failure_ms: clock.nowMs(),
+          consecutive_failures: attempt,
+          last_error: attempt === 3 ? 'http_503' : null,
+        });
+        if (attempt < 3) clock.set(new Date(row.due_at).toISOString());
+      }
+
+      const dueAt = app.db.one<{ due_at: number }>(
+        'SELECT due_at FROM forward_outbox WHERE dedupe_key=?',
+        'persistent-health-key',
+      )!.due_at;
+      await app.close();
+      clock.set(new Date(dueAt).toISOString());
+      app = await startApp(appOptions());
+      const restartedService = (app.composed.app as unknown as { links: LinksService }).links;
+      expect(
+        app.db.one(
+          'SELECT last_success_ms,last_failure_ms,consecutive_failures,last_error FROM linked_accounts WHERE id=?',
+          link.id,
+        ),
+      ).toEqual({
+        last_success_ms: null,
+        last_failure_ms: thirdFailureAt,
+        consecutive_failures: 3,
+        last_error: 'http_503',
+      });
+
+      expect((await runForward(restartedService.forwarding)).requests).toBe(1);
+      expect(
+        app.db.one(
+          'SELECT last_success_ms,last_failure_ms,consecutive_failures,last_error FROM linked_accounts WHERE id=?',
+          link.id,
+        ),
+      ).toEqual({
+        last_success_ms: clock.nowMs(),
+        last_failure_ms: thirdFailureAt,
+        consecutive_failures: 0,
+        last_error: null,
+      });
+      expect(
+        app.db.one('SELECT state,attempts FROM forward_outbox WHERE dedupe_key=?', 'persistent-health-key'),
+      ).toEqual({
+        state: 'sent',
+        attempts: 4,
+      });
+    } finally {
+      await app.close();
+      rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
   it('a run handed a stale now (a tick timestamp seconds old) still keeps Last.fm requests at least 1 s apart, and the shared bucket never trusts a stale caller time', async () => {
     const w = await world();
     w.linkLastfm(ALICE, 'alice_fm');
@@ -630,6 +847,42 @@ describe('Last.fm forwarding', () => {
     expect(w.lastfm.scrobbles.at(-1)?.items.map((i) => i.track)).toEqual([`Track 5`]);
   });
 
+  it('stops after exactly the configured maximum of attempted retryable requests', async () => {
+    const w = await world();
+    w.linkLastfm(ALICE, 'alice_fm');
+    w.scrobbles(ALICE, 1, 'retry-cap');
+    const row = () => w.rows(ALICE)[0]!;
+    for (let attempt = 1; attempt <= MAX_FORWARD_ATTEMPTS; attempt++) {
+      if (attempt > 1) w.clock.set(new Date(row().due_at).toISOString());
+      w.lastfm.fail({ httpStatus: 503, method: 'track.scrobble' });
+      expect((await w.run()).requests).toBe(1);
+      if (attempt < MAX_FORWARD_ATTEMPTS) expect(row()).toMatchObject({ state: 'queued', attempts: attempt });
+    }
+    expect(row()).toMatchObject({ state: 'failed', attempts: MAX_FORWARD_ATTEMPTS, last_error: 'retry_exhausted' });
+    const calls = w.lastfm.calls.count({ nsid: 'track.scrobble' });
+    expect(calls).toBe(MAX_FORWARD_ATTEMPTS);
+    expect((await w.run()).requests).toBe(0);
+    expect(w.lastfm.calls.count({ nsid: 'track.scrobble' })).toBe(calls);
+  });
+
+  it('stops after exactly the configured maximum of attempted retryable requests', async () => {
+    const w = await world();
+    w.linkLastfm(ALICE, 'alice_fm');
+    w.scrobbles(ALICE, 1, 'retry-cap');
+    const row = () => w.rows(ALICE)[0]!;
+    for (let attempt = 1; attempt <= MAX_FORWARD_ATTEMPTS; attempt++) {
+      if (attempt > 1) w.clock.set(new Date(row().due_at).toISOString());
+      w.lastfm.fail({ httpStatus: 503, method: 'track.scrobble' });
+      expect((await w.run()).requests).toBe(1);
+      if (attempt < MAX_FORWARD_ATTEMPTS) expect(row()).toMatchObject({ state: 'queued', attempts: attempt });
+    }
+    expect(row()).toMatchObject({ state: 'failed', attempts: MAX_FORWARD_ATTEMPTS, last_error: 'retry_exhausted' });
+    const calls = w.lastfm.calls.count({ nsid: 'track.scrobble' });
+    expect(calls).toBe(MAX_FORWARD_ATTEMPTS);
+    expect((await w.run()).requests).toBe(0);
+    expect(w.lastfm.calls.count({ nsid: 'track.scrobble' })).toBe(calls);
+  });
+
   it('code 9 marks the link revoked and holds its rows, which resume after relinking; code 26 pauses all Last.fm forwarding and adminStatus reports lastfm_key_rejected', async () => {
     const w = await world();
     const alice = w.linkLastfm(ALICE, 'alice_fm');
@@ -679,6 +932,13 @@ describe('Last.fm forwarding', () => {
     const status = await w.app.composed.core.adminStatus();
     expect(status.counters).toContainEqual({ name: LASTFM_KEY_REJECTED, label: '', value: rejectedAt });
     expect(w.lb.submissions.map((s) => s.user)).toEqual(['bob_lb']);
+    expect(
+      w.app.db.one(
+        'SELECT last_error,last_failure_ms,consecutive_failures FROM linked_accounts WHERE did=? AND service=?',
+        ALICE,
+        'lastfm',
+      ),
+    ).toEqual({ last_error: 'lastfm_key_rejected', last_failure_ms: rejectedAt, consecutive_failures: 1 });
 
     const lastfmCalls = w.lastfm.calls.count();
     for (let i = 0; i < 5; i++) {
@@ -692,7 +952,10 @@ describe('Last.fm forwarding', () => {
     const pausedRows = w.rows().filter((r) => r.dedupe_key.startsWith('paused') && lastfmLinks.has(r.link_id));
     expect(pausedRows.map((r) => r.did).sort()).toEqual([ALICE, BOB].sort());
     expect(statesOf(pausedRows)).toEqual(['queued', 'queued']);
-    expect(pausedRows.every((r) => r.attempts === 0)).toBe(true);
+    expect(pausedRows.map((r) => [r.did, r.attempts]).sort()).toEqual([
+      [ALICE, 1],
+      [BOB, 0],
+    ]);
 
     // One probe an hour after the rejection; its success lifts the pause.
     w.clock.set(new Date(rejectedAt + KEY_REJECTED_PROBE_MS).toISOString());
@@ -908,7 +1171,7 @@ describe('Last.fm forwarding', () => {
     expect(w.seen.map(([host, path]) => `${host}${path}`)).toEqual(['lastfm.test/2.0/']);
     const [a, b] = w.rows();
     for (const row of [a, b]) {
-      expect(row).toMatchObject({ state: 'queued', attempts: 1, last_error: 'network_redirect' });
+      expect(row).toMatchObject({ state: 'queued', attempts: 1, last_error: 'network_error' });
       expect((row?.due_at as number) - w.clock.nowMs()).toBeGreaterThanOrEqual(BACKOFF_BASE_MS);
       expect((row?.due_at as number) - w.clock.nowMs()).toBeLessThanOrEqual(BACKOFF_BASE_MS * 1.25);
     }
@@ -945,7 +1208,7 @@ describe('Last.fm forwarding', () => {
     expect(w.rows().find((r) => r.dedupe_key.startsWith('port'))).toMatchObject({
       state: 'queued',
       attempts: 1,
-      last_error: 'network_blocked_address',
+      last_error: 'network_error',
     });
     // The composition never builds such a client: the config refuses the root.
     await expect(

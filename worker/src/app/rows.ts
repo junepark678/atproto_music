@@ -369,6 +369,9 @@ export interface LinkedAccountRow {
   generation: number;
   /** Exclusive durable admission sequence boundary for this generation. */
   generation_start_seq: number;
+  last_success_ms: number | null;
+  last_failure_ms: number | null;
+  consecutive_failures: number;
 }
 
 export interface LinkStateRow {

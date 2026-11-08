@@ -38,6 +38,8 @@ import { resumeHeldRows } from './forward-outbox';
 export const LINK_STATE_TTL_MS = 600_000;
 /** `remote_user` is at most this many characters (the contract's Link.remoteUser). */
 export const MAX_REMOTE_USER_CHARS = 128;
+/** Consecutive transient forward failures before a link exposes a persistent error. */
+export const LINK_ERROR_THRESHOLD = 3;
 
 const STATE_RE = /^[0-9a-f]{64}$/;
 
@@ -199,10 +201,15 @@ export function saveLink(deps: LinkDeps, input: SaveLinkInput): SaveLinkResult {
         );
       db.run(
         `UPDATE linked_accounts SET remote_user = ?, credential_ciphertext = ?, key_id = ?, status = 'active',
-           last_error = NULL, generation=?, generation_start_seq=?, updated_at_ms = ? WHERE id = ?`,
+           last_error=NULL,consecutive_failures=0,
+           last_success_ms=CASE WHEN ? THEN NULL ELSE last_success_ms END,
+           last_failure_ms=CASE WHEN ? THEN NULL ELSE last_failure_ms END,
+           generation=?,generation_start_seq=?,updated_at_ms=? WHERE id=?`,
         remoteUser,
         toBlob(sealed),
         box.currentKeyId,
+        changedRemote ? 1 : 0,
+        changedRemote ? 1 : 0,
         generation,
         generationStartSeq,
         now,
@@ -302,11 +309,14 @@ export function revokeLink(
   error: string,
   now: number,
 ): boolean {
+  const safeError = /^[a-z0-9_]{1,64}$/.test(error) ? error : 'credential_revoked';
   return (
     db.run(
-      `UPDATE linked_accounts SET status = 'revoked', last_error = ?, updated_at_ms = ?
+      `UPDATE linked_accounts SET status='revoked',last_error=?,last_failure_ms=?,
+         consecutive_failures=consecutive_failures+1,updated_at_ms=?
        WHERE id = ? AND generation = ? AND status = 'active' AND credential_ciphertext = ?`,
-      error,
+      safeError,
+      now,
       now,
       link.id,
       link.generation,
@@ -315,13 +325,42 @@ export function revokeLink(
   );
 }
 
-/** Records a non-revoking problem on an active link (`error` is a Link.lastError slug). */
-export function noteLinkError(db: Db, linkId: string, error: string | null, now: number): void {
-  db.run(
-    `UPDATE linked_accounts SET last_error = ?, updated_at_ms = ? WHERE id = ? AND last_error IS NOT ?`,
-    error,
-    now,
-    linkId,
-    error,
+/** Records a generation-scoped failure; transient errors surface after three consecutive failures. */
+export function noteLinkError(
+  db: Db,
+  link: Pick<LinkedAccountRow, 'id' | 'generation'>,
+  error: string,
+  now: number,
+  immediate = false,
+): boolean {
+  const safeError = /^[a-z0-9_]{1,64}$/.test(error) ? error : 'upstream_error';
+  return (
+    db.run(
+      `UPDATE linked_accounts SET
+         last_error=CASE WHEN ? OR consecutive_failures+1>=? THEN ? ELSE last_error END,
+         last_failure_ms=?,consecutive_failures=consecutive_failures+1,updated_at_ms=?
+       WHERE id=? AND generation=? AND status='active'`,
+      immediate ? 1 : 0,
+      LINK_ERROR_THRESHOLD,
+      safeError,
+      now,
+      now,
+      link.id,
+      link.generation,
+    ).rowsWritten === 1
+  );
+}
+
+/** Records a successful response and clears the consecutive failure state for this generation. */
+export function noteLinkSuccess(db: Db, link: Pick<LinkedAccountRow, 'id' | 'generation'>, now: number): boolean {
+  return (
+    db.run(
+      `UPDATE linked_accounts SET last_error=NULL,last_success_ms=?,consecutive_failures=0,updated_at_ms=?
+       WHERE id=? AND generation=? AND status='active'`,
+      now,
+      now,
+      link.id,
+      link.generation,
+    ).rowsWritten === 1
   );
 }

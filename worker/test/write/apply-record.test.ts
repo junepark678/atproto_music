@@ -167,7 +167,7 @@ describe('applyRecordProof', () => {
   it('retains an API admission through D32, cleanup and disk reopen before a late live proof', async () => {
     const repo = await repoFor('alice');
     const proof = await putProof(repo, SCROBBLE, 'r02', fixtureScrobble('r02'));
-    await withMigratedDb((initial, ctx) => {
+    await withMigratedDb((initial, _ctx) => {
       seedUser(initial, ALICE);
       initial.run(
         `INSERT INTO linked_accounts(id,did,service,remote_user,credential_ciphertext,key_id,created_at_ms,updated_at_ms)

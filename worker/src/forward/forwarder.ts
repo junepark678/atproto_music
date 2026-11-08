@@ -55,6 +55,10 @@
 //
 // Delivery is at least once: a request that timed out after the upstream
 // accepted it is sent again (neither service has an idempotency key).
+// Retryable row requests stop after eight attempted requests, including
+// upstream 429 responses. Local pacing waits do not consume attempts. Link
+// health stores the last success/failure times and shows transient errors
+// after three consecutive failures; a successful response clears that error.
 //
 // Every request goes through the clients (lastfm-client.ts,
 // listenbrainz-client.ts), and so through policyFetch. No transaction spans
@@ -90,11 +94,12 @@ import {
   nowPlayingPayload,
   type QueuedRow,
   requeueRows,
+  retryRowsAt,
   scrobblePayload,
   settleRows,
 } from './forward-outbox';
 import { LASTFM_MAX_BATCH, type LastfmClient, type LastfmFailure, type LastfmTrack } from './lastfm-client';
-import { openLinkCredential, revokeLink } from './links';
+import { noteLinkError, noteLinkSuccess, openLinkCredential, revokeLink } from './links';
 import {
   LISTENBRAINZ_MAX_IMPORT,
   type ListenbrainzClient,
@@ -222,6 +227,7 @@ function upstreamFreeAt(rt: ForwardRuntime, link: LinkRow, now: number): number 
 /** Parses rows; unusable payloads are settled `failed` (no attempt) and dropped. */
 function parsed<T>(
   rt: ForwardRuntime,
+  link: LinkRow,
   rows: QueuedRow[],
   parse: (row: QueuedRow) => T | null,
   now: number,
@@ -233,7 +239,11 @@ function parsed<T>(
     if (value === null) bad.push(row.id);
     else out.push([row, value]);
   }
-  if (bad.length > 0) settleRows(rt.db, bad, 'failed', now, 'invalid_payload', false);
+  if (bad.length > 0)
+    rt.db.tx(() => {
+      noteLinkError(rt.db, link, 'invalid_payload', now, true);
+      settleRows(rt.db, bad, 'failed', now, 'invalid_payload', false, link.generation);
+    });
   return out;
 }
 
@@ -243,7 +253,7 @@ function nowPlayingJob(rt: ForwardRuntime, link: LinkRow, now: number): Job | nu
   // Only the newest is current; older ones are superseded.
   const newest = rows[rows.length - 1] as QueuedRow;
   settleRows(rt.db, ids(rows.slice(0, -1)), 'expired', now, 'superseded', false);
-  const [entry] = parsed(rt, [newest], nowPlayingPayload, now);
+  const [entry] = parsed(rt, link, [newest], nowPlayingPayload, now);
   return entry === undefined ? null : { link, kind: 'nowplaying', rows: [entry[0]], track: entry[1] };
 }
 
@@ -257,7 +267,7 @@ function scrobbleJob(rt: ForwardRuntime, link: LinkRow, now: number): Job | null
       const first = rows[0] as QueuedRow;
       batch = first.last_error === BATCH_REJECTED ? [first] : rows.filter((r) => r.last_error !== BATCH_REJECTED);
     }
-    const entries = parsed(rt, batch, scrobblePayload, now);
+    const entries = parsed(rt, link, batch, scrobblePayload, now);
     if (entries.length === 0) continue; // every row was unusable and is now failed
     return { link, kind: 'scrobble', rows: entries.map(([r]) => r), listens: entries.map(([, l]) => l) };
   }
@@ -286,10 +296,9 @@ function queuedLoveHeads(db: Db, linkId: string, generation: number): QueuedRow[
 
 function loveJob(rt: ForwardRuntime, link: LinkRow, now: number): Job | null {
   for (;;) {
-<<<<<<< HEAD
     const head = queuedLoveHeads(rt.db, link.id, link.generation).find((row) => row.due_at <= now);
     if (head === undefined) return null;
-    const [entry] = parsed(rt, [head], lovePayload, now);
+    const [entry] = parsed(rt, link, [head], lovePayload, now);
     if (entry === undefined) continue;
     if (link.service === 'listenbrainz' && entry[1].recordingMbid === undefined) {
       // An unlove names only the track; the MBID its love was sent with is known locally.
@@ -466,7 +475,7 @@ function lastfmErrorText(out: LastfmFailure): string {
     case 'http':
       return `http_${out.httpStatus}`;
     case 'network':
-      return `network_${out.error}`;
+      return 'network_error';
     default:
       return 'malformed_answer';
   }
@@ -477,16 +486,18 @@ function lastfmFailed(rt: ForwardRuntime, job: Job, out: LastfmFailure, now: num
   if (!generationIsCurrent(rt.db, job.link)) return;
   const db = rt.db;
   const once = job.kind === 'nowplaying';
-  const error = lastfmErrorText(out);
+  const error = out.kind === 'error' && KEY_LASTFM_CODES.has(out.code) ? 'lastfm_key_rejected' : lastfmErrorText(out);
   db.tx(() => {
     if (out.kind === 'error' && REVOKING_LASTFM_CODES.has(out.code)) {
-      if (once) settleJobRows(db, job, 'failed', now, error);
+      if (once) settleJobRows(db, job, 'failed', now, 'session_revoked');
       revokeAndHold(db, job.link, 'session_revoked', now);
       return;
     }
     if (out.kind === 'error' && KEY_LASTFM_CODES.has(out.code)) {
       markLastfmKeyRejected(db, now);
+      noteLinkError(db, job.link, error, now, true);
       if (once) settleJobRows(db, job, 'failed', now, error);
+      else retryRowsAt(db, job.rows, now, () => now, error);
       return;
     }
     const retryable =
@@ -495,9 +506,11 @@ function lastfmFailed(rt: ForwardRuntime, job: Job, out: LastfmFailure, now: num
       out.kind === 'network' ||
       out.kind === 'malformed';
     if (!retryable || once) {
+      noteLinkError(db, job.link, error, now, true);
       settleJobRows(db, job, 'failed', now, error);
       return;
     }
+    noteLinkError(db, job.link, error, now);
     const rateLimited = (out.kind === 'error' && out.code === 29) || (out.kind === 'http' && out.httpStatus === 429);
     if (rateLimited && 'retryAfterS' in out && out.retryAfterS !== null) {
       rt.pacing.deferLastfm(now + Math.min(MAX_RETRY_AFTER_MS, out.retryAfterS * 1000));
@@ -520,6 +533,7 @@ async function sendLastfm(rt: ForwardRuntime, job: Job, sk: string): Promise<voi
     if (!out.ok) return lastfmFailed(rt, job, out, at);
     db.tx(() => {
       clearLastfmKeyRejected(db);
+      noteLinkSuccess(db, job.link, at);
       job.rows.forEach((row, i) => {
         const code = out.value[i] as number;
         if (code === 0) settleRows(db, [row.id], 'sent', at, null, true, job.link.generation);
@@ -539,6 +553,7 @@ async function sendLastfm(rt: ForwardRuntime, job: Job, sk: string): Promise<voi
   if (!out.ok) return lastfmFailed(rt, job, out, at);
   db.tx(() => {
     clearLastfmKeyRejected(db);
+    noteLinkSuccess(db, job.link, at);
     settleJobRows(db, job, 'sent', at);
   });
 }
@@ -588,17 +603,23 @@ async function sendListenbrainz(rt: ForwardRuntime, job: Job, token: string): Pr
   const once = job.kind === 'nowplaying';
   if (out.ok) {
     rt.pacing.observeListenbrainz(key, at, out.rate);
-    settleJobRows(db, job, 'sent', at);
+    db.tx(() => {
+      noteLinkSuccess(db, job.link, at);
+      settleJobRows(db, job, 'sent', at);
+    });
     return;
   }
   if (out.kind === 'network') {
-    const error = `network_${out.error}`;
-    if (once) settleJobRows(db, job, 'failed', at, error);
-    else backoffRows(db, job.rows, at, rt.random, error);
+    const error = 'network_error';
+    db.tx(() => {
+      noteLinkError(db, job.link, error, at, once);
+      if (once) settleJobRows(db, job, 'failed', at, error);
+      else backoffRows(db, job.rows, at, rt.random, error);
+    });
     rt.log.log('warn', 'forward.failed', { service: 'listenbrainz', kind: job.kind, rows: job.rows.length, error });
     return;
   }
-  const error = `http_${out.status}: ${out.error}`;
+  const error = `http_${out.status}`;
   db.tx(() => {
     if (out.status === 401) {
       if (once) settleJobRows(db, job, 'failed', at, error);
@@ -607,12 +628,14 @@ async function sendListenbrainz(rt: ForwardRuntime, job: Job, token: string): Pr
     }
     if (out.status === 429) {
       const until = rt.pacing.observeListenbrainz(key, at, out.rate, true) as number;
+      noteLinkError(db, job.link, error, at, once);
       if (once) settleJobRows(db, job, 'failed', at, error);
-      else requeueJobRows(db, job, until, at, 'rate_limited', false);
+      else retryRowsAt(db, job.rows, at, () => until, error);
       return;
     }
     rt.pacing.observeListenbrainz(key, at, out.rate);
     if (out.status >= 500 && !once) {
+      noteLinkError(db, job.link, error, at);
       backoffRows(db, job.rows, at, rt.random, error);
       return;
     }
@@ -621,6 +644,7 @@ async function sendListenbrainz(rt: ForwardRuntime, job: Job, token: string): Pr
       requeueJobRows(db, job, at, at, BATCH_REJECTED, false);
       return;
     }
+    noteLinkError(db, job.link, error, at, true);
     settleJobRows(db, job, 'failed', at, error);
   });
   rt.log.log('warn', 'forward.failed', {

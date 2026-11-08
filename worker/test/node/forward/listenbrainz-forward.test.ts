@@ -218,7 +218,7 @@ describe('ListenBrainz forwarding', () => {
     await w.run();
     const failed = w.rows().at(-1);
     expect(failed).toMatchObject({ kind: 'nowplaying', state: 'failed', attempts: 1 });
-    expect(failed?.last_error).toMatch(/^http_503: /);
+    expect(failed?.last_error).toBe('http_503');
     const count = w.seen.length;
     for (let i = 0; i < 5; i++) {
       w.clock.advance(MINUTE);
@@ -309,6 +309,7 @@ describe('ListenBrainz forwarding', () => {
     expect(w.seen.map(([meth, p]) => `${meth} ${p}`)).toEqual(Array(4).fill('POST /1/feedback/recording-feedback'));
   });
 
+<<<<<<< HEAD
   it('keeps same-key love toggles FIFO through backoff while a different track proceeds', async () => {
     const w = await world();
     w.link();
@@ -475,7 +476,7 @@ describe('ListenBrainz forwarding', () => {
     expect(w.rows().find((r) => r.id === never.id)?.link_id).toBe(link);
   });
 
-  it('401 revokes the link; 429 waits X-RateLimit-Reset-In; 400 marks the row failed with the upstream error and does not retry', async () => {
+  it('401 revokes the link; an attempted 429 counts and waits X-RateLimit-Reset-In; 400 is terminal', async () => {
     const w = await world();
     const id = w.link();
 
@@ -497,13 +498,13 @@ describe('ListenBrainz forwarding', () => {
     w.link('new-token');
     expect(w.rows().map((r) => r.state)).toEqual(['queued', 'queued']);
 
-    // 429: the rows (and the link) wait X-RateLimit-Reset-In seconds, without an attempt counted.
+    // 429 is an attempted request: rows count it once while waiting for reset.
     w.lb.fail({ status: 429, resetIn: 42 });
     const limitedAt = w.clock.nowMs();
     await w.run();
     expect(w.rows().map((r) => [r.state, r.due_at, r.attempts, r.last_error])).toEqual([
-      ['queued', limitedAt + 42 * SECOND, 0, 'rate_limited'],
-      ['queued', limitedAt + 42 * SECOND, 0, 'rate_limited'],
+      ['queued', limitedAt + 42 * SECOND, 1, 'http_429'],
+      ['queued', limitedAt + 42 * SECOND, 1, 'http_429'],
     ]);
     const seenAfter429 = w.seen.length;
     for (let s = 1; s < 42; s += 10) {
@@ -531,7 +532,7 @@ describe('ListenBrainz forwarding', () => {
     expect(bad).toMatchObject({
       state: 'failed',
       attempts: 1,
-      last_error: 'http_400: Value for key listened_at is too low.',
+      last_error: 'http_400',
     });
     const seenAfter400 = w.seen.length;
     for (let i = 0; i < 5; i++) {
