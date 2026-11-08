@@ -48,13 +48,15 @@ export async function getNowPlaying(req: Request, ctx: RequestCtx, params: Recor
     const did = didParam(params);
     let owner = false;
     const cookie = req.headers.get('cookie');
-    if (cookie !== null) {
-      const services = webWrites(ctx);
+    const service = cookie !== null && ctx.app !== undefined ? (ctx.app as Partial<{ webWrites: ReturnType<typeof webWrites> }>).webWrites : undefined;
+    if (cookie !== null && service !== undefined) {
+      const services = service;
       const guard = requireSession(req, { requestId: ctx.requestId, sessions: services.sessions, publicOrigin: services.publicOrigin, csrfKey: services.csrfKey });
       if (guard.ok) owner = guard.session.did === did;
     }
     const row = await ctx.index.nowPlaying(did, owner);
-    return noStoreJson({ nowPlaying: row === null ? null : nowPlayingDto(row, owner ? false : undefined), serverTime: toDto(fromMs(ctx.clock.nowMs())) });
+    const shared = owner && row !== null ? (await ctx.index.nowPlaying(did, false)) !== null : undefined;
+    return noStoreJson({ nowPlaying: row === null ? null : nowPlayingDto(row, shared), serverTime: toDto(fromMs(ctx.clock.nowMs())) });
   } catch (error) { return toErrorResponse(error, ctx.requestId); }
 }
 
