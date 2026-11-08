@@ -1383,6 +1383,11 @@ const MIGRATION_S4_DELETE_LOOKUP_TIE_FENCE: Migration = {
   name: 'listenbrainz_delete_lookup_tie_fence',
   statements: ['ALTER TABLE listenbrainz_deletes ADD COLUMN lookup_last_earliest INTEGER'],
 };
+const MIGRATION_S4_DELETE_LOOKUP_PAGE_BOUNDARY: Migration = {
+  version: 42,
+  name: 'listenbrainz_delete_lookup_page_boundary',
+  statements: ['ALTER TABLE listenbrainz_deletes ADD COLUMN lookup_last_max INTEGER'],
+};
 
 export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_1,
@@ -1426,6 +1431,7 @@ export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_S4_LISTEN_DELETES,
   MIGRATION_S4_DELETE_LOOKUP_PROGRESS,
   MIGRATION_S4_DELETE_LOOKUP_TIE_FENCE,
+  MIGRATION_S4_DELETE_LOOKUP_PAGE_BOUNDARY,
 ];
 
 /** The schema version this code expects. */
@@ -1476,6 +1482,7 @@ export const TABLES = [
   'linked_accounts',
   'link_states',
   'forward_outbox',
+  'listenbrainz_deletes',
   'link_backfill_items',
   'forward_admissions',
   'forward_admission_clock',
@@ -1564,6 +1571,7 @@ export const TABLE_CLASS: Readonly<Record<TableName, TableClass>> = {
   linked_accounts: 'non-derived',
   link_states: 'non-derived',
   forward_outbox: 'non-derived',
+  listenbrainz_deletes: 'non-derived',
   link_backfill_items: 'non-derived',
   forward_admissions: 'non-derived',
   forward_admission_clock: 'non-derived',

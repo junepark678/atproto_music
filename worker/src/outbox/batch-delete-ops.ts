@@ -333,8 +333,9 @@ export function enqueueBatchListenDelete(
           track_key: string;
           artist: string;
           track: string;
+          cid: string;
         }>(
-          'SELECT uri,listened_at,artist_key,track_key,artist,track FROM scrobbles WHERE did=? AND record_uri=?',
+          'SELECT uri,listened_at,artist_key,track_key,artist,track,cid FROM scrobbles WHERE did=? AND record_uri=?',
           args.did,
           args.uri,
         )
@@ -345,8 +346,9 @@ export function enqueueBatchListenDelete(
           track_key: string;
           artist: string;
           track: string;
+          cid: string;
         }>(
-          `SELECT uri,listened_at,artist_key,track_key,artist,track FROM scrobbles WHERE did=? AND record_uri=? AND listen_id IN (${args.listenIds.map(() => '?').join(',')})`,
+          `SELECT uri,listened_at,artist_key,track_key,artist,track,cid FROM scrobbles WHERE did=? AND record_uri=? AND listen_id IN (${args.listenIds.map(() => '?').join(',')})`,
           args.did,
           args.uri,
           ...args.listenIds,
@@ -365,7 +367,7 @@ export function enqueueBatchListenDelete(
       enqueueListenDelete(m.db, {
         did: args.did,
         identityKey,
-        eventKey: identityKey,
+        eventKey: `${identityKey}:${row.cid}`,
         listenedAt: Math.floor(Date.parse(row.listened_at) / 1000),
         artistKey: row.artist_key,
         trackKey: row.track_key,

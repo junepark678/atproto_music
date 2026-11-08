@@ -1115,6 +1115,34 @@ describe('link routes', () => {
 
     const [row] = links(w);
     expect(row).toMatchObject({ id: good.body?.id, did: ALICE, service: 'listenbrainz', remote_user: 'Alice_LB' });
+    const queuedKey = trackKey('Queue Artist', 'Queue Track');
+    for (const [id, generation, state] of [
+      ['delete-queued', 1, 'queued'],
+      ['delete-failed', 1, 'failed'],
+      ['delete-stale', 0, 'queued'],
+    ] as const) {
+      w.app.db.run(
+        `INSERT INTO listenbrainz_deletes
+        (id,event_key,link_id,generation,did,identity_key,listened_at,artist_key,track_key,artist,track,source_path,state,attempts,due_at,deadline_at,created_at_ms,updated_at_ms)
+        VALUES(?,?,?,?,?,'identity',1768392000,?,?,'Queue Artist','Queue Track','api',?,0,?,?,?,?)`,
+        id,
+        id,
+        row!.id,
+        generation,
+        ALICE,
+        queuedKey[0],
+        queuedKey[1],
+        state,
+        w.clock.nowMs(),
+        w.clock.nowMs() + 7 * 24 * 60 * 60 * 1000,
+        w.clock.nowMs(),
+        w.clock.nowMs(),
+      );
+    }
+    const reported = await call(w, 'GET', '/api/v1/links', { token });
+    expect(reported.body).toMatchObject({
+      items: [{ id: row!.id, sync: { queued: 1, failed: 1 } }],
+    });
     const sealed = bytes(row?.credential_ciphertext as ArrayBuffer);
     expect(containsText(sealed, lbToken)).toBe(false);
     expect(w.box.openText('linked-listenbrainz', sealed, linkedAad(ALICE, 'listenbrainz'))).toBe(lbToken);

@@ -89,6 +89,7 @@ export async function runDeleteSlice(deps: DeleteForwardDeps, now = deps.clock.n
     lookup_min_ts: number | null;
     lookup_candidates: string | null;
     lookup_last_earliest: number | null;
+    lookup_last_max: number | null;
   }>(
     "SELECT q.* FROM listenbrainz_deletes q JOIN linked_accounts l ON l.id=q.link_id AND l.generation=q.generation WHERE q.state='queued' AND q.due_at<=? AND l.status='active' ORDER BY q.due_at,q.created_at_ms LIMIT 1",
     now,
@@ -160,6 +161,7 @@ export async function runDeleteSlice(deps: DeleteForwardDeps, now = deps.clock.n
       );
       return { requests: 1, state: 'sent', nextDueMs: null };
     }
+    let resultState = 'retry';
     if (out.kind === 'status') {
       after(out.rate, out.status === 429);
       if (out.status === 401) {
@@ -170,14 +172,16 @@ export async function runDeleteSlice(deps: DeleteForwardDeps, now = deps.clock.n
             row.id,
             row.generation,
           );
-      } else if (out.status === 400)
+        resultState = 'failed';
+      } else if (out.status === 400) {
         deps.db.run(
           "UPDATE listenbrainz_deletes SET state='failed',attempts=attempts+1,last_error='upstream_400',updated_at_ms=? WHERE id=? AND generation=?",
           deps.clock.nowMs(),
           row.id,
           row.generation,
         );
-      else {
+        resultState = 'failed';
+      } else {
         const due = retryAt(deps.clock.nowMs(), row.attempts, deps.random);
         deps.db.run(
           'UPDATE listenbrainz_deletes SET attempts=attempts+1,due_at=?,last_error=?,updated_at_ms=? WHERE id=? AND generation=? AND deadline_at>?',
@@ -202,7 +206,7 @@ export async function runDeleteSlice(deps: DeleteForwardDeps, now = deps.clock.n
     }
     return {
       requests: 1,
-      state: 'retry',
+      state: resultState,
       nextDueMs:
         deps.db.one<{ due_at: number }>('SELECT due_at FROM listenbrainz_deletes WHERE id=?', row.id)?.due_at ?? null,
     };
@@ -228,10 +232,18 @@ export async function runDeleteSlice(deps: DeleteForwardDeps, now = deps.clock.n
     if (out.kind === 'status' && out.status === 401) {
       if (revokeLink(deps.db, link, 'credential_revoked', deps.clock.nowMs()))
         deps.db.run(
-          "UPDATE listenbrainz_deletes SET state='failed',last_error='credential_revoked' WHERE id=? AND generation=?",
+          "UPDATE listenbrainz_deletes SET state='failed',attempts=attempts+1,last_error='credential_revoked',updated_at_ms=? WHERE id=? AND generation=?",
+          deps.clock.nowMs(),
           row.id,
           row.generation,
         );
+    } else if (out.kind === 'status' && out.status === 400) {
+      deps.db.run(
+        "UPDATE listenbrainz_deletes SET state='failed',attempts=attempts+1,last_error='upstream_400',updated_at_ms=? WHERE id=? AND generation=?",
+        deps.clock.nowMs(),
+        row.id,
+        row.generation,
+      );
     } else {
       const due = retryAt(deps.clock.nowMs(), row.attempts, deps.random);
       deps.db.run(
@@ -260,13 +272,18 @@ export async function runDeleteSlice(deps: DeleteForwardDeps, now = deps.clock.n
       candidates.push(c);
     }
   }
-  const earliest = out.value.reduce((min, c) => Math.min(min, c.listenedAt), Number.POSITIVE_INFINITY);
-  const complete = out.value.length < PAGE_SIZE || earliest < row.listened_at - 1;
+  // ListenBrainz selects the earliest page after exclusive min_ts, then
+  // returns it newest-first. The page maximum is therefore the only safe
+  // forward cursor. If a full page ends inside the target window, more rows
+  // may share that second; min_ts cannot disambiguate them, so ignore safely.
+  const pageMax = out.value.reduce((max, c) => Math.max(max, c.listenedAt), Number.NEGATIVE_INFINITY);
+  const complete = out.value.length < PAGE_SIZE || pageMax > row.listened_at + 1;
   if (!complete) {
     if (
       candidates.length > MAX_LOOKUP_CANDIDATES ||
-      !Number.isFinite(earliest) ||
-      earliest === row.lookup_last_earliest
+      !Number.isFinite(pageMax) ||
+      pageMax === row.lookup_last_max ||
+      pageMax >= row.listened_at - 1
     ) {
       deps.db.run(
         "UPDATE listenbrainz_deletes SET state='ignored',last_error='ambiguous_saturated',updated_at_ms=? WHERE id=? AND generation=?",
@@ -278,11 +295,10 @@ export async function runDeleteSlice(deps: DeleteForwardDeps, now = deps.clock.n
     }
     deps.db.run(
       "UPDATE listenbrainz_deletes SET lookup_min_ts=?,lookup_candidates=?,lookup_last_earliest=?,due_at=?,updated_at_ms=? WHERE id=? AND generation=? AND state='queued'",
-      // Exclusive min_ts must replay the page's earliest second and include
-      // the preceding second, so subtract two and filter locally.
-      earliest - 2,
+      // `min_ts` is exclusive. Continue after this page's newest second.
+      pageMax,
       JSON.stringify(candidates),
-      earliest,
+      pageMax,
       deps.clock.nowMs() + 1000,
       deps.clock.nowMs(),
       row.id,

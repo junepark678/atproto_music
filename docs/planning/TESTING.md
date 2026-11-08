@@ -10,6 +10,10 @@ For each named case, record the exact test target, command, executed count, resu
 
 Code changes must satisfy the issue's input/action/expected-outcome rows. A mocked helper returning `Ok` does not establish that the real HTTP route, database transaction or remote record behaved correctly. Assert HTTP status **and** response schema, DB state, count of remote calls, and final verified record state where applicable. A failed assertion must preserve the runner's nonzero exit code. On Workers every HTTP test validates the response with AJV against `api/openapi.yaml`, reads Durable Object table state through `runInDurableObject`, and asserts the fixture transport's remote-call counts.
 
+### S4 ListenBrainz deletion acceptance
+
+The Node production-path acceptance lives in `worker/test/node/forward/listenbrainz-forward.test.ts`, `worker/test/node/outbox/delete.test.ts`, `worker/test/node/outbox/batch.test.ts`, link tests, and feature/admin suites. It verifies persisted queue and target state against fake-router GET/POST calls, exclusive `min_ts` pagination (never offset), ±1-second boundaries, exact/unique-near/ambiguous matching, top-level MSID validation, asynchronous HTTP 200 acceptance, tombstone protection, retry deadline/attempt limits, credential-generation fences, relink expiry/resume, Last.fm no-egress, and timer pacing/priority. Run focused suites during implementation, then `npm run typecheck`, `npm run lint`, and unfiltered `bash scripts/check-ts.sh` on the exact final head; do not weaken the case map or fingerprint gate.
+
 Docs-only/CI tasks must validate the artifact they own: parse schema examples, execute the CLI/script, inspect the produced binary, or exercise failure cases in a disposable checkout. Do not permanently alter production files just to demonstrate a failing check.
 
 ## Time, randomness, temporary resources

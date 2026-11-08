@@ -144,6 +144,13 @@ export class ListenbrainzClient {
         return { ok: false, kind: 'malformed', status: 502, error: 'malformed listen entry', rate: out.rate };
       }
       const msid = item.recording_msid;
+      if (
+        msid !== undefined &&
+        msid !== null &&
+        (typeof msid !== 'string' ||
+          !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(msid))
+      )
+        return { ok: false, kind: 'malformed', status: 502, error: 'malformed recording_msid', rate: out.rate };
       const uuid =
         typeof msid === 'string' &&
         /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(msid)

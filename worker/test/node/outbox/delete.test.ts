@@ -106,6 +106,14 @@ it('queues a ListenBrainz delete in the indexed API deletion transaction only af
     ]);
     enqueueScrobbleDelete(h.m, { did: h.alice, uri, origin: 'web' });
     expect(count(h.db, 'listenbrainz_deletes')).toBe(1);
+    // A later indexed incarnation with the same canonical listen identity is
+    // a distinct remote deletion event. The API/Jetstream echo for the first
+    // CID remains deduped, while a recreated row must be eligible again.
+    h.db.run('UPDATE scrobbles SET cid=? WHERE uri=?', 'bafydeletecid2', uri);
+    enqueueScrobbleDelete(h.m, { did: h.alice, uri, origin: 'web' });
+    expect(
+      h.db.all<{ event_key: string }>('SELECT event_key FROM listenbrainz_deletes ORDER BY event_key'),
+    ).toHaveLength(2);
     const unsentUri = indexRecordState(h, '3kunsentmusic01', 'bafyunsentcid');
     h.db.run(
       `INSERT INTO scrobbles(uri,cid,did,rkey,revision,artist,track,album,listened_at,created_at,indexed_at,artist_key,track_key,album_key)
@@ -121,7 +129,48 @@ it('queues a ListenBrainz delete in the indexed API deletion transaction only af
       ...trackKey('Björk', 'Unsent song'),
     );
     enqueueScrobbleDelete(h.m, { did: h.alice, uri: unsentUri, origin: 'web' });
-    expect(count(h.db, 'listenbrainz_deletes')).toBe(1);
+    expect(count(h.db, 'listenbrainz_deletes')).toBe(2);
+  });
+});
+
+it('records an eligible Last.fm delivery as unsupported without creating egress work', async () => {
+  await withHarness(async (h) => {
+    h.seedUser(h.alice);
+    const linkId = h.link(h.alice, 'lastfm');
+    const uri = indexRecordState(h, '3klastfmdel001', 'bafylastfmdelcid');
+    const listenedAt = toStorage(fromMs(Date.parse('2026-01-15T10:00:00Z')));
+    const [artistKey, trackKeyValue] = trackKey('Björk', 'Hyperballad');
+    h.db.run(
+      `INSERT INTO scrobbles(uri,cid,did,rkey,revision,artist,track,album,listened_at,created_at,indexed_at,artist_key,track_key,album_key)
+      VALUES(?,?,?,?,?,'Björk','Hyperballad',NULL,?,?,? ,?,?,NULL)`,
+      uri,
+      'bafylastfmdelcid',
+      h.alice,
+      '3klastfmdel001',
+      '3lbkzzzzzzz22',
+      listenedAt,
+      listenedAt,
+      listenedAt,
+      artistKey,
+      trackKeyValue,
+    );
+    const identityKey = projectionListenKey(h.alice, listenedAt, artistKey, trackKeyValue);
+    h.db.run(
+      `INSERT INTO forward_outbox(id,link_id,did,kind,dedupe_key,payload_json,state,attempts,due_at,created_at_ms,updated_at_ms,generation)
+      VALUES('sent-lastfm-row',?,?, 'scrobble', ?, '{}','sent',1,?,?,?,1)`,
+      linkId,
+      h.alice,
+      identityKey,
+      T0,
+      T0,
+      T0,
+    );
+
+    enqueueScrobbleDelete(h.m, { did: h.alice, uri, origin: 'web' });
+
+    expect(h.db.all('SELECT state,source_path FROM listenbrainz_deletes')).toEqual([
+      { state: 'unsupported', source_path: 'api' },
+    ]);
   });
 });
 

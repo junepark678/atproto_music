@@ -112,8 +112,9 @@ export function enqueueScrobbleDelete(
       listen_id: string | null;
       artist: string;
       track: string;
+      cid: string;
     }>(
-      'SELECT uri,listened_at,artist_key,track_key,listen_id,artist,track FROM scrobbles WHERE did=? AND (uri=? OR record_uri=?)',
+      'SELECT uri,listened_at,artist_key,track_key,listen_id,artist,track,cid FROM scrobbles WHERE did=? AND (uri=? OR record_uri=?)',
       args.did,
       args.uri,
       args.uri,
@@ -133,7 +134,7 @@ export function enqueueScrobbleDelete(
       enqueueListenDelete(m.db, {
         did: args.did,
         identityKey,
-        eventKey: identityKey,
+        eventKey: `${identityKey}:${row.cid}`,
         listenedAt: second,
         artistKey: row.artist_key,
         trackKey: row.track_key,

@@ -412,7 +412,7 @@ function batchVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, o: 
           enqueueListenDelete(db, {
             did: t.did,
             identityKey,
-            eventKey: identityKey,
+            eventKey: `${identityKey}:${old.cid}`,
             listenedAt: Math.floor(Date.parse(old.listened_at) / 1000),
             artistKey: old.artist_key,
             trackKey: old.track_key,
@@ -774,13 +774,14 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
     if (o.forwarding && (t.kind === 'scrobble' || t.kind === 'scrobbleBatch')) {
       const listens = db.all<{
         uri: string;
+        cid: string;
         listened_at: string;
         artist_key: string;
         track_key: string;
         artist: string;
         track: string;
       }>(
-        'SELECT uri,listened_at,artist_key,track_key,artist,track FROM scrobbles WHERE did=? AND (uri=? OR record_uri=?)',
+        'SELECT uri,cid,listened_at,artist_key,track_key,artist,track FROM scrobbles WHERE did=? AND (uri=? OR record_uri=?)',
         t.did,
         t.uri,
         t.uri,
@@ -799,7 +800,7 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
         enqueueListenDelete(db, {
           did: t.did,
           identityKey,
-          eventKey: identityKey,
+          eventKey: `${identityKey}:${listen.cid}`,
           listenedAt: Math.floor(Date.parse(listen.listened_at) / 1000),
           artistKey: listen.artist_key,
           trackKey: listen.track_key,
