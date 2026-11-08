@@ -37,6 +37,7 @@ import {
   readNetwork,
   workerOrigin,
 } from '../../scripts/e2e/dev-env';
+import { toLocalInput } from '../src/components/format';
 import { expect, test } from './fixtures';
 
 const repoRoot = resolve(new URL('../..', import.meta.url).pathname);
@@ -179,8 +180,11 @@ async function publishScrobble(
   await page.getByLabel('Artist').fill(fields.artist);
   await page.getByLabel('Track').fill(fields.track);
   await page.getByLabel('Album (optional)').fill(fields.album);
-  // datetime-local takes the browser-local (pinned UTC) wall time without a zone suffix.
-  await page.getByLabel('Listened at').fill(fields.listenedAt.replace(/Z$/, ''));
+  // Playwright pins Chromium to UTC; fill the browser's local input format rather than RFC3339.
+  const listenedAtValue = toLocalInput(Date.parse(fields.listenedAt), 'UTC').slice(0, 16);
+  const listenedAt = page.getByLabel('Listened at');
+  await listenedAt.fill(listenedAtValue);
+  await expect(listenedAt).toHaveValue(listenedAtValue);
   await page.getByRole('button', { name: 'Publish scrobble' }).click();
   return page.locator('li[data-op-id]').filter({ hasText: fields.track });
 }
@@ -630,7 +634,7 @@ test('GET /u/<did> and /feed serve index.html 200 and POST /feed never returns S
     await page.goto(path);
     expect(new URL(page.url()).pathname, path).toBe(path);
     await expect(heading(page)).toHaveText(`@${bob.handle}`);
-    await expect(page.locator('.profile-did code')).toHaveText(bob.did);
+    await expect(page.getByRole('region', { name: `@${bob.handle}` })).toBeVisible();
   }
   await page.goto('/feed');
   await expect(heading(page)).toHaveText('Feed');
