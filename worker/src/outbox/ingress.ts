@@ -187,12 +187,13 @@ export async function acceptListens(m: ModuleDeps, args: AcceptListensArgs): Pro
       // ADR §7.7 step 3, in order: the listen key, the operation, the forward rows.
       const operationId = newOperationId(m.random);
       db.run(
-        `INSERT INTO listen_keys(did, dedupe_key, operation_id, source, created_at_ms) VALUES (?, ?, ?, ?, ?)`,
+        `INSERT INTO listen_keys(did, dedupe_key, operation_id, source, created_at_ms, listen_second) VALUES (?, ?, ?, ?, ?, ?)`,
         args.did,
         prep.key,
         operationId,
         args.origin,
         now,
+        Number((parseRfc3339(prep.prepared.record.listenedAt) ?? 0n) / 1_000_000_000n),
       );
       const firstAdmission = admitForwardIdentity(db, {
         did: args.did,

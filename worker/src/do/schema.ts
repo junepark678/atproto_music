@@ -1164,6 +1164,50 @@ const MIGRATION_S2_BACKFILL_MEMBERSHIP: Migration = {
   ],
 };
 
+// Durable linked-service pull pages. State is scoped to the current link
+// generation; page rows are retained until accepted by the import writer.
+const MIGRATION_S3_PULL_FOUNDATION: Migration = {
+  version: 30,
+  name: 'linked_service_pull_foundation',
+  statements: [
+    'ALTER TABLE listen_keys ADD COLUMN listen_second INTEGER',
+    `CREATE TABLE linked_pull_state (
+      link_id TEXT NOT NULL,
+      generation INTEGER NOT NULL,
+      source_service TEXT NOT NULL,
+      source_account TEXT NOT NULL,
+      listen_watermark_ms INTEGER NOT NULL,
+      love_boundary_ms INTEGER,
+      love_boundary_key TEXT,
+      page_kind TEXT,
+      page_cursor TEXT,
+      page_started_at_ms INTEGER,
+      hold_reason TEXT,
+      retry_at_ms INTEGER,
+      failures INTEGER NOT NULL DEFAULT 0,
+      updated_at_ms INTEGER NOT NULL,
+      PRIMARY KEY(link_id,generation)
+    )`,
+    `CREATE TABLE linked_pull_items (
+      link_id TEXT NOT NULL,
+      generation INTEGER NOT NULL,
+      item_key TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      source_service TEXT NOT NULL,
+      source_account TEXT NOT NULL,
+      listened_at_ms INTEGER,
+      love_key TEXT,
+      recording_mbid TEXT,
+      payload_json TEXT NOT NULL,
+      payload_bytes INTEGER NOT NULL,
+      staged_at_ms INTEGER NOT NULL,
+      PRIMARY KEY(link_id,generation,item_key)
+    )`,
+    'CREATE INDEX linked_pull_items_pending ON linked_pull_items(link_id,generation,kind,staged_at_ms,item_key)',
+    'CREATE INDEX listen_keys_did_second ON listen_keys(did,listen_second) WHERE listen_second IS NOT NULL',
+  ],
+};
+
 export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_1,
   MIGRATION_2,
@@ -1194,6 +1238,7 @@ export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_S2_BACKFILL_RUN_REVISION,
   MIGRATION_S2_BACKFILL_BUDGET,
   MIGRATION_S2_BACKFILL_MEMBERSHIP,
+  MIGRATION_S3_PULL_FOUNDATION,
 ];
 
 /** The schema version this code expects. */
@@ -1273,6 +1318,9 @@ export const TABLES = [
   'mb_cover_art',
   'mb_cover_art_jobs',
   'mb_cover_art_usage',
+  // Migration 30.
+  'linked_pull_state',
+  'linked_pull_items',
 ] as const;
 
 export type TableName = (typeof TABLES)[number];
@@ -1352,4 +1400,6 @@ export const TABLE_CLASS: Readonly<Record<TableName, TableClass>> = {
   mb_cover_art: 'non-derived',
   mb_cover_art_jobs: 'non-derived',
   mb_cover_art_usage: 'non-derived',
+  linked_pull_state: 'non-derived',
+  linked_pull_items: 'non-derived',
 };
