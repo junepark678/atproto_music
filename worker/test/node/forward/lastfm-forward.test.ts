@@ -455,11 +455,21 @@ describe('Last.fm forwarding', () => {
         now: clock.nowMs(),
       });
       const sk = lastfm.addSession('restart_user');
-      const saved = saveLink(
+      const initialLink = saveLink(
         { db: app.db, clock, random: service.forwarding.random, box: service.forwarding.box },
         { did: ALICE, service: 'lastfm', remoteUser: 'restart_user', credential: sk },
       );
-      expect(saved.link).toMatchObject({ generation: 1, generation_start_seq: 1 });
+      expect(initialLink.link).toMatchObject({ generation: 1, generation_start_seq: 1 });
+      const rotatedLink = saveLink(
+        { db: app.db, clock, random: service.forwarding.random, box: service.forwarding.box },
+        {
+          did: ALICE,
+          service: 'lastfm',
+          remoteUser: 'restart_user_v2',
+          credential: lastfm.addSession('restart_user_v2'),
+        },
+      );
+      expect(rotatedLink.link).toMatchObject({ generation: 2, generation_start_seq: 1 });
       const receipt = clock.nowMs();
       const dueAt = receipt + 25 * MINUTE;
       const listenedAt = dueAt + 5 * MINUTE;
@@ -484,11 +494,11 @@ describe('Last.fm forwarding', () => {
       app = await startApp(appOptions());
       const restartedService = (app.composed.app as unknown as { links: LinksService }).links;
       expect(app.db.one('SELECT generation,generation_start_seq FROM linked_accounts')).toEqual({
-        generation: 1,
+        generation: 2,
         generation_start_seq: 1,
       });
       expect(app.db.one('SELECT next_seq FROM forward_admission_clock')).toEqual({ next_seq: 1 });
-      expect(app.db.one('SELECT generation FROM forward_outbox')).toEqual({ generation: 1 });
+      expect(app.db.one('SELECT generation FROM forward_outbox')).toEqual({ generation: 2 });
       expect(app.db.one('SELECT state, due_at, created_at_ms, updated_at_ms FROM forward_outbox')).toEqual({
         state: 'queued',
         due_at: dueAt,
