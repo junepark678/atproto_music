@@ -60,7 +60,7 @@ it('ticks elapsed time against the server clock skew and refreshes on visibility
   vi.useFakeTimers();
   Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
   vi.setSystemTime(new Date('2026-01-15T12:00:00Z'));
-  const clockItem = { ...item, startedAt: '2026-01-15T11:48:45Z' };
+  const clockItem = { ...item, startedAt: '2026-01-15T11:48:31Z' };
   const app = setup({ nowPlaying: clockItem, serverTime: response.serverTime }, did, 30_000);
   await vi.waitFor(() => expect(app.root.textContent).toContain('for 11 min'));
   expect(app.root.querySelector('time')?.getAttribute('datetime')).toBe(clockItem.startedAt);
