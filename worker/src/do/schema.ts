@@ -1338,6 +1338,39 @@ const MIGRATION_S3_LOVE_DELETE_REVISION: Migration = {
   statements: ['ALTER TABLE love_delete_bridges ADD COLUMN delete_rev TEXT'],
 };
 
+// S4: retain exact local deletion intent independently of the record projection.
+const MIGRATION_S4_LISTEN_DELETES: Migration = {
+  version: 39,
+  name: 'listenbrainz_delete_queue',
+  statements: [
+    `CREATE TABLE listenbrainz_deletes (
+      id TEXT PRIMARY KEY NOT NULL,
+      event_key TEXT NOT NULL,
+      link_id TEXT NOT NULL REFERENCES linked_accounts(id) ON DELETE CASCADE,
+      generation INTEGER NOT NULL,
+      did TEXT NOT NULL,
+      identity_key TEXT NOT NULL,
+      listened_at INTEGER NOT NULL,
+      artist_key TEXT NOT NULL,
+      track_key TEXT NOT NULL,
+      artist TEXT NOT NULL,
+      track TEXT NOT NULL,
+      source_path TEXT NOT NULL,
+      state TEXT NOT NULL DEFAULT 'queued' CHECK(state IN ('queued','ignored','unsupported','sent','failed','expired')),
+      attempts INTEGER NOT NULL DEFAULT 0,
+      due_at INTEGER NOT NULL,
+      deadline_at INTEGER NOT NULL,
+      target_msid TEXT,
+      target_listened_at INTEGER,
+      last_error TEXT,
+      created_at_ms INTEGER NOT NULL,
+      updated_at_ms INTEGER NOT NULL,
+      UNIQUE(link_id,generation,event_key)
+    )`,
+    'CREATE INDEX listenbrainz_deletes_due ON listenbrainz_deletes(state,due_at)',
+  ],
+};
+
 export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_1,
   MIGRATION_2,
@@ -1377,6 +1410,7 @@ export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_S3_LISTENBRAINZ_PULL,
   MIGRATION_S3_LOVE_PULL_ADMISSIONS,
   MIGRATION_S3_LOVE_DELETE_REVISION,
+  MIGRATION_S4_LISTEN_DELETES,
 ];
 
 /** The schema version this code expects. */

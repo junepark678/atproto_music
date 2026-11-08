@@ -38,6 +38,8 @@ import { isTid } from '@atmusic/core/syntax';
 import type { OperationRow, Origin } from '../app/rows';
 import type { ModuleDeps } from '../do/contracts';
 import { bumpStatsVersion } from '../do/write/account-state';
+import { enqueueListenDelete } from '../forward/delete-enqueue';
+import { projectionListenKey } from '../forward/projection';
 import { tombstoneListen } from '../sync/tombstones';
 import {
   cancelUnsent,
@@ -108,8 +110,10 @@ export function enqueueScrobbleDelete(
       artist_key: string;
       track_key: string;
       listen_id: string | null;
+      artist: string;
+      track: string;
     }>(
-      'SELECT uri,listened_at,artist_key,track_key,listen_id FROM scrobbles WHERE did=? AND (uri=? OR record_uri=?)',
+      'SELECT uri,listened_at,artist_key,track_key,listen_id,artist,track FROM scrobbles WHERE did=? AND (uri=? OR record_uri=?)',
       args.did,
       args.uri,
       args.uri,
@@ -123,6 +127,22 @@ export function enqueueScrobbleDelete(
         trackKey: row.track_key,
         nowMs: now,
       });
+    for (const row of rows) {
+      const second = Math.floor(Date.parse(row.listened_at) / 1000);
+      const identityKey = projectionListenKey(args.did, row.listened_at, row.artist_key, row.track_key);
+      enqueueListenDelete(m.db, {
+        did: args.did,
+        identityKey,
+        eventKey: identityKey,
+        listenedAt: second,
+        artistKey: row.artist_key,
+        trackKey: row.track_key,
+        artist: row.artist,
+        track: row.track,
+        sourcePath: 'api',
+        now,
+      });
+    }
     const inserted = insertOperation(
       m.db,
       {

@@ -7,6 +7,7 @@ import { trackKey } from '@atmusic/core/music-key';
 import { fromMs, toStorage } from '@atmusic/core/timestamp';
 import { expect, it } from 'vitest';
 import type { Db } from '../../../src/do/db';
+import { projectionListenKey } from '../../../src/forward/projection';
 import { enqueueScrobbleDelete, removeScrobbleCreate } from '../../../src/outbox/delete-ops';
 import { acceptListens } from '../../../src/outbox/ingress';
 import { cancelUnsent, predecessorRows } from '../../../src/outbox/operations';
@@ -47,6 +48,82 @@ function indexRecordState(h: Harness, rkey: string, cid: string): string {
 function scrobble(listenedAt: string, track = 'Hyperballad') {
   return { $type: SCROBBLE, artist: 'Björk', track, listenedAt, createdAt: '2026-01-15T11:00:00Z' };
 }
+
+it('queues a ListenBrainz delete in the indexed API deletion transaction only after a sent forward', async () => {
+  await withHarness(async (h) => {
+    h.seedUser(h.alice);
+    const linkId = h.link(h.alice, 'listenbrainz');
+    const uri = indexRecordState(h, '3kdeletemusic001', 'bafydeletecid');
+    const listenedAt = toStorage(fromMs(Date.parse('2026-01-15T10:00:00Z')));
+    const [artistKey, trackKeyValue] = trackKey('Björk', 'Hyperballad');
+    h.db.run(
+      `INSERT INTO scrobbles(uri,cid,did,rkey,revision,artist,track,album,listened_at,created_at,indexed_at,artist_key,track_key,album_key)
+      VALUES(?,?,?,?,?,'Björk','Hyperballad',NULL,?,?,? ,?,?,NULL)`,
+      uri,
+      'bafydeletecid',
+      h.alice,
+      '3kdeletemusic001',
+      '3lbkzzzzzzz22',
+      listenedAt,
+      listenedAt,
+      listenedAt,
+      artistKey,
+      trackKeyValue,
+    );
+    const identityKey = projectionListenKey(h.alice, listenedAt, artistKey, trackKeyValue);
+    h.db.run(
+      `INSERT INTO forward_outbox(id,link_id,did,kind,dedupe_key,payload_json,state,attempts,due_at,created_at_ms,updated_at_ms,generation)
+      VALUES('sent-row',?,?, 'scrobble', ?, '{}','sent',1,?,?,?,1)`,
+      linkId,
+      h.alice,
+      identityKey,
+      T0,
+      T0,
+      T0,
+    );
+
+    const first = enqueueScrobbleDelete(h.m, { did: h.alice, uri, origin: 'web' });
+    expect(h.op(first.id).kind).toBe('scrobble.delete');
+    expect(isListenTombstoned(h.db, h.alice, Math.floor(Date.parse(listenedAt) / 1000), artistKey, trackKeyValue)).toBe(
+      true,
+    );
+    expect(
+      h.db.all(`SELECT link_id,generation,did,identity_key,listened_at,artist_key,track_key,artist,track,state
+      FROM listenbrainz_deletes`),
+    ).toEqual([
+      {
+        link_id: linkId,
+        generation: 1,
+        did: h.alice,
+        identity_key: identityKey,
+        listened_at: Math.floor(Date.parse(listenedAt) / 1000),
+        artist_key: artistKey,
+        track_key: trackKeyValue,
+        artist: 'Björk',
+        track: 'Hyperballad',
+        state: 'queued',
+      },
+    ]);
+    enqueueScrobbleDelete(h.m, { did: h.alice, uri, origin: 'web' });
+    expect(count(h.db, 'listenbrainz_deletes')).toBe(1);
+    const unsentUri = indexRecordState(h, '3kunsentmusic01', 'bafyunsentcid');
+    h.db.run(
+      `INSERT INTO scrobbles(uri,cid,did,rkey,revision,artist,track,album,listened_at,created_at,indexed_at,artist_key,track_key,album_key)
+      VALUES(?,?,?,?,?,'Björk','Unsent song',NULL,?,?,? ,?,?,NULL)`,
+      unsentUri,
+      'bafyunsentcid',
+      h.alice,
+      '3kunsentmusic01',
+      '3lbkzzzzzzz22',
+      listenedAt,
+      listenedAt,
+      listenedAt,
+      ...trackKey('Björk', 'Unsent song'),
+    );
+    enqueueScrobbleDelete(h.m, { did: h.alice, uri: unsentUri, origin: 'web' });
+    expect(count(h.db, 'listenbrainz_deletes')).toBe(1);
+  });
+});
 
 async function accept(h: Harness, i: number) {
   const r = await acceptListens(h.m, {
