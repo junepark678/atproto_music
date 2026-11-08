@@ -253,9 +253,17 @@ The owner's word is "synced". Our definition: canonical MusicBrainz data is reso
   - love creates and deletes;
 
   that arrive from other clients through **live** Jetstream commits. Exclude snapshot, repair and discovery backfill, which belong to S2.
-- **Exactly once.** A record we accepted through our API that echoes back through Jetstream must be forwarded exactly once.
-  - Verify how long `forward_outbox` rows and `listen_keys` persist.
-  - If sent rows are pruned, add a compact `forward_sent(link_id, dedupe_key)` ledger with an age bound.
+- **Exactly once: the replay contract** (planner ruling, 2026-11-08, replacing the earlier "ledger with an age bound" idea).
+  - **Admission marker.** Every listen and love identity gets one durable, compact *admission marker*, attached to its existing durable identity (`listen_keys` / `record_state`). It is written in the same transaction as the first API or compat acceptance, import, or projection. It records:
+    - the acceptance sequence or time;
+    - the path: `api`, `import`, `live` or `snapshot`;
+    - the import source service, if any.
+  - **Admission happens at most once per identity lifetime.** Live forwarding enqueues only on the first admission through the `api` or `live` path, for the links active at that moment. A replay of a known identity, at any lateness, enqueues nothing.
+  - **The marker lives as long as the identity.** It lasts exactly as long as the indexer keeps that record identity or its tombstone. Forwarding suppression therefore matches the indexer's own resurrection suppression. If the indexer would re-project an identity as new, forwarding treats it as new too.
+  - **No cutoff by age.** There is no TTL, no "echo horizon" and no listen-age exclusion used for dedupe. A replay suppressed beyond the identity's lifetime is out of contract and must not be promised. No new ListenBrainz age limit; Last.fm keeps its 13-day limit when sending.
+  - **Link generations.** Each link has a generation that changes when the remote account changes, and forward rows carry it. For each link generation, every indexed identity is forwarded at most once, either by live admission or by S2 backfill, and the admission marker decides which. Backfill covers what live admission did not enqueue for that generation: identities admitted before the generation started, and `snapshot`-path identities admitted after it.
+  - **Outbox cleanup.** Per-link send state stays in `forward_outbox`. Because re-admission is blocked by the marker, not by outbox rows, terminal outbox rows may be removed by a periodic, bounded, indexed sweep after their terminal age. There is never a global scan on each success. This sweep is optional for S1.
+  - **Storage reporting.** Report marker and outbox row counts and bytes in the operator metrics and admin socket. There is no hard quota beyond existing disk checks.
 - **Imported listens.** Still never forwarded to the service they came from.
   - Forward them to other services only where the per-listen import source is known. Otherwise keep today's exclusion.
 - **Love deletes.** Deleting a love from another client forwards an unlove, keeping the love-head ordering.
