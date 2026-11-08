@@ -163,6 +163,12 @@ if ((${#projects[@]} > 0)); then
     vitest_args+=(--project "$name")
     test_command+=" -- --project $name"
   done
+  # These filtered runs are used by scripts-gate negative controls, which
+  # spawn Vitest from inside Vitest. Leave CPU headroom for the parent and
+  # child processes so the worker-node project's 5 s test budgets remain
+  # meaningful instead of timing out from nested worker oversubscription.
+  vitest_args+=(--maxWorkers=2)
+  test_command+=' --maxWorkers=2'
 else
   step 'test (vitest, all projects)'
 fi
