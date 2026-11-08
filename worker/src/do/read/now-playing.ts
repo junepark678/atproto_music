@@ -53,10 +53,18 @@ export interface NowPlayingInput {
   albumArtist?: string | null;
   durationSeconds?: number | null;
   recordingMbid?: string | null;
+  trackNumber?: number | null;
+  releaseMbid?: string | null;
+  releaseGroupMbid?: string | null;
+  artistMbids?: readonly string[] | null;
+  isrc?: string | null;
+  submissionClientVersion?: string | null;
+  musicService?: string | null;
+  mediaPlayer?: string | null;
   /** Submitting client (ListenBrainz `submission_client`, Last.fm session client). */
   client?: string | null;
   source: NowPlayingSource;
-  /** What the same current track does: `refresh` (default) or `keep`. */
+  /** Retained for caller compatibility; same-track submissions always refresh. */
   sameTrack?: 'refresh' | 'keep';
 }
 
@@ -109,17 +117,29 @@ export function upsertNowPlaying(m: Pick<ModuleDeps, 'db' | 'clock'>, input: Now
   return db.tx(() => {
     const existing = db.one<NowPlayingRow>('SELECT * FROM now_playing WHERE did = ?', input.did);
     if (existing !== null && existing.expires_at_ms > now && sameTrack(existing, input.artist, input.track)) {
-      if (input.sameTrack === 'keep') return { outcome: 'unchanged' as const, row: existing };
       const expires = now + ttlMs;
+      const merge = <T>(incoming: T | null | undefined, previous: T | null): T | null => incoming ?? previous;
+      const fields = {
+        album: merge(input.album, existing.album), album_artist: merge(input.albumArtist, existing.album_artist),
+        duration_seconds: merge(input.durationSeconds === undefined ? undefined : durationSeconds, existing.duration_seconds), recording_mbid: merge(input.recordingMbid, existing.recording_mbid),
+        client: merge(input.client, existing.client), track_number: merge(input.trackNumber, existing.track_number),
+        release_mbid: merge(input.releaseMbid, existing.release_mbid), release_group_mbid: merge(input.releaseGroupMbid, existing.release_group_mbid),
+        artist_mbids: merge(input.artistMbids ? JSON.stringify(input.artistMbids) : undefined, existing.artist_mbids),
+        isrc: merge(input.isrc, existing.isrc), submission_client_version: merge(input.submissionClientVersion, existing.submission_client_version),
+        music_service: merge(input.musicService, existing.music_service), media_player: merge(input.mediaPlayer, existing.media_player),
+      };
       db.run(
-        'UPDATE now_playing SET duration_seconds = ?, expires_at_ms = ? WHERE did = ?',
-        durationSeconds,
+        `UPDATE now_playing SET album=?, album_artist=?, duration_seconds=?, recording_mbid=?, client=?, track_number=?, release_mbid=?,
+         release_group_mbid=?, artist_mbids=?, isrc=?, submission_client_version=?, music_service=?, media_player=?, updated_at_ms=?, expires_at_ms=? WHERE did=?`,
+        fields.album, fields.album_artist, fields.duration_seconds, fields.recording_mbid, fields.client, fields.track_number,
+        fields.release_mbid, fields.release_group_mbid, fields.artist_mbids, fields.isrc, fields.submission_client_version,
+        fields.music_service, fields.media_player, now,
         expires,
         input.did,
       );
       return {
         outcome: 'refreshed' as const,
-        row: { ...existing, duration_seconds: durationSeconds, expires_at_ms: expires },
+        row: { ...existing, ...fields, updated_at_ms: now, expires_at_ms: expires },
       };
     }
     const row: NowPlayingRow = {
@@ -134,15 +154,29 @@ export function upsertNowPlaying(m: Pick<ModuleDeps, 'db' | 'clock'>, input: Now
       source: input.source,
       started_at_ms: now,
       expires_at_ms: now + ttlMs,
+      updated_at_ms: now,
+      track_number: input.trackNumber ?? null,
+      release_mbid: input.releaseMbid ?? null,
+      release_group_mbid: input.releaseGroupMbid ?? null,
+      artist_mbids: input.artistMbids ? JSON.stringify(input.artistMbids) : null,
+      isrc: input.isrc ?? null,
+      submission_client_version: input.submissionClientVersion ?? null,
+      music_service: input.musicService ?? null,
+      media_player: input.mediaPlayer ?? null,
+      scrobbled_at_ms: null,
     };
     db.run(
       `INSERT INTO now_playing(did, artist, track, album, album_artist, duration_seconds, recording_mbid, client,
-         source, started_at_ms, expires_at_ms)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         source, started_at_ms, expires_at_ms, updated_at_ms, track_number, release_mbid, release_group_mbid, artist_mbids, isrc,
+         submission_client_version, music_service, media_player, scrobbled_at_ms)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(did) DO UPDATE SET artist = excluded.artist, track = excluded.track, album = excluded.album,
          album_artist = excluded.album_artist, duration_seconds = excluded.duration_seconds,
          recording_mbid = excluded.recording_mbid, client = excluded.client, source = excluded.source,
-         started_at_ms = excluded.started_at_ms, expires_at_ms = excluded.expires_at_ms`,
+         started_at_ms = excluded.started_at_ms, expires_at_ms = excluded.expires_at_ms, updated_at_ms=excluded.updated_at_ms,
+         track_number=excluded.track_number, release_mbid=excluded.release_mbid, release_group_mbid=excluded.release_group_mbid,
+         artist_mbids=excluded.artist_mbids, isrc=excluded.isrc, submission_client_version=excluded.submission_client_version,
+         music_service=excluded.music_service, media_player=excluded.media_player, scrobbled_at_ms=NULL`,
       row.did,
       row.artist,
       row.track,
@@ -154,6 +188,8 @@ export function upsertNowPlaying(m: Pick<ModuleDeps, 'db' | 'clock'>, input: Now
       row.source,
       row.started_at_ms,
       row.expires_at_ms,
+      row.updated_at_ms, row.track_number, row.release_mbid, row.release_group_mbid, row.artist_mbids, row.isrc,
+      row.submission_client_version, row.music_service, row.media_player, row.scrobbled_at_ms,
     );
     return { outcome: 'stored' as const, row };
   });
