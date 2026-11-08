@@ -26,6 +26,12 @@ interface TrackMetadata {
     submission_client_version: '3.15.0';
     music_service_name: 'YouTube Music';
     origin_url: string;
+    media_player?: string;
+    tracknumber?: number;
+    release_mbid?: string;
+    release_group_mbid?: string;
+    artist_mbids?: string[];
+    isrc?: string;
     release_artist_name?: string;
     duration_ms: number;
   };
@@ -56,6 +62,12 @@ function nowPlayingMetadata(): TrackMetadata {
       submission_client: 'Web Scrobbler',
       submission_client_version: '3.15.0',
       music_service_name: 'YouTube Music',
+      media_player: 'Chrome',
+      tracknumber: 1,
+      release_mbid: '00000000-0000-4000-8000-000000000001',
+      release_group_mbid: '00000000-0000-4000-8000-000000000002',
+      artist_mbids: ['00000000-0000-4000-8000-000000000003'],
+      isrc: 'ISRC12345678',
       origin_url: 'https://music.youtube.com/watch?v=lmnopqrstuv',
       duration_ms: 375_000,
     },

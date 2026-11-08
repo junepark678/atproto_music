@@ -37,7 +37,7 @@ describe('MusicBrainz storage', () => {
     const db = database();
     const path = join(dirs[dirs.length - 1]!, 'db.sqlite');
     try {
-      expect(MIGRATIONS.find((m) => m.version === 18)?.name).toBe('musicbrainz_love_revival_jobs');
+      expect(MIGRATIONS.find((m) => m.version === 19)?.name).toBe('musicbrainz_love_revival_jobs');
       expect(TABLES).toContain('mb_love_revive_jobs');
       expect(TABLE_CLASS.mb_love_revive_jobs).toBe('non-derived');
       stageLoveReviveJob(
@@ -135,7 +135,7 @@ describe('MusicBrainz storage', () => {
     try {
       expect(TABLES).toContain('mb_tracks');
       expect(TABLE_CLASS.mb_tracks).toBe('non-derived');
-      expect(MIGRATIONS.find((m) => m.version === 15)?.statements.join('\n')).toContain(
+      expect(MIGRATIONS.find((m) => m.version === 16)?.statements.join('\n')).toContain(
         'CREATE INDEX mb_tracks_due ON mb_tracks(status,next_attempt_ms,priority)',
       );
       enqueueTrack(db, { artistKey: 'artist', trackKey: 'track' }, 10);

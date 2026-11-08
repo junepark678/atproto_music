@@ -297,8 +297,21 @@ async function playingNow(
         durationSeconds: nowPlayingDuration(info),
         recordingMbid: track.recordingMbid ?? null,
         client: submissionClient(info),
+        trackNumber: track.trackNumber ?? null,
+        releaseMbid: track.releaseMbid ?? null,
+        releaseGroupMbid: track.releaseGroupMbid ?? null,
+        artistMbids: track.artistMbids ?? null,
+        isrc: track.isrc ?? null,
+        submissionClientVersion:
+          typeof info.submission_client_version === 'string' ? info.submission_client_version : null,
+        musicService:
+          typeof info.music_service === 'string'
+            ? info.music_service
+            : typeof info.music_service_name === 'string'
+              ? info.music_service_name
+              : null,
+        mediaPlayer: typeof info.media_player === 'string' ? info.media_player : null,
         source: 'listenbrainz',
-        sameTrack: 'keep',
       });
       if (stored.outcome !== 'stored') return;
       const startedAtMs = stored.row.started_at_ms;

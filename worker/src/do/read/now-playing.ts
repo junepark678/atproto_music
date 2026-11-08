@@ -15,11 +15,10 @@
 //   TTL: a longer duration is used for the expiry and stored as NULL. An entry
 //   is current while `now < expires_at_ms`.
 // - The same track (equal music keys, so spelling variants count) while the
-//   entry is still current is not a new entry: `refresh` (Last.fm, §7.8) keeps
-//   the row and its `started_at_ms` and moves the expiry to `now + ttl` and
-//   `duration_seconds` to the new submission's duration, so the stored
-//   duration is always the basis of the stored expiry; `keep` (ListenBrainz
-//   "an identical current track is ignored") changes nothing.
+//   entry is still current is not a new entry: both protocols keep the row and
+//   its `started_at_ms`, merge each non-null detail, and refresh `updated_at_ms`
+//   and expiry. The expiry uses the effective duration after merging, so an
+//   omitted duration cannot shorten an existing long TTL.
 //   Anything else replaces the row, starting now.
 // - Reads (`currentNowPlaying`) show an entry only when it is current, its
 //   owner is a visible user, and the owner's account shares now playing
@@ -33,11 +32,11 @@
 //   timer, §3.3); reads never depend on that sweep.
 
 import { albumKey, artistKey, trackKey } from '@atmusic/core/music-key';
-import { enqueueTrack } from '../../musicbrainz/store';
 import type { NowPlayingRow, NowPlayingSource } from '../../app/rows';
+import { enqueueTrack } from '../../musicbrainz/store';
 import type { ModuleDeps } from '../contracts';
 import { NOW_PLAYING_SOURCES } from '../schema';
-import { activeUser } from './visibility';
+import { activeUser, visibleFollowEdge } from './visibility';
 
 export const NOW_PLAYING_DEFAULT_TTL_SECONDS = 600;
 /** Last.fm durations outside this range fall back to the default TTL (§7.8). */
@@ -54,10 +53,18 @@ export interface NowPlayingInput {
   albumArtist?: string | null;
   durationSeconds?: number | null;
   recordingMbid?: string | null;
+  trackNumber?: number | null;
+  releaseMbid?: string | null;
+  releaseGroupMbid?: string | null;
+  artistMbids?: readonly string[] | null;
+  isrc?: string | null;
+  submissionClientVersion?: string | null;
+  musicService?: string | null;
+  mediaPlayer?: string | null;
   /** Submitting client (ListenBrainz `submission_client`, Last.fm session client). */
   client?: string | null;
   source: NowPlayingSource;
-  /** What the same current track does: `refresh` (default) or `keep`. */
+  /** Retained for caller compatibility; same-track submissions always refresh. */
   sameTrack?: 'refresh' | 'keep';
 }
 
@@ -89,6 +96,13 @@ export function nowPlayingTtlSeconds(source: NowPlayingSource, durationSeconds: 
   return d >= LASTFM_MIN_DURATION_SECONDS && d <= LASTFM_MAX_DURATION_SECONDS ? d : NOW_PLAYING_DEFAULT_TTL_SECONDS;
 }
 
+function hasValidTtlDuration(source: NowPlayingSource, durationSeconds: number | null | undefined): boolean {
+  const d = wholeSeconds(durationSeconds);
+  return (
+    d !== null && (source === 'listenbrainz' || (d >= LASTFM_MIN_DURATION_SECONDS && d <= LASTFM_MAX_DURATION_SECONDS))
+  );
+}
+
 function sameTrack(row: NowPlayingRow, artist: string, track: string): boolean {
   if (artistKey(row.artist) !== artistKey(artist)) return false;
   return trackKey(row.artist, row.track)[1] === trackKey(artist, track)[1];
@@ -110,20 +124,59 @@ export function upsertNowPlaying(m: Pick<ModuleDeps, 'db' | 'clock'>, input: Now
   return db.tx(() => {
     const existing = db.one<NowPlayingRow>('SELECT * FROM now_playing WHERE did = ?', input.did);
     if (existing !== null && existing.expires_at_ms > now && sameTrack(existing, input.artist, input.track)) {
-      if (input.sameTrack === 'keep') return { outcome: 'unchanged' as const, row: existing };
-      const expires = now + ttlMs;
+      const refreshTtlSeconds = hasValidTtlDuration(input.source, input.durationSeconds)
+        ? nowPlayingTtlSeconds(input.source, input.durationSeconds)
+        : Math.max(1, Math.round((existing.expires_at_ms - (existing.updated_at_ms ?? existing.started_at_ms)) / 1000));
+      const expires = now + refreshTtlSeconds * 1000;
+      if (!Number.isSafeInteger(expires)) throw new RangeError('now-playing duration overflows the expiry');
+      const merge = <T>(incoming: T | null | undefined, previous: T | null): T | null => incoming ?? previous;
+      const fields = {
+        album: merge(input.album, existing.album),
+        album_artist: merge(input.albumArtist, existing.album_artist),
+        duration_seconds: merge(durationSeconds, existing.duration_seconds),
+        recording_mbid: merge(input.recordingMbid, existing.recording_mbid),
+        client: merge(input.client, existing.client),
+        track_number: merge(input.trackNumber, existing.track_number),
+        release_mbid: merge(input.releaseMbid, existing.release_mbid),
+        release_group_mbid: merge(input.releaseGroupMbid, existing.release_group_mbid),
+        artist_mbids: merge(input.artistMbids ? JSON.stringify(input.artistMbids) : undefined, existing.artist_mbids),
+        isrc: merge(input.isrc, existing.isrc),
+        submission_client_version: merge(input.submissionClientVersion, existing.submission_client_version),
+        music_service: merge(input.musicService, existing.music_service),
+        media_player: merge(input.mediaPlayer, existing.media_player),
+      };
       const musicTrackKey = trackKey(input.artist, input.track);
-      const musicAlbumKey = albumKey(input.artist, input.album ?? existing.album);
-      enqueueTrack(db, { artistKey: artistKey(input.artist), trackKey: musicTrackKey[1], albumKey: musicAlbumKey?.[1] ?? '' }, now, 10, input.recordingMbid);
+      const musicAlbumKey = albumKey(input.artist, fields.album);
+      enqueueTrack(
+        db,
+        { artistKey: artistKey(input.artist), trackKey: musicTrackKey[1], albumKey: musicAlbumKey?.[1] ?? '' },
+        now,
+        10,
+        fields.recording_mbid,
+      );
       db.run(
-        'UPDATE now_playing SET duration_seconds = ?, expires_at_ms = ? WHERE did = ?',
-        durationSeconds,
+        `UPDATE now_playing SET album=?, album_artist=?, duration_seconds=?, recording_mbid=?, client=?, track_number=?, release_mbid=?,
+         release_group_mbid=?, artist_mbids=?, isrc=?, submission_client_version=?, music_service=?, media_player=?, updated_at_ms=?, expires_at_ms=? WHERE did=?`,
+        fields.album,
+        fields.album_artist,
+        fields.duration_seconds,
+        fields.recording_mbid,
+        fields.client,
+        fields.track_number,
+        fields.release_mbid,
+        fields.release_group_mbid,
+        fields.artist_mbids,
+        fields.isrc,
+        fields.submission_client_version,
+        fields.music_service,
+        fields.media_player,
+        now,
         expires,
         input.did,
       );
       return {
         outcome: 'refreshed' as const,
-        row: { ...existing, duration_seconds: durationSeconds, expires_at_ms: expires },
+        row: { ...existing, ...fields, updated_at_ms: now, expires_at_ms: expires },
       };
     }
     const row: NowPlayingRow = {
@@ -138,15 +191,29 @@ export function upsertNowPlaying(m: Pick<ModuleDeps, 'db' | 'clock'>, input: Now
       source: input.source,
       started_at_ms: now,
       expires_at_ms: now + ttlMs,
+      updated_at_ms: now,
+      track_number: input.trackNumber ?? null,
+      release_mbid: input.releaseMbid ?? null,
+      release_group_mbid: input.releaseGroupMbid ?? null,
+      artist_mbids: input.artistMbids ? JSON.stringify(input.artistMbids) : null,
+      isrc: input.isrc ?? null,
+      submission_client_version: input.submissionClientVersion ?? null,
+      music_service: input.musicService ?? null,
+      media_player: input.mediaPlayer ?? null,
+      scrobbled_at_ms: null,
     };
     db.run(
       `INSERT INTO now_playing(did, artist, track, album, album_artist, duration_seconds, recording_mbid, client,
-         source, started_at_ms, expires_at_ms)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         source, started_at_ms, expires_at_ms, updated_at_ms, track_number, release_mbid, release_group_mbid, artist_mbids, isrc,
+         submission_client_version, music_service, media_player, scrobbled_at_ms)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(did) DO UPDATE SET artist = excluded.artist, track = excluded.track, album = excluded.album,
          album_artist = excluded.album_artist, duration_seconds = excluded.duration_seconds,
          recording_mbid = excluded.recording_mbid, client = excluded.client, source = excluded.source,
-         started_at_ms = excluded.started_at_ms, expires_at_ms = excluded.expires_at_ms`,
+         started_at_ms = excluded.started_at_ms, expires_at_ms = excluded.expires_at_ms, updated_at_ms=excluded.updated_at_ms,
+         track_number=excluded.track_number, release_mbid=excluded.release_mbid, release_group_mbid=excluded.release_group_mbid,
+         artist_mbids=excluded.artist_mbids, isrc=excluded.isrc, submission_client_version=excluded.submission_client_version,
+         music_service=excluded.music_service, media_player=excluded.media_player, scrobbled_at_ms=NULL`,
       row.did,
       row.artist,
       row.track,
@@ -158,14 +225,30 @@ export function upsertNowPlaying(m: Pick<ModuleDeps, 'db' | 'clock'>, input: Now
       row.source,
       row.started_at_ms,
       row.expires_at_ms,
+      row.updated_at_ms,
+      row.track_number,
+      row.release_mbid,
+      row.release_group_mbid,
+      row.artist_mbids,
+      row.isrc,
+      row.submission_client_version,
+      row.music_service,
+      row.media_player,
+      row.scrobbled_at_ms,
     );
     const musicTrackKey = trackKey(row.artist, row.track);
     const musicAlbumKey = albumKey(row.artist, row.album);
-    enqueueTrack(db, {
-      artistKey: artistKey(row.artist),
-      trackKey: musicTrackKey[1],
-      albumKey: musicAlbumKey?.[1] ?? '',
-    }, now, 10, row.recording_mbid);
+    enqueueTrack(
+      db,
+      {
+        artistKey: artistKey(row.artist),
+        trackKey: musicTrackKey[1],
+        albumKey: musicAlbumKey?.[1] ?? '',
+      },
+      now,
+      10,
+      row.recording_mbid,
+    );
     return { outcome: 'stored' as const, row };
   });
 }
@@ -185,6 +268,23 @@ export function currentNowPlaying(m: Pick<ModuleDeps, 'db' | 'clock'>, did: stri
 /** The owner's own current entry, regardless of the share flag. */
 export function ownNowPlaying(m: Pick<ModuleDeps, 'db' | 'clock'>, did: string): NowPlayingRow | null {
   return m.db.one<NowPlayingRow>('SELECT * FROM now_playing WHERE did = ? AND expires_at_ms > ?', did, m.clock.nowMs());
+}
+
+/** Current shared rows for accounts the viewer follows, newest refresh first, capped at 50. */
+export function followedNowPlaying(
+  m: Pick<ModuleDeps, 'db' | 'clock'>,
+  did: string,
+): Array<{ did: string; row: NowPlayingRow }> {
+  const rows = m.db.all<NowPlayingRow & { followed_did: string }>(
+    `SELECT n.*, n.did AS followed_did FROM follows f JOIN now_playing n ON n.did=f.subject
+     JOIN accounts a ON a.did=n.did AND a.share_now_playing=1 JOIN users u ON u.did=n.did AND ${activeUser('u')}
+     WHERE f.actor=? AND n.expires_at_ms>? AND ${visibleFollowEdge('f')}
+       AND f.uri=(SELECT min(g.uri) FROM follows g WHERE g.actor=f.actor AND g.subject=f.subject)
+     ORDER BY coalesce(n.updated_at_ms,n.started_at_ms) DESC, n.did ASC LIMIT 50`,
+    did,
+    m.clock.nowMs(),
+  );
+  return rows.map(({ followed_did, ...row }) => ({ did: followed_did, row }));
 }
 
 export type ClearNowPlayingOutcome = 'already_cleared' | 'client_mismatch' | 'cleared';

@@ -229,9 +229,17 @@ export async function listenOf(row: ScrobbleRowV2, userName: string, db: ModuleD
 function nowPlayingMetadata(row: NowPlayingRow): LbTrackMetadata {
   const info: Record<string, unknown> = {};
   if (row.album_artist !== null) info.release_artist_name = row.album_artist;
+  if (row.track_number !== null) info.tracknumber = row.track_number;
+  if (row.artist_mbids !== null) info.artist_mbids = JSON.parse(row.artist_mbids) as string[];
   if (row.recording_mbid !== null) info.recording_mbid = row.recording_mbid;
+  if (row.release_mbid !== null) info.release_mbid = row.release_mbid;
+  if (row.release_group_mbid !== null) info.release_group_mbid = row.release_group_mbid;
+  if (row.isrc !== null) info.isrc = row.isrc;
   if (row.duration_seconds !== null) info.duration_ms = row.duration_seconds * 1000;
   if (row.client !== null) info.submission_client = row.client;
+  if (row.submission_client_version !== null) info.submission_client_version = row.submission_client_version;
+  if (row.music_service !== null) info.music_service = row.music_service;
+  if (row.media_player !== null) info.media_player = row.media_player;
   return {
     artist_name: row.artist,
     track_name: row.track,

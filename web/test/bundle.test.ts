@@ -13,7 +13,7 @@ const repoRoot = resolve(webRoot, '..');
 
 beforeAll(() => {
   execFileSync('npm', ['run', 'build', '--workspace', '@atmusic/web'], { cwd: repoRoot, stdio: 'pipe' });
-});
+}, 60_000);
 
 function files(dir: string): string[] {
   return (readdirSync(dir, { withFileTypes: true }) as Array<{ name: string; isDirectory(): boolean }>).flatMap(
