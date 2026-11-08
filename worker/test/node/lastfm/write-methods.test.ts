@@ -325,6 +325,9 @@ describe('Last.fm write methods', () => {
       artist: 'Test Artist',
       track: 'Test Track',
       album: 'Test Album',
+      albumArtist: 'Test Album Artist',
+      trackNumber: '7',
+      mbid: '00000000-0000-4000-8000-000000000007',
       duration: '200',
     };
     const res = await post(app, params);
@@ -334,7 +337,7 @@ describe('Last.fm write methods', () => {
         track: { corrected: '0', '#text': 'Test Track' },
         artist: { corrected: '0', '#text': 'Test Artist' },
         album: { corrected: '0', '#text': 'Test Album' },
-        albumArtist: { corrected: '0', '#text': '' },
+        albumArtist: { corrected: '0', '#text': 'Test Album Artist' },
         ignoredMessage: { code: '0', '#text': '' },
       },
     });
@@ -343,11 +346,25 @@ describe('Last.fm write methods', () => {
       artist: 'Test Artist',
       track: 'Test Track',
       album: 'Test Album',
+      album_artist: 'Test Album Artist',
+      track_number: 7,
+      recording_mbid: '00000000-0000-4000-8000-000000000007',
       duration_seconds: 200,
       client: 'Pano Scrobbler',
       source: 'lastfm',
       started_at_ms: NOW_MS,
       expires_at_ms: NOW_MS + 200_000,
+    });
+    const roundTrip = await app.fetch(`/api/v1/users/${ALICE}/now-playing`);
+    expect(roundTrip.status).toBe(200);
+    expect(await roundTrip.json()).toMatchObject({
+      nowPlaying: {
+        artist: 'Test Artist',
+        track: 'Test Track',
+        albumArtist: 'Test Album Artist',
+        trackNumber: 7,
+        recordingMbid: '00000000-0000-4000-8000-000000000007',
+      },
     });
     // One nowplaying forward row, only for the link that forwards now playing.
     const forwards = app.db.all<{ link_id: string; kind: string; payload_json: string }>(
@@ -370,7 +387,7 @@ describe('Last.fm write methods', () => {
         '    <track corrected="0">Test Track</track>',
         '    <artist corrected="0">Test Artist</artist>',
         '    <album corrected="0">Test Album</album>',
-        '    <albumArtist corrected="0"/>',
+        '    <albumArtist corrected="0">Test Album Artist</albumArtist>',
         '    <ignoredMessage code="0"/>',
         '  </nowplaying>',
         '</lfm>',

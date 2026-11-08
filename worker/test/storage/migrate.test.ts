@@ -694,7 +694,7 @@ describe('migrate', () => {
   // database at that version is ready for that code, across restarts.
   // Migration 3 is additive and keeps the v2 compatibility floor.
   it('SCHEMA_VERSION includes additive batch provenance and remains compatible with v2 code', async () => {
-    expect(SCHEMA_VERSION).toBe(14);
+    expect(SCHEMA_VERSION).toBe(15);
     expect(MIGRATIONS.map((m) => [m.version, m.name])).toEqual([
       [1, 'initial_workers_schema'],
       [2, 'node_schema'],
@@ -710,6 +710,7 @@ describe('migrate', () => {
       [12, 'removal_completion_boundary'],
       [13, 'removal_reached'],
       [14, 'removal_send_pin'],
+      [15, 'detailed_now_playing'],
     ]);
 
     const name = 'migrate-v2-ready';
@@ -736,6 +737,7 @@ describe('migrate', () => {
         { version: 12, name: 'removal_completion_boundary' },
         { version: 13, name: 'removal_reached' },
         { version: 14, name: 'removal_send_pin' },
+        { version: 15, name: 'detailed_now_playing' },
       ]);
       expect(db.all('SELECT min_compatible_version FROM schema_compat')).toEqual([{ min_compatible_version: 2 }]);
       // A row in a migration-2 table survives reopening.

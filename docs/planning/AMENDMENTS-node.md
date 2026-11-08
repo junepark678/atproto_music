@@ -7,7 +7,7 @@ The format follows [AMENDMENTS-workers.md](AMENDMENTS-workers.md), which stays i
 - it rejects every case-map retirement that cites an id listed under [Superseded ADR 0004 amendments](#superseded-adr-0004-amendments), reporting the case and the superseding B id;
 - it accepts `retired:B<n>` only when the `### B<n>` section below names the case (as `` `<leaf>/<case>` ``).
 
-Amendment ids: B1–B20 are ADR 0005 §16. A1–A20, N1–N4 and D keep their ADR 0004 meaning in AMENDMENTS-workers.md.
+Amendment ids: B1–B22 are ADR 0005 §16. A1–A20, N1–N4 and D keep their ADR 0004 meaning in AMENDMENTS-workers.md.
 
 ## Superseded ADR 0004 amendments
 
@@ -169,6 +169,12 @@ Retired cases (true on Node):
 **Demonstrated gap:** every signed-in account holds credentials, upload quota and a share of the owner's home machine and Last.fm key; open registration would let anyone use them.
 
 **Amendment text:** Sign-in is restricted to `ATMUSIC_SIGNIN_DIDS` unless `ATMUSIC_SIGNIN_POLICY=open`, and the policy is reconciled at startup and on every 10-minute expiry sweep: a removed DID loses its OAuth session, web sessions and protocol credentials, its links are revoked and its operations blocked. OAuth sessions are kept alive only while the DID is in use (a live web session, a protocol credential used within 90 days, an active link, pending operations or an unfinished import). Users can disconnect with `DELETE /api/v1/account/connection`. The OAuth callback is protected against login CSRF by the `__Host-atmusic_oauth` cookie bound to the state.
+
+### B22 Detailed now-playing reads (new, DRAFT — not published)
+
+**Demonstrated gap:** the fixed API contract has no way to read detailed current playback or the followed accounts' current playback, although the Node service persists these fields and enforces the owner sharing preference.
+
+**Amendment text (DRAFT):** Add `NowPlaying` and `NowPlayingFeed` as additive DTOs. `GET /api/v1/users/{did}/now-playing` returns `{nowPlaying,serverTime}` with ISO timestamps and `Cache-Control: no-store`; visitors see only an active, unexpired row when sharing is enabled, while the owner may read their own unexpired row with `shared:false` when sharing is disabled. `GET /api/v1/feed/now-playing` requires a valid session and returns at most 50 followed active accounts with verified handles and only shared, unexpired rows, ordered by latest refresh and DID. No DID is intended as UI display text. The OpenAPI 1.2 document adds these routes and closed schemas without changing existing payloads. This amendment remains a draft and is not published.
 
 ## Leaf amendments
 

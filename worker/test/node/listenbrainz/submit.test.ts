@@ -360,7 +360,7 @@ describe('POST /1/submit-listens (ADR §8.3)', () => {
     expect(r.app.db.one<NowPlayingRow>('SELECT * FROM now_playing WHERE did = ?', ALICE)).toMatchObject({
       started_at_ms: row?.started_at_ms,
       updated_at_ms: NOW_MS,
-      expires_at_ms: NOW_MS + 600_000,
+      expires_at_ms: NOW_MS + 292_000,
     });
     expect(r.count("SELECT count(*) AS n FROM forward_outbox WHERE did = ? AND kind = 'nowplaying'", ALICE)).toBe(1);
     expect(r.count('SELECT count(*) AS n FROM operations')).toBe(0);
