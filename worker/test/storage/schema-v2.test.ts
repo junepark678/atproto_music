@@ -476,6 +476,10 @@ const NEW_TABLES: Record<string, ExpectedTable> = {
     pk: ['id'],
     unique: [['did', 'service']],
   },
+  link_backfill_items: {
+    columns: ['link_id', 'generation', 'run_revision', 'ordinal', 'identity_key', 'uri', 'cid', 'kind', 'event_at'],
+    pk: ['link_id', 'generation', 'run_revision', 'identity_key'],
+  },
   link_states: {
     columns: cols<LinkStateRow>({
       state_hash: true,
@@ -710,6 +714,17 @@ const NEW_INDEXES: Record<string, [string, number, number, Array<[string, number
       ['id', 0],
     ],
   ],
+  link_backfill_items_pending: [
+    'link_backfill_items',
+    0,
+    0,
+    [
+      ['link_id', 0],
+      ['generation', 0],
+      ['run_revision', 0],
+      ['ordinal', 0],
+    ],
+  ],
   love_delete_bridges_pending: [
     'love_delete_bridges',
     0,
@@ -913,6 +928,7 @@ const NEW_INDEXES: Record<string, [string, number, number, Array<[string, number
 const NEW_FOREIGN_KEYS = [
   ['mb_forward_love_current', 'link_id', 'linked_accounts', 'id', 'CASCADE'],
   ['loves', 'did', 'users', 'did', 'CASCADE'],
+  ['link_backfill_items', 'link_id', 'linked_accounts', 'id', 'CASCADE'],
   ['forward_outbox', 'link_id', 'linked_accounts', 'id', 'CASCADE'],
 ];
 
@@ -1514,6 +1530,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       "26|'forward_backfill_retry_state'",
       "27|'linked_account_backfill_run_revision'",
       "28|'bounded_link_backfill_progress_and_fairness'",
+      "29|'link_backfill_staged_membership'",
     ]);
     // The new scrobble columns exist and are NULL on every migrated row.
     expect(after.newColumns).toHaveLength(expectedScrobbles);
@@ -1549,6 +1566,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       { version: 26, name: 'forward_backfill_retry_state' },
       { version: 27, name: 'linked_account_backfill_run_revision' },
       { version: 28, name: 'bounded_link_backfill_progress_and_fairness' },
+      { version: 29, name: 'link_backfill_staged_membership' },
     ]);
     expect(after.compat).toEqual([{ singleton: 1, min_compatible_version: 2 }]);
     expect(after.newTablesEmpty).toEqual(['mb_cover_art_usage']);

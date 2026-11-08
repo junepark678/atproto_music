@@ -262,6 +262,19 @@ const SEED_ROWS: Record<string, Record<string, SqlParam>[]> = {
       updated_at_ms: NOW,
     },
   ],
+  link_backfill_items: [
+    {
+      link_id: 'l1',
+      generation: 1,
+      run_revision: 1,
+      ordinal: 1,
+      identity_key: 'listen:fixture-backfill',
+      uri: `at://${ALICE}/com.example.atmusic.scrobble/backfill-fixture`,
+      cid: 'bafybackfill',
+      kind: 'scrobble',
+      event_at: T0,
+    },
+  ],
   forward_admissions: [
     {
       did: ALICE,
@@ -567,7 +580,7 @@ describe('worker/test/harness', () => {
   it('the migration ledger is ordered across the N/M, M4, S1 and S2 stack', async () => {
     const versions = MIGRATIONS.map((m) => m.version);
     expect(versions.slice(0, 14)).toEqual(Array.from({ length: 14 }, (_, i) => i + 1));
-    expect(versions.slice(-5)).toEqual([24, 25, 26, 27, 28]);
+    expect(versions.slice(-6)).toEqual([24, 25, 26, 27, 28, 29]);
     expect(versions.every((version, index) => index === 0 || version > (versions[index - 1] ?? 0))).toBe(true);
     expect(SCHEMA_VERSION).toBe(MIGRATIONS[MIGRATIONS.length - 1]?.version);
     expect(MIGRATIONS.length).toBeGreaterThanOrEqual(2);
