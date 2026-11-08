@@ -42,8 +42,8 @@
 import type { HistoryQuery, KeysetQuery, ModuleDeps, RowsResult, ScrobbleRow, TimeKey } from '../contracts';
 import type { SqlParam } from '../db';
 import { indexing } from '../status';
-import { visibleScrobblesFrom } from './visibility';
 import { MUSICBRAINZ_SCROBBLE_COLUMNS, MUSICBRAINZ_SCROBBLE_JOIN } from './musicbrainz-join';
+import { visibleScrobblesFrom } from './visibility';
 
 /** API.md list limit maximum; the HTTP layer rejects anything else with 422 (no clamping). */
 export const MAX_PAGE_LIMIT = 100;

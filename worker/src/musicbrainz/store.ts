@@ -53,20 +53,42 @@ export function enqueueTrack(
 }
 
 /** Seed at most one deterministic URI window; cursor and insertions commit together. */
-export function seedHistoricalTracks(db: Db, nowMs: number, limit = MUSICBRAINZ_SEED_CHUNK): { insertedCandidates: number; complete: boolean } {
-  if (!Number.isSafeInteger(limit) || limit < 1 || limit > MUSICBRAINZ_SEED_CHUNK) throw new RangeError('invalid MusicBrainz seed chunk size');
+export function seedHistoricalTracks(
+  db: Db,
+  nowMs: number,
+  limit = MUSICBRAINZ_SEED_CHUNK,
+): { insertedCandidates: number; complete: boolean } {
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > MUSICBRAINZ_SEED_CHUNK)
+    throw new RangeError('invalid MusicBrainz seed chunk size');
   return db.tx(() => {
-    db.run('INSERT OR IGNORE INTO mb_seed_state(singleton,cursor_uri,complete) VALUES(1,\'\',0)');
-    const state = db.one<{ cursor_uri: string; complete: number }>('SELECT cursor_uri,complete FROM mb_seed_state WHERE singleton=1');
+    db.run("INSERT OR IGNORE INTO mb_seed_state(singleton,cursor_uri,complete) VALUES(1,'',0)");
+    const state = db.one<{ cursor_uri: string; complete: number }>(
+      'SELECT cursor_uri,complete FROM mb_seed_state WHERE singleton=1',
+    );
     if (!state || state.complete === 1) return { insertedCandidates: 0, complete: true };
-    const rows = db.all<{ uri: string; artist_key: string; track_key: string; album_key: string | null; recording_mbid: string | null }>(
-      'SELECT uri,artist_key,track_key,album_key,recording_mbid FROM scrobbles WHERE uri>? ORDER BY uri LIMIT ?', state.cursor_uri, limit,
+    const rows = db.all<{
+      uri: string;
+      artist_key: string;
+      track_key: string;
+      album_key: string | null;
+      recording_mbid: string | null;
+    }>(
+      'SELECT uri,artist_key,track_key,album_key,recording_mbid FROM scrobbles WHERE uri>? ORDER BY uri LIMIT ?',
+      state.cursor_uri,
+      limit,
     );
     if (rows.length === 0) {
       db.run('UPDATE mb_seed_state SET complete=1 WHERE singleton=1');
       return { insertedCandidates: 0, complete: true };
     }
-    for (const row of rows) enqueueTrack(db, { artistKey: row.artist_key, trackKey: row.track_key, albumKey: row.album_key }, nowMs, 0, row.recording_mbid);
+    for (const row of rows)
+      enqueueTrack(
+        db,
+        { artistKey: row.artist_key, trackKey: row.track_key, albumKey: row.album_key },
+        nowMs,
+        0,
+        row.recording_mbid,
+      );
     const cursor = rows[rows.length - 1]?.uri;
     if (cursor !== undefined) db.run('UPDATE mb_seed_state SET cursor_uri=? WHERE singleton=1', cursor);
     return { insertedCandidates: rows.length, complete: false };
@@ -83,16 +105,16 @@ export function matchedRecordingMbid(db: Db, key: TrackKey): string | null {
   return row?.status === 'matched' && row.recording_mbid && isUUID(row.recording_mbid) ? row.recording_mbid : null;
 }
 
-export function recordingByMbid(
-  db: Db,
-  mbid: string,
-): { title: string; artistCredit: string } | null {
+export function recordingByMbid(db: Db, mbid: string): { title: string; artistCredit: string } | null {
   if (!isUUID(mbid)) return null;
   const row = db.one<{ title: string | null; artist_credit: string | null }>(
     `SELECT title,artist_credit FROM mb_tracks WHERE status='matched' AND recording_mbid=? LIMIT 1`,
     mbid,
   );
-  return row?.title !== null && row?.title !== undefined && row.artist_credit !== null && row.artist_credit !== undefined
+  return row?.title !== null &&
+    row?.title !== undefined &&
+    row.artist_credit !== null &&
+    row.artist_credit !== undefined
     ? { title: row.title, artistCredit: row.artist_credit }
     : null;
 }

@@ -33,8 +33,8 @@
 //   timer, §3.3); reads never depend on that sweep.
 
 import { albumKey, artistKey, trackKey } from '@atmusic/core/music-key';
-import { enqueueTrack } from '../../musicbrainz/store';
 import type { NowPlayingRow, NowPlayingSource } from '../../app/rows';
+import { enqueueTrack } from '../../musicbrainz/store';
 import type { ModuleDeps } from '../contracts';
 import { NOW_PLAYING_SOURCES } from '../schema';
 import { activeUser } from './visibility';
@@ -114,7 +114,13 @@ export function upsertNowPlaying(m: Pick<ModuleDeps, 'db' | 'clock'>, input: Now
       const expires = now + ttlMs;
       const musicTrackKey = trackKey(input.artist, input.track);
       const musicAlbumKey = albumKey(input.artist, input.album ?? existing.album);
-      enqueueTrack(db, { artistKey: artistKey(input.artist), trackKey: musicTrackKey[1], albumKey: musicAlbumKey?.[1] ?? '' }, now, 10, input.recordingMbid);
+      enqueueTrack(
+        db,
+        { artistKey: artistKey(input.artist), trackKey: musicTrackKey[1], albumKey: musicAlbumKey?.[1] ?? '' },
+        now,
+        10,
+        input.recordingMbid,
+      );
       db.run(
         'UPDATE now_playing SET duration_seconds = ?, expires_at_ms = ? WHERE did = ?',
         durationSeconds,
@@ -161,11 +167,17 @@ export function upsertNowPlaying(m: Pick<ModuleDeps, 'db' | 'clock'>, input: Now
     );
     const musicTrackKey = trackKey(row.artist, row.track);
     const musicAlbumKey = albumKey(row.artist, row.album);
-    enqueueTrack(db, {
-      artistKey: artistKey(row.artist),
-      trackKey: musicTrackKey[1],
-      albumKey: musicAlbumKey?.[1] ?? '',
-    }, now, 10, row.recording_mbid);
+    enqueueTrack(
+      db,
+      {
+        artistKey: artistKey(row.artist),
+        trackKey: musicTrackKey[1],
+        albumKey: musicAlbumKey?.[1] ?? '',
+      },
+      now,
+      10,
+      row.recording_mbid,
+    );
     return { outcome: 'stored' as const, row };
   });
 }

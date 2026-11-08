@@ -63,7 +63,10 @@ describe('now playing', () => {
       });
       expect(stored.outcome).toBe('stored');
       expect(db.one('SELECT artist_key,track_key,album_key,priority FROM mb_tracks')).toEqual({
-        artist_key: 'radiohead', track_key: 'reckoner', album_key: 'in rainbows', priority: 10,
+        artist_key: 'radiohead',
+        track_key: 'reckoner',
+        album_key: 'in rainbows',
+        priority: 10,
       });
       expect(rowOf(db, ALICE)).toEqual({
         did: ALICE,
@@ -92,7 +95,8 @@ describe('now playing', () => {
       });
       expect(refreshed.outcome).toBe('refreshed');
       expect(db.one("SELECT priority,submitted_recording_mbid FROM mb_tracks WHERE track_key='reckoner'")).toEqual({
-        priority: 10, submitted_recording_mbid: '3f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2d10',
+        priority: 10,
+        submitted_recording_mbid: '3f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2d10',
       });
       expect(rowOf(db, ALICE)).toMatchObject({
         artist: 'Radiohead',

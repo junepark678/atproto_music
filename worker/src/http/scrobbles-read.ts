@@ -108,7 +108,14 @@ export function scrobbleDto(row: ScrobbleDtoRow, handles?: Record<string, string
 }
 
 function musicBrainzOf(row: ScrobbleRow): MusicBrainzMatch | null {
-  if (!row.mb_recording_mbid || !row.mb_title || !row.mb_artist_credit || !row.mb_matched_by || row.mb_synced_at_ms == null) return null;
+  if (
+    !row.mb_recording_mbid ||
+    !row.mb_title ||
+    !row.mb_artist_credit ||
+    !row.mb_matched_by ||
+    row.mb_synced_at_ms == null
+  )
+    return null;
   let artistMbids: string[];
   try {
     const parsed: unknown = JSON.parse(row.mb_artist_mbids ?? '[]');
@@ -118,13 +125,16 @@ function musicBrainzOf(row: ScrobbleRow): MusicBrainzMatch | null {
     return null;
   }
   return {
-    recordingMbid: row.mb_recording_mbid, title: row.mb_title, artistCredit: row.mb_artist_credit,
+    recordingMbid: row.mb_recording_mbid,
+    title: row.mb_title,
+    artistCredit: row.mb_artist_credit,
     artistMbids,
     ...(row.mb_release_mbid == null ? {} : { releaseMbid: row.mb_release_mbid }),
     ...(row.mb_release_title == null ? {} : { releaseTitle: row.mb_release_title }),
     ...(row.mb_release_group_mbid == null ? {} : { releaseGroupMbid: row.mb_release_group_mbid }),
     ...(row.mb_duration_ms == null ? {} : { durationSeconds: Math.round(row.mb_duration_ms / 1000) }),
-    matchedBy: row.mb_matched_by as 'mbid' | 'search', syncedAt: toDto(fromMs(row.mb_synced_at_ms)),
+    matchedBy: row.mb_matched_by as 'mbid' | 'search',
+    syncedAt: toDto(fromMs(row.mb_synced_at_ms)),
   };
 }
 

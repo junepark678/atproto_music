@@ -312,6 +312,22 @@ const scrobble: Decoder<Scrobble> = object(
     handle: nullable(handle),
     recordUri: atUri,
     listenId,
+    musicbrainz: object(
+      {
+        recordingMbid: uuid,
+        title: musicText,
+        artistCredit: musicText,
+        artistMbids: array(uuid),
+        matchedBy: oneOf(['mbid', 'search'] as const),
+        syncedAt: timestamp,
+      },
+      {
+        releaseMbid: uuid,
+        releaseTitle: musicText,
+        releaseGroupMbid: uuid,
+        durationSeconds: nonNegativeNumber,
+      },
+    ),
   },
 );
 
@@ -338,9 +354,15 @@ const profile: Decoder<Profile> = object({
   indexing,
 });
 
-const topArtist: Decoder<TopArtist> = object({ artist: musicText, scrobbleCount: count });
-const topTrack: Decoder<TopTrack> = object({ artist: musicText, track: musicText, scrobbleCount: count });
-const topAlbum: Decoder<TopAlbum> = object({ artist: musicText, album: musicText, scrobbleCount: count });
+const topArtist: Decoder<TopArtist> = object({ artist: musicText, scrobbleCount: count }, { artistMbid: uuid });
+const topTrack: Decoder<TopTrack> = object(
+  { artist: musicText, track: musicText, scrobbleCount: count },
+  { recordingMbid: uuid },
+);
+const topAlbum: Decoder<TopAlbum> = object(
+  { artist: musicText, album: musicText, scrobbleCount: count },
+  { releaseMbid: uuid, releaseGroupMbid: uuid },
+);
 
 const statistics: Decoder<Statistics> = object({
   did,

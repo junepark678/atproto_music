@@ -29,8 +29,8 @@ import { NS_PER_SECOND, toStorage } from '@atmusic/core/timestamp';
 import type { ScrobbleRowV2 } from '../../app/rows';
 import type { ModuleDeps } from '../contracts';
 import type { Db, SqlParam } from '../db';
-import { activeUser, visibleScrobblesFrom } from './visibility';
 import { MUSICBRAINZ_SCROBBLE_COLUMNS, MUSICBRAINZ_SCROBBLE_JOIN } from './musicbrainz-join';
+import { activeUser, visibleScrobblesFrom } from './visibility';
 
 /** 9999-12-31T23:59:59Z, the last second the storage form can hold. */
 export const MAX_UNIX_SECONDS = 253_402_300_799;

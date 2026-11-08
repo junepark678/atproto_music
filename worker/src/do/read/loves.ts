@@ -10,10 +10,10 @@
 //   matches every spelling variant of a track (loves_owner_track). A name that
 //   has no music key is loved by nobody.
 
-import { MusicKeyError, trackKey } from '@atmusic/core/music-key';
-import type { LoveRow } from '../../app/rows';
 import type { MusicBrainzMatch } from '@atmusic/core/api-types';
+import { MusicKeyError, trackKey } from '@atmusic/core/music-key';
 import { fromMs, toDto } from '@atmusic/core/timestamp';
+import type { LoveRow } from '../../app/rows';
 import type { ModuleDeps } from '../contracts';
 import { isVisibleUser, type OffsetPage, offsetOf } from './recent';
 import { activeUser } from './visibility';
@@ -30,9 +30,15 @@ export type EnrichedLoveRow = LoveRow & { musicbrainz?: MusicBrainzMatch };
 export type LovedTracksPage = OffsetPage<EnrichedLoveRow>;
 
 type LoveMatchRow = LoveRow & {
-  mb_recording_mbid?: string | null; mb_title?: string | null; mb_artist_credit?: string | null;
-  mb_artist_mbids?: string | null; mb_release_mbid?: string | null; mb_release_title?: string | null;
-  mb_release_group_mbid?: string | null; mb_duration_ms?: number | null; mb_matched_by?: string | null;
+  mb_recording_mbid?: string | null;
+  mb_title?: string | null;
+  mb_artist_credit?: string | null;
+  mb_artist_mbids?: string | null;
+  mb_release_mbid?: string | null;
+  mb_release_title?: string | null;
+  mb_release_group_mbid?: string | null;
+  mb_duration_ms?: number | null;
+  mb_matched_by?: string | null;
   mb_synced_at_ms?: number | null;
 };
 
@@ -62,24 +68,46 @@ export function lovedTracks(m: Pick<ModuleDeps, 'db'>, q: LovedTracksQuery): Lov
           q.limit,
           offset,
         );
-  return { rows: rows.map(withMusicBrainz), total, totalPages: Math.ceil(total / q.limit), page, perPage: q.limit, offset };
+  return {
+    rows: rows.map(withMusicBrainz),
+    total,
+    totalPages: Math.ceil(total / q.limit),
+    page,
+    perPage: q.limit,
+    offset,
+  };
 }
 
 function withMusicBrainz(row: LoveMatchRow): EnrichedLoveRow {
-  const { mb_recording_mbid: _recording, mb_title: _title, mb_artist_credit: _credit, mb_artist_mbids: _artistMbids,
-    mb_release_mbid: _release, mb_release_title: _releaseTitle, mb_release_group_mbid: _group,
-    mb_duration_ms: _duration, mb_matched_by: _matchedBy, mb_synced_at_ms: syncedAt, ...love } = row;
-  if (!row.mb_recording_mbid || !row.mb_title || !row.mb_artist_credit || !row.mb_matched_by || syncedAt == null) return love;
+  const {
+    mb_recording_mbid: _recording,
+    mb_title: _title,
+    mb_artist_credit: _credit,
+    mb_artist_mbids: _artistMbids,
+    mb_release_mbid: _release,
+    mb_release_title: _releaseTitle,
+    mb_release_group_mbid: _group,
+    mb_duration_ms: _duration,
+    mb_matched_by: _matchedBy,
+    mb_synced_at_ms: syncedAt,
+    ...love
+  } = row;
+  if (!row.mb_recording_mbid || !row.mb_title || !row.mb_artist_credit || !row.mb_matched_by || syncedAt == null)
+    return love;
   let artistMbids: string[];
   try {
     const parsed: unknown = JSON.parse(row.mb_artist_mbids ?? '[]');
     if (!Array.isArray(parsed) || !parsed.every((id) => typeof id === 'string')) return love;
     artistMbids = parsed;
-  } catch { return love; }
+  } catch {
+    return love;
+  }
   return {
     ...love,
     musicbrainz: {
-      recordingMbid: row.mb_recording_mbid, title: row.mb_title, artistCredit: row.mb_artist_credit,
+      recordingMbid: row.mb_recording_mbid,
+      title: row.mb_title,
+      artistCredit: row.mb_artist_credit,
       artistMbids,
       ...(row.mb_release_mbid == null ? {} : { releaseMbid: row.mb_release_mbid }),
       ...(row.mb_release_title == null ? {} : { releaseTitle: row.mb_release_title }),

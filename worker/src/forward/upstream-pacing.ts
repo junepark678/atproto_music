@@ -143,12 +143,16 @@ export class UpstreamPacing {
     this.lbNextMs.delete(key);
   }
 
-  musicbrainzAvailableAt(now: number): number { return Math.max(now, this.mbNextMs); }
+  musicbrainzAvailableAt(now: number): number {
+    return Math.max(now, this.mbNextMs);
+  }
   tryMusicbrainz(now: number): boolean {
     const at = this.instant(now);
     if (at < this.mbNextMs) return false;
     this.mbNextMs = at + MUSICBRAINZ_MIN_INTERVAL_MS;
     return true;
   }
-  deferMusicbrainz(untilMs: number): void { if (untilMs > this.mbNextMs) this.mbNextMs = untilMs; }
+  deferMusicbrainz(untilMs: number): void {
+    if (untilMs > this.mbNextMs) this.mbNextMs = untilMs;
+  }
 }

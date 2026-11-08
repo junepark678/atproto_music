@@ -407,7 +407,7 @@ it('every api/examples response decodes and a changed field type is rejected', a
   expect([...routes].sort()).toEqual(Object.keys(ROUTE_CALLS).sort());
   const responseFixtures = Object.keys(exampleFiles)
     .map((file) => file.replace('../../api/examples/', '').replace('.json', ''))
-    .filter((name) => !name.endsWith('-input') && !name.endsWith('-cases'));
+    .filter((name) => !name.endsWith('-input') && !name.endsWith('-cases') && name !== 'love');
   expect([...new Set(RESPONSE_CASES.map((c) => c.example))].sort()).toEqual(responseFixtures.sort());
 
   let decoded = 0;

@@ -26,8 +26,8 @@ import fixture from '../../../../tests/fixtures/read_models.json' with { type: '
 import type { Db } from '../../../src/do/db';
 import { type ApplyOptions, applyRecordProof } from '../../../src/do/write/apply-record';
 import { applySnapshotChunk } from '../../../src/do/write/apply-snapshot';
-import { scrobbleDto } from '../../../src/http/scrobbles-read';
 import { recordingMsidOf, sha1 } from '../../../src/do/write/keys';
+import { scrobbleDto } from '../../../src/http/scrobbles-read';
 import { checkResponse } from '../../acceptance/support/openapi';
 import { closeApps, startApp, type TestApp } from '../support/app';
 import { withMigratedDb } from '../support/node-db';
@@ -178,8 +178,15 @@ describe('scrobble field projection', () => {
       for (const proof of [withProof, withoutProof, droppedProof]) {
         expect(db.tx(() => applyRecordProof(db, proof, OPTS))).toMatchObject({ outcome: 'applied' });
       }
-      expect(db.all('SELECT artist_key,track_key,album_key,submitted_recording_mbid FROM mb_tracks ORDER BY track_key')).toEqual([
-        { artist_key: 'björk', track_key: 'jóga', album_key: 'homogenic', submitted_recording_mbid: '8f3471b5-7e6a-48da-86a9-c1c07a0f47ae' },
+      expect(
+        db.all('SELECT artist_key,track_key,album_key,submitted_recording_mbid FROM mb_tracks ORDER BY track_key'),
+      ).toEqual([
+        {
+          artist_key: 'björk',
+          track_key: 'jóga',
+          album_key: 'homogenic',
+          submitted_recording_mbid: '8f3471b5-7e6a-48da-86a9-c1c07a0f47ae',
+        },
       ]);
 
       // With the fields: every new column filled, remote spelling kept.
@@ -195,13 +202,19 @@ describe('scrobble field projection', () => {
         music_service: 'spotify.com',
         recording_msid: msid,
       });
-      const dtoRow = db.one<import('../../../src/do/contracts').ScrobbleRow>('SELECT * FROM scrobbles WHERE uri=?', withUri)!;
+      const dtoRow = db.one<import('../../../src/do/contracts').ScrobbleRow>(
+        'SELECT * FROM scrobbles WHERE uri=?',
+        withUri,
+      )!;
       expect(scrobbleDto(dtoRow)).toMatchObject({
-        albumArtist: ' Björk  & Friends ', trackNumber: 3,
+        albumArtist: ' Björk  & Friends ',
+        trackNumber: 3,
         artistMbids: ['87c5dedd-371d-4a53-9f7f-80522fb7f3cb', 'A74B1B7F-71A5-4011-9441-D0B5E4122711'],
         releaseMbid: 'D2E7A5B1-1C3F-4B8E-9A6D-0F1E2D3C4B5A',
-        releaseGroupMbid: '0c9d0b0e-2f6a-4c3b-8d7e-6f5a4b3c2d1e', isrc: 'GBAYE0601498',
-        submissionClient: 'Navidrome 0.53.3', musicService: 'spotify.com',
+        releaseGroupMbid: '0c9d0b0e-2f6a-4c3b-8d7e-6f5a4b3c2d1e',
+        isrc: 'GBAYE0601498',
+        submissionClient: 'Navidrome 0.53.3',
+        musicService: 'spotify.com',
       });
       expect(scrobbleDto(dtoRow)).not.toHaveProperty('origin_url');
       expect(
