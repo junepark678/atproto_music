@@ -5,11 +5,24 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { migrate } from '../../src/do/migrate';
 import { MIGRATIONS, SCHEMA_VERSION, TABLE_CLASS, TABLES } from '../../src/do/schema';
 import { enqueueRevivedLoves } from '../../src/musicbrainz/revive-loves';
-import { enqueueTrack, matchedRecordingMbid, recordingByMbid, seedHistoricalTracks } from '../../src/musicbrainz/store';
+import {
+  advanceLoveReviveJob,
+  deleteLoveReviveJob,
+  enqueueTrack,
+  loveReviveJobs,
+  matchedRecordingMbid,
+  recordingByMbid,
+  seedHistoricalTracks,
+  stageLoveReviveJob,
+} from '../../src/musicbrainz/store';
 import { openSqliteDb } from '../../src/node/sqlite-db';
 
 const dirs: string[] = [];
-afterEach(() => dirs.splice(0).forEach((dir) => rmSync(dir, { recursive: true, force: true })));
+afterEach(() => {
+  dirs.splice(0).forEach((dir) => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
 
 function database() {
   const dir = mkdtempSync(join(tmpdir(), 'mb-store-'));
@@ -20,6 +33,36 @@ function database() {
 }
 
 describe('MusicBrainz storage', () => {
+  it('migration 18 stores bounded love revival jobs across reopen and supports cursor advance and deletion', () => {
+    const db = database();
+    const path = join(dirs[dirs.length - 1]!, 'db.sqlite');
+    try {
+      expect(MIGRATIONS.find((m) => m.version === 18)?.name).toBe('musicbrainz_love_revival_jobs');
+      expect(TABLES).toContain('mb_love_revive_jobs');
+      expect(TABLE_CLASS.mb_love_revive_jobs).toBe('non-derived');
+      stageLoveReviveJob(
+        db,
+        { artistKey: 'artist', trackKey: 'track', albumKey: 'album' },
+        '3f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2d10',
+        10,
+      );
+      expect(loveReviveJobs(db, 1)).toMatchObject([
+        { artistKey: 'artist', trackKey: 'track', albumKey: 'album', cursorLinkId: '' },
+      ]);
+    } finally {
+      db.close();
+    }
+    const reopened = openSqliteDb(path, { busyTimeoutMs: 200 });
+    try {
+      const job = loveReviveJobs(reopened, 1)[0]!;
+      advanceLoveReviveJob(reopened, job, 'link-cursor');
+      expect(loveReviveJobs(reopened, 1)[0]?.cursorLinkId).toBe('link-cursor');
+      deleteLoveReviveJob(reopened, job);
+      expect(loveReviveJobs(reopened, 1)).toEqual([]);
+    } finally {
+      reopened.close();
+    }
+  });
   it('revives only the latest ignored love state per ListenBrainz link, idempotently and in bounded progressing slices', () => {
     const db = database();
     try {

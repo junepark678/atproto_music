@@ -972,6 +972,23 @@ const MIGRATION_17: Migration = {
     "CREATE TABLE mb_seed_state (singleton INTEGER PRIMARY KEY NOT NULL, cursor_uri TEXT NOT NULL DEFAULT '', complete INTEGER NOT NULL DEFAULT 0)",
   ],
 };
+const MIGRATION_18: Migration = {
+  version: 18,
+  name: 'musicbrainz_love_revival_jobs',
+  statements: [
+    `CREATE TABLE mb_love_revive_jobs (
+      artist_key TEXT NOT NULL,
+      track_key TEXT NOT NULL,
+      album_key TEXT NOT NULL DEFAULT '',
+      recording_mbid TEXT NOT NULL,
+      matched_at_ms INTEGER NOT NULL,
+      created_at_ms INTEGER NOT NULL,
+      cursor_link_id TEXT NOT NULL DEFAULT '',
+      PRIMARY KEY (artist_key,track_key,album_key)
+    )`,
+    'CREATE INDEX mb_love_revive_jobs_due ON mb_love_revive_jobs(matched_at_ms,artist_key,track_key,album_key)',
+  ],
+};
 
 export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_1,
@@ -991,6 +1008,7 @@ export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_15,
   MIGRATION_16,
   MIGRATION_17,
+  MIGRATION_18,
 ];
 
 /** The schema version this code expects. */
@@ -1057,6 +1075,7 @@ export const TABLES = [
   'mb_tracks',
   'mb_pacing',
   'mb_seed_state',
+  'mb_love_revive_jobs',
 ] as const;
 
 export type TableName = (typeof TABLES)[number];
@@ -1123,4 +1142,5 @@ export const TABLE_CLASS: Readonly<Record<TableName, TableClass>> = {
   mb_tracks: 'non-derived',
   mb_pacing: 'non-derived',
   mb_seed_state: 'non-derived',
+  mb_love_revive_jobs: 'non-derived',
 };
