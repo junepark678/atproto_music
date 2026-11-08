@@ -360,7 +360,7 @@
     "tests": [
      "worker/test/storage/schema-v2.test.ts › migration 2 creates exactly the ADR 0005 §6.4 tables, scrobbles columns and indexes, and TABLES lists every table",
      "worker/test/storage/schema-v2.test.ts › CHECK constraints accept operation state cancelled and reject an unknown operation kind, operation state, link service, import source and forward kind",
-     "worker/test/storage/schema-v2.test.ts › UNIQUE(did, idempotency_key), listen_keys PK, forward_outbox (link_id, kind, dedupe_key) and lastfm_sessions.sk_hash are enforced",
+     "worker/test/storage/schema-v2.test.ts › UNIQUE(did, idempotency_key), listen_keys PK, forward_outbox generation key and lastfm_sessions.sk_hash are enforced",
      "worker/test/storage/schema-v2.test.ts › deleting a users row cascades its loves and deleting a linked_accounts row cascades its forward_outbox rows",
      "worker/test/storage/schema-v2.test.ts › a v1 database seeded with the read-model fixture migrates to v2 with every v1 row byte-identical and the new scrobbles columns NULL",
      "worker/test/storage/schema-v2.test.ts › EXPLAIN QUERY PLAN for loves by owner, due operations, due forward rows and import items by job uses the new indexes",

@@ -77,9 +77,9 @@ function historyModule(m: ModuleDeps, q: HistoryQuery): RowsResult<ScrobbleRow> 
 const blob = (byte: number, length = 32): ArrayBuffer => new Uint8Array(length).fill(byte).buffer;
 
 /**
- * One valid row for every table migration 1 and 2 create that the migrations
+ * One valid row for every table migration 1–20 create that the migrations
  * do not already seed (indexing_status, backfill_generation, ingest_checkpoint,
- * schema_migrations and schema_compat hold their seed rows).
+ * forward_admission_clock, schema_migrations and schema_compat hold seed rows).
  */
 const SEED_ROWS: Record<string, Record<string, SqlParam>[]> = {
   users: [
@@ -259,6 +259,48 @@ const SEED_ROWS: Record<string, Record<string, SqlParam>[]> = {
       due_at: NOW + DAY,
       created_at_ms: NOW,
       updated_at_ms: NOW,
+    },
+  ],
+  forward_admissions: [
+    {
+      did: ALICE,
+      identity_key: 'listen:fixture-admission',
+      path: 'api',
+      source_service: null,
+      created_at_ms: NOW,
+      admission_seq: 1,
+    },
+  ],
+  love_incarnations: [
+    {
+      uri: `at://${ALICE}/com.example.atmusic.love/3lb2aaaaaaa2e`,
+      incarnation_key: 'love:fixture-incarnation',
+      state: 'present',
+      path: 'live',
+      source_service: null,
+      updated_at_ms: NOW,
+    },
+  ],
+  love_delete_bridges: [
+    {
+      did: ALICE,
+      uri: `at://${ALICE}/com.example.atmusic.love/3lb2aaaaaaa2e`,
+      incarnation_key: 'love:fixture-incarnation',
+      expected_cid: 'bafyfixturelove',
+      operation_id: 'op2',
+      state: 'pending',
+      created_at_ms: NOW,
+    },
+  ],
+  love_import_bridges: [
+    {
+      did: ALICE,
+      operation_id: 'import-op1',
+      uri: `at://${ALICE}/com.example.atmusic.love/3lb2aaaaaaa2f`,
+      incarnation_key: 'love:fixture-import',
+      source_service: 'lastfm',
+      state: 'bound',
+      created_at_ms: NOW,
     },
   ],
   import_jobs: [{ id: 'j1', did: ALICE, source: 'lastfm_api', created_at_ms: NOW, updated_at_ms: NOW }],
@@ -587,8 +629,11 @@ describe('worker/test/harness', () => {
 
       // reopen: every table and its rows survive close and reopen of the same file.
       for (const [table, rows] of Object.entries(SEED_ROWS)) for (const row of rows) insertRow(db, table, row);
-      for (const table of TABLES)
-        if (table !== 'mb_cover_art_usage') expect([table, rowCount(db, table)]).not.toEqual([table, 0]);
+      db.run('UPDATE forward_admission_clock SET next_seq=1 WHERE singleton=1');
+      for (const table of TABLES) {
+        if (table === 'mb_cover_art_usage') continue; // Migration 21 seeds its singleton usage counter.
+        expect([table, rowCount(db, table)]).not.toEqual([table, 0]);
+      }
       const before = dumpDb(db);
       const tableNames = before.objects.filter((o) => o.type === 'table').map((o) => o.name);
       expect([...tableNames].sort()).toEqual([...TABLES].sort());

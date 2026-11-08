@@ -321,6 +321,7 @@ function columns(db: Db, table: string): string[] {
 }
 
 const SEEDED_BY_MIGRATION_1 = ['indexing_status', 'backfill_generation', 'ingest_checkpoint'];
+const SEEDED_BY_MIGRATION_19 = ['forward_admission_clock'];
 
 /** The ledger a database fully migrated by this code holds: one row per migration. */
 const LEDGER = MIGRATIONS.map((m) => ({ version: m.version, name: m.name }));
@@ -375,8 +376,8 @@ describe('migrate', () => {
     expect(await res.json()).toEqual({ status: 'ready' });
 
     // The open applied every migration, migration 1 first, and
-    // migration 1 seeded its three singleton rows; every other table starts
-    // empty (schema_compat holds migration 2's row, schema-v2.test.ts).
+    // migration 1 seeded its three singleton rows. Migration 19 seeds the
+    // admission sequence clock; schema_compat holds migration 2's row.
     {
       expect(lastMigration('migrate-fresh')).toEqual({ status: 'ready', version: SCHEMA_VERSION });
       const ledger = db.all('SELECT version, name FROM schema_migrations ORDER BY version');
@@ -387,8 +388,13 @@ describe('migrate', () => {
       expect(EXPECTED_TABLES.filter((t) => !names('table').includes(t))).toEqual([]);
       expect(EXPECTED_INDEXES.filter((i) => !names('index').includes(i))).toEqual([]);
       expectMigration1Seeds(db);
+      expect(db.all('SELECT singleton,next_seq FROM forward_admission_clock')).toEqual([{ singleton: 1, next_seq: 0 }]);
       for (const table of TABLES) {
-        if ([...SEEDED_BY_MIGRATION_1, 'schema_migrations', 'schema_compat', 'mb_cover_art_usage'].includes(table))
+        if (
+          [...SEEDED_BY_MIGRATION_1, ...SEEDED_BY_MIGRATION_19, 'schema_migrations', 'schema_compat', 'mb_cover_art_usage'].includes(
+            table,
+          )
+        )
           continue;
         expect([table, db.one<{ n: number }>(`SELECT count(*) AS n FROM ${table}`)]).toEqual([table, { n: 0 }]);
       }
@@ -693,7 +699,7 @@ describe('migrate', () => {
 
   // ADR 0005 §3.2, §6.4 (N1-10): migration 2 makes the code version 2, and a
   // database at that version is ready for that code, across restarts.
-  // Migration 3 is additive and keeps the v2 compatibility floor.
+  // Later additive migrations keep the v2 compatibility floor.
   it('SCHEMA_VERSION includes additive batch provenance and remains compatible with v2 code', async () => {
     expect(SCHEMA_VERSION).toBe(21);
     expect(MIGRATIONS.map((m) => [m.version, m.name])).toEqual([
