@@ -627,7 +627,7 @@ describe('scripts/check-ts.sh', () => {
         .map((l) => JSON.parse(l) as { target: string; command: string; result: string });
       expect(cases.filter((c) => c.result === 'failed').map((c) => c.target)).toEqual([target]);
       expect(new Set(cases.map((c) => c.command))).toEqual(
-        new Set(['npm test -- --project worker-node --maxWorkers=2']),
+        new Set(['npm test -- --project worker-node --maxWorkers=4']),
       );
 
       // The duration report ends at the failed step with the same status.

@@ -167,8 +167,8 @@ if ((${#projects[@]} > 0)); then
   # spawn Vitest from inside Vitest. Leave CPU headroom for the parent and
   # child processes so the worker-node project's 5 s test budgets remain
   # meaningful instead of timing out from nested worker oversubscription.
-  vitest_args+=(--maxWorkers=2)
-  test_command+=' --maxWorkers=2'
+  vitest_args+=(--maxWorkers=4)
+  test_command+=' --maxWorkers=4'
 else
   step 'test (vitest, all projects)'
 fi
