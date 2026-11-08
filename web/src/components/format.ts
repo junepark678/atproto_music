@@ -22,6 +22,14 @@ export function formatLocalTime(timestamp: string, options: LocalTimeOptions = {
   return Number.isNaN(ms) ? timestamp : formatLocalTimeMs(ms, options);
 }
 
+/** A UTC RFC 3339 timestamp → local clock time, e.g. `2:32 PM`. */
+export function formatLocalClock(timestamp: string): string {
+  const ms = Date.parse(timestamp);
+  return Number.isNaN(ms)
+    ? timestamp
+    : new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' }).format(ms);
+}
+
 /** Epoch ms or a timestamp → a local calendar date, e.g. `Jan 15, 2026`. */
 export function formatLocalDate(value: string | number): string {
   const ms = typeof value === 'number' ? value : Date.parse(value);

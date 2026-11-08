@@ -13,6 +13,7 @@
 import type { Did, FeedScope, Scrobble } from '@atmusic/core/api-types';
 import { useCallback, useState } from 'preact/hooks';
 import { useLocation } from 'preact-iso';
+import { ListeningNow } from '../components/now-playing';
 import { withDueAt } from '../components/operation-status';
 import { usePaged } from '../components/paged';
 import { type ListItem, ScrobbleList } from '../components/scrobble-list';
@@ -37,6 +38,7 @@ export default function Feed() {
   return (
     <section aria-labelledby="page-title">
       <h1 id="page-title">Feed</h1>
+      {session !== null ? <ListeningNow api={state.api} /> : null}
       <div class="tabs" role="tablist" aria-label="Feed scope">
         {SCOPES.map((s) => (
           <button

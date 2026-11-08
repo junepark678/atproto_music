@@ -30,6 +30,8 @@ import type {
   Meta,
   NotifyAccepted,
   NotifyInput,
+  NowPlaying,
+  NowPlayingFeed,
   OAuthClientMetadata,
   Profile,
   RecordStatus,
@@ -336,6 +338,38 @@ const profile: Decoder<Profile> = object({
   followerCount: count,
   followingCount: count,
   indexing,
+});
+
+const nowPlaying: Decoder<NowPlaying> = object(
+  {
+    artist: musicText,
+    track: musicText,
+    startedAt: timestamp,
+    updatedAt: timestamp,
+    expiresAt: timestamp,
+    source: oneOf(['lastfm', 'listenbrainz', 'web'] as const),
+  },
+  {
+    album: musicText,
+    albumArtist: musicText,
+    trackNumber: int(1),
+    durationSeconds: int(1, 86_400),
+    recordingMbid: uuid,
+    releaseMbid: uuid,
+    releaseGroupMbid: uuid,
+    artistMbids: array(uuid),
+    isrc: str,
+    scrobbledAt: timestamp,
+    client: object({ name: str }, { version: str }),
+    musicService: str,
+    mediaPlayer: str,
+    shared: bool,
+  },
+);
+const nowPlayingResult = object({ nowPlaying: nullable(nowPlaying), serverTime: timestamp });
+const nowPlayingFeed: Decoder<NowPlayingFeed> = object({
+  items: array(object({ did, handle: nullable(handle), nowPlaying })),
+  serverTime: timestamp,
 });
 
 const topArtist: Decoder<TopArtist> = object({ artist: musicText, scrobbleCount: count });
@@ -756,6 +790,26 @@ export class ApiClient {
         decode: profile,
         noStore: true,
       },
+      o,
+    );
+  }
+
+  nowPlaying(user: Did, o?: CallOptions): Promise<{ nowPlaying: NowPlaying | null; serverTime: string }> {
+    return this.#call(
+      {
+        method: 'GET',
+        path: `/api/v1/users/${didSegment(user)}/now-playing`,
+        expect: 200,
+        decode: nowPlayingResult,
+        noStore: true,
+      },
+      o,
+    );
+  }
+
+  nowPlayingFeed(o?: CallOptions): Promise<NowPlayingFeed> {
+    return this.#call(
+      { method: 'GET', path: '/api/v1/feed/now-playing', expect: 200, decode: nowPlayingFeed, noStore: true },
       o,
     );
   }

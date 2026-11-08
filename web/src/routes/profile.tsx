@@ -19,6 +19,7 @@ import { useRoute } from 'preact-iso';
 import { isDid } from '../api/client';
 import { FollowButton, type FollowEdge } from '../components/follow-button';
 import { formatLocalDate, formatLocalTime, isNotFound } from '../components/format';
+import { NowPlayingCard } from '../components/now-playing';
 import { isPending, OperationStatus, withDueAt } from '../components/operation-status';
 import type { OutboxService } from '../components/outbox-service';
 import { usePaged } from '../components/paged';
@@ -198,6 +199,8 @@ function ProfileView({ profile, refreshing, refreshError, onRefresh }: ProfileVi
           <ProfileFollow viewer={session.did} subject={profile.did} outbox={outbox} ops={ops} onSettled={onRefresh} />
         ) : null}
       </header>
+
+      <NowPlayingCard api={state.api} did={profile.did} owner={own} />
 
       <section aria-labelledby="stats-title">
         <h2 id="stats-title">Statistics</h2>

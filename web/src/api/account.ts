@@ -81,6 +81,9 @@ export async function uploadImport(
   return r.json() as Promise<ImportJob>;
 }
 export const listCredentials = () => get<Credentials>('/api/v1/account/credentials');
+export const getAccount = () => get<{ shareNowPlaying: boolean }>('/api/v1/account');
+export const setShareNowPlaying = (shareNowPlaying: boolean, expectedDid: Did) =>
+  mutate<{ shareNowPlaying: boolean }>('/api/v1/account', 'PATCH', expectedDid, { shareNowPlaying });
 export const createAppPassword = (label: string, expectedDid: Did) =>
   mutate<Extract<CreatedSecret, { password: string }>>('/api/v1/account/app-passwords', 'POST', expectedDid, { label });
 export const revokeAppPassword = (id: string, expectedDid: Did) =>
