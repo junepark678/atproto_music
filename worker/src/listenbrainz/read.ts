@@ -48,6 +48,7 @@ import { type ListensPage, listensByTimestamp, MAX_UNIX_SECONDS, storageToUnixSe
 import { lookupUser, type ProtocolUser } from '../do/read/user-lookup';
 import { visibleScrobblesFrom } from '../do/read/visibility';
 import { need, type RequestCtx } from '../http/types';
+import { matchedRecordingMbid } from '../musicbrainz/store';
 import { lbJson } from './errors';
 import type { LbRouteDef } from './routes';
 
@@ -171,12 +172,39 @@ export interface LbTrackMetadata {
   additional_info: Record<string, unknown>;
 }
 
-export function trackMetadataOf(row: ScrobbleRowV2): LbTrackMetadata {
+export function trackMetadataOf(row: ScrobbleRowV2, db?: ModuleDeps['db']): LbTrackMetadata {
+  const submitted = additionalInfoOf(row);
+  const matched = db?.one<{ recording_mbid: string | null; release_mbid: string | null; artist_mbids: string | null }>(
+    `SELECT recording_mbid,release_mbid,artist_mbids FROM mb_tracks WHERE status='matched' AND artist_key=? AND track_key=? AND album_key=?`,
+    row.artist_key,
+    row.track_key,
+    row.album_key ?? '',
+  );
+  let mappedArtists: string[] = [];
+  try {
+    const value = JSON.parse(matched?.artist_mbids ?? '[]');
+    if (Array.isArray(value)) mappedArtists = value.filter((v): v is string => typeof v === 'string');
+  } catch {}
+  const mapping = {
+    recording_mbid:
+      row.recording_mbid ||
+      (db
+        ? matchedRecordingMbid(db, { artistKey: row.artist_key, trackKey: row.track_key, albumKey: row.album_key })
+        : null) ||
+      matched?.recording_mbid ||
+      null,
+    release_mbid: row.release_mbid || matched?.release_mbid || null,
+    artist_mbids: parseMbids(row.artist_mbids) ?? mappedArtists,
+  };
+  const mbidMapping = Object.fromEntries(
+    Object.entries(mapping).filter(([, value]) => value !== null && (Array.isArray(value) ? value.length > 0 : true)),
+  );
   return {
     artist_name: row.artist,
     track_name: row.track,
     ...(row.album === null ? {} : { release_name: row.album }),
-    additional_info: additionalInfoOf(row),
+    additional_info: submitted,
+    ...(Object.keys(mbidMapping).length ? { mbid_mapping: mbidMapping } : {}),
   };
 }
 
@@ -188,13 +216,13 @@ export interface LbListen {
   track_metadata: LbTrackMetadata;
 }
 
-export async function listenOf(row: ScrobbleRowV2, userName: string): Promise<LbListen> {
+export async function listenOf(row: ScrobbleRowV2, userName: string, db: ModuleDeps['db']): Promise<LbListen> {
   return {
     listened_at: storageToUnixSeconds(row.listened_at),
     inserted_at: storageToUnixSeconds(row.indexed_at),
     recording_msid: await msidOfRow(row),
     user_name: userName,
-    track_metadata: trackMetadataOf(row),
+    track_metadata: trackMetadataOf(row, db),
   };
 }
 
@@ -245,7 +273,7 @@ async function getListens(req: Request, ctx: RequestCtx, params: Record<string, 
   });
   if (page === null) throw new LbHttpError(404, `Cannot find user: ${pathUser}`);
   const name = displayName(m.db, user.did);
-  const listens = await Promise.all(page.rows.map((row) => listenOf(row, name)));
+  const listens = await Promise.all(page.rows.map((row) => listenOf(row, name, m.db)));
   return lbJson({
     payload: {
       count: listens.length,
