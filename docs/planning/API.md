@@ -131,6 +131,8 @@ Credentials = {appPasswords: [{id, label, createdAt, lastUsedAt}], listenbrainzT
                lastfmApps: [{apiKey, name, createdAt}], lastfmSessions: [{id, apiKey, clientName, createdAt, lastUsedAt}]}
 ```
 
+`Link.sync.backfill.done` counts eligible indexed-history items settled by enqueue or skip; `total` counts unique eligible items discovered so far and can grow while the state is `running`. These describe queue work considered, not confirmed upstream deliveries.
+
 | Route | Auth | Request | Success payload / status |
 | --- | --- | --- | --- |
 | GET `/oauth/jwks.json` | none | none | 200 `{keys: [{kty:"EC", crv:"P-256", x, y, kid, alg:"ES256", use:"sig"}]}`, never `d` (§5.4) |

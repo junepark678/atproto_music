@@ -1144,6 +1144,26 @@ const MIGRATION_S2_BACKFILL_BUDGET: Migration = {
   ],
 };
 
+const MIGRATION_S2_BACKFILL_MEMBERSHIP: Migration = {
+  version: 29,
+  name: 'link_backfill_staged_membership',
+  statements: [
+    `CREATE TABLE link_backfill_items (
+      link_id TEXT NOT NULL REFERENCES linked_accounts(id) ON DELETE CASCADE,
+      generation INTEGER NOT NULL,
+      run_revision INTEGER NOT NULL,
+      ordinal INTEGER NOT NULL,
+      identity_key TEXT NOT NULL,
+      uri TEXT NOT NULL,
+      cid TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      event_at TEXT NOT NULL,
+      PRIMARY KEY(link_id,generation,run_revision,identity_key)
+    )`,
+    'CREATE INDEX link_backfill_items_pending ON link_backfill_items(link_id,generation,run_revision,ordinal)',
+  ],
+};
+
 export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_1,
   MIGRATION_2,
@@ -1173,6 +1193,7 @@ export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_S2_BACKFILL_RETRY,
   MIGRATION_S2_BACKFILL_RUN_REVISION,
   MIGRATION_S2_BACKFILL_BUDGET,
+  MIGRATION_S2_BACKFILL_MEMBERSHIP,
 ];
 
 /** The schema version this code expects. */
@@ -1223,6 +1244,7 @@ export const TABLES = [
   'linked_accounts',
   'link_states',
   'forward_outbox',
+  'link_backfill_items',
   'forward_admissions',
   'forward_admission_clock',
   'love_incarnations',
@@ -1302,6 +1324,7 @@ export const TABLE_CLASS: Readonly<Record<TableName, TableClass>> = {
   linked_accounts: 'non-derived',
   link_states: 'non-derived',
   forward_outbox: 'non-derived',
+  link_backfill_items: 'non-derived',
   forward_admissions: 'non-derived',
   forward_admission_clock: 'non-derived',
   love_incarnations: 'non-derived',

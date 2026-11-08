@@ -433,7 +433,9 @@ export interface Link {
   sync?: {
     backfill: {
       state: 'pending' | 'running' | 'done' | 'skipped';
+      /** Eligible indexed-history items settled by enqueue or skip; not upstream deliveries. */
       done: number;
+      /** Unique eligible items discovered so far; grows during a running backfill. */
       total: number;
       lastError?: 'retry_exhausted';
     };

@@ -9,6 +9,7 @@ import type { Db } from '../do/db';
 import { matchedRecordingMbid } from '../musicbrainz/store';
 import { enqueueForwards } from '../outbox/forward-enqueue';
 import type { ForwardRuntime } from './forwarder';
+import { projectionListenKey } from './projection';
 
 export const BACKFILL_CHUNK_SIZE = 500;
 export const BACKFILL_IDLE_MS = 30_000;
@@ -34,37 +35,50 @@ export function recordBackfillFailure(
   attempt: AttemptFence,
   now: number,
 ): { failures: number; retryAt: number | null; exhausted: boolean } | null {
-  const link = db.one<{ backfill_failures: number }>(
-    `SELECT backfill_failures FROM linked_accounts WHERE id=? AND generation=? AND backfill_run_revision=?
+  return db.tx(() => {
+    const link = db.one<{ backfill_failures: number }>(
+      `SELECT backfill_failures FROM linked_accounts WHERE id=? AND generation=? AND backfill_run_revision=?
        AND status='active' AND forward_scrobbles=1 AND backfill_state='running'`,
-    attempt.id,
-    attempt.generation,
-    attempt.backfill_run_revision,
-  );
-  if (link === null) return null;
-  const failures = link.backfill_failures + 1;
-  const exhausted = failures >= BACKFILL_MAX_FAILURES;
-  const delay = Math.min(BACKFILL_RETRY_MAX_MS, BACKFILL_RETRY_BASE_MS * 2 ** Math.min(failures - 1, 10));
-  const retryAt = exhausted ? null : now + delay;
-  const updated = db.run(
-    `UPDATE linked_accounts SET backfill_failures=?,backfill_next_attempt_ms=?,
+      attempt.id,
+      attempt.generation,
+      attempt.backfill_run_revision,
+    );
+    if (link === null) return null;
+    const failures = link.backfill_failures + 1;
+    const exhausted = failures >= BACKFILL_MAX_FAILURES;
+    const delay = Math.min(BACKFILL_RETRY_MAX_MS, BACKFILL_RETRY_BASE_MS * 2 ** Math.min(failures - 1, 10));
+    const retryAt = exhausted ? null : now + delay;
+    const updated = db.run(
+      `UPDATE linked_accounts SET backfill_failures=?,backfill_next_attempt_ms=?,
        backfill_state=CASE WHEN ? THEN 'skipped' ELSE backfill_state END,
-       backfill_last_error=CASE WHEN ? THEN 'retry_exhausted' ELSE backfill_last_error END
-     WHERE id=? AND generation=? AND backfill_run_revision=? AND status='active'
-       AND forward_scrobbles=1 AND backfill_state='running'`,
-    failures,
-    retryAt,
-    exhausted ? 1 : 0,
-    exhausted ? 1 : 0,
-    attempt.id,
-    attempt.generation,
-    attempt.backfill_run_revision,
-  );
-  return updated.rowsWritten === 0 ? null : { failures, retryAt, exhausted };
+         backfill_last_error=CASE WHEN ? THEN 'retry_exhausted' ELSE backfill_last_error END,
+         backfill_done=CASE WHEN ? THEN backfill_total ELSE backfill_done END
+       WHERE id=? AND generation=? AND backfill_run_revision=? AND status='active'
+         AND forward_scrobbles=1 AND backfill_state='running'`,
+      failures,
+      retryAt,
+      exhausted ? 1 : 0,
+      exhausted ? 1 : 0,
+      exhausted ? 1 : 0,
+      attempt.id,
+      attempt.generation,
+      attempt.backfill_run_revision,
+    );
+    if (updated.rowsWritten === 0) return null;
+    if (exhausted)
+      db.run(
+        'DELETE FROM link_backfill_items WHERE link_id=? AND generation=? AND run_revision=?',
+        attempt.id,
+        attempt.generation,
+        attempt.backfill_run_revision,
+      );
+    return { failures, retryAt, exhausted };
+  });
 }
 type HistoryRow = {
   kind: 'scrobble' | 'love';
   uri: string;
+  cid: string;
   event_at: string;
   artist: string;
   track: string;
@@ -98,24 +112,47 @@ function candidates(
       ? new Date(now - LASTFM_WINDOW_MS).toISOString().replace(/\.\d{3}Z$/, '.000000000Z')
       : null;
   const cutoffFilter = lastfmCutoff === null ? '' : ' AND s.listened_at >= ?';
-  const keysetFilter = cursor === null ? '' : ' AND (event_at < ? OR (event_at = ? AND uri < ?))';
-  return db.all<HistoryRow>(
-    `SELECT * FROM (
-       SELECT 'scrobble' AS kind, s.uri, s.listened_at AS event_at, s.artist, s.track, s.album,
-              s.recording_mbid, s.artist_key, s.track_key, s.album_key, s.listened_at
-       FROM scrobbles s WHERE s.did=?${cutoffFilter}
-       UNION ALL
-       SELECT 'love' AS kind, l.uri, l.created_at AS event_at, l.artist, l.track, l.album,
-              l.recording_mbid, l.artist_key, l.track_key, NULL AS album_key, NULL AS listened_at
-       FROM loves l WHERE l.did=?
-     ) WHERE 1=1${keysetFilter}
-     ORDER BY event_at DESC, uri DESC LIMIT ?`,
+  const scrobbleKeyset = cursor === null ? '' : ' AND (s.listened_at,s.uri) < (?,?)';
+  const loveKeyset = cursor === null ? '' : ' AND (l.created_at,l.uri) < (?,?)';
+  const scrobbles = db.all<HistoryRow>(
+    `SELECT 'scrobble' AS kind,s.uri,s.cid,s.listened_at AS event_at,s.artist,s.track,s.album,
+            s.recording_mbid,s.artist_key,s.track_key,s.album_key,s.listened_at
+     FROM scrobbles s WHERE s.did=?${cutoffFilter}${scrobbleKeyset}
+     ORDER BY s.listened_at DESC,s.uri DESC LIMIT ?`,
     link.did,
     ...(lastfmCutoff === null ? [] : [lastfmCutoff]),
-    link.did,
-    ...(cursor === null ? [] : [cursor.at, cursor.at, cursor.uri]),
+    ...(cursor === null ? [] : [cursor.at, cursor.uri]),
     chunkSize,
   );
+  const loves = db.all<HistoryRow>(
+    `SELECT 'love' AS kind,l.uri,l.cid,l.created_at AS event_at,l.artist,l.track,l.album,
+            l.recording_mbid,l.artist_key,l.track_key,NULL AS album_key,NULL AS listened_at
+     FROM loves l WHERE l.did=?${loveKeyset}
+     ORDER BY l.created_at DESC,l.uri DESC LIMIT ?`,
+    link.did,
+    ...(cursor === null ? [] : [cursor.at, cursor.uri]),
+    chunkSize,
+  );
+  const merged: HistoryRow[] = [];
+  let scrobbleIndex = 0;
+  let loveIndex = 0;
+  while (merged.length < chunkSize && (scrobbleIndex < scrobbles.length || loveIndex < loves.length)) {
+    const scrobble = scrobbles[scrobbleIndex];
+    const love = loves[loveIndex];
+    if (
+      scrobble !== undefined &&
+      (love === undefined ||
+        scrobble.event_at > love.event_at ||
+        (scrobble.event_at === love.event_at && scrobble.uri > love.uri))
+    ) {
+      merged.push(scrobble);
+      scrobbleIndex++;
+    } else if (love !== undefined) {
+      merged.push(love);
+      loveIndex++;
+    }
+  }
+  return merged;
 }
 
 function sourceService(source: string | null): 'lastfm' | 'listenbrainz' | null {
@@ -125,23 +162,18 @@ function sourceService(source: string | null): 'lastfm' | 'listenbrainz' | null 
   return null;
 }
 
-async function admitHistoryRow(
+function payloadForHistoryRow(
   db: Db,
   link: LinkedAccountRow,
   row: HistoryRow,
-): Promise<{ key: string; payload: unknown } | null> {
-  let identityKey: string;
-  if (row.kind === 'scrobble') {
-    const ns = parseRfc3339(row.listened_at ?? '');
-    if (ns === null) return null;
-    identityKey = await listenKey({ did: link.did, listenedAtNs: ns, artist: row.artist, track: row.track });
-  } else {
+  identityKey: string,
+): { key: string; payload: unknown } | null {
+  if (row.kind === 'love') {
     const incarnation = db.one<{ incarnation_key: string; path: string; source_service: string | null }>(
       "SELECT incarnation_key,path,source_service FROM love_incarnations WHERE uri=? AND state='present'",
       row.uri,
     );
-    if (!incarnation) return null;
-    identityKey = incarnation.incarnation_key;
+    if (incarnation === null || incarnation.incarnation_key !== identityKey) return null;
     if (incarnation.path === 'import' && sourceService(incarnation.source_service) === null) return null;
     if (incarnation.path === 'import' && sourceService(incarnation.source_service) === link.service) return null;
   }
@@ -197,6 +229,65 @@ async function admitHistoryRow(
   };
 }
 
+async function admitHistoryRow(
+  db: Db,
+  link: LinkedAccountRow,
+  row: HistoryRow,
+): Promise<{ key: string; payload: unknown } | null> {
+  let identityKey: string;
+  if (row.kind === 'scrobble') {
+    const ns = parseRfc3339(row.listened_at ?? '');
+    if (ns === null) return null;
+    identityKey = await listenKey({ did: link.did, listenedAtNs: ns, artist: row.artist, track: row.track });
+  } else {
+    const incarnation = db.one<{ incarnation_key: string }>(
+      "SELECT incarnation_key FROM love_incarnations WHERE uri=? AND state='present'",
+      row.uri,
+    );
+    if (incarnation === null) return null;
+    identityKey = incarnation.incarnation_key;
+  }
+  return payloadForHistoryRow(db, link, row, identityKey);
+}
+
+/** Re-read the candidate inside the enqueue transaction after identity work yielded. */
+function validateCurrentCandidate(
+  db: Db,
+  link: LinkedAccountRow,
+  candidate: Pick<HistoryRow, 'kind' | 'uri' | 'cid'>,
+  expectedKey: string,
+): { key: string; payload: unknown } | null {
+  if (candidate.kind === 'scrobble') {
+    const current = db.one<HistoryRow>(
+      `SELECT 'scrobble' AS kind,uri,cid,listened_at AS event_at,artist,track,album,recording_mbid,
+              artist_key,track_key,album_key,listened_at
+       FROM scrobbles WHERE uri=? AND did=? AND cid=?`,
+      candidate.uri,
+      link.did,
+      candidate.cid,
+    );
+    if (current === null) return null;
+    const key = projectionListenKey(link.did, current.listened_at ?? '', current.artist_key, current.track_key);
+    return key === expectedKey ? payloadForHistoryRow(db, link, current, key) : null;
+  }
+
+  const current = db.one<HistoryRow>(
+    `SELECT 'love' AS kind,l.uri,l.cid,l.created_at AS event_at,l.artist,l.track,l.album,l.recording_mbid,
+            l.artist_key,l.track_key,NULL AS album_key,NULL AS listened_at
+     FROM loves l WHERE l.uri=? AND l.did=? AND l.cid=?`,
+    candidate.uri,
+    link.did,
+    candidate.cid,
+  );
+  if (current === null) return null;
+  const incarnation = db.one<{ incarnation_key: string; state: string }>(
+    'SELECT incarnation_key,state FROM love_incarnations WHERE uri=?',
+    current.uri,
+  );
+  if (incarnation?.state !== 'present' || incarnation.incarnation_key !== expectedKey) return null;
+  return payloadForHistoryRow(db, link, current, incarnation.incarnation_key);
+}
+
 export async function runLinkBackfill(
   db: Db,
   random: ForwardRuntime['random'],
@@ -238,30 +329,187 @@ export async function runLinkBackfill(
     if (started.rowsWritten === 0) return 0;
   }
   try {
-    const current = db.one<{ backfill_discovery_done: number }>(
-      "SELECT backfill_discovery_done FROM linked_accounts WHERE id=? AND generation=? AND backfill_run_revision=? AND backfill_state='running'",
+    const current = db.one<{ backfill_discovery_done: number; staged: number }>(
+      `SELECT la.backfill_discovery_done,
+         (SELECT count(*) FROM link_backfill_items i WHERE i.link_id=la.id AND i.generation=la.generation
+            AND i.run_revision=la.backfill_run_revision) AS staged
+       FROM linked_accounts la WHERE la.id=? AND la.generation=? AND la.backfill_run_revision=? AND la.backfill_state='running'`,
       link.id,
       link.generation,
       link.backfill_run_revision,
     );
     if (current === null) return 0;
-    if (current.backfill_discovery_done === 0) {
+    if (current.staged > 0) {
+      const queuedHistory = db.one<{ n: number }>(
+        "SELECT count(*) AS n FROM forward_outbox WHERE priority=1 AND state='queued'",
+      )?.n;
+      if (queuedHistory === undefined) throw new Error('missing history queue count');
+      const queueSpace = BACKFILL_HISTORY_QUEUE_HIGH_WATER - queuedHistory;
+      if (queueSpace <= 0) return 0;
+      const page = db.all<{
+        identity_key: string;
+        uri: string;
+        cid: string;
+        kind: 'scrobble' | 'love';
+        ordinal: number;
+      }>(
+        `SELECT identity_key,uri,cid,kind,ordinal FROM link_backfill_items
+         WHERE link_id=? AND generation=? AND run_revision=? ORDER BY ordinal LIMIT ?`,
+        link.id,
+        link.generation,
+        link.backfill_run_revision,
+        Math.min(maxPageSize, queueSpace),
+      );
+      const committed = db.tx(() => {
+        const row = db.one<{
+          generation: number;
+          backfill_run_revision: number;
+          backfill_state: string;
+          status: string;
+          forward_scrobbles: number;
+          backfill_discovery_done: number;
+        }>(
+          'SELECT generation,backfill_run_revision,backfill_state,status,forward_scrobbles,backfill_discovery_done FROM linked_accounts WHERE id=?',
+          link.id,
+        );
+        if (
+          row === null ||
+          row.generation !== link.generation ||
+          row.backfill_run_revision !== link.backfill_run_revision ||
+          row.backfill_state !== 'running' ||
+          row.status !== 'active' ||
+          row.forward_scrobbles !== 1
+        )
+          return false;
+        for (const item of page) {
+          const currentItem = validateCurrentCandidate(db, link, item, item.identity_key);
+          if (currentItem !== null) {
+            enqueueForwards(db, {
+              did: link.did,
+              linkId: link.id,
+              priority: 1,
+              now,
+              random,
+              items:
+                item.kind === 'scrobble'
+                  ? [{ kind: 'scrobble', listenKey: currentItem.key, payload: currentItem.payload }]
+                  : [{ kind: 'love', operationId: currentItem.key, payload: currentItem.payload }],
+            });
+          }
+          db.run(
+            'DELETE FROM link_backfill_items WHERE link_id=? AND generation=? AND run_revision=? AND identity_key=?',
+            link.id,
+            link.generation,
+            link.backfill_run_revision,
+            item.identity_key,
+          );
+        }
+        if (page.length > 0) {
+          db.run(
+            `UPDATE linked_accounts SET backfill_done=backfill_done+?,backfill_failures=0,backfill_next_attempt_ms=NULL
+             WHERE id=? AND generation=? AND backfill_run_revision=? AND status='active' AND forward_scrobbles=1 AND backfill_state='running'`,
+            page.length,
+            link.id,
+            link.generation,
+            link.backfill_run_revision,
+          );
+        }
+        const remaining = db.one<{ n: number }>(
+          'SELECT count(*) AS n FROM link_backfill_items WHERE link_id=? AND generation=? AND run_revision=?',
+          link.id,
+          link.generation,
+          link.backfill_run_revision,
+        )?.n;
+        if (remaining === 0 && row.backfill_discovery_done === 1) {
+          db.run(
+            "UPDATE linked_accounts SET backfill_state='done',backfill_failures=0,backfill_next_attempt_ms=NULL WHERE id=? AND generation=? AND backfill_run_revision=? AND status='active' AND forward_scrobbles=1 AND backfill_state='running'",
+            link.id,
+            link.generation,
+            link.backfill_run_revision,
+          );
+        }
+        return true;
+      });
+      return committed ? page.length : 0;
+    }
+    if (current.backfill_discovery_done === 1) {
+      db.run(
+        "UPDATE linked_accounts SET backfill_state='done',backfill_failures=0,backfill_next_attempt_ms=NULL WHERE id=? AND generation=? AND backfill_run_revision=? AND status='active' AND forward_scrobbles=1 AND backfill_state='running'",
+        link.id,
+        link.generation,
+        link.backfill_run_revision,
+      );
+      return 0;
+    }
+    {
       const discovery = candidates(db, link, now, maxPageSize, cursorOf(link.backfill_discovery_cursor));
-      let eligible = 0;
-      for (const row of discovery) if ((await admitHistoryRow(db, link, row)) !== null) eligible++;
+      const eligible: Array<{ row: HistoryRow; key: string }> = [];
+      for (const row of discovery) {
+        const result = await admitHistoryRow(db, link, row);
+        if (result !== null) eligible.push({ row, key: result.key });
+      }
       const lastDiscovered = discovery.at(-1);
       db.tx(() => {
+        const active = db.one<{
+          generation: number;
+          backfill_run_revision: number;
+          backfill_state: string;
+          status: string;
+          forward_scrobbles: number;
+          backfill_discovery_done: number;
+          total: number;
+        }>(
+          `SELECT generation,backfill_run_revision,backfill_state,status,forward_scrobbles,backfill_discovery_done,
+             backfill_total AS total FROM linked_accounts WHERE id=?`,
+          link.id,
+        );
+        if (
+          active === null ||
+          active.generation !== link.generation ||
+          active.backfill_run_revision !== link.backfill_run_revision ||
+          active.backfill_state !== 'running' ||
+          active.status !== 'active' ||
+          active.forward_scrobbles !== 1 ||
+          active.backfill_discovery_done !== 0
+        )
+          return;
+        let addedTotal = 0;
+        let settledSkipped = 0;
+        for (let i = 0; i < eligible.length; i++) {
+          const item = eligible[i];
+          if (item === undefined) continue;
+          const valid = validateCurrentCandidate(db, link, item.row, item.key);
+          if (valid === null) {
+            addedTotal++;
+            settledSkipped++;
+            continue;
+          }
+          const inserted = db.run(
+            `INSERT OR IGNORE INTO link_backfill_items(link_id,generation,run_revision,ordinal,identity_key,uri,cid,kind,event_at)
+             VALUES(?,?,?,?,?,?,?,?,?)`,
+            link.id,
+            link.generation,
+            link.backfill_run_revision,
+            active.total + i,
+            item.key,
+            item.row.uri,
+            item.row.cid,
+            item.row.kind,
+            item.row.event_at,
+          );
+          if (inserted.rowsWritten > 0) addedTotal++;
+        }
         db.run(
-          `UPDATE linked_accounts SET backfill_total=backfill_total+?,backfill_discovery_cursor=?,
+          `UPDATE linked_accounts SET backfill_total=backfill_total+?,backfill_done=backfill_done+?,backfill_discovery_cursor=?,
              backfill_discovery_done=CASE WHEN ? THEN 1 ELSE 0 END,
-             backfill_cursor=CASE WHEN ? THEN NULL ELSE backfill_cursor END
+             backfill_cursor=NULL
            WHERE id=? AND generation=? AND backfill_run_revision=? AND status='active'
              AND forward_scrobbles=1 AND backfill_state='running' AND backfill_discovery_done=0`,
-          eligible,
+          addedTotal,
+          settledSkipped,
           lastDiscovered === undefined
             ? null
             : JSON.stringify({ at: lastDiscovered.event_at, uri: lastDiscovered.uri }),
-          discovery.length < maxPageSize ? 1 : 0,
           discovery.length < maxPageSize ? 1 : 0,
           link.id,
           link.generation,
@@ -270,75 +518,6 @@ export async function runLinkBackfill(
       });
       return discovery.length;
     }
-    const queuedHistory = db.one<{ n: number }>(
-      "SELECT count(*) AS n FROM forward_outbox WHERE priority=1 AND state='queued'",
-    )?.n;
-    if (queuedHistory === undefined) throw new Error('missing history queue count');
-    const queueSpace = BACKFILL_HISTORY_QUEUE_HIGH_WATER - queuedHistory;
-    if (queueSpace <= 0) return 0;
-    const pageLimit = Math.min(maxPageSize, queueSpace);
-    const page = candidates(db, link, now, pageLimit, cursorOf(link.backfill_cursor));
-    const admitted: Array<{ row: HistoryRow; key: string; payload: unknown }> = [];
-    for (const row of page) {
-      const result = await admitHistoryRow(db, link, row);
-      if (result !== null) admitted.push({ row, ...result });
-    }
-    const last = page.at(-1);
-    const committed = db.tx(() => {
-      const current = db.one<{
-        generation: number;
-        backfill_run_revision: number;
-        backfill_state: string;
-        status: string;
-        forward_scrobbles: number;
-      }>(
-        'SELECT generation,backfill_run_revision,backfill_state,status,forward_scrobbles FROM linked_accounts WHERE id=?',
-        link.id,
-      );
-      if (
-        current === null ||
-        current.generation !== link.generation ||
-        current.backfill_run_revision !== link.backfill_run_revision ||
-        current.backfill_state !== 'running' ||
-        current.status !== 'active' ||
-        current.forward_scrobbles !== 1
-      )
-        return false;
-      for (const item of admitted) {
-        enqueueForwards(db, {
-          did: link.did,
-          linkId: link.id,
-          priority: 1,
-          now,
-          random,
-          items:
-            item.row.kind === 'scrobble'
-              ? [{ kind: 'scrobble', listenKey: item.key, payload: item.payload }]
-              : [{ kind: 'love', operationId: item.key, payload: item.payload }],
-        });
-      }
-      if (last === undefined) {
-        db.run(
-          "UPDATE linked_accounts SET backfill_state='done',backfill_cursor=NULL,backfill_failures=0,backfill_next_attempt_ms=NULL,backfill_total=max(backfill_total,backfill_done) WHERE id=? AND generation=? AND backfill_run_revision=? AND status='active' AND forward_scrobbles=1 AND backfill_state='running'",
-          link.id,
-          link.generation,
-          link.backfill_run_revision,
-        );
-      } else {
-        const nextState = page.length < pageLimit ? 'done' : 'running';
-        db.run(
-          "UPDATE linked_accounts SET backfill_state=?,backfill_cursor=?,backfill_done=min(backfill_total,backfill_done+?),backfill_failures=0,backfill_next_attempt_ms=NULL WHERE id=? AND generation=? AND backfill_run_revision=? AND status='active' AND forward_scrobbles=1 AND backfill_state='running'",
-          nextState,
-          JSON.stringify({ at: last.event_at, uri: last.uri }),
-          admitted.length,
-          link.id,
-          link.generation,
-          link.backfill_run_revision,
-        );
-      }
-      return true;
-    });
-    return committed ? page.length : 0;
   } catch (error) {
     throw new BackfillAttemptFailure(
       { id: link.id, generation: link.generation, backfill_run_revision: link.backfill_run_revision },

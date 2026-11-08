@@ -220,6 +220,7 @@ export function saveLink(deps: LinkDeps, input: SaveLinkInput): SaveLinkResult {
         ? (db.one<{ boundary: number }>('SELECT coalesce(max(admission_seq),0) AS boundary FROM forward_admissions')
             ?.boundary ?? 0)
         : existing.generation_start_seq;
+      if (changedRemote) db.run('DELETE FROM link_backfill_items WHERE link_id=?', existing.id);
       if (changedRemote)
         db.run(
           `UPDATE forward_outbox SET state='expired',last_error='account_changed',updated_at_ms=?
@@ -328,6 +329,7 @@ export function patchLink(
     const nowPlaying = patch.forwardNowPlaying ?? row.forward_now_playing === 1;
     const pullEnabled = patch.pullEnabled ?? row.pull_enabled === 1;
     const enableScrobbles = row.forward_scrobbles === 0 && scrobbles;
+    if (enableScrobbles) db.run('DELETE FROM link_backfill_items WHERE link_id=?', row.id);
     db.run(
       `UPDATE linked_accounts SET forward_scrobbles = ?, forward_now_playing = ?, pull_enabled = ?,
        backfill_state=CASE WHEN ? THEN 'pending' ELSE backfill_state END,
