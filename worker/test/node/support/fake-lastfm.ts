@@ -545,7 +545,11 @@ export class FakeLastfm implements Routable {
     if (POST_ONLY.has(method) && httpMethod !== 'POST') {
       throw new LastfmError(3, 'Invalid Method - this method must be called with POST');
     }
-    if (SIGNED_METHODS.has(method) || (method === 'user.getRecentTracks' && params.has('sk')) || method === 'user.getLovedTracks') {
+    if (
+      SIGNED_METHODS.has(method) ||
+      (method === 'user.getRecentTracks' && params.has('sk')) ||
+      method === 'user.getLovedTracks'
+    ) {
       const sig = (params.get('api_sig') ?? '').toLowerCase();
       if (!/^[0-9a-f]{32}$/.test(sig) || sig !== lastfmSignature(params, this.secret)) throw new LastfmError(13);
     }
@@ -788,7 +792,13 @@ export class FakeLastfm implements Routable {
           mbid: love.mbid ?? '',
           date: { uts: String(love.uts), '#text': lastfmDateText(love.uts) },
         })),
-        '@attr': { user: state.name, page: String(page), perPage: String(limit), totalPages: String(totalPages), total: String(tracks.length) },
+        '@attr': {
+          user: state.name,
+          page: String(page),
+          perPage: String(limit),
+          totalPages: String(totalPages),
+          total: String(tracks.length),
+        },
       },
     };
   }

@@ -140,6 +140,7 @@ export const OUTBOUND_CONSUMERS = [
   'listenbrainz-forward',
   'lastfm-import',
   'lastfm-pull',
+  'listenbrainz-pull',
   'listenbrainz-import',
   'jetstream',
   'musicbrainz',
@@ -154,7 +155,7 @@ export const OUTBOUND_WIRES = Object.freeze({
   oauth: ['oauth-client', 'pds-writer'],
   forward: ['lastfm-forward', 'listenbrainz-forward'],
   imports: ['lastfm-import', 'listenbrainz-import'],
-  'linked-pull': ['lastfm-pull'],
+  'linked-pull': ['lastfm-pull', 'listenbrainz-pull'],
   jetstream: ['jetstream'],
   musicbrainz: ['musicbrainz'],
   'cover-art': ['cover-art'],
@@ -613,8 +614,22 @@ export async function productionFeatures(options: ProductionFeatureOptions): Pro
                 apiRoot: config.lastfmApiRoot,
                 apiKey: secrets.lastfm?.apiKey ?? null,
                 sharedSecret: secrets.lastfm?.sharedSecret ?? null,
+                listenbrainzApiRoot: config.listenbrainzApiRoot,
                 intervalMs: config.linkedPullIntervalMs,
                 pacer: lastfmImportPacer(pacing),
+                listenbrainzPacer: (linkId, generation) => {
+                  const key = `link:${linkId}:generation:${generation}`;
+                  return {
+                    take(nowMs) {
+                      return pacing.tryListenbrainz(key, nowMs)
+                        ? null
+                        : Math.max(nowMs + 1, pacing.listenbrainzAvailableAt(key));
+                    },
+                    holdUntil(untilMs) {
+                      pacing.deferListenbrainz(key, untilMs);
+                    },
+                  };
+                },
                 writerAvailability: pullWriterAvailability,
               },
               now,

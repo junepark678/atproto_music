@@ -91,7 +91,13 @@ export function stagePullPage(
     nowMs: number;
     items: readonly PulledListen[];
     credentialCiphertext?: Uint8Array;
-    listenRound?: { upperMs: number | null; floorMs: number | null; nextPage: number | null };
+    listenRound?: {
+      upperMs: number | null;
+      floorMs: number | null;
+      nextPage: number | null;
+      saturated?: boolean;
+      holdReason?: string | null;
+    };
     skippedCount?: number;
   },
 ): StageOutcome[] {
@@ -197,11 +203,16 @@ export function stagePullPage(
     );
     if (args.listenRound !== undefined)
       db.run(
-        `UPDATE linked_pull_state SET listen_round_upper_ms=?,listen_round_floor_ms=?,listen_round_page=?
+        `UPDATE linked_pull_state SET listen_round_upper_ms=?,listen_round_floor_ms=?,listen_round_page=?,
+          listen_round_saturated=coalesce(?,listen_round_saturated),hold_reason=coalesce(?,hold_reason),
+          poll_next_at_ms=CASE WHEN ? THEN NULL ELSE poll_next_at_ms END
          WHERE link_id=? AND generation=?`,
         args.listenRound.upperMs,
         args.listenRound.floorMs,
         args.listenRound.nextPage,
+        args.listenRound.saturated === undefined ? null : args.listenRound.saturated ? 1 : 0,
+        args.listenRound.holdReason ?? null,
+        args.listenRound.saturated ? 1 : 0,
         args.linkId,
         args.generation,
       );
@@ -238,6 +249,10 @@ export function stageLovePage(
       nextPage: number | null;
       committedBoundaryMs: number | null;
       committedBoundaryKey: string | null;
+      totalCount?: number | null;
+      firstKey?: string | null;
+      newestMs?: number | null;
+      completedAtMs?: number | null;
     };
   },
 ): Array<'accepted' | 'duplicate' | 'tombstoned' | 'unresolved'> {
@@ -288,7 +303,7 @@ export function stageLovePage(
     for (const item of args.items) {
       if (!item.itemKey) throw new TypeError('invalid pull item key');
       if (!item.artist || !item.track) {
-        outcomes.push('unresolved');
+        outcomes.push(isLoveTombstoned(db, args.did, '', item.recordingMbid ?? null) ? 'tombstoned' : 'unresolved');
         continue;
       }
       const key = normalizedLoveKey(item.artist, item.track);
@@ -379,16 +394,27 @@ export function stageLovePage(
       db.run(
         `UPDATE linked_pull_state SET love_round_upper_ms=?,love_round_floor_ms=?,love_round_page=?,
           love_boundary_ms=coalesce(?,love_boundary_ms),love_boundary_key=coalesce(?,love_boundary_key),
+          love_round_total_count=?,love_round_first_key=?,love_round_newest_ms=?,
           skipped_count=skipped_count+? WHERE link_id=? AND generation=?`,
         args.loveRound.upperMs,
         args.loveRound.floorMs,
         args.loveRound.nextPage,
         args.loveRound.committedBoundaryMs,
         args.loveRound.committedBoundaryKey,
+        args.loveRound.totalCount ?? null,
+        args.loveRound.firstKey ?? null,
+        args.loveRound.newestMs ?? null,
         outcomes.filter((outcome) => outcome === 'unresolved').length,
         args.linkId,
         args.generation,
       );
+      if (args.loveRound.completedAtMs !== undefined && args.loveRound.completedAtMs !== null)
+        db.run(
+          'UPDATE linked_accounts SET last_pull_ms=? WHERE id=? AND generation=?',
+          args.loveRound.completedAtMs,
+          args.linkId,
+          args.generation,
+        );
     } else {
       db.run(
         'UPDATE linked_pull_state SET love_boundary_ms=?,love_boundary_key=? WHERE link_id=? AND generation=?',

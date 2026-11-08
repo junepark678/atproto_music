@@ -300,7 +300,9 @@ export function saveLink(deps: LinkDeps, input: SaveLinkInput): SaveLinkResult {
         now,
       );
       db.run(
-        `UPDATE linked_pull_state SET hold_reason=NULL,retry_at_ms=NULL,failures=0,poll_next_at_ms=?,updated_at_ms=?
+        `UPDATE linked_pull_state SET hold_reason=NULL,retry_at_ms=NULL,failures=0,listen_round_saturated=0,
+          listen_round_upper_ms=NULL,listen_round_floor_ms=NULL,listen_round_page=NULL,page_cursor=NULL,
+          poll_next_at_ms=?,updated_at_ms=?
          WHERE link_id=? AND generation=?`,
         now,
         now,
@@ -416,7 +418,9 @@ export function patchLink(
     );
     if (resumePull)
       db.run(
-        `UPDATE linked_pull_state SET poll_next_at_ms=?,hold_reason=NULL,retry_at_ms=NULL,failures=0,updated_at_ms=?
+        `UPDATE linked_pull_state SET poll_next_at_ms=?,hold_reason=NULL,retry_at_ms=NULL,failures=0,
+          listen_round_saturated=0,listen_round_upper_ms=NULL,listen_round_floor_ms=NULL,listen_round_page=NULL,
+          page_cursor=NULL,updated_at_ms=?
          WHERE link_id=? AND generation=?`,
         deps.clock.nowMs(),
         deps.clock.nowMs(),

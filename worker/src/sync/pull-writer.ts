@@ -38,6 +38,8 @@ export type PullHoldReason =
   | 'staging_capacity'
   | 'credential_unavailable'
   | 'lastfm_not_configured'
+  | 'listenbrainz_not_configured'
+  | 'listenbrainz_page_saturated'
   | 'upstream_unauthorized'
   | 'upstream_retry'
   | 'retry_exhausted'

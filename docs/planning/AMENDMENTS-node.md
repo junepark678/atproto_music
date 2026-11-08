@@ -556,19 +556,25 @@ receipt and no live batch gate.
 §12.2. The base ADR paragraphs remain unchanged until this draft is published.
 
 **Track S3 operational addition (draft).** Linked pulls run only on the closed
-`linked-pull` extension timer through the pinned Last.fm transport. They persist
-per-generation listen/love page rounds, continuation and next-due time, use a
-configurable ten-minute interval with jitter, share Last.fm pacing with the
-forward lane, and stop requesting at durable staging caps. Relink, account,
-credential and pause state are rechecked before accepting a response. A staged
-item is accepted by the existing origin=`import` writer and outbox; cursor
-progress does not pass an unstaged page. Operational holds distinguish a
-missing session, required reauthentication, publication disabled, insufficient
-scope, temporary session restore, legacy dedupe coverage, staging capacity,
-credential availability, upstream retry and permanent upstream errors.
+`linked-pull` extension timer through the pinned Last.fm and ListenBrainz
+transports. They persist per-generation listen/love page rounds, continuation
+and next-due time, use a configurable ten-minute interval with jitter, share
+each service's per-key pacing with its forward lane, and stop requesting at
+durable staging caps. Last.fm recent tracks overlap the watermark by one hour.
+ListenBrainz listens use exclusive `min_ts`, advancing from the maximum second
+in the descending response; an unpageable 1,000-item same-second tie is held
+with `listenbrainz_page_saturated` and does not advance the watermark. Positive
+feedback uses bounded offset pages and restarts at offset zero if the head or
+total changes during a scan. Relink, account, credential and pause state are
+rechecked before accepting a response. A staged item is accepted by the
+existing origin=`import` writer and outbox; cursor progress does not pass an
+unstaged page. Operational holds distinguish a missing session, required
+reauthentication, publication disabled, insufficient scope, temporary session
+restore, legacy dedupe coverage, staging capacity, credential availability,
+unpageable ListenBrainz ties, upstream retry and permanent upstream errors.
 `needsReauth` is true only when the actual stored OAuth session is missing or
-expired. These clauses describe the current Last.fm slice; ListenBrainz polling
-and the remaining S3 acceptance gate are still pending.
+expired. The S3 acceptance gate remains pending the full current-Node checks
+and review.
 
 > Forwarding suppression = the indexer's own resurrection suppression.
 

@@ -118,6 +118,10 @@ const NEW_TABLES: Record<string, ExpectedTable> = {
       'skipped_count',
       'listen_floor_at_ms',
       'love_floor_at_ms',
+      'listen_round_saturated',
+      'love_round_total_count',
+      'love_round_first_key',
+      'love_round_newest_ms',
     ],
     pk: ['link_id', 'generation'],
   },
@@ -1658,6 +1662,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       "33|'linked_love_user_intent_fence'",
       "34|'linked_pull_legacy_listen_second_recovery'",
       "35|'linked_pull_persisted_poll_rounds'",
+      "36|'linked_listenbrainz_pull_round_guards'",
     ]);
     // The new scrobble columns exist and are NULL on every migrated row.
     expect(after.newColumns).toHaveLength(expectedScrobbles);
@@ -1700,6 +1705,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       { version: 33, name: 'linked_love_user_intent_fence' },
       { version: 34, name: 'linked_pull_legacy_listen_second_recovery' },
       { version: 35, name: 'linked_pull_persisted_poll_rounds' },
+      { version: 36, name: 'linked_listenbrainz_pull_round_guards' },
     ]);
     expect(after.compat).toEqual([{ singleton: 1, min_compatible_version: 2 }]);
     expect(after.newTablesEmpty).toEqual(['mb_cover_art_usage']);

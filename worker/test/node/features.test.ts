@@ -176,7 +176,7 @@ function consumerOf(r: SpyRequest, asHost: string, dohHost: string, plcHost: str
       if (r.host === 'listenbrainz.test') return 'listenbrainz-import';
       return null;
     case 'linked-pull':
-      return r.host === 'lastfm.test' ? 'lastfm-pull' : null;
+      return r.host === 'lastfm.test' ? 'lastfm-pull' : r.host === 'listenbrainz.test' ? 'listenbrainz-pull' : null;
     case 'jetstream':
       return null;
     case 'musicbrainz':
@@ -227,6 +227,10 @@ async function exercise(w: World, alice: User): Promise<void> {
 
   // The timer-only pull uses its own pinned wire and the linked account's
   // encrypted session credential. Empty history keeps this proof read-only.
+  w.core.extensionTimers.kick('linked-pull');
+  await w.core.tick('extension');
+  // A second timer turn reaches the other linked service after the first
+  // durable state row has been installed.
   w.core.extensionTimers.kick('linked-pull');
   await w.core.tick('extension');
 

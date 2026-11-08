@@ -1287,6 +1287,17 @@ const MIGRATION_S3_PULL_POLLING: Migration = {
   ],
 };
 
+const MIGRATION_S3_LISTENBRAINZ_PULL: Migration = {
+  version: 36,
+  name: 'linked_listenbrainz_pull_round_guards',
+  statements: [
+    'ALTER TABLE linked_pull_state ADD COLUMN listen_round_saturated INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE linked_pull_state ADD COLUMN love_round_total_count INTEGER',
+    'ALTER TABLE linked_pull_state ADD COLUMN love_round_first_key TEXT',
+    'ALTER TABLE linked_pull_state ADD COLUMN love_round_newest_ms INTEGER',
+  ],
+};
+
 export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_1,
   MIGRATION_2,
@@ -1323,6 +1334,7 @@ export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_S3_LOVE_INTENT_FENCE,
   MIGRATION_S3_LISTEN_SECOND_RECOVERY,
   MIGRATION_S3_PULL_POLLING,
+  MIGRATION_S3_LISTENBRAINZ_PULL,
 ];
 
 /** The schema version this code expects. */

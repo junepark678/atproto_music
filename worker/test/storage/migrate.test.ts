@@ -705,7 +705,7 @@ describe('migrate', () => {
   // database at that version is ready for that code, across restarts.
   // Later additive migrations keep the v2 compatibility floor.
   it('SCHEMA_VERSION includes additive batch provenance and remains compatible with v2 code', async () => {
-    expect(SCHEMA_VERSION).toBe(35);
+    expect(SCHEMA_VERSION).toBe(36);
     expect(MIGRATIONS.map((m) => [m.version, m.name])).toEqual([
       [1, 'initial_workers_schema'],
       [2, 'node_schema'],
@@ -742,6 +742,7 @@ describe('migrate', () => {
       [33, 'linked_love_user_intent_fence'],
       [34, 'linked_pull_legacy_listen_second_recovery'],
       [35, 'linked_pull_persisted_poll_rounds'],
+      [36, 'linked_listenbrainz_pull_round_guards'],
     ]);
 
     const name = 'migrate-v2-ready';
@@ -789,6 +790,7 @@ describe('migrate', () => {
         { version: 33, name: 'linked_love_user_intent_fence' },
         { version: 34, name: 'linked_pull_legacy_listen_second_recovery' },
         { version: 35, name: 'linked_pull_persisted_poll_rounds' },
+        { version: 36, name: 'linked_listenbrainz_pull_round_guards' },
       ]);
       expect(db.all('SELECT min_compatible_version FROM schema_compat')).toEqual([{ min_compatible_version: 2 }]);
       // A row in a migration-2 table survives reopening.

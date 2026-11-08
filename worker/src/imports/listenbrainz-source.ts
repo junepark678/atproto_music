@@ -26,7 +26,10 @@ import type { BoundPolicyFetch } from '../node/policy-fetch';
 import type { FetchOutcome } from './jobs';
 import { type Boundary, type ListenEntry, type ParsedEntry, pageBoundary, sha256Hex } from './staging';
 
+export { sha256Hex } from './staging';
+
 export const LISTENBRAINZ_PAGE_COUNT = 1_000;
+export const LINKED_LISTENBRAINZ_PAGE_COUNT = 1_000;
 
 export interface ListenBrainzCursor {
   /** The exclusive upper bound (UNIX seconds) of the next request. */
@@ -38,6 +41,157 @@ export interface ListenBrainzFetchDeps {
   fetch: BoundPolicyFetch;
   /** LISTENBRAINZ_API_ROOT, e.g. `https://api.listenbrainz.org/`. */
   apiRoot: string;
+}
+
+export type LinkedListenBrainzPage =
+  | { kind: 'page'; rows: unknown[]; count: number; maxSecond: number | null; minSecond: number | null; rate: RateInfo }
+  | { kind: 'rate_limited'; untilMs: number | null; rate: RateInfo }
+  | { kind: 'pause'; error: 'upstream_unauthorized'; rate: RateInfo }
+  | { kind: 'fail'; error: 'remote_user_not_found' | 'listenbrainz_error'; rate: RateInfo }
+  | { kind: 'retry'; reason: string; rate: RateInfo | null };
+type LinkedListenBrainzError = Exclude<LinkedListenBrainzPage, { kind: 'page' }>;
+
+function linkedUrl(apiRoot: string, path: string, params: Record<string, string>): string {
+  const url = new URL(path, apiRoot.endsWith('/') ? apiRoot : `${apiRoot}/`);
+  for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
+  return url.href;
+}
+
+async function linkedResponse(
+  deps: ListenBrainzFetchDeps,
+  args: { url: string; token: string; nowMs: number },
+): Promise<{ response: Response; body: unknown; rate: RateInfo } | LinkedListenBrainzError> {
+  let response: Response;
+  try {
+    response = await deps.fetch(args.url, {
+      method: 'GET',
+      headers: { accept: 'application/json', authorization: `Token ${args.token}` },
+    });
+  } catch {
+    return { kind: 'retry', reason: 'network', rate: null };
+  }
+  const rate = rateInfo(response.headers);
+  if (response.status === 429) {
+    const untilMs = rate.resetInSeconds === null ? null : args.nowMs + Math.max(1, rate.resetInSeconds) * 1000;
+    return { kind: 'rate_limited', untilMs, rate };
+  }
+  if (response.status >= 500) return { kind: 'retry', reason: `http_${response.status}`, rate };
+  if (response.status === 401) return { kind: 'pause', error: 'upstream_unauthorized', rate };
+  if (response.status === 404) return { kind: 'fail', error: 'remote_user_not_found', rate };
+  if (response.status !== 200) return { kind: 'fail', error: 'listenbrainz_error', rate };
+  let body: unknown;
+  try {
+    body = JSON.parse(await response.text());
+  } catch {
+    return { kind: 'retry', reason: 'malformed_json', rate };
+  }
+  return { response, body, rate };
+}
+
+function record(value: unknown): Json | null {
+  return obj(value);
+}
+
+function boundedInteger(value: unknown, min: number, max: number): number | null {
+  if (typeof value === 'number' && Number.isSafeInteger(value) && value >= min && value <= max) return value;
+  if (typeof value === 'string' && /^\d{1,15}$/.test(value)) {
+    const parsed = Number(value);
+    if (Number.isSafeInteger(parsed) && parsed >= min && parsed <= max) return parsed;
+  }
+  return null;
+}
+
+/** One linked incremental page. min_ts is exclusive; ListenBrainz returns the earliest page, newest first. */
+export async function fetchLinkedListenBrainzListens(
+  deps: ListenBrainzFetchDeps,
+  args: { user: string; token: string; minTs: number; nowMs: number },
+): Promise<LinkedListenBrainzPage> {
+  const result = await linkedResponse(deps, {
+    url: linkedUrl(deps.apiRoot, `1/user/${encodeURIComponent(args.user)}/listens`, {
+      min_ts: String(args.minTs),
+      count: String(LINKED_LISTENBRAINZ_PAGE_COUNT),
+    }),
+    token: args.token,
+    nowMs: args.nowMs,
+  });
+  if ('kind' in result) return result;
+  const payload = record(record(result.body)?.payload);
+  const rows = payload?.listens;
+  const count = boundedInteger(payload?.count, 0, LINKED_LISTENBRAINZ_PAGE_COUNT);
+  if (!Array.isArray(rows) || count === null || count !== rows.length)
+    return { kind: 'retry', reason: 'malformed_page', rate: result.rate };
+  const seconds = rows.map((row) => listenedAtSeconds(record(row)?.listened_at));
+  if (seconds.some((second) => second === null))
+    return { kind: 'retry', reason: 'malformed_timestamp', rate: result.rate };
+  const valid = seconds as number[];
+  return {
+    kind: 'page',
+    rows,
+    count,
+    maxSecond: valid.length === 0 ? null : Math.max(...valid),
+    minSecond: valid.length === 0 ? null : Math.min(...valid),
+    rate: result.rate,
+  };
+}
+
+/** One paged positive-feedback page. Offset is explicit because feedback order has no secondary cursor. */
+export async function fetchLinkedListenBrainzFeedback(
+  deps: ListenBrainzFetchDeps,
+  args: { user: string; token: string; offset: number; nowMs: number },
+): Promise<
+  | {
+      kind: 'page';
+      rows: unknown[];
+      count: number;
+      totalCount: number;
+      offset: number;
+      maxSecond: number | null;
+      minSecond: number | null;
+      rate: RateInfo;
+    }
+  | LinkedListenBrainzError
+> {
+  const result = await linkedResponse(deps, {
+    url: linkedUrl(deps.apiRoot, `1/feedback/user/${encodeURIComponent(args.user)}/get-feedback`, {
+      score: '1',
+      metadata: 'true',
+      count: String(LINKED_LISTENBRAINZ_PAGE_COUNT),
+      offset: String(args.offset),
+    }),
+    token: args.token,
+    nowMs: args.nowMs,
+  });
+  if ('kind' in result) return result;
+  const envelope = record(result.body);
+  const root = record(envelope?.payload) ?? envelope;
+  const rows = root?.feedback;
+  const count = boundedInteger(root?.count, 0, LINKED_LISTENBRAINZ_PAGE_COUNT);
+  const totalCount = boundedInteger(root?.total_count, 0, Number.MAX_SAFE_INTEGER);
+  const offset = boundedInteger(root?.offset, 0, Number.MAX_SAFE_INTEGER);
+  if (
+    !Array.isArray(rows) ||
+    count === null ||
+    totalCount === null ||
+    offset === null ||
+    count !== rows.length ||
+    offset !== args.offset ||
+    offset + count > totalCount
+  )
+    return { kind: 'retry', reason: 'malformed_feedback', rate: result.rate };
+  const seconds = rows.map((row) => boundedInteger(record(row)?.created, 0, Number.MAX_SAFE_INTEGER));
+  if (seconds.some((second) => second === null))
+    return { kind: 'retry', reason: 'malformed_feedback_timestamp', rate: result.rate };
+  const valid = seconds as number[];
+  return {
+    kind: 'page',
+    rows,
+    count,
+    totalCount,
+    offset,
+    maxSecond: valid.length === 0 ? null : Math.max(...valid),
+    minSecond: valid.length === 0 ? null : Math.min(...valid),
+    rate: result.rate,
+  };
 }
 
 export function initialListenBrainzCursor(nowMs: number): ListenBrainzCursor {

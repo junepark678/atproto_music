@@ -17,6 +17,15 @@ import {
   mapLastfmRow,
   pageTracks,
 } from '../imports/lastfm-source';
+import {
+  fetchLinkedListenBrainzFeedback,
+  fetchLinkedListenBrainzListens,
+  LINKED_LISTENBRAINZ_PAGE_COUNT,
+  listenedAtSeconds,
+  mapListenBrainzRow,
+  type RateInfo,
+  sha256Hex,
+} from '../imports/listenbrainz-source';
 import { recordingByMbid } from '../musicbrainz/store';
 import type { BoundPolicyFetch } from '../node/policy-fetch';
 import { seedIndexedListenSecondSlice, seedLegacyListenSecondSlice } from '../outbox/listen-second-receipts';
@@ -44,6 +53,7 @@ const TERMINAL_HOLDS = new Set([
   'remote_user_not_found',
   'lastfm_key_rejected',
   'lastfm_error',
+  'listenbrainz_page_saturated',
 ]);
 
 type PullState = {
@@ -55,11 +65,17 @@ type PullState = {
   listen_round_upper_ms: number | null;
   listen_round_floor_ms: number | null;
   listen_round_page: number | null;
+  page_cursor: string | null;
+  listen_round_saturated: number;
   love_boundary_ms: number | null;
   love_boundary_key: string | null;
   love_round_upper_ms: number | null;
   love_round_floor_ms: number | null;
   love_round_page: number | null;
+  love_cursor: string | null;
+  love_round_total_count: number | null;
+  love_round_first_key: string | null;
+  love_round_newest_ms: number | null;
   poll_phase: 'listen' | 'love';
   listen_floor_at_ms: number | null;
   love_floor_at_ms: number | null;
@@ -135,10 +151,12 @@ export interface LinkedPullPollerDeps {
   box: Box;
   fetch: BoundPolicyFetch;
   apiRoot: string;
+  listenbrainzApiRoot?: string;
   apiKey: string | null;
   sharedSecret: string | null;
   intervalMs: number;
   pacer: Pacer;
+  listenbrainzPacer?: (linkId: string, generation: number) => Pacer;
   writerAvailability: PullWriterAvailabilitySource;
 }
 
@@ -152,8 +170,9 @@ export interface LinkedPullPollReport {
 function stateOf(db: Db, link: PullLink): PullState | null {
   return db.one<PullState>(
     `SELECT listen_watermark_ms,poll_next_at_ms,retry_at_ms,failures,hold_reason,listen_floor_at_ms,love_floor_at_ms,
-      listen_round_upper_ms,listen_round_floor_ms,listen_round_page,love_boundary_ms,love_boundary_key,
-      love_round_upper_ms,love_round_floor_ms,love_round_page,poll_phase
+      listen_round_upper_ms,listen_round_floor_ms,listen_round_page,page_cursor,listen_round_saturated,
+      love_boundary_ms,love_boundary_key,love_round_upper_ms,love_round_floor_ms,love_round_page,love_cursor,
+      love_round_total_count,love_round_first_key,love_round_newest_ms,poll_phase
      FROM linked_pull_state WHERE link_id=? AND generation=?`,
     link.id,
     link.generation,
@@ -240,6 +259,115 @@ function pullListenItems(tracks: readonly unknown[], floorMs: number, upperMs: n
   return items;
 }
 
+function activePacer(deps: LinkedPullPollerDeps, link: PullLink): Pacer {
+  return link.service === 'lastfm' ? deps.pacer : (deps.listenbrainzPacer?.(link.id, link.generation) ?? deps.pacer);
+}
+
+function rateHoldUntil(rate: RateInfo, nowMs: number): number | null {
+  if (rate.remaining !== 0) return null;
+  return nowMs + Math.min(3_600_000, Math.max(1000, (rate.resetInSeconds ?? 1) * 1000));
+}
+
+function stringField(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() !== '' ? value : null;
+}
+
+function feedbackKey(raw: unknown): string | null {
+  return sha256Hex(JSON.stringify(raw));
+}
+
+function listenBrainzLoveItems(
+  rows: readonly unknown[],
+  floorMs: number,
+  upperMs: number,
+  db: Db,
+): { items: PulledLove[]; newestMs: number | null; minMs: number | null; firstKey: string | null } {
+  const items: PulledLove[] = [];
+  const times: number[] = [];
+  const eligibleTimes: number[] = [];
+  for (const raw of rows) {
+    if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) continue;
+    const row = raw as Record<string, unknown>;
+    const createdSecond = listenedAtSeconds(row.created);
+    if (createdSecond === null) continue;
+    const createdMs = createdSecond * 1000;
+    times.push(createdMs);
+    if (createdMs < floorMs || createdMs > upperMs) continue;
+    eligibleTimes.push(createdMs);
+
+    const metadata =
+      row.track_metadata !== null && typeof row.track_metadata === 'object' && !Array.isArray(row.track_metadata)
+        ? (row.track_metadata as Record<string, unknown>)
+        : row.metadata !== null && typeof row.metadata === 'object' && !Array.isArray(row.metadata)
+          ? (row.metadata as Record<string, unknown>)
+          : {};
+    const submitted =
+      row.submitted !== null && typeof row.submitted === 'object' && !Array.isArray(row.submitted)
+        ? (row.submitted as Record<string, unknown>)
+        : metadata.submitted !== null && typeof metadata.submitted === 'object' && !Array.isArray(metadata.submitted)
+          ? (metadata.submitted as Record<string, unknown>)
+          : metadata;
+    const additional =
+      submitted.additional_info !== null &&
+      typeof submitted.additional_info === 'object' &&
+      !Array.isArray(submitted.additional_info)
+        ? (submitted.additional_info as Record<string, unknown>)
+        : metadata.additional_info !== null &&
+            typeof metadata.additional_info === 'object' &&
+            !Array.isArray(metadata.additional_info)
+          ? (metadata.additional_info as Record<string, unknown>)
+          : {};
+    const mapped =
+      metadata.mbid_mapping !== null &&
+      typeof metadata.mbid_mapping === 'object' &&
+      !Array.isArray(metadata.mbid_mapping)
+        ? (metadata.mbid_mapping as Record<string, unknown>)
+        : {};
+    const directMbid = stringField(row.recording_mbid) ?? stringField(additional.recording_mbid);
+    const mappedMbid = stringField(mapped.recording_mbid);
+    const recordingMbid = directMbid ?? mappedMbid;
+    let artist =
+      stringField(metadata.artist_name) ??
+      stringField(submitted.artist_name) ??
+      stringField(mapped.artist_name) ??
+      stringField(mapped.artist_credit_name);
+    let track =
+      stringField(metadata.track_name) ??
+      stringField(submitted.track_name) ??
+      stringField(mapped.track_name) ??
+      stringField(mapped.recording_name);
+    if ((!artist || !track) && recordingMbid !== null) {
+      const local = recordingByMbid(db, recordingMbid);
+      if (local !== null) {
+        artist ??= local.artistCredit;
+        track ??= local.title;
+      }
+    }
+    const itemKey = JSON.stringify([
+      createdSecond,
+      row.recording_msid ?? null,
+      directMbid,
+      mappedMbid,
+      metadata,
+      submitted,
+    ]);
+    // SHA-256 identities are deterministic and keep persisted staging bounded.
+    items.push({
+      itemKey: sha256Hex(itemKey),
+      artist,
+      track,
+      recordingMbid,
+      payload: { artist, track, ...(recordingMbid === null ? {} : { recordingMbid }) },
+    });
+  }
+  return {
+    items,
+    newestMs: eligibleTimes.length === 0 ? null : Math.max(...eligibleTimes),
+    minMs: times.length === 0 ? null : Math.min(...times),
+    firstKey: rows.length === 0 ? null : feedbackKey(rows[0]),
+  };
+}
+
 function pullLoveItems(tracks: readonly unknown[], floorMs: number, upperMs: number, db: Db): PulledLove[] {
   const items: PulledLove[] = [];
   for (const raw of tracks) {
@@ -277,10 +405,380 @@ function pullLoveItems(tracks: readonly unknown[], floorMs: number, upperMs: num
 
 function currentLinks(db: Db): PullLink[] {
   return db.all<PullLink>(
-    `SELECT * FROM linked_accounts WHERE service='lastfm' AND status='active' AND pull_enabled=1
+    `SELECT * FROM linked_accounts WHERE service IN ('lastfm','listenbrainz') AND status='active' AND pull_enabled=1
      ORDER BY coalesce((SELECT poll_next_at_ms FROM linked_pull_state p WHERE p.link_id=linked_accounts.id
        AND p.generation=linked_accounts.generation),0),id LIMIT 1000`,
   );
+}
+
+function startListenbrainzRound(deps: LinkedPullPollerDeps, link: PullLink, state: PullState, now: number): PullState {
+  if (state.listen_round_upper_ms !== null && state.listen_round_floor_ms !== null) return state;
+  const upper = now;
+  const floor = Math.max(state.listen_floor_at_ms ?? link.created_at_ms, state.listen_watermark_ms - 3_600_000);
+  deps.db.tx(() => {
+    if (!current(deps.db, link)) return;
+    deps.db.run(
+      `UPDATE linked_pull_state SET listen_round_upper_ms=?,listen_round_floor_ms=?,listen_round_page=1,
+        page_cursor=NULL,listen_round_saturated=0,poll_next_at_ms=?,updated_at_ms=? WHERE link_id=? AND generation=?`,
+      upper,
+      floor,
+      now,
+      now,
+      link.id,
+      link.generation,
+    );
+  });
+  return stateOf(deps.db, link)!;
+}
+
+function mappedListenBrainzItems(
+  rows: readonly unknown[],
+  floorMs: number,
+  upperMs: number,
+): { items: PulledListen[]; skipped: number } {
+  const items: PulledListen[] = [];
+  let skipped = 0;
+  for (const raw of rows) {
+    const mapped = mapListenBrainzRow(raw);
+    if (mapped.second === null || mapped.entry.kind !== 'listen') {
+      skipped++;
+      continue;
+    }
+    const listenedAtMs = mapped.second * 1000;
+    if (listenedAtMs < floorMs || listenedAtMs > upperMs) continue;
+    const artist = mapped.entry.input.artist;
+    const track = mapped.entry.input.track;
+    const [artistKey, trackKeyValue] = trackKey(artist, track);
+    items.push({
+      itemKey: mapped.id,
+      listenedAtMs,
+      artistKey,
+      trackKey: trackKeyValue,
+      payload: {
+        artist,
+        track,
+        listenedAt: mapped.entry.input.listenedAt,
+        ...(mapped.entry.input.album === undefined ? {} : { album: mapped.entry.input.album }),
+        ...(mapped.entry.input.recordingMbid === undefined ? {} : { recordingMbid: mapped.entry.input.recordingMbid }),
+      },
+    });
+  }
+  return { items, skipped };
+}
+
+async function runListenbrainzListenPage(
+  deps: LinkedPullPollerDeps,
+  link: PullLink,
+  state: PullState,
+  token: string,
+  now: number,
+): Promise<{ requested: number; staged: number; held: string | null; nextDueMs: number | null; saturated?: boolean }> {
+  const apiRoot = deps.listenbrainzApiRoot;
+  if (apiRoot === undefined) {
+    setHold(deps.db, link, 'listenbrainz_not_configured', now, now + deps.intervalMs);
+    return { requested: 0, staged: 0, held: 'listenbrainz_not_configured', nextDueMs: now + deps.intervalMs };
+  }
+  state = startListenbrainzRound(deps, link, state, now);
+  const upper = state.listen_round_upper_ms!;
+  const floor = state.listen_round_floor_ms!;
+  const floorSecond = Math.floor(floor / 1000);
+  const minTs = state.page_cursor === null ? Math.max(0, floorSecond - 1) : Number(state.page_cursor);
+  if (!Number.isSafeInteger(minTs) || minTs < 0) throw new Error('invalid ListenBrainz continuation');
+  const pacer = activePacer(deps, link);
+  const paceAt = pacer.take(now);
+  if (paceAt !== null) {
+    deps.db.run(
+      'UPDATE linked_pull_state SET poll_next_at_ms=?,updated_at_ms=? WHERE link_id=? AND generation=?',
+      paceAt,
+      now,
+      link.id,
+      link.generation,
+    );
+    return { requested: 0, staged: 0, held: null, nextDueMs: paceAt };
+  }
+  const response = await fetchLinkedListenBrainzListens(
+    { fetch: deps.fetch, apiRoot },
+    { user: link.remote_user, token, minTs, nowMs: now },
+  );
+  if (!current(deps.db, link)) return { requested: 1, staged: 0, held: null, nextDueMs: null };
+  if (response.kind === 'rate_limited') {
+    if (response.untilMs !== null) pacer.holdUntil(response.untilMs);
+    const retryDue = retry(deps.db, link, state, 'upstream_retry', now);
+    const due = Math.max(retryDue ?? now + deps.intervalMs, response.untilMs ?? now + 60_000);
+    deps.db.run(
+      'UPDATE linked_pull_state SET poll_next_at_ms=?,retry_at_ms=? WHERE link_id=? AND generation=?',
+      due,
+      due,
+      link.id,
+      link.generation,
+    );
+    return { requested: 1, staged: 0, held: 'upstream_retry', nextDueMs: due };
+  }
+  if (response.kind === 'pause') {
+    setHold(deps.db, link, response.error, now, null);
+    return { requested: 1, staged: 0, held: response.error, nextDueMs: null };
+  }
+  if (response.kind === 'fail') {
+    setHold(deps.db, link, response.error, now, null);
+    return { requested: 1, staged: 0, held: response.error, nextDueMs: null };
+  }
+  if (response.kind === 'retry') {
+    const due = retry(deps.db, link, state, 'upstream_retry', now);
+    return { requested: 1, staged: 0, held: 'upstream_retry', nextDueMs: due };
+  }
+  const rateDue = rateHoldUntil(response.rate, now);
+  if (rateDue !== null) pacer.holdUntil(rateDue);
+  const { items, skipped } = mappedListenBrainzItems(response.rows, floor, upper);
+  const maxSecond = response.maxSecond;
+  const nextMinTs = maxSecond === null ? null : maxSecond - 1;
+  const upperSecond = Math.floor(upper / 1000);
+  const complete =
+    response.count < LINKED_LISTENBRAINZ_PAGE_COUNT ||
+    (response.minSecond !== null && response.minSecond > upperSecond) ||
+    (nextMinTs !== null && nextMinTs > upperSecond);
+  const saturated =
+    !complete &&
+    response.count === LINKED_LISTENBRAINZ_PAGE_COUNT &&
+    ((response.maxSecond !== null && response.maxSecond === response.minSecond) ||
+      (nextMinTs !== null && nextMinTs <= minTs));
+  const proposedCursor = complete ? null : String(saturated ? minTs : nextMinTs);
+  const outcomes = stagePullPage(deps.db, {
+    linkId: link.id,
+    generation: link.generation,
+    sourceService: 'listenbrainz',
+    sourceAccount: link.remote_user,
+    did: link.did,
+    credentialCiphertext: bytes(link.credential_ciphertext),
+    proposedCursor,
+    proposedWatermarkMs: complete ? upper : state.listen_watermark_ms,
+    nowMs: now,
+    items,
+    skippedCount: skipped,
+    listenRound: {
+      upperMs: complete ? null : upper,
+      floorMs: complete ? null : floor,
+      nextPage: complete ? null : (state.listen_round_page ?? 1) + (saturated ? 0 : 1),
+      saturated,
+      ...(saturated ? { holdReason: 'listenbrainz_page_saturated' } : {}),
+    },
+  });
+  if (saturated) {
+    setHold(deps.db, link, 'listenbrainz_page_saturated', now, null);
+    return {
+      requested: 1,
+      staged: outcomes.filter((outcome) => outcome === 'accepted').length,
+      held: 'listenbrainz_page_saturated',
+      nextDueMs: null,
+      saturated: true,
+    };
+  }
+  const due = complete ? now + 1 : Math.max(now + 1, rateDue ?? 0);
+  deps.db.run(
+    `UPDATE linked_pull_state SET failures=0,retry_at_ms=NULL,hold_reason=NULL,poll_phase=?,poll_next_at_ms=?,
+      updated_at_ms=? WHERE link_id=? AND generation=?`,
+    complete ? 'love' : 'listen',
+    due,
+    now,
+    link.id,
+    link.generation,
+  );
+  const writer = await writePullSlice(deps.moduleDeps, {
+    linkId: link.id,
+    generation: link.generation,
+    available: deps.writerAvailability,
+    limit: 100,
+    credentialCiphertext: bytes(link.credential_ciphertext),
+  });
+  return {
+    requested: 1,
+    staged: outcomes.filter((outcome) => outcome === 'accepted').length,
+    held: writer.held,
+    nextDueMs: due,
+  };
+}
+
+function resetListenbrainzFeedbackRound(db: Db, link: PullLink, now: number): void {
+  db.tx(() => {
+    if (!current(db, link)) return;
+    db.run(
+      `UPDATE linked_pull_state SET love_round_upper_ms=NULL,love_round_floor_ms=NULL,love_round_page=NULL,
+        love_cursor=NULL,love_round_total_count=NULL,love_round_first_key=NULL,love_round_newest_ms=NULL,
+        poll_next_at_ms=?,updated_at_ms=? WHERE link_id=? AND generation=?`,
+      now + 1,
+      now,
+      link.id,
+      link.generation,
+    );
+  });
+}
+
+async function runListenbrainzFeedbackPage(
+  deps: LinkedPullPollerDeps,
+  link: PullLink,
+  state: PullState,
+  token: string,
+  now: number,
+): Promise<{ requested: number; staged: number; held: string | null; nextDueMs: number | null }> {
+  const apiRoot = deps.listenbrainzApiRoot;
+  if (apiRoot === undefined) {
+    setHold(deps.db, link, 'listenbrainz_not_configured', now, now + deps.intervalMs);
+    return { requested: 0, staged: 0, held: 'listenbrainz_not_configured', nextDueMs: now + deps.intervalMs };
+  }
+  if (state.love_round_upper_ms === null || state.love_round_floor_ms === null) {
+    const upper = now;
+    const floor = Math.max(state.love_floor_at_ms ?? link.created_at_ms, state.love_boundary_ms ?? 0);
+    deps.db.tx(() => {
+      if (!current(deps.db, link)) return;
+      deps.db.run(
+        `UPDATE linked_pull_state SET love_round_upper_ms=?,love_round_floor_ms=?,love_round_page=0,
+          love_cursor=NULL,love_round_total_count=NULL,love_round_first_key=NULL,love_round_newest_ms=NULL,
+          poll_next_at_ms=?,updated_at_ms=? WHERE link_id=? AND generation=?`,
+        upper,
+        floor,
+        now,
+        now,
+        link.id,
+        link.generation,
+      );
+    });
+    state = stateOf(deps.db, link)!;
+  }
+  const upper = state.love_round_upper_ms!;
+  const floor = state.love_round_floor_ms!;
+  let offset = state.love_round_page ?? 0;
+  let verifiedPage = false;
+  const pacer = activePacer(deps, link);
+  const paceAt = pacer.take(now);
+  if (paceAt !== null) {
+    deps.db.run(
+      'UPDATE linked_pull_state SET poll_next_at_ms=?,updated_at_ms=? WHERE link_id=? AND generation=?',
+      paceAt,
+      now,
+      link.id,
+      link.generation,
+    );
+    return { requested: 0, staged: 0, held: null, nextDueMs: paceAt };
+  }
+  const verifyHead = offset > 0 && state.love_cursor === 'verify';
+  const response = await fetchLinkedListenBrainzFeedback(
+    { fetch: deps.fetch, apiRoot },
+    { user: link.remote_user, token, offset: verifyHead ? 0 : offset, nowMs: now },
+  );
+  if (!current(deps.db, link)) return { requested: 1, staged: 0, held: null, nextDueMs: null };
+  if (response.kind === 'rate_limited') {
+    if (response.untilMs !== null) pacer.holdUntil(response.untilMs);
+    const retryDue = retry(deps.db, link, state, 'upstream_retry', now);
+    const due = Math.max(retryDue ?? now + deps.intervalMs, response.untilMs ?? now + 60_000);
+    deps.db.run(
+      'UPDATE linked_pull_state SET poll_next_at_ms=?,retry_at_ms=? WHERE link_id=? AND generation=?',
+      due,
+      due,
+      link.id,
+      link.generation,
+    );
+    return { requested: 1, staged: 0, held: 'upstream_retry', nextDueMs: due };
+  }
+  if (response.kind === 'pause') {
+    setHold(deps.db, link, response.error, now, null);
+    return { requested: 1, staged: 0, held: response.error, nextDueMs: null };
+  }
+  if (response.kind === 'fail') {
+    setHold(deps.db, link, response.error, now, null);
+    return { requested: 1, staged: 0, held: response.error, nextDueMs: null };
+  }
+  if (response.kind === 'retry') {
+    const due = retry(deps.db, link, state, 'upstream_retry', now);
+    return { requested: 1, staged: 0, held: 'upstream_retry', nextDueMs: due };
+  }
+  const rateDue = rateHoldUntil(response.rate, now);
+  if (rateDue !== null) pacer.holdUntil(rateDue);
+
+  if (verifyHead) {
+    const currentHeadKey = response.rows.length === 0 ? null : feedbackKey(response.rows[0]);
+    if (response.totalCount !== state.love_round_total_count || currentHeadKey !== state.love_round_first_key) {
+      // Offset pagination can shift as new feedback arrives. Restart the scan
+      // at the head and let staging dedupe page zero again.
+      offset = 0;
+      verifiedPage = true;
+    } else {
+      const due = Math.max(now + 1, rateDue ?? 0);
+      deps.db.tx(() => {
+        if (!current(deps.db, link)) return;
+        deps.db.run(
+          'UPDATE linked_pull_state SET love_cursor=?,poll_next_at_ms=?,updated_at_ms=? WHERE link_id=? AND generation=?',
+          String(offset),
+          due,
+          now,
+          link.id,
+          link.generation,
+        );
+      });
+      return { requested: 1, staged: 0, held: null, nextDueMs: due };
+    }
+  } else if (offset > 0 && state.love_round_total_count !== response.totalCount) {
+    // A changed total count means inserts/deletes shifted offsets. Restart
+    // from offset zero before accepting any items from this response.
+    resetListenbrainzFeedbackRound(deps.db, link, now);
+    return { requested: 1, staged: 0, held: null, nextDueMs: now + 1 };
+  }
+
+  const { items, newestMs, minMs, firstKey } = listenBrainzLoveItems(response.rows, floor, upper, deps.db);
+  const roundNewestMs = Math.max(state.love_round_newest_ms ?? 0, newestMs ?? 0) || null;
+  const floorSecond = Math.floor(floor / 1000);
+  const crossedBoundary = minMs !== null && Math.floor(minMs / 1000) < floorSecond;
+  const complete =
+    crossedBoundary ||
+    response.count < LINKED_LISTENBRAINZ_PAGE_COUNT ||
+    offset + response.count >= response.totalCount;
+  const nextOffset = offset + response.count;
+  const committedBoundary = complete ? Math.max(state.love_boundary_ms ?? floor, roundNewestMs ?? floor) : null;
+  const outcomes = stageLovePage(deps.db, {
+    linkId: link.id,
+    generation: link.generation,
+    sourceService: 'listenbrainz',
+    sourceAccount: link.remote_user,
+    did: link.did,
+    credentialCiphertext: bytes(link.credential_ciphertext),
+    proposedCursor: complete ? null : 'verify',
+    proposedBoundaryMs: committedBoundary ?? state.love_boundary_ms ?? floor,
+    proposedBoundaryKey: null,
+    nowMs: now,
+    items,
+    loveRound: {
+      upperMs: complete ? null : upper,
+      floorMs: complete ? null : floor,
+      nextPage: complete ? null : nextOffset,
+      committedBoundaryMs: committedBoundary,
+      committedBoundaryKey: null,
+      totalCount: complete ? null : response.totalCount,
+      firstKey: complete ? null : verifiedPage ? firstKey : (state.love_round_first_key ?? firstKey),
+      newestMs: complete ? null : roundNewestMs,
+      completedAtMs: complete ? now : null,
+    },
+  });
+  const due = complete ? now + dueJitter(deps.random, deps.intervalMs) : Math.max(now + 1, rateDue ?? 0);
+  deps.db.run(
+    `UPDATE linked_pull_state SET poll_phase=?,poll_next_at_ms=?,failures=0,retry_at_ms=NULL,hold_reason=NULL,
+      updated_at_ms=? WHERE link_id=? AND generation=?`,
+    complete ? 'listen' : 'love',
+    due,
+    now,
+    link.id,
+    link.generation,
+  );
+  const writer = await writePullSlice(deps.moduleDeps, {
+    linkId: link.id,
+    generation: link.generation,
+    available: deps.writerAvailability,
+    limit: 100,
+    credentialCiphertext: bytes(link.credential_ciphertext),
+  });
+  return {
+    requested: 1,
+    staged: outcomes.filter((outcome) => outcome === 'accepted').length,
+    held: writer.held,
+    nextDueMs: due,
+  };
 }
 
 async function runLovePage(
@@ -403,7 +901,7 @@ export async function runLinkedLastfmPull(
     if (state.poll_next_at_ms === null) continue;
     nextDueMs = nextDueMs === null ? state.poll_next_at_ms : Math.min(nextDueMs, state.poll_next_at_ms);
     if (state.poll_next_at_ms > now) continue;
-    if (deps.apiKey === null || deps.sharedSecret === null) {
+    if (link.service === 'lastfm' && (deps.apiKey === null || deps.sharedSecret === null)) {
       held = 'lastfm_not_configured';
       const due = now + deps.intervalMs;
       setHold(deps.db, link, held, now, due);
@@ -468,12 +966,47 @@ export async function runLinkedLastfmPull(
       nextDueMs = now + 60_000;
       break;
     }
+    if (link.service === 'listenbrainz' && state.listen_round_saturated !== 0) {
+      held = 'listenbrainz_page_saturated';
+      setHold(deps.db, link, held, now, null);
+      continue;
+    }
+    if (state.poll_phase === 'love' && link.service === 'listenbrainz') {
+      try {
+        const result = await runListenbrainzFeedbackPage(deps, link, state, credential, now);
+        requested += result.requested;
+        staged += result.staged;
+        held = result.held ?? priorWriterHeld;
+        nextDueMs = result.nextDueMs;
+      } catch (error) {
+        if (!current(deps.db, link)) continue;
+        held = error instanceof Error && error.message.includes('capacity') ? 'staging_capacity' : safeReason(error);
+        if (held === 'staging_capacity') setHold(deps.db, link, held, now, now + 60_000);
+        else nextDueMs = retry(deps.db, link, state, held, now) ?? nextDueMs;
+      }
+      break;
+    }
     if (state.poll_phase === 'love') {
       try {
         const result = await runLovePage(deps, link, state, credential, now);
         requested += result.requested;
         staged += result.staged;
         held = result.held;
+        nextDueMs = result.nextDueMs;
+      } catch (error) {
+        if (!current(deps.db, link)) continue;
+        held = error instanceof Error && error.message.includes('capacity') ? 'staging_capacity' : safeReason(error);
+        if (held === 'staging_capacity') setHold(deps.db, link, held, now, now + 60_000);
+        else nextDueMs = retry(deps.db, link, state, held, now) ?? nextDueMs;
+      }
+      break;
+    }
+    if (link.service === 'listenbrainz') {
+      try {
+        const result = await runListenbrainzListenPage(deps, link, state, credential, now);
+        requested += result.requested;
+        staged += result.staged;
+        held = result.held ?? priorWriterHeld;
         nextDueMs = result.nextDueMs;
       } catch (error) {
         if (!current(deps.db, link)) continue;
@@ -518,7 +1051,7 @@ export async function runLinkedLastfmPull(
     }
     try {
       const response = await fetchLastfmPullPage(
-        { fetch: deps.fetch, apiRoot: deps.apiRoot, apiKey: deps.apiKey, sharedSecret: deps.sharedSecret },
+        { fetch: deps.fetch, apiRoot: deps.apiRoot, apiKey: deps.apiKey!, sharedSecret: deps.sharedSecret! },
         {
           method: 'user.getRecentTracks',
           user: link.remote_user,
