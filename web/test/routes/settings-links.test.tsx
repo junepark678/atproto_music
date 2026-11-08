@@ -43,7 +43,7 @@ function mount() {
   return { root, unmount: () => render(null, root) };
 }
 
-function stubLinks(initial: Link[]) {
+function stubLinks(initial: Link[], options: { failPatch?: boolean } = {}) {
   const requests: Array<{ path: string; method: string; body?: unknown }> = [];
   let links = initial;
   vi.stubGlobal('fetch', async (input: RequestInfo | URL, init: RequestInit = {}) => {
@@ -55,6 +55,7 @@ function stubLinks(initial: Link[]) {
     if (path === '/api/v1/links' && method === 'GET') return Response.json({ items: links });
     const patchMatch = /^\/api\/v1\/links\/([^/]+)$/.exec(path);
     if (patchMatch && method === 'PATCH') {
+      if (options.failPatch) return Response.json({ error: 'upstream_error' }, { status: 502 });
       const id = decodeURIComponent(patchMatch[1]!);
       links = links.map((item) =>
         item.id === id
@@ -155,6 +156,41 @@ it('shows reconnect guidance and scrubs DIDs from the server error', async () =>
   expect(root.textContent).toContain('Needs reconnect');
   expect(root.textContent).toContain('Unable to sync an account');
   expect(root.textContent).not.toContain('did:');
+  expect(root.querySelector('.link-error')?.getAttribute('role')).toBeNull();
+  expect(root.querySelector('[role="alert"]')).toBeNull();
+  unmount();
+});
+
+it('shows known sync-error advice in plain words for each service', async () => {
+  stubLinks([
+    link({ id: 'lastfm-revoked', service: 'lastfm', status: 'revoked', lastError: 'session_revoked' }),
+    link({ id: 'lb-revoked', service: 'listenbrainz', status: 'revoked', lastError: 'token_revoked' }),
+    link({ id: 'credential-error', status: 'error', lastError: 'credential_unreadable' }),
+    link({ id: 'lastfm-key-error', service: 'lastfm', status: 'error', lastError: 'lastfm_key_rejected' }),
+  ]);
+  const { root, unmount } = mount();
+  await vi.waitFor(() => expect(root.querySelectorAll('.link-card')).toHaveLength(4));
+  expect(root.textContent).toContain('Last.fm disconnected this app. Reconnect to resume syncing.');
+  expect(root.textContent).toContain('ListenBrainz disconnected this app. Reconnect to resume syncing.');
+  expect(root.textContent).toContain("Saved credentials couldn't be read. Reconnect to resume syncing.");
+  expect(root.textContent).toContain("Last.fm is rejecting this server's API key. Syncing is paused.");
+  expect(root.querySelectorAll('.link-error[role="alert"]')).toHaveLength(0);
+  expect(root.textContent).not.toContain('did:');
+  unmount();
+});
+
+it('keeps action errors announced as alerts', async () => {
+  const requests = stubLinks([link()], { failPatch: true });
+  const { root, unmount } = mount();
+  await vi.waitFor(() => expect(root.querySelectorAll('.link-card')).toHaveLength(1));
+  const label = [...root.querySelectorAll('label')].find(
+    (item) => item.textContent?.trim() === 'Send scrobbles and loves',
+  )!;
+  const input = label.querySelector('input')!;
+  input.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+  input.dispatchEvent(new Event('change', { bubbles: true }));
+  await vi.waitFor(() => expect(root.querySelector('[role="alert"]')?.textContent).toContain('Something went wrong.'));
+  expect(requests.some((request) => request.method === 'PATCH')).toBe(true);
   unmount();
 });
 
@@ -187,11 +223,12 @@ it('still connects and disconnects ListenBrainz links', async () => {
   await vi.waitFor(() => expect(root.querySelector<HTMLButtonElement>('form button')?.disabled).toBe(false));
   root.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
   await vi.waitFor(() => expect(root.textContent).toContain('alice'));
+  expect(root.textContent).toContain('Disconnect ListenBrainz');
   expect(requests.some((request) => request.path === '/api/v1/links/listenbrainz' && request.method === 'POST')).toBe(
     true,
   );
   [...root.querySelectorAll('button')]
-    .find((button) => button.textContent?.includes('Disconnect listenbrainz'))
+    .find((button) => button.textContent?.includes('Disconnect ListenBrainz'))
     ?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
   await vi.waitFor(() => expect(root.textContent).toContain('No music services are connected.'));
   expect(requests.some((request) => request.path === '/api/v1/links/link-1' && request.method === 'DELETE')).toBe(true);

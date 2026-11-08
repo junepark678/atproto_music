@@ -19,8 +19,16 @@ function lastSynced(link: Link): string | undefined {
   return candidates.sort((a, b) => Date.parse(b) - Date.parse(a))[0];
 }
 
-function errorWords(error: string): string {
-  const words = scrubDids(error).replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
+function errorWords(error: string, service: string): string {
+  const advice =
+    error === 'session_revoked' || error === 'token_revoked'
+      ? `${service} disconnected this app. Reconnect to resume syncing.`
+      : error === 'credential_unreadable'
+        ? "Saved credentials couldn't be read. Reconnect to resume syncing."
+        : error === 'lastfm_key_rejected'
+          ? "Last.fm is rejecting this server's API key. Syncing is paused."
+          : error;
+  const words = scrubDids(advice).replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
   return words ? words[0]!.toLocaleUpperCase() + words.slice(1) : '';
 }
 
@@ -141,8 +149,8 @@ export default function SettingsLinks() {
       setLinks((current) => current?.map((item) => (item.id === updated.id ? updated : item)) ?? current);
       setMessage(`${serviceName(link.service)} sync settings updated.`);
     } catch (e) {
-      setError(e);
       await refresh();
+      setError(e);
     } finally {
       setBusy(false);
     }
@@ -203,11 +211,7 @@ export default function SettingsLinks() {
                   </div>
                 ) : null}
                 {link.sync?.needsReauth ? <p role="status">Reconnect your account to keep importing.</p> : null}
-                {lastError ? (
-                  <p class="link-error" role="alert">
-                    {errorWords(lastError)}
-                  </p>
-                ) : null}
+                {lastError ? <p class="link-error">{errorWords(lastError, name)}</p> : null}
                 <fieldset class="link-settings" disabled={!canManage || busy}>
                   <legend>Sync settings</legend>
                   <label>
@@ -252,7 +256,7 @@ export default function SettingsLinks() {
                 ) : null}
                 {canManage ? (
                   <button type="button" disabled={busy} onClick={() => void remove(link)}>
-                    Disconnect {link.service}
+                    Disconnect {name}
                   </button>
                 ) : null}
               </li>
