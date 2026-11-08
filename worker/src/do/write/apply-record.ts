@@ -786,7 +786,7 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
     if (t.kind === 'love' && priorLove && loveIncarnation?.state === 'present') {
       const identityKey = `love-delete:${loveIncarnation.incarnation_key}`;
       const apiBridge = db.one<{ expected_cid: string }>(
-        `SELECT expected_cid FROM love_delete_bridges WHERE did=? AND uri=? AND incarnation_key=? AND state='pending'
+        `SELECT expected_cid FROM love_delete_bridges WHERE did=? AND uri=? AND incarnation_key=? AND state IN ('pending','succeeded')
          ORDER BY created_at_ms DESC LIMIT 1`,
         t.did,
         t.uri,
@@ -796,7 +796,7 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
       const apiEcho = apiBridge !== null && apiBridge.expected_cid === priorCid;
       if (apiBridge && !apiEcho)
         db.run(
-          "UPDATE love_delete_bridges SET state='obsolete' WHERE did=? AND uri=? AND incarnation_key=? AND state='pending'",
+          "UPDATE love_delete_bridges SET state='obsolete' WHERE did=? AND uri=? AND incarnation_key=? AND state IN ('pending','succeeded')",
           t.did,
           t.uri,
           loveIncarnation.incarnation_key,
@@ -811,7 +811,7 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
       });
       if (apiEcho)
         db.run(
-          "UPDATE love_delete_bridges SET state='consumed' WHERE did=? AND uri=? AND incarnation_key=? AND state='pending'",
+          "UPDATE love_delete_bridges SET state='consumed' WHERE did=? AND uri=? AND incarnation_key=? AND state IN ('pending','succeeded')",
           t.did,
           t.uri,
           loveIncarnation.incarnation_key,
@@ -870,7 +870,11 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
     if (t.kind === 'love' && !priorLove) {
       // API deletes can target a remote love the index never projected. A
       // successful, matching absence still consumes the pre-send bridge.
-      db.run("UPDATE love_delete_bridges SET state='consumed' WHERE did=? AND uri=? AND state='pending'", t.did, t.uri);
+      db.run(
+        "UPDATE love_delete_bridges SET state='consumed' WHERE did=? AND uri=? AND state IN ('pending','succeeded')",
+        t.did,
+        t.uri,
+      );
       db.run("UPDATE love_import_bridges SET state='consumed' WHERE did=? AND uri=? AND state='bound'", t.did, t.uri);
       db.run(
         "UPDATE love_incarnations SET state='absent',updated_at_ms=? WHERE uri=?",

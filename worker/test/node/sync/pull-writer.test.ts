@@ -7,7 +7,7 @@ import { describe, expect, it } from 'vitest';
 import type { LinkedAccountRow } from '../../../src/app/rows';
 import { applyRecordProof } from '../../../src/do/write/apply-record';
 import { linkDto } from '../../../src/forward/links';
-import { retainedForwardProvenance } from '../../../src/forward/projection';
+import { cleanupForwardAdmissionsForSuppression, retainedForwardProvenance } from '../../../src/forward/projection';
 import { removeScrobbleCreate } from '../../../src/outbox/delete-ops';
 import { seedLegacyListenSecondSlice } from '../../../src/outbox/listen-second-receipts';
 import { enqueueLove, enqueueUnlove } from '../../../src/outbox/love-ops';
@@ -16,7 +16,7 @@ import { insertPullLoveAdmission } from '../../../src/sync/pull-love-admissions'
 import { stageLovePage, stagePullPage } from '../../../src/sync/pull-staging';
 import { writePullSlice } from '../../../src/sync/pull-writer';
 import { isListenTombstoned, tombstoneListen } from '../../../src/sync/tombstones';
-import { LOVE, remoteRecords, withHarness } from '../outbox/support';
+import { CREATE, DELETE, LIST, LOVE, remoteRecords, withHarness } from '../outbox/support';
 
 async function setup(h: Parameters<Parameters<typeof withHarness>[0]>[0], did = 'did:plc:pullwriter') {
   h.seedUser(did);
@@ -202,6 +202,86 @@ describe('linked pull staged writer', () => {
         expect(h.db.all("SELECT link_id FROM forward_outbox WHERE did=? AND kind='love'", did)).toEqual([
           { link_id: targetLink },
         ]);
+      });
+    },
+  );
+
+  it.each([false, true])(
+    'explicit re-love after a pulled love delete survives operation GC while the delete projection is delayed (all prior operations collected=%s)',
+    async (collectAllOperations) => {
+      await withHarness(async (h) => {
+        const { did, linkId } = await setup(h, h.alice);
+        stageLovePage(h.db, {
+          linkId,
+          generation: 1,
+          sourceService: 'listenbrainz',
+          sourceAccount: 'remote',
+          did,
+          proposedCursor: null,
+          proposedBoundaryMs: 100,
+          proposedBoundaryKey: null,
+          nowMs: 2,
+          items: [
+            { itemKey: 'pulled', artist: 'Artist', track: 'Track', payload: { artist: 'Artist', track: 'Track' } },
+          ],
+        });
+        await writePullSlice(h.m, { linkId, generation: 1, available: async () => ({ available: true }) });
+        await h.runUntilIdle();
+        const applyProof = async (rkey: string) => {
+          const proof = await verifyRecordProof(await h.kit.repos.Alice.getRecordCar(LOVE, rkey), {
+            did,
+            collection: LOVE,
+            rkey,
+            signingKey: h.kit.users.Alice.key.didKey,
+          });
+          const nowNs = fromMs(h.kit.clock.nowMs());
+          return h.db.tx(() =>
+            applyRecordProof(h.db, proof, {
+              prefix: h.m.config.prefix!,
+              nowNs,
+              receiptNs: nowNs,
+              forwarding: { random: seededRandom(0x71) },
+            }),
+          );
+        };
+        const firstRemote = (await remoteRecords(h.kit, 'Alice', LOVE))[0]!;
+        expect((await applyProof(firstRemote.rkey)).outcome).toBe('applied');
+
+        const unlove = await enqueueUnlove(h.m, { did, artist: 'Artist', track: 'Track', origin: 'web' });
+        if (!unlove.ok) throw new Error('unlove was not admitted');
+        await h.runUntilIdle();
+        expect(await remoteRecords(h.kit, 'Alice', LOVE)).toHaveLength(0);
+        expect(h.db.all('SELECT state FROM love_delete_bridges WHERE operation_id=?', unlove.operation.id)).toEqual([
+          { state: 'succeeded' },
+        ]);
+
+        // Model operation GC before the Jetstream delete arrives. The bridge and
+        // incarnation are the durable fence against reusing the stale projection.
+        if (collectAllOperations) h.db.run('DELETE FROM operations WHERE did=?', did);
+        else h.db.run('DELETE FROM operations WHERE id=?', unlove.operation.id);
+        cleanupForwardAdmissionsForSuppression(h.db, did);
+        expect(h.db.all('SELECT state FROM love_delete_bridges WHERE did=?', did)).toEqual([{ state: 'succeeded' }]);
+        expect(
+          h.db.one('SELECT state FROM love_incarnations WHERE uri=?', `at://${did}/${LOVE}/${firstRemote.rkey}`),
+        ).toEqual({ state: 'present' });
+        h.restart();
+
+        const relove = await enqueueLove(h.m, { did, input: { artist: 'artist', track: 'TRACK' }, origin: 'web' });
+        if (!relove.ok) throw new Error('re-love was not admitted');
+        await h.runUntilIdle();
+        const secondUri = `at://${did}/${LOVE}/${relove.operation.rkey}`;
+        expect(relove.operation.rkey).not.toBe(firstRemote.rkey);
+        expect(h.op(relove.operation.id)).toMatchObject({ state: 'succeeded', result_uri: secondUri });
+        expect(h.writers.order()).toEqual([CREATE, LIST, DELETE, CREATE]);
+        expect(await remoteRecords(h.kit, 'Alice', LOVE)).toEqual([
+          expect.objectContaining({ rkey: relove.operation.rkey }),
+        ]);
+
+        expect((await applyProof(firstRemote.rkey)).outcome).toBe('absent');
+        const secondRemote = (await remoteRecords(h.kit, 'Alice', LOVE))[0]!;
+        expect((await applyProof(secondRemote.rkey)).outcome).toBe('applied');
+        expect(h.db.all('SELECT uri FROM loves WHERE did=?', did)).toEqual([{ uri: secondUri }]);
+        expect(h.db.one('SELECT state FROM love_delete_bridges WHERE did=?', did)).toEqual({ state: 'consumed' });
       });
     },
   );

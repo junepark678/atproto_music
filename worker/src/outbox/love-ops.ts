@@ -324,16 +324,22 @@ function existingLove(op: OperationRow, ctx: ExecContext, key: string): Existing
     if (last.kind === 'love.put' && last.uri !== null && last.cid !== null) {
       const rkey = ownRecordKey(last.uri, op.did, op.collection);
       if (rkey !== null) {
+        const fencedDelete =
+          db.one(
+            "SELECT 1 AS hit FROM love_delete_bridges WHERE did=? AND uri=? AND state IN ('pending','succeeded') LIMIT 1",
+            op.did,
+            last.uri,
+          ) !== null;
         const state = db.one<{ cid: string | null; state: string }>(
           `SELECT cid, state FROM record_state WHERE uri = ?`,
           last.uri,
         );
-        if (state === null) {
+        if (state === null && !fencedDelete) {
           // A successful write can be ahead of its proof. Keep that receipt
           // reusable across runs so a second intent cannot duplicate it.
           return { uri: last.uri, cid: last.cid, rkey };
         }
-        if (state.state === 'present' && state.cid !== null) {
+        if (!fencedDelete && state?.state === 'present' && state.cid !== null) {
           const projected = db.one<{
             uri: string;
             cid: string;
@@ -362,7 +368,13 @@ function existingLove(op: OperationRow, ctx: ExecContext, key: string): Existing
   const record = recordOf(op);
   const [artistKey, trackKeyPart] = trackKey(record?.artist as string, record?.track as string);
   const row = db.one<{ uri: string; cid: string }>(
-    `SELECT uri, cid FROM loves WHERE did = ? AND artist_key = ? AND track_key = ? ORDER BY created_at, uri LIMIT 1`,
+    `SELECT uri, cid FROM loves
+     WHERE did = ? AND artist_key = ? AND track_key = ?
+       AND NOT EXISTS (
+         SELECT 1 FROM love_delete_bridges AS bridge
+         WHERE bridge.did=loves.did AND bridge.uri=loves.uri AND bridge.state IN ('pending','succeeded')
+       )
+     ORDER BY created_at, uri LIMIT 1`,
     op.did,
     artistKey,
     trackKeyPart,
@@ -526,14 +538,28 @@ export const loveDeleteExecutor: Executor = {
       );
     };
     const outcome = await deleteMatching(op, ctx, loveMatches(key), [], bridgeBeforeDelete, bridgeFailed);
-    if (outcome.kind === 'succeeded') remember(ctx, op.did, key, { kind: 'love.delete', uri: null, cid: null });
+    if (outcome.kind === 'succeeded') {
+      ctx.m.db.run(
+        "UPDATE love_delete_bridges SET state='succeeded' WHERE did=? AND operation_id=? AND state='pending'",
+        op.did,
+        op.id,
+      );
+      remember(ctx, op.did, key, { kind: 'love.delete', uri: null, cid: null });
+    }
     return outcome;
   },
   async reconcile(op, ctx) {
     const key = unloveIdentity(op, ctx);
     if (key === null) return { kind: 'permanent', code: 'invalid_record_identity' };
     const outcome = await noneMatching(op, ctx, loveMatches(key));
-    if (outcome.kind === 'succeeded') remember(ctx, op.did, key, { kind: 'love.delete', uri: null, cid: null });
+    if (outcome.kind === 'succeeded') {
+      ctx.m.db.run(
+        "UPDATE love_delete_bridges SET state='succeeded' WHERE did=? AND operation_id=? AND state='pending'",
+        op.did,
+        op.id,
+      );
+      remember(ctx, op.did, key, { kind: 'love.delete', uri: null, cid: null });
+    }
     return outcome;
   },
 };
