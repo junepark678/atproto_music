@@ -193,6 +193,40 @@ describe('Last.fm entity read methods', () => {
     expect([unmatched.body.track.mbid, unmatched.body.track.duration]).toEqual(['', '0']);
   });
 
+  it('artist and album info fill missing MBIDs only when local matches agree, preserving submitted IDs', async () => {
+    const app = await entityApp();
+    const artistMbid = '11111111-1111-4111-8111-111111111111';
+    const releaseMbid = '22222222-2222-4222-8222-222222222222';
+    const ak = artistKey('Radiohead');
+    const albumKey = app.db.one<{ album_key: string }>(
+      "SELECT album_key FROM scrobbles WHERE artist='Radiohead' AND album='OK Computer' LIMIT 1",
+    )!.album_key;
+    app.db.run(
+      "UPDATE mb_tracks SET status='matched',artist_mbids=?,release_mbid=? WHERE artist_key=? AND album_key=?",
+      JSON.stringify([artistMbid]),
+      releaseMbid,
+      ak,
+      albumKey,
+    );
+    expect((await get(app, { method: 'artist.getInfo', artist: 'Radiohead' })).body.artist.mbid).toBe(artistMbid);
+    expect(
+      (await get(app, { method: 'album.getInfo', artist: 'Radiohead', album: 'OK Computer' })).body.album.mbid,
+    ).toBe(releaseMbid);
+
+    const other = '33333333-3333-4333-8333-333333333333';
+    app.db.run(
+      'UPDATE mb_tracks SET artist_mbids=? WHERE artist_key=? AND track_key<>?',
+      JSON.stringify([other]),
+      ak,
+      trackKey('Radiohead', 'Karma Police')[1],
+    );
+    expect((await get(app, { method: 'artist.getInfo', artist: 'Radiohead' })).body.artist.mbid).toBe('');
+    app.db.run("UPDATE scrobbles SET release_mbid=? WHERE artist='Radiohead' AND album='OK Computer'", other);
+    expect(
+      (await get(app, { method: 'album.getInfo', artist: 'Radiohead', album: 'OK Computer' })).body.album.mbid,
+    ).toBe(other);
+  });
+
   it('artist.getInfo and album.getInfo report stats over every listener and the getTopTags family answers empty lists', async () => {
     const app = await entityApp();
     const artist = await get(app, { method: 'artist.getInfo', artist: 'radiohead', username: 'alice' });
