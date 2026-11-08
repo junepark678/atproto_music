@@ -64,6 +64,42 @@ describe('now playing', () => {
       });
     },
   );
+  it('ListenBrainz keeps a valid duration above the storage limit through repeated and omitted-duration refreshes', async () => {
+    await withMigratedDb((db) => {
+      const clock = fixedClock();
+      const m = { db, clock };
+      const initial = upsertNowPlaying(m, {
+        did: ALICE,
+        artist: 'Radiohead',
+        track: 'Reckoner',
+        durationSeconds: 90_000,
+        source: 'listenbrainz',
+      });
+      expect(initial.row.duration_seconds).toBeNull();
+      expect(initial.row.expires_at_ms).toBe(T0 + 90_000_000);
+
+      clock.advance(1_000);
+      const repeated = upsertNowPlaying(m, {
+        did: ALICE,
+        artist: 'Radiohead',
+        track: 'Reckoner',
+        durationSeconds: 90_000,
+        source: 'listenbrainz',
+      });
+      expect(repeated.row.duration_seconds).toBeNull();
+      expect(repeated.row.expires_at_ms).toBe(T0 + 1_000 + 90_000_000);
+
+      clock.advance(1_000);
+      const omitted = upsertNowPlaying(m, {
+        did: ALICE,
+        artist: 'Radiohead',
+        track: 'Reckoner',
+        source: 'listenbrainz',
+      });
+      expect(omitted.row.duration_seconds).toBeNull();
+      expect(omitted.row.expires_at_ms).toBe(T0 + 2_000 + 90_000_000);
+    });
+  });
   it.each(['lastfm', 'listenbrainz'] as const)(
     '%s same-track refresh merges non-null detail fields',
     async (source) => {

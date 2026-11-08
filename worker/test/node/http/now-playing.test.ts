@@ -172,7 +172,7 @@ describe('GET /api/v1/feed/now-playing', () => {
     ensureUser(ALICE, 'alice.test');
     const viewer = (sessions as unknown as WebSessions).create(ALICE);
     const expected: string[] = [];
-    for (let i = 0; i < 52; i++) {
+    for (let i = 0; i < 55; i++) {
       const did = `did:plc:${String(i + 1).padStart(24, '0')}`;
       ensureUser(did, `user${i}.test`);
       app.db.run(
@@ -185,14 +185,15 @@ describe('GET /api/v1/feed/now-playing', () => {
         '2026-01-15T12:00:00.000000000Z',
         '2026-01-15T12:00:00.000000000Z',
       );
-      if (i < 52)
-        upsertNowPlaying(app.composed.core.deps, { did, artist: `Artist ${i}`, track: 'Track', source: 'web' });
+      upsertNowPlaying(app.composed.core.deps, { did, artist: `Artist ${i}`, track: 'Track', source: 'web' });
       expected.push(did);
     }
     const privateDid = expected[0]!;
     app.db.run('UPDATE accounts SET share_now_playing=0 WHERE did=?', privateDid);
     const expiredDid = expected[1]!;
     app.db.run('UPDATE now_playing SET expires_at_ms=? WHERE did=?', T0, expiredDid);
+    const eligible = expected.slice(2);
+    expect(eligible).toHaveLength(53);
     const notFollowed = 'did:plc:999999999999999999999999';
     ensureUser(notFollowed, 'stranger.test');
     upsertNowPlaying(app.composed.core.deps, { did: notFollowed, artist: 'Stranger', track: 'Track', source: 'web' });
@@ -205,6 +206,7 @@ describe('GET /api/v1/feed/now-playing', () => {
       items: Array<{ did: string; handle: string | null; nowPlaying: { artist: string } }>;
     };
     expect(body.items).toHaveLength(50);
+    expect(body.items.map((item) => item.did)).toEqual(eligible.slice(0, 50));
     expect(body.items.map((item) => item.did)).not.toContain(privateDid);
     expect(body.items.map((item) => item.did)).not.toContain(expiredDid);
     expect(body.items.map((item) => item.did)).not.toContain(notFollowed);

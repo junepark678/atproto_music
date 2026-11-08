@@ -116,8 +116,17 @@ export function upsertNowPlaying(m: Pick<ModuleDeps, 'db' | 'clock'>, input: Now
   return db.tx(() => {
     const existing = db.one<NowPlayingRow>('SELECT * FROM now_playing WHERE did = ?', input.did);
     if (existing !== null && existing.expires_at_ms > now && sameTrack(existing, input.artist, input.track)) {
-      const effectiveDuration = input.durationSeconds == null ? existing.duration_seconds : durationSeconds;
-      const expires = now + nowPlayingTtlSeconds(input.source, effectiveDuration) * 1000;
+      const refreshTtlSeconds =
+        input.durationSeconds != null
+          ? nowPlayingTtlSeconds(input.source, input.durationSeconds)
+          : existing.duration_seconds !== null
+            ? nowPlayingTtlSeconds(input.source, existing.duration_seconds)
+            : Math.max(
+                1,
+                Math.round((existing.expires_at_ms - (existing.updated_at_ms ?? existing.started_at_ms)) / 1000),
+              );
+      const expires = now + refreshTtlSeconds * 1000;
+      if (!Number.isSafeInteger(expires)) throw new RangeError('now-playing duration overflows the expiry');
       const merge = <T>(incoming: T | null | undefined, previous: T | null): T | null => incoming ?? previous;
       const fields = {
         album: merge(input.album, existing.album),
