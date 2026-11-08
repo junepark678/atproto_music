@@ -435,7 +435,7 @@ export interface Link {
       state: 'pending' | 'running' | 'done' | 'skipped';
       /** Eligible indexed-history items settled by enqueue or skip; not upstream deliveries. */
       done: number;
-      /** Unique eligible items discovered so far; grows during a running backfill. */
+      /** Eligible candidate work discovered so far, including duplicate skips; grows during a running backfill. */
       total: number;
       lastError?: 'retry_exhausted';
     };

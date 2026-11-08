@@ -131,7 +131,7 @@ Credentials = {appPasswords: [{id, label, createdAt, lastUsedAt}], listenbrainzT
                lastfmApps: [{apiKey, name, createdAt}], lastfmSessions: [{id, apiKey, clientName, createdAt, lastUsedAt}]}
 ```
 
-`Link.sync.backfill.done` counts eligible indexed-history items settled by enqueue or skip; `total` counts unique eligible items discovered so far and can grow while the state is `running`. These describe queue work considered, not confirmed upstream deliveries.
+`Link.sync.backfill.done` counts eligible indexed-history items settled by enqueue or skip; `total` counts eligible candidate work discovered so far (including duplicate skips) and can grow while the state is `running`. These describe queue work considered, not confirmed upstream deliveries.
 
 | Route | Auth | Request | Success payload / status |
 | --- | --- | --- | --- |
