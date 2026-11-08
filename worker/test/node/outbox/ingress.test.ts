@@ -66,7 +66,7 @@ describe('acceptListens', () => {
           'SELECT started_at_ms, scrobbled_at_ms FROM now_playing WHERE did=?',
           h.alice,
         ),
-      ).toEqual({ started_at_ms: T0 - 120_000, scrobbled_at_ms: T0 - 120_000 });
+      ).toEqual({ started_at_ms: T0 - 120_000, scrobbled_at_ms: T0 });
     });
     await withHarness(async (h) => {
       h.account(h.alice);
@@ -84,10 +84,10 @@ describe('acceptListens', () => {
           'SELECT started_at_ms, scrobbled_at_ms FROM now_playing WHERE did=?',
           h.alice,
         ),
-      ).toEqual({ started_at_ms: T0, scrobbled_at_ms: T0 - 601_000 });
+      ).toEqual({ started_at_ms: T0, scrobbled_at_ms: null });
     });
   });
-  it('uses the 600 second duration fallback and leaves mismatches or later listens untouched', async () => {
+  it('uses the 600 second duration fallback and records acceptance time for later listens', async () => {
     await withHarness(async (h) => {
       h.account(h.alice);
       upsertNowPlaying(h.m, { did: h.alice, artist: 'Radiohead', track: 'Reckoner', source: 'web' });
@@ -121,7 +121,51 @@ describe('acceptListens', () => {
           'SELECT started_at_ms, scrobbled_at_ms FROM now_playing WHERE did=?',
           h.alice,
         ),
-      ).toEqual({ started_at_ms: T0, scrobbled_at_ms: T0 + 10_000 });
+      ).toEqual({ started_at_ms: T0, scrobbled_at_ms: T0 });
+    });
+  });
+  it.each([120, null])('ignores an earlier repeat beyond the %s second play window', async (durationSeconds) => {
+    await withHarness(async (h) => {
+      h.account(h.alice);
+      upsertNowPlaying(h.m, { did: h.alice, artist: 'Radiohead', track: 'Reckoner', durationSeconds, source: 'web' });
+      const before = h.db.one('SELECT * FROM now_playing WHERE did=?', h.alice);
+      h.kit.clock.advance(1_000);
+      const accepted = await acceptListens(h.m, {
+        did: h.alice,
+        origin: 'lastfm',
+        receiptMs: T0 + 1_000,
+        listens: [
+          {
+            input: {
+              artist: 'Radiohead',
+              track: 'Reckoner',
+              listenedAt: new Date(T0 - ((durationSeconds ?? 600) + 1) * 1000).toISOString(),
+            },
+          },
+        ],
+      });
+      expect(accepted.results[0]?.status).toBe('accepted');
+      expect(h.db.one('SELECT * FROM now_playing WHERE did=?', h.alice)).toEqual(before);
+    });
+  });
+  it('marks a clock-skewed current play at acceptance time without moving its start', async () => {
+    await withHarness(async (h) => {
+      h.account(h.alice);
+      upsertNowPlaying(h.m, { did: h.alice, artist: 'Radiohead', track: 'Reckoner', source: 'web' });
+      h.kit.clock.advance(30_000);
+      const accepted = await acceptListens(h.m, {
+        did: h.alice,
+        origin: 'lastfm',
+        receiptMs: T0 + 30_000,
+        listens: [
+          { input: { artist: 'Radiohead', track: 'Reckoner', listenedAt: new Date(T0 + 10_000).toISOString() } },
+        ],
+      });
+      expect(accepted.results[0]?.status).toBe('accepted');
+      expect(h.db.one('SELECT started_at_ms, scrobbled_at_ms FROM now_playing WHERE did=?', h.alice)).toEqual({
+        started_at_ms: T0,
+        scrobbled_at_ms: T0 + 30_000,
+      });
     });
   });
   it('acceptListens writes listen keys, operations and forward rows for active links in one transaction; a repeated listen key creates nothing and is reported accepted', async () => {
