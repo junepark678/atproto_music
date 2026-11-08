@@ -90,21 +90,24 @@ async function seedMusicBrainzMatch(
   },
 ) {
   await inTestDb(store, (db) =>
-    db.run(
-      `INSERT INTO mb_tracks(artist_key,track_key,album_key,status,recording_mbid,title,artist_credit,artist_mbids,
+    db.tx(() => {
+      db.run(
+        `INSERT INTO mb_tracks(artist_key,track_key,album_key,status,recording_mbid,title,artist_credit,artist_mbids,
        release_mbid,release_group_mbid,isrcs,matched_by,score,synced_at_ms,created_at_ms)
      VALUES(?,?,?,'matched',?,'canonical title','canonical artist',?,?,?,'[]','search',95,1768478400000,1)
      ON CONFLICT(artist_key,track_key,album_key) DO UPDATE SET status='matched',recording_mbid=excluded.recording_mbid,
        artist_mbids=excluded.artist_mbids,release_mbid=excluded.release_mbid,release_group_mbid=excluded.release_group_mbid,
        matched_by=excluded.matched_by,score=excluded.score,synced_at_ms=excluded.synced_at_ms`,
-      input.artistKey,
-      input.trackKey,
-      input.albumKey ?? '',
-      input.recordingMbid,
-      JSON.stringify(input.artistMbids),
-      input.releaseMbid ?? null,
-      input.releaseGroupMbid ?? null,
-    ),
+        input.artistKey,
+        input.trackKey,
+        input.albumKey ?? '',
+        input.recordingMbid,
+        JSON.stringify(input.artistMbids),
+        input.releaseMbid ?? null,
+        input.releaseGroupMbid ?? null,
+      );
+      db.run('DELETE FROM stats_cache');
+    }),
   );
 }
 
@@ -409,12 +412,10 @@ it('attaches only unambiguous MusicBrainz IDs after cached stats and leaves coun
   expect(totalsOf(got.body)).toEqual([7, 3, 6]);
   expect(got.network).toBe(0);
   expect(schemas.Statistics(got.body)).toBe('valid');
-  // The cached body remains count-only; metadata was attached after the cache read.
+  // The cache stores the enriched projection and match changes invalidate it.
   const cached = JSON.parse((await cacheRow(store, ALICE, 'all', 10))!.body) as { statistics: Record<string, unknown> };
-  expect(cached.statistics.topArtists).toEqual(EXPECTED.all.artists);
-  expect(
-    (cached.statistics.topTracks as Array<Record<string, unknown>>).every((row) => !('recordingMbid' in row)),
-  ).toBe(true);
+  expect(cached.statistics.topArtists).toEqual(got.body.topArtists);
+  expect(cached.statistics.topTracks).toEqual(got.body.topTracks);
 });
 
 it('7d: 4/2/3; artists (björk,2),(radiohead,2); tracks Björk/Jóga:2, Radiohead/No Surprises:1, Radiohead/Weird Fishes:1', async () => {

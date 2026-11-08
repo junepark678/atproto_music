@@ -8162,6 +8162,16 @@
         "externalValue": "examples/love.json",
         "x-schema": "Love"
       },
+      "scrobble-musicbrainz": {
+        "summary": "Reserved offline Scrobble MusicBrainz DTO fixture; not public publication evidence.",
+        "externalValue": "examples/scrobble-musicbrainz.json",
+        "x-schema": "Scrobble"
+      },
+      "stats-musicbrainz": {
+        "summary": "Reserved offline Statistics MBID fixture; not public publication evidence.",
+        "externalValue": "examples/stats-musicbrainz.json",
+        "x-schema": "Statistics"
+      },
       "scrobble-page": {
         "summary": "Reserved offline schema fixture; not public publication evidence.",
         "externalValue": "examples/scrobble-page.json"

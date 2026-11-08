@@ -31,7 +31,12 @@ function setup(enabled = true) {
     createPolicyFetch({ transport: routerTransport({ hosts: { [MUSICBRAINZ_HOST]: fake } }) }),
     MB_CAPS,
   );
-  const client = createMusicBrainzClient({ fetch, apiRoot: `https://${MUSICBRAINZ_HOST}/ws/2/`, version: 'test' });
+  const client = createMusicBrainzClient({
+    fetch,
+    apiRoot: `https://${MUSICBRAINZ_HOST}/ws/2/`,
+    version: 'test',
+    nowMs: () => clock.nowMs(),
+  });
   const resolver = createMusicBrainzResolver({ db, client, clock, enabled });
   return { db, clock, fake, resolver, path: join(dir, 'db.sqlite') };
 }
@@ -76,7 +81,7 @@ it('rejects absent/low scores and wrong credited artist names', async () => {
   enqueueTrack(x.db, { artistKey: 'artist', trackKey: 'track' }, x.clock.nowMs());
   x.fake.response = { status: 200, body: { recordings: [{ ...candidate(89), score: undefined }] } };
   await x.resolver.run();
-  expect(x.db.one('SELECT status FROM mb_tracks')).toEqual({ status: 'unmatched' });
+  expect(x.db.one('SELECT status,attempts FROM mb_tracks')).toEqual({ status: 'pending', attempts: 1 });
 });
 
 it('searches and accepts a top score only when title and the displayed credited artist name match', async () => {
@@ -124,7 +129,12 @@ function setupResolverOnExistingDb(
   return createMusicBrainzResolver({
     db,
     clock,
-    client: createMusicBrainzClient({ fetch, apiRoot: `https://${MUSICBRAINZ_HOST}/ws/2/`, version: 'test' }),
+    client: createMusicBrainzClient({
+      fetch,
+      apiRoot: `https://${MUSICBRAINZ_HOST}/ws/2/`,
+      version: 'test',
+      nowMs: () => clock.nowMs(),
+    }),
   });
 }
 
@@ -328,4 +338,84 @@ it('charges match-triggered revival to one total 100-row budget across three sam
   expect(revived).toBe(98);
   expect(revived).toBeLessThanOrEqual(100);
   expect(x.db.one<{ n: number }>("SELECT count(*) AS n FROM mb_tracks WHERE status='matched'")!.n).toBe(2);
+});
+it('persists an HTTP-date 503 deadline globally across tracks and resolver restart', async () => {
+  const x = setup();
+  const deadline = x.clock.nowMs() + 3_600_000;
+  enqueueTrack(x.db, { artistKey: 'artist', trackKey: 'track' }, x.clock.nowMs());
+  x.fake.response = { status: 503, body: {}, headers: { 'retry-after': new Date(deadline).toUTCString() } };
+  await x.resolver.run();
+  enqueueTrack(x.db, { artistKey: 'other', trackKey: 'song' }, x.clock.nowMs(), 10);
+  expect(x.resolver.availableAt()).toBe(deadline);
+  const restarted = setupResolverOnExistingDb(x.db, x.clock, x.fake);
+  expect((await restarted.run()).requests).toBe(0);
+  x.clock.advance(3_600_000 - 1);
+  expect((await setupResolverOnExistingDb(x.db, x.clock, x.fake).run()).requests).toBe(0);
+  x.clock.advance(1);
+  x.fake.response = { status: 200, body: { recordings: [candidate()] } };
+  expect((await setupResolverOnExistingDb(x.db, x.clock, x.fake).run()).requests).toBeGreaterThan(0);
+});
+
+it('backs off malformed external candidates across restarts while healthy queued rows progress', async () => {
+  const malformed = [
+    { ...candidate(), title: '   ' },
+    { ...candidate(), 'artist-credit': [{ name: '   ', artist: { id: uuid } }] },
+    { ...candidate(), score: Number.NaN },
+    { ...candidate(), score: Number.POSITIVE_INFINITY },
+    { ...candidate(), score: -1 },
+    { ...candidate(), length: -1 },
+    { ...candidate(), length: 1.5 },
+    { ...candidate(), length: Number.POSITIVE_INFINITY },
+    { ...candidate(), releases: [{ id: uuid, title: '   ', status: 'Official' }] },
+  ];
+  for (const value of malformed) {
+    const x = setup();
+    enqueueTrack(x.db, { artistKey: 'artist', trackKey: 'track' }, x.clock.nowMs());
+    x.fake.response = { status: 200, body: { recordings: [value] } };
+    expect((await x.resolver.run()).requests).toBe(1);
+    expect(x.db.one('SELECT status,attempts,next_attempt_ms FROM mb_tracks')).toMatchObject({
+      status: 'pending',
+      attempts: 1,
+    });
+    expect(
+      x.db.one<{ next_attempt_ms: number }>('SELECT next_attempt_ms FROM mb_tracks')!.next_attempt_ms,
+    ).toBeGreaterThan(x.clock.nowMs());
+    const restarted = setupResolverOnExistingDb(x.db, x.clock, x.fake);
+    x.clock.advance(60_000);
+    x.fake.response = { status: 200, body: { recordings: [value] } };
+    await restarted.run();
+    expect(x.db.one('SELECT status,attempts FROM mb_tracks')).toMatchObject({ status: 'pending', attempts: 2 });
+  }
+  const x = setup();
+  enqueueTrack(x.db, { artistKey: 'artist', trackKey: 'bad' }, x.clock.nowMs());
+  enqueueTrack(x.db, { artistKey: 'artist', trackKey: 'track' }, x.clock.nowMs(), 1);
+  x.fake.onRequest = (request) =>
+    new URL(request.url).searchParams.get('query')?.includes('bad')
+      ? { status: 200, body: { recordings: [{ ...candidate(), title: '   ' }] } }
+      : { status: 200, body: { recordings: [candidate()] } };
+  expect((await x.resolver.run()).requests).toBe(1);
+  x.clock.advance(1000);
+  expect((await setupResolverOnExistingDb(x.db, x.clock, x.fake).run()).requests).toBe(1);
+  expect(x.db.all('SELECT track_key,status,attempts FROM mb_tracks ORDER BY track_key')).toEqual([
+    { track_key: 'bad', status: 'pending', attempts: 1 },
+    { track_key: 'track', status: 'matched', attempts: 0 },
+  ]);
+});
+
+it('moves a malformed candidate to failed for 30 days after eight persisted attempts', async () => {
+  const x = setup();
+  enqueueTrack(x.db, { artistKey: 'artist', trackKey: 'track' }, x.clock.nowMs());
+  x.fake.response = { status: 200, body: { recordings: [{ ...candidate(), title: '   ' }] } };
+  for (let attempt = 1; attempt <= 8; attempt++) {
+    const resolver = setupResolverOnExistingDb(x.db, x.clock, x.fake);
+    await resolver.run();
+    if (attempt < 8) {
+      const next = x.db.one<{ next_attempt_ms: number }>('SELECT next_attempt_ms FROM mb_tracks')!.next_attempt_ms;
+      x.clock.advance(Math.max(next - x.clock.nowMs(), resolver.availableAt() - x.clock.nowMs()));
+    }
+  }
+  expect(x.db.one('SELECT status,attempts FROM mb_tracks')).toEqual({ status: 'failed', attempts: 8 });
+  expect(
+    x.db.one<{ next_attempt_ms: number }>('SELECT next_attempt_ms FROM mb_tracks')!.next_attempt_ms - x.clock.nowMs(),
+  ).toBe(30 * 86_400_000);
 });

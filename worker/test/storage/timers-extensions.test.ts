@@ -358,7 +358,7 @@ it('a core runDue started while outbox is claimed leaves ~running:outbox untouch
   });
 });
 
-it('extension handlers run on the extension lane in the order outbox, forward, import, oauth-keepalive, expiry-sweep, backup, musicbrainz', async () => {
+it('extension handlers run on the extension lane in the order outbox, forward, import, oauth-keepalive, expiry-sweep, backup', async () => {
   await withIndex(async (db) => {
     const calls: string[] = [];
     const record = (name: string) => async () => {

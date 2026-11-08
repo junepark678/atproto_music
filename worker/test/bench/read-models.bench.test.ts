@@ -880,7 +880,7 @@ async function measureRead(h: Harness, spec: ReadSpec): Promise<MeasuredRead> {
   const result = run();
   const coldMs = performance.now() - t0;
   const pageStatement = trace[0] as Trace;
-  if (!pageStatement.sql.trimStart().startsWith('SELECT s.* FROM scrobbles s')) {
+  if (!pageStatement.sql.trimStart().startsWith('SELECT s.*') || !pageStatement.sql.includes('FROM scrobbles s')) {
     throw new Error(`${spec.name}: unexpected first statement ${pageStatement.sql}`);
   }
   const statements = trace.length;
@@ -1775,8 +1775,9 @@ describe('read-model benchmark', () => {
       // and equals it as well.
       expect(s.equalsUncached, name).toBe(true);
       expect(s.afterVersionBump, name).toEqual({ cache: 'miss', equalsUncached: true });
-      // Uncached: user, cache, totals, artists, tracks, albums, store.
-      expect(s.uncached.statements, name).toBe(7);
+      // Uncached: user, cache, totals, artists, tracks, albums, store and
+      // one bounded local metadata lookup for each populated top-list group.
+      expect(s.uncached.statements, name).toBe(10);
       expect(s.withinBudget, name).toBe(true);
     }
   });

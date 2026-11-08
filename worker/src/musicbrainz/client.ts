@@ -15,6 +15,7 @@ export interface MusicBrainzClientOptions {
   fetch: BoundPolicyFetch;
   apiRoot: string;
   version: string;
+  nowMs?: () => number;
 }
 
 export interface RecordingSearch {
@@ -62,8 +63,14 @@ export function createMusicBrainzClient(options: MusicBrainzClientOptions) {
     if (response.status === 404) return { kind: 'not_found' };
     if (!response.ok) {
       const raw = response.headers.get('retry-after');
-      const seconds = raw !== null && /^\d{1,9}$/.test(raw) ? Number(raw) : null;
-      const retryAfterMs = seconds !== null ? Math.min(seconds * 1000, 86_400_000) : undefined;
+      const seconds = raw !== null && /^\d{1,9}$/.test(raw.trim()) ? Number(raw.trim()) : null;
+      const date = raw === null || seconds !== null ? Number.NaN : Date.parse(raw);
+      const retryAfterMs =
+        seconds !== null
+          ? Math.min(seconds * 1000, 86_400_000)
+          : Number.isFinite(date)
+            ? Math.min(Math.max(0, date - (options.nowMs?.() ?? Date.now())), 86_400_000)
+            : undefined;
       return { kind: 'status', status: response.status, ...(retryAfterMs === undefined ? {} : { retryAfterMs }) };
     }
     try {

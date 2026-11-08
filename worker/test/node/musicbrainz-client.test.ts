@@ -15,6 +15,7 @@ function client(fake: FakeMusicBrainz) {
     fetch: bindPolicyFetch(createPolicyFetch({ transport }), MB_CAPS),
     apiRoot: ROOT,
     version: '1.2.3',
+    nowMs: () => clock.nowMs(),
   });
 }
 
@@ -69,5 +70,20 @@ describe('MusicBrainz client', () => {
       version: '1.2.3',
     });
     expect(await offline.lookupRecording('x')).toEqual({ kind: 'network' });
+  });
+
+  it('parses Retry-After delta seconds and HTTP dates against the injected clock', async () => {
+    const fake = new FakeMusicBrainz();
+    const c = client(fake);
+    fake.response = { status: 503, body: {}, headers: { 'retry-after': '30' } };
+    expect(await c.searchRecordings({ artist: 'A', recording: 'T' })).toMatchObject({
+      kind: 'status',
+      retryAfterMs: 30_000,
+    });
+    fake.response = { status: 503, body: {}, headers: { 'retry-after': 'Thu, 15 Jan 2026 13:00:00 GMT' } };
+    expect(await c.searchRecordings({ artist: 'A', recording: 'T' })).toMatchObject({
+      kind: 'status',
+      retryAfterMs: 3_600_000,
+    });
   });
 });

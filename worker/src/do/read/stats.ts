@@ -202,12 +202,11 @@ export function statsWithCache(db: Db, q: StatsQuery): StatsResult {
 
   const key = { did: q.did, window: q.window, limit: q.limit };
   const cached = readCache(db, key, bounds, user);
-  if (cached !== null)
-    return { statistics: withStatsMusicBrainz(db, { ...cached, asOf: toDto(q.asOfNs) }), cache: 'hit' };
+  if (cached !== null) return { statistics: { ...cached, asOf: toDto(q.asOfNs) }, cache: 'hit' };
 
-  const statistics = computeStatistics(db, q.did, q.window, q.limit, q.asOfNs);
+  const statistics = withStatsMusicBrainz(db, computeStatistics(db, q.did, q.window, q.limit, q.asOfNs));
   writeCache(db, key, bounds, user, statistics);
-  return { statistics: withStatsMusicBrainz(db, statistics), cache: 'miss' };
+  return { statistics, cache: 'miss' };
 }
 
 /** IndexRpc.stats: the exact statistics, or null for unknown or inactive users (404). */

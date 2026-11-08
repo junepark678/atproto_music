@@ -396,6 +396,7 @@ export async function productionFeatures(options: ProductionFeatureOptions): Pro
     ),
     apiRoot: config.musicbrainzApiRoot,
     version: '0.0.0',
+    nowMs: () => options.clock.nowMs(),
   });
   const musicbrainzFeature: Feature = {
     name: 'musicbrainz',

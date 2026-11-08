@@ -363,7 +363,7 @@ UPLOAD_MAX_BODY_BYTES = 64 * 1024 * 1024
 # api/examples/*.json); AMENDMENTS-node.md "Package deviations" records this against node-waves.json.
 V11_CASES = 'response-cases.json'
 V12_CASES = 'v1.2/response-cases.json'
-INVENTORY_FILES = {V11_CASES, 'schema-cases.json', V12_CASES}
+INVENTORY_FILES = {V11_CASES, 'schema-cases.json', V12_CASES, 'component-cases.json'}
 LEGACY_CASES = {('GET', '/oauth/client-metadata.json', 200): 'OAuthClientMetadata'}
 LEXICON_PREFIX = 'com.example.atmusic'
 LEXICON_COLLECTIONS = {'scrobble', 'follow', 'settings', 'love'}
@@ -1041,6 +1041,9 @@ def component_examples(spec, validator_type, checker, validated):
 
 def example_inventory(spec, validated, files=None):
     """Every api/examples payload (top level and v1.2/) is a declared component example, and every component example was validated."""
+    component_cases = load_json(API / 'examples/component-cases.json')
+    require(isinstance(component_cases, dict) and component_cases,
+            'example_inventory: component-cases.json must map component schemas to fixture IDs')
     declared = {}
     for name, example in spec['components']['examples'].items():
         external = example.get('externalValue', '')
@@ -1049,6 +1052,11 @@ def example_inventory(spec, validated, files=None):
                 f'example_inventory: {name} must live directly in api/examples or api/examples/v1.2')
         require(relative.startswith('v1.2/') == name.startswith('v1.2-'), f'example_inventory: {name} and its file {relative} disagree on v1.2')
         declared[relative] = name
+    for schema, fixture_id in component_cases.items():
+        example = spec['components']['examples'].get(fixture_id)
+        require(example is not None and example.get('x-schema') == schema and
+                example.get('externalValue') == f'examples/{fixture_id}.json',
+                f'example_inventory: {schema} fixture ID {fixture_id} is not bound to its matching component schema')
     if files is None:
         files = {str(p.relative_to(API / 'examples')) for p in (API / 'examples').rglob('*') if p.is_file()}
     payloads = set(files) - INVENTORY_FILES

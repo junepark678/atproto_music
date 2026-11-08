@@ -8,25 +8,21 @@
   "topArtists": [
     {
       "artist": "Björk",
-      "scrobbleCount": 1,
-      "artistMbid": "87c5dedd-371d-4a53-9f7f-80522fb7f3cb"
+      "scrobbleCount": 1
     }
   ],
   "topTracks": [
     {
       "artist": "Björk",
       "track": "Jóga",
-      "scrobbleCount": 1,
-      "recordingMbid": "3f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2d10"
+      "scrobbleCount": 1
     }
   ],
   "topAlbums": [
     {
       "artist": "Björk",
       "album": "Homogenic",
-      "scrobbleCount": 1,
-      "releaseMbid": "d2e7a5b1-1c3f-4b8e-9a6d-0f1e2d3c4b5a",
-      "releaseGroupMbid": "0c9d0b0e-2f6a-4c3b-8d7e-6f5a4b3c2d1e"
+      "scrobbleCount": 1
     }
   ]
 }
