@@ -110,7 +110,7 @@ import { feed } from '../do/read/feed';
 import { followers, following } from '../do/read/follows';
 import { history } from '../do/read/history';
 import { lookup } from '../do/read/lookup';
-import { currentNowPlaying, followedNowPlaying, ownNowPlaying } from '../do/read/now-playing';
+import { apiFollowedNowPlaying, apiNowPlaying } from '../do/read/now-playing';
 import { profile, resolveHandle, verifiedHandles } from '../do/read/profile';
 import { stats } from '../do/read/stats';
 import { indexing, internalStatus } from '../do/status';
@@ -644,13 +644,11 @@ export class IndexCore implements IndexRpc, AdminRpc {
   }
 
   async nowPlaying(did: Did, owner: boolean) {
-    return this.#rpc('nowPlaying', () =>
-      owner ? ownNowPlaying(this.live(), did) : currentNowPlaying(this.live(), did),
-    );
+    return this.#rpc('nowPlaying', () => apiNowPlaying(this.live(), did, owner));
   }
 
   async followedNowPlaying(did: Did) {
-    return this.#rpc('followedNowPlaying', () => followedNowPlaying(this.live(), did));
+    return this.#rpc('followedNowPlaying', () => apiFollowedNowPlaying(this.live(), did));
   }
 
   async verifiedHandles(dids: readonly Did[]): Promise<Record<string, string | null>> {

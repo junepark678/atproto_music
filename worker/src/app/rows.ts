@@ -10,6 +10,7 @@
 //
 // Type only: no runtime code, no barrel.
 
+import type { MusicBrainzMatch } from '@atmusic/core/api-types';
 import type { ScrobbleRow } from '../do/contracts';
 import type {
   BACKUP_KINDS,
@@ -331,6 +332,9 @@ export interface NowPlayingRow {
   media_player: string | null;
   scrobbled_at_ms: number | null;
 }
+
+/** A database now-playing row with optional local MusicBrainz read enrichment. */
+export type EnrichedNowPlayingRow = NowPlayingRow & { musicbrainz?: MusicBrainzMatch };
 
 export interface LoveRow {
   uri: string;

@@ -149,6 +149,7 @@ export interface NowPlaying {
   client?: { name: string; version?: string };
   musicService?: string;
   mediaPlayer?: string;
+  musicbrainz?: MusicBrainzMatch;
   source: 'lastfm' | 'listenbrainz' | 'web';
   shared?: boolean;
 }

@@ -31,10 +31,13 @@
 // - Expired rows are deleted by `deleteExpiredNowPlaying` (the expiry-sweep
 //   timer, §3.3); reads never depend on that sweep.
 
+import type { MusicBrainzMatch } from '@atmusic/core/api-types';
 import { albumKey, artistKey, trackKey } from '@atmusic/core/music-key';
-import type { NowPlayingRow, NowPlayingSource } from '../../app/rows';
+import { fromMs, toDto } from '@atmusic/core/timestamp';
+import type { EnrichedNowPlayingRow, NowPlayingRow, NowPlayingSource } from '../../app/rows';
 import { enqueueTrack } from '../../musicbrainz/store';
 import type { ModuleDeps } from '../contracts';
+import { MAX_SQL_PARAMS } from '../db';
 import { NOW_PLAYING_SOURCES } from '../schema';
 import { activeUser, visibleFollowEdge } from './visibility';
 
@@ -265,6 +268,90 @@ export function currentNowPlaying(m: Pick<ModuleDeps, 'db' | 'clock'>, did: stri
   );
 }
 
+interface MatchedTrackRow {
+  ordinal: number;
+  recording_mbid: string | null;
+  title: string | null;
+  artist_credit: string | null;
+  artist_mbids: string | null;
+  release_mbid: string | null;
+  release_title: string | null;
+  release_group_mbid: string | null;
+  duration_ms: number | null;
+  matched_by: string | null;
+  synced_at_ms: number | null;
+}
+
+/** Attach local matches to already-visible rows with one bounded exact-tuple query. */
+function withMusicBrainz(m: Pick<ModuleDeps, 'db'>, rows: readonly NowPlayingRow[]): EnrichedNowPlayingRow[] {
+  if (rows.length === 0) return [];
+  const keyed = rows.map((row, ordinal) => {
+    const [aKey, tKey] = trackKey(row.artist, row.track);
+    const aKeyAlbum = albumKey(row.artist, row.album);
+    return { ordinal, artist_key: aKey, track_key: tKey, album_key: aKeyAlbum?.[1] ?? '' };
+  });
+  const matches: MatchedTrackRow[] = [];
+  const batchSize = Math.floor(MAX_SQL_PARAMS / 4);
+  for (let offset = 0; offset < keyed.length; offset += batchSize) {
+    const batch = keyed.slice(offset, offset + batchSize);
+    const values = batch.map(() => '(?, ?, ?, ?)').join(', ');
+    const bindings = batch.flatMap(({ ordinal, artist_key, track_key, album_key }) => [
+      ordinal,
+      artist_key,
+      track_key,
+      album_key,
+    ]);
+    matches.push(
+      ...m.db.all<MatchedTrackRow>(
+        `WITH requested(ordinal, artist_key, track_key, album_key) AS (VALUES ${values})
+         SELECT requested.ordinal, mb.recording_mbid, mb.title, mb.artist_credit, mb.artist_mbids,
+           mb.release_mbid, mb.release_title, mb.release_group_mbid, mb.duration_ms, mb.matched_by, mb.synced_at_ms
+         FROM requested JOIN mb_tracks mb USING (artist_key, track_key, album_key)
+         WHERE mb.status='matched' ORDER BY requested.ordinal`,
+        ...bindings,
+      ),
+    );
+  }
+  const byOrdinal = new Map<number, MusicBrainzMatch>();
+  for (const row of matches) {
+    if (!row.recording_mbid || !row.title || !row.artist_credit || row.synced_at_ms == null) continue;
+    if (row.matched_by !== 'mbid' && row.matched_by !== 'search') continue;
+    let artistMbids: unknown;
+    try {
+      artistMbids = JSON.parse(row.artist_mbids ?? '[]') as unknown;
+    } catch {
+      continue;
+    }
+    if (!Array.isArray(artistMbids) || !artistMbids.every((id) => typeof id === 'string')) continue;
+    byOrdinal.set(row.ordinal, {
+      recordingMbid: row.recording_mbid,
+      title: row.title,
+      artistCredit: row.artist_credit,
+      artistMbids,
+      ...(row.release_mbid == null ? {} : { releaseMbid: row.release_mbid }),
+      ...(row.release_title == null ? {} : { releaseTitle: row.release_title }),
+      ...(row.release_group_mbid == null ? {} : { releaseGroupMbid: row.release_group_mbid }),
+      ...(row.duration_ms == null ? {} : { durationSeconds: Math.round(row.duration_ms / 1000) }),
+      matchedBy: row.matched_by,
+      syncedAt: toDto(fromMs(row.synced_at_ms)),
+    });
+  }
+  return rows.map((row, ordinal) => {
+    const musicbrainz = byOrdinal.get(ordinal);
+    return musicbrainz === undefined ? row : { ...row, musicbrainz };
+  });
+}
+
+/** API read variant: resolve only the already-visible local entry, with no upstream work. */
+export function apiNowPlaying(
+  m: Pick<ModuleDeps, 'db' | 'clock'>,
+  did: string,
+  owner: boolean,
+): EnrichedNowPlayingRow | null {
+  const row = owner ? ownNowPlaying(m, did) : currentNowPlaying(m, did);
+  return row === null ? null : (withMusicBrainz(m, [row])[0] ?? row);
+}
+
 /** The owner's own current entry, regardless of the share flag. */
 export function ownNowPlaying(m: Pick<ModuleDeps, 'db' | 'clock'>, did: string): NowPlayingRow | null {
   return m.db.one<NowPlayingRow>('SELECT * FROM now_playing WHERE did = ? AND expires_at_ms > ?', did, m.clock.nowMs());
@@ -285,6 +372,19 @@ export function followedNowPlaying(
     m.clock.nowMs(),
   );
   return rows.map(({ followed_did, ...row }) => ({ did: followed_did, row }));
+}
+
+/** API feed variant: first applies visibility/cap, then performs a single batch match lookup. */
+export function apiFollowedNowPlaying(
+  m: Pick<ModuleDeps, 'db' | 'clock'>,
+  did: string,
+): Array<{ did: string; row: EnrichedNowPlayingRow }> {
+  const visible = followedNowPlaying(m, did);
+  const enrichedRows = withMusicBrainz(
+    m,
+    visible.map(({ row }) => row),
+  );
+  return visible.map(({ did: followedDid }, index) => ({ did: followedDid, row: enrichedRows[index]! }));
 }
 
 export type ClearNowPlayingOutcome = 'already_cleared' | 'client_mismatch' | 'cleared';

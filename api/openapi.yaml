@@ -7811,6 +7811,9 @@
           "mediaPlayer": {
             "type": "string"
           },
+          "musicbrainz": {
+            "$ref": "#/components/schemas/MusicBrainzMatch"
+          },
           "source": {
             "enum": [
               "lastfm",
