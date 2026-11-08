@@ -96,6 +96,7 @@ import { sweepExpiredLinkStates } from '../forward/links';
 import { UpstreamPacing } from '../forward/upstream-pacing';
 import { IGNORED_LISTEN_RETENTION_MS } from '../http/account';
 import { authFeature } from '../http/auth';
+import { routes as coverArtRoutes } from '../http/cover-art';
 import { credentialsFeature } from '../http/credentials';
 import { importsFeature } from '../http/imports';
 import { lastfmAuthFeature } from '../http/lastfm-authorize';
@@ -440,6 +441,7 @@ export async function productionFeatures(options: ProductionFeatureOptions): Pro
   const coverArtClient = createCoverArtClient({ policyFetch: coverArtPolicy, root: config.coverArtArchiveRoot });
   const coverArtFeature: Feature = {
     name: 'cover-art',
+    routes: coverArtRoutes,
     extensions: [
       {
         name: 'cover-art',

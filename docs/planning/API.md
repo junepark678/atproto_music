@@ -1,5 +1,7 @@
 # Fixed API v1 payload contract
 
+`GET /api/v1/cover-art/{releaseMbid}` returns locally cached JPEG, PNG or WebP bytes with `X-Content-Type-Options: nosniff` and `Cache-Control: public, max-age=86400`. Missing art is 404; malformed release UUIDs are 422. Reads only touch the local cache and never fetch or enqueue upstream work.
+
 This is the fixed API contract encoded in `api/openapi.yaml`. The backend implements these routes with deterministic integration coverage. Owned-namespace production writes and backfills use exact current-head verification; production relay progress and full packaged/live acceptance remain unresolved. See [validation evidence](../VALIDATION.md) for actual checks and limitations. Changes require an explicit issue amendment.
 
 **Amended by [ADR 0004 §9](../adr/0004-cloudflare-workers.md#9-amended-mvp--api--adr-rules) (contract v1.1, `info.version: 1.1.0`).** The Workers AppView is read-only and every route is public. The browser SPA is the OAuth client and writes to the user's own PDS (A2, A3). The server auth routes, the server scrobble and follow write routes, operation lookup, and the two account routes are dropped (§9.3), together with the `Accepted` and `Operation` schemas. Notify, record status and the public export are added (N1–N3). The following feed takes `viewer` (A8), export moves (A9), and disconnect is a signed settings record (A10). The feed loses its 401 (A8), and client metadata loses its 429 because a static asset never reaches the Worker's rate limiter (A3). Every other shape and status is unchanged. Issue amendment texts: [AMENDMENTS-workers.md](AMENDMENTS-workers.md).
@@ -58,6 +60,7 @@ No v1.1 read route reads a session, cookie, CSRF token or Origin header, so no v
 | GET `/api/v1/users/{did}/profile` | DID | 200 Profile below; unknown/inactive 404 |
 | GET `/api/v1/users/{did}/now-playing` | DID; optional owner session | 200 `{nowPlaying:NowPlaying|null,serverTime}`; public callers see only shared, current rows; owner sees a private current row with `shared:false`; 422 invalid DID; `Cache-Control: no-store` |
 | GET `/api/v1/feed/now-playing` | session | 200 `{items:[{did,handle,nowPlaying}],serverTime}`; followed active accounts only, shared and current entries, at most 50, newest refresh first then DID; 401 without a valid session; `Cache-Control: no-store` |
+| GET `/api/v1/cover-art/{releaseMbid}` | release UUID | Cached image bytes (JPEG, PNG or WebP); missing art 404; malformed UUID 422; local read only, `Cache-Control: public, max-age=86400`, `X-Content-Type-Options: nosniff` |
 | GET `/api/v1/users/{did}/stats` | `window=all\|7d\|30d\|365d`, `limit` | 200 Statistics below; default window all |
 | GET `/api/v1/users/{did}/following` | `limit`, `cursor` | 200 Page<Follow> |
 | GET `/api/v1/users/{did}/followers` | `limit`, `cursor` | 200 Page<Follow> |
