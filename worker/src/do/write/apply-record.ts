@@ -594,14 +594,37 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
     const deleted = deleteProjection(db, t.kind, t.uri);
     if (t.kind === 'love' && priorLove && loveIncarnation?.state === 'present') {
       const identityKey = `love-delete:${loveIncarnation.incarnation_key}`;
+      const apiBridge = db.one<{ expected_cid: string }>(
+        `SELECT expected_cid FROM love_delete_bridges WHERE did=? AND uri=? AND incarnation_key=? AND state='pending'
+         ORDER BY created_at_ms DESC LIMIT 1`,
+        t.did,
+        t.uri,
+        loveIncarnation.incarnation_key,
+      );
+      const priorCid = db.one<{ cid: string }>('SELECT cid FROM record_state WHERE uri=?', t.uri)?.cid;
+      const apiEcho = apiBridge !== null && apiBridge.expected_cid === priorCid;
+      if (apiBridge && !apiEcho)
+        db.run(
+          "UPDATE love_delete_bridges SET state='obsolete' WHERE did=? AND uri=? AND incarnation_key=? AND state='pending'",
+          t.did,
+          t.uri,
+          loveIncarnation.incarnation_key,
+        );
       const path = o.forwarding ? 'live' : 'snapshot';
       admitForwardIdentity(db, { did: t.did, identityKey, path, now: Number(o.nowNs / 1_000_000n) });
+      if (apiEcho)
+        db.run(
+          "UPDATE love_delete_bridges SET state='consumed' WHERE did=? AND uri=? AND incarnation_key=? AND state='pending'",
+          t.did,
+          t.uri,
+          loveIncarnation.incarnation_key,
+        );
       db.run(
         "UPDATE love_incarnations SET state='absent',updated_at_ms=? WHERE uri=?",
         Number(o.nowNs / 1_000_000n),
         t.uri,
       );
-      if (o.forwarding && loveIncarnation.path === 'live') {
+      if (o.forwarding && loveIncarnation.path === 'live' && !apiEcho) {
         const local = db.one<{ origin: string }>(
           'SELECT origin FROM operations WHERE did=? AND collection=? AND rkey=? ORDER BY created_at_ms DESC LIMIT 1',
           t.did,

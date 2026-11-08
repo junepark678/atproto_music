@@ -290,6 +290,31 @@ export const lovePutExecutor: Executor = {
       // is hinted like a written one (hinting an indexed record is harmless),
       // so an unknown DID is admitted too.
       remember(ctx, op.did, key, { kind: 'love.put', uri: existing.uri, cid: existing.cid });
+      const currentIncarnation = ctx.m.db.one<{ incarnation_key: string }>(
+        "SELECT incarnation_key FROM love_incarnations WHERE uri=? AND state='present'",
+        existing.uri,
+      );
+      if (currentIncarnation === null) {
+        const incarnationKey = `love:${existing.uri}:api:${op.id}`;
+        admitForwardIdentity(ctx.m.db, {
+          did: op.did,
+          identityKey: incarnationKey,
+          path: 'api',
+          now: ctx.m.clock.nowMs(),
+        });
+        ctx.m.db.run(
+          `INSERT INTO love_incarnations(uri,incarnation_key,state,path,source_service,updated_at_ms) VALUES (?,?,'present','api',NULL,?)
+           ON CONFLICT(uri) DO NOTHING`,
+          existing.uri,
+          incarnationKey,
+          ctx.m.clock.nowMs(),
+        );
+      }
+      ctx.m.db.run(
+        'DELETE FROM forward_admissions WHERE did=? AND identity_key=?',
+        op.did,
+        `love-uri:${op.did}:${op.collection}:${op.rkey}`,
+      );
       return {
         kind: 'succeeded',
         uri: existing.uri,
@@ -318,7 +343,43 @@ export const loveDeleteExecutor: Executor = {
   async execute(op, ctx) {
     const key = unloveIdentity(op, ctx);
     if (key === null) return { kind: 'permanent', code: 'invalid_record_identity' };
-    const outcome = await deleteMatching(op, ctx, loveMatches(key));
+    const bridgeBeforeDelete = ({ uri, cid }: { uri: string; cid: string }) => {
+      const incarnation = ctx.m.db.one<{ incarnation_key: string; state: string }>(
+        'SELECT incarnation_key,state FROM love_incarnations WHERE uri=?',
+        uri,
+      );
+      const incarnationKey = incarnation?.state === 'present' ? incarnation.incarnation_key : `love:${uri}:cid:${cid}`;
+      if (!incarnation || incarnation.state !== 'present') {
+        ctx.m.db.run(
+          `INSERT INTO love_incarnations(uri,incarnation_key,state,path,source_service,updated_at_ms)
+           VALUES (?,?,'present','api',NULL,?) ON CONFLICT(uri) DO NOTHING`,
+          uri,
+          incarnationKey,
+          ctx.m.clock.nowMs(),
+        );
+      }
+      ctx.m.db.run(
+        `INSERT INTO love_delete_bridges(did,uri,incarnation_key,expected_cid,operation_id,state,created_at_ms)
+         VALUES (?,?,?,?,?,'pending',?) ON CONFLICT(did,uri,incarnation_key,operation_id)
+         DO UPDATE SET expected_cid=excluded.expected_cid,state='pending'`,
+        op.did,
+        uri,
+        incarnationKey,
+        cid,
+        op.id,
+        ctx.m.clock.nowMs(),
+      );
+    };
+    const bridgeFailed = ({ uri, cid }: { uri: string; cid: string }) => {
+      ctx.m.db.run(
+        "UPDATE love_delete_bridges SET state='obsolete' WHERE did=? AND uri=? AND expected_cid=? AND operation_id=? AND state='pending'",
+        op.did,
+        uri,
+        cid,
+        op.id,
+      );
+    };
+    const outcome = await deleteMatching(op, ctx, loveMatches(key), [], bridgeBeforeDelete, bridgeFailed);
     if (outcome.kind === 'succeeded') remember(ctx, op.did, key, { kind: 'love.delete', uri: null, cid: null });
     return outcome;
   },

@@ -201,6 +201,8 @@ export async function deleteMatching(
   ctx: ExecContext,
   matches: (value: unknown) => boolean,
   alwaysHint: readonly HintTarget[] = [],
+  beforeDelete?: (target: { uri: string; cid: string }) => void,
+  deleteFailed?: (target: { uri: string; cid: string }) => void,
 ): Promise<Outcome> {
   const stopped = await eachListedRecord(ctx.xrpc, op.collection, async (r) => {
     const rkey = ownRecordKey(r.uri, op.did, op.collection);
@@ -208,6 +210,7 @@ export async function deleteMatching(
     // Each delete is budget-checked; one the budget stops waits, and the next attempt lists again.
     const refused = ctx.afford(WRITE_COST.delete);
     if (refused !== null) return refused;
+    beforeDelete?.({ uri: r.uri, cid: r.cid });
     const result = await ctx.xrpc.procedure(
       'com.atproto.repo.deleteRecord',
       { repo: op.did, collection: op.collection, rkey, swapRecord: r.cid },
@@ -216,7 +219,10 @@ export async function deleteMatching(
     if (!result.ok) {
       const failure = result.failure;
       // InvalidSwap: the record changed since the listing; relist on the next attempt.
-      if (failure.code === 'repository_changed') return { kind: 'transient', code: 'repository_changed' };
+      if (failure.code === 'repository_changed') {
+        deleteFailed?.({ uri: r.uri, cid: r.cid });
+        return { kind: 'transient', code: 'repository_changed' };
+      }
       // Already gone is what we wanted.
       if (failure.kind !== 'missing') return failureOutcome(failure);
     }

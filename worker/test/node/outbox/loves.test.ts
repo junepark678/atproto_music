@@ -74,6 +74,9 @@ it('a second love for the same (artist_key, track_key) succeeds without a new re
         .sort(),
     ).toEqual(['3kotherapp222', created.rkey].sort());
     expect(sent.filter((s) => s.nsid === DELETE).every((s) => typeof s.body?.swapRecord === 'string')).toBe(true);
+    expect(
+      h.db.all('SELECT state,expected_cid FROM love_delete_bridges WHERE operation_id=?', unlove.operation.id),
+    ).toHaveLength(2);
     expect(h.op(unlove.operation.id)).toMatchObject({ state: 'succeeded', attempts: 1 });
     expect((await remoteRecords(h.kit, 'Alice', LOVE)).map((r) => r.rkey)).toEqual(['3kunrelated22']);
   });
