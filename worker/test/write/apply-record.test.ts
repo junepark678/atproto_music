@@ -4,12 +4,16 @@
 // code under test.
 
 import type { RecordProof } from '@atmusic/atproto/verify/types';
+import { listenKey } from '@atmusic/core/listen-key';
+import { trackKey } from '@atmusic/core/music-key';
 import { seededRandom } from '@atmusic/core/test-support/random';
+import { parseRfc3339 } from '@atmusic/core/timestamp';
 import { describe, expect, it } from 'vitest';
 import type { Db } from '../../src/do/db';
 import { visibleScrobblesFrom } from '../../src/do/read/visibility';
 import { applyRecordProof } from '../../src/do/write/apply-record';
 import { applySnapshotChunk } from '../../src/do/write/apply-snapshot';
+import { projectionListenKey } from '../../src/forward/projection';
 import { reopen, withMigratedDb } from '../node/support/node-db';
 import {
   ALICE,
@@ -67,6 +71,96 @@ function artistCounts(db: Db, did: string): Array<[string, number]> {
 }
 
 describe('applyRecordProof', () => {
+  it('matches core listenKey for unicode displays and fractional seconds', async () => {
+    const input = { did: ALICE, listenedAt: '2026-01-14T00:01:02.987Z', artist: 'Björk', track: '雪の華' };
+    const [artistKey, trackMusicKey] = trackKey(input.artist, input.track);
+    expect(projectionListenKey(input.did, input.listenedAt, artistKey, trackMusicKey)).toBe(
+      await listenKey({
+        did: input.did,
+        listenedAtNs: parseRfc3339(input.listenedAt)!,
+        artist: input.artist,
+        track: input.track,
+      }),
+    );
+  });
+  it('records a fresh snapshot proof without forwarding and suppresses a later live revision', async () => {
+    const repo = await repoFor('alice');
+    const first = await putProof(repo, SCROBBLE, 'r02', fixtureScrobble('r02'));
+    const second = await putProof(repo, SCROBBLE, 'r02', fixtureScrobble('r02'));
+    await withMigratedDb((db) => {
+      seedUser(db, ALICE);
+      db.run(
+        `INSERT INTO linked_accounts(id,did,service,remote_user,credential_ciphertext,key_id,created_at_ms,updated_at_ms)
+        VALUES ('link-s',?,'lastfm','alice',X'00','test',?,?)`,
+        ALICE,
+        NOW_MS,
+        NOW_MS,
+      );
+      db.tx(() => applyRecordProof(db, first, OPTS));
+      expect(db.all('SELECT kind FROM forward_outbox')).toHaveLength(0);
+      expect(db.all<{ path: string }>("SELECT path FROM forward_admissions WHERE path='snapshot'")).toHaveLength(1);
+      db.tx(() => applyRecordProof(db, second, { ...OPTS, forwarding: { random: seededRandom(3) } }));
+      expect(db.all('SELECT kind FROM forward_outbox')).toHaveLength(0);
+    });
+  });
+
+  it('retains an API admission through D32, cleanup and disk reopen before a late live proof', async () => {
+    const repo = await repoFor('alice');
+    const proof = await putProof(repo, SCROBBLE, 'r02', fixtureScrobble('r02'));
+    await withMigratedDb((initial, ctx) => {
+      seedUser(initial, ALICE);
+      initial.run(
+        `INSERT INTO linked_accounts(id,did,service,remote_user,credential_ciphertext,key_id,created_at_ms,updated_at_ms)
+        VALUES ('link-a',?,'lastfm','alice',X'00','test',?,?)`,
+        ALICE,
+        NOW_MS,
+        NOW_MS,
+      );
+      const record = fixtureScrobble('r02');
+      const recordListenAt = String(record.listenedAt);
+      const [artistKey, trackMusicKey] = trackKey(String(record.artist), String(record.track));
+      const key = projectionListenKey(ALICE, recordListenAt, artistKey, trackMusicKey);
+      initial.run("INSERT INTO forward_admissions VALUES (?,?,'api',NULL,?)", ALICE, key, NOW_MS);
+      initial.run('DELETE FROM operations');
+      initial.run('DELETE FROM listen_keys');
+      initial.run('DELETE FROM forward_outbox');
+      const db = reopen(initial);
+      const d32 = {
+        ...OPTS,
+        nowNs: OPTS.nowNs + 32n * 24n * 60n * 60n * 1_000_000_000n,
+        receiptNs: OPTS.receiptNs + 32n * 24n * 60n * 60n * 1_000_000_000n,
+      };
+      db.tx(() => applyRecordProof(db, proof, { ...d32, forwarding: { random: seededRandom(5) } }));
+      expect(db.all('SELECT kind FROM forward_outbox')).toHaveLength(0);
+    });
+  });
+
+  it('does not forward an import listen key when its operation row is gone', async () => {
+    const repo = await repoFor('alice');
+    const proof = await putProof(repo, SCROBBLE, 'r02', fixtureScrobble('r02'));
+    await withMigratedDb((db) => {
+      seedUser(db, ALICE);
+      db.run(
+        `INSERT INTO linked_accounts(id,did,service,remote_user,credential_ciphertext,key_id,created_at_ms,updated_at_ms)
+        VALUES ('link-i',?,'lastfm','alice',X'00','test',?,?)`,
+        ALICE,
+        NOW_MS,
+        NOW_MS,
+      );
+      const record = fixtureScrobble('r02');
+      const [artistKey, trackMusicKey] = trackKey(String(record.artist), String(record.track));
+      const key = projectionListenKey(ALICE, String(record.listenedAt), artistKey, trackMusicKey);
+      db.run(
+        "INSERT INTO listen_keys(did,dedupe_key,operation_id,source,created_at_ms) VALUES (?, ?, NULL, 'import', ?)",
+        ALICE,
+        key,
+        NOW_MS,
+      );
+      db.tx(() => applyRecordProof(db, proof, { ...OPTS, forwarding: { random: seededRandom(7) } }));
+      expect(db.one('SELECT 1 AS hit FROM operations WHERE did=?', ALICE)).toBeNull();
+      expect(db.all('SELECT kind FROM forward_outbox')).toHaveLength(0);
+    });
+  });
   it('forwards only an explicitly opted-in projected single scrobble and ignores its proof replay', async () => {
     const repo = await repoFor('alice');
     const proof = await putProof(repo, SCROBBLE, 'r02', fixtureScrobble('r02'));
