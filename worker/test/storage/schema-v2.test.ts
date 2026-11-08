@@ -157,7 +157,7 @@ const NEW_TABLES: Record<string, ExpectedTable> = {
     pk: ['did', 'kind', 'identity_key'],
   },
   linked_love_intents: {
-    columns: ['did', 'love_key', 'intent', 'operation_id', 'updated_at_ms'],
+    columns: ['did', 'love_key', 'intent', 'operation_id', 'updated_at_ms', 'recording_mbid'],
     pk: ['did', 'love_key'],
   },
   linked_pull_receipt_seed: {
@@ -167,6 +167,23 @@ const NEW_TABLES: Record<string, ExpectedTable> = {
   linked_pull_projection_scan: {
     columns: ['did', 'rowid_cursor', 'updated_at_ms'],
     pk: ['did'],
+  },
+  linked_pull_love_admissions: {
+    columns: [
+      'did',
+      'link_id',
+      'generation',
+      'operation_id',
+      'love_key',
+      'recording_mbid',
+      'source_service',
+      'source_account',
+      'state',
+      'uri',
+      'incarnation_key',
+      'updated_at_ms',
+    ],
+    pk: ['did', 'operation_id'],
   },
   forward_admissions: {
     columns: ['did', 'identity_key', 'path', 'source_service', 'created_at_ms', 'admission_seq'],
@@ -701,6 +718,16 @@ const NEW_SCROBBLE_COLUMNS = cols<ScrobbleV2Columns>({
 
 /** New named indexes: table, unique, partial, [column, desc] in key order. */
 const NEW_INDEXES: Record<string, [string, number, number, Array<[string, number]>]> = {
+  linked_love_intents_mbid: [
+    'linked_love_intents',
+    0,
+    0,
+    [
+      ['did', 0],
+      ['recording_mbid', 0],
+      ['updated_at_ms', 0],
+    ],
+  ],
   linked_pull_items_pending: [
     'linked_pull_items',
     0,
@@ -739,6 +766,46 @@ const NEW_INDEXES: Record<string, [string, number, number, Array<[string, number
       ['did', 0],
       ['love_key', 0],
       ['recording_mbid', 0],
+    ],
+  ],
+  linked_pull_love_admissions_generation: [
+    'linked_pull_love_admissions',
+    0,
+    0,
+    [
+      ['link_id', 0],
+      ['generation', 0],
+      ['state', 0],
+    ],
+  ],
+  linked_pull_love_admissions_key: [
+    'linked_pull_love_admissions',
+    0,
+    0,
+    [
+      ['did', 0],
+      ['state', 0],
+      ['love_key', 0],
+    ],
+  ],
+  linked_pull_love_admissions_mbid: [
+    'linked_pull_love_admissions',
+    0,
+    1,
+    [
+      ['did', 0],
+      ['state', 0],
+      ['recording_mbid', 0],
+    ],
+  ],
+  linked_pull_love_admissions_uri: [
+    'linked_pull_love_admissions',
+    0,
+    1,
+    [
+      ['did', 0],
+      ['uri', 0],
+      ['state', 0],
     ],
   ],
   mb_cover_art_lru: [
@@ -1663,6 +1730,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       "34|'linked_pull_legacy_listen_second_recovery'",
       "35|'linked_pull_persisted_poll_rounds'",
       "36|'linked_listenbrainz_pull_round_guards'",
+      "37|'linked_pull_love_acceptance_admissions'",
     ]);
     // The new scrobble columns exist and are NULL on every migrated row.
     expect(after.newColumns).toHaveLength(expectedScrobbles);
@@ -1706,6 +1774,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       { version: 34, name: 'linked_pull_legacy_listen_second_recovery' },
       { version: 35, name: 'linked_pull_persisted_poll_rounds' },
       { version: 36, name: 'linked_listenbrainz_pull_round_guards' },
+      { version: 37, name: 'linked_pull_love_acceptance_admissions' },
     ]);
     expect(after.compat).toEqual([{ singleton: 1, min_compatible_version: 2 }]);
     expect(after.newTablesEmpty).toEqual(['mb_cover_art_usage']);

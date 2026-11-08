@@ -704,6 +704,19 @@ describe('restore.ts', () => {
         'listenbrainz',
         world.clock.nowMs(),
       );
+      expect(TABLE_CLASS.linked_pull_love_admissions).toBe('non-derived');
+      db.run(
+        `INSERT INTO linked_pull_love_admissions(
+           did,link_id,generation,operation_id,love_key,recording_mbid,source_service,source_account,state,uri,incarnation_key,updated_at_ms
+         ) VALUES(?,?,2,'restore-pull-op',?,'00000000-0000-4000-8000-000000000003',
+           'listenbrainz','alice-source','present',?,?,?)`,
+        DID_A,
+        world.ids.link!,
+        `artist-key\u0000track-key`,
+        uri,
+        incarnationKey,
+        world.clock.nowMs(),
+      );
     } finally {
       db.close();
     }
@@ -740,9 +753,26 @@ describe('restore.ts', () => {
     expect(restored.code, `${restored.stdout}\n${restored.stderr}`).toBe(0);
     expect(restored.stdout).toMatch(/love_incarnations\s+1\s+live/);
     expect(restored.stdout).toMatch(/love_import_bridges\s+1\s+live/);
+    expect(restored.stdout).toMatch(/linked_pull_love_admissions\s+1\s+live/);
     expect(TABLE_CLASS.love_import_bridges).toBe('non-derived');
+    expect(TABLE_CLASS.linked_pull_love_admissions).toBe('non-derived');
     expect(query(world.dbPath, 'SELECT source_service,state FROM love_import_bridges')).toEqual([
       { source_service: 'listenbrainz', state: 'bound' },
+    ]);
+    expect(
+      query(
+        world.dbPath,
+        'SELECT love_key,recording_mbid,source_service,source_account,state,uri FROM linked_pull_love_admissions',
+      ),
+    ).toEqual([
+      {
+        love_key: `artist-key\u0000track-key`,
+        recording_mbid: '00000000-0000-4000-8000-000000000003',
+        source_service: 'listenbrainz',
+        source_account: 'alice-source',
+        state: 'present',
+        uri,
+      },
     ]);
     expect(query(world.dbPath, "SELECT count(*) AS n FROM forward_outbox WHERE kind='love'")).toEqual([{ n: 1 }]);
     expect(

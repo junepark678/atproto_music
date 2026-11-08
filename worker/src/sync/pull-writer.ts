@@ -25,6 +25,7 @@ import {
   unsettledOfKinds,
 } from '../outbox/operations';
 import { insertScrobbleCreate, prepareScrobble } from '../outbox/scrobble-ops';
+import { hasActivePullLoveAdmission, insertPullLoveAdmission } from './pull-love-admissions';
 import { hasListenAtSecond } from './pull-staging';
 import { isListenTombstoned, isLoveTombstoned } from './tombstones';
 
@@ -137,18 +138,29 @@ function setHold(m: ModuleDeps, linkId: string, generation: number, reason: Pull
   );
 }
 
-function loveWasUnloved(db: ModuleDeps['db'], did: string, key: string): boolean {
+function loveWasUnloved(db: ModuleDeps['db'], did: string, key: string, recordingMbid: string | null): boolean {
   const intent = db.one<{ intent: string }>(
-    'SELECT intent FROM linked_love_intents WHERE did=? AND love_key=?',
+    `SELECT intent FROM linked_love_intents WHERE did=?
+     AND (love_key=? OR (? IS NOT NULL AND recording_mbid=?))
+     ORDER BY updated_at_ms DESC,rowid DESC LIMIT 1`,
     did,
     key,
+    recordingMbid,
+    recordingMbid,
   );
   return intent?.intent === 'unlove';
 }
 
-function hasLocalLoveIntent(db: ModuleDeps['db'], did: string, key: string): boolean {
+function hasLocalLoveIntent(db: ModuleDeps['db'], did: string, key: string, recordingMbid: string | null): boolean {
   return (
-    db.one("SELECT 1 AS hit FROM linked_love_intents WHERE did=? AND love_key=? AND intent='love'", did, key) !== null
+    db.one(
+      `SELECT 1 AS hit FROM linked_love_intents WHERE did=? AND intent='love'
+       AND (love_key=? OR (? IS NOT NULL AND recording_mbid=?)) LIMIT 1`,
+      did,
+      key,
+      recordingMbid,
+      recordingMbid,
+    ) !== null
   );
 }
 
@@ -433,7 +445,10 @@ export async function writePullSlice(
           });
       } else {
         const key = plan.loveKey!;
-        if (isLoveTombstoned(m.db, link.did, key, current.recording_mbid) || loveWasUnloved(m.db, link.did, key)) {
+        if (
+          isLoveTombstoned(m.db, link.did, key, current.recording_mbid) ||
+          loveWasUnloved(m.db, link.did, key, current.recording_mbid)
+        ) {
           m.db.run(
             'DELETE FROM linked_pull_items WHERE link_id=? AND generation=? AND item_key=?',
             args.linkId,
@@ -443,7 +458,7 @@ export async function writePullSlice(
           report.tombstoned++;
           continue;
         }
-        if (hasLocalLoveIntent(m.db, link.did, key)) {
+        if (hasLocalLoveIntent(m.db, link.did, key, current.recording_mbid)) {
           m.db.run(
             'DELETE FROM linked_pull_items WHERE link_id=? AND generation=? AND item_key=?',
             args.linkId,
@@ -482,6 +497,22 @@ export async function writePullSlice(
           report.duplicate++;
           continue;
         }
+        if (
+          hasActivePullLoveAdmission(m.db, {
+            did: link.did,
+            loveKey: key,
+            recordingMbid: current.recording_mbid,
+          })
+        ) {
+          m.db.run(
+            'DELETE FROM linked_pull_items WHERE link_id=? AND generation=? AND item_key=?',
+            args.linkId,
+            args.generation,
+            plan.row.item_key,
+          );
+          report.duplicate++;
+          continue;
+        }
         const predecessors = unsettledOfKinds(m.db, link.did, ['love.put', 'love.delete'])
           .filter((op) => {
             const r = recordOf(op);
@@ -505,6 +536,17 @@ export async function writePullSlice(
           },
           now,
         );
+        insertPullLoveAdmission(m.db, {
+          did: link.did,
+          linkId: args.linkId,
+          generation: args.generation,
+          operationId: id,
+          loveKey: key,
+          recordingMbid: current.recording_mbid,
+          sourceService: current.source_service,
+          sourceAccount: current.source_account,
+          nowMs: now,
+        });
         const identityKey = `love-uri:${link.did}:${op.collection}:${op.rkey}`;
         const first = admitForwardIdentity(m.db, {
           did: link.did,

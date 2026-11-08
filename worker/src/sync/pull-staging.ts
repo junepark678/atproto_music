@@ -1,6 +1,7 @@
 import { MusicKeyError, trackKey } from '@atmusic/core/music-key';
 import type { Db } from '../do/db';
 import { hasUnknownListenSecond } from '../outbox/listen-second-receipts';
+import { hasActivePullLoveAdmission } from './pull-love-admissions';
 import { isListenTombstoned, isLoveTombstoned } from './tombstones';
 
 export const PULL_PAGE_MAX_ITEMS = 1000;
@@ -337,9 +338,13 @@ export function stageLovePage(
         item.recordingMbid ?? null,
       );
       const localIntent = db.one<{ intent: string }>(
-        'SELECT intent FROM linked_love_intents WHERE did=? AND love_key=?',
+        `SELECT intent FROM linked_love_intents WHERE did=?
+         AND (love_key=? OR (? IS NOT NULL AND recording_mbid=?))
+         ORDER BY updated_at_ms DESC,rowid DESC LIMIT 1`,
         args.did,
         key,
+        item.recordingMbid ?? null,
+        item.recordingMbid ?? null,
       );
       const staged = db.one(
         "SELECT 1 FROM linked_pull_items p JOIN linked_accounts l ON l.id=p.link_id WHERE l.did=? AND p.kind='love' AND (p.love_key=? OR (? IS NOT NULL AND p.recording_mbid=?)) LIMIT 1",
@@ -352,7 +357,12 @@ export function stageLovePage(
         outcomes.push('tombstoned');
         continue;
       }
-      if (indexed || pending?.kind === 'love.put' || localIntent?.intent === 'love' || staged) {
+      const acceptedPull = hasActivePullLoveAdmission(db, {
+        did: args.did,
+        loveKey: key,
+        recordingMbid: item.recordingMbid ?? null,
+      });
+      if (indexed || pending?.kind === 'love.put' || localIntent?.intent === 'love' || staged || acceptedPull) {
         outcomes.push('duplicate');
         continue;
       }

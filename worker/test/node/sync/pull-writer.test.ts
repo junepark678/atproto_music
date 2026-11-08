@@ -1,21 +1,24 @@
+import { verifyRecordProof } from '@atmusic/atproto/verify/record-proof';
 import { listenKey } from '@atmusic/core/listen-key';
 import { trackKey } from '@atmusic/core/music-key';
-import { NS_PER_SECOND } from '@atmusic/core/timestamp';
+import { seededRandom } from '@atmusic/core/test-support/random';
+import { fromMs, NS_PER_SECOND } from '@atmusic/core/timestamp';
 import { describe, expect, it } from 'vitest';
 import type { LinkedAccountRow } from '../../../src/app/rows';
+import { applyRecordProof } from '../../../src/do/write/apply-record';
 import { linkDto } from '../../../src/forward/links';
 import { retainedForwardProvenance } from '../../../src/forward/projection';
 import { removeScrobbleCreate } from '../../../src/outbox/delete-ops';
 import { seedLegacyListenSecondSlice } from '../../../src/outbox/listen-second-receipts';
-import { enqueueUnlove } from '../../../src/outbox/love-ops';
+import { enqueueLove, enqueueUnlove } from '../../../src/outbox/love-ops';
 import { insertOperation, newOperationId, outboxCollections, prepare } from '../../../src/outbox/operations';
+import { insertPullLoveAdmission } from '../../../src/sync/pull-love-admissions';
 import { stageLovePage, stagePullPage } from '../../../src/sync/pull-staging';
 import { writePullSlice } from '../../../src/sync/pull-writer';
 import { isListenTombstoned, tombstoneListen } from '../../../src/sync/tombstones';
-import { withHarness } from '../outbox/support';
+import { LOVE, remoteRecords, withHarness } from '../outbox/support';
 
-async function setup(h: Parameters<Parameters<typeof withHarness>[0]>[0]) {
-  const did = 'did:plc:pullwriter';
+async function setup(h: Parameters<Parameters<typeof withHarness>[0]>[0], did = 'did:plc:pullwriter') {
   h.seedUser(did);
   h.account(did);
   const linkId = h.link(did, 'listenbrainz');
@@ -28,6 +31,285 @@ async function setup(h: Parameters<Parameters<typeof withHarness>[0]>[0]) {
 }
 
 describe('linked pull staged writer', () => {
+  it('rechecks a concurrent accepted love alias in the final writer transaction', async () => {
+    await withHarness(async (h) => {
+      const { did, linkId } = await setup(h);
+      const recordingMbid = '00000000-0000-4000-8000-000000000004';
+      stageLovePage(h.db, {
+        linkId,
+        generation: 1,
+        sourceService: 'listenbrainz',
+        sourceAccount: 'remote',
+        did,
+        proposedCursor: null,
+        proposedBoundaryMs: 100,
+        proposedBoundaryKey: null,
+        nowMs: 2,
+        items: [
+          {
+            itemKey: 'staged',
+            artist: 'Artist',
+            track: 'Track',
+            recordingMbid,
+            payload: { artist: 'Artist', track: 'Track', recordingMbid },
+          },
+        ],
+      });
+      const [artistKey, trackKeyValue] = trackKey('Artist', 'Track');
+      const result = await writePullSlice(h.m, {
+        linkId,
+        generation: 1,
+        available: async () => {
+          insertPullLoveAdmission(h.db, {
+            did,
+            linkId: 'concurrent-lastfm-link',
+            generation: 3,
+            operationId: 'concurrent-accepted-love',
+            loveKey: `${artistKey}\u0000${trackKeyValue}`,
+            recordingMbid,
+            sourceService: 'lastfm',
+            sourceAccount: 'other-remote-account',
+            nowMs: 3,
+          });
+          return { available: true };
+        },
+      });
+      expect(result).toMatchObject({ accepted: 0, duplicate: 1 });
+      expect(h.db.one("SELECT count(*) AS n FROM operations WHERE did=? AND kind='love.put'", did)).toEqual({ n: 0 });
+      expect(h.db.one('SELECT count(*) AS n FROM linked_pull_items WHERE link_id=?', linkId)).toEqual({ n: 0 });
+    });
+  });
+
+  it.each([false, true])(
+    'keeps love key, MBID aliases and source admission through PDS success before projection (operation GC=%s)',
+    async (collectOperation) => {
+      await withHarness(async (h) => {
+        const { did, linkId } = await setup(h, h.alice);
+        const targetLink = h.link(did, 'lastfm');
+        const recordingMbid = '00000000-0000-4000-8000-000000000001';
+        const pulled = {
+          itemKey: 'source-love',
+          artist: 'Artist',
+          track: 'Original title',
+          recordingMbid,
+          payload: { artist: 'Artist', track: 'Original title', recordingMbid },
+        };
+        stageLovePage(h.db, {
+          linkId,
+          generation: 1,
+          sourceService: 'listenbrainz',
+          sourceAccount: 'remote',
+          did,
+          proposedCursor: null,
+          proposedBoundaryMs: 100,
+          proposedBoundaryKey: null,
+          nowMs: 2,
+          items: [pulled],
+        });
+        expect(
+          await writePullSlice(h.m, { linkId, generation: 1, available: async () => ({ available: true }) }),
+        ).toMatchObject({ accepted: 1, duplicate: 0 });
+        const accepted = h.db.one<{
+          operation_id: string;
+          state: string;
+          source_service: string;
+          source_account: string;
+        }>(
+          'SELECT operation_id,state,source_service,source_account FROM linked_pull_love_admissions WHERE did=?',
+          did,
+        )!;
+        expect(accepted).toMatchObject({ state: 'accepted', source_service: 'listenbrainz', source_account: 'remote' });
+        expect(
+          h.db.all<{ link_id: string; kind: string }>(
+            "SELECT link_id,kind FROM forward_outbox WHERE did=? AND kind='love'",
+            did,
+          ),
+        ).toEqual([{ link_id: targetLink, kind: 'love' }]);
+
+        await h.runUntilIdle();
+        expect(h.db.one('SELECT state FROM operations WHERE id=?', accepted.operation_id)).toMatchObject({
+          state: 'succeeded',
+        });
+        expect(await remoteRecords(h.kit, 'Alice', `${h.m.config.prefix}.love`)).toHaveLength(1);
+        expect(
+          h.db.one<{ state: string; uri: string; source_service: string }>(
+            'SELECT state,uri,source_service FROM linked_pull_love_admissions WHERE did=? AND operation_id=?',
+            did,
+            accepted.operation_id,
+          ),
+        ).toMatchObject({ state: 'present', source_service: 'listenbrainz' });
+
+        if (collectOperation) h.db.run('DELETE FROM operations WHERE id=?', accepted.operation_id);
+        h.restart();
+        const echo = stageLovePage(h.db, {
+          linkId,
+          generation: 1,
+          sourceService: 'listenbrainz',
+          sourceAccount: 'remote',
+          did,
+          proposedCursor: null,
+          proposedBoundaryMs: 100,
+          proposedBoundaryKey: null,
+          nowMs: 4,
+          items: [
+            {
+              itemKey: 'normalized-key-echo',
+              artist: ' artist ',
+              track: 'ORIGINAL TITLE ',
+              payload: { artist: ' artist ', track: 'ORIGINAL TITLE ' },
+            },
+            {
+              itemKey: 'corrected-title-echo',
+              artist: 'Artist',
+              track: 'Corrected title',
+              recordingMbid,
+              payload: { artist: 'Artist', track: 'Corrected title', recordingMbid },
+            },
+          ],
+        });
+        expect(echo).toEqual(['duplicate', 'duplicate']);
+        expect(
+          await writePullSlice(h.m, { linkId, generation: 1, available: async () => ({ available: true }) }),
+        ).toMatchObject({ accepted: 0 });
+
+        const remoteLove = (await remoteRecords(h.kit, 'Alice', LOVE))[0]!;
+        const proof = await verifyRecordProof(await h.kit.repos.Alice.getRecordCar(LOVE, remoteLove.rkey), {
+          did,
+          collection: LOVE,
+          rkey: remoteLove.rkey,
+          signingKey: h.kit.users.Alice.key.didKey,
+        });
+        const nowNs = fromMs(h.kit.clock.nowMs());
+        h.db.tx(() =>
+          applyRecordProof(h.db, proof, {
+            prefix: h.m.config.prefix!,
+            nowNs,
+            receiptNs: nowNs,
+            forwarding: { random: seededRandom(0x61) },
+          }),
+        );
+        expect(
+          h.db.one<{ path: string; source_service: string }>(
+            'SELECT path,source_service FROM love_incarnations WHERE uri=?',
+            `at://${did}/${LOVE}/${remoteLove.rkey}`,
+          ),
+        ).toEqual({
+          path: 'import',
+          source_service: 'listenbrainz',
+        });
+        await h.runUntilIdle();
+        expect(await remoteRecords(h.kit, 'Alice', `${h.m.config.prefix}.love`)).toHaveLength(1);
+        expect(h.db.all("SELECT link_id FROM forward_outbox WHERE did=? AND kind='love'", did)).toEqual([
+          { link_id: targetLink },
+        ]);
+      });
+    },
+  );
+
+  it('lets explicit local unlove tombstone the accepted aliases and explicit re-love create a new intent', async () => {
+    await withHarness(async (h) => {
+      const { did, linkId } = await setup(h, h.alice);
+      const recordingMbid = '00000000-0000-4000-8000-000000000002';
+      stageLovePage(h.db, {
+        linkId,
+        generation: 1,
+        sourceService: 'listenbrainz',
+        sourceAccount: 'remote',
+        did,
+        proposedCursor: null,
+        proposedBoundaryMs: 100,
+        proposedBoundaryKey: null,
+        nowMs: 2,
+        items: [
+          {
+            itemKey: 'pulled',
+            artist: 'Artist',
+            track: 'Original title',
+            recordingMbid,
+            payload: { artist: 'Artist', track: 'Original title', recordingMbid },
+          },
+        ],
+      });
+      await writePullSlice(h.m, { linkId, generation: 1, available: async () => ({ available: true }) });
+      await h.runUntilIdle();
+      const unlove = await enqueueUnlove(h.m, { did, artist: 'Artist', track: 'Original title', origin: 'web' });
+      expect(unlove.ok).toBe(true);
+      expect(h.db.one('SELECT state FROM linked_pull_love_admissions WHERE did=?', did)).toEqual({ state: 'retired' });
+      expect(h.db.one('SELECT recording_mbid FROM linked_love_intents WHERE did=?', did)).toEqual({
+        recording_mbid: recordingMbid,
+      });
+      await h.runUntilIdle();
+      expect(await remoteRecords(h.kit, 'Alice', `${h.m.config.prefix}.love`)).toHaveLength(0);
+      h.restart();
+
+      const oldEcho = stageLovePage(h.db, {
+        linkId,
+        generation: 1,
+        sourceService: 'listenbrainz',
+        sourceAccount: 'remote',
+        did,
+        proposedCursor: null,
+        proposedBoundaryMs: 100,
+        proposedBoundaryKey: null,
+        nowMs: 5,
+        items: [
+          {
+            itemKey: 'old-mbid-title-echo',
+            artist: 'Artist',
+            track: 'Corrected title',
+            recordingMbid,
+            payload: { artist: 'Artist', track: 'Corrected title', recordingMbid },
+          },
+        ],
+      });
+      expect(oldEcho).toEqual(['tombstoned']);
+
+      const relove = await enqueueLove(h.m, {
+        did,
+        input: { artist: 'Artist', track: 'Corrected title', recordingMbid },
+        origin: 'web',
+      });
+      expect(relove.ok).toBe(true);
+      const [artistKey, correctedTrackKey] = trackKey('Artist', 'Corrected title');
+      expect(
+        h.db.one<{ intent: string }>(
+          'SELECT intent FROM linked_love_intents WHERE did=? AND love_key=?',
+          did,
+          `${artistKey}\u0000${correctedTrackKey}`,
+        ),
+      ).toEqual({ intent: 'love' });
+      expect(h.db.one("SELECT count(*) AS n FROM linked_pull_tombstones WHERE did=? AND kind='love'", did)).toEqual({
+        n: 0,
+      });
+      await h.runUntilIdle();
+      expect(await remoteRecords(h.kit, 'Alice', `${h.m.config.prefix}.love`)).toHaveLength(1);
+      if (relove.ok) h.db.run('DELETE FROM operations WHERE id=?', relove.operation.id);
+      h.restart();
+      expect(
+        stageLovePage(h.db, {
+          linkId,
+          generation: 1,
+          sourceService: 'listenbrainz',
+          sourceAccount: 'remote',
+          did,
+          proposedCursor: null,
+          proposedBoundaryMs: 100,
+          proposedBoundaryKey: null,
+          nowMs: 6,
+          items: [
+            {
+              itemKey: 'old-name-after-local-relove',
+              artist: 'Artist',
+              track: 'Original title',
+              recordingMbid,
+              payload: { artist: 'Artist', track: 'Original title', recordingMbid },
+            },
+          ],
+        }),
+      ).toEqual(['duplicate']);
+    });
+  });
+
   it('rechecks legacy pending single and batch member seconds before accepting staged pulls', async () => {
     await withHarness(async (h) => {
       const { did, linkId } = await setup(h);

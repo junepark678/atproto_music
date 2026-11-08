@@ -1298,6 +1298,37 @@ const MIGRATION_S3_LISTENBRAINZ_PULL: Migration = {
   ],
 };
 
+// A pulled love can be accepted by the outbox and written to the PDS before
+// its Jetstream projection arrives. Keep its canonical aliases and source
+// provenance across operation cleanup, scoped to that accepted incarnation.
+const MIGRATION_S3_LOVE_PULL_ADMISSIONS: Migration = {
+  version: 37,
+  name: 'linked_pull_love_acceptance_admissions',
+  statements: [
+    'ALTER TABLE linked_love_intents ADD COLUMN recording_mbid TEXT',
+    'CREATE INDEX linked_love_intents_mbid ON linked_love_intents(did,recording_mbid,updated_at_ms)',
+    `CREATE TABLE linked_pull_love_admissions (
+      did TEXT NOT NULL,
+      link_id TEXT NOT NULL,
+      generation INTEGER NOT NULL,
+      operation_id TEXT NOT NULL,
+      love_key TEXT NOT NULL,
+      recording_mbid TEXT,
+      source_service TEXT NOT NULL,
+      source_account TEXT NOT NULL,
+      state TEXT NOT NULL,
+      uri TEXT,
+      incarnation_key TEXT,
+      updated_at_ms INTEGER NOT NULL,
+      PRIMARY KEY(did,operation_id)
+    )`,
+    'CREATE INDEX linked_pull_love_admissions_generation ON linked_pull_love_admissions(link_id,generation,state)',
+    'CREATE INDEX linked_pull_love_admissions_key ON linked_pull_love_admissions(did,state,love_key)',
+    'CREATE INDEX linked_pull_love_admissions_mbid ON linked_pull_love_admissions(did,state,recording_mbid) WHERE recording_mbid IS NOT NULL',
+    'CREATE INDEX linked_pull_love_admissions_uri ON linked_pull_love_admissions(did,uri,state) WHERE uri IS NOT NULL',
+  ],
+};
+
 export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_1,
   MIGRATION_2,
@@ -1335,6 +1366,7 @@ export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_S3_LISTEN_SECOND_RECOVERY,
   MIGRATION_S3_PULL_POLLING,
   MIGRATION_S3_LISTENBRAINZ_PULL,
+  MIGRATION_S3_LOVE_PULL_ADMISSIONS,
 ];
 
 /** The schema version this code expects. */
@@ -1421,6 +1453,7 @@ export const TABLES = [
   'linked_love_intents',
   'linked_pull_receipt_seed',
   'linked_pull_projection_scan',
+  'linked_pull_love_admissions',
 ] as const;
 
 export type TableName = (typeof TABLES)[number];
@@ -1506,4 +1539,5 @@ export const TABLE_CLASS: Readonly<Record<TableName, TableClass>> = {
   linked_love_intents: 'non-derived',
   linked_pull_receipt_seed: 'non-derived',
   linked_pull_projection_scan: 'non-derived',
+  linked_pull_love_admissions: 'non-derived',
 };

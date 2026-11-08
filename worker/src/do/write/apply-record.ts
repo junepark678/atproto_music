@@ -64,6 +64,7 @@ import {
 } from '../../forward/projection';
 import { enqueueTrack } from '../../musicbrainz/store';
 import { enqueueForwards } from '../../outbox/forward-enqueue';
+import { pullLoveAdmissionForUri, retirePullLoveAdmissionUri } from '../../sync/pull-love-admissions';
 import { tombstoneListen, tombstoneLove } from '../../sync/tombstones';
 import type { Db } from '../db';
 import { advanceUser, bumpStatsVersion, isSuppressed, loadUser } from './account-state';
@@ -564,9 +565,11 @@ function loveVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, o: A
       );
       const identityKey = current?.state === 'present' ? current.incarnation_key : `love:${t.uri}:${t.rev}`;
       const acceptanceKey = `love-uri:${t.did}:${t.collection}:${t.rkey}`;
+      const pullAdmission = pullLoveAdmissionForUri(db, { did: t.did, uri: t.uri });
       const apiBridge =
         retainedForwardProvenance(db, t.did, acceptanceKey) ??
-        (priorLove !== null ? retainedRecordProvenance(db, t.did, t.collection, t.rkey) : null);
+        (priorLove !== null ? retainedRecordProvenance(db, t.did, t.collection, t.rkey) : null) ??
+        (pullAdmission === null ? null : { path: 'import' as const, sourceService: pullAdmission.source_service });
       const legacyPresent =
         current?.state === 'present' || priorLove !== null || previousRecordState?.state === 'present';
       const provenancePath = apiBridge?.path ?? (legacyPresent ? 'snapshot' : o.forwarding ? 'live' : 'snapshot');
@@ -759,9 +762,12 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
     const locallyReloved =
       priorLove !== null &&
       db.one(
-        "SELECT 1 FROM linked_love_intents WHERE did=? AND love_key=? AND intent='love' LIMIT 1",
+        `SELECT 1 FROM linked_love_intents WHERE did=? AND intent='love'
+         AND (love_key=? OR (? IS NOT NULL AND recording_mbid=?)) LIMIT 1`,
         t.did,
         `${priorArtistKey}\u0000${priorTrackKey}`,
+        priorLove.recording_mbid,
+        priorLove.recording_mbid,
       ) !== null;
     if (o.forwarding && t.kind === 'love' && priorLove && !newerLoveIntent && !locallyReloved) {
       const [artistKeyValue, trackKeyValue] = trackKey(priorLove.artist, priorLove.track);
@@ -775,6 +781,8 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
       });
     }
     const deleted = deleteProjection(db, t.kind, t.uri);
+    if (t.kind === 'love')
+      retirePullLoveAdmissionUri(db, { did: t.did, uri: t.uri, nowMs: Number(o.nowNs / 1_000_000n) });
     if (t.kind === 'love' && priorLove && loveIncarnation?.state === 'present') {
       const identityKey = `love-delete:${loveIncarnation.incarnation_key}`;
       const apiBridge = db.one<{ expected_cid: string }>(

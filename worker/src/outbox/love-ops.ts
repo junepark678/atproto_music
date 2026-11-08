@@ -35,6 +35,7 @@ import { validateDisplayString } from '@atmusic/core/scrobble';
 import type { OperationRow, Origin } from '../app/rows';
 import type { ModuleDeps } from '../do/contracts';
 import { admitForwardIdentity } from '../forward/projection';
+import { bindPullLoveAdmission, retirePullLoveAdmissions } from '../sync/pull-love-admissions';
 import { tombstoneLove } from '../sync/tombstones';
 import { ownRecordKey } from './delete-ops';
 import { deleteMatching, type EnqueueResult, noneMatching } from './follow-ops';
@@ -90,7 +91,20 @@ export async function enqueueLove(m: ModuleDeps, args: EnqueueLoveArgs): Promise
     // A fresh explicit API love is a new user intent and supersedes prior
     // unlove tombstones. Imported/pulled loves cannot clear them.
     if (args.origin !== 'import')
-      m.db.run("DELETE FROM linked_pull_tombstones WHERE did=? AND kind='love' AND love_key=?", args.did, key);
+      m.db.run(
+        `DELETE FROM linked_pull_tombstones WHERE did=? AND kind='love'
+         AND (love_key=? OR (? IS NOT NULL AND recording_mbid=?) OR
+           (? IS NOT NULL AND love_key IN (
+             SELECT love_key FROM linked_pull_love_admissions WHERE did=? AND recording_mbid=?
+           )))`,
+        args.did,
+        key,
+        typeof record.recordingMbid === 'string' ? record.recordingMbid : null,
+        typeof record.recordingMbid === 'string' ? record.recordingMbid : null,
+        typeof record.recordingMbid === 'string' ? record.recordingMbid : null,
+        args.did,
+        typeof record.recordingMbid === 'string' ? record.recordingMbid : null,
+      );
     const op = insertOperation(
       m.db,
       {
@@ -108,12 +122,15 @@ export async function enqueueLove(m: ModuleDeps, args: EnqueueLoveArgs): Promise
     );
     if (args.origin !== 'import')
       m.db.run(
-        `INSERT INTO linked_love_intents(did,love_key,intent,operation_id,updated_at_ms) VALUES(?,?,'love',?,?)
-        ON CONFLICT(did,love_key) DO UPDATE SET intent='love',operation_id=excluded.operation_id,updated_at_ms=excluded.updated_at_ms`,
+        `INSERT INTO linked_love_intents(did,love_key,intent,operation_id,updated_at_ms,recording_mbid)
+        VALUES(?,?,'love',?,?,?)
+        ON CONFLICT(did,love_key) DO UPDATE SET intent='love',operation_id=excluded.operation_id,
+          updated_at_ms=excluded.updated_at_ms,recording_mbid=coalesce(excluded.recording_mbid,linked_love_intents.recording_mbid)`,
         args.did,
         key,
         op.id,
         now,
+        typeof record.recordingMbid === 'string' ? record.recordingMbid : null,
       );
     admitForwardIdentity(m.db, {
       did: args.did,
@@ -164,8 +181,27 @@ export async function enqueueUnlove(
       artistKeyValue,
       trackKeyValue,
     );
+    let knownRecordingMbid = mbids.find((row) => row.recording_mbid !== null)?.recording_mbid ?? null;
+    const previousIntent = m.db.one<{ recording_mbid: string | null }>(
+      'SELECT recording_mbid FROM linked_love_intents WHERE did=? AND love_key=?',
+      args.did,
+      key,
+    );
+    knownRecordingMbid ??= previousIntent?.recording_mbid ?? null;
     if (args.origin !== 'import') {
+      const acceptedPulls = retirePullLoveAdmissions(m.db, { did: args.did, loveKey: key, nowMs: now });
+      knownRecordingMbid ??=
+        acceptedPulls.find((admission) => admission.recording_mbid !== null)?.recording_mbid ?? null;
       tombstoneLove(m.db, { did: args.did, identity: `key:${key}`, loveKey: key, recordingMbid: null, nowMs: now });
+      for (const [i, admission] of acceptedPulls.entries())
+        if (admission.recording_mbid)
+          tombstoneLove(m.db, {
+            did: args.did,
+            identity: `mbid:${admission.recording_mbid}`,
+            loveKey: admission.love_key,
+            recordingMbid: admission.recording_mbid,
+            nowMs: now + i,
+          });
       for (const [i, row] of mbids.entries())
         if (row.recording_mbid)
           tombstoneLove(m.db, {
@@ -179,6 +215,7 @@ export async function enqueueUnlove(
         const record = recordOf(pending);
         if (!record || loveKeyOf(record.artist, record.track) !== key || typeof record.recordingMbid !== 'string')
           continue;
+        knownRecordingMbid ??= record.recordingMbid;
         tombstoneLove(m.db, {
           did: args.did,
           identity: `mbid:${record.recordingMbid}`,
@@ -205,12 +242,15 @@ export async function enqueueUnlove(
     );
     if (args.origin !== 'import')
       m.db.run(
-        `INSERT INTO linked_love_intents(did,love_key,intent,operation_id,updated_at_ms) VALUES(?,?,'unlove',?,?)
-        ON CONFLICT(did,love_key) DO UPDATE SET intent='unlove',operation_id=excluded.operation_id,updated_at_ms=excluded.updated_at_ms`,
+        `INSERT INTO linked_love_intents(did,love_key,intent,operation_id,updated_at_ms,recording_mbid)
+        VALUES(?,?,'unlove',?,?,?)
+        ON CONFLICT(did,love_key) DO UPDATE SET intent='unlove',operation_id=excluded.operation_id,
+          updated_at_ms=excluded.updated_at_ms,recording_mbid=coalesce(excluded.recording_mbid,linked_love_intents.recording_mbid)`,
         args.did,
         key,
         op.id,
         now,
+        knownRecordingMbid,
       );
     if (args.origin !== 'import') {
       enqueueForwards(m.db, {
@@ -391,6 +431,13 @@ export const lovePutExecutor: Executor = {
           accepted.source_service,
           ctx.m.clock.nowMs(),
         );
+        bindPullLoveAdmission(ctx.m.db, {
+          did: op.did,
+          operationId: op.id,
+          uri: existing.uri,
+          incarnationKey,
+          nowMs: ctx.m.clock.nowMs(),
+        });
       }
       ctx.m.db.run(
         'DELETE FROM forward_admissions WHERE did=? AND identity_key=?',
@@ -407,12 +454,29 @@ export const lovePutExecutor: Executor = {
     const outcome = await createWithReconcile(op, ctx, (remote) => sameDigest(op, remote));
     if (outcome.kind === 'succeeded') {
       remember(ctx, op.did, key, { kind: 'love.put', uri: outcome.uri ?? null, cid: outcome.cid ?? null });
+      if (outcome.uri !== undefined && outcome.uri !== null)
+        bindPullLoveAdmission(ctx.m.db, {
+          did: op.did,
+          operationId: op.id,
+          uri: outcome.uri,
+          incarnationKey: `love:${outcome.uri}:import:${op.id}`,
+          nowMs: ctx.m.clock.nowMs(),
+        });
     }
     return outcome;
   },
   async reconcile(op, ctx) {
     if (!hasIdentity(op, ctx, ctx.collections.love)) return { kind: 'permanent', code: 'invalid_record_identity' };
-    return lookupCreate(op, ctx, (remote) => sameDigest(op, remote), 'attempts_exhausted');
+    const outcome = await lookupCreate(op, ctx, (remote) => sameDigest(op, remote), 'attempts_exhausted');
+    if (outcome.kind === 'succeeded' && outcome.uri !== undefined && outcome.uri !== null)
+      bindPullLoveAdmission(ctx.m.db, {
+        did: op.did,
+        operationId: op.id,
+        uri: outcome.uri,
+        incarnationKey: `love:${outcome.uri}:import:${op.id}`,
+        nowMs: ctx.m.clock.nowMs(),
+      });
+    return outcome;
   },
 };
 
