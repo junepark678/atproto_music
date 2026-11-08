@@ -122,18 +122,22 @@ export const STATS_WINDOWS: readonly StatsWindow[] = ['all', '7d', '30d', '365d'
 export interface TopArtist {
   artist: string;
   scrobbleCount: number;
+  artistMbid?: string;
 }
 
 export interface TopTrack {
   artist: string;
   track: string;
   scrobbleCount: number;
+  recordingMbid?: string;
 }
 
 export interface TopAlbum {
   artist: string;
   album: string;
   scrobbleCount: number;
+  releaseMbid?: string;
+  releaseGroupMbid?: string;
 }
 
 export interface Statistics {

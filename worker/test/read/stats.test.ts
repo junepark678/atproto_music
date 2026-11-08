@@ -77,6 +77,37 @@ async function put(store: TestDb, repo: SignedRepo, rkey: string, record: Record
   expect(await applyVerified(store, repo, rkey)).toBe('applied');
 }
 
+async function seedMusicBrainzMatch(
+  store: TestDb,
+  input: {
+    artistKey: string;
+    trackKey: string;
+    albumKey?: string;
+    recordingMbid: string;
+    artistMbids: string[];
+    releaseMbid?: string;
+    releaseGroupMbid?: string;
+  },
+) {
+  await inTestDb(store, (db) =>
+    db.run(
+      `INSERT INTO mb_tracks(artist_key,track_key,album_key,status,recording_mbid,title,artist_credit,artist_mbids,
+       release_mbid,release_group_mbid,isrcs,matched_by,score,synced_at_ms,created_at_ms)
+     VALUES(?,?,?,'matched',?,'canonical title','canonical artist',?,?,?,'[]','search',95,1768478400000,1)
+     ON CONFLICT(artist_key,track_key,album_key) DO UPDATE SET status='matched',recording_mbid=excluded.recording_mbid,
+       artist_mbids=excluded.artist_mbids,release_mbid=excluded.release_mbid,release_group_mbid=excluded.release_group_mbid,
+       matched_by=excluded.matched_by,score=excluded.score,synced_at_ms=excluded.synced_at_ms`,
+      input.artistKey,
+      input.trackKey,
+      input.albumKey ?? '',
+      input.recordingMbid,
+      JSON.stringify(input.artistMbids),
+      input.releaseMbid ?? null,
+      input.releaseGroupMbid ?? null,
+    ),
+  );
+}
+
 /** Alice's r01..r08 (r08 created then deleted) and Bob's r09, from the shared fixture. */
 async function seedFixture() {
   const store = await openTestDb();
@@ -278,6 +309,112 @@ it('all: 7 listens, 3 artists, 6 tracks; artists (radiohead,3),(björk,2),(kate 
   expect(row!.as_of).toBe(AS_OF);
   expect(row!.lower).toBeNull();
   expect(row!.version).toBe(await statsVersion(store, ALICE));
+});
+
+it('attaches only unambiguous MusicBrainz IDs after cached stats and leaves counts and order unchanged', async () => {
+  const { store } = await seedFixture();
+  const before = await getStats(store, ALICE);
+  expectOk(before, 'all');
+  expect(before.body.topArtists).toEqual(EXPECTED.all.artists);
+  expect(before.body.topTracks).toEqual(EXPECTED.all.tracks);
+  expect(before.body.topAlbums).toEqual(EXPECTED.all.albums);
+
+  const id = {
+    artistA: '87c5dedd-371d-4a53-9f7f-80522fb7f3cb',
+    artistB: 'a74b1b7f-71a5-4011-9441-d0b5e4122711',
+    recordingA: '3f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2d10',
+    recordingB: '0c9d0b0e-2f6a-4c3b-8d7e-6f5a4b3c2d1e',
+    releaseA: 'd2e7a5b1-1c3f-4b8e-9a6d-0f1e2d3c4b5a',
+    releaseB: 'ec5f560a-5fff-4d78-a66f-7e9da6f14e76',
+    groupA: 'b2b9f8f9-f7a6-4b2a-8e1d-6d0e4c5f1a23',
+  };
+  // Album-less top track: its empty album tuple still has a valid match.
+  await seedMusicBrainzMatch(store, {
+    artistKey: 'kate bush',
+    trackKey: 'running up that hill',
+    recordingMbid: id.recordingA,
+    artistMbids: [id.artistA],
+  });
+  await seedMusicBrainzMatch(store, {
+    artistKey: 'kate bush',
+    trackKey: 'cloudbusting',
+    albumKey: 'hounds of love',
+    recordingMbid: id.recordingB,
+    artistMbids: [id.artistA],
+    releaseMbid: id.releaseA,
+    releaseGroupMbid: id.groupA,
+  });
+  // A second track match from another edition makes the release ambiguous while
+  // leaving the release group unambiguous.
+  await seedMusicBrainzMatch(store, {
+    artistKey: 'kate bush',
+    trackKey: "this woman's work",
+    albumKey: 'hounds of love',
+    recordingMbid: id.recordingA,
+    artistMbids: [id.artistA],
+    releaseMbid: id.releaseB,
+    releaseGroupMbid: id.groupA,
+  });
+  // Radiohead has conflicting credited artist IDs, including a multi-artist credit.
+  await seedMusicBrainzMatch(store, {
+    artistKey: 'radiohead',
+    trackKey: 'weird fishes',
+    albumKey: 'in rainbows',
+    recordingMbid: id.recordingA,
+    artistMbids: [id.artistA, id.artistB],
+  });
+  await seedMusicBrainzMatch(store, {
+    artistKey: 'radiohead',
+    trackKey: 'karma police',
+    albumKey: 'ok computer',
+    recordingMbid: id.recordingB,
+    artistMbids: [id.artistB],
+  });
+  // The same normalized track key has two matched recordings across album tuples.
+  await seedMusicBrainzMatch(store, {
+    artistKey: 'radiohead',
+    trackKey: 'weird fishes',
+    albumKey: '',
+    recordingMbid: id.recordingB,
+    artistMbids: [id.artistA],
+  });
+  // A status other than matched contributes no ID.
+  await inTestDb(store, (db) =>
+    db.run(
+      `INSERT INTO mb_tracks(artist_key,track_key,album_key,status,recording_mbid,artist_mbids,created_at_ms)
+     VALUES('radiohead','no surprises','ok computer','unmatched',?,'[]',1)
+     ON CONFLICT(artist_key,track_key,album_key) DO UPDATE SET status='unmatched',recording_mbid=excluded.recording_mbid,artist_mbids='[]'`,
+      id.recordingA,
+    ),
+  );
+
+  const got = await getStats(store, ALICE);
+  expectOk(got, 'all');
+  expect(got.body.topArtists).toEqual([
+    { ...artist('Radiohead', 3) },
+    { ...artist('Björk', 2) },
+    { ...artist('Kate Bush', 2), artistMbid: id.artistA },
+  ]);
+  expect(got.body.topTracks).toContainEqual({
+    ...track('Kate Bush', 'Running Up That Hill', 1),
+    recordingMbid: id.recordingA,
+  });
+  expect(got.body.topTracks).toContainEqual(track('Radiohead', 'Weird Fishes', 1));
+  expect(got.body.topTracks).toContainEqual(track('Radiohead', 'No Surprises', 1));
+  expect(got.body.topAlbums).toContainEqual({
+    ...album('Kate Bush', 'Hounds of Love', 1),
+    releaseGroupMbid: id.groupA,
+  });
+  expect(got.body.topAlbums).not.toContainEqual(expect.objectContaining({ album: 'Running Up That Hill' }));
+  expect(totalsOf(got.body)).toEqual([7, 3, 6]);
+  expect(got.network).toBe(0);
+  expect(schemas.Statistics(got.body)).toBe('valid');
+  // The cached body remains count-only; metadata was attached after the cache read.
+  const cached = JSON.parse((await cacheRow(store, ALICE, 'all', 10))!.body) as { statistics: Record<string, unknown> };
+  expect(cached.statistics.topArtists).toEqual(EXPECTED.all.artists);
+  expect(
+    (cached.statistics.topTracks as Array<Record<string, unknown>>).every((row) => !('recordingMbid' in row)),
+  ).toBe(true);
 });
 
 it('7d: 4/2/3; artists (björk,2),(radiohead,2); tracks Björk/Jóga:2, Radiohead/No Surprises:1, Radiohead/Weird Fishes:1', async () => {

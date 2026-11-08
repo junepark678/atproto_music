@@ -5998,6 +5998,9 @@
                 "scrobbleCount": {
                   "type": "integer",
                   "minimum": 0
+                },
+                "artistMbid": {
+                  "$ref": "#/components/schemas/Uuid"
                 }
               }
             }
@@ -6022,6 +6025,9 @@
                 "scrobbleCount": {
                   "type": "integer",
                   "minimum": 0
+                },
+                "recordingMbid": {
+                  "$ref": "#/components/schemas/Uuid"
                 }
               }
             }
@@ -6046,6 +6052,12 @@
                 "scrobbleCount": {
                   "type": "integer",
                   "minimum": 0
+                },
+                "releaseMbid": {
+                  "$ref": "#/components/schemas/Uuid"
+                },
+                "releaseGroupMbid": {
+                  "$ref": "#/components/schemas/Uuid"
                 }
               }
             }
