@@ -221,10 +221,14 @@ function scrobbleVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, 
   return {
     ok: true,
     write: () => {
-      const before = db.one<{ cid: string; listened_at: string; artist_key: string; track_key: string }>(
-        'SELECT cid,listened_at,artist_key,track_key FROM scrobbles WHERE uri = ?',
-        t.uri,
-      );
+      const before = db.one<{
+        cid: string;
+        listened_at: string;
+        artist_key: string;
+        track_key: string;
+        artist: string;
+        track: string;
+      }>('SELECT cid,listened_at,artist_key,track_key,artist,track FROM scrobbles WHERE uri = ?', t.uri);
       enqueueTrack(
         db,
         { artistKey: keys.artist_key, trackKey: keys.track_key, albumKey: keys.album_key },
@@ -253,6 +257,47 @@ function scrobbleVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, 
         before !== null ||
         db.one('SELECT 1 AS hit FROM record_state WHERE uri=? LIMIT 1', t.uri) !== null;
       const now = Number(o.nowNs / 1_000_000n);
+      if (
+        o.forwarding &&
+        t.recordUri === undefined &&
+        before &&
+        priorIdentityKey !== undefined &&
+        priorIdentityKey !== identityKey
+      ) {
+        const priorSecond = BigInt(Math.floor(Date.parse(before.listened_at) / 1000)) * 1_000_000_000n;
+        const retained = db.one(
+          `SELECT 1 FROM scrobbles WHERE did=? AND artist_key=? AND track_key=?
+           AND listened_at>=? AND listened_at<? AND uri<>? LIMIT 1`,
+          t.did,
+          before.artist_key,
+          before.track_key,
+          toStorage(priorSecond),
+          toStorage(priorSecond + 1_000_000_000n),
+          t.uri,
+        );
+        if (retained === null) {
+          tombstoneListen(db, {
+            did: t.did,
+            identity: `single-replaced:${t.uri}:${cid}`,
+            second: Number(priorSecond / 1_000_000_000n),
+            artistKey: before.artist_key,
+            trackKey: before.track_key,
+            nowMs: now,
+          });
+          enqueueListenDelete(db, {
+            did: t.did,
+            identityKey: priorIdentityKey,
+            eventKey: `${priorIdentityKey}:${before.cid}`,
+            listenedAt: Number(priorSecond / 1_000_000_000n),
+            artistKey: before.artist_key,
+            trackKey: before.track_key,
+            artist: before.artist,
+            track: before.track,
+            sourcePath: 'live',
+            now,
+          });
+        }
+      }
       const canonicalCollection = (canonical?.record_uri ?? canonical?.uri)?.split('/')[3];
       const provenance =
         canonical && canonicalCollection
