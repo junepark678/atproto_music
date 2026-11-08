@@ -133,6 +133,96 @@ const listensOf = (s: LbSubmission) =>
   (s.json as { payload: Array<{ track_metadata: { track_name: string } }> }).payload;
 
 describe('ListenBrainz forwarding', () => {
+  it('delete client uses the pinned policy fetch, parses top-level MSID separately from MBID, and accepts async delete 200', async () => {
+    const w = await world();
+    w.link();
+    const seenRequests: Request[] = [];
+    w.intercept(async (req) => {
+      seenRequests.push(req);
+      return Response.json(
+        {
+          payload: {
+            listens: [
+              {
+                listened_at: 100,
+                recording_msid: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+                track_metadata: { artist_name: 'Artist', track_name: 'Track', mbid_mapping: { recording_mbid: MBID } },
+              },
+              {
+                listened_at: 101,
+                recording_msid: null,
+                track_metadata: {
+                  artist_name: 'No MSID',
+                  track_name: 'Track',
+                  additional_info: { recording_mbid: MBID },
+                },
+              },
+            ],
+          },
+        },
+        { headers: { 'X-RateLimit-Remaining': '4' } },
+      );
+    });
+    w.intercept(async (req) => {
+      seenRequests.push(req);
+      expect(new URL(req.url).pathname).toBe('/1/delete-listen');
+      return Response.json({ status: 'ok' });
+    });
+    const page = await w.rt.listenbrainz.listWindowPage('alice_lb', TOKEN, 98, 1000);
+    expect(page).toMatchObject({
+      ok: true,
+      value: [
+        { listenedAt: 100, recordingMsid: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', artist: 'Artist', track: 'Track' },
+        { listenedAt: 101, recordingMsid: null, artist: 'No MSID', track: 'Track' },
+      ],
+    });
+    expect(new URL(seenRequests[0]!.url).search).toBe('?min_ts=98&count=1000&offset=0');
+    expect(seenRequests[0]!.headers.get('authorization')).toBe(`Token ${TOKEN}`);
+    const deleted = await w.rt.listenbrainz.deleteListen(TOKEN, {
+      listened_at: 100,
+      recording_msid: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    });
+    expect(deleted).toMatchObject({ ok: true, accepted: true });
+    expect(seenRequests[1]!.method).toBe('POST');
+    expect(seenRequests[1]!.headers.get('authorization')).toBe(`Token ${TOKEN}`);
+    expect(await seenRequests[1]!.clone().json()).toEqual({
+      listened_at: 100,
+      recording_msid: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    });
+  });
+
+  it('delete client classifies malformed pages and malformed delete success distinctly', async () => {
+    const w = await world();
+    w.link();
+    w.intercept(() => Response.json({ payload: { listens: [{ listened_at: 'bad', track_metadata: {} }] } }));
+    expect(await w.rt.listenbrainz.listWindowPage('alice_lb', TOKEN, 10, 10)).toMatchObject({
+      ok: false,
+      kind: 'malformed',
+      status: 502,
+    });
+    w.intercept(() => Response.json({ status: 'queued' }));
+    expect(
+      await w.rt.listenbrainz.deleteListen(TOKEN, {
+        listened_at: 10,
+        recording_msid: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      }),
+    ).toMatchObject({ ok: false, kind: 'malformed', status: 502 });
+  });
+
+  it('delete client preserves 429 rate headers and permanent HTTP status classification', async () => {
+    const w = await world();
+    w.link();
+    w.intercept(() =>
+      Response.json({ error: 'slow down' }, { status: 429, headers: { 'X-RateLimit-Reset-In': '17' } }),
+    );
+    expect(await w.rt.listenbrainz.listWindowPage('alice_lb', TOKEN, 10, 10)).toMatchObject({
+      ok: false,
+      kind: 'status',
+      status: 429,
+      rate: { resetInS: 17 },
+    });
+  });
+
   it('a live listen goes as single, a backlog as import batches of at most 100, now playing as playing_now once', async () => {
     const w = await world();
     w.link();
