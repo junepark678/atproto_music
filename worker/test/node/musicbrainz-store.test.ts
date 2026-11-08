@@ -24,7 +24,7 @@ describe('MusicBrainz storage', () => {
     try {
       expect(TABLES).toContain('mb_tracks');
       expect(TABLE_CLASS.mb_tracks).toBe('non-derived');
-      expect(MIGRATIONS.at(-1)?.statements.join('\n')).toContain('CREATE INDEX mb_tracks_due ON mb_tracks(status,next_attempt_ms,priority)');
+      expect(MIGRATIONS.find((m) => m.version === 15)?.statements.join('\n')).toContain('CREATE INDEX mb_tracks_due ON mb_tracks(status,next_attempt_ms,priority)');
       enqueueTrack(db, { artistKey: 'artist', trackKey: 'track' }, 10);
       enqueueTrack(db, { artistKey: 'artist', trackKey: 'track', albumKey: null }, 20, 5, '3f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2d10');
       enqueueTrack(db, { artistKey: 'artist', trackKey: 'track' }, 30, 2);

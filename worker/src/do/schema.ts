@@ -958,6 +958,13 @@ const MIGRATION_15: Migration = {
     'CREATE INDEX mb_tracks_due ON mb_tracks(status,next_attempt_ms,priority)',
   ],
 };
+const MIGRATION_16: Migration = {
+  version: 16,
+  name: 'musicbrainz_global_pacing',
+  statements: [
+    'CREATE TABLE mb_pacing (singleton INTEGER PRIMARY KEY NOT NULL, available_at_ms INTEGER NOT NULL DEFAULT 0)',
+  ],
+};
 
 export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_1,
@@ -975,6 +982,7 @@ export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_13,
   MIGRATION_14,
   MIGRATION_15,
+  MIGRATION_16,
 ];
 
 /** The schema version this code expects. */
@@ -1039,6 +1047,7 @@ export const TABLES = [
   // Migration 10.
   'verified_membership',
   'mb_tracks',
+  'mb_pacing',
 ] as const;
 
 export type TableName = (typeof TABLES)[number];
@@ -1103,4 +1112,5 @@ export const TABLE_CLASS: Readonly<Record<TableName, TableClass>> = {
   listen_removal_cids: 'non-derived',
   verified_membership: 'derived',
   mb_tracks: 'non-derived',
+  mb_pacing: 'non-derived',
 };
