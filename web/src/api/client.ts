@@ -28,6 +28,7 @@ import type {
   Indexing,
   ListenUri,
   Meta,
+  MusicBrainzMatch,
   NotifyAccepted,
   NotifyInput,
   OAuthClientMetadata,
@@ -293,6 +294,23 @@ const indexing: Decoder<Indexing> = object({
   lagSeconds: nullable(nonNegativeNumber),
 });
 
+const musicBrainzMatch: Decoder<MusicBrainzMatch> = object(
+  {
+    recordingMbid: uuid,
+    title: musicText,
+    artistCredit: musicText,
+    artistMbids: array(uuid),
+    matchedBy: oneOf(['mbid', 'search'] as const),
+    syncedAt: timestamp,
+  },
+  {
+    releaseMbid: uuid,
+    releaseTitle: musicText,
+    releaseGroupMbid: uuid,
+    durationSeconds: int(1, 86_400),
+  },
+);
+
 const scrobble: Decoder<Scrobble> = object(
   {
     uri: listenUri,
@@ -309,6 +327,7 @@ const scrobble: Decoder<Scrobble> = object(
     album: musicText,
     durationSeconds: int(1, 86_400),
     recordingMbid: uuid,
+    musicbrainz: musicBrainzMatch,
     handle: nullable(handle),
     recordUri: atUri,
     listenId,
@@ -338,9 +357,15 @@ const profile: Decoder<Profile> = object({
   indexing,
 });
 
-const topArtist: Decoder<TopArtist> = object({ artist: musicText, scrobbleCount: count });
-const topTrack: Decoder<TopTrack> = object({ artist: musicText, track: musicText, scrobbleCount: count });
-const topAlbum: Decoder<TopAlbum> = object({ artist: musicText, album: musicText, scrobbleCount: count });
+const topArtist: Decoder<TopArtist> = object({ artist: musicText, scrobbleCount: count }, { artistMbid: uuid });
+const topTrack: Decoder<TopTrack> = object(
+  { artist: musicText, track: musicText, scrobbleCount: count },
+  { recordingMbid: uuid },
+);
+const topAlbum: Decoder<TopAlbum> = object(
+  { artist: musicText, album: musicText, scrobbleCount: count },
+  { releaseMbid: uuid, releaseGroupMbid: uuid },
+);
 
 const statistics: Decoder<Statistics> = object({
   did,

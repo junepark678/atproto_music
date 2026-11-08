@@ -186,27 +186,27 @@ function storeMatch(
   const firstDate = rel ? dateOf(rel) : null;
   return db.tx(() => {
     db.run(
-    `UPDATE mb_tracks SET status='matched',priority=-1,attempts=0,next_attempt_ms=?,last_attempt_ms=?,
+      `UPDATE mb_tracks SET status='matched',priority=-1,attempts=0,next_attempt_ms=?,last_attempt_ms=?,
     matched_by=?,score=?,recording_mbid=?,title=?,artist_credit=?,artist_mbids=?,release_mbid=?,release_title=?,
     release_group_mbid=?,duration_ms=?,isrcs=?,first_release_date=?,synced_at_ms=?
     WHERE artist_key=? AND track_key=? AND album_key=?`,
-    now + 90 * DAY,
-    now,
-    matchedBy,
-    score,
-    recording.id as string,
-    recording.title as string,
-    creditDisplay(recording['artist-credit']),
-    JSON.stringify(ids),
-    typeof rel?.id === 'string' && /^[0-9a-f-]{36}$/i.test(rel.id) ? rel.id : null,
-    typeof rel?.title === 'string' ? rel.title : null,
-    typeof group?.id === 'string' ? group.id : null,
-    typeof recording.length === 'number' && Number.isFinite(recording.length) ? recording.length : null,
-    JSON.stringify(Array.isArray(recording.isrcs) ? recording.isrcs : []),
-    firstDate === '9999' ? null : firstDate,
-    now,
-    row.artist_key,
-    row.track_key,
+      now + 90 * DAY,
+      now,
+      matchedBy,
+      score,
+      recording.id as string,
+      recording.title as string,
+      creditDisplay(recording['artist-credit']),
+      JSON.stringify(ids),
+      typeof rel?.id === 'string' && /^[0-9a-f-]{36}$/i.test(rel.id) ? rel.id : null,
+      typeof rel?.title === 'string' ? rel.title : null,
+      typeof group?.id === 'string' ? group.id : null,
+      typeof recording.length === 'number' && Number.isFinite(recording.length) ? recording.length : null,
+      JSON.stringify(Array.isArray(recording.isrcs) ? recording.isrcs : []),
+      firstDate === '9999' ? null : firstDate,
+      now,
+      row.artist_key,
+      row.track_key,
       row.album_key,
     );
     // Cached statistics include their attached IDs; clear them when enrichment changes.
@@ -343,10 +343,17 @@ export function createMusicBrainzResolver(options: {
           continue;
         }
         if (recording) {
-          const scanned = storeMatch(db, row, recording, matchedBy, Number(recording.score), now, Math.max(0, 99 - localWork));
+          const scanned = storeMatch(
+            db,
+            row,
+            recording,
+            matchedBy,
+            Number(recording.score),
+            now,
+            Math.max(0, 99 - localWork),
+          );
           localWork += 1 + scanned;
-        }
-        else
+        } else
           db.run(
             `UPDATE mb_tracks SET status='unmatched',attempts=0,next_attempt_ms=?,last_attempt_ms=? WHERE artist_key=? AND track_key=? AND album_key=?`,
             now + 30 * DAY,
@@ -368,8 +375,7 @@ export function createMusicBrainzResolver(options: {
         localWork += 1 + scanned;
       }
     }
-    if (localWork >= 100 || loveReviveJobs(db, 1).length > 0)
-      return { requests, availableAt: clock.nowMs() + 1 };
+    if (localWork >= 100 || loveReviveJobs(db, 1).length > 0) return { requests, availableAt: clock.nowMs() + 1 };
     return { requests, availableAt: availableAt() };
   }
   async function retry(outcome: MusicBrainzOutcome<unknown>, row: Row): Promise<void> {
