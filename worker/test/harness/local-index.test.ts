@@ -313,6 +313,27 @@ const SEED_ROWS: Record<string, Record<string, SqlParam>[]> = {
   ],
   mb_love_revival_state: [{ singleton: 1, cursor_rowid: 0, complete: 0 }],
   mb_forward_love_current: [{ link_id: 'l1', love_artist_key: 'björk', love_track_key: 'jóga', forward_rowid: 1 }],
+  mb_cover_art: [
+    {
+      release_mbid: 'cover',
+      mime_type: 'image/png',
+      image_bytes: new Uint8Array([1, 2]).buffer,
+      byte_size: 2,
+      created_at_ms: 1,
+      fetched_at_ms: 2,
+      last_access_ms: 3,
+    },
+  ],
+  mb_cover_art_jobs: [
+    {
+      release_mbid: 'cover-job',
+      release_group_mbid: null,
+      status: 'pending',
+      attempts: 0,
+      next_due_ms: 1,
+      created_at_ms: 1,
+    },
+  ],
 };
 
 function insertRow(db: SqliteDb, table: string, row: Record<string, SqlParam>): void {
@@ -369,7 +390,7 @@ describe('worker/test/harness', () => {
       // An unwired method rejects instead of silently returning.
       await expect(index.profile('did:plc:alice')).rejects.toBeInstanceOf(NotWiredError);
       expect(index.calls.map((c) => c.method)).toEqual(['history', 'history', 'profile']);
-      expect(NODE_INDEX_METHODS).toHaveLength(19);
+      expect(NODE_INDEX_METHODS).toHaveLength(20);
       for (const method of NODE_INDEX_METHODS) expect(typeof index[method]).toBe('function');
 
       // A module error rolls its transaction back and surfaces to the caller.
@@ -566,7 +587,8 @@ describe('worker/test/harness', () => {
 
       // reopen: every table and its rows survive close and reopen of the same file.
       for (const [table, rows] of Object.entries(SEED_ROWS)) for (const row of rows) insertRow(db, table, row);
-      for (const table of TABLES) expect([table, rowCount(db, table)]).not.toEqual([table, 0]);
+      for (const table of TABLES)
+        if (table !== 'mb_cover_art_usage') expect([table, rowCount(db, table)]).not.toEqual([table, 0]);
       const before = dumpDb(db);
       const tableNames = before.objects.filter((o) => o.type === 'table').map((o) => o.name);
       expect([...tableNames].sort()).toEqual([...TABLES].sort());

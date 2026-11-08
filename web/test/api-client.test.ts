@@ -34,6 +34,7 @@ interface ResponseCase {
   path: string;
   status: number;
   example: string;
+  alternatives?: Array<{ example: string }>;
 }
 
 const RESPONSE_CASES = example<ResponseCase[]>('response-cases');
@@ -414,7 +415,11 @@ it('notify posts {uri} and returns queued', async () => {
 it('every api/examples response decodes and a changed field type is rejected', async () => {
   // Every remaining route has a client method, and every response fixture is exercised.
   const routes = new Set(RESPONSE_CASES.map((c) => `${c.method} ${c.path}`));
-  expect([...routes].sort()).toEqual(Object.keys(ROUTE_CALLS).sort());
+  // Binary image responses deliberately do not use the JSON-decoding ApiClient.
+  expect([...routes].filter((route) => route !== 'GET /api/v1/cover-art/{releaseMbid}').sort()).toEqual(
+    Object.keys(ROUTE_CALLS).sort(),
+  );
+  expect(routes.has('GET /api/v1/cover-art/{releaseMbid}')).toBe(true);
   const responseFixtures = Object.keys(exampleFiles)
     .map((file) => file.replace('../../api/examples/', '').replace('.json', ''))
     .filter(
@@ -425,11 +430,24 @@ it('every api/examples response decodes and a changed field type is rejected', a
         !Object.values(COMPONENT_CASES).includes(name),
     );
   expect(Object.values(COMPONENT_CASES).sort()).toEqual(['love', 'scrobble-musicbrainz', 'stats-musicbrainz']);
-  expect([...new Set(RESPONSE_CASES.map((c) => c.example))].sort()).toEqual(responseFixtures.sort());
+  expect(
+    [...new Set(RESPONSE_CASES.flatMap((c) => [c.example, ...(c.alternatives ?? []).map((a) => a.example)]))].sort(),
+  ).toEqual(responseFixtures.sort());
 
   let decoded = 0;
   let rejected = 0;
   for (const c of RESPONSE_CASES) {
+    if (c.path === '/api/v1/cover-art/{releaseMbid}') {
+      const fixture = example(c.example) as { mediaType?: string; base64?: string; error?: { code: string } };
+      if (c.status === 200) {
+        expect(fixture.mediaType).toMatch(/^image\/(jpeg|png|webp)$/);
+        expect(fixture.base64).toBe('AQID');
+      } else {
+        expect(fixture.error?.code).toBe(c.status === 404 ? 'not_found' : 'validation_failed');
+      }
+      decoded++;
+      continue;
+    }
     const call = routeCall(c);
     const fixture = example(c.example);
     const label = `${c.method} ${c.path} ${c.status} ${c.example}`;
@@ -475,7 +493,7 @@ it('every api/examples response decodes and a changed field type is rejected', a
     }
   }
   expect(decoded).toBe(RESPONSE_CASES.length);
-  expect(decoded).toBe(51);
+  expect(decoded).toBe(54);
   expect(rejected).toBeGreaterThan(300);
 });
 

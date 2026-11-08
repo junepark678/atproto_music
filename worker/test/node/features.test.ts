@@ -342,6 +342,7 @@ describe('production features', () => {
       new Promise<unknown[]>((resolve) => {
         checkedLookup(async () => answers)('jetstream.example.test', { all }, (...args: unknown[]) => resolve(args));
       });
+
     expect(await answer([{ address: '93.184.216.34' }])).toEqual([null, '93.184.216.34', 4]);
     expect(await answer([{ address: '93.184.216.34' }, { address: '2606:2800:220:1::1' }], true)).toEqual([
       null,
@@ -377,6 +378,37 @@ describe('production features', () => {
       await run.w.close();
     }
   }, 180_000);
+
+  it('carries each fetched image MIME and exact bytes through the timer, SQLite cache and HTTP route', async () => {
+    const { w } = await startWorld({
+      connectJetstream: null,
+      env: { COVER_ART_ARCHIVE_ROOT: 'https://coverartarchive.test/' },
+    });
+    const fixtures = [
+      { id: '11111111-1111-4111-8111-111111111111', mime: 'image/jpeg', bytes: [0xff, 0xd8, 0xff] },
+      { id: '22222222-2222-4222-8222-222222222222', mime: 'image/png', bytes: [0x89, 0x50, 0x4e, 0x47] },
+      { id: '33333333-3333-4333-8333-333333333333', mime: 'image/webp', bytes: [0x52, 0x49, 0x46, 0x46] },
+    ];
+    for (const { id } of fixtures) enqueueCoverArt(w.db, id, null, w.clock.nowMs());
+
+    for (let slice = 0; slice < 2; slice++) {
+      w.core.extensionTimers.kick('cover-art');
+      await w.core.tick('extension');
+    }
+
+    for (const { id, mime, bytes } of fixtures) {
+      const response = await w.fetchRaw(`/api/v1/cover-art/${id}`);
+      expect(response.status).toBe(200);
+      expect(response.headers.get('content-type')).toBe(mime);
+      expect([...new Uint8Array(await response.arrayBuffer())]).toEqual(bytes);
+      expect(
+        w.db.one<{ mime_type: string; byte_size: number }>(
+          'SELECT mime_type,byte_size FROM mb_cover_art WHERE release_mbid=?',
+          id,
+        ),
+      ).toEqual({ mime_type: mime, byte_size: bytes.length });
+    }
+  });
 
   it('the production features register the extension timers in EXTENSION_TIMER_NAMES order and run reconcileSignInPolicy once at startup before listen', async () => {
     const REFUSED = 'did:plc:cccccccccccccccccccccccc';
