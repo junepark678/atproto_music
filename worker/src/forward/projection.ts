@@ -1,6 +1,108 @@
 import { createHash } from 'node:crypto';
 import type { Db } from '../do/db';
 
+export interface ForwardProvenance {
+  path: 'api' | 'import' | 'live' | 'snapshot';
+  sourceService: string | null;
+}
+
+function sourceServiceOf(source: string | null | undefined): string | null {
+  if (source === 'lastfm_api' || source === 'lastfm_json') return 'lastfm';
+  if (source === 'listenbrainz_api' || source === 'listenbrainz_zip') return 'listenbrainz';
+  return null;
+}
+
+/** Existing durable acceptance/provenance, if this canonical identity was admitted before migration 15. */
+export function retainedForwardProvenance(db: Db, did: string, identityKey: string): ForwardProvenance | null {
+  const admission = db.one<ForwardProvenance>(
+    'SELECT path,source_service AS sourceService FROM forward_admissions WHERE did=? AND identity_key=?',
+    did,
+    identityKey,
+  );
+  if (admission !== null) return admission;
+
+  const accepted = db.one<{ source: string; operation_id: string | null }>(
+    'SELECT source,operation_id FROM listen_keys WHERE did=? AND dedupe_key=?',
+    did,
+    identityKey,
+  );
+  if (accepted !== null) {
+    if (accepted.source !== 'import') return { path: 'api', sourceService: null };
+    const job = accepted.operation_id
+      ? db.one<{ source: string }>(
+          `SELECT jobs.source FROM operations AS op JOIN import_jobs AS jobs ON jobs.id=op.import_job_id
+           WHERE op.id=?`,
+          accepted.operation_id,
+        )
+      : null;
+    return { path: 'import', sourceService: sourceServiceOf(job?.source) };
+  }
+  return null;
+}
+
+/** Trusted path from a retained operation at one exact repository record. */
+export function retainedRecordProvenance(
+  db: Db,
+  did: string,
+  collection: string,
+  rkey: string,
+): ForwardProvenance | null {
+  const operation = db.one<{ origin: string; source: string | null }>(
+    `SELECT op.origin,jobs.source FROM operations AS op
+     LEFT JOIN import_jobs AS jobs ON jobs.id=op.import_job_id
+     WHERE op.did=? AND op.collection=? AND op.rkey=? ORDER BY op.created_at_ms DESC LIMIT 1`,
+    did,
+    collection,
+    rkey,
+  );
+  if (operation === null) return null;
+  return operation.origin === 'import'
+    ? { path: 'import', sourceService: sourceServiceOf(operation.source) }
+    : { path: 'api', sourceService: null };
+}
+
+/**
+ * Seed a legacy projection identity before replacing its row. The caller passes
+ * the old canonical key when available; absent provenance is conservatively
+ * classified as snapshot whenever the URI/member already existed.
+ */
+export function admitProjectedIdentity(
+  db: Db,
+  args: {
+    did: string;
+    identityKey: string;
+    priorIdentityKey?: string;
+    provenance?: ForwardProvenance | null;
+    legacyPresent: boolean;
+    path: 'live' | 'snapshot';
+    now: number;
+  },
+): boolean {
+  const prior = args.priorIdentityKey ? retainedForwardProvenance(db, args.did, args.priorIdentityKey) : null;
+  const retained = retainedForwardProvenance(db, args.did, args.identityKey);
+  const conservative: ForwardProvenance = prior ??
+    retained ??
+    args.provenance ?? {
+      path: args.legacyPresent ? 'snapshot' : args.path,
+      sourceService: null,
+    };
+  if (args.priorIdentityKey && prior === null && args.priorIdentityKey !== args.identityKey)
+    admitForwardIdentity(db, {
+      did: args.did,
+      identityKey: args.priorIdentityKey,
+      path: conservative.path,
+      sourceService: conservative.sourceService ?? undefined,
+      now: args.now,
+    });
+  return admitForwardIdentity(db, {
+    did: args.did,
+    identityKey: args.identityKey,
+    path: conservative.path,
+    sourceService: conservative.sourceService ?? undefined,
+    now: args.now,
+  });
+}
+
 /** Synchronous equivalent of core listenKey, for use inside a projection transaction. */
 export function projectionListenKey(did: string, listenedAt: string, artistKey: string, trackKey: string): string {
   const seconds = String(Math.floor(Date.parse(listenedAt) / 1000));
