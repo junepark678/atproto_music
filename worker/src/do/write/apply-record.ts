@@ -46,7 +46,9 @@
 //   `users.stats_version` (no /api/v1 stat reads them).
 
 import { encode } from '@atcute/cbor';
+import { createHash } from 'node:crypto';
 import type { RecordProof } from '@atmusic/atproto/verify/types';
+import type { Random } from '@atmusic/core/deps';
 import { validateFollowRecord } from '@atmusic/core/follow';
 import { validateLoveRecord } from '@atmusic/core/love';
 import { MusicKeyError } from '@atmusic/core/music-key';
@@ -55,6 +57,7 @@ import { MAX_INGEST_CBOR_BYTES, validateScrobbleBatchRecord } from '@atmusic/cor
 import { isTid } from '@atmusic/core/syntax';
 import { toStorage } from '@atmusic/core/timestamp';
 import { enqueueTrack } from '../../musicbrainz/store';
+import { enqueueForwards } from '../../outbox/forward-enqueue';
 import type { Db } from '../db';
 import { advanceUser, bumpStatsVersion, isSuppressed, loadUser } from './account-state';
 import {
@@ -95,6 +98,18 @@ export interface ApplyOptions {
   prefix: string;
   /** Now in ns (injected clock): indexed_at, verified_at, last_activity_ms. */
   nowNs: bigint;
+  /** Explicit opt-in for forwarding a live Jetstream projection; absent elsewhere. */
+  forwarding?: { random: Random };
+}
+
+function listenKeyForProjection(did: string, listenedAt: string, artistKey: string, trackKey: string): string {
+  const seconds = String(Math.floor(Date.parse(listenedAt) / 1000));
+  const parts = [did, seconds, artistKey, trackKey].map((part) => {
+    const bytes = Buffer.from(part, 'utf8');
+    const len = Buffer.alloc(4); len.writeUInt32BE(bytes.length);
+    return Buffer.concat([len, bytes]);
+  });
+  return createHash('sha256').update('atmusic:listen-key:v1', 'utf8').update(Buffer.concat(parts)).digest('hex');
 }
 
 export function result(outcome: ApplyOutcome, extra: Partial<ApplyResult> = {}): ApplyResult {
@@ -676,6 +691,18 @@ export function applyRecordProof(db: Db, proof: RecordProof, o: ApplyOptions): A
     },
     o,
   );
+  if (o.forwarding && kind === 'scrobble' && applied.outcome === 'applied' && proof.state === 'present') {
+    const local = db.one<{ origin: string }>(
+      'SELECT origin FROM operations WHERE did=? AND collection=? AND rkey=? ORDER BY created_at_ms DESC LIMIT 1',
+      did, proof.collection, proof.rkey,
+    );
+    if (local?.origin !== 'import') {
+      const row = db.one<{ artist: string; track: string; album: string | null; listened_at: string; artist_key: string; track_key: string; duration_seconds: number | null; recording_mbid: string | null }>(
+        'SELECT artist,track,album,listened_at,artist_key,track_key,duration_seconds,recording_mbid FROM scrobbles WHERE uri=?', uri,
+      );
+      if (row) enqueueForwards(db, { did, items: [{ kind: 'scrobble', listenKey: listenKeyForProjection(did,row.listened_at,row.artist_key,row.track_key), payload: { listen: { artist: row.artist, track: row.track, album: row.album ?? undefined, listenedAt: row.listened_at, durationSeconds: row.duration_seconds ?? undefined, recordingMbid: row.recording_mbid ?? undefined }, origin: 'web' } }], now: Number(o.nowNs / 1_000_000n), random: o.forwarding.random });
+    }
+  }
   advanceUser(db, did, rev, o.nowNs);
   return result(applied.outcome, applied.reason === undefined ? {} : { reason: applied.reason });
 }

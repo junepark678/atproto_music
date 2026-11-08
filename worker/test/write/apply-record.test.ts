@@ -5,6 +5,7 @@
 
 import type { RecordProof } from '@atmusic/atproto/verify/types';
 import { describe, expect, it } from 'vitest';
+import { seededRandom } from '@atmusic/core/test-support/random';
 import type { Db } from '../../src/do/db';
 import { visibleScrobblesFrom } from '../../src/do/read/visibility';
 import { applyRecordProof } from '../../src/do/write/apply-record';
@@ -15,6 +16,7 @@ import {
   deleteProof,
   dump,
   fixtureScrobble,
+  NOW_MS,
   NOW_STORAGE,
   OPTS,
   PREFIX,
@@ -65,6 +67,22 @@ function artistCounts(db: Db, did: string): Array<[string, number]> {
 }
 
 describe('applyRecordProof', () => {
+  it('forwards only an explicitly opted-in projected single scrobble and ignores its proof replay', async () => {
+    const repo = await repoFor('alice');
+    const proof = await putProof(repo, SCROBBLE, 'r02', fixtureScrobble('r02'));
+    await withMigratedDb((db) => {
+      seedUser(db, ALICE);
+      db.run(`INSERT INTO linked_accounts(id,did,service,remote_user,credential_ciphertext,key_id,created_at_ms,updated_at_ms)
+        VALUES ('link-a',?,'lastfm','alice',X'00','test',?,?)`, ALICE, NOW_MS, NOW_MS);
+      db.tx(() => applyRecordProof(db, proof, { ...OPTS, forwarding: { random: seededRandom(99) } }));
+      expect(db.all('SELECT kind FROM forward_outbox')).toHaveLength(1);
+      db.tx(() => applyRecordProof(db, proof, { ...OPTS, forwarding: { random: seededRandom(99) } }));
+      expect(db.all('SELECT kind FROM forward_outbox')).toHaveLength(1);
+      db.run('DELETE FROM forward_outbox');
+      db.tx(() => applyRecordProof(db, proof, OPTS));
+      expect(db.all('SELECT kind FROM forward_outbox')).toHaveLength(0);
+    });
+  });
   it('present valid scrobble inserts row with exact keys and record_state present', async () => {
     const repo = await repoFor('alice');
     // r02 of the shared fixture: untrimmed, upper-case display strings.
