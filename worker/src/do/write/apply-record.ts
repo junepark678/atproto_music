@@ -55,6 +55,7 @@ import { reasonText, type ScrobbleRow, validateScrobbleRecord } from '@atmusic/c
 import { MAX_INGEST_CBOR_BYTES, validateScrobbleBatchRecord } from '@atmusic/core/scrobble-batch';
 import { isTid } from '@atmusic/core/syntax';
 import { toStorage } from '@atmusic/core/timestamp';
+import { enqueueListenDelete } from '../../forward/delete-enqueue';
 import {
   admitForwardIdentity,
   admitProjectedIdentity,
@@ -387,7 +388,12 @@ function batchVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, o: 
         track_key: string;
         listened_at: string;
         listen_id: string | null;
-      }>('SELECT uri,cid,artist_key,track_key,listened_at,listen_id FROM scrobbles WHERE record_uri = ?', t.uri);
+        artist: string;
+        track: string;
+      }>(
+        'SELECT uri,cid,artist_key,track_key,listened_at,listen_id,artist,track FROM scrobbles WHERE record_uri = ?',
+        t.uri,
+      );
       const priorByUri = new Map(prior.map((row) => [row.uri, row]));
       const now = Number(o.nowNs / 1_000_000n);
       if (o.forwarding) {
@@ -401,6 +407,19 @@ function batchVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, o: 
             artistKey: old.artist_key,
             trackKey: old.track_key,
             nowMs: now,
+          });
+          const identityKey = projectionListenKey(t.did, old.listened_at, old.artist_key, old.track_key);
+          enqueueListenDelete(db, {
+            did: t.did,
+            identityKey,
+            eventKey: identityKey,
+            listenedAt: Math.floor(Date.parse(old.listened_at) / 1000),
+            artistKey: old.artist_key,
+            trackKey: old.track_key,
+            artist: old.artist,
+            track: old.track,
+            sourcePath: 'live',
+            now,
           });
         }
       }
@@ -753,8 +772,15 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
           )
         : [];
     if (o.forwarding && (t.kind === 'scrobble' || t.kind === 'scrobbleBatch')) {
-      const listens = db.all<{ uri: string; listened_at: string; artist_key: string; track_key: string }>(
-        'SELECT uri,listened_at,artist_key,track_key FROM scrobbles WHERE did=? AND (uri=? OR record_uri=?)',
+      const listens = db.all<{
+        uri: string;
+        listened_at: string;
+        artist_key: string;
+        track_key: string;
+        artist: string;
+        track: string;
+      }>(
+        'SELECT uri,listened_at,artist_key,track_key,artist,track FROM scrobbles WHERE did=? AND (uri=? OR record_uri=?)',
         t.did,
         t.uri,
         t.uri,
@@ -768,6 +794,21 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
           trackKey: listen.track_key,
           nowMs: Number(o.nowNs / 1_000_000n),
         });
+      for (const listen of listens) {
+        const identityKey = projectionListenKey(t.did, listen.listened_at, listen.artist_key, listen.track_key);
+        enqueueListenDelete(db, {
+          did: t.did,
+          identityKey,
+          eventKey: identityKey,
+          listenedAt: Math.floor(Date.parse(listen.listened_at) / 1000),
+          artistKey: listen.artist_key,
+          trackKey: listen.track_key,
+          artist: listen.artist,
+          track: listen.track,
+          sourcePath: 'live',
+          now: Number(o.nowNs / 1_000_000n),
+        });
+      }
     }
     const newerLoveIntent =
       o.forwarding && t.kind === 'love' && priorLove

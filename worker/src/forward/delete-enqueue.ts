@@ -17,8 +17,8 @@ export function enqueueListenDelete(
     now: number;
   },
 ): number {
-  const links = db.all<{ id: string; generation: number }>(
-    "SELECT id,generation FROM linked_accounts WHERE did=? AND service='listenbrainz'",
+  const links = db.all<{ id: string; generation: number; service: string }>(
+    'SELECT id,generation,service FROM linked_accounts WHERE did=?',
     args.did,
   );
   let queued = 0;
@@ -31,10 +31,11 @@ export function enqueueListenDelete(
     );
     if (!delivered.some((row) => canonicalForwardDedupeKey(link.generation, row.dedupe_key) === args.identityKey))
       continue;
+    const state = link.service === 'listenbrainz' ? 'queued' : 'unsupported';
     const result = db.run(
       `INSERT OR IGNORE INTO listenbrainz_deletes
       (id,event_key,link_id,generation,did,identity_key,listened_at,artist_key,track_key,artist,track,source_path,state,due_at,deadline_at,created_at_ms,updated_at_ms)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'queued',?,?,?,?)`,
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'${state}',?,?,?,?)`,
       `${link.id}:${args.eventKey}`,
       args.eventKey,
       link.id,
