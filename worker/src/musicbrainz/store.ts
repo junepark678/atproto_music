@@ -121,12 +121,22 @@ export function recordingByMbid(db: Db, mbid: string): { title: string; artistCr
 }
 
 /** Return a local entity MBID only when every matching row agrees. */
-export function matchedEntityMbid(db: Db, kind: 'artist' | 'release', key: string): string | null {
+export function matchedEntityMbid(db: Db, kind: 'artist', key: string): string | null;
+export function matchedEntityMbid(db: Db, kind: 'release', key: { artistKey: string; albumKey: string }): string | null;
+export function matchedEntityMbid(
+  db: Db,
+  kind: 'artist' | 'release',
+  key: string | { artistKey: string; albumKey: string },
+): string | null {
+  if (kind === 'release' && typeof key === 'string')
+    throw new TypeError('release lookup requires artist and album keys');
   const rows = db.all<{ value: string }>(
     kind === 'artist'
       ? `SELECT DISTINCT j.value AS value FROM mb_tracks m, json_each(m.artist_mbids) j WHERE m.status='matched' AND m.artist_key=?`
-      : `SELECT DISTINCT release_mbid AS value FROM mb_tracks WHERE status='matched' AND album_key=? AND release_mbid IS NOT NULL`,
-    key,
+      : `SELECT DISTINCT release_mbid AS value FROM mb_tracks WHERE status='matched' AND artist_key=? AND album_key=? AND release_mbid IS NOT NULL`,
+    ...(kind === 'artist'
+      ? [key as string]
+      : [(key as { artistKey: string }).artistKey, (key as { albumKey: string }).albumKey]),
   );
   const values = [...new Set(rows.map((row) => row.value).filter(isUUID))];
   return values.length === 1 ? values[0]! : null;

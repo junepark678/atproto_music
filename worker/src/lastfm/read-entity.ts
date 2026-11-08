@@ -163,7 +163,12 @@ function trackInfo(call: LastfmCall): LfmDocument {
         leaf('title', withAlbum.album),
         leaf(
           'mbid',
-          withAlbum.release_mbid || matchedEntityMbid(call.deps.db, 'release', withAlbum.album_key ?? '') || '',
+          withAlbum.release_mbid ||
+            matchedEntityMbid(call.deps.db, 'release', {
+              artistKey: withAlbum.artist_key,
+              albumKey: withAlbum.album_key ?? '',
+            }) ||
+            '',
         ),
         leaf('url', albumUrl(albumArtist, withAlbum.album)),
         images(),
@@ -289,7 +294,12 @@ function albumInfo(call: LastfmCall): LfmDocument {
   const children: LfmElement[] = [
     leaf('name', display.album),
     leaf('artist', albumArtist),
-    leaf('mbid', display.release_mbid || matchedEntityMbid(db, 'release', display.album_key ?? '') || ''),
+    leaf(
+      'mbid',
+      display.release_mbid ||
+        matchedEntityMbid(db, 'release', { artistKey: display.artist_key, albumKey: display.album_key ?? '' }) ||
+        '',
+    ),
     leaf('url', albumUrl(albumArtist, display.album)),
     images(),
     leaf('listeners', counts.listeners),
