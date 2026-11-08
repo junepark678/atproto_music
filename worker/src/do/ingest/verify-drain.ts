@@ -286,7 +286,9 @@ function applyVerified(c: Ctx, row: HintRow, proof: Parameters<typeof applyRecor
         receiptNs,
         prefix: c.prefix,
         nowNs: fromMs(c.now),
-        ...(row.source === 'jetstream' && row.hint_rev === proof.commit.rev ? { forwarding: { random: c.m.random } } : {}),
+        ...(row.source === 'jetstream' && row.hint_rev === proof.commit.rev
+          ? { forwarding: { random: c.m.random } }
+          : {}),
       });
       if (result.outcome === 'stale_head') {
         return staleProof(c, row, current);

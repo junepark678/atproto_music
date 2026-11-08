@@ -4,8 +4,8 @@
 // code under test.
 
 import type { RecordProof } from '@atmusic/atproto/verify/types';
-import { describe, expect, it } from 'vitest';
 import { seededRandom } from '@atmusic/core/test-support/random';
+import { describe, expect, it } from 'vitest';
 import type { Db } from '../../src/do/db';
 import { visibleScrobblesFrom } from '../../src/do/read/visibility';
 import { applyRecordProof } from '../../src/do/write/apply-record';
@@ -72,8 +72,13 @@ describe('applyRecordProof', () => {
     const proof = await putProof(repo, SCROBBLE, 'r02', fixtureScrobble('r02'));
     await withMigratedDb((db) => {
       seedUser(db, ALICE);
-      db.run(`INSERT INTO linked_accounts(id,did,service,remote_user,credential_ciphertext,key_id,created_at_ms,updated_at_ms)
-        VALUES ('link-a',?,'lastfm','alice',X'00','test',?,?)`, ALICE, NOW_MS, NOW_MS);
+      db.run(
+        `INSERT INTO linked_accounts(id,did,service,remote_user,credential_ciphertext,key_id,created_at_ms,updated_at_ms)
+        VALUES ('link-a',?,'lastfm','alice',X'00','test',?,?)`,
+        ALICE,
+        NOW_MS,
+        NOW_MS,
+      );
       db.tx(() => applyRecordProof(db, proof, { ...OPTS, forwarding: { random: seededRandom(99) } }));
       expect(db.all('SELECT kind FROM forward_outbox')).toHaveLength(1);
       db.tx(() => applyRecordProof(db, proof, { ...OPTS, forwarding: { random: seededRandom(99) } }));
