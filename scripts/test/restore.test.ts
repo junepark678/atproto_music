@@ -583,10 +583,13 @@ describe('restore.ts', () => {
     const db = openSqliteDb(world.dbPath, { busyTimeoutMs: BUSY_MS });
     try {
       expect(db.one("SELECT title,recording_mbid FROM mb_tracks WHERE track_key='late song'")).toEqual({
-        title: 'Late Song', recording_mbid: '3f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2d10',
+        title: 'Late Song',
+        recording_mbid: '3f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2d10',
       });
       expect(db.all('SELECT rkey FROM scrobbles ORDER BY rkey')).toEqual([{ rkey: 's1' }]);
-    } finally { db.close(); }
+    } finally {
+      db.close();
+    }
   }, 30_000);
 
   it('with a fake systemctl, restore stops atmusic.socket and atmusic.service, proceeds only when both report inactive, swaps the db in, and starts both units only afterwards; a connection attempted mid-restore starts no server', async () => {

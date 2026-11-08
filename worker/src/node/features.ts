@@ -94,8 +94,6 @@ import { type ConnectJetstream, JetstreamConnectError } from '../do/ingest/jetst
 import { deleteExpiredNowPlaying } from '../do/read/now-playing';
 import { sweepExpiredLinkStates } from '../forward/links';
 import { UpstreamPacing } from '../forward/upstream-pacing';
-import { createMusicBrainzClient, MB_CAPS } from '../musicbrainz/client';
-import { createMusicBrainzResolver } from '../musicbrainz/resolver';
 import { IGNORED_LISTEN_RETENTION_MS } from '../http/account';
 import { authFeature } from '../http/auth';
 import { credentialsFeature } from '../http/credentials';
@@ -112,6 +110,8 @@ import { writeMethods } from '../lastfm/write-methods';
 import { listenBrainzRoutes } from '../listenbrainz/routes';
 import { createSubmitRoutes } from '../listenbrainz/submit';
 import { createTokenRoutes, listenBrainzLimiterFor } from '../listenbrainz/token-routes';
+import { createMusicBrainzClient, MB_CAPS } from '../musicbrainz/client';
+import { createMusicBrainzResolver } from '../musicbrainz/resolver';
 import { type PdsWriter, type PdsWriterSource, ReauthRequiredError, sessionWriter } from '../outbox/pds-writer';
 import { outboxExtension } from '../outbox/runner';
 import { backupExtension } from './backup';
@@ -387,21 +387,42 @@ export async function productionFeatures(options: ProductionFeatureOptions): Pro
   const pacing = new UpstreamPacing(options.clock);
   let musicBrainzResolver: ReturnType<typeof createMusicBrainzResolver> | null = null;
   const musicBrainzClient = createMusicBrainzClient({
-    fetch: bindPolicyFetch(createPolicyFetch({ transport: outbound.transportFor('musicbrainz'), ...(options.timer === undefined ? {} : { timer: options.timer }) }), MB_CAPS),
+    fetch: bindPolicyFetch(
+      createPolicyFetch({
+        transport: outbound.transportFor('musicbrainz'),
+        ...(options.timer === undefined ? {} : { timer: options.timer }),
+      }),
+      MB_CAPS,
+    ),
     apiRoot: config.musicbrainzApiRoot,
     version: '0.0.0',
   });
   const musicbrainzFeature: Feature = {
     name: 'musicbrainz',
-    extensions: [{ name: 'musicbrainz', start(ctx, now) { ctx.schedule('musicbrainz', now); }, timers: { musicbrainz: async (now, ctx) => {
-      const resolver = musicBrainzResolver;
-      if (resolver) {
-        const result = await resolver.run();
-        ctx.schedule('musicbrainz', result.availableAt > now ? result.availableAt : now + 300_000);
-      } else ctx.schedule('musicbrainz', now + 300_000);
-    } } }],
+    extensions: [
+      {
+        name: 'musicbrainz',
+        start(ctx, now) {
+          ctx.schedule('musicbrainz', now);
+        },
+        timers: {
+          musicbrainz: async (now, ctx) => {
+            const resolver = musicBrainzResolver;
+            if (resolver) {
+              const result = await resolver.run();
+              ctx.schedule('musicbrainz', result.availableAt > now ? result.availableAt : now + 300_000);
+            } else ctx.schedule('musicbrainz', now + 300_000);
+          },
+        },
+      },
+    ],
     services(ctx) {
-      musicBrainzResolver = createMusicBrainzResolver({ db: ctx.deps.db, client: musicBrainzClient, clock: ctx.deps.clock, enabled: config.musicbrainzEnabled });
+      musicBrainzResolver = createMusicBrainzResolver({
+        db: ctx.deps.db,
+        client: musicBrainzClient,
+        clock: ctx.deps.clock,
+        enabled: config.musicbrainzEnabled,
+      });
       return {};
     },
   };

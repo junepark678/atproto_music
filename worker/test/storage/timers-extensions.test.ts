@@ -271,7 +271,14 @@ it('runDue with a names subset claims only those timers, and two lanes over two 
     calls.length = 0;
     const coreRun = await runDue(storage, db, NOW, handlers, UNLIMITED);
     expect(coreRun.ran).toEqual(['snapshot', 'jetstream-watchdog', 'status-sweep', 'identity-sweep', 'discovery']);
-    expect(timerRows(db).map((r) => r.name)).toEqual(['backup', 'expiry-sweep', 'import', 'musicbrainz', 'oauth-keepalive', 'outbox']);
+    expect(timerRows(db).map((r) => r.name)).toEqual([
+      'backup',
+      'expiry-sweep',
+      'import',
+      'musicbrainz',
+      'oauth-keepalive',
+      'outbox',
+    ]);
 
     // Two lanes over two storage objects run at the same time.
     const coreAlarm = recordingAlarms();

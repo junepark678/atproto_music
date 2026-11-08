@@ -54,8 +54,8 @@ import { reasonText, type ScrobbleRow, validateScrobbleRecord } from '@atmusic/c
 import { MAX_INGEST_CBOR_BYTES, validateScrobbleBatchRecord } from '@atmusic/core/scrobble-batch';
 import { isTid } from '@atmusic/core/syntax';
 import { toStorage } from '@atmusic/core/timestamp';
-import type { Db } from '../db';
 import { enqueueTrack } from '../../musicbrainz/store';
+import type { Db } from '../db';
 import { advanceUser, bumpStatsVersion, isSuppressed, loadUser } from './account-state';
 import {
   albumArtistKey,
@@ -208,7 +208,13 @@ function scrobbleVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, 
     ok: true,
     write: () => {
       const before = db.one<{ cid: string }>('SELECT cid FROM scrobbles WHERE uri = ?', t.uri);
-      enqueueTrack(db, { artistKey: keys.artist_key, trackKey: keys.track_key, albumKey: keys.album_key }, Number(o.nowNs / 1_000_000n), 0, row.recordingMbid);
+      enqueueTrack(
+        db,
+        { artistKey: keys.artist_key, trackKey: keys.track_key, albumKey: keys.album_key },
+        Number(o.nowNs / 1_000_000n),
+        0,
+        row.recordingMbid,
+      );
       db.run(
         `INSERT INTO scrobbles(uri, record_uri, listen_id, cid, did, rkey, revision, artist, track, album, listened_at, created_at,
            duration_seconds, recording_mbid, indexed_at, artist_key, track_key, album_key,
@@ -405,7 +411,13 @@ function loveVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, o: A
         row.createdAt,
         toStorage(o.nowNs),
       );
-      enqueueTrack(db, { artistKey: keys.artist_key, trackKey: keys.track_key }, Number(o.nowNs / 1_000_000n), 0, row.recordingMbid);
+      enqueueTrack(
+        db,
+        { artistKey: keys.artist_key, trackKey: keys.track_key },
+        Number(o.nowNs / 1_000_000n),
+        0,
+        row.recordingMbid,
+      );
       return false;
     },
   };
