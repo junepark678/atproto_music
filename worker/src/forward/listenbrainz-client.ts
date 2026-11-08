@@ -121,18 +121,10 @@ export class ListenbrainzClient {
     token: string,
     minTs: number,
     count: number,
-    offset = 0,
   ): Promise<ListenbrainzOutcome<ListenWindowEntry[]>> {
-    if (
-      !Number.isSafeInteger(minTs) ||
-      !Number.isSafeInteger(count) ||
-      count < 1 ||
-      count > 1000 ||
-      !Number.isSafeInteger(offset) ||
-      offset < 0
-    )
+    if (!Number.isSafeInteger(minTs) || !Number.isSafeInteger(count) || count < 1 || count > 1000)
       throw new RangeError('invalid ListenBrainz page bounds');
-    const path = `1/user/${encodeURIComponent(user)}/listens?min_ts=${minTs}&count=${count}&offset=${offset}`;
+    const path = `1/user/${encodeURIComponent(user)}/listens?min_ts=${minTs}&count=${count}`;
     const out = await this.exchange(path, token, { method: 'GET' });
     if (!out.ok) return out;
     const body = out.value;

@@ -1,29 +1,18 @@
 import type { Clock, Random } from '@atmusic/core/deps';
+import { trackKey } from '@atmusic/core/music-key';
 import type { LinkedAccountRow } from '../app/rows';
 import type { Box } from '../crypto/box';
 import type { Db } from '../do/db';
 import { openLinkCredential, revokeLink } from './links';
 import type { ListenbrainzClient, ListenWindowEntry } from './listenbrainz-client';
 import type { UpstreamPacing } from './upstream-pacing';
+import { listenbrainzPacingKey } from './upstream-pacing';
 
 export const DELETE_MAX_ATTEMPTS = 32;
 export const DELETE_MAX_REQUESTS_PER_RUN = 1;
 const PAGE_SIZE = 1000;
+const MAX_LOOKUP_CANDIDATES = 4000;
 type Candidate = ListenWindowEntry;
-interface Progress {
-  offset: number;
-  candidates: Candidate[];
-}
-function progress(text: string | null): Progress {
-  if (text === null) return { offset: 0, candidates: [] };
-  try {
-    const p = JSON.parse(text) as Progress;
-    if (Number.isSafeInteger(p.offset) && p.offset >= 0 && Array.isArray(p.candidates)) return p;
-  } catch {
-    /* treat corrupt continuation as empty, never a target */
-  }
-  return { offset: 0, candidates: [] };
-}
 function sameCredential(db: Db, row: LinkedAccountRow): boolean {
   const live = db.one<{ generation: number; credential_ciphertext: ArrayBuffer; key_id: string; status: string }>(
     'SELECT generation,credential_ciphertext,key_id,status FROM linked_accounts WHERE id=?',
@@ -40,16 +29,19 @@ function retryAt(now: number, attempts: number, random: Random): number {
   const base = Math.min(6 * 60 * 60_000, 30_000 * 2 ** Math.min(attempts, 10));
   return now + Math.floor(base + random.float() * base * 0.25);
 }
-function norm(value: string): string {
-  return value.normalize('NFKC').trim().toLocaleLowerCase('und');
-}
 function choose(
   candidates: Candidate[],
-  row: { listened_at: number; artist: string; track: string },
+  row: { listened_at: number; artist_key: string; track_key: string },
 ): Candidate | 'ambiguous' | null {
   const matching = new Map<string, Candidate>();
   for (const c of candidates) {
-    if (norm(c.artist) !== norm(row.artist) || norm(c.track) !== norm(row.track)) continue;
+    let keys: readonly [string, string];
+    try {
+      keys = trackKey(c.artist, c.track);
+    } catch {
+      continue;
+    }
+    if (keys[0] !== row.artist_key || keys[1] !== row.track_key) continue;
     if (c.listenedAt < row.listened_at - 1 || c.listenedAt > row.listened_at + 1) continue;
     const identity = `${c.listenedAt}\0${c.recordingMsid ?? ''}`;
     matching.set(identity, c);
@@ -94,6 +86,9 @@ export async function runDeleteSlice(deps: DeleteForwardDeps, now = deps.clock.n
     target_msid: string | null;
     target_listened_at: number | null;
     last_error: string | null;
+    lookup_min_ts: number | null;
+    lookup_candidates: string | null;
+    lookup_last_earliest: number | null;
   }>(
     "SELECT q.* FROM listenbrainz_deletes q JOIN linked_accounts l ON l.id=q.link_id AND l.generation=q.generation WHERE q.state='queued' AND q.due_at<=? AND l.status='active' ORDER BY q.due_at,q.created_at_ms LIMIT 1",
     now,
@@ -121,7 +116,7 @@ export async function runDeleteSlice(deps: DeleteForwardDeps, now = deps.clock.n
     row.generation,
   );
   if (!link) return { requests: 0, state: 'stale', nextDueMs: null };
-  const pacerKey = `link:${link.id}:generation:${link.generation}`;
+  const pacerKey = listenbrainzPacingKey(link);
   if (!deps.pacing.tryListenbrainz(pacerKey, now))
     return { requests: 0, state: 'paced', nextDueMs: deps.pacing.listenbrainzAvailableAt(pacerKey) };
   let token: string;
@@ -212,8 +207,22 @@ export async function runDeleteSlice(deps: DeleteForwardDeps, now = deps.clock.n
         deps.db.one<{ due_at: number }>('SELECT due_at FROM listenbrainz_deletes WHERE id=?', row.id)?.due_at ?? null,
     };
   }
-  const p = progress(row.last_error);
-  const out = await deps.client.listWindowPage(link.remote_user, token, row.listened_at - 2, PAGE_SIZE, p.offset);
+  let priorCandidates: Candidate[] = [];
+  try {
+    const parsed: unknown = row.lookup_candidates === null ? [] : JSON.parse(row.lookup_candidates);
+    if (!Array.isArray(parsed) || parsed.length > MAX_LOOKUP_CANDIDATES) throw new Error('bad_progress');
+    priorCandidates = parsed as Candidate[];
+  } catch {
+    deps.db.run(
+      "UPDATE listenbrainz_deletes SET state='failed',last_error='lookup_progress_invalid',updated_at_ms=? WHERE id=? AND generation=?",
+      now,
+      row.id,
+      row.generation,
+    );
+    return { requests: 0, state: 'failed', nextDueMs: null };
+  }
+  const minTs = row.lookup_min_ts ?? row.listened_at - 2;
+  const out = await deps.client.listWindowPage(link.remote_user, token, minTs, PAGE_SIZE);
   if (!sameCredential(deps.db, link)) return { requests: 1, state: 'stale_response', nextDueMs: null };
   if (!out.ok) {
     if (out.kind === 'status' && out.status === 401) {
@@ -241,20 +250,39 @@ export async function runDeleteSlice(deps: DeleteForwardDeps, now = deps.clock.n
     };
   }
   finishRequest(out.rate);
-  const candidates = [
-    ...p.candidates,
-    ...out.value.filter(
-      (c) =>
-        norm(c.artist) === norm(row.artist) &&
-        norm(c.track) === norm(row.track) &&
-        c.listenedAt >= row.listened_at - 1 &&
-        c.listenedAt <= row.listened_at + 1,
-    ),
-  ];
-  if (out.value.length === PAGE_SIZE) {
+  const candidates = [...priorCandidates];
+  const seen = new Set(candidates.map((c) => `${c.listenedAt}\0${c.recordingMsid ?? ''}`));
+  for (const c of out.value) {
+    if (c.listenedAt < row.listened_at - 1 || c.listenedAt > row.listened_at + 1) continue;
+    const tuple = `${c.listenedAt}\0${c.recordingMsid ?? ''}`;
+    if (!seen.has(tuple)) {
+      seen.add(tuple);
+      candidates.push(c);
+    }
+  }
+  const earliest = out.value.reduce((min, c) => Math.min(min, c.listenedAt), Number.POSITIVE_INFINITY);
+  const complete = out.value.length < PAGE_SIZE || earliest < row.listened_at - 1;
+  if (!complete) {
+    if (
+      candidates.length > MAX_LOOKUP_CANDIDATES ||
+      !Number.isFinite(earliest) ||
+      earliest === row.lookup_last_earliest
+    ) {
+      deps.db.run(
+        "UPDATE listenbrainz_deletes SET state='ignored',last_error='ambiguous_saturated',updated_at_ms=? WHERE id=? AND generation=?",
+        deps.clock.nowMs(),
+        row.id,
+        row.generation,
+      );
+      return { requests: 1, state: 'ignored', nextDueMs: null };
+    }
     deps.db.run(
-      "UPDATE listenbrainz_deletes SET last_error=?,due_at=?,updated_at_ms=? WHERE id=? AND generation=? AND state='queued'",
-      JSON.stringify({ offset: p.offset + PAGE_SIZE, candidates }),
+      "UPDATE listenbrainz_deletes SET lookup_min_ts=?,lookup_candidates=?,lookup_last_earliest=?,due_at=?,updated_at_ms=? WHERE id=? AND generation=? AND state='queued'",
+      // Exclusive min_ts must replay the page's earliest second and include
+      // the preceding second, so subtract two and filter locally.
+      earliest - 2,
+      JSON.stringify(candidates),
+      earliest,
       deps.clock.nowMs() + 1000,
       deps.clock.nowMs(),
       row.id,

@@ -1370,6 +1370,19 @@ const MIGRATION_S4_LISTEN_DELETES: Migration = {
     'CREATE INDEX listenbrainz_deletes_due ON listenbrainz_deletes(state,due_at)',
   ],
 };
+const MIGRATION_S4_DELETE_LOOKUP_PROGRESS: Migration = {
+  version: 40,
+  name: 'listenbrainz_delete_lookup_progress',
+  statements: [
+    'ALTER TABLE listenbrainz_deletes ADD COLUMN lookup_min_ts INTEGER',
+    'ALTER TABLE listenbrainz_deletes ADD COLUMN lookup_candidates TEXT',
+  ],
+};
+const MIGRATION_S4_DELETE_LOOKUP_TIE_FENCE: Migration = {
+  version: 41,
+  name: 'listenbrainz_delete_lookup_tie_fence',
+  statements: ['ALTER TABLE listenbrainz_deletes ADD COLUMN lookup_last_earliest INTEGER'],
+};
 
 export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_1,
@@ -1411,6 +1424,8 @@ export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_S3_LOVE_PULL_ADMISSIONS,
   MIGRATION_S3_LOVE_DELETE_REVISION,
   MIGRATION_S4_LISTEN_DELETES,
+  MIGRATION_S4_DELETE_LOOKUP_PROGRESS,
+  MIGRATION_S4_DELETE_LOOKUP_TIE_FENCE,
 ];
 
 /** The schema version this code expects. */

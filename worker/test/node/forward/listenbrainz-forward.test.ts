@@ -139,6 +139,7 @@ describe('ListenBrainz forwarding', () => {
     const linkId = w.link();
     const listenedAt = 1768392000;
     const msid = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    const [aKey, tKey] = trackKey('Artist', 'Target track');
     w.lb.seedListens('alice_lb', [
       {
         listened_at: listenedAt,
@@ -153,10 +154,12 @@ describe('ListenBrainz forwarding', () => {
     w.app.db.run(
       `INSERT INTO listenbrainz_deletes
       (id,event_key,link_id,generation,did,identity_key,listened_at,artist_key,track_key,artist,track,source_path,state,attempts,due_at,deadline_at,created_at_ms,updated_at_ms)
-      VALUES('delete-test','event-1',?,1,?,'identity-1',?, 'artist-key','track-key','Artist','Target track','api','queued',0,?,?,?,?)`,
+      VALUES('delete-test','event-1',?,1,?,'identity-1',?,?,?, 'Artist','Target track','api','queued',0,?,?,?,?)`,
       linkId,
       ALICE,
       listenedAt,
+      aKey,
+      tKey,
       w.clock.nowMs(),
       w.clock.nowMs() + DAY,
       w.clock.nowMs(),
@@ -193,6 +196,47 @@ describe('ListenBrainz forwarding', () => {
     expect(
       w.app.db.one('SELECT state,target_msid,target_listened_at FROM listenbrainz_deletes WHERE id=?', 'delete-test'),
     ).toEqual({ state: 'sent', target_msid: msid, target_listened_at: listenedAt });
+  });
+
+  it('production forward timer dispatches queued deletion work after live forward priority', async () => {
+    const w = await world();
+    const linkId = w.link();
+    const listenedAt = 1768392000;
+    const msid = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+    const [aKey, tKey] = trackKey('Timer Artist', 'Timer Track');
+    w.lb.seedListens('alice_lb', [
+      {
+        listened_at: listenedAt,
+        recording_msid: msid,
+        track_metadata: { artist_name: 'Timer Artist', track_name: 'Timer Track' },
+      },
+    ]);
+    w.app.db.run(
+      `INSERT INTO listenbrainz_deletes
+      (id,event_key,link_id,generation,did,identity_key,listened_at,artist_key,track_key,artist,track,source_path,state,attempts,due_at,deadline_at,created_at_ms,updated_at_ms)
+      VALUES('timer-delete','event-timer',?,1,?,'identity-timer',?,?,?, 'Timer Artist','Timer Track','api','queued',0,?,?,?,?)`,
+      linkId,
+      ALICE,
+      listenedAt,
+      aKey,
+      tKey,
+      w.clock.nowMs(),
+      w.clock.nowMs() + DAY,
+      w.clock.nowMs(),
+      w.clock.nowMs(),
+    );
+    const core = w.app.composed.core;
+    core.extensionTimers.kick('forward');
+    await core.tick('extension');
+    expect(w.app.db.one('SELECT target_msid FROM listenbrainz_deletes WHERE id=?', 'timer-delete')).toEqual({
+      target_msid: msid,
+    });
+    w.clock.advance(1000);
+    await core.tick('extension');
+    expect(w.lb.deletions).toHaveLength(1);
+    expect(w.app.db.one('SELECT state FROM listenbrainz_deletes WHERE id=?', 'timer-delete')).toEqual({
+      state: 'sent',
+    });
   });
   it('delete client uses the pinned policy fetch, parses top-level MSID separately from MBID, and accepts async delete 200', async () => {
     const w = await world();
@@ -237,7 +281,7 @@ describe('ListenBrainz forwarding', () => {
         { listenedAt: 101, recordingMsid: null, artist: 'No MSID', track: 'Track' },
       ],
     });
-    expect(new URL(seenRequests[0]!.url).search).toBe('?min_ts=98&count=1000&offset=0');
+    expect(new URL(seenRequests[0]!.url).search).toBe('?min_ts=98&count=1000');
     expect(seenRequests[0]!.headers.get('authorization')).toBe(`Token ${TOKEN}`);
     const deleted = await w.rt.listenbrainz.deleteListen(TOKEN, {
       listened_at: 100,
