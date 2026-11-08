@@ -3,9 +3,27 @@ import { useEffect, useState } from 'preact/hooks';
 import type { ApiClient } from '../api/client';
 import { formatLocalClock } from './format';
 
-type Snapshot = { api: ApiClient; did: Did; nowPlaying: NowPlaying | null; serverTime: string; skew: number };
-const durationLabel = (seconds: number) => `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
-const elapsedLabel = (seconds: number) => (seconds < 60 ? `${seconds} sec` : `${Math.floor(seconds / 60)} min`);
+type Snapshot = {
+  api: ApiClient;
+  did: Did;
+  owner: boolean;
+  nowPlaying: NowPlaying | null;
+  serverTime: string;
+  skew: number;
+};
+const durationLabel = (seconds: number) => {
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const remainder = seconds % 60;
+  if (hours > 0) return `${hours}:${String(minutes).padStart(2, '0')}:${String(remainder).padStart(2, '0')}`;
+  return `${minutes}:${String(remainder).padStart(2, '0')}`;
+};
+const elapsedLabel = (seconds: number) => {
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  if (hours > 0) return minutes > 0 ? `${hours} hr ${minutes} min` : `${hours} hr`;
+  return seconds < 60 ? `${seconds} sec` : `${minutes} min`;
+};
 
 export function NowPlayingCard({ api, did, owner }: { api: ApiClient; did: Did; owner: boolean }) {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
@@ -13,17 +31,19 @@ export function NowPlayingCard({ api, did, owner }: { api: ApiClient; did: Did; 
   const [error, setError] = useState(false);
   useEffect(() => {
     let active = true;
+    let requestSequence = 0;
     let ticker: number | undefined;
     setSnapshot(null);
     setError(false);
     const refresh = async () => {
+      const sequence = ++requestSequence;
       try {
         const response = await api.nowPlaying(did);
-        if (!active) return;
-        setSnapshot({ api, did, ...response, skew: Date.parse(response.serverTime) - Date.now() });
+        if (!active || sequence !== requestSequence) return;
+        setSnapshot({ api, did, owner, ...response, skew: Date.parse(response.serverTime) - Date.now() });
         setError(false);
       } catch {
-        if (active) setError(true);
+        if (active && sequence === requestSequence) setError(true);
       }
     };
     const syncTicker = () => {
@@ -56,8 +76,8 @@ export function NowPlayingCard({ api, did, owner }: { api: ApiClient; did: Did; 
       if (ticker !== undefined) clearInterval(ticker);
       active = false;
     };
-  }, [api, did]);
-  const currentSnapshot = snapshot?.api === api && snapshot.did === did ? snapshot : null;
+  }, [api, did, owner]);
+  const currentSnapshot = snapshot?.api === api && snapshot.did === did && snapshot.owner === owner ? snapshot : null;
   if (currentSnapshot === null)
     return owner ? (
       <p class="now-playing-empty" aria-live="polite">
@@ -133,14 +153,19 @@ export function NowPlayingCard({ api, did, owner }: { api: ApiClient; did: Did; 
 }
 
 export function ListeningNow({ api }: { api: ApiClient }) {
-  const [items, setItems] = useState<Array<{ did: Did; handle: string | null; nowPlaying: NowPlaying }>>([]);
+  const [feed, setFeed] = useState<{
+    api: ApiClient;
+    items: Array<{ did: Did; handle: string | null; nowPlaying: NowPlaying }>;
+  } | null>(null);
   useEffect(() => {
     let active = true;
+    let requestSequence = 0;
     const refresh = () => {
       if (document.visibilityState !== 'visible') return;
+      const sequence = ++requestSequence;
       void api.nowPlayingFeed().then(
         (result) => {
-          if (active) setItems(result.items);
+          if (active && sequence === requestSequence) setFeed({ api, items: result.items });
         },
         () => {},
       );
@@ -153,10 +178,12 @@ export function ListeningNow({ api }: { api: ApiClient }) {
     const timer = window.setInterval(refresh, 30_000);
     return () => {
       active = false;
+      requestSequence += 1;
       document.removeEventListener('visibilitychange', onVisibility);
       clearInterval(timer);
     };
   }, [api]);
+  const items = feed?.api === api ? feed.items : [];
   if (items.length === 0) return null;
   return (
     <aside class="listening-now" aria-labelledby="listening-now-title">
@@ -168,7 +195,9 @@ export function ListeningNow({ api }: { api: ApiClient }) {
             <span>
               {nowPlaying.track} — {nowPlaying.artist}
             </span>
-            <small>since {formatLocalClock(nowPlaying.startedAt)}</small>
+            <small>
+              since <time dateTime={nowPlaying.startedAt}>{formatLocalClock(nowPlaying.startedAt)}</time>
+            </small>
           </li>
         ))}
       </ul>
