@@ -111,6 +111,7 @@ import { followers, following } from '../do/read/follows';
 import { history } from '../do/read/history';
 import { lookup } from '../do/read/lookup';
 import { profile, resolveHandle, verifiedHandles } from '../do/read/profile';
+import { currentNowPlaying, ownNowPlaying } from '../do/read/now-playing';
 import { stats } from '../do/read/stats';
 import { indexing, internalStatus } from '../do/status';
 import {
@@ -640,6 +641,10 @@ export class IndexCore implements IndexRpc, AdminRpc {
 
   async profile(did: Did): Promise<Profile | null> {
     return this.#rpc('profile', () => profile(this.live(), did));
+  }
+
+  async nowPlaying(did: Did, owner: boolean) {
+    return this.#rpc('nowPlaying', () => owner ? ownNowPlaying(this.live(), did) : currentNowPlaying(this.live(), did));
   }
 
   async verifiedHandles(dids: readonly Did[]): Promise<Record<string, string | null>> {
