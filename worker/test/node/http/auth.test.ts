@@ -39,11 +39,14 @@ import type { Db } from '../../../src/do/db';
 import { authFeature } from '../../../src/http/auth';
 import type { Feature } from '../../../src/node/compose';
 import type { NodeEnv } from '../../../src/node/config';
+import { pullWriterAvailability } from '../../../src/node/pull-writer-availability';
 import type { Secrets } from '../../../src/node/secrets';
 import type { SqliteDb } from '../../../src/node/sqlite-db';
 import { sessionWriter } from '../../../src/outbox/pds-writer';
 import { outboxExtension } from '../../../src/outbox/runner';
 import { enqueueScrobbleCreates } from '../../../src/outbox/scrobble-ops';
+import { stagePullPage } from '../../../src/sync/pull-staging';
+import { writePullSlice } from '../../../src/sync/pull-writer';
 import { checkResponse } from '../../acceptance/support/openapi';
 import {
   closeApps,
@@ -172,7 +175,9 @@ async function world(o: WorldOptions = {}) {
           writers: {
             writerFor: async (did) => {
               if (app === null) return null;
-              return sessionWriter(await app.composed.app.auth.oauth.restore(did));
+              const session = await app.composed.app.auth.oauth.restore(did);
+              const { scope } = await session.getTokenInfo();
+              return { ...sessionWriter(session), scope };
             },
           },
         }),
@@ -290,6 +295,95 @@ function signInRows(w: World): { oauth: number; web: number; accounts: number } 
 // ---------------------------------------------------------------------------
 
 describe('the auth routes', () => {
+  it('restores the stored OAuth writer and sends a packed linked pull batch through the real outbox to the signed fake PDS', async () => {
+    const w = await world({
+      outbox: true,
+      env: {
+        LEXICON_PREFIX: OUTBOX_TEST_PREFIX,
+        NAMESPACE_OWNERSHIP_REF: 'test-only: fake authority proof',
+        NAMESPACE_PUBLICATION_REF: OUTBOX_TEST_PUBLICATION_REF,
+        NAMESPACE_BATCH_PUBLICATION_REF: `sha256:${'e'.repeat(64)}`,
+      },
+    });
+    const alice = await w.addUser(ALICE, 'alice');
+    await w.signIn(alice);
+    const m = w.app.composed.core.deps;
+    const linkId = 'oauth-linked-listenbrainz';
+    w.db.run(
+      `INSERT INTO linked_accounts(id,did,service,remote_user,credential_ciphertext,key_id,forward_scrobbles,forward_now_playing,status,created_at_ms,updated_at_ms)
+       VALUES(?,?,'listenbrainz','remote-user',?, 'e1',1,1,'active',?,?)`,
+      linkId,
+      ALICE,
+      new Uint8Array([9]).buffer,
+      T0,
+      T0,
+    );
+    w.db.run(
+      `INSERT INTO linked_pull_state(link_id,generation,source_service,source_account,listen_watermark_ms,updated_at_ms)
+       VALUES(?,1,'listenbrainz','remote-user',0,?)`,
+      linkId,
+      T0,
+    );
+    stagePullPage(w.db, {
+      linkId,
+      generation: 1,
+      sourceService: 'listenbrainz',
+      sourceAccount: 'remote-user',
+      did: ALICE,
+      proposedCursor: 'upstream-page-2',
+      proposedWatermarkMs: T0,
+      nowMs: T0,
+      items: Array.from({ length: 3 }, (_, i) => ({
+        itemKey: `remote-${i}`,
+        listenedAtMs: T0 - (3 - i) * 1000,
+        payload: {
+          artist: 'Pulled Artist',
+          track: `Pulled Track ${i}`,
+          listenedAt: new Date(T0 - (3 - i) * 1000).toISOString(),
+        },
+      })),
+    });
+    const oauth = w.app.composed.app.auth.oauth;
+    const availability = () =>
+      pullWriterAvailability({
+        did: ALICE,
+        publicationEnabled: w.app.config.app.publication,
+        batchPublicationEnabled: w.app.config.app.batchPublication,
+        prefix: w.app.config.app.prefix,
+        signInAllowed: true,
+        sessionStore: oauth.sessionStore,
+        restore: (did) => oauth.restore(did),
+      });
+    expect(await availability()).toEqual({ available: true });
+    const accepted = await writePullSlice(m, { linkId, generation: 1, available: availability });
+    expect(accepted.accepted).toBe(3);
+    expect(
+      w.db.one(
+        "SELECT count(*) AS n FROM operations WHERE did=? AND collection=? AND origin='import'",
+        ALICE,
+        `${OUTBOX_TEST_PREFIX}.scrobbleBatch`,
+      ),
+    ).toEqual({ n: 1 });
+    expect(w.app.timers.pending().length).toBeGreaterThan(0);
+    await w.app.composed.core.extensionAlarm();
+    const records = await alice.repo.list(`${OUTBOX_TEST_PREFIX}.scrobbleBatch`);
+    expect(records).toHaveLength(1);
+    expect((records[0]!.value as { listens: Array<{ track: string }> }).listens.map((item) => item.track)).toEqual([
+      'Pulled Track 0',
+      'Pulled Track 1',
+      'Pulled Track 2',
+    ]);
+    expect(
+      w.db.one(
+        "SELECT count(*) AS n FROM operations WHERE did=? AND collection=? AND state='succeeded'",
+        ALICE,
+        `${OUTBOX_TEST_PREFIX}.scrobbleBatch`,
+      ),
+    ).toEqual({ n: 1 });
+    expect(w.db.one('SELECT count(*) AS n FROM linked_pull_items WHERE link_id=?', linkId)).toEqual({ n: 0 });
+    expect((await writePullSlice(m, { linkId, generation: 1, available: availability })).accepted).toBe(0);
+  });
+
   it('POST /api/v1/auth/start {handle} returns an authorizeUrl at the fake AS; a malformed handle is 422 fields.handle; the 11th request in a minute from one IP is 429', async () => {
     const w = await world();
     const alice = await w.addUser(ALICE, 'alice');

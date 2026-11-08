@@ -2,13 +2,15 @@
 // This deliberately stops before any upstream polling: accepted records enter
 // the ordinary origin=import outbox and are sent by the existing outbox lane.
 
+import { listenKey } from '@atmusic/core/listen-key';
 import { buildLoveRecord } from '@atmusic/core/love';
 import { trackKey } from '@atmusic/core/music-key';
 import { newTid } from '@atmusic/core/record-key';
-import type { ScrobbleBatchRecord } from '@atmusic/core/scrobble-batch';
+import type { ScrobbleBatchEntry } from '@atmusic/core/scrobble-batch';
 import { NS_PER_SECOND, parseRfc3339 } from '@atmusic/core/timestamp';
 import type { ModuleDeps } from '../do/contracts';
 import { admitForwardIdentity } from '../forward/projection';
+import { acceptImportBatch, prepareImportBatchPrefix } from '../imports/batch-acceptance';
 import { enqueueForwards } from '../outbox/forward-enqueue';
 import { loveKeyOf } from '../outbox/love-ops';
 import {
@@ -33,6 +35,19 @@ export type PullHoldReason =
 export type PullWriterAvailability = { available: true } | { available: false; reason: PullHoldReason };
 export type PullWriterAvailabilitySource = (did: string) => Promise<PullWriterAvailability>;
 export const PULL_WRITE_SLICE = 100;
+
+type PullPlan = {
+  row: Staged;
+  prepared?: Prepared<object>;
+  batchEntry?: ScrobbleBatchEntry;
+  key?: string;
+  loveKey?: string;
+  second?: number;
+  artistKey?: string;
+  trackKey?: string;
+  forward?: Record<string, unknown>;
+  invalid?: boolean;
+};
 
 type Staged = {
   item_key: string;
@@ -147,18 +162,8 @@ export async function writePullSlice(
     setHold(m, args.linkId, args.generation, null, now);
     return { accepted: 0, duplicate: 0, tombstoned: 0, invalid: 0, held: null };
   }
-  const plans: Array<{
-    row: Staged;
-    prepared?: Prepared<object>;
-    batchPrepared?: Prepared<object>;
-    batchRkey?: string;
-    loveKey?: string;
-    second?: number;
-    artistKey?: string;
-    trackKey?: string;
-    forward?: Record<string, unknown>;
-    invalid?: boolean;
-  }> = [];
+  const plans: PullPlan[] = [];
+  const batchCandidates: Array<{ member: PullPlan; entry: ScrobbleBatchEntry }> = [];
   for (const row of rows) {
     let payload: unknown;
     try {
@@ -175,24 +180,16 @@ export async function writePullSlice(
         continue;
       }
       const [artistKey, trackKeyValue] = trackKey(built.prepared.record.artist, built.prepared.record.track);
-      plans.push({
+      const key = await listenKey({
+        did: link.did,
+        listenedAtNs: second,
+        artist: built.prepared.record.artist,
+        track: built.prepared.record.track,
+      });
+      const plan: PullPlan = {
         row,
         prepared: built.prepared,
-        ...(m.config.batchPublication
-          ? {
-              batchPrepared: await prepare({
-                $type: outboxCollections(prefix).scrobbleBatch,
-                createdAt: built.prepared.record.createdAt,
-                listens: [
-                  {
-                    id: newTid(m.clock, m.random),
-                    ...Object.fromEntries(Object.entries(built.prepared.record).filter(([key]) => key !== '$type')),
-                  },
-                ],
-              } as ScrobbleBatchRecord),
-              batchRkey: newTid(m.clock, m.random),
-            }
-          : {}),
+        key,
         second: Number(second / NS_PER_SECOND),
         artistKey,
         trackKey: trackKeyValue,
@@ -205,7 +202,14 @@ export async function writePullSlice(
             ? { recordingMbid: built.prepared.record.recordingMbid }
             : {}),
         },
-      });
+      };
+      plans.push(plan);
+      if (m.config.batchPublication) {
+        const { $type: _type, ...fields } = built.prepared.record;
+        const entry: ScrobbleBatchEntry = { id: newTid(m.clock, m.random), ...fields };
+        plan.batchEntry = entry;
+        batchCandidates.push({ member: plan, entry });
+      }
     } else {
       const value = payload as { artist?: unknown; track?: unknown; recordingMbid?: unknown };
       if (typeof value?.artist !== 'string' || typeof value?.track !== 'string') {
@@ -229,9 +233,14 @@ export async function writePullSlice(
       plans.push({ row, prepared: await prepare(built.record), loveKey: key });
     }
   }
+  const packed =
+    m.config.batchPublication && batchCandidates.length > 0
+      ? await prepareImportBatchPrefix(m, { did: link.did, now, candidates: batchCandidates })
+      : null;
   const report = { accepted: 0, duplicate: 0, tombstoned: 0, invalid: 0, held: null as PullHoldReason | null };
   m.db.tx(() => {
     if (!stillCurrent(m, args.linkId, args.generation, link.did, link.service, link.remote_user)) return;
+    const currentRows = new Map<string, Staged>();
     for (const plan of plans) {
       const current = m.db.one<Staged>(
         'SELECT item_key,kind,source_service,source_account,listened_at_ms,love_key,recording_mbid,payload_json,payload_bytes,staged_at_ms FROM linked_pull_items WHERE link_id=? AND generation=? AND item_key=?',
@@ -240,12 +249,57 @@ export async function writePullSlice(
         plan.row.item_key,
       );
       if (
-        !current ||
-        current.payload_json !== plan.row.payload_json ||
-        current.payload_bytes !== plan.row.payload_bytes
+        current &&
+        current.payload_json === plan.row.payload_json &&
+        current.payload_bytes === plan.row.payload_bytes &&
+        current.source_service === link.service &&
+        current.source_account === link.remote_user
       )
-        continue;
-      if (current.source_service !== link.service || current.source_account !== link.remote_user) continue;
+        currentRows.set(current.item_key, current);
+    }
+    const acceptBatch =
+      packed !== null &&
+      packed.prepared !== null &&
+      packed.members.every((plan) => {
+        const current = currentRows.get(plan.row.item_key);
+        return (
+          current !== undefined &&
+          plan.second !== undefined &&
+          !isListenTombstoned(m.db, link.did, plan.second, plan.artistKey, plan.trackKey) &&
+          !m.db.one(
+            "SELECT 1 AS hit FROM scrobbles WHERE did=? AND substr(listened_at,1,19)=strftime('%Y-%m-%dT%H:%M:%S',?,'unixepoch') LIMIT 1",
+            link.did,
+            plan.second,
+          ) &&
+          !m.db.one('SELECT 1 AS hit FROM listen_keys WHERE did=? AND listen_second=? LIMIT 1', link.did, plan.second)
+        );
+      });
+    if (acceptBatch && packed !== null) {
+      acceptImportBatch(m, {
+        did: link.did,
+        now,
+        rkey: packed.rkey,
+        prepared: packed.prepared!,
+        members: packed.members.map((plan) => ({
+          listenKey: plan.key!,
+          listenSecond: plan.second!,
+          forward: plan.forward!,
+          sourceService: link.service as 'lastfm' | 'listenbrainz',
+        })),
+      });
+      for (const plan of packed.members) {
+        m.db.run(
+          'DELETE FROM linked_pull_items WHERE link_id=? AND generation=? AND item_key=?',
+          args.linkId,
+          args.generation,
+          plan.row.item_key,
+        );
+        report.accepted++;
+      }
+    }
+    for (const plan of plans) {
+      const current = currentRows.get(plan.row.item_key);
+      if (!current) continue;
       if (plan.invalid) {
         m.db.run(
           'DELETE FROM linked_pull_items WHERE link_id=? AND generation=? AND item_key=?',
@@ -257,6 +311,37 @@ export async function writePullSlice(
         continue;
       }
       if (current.kind === 'listen') {
+        if (m.config.batchPublication) {
+          if (!acceptBatch && packed?.members.some((member) => member.row.item_key === current.item_key)) {
+            const second = plan.second;
+            if (second !== undefined && isListenTombstoned(m.db, link.did, second, plan.artistKey, plan.trackKey)) {
+              m.db.run(
+                'DELETE FROM linked_pull_items WHERE link_id=? AND generation=? AND item_key=?',
+                args.linkId,
+                args.generation,
+                plan.row.item_key,
+              );
+              report.tombstoned++;
+            } else if (
+              second !== undefined &&
+              (m.db.one(
+                "SELECT 1 AS hit FROM scrobbles WHERE did=? AND substr(listened_at,1,19)=strftime('%Y-%m-%dT%H:%M:%S',?,'unixepoch') LIMIT 1",
+                link.did,
+                second,
+              ) ||
+                m.db.one('SELECT 1 AS hit FROM listen_keys WHERE did=? AND listen_second=? LIMIT 1', link.did, second))
+            ) {
+              m.db.run(
+                'DELETE FROM linked_pull_items WHERE link_id=? AND generation=? AND item_key=?',
+                args.linkId,
+                args.generation,
+                plan.row.item_key,
+              );
+              report.duplicate++;
+            }
+          }
+          continue;
+        }
         const second = plan.second!;
         if (isListenTombstoned(m.db, link.did, second, plan.artistKey, plan.trackKey)) {
           m.db.run(
@@ -288,7 +373,7 @@ export async function writePullSlice(
           report.duplicate++;
           continue;
         }
-        const key = `linked-pull:${args.linkId}:${args.generation}:${current.item_key}`;
+        const key = plan.key!;
         const opid = newOperationId(m.random);
         m.db.run(
           "INSERT INTO listen_keys(did,dedupe_key,operation_id,source,created_at_ms,listen_second) VALUES(?,?,?,'import',?,?)",
@@ -305,29 +390,11 @@ export async function writePullSlice(
           sourceService: current.source_service as 'lastfm' | 'listenbrainz',
           now,
         });
-        if (plan.batchPrepared && plan.batchRkey) {
-          insertOperation(
-            m.db,
-            {
-              id: opid,
-              did: link.did,
-              kind: 'scrobble.create',
-              origin: 'import',
-              priority: IMPORT_PRIORITY,
-              collection: outboxCollections(prefix).scrobbleBatch,
-              rkey: plan.batchRkey,
-              prepared: plan.batchPrepared,
-              dueAt: now,
-            },
-            now,
-          );
-        } else {
-          insertScrobbleCreate(
-            m,
-            { id: opid, did: link.did, origin: 'import', prepared: plan.prepared!, dueAt: now },
-            now,
-          );
-        }
+        insertScrobbleCreate(
+          m,
+          { id: opid, did: link.did, origin: 'import', prepared: plan.prepared!, dueAt: now },
+          now,
+        );
         if (first)
           enqueueForwards(m.db, {
             did: link.did,
@@ -418,7 +485,7 @@ export async function writePullSlice(
           sourceService: current.source_service as 'lastfm' | 'listenbrainz',
           now,
         });
-        const { $type: _type, createdAt: _createdAt, ...body } = plan.prepared! as unknown as Record<string, unknown>;
+        const { $type: _type, createdAt: _createdAt, ...body } = plan.prepared!.record as Record<string, unknown>;
         if (first)
           enqueueForwards(m.db, {
             did: link.did,
