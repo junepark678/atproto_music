@@ -280,7 +280,7 @@ function queuedLoveHeads(db: Db, linkId: string, generation: number): QueuedRow[
   const rows = db.all<QueuedRow>(
     `SELECT f.*,f.rowid AS seq FROM forward_outbox f
      WHERE f.link_id=? AND f.generation=? AND f.kind IN ('love','unlove') AND f.state='queued'
-     ORDER BY f.priority,f.created_at_ms,f.rowid`,
+     ORDER BY f.created_at_ms,f.rowid`,
     linkId,
     generation,
   );
@@ -293,7 +293,9 @@ function queuedLoveHeads(db: Db, linkId: string, generation: number): QueuedRow[
     seen.add(key);
     heads.push(row);
   }
-  return heads;
+  // Priority selects among independent tracks, never among transitions of
+  // the same track: a live unlove must wait for its earlier historical love.
+  return heads.sort((a, b) => a.priority - b.priority || a.created_at_ms - b.created_at_ms || a.seq - b.seq);
 }
 
 function loveJob(rt: ForwardRuntime, link: LinkRow, now: number): Job | null {
