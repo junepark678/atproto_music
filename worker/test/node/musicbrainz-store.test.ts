@@ -115,7 +115,7 @@ describe('MusicBrainz storage', () => {
       addOp('op-delete', 'love.delete', { artist: 'Artist', track: 'Track' });
       // Current latest operation is love; update link B's latest row to sent to prove no revival there.
       const key = { artistKey: 'artist', trackKey: 'track' };
-      expect(enqueueRevivedLoves(db, key, '3f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2d10', 10, 1)).toBe(1);
+      expect(enqueueRevivedLoves(db, key, '3f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2d10', 10, 1).enqueued).toBe(1);
       const revived = db.one<{ kind: string; payload_json: string }>(
         "SELECT kind,payload_json FROM forward_outbox WHERE dedupe_key LIKE 'mb-match:%'",
       );
@@ -125,7 +125,7 @@ describe('MusicBrainz storage', () => {
         track: 'Track',
         recordingMbid: '3f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2d10',
       });
-      expect(enqueueRevivedLoves(db, key, '3f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2d10', 11, 1)).toBe(0);
+      expect(enqueueRevivedLoves(db, key, '3f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2d10', 11, 1).enqueued).toBe(0);
     } finally {
       db.close();
     }

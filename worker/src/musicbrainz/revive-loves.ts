@@ -8,16 +8,18 @@ export function enqueueRevivedLoves(
   matchedMbid: string,
   now: number,
   limit: number,
-): number {
+  afterLinkId = '',
+): { enqueued: number; cursorLinkId: string; complete: boolean } {
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new RangeError('invalid revival limit');
   const ignored = db.all<{ link_id: string; did: string; payload_json: string; dedupe_key: string }>(
     `SELECT f.link_id,f.did,f.payload_json,f.dedupe_key FROM forward_outbox f
      JOIN linked_accounts l ON l.id=f.link_id AND l.service='listenbrainz'
      WHERE f.state='ignored' AND f.last_error IN ('mbid_unresolved','no_recording_mbid')
-     ORDER BY f.created_at_ms DESC,f.rowid DESC`,
+     ORDER BY f.link_id,f.created_at_ms DESC,f.rowid DESC`,
   );
   let enqueued = 0;
   let considered = 0;
+  let cursorLinkId = afterLinkId;
   const processed = new Set<string>();
   for (const candidate of ignored) {
     let old: Record<string, unknown>;
@@ -34,6 +36,7 @@ export function enqueueRevivedLoves(
       continue;
     const candidateKey = `${candidate.link_id}\u0000${key.artistKey}\u0000${key.trackKey}`;
     if (processed.has(candidateKey)) continue;
+    if (candidate.link_id <= afterLinkId) continue;
     const rows = db.all<{ id: string; payload_json: string; state: string; last_error: string | null }>(
       `SELECT id,payload_json,state,last_error FROM forward_outbox WHERE link_id=? AND kind IN ('love','unlove') ORDER BY created_at_ms DESC,rowid DESC`,
       candidate.link_id,
@@ -98,9 +101,10 @@ export function enqueueRevivedLoves(
       )
     )
       continue;
-    if (considered >= limit) break;
+    if (considered >= limit) return { enqueued, cursorLinkId, complete: false };
     processed.add(candidateKey);
     considered++;
+    cursorLinkId = candidate.link_id;
     const id = crypto.randomUUID().replaceAll('-', '').slice(0, 32);
     enqueued += db.run(
       `INSERT INTO forward_outbox(id,link_id,did,kind,dedupe_key,payload_json,state,attempts,due_at,created_at_ms,updated_at_ms)
@@ -116,5 +120,5 @@ export function enqueueRevivedLoves(
       now,
     ).rowsWritten;
   }
-  return enqueued;
+  return { enqueued, cursorLinkId, complete: true };
 }
