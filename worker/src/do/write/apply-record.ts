@@ -461,29 +461,41 @@ function loveVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, o: A
         0,
         row.recordingMbid,
       );
-      const absence = db.one<{ revision: string; state: string }>(
-        'SELECT revision,state FROM record_state WHERE uri=?',
+      const current = db.one<{ incarnation_key: string; state: string; path: string }>(
+        'SELECT incarnation_key,state,path FROM love_incarnations WHERE uri=?',
         t.uri,
       );
-      const identityKey = `love:${t.uri}:${absence?.state === 'absent' ? absence.revision : 'initial'}`;
+      const identityKey = current?.state === 'present' ? current.incarnation_key : `love:${t.uri}:${t.rev}`;
       const apiBridge = db.one<{ path: string }>(
         'SELECT path FROM forward_admissions WHERE did=? AND identity_key=?',
         t.did,
         `love-uri:${t.did}:${t.collection}:${t.rkey}`,
       );
-      const admission = db.one<{ path: string }>(
-        'SELECT path FROM forward_admissions WHERE did=? AND identity_key=?',
-        t.did,
-        identityKey,
-      );
-      if (admission === null && apiBridge === null) {
+      let path = current?.state === 'present' ? current.path : (apiBridge?.path ?? null);
+      if (path === null) path = o.forwarding ? 'live' : 'snapshot';
+      if (current?.state !== 'present') {
         admitForwardIdentity(db, {
           did: t.did,
           identityKey,
-          path: o.forwarding ? 'live' : 'snapshot',
+          path: path as 'api' | 'import' | 'live' | 'snapshot',
           now: Number(o.nowNs / 1_000_000n),
         });
-        if (o.forwarding) {
+        db.run(
+          `INSERT INTO love_incarnations(uri,incarnation_key,state,path,source_service,updated_at_ms) VALUES (?,?,?,?,NULL,?)
+           ON CONFLICT(uri) DO UPDATE SET incarnation_key=excluded.incarnation_key,state='present',path=excluded.path,updated_at_ms=excluded.updated_at_ms`,
+          t.uri,
+          identityKey,
+          'present',
+          path,
+          Number(o.nowNs / 1_000_000n),
+        );
+        if (apiBridge)
+          db.run(
+            'DELETE FROM forward_admissions WHERE did=? AND identity_key=?',
+            t.did,
+            `love-uri:${t.did}:${t.collection}:${t.rkey}`,
+          );
+        if (o.forwarding && path === 'live') {
           const local = db.one<{ origin: string }>(
             'SELECT origin FROM operations WHERE did=? AND collection=? AND rkey=? ORDER BY created_at_ms DESC LIMIT 1',
             t.did,
@@ -510,7 +522,12 @@ function loveVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, o: A
               random: o.forwarding.random,
             });
         }
-      }
+      } else
+        db.run(
+          "UPDATE love_incarnations SET state='present',updated_at_ms=? WHERE uri=?",
+          Number(o.nowNs / 1_000_000n),
+          t.uri,
+        );
       return false;
     },
   };
@@ -560,7 +577,52 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
     db.one<{ revision: string }>('SELECT revision FROM record_state WHERE uri = ?', t.uri)?.revision ?? null;
   let out: TargetResult;
   if (t.present === null) {
+    const priorLove =
+      t.kind === 'love'
+        ? db.one<{ artist: string; track: string; album: string | null; recording_mbid: string | null }>(
+            'SELECT artist,track,album,recording_mbid FROM loves WHERE uri=?',
+            t.uri,
+          )
+        : null;
+    const loveIncarnation =
+      t.kind === 'love'
+        ? db.one<{ incarnation_key: string; path: string; state: string }>(
+            'SELECT incarnation_key,path,state FROM love_incarnations WHERE uri=?',
+            t.uri,
+          )
+        : null;
     const deleted = deleteProjection(db, t.kind, t.uri);
+    if (t.kind === 'love' && priorLove && loveIncarnation?.state === 'present') {
+      const identityKey = `love-delete:${loveIncarnation.incarnation_key}`;
+      const path = o.forwarding ? 'live' : 'snapshot';
+      admitForwardIdentity(db, { did: t.did, identityKey, path, now: Number(o.nowNs / 1_000_000n) });
+      db.run(
+        "UPDATE love_incarnations SET state='absent',updated_at_ms=? WHERE uri=?",
+        Number(o.nowNs / 1_000_000n),
+        t.uri,
+      );
+      if (o.forwarding && loveIncarnation.path === 'live') {
+        const local = db.one<{ origin: string }>(
+          'SELECT origin FROM operations WHERE did=? AND collection=? AND rkey=? ORDER BY created_at_ms DESC LIMIT 1',
+          t.did,
+          t.collection,
+          t.rkey,
+        );
+        if (local?.origin !== 'import')
+          enqueueForwards(db, {
+            did: t.did,
+            items: [
+              {
+                kind: 'unlove',
+                operationId: identityKey,
+                payload: { artist: priorLove.artist, track: priorLove.track, origin: 'web' },
+              },
+            ],
+            now: Number(o.nowNs / 1_000_000n),
+            random: o.forwarding.random,
+          });
+      }
+    }
     writeRecordState(db, {
       uri: t.uri,
       did: t.did,

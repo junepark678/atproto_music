@@ -71,7 +71,7 @@ function artistCounts(db: Db, did: string): Array<[string, number]> {
 }
 
 describe('applyRecordProof', () => {
-  it('forwards a live external love create once per indexer incarnation', async () => {
+  it('forwards live love, unlove and recreated love as three ordered transitions', async () => {
     const repo = await repoFor('alice');
     const loveRecord = { $type: `${PREFIX}.love`, artist: 'Björk', track: 'Jóga', createdAt: '2026-01-15T11:00:00Z' };
     const created = await putProof(repo, `${PREFIX}.love`, '3lbqlove01ab', loveRecord);
@@ -94,7 +94,11 @@ describe('applyRecordProof', () => {
       expect(db.all("SELECT kind FROM forward_outbox WHERE kind='love'")).toHaveLength(1);
       db.tx(() => applyRecordProof(db, absent, live));
       db.tx(() => applyRecordProof(db, recreated, live));
-      expect(db.all("SELECT kind FROM forward_outbox WHERE kind='love'")).toHaveLength(2);
+      expect(db.all<{ kind: string }>('SELECT kind FROM forward_outbox ORDER BY rowid')).toEqual([
+        { kind: 'love' },
+        { kind: 'unlove' },
+        { kind: 'love' },
+      ]);
     });
   });
 
