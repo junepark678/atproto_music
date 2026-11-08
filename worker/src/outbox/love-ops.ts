@@ -34,6 +34,7 @@ import type { ValidationFailure } from '@atmusic/core/scrobble';
 import { validateDisplayString } from '@atmusic/core/scrobble';
 import type { OperationRow, Origin } from '../app/rows';
 import type { ModuleDeps } from '../do/contracts';
+import { admitForwardIdentity } from '../forward/projection';
 import { ownRecordKey } from './delete-ops';
 import { deleteMatching, type EnqueueResult, noneMatching } from './follow-ops';
 import { enqueueForwards } from './forward-enqueue';
@@ -100,6 +101,12 @@ export async function enqueueLove(m: ModuleDeps, args: EnqueueLoveArgs): Promise
       },
       now,
     );
+    admitForwardIdentity(m.db, {
+      did: args.did,
+      identityKey: `love-uri:${args.did}:${outboxCollections(prefix).love}:${op.rkey}`,
+      path: args.origin === 'import' ? 'import' : 'api',
+      now,
+    });
     if (args.origin !== 'import') {
       const { $type: _type, createdAt: _created, ...payload } = record;
       enqueueForwards(m.db, {

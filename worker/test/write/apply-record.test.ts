@@ -71,6 +71,62 @@ function artistCounts(db: Db, did: string): Array<[string, number]> {
 }
 
 describe('applyRecordProof', () => {
+  it('forwards a live external love create once per indexer incarnation', async () => {
+    const repo = await repoFor('alice');
+    const loveRecord = { $type: `${PREFIX}.love`, artist: 'Björk', track: 'Jóga', createdAt: '2026-01-15T11:00:00Z' };
+    const created = await putProof(repo, `${PREFIX}.love`, '3lbqlove01ab', loveRecord);
+    const metadata = await putProof(repo, `${PREFIX}.love`, '3lbqlove01ab', { ...loveRecord, album: 'Homogenic' });
+    const absent = await deleteProof(repo, `${PREFIX}.love`, '3lbqlove01ab');
+    const recreated = await putProof(repo, `${PREFIX}.love`, '3lbqlove01ab', loveRecord);
+    await withMigratedDb((db) => {
+      seedUser(db, ALICE);
+      db.run(
+        `INSERT INTO linked_accounts(id,did,service,remote_user,credential_ciphertext,key_id,created_at_ms,updated_at_ms)
+        VALUES ('love-link',?,'lastfm','alice',X'00','test',?,?)`,
+        ALICE,
+        NOW_MS,
+        NOW_MS,
+      );
+      const live = { ...OPTS, forwarding: { random: seededRandom(21) } };
+      db.tx(() => applyRecordProof(db, created, live));
+      expect(db.all("SELECT kind FROM forward_outbox WHERE kind='love'")).toHaveLength(1);
+      db.tx(() => applyRecordProof(db, metadata, live));
+      expect(db.all("SELECT kind FROM forward_outbox WHERE kind='love'")).toHaveLength(1);
+      db.tx(() => applyRecordProof(db, absent, live));
+      db.tx(() => applyRecordProof(db, recreated, live));
+      expect(db.all("SELECT kind FROM forward_outbox WHERE kind='love'")).toHaveLength(2);
+    });
+  });
+
+  it('suppresses an API love bridge when its operation and outbox rows were pruned', async () => {
+    const repo = await repoFor('alice');
+    const collection = `${PREFIX}.love`;
+    const proof = await putProof(repo, collection, '3lbqlove02ab', {
+      $type: collection,
+      artist: 'Björk',
+      track: 'Jóga',
+      createdAt: '2026-01-15T11:00:00Z',
+    });
+    await withMigratedDb((db) => {
+      seedUser(db, ALICE);
+      db.run(
+        `INSERT INTO linked_accounts(id,did,service,remote_user,credential_ciphertext,key_id,created_at_ms,updated_at_ms)
+        VALUES ('love-bridge-link',?,'lastfm','alice',X'00','test',?,?)`,
+        ALICE,
+        NOW_MS,
+        NOW_MS,
+      );
+      db.run(
+        "INSERT INTO forward_admissions VALUES (?,?,'api',NULL,?)",
+        ALICE,
+        `love-uri:${ALICE}:${collection}:3lbqlove02ab`,
+        NOW_MS,
+      );
+      db.tx(() => applyRecordProof(db, proof, { ...OPTS, forwarding: { random: seededRandom(22) } }));
+      expect(db.all('SELECT * FROM forward_outbox')).toHaveLength(0);
+    });
+  });
+
   it('matches core listenKey for unicode displays and fractional seconds', async () => {
     const input = { did: ALICE, listenedAt: '2026-01-14T00:01:02.987Z', artist: 'Björk', track: '雪の華' };
     const [artistKey, trackMusicKey] = trackKey(input.artist, input.track);

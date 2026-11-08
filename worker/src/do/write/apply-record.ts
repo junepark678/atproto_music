@@ -461,6 +461,56 @@ function loveVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, o: A
         0,
         row.recordingMbid,
       );
+      const absence = db.one<{ revision: string; state: string }>(
+        'SELECT revision,state FROM record_state WHERE uri=?',
+        t.uri,
+      );
+      const identityKey = `love:${t.uri}:${absence?.state === 'absent' ? absence.revision : 'initial'}`;
+      const apiBridge = db.one<{ path: string }>(
+        'SELECT path FROM forward_admissions WHERE did=? AND identity_key=?',
+        t.did,
+        `love-uri:${t.did}:${t.collection}:${t.rkey}`,
+      );
+      const admission = db.one<{ path: string }>(
+        'SELECT path FROM forward_admissions WHERE did=? AND identity_key=?',
+        t.did,
+        identityKey,
+      );
+      if (admission === null && apiBridge === null) {
+        admitForwardIdentity(db, {
+          did: t.did,
+          identityKey,
+          path: o.forwarding ? 'live' : 'snapshot',
+          now: Number(o.nowNs / 1_000_000n),
+        });
+        if (o.forwarding) {
+          const local = db.one<{ origin: string }>(
+            'SELECT origin FROM operations WHERE did=? AND collection=? AND rkey=? ORDER BY created_at_ms DESC LIMIT 1',
+            t.did,
+            t.collection,
+            t.rkey,
+          );
+          if (local?.origin !== 'import')
+            enqueueForwards(db, {
+              did: t.did,
+              items: [
+                {
+                  kind: 'love',
+                  operationId: identityKey,
+                  payload: {
+                    artist: row.artist,
+                    track: row.track,
+                    album: row.album ?? undefined,
+                    recordingMbid: row.recordingMbid ?? undefined,
+                    origin: 'web',
+                  },
+                },
+              ],
+              now: Number(o.nowNs / 1_000_000n),
+              random: o.forwarding.random,
+            });
+        }
+      }
       return false;
     },
   };
