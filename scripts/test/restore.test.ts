@@ -51,7 +51,7 @@ import { createWebSessions } from '../../worker/src/bff/sessions.ts';
 import { ensureAccount, renameAccount } from '../../worker/src/credentials/accounts.ts';
 import { createAppPassword, revokeAppPassword, verifyAppPassword } from '../../worker/src/credentials/app-passwords.ts';
 import { type Box, createBox } from '../../worker/src/crypto/box.ts';
-import { executeAuthorizedRemovals } from '../../worker/src/do/ingest/live-pending-removals';
+import { executeAuthorizedRemovals, nextPendingRemovalDue } from '../../worker/src/do/ingest/live-pending-removals';
 import { migrate } from '../../worker/src/do/migrate.ts';
 import { SCHEMA_VERSION, TABLE_CLASS } from '../../worker/src/do/schema.ts';
 import { applyRecordProof } from '../../worker/src/do/write/apply-record.ts';
@@ -660,8 +660,31 @@ describe('restore.ts', () => {
         executeAuthorizedRemovals(db, { nowMs: world.clock.nowMs(), random: seededRandom(0xa2), limit: 1 }),
       ).toMatchObject({
         groups: 1,
+        effects: 0,
       });
-      expect(db.all('SELECT * FROM live_pending_removals')).toHaveLength(0);
+      const retainedObservation = {
+        window_lo: '1111111111111',
+        window_hi: '2222222222222',
+        authorized_rev: null,
+        expires_at_ms: 9999999999998,
+      };
+      const pendingObservation = () =>
+        db.all('SELECT window_lo,window_hi,authorized_rev,expires_at_ms FROM live_pending_removals WHERE uri=?', uri);
+      expect(pendingObservation()).toEqual([retainedObservation]);
+      expect(db.one('SELECT cursor_rev,next_due_ms FROM live_pending_removal_reconcile WHERE uri=?', uri)).toEqual({
+        cursor_rev: '1111111111111',
+        next_due_ms: world.clock.nowMs(),
+      });
+      expect(nextPendingRemovalDue(db, world.clock.nowMs())).toBe(world.clock.nowMs());
+      expect(
+        executeAuthorizedRemovals(db, { nowMs: world.clock.nowMs(), random: seededRandom(0xa3), limit: 1 }),
+      ).toMatchObject({ groups: 0, effects: 0 });
+      expect(pendingObservation()).toEqual([retainedObservation]);
+      expect(db.all('SELECT * FROM live_pending_removal_reconcile WHERE uri=?', uri)).toHaveLength(0);
+      expect(db.one('SELECT conflicted FROM live_pending_removal_events WHERE uri=?', uri)).toEqual({ conflicted: 1 });
+      expect(db.all('SELECT * FROM listenbrainz_deletes')).toHaveLength(0);
+      expect(db.all("SELECT * FROM forward_outbox WHERE kind='unlove'")).toHaveLength(0);
+      expect(nextPendingRemovalDue(db, world.clock.nowMs())).toBeGreaterThan(world.clock.nowMs());
     } finally {
       db.close();
     }
