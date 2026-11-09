@@ -1081,7 +1081,40 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
     }
   }
   if (out.statsChanged) bumpStatsVersion(db, t.did);
+  if (t.present !== null && out.outcome === 'applied' && (t.kind === 'scrobble' || t.kind === 'scrobbleBatch')) {
+    archiveAcceptedListenTombstones(db, t.did, t.uri, t.rev);
+  }
   return out;
+}
+
+function archiveAcceptedListenTombstones(db: Db, did: string, uri: string, revision: string): void {
+  const listens = db.all<{
+    uri: string;
+    record_uri: string | null;
+    listen_id: string | null;
+    cid: string;
+    listened_at: string;
+    artist_key: string;
+    track_key: string;
+  }>(
+    'SELECT uri,record_uri,listen_id,cid,listened_at,artist_key,track_key FROM scrobbles WHERE did=? AND (uri=? OR record_uri=?)',
+    did,
+    uri,
+    uri,
+  );
+  for (const listen of listens) {
+    archiveMatchingLiveListenTombstones(db, {
+      did,
+      uri: listen.uri,
+      recordUri: listen.record_uri,
+      listenId: listen.listen_id,
+      revision,
+      cid: listen.cid,
+      second: Math.floor(Date.parse(listen.listened_at) / 1000),
+      artistKey: listen.artist_key,
+      trackKey: listen.track_key,
+    });
+  }
 }
 
 /**
@@ -1144,6 +1177,7 @@ export function reaffirmRecordTarget(
       t.uri,
       t.rev,
     );
+    archiveAcceptedListenTombstones(db, t.did, t.uri, t.rev);
   }
   const verified = { did: t.did, uri: t.uri, rev: t.rev, cid, state, reason };
   if (!batch) {
@@ -1234,33 +1268,6 @@ export function applyRecordProof(db: Db, proof: RecordProof, o: ApplyOptions): A
     },
     o,
   );
-  if (proof.state === 'present' && applied.outcome === 'applied' && (kind === 'scrobble' || kind === 'scrobbleBatch')) {
-    // Retire only the live removal intent for a successfully projected
-    // matching incarnation. Keep archived history for pull suppression and
-    // leave API removals active while their operation is outstanding.
-    const projected = db.all<{
-      uri: string;
-      cid: string;
-      listened_at: string;
-      artist_key: string;
-      track_key: string;
-    }>(
-      'SELECT uri,cid,listened_at,artist_key,track_key FROM scrobbles WHERE did=? AND (uri=? OR record_uri=?)',
-      did,
-      uri,
-      uri,
-    );
-    for (const listen of projected) {
-      archiveMatchingLiveListenTombstones(db, {
-        did,
-        uri: listen.uri,
-        cid: listen.cid,
-        second: Math.floor(Date.parse(listen.listened_at) / 1000),
-        artistKey: listen.artist_key,
-        trackKey: listen.track_key,
-      });
-    }
-  }
   advanceUser(db, did, rev, o.nowNs);
   return result(applied.outcome, applied.reason === undefined ? {} : { reason: applied.reason });
 }

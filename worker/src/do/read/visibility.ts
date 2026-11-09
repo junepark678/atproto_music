@@ -79,7 +79,7 @@ function outlived(d: string, s: string): string {
  * (settled before migration 11): `legacyMatch` (its CID evidence) and not
  * outlived.
  */
-function removedBy(d: string, s: string, legacyMatch: string): string {
+export function removedBy(d: string, s: string, legacyMatch: string): string {
   return `(CASE WHEN ${d}.removal_done_rev IS NOT NULL AND ${d}.removal_done_basis = 'after'
       THEN ${s}.revision < ${d}.removal_done_rev
     WHEN ${d}.removal_done_rev IS NOT NULL THEN ${s}.revision <= ${d}.removal_done_rev
@@ -87,6 +87,45 @@ function removedBy(d: string, s: string, legacyMatch: string): string {
       THEN (${s}.revision <= ${d}.removal_head_rev
         OR (${d}.removal_commit_rev IS NOT NULL AND ${s}.revision < ${d}.removal_commit_rev))
       ELSE ((${legacyMatch}) AND NOT ${outlived(d, s)}) END)`;
+}
+
+/** The same ordered receipt rule used by public visibility, for accepted projections. */
+export function removalIntentStillHidesProjection(
+  db: import('../db').Db,
+  projection: {
+    did: string;
+    uri: string;
+    recordUri: string | null;
+    listenId: string | null;
+    cid: string;
+    revision: string;
+  },
+): boolean {
+  const collection = projection.uri.slice(`at://${projection.did}/`.length).split('/', 1)[0] ?? '';
+  const rkey = projection.uri.slice(`at://${projection.did}/${collection}/`.length);
+  const matched = db.one(
+    `SELECT 1 FROM operations d
+     JOIN (SELECT ? AS did, ? AS uri, ? AS record_uri, ? AS listen_id, ? AS cid, ? AS revision) s
+       ON d.did=s.did AND d.collection=? AND d.rkey=? AND d.kind='scrobble.delete'
+     WHERE (NOT EXISTS (SELECT 1 FROM batch_delete_listens b WHERE b.operation_id=d.id)
+       OR EXISTS (SELECT 1 FROM batch_delete_listens b WHERE b.operation_id=d.id AND (b.listen_id='*' OR b.listen_id=s.listen_id)))
+       AND (d.state IN ('queued','running','blocked','failed') OR
+         (d.state='succeeded' AND ${removedBy(
+           'd',
+           's',
+           `d.swap_cid=s.cid OR EXISTS (
+            SELECT 1 FROM listen_removal_cids e WHERE e.operation_id=d.id AND e.cid=s.cid)`,
+         )})) LIMIT 1`,
+    projection.did,
+    projection.uri,
+    projection.recordUri,
+    projection.listenId,
+    projection.cid,
+    projection.revision,
+    collection,
+    rkey,
+  );
+  return matched !== null;
 }
 const COLUMN = /^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?$/;
 

@@ -8,6 +8,7 @@ import type { Box } from '../../src/crypto/box';
 import type { ModuleDeps } from '../../src/do/contracts';
 import type { Db } from '../../src/do/db';
 import { applyRecordProof } from '../../src/do/write/apply-record';
+import { applySnapshotChunk } from '../../src/do/write/apply-snapshot';
 import { enqueueListenDelete, hasCanonicalListenSurvivor } from '../../src/forward/delete-enqueue';
 import type { DeleteForwardDeps } from '../../src/forward/delete-forwarder';
 import { runDeleteSlice } from '../../src/forward/delete-forwarder';
@@ -27,6 +28,7 @@ import {
   repoFor,
   SCROBBLE,
   scrobble,
+  seedSnapshotJob,
   seedUser,
 } from '../../test/write/support';
 import { withMigratedDb } from './support/node-db';
@@ -221,6 +223,142 @@ it('same-byte recreation at same URI is a current survivor', async () => {
     expect(await drain(db)).toEqual({ deletes: 0, lookups: 0 });
   });
 });
+it.each([false, true])(
+  'five same-CID presence/absence cycles remain atomic and suppressed: batch=%s',
+  async (batch) => {
+    const repo = await repoFor('alice');
+    const collection = batch ? BATCH : SCROBBLE;
+    const value = batch ? batchRecord() : record;
+    const proofs = [
+      await putProof(repo, collection, 'cycle', value),
+      await deleteProof(repo, collection, 'cycle'),
+      await putProof(repo, collection, 'cycle', value),
+      await deleteProof(repo, collection, 'cycle'),
+      await putProof(repo, collection, 'cycle', value),
+      await deleteProof(repo, collection, 'cycle'),
+      await putProof(repo, collection, 'cycle', value),
+      await deleteProof(repo, collection, 'cycle'),
+      await putProof(repo, collection, 'cycle', value),
+      await deleteProof(repo, collection, 'cycle'),
+      await putProof(repo, collection, 'cycle', value),
+    ];
+    await withMigratedDb((db) => {
+      seedLink(db);
+      proofs.forEach((proof, index) => {
+        expect(db.tx(() => applyRecordProof(db, proof!, index % 2 ? live : OPTS)).outcome).toBe(
+          index % 2 ? 'absent' : 'applied',
+        );
+      });
+      expect(
+        db.all<{ identity_key: string }>("SELECT identity_key FROM linked_pull_tombstones WHERE kind='listen'"),
+      ).toHaveLength(1);
+      expect(isListenTombstoned(db, ALICE, second, artistKey, musicTrackKey)).toBe(true);
+      expect(hasCanonicalListenSurvivor(db, deletion)).toBe(true);
+    });
+  },
+);
+it.each([false, true])('snapshot accepted recreation archives live deletion: batch=%s', async (batch) => {
+  const repo = await repoFor('alice');
+  const collection = batch ? BATCH : SCROBBLE;
+  const value = batch ? batchRecord() : record;
+  const a = await putProof(repo, collection, 'snapshot-cycle', value);
+  const gone = await deleteProof(repo, collection, 'snapshot-cycle');
+  const again = await putProof(repo, collection, 'snapshot-cycle', value);
+  await withMigratedDb((db) => {
+    seedLink(db);
+    expect(db.tx(() => applyRecordProof(db, a, OPTS)).outcome).toBe('applied');
+    delivered(db);
+    expect(db.tx(() => applyRecordProof(db, gone, live)).outcome).toBe('absent');
+    const generation = db.one<{ generation: number }>('SELECT generation FROM users WHERE did=?', ALICE)!.generation;
+    seedSnapshotJob(db, ALICE, generation);
+    expect(
+      db.tx(() =>
+        applySnapshotChunk(db, {
+          did: ALICE,
+          generation,
+          headRev: again.commit.rev,
+          intervalLo: null,
+          intervalHi: `${collection}/snapshot-cycle`,
+          entries: [{ key: `${collection}/snapshot-cycle`, cid: again.cid!, record: again.record }],
+          ...OPTS,
+        }),
+      ).outcome,
+    ).toBe('applied');
+    expect(hasCanonicalListenSurvivor(db, deletion)).toBe(true);
+    expect(isListenTombstoned(db, ALICE, second, artistKey, musicTrackKey)).toBe(true);
+  });
+});
+it('snapshot reaffirm archives an exact live tombstone through the accepted projection path', async () => {
+  const repo = await repoFor('alice');
+  const a = await putProof(repo, SCROBBLE, 'snapshot-reaffirm', record);
+  const again = await putProof(repo, SCROBBLE, 'snapshot-reaffirm', record);
+  await withMigratedDb((db) => {
+    seedLink(db);
+    expect(db.tx(() => applyRecordProof(db, a, OPTS)).outcome).toBe('applied');
+    const uriKey = uri('snapshot-reaffirm');
+    tombstoneListen(db, {
+      did: ALICE,
+      identity: `live:${uriKey}:${a.cid}`,
+      second,
+      artistKey,
+      trackKey: musicTrackKey,
+      nowMs: NOW_MS,
+    });
+    const generation = db.one<{ generation: number }>('SELECT generation FROM users WHERE did=?', ALICE)!.generation;
+    seedSnapshotJob(db, ALICE, generation);
+    expect(
+      db.tx(() =>
+        applySnapshotChunk(db, {
+          did: ALICE,
+          generation,
+          headRev: again.commit.rev,
+          intervalLo: null,
+          intervalHi: `${SCROBBLE}/snapshot-reaffirm`,
+          entries: [{ key: `${SCROBBLE}/snapshot-reaffirm`, cid: a.cid!, record: undefined }],
+          ...OPTS,
+        }),
+      ).outcome,
+    ).toBe('applied');
+    expect(
+      db.all<{ identity_key: string }>("SELECT identity_key FROM linked_pull_tombstones WHERE kind='listen'"),
+    ).toEqual([{ identity_key: `history:live:${uriKey}:${a.cid}` }]);
+  });
+});
+it.each([
+  ['failed', 'commit', 'before', false],
+  ['cancelled', 'commit', 'before', true],
+  ['succeeded', 'commit', 'before', false],
+  ['succeeded', 'commit', 'equal', false],
+  ['succeeded', 'commit', 'after', true],
+  ['succeeded', 'after', 'before', false],
+  ['succeeded', 'after', 'equal', true],
+  ['succeeded', 'after', 'after', true],
+] as const)(
+  'API tombstone follows visibility lifecycle state=%s basis=%s position=%s',
+  async (state, basis, position, survives) => {
+    const repo = await repoFor('alice');
+    const a = await putProof(repo, SCROBBLE, 'api-boundary', record);
+    await putProof(repo, SCROBBLE, 'api-boundary-neighbor', { ...record, track: 'Neighbor' });
+    const mid = await putProof(repo, SCROBBLE, 'api-boundary', record);
+    const later = await putProof(repo, SCROBBLE, 'api-boundary', record);
+    await withMigratedDb((db) => {
+      seedLink(db);
+      expect(db.tx(() => applyRecordProof(db, a, OPTS)).outcome).toBe('applied');
+      apiSingle(db, 'api-boundary');
+      const boundary = position === 'before' ? later.commit.rev : position === 'equal' ? mid.commit.rev : a.commit.rev;
+      db.run(
+        `UPDATE operations SET state=?,removal_head_rev=?,removal_done_rev=?,removal_done_basis=?,removal_reached='commit'`,
+        state,
+        a.commit.rev,
+        state === 'succeeded' ? boundary : null,
+        basis,
+      );
+      const proof = position === 'after' ? later : mid;
+      expect(db.tx(() => applyRecordProof(db, proof, OPTS)).outcome).toBe('applied');
+      expect(hasCanonicalListenSurvivor(db, deletion)).toBe(survives);
+    });
+  },
+);
 it('two outstanding removals do not suppress the final deletion', async () => {
   const repo = await repoFor('alice');
   const a = await putProof(repo, SCROBBLE, 'a', record);

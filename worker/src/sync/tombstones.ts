@@ -1,4 +1,5 @@
 import type { Db } from '../do/db';
+import { removalIntentStillHidesProjection } from '../do/read/visibility';
 
 export function tombstoneListen(
   db: Db,
@@ -31,7 +32,17 @@ export function tombstoneListen(
  */
 export function archiveMatchingLiveListenTombstones(
   db: Db,
-  args: { did: string; uri: string; cid: string; second: number; artistKey: string; trackKey: string },
+  args: {
+    did: string;
+    uri: string;
+    recordUri?: string | null;
+    listenId?: string | null;
+    revision: string;
+    cid: string;
+    second: number;
+    artistKey: string;
+    trackKey: string;
+  },
 ): void {
   const candidates = db.all<{ identity_key: string }>(
     `SELECT identity_key FROM linked_pull_tombstones WHERE did=? AND kind='listen'
@@ -56,27 +67,30 @@ export function archiveMatchingLiveListenTombstones(
     if (suffix !== '' && !suffix.startsWith(':') && !suffix.startsWith('#member:')) continue;
     if (suffix.startsWith(':') && suffix.slice(1) !== args.cid) continue;
     if (suffix.startsWith('#member:') && suffix.slice('#member:'.length) !== args.cid) continue;
-    if (prefix === uriPrefix) {
-      const record = db.one<{ record_uri: string | null }>(
-        'SELECT record_uri FROM scrobbles WHERE did=? AND uri=?',
-        args.did,
-        args.uri,
-      );
-      const recordUri = record?.record_uri ?? args.uri.split('#member:', 1)[0] ?? args.uri;
-      const [collection = '', ...rkeyParts] = recordUri.slice(`at://${args.did}/`.length).split('/');
-      const pendingApiRemoval = db.one(
-        `SELECT 1 FROM operations WHERE did=? AND kind='scrobble.delete' AND collection=? AND rkey=?
-         AND state IN ('queued','running','blocked') LIMIT 1`,
-        args.did,
-        collection,
-        rkeyParts.join('/'),
-      );
-      if (pendingApiRemoval !== null) continue;
-    }
+    if (
+      prefix === uriPrefix &&
+      removalIntentStillHidesProjection(db, {
+        did: args.did,
+        uri: args.recordUri ?? args.uri.split('#member:', 1)[0] ?? args.uri,
+        recordUri: args.recordUri ?? null,
+        listenId: args.listenId ?? null,
+        cid: args.cid,
+        revision: args.revision,
+      })
+    )
+      continue;
+    // Keep one durable history copy per original identity. Repeated identical
+    // recreation cycles are idempotent even when that history already exists.
     db.run(
-      `UPDATE linked_pull_tombstones SET identity_key=?
-       WHERE did=? AND kind='listen' AND identity_key=?`,
+      `INSERT OR IGNORE INTO linked_pull_tombstones(did,kind,identity_key,listen_second,artist_key,track_key,love_key,recording_mbid,created_at_ms)
+       SELECT did,kind,?,listen_second,artist_key,track_key,love_key,recording_mbid,created_at_ms
+       FROM linked_pull_tombstones WHERE did=? AND kind='listen' AND identity_key=?`,
       `history:${identity_key}`,
+      args.did,
+      identity_key,
+    );
+    db.run(
+      "DELETE FROM linked_pull_tombstones WHERE did=? AND kind='listen' AND identity_key=?",
       args.did,
       identity_key,
     );
