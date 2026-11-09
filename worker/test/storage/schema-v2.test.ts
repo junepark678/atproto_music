@@ -899,6 +899,19 @@ const NEW_INDEXES: Record<string, [string, number, number, Array<[string, number
       ['created_at_ms', 0],
     ],
   ],
+  forward_outbox_love_heads: [
+    'forward_outbox',
+    0,
+    0,
+    [
+      ['link_id', 0],
+      ['generation', 0],
+      ['state', 0],
+      ['love_artist_key', 0],
+      ['love_track_key', 0],
+      ['created_at_ms', 0],
+    ],
+  ],
   linked_accounts_backfill_due: [
     'linked_accounts',
     0,
@@ -1777,6 +1790,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       "40|'listenbrainz_delete_lookup_progress'",
       "41|'listenbrainz_delete_lookup_tie_fence'",
       "42|'listenbrainz_delete_lookup_page_boundary'",
+      "43|'forward_love_key_heads'",
     ]);
     // The new scrobble columns exist and are NULL on every migrated row.
     expect(after.newColumns).toHaveLength(expectedScrobbles);
@@ -1826,6 +1840,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       { version: 40, name: 'listenbrainz_delete_lookup_progress' },
       { version: 41, name: 'listenbrainz_delete_lookup_tie_fence' },
       { version: 42, name: 'listenbrainz_delete_lookup_page_boundary' },
+      { version: 43, name: 'forward_love_key_heads' },
     ]);
     expect(after.compat).toEqual([{ singleton: 1, min_compatible_version: 2 }]);
     expect(after.newTablesEmpty).toEqual(['mb_cover_art_usage']);

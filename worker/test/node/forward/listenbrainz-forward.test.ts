@@ -21,10 +21,11 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { MemoryRevocations } from '../../../src/app/revocations';
 import type { ForwardOutboxRow } from '../../../src/app/rows';
 import { ensureAccount } from '../../../src/credentials/accounts';
+import type { SqlParam } from '../../../src/do/db';
 import { migrate } from '../../../src/do/migrate';
 import { runDeleteSlice } from '../../../src/forward/delete-forwarder';
 import { LASTFM_EXPIRY_MS, LISTENBRAINZ_EXPIRY_MS } from '../../../src/forward/forward-outbox';
-import { type ForwardRuntime, runForward } from '../../../src/forward/forwarder';
+import { type ForwardRuntime, MAX_LOCAL_WORK_PER_RUN, runForward } from '../../../src/forward/forwarder';
 import { saveLink } from '../../../src/forward/links';
 import { UpstreamPacing } from '../../../src/forward/upstream-pacing';
 import { type LinksService, linksFeature } from '../../../src/http/links';
@@ -277,7 +278,7 @@ describe('ListenBrainz forwarding', () => {
     await w.app.close();
     let db: SqliteDb | null = openSqliteDb(path, { busyTimeoutMs: 200 });
     try {
-      expect(migrate(db)).toEqual({ status: 'ready', version: 42 });
+      expect(migrate(db)).toEqual({ status: 'ready', version: 43 });
       expect(
         db.one('SELECT target_msid,target_listened_at FROM listenbrainz_deletes WHERE id=?', 'restart-delete'),
       ).toEqual({
@@ -302,7 +303,7 @@ describe('ListenBrainz forwarding', () => {
       expect(retry).toMatchObject({ target_msid: msid, target_listened_at: listenedAt + 1 });
       db.close();
       db = openSqliteDb(path, { busyTimeoutMs: 200 });
-      expect(migrate(db)).toEqual({ status: 'ready', version: 42 });
+      expect(migrate(db)).toEqual({ status: 'ready', version: 43 });
       w.clock.set(new Date(retry!.due_at).toISOString());
       expect(
         (
@@ -1174,6 +1175,62 @@ describe('ListenBrainz forwarding', () => {
     expect(w.rows().find((r) => r.id === never.id)).toMatchObject({ state: 'ignored', last_error: 'mbid_unresolved' });
     expect(w.seen.every(([, path]) => path === '/1/feedback/recording-feedback')).toBe(true);
     expect(w.rows().find((r) => r.id === never.id)?.link_id).toBe(link);
+  });
+
+  it('bounds love-head row work for a large unresolved backlog and still forwards an unrelated resolved track', async () => {
+    const w = await world();
+    const linkId = w.link();
+    const link = w.app.db.one<{ generation: number }>('SELECT generation FROM linked_accounts WHERE id=?', linkId)!;
+    const count = 2_000;
+    for (let i = 0; i < count; i++) {
+      const artist = i === MAX_LOCAL_WORK_PER_RUN - 1 ? 'Ready Artist' : `Unresolved Artist ${i}`;
+      const track = i === MAX_LOCAL_WORK_PER_RUN - 1 ? 'Ready Song' : `Unresolved Track ${i}`;
+      const [artistKey, trackKeyValue] = trackKey(artist, track);
+      const payload = JSON.stringify({
+        artist,
+        track,
+        ...(i === MAX_LOCAL_WORK_PER_RUN - 1 ? { recordingMbid: MBID } : {}),
+      });
+      w.app.db.run(
+        `INSERT INTO forward_outbox(id,link_id,generation,did,kind,dedupe_key,payload_json,state,attempts,due_at,
+         created_at_ms,updated_at_ms,love_artist_key,love_track_key)
+         VALUES(?,?,?,?,'love',?,?, 'queued',0,0,?,?,?,?)`,
+        `love-backlog-${i}`,
+        linkId,
+        link.generation,
+        ALICE,
+        `love-backlog-${i}`,
+        payload,
+        w.clock.nowMs(),
+        w.clock.nowMs(),
+        artistKey,
+        trackKeyValue,
+      );
+    }
+    const db = w.app.db;
+    const originalAll = db.all.bind(db);
+    let headRowsReturned = 0;
+    db.all = ((sql: string, ...params: SqlParam[]) => {
+      const rows = originalAll(sql, ...params);
+      if (sql.includes('f.rowid AS seq')) headRowsReturned += rows.length;
+      return rows;
+    }) as typeof db.all;
+    let report: Awaited<ReturnType<typeof runForward>>;
+    try {
+      report = await runForward({ ...w.rt, db }, w.clock.nowMs(), { maxRequests: 5 });
+    } finally {
+      db.all = originalAll;
+    }
+
+    expect(report.requests).toBe(1);
+    expect(w.lb.feedback.map((f) => f.json)).toEqual([{ recording_mbid: MBID, score: 1 }]);
+    expect(headRowsReturned).toBeLessThanOrEqual(MAX_LOCAL_WORK_PER_RUN);
+    expect(headRowsReturned).toBeGreaterThan(0);
+    expect(w.rows().filter((row) => row.state === 'queued' && row.due_at > w.clock.nowMs())).toHaveLength(
+      MAX_LOCAL_WORK_PER_RUN - 1,
+    );
+    expect(report.nextDueMs).not.toBeNull();
+    expect(report.nextDueMs!).toBeLessThanOrEqual(w.clock.nowMs() + 1_000);
   });
 
   it('401 revokes the link; an attempted 429 counts and waits X-RateLimit-Reset-In; 400 is terminal', async () => {

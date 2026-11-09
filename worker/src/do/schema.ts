@@ -1388,6 +1388,13 @@ const MIGRATION_S4_DELETE_LOOKUP_PAGE_BOUNDARY: Migration = {
   name: 'listenbrainz_delete_lookup_page_boundary',
   statements: ['ALTER TABLE listenbrainz_deletes ADD COLUMN lookup_last_max INTEGER'],
 };
+const MIGRATION_S4_FORWARD_LOVE_HEADS: Migration = {
+  version: 43,
+  name: 'forward_love_key_heads',
+  statements: [
+    'CREATE INDEX forward_outbox_love_heads ON forward_outbox(link_id,generation,state,love_artist_key,love_track_key,created_at_ms)',
+  ],
+};
 
 export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_1,
@@ -1432,6 +1439,7 @@ export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_S4_DELETE_LOOKUP_PROGRESS,
   MIGRATION_S4_DELETE_LOOKUP_TIE_FENCE,
   MIGRATION_S4_DELETE_LOOKUP_PAGE_BOUNDARY,
+  MIGRATION_S4_FORWARD_LOVE_HEADS,
 ];
 
 /** The schema version this code expects. */
