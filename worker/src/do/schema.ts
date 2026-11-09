@@ -925,6 +925,23 @@ const MIGRATION_14: Migration = {
   ],
 };
 
+const MIGRATION_15: Migration = {
+  version: 15,
+  name: 'detailed_now_playing',
+  statements: [
+    'ALTER TABLE now_playing ADD COLUMN updated_at_ms INTEGER',
+    'ALTER TABLE now_playing ADD COLUMN track_number INTEGER',
+    'ALTER TABLE now_playing ADD COLUMN release_mbid TEXT',
+    'ALTER TABLE now_playing ADD COLUMN release_group_mbid TEXT',
+    'ALTER TABLE now_playing ADD COLUMN artist_mbids TEXT',
+    'ALTER TABLE now_playing ADD COLUMN isrc TEXT',
+    'ALTER TABLE now_playing ADD COLUMN submission_client_version TEXT',
+    'ALTER TABLE now_playing ADD COLUMN music_service TEXT',
+    'ALTER TABLE now_playing ADD COLUMN media_player TEXT',
+    'ALTER TABLE now_playing ADD COLUMN scrobbled_at_ms INTEGER',
+  ],
+};
+
 export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_1,
   MIGRATION_2,
@@ -940,6 +957,7 @@ export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_12,
   MIGRATION_13,
   MIGRATION_14,
+  MIGRATION_15,
 ];
 
 /** The schema version this code expects. */

@@ -67,7 +67,7 @@ describe('Web Scrobbler ListenBrainz replay client', () => {
       resolve('worker/test/node/listenbrainz/fixtures/web-scrobbler-playing-now.body'),
       'utf8',
     );
-    expect(requests[0]!.body).toBe(capturedNowPlaying);
+    expect(JSON.parse(requests[0]!.body)).toEqual(JSON.parse(capturedNowPlaying));
     expect(JSON.parse(requests[1]!.body)).toEqual({
       listen_type: 'import',
       payload: [

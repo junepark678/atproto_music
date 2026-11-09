@@ -229,6 +229,8 @@ export interface IndexRpc {
   stats(q: StatsQuery): Promise<Statistics | null>;
   /** Null for unknown, inactive or suppressed users (404, before any identity request). */
   profile(did: Did): Promise<Profile | null>;
+  nowPlaying(did: Did, owner: boolean): Promise<import('../app/rows').NowPlayingRow | null>;
+  followedNowPlaying(did: Did): Promise<Array<{ did: Did; row: import('../app/rows').NowPlayingRow }>>;
   /**
    * Verified handles for a page's actors: one cached identity lookup per
    * distinct DID, null when not verified in both directions.

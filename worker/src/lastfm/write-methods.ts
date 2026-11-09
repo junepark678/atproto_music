@@ -293,6 +293,7 @@ const updateNowPlayingMethod: LastfmMethodDef = {
         albumArtist: t.albumArtist ?? null,
         durationSeconds: t.durationSeconds ?? null,
         recordingMbid: t.recordingMbid ?? null,
+        trackNumber: t.trackNumber ?? null,
         client: caller.clientName,
         source: 'lastfm',
       });

@@ -4,7 +4,7 @@
   "info": {
     "title": "AT Protocol Music API",
     "version": "1.2.0",
-    "description": "API contract v1.2 from docs/planning/API.md as amended by ADR 0004 §9 (docs/adr/0004-cloudflare-workers.md) and ADR 0005 B14 (docs/adr/0005-local-node-host-and-compat-apis.md §5.7, §16). A route in this specification is not a claim that the current executable implements it. Every v1.1 route and payload is unchanged except the additive optional Scrobble fields (ADR 0005 §6.2); no v1.1 read route reads a session, cookie, CSRF token or Origin header. v1.2 adds the confidential OAuth client (BFF) routes: sign-in, cookie sessions (__Host-atmusic_session) with CSRF (Origin plus X-CSRF-Token) on every unsafe cookie route, server writes into one outbox (202 Accepted with an Operation), the account, credential, link and import routes, and the dynamic /oauth/client-metadata.json and /oauth/jwks.json. The Last.fm 2.0 API (/2.0/) and the ListenBrainz API (/1/) are specified in ADR 0005 §7 and §8 and docs/compat/{lastfm,listenbrainz}.md, not here. Schema and transport fixtures use reserved identities and a fixture-only namespace; production publication requires an owner-controlled prefix. All application JSON objects are closed; absent optional fields are omitted, not null/empty. No response returns upstream access/refresh tokens, DPoP keys or private signing keys; the server holds them sealed at rest (ADR 0005 §5.5)."
+    "description": "API contract v1.2 from docs/planning/API.md as amended by ADR 0004 §9 (docs/adr/0004-cloudflare-workers.md) and ADR 0005 B14 (docs/adr/0005-local-node-host-and-compat-apis.md §5.7, §16). A route in this specification is not a claim that the current executable implements it. Every v1.1 route and payload is unchanged except the additive optional Scrobble fields (ADR 0005 §6.2); no v1.1 read route reads a session, cookie, CSRF token or Origin header. v1.2 adds the confidential OAuth client (BFF) routes: sign-in, cookie sessions (__Host-atmusic_session) with CSRF (Origin plus X-CSRF-Token) on every unsafe cookie route, server writes into one outbox (202 Accepted with an Operation), the account, credential, link and import routes, and the dynamic /oauth/client-metadata.json and /oauth/jwks.json. The Last.fm 2.0 API (/2.0/) and the ListenBrainz API (/1/) are specified in ADR 0005 §7 and §8 and docs/compat/{lastfm,listenbrainz}.md, not here. Schema and transport fixtures use reserved identities and a fixture-only namespace; production publication requires an owner-controlled prefix. All application JSON objects are closed; absent optional fields are omitted, not null/empty. No response returns upstream access/refresh tokens, DPoP keys or private signing keys; the server holds them sealed at rest (ADR 0005 §5.5). Additive N1 B22 draft: detailed user now-playing and signed-in followed now-playing feed DTOs."
   },
   "servers": [
     {
@@ -4235,24 +4235,6 @@
               }
             }
           },
-          "401": {
-            "description": "No valid session cookie.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                },
-                "examples": {
-                  "fixture": {
-                    "$ref": "#/components/examples/v1.2-error-401"
-                  }
-                }
-              }
-            },
-            "x-error-codes": [
-              "unauthenticated"
-            ]
-          },
           "400": {
             "description": "The query does not carry exactly one well-formed state and token, or the state is unknown, used or expired. Nothing is stored.",
             "content": {
@@ -4269,6 +4251,24 @@
             },
             "x-error-codes": [
               "bad_request"
+            ]
+          },
+          "401": {
+            "description": "No valid session cookie.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "fixture": {
+                    "$ref": "#/components/examples/v1.2-error-401"
+                  }
+                }
+              }
+            },
+            "x-error-codes": [
+              "unauthenticated"
             ]
           },
           "403": {
@@ -5449,6 +5449,187 @@
             ]
           }
         }
+      }
+    },
+    "/api/v1/users/{did}/now-playing": {
+      "get": {
+        "operationId": "user_now_playing",
+        "summary": "User now playing",
+        "security": [],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DidPath"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                },
+                "example": "no-store"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NowPlayingResponse"
+                },
+                "examples": {
+                  "fixture": {
+                    "$ref": "#/components/examples/v1.2-now-playing-response"
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid DID",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                },
+                "example": "no-store"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "fixture": {
+                    "$ref": "#/components/examples/error-422"
+                  }
+                }
+              }
+            },
+            "x-error-codes": [
+              "validation_failed"
+            ]
+          },
+          "429": {
+            "description": "Rate limited",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                },
+                "example": "no-store"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "fixture": {
+                    "$ref": "#/components/examples/error-429"
+                  }
+                }
+              }
+            },
+            "x-error-codes": [
+              "rate_limited"
+            ]
+          }
+        },
+        "x-auth-mode": "public-owner-session",
+        "x-contract": "1.2"
+      }
+    },
+    "/api/v1/feed/now-playing": {
+      "get": {
+        "operationId": "now_playing_feed",
+        "summary": "Followed accounts now playing",
+        "security": [
+          {
+            "SessionCookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                },
+                "example": "no-store"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NowPlayingFeed"
+                },
+                "examples": {
+                  "fixture": {
+                    "$ref": "#/components/examples/v1.2-now-playing-feed"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                },
+                "example": "no-store"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "fixture": {
+                    "$ref": "#/components/examples/v1.2-error-401"
+                  }
+                }
+              }
+            },
+            "x-error-codes": [
+              "unauthenticated"
+            ]
+          },
+          "429": {
+            "description": "Rate limited",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                },
+                "example": "no-store"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "fixture": {
+                    "$ref": "#/components/examples/error-429"
+                  }
+                }
+              }
+            },
+            "x-error-codes": [
+              "rate_limited"
+            ]
+          }
+        },
+        "x-auth-mode": "session",
+        "x-contract": "1.2"
       }
     }
   },
@@ -7498,6 +7679,169 @@
             "maxLength": 64
           }
         }
+      },
+      "NowPlaying": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "artist",
+          "track",
+          "startedAt",
+          "updatedAt",
+          "expiresAt",
+          "source"
+        ],
+        "properties": {
+          "artist": {
+            "type": "string"
+          },
+          "track": {
+            "type": "string"
+          },
+          "album": {
+            "type": "string"
+          },
+          "albumArtist": {
+            "type": "string"
+          },
+          "trackNumber": {
+            "type": "integer"
+          },
+          "durationSeconds": {
+            "type": "integer"
+          },
+          "recordingMbid": {
+            "type": "string"
+          },
+          "releaseMbid": {
+            "type": "string"
+          },
+          "releaseGroupMbid": {
+            "type": "string"
+          },
+          "artistMbids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "isrc": {
+            "type": "string"
+          },
+          "startedAt": {
+            "$ref": "#/components/schemas/Timestamp"
+          },
+          "updatedAt": {
+            "$ref": "#/components/schemas/Timestamp"
+          },
+          "expiresAt": {
+            "$ref": "#/components/schemas/Timestamp"
+          },
+          "scrobbledAt": {
+            "$ref": "#/components/schemas/Timestamp"
+          },
+          "client": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "version": {
+                "type": "string"
+              }
+            }
+          },
+          "musicService": {
+            "type": "string"
+          },
+          "mediaPlayer": {
+            "type": "string"
+          },
+          "source": {
+            "enum": [
+              "lastfm",
+              "listenbrainz",
+              "web"
+            ]
+          },
+          "shared": {
+            "type": "boolean"
+          }
+        }
+      },
+      "NowPlayingResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "nowPlaying",
+          "serverTime"
+        ],
+        "properties": {
+          "nowPlaying": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/NowPlaying"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "serverTime": {
+            "$ref": "#/components/schemas/Timestamp"
+          }
+        }
+      },
+      "NowPlayingFeedItem": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "did",
+          "handle",
+          "nowPlaying"
+        ],
+        "properties": {
+          "did": {
+            "$ref": "#/components/schemas/Did"
+          },
+          "handle": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Handle"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "nowPlaying": {
+            "$ref": "#/components/schemas/NowPlaying"
+          }
+        }
+      },
+      "NowPlayingFeed": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "items",
+          "serverTime"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "maxItems": 50,
+            "items": {
+              "$ref": "#/components/schemas/NowPlayingFeedItem"
+            }
+          },
+          "serverTime": {
+            "$ref": "#/components/schemas/Timestamp"
+          }
+        }
       }
     },
     "parameters": {
@@ -8006,6 +8350,14 @@
       "v1.2-import-input": {
         "summary": "v1.2 request fixture.",
         "externalValue": "examples/v1.2/import-input.json"
+      },
+      "v1.2-now-playing-response": {
+        "summary": "N1 response fixture.",
+        "externalValue": "examples/v1.2/now-playing-response.json"
+      },
+      "v1.2-now-playing-feed": {
+        "summary": "N1 response fixture.",
+        "externalValue": "examples/v1.2/now-playing-feed.json"
       }
     },
     "securitySchemes": {

@@ -320,6 +320,16 @@ export interface NowPlayingRow {
   source: NowPlayingSource;
   started_at_ms: number;
   expires_at_ms: number;
+  updated_at_ms: number | null;
+  track_number: number | null;
+  release_mbid: string | null;
+  release_group_mbid: string | null;
+  artist_mbids: string | null;
+  isrc: string | null;
+  submission_client_version: string | null;
+  music_service: string | null;
+  media_player: string | null;
+  scrobbled_at_ms: number | null;
 }
 
 export interface LoveRow {
