@@ -193,6 +193,226 @@ describe('Last.fm entity read methods', () => {
     expect([unmatched.body.track.mbid, unmatched.body.track.duration]).toEqual(['', '0']);
   });
 
+  it('resolves name-reported local MBIDs back to the same visible entity and stats', async () => {
+    const app = await entityApp();
+    const trackMbid = '66666666-6666-4666-8666-666666666666';
+    const artistMbid = '77777777-7777-4777-8777-777777777777';
+    const releaseMbid = '88888888-8888-4888-8888-888888888888';
+    const [bak, btk] = trackKey('Björk', 'Jóga');
+    const albumKey = app.db.one<{ album_key: string }>(
+      'SELECT album_key FROM scrobbles WHERE artist_key=? AND track_key=? ORDER BY listened_at DESC,uri DESC LIMIT 1',
+      bak,
+      btk,
+    )!.album_key;
+    app.db.run('UPDATE scrobbles SET recording_mbid=NULL WHERE artist_key=? AND track_key=?', bak, btk);
+    app.db.run(
+      "UPDATE mb_tracks SET status='matched',recording_mbid=? WHERE artist_key=? AND track_key=? AND album_key=?",
+      trackMbid,
+      bak,
+      btk,
+      albumKey,
+    );
+    const byNameTrack = await get(app, { method: 'track.getInfo', artist: 'Björk', track: 'Jóga', username: 'alice' });
+    const byIdTrack = await get(app, { method: 'track.getInfo', mbid: trackMbid, username: 'alice' });
+    expect(byNameTrack.body.track.mbid).toBe(trackMbid);
+    expect(byIdTrack.body.track).toMatchObject({
+      name: byNameTrack.body.track.name,
+      playcount: byNameTrack.body.track.playcount,
+      listeners: byNameTrack.body.track.listeners,
+      userplaycount: byNameTrack.body.track.userplaycount,
+    });
+
+    const [rTrackAk, rTrackTk] = trackKey('Radiohead', 'Karma Police');
+    const rTrackAlbumKey = app.db.one<{ album_key: string }>(
+      'SELECT album_key FROM scrobbles WHERE artist_key=? AND track_key=? ORDER BY listened_at DESC,uri DESC LIMIT 1',
+      rTrackAk,
+      rTrackTk,
+    )!.album_key;
+    app.db.run(
+      "UPDATE mb_tracks SET status='matched',recording_mbid=? WHERE artist_key=? AND track_key=? AND album_key=?",
+      trackMbid,
+      rTrackAk,
+      rTrackTk,
+      rTrackAlbumKey,
+    );
+    const otherCanonicalName = await get(app, { method: 'track.getInfo', artist: 'Radiohead', track: 'Karma Police' });
+    const newestCanonicalId = await get(app, { method: 'track.getInfo', mbid: trackMbid });
+    expect(otherCanonicalName.body.track.mbid).toBe(trackMbid);
+    expect(newestCanonicalId.body.track.name).toBe('Jóga');
+    expect(newestCanonicalId.body.track.playcount).toBe(byNameTrack.body.track.playcount);
+
+    const rak = artistKey('Radiohead');
+    const radioAlbumKey = app.db.one<{ album_key: string }>(
+      "SELECT album_key FROM scrobbles WHERE artist='Radiohead' AND album='OK Computer' LIMIT 1",
+    )!.album_key;
+    app.db.run(
+      "UPDATE mb_tracks SET status='matched',artist_mbids=? WHERE artist_key=? AND album_key=?",
+      JSON.stringify([artistMbid]),
+      rak,
+      radioAlbumKey,
+    );
+    const byNameArtist = await get(app, { method: 'artist.getInfo', artist: 'Radiohead', username: 'alice' });
+    const byIdArtist = await get(app, { method: 'artist.getInfo', mbid: artistMbid, username: 'alice' });
+    expect(byNameArtist.body.artist.mbid).toBe(artistMbid);
+    expect(byIdArtist.body.artist.stats).toEqual(byNameArtist.body.artist.stats);
+
+    app.db.run(
+      "UPDATE mb_tracks SET status='matched',release_mbid=? WHERE artist_key=? AND album_key=?",
+      releaseMbid,
+      rak,
+      radioAlbumKey,
+    );
+    const byNameAlbum = await get(app, {
+      method: 'album.getInfo',
+      artist: 'Radiohead',
+      album: 'OK Computer',
+      username: 'alice',
+    });
+    const byIdAlbum = await get(app, { method: 'album.getInfo', mbid: releaseMbid, username: 'alice' });
+    expect(byNameAlbum.body.album.mbid).toBe(releaseMbid);
+    expect(byIdAlbum.body.album).toMatchObject({
+      artist: byNameAlbum.body.album.artist,
+      playcount: byNameAlbum.body.album.playcount,
+      listeners: byNameAlbum.body.album.listeners,
+      userplaycount: byNameAlbum.body.album.userplaycount,
+    });
+    expect(byIdAlbum.body.album.tracks.track).toHaveLength(byNameAlbum.body.album.tracks.track.length);
+  });
+
+  it('resolves an artist MBID emitted by artist.getInfo back through artist.getInfo', async () => {
+    const app = await entityApp();
+    const mbid = '66666666-6666-4666-8666-666666666667';
+    const key = artistKey('Radiohead');
+    const albumKey = app.db.one<{ album_key: string }>(
+      "SELECT album_key FROM scrobbles WHERE artist='Radiohead' AND album='OK Computer' LIMIT 1",
+    )!.album_key;
+    app.db.run(
+      "UPDATE mb_tracks SET status='matched',artist_mbids=? WHERE artist_key=? AND album_key=?",
+      JSON.stringify([mbid]),
+      key,
+      albumKey,
+    );
+    expect((await get(app, { method: 'artist.getInfo', artist: 'Radiohead' })).body.artist.mbid).toBe(mbid);
+    expect((await get(app, { method: 'artist.getInfo', mbid })).status).toBe(200);
+  });
+
+  it('resolves a release MBID emitted by album.getInfo back through album.getInfo', async () => {
+    const app = await entityApp();
+    const mbid = '66666666-6666-4666-8666-666666666668';
+    const key = artistKey('Radiohead');
+    const albumKey = app.db.one<{ album_key: string }>(
+      "SELECT album_key FROM scrobbles WHERE artist='Radiohead' AND album='OK Computer' LIMIT 1",
+    )!.album_key;
+    app.db.run(
+      "UPDATE mb_tracks SET status='matched',release_mbid=? WHERE artist_key=? AND album_key=?",
+      mbid,
+      key,
+      albumKey,
+    );
+    expect(
+      (await get(app, { method: 'album.getInfo', artist: 'Radiohead', album: 'OK Computer' })).body.album.mbid,
+    ).toBe(mbid);
+    expect((await get(app, { method: 'album.getInfo', mbid })).status).toBe(200);
+  });
+
+  it('keeps compilation album groups distinct, rejects disputed cache aliases, and ignores inactive-only evidence', async () => {
+    const app = await entityApp();
+    const vaMbid = '99999999-9999-4999-8999-999999999991';
+    const ownMbid = '99999999-9999-4999-8999-999999999992';
+    const vaKey = artistKey('Various Artists');
+    const [bak, btk] = trackKey('Björk', 'Jóga');
+    const [rak, rtk] = trackKey('Radiohead', 'Karma Police');
+    for (const [ak, tk, title, groupKey] of [
+      [bak, btk, 'Björk', vaKey],
+      [rak, rtk, 'Radiohead', rak],
+    ] as const) {
+      app.db.run(
+        'UPDATE scrobbles SET album=?,album_key=?,album_artist=?,album_artist_key=?,release_mbid=NULL WHERE artist_key=? AND track_key=?',
+        'Hits',
+        'hits',
+        title === 'Björk' ? 'Various Artists' : null,
+        groupKey,
+        ak,
+        tk,
+      );
+    }
+    app.db.run(
+      "UPDATE mb_tracks SET status='matched',album_key='hits',release_mbid=? WHERE artist_key=? AND track_key=?",
+      vaMbid,
+      bak,
+      btk,
+    );
+    app.db.run(
+      "UPDATE mb_tracks SET status='matched',album_key='hits',release_mbid=? WHERE artist_key=? AND track_key=?",
+      ownMbid,
+      rak,
+      rtk,
+    );
+    const va = await get(app, { method: 'album.getInfo', mbid: vaMbid });
+    const own = await get(app, { method: 'album.getInfo', mbid: ownMbid });
+    expect([va.body.album.artist, own.body.album.artist]).toEqual(['Various Artists', 'Radiohead']);
+
+    const disputed = '99999999-9999-4999-8999-999999999993';
+    app.db.run(
+      "UPDATE mb_tracks SET status='matched',artist_mbids=? WHERE artist_key=? AND album_key='hits'",
+      JSON.stringify([disputed]),
+      bak,
+    );
+    app.db.run(
+      "INSERT INTO mb_tracks(artist_key,track_key,album_key,status,artist_mbids,created_at_ms) VALUES(?,?,'hits','matched',?,1)",
+      bak,
+      trackKey('Björk', 'Other Track')[1],
+      JSON.stringify(['99999999-9999-4999-8999-999999999994']),
+    );
+    const disputedByName = await get(app, { method: 'artist.getInfo', artist: 'Björk' });
+    const disputedById = await get(app, { method: 'artist.getInfo', mbid: disputed });
+    expect(disputedByName.body.artist.mbid).toBe('');
+    expect(disputedById.body.error).toBe(6);
+
+    const hiddenMbid = '99999999-9999-4999-8999-999999999995';
+    const [kak, ktk] = trackKey('Radiohead', 'Karma Police');
+    app.db.run('UPDATE scrobbles SET recording_mbid=NULL WHERE artist_key=? AND track_key=?', kak, ktk);
+    app.db.run(
+      "UPDATE mb_tracks SET status='matched',recording_mbid=? WHERE artist_key=? AND track_key=? AND album_key='hits'",
+      hiddenMbid,
+      kak,
+      ktk,
+    );
+    app.db.run('UPDATE users SET active=0 WHERE did=?', ALICE);
+    app.db.run('UPDATE users SET active=0 WHERE did=?', BOB);
+    const hiddenByInactive = await get(app, { method: 'track.getInfo', mbid: hiddenMbid });
+    expect([hiddenByInactive.status, hiddenByInactive.body.error]).toEqual([400, 6]);
+
+    app.db.run('UPDATE users SET active=1 WHERE did=?', ALICE);
+    app.db.run('UPDATE users SET active=1 WHERE did=?', BOB);
+    app.db.run(
+      "INSERT INTO suppression(did,suppressed_at) VALUES(?,'2026-01-15T12:00:00Z'),(?,'2026-01-15T12:00:00Z')",
+      ALICE,
+      BOB,
+    );
+    const hiddenBySuppression = await get(app, { method: 'track.getInfo', mbid: hiddenMbid });
+    expect([hiddenBySuppression.status, hiddenBySuppression.body.error]).toEqual([400, 6]);
+
+    app.db.run('DELETE FROM suppression WHERE did IN (?,?)', ALICE, BOB);
+    const affected = app.db.all<{ did: string; rkey: string }>(
+      'SELECT DISTINCT did,rkey FROM scrobbles WHERE artist_key=? AND track_key=?',
+      kak,
+      ktk,
+    );
+    for (const row of affected) {
+      app.db.run(
+        `INSERT INTO operations(id,did,kind,origin,priority,collection,rkey,state,due_at,created_at_ms,updated_at_ms)
+         VALUES(?,?,'scrobble.delete','web',0,?,?,'queued',1,1,1)`,
+        `hidden-${row.did}-${row.rkey}`,
+        row.did,
+        SCROBBLE,
+        row.rkey,
+      );
+    }
+    const hiddenByQueuedDelete = await get(app, { method: 'track.getInfo', mbid: hiddenMbid });
+    expect([hiddenByQueuedDelete.status, hiddenByQueuedDelete.body.error]).toEqual([400, 6]);
+  });
+
   it('artist and album info fill missing MBIDs only when local matches agree, preserving submitted IDs', async () => {
     const app = await entityApp();
     const artistMbid = '11111111-1111-4111-8111-111111111111';

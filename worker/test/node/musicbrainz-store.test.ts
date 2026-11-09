@@ -10,7 +10,10 @@ import {
   deleteLoveReviveJob,
   enqueueTrack,
   loveReviveJobs,
+  matchedArtistKeys,
+  matchedRecordingKeys,
   matchedRecordingMbid,
+  matchedReleaseKeys,
   recordingByMbid,
   seedHistoricalTracks,
   stageLoveReviveJob,
@@ -33,6 +36,42 @@ function database() {
 }
 
 describe('MusicBrainz storage', () => {
+  it('reads distinct matched reverse keys and rejects invalid IDs and non-matched rows', () => {
+    const db = database();
+    try {
+      const recording = '66666666-6666-4666-8666-666666666666';
+      const artist = '77777777-7777-4777-8777-777777777777';
+      const release = '88888888-8888-4888-8888-888888888888';
+      db.run(
+        "INSERT INTO mb_tracks(artist_key,track_key,album_key,status,recording_mbid,artist_mbids,release_mbid,created_at_ms) VALUES('a','t','x','matched',?,?,?,1)",
+        recording,
+        JSON.stringify([artist]),
+        release,
+      );
+      db.run(
+        "INSERT INTO mb_tracks(artist_key,track_key,album_key,status,recording_mbid,artist_mbids,release_mbid,created_at_ms) VALUES('a','t','y','pending',?,?,?,2)",
+        recording,
+        JSON.stringify([artist]),
+        release,
+      );
+      db.run(
+        "INSERT INTO mb_tracks(artist_key,track_key,album_key,status,recording_mbid,artist_mbids,release_mbid,created_at_ms) VALUES('b','u','','matched',?,?,?,3)",
+        recording,
+        JSON.stringify([artist]),
+        release,
+      );
+      expect(matchedRecordingKeys(db, recording)).toEqual([
+        { artistKey: 'a', trackKey: 't' },
+        { artistKey: 'b', trackKey: 'u' },
+      ]);
+      expect(matchedArtistKeys(db, artist)).toEqual(['a', 'b']);
+      expect(matchedReleaseKeys(db, release)).toEqual([{ artistKey: 'a', albumKey: 'x' }]);
+      for (const read of [matchedRecordingKeys, matchedArtistKeys, matchedReleaseKeys])
+        expect(read(db, 'bad')).toEqual([]);
+    } finally {
+      db.close();
+    }
+  });
   it('migration 18 stores bounded love revival jobs across reopen and supports cursor advance and deletion', () => {
     const db = database();
     const path = join(dirs[dirs.length - 1]!, 'db.sqlite');
