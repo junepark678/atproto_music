@@ -3,7 +3,7 @@ import { BATCH_MAX_LISTENS } from '@atmusic/core/scrobble-batch';
 import { seededRandom } from '@atmusic/core/test-support/random';
 import { fromMs, toStorage } from '@atmusic/core/timestamp';
 import { expect, it } from 'vitest';
-import type { Db } from '../../../src/do/db';
+import type { Db, SqlParam } from '../../../src/do/db';
 import { enqueueHints } from '../../../src/do/ingest/hints';
 import { LIVE_EVIDENCE_TTL_MS, readLiveEvidence, recordLiveEvidence } from '../../../src/do/ingest/live-evidence';
 import {
@@ -170,7 +170,7 @@ it('delays love removal while preserving import exclusions, local re-love, and n
     for (const [id, service] of [
       ['love-lb', 'listenbrainz'],
       ['love-lfm', 'lastfm'],
-    ])
+    ] as const)
       db.run(
         `INSERT INTO linked_accounts(id,did,service,remote_user,credential_ciphertext,key_id,created_at_ms,updated_at_ms)
          VALUES(?,?,?,'remote',X'00','fixture',?,?)`,
@@ -443,15 +443,15 @@ it('executes one complete validator-sized 10,000-member container group in linea
     });
     let statements = 0;
     const traced: Db = {
-      all<T>(sql, ...params) {
+      all<T>(sql: string, ...params: SqlParam[]) {
         statements++;
         return db.all<T>(sql, ...params);
       },
-      one<T>(sql, ...params) {
+      one<T>(sql: string, ...params: SqlParam[]) {
         statements++;
         return db.one<T>(sql, ...params);
       },
-      run(sql, ...params) {
+      run(sql: string, ...params: SqlParam[]) {
         statements++;
         return db.run(sql, ...params);
       },

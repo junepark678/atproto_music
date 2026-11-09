@@ -292,7 +292,11 @@ function scrobbleVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, 
         track_key: string;
         artist: string;
         track: string;
-      }>('SELECT uri,cid,listened_at,artist_key,track_key,artist,track FROM scrobbles WHERE uri = ?', t.uri);
+        recording_mbid: string | null;
+      }>(
+        'SELECT uri,cid,listened_at,artist_key,track_key,artist,track,recording_mbid FROM scrobbles WHERE uri = ?',
+        t.uri,
+      );
       enqueueTrack(
         db,
         { artistKey: keys.artist_key, trackKey: keys.track_key, albumKey: keys.album_key },
@@ -334,7 +338,7 @@ function scrobbleVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, 
           did: t.did,
           uri: t.uri,
           kind: 'scrobble',
-          row: { ...before, record_uri: null, listen_id: null, recording_mbid: null },
+          row: { ...before, record_uri: null, listen_id: null },
           identityKey: priorIdentityKey,
           windowLo: t.priorRevision ?? '',
           windowHi: t.rev,
