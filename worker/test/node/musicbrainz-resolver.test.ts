@@ -82,6 +82,34 @@ it('matches submitted MBID, captures full credit and metadata, and keeps no egre
   expect(x.fake.requests).toHaveLength(1); // only the MusicBrainz match request; CAA work is timer-only
 });
 
+it.each(['lookup', 'search'] as const)(
+  'accepts unknown recording duration through %s without losing the match',
+  async (mode) => {
+    for (const length of [null, undefined, 0]) {
+      const x = setup();
+      enqueueTrack(
+        x.db,
+        { artistKey: 'artist', trackKey: 'track', albumKey: 'album' },
+        x.clock.nowMs(),
+        0,
+        mode === 'lookup' ? uuid : undefined,
+      );
+      const recording = { ...candidate(), length };
+      x.fake.response = { status: 200, body: mode === 'lookup' ? recording : { recordings: [recording] } };
+      expect((await x.resolver.run()).requests).toBe(1);
+      expect(x.db.one('SELECT status,matched_by,recording_mbid,duration_ms,attempts FROM mb_tracks')).toEqual({
+        status: 'matched',
+        matched_by: mode === 'lookup' ? 'mbid' : 'search',
+        recording_mbid: uuid,
+        duration_ms: length ?? null,
+        attempts: 0,
+      });
+      expect(x.fake.requests).toHaveLength(1);
+      x.db.close();
+    }
+  },
+);
+
 it('rejects absent/low scores and wrong credited artist names', async () => {
   const x = setup();
   enqueueTrack(x.db, { artistKey: 'artist', trackKey: 'track' }, x.clock.nowMs());
@@ -371,7 +399,7 @@ it('backs off malformed external candidates across restarts while healthy queued
     { ...candidate(), score: -1 },
     { ...candidate(), length: -1 },
     { ...candidate(), length: 1.5 },
-    { ...candidate(), length: Number.POSITIVE_INFINITY },
+    { ...candidate(), length: '210000' },
     { ...candidate(), releases: [{ id: uuid, title: '   ', status: 'Official' }] },
   ];
   for (const value of malformed) {
@@ -406,6 +434,22 @@ it('backs off malformed external candidates across restarts while healthy queued
     { track_key: 'bad', status: 'pending', attempts: 1 },
     { track_key: 'track', status: 'matched', attempts: 0 },
   ]);
+});
+
+it('backs off an invalid JSON non-finite duration instead of treating it as an unknown duration', async () => {
+  const x = setup();
+  enqueueTrack(x.db, { artistKey: 'artist', trackKey: 'track' }, x.clock.nowMs());
+  x.fake.response = {
+    status: 200,
+    body: `{"recordings":[{"id":"${uuid}","title":"Track","score":95,"artist-credit":[{"name":"Artist"}],"length":Infinity}]}`,
+  };
+  expect((await x.resolver.run()).requests).toBe(1);
+  expect(x.db.one('SELECT status,attempts,recording_mbid,duration_ms FROM mb_tracks')).toEqual({
+    status: 'pending',
+    attempts: 1,
+    recording_mbid: null,
+    duration_ms: null,
+  });
 });
 
 it('moves a malformed candidate to failed for 30 days after eight persisted attempts', async () => {
