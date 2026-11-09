@@ -840,6 +840,21 @@ describe('ListenBrainz forwarding', () => {
 
     // One live listen: `single`, with the original metadata and our Token.
     w.scrobbles(1);
+    const queued = w.app.db.one<{ id: string; payload_json: string }>(
+      "SELECT id,payload_json FROM forward_outbox WHERE kind='scrobble' ORDER BY rowid DESC LIMIT 1",
+    )!;
+    const queuedPayload = JSON.parse(queued.payload_json) as { listen: Record<string, unknown>; origin: string };
+    Object.assign(queuedPayload.listen, {
+      albumArtist: 'Album Artist',
+      trackNumber: 4,
+      artistMbids: [MBID],
+      releaseMbid: MBID,
+      releaseGroupMbid: MBID,
+      isrc: 'USABC1234567',
+      submissionClient: 'Pano',
+      musicService: 'Radio',
+    });
+    w.app.db.run('UPDATE forward_outbox SET payload_json=? WHERE id=?', JSON.stringify(queuedPayload), queued.id);
     await w.run();
     expect(w.lb.submissions).toHaveLength(1);
     expect(w.lb.submissions[0]).toMatchObject({
@@ -857,7 +872,18 @@ describe('ListenBrainz forwarding', () => {
             artist_name: 'Artist 1',
             track_name: 'Track 1',
             release_name: 'Album',
-            additional_info: { recording_mbid: MBID, duration_ms: 180_000 },
+            additional_info: {
+              recording_mbid: MBID,
+              duration_ms: 180_000,
+              release_artist_name: 'Album Artist',
+              tracknumber: 4,
+              artist_mbids: [MBID],
+              release_mbid: MBID,
+              release_group_mbid: MBID,
+              isrc: 'USABC1234567',
+              submission_client: 'Pano',
+              music_service: 'Radio',
+            },
           },
         },
       ],
