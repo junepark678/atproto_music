@@ -1,6 +1,28 @@
 import type { Db } from '../do/db';
 import { storedForwardDedupeKey } from '../outbox/forward-key';
 
+/** True while another non-removed projection row still represents this canonical listen. */
+export function hasCanonicalListenSurvivor(
+  db: Db,
+  args: { did: string; listenedAt: number; artistKey: string; trackKey: string; excluding?: ReadonlySet<string> },
+): boolean {
+  const second = BigInt(args.listenedAt) * 1_000_000_000n;
+  const rows = db.all<{ uri: string }>(
+    `SELECT s.uri FROM scrobbles s WHERE s.did=? AND s.artist_key=? AND s.track_key=?
+     AND s.listened_at>=? AND s.listened_at<?`,
+    args.did, args.artistKey, args.trackKey, second.toString(), (second + 1_000_000_000n).toString(),
+  );
+  return rows.some((row) => {
+    if (args.excluding?.has(row.uri)) return false;
+    // A local tombstone is durable removal intent even while the projection lags.
+    return db.one(
+      `SELECT 1 FROM linked_pull_tombstones WHERE did=? AND kind='listen' AND
+       (identity_key=? OR identity_key=? OR identity_key LIKE ?) LIMIT 1`,
+      args.did, `uri:${row.uri}`, `live:${row.uri}`, `batch-replaced:${row.uri}:%`,
+    ) === null;
+  });
+}
+
 /** Enqueue one local deletion only for a ListenBrainz listen proven delivered to that account generation. */
 export function enqueueListenDelete(
   db: Db,
@@ -15,8 +37,10 @@ export function enqueueListenDelete(
     track: string;
     sourcePath: string;
     now: number;
+    excluding?: ReadonlySet<string>;
   },
 ): number {
+  if (hasCanonicalListenSurvivor(db, args)) return 0;
   const links = db.all<{ id: string; generation: number; service: string }>(
     'SELECT id,generation,service FROM linked_accounts WHERE did=?',
     args.did,

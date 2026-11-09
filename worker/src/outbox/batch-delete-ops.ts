@@ -375,6 +375,7 @@ export function enqueueBatchListenDelete(
         track: row.track,
         sourcePath: 'api',
         now,
+        excluding: new Set([row.uri]),
       });
     }
     const inserted = insertOperation(

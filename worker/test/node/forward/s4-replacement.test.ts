@@ -111,6 +111,24 @@ describe('S4 generation and single replacement', () => {
       expect(db.all('SELECT identity_key FROM linked_pull_tombstones')).toHaveLength(0);
     });
   });
+
+  it('does not enqueue deletion of one single record while an equal canonical batch member survives', async () => {
+    const repo = await repoFor('alice');
+    const single = await putProof(repo, SCROBBLE, 'same-single', record);
+    const { $type, ...entry } = record;
+    const batch = await putProof(repo, `${SCROBBLE}Batch`, 'same-batch', {
+      $type: `${SCROBBLE}Batch`, createdAt: record.createdAt, listens: [{ ...entry, id: '2222222222222' }],
+    });
+    const gone = await putProof(repo, SCROBBLE, 'same-single', null);
+    await withMigratedDb((db) => {
+      seedLink(db);
+      db.tx(() => applyRecordProof(db, single, OPTS));
+      db.tx(() => applyRecordProof(db, batch, OPTS));
+      delivered(db);
+      db.tx(() => applyRecordProof(db, gone, live));
+      expect(db.all('SELECT id FROM listenbrainz_deletes')).toHaveLength(0);
+    });
+  });
 });
 
 describe('S4 canonical batch replacement', () => {

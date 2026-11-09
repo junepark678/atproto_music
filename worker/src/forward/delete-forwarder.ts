@@ -7,6 +7,7 @@ import { noteLinkError, noteLinkSuccess, openLinkCredential, revokeLink } from '
 import type { ListenbrainzClient, ListenWindowEntry } from './listenbrainz-client';
 import type { UpstreamPacing } from './upstream-pacing';
 import { listenbrainzPacingKey } from './upstream-pacing';
+import { hasCanonicalListenSurvivor } from './delete-enqueue';
 
 export const DELETE_MAX_ATTEMPTS = 32;
 export const DELETE_MAX_REQUESTS_PER_RUN = 1;
@@ -202,6 +203,19 @@ export async function runDeleteSlice(
     if (row !== null) break;
   }
   if (!row) return { requests: 0, state: null, nextDueMs: nextCandidateAt ?? nextDeleteWakeAt(deps, now) };
+  if (hasCanonicalListenSurvivor(deps.db, {
+    did: row.did,
+    listenedAt: row.listened_at,
+    artistKey: row.artist_key,
+    trackKey: row.track_key,
+  })) {
+    deps.db.run(
+      "UPDATE listenbrainz_deletes SET state='ignored',last_error='canonical_survivor',updated_at_ms=? WHERE id=? AND state='queued'",
+      now,
+      row.id,
+    );
+    return { requests: 0, state: 'survivor_present', nextDueMs: nextDeleteWakeAt(deps, now) };
+  }
   if (row.deadline_at <= now) {
     deps.db.run(
       "UPDATE listenbrainz_deletes SET state='expired',last_error='retry_deadline',updated_at_ms=? WHERE id=? AND state='queued'",

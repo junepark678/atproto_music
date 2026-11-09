@@ -295,6 +295,7 @@ function scrobbleVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, 
             track: before.track,
             sourcePath: 'live',
             now,
+            excluding: new Set([before.uri]),
           });
         }
       }
@@ -485,6 +486,7 @@ function batchVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, o: 
             track: old.track,
             sourcePath: 'live',
             now,
+            excluding: new Set([old.uri]),
           });
         }
       }
@@ -873,6 +875,7 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
           track: listen.track,
           sourcePath: 'live',
           now: Number(o.nowNs / 1_000_000n),
+          excluding: new Set(listens.map((entry) => entry.uri)),
         });
       }
     }
