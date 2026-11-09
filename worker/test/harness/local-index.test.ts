@@ -603,7 +603,7 @@ describe('worker/test/harness', () => {
     const versions = MIGRATIONS.map((m) => m.version);
     expect(versions.slice(0, 14)).toEqual(Array.from({ length: 14 }, (_, i) => i + 1));
     expect(versions.slice(-20)).toEqual([
-      29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48,
+      30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49,
     ]);
     expect(versions.every((version, index) => index === 0 || version > (versions[index - 1] ?? 0))).toBe(true);
     expect(SCHEMA_VERSION).toBe(MIGRATIONS[MIGRATIONS.length - 1]?.version);
@@ -683,6 +683,10 @@ describe('worker/test/harness', () => {
       db.run(
         `INSERT INTO live_acceptance_candidates(uri,identity_key,kind,member_uri,cid,created_at_ms,expires_at_ms)
          VALUES('at://did:plc:seed/com.example.atmusic.scrobble/live','listen:key','scrobble','at://did:plc:seed/com.example.atmusic.scrobble/live','cid',0,9999999999999)`,
+      );
+      db.run(
+        `INSERT INTO live_pending_removals(uri,member_uri,removed_cid,kind,window_lo,window_hi,replaced_by_cid,identity_key,listened_at,artist_key,track_key,artist,track,recording_mbid,love_source_service,love_import_sources,authorized_rev,created_at_ms,expires_at_ms)
+         VALUES('at://did:plc:seed/com.example.atmusic.scrobble/live','at://did:plc:seed/com.example.atmusic.scrobble/live','removed-cid','scrobble','r1','r2','','listen:key',1,'artist-key','track-key','Artist','Track',NULL,NULL,NULL,NULL,0,9999999999999)`,
       );
       for (const [table, rows] of Object.entries(SEED_ROWS)) for (const row of rows) insertRow(db, table, row);
       db.run('UPDATE forward_admission_clock SET next_seq=1 WHERE singleton=1');
