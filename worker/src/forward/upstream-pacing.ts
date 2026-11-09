@@ -35,6 +35,11 @@ export const MUSICBRAINZ_MIN_INTERVAL_MS = 1_000;
 
 export type LastfmLane = 'forward' | 'import';
 
+/** Canonical ListenBrainz forwarding/deletion bucket key; both lanes share it. */
+export function listenbrainzPacingKey(link: { id: string; generation: number }): string {
+  return `link:${link.id}:generation:${link.generation}`;
+}
+
 /** What a ListenBrainz answer said about the caller's window. */
 export interface ListenbrainzRateObservation {
   /** X-RateLimit-Remaining, when the header was a non-negative integer. */

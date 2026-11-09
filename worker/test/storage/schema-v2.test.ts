@@ -90,6 +90,37 @@ interface ExpectedTable {
 }
 
 const NEW_TABLES: Record<string, ExpectedTable> = {
+  listenbrainz_deletes: {
+    columns: [
+      'id',
+      'event_key',
+      'link_id',
+      'generation',
+      'did',
+      'identity_key',
+      'listened_at',
+      'artist_key',
+      'track_key',
+      'artist',
+      'track',
+      'source_path',
+      'state',
+      'attempts',
+      'due_at',
+      'deadline_at',
+      'target_msid',
+      'target_listened_at',
+      'last_error',
+      'created_at_ms',
+      'updated_at_ms',
+      'lookup_min_ts',
+      'lookup_candidates',
+      'lookup_last_earliest',
+      'lookup_last_max',
+    ],
+    pk: ['id'],
+    unique: [['link_id', 'generation', 'event_key']],
+  },
   linked_pull_state: {
     columns: [
       'link_id',
@@ -718,6 +749,15 @@ const NEW_SCROBBLE_COLUMNS = cols<ScrobbleV2Columns>({
 
 /** New named indexes: table, unique, partial, [column, desc] in key order. */
 const NEW_INDEXES: Record<string, [string, number, number, Array<[string, number]>]> = {
+  listenbrainz_deletes_due: [
+    'listenbrainz_deletes',
+    0,
+    0,
+    [
+      ['state', 0],
+      ['due_at', 0],
+    ],
+  ],
   linked_love_intents_mbid: [
     'linked_love_intents',
     0,
@@ -1116,8 +1156,9 @@ const NEW_INDEXES: Record<string, [string, number, number, Array<[string, number
   ],
 };
 
-/** The only foreign keys migration 2 adds: [table, from, parent, to, on_delete]. */
+/** Foreign keys in the additive schema: [table, from, parent, to, on_delete]. */
 const NEW_FOREIGN_KEYS = [
+  ['listenbrainz_deletes', 'link_id', 'linked_accounts', 'id', 'CASCADE'],
   ['mb_forward_love_current', 'link_id', 'linked_accounts', 'id', 'CASCADE'],
   ['loves', 'did', 'users', 'did', 'CASCADE'],
   ['link_backfill_items', 'link_id', 'linked_accounts', 'id', 'CASCADE'],
@@ -1732,6 +1773,10 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       "36|'linked_listenbrainz_pull_round_guards'",
       "37|'linked_pull_love_acceptance_admissions'",
       "38|'love_delete_bridge_commit_revision'",
+      "39|'listenbrainz_delete_queue'",
+      "40|'listenbrainz_delete_lookup_progress'",
+      "41|'listenbrainz_delete_lookup_tie_fence'",
+      "42|'listenbrainz_delete_lookup_page_boundary'",
     ]);
     // The new scrobble columns exist and are NULL on every migrated row.
     expect(after.newColumns).toHaveLength(expectedScrobbles);
@@ -1777,6 +1822,10 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       { version: 36, name: 'linked_listenbrainz_pull_round_guards' },
       { version: 37, name: 'linked_pull_love_acceptance_admissions' },
       { version: 38, name: 'love_delete_bridge_commit_revision' },
+      { version: 39, name: 'listenbrainz_delete_queue' },
+      { version: 40, name: 'listenbrainz_delete_lookup_progress' },
+      { version: 41, name: 'listenbrainz_delete_lookup_tie_fence' },
+      { version: 42, name: 'listenbrainz_delete_lookup_page_boundary' },
     ]);
     expect(after.compat).toEqual([{ singleton: 1, min_compatible_version: 2 }]);
     expect(after.newTablesEmpty).toEqual(['mb_cover_art_usage']);

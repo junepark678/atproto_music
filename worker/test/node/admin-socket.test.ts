@@ -281,7 +281,12 @@ describe('admin socket', () => {
     expect(before.json).toHaveProperty('hints');
     expect(Array.isArray(before.json.counters)).toBe(true);
     // ... and the host half.
-    expect(before.json.queues).toEqual({ outbox: { failed: 1, queued: 2 }, forward: {}, imports: {} });
+    expect(before.json.queues).toEqual({
+      outbox: { failed: 1, queued: 2 },
+      forward: {},
+      forwardDeletes: {},
+      imports: {},
+    });
     expect(before.json.backup).toMatchObject({ ageMs: null, lastSuccess: null, lastRun: null });
     expect(before.json.uploads).toEqual({ dir: join(dir, 'state', 'imports'), bytes: 0 });
     expect(before.json.disk).toMatchObject({ path: join(dir, 'state'), minFreeBytes: 2_147_483_648 });

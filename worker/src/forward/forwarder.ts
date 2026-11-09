@@ -79,6 +79,7 @@ import type { Db } from '../do/db';
 import { enqueueTrack, matchedRecordingMbid } from '../musicbrainz/store';
 import { canonicalForwardDedupeKey } from '../outbox/forward-key';
 import { loveKeyOf } from '../outbox/love-ops';
+import { nextDeleteWakeAt, runDeleteSlice } from './delete-forwarder';
 import {
   backoffRows,
   clearLastfmKeyRejected,
@@ -110,7 +111,7 @@ import {
   type TrackMetadata,
 } from './listenbrainz-client';
 import { refreshForwardStorageStats } from './storage-stats';
-import { LASTFM_MIN_INTERVAL_MS, type UpstreamPacing } from './upstream-pacing';
+import { LASTFM_MIN_INTERVAL_MS, listenbrainzPacingKey, type UpstreamPacing } from './upstream-pacing';
 
 /** Upstream requests per `forward` run (ADR §3.3). */
 export const MAX_REQUESTS_PER_RUN = 5;
@@ -146,6 +147,8 @@ export interface ForwardReport {
   skipped: boolean;
   /** Upstream requests sent. */
   requests: number;
+  /** ListenBrainz links that used the shared bucket for a live request this run. */
+  listenbrainzLinkIds: ReadonlySet<string>;
   expired: ExpiryReport | null;
   /** When to run next (epoch ms), or null when nothing is queued. */
   nextDueMs: number | null;
@@ -158,7 +161,7 @@ type Job =
   | { link: LinkRow; kind: 'scrobble'; rows: QueuedRow[]; listens: ForwardListen[] }
   | { link: LinkRow; kind: 'love' | 'unlove'; rows: [QueuedRow]; track: ForwardTrack };
 
-const lbKey = (link: Pick<LinkRow, 'id' | 'generation'>): string => `link:${link.id}:generation:${link.generation}`;
+const lbKey = listenbrainzPacingKey;
 
 function generationIsCurrent(db: Db, link: LinkRow): boolean {
   return (
@@ -725,7 +728,8 @@ export async function runForward(
   now: number = rt.clock.nowMs(),
   options: { maxRequests?: number } = {},
 ): Promise<ForwardReport> {
-  if (inFlight.has(rt.db)) return { skipped: true, requests: 0, expired: null, nextDueMs: null };
+  if (inFlight.has(rt.db))
+    return { skipped: true, requests: 0, listenbrainzLinkIds: new Set(), expired: null, nextDueMs: null };
   inFlight.add(rt.db);
   try {
     const max = options.maxRequests ?? MAX_REQUESTS_PER_RUN;
@@ -735,18 +739,22 @@ export async function runForward(
     let at = Math.max(now, rt.clock.nowMs());
     const expired = expireRows(rt.db, at);
     let requests = 0;
+    const listenbrainzLinkIds = new Set<string>();
     // A pick that sends nothing (an unreadable credential revokes its link) still counts against this bound.
     for (let picks = 0; requests < max && picks < max * 4; picks++) {
       const job = pickJob(rt, at);
       if (job === null) break;
       const sent = await execute(rt, job, at);
-      if (sent) requests += 1;
+      if (sent) {
+        requests += 1;
+        if (job.link.service === 'listenbrainz') listenbrainzLinkIds.add(job.link.id);
+      }
       at = Math.max(at, rt.clock.nowMs());
     }
     let next = nextForwardDue(rt, at);
     // Work left that this run could not send (a bound, or rows that turned unsendable): try again shortly.
     if (next !== null && next <= at && requests < max) next = at + LASTFM_MIN_INTERVAL_MS;
-    return { skipped: false, requests, expired, nextDueMs: next };
+    return { skipped: false, requests, listenbrainzLinkIds, expired, nextDueMs: next };
   } finally {
     inFlight.delete(rt.db);
   }
@@ -766,6 +774,22 @@ export function forwardExtension(runtime: () => ForwardRuntime | null): CoreExte
         const rt = runtime();
         if (rt === null) return;
         const report = await runForward(rt, now);
+        if (!report.skipped) {
+          // Live work has per-account priority; it does not block unrelated
+          // accounts. The delete lane still takes at most one request here.
+          await runDeleteSlice(
+            {
+              db: rt.db,
+              clock: rt.clock,
+              random: rt.random,
+              box: rt.box,
+              client: rt.listenbrainz,
+              pacing: rt.pacing,
+            },
+            rt.clock.nowMs(),
+            { livePriorityLinkIds: report.listenbrainzLinkIds },
+          );
+        }
         // Pull polling remains a separate future increment. This only drains
         // pages already committed to durable local staging.
         const pullLinks = rt.db.all<{ id: string; generation: number }>(
@@ -792,8 +816,12 @@ export function forwardExtension(runtime: () => ForwardRuntime | null): CoreExte
         }
         refreshForwardStorageStats(rt.db, rt.clock.nowMs());
         if (report.skipped) return;
+        const deleteDue = nextDeleteWakeAt({ db: rt.db, pacing: rt.pacing }, rt.clock.nowMs());
+        const due = [report.nextDueMs, deleteDue]
+          .filter((v): v is number => v !== null)
+          .reduce<number | null>((a, v) => (a === null ? v : Math.min(a, v)), null);
         const poll = now + FORWARD_IDLE_POLL_MS;
-        ctx.schedule('forward', report.nextDueMs === null ? poll : Math.min(poll, report.nextDueMs), { force: true });
+        ctx.schedule('forward', due === null ? poll : Math.min(poll, due), { force: true });
       },
     },
     start(ctx, now) {

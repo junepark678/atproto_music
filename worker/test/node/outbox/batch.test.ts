@@ -7,6 +7,7 @@ import { expect, it } from 'vitest';
 import type { OperationRow } from '../../../src/app/rows';
 import { visibleScrobblesFrom } from '../../../src/do/read/visibility';
 import { applyRecordProof } from '../../../src/do/write/apply-record';
+import { projectionListenKey } from '../../../src/forward/projection';
 import { createJob } from '../../../src/imports/jobs';
 import { encodeBatch, MAX_BATCH_BYTES } from '../../../src/outbox/apply-writes';
 import { batchDeleteExecutor, enqueueBatchListenDelete } from '../../../src/outbox/batch-delete-ops';
@@ -215,6 +216,18 @@ it('removes one indexed batch listen with CAS and preserves sibling and unknown 
       artistKey,
       trackKeyValue,
     );
+    const linkId = h.link(h.alice, 'listenbrainz');
+    const identityKey = projectionListenKey(h.alice, removedAt, artistKey, trackKeyValue);
+    h.db.run(
+      `INSERT INTO forward_outbox(id,link_id,did,kind,dedupe_key,payload_json,state,attempts,due_at,created_at_ms,updated_at_ms,generation)
+      VALUES('sent-batch-row',?,?,'scrobble',?,'{}','sent',1,?,?,?,1)`,
+      linkId,
+      h.alice,
+      identityKey,
+      T0,
+      T0,
+      T0,
+    );
     const del = enqueueBatchListenDelete(h.m, {
       did: h.alice,
       uri: `at://${h.alice}/${BATCH}/${uriKey}`,
@@ -224,6 +237,9 @@ it('removes one indexed batch listen with CAS and preserves sibling and unknown 
     expect(h.db.one('SELECT listen_id FROM batch_delete_listens WHERE operation_id=?', del.id)).toEqual({
       listen_id: '3lb2batchidab',
     });
+    expect(h.db.all('SELECT identity_key,listened_at,track,state FROM listenbrainz_deletes')).toEqual([
+      { identity_key: identityKey, listened_at: 1768392000, track: 'Removed', state: 'queued' },
+    ]);
     expect(
       h.db.one(
         "SELECT listen_second FROM linked_pull_tombstones WHERE did=? AND kind='listen' AND listen_second=1768392000",

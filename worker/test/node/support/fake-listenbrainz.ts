@@ -69,6 +69,13 @@ export interface LbFeedback {
   token: string;
   json: unknown;
 }
+export interface LbDeletion {
+  user: string;
+  token: string;
+  scheme: string;
+  listened_at: number;
+  recording_msid: string;
+}
 
 export interface LbFeedbackEntry {
   created: number;
@@ -128,6 +135,8 @@ export class FakeListenBrainz implements Routable {
   /** Every accepted submit-listens request, in order. */
   readonly submissions: LbSubmission[] = [];
   readonly feedback: LbFeedback[] = [];
+  /** Accepted asynchronous delete requests; listens remain visible until an external hourly processor acts. */
+  readonly deletions: LbDeletion[] = [];
   readonly feedbackCalls: Array<{
     user: string;
     offset: number;
@@ -262,6 +271,20 @@ export class FakeListenBrainz implements Routable {
       const a = this.require(auth);
       const json = this.parseJson(await req.text());
       this.feedback.push({ user: a.user, token: a.token, json });
+      return { status: 'ok' };
+    }
+    if (req.method === 'POST' && path === '/1/delete-listen') {
+      const a = this.require(auth);
+      const doc = this.parseJson(await req.text()) as { listened_at?: unknown; recording_msid?: unknown } | null;
+      if (!doc || !Number.isSafeInteger(doc.listened_at) || typeof doc.recording_msid !== 'string')
+        throw new LbError(400, 'Invalid delete request.');
+      this.deletions.push({
+        user: a.user,
+        token: a.token,
+        scheme: a.scheme,
+        listened_at: doc.listened_at as number,
+        recording_msid: doc.recording_msid,
+      });
       return { status: 'ok' };
     }
     const m = /^\/1\/user\/([^/]+)\/listens$/.exec(path);

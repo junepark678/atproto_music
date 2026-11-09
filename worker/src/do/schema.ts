@@ -1338,6 +1338,57 @@ const MIGRATION_S3_LOVE_DELETE_REVISION: Migration = {
   statements: ['ALTER TABLE love_delete_bridges ADD COLUMN delete_rev TEXT'],
 };
 
+// S4: retain exact local deletion intent independently of the record projection.
+const MIGRATION_S4_LISTEN_DELETES: Migration = {
+  version: 39,
+  name: 'listenbrainz_delete_queue',
+  statements: [
+    `CREATE TABLE listenbrainz_deletes (
+      id TEXT PRIMARY KEY NOT NULL,
+      event_key TEXT NOT NULL,
+      link_id TEXT NOT NULL REFERENCES linked_accounts(id) ON DELETE CASCADE,
+      generation INTEGER NOT NULL,
+      did TEXT NOT NULL,
+      identity_key TEXT NOT NULL,
+      listened_at INTEGER NOT NULL,
+      artist_key TEXT NOT NULL,
+      track_key TEXT NOT NULL,
+      artist TEXT NOT NULL,
+      track TEXT NOT NULL,
+      source_path TEXT NOT NULL,
+      state TEXT NOT NULL DEFAULT 'queued' CHECK(state IN ('queued','ignored','unsupported','sent','failed','expired')),
+      attempts INTEGER NOT NULL DEFAULT 0,
+      due_at INTEGER NOT NULL,
+      deadline_at INTEGER NOT NULL,
+      target_msid TEXT,
+      target_listened_at INTEGER,
+      last_error TEXT,
+      created_at_ms INTEGER NOT NULL,
+      updated_at_ms INTEGER NOT NULL,
+      UNIQUE(link_id,generation,event_key)
+    )`,
+    'CREATE INDEX listenbrainz_deletes_due ON listenbrainz_deletes(state,due_at)',
+  ],
+};
+const MIGRATION_S4_DELETE_LOOKUP_PROGRESS: Migration = {
+  version: 40,
+  name: 'listenbrainz_delete_lookup_progress',
+  statements: [
+    'ALTER TABLE listenbrainz_deletes ADD COLUMN lookup_min_ts INTEGER',
+    'ALTER TABLE listenbrainz_deletes ADD COLUMN lookup_candidates TEXT',
+  ],
+};
+const MIGRATION_S4_DELETE_LOOKUP_TIE_FENCE: Migration = {
+  version: 41,
+  name: 'listenbrainz_delete_lookup_tie_fence',
+  statements: ['ALTER TABLE listenbrainz_deletes ADD COLUMN lookup_last_earliest INTEGER'],
+};
+const MIGRATION_S4_DELETE_LOOKUP_PAGE_BOUNDARY: Migration = {
+  version: 42,
+  name: 'listenbrainz_delete_lookup_page_boundary',
+  statements: ['ALTER TABLE listenbrainz_deletes ADD COLUMN lookup_last_max INTEGER'],
+};
+
 export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_1,
   MIGRATION_2,
@@ -1377,6 +1428,10 @@ export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_S3_LISTENBRAINZ_PULL,
   MIGRATION_S3_LOVE_PULL_ADMISSIONS,
   MIGRATION_S3_LOVE_DELETE_REVISION,
+  MIGRATION_S4_LISTEN_DELETES,
+  MIGRATION_S4_DELETE_LOOKUP_PROGRESS,
+  MIGRATION_S4_DELETE_LOOKUP_TIE_FENCE,
+  MIGRATION_S4_DELETE_LOOKUP_PAGE_BOUNDARY,
 ];
 
 /** The schema version this code expects. */
@@ -1427,6 +1482,7 @@ export const TABLES = [
   'linked_accounts',
   'link_states',
   'forward_outbox',
+  'listenbrainz_deletes',
   'link_backfill_items',
   'forward_admissions',
   'forward_admission_clock',
@@ -1515,6 +1571,7 @@ export const TABLE_CLASS: Readonly<Record<TableName, TableClass>> = {
   linked_accounts: 'non-derived',
   link_states: 'non-derived',
   forward_outbox: 'non-derived',
+  listenbrainz_deletes: 'non-derived',
   link_backfill_items: 'non-derived',
   forward_admissions: 'non-derived',
   forward_admission_clock: 'non-derived',

@@ -4,7 +4,8 @@ import type { OperationRow, Origin } from '../app/rows';
 import type { ModuleDeps } from '../do/contracts';
 import type { Db } from '../do/db';
 import { bumpStatsVersion } from '../do/write/account-state';
-import { releaseForwardAdmission } from '../forward/projection';
+import { enqueueListenDelete } from '../forward/delete-enqueue';
+import { projectionListenKey, releaseForwardAdmission } from '../forward/projection';
 import { tombstoneListen } from '../sync/tombstones';
 import { deleteQueuedForwardIdentity } from './forward-key';
 import {
@@ -325,13 +326,29 @@ export function enqueueBatchListenDelete(
   const now = m.clock.nowMs();
   const op = m.db.tx(() => {
     const removed = args.listenIds.includes('*')
-      ? m.db.all<{ uri: string; listened_at: string; artist_key: string; track_key: string }>(
-          'SELECT uri,listened_at,artist_key,track_key FROM scrobbles WHERE did=? AND record_uri=?',
+      ? m.db.all<{
+          uri: string;
+          listened_at: string;
+          artist_key: string;
+          track_key: string;
+          artist: string;
+          track: string;
+          cid: string;
+        }>(
+          'SELECT uri,listened_at,artist_key,track_key,artist,track,cid FROM scrobbles WHERE did=? AND record_uri=?',
           args.did,
           args.uri,
         )
-      : m.db.all<{ uri: string; listened_at: string; artist_key: string; track_key: string }>(
-          `SELECT uri,listened_at,artist_key,track_key FROM scrobbles WHERE did=? AND record_uri=? AND listen_id IN (${args.listenIds.map(() => '?').join(',')})`,
+      : m.db.all<{
+          uri: string;
+          listened_at: string;
+          artist_key: string;
+          track_key: string;
+          artist: string;
+          track: string;
+          cid: string;
+        }>(
+          `SELECT uri,listened_at,artist_key,track_key,artist,track,cid FROM scrobbles WHERE did=? AND record_uri=? AND listen_id IN (${args.listenIds.map(() => '?').join(',')})`,
           args.did,
           args.uri,
           ...args.listenIds,
@@ -345,6 +362,21 @@ export function enqueueBatchListenDelete(
         trackKey: row.track_key,
         nowMs: now,
       });
+    for (const row of removed) {
+      const identityKey = projectionListenKey(args.did, row.listened_at, row.artist_key, row.track_key);
+      enqueueListenDelete(m.db, {
+        did: args.did,
+        identityKey,
+        eventKey: `${identityKey}:${row.cid}`,
+        listenedAt: Math.floor(Date.parse(row.listened_at) / 1000),
+        artistKey: row.artist_key,
+        trackKey: row.track_key,
+        artist: row.artist,
+        track: row.track,
+        sourcePath: 'api',
+        now,
+      });
+    }
     const inserted = insertOperation(
       m.db,
       {

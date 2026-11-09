@@ -9,6 +9,10 @@
 // ListenBrainz is the fake at listenbrainz.test behind the fixture router; it
 // accepts a submission only with a registered `Token`.
 
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import * as sqlite from 'node:sqlite';
 import { routerTransport } from '@atmusic/atproto/test-support/router-transport';
 import { trackKey } from '@atmusic/core/music-key';
 import { type FixedClock, fixedClock } from '@atmusic/core/test-support/clock';
@@ -17,11 +21,15 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { MemoryRevocations } from '../../../src/app/revocations';
 import type { ForwardOutboxRow } from '../../../src/app/rows';
 import { ensureAccount } from '../../../src/credentials/accounts';
+import { migrate } from '../../../src/do/migrate';
+import { runDeleteSlice } from '../../../src/forward/delete-forwarder';
 import { LASTFM_EXPIRY_MS, LISTENBRAINZ_EXPIRY_MS } from '../../../src/forward/forward-outbox';
 import { type ForwardRuntime, runForward } from '../../../src/forward/forwarder';
 import { saveLink } from '../../../src/forward/links';
+import { UpstreamPacing } from '../../../src/forward/upstream-pacing';
 import { type LinksService, linksFeature } from '../../../src/http/links';
 import { parseSecrets } from '../../../src/node/secrets';
+import { openSqliteDb, type SqliteDb } from '../../../src/node/sqlite-db';
 import { enqueueForwards, type ForwardItem } from '../../../src/outbox/forward-enqueue';
 import { enqueueLove, enqueueUnlove } from '../../../src/outbox/love-ops';
 import { closeApps, startApp, type TestApp, testSecretsDocument } from '../support/app';
@@ -132,7 +140,700 @@ afterEach(async () => {
 const listensOf = (s: LbSubmission) =>
   (s.json as { payload: Array<{ track_metadata: { track_name: string } }> }).payload;
 
+function queueDelete(w: World, linkId: string, id: string, listenedAt: number, artist: string, track: string) {
+  const [artistKey, trackKeyValue] = trackKey(artist, track);
+  const now = w.clock.nowMs();
+  w.app.db.run(
+    `INSERT INTO listenbrainz_deletes
+    (id,event_key,link_id,generation,did,identity_key,listened_at,artist_key,track_key,artist,track,source_path,state,attempts,due_at,deadline_at,created_at_ms,updated_at_ms)
+    VALUES(?,?,?,1,?,?, ?,?,?,?,?,'api','queued',0,?,?,?,?)`,
+    id,
+    id,
+    linkId,
+    ALICE,
+    id,
+    listenedAt,
+    artistKey,
+    trackKeyValue,
+    artist,
+    track,
+    now,
+    now + 7 * DAY,
+    now,
+    now,
+  );
+}
+
 describe('ListenBrainz forwarding', () => {
+  it('persists the matched upstream target, then deletes that exact listen on a later paced invocation', async () => {
+    const w = await world();
+    const linkId = w.link();
+    const listenedAt = 1768392000;
+    const msid = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    const [aKey, tKey] = trackKey('STRASSE', '  TARGET   TRACK  ');
+    w.lb.seedListens('alice_lb', [
+      {
+        listened_at: listenedAt - 1,
+        recording_msid: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+        track_metadata: { artist_name: 'Straße', track_name: 'target track' },
+      },
+      {
+        listened_at: listenedAt + 1,
+        recording_msid: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+        track_metadata: { artist_name: 'Straße', track_name: 'target track' },
+      },
+      {
+        listened_at: listenedAt,
+        recording_msid: msid,
+        track_metadata: {
+          artist_name: 'Straße',
+          track_name: 'target track',
+          additional_info: { recording_mbid: MBID },
+        },
+      },
+      {
+        listened_at: listenedAt,
+        recording_msid: msid,
+        track_metadata: { artist_name: 'Straße', track_name: 'target track' },
+      },
+      {
+        listened_at: listenedAt + 2,
+        recording_msid: 'ffffffff-ffff-4fff-8fff-ffffffffffff',
+        track_metadata: { artist_name: 'Straße', track_name: 'target track' },
+      },
+    ]);
+    w.app.db.run(
+      `INSERT INTO listenbrainz_deletes
+      (id,event_key,link_id,generation,did,identity_key,listened_at,artist_key,track_key,artist,track,source_path,state,attempts,due_at,deadline_at,created_at_ms,updated_at_ms)
+      VALUES('delete-test','event-1',?,1,?,'identity-1',?,?,?, 'STRASSE','  TARGET   TRACK  ','api','queued',0,?,?,?,?)`,
+      linkId,
+      ALICE,
+      listenedAt,
+      aKey,
+      tKey,
+      w.clock.nowMs(),
+      w.clock.nowMs() + DAY,
+      w.clock.nowMs(),
+      w.clock.nowMs(),
+    );
+
+    const first = await runDeleteSlice({
+      db: w.app.db,
+      clock: w.clock,
+      random: w.rt.random,
+      box: w.rt.box,
+      client: w.rt.listenbrainz,
+      pacing: w.rt.pacing,
+    });
+    expect(first.state).toBe('target_persisted');
+    expect(
+      w.app.db.one('SELECT target_msid,target_listened_at,state FROM listenbrainz_deletes WHERE id=?', 'delete-test'),
+    ).toEqual({ target_msid: msid, target_listened_at: listenedAt, state: 'queued' });
+    expect(w.lb.deletions).toEqual([]);
+    w.clock.advance(1000);
+    const second = await runDeleteSlice({
+      db: w.app.db,
+      clock: w.clock,
+      random: w.rt.random,
+      box: w.rt.box,
+      client: w.rt.listenbrainz,
+      pacing: w.rt.pacing,
+    });
+    expect(second.state).toBe('sent');
+    expect(w.lb.deletions).toEqual([
+      { user: 'alice_lb', token: TOKEN, scheme: 'Token', listened_at: listenedAt, recording_msid: msid },
+    ]);
+    expect(w.lb.listens('alice_lb')).toHaveLength(5); // HTTP 200 is async acceptance, not absence confirmation.
+    expect(
+      w.app.db.one('SELECT state,target_msid,target_listened_at FROM listenbrainz_deletes WHERE id=?', 'delete-test'),
+    ).toEqual({ state: 'sent', target_msid: msid, target_listened_at: listenedAt });
+  });
+
+  it('reopens durable lookup target and reuses the exact candidate after a transient POST failure', async () => {
+    const w = await world();
+    const linkId = w.link();
+    const listenedAt = 1768392000;
+    const msid = '12121212-1212-4212-8212-121212121212';
+    w.lb.seedListens('alice_lb', [
+      {
+        listened_at: listenedAt + 1,
+        recording_msid: msid,
+        track_metadata: { artist_name: 'Restart Artist', track_name: 'Restart Track' },
+      },
+    ]);
+    queueDelete(w, linkId, 'restart-delete', listenedAt, 'Restart Artist', 'Restart Track');
+    const initialDeps = {
+      db: w.app.db,
+      clock: w.clock,
+      random: w.rt.random,
+      box: w.rt.box,
+      client: w.rt.listenbrainz,
+      pacing: w.rt.pacing,
+    };
+    expect((await runDeleteSlice(initialDeps)).state).toBe('target_persisted');
+    const dir = mkdtempSync(join(tmpdir(), 'atmusic-delete-restart-'));
+    const path = join(dir, 'restart.db');
+    await sqlite.backup(w.app.db.raw, path);
+    await w.app.close();
+    let db: SqliteDb | null = openSqliteDb(path, { busyTimeoutMs: 200 });
+    try {
+      expect(migrate(db)).toEqual({ status: 'ready', version: 42 });
+      expect(
+        db.one('SELECT target_msid,target_listened_at FROM listenbrainz_deletes WHERE id=?', 'restart-delete'),
+      ).toEqual({
+        target_msid: msid,
+        target_listened_at: listenedAt + 1,
+      });
+      const dependencies = {
+        db,
+        clock: w.clock,
+        random: w.rt.random,
+        box: w.rt.box,
+        client: w.rt.listenbrainz,
+        pacing: new UpstreamPacing(w.clock),
+      };
+      w.clock.advance(1000);
+      w.lb.fail({ status: 503, path: '/1/delete-listen' });
+      expect((await runDeleteSlice(dependencies)).state).toBe('retry');
+      const retry = db.one<{ target_msid: string; target_listened_at: number; due_at: number }>(
+        'SELECT target_msid,target_listened_at,due_at FROM listenbrainz_deletes WHERE id=?',
+        'restart-delete',
+      );
+      expect(retry).toMatchObject({ target_msid: msid, target_listened_at: listenedAt + 1 });
+      db.close();
+      db = openSqliteDb(path, { busyTimeoutMs: 200 });
+      expect(migrate(db)).toEqual({ status: 'ready', version: 42 });
+      w.clock.set(new Date(retry!.due_at).toISOString());
+      expect(
+        (
+          await runDeleteSlice({
+            ...dependencies,
+            db,
+            pacing: new UpstreamPacing(w.clock),
+          })
+        ).state,
+      ).toBe('sent');
+      expect(w.lb.deletions).toEqual([
+        { user: 'alice_lb', token: TOKEN, scheme: 'Token', listened_at: listenedAt + 1, recording_msid: msid },
+      ]);
+      expect(
+        db.one('SELECT state,target_msid,target_listened_at FROM listenbrainz_deletes WHERE id=?', 'restart-delete'),
+      ).toEqual({
+        state: 'sent',
+        target_msid: msid,
+        target_listened_at: listenedAt + 1,
+      });
+    } finally {
+      db?.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('production forward timer dispatches queued deletion work after live forward priority', async () => {
+    const w = await world();
+    const linkId = w.link();
+    const listenedAt = 1768392000;
+    const msid = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+    const [aKey, tKey] = trackKey('Timer Artist', 'Timer Track');
+    w.lb.seedListens('alice_lb', [
+      {
+        listened_at: listenedAt,
+        recording_msid: msid,
+        track_metadata: { artist_name: 'Timer Artist', track_name: 'Timer Track' },
+      },
+    ]);
+    w.app.db.run(
+      `INSERT INTO listenbrainz_deletes
+      (id,event_key,link_id,generation,did,identity_key,listened_at,artist_key,track_key,artist,track,source_path,state,attempts,due_at,deadline_at,created_at_ms,updated_at_ms)
+      VALUES('timer-delete','event-timer',?,1,?,'identity-timer',?,?,?, 'Timer Artist','Timer Track','api','queued',0,?,?,?,?)`,
+      linkId,
+      ALICE,
+      listenedAt,
+      aKey,
+      tKey,
+      w.clock.nowMs(),
+      w.clock.nowMs() + DAY,
+      w.clock.nowMs(),
+      w.clock.nowMs(),
+    );
+    w.scrobbles(1, 'live-priority');
+    const core = w.app.composed.core;
+    core.extensionTimers.kick('forward');
+    await core.tick('extension');
+    expect(w.lb.submissions).toHaveLength(1);
+    expect(w.app.db.one('SELECT target_msid FROM listenbrainz_deletes WHERE id=?', 'timer-delete')).toEqual({
+      target_msid: null,
+    });
+    w.clock.advance(1000);
+    await core.tick('extension');
+    expect(w.app.db.one('SELECT target_msid FROM listenbrainz_deletes WHERE id=?', 'timer-delete')).toEqual({
+      target_msid: msid,
+    });
+    w.clock.advance(1000);
+    await core.tick('extension');
+    expect(w.lb.deletions).toHaveLength(1);
+    expect(w.app.db.one('SELECT state FROM listenbrainz_deletes WHERE id=?', 'timer-delete')).toEqual({
+      state: 'sent',
+    });
+  });
+
+  it('production timer wakes at the retry deadline when persisted backoff is later', async () => {
+    const w = await world();
+    const linkId = w.link();
+    const now = w.clock.nowMs();
+    queueDelete(w, linkId, 'deadline-wakeup', 1768392000, 'Deadline Artist', 'Deadline Track');
+    const deadline = now + 5_000;
+    w.app.db.run(
+      "UPDATE listenbrainz_deletes SET due_at=?,deadline_at=? WHERE id='deadline-wakeup'",
+      now + 60_000,
+      deadline,
+    );
+    const core = w.app.composed.core;
+    core.extensionTimers.kick('forward');
+    await core.tick('extension');
+    expect(w.seen).toEqual([]);
+    expect(w.app.db.one("SELECT due_at FROM timers WHERE name='forward'")).toEqual({ due_at: deadline });
+  });
+
+  it('ignores saturated same-second pages even when one visible near candidate looks usable', async () => {
+    const w = await world();
+    const linkId = w.link();
+    const listenedAt = 1768392000;
+    const exactCandidateMsid = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
+    const [artist, track] = trackKey('Flood Artist', 'Flood Track');
+    w.lb.seedListens(
+      'alice_lb',
+      Array.from({ length: 1001 }, (_, i) => ({
+        listened_at: listenedAt - 1,
+        recording_msid: i === 0 ? exactCandidateMsid : `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`,
+        track_metadata: {
+          artist_name: i === 0 ? 'Flood Artist' : `Other ${i}`,
+          track_name: i === 0 ? 'Flood Track' : 'Other',
+        },
+      })),
+    );
+    w.app.db.run(
+      `INSERT INTO listenbrainz_deletes
+      (id,event_key,link_id,generation,did,identity_key,listened_at,artist_key,track_key,artist,track,source_path,state,attempts,due_at,deadline_at,created_at_ms,updated_at_ms)
+      VALUES('saturated','saturated',?,1,?,'saturated',?,?,?,'Flood Artist','Flood Track','api','queued',0,?,?,?,?)`,
+      linkId,
+      ALICE,
+      listenedAt,
+      artist,
+      track,
+      w.clock.nowMs(),
+      w.clock.nowMs() + DAY,
+      w.clock.nowMs(),
+      w.clock.nowMs(),
+    );
+    const run = () =>
+      runDeleteSlice({
+        db: w.app.db,
+        clock: w.clock,
+        random: w.rt.random,
+        box: w.rt.box,
+        client: w.rt.listenbrainz,
+        pacing: w.rt.pacing,
+      });
+    expect((await run()).state).toBe('ignored');
+    expect(w.app.db.one('SELECT state,last_error FROM listenbrainz_deletes WHERE id=?', 'saturated')).toEqual({
+      state: 'ignored',
+      last_error: 'ambiguous_saturated',
+    });
+    expect(w.lb.deletions).toEqual([]);
+    expect(w.lb.calls.filter({ path: '/1/user/alice_lb/listens' }).map((call) => call.params)).toEqual([
+      { min_ts: ['1768391998'], count: ['1000'] },
+    ]);
+  });
+
+  it('never substitutes an MBID for a missing recording_msid and enforces the seven-day deadline before egress', async () => {
+    const w = await world();
+    const linkId = w.link();
+    const listenedAt = 1768392000;
+    const [artist, track] = trackKey('Missing Artist', 'Missing Track');
+    w.intercept(() =>
+      Response.json({
+        payload: {
+          listens: [
+            {
+              listened_at: listenedAt,
+              track_metadata: {
+                artist_name: 'Missing Artist',
+                track_name: 'Missing Track',
+                mbid_mapping: { recording_mbid: MBID },
+              },
+            },
+          ],
+        },
+      }),
+    );
+    w.app.db.run(
+      `INSERT INTO listenbrainz_deletes
+      (id,event_key,link_id,generation,did,identity_key,listened_at,artist_key,track_key,artist,track,source_path,state,attempts,due_at,deadline_at,created_at_ms,updated_at_ms)
+      VALUES('missing-msid','missing-msid',?,1,?,'missing-msid',?,?,?,'Missing Artist','Missing Track','api','queued',0,?,?,?,?)`,
+      linkId,
+      ALICE,
+      listenedAt,
+      artist,
+      track,
+      w.clock.nowMs(),
+      w.clock.nowMs() + DAY,
+      w.clock.nowMs(),
+      w.clock.nowMs(),
+    );
+    const deps = {
+      db: w.app.db,
+      clock: w.clock,
+      random: w.rt.random,
+      box: w.rt.box,
+      client: w.rt.listenbrainz,
+      pacing: w.rt.pacing,
+    };
+    expect((await runDeleteSlice(deps)).state).toBe('ignored');
+    expect(w.lb.deletions).toEqual([]);
+    w.app.db.run(
+      "UPDATE listenbrainz_deletes SET state='queued',due_at=?,deadline_at=? WHERE id='missing-msid'",
+      w.clock.nowMs(),
+      w.clock.nowMs(),
+    );
+    expect((await runDeleteSlice(deps)).state).toBe('expired');
+    expect(w.seen).toHaveLength(1);
+  });
+
+  it('same-account relink keeps delete work, while a different remote expires the old generation', async () => {
+    const w = await world();
+    const linkId = w.link();
+    const now = w.clock.nowMs();
+    w.app.db.run(
+      `INSERT INTO listenbrainz_deletes
+      (id,event_key,link_id,generation,did,identity_key,listened_at,artist_key,track_key,artist,track,source_path,state,attempts,due_at,deadline_at,created_at_ms,updated_at_ms)
+      VALUES('relink-delete','relink-delete',?,1,?,'identity',1,'a','t','A','T','api','queued',0,?,?,?,?)`,
+      linkId,
+      ALICE,
+      now,
+      now + DAY,
+      now,
+      now,
+    );
+    saveLink(
+      { db: w.app.db, clock: w.clock, random: w.rt.random, box: w.rt.box },
+      { did: ALICE, service: 'listenbrainz', remoteUser: 'alice_lb', credential: TOKEN },
+    );
+    expect(w.app.db.one('SELECT generation,state FROM listenbrainz_deletes WHERE id=?', 'relink-delete')).toEqual({
+      generation: 1,
+      state: 'queued',
+    });
+    saveLink(
+      { db: w.app.db, clock: w.clock, random: w.rt.random, box: w.rt.box },
+      { did: ALICE, service: 'listenbrainz', remoteUser: 'new_lb_account', credential: TOKEN },
+    );
+    expect(
+      w.app.db.one('SELECT generation,state,last_error FROM listenbrainz_deletes WHERE id=?', 'relink-delete'),
+    ).toEqual({ generation: 1, state: 'expired', last_error: 'account_changed' });
+  });
+
+  it('retries transient delete failure with the persisted target and stops exactly at the attempt budget', async () => {
+    const w = await world();
+    const linkId = w.link();
+    const listenedAt = 1768392000;
+    const msid = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+    const [aKey, tKey] = trackKey('Retry Artist', 'Retry Track');
+    w.lb.seedListens('alice_lb', [
+      {
+        listened_at: listenedAt,
+        recording_msid: msid,
+        track_metadata: { artist_name: 'Retry Artist', track_name: 'Retry Track' },
+      },
+    ]);
+    w.app.db.run(
+      `INSERT INTO listenbrainz_deletes
+      (id,event_key,link_id,generation,did,identity_key,listened_at,artist_key,track_key,artist,track,source_path,state,attempts,due_at,deadline_at,created_at_ms,updated_at_ms)
+      VALUES('retry-delete','retry-delete',?,1,?,'retry-key',?,?,?,'Retry Artist','Retry Track','api','queued',30,?,?,?,?)`,
+      linkId,
+      ALICE,
+      listenedAt,
+      aKey,
+      tKey,
+      w.clock.nowMs(),
+      w.clock.nowMs() + DAY,
+      w.clock.nowMs(),
+      w.clock.nowMs(),
+    );
+    const deps = {
+      db: w.app.db,
+      clock: w.clock,
+      random: w.rt.random,
+      box: w.rt.box,
+      client: w.rt.listenbrainz,
+      pacing: w.rt.pacing,
+    };
+    expect((await runDeleteSlice(deps)).state).toBe('target_persisted');
+    w.clock.advance(1000);
+    w.lb.fail({ status: 503, path: '/1/delete-listen' });
+    expect((await runDeleteSlice(deps)).state).toBe('retry');
+    const pinned = w.app.db.one<{ target_msid: string; target_listened_at: number; attempts: number; due_at: number }>(
+      'SELECT target_msid,target_listened_at,attempts,due_at FROM listenbrainz_deletes WHERE id=?',
+      'retry-delete',
+    );
+    expect(pinned).toMatchObject({ target_msid: msid, target_listened_at: listenedAt, attempts: 32 });
+    w.clock.set(new Date(pinned!.due_at).toISOString());
+    expect((await runDeleteSlice(deps)).state).toBe('failed');
+    expect(
+      w.app.db.one<{ attempts: number }>('SELECT attempts FROM listenbrainz_deletes WHERE id=?', 'retry-delete'),
+    ).toEqual({ attempts: 32 });
+    expect(w.lb.deletions).toEqual([]);
+  });
+
+  it('malformed lookup retries instead of being classified as a successful no-match', async () => {
+    const w = await world();
+    const linkId = w.link();
+    queueDelete(w, linkId, 'malformed-lookup', 1768392000, 'Malformed Artist', 'Malformed Track');
+    w.intercept(() =>
+      Response.json({
+        payload: {
+          listens: [
+            {
+              listened_at: 1768392000,
+              recording_msid: 'not-a-uuid',
+              track_metadata: { artist_name: 'Malformed Artist', track_name: 'Malformed Track' },
+            },
+          ],
+        },
+      }),
+    );
+
+    const result = await runDeleteSlice({
+      db: w.app.db,
+      clock: w.clock,
+      random: w.rt.random,
+      box: w.rt.box,
+      client: w.rt.listenbrainz,
+      pacing: w.rt.pacing,
+    });
+
+    expect(result.state).toBe('lookup_retry');
+    expect(
+      w.app.db.one('SELECT state,last_error,attempts FROM listenbrainz_deletes WHERE id=?', 'malformed-lookup'),
+    ).toEqual({
+      state: 'queued',
+      last_error: 'malformed_response',
+      attempts: 1,
+    });
+  });
+
+  it.each([
+    { status: 400, state: 'failed', error: 'upstream_400', linkStatus: 'active' },
+    { status: 401, state: 'failed', error: 'credential_revoked', linkStatus: 'revoked' },
+    { status: 429, state: 'queued', error: 'rate_limited', linkStatus: 'active' },
+  ])('classifies delete HTTP $status without false success', async ({ status, state, error, linkStatus }) => {
+    const w = await world();
+    const linkId = w.link();
+    const listenedAt = 1768392000;
+    w.lb.seedListens('alice_lb', [
+      {
+        listened_at: listenedAt,
+        recording_msid: 'abababab-abab-4bab-8bab-abababababab',
+        track_metadata: { artist_name: 'Status Artist', track_name: 'Status Track' },
+      },
+    ]);
+    queueDelete(w, linkId, `status-${status}`, listenedAt, 'Status Artist', 'Status Track');
+    const deps = {
+      db: w.app.db,
+      clock: w.clock,
+      random: w.rt.random,
+      box: w.rt.box,
+      client: w.rt.listenbrainz,
+      pacing: w.rt.pacing,
+    };
+    expect((await runDeleteSlice(deps)).state).toBe('target_persisted');
+    w.clock.advance(1000);
+    w.intercept(() =>
+      Response.json({ error: 'safe fixture error' }, { status, headers: { 'X-RateLimit-Reset-In': '17' } }),
+    );
+
+    expect((await runDeleteSlice(deps)).state).toBe(status === 429 ? 'retry' : 'failed');
+    expect(
+      w.app.db.one('SELECT state,last_error,attempts FROM listenbrainz_deletes WHERE id=?', `status-${status}`),
+    ).toMatchObject({
+      state,
+      last_error: error,
+      attempts: 2,
+    });
+    expect(w.app.db.one('SELECT status FROM linked_accounts WHERE id=?', linkId)).toEqual({ status: linkStatus });
+    expect(w.lb.deletions).toEqual([]);
+  });
+
+  it('an in-flight delete success after a different-remote relink cannot settle the expired old-generation row', async () => {
+    const w = await world();
+    const linkId = w.link();
+    const listenedAt = 1768392000;
+    const msid = '99999999-9999-4999-8999-999999999999';
+    w.lb.seedListens('alice_lb', [
+      {
+        listened_at: listenedAt,
+        recording_msid: msid,
+        track_metadata: { artist_name: 'Fence Artist', track_name: 'Fence Track' },
+      },
+    ]);
+    queueDelete(w, linkId, 'generation-fence', listenedAt, 'Fence Artist', 'Fence Track');
+    const deps = {
+      db: w.app.db,
+      clock: w.clock,
+      random: w.rt.random,
+      box: w.rt.box,
+      client: w.rt.listenbrainz,
+      pacing: w.rt.pacing,
+    };
+    expect((await runDeleteSlice(deps)).state).toBe('target_persisted');
+    w.clock.advance(1000);
+
+    let release!: () => void;
+    let entered!: () => void;
+    const requestEntered = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const responseGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const requestStartedAt = w.clock.nowMs();
+    w.intercept(async () => {
+      entered();
+      await responseGate;
+      return Response.json(
+        { status: 'ok' },
+        { headers: { 'X-RateLimit-Remaining': '0', 'X-RateLimit-Reset-In': '600' } },
+      );
+    });
+    const inflight = runDeleteSlice(deps);
+    await requestEntered;
+    saveLink(
+      { db: w.app.db, clock: w.clock, random: w.rt.random, box: w.rt.box },
+      { did: ALICE, service: 'listenbrainz', remoteUser: 'new_remote', credential: TOKEN },
+    );
+    release();
+
+    expect((await inflight).state).toBe('stale_response');
+    expect(w.app.db.one('SELECT state,last_error FROM listenbrainz_deletes WHERE id=?', 'generation-fence')).toEqual({
+      state: 'expired',
+      last_error: 'account_changed',
+    });
+    expect(w.app.db.one('SELECT remote_user,status FROM linked_accounts WHERE id=?', linkId)).toEqual({
+      remote_user: 'new_remote',
+      status: 'active',
+    });
+    expect(w.rt.pacing.listenbrainzAvailableAt(`link:${linkId}:generation:1`)).toBe(requestStartedAt + 1000);
+    expect(w.rt.pacing.listenbrainzAvailableAt(`link:${linkId}:generation:2`)).toBe(Number.NEGATIVE_INFINITY);
+    expect(
+      w.app.db.one(
+        'SELECT last_success_ms,last_failure_ms,last_error,consecutive_failures FROM linked_accounts WHERE id=?',
+        linkId,
+      ),
+    ).toEqual({ last_success_ms: null, last_failure_ms: null, last_error: null, consecutive_failures: 0 });
+  });
+  it('delete client uses the pinned policy fetch, parses top-level MSID separately from MBID, and accepts async delete 200', async () => {
+    const w = await world();
+    w.link();
+    const seenRequests: Request[] = [];
+    w.intercept(async (req) => {
+      seenRequests.push(req);
+      return Response.json(
+        {
+          payload: {
+            listens: [
+              {
+                listened_at: 100,
+                recording_msid: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+                track_metadata: { artist_name: 'Artist', track_name: 'Track', mbid_mapping: { recording_mbid: MBID } },
+              },
+              {
+                listened_at: 101,
+                recording_msid: null,
+                track_metadata: {
+                  artist_name: 'No MSID',
+                  track_name: 'Track',
+                  additional_info: { recording_mbid: MBID },
+                },
+              },
+            ],
+          },
+        },
+        { headers: { 'X-RateLimit-Remaining': '4' } },
+      );
+    });
+    w.intercept(async (req) => {
+      seenRequests.push(req);
+      expect(new URL(req.url).pathname).toBe('/1/delete-listen');
+      return Response.json({ status: 'ok' });
+    });
+    const page = await w.rt.listenbrainz.listWindowPage('alice_lb', TOKEN, 98, 1000);
+    expect(page).toMatchObject({
+      ok: true,
+      value: [
+        { listenedAt: 100, recordingMsid: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', artist: 'Artist', track: 'Track' },
+        { listenedAt: 101, recordingMsid: null, artist: 'No MSID', track: 'Track' },
+      ],
+    });
+    expect(new URL(seenRequests[0]!.url).search).toBe('?min_ts=98&count=1000');
+    expect(seenRequests[0]!.headers.get('authorization')).toBe(`Token ${TOKEN}`);
+    const deleted = await w.rt.listenbrainz.deleteListen(TOKEN, {
+      listened_at: 100,
+      recording_msid: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    });
+    expect(deleted).toMatchObject({ ok: true, accepted: true });
+    expect(seenRequests[1]!.method).toBe('POST');
+    expect(seenRequests[1]!.headers.get('authorization')).toBe(`Token ${TOKEN}`);
+    expect(await seenRequests[1]!.clone().json()).toEqual({
+      listened_at: 100,
+      recording_msid: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    });
+  });
+
+  it('delete client classifies malformed pages and malformed delete success distinctly', async () => {
+    const w = await world();
+    w.link();
+    w.intercept(() => Response.json({ payload: { listens: [{ listened_at: 'bad', track_metadata: {} }] } }));
+    expect(await w.rt.listenbrainz.listWindowPage('alice_lb', TOKEN, 10, 10)).toMatchObject({
+      ok: false,
+      kind: 'malformed',
+      status: 502,
+    });
+    w.intercept(() => Response.json({ status: 'queued' }));
+    expect(
+      await w.rt.listenbrainz.deleteListen(TOKEN, {
+        listened_at: 10,
+        recording_msid: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      }),
+    ).toMatchObject({ ok: false, kind: 'malformed', status: 502 });
+    w.intercept(() =>
+      Response.json({
+        payload: {
+          listens: [
+            { listened_at: 10, recording_msid: 'not-a-uuid', track_metadata: { artist_name: 'A', track_name: 'B' } },
+          ],
+        },
+      }),
+    );
+    expect(await w.rt.listenbrainz.listWindowPage('alice_lb', TOKEN, 8, 10)).toMatchObject({
+      ok: false,
+      kind: 'malformed',
+      error: 'malformed recording_msid',
+    });
+  });
+
+  it('delete client preserves 429 rate headers and permanent HTTP status classification', async () => {
+    const w = await world();
+    w.link();
+    w.intercept(() =>
+      Response.json({ error: 'slow down' }, { status: 429, headers: { 'X-RateLimit-Reset-In': '17' } }),
+    );
+    expect(await w.rt.listenbrainz.listWindowPage('alice_lb', TOKEN, 10, 10)).toMatchObject({
+      ok: false,
+      kind: 'status',
+      status: 429,
+      rate: { resetInS: 17 },
+    });
+  });
+
   it('a live listen goes as single, a backlog as import batches of at most 100, now playing as playing_now once', async () => {
     const w = await world();
     w.link();

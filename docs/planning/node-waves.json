@@ -367,7 +367,7 @@
      "worker/test/storage/migrate.test.ts › SCHEMA_VERSION includes additive batch provenance and remains compatible with v2 code",
      "worker/test/storage/schema-v2.test.ts › schema_compat holds one row with min_compatible_version 2",
      "worker/test/storage/schema-v2.test.ts › every migration after 2 contains only CREATE TABLE, CREATE INDEX and ALTER TABLE ADD COLUMN statements",
-     "worker/test/harness/local-index.test.ts › the migration ledger is ordered across the N/M, M4, S1, S2 and S3 stack",
+     "worker/test/harness/local-index.test.ts › the migration ledger is ordered across the N/M, M4, S1, S2, S3 and S4 stack",
      "worker/test/storage/schema-v2.test.ts › every table in TABLES has exactly one TABLE_CLASS entry and the test names any table that has none",
      "worker/test/storage/schema-v2.test.ts › ignored_listens accepts reasons artist_invalid and track_invalid only and is listed newest first by its (did, created_at_ms DESC) index"
     ]
@@ -1114,11 +1114,14 @@
      "worker/src/forward/lastfm-client.ts",
      "worker/src/forward/listenbrainz-client.ts",
      "worker/src/forward/forwarder.ts",
+     "worker/src/forward/delete-forwarder.ts",
      "worker/src/forward/upstream-pacing.ts",
      "worker/src/http/links.ts",
      "worker/test/node/forward/links-http.test.ts",
      "worker/test/node/forward/lastfm-forward.test.ts",
-     "worker/test/node/forward/listenbrainz-forward.test.ts"
+     "worker/test/node/forward/listenbrainz-forward.test.ts",
+     "worker/test/node/forward/s4-replacement.test.ts",
+     "worker/test/node/forward/s4-review-regressions.test.ts"
     ],
     "dependsOn": [
      "N2-01",
@@ -1145,6 +1148,17 @@
      "worker/test/node/forward/listenbrainz-forward.test.ts › 401 revokes the link; 429 waits X-RateLimit-Reset-In; 400 marks the row failed with the upstream error and does not retry",
      "worker/test/node/forward/lastfm-forward.test.ts › love, unlove, love for one track forwards track.love, track.unlove, track.love in order, and the same track played as now playing twice 10 minutes apart is forwarded twice",
      "worker/test/node/forward/listenbrainz-forward.test.ts › ListenBrainz rows expire after 30 days, not 13",
+     "worker/test/node/forward/s4-review-regressions.test.ts › review: lookup 429 holds the shared bucket for Reset-In",
+     "worker/test/node/forward/s4-review-regressions.test.ts › review: malformed HTTP success still informs pacing and persists its reset hold",
+     "worker/test/node/forward/s4-review-regressions.test.ts › review: expired rows settle when due_at is after deadline",
+     "worker/test/node/forward/s4-review-regressions.test.ts › review: paced first account must not block another due account",
+     "worker/test/node/forward/s4-review-regressions.test.ts › review: repeated deletion failures update current link health",
+     "worker/test/node/forward/s4-replacement.test.ts › retains independent deletion evidence for a replacement destination generation",
+     "worker/test/node/forward/s4-replacement.test.ts › captures the removed track identity before a live single replacement",
+     "worker/test/node/forward/s4-replacement.test.ts › captures the removed listenedAt identity before a live single replacement",
+     "worker/test/node/forward/s4-replacement.test.ts › does not delete upstream for snapshot updates",
+     "worker/test/node/forward/s4-replacement.test.ts › does not delete upstream for retained updates",
+     "worker/test/node/forward/s4-replacement.test.ts › does not delete upstream for metadata updates",
      "worker/test/node/forward/links-http.test.ts › a Last.fm link callback whose state belongs to another session is 403 and stores nothing",
      "worker/test/node/forward/lastfm-forward.test.ts › forwarded track.scrobble POSTs pass through policyFetch: a fake Last.fm 302 is a retryable redirect error, not followed, and an upstream root on a non-default port is refused before sending"
     ]

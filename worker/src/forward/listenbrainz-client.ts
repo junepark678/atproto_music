@@ -40,6 +40,7 @@ export interface ListenbrainzClientOptions {
 export type ListenbrainzOutcome<T> =
   | { ok: true; value: T; rate: ListenbrainzRateObservation }
   | { ok: false; kind: 'status'; status: number; error: string; rate: ListenbrainzRateObservation }
+  | { ok: false; kind: 'malformed'; status: 502; error: string; rate: ListenbrainzRateObservation }
   | { ok: false; kind: 'network'; error: string };
 
 export interface TrackMetadata {
@@ -56,6 +57,17 @@ export interface ListenPayload {
 }
 
 export type ValidateTokenResult = { valid: true; userName: string } | { valid: false };
+
+export interface ListenWindowEntry {
+  listenedAt: number;
+  recordingMsid: string | null;
+  artist: string;
+  track: string;
+}
+export type DeleteListenOutcome =
+  | { ok: true; accepted: true; rate: ListenbrainzRateObservation }
+  | { ok: false; kind: 'status' | 'malformed'; status: number; error: string; rate: ListenbrainzRateObservation }
+  | { ok: false; kind: 'network'; error: string };
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -101,6 +113,77 @@ export class ListenbrainzClient {
     }
     if (res.status >= 200 && res.status < 300) return { ok: true, value: body, rate };
     return { ok: false, kind: 'status', status: res.status, error: errorText(body, res.status), rate };
+  }
+
+  /** Fetch one recent-listens page; missing/invalid MSIDs remain null and are never inferred from MBIDs. */
+  async listWindowPage(
+    user: string,
+    token: string,
+    minTs: number,
+    count: number,
+  ): Promise<ListenbrainzOutcome<ListenWindowEntry[]>> {
+    if (!Number.isSafeInteger(minTs) || !Number.isSafeInteger(count) || count < 1 || count > 1000)
+      throw new RangeError('invalid ListenBrainz page bounds');
+    const path = `1/user/${encodeURIComponent(user)}/listens?min_ts=${minTs}&count=${count}`;
+    const out = await this.exchange(path, token, { method: 'GET' });
+    if (!out.ok) return out;
+    const body = out.value;
+    const payload = isObject(body) && isObject(body.payload) ? body.payload : null;
+    const listens = payload && Array.isArray(payload.listens) ? payload.listens : null;
+    if (listens === null)
+      return { ok: false, kind: 'malformed', status: 502, error: 'malformed listens response', rate: out.rate };
+    const entries: ListenWindowEntry[] = [];
+    for (const item of listens) {
+      if (
+        !isObject(item) ||
+        !Number.isSafeInteger(item.listened_at) ||
+        !isObject(item.track_metadata) ||
+        typeof item.track_metadata.artist_name !== 'string' ||
+        typeof item.track_metadata.track_name !== 'string'
+      ) {
+        return { ok: false, kind: 'malformed', status: 502, error: 'malformed listen entry', rate: out.rate };
+      }
+      const msid = item.recording_msid;
+      if (
+        msid !== undefined &&
+        msid !== null &&
+        (typeof msid !== 'string' ||
+          !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(msid))
+      )
+        return { ok: false, kind: 'malformed', status: 502, error: 'malformed recording_msid', rate: out.rate };
+      const uuid =
+        typeof msid === 'string' &&
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(msid)
+          ? msid
+          : null;
+      entries.push({
+        listenedAt: item.listened_at as number,
+        recordingMsid: uuid,
+        artist: item.track_metadata.artist_name,
+        track: item.track_metadata.track_name,
+      });
+    }
+    return { ok: true, value: entries, rate: out.rate };
+  }
+
+  /** HTTP 200 means accepted for asynchronous deletion; callers must not poll for absence. */
+  async deleteListen(
+    token: string,
+    listen: { listened_at: number; recording_msid: string },
+  ): Promise<DeleteListenOutcome> {
+    if (
+      !Number.isSafeInteger(listen.listened_at) ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(listen.recording_msid)
+    )
+      throw new RangeError('invalid ListenBrainz delete target');
+    const out = await this.exchange('1/delete-listen', token, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(listen),
+    });
+    if (!out.ok) return out;
+    if (isObject(out.value) && out.value.status === 'ok') return { ok: true, accepted: true, rate: out.rate };
+    return { ok: false, kind: 'malformed', status: 502, error: 'malformed delete-listen response', rate: out.rate };
   }
 
   /** GET 1/validate-token: whether `token` is valid and whose it is. */

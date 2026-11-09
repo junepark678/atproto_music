@@ -262,6 +262,28 @@ const SEED_ROWS: Record<string, Record<string, SqlParam>[]> = {
       updated_at_ms: NOW,
     },
   ],
+  listenbrainz_deletes: [
+    {
+      id: 'delete-seed',
+      event_key: 'delete-seed-event',
+      link_id: 'l1',
+      generation: 1,
+      did: ALICE,
+      identity_key: 'listen:delete-seed',
+      listened_at: NOW,
+      artist_key: 'seed-artist',
+      track_key: 'seed-track',
+      artist: 'Seed Artist',
+      track: 'Seed Track',
+      source_path: 'api',
+      state: 'unsupported',
+      attempts: 0,
+      due_at: NOW,
+      deadline_at: NOW + DAY,
+      created_at_ms: NOW,
+      updated_at_ms: NOW,
+    },
+  ],
   link_backfill_items: [
     {
       link_id: 'l1',
@@ -577,10 +599,10 @@ describe('worker/test/harness', () => {
   });
 
   // N1-10: suites that pinned schema version 1 derive it from the schema.
-  it('the migration ledger is ordered across the N/M, M4, S1, S2 and S3 stack', async () => {
+  it('the migration ledger is ordered across the N/M, M4, S1, S2, S3 and S4 stack', async () => {
     const versions = MIGRATIONS.map((m) => m.version);
     expect(versions.slice(0, 14)).toEqual(Array.from({ length: 14 }, (_, i) => i + 1));
-    expect(versions.slice(-13)).toEqual([26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38]);
+    expect(versions.slice(-17)).toEqual([26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42]);
     expect(versions.every((version, index) => index === 0 || version > (versions[index - 1] ?? 0))).toBe(true);
     expect(SCHEMA_VERSION).toBe(MIGRATIONS[MIGRATIONS.length - 1]?.version);
     expect(MIGRATIONS.length).toBeGreaterThanOrEqual(2);

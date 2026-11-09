@@ -81,6 +81,18 @@ export function linkDto(row: LinkedAccountRow, db: Db): Link {
         row.generation,
       )?.n ?? 0,
   };
+  queue.queued +=
+    db.one<{ n: number }>(
+      "SELECT count(*) AS n FROM listenbrainz_deletes WHERE link_id=? AND generation=? AND state='queued'",
+      row.id,
+      row.generation,
+    )?.n ?? 0;
+  queue.failed +=
+    db.one<{ n: number }>(
+      "SELECT count(*) AS n FROM listenbrainz_deletes WHERE link_id=? AND generation=? AND state='failed'",
+      row.id,
+      row.generation,
+    )?.n ?? 0;
   return {
     id: row.id,
     service: row.service,
@@ -236,6 +248,14 @@ export function saveLink(deps: LinkDeps, input: SaveLinkInput): SaveLinkResult {
         db.run(
           `UPDATE forward_outbox SET state='expired',last_error='account_changed',updated_at_ms=?
            WHERE link_id=? AND generation=? AND state IN ('queued','held')`,
+          now,
+          existing.id,
+          existing.generation,
+        );
+      if (changedRemote)
+        db.run(
+          `UPDATE listenbrainz_deletes SET state='expired',last_error='account_changed',updated_at_ms=?
+           WHERE link_id=? AND generation=? AND state='queued'`,
           now,
           existing.id,
           existing.generation,

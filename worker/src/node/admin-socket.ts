@@ -286,6 +286,14 @@ export async function hostStatus(deps: HostStatusDeps): Promise<Record<string, u
           )
         : countsBy(db, `SELECT state AS k,count(*) AS n FROM ${table} GROUP BY state ORDER BY state`);
   }
+  if (tableExists(db, 'listenbrainz_deletes')) {
+    const deletes = countsBy(
+      db,
+      `SELECT q.state AS k,count(*) AS n FROM listenbrainz_deletes q
+       JOIN linked_accounts l ON l.id=q.link_id AND l.generation=q.generation GROUP BY q.state ORDER BY q.state`,
+    );
+    queues.forwardDeletes = deletes;
+  }
   const links = tableExists(db, 'linked_accounts')
     ? countsBy(db, 'SELECT status AS k, count(*) AS n FROM linked_accounts GROUP BY status ORDER BY status')
     : {};

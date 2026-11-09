@@ -617,6 +617,39 @@ attempts; an upstream 429 counts, while local pacing waits do not. Admission
 and replay have no age cutoff; Last.fm retains its 13-day send limit, and the
 existing queue-expiry behavior is otherwise unchanged.
 
+**S4 draft addition — ListenBrainz delete propagation (owner publication required).**
+An indexed local/API delete or explicitly forwarded live Jetstream removal queues
+a destination-generation-scoped delete only when that listen has a durable sent
+forward receipt for the same canonical identity and generation. ListenBrainz
+lookup uses `GET /1/user/{name}/listens?min_ts=t-2&count=1000`; `min_ts` is
+exclusive, results descend by timestamp, and the response has no offset paging
+contract. The implementation locally filters `[t-1,t+1]`, advances a persisted
+exclusive timestamp cursor from the response page's maximum timestamp, and
+ignores a full page ending inside the target window because same-second ties
+cannot be advanced safely without offset paging. It uses core normalized music keys, requires a valid top-level
+`recording_msid`, and persists the selected actual timestamp/MSID before POST.
+`POST /1/delete-listen` HTTP 200 with `status:ok` is accepted asynchronous work,
+not confirmation of absence; S3 pull tombstones remain the resurrection fence.
+The delete lane shares the live ListenBrainz per-link generation bucket, makes
+at most one request per timer visit, gives live work priority on that same
+account, and continues eligible work for other accounts. It rotates through a
+bounded candidate set so a paced account cannot block available accounts.
+Rate observations from every current-credential HTTP response update the shared
+bucket; a 429 retry is persisted no earlier than the advertised reset time.
+Transient failures use persisted jittered backoff, a 32 actual-attempt ceiling,
+and a seven-day deadline. Expiration is independent of retry due time. Link
+health records transient errors after three failures and clears on a later
+successful response; permanent 400 and current-credential 401 outcomes surface
+immediately. Last.fm deliveries are recorded as unsupported without egress.
+Same-remote relink resumes a queue; different-remote relink expires
+old-generation queued rows. Current terminal forward receipts remain retained
+because they prove past delivery for later local deletion eligibility. Any
+future receipt cleanup must preserve equivalent durable evidence before
+removing them. Primary API
+references: [ListenBrainz Core API](https://listenbrainz.readthedocs.io/en/latest/users/api/core.html).
+The additive S4 schema currently advances the post-S3 version 38 through
+version 42; the delete queue is registered as non-derived restore state.
+
 Operator metrics and the Unix admin socket expose marker and forward-outbox
 counts plus a five-minute cached logical text-byte estimate. The extension
 timer advances persisted primary-key cursors by at most 100 rows per table per
