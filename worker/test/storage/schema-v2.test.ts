@@ -1841,6 +1841,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       { version: 41, name: 'listenbrainz_delete_lookup_tie_fence' },
       { version: 42, name: 'listenbrainz_delete_lookup_page_boundary' },
       { version: 43, name: 'forward_love_key_heads' },
+      { version: 44, name: 'forward_love_lanes' },
     ]);
     expect(after.compat).toEqual([{ singleton: 1, min_compatible_version: 2 }]);
     expect(after.newTablesEmpty).toEqual(['mb_cover_art_usage']);

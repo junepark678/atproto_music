@@ -1395,6 +1395,31 @@ const MIGRATION_S4_FORWARD_LOVE_HEADS: Migration = {
     'CREATE INDEX forward_outbox_love_heads ON forward_outbox(link_id,generation,state,love_artist_key,love_track_key,created_at_ms)',
   ],
 };
+const MIGRATION_S4_FORWARD_LOVE_LANES: Migration = {
+  version: 44,
+  name: 'forward_love_lanes',
+  statements: [
+    'ALTER TABLE forward_outbox ADD COLUMN love_lane INTEGER',
+    `CREATE TABLE forward_love_lanes (
+      link_id TEXT NOT NULL REFERENCES linked_accounts(id) ON DELETE CASCADE,
+      generation INTEGER NOT NULL,
+      love_artist_key TEXT NOT NULL,
+      love_track_key TEXT NOT NULL,
+      priority INTEGER NOT NULL CHECK (priority IN (0,1)),
+      due_at INTEGER NOT NULL,
+      head_created_at_ms INTEGER NOT NULL,
+      PRIMARY KEY (link_id,generation,love_artist_key,love_track_key)
+    )`,
+    'CREATE INDEX forward_love_lanes_due ON forward_love_lanes(link_id,generation,priority,due_at)',
+    `CREATE INDEX forward_outbox_love_unkeyed ON forward_outbox(link_id,generation,kind,created_at_ms)
+      WHERE state='queued' AND (love_artist_key IS NULL OR love_track_key IS NULL)`,
+    `CREATE INDEX forward_outbox_love_unframed ON forward_outbox(link_id,generation,kind,created_at_ms)
+      WHERE state='queued' AND love_lane IS NULL`,
+    'CREATE INDEX forward_outbox_kind_due ON forward_outbox(link_id,generation,kind,state,due_at)',
+    'CREATE INDEX forward_outbox_link_expiry ON forward_outbox(link_id,state,kind,created_at_ms)',
+    'CREATE INDEX forward_outbox_held_expiry ON forward_outbox(state,updated_at_ms)',
+  ],
+};
 
 export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_1,
@@ -1440,6 +1465,7 @@ export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_S4_DELETE_LOOKUP_TIE_FENCE,
   MIGRATION_S4_DELETE_LOOKUP_PAGE_BOUNDARY,
   MIGRATION_S4_FORWARD_LOVE_HEADS,
+  MIGRATION_S4_FORWARD_LOVE_LANES,
 ];
 
 /** The schema version this code expects. */
@@ -1490,6 +1516,7 @@ export const TABLES = [
   'linked_accounts',
   'link_states',
   'forward_outbox',
+  'forward_love_lanes',
   'listenbrainz_deletes',
   'link_backfill_items',
   'forward_admissions',
@@ -1579,6 +1606,7 @@ export const TABLE_CLASS: Readonly<Record<TableName, TableClass>> = {
   linked_accounts: 'non-derived',
   link_states: 'non-derived',
   forward_outbox: 'non-derived',
+  forward_love_lanes: 'non-derived',
   listenbrainz_deletes: 'non-derived',
   link_backfill_items: 'non-derived',
   forward_admissions: 'non-derived',
