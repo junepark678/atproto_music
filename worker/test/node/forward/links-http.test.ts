@@ -412,6 +412,21 @@ describe('link routes', () => {
         trackValue,
         null,
       );
+      if (i === batch) {
+        w.app.db.run(
+          `UPDATE scrobbles SET album_artist=?,track_number=?,artist_mbids=?,release_mbid=?,release_group_mbid=?,
+           isrc=?,submission_client=?,music_service=? WHERE uri=?`,
+          'Backfill Album Artist',
+          7,
+          '["00000000-0000-4000-8000-000000000001"]',
+          '00000000-0000-4000-8000-000000000002',
+          '00000000-0000-4000-8000-000000000003',
+          'USABC1234567',
+          'Pano',
+          'Radio',
+          `at://${ALICE}/com.example.atmusic.scrobble/r${i}`,
+        );
+      }
       if (i <= 2) {
         w.app.db.run(
           'INSERT INTO forward_admissions(did,identity_key,path,source_service,created_at_ms,admission_seq) VALUES(?,?,?,?,?,?)',
@@ -452,8 +467,18 @@ describe('link routes', () => {
         'SELECT payload_json FROM forward_outbox WHERE link_id=? ORDER BY rowid LIMIT 1',
         linked.link.id,
       )?.payload_json ?? '{}',
-    ) as { listen?: { track?: string } };
-    expect(first.listen?.track).toBe('Backfill Track 501');
+    ) as { listen?: Record<string, unknown> };
+    expect(first.listen).toMatchObject({
+      track: 'Backfill Track 501',
+      albumArtist: 'Backfill Album Artist',
+      trackNumber: 7,
+      artistMbids: ['00000000-0000-4000-8000-000000000001'],
+      releaseMbid: '00000000-0000-4000-8000-000000000002',
+      releaseGroupMbid: '00000000-0000-4000-8000-000000000003',
+      isrc: 'USABC1234567',
+      submissionClient: 'Pano',
+      musicService: 'Radio',
+    });
     enqueueForwards(w.app.db, {
       did: ALICE,
       now: w.clock.nowMs(),
