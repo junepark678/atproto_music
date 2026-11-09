@@ -229,9 +229,29 @@ it('shows terminal sync failures, transient holds, and independent backfill erro
         failed: 0,
       },
     }),
+    link({
+      id: 'temporary-retry',
+      sync: {
+        backfill: { state: 'pending', done: 0, total: 0 },
+        pullEnabled: true,
+        holdReason: 'upstream_retry',
+        queued: 0,
+        failed: 1,
+      },
+    }),
+    link({
+      id: 'legacy-hold',
+      sync: {
+        backfill: { state: 'pending', done: 0, total: 0 },
+        pullEnabled: true,
+        holdReason: 'legacy_dedupe_coverage',
+        queued: 0,
+        failed: 0,
+      },
+    }),
   ]);
   const { root, unmount } = mount();
-  await vi.waitFor(() => expect(root.querySelectorAll('.link-card')).toHaveLength(4));
+  await vi.waitFor(() => expect(root.querySelectorAll('.link-card')).toHaveLength(6));
   const cards = [...root.querySelectorAll<HTMLElement>('.link-card')];
   expect(cards[0]!.querySelector('.link-status-pill')?.textContent).toBe('Error');
   expect(cards[1]!.querySelector('.link-status-pill')?.textContent).toBe('Error');
@@ -242,6 +262,10 @@ it('shows terminal sync failures, transient holds, and independent backfill erro
   expect(cards[2]!.textContent).toContain('Repeated attempts to sync with ListenBrainz failed.');
   expect(cards[3]!.querySelector('.link-status-pill')?.textContent).toBe('Active');
   expect(cards[3]!.textContent).toContain('restoring its session');
+  expect(cards[4]!.querySelector('.link-status-pill')?.textContent).toBe('Active');
+  expect(cards[4]!.textContent).toContain('could not be reached. Importing will retry later.');
+  expect(cards[5]!.querySelector('.link-status-pill')?.textContent).toBe('Active');
+  expect(cards[5]!.textContent).toContain('waiting for older history to be checked for duplicates');
   expect(root.querySelectorAll('.link-error[role="alert"]')).toHaveLength(0);
   unmount();
 });
