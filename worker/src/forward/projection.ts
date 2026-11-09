@@ -188,6 +188,10 @@ export function releaseForwardAdmission(db: Db, did: string, identityKey: string
 
 /** Drop projection-only admission state during a DID opt-out, keeping local acceptance receipts. */
 export function cleanupForwardAdmissionsForSuppression(db: Db, did: string): void {
+  const uriLo = `at://${did}/`;
+  const uriHi = `at://${did}0`;
+  db.run('DELETE FROM live_record_evidence WHERE uri>=? AND uri<?', uriLo, uriHi);
+  db.run('DELETE FROM live_acceptance_candidates WHERE uri>=? AND uri<?', uriLo, uriHi);
   db.run(
     `DELETE FROM forward_admissions AS admission
      WHERE did=? AND NOT EXISTS (

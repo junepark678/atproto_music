@@ -24,6 +24,7 @@ import { withMigratedDb } from '../node/support/node-db';
 import {
   ALICE,
   deleteProof,
+  liveApplyOptions,
   NOW_NS,
   OPTS,
   PREFIX,
@@ -83,12 +84,12 @@ describe('batch projection and visibility', () => {
         Date.parse('2026-01-15T12:00:00Z'),
         Date.parse('2026-01-15T12:00:00Z'),
       );
-      const opts = { ...OPTS, forwarding: { random: seededRandom(14) } };
-      db.tx(() => applyRecordProof(db, first, opts));
+      const liveRandom = seededRandom(14);
+      db.tx(() => applyRecordProof(db, first, liveApplyOptions(first, liveRandom)));
       expect(db.all("SELECT * FROM forward_outbox WHERE kind='scrobble'")).toHaveLength(2);
-      db.tx(() => applyRecordProof(db, moved, opts));
+      db.tx(() => applyRecordProof(db, moved, liveApplyOptions(moved, liveRandom)));
       expect(db.all("SELECT * FROM forward_outbox WHERE kind='scrobble'")).toHaveLength(2);
-      db.tx(() => applyRecordProof(db, added, opts));
+      db.tx(() => applyRecordProof(db, added, liveApplyOptions(added, liveRandom, 'update')));
       expect(db.all("SELECT * FROM forward_outbox WHERE kind='scrobble'")).toHaveLength(3);
     });
   });
@@ -119,7 +120,7 @@ describe('batch projection and visibility', () => {
       db.tx(() => applyRecordProof(db, first, OPTS));
       expect(db.all('SELECT * FROM forward_outbox')).toHaveLength(0);
       expect(db.all("SELECT * FROM forward_admissions WHERE path='snapshot'")).toHaveLength(2);
-      db.tx(() => applyRecordProof(db, later, { ...OPTS, forwarding: { random: seededRandom(15) } }));
+      db.tx(() => applyRecordProof(db, later, liveApplyOptions(later, seededRandom(15), 'update')));
       expect(db.all('SELECT * FROM forward_outbox')).toHaveLength(1);
     });
   });
@@ -155,7 +156,7 @@ describe('batch projection and visibility', () => {
           Date.parse('2026-01-15T12:00:00Z'),
         );
       }
-      db.tx(() => applyRecordProof(db, proof, { ...OPTS, forwarding: { random: seededRandom(16) } }));
+      db.tx(() => applyRecordProof(db, proof, liveApplyOptions(proof, seededRandom(16))));
       expect(db.all('SELECT * FROM forward_outbox')).toHaveLength(0);
     });
   });

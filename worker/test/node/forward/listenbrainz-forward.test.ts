@@ -540,7 +540,7 @@ describe('ListenBrainz forwarding', () => {
     await w.app.close();
     let db: SqliteDb | null = openSqliteDb(path, { busyTimeoutMs: 200 });
     try {
-      expect(migrate(db)).toEqual({ status: 'ready', version: 47 });
+      expect(migrate(db)).toEqual({ status: 'ready', version: 48 });
       expect(
         db.one('SELECT target_msid,target_listened_at FROM listenbrainz_deletes WHERE id=?', 'restart-delete'),
       ).toEqual({
@@ -565,7 +565,7 @@ describe('ListenBrainz forwarding', () => {
       expect(retry).toMatchObject({ target_msid: msid, target_listened_at: listenedAt + 1 });
       db.close();
       db = openSqliteDb(path, { busyTimeoutMs: 200 });
-      expect(migrate(db)).toEqual({ status: 'ready', version: 47 });
+      expect(migrate(db)).toEqual({ status: 'ready', version: 48 });
       w.clock.set(new Date(retry!.due_at).toISOString());
       expect(
         (
@@ -1906,12 +1906,11 @@ it('review: external unlove retains its known MBID after terminal forward GC', a
   const { SignedRepo } = await import('@atmusic/atproto/test-support/signed-repo');
   const { fixtureKeys } = await import('@atmusic/atproto/test-support/keys');
   const { applyRecordProof } = await import('../../../src/do/write/apply-record');
-  const { seedUser, putProof, deleteProof, OPTS, PREFIX } = await import('../../write/support');
+  const { seedUser, putProof, deleteProof, authorizedLiveOptions, PREFIX } = await import('../../write/support');
   const w = await world();
   w.link();
   seedUser(w.app.db, ALICE);
   const repo = new SignedRepo(ALICE, (await fixtureKeys()).alice, { clock: w.clock });
-  const opts = { ...OPTS, forwarding: { random: seededRandom(999) } };
   const p = await putProof(repo, `${PREFIX}.love`, 'review-love', {
     $type: `${PREFIX}.love`,
     artist: 'Review artist',
@@ -1919,13 +1918,13 @@ it('review: external unlove retains its known MBID after terminal forward GC', a
     recordingMbid: MBID,
     createdAt: '2026-01-15T11:00:00Z',
   });
-  w.app.db.tx(() => applyRecordProof(w.app.db, p, opts));
+  w.app.db.tx(() => applyRecordProof(w.app.db, p, authorizedLiveOptions(w.app.db, p, seededRandom(999))));
   await w.run();
   expect(w.rows().filter((r) => r.kind === 'love' && r.state === 'sent')).toHaveLength(1);
   w.app.db.run("DELETE FROM forward_outbox WHERE state='sent'");
   w.clock.advance(2000);
   const d = await deleteProof(repo, `${PREFIX}.love`, 'review-love');
-  w.app.db.tx(() => applyRecordProof(w.app.db, d, opts));
+  w.app.db.tx(() => applyRecordProof(w.app.db, d, authorizedLiveOptions(w.app.db, d, seededRandom(999))));
   await w.run();
   expect(w.rows().filter((r) => r.kind === 'unlove')).toHaveLength(1);
   expect(w.rows().find((r) => r.kind === 'unlove')?.state).toBe('sent');

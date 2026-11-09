@@ -1467,6 +1467,28 @@ const MIGRATION_OPERATIONS_RECORD_TARGET: Migration = {
   statements: ['CREATE INDEX operations_record_target ON operations(did,collection,rkey,created_at_ms)'],
 };
 
+const MIGRATION_LIVE_ADMISSION_EVIDENCE: Migration = {
+  version: 48,
+  name: 'live_admission_evidence',
+  statements: [
+    `CREATE TABLE live_record_evidence (
+      uri TEXT PRIMARY KEY NOT NULL, did TEXT NOT NULL, collection TEXT NOT NULL, rkey TEXT NOT NULL,
+      up_rev TEXT, up_action TEXT CHECK(up_action IS NULL OR up_action IN ('create','update')), up_cid TEXT,
+      del_rev TEXT, conflict_rev TEXT, received_ms INTEGER NOT NULL, expires_at_ms INTEGER NOT NULL,
+      CHECK(up_rev IS NOT NULL OR del_rev IS NOT NULL),
+      CHECK((up_rev IS NULL) = (up_action IS NULL) AND (up_rev IS NULL) = (up_cid IS NULL))
+    )`,
+    'CREATE INDEX live_record_evidence_expiry ON live_record_evidence(expires_at_ms)',
+    `CREATE TABLE live_acceptance_candidates (
+      uri TEXT NOT NULL, identity_key TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('scrobble','love')),
+      member_uri TEXT NOT NULL, cid TEXT NOT NULL, created_at_ms INTEGER NOT NULL, expires_at_ms INTEGER NOT NULL,
+      PRIMARY KEY(uri,identity_key)
+    )`,
+    'CREATE INDEX live_acceptance_candidates_expiry ON live_acceptance_candidates(expires_at_ms)',
+    'ALTER TABLE hints ADD COLUMN evidence_rev TEXT',
+  ],
+};
+
 export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_1,
   MIGRATION_2,
@@ -1515,6 +1537,7 @@ export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_FORWARD_LOVE_RECORDING_HISTORY,
   MIGRATION_FORWARD_LOVE_RECORDING_TARGETS,
   MIGRATION_OPERATIONS_RECORD_TARGET,
+  MIGRATION_LIVE_ADMISSION_EVIDENCE,
 ];
 
 /** The schema version this code expects. */
@@ -1546,6 +1569,8 @@ export const TABLES = [
   'counters',
   // The migration ledger (worker/src/do/migrate.ts).
   'schema_migrations',
+  'live_record_evidence',
+  'live_acceptance_candidates',
   // Migration 2.
   'accounts',
   'web_sessions',
@@ -1644,6 +1669,8 @@ export const TABLE_CLASS: Readonly<Record<TableName, TableClass>> = {
   stats_cache: 'derived',
   counters: 'non-derived',
   schema_migrations: 'non-derived',
+  live_record_evidence: 'non-derived',
+  live_acceptance_candidates: 'non-derived',
   accounts: 'non-derived',
   web_sessions: 'non-derived',
   oauth_states: 'non-derived',

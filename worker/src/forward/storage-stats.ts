@@ -10,6 +10,18 @@ export const FORWARD_STORAGE_STATS_SLICE_SIZE = 100;
 const COUNTER_NAME = 'forward_storage';
 const TABLES = [
   {
+    key: 'live_record_evidence',
+    primaryKey: ['uri'],
+    columns: ['uri', 'did', 'collection', 'rkey', 'up_rev', 'up_action', 'up_cid', 'del_rev', 'conflict_rev'],
+    marker: true,
+  },
+  {
+    key: 'live_acceptance_candidates',
+    primaryKey: ['uri', 'identity_key'],
+    columns: ['uri', 'identity_key', 'kind', 'member_uri', 'cid'],
+    marker: true,
+  },
+  {
     key: 'forward_admissions',
     primaryKey: ['did', 'identity_key'],
     columns: ['did', 'identity_key', 'path', 'source_service'],

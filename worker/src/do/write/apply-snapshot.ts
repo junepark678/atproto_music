@@ -65,8 +65,12 @@
 // snapshot with no chunks) `max_rev` and the snapshot floor rise to headRev.
 // A generation or suppression mismatch changes nothing: `superseded`.
 
+import type { Random } from '@atmusic/core/deps';
 import { toMs, toStorage } from '@atmusic/core/timestamp';
+import { lateAccept } from '../../forward/live-acceptance';
 import type { Db } from '../db';
+import { enqueueHints } from '../ingest/hints';
+import { isStale, LIVE_REHINT_DELAY_MS, readLiveEvidence } from '../ingest/live-evidence';
 import { noteIndexed } from '../status';
 import { isSuppressed, loadUser, raiseMaxRev } from './account-state';
 import { type ApplyOptions, applyRecordTarget, reaffirmRecordTarget } from './apply-record';
@@ -74,6 +78,7 @@ import {
   type CollectionKind,
   collectionKind,
   guardRevision,
+  incrementCounter,
   readRecordState,
   recordUri,
   splitKey,
@@ -106,6 +111,7 @@ export interface SnapshotChunk {
   prefix: string;
   /** Now (injected clock), for indexed_at / verified_at. */
   nowNs: bigint;
+  random?: Random;
 }
 
 export interface ChunkResult {
@@ -173,11 +179,23 @@ function reaffirm(
     // writes (projection revisions, membership, statistics), not only the
     // per-URI revision, so a removal cutoff they cross is decided as it would
     // be live and a later hint at this head is truly a no-op.
+    const evidence = readLiveEvidence(db, uri, Number(c.nowNs / 1_000_000n));
     reaffirmRecordTarget(db, { did: c.did, kind, collection, rkey, uri, rev: c.headRev }, cid, {
       receiptNs: c.receiptNs,
       prefix: c.prefix,
       nowNs: c.nowNs,
+      ...(c.random ? { live: { random: c.random, evidence, legacyRev: null }, liveCandidates: true } : {}),
     });
+    if (c.random)
+      lateAccept(db, {
+        uri,
+        did: c.did,
+        collection,
+        rkey,
+        evidence,
+        nowMs: Number(c.nowNs / 1_000_000n),
+        random: c.random,
+      });
     return;
   }
   const verifiedAt = toStorage(c.nowNs);
@@ -238,6 +256,7 @@ export function applySnapshotChunk(db: Db, c: SnapshotChunk): ChunkResult {
   raiseFloors(db, c.did, c.headRev);
 
   const o: ApplyOptions = { receiptNs: c.receiptNs, prefix: c.prefix, nowNs: c.nowNs };
+  const canCandidate = loadUser(db, c.did)?.last_snapshot_at_ms !== null;
   const res: ChunkResult = { outcome: 'applied', written: 0, unchanged: 0, deleted: 0 };
   const present = new Set<string>();
 
@@ -246,6 +265,27 @@ export function applySnapshotChunk(db: Db, c: SnapshotChunk): ChunkResult {
     const uri = recordUri(c.did, collection, rkey);
     present.add(uri);
     const kind = collectionKind(c.prefix, collection);
+    const evidence = readLiveEvidence(db, uri, Number(c.nowNs / 1_000_000n));
+    if (isStale(evidence, c.headRev)) {
+      const hintRev = [evidence?.up_rev, evidence?.del_rev]
+        .filter((rev): rev is string => rev !== null && rev !== undefined)
+        .sort()
+        .at(-1)!;
+      enqueueHints(db, [
+        {
+          did: c.did,
+          collection,
+          rkey,
+          source: 'reconcile',
+          hintRev,
+          receiptMs: Number(c.nowNs / 1_000_000n),
+          dueAt: Number(c.nowNs / 1_000_000n) + LIVE_REHINT_DELAY_MS,
+        },
+      ]);
+      incrementCounter(db, 'live_admission', 'walk_stale_skip');
+      res.unchanged++;
+      continue;
+    }
     const guard = guardRevision(db, uri);
     if (kind === null || (guard !== null && guard >= c.headRev)) {
       res.unchanged++;
@@ -257,6 +297,18 @@ export function applySnapshotChunk(db: Db, c: SnapshotChunk): ChunkResult {
     }
     if (stored === e.cid) {
       reaffirm(db, c, { uri, collection, rkey, kind }, e.cid);
+      if (c.random)
+        lateAccept(db, {
+          uri,
+          did: c.did,
+          collection,
+          rkey,
+          evidence,
+          nowMs: Number(c.nowNs / 1_000_000n),
+          random: c.random,
+        });
+      if (evidence && c.headRev >= (evidence.up_rev ?? '') && c.headRev >= (evidence.del_rev ?? ''))
+        db.run('DELETE FROM live_record_evidence WHERE uri=?', uri);
       res.unchanged++;
       continue;
     }
@@ -269,7 +321,26 @@ export function applySnapshotChunk(db: Db, c: SnapshotChunk): ChunkResult {
         continue;
       }
     } else {
-      applyRecordTarget(db, { ...target, kind, collection, uri }, o);
+      applyRecordTarget(
+        db,
+        { ...target, kind, collection, uri },
+        {
+          ...o,
+          ...(c.random ? { live: { random: c.random, evidence, legacyRev: null }, liveCandidates: canCandidate } : {}),
+        },
+      );
+      if (c.random)
+        lateAccept(db, {
+          uri,
+          did: c.did,
+          collection,
+          rkey,
+          evidence,
+          nowMs: Number(c.nowNs / 1_000_000n),
+          random: c.random,
+        });
+      if (evidence && c.headRev >= (evidence.up_rev ?? '') && c.headRev >= (evidence.del_rev ?? ''))
+        db.run('DELETE FROM live_record_evidence WHERE uri=?', uri);
     }
     res.written++;
   }
@@ -299,10 +370,50 @@ export function applySnapshotChunk(db: Db, c: SnapshotChunk): ChunkResult {
     const collection = uriCollection(c.did, uri);
     const kind = collectionKind(c.prefix, collection);
     const rkey = uri.slice(`at://${c.did}/${collection}/`.length);
+    const evidence = readLiveEvidence(db, uri, Number(c.nowNs / 1_000_000n));
+    if (isStale(evidence, c.headRev)) {
+      const hintRev = [evidence?.up_rev, evidence?.del_rev]
+        .filter((rev): rev is string => rev !== null && rev !== undefined)
+        .sort()
+        .at(-1)!;
+      enqueueHints(db, [
+        {
+          did: c.did,
+          collection,
+          rkey,
+          source: 'reconcile',
+          hintRev,
+          receiptMs: Number(c.nowNs / 1_000_000n),
+          dueAt: Number(c.nowNs / 1_000_000n) + LIVE_REHINT_DELAY_MS,
+        },
+      ]);
+      incrementCounter(db, 'live_admission', 'walk_stale_skip');
+      res.unchanged++;
+      continue;
+    }
     if (kind === 'scrobble' || kind === 'scrobbleBatch' || kind === 'follow' || kind === 'love') {
       // A batch container is swept as one record: every projected listen of
       // it is deleted and stats_version moves (apply-record deleteProjection).
-      applyRecordTarget(db, { did: c.did, kind, collection, rkey, uri, rev: c.headRev, present: null }, o);
+      applyRecordTarget(
+        db,
+        { did: c.did, kind, collection, rkey, uri, rev: c.headRev, present: null },
+        {
+          ...o,
+          ...(c.random ? { live: { random: c.random, evidence, legacyRev: null }, liveCandidates: canCandidate } : {}),
+        },
+      );
+      if (c.random)
+        lateAccept(db, {
+          uri,
+          did: c.did,
+          collection,
+          rkey,
+          evidence,
+          nowMs: Number(c.nowNs / 1_000_000n),
+          random: c.random,
+        });
+      if (evidence && c.headRev >= (evidence.up_rev ?? '') && c.headRev >= (evidence.del_rev ?? ''))
+        db.run('DELETE FROM live_record_evidence WHERE uri=?', uri);
     } else {
       // A settings record (or a row of a collection no longer configured):
       // proven absent at headRev. An absent settings record of an

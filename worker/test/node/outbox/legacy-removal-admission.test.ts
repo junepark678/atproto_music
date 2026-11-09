@@ -7,6 +7,7 @@ import { applyRecordProof, applyRecordTarget, projectedListensOfRecord } from '.
 import { applySnapshotChunk } from '../../../src/do/write/apply-snapshot';
 import { musicKeyColumns } from '../../../src/do/write/keys';
 import { projectionListenKey, retainedRecordProvenance } from '../../../src/forward/projection';
+import { authorizedLiveOptions } from '../../write/support';
 import { type Harness, SCROBBLE, T0, withHarness } from './support';
 
 const BATCH = 'com.example.atmusic.scrobbleBatch';
@@ -31,7 +32,7 @@ function apply(h: Harness, proof: RecordProof, forwarding = true) {
       prefix: PREFIX,
       nowNs: fromMs(h.kit.clock.nowMs()),
       receiptNs: fromMs(h.kit.clock.nowMs()),
-      ...(forwarding ? { forwarding: { random: LIVE_RANDOM } } : {}),
+      ...(forwarding ? { live: authorizedLiveOptions(h.db, proof, LIVE_RANDOM).live } : {}),
     }),
   );
 }

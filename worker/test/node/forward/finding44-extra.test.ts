@@ -7,14 +7,26 @@ import { applyRecordProof } from '../../../src/do/write/apply-record';
 import { hasCanonicalListenSurvivor } from '../../../src/forward/delete-enqueue';
 import { projectionListenKey } from '../../../src/forward/projection';
 import { enqueueForwards } from '../../../src/outbox/forward-enqueue';
-import { ALICE, deleteProof, NOW_MS, OPTS, putProof, repoFor, SCROBBLE, scrobble, seedUser } from '../../write/support';
+import {
+  ALICE,
+  authorizedLiveOptions,
+  deleteProof,
+  NOW_MS,
+  OPTS,
+  putProof,
+  repoFor,
+  SCROBBLE,
+  scrobble,
+  seedUser,
+} from '../../write/support';
 import { withMigratedDb } from '../support/node-db';
 
 const record = scrobble({ artist: 'Björk', track: 'Jóga' });
 const second = Date.parse(record.listenedAt as string) / 1000;
 const [artistKey, musicTrackKey] = trackKey('Björk', 'Jóga');
 const identity = projectionListenKey(ALICE, record.listenedAt as string, artistKey, musicTrackKey);
-const live = { ...OPTS, forwarding: { random: seededRandom(619) } };
+const live = (db: Db, proof: Awaited<ReturnType<typeof putProof>>) =>
+  authorizedLiveOptions(db, proof, seededRandom(619));
 function seedLink(db: Db) {
   seedUser(db, ALICE);
   ensureAccount({ db, clock: { nowMs: () => NOW_MS } } as any, { did: ALICE, verifiedHandle: null });
@@ -110,7 +122,7 @@ it('batch same-CID recreation survives historical live deletion', async () => {
     seedLink(db);
     expect(db.tx(() => applyRecordProof(db, a, OPTS)).outcome).toBe('applied');
     delivered(db);
-    expect(db.tx(() => applyRecordProof(db, gone, live)).outcome).toBe('absent');
+    expect(db.tx(() => applyRecordProof(db, gone, live(db, gone))).outcome).toBe('absent');
     expect(db.tx(() => applyRecordProof(db, again, OPTS)).outcome).toBe('applied');
     expect(await drain(db)).toEqual({ deletes: 0, lookups: 0 });
   });
@@ -124,7 +136,7 @@ it('legacy live tombstone does not hide recreated single', async () => {
     seedLink(db);
     expect(db.tx(() => applyRecordProof(db, a, OPTS)).outcome).toBe('applied');
     delivered(db);
-    expect(db.tx(() => applyRecordProof(db, gone, live)).outcome).toBe('absent');
+    expect(db.tx(() => applyRecordProof(db, gone, live(db, gone))).outcome).toBe('absent');
     db.run('UPDATE linked_pull_tombstones SET identity_key=?', `live:${uri('a')}`);
     expect(db.tx(() => applyRecordProof(db, again, OPTS)).outcome).toBe('applied');
     expect(await drain(db)).toEqual({ deletes: 0, lookups: 0 });
@@ -142,7 +154,7 @@ it('legacy API tombstone remains removal intent while final copy disappears', as
     delivered(db);
     apiSingle(db, 'a');
     db.run('UPDATE linked_pull_tombstones SET identity_key=?', `uri:${uri('a')}`);
-    expect(db.tx(() => applyRecordProof(db, gone, live)).outcome).toBe('absent');
+    expect(db.tx(() => applyRecordProof(db, gone, live(db, gone))).outcome).toBe('absent');
     expect(await drain(db)).toMatchObject({ deletes: 1 });
   });
 });
@@ -169,9 +181,9 @@ it('invalid later record does not clear historical removal intent', async () => 
   await withMigratedDb((db) => {
     seedLink(db);
     expect(db.tx(() => applyRecordProof(db, a, OPTS)).outcome).toBe('applied');
-    expect(db.tx(() => applyRecordProof(db, gone, live)).outcome).toBe('absent');
+    expect(db.tx(() => applyRecordProof(db, gone, live(db, gone))).outcome).toBe('absent');
     expect(db.all('SELECT * FROM linked_pull_tombstones')).toHaveLength(1);
-    expect(db.tx(() => applyRecordProof(db, invalid, live)).outcome).toBe('excluded');
+    expect(db.tx(() => applyRecordProof(db, invalid, live(db, invalid))).outcome).toBe('excluded');
     expect(db.all('SELECT * FROM linked_pull_tombstones')).toHaveLength(1);
   });
 });
@@ -191,7 +203,7 @@ it.each([false, true])('replacement with survivor and final removal: batch=%s', 
     expect(db.tx(() => applyRecordProof(db, a, OPTS)).outcome).toBe('applied');
     expect(db.tx(() => applyRecordProof(db, b, OPTS)).outcome).toBe('applied');
     delivered(db);
-    expect(db.tx(() => applyRecordProof(db, replaced, live)).outcome).toBe('applied');
+    expect(db.tx(() => applyRecordProof(db, replaced, live(db, replaced))).outcome).toBe('applied');
     expect(db.all('SELECT * FROM listenbrainz_deletes')).toHaveLength(0);
     apiSingle(db, 'b');
     expect(await drain(db)).toMatchObject({ deletes: 1 });
@@ -209,7 +221,7 @@ it('batch replacement excludes outstanding API removal', async () => {
     delivered(db);
     apiSingle(db, 'a');
     expect(db.all('SELECT * FROM listenbrainz_deletes')).toHaveLength(0);
-    expect(db.tx(() => applyRecordProof(db, c, live)).outcome).toBe('applied');
+    expect(db.tx(() => applyRecordProof(db, c, live(db, c))).outcome).toBe('applied');
     expect(await drain(db)).toMatchObject({ deletes: 1 });
   });
 });
@@ -254,13 +266,13 @@ it('genuine forward in new generation then repository deletion remains eligible'
     };
     expect(db.tx(() => applyRecordProof(db, a, OPTS)).outcome).toBe('applied');
     await forward();
-    expect(db.tx(() => applyRecordProof(db, gone, live)).outcome).toBe('absent');
+    expect(db.tx(() => applyRecordProof(db, gone, live(db, gone))).outcome).toBe('absent');
     expect(await drain(db)).toMatchObject({ deletes: 1 });
     db.run('UPDATE linked_accounts SET generation=generation+1');
     expect(db.tx(() => applyRecordProof(db, again, OPTS)).outcome).toBe('applied');
     await forward();
     expect(submits).toBe(2);
-    expect(db.tx(() => applyRecordProof(db, goneAgain, live)).outcome).toBe('absent');
+    expect(db.tx(() => applyRecordProof(db, goneAgain, live(db, goneAgain))).outcome).toBe('absent');
     expect(await drain(db)).toMatchObject({ deletes: 1 });
   });
 });
@@ -283,8 +295,8 @@ it('different-identity recreation preserves deleted old identity history', async
   await withMigratedDb((db) => {
     seedLink(db);
     expect(db.tx(() => applyRecordProof(db, a, OPTS)).outcome).toBe('applied');
-    expect(db.tx(() => applyRecordProof(db, gone, live)).outcome).toBe('absent');
-    expect(db.tx(() => applyRecordProof(db, other, live)).outcome).toBe('applied');
+    expect(db.tx(() => applyRecordProof(db, gone, live(db, gone))).outcome).toBe('absent');
+    expect(db.tx(() => applyRecordProof(db, other, live(db, other))).outcome).toBe('applied');
     expect(
       db.all('SELECT * FROM linked_pull_tombstones WHERE artist_key=? AND track_key=?', artistKey, musicTrackKey),
     ).toHaveLength(1);
@@ -312,7 +324,7 @@ it('stale present proof cannot clear live removal intent', async () => {
   await withMigratedDb((db) => {
     seedLink(db);
     expect(db.tx(() => applyRecordProof(db, a, OPTS)).outcome).toBe('applied');
-    expect(db.tx(() => applyRecordProof(db, gone, live)).outcome).toBe('absent');
+    expect(db.tx(() => applyRecordProof(db, gone, live(db, gone))).outcome).toBe('absent');
     expect(db.tx(() => applyRecordProof(db, a, OPTS)).outcome).toBe('stale_head');
     expect(db.all('SELECT * FROM linked_pull_tombstones')).toHaveLength(1);
   });

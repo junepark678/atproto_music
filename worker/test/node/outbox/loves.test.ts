@@ -8,6 +8,7 @@ import { expect, it } from 'vitest';
 import { applyRecordProof } from '../../../src/do/write/apply-record';
 import { enqueueForwards } from '../../../src/outbox/forward-enqueue';
 import { enqueueLove, enqueueUnlove } from '../../../src/outbox/love-ops';
+import { authorizedLiveOptions } from '../../write/support';
 import { CREATE, DELETE, GET, type Harness, LIST, LOVE, remoteRecords, withHarness } from './support';
 
 function love(artist: string, track: string) {
@@ -31,7 +32,7 @@ async function projectLove(h: Harness, rkey: string, live = false) {
       prefix: 'com.example.atmusic',
       nowNs,
       receiptNs: nowNs,
-      ...(live ? { forwarding: { random: projectionRandom } } : {}),
+      ...(live ? authorizedLiveOptions(h.db, proof, projectionRandom) : {}),
     }),
   );
 }

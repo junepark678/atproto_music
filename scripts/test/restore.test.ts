@@ -69,6 +69,7 @@ import {
   testEnv,
   testSecretsDocument,
 } from '../../worker/test/node/support/app.ts';
+import { authorizedLiveOptions } from '../../worker/test/write/support.ts';
 import { type CommandResult, main, type RestoreStep } from '../admin/restore.ts';
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -178,6 +179,8 @@ interface WorldOptions {
   keepWal?: boolean;
   /** Extra SQL run on the live database after the backup. */
   liveSql?: string[];
+  /** SQL run immediately before the backup for stale-backup merge coverage. */
+  backupSql?: string[];
 }
 
 /**
@@ -246,6 +249,8 @@ async function buildWorld(
     { did: DID_A, service: 'lastfm', remoteUser: 'alice', credential: LASTFM_SK },
   ).link.id;
   insertOperation(db, 'op1', DID_A, clock.nowMs());
+
+  for (const sql of options.backupSql ?? []) db.exec(sql);
 
   const backups = createBackups({ db, dir: join(state, 'backups'), clock, log, minFreeBytes: 0, revocations: journal });
   const outcome = await backups.run('manual');
@@ -577,6 +582,49 @@ function boxOf(doc: Record<string, unknown>): { box: Box; secrets: Secrets } {
 // ---------------------------------------------------------------------------
 
 describe('restore.ts', () => {
+  it('keeps the newest live evidence and candidate when a readable restore merges an older backup', async () => {
+    const uri = `at://${DID_A}/${PREFIX}.scrobble/evidence-restore`;
+    const identity = 'listen:restore-candidate';
+    const world = await buildWorld({
+      backupSql: [
+        `INSERT INTO live_record_evidence(uri,did,collection,rkey,up_rev,up_action,up_cid,del_rev,conflict_rev,received_ms,expires_at_ms)
+         VALUES('${uri}','${DID_A}','${PREFIX}.scrobble','evidence-restore','2222222222222','create','bafyold',NULL,NULL,1,9999999999999)`,
+        `INSERT INTO live_acceptance_candidates(uri,identity_key,kind,member_uri,cid,created_at_ms,expires_at_ms)
+         VALUES('${uri}','${identity}','scrobble','${uri}','bafyold',1,9999999999999)`,
+      ],
+      liveSql: [
+        `UPDATE live_record_evidence SET up_rev='3333333333333',up_action='update',up_cid='bafynew' WHERE uri='${uri}'`,
+        `UPDATE live_acceptance_candidates SET cid='bafynew',created_at_ms=2 WHERE uri='${uri}' AND identity_key='${identity}'`,
+      ],
+    });
+    expect(TABLE_CLASS.live_record_evidence).toBe('non-derived');
+    expect(TABLE_CLASS.live_acceptance_candidates).toBe('non-derived');
+    const systemd = new FakeSystemd(world, { servicePort: null });
+    await systemd.boot();
+    const result = await restoreCli(world, systemd, [...baseArgs(world), '--no-ready-check']);
+    expect(result.code, `${result.stdout}\n${result.stderr}`).toBe(0);
+    const db = openSqliteDb(world.dbPath, { busyTimeoutMs: BUSY_MS });
+    try {
+      expect(db.one('SELECT up_rev,up_action,up_cid FROM live_record_evidence WHERE uri=?', uri)).toEqual({
+        up_rev: '3333333333333',
+        up_action: 'update',
+        up_cid: 'bafynew',
+      });
+      expect(
+        db.one(
+          'SELECT cid,created_at_ms FROM live_acceptance_candidates WHERE uri=? AND identity_key=?',
+          uri,
+          identity,
+        ),
+      ).toEqual({
+        cid: 'bafynew',
+        created_at_ms: 2,
+      });
+    } finally {
+      db.close();
+    }
+  }, 60_000);
+
   it('preserves live non-derived MusicBrainz and cover-art state while rebuilding derived projections from backup', async () => {
     expect(TABLE_CLASS.mb_tracks).toBe('non-derived');
     expect(TABLE_CLASS.mb_cover_art).toBe('non-derived');
@@ -682,7 +730,7 @@ describe('restore.ts', () => {
           prefix: PREFIX,
           nowNs,
           receiptNs: nowNs,
-          forwarding: { random: seededRandom(0x51) },
+          live: authorizedLiveOptions(db, recordProof, seededRandom(0x51)).live,
         }),
       );
     };
@@ -808,7 +856,7 @@ describe('restore.ts', () => {
             prefix: PREFIX,
             nowNs,
             receiptNs: nowNs,
-            forwarding: { random: projectionRandom },
+            live: authorizedLiveOptions(restoredDb, recordProof, projectionRandom).live,
           }),
         );
       expect(apply(await proof()).outcome).toBe('applied');

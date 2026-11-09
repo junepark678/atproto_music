@@ -15,6 +15,7 @@ import { describe, expect, it } from 'vitest';
 import { NODE_BUDGET, type SliceBudget } from '../../src/config';
 import type { Db } from '../../src/do/db';
 import { resolveIdentity } from '../../src/do/ingest/identity-cache';
+import { recordLiveEvidence } from '../../src/do/ingest/live-evidence';
 import { drain, drainState } from '../../src/do/ingest/verify-drain';
 import { visibleFollowEdge, visibleScrobblesFrom } from '../../src/do/read/visibility';
 import { runDue, type TimerHandlers } from '../../src/do/timers';
@@ -96,6 +97,45 @@ const getRecordCalls = (pds: FakePds, rkey?: string) =>
 const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
 describe('verify drain', () => {
+  it('re-hints orphaned durable event evidence in one bounded process pass after restore', async () => {
+    const k = await kit();
+    const alice = k.users.Alice.did;
+    const collection = k.collections.scrobble;
+    const rkey = 'orphan-evidence';
+    await k.externalPut('Alice', collection, rkey, scrobble(k, '2026-01-15T11:00:00Z'));
+    const event = k.jetstream.events.at(-1)!;
+    if (event.kind !== 'commit') throw new Error('expected Jetstream commit event');
+    await withIngestIndex(async (i) => {
+      seedUser(i.db, alice);
+      const uri = `at://${alice}/${collection}/${rkey}`;
+      i.db.tx(() =>
+        recordLiveEvidence(
+          i.db,
+          {
+            uri,
+            did: alice,
+            collection,
+            rkey,
+            rev: event.commit.rev,
+            action: 'create',
+            cid: event.commit.cid!,
+          },
+          k.clock.nowMs(),
+        ),
+      );
+      const m = depsFor(i.db, k);
+      expect(await drain(m, k.clock.nowMs())).toMatchObject({ claimed: 0, outcomes: [] });
+      expect(i.db.one('SELECT uri,source,hint_rev FROM hints WHERE uri=?', uri)).toEqual({
+        uri,
+        source: 'reconcile',
+        hint_rev: event.commit.rev,
+      });
+      expect(await drain(m, k.clock.nowMs())).toMatchObject({ claimed: 1, outcomes: [{ uri, outcome: 'applied' }] });
+      expect(rows(i.db, alice).map((row) => row.uri)).toEqual([uri]);
+      expect(i.db.all('SELECT * FROM live_record_evidence')).toHaveLength(0);
+    });
+  });
+
   it('known active DID hint → one getRecord call → row applied with receipt-time validation', async () => {
     const k = await kit();
     const alice = k.users.Alice.did;
@@ -299,6 +339,25 @@ describe('verify drain', () => {
       const aliceGen = seedUser(db, alice);
       seedUser(db, bob);
       const rkeys = (n: number) => Array.from({ length: n }, (_, j) => `r${String(j).padStart(2, '0')}`);
+      const put = await k.externalPut('Alice', S, 'r00', scrobble(k, '2026-01-15T11:00:00Z'));
+      const event = k.jetstream.events.at(-1)!;
+      if (event.kind !== 'commit') throw new Error('expected Jetstream commit event');
+      const evidenceUri = `at://${alice}/${S}/r00`;
+      db.tx(() =>
+        recordLiveEvidence(
+          db,
+          {
+            uri: evidenceUri,
+            did: alice,
+            collection: S,
+            rkey: 'r00',
+            rev: event.commit.rev,
+            action: event.commit.operation,
+            ...(event.commit.cid ? { cid: event.commit.cid } : {}),
+          },
+          k.clock.nowMs(),
+        ),
+      );
       enqueue(
         db,
         rkeys(25).map((r) => hint(k, alice, S, r)),
@@ -325,6 +384,10 @@ describe('verify drain', () => {
       expect(getRecordCalls(k.pds.Alice)).toBe(0);
       expect(k.plc.count(alice)).toBe(0);
       expect(snapshotJobs(db)).toEqual([{ did: alice, state: 'pending', generation: aliceGen, reason: 'coalesced' }]);
+      expect(db.one('SELECT up_rev,up_cid FROM live_record_evidence WHERE uri=?', evidenceUri)).toEqual({
+        up_rev: put.rev,
+        up_cid: put.ops[0]!.cid,
+      });
       expect(db.one('SELECT count(*) AS n FROM hints WHERE did = ?', alice)).toEqual({ n: 0 });
       expect(counterValue(db, 'coalesced')).toBe(1);
       // Bob: 24 individual proofs.

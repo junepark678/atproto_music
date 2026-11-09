@@ -80,6 +80,7 @@ import { VerifyError, type VerifyErrorCode } from '@atmusic/atproto/verify/types
 import { isTid } from '@atmusic/core/syntax';
 import { fromMs, parseRfc3339 } from '@atmusic/core/timestamp';
 import type { SliceBudget } from '../../config';
+import { dropLiveState, lateAccept } from '../../forward/live-acceptance';
 import type { ModuleDeps } from '../contracts';
 import type { Db } from '../db';
 import { cancel, schedule } from '../timers';
@@ -94,6 +95,7 @@ import {
   deferHint,
   deleteHint,
   deleteHintsForDid,
+  enqueueHints,
   type HintRow,
   nextHintDue,
   readHint,
@@ -101,6 +103,7 @@ import {
   takeDue,
 } from './hints';
 import { cachedIdentity, resolveIdentity } from './identity-cache';
+import { countLiveAdmission, isStale, readLiveEvidence, sweepLiveAdmission } from './live-evidence';
 import {
   FetchLimiter,
   hostOf,
@@ -159,6 +162,7 @@ export type DrainOutcome =
   | 'snapshot_scheduled'
   | 'verify_failed'
   | 'stale'
+  | 'staleProof'
   | 'gave_up'
   | 'budget';
 
@@ -174,6 +178,8 @@ export interface DrainReport {
 interface DrainState {
   inFlight: Set<string>;
   limiter: FetchLimiter;
+  orphanCursor: string | null;
+  orphanReconciled: boolean;
 }
 
 const states = new WeakMap<Db, DrainState>();
@@ -188,6 +194,8 @@ export function drainState(db: Db, budget: Pick<SliceBudget, 'concurrentFetches'
         concurrentFetches: budget.concurrentFetches,
         perHostConcurrency: budget.perHostConcurrency,
       }),
+      orphanCursor: null,
+      orphanReconciled: false,
     };
     states.set(db, state);
   }
@@ -261,6 +269,7 @@ function drop(c: Ctx, row: HintRow, reason: string): Outcome {
   const db = c.m.db;
   db.tx(() => {
     deleteHint(db, row.uri);
+    dropLiveState(db, row.uri);
     counter(db, HINT_DROPPED_COUNTER, reason);
   });
   return { outcome: 'dropped', detail: reason };
@@ -282,16 +291,47 @@ function applyVerified(c: Ctx, row: HintRow, proof: Parameters<typeof applyRecor
   try {
     return db.tx((): Outcome => {
       const current = readHint(db, row.uri);
+      const evidence = readLiveEvidence(db, row.uri, c.now);
+      if (isStale(evidence, proof.commit.rev)) {
+        // Keep the projection, candidates, evidence and queue ownership intact.
+        backoffHint(db, row.uri, c.now, 'stale_live_evidence');
+        countLiveAdmission(db, 'stale_proof');
+        return { outcome: 'staleProof', detail: 'live_evidence' };
+      }
+      const legacy =
+        row.source === 'jetstream' &&
+        row.hint_rev !== null &&
+        (row.evidence_rev === null || row.hint_rev > row.evidence_rev) &&
+        (current === null ||
+          current.evidence_rev === null ||
+          (current.hint_rev !== null && current.hint_rev > current.evidence_rev));
       const result = applyRecordProof(db, proof, {
         receiptNs,
         prefix: c.prefix,
         nowNs: fromMs(c.now),
-        ...(row.source === 'jetstream' && row.hint_rev === proof.commit.rev
-          ? { forwarding: { random: c.m.random } }
-          : {}),
+        live: { random: c.m.random, evidence, legacyRev: legacy ? row.hint_rev : null },
+        liveCandidates: true,
       });
       if (result.outcome === 'stale_head') {
         return staleProof(c, row, current);
+      }
+      if (result.outcome === 'ignored') dropLiveState(db, row.uri);
+      else {
+        lateAccept(db, {
+          uri: row.uri,
+          did: row.did,
+          collection: row.collection,
+          rkey: row.rkey,
+          evidence,
+          nowMs: c.now,
+          random: c.m.random,
+        });
+        if (
+          evidence !== null &&
+          proof.commit.rev >= (evidence.up_rev ?? '') &&
+          proof.commit.rev >= (evidence.del_rev ?? '')
+        )
+          db.run('DELETE FROM live_record_evidence WHERE uri=?', row.uri);
       }
       if (result.admit) {
         // The opt-out was lifted: admit a fresh snapshot in the same transaction.
@@ -356,6 +396,7 @@ async function processHint(c: Ctx, taken: HintRow): Promise<Outcome> {
       const a = admit(db, row.did, row.source, c.now);
       if (a.status === 'admitted' || a.status === 'known') {
         deleteHint(db, row.uri);
+        dropLiveState(db, row.uri);
         return { outcome: 'admitted', detail: a.status };
       }
       if (a.status === 'suppressed') {
@@ -548,6 +589,68 @@ export async function drain(m: ModuleDeps, now: number, budget: SliceBudget = m.
     for (const row of queue) state.inFlight.delete(row.uri);
   }
   report.subrequests = c.meter.reserved;
-  m.db.tx(() => scheduleDrainTimer(m.db, now));
+  m.db.tx(() => {
+    sweepLiveAdmission(m.db, now);
+    if (!state.orphanReconciled) {
+      const rows = m.db.all<{
+        uri: string;
+        did: string;
+        collection: string;
+        rkey: string;
+        up_rev: string | null;
+        del_rev: string | null;
+      }>(
+        `SELECT uri,did,collection,rkey,up_rev,del_rev FROM live_record_evidence
+         WHERE uri>? AND expires_at_ms>? ORDER BY uri LIMIT 200`,
+        state.orphanCursor ?? '',
+        now,
+      );
+      const rehint: Array<{
+        did: string;
+        collection: string;
+        rkey: string;
+        source: 'reconcile';
+        hintRev: string;
+        receiptMs: number;
+      }> = [];
+      for (const row of rows) {
+        state.orphanCursor = row.uri;
+        const exists = m.db.one('SELECT 1 AS hit FROM hints WHERE uri=?', row.uri) !== null;
+        const walking =
+          m.db.one(
+            "SELECT 1 AS hit FROM repo_jobs WHERE did=? AND kind='snapshot' AND state IN ('pending','running') LIMIT 1",
+            row.did,
+          ) !== null;
+        if (!exists && !walking) {
+          const hintRev =
+            row.up_rev === null
+              ? row.del_rev!
+              : row.del_rev === null
+                ? row.up_rev
+                : row.up_rev > row.del_rev
+                  ? row.up_rev
+                  : row.del_rev;
+          rehint.push({
+            did: row.did,
+            collection: row.collection,
+            rkey: row.rkey,
+            source: 'reconcile',
+            hintRev,
+            receiptMs: now,
+          });
+        }
+      }
+      if (rehint.length) {
+        enqueueHints(m.db, rehint);
+        m.db.run(
+          `INSERT INTO counters(name,label,value) VALUES('live_admission','orphan_rehint',?)
+          ON CONFLICT(name,label) DO UPDATE SET value=counters.value+excluded.value`,
+          rehint.length,
+        );
+      }
+      if (rows.length < 200) state.orphanReconciled = true;
+    }
+    scheduleDrainTimer(m.db, now);
+  });
   return report;
 }

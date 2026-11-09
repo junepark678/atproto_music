@@ -90,6 +90,26 @@ interface ExpectedTable {
 }
 
 const NEW_TABLES: Record<string, ExpectedTable> = {
+  live_record_evidence: {
+    columns: [
+      'uri',
+      'did',
+      'collection',
+      'rkey',
+      'up_rev',
+      'up_action',
+      'up_cid',
+      'del_rev',
+      'conflict_rev',
+      'received_ms',
+      'expires_at_ms',
+    ],
+    pk: ['uri'],
+  },
+  live_acceptance_candidates: {
+    columns: ['uri', 'identity_key', 'kind', 'member_uri', 'cid', 'created_at_ms', 'expires_at_ms'],
+    pk: ['uri', 'identity_key'],
+  },
   listenbrainz_deletes: {
     columns: [
       'id',
@@ -793,6 +813,8 @@ const NEW_SCROBBLE_COLUMNS = cols<ScrobbleV2Columns>({
 
 /** New named indexes: table, unique, partial, [column, desc] in key order. */
 const NEW_INDEXES: Record<string, [string, number, number, Array<[string, number]>]> = {
+  live_record_evidence_expiry: ['live_record_evidence', 0, 0, [['expires_at_ms', 0]]],
+  live_acceptance_candidates_expiry: ['live_acceptance_candidates', 0, 0, [['expires_at_ms', 0]]],
   forward_love_lanes_due: [
     'forward_love_lanes',
     0,
@@ -1576,6 +1598,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       return {
         objects,
         scrobbles: columnsOf(db, 'scrobbles'),
+        hints: columnsOf(db, 'hints'),
         tables: Object.fromEntries(
           Object.keys(NEW_TABLES).map((t) => [
             t,
@@ -1612,12 +1635,13 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
     for (const o of v1.objects) {
       const now = v2.objects.find((x) => x.name === o.name);
       expect([o.name, now?.type]).toEqual([o.name, o.type]);
-      if (o.name !== 'scrobbles') expect([o.name, now?.sql]).toEqual([o.name, o.sql]);
+      if (o.name !== 'scrobbles' && o.name !== 'hints') expect([o.name, now?.sql]).toEqual([o.name, o.sql]);
     }
 
     // scrobbles: the v1 columns in place, then the §6.2/§8.4 columns.
     expect(v2.scrobbles).toEqual([...v1.scrobbles, ...NEW_SCROBBLE_COLUMNS]);
     expect(v1.scrobbles).not.toContain('album_artist');
+    expect(v2.hints).toContain('evidence_rev');
 
     // Every new table's columns, primary key and UNIQUE constraints.
     for (const [table, e] of Object.entries(NEW_TABLES)) {
@@ -1964,6 +1988,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       "45|'forward_love_recording_history'",
       "46|'forward_love_recording_targets'",
       "47|'operations_record_target'",
+      "48|'live_admission_evidence'",
     ]);
     // The new scrobble columns exist and are NULL on every migrated row.
     expect(after.newColumns).toHaveLength(expectedScrobbles);
@@ -2018,6 +2043,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       { version: 45, name: 'forward_love_recording_history' },
       { version: 46, name: 'forward_love_recording_targets' },
       { version: 47, name: 'operations_record_target' },
+      { version: 48, name: 'live_admission_evidence' },
     ]);
     expect(after.compat).toEqual([{ singleton: 1, min_compatible_version: 2 }]);
     expect(after.newTablesEmpty).toEqual(['mb_cover_art_usage']);

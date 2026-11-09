@@ -823,6 +823,7 @@ class Slice {
           receiptNs: nowNs,
           prefix: this.prefix,
           nowNs,
+          random: this.m.random,
         });
         if (chunk.outcome === 'suppressed') return 'suppressed' as const;
         if (chunk.outcome === 'superseded' || chunk.outcome === 'stale') {
