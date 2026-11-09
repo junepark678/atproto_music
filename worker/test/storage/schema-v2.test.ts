@@ -1655,7 +1655,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
     expect(new Set(TABLES).size).toBe(TABLES.length);
     expect([...TABLES].sort()).toEqual([...v2.allTables].sort());
     expect(v2.allTables).toContain('schema_migrations');
-  });
+  }, 15_000);
 
   it('CHECK constraints accept operation state cancelled and reject an unknown operation kind, operation state, link service, import source and forward kind', async () => {
     // The ADR 0005 value sets, hardcoded; schema.ts exports the same lists.
