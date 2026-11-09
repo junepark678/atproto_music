@@ -32,7 +32,7 @@ function terminalSyncError(link: Link): boolean {
 
 function terminalForwardError(link: Link): boolean {
   if (!link.lastError) return false;
-  if (link.lastError === 'lastfm_key_rejected') return true;
+  if (link.lastError === 'lastfm_key_rejected' || link.lastError === 'invalid_payload') return true;
   const lastfmCode = /^lastfm_error_(\d+)$/.exec(link.lastError);
   if (lastfmCode) return !retryableLastfmForwardCodes.has(lastfmCode[1]!);
   const httpStatus = /^http_(\d{3})$/.exec(link.lastError);
@@ -107,28 +107,22 @@ export default function SettingsLinks() {
   const refresh = useCallback(async (preserveError = false) => {
     const requestSession = activeSession.current;
     const generation = ++requestGeneration.current;
+    const isCurrent = () =>
+      mounted.current &&
+      activeSession.current === requestSession &&
+      mutationInFlight.current === 0 &&
+      generation === requestGeneration.current;
     try {
       const result = await listLinks();
-      if (
-        mounted.current &&
-        activeSession.current === requestSession &&
-        mutationInFlight.current === 0 &&
-        generation === requestGeneration.current
-      ) {
-        setLinks(result.items);
-        setDataSession(requestSession);
-        if (!preserveError) setError(null);
-      }
+      if (!isCurrent()) return false;
+      setLinks(result.items);
+      setDataSession(requestSession);
+      if (!preserveError) setError(null);
     } catch (e) {
-      if (
-        !preserveError &&
-        mounted.current &&
-        activeSession.current === requestSession &&
-        mutationInFlight.current === 0 &&
-        generation === requestGeneration.current
-      )
-        setError(e);
+      if (!isCurrent()) return false;
+      if (!preserveError) setError(e);
     }
+    return true;
   }, []);
 
   useEffect(() => {
@@ -315,8 +309,9 @@ export default function SettingsLinks() {
       if (mounted.current && activeSession.current === operationSession && generation === actionGeneration.current)
         setBusy(false);
       if (mounted.current && activeSession.current === operationSession && generation === actionGeneration.current) {
-        await refresh(Boolean(actionError));
+        const currentRead = await refresh(Boolean(actionError));
         if (
+          currentRead &&
           actionError &&
           mounted.current &&
           activeSession.current === operationSession &&

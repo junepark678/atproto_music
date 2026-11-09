@@ -1,4 +1,5 @@
 import { render } from 'preact';
+import { act } from 'preact/test-utils';
 import { afterEach, expect, it, vi } from 'vitest';
 import type { Link } from '../../src/api/account';
 import { formatLocalTime } from '../../src/components/format';
@@ -733,4 +734,66 @@ it('still connects and disconnects ListenBrainz links', async () => {
   await vi.waitFor(() => expect(root.textContent).toContain('No music services are connected.'));
   expect(requests.some((request) => request.path === '/api/v1/links/link-1' && request.method === 'DELETE')).toBe(true);
   unmount();
+});
+
+it.each(['success', 'failure'])(
+  'discards a PATCH error when its recovery %s is superseded by a poll',
+  async (outcome) => {
+    vi.useFakeTimers();
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
+    const reads: Array<{ resolve: (value: Response) => void; reject: (error: Error) => void }> = [];
+    vi.stubGlobal('fetch', (input: RequestInfo | URL, init: RequestInit = {}) => {
+      const path = new URL(String(input), 'https://music.test').pathname;
+      if (path === '/api/v1/auth/session') return Promise.resolve(Response.json(session));
+      if (init.method === 'PATCH') return Promise.resolve(Response.json({ error: 'failed' }, { status: 502 }));
+      return new Promise<Response>((resolve, reject) => reads.push({ resolve, reject }));
+    });
+    const flush = () =>
+      act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+    let view!: ReturnType<typeof mount>;
+    await act(() => {
+      view = mount();
+    });
+    try {
+      await flush();
+      reads[0]!.resolve(Response.json({ items: [link()] }));
+      await flush();
+      await act(() => {
+        const input = view.root.querySelector<HTMLInputElement>('input[type=checkbox]')!;
+        input.checked = false;
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+      });
+      await flush();
+      expect(reads).toHaveLength(2);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(30_000);
+      });
+      expect(reads).toHaveLength(3);
+      reads[2]!.resolve(Response.json({ items: [link({ remoteUser: 'latest-poll' })] }));
+      await flush();
+      expect(view.root.textContent).toContain('latest-poll');
+      if (outcome === 'success') reads[1]!.resolve(Response.json({ items: [link()] }));
+      else reads[1]!.reject(new Error('discarded recovery'));
+      await flush();
+      expect(view.root.querySelector('[role=alert]')).toBeNull();
+      expect(view.root.textContent).toContain('latest-poll');
+    } finally {
+      await act(() => view.unmount());
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  },
+);
+
+it('marks permanent invalid payload forwarding errors on active links as Error', async () => {
+  stubLinks([link({ status: 'active', lastError: 'invalid_payload' })]);
+  const view = mount();
+  try {
+    await vi.waitFor(() => expect(view.root.querySelector('.link-status-pill')?.textContent).toBe('Error'));
+    expect(view.root.textContent).not.toContain('invalid_payload');
+  } finally {
+    view.unmount();
+  }
 });
