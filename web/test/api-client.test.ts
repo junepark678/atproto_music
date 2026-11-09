@@ -8,17 +8,24 @@
 
 import type { NotifyInput, ScrobblePage } from '@atmusic/core/api-types';
 import { expect, it } from 'vitest';
-import { ApiClient, ApiDecodeError, ApiError, ApiNetworkError } from '../src/api/client';
+import { ApiClient, ApiDecodeError, ApiError, ApiNetworkError, decoders } from '../src/api/client';
 
 // ---------------------------------------------------------------------------
 // Fixtures and fake transport
 // ---------------------------------------------------------------------------
 
 const exampleFiles = import.meta.glob<unknown>('../../api/examples/*.json', { eager: true, import: 'default' });
+const v12ExampleFiles = import.meta.glob<unknown>('../../api/examples/v1.2/*.json', { eager: true, import: 'default' });
 
 function example<T = unknown>(name: string): T {
   const value = exampleFiles[`../../api/examples/${name}.json`];
   if (value === undefined) throw new Error(`missing api/examples/${name}.json`);
+  return structuredClone(value) as T;
+}
+
+function v12Example<T = unknown>(name: string): T {
+  const value = v12ExampleFiles[`../../api/examples/v1.2/${name}.json`];
+  if (value === undefined) throw new Error(`missing api/examples/v1.2/${name}.json`);
   return structuredClone(value) as T;
 }
 
@@ -30,6 +37,8 @@ interface ResponseCase {
 }
 
 const RESPONSE_CASES = example<ResponseCase[]>('response-cases');
+// `love.json` documents a closed DTO schema but no public route returns Love.
+const DTO_ONLY_FIXTURES = new Set(['love']);
 const COMPONENT_CASES = example<Record<string, string>>('component-cases');
 
 const BASE = 'https://music.example.org';
@@ -409,7 +418,11 @@ it('every api/examples response decodes and a changed field type is rejected', a
   const responseFixtures = Object.keys(exampleFiles)
     .map((file) => file.replace('../../api/examples/', '').replace('.json', ''))
     .filter(
-      (name) => !name.endsWith('-input') && !name.endsWith('-cases') && !Object.values(COMPONENT_CASES).includes(name),
+      (name) =>
+        !name.endsWith('-input') &&
+        !name.endsWith('-cases') &&
+        !DTO_ONLY_FIXTURES.has(name) &&
+        !Object.values(COMPONENT_CASES).includes(name),
     );
   expect(Object.values(COMPONENT_CASES).sort()).toEqual(['love', 'scrobble-musicbrainz', 'stats-musicbrainz']);
   expect([...new Set(RESPONSE_CASES.map((c) => c.example))].sort()).toEqual(responseFixtures.sort());
@@ -464,6 +477,37 @@ it('every api/examples response decodes and a changed field type is rejected', a
   expect(decoded).toBe(RESPONSE_CASES.length);
   expect(decoded).toBe(51);
   expect(rejected).toBeGreaterThan(300);
+});
+
+it('decodes complete MusicBrainz read DTO examples and statistics MBIDs', () => {
+  const scrobbleResult = decoders.ScrobbleResult({ scrobble: example('scrobble-musicbrainz') }, '$');
+  expect(scrobbleResult.scrobble.musicbrainz?.recordingMbid).toBe('3f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2d10');
+
+  const love = decoders.Love(example('love'), '$');
+  expect(love.musicbrainz?.releaseMbid).toBe('d2e7a5b1-1c3f-4b8e-9a6d-0f1e2d3c4b5a');
+
+  const nowPlaying = v12Example<{ nowPlaying: unknown }>('now-playing-response');
+  expect(decoders.NowPlaying(nowPlaying.nowPlaying, '$').musicbrainz?.durationSeconds).toBe(202);
+
+  const statistics = decoders.Statistics(example('stats-musicbrainz'), '$');
+  expect(statistics.topArtists[0]?.artistMbid).toBe('87c5dedd-371d-4a53-9f7f-80522fb7f3cb');
+  expect(statistics.topTracks[0]?.recordingMbid).toBe('3f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2d10');
+  expect(statistics.topAlbums[0]?.releaseMbid).toBe('d2e7a5b1-1c3f-4b8e-9a6d-0f1e2d3c4b5a');
+});
+
+it('rejects malformed MusicBrainz UUIDs and durations while keeping DTOs closed', () => {
+  const scrobbleResult = { scrobble: example<Record<string, unknown>>('scrobble-musicbrainz') };
+  (scrobbleResult.scrobble.musicbrainz as Record<string, unknown>).recordingMbid = 'not-a-uuid';
+  expect(() => decoders.ScrobbleResult(scrobbleResult, '$')).toThrow('$.scrobble.musicbrainz.recordingMbid');
+
+  const nowPlaying = v12Example<{ nowPlaying: Record<string, unknown> }>('now-playing-response');
+  (nowPlaying.nowPlaying.musicbrainz as Record<string, unknown>).durationSeconds = '202';
+  expect(() => decoders.NowPlaying(nowPlaying.nowPlaying, '$')).toThrow('$.musicbrainz.durationSeconds');
+
+  const statistics = example<Record<string, unknown>>('stats-musicbrainz');
+  (statistics.topArtists as Array<Record<string, unknown>>)[0]!.artistMbid = 'not-a-uuid';
+  expect(() => decoders.Statistics(statistics, '$')).toThrow('$.topArtists[0].artistMbid');
+  expect(() => decoders.Love({ ...example<Record<string, unknown>>('love'), extra: true }, '$')).toThrow('$.extra');
 });
 
 const INDEXING = { state: 'current', caughtUp: true, lastIndexedAt: '2026-11-07T15:25:53.327000000Z', lagSeconds: 280 };

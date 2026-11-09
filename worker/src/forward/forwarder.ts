@@ -13,8 +13,8 @@
 //    link's own 1 request/s token and no rate-limit hold. For that link it
 //    sends, in this order of preference:
 //    - its newest due now playing (older ones are superseded), once;
-//    - otherwise whichever is older of its due scrobbles and its love/unlove
-//      head (forward-outbox.ts `loveHead`: love toggles go strictly in order).
+//    - otherwise whichever is older of its due scrobbles and the next due
+//      love/unlove head for any love key (toggles stay ordered per track).
 //      Last.fm scrobbles go as one signed track.scrobble of ≤ 50 rows, oldest
 //      first; ListenBrainz sends one due listen as `single` and a backlog as
 //      `import` of ≤ 100; a row whose import was refused with 400 is retried
@@ -66,11 +66,13 @@
 // production.
 
 import type { Clock, Random } from '@atmusic/core/deps';
+import { albumKey, artistKey, trackKey } from '@atmusic/core/music-key';
 import type { CoreExtension } from '../app/host';
 import type { LinkedAccountRow } from '../app/rows';
 import type { Box } from '../crypto/box';
 import type { Logger } from '../do/contracts';
 import type { Db } from '../do/db';
+import { enqueueTrack, matchedRecordingMbid } from '../musicbrainz/store';
 import { loveKeyOf } from '../outbox/love-ops';
 import {
   backoffRows,
@@ -82,7 +84,6 @@ import {
   type ForwardTrack,
   holdLinkRows,
   lastfmKeyRejectedAt,
-  loveHead,
   lovePayload,
   markLastfmKeyRejected,
   nextUtcMidnight,
@@ -233,22 +234,68 @@ function scrobbleJob(rt: ForwardRuntime, link: LinkRow, now: number): Job | null
   }
 }
 
+/** First queued row for each normalized love key, preserving FIFO across backoff. */
+function queuedLoveHeads(db: Db, linkId: string): QueuedRow[] {
+  const rows = db.all<QueuedRow>(
+    `SELECT f.*,f.rowid AS seq FROM forward_outbox f
+     WHERE f.link_id=? AND f.kind IN ('love','unlove') AND f.state='queued'
+     ORDER BY f.created_at_ms,f.rowid`,
+    linkId,
+  );
+  const seen = new Set<string>();
+  const heads: QueuedRow[] = [];
+  for (const row of rows) {
+    const track = lovePayload(row);
+    const key = track === null ? `invalid:${row.id}` : (loveKeyOf(track.artist, track.track) ?? `invalid:${row.id}`);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    heads.push(row);
+  }
+  return heads;
+}
+
 function loveJob(rt: ForwardRuntime, link: LinkRow, now: number): Job | null {
   for (;;) {
-    const head = loveHead(rt.db, link.id);
-    if (head === null || head.due_at > now) return null;
+    const head = queuedLoveHeads(rt.db, link.id).find((row) => row.due_at <= now);
+    if (head === undefined) return null;
     const [entry] = parsed(rt, [head], lovePayload, now);
     if (entry === undefined) continue;
     if (link.service === 'listenbrainz' && entry[1].recordingMbid === undefined) {
       // An unlove names only the track; the MBID its love was sent with is known locally.
       const mbid = head.kind === 'unlove' ? knownRecordingMbid(rt.db, head, entry[1]) : null;
-      if (mbid === null) {
-        // ListenBrainz feedback needs a recording MBID; without one it is not forwarded.
-        settleRows(rt.db, [head.id], 'ignored', now, 'no_recording_mbid', false);
+      const key = {
+        artistKey: artistKey(entry[1].artist),
+        trackKey: trackKey(entry[1].artist, entry[1].track)[1],
+        albumKey: entry[1].album ? albumKey(entry[1].artist, entry[1].album)?.[1] : '',
+      };
+      const local = mbid ?? matchedRecordingMbid(rt.db, key);
+      if (local === null) {
+        const resolved = rt.db.one<{ status: string }>(
+          'SELECT status FROM mb_tracks WHERE artist_key=? AND track_key=? AND album_key=?',
+          key.artistKey,
+          key.trackKey,
+          key.albumKey ?? '',
+        );
+        if (resolved?.status === 'unmatched') {
+          settleRows(rt.db, [head.id], 'ignored', now, 'no_recording_mbid', false);
+          continue;
+        }
+        enqueueTrack(rt.db, key, now);
+        const deadline = head.created_at_ms + 24 * 60 * 60 * 1000;
+        if (now >= deadline) {
+          settleRows(rt.db, [head.id], 'ignored', now, 'mbid_unresolved', false);
+          continue;
+        }
+        rt.db.run(
+          "UPDATE forward_outbox SET due_at=?,updated_at_ms=? WHERE id=? AND state='queued'",
+          Math.min(deadline, now + 60_000),
+          now,
+          head.id,
+        );
         continue;
       }
-      entry[1].recordingMbid = mbid;
-      withRecordingMbid(rt.db, head, mbid);
+      entry[1].recordingMbid = local;
+      withRecordingMbid(rt.db, head, local);
     }
     return { link, kind: head.kind as 'love' | 'unlove', rows: [head], track: entry[1] };
   }
@@ -582,8 +629,11 @@ export function nextForwardDue(rt: ForwardRuntime, now: number): number | null {
   let lastfmBacklog = false;
   for (const link of links) {
     if (link.service === 'lastfm' && rt.lastfm === null) continue;
-    const head = loveHead(rt.db, link.id);
-    const due = Math.min(link.due ?? Number.POSITIVE_INFINITY, head?.due_at ?? Number.POSITIVE_INFINITY);
+    const loveDue = queuedLoveHeads(rt.db, link.id).reduce(
+      (dueAt, row) => Math.min(dueAt, row.due_at),
+      Number.POSITIVE_INFINITY,
+    );
+    const due = Math.min(link.due ?? Number.POSITIVE_INFINITY, loveDue);
     if (due === Number.POSITIVE_INFINITY) continue;
     if (link.service === 'lastfm' && due <= now) lastfmBacklog = true;
     const at = Math.max(due, upstreamFreeAt(rt, link, now));

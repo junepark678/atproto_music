@@ -61,6 +61,33 @@
   font-size: 0.9rem;
 }
 
+.musicbrainz-link {
+  color: inherit;
+  text-decoration: underline;
+  text-decoration-color: var(--border);
+  text-underline-offset: 0.12em;
+}
+
+.external-link {
+  color: var(--muted);
+  font-size: 0.75em;
+  text-decoration: none;
+  opacity: 0;
+}
+
+.now-playing-card .external-link {
+  opacity: 1;
+}
+
+.musicbrainz-link:hover .external-link,
+.musicbrainz-link:focus-visible .external-link {
+  opacity: 1;
+}
+
+.album-muted {
+  color: var(--muted);
+}
+
 .op-status {
   display: inline-block;
   margin-left: 0.5rem;

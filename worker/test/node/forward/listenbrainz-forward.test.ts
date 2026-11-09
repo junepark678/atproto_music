@@ -264,6 +264,13 @@ describe('ListenBrainz forwarding', () => {
     // 4. A love without an MBID, and its unlove: no MBID is known anywhere.
     await love({ artist: 'Nobody', track: 'Knows' });
     await unlove('Nobody', 'Knows');
+    const [nobodyArtist, nobodyTrack] = trackKey('Nobody', 'Knows');
+    w.app.db.run(
+      "INSERT INTO mb_tracks(artist_key,track_key,album_key,status,created_at_ms) VALUES(?,?,'','unmatched',?)",
+      nobodyArtist,
+      nobodyTrack,
+      w.clock.nowMs(),
+    );
 
     const queued = w.rows();
     expect(queued.map((r) => r.kind)).toEqual(['love', 'unlove', 'unlove', 'unlove', 'love', 'unlove']);
@@ -300,6 +307,172 @@ describe('ListenBrainz forwarding', () => {
       undefined,
     ]);
     expect(w.seen.map(([meth, p]) => `${meth} ${p}`)).toEqual(Array(4).fill('POST /1/feedback/recording-feedback'));
+  });
+
+  it('keeps same-key love toggles FIFO through backoff while a different track proceeds', async () => {
+    const w = await world();
+    w.link();
+    const addLove = async (artist: string, track: string, mbid: string) =>
+      expect(
+        (
+          await enqueueLove(w.app.composed.core.deps, {
+            did: ALICE,
+            input: { artist, track, recordingMbid: mbid },
+            origin: 'listenbrainz',
+          })
+        ).ok,
+      ).toBe(true);
+    const addUnlove = async (artist: string, track: string) =>
+      expect(
+        (await enqueueUnlove(w.app.composed.core.deps, { did: ALICE, artist, track, origin: 'listenbrainz' })).ok,
+      ).toBe(true);
+
+    await addLove('Band', 'Song', MBID);
+    await addUnlove('BAND', ' song ');
+    const otherMbid = '77777777-7777-4777-8777-777777777777';
+    await addLove('Other Band', 'Other Song', otherMbid);
+    w.lb.fail({ status: 503, path: '/1/feedback/recording-feedback' });
+    await w.run();
+    const deferredLove = w.rows().find((row) => row.kind === 'love')!;
+    const delayedUnlove = w.rows().find((row) => row.kind === 'unlove')!;
+    expect(deferredLove).toMatchObject({ state: 'queued', attempts: 1 });
+    expect(deferredLove.due_at).toBeGreaterThan(w.clock.nowMs());
+
+    w.clock.advance(SECOND);
+    await w.run();
+    expect(w.lb.feedback.map((f) => f.json)).toEqual([{ recording_mbid: otherMbid, score: 1 }]);
+    expect(w.rows().find((row) => row.id === delayedUnlove.id)?.state).toBe('queued');
+
+    w.clock.set(new Date(deferredLove.due_at).toISOString());
+    await w.run();
+    expect(w.lb.feedback.map((f) => f.json)).toEqual([
+      { recording_mbid: otherMbid, score: 1 },
+      { recording_mbid: MBID, score: 1 },
+    ]);
+    w.clock.advance(SECOND);
+    await w.run();
+    expect(w.lb.feedback.map((f) => f.json)).toEqual([
+      { recording_mbid: otherMbid, score: 1 },
+      { recording_mbid: MBID, score: 1 },
+      { recording_mbid: MBID, score: 0 },
+    ]);
+    expect(
+      w
+        .rows()
+        .filter((row) => row.kind === 'love' || row.kind === 'unlove')
+        .map((row) => row.state),
+    ).toEqual(['sent', 'sent', 'sent']);
+  });
+
+  it('keeps a newer love behind a backoff unlove so the latest state wins', async () => {
+    const w = await world();
+    w.link();
+    const m = w.app.composed.core.deps;
+    expect(
+      (
+        await enqueueLove(m, {
+          did: ALICE,
+          input: { artist: 'Band', track: 'Song', recordingMbid: MBID },
+          origin: 'listenbrainz',
+        })
+      ).ok,
+    ).toBe(true);
+    await w.run();
+    expect(w.lb.feedback.map((f) => f.json)).toEqual([{ recording_mbid: MBID, score: 1 }]);
+
+    expect((await enqueueUnlove(m, { did: ALICE, artist: 'Band', track: 'Song', origin: 'listenbrainz' })).ok).toBe(
+      true,
+    );
+    expect(
+      (
+        await enqueueLove(m, {
+          did: ALICE,
+          input: { artist: 'BAND', track: ' song ', recordingMbid: MBID },
+          origin: 'listenbrainz',
+        })
+      ).ok,
+    ).toBe(true);
+    w.clock.advance(SECOND);
+    w.lb.fail({ status: 503, path: '/1/feedback/recording-feedback' });
+    await w.run();
+    const delayedUnlove = w.rows().find((row) => row.kind === 'unlove' && row.state === 'queued')!;
+    const newerLove = w
+      .rows()
+      .filter((row) => row.kind === 'love')
+      .at(-1)!;
+    expect(delayedUnlove).toMatchObject({ attempts: 1, state: 'queued' });
+    expect(newerLove.state).toBe('queued');
+
+    w.clock.advance(SECOND);
+    await w.run();
+    expect(newerLove.state).toBe('queued');
+    expect(w.lb.feedback.map((f) => f.json)).toEqual([{ recording_mbid: MBID, score: 1 }]);
+
+    w.clock.set(new Date(delayedUnlove.due_at).toISOString());
+    await w.run();
+    w.clock.advance(SECOND);
+    await w.run();
+    expect(w.lb.feedback.map((f) => f.json)).toEqual([
+      { recording_mbid: MBID, score: 1 },
+      { recording_mbid: MBID, score: 0 },
+      { recording_mbid: MBID, score: 1 },
+    ]);
+  });
+
+  it('defers a pending key persistently, lets another key pass, then forwards on match; unresolved expires as mbid_unresolved', async () => {
+    const w = await world();
+    const link = w.link();
+    const m = w.app.composed.core.deps;
+    const addLove = async (artist: string, track: string) =>
+      enqueueLove(m, { did: ALICE, input: { artist, track }, origin: 'listenbrainz' });
+    await addLove('Pending Artist', 'Pending Song');
+    const [pendingArtist, pendingTrack] = trackKey('Pending Artist', 'Pending Song');
+    const rowA = w.rows()[0]!;
+    await w.run();
+    expect(w.rows()[0]).toMatchObject({ state: 'queued', attempts: 0 });
+    expect(w.seen).toHaveLength(0);
+    expect(w.rows()[0]!.due_at).toBeGreaterThan(w.clock.nowMs());
+
+    await addLove('Ready Artist', 'Ready Song');
+    const [readyArtist, readyTrack] = trackKey('Ready Artist', 'Ready Song');
+    const recording = '77777777-7777-4777-8777-777777777777';
+    w.app.db.run(
+      "INSERT INTO mb_tracks(artist_key,track_key,album_key,status,recording_mbid,created_at_ms) VALUES(?,?,'','matched',?,?)",
+      readyArtist,
+      readyTrack,
+      recording,
+      w.clock.nowMs(),
+    );
+    await w.run();
+    expect(w.lb.feedback.map((f) => f.json)).toEqual([{ recording_mbid: recording, score: 1 }]);
+    expect(w.rows().find((r) => r.id === rowA.id)?.state).toBe('queued');
+
+    const resolved = '88888888-8888-4888-8888-888888888888';
+    w.app.db.run(
+      "UPDATE mb_tracks SET status='matched',recording_mbid=? WHERE artist_key=? AND track_key=?",
+      resolved,
+      pendingArtist,
+      pendingTrack,
+    );
+    w.clock.advance(MINUTE);
+    await w.run();
+    expect(w.lb.feedback.map((f) => f.json)).toEqual([
+      { recording_mbid: recording, score: 1 },
+      { recording_mbid: resolved, score: 1 },
+    ]);
+    expect(w.rows().find((r) => r.id === rowA.id)?.state).toBe('sent');
+
+    await addLove('Never Artist', 'Never Song');
+    const never = w.rows().at(-1)!;
+    const [neverArtist, neverTrack] = trackKey('Never Artist', 'Never Song');
+    w.app.db.run("UPDATE mb_tracks SET status='pending' WHERE artist_key=? AND track_key=?", neverArtist, neverTrack);
+    await w.run();
+    expect(w.rows().at(-1)?.state).toBe('queued');
+    w.clock.advance(DAY);
+    await w.run();
+    expect(w.rows().find((r) => r.id === never.id)).toMatchObject({ state: 'ignored', last_error: 'mbid_unresolved' });
+    expect(w.seen.every(([, path]) => path === '/1/feedback/recording-feedback')).toBe(true);
+    expect(w.rows().find((r) => r.id === never.id)?.link_id).toBe(link);
   });
 
   it('401 revokes the link; 429 waits X-RateLimit-Reset-In; 400 marks the row failed with the upstream error and does not retry', async () => {

@@ -117,6 +117,26 @@ const NEW_TABLES: Record<string, ExpectedTable> = {
   },
   mb_pacing: { columns: ['singleton', 'available_at_ms'], pk: ['singleton'] },
   mb_seed_state: { columns: ['singleton', 'cursor_uri', 'complete'], pk: ['singleton'] },
+  mb_love_revive_jobs: {
+    columns: [
+      'artist_key',
+      'track_key',
+      'album_key',
+      'recording_mbid',
+      'matched_at_ms',
+      'created_at_ms',
+      'cursor_link_id',
+    ],
+    pk: ['artist_key', 'track_key', 'album_key'],
+  },
+  mb_love_revival_state: {
+    columns: ['singleton', 'cursor_rowid', 'complete'],
+    pk: ['singleton'],
+  },
+  mb_forward_love_current: {
+    columns: ['link_id', 'love_artist_key', 'love_track_key', 'forward_rowid'],
+    pk: ['link_id', 'love_artist_key', 'love_track_key'],
+  },
   mb_tracks: {
     columns: [
       'artist_key',
@@ -418,6 +438,8 @@ const NEW_TABLES: Record<string, ExpectedTable> = {
       last_error: true,
       created_at_ms: true,
       updated_at_ms: true,
+      love_artist_key: true,
+      love_track_key: true,
     }),
     pk: ['id'],
     unique: [['link_id', 'kind', 'dedupe_key']],
@@ -526,6 +548,27 @@ const NEW_SCROBBLE_COLUMNS = cols<ScrobbleV2Columns>({
 
 /** New named indexes: table, unique, partial, [column, desc] in key order. */
 const NEW_INDEXES: Record<string, [string, number, number, Array<[string, number]>]> = {
+  mb_forward_love_current_key: [
+    'mb_forward_love_current',
+    0,
+    0,
+    [
+      ['love_artist_key', 0],
+      ['love_track_key', 0],
+      ['link_id', 0],
+    ],
+  ],
+  mb_love_revive_jobs_due: [
+    'mb_love_revive_jobs',
+    0,
+    0,
+    [
+      ['matched_at_ms', 0],
+      ['artist_key', 0],
+      ['track_key', 0],
+      ['album_key', 0],
+    ],
+  ],
   mb_tracks_due: [
     'mb_tracks',
     0,
@@ -695,6 +738,7 @@ const NEW_INDEXES: Record<string, [string, number, number, Array<[string, number
 
 /** The only foreign keys migration 2 adds: [table, from, parent, to, on_delete]. */
 const NEW_FOREIGN_KEYS = [
+  ['mb_forward_love_current', 'link_id', 'linked_accounts', 'id', 'CASCADE'],
   ['loves', 'did', 'users', 'did', 'CASCADE'],
   ['forward_outbox', 'link_id', 'linked_accounts', 'id', 'CASCADE'],
 ];
@@ -1284,6 +1328,8 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       "16|'musicbrainz_track_matches'",
       "17|'musicbrainz_global_pacing'",
       "18|'musicbrainz_seed_cursor'",
+      "19|'musicbrainz_love_revival_jobs'",
+      "20|'bounded_love_revival_scan'",
     ]);
     // The new scrobble columns exist and are NULL on every migrated row.
     expect(after.newColumns).toHaveLength(expectedScrobbles);
@@ -1309,6 +1355,8 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       { version: 16, name: 'musicbrainz_track_matches' },
       { version: 17, name: 'musicbrainz_global_pacing' },
       { version: 18, name: 'musicbrainz_seed_cursor' },
+      { version: 19, name: 'musicbrainz_love_revival_jobs' },
+      { version: 20, name: 'bounded_love_revival_scan' },
     ]);
     expect(after.compat).toEqual([{ singleton: 1, min_compatible_version: 2 }]);
     expect(after.newTablesEmpty).toEqual([]);
@@ -1542,6 +1590,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       'range_stats_cache',
       // Migration 10: rebuilt from verified proofs and snapshots.
       'verified_membership',
+      'mb_forward_love_current',
     ];
     const entries = Object.entries(TABLE_CLASS);
     expect(

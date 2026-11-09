@@ -31,6 +31,7 @@ import type { SqlParam } from '../do/db';
 import { isLovedKey } from '../do/read/loves';
 import { globalArtistCounts, globalTrackCounts } from '../do/read/range-stats';
 import { visibleScrobblesFrom } from '../do/read/visibility';
+import { matchedEntityMbid, matchedRecordingMbid } from '../musicbrainz/store';
 import { images, type LfmDocument, type LfmElement, type LfmValue, leaf, lfmOk, list, node } from './encode';
 import { LastfmError } from './errors';
 import {
@@ -132,9 +133,23 @@ function trackInfo(call: LastfmCall): LfmDocument {
 
   const children: LfmElement[] = [
     leaf('name', display.track),
-    leaf('mbid', display.recording_mbid ?? ''),
+    leaf(
+      'mbid',
+      display.recording_mbid ||
+        matchedRecordingMbid(call.deps.db, { artistKey: ak, trackKey: tk, albumKey: display.album_key }) ||
+        '',
+    ),
     leaf('url', trackUrl(display.artist, display.track)),
-    leaf('duration', (withDuration?.duration_seconds ?? 0) * 1000),
+    leaf(
+      'duration',
+      (withDuration?.duration_seconds ??
+        (call.deps.db.one<{ duration_ms: number | null }>(
+          `SELECT duration_ms FROM mb_tracks WHERE status='matched' AND artist_key=? AND track_key=? AND album_key=?`,
+          ak,
+          tk,
+          display.album_key ?? '',
+        )?.duration_ms ?? 0) / 1000) * 1000,
+    ),
     leaf('streamable', '0', { fulltrack: '0' }),
     leaf('listeners', counts.listeners),
     leaf('playcount', counts.playcount),
@@ -146,7 +161,15 @@ function trackInfo(call: LastfmCall): LfmDocument {
       node('album', [
         leaf('artist', albumArtist),
         leaf('title', withAlbum.album),
-        leaf('mbid', withAlbum.release_mbid ?? ''),
+        leaf(
+          'mbid',
+          withAlbum.release_mbid ||
+            matchedEntityMbid(call.deps.db, 'release', {
+              artistKey: withAlbum.artist_key,
+              albumKey: withAlbum.album_key ?? '',
+            }) ||
+            '',
+        ),
         leaf('url', albumUrl(albumArtist, withAlbum.album)),
         images(),
       ]),
@@ -185,7 +208,7 @@ function artistInfo(call: LastfmCall): LfmDocument {
   return lfmOk(
     node('artist', [
       leaf('name', display.artist),
-      leaf('mbid', firstArtistMbid(display.artist_mbids)),
+      leaf('mbid', firstArtistMbid(display.artist_mbids) || matchedEntityMbid(call.deps.db, 'artist', ak) || ''),
       leaf('url', artistUrl(display.artist)),
       images(),
       leaf('streamable', '0'),
@@ -271,7 +294,12 @@ function albumInfo(call: LastfmCall): LfmDocument {
   const children: LfmElement[] = [
     leaf('name', display.album),
     leaf('artist', albumArtist),
-    leaf('mbid', display.release_mbid ?? ''),
+    leaf(
+      'mbid',
+      display.release_mbid ||
+        matchedEntityMbid(db, 'release', { artistKey: display.artist_key, albumKey: display.album_key ?? '' }) ||
+        '',
+    ),
     leaf('url', albumUrl(albumArtist, display.album)),
     images(),
     leaf('listeners', counts.listeners),

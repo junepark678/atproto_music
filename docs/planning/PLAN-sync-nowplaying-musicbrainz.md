@@ -218,7 +218,7 @@ The owner's word is "synced". Our definition: canonical MusicBrainz data is reso
     - The fresh row carries the *current* love state, love or unlove. The latest state wins and history is not replayed.
     - It has its own dedupe key.
     - The work is bounded per resolver run.
-- **Now playing.** `NowPlaying.musicbrainz`, if M1 didn't already add it.
+- **Now playing.** Add `NowPlaying.musicbrainz` from the exact local matched tuple on profile and followed-feed reads after visibility filtering. Batch the feed lookup, make no upstream request on reads, and preserve submitted values and existing sharing behavior.
 
 ### M3 Web display (base: M2)
 

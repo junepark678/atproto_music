@@ -2,6 +2,7 @@ import type { Did, NowPlaying } from '@atmusic/core/api-types';
 import { useEffect, useState } from 'preact/hooks';
 import type { ApiClient } from '../api/client';
 import { formatLocalClock } from './format';
+import { isMbid, MusicBrainzLink, unambiguousMbid } from './musicbrainz-links';
 
 type Snapshot = {
   api: ApiClient;
@@ -88,8 +89,10 @@ export function NowPlayingCard({ api, did, owner }: { api: ApiClient; did: Did; 
   if (item === null) return owner ? <p class="now-playing-empty">Nothing playing right now</p> : null;
   const started = Date.parse(item.startedAt);
   const elapsed = Math.max(0, Math.floor((now + currentSnapshot.skew - started) / 1000));
-  const duration = item.durationSeconds;
+  const duration = item.durationSeconds ?? item.musicbrainz?.durationSeconds;
   const progress = duration === undefined ? null : Math.min(duration, elapsed);
+  const album = item.album ?? item.musicbrainz?.releaseTitle;
+  const artistMbid = unambiguousMbid(item.artistMbids) ?? unambiguousMbid(item.musicbrainz?.artistMbids);
   return (
     <article class="now-playing-card" aria-label="Now playing">
       <div class="now-playing-art" aria-hidden="true">
@@ -104,10 +107,37 @@ export function NowPlayingCard({ api, did, owner }: { api: ApiClient; did: Did; 
           </span>{' '}
           Now playing
         </p>
-        <strong class="now-playing-track">{item.track}</strong>
+        <strong class="now-playing-track">
+          <MusicBrainzLink
+            kind="recording"
+            mbid={isMbid(item.recordingMbid) ? item.recordingMbid : item.musicbrainz?.recordingMbid}
+          >
+            {item.track}
+          </MusicBrainzLink>
+        </strong>
         <p class="now-playing-byline">
-          {item.artist}
-          {item.album ? ` — ${item.album}` : ''}
+          <MusicBrainzLink kind="artist" mbid={artistMbid}>
+            {item.artist}
+          </MusicBrainzLink>
+          {album !== undefined ? (
+            <>
+              {' — '}
+              {item.album !== undefined ? (
+                <MusicBrainzLink
+                  kind="release"
+                  mbid={isMbid(item.releaseMbid) ? item.releaseMbid : item.musicbrainz?.releaseMbid}
+                >
+                  {item.album}
+                </MusicBrainzLink>
+              ) : (
+                <span class="album-muted" title="From MusicBrainz">
+                  <MusicBrainzLink kind="release" mbid={item.musicbrainz?.releaseMbid}>
+                    {item.musicbrainz?.releaseTitle}
+                  </MusicBrainzLink>
+                </span>
+              )}
+            </>
+          ) : null}
         </p>
         <p class="now-playing-meta">
           <span>

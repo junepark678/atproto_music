@@ -300,6 +300,19 @@ const SEED_ROWS: Record<string, Record<string, SqlParam>[]> = {
     },
   ],
   backup_runs: [{ kind: 'manual', started_at_ms: NOW, finished_at_ms: NOW + 1, path: '/tmp/x.db', bytes: 1, ok: 1 }],
+  mb_love_revive_jobs: [
+    {
+      artist_key: 'björk',
+      track_key: 'jóga',
+      album_key: 'homogenic',
+      recording_mbid: '3f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2d10',
+      matched_at_ms: NOW,
+      created_at_ms: NOW,
+      cursor_link_id: '',
+    },
+  ],
+  mb_love_revival_state: [{ singleton: 1, cursor_rowid: 0, complete: 0 }],
+  mb_forward_love_current: [{ link_id: 'l1', love_artist_key: 'björk', love_track_key: 'jóga', forward_rowid: 1 }],
 };
 
 function insertRow(db: SqliteDb, table: string, row: Record<string, SqlParam>): void {

@@ -8,6 +8,7 @@ import type { Scrobble } from '@atmusic/core/api-types';
 import { useState } from 'preact/hooks';
 import type { LocalState } from '../outbox/overlay';
 import { describeFailure, formatLocalTime } from './format';
+import { isMbid, MusicBrainzLink, unambiguousMbid } from './musicbrainz-links';
 import { OperationStatus } from './operation-status';
 
 export interface ListItem {
@@ -48,23 +49,64 @@ export function ScrobbleText({
   scrobble,
   showActor = false,
 }: {
-  scrobble: Pick<Scrobble, 'artist' | 'track' | 'listenedAt' | 'did'> & { album?: string; handle?: string | null };
+  scrobble: Pick<Scrobble, 'artist' | 'track' | 'listenedAt' | 'did'> &
+    Partial<
+      Pick<Scrobble, 'album' | 'durationSeconds' | 'recordingMbid' | 'artistMbids' | 'releaseMbid' | 'musicbrainz'>
+    > & {
+      handle?: string | null;
+    };
   showActor?: boolean;
 }) {
+  const durationSeconds = scrobble.durationSeconds ?? scrobble.musicbrainz?.durationSeconds;
   return (
     <>
-      <span class="track">{scrobble.track}</span>
+      <span class="track">
+        <MusicBrainzLink
+          kind="recording"
+          mbid={isMbid(scrobble.recordingMbid) ? scrobble.recordingMbid : scrobble.musicbrainz?.recordingMbid}
+        >
+          {scrobble.track}
+        </MusicBrainzLink>
+      </span>
       {' by '}
-      <span class="artist">{scrobble.artist}</span>
-      {scrobble.album !== undefined ? (
+      <span class="artist">
+        <MusicBrainzLink
+          kind="artist"
+          mbid={unambiguousMbid(scrobble.artistMbids) ?? unambiguousMbid(scrobble.musicbrainz?.artistMbids)}
+        >
+          {scrobble.artist}
+        </MusicBrainzLink>
+      </span>
+      {scrobble.album !== undefined || scrobble.musicbrainz?.releaseTitle !== undefined ? (
         <>
           {' from '}
-          <span class="album">{scrobble.album}</span>
+          {scrobble.album !== undefined ? (
+            <span class="album">
+              <MusicBrainzLink
+                kind="release"
+                mbid={isMbid(scrobble.releaseMbid) ? scrobble.releaseMbid : scrobble.musicbrainz?.releaseMbid}
+              >
+                {scrobble.album}
+              </MusicBrainzLink>
+            </span>
+          ) : (
+            <span class="album album-muted" title="From MusicBrainz">
+              <MusicBrainzLink kind="release" mbid={scrobble.musicbrainz?.releaseMbid}>
+                {scrobble.musicbrainz?.releaseTitle}
+              </MusicBrainzLink>
+            </span>
+          )}
         </>
       ) : null}
       <span class="scrobble-meta">
         {' · '}
         <time dateTime={scrobble.listenedAt}>{formatLocalTime(scrobble.listenedAt)}</time>
+        {durationSeconds !== undefined ? (
+          <>
+            {' · '}
+            {formatDuration(durationSeconds)}
+          </>
+        ) : null}
         {showActor ? (
           <>
             {' · '}
@@ -76,6 +118,12 @@ export function ScrobbleText({
       </span>
     </>
   );
+}
+
+function formatDuration(seconds: number): string {
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  return `${minutes}:${String(remainder).padStart(2, '0')}`;
 }
 
 function DeleteControl({ scrobble, onDelete }: { scrobble: Scrobble; onDelete: (s: Scrobble) => Promise<void> }) {

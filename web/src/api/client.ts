@@ -27,7 +27,9 @@ import type {
   HealthReady,
   Indexing,
   ListenUri,
+  Love,
   Meta,
+  MusicBrainzMatch,
   NotifyAccepted,
   NotifyInput,
   NowPlaying,
@@ -287,6 +289,22 @@ const handle = refine(str, isHandle, 'must be a handle');
 const uuid = refine(str, (v) => UUID_RE.test(v), 'must be a UUID');
 const musicText = refine(str, isMusicText, 'must be 1–256 scalars, ≤1,024 UTF-8 bytes and not blank');
 const nonEmpty = refine(str, (v) => v.length > 0, 'must not be empty');
+const isrc = refine(str, (v) => /^[A-Z]{2}[A-Z0-9]{3}[0-9]{7}$/.test(v), 'must be an uppercase ISRC');
+const musicService = refine(
+  str,
+  (v) => /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/.test(v),
+  'must be a lowercase DNS name',
+);
+const submissionClient = refine(
+  str,
+  (v) => [...v].length <= 64 && UTF8.encode(v).length <= 256 && v.replace(WHITE_SPACE_EDGES_RE, '') !== '',
+  'must be 1–64 scalars, at most 256 UTF-8 bytes and not blank',
+);
+const artistMbids = refine(
+  array(uuid),
+  (values) => values.length >= 1 && values.length <= 10 && new Set(values).size === values.length,
+  'must contain 1–10 distinct UUIDs',
+);
 
 const indexing: Decoder<Indexing> = object({
   state: oneOf(['current', 'recovering', 'stale', 'suppressed'] as const),
@@ -294,6 +312,23 @@ const indexing: Decoder<Indexing> = object({
   lastIndexedAt: nullable(timestamp),
   lagSeconds: nullable(nonNegativeNumber),
 });
+
+const musicBrainzMatch: Decoder<MusicBrainzMatch> = object(
+  {
+    recordingMbid: uuid,
+    title: musicText,
+    artistCredit: musicText,
+    artistMbids: array(uuid),
+    matchedBy: oneOf(['mbid', 'search'] as const),
+    syncedAt: timestamp,
+  },
+  {
+    releaseMbid: uuid,
+    releaseTitle: musicText,
+    releaseGroupMbid: uuid,
+    durationSeconds: int(1, 86_400),
+  },
+);
 
 const scrobble: Decoder<Scrobble> = object(
   {
@@ -314,7 +349,29 @@ const scrobble: Decoder<Scrobble> = object(
     handle: nullable(handle),
     recordUri: atUri,
     listenId,
+    albumArtist: musicText,
+    trackNumber: int(1, 9_999),
+    artistMbids,
+    releaseMbid: uuid,
+    releaseGroupMbid: uuid,
+    isrc,
+    submissionClient,
+    musicService,
+    musicbrainz: musicBrainzMatch,
   },
+);
+
+const love: Decoder<Love> = object(
+  {
+    uri: atUri,
+    cid,
+    did,
+    artist: musicText,
+    track: musicText,
+    createdAt: timestamp,
+    indexedAt: timestamp,
+  },
+  { album: musicText, recordingMbid: uuid, musicbrainz: musicBrainzMatch },
 );
 
 const follow: Decoder<Follow> = object({ uri: atUri, cid, actor: did, subject: did, createdAt: timestamp });
@@ -364,6 +421,7 @@ const nowPlaying: Decoder<NowPlaying> = object(
     musicService: str,
     mediaPlayer: str,
     shared: bool,
+    musicbrainz: musicBrainzMatch,
   },
 );
 const nowPlayingResult = object({ nowPlaying: nullable(nowPlaying), serverTime: timestamp });
@@ -372,9 +430,15 @@ const nowPlayingFeed: Decoder<NowPlayingFeed> = object({
   serverTime: timestamp,
 });
 
-const topArtist: Decoder<TopArtist> = object({ artist: musicText, scrobbleCount: count });
-const topTrack: Decoder<TopTrack> = object({ artist: musicText, track: musicText, scrobbleCount: count });
-const topAlbum: Decoder<TopAlbum> = object({ artist: musicText, album: musicText, scrobbleCount: count });
+const topArtist: Decoder<TopArtist> = object({ artist: musicText, scrobbleCount: count }, { artistMbid: uuid });
+const topTrack: Decoder<TopTrack> = object(
+  { artist: musicText, track: musicText, scrobbleCount: count },
+  { recordingMbid: uuid },
+);
+const topAlbum: Decoder<TopAlbum> = object(
+  { artist: musicText, album: musicText, scrobbleCount: count },
+  { releaseMbid: uuid, releaseGroupMbid: uuid },
+);
 
 const statistics: Decoder<Statistics> = object({
   did,
@@ -531,6 +595,9 @@ export const decoders = {
   OAuthClientMetadata: oauthClientMetadata,
   ResolvedIdentity: resolve,
   ScrobbleResult: scrobbleResult,
+  Love: love,
+  MusicBrainzMatch: musicBrainzMatch,
+  NowPlaying: nowPlaying,
   ScrobblePage: scrobblePage,
   Profile: profile,
   Statistics: statistics,

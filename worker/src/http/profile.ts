@@ -12,7 +12,7 @@
 import type { NowPlaying } from '@atmusic/core/api-types';
 import { isDid } from '@atmusic/core/syntax';
 import { fromMs, toDto } from '@atmusic/core/timestamp';
-import type { NowPlayingRow } from '../app/rows';
+import type { EnrichedNowPlayingRow } from '../app/rows';
 import { requireSession, withSessionCookie } from '../bff/guard';
 import { errorResponse, toErrorResponse } from './error';
 import { noStoreJson } from './json';
@@ -23,7 +23,7 @@ import type { RequestCtx, RouteDef } from './types';
 export const PROFILE_PATTERN = '/api/v1/users/{did}/profile';
 export const NOW_PLAYING_PATTERN = '/api/v1/users/{did}/now-playing';
 
-export function nowPlayingDto(row: NowPlayingRow, shared?: boolean): NowPlaying {
+export function nowPlayingDto(row: EnrichedNowPlayingRow, shared?: boolean): NowPlaying {
   const dto: NowPlaying = {
     artist: row.artist,
     track: row.track,
@@ -49,6 +49,7 @@ export function nowPlayingDto(row: NowPlayingRow, shared?: boolean): NowPlaying 
     };
   if (row.music_service !== null) dto.musicService = row.music_service;
   if (row.media_player !== null) dto.mediaPlayer = row.media_player;
+  if (row.musicbrainz !== undefined) dto.musicbrainz = row.musicbrainz;
   if (shared !== undefined) dto.shared = shared;
   return dto;
 }

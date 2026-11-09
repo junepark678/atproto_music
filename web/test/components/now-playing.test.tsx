@@ -6,6 +6,9 @@ import type { ApiClient } from '../../src/api/client';
 import { ListeningNow, NowPlayingCard } from '../../src/components/now-playing';
 
 const did = 'did:plc:aaaaaaaaaaaaaaaaaaaaaaaa' as Did;
+const recordingMbid = '00000000-0000-4000-8000-000000000001';
+const artistMbid = '00000000-0000-4000-8000-000000000002';
+const releaseMbid = '00000000-0000-4000-8000-000000000003';
 const item: NowPlaying = {
   artist: 'Björk',
   track: 'Jóga',
@@ -238,7 +241,20 @@ it('omits progress when duration is unknown', async () => {
   vi.useFakeTimers();
   vi.setSystemTime(new Date('2026-01-15T12:00:00Z'));
   const { durationSeconds: _durationSeconds, ...withoutDuration } = item;
-  const app = setup({ nowPlaying: withoutDuration, serverTime: response.serverTime });
+  const app = setup({
+    nowPlaying: {
+      ...withoutDuration,
+      musicbrainz: {
+        recordingMbid,
+        title: 'Resolved track title',
+        artistCredit: 'Resolved artist',
+        artistMbids: [artistMbid],
+        matchedBy: 'search',
+        syncedAt: '2026-01-15T11:59:00Z',
+      },
+    },
+    serverTime: response.serverTime,
+  });
   await vi.waitFor(() => expect(app.root.textContent).toContain('Jóga'));
   expect(app.root.querySelector('[role="progressbar"]')).toBeNull();
   app.cleanup();
@@ -255,5 +271,102 @@ it('formats elapsed and track duration labels beyond one hour', async () => {
   const app = setup({ nowPlaying: longTrack, serverTime: '2026-01-15T12:00:30Z' });
   await vi.waitFor(() => expect(app.root.textContent).toContain('for 1 hr 15 min'));
   expect(app.root.querySelector('progress')?.getAttribute('aria-valuetext')).toBe('1:01:40 / 1:01:40');
+  app.cleanup();
+});
+
+it('fills an absent submitted album with a muted MusicBrainz release title', async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date('2026-01-15T12:00:00Z'));
+  const { album: _album, ...withoutAlbum } = item;
+  const { durationSeconds: _duration, ...withoutDuration } = withoutAlbum;
+  const app = setup({
+    nowPlaying: {
+      ...withoutDuration,
+      musicbrainz: {
+        recordingMbid,
+        title: 'Resolved track title',
+        artistCredit: 'Resolved artist',
+        artistMbids: [artistMbid],
+        releaseMbid,
+        releaseTitle: 'Resolved release title',
+        durationSeconds: 225,
+        matchedBy: 'search',
+        syncedAt: '2026-01-15T11:59:00Z',
+      },
+    },
+    serverTime: response.serverTime,
+  });
+  await vi.waitFor(() => expect(app.root.textContent).toContain('Resolved release title'));
+  expect(app.root.querySelector('[title="From MusicBrainz"]')?.textContent).toContain('Resolved release title');
+  expect(app.root.querySelector('.now-playing-track')?.textContent).toContain('Jóga');
+  expect(app.root.querySelector('progress')?.max).toBe(225);
+  expect(app.root.querySelector('progress')?.getAttribute('aria-valuetext')).toBe('3:45 / 3:45');
+  app.cleanup();
+});
+
+it('keeps submitted album text ahead of the matched MusicBrainz release title', async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date('2026-01-15T12:00:00Z'));
+  const app = setup({
+    nowPlaying: {
+      ...item,
+      musicbrainz: {
+        recordingMbid,
+        title: 'Resolved track title',
+        artistCredit: 'Resolved artist',
+        artistMbids: [artistMbid],
+        releaseMbid,
+        releaseTitle: 'Resolved release title',
+        durationSeconds: 225,
+        matchedBy: 'search',
+        syncedAt: '2026-01-15T11:59:00Z',
+      },
+    },
+    serverTime: response.serverTime,
+  });
+  await vi.waitFor(() => expect(app.root.textContent).toContain('Homogenic'));
+  expect(app.root.querySelector('.now-playing-byline')?.textContent).toContain('Homogenic');
+  expect(app.root.querySelector('.now-playing-byline')?.textContent).not.toContain('Resolved release title');
+  expect(app.root.querySelector('[title="From MusicBrainz"]')).toBeNull();
+  expect(app.root.querySelector('progress')?.max).toBe(180);
+  expect(app.root.querySelector('progress')?.getAttribute('aria-valuetext')).toBe('3:00 / 3:00');
+  app.cleanup();
+});
+
+it('links current track, artist and release with validated IDs and safe external-link attributes', async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date('2026-01-15T12:00:00Z'));
+  const app = setup({
+    nowPlaying: {
+      ...item,
+      recordingMbid,
+      artistMbids: [artistMbid],
+      releaseMbid,
+    },
+    serverTime: response.serverTime,
+  });
+  await vi.waitFor(() => expect(app.root.querySelectorAll('.now-playing-card a.musicbrainz-link')).toHaveLength(3));
+  expect(app.root.querySelector('.now-playing-track a')?.getAttribute('href')).toBe(
+    `https://musicbrainz.org/recording/${recordingMbid}`,
+  );
+  expect(app.root.querySelector('.now-playing-byline a[href*="/artist/"]')?.getAttribute('href')).toBe(
+    `https://musicbrainz.org/artist/${artistMbid}`,
+  );
+  expect(app.root.querySelector('.now-playing-byline a[href*="/release/"]')?.getAttribute('href')).toBe(
+    `https://musicbrainz.org/release/${releaseMbid}`,
+  );
+  for (const link of app.root.querySelectorAll('.now-playing-card a.musicbrainz-link')) {
+    expect(link.getAttribute('rel')).toBe('noopener noreferrer');
+    expect(link.querySelector('.external-link')?.getAttribute('aria-hidden')).toBe('true');
+  }
+  const trackLink = app.root.querySelector('.now-playing-track a.musicbrainz-link');
+  expect(trackLink).not.toBeNull();
+  const accessibleName = [...(trackLink?.childNodes ?? [])]
+    .filter((node) => !(node instanceof Element && node.getAttribute('aria-hidden') === 'true'))
+    .map((node) => node.textContent)
+    .join('')
+    .replace(/\s+/g, ' ')
+    .trim();
+  expect(accessibleName).toBe('Jóga (MusicBrainz)');
   app.cleanup();
 });

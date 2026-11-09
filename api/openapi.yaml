@@ -6023,6 +6023,7 @@
       "MusicBrainzMatch": {
         "type": "object",
         "additionalProperties": false,
+        "description": "Optional enrichment from an unambiguous local MusicBrainz match. It never replaces submitted display metadata or causes a read-path upstream request.",
         "required": ["recordingMbid", "title", "artistCredit", "artistMbids", "matchedBy", "syncedAt"],
         "properties": {
           "recordingMbid": { "$ref": "#/components/schemas/Uuid" },
@@ -7810,6 +7811,10 @@
           },
           "mediaPlayer": {
             "type": "string"
+          },
+          "musicbrainz": {
+            "$ref": "#/components/schemas/MusicBrainzMatch",
+            "description": "Optional local match for this exact artist/track/album tuple. Added after visibility filtering; never fetched from MusicBrainz during the read."
           },
           "source": {
             "enum": [

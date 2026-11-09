@@ -3,6 +3,7 @@ import type { Db } from '../do/db';
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const isUUID = (value: string): boolean => UUID.test(value);
 export const MUSICBRAINZ_SEED_CHUNK = 100;
+export const MUSICBRAINZ_REVIVE_CHUNK = 100;
 
 export interface TrackKey {
   artistKey: string;
@@ -117,4 +118,82 @@ export function recordingByMbid(db: Db, mbid: string): { title: string; artistCr
     row.artist_credit !== undefined
     ? { title: row.title, artistCredit: row.artist_credit }
     : null;
+}
+
+/** Return a local entity MBID only when every matching row agrees. */
+export function matchedEntityMbid(db: Db, kind: 'artist', key: string): string | null;
+export function matchedEntityMbid(db: Db, kind: 'release', key: { artistKey: string; albumKey: string }): string | null;
+export function matchedEntityMbid(
+  db: Db,
+  kind: 'artist' | 'release',
+  key: string | { artistKey: string; albumKey: string },
+): string | null {
+  if (kind === 'release' && typeof key === 'string')
+    throw new TypeError('release lookup requires artist and album keys');
+  const rows = db.all<{ value: string }>(
+    kind === 'artist'
+      ? `SELECT DISTINCT j.value AS value FROM mb_tracks m, json_each(m.artist_mbids) j WHERE m.status='matched' AND m.artist_key=?`
+      : `SELECT DISTINCT release_mbid AS value FROM mb_tracks WHERE status='matched' AND artist_key=? AND album_key=? AND release_mbid IS NOT NULL`,
+    ...(kind === 'artist'
+      ? [key as string]
+      : [(key as { artistKey: string }).artistKey, (key as { albumKey: string }).albumKey]),
+  );
+  const values = [...new Set(rows.map((row) => row.value).filter(isUUID))];
+  return values.length === 1 ? values[0]! : null;
+}
+
+export interface LoveReviveJob extends TrackKey {
+  artistKey: string;
+  trackKey: string;
+  albumKey: string;
+  recordingMbid: string;
+  matchedAtMs: number;
+  createdAtMs: number;
+  cursorLinkId: string;
+}
+
+/** Stage/restart a bounded revival scan. Call in the match transaction. */
+export function stageLoveReviveJob(db: Db, key: TrackKey, recordingMbid: string, nowMs: number): void {
+  db.run(
+    `INSERT INTO mb_love_revive_jobs(artist_key,track_key,album_key,recording_mbid,matched_at_ms,created_at_ms,cursor_link_id)
+    VALUES(?,?,?,?,?,?, '') ON CONFLICT(artist_key,track_key,album_key) DO UPDATE SET
+    recording_mbid=excluded.recording_mbid,matched_at_ms=excluded.matched_at_ms,cursor_link_id=''`,
+    key.artistKey,
+    key.trackKey,
+    key.albumKey ?? '',
+    recordingMbid,
+    nowMs,
+    nowMs,
+  );
+}
+
+/** Read the next deterministic slice for a staged match job. */
+export function loveReviveJobs(db: Db, limit = MUSICBRAINZ_REVIVE_CHUNK): LoveReviveJob[] {
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > MUSICBRAINZ_REVIVE_CHUNK)
+    throw new RangeError('invalid MusicBrainz revival chunk size');
+  return db.all<LoveReviveJob>(
+    `SELECT artist_key AS artistKey,track_key AS trackKey,album_key AS albumKey,recording_mbid AS recordingMbid,
+    matched_at_ms AS matchedAtMs,created_at_ms AS createdAtMs,cursor_link_id AS cursorLinkId
+    FROM mb_love_revive_jobs ORDER BY matched_at_ms,artist_key,track_key,album_key LIMIT ?`,
+    limit,
+  );
+}
+
+export function advanceLoveReviveJob(db: Db, key: TrackKey, cursorLinkId: string): void {
+  db.run(
+    'UPDATE mb_love_revive_jobs SET cursor_link_id=? WHERE artist_key=? AND track_key=? AND album_key=?',
+    cursorLinkId,
+    key.artistKey,
+    key.trackKey,
+    key.albumKey ?? '',
+  );
+}
+
+export function deleteLoveReviveJob(db: Db, key: TrackKey): void {
+  db.run(
+    'DELETE FROM mb_love_revive_jobs WHERE artist_key=? AND track_key=? AND album_key=?',
+    key.artistKey,
+    key.trackKey,
+    key.albumKey ?? '',
+  );
 }

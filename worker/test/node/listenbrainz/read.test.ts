@@ -122,6 +122,7 @@ interface Listen {
     track_name: string;
     release_name?: string;
     additional_info: Record<string, unknown>;
+    mbid_mapping?: { recording_mbid?: string; release_mbid?: string; artist_mbids?: string[] };
   };
 }
 interface ListensBody {
@@ -147,6 +148,60 @@ const tracks = (b: ListensBody) => b.payload.listens.map((l) => l.track_metadata
 afterEach(closeApps);
 
 describe('ListenBrainz reads (ADR §8.4)', () => {
+  it('listen route returns local matched MBID mappings, omits unmatched mapping, and retains submitted IDs', async () => {
+    const app = await started();
+    const recording = '11111111-1111-4111-8111-111111111111';
+    const release = '22222222-2222-4222-8222-222222222222';
+    const artist = '33333333-3333-4333-8333-333333333333';
+    const row = app.db.one<{ artist_key: string; track_key: string; album_key: string | null }>(
+      "SELECT artist_key,track_key,album_key FROM scrobbles WHERE did=? AND track='No Surprises' LIMIT 1",
+      ALICE,
+    )!;
+    app.db.run(
+      `UPDATE mb_tracks SET status='matched',recording_mbid=?,release_mbid=?,artist_mbids=?
+      WHERE artist_key=? AND track_key=? AND album_key=?`,
+      recording,
+      release,
+      JSON.stringify([artist]),
+      row.artist_key,
+      row.track_key,
+      row.album_key ?? '',
+    );
+    const response = await listens(app, '/1/user/alice/listens?count=25');
+    const mapped = response.payload.listens.find((listen) => listen.track_metadata.track_name === 'No Surprises')!;
+    expect(mapped.track_metadata.mbid_mapping).toEqual({
+      recording_mbid: recording,
+      release_mbid: release,
+      artist_mbids: [artist],
+    });
+
+    const unmatched = response.payload.listens.find(
+      (listen) => listen.track_metadata.track_name === 'Running Up That Hill',
+    )!;
+    expect(unmatched.track_metadata.mbid_mapping).toBeUndefined();
+
+    const submittedRecording = '44444444-4444-4444-8444-444444444444';
+    const submittedRelease = '55555555-5555-4555-8555-555555555555';
+    const submittedArtist = '66666666-6666-4666-8666-666666666666';
+    app.db.run(
+      `UPDATE scrobbles SET recording_mbid=?,release_mbid=?,artist_mbids=? WHERE artist_key=? AND track_key=? AND album_key=?`,
+      submittedRecording,
+      submittedRelease,
+      JSON.stringify([submittedArtist]),
+      row.artist_key,
+      row.track_key,
+      row.album_key ?? '',
+    );
+    const retained = (await listens(app, '/1/user/alice/listens?count=25')).payload.listens.find(
+      (listen) => listen.track_metadata.track_name === 'No Surprises',
+    )!;
+    expect(retained.track_metadata.mbid_mapping).toEqual({
+      recording_mbid: submittedRecording,
+      release_mbid: submittedRelease,
+      artist_mbids: [submittedArtist],
+    });
+  });
+
   it('/1/user/alice/listens defaults to count 25, caps at 1000, applies exclusive min_ts/max_ts, reports latest/oldest_listen_ts, and echoes user_id as typed', async () => {
     const app = await started();
 
