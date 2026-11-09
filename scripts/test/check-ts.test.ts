@@ -6,7 +6,8 @@
 //
 // Gate duration (ADR 0005 §15.1): every control that runs the nested gate
 // limits its vitest step with `--projects <the project it exercises>` and has a
-// 180 s timeout (GATE_TIMEOUT), instead of running a second full gate.
+// 180 s timeout (GATE_TIMEOUT) for each nested gate run it makes, instead of
+// running a second full gate. Each run must also finish inside 180 s on its own.
 //
 // Every test copies the repository (tracked plus untracked, non-ignored files,
 // as `git ls-files` lists them) into a fresh temporary directory, breaks the
@@ -47,8 +48,14 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const SELF = 'scripts/test/check-ts.test.ts';
 /** Tests that install, build or typecheck a copy without running the nested gate. */
 const TIMEOUT = 15 * 60_000;
-/** Every nested negative control: a `scripts/check-ts.sh` run limited by --projects (ADR 0005 §15.1). */
+/**
+ * The budget for one nested negative-control run of `scripts/check-ts.sh`, limited
+ * by --projects (ADR 0005 §15.1). A control that runs the gate n times has a
+ * timeout of n × GATE_TIMEOUT, and every run still finishes inside GATE_TIMEOUT.
+ */
 const GATE_TIMEOUT = 180_000;
+/** The bundle-guard control runs the nested gate twice: a failing guard, then build-server.ts alone. */
+const BUNDLE_GUARD_GATE_RUNS = 2;
 const WORKSPACES: Record<string, string> = {
   core: 'packages/core',
   atproto: 'packages/atproto',
@@ -770,7 +777,7 @@ describe('scripts/check-ts.sh', () => {
 
       expect(fingerprint()).toBe(before);
     },
-    GATE_TIMEOUT,
+    BUNDLE_GUARD_GATE_RUNS * GATE_TIMEOUT,
   );
 
   // Declared last: it also checks the wall-clock time of every nested gate run
@@ -818,19 +825,26 @@ describe('scripts/check-ts.sh', () => {
       const testStep = durations.steps.find((s) => s.name === 'test (vitest, projects: worker-node)');
       expect(testStep?.seconds).toBeGreaterThan(0.5);
 
-      // Every nested negative control in this file has the 180 s budget ...
+      // Every nested negative control in this file has the 180 s budget for
+      // each nested gate run it makes ...
       const tests = (task.suite?.tasks ?? []).filter((t) => t.type === 'test');
-      const controls = [
-        'a misformatted file in a disposable copy fails the biome step and leaves the repository unchanged',
-        'an inverted assertion in a disposable copy makes check-ts.sh exit nonzero',
-        'the gate runs the worker-node project and fails with its status when a worker-node test fails in the disposable copy, with the nested run limited by --projects worker-node',
-        'check-ts.sh runs scripts/check-node-bundle.ts and build-server.ts --check only when those files exist, and a failing check-node-bundle.ts fails the gate in the disposable copy',
-        task.name,
+      const controls: [name: string, gateRuns: number][] = [
+        ['a misformatted file in a disposable copy fails the biome step and leaves the repository unchanged', 1],
+        ['an inverted assertion in a disposable copy makes check-ts.sh exit nonzero', 1],
+        [
+          'the gate runs the worker-node project and fails with its status when a worker-node test fails in the disposable copy, with the nested run limited by --projects worker-node',
+          1,
+        ],
+        [
+          'check-ts.sh runs scripts/check-node-bundle.ts and build-server.ts --check only when those files exist, and a failing check-node-bundle.ts fails the gate in the disposable copy',
+          BUNDLE_GUARD_GATE_RUNS,
+        ],
+        [task.name, 1],
       ];
-      for (const name of controls) {
+      for (const [name, runs] of controls) {
         const t = tests.find((x) => x.name === name);
         expect(t, name).toBeDefined();
-        expect(t?.type === 'test' ? t.timeout : undefined, name).toBe(GATE_TIMEOUT);
+        expect(t?.type === 'test' ? t.timeout : undefined, name).toBe(runs * GATE_TIMEOUT);
       }
       // ... every recorded nested gate run was limited by --projects, and each
       // finished inside it (this one always; the others when they ran in this
