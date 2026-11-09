@@ -96,6 +96,7 @@ import { sweepExpiredLinkStates } from '../forward/links';
 import { UpstreamPacing } from '../forward/upstream-pacing';
 import { IGNORED_LISTEN_RETENTION_MS } from '../http/account';
 import { authFeature } from '../http/auth';
+import { routes as coverArtRoutes } from '../http/cover-art';
 import { credentialsFeature } from '../http/credentials';
 import { importsFeature } from '../http/imports';
 import { lastfmAuthFeature } from '../http/lastfm-authorize';
@@ -111,12 +112,14 @@ import { listenBrainzRoutes } from '../listenbrainz/routes';
 import { createSubmitRoutes } from '../listenbrainz/submit';
 import { createTokenRoutes, listenBrainzLimiterFor } from '../listenbrainz/token-routes';
 import { createMusicBrainzClient, MB_CAPS } from '../musicbrainz/client';
+import { runCoverArtJobs } from '../musicbrainz/cover-art-runner';
 import { createMusicBrainzResolver } from '../musicbrainz/resolver';
 import { type PdsWriter, type PdsWriterSource, ReauthRequiredError, sessionWriter } from '../outbox/pds-writer';
 import { outboxExtension } from '../outbox/runner';
 import { backupExtension } from './backup';
 import type { Feature, FeatureContext } from './compose';
 import type { NodeConfig } from './config';
+import { createCoverArtClient } from './cover-art-client';
 import { createJetstreamWsConnector, jetstreamWsTarget, type WsClientCtor } from './jetstream-ws';
 import { type PinnedLookup, TransportError } from './pinned-transport';
 import { bindPolicyFetch, createPolicyFetch } from './policy-fetch';
@@ -138,6 +141,7 @@ export const OUTBOUND_CONSUMERS = [
   'listenbrainz-import',
   'jetstream',
   'musicbrainz',
+  'cover-art',
 ] as const;
 export type OutboundConsumer = (typeof OUTBOUND_CONSUMERS)[number];
 
@@ -150,6 +154,7 @@ export const OUTBOUND_WIRES = Object.freeze({
   imports: ['lastfm-import', 'listenbrainz-import'],
   jetstream: ['jetstream'],
   musicbrainz: ['musicbrainz'],
+  'cover-art': ['cover-art'],
 } as const satisfies Record<string, readonly OutboundConsumer[]>);
 export type OutboundWire = keyof typeof OUTBOUND_WIRES;
 
@@ -386,6 +391,8 @@ export async function productionFeatures(options: ProductionFeatureOptions): Pro
   const { config, secrets, revocations, outbound } = options;
   const pacing = new UpstreamPacing(options.clock);
   let musicBrainzResolver: ReturnType<typeof createMusicBrainzResolver> | null = null;
+  let coverArtRun: (() => Promise<{ processed: number; nextDueAt: number | null; cleanupPending: boolean }>) | null =
+    null;
   const musicBrainzClient = createMusicBrainzClient({
     fetch: bindPolicyFetch(
       createPolicyFetch({
@@ -424,6 +431,45 @@ export async function productionFeatures(options: ProductionFeatureOptions): Pro
         clock: ctx.deps.clock,
         enabled: config.musicbrainzEnabled,
       });
+      return {};
+    },
+  };
+  const coverArtPolicy = createPolicyFetch({
+    transport: outbound.transportFor('cover-art'),
+    ...(options.timer === undefined ? {} : { timer: options.timer }),
+  });
+  const coverArtClient = createCoverArtClient({ policyFetch: coverArtPolicy, root: config.coverArtArchiveRoot });
+  const coverArtFeature: Feature = {
+    name: 'cover-art',
+    routes: coverArtRoutes,
+    extensions: [
+      {
+        name: 'cover-art',
+        start(ctx, now) {
+          ctx.schedule('cover-art', now);
+        },
+        timers: {
+          'cover-art': async (now, ctx) => {
+            const result = await coverArtRun?.();
+            const due = result?.nextDueAt;
+            const nextRun = due === null || due === undefined ? now + 3_600_000 : due <= now ? now + 1_000 : due;
+            const cleanupDue = result?.cleanupPending ? now + 60_000 : Number.POSITIVE_INFINITY;
+            ctx.schedule('cover-art', Math.min(nextRun, cleanupDue));
+          },
+        },
+      },
+    ],
+    services(ctx) {
+      coverArtRun = () =>
+        runCoverArtJobs({
+          db: ctx.deps.db,
+          clock: ctx.deps.clock,
+          client: async (release, group) => {
+            return coverArtClient(release, group);
+          },
+          cacheBudgetBytes: config.coverArtCacheMb * 1024 * 1024,
+          enabled: config.musicbrainzEnabled,
+        });
       return {};
     },
   };
@@ -665,6 +711,7 @@ export async function productionFeatures(options: ProductionFeatureOptions): Pro
     keepalive,
     expiry,
     musicbrainzFeature,
+    coverArtFeature,
     meta,
   ];
   if (options.backups !== undefined) features.push({ name: 'backup', extensions: [backupExtension(options.backups)] });

@@ -226,6 +226,24 @@ export class World {
         [APP_HOST]: self,
         'lastfm.test': this.lastfm,
         'listenbrainz.test': this.lb,
+        'coverartarchive.test': (req: Request) => {
+          const release = new URL(req.url).pathname.split('/')[2];
+          return new Response(null, {
+            status: 302,
+            headers: { location: `https://ia800.archive.org/image?release=${release}` },
+          });
+        },
+        'ia800.archive.org': (req: Request) => {
+          const release = new URL(req.url).searchParams.get('release');
+          const suffix = release?.at(-1);
+          const fixture =
+            suffix === '2'
+              ? { mime: 'image/png', bytes: [0x89, 0x50, 0x4e, 0x47] }
+              : suffix === '3'
+                ? { mime: 'image/webp', bytes: [0x52, 0x49, 0x46, 0x46] }
+                : { mime: 'image/jpeg', bytes: [0xff, 0xd8, 0xff] };
+          return new Response(new Uint8Array(fixture.bytes), { headers: { 'content-type': fixture.mime } });
+        },
       },
     });
     this.as.connect(this.router);

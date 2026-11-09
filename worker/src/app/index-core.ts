@@ -639,6 +639,18 @@ export class IndexCore implements IndexRpc, AdminRpc {
     return this.#rpc('stats', () => stats(this.live(), q));
   }
 
+  async coverArt(releaseMbid: string, nowMs: number) {
+    return this.#rpc('coverArt', () => {
+      const row = this.live().db.one<{ mime_type: string; image_bytes: ArrayBuffer }>(
+        'SELECT mime_type,image_bytes FROM mb_cover_art WHERE release_mbid=?',
+        releaseMbid,
+      );
+      if (!row) return null;
+      this.live().db.run('UPDATE mb_cover_art SET last_access_ms=? WHERE release_mbid=?', nowMs, releaseMbid);
+      return { mimeType: row.mime_type, bytes: new Uint8Array(row.image_bytes) };
+    });
+  }
+
   async profile(did: Did): Promise<Profile | null> {
     return this.#rpc('profile', () => profile(this.live(), did));
   }

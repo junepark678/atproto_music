@@ -70,6 +70,7 @@ const KIND: Record<keyof IndexRpc, 'read' | 'write'> = {
   lookup: 'read',
   recordStatus: 'read',
   stats: 'read',
+  coverArt: 'write',
   profile: 'read',
   nowPlaying: 'read',
   followedNowPlaying: 'read',

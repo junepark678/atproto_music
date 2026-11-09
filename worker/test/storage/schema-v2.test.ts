@@ -137,6 +137,23 @@ const NEW_TABLES: Record<string, ExpectedTable> = {
     columns: ['link_id', 'love_artist_key', 'love_track_key', 'forward_rowid'],
     pk: ['link_id', 'love_artist_key', 'love_track_key'],
   },
+  mb_cover_art: {
+    columns: [
+      'release_mbid',
+      'mime_type',
+      'image_bytes',
+      'byte_size',
+      'created_at_ms',
+      'fetched_at_ms',
+      'last_access_ms',
+    ],
+    pk: ['release_mbid'],
+  },
+  mb_cover_art_jobs: {
+    columns: ['release_mbid', 'release_group_mbid', 'status', 'attempts', 'next_due_ms', 'created_at_ms'],
+    pk: ['release_mbid'],
+  },
+  mb_cover_art_usage: { columns: ['singleton', 'used_bytes'], pk: ['singleton'] },
   mb_tracks: {
     columns: [
       'artist_key',
@@ -548,6 +565,25 @@ const NEW_SCROBBLE_COLUMNS = cols<ScrobbleV2Columns>({
 
 /** New named indexes: table, unique, partial, [column, desc] in key order. */
 const NEW_INDEXES: Record<string, [string, number, number, Array<[string, number]>]> = {
+  mb_cover_art_lru: [
+    'mb_cover_art',
+    0,
+    0,
+    [
+      ['last_access_ms', 0],
+      ['release_mbid', 0],
+    ],
+  ],
+  mb_cover_art_jobs_due: [
+    'mb_cover_art_jobs',
+    0,
+    0,
+    [
+      ['status', 0],
+      ['next_due_ms', 0],
+      ['release_mbid', 0],
+    ],
+  ],
   mb_forward_love_current_key: [
     'mb_forward_love_current',
     0,
@@ -1330,6 +1366,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       "18|'musicbrainz_seed_cursor'",
       "19|'musicbrainz_love_revival_jobs'",
       "20|'bounded_love_revival_scan'",
+      "21|'cover_art_cache_and_jobs'",
     ]);
     // The new scrobble columns exist and are NULL on every migrated row.
     expect(after.newColumns).toHaveLength(expectedScrobbles);
@@ -1357,9 +1394,10 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       { version: 18, name: 'musicbrainz_seed_cursor' },
       { version: 19, name: 'musicbrainz_love_revival_jobs' },
       { version: 20, name: 'bounded_love_revival_scan' },
+      { version: 21, name: 'cover_art_cache_and_jobs' },
     ]);
     expect(after.compat).toEqual([{ singleton: 1, min_compatible_version: 2 }]);
-    expect(after.newTablesEmpty).toEqual([]);
+    expect(after.newTablesEmpty).toEqual(['mb_cover_art_usage']);
 
     // The production history module still reads the migrated rows.
     const migrated = nodeIndex(fileIndexes().get(name), { history }, { clock: fixedClock() });
@@ -1683,6 +1721,7 @@ function nonAdditiveStatements(m: Migration): string[] {
   return m.statements.filter((statement) => {
     const s = statement.replace(/\s+/g, ' ').trim();
     const body = s.endsWith(';') ? s.slice(0, -1) : s;
+    if (m.version === 21 && /^INSERT INTO mb_cover_art_usage\(/i.test(body)) return false;
     // More than one statement in one string is never additive.
     if (body.includes(';')) return true;
     if (isUnsafeAddColumn(body)) return true;

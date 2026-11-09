@@ -237,6 +237,7 @@ export interface IndexRpc {
   recordStatus(uri: ListenUri): Promise<RecordStatus>;
   /** Null for unknown or inactive users (404). */
   stats(q: StatsQuery): Promise<Statistics | null>;
+  coverArt(releaseMbid: string, nowMs: number): Promise<{ mimeType: string; bytes: Uint8Array } | null>;
   /** Null for unknown, inactive or suppressed users (404, before any identity request). */
   profile(did: Did): Promise<Profile | null>;
   nowPlaying(did: Did, owner: boolean): Promise<import('../app/rows').EnrichedNowPlayingRow | null>;

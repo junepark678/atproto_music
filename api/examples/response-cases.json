@@ -314,5 +314,31 @@
     "path": "/api/v1/records/status",
     "status": 429,
     "example": "error-429"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/cover-art/{releaseMbid}",
+    "status": 200,
+    "example": "cover-art-jpeg",
+    "alternatives": [
+      {
+        "example": "cover-art-png"
+      },
+      {
+        "example": "cover-art-webp"
+      }
+    ]
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/cover-art/{releaseMbid}",
+    "status": 404,
+    "example": "error-404"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/cover-art/{releaseMbid}",
+    "status": 422,
+    "example": "error-422"
   }
 ]

@@ -50,6 +50,7 @@ import { type Box, createBox } from '../../worker/src/crypto/box.ts';
 import { migrate } from '../../worker/src/do/migrate.ts';
 import { SCHEMA_VERSION, TABLE_CLASS } from '../../worker/src/do/schema.ts';
 import { deleteLink, getLinkById, openLinkCredential, saveLink } from '../../worker/src/forward/links.ts';
+import { enqueueCoverArt, putCoverArt } from '../../worker/src/musicbrainz/cover-art-store.ts';
 import { createBackups } from '../../worker/src/node/backup.ts';
 import { type ExitCode, type RunningServer, run } from '../../worker/src/node/run.ts';
 import { parseSecrets, type Secrets } from '../../worker/src/node/secrets.ts';
@@ -569,12 +570,33 @@ function boxOf(doc: Record<string, unknown>): { box: Box; secrets: Secrets } {
 // ---------------------------------------------------------------------------
 
 describe('restore.ts', () => {
-  it('preserves live non-derived mb_tracks rows while rebuilding derived projections from backup', async () => {
+  it('preserves live non-derived MusicBrainz and cover-art state while rebuilding derived projections from backup', async () => {
     expect(TABLE_CLASS.mb_tracks).toBe('non-derived');
+    expect(TABLE_CLASS.mb_cover_art).toBe('non-derived');
+    expect(TABLE_CLASS.mb_cover_art_jobs).toBe('non-derived');
+    expect(TABLE_CLASS.mb_cover_art_usage).toBe('non-derived');
     const world = await buildWorld();
     const live = openSqliteDb(world.dbPath, { busyTimeoutMs: BUSY_MS });
     live.run(`INSERT INTO mb_tracks(artist_key,track_key,album_key,status,recording_mbid,title,artist_credit,created_at_ms)
       VALUES ('artist','late song','','matched','3f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2d10','Late Song','Artist',1)`);
+    const imageBytes = new Uint8Array([0x52, 0x49, 0x46, 0x46, 0x01, 0x02, 0x03]);
+    const releaseMbid = '01234567-89ab-4cde-8fab-0123456789ab';
+    const releaseGroupMbid = '11234567-89ab-4cde-8fab-0123456789ab';
+    expect(
+      putCoverArt(live, {
+        releaseMbid,
+        mimeType: 'image/webp',
+        bytes: imageBytes,
+        nowMs: world.clock.nowMs(),
+        budgetBytes: 1024,
+      }),
+    ).toBe(true);
+    enqueueCoverArt(live, releaseMbid, releaseGroupMbid, world.clock.nowMs());
+    live.run(
+      'UPDATE mb_cover_art_jobs SET attempts=3,next_due_ms=? WHERE release_mbid=?',
+      world.clock.nowMs() + 60_000,
+      releaseMbid,
+    );
     live.close();
     const systemd = new FakeSystemd(world, { servicePort: null });
     await systemd.boot();
@@ -586,6 +608,38 @@ describe('restore.ts', () => {
         title: 'Late Song',
         recording_mbid: '3f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2d10',
       });
+      expect(
+        db.one<{
+          mime_type: string;
+          byte_size: number;
+          payload: string;
+          created_at_ms: number;
+          fetched_at_ms: number;
+          last_access_ms: number;
+        }>(
+          'SELECT mime_type,byte_size,hex(image_bytes) AS payload,created_at_ms,fetched_at_ms,last_access_ms FROM mb_cover_art WHERE release_mbid=?',
+          releaseMbid,
+        ),
+      ).toEqual({
+        mime_type: 'image/webp',
+        byte_size: imageBytes.length,
+        payload: Buffer.from(imageBytes).toString('hex').toUpperCase(),
+        created_at_ms: world.clock.nowMs(),
+        fetched_at_ms: world.clock.nowMs(),
+        last_access_ms: world.clock.nowMs(),
+      });
+      expect(
+        db.one(
+          'SELECT release_group_mbid,status,attempts,next_due_ms FROM mb_cover_art_jobs WHERE release_mbid=?',
+          releaseMbid,
+        ),
+      ).toEqual({
+        release_group_mbid: releaseGroupMbid,
+        status: 'pending',
+        attempts: 3,
+        next_due_ms: world.clock.nowMs() + 60_000,
+      });
+      expect(db.one('SELECT used_bytes FROM mb_cover_art_usage')).toEqual({ used_bytes: imageBytes.length });
       expect(db.all('SELECT rkey FROM scrobbles ORDER BY rkey')).toEqual([{ rkey: 's1' }]);
     } finally {
       db.close();

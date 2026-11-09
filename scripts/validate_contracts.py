@@ -236,6 +236,7 @@ CONTRACT_VERSION = '1.2.0'
 # The v1.1 entries are frozen in MVP.md and API.md as amended by ADR 0004 §9
 # (A3, A8, A9, A10, N1–N3); ADR 0005 B14 keeps every one of them.
 V11_STATUSES = {
+    ('GET', '/api/v1/cover-art/{releaseMbid}'): {200, 404, 422},
     ('GET', '/health/live'): {200},
     ('GET', '/health/ready'): {200, 503},
     ('GET', '/api/v1/meta'): {200, 429},
@@ -956,6 +957,16 @@ def _check_case(spec, validator_type, checker, validated, found, case, key):
             validate(headers[name], header['schema'], spec, validator_type, checker, f'{key} {name}')
     if 'content' not in response:
         require(case.get('body', 'missing') is None and 'example' not in case, f'response_examples: {key} must have no response body')
+        return 0
+    if key[:2] == ('GET', '/api/v1/cover-art/{releaseMbid}') and key[2] == 200:
+        media_types = set(response['content'])
+        require(media_types == {'image/jpeg', 'image/png', 'image/webp'}, 'response_examples: cover-art must document all accepted binary media types')
+        names = [ref['$ref'].rsplit('/', 1)[1] for item in response['content'].values() for ref in item.get('examples', {}).values()]
+        require(set(names) == {'cover-art-jpeg', 'cover-art-png', 'cover-art-webp'}, 'response_examples: each cover-art media type needs its binary adapter fixture')
+        for name, media_type in zip(names, sorted(media_types)):
+            fixture = fixture_value(spec, name)
+            require(fixture == {'mediaType': media_type, 'base64': 'AQID'}, f'response_examples: invalid binary fixture {name}')
+            validated.add(name)
         return 0
     media = response['content']['application/json']
     declared_example = media['examples']['fixture']['$ref'].rsplit('/', 1)[1]

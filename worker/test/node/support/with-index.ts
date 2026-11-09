@@ -409,6 +409,7 @@ const METHODS: Record<keyof IndexRpc, true> = {
   lookup: true,
   recordStatus: true,
   stats: true,
+  coverArt: true,
   profile: true,
   nowPlaying: true,
   followedNowPlaying: true,

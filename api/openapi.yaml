@@ -5631,6 +5631,102 @@
         "x-auth-mode": "session",
         "x-contract": "1.2"
       }
+    },
+    "/api/v1/cover-art/{releaseMbid}": {
+      "get": {
+        "operationId": "cover_art",
+        "summary": "Cached cover art",
+        "description": "Returns a locally cached Cover Art Archive image. This request never fetches upstream.",
+        "parameters": [
+          {
+            "name": "releaseMbid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Cached image bytes",
+            "content": {
+              "image/jpeg": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                },
+                "examples": {
+                  "fixture": {
+                    "$ref": "#/components/examples/cover-art-jpeg"
+                  }
+                }
+              },
+              "image/png": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                },
+                "examples": {
+                  "fixture": {
+                    "$ref": "#/components/examples/cover-art-png"
+                  }
+                }
+              },
+              "image/webp": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                },
+                "examples": {
+                  "fixture": {
+                    "$ref": "#/components/examples/cover-art-webp"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Cached cover art is absent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "fixture": {
+                    "$ref": "#/components/examples/error-404"
+                  }
+                }
+              }
+            },
+            "x-error-codes": [
+              "not_found"
+            ]
+          },
+          "422": {
+            "description": "Release UUID is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "fixture": {
+                    "$ref": "#/components/examples/error-422"
+                  }
+                }
+              }
+            },
+            "x-error-codes": [
+              "validation_failed"
+            ]
+          }
+        },
+        "security": [],
+        "x-auth-mode": "public"
+      }
     }
   },
   "components": {
@@ -6024,35 +6120,98 @@
         "type": "object",
         "additionalProperties": false,
         "description": "Optional enrichment from an unambiguous local MusicBrainz match. It never replaces submitted display metadata or causes a read-path upstream request.",
-        "required": ["recordingMbid", "title", "artistCredit", "artistMbids", "matchedBy", "syncedAt"],
+        "required": [
+          "recordingMbid",
+          "title",
+          "artistCredit",
+          "artistMbids",
+          "matchedBy",
+          "syncedAt"
+        ],
         "properties": {
-          "recordingMbid": { "$ref": "#/components/schemas/Uuid" },
-          "title": { "$ref": "#/components/schemas/MusicText" },
-          "artistCredit": { "type": "string" },
-          "artistMbids": { "type": "array", "items": { "$ref": "#/components/schemas/Uuid" } },
-          "releaseMbid": { "$ref": "#/components/schemas/Uuid" },
-          "releaseTitle": { "$ref": "#/components/schemas/MusicText" },
-          "releaseGroupMbid": { "$ref": "#/components/schemas/Uuid" },
-          "durationSeconds": { "type": "integer", "minimum": 1 },
-          "matchedBy": { "type": "string", "enum": ["mbid", "search"] },
-          "syncedAt": { "$ref": "#/components/schemas/Timestamp" }
+          "recordingMbid": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "title": {
+            "$ref": "#/components/schemas/MusicText"
+          },
+          "artistCredit": {
+            "type": "string"
+          },
+          "artistMbids": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Uuid"
+            }
+          },
+          "releaseMbid": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "releaseTitle": {
+            "$ref": "#/components/schemas/MusicText"
+          },
+          "releaseGroupMbid": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "durationSeconds": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "matchedBy": {
+            "type": "string",
+            "enum": [
+              "mbid",
+              "search"
+            ]
+          },
+          "syncedAt": {
+            "$ref": "#/components/schemas/Timestamp"
+          }
         }
       },
       "Love": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["uri", "cid", "did", "artist", "track", "createdAt", "indexedAt"],
+        "required": [
+          "uri",
+          "cid",
+          "did",
+          "artist",
+          "track",
+          "createdAt",
+          "indexedAt"
+        ],
         "properties": {
-          "uri": { "$ref": "#/components/schemas/AtUri" },
-          "cid": { "$ref": "#/components/schemas/Cid" },
-          "did": { "$ref": "#/components/schemas/Did" },
-          "artist": { "$ref": "#/components/schemas/MusicText" },
-          "track": { "$ref": "#/components/schemas/MusicText" },
-          "album": { "$ref": "#/components/schemas/MusicText" },
-          "recordingMbid": { "$ref": "#/components/schemas/Uuid" },
-          "createdAt": { "$ref": "#/components/schemas/Timestamp" },
-          "indexedAt": { "$ref": "#/components/schemas/Timestamp" },
-          "musicbrainz": { "$ref": "#/components/schemas/MusicBrainzMatch" }
+          "uri": {
+            "$ref": "#/components/schemas/AtUri"
+          },
+          "cid": {
+            "$ref": "#/components/schemas/Cid"
+          },
+          "did": {
+            "$ref": "#/components/schemas/Did"
+          },
+          "artist": {
+            "$ref": "#/components/schemas/MusicText"
+          },
+          "track": {
+            "$ref": "#/components/schemas/MusicText"
+          },
+          "album": {
+            "$ref": "#/components/schemas/MusicText"
+          },
+          "recordingMbid": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "createdAt": {
+            "$ref": "#/components/schemas/Timestamp"
+          },
+          "indexedAt": {
+            "$ref": "#/components/schemas/Timestamp"
+          },
+          "musicbrainz": {
+            "$ref": "#/components/schemas/MusicBrainzMatch"
+          }
         },
         "description": "A loved track read DTO. MusicBrainz enrichment is optional and never replaces submitted artist, track or album values."
       },
@@ -8428,6 +8587,18 @@
       "v1.2-now-playing-feed": {
         "summary": "N1 response fixture.",
         "externalValue": "examples/v1.2/now-playing-feed.json"
+      },
+      "cover-art-jpeg": {
+        "summary": "Tiny binary fixture described by the validator adapter.",
+        "externalValue": "examples/cover-art-jpeg.json"
+      },
+      "cover-art-png": {
+        "summary": "Tiny binary fixture described by the validator adapter.",
+        "externalValue": "examples/cover-art-png.json"
+      },
+      "cover-art-webp": {
+        "summary": "Tiny binary fixture described by the validator adapter.",
+        "externalValue": "examples/cover-art-webp.json"
       }
     },
     "securitySchemes": {

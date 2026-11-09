@@ -46,6 +46,7 @@ All JSON API routes use /api/v1. Standard errors: {error: {code, message, reques
 | Health/config | GET /health/live; GET /health/ready; GET /api/v1/meta |
 | Identity | GET /oauth/client-metadata.json (static asset, A3); GET /api/v1/resolve?handle=... |
 | Listening | GET /api/v1/scrobbles/{id}; GET /api/v1/users/{did}/scrobbles |
+| Cover art | GET /api/v1/cover-art/{releaseMbid} (locally cached bytes only) |
 | Read models | GET /api/v1/users/{did}/profile; GET /api/v1/users/{did}/stats?window=all\|7d\|30d\|365d&limit=...; GET /api/v1/feed?scope=global\|following&viewer=... (A8) |
 | Social | GET /api/v1/users/{did}/following; GET /api/v1/users/{did}/followers |
 | User controls | GET /api/v1/users/{did}/export (A9); disconnect is the signed `<prefix>.settings/self` record (A10) |

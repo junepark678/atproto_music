@@ -44,6 +44,8 @@ export interface PolicyCaps {
 
 export interface PolicyFetchOptions {
   caps: PolicyCaps;
+  /** Return redirect responses to this caller for its own validated handling. Default rejects all 3xx. */
+  allowManualRedirectResponse?: boolean;
 }
 
 export type PolicyFetch = (
@@ -262,7 +264,10 @@ export function createPolicyFetch(options: CreatePolicyFetchOptions): PolicyFetc
 
     // 4. Redirects are refused; Location is never read.
     const status = response.status;
-    if ((response.type as string) === 'opaqueredirect' || (status >= 300 && status < 400)) {
+    if (
+      (response.type as string) === 'opaqueredirect' ||
+      (status >= 300 && status < 400 && fetchOptions.allowManualRedirectResponse !== true)
+    ) {
       discard(response);
       throw new TransportError('redirect', `redirect refused (HTTP ${status})`, { reason: `http_${status}`, status });
     }

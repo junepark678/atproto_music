@@ -370,3 +370,89 @@ it('links current track, artist and release with validated IDs and safe external
   expect(accessibleName).toBe('Jóga (MusicBrainz)');
   app.cleanup();
 });
+
+it('loads matched release art from the same-origin cache endpoint with a decorative lazy image', async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date('2026-01-15T12:00:00Z'));
+  const app = setup({
+    nowPlaying: {
+      ...item,
+      releaseMbid: artistMbid,
+      musicbrainz: {
+        recordingMbid,
+        title: 'Resolved track title',
+        artistCredit: 'Resolved artist',
+        artistMbids: [artistMbid],
+        releaseMbid,
+        releaseTitle: 'Resolved release',
+        matchedBy: 'search',
+        syncedAt: '2026-01-15T11:59:00Z',
+      },
+    },
+    serverTime: response.serverTime,
+  });
+  const art = await vi.waitFor(() => {
+    const image = app.root.querySelector<HTMLImageElement>('.now-playing-cover');
+    expect(image).not.toBeNull();
+    return image!;
+  });
+  expect(art.getAttribute('src')).toBe(`/api/v1/cover-art/${releaseMbid}`);
+  expect(art.getAttribute('loading')).toBe('lazy');
+  expect(art.getAttribute('alt')).toBe('');
+  expect(art.getAttribute('src')).not.toMatch(/^https?:/);
+  expect(app.root.textContent).not.toContain(did);
+  app.cleanup();
+});
+
+it('uses a valid submitted release ID when no matched release ID exists', async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date('2026-01-15T12:00:00Z'));
+  const app = setup({ nowPlaying: { ...item, releaseMbid }, serverTime: response.serverTime });
+  await vi.waitFor(() =>
+    expect(app.root.querySelector('.now-playing-cover')?.getAttribute('src')).toBe(`/api/v1/cover-art/${releaseMbid}`),
+  );
+  app.cleanup();
+});
+
+it('omits cover art when the release ID is missing or invalid', async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date('2026-01-15T12:00:00Z'));
+  const app = setup({ nowPlaying: { ...item, releaseMbid: 'not-a-uuid' }, serverTime: response.serverTime });
+  await vi.waitFor(() => expect(app.root.textContent).toContain('Jóga'));
+  expect(app.root.querySelector('.now-playing-cover')).toBeNull();
+  app.cleanup();
+});
+
+it('falls back to the glyph after an image error and resets when the release changes', async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date('2026-01-15T12:00:00Z'));
+  let current = { ...item, releaseMbid };
+  const nowPlaying = vi.fn(async () => ({ nowPlaying: current, serverTime: response.serverTime }));
+  const api = { nowPlaying } as unknown as ApiClient;
+  const root = document.createElement('div');
+  document.body.append(root);
+  render(<NowPlayingCard api={api} did={did} owner />, root);
+  const first = await vi.waitFor(() => {
+    const image = root.querySelector<HTMLImageElement>('.now-playing-cover');
+    expect(image).not.toBeNull();
+    return image!;
+  });
+  await act(async () => {
+    first.dispatchEvent(new Event('error'));
+  });
+  expect(root.querySelector('.now-playing-cover')).toBeNull();
+  expect(root.querySelector('.now-playing-art')?.textContent).toContain('♫');
+
+  const nextRelease = recordingMbid;
+  current = { ...item, releaseMbid: nextRelease };
+  document.dispatchEvent(new Event('visibilitychange'));
+  const next = await vi.waitFor(() => {
+    const image = root.querySelector<HTMLImageElement>('.now-playing-cover');
+    expect(image?.getAttribute('src')).toBe(`/api/v1/cover-art/${nextRelease}`);
+    return image!;
+  });
+  expect(next.getAttribute('alt')).toBe('');
+  expect(root.textContent).not.toContain(did);
+  render(null, root);
+  root.remove();
+});

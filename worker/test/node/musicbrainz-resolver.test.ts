@@ -74,6 +74,12 @@ it('matches submitted MBID, captures full credit and metadata, and keeps no egre
     release_title: 'Album',
     duration_ms: 210000,
   });
+  expect(x.db.one('SELECT release_mbid,release_group_mbid,status FROM mb_cover_art_jobs')).toEqual({
+    release_mbid: uuid,
+    release_group_mbid: uuid,
+    status: 'pending',
+  });
+  expect(x.fake.requests).toHaveLength(1); // only the MusicBrainz match request; CAA work is timer-only
 });
 
 it('rejects absent/low scores and wrong credited artist names', async () => {

@@ -37,6 +37,7 @@ import { createAppPassword } from '../../src/credentials/app-passwords';
 import { createLbToken } from '../../src/credentials/lb-tokens';
 import { migrate } from '../../src/do/migrate';
 import { EXTENSION_TIMER_NAMES } from '../../src/do/timers';
+import { enqueueCoverArt } from '../../src/musicbrainz/cover-art-store';
 import { enqueueTrack } from '../../src/musicbrainz/store';
 import { nodeTimers } from '../../src/node/alarm';
 import {
@@ -178,6 +179,8 @@ function consumerOf(r: SpyRequest, asHost: string, dohHost: string, plcHost: str
       return null;
     case 'musicbrainz':
       return r.host === 'musicbrainz.test' ? 'musicbrainz' : null;
+    case 'cover-art':
+      return ['coverartarchive.test', 'ia800.archive.org'].includes(r.host) ? 'cover-art' : null;
   }
 }
 
@@ -282,6 +285,7 @@ async function spiedWorld(spy: Spy, enableMusicbrainz = false): Promise<{ w: Wor
     env: {
       NAMESPACE_BATCH_PUBLICATION_REF: `sha256:${'b'.repeat(64)}`,
       ...(enableMusicbrainz ? { MUSICBRAINZ_API_ROOT: 'https://musicbrainz.test/ws/2/' } : {}),
+      ...(enableMusicbrainz ? { COVER_ART_ARCHIVE_ROOT: 'https://coverartarchive.test/' } : {}),
     },
   });
   // run() installed the unpinned stub as globalThis.fetch; record every call to it.
@@ -300,6 +304,12 @@ async function exerciseMusicbrainz(w: World): Promise<void> {
   await w.core.tick('extension');
 }
 
+async function exerciseCoverArt(w: World): Promise<void> {
+  enqueueCoverArt(w.db, '01234567-89ab-4cde-8fab-0123456789ab', null, w.clock.nowMs());
+  w.core.extensionTimers.kick('cover-art');
+  await w.core.tick('extension');
+}
+
 describe('production features', () => {
   it('every outbound consumer of the production composition receives the injected spy transport, and leaving it out of any one consumer makes the test fail', async () => {
     // With the spy on every wire.
@@ -308,6 +318,7 @@ describe('production features', () => {
     expect(new Set(spy.handed)).toEqual(new Set(WIRES));
     await exercise(w, alice);
     await exerciseMusicbrainz(w);
+    await exerciseCoverArt(w);
     const full = coverage(w, spy);
     expect(full.missing).toEqual([]);
     expect(full.unclassified).toEqual([]);
@@ -315,6 +326,14 @@ describe('production features', () => {
     const mbRequest = spy.requests.find((r) => r.wire === 'musicbrainz');
     expect(mbRequest).toMatchObject({ host: 'musicbrainz.test', path: '/ws/2/recording' });
     expect(mbRequest?.userAgent).toBe('atmusic/0.0.0 ( https://github.com/junepark678/atproto_music )');
+    const coverRequests = spy.requests.filter((r) => r.wire === 'cover-art');
+    expect(coverRequests.map((r) => [r.host, r.path])).toEqual([
+      ['coverartarchive.test', '/release/01234567-89ab-4cde-8fab-0123456789ab/front-250'],
+      ['ia800.archive.org', '/image'],
+    ]);
+    expect(
+      coverRequests.every((r) => r.userAgent === 'atmusic/0.0.0 ( https://github.com/junepark678/atproto_music )'),
+    ).toBe(true);
     // The Jetstream connector dialled through the pinned lookup, which refused the private answer: no socket.
     expect(spy.lookups.filter((l) => l.wire === 'jetstream').map((l) => l.hostname)).toContain(JETSTREAM_HOST);
     expect(w.log.logs.some((l) => l.event === 'jetstream_connected')).toBe(false);
@@ -323,6 +342,7 @@ describe('production features', () => {
       new Promise<unknown[]>((resolve) => {
         checkedLookup(async () => answers)('jetstream.example.test', { all }, (...args: unknown[]) => resolve(args));
       });
+
     expect(await answer([{ address: '93.184.216.34' }])).toEqual([null, '93.184.216.34', 4]);
     expect(await answer([{ address: '93.184.216.34' }, { address: '2606:2800:220:1::1' }], true)).toEqual([
       null,
@@ -348,6 +368,7 @@ describe('production features', () => {
       const run = await spiedWorld(partial, true);
       await exercise(run.w, run.alice);
       await exerciseMusicbrainz(run.w);
+      await exerciseCoverArt(run.w);
       const result = coverage(run.w, partial);
       expect(result.missing, `spy left out of ${wire}`).toEqual(
         OUTBOUND_CONSUMERS.filter((c) => (OUTBOUND_WIRES[wire] as readonly OutboundConsumer[]).includes(c)),
@@ -357,6 +378,99 @@ describe('production features', () => {
       await run.w.close();
     }
   }, 180_000);
+
+  it('carries each fetched image MIME and exact bytes through the timer, SQLite cache and HTTP route', async () => {
+    const { w } = await startWorld({
+      connectJetstream: null,
+      env: { COVER_ART_ARCHIVE_ROOT: 'https://coverartarchive.test/' },
+    });
+    const fixtures = [
+      { id: '11111111-1111-4111-8111-111111111111', mime: 'image/jpeg', bytes: [0xff, 0xd8, 0xff] },
+      { id: '22222222-2222-4222-8222-222222222222', mime: 'image/png', bytes: [0x89, 0x50, 0x4e, 0x47] },
+      { id: '33333333-3333-4333-8333-333333333333', mime: 'image/webp', bytes: [0x52, 0x49, 0x46, 0x46] },
+    ];
+    for (const { id } of fixtures) enqueueCoverArt(w.db, id, null, w.clock.nowMs());
+
+    for (let slice = 0; slice < 2; slice++) {
+      w.core.extensionTimers.kick('cover-art');
+      await w.core.tick('extension');
+    }
+
+    for (const { id, mime, bytes } of fixtures) {
+      const response = await w.fetchRaw(`/api/v1/cover-art/${id}`);
+      expect(response.status).toBe(200);
+      expect(response.headers.get('content-type')).toBe(mime);
+      expect([...new Uint8Array(await response.arrayBuffer())]).toEqual(bytes);
+      expect(
+        w.db.one<{ mime_type: string; byte_size: number }>(
+          'SELECT mime_type,byte_size FROM mb_cover_art WHERE release_mbid=?',
+          id,
+        ),
+      ).toEqual({ mime_type: mime, byte_size: bytes.length });
+    }
+  });
+
+  it('continues bounded due cover-art slices from the armed alarm without a hot loop and waits for future retries', async () => {
+    const { w } = await startWorld({
+      connectJetstream: null,
+      env: { COVER_ART_ARCHIVE_ROOT: 'https://coverartarchive.test/' },
+    });
+    const ids = [
+      '11111111-1111-4111-8111-111111111111',
+      '22222222-2222-4222-8222-222222222222',
+      '33333333-3333-4333-8333-333333333333',
+      '44444444-4444-4444-8444-444444444444',
+      '55555555-5555-4555-8555-555555555555',
+    ];
+    for (const id of ids) enqueueCoverArt(w.db, id, null, w.clock.nowMs());
+
+    const requests = () =>
+      w.outbound.filter((request) => ['coverartarchive.test', 'ia800.archive.org'].includes(request.host));
+    const complete = () =>
+      w.db.one<{ n: number }>("SELECT count(*) AS n FROM mb_cover_art_jobs WHERE status='complete'")?.n;
+    w.core.extensionTimers.kick('cover-art');
+    await w.core.extensionAlarm();
+    await w.settle();
+    expect(complete()).toBe(2);
+    expect(requests()).toHaveLength(4);
+
+    const firstDue = w.db.one<{ due_at: number }>("SELECT due_at FROM timers WHERE name='cover-art'")?.due_at;
+    expect(firstDue).toBe(w.clock.nowMs() + 1_000);
+    await w.core.extensionAlarm();
+    await w.settle();
+    expect(complete()).toBe(2);
+    expect(requests()).toHaveLength(4);
+
+    w.advance(firstDue! - w.clock.nowMs());
+    await w.core.extensionAlarm();
+    await w.settle();
+    expect(complete()).toBe(4);
+    expect(requests()).toHaveLength(8);
+
+    const secondDue = w.db.one<{ due_at: number }>("SELECT due_at FROM timers WHERE name='cover-art'")?.due_at;
+    expect(secondDue).toBe(w.clock.nowMs() + 1_000);
+    w.advance(secondDue! - w.clock.nowMs());
+    await w.core.extensionAlarm();
+    await w.settle();
+    expect(complete()).toBe(5);
+    expect(requests()).toHaveLength(10);
+
+    // A future retry deadline is armed exactly; firing before it does not fetch early.
+    enqueueCoverArt(w.db, '66666666-6666-4666-8666-666666666666', null, w.clock.nowMs());
+    w.db.run(
+      "UPDATE mb_cover_art_jobs SET status='pending',next_due_ms=? WHERE release_mbid=?",
+      w.clock.nowMs() + 60_000,
+      '66666666-6666-4666-8666-666666666666',
+    );
+    w.core.extensionTimers.kick('cover-art');
+    await w.core.extensionAlarm();
+    await w.settle();
+    const retryDue = w.db.one<{ due_at: number }>("SELECT due_at FROM timers WHERE name='cover-art'")?.due_at;
+    expect(retryDue).toBe(w.clock.nowMs() + 60_000);
+    await w.core.extensionAlarm();
+    await w.settle();
+    expect(requests()).toHaveLength(10);
+  });
 
   it('the production features register the extension timers in EXTENSION_TIMER_NAMES order and run reconcileSignInPolicy once at startup before listen', async () => {
     const REFUSED = 'did:plc:cccccccccccccccccccccccc';
@@ -440,6 +554,7 @@ describe('production features', () => {
       'expiry-sweep',
       'backup',
       'musicbrainz',
+      'cover-art',
     ]);
     const stored = w.db.all<{ name: string }>('SELECT name FROM timers ORDER BY name').map((r) => r.name);
     for (const name of EXTENSION_TIMER_NAMES) expect(stored).toContain(name);
@@ -457,6 +572,7 @@ describe('production features', () => {
       'oauth-keepalive',
       'expiry-sweep',
       'musicbrainz',
+      'cover-art',
       'meta',
       'backup',
     ]);

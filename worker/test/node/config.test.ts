@@ -104,6 +104,8 @@ describe('parseNodeConfig', () => {
     expect(cfg.listen).toEqual({ host: '127.2.0.1', port: 8888 });
     expect(cfg.musicbrainzApiRoot).toBe('https://musicbrainz.org/ws/2/');
     expect(cfg.musicbrainzEnabled).toBe(true);
+    expect(cfg.coverArtArchiveRoot).toBe('https://coverartarchive.org/');
+    expect(cfg.coverArtCacheMb).toBe(200);
 
     // systemd lists several state directories colon-separated; the first is ours.
     expect(parse({ ...baseEnv(), STATE_DIRECTORY: '/srv/a:/srv/b' }).dbPath).toBe('/srv/a/atmusic.db');
@@ -164,6 +166,14 @@ describe('parseNodeConfig', () => {
         const issues = issuesOf(() => parse({ ...env, [name]: root }));
         expect(fields(issues), `${name} ${kind}`).toEqual([name]);
       }
+    }
+    for (const value of ['http://coverartarchive.org/', 'https://archive.org:8443/', 'https://127.0.0.1/']) {
+      expect(fields(issuesOf(() => parse({ ...env, COVER_ART_ARCHIVE_ROOT: value })))).toContain(
+        'COVER_ART_ARCHIVE_ROOT',
+      );
+    }
+    for (const value of ['0', '-1', '1.5', '9007199254740992', '10001']) {
+      expect(fields(issuesOf(() => parse({ ...env, COVER_ART_CACHE_MB: value })))).toContain('COVER_ART_CACHE_MB');
     }
 
     // The defaults are the real upstreams; an explicit :443 is the default port.

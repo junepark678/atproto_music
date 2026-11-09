@@ -1,4 +1,5 @@
 import { account, authorizeOnFixtureAs, pdsListRecords, readNetwork } from '../../scripts/e2e/dev-env';
+import { toLocalInput } from '../src/components/format';
 import { expect, pauseNodePump, restartNode, test } from './fixtures';
 
 test('a Node process restart mid-journey keeps the browser session cookie and indexed data, and new writes still index', async ({
@@ -33,7 +34,10 @@ test('a Node process restart mid-journey keeps the browser session cookie and in
     await form.getByLabel('Artist').fill('Restart Fixture Artist');
     await form.getByLabel('Track').fill(track);
     await form.getByLabel('Album (optional)').fill('Persistent Session');
-    await form.getByLabel('Listened at').fill(new Date(network.fixtureNowMs - 60_000).toISOString().slice(0, 19));
+    const listenedAtValue = toLocalInput(network.fixtureNowMs - 60_000, 'UTC').slice(0, 16);
+    const listenedAt = form.getByLabel('Listened at');
+    await listenedAt.fill(listenedAtValue);
+    await expect(listenedAt).toHaveValue(listenedAtValue);
     await page.getByRole('button', { name: 'Publish scrobble' }).click();
     const item = page.locator('li[data-op-id]').filter({ hasText: track });
     await expect(item.locator('.op-status')).toHaveAttribute('data-op-state', waitForIndex ? 'indexed' : 'queued', {

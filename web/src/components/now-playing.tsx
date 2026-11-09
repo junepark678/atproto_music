@@ -93,10 +93,15 @@ export function NowPlayingCard({ api, did, owner }: { api: ApiClient; did: Did; 
   const progress = duration === undefined ? null : Math.min(duration, elapsed);
   const album = item.album ?? item.musicbrainz?.releaseTitle;
   const artistMbid = unambiguousMbid(item.artistMbids) ?? unambiguousMbid(item.musicbrainz?.artistMbids);
+  const coverReleaseMbid = isMbid(item.musicbrainz?.releaseMbid)
+    ? item.musicbrainz.releaseMbid
+    : isMbid(item.releaseMbid)
+      ? item.releaseMbid
+      : undefined;
   return (
     <article class="now-playing-card" aria-label="Now playing">
       <div class="now-playing-art" aria-hidden="true">
-        ♫
+        ♫{coverReleaseMbid ? <CoverArt key={coverReleaseMbid} releaseMbid={coverReleaseMbid} /> : null}
       </div>
       <div class="now-playing-content">
         <p class="now-playing-overline">
@@ -179,6 +184,20 @@ export function NowPlayingCard({ api, did, owner }: { api: ApiClient; did: Did; 
         ) : null}
       </div>
     </article>
+  );
+}
+
+function CoverArt({ releaseMbid }: { releaseMbid: string }) {
+  const [failed, setFailed] = useState(false);
+  if (failed) return null;
+  return (
+    <img
+      class="now-playing-cover"
+      src={`/api/v1/cover-art/${releaseMbid}`}
+      loading="lazy"
+      alt=""
+      onError={() => setFailed(true)}
+    />
   );
 }
 

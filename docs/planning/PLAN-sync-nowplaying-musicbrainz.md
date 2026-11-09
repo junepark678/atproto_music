@@ -233,12 +233,15 @@ The owner's word is "synced". Our definition: canonical MusicBrainz data is reso
 - **Fetch.**
   - After a match, a background job fetches the Cover Art Archive `release/{mbid}/front-250`, falling back to `release-group/{mbid}/front-250`.
   - It uses `policyFetch` with manual following of at most two redirects, each to an https `archive.org` / `*.archive.org` host.
-  - Responses are capped at 512 KB and must be `image/jpeg`, `image/png` or `image/webp`.
+  - CAA uses a client-only `policyFetch` opt-in to return manual redirect responses; every hop still goes through URL validation and the pinned transport. All other consumers keep rejecting redirects. One shared budget of at most two followed redirects applies across release and release-group requests. Destinations must be HTTPS `archive.org` or a subdomain at the default port, with no credentials or fragment.
+  - Requests carry only the repository User-Agent and image Accept header; no user identity or credentials. Responses are capped at 512 KiB and must be `image/jpeg`, `image/png` or `image/webp`.
+  - A dedicated extension timer processes at most two due jobs per run. Match-time enqueue is local and transactional; no request read or resolver match performs CAA egress. The existing MusicBrainz kill switch disables this enrichment timer.
 - **Storage.**
-  - Store the images in a blob table `mb_cover_art`.
-  - Evict least-recently-used images under `COVER_ART_CACHE_MB` (default 200).
+  - Append-only migration 21 stores images (`mb_cover_art`), persistent fetch jobs (`mb_cover_art_jobs`) and a transactional byte counter (`mb_cover_art_usage`); these are non-derived restore state.
+  - The indexed LRU uses `(last_access_ms, release_mbid)` and evicts at most eight rows per put. The cache is kept under `COVER_ART_CACHE_MB` (default 200 MiB); if one bounded batch cannot make room, the job is deferred for a later timer run.
+  - Network failures back off exponentially from 60 seconds to 24 hours; after eight attempts the job waits 30 days before a new retry window. 404 is a normal release-to-group fallback/absence, not a retry.
 - **Serving.**
-  - `GET /api/v1/cover-art/{releaseMbid}` serves from our origin with long-lived caching, and returns 404 when nothing is cached. The request path never makes an outbound request.
+  - `GET /api/v1/cover-art/{releaseMbid}` serves exact cached bytes from our origin with MIME, `nosniff` and one-day public caching, and returns 404 when nothing is cached. Invalid UUIDs return 422. The request path only touches local LRU state and never makes an outbound request.
   - The CSP stays `img-src 'self' data:`, and viewers never contact archive.org.
 - The UI art tiles use these images.
 
