@@ -75,9 +75,11 @@ export function enqueueListenDelete(
     authorizationRev?: string;
     now: number;
     excluding?: ReadonlySet<string>;
+    /** Internal synchronous caller already checked this exact canonical tuple. */
+    survivorAlreadyChecked?: boolean;
   },
 ): number {
-  if (hasCanonicalListenSurvivor(db, args)) return 0;
+  if (!args.survivorAlreadyChecked && hasCanonicalListenSurvivor(db, args)) return 0;
   const links = db.all<{ id: string; generation: number; service: string }>(
     'SELECT id,generation,service FROM linked_accounts WHERE did=?',
     args.did,

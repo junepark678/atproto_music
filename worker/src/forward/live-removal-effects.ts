@@ -27,19 +27,27 @@ export function executeListenRemovals(
   },
 ): number {
   const excluding = new Set(args.rows.map((row) => row.uri));
+  // Tombstones do not change scrobbles, and the full exclusion set stays fixed
+  // for this synchronous invocation. The first result therefore remains valid
+  // for every member with the same canonical tuple.
+  const survivorByCanonical = new Map<string, boolean>();
+  const enqueuedEventKeys = new Set<string>();
   let queued = 0;
   for (const row of args.rows) {
     const listenedAt = Math.floor(Date.parse(row.listened_at) / 1000);
-    if (
-      hasCanonicalListenSurvivor(db, {
+    const canonicalKey = JSON.stringify([args.did, listenedAt, row.artist_key, row.track_key]);
+    let hasSurvivor = survivorByCanonical.get(canonicalKey);
+    if (hasSurvivor === undefined) {
+      hasSurvivor = hasCanonicalListenSurvivor(db, {
         did: args.did,
         listenedAt,
         artistKey: row.artist_key,
         trackKey: row.track_key,
         excluding,
-      })
-    )
-      continue;
+      });
+      survivorByCanonical.set(canonicalKey, hasSurvivor);
+    }
+    if (hasSurvivor) continue;
     tombstoneListen(db, {
       did: args.did,
       identity: args.tombstoneIdentity(row),
@@ -48,10 +56,14 @@ export function executeListenRemovals(
       trackKey: row.track_key,
       nowMs: args.now,
     });
+    const identityKey = args.identity(row);
+    const eventKey = `${identityKey}:${row.cid}:rev:${args.authRev}`;
+    if (enqueuedEventKeys.has(eventKey)) continue;
+    enqueuedEventKeys.add(eventKey);
     queued += enqueueListenDelete(db, {
       did: args.did,
-      identityKey: args.identity(row),
-      eventKey: `${args.identity(row)}:${row.cid}:rev:${args.authRev}`,
+      identityKey,
+      eventKey,
       listenedAt,
       artistKey: row.artist_key,
       trackKey: row.track_key,
@@ -62,6 +74,7 @@ export function executeListenRemovals(
       authorizationRev: args.authRev,
       now: args.now,
       excluding,
+      survivorAlreadyChecked: true,
     });
   }
   return queued;

@@ -191,10 +191,17 @@ function seedRemovedListenAdmissions(
 ): void {
   if (listens.length === 0) return;
   const provenance: ForwardProvenance | null = retainedRecordProvenance(db, target.did, target.collection, target.rkey);
+  const admittedIdentities = new Set<string>();
   for (const listen of listens) {
+    const identityKey = projectionListenKey(target.did, listen.listened_at, listen.artist_key, listen.track_key);
+    // Repeated members share exactly the same identity and target-level
+    // provenance. admitProjectedIdentity's first call establishes that state;
+    // later calls in this synchronous seeding pass can only observe its no-op.
+    if (admittedIdentities.has(identityKey)) continue;
+    admittedIdentities.add(identityKey);
     admitProjectedIdentity(db, {
       did: target.did,
-      identityKey: projectionListenKey(target.did, listen.listened_at, listen.artist_key, listen.track_key),
+      identityKey,
       provenance,
       legacyPresent: true,
       path: 'snapshot',

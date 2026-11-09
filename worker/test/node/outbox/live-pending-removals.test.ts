@@ -13,13 +13,15 @@ import {
   recordPendingRemoval,
 } from '../../../src/do/ingest/live-pending-removals';
 import { applyRecordProof } from '../../../src/do/write/apply-record';
-import { executeListenRemovals } from '../../../src/forward/live-removal-effects';
+import { enqueueListenDelete, hasCanonicalListenSurvivor } from '../../../src/forward/delete-enqueue';
+import { executeListenRemovals, type LiveRemovedListen } from '../../../src/forward/live-removal-effects';
 import {
   admitForwardIdentity,
   cleanupForwardAdmissionsForSuppression,
   projectionListenKey,
 } from '../../../src/forward/projection';
 import { enqueueForwards } from '../../../src/outbox/forward-enqueue';
+import { tombstoneListen } from '../../../src/sync/tombstones';
 import {
   ALICE as DID,
   deleteProof,
@@ -133,6 +135,247 @@ it('removes the projection before the delete event, then runs one delayed deleti
     });
     expect(db.one('SELECT count(*) AS n FROM listenbrainz_deletes')).toEqual({ n: 1 });
     expect(db.one('SELECT count(*) AS n FROM live_pending_removals')).toEqual({ n: 0 });
+  });
+});
+
+it('deduplicates only the invocation-local canonical read and exact event key', async () => {
+  await withMigratedDb((db) => {
+    seedUser(db, DID);
+    setup(db);
+    const secondIdentity = projectionListenKey(DID, LISTENED_AT, 'artist-2', 'track-2');
+    enqueueForwards(db, {
+      did: DID,
+      items: [{ kind: 'scrobble', listenKey: secondIdentity, payload: {} }],
+      now: NOW,
+      random,
+    });
+    db.run("UPDATE forward_outbox SET state='sent' WHERE kind='scrobble'");
+
+    const rows: LiveRemovedListen[] = [
+      {
+        uri: `${URI}-a`,
+        cid: 'cid-1',
+        listened_at: LISTENED_AT,
+        artist_key: 'artist-key',
+        track_key: 'track-key',
+        artist: 'Björk',
+        track: 'Jóga',
+        recording_mbid: null,
+      },
+      {
+        uri: `${URI}-b`,
+        cid: 'cid-1',
+        listened_at: LISTENED_AT,
+        artist_key: 'artist-key',
+        track_key: 'track-key',
+        artist: 'BJÖRK',
+        track: 'JÓGA',
+        recording_mbid: null,
+      },
+      {
+        uri: `${URI}-c`,
+        cid: 'cid-2',
+        listened_at: LISTENED_AT,
+        artist_key: 'artist-key',
+        track_key: 'track-key',
+        artist: 'Björk',
+        track: 'Jóga',
+        recording_mbid: null,
+      },
+      {
+        uri: `${URI}-d`,
+        cid: 'cid-3',
+        listened_at: LISTENED_AT,
+        artist_key: 'artist-2',
+        track_key: 'track-2',
+        artist: 'Other',
+        track: 'Song',
+        recording_mbid: null,
+      },
+    ];
+    db.run(
+      `INSERT INTO scrobbles(uri,cid,did,rkey,revision,artist,track,album,listened_at,created_at,indexed_at,
+       artist_key,track_key,album_key) VALUES(?,? ,?,'survivor','2222222222222','Other','Song',NULL,?,?,?,'artist-2','track-2',NULL)`,
+      `${URI}-survivor`,
+      'survivor-cid',
+      DID,
+      toStorage(fromMs(Date.parse(LISTENED_AT))),
+      toStorage(fromMs(Date.parse(LISTENED_AT))),
+      toStorage(fromMs(NOW)),
+    );
+
+    let survivorReads = 0;
+    let eventWrites = 0;
+    const traced: Db = {
+      all<T>(sql: string, ...params: SqlParam[]) {
+        if (sql.includes('SELECT s.uri FROM scrobbles s')) survivorReads++;
+        return db.all<T>(sql, ...params);
+      },
+      one: db.one.bind(db),
+      run(sql, ...params) {
+        if (sql.includes('listenbrainz_deletes')) eventWrites++;
+        return db.run(sql, ...params);
+      },
+      tx: db.tx.bind(db),
+    };
+    const identity = (row: LiveRemovedListen) =>
+      projectionListenKey(DID, row.listened_at, row.artist_key, row.track_key);
+    const tombstoneIdentity = (row: LiveRemovedListen) => `live:${row.uri}:${row.cid}`;
+    const call = () =>
+      executeListenRemovals(traced, {
+        did: DID,
+        rows,
+        authRev: '3333333333333',
+        now: NOW,
+        identity,
+        tombstoneIdentity,
+      });
+
+    expect(call()).toBe(2);
+    expect(survivorReads).toBe(2);
+    expect(eventWrites).toBe(2);
+    expect(db.one("SELECT count(*) n FROM linked_pull_tombstones WHERE kind='listen'")).toEqual({ n: 3 });
+    expect(db.one('SELECT count(*) n FROM listenbrainz_deletes')).toEqual({ n: 2 });
+
+    db.run('DELETE FROM scrobbles WHERE uri=?', `${URI}-survivor`);
+    expect(call()).toBe(1);
+    expect(survivorReads).toBe(4);
+    // Repeated invocations still attempt the exact inserts, where the durable
+    // event key provides cross-call idempotency; the per-call Set is ephemeral.
+    expect(eventWrites).toBe(5);
+    expect(db.one("SELECT count(*) n FROM linked_pull_tombstones WHERE kind='listen'")).toEqual({ n: 4 });
+    expect(db.one('SELECT count(*) n FROM listenbrainz_deletes')).toEqual({ n: 3 });
+  });
+});
+
+it.each([1_000, 10_000])('bounds live-removal statements for %s duplicate canonical members', async (count) => {
+  await withMigratedDb(async (db) => {
+    seedUser(db, DID);
+    setup(db);
+    const rows: LiveRemovedListen[] = Array.from({ length: count }, (_, i) => ({
+      uri: `${URI}-member-${i}`,
+      cid: 'same-cid',
+      listened_at: LISTENED_AT,
+      artist_key: 'artist-key',
+      track_key: 'track-key',
+      artist: 'Artist',
+      track: 'Track',
+      recording_mbid: null,
+    }));
+    let statements = 0;
+    let survivorReads = 0;
+    let tombstoneWrites = 0;
+    let eventWrites = 0;
+    const traced: Db = {
+      all<T>(sql: string, ...params: SqlParam[]) {
+        statements++;
+        if (sql.includes('SELECT s.uri FROM scrobbles s')) survivorReads++;
+        return db.all<T>(sql, ...params);
+      },
+      one<T>(sql: string, ...params: SqlParam[]) {
+        statements++;
+        return db.one<T>(sql, ...params);
+      },
+      run(sql, ...params) {
+        statements++;
+        if (sql.includes('INSERT INTO linked_pull_tombstones')) tombstoneWrites++;
+        if (sql.includes('listenbrainz_deletes')) eventWrites++;
+        return db.run(sql, ...params);
+      },
+      tx: db.tx.bind(db),
+    };
+    const started = performance.now();
+    expect(
+      executeListenRemovals(traced, {
+        did: DID,
+        rows,
+        authRev: '3333333333333',
+        now: NOW,
+        identity: (row) => projectionListenKey(DID, row.listened_at, row.artist_key, row.track_key),
+        tombstoneIdentity: (row) => `live:${row.uri}:${row.cid}`,
+      }),
+    ).toBe(1);
+    const elapsedMs = performance.now() - started;
+    expect(statements).toBeLessThanOrEqual(count + 20);
+    expect(survivorReads).toBe(1);
+    expect(tombstoneWrites).toBe(count);
+    expect(eventWrites).toBe(1);
+    expect(db.one("SELECT count(*) n FROM linked_pull_tombstones WHERE kind='listen'")).toEqual({ n: count });
+    expect(db.one("SELECT count(DISTINCT identity_key) n FROM linked_pull_tombstones WHERE kind='listen'")).toEqual({
+      n: count,
+    });
+    expect(db.one('SELECT count(*) n FROM listenbrainz_deletes')).toEqual({ n: 1 });
+    if (process.env.A2_PROFILE === '1')
+      console.info(
+        JSON.stringify({ removalMembers: count, elapsedMs, statements, survivorReads, tombstoneWrites, eventWrites }),
+      );
+
+    // Negative control: reproduce the prior per-member check → tombstone →
+    // enqueue flow. The old path performs two survivor reads and three event
+    // SQL statements per member even though its durable event key coalesces.
+    await withMigratedDb((legacyDb) => {
+      seedUser(legacyDb, DID);
+      setup(legacyDb);
+      let legacyStatements = 0;
+      let legacySurvivorReads = 0;
+      const legacyTracked: Db = {
+        all<T>(sql: string, ...params: SqlParam[]) {
+          legacyStatements++;
+          if (sql.includes('SELECT s.uri FROM scrobbles s')) legacySurvivorReads++;
+          return legacyDb.all<T>(sql, ...params);
+        },
+        one<T>(sql: string, ...params: SqlParam[]) {
+          legacyStatements++;
+          return legacyDb.one<T>(sql, ...params);
+        },
+        run(sql, ...params) {
+          legacyStatements++;
+          return legacyDb.run(sql, ...params);
+        },
+        tx: legacyDb.tx.bind(legacyDb),
+      };
+      const excluding = new Set(rows.map((row) => row.uri));
+      let legacyQueued = 0;
+      for (const row of rows) {
+        const listenedAt = Math.floor(Date.parse(row.listened_at) / 1000);
+        if (
+          hasCanonicalListenSurvivor(legacyTracked, {
+            did: DID,
+            listenedAt,
+            artistKey: row.artist_key,
+            trackKey: row.track_key,
+            excluding,
+          })
+        )
+          continue;
+        tombstoneListen(legacyTracked, {
+          did: DID,
+          identity: `live:${row.uri}:${row.cid}`,
+          second: listenedAt,
+          artistKey: row.artist_key,
+          trackKey: row.track_key,
+          nowMs: NOW,
+        });
+        const identityKey = projectionListenKey(DID, row.listened_at, row.artist_key, row.track_key);
+        legacyQueued += enqueueListenDelete(legacyTracked, {
+          did: DID,
+          identityKey,
+          eventKey: `${identityKey}:${row.cid}:rev:3333333333333`,
+          listenedAt,
+          artistKey: row.artist_key,
+          trackKey: row.track_key,
+          artist: row.artist,
+          track: row.track,
+          sourcePath: 'live',
+          authorizationRev: '3333333333333',
+          now: NOW,
+          excluding,
+        });
+      }
+      expect(legacyQueued).toBe(1);
+      expect(legacySurvivorReads).toBe(count * 2);
+      expect(legacyStatements).toBeGreaterThan(count * 5);
+    });
   });
 });
 
