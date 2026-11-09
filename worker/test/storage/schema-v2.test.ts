@@ -658,6 +658,37 @@ const NEW_TABLES: Record<string, ExpectedTable> = {
     columns: ['singleton', 'cursor_rowid', 'complete'],
     pk: ['singleton'],
   },
+  forward_love_recording_targets: {
+    columns: [
+      'target_id',
+      'forward_rowid',
+      'link_id',
+      'generation',
+      'artist_key',
+      'track_key',
+      'created_at_ms',
+      'recording_mbid',
+    ],
+    pk: ['target_id'],
+    unique: [['forward_rowid']],
+  },
+  forward_love_recording_targets_state: {
+    columns: ['singleton', 'cursor_rowid', 'complete'],
+    pk: ['singleton'],
+  },
+  forward_love_operation_targets: {
+    columns: ['target_id', 'operation_rowid', 'did', 'artist_key', 'track_key', 'created_at_ms', 'recording_mbid'],
+    pk: ['target_id'],
+    unique: [['operation_rowid']],
+  },
+  forward_love_operation_targets_state: {
+    columns: ['singleton', 'cursor_rowid', 'complete'],
+    pk: ['singleton'],
+  },
+  forward_unlove_lookup_progress: {
+    columns: ['unlove_rowid', 'cursor_created_at_ms', 'cursor_operation_rowid'],
+    pk: ['unlove_rowid'],
+  },
   import_jobs: {
     columns: cols<ImportJobRow>({
       id: true,
@@ -1011,6 +1042,31 @@ const NEW_INDEXES: Record<string, [string, number, number, Array<[string, number
       ['love_artist_key', 0],
       ['love_track_key', 0],
       ['created_at_ms', 0],
+    ],
+  ],
+  forward_love_recording_targets_latest: [
+    'forward_love_recording_targets',
+    0,
+    0,
+    [
+      ['link_id', 0],
+      ['generation', 0],
+      ['artist_key', 0],
+      ['track_key', 0],
+      ['created_at_ms', 1],
+      ['forward_rowid', 1],
+    ],
+  ],
+  forward_love_operation_targets_latest: [
+    'forward_love_operation_targets',
+    0,
+    0,
+    [
+      ['did', 0],
+      ['artist_key', 0],
+      ['track_key', 0],
+      ['created_at_ms', 1],
+      ['operation_rowid', 1],
     ],
   ],
   linked_accounts_backfill_due: [
@@ -1895,6 +1951,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       "43|'forward_love_key_heads'",
       "44|'forward_love_lanes'",
       "45|'forward_love_recording_history'",
+      "46|'forward_love_recording_targets'",
     ]);
     // The new scrobble columns exist and are NULL on every migrated row.
     expect(after.newColumns).toHaveLength(expectedScrobbles);
@@ -1947,6 +2004,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       { version: 43, name: 'forward_love_key_heads' },
       { version: 44, name: 'forward_love_lanes' },
       { version: 45, name: 'forward_love_recording_history' },
+      { version: 46, name: 'forward_love_recording_targets' },
     ]);
     expect(after.compat).toEqual([{ singleton: 1, min_compatible_version: 2 }]);
     expect(after.newTablesEmpty).toEqual(['mb_cover_art_usage']);

@@ -31,6 +31,14 @@ export function deleteQueuedForwardIdentity(
   );
   const kindSlots = kinds.map(() => '?').join(',');
   for (const link of links) {
+    db.run(
+      `DELETE FROM forward_love_recording_targets WHERE forward_rowid IN (
+        SELECT rowid FROM forward_outbox WHERE link_id=? AND generation=? AND kind='love' AND dedupe_key=? AND state='queued'
+      )`,
+      link.id,
+      link.generation,
+      storedForwardDedupeKey(link.generation, canonicalKey),
+    );
     const loves = db.all<{ generation: number; love_artist_key: string; love_track_key: string }>(
       `SELECT generation,love_artist_key,love_track_key FROM forward_outbox
        WHERE link_id=? AND generation=? AND kind IN ('love','unlove') AND dedupe_key=? AND state='queued'

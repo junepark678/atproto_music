@@ -40,6 +40,7 @@ import { MusicKeyError, trackKey } from '@atmusic/core/music-key';
 import type { ForwardKind } from '../app/rows';
 import type { Db } from '../do/db';
 import { noteForwardLoveCurrent, touchLoveLane } from '../forward/love-lanes';
+import { indexForwardLoveTarget } from '../forward/love-recording-targets';
 import { storedForwardDedupeKey } from './forward-key';
 import { newOperationId } from './operations';
 
@@ -186,6 +187,14 @@ export function enqueueForwards(db: Db, args: EnqueueForwardsArgs): number {
         if (inserted === 1 && loveArtistKey !== null && loveTrackKey !== null) {
           const row = db.one<{ rowid: number }>('SELECT rowid FROM forward_outbox WHERE id=?', id);
           if (row && (item.kind === 'love' || item.kind === 'unlove')) {
+            if (item.kind === 'love')
+              indexForwardLoveTarget(db, {
+                rowid: row.rowid,
+                linkId: link.id,
+                generation: link.generation,
+                createdAtMs: args.now,
+                payloadJson: payload,
+              });
             noteForwardLoveCurrent(db, link.id, loveArtistKey, loveTrackKey, row.rowid);
             touchLoveLane(db, {
               linkId: link.id,

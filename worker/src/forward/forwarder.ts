@@ -71,7 +71,7 @@
 // production.
 
 import type { Clock, Random } from '@atmusic/core/deps';
-import { albumKey, artistKey, trackKey } from '@atmusic/core/music-key';
+import { albumKey, artistKey, MusicKeyError, trackKey } from '@atmusic/core/music-key';
 import type { CoreExtension } from '../app/host';
 import type { LinkedAccountRow } from '../app/rows';
 import type { Box } from '../crypto/box';
@@ -79,7 +79,6 @@ import type { Logger } from '../do/contracts';
 import type { Db } from '../do/db';
 import { enqueueTrack, matchedRecordingMbid } from '../musicbrainz/store';
 import { canonicalForwardDedupeKey } from '../outbox/forward-key';
-import { loveKeyOf } from '../outbox/love-ops';
 import { nextDeleteWakeAt, runDeleteSlice } from './delete-forwarder';
 import {
   backoffRows,
@@ -119,13 +118,13 @@ import {
   type QueuedRow as LoveQueuedRow,
   MAX_LOVE_FRAMING_PER_RUN,
   MAX_LOVE_LANES_PER_LINK_PER_RUN,
-  MusicKeyError,
   noteForwardLoveCurrent,
   refreshLoveLane,
   touchLoveLane,
   UNFRAMED_SQL,
   UNKEYED_SQL,
 } from './love-lanes';
+import { indexForwardLoveTarget, indexLoveOperationTarget, normalizeForwardLoveKeys } from './love-recording-targets';
 import { refreshForwardStorageStats } from './storage-stats';
 import { LASTFM_MIN_INTERVAL_MS, listenbrainzPacingKey, type UpstreamPacing } from './upstream-pacing';
 
@@ -509,81 +508,119 @@ function withRecordingMbid(db: Db, row: QueuedRow, mbid: string): void {
   const text = payloadWithMbid(row.payload_json, mbid);
   if (text === null) return;
   db.run(`UPDATE forward_outbox SET payload_json = ? WHERE id = ? AND state = 'queued'`, text, row.id);
-}
-
-/** The recording MBID in `text` when it is a payload or record of the love key `key`. */
-function mbidOfLove(text: string | null, key: string): string | null {
-  if (text === null) return null;
-  const track = lovePayload({ payload_json: text });
-  if (track === null || track.recordingMbid === undefined) return null;
-  return loveKeyOf(track.artist, track.track) === key ? track.recordingMbid : null;
+  const stored = db.one<{ rowid: number; link_id: string; generation: number; created_at_ms: number }>(
+    "SELECT rowid,link_id,generation,created_at_ms FROM forward_outbox WHERE id=? AND kind='love'",
+    row.id,
+  );
+  if (stored !== null)
+    indexForwardLoveTarget(db, {
+      rowid: stored.rowid,
+      linkId: stored.link_id,
+      generation: stored.generation,
+      createdAtMs: stored.created_at_ms,
+      payloadJson: text,
+    });
 }
 
 /** Incrementally indexes historical love.put rows; never scans an operation backlog in a dispatch transaction. */
 function advanceLoveRecordingHistory(db: Db): void {
   db.run('INSERT OR IGNORE INTO forward_love_recording_history_state(singleton) VALUES(1)');
-  const state = db.one<{ cursor_rowid: number; complete: number }>(
-    'SELECT cursor_rowid,complete FROM forward_love_recording_history_state WHERE singleton=1',
-  );
-  if (state === null || state.complete) return;
+  db.run('INSERT OR IGNORE INTO forward_love_recording_targets_state(singleton) VALUES(1)');
+  db.run('INSERT OR IGNORE INTO forward_love_operation_targets_state(singleton) VALUES(1)');
   db.tx(() => {
-    const rows = db.all<{ rowid: number; did: string; kind: string; record_json: string | null }>(
-      'SELECT rowid,did,kind,record_json FROM operations WHERE rowid>? ORDER BY rowid LIMIT 128',
-      state.cursor_rowid,
-    );
-    for (const row of rows) {
-      if (row.kind !== 'love.put' || row.record_json === null) continue;
-      let record: unknown;
-      try {
-        record = JSON.parse(row.record_json);
-      } catch {
-        continue;
+    const forwardState = db.one<{ cursor_rowid: number; complete: number }>(
+      'SELECT cursor_rowid,complete FROM forward_love_recording_targets_state WHERE singleton=1',
+    )!;
+    if (forwardState.complete !== 1) {
+      const rows = db.all<{
+        rowid: number;
+        link_id: string;
+        generation: number;
+        kind: string;
+        created_at_ms: number;
+        payload_json: string;
+      }>(
+        'SELECT rowid,link_id,generation,kind,created_at_ms,payload_json FROM forward_outbox WHERE rowid>? ORDER BY rowid LIMIT 128',
+        forwardState.cursor_rowid,
+      );
+      for (const row of rows) {
+        if (row.kind !== 'love' && row.kind !== 'unlove') continue;
+        normalizeForwardLoveKeys(db, { rowid: row.rowid, linkId: row.link_id, payloadJson: row.payload_json });
+        if (row.kind === 'love')
+          indexForwardLoveTarget(db, {
+            rowid: row.rowid,
+            linkId: row.link_id,
+            generation: row.generation,
+            createdAtMs: row.created_at_ms,
+            payloadJson: row.payload_json,
+          });
       }
-      if (typeof record !== 'object' || record === null) continue;
-      const value = record as Record<string, unknown>;
-      if (
-        typeof value.artist !== 'string' ||
-        typeof value.track !== 'string' ||
-        typeof value.recordingMbid !== 'string' ||
-        value.recordingMbid.trim() === ''
-      )
-        continue;
-      try {
-        const [a, t] = trackKey(value.artist, value.track);
-        db.run(
-          `INSERT OR IGNORE INTO forward_love_recording_history(did,artist_key,track_key,operation_rowid,recording_mbid)
-           VALUES(?,?,?,?,?)`,
-          row.did,
-          a,
-          t,
-          row.rowid,
-          value.recordingMbid,
-        );
-      } catch {
-        /* malformed legacy record: it cannot match a validated unlove */
-      }
+      db.run(
+        'UPDATE forward_love_recording_targets_state SET cursor_rowid=?,complete=? WHERE singleton=1',
+        rows.at(-1)?.rowid ?? forwardState.cursor_rowid,
+        rows.length < 128 ? 1 : 0,
+      );
     }
-    const cursor = rows.at(-1)?.rowid ?? state.cursor_rowid;
-    db.run(
-      'UPDATE forward_love_recording_history_state SET cursor_rowid=?,complete=? WHERE singleton=1',
-      cursor,
-      rows.length < 128 ? 1 : 0,
-    );
+    const operationState = db.one<{ cursor_rowid: number; complete: number }>(
+      'SELECT cursor_rowid,complete FROM forward_love_operation_targets_state WHERE singleton=1',
+    )!;
+    if (operationState.complete !== 1) {
+      const rows = db.all<{
+        rowid: number;
+        did: string;
+        kind: string;
+        created_at_ms: number;
+        record_json: string | null;
+      }>(
+        'SELECT rowid,did,kind,created_at_ms,record_json FROM operations WHERE rowid>? ORDER BY rowid LIMIT 128',
+        operationState.cursor_rowid,
+      );
+      for (const row of rows) {
+        if (row.kind !== 'love.put') continue;
+        indexLoveOperationTarget(db, {
+          rowid: row.rowid,
+          did: row.did,
+          createdAtMs: row.created_at_ms,
+          recordJson: row.record_json,
+        });
+        if (row.record_json !== null) {
+          const target = db.one<{ artist_key: string; track_key: string; recording_mbid: string }>(
+            'SELECT artist_key,track_key,recording_mbid FROM forward_love_operation_targets WHERE operation_rowid=?',
+            row.rowid,
+          );
+          if (target !== null)
+            db.run(
+              `INSERT OR IGNORE INTO forward_love_recording_history(did,artist_key,track_key,operation_rowid,recording_mbid) VALUES(?,?,?,?,?)`,
+              row.did,
+              target.artist_key,
+              target.track_key,
+              row.rowid,
+              target.recording_mbid,
+            );
+        }
+      }
+      db.run(
+        'UPDATE forward_love_operation_targets_state SET cursor_rowid=?,complete=? WHERE singleton=1',
+        rows.at(-1)?.rowid ?? operationState.cursor_rowid,
+        rows.length < 128 ? 1 : 0,
+      );
+      db.run(
+        'UPDATE forward_love_recording_history_state SET cursor_rowid=?,complete=? WHERE singleton=1',
+        rows.at(-1)?.rowid ?? operationState.cursor_rowid,
+        rows.length < 128 ? 1 : 0,
+      );
+    }
   });
 }
 
-/** `json_extract(<column>, '$.recordingMbid')`, NULL for a column that is not valid JSON. */
-const MBID_OF = (column: string): string =>
-  `CASE WHEN json_valid(${column}) THEN json_extract(${column}, '$.recordingMbid') END`;
-
-export const FORWARD_LOVE_RECORDING_LOOKUP_SQL = `SELECT payload_json FROM forward_outbox INDEXED BY forward_outbox_love_recording_lookup
-  WHERE link_id=? AND generation=? AND kind='love'
-    AND love_artist_key=? AND love_track_key=? AND ${MBID_OF('payload_json')} IS NOT NULL
-    AND json_type(payload_json,'$.recordingMbid')='text' AND trim(json_extract(payload_json,'$.recordingMbid'))<>''
-    AND (created_at_ms < ? OR (created_at_ms = ? AND rowid < ?))
-  ORDER BY created_at_ms DESC,rowid DESC LIMIT 1`;
-export const LOVE_RECORDING_HISTORY_LOOKUP_SQL = `SELECT recording_mbid FROM forward_love_recording_history INDEXED BY forward_love_recording_history_latest
-  WHERE did=? AND artist_key=? AND track_key=? AND operation_rowid<? ORDER BY operation_rowid DESC LIMIT 1`;
+export const FORWARD_LOVE_RECORDING_LOOKUP_SQL = `SELECT recording_mbid FROM forward_love_recording_targets INDEXED BY forward_love_recording_targets_latest
+  WHERE link_id=? AND generation=? AND artist_key=? AND track_key=? AND (created_at_ms,forward_rowid) < (?,?)
+  ORDER BY created_at_ms DESC,forward_rowid DESC LIMIT 1`;
+export const LOVE_RECORDING_HISTORY_LOOKUP_SQL = `SELECT operation_rowid,created_at_ms,recording_mbid FROM forward_love_operation_targets INDEXED BY forward_love_operation_targets_latest
+  WHERE did=? AND artist_key=? AND track_key=? ORDER BY created_at_ms DESC,operation_rowid DESC LIMIT 128`;
+export const LOVE_RECORDING_HISTORY_PAGE_SQL = `SELECT operation_rowid,created_at_ms,recording_mbid FROM forward_love_operation_targets INDEXED BY forward_love_operation_targets_latest
+  WHERE did=? AND artist_key=? AND track_key=? AND (created_at_ms,operation_rowid) < (?,?)
+  ORDER BY created_at_ms DESC,operation_rowid DESC LIMIT 128`;
 
 /**
  * The recording MBID an unlove's track was loved with, or null when none is
@@ -597,42 +634,76 @@ export const LOVE_RECORDING_HISTORY_LOOKUP_SQL = `SELECT recording_mbid FROM for
  * Matching is by the love key (outbox/love-ops.ts loveKeyOf), as unlove matches.
  */
 function knownRecordingMbid(db: Db, unlove: QueuedRow, track: ForwardTrack): { mbid: string | null; pending: boolean } {
-  const key = loveKeyOf(track.artist, track.track);
-  if (key === null) return { mbid: null, pending: false };
-  const [artistKey, trackKeyPart] = key.split('\u0000') as [string, string];
-  const row = db.one<{ payload_json: string }>(
+  let artistKey: string;
+  let trackKeyPart: string;
+  try {
+    [artistKey, trackKeyPart] = trackKey(track.artist, track.track);
+  } catch (error) {
+    if (!(error instanceof MusicKeyError)) throw error;
+    return { mbid: null, pending: false };
+  }
+  const forwardState = db.one<{ complete: number }>(
+    'SELECT complete FROM forward_love_recording_targets_state WHERE singleton=1',
+  );
+  const operationState = db.one<{ complete: number }>(
+    'SELECT complete FROM forward_love_operation_targets_state WHERE singleton=1',
+  );
+  if (forwardState?.complete !== 1 || operationState?.complete !== 1) return { mbid: null, pending: true };
+  const row = db.one<{ recording_mbid: string }>(
     FORWARD_LOVE_RECORDING_LOOKUP_SQL,
     unlove.link_id,
     unlove.generation,
     artistKey,
     trackKeyPart,
     unlove.created_at_ms,
-    unlove.created_at_ms,
     unlove.seq,
   );
-  const forwardMbid = row === null ? null : mbidOfLove(row.payload_json, key);
-  if (forwardMbid !== null) return { mbid: forwardMbid, pending: false };
+  if (row !== null) return { mbid: row.recording_mbid, pending: false };
   const operationId = canonicalForwardDedupeKey(unlove.generation, unlove.dedupe_key);
   if (operationId !== null) {
-    const state = db.one<{ complete: number }>(
-      'SELECT complete FROM forward_love_recording_history_state WHERE singleton=1',
-    );
     const previous = db.one<{ rowid: number }>(
       'SELECT rowid FROM operations WHERE id=? AND did=?',
       operationId,
       unlove.did,
     );
-    if (previous !== null) {
-      const intent = db.one<{ recording_mbid: string }>(
-        LOVE_RECORDING_HISTORY_LOOKUP_SQL,
-        unlove.did,
-        artistKey,
-        trackKeyPart,
-        previous.rowid,
-      );
-      if (intent !== null) return { mbid: intent.recording_mbid, pending: state?.complete !== 1 };
+    const progress = db.one<{ cursor_created_at_ms: number; cursor_operation_rowid: number }>(
+      'SELECT cursor_created_at_ms,cursor_operation_rowid FROM forward_unlove_lookup_progress WHERE unlove_rowid=?',
+      unlove.seq,
+    );
+    const page =
+      progress === null
+        ? db.all<{ operation_rowid: number; created_at_ms: number; recording_mbid: string }>(
+            LOVE_RECORDING_HISTORY_LOOKUP_SQL,
+            unlove.did,
+            artistKey,
+            trackKeyPart,
+          )
+        : db.all<{ operation_rowid: number; created_at_ms: number; recording_mbid: string }>(
+            LOVE_RECORDING_HISTORY_PAGE_SQL,
+            unlove.did,
+            artistKey,
+            trackKeyPart,
+            progress.cursor_created_at_ms,
+            progress.cursor_operation_rowid,
+          );
+    for (const intent of page) {
+      if (previous === null || intent.operation_rowid < previous.rowid) {
+        db.run('DELETE FROM forward_unlove_lookup_progress WHERE unlove_rowid=?', unlove.seq);
+        return { mbid: intent.recording_mbid, pending: false };
+      }
     }
-    if (state?.complete !== 1) return { mbid: null, pending: true };
+    if (page.length === 128) {
+      const last = page.at(-1)!;
+      db.run(
+        `INSERT INTO forward_unlove_lookup_progress(unlove_rowid,cursor_created_at_ms,cursor_operation_rowid) VALUES(?,?,?)
+         ON CONFLICT(unlove_rowid) DO UPDATE SET cursor_created_at_ms=excluded.cursor_created_at_ms,cursor_operation_rowid=excluded.cursor_operation_rowid`,
+        unlove.seq,
+        last.created_at_ms,
+        last.operation_rowid,
+      );
+      return { mbid: null, pending: true };
+    }
+    db.run('DELETE FROM forward_unlove_lookup_progress WHERE unlove_rowid=?', unlove.seq);
   }
   return {
     mbid:

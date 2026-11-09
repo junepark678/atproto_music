@@ -1,6 +1,7 @@
 import { MusicKeyError, trackKey } from '@atmusic/core/music-key';
 import type { Db } from '../do/db';
 import { noteForwardLoveCurrent, touchLoveLane } from '../forward/love-lanes';
+import { indexForwardLoveTarget } from '../forward/love-recording-targets';
 import { storedForwardDedupeKey } from '../outbox/forward-key';
 
 const MAX_SCAN = 100;
@@ -130,6 +131,14 @@ export function enqueueRevivedLoves(
           dedupe,
         );
         if (created) {
+          if (kind === 'love')
+            indexForwardLoveTarget(db, {
+              rowid: created.rowid,
+              linkId: row.link_id,
+              generation: row.generation,
+              createdAtMs: now,
+              payloadJson: JSON.stringify(payload),
+            });
           noteForwardLoveCurrent(db, row.link_id, key.artistKey, key.trackKey, created.rowid);
           touchLoveLane(db, {
             linkId: row.link_id,

@@ -1436,6 +1436,30 @@ const MIGRATION_FORWARD_LOVE_RECORDING_HISTORY: Migration = {
   ],
 };
 
+// Additive indexed targets preserve the established temporal ordering while
+// keeping repeated same-track lookups bounded by a composite-key seek.
+const MIGRATION_FORWARD_LOVE_RECORDING_TARGETS: Migration = {
+  version: 46,
+  name: 'forward_love_recording_targets',
+  statements: [
+    `CREATE TABLE forward_love_recording_targets (
+      target_id INTEGER PRIMARY KEY NOT NULL, forward_rowid INTEGER NOT NULL UNIQUE, link_id TEXT NOT NULL, generation INTEGER NOT NULL,
+      artist_key TEXT NOT NULL, track_key TEXT NOT NULL, created_at_ms INTEGER NOT NULL, recording_mbid TEXT NOT NULL
+    )`,
+    'CREATE INDEX forward_love_recording_targets_latest ON forward_love_recording_targets(link_id,generation,artist_key,track_key,created_at_ms DESC,forward_rowid DESC)',
+    'CREATE TABLE forward_love_recording_targets_state (singleton INTEGER PRIMARY KEY NOT NULL, cursor_rowid INTEGER NOT NULL DEFAULT 0, complete INTEGER NOT NULL DEFAULT 0)',
+    `CREATE TABLE forward_love_operation_targets (
+      target_id INTEGER PRIMARY KEY NOT NULL, operation_rowid INTEGER NOT NULL UNIQUE, did TEXT NOT NULL, artist_key TEXT NOT NULL,
+      track_key TEXT NOT NULL, created_at_ms INTEGER NOT NULL, recording_mbid TEXT NOT NULL
+    )`,
+    'CREATE INDEX forward_love_operation_targets_latest ON forward_love_operation_targets(did,artist_key,track_key,created_at_ms DESC,operation_rowid DESC)',
+    'CREATE TABLE forward_love_operation_targets_state (singleton INTEGER PRIMARY KEY NOT NULL, cursor_rowid INTEGER NOT NULL DEFAULT 0, complete INTEGER NOT NULL DEFAULT 0)',
+    `CREATE TABLE forward_unlove_lookup_progress (
+      unlove_rowid INTEGER PRIMARY KEY NOT NULL, cursor_created_at_ms INTEGER NOT NULL, cursor_operation_rowid INTEGER NOT NULL
+    )`,
+  ],
+};
+
 export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_1,
   MIGRATION_2,
@@ -1482,6 +1506,7 @@ export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_S4_FORWARD_LOVE_HEADS,
   MIGRATION_S4_FORWARD_LOVE_LANES,
   MIGRATION_FORWARD_LOVE_RECORDING_HISTORY,
+  MIGRATION_FORWARD_LOVE_RECORDING_TARGETS,
 ];
 
 /** The schema version this code expects. */
@@ -1535,6 +1560,11 @@ export const TABLES = [
   'forward_love_lanes',
   'forward_love_recording_history',
   'forward_love_recording_history_state',
+  'forward_love_recording_targets',
+  'forward_love_recording_targets_state',
+  'forward_love_operation_targets',
+  'forward_love_operation_targets_state',
+  'forward_unlove_lookup_progress',
   'listenbrainz_deletes',
   'link_backfill_items',
   'forward_admissions',
@@ -1627,6 +1657,11 @@ export const TABLE_CLASS: Readonly<Record<TableName, TableClass>> = {
   forward_love_lanes: 'non-derived',
   forward_love_recording_history: 'non-derived',
   forward_love_recording_history_state: 'non-derived',
+  forward_love_recording_targets: 'non-derived',
+  forward_love_recording_targets_state: 'non-derived',
+  forward_love_operation_targets: 'non-derived',
+  forward_love_operation_targets_state: 'non-derived',
+  forward_unlove_lookup_progress: 'non-derived',
   listenbrainz_deletes: 'non-derived',
   link_backfill_items: 'non-derived',
   forward_admissions: 'non-derived',

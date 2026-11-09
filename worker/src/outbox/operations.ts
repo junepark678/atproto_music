@@ -37,7 +37,6 @@ import type { Operation } from '@atmusic/core/api-types';
 import { canonicalDigest } from '@atmusic/core/canonical';
 import type { Random } from '@atmusic/core/deps';
 import { loveCollection } from '@atmusic/core/love';
-import { trackKey } from '@atmusic/core/music-key';
 import { collectionsFor } from '@atmusic/core/namespace';
 import { scrobbleBatchCollection } from '@atmusic/core/scrobble-batch';
 import { fromMs, toDto } from '@atmusic/core/timestamp';
@@ -45,6 +44,7 @@ import { MAX_ATTEMPTS } from '@atmusic/core/write-policy';
 import type { OperationKind, OperationRow, OperationState, Origin } from '../app/rows';
 import type { Db } from '../do/db';
 import { bumpStatsVersion } from '../do/write/account-state';
+import { indexLoveOperationTarget } from '../forward/love-recording-targets';
 import { releaseForwardAdmission } from '../forward/projection';
 import { deleteQueuedForwardIdentity } from './forward-key';
 
@@ -211,30 +211,17 @@ export function insertOperation(db: Db, op: NewOperation, now: number): Operatio
       op.rkey,
     );
     if (op.kind === 'love.put' && prepared !== null) {
-      const record = prepared.record as Record<string, unknown>;
-      if (
-        typeof record.artist === 'string' &&
-        typeof record.track === 'string' &&
-        typeof record.recordingMbid === 'string' &&
-        record.recordingMbid.trim() !== ''
-      ) {
-        try {
-          const [artistKey, trackKeyValue] = trackKey(record.artist, record.track);
-          const rowid = db.one<{ rowid: number }>('SELECT rowid FROM operations WHERE id=?', op.id)?.rowid;
-          if (rowid !== undefined)
-            db.run(
-              `INSERT OR IGNORE INTO forward_love_recording_history(did,artist_key,track_key,operation_rowid,recording_mbid)
-               VALUES(?,?,?,?,?)`,
-              op.did,
-              artistKey,
-              trackKeyValue,
-              rowid,
-              record.recordingMbid,
-            );
-        } catch {
-          /* invalid legacy-shaped input is rejected by the love route */
-        }
-      }
+      const row = db.one<{ rowid: number; created_at_ms: number }>(
+        'SELECT rowid,created_at_ms FROM operations WHERE id=?',
+        op.id,
+      );
+      if (row !== null)
+        indexLoveOperationTarget(db, {
+          rowid: row.rowid,
+          did: op.did,
+          createdAtMs: row.created_at_ms,
+          recordJson: JSON.stringify(prepared.record),
+        });
     }
     for (const pred of new Set(op.predecessors ?? [])) {
       if (pred === op.id) continue;

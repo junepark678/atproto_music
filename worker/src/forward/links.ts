@@ -464,6 +464,7 @@ export function deleteLink(deps: { db: Db; revocations: Revocations }, did: stri
     if (row === null) return false;
     // A journal failure throws here and rolls the transaction back: nothing is deleted.
     deps.revocations.record({ kind: 'linked_account', id: row.id, did: row.did });
+    db.run('DELETE FROM forward_love_recording_targets WHERE link_id=?', row.id);
     db.run('DELETE FROM forward_outbox WHERE link_id = ?', row.id);
     db.run('DELETE FROM linked_accounts WHERE id = ?', row.id);
     return true;
