@@ -45,6 +45,8 @@ import {
   storedForwardDedupeKey,
 } from '../../../src/outbox/forward-key';
 import { enqueueLove, enqueueUnlove } from '../../../src/outbox/love-ops';
+import { stageLovePage } from '../../../src/sync/pull-staging';
+import { writePullSlice } from '../../../src/sync/pull-writer';
 import { closeApps, startApp, type TestApp, testSecretsDocument } from '../support/app';
 import { FakeLastfm } from '../support/fake-lastfm';
 import { FakeListenBrainz } from '../support/fake-listenbrainz';
@@ -174,6 +176,61 @@ afterEach(async () => {
 const statesOf = (rows: readonly ForwardOutboxRow[]) => rows.map((r) => r.state);
 
 describe('Last.fm forwarding', () => {
+  it('delivers a linked ListenBrainz love through the real signed Last.fm fake', async () => {
+    const w = await world();
+    w.linkLastfm(ALICE, 'alice_fm');
+    const m = w.app.composed.core.deps;
+    const sourceLinkId = 'linked-pull-love-source';
+    w.app.db.run(
+      `INSERT INTO linked_accounts(id,did,service,remote_user,credential_ciphertext,key_id,forward_scrobbles,forward_now_playing,status,created_at_ms,updated_at_ms)
+       VALUES(?,?,'listenbrainz','remote-user',?,'e1',1,1,'active',?,?)`,
+      sourceLinkId,
+      ALICE,
+      new Uint8Array([9]).buffer,
+      w.clock.nowMs(),
+      w.clock.nowMs(),
+    );
+    w.app.db.run(
+      `INSERT INTO linked_pull_state(link_id,generation,source_service,source_account,listen_watermark_ms,updated_at_ms)
+       VALUES(?,1,'listenbrainz','remote-user',0,?)`,
+      sourceLinkId,
+      w.clock.nowMs(),
+    );
+    const recordingMbid = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    stageLovePage(w.app.db, {
+      linkId: sourceLinkId,
+      generation: 1,
+      sourceService: 'listenbrainz',
+      sourceAccount: 'remote-user',
+      did: ALICE,
+      proposedCursor: null,
+      proposedBoundaryMs: w.clock.nowMs(),
+      proposedBoundaryKey: null,
+      nowMs: w.clock.nowMs(),
+      items: [
+        {
+          itemKey: 'remote-love',
+          artist: 'Band',
+          track: 'Song',
+          recordingMbid,
+          payload: { artist: 'Band', track: 'Song', recordingMbid },
+        },
+      ],
+    });
+    const accepted = await writePullSlice(m, {
+      linkId: sourceLinkId,
+      generation: 1,
+      available: async () => ({ available: true }),
+    });
+    expect(accepted.accepted).toBe(1);
+    expect(w.rows(ALICE)).toHaveLength(1);
+    await w.run();
+    expect(w.lastfm.loveCalls.map(({ method, artist, track }) => [method, artist, track])).toEqual([
+      ['track.love', 'Band', 'Song'],
+    ]);
+    expect(w.rows(ALICE)[0]).toMatchObject({ kind: 'love', state: 'sent' });
+  });
+
   it('same-remote relink preserves generation and resumes only its held rows', async () => {
     const w = await world();
     const link = w.linkLastfm(ALICE, 'alice_fm');

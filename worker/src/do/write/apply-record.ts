@@ -50,7 +50,7 @@ import type { RecordProof } from '@atmusic/atproto/verify/types';
 import type { Random } from '@atmusic/core/deps';
 import { validateFollowRecord } from '@atmusic/core/follow';
 import { validateLoveRecord } from '@atmusic/core/love';
-import { MusicKeyError } from '@atmusic/core/music-key';
+import { MusicKeyError, trackKey } from '@atmusic/core/music-key';
 import { reasonText, type ScrobbleRow, validateScrobbleRecord } from '@atmusic/core/scrobble';
 import { MAX_INGEST_CBOR_BYTES, validateScrobbleBatchRecord } from '@atmusic/core/scrobble-batch';
 import { isTid } from '@atmusic/core/syntax';
@@ -64,6 +64,8 @@ import {
 } from '../../forward/projection';
 import { enqueueTrack } from '../../musicbrainz/store';
 import { enqueueForwards } from '../../outbox/forward-enqueue';
+import { pullLoveAdmissionForUri, retirePullLoveAdmissionUri } from '../../sync/pull-love-admissions';
+import { tombstoneListen, tombstoneLove } from '../../sync/tombstones';
 import type { Db } from '../db';
 import { advanceUser, bumpStatsVersion, isSuppressed, loadUser } from './account-state';
 import {
@@ -388,6 +390,20 @@ function batchVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, o: 
       }>('SELECT uri,cid,artist_key,track_key,listened_at,listen_id FROM scrobbles WHERE record_uri = ?', t.uri);
       const priorByUri = new Map(prior.map((row) => [row.uri, row]));
       const now = Number(o.nowNs / 1_000_000n);
+      if (o.forwarding) {
+        const retainedIds = new Set(batch.listens.map((listen) => listen.id));
+        for (const old of prior) {
+          if (old.listen_id !== null && retainedIds.has(old.listen_id)) continue;
+          tombstoneListen(db, {
+            did: t.did,
+            identity: `batch-replaced:${old.uri}:${cid}`,
+            second: Math.floor(Date.parse(old.listened_at) / 1000),
+            artistKey: old.artist_key,
+            trackKey: old.track_key,
+            nowMs: now,
+          });
+        }
+      }
       const provenance = retainedRecordProvenance(db, t.did, t.collection, t.rkey);
       for (const old of prior) {
         admitProjectedIdentity(db, {
@@ -511,6 +527,25 @@ function loveVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, o: A
     ok: true,
     write: () => {
       const priorLove = db.one<{ cid: string }>('SELECT cid FROM loves WHERE uri=?', t.uri);
+      const replacementAfterDelete =
+        db.run(
+          `UPDATE love_delete_bridges SET state='obsolete'
+         WHERE did=? AND uri=? AND state IN ('pending','succeeded')
+           AND delete_rev IS NOT NULL AND delete_rev < ?`,
+          t.did,
+          t.uri,
+          t.rev,
+        ).rowsWritten > 0;
+      if (replacementAfterDelete) {
+        // A verified post-delete revision starts a new incarnation even when
+        // the recreated record has byte-identical content and the same CID.
+        db.run(
+          "UPDATE love_incarnations SET state='absent',updated_at_ms=? WHERE uri=?",
+          Number(o.nowNs / 1_000_000n),
+          t.uri,
+        );
+        retirePullLoveAdmissionUri(db, { did: t.did, uri: t.uri, nowMs: Number(o.nowNs / 1_000_000n) });
+      }
       const previousRecordState = db.one<{ state: string; cid: string | null }>(
         'SELECT state,cid FROM record_state WHERE uri=?',
         t.uri,
@@ -549,11 +584,15 @@ function loveVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, o: A
       );
       const identityKey = current?.state === 'present' ? current.incarnation_key : `love:${t.uri}:${t.rev}`;
       const acceptanceKey = `love-uri:${t.did}:${t.collection}:${t.rkey}`;
-      const apiBridge =
-        retainedForwardProvenance(db, t.did, acceptanceKey) ??
-        (priorLove !== null ? retainedRecordProvenance(db, t.did, t.collection, t.rkey) : null);
+      const pullAdmission = pullLoveAdmissionForUri(db, { did: t.did, uri: t.uri });
+      const apiBridge = replacementAfterDelete
+        ? null
+        : (retainedForwardProvenance(db, t.did, acceptanceKey) ??
+          (priorLove !== null ? retainedRecordProvenance(db, t.did, t.collection, t.rkey) : null) ??
+          (pullAdmission === null ? null : { path: 'import' as const, sourceService: pullAdmission.source_service }));
       const legacyPresent =
-        current?.state === 'present' || priorLove !== null || previousRecordState?.state === 'present';
+        !replacementAfterDelete &&
+        (current?.state === 'present' || priorLove !== null || previousRecordState?.state === 'present');
       const provenancePath = apiBridge?.path ?? (legacyPresent ? 'snapshot' : o.forwarding ? 'live' : 'snapshot');
       const path = current?.state === 'present' ? current.path : provenancePath;
       const sourceService = current?.state === 'present' ? current.source_service : (apiBridge?.sourceService ?? null);
@@ -589,7 +628,7 @@ function loveVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, o: A
             t.collection,
             t.rkey,
           );
-          if (local?.origin !== 'import')
+          if (replacementAfterDelete || local?.origin !== 'import')
             enqueueForwards(db, {
               did: t.did,
               items: [
@@ -713,11 +752,62 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
             loveIncarnation.incarnation_key,
           )
         : [];
+    if (o.forwarding && (t.kind === 'scrobble' || t.kind === 'scrobbleBatch')) {
+      const listens = db.all<{ uri: string; listened_at: string; artist_key: string; track_key: string }>(
+        'SELECT uri,listened_at,artist_key,track_key FROM scrobbles WHERE did=? AND (uri=? OR record_uri=?)',
+        t.did,
+        t.uri,
+        t.uri,
+      );
+      for (const listen of listens)
+        tombstoneListen(db, {
+          did: t.did,
+          identity: `live:${listen.uri}`,
+          second: Math.floor(Date.parse(listen.listened_at) / 1000),
+          artistKey: listen.artist_key,
+          trackKey: listen.track_key,
+          nowMs: Number(o.nowNs / 1_000_000n),
+        });
+    }
+    const newerLoveIntent =
+      o.forwarding && t.kind === 'love' && priorLove
+        ? db.one(
+            `SELECT 1 FROM operations WHERE did=? AND kind='love.put' AND state IN ('queued','blocked','running')
+             AND json_extract(record_json,'$.artist')=? AND json_extract(record_json,'$.track')=? LIMIT 1`,
+            t.did,
+            priorLove.artist,
+            priorLove.track,
+          ) !== null
+        : false;
+    const [priorArtistKey, priorTrackKey] = priorLove ? trackKey(priorLove.artist, priorLove.track) : ['', ''];
+    const locallyReloved =
+      priorLove !== null &&
+      db.one(
+        `SELECT 1 FROM linked_love_intents WHERE did=? AND intent='love'
+         AND (love_key=? OR (? IS NOT NULL AND recording_mbid=?)) LIMIT 1`,
+        t.did,
+        `${priorArtistKey}\u0000${priorTrackKey}`,
+        priorLove.recording_mbid,
+        priorLove.recording_mbid,
+      ) !== null;
+    if (o.forwarding && t.kind === 'love' && priorLove && !newerLoveIntent && !locallyReloved) {
+      const [artistKeyValue, trackKeyValue] = trackKey(priorLove.artist, priorLove.track);
+      const key = `${artistKeyValue}\u0000${trackKeyValue}`;
+      tombstoneLove(db, {
+        did: t.did,
+        identity: `live:${t.uri}`,
+        loveKey: key,
+        recordingMbid: priorLove.recording_mbid,
+        nowMs: Number(o.nowNs / 1_000_000n),
+      });
+    }
     const deleted = deleteProjection(db, t.kind, t.uri);
+    if (t.kind === 'love')
+      retirePullLoveAdmissionUri(db, { did: t.did, uri: t.uri, nowMs: Number(o.nowNs / 1_000_000n) });
     if (t.kind === 'love' && priorLove && loveIncarnation?.state === 'present') {
       const identityKey = `love-delete:${loveIncarnation.incarnation_key}`;
       const apiBridge = db.one<{ expected_cid: string }>(
-        `SELECT expected_cid FROM love_delete_bridges WHERE did=? AND uri=? AND incarnation_key=? AND state='pending'
+        `SELECT expected_cid FROM love_delete_bridges WHERE did=? AND uri=? AND incarnation_key=? AND state IN ('pending','succeeded')
          ORDER BY created_at_ms DESC LIMIT 1`,
         t.did,
         t.uri,
@@ -727,7 +817,7 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
       const apiEcho = apiBridge !== null && apiBridge.expected_cid === priorCid;
       if (apiBridge && !apiEcho)
         db.run(
-          "UPDATE love_delete_bridges SET state='obsolete' WHERE did=? AND uri=? AND incarnation_key=? AND state='pending'",
+          "UPDATE love_delete_bridges SET state='obsolete' WHERE did=? AND uri=? AND incarnation_key=? AND state IN ('pending','succeeded')",
           t.did,
           t.uri,
           loveIncarnation.incarnation_key,
@@ -742,7 +832,7 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
       });
       if (apiEcho)
         db.run(
-          "UPDATE love_delete_bridges SET state='consumed' WHERE did=? AND uri=? AND incarnation_key=? AND state='pending'",
+          "UPDATE love_delete_bridges SET state='consumed' WHERE did=? AND uri=? AND incarnation_key=? AND state IN ('pending','succeeded')",
           t.did,
           t.uri,
           loveIncarnation.incarnation_key,
@@ -801,7 +891,11 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
     if (t.kind === 'love' && !priorLove) {
       // API deletes can target a remote love the index never projected. A
       // successful, matching absence still consumes the pre-send bridge.
-      db.run("UPDATE love_delete_bridges SET state='consumed' WHERE did=? AND uri=? AND state='pending'", t.did, t.uri);
+      db.run(
+        "UPDATE love_delete_bridges SET state='consumed' WHERE did=? AND uri=? AND state IN ('pending','succeeded')",
+        t.did,
+        t.uri,
+      );
       db.run("UPDATE love_import_bridges SET state='consumed' WHERE did=? AND uri=? AND state='bound'", t.did, t.uri);
       db.run(
         "UPDATE love_incarnations SET state='absent',updated_at_ms=? WHERE uri=?",
@@ -1001,6 +1095,20 @@ export function applyRecordProof(db: Db, proof: RecordProof, o: ApplyOptions): A
   const user = loadUser(db, did);
   if (user === null) return result('ignored');
   if (user.max_rev !== null && rev < user.max_rev) return result('stale_head');
+  if (kind === 'love' && proof.state === 'present') {
+    const deletion = db.one(
+      `SELECT 1 AS hit FROM love_delete_bridges
+       WHERE did=? AND uri=? AND state IN ('pending','succeeded')
+         AND (delete_rev IS NULL OR delete_rev>=?) LIMIT 1`,
+      did,
+      uri,
+      rev,
+    );
+    // A present proof at or before a confirmed delete boundary is stale. A
+    // legacy/ambiguous delete without a commit revision remains fenced until
+    // a verified absence or a revisioned post-delete present proof arrives.
+    if (deletion !== null) return result('noop_older');
+  }
   const guard = guardRevision(db, uri);
   if (guard !== null && guard >= rev) return result('noop_older');
 

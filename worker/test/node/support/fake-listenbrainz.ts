@@ -70,6 +70,15 @@ export interface LbFeedback {
   json: unknown;
 }
 
+export interface LbFeedbackEntry {
+  created: number;
+  score?: number;
+  recording_msid?: string | null;
+  recording_mbid?: string | null;
+  track_metadata?: Record<string, unknown> | null;
+  submitted?: Record<string, unknown> | null;
+}
+
 export type LbFault =
   | { status: 401; path?: string }
   | { status: 429; resetIn?: number; path?: string }
@@ -88,6 +97,7 @@ interface UserState {
   name: string;
   listens: Required<LbListen>[];
   playingNow: LbTrackMetadata | null;
+  feedback: LbFeedbackEntry[];
 }
 
 interface Bucket {
@@ -118,6 +128,13 @@ export class FakeListenBrainz implements Routable {
   /** Every accepted submit-listens request, in order. */
   readonly submissions: LbSubmission[] = [];
   readonly feedback: LbFeedback[] = [];
+  readonly feedbackCalls: Array<{
+    user: string;
+    offset: number;
+    count: number;
+    score: number | null;
+    metadata: boolean;
+  }> = [];
 
   private readonly clock: Clock;
   private readonly rateLimit: number;
@@ -138,7 +155,7 @@ export class FakeListenBrainz implements Routable {
 
   addUser(name: string): void {
     if (!this.users.has(name.toLowerCase())) {
-      this.users.set(name.toLowerCase(), { name, listens: [], playingNow: null });
+      this.users.set(name.toLowerCase(), { name, listens: [], playingNow: null, feedback: [] });
     }
   }
 
@@ -156,6 +173,12 @@ export class FakeListenBrainz implements Routable {
   seedListens(user: string, listens: readonly LbListen[]): void {
     this.addUser(user);
     this.state(user)!.listens.push(...listens.map((l) => this.complete(l)));
+  }
+
+  /** Append positive and non-positive feedback entries; reads sort by created descending. */
+  seedFeedback(user: string, feedback: readonly LbFeedbackEntry[]): void {
+    this.addUser(user);
+    this.state(user)!.feedback.push(...feedback.map((row) => structuredClone(row)));
   }
 
   /** The user's listens, newest first. */
@@ -243,6 +266,8 @@ export class FakeListenBrainz implements Routable {
     }
     const m = /^\/1\/user\/([^/]+)\/listens$/.exec(path);
     if (req.method === 'GET' && m) return this.getListens(decodeURIComponent(m[1]!), url);
+    const feedback = /^\/1\/feedback\/user\/([^/]+)\/get-feedback$/.exec(path);
+    if (req.method === 'GET' && feedback) return this.getFeedback(decodeURIComponent(feedback[1]!), url, auth);
     throw new LbError(404, 'Not found');
   }
 
@@ -325,6 +350,34 @@ export class FakeListenBrainz implements Routable {
         user_id: name,
       },
     };
+  }
+
+  private getFeedback(name: string, url: URL, auth: ReturnType<FakeListenBrainz['authOf']>): unknown {
+    const user = this.state(name);
+    if (!user) throw new LbError(404, `Cannot find user: ${name}`);
+    const token = this.require(auth);
+    const int = (key: string, fallback: number): number => {
+      const value = url.searchParams.get(key);
+      if (value === null) return fallback;
+      if (!/^\d{1,15}$/.test(value)) throw new LbError(400, `Invalid value for ${key}`);
+      return Number(value);
+    };
+    const count = Math.min(1000, int('count', 25));
+    const offset = int('offset', 0);
+    const scoreParam = url.searchParams.get('score');
+    const score = scoreParam === null ? null : int('score', 1);
+    const metadata = url.searchParams.get('metadata') === 'true';
+    if (count < 1) throw new LbError(400, 'Number of items requested should be positive');
+    const all = [...user.feedback]
+      .filter((row) => score === null || (row.score ?? 1) === score)
+      .sort((a, b) => b.created - a.created);
+    const page = all.slice(offset, offset + count).map((row) => ({
+      ...row,
+      ...(metadata ? {} : { track_metadata: undefined }),
+      user_id: name,
+    }));
+    this.feedbackCalls.push({ user: token.user, offset, count, score, metadata });
+    return { feedback: page, count: page.length, total_count: all.length, offset, user_name: name };
   }
 
   // -- helpers --------------------------------------------------------------

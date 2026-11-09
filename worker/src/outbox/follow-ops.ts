@@ -29,7 +29,7 @@ import type { Db } from '../do/db';
 import { WRITE_COST } from './budget';
 import { ownRecordKey } from './delete-ops';
 import { insertOperation, newOperationId, outboxCollections, prepare, recordOf, unsettledAt } from './operations';
-import { eachListedRecord, failureOutcome, type HintTarget, type Outcome } from './pds-writer';
+import { eachListedRecord, failureOutcome, type HintTarget, type Outcome, writeCommitRev } from './pds-writer';
 import type { ExecContext, Executor } from './runner';
 import { createWithReconcile, hasIdentity, lookupCreate } from './scrobble-ops';
 
@@ -203,6 +203,7 @@ export async function deleteMatching(
   alwaysHint: readonly HintTarget[] = [],
   beforeDelete?: (target: { uri: string; cid: string }) => void,
   deleteFailed?: (target: { uri: string; cid: string }) => void,
+  deleteSucceeded?: (target: { uri: string; cid: string }, commitRev: string | null) => void,
 ): Promise<Outcome> {
   const stopped = await eachListedRecord(ctx.xrpc, op.collection, async (r) => {
     const rkey = ownRecordKey(r.uri, op.did, op.collection);
@@ -225,6 +226,10 @@ export async function deleteMatching(
       }
       // Already gone is what we wanted.
       if (failure.kind !== 'missing') return failureOutcome(failure);
+    } else {
+      // Love passes this callback to persist its deletion boundary before the
+      // hint can cause a projection transaction. Other delete callers omit it.
+      deleteSucceeded?.({ uri: r.uri, cid: r.cid }, writeCommitRev(result.body));
     }
     ctx.hint([{ collection: op.collection, rkey }]);
     return null;

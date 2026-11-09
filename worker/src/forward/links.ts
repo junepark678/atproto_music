@@ -60,6 +60,13 @@ function iso(ms: number): string {
 
 /** The contract's Link (api/openapi.yaml v1.2). Never carries the credential. */
 export function linkDto(row: LinkedAccountRow, db: Db): Link {
+  const pullState = db.one<{ hold_reason: string | null }>(
+    'SELECT hold_reason FROM linked_pull_state WHERE link_id=? AND generation=?',
+    row.id,
+    row.generation,
+  );
+  const holdReason = pullState?.hold_reason;
+  const needsReauth = holdReason === 'session_missing' || holdReason === 'reauth_required';
   const queue = {
     queued:
       db.one<{ n: number }>(
@@ -92,6 +99,10 @@ export function linkDto(row: LinkedAccountRow, db: Db): Link {
         ...(row.backfill_last_error === 'retry_exhausted' ? { lastError: 'retry_exhausted' as const } : {}),
       },
       pullEnabled: row.pull_enabled === 1,
+      ...(holdReason === null || holdReason === undefined
+        ? {}
+        : { holdReason: holdReason as NonNullable<Link['sync']>['holdReason'] }),
+      ...(holdReason === null || holdReason === undefined ? {} : { needsReauth }),
       ...(row.last_success_ms === null ? {} : { lastSuccessAt: iso(row.last_success_ms) }),
       ...(row.last_failure_ms === null ? {} : { lastFailureAt: iso(row.last_failure_ms) }),
       ...(row.last_error === null ? {} : { lastError: row.last_error as Link['lastError'] }),
@@ -271,6 +282,33 @@ export function saveLink(deps: LinkDeps, input: SaveLinkInput): SaveLinkResult {
         now,
         existing.id,
       );
+      if (changedRemote)
+        db.run('DELETE FROM linked_pull_items WHERE link_id=? AND generation=?', existing.id, existing.generation);
+      db.run(
+        `INSERT OR IGNORE INTO linked_pull_state(link_id,generation,source_service,source_account,listen_watermark_ms,
+          listen_floor_at_ms,love_floor_at_ms,love_boundary_ms,poll_next_at_ms,updated_at_ms)
+         VALUES(?,?,?,?,?,?,?,?,?,?)`,
+        existing.id,
+        generation,
+        input.service,
+        remoteUser,
+        now,
+        now,
+        now,
+        now,
+        now,
+        now,
+      );
+      db.run(
+        `UPDATE linked_pull_state SET hold_reason=NULL,retry_at_ms=NULL,failures=0,listen_round_saturated=0,
+          listen_round_upper_ms=NULL,listen_round_floor_ms=NULL,listen_round_page=NULL,page_cursor=NULL,
+          poll_next_at_ms=?,updated_at_ms=?
+         WHERE link_id=? AND generation=?`,
+        now,
+        now,
+        existing.id,
+        generation,
+      );
       const resumed = resumeHeldRows(db, existing.id, now, generation);
       return { link: getLinkById(db, existing.id) as LinkedAccountRow, created: false, resumed };
     }
@@ -294,6 +332,21 @@ export function saveLink(deps: LinkDeps, input: SaveLinkInput): SaveLinkResult {
       now,
       now,
       remoteUser,
+    );
+    db.run(
+      `INSERT INTO linked_pull_state(link_id,generation,source_service,source_account,listen_watermark_ms,
+        listen_floor_at_ms,love_floor_at_ms,love_boundary_ms,poll_next_at_ms,updated_at_ms)
+       VALUES(?,?,?,?,?,?,?,?,?,?)`,
+      id,
+      1,
+      input.service,
+      remoteUser,
+      now,
+      now,
+      now,
+      now,
+      now,
+      now,
     );
     return { link: getLinkById(db, id) as LinkedAccountRow, created: true, resumed: 0 };
   });
@@ -328,6 +381,7 @@ export function patchLink(
     const scrobbles = patch.forwardScrobbles ?? row.forward_scrobbles === 1;
     const nowPlaying = patch.forwardNowPlaying ?? row.forward_now_playing === 1;
     const pullEnabled = patch.pullEnabled ?? row.pull_enabled === 1;
+    const resumePull = row.pull_enabled === 0 && pullEnabled;
     const enableScrobbles = row.forward_scrobbles === 0 && scrobbles;
     if (enableScrobbles) db.run('DELETE FROM link_backfill_items WHERE link_id=?', row.id);
     db.run(
@@ -362,6 +416,17 @@ export function patchLink(
       deps.clock.nowMs(),
       id,
     );
+    if (resumePull)
+      db.run(
+        `UPDATE linked_pull_state SET poll_next_at_ms=?,hold_reason=NULL,retry_at_ms=NULL,failures=0,
+          listen_round_saturated=0,listen_round_upper_ms=NULL,listen_round_floor_ms=NULL,listen_round_page=NULL,
+          page_cursor=NULL,updated_at_ms=?
+         WHERE link_id=? AND generation=?`,
+        deps.clock.nowMs(),
+        deps.clock.nowMs(),
+        id,
+        row.generation,
+      );
     return getLinkById(db, id);
   });
 }

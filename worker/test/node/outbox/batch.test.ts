@@ -1,6 +1,8 @@
 // applyWrites batching and bisection, and the PdsWriter path (ADR 0005 §5.8
 // "Batching", "Writer port", §3.5; N2-05).
 
+import { trackKey } from '@atmusic/core/music-key';
+import { NS_PER_SECOND, toStorage } from '@atmusic/core/timestamp';
 import { expect, it } from 'vitest';
 import type { OperationRow } from '../../../src/app/rows';
 import { visibleScrobblesFrom } from '../../../src/do/read/visibility';
@@ -170,6 +172,7 @@ it('excludes attempted batch operations while the batch gate is closed without p
 
 it('removes one indexed batch listen with CAS and preserves sibling and unknown remote fields', async () => {
   await withHarness(async (h) => {
+    h.seedUser(h.alice);
     const uriKey = '3lb2batchcontainer1';
     const record = {
       $type: BATCH,
@@ -195,6 +198,23 @@ it('removes one indexed batch listen with CAS and preserves sibling and unknown 
       ],
     };
     await h.kit.externalPut('Alice', BATCH, uriKey, record);
+    const [artistKey, trackKeyValue] = trackKey('Artist', 'Removed');
+    const removedAt = toStorage(BigInt(Math.floor(Date.parse('2026-01-14T12:00:00Z') / 1000)) * NS_PER_SECOND);
+    h.db.run(
+      `INSERT INTO scrobbles(uri,record_uri,listen_id,cid,did,rkey,revision,artist,track,listened_at,created_at,indexed_at,artist_key,track_key)
+       VALUES(?,?,?,?,?,?,'rev','Artist','Removed',?,?,?, ?,?)`,
+      `at://${h.alice}/${BATCH}/${uriKey}#3lb2batchidab`,
+      `at://${h.alice}/${BATCH}/${uriKey}`,
+      '3lb2batchidab',
+      'cid',
+      h.alice,
+      uriKey,
+      removedAt,
+      removedAt,
+      removedAt,
+      artistKey,
+      trackKeyValue,
+    );
     const del = enqueueBatchListenDelete(h.m, {
       did: h.alice,
       uri: `at://${h.alice}/${BATCH}/${uriKey}`,
@@ -204,6 +224,12 @@ it('removes one indexed batch listen with CAS and preserves sibling and unknown 
     expect(h.db.one('SELECT listen_id FROM batch_delete_listens WHERE operation_id=?', del.id)).toEqual({
       listen_id: '3lb2batchidab',
     });
+    expect(
+      h.db.one(
+        "SELECT listen_second FROM linked_pull_tombstones WHERE did=? AND kind='listen' AND listen_second=1768392000",
+        h.alice,
+      ),
+    ).not.toBeNull();
     await h.runUntilIdle();
     expect(h.op(del.id)).toMatchObject({ state: 'succeeded', collection: BATCH });
     const value = (await remoteRecords(h.kit, 'Alice', BATCH)).find((item) => item.rkey === uriKey);
@@ -439,6 +465,49 @@ const PROOF_OPTIONS = {
   nowNs: BigInt(T0) * 1_000_000n,
   prefix: 'com.example.atmusic',
 };
+
+it('live batch replacement tombstones removed members only; snapshot replacement does not', async () => {
+  await withHarness(async (h) => {
+    h.seedUser(h.alice);
+    const rkey = '3lb2batchcontainer1',
+      uri = `at://${h.alice}/${BATCH}/${rkey}`;
+    await h.kit.externalPut('Alice', BATCH, rkey, twoListenRecord());
+    let proof = await proofAt(h.kit.repos.Alice, BATCH, rkey);
+    h.db.tx(() => applyRecordProof(h.db, proof, { ...PROOF_OPTIONS, forwarding: { random: h.m.random } }));
+    const member = h.db.one<{ listened_at: string }>(
+      'SELECT listened_at FROM scrobbles WHERE record_uri=? AND listen_id=?',
+      uri,
+      REMOVED_ID,
+    )!;
+    const sibling = h.db.one<{ listened_at: string }>(
+      'SELECT listened_at FROM scrobbles WHERE record_uri=? AND listen_id=?',
+      uri,
+      SIBLING_ID,
+    )!;
+    const removedSecond = Math.floor(Date.parse(member.listened_at) / 1000),
+      retainedSecond = Math.floor(Date.parse(sibling.listened_at) / 1000);
+    const replacement = twoListenRecord();
+    replacement.listens = replacement.listens.filter((item) => item.id === SIBLING_ID);
+    await h.kit.externalPut('Alice', BATCH, rkey, replacement);
+    proof = await proofAt(h.kit.repos.Alice, BATCH, rkey);
+    h.db.tx(() => applyRecordProof(h.db, proof, { ...PROOF_OPTIONS, forwarding: { random: h.m.random } }));
+    expect(
+      h.db.one(
+        "SELECT count(*) AS n FROM linked_pull_tombstones WHERE did=? AND kind='listen' AND listen_second=?",
+        h.alice,
+        removedSecond,
+      ),
+    ).toEqual({ n: 1 });
+    expect(
+      h.db.one(
+        "SELECT count(*) AS n FROM linked_pull_tombstones WHERE did=? AND kind='listen' AND listen_second=?",
+        h.alice,
+        retainedSecond,
+      ),
+    ).toEqual({ n: 0 });
+  });
+});
+
 const cidOf = (proof: Awaited<ReturnType<typeof proofAt>>): string => {
   if (proof.state !== 'present') throw new Error('expected a present proof');
   return proof.cid;

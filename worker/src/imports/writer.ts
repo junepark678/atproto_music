@@ -44,18 +44,10 @@
 // (succeeded) or `failed` (failed or withdrawn) and adds them to the job's
 // `written` and `failed_items` counters.
 
-import { measureScrobbleBatch, scrobbleBatchSizer } from '@atmusic/atproto/scrobble-batch-size';
 import { buildLoveRecord } from '@atmusic/core/love';
 import { newTid } from '@atmusic/core/record-key';
 import { buildScrobbleRecord } from '@atmusic/core/scrobble';
-import {
-  BATCH_MAX_LISTENS,
-  newBatchPrefix,
-  type ScrobbleBatchEntry,
-  type ScrobbleBatchRecord,
-  scrobbleBatchCollection,
-  verifyBatchBoundary,
-} from '@atmusic/core/scrobble-batch';
+import { BATCH_MAX_LISTENS, type ScrobbleBatchEntry, type ScrobbleBatchRecord } from '@atmusic/core/scrobble-batch';
 import { NS_PER_SECOND, parseRfc3339 } from '@atmusic/core/timestamp';
 import type { ModuleDeps } from '../do/contracts';
 import type { Db } from '../do/db';
@@ -73,6 +65,7 @@ import {
   unsettledOfKinds,
 } from '../outbox/operations';
 import { insertScrobbleCreate, prepareScrobble } from '../outbox/scrobble-ops';
+import { acceptImportBatch, prepareImportBatchPrefix } from './batch-acceptance';
 import { addReasons, indexedAtSecond, knownListenKey, type StagedRecord } from './staging';
 
 /** Staged items turned into operations per slice (ADR §3.3 `import` bound). */
@@ -254,11 +247,12 @@ export async function writeSlice(
         }
         const operationId = newOperationId(m.random);
         db.run(
-          `INSERT INTO listen_keys(did, dedupe_key, operation_id, source, created_at_ms) VALUES (?, ?, ?, 'import', ?)`,
+          `INSERT INTO listen_keys(did, dedupe_key, operation_id, source, created_at_ms, listen_second) VALUES (?, ?, ?, 'import', ?, ?)`,
           job.did,
           plan.key,
           operationId,
           now,
+          plan.seconds,
         );
         const sourceService = importService(db, job.id);
         const firstAdmission = admitForwardIdentity(db, {
@@ -394,15 +388,10 @@ async function writeBatchSlice(
   const report: WriteSliceReport = { created: 0, duplicates: 0, invalid: 0, taken: 0 };
   if (room === 0) return report;
   const clock = { nowMs: () => now };
-  const collection = scrobbleBatchCollection(prefix);
-  // TIDs come from the module clock, strictly increasing across slices too.
-  const rkey = newTid(m.clock, m.random);
-  const envelope = { $type: collection, createdAt: new Date(now).toISOString() };
-  const request = { repo: job.did, collection, rkey };
-  const group = newBatchPrefix(scrobbleBatchSizer(envelope, request));
-  const members: ListenMember[] = [];
+  const candidates: Array<{ member: ListenMember; entry: ScrobbleBatchEntry }> = [];
+  let members: ListenMember[] = [];
   const settled: Settled[] = [];
-  let next: ScrobbleBatchEntry | undefined;
+  let next: ListenMember | null = null;
   let exhausted = false;
   let loves = 0;
   let scanned = 0;
@@ -442,12 +431,7 @@ async function writeBatchSlice(
           } else {
             const { $type: _type, ...fields } = built.record;
             const entry: ScrobbleBatchEntry = { id: newTid(m.clock, m.random), ...fields };
-            if (!group.tryAdd(entry)) {
-              if (members.length === 0) throw new RangeError('one listen exceeds the scrobbleBatch byte limits');
-              next = entry; // full: this listen and everything after it stay staged
-              break scan;
-            }
-            members.push(member);
+            candidates.push({ member, entry });
           }
         }
       } else {
@@ -470,19 +454,18 @@ async function writeBatchSlice(
     }
   }
 
+  const packed = await prepareImportBatchPrefix(m, { did: job.did, now, candidates });
+  members = packed.members;
+  next = packed.overflowMember;
   // A container short of full waits for more listens unless none is left.
-  const emit = members.length > 0 && (next !== undefined || exhausted);
+  const emit = members.length > 0 && (next !== null || exhausted);
   let batch: { operationId: string; entries: ScrobbleBatchEntry[]; prepared: Prepared<ScrobbleBatchRecord> } | null =
     null;
   if (emit) {
-    const entries = [...group.entries];
-    verifyBatchBoundary(entries, group.sizes(), next, {
-      measure: (candidate) => measureScrobbleBatch({ ...envelope, listens: [...candidate] }, request),
-    });
     batch = {
       operationId: newOperationId(m.random),
-      entries,
-      prepared: await prepare({ ...envelope, listens: entries } as ScrobbleBatchRecord),
+      entries: packed.entries,
+      prepared: packed.prepared!,
     };
   }
 
@@ -506,50 +489,26 @@ async function writeBatchSlice(
     // A race that made any member ineligible leaves the whole group staged;
     // the next slice settles that listen as a duplicate and packs the rest.
     if (batch !== null && members.every(eligible)) {
-      const op = insertOperation(
-        db,
-        {
-          id: batch.operationId,
-          did: job.did,
-          kind: 'scrobble.create',
-          origin: 'import',
-          priority: IMPORT_PRIORITY,
-          collection,
-          rkey,
-          prepared: batch.prepared,
-          dueAt: now,
-          importJobId: job.id,
-        },
-        now,
-      );
       const sourceService = importService(db, job.id);
+      acceptImportBatch(m, {
+        did: job.did,
+        now,
+        rkey: packed.rkey,
+        prepared: batch.prepared,
+        operationId: batch.operationId,
+        importJobId: job.id,
+        members: members.map((member) => ({
+          listenKey: member.key,
+          listenSecond: member.seconds,
+          forward: member.forward,
+          sourceService,
+        })),
+      });
       for (const [i, member] of members.entries()) {
-        db.run(
-          `INSERT INTO listen_keys(did, dedupe_key, operation_id, source, created_at_ms) VALUES (?, ?, ?, 'import', ?)`,
-          job.did,
-          member.key,
-          op.id,
-          now,
-        );
-        const firstAdmission = admitForwardIdentity(db, {
-          did: job.did,
-          identityKey: member.key,
-          path: 'import',
-          sourceService: sourceService ?? undefined,
-          now,
-        });
-        if (firstAdmission && sourceService !== null)
-          enqueueForwards(db, {
-            did: job.did,
-            items: [{ kind: 'scrobble', listenKey: member.key, payload: { listen: member.forward, origin: 'import' } }],
-            excludeSourceService: sourceService,
-            now,
-            random: m.random,
-          });
-        setState(member.seq, 'queued', op.id);
+        setState(member.seq, 'queued', batch.operationId);
         db.run(
           'INSERT INTO batch_entry_items(operation_id, entry_id, job_id, seq) VALUES (?, ?, ?, ?)',
-          op.id,
+          batch.operationId,
           (batch.entries[i] as ScrobbleBatchEntry).id,
           job.id,
           member.seq,

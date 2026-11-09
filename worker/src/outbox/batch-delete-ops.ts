@@ -1,9 +1,11 @@
+import { trackKey } from '@atmusic/core/music-key';
 import { isTid } from '@atmusic/core/syntax';
 import type { OperationRow, Origin } from '../app/rows';
 import type { ModuleDeps } from '../do/contracts';
 import type { Db } from '../do/db';
 import { bumpStatsVersion } from '../do/write/account-state';
 import { releaseForwardAdmission } from '../forward/projection';
+import { tombstoneListen } from '../sync/tombstones';
 import { deleteQueuedForwardIdentity } from './forward-key';
 import {
   explicitlyUnsent,
@@ -223,6 +225,26 @@ export function commitUnsentBatchListenRemoval(m: ModuleDeps, plan: BatchListenR
       )
     )
       return null;
+    const original = JSON.parse(op.record_json) as {
+      listens?: Array<{ id?: unknown; artist?: unknown; track?: unknown; listenedAt?: unknown }>;
+    };
+    const removed = original.listens?.find((item) => item.id === plan.listenId);
+    if (
+      removed &&
+      typeof removed.artist === 'string' &&
+      typeof removed.track === 'string' &&
+      typeof removed.listenedAt === 'string'
+    ) {
+      const [artistKey, trackKeyValue] = trackKey(removed.artist, removed.track);
+      tombstoneListen(m.db, {
+        did: op.did,
+        identity: `pending-batch:${op.id}:${plan.listenId}`,
+        second: Math.floor(Date.parse(removed.listenedAt) / 1000),
+        artistKey,
+        trackKey: trackKeyValue,
+        nowMs: now,
+      });
+    }
     m.db.run('DELETE FROM batch_entry_items WHERE operation_id = ? AND entry_id = ?', op.id, plan.listenId);
     for (const member of plan.members) {
       m.db.run(
@@ -302,6 +324,27 @@ export function enqueueBatchListenDelete(
   }
   const now = m.clock.nowMs();
   const op = m.db.tx(() => {
+    const removed = args.listenIds.includes('*')
+      ? m.db.all<{ uri: string; listened_at: string; artist_key: string; track_key: string }>(
+          'SELECT uri,listened_at,artist_key,track_key FROM scrobbles WHERE did=? AND record_uri=?',
+          args.did,
+          args.uri,
+        )
+      : m.db.all<{ uri: string; listened_at: string; artist_key: string; track_key: string }>(
+          `SELECT uri,listened_at,artist_key,track_key FROM scrobbles WHERE did=? AND record_uri=? AND listen_id IN (${args.listenIds.map(() => '?').join(',')})`,
+          args.did,
+          args.uri,
+          ...args.listenIds,
+        );
+    for (const row of removed)
+      tombstoneListen(m.db, {
+        did: args.did,
+        identity: `uri:${row.uri}`,
+        second: Math.floor(Date.parse(row.listened_at) / 1000),
+        artistKey: row.artist_key,
+        trackKey: row.track_key,
+        nowMs: now,
+      });
     const inserted = insertOperation(
       m.db,
       {

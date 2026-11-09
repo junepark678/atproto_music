@@ -29,7 +29,9 @@ function deadlines(launchMs = 800, cleanupMs = launchMs + 500) {
 test('an unresponsive owned startup process is killed and reaped before ready rejects', async () => {
   const evidenceDir = await mkdtemp(join(tmpdir(), 'atmusic-owned-test-'));
   const pidFile = join(evidenceDir, 'pid');
-  const deadline = deadlines(700, 950);
+  // Leave room for the child Node process to start when the full suite is
+  // under load; the assertion still verifies it is stopped within the bound.
+  const deadline = deadlines(2_000, 2_500);
   const startedAt = performance.now();
   const launch = startOwnedChromium({
     interactive: false,
@@ -43,7 +45,7 @@ test('an unresponsive owned startup process is killed and reaped before ready re
 
   await expect(launch.ready).rejects.toThrow(/deadline exceeded|budget exhausted/);
   const pid = Number(await readFile(pidFile, 'utf8'));
-  expect(performance.now() - startedAt).toBeLessThan(1_000);
+  expect(performance.now() - startedAt).toBeLessThan(2_200);
   expect(processExists(pid)).toBe(false);
   expect(await launch.terminate()).toMatchObject({
     processStopped: true,

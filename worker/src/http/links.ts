@@ -337,6 +337,8 @@ export interface LinksFeatureOptions {
   pacing?: UpstreamPacing;
   /** The web sessions; by default built over the composed db, clock and random with `revocations`. */
   sessions?: Pick<WebSessions, 'lookupCookieHeader' | 'renew'>;
+  /** Actual OAuth restore/scope availability; account.oauth_status is not a session proof. */
+  pullWriterAvailability?: (did: string) => Promise<import('../sync/pull-writer').PullWriterAvailability>;
 }
 
 /** Builds the link service and the forwarding runtime from the composition. */
@@ -366,6 +368,7 @@ export function buildLinksService(context: FeatureContext, options: LinksFeature
     pacing: options.pacing ?? new UpstreamPacing(deps.clock),
     lastfm,
     listenbrainz,
+    pullWriterAvailability: options.pullWriterAvailability,
   };
   return {
     db: deps.db,

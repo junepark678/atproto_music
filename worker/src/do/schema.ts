@@ -1164,6 +1164,180 @@ const MIGRATION_S2_BACKFILL_MEMBERSHIP: Migration = {
   ],
 };
 
+// Durable linked-service pull pages. State is scoped to the current link
+// generation; page rows are retained until accepted by the import writer.
+const MIGRATION_S3_PULL_FOUNDATION: Migration = {
+  version: 30,
+  name: 'linked_service_pull_foundation',
+  statements: [
+    'ALTER TABLE listen_keys ADD COLUMN listen_second INTEGER',
+    `CREATE TABLE linked_pull_state (
+      link_id TEXT NOT NULL,
+      generation INTEGER NOT NULL,
+      source_service TEXT NOT NULL,
+      source_account TEXT NOT NULL,
+      listen_watermark_ms INTEGER NOT NULL,
+      love_boundary_ms INTEGER,
+      love_boundary_key TEXT,
+      page_kind TEXT,
+      page_cursor TEXT,
+      page_started_at_ms INTEGER,
+      hold_reason TEXT,
+      retry_at_ms INTEGER,
+      failures INTEGER NOT NULL DEFAULT 0,
+      updated_at_ms INTEGER NOT NULL,
+      PRIMARY KEY(link_id,generation)
+    )`,
+    `CREATE TABLE linked_pull_items (
+      link_id TEXT NOT NULL,
+      generation INTEGER NOT NULL,
+      item_key TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      source_service TEXT NOT NULL,
+      source_account TEXT NOT NULL,
+      listened_at_ms INTEGER,
+      love_key TEXT,
+      recording_mbid TEXT,
+      payload_json TEXT NOT NULL,
+      payload_bytes INTEGER NOT NULL,
+      staged_at_ms INTEGER NOT NULL,
+      PRIMARY KEY(link_id,generation,item_key)
+    )`,
+    'CREATE INDEX linked_pull_items_pending ON linked_pull_items(link_id,generation,kind,staged_at_ms,item_key)',
+    'CREATE INDEX listen_keys_did_second ON listen_keys(did,listen_second) WHERE listen_second IS NOT NULL',
+  ],
+};
+
+const MIGRATION_S3_PULL_TOMBSTONES: Migration = {
+  version: 31,
+  name: 'linked_pull_deletion_tombstones',
+  statements: [
+    `CREATE TABLE linked_pull_tombstones (
+      did TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      identity_key TEXT NOT NULL,
+      listen_second INTEGER,
+      artist_key TEXT,
+      track_key TEXT,
+      love_key TEXT,
+      recording_mbid TEXT,
+      created_at_ms INTEGER NOT NULL,
+      PRIMARY KEY(did,kind,identity_key)
+    )`,
+    "CREATE INDEX linked_pull_tombstones_listen_second ON linked_pull_tombstones(did,listen_second) WHERE kind = 'listen'",
+    "CREATE INDEX linked_pull_tombstones_love_key ON linked_pull_tombstones(did,love_key,recording_mbid) WHERE kind = 'love'",
+  ],
+};
+
+const MIGRATION_S3_LOVE_PULL_CURSOR: Migration = {
+  version: 32,
+  name: 'linked_love_pull_cursor',
+  statements: ['ALTER TABLE linked_pull_state ADD COLUMN love_cursor TEXT'],
+};
+
+const MIGRATION_S3_LOVE_INTENT_FENCE: Migration = {
+  version: 33,
+  name: 'linked_love_user_intent_fence',
+  statements: [
+    `CREATE TABLE linked_love_intents (
+    did TEXT NOT NULL,
+    love_key TEXT NOT NULL,
+    intent TEXT NOT NULL,
+    operation_id TEXT NOT NULL,
+    updated_at_ms INTEGER NOT NULL,
+    PRIMARY KEY(did,love_key)
+  )`,
+  ],
+};
+
+const MIGRATION_S3_LISTEN_SECOND_RECOVERY: Migration = {
+  version: 34,
+  name: 'linked_pull_legacy_listen_second_recovery',
+  statements: [
+    `CREATE TABLE linked_pull_receipt_seed (
+      singleton INTEGER PRIMARY KEY NOT NULL,
+      last_rowid INTEGER NOT NULL DEFAULT 0,
+      member_offset INTEGER NOT NULL DEFAULT 0,
+      done INTEGER NOT NULL DEFAULT 0,
+      updated_at_ms INTEGER NOT NULL
+    )`,
+    `CREATE TABLE linked_pull_projection_scan (
+      did TEXT PRIMARY KEY NOT NULL,
+      rowid_cursor INTEGER NOT NULL DEFAULT 0,
+      updated_at_ms INTEGER NOT NULL
+    )`,
+  ],
+};
+
+const MIGRATION_S3_PULL_POLLING: Migration = {
+  version: 35,
+  name: 'linked_pull_persisted_poll_rounds',
+  statements: [
+    'ALTER TABLE linked_pull_state ADD COLUMN poll_next_at_ms INTEGER',
+    'ALTER TABLE linked_pull_state ADD COLUMN listen_round_upper_ms INTEGER',
+    'ALTER TABLE linked_pull_state ADD COLUMN listen_round_floor_ms INTEGER',
+    'ALTER TABLE linked_pull_state ADD COLUMN listen_round_page INTEGER',
+    'ALTER TABLE linked_pull_state ADD COLUMN love_round_upper_ms INTEGER',
+    'ALTER TABLE linked_pull_state ADD COLUMN love_round_page INTEGER',
+    'ALTER TABLE linked_pull_state ADD COLUMN love_round_floor_ms INTEGER',
+    "ALTER TABLE linked_pull_state ADD COLUMN poll_phase TEXT NOT NULL DEFAULT 'listen'",
+    'ALTER TABLE linked_pull_state ADD COLUMN skipped_count INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE linked_pull_state ADD COLUMN listen_floor_at_ms INTEGER',
+    'ALTER TABLE linked_pull_state ADD COLUMN love_floor_at_ms INTEGER',
+  ],
+};
+
+const MIGRATION_S3_LISTENBRAINZ_PULL: Migration = {
+  version: 36,
+  name: 'linked_listenbrainz_pull_round_guards',
+  statements: [
+    'ALTER TABLE linked_pull_state ADD COLUMN listen_round_saturated INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE linked_pull_state ADD COLUMN love_round_total_count INTEGER',
+    'ALTER TABLE linked_pull_state ADD COLUMN love_round_first_key TEXT',
+    'ALTER TABLE linked_pull_state ADD COLUMN love_round_newest_ms INTEGER',
+  ],
+};
+
+// A pulled love can be accepted by the outbox and written to the PDS before
+// its Jetstream projection arrives. Keep its canonical aliases and source
+// provenance across operation cleanup, scoped to that accepted incarnation.
+const MIGRATION_S3_LOVE_PULL_ADMISSIONS: Migration = {
+  version: 37,
+  name: 'linked_pull_love_acceptance_admissions',
+  statements: [
+    'ALTER TABLE linked_love_intents ADD COLUMN recording_mbid TEXT',
+    'CREATE INDEX linked_love_intents_mbid ON linked_love_intents(did,recording_mbid,updated_at_ms)',
+    `CREATE TABLE linked_pull_love_admissions (
+      did TEXT NOT NULL,
+      link_id TEXT NOT NULL,
+      generation INTEGER NOT NULL,
+      operation_id TEXT NOT NULL,
+      love_key TEXT NOT NULL,
+      recording_mbid TEXT,
+      source_service TEXT NOT NULL,
+      source_account TEXT NOT NULL,
+      state TEXT NOT NULL,
+      uri TEXT,
+      incarnation_key TEXT,
+      updated_at_ms INTEGER NOT NULL,
+      PRIMARY KEY(did,operation_id)
+    )`,
+    'CREATE INDEX linked_pull_love_admissions_generation ON linked_pull_love_admissions(link_id,generation,state)',
+    'CREATE INDEX linked_pull_love_admissions_key ON linked_pull_love_admissions(did,state,love_key)',
+    'CREATE INDEX linked_pull_love_admissions_mbid ON linked_pull_love_admissions(did,state,recording_mbid) WHERE recording_mbid IS NOT NULL',
+    'CREATE INDEX linked_pull_love_admissions_uri ON linked_pull_love_admissions(did,uri,state) WHERE uri IS NOT NULL',
+  ],
+};
+
+// A successful repo.deleteRecord response carries the repository revision
+// that orders the deletion before a same-URI recreation, even when its CID is
+// byte-identical. Null remains conservative for legacy or malformed replies.
+const MIGRATION_S3_LOVE_DELETE_REVISION: Migration = {
+  version: 38,
+  name: 'love_delete_bridge_commit_revision',
+  statements: ['ALTER TABLE love_delete_bridges ADD COLUMN delete_rev TEXT'],
+};
+
 export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_1,
   MIGRATION_2,
@@ -1194,6 +1368,15 @@ export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_S2_BACKFILL_RUN_REVISION,
   MIGRATION_S2_BACKFILL_BUDGET,
   MIGRATION_S2_BACKFILL_MEMBERSHIP,
+  MIGRATION_S3_PULL_FOUNDATION,
+  MIGRATION_S3_PULL_TOMBSTONES,
+  MIGRATION_S3_LOVE_PULL_CURSOR,
+  MIGRATION_S3_LOVE_INTENT_FENCE,
+  MIGRATION_S3_LISTEN_SECOND_RECOVERY,
+  MIGRATION_S3_PULL_POLLING,
+  MIGRATION_S3_LISTENBRAINZ_PULL,
+  MIGRATION_S3_LOVE_PULL_ADMISSIONS,
+  MIGRATION_S3_LOVE_DELETE_REVISION,
 ];
 
 /** The schema version this code expects. */
@@ -1273,6 +1456,14 @@ export const TABLES = [
   'mb_cover_art',
   'mb_cover_art_jobs',
   'mb_cover_art_usage',
+  // Migration 30.
+  'linked_pull_state',
+  'linked_pull_items',
+  'linked_pull_tombstones',
+  'linked_love_intents',
+  'linked_pull_receipt_seed',
+  'linked_pull_projection_scan',
+  'linked_pull_love_admissions',
 ] as const;
 
 export type TableName = (typeof TABLES)[number];
@@ -1352,4 +1543,11 @@ export const TABLE_CLASS: Readonly<Record<TableName, TableClass>> = {
   mb_cover_art: 'non-derived',
   mb_cover_art_jobs: 'non-derived',
   mb_cover_art_usage: 'non-derived',
+  linked_pull_state: 'non-derived',
+  linked_pull_items: 'non-derived',
+  linked_pull_tombstones: 'non-derived',
+  linked_love_intents: 'non-derived',
+  linked_pull_receipt_seed: 'non-derived',
+  linked_pull_projection_scan: 'non-derived',
+  linked_pull_love_admissions: 'non-derived',
 };

@@ -19,7 +19,7 @@
 //    that wire handed a transport that is NOT the spy (the bare fixture
 //    router, which still reaches every fake): the journey still works, and the
 //    check must name exactly that wire's consumers as missing.
-// 2. The timers and the startup reconcile: the six extension timers are
+// 2. The timers and the startup reconcile: extension timers are
 //    registered (EXTENSION_TIMER_NAMES order) and armed, and a DID the sign-in
 //    policy no longer admits has lost its sessions and credentials by the time
 //    the listener binds, with the reconcile run exactly once.
@@ -175,6 +175,8 @@ function consumerOf(r: SpyRequest, asHost: string, dohHost: string, plcHost: str
       if (r.host === 'lastfm.test') return 'lastfm-import';
       if (r.host === 'listenbrainz.test') return 'listenbrainz-import';
       return null;
+    case 'linked-pull':
+      return r.host === 'lastfm.test' ? 'lastfm-pull' : r.host === 'listenbrainz.test' ? 'listenbrainz-pull' : null;
     case 'jetstream':
       return null;
     case 'musicbrainz':
@@ -222,6 +224,15 @@ async function exercise(w: World, alice: User): Promise<void> {
     body: { token: 'alice-lb-link-token' },
   });
   expect(lbLink.status).toBe(201);
+
+  // The timer-only pull uses its own pinned wire and the linked account's
+  // encrypted session credential. Empty history keeps this proof read-only.
+  w.core.extensionTimers.kick('linked-pull');
+  await w.core.tick('extension');
+  // A second timer turn reaches the other linked service after the first
+  // durable state row has been installed.
+  w.core.extensionTimers.kick('linked-pull');
+  await w.core.tick('extension');
 
   // A web scrobble: the outbox's DPoP write (PdsWriter), the proof read (SafeFetch), both forwards.
   const posted = await w.send('POST', '/api/v1/scrobbles', {
@@ -549,6 +560,7 @@ describe('production features', () => {
     expect(EXTENSION_TIMER_NAMES).toEqual([
       'outbox',
       'forward',
+      'linked-pull',
       'link-backfill',
       'import',
       'oauth-keepalive',
@@ -568,6 +580,7 @@ describe('production features', () => {
       'listenbrainz',
       'links',
       'imports',
+      'linked-pull',
       'credential-settings',
       'outbox',
       'oauth-keepalive',

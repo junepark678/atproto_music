@@ -39,6 +39,7 @@ import {
 import { enqueueForwards } from '../../../src/outbox/forward-enqueue';
 import { newOperationId, unblockOperations } from '../../../src/outbox/operations';
 import { insertScrobbleCreate, prepareScrobble } from '../../../src/outbox/scrobble-ops';
+import { stagePullPage } from '../../../src/sync/pull-staging';
 import { APPLY, CREATE, GET, type Harness, remoteRecords, SCROBBLE, T0, withHarness } from '../outbox/support';
 
 const SCROBBLE_BATCH = 'com.example.atmusic.scrobbleBatch';
@@ -215,7 +216,12 @@ describe('import writer', () => {
   it('rewrites a never-sent batch after async preparation, keeping siblings and releasing only the removed listen key', async () => {
     await withHarness(async (h) => {
       h.seedUser(h.alice);
-      h.link(h.alice, 'listenbrainz');
+      const linkId = h.link(h.alice, 'listenbrainz');
+      h.db.run("UPDATE linked_accounts SET remote_user='remote' WHERE id=?", linkId);
+      h.db.run(
+        "INSERT INTO linked_pull_state(link_id,generation,source_service,source_account,listen_watermark_ms,updated_at_ms) VALUES(?,1,'listenbrainz','remote',0,1)",
+        linkId,
+      );
       const rt = runtime(h);
       uploadJob(h, 'job-unsent-remove', [listen(31), listen(32)]);
       await parse(h, rt, 'job-unsent-remove');
@@ -226,7 +232,9 @@ describe('import writer', () => {
         'job-unsent-remove',
       )!.dedupe_key;
       expect(h.db.one('SELECT count(*) AS n FROM forward_outbox')).toEqual({ n: 2 });
-      const original = JSON.parse(parent.record_json!) as { listens: Array<{ id: string }> };
+      const original = JSON.parse(parent.record_json!) as {
+        listens: Array<{ id: string; artist: string; track: string; listenedAt: string }>;
+      };
       const removedId = original.listens[0]!.id;
       const plan = await prepareUnsentBatchListenRemoval(h.m, {
         did: h.alice,
@@ -235,6 +243,35 @@ describe('import writer', () => {
       });
       expect(plan).not.toBeNull();
       const rewritten = commitUnsentBatchListenRemoval(h.m, plan!);
+      expect(
+        h.db.one(
+          "SELECT listen_second FROM linked_pull_tombstones WHERE did=? AND kind='listen' AND listen_second=?",
+          h.alice,
+          Math.floor(Date.parse(original.listens[0]!.listenedAt) / 1000),
+        ),
+      ).not.toBeNull();
+      const [removedArtistKey, removedTrackKey] = trackKey(original.listens[0]!.artist, original.listens[0]!.track);
+      expect(
+        stagePullPage(h.db, {
+          linkId,
+          generation: 1,
+          sourceService: 'listenbrainz',
+          sourceAccount: 'remote',
+          did: h.alice,
+          proposedCursor: 'after-remove',
+          proposedWatermarkMs: Date.parse(original.listens[0]!.listenedAt),
+          nowMs: T0,
+          items: [
+            {
+              itemKey: 'corrected-name',
+              listenedAtMs: Date.parse(original.listens[0]!.listenedAt),
+              artistKey: removedArtistKey,
+              trackKey: removedTrackKey,
+              payload: { artist: 'Corrected', track: 'Metadata' },
+            },
+          ],
+        }),
+      ).toEqual(['tombstoned']);
       expect(rewritten).toMatchObject({ state: 'queued', attempts: 0, send_started_at_ms: null });
       expect(JSON.parse(rewritten!.record_json!).listens).toHaveLength(1);
       expect(

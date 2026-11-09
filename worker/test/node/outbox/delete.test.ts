@@ -3,12 +3,14 @@
 // web/test/outbox/delete.test.ts, cases M3.3.1/pending_create_delete and
 // M3.3.2/create_in_flight).
 
+import { trackKey } from '@atmusic/core/music-key';
 import { fromMs, toStorage } from '@atmusic/core/timestamp';
 import { expect, it } from 'vitest';
 import type { Db } from '../../../src/do/db';
 import { enqueueScrobbleDelete, removeScrobbleCreate } from '../../../src/outbox/delete-ops';
 import { acceptListens } from '../../../src/outbox/ingress';
 import { cancelUnsent, predecessorRows } from '../../../src/outbox/operations';
+import { isListenTombstoned } from '../../../src/sync/tombstones';
 import {
   CREATE,
   DELETE,
@@ -192,10 +194,16 @@ it('a still-queued create cancelled at removal sends nothing to the PDS and dele
 
     // A queued create, never sent: cancelled.
     const queued = await accept(h, 0);
+    const pendingRecord = JSON.parse(queued.record_json!) as { artist: string; track: string; listenedAt: string };
+    const [artistKey, trackKeyValue] = trackKey(pendingRecord.artist, pendingRecord.track);
+    const listenSecond = Math.floor(Date.parse(pendingRecord.listenedAt) / 1000);
     const key = h.db.one<{ k: string }>('SELECT dedupe_key AS k FROM listen_keys WHERE operation_id = ?', queued.id)!.k;
     expect(count(h.db, 'forward_outbox', 'dedupe_key = ?', key)).toBe(2);
     const removed = removeScrobbleCreate(h.m, { did: h.alice, operationId: queued.id, origin: 'lastfm', kick });
     expect(removed).toMatchObject({ status: 'cancelled', operation: { id: queued.id, state: 'cancelled' } });
+    expect(isListenTombstoned(h.db, h.alice, listenSecond, artistKey, trackKeyValue)).toBe(true);
+    h.db.run('DELETE FROM operations WHERE id=?', queued.id);
+    expect(isListenTombstoned(h.db, h.alice, listenSecond, artistKey, trackKeyValue)).toBe(true);
     expect(count(h.db, 'listen_keys', 'did = ?', h.alice)).toBe(0);
     expect(count(h.db, 'forward_outbox')).toBe(0);
     expect(await h.run()).toMatchObject({ attempted: 0, nextDueMs: null });

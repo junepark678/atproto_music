@@ -389,7 +389,16 @@ describe('migrate', () => {
       expectMigration1Seeds(db);
       expect(db.all('SELECT singleton,next_seq FROM forward_admission_clock')).toEqual([]);
       for (const table of TABLES) {
-        if ([...SEEDED_BY_MIGRATION_1, 'schema_migrations', 'schema_compat', 'mb_cover_art_usage'].includes(table))
+        if (
+          [
+            ...SEEDED_BY_MIGRATION_1,
+            'schema_migrations',
+            'schema_compat',
+            'mb_cover_art_usage',
+            'linked_pull_receipt_seed',
+            'linked_pull_projection_scan',
+          ].includes(table)
+        )
           continue;
         expect([table, db.one<{ n: number }>(`SELECT count(*) AS n FROM ${table}`)]).toEqual([table, { n: 0 }]);
       }
@@ -696,7 +705,7 @@ describe('migrate', () => {
   // database at that version is ready for that code, across restarts.
   // Later additive migrations keep the v2 compatibility floor.
   it('SCHEMA_VERSION includes additive batch provenance and remains compatible with v2 code', async () => {
-    expect(SCHEMA_VERSION).toBe(29);
+    expect(SCHEMA_VERSION).toBe(38);
     expect(MIGRATIONS.map((m) => [m.version, m.name])).toEqual([
       [1, 'initial_workers_schema'],
       [2, 'node_schema'],
@@ -727,6 +736,15 @@ describe('migrate', () => {
       [27, 'linked_account_backfill_run_revision'],
       [28, 'bounded_link_backfill_progress_and_fairness'],
       [29, 'link_backfill_staged_membership'],
+      [30, 'linked_service_pull_foundation'],
+      [31, 'linked_pull_deletion_tombstones'],
+      [32, 'linked_love_pull_cursor'],
+      [33, 'linked_love_user_intent_fence'],
+      [34, 'linked_pull_legacy_listen_second_recovery'],
+      [35, 'linked_pull_persisted_poll_rounds'],
+      [36, 'linked_listenbrainz_pull_round_guards'],
+      [37, 'linked_pull_love_acceptance_admissions'],
+      [38, 'love_delete_bridge_commit_revision'],
     ]);
 
     const name = 'migrate-v2-ready';
@@ -768,6 +786,15 @@ describe('migrate', () => {
         { version: 27, name: 'linked_account_backfill_run_revision' },
         { version: 28, name: 'bounded_link_backfill_progress_and_fairness' },
         { version: 29, name: 'link_backfill_staged_membership' },
+        { version: 30, name: 'linked_service_pull_foundation' },
+        { version: 31, name: 'linked_pull_deletion_tombstones' },
+        { version: 32, name: 'linked_love_pull_cursor' },
+        { version: 33, name: 'linked_love_user_intent_fence' },
+        { version: 34, name: 'linked_pull_legacy_listen_second_recovery' },
+        { version: 35, name: 'linked_pull_persisted_poll_rounds' },
+        { version: 36, name: 'linked_listenbrainz_pull_round_guards' },
+        { version: 37, name: 'linked_pull_love_acceptance_admissions' },
+        { version: 38, name: 'love_delete_bridge_commit_revision' },
       ]);
       expect(db.all('SELECT min_compatible_version FROM schema_compat')).toEqual([{ min_compatible_version: 2 }]);
       // A row in a migration-2 table survives reopening.

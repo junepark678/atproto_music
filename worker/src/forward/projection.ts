@@ -208,13 +208,17 @@ export function cleanupForwardAdmissionsForSuppression(db: Db, did: string): voi
      WHERE incarnation.uri LIKE ? AND NOT EXISTS (
        SELECT 1 FROM operations AS op WHERE op.did=? AND op.state!='cancelled'
          AND incarnation.uri='at://' || op.did || '/' || op.collection || '/' || coalesce(op.rkey,'')
+     ) AND NOT EXISTS (
+       SELECT 1 FROM love_delete_bridges AS bridge
+       WHERE bridge.did=? AND bridge.uri=incarnation.uri AND bridge.state IN ('pending','succeeded')
      )`,
     `at://${did}/%`,
+    did,
     did,
   );
   db.run(
     `DELETE FROM love_delete_bridges AS bridge
-     WHERE bridge.did=? AND NOT EXISTS (
+     WHERE bridge.did=? AND bridge.state NOT IN ('pending','succeeded') AND NOT EXISTS (
        SELECT 1 FROM operations AS op WHERE op.id=bridge.operation_id AND op.state!='cancelled'
      )`,
     did,

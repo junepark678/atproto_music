@@ -77,6 +77,7 @@ export type TimerName = (typeof TIMER_NAMES)[number];
 export const EXTENSION_TIMER_NAMES = [
   'outbox',
   'forward',
+  'linked-pull',
   'link-backfill',
   'import',
   'oauth-keepalive',

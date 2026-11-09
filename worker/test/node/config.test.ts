@@ -179,6 +179,7 @@ describe('parseNodeConfig', () => {
     // The defaults are the real upstreams; an explicit :443 is the default port.
     const cfg = parse({ ...env, LISTENBRAINZ_API_ROOT: 'https://api.listenbrainz.org:443/' });
     expect(cfg.lastfmApiRoot).toBe('https://ws.audioscrobbler.com/2.0/');
+    expect(cfg.linkedPullIntervalMs).toBe(600_000);
     expect(cfg.lastfmAuthUrl).toBe('https://www.last.fm/api/auth/');
     expect(cfg.fixtureOrigins).toBe(false);
     expect(
@@ -189,6 +190,10 @@ describe('parseNodeConfig', () => {
       }),
     ).toMatchObject({ musicbrainzApiRoot: 'https://musicbrainz.example.org/ws/2/', musicbrainzEnabled: false });
     expect(fields(issuesOf(() => parse({ ...baseEnv(), MUSICBRAINZ_ENABLED: '0' })))).toEqual(['MUSICBRAINZ_ENABLED']);
+    for (const value of ['0', '59999', '86400001', '1.5', '9007199254740992'])
+      expect(fields(issuesOf(() => parse({ ...baseEnv(), LINKED_PULL_INTERVAL_MS: value })))).toContain(
+        'LINKED_PULL_INTERVAL_MS',
+      );
 
     // Non-vacuity: the test-only option is what admits the e2e stack's values,
     // and it still refuses http upstreams, IP literals and loopback names.

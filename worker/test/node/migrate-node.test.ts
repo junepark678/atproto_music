@@ -8,7 +8,7 @@ import { rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { MigrationLedgerError, type MigrationTarget, migrate } from '../../src/do/migrate';
-import { MIGRATIONS, type Migration, SCHEMA_VERSION, TABLES } from '../../src/do/schema';
+import { MIGRATIONS, type Migration, SCHEMA_VERSION, TABLE_CLASS, TABLES } from '../../src/do/schema';
 import { openSqliteDb, type SqliteDb } from '../../src/node/sqlite-db';
 import { dumpDb, makeTempDir, reopen, TEST_BUSY_TIMEOUT_MS, withMigratedDb } from './support/node-db';
 
@@ -72,6 +72,25 @@ function recordingTarget(db: SqliteDb) {
 }
 
 describe('migrate over node:sqlite', () => {
+  it('migration 30 creates durable per-generation pull state, staging and tombstone tables', () => {
+    const db = freshDb();
+    migrate(db);
+    expect(SCHEMA_VERSION).toBe(38);
+    for (const table of ['linked_pull_state', 'linked_pull_items'] as const) {
+      expect(TABLES).toContain(table);
+      expect(db.one<{ name: string }>("SELECT name FROM sqlite_master WHERE type='table' AND name=?", table)).toEqual({
+        name: table,
+      });
+    }
+    expect(
+      db.one<{ sql: string }>("SELECT sql FROM sqlite_master WHERE type='table' AND name='linked_pull_state'")!.sql,
+    ).toContain('love_boundary_ms');
+    expect(TABLE_CLASS.linked_pull_state).toBe('non-derived');
+    expect(TABLE_CLASS.linked_pull_items).toBe('non-derived');
+    expect(TABLE_CLASS.linked_pull_receipt_seed).toBe('non-derived');
+    expect(TABLE_CLASS.linked_pull_projection_scan).toBe('non-derived');
+  });
+
   it('all MIGRATIONS apply in one transaction on a fresh file and schema_migrations lists every version', () => {
     const db = freshDb();
     const { target, events } = recordingTarget(db);

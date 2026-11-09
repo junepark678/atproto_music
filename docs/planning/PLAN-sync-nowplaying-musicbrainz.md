@@ -308,6 +308,12 @@ The owner's word is "synced". Our definition: canonical MusicBrainz data is reso
 
 ### S3 Continuous pull from the linked service (base: S2)
 
+**Implementation progress (draft):** The current increment adds the timer-driven
+Last.fm recent/loved reader, persisted page rounds and retry cadence, and routes
+staged records through the import/outbox writer. ListenBrainz polling and the
+remaining S3 gate scenarios are still pending; this note does not mark S3
+complete.
+
 - **Poller.** A per-link poller on an extension timer.
   - It runs every 10 min (configurable) with jitter, for links where `pull_enabled` is set.
   - New links default to on, and existing links switch on at rollout.

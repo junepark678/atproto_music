@@ -34,9 +34,8 @@
 //                    adds (http/meta.ts, B14, B18)
 //   backup           the daily backup timer (node/backup.ts), when given
 //
-// The six extension timers therefore all have a handler, and IndexCore runs
-// them in EXTENSION_TIMER_NAMES order (outbox, forward, import,
-// oauth-keepalive, expiry-sweep, backup).
+// The linked-pull extension runs on the pinned upstream transport and shares
+// Last.fm pacing with forward/import; its timer follows forward in priority.
 //
 // **The startup reconcile comes first (ADR §5.5, B20).** compose starts
 // IndexCore, and so arms the extension lane (the outbox, forward and import
@@ -103,7 +102,7 @@ import { lastfmAuthFeature } from '../http/lastfm-authorize';
 import { linksFeature } from '../http/links';
 import type { MetaService } from '../http/meta';
 import { defaultAccountCapabilities, writesFeature } from '../http/writes';
-import { intervalPacer, type Pacer } from '../imports/jobs';
+import { IMPORT_FETCH_CAPS, intervalPacer, type Pacer } from '../imports/jobs';
 import { routes as as12Routes } from '../lastfm/as12';
 import { authMethods, handleLastfmMethod } from '../lastfm/auth-methods';
 import { lastfmRoutes } from '../lastfm/routes';
@@ -116,6 +115,7 @@ import { runCoverArtJobs } from '../musicbrainz/cover-art-runner';
 import { createMusicBrainzResolver } from '../musicbrainz/resolver';
 import { type PdsWriter, type PdsWriterSource, ReauthRequiredError, sessionWriter } from '../outbox/pds-writer';
 import { outboxExtension } from '../outbox/runner';
+import { runLinkedLastfmPull } from '../sync/pull-poller';
 import { backupExtension } from './backup';
 import type { Feature, FeatureContext } from './compose';
 import type { NodeConfig } from './config';
@@ -123,6 +123,7 @@ import { createCoverArtClient } from './cover-art-client';
 import { createJetstreamWsConnector, jetstreamWsTarget, type WsClientCtor } from './jetstream-ws';
 import { type PinnedLookup, TransportError } from './pinned-transport';
 import { bindPolicyFetch, createPolicyFetch } from './policy-fetch';
+import { pullWriterAvailability as resolvePullWriterAvailability } from './pull-writer-availability';
 import type { Secrets } from './secrets';
 
 // ---------------------------------------------------------------------------
@@ -138,6 +139,8 @@ export const OUTBOUND_CONSUMERS = [
   'lastfm-forward',
   'listenbrainz-forward',
   'lastfm-import',
+  'lastfm-pull',
+  'listenbrainz-pull',
   'listenbrainz-import',
   'jetstream',
   'musicbrainz',
@@ -152,6 +155,7 @@ export const OUTBOUND_WIRES = Object.freeze({
   oauth: ['oauth-client', 'pds-writer'],
   forward: ['lastfm-forward', 'listenbrainz-forward'],
   imports: ['lastfm-import', 'listenbrainz-import'],
+  'linked-pull': ['lastfm-pull', 'listenbrainz-pull'],
   jetstream: ['jetstream'],
   musicbrainz: ['musicbrainz'],
   'cover-art': ['cover-art'],
@@ -555,8 +559,21 @@ export async function productionFeatures(options: ProductionFeatureOptions): Pro
     }),
   };
 
+  const pullWriterAvailability = (did: string) => {
+    const service = oauthService();
+    return resolvePullWriterAvailability({
+      did,
+      publicationEnabled: config.app.publication,
+      batchPublicationEnabled: config.app.batchPublication,
+      signInAllowed: signInAllowed(config, did),
+      prefix: config.app.prefix,
+      sessionStore: service.sessionStore,
+      restore: (accountDid) => service.restore(accountDid),
+    });
+  };
+
   const links = onWire(
-    linksFeature({ revocations, pacing, sessions: sharedSessions }),
+    linksFeature({ revocations, pacing, sessions: sharedSessions, pullWriterAvailability }),
     outbound.transportFor('forward'),
   );
 
@@ -568,6 +585,61 @@ export async function productionFeatures(options: ProductionFeatureOptions): Pro
     }),
     outbound.transportFor('imports'),
   );
+
+  const linkedPullFetch = bindPolicyFetch(
+    createPolicyFetch({
+      transport: outbound.transportFor('linked-pull'),
+      ...(options.timer === undefined ? {} : { timer: options.timer }),
+    }),
+    IMPORT_FETCH_CAPS,
+  );
+  const linkedPullFeature: Feature = {
+    name: 'linked-pull',
+    extensions: [
+      {
+        name: 'linked-pull',
+        start(ctx, now) {
+          ctx.schedule('linked-pull', now);
+        },
+        timers: {
+          'linked-pull': async (now, ctx) => {
+            const report = await runLinkedLastfmPull(
+              {
+                moduleDeps: ctx.deps,
+                db: ctx.deps.db,
+                clock: ctx.deps.clock,
+                random: ctx.deps.random,
+                box: createBox(secrets.encryptionKeys, ctx.deps.random),
+                fetch: linkedPullFetch,
+                apiRoot: config.lastfmApiRoot,
+                apiKey: secrets.lastfm?.apiKey ?? null,
+                sharedSecret: secrets.lastfm?.sharedSecret ?? null,
+                listenbrainzApiRoot: config.listenbrainzApiRoot,
+                intervalMs: config.linkedPullIntervalMs,
+                pacer: lastfmImportPacer(pacing),
+                listenbrainzPacer: (linkId, generation) => {
+                  const key = `link:${linkId}:generation:${generation}`;
+                  return {
+                    take(nowMs) {
+                      return pacing.tryListenbrainz(key, nowMs)
+                        ? null
+                        : Math.max(nowMs + 1, pacing.listenbrainzAvailableAt(key));
+                    },
+                    holdUntil(untilMs) {
+                      pacing.deferListenbrainz(key, untilMs);
+                    },
+                  };
+                },
+                writerAvailability: pullWriterAvailability,
+              },
+              now,
+            );
+            ctx.schedule('linked-pull', report.nextDueMs ?? now + config.linkedPullIntervalMs);
+          },
+        },
+      },
+    ],
+  };
 
   const credentials = credentialsFeature({ revocations, sessions: sharedSessions });
 
@@ -706,6 +778,7 @@ export async function productionFeatures(options: ProductionFeatureOptions): Pro
     listenbrainz,
     links,
     imports,
+    linkedPullFeature,
     credentials,
     outbox,
     keepalive,

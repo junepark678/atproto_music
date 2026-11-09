@@ -90,6 +90,101 @@ interface ExpectedTable {
 }
 
 const NEW_TABLES: Record<string, ExpectedTable> = {
+  linked_pull_state: {
+    columns: [
+      'link_id',
+      'generation',
+      'source_service',
+      'source_account',
+      'listen_watermark_ms',
+      'love_boundary_ms',
+      'love_boundary_key',
+      'page_kind',
+      'page_cursor',
+      'page_started_at_ms',
+      'hold_reason',
+      'retry_at_ms',
+      'failures',
+      'updated_at_ms',
+      'love_cursor',
+      'poll_next_at_ms',
+      'listen_round_upper_ms',
+      'listen_round_floor_ms',
+      'listen_round_page',
+      'love_round_upper_ms',
+      'love_round_page',
+      'love_round_floor_ms',
+      'poll_phase',
+      'skipped_count',
+      'listen_floor_at_ms',
+      'love_floor_at_ms',
+      'listen_round_saturated',
+      'love_round_total_count',
+      'love_round_first_key',
+      'love_round_newest_ms',
+    ],
+    pk: ['link_id', 'generation'],
+  },
+  linked_pull_items: {
+    columns: [
+      'link_id',
+      'generation',
+      'item_key',
+      'kind',
+      'source_service',
+      'source_account',
+      'listened_at_ms',
+      'love_key',
+      'recording_mbid',
+      'payload_json',
+      'payload_bytes',
+      'staged_at_ms',
+    ],
+    pk: ['link_id', 'generation', 'item_key'],
+  },
+  linked_pull_tombstones: {
+    columns: [
+      'did',
+      'kind',
+      'identity_key',
+      'listen_second',
+      'artist_key',
+      'track_key',
+      'love_key',
+      'recording_mbid',
+      'created_at_ms',
+    ],
+    pk: ['did', 'kind', 'identity_key'],
+  },
+  linked_love_intents: {
+    columns: ['did', 'love_key', 'intent', 'operation_id', 'updated_at_ms', 'recording_mbid'],
+    pk: ['did', 'love_key'],
+  },
+  linked_pull_receipt_seed: {
+    columns: ['singleton', 'last_rowid', 'member_offset', 'done', 'updated_at_ms'],
+    pk: ['singleton'],
+  },
+  linked_pull_projection_scan: {
+    columns: ['did', 'rowid_cursor', 'updated_at_ms'],
+    pk: ['did'],
+  },
+  linked_pull_love_admissions: {
+    columns: [
+      'did',
+      'link_id',
+      'generation',
+      'operation_id',
+      'love_key',
+      'recording_mbid',
+      'source_service',
+      'source_account',
+      'state',
+      'uri',
+      'incarnation_key',
+      'updated_at_ms',
+    ],
+    pk: ['did', 'operation_id'],
+  },
   forward_admissions: {
     columns: ['did', 'identity_key', 'path', 'source_service', 'created_at_ms', 'admission_seq'],
     pk: ['did', 'identity_key'],
@@ -104,7 +199,7 @@ const NEW_TABLES: Record<string, ExpectedTable> = {
     pk: ['uri'],
   },
   love_delete_bridges: {
-    columns: ['did', 'uri', 'incarnation_key', 'expected_cid', 'operation_id', 'state', 'created_at_ms'],
+    columns: ['did', 'uri', 'incarnation_key', 'expected_cid', 'operation_id', 'state', 'created_at_ms', 'delete_rev'],
     pk: ['did', 'uri', 'incarnation_key', 'operation_id'],
   },
   love_import_bridges: {
@@ -321,7 +416,14 @@ const NEW_TABLES: Record<string, ExpectedTable> = {
   },
   operation_deps: { columns: cols<OperationDepRow>({ op_id: true, pred_id: true }), pk: ['op_id', 'pred_id'] },
   listen_keys: {
-    columns: cols<ListenKeyRow>({ did: true, dedupe_key: true, operation_id: true, source: true, created_at_ms: true }),
+    columns: cols<ListenKeyRow>({
+      did: true,
+      dedupe_key: true,
+      operation_id: true,
+      source: true,
+      created_at_ms: true,
+      listen_second: true,
+    }),
     pk: ['did', 'dedupe_key'],
   },
   pds_budget: {
@@ -616,6 +718,96 @@ const NEW_SCROBBLE_COLUMNS = cols<ScrobbleV2Columns>({
 
 /** New named indexes: table, unique, partial, [column, desc] in key order. */
 const NEW_INDEXES: Record<string, [string, number, number, Array<[string, number]>]> = {
+  linked_love_intents_mbid: [
+    'linked_love_intents',
+    0,
+    0,
+    [
+      ['did', 0],
+      ['recording_mbid', 0],
+      ['updated_at_ms', 0],
+    ],
+  ],
+  linked_pull_items_pending: [
+    'linked_pull_items',
+    0,
+    0,
+    [
+      ['link_id', 0],
+      ['generation', 0],
+      ['kind', 0],
+      ['staged_at_ms', 0],
+      ['item_key', 0],
+    ],
+  ],
+  listen_keys_did_second: [
+    'listen_keys',
+    0,
+    1,
+    [
+      ['did', 0],
+      ['listen_second', 0],
+    ],
+  ],
+  linked_pull_tombstones_listen_second: [
+    'linked_pull_tombstones',
+    0,
+    1,
+    [
+      ['did', 0],
+      ['listen_second', 0],
+    ],
+  ],
+  linked_pull_tombstones_love_key: [
+    'linked_pull_tombstones',
+    0,
+    1,
+    [
+      ['did', 0],
+      ['love_key', 0],
+      ['recording_mbid', 0],
+    ],
+  ],
+  linked_pull_love_admissions_generation: [
+    'linked_pull_love_admissions',
+    0,
+    0,
+    [
+      ['link_id', 0],
+      ['generation', 0],
+      ['state', 0],
+    ],
+  ],
+  linked_pull_love_admissions_key: [
+    'linked_pull_love_admissions',
+    0,
+    0,
+    [
+      ['did', 0],
+      ['state', 0],
+      ['love_key', 0],
+    ],
+  ],
+  linked_pull_love_admissions_mbid: [
+    'linked_pull_love_admissions',
+    0,
+    1,
+    [
+      ['did', 0],
+      ['state', 0],
+      ['recording_mbid', 0],
+    ],
+  ],
+  linked_pull_love_admissions_uri: [
+    'linked_pull_love_admissions',
+    0,
+    1,
+    [
+      ['did', 0],
+      ['uri', 0],
+      ['state', 0],
+    ],
+  ],
   mb_cover_art_lru: [
     'mb_cover_art',
     0,
@@ -1531,6 +1723,15 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       "27|'linked_account_backfill_run_revision'",
       "28|'bounded_link_backfill_progress_and_fairness'",
       "29|'link_backfill_staged_membership'",
+      "30|'linked_service_pull_foundation'",
+      "31|'linked_pull_deletion_tombstones'",
+      "32|'linked_love_pull_cursor'",
+      "33|'linked_love_user_intent_fence'",
+      "34|'linked_pull_legacy_listen_second_recovery'",
+      "35|'linked_pull_persisted_poll_rounds'",
+      "36|'linked_listenbrainz_pull_round_guards'",
+      "37|'linked_pull_love_acceptance_admissions'",
+      "38|'love_delete_bridge_commit_revision'",
     ]);
     // The new scrobble columns exist and are NULL on every migrated row.
     expect(after.newColumns).toHaveLength(expectedScrobbles);
@@ -1567,6 +1768,15 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       { version: 27, name: 'linked_account_backfill_run_revision' },
       { version: 28, name: 'bounded_link_backfill_progress_and_fairness' },
       { version: 29, name: 'link_backfill_staged_membership' },
+      { version: 30, name: 'linked_service_pull_foundation' },
+      { version: 31, name: 'linked_pull_deletion_tombstones' },
+      { version: 32, name: 'linked_love_pull_cursor' },
+      { version: 33, name: 'linked_love_user_intent_fence' },
+      { version: 34, name: 'linked_pull_legacy_listen_second_recovery' },
+      { version: 35, name: 'linked_pull_persisted_poll_rounds' },
+      { version: 36, name: 'linked_listenbrainz_pull_round_guards' },
+      { version: 37, name: 'linked_pull_love_acceptance_admissions' },
+      { version: 38, name: 'love_delete_bridge_commit_revision' },
     ]);
     expect(after.compat).toEqual([{ singleton: 1, min_compatible_version: 2 }]);
     expect(after.newTablesEmpty).toEqual(['mb_cover_art_usage']);
