@@ -35,6 +35,7 @@ import type { ScrobbleRecord, ValidationFailure } from '@atmusic/core/scrobble';
 import { parseRfc3339 } from '@atmusic/core/timestamp';
 import type { Origin } from '../app/rows';
 import type { ModuleDeps } from '../do/contracts';
+import { admitForwardIdentity } from '../forward/projection';
 import { enqueueForwards } from './forward-enqueue';
 import { type Idempotency, idempotentOperation, newOperationId, type Prepared } from './operations';
 import { insertScrobbleCreate, prepareScrobble } from './scrobble-ops';
@@ -193,6 +194,12 @@ export async function acceptListens(m: ModuleDeps, args: AcceptListensArgs): Pro
         args.origin,
         now,
       );
+      const firstAdmission = admitForwardIdentity(db, {
+        did: args.did,
+        identityKey: prep.key,
+        path: 'api',
+        now,
+      });
       const op = insertScrobbleCreate(
         m,
         {
@@ -232,13 +239,14 @@ export async function acceptListens(m: ModuleDeps, args: AcceptListensArgs): Pro
           }
         }
       }
-      enqueueForwards(db, {
-        did: args.did,
-        items: [{ kind: 'scrobble', listenKey: prep.key, payload: { listen: prep.forward, origin: args.origin } }],
-        dueAt: prep.dueAt,
-        now,
-        random: m.random,
-      });
+      if (firstAdmission)
+        enqueueForwards(db, {
+          did: args.did,
+          items: [{ kind: 'scrobble', listenKey: prep.key, payload: { listen: prep.forward, origin: args.origin } }],
+          dueAt: prep.dueAt,
+          now,
+          random: m.random,
+        });
       seen.set(prep.key, op.id);
       used += 1;
       created += 1;

@@ -47,6 +47,7 @@
 
 import { encode } from '@atcute/cbor';
 import type { RecordProof } from '@atmusic/atproto/verify/types';
+import type { Random } from '@atmusic/core/deps';
 import { validateFollowRecord } from '@atmusic/core/follow';
 import { validateLoveRecord } from '@atmusic/core/love';
 import { MusicKeyError } from '@atmusic/core/music-key';
@@ -54,7 +55,15 @@ import { reasonText, type ScrobbleRow, validateScrobbleRecord } from '@atmusic/c
 import { MAX_INGEST_CBOR_BYTES, validateScrobbleBatchRecord } from '@atmusic/core/scrobble-batch';
 import { isTid } from '@atmusic/core/syntax';
 import { toStorage } from '@atmusic/core/timestamp';
+import {
+  admitForwardIdentity,
+  admitProjectedIdentity,
+  projectionListenKey,
+  retainedForwardProvenance,
+  retainedRecordProvenance,
+} from '../../forward/projection';
 import { enqueueTrack } from '../../musicbrainz/store';
+import { enqueueForwards } from '../../outbox/forward-enqueue';
 import type { Db } from '../db';
 import { advanceUser, bumpStatsVersion, isSuppressed, loadUser } from './account-state';
 import {
@@ -95,6 +104,8 @@ export interface ApplyOptions {
   prefix: string;
   /** Now in ns (injected clock): indexed_at, verified_at, last_activity_ms. */
   nowNs: bigint;
+  /** Explicit opt-in for forwarding a live Jetstream projection; absent elsewhere. */
+  forwarding?: { random: Random };
 }
 
 export function result(outcome: ApplyOutcome, extra: Partial<ApplyResult> = {}): ApplyResult {
@@ -207,7 +218,10 @@ function scrobbleVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, 
   return {
     ok: true,
     write: () => {
-      const before = db.one<{ cid: string }>('SELECT cid FROM scrobbles WHERE uri = ?', t.uri);
+      const before = db.one<{ cid: string; listened_at: string; artist_key: string; track_key: string }>(
+        'SELECT cid,listened_at,artist_key,track_key FROM scrobbles WHERE uri = ?',
+        t.uri,
+      );
       enqueueTrack(
         db,
         { artistKey: keys.artist_key, trackKey: keys.track_key, albumKey: keys.album_key },
@@ -215,6 +229,43 @@ function scrobbleVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, 
         0,
         row.recordingMbid,
       );
+      const identityKey = projectionListenKey(t.did, row.listenedAt, keys.artist_key, keys.track_key);
+      const priorIdentityKey = before
+        ? projectionListenKey(t.did, before.listened_at, before.artist_key, before.track_key)
+        : undefined;
+      // Admission belongs to the canonical listen, including copies at other
+      // record/container URIs and subsecond variants of the same listen key.
+      const second = BigInt(Math.floor(Date.parse(row.listenedAt) / 1000)) * 1_000_000_000n;
+      const canonical = db.one<{ uri: string; record_uri: string | null; rkey: string }>(
+        `SELECT uri,record_uri,rkey FROM scrobbles
+         WHERE did=? AND artist_key=? AND track_key=? AND listened_at>=? AND listened_at<? LIMIT 1`,
+        t.did,
+        keys.artist_key,
+        keys.track_key,
+        toStorage(second),
+        toStorage(second + 1_000_000_000n),
+      );
+      const legacyPresent =
+        canonical !== null ||
+        before !== null ||
+        db.one('SELECT 1 AS hit FROM record_state WHERE uri=? LIMIT 1', t.uri) !== null;
+      const now = Number(o.nowNs / 1_000_000n);
+      const canonicalCollection = (canonical?.record_uri ?? canonical?.uri)?.split('/')[3];
+      const provenance =
+        canonical && canonicalCollection
+          ? retainedRecordProvenance(db, t.did, canonicalCollection, canonical.rkey)
+          : legacyPresent
+            ? retainedRecordProvenance(db, t.did, t.collection, t.rkey)
+            : null;
+      const firstAdmission = admitProjectedIdentity(db, {
+        did: t.did,
+        identityKey,
+        ...(priorIdentityKey === undefined ? {} : { priorIdentityKey }),
+        provenance,
+        legacyPresent,
+        path: o.forwarding ? 'live' : 'snapshot',
+        now,
+      });
       db.run(
         `INSERT INTO scrobbles(uri, record_uri, listen_id, cid, did, rkey, revision, artist, track, album, listened_at, created_at,
            duration_seconds, recording_mbid, indexed_at, artist_key, track_key, album_key,
@@ -262,6 +313,43 @@ function scrobbleVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, 
         fields.music_service,
         fields.recording_msid,
       );
+      const localOperation = db.one<{ origin: string }>(
+        'SELECT origin FROM operations WHERE did=? AND collection=? AND rkey=? ORDER BY created_at_ms DESC LIMIT 1',
+        t.did,
+        t.collection,
+        t.rkey,
+      );
+      const knownListen = db.one('SELECT 1 AS hit FROM listen_keys WHERE did=? AND dedupe_key=?', t.did, identityKey);
+      if (
+        firstAdmission &&
+        !legacyPresent &&
+        o.forwarding &&
+        knownListen === null &&
+        localOperation?.origin !== 'import'
+      ) {
+        enqueueForwards(db, {
+          did: t.did,
+          items: [
+            {
+              kind: 'scrobble',
+              listenKey: identityKey,
+              payload: {
+                listen: {
+                  artist: row.artist,
+                  track: row.track,
+                  album: row.album ?? undefined,
+                  listenedAt: row.listenedAt,
+                  durationSeconds: row.durationSeconds ?? undefined,
+                  recordingMbid: row.recordingMbid ?? undefined,
+                },
+                origin: 'web',
+              },
+            },
+          ],
+          now: Number(o.nowNs / 1_000_000n),
+          random: o.forwarding.random,
+        });
+      }
       return before === null || before.cid !== cid;
     },
   };
@@ -299,6 +387,18 @@ function batchVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, o: 
         listen_id: string | null;
       }>('SELECT uri,cid,artist_key,track_key,listened_at,listen_id FROM scrobbles WHERE record_uri = ?', t.uri);
       const priorByUri = new Map(prior.map((row) => [row.uri, row]));
+      const now = Number(o.nowNs / 1_000_000n);
+      const provenance = retainedRecordProvenance(db, t.did, t.collection, t.rkey);
+      for (const old of prior) {
+        admitProjectedIdentity(db, {
+          did: t.did,
+          identityKey: projectionListenKey(t.did, old.listened_at, old.artist_key, old.track_key),
+          provenance,
+          legacyPresent: true,
+          path: 'snapshot',
+          now,
+        });
+      }
       db.run('DELETE FROM scrobbles WHERE record_uri = ?', t.uri);
       let changed = prior.length !== batch.listens.length;
       // Verified membership keeps every valid-TID entry of this version,
@@ -319,6 +419,26 @@ function batchVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, o: 
           listenId: listen.id,
           present: { cid, record: singleRecord },
         };
+        const itemKeys = musicKeyColumns(listen.row.artist, listen.row.track, listen.row.album);
+        const priorItem = priorByUri.get(uri);
+        const priorIdentityKey = priorItem
+          ? projectionListenKey(t.did, priorItem.listened_at, priorItem.artist_key, priorItem.track_key)
+          : undefined;
+        const memberEvidence = db.one(
+          'SELECT 1 AS hit FROM verified_membership WHERE record_uri=? AND listen_id=? LIMIT 1',
+          t.uri,
+          listen.id,
+        );
+        if (priorItem !== undefined || memberEvidence !== null)
+          admitProjectedIdentity(db, {
+            did: t.did,
+            identityKey: projectionListenKey(t.did, listen.row.listenedAt, itemKeys.artist_key, itemKeys.track_key),
+            ...(priorIdentityKey === undefined ? {} : { priorIdentityKey }),
+            provenance,
+            legacyPresent: true,
+            path: o.forwarding ? 'live' : 'snapshot',
+            now,
+          });
         const verdict = scrobbleVerdict(db, itemTarget, cid, singleRecord, o);
         if (!verdict.ok) {
           members.push({ id: listen.id, state: 'excluded', reason: verdict.reason });
@@ -390,6 +510,11 @@ function loveVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, o: A
   return {
     ok: true,
     write: () => {
+      const priorLove = db.one<{ cid: string }>('SELECT cid FROM loves WHERE uri=?', t.uri);
+      const previousRecordState = db.one<{ state: string; cid: string | null }>(
+        'SELECT state,cid FROM record_state WHERE uri=?',
+        t.uri,
+      );
       db.run(
         `INSERT INTO loves(uri, did, rkey, cid, artist, track, album, artist_key, track_key, recording_mbid,
            created_at, indexed_at)
@@ -418,6 +543,78 @@ function loveVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, o: A
         0,
         row.recordingMbid,
       );
+      const current = db.one<{ incarnation_key: string; state: string; path: string; source_service: string | null }>(
+        'SELECT incarnation_key,state,path,source_service FROM love_incarnations WHERE uri=?',
+        t.uri,
+      );
+      const identityKey = current?.state === 'present' ? current.incarnation_key : `love:${t.uri}:${t.rev}`;
+      const acceptanceKey = `love-uri:${t.did}:${t.collection}:${t.rkey}`;
+      const apiBridge =
+        retainedForwardProvenance(db, t.did, acceptanceKey) ??
+        (priorLove !== null ? retainedRecordProvenance(db, t.did, t.collection, t.rkey) : null);
+      const legacyPresent =
+        current?.state === 'present' || priorLove !== null || previousRecordState?.state === 'present';
+      const provenancePath = apiBridge?.path ?? (legacyPresent ? 'snapshot' : o.forwarding ? 'live' : 'snapshot');
+      const path = current?.state === 'present' ? current.path : provenancePath;
+      const sourceService = current?.state === 'present' ? current.source_service : (apiBridge?.sourceService ?? null);
+      const admittedIdentityKey =
+        current?.state === 'present'
+          ? current.incarnation_key
+          : legacyPresent
+            ? `love:${t.uri}:legacy:${priorLove?.cid ?? previousRecordState?.cid ?? cid}`
+            : identityKey;
+      if (current?.state !== 'present') {
+        const firstAdmission = admitForwardIdentity(db, {
+          did: t.did,
+          identityKey: admittedIdentityKey,
+          path: path as 'api' | 'import' | 'live' | 'snapshot',
+          sourceService: sourceService ?? undefined,
+          now: Number(o.nowNs / 1_000_000n),
+        });
+        db.run(
+          `INSERT INTO love_incarnations(uri,incarnation_key,state,path,source_service,updated_at_ms) VALUES (?,?,?,?,?,?)
+           ON CONFLICT(uri) DO UPDATE SET incarnation_key=excluded.incarnation_key,state='present',path=excluded.path,source_service=excluded.source_service,updated_at_ms=excluded.updated_at_ms`,
+          t.uri,
+          admittedIdentityKey,
+          'present',
+          path,
+          sourceService,
+          Number(o.nowNs / 1_000_000n),
+        );
+        if (apiBridge) db.run('DELETE FROM forward_admissions WHERE did=? AND identity_key=?', t.did, acceptanceKey);
+        if (o.forwarding && firstAdmission && !legacyPresent && path === 'live') {
+          const local = db.one<{ origin: string }>(
+            'SELECT origin FROM operations WHERE did=? AND collection=? AND rkey=? ORDER BY created_at_ms DESC LIMIT 1',
+            t.did,
+            t.collection,
+            t.rkey,
+          );
+          if (local?.origin !== 'import')
+            enqueueForwards(db, {
+              did: t.did,
+              items: [
+                {
+                  kind: 'love',
+                  operationId: admittedIdentityKey,
+                  payload: {
+                    artist: row.artist,
+                    track: row.track,
+                    album: row.album ?? undefined,
+                    recordingMbid: row.recordingMbid ?? undefined,
+                    origin: 'web',
+                  },
+                },
+              ],
+              now: Number(o.nowNs / 1_000_000n),
+              random: o.forwarding.random,
+            });
+        }
+      } else
+        db.run(
+          "UPDATE love_incarnations SET state='present',updated_at_ms=? WHERE uri=?",
+          Number(o.nowNs / 1_000_000n),
+          t.uri,
+        );
       return false;
     },
   };
@@ -467,7 +664,151 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
     db.one<{ revision: string }>('SELECT revision FROM record_state WHERE uri = ?', t.uri)?.revision ?? null;
   let out: TargetResult;
   if (t.present === null) {
+    const priorLove =
+      t.kind === 'love'
+        ? db.one<{ cid: string; artist: string; track: string; album: string | null; recording_mbid: string | null }>(
+            'SELECT cid,artist,track,album,recording_mbid FROM loves WHERE uri=?',
+            t.uri,
+          )
+        : null;
+    let loveIncarnation =
+      t.kind === 'love'
+        ? db.one<{ incarnation_key: string; path: string; state: string; source_service: string | null }>(
+            'SELECT incarnation_key,path,state,source_service FROM love_incarnations WHERE uri=?',
+            t.uri,
+          )
+        : null;
+    if (t.kind === 'love' && priorLove !== null && loveIncarnation === null) {
+      const acceptance =
+        retainedForwardProvenance(db, t.did, `love-uri:${t.did}:${t.collection}:${t.rkey}`) ??
+        retainedRecordProvenance(db, t.did, t.collection, t.rkey);
+      const path = acceptance?.path ?? 'snapshot';
+      const sourceService = acceptance?.sourceService ?? null;
+      const incarnationKey = `love:${t.uri}:legacy:${priorLove.cid}`;
+      admitForwardIdentity(db, {
+        did: t.did,
+        identityKey: incarnationKey,
+        path,
+        sourceService: sourceService ?? undefined,
+        now: Number(o.nowNs / 1_000_000n),
+      });
+      db.run(
+        `INSERT INTO love_incarnations(uri,incarnation_key,state,path,source_service,updated_at_ms)
+         VALUES (?,?,'present',?,?,?) ON CONFLICT(uri) DO NOTHING`,
+        t.uri,
+        incarnationKey,
+        path,
+        sourceService,
+        Number(o.nowNs / 1_000_000n),
+      );
+      loveIncarnation = { incarnation_key: incarnationKey, state: 'present', path, source_service: sourceService };
+    }
+    const importLoveBridges =
+      t.kind === 'love' && loveIncarnation?.state === 'present'
+        ? db.all<{ source_service: string | null }>(
+            `SELECT source_service FROM love_import_bridges
+             WHERE did=? AND uri=? AND incarnation_key=? AND state='bound' ORDER BY created_at_ms,operation_id`,
+            t.did,
+            t.uri,
+            loveIncarnation.incarnation_key,
+          )
+        : [];
     const deleted = deleteProjection(db, t.kind, t.uri);
+    if (t.kind === 'love' && priorLove && loveIncarnation?.state === 'present') {
+      const identityKey = `love-delete:${loveIncarnation.incarnation_key}`;
+      const apiBridge = db.one<{ expected_cid: string }>(
+        `SELECT expected_cid FROM love_delete_bridges WHERE did=? AND uri=? AND incarnation_key=? AND state='pending'
+         ORDER BY created_at_ms DESC LIMIT 1`,
+        t.did,
+        t.uri,
+        loveIncarnation.incarnation_key,
+      );
+      const priorCid = db.one<{ cid: string }>('SELECT cid FROM record_state WHERE uri=?', t.uri)?.cid;
+      const apiEcho = apiBridge !== null && apiBridge.expected_cid === priorCid;
+      if (apiBridge && !apiEcho)
+        db.run(
+          "UPDATE love_delete_bridges SET state='obsolete' WHERE did=? AND uri=? AND incarnation_key=? AND state='pending'",
+          t.did,
+          t.uri,
+          loveIncarnation.incarnation_key,
+        );
+      const path = o.forwarding ? 'live' : 'snapshot';
+      const firstAdmission = admitForwardIdentity(db, {
+        did: t.did,
+        identityKey,
+        path,
+        sourceService: loveIncarnation.source_service ?? undefined,
+        now: Number(o.nowNs / 1_000_000n),
+      });
+      if (apiEcho)
+        db.run(
+          "UPDATE love_delete_bridges SET state='consumed' WHERE did=? AND uri=? AND incarnation_key=? AND state='pending'",
+          t.did,
+          t.uri,
+          loveIncarnation.incarnation_key,
+        );
+      db.run(
+        `UPDATE love_import_bridges SET state='consumed'
+         WHERE did=? AND uri=? AND incarnation_key=? AND state='bound'`,
+        t.did,
+        t.uri,
+        loveIncarnation.incarnation_key,
+      );
+      db.run(
+        "UPDATE love_incarnations SET state='absent',updated_at_ms=? WHERE uri=?",
+        Number(o.nowNs / 1_000_000n),
+        t.uri,
+      );
+      if (o.forwarding && firstAdmission && !apiEcho) {
+        const local = db.one<{ origin: string }>(
+          'SELECT origin FROM operations WHERE did=? AND collection=? AND rkey=? ORDER BY created_at_ms DESC LIMIT 1',
+          t.did,
+          t.collection,
+          t.rkey,
+        );
+        const importSources = new Set<'lastfm' | 'listenbrainz'>();
+        if (loveIncarnation.source_service === 'lastfm' || loveIncarnation.source_service === 'listenbrainz')
+          importSources.add(loveIncarnation.source_service);
+        let unknownImportSource = loveIncarnation.path === 'import' && loveIncarnation.source_service === null;
+        for (const bridge of importLoveBridges) {
+          if (bridge.source_service === 'lastfm' || bridge.source_service === 'listenbrainz')
+            importSources.add(bridge.source_service);
+          else unknownImportSource = true;
+        }
+        const importMayForward = importSources.size > 0;
+        const eligiblePath = loveIncarnation.path === 'live' || loveIncarnation.path === 'api' || importMayForward;
+        if (!unknownImportSource && eligiblePath && (local?.origin !== 'import' || importMayForward))
+          enqueueForwards(db, {
+            did: t.did,
+            items: [
+              {
+                kind: 'unlove',
+                operationId: identityKey,
+                payload: {
+                  artist: priorLove.artist,
+                  track: priorLove.track,
+                  recordingMbid: priorLove.recording_mbid ?? undefined,
+                  origin: 'web',
+                },
+              },
+            ],
+            ...(importSources.size > 0 ? { excludeSourceServices: [...importSources] } : {}),
+            now: Number(o.nowNs / 1_000_000n),
+            random: o.forwarding.random,
+          });
+      }
+    }
+    if (t.kind === 'love' && !priorLove) {
+      // API deletes can target a remote love the index never projected. A
+      // successful, matching absence still consumes the pre-send bridge.
+      db.run("UPDATE love_delete_bridges SET state='consumed' WHERE did=? AND uri=? AND state='pending'", t.did, t.uri);
+      db.run("UPDATE love_import_bridges SET state='consumed' WHERE did=? AND uri=? AND state='bound'", t.did, t.uri);
+      db.run(
+        "UPDATE love_incarnations SET state='absent',updated_at_ms=? WHERE uri=?",
+        Number(o.nowNs / 1_000_000n),
+        t.uri,
+      );
+    }
     writeRecordState(db, {
       uri: t.uri,
       did: t.did,

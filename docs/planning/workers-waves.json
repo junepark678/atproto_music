@@ -439,7 +439,7 @@
      "web/test/api-client.test.ts › decodes Page<Scrobble> and passes nextCursor unchanged",
      "web/test/api-client.test.ts › maps 422 envelope to ApiError with fields",
      "web/test/api-client.test.ts › notify posts {uri} and returns queued",
-     "web/test/api-client.test.ts › every api/examples response decodes and a changed field type is rejected"
+     "web/test/api-client.test.ts › every typed JSON api/examples response decodes and a changed field type is rejected"
     ]
    }
   ]

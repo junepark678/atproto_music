@@ -633,7 +633,9 @@ describe('scripts/check-ts.sh', () => {
         .split('\n')
         .map((l) => JSON.parse(l) as { target: string; command: string; result: string });
       expect(cases.filter((c) => c.result === 'failed').map((c) => c.target)).toEqual([target]);
-      expect(new Set(cases.map((c) => c.command))).toEqual(new Set(['npm test -- --project worker-node']));
+      expect(new Set(cases.map((c) => c.command))).toEqual(
+        new Set(['npm test -- --project worker-node --maxWorkers=4']),
+      );
 
       // The duration report ends at the failed step with the same status.
       const durations = JSON.parse(copy.read('work/gate-durations.json')) as GateDurations;

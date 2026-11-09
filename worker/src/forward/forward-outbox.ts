@@ -26,9 +26,13 @@
 // order even across retries.
 //
 // Retry (ADR §12.3): `forwardBackoffMs(n)` = 30 s·2^n + U[0, 25%] of it,
-// capped at 6 h, with n the row's attempts before this one. A Last.fm
-// `ignoredMessage` code 5 (daily scrobble limit) re-queues the row at the
-// next 00:00 UTC without counting an attempt; the 13-day expiry still applies.
+// capped at 6 h, with n the row's attempts before this one. At most eight
+// attempted retryable requests are made per row. An actual upstream 429
+// counts; a local pacing deferral does not. Last.fm code 5 re-queues at the
+// next 00:00 UTC without counting an attempt; service age limits still apply.
+// Admission and destination generations persist locally. A crash after
+// upstream acceptance but before the outbox transition commits can still
+// duplicate delivery: neither upstream supports idempotency keys.
 //
 // Payloads (payload_json, written by enqueueForwards' callers):
 // - scrobble:    {listen, origin}. `listen` is the accepted entry: a
@@ -64,6 +68,8 @@ export const HELD_RETENTION_MS = 30 * DAY;
 export const NOW_PLAYING_MAX_AGE_MS = 60 * SECOND;
 export const BACKOFF_BASE_MS = 30 * SECOND;
 export const BACKOFF_CAP_MS = 6 * HOUR;
+/** Maximum upstream attempts for a retryable forward row, including 429 responses. */
+export const MAX_FORWARD_ATTEMPTS = 8;
 /** The counters row that pauses all Last.fm forwarding (ADR §12.3). */
 export const LASTFM_KEY_REJECTED = 'lastfm_key_rejected';
 /** The longest `last_error` kept on a row. */
@@ -194,15 +200,23 @@ export function lovePayload(row: Pick<ForwardOutboxRow, 'payload_json'>): Forwar
 export type QueuedRow = ForwardOutboxRow & { seq: number };
 
 const ROW_COLUMNS =
-  'rowid AS seq, id, link_id, did, kind, dedupe_key, payload_json, state, attempts, due_at, last_error, created_at_ms, updated_at_ms';
+  'rowid AS seq,id,link_id,generation,did,kind,dedupe_key,payload_json,state,attempts,due_at,last_error,created_at_ms,updated_at_ms';
 
 /** Due queued rows of `link` of `kind`, oldest first. */
-export function dueRows(db: Db, linkId: string, kind: ForwardKind, now: number, limit: number): QueuedRow[] {
+export function dueRows(
+  db: Db,
+  linkId: string,
+  generation: number,
+  kind: ForwardKind,
+  now: number,
+  limit: number,
+): QueuedRow[] {
   return db.all<QueuedRow>(
     `SELECT ${ROW_COLUMNS} FROM forward_outbox
-     WHERE link_id = ? AND kind = ? AND state = 'queued' AND due_at <= ?
+     WHERE link_id = ? AND generation=? AND kind=? AND state='queued' AND due_at<=?
      ORDER BY created_at_ms, rowid LIMIT ?`,
     linkId,
+    generation,
     kind,
     now,
     limit,
@@ -213,12 +227,13 @@ export function dueRows(db: Db, linkId: string, kind: ForwardKind, now: number, 
  * The oldest queued love/unlove row of `link` (due or not): only it may be
  * sent, so toggles reach the upstream in order.
  */
-export function loveHead(db: Db, linkId: string): QueuedRow | null {
+export function loveHead(db: Db, linkId: string, generation: number): QueuedRow | null {
   return db.one<QueuedRow>(
     `SELECT ${ROW_COLUMNS} FROM forward_outbox
-     WHERE link_id = ? AND kind IN ('love', 'unlove') AND state = 'queued'
+     WHERE link_id = ? AND generation=? AND kind IN ('love', 'unlove') AND state = 'queued'
      ORDER BY created_at_ms, rowid LIMIT 1`,
     linkId,
+    generation,
   );
 }
 
@@ -227,10 +242,13 @@ export function rowStates(db: Db, linkId?: string): Partial<Record<ForwardOutbox
   const rows =
     linkId === undefined
       ? db.all<{ state: ForwardOutboxRow['state']; n: number }>(
-          'SELECT state, count(*) AS n FROM forward_outbox GROUP BY state',
+          `SELECT f.state,count(*) AS n FROM forward_outbox AS f
+           JOIN linked_accounts AS link ON link.id=f.link_id AND link.generation=f.generation GROUP BY f.state`,
         )
       : db.all<{ state: ForwardOutboxRow['state']; n: number }>(
-          'SELECT state, count(*) AS n FROM forward_outbox WHERE link_id = ? GROUP BY state',
+          `SELECT f.state,count(*) AS n FROM forward_outbox AS f
+           JOIN linked_accounts AS link ON link.id=f.link_id AND link.generation=f.generation
+           WHERE f.link_id=? GROUP BY f.state`,
           linkId,
         );
   const out: Partial<Record<ForwardOutboxRow['state'], number>> = {};
@@ -268,16 +286,21 @@ export function settleRows(
   now: number,
   error: string | null = null,
   countAttempt = true,
+  generation?: number,
 ): void {
   inSlices(db, ids, (slice) =>
     db.run(
       `UPDATE forward_outbox SET state = ?, last_error = ?, attempts = attempts + ?, updated_at_ms = ?
-       WHERE id IN (${inList(slice)}) AND state = 'queued'`,
+       WHERE id IN (${inList(slice)}) AND state='queued'
+         AND generation=coalesce(?,generation)
+         AND EXISTS (SELECT 1 FROM linked_accounts AS link
+                     WHERE link.id=forward_outbox.link_id AND link.generation=forward_outbox.generation)`,
       state,
       error === null ? null : clip(error),
       countAttempt ? 1 : 0,
       now,
       ...slice,
+      generation ?? null,
     ),
   );
 }
@@ -290,43 +313,80 @@ export function requeueRows(
   now: number,
   error: string | null,
   countAttempt: boolean,
+  generation?: number,
 ): void {
   inSlices(db, ids, (slice) =>
     db.run(
       `UPDATE forward_outbox SET due_at = ?, last_error = ?, attempts = attempts + ?, updated_at_ms = ?
-       WHERE id IN (${inList(slice)}) AND state = 'queued'`,
+       WHERE id IN (${inList(slice)}) AND state='queued'
+         AND generation=coalesce(?,generation)
+         AND EXISTS (SELECT 1 FROM linked_accounts AS link
+                     WHERE link.id=forward_outbox.link_id AND link.generation=forward_outbox.generation)`,
       dueAt,
       error === null ? null : clip(error),
       countAttempt ? 1 : 0,
       now,
       ...slice,
+      generation ?? null,
     ),
   );
 }
 
 /** Queues each row again after its own backoff (attempts counted). */
 export function backoffRows(db: Db, rows: readonly QueuedRow[], now: number, random: Random, error: string): void {
+  retryRowsAt(db, rows, now, (row) => now + forwardBackoffMs(row.attempts, random), error);
+}
+
+/** Retries rows after an attempted request; exhausted rows become terminal failed rows. */
+export function retryRowsAt(
+  db: Db,
+  rows: readonly QueuedRow[],
+  now: number,
+  dueAt: (row: QueuedRow) => number,
+  error: string,
+): void {
   db.tx(() => {
-    for (const row of rows) requeueRows(db, [row.id], now + forwardBackoffMs(row.attempts, random), now, error, true);
+    for (const row of rows) {
+      if (row.attempts + 1 >= MAX_FORWARD_ATTEMPTS)
+        settleRows(db, [row.id], 'failed', now, 'retry_exhausted', true, row.generation);
+      else requeueRows(db, [row.id], dueAt(row), now, error, true, row.generation);
+    }
   });
 }
 
 /** Holds every queued row of a revoked link. Returns how many were held. */
-export function holdLinkRows(db: Db, linkId: string, now: number): number {
+export function holdLinkRows(db: Db, linkId: string, now: number, generation?: number): number {
+  const expected =
+    generation ??
+    db.one<{ generation: number }>('SELECT generation FROM linked_accounts WHERE id=?', linkId)?.generation;
+  if (expected === undefined) return 0;
   return db.run(
-    `UPDATE forward_outbox SET state = 'held', updated_at_ms = ? WHERE link_id = ? AND state = 'queued'`,
+    `UPDATE forward_outbox SET state='held',updated_at_ms=? WHERE link_id=? AND generation=? AND state='queued'
+       AND EXISTS (SELECT 1 FROM linked_accounts AS link WHERE link.id=? AND link.generation=?)`,
     now,
     linkId,
+    expected,
+    linkId,
+    expected,
   ).rowsWritten;
 }
 
 /** Queues a relinked link's held rows without bypassing their original due time. */
-export function resumeHeldRows(db: Db, linkId: string, now: number): number {
+export function resumeHeldRows(db: Db, linkId: string, now: number, generation?: number): number {
+  const expected =
+    generation ??
+    db.one<{ generation: number }>('SELECT generation FROM linked_accounts WHERE id=?', linkId)?.generation;
+  if (expected === undefined) return 0;
   return db.run(
-    `UPDATE forward_outbox SET state = 'queued', due_at = max(due_at, ?), updated_at_ms = ? WHERE link_id = ? AND state = 'held'`,
+    `UPDATE forward_outbox SET state='queued',due_at=max(due_at,?),updated_at_ms=?
+     WHERE link_id=? AND generation=? AND state='held'
+       AND EXISTS (SELECT 1 FROM linked_accounts AS link WHERE link.id=? AND link.generation=?)`,
     now,
     now,
     linkId,
+    expected,
+    linkId,
+    expected,
   ).rowsWritten;
 }
 

@@ -437,7 +437,7 @@ Places where a package's tree differs from its `files` entry in [node-waves.json
 | `api/examples/response-cases.json` (v1.2 cases) | `api/examples/v1.2/response-cases.json` |
 | not declared | the other 37 `api/examples/v1.2/*.json` fixtures: `accepted`, the v1.2 `error-*` envelopes, the `*-input` request bodies, `client-metadata`, `jwks` and the remaining link, import, credential and account payloads |
 
-**Why:** `web/test/api-client.test.ts › every api/examples response decodes and a changed field type is rejected` (W1-10, case `M7.1.2/contract_drift`; not owned by N0-02) globs `api/examples/*.json` without recursing. It requires that the set of top-level response fixtures equals the set that `api/examples/response-cases.json` references, and that every route in that file has an `ApiClient` method. So any v1.2 payload at the top level, or any v1.2 case in the top-level inventory, fails that test until N5-01 gives the SPA its v1.2 client. N0-02 verified this: with `api/examples/operation.json` added at the top level, the test fails with `operation` missing from the referenced fixtures. `scripts/validate_contracts.py` (`example_inventory`) enforces the layout: an example lives directly in `api/examples` (v1.1) or in `api/examples/v1.2` (v1.2, with component example names prefixed `v1.2-`), and every file in either directory is a declared, validated component example.
+**Why:** `web/test/api-client.test.ts › every typed JSON api/examples response decodes and a changed field type is rejected` (W1-10, case `M7.1.2/contract_drift`; not owned by N0-02) globs `api/examples/*.json` without recursing. It requires that the set of top-level JSON response fixtures equals the set that `api/examples/response-cases.json` references, and that every JSON route in that file has an `ApiClient` method. The binary M4 cover-art route is excluded from this typed client inventory and is covered by route tests and the contract validator. So any v1.2 payload at the top level, or any v1.2 case in the top-level inventory, fails that test until N5-01 gives the SPA its v1.2 client. N0-02 verified this: with `api/examples/operation.json` added at the top level, the test fails with `operation` missing from the referenced fixtures. `scripts/validate_contracts.py` (`example_inventory`) enforces the layout: an example lives directly in `api/examples` (v1.1) or in `api/examples/v1.2` (v1.2, with component example names prefixed `v1.2-`), and every file in either directory is a declared, validated component example.
 
 **Requested owner amendment:** in the N0-02 `files` entry, replace the six `api/examples/{operation,session,account,link,import-job,credentials}.json` paths with `api/examples/v1.2/`, and leave `api/examples/response-cases.json` declared, since it stays the v1.1 inventory. Any later package that reads N0-02's fixtures should cite `api/examples/v1.2/<name>.json`.
 
@@ -548,3 +548,64 @@ reuse historical Workers evidence. Later implementation slices own ingest,
 projection, import outbox/rebatching, and removal. N9-01's four-schema
 publication evidence remains unchanged; the batch candidate has no publication
 receipt and no live batch gate.
+
+## B21 draft — linked-account forwarding admission and operations
+
+**Status: DRAFT. Owner publication is required.** Explicitly amends the blanket
+“Never forwarded” clause in ADR 0005 §11.2.5 and the “Not forwarded” list in
+§12.2. The base ADR paragraphs remain unchanged until this draft is published.
+
+> Forwarding suppression = the indexer's own resurrection suppression.
+
+The proposed rule gives each canonical listen identity and love transition a
+durable first-admission marker for exactly the lifetime of its retained
+acceptance/index identity or tombstone. The first path (`api`, `import`, `live`
+or `snapshot`) and trusted import source are preserved. API acceptance and a
+live Jetstream echo share the canonical identity; replay after arbitrary delay,
+operation cleanup, outbox pruning or restart does not create another local
+forward. Snapshot/repair/discovery projection records identity state but does
+not forward; S2 backfill owns historical and pre-generation identities. Import
+source comes only from trusted `import_jobs.source`, not compatibility API
+`origin`: a known-source listen or love can cross-forward to another linked
+service, never its source, and unknown-source items remain excluded.
+
+Love transitions use durable URI/incarnation and API-operation bridges. They
+pair API create/delete acceptance with its Jetstream echo, retain source
+provenance, and distinguish a later delete/re-create. Live verified deletes
+enqueue `unlove` in love-head order; snapshot absence cannot invent one.
+
+Each linked remote account has an immutable generation and explicit admission
+sequence boundary. Same-remote relink preserves it and resumes held rows;
+different-remote relink rotates it, expires queued/held old-generation rows,
+and prevents old asynchronous settlement, retry, revocation or health writes
+from changing the new generation. The legacy `UNIQUE(link_id,kind,dedupe_key)`
+remains unchanged: generation 1 stores its canonical key unchanged, while
+later generations store `g<n>:` followed by that key. One checked encoder and
+decoder preserve canonical keys that themselves begin with `g<n>:`. This lets
+S2 backfill deliver an older identity to a replacement remote.
+Requests already sent upstream before relinking are best-effort and cannot be
+recalled. Local enqueue is exactly once; upstream delivery remains at least
+once because neither service supports idempotency keys across ambiguous
+crashes.
+
+Per-link `last_success_ms`, `last_failure_ms` and consecutive failures persist
+across restart. Transient errors surface after three consecutive failures;
+rejected credentials and permanent bad payloads surface immediately, and a
+successful response clears the error. Retryable rows stop after eight actual
+attempts; an upstream 429 counts, while local pacing waits do not. Admission
+and replay have no age cutoff; Last.fm retains its 13-day send limit, and the
+existing queue-expiry behavior is otherwise unchanged.
+
+Operator metrics and the Unix admin socket expose marker and forward-outbox
+counts plus a five-minute cached logical text-byte estimate. The extension
+timer advances persisted primary-key cursors by at most 100 rows per table per
+visit and publishes the five table totals together only after a complete scan
+cycle. Concurrent writes or deletes during that multi-visit cycle can make the
+estimate approximate; admin reads never scan source tables. The estimate is
+not SQLite physical size. There is no hard quota or automatic marker cleanup;
+database/free-space reporting and the existing backup disk floor remain the
+operator's storage safeguards. The previously drafted `forward_sent` table
+was discarded before deployment. S1 migrations take the next free versions
+after final N/M/M4: currently planned as 22–23 because M4 reserves 21; if M4
+is deferred, S1 uses 21–22. There is no sent ledger or per-destination sent
+retention.

@@ -77,9 +77,10 @@ function historyModule(m: ModuleDeps, q: HistoryQuery): RowsResult<ScrobbleRow> 
 const blob = (byte: number, length = 32): ArrayBuffer => new Uint8Array(length).fill(byte).buffer;
 
 /**
- * One valid row for every table migration 1 and 2 create that the migrations
- * do not already seed (indexing_status, backfill_generation, ingest_checkpoint,
- * schema_migrations and schema_compat hold their seed rows).
+ * One valid row for every table the migrations
+ * do not already seed (indexing_status, backfill_generation and
+ * ingest_checkpoint hold migration-1 seeds; schema_migrations and schema_compat
+ * are seeded by migrate()).
  */
 const SEED_ROWS: Record<string, Record<string, SqlParam>[]> = {
   users: [
@@ -260,6 +261,56 @@ const SEED_ROWS: Record<string, Record<string, SqlParam>[]> = {
       created_at_ms: NOW,
       updated_at_ms: NOW,
     },
+  ],
+  forward_admissions: [
+    {
+      did: ALICE,
+      identity_key: 'listen:fixture-admission',
+      path: 'api',
+      source_service: null,
+      created_at_ms: NOW,
+      admission_seq: 1,
+    },
+  ],
+  forward_admission_clock: [{ singleton: 1, next_seq: 0 }],
+  love_incarnations: [
+    {
+      uri: `at://${ALICE}/com.example.atmusic.love/3lb2aaaaaaa2e`,
+      incarnation_key: 'love:fixture-incarnation',
+      state: 'present',
+      path: 'live',
+      source_service: null,
+      updated_at_ms: NOW,
+    },
+  ],
+  love_delete_bridges: [
+    {
+      did: ALICE,
+      uri: `at://${ALICE}/com.example.atmusic.love/3lb2aaaaaaa2e`,
+      incarnation_key: 'love:fixture-incarnation',
+      expected_cid: 'bafyfixturelove',
+      operation_id: 'op2',
+      state: 'pending',
+      created_at_ms: NOW,
+    },
+  ],
+  love_import_bridges: [
+    {
+      did: ALICE,
+      operation_id: 'import-op1',
+      uri: `at://${ALICE}/com.example.atmusic.love/3lb2aaaaaaa2f`,
+      incarnation_key: 'love:fixture-import',
+      source_service: 'lastfm',
+      state: 'bound',
+      created_at_ms: NOW,
+    },
+  ],
+  forward_storage_scan: [
+    { table_key: 'forward_admissions' },
+    { table_key: 'love_incarnations' },
+    { table_key: 'love_delete_bridges' },
+    { table_key: 'love_import_bridges' },
+    { table_key: 'forward_outbox' },
   ],
   import_jobs: [{ id: 'j1', did: ALICE, source: 'lastfm_api', created_at_ms: NOW, updated_at_ms: NOW }],
   import_items: [{ job_id: 'j1', seq: 0, dedupe_key: 'k0', listened_at: T0, record_json: '{}' }],
@@ -513,9 +564,11 @@ describe('worker/test/harness', () => {
   });
 
   // N1-10: suites that pinned schema version 1 derive it from the schema.
-  it('the ready status and the schema_migrations ledger equal SCHEMA_VERSION and one row per entry of MIGRATIONS', async () => {
-    // The schema itself: contiguous versions from 1, the last is SCHEMA_VERSION.
-    expect(MIGRATIONS.map((m) => m.version)).toEqual(MIGRATIONS.map((_m, i) => i + 1));
+  it('the migration ledger is ordered across the N/M, M4, and S1 stack', async () => {
+    const versions = MIGRATIONS.map((m) => m.version);
+    expect(versions.slice(0, 14)).toEqual(Array.from({ length: 14 }, (_, i) => i + 1));
+    expect(versions.slice(-2)).toEqual([22, 23]);
+    expect(versions.every((version, index) => index === 0 || version > (versions[index - 1] ?? 0))).toBe(true);
     expect(SCHEMA_VERSION).toBe(MIGRATIONS[MIGRATIONS.length - 1]?.version);
     expect(MIGRATIONS.length).toBeGreaterThanOrEqual(2);
 
@@ -587,8 +640,11 @@ describe('worker/test/harness', () => {
 
       // reopen: every table and its rows survive close and reopen of the same file.
       for (const [table, rows] of Object.entries(SEED_ROWS)) for (const row of rows) insertRow(db, table, row);
-      for (const table of TABLES)
-        if (table !== 'mb_cover_art_usage') expect([table, rowCount(db, table)]).not.toEqual([table, 0]);
+      db.run('UPDATE forward_admission_clock SET next_seq=1 WHERE singleton=1');
+      for (const table of TABLES) {
+        if (table === 'mb_cover_art_usage') continue; // Migration 21 seeds its singleton usage counter.
+        expect([table, rowCount(db, table)]).not.toEqual([table, 0]);
+      }
       const before = dumpDb(db);
       const tableNames = before.objects.filter((o) => o.type === 'table').map((o) => o.name);
       expect([...tableNames].sort()).toEqual([...TABLES].sort());

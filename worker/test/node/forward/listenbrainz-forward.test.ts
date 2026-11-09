@@ -218,7 +218,7 @@ describe('ListenBrainz forwarding', () => {
     await w.run();
     const failed = w.rows().at(-1);
     expect(failed).toMatchObject({ kind: 'nowplaying', state: 'failed', attempts: 1 });
-    expect(failed?.last_error).toMatch(/^http_503: /);
+    expect(failed?.last_error).toBe('http_503');
     const count = w.seen.length;
     for (let i = 0; i < 5; i++) {
       w.clock.advance(MINUTE);
@@ -475,7 +475,7 @@ describe('ListenBrainz forwarding', () => {
     expect(w.rows().find((r) => r.id === never.id)?.link_id).toBe(link);
   });
 
-  it('401 revokes the link; 429 waits X-RateLimit-Reset-In; 400 marks the row failed with the upstream error and does not retry', async () => {
+  it('401 revokes the link; an attempted 429 counts and waits X-RateLimit-Reset-In; 400 is terminal', async () => {
     const w = await world();
     const id = w.link();
 
@@ -497,13 +497,13 @@ describe('ListenBrainz forwarding', () => {
     w.link('new-token');
     expect(w.rows().map((r) => r.state)).toEqual(['queued', 'queued']);
 
-    // 429: the rows (and the link) wait X-RateLimit-Reset-In seconds, without an attempt counted.
+    // 429 is an attempted request: rows count it once while waiting for reset.
     w.lb.fail({ status: 429, resetIn: 42 });
     const limitedAt = w.clock.nowMs();
     await w.run();
     expect(w.rows().map((r) => [r.state, r.due_at, r.attempts, r.last_error])).toEqual([
-      ['queued', limitedAt + 42 * SECOND, 0, 'rate_limited'],
-      ['queued', limitedAt + 42 * SECOND, 0, 'rate_limited'],
+      ['queued', limitedAt + 42 * SECOND, 1, 'http_429'],
+      ['queued', limitedAt + 42 * SECOND, 1, 'http_429'],
     ]);
     const seenAfter429 = w.seen.length;
     for (let s = 1; s < 42; s += 10) {
@@ -531,7 +531,7 @@ describe('ListenBrainz forwarding', () => {
     expect(bad).toMatchObject({
       state: 'failed',
       attempts: 1,
-      last_error: 'http_400: Value for key listened_at is too low.',
+      last_error: 'http_400',
     });
     const seenAfter400 = w.seen.length;
     for (let i = 0; i < 5; i++) {
@@ -639,4 +639,33 @@ describe('ListenBrainz forwarding', () => {
     expect(late.requests).toBe(0);
     expect(byLink('late').lb).toMatchObject({ state: 'expired', last_error: 'expired', attempts: 1 });
   });
+});
+
+it('review: external unlove retains its known MBID after terminal forward GC', async () => {
+  const { SignedRepo } = await import('@atmusic/atproto/test-support/signed-repo');
+  const { fixtureKeys } = await import('@atmusic/atproto/test-support/keys');
+  const { applyRecordProof } = await import('../../../src/do/write/apply-record');
+  const { seedUser, putProof, deleteProof, OPTS, PREFIX } = await import('../../write/support');
+  const w = await world();
+  w.link();
+  seedUser(w.app.db, ALICE);
+  const repo = new SignedRepo(ALICE, (await fixtureKeys()).alice, { clock: w.clock });
+  const opts = { ...OPTS, forwarding: { random: seededRandom(999) } };
+  const p = await putProof(repo, `${PREFIX}.love`, 'review-love', {
+    $type: `${PREFIX}.love`,
+    artist: 'Review artist',
+    track: 'Review track',
+    recordingMbid: MBID,
+    createdAt: '2026-01-15T11:00:00Z',
+  });
+  w.app.db.tx(() => applyRecordProof(w.app.db, p, opts));
+  await w.run();
+  expect(w.rows().filter((r) => r.kind === 'love' && r.state === 'sent')).toHaveLength(1);
+  w.app.db.run("DELETE FROM forward_outbox WHERE state='sent'");
+  w.clock.advance(2000);
+  const d = await deleteProof(repo, `${PREFIX}.love`, 'review-love');
+  w.app.db.tx(() => applyRecordProof(w.app.db, d, opts));
+  await w.run();
+  expect(w.rows().filter((r) => r.kind === 'unlove')).toHaveLength(1);
+  expect(w.rows().find((r) => r.kind === 'unlove')?.state).toBe('sent');
 });

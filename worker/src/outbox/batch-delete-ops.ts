@@ -3,6 +3,8 @@ import type { OperationRow, Origin } from '../app/rows';
 import type { ModuleDeps } from '../do/contracts';
 import type { Db } from '../do/db';
 import { bumpStatsVersion } from '../do/write/account-state';
+import { releaseForwardAdmission } from '../forward/projection';
+import { deleteQueuedForwardIdentity } from './forward-key';
 import {
   explicitlyUnsent,
   insertOperation,
@@ -237,6 +239,8 @@ export function commitUnsentBatchListenRemoval(m: ModuleDeps, plan: BatchListenR
         op.id,
         member.dedupe_key,
       );
+      deleteQueuedForwardIdentity(m.db, op.did, ['scrobble'], member.dedupe_key);
+      releaseForwardAdmission(m.db, op.did, member.dedupe_key);
     }
     if (plan.replacement === null) {
       if (

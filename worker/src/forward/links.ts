@@ -7,9 +7,11 @@
 //   `lastfm` / `listenbrainz`), AAD `linked/<did>/<service>`, so a ciphertext
 //   copied to another row fails to open. `key_id` records the sealing key.
 // - **One link per (DID, service)** (UNIQUE). Linking again updates the row
-//   in place — credential, remote user, status `active`, no last error — and
-//   queues its held forward rows again (a relink after a revocation resumes
-//   them). The forwarding flags are kept.
+//   in place. A same-remote relink preserves its generation and resumes held
+//   rows; a different remote rotates generation and expires the old rows.
+//   A request already in flight may have reached the old remote before the
+//   relink committed; local generation guards discard its eventual response,
+//   but cannot retract that upstream request.
 // - **Only signed-in accounts hold links** (`requireAccount`, N2-09).
 // - **Delete** journals `{kind: 'linked_account', id, did}` inside the
 //   deleting transaction, before it commits, then deletes the row; its
@@ -36,6 +38,8 @@ import { resumeHeldRows } from './forward-outbox';
 export const LINK_STATE_TTL_MS = 600_000;
 /** `remote_user` is at most this many characters (the contract's Link.remoteUser). */
 export const MAX_REMOTE_USER_CHARS = 128;
+/** Consecutive transient forward failures before a link exposes a persistent error. */
+export const LINK_ERROR_THRESHOLD = 3;
 
 const STATE_RE = /^[0-9a-f]{64}$/;
 
@@ -181,29 +185,54 @@ export function saveLink(deps: LinkDeps, input: SaveLinkInput): SaveLinkResult {
       input.service,
     );
     if (existing !== null) {
+      const changedRemote = existing.remote_user !== remoteUser;
+      const generation = existing.generation + (changedRemote ? 1 : 0);
+      const generationStartSeq = changedRemote
+        ? (db.one<{ boundary: number }>('SELECT coalesce(max(admission_seq),0) AS boundary FROM forward_admissions')
+            ?.boundary ?? 0)
+        : existing.generation_start_seq;
+      if (changedRemote)
+        db.run(
+          `UPDATE forward_outbox SET state='expired',last_error='account_changed',updated_at_ms=?
+           WHERE link_id=? AND generation=? AND state IN ('queued','held')`,
+          now,
+          existing.id,
+          existing.generation,
+        );
       db.run(
         `UPDATE linked_accounts SET remote_user = ?, credential_ciphertext = ?, key_id = ?, status = 'active',
-           last_error = NULL, updated_at_ms = ? WHERE id = ?`,
+           last_error=NULL,consecutive_failures=0,
+           last_success_ms=CASE WHEN ? THEN NULL ELSE last_success_ms END,
+           last_failure_ms=CASE WHEN ? THEN NULL ELSE last_failure_ms END,
+           generation=?,generation_start_seq=?,updated_at_ms=? WHERE id=?`,
         remoteUser,
         toBlob(sealed),
         box.currentKeyId,
+        changedRemote ? 1 : 0,
+        changedRemote ? 1 : 0,
+        generation,
+        generationStartSeq,
         now,
         existing.id,
       );
-      const resumed = resumeHeldRows(db, existing.id, now);
+      const resumed = resumeHeldRows(db, existing.id, now, generation);
       return { link: getLinkById(db, existing.id) as LinkedAccountRow, created: false, resumed };
     }
     const id = newCredentialId(deps.random);
+    const generationStartSeq =
+      db.one<{ boundary: number }>('SELECT coalesce(max(admission_seq),0) AS boundary FROM forward_admissions')
+        ?.boundary ?? 0;
     db.run(
       `INSERT INTO linked_accounts(id, did, service, remote_user, credential_ciphertext, key_id, forward_scrobbles,
-         forward_now_playing, status, last_error, created_at_ms, updated_at_ms)
-       VALUES (?, ?, ?, ?, ?, ?, 1, 1, 'active', NULL, ?, ?)`,
+         forward_now_playing, status, last_error, generation, generation_start_seq, created_at_ms, updated_at_ms)
+       VALUES (?, ?, ?, ?, ?, ?, 1, 1, 'active', NULL, 1, ?, ?, ?)`,
       id,
       input.did,
       input.service,
       remoteUser,
       toBlob(sealed),
       box.currentKeyId,
+      generationStartSeq,
       now,
       now,
     );
@@ -276,29 +305,62 @@ export function deleteLink(deps: { db: Db; revocations: Revocations }, did: stri
  */
 export function revokeLink(
   db: Db,
-  link: Pick<LinkedAccountRow, 'id' | 'credential_ciphertext'>,
+  link: Pick<LinkedAccountRow, 'id' | 'generation' | 'credential_ciphertext'>,
   error: string,
   now: number,
 ): boolean {
+  const safeError = /^[a-z0-9_]{1,64}$/.test(error) ? error : 'credential_revoked';
   return (
     db.run(
-      `UPDATE linked_accounts SET status = 'revoked', last_error = ?, updated_at_ms = ?
-       WHERE id = ? AND status = 'active' AND credential_ciphertext = ?`,
-      error,
+      `UPDATE linked_accounts SET status='revoked',last_error=?,last_failure_ms=?,
+         consecutive_failures=consecutive_failures+1,updated_at_ms=?
+       WHERE id = ? AND generation = ? AND status = 'active' AND credential_ciphertext = ?`,
+      safeError,
+      now,
       now,
       link.id,
+      link.generation,
       toBlob(blobBytes(link.credential_ciphertext)),
     ).rowsWritten === 1
   );
 }
 
-/** Records a non-revoking problem on an active link (`error` is a Link.lastError slug). */
-export function noteLinkError(db: Db, linkId: string, error: string | null, now: number): void {
-  db.run(
-    `UPDATE linked_accounts SET last_error = ?, updated_at_ms = ? WHERE id = ? AND last_error IS NOT ?`,
-    error,
-    now,
-    linkId,
-    error,
+/** Records a generation-scoped failure; transient errors surface after three consecutive failures. */
+export function noteLinkError(
+  db: Db,
+  link: Pick<LinkedAccountRow, 'id' | 'generation'>,
+  error: string,
+  now: number,
+  immediate = false,
+): boolean {
+  const safeError = /^[a-z0-9_]{1,64}$/.test(error) ? error : 'upstream_error';
+  return (
+    db.run(
+      `UPDATE linked_accounts SET
+         last_error=CASE WHEN ? OR consecutive_failures+1>=? THEN ? ELSE last_error END,
+         last_failure_ms=?,consecutive_failures=consecutive_failures+1,updated_at_ms=?
+       WHERE id=? AND generation=? AND status='active'`,
+      immediate ? 1 : 0,
+      LINK_ERROR_THRESHOLD,
+      safeError,
+      now,
+      now,
+      link.id,
+      link.generation,
+    ).rowsWritten === 1
+  );
+}
+
+/** Records a successful response and clears the consecutive failure state for this generation. */
+export function noteLinkSuccess(db: Db, link: Pick<LinkedAccountRow, 'id' | 'generation'>, now: number): boolean {
+  return (
+    db.run(
+      `UPDATE linked_accounts SET last_error=NULL,last_success_ms=?,consecutive_failures=0,updated_at_ms=?
+       WHERE id=? AND generation=? AND status='active'`,
+      now,
+      now,
+      link.id,
+      link.generation,
+    ).rowsWritten === 1
   );
 }

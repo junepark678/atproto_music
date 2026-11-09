@@ -17,6 +17,7 @@ import { MAX_CREATE_BODY_BYTES, MAX_WRITE_BODY_BYTES } from '@atmusic/core/scrob
 import { NS_PER_SECOND, toStorage } from '@atmusic/core/timestamp';
 import { describe, expect, it } from 'vitest';
 import type { ImportItemRow, ImportJobRow, OperationRow } from '../../../src/app/rows';
+import { admitForwardIdentity } from '../../../src/forward/projection';
 import {
   cancelJob,
   createJob,
@@ -35,6 +36,7 @@ import {
   enqueueBatchListenDelete,
   prepareUnsentBatchListenRemoval,
 } from '../../../src/outbox/batch-delete-ops';
+import { enqueueForwards } from '../../../src/outbox/forward-enqueue';
 import { newOperationId, unblockOperations } from '../../../src/outbox/operations';
 import { insertScrobbleCreate, prepareScrobble } from '../../../src/outbox/scrobble-ops';
 import { APPLY, CREATE, GET, type Harness, remoteRecords, SCROBBLE, T0, withHarness } from '../outbox/support';
@@ -213,11 +215,17 @@ describe('import writer', () => {
   it('rewrites a never-sent batch after async preparation, keeping siblings and releasing only the removed listen key', async () => {
     await withHarness(async (h) => {
       h.seedUser(h.alice);
+      h.link(h.alice, 'listenbrainz');
       const rt = runtime(h);
       uploadJob(h, 'job-unsent-remove', [listen(31), listen(32)]);
       await parse(h, rt, 'job-unsent-remove');
       await runImports(rt, h.kit.clock.nowMs());
       const parent = h.ops()[0]!;
+      const removedKey = h.db.one<{ dedupe_key: string }>(
+        'SELECT dedupe_key FROM import_items WHERE job_id=? AND seq=0',
+        'job-unsent-remove',
+      )!.dedupe_key;
+      expect(h.db.one('SELECT count(*) AS n FROM forward_outbox')).toEqual({ n: 2 });
       const original = JSON.parse(parent.record_json!) as { listens: Array<{ id: string }> };
       const removedId = original.listens[0]!.id;
       const plan = await prepareUnsentBatchListenRemoval(h.m, {
@@ -237,6 +245,13 @@ describe('import writer', () => {
       ).toBe(T0);
       expect(h.db.all('SELECT entry_id FROM batch_entry_items WHERE operation_id = ?', parent.id)).toHaveLength(1);
       expect(h.db.all('SELECT operation_id FROM listen_keys WHERE operation_id = ?', parent.id)).toHaveLength(1);
+      expect(
+        h.db.one('SELECT 1 AS hit FROM forward_admissions WHERE did=? AND identity_key=?', h.alice, removedKey),
+      ).toEqual({ hit: 1 });
+      expect(
+        h.db.one("SELECT 1 AS hit FROM forward_outbox WHERE kind='scrobble' AND dedupe_key=?", removedKey),
+      ).toBeNull();
+      expect(h.db.one('SELECT count(*) AS n FROM forward_outbox')).toEqual({ n: 1 });
 
       await h.runUntilIdle();
       await runImports(rt, h.kit.clock.nowMs());
@@ -485,6 +500,8 @@ describe('import writer', () => {
   it('rebatches only queued never-sent import singles after rechecking all item and key links', async () => {
     await withHarness(async (h) => {
       h.seedUser(h.alice);
+      h.link(h.alice, 'lastfm');
+      h.link(h.alice, 'listenbrainz');
       h.m.config = { ...h.m.config, batchPublication: false };
       const rt = runtime(h);
       uploadJob(h, 'job-rebatch', [listen(1), listen(2), listen(3), listen(4), listen(5)]);
@@ -516,6 +533,23 @@ describe('import writer', () => {
           id,
           h.kit.clock.nowMs(),
         );
+        expect(
+          admitForwardIdentity(h.db, {
+            did: h.alice,
+            identityKey: item.dedupe_key,
+            path: 'import',
+            sourceService: 'lastfm',
+            now: h.kit.clock.nowMs(),
+          }),
+        ).toBe(true);
+        const record = prepared.prepared.record as unknown as Record<string, unknown>;
+        enqueueForwards(h.db, {
+          did: h.alice,
+          items: [{ kind: 'scrobble', listenKey: item.dedupe_key, payload: { listen: record, origin: 'import' } }],
+          excludeSourceService: 'lastfm',
+          now: h.kit.clock.nowMs(),
+          random: h.m.random,
+        });
         h.db.run(
           "UPDATE import_items SET state = 'queued', operation_id = ? WHERE job_id = 'job-rebatch' AND seq = ?",
           op.id,
@@ -524,6 +558,7 @@ describe('import writer', () => {
       }
       const singles = h.ops();
       expect(singles).toHaveLength(5);
+      expect(h.db.one('SELECT count(*) AS n FROM forward_outbox')).toEqual({ n: 5 });
       h.db.run(
         "UPDATE operations SET state = 'succeeded', result_uri = ? WHERE id = ?",
         `at://${h.alice}/${SCROBBLE}/${singles[0]!.rkey}`,
@@ -534,6 +569,7 @@ describe('import writer', () => {
       h.m.config = { ...h.m.config, batchPublication: true };
 
       expect(await rebatchUnsentImports(h.m, 'job-rebatch', h.alice, h.kit.clock.nowMs())).toBe(2);
+      expect(h.db.one('SELECT count(*) AS n FROM forward_outbox')).toEqual({ n: 5 });
       const batches = h.db.all<{ id: string; collection: string; record_json: string }>(
         "SELECT id, collection, record_json FROM operations WHERE collection = ? AND origin = 'import'",
         SCROBBLE_BATCH,
@@ -1488,4 +1524,99 @@ describe('import writer', () => {
       expect(itemStates(h, 'job-mixed')).toMatchObject({ duplicate: 50, invalid: 20 });
     });
   }, 60_000);
+
+  it.each([
+    { source: 'lastfm_json', expected: ['listenbrainz'] },
+    { source: 'listenbrainz_zip', expected: ['lastfm'] },
+  ])('routes imported listens from $source only to known other services', async ({ source, expected }) => {
+    await withHarness(async (h) => {
+      h.seedUser(h.alice);
+      const lastfm = h.link(h.alice, 'lastfm');
+      const listenbrainz = h.link(h.alice, 'listenbrainz');
+      h.m.config = { ...h.m.config, batchPublication: true };
+      const rt = runtime(h);
+      uploadJob(h, 'job-source-listen', [listen(1)]);
+      await parse(h, rt, 'job-source-listen');
+      h.db.run('UPDATE import_jobs SET source = ? WHERE id = ?', source, 'job-source-listen');
+      const staged = h.db.one<{ dedupe_key: string; record_json: string }>(
+        "SELECT dedupe_key,record_json FROM import_items WHERE job_id='job-source-listen' AND state='staged'",
+      )!;
+      const stagedRecord = JSON.parse(staged.record_json) as { kind: 'listen'; input: Record<string, unknown> };
+      stagedRecord.input.recordingMbid = '3c4f9c1e-5a2b-4d8e-9f10-2a7c3b9d0e45';
+      h.db.run(
+        'UPDATE import_items SET record_json=? WHERE job_id=?',
+        JSON.stringify(stagedRecord),
+        'job-source-listen',
+      );
+
+      expect(await writeSlice(h.m, { id: 'job-source-listen', did: h.alice }, h.kit.clock.nowMs())).toMatchObject({
+        created: 1,
+      });
+      const rows = h.db.all<{ service: string; payload_json: string }>(
+        `SELECT linked_accounts.service,forward_outbox.payload_json FROM forward_outbox
+         JOIN linked_accounts ON linked_accounts.id=forward_outbox.link_id ORDER BY linked_accounts.service`,
+      );
+      expect(rows.map((row) => row.service)).toEqual(expected);
+      expect(
+        h.db.one<{ source_service: string | null }>(
+          'SELECT source_service FROM forward_admissions WHERE did=? AND identity_key=?',
+          h.alice,
+          staged.dedupe_key,
+        ),
+      ).toEqual({
+        source_service: source === 'lastfm_json' ? 'lastfm' : source === 'listenbrainz_zip' ? 'listenbrainz' : null,
+      });
+      if (expected.length > 0) {
+        const payload = JSON.parse(rows[0]!.payload_json) as { listen: { recordingMbid?: string }; origin: string };
+        expect(payload).toMatchObject({
+          origin: 'import',
+          listen: { recordingMbid: '3c4f9c1e-5a2b-4d8e-9f10-2a7c3b9d0e45' },
+        });
+      }
+      expect([lastfm, listenbrainz]).toHaveLength(2);
+    });
+  });
+
+  it.each([
+    { source: 'lastfm_api', expected: ['listenbrainz'], mapped: 'lastfm' },
+    { source: 'listenbrainz_api', expected: ['lastfm'], mapped: 'listenbrainz' },
+  ])('routes imported loves from $source only to known other services', async ({ source, expected, mapped }) => {
+    await withHarness(async (h) => {
+      h.seedUser(h.alice);
+      h.link(h.alice, 'lastfm');
+      h.link(h.alice, 'listenbrainz');
+      h.m.config = { ...h.m.config, batchPublication: false };
+      const rt = runtime(h);
+      uploadJob(h, 'job-source-love', [listen(2)]);
+      await parse(h, rt, 'job-source-love');
+      h.db.run('UPDATE import_jobs SET source = ? WHERE id = ?', source, 'job-source-love');
+      h.db.run(
+        `UPDATE import_items SET record_json=json_object('kind','love','input',json_object(
+          'artist','Björk','track','Jóga','recordingMbid','3c4f9c1e-5a2b-4d8e-9f10-2a7c3b9d0e45'))
+         WHERE job_id='job-source-love'`,
+      );
+
+      expect(await writeSlice(h.m, { id: 'job-source-love', did: h.alice }, h.kit.clock.nowMs())).toMatchObject({
+        created: 1,
+      });
+      const row = h.db.one<{ did: string; identity_key: string; source_service: string | null }>(
+        "SELECT did,identity_key,source_service FROM forward_admissions WHERE path='import' AND identity_key LIKE 'love-uri:%'",
+      );
+      expect(row?.source_service ?? null).toBe(mapped);
+      const rows = h.db.all<{ service: string; payload_json: string }>(
+        `SELECT linked_accounts.service,forward_outbox.payload_json FROM forward_outbox
+         JOIN linked_accounts ON linked_accounts.id=forward_outbox.link_id ORDER BY linked_accounts.service`,
+      );
+      expect(rows.map((item) => item.service)).toEqual(expected);
+      if (expected.length > 0) {
+        const payload = JSON.parse(rows[0]!.payload_json) as { recordingMbid?: string; origin: string };
+        expect(payload).toMatchObject({
+          origin: 'import',
+          artist: 'Björk',
+          track: 'Jóga',
+          recordingMbid: '3c4f9c1e-5a2b-4d8e-9f10-2a7c3b9d0e45',
+        });
+      }
+    });
+  });
 });

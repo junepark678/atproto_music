@@ -213,6 +213,7 @@ describe('worker/src/node/admin-socket.ts', () => {
     expect(Object.keys(host).sort()).toEqual([
       'backup',
       'disk',
+      'forwardStorage',
       'links',
       'oauthSessions',
       'queues',
@@ -222,6 +223,19 @@ describe('worker/src/node/admin-socket.ts', () => {
     expect(host).toMatchObject({
       backup: { ageMs: null },
       queues: { outbox: {}, forward: {}, imports: {} },
+      forwardStorage: {
+        refreshedAtMs: null,
+        refreshIntervalMs: 300000,
+        markers: { rows: null, logicalBytesEstimate: null },
+        forwardOutbox: { rows: null, logicalBytesEstimate: null },
+        tables: {
+          forward_admissions: { rows: null, logicalBytesEstimate: null },
+          love_incarnations: { rows: null, logicalBytesEstimate: null },
+          love_delete_bridges: { rows: null, logicalBytesEstimate: null },
+          love_import_bridges: { rows: null, logicalBytesEstimate: null },
+          forward_outbox: { rows: null, logicalBytesEstimate: null },
+        },
+      },
       links: {},
       oauthSessions: [],
       disk: { freeBytes: 2 ** 30 * 4096, low: false },
