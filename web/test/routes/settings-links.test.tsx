@@ -312,6 +312,81 @@ it('ignores a poll that began before a successful settings mutation', async () =
   unmount();
 });
 
+it('does not let an earlier poll erase a newly added link', async () => {
+  let links: Link[] = [];
+  let listCount = 0;
+  let finishPoll!: (response: Response) => void;
+  vi.stubGlobal('fetch', async (input: RequestInfo | URL, init: RequestInit = {}) => {
+    const path = new URL(String(input), 'https://music.test').pathname;
+    const method = init.method ?? 'GET';
+    if (path === '/api/v1/auth/session') return Response.json(session);
+    if (path === '/api/v1/links' && method === 'GET') {
+      listCount++;
+      if (listCount === 2)
+        return await new Promise<Response>((resolve) => {
+          finishPoll = resolve;
+        });
+      return Response.json({ items: links });
+    }
+    if (path === '/api/v1/links/listenbrainz' && method === 'POST') {
+      links = [link()];
+      return Response.json(links[0], { status: 201 });
+    }
+    throw new Error(`unexpected request ${method} ${path}`);
+  });
+  const { root, unmount } = mount();
+  Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
+  await vi.waitFor(() => expect(root.textContent).toContain('No music services are connected.'));
+  document.dispatchEvent(new Event('visibilitychange'));
+  await vi.waitFor(() => expect(finishPoll).toBeTypeOf('function'));
+  const token = root.querySelector<HTMLInputElement>('#listenbrainz-token')!;
+  token.value = 'secret-token';
+  token.dispatchEvent(new Event('input', { bubbles: true }));
+  root.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+  await vi.waitFor(() => expect(root.querySelectorAll('.link-card')).toHaveLength(1));
+  finishPoll(Response.json({ items: [] }));
+  await vi.waitFor(() => expect(root.querySelectorAll('.link-card')).toHaveLength(1));
+  unmount();
+});
+
+it('does not let an earlier poll restore a link after unlink', async () => {
+  let links: Link[] = [link()];
+  let listCount = 0;
+  let finishPoll!: (response: Response) => void;
+  vi.stubGlobal('confirm', () => true);
+  vi.stubGlobal('fetch', async (input: RequestInfo | URL, init: RequestInit = {}) => {
+    const path = new URL(String(input), 'https://music.test').pathname;
+    const method = init.method ?? 'GET';
+    if (path === '/api/v1/auth/session') return Response.json(session);
+    if (path === '/api/v1/links' && method === 'GET') {
+      listCount++;
+      if (listCount === 2)
+        return await new Promise<Response>((resolve) => {
+          finishPoll = resolve;
+        });
+      return Response.json({ items: links });
+    }
+    if (path === '/api/v1/links/link-1' && method === 'DELETE') {
+      links = [];
+      return new Response(null, { status: 204 });
+    }
+    throw new Error(`unexpected request ${method} ${path}`);
+  });
+  const { root, unmount } = mount();
+  Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
+  await vi.waitFor(() => expect(root.querySelectorAll('.link-card')).toHaveLength(1));
+  document.dispatchEvent(new Event('visibilitychange'));
+  await vi.waitFor(() => expect(finishPoll).toBeTypeOf('function'));
+  [...root.querySelectorAll('button')]
+    .find((button) => button.textContent?.includes('Disconnect ListenBrainz'))
+    ?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+  await vi.waitFor(() => expect(root.textContent).toContain('No music services are connected.'));
+  finishPoll(Response.json({ items: [link()] }));
+  await vi.waitFor(() => expect(root.textContent).toContain('No music services are connected.'));
+  expect(root.querySelectorAll('.link-card')).toHaveLength(0);
+  unmount();
+});
+
 it('does not let an older list error replace a newer successful refresh', async () => {
   const pending: Array<{ resolve: (value: Response) => void; reject: (error: Error) => void }> = [];
   vi.stubGlobal('fetch', async (input: RequestInfo | URL) => {
