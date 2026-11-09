@@ -14,7 +14,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as sqlite from 'node:sqlite';
 import { routerTransport } from '@atmusic/atproto/test-support/router-transport';
-import { trackKey } from '@atmusic/core/music-key';
+import { albumKey, trackKey } from '@atmusic/core/music-key';
 import { type FixedClock, fixedClock } from '@atmusic/core/test-support/clock';
 import { seededRandom } from '@atmusic/core/test-support/random';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -1520,6 +1520,181 @@ describe('ListenBrainz forwarding', () => {
     expect(w.rows().find((r) => r.id === never.id)).toMatchObject({ state: 'ignored', last_error: 'mbid_unresolved' });
     expect(w.seen.every(([, path]) => path === '/1/feedback/recording-feedback')).toBe(true);
     expect(w.rows().find((r) => r.id === never.id)?.link_id).toBe(link);
+  });
+
+  it('resolves backfill loves from the primary tuple before the album fallback', async () => {
+    const w = await world();
+    w.link();
+    const artist = 'Backfill Artist';
+    const track = 'Backfill Song';
+    const album = 'Backfill Album';
+    const [artistKey, trackKeyValue] = trackKey(artist, track);
+    const albumKeyValue = albumKey(artist, album)![1];
+    const fallbackMbid = '11111111-1111-4111-8111-111111111111';
+    w.app.db.run(
+      "INSERT INTO mb_tracks(artist_key,track_key,album_key,status,recording_mbid,created_at_ms) VALUES(?,?,'','matched',?,?)",
+      artistKey,
+      trackKeyValue,
+      MBID,
+      w.clock.nowMs(),
+    );
+    w.app.db.run(
+      "INSERT INTO mb_tracks(artist_key,track_key,album_key,status,recording_mbid,created_at_ms) VALUES(?,?,?,'matched',?,?)",
+      artistKey,
+      trackKeyValue,
+      albumKeyValue,
+      fallbackMbid,
+      w.clock.nowMs(),
+    );
+    expect(
+      w.enqueue([
+        { kind: 'love', operationId: 'backfill-primary-match', payload: { artist, track, album, origin: 'backfill' } },
+      ]),
+    ).toBe(1);
+
+    await w.run();
+
+    expect(w.lb.feedback.map((entry) => entry.json)).toEqual([{ recording_mbid: MBID, score: 1 }]);
+  });
+
+  it('keeps a backfill love pending when primary resolution is pending despite terminal album fallback, then uses a fallback match', async () => {
+    const w = await world();
+    w.link();
+    const artist = 'Backfill Fallback Artist';
+    const track = 'Backfill Fallback Song';
+    const album = 'Backfill Fallback Album';
+    const [artistKey, trackKeyValue] = trackKey(artist, track);
+    const albumKeyValue = albumKey(artist, album)![1];
+    w.enqueue([
+      { kind: 'love', operationId: 'backfill-pending-primary', payload: { artist, track, album, origin: 'backfill' } },
+    ]);
+    w.app.db.run(
+      "INSERT INTO mb_tracks(artist_key,track_key,album_key,status,created_at_ms) VALUES(?,?,?,'unmatched',?)",
+      artistKey,
+      trackKeyValue,
+      albumKeyValue,
+      w.clock.nowMs(),
+    );
+    w.app.db.run(
+      "INSERT INTO mb_tracks(artist_key,track_key,album_key,status,created_at_ms) VALUES(?,?,'','pending',?)",
+      artistKey,
+      trackKeyValue,
+      w.clock.nowMs(),
+    );
+
+    await w.run();
+
+    expect(w.lb.feedback).toHaveLength(0);
+    expect(w.rows()[0]).toMatchObject({ state: 'queued', attempts: 0 });
+    const fallbackMbid = '22222222-2222-4222-8222-222222222222';
+    w.app.db.run(
+      "UPDATE mb_tracks SET status='matched',recording_mbid=? WHERE artist_key=? AND track_key=? AND album_key=?",
+      fallbackMbid,
+      artistKey,
+      trackKeyValue,
+      albumKeyValue,
+    );
+    w.clock.advance(MINUTE);
+    await w.run();
+    expect(w.lb.feedback.map((entry) => entry.json)).toEqual([{ recording_mbid: fallbackMbid, score: 1 }]);
+  });
+
+  it('waits for a backfill love primary match after the album tuple is terminal', async () => {
+    const w = await world();
+    w.link();
+    const artist = 'Primary Pending Artist';
+    const track = 'Primary Pending Song';
+    const album = 'Primary Pending Album';
+    const [artistKey, trackKeyValue] = trackKey(artist, track);
+    const albumKeyValue = albumKey(artist, album)![1];
+    const primaryMbid = '33333333-3333-4333-8333-333333333333';
+    w.enqueue([
+      { kind: 'love', operationId: 'backfill-primary-waits', payload: { artist, track, album, origin: 'backfill' } },
+    ]);
+    w.app.db.run(
+      "INSERT INTO mb_tracks(artist_key,track_key,album_key,status,created_at_ms) VALUES(?,?,?,'unmatched',?)",
+      artistKey,
+      trackKeyValue,
+      albumKeyValue,
+      w.clock.nowMs(),
+    );
+    w.app.db.run(
+      "INSERT INTO mb_tracks(artist_key,track_key,album_key,status,created_at_ms) VALUES(?,?,'','pending',?)",
+      artistKey,
+      trackKeyValue,
+      w.clock.nowMs(),
+    );
+    await w.run();
+    expect(w.lb.feedback).toHaveLength(0);
+    expect(w.rows()[0]).toMatchObject({ state: 'queued', attempts: 0 });
+
+    w.app.db.run(
+      "UPDATE mb_tracks SET status='matched',recording_mbid=? WHERE artist_key=? AND track_key=? AND album_key=''",
+      primaryMbid,
+      artistKey,
+      trackKeyValue,
+    );
+    w.clock.advance(MINUTE);
+    await w.run();
+    expect(w.lb.feedback.map((entry) => entry.json)).toEqual([{ recording_mbid: primaryMbid, score: 1 }]);
+  });
+
+  it('settles a backfill love with both tuples unmatched without a ListenBrainz request', async () => {
+    const w = await world();
+    w.link();
+    const artist = 'Terminal Backfill Artist';
+    const track = 'Terminal Backfill Song';
+    const album = 'Terminal Backfill Album';
+    const [artistKey, trackKeyValue] = trackKey(artist, track);
+    const albumKeyValue = albumKey(artist, album)![1];
+    w.enqueue([
+      { kind: 'love', operationId: 'backfill-terminal', payload: { artist, track, album, origin: 'backfill' } },
+    ]);
+    w.app.db.run(
+      "INSERT INTO mb_tracks(artist_key,track_key,album_key,status,created_at_ms) VALUES(?,?,'','unmatched',?)",
+      artistKey,
+      trackKeyValue,
+      w.clock.nowMs(),
+    );
+    w.app.db.run(
+      "INSERT INTO mb_tracks(artist_key,track_key,album_key,status,created_at_ms) VALUES(?,?,?,'unmatched',?)",
+      artistKey,
+      trackKeyValue,
+      albumKeyValue,
+      w.clock.nowMs(),
+    );
+
+    await w.run();
+
+    expect(w.rows()[0]).toMatchObject({ state: 'ignored', last_error: 'no_recording_mbid' });
+    expect(w.lb.feedback).toHaveLength(0);
+    expect(w.seen).toHaveLength(0);
+  });
+
+  it('keeps the original backfill head deadline across repeated pending runs', async () => {
+    const w = await world();
+    w.link();
+    w.enqueue([
+      {
+        kind: 'love',
+        operationId: 'backfill-fixed-deadline',
+        payload: {
+          artist: 'Never Matched Artist',
+          track: 'Never Matched Song',
+          album: 'Never Matched Album',
+          origin: 'backfill',
+        },
+      },
+    ]);
+    const original = w.rows()[0]!.created_at_ms;
+    await w.run();
+    w.clock.advance(DAY - MINUTE);
+    await w.run();
+    expect(w.rows()[0]).toMatchObject({ state: 'queued', created_at_ms: original });
+    w.clock.advance(MINUTE);
+    await w.run();
+    expect(w.rows()[0]).toMatchObject({ state: 'ignored', last_error: 'mbid_unresolved', created_at_ms: original });
+    expect(w.seen).toHaveLength(0);
   });
 
   it('bounds love-head row work for a large unresolved backlog and still forwards an unrelated resolved track', async () => {
