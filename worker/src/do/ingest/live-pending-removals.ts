@@ -30,65 +30,91 @@ export interface PendingRemovalInput {
 
 /** A removal observation is immutable. An exact replay is ignored; a later window gets a distinct group. */
 export function recordPendingRemoval(db: Db, input: PendingRemovalInput): void {
-  if (db.one('SELECT 1 FROM linked_accounts WHERE did=? LIMIT 1', input.did) === null) return;
-  const second = Math.floor(Date.parse(input.row.listened_at) / 1000);
-  const priorGroup = db.one<{
-    authorized_rev: string | null;
-    conflict_invalidated: number;
-    conflicted_auth_rev: string | null;
-  }>(
-    `SELECT authorized_rev,conflict_invalidated,conflicted_auth_rev FROM live_pending_removals
-     WHERE uri=? AND kind=? AND window_lo=? AND window_hi=? AND replaced_by_cid=? LIMIT 1`,
-    input.uri,
-    input.kind,
-    input.windowLo,
-    input.windowHi,
-    input.replacedByCid ?? '',
-  );
-  const inserted = db.run(
-    `INSERT OR IGNORE INTO live_pending_removals
-      (uri,member_uri,removed_cid,kind,window_lo,window_hi,replaced_by_cid,identity_key,listened_at,
-       artist_key,track_key,artist,track,recording_mbid,love_source_service,love_import_sources,
-       authorized_rev,created_at_ms,expires_at_ms,conflict_invalidated,conflicted_auth_rev)
-     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-    input.uri,
-    input.row.uri,
-    input.row.cid,
-    input.kind,
-    input.windowLo,
-    input.windowHi,
-    input.replacedByCid ?? '',
-    input.identityKey,
-    input.kind === 'love' ? null : second,
-    input.row.artist_key,
-    input.row.track_key,
-    input.row.artist,
-    input.row.track,
-    input.row.recording_mbid,
-    input.loveSourceService ?? null,
-    input.loveImportSources?.length ? JSON.stringify([...new Set(input.loveImportSources)].sort()) : null,
-    priorGroup?.authorized_rev ?? null,
-    input.nowMs,
-    input.nowMs + LIVE_EVIDENCE_TTL_MS,
-    priorGroup?.conflict_invalidated ?? 0,
-    priorGroup?.conflicted_auth_rev ?? null,
-  );
-  if (inserted.rowsWritten > 0) {
-    db.run(
-      `INSERT OR IGNORE INTO live_pending_removal_reconcile
-        (uri,window_lo,window_hi,replaced_by_cid,cursor_rev,next_due_ms,created_at_ms)
-       VALUES(?,?,?,?,?,?,?)`,
+  recordPendingRemovals(db, [input]);
+}
+
+/** Inserts same-window removal batches with one durable-state lookup and one reconcile page. */
+export function recordPendingRemovals(db: Db, inputs: readonly PendingRemovalInput[]): void {
+  if (inputs.length === 0) return;
+  if (db.one('SELECT 1 FROM linked_accounts WHERE did=? LIMIT 1', inputs[0]!.did) === null) return;
+  const groups = new Map<string, PendingRemovalInput[]>();
+  for (const input of inputs) {
+    const key = JSON.stringify([
+      input.did,
       input.uri,
+      input.kind,
       input.windowLo,
       input.windowHi,
       input.replacedByCid ?? '',
-      input.windowLo,
-      input.nowMs,
-      input.nowMs,
-    );
-    reconcilePendingWindowPage(db, input.uri, input.windowLo, input.windowHi, input.replacedByCid ?? '', input.nowMs);
+    ]);
+    const group = groups.get(key);
+    if (group) group.push(input);
+    else groups.set(key, [input]);
   }
-  countLiveAdmission(db, 'pending_recorded');
+  for (const group of groups.values()) {
+    const first = group[0]!;
+    const priorGroup = db.one<{
+      authorized_rev: string | null;
+      conflict_invalidated: number;
+      conflicted_auth_rev: string | null;
+    }>(
+      `SELECT authorized_rev,conflict_invalidated,conflicted_auth_rev FROM live_pending_removals
+       WHERE uri=? AND kind=? AND window_lo=? AND window_hi=? AND replaced_by_cid=? LIMIT 1`,
+      first.uri,
+      first.kind,
+      first.windowLo,
+      first.windowHi,
+      first.replacedByCid ?? '',
+    );
+    let insertedCount = 0;
+    for (const input of group) {
+      const second = Math.floor(Date.parse(input.row.listened_at) / 1000);
+      insertedCount += db.run(
+        `INSERT OR IGNORE INTO live_pending_removals
+          (uri,member_uri,removed_cid,kind,window_lo,window_hi,replaced_by_cid,identity_key,listened_at,
+           artist_key,track_key,artist,track,recording_mbid,love_source_service,love_import_sources,
+           authorized_rev,created_at_ms,expires_at_ms,conflict_invalidated,conflicted_auth_rev)
+         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        input.uri,
+        input.row.uri,
+        input.row.cid,
+        input.kind,
+        input.windowLo,
+        input.windowHi,
+        input.replacedByCid ?? '',
+        input.identityKey,
+        input.kind === 'love' ? null : second,
+        input.row.artist_key,
+        input.row.track_key,
+        input.row.artist,
+        input.row.track,
+        input.row.recording_mbid,
+        input.loveSourceService ?? null,
+        input.loveImportSources?.length ? JSON.stringify([...new Set(input.loveImportSources)].sort()) : null,
+        priorGroup?.authorized_rev ?? null,
+        input.nowMs,
+        input.nowMs + LIVE_EVIDENCE_TTL_MS,
+        priorGroup?.conflict_invalidated ?? 0,
+        priorGroup?.conflicted_auth_rev ?? null,
+      ).rowsWritten;
+    }
+    if (insertedCount > 0) {
+      db.run(
+        `INSERT OR IGNORE INTO live_pending_removal_reconcile
+          (uri,window_lo,window_hi,replaced_by_cid,cursor_rev,next_due_ms,created_at_ms)
+         VALUES(?,?,?,?,?,?,?)`,
+        first.uri,
+        first.windowLo,
+        first.windowHi,
+        first.replacedByCid ?? '',
+        first.windowLo,
+        first.nowMs,
+        first.nowMs,
+      );
+      reconcilePendingWindowPage(db, first.uri, first.windowLo, first.windowHi, first.replacedByCid ?? '', first.nowMs);
+    }
+  }
+  countLiveAdmission(db, 'pending_recorded', inputs.length);
 }
 
 function eventMatchesPending(event: { action: LiveAction; cid: string }, replacedByCid: string): boolean {
@@ -204,6 +230,19 @@ export const CONFLICT_RETENTION_SCAN_SQL = `SELECT window_hi,window_lo,replaced_
   FROM live_pending_removals INDEXED BY live_pending_removals_page
  WHERE uri=? AND (window_hi,window_lo,replaced_by_cid,kind,member_uri,removed_cid)>(?,?,?,?,?,?)
  ORDER BY window_hi,window_lo,replaced_by_cid,kind,member_uri,removed_cid LIMIT ?`;
+
+type RetentionCursor = [string, string, string, string, string, string];
+function retentionCursor(encoded: string): RetentionCursor {
+  if (encoded === '') return ['', '', '', '', '', ''];
+  try {
+    const value: unknown = JSON.parse(encoded);
+    return Array.isArray(value) && value.length === 6 && value.every((part) => typeof part === 'string')
+      ? (value as RetentionCursor)
+      : ['', '', '', '', '', ''];
+  } catch {
+    return ['', '', '', '', '', ''];
+  }
+}
 
 interface AuthorizationEvent {
   uri: string;
@@ -603,18 +642,13 @@ export function executeAuthorizedRemovals(
     rev: string;
     conflicted: number;
     expires_at_ms: number;
-    cleanup_cursor_window_hi: string;
-    cleanup_cursor_window_lo: string;
-    cleanup_cursor_replaced_by_cid: string;
-    cleanup_cursor_kind: string;
-    cleanup_cursor_member_uri: string;
-    cleanup_cursor_removed_cid: string;
+    cleanup_frontier: string;
     cleanup_scan_complete: number;
     cleanup_has_match: number;
   }>(
     PENDING_EVENT_CLEANUP_PAGE_SQL.replace(
       'expires_at_ms FROM',
-      'expires_at_ms,cleanup_cursor_window_hi,cleanup_cursor_window_lo,cleanup_cursor_replaced_by_cid,cleanup_cursor_kind,cleanup_cursor_member_uri,cleanup_cursor_removed_cid,cleanup_scan_complete,cleanup_has_match FROM',
+      'expires_at_ms,cleanup_frontier,cleanup_scan_complete,cleanup_has_match FROM',
     ),
     args.nowMs,
     EVENT_CLEANUP_PAGE_SIZE,
@@ -627,6 +661,7 @@ export function executeAuthorizedRemovals(
     }
     let retainedPending = false;
     if (event.conflicted !== 0 && event.cleanup_scan_complete === 0) {
+      const cursor = retentionCursor(event.cleanup_frontier);
       const page = db.all<{
         window_hi: string;
         window_lo: string;
@@ -634,31 +669,21 @@ export function executeAuthorizedRemovals(
         kind: 'scrobble' | 'love';
         member_uri: string;
         removed_cid: string;
-      }>(
-        CONFLICT_RETENTION_SCAN_SQL,
-        event.uri,
-        event.cleanup_cursor_window_hi,
-        event.cleanup_cursor_window_lo,
-        event.cleanup_cursor_replaced_by_cid,
-        event.cleanup_cursor_kind,
-        event.cleanup_cursor_member_uri,
-        event.cleanup_cursor_removed_cid,
-        EVENT_CLEANUP_PAGE_SIZE,
-      );
+      }>(CONFLICT_RETENTION_SCAN_SQL, event.uri, ...cursor, EVENT_CLEANUP_PAGE_SIZE);
       const hasMatch =
         event.cleanup_has_match !== 0 || page.some((row) => row.window_lo < event.rev && row.window_hi >= event.rev);
       const last = page.at(-1);
       if (page.length === EVENT_CLEANUP_PAGE_SIZE && last) {
         db.run(
-          `UPDATE live_pending_removal_events SET cleanup_cursor_window_hi=?,cleanup_cursor_window_lo=?,
-           cleanup_cursor_replaced_by_cid=?,cleanup_cursor_kind=?,cleanup_cursor_member_uri=?,cleanup_cursor_removed_cid=?,
-           cleanup_has_match=?,cleanup_due_ms=? WHERE rowid=?`,
-          last.window_hi,
-          last.window_lo,
-          last.replaced_by_cid,
-          last.kind,
-          last.member_uri,
-          last.removed_cid,
+          `UPDATE live_pending_removal_events SET cleanup_frontier=?,cleanup_has_match=?,cleanup_due_ms=? WHERE rowid=?`,
+          JSON.stringify([
+            last.window_hi,
+            last.window_lo,
+            last.replaced_by_cid,
+            last.kind,
+            last.member_uri,
+            last.removed_cid,
+          ]),
           hasMatch ? 1 : 0,
           args.nowMs + RETAINED_EVENT_RECHECK_MS,
           event.rowid,
@@ -666,9 +691,7 @@ export function executeAuthorizedRemovals(
         retainedPending = true;
       } else if (hasMatch) {
         db.run(
-          `UPDATE live_pending_removal_events SET cleanup_cursor_window_hi='',cleanup_cursor_window_lo='',
-           cleanup_cursor_replaced_by_cid='',cleanup_cursor_kind='',cleanup_cursor_member_uri='',cleanup_cursor_removed_cid='',
-           cleanup_has_match=0,cleanup_due_ms=? WHERE rowid=?`,
+          `UPDATE live_pending_removal_events SET cleanup_frontier='',cleanup_has_match=0,cleanup_due_ms=? WHERE rowid=?`,
           args.nowMs + RETAINED_EVENT_RECHECK_MS,
           event.rowid,
         );

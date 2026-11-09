@@ -675,6 +675,65 @@ it('fresh: production SQL bounds equal-hi tail seeks, event readiness, and retai
       .map((row: { detail: string }) => row.detail)
       .join(' ');
     expect(queuedRetentionPlan).toContain('listenbrainz_deletes_authorization');
+
+    // Exercise the persisted frontier when the one intersecting window sorts after
+    // a same-URI prefix. No due cleanup row may be deleted before the full scan.
+    const frontierUri = uri('retention-frontier');
+    db.run('UPDATE live_pending_removal_events SET cleanup_due_ms=?', NOW_MS + 10_000_000);
+    for (let i = 0; i < 10_000; i++) {
+      const member = String(i).padStart(13, '0');
+      db.run(
+        `INSERT INTO live_pending_removals
+         (uri,member_uri,removed_cid,kind,window_lo,window_hi,replaced_by_cid,identity_key,artist_key,track_key,artist,track,created_at_ms,expires_at_ms)
+         VALUES(?,?,'old','scrobble','0000000000000',?,'','frontier-'||?,'a','t','A','T',1,?)`,
+        frontierUri,
+        `member-${member}`,
+        i === 9_999 ? 'zzzzzzzzzzzzz' : 'aaaaaaaaaaaaa',
+        member,
+        NOW_MS + 10_000_000,
+      );
+    }
+    const frontierRev = 'mmmmmmmmmmmmm';
+    db.run(
+      `INSERT INTO live_pending_removal_events(uri,rev,action,cid,conflicted,scan_complete,created_at_ms,expires_at_ms,cleanup_due_ms)
+       VALUES(?,?,'update','conflict',1,1,?,?,?)`,
+      frontierUri,
+      frontierRev,
+      NOW_MS - 1,
+      NOW_MS - 1,
+      NOW_MS,
+    );
+    let frontierNow = NOW_MS;
+    const cleanup = () =>
+      executeAuthorizedRemovals(db, { uri: frontierUri, nowMs: frontierNow, random: seededRandom(14), limit: 0 });
+    cleanup();
+    const firstFrontier = db.one<{ cleanup_frontier: string }>(
+      'SELECT cleanup_frontier FROM live_pending_removal_events WHERE uri=? AND rev=?',
+      frontierUri,
+      frontierRev,
+    );
+    expect(JSON.parse(firstFrontier!.cleanup_frontier)).toHaveLength(6);
+    expect(db.one('SELECT count(*) AS n FROM live_pending_removals WHERE uri=?', frontierUri)).toEqual({ n: 10_000 });
+    for (let page = 1; page < 79; page++) {
+      frontierNow += 60_000;
+      cleanup();
+    }
+    expect(
+      db.one(
+        'SELECT cleanup_frontier FROM live_pending_removal_events WHERE uri=? AND rev=?',
+        frontierUri,
+        frontierRev,
+      ),
+    ).toEqual({ cleanup_frontier: '' });
+    expect(
+      db.one('SELECT count(*) AS n FROM live_pending_removal_events WHERE uri=? AND rev=?', frontierUri, frontierRev),
+    ).toEqual({ n: 1 });
+    db.run('DELETE FROM live_pending_removals WHERE uri=?', frontierUri);
+    frontierNow += 60_000;
+    cleanup();
+    expect(
+      db.one('SELECT count(*) AS n FROM live_pending_removal_events WHERE uri=? AND rev=?', frontierUri, frontierRev),
+    ).toEqual({ n: 0 });
   });
 });
 

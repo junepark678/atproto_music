@@ -77,7 +77,7 @@ import {
   recordLiveCandidate,
   replacementAuthority,
 } from '../ingest/live-evidence';
-import { recordPendingRemoval } from '../ingest/live-pending-removals';
+import { recordPendingRemoval, recordPendingRemovals } from '../ingest/live-pending-removals';
 import { advanceUser, bumpStatsVersion, isSuppressed, loadUser } from './account-state';
 import {
   albumArtistKey,
@@ -268,10 +268,35 @@ type Verdict =
       reason: string;
     };
 
-function scrobbleVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, o: ApplyOptions): Verdict {
-  const v = validateScrobbleRecord(record, o.prefix, o.receiptNs);
-  if (!v.ok) return { ok: false, reason: reasonText(v.reason) };
-  const row = v.row;
+interface BatchScrobbleContext {
+  priorByUri: Map<string, ProjectedListen>;
+  admissions: Set<string>;
+  enqueuedTracks: Set<string>;
+  tracksWithSubmittedMbid: Set<string>;
+  canonicalByIdentity: Map<string, { uri: string; record_uri: string | null; rkey: string } | null>;
+  knownListenByIdentity: Map<string, boolean>;
+  ownedCandidateByIdentity: Map<string, boolean>;
+  hasUriCandidate: boolean | null;
+  localOperationLoaded: boolean;
+  localOperationOrigin: string | null;
+}
+
+function scrobbleVerdict(
+  db: Db,
+  t: RecordTarget,
+  cid: string,
+  record: unknown,
+  o: ApplyOptions,
+  batch?: BatchScrobbleContext,
+  validatedRow?: ScrobbleRow,
+): Verdict {
+  let row: ScrobbleRow;
+  if (validatedRow) row = validatedRow;
+  else {
+    const v = validateScrobbleRecord(record, o.prefix, o.receiptNs);
+    if (!v.ok) return { ok: false, reason: reasonText(v.reason) };
+    row = v.row;
+  }
   let keys: ReturnType<typeof musicKeyColumns>;
   try {
     keys = musicKeyColumns(row.artist, row.track, row.album);
@@ -284,26 +309,37 @@ function scrobbleVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, 
   return {
     ok: true,
     write: () => {
-      const before = db.one<{
-        uri: string;
-        cid: string;
-        listened_at: string;
-        artist_key: string;
-        track_key: string;
-        artist: string;
-        track: string;
-        recording_mbid: string | null;
-      }>(
-        'SELECT uri,cid,listened_at,artist_key,track_key,artist,track,recording_mbid FROM scrobbles WHERE uri = ?',
-        t.uri,
-      );
-      enqueueTrack(
-        db,
-        { artistKey: keys.artist_key, trackKey: keys.track_key, albumKey: keys.album_key },
-        Number(o.nowNs / 1_000_000n),
-        0,
-        row.recordingMbid,
-      );
+      const before = batch
+        ? (batch.priorByUri.get(t.uri) ?? null)
+        : db.one<{
+            uri: string;
+            cid: string;
+            listened_at: string;
+            artist_key: string;
+            track_key: string;
+            artist: string;
+            track: string;
+            recording_mbid: string | null;
+          }>(
+            'SELECT uri,cid,listened_at,artist_key,track_key,artist,track,recording_mbid FROM scrobbles WHERE uri = ?',
+            t.uri,
+          );
+      const trackQueueKey = JSON.stringify([keys.artist_key, keys.track_key, keys.album_key]);
+      if (
+        batch === undefined ||
+        !batch.enqueuedTracks.has(trackQueueKey) ||
+        (row.recordingMbid != null && !batch.tracksWithSubmittedMbid.has(trackQueueKey))
+      ) {
+        enqueueTrack(
+          db,
+          { artistKey: keys.artist_key, trackKey: keys.track_key, albumKey: keys.album_key },
+          Number(o.nowNs / 1_000_000n),
+          0,
+          row.recordingMbid,
+        );
+        batch?.enqueuedTracks.add(trackQueueKey);
+        if (row.recordingMbid != null) batch?.tracksWithSubmittedMbid.add(trackQueueKey);
+      }
       const identityKey = projectionListenKey(t.did, row.listenedAt, keys.artist_key, keys.track_key);
       const priorIdentityKey = before
         ? projectionListenKey(t.did, before.listened_at, before.artist_key, before.track_key)
@@ -311,15 +347,20 @@ function scrobbleVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, 
       // Admission belongs to the canonical listen, including copies at other
       // record/container URIs and subsecond variants of the same listen key.
       const second = BigInt(Math.floor(Date.parse(row.listenedAt) / 1000)) * 1_000_000_000n;
-      const canonical = db.one<{ uri: string; record_uri: string | null; rkey: string }>(
-        `SELECT uri,record_uri,rkey FROM scrobbles
-         WHERE did=? AND artist_key=? AND track_key=? AND listened_at>=? AND listened_at<? LIMIT 1`,
-        t.did,
-        keys.artist_key,
-        keys.track_key,
-        toStorage(second),
-        toStorage(second + 1_000_000_000n),
-      );
+      let canonical: { uri: string; record_uri: string | null; rkey: string } | null;
+      if (batch?.canonicalByIdentity.has(identityKey)) canonical = batch.canonicalByIdentity.get(identityKey) ?? null;
+      else {
+        canonical = db.one<{ uri: string; record_uri: string | null; rkey: string }>(
+          `SELECT uri,record_uri,rkey FROM scrobbles
+           WHERE did=? AND artist_key=? AND track_key=? AND listened_at>=? AND listened_at<? LIMIT 1`,
+          t.did,
+          keys.artist_key,
+          keys.track_key,
+          toStorage(second),
+          toStorage(second + 1_000_000_000n),
+        );
+        batch?.canonicalByIdentity.set(identityKey, canonical);
+      }
       const legacyPresent =
         canonical !== null ||
         before !== null ||
@@ -369,25 +410,34 @@ function scrobbleVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, 
           : legacyPresent
             ? retainedRecordProvenance(db, t.did, t.collection, t.rkey)
             : null;
-      const anyUriCandidate = db.one(
-        'SELECT 1 AS hit FROM live_acceptance_candidates WHERE uri=? LIMIT 1',
-        t.recordUri ?? t.uri,
-      );
+      if (batch && batch.hasUriCandidate === null)
+        batch.hasUriCandidate =
+          db.one('SELECT 1 AS hit FROM live_acceptance_candidates WHERE uri=? LIMIT 1', t.recordUri ?? t.uri) !== null;
+      const anyUriCandidate = batch
+        ? batch.hasUriCandidate === true
+        : db.one('SELECT 1 AS hit FROM live_acceptance_candidates WHERE uri=? LIMIT 1', t.recordUri ?? t.uri) !== null;
       const replacementCandidate =
         canonical === null &&
         before !== null &&
         priorIdentityKey !== undefined &&
         priorIdentityKey !== identityKey &&
-        anyUriCandidate === null;
-      const firstAdmission = admitProjectedIdentity(db, {
-        did: t.did,
-        identityKey,
-        ...(priorIdentityKey === undefined ? {} : { priorIdentityKey }),
-        provenance,
-        legacyPresent,
-        path: additionAuthority(o.live, t.rev, cid) ? 'live' : 'snapshot',
-        now,
-      });
+        !anyUriCandidate;
+      const admissionKey = JSON.stringify([identityKey, priorIdentityKey ?? null]);
+      const firstAdmission =
+        batch?.admissions.has(admissionKey) === true
+          ? false
+          : (() => {
+              batch?.admissions.add(admissionKey);
+              return admitProjectedIdentity(db, {
+                did: t.did,
+                identityKey,
+                ...(priorIdentityKey === undefined ? {} : { priorIdentityKey }),
+                provenance,
+                legacyPresent,
+                path: additionAuthority(o.live, t.rev, cid) ? 'live' : 'snapshot',
+                now,
+              });
+            })();
       if (replacementCandidate && !additionAuthority(o.live, t.rev, cid))
         db.run("UPDATE forward_admissions SET path='snapshot' WHERE did=? AND identity_key=?", t.did, identityKey);
       if (additionAuthority(o.live, t.rev, cid)) countLiveAdmission(db, 'addition_matched');
@@ -438,25 +488,58 @@ function scrobbleVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, 
         fields.music_service,
         fields.recording_msid,
       );
-      const localOperation = db.one<{ origin: string }>(
-        'SELECT origin FROM operations WHERE did=? AND collection=? AND rkey=? ORDER BY created_at_ms DESC LIMIT 1',
-        t.did,
-        t.collection,
-        t.rkey,
-      );
-      const knownListen = db.one('SELECT 1 AS hit FROM listen_keys WHERE did=? AND dedupe_key=?', t.did, identityKey);
-      const ownedCandidate = db.one(
-        'SELECT 1 AS hit FROM live_acceptance_candidates WHERE uri=? AND identity_key=? AND expires_at_ms>? ',
-        t.recordUri ?? t.uri,
-        identityKey,
-        now,
-      );
+      if (batch && canonical === null)
+        batch.canonicalByIdentity.set(identityKey, { uri: t.uri, record_uri: t.recordUri ?? null, rkey: t.rkey });
+      if (batch && !batch.localOperationLoaded) {
+        batch.localOperationOrigin =
+          db.one<{ origin: string }>(
+            'SELECT origin FROM operations WHERE did=? AND collection=? AND rkey=? ORDER BY created_at_ms DESC LIMIT 1',
+            t.did,
+            t.collection,
+            t.rkey,
+          )?.origin ?? null;
+        batch.localOperationLoaded = true;
+      }
+      const localOperationOrigin = batch
+        ? batch.localOperationOrigin
+        : (db.one<{ origin: string }>(
+            'SELECT origin FROM operations WHERE did=? AND collection=? AND rkey=? ORDER BY created_at_ms DESC LIMIT 1',
+            t.did,
+            t.collection,
+            t.rkey,
+          )?.origin ?? null);
+      if (!batch?.knownListenByIdentity.has(identityKey))
+        batch?.knownListenByIdentity.set(
+          identityKey,
+          db.one('SELECT 1 AS hit FROM listen_keys WHERE did=? AND dedupe_key=?', t.did, identityKey) !== null,
+        );
+      const knownListen = batch
+        ? (batch.knownListenByIdentity.get(identityKey) ?? false)
+        : db.one('SELECT 1 AS hit FROM listen_keys WHERE did=? AND dedupe_key=?', t.did, identityKey) !== null;
+      if (!batch?.ownedCandidateByIdentity.has(identityKey))
+        batch?.ownedCandidateByIdentity.set(
+          identityKey,
+          db.one(
+            'SELECT 1 AS hit FROM live_acceptance_candidates WHERE uri=? AND identity_key=? AND expires_at_ms>? ',
+            t.recordUri ?? t.uri,
+            identityKey,
+            now,
+          ) !== null,
+        );
+      const ownedCandidate = batch
+        ? (batch.ownedCandidateByIdentity.get(identityKey) ?? false)
+        : db.one(
+            'SELECT 1 AS hit FROM live_acceptance_candidates WHERE uri=? AND identity_key=? AND expires_at_ms>? ',
+            t.recordUri ?? t.uri,
+            identityKey,
+            now,
+          ) !== null;
       if (
         firstAdmission &&
         !legacyPresent &&
         additionAuthority(o.live, t.rev, cid) &&
-        knownListen === null &&
-        localOperation?.origin !== 'import'
+        !knownListen &&
+        localOperationOrigin !== 'import'
       ) {
         enqueueForwards(db, {
           did: t.did,
@@ -482,11 +565,11 @@ function scrobbleVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, 
         });
       }
       if (
-        (ownedCandidate !== null || firstAdmission) &&
+        (ownedCandidate || firstAdmission) &&
         (!legacyPresent || replacementCandidate) &&
-        knownListen === null &&
-        localOperation?.origin !== 'import' &&
-        (ownedCandidate !== null || !additionAuthority(o.live, t.rev, cid)) &&
+        !knownListen &&
+        localOperationOrigin !== 'import' &&
+        (ownedCandidate || !additionAuthority(o.live, t.rev, cid)) &&
         o.liveCandidates
       ) {
         recordLiveCandidate(db, {
@@ -497,6 +580,8 @@ function scrobbleVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, 
           cid,
           nowMs: now,
         });
+        batch?.ownedCandidateByIdentity.set(identityKey, true);
+        if (batch) batch.hasUriCandidate = true;
       }
       return before === null || before.cid !== cid;
     },
@@ -558,8 +643,9 @@ function batchVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, o: 
         return !retainedIdentities.has(identityKey) && !(old.listen_id !== null && excludedIds.has(old.listen_id));
       });
       if (replacementRev === null) {
-        for (const old of removed)
-          recordPendingRemoval(db, {
+        recordPendingRemovals(
+          db,
+          removed.map((old) => ({
             did: t.did,
             uri: t.uri,
             kind: 'scrobble',
@@ -569,7 +655,8 @@ function batchVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, o: 
             windowHi: t.rev,
             replacedByCid: cid,
             nowMs: now,
-          });
+          })),
+        );
       }
       if (replacementRev !== null) {
         executeListenRemovals(db, {
@@ -602,6 +689,23 @@ function batchVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, o: 
           ? [{ id: dropped.id, state: 'excluded' as const, reason: reasonText(dropped.reason) }]
           : [],
       );
+      const batchContext: BatchScrobbleContext = {
+        priorByUri,
+        admissions: new Set(),
+        enqueuedTracks: new Set(),
+        tracksWithSubmittedMbid: new Set(),
+        canonicalByIdentity: new Map(),
+        knownListenByIdentity: new Map(),
+        ownedCandidateByIdentity: new Map(),
+        hasUriCandidate: null,
+        localOperationLoaded: false,
+        localOperationOrigin: null,
+      };
+      const memberEvidenceIds = new Set(
+        db
+          .all<{ listen_id: string }>('SELECT listen_id FROM verified_membership WHERE record_uri=?', t.uri)
+          .map(({ listen_id }) => listen_id),
+      );
       for (const listen of batch.listens) {
         const uri = `${t.uri}#${listen.id}`;
         const singleRecord = { ...listen.row.record, $type: `${o.prefix}.scrobble` };
@@ -618,12 +722,7 @@ function batchVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, o: 
         const priorIdentityKey = priorItem
           ? projectionListenKey(t.did, priorItem.listened_at, priorItem.artist_key, priorItem.track_key)
           : undefined;
-        const memberEvidence = db.one(
-          'SELECT 1 AS hit FROM verified_membership WHERE record_uri=? AND listen_id=? LIMIT 1',
-          t.uri,
-          listen.id,
-        );
-        if (priorItem !== undefined || memberEvidence !== null)
+        if (priorItem !== undefined || memberEvidenceIds.has(listen.id))
           admitProjectedIdentity(db, {
             did: t.did,
             identityKey: projectionListenKey(t.did, listen.row.listenedAt, itemKeys.artist_key, itemKeys.track_key),
@@ -633,7 +732,7 @@ function batchVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, o: 
             path: additionAuthority(o.live, t.rev, cid) ? 'live' : 'snapshot',
             now,
           });
-        const verdict = scrobbleVerdict(db, itemTarget, cid, singleRecord, o);
+        const verdict = scrobbleVerdict(db, itemTarget, cid, singleRecord, o, batchContext, listen.row);
         if (!verdict.ok) {
           members.push({ id: listen.id, state: 'excluded', reason: verdict.reason });
           continue;
@@ -644,8 +743,8 @@ function batchVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, o: 
         if (
           old === undefined ||
           old.cid !== cid ||
-          old.artist_key !== musicKeyColumns(listen.row.artist, listen.row.track, listen.row.album).artist_key ||
-          old.track_key !== musicKeyColumns(listen.row.artist, listen.row.track, listen.row.album).track_key ||
+          old.artist_key !== itemKeys.artist_key ||
+          old.track_key !== itemKeys.track_key ||
           old.listened_at !== listen.row.listenedAt
         )
           changed = true;
