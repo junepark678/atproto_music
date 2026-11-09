@@ -492,19 +492,6 @@ function scrobbleVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, 
           nowMs: now,
         });
       }
-      // A candidate owns this canonical identity across metadata-only record
-      // revisions. Track the CID of the currently projected version while
-      // retaining its original admission and expiry window.
-      if (ownedCandidate !== null && !legacyPresent) {
-        db.run(
-          'UPDATE live_acceptance_candidates SET cid=?,member_uri=? WHERE uri=? AND identity_key=? AND expires_at_ms>?',
-          cid,
-          t.uri,
-          t.recordUri ?? t.uri,
-          identityKey,
-          now,
-        );
-      }
       return before === null || before.cid !== cid;
     },
   };
@@ -1209,10 +1196,50 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
     }
   }
   if (out.statsChanged) bumpStatsVersion(db, t.did);
+  if (t.present !== null && out.outcome === 'applied') refreshOwnedCandidates(db, t, Number(o.nowNs / 1_000_000n));
   if (t.present !== null && out.outcome === 'applied' && (t.kind === 'scrobble' || t.kind === 'scrobbleBatch')) {
     archiveAcceptedListenTombstones(db, t.did, t.uri, t.rev);
   }
   return out;
+}
+
+/** Keep an existing candidate aligned with an accepted projection revision.
+ * The exact canonical identity / love incarnation match prevents transferring
+ * ownership across replacements; the expiry predicate preserves the original
+ * admission window and never creates a candidate from projection history. */
+function refreshOwnedCandidates(db: Db, t: RecordTarget, nowMs: number): void {
+  if (t.kind === 'scrobble' || t.kind === 'scrobbleBatch') {
+    const listens = projectedListensOfRecord(db, t.did, t.uri);
+    for (const listen of listens) {
+      const identityKey = projectionListenKey(t.did, listen.listened_at, listen.artist_key, listen.track_key);
+      const ownerUri = listen.record_uri ?? listen.uri;
+      db.run(
+        `UPDATE live_acceptance_candidates SET cid=?,member_uri=?
+         WHERE uri=? AND identity_key=? AND kind='scrobble' AND expires_at_ms>?`,
+        listen.cid,
+        listen.uri,
+        ownerUri,
+        identityKey,
+        nowMs,
+      );
+    }
+  } else if (t.kind === 'love') {
+    const incarnation = db.one<{ incarnation_key: string; state: string }>(
+      'SELECT incarnation_key,state FROM love_incarnations WHERE uri=?',
+      t.uri,
+    );
+    const love = db.one<{ cid: string }>('SELECT cid FROM loves WHERE uri=? AND did=?', t.uri, t.did);
+    if (incarnation?.state !== 'present' || love === null) return;
+    db.run(
+      `UPDATE live_acceptance_candidates SET cid=?,member_uri=?
+       WHERE uri=? AND identity_key=? AND kind='love' AND expires_at_ms>?`,
+      love.cid,
+      t.uri,
+      t.uri,
+      incarnation.incarnation_key,
+      nowMs,
+    );
+  }
 }
 
 function archiveAcceptedListenTombstones(db: Db, did: string, uri: string, revision: string): void {
@@ -1384,33 +1411,6 @@ export function applyRecordProof(db: Db, proof: RecordProof, o: ApplyOptions): A
     },
     o,
   );
-  if (
-    proof.state === 'present' &&
-    o.liveCandidates &&
-    (kind === 'scrobble' || kind === 'scrobbleBatch') &&
-    applied.outcome === 'applied'
-  ) {
-    // A newer metadata CID can retain a previously owned canonical listen.
-    // Refresh only candidates whose identity is still projected by this record;
-    // keep their original creation and expiry timestamps.
-    const identityKeys = new Set(
-      projectedListensOfRecord(db, did, uri).map((row) =>
-        projectionListenKey(did, row.listened_at, row.artist_key, row.track_key),
-      ),
-    );
-    for (const candidate of db.all<{ identity_key: string }>(
-      'SELECT identity_key FROM live_acceptance_candidates WHERE uri=?',
-      uri,
-    )) {
-      if (!identityKeys.has(candidate.identity_key)) continue;
-      db.run(
-        'UPDATE live_acceptance_candidates SET cid=? WHERE uri=? AND identity_key=?',
-        proof.cid,
-        uri,
-        candidate.identity_key,
-      );
-    }
-  }
   advanceUser(db, did, rev, o.nowNs);
   return result(applied.outcome, applied.reason === undefined ? {} : { reason: applied.reason });
 }

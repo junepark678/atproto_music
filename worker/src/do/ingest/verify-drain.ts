@@ -295,8 +295,12 @@ function applyVerified(
   if (receiptNs === null) throw new Error(`hint ${row.uri} has an unparseable receipt_time`);
   try {
     return db.tx((): Outcome => {
+      // Transport and signature verification may cross evidence/candidate
+      // expiry. Evaluate every settlement fence against one clock sample taken
+      // inside the atomic transaction, after the async work has completed.
+      const settledAt = c.m.clock.nowMs();
       const current = readHint(db, row.uri);
-      const evidence = readLiveEvidence(db, row.uri, c.now);
+      const evidence = readLiveEvidence(db, row.uri, settledAt);
       if (isStale(evidence, proof.commit.rev)) {
         // Keep the projection and live state intact while using normal stale-PDS
         // backoff and snapshot fallback accounting.
@@ -313,7 +317,7 @@ function applyVerified(
       const result = applyRecordProof(db, proof, {
         receiptNs,
         prefix: c.prefix,
-        nowNs: fromMs(c.now),
+        nowNs: fromMs(settledAt),
         live: { random: c.m.random, evidence, legacyRev: legacy ? row.hint_rev : null },
         liveCandidates: true,
       });
@@ -328,7 +332,7 @@ function applyVerified(
           collection: row.collection,
           rkey: row.rkey,
           evidence,
-          nowMs: c.now,
+          nowMs: settledAt,
           random: c.m.random,
         });
         if (
@@ -340,18 +344,18 @@ function applyVerified(
       }
       if (result.admit) {
         // The opt-out was lifted: admit a fresh snapshot in the same transaction.
-        const a = admit(db, proof.commit.did, 'settings', c.now);
+        const a = admit(db, proof.commit.did, 'settings', settledAt);
         if (a.status === 'busy') throw new RollbackAdmission();
       } else if (result.outcome === 'ignored' && proof.collection === `${c.prefix}.settings`) {
         // A settings record of a DID we do not know (and that is not opting out): admission.
         if (!isSuppressed(db, row.did) && loadUser(db, row.did) === null) {
-          const a = admit(db, row.did, row.source, c.now);
+          const a = admit(db, row.did, row.source, settledAt);
           if (a.status === 'busy') throw new RollbackAdmission();
         }
       }
       if (current === null) return { outcome: result.outcome };
       const claimedNewer = current.hint_rev !== null && isTid(current.hint_rev) && proof.commit.rev < current.hint_rev;
-      const latestEvidence = readLiveEvidence(db, row.uri, c.now);
+      const latestEvidence = readLiveEvidence(db, row.uri, settledAt);
       const capturedWasSettled =
         latestEvidence === null &&
         capturedEvidence !== null &&

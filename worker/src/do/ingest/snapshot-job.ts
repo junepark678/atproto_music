@@ -801,11 +801,13 @@ class Slice {
         ? { key: e.key, cid: e.cid }
         : { key: e.key, cid: e.cid, record: recordValue(e.key, e.recordBytes) },
     );
-    const nowNs = fromMs(this.now);
     const result = this.write(
       'frontier_json = ?',
       [JSON.stringify(next)],
       () => {
+        // Snapshot I/O can outlive event and candidate TTLs. Sample the
+        // injected clock only once the chunk is inside its atomic settlement.
+        const nowNs = fromMs(this.m.clock.nowMs());
         // A body-less entry must still carry the stored CID (see the header, step 5).
         for (const e of entries) {
           if (e.record === undefined && storedCid(db, recordUri(this.did, ...keyParts(e.key))) !== e.cid) {
@@ -921,6 +923,7 @@ class Slice {
     const db = this.db;
     const pds = this.identity?.pds ?? null;
     const r = this.write('', [], (): SnapshotOutcome => {
+      const settledAt = this.m.clock.nowMs();
       const job = db.one<{ attempts: number; reason: string | null }>(
         "SELECT attempts, reason FROM repo_jobs WHERE did = ? AND kind = 'snapshot'",
         this.did,
@@ -930,7 +933,7 @@ class Slice {
         generation: this.generation,
         headRev: frontier.walk.headRev,
         accountActive: active,
-        nowNs: fromMs(this.now),
+        nowNs: fromMs(settledAt),
       });
       if (done.outcome === 'superseded') {
         db.run(
@@ -945,7 +948,7 @@ class Slice {
       }
       if (done.outcome === 'complete') {
         if (pds !== null) db.run('UPDATE users SET pds = ? WHERE did = ?', pds, this.did);
-        if (!active) scheduleStatusCheck(db, this.did, 'snapshot_inactive', this.now);
+        if (!active) scheduleStatusCheck(db, this.did, 'snapshot_inactive', settledAt);
       }
       if (done.outcome === 'stale' || job.attempts > 0) {
         // A request arrived during the walk (or a newer head owns the floor):

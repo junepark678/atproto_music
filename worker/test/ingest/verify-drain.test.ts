@@ -11,6 +11,7 @@ import { testKey } from '@atmusic/atproto/test-support/keys';
 import { type FixtureKit, followRkey } from '@atmusic/atproto/test-support/read-models';
 import { carResponse, type FixtureTransport } from '@atmusic/atproto/test-support/router-transport';
 import { SignedRepo } from '@atmusic/atproto/test-support/signed-repo';
+import { verifyRecordProof } from '@atmusic/atproto/verify/record-proof';
 import { describe, expect, it } from 'vitest';
 import { NODE_BUDGET, type SliceBudget } from '../../src/config';
 import type { Db } from '../../src/do/db';
@@ -19,6 +20,7 @@ import { recordLiveEvidence } from '../../src/do/ingest/live-evidence';
 import { drain, drainState } from '../../src/do/ingest/verify-drain';
 import { visibleFollowEdge, visibleScrobblesFrom } from '../../src/do/read/visibility';
 import { runDue, type TimerHandlers } from '../../src/do/timers';
+import { applyRecordProof } from '../../src/do/write/apply-record';
 import { seedUser } from '../write/support';
 import {
   counterValue,
@@ -97,6 +99,272 @@ const getRecordCalls = (pds: FakePds, rkey?: string) =>
 const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
 describe('verify drain', () => {
+  it('uses settlement time when evidence expires during the signed getRecord fetch', async () => {
+    const k = await kit();
+    const did = k.users.Alice.did;
+    const collection = k.collections.scrobble;
+    await k.externalPut('Alice', collection, 'expires-in-flight', scrobble(k, '2026-01-15T11:00:00Z'));
+    const initialCar = await k.repos.Alice.getRecordCar(collection, 'expires-in-flight');
+    const initialProof = await verifyRecordProof(initialCar, {
+      did,
+      collection,
+      rkey: 'expires-in-flight',
+      signingKey: k.users.Alice.key.didKey,
+    });
+    const nextRecord = scrobble(k, '2026-01-15T11:00:00Z', { album: 'Changed after expiry' });
+    const next = await k.externalPut('Alice', collection, 'expires-in-flight', nextRecord);
+    const nextCar = await k.repos.Alice.getRecordCar(collection, 'expires-in-flight');
+    const ttl = 6 * 60 * 60 * 1000;
+    await withIngestIndex(async (i) => {
+      seedUser(i.db, did);
+      i.db.run(
+        `INSERT INTO linked_accounts(id,did,service,remote_user,credential_ciphertext,key_id,created_at_ms,updated_at_ms)
+        VALUES('live-expiry-link',?,'lastfm','remote',X'00','fixture',?,?)`,
+        did,
+        T0,
+        T0,
+      );
+      i.db.tx(() =>
+        applyRecordProof(i.db, initialProof, {
+          prefix: 'com.example.atmusic',
+          receiptNs: BigInt(T0) * 1_000_000n,
+          nowNs: BigInt(T0) * 1_000_000n,
+          liveCandidates: true,
+        }),
+      );
+      const originalCandidate = i.db.one<{ cid: string; expires_at_ms: number }>(
+        'SELECT cid,expires_at_ms FROM live_acceptance_candidates',
+      )!;
+      k.clock.advance(ttl - 1);
+      enqueue(i.db, [
+        hint(k, did, collection, 'expires-in-flight', {
+          hintRev: next.rev,
+          live: { operation: 'update', cid: next.ops[0]!.cid },
+        }),
+      ]);
+      k.pds.Alice.fail(
+        { nsid: GET_RECORD },
+        {
+          kind: 'respond',
+          respond: () => {
+            k.clock.advance(2);
+            return carResponse(nextCar);
+          },
+        },
+      );
+      await drain(depsFor(i.db, k), k.clock.nowMs());
+      expect(i.db.all('SELECT * FROM forward_outbox')).toHaveLength(0);
+      expect(
+        i.db.one('SELECT cid FROM record_state WHERE uri=?', `at://${did}/${collection}/expires-in-flight`),
+      ).toEqual({ cid: next.ops[0]!.cid });
+      expect(i.db.one('SELECT cid,expires_at_ms FROM live_acceptance_candidates')).toEqual(originalCandidate);
+    });
+  });
+
+  it('does not authorize forwarding when signed proof transport crosses evidence TTL', async () => {
+    const k = await kit();
+    const did = k.users.Alice.did;
+    const collection = k.collections.scrobble;
+    await k.externalPut('Alice', collection, 'evidence-expires-in-flight', scrobble(k, '2026-01-15T11:00:00Z'));
+    const car = await k.repos.Alice.getRecordCar(collection, 'evidence-expires-in-flight');
+    await withIngestIndex(async (i) => {
+      seedUser(i.db, did);
+      i.db.run(
+        `INSERT INTO linked_accounts(id,did,service,remote_user,credential_ciphertext,key_id,created_at_ms,updated_at_ms)
+        VALUES('late-evidence-link',?,'lastfm','remote',X'00','fixture',?,?)`,
+        did,
+        T0,
+        T0,
+      );
+      const e = k.jetstream.events.at(-1);
+      if (e?.kind !== 'commit') throw new Error('expected signed commit evidence');
+      enqueue(i.db, [
+        hint(k, did, collection, 'evidence-expires-in-flight', {
+          hintRev: e.commit.rev,
+          live: { operation: 'create', cid: e.commit.cid },
+        }),
+      ]);
+      k.clock.advance(6 * 60 * 60 * 1000 - 1);
+      k.pds.Alice.fail(
+        { nsid: GET_RECORD },
+        {
+          kind: 'respond',
+          respond: () => {
+            k.clock.advance(2);
+            return carResponse(car);
+          },
+        },
+      );
+      await drain(depsFor(i.db, k), k.clock.nowMs());
+      expect(i.db.all('SELECT * FROM forward_outbox')).toHaveLength(0);
+      expect(i.db.all('SELECT * FROM scrobbles')).toHaveLength(1);
+    });
+  });
+
+  it('keeps conflict settlement sticky through replay, then accepts one newer revision', async () => {
+    const k = await kit();
+    const did = k.users.Alice.did;
+    const collection = k.collections.scrobble;
+    const first = await k.externalPut('Alice', collection, 'conflict-replay', scrobble(k, '2026-01-15T11:00:00Z'));
+    await withIngestIndex(async (i) => {
+      seedUser(i.db, did);
+      i.db.run(
+        `INSERT INTO linked_accounts(id,did,service,remote_user,credential_ciphertext,key_id,created_at_ms,updated_at_ms)
+        VALUES('conflict-replay-link',?,'lastfm','remote',X'00','fixture',?,?)`,
+        did,
+        T0,
+        T0,
+      );
+      const initialHint = hint(k, did, collection, 'conflict-replay', {
+        hintRev: first.rev,
+        live: { operation: 'create', cid: first.ops[0]!.cid! },
+      });
+      enqueue(i.db, [initialHint, { ...initialHint, live: { operation: 'update', cid: first.ops[0]!.cid! } }]);
+      await drain(depsFor(i.db, k), k.clock.nowMs());
+      expect(i.db.all('SELECT * FROM forward_outbox')).toHaveLength(0);
+      k.clock.advance(1000);
+      enqueue(i.db, [initialHint]);
+      await drain(depsFor(i.db, k), k.clock.nowMs());
+      expect(i.db.all('SELECT conflict_rev FROM live_record_evidence')).toEqual([{ conflict_rev: first.rev }]);
+      expect(i.db.all('SELECT * FROM forward_outbox')).toHaveLength(0);
+      const newer = await k.externalPut(
+        'Alice',
+        collection,
+        'conflict-replay',
+        scrobble(k, '2026-01-15T11:00:00Z', { album: 'newer' }),
+      );
+      enqueue(i.db, [
+        hint(k, did, collection, 'conflict-replay', {
+          hintRev: newer.rev,
+          live: { operation: 'update', cid: newer.ops[0]!.cid! },
+        }),
+      ]);
+      await drain(depsFor(i.db, k), k.clock.nowMs());
+      expect(i.db.all('SELECT * FROM forward_outbox')).toHaveLength(1);
+    });
+  });
+
+  it('re-arms an in-flight proof when evidence changes at the same injected clock instant', async () => {
+    const k = await kit();
+    const did = k.users.Alice.did;
+    const collection = k.collections.scrobble;
+    const old = await k.externalPut('Alice', collection, 'same-clock-evidence', scrobble(k, '2026-01-15T11:00:00Z'));
+    const oldCar = await k.repos.Alice.getRecordCar(collection, 'same-clock-evidence');
+    await withIngestIndex(async (i) => {
+      seedUser(i.db, did);
+      const initial = hint(k, did, collection, 'same-clock-evidence', {
+        hintRev: old.rev,
+        live: { operation: 'create', cid: old.ops[0]!.cid! },
+      });
+      enqueue(i.db, [initial]);
+      k.pds.Alice.fail(
+        { nsid: GET_RECORD },
+        {
+          kind: 'respond',
+          respond: () => {
+            enqueue(i.db, [
+              hint(k, did, collection, 'same-clock-evidence', {
+                hintRev: old.rev,
+                live: { operation: 'update', cid: old.ops[0]!.cid! },
+              }),
+            ]);
+            return carResponse(oldCar);
+          },
+        },
+      );
+      const first = await drain(depsFor(i.db, k), k.clock.nowMs());
+      expect(first.outcomes[0]?.outcome).toBe('rearmed');
+      expect(i.db.one('SELECT cid FROM scrobbles')).toEqual({ cid: old.ops[0]!.cid });
+      expect(i.db.all('SELECT uri FROM hints')).toEqual([{ uri: `at://${did}/${collection}/same-clock-evidence` }]);
+    });
+  });
+
+  it('retries an orphan-evidence page after a settlement transaction fails without advancing its cursor', async () => {
+    const { drainState } = await import('../../src/do/ingest/verify-drain');
+    const k = await kit();
+    await withIngestIndex(async (i) => {
+      for (let n = 0; n < 401; n++) {
+        const rkey = `orphan-retry-${String(n).padStart(3, '0')}`;
+        recordLiveEvidence(
+          i.db,
+          {
+            uri: `at://${k.users.Alice.did}/${k.collections.scrobble}/${rkey}`,
+            did: k.users.Alice.did,
+            collection: k.collections.scrobble,
+            rkey,
+            rev: '3333333333333',
+            action: 'create',
+            cid: 'bafya',
+          },
+          T0,
+        );
+      }
+      let failCommit = true;
+      const wrapped = {
+        ...i.db,
+        tx: <T>(fn: () => T): T =>
+          i.db.tx(() => {
+            const result = fn();
+            if (failCommit) throw new Error('injected commit failure');
+            return result;
+          }),
+      };
+      const m = depsFor(wrapped, k);
+      const budget = { ...m.config.budget, drainHints: 0 };
+      await expect(drain(m, k.clock.nowMs(), budget)).rejects.toThrow('injected commit failure');
+      expect(drainState(wrapped, budget).orphanCursor).toBeNull();
+      expect(i.db.all('SELECT * FROM hints')).toHaveLength(0);
+      failCommit = false;
+      for (const count of [200, 400, 401]) {
+        await drain(m, k.clock.nowMs(), budget);
+        expect(i.db.all('SELECT * FROM hints')).toHaveLength(count);
+      }
+      expect(drainState(wrapped, budget).orphanReconciled).toBe(true);
+    });
+  });
+
+  it('schedules snapshot fallback after five stale live-evidence proofs without applying stale projections', async () => {
+    const k = await kit();
+    const did = k.users.Alice.did;
+    const collection = k.collections.scrobble;
+    const old = await k.externalPut('Alice', collection, 'stale-fallback', scrobble(k, '2026-01-15T11:00:00Z'));
+    const oldCar = await k.repos.Alice.getRecordCar(collection, 'stale-fallback');
+    await k.externalPut(
+      'Alice',
+      collection,
+      'stale-fallback',
+      scrobble(k, '2026-01-15T11:00:00Z', { album: 'new head' }),
+    );
+    const latest = k.jetstream.events.at(-1);
+    if (latest?.kind !== 'commit') throw new Error('expected latest commit evidence');
+    await withIngestIndex(async (i) => {
+      seedUser(i.db, did);
+      const h = hint(k, did, collection, 'stale-fallback', {
+        hintRev: latest.commit.rev,
+        live: { operation: 'update', cid: latest.commit.cid! },
+      });
+      enqueue(i.db, [h]);
+      for (let attempt = 0; attempt < 5; attempt++) {
+        k.pds.Alice.fail({ nsid: GET_RECORD }, { kind: 'respond', respond: () => carResponse(oldCar) });
+        const report = await drain(depsFor(i.db, k), k.clock.nowMs());
+        if (attempt === 4) expect(report.outcomes[0]?.outcome).toBe('snapshot_scheduled');
+        else {
+          const due = i.db.one<{ due_at: number }>(
+            'SELECT due_at FROM hints WHERE uri=?',
+            `at://${did}/${collection}/stale-fallback`,
+          )?.due_at;
+          expect(due).toBeDefined();
+          k.clock.advance(due! - k.clock.nowMs());
+        }
+      }
+      expect(i.db.all('SELECT * FROM scrobbles')).toHaveLength(0);
+      expect(i.db.all("SELECT state,reason FROM repo_jobs WHERE kind='snapshot'")).toEqual([
+        { state: 'pending', reason: 'stale_live_evidence' },
+      ]);
+      expect(old.rev < latest.commit.rev).toBe(true);
+    });
+  });
+
   it('re-hints orphaned durable event evidence in one bounded process pass after restore', async () => {
     const k = await kit();
     const alice = k.users.Alice.did;
