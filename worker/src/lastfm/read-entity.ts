@@ -152,15 +152,21 @@ function enrichedArtistKey(call: LastfmCall, mbid: string): string | null {
 function enrichedAlbumWhere(call: LastfmCall, mbid: string): Where | null {
   const keys = matchedReleaseKeys(call.deps.db, mbid);
   if (keys.length === 0) return null;
+  // Candidate artists identify groups; every visible group member can determine its current display.
   const displays = call.deps.db.all<ScrobbleRowV2>(
     `WITH mk AS (SELECT json_extract(value,'$.artistKey') AS ak,json_extract(value,'$.albumKey') AS xk FROM json_each(?)),
+       album_groups AS MATERIALIZED (
+         SELECT DISTINCT coalesce(s.album_artist_key,s.artist_key) AS ak,s.album_key AS xk
+         FROM ${visibleScrobblesFrom('s', 'u')} JOIN mk ON mk.ak=s.artist_key AND mk.xk=s.album_key
+         WHERE s.album_key IS NOT NULL
+       ),
        ranked AS (
          SELECT s.*, row_number() OVER (
            PARTITION BY coalesce(s.album_artist_key,s.artist_key),s.album_key
            ORDER BY s.listened_at DESC,s.uri DESC
          ) AS rn
-         FROM ${visibleScrobblesFrom('s', 'u')} JOIN mk ON mk.ak=s.artist_key AND mk.xk=s.album_key
-         WHERE s.album_key IS NOT NULL AND s.album IS NOT NULL
+         FROM ${visibleScrobblesFrom('s', 'u')}
+         WHERE (coalesce(s.album_artist_key,s.artist_key),s.album_key) IN (SELECT ak,xk FROM album_groups)
        ) SELECT * FROM ranked WHERE rn=1`,
     JSON.stringify(keys),
   );

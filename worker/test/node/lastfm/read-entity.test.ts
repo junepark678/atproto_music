@@ -540,3 +540,75 @@ describe('Last.fm entity read methods', () => {
     expect(unknownUserTags.body.error).toBe(6);
   });
 });
+
+const M = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+const N = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+async function compilation(mode: string) {
+  const app = await entityApp();
+  const keys = await fixtureKeys();
+  for (const [did, key, artist, rkey, time] of [
+    [ALICE, keys.alice, 'Probe A', 'probea', '2026-01-14T10:00:00Z'],
+    [BOB, keys.bob, 'Probe B', 'probeb', '2026-01-14T11:00:00Z'],
+  ] as const) {
+    await put(app.db, new SignedRepo(did, key, { clock: fixedClock('2026-01-15T12:00:01Z') }), rkey, {
+      $type: SCROBBLE,
+      artist,
+      track: 'Probe Song',
+      album: 'Probe Hits',
+      albumArtist: 'Various Artists',
+      listenedAt: time,
+      createdAt: time,
+      ...(artist === 'Probe B' && mode === 'submitted' ? { releaseMbid: N } : {}),
+    });
+  }
+  app.db.run("UPDATE mb_tracks SET status='matched',release_mbid=? WHERE artist_key=?", M, artistKey('Probe A'));
+  if (mode === 'other' || mode === 'same' || mode === 'disputed') {
+    app.db.run(
+      "UPDATE mb_tracks SET status='matched',release_mbid=? WHERE artist_key=?",
+      mode === 'same' ? M : N,
+      artistKey('Probe B'),
+    );
+  }
+  if (mode === 'disputed')
+    app.db.run(
+      "INSERT INTO mb_tracks(artist_key,track_key,album_key,status,release_mbid,created_at_ms) VALUES(?,'other','probe hits','matched',?,1)",
+      artistKey('Probe B'),
+      'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+    );
+  if (mode === 'null-display') app.db.run("UPDATE scrobbles SET album=NULL WHERE rkey='probeb'");
+  if (mode === 'inactive') app.db.run('UPDATE users SET active=0 WHERE did=?', BOB);
+  if (mode === 'suppressed')
+    app.db.run("INSERT INTO suppression(did,suppressed_at) VALUES(?,'2026-01-15T12:00:00Z')", BOB);
+  if (mode === 'deleted')
+    app.db.run(
+      "INSERT INTO operations(id,did,kind,origin,priority,collection,rkey,state,due_at,created_at_ms,updated_at_ms) VALUES('probe-delete',?,'scrobble.delete','web',0,?,'probeb','queued',1,1,1)",
+      BOB,
+      SCROBBLE,
+    );
+  return app;
+}
+describe('compilation MBID aliases use the newest visible group display', () => {
+  it.each(['unmatched', 'other', 'submitted', 'disputed', 'null-display'])(
+    'rejects a stale compilation alias when newest artist is %s',
+    async (mode) => {
+      const app = await compilation(mode);
+      const byName = await get(app, { method: 'album.getInfo', artist: 'Various Artists', album: 'Probe Hits' });
+      const byId = await get(app, { method: 'album.getInfo', mbid: M });
+
+      if (mode === 'null-display') expect(byName.body.error).toBe(6);
+      else expect(byName.body.album.mbid).not.toBe(M);
+      expect(byId.body.error).toBe(6);
+    },
+  );
+  it.each(['same', 'inactive', 'suppressed', 'deleted'])(
+    'accepts correct compilation alias with %s newest artist',
+    async (mode) => {
+      const app = await compilation(mode);
+      const byName = await get(app, { method: 'album.getInfo', artist: 'Various Artists', album: 'Probe Hits' });
+      const byId = await get(app, { method: 'album.getInfo', mbid: M });
+      expect(byName.body.album.mbid).toBe(M);
+      expect(byId.status).toBe(200);
+      expect(byId.body.album).toEqual(byName.body.album);
+    },
+  );
+});
