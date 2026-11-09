@@ -1585,6 +1585,18 @@ const MIGRATION_A2_RETENTION_EPOCH: Migration = {
   ],
 };
 
+export const LOVE_IMPORT_SOURCE_CLASS_SQL =
+  "CASE WHEN source_service IN ('lastfm','lastfm_api','lastfm_json') THEN 1 " +
+  "WHEN source_service IN ('listenbrainz','listenbrainz_api','listenbrainz_zip') THEN 2 ELSE 0 END";
+
+const MIGRATION_LOVE_IMPORT_BRIDGE_SOURCE_CLASS: Migration = {
+  version: 54,
+  name: 'love_import_bridges_source_class',
+  statements: [
+    `CREATE INDEX love_import_bridges_source_class ON love_import_bridges(did,uri,incarnation_key,state,(${LOVE_IMPORT_SOURCE_CLASS_SQL}))`,
+  ],
+};
+
 export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_1,
   MIGRATION_2,
@@ -1639,6 +1651,7 @@ export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_LIVE_PENDING_REMOVAL_BOUNDS,
   MIGRATION_A2_AUTHORIZATION_BINDING,
   MIGRATION_A2_RETENTION_EPOCH,
+  MIGRATION_LOVE_IMPORT_BRIDGE_SOURCE_CLASS,
 ];
 
 /** The schema version this code expects. */

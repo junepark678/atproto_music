@@ -216,7 +216,18 @@ const GOLDEN_DDL: ReadonlyArray<{ type: 'table' | 'index'; name: string; sql: st
 
 // Index structure from SQLite's own catalog, independent of the DDL text:
 // [unique, partial, [[column, desc], ...]] for every key column.
-const EXPECTED_INDEX_SHAPE: Record<string, [number, number, Array<[string, number]>]> = {
+const EXPECTED_INDEX_SHAPE: Record<string, [number, number, Array<[string | null, number]>]> = {
+  love_import_bridges_source_class: [
+    0,
+    0,
+    [
+      ['did', 0],
+      ['uri', 0],
+      ['incarnation_key', 0],
+      ['state', 0],
+      [null, 0],
+    ],
+  ],
   follows_actor_subject: [
     0,
     0,
@@ -707,7 +718,7 @@ describe('migrate', () => {
   // database at that version is ready for that code, across restarts.
   // Later additive migrations keep the v2 compatibility floor.
   it('SCHEMA_VERSION includes additive batch provenance and remains compatible with v2 code', async () => {
-    expect(SCHEMA_VERSION).toBe(53);
+    expect(SCHEMA_VERSION).toBe(54);
     expect(MIGRATIONS.map((m) => [m.version, m.name])).toEqual([
       [1, 'initial_workers_schema'],
       [2, 'node_schema'],
@@ -762,6 +773,7 @@ describe('migrate', () => {
       [51, 'live_pending_removal_bounds'],
       [52, 'a2_authorization_binding'],
       [53, 'a2_retention_epoch'],
+      [54, 'love_import_bridges_source_class'],
     ]);
 
     const name = 'migrate-v2-ready';
@@ -827,6 +839,7 @@ describe('migrate', () => {
         { version: 51, name: 'live_pending_removal_bounds' },
         { version: 52, name: 'a2_authorization_binding' },
         { version: 53, name: 'a2_retention_epoch' },
+        { version: 54, name: 'love_import_bridges_source_class' },
       ]);
       expect(db.all('SELECT min_compatible_version FROM schema_compat')).toEqual([{ min_compatible_version: 2 }]);
       // A row in a migration-2 table survives reopening.

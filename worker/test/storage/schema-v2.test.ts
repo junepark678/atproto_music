@@ -872,7 +872,7 @@ const NEW_SCROBBLE_COLUMNS = cols<ScrobbleV2Columns>({
 });
 
 /** New named indexes: table, unique, partial, [column, desc] in key order. */
-const NEW_INDEXES: Record<string, [string, number, number, Array<[string, number]>]> = {
+const NEW_INDEXES: Record<string, [string, number, number, Array<[string | null, number]>]> = {
   forward_outbox_authorization: [
     'forward_outbox',
     0,
@@ -1414,6 +1414,18 @@ const NEW_INDEXES: Record<string, [string, number, number, Array<[string, number
       ['did', 0],
       ['uri', 0],
       ['state', 0],
+    ],
+  ],
+  love_import_bridges_source_class: [
+    'love_import_bridges',
+    0,
+    0,
+    [
+      ['did', 0],
+      ['uri', 0],
+      ['incarnation_key', 0],
+      ['state', 0],
+      [null, 0],
     ],
   ],
   love_import_bridges_incarnation: [
@@ -2259,6 +2271,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       "51|'live_pending_removal_bounds'",
       "52|'a2_authorization_binding'",
       "53|'a2_retention_epoch'",
+      "54|'love_import_bridges_source_class'",
     ]);
     // The new scrobble columns exist and are NULL on every migrated row.
     expect(after.newColumns).toHaveLength(expectedScrobbles);
@@ -2319,6 +2332,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       { version: 51, name: 'live_pending_removal_bounds' },
       { version: 52, name: 'a2_authorization_binding' },
       { version: 53, name: 'a2_retention_epoch' },
+      { version: 54, name: 'love_import_bridges_source_class' },
     ]);
     expect(after.compat).toEqual([{ singleton: 1, min_compatible_version: 2 }]);
     expect(after.newTablesEmpty).toEqual(['mb_cover_art_usage']);

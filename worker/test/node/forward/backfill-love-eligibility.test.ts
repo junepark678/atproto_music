@@ -8,6 +8,7 @@ import { fromMs } from '@atmusic/core/timestamp';
 import { describe, expect, it } from 'vitest';
 import { createBox } from '../../../src/crypto/box';
 import type { Db } from '../../../src/do/db';
+import { LOVE_IMPORT_SOURCE_CLASS_SQL } from '../../../src/do/schema';
 import { applyRecordProof } from '../../../src/do/write/apply-record';
 import { runLinkBackfill } from '../../../src/forward/backfill';
 import { saveLink } from '../../../src/forward/links';
@@ -578,6 +579,115 @@ describe('backfill love recording eligibility', () => {
       expect(h.db.one('SELECT backfill_state FROM linked_accounts WHERE id=?', listenbrainz)).toEqual({
         backfill_state: 'done',
       });
+    });
+  });
+
+  it('uses bounded indexes for retained provenance and import bridge exclusions', async () => {
+    await withHarness(async (h) => {
+      const provenanceSql = `SELECT op.origin,jobs.source FROM operations AS op
+        LEFT JOIN import_jobs AS jobs ON jobs.id=op.import_job_id
+        WHERE op.did=? AND op.collection=? AND op.rkey=? ORDER BY op.created_at_ms DESC LIMIT 1`;
+      for (const [id, createdAt, origin] of [
+        ['older-target', 1, 'lastfm'],
+        ['newer-target', 2, 'lastfm'],
+        ['newest-target', 3, 'import'],
+      ] as const) {
+        h.db.run(
+          `INSERT INTO operations
+           (id,did,kind,origin,priority,collection,rkey,state,due_at,created_at_ms,updated_at_ms)
+           VALUES(?,'did:plc:plan-test','love.put',?,0,?,'found-target','succeeded',0,?,?)`,
+          id,
+          origin,
+          LOVE,
+          createdAt,
+          createdAt,
+        );
+      }
+      for (const rkey of ['missing-target', 'found-target']) {
+        const plan = h.db
+          .all<{ detail: string }>(`EXPLAIN QUERY PLAN ${provenanceSql}`, h.alice, LOVE, rkey)
+          .map((row) => row.detail)
+          .join(' | ');
+        expect(plan).toContain('operations_record_target (did=? AND collection=? AND rkey=?)');
+        expect(plan).not.toMatch(/TEMP B-TREE|operations_did_state/);
+      }
+      expect(
+        h.db.one<{ origin: string; source: string | null }>(provenanceSql, 'did:plc:plan-test', LOVE, 'found-target'),
+      ).toEqual({ origin: 'import', source: null });
+
+      const bridgeSql = `SELECT 1 AS x FROM love_import_bridges INDEXED BY love_import_bridges_source_class
+        WHERE did=? AND uri=? AND incarnation_key=? AND state='bound'
+          AND (${LOVE_IMPORT_SOURCE_CLASS_SQL}) IN (0,?) LIMIT 1`;
+      const bridgePlan = h.db
+        .all<{ detail: string }>(
+          `EXPLAIN QUERY PLAN ${bridgeSql}`,
+          h.alice,
+          `at://${h.alice}/${LOVE}/rkey`,
+          'incarnation',
+          2,
+        )
+        .map((row) => row.detail)
+        .join(' | ');
+      expect(bridgePlan).toContain('COVERING INDEX love_import_bridges_source_class');
+      expect(bridgePlan).toContain('<expr>=?');
+      expect(bridgePlan).not.toMatch(/SCAN|TEMP B-TREE/);
+    });
+  });
+
+  it('matches the source-class index exclusion semantics for known, unknown, and non-text sources', async () => {
+    await withHarness(async (h) => {
+      const values: Array<string | null | number | ArrayBuffer> = [
+        null,
+        'lastfm',
+        'lastfm_api',
+        'lastfm_json',
+        'listenbrainz',
+        'listenbrainz_api',
+        'listenbrainz_zip',
+        'spotify',
+        '',
+        'LASTFM',
+        'lastfm ',
+        1,
+        Uint8Array.from(Buffer.from('lastfm')).buffer,
+      ];
+      for (const [i, source] of values.entries()) {
+        const uri = `at://${h.alice}/${LOVE}/bridge-${i}`;
+        h.db.run(
+          `INSERT INTO love_import_bridges(did,operation_id,uri,incarnation_key,source_service,state,created_at_ms)
+           VALUES(?,?,?,?,?,'bound',?)`,
+          h.alice,
+          `op-${i}`,
+          uri,
+          `inc-${i}`,
+          source,
+          i,
+        );
+        for (const [service, destination] of [
+          ['lastfm', 1],
+          ['listenbrainz', 2],
+        ] as const) {
+          const actual =
+            h.db.one<{ x: number }>(
+              `SELECT 1 AS x FROM love_import_bridges INDEXED BY love_import_bridges_source_class
+             WHERE did=? AND uri=? AND incarnation_key=? AND state='bound'
+               AND (${LOVE_IMPORT_SOURCE_CLASS_SQL}) IN (0,?) LIMIT 1`,
+              h.alice,
+              uri,
+              `inc-${i}`,
+              destination,
+            ) !== null;
+          const classified =
+            typeof source !== 'string'
+              ? null
+              : ['lastfm', 'lastfm_api', 'lastfm_json'].includes(source)
+                ? 'lastfm'
+                : ['listenbrainz', 'listenbrainz_api', 'listenbrainz_zip'].includes(source)
+                  ? 'listenbrainz'
+                  : null;
+          expect(actual).toBe(classified === null || classified === service);
+        }
+      }
     });
   });
 });

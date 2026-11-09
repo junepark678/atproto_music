@@ -6,6 +6,7 @@ import { parseRfc3339 } from '@atmusic/core/timestamp';
 import type { CoreExtension } from '../app/host';
 import type { LinkedAccountRow } from '../app/rows';
 import type { Db } from '../do/db';
+import { LOVE_IMPORT_SOURCE_CLASS_SQL } from '../do/schema';
 import { matchedRecordingMbid } from '../musicbrainz/store';
 import { enqueueForwards } from '../outbox/forward-enqueue';
 import type { ForwardRuntime } from './forwarder';
@@ -179,20 +180,17 @@ function payloadForHistoryRow(
     if (incarnation === null || incarnation.incarnation_key !== identityKey) return null;
     if (incarnation.path === 'import' && sourceService(incarnation.source_service) === null) return null;
     if (incarnation.path === 'import' && sourceService(incarnation.source_service) === link.service) return null;
-    const bridges = db.all<{ source_service: string | null }>(
-      `SELECT source_service FROM love_import_bridges INDEXED BY love_import_bridges_incarnation
-       WHERE did=? AND uri=? AND incarnation_key=? AND state='bound'`,
+    const destinationClass = link.service === 'lastfm' ? 1 : 2;
+    const excludedByBridge = db.one<{ x: number }>(
+      `SELECT 1 AS x FROM love_import_bridges INDEXED BY love_import_bridges_source_class
+       WHERE did=? AND uri=? AND incarnation_key=? AND state='bound'
+         AND (${LOVE_IMPORT_SOURCE_CLASS_SQL}) IN (0,?) LIMIT 1`,
       link.did,
       row.uri,
       incarnation.incarnation_key,
+      destinationClass,
     );
-    if (
-      bridges.some((bridge) => {
-        const source = sourceService(bridge.source_service);
-        return source === null || source === link.service;
-      })
-    )
-      return null;
+    if (excludedByBridge !== null) return null;
     if (latestExplicitLoveIntent(db, link.did, row.artist_key, row.track_key) === 'unlove') return null;
   }
   const marker = db.one<{ path: string; source_service: string | null; admission_seq: number }>(
