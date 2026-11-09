@@ -17,7 +17,6 @@
 // it with SIGKILL at each swap step. No real systemctl, network or
 // 127.2.0.1:8888 is involved.
 
-import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import {
   chmodSync,
@@ -27,7 +26,6 @@ import {
   mkdirSync,
   mkdtempSync,
   openSync,
-  readFileSync,
   rmSync,
   writeFileSync,
   writeSync,
@@ -38,28 +36,24 @@ import { dirname, join, resolve } from 'node:path';
 import * as sqlite from 'node:sqlite';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { fixtureKeys } from '@atmusic/atproto/test-support/keys';
-import { type FixtureTransport, routerTransport } from '@atmusic/atproto/test-support/router-transport';
+import { routerTransport } from '@atmusic/atproto/test-support/router-transport';
 import { SignedRepo } from '@atmusic/atproto/test-support/signed-repo';
 import { verifyRecordProof } from '@atmusic/atproto/verify/record-proof';
 import { type FixedClock, fixedClock } from '@atmusic/core/test-support/clock';
 import { seededRandom } from '@atmusic/core/test-support/random';
 import { fromMs } from '@atmusic/core/timestamp';
-import { build } from 'esbuild';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, expect, it } from 'vitest';
 import { FileRevocations, revocationLogPath } from '../../worker/src/app/revocations.ts';
 import { OAuthSessionStore } from '../../worker/src/bff/oauth-stores.ts';
 import { createWebSessions } from '../../worker/src/bff/sessions.ts';
 import { ensureAccount, renameAccount } from '../../worker/src/credentials/accounts.ts';
-import { createAppPassword, revokeAppPassword, verifyAppPassword } from '../../worker/src/credentials/app-passwords.ts';
+import { createAppPassword, revokeAppPassword } from '../../worker/src/credentials/app-passwords.ts';
 import { type Box, createBox } from '../../worker/src/crypto/box.ts';
 import { executeAuthorizedRemovals } from '../../worker/src/do/ingest/live-pending-removals';
 import { migrate } from '../../worker/src/do/migrate.ts';
-import { SCHEMA_VERSION, TABLE_CLASS } from '../../worker/src/do/schema.ts';
+import { SCHEMA_VERSION } from '../../worker/src/do/schema.ts';
 import { applyRecordProof } from '../../worker/src/do/write/apply-record.ts';
-import { FORWARD_LOVE_RECORDING_LOOKUP_SQL } from '../../worker/src/forward/forwarder.ts';
-import { deleteLink, getLinkById, openLinkCredential, saveLink } from '../../worker/src/forward/links.ts';
-import { admitForwardIdentity } from '../../worker/src/forward/projection.ts';
-import { enqueueCoverArt, putCoverArt } from '../../worker/src/musicbrainz/cover-art-store.ts';
+import { deleteLink, saveLink } from '../../worker/src/forward/links.ts';
 import { createBackups } from '../../worker/src/node/backup.ts';
 import { type ExitCode, type RunningServer, run } from '../../worker/src/node/run.ts';
 import { parseSecrets, type Secrets } from '../../worker/src/node/secrets.ts';
@@ -74,7 +68,7 @@ import {
 import { authorizedLiveOptions } from '../../worker/test/write/support.ts';
 import { type CommandResult, main, type RestoreStep } from '../admin/restore.ts';
 
-const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
+const _REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const BUSY_MS = 200;
 const DID_A = 'did:plc:aaaaaaaaaaaaaaaaaaaaaaaa';
 const DID_B = 'did:plc:bbbbbbbbbbbbbbbbbbbbbbbb';
@@ -121,7 +115,7 @@ function writeSecrets(path: string, doc: Record<string, unknown>): void {
 }
 
 /** A secrets document whose only encryption key is `e2` (the backup's sessions are sealed with e1). */
-function secretsWithoutE1(): Record<string, unknown> {
+function _secretsWithoutE1(): Record<string, unknown> {
   return { ...testSecretsDocument(), encryptionKeys: [{ id: 'e2', key: Buffer.alloc(32, 0x7e).toString('base64') }] };
 }
 
@@ -303,7 +297,7 @@ async function buildWorld(
 }
 
 /** Overwrites the live database with bytes that are not SQLite (a failed disk). */
-function corruptLive(world: World): Buffer {
+function _corruptLive(world: World): Buffer {
   const garbage = Buffer.alloc(8192, 0x5a);
   writeFileSync(world.dbPath, garbage);
   rmSync(`${world.dbPath}-wal`, { force: true });
@@ -315,7 +309,7 @@ function corruptLive(world: World): Buffer {
  * pair: the main file and its WAL as they were while it was open, with every
  * post-backup commit only in the WAL (no checkpoint).
  */
-function crashConsistentLive(world: World & { live: SqliteDb | null }): void {
+function _crashConsistentLive(world: World & { live: SqliteDb | null }): void {
   const live = world.live as SqliteDb;
   const copy = join(world.dir, 'crash');
   mkdirSync(copy);
@@ -334,7 +328,7 @@ function crashConsistentLive(world: World & { live: SqliteDb | null }): void {
 }
 
 /** Runs `read` on a scratch copy of `path` and its WAL, so the inspected files stay as they are. */
-function onScratchCopy<T>(world: World, label: string, path: string, read: (db: sqlite.DatabaseSync) => T): T {
+function _onScratchCopy<T>(world: World, label: string, path: string, read: (db: sqlite.DatabaseSync) => T): T {
   const scratch = join(world.dir, `scratch-${label}`);
   mkdirSync(scratch);
   copyFileSync(path, join(scratch, 'x.db'));
@@ -347,7 +341,7 @@ function onScratchCopy<T>(world: World, label: string, path: string, read: (db: 
   }
 }
 
-function integrity(db: sqlite.DatabaseSync, table?: string): string[] {
+function _integrity(db: sqlite.DatabaseSync, table?: string): string[] {
   const sql = table === undefined ? 'PRAGMA integrity_check' : `PRAGMA integrity_check("${table}")`;
   try {
     return (db.prepare(sql).all() as Array<Record<string, unknown>>).map((r) => String(Object.values(r)[0]));
@@ -357,14 +351,14 @@ function integrity(db: sqlite.DatabaseSync, table?: string): string[] {
 }
 
 /** The page numbers a WAL file holds frames for (32-byte header, then 24-byte frame headers). */
-function walPages(wal: Buffer, pageSize: number): Set<number> {
+function _walPages(wal: Buffer, pageSize: number): Set<number> {
   const pages = new Set<number>();
   for (let at = 32; at + 24 + pageSize <= wal.length; at += 24 + pageSize) pages.add(wal.readUInt32BE(at));
   return pages;
 }
 
 /** Overwrites one page of the main database file in place (a bad sector). */
-function damagePage(path: string, page: number, pageSize: number): void {
+function _damagePage(path: string, page: number, pageSize: number): void {
   const fd = openSync(path, 'r+');
   try {
     writeSync(fd, Buffer.alloc(pageSize, 0x07), 0, pageSize, (page - 1) * pageSize);
@@ -376,7 +370,7 @@ function damagePage(path: string, page: number, pageSize: number): void {
 // ---------------------------------------------------------------------------
 // The server and the fake systemd
 
-async function freePort(): Promise<number> {
+async function _freePort(): Promise<number> {
   const s = createNetServer();
   await new Promise<void>((r) => s.listen(0, '127.0.0.1', () => r()));
   const port = (s.address() as { port: number }).port;
@@ -441,7 +435,7 @@ async function stopServer(server: RunningServer): Promise<void> {
   }
 }
 
-function accepts(port: number): Promise<boolean> {
+function _accepts(port: number): Promise<boolean> {
   return new Promise((r) => {
     const s = connect({ host: '127.0.0.1', port });
     s.once('connect', () => {
@@ -584,16 +578,14 @@ function boxOf(doc: Record<string, unknown>): { box: Box; secrets: Secrets } {
 
 // ---------------------------------------------------------------------------
 
-import { trackKey } from '@atmusic/core/music-key';
 import { enqueueHints } from '../../worker/src/do/ingest/hints';
 import { runDeleteSlice } from '../../worker/src/forward/delete-forwarder';
 import { runForward } from '../../worker/src/forward/forwarder';
-import { projectionListenKey } from '../../worker/src/forward/projection';
 import { UpstreamPacing } from '../../worker/src/forward/upstream-pacing';
 import { nodeTimers } from '../../worker/src/node/alarm';
 
 let remoteDeletes = 0;
-let remoteSubmits = 0;
+let _remoteSubmits = 0;
 const restoreTransport = routerTransport({
   hosts: {
     'lb.example.test': async (req) => {
@@ -603,7 +595,7 @@ const restoreTransport = routerTransport({
         return Response.json({ status: 'ok' });
       }
       if (url.pathname === '/1/submit-listens') {
-        remoteSubmits++;
+        _remoteSubmits++;
         return Response.json({ status: 'ok' });
       }
       if (url.pathname.includes('/listens'))
@@ -618,14 +610,14 @@ const restoreTransport = routerTransport({
             ],
           },
         });
-      return Response.json({ error: 'unexpected ' + url.pathname }, { status: 404 });
+      return Response.json({ error: `unexpected ${url.pathname}` }, { status: 404 });
     },
   },
 });
 const random = seededRandom(555);
 async function signedWorld() {
   remoteDeletes = 0;
-  remoteSubmits = 0;
+  _remoteSubmits = 0;
   const world = await buildWorld();
   const db = openSqliteDb(world.dbPath, { busyTimeoutMs: BUSY_MS });
   const box = boxOf(world.secretsDoc).box;
@@ -636,7 +628,7 @@ async function signedWorld() {
   db.run('DELETE FROM operations');
   const keys = await fixtureKeys();
   const repo = new SignedRepo(DID_A, keys.alice, { clock: world.clock });
-  const collection = PREFIX + '.scrobble',
+  const collection = `${PREFIX}.scrobble`,
     rkey = '3krestoreproof';
   const record = {
     $type: collection,
@@ -817,8 +809,8 @@ it('D10 independent real restore replays both direct and delayed signed deletion
     now += 1000;
   }
   expect(deletes).toBe(1);
-  copyFileSync(x.world.dbPath + '.pre-restore', x.world.dbPath + '.first-pre-restore');
-  rmSync(x.world.dbPath + '.pre-restore');
+  copyFileSync(`${x.world.dbPath}.pre-restore`, `${x.world.dbPath}.first-pre-restore`);
+  rmSync(`${x.world.dbPath}.pre-restore`);
   const secondRestore = await restoreCli(x.world, systemd, [...baseArgs(x.world), '--no-ready-check']);
   expect(secondRestore.code, secondRestore.stderr).toBe(0);
   const replayDb = systemd.server!.server.db;
@@ -962,14 +954,14 @@ it('independent signed settings suppression clears only A retained work and rest
       },
     ]);
   expect(x.db.one('SELECT count(*) n FROM live_pending_removals')).toEqual({ n: 2 });
-  await x.repo.put(PREFIX + '.settings', 'self', {
-    $type: PREFIX + '.settings',
+  await x.repo.put(`${PREFIX}.settings`, 'self', {
+    $type: `${PREFIX}.settings`,
     indexing: 'disabled',
     createdAt: '2026-01-15T11:00:00Z',
   });
-  const disabled = await verifyRecordProof(await x.repo.getRecordCar(PREFIX + '.settings', 'self'), {
+  const disabled = await verifyRecordProof(await x.repo.getRecordCar(`${PREFIX}.settings`, 'self'), {
     did: DID_A,
-    collection: PREFIX + '.settings',
+    collection: `${PREFIX}.settings`,
     rkey: 'self',
     signingKey: x.repo.key.didKey,
   });

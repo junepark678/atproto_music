@@ -5,21 +5,14 @@ import { expect, it } from 'vitest';
 import type { CredentialDeps } from '../../../src/credentials/accounts';
 import { ensureAccount } from '../../../src/credentials/accounts';
 import type { Box } from '../../../src/crypto/box';
-import type { Db, SqlParam } from '../../../src/do/db';
+import type { Db } from '../../../src/do/db';
 import { enqueueHints } from '../../../src/do/ingest/hints';
-import { LIVE_EVIDENCE_TTL_MS } from '../../../src/do/ingest/live-evidence';
-import {
-  authorizePendingRemovals,
-  executeAuthorizedRemovals,
-  type PendingListen,
-  recordPendingRemoval,
-} from '../../../src/do/ingest/live-pending-removals';
+import { executeAuthorizedRemovals } from '../../../src/do/ingest/live-pending-removals';
 import { applyRecordProof } from '../../../src/do/write/apply-record';
 import type { DeleteForwardDeps } from '../../../src/forward/delete-forwarder';
 import { runDeleteSlice } from '../../../src/forward/delete-forwarder';
 import { type ForwardRuntime, runForward } from '../../../src/forward/forwarder';
 import type { ListenbrainzClient } from '../../../src/forward/listenbrainz-client';
-import { lateAccept } from '../../../src/forward/live-acceptance';
 import { projectionListenKey } from '../../../src/forward/projection';
 import { UpstreamPacing } from '../../../src/forward/upstream-pacing';
 import { enqueueForwards } from '../../../src/outbox/forward-enqueue';
@@ -35,7 +28,7 @@ import {
   scrobble,
   seedUser,
 } from '../../write/support';
-import { reopen, withMigratedDb } from '../support/node-db';
+import { withMigratedDb } from '../support/node-db';
 
 const record = scrobble({ artist: 'Björk', track: 'Jóga' });
 const second = Date.parse(record.listenedAt as string) / 1000;
@@ -69,7 +62,7 @@ function delivered(db: Db) {
 }
 const BATCH = `${SCROBBLE}Batch`;
 const uri = (key: string, batch = false) => `at://${ALICE}/${batch ? BATCH : SCROBBLE}/${key}`;
-const batchRecord = (ids = ['2222222222222'], track = record.track) => {
+const _batchRecord = (ids = ['2222222222222'], track = record.track) => {
   const { $type, ...entry } = record;
   return { $type: BATCH, createdAt: record.createdAt, listens: ids.map((id) => ({ ...entry, id, track })) };
 };
@@ -131,8 +124,6 @@ async function forward(db: Db) {
   const report = await runForward(runtime, NOW_MS);
   return { submissions, feedbacks, report };
 }
-
-import { readLiveEvidence } from '../../../src/do/ingest/live-evidence';
 
 const rng = seededRandom(888);
 const sweep = (db: Db, nowMs = NOW_MS) => db.tx(() => executeAuthorizedRemovals(db, { nowMs, random: rng, limit: 10 }));

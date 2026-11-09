@@ -9,8 +9,6 @@ import type { ModuleDeps } from '../../../src/do/contracts';
 import type { Db } from '../../../src/do/db';
 import { visibleScrobblesFrom } from '../../../src/do/read/visibility';
 import { applyRecordProof } from '../../../src/do/write/apply-record';
-import { applySnapshotChunk } from '../../../src/do/write/apply-snapshot';
-import { enqueueListenDelete, hasCanonicalListenSurvivor } from '../../../src/forward/delete-enqueue';
 import type { DeleteForwardDeps } from '../../../src/forward/delete-forwarder';
 import { runDeleteSlice } from '../../../src/forward/delete-forwarder';
 import type { ListenbrainzClient } from '../../../src/forward/listenbrainz-client';
@@ -19,7 +17,6 @@ import { UpstreamPacing } from '../../../src/forward/upstream-pacing';
 import { enqueueBatchListenDelete } from '../../../src/outbox/batch-delete-ops';
 import { enqueueScrobbleDelete } from '../../../src/outbox/delete-ops';
 import { enqueueForwards } from '../../../src/outbox/forward-enqueue';
-import { hasListenRemovalTombstones, isListenTombstoned, tombstoneListen } from '../../../src/sync/tombstones';
 import {
   ALICE,
   authorizedLiveOptions,
@@ -30,7 +27,6 @@ import {
   repoFor,
   SCROBBLE,
   scrobble,
-  seedSnapshotJob,
   seedUser,
 } from '../../write/support';
 import { withMigratedDb } from '../support/node-db';
@@ -65,7 +61,7 @@ function delivered(db: Db) {
   });
   db.run("UPDATE forward_outbox SET state='sent'");
 }
-const deletion = {
+const _deletion = {
   did: ALICE,
   identityKey: identity,
   eventKey: 'same-event',
@@ -92,9 +88,9 @@ const moduleOf = (db: Db) =>
     clock: { nowMs: () => NOW_MS },
     random: opRandom,
   }) as unknown as ModuleDeps;
-const apiSingle = (db: Db, key: string) =>
+const _apiSingle = (db: Db, key: string) =>
   enqueueScrobbleDelete(moduleOf(db), { did: ALICE, uri: uri(key), origin: 'web' });
-const apiBatch = (db: Db, key: string, ids: string[]) =>
+const _apiBatch = (db: Db, key: string, ids: string[]) =>
   enqueueBatchListenDelete(moduleOf(db), { did: ALICE, uri: uri(key, true), listenIds: ids, origin: 'web' });
 async function drain(db: Db) {
   let now = NOW_MS,
@@ -130,12 +126,8 @@ async function drain(db: Db) {
 }
 
 import { enqueueHints } from '../../../src/do/ingest/hints';
-import { LIVE_EVIDENCE_TTL_MS, readLiveEvidence } from '../../../src/do/ingest/live-evidence';
-import {
-  authorizePendingRemovals,
-  executeAuthorizedRemovals,
-  recordPendingRemoval,
-} from '../../../src/do/ingest/live-pending-removals';
+import { LIVE_EVIDENCE_TTL_MS } from '../../../src/do/ingest/live-evidence';
+import { executeAuthorizedRemovals } from '../../../src/do/ingest/live-pending-removals';
 
 const rng = seededRandom(888);
 const sweep = (db: Db, nowMs = NOW_MS) => db.tx(() => executeAuthorizedRemovals(db, { nowMs, random: rng, limit: 10 }));

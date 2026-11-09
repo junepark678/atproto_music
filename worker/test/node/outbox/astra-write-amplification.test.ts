@@ -12,7 +12,7 @@ it('independent: one event page must not rewrite the same 1000-member group 128 
    (uri,member_uri,removed_cid,kind,window_lo,window_hi,replaced_by_cid,identity_key,artist_key,track_key,artist,track,created_at_ms,expires_at_ms)
    VALUES(?,?,'old','scrobble','1111111111111','3333333333333','','key','a','t','A','T',1,9999999999999)`,
         uri,
-        uri + '#' + i,
+        `${uri}#${i}`,
       );
     let updates = 0,
       calls = 0;
