@@ -456,7 +456,6 @@ function batchVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, o: 
           const identityKey = projectionListenKey(t.did, old.listened_at, old.artist_key, old.track_key);
           if (retainedIdentities.has(identityKey) || (old.listen_id !== null && excludedIds.has(old.listen_id)))
             continue;
-          const second = BigInt(Math.floor(Date.parse(old.listened_at) / 1000)) * 1_000_000_000n;
           if (
             hasCanonicalListenSurvivor(db, {
               did: t.did,

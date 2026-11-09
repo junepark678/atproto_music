@@ -1,17 +1,21 @@
+import type { Clock } from '@atmusic/core/deps';
 import { trackKey } from '@atmusic/core/music-key';
 import { seededRandom } from '@atmusic/core/test-support/random';
-import { describe, expect, it } from 'vitest';
+import { expect, it } from 'vitest';
+import type { CredentialDeps } from '../../src/credentials/accounts';
+import { ensureAccount } from '../../src/credentials/accounts';
+import type { ModuleDeps } from '../../src/do/contracts';
 import type { Db } from '../../src/do/db';
 import { applyRecordProof } from '../../src/do/write/apply-record';
-import { ensureAccount } from '../../src/credentials/accounts';
 import { enqueueListenDelete, hasCanonicalListenSurvivor } from '../../src/forward/delete-enqueue';
+import type { DeleteForwardDeps } from '../../src/forward/delete-forwarder';
 import { runDeleteSlice } from '../../src/forward/delete-forwarder';
 import { projectionListenKey } from '../../src/forward/projection';
-import { enqueueForwards } from '../../src/outbox/forward-enqueue';
-import { enqueueScrobbleDelete } from '../../src/outbox/delete-ops';
-import { enqueueBatchListenDelete } from '../../src/outbox/batch-delete-ops';
-import { tombstoneListen } from '../../src/sync/tombstones';
 import { UpstreamPacing } from '../../src/forward/upstream-pacing';
+import { enqueueBatchListenDelete } from '../../src/outbox/batch-delete-ops';
+import { enqueueScrobbleDelete } from '../../src/outbox/delete-ops';
+import { enqueueForwards } from '../../src/outbox/forward-enqueue';
+import { tombstoneListen } from '../../src/sync/tombstones';
 import {
   ALICE,
   deleteProof,
@@ -32,7 +36,13 @@ const identity = projectionListenKey(ALICE, record.listenedAt as string, artistK
 const live = { ...OPTS, forwarding: { random: seededRandom(619) } };
 function seedLink(db: Db) {
   seedUser(db, ALICE);
-  ensureAccount({ db, clock: { nowMs: () => NOW_MS } } as any, { did: ALICE, verifiedHandle: null });
+  ensureAccount(
+    { db, clock: { nowMs: () => NOW_MS } satisfies Pick<CredentialDeps, 'db' | 'clock'> },
+    {
+      did: ALICE,
+      verifiedHandle: null,
+    },
+  );
   db.run(
     `INSERT INTO linked_accounts(id,did,service,remote_user,credential_ciphertext,key_id,created_at_ms,updated_at_ms)
     VALUES ('replacement-link',?,'listenbrainz','alice',X'00','fixture',?,?)`,
@@ -75,7 +85,12 @@ const batchRecord = (ids = ['2222222222222'], track = record.track) => {
 };
 const opRandom = seededRandom(123);
 const moduleOf = (db: Db) =>
-  ({ db, config: { prefix: 'com.example.atmusic' }, clock: { nowMs: () => NOW_MS }, random: opRandom }) as any;
+  ({
+    db,
+    config: { prefix: 'com.example.atmusic' },
+    clock: { nowMs: () => NOW_MS },
+    random: opRandom,
+  }) as unknown as ModuleDeps;
 const apiSingle = (db: Db, key: string) =>
   enqueueScrobbleDelete(moduleOf(db), { did: ALICE, uri: uri(key), origin: 'web' });
 const apiBatch = (db: Db, key: string, ids: string[]) =>
@@ -85,12 +100,12 @@ async function drain(db: Db) {
     deletes = 0,
     lookups = 0;
   const clock = { nowMs: () => now };
-  const deps: any = {
+  const deps: DeleteForwardDeps = {
     db,
     clock,
     random: seededRandom(9),
     box: { openText: () => 'fixture' },
-    pacing: new UpstreamPacing(clock as any),
+    pacing: new UpstreamPacing(clock as Clock),
     client: {
       listWindowPage: async () => {
         lookups++;
@@ -268,7 +283,7 @@ it('helper scopes did, canonical tuple, whole nanosecond storage second and exac
       { excluding: new Set([uri('a')]) },
     ])
       expect(hasCanonicalListenSurvivor(db, { ...deletion, ...override })).toBe(false);
-    expect(hasCanonicalListenSurvivor(db, { ...deletion, excluding: new Set([uri('a') + 'other']) })).toBe(true);
+    expect(hasCanonicalListenSurvivor(db, { ...deletion, excluding: new Set([`${uri('a')}other`]) })).toBe(true);
   });
 });
 it.each(['uri', 'live', 'single-replaced', 'batch-replaced'])(
@@ -297,7 +312,7 @@ it('SQL wildcard in historical identity is literal', async () => {
   await withMigratedDb((db) => {
     seedLink(db);
     db.tx(() => applyRecordProof(db, a, OPTS));
-    const cid = db.one<any>('SELECT cid FROM scrobbles')!.cid;
+    const cid = db.one<{ cid: string }>('SELECT cid FROM scrobbles')!.cid;
     tombstoneListen(db, {
       did: ALICE,
       identity: `uri:at://${ALICE}/${SCROBBLE}/%:${cid}`,
