@@ -1,17 +1,7 @@
-import type { Did } from '@atmusic/core/api-types';
+import type { Did, Link as LinkDto } from '@atmusic/core/api-types';
 import { sessionClient, sessionFetch } from '../session/client';
 
-export type Link = {
-  id: string;
-  service: 'lastfm' | 'listenbrainz';
-  remoteUser: string;
-  forwardScrobbles: boolean;
-  forwardNowPlaying: boolean;
-  status: 'active' | 'revoked' | 'error';
-  lastError: string | null;
-  createdAt: string;
-  updatedAt: string;
-};
+export type Link = LinkDto;
 export type ImportJob = {
   id: string;
   source: 'lastfm_api' | 'lastfm_json' | 'listenbrainz_api' | 'listenbrainz_zip';
@@ -58,6 +48,11 @@ async function mutate<T = void>(path: string, method: string, expectedDid: Did, 
 }
 const segment = (s: string) => encodeURIComponent(s);
 export const listLinks = () => get<{ items: Link[] }>('/api/v1/links');
+export const patchLink = (
+  id: string,
+  patch: Partial<Pick<Link, 'forwardScrobbles' | 'forwardNowPlaying'>> & { pullEnabled?: boolean },
+  expectedDid: Did,
+) => mutate<Link>(`/api/v1/links/${segment(id)}`, 'PATCH', expectedDid, patch);
 export const startLastfmLink = (expectedDid: Did) =>
   mutate<{ authorizeUrl: string }>('/api/v1/links/lastfm/start', 'POST', expectedDid);
 export const addListenbrainzLink = (token: string, expectedDid: Did) =>
