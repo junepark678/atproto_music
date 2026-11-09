@@ -59,6 +59,12 @@ Owner request:
   - Append-only. Never edit an applied migration.
   - Add every new table to `TABLES` and `TABLE_CLASS`.
   - The tracks run in parallel, so the slice that lands second renumbers its migration when it rebases.
+  - **No table rebuilds, and no relaxing of the additive guard** (planner ruling, 2026-11-08). The rule in `worker/test/storage/schema-v2.test.ts` stays as it is: every migration after 2 may only `CREATE TABLE`, `CREATE INDEX` or `ADD COLUMN`. A changed uniqueness rule must be expressed additively. For example, keep `forward_outbox` UNIQUE(`link_id`, `kind`, `dedupe_key`), add `generation INTEGER NOT NULL DEFAULT 1`, and prefix the dedupe key with the generation (`g<n>:`) for generations above 1.
+  - **Squash unmerged migrations** before readiness, down to the fewest that the logical changes need.
+  - **Assigned numbers:**
+    - Tracks N and M hold 15–21: N1 15, M1 16–18, M2 19–20, and M4 21 if it lands.
+    - Track S takes the next free number after the last N/M migration (22 if M4 lands) when it rebases onto them.
+    - The stack merges linearly: #173, #175, #176, #177, #178, #179, M4, then the S slices.
 - **Tests.**
   - Use `fixedClock` and `seededRandom`. Fake upstreams sit on reserved `.test` hosts, wired through `routerTransport` and fakes beside `worker/test/node/support/fake-{lastfm,listenbrainz}.ts`.
   - Extend the features test so each new client provably gets the pinned transport.
@@ -203,7 +209,15 @@ The owner's word is "synced". Our definition: canonical MusicBrainz data is reso
 - **Forwarding.**
   - A ListenBrainz love or unlove with no submitted MBID falls back to the matched recording MBID.
   - If the lookup is still pending, defer the row for up to 24 h. Do not ignore it.
+  - A deferred row must not block loves or unloves for other tracks. Strict ordering only has to hold per link and per love key.
   - Rows are marked `ignored` with `no_recording_mbid` only after the track resolves as unmatched.
+  - **The 24 h deadline** (planner ruling, 2026-11-08): if the track is still `pending` or `failed` after 24 h, the row becomes terminal `ignored` with the distinct reason `mbid_unresolved`.
+    - It is not marked `failed`: the user can do nothing about it, so it must not count as a sync failure.
+    - It does not stay retryable forever, because it would occupy the queue indefinitely.
+  - **A later match retries automatically.** When a track key later becomes `matched` (a 30-day re-lookup or a refresh), enqueue one fresh row per affected link generation. Affected links are those whose latest row for that love key was ignored as `mbid_unresolved` or `no_recording_mbid`.
+    - The fresh row carries the *current* love state, love or unlove. The latest state wins and history is not replayed.
+    - It has its own dedupe key.
+    - The work is bounded per resolver run.
 - **Now playing.** Add `NowPlaying.musicbrainz` from the exact local matched tuple on profile and followed-feed reads after visibility filtering. Batch the feed lookup, make no upstream request on reads, and preserve submitted values and existing sharing behavior.
 
 ### M3 Web display (base: M2)
