@@ -1014,14 +1014,9 @@ function allowAuthorizedUnlove(rt: ForwardRuntime, job: Job, now: number): boole
   const current = rt.db.one<{
     authorization_uri: string | null;
     authorization_rev: string | null;
-    authorization_conflicted: number;
-  }>(
-    "SELECT authorization_uri,authorization_rev,authorization_conflicted FROM forward_outbox WHERE id=? AND state='queued'",
-    row.id,
-  );
+  }>("SELECT authorization_uri,authorization_rev FROM forward_outbox WHERE id=? AND state='queued'", row.id);
   if (current === null || current.authorization_uri === null || current.authorization_rev === null) return true;
   const conflict =
-    current.authorization_conflicted !== 0 ||
     rt.db.one(
       'SELECT 1 FROM live_pending_removal_events WHERE uri=? AND rev=? AND conflicted=1 LIMIT 1',
       current.authorization_uri,
@@ -1035,7 +1030,7 @@ function allowAuthorizedUnlove(rt: ForwardRuntime, job: Job, now: number): boole
   if (!conflict) return true;
   rt.db.tx(() => {
     rt.db.run(
-      "UPDATE forward_outbox SET authorization_conflicted=1,state='ignored',last_error='authorization_conflicted',updated_at_ms=? WHERE id=? AND state='queued'",
+      "UPDATE forward_outbox SET state='ignored',last_error='authorization_conflicted',updated_at_ms=? WHERE id=? AND state='queued'",
       now,
       row.id,
     );

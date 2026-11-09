@@ -426,7 +426,6 @@ export interface ForwardOutboxRow {
   /** Immutable authorization for a live removal unlove, when present. */
   authorization_uri?: string | null;
   authorization_rev?: string | null;
-  authorization_conflicted?: number;
 }
 
 export interface ImportJobRow {

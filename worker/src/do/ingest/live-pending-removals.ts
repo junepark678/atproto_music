@@ -232,15 +232,27 @@ export const CONFLICT_RETENTION_SCAN_SQL = `SELECT window_hi,window_lo,replaced_
  ORDER BY window_hi,window_lo,replaced_by_cid,kind,member_uri,removed_cid LIMIT ?`;
 
 type RetentionCursor = [string, string, string, string, string, string];
-function retentionCursor(encoded: string): RetentionCursor {
-  if (encoded === '') return ['', '', '', '', '', ''];
+interface RetentionFrontier {
+  cursor: RetentionCursor;
+  complete: boolean;
+  hasMatch: boolean;
+}
+function retentionFrontier(encoded: string): RetentionFrontier {
+  if (encoded === '') return { cursor: ['', '', '', '', '', ''], complete: false, hasMatch: false };
   try {
-    const value: unknown = JSON.parse(encoded);
-    return Array.isArray(value) && value.length === 6 && value.every((part) => typeof part === 'string')
-      ? (value as RetentionCursor)
-      : ['', '', '', '', '', ''];
+    const value = JSON.parse(encoded) as Partial<RetentionFrontier>;
+    const cursor = value.cursor;
+    if (
+      Array.isArray(cursor) &&
+      cursor.length === 6 &&
+      cursor.every((part) => typeof part === 'string') &&
+      typeof value.complete === 'boolean' &&
+      typeof value.hasMatch === 'boolean'
+    )
+      return { cursor: cursor as RetentionCursor, complete: value.complete, hasMatch: value.hasMatch };
+    return { cursor: ['', '', '', '', '', ''], complete: false, hasMatch: false };
   } catch {
-    return ['', '', '', '', '', ''];
+    return { cursor: ['', '', '', '', '', ''], complete: false, hasMatch: false };
   }
 }
 
@@ -261,7 +273,7 @@ interface AuthorizationEvent {
 }
 
 /** Read and decide one bounded page of potentially intersecting windows. */
-function processAuthorizationPage(db: Db, event: AuthorizationEvent): number {
+function processAuthorizationPage(db: Db, event: AuthorizationEvent, nowMs: number): number {
   const page = db.all<{
     kind: 'scrobble' | 'love';
     window_lo: string;
@@ -298,8 +310,9 @@ function processAuthorizationPage(db: Db, event: AuthorizationEvent): number {
     if (event.conflicted) {
       if (row.conflicted_auth_rev !== null && row.conflicted_auth_rev >= event.rev) continue;
       db.run(
-        `UPDATE forward_outbox SET authorization_conflicted=1
+        `UPDATE forward_outbox SET state='ignored',last_error='authorization_conflicted',updated_at_ms=?
          WHERE authorization_uri=? AND authorization_rev=? AND kind='unlove' AND state='queued'`,
+        nowMs,
         event.uri,
         event.rev,
       );
@@ -392,8 +405,9 @@ export function authorizePendingRemovals(
   }
   if (conflict)
     db.run(
-      `UPDATE forward_outbox SET authorization_conflicted=1
+      `UPDATE forward_outbox SET state='ignored',last_error='authorization_conflicted',updated_at_ms=?
        WHERE authorization_uri=? AND authorization_rev=? AND kind='unlove' AND state='queued'`,
+      nowMs,
       event.uri,
       event.rev,
     );
@@ -403,7 +417,7 @@ export function authorizePendingRemovals(
     event.rev,
   );
   if (scan === null || scan.scan_complete) return 0;
-  return processAuthorizationPage(db, scan);
+  return processAuthorizationPage(db, scan, nowMs);
 }
 
 interface PendingRow {
@@ -643,13 +657,8 @@ export function executeAuthorizedRemovals(
     conflicted: number;
     expires_at_ms: number;
     cleanup_frontier: string;
-    cleanup_scan_complete: number;
-    cleanup_has_match: number;
   }>(
-    PENDING_EVENT_CLEANUP_PAGE_SQL.replace(
-      'expires_at_ms FROM',
-      'expires_at_ms,cleanup_frontier,cleanup_scan_complete,cleanup_has_match FROM',
-    ),
+    PENDING_EVENT_CLEANUP_PAGE_SQL.replace('expires_at_ms FROM', 'expires_at_ms,cleanup_frontier FROM'),
     args.nowMs,
     EVENT_CLEANUP_PAGE_SIZE,
   );
@@ -660,8 +669,8 @@ export function executeAuthorizedRemovals(
       continue;
     }
     let retainedPending = false;
-    if (event.conflicted !== 0 && event.cleanup_scan_complete === 0) {
-      const cursor = retentionCursor(event.cleanup_frontier);
+    const frontier = retentionFrontier(event.cleanup_frontier);
+    if (event.conflicted !== 0 && !frontier.complete) {
       const page = db.all<{
         window_hi: string;
         window_lo: string;
@@ -669,36 +678,40 @@ export function executeAuthorizedRemovals(
         kind: 'scrobble' | 'love';
         member_uri: string;
         removed_cid: string;
-      }>(CONFLICT_RETENTION_SCAN_SQL, event.uri, ...cursor, EVENT_CLEANUP_PAGE_SIZE);
-      const hasMatch =
-        event.cleanup_has_match !== 0 || page.some((row) => row.window_lo < event.rev && row.window_hi >= event.rev);
+      }>(CONFLICT_RETENTION_SCAN_SQL, event.uri, ...frontier.cursor, EVENT_CLEANUP_PAGE_SIZE);
+      const hasMatch = frontier.hasMatch || page.some((row) => row.window_lo < event.rev && row.window_hi >= event.rev);
       const last = page.at(-1);
       if (page.length === EVENT_CLEANUP_PAGE_SIZE && last) {
         db.run(
-          `UPDATE live_pending_removal_events SET cleanup_frontier=?,cleanup_has_match=?,cleanup_due_ms=? WHERE rowid=?`,
-          JSON.stringify([
-            last.window_hi,
-            last.window_lo,
-            last.replaced_by_cid,
-            last.kind,
-            last.member_uri,
-            last.removed_cid,
-          ]),
-          hasMatch ? 1 : 0,
+          `UPDATE live_pending_removal_events SET cleanup_frontier=?,cleanup_due_ms=? WHERE rowid=?`,
+          JSON.stringify({
+            cursor: [
+              last.window_hi,
+              last.window_lo,
+              last.replaced_by_cid,
+              last.kind,
+              last.member_uri,
+              last.removed_cid,
+            ],
+            complete: false,
+            hasMatch,
+          }),
           args.nowMs + RETAINED_EVENT_RECHECK_MS,
           event.rowid,
         );
         retainedPending = true;
       } else if (hasMatch) {
         db.run(
-          `UPDATE live_pending_removal_events SET cleanup_frontier='',cleanup_has_match=0,cleanup_due_ms=? WHERE rowid=?`,
+          `UPDATE live_pending_removal_events SET cleanup_frontier=?,cleanup_due_ms=? WHERE rowid=?`,
+          JSON.stringify({ cursor: ['', '', '', '', '', ''], complete: false, hasMatch: false }),
           args.nowMs + RETAINED_EVENT_RECHECK_MS,
           event.rowid,
         );
         retainedPending = true;
       } else {
         db.run(
-          'UPDATE live_pending_removal_events SET cleanup_scan_complete=1,cleanup_has_match=0 WHERE rowid=?',
+          'UPDATE live_pending_removal_events SET cleanup_frontier=? WHERE rowid=?',
+          JSON.stringify({ cursor: ['', '', '', '', '', ''], complete: true, hasMatch: false }),
           event.rowid,
         );
       }
@@ -752,7 +765,7 @@ export function executeAuthorizedRemovals(
         pendingEvent.uri,
         pendingEvent.rev,
       );
-    else processAuthorizationPage(db, pendingEvent);
+    else processAuthorizationPage(db, pendingEvent, args.nowMs);
   }
   if (
     db.one(

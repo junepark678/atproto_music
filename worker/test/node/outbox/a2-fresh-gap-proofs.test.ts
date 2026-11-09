@@ -712,19 +712,21 @@ it('fresh: production SQL bounds equal-hi tail seeks, event readiness, and retai
       frontierUri,
       frontierRev,
     );
-    expect(JSON.parse(firstFrontier!.cleanup_frontier)).toHaveLength(6);
+    expect(JSON.parse(firstFrontier!.cleanup_frontier).cursor).toHaveLength(6);
     expect(db.one('SELECT count(*) AS n FROM live_pending_removals WHERE uri=?', frontierUri)).toEqual({ n: 10_000 });
     for (let page = 1; page < 79; page++) {
       frontierNow += 60_000;
       cleanup();
     }
-    expect(
-      db.one(
-        'SELECT cleanup_frontier FROM live_pending_removal_events WHERE uri=? AND rev=?',
-        frontierUri,
-        frontierRev,
-      ),
-    ).toEqual({ cleanup_frontier: '' });
+    const completedPass = db.one<{ cleanup_frontier: string }>(
+      'SELECT cleanup_frontier FROM live_pending_removal_events WHERE uri=? AND rev=?',
+      frontierUri,
+      frontierRev,
+    );
+    expect(JSON.parse(completedPass!.cleanup_frontier)).toMatchObject({
+      cursor: ['', '', '', '', '', ''],
+      hasMatch: false,
+    });
     expect(
       db.one('SELECT count(*) AS n FROM live_pending_removal_events WHERE uri=? AND rev=?', frontierUri, frontierRev),
     ).toEqual({ n: 1 });

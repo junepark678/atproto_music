@@ -1568,12 +1568,9 @@ const MIGRATION_A2_AUTHORIZATION_BINDING: Migration = {
   statements: [
     'ALTER TABLE forward_outbox ADD COLUMN authorization_uri TEXT',
     'ALTER TABLE forward_outbox ADD COLUMN authorization_rev TEXT',
-    'ALTER TABLE forward_outbox ADD COLUMN authorization_conflicted INTEGER NOT NULL DEFAULT 0',
     'CREATE INDEX forward_outbox_authorization ON forward_outbox(authorization_uri,authorization_rev,state)',
     'CREATE INDEX live_pending_removal_events_uri_ready_order ON live_pending_removal_events(uri,scan_complete,created_at_ms,rev)',
     `ALTER TABLE live_pending_removal_events ADD COLUMN cleanup_frontier TEXT NOT NULL DEFAULT ''`,
-    'ALTER TABLE live_pending_removal_events ADD COLUMN cleanup_scan_complete INTEGER NOT NULL DEFAULT 0',
-    'ALTER TABLE live_pending_removal_events ADD COLUMN cleanup_has_match INTEGER NOT NULL DEFAULT 0',
   ],
 };
 
