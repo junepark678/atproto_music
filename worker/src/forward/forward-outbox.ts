@@ -20,10 +20,11 @@
 //
 // Order. Rows are read oldest first: `created_at_ms`, then `rowid` (the
 // insertion order, which breaks ties between rows accepted in the same
-// millisecond). For love/unlove, the oldest queued row for each normalized
-// love key is eligible; a backoff blocks later toggles of that same key, but
-// does not block another track. Thus each track's toggles reach upstream in
-// order even across retries.
+// millisecond). For love/unlove, the durable lane table schedules keys fairly,
+// while an indexed canonical head probe chooses the oldest queued row for the
+// key. A backoff blocks later toggles of that same key, but does not block a
+// different track. Thus each track's toggles reach upstream in order even
+// across retries.
 //
 // Retry (ADR §12.3): `forwardBackoffMs(n)` = 30 s·2^n + U[0, 25%] of it,
 // capped at 6 h, with n the row's attempts before this one. At most eight

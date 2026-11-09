@@ -14,7 +14,8 @@
 //    sends, in this order of preference:
 //    - its newest due now playing (older ones are superseded), once;
 //    - otherwise whichever is older of its due scrobbles and the next due
-//      love/unlove head for any love key (toggles stay ordered per track).
+//      first due durable love lane. Lane hints keep selection fair and bounded;
+//      the canonical oldest-row probe remains authoritative for each key.
 //      Last.fm scrobbles go as one signed track.scrobble of ≤ 50 rows, oldest
 //      first; ListenBrainz sends one due listen as `single` and a backlog as
 //      `import` of ≤ 100; a row whose import was refused with 400 is retried
@@ -81,6 +82,21 @@ import { canonicalForwardDedupeKey } from '../outbox/forward-key';
 import { loveKeyOf } from '../outbox/love-ops';
 import { nextDeleteWakeAt, runDeleteSlice } from './delete-forwarder';
 import {
+  HEAD_SQL,
+  LANE_PICK_SQL,
+  LOVE_KINDS,
+  MusicKeyError,
+  MAX_LOVE_FRAMING_PER_RUN,
+  MAX_LOVE_LANES_PER_LINK_PER_RUN,
+  UNFRAMED_SQL,
+  UNKEYED_SQL,
+  hasUnkeyedLoves,
+  noteForwardLoveCurrent,
+  refreshLoveLane,
+  touchLoveLane,
+  type QueuedRow as LoveQueuedRow,
+} from './love-lanes';
+import {
   backoffRows,
   clearLastfmKeyRejected,
   dueRows,
@@ -122,7 +138,8 @@ export const FORWARD_IDLE_POLL_MS = 10_000;
 /** Last error of a row whose ListenBrainz import was refused: it is sent alone next. */
 export const BATCH_REJECTED = 'batch_rejected';
 /** Local candidate work is bounded independently from upstream request count. */
-export const MAX_LOCAL_WORK_PER_RUN = 32;
+export const MAX_LOCAL_WORK_PER_RUN = MAX_LOVE_LANES_PER_LINK_PER_RUN;
+export { MAX_LOVE_FRAMING_PER_RUN };
 
 const RETRYABLE_LASTFM_CODES: ReadonlySet<number> = new Set([8, 11, 16, 29]);
 const REVOKING_LASTFM_CODES: ReadonlySet<number> = new Set([4, 9]);
@@ -161,7 +178,7 @@ type LinkRow = LinkedAccountRow;
 type Job =
   | { link: LinkRow; kind: 'nowplaying'; rows: [QueuedRow]; track: ForwardTrack }
   | { link: LinkRow; kind: 'scrobble'; rows: QueuedRow[]; listens: ForwardListen[] }
-  | { link: LinkRow; kind: 'love' | 'unlove'; rows: [QueuedRow]; track: ForwardTrack };
+  | { link: LinkRow; kind: 'love' | 'unlove'; rows: [QueuedRow]; track: ForwardTrack; lane: { artistKey: string; trackKey: string } };
 
 const lbKey = listenbrainzPacingKey;
 
@@ -282,36 +299,73 @@ function scrobbleJob(rt: ForwardRuntime, link: LinkRow, now: number): Job | null
   }
 }
 
-/** Bounded due head rows, preserving FIFO within each normalized key across backoff. */
-function queuedLoveHeads(db: Db, linkId: string, generation: number, now: number, limit: number): QueuedRow[] {
-  return db.all<QueuedRow>(
-    `SELECT f.*,f.rowid AS seq FROM forward_outbox f
-     WHERE f.link_id=? AND f.generation=? AND f.kind IN ('love','unlove') AND f.state='queued'
-       AND f.due_at<=? AND f.love_artist_key IS NOT NULL AND f.love_track_key IS NOT NULL
-       AND NOT EXISTS (
-         SELECT 1 FROM forward_outbox older
-         WHERE older.link_id=f.link_id AND older.generation=f.generation
-           AND older.state='queued' AND older.kind IN ('love','unlove')
-           AND older.love_artist_key=f.love_artist_key AND older.love_track_key=f.love_track_key
-           AND (older.created_at_ms<f.created_at_ms OR
-             (older.created_at_ms=f.created_at_ms AND older.rowid<f.rowid))
-       )
-     ORDER BY f.priority,f.created_at_ms,f.rowid LIMIT ?`,
-    linkId,
-    generation,
-    now,
-    limit,
-  );
+/** Frames legacy, resumed and raw-inserted love rows with a fixed per-link budget. */
+function frameLoveRows(rt: ForwardRuntime, link: LinkRow, now: number): { pending: boolean } {
+  return rt.db.tx(() => {
+    let budget = MAX_LOVE_FRAMING_PER_RUN;
+    for (const kind of LOVE_KINDS) {
+      while (budget > 0) {
+        const rows = rt.db.all<LoveQueuedRow>(UNKEYED_SQL, link.id, link.generation, kind, budget);
+        if (rows.length === 0) break;
+        for (const row of rows) {
+          budget -= 1;
+          const track = lovePayload(row);
+          let keys: readonly [string, string] | null = null;
+          if (track !== null) {
+            try { keys = trackKey(track.artist, track.track); } catch (error) { if (!(error instanceof MusicKeyError)) throw error; }
+          }
+          if (track === null || keys === null) {
+            noteLinkError(rt.db, link, 'invalid_payload', now, true);
+            settleRows(rt.db, [row.id], 'failed', now, 'invalid_payload', false, link.generation);
+            continue;
+          }
+          const [artistKeyValue, trackKeyValue] = keys;
+          rt.db.run('UPDATE forward_outbox SET love_artist_key=?,love_track_key=?,love_lane=1 WHERE rowid=? AND state=\'queued\'', artistKeyValue, trackKeyValue, row.seq);
+          touchLoveLane(rt.db, { linkId: link.id, generation: link.generation, artistKey: artistKeyValue, trackKey: trackKeyValue, priority: row.priority as 0 | 1, dueAt: row.due_at, createdAtMs: row.created_at_ms });
+          noteForwardLoveCurrent(rt.db, link.id, artistKeyValue, trackKeyValue, row.seq);
+        }
+      }
+    }
+    for (const kind of LOVE_KINDS) {
+      while (budget > 0) {
+        const rows = rt.db.all<LoveQueuedRow>(UNFRAMED_SQL, link.id, link.generation, kind, budget);
+        if (rows.length === 0) break;
+        for (const row of rows) {
+          budget -= 1;
+          rt.db.run('UPDATE forward_outbox SET love_lane=1 WHERE rowid=? AND state=\'queued\'', row.seq);
+          touchLoveLane(rt.db, { linkId: link.id, generation: link.generation, artistKey: row.love_artist_key!, trackKey: row.love_track_key!, priority: row.priority as 0 | 1, dueAt: row.due_at, createdAtMs: row.created_at_ms });
+        }
+      }
+    }
+    const pending = LOVE_KINDS.some((kind) =>
+      rt.db.all(UNKEYED_SQL, link.id, link.generation, kind, 1).length > 0 ||
+      rt.db.all(UNFRAMED_SQL, link.id, link.generation, kind, 1).length > 0,
+    );
+    return { pending };
+  });
 }
 
 function loveJob(rt: ForwardRuntime, link: LinkRow, now: number, budget: { remaining: number }): Job | null {
-  while (budget.remaining > 0) {
-    const heads = queuedLoveHeads(rt.db, link.id, link.generation, now, budget.remaining);
-    if (heads.length === 0) return null;
-    for (const head of heads) {
-      budget.remaining -= 1;
+  if (hasUnkeyedLoves(rt.db, link.id, link.generation)) return null;
+  for (const priority of [0, 1] as const) {
+    while (budget.remaining > 0) {
+      const lanes = rt.db.all<{ rowid: number; love_artist_key: string; love_track_key: string; priority: number; due_at: number; head_created_at_ms: number }>(
+        LANE_PICK_SQL, link.id, link.generation, priority, now, budget.remaining,
+      );
+      if (lanes.length === 0) break;
+      for (const lane of lanes) {
+        budget.remaining -= 1;
+        const head = rt.db.one<QueuedRow>(HEAD_SQL, link.id, link.generation, lane.love_artist_key, lane.love_track_key);
+        if (head === null) {
+          rt.db.run('DELETE FROM forward_love_lanes WHERE rowid=?', lane.rowid);
+          continue;
+        }
+        if (head.priority !== lane.priority || head.due_at !== lane.due_at || head.created_at_ms !== lane.head_created_at_ms) {
+          rt.db.run(`UPDATE forward_love_lanes SET priority=?,due_at=?,head_created_at_ms=? WHERE rowid=?`, head.priority, head.due_at, head.created_at_ms, lane.rowid);
+          if (head.due_at > now || head.priority !== priority) continue;
+        }
       const [entry] = parsed(rt, link, [head], lovePayload, now);
-      if (entry === undefined) continue;
+      if (entry === undefined) { refreshLoveLane(rt.db, link.id, link.generation, lane.love_artist_key, lane.love_track_key); continue; }
       if (link.service === 'listenbrainz' && entry[1].recordingMbid === undefined) {
         // An unlove names only the track; the MBID its love was sent with is known locally.
         const mbid = head.kind === 'unlove' ? knownRecordingMbid(rt.db, head, entry[1]) : null;
@@ -330,12 +384,14 @@ function loveJob(rt: ForwardRuntime, link: LinkRow, now: number, budget: { remai
           );
           if (resolved?.status === 'unmatched') {
             settleRows(rt.db, [head.id], 'ignored', now, 'no_recording_mbid', false);
+            refreshLoveLane(rt.db, link.id, link.generation, lane.love_artist_key, lane.love_track_key);
             continue;
           }
           enqueueTrack(rt.db, key, now);
           const deadline = head.created_at_ms + 24 * 60 * 60 * 1000;
           if (now >= deadline) {
             settleRows(rt.db, [head.id], 'ignored', now, 'mbid_unresolved', false);
+            refreshLoveLane(rt.db, link.id, link.generation, lane.love_artist_key, lane.love_track_key);
             continue;
           }
           rt.db.run(
@@ -344,12 +400,14 @@ function loveJob(rt: ForwardRuntime, link: LinkRow, now: number, budget: { remai
             now,
             head.id,
           );
+          rt.db.run('UPDATE forward_love_lanes SET due_at=? WHERE rowid=?', Math.min(deadline, now + 60_000), lane.rowid);
           continue;
         }
         entry[1].recordingMbid = local;
         withRecordingMbid(rt.db, head, local);
       }
-      return { link, kind: head.kind as 'love' | 'unlove', rows: [head], track: entry[1] };
+      return { link, kind: head.kind as 'love' | 'unlove', rows: [head], track: entry[1], lane: { artistKey: lane.love_artist_key, trackKey: lane.love_track_key } };
+      }
     }
   }
   return null;
@@ -458,18 +516,35 @@ function older(a: Job | null, b: Job | null): Job | null {
 }
 
 /** The next job to send at `now`, or null. */
-function pickJob(rt: ForwardRuntime, now: number, localWork: { remaining: number }): Job | null {
-  const candidates = rt.db.all<LinkRow & { oldest: number }>(
-    `SELECT l.*, min(f.created_at_ms) AS oldest FROM linked_accounts l
-     JOIN forward_outbox f ON f.link_id = l.id
-     WHERE l.status='active' AND f.generation=l.generation AND f.state='queued' AND f.due_at<=?
-     GROUP BY l.id ORDER BY min(f.priority),oldest, l.id`,
-    now,
-  );
-  for (const link of candidates) {
+export const KIND_CANDIDATE_SQL = `SELECT min(priority) AS priority,min(created_at_ms) AS created_at_ms FROM forward_outbox INDEXED BY forward_outbox_kind_due
+  WHERE link_id=? AND generation=? AND kind=? AND state='queued' AND due_at<=?`;
+export const LANE_FIRST_DUE_SQL = `SELECT priority,head_created_at_ms FROM forward_love_lanes INDEXED BY forward_love_lanes_due
+  WHERE link_id=? AND generation=? AND priority=? AND due_at<=? ORDER BY due_at,rowid LIMIT 1`;
+
+function pickJob(rt: ForwardRuntime, now: number, localWork: Map<string, { remaining: number }>): Job | null {
+  const links = rt.db.all<LinkRow>("SELECT * FROM linked_accounts WHERE status='active' ORDER BY id");
+  const candidates: Array<{ link: LinkRow; priority: number; oldest: number }> = [];
+  for (const link of links) {
+    const hints: Array<{ priority: number; created_at_ms: number } | null> = [];
+    for (const kind of ['nowplaying', 'scrobble'] as const) {
+      hints.push(rt.db.one(KIND_CANDIDATE_SQL, link.id, link.generation, kind, now));
+    }
+    if (!hasUnkeyedLoves(rt.db, link.id, link.generation)) {
+      for (const priority of [0, 1] as const) hints.push(rt.db.one(LANE_FIRST_DUE_SQL, link.id, link.generation, priority, now));
+    }
+    const due = hints.filter((hint): hint is { priority: number; created_at_ms: number } => hint !== null && hint.created_at_ms !== null);
+    if (due.length === 0) continue;
+    const priority = Math.min(...due.map((hint) => hint.priority));
+    const oldest = Math.min(...due.filter((hint) => hint.priority === priority).map((hint) => hint.created_at_ms));
+    candidates.push({ link, priority, oldest });
+  }
+  candidates.sort((a, b) => a.priority - b.priority || a.oldest - b.oldest || a.link.id.localeCompare(b.link.id));
+  for (const { link } of candidates) {
     if (!upstreamFree(rt, link, now)) continue;
+    let budget = localWork.get(link.id);
+    if (budget === undefined) { budget = { remaining: MAX_LOCAL_WORK_PER_RUN }; localWork.set(link.id, budget); }
     const job = rt.db.tx(
-      () => nowPlayingJob(rt, link, now) ?? older(scrobbleJob(rt, link, now), loveJob(rt, link, now, localWork)),
+      () => nowPlayingJob(rt, link, now) ?? older(scrobbleJob(rt, link, now), loveJob(rt, link, now, budget!)),
     );
     if (job !== null) return job;
   }
@@ -699,36 +774,30 @@ async function execute(rt: ForwardRuntime, job: Job, now: number): Promise<boole
   return true;
 }
 
+export const KIND_MIN_DUE_SQL = `SELECT min(due_at) AS due FROM forward_outbox INDEXED BY forward_outbox_kind_due
+  WHERE link_id=? AND generation=? AND kind=? AND state='queued'`;
+export const LANE_MIN_DUE_SQL = `SELECT min(due_at) AS due FROM forward_love_lanes INDEXED BY forward_love_lanes_due
+  WHERE link_id=? AND generation=? AND priority=?`;
+
 /** The earliest instant some active link has a due row and a free upstream; null when nothing is queued. */
 export function nextForwardDue(rt: ForwardRuntime, now: number): number | null {
-  const links = rt.db.all<LinkRow & { due: number | null }>(
-    `SELECT l.*, (SELECT min(f.due_at) FROM forward_outbox f
-                  WHERE f.link_id=l.id AND f.generation=l.generation AND f.state='queued'
-                    AND f.kind IN ('scrobble','nowplaying')) AS due
-     FROM linked_accounts l WHERE l.status = 'active'`,
-  );
+  const links = rt.db.all<LinkRow>("SELECT * FROM linked_accounts WHERE status='active' ORDER BY id");
   let next: number | null = null;
   let lastfmBacklog = false;
   for (const link of links) {
     if (link.service === 'lastfm' && rt.lastfm === null) continue;
-    const loveDue =
-      rt.db.one<{ due: number | null }>(
-        `SELECT min(f.due_at) AS due FROM forward_outbox f
-       WHERE f.link_id=? AND f.generation=? AND f.kind IN ('love','unlove') AND f.state='queued'
-         AND f.love_artist_key IS NOT NULL AND f.love_track_key IS NOT NULL
-         AND NOT EXISTS (
-           SELECT 1 FROM forward_outbox older
-           WHERE older.link_id=f.link_id AND older.generation=f.generation
-             AND older.state='queued' AND older.kind IN ('love','unlove')
-             AND older.love_artist_key=f.love_artist_key AND older.love_track_key=f.love_track_key
-             AND (older.created_at_ms<f.created_at_ms OR
-               (older.created_at_ms=f.created_at_ms AND older.rowid<f.rowid))
-         )`,
-        link.id,
-        link.generation,
-      )?.due ?? null;
-    const due = Math.min(link.due ?? Number.POSITIVE_INFINITY, loveDue ?? Number.POSITIVE_INFINITY);
-    if (due === Number.POSITIVE_INFINITY) continue;
+    let due: number | null = null;
+    for (const kind of ['scrobble', 'nowplaying'] as const) {
+      const value = rt.db.one<{ due: number | null }>(KIND_MIN_DUE_SQL, link.id, link.generation, kind)?.due ?? null;
+      if (value !== null) due = due === null ? value : Math.min(due, value);
+    }
+    if (!hasUnkeyedLoves(rt.db, link.id, link.generation)) {
+      for (const priority of [0, 1] as const) {
+        const value = rt.db.one<{ due: number | null }>(LANE_MIN_DUE_SQL, link.id, link.generation, priority)?.due ?? null;
+        if (value !== null) due = due === null ? value : Math.min(due, value);
+      }
+    }
+    if (due === null) continue;
     if (link.service === 'lastfm' && due <= now) lastfmBacklog = true;
     const at = Math.max(due, upstreamFreeAt(rt, link, now));
     next = next === null ? at : Math.min(next, at);
@@ -755,14 +824,25 @@ export async function runForward(
     // the clock's current time.
     let at = Math.max(now, rt.clock.nowMs());
     const expired = expireRows(rt.db, at);
+    if (expired.pending === true) {
+      return { skipped: false, requests: 0, listenbrainzLinkIds: new Set(), expired, nextDueMs: at + LASTFM_MIN_INTERVAL_MS };
+    }
+    let framingPending = false;
+    for (const link of rt.db.all<LinkRow>("SELECT * FROM linked_accounts WHERE status='active' ORDER BY id")) {
+      const framed = frameLoveRows(rt, link, at);
+      if (framed.pending) framingPending = true;
+    }
     let requests = 0;
-    const localWork = { remaining: MAX_LOCAL_WORK_PER_RUN };
+    const localWork = new Map<string, { remaining: number }>();
     const listenbrainzLinkIds = new Set<string>();
     // A pick that sends nothing (an unreadable credential revokes its link) still counts against this bound.
     for (let picks = 0; requests < max && picks < max * 4; picks++) {
       const job = pickJob(rt, at, localWork);
       if (job === null) break;
       const sent = await execute(rt, job, at);
+      if (job.kind === 'love' || job.kind === 'unlove') {
+        rt.db.tx(() => refreshLoveLane(rt.db, job.link.id, job.link.generation, job.lane.artistKey, job.lane.trackKey));
+      }
       if (sent) {
         requests += 1;
         if (job.link.service === 'listenbrainz') listenbrainzLinkIds.add(job.link.id);
@@ -770,6 +850,7 @@ export async function runForward(
       at = Math.max(at, rt.clock.nowMs());
     }
     let next = nextForwardDue(rt, at);
+    if (framingPending) next = Math.min(next ?? Number.POSITIVE_INFINITY, at + LASTFM_MIN_INTERVAL_MS);
     // Work left that this run could not send (a bound, or rows that turned unsendable): try again shortly.
     if (next !== null && next <= at && requests < max) next = at + LASTFM_MIN_INTERVAL_MS;
     return { skipped: false, requests, listenbrainzLinkIds, expired, nextDueMs: next };
