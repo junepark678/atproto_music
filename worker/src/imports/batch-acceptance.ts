@@ -2,14 +2,17 @@
 // imports and linked pull staging use this seam, so the byte boundary,
 // provenance admission, forwarding exclusion and import budget are identical.
 import { measureScrobbleBatch, scrobbleBatchSizer } from '@atmusic/atproto/scrobble-batch-size';
+import { listenKey } from '@atmusic/core/listen-key';
 import { newTid } from '@atmusic/core/record-key';
 import {
   newBatchPrefix,
   type ScrobbleBatchEntry,
   type ScrobbleBatchRecord,
   scrobbleBatchCollection,
+  validateScrobbleBatchRecord,
   verifyBatchBoundary,
 } from '@atmusic/core/scrobble-batch';
+import { fromMs, parseRfc3339 } from '@atmusic/core/timestamp';
 import type { ModuleDeps } from '../do/contracts';
 import { admitForwardIdentity } from '../forward/projection';
 import { enqueueForwards } from '../outbox/forward-enqueue';
@@ -21,6 +24,37 @@ import {
   type Prepared,
   prepare,
 } from '../outbox/operations';
+
+/** Resolve one validated batch member by its owner-scoped canonical listen identity. */
+export async function batchMemberForListenKey(
+  m: ModuleDeps,
+  args: { did: string; recordJson: string | null; listenKey: string },
+): Promise<string | null> {
+  const prefix = m.config.prefix;
+  if (prefix === null || args.recordJson === null) return null;
+  let payload: unknown;
+  try {
+    payload = JSON.parse(args.recordJson);
+  } catch {
+    return null;
+  }
+  const validated = validateScrobbleBatchRecord(payload, prefix, fromMs(m.clock.nowMs()));
+  if (!validated.ok || validated.row.dropped.length > 0) return null;
+  for (const member of validated.row.listens) {
+    const ns = parseRfc3339(member.row.record.listenedAt);
+    if (ns === null) return null;
+    const key = await listenKey({
+      did: args.did,
+      listenedAtNs: ns,
+      artist: member.row.record.artist,
+      track: member.row.record.track,
+    });
+    // A protocol removal has single-listen semantics; if a legacy payload
+    // repeats a canonical key, remove its first matching member only.
+    if (key === args.listenKey) return member.id;
+  }
+  return null;
+}
 
 export interface BatchCandidate<T> {
   member: T;

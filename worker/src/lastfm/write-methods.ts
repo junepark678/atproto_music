@@ -66,6 +66,7 @@ import type { ModuleDeps } from '../do/contracts';
 import { upsertNowPlaying } from '../do/read/now-playing';
 import { visibleScrobblesFrom } from '../do/read/visibility';
 import { musicKeyColumns } from '../do/write/keys';
+import { batchMemberForListenKey } from '../imports/batch-acceptance';
 import {
   commitUnsentBatchListenRemoval,
   enqueueBatchListenDelete,
@@ -484,18 +485,23 @@ export async function removeScrobble(m: ModuleDeps, args: RemoveScrobbleArgs): P
   const lower = toStorage(BigInt(args.timestamp) * NS_PER_SECOND);
   const upper = toStorage(BigInt(args.timestamp + 1) * NS_PER_SECOND);
   const unsentBatchPlans = new Map<string, NonNullable<Awaited<ReturnType<typeof prepareUnsentBatchListenRemoval>>>>();
+  const batchMembers = new Map<string, { entryId: string; recordJson: string | null }>();
   for (const operationId of createsWithKey(m, args.did, key)) {
     const candidate = loadOperation(m.db, operationId);
     if (candidate?.collection !== collections.scrobbleBatch) continue;
-    const entryId = m.db.one<{ entry_id: string }>(
-      `SELECT b.entry_id FROM batch_entry_items b JOIN import_items i
-         ON i.job_id=b.job_id AND i.seq=b.seq
-       WHERE b.operation_id=? AND i.dedupe_key=? LIMIT 1`,
-      candidate.id,
-      key,
-    )?.entry_id;
-    if (entryId === undefined) continue;
-    const plan = await prepareUnsentBatchListenRemoval(m, { did: args.did, operationId, listenId: entryId });
+    const entryId = await batchMemberForListenKey(m, {
+      did: args.did,
+      recordJson: candidate.record_json,
+      listenKey: key,
+    });
+    if (entryId === null) continue;
+    batchMembers.set(operationId, { entryId, recordJson: candidate.record_json });
+    const plan = await prepareUnsentBatchListenRemoval(m, {
+      did: args.did,
+      operationId,
+      listenId: entryId,
+      listenKey: key,
+    });
     if (plan !== null) unsentBatchPlans.set(operationId, plan);
   }
   const matches = m.db.tx((): RemoveMatch[] => {
@@ -561,12 +567,10 @@ export async function removeScrobble(m: ModuleDeps, args: RemoveScrobbleArgs): P
       handled.add(uri);
       const batchEntry =
         op.collection === collections.scrobbleBatch
-          ? m.db.one<{ entry_id: string }>(
-              `SELECT b.entry_id FROM batch_entry_items b JOIN import_items i
-            ON i.job_id=b.job_id AND i.seq=b.seq WHERE b.operation_id=? AND i.dedupe_key=? LIMIT 1`,
-              op.id,
-              key,
-            )?.entry_id
+          ? (() => {
+              const member = batchMembers.get(op.id);
+              return member !== undefined && member.recordJson === op.record_json ? member.entryId : undefined;
+            })()
           : undefined;
       if (op.collection === collections.scrobbleBatch && batchEntry === undefined) continue;
       const waiting = pendingDelete(m, args.did, op.collection, op.rkey, batchEntry);
@@ -576,8 +580,9 @@ export async function removeScrobble(m: ModuleDeps, args: RemoveScrobbleArgs): P
       }
       if (alreadyRemoved(m, args.did, op.collection, op.rkey, batchEntry)) continue;
       const plan = unsentBatchPlans.get(op.id);
-      if (plan !== undefined && commitUnsentBatchListenRemoval(m, plan) !== null) {
-        out.push({ kind: 'rewritten', operationId: op.id });
+      const batchRemoval = plan === undefined ? null : commitUnsentBatchListenRemoval(m, plan);
+      if (batchRemoval !== null) {
+        out.push({ kind: batchRemoval.state === 'cancelled' ? 'cancelled' : 'rewritten', operationId: op.id });
         continue;
       }
       const removed = removeScrobbleCreate(m, {
