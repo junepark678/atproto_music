@@ -192,6 +192,7 @@ export function cleanupForwardAdmissionsForSuppression(db: Db, did: string): voi
   const uriHi = `at://${did}0`;
   db.run('DELETE FROM live_record_evidence WHERE uri>=? AND uri<?', uriLo, uriHi);
   db.run('DELETE FROM live_acceptance_candidates WHERE uri>=? AND uri<?', uriLo, uriHi);
+  db.run('DELETE FROM live_pending_removals WHERE uri>=? AND uri<?', uriLo, uriHi);
   db.run(
     `DELETE FROM forward_admissions AS admission
      WHERE did=? AND NOT EXISTS (

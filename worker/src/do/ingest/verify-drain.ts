@@ -103,7 +103,8 @@ import {
   takeDue,
 } from './hints';
 import { cachedIdentity, resolveIdentity } from './identity-cache';
-import { countLiveAdmission, isStale, readLiveEvidence, sweepLiveAdmission } from './live-evidence';
+import { countLiveAdmission, isStale, LIVE_SWEEP_LIMIT, readLiveEvidence, sweepLiveAdmission } from './live-evidence';
+import { executeAuthorizedRemovals } from './live-pending-removals';
 import {
   FetchLimiter,
   hostOf,
@@ -335,6 +336,7 @@ function applyVerified(
           nowMs: settledAt,
           random: c.m.random,
         });
+        executeAuthorizedRemovals(db, { uri: row.uri, nowMs: settledAt, random: c.m.random, limit: 1 });
         if (
           evidence !== null &&
           proof.commit.rev >= (evidence.up_rev ?? '') &&
@@ -612,7 +614,13 @@ export async function drain(m: ModuleDeps, now: number, budget: SliceBudget = m.
   let committedOrphanCursor: string | null = null;
   let orphanReconciled = false;
   m.db.tx(() => {
-    sweepLiveAdmission(m.db, now);
+    const sweptAt = m.clock.nowMs();
+    sweepLiveAdmission(m.db, sweptAt);
+    const pendingSweep = executeAuthorizedRemovals(m.db, {
+      nowMs: sweptAt,
+      random: m.random,
+      limit: LIVE_SWEEP_LIMIT,
+    });
     if (!state.orphanReconciled) {
       const rows = m.db.all<{
         uri: string;
@@ -675,6 +683,8 @@ export async function drain(m: ModuleDeps, now: number, budget: SliceBudget = m.
       orphanReconciled = rows.length < 200;
     }
     scheduleDrainTimer(m.db, now);
+    if (pendingSweep.groups >= LIVE_SWEEP_LIMIT || pendingSweep.expired >= LIVE_SWEEP_LIMIT)
+      schedule(m.db, 'drain', sweptAt + DRAIN_MIN_INTERVAL_MS, { force: true });
   });
   if (committedOrphanCursor !== null) state.orphanCursor = committedOrphanCursor;
   if (orphanReconciled) state.orphanReconciled = true;

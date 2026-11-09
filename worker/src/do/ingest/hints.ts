@@ -38,6 +38,7 @@ import { recordEvent } from '../status';
 import { schedule } from '../timers';
 import { recordUri } from '../write/keys';
 import { type LiveAction, recordLiveEvidence } from './live-evidence';
+import { authorizePendingRemovals } from './live-pending-removals';
 
 export type HintSource = 'jetstream' | 'notify' | 'reconcile';
 
@@ -145,6 +146,16 @@ function upsertHint(db: Db, h: HintInput): string {
         rev: hintRev!,
         action: h.live.operation,
         ...(h.live.cid ? { cid: h.live.cid } : {}),
+      },
+      h.receiptMs,
+    );
+    authorizePendingRemovals(
+      db,
+      {
+        uri,
+        rev: hintRev!,
+        action: h.live.operation,
+        ...(h.live.cid === undefined ? {} : { cid: h.live.cid }),
       },
       h.receiptMs,
     );

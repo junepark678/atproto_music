@@ -132,9 +132,6 @@ describe('verify drain', () => {
           liveCandidates: true,
         }),
       );
-      const originalCandidate = i.db.one<{ cid: string; expires_at_ms: number }>(
-        'SELECT cid,expires_at_ms FROM live_acceptance_candidates',
-      )!;
       k.clock.advance(ttl - 1);
       enqueue(i.db, [
         hint(k, did, collection, 'expires-in-flight', {
@@ -157,7 +154,10 @@ describe('verify drain', () => {
       expect(
         i.db.one('SELECT cid FROM record_state WHERE uri=?', `at://${did}/${collection}/expires-in-flight`),
       ).toEqual({ cid: next.ops[0]!.cid });
-      expect(i.db.one('SELECT cid,expires_at_ms FROM live_acceptance_candidates')).toEqual(originalCandidate);
+      expect(i.db.one('SELECT cid,expires_at_ms FROM live_acceptance_candidates')).toBeNull();
+      expect(i.db.one("SELECT value FROM counters WHERE name='live_admission' AND label='candidate_expired'")).toEqual({
+        value: 1,
+      });
     });
   });
 

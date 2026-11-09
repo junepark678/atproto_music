@@ -8,6 +8,7 @@ import { projectionListenKey } from './projection';
 export function dropLiveState(db: Db, uri: string): void {
   db.run('DELETE FROM live_record_evidence WHERE uri=?', uri);
   db.run('DELETE FROM live_acceptance_candidates WHERE uri=?', uri);
+  db.run('DELETE FROM live_pending_removals WHERE uri=?', uri);
 }
 
 export function deleteLiveCandidates(db: Db, uri: string): void {

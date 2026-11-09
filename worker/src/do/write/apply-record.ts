@@ -55,7 +55,7 @@ import { reasonText, type ScrobbleRow, validateScrobbleRecord } from '@atmusic/c
 import { MAX_INGEST_CBOR_BYTES, validateScrobbleBatchRecord } from '@atmusic/core/scrobble-batch';
 import { isTid } from '@atmusic/core/syntax';
 import { toStorage } from '@atmusic/core/timestamp';
-import { enqueueListenDelete, hasCanonicalListenSurvivor } from '../../forward/delete-enqueue';
+import { executeListenRemovals } from '../../forward/live-removal-effects';
 import {
   admitForwardIdentity,
   admitProjectedIdentity,
@@ -67,12 +67,7 @@ import {
 import { enqueueTrack } from '../../musicbrainz/store';
 import { enqueueForwards } from '../../outbox/forward-enqueue';
 import { pullLoveAdmissionForUri, retirePullLoveAdmissionUri } from '../../sync/pull-love-admissions';
-import {
-  archiveMatchingLiveListenTombstones,
-  hasListenRemovalTombstones,
-  tombstoneListen,
-  tombstoneLove,
-} from '../../sync/tombstones';
+import { archiveMatchingLiveListenTombstones, hasListenRemovalTombstones, tombstoneLove } from '../../sync/tombstones';
 import type { Db } from '../db';
 import {
   absenceAuthority,
@@ -82,6 +77,7 @@ import {
   recordLiveCandidate,
   replacementAuthority,
 } from '../ingest/live-evidence';
+import { recordPendingRemoval } from '../ingest/live-pending-removals';
 import { advanceUser, bumpStatsVersion, isSuppressed, loadUser } from './account-state';
 import {
   albumArtistKey,
@@ -328,45 +324,38 @@ function scrobbleVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, 
       const replacementRev = replacementAuthority(o.live, t.priorRevision ?? null, t.rev, cid);
       if (replacementRev !== null) countLiveAdmission(db, 'replacement_authorized');
       if (
+        replacementRev === null &&
+        t.recordUri === undefined &&
+        before &&
+        priorIdentityKey !== undefined &&
+        priorIdentityKey !== identityKey
+      )
+        recordPendingRemoval(db, {
+          did: t.did,
+          uri: t.uri,
+          kind: 'scrobble',
+          row: { ...before, record_uri: null, listen_id: null, recording_mbid: null },
+          identityKey: priorIdentityKey,
+          windowLo: t.priorRevision ?? '',
+          windowHi: t.rev,
+          replacedByCid: cid,
+          nowMs: now,
+        });
+      if (
         replacementRev !== null &&
         t.recordUri === undefined &&
         before &&
         priorIdentityKey !== undefined &&
         priorIdentityKey !== identityKey
       ) {
-        const priorSecond = BigInt(Math.floor(Date.parse(before.listened_at) / 1000)) * 1_000_000_000n;
-        const removalScope = new Set([t.uri]);
-        if (
-          !hasCanonicalListenSurvivor(db, {
-            did: t.did,
-            listenedAt: Number(priorSecond / 1_000_000_000n),
-            artistKey: before.artist_key,
-            trackKey: before.track_key,
-            excluding: removalScope,
-          })
-        ) {
-          tombstoneListen(db, {
-            did: t.did,
-            identity: `single-replaced:${t.uri}:${cid}`,
-            second: Number(priorSecond / 1_000_000_000n),
-            artistKey: before.artist_key,
-            trackKey: before.track_key,
-            nowMs: now,
-          });
-          enqueueListenDelete(db, {
-            did: t.did,
-            identityKey: priorIdentityKey,
-            eventKey: `${priorIdentityKey}:${before.cid}:rev:${replacementRev}`,
-            listenedAt: Number(priorSecond / 1_000_000_000n),
-            artistKey: before.artist_key,
-            trackKey: before.track_key,
-            artist: before.artist,
-            track: before.track,
-            sourcePath: 'live',
-            now,
-            excluding: removalScope,
-          });
-        }
+        executeListenRemovals(db, {
+          did: t.did,
+          rows: [before],
+          authRev: replacementRev,
+          now,
+          identity: () => priorIdentityKey,
+          tombstoneIdentity: () => `single-replaced:${t.uri}:${cid}`,
+        });
       }
       const canonicalCollection = (canonical?.record_uri ?? canonical?.uri)?.split('/')[3];
       const provenance =
@@ -529,60 +518,51 @@ function batchVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, o: 
         listen_id: string | null;
         artist: string;
         track: string;
+        record_uri: string | null;
+        recording_mbid: string | null;
       }>(
-        'SELECT uri,cid,artist_key,track_key,listened_at,listen_id,artist,track FROM scrobbles WHERE record_uri = ?',
+        'SELECT uri,cid,artist_key,track_key,listened_at,listen_id,artist,track,record_uri,recording_mbid FROM scrobbles WHERE record_uri = ?',
         t.uri,
       );
       const priorByUri = new Map(prior.map((row) => [row.uri, row]));
       const now = Number(o.nowNs / 1_000_000n);
       const replacementRev = replacementAuthority(o.live, t.priorRevision ?? null, t.rev, cid);
       if (replacementRev !== null) countLiveAdmission(db, 'replacement_authorized');
-      if (replacementRev !== null) {
-        const removalScope = new Set(prior.map((old) => old.uri));
-        const retainedIdentities = new Set(
-          batch.listens.map((listen) => {
-            const keys = musicKeyColumns(listen.row.artist, listen.row.track, listen.row.album);
-            return projectionListenKey(t.did, listen.row.listenedAt, keys.artist_key, keys.track_key);
-          }),
-        );
-        // An excluded member is not verified absence of its previous listen.
-        const excludedIds = new Set(batch.dropped.map((entry) => entry.id));
-        for (const old of prior) {
-          const identityKey = projectionListenKey(t.did, old.listened_at, old.artist_key, old.track_key);
-          if (retainedIdentities.has(identityKey) || (old.listen_id !== null && excludedIds.has(old.listen_id)))
-            continue;
-          if (
-            hasCanonicalListenSurvivor(db, {
-              did: t.did,
-              listenedAt: Math.floor(Date.parse(old.listened_at) / 1000),
-              artistKey: old.artist_key,
-              trackKey: old.track_key,
-              excluding: removalScope,
-            })
-          )
-            continue;
-          tombstoneListen(db, {
+      const retainedIdentities = new Set(
+        batch.listens.map((listen) => {
+          const keys = musicKeyColumns(listen.row.artist, listen.row.track, listen.row.album);
+          return projectionListenKey(t.did, listen.row.listenedAt, keys.artist_key, keys.track_key);
+        }),
+      );
+      // An excluded member is not verified absence of its previous listen.
+      const excludedIds = new Set(batch.dropped.map((entry) => entry.id));
+      const removed = prior.filter((old) => {
+        const identityKey = projectionListenKey(t.did, old.listened_at, old.artist_key, old.track_key);
+        return !retainedIdentities.has(identityKey) && !(old.listen_id !== null && excludedIds.has(old.listen_id));
+      });
+      if (replacementRev === null) {
+        for (const old of removed)
+          recordPendingRemoval(db, {
             did: t.did,
-            identity: `batch-replaced:${old.uri}:${cid}`,
-            second: Math.floor(Date.parse(old.listened_at) / 1000),
-            artistKey: old.artist_key,
-            trackKey: old.track_key,
+            uri: t.uri,
+            kind: 'scrobble',
+            row: old,
+            identityKey: projectionListenKey(t.did, old.listened_at, old.artist_key, old.track_key),
+            windowLo: t.priorRevision ?? '',
+            windowHi: t.rev,
+            replacedByCid: cid,
             nowMs: now,
           });
-          enqueueListenDelete(db, {
-            did: t.did,
-            identityKey,
-            eventKey: `${identityKey}:${old.cid}:rev:${replacementRev}`,
-            listenedAt: Math.floor(Date.parse(old.listened_at) / 1000),
-            artistKey: old.artist_key,
-            trackKey: old.track_key,
-            artist: old.artist,
-            track: old.track,
-            sourcePath: 'live',
-            now,
-            excluding: removalScope,
-          });
-        }
+      }
+      if (replacementRev !== null) {
+        executeListenRemovals(db, {
+          did: t.did,
+          rows: removed,
+          authRev: replacementRev,
+          now,
+          identity: (old) => projectionListenKey(t.did, old.listened_at, old.artist_key, old.track_key),
+          tombstoneIdentity: (old) => `batch-replaced:${old.uri}:${cid}`,
+        });
       }
       const provenance = retainedRecordProvenance(db, t.did, t.collection, t.rkey);
       for (const old of prior) {
@@ -962,33 +942,28 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
     if (authRev !== null) countLiveAdmission(db, 'removal_authorized');
     else if (removedListens.length > 0 || (t.kind === 'love' && priorLove !== null))
       countLiveAdmission(db, 'removal_deferred');
-    if (authRev !== null && (t.kind === 'scrobble' || t.kind === 'scrobbleBatch')) {
+    if (authRev === null && (t.kind === 'scrobble' || t.kind === 'scrobbleBatch'))
       for (const listen of removedListens)
-        tombstoneListen(db, {
+        recordPendingRemoval(db, {
           did: t.did,
-          identity: `live:${listen.uri}:${listen.cid}`,
-          second: Math.floor(Date.parse(listen.listened_at) / 1000),
-          artistKey: listen.artist_key,
-          trackKey: listen.track_key,
-          nowMs: Number(o.nowNs / 1_000_000n),
+          uri: t.uri,
+          kind: 'scrobble',
+          row: listen,
+          identityKey: projectionListenKey(t.did, listen.listened_at, listen.artist_key, listen.track_key),
+          windowLo: priorRevision ?? '',
+          windowHi: t.rev,
+          replacedByCid: null,
+          nowMs: now,
         });
-      for (const listen of removedListens) {
-        const identityKey = projectionListenKey(t.did, listen.listened_at, listen.artist_key, listen.track_key);
-        enqueueListenDelete(db, {
-          did: t.did,
-          identityKey,
-          eventKey: `${identityKey}:${listen.cid}:rev:${authRev}`,
-          listenedAt: Math.floor(Date.parse(listen.listened_at) / 1000),
-          artistKey: listen.artist_key,
-          trackKey: listen.track_key,
-          artist: listen.artist,
-          track: listen.track,
-          sourcePath: 'live',
-          now,
-          excluding: new Set(removedListens.map((entry) => entry.uri)),
-        });
-      }
-    }
+    if (authRev !== null && (t.kind === 'scrobble' || t.kind === 'scrobbleBatch'))
+      executeListenRemovals(db, {
+        did: t.did,
+        rows: removedListens,
+        authRev,
+        now,
+        identity: (listen) => projectionListenKey(t.did, listen.listened_at, listen.artist_key, listen.track_key),
+        tombstoneIdentity: (listen) => `live:${listen.uri}:${listen.cid}`,
+      });
     const newerLoveIntent =
       authRev !== null && t.kind === 'love' && priorLove
         ? db.one(
@@ -1069,7 +1044,7 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
         Number(o.nowNs / 1_000_000n),
         t.uri,
       );
-      if (authRev !== null && firstAdmission && !apiEcho) {
+      if (firstAdmission && !apiEcho) {
         const local = db.one<{ origin: string }>(
           'SELECT origin FROM operations WHERE did=? AND collection=? AND rkey=? ORDER BY created_at_ms DESC LIMIT 1',
           t.did,
@@ -1087,25 +1062,52 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
         }
         const importMayForward = importSources.size > 0;
         const eligiblePath = loveIncarnation.path === 'live' || loveIncarnation.path === 'api' || importMayForward;
-        if (!unknownImportSource && eligiblePath && (local?.origin !== 'import' || importMayForward))
-          enqueueForwards(db, {
-            did: t.did,
-            items: [
-              {
-                kind: 'unlove',
-                operationId: `${identityKey}:rev:${authRev}`,
-                payload: {
-                  artist: priorLove.artist,
-                  track: priorLove.track,
-                  recordingMbid: priorLove.recording_mbid ?? undefined,
-                  origin: 'web',
+        if (!unknownImportSource && eligiblePath && (local?.origin !== 'import' || importMayForward)) {
+          if (authRev !== null)
+            enqueueForwards(db, {
+              did: t.did,
+              items: [
+                {
+                  kind: 'unlove',
+                  operationId: `${identityKey}:rev:${authRev}`,
+                  payload: {
+                    artist: priorLove.artist,
+                    track: priorLove.track,
+                    recordingMbid: priorLove.recording_mbid ?? undefined,
+                    origin: 'web',
+                  },
                 },
+              ],
+              ...(importSources.size > 0 ? { excludeSourceServices: [...importSources] } : {}),
+              now,
+              random: o.live!.random,
+            });
+          else
+            recordPendingRemoval(db, {
+              did: t.did,
+              uri: t.uri,
+              kind: 'love',
+              row: {
+                uri: t.uri,
+                record_uri: null,
+                listen_id: null,
+                cid: priorLove.cid,
+                listened_at: '',
+                artist_key: priorArtistKey,
+                track_key: priorTrackKey,
+                artist: priorLove.artist,
+                track: priorLove.track,
+                recording_mbid: priorLove.recording_mbid,
               },
-            ],
-            ...(importSources.size > 0 ? { excludeSourceServices: [...importSources] } : {}),
-            now: Number(o.nowNs / 1_000_000n),
-            random: o.live!.random,
-          });
+              identityKey: loveIncarnation.incarnation_key,
+              windowLo: priorRevision ?? '',
+              windowHi: t.rev,
+              replacedByCid: null,
+              loveSourceService: loveIncarnation.source_service,
+              loveImportSources: [...importSources],
+              nowMs: now,
+            });
+        }
       }
     }
     if (t.kind === 'love' && !priorLove) {

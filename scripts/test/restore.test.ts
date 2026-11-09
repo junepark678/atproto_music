@@ -51,6 +51,7 @@ import { createWebSessions } from '../../worker/src/bff/sessions.ts';
 import { ensureAccount, renameAccount } from '../../worker/src/credentials/accounts.ts';
 import { createAppPassword, revokeAppPassword, verifyAppPassword } from '../../worker/src/credentials/app-passwords.ts';
 import { type Box, createBox } from '../../worker/src/crypto/box.ts';
+import { executeAuthorizedRemovals } from '../../worker/src/do/ingest/live-pending-removals';
 import { migrate } from '../../worker/src/do/migrate.ts';
 import { SCHEMA_VERSION, TABLE_CLASS } from '../../worker/src/do/schema.ts';
 import { applyRecordProof } from '../../worker/src/do/write/apply-record.ts';
@@ -582,7 +583,7 @@ function boxOf(doc: Record<string, unknown>): { box: Box; secrets: Secrets } {
 // ---------------------------------------------------------------------------
 
 describe('restore.ts', () => {
-  it('keeps the newest live evidence and candidate when a readable restore merges an older backup', async () => {
+  it('keeps the newest live evidence, candidate, and pending removal when a readable restore merges an older backup', async () => {
     const uri = `at://${DID_A}/${PREFIX}.scrobble/evidence-restore`;
     const identity = 'listen:restore-candidate';
     const world = await buildWorld({
@@ -591,14 +592,21 @@ describe('restore.ts', () => {
          VALUES('${uri}','${DID_A}','${PREFIX}.scrobble','evidence-restore','2222222222222','create','bafyold',NULL,NULL,1,9999999999999)`,
         `INSERT INTO live_acceptance_candidates(uri,identity_key,kind,member_uri,cid,created_at_ms,expires_at_ms)
          VALUES('${uri}','${identity}','scrobble','${uri}','bafyold',1,9999999999999)`,
+        `INSERT INTO live_pending_removals
+         (uri,member_uri,removed_cid,kind,window_lo,window_hi,replaced_by_cid,identity_key,artist_key,track_key,artist,track,
+          authorized_rev,created_at_ms,expires_at_ms)
+         VALUES('${uri}','${uri}','bafyold','scrobble','1111111111111','2222222222222','','${identity}',
+          'artist-key','track-key','Artist','Track',NULL,1,9999999999999)`,
       ],
       liveSql: [
         `UPDATE live_record_evidence SET up_rev='3333333333333',up_action='update',up_cid='bafynew' WHERE uri='${uri}'`,
         `UPDATE live_acceptance_candidates SET cid='bafynew',created_at_ms=2 WHERE uri='${uri}' AND identity_key='${identity}'`,
+        `UPDATE live_pending_removals SET authorized_rev='2222222222222',expires_at_ms=9999999999998 WHERE uri='${uri}'`,
       ],
     });
     expect(TABLE_CLASS.live_record_evidence).toBe('non-derived');
     expect(TABLE_CLASS.live_acceptance_candidates).toBe('non-derived');
+    expect(TABLE_CLASS.live_pending_removals).toBe('non-derived');
     const systemd = new FakeSystemd(world, { servicePort: null });
     await systemd.boot();
     const result = await restoreCli(world, systemd, [...baseArgs(world), '--no-ready-check']);
@@ -620,6 +628,20 @@ describe('restore.ts', () => {
         cid: 'bafynew',
         created_at_ms: 2,
       });
+      expect(
+        db.one('SELECT window_lo,window_hi,authorized_rev,expires_at_ms FROM live_pending_removals WHERE uri=?', uri),
+      ).toEqual({
+        window_lo: '1111111111111',
+        window_hi: '2222222222222',
+        authorized_rev: '2222222222222',
+        expires_at_ms: 9999999999998,
+      });
+      expect(
+        executeAuthorizedRemovals(db, { nowMs: world.clock.nowMs(), random: seededRandom(0xa2), limit: 1 }),
+      ).toMatchObject({
+        groups: 1,
+      });
+      expect(db.all('SELECT * FROM live_pending_removals')).toHaveLength(0);
     } finally {
       db.close();
     }
