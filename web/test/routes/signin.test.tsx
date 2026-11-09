@@ -1,4 +1,5 @@
 import { render } from 'preact';
+import { act } from 'preact/test-utils';
 import { describe, expect, it, vi } from 'vitest';
 import { App } from '../../src/app';
 import { createDefaultServices, type ScreenServices, ServicesProvider } from '../../src/components/services';
@@ -22,6 +23,13 @@ function services(
   };
 }
 
+async function settleRouteImport(): Promise<void> {
+  // AppRouter loads the screen through import.meta.glob and preact-iso's lazy().
+  // Wait for Vite's tracked dynamic import, then let Preact commit its render.
+  await vi.dynamicImportSettled();
+  await act(async () => undefined);
+}
+
 describe('web/test/routes/signin.test.tsx', () => {
   it('reauthenticates in a separate window so the signed-out tab can keep its in-memory draft', async () => {
     (window as unknown as { happyDOM: { setURL(url: string): void } }).happyDOM.setURL('https://music.test/signin');
@@ -37,21 +45,28 @@ describe('web/test/routes/signin.test.tsx', () => {
       </ServicesProvider>,
       root,
     );
-    await vi.waitFor(() => expect(root.querySelector('form')).not.toBeNull());
-    expect(root.textContent).toContain('Your previous session has ended');
-    const input = root.querySelector<HTMLInputElement>('[name="handle"]')!;
-    input.value = 'alice.test';
-    input.dispatchEvent(new Event('input', { bubbles: true }));
-    root.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
-    await vi.waitFor(() => expect(reauthenticate).toHaveBeenCalledWith('alice.test'));
-    expect(signIn).not.toHaveBeenCalled();
-    expect(root.querySelector<HTMLButtonElement>('button[type="submit"]')?.disabled).toBe(true);
-    window.dispatchEvent(new Event('focus'));
-    await vi.waitFor(() =>
-      expect(root.querySelector<HTMLButtonElement>('button[type="submit"]')?.disabled).toBe(false),
-    );
-    render(null, root);
-    root.remove();
+    try {
+      // The shell renders synchronously while the real /signin screen is still
+      // loading. This cold-route control makes readiness depend on that import.
+      expect(root.querySelector('form')).toBeNull();
+      await settleRouteImport();
+      expect(root.querySelector('form')).not.toBeNull();
+      expect(root.textContent).toContain('Your previous session has ended');
+      const input = root.querySelector<HTMLInputElement>('[name="handle"]')!;
+      input.value = 'alice.test';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      root.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      await vi.waitFor(() => expect(reauthenticate).toHaveBeenCalledWith('alice.test'));
+      expect(signIn).not.toHaveBeenCalled();
+      expect(root.querySelector<HTMLButtonElement>('button[type="submit"]')?.disabled).toBe(true);
+      window.dispatchEvent(new Event('focus'));
+      await vi.waitFor(() =>
+        expect(root.querySelector<HTMLButtonElement>('button[type="submit"]')?.disabled).toBe(false),
+      );
+    } finally {
+      render(null, root);
+      root.remove();
+    }
   });
 
   it('keeps the sign-in retry form visible for a reauth_required server session', async () => {
@@ -83,13 +98,17 @@ describe('web/test/routes/signin.test.tsx', () => {
       </ServicesProvider>,
       root,
     );
-    await vi.waitFor(() => expect(root.querySelector('form')).not.toBeNull());
-    expect(root.textContent).toContain('Your previous session has ended');
-    expect(root.textContent).not.toContain('You are signed in as');
-    root.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
-    await vi.waitFor(() => expect(reauthenticate).toHaveBeenCalled());
-    render(null, root);
-    root.remove();
+    try {
+      await settleRouteImport();
+      expect(root.querySelector('form')).not.toBeNull();
+      expect(root.textContent).toContain('Your previous session has ended');
+      expect(root.textContent).not.toContain('You are signed in as');
+      root.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      await vi.waitFor(() => expect(reauthenticate).toHaveBeenCalled());
+    } finally {
+      render(null, root);
+      root.remove();
+    }
   });
 
   it('opens the reauthentication popup synchronously before requesting the authorize URL', async () => {
@@ -133,11 +152,15 @@ describe('web/test/routes/signin.test.tsx', () => {
       </ServicesProvider>,
       root,
     );
-    await vi.waitFor(() => expect(root.textContent).toContain('Authorization was cancelled'));
-    expect(root.textContent).not.toContain('secret-code');
-    expect(root.textContent).not.toContain('secret-token');
-    expect(root.querySelector('button')?.textContent).toBe('Try again');
-    render(null, root);
-    root.remove();
+    try {
+      await settleRouteImport();
+      expect(root.textContent).toContain('Authorization was cancelled');
+      expect(root.textContent).not.toContain('secret-code');
+      expect(root.textContent).not.toContain('secret-token');
+      expect(root.querySelector('button')?.textContent).toBe('Try again');
+    } finally {
+      render(null, root);
+      root.remove();
+    }
   });
 });
