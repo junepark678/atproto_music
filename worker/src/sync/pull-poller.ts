@@ -912,7 +912,7 @@ async function runLovePage(
   return { requested: 1, staged: items.length, held: writer.held, nextDueMs: due };
 }
 
-/** One bounded timer run. It uses at most one remote request currently; remaining budget is reserved for follow-up pagers. */
+/** One bounded timer run, with at most three remote requests and no budget charge for pacing deferrals. */
 export async function runLinkedLastfmPull(
   deps: LinkedPullPollerDeps,
   now = deps.clock.nowMs(),

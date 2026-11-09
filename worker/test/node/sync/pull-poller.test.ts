@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { createBox, linkedAad } from '../../../src/crypto/box';
-import { runLinkedLastfmPull } from '../../../src/sync/pull-poller';
+import { type LinkedPullPollerDeps, runLinkedLastfmPull } from '../../../src/sync/pull-poller';
 import type { PullWriterAvailability } from '../../../src/sync/pull-writer';
 import { remoteRecords, SCROBBLE, T0, withHarness } from '../outbox/support';
 import { FakeLastfm, type LastfmListen, type LastfmLoved } from '../support/fake-lastfm';
@@ -43,7 +43,7 @@ async function setup(h: Parameters<Parameters<typeof withHarness>[0]>[0]) {
     available: false,
     reason: 'session_missing',
   });
-  const deps = () => ({
+  const deps = (): LinkedPullPollerDeps => ({
     moduleDeps: h.m,
     db: h.db,
     clock: h.m.clock,
