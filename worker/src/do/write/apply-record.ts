@@ -279,6 +279,8 @@ interface BatchScrobbleContext {
   hasUriCandidate: boolean | null;
   localOperationLoaded: boolean;
   localOperationOrigin: string | null;
+  recordStatePresent: boolean | null;
+  provenanceByIdentity: Map<string, ReturnType<typeof retainedRecordProvenance>>;
 }
 
 function scrobbleVerdict(
@@ -361,10 +363,14 @@ function scrobbleVerdict(
         );
         batch?.canonicalByIdentity.set(identityKey, canonical);
       }
-      const legacyPresent =
-        canonical !== null ||
-        before !== null ||
-        db.one('SELECT 1 AS hit FROM record_state WHERE uri=? LIMIT 1', t.uri) !== null;
+      let legacyPresent = canonical !== null || before !== null;
+      if (!legacyPresent) {
+        if (batch && batch.recordStatePresent !== null) legacyPresent = batch.recordStatePresent;
+        else {
+          legacyPresent = db.one('SELECT 1 AS hit FROM record_state WHERE uri=? LIMIT 1', t.uri) !== null;
+          if (batch) batch.recordStatePresent = legacyPresent;
+        }
+      }
       const now = Number(o.nowNs / 1_000_000n);
       const replacementRev = replacementAuthority(o.live, t.priorRevision ?? null, t.rev, cid);
       if (replacementRev !== null) countLiveAdmission(db, 'replacement_authorized');
@@ -404,12 +410,18 @@ function scrobbleVerdict(
         });
       }
       const canonicalCollection = (canonical?.record_uri ?? canonical?.uri)?.split('/')[3];
-      const provenance =
-        canonical && canonicalCollection
-          ? retainedRecordProvenance(db, t.did, canonicalCollection, canonical.rkey)
-          : legacyPresent
-            ? retainedRecordProvenance(db, t.did, t.collection, t.rkey)
-            : null;
+      let provenance: ReturnType<typeof retainedRecordProvenance>;
+      if (batch?.provenanceByIdentity.has(identityKey))
+        provenance = batch.provenanceByIdentity.get(identityKey) ?? null;
+      else {
+        provenance =
+          canonical && canonicalCollection
+            ? retainedRecordProvenance(db, t.did, canonicalCollection, canonical.rkey)
+            : legacyPresent
+              ? retainedRecordProvenance(db, t.did, t.collection, t.rkey)
+              : null;
+        batch?.provenanceByIdentity.set(identityKey, provenance);
+      }
       if (batch && batch.hasUriCandidate === null)
         batch.hasUriCandidate =
           db.one('SELECT 1 AS hit FROM live_acceptance_candidates WHERE uri=? LIMIT 1', t.recordUri ?? t.uri) !== null;
@@ -700,6 +712,8 @@ function batchVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, o: 
         hasUriCandidate: null,
         localOperationLoaded: false,
         localOperationOrigin: null,
+        recordStatePresent: null,
+        provenanceByIdentity: new Map(),
       };
       const memberEvidenceIds = new Set(
         db
