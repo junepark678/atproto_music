@@ -17,7 +17,7 @@ import { routerTransport } from '@atmusic/atproto/test-support/router-transport'
 import { type FixedClock, fixedClock } from '@atmusic/core/test-support/clock';
 import { seededRandom } from '@atmusic/core/test-support/random';
 import { afterEach, expect, it } from 'vitest';
-import { MemoryRevocations } from '../../../src/app/revocations';
+import { MemoryRevocations, replayRevocations } from '../../../src/app/revocations';
 import type { ForwardOutboxRow } from '../../../src/app/rows';
 import { ensureAccount } from '../../../src/credentials/accounts';
 import type { SqlParam } from '../../../src/do/db';
@@ -255,6 +255,66 @@ it('link deletion and account disconnect remove paging cursors before deleting u
   );
   expect(disconnected.app.db.one('SELECT 1 FROM forward_unlove_lookup_progress')).toBeNull();
   expect(disconnected.app.db.one('SELECT 1 FROM linked_accounts WHERE id=?', didLink)).toBeNull();
+});
+it('revocation replay clears only caches for links actually deleted and rolls back atomically', async () => {
+  for (const kind of ['linked_account', 'account_disconnect'] as const) {
+    const w = await world();
+    const linkId = w.link();
+    const at = w.clock.nowMs();
+    operation(w, 'cached-love', 'love.put', { artist: 'Band', track: 'Song', recordingMbid: MBID }, at - 1);
+    operation(w, 'cached-delete', 'love.delete', null, at);
+    w.enqueue([
+      { kind: 'love', operationId: 'cached-love', payload: { artist: 'Band', track: 'Song', recordingMbid: MBID } },
+      { kind: 'unlove', operationId: 'cached-delete', payload: { artist: 'Band', track: 'Song' } },
+    ]);
+    // Force a cursor to exist before replay; cleanup must precede the FK cascade.
+    const unloveRow = w.app.db.one<{ rowid: number }>("SELECT rowid FROM forward_outbox WHERE kind='unlove'")!.rowid;
+    w.app.db.run('INSERT INTO forward_unlove_lookup_progress VALUES(?,1,200)', unloveRow);
+    const eventAt = w.clock.nowMs();
+    const entry = kind === 'linked_account'
+      ? { kind, id: linkId, did: ALICE, at: eventAt }
+      : { kind, did: ALICE, at: eventAt };
+    w.app.db.raw.exec(
+      `CREATE TRIGGER reject_replay_delete BEFORE DELETE ON linked_accounts BEGIN SELECT RAISE(ABORT,'injected replay delete failure'); END`,
+    );
+    expect(() => replayRevocations(w.app.db, [entry])).toThrow('injected replay delete failure');
+    expect(w.app.db.one('SELECT count(*) AS n FROM forward_outbox')).toEqual({ n: 2 });
+    expect(w.app.db.one('SELECT forward_rowid FROM forward_love_recording_targets')).toEqual({ forward_rowid: 1 });
+    expect(w.app.db.one('SELECT unlove_rowid FROM forward_unlove_lookup_progress')).toEqual({ unlove_rowid: unloveRow });
+    w.app.db.raw.exec('DROP TRIGGER reject_replay_delete');
+
+    replayRevocations(w.app.db, [entry]);
+    expect(w.rows()).toHaveLength(0);
+    expect(w.app.db.one('SELECT 1 FROM forward_love_recording_targets')).toBeNull();
+    expect(w.app.db.one('SELECT 1 FROM forward_unlove_lookup_progress')).toBeNull();
+    replayRevocations(w.app.db, [entry]);
+    expect(w.rows()).toHaveLength(0);
+    // Operation history is DID-scoped and intentionally survives link deletion.
+    expect(w.app.db.one("SELECT id FROM operations WHERE id='cached-love'")).toEqual({ id: 'cached-love' });
+
+    w.link();
+    w.clock.advance(1);
+    w.enqueue([{ kind: 'love', operationId: 'new', payload: { artist: 'Band', track: 'Song', recordingMbid: OTHER } }]);
+    expect(w.app.db.one<{ forward_rowid: number; recording_mbid: string | null }>(
+      `SELECT t.forward_rowid,t.recording_mbid FROM forward_love_recording_targets t JOIN forward_outbox f ON f.rowid=t.forward_rowid WHERE f.dedupe_key='new'`,
+    )).toEqual({ forward_rowid: 1, recording_mbid: OTHER });
+    w.app.db.run("UPDATE forward_outbox SET state='sent'");
+    w.clock.advance(1);
+    unlove(w);
+    await drain(w);
+    expect(w.lb.feedback.map((f) => f.json)).toContainEqual({ recording_mbid: OTHER, score: 0 });
+  }
+});
+it('revocation replay preserves caches for a newer relink', async () => {
+  const w = await world();
+  const linkId = w.link();
+  w.enqueue([{ kind: 'love', operationId: 'newer-link-love', payload: { artist: 'Band', track: 'Song', recordingMbid: MBID } }]);
+  w.app.db.run('UPDATE linked_accounts SET updated_at_ms=updated_at_ms+100 WHERE id=?', linkId);
+  const target = w.app.db.one<{ forward_rowid: number }>('SELECT forward_rowid FROM forward_love_recording_targets');
+  expect(target).not.toBeNull();
+  expect(replayRevocations(w.app.db, [{ kind: 'linked_account', id: linkId, did: ALICE, at: w.clock.nowMs() }]).deleted.linked_accounts).toBe(0);
+  expect(w.app.db.one('SELECT id FROM linked_accounts WHERE id=?', linkId)).toEqual({ id: linkId });
+  expect(w.app.db.one('SELECT forward_rowid FROM forward_love_recording_targets')).toEqual(target);
 });
 it('forward initialization truly repairs missing caches in every retained state', async () => {
   for (const state of ['sent', 'held', 'failed', 'ignored', 'expired']) {

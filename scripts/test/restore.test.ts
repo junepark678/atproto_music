@@ -1297,6 +1297,20 @@ describe('restore.ts', () => {
       { did: DID_A },
       { did: DID_B },
     ]);
+    const backup = new sqlite.DatabaseSync(world.backupPath);
+    try {
+      backup.exec(`
+        INSERT INTO forward_outbox(rowid,id,link_id,did,kind,dedupe_key,payload_json,state,due_at,created_at_ms,updated_at_ms)
+        SELECT 100,'restore-cached-love',id,did,'love','restore-cached-love','{}','sent',1,1,1 FROM linked_accounts LIMIT 1;
+        INSERT INTO forward_outbox(rowid,id,link_id,did,kind,dedupe_key,payload_json,state,due_at,created_at_ms,updated_at_ms)
+        SELECT 101,'restore-cached-unlove',id,did,'unlove','restore-cached-unlove','{}','queued',1,1,1 FROM linked_accounts LIMIT 1;
+        INSERT INTO forward_love_recording_targets(forward_rowid,link_id,generation,artist_key,track_key,created_at_ms,recording_mbid)
+        SELECT 100,id,1,'band','song',1,'8f3471b5-7e6a-48da-86a9-c1c07a0f47ae' FROM linked_accounts LIMIT 1;
+        INSERT INTO forward_unlove_lookup_progress VALUES(101,1,200);
+      `);
+    } finally {
+      backup.close();
+    }
     corruptLive(world);
 
     const systemd = new FakeSystemd(world, { servicePort: null });
@@ -1312,6 +1326,9 @@ describe('restore.ts', () => {
     expect(rows('SELECT count(*) AS n FROM app_passwords WHERE id = ?', world.ids.p1Id as string)).toEqual([{ n: 0 }]);
     expect(rows('SELECT count(*) AS n FROM app_passwords')).toEqual([{ n: 1 }]); // bob's P3, never revoked
     expect(rows('SELECT count(*) AS n FROM linked_accounts')).toEqual([{ n: 0 }]);
+    expect(rows('SELECT count(*) AS n FROM forward_outbox')).toEqual([{ n: 0 }]);
+    expect(rows('SELECT count(*) AS n FROM forward_love_recording_targets')).toEqual([{ n: 0 }]);
+    expect(rows('SELECT count(*) AS n FROM forward_unlove_lookup_progress')).toEqual([{ n: 0 }]);
     expect(rows('SELECT did FROM oauth_sessions ORDER BY did')).toEqual([{ did: DID_A }]);
     // The raw unreadable files are kept aside.
     expect(readFileSync(`${world.dbPath}.pre-restore`).equals(Buffer.alloc(8192, 0x5a))).toBe(true);
