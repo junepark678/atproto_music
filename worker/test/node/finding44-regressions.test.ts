@@ -7,6 +7,7 @@ import { ensureAccount } from '../../src/credentials/accounts';
 import type { Box } from '../../src/crypto/box';
 import type { ModuleDeps } from '../../src/do/contracts';
 import type { Db } from '../../src/do/db';
+import { visibleScrobblesFrom } from '../../src/do/read/visibility';
 import { applyRecordProof } from '../../src/do/write/apply-record';
 import { applySnapshotChunk } from '../../src/do/write/apply-snapshot';
 import { enqueueListenDelete, hasCanonicalListenSurvivor } from '../../src/forward/delete-enqueue';
@@ -18,7 +19,7 @@ import { UpstreamPacing } from '../../src/forward/upstream-pacing';
 import { enqueueBatchListenDelete } from '../../src/outbox/batch-delete-ops';
 import { enqueueScrobbleDelete } from '../../src/outbox/delete-ops';
 import { enqueueForwards } from '../../src/outbox/forward-enqueue';
-import { isListenTombstoned, tombstoneListen } from '../../src/sync/tombstones';
+import { hasListenRemovalTombstones, isListenTombstoned, tombstoneListen } from '../../src/sync/tombstones';
 import {
   ALICE,
   deleteProof,
@@ -217,7 +218,7 @@ it('same-byte recreation at same URI is a current survivor', async () => {
     expect(db.tx(() => applyRecordProof(db, again, OPTS)).outcome).toBe('applied');
     const history = db.all<{ identity_key: string }>('SELECT identity_key FROM linked_pull_tombstones');
     expect(history).toHaveLength(1);
-    expect(history[0]!.identity_key).toMatch(/^history:live:/);
+    expect(history[0]!.identity_key).toMatch(/^history:v2:/);
     expect(isListenTombstoned(db, ALICE, second, artistKey, musicTrackKey)).toBe(true);
     expect(hasCanonicalListenSurvivor(db, deletion)).toBe(true);
     expect(await drain(db)).toEqual({ deletes: 0, lookups: 0 });
@@ -323,7 +324,161 @@ it('snapshot reaffirm archives an exact live tombstone through the accepted proj
     ).toBe('applied');
     expect(
       db.all<{ identity_key: string }>("SELECT identity_key FROM linked_pull_tombstones WHERE kind='listen'"),
-    ).toEqual([{ identity_key: `history:live:${uriKey}:${a.cid}` }]);
+    ).toHaveLength(1);
+    expect(
+      db.one<{ identity_key: string }>("SELECT identity_key FROM linked_pull_tombstones WHERE kind='listen'")
+        ?.identity_key,
+    ).toMatch(/^history:v2:/);
+  });
+});
+it.each(['live', 'uri'] as const)('reused legacy identity preserves each canonical tuple: %s', async (prefix) => {
+  const repo = await repoFor('alice');
+  const first = await putProof(repo, SCROBBLE, 'reused', record);
+  const other = await putProof(repo, SCROBBLE, 'reused', { ...record, track: 'Different canonical tuple' });
+  const [, otherTrackKey] = trackKey('Björk', 'Different canonical tuple');
+  await withMigratedDb((db) => {
+    seedLink(db);
+    const oldIdentity = `${prefix}:${uri('reused')}`;
+    tombstoneListen(db, {
+      did: ALICE,
+      identity: oldIdentity,
+      second,
+      artistKey,
+      trackKey: musicTrackKey,
+      nowMs: NOW_MS,
+    });
+    expect(db.tx(() => applyRecordProof(db, first, OPTS)).outcome).toBe('applied');
+    tombstoneListen(db, {
+      did: ALICE,
+      identity: oldIdentity,
+      second,
+      artistKey,
+      trackKey: otherTrackKey,
+      nowMs: NOW_MS,
+    });
+    expect(db.tx(() => applyRecordProof(db, other, OPTS)).outcome).toBe('applied');
+    expect(isListenTombstoned(db, ALICE, second, artistKey, musicTrackKey)).toBe(true);
+    expect(isListenTombstoned(db, ALICE, second, artistKey, otherTrackKey)).toBe(true);
+    expect(db.all("SELECT identity_key FROM linked_pull_tombstones WHERE kind='listen'")).toHaveLength(2);
+  });
+});
+it('indexed absence checks see raw imports and transaction rollback immediately', async () => {
+  await withMigratedDb((db) => {
+    seedLink(db);
+    expect(hasListenRemovalTombstones(db, ALICE)).toBe(false);
+    tombstoneListen(db, {
+      did: ALICE,
+      identity: 'live:cache-fixture',
+      second,
+      artistKey,
+      trackKey: musicTrackKey,
+      nowMs: NOW_MS,
+    });
+    expect(hasListenRemovalTombstones(db, ALICE)).toBe(true);
+    expect(() =>
+      db.tx(() => {
+        db.run("DELETE FROM linked_pull_tombstones WHERE did=? AND kind='listen'", ALICE);
+        expect(hasListenRemovalTombstones(db, ALICE)).toBe(false);
+        throw new Error('rollback fixture');
+      }),
+    ).toThrow('rollback fixture');
+    expect(hasListenRemovalTombstones(db, ALICE)).toBe(true);
+  });
+});
+it.each(['incremental', 'snapshot', 'reaffirm'] as const)(
+  'indexed absence lookup observes raw tombstones on accepted %s projections',
+  async (path) => {
+    const repo = await repoFor('alice');
+    const first = await putProof(repo, SCROBBLE, 'raw-import', record);
+    const next = await putProof(repo, SCROBBLE, 'raw-import', record);
+    await withMigratedDb(async (db) => {
+      seedLink(db);
+      expect(db.tx(() => applyRecordProof(db, first, OPTS)).outcome).toBe('applied');
+      delivered(db);
+      db.run(
+        `INSERT INTO linked_pull_tombstones(did,kind,identity_key,listen_second,artist_key,track_key,created_at_ms)
+         VALUES(?,'listen',?,?,?,?,?)`,
+        ALICE,
+        `live:${uri('raw-import')}:${first.cid}`,
+        second,
+        artistKey,
+        musicTrackKey,
+        NOW_MS,
+      );
+      expect(enqueueListenDelete(db, deletion)).toBe(1);
+      if (path === 'incremental') {
+        expect(db.tx(() => applyRecordProof(db, next, OPTS)).outcome).toBe('applied');
+      } else {
+        const generation = db.one<{ generation: number }>(
+          'SELECT generation FROM users WHERE did=?',
+          ALICE,
+        )!.generation;
+        seedSnapshotJob(db, ALICE, generation);
+        expect(
+          db.tx(() =>
+            applySnapshotChunk(db, {
+              did: ALICE,
+              generation,
+              headRev: next.commit.rev,
+              intervalLo: null,
+              intervalHi: `${SCROBBLE}/raw-import`,
+              entries: [
+                {
+                  key: `${SCROBBLE}/raw-import`,
+                  cid: next.cid!,
+                  record: path === 'snapshot' ? next.record : undefined,
+                },
+              ],
+              ...OPTS,
+            }),
+          ).outcome,
+        ).toBe('applied');
+      }
+      expect(await drain(db)).toEqual({ deletes: 0, lookups: 0 });
+    });
+  },
+);
+it('operation-less legacy listen_removals preserve projection visibility and delete dispatch', async () => {
+  const repo = await repoFor('alice');
+  const batch = `${SCROBBLE}Batch`;
+  const { $type, ...entry } = record;
+  const proof = await putProof(repo, batch, 'legacy-overlay', {
+    $type: batch,
+    createdAt: record.createdAt,
+    listens: [{ ...entry, id: '2222222222222' }],
+  });
+  const reaffirmed = await putProof(repo, batch, 'legacy-overlay', {
+    $type: batch,
+    createdAt: record.createdAt,
+    listens: [{ ...entry, id: '2222222222222' }],
+  });
+  await withMigratedDb(async (db) => {
+    seedLink(db);
+    expect(db.tx(() => applyRecordProof(db, proof, OPTS)).outcome).toBe('applied');
+    delivered(db);
+    const container = uri('legacy-overlay', true);
+    tombstoneListen(db, {
+      did: ALICE,
+      identity: `uri:${container}#2222222222222`,
+      second,
+      artistKey,
+      trackKey: musicTrackKey,
+      nowMs: NOW_MS,
+    });
+    db.run(
+      'INSERT INTO listen_removals(did,record_uri,listen_id,created_at_ms) VALUES(?,?,?,?)',
+      ALICE,
+      container,
+      '2222222222222',
+      NOW_MS,
+    );
+    expect(enqueueListenDelete(db, deletion)).toBe(1);
+    expect(db.tx(() => applyRecordProof(db, reaffirmed, OPTS)).outcome).toBe('applied');
+    expect(db.all(`SELECT s.uri FROM ${visibleScrobblesFrom()}`)).toHaveLength(0);
+    expect(db.all('SELECT uri FROM scrobbles WHERE did=? AND listen_id=?', ALICE, '2222222222222')).toHaveLength(1);
+    expect(hasCanonicalListenSurvivor(db, deletion)).toBe(false);
+    expect(db.all("SELECT identity_key FROM linked_pull_tombstones WHERE kind='listen'")).toHaveLength(1);
+    expect(await drain(db)).toEqual({ deletes: 1, lookups: 1 });
   });
 });
 it.each([

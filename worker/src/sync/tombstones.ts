@@ -1,21 +1,8 @@
 import type { Db } from '../do/db';
 import { removalIntentStillHidesProjection } from '../do/read/visibility';
 
-// The common ingestion path has no pull removals for almost every record.
-// Remember negative DID lookups and invalidate them at the sole production
-// insertion point so accepted projections avoid repeated tombstone scans.
-const didsWithoutListenTombstones = new WeakMap<Db, Set<string>>();
-
 export function hasListenRemovalTombstones(db: Db, did: string): boolean {
-  let empty = didsWithoutListenTombstones.get(db);
-  if (empty?.has(did)) return false;
-  if (db.one("SELECT 1 FROM linked_pull_tombstones WHERE did=? AND kind='listen' LIMIT 1", did) !== null) return true;
-  if (empty === undefined) {
-    empty = new Set();
-    didsWithoutListenTombstones.set(db, empty);
-  }
-  empty.add(did);
-  return false;
+  return db.one("SELECT 1 FROM linked_pull_tombstones WHERE did=? AND kind='listen' LIMIT 1", did) !== null;
 }
 
 export function tombstoneListen(
@@ -29,7 +16,6 @@ export function tombstoneListen(
     nowMs: number;
   },
 ): void {
-  didsWithoutListenTombstones.get(db)?.delete(args.did);
   db.run(
     `INSERT INTO linked_pull_tombstones(did,kind,identity_key,listen_second,artist_key,track_key,created_at_ms)
     VALUES(?,'listen',?,?,?,?,?) ON CONFLICT(did,kind,identity_key) DO NOTHING`,
@@ -97,16 +83,30 @@ export function archiveMatchingLiveListenTombstones(
       })
     )
       continue;
-    // Keep one durable history copy per original identity. Repeated identical
-    // recreation cycles are idempotent even when that history already exists.
+    // Versioned JSON encoding distinguishes the source key from the complete
+    // canonical tuple without delimiter ambiguity. Legacy history:<identity>
+    // rows remain valid when their stored tuple matches this recreation.
+    const historyIdentity = `history:v2:${JSON.stringify([identity_key, args.second, args.artistKey, args.trackKey])}`;
     db.run(
       `INSERT OR IGNORE INTO linked_pull_tombstones(did,kind,identity_key,listen_second,artist_key,track_key,love_key,recording_mbid,created_at_ms)
        SELECT did,kind,?,listen_second,artist_key,track_key,love_key,recording_mbid,created_at_ms
        FROM linked_pull_tombstones WHERE did=? AND kind='listen' AND identity_key=?`,
-      `history:${identity_key}`,
+      historyIdentity,
       args.did,
       identity_key,
     );
+    const equivalent = db.one(
+      `SELECT 1 FROM linked_pull_tombstones WHERE did=? AND kind='listen'
+       AND listen_second=? AND artist_key=? AND track_key=?
+       AND (identity_key=? OR identity_key=?) LIMIT 1`,
+      args.did,
+      args.second,
+      args.artistKey,
+      args.trackKey,
+      historyIdentity,
+      `history:${identity_key}`,
+    );
+    if (equivalent === null) continue;
     db.run(
       "DELETE FROM linked_pull_tombstones WHERE did=? AND kind='listen' AND identity_key=?",
       args.did,

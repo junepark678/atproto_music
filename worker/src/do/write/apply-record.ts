@@ -1103,10 +1103,15 @@ function archiveAcceptedListenTombstones(db: Db, did: string, uri: string, revis
     artist_key: string;
     track_key: string;
   }>(
-    'SELECT uri,record_uri,listen_id,cid,listened_at,artist_key,track_key FROM scrobbles WHERE did=? AND (uri=? OR record_uri=?)',
+    `SELECT uri,record_uri,listen_id,cid,listened_at,artist_key,track_key
+       FROM scrobbles WHERE uri=? AND did=?
+     UNION ALL
+     SELECT uri,record_uri,listen_id,cid,listened_at,artist_key,track_key
+       FROM scrobbles WHERE record_uri=? AND did=?`,
+    uri,
     did,
     uri,
-    uri,
+    did,
   );
   for (const listen of listens) {
     archiveMatchingLiveListenTombstones(db, {

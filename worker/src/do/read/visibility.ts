@@ -125,7 +125,20 @@ export function removalIntentStillHidesProjection(
     collection,
     rkey,
   );
-  return matched !== null;
+  if (matched !== null) return true;
+  // Historical batch removals can predate their operation row. Public
+  // visibility treats an operation-less listen_removals entry as durable
+  // intent, so archival must apply the same overlay to this exact member.
+  return (
+    db.one(
+      `SELECT 1 FROM listen_removals lr
+       WHERE lr.did=? AND lr.record_uri=? AND lr.operation_id IS NULL
+         AND (lr.listen_id='*' OR lr.listen_id=?) LIMIT 1`,
+      projection.did,
+      projection.recordUri ?? projection.uri,
+      projection.listenId,
+    ) !== null
+  );
 }
 const COLUMN = /^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?$/;
 
