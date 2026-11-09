@@ -37,6 +37,8 @@ import type { Db } from '../db';
 import { recordEvent } from '../status';
 import { schedule } from '../timers';
 import { recordUri } from '../write/keys';
+import { type LiveAction, recordLiveEvidence } from './live-evidence';
+import { authorizePendingRemovals } from './live-pending-removals';
 
 export type HintSource = 'jetstream' | 'notify' | 'reconcile';
 
@@ -50,6 +52,8 @@ export interface HintInput {
   source: HintSource;
   /** The commit revision the event claimed (a TID), when known; anything else is dropped. */
   hintRev?: string | null;
+  /** Authenticated Jetstream commit tuple. Hints from other sources never set it. */
+  live?: { operation: LiveAction; cid?: string };
   /** When we received it (epoch ms, injected clock): the +300 s validation bound. */
   receiptMs: number;
   /** When it becomes due (epoch ms); defaults to `receiptMs`. */
@@ -70,6 +74,7 @@ export interface HintRow {
   source: HintSource;
   priority: number;
   hint_rev: string | null;
+  evidence_rev: string | null;
   /** 30-character storage timestamp. */
   receipt_time: string;
   due_at: number;
@@ -83,8 +88,8 @@ function assertEpochMs(label: string, value: number): void {
   }
 }
 
-const UPSERT = `INSERT INTO hints(uri, did, collection, rkey, source, priority, hint_rev, receipt_time, due_at, attempts)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+const UPSERT = `INSERT INTO hints(uri, did, collection, rkey, source, priority, hint_rev, evidence_rev, receipt_time, due_at, attempts)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
   ON CONFLICT(uri) DO UPDATE SET
     due_at = min(hints.due_at, excluded.due_at),
     source = CASE WHEN excluded.priority < hints.priority THEN excluded.source ELSE hints.source END,
@@ -93,6 +98,9 @@ const UPSERT = `INSERT INTO hints(uri, did, collection, rkey, source, priority, 
       WHEN hints.hint_rev IS NULL THEN excluded.hint_rev
       WHEN excluded.hint_rev IS NULL THEN hints.hint_rev
       ELSE max(hints.hint_rev, excluded.hint_rev) END,
+    evidence_rev = CASE WHEN excluded.evidence_rev IS NULL THEN hints.evidence_rev
+                        WHEN hints.evidence_rev IS NULL THEN excluded.evidence_rev
+                        ELSE max(hints.evidence_rev, excluded.evidence_rev) END,
     receipt_time = max(hints.receipt_time, excluded.receipt_time)`;
 
 function upsertHint(db: Db, h: HintInput): string {
@@ -103,6 +111,17 @@ function upsertHint(db: Db, h: HintInput): string {
   // Throws a RangeError on invalid DID / NSID / record key syntax (rolls back the batch).
   const uri = recordUri(h.did, h.collection, h.rkey);
   const hintRev = typeof h.hintRev === 'string' && isTid(h.hintRev) ? h.hintRev : null;
+  if (h.live !== undefined) {
+    if (!['create', 'update', 'delete'].includes(h.live.operation)) throw new TypeError('unknown live event action');
+    if (h.source !== 'jetstream') throw new TypeError('live evidence is only valid for Jetstream hints');
+    if (hintRev === null) throw new TypeError('live evidence requires a TID hint revision');
+    if (
+      h.live.operation === 'delete'
+        ? h.live.cid !== undefined
+        : typeof h.live.cid !== 'string' || h.live.cid.length === 0
+    )
+      throw new TypeError('live evidence CID does not match its operation');
+  }
   db.run(
     UPSERT,
     uri,
@@ -112,9 +131,39 @@ function upsertHint(db: Db, h: HintInput): string {
     h.source,
     HINT_PRIORITY[h.source],
     hintRev,
+    hintRev,
     toStorage(fromMs(h.receiptMs)),
     dueAt,
   );
+  if (h.live !== undefined) {
+    recordLiveEvidence(
+      db,
+      {
+        uri,
+        did: h.did,
+        collection: h.collection,
+        rkey: h.rkey,
+        rev: hintRev!,
+        action: h.live.operation,
+        ...(h.live.cid ? { cid: h.live.cid } : {}),
+      },
+      h.receiptMs,
+    );
+    const conflicted =
+      db.one<{ conflict_rev: string | null }>('SELECT conflict_rev FROM live_record_evidence WHERE uri=?', uri)
+        ?.conflict_rev === hintRev;
+    authorizePendingRemovals(
+      db,
+      {
+        uri,
+        rev: hintRev!,
+        action: h.live.operation,
+        ...(h.live.cid === undefined ? {} : { cid: h.live.cid }),
+        conflicted,
+      },
+      h.receiptMs,
+    );
+  }
   return uri;
 }
 

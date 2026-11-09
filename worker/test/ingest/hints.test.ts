@@ -70,6 +70,7 @@ describe('enqueueHints', () => {
           priority: HINT_PRIORITY.notify,
           // The newest claimed revision, the newest receipt, the earliest due time.
           hint_rev: REV_B,
+          evidence_rev: REV_B,
           receipt_time: '2026-01-15T12:00:05.000000000Z',
           due_at: T0 + 10_000,
           attempts: 0,
@@ -83,6 +84,7 @@ describe('enqueueHints', () => {
           source: 'jetstream',
           priority: HINT_PRIORITY.jetstream,
           hint_rev: null,
+          evidence_rev: null,
           receipt_time: '2026-01-15T12:00:00.000000000Z',
           due_at: T0,
           attempts: 0,

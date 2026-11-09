@@ -72,8 +72,11 @@ export function enqueueRevivedLoves(
     state: string;
     last_error: string | null;
     generation: number;
+    authorization_uri: string | null;
+    authorization_rev: string | null;
   }>(
-    `SELECT f.rowid,f.link_id,f.did,f.kind,f.dedupe_key,f.payload_json,f.state,f.last_error,f.generation
+    `SELECT f.rowid,f.link_id,f.did,f.kind,f.dedupe_key,f.payload_json,f.state,f.last_error,f.generation,
+            f.authorization_uri,f.authorization_rev
        FROM mb_forward_love_current c JOIN forward_outbox f ON f.rowid=c.forward_rowid
        JOIN linked_accounts l ON l.id=c.link_id AND l.service='listenbrainz' AND l.generation=f.generation
       WHERE c.love_artist_key=? AND c.love_track_key=? AND c.link_id>? AND f.kind IN ('love','unlove')
@@ -107,9 +110,20 @@ export function enqueueRevivedLoves(
       `mb-match:${matchedMbid}:${row.link_id}:${key.artistKey}:${key.trackKey}`,
     );
     const insertedCount = db.tx(() => {
+      if (
+        kind === 'unlove' &&
+        row.authorization_uri !== null &&
+        row.authorization_rev !== null &&
+        db.one(
+          `SELECT 1 FROM live_pending_removal_events WHERE uri=? AND rev=? AND conflicted=1 LIMIT 1`,
+          row.authorization_uri,
+          row.authorization_rev,
+        ) !== null
+      )
+        return 0;
       const inserted = db.run(
-        `INSERT INTO forward_outbox(id,link_id,did,kind,dedupe_key,payload_json,state,attempts,due_at,created_at_ms,updated_at_ms,love_artist_key,love_track_key,generation,love_lane)
-         VALUES(?,?,?,?,?,?,'queued',0,?,?,?,?,?,?,1) ON CONFLICT(link_id,kind,dedupe_key) DO NOTHING`,
+        `INSERT INTO forward_outbox(id,link_id,did,kind,dedupe_key,payload_json,state,attempts,due_at,created_at_ms,updated_at_ms,love_artist_key,love_track_key,generation,love_lane,authorization_uri,authorization_rev)
+         VALUES(?,?,?,?,?,?,'queued',0,?,?,?,?,?,?,1,?,?) ON CONFLICT(link_id,kind,dedupe_key) DO NOTHING`,
         crypto.randomUUID().replaceAll('-', '').slice(0, 32),
         row.link_id,
         row.did,
@@ -122,6 +136,8 @@ export function enqueueRevivedLoves(
         key.artistKey,
         key.trackKey,
         row.generation,
+        row.authorization_uri,
+        row.authorization_rev,
       ).rowsWritten;
       if (inserted === 1) {
         const created = db.one<{ rowid: number }>(

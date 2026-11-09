@@ -723,21 +723,36 @@ describe('N4-04 de-shim: harness, storage and shared helpers', () => {
     for (const [file, module] of Object.entries(modules)) {
       const recorded = WAVE_START_EXPORTS[file];
       expect(recorded, file).toBeDefined();
-      const expectedRuntime = recorded?.runtime.filter(
-        ([name]) => !(file === 'worker/test/write/support.ts' && name === 'stubFor'),
-      );
+      const addedLiveHelpers =
+        file === 'worker/test/write/support.ts'
+          ? ([
+              ['authorizedLiveOptions', 'function', 3],
+              ['liveApplyOptions', 'function', 2],
+            ] as const)
+          : [];
+      const expectedRuntime = [
+        ...(recorded?.runtime.filter(([name]) => !(file === 'worker/test/write/support.ts' && name === 'stubFor')) ??
+          []),
+        ...addedLiveHelpers,
+      ].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
       // Runtime: the same names, kinds and Function.length as at the wave start.
       expect([file, runtimeExports(module)]).toEqual([file, expectedRuntime]);
       // Source: the same value and type declarations.
       const now = exportedNames(read(file));
-      expect([file, now.values]).toEqual([file, expectedRuntime?.map(([name]) => name).sort()]);
+      expect([file, now.values]).toEqual([file, expectedRuntime.map(([name]) => name).sort()]);
       expect([file, now.types]).toEqual([file, recorded?.types]);
       // The record is the wave start's own source, when that commit is available.
       const before = atWaveStart(file);
       if (before !== null) {
         const retiredHelperRemoved =
           file === 'worker/test/write/support.ts' ? before.replace(/^export const stubFor = .*\n/m, '') : before;
-        expect([file, exportedNames(retiredHelperRemoved)]).toEqual([file, now]);
+        expect([file, exportedNames(retiredHelperRemoved)]).toEqual([
+          file,
+          {
+            values: now.values.filter((name) => !addedLiveHelpers.some(([added]) => added === name)),
+            types: now.types,
+          },
+        ]);
       }
     }
 

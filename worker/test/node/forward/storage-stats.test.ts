@@ -31,6 +31,57 @@ function trace(db: Db, queries: string[], limits: SqlParam[]): Db {
 }
 
 describe('forward storage statistics refresh', () => {
+  it('includes durable live evidence, candidates, and pending removals in bounded marker statistics', async () => {
+    await withMigratedDb((db) => {
+      const uri = `at://${DID}/com.example.atmusic.scrobble/r1`;
+      db.run(
+        `INSERT INTO live_record_evidence(uri,did,collection,rkey,up_rev,up_action,up_cid,del_rev,conflict_rev,received_ms,expires_at_ms)
+         VALUES(?,?,?,?,?,'create',?,NULL,NULL,?,?)`,
+        uri,
+        DID,
+        'com.example.atmusic.scrobble',
+        'r1',
+        '2222222222222',
+        'bafycid',
+        1,
+        9999999999999,
+      );
+      db.run(
+        `INSERT INTO live_pending_removals
+         (uri,member_uri,removed_cid,kind,window_lo,window_hi,replaced_by_cid,identity_key,listened_at,
+          artist_key,track_key,artist,track,recording_mbid,authorized_rev,created_at_ms,expires_at_ms)
+         VALUES(?,?,?,'scrobble','','3333333333333','',?,1,'artist-key','track-key','Artist','Track',NULL,NULL,1,?)`,
+        uri,
+        uri,
+        'bafycid',
+        'listen-key',
+        9999999999999,
+      );
+      db.run(
+        `INSERT INTO live_acceptance_candidates(uri,identity_key,kind,member_uri,cid,created_at_ms,expires_at_ms)
+         VALUES(?,?,'scrobble',?,?,1,?)`,
+        uri,
+        'listen-key',
+        uri,
+        'bafycid',
+        9999999999999,
+      );
+      let complete = false;
+      for (let i = 0; i < 20 && !complete; i++) complete = refreshForwardStorageStats(db, 10);
+      expect(complete).toBe(true);
+      expect(readForwardStorageStats(db)).toMatchObject({
+        markers: { rows: 3 },
+        tables: {
+          live_record_evidence: { rows: 1 },
+          live_acceptance_candidates: { rows: 1 },
+          live_pending_removals: { rows: 1 },
+          live_pending_removal_events: { rows: 0 },
+          live_pending_removal_reconcile: { rows: 0 },
+        },
+      });
+    });
+  });
+
   it('keyset scans bounded pages, resumes after restart, and publishes only a complete cycle', async () => {
     await withMigratedDb((initial, context) => {
       const clock = fixedClock();

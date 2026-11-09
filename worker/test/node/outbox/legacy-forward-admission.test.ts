@@ -7,6 +7,7 @@ import { MIGRATIONS, SCHEMA_VERSION } from '../../../src/do/schema';
 import { applyRecordProof } from '../../../src/do/write/apply-record';
 import { musicKeyColumns } from '../../../src/do/write/keys';
 import { projectionListenKey } from '../../../src/forward/projection';
+import { authorizedLiveOptions } from '../../write/support';
 import { type Harness, LOVE, SCROBBLE, T0, withHarness } from './support';
 
 const BATCH = 'com.example.atmusic.scrobbleBatch';
@@ -36,7 +37,7 @@ function apply(h: Harness, proof: RecordProof) {
       prefix: 'com.example.atmusic',
       nowNs,
       receiptNs: nowNs,
-      forwarding: LIVE,
+      live: authorizedLiveOptions(h.db, proof, LIVE.random).live,
     }),
   );
 }

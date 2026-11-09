@@ -1,7 +1,6 @@
 import { verifyRecordProof } from '@atmusic/atproto/verify/record-proof';
 import { listenKey } from '@atmusic/core/listen-key';
 import { trackKey } from '@atmusic/core/music-key';
-import { seededRandom } from '@atmusic/core/test-support/random';
 import { fromMs, NS_PER_SECOND } from '@atmusic/core/timestamp';
 import { describe, expect, it } from 'vitest';
 import type { LinkedAccountRow } from '../../../src/app/rows';
@@ -185,7 +184,6 @@ describe('linked pull staged writer', () => {
             prefix: h.m.config.prefix!,
             nowNs,
             receiptNs: nowNs,
-            forwarding: { random: seededRandom(0x61) },
           }),
         );
         expect(
@@ -240,7 +238,6 @@ describe('linked pull staged writer', () => {
               prefix: h.m.config.prefix!,
               nowNs,
               receiptNs: nowNs,
-              forwarding: { random: seededRandom(0x71) },
             }),
           );
         };
@@ -349,7 +346,6 @@ describe('linked pull staged writer', () => {
               prefix: h.m.config.prefix!,
               nowNs: oldNow,
               receiptNs: oldNow,
-              forwarding: { random: seededRandom(0x72) },
             }),
           ).outcome,
         ).toBe('noop_older');
@@ -376,7 +372,6 @@ describe('linked pull staged writer', () => {
               prefix: h.m.config.prefix!,
               nowNs: freshNow,
               receiptNs: freshNow,
-              forwarding: { random: seededRandom(0x73) },
             }),
           ).outcome,
         ).toBe('applied');
@@ -391,13 +386,13 @@ describe('linked pull staged writer', () => {
             'SELECT path,incarnation_key FROM love_incarnations WHERE uri=?',
             oldUri,
           ),
-        ).toEqual({ path: 'live', incarnation_key: `love:${oldUri}:${newProof.commit.rev}` });
+        ).toEqual({ path: 'snapshot', incarnation_key: `love:${oldUri}:${newProof.commit.rev}` });
         const forwardedAfterReplacement = h.db.one<{ n: number }>(
           "SELECT count(*) AS n FROM forward_outbox WHERE did=? AND link_id=? AND kind='love'",
           did,
           targetLink,
         )?.n;
-        expect(forwardedAfterReplacement).toBe(2);
+        expect(forwardedAfterReplacement).toBe(1);
 
         h.restart();
         const relove = await enqueueLove(h.m, { did, input: { artist: 'artist', track: 'TRACK' }, origin: 'web' });
@@ -412,7 +407,7 @@ describe('linked pull staged writer', () => {
             did,
             targetLink,
           )?.n,
-        ).toBe(3);
+        ).toBe(2);
       });
     },
   );

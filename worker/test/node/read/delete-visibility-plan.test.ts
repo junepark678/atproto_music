@@ -16,6 +16,9 @@ it('delete visibility searches by did and rkey and has byte-equal bodies without
     (db) =>
       db.one<{ sql: string }>("SELECT sql FROM sqlite_master WHERE name='operations_scrobble_delete_target'")!.sql,
   );
+  const recordTargetDdl = await f.inDb(
+    (db) => db.one<{ sql: string }>("SELECT sql FROM sqlite_master WHERE name='operations_record_target'")!.sql,
+  );
   await f.inDb((db) =>
     db.tx(() => {
       const insert = (id: string, did: string, kind: string, rkey: string, state: string) =>
@@ -70,14 +73,17 @@ it('delete visibility searches by did and rkey and has byte-equal bodies without
     ['cancelled', cid, false],
   ] as const) {
     await f.inDb((db) => db.run('UPDATE operations SET state=?,swap_cid=? WHERE id=?', state, swapCid, 'target'));
-    expect(await plan(`${state}-${swapCid}-indexed`)).toContain(
-      'SEARCH d USING INDEX operations_scrobble_delete_target (did=? AND rkey=?)',
-    );
+    expect(
+      (await plan(`${state}-${swapCid}-indexed`)).some(
+        (detail) => detail.includes('operations_scrobble_delete_target') || detail.includes('operations_record_target'),
+      ),
+    ).toBe(true);
     const history = pageRkeys(await get(ctx, `/api/v1/users/${ALICE}/scrobbles`));
     expect(history.includes('r01')).toBe(!hidden);
     expect(history).toContain('r02');
     const indexed = await bodies();
     await f.inDb((db) => db.run('DROP INDEX operations_scrobble_delete_target'));
+    await f.inDb((db) => db.run('DROP INDEX operations_record_target'));
     try {
       expect(await plan(`${state}-${swapCid}-unindexed`)).toContain(
         'SEARCH d USING INDEX operations_did_state (did=?)',
@@ -85,6 +91,7 @@ it('delete visibility searches by did and rkey and has byte-equal bodies without
       expect(await bodies()).toEqual(indexed);
     } finally {
       await f.inDb((db) => db.run(ddl));
+      await f.inDb((db) => db.run(recordTargetDdl));
     }
     expect(await bodies()).toEqual(indexed);
   }

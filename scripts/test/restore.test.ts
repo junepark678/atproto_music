@@ -51,6 +51,7 @@ import { createWebSessions } from '../../worker/src/bff/sessions.ts';
 import { ensureAccount, renameAccount } from '../../worker/src/credentials/accounts.ts';
 import { createAppPassword, revokeAppPassword, verifyAppPassword } from '../../worker/src/credentials/app-passwords.ts';
 import { type Box, createBox } from '../../worker/src/crypto/box.ts';
+import { executeAuthorizedRemovals, nextPendingRemovalDue } from '../../worker/src/do/ingest/live-pending-removals';
 import { migrate } from '../../worker/src/do/migrate.ts';
 import { SCHEMA_VERSION, TABLE_CLASS } from '../../worker/src/do/schema.ts';
 import { applyRecordProof } from '../../worker/src/do/write/apply-record.ts';
@@ -69,6 +70,7 @@ import {
   testEnv,
   testSecretsDocument,
 } from '../../worker/test/node/support/app.ts';
+import { authorizedLiveOptions } from '../../worker/test/write/support.ts';
 import { type CommandResult, main, type RestoreStep } from '../admin/restore.ts';
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -178,6 +180,8 @@ interface WorldOptions {
   keepWal?: boolean;
   /** Extra SQL run on the live database after the backup. */
   liveSql?: string[];
+  /** SQL run immediately before the backup for stale-backup merge coverage. */
+  backupSql?: string[];
 }
 
 /**
@@ -246,6 +250,8 @@ async function buildWorld(
     { did: DID_A, service: 'lastfm', remoteUser: 'alice', credential: LASTFM_SK },
   ).link.id;
   insertOperation(db, 'op1', DID_A, clock.nowMs());
+
+  for (const sql of options.backupSql ?? []) db.exec(sql);
 
   const backups = createBackups({ db, dir: join(state, 'backups'), clock, log, minFreeBytes: 0, revocations: journal });
   const outcome = await backups.run('manual');
@@ -577,6 +583,113 @@ function boxOf(doc: Record<string, unknown>): { box: Box; secrets: Secrets } {
 // ---------------------------------------------------------------------------
 
 describe('restore.ts', () => {
+  it('keeps the newest live evidence, candidate, and pending removal when a readable restore merges an older backup', async () => {
+    const uri = `at://${DID_A}/${PREFIX}.scrobble/evidence-restore`;
+    const identity = 'listen:restore-candidate';
+    const world = await buildWorld({
+      backupSql: [
+        `INSERT INTO live_record_evidence(uri,did,collection,rkey,up_rev,up_action,up_cid,del_rev,conflict_rev,received_ms,expires_at_ms)
+         VALUES('${uri}','${DID_A}','${PREFIX}.scrobble','evidence-restore','2222222222222','create','bafyold',NULL,NULL,1,9999999999999)`,
+        `INSERT INTO live_acceptance_candidates(uri,identity_key,kind,member_uri,cid,created_at_ms,expires_at_ms)
+         VALUES('${uri}','${identity}','scrobble','${uri}','bafyold',1,9999999999999)`,
+        `INSERT INTO live_pending_removals
+         (uri,member_uri,removed_cid,kind,window_lo,window_hi,replaced_by_cid,identity_key,artist_key,track_key,artist,track,
+          authorized_rev,created_at_ms,expires_at_ms)
+         VALUES('${uri}','${uri}','bafyold','scrobble','1111111111111','2222222222222','','${identity}',
+          'artist-key','track-key','Artist','Track',NULL,1,9999999999999)`,
+        `INSERT INTO live_pending_removal_events(uri,rev,action,cid,created_at_ms,expires_at_ms)
+         VALUES('${uri}','2222222222222','delete','',1,9999999999999)`,
+        `INSERT INTO live_pending_removal_reconcile(uri,window_lo,window_hi,replaced_by_cid,cursor_rev,next_due_ms,created_at_ms)
+         VALUES('${uri}','1111111111111','2222222222222','','1111111111111',1,1)`,
+      ],
+      liveSql: [
+        `UPDATE live_record_evidence SET up_rev='3333333333333',up_action='update',up_cid='bafynew' WHERE uri='${uri}'`,
+        `UPDATE live_acceptance_candidates SET cid='bafynew',created_at_ms=2 WHERE uri='${uri}' AND identity_key='${identity}'`,
+        `UPDATE live_pending_removals SET authorized_rev='2222222222222',expires_at_ms=9999999999998 WHERE uri='${uri}'`,
+        `UPDATE live_pending_removals SET conflict_invalidated=1 WHERE uri='${uri}'`,
+        `UPDATE live_pending_removal_events SET conflicted=1,cursor_window_hi='2222222222222',scan_complete=0 WHERE uri='${uri}'`,
+        `UPDATE live_pending_removal_reconcile SET cursor_rev='2222222222222',next_due_ms=2 WHERE uri='${uri}'`,
+      ],
+    });
+    expect(TABLE_CLASS.live_record_evidence).toBe('non-derived');
+    expect(TABLE_CLASS.live_acceptance_candidates).toBe('non-derived');
+    expect(TABLE_CLASS.live_pending_removals).toBe('non-derived');
+    expect(TABLE_CLASS.live_pending_removal_events).toBe('non-derived');
+    expect(TABLE_CLASS.live_pending_removal_reconcile).toBe('non-derived');
+    const systemd = new FakeSystemd(world, { servicePort: null });
+    await systemd.boot();
+    const result = await restoreCli(world, systemd, [...baseArgs(world), '--no-ready-check']);
+    expect(result.code, `${result.stdout}\n${result.stderr}`).toBe(0);
+    const db = openSqliteDb(world.dbPath, { busyTimeoutMs: BUSY_MS });
+    try {
+      expect(db.one('SELECT up_rev,up_action,up_cid FROM live_record_evidence WHERE uri=?', uri)).toEqual({
+        up_rev: '3333333333333',
+        up_action: 'update',
+        up_cid: 'bafynew',
+      });
+      expect(
+        db.one(
+          'SELECT cid,created_at_ms FROM live_acceptance_candidates WHERE uri=? AND identity_key=?',
+          uri,
+          identity,
+        ),
+      ).toEqual({
+        cid: 'bafynew',
+        created_at_ms: 2,
+      });
+      expect(
+        db.one('SELECT window_lo,window_hi,authorized_rev,expires_at_ms FROM live_pending_removals WHERE uri=?', uri),
+      ).toEqual({
+        window_lo: '1111111111111',
+        window_hi: '2222222222222',
+        authorized_rev: '2222222222222',
+        expires_at_ms: 9999999999998,
+      });
+      expect(
+        db.one('SELECT conflicted,cursor_window_hi,scan_complete FROM live_pending_removal_events WHERE uri=?', uri),
+      ).toEqual({
+        conflicted: 1,
+        cursor_window_hi: '2222222222222',
+        scan_complete: 0,
+      });
+      expect(db.one('SELECT cursor_rev,next_due_ms FROM live_pending_removal_reconcile WHERE uri=?', uri)).toEqual({
+        cursor_rev: '2222222222222',
+        next_due_ms: 2,
+      });
+      expect(
+        executeAuthorizedRemovals(db, { nowMs: world.clock.nowMs(), random: seededRandom(0xa2), limit: 1 }),
+      ).toMatchObject({
+        groups: 1,
+        effects: 0,
+      });
+      const retainedObservation = {
+        window_lo: '1111111111111',
+        window_hi: '2222222222222',
+        authorized_rev: null,
+        expires_at_ms: 9999999999998,
+      };
+      const pendingObservation = () =>
+        db.all('SELECT window_lo,window_hi,authorized_rev,expires_at_ms FROM live_pending_removals WHERE uri=?', uri);
+      expect(pendingObservation()).toEqual([retainedObservation]);
+      expect(db.one('SELECT cursor_rev,next_due_ms FROM live_pending_removal_reconcile WHERE uri=?', uri)).toEqual({
+        cursor_rev: '1111111111111',
+        next_due_ms: world.clock.nowMs(),
+      });
+      expect(nextPendingRemovalDue(db, world.clock.nowMs())).toBe(world.clock.nowMs());
+      expect(
+        executeAuthorizedRemovals(db, { nowMs: world.clock.nowMs(), random: seededRandom(0xa3), limit: 1 }),
+      ).toMatchObject({ groups: 0, effects: 0 });
+      expect(pendingObservation()).toEqual([retainedObservation]);
+      expect(db.all('SELECT * FROM live_pending_removal_reconcile WHERE uri=?', uri)).toHaveLength(0);
+      expect(db.one('SELECT conflicted FROM live_pending_removal_events WHERE uri=?', uri)).toEqual({ conflicted: 1 });
+      expect(db.all('SELECT * FROM listenbrainz_deletes')).toHaveLength(0);
+      expect(db.all("SELECT * FROM forward_outbox WHERE kind='unlove'")).toHaveLength(0);
+      expect(nextPendingRemovalDue(db, world.clock.nowMs())).toBeGreaterThan(world.clock.nowMs());
+    } finally {
+      db.close();
+    }
+  }, 60_000);
+
   it('preserves live non-derived MusicBrainz and cover-art state while rebuilding derived projections from backup', async () => {
     expect(TABLE_CLASS.mb_tracks).toBe('non-derived');
     expect(TABLE_CLASS.mb_cover_art).toBe('non-derived');
@@ -682,7 +795,7 @@ describe('restore.ts', () => {
           prefix: PREFIX,
           nowNs,
           receiptNs: nowNs,
-          forwarding: { random: seededRandom(0x51) },
+          live: authorizedLiveOptions(db, recordProof, seededRandom(0x51)).live,
         }),
       );
     };
@@ -808,7 +921,7 @@ describe('restore.ts', () => {
             prefix: PREFIX,
             nowNs,
             receiptNs: nowNs,
-            forwarding: { random: projectionRandom },
+            live: authorizedLiveOptions(restoredDb, recordProof, projectionRandom).live,
           }),
         );
       expect(apply(await proof()).outcome).toBe('applied');

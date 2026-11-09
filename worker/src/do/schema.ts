@@ -1460,6 +1460,131 @@ const MIGRATION_FORWARD_LOVE_RECORDING_TARGETS: Migration = {
   ],
 };
 
+// Keep repository-operation provenance reads bounded to the exact record.
+const MIGRATION_OPERATIONS_RECORD_TARGET: Migration = {
+  version: 47,
+  name: 'operations_record_target',
+  statements: ['CREATE INDEX operations_record_target ON operations(did,collection,rkey,created_at_ms)'],
+};
+
+const MIGRATION_LIVE_ADMISSION_EVIDENCE: Migration = {
+  version: 48,
+  name: 'live_admission_evidence',
+  statements: [
+    `CREATE TABLE live_record_evidence (
+      uri TEXT PRIMARY KEY NOT NULL, did TEXT NOT NULL, collection TEXT NOT NULL, rkey TEXT NOT NULL,
+      up_rev TEXT, up_action TEXT CHECK(up_action IS NULL OR up_action IN ('create','update')), up_cid TEXT,
+      del_rev TEXT, conflict_rev TEXT, received_ms INTEGER NOT NULL, expires_at_ms INTEGER NOT NULL,
+      CHECK(up_rev IS NOT NULL OR del_rev IS NOT NULL),
+      CHECK((up_rev IS NULL) = (up_action IS NULL) AND (up_rev IS NULL) = (up_cid IS NULL))
+    )`,
+    'CREATE INDEX live_record_evidence_expiry ON live_record_evidence(expires_at_ms)',
+    `CREATE TABLE live_acceptance_candidates (
+      uri TEXT NOT NULL, identity_key TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('scrobble','love')),
+      member_uri TEXT NOT NULL, cid TEXT NOT NULL, created_at_ms INTEGER NOT NULL, expires_at_ms INTEGER NOT NULL,
+      PRIMARY KEY(uri,identity_key)
+    )`,
+    'CREATE INDEX live_acceptance_candidates_expiry ON live_acceptance_candidates(expires_at_ms)',
+    'ALTER TABLE hints ADD COLUMN evidence_rev TEXT',
+  ],
+};
+
+const MIGRATION_LIVE_PENDING_REMOVALS: Migration = {
+  version: 49,
+  name: 'live_pending_removals',
+  statements: [
+    `CREATE TABLE live_pending_removals (
+      uri TEXT NOT NULL, member_uri TEXT NOT NULL, removed_cid TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK(kind IN ('scrobble','love')),
+      window_lo TEXT NOT NULL, window_hi TEXT NOT NULL, replaced_by_cid TEXT NOT NULL,
+      identity_key TEXT NOT NULL, listened_at INTEGER,
+      artist_key TEXT NOT NULL, track_key TEXT NOT NULL, artist TEXT NOT NULL, track TEXT NOT NULL,
+      recording_mbid TEXT, love_source_service TEXT, love_import_sources TEXT,
+      authorized_rev TEXT, created_at_ms INTEGER NOT NULL, expires_at_ms INTEGER NOT NULL,
+      PRIMARY KEY(uri,member_uri,removed_cid,window_lo,window_hi,replaced_by_cid)
+    )`,
+    'CREATE INDEX live_pending_removals_ready ON live_pending_removals(authorized_rev,created_at_ms,uri,window_hi,expires_at_ms)',
+    'CREATE INDEX live_pending_removals_uri_ready ON live_pending_removals(uri,authorized_rev,created_at_ms,window_hi,expires_at_ms)',
+    'CREATE INDEX live_pending_removals_group ON live_pending_removals(uri,kind,window_lo,window_hi,replaced_by_cid,authorized_rev,expires_at_ms,member_uri)',
+    'CREATE INDEX live_pending_removals_authorize ON live_pending_removals(uri,window_hi,window_lo DESC,replaced_by_cid,authorized_rev,expires_at_ms)',
+    'CREATE INDEX live_pending_removals_expiry ON live_pending_removals(expires_at_ms,uri,window_hi)',
+  ],
+};
+
+// A2 repair: durable authorization cursors and conflict decisions. Migration 49
+// is already applied in deployed stores and remains byte-for-byte unchanged.
+const MIGRATION_LIVE_PENDING_REMOVAL_REPAIR: Migration = {
+  version: 50,
+  name: 'live_pending_removal_repair',
+  statements: [
+    'ALTER TABLE live_pending_removals ADD COLUMN conflict_invalidated INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE loves ADD COLUMN revision TEXT',
+    'CREATE INDEX loves_newer_by_track ON loves(did,artist_key,track_key,revision)',
+    'CREATE INDEX live_pending_removals_page ON live_pending_removals(uri,window_hi,window_lo,replaced_by_cid,kind,member_uri,removed_cid)',
+    `CREATE TABLE live_pending_removal_events (
+      uri TEXT NOT NULL, rev TEXT NOT NULL, action TEXT NOT NULL CHECK(action IN ('create','update','delete')),
+      cid TEXT NOT NULL DEFAULT '', conflicted INTEGER NOT NULL DEFAULT 0 CHECK(conflicted IN (0,1)),
+      cursor_window_hi TEXT NOT NULL DEFAULT '', cursor_window_lo TEXT NOT NULL DEFAULT '',
+      cursor_replaced_by_cid TEXT NOT NULL DEFAULT '', cursor_kind TEXT NOT NULL DEFAULT '',
+      cursor_member_uri TEXT NOT NULL DEFAULT '', cursor_removed_cid TEXT NOT NULL DEFAULT '',
+      scan_complete INTEGER NOT NULL DEFAULT 0 CHECK(scan_complete IN (0,1)),
+      created_at_ms INTEGER NOT NULL, expires_at_ms INTEGER NOT NULL,
+      PRIMARY KEY(uri,rev)
+    )`,
+    'CREATE INDEX live_pending_removal_events_expiry ON live_pending_removal_events(expires_at_ms,uri,rev)',
+    'CREATE INDEX live_pending_removal_events_by_uri ON live_pending_removal_events(uri,rev,expires_at_ms)',
+    'CREATE INDEX live_pending_removal_events_scan ON live_pending_removal_events(scan_complete,expires_at_ms,created_at_ms,uri,rev)',
+    'CREATE INDEX live_pending_removal_events_uri_scan ON live_pending_removal_events(uri,scan_complete,expires_at_ms,created_at_ms,rev)',
+  ],
+};
+
+// A2 follow-up repair: preserve conflicting authorization revisions, reconcile
+// newly recorded windows against retained events, and keep cleanup/index work
+// on durable bounded frontiers. Migrations 1–50 are already deployed.
+const MIGRATION_LIVE_PENDING_REMOVAL_BOUNDS: Migration = {
+  version: 51,
+  name: 'live_pending_removal_bounds',
+  statements: [
+    'ALTER TABLE live_pending_removals ADD COLUMN conflicted_auth_rev TEXT',
+    'ALTER TABLE live_pending_removal_events ADD COLUMN cleanup_due_ms INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE listenbrainz_deletes ADD COLUMN authorization_uri TEXT',
+    'ALTER TABLE listenbrainz_deletes ADD COLUMN authorization_rev TEXT',
+    `CREATE TABLE live_pending_removal_reconcile (
+      uri TEXT NOT NULL, window_lo TEXT NOT NULL, window_hi TEXT NOT NULL, replaced_by_cid TEXT NOT NULL,
+      cursor_rev TEXT NOT NULL, next_due_ms INTEGER NOT NULL, created_at_ms INTEGER NOT NULL,
+      PRIMARY KEY(uri,window_lo,window_hi,replaced_by_cid)
+    )`,
+    'CREATE INDEX live_pending_removal_reconcile_due ON live_pending_removal_reconcile(next_due_ms,created_at_ms,uri,window_lo,window_hi,replaced_by_cid)',
+    'CREATE INDEX live_pending_removal_events_ready_v2 ON live_pending_removal_events(scan_complete,created_at_ms,uri,rev)',
+    'CREATE INDEX live_pending_removal_events_cleanup ON live_pending_removal_events(cleanup_due_ms,uri,rev,expires_at_ms)',
+    'CREATE INDEX listenbrainz_deletes_authorization ON listenbrainz_deletes(authorization_uri,authorization_rev,state)',
+  ],
+};
+
+// A2 repair: bind queued live unlove effects to their immutable authorization.
+const MIGRATION_A2_AUTHORIZATION_BINDING: Migration = {
+  version: 52,
+  name: 'a2_authorization_binding',
+  statements: [
+    'ALTER TABLE forward_outbox ADD COLUMN authorization_uri TEXT',
+    'ALTER TABLE forward_outbox ADD COLUMN authorization_rev TEXT',
+    'CREATE INDEX forward_outbox_authorization ON forward_outbox(authorization_uri,authorization_rev,state)',
+    'CREATE INDEX live_pending_removal_events_uri_ready_order ON live_pending_removal_events(uri,scan_complete,created_at_ms,rev)',
+    `ALTER TABLE live_pending_removal_events ADD COLUMN cleanup_frontier TEXT NOT NULL DEFAULT ''`,
+  ],
+};
+
+// A2 repair: cleanup cursors are invalidated by new pending windows per URI.
+const MIGRATION_A2_RETENTION_EPOCH: Migration = {
+  version: 53,
+  name: 'a2_retention_epoch',
+  statements: [
+    `CREATE TABLE live_pending_removal_retention_epoch (
+      uri TEXT PRIMARY KEY, generation INTEGER NOT NULL CHECK(generation>=0)
+    )`,
+  ],
+};
+
 export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_1,
   MIGRATION_2,
@@ -1507,6 +1632,13 @@ export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_S4_FORWARD_LOVE_LANES,
   MIGRATION_FORWARD_LOVE_RECORDING_HISTORY,
   MIGRATION_FORWARD_LOVE_RECORDING_TARGETS,
+  MIGRATION_OPERATIONS_RECORD_TARGET,
+  MIGRATION_LIVE_ADMISSION_EVIDENCE,
+  MIGRATION_LIVE_PENDING_REMOVALS,
+  MIGRATION_LIVE_PENDING_REMOVAL_REPAIR,
+  MIGRATION_LIVE_PENDING_REMOVAL_BOUNDS,
+  MIGRATION_A2_AUTHORIZATION_BINDING,
+  MIGRATION_A2_RETENTION_EPOCH,
 ];
 
 /** The schema version this code expects. */
@@ -1538,6 +1670,12 @@ export const TABLES = [
   'counters',
   // The migration ledger (worker/src/do/migrate.ts).
   'schema_migrations',
+  'live_record_evidence',
+  'live_acceptance_candidates',
+  'live_pending_removals',
+  'live_pending_removal_events',
+  'live_pending_removal_reconcile',
+  'live_pending_removal_retention_epoch',
   // Migration 2.
   'accounts',
   'web_sessions',
@@ -1636,6 +1774,12 @@ export const TABLE_CLASS: Readonly<Record<TableName, TableClass>> = {
   stats_cache: 'derived',
   counters: 'non-derived',
   schema_migrations: 'non-derived',
+  live_record_evidence: 'non-derived',
+  live_acceptance_candidates: 'non-derived',
+  live_pending_removals: 'non-derived',
+  live_pending_removal_events: 'non-derived',
+  live_pending_removal_reconcile: 'non-derived',
+  live_pending_removal_retention_epoch: 'non-derived',
   accounts: 'non-derived',
   web_sessions: 'non-derived',
   oauth_states: 'non-derived',

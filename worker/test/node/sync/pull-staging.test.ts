@@ -327,7 +327,7 @@ describe('linked pull staging', () => {
     });
   });
 
-  it('a live projection removal tombstones before deleting, while snapshot absence does not', async () => {
+  it('a projection removal without durable delete evidence does not tombstone, including snapshot absence', async () => {
     await withHarness(async (h) => {
       const did = 'did:plc:projection';
       h.seedUser(did);
@@ -358,12 +358,11 @@ describe('linked pull staging', () => {
             receiptNs: 200n * NS_PER_SECOND,
             prefix: 'com.example.atmusic',
             nowNs: 200n * NS_PER_SECOND,
-            ...(owner === did ? { forwarding: { random: h.m.random } } : {}),
           },
         );
       }
       expect(h.db.one("SELECT count(*) AS n FROM linked_pull_tombstones WHERE did=? AND kind='listen'", did)).toEqual({
-        n: 1,
+        n: 0,
       });
       expect(
         h.db.one("SELECT count(*) AS n FROM linked_pull_tombstones WHERE did='did:plc:snapshot' AND kind='listen'"),

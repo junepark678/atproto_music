@@ -90,6 +90,81 @@ interface ExpectedTable {
 }
 
 const NEW_TABLES: Record<string, ExpectedTable> = {
+  live_record_evidence: {
+    columns: [
+      'uri',
+      'did',
+      'collection',
+      'rkey',
+      'up_rev',
+      'up_action',
+      'up_cid',
+      'del_rev',
+      'conflict_rev',
+      'received_ms',
+      'expires_at_ms',
+    ],
+    pk: ['uri'],
+  },
+  live_acceptance_candidates: {
+    columns: ['uri', 'identity_key', 'kind', 'member_uri', 'cid', 'created_at_ms', 'expires_at_ms'],
+    pk: ['uri', 'identity_key'],
+  },
+  live_pending_removals: {
+    columns: [
+      'uri',
+      'member_uri',
+      'removed_cid',
+      'kind',
+      'window_lo',
+      'window_hi',
+      'replaced_by_cid',
+      'identity_key',
+      'listened_at',
+      'artist_key',
+      'track_key',
+      'artist',
+      'track',
+      'recording_mbid',
+      'love_source_service',
+      'love_import_sources',
+      'authorized_rev',
+      'created_at_ms',
+      'expires_at_ms',
+      'conflict_invalidated',
+      'conflicted_auth_rev',
+    ],
+    pk: ['uri', 'member_uri', 'removed_cid', 'window_lo', 'window_hi', 'replaced_by_cid'],
+  },
+  live_pending_removal_events: {
+    columns: [
+      'uri',
+      'rev',
+      'action',
+      'cid',
+      'conflicted',
+      'cursor_window_hi',
+      'cursor_window_lo',
+      'cursor_replaced_by_cid',
+      'cursor_kind',
+      'cursor_member_uri',
+      'cursor_removed_cid',
+      'scan_complete',
+      'created_at_ms',
+      'expires_at_ms',
+      'cleanup_due_ms',
+      'cleanup_frontier',
+    ],
+    pk: ['uri', 'rev'],
+  },
+  live_pending_removal_reconcile: {
+    columns: ['uri', 'window_lo', 'window_hi', 'replaced_by_cid', 'cursor_rev', 'next_due_ms', 'created_at_ms'],
+    pk: ['uri', 'window_lo', 'window_hi', 'replaced_by_cid'],
+  },
+  live_pending_removal_retention_epoch: {
+    columns: ['uri', 'generation'],
+    pk: ['uri'],
+  },
   listenbrainz_deletes: {
     columns: [
       'id',
@@ -117,6 +192,8 @@ const NEW_TABLES: Record<string, ExpectedTable> = {
       'lookup_candidates',
       'lookup_last_earliest',
       'lookup_last_max',
+      'authorization_uri',
+      'authorization_rev',
     ],
     pk: ['id'],
     unique: [['link_id', 'generation', 'event_key']],
@@ -568,6 +645,7 @@ const NEW_TABLES: Record<string, ExpectedTable> = {
       recording_mbid: true,
       created_at: true,
       indexed_at: true,
+      revision: true,
     }),
     pk: ['uri'],
   },
@@ -642,6 +720,8 @@ const NEW_TABLES: Record<string, ExpectedTable> = {
       generation: true,
       priority: true,
       love_lane: true,
+      authorization_uri: true,
+      authorization_rev: true,
     }),
     pk: ['id'],
     unique: [['link_id', 'kind', 'dedupe_key']],
@@ -793,6 +873,195 @@ const NEW_SCROBBLE_COLUMNS = cols<ScrobbleV2Columns>({
 
 /** New named indexes: table, unique, partial, [column, desc] in key order. */
 const NEW_INDEXES: Record<string, [string, number, number, Array<[string, number]>]> = {
+  forward_outbox_authorization: [
+    'forward_outbox',
+    0,
+    0,
+    [
+      ['authorization_uri', 0],
+      ['authorization_rev', 0],
+      ['state', 0],
+    ],
+  ],
+  live_pending_removal_events_uri_ready_order: [
+    'live_pending_removal_events',
+    0,
+    0,
+    [
+      ['uri', 0],
+      ['scan_complete', 0],
+      ['created_at_ms', 0],
+      ['rev', 0],
+    ],
+  ],
+  live_record_evidence_expiry: ['live_record_evidence', 0, 0, [['expires_at_ms', 0]]],
+  live_acceptance_candidates_expiry: ['live_acceptance_candidates', 0, 0, [['expires_at_ms', 0]]],
+  live_pending_removals_ready: [
+    'live_pending_removals',
+    0,
+    0,
+    [
+      ['authorized_rev', 0],
+      ['created_at_ms', 0],
+      ['uri', 0],
+      ['window_hi', 0],
+      ['expires_at_ms', 0],
+    ],
+  ],
+  live_pending_removals_uri_ready: [
+    'live_pending_removals',
+    0,
+    0,
+    [
+      ['uri', 0],
+      ['authorized_rev', 0],
+      ['created_at_ms', 0],
+      ['window_hi', 0],
+      ['expires_at_ms', 0],
+    ],
+  ],
+  live_pending_removals_group: [
+    'live_pending_removals',
+    0,
+    0,
+    [
+      ['uri', 0],
+      ['kind', 0],
+      ['window_lo', 0],
+      ['window_hi', 0],
+      ['replaced_by_cid', 0],
+      ['authorized_rev', 0],
+      ['expires_at_ms', 0],
+      ['member_uri', 0],
+    ],
+  ],
+  live_pending_removals_authorize: [
+    'live_pending_removals',
+    0,
+    0,
+    [
+      ['uri', 0],
+      ['window_hi', 0],
+      ['window_lo', 1],
+      ['replaced_by_cid', 0],
+      ['authorized_rev', 0],
+      ['expires_at_ms', 0],
+    ],
+  ],
+  live_pending_removals_expiry: [
+    'live_pending_removals',
+    0,
+    0,
+    [
+      ['expires_at_ms', 0],
+      ['uri', 0],
+      ['window_hi', 0],
+    ],
+  ],
+  live_pending_removals_page: [
+    'live_pending_removals',
+    0,
+    0,
+    [
+      ['uri', 0],
+      ['window_hi', 0],
+      ['window_lo', 0],
+      ['replaced_by_cid', 0],
+      ['kind', 0],
+      ['member_uri', 0],
+      ['removed_cid', 0],
+    ],
+  ],
+  loves_newer_by_track: [
+    'loves',
+    0,
+    0,
+    [
+      ['did', 0],
+      ['artist_key', 0],
+      ['track_key', 0],
+      ['revision', 0],
+    ],
+  ],
+  live_pending_removal_events_expiry: [
+    'live_pending_removal_events',
+    0,
+    0,
+    [
+      ['expires_at_ms', 0],
+      ['uri', 0],
+      ['rev', 0],
+    ],
+  ],
+  live_pending_removal_events_by_uri: [
+    'live_pending_removal_events',
+    0,
+    0,
+    [
+      ['uri', 0],
+      ['rev', 0],
+      ['expires_at_ms', 0],
+    ],
+  ],
+  live_pending_removal_events_scan: [
+    'live_pending_removal_events',
+    0,
+    0,
+    [
+      ['scan_complete', 0],
+      ['expires_at_ms', 0],
+      ['created_at_ms', 0],
+      ['uri', 0],
+      ['rev', 0],
+    ],
+  ],
+  live_pending_removal_events_uri_scan: [
+    'live_pending_removal_events',
+    0,
+    0,
+    [
+      ['uri', 0],
+      ['scan_complete', 0],
+      ['expires_at_ms', 0],
+      ['created_at_ms', 0],
+      ['rev', 0],
+    ],
+  ],
+  live_pending_removal_events_ready_v2: [
+    'live_pending_removal_events',
+    0,
+    0,
+    [
+      ['scan_complete', 0],
+      ['created_at_ms', 0],
+      ['uri', 0],
+      ['rev', 0],
+    ],
+  ],
+  live_pending_removal_events_cleanup: [
+    'live_pending_removal_events',
+    0,
+    0,
+    [
+      ['cleanup_due_ms', 0],
+      ['uri', 0],
+      ['rev', 0],
+      ['expires_at_ms', 0],
+    ],
+  ],
+  live_pending_removal_reconcile_due: [
+    'live_pending_removal_reconcile',
+    0,
+    0,
+    [
+      ['next_due_ms', 0],
+      ['created_at_ms', 0],
+      ['uri', 0],
+      ['window_lo', 0],
+      ['window_hi', 0],
+      ['replaced_by_cid', 0],
+    ],
+  ],
   forward_love_lanes_due: [
     'forward_love_lanes',
     0,
@@ -865,6 +1134,16 @@ const NEW_INDEXES: Record<string, [string, number, number, Array<[string, number
     [
       ['state', 0],
       ['due_at', 0],
+    ],
+  ],
+  listenbrainz_deletes_authorization: [
+    'listenbrainz_deletes',
+    0,
+    0,
+    [
+      ['authorization_uri', 0],
+      ['authorization_rev', 0],
+      ['state', 0],
     ],
   ],
   linked_love_intents_mbid: [
@@ -1267,6 +1546,17 @@ const NEW_INDEXES: Record<string, [string, number, number, Array<[string, number
       ['state', 0],
     ],
   ],
+  operations_record_target: [
+    'operations',
+    0,
+    0,
+    [
+      ['did', 0],
+      ['collection', 0],
+      ['rkey', 0],
+      ['created_at_ms', 0],
+    ],
+  ],
   loves_owner_time: [
     'loves',
     0,
@@ -1556,7 +1846,11 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
   it('migration 2 creates exactly the ADR 0005 §6.4 tables, scrobbles columns and indexes, and TABLES lists every table', async () => {
     const v1Name = 'schema-v2-shape-v1';
     expect(await resetToV1(v1Name)).toEqual({ status: 'ready', version: 1 });
-    const v1 = await inDb(v1Name, (db) => ({ objects: appObjects(db), scrobbles: columnsOf(db, 'scrobbles') }));
+    const v1 = await inDb(v1Name, (db) => ({
+      objects: appObjects(db),
+      scrobbles: columnsOf(db, 'scrobbles'),
+      hints: columnsOf(db, 'hints'),
+    }));
     expect(v1.objects.some((o) => o.name === 'accounts')).toBe(false);
 
     // The constructor of a fresh harness DO applied every migration.
@@ -1565,6 +1859,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       return {
         objects,
         scrobbles: columnsOf(db, 'scrobbles'),
+        hints: columnsOf(db, 'hints'),
         tables: Object.fromEntries(
           Object.keys(NEW_TABLES).map((t) => [
             t,
@@ -1601,12 +1896,17 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
     for (const o of v1.objects) {
       const now = v2.objects.find((x) => x.name === o.name);
       expect([o.name, now?.type]).toEqual([o.name, o.type]);
-      if (o.name !== 'scrobbles') expect([o.name, now?.sql]).toEqual([o.name, o.sql]);
+      if (o.name !== 'scrobbles')
+        expect([o.name, o.name === 'hints' ? now?.sql?.replace(', evidence_rev TEXT', '') : now?.sql]).toEqual([
+          o.name,
+          o.sql,
+        ]);
     }
 
     // scrobbles: the v1 columns in place, then the §6.2/§8.4 columns.
     expect(v2.scrobbles).toEqual([...v1.scrobbles, ...NEW_SCROBBLE_COLUMNS]);
     expect(v1.scrobbles).not.toContain('album_artist');
+    expect(v2.hints).toEqual([...v1.hints, 'evidence_rev']);
 
     // Every new table's columns, primary key and UNIQUE constraints.
     for (const [table, e] of Object.entries(NEW_TABLES)) {
@@ -1952,6 +2252,13 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       "44|'forward_love_lanes'",
       "45|'forward_love_recording_history'",
       "46|'forward_love_recording_targets'",
+      "47|'operations_record_target'",
+      "48|'live_admission_evidence'",
+      "49|'live_pending_removals'",
+      "50|'live_pending_removal_repair'",
+      "51|'live_pending_removal_bounds'",
+      "52|'a2_authorization_binding'",
+      "53|'a2_retention_epoch'",
     ]);
     // The new scrobble columns exist and are NULL on every migrated row.
     expect(after.newColumns).toHaveLength(expectedScrobbles);
@@ -2005,6 +2312,13 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       { version: 44, name: 'forward_love_lanes' },
       { version: 45, name: 'forward_love_recording_history' },
       { version: 46, name: 'forward_love_recording_targets' },
+      { version: 47, name: 'operations_record_target' },
+      { version: 48, name: 'live_admission_evidence' },
+      { version: 49, name: 'live_pending_removals' },
+      { version: 50, name: 'live_pending_removal_repair' },
+      { version: 51, name: 'live_pending_removal_bounds' },
+      { version: 52, name: 'a2_authorization_binding' },
+      { version: 53, name: 'a2_retention_epoch' },
     ]);
     expect(after.compat).toEqual([{ singleton: 1, min_compatible_version: 2 }]);
     expect(after.newTablesEmpty).toEqual(['mb_cover_art_usage']);
@@ -2137,7 +2451,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
 
     expect(plans.lovesByOwner).toEqual(['SEARCH loves USING INDEX loves_owner_time (did=?)']);
     expect(plans.lovedTrack).toEqual([
-      'SEARCH loves USING INDEX loves_owner_track (did=? AND artist_key=? AND track_key=?)',
+      'SEARCH loves USING INDEX loves_newer_by_track (did=? AND artist_key=? AND track_key=?)',
     ]);
     expect(plans.dueOperations).toEqual(['SEARCH operations USING INDEX operations_due (state=?)']);
     expect(plans.dueForwards).toEqual(['SEARCH forward_outbox USING INDEX forward_outbox_due (state=? AND due_at<?)']);

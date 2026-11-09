@@ -80,6 +80,7 @@ import { VerifyError, type VerifyErrorCode } from '@atmusic/atproto/verify/types
 import { isTid } from '@atmusic/core/syntax';
 import { fromMs, parseRfc3339 } from '@atmusic/core/timestamp';
 import type { SliceBudget } from '../../config';
+import { dropLiveState, lateAccept } from '../../forward/live-acceptance';
 import type { ModuleDeps } from '../contracts';
 import type { Db } from '../db';
 import { cancel, schedule } from '../timers';
@@ -94,6 +95,7 @@ import {
   deferHint,
   deleteHint,
   deleteHintsForDid,
+  enqueueHints,
   type HintRow,
   nextHintDue,
   readHint,
@@ -101,6 +103,8 @@ import {
   takeDue,
 } from './hints';
 import { cachedIdentity, resolveIdentity } from './identity-cache';
+import { countLiveAdmission, isStale, LIVE_SWEEP_LIMIT, readLiveEvidence, sweepLiveAdmission } from './live-evidence';
+import { executeAuthorizedRemovals, nextPendingRemovalDue } from './live-pending-removals';
 import {
   FetchLimiter,
   hostOf,
@@ -159,6 +163,7 @@ export type DrainOutcome =
   | 'snapshot_scheduled'
   | 'verify_failed'
   | 'stale'
+  | 'staleProof'
   | 'gave_up'
   | 'budget';
 
@@ -174,6 +179,8 @@ export interface DrainReport {
 interface DrainState {
   inFlight: Set<string>;
   limiter: FetchLimiter;
+  orphanCursor: string | null;
+  orphanReconciled: boolean;
 }
 
 const states = new WeakMap<Db, DrainState>();
@@ -188,6 +195,8 @@ export function drainState(db: Db, budget: Pick<SliceBudget, 'concurrentFetches'
         concurrentFetches: budget.concurrentFetches,
         perHostConcurrency: budget.perHostConcurrency,
       }),
+      orphanCursor: null,
+      orphanReconciled: false,
     };
     states.set(db, state);
   }
@@ -200,7 +209,9 @@ export function drainState(db: Db, budget: Pick<SliceBudget, 'concurrentFetches'
  * replaces whatever was stored), or cancel it when the queue is empty.
  */
 export function scheduleDrainTimer(db: Db, now: number): number | null {
-  const next = nextHintDue(db);
+  const hintDue = nextHintDue(db);
+  const pendingDue = nextPendingRemovalDue(db, now);
+  const next = hintDue === null ? pendingDue : pendingDue === null ? hintDue : Math.min(hintDue, pendingDue);
   if (next === null) {
     cancel(db, 'drain');
     return null;
@@ -261,6 +272,7 @@ function drop(c: Ctx, row: HintRow, reason: string): Outcome {
   const db = c.m.db;
   db.tx(() => {
     deleteHint(db, row.uri);
+    dropLiveState(db, row.uri);
     counter(db, HINT_DROPPED_COUNTER, reason);
   });
   return { outcome: 'dropped', detail: reason };
@@ -275,38 +287,87 @@ function getRecordUrl(pds: string, row: HintRow): URL {
 }
 
 /** Apply a verified proof in one transaction; see the header, step 9. */
-function applyVerified(c: Ctx, row: HintRow, proof: Parameters<typeof applyRecordProof>[1]): Outcome {
+function applyVerified(
+  c: Ctx,
+  row: HintRow,
+  proof: Parameters<typeof applyRecordProof>[1],
+  capturedEvidence: ReturnType<typeof readLiveEvidence>,
+): Outcome {
   const db = c.m.db;
   const receiptNs = parseRfc3339(row.receipt_time);
   if (receiptNs === null) throw new Error(`hint ${row.uri} has an unparseable receipt_time`);
   try {
     return db.tx((): Outcome => {
+      // Transport and signature verification may cross evidence/candidate
+      // expiry. Evaluate every settlement fence against one clock sample taken
+      // inside the atomic transaction, after the async work has completed.
+      const settledAt = c.m.clock.nowMs();
       const current = readHint(db, row.uri);
+      const evidence = readLiveEvidence(db, row.uri, settledAt);
+      if (isStale(evidence, proof.commit.rev)) {
+        // Keep the projection and live state intact while using normal stale-PDS
+        // backoff and snapshot fallback accounting.
+        countLiveAdmission(db, 'stale_proof');
+        return staleProof(c, row, current, 'stale_live_evidence');
+      }
+      const legacy =
+        row.source === 'jetstream' &&
+        row.hint_rev !== null &&
+        (row.evidence_rev === null || row.hint_rev > row.evidence_rev) &&
+        (current === null ||
+          current.evidence_rev === null ||
+          (current.hint_rev !== null && current.hint_rev > current.evidence_rev));
       const result = applyRecordProof(db, proof, {
         receiptNs,
         prefix: c.prefix,
-        nowNs: fromMs(c.now),
-        ...(row.source === 'jetstream' && row.hint_rev === proof.commit.rev
-          ? { forwarding: { random: c.m.random } }
-          : {}),
+        nowNs: fromMs(settledAt),
+        live: { random: c.m.random, evidence, legacyRev: legacy ? row.hint_rev : null },
+        liveCandidates: true,
       });
       if (result.outcome === 'stale_head') {
         return staleProof(c, row, current);
       }
+      if (result.outcome === 'ignored') dropLiveState(db, row.uri);
+      else {
+        lateAccept(db, {
+          uri: row.uri,
+          did: row.did,
+          collection: row.collection,
+          rkey: row.rkey,
+          evidence,
+          nowMs: settledAt,
+          random: c.m.random,
+        });
+        executeAuthorizedRemovals(db, { uri: row.uri, nowMs: settledAt, random: c.m.random, limit: 1 });
+        if (
+          evidence !== null &&
+          proof.commit.rev >= (evidence.up_rev ?? '') &&
+          proof.commit.rev >= (evidence.del_rev ?? '')
+        )
+          db.run('DELETE FROM live_record_evidence WHERE uri=? AND conflict_rev IS NULL', row.uri);
+      }
       if (result.admit) {
         // The opt-out was lifted: admit a fresh snapshot in the same transaction.
-        const a = admit(db, proof.commit.did, 'settings', c.now);
+        const a = admit(db, proof.commit.did, 'settings', settledAt);
         if (a.status === 'busy') throw new RollbackAdmission();
       } else if (result.outcome === 'ignored' && proof.collection === `${c.prefix}.settings`) {
         // A settings record of a DID we do not know (and that is not opting out): admission.
         if (!isSuppressed(db, row.did) && loadUser(db, row.did) === null) {
-          const a = admit(db, row.did, row.source, c.now);
+          const a = admit(db, row.did, row.source, settledAt);
           if (a.status === 'busy') throw new RollbackAdmission();
         }
       }
       if (current === null) return { outcome: result.outcome };
       const claimedNewer = current.hint_rev !== null && isTid(current.hint_rev) && proof.commit.rev < current.hint_rev;
-      const changed = current.receipt_time !== row.receipt_time || current.hint_rev !== row.hint_rev;
+      const latestEvidence = readLiveEvidence(db, row.uri, settledAt);
+      const capturedWasSettled =
+        latestEvidence === null &&
+        capturedEvidence !== null &&
+        proof.commit.rev >= (capturedEvidence.up_rev ?? '') &&
+        proof.commit.rev >= (capturedEvidence.del_rev ?? '');
+      const evidenceChanged =
+        !capturedWasSettled && JSON.stringify(latestEvidence) !== JSON.stringify(capturedEvidence);
+      const changed = current.receipt_time !== row.receipt_time || current.hint_rev !== row.hint_rev || evidenceChanged;
       if (changed) {
         // A newer event arrived while this proof was in flight: fetch again.
         rearmHint(db, row.uri, c.now);
@@ -325,18 +386,20 @@ function applyVerified(c: Ctx, row: HintRow, proof: Parameters<typeof applyRecor
 }
 
 /** The PDS served a head older than one already applied or claimed: back off, then snapshot. */
-function staleProof(c: Ctx, row: HintRow, current: HintRow | null): Outcome {
+function staleProof(c: Ctx, row: HintRow, current: HintRow | null, reason = 'stale_head'): Outcome {
   const db = c.m.db;
   if (current === null) return { outcome: 'stale' };
-  const attempts = backoffHint(db, row.uri, c.now, 'stale_head');
+  const attempts = backoffHint(db, row.uri, c.now, reason);
   if (attempts !== null && attempts >= STALE_ATTEMPTS) {
-    const s = scheduleSnapshot(db, row.did, 'stale_head', c.now);
+    const s = scheduleSnapshot(db, row.did, reason, c.now);
     if (s.status === 'scheduled' || s.status === 'already') {
       deleteHint(db, row.uri);
-      return { outcome: 'snapshot_scheduled', detail: 'stale_head' };
+      return { outcome: 'snapshot_scheduled', detail: reason };
     }
   }
-  return { outcome: 'stale', detail: 'stale_head' };
+  return reason === 'stale_live_evidence'
+    ? { outcome: 'staleProof', detail: 'live_evidence' }
+    : { outcome: 'stale', detail: 'stale_head' };
 }
 
 async function processHint(c: Ctx, taken: HintRow): Promise<Outcome> {
@@ -344,6 +407,7 @@ async function processHint(c: Ctx, taken: HintRow): Promise<Outcome> {
   const row = readHint(db, taken.uri);
   if (row === null) return { outcome: 'skipped' };
   if (row.due_at > c.now) return { outcome: 'skipped' };
+  const capturedEvidence = readLiveEvidence(db, row.uri, c.now);
 
   const kind = collectionKind(c.prefix, row.collection);
   if (kind === null) return drop(c, row, 'unconfigured');
@@ -356,6 +420,7 @@ async function processHint(c: Ctx, taken: HintRow): Promise<Outcome> {
       const a = admit(db, row.did, row.source, c.now);
       if (a.status === 'admitted' || a.status === 'known') {
         deleteHint(db, row.uri);
+        dropLiveState(db, row.uri);
         return { outcome: 'admitted', detail: a.status };
       }
       if (a.status === 'suppressed') {
@@ -429,7 +494,7 @@ async function processHint(c: Ctx, taken: HintRow): Promise<Outcome> {
   for (;;) {
     try {
       const verified = await verifyProof(db, body, { ...opts, signingKey: id.identity.signingKey }, c.now);
-      return applyVerified(c, row, verified.proof);
+      return applyVerified(c, row, verified.proof, capturedEvidence);
     } catch (error) {
       const code = errorCode(error);
       if (code !== null && FRESH_RETRY_CODES.has(code) && !freshTried) {
@@ -548,6 +613,82 @@ export async function drain(m: ModuleDeps, now: number, budget: SliceBudget = m.
     for (const row of queue) state.inFlight.delete(row.uri);
   }
   report.subrequests = c.meter.reserved;
-  m.db.tx(() => scheduleDrainTimer(m.db, now));
+  let committedOrphanCursor: string | null = null;
+  let orphanReconciled = false;
+  m.db.tx(() => {
+    const sweptAt = m.clock.nowMs();
+    sweepLiveAdmission(m.db, sweptAt);
+    const pendingSweep = executeAuthorizedRemovals(m.db, {
+      nowMs: sweptAt,
+      random: m.random,
+      limit: LIVE_SWEEP_LIMIT,
+    });
+    if (!state.orphanReconciled) {
+      const rows = m.db.all<{
+        uri: string;
+        did: string;
+        collection: string;
+        rkey: string;
+        up_rev: string | null;
+        del_rev: string | null;
+      }>(
+        `SELECT uri,did,collection,rkey,up_rev,del_rev FROM live_record_evidence
+         WHERE uri>? AND expires_at_ms>? ORDER BY uri LIMIT 200`,
+        state.orphanCursor ?? '',
+        now,
+      );
+      const rehint: Array<{
+        did: string;
+        collection: string;
+        rkey: string;
+        source: 'reconcile';
+        hintRev: string;
+        receiptMs: number;
+      }> = [];
+      let lastScannedUri = state.orphanCursor ?? '';
+      for (const row of rows) {
+        lastScannedUri = row.uri;
+        const exists = m.db.one('SELECT 1 AS hit FROM hints WHERE uri=?', row.uri) !== null;
+        const walking =
+          m.db.one(
+            "SELECT 1 AS hit FROM repo_jobs WHERE did=? AND kind='snapshot' AND state IN ('pending','running') LIMIT 1",
+            row.did,
+          ) !== null;
+        if (!exists && !walking) {
+          const hintRev =
+            row.up_rev === null
+              ? row.del_rev!
+              : row.del_rev === null
+                ? row.up_rev
+                : row.up_rev > row.del_rev
+                  ? row.up_rev
+                  : row.del_rev;
+          rehint.push({
+            did: row.did,
+            collection: row.collection,
+            rkey: row.rkey,
+            source: 'reconcile',
+            hintRev,
+            receiptMs: now,
+          });
+        }
+      }
+      if (rehint.length) {
+        enqueueHints(m.db, rehint);
+        m.db.run(
+          `INSERT INTO counters(name,label,value) VALUES('live_admission','orphan_rehint',?)
+          ON CONFLICT(name,label) DO UPDATE SET value=counters.value+excluded.value`,
+          rehint.length,
+        );
+      }
+      committedOrphanCursor = lastScannedUri;
+      orphanReconciled = rows.length < 200;
+    }
+    scheduleDrainTimer(m.db, now);
+    if (pendingSweep.groups >= LIVE_SWEEP_LIMIT || pendingSweep.expired >= LIVE_SWEEP_LIMIT)
+      schedule(m.db, 'drain', sweptAt + DRAIN_MIN_INTERVAL_MS, { force: true });
+  });
+  if (committedOrphanCursor !== null) state.orphanCursor = committedOrphanCursor;
+  if (orphanReconciled) state.orphanReconciled = true;
   return report;
 }

@@ -1014,12 +1014,44 @@ async function execute(rt: ForwardRuntime, job: Job, now: number): Promise<boole
   }
   if (job.link.service === 'lastfm') {
     if (!rt.pacing.tryLastfm('forward', now)) return false;
+    if (job.kind === 'unlove' && !allowAuthorizedUnlove(rt, job, now)) return false;
     await sendLastfm(rt, job, credential);
   } else {
     if (!rt.pacing.tryListenbrainz(lbKey(job.link), now)) return false;
+    if (job.kind === 'unlove' && !allowAuthorizedUnlove(rt, job, now)) return false;
     await sendListenbrainz(rt, job, credential);
   }
   return true;
+}
+
+/** Re-read the durable authorization at the last synchronous point before either remote effect. */
+function allowAuthorizedUnlove(rt: ForwardRuntime, job: Job, now: number): boolean {
+  const row = job.rows[0]!;
+  const current = rt.db.one<{
+    authorization_uri: string | null;
+    authorization_rev: string | null;
+  }>("SELECT authorization_uri,authorization_rev FROM forward_outbox WHERE id=? AND state='queued'", row.id);
+  if (current === null || current.authorization_uri === null || current.authorization_rev === null) return true;
+  const conflict =
+    rt.db.one(
+      'SELECT 1 FROM live_pending_removal_events WHERE uri=? AND rev=? AND conflicted=1 LIMIT 1',
+      current.authorization_uri,
+      current.authorization_rev,
+    ) !== null ||
+    rt.db.one(
+      'SELECT 1 FROM live_record_evidence WHERE uri=? AND conflict_rev=? LIMIT 1',
+      current.authorization_uri,
+      current.authorization_rev,
+    ) !== null;
+  if (!conflict) return true;
+  rt.db.tx(() => {
+    rt.db.run(
+      "UPDATE forward_outbox SET state='ignored',last_error='authorization_conflicted',updated_at_ms=? WHERE id=? AND state='queued'",
+      now,
+      row.id,
+    );
+  });
+  return false;
 }
 
 export const KIND_MIN_DUE_SQL = `SELECT min(due_at) AS due FROM forward_outbox INDEXED BY forward_outbox_kind_due
