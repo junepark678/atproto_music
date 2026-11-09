@@ -569,6 +569,29 @@ function boxOf(doc: Record<string, unknown>): { box: Box; secrets: Secrets } {
 // ---------------------------------------------------------------------------
 
 describe('restore.ts', () => {
+  it('preserves live non-derived mb_tracks rows while rebuilding derived projections from backup', async () => {
+    expect(TABLE_CLASS.mb_tracks).toBe('non-derived');
+    const world = await buildWorld();
+    const live = openSqliteDb(world.dbPath, { busyTimeoutMs: BUSY_MS });
+    live.run(`INSERT INTO mb_tracks(artist_key,track_key,album_key,status,recording_mbid,title,artist_credit,created_at_ms)
+      VALUES ('artist','late song','','matched','3f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2d10','Late Song','Artist',1)`);
+    live.close();
+    const systemd = new FakeSystemd(world, { servicePort: null });
+    await systemd.boot();
+    const result = await restoreCli(world, systemd, [...baseArgs(world), '--no-ready-check']);
+    expect(result.code, `${result.stdout}\n${result.stderr}`).toBe(0);
+    const db = openSqliteDb(world.dbPath, { busyTimeoutMs: BUSY_MS });
+    try {
+      expect(db.one("SELECT title,recording_mbid FROM mb_tracks WHERE track_key='late song'")).toEqual({
+        title: 'Late Song',
+        recording_mbid: '3f2f7f3e-3c1d-4b9e-9a39-1f3a7c5b2d10',
+      });
+      expect(db.all('SELECT rkey FROM scrobbles ORDER BY rkey')).toEqual([{ rkey: 's1' }]);
+    } finally {
+      db.close();
+    }
+  }, 30_000);
+
   it('with a fake systemctl, restore stops atmusic.socket and atmusic.service, proceeds only when both report inactive, swaps the db in, and starts both units only afterwards; a connection attempted mid-restore starts no server', async () => {
     const world = await buildWorld();
     const servicePort = await freePort();

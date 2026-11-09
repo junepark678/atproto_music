@@ -96,6 +96,16 @@ export interface ScrobbleRow {
   artist_key: string;
   track_key: string;
   album_key: string | null;
+  mb_recording_mbid?: string | null;
+  mb_title?: string | null;
+  mb_artist_credit?: string | null;
+  mb_artist_mbids?: string | null;
+  mb_release_mbid?: string | null;
+  mb_release_title?: string | null;
+  mb_release_group_mbid?: string | null;
+  mb_duration_ms?: number | null;
+  mb_matched_by?: string | null;
+  mb_synced_at_ms?: number | null;
 }
 
 export interface FollowRow {

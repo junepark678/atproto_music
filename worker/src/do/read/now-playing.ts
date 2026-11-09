@@ -31,8 +31,9 @@
 // - Expired rows are deleted by `deleteExpiredNowPlaying` (the expiry-sweep
 //   timer, §3.3); reads never depend on that sweep.
 
-import { artistKey, trackKey } from '@atmusic/core/music-key';
+import { albumKey, artistKey, trackKey } from '@atmusic/core/music-key';
 import type { NowPlayingRow, NowPlayingSource } from '../../app/rows';
+import { enqueueTrack } from '../../musicbrainz/store';
 import type { ModuleDeps } from '../contracts';
 import { NOW_PLAYING_SOURCES } from '../schema';
 import { activeUser, visibleFollowEdge } from './visibility';
@@ -144,6 +145,15 @@ export function upsertNowPlaying(m: Pick<ModuleDeps, 'db' | 'clock'>, input: Now
         music_service: merge(input.musicService, existing.music_service),
         media_player: merge(input.mediaPlayer, existing.media_player),
       };
+      const musicTrackKey = trackKey(input.artist, input.track);
+      const musicAlbumKey = albumKey(input.artist, fields.album);
+      enqueueTrack(
+        db,
+        { artistKey: artistKey(input.artist), trackKey: musicTrackKey[1], albumKey: musicAlbumKey?.[1] ?? '' },
+        now,
+        10,
+        fields.recording_mbid,
+      );
       db.run(
         `UPDATE now_playing SET album=?, album_artist=?, duration_seconds=?, recording_mbid=?, client=?, track_number=?, release_mbid=?,
          release_group_mbid=?, artist_mbids=?, isrc=?, submission_client_version=?, music_service=?, media_player=?, updated_at_ms=?, expires_at_ms=? WHERE did=?`,
@@ -225,6 +235,19 @@ export function upsertNowPlaying(m: Pick<ModuleDeps, 'db' | 'clock'>, input: Now
       row.music_service,
       row.media_player,
       row.scrobbled_at_ms,
+    );
+    const musicTrackKey = trackKey(row.artist, row.track);
+    const musicAlbumKey = albumKey(row.artist, row.album);
+    enqueueTrack(
+      db,
+      {
+        artistKey: artistKey(row.artist),
+        trackKey: musicTrackKey[1],
+        albumKey: musicAlbumKey?.[1] ?? '',
+      },
+      now,
+      10,
+      row.recording_mbid,
     );
     return { outcome: 'stored' as const, row };
   });

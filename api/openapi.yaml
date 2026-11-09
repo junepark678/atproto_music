@@ -4,7 +4,7 @@
   "info": {
     "title": "AT Protocol Music API",
     "version": "1.2.0",
-    "description": "API contract v1.2 from docs/planning/API.md as amended by ADR 0004 §9 (docs/adr/0004-cloudflare-workers.md) and ADR 0005 B14 (docs/adr/0005-local-node-host-and-compat-apis.md §5.7, §16). A route in this specification is not a claim that the current executable implements it. Every v1.1 route and payload is unchanged except the additive optional Scrobble fields (ADR 0005 §6.2); no v1.1 read route reads a session, cookie, CSRF token or Origin header. v1.2 adds the confidential OAuth client (BFF) routes: sign-in, cookie sessions (__Host-atmusic_session) with CSRF (Origin plus X-CSRF-Token) on every unsafe cookie route, server writes into one outbox (202 Accepted with an Operation), the account, credential, link and import routes, and the dynamic /oauth/client-metadata.json and /oauth/jwks.json. The Last.fm 2.0 API (/2.0/) and the ListenBrainz API (/1/) are specified in ADR 0005 §7 and §8 and docs/compat/{lastfm,listenbrainz}.md, not here. Schema and transport fixtures use reserved identities and a fixture-only namespace; production publication requires an owner-controlled prefix. All application JSON objects are closed; absent optional fields are omitted, not null/empty. No response returns upstream access/refresh tokens, DPoP keys or private signing keys; the server holds them sealed at rest (ADR 0005 §5.5). Additive N1 B22 draft: detailed user now-playing and signed-in followed now-playing feed DTOs."
+    "description": "API contract v1.2 from docs/planning/API.md as amended by ADR 0004 §9 (docs/adr/0004-cloudflare-workers.md) and ADR 0005 B14 (docs/adr/0005-local-node-host-and-compat-apis.md §5.7, §16). A route in this specification is not a claim that the current executable implements it. Every v1.1 route and payload is unchanged except additive optional Scrobble fields (ADR 0005 §6.2); no v1.1 read route reads a session, cookie, CSRF token or Origin header. Draft B23 adds optional MusicBrainz fields to Scrobble and Love DTOs and unambiguous MBIDs to Statistics without changing required fields or routes. v1.2 adds the confidential OAuth client (BFF) routes: sign-in, cookie sessions (__Host-atmusic_session) with CSRF (Origin plus X-CSRF-Token) on every unsafe cookie route, server writes into one outbox (202 Accepted with an Operation), the account, credential, link and import routes, and the dynamic /oauth/client-metadata.json and /oauth/jwks.json. The Last.fm 2.0 API (/2.0/) and the ListenBrainz API (/1/) are specified in ADR 0005 §7 and §8 and docs/compat/{lastfm,listenbrainz}.md, not here. Schema and transport fixtures use reserved identities and a fixture-only namespace; production publication requires an owner-controlled prefix. All application JSON objects are closed; absent optional fields are omitted, not null/empty. No response returns upstream access/refresh tokens, DPoP keys or private signing keys; the server holds them sealed at rest (ADR 0005 §5.5). Additive N1 B22 draft: detailed user now-playing and signed-in followed now-playing feed DTOs."
   },
   "servers": [
     {
@@ -6013,9 +6013,47 @@
           },
           "musicService": {
             "$ref": "#/components/schemas/MusicService"
+          },
+          "musicbrainz": {
+            "$ref": "#/components/schemas/MusicBrainzMatch"
           }
         },
         "description": "An indexed, proof-verified scrobble. The fields albumArtist through musicService are additive optional v1.2 fields (ADR 0005 §6.2); they are omitted when the record has none."
+      },
+      "MusicBrainzMatch": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["recordingMbid", "title", "artistCredit", "artistMbids", "matchedBy", "syncedAt"],
+        "properties": {
+          "recordingMbid": { "$ref": "#/components/schemas/Uuid" },
+          "title": { "$ref": "#/components/schemas/MusicText" },
+          "artistCredit": { "type": "string" },
+          "artistMbids": { "type": "array", "items": { "$ref": "#/components/schemas/Uuid" } },
+          "releaseMbid": { "$ref": "#/components/schemas/Uuid" },
+          "releaseTitle": { "$ref": "#/components/schemas/MusicText" },
+          "releaseGroupMbid": { "$ref": "#/components/schemas/Uuid" },
+          "durationSeconds": { "type": "integer", "minimum": 1 },
+          "matchedBy": { "type": "string", "enum": ["mbid", "search"] },
+          "syncedAt": { "$ref": "#/components/schemas/Timestamp" }
+        }
+      },
+      "Love": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["uri", "cid", "did", "artist", "track", "createdAt", "indexedAt"],
+        "properties": {
+          "uri": { "$ref": "#/components/schemas/AtUri" },
+          "cid": { "$ref": "#/components/schemas/Cid" },
+          "did": { "$ref": "#/components/schemas/Did" },
+          "artist": { "$ref": "#/components/schemas/MusicText" },
+          "track": { "$ref": "#/components/schemas/MusicText" },
+          "album": { "$ref": "#/components/schemas/MusicText" },
+          "recordingMbid": { "$ref": "#/components/schemas/Uuid" },
+          "createdAt": { "$ref": "#/components/schemas/Timestamp" },
+          "indexedAt": { "$ref": "#/components/schemas/Timestamp" },
+          "musicbrainz": { "$ref": "#/components/schemas/MusicBrainzMatch" }
+        },
+        "description": "A loved track read DTO. MusicBrainz enrichment is optional and never replaces submitted artist, track or album values."
       },
       "Follow": {
         "type": "object",
@@ -6159,6 +6197,9 @@
                 "scrobbleCount": {
                   "type": "integer",
                   "minimum": 0
+                },
+                "artistMbid": {
+                  "$ref": "#/components/schemas/Uuid"
                 }
               }
             }
@@ -6183,6 +6224,9 @@
                 "scrobbleCount": {
                   "type": "integer",
                   "minimum": 0
+                },
+                "recordingMbid": {
+                  "$ref": "#/components/schemas/Uuid"
                 }
               }
             }
@@ -6207,6 +6251,12 @@
                 "scrobbleCount": {
                   "type": "integer",
                   "minimum": 0
+                },
+                "releaseMbid": {
+                  "$ref": "#/components/schemas/Uuid"
+                },
+                "releaseGroupMbid": {
+                  "$ref": "#/components/schemas/Uuid"
                 }
               }
             }
@@ -8101,6 +8151,21 @@
       "scrobble": {
         "summary": "Reserved offline schema fixture; not public publication evidence.",
         "externalValue": "examples/scrobble.json"
+      },
+      "love": {
+        "summary": "Reserved offline Love DTO fixture; not public publication evidence.",
+        "externalValue": "examples/love.json",
+        "x-schema": "Love"
+      },
+      "scrobble-musicbrainz": {
+        "summary": "Reserved offline Scrobble MusicBrainz DTO fixture; not public publication evidence.",
+        "externalValue": "examples/scrobble-musicbrainz.json",
+        "x-schema": "Scrobble"
+      },
+      "stats-musicbrainz": {
+        "summary": "Reserved offline Statistics MBID fixture; not public publication evidence.",
+        "externalValue": "examples/stats-musicbrainz.json",
+        "x-schema": "Statistics"
       },
       "scrobble-page": {
         "summary": "Reserved offline schema fixture; not public publication evidence.",

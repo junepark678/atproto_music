@@ -102,6 +102,8 @@ describe('parseNodeConfig', () => {
     expect(cfg.adminSocket).toBe('/run/user/1000/atmusic/admin.sock');
     expect(cfg.assetsDir).toBe('/opt/atmusic/release/web/dist');
     expect(cfg.listen).toEqual({ host: '127.2.0.1', port: 8888 });
+    expect(cfg.musicbrainzApiRoot).toBe('https://musicbrainz.org/ws/2/');
+    expect(cfg.musicbrainzEnabled).toBe(true);
 
     // systemd lists several state directories colon-separated; the first is ours.
     expect(parse({ ...baseEnv(), STATE_DIRECTORY: '/srv/a:/srv/b' }).dbPath).toBe('/srv/a/atmusic.db');
@@ -157,7 +159,7 @@ describe('parseNodeConfig', () => {
       port: 'https://ws.audioscrobbler.com:8443/2.0/',
       fixtureTld: 'https://lastfm.test/2.0/',
     };
-    for (const name of ['LASTFM_API_ROOT', 'LASTFM_AUTH_URL', 'LISTENBRAINZ_API_ROOT']) {
+    for (const name of ['LASTFM_API_ROOT', 'LASTFM_AUTH_URL', 'LISTENBRAINZ_API_ROOT', 'MUSICBRAINZ_API_ROOT']) {
       for (const [kind, root] of Object.entries(badRoots)) {
         const issues = issuesOf(() => parse({ ...env, [name]: root }));
         expect(fields(issues), `${name} ${kind}`).toEqual([name]);
@@ -169,6 +171,14 @@ describe('parseNodeConfig', () => {
     expect(cfg.lastfmApiRoot).toBe('https://ws.audioscrobbler.com/2.0/');
     expect(cfg.lastfmAuthUrl).toBe('https://www.last.fm/api/auth/');
     expect(cfg.fixtureOrigins).toBe(false);
+    expect(
+      parse({
+        ...baseEnv(),
+        MUSICBRAINZ_API_ROOT: 'https://musicbrainz.example.org/ws/2/',
+        MUSICBRAINZ_ENABLED: 'false',
+      }),
+    ).toMatchObject({ musicbrainzApiRoot: 'https://musicbrainz.example.org/ws/2/', musicbrainzEnabled: false });
+    expect(fields(issuesOf(() => parse({ ...baseEnv(), MUSICBRAINZ_ENABLED: '0' })))).toEqual(['MUSICBRAINZ_ENABLED']);
 
     // Non-vacuity: the test-only option is what admits the e2e stack's values,
     // and it still refuses http upstreams, IP literals and loopback names.
@@ -179,6 +189,7 @@ describe('parseNodeConfig', () => {
         ATMUSIC_LISTEN: '127.0.0.1:0',
         LASTFM_API_ROOT: 'https://lastfm.test/2.0/',
         LISTENBRAINZ_API_ROOT: 'https://listenbrainz.test/',
+        MUSICBRAINZ_API_ROOT: 'https://musicbrainz.test/ws/2/',
       },
       { fixtureOrigins: true },
     );
@@ -186,6 +197,7 @@ describe('parseNodeConfig', () => {
     expect(fixture.app.publicOrigin).toBe('http://127.0.0.1:41234');
     expect(fixture.listen).toEqual({ host: '127.0.0.1', port: 0 });
     expect(fixture.fixtureOrigins).toBe(true);
+    expect(fixture.musicbrainzApiRoot).toBe('https://musicbrainz.test/ws/2/');
     for (const kind of ['http', 'ipv4', 'loopbackIp', 'localhost', 'port'] as const) {
       const issues = issuesOf(() => parse({ ...env, LASTFM_API_ROOT: badRoots[kind] }, { fixtureOrigins: true }));
       expect(fields(issues), kind).toEqual(['LASTFM_API_ROOT']);

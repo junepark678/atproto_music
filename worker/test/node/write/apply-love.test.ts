@@ -191,6 +191,12 @@ describe('love projection', () => {
           track_key: 'cloudbusting',
         },
       ]);
+      expect(db.one('SELECT artist_key,track_key,album_key,submitted_recording_mbid FROM mb_tracks')).toEqual({
+        artist_key: 'björk',
+        track_key: 'jóga',
+        album_key: '',
+        submitted_recording_mbid: MBID,
+      });
       expect(state(db, bobUri)).toMatchObject({ revision: h1.rev, state: 'present', cid: found!.cid });
 
       const h2 = await bob.delete(LOVE, bobKey);

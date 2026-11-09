@@ -115,6 +115,36 @@ const NEW_TABLES: Record<string, ExpectedTable> = {
     }),
     pk: ['record_uri', 'listen_id'],
   },
+  mb_pacing: { columns: ['singleton', 'available_at_ms'], pk: ['singleton'] },
+  mb_seed_state: { columns: ['singleton', 'cursor_uri', 'complete'], pk: ['singleton'] },
+  mb_tracks: {
+    columns: [
+      'artist_key',
+      'track_key',
+      'album_key',
+      'status',
+      'priority',
+      'attempts',
+      'next_attempt_ms',
+      'last_attempt_ms',
+      'submitted_recording_mbid',
+      'matched_by',
+      'score',
+      'recording_mbid',
+      'title',
+      'artist_credit',
+      'artist_mbids',
+      'release_mbid',
+      'release_title',
+      'release_group_mbid',
+      'duration_ms',
+      'isrcs',
+      'first_release_date',
+      'synced_at_ms',
+      'created_at_ms',
+    ],
+    pk: ['artist_key', 'track_key', 'album_key'],
+  },
   batch_entry_items: {
     columns: ['operation_id', 'entry_id', 'job_id', 'seq', 'removal_operation_id', 'removed_at_ms'],
     pk: ['operation_id', 'entry_id', 'job_id', 'seq'],
@@ -496,6 +526,16 @@ const NEW_SCROBBLE_COLUMNS = cols<ScrobbleV2Columns>({
 
 /** New named indexes: table, unique, partial, [column, desc] in key order. */
 const NEW_INDEXES: Record<string, [string, number, number, Array<[string, number]>]> = {
+  mb_tracks_due: [
+    'mb_tracks',
+    0,
+    0,
+    [
+      ['status', 0],
+      ['next_attempt_ms', 0],
+      ['priority', 0],
+    ],
+  ],
   batch_delete_children_child: ['batch_delete_children', 0, 0, [['child_operation_id', 0]]],
   batch_delete_listens_operation: ['batch_delete_listens', 0, 0, [['operation_id', 0]]],
   batch_entry_items_job: [
@@ -1241,6 +1281,9 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       "13|'removal_reached'",
       "14|'removal_send_pin'",
       "15|'detailed_now_playing'",
+      "16|'musicbrainz_track_matches'",
+      "17|'musicbrainz_global_pacing'",
+      "18|'musicbrainz_seed_cursor'",
     ]);
     // The new scrobble columns exist and are NULL on every migrated row.
     expect(after.newColumns).toHaveLength(expectedScrobbles);
@@ -1263,6 +1306,9 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       { version: 13, name: 'removal_reached' },
       { version: 14, name: 'removal_send_pin' },
       { version: 15, name: 'detailed_now_playing' },
+      { version: 16, name: 'musicbrainz_track_matches' },
+      { version: 17, name: 'musicbrainz_global_pacing' },
+      { version: 18, name: 'musicbrainz_seed_cursor' },
     ]);
     expect(after.compat).toEqual([{ singleton: 1, min_compatible_version: 2 }]);
     expect(after.newTablesEmpty).toEqual([]);

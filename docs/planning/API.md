@@ -6,6 +6,8 @@ This is the fixed API contract encoded in `api/openapi.yaml`. The backend implem
 
 **Amended by [ADR 0005](../adr/0005-local-node-host-and-compat-apis.md) B14 (contract v1.2, `info.version: 1.2.0`).** The server becomes one confidential atproto OAuth client (BFF) that writes for signed-in users (B2, B3). Every v1.1 route, status matrix and payload below is unchanged, except that `Scrobble` and `ScrobbleInput` gain the optional §6.2 fields, and `GET /oauth/client-metadata.json` becomes the dynamic confidential-client document beside the new `GET /oauth/jwks.json` (§5.3). v1.2 adds, additively: sign-in (`POST /api/v1/auth/start`, `GET /oauth/callback`), the cookie session (`GET /api/v1/auth/session`, `POST /api/v1/auth/logout`, `DELETE /api/v1/account/connection`), server writes that answer 202 `Accepted` with an `Operation` (state `queued`, `running`, `succeeded`, `failed`, `blocked` or `cancelled`), operation lookup, the account routes (including `GET /api/v1/account/ignored-listens`), protocol credentials, linked accounts and imports, listed in [v1.2 endpoints](#v12-endpoints-adr-0005-b14). Cookie routes read `__Host-atmusic_session`; every unsafe one also needs exactly one `Origin` equal to the public origin and the `X-CSRF-Token` from the session (401 `unauthenticated`, 403 `csrf_failed`). `meta.capabilities` may add `writes`, `lastfm`, `listenbrainz`, `imports` and `forwarding`; ADR 0006 adds `batchPublication` only with a distinct, separately reviewed five-schema manifest receipt. The OAuth scope includes `repo:<prefix>.scrobbleBatch` only while that second publication gate is open. The Last.fm 2.0 API (`/2.0/`) and the ListenBrainz API (`/1/`) are specified in ADR 0005 §7 and §8 and in [docs/compat/lastfm.md](../compat/lastfm.md) and [docs/compat/listenbrainz.md](../compat/listenbrainz.md), not here. v1.0's account export and local-data deletion routes are not restored (A9 and A10 stay). Issue amendment texts: [AMENDMENTS-node.md](AMENDMENTS-node.md).
 
+**Draft additive amendment B23 (not published):** M1 appends optional MusicBrainz metadata to Scrobble and Love read DTOs and optional unambiguous MBIDs to statistics top lists. It does not change primary submitted display values, counts, ordering, or existing required fields. `NowPlaying.musicbrainz` is deferred to M2 because the N1 now-playing projection is owned by the parallel branch.
+
 ## Shared shapes
 
 All timestamps are UTC RFC3339 strings. IDs are strings. Absent optional record fields are omitted, not replaced with empty strings. Handles can be `null` when no current verified handle exists. Query validation failures are 422 with `error.fields`; malformed JSON and malformed cursors are 400.
@@ -20,7 +22,12 @@ Scrobble = {uri: AT_URI, cid: CID, did: DID, revision: string,
             durationSeconds?: integer, recordingMbid?: UUID, indexedAt: timestamp,
             albumArtist?: string, trackNumber?: 1..9999, artistMbids?: UUID[] (<=10, distinct),
             releaseMbid?: UUID, releaseGroupMbid?: UUID, isrc?: string, submissionClient?: string,
-            musicService?: string}   (the last eight are the optional v1.2 fields, ADR 0005 §6.2)
+            musicService?: string, musicbrainz?: MusicBrainzMatch}   (the last eight are the optional v1.2 fields, ADR 0005 §6.2)
+MusicBrainzMatch = {recordingMbid: UUID, title: string, artistCredit: string, artistMbids: UUID[],
+                    releaseMbid?: UUID, releaseTitle?: string, releaseGroupMbid?: UUID,
+                    durationSeconds?: integer, matchedBy: "mbid"|"search", syncedAt: timestamp}
+Love = {uri: AT_URI, cid: CID, did: DID, artist: string, track: string, album?: string,
+        recordingMbid?: UUID, createdAt: timestamp, indexedAt: timestamp, musicbrainz?: MusicBrainzMatch}
 Follow = {uri: AT_URI, cid: CID, actor: DID, subject: DID, createdAt: timestamp}
 Page<T> = {items: T[], nextCursor: string|null, asOf: timestamp, indexing: Indexing}
 ListenUri = AT_URI | (at://<did>/<prefix>.scrobbleBatch/<containerTid>#<listenTid>)
@@ -81,12 +88,12 @@ NowPlaying = {artist, track, album?, albumArtist?, trackNumber?, durationSeconds
 NowPlayingFeed = {items:[{did:DID,handle:string|null,nowPlaying:NowPlaying}],serverTime:timestamp}
 Statistics = {did:DID, window:"all"|"7d"|"30d"|"365d", asOf:timestamp,
               totalScrobbles:integer, distinctArtists:integer, distinctTracks:integer,
-              topArtists:[{artist:string,scrobbleCount:integer}],
-              topTracks:[{artist:string,track:string,scrobbleCount:integer}],
-              topAlbums:[{artist:string,album:string,scrobbleCount:integer}]}
+              topArtists:[{artist:string,scrobbleCount:integer,artistMbid?:UUID}],
+              topTracks:[{artist:string,track:string,scrobbleCount:integer,recordingMbid?:UUID}],
+              topAlbums:[{artist:string,album:string,scrobbleCount:integer,releaseMbid?:UUID,releaseGroupMbid?:UUID}]}
 ```
 
-Rank arrays order by count descending, then normalized group tuple ascending. Display values use the newest record in each group with AT URI tie-break. Profile counts and follower edges use confirmed active state. For duplicate external follow records representing one edge, serialize the lexicographically smallest active AT URI as its representative; do not double-count it.
+Rank arrays order by count descending, then normalized group tuple ascending. Display values use the newest record in each group with AT URI tie-break. B23 metadata joins only stored `matched` MusicBrainz rows by normalized keys and is attached after cached statistics are read. A missing or conflicting ID is omitted; artist MBIDs require a single credited artist, recording IDs must be unique across matched recordings for the track key, and release IDs must be unique for the album key. MusicBrainz never replaces submitted display names, changes counts/order, makes a read call, or rewrites a PDS record. M1 does not add `musicbrainz` to NowPlaying; that field is deferred to M2 after N1 integration. Profile counts and follower edges use confirmed active state. For duplicate external follow records representing one edge, serialize the lexicographically smallest active AT URI as its representative; do not double-count it.
 
 Deletion clarification (A12, A13, ADR 0006): deletes run in the outbox against the owner's own PDS. A single-record delete URI cannot have a fragment; a batch URI may include one exact listen TID to remove only that item, while the unfragmented batch URI deletes its full container. A pending item deletion hides only that item in the owner's view immediately; public views change only once signed proof is applied. A failed delete stays visible as failed rather than claiming removal. Deletes use the container's current CID as `swapRecord`; `InvalidSwap` re-fetches and reconciles before retry. A delete queued behind a pending create waits for it. Unfollow lists the owner's own follow records from their PDS and deletes every record whose subject matches, each with `swapRecord`; an unrelated follow subject is retained. Alternating follow and unfollow intents retain separate operation identities and execute in order after their persisted predecessors. A follow whose deterministic record already exists with the same subject is success and keeps its original `createdAt` without overwriting it.
 

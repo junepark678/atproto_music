@@ -31,6 +31,7 @@ import { NS_PER_SECOND, toDto, toStorage } from '@atmusic/core/timestamp';
 import type { ModuleDeps, StatsQuery } from '../contracts';
 import type { Db, SqlParam } from '../db';
 import { readCache, type StatsUser, writeCache } from './stats-cache';
+import { withStatsMusicBrainz } from './stats-musicbrainz';
 import { activeUser, visibleScrobblesFrom } from './visibility';
 
 export const STATS_MIN_LIMIT = 1;
@@ -203,7 +204,7 @@ export function statsWithCache(db: Db, q: StatsQuery): StatsResult {
   const cached = readCache(db, key, bounds, user);
   if (cached !== null) return { statistics: { ...cached, asOf: toDto(q.asOfNs) }, cache: 'hit' };
 
-  const statistics = computeStatistics(db, q.did, q.window, q.limit, q.asOfNs);
+  const statistics = withStatsMusicBrainz(db, computeStatistics(db, q.did, q.window, q.limit, q.asOfNs));
   writeCache(db, key, bounds, user, statistics);
   return { statistics, cache: 'miss' };
 }

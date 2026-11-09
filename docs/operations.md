@@ -37,6 +37,14 @@ A shell alias keeps it short: `alias atmusic-admin='node ~/.local/lib/atmusic/cu
 
 Events to watch: `run.config_error` (exit 78), `run.database_locked` (exit 75), `run.migrated`, `run.ready`, `backup.*`, `oauth_store_write_failed` / `oauth_store_write_recovered`, `oauth_session_deleted`, `forward.credential_unreadable`, `alarm.failed`, `jetstream_disconnected`, `verify_failed` counters.
 
+## MusicBrainz metadata sync (draft B23)
+
+`MUSICBRAINZ_ENABLED` defaults to `true`; set it to `false` in the environment file and restart `atmusic` to stop MusicBrainz requests. The local enqueue and historical-seed state remain stored, and reenabling resumes the queue. `MUSICBRAINZ_API_ROOT` defaults to `https://musicbrainz.org/ws/2/` and is validated at startup as an HTTPS URL on a DNS name, default port, and trailing `/`. The client uses the configured pinned `policyFetch` transport, a 1 MiB response cap, and the repository User-Agent `atmusic/<version> ( https://github.com/junepark678/atproto_music )`; it sends no user DID, handle, token, IP, or contact email.
+
+The in-process `musicbrainz` timer seeds old scrobble keys in chunks of at most 100, then handles a few due rows per run. All MusicBrainz requests share a persisted global one-request-per-second lane; the timer re-arms for the lane's available time rather than sleeping. Matched rows refresh after 90 days at low priority, unmatched rows after 30 days, and transient 5xx/network failures back off from 60 seconds exponentially up to 24 hours. Eight failed attempts schedule a 30-day retry; a 503 `Retry-After` also holds the global lane. Read routes and projections never contact MusicBrainz, submitted names remain authoritative, and no PDS record is rewritten.
+
+`mb_tracks`, its global pacing row and the historical seed cursor are non-derived SQLite state. They cannot be rebuilt from PDS records, so online backups include them and disaster restore retains their live rows under the non-derived restore rule; a backup's older enrichment copy does not replace the live resolver queue or its pacing state. See [backup and restore](backup.md#restore-is-disaster-recovery-only).
+
 The `counters` table (shown by `status`) holds the monotonic operational counts of the index (admissions, exclusions, `verify_failed` by code, snapshot lifecycle, gap recoveries, `timer_failures` and `timer_failure_streak` per timer, ...). A growing `timer_failure_streak` for one timer, a rising `verify_failed`, or `snapshot_failed` without matching `snapshot_completed` are the signals to read the journal.
 
 ## Exit codes and restarts

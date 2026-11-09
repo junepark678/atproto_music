@@ -42,6 +42,7 @@
 import type { HistoryQuery, KeysetQuery, ModuleDeps, RowsResult, ScrobbleRow, TimeKey } from '../contracts';
 import type { SqlParam } from '../db';
 import { indexing } from '../status';
+import { MUSICBRAINZ_SCROBBLE_COLUMNS, MUSICBRAINZ_SCROBBLE_JOIN } from './musicbrainz-join';
 import { visibleScrobblesFrom } from './visibility';
 
 /** API.md list limit maximum; the HTTP layer rejects anything else with 422 (no clamping). */
@@ -125,7 +126,7 @@ export function history(m: ModuleDeps, q: HistoryQuery): RowsResult<ScrobbleRow>
   checkKeyset(q);
   const keyset = keysetWhere(q, 's.listened_at', 's.uri');
   const rows = m.db.all<ScrobbleRow>(
-    `SELECT s.* FROM ${visibleScrobblesFrom('s', 'u')}
+    `SELECT s.*, ${MUSICBRAINZ_SCROBBLE_COLUMNS} FROM ${visibleScrobblesFrom('s', 'u')} ${MUSICBRAINZ_SCROBBLE_JOIN}
      WHERE s.did = ?${keyset.sql}
      ORDER BY s.listened_at DESC, s.uri DESC
      LIMIT ?`,

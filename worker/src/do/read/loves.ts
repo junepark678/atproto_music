@@ -10,7 +10,9 @@
 //   matches every spelling variant of a track (loves_owner_track). A name that
 //   has no music key is loved by nobody.
 
+import type { MusicBrainzMatch } from '@atmusic/core/api-types';
 import { MusicKeyError, trackKey } from '@atmusic/core/music-key';
+import { fromMs, toDto } from '@atmusic/core/timestamp';
 import type { LoveRow } from '../../app/rows';
 import type { ModuleDeps } from '../contracts';
 import { isVisibleUser, type OffsetPage, offsetOf } from './recent';
@@ -24,7 +26,21 @@ export interface LovedTracksQuery {
   offset?: number;
 }
 
-export type LovedTracksPage = OffsetPage<LoveRow>;
+export type EnrichedLoveRow = LoveRow & { musicbrainz?: MusicBrainzMatch };
+export type LovedTracksPage = OffsetPage<EnrichedLoveRow>;
+
+type LoveMatchRow = LoveRow & {
+  mb_recording_mbid?: string | null;
+  mb_title?: string | null;
+  mb_artist_credit?: string | null;
+  mb_artist_mbids?: string | null;
+  mb_release_mbid?: string | null;
+  mb_release_title?: string | null;
+  mb_release_group_mbid?: string | null;
+  mb_duration_ms?: number | null;
+  mb_matched_by?: string | null;
+  mb_synced_at_ms?: number | null;
+};
 
 /** The visible-owner join for `loves l`. */
 const VISIBLE_LOVES = `loves l JOIN users u ON u.did = l.did AND ${activeUser('u')}`;
@@ -37,14 +53,70 @@ export function lovedTracks(m: Pick<ModuleDeps, 'db'>, q: LovedTracksQuery): Lov
   const rows =
     total === 0
       ? []
-      : m.db.all<LoveRow>(
-          `SELECT l.* FROM ${VISIBLE_LOVES} WHERE l.did = ?
+      : m.db.all<LoveMatchRow>(
+          `SELECT l.*, mb.recording_mbid AS mb_recording_mbid, mb.title AS mb_title,
+             mb.artist_credit AS mb_artist_credit, mb.artist_mbids AS mb_artist_mbids,
+             mb.release_mbid AS mb_release_mbid, mb.release_title AS mb_release_title,
+             mb.release_group_mbid AS mb_release_group_mbid, mb.duration_ms AS mb_duration_ms,
+             mb.matched_by AS mb_matched_by, mb.synced_at_ms AS mb_synced_at_ms
+           FROM ${VISIBLE_LOVES}
+           LEFT JOIN mb_tracks mb ON mb.status='matched' AND mb.artist_key=l.artist_key
+             AND mb.track_key=l.track_key AND mb.album_key=''
+           WHERE l.did = ?
            ORDER BY l.created_at DESC, l.uri DESC LIMIT ? OFFSET ?`,
           q.did,
           q.limit,
           offset,
         );
-  return { rows, total, totalPages: Math.ceil(total / q.limit), page, perPage: q.limit, offset };
+  return {
+    rows: rows.map(withMusicBrainz),
+    total,
+    totalPages: Math.ceil(total / q.limit),
+    page,
+    perPage: q.limit,
+    offset,
+  };
+}
+
+function withMusicBrainz(row: LoveMatchRow): EnrichedLoveRow {
+  const {
+    mb_recording_mbid: _recording,
+    mb_title: _title,
+    mb_artist_credit: _credit,
+    mb_artist_mbids: _artistMbids,
+    mb_release_mbid: _release,
+    mb_release_title: _releaseTitle,
+    mb_release_group_mbid: _group,
+    mb_duration_ms: _duration,
+    mb_matched_by: _matchedBy,
+    mb_synced_at_ms: syncedAt,
+    ...love
+  } = row;
+  if (!row.mb_recording_mbid || !row.mb_title || !row.mb_artist_credit || !row.mb_matched_by || syncedAt == null)
+    return love;
+  let artistMbids: string[];
+  try {
+    const parsed: unknown = JSON.parse(row.mb_artist_mbids ?? '[]');
+    if (!Array.isArray(parsed) || !parsed.every((id) => typeof id === 'string')) return love;
+    artistMbids = parsed;
+  } catch {
+    return love;
+  }
+  return {
+    ...love,
+    musicbrainz: {
+      recordingMbid: row.mb_recording_mbid,
+      title: row.mb_title,
+      artistCredit: row.mb_artist_credit,
+      artistMbids,
+      ...(row.mb_release_mbid == null ? {} : { releaseMbid: row.mb_release_mbid }),
+      ...(row.mb_release_title == null ? {} : { releaseTitle: row.mb_release_title }),
+      ...(row.mb_release_group_mbid == null ? {} : { releaseGroupMbid: row.mb_release_group_mbid }),
+      ...(row.mb_duration_ms == null ? {} : { durationSeconds: Math.round(row.mb_duration_ms / 1000) }),
+      matchedBy: row.mb_matched_by as MusicBrainzMatch['matchedBy'],
+      syncedAt: toDto(fromMs(syncedAt!)),
+    },
+  };
 }
 
 /** The `(artist_key, track_key)` of display names, or null when they have none. */

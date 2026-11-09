@@ -941,6 +941,53 @@ const MIGRATION_15: Migration = {
     'ALTER TABLE now_playing ADD COLUMN scrobbled_at_ms INTEGER',
   ],
 };
+const MIGRATION_16: Migration = {
+  version: 16,
+  name: 'musicbrainz_track_matches',
+  statements: [
+    `CREATE TABLE mb_tracks (
+      artist_key TEXT NOT NULL,
+      track_key TEXT NOT NULL,
+      album_key TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'pending',
+      priority INTEGER NOT NULL DEFAULT 0,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      next_attempt_ms INTEGER NOT NULL DEFAULT 0,
+      last_attempt_ms INTEGER,
+      submitted_recording_mbid TEXT,
+      matched_by TEXT,
+      score INTEGER,
+      recording_mbid TEXT,
+      title TEXT,
+      artist_credit TEXT,
+      artist_mbids TEXT,
+      release_mbid TEXT,
+      release_title TEXT,
+      release_group_mbid TEXT,
+      duration_ms INTEGER,
+      isrcs TEXT,
+      first_release_date TEXT,
+      synced_at_ms INTEGER,
+      created_at_ms INTEGER NOT NULL,
+      PRIMARY KEY (artist_key, track_key, album_key)
+    )`,
+    'CREATE INDEX mb_tracks_due ON mb_tracks(status,next_attempt_ms,priority)',
+  ],
+};
+const MIGRATION_17: Migration = {
+  version: 17,
+  name: 'musicbrainz_global_pacing',
+  statements: [
+    'CREATE TABLE mb_pacing (singleton INTEGER PRIMARY KEY NOT NULL, available_at_ms INTEGER NOT NULL DEFAULT 0)',
+  ],
+};
+const MIGRATION_18: Migration = {
+  version: 18,
+  name: 'musicbrainz_seed_cursor',
+  statements: [
+    "CREATE TABLE mb_seed_state (singleton INTEGER PRIMARY KEY NOT NULL, cursor_uri TEXT NOT NULL DEFAULT '', complete INTEGER NOT NULL DEFAULT 0)",
+  ],
+};
 
 export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_1,
@@ -958,6 +1005,9 @@ export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_13,
   MIGRATION_14,
   MIGRATION_15,
+  MIGRATION_16,
+  MIGRATION_17,
+  MIGRATION_18,
 ];
 
 /** The schema version this code expects. */
@@ -1021,6 +1071,9 @@ export const TABLES = [
   'listen_removal_cids',
   // Migration 10.
   'verified_membership',
+  'mb_tracks',
+  'mb_pacing',
+  'mb_seed_state',
 ] as const;
 
 export type TableName = (typeof TABLES)[number];
@@ -1084,4 +1137,7 @@ export const TABLE_CLASS: Readonly<Record<TableName, TableClass>> = {
   batch_delete_children: 'non-derived',
   listen_removal_cids: 'non-derived',
   verified_membership: 'derived',
+  mb_tracks: 'non-derived',
+  mb_pacing: 'non-derived',
+  mb_seed_state: 'non-derived',
 };

@@ -54,6 +54,7 @@ export const DEFAULT_MIN_FREE_BYTES = 2_147_483_648; // 2 GiB
 export const DEFAULT_LASTFM_API_ROOT = 'https://ws.audioscrobbler.com/2.0/';
 export const DEFAULT_LASTFM_AUTH_URL = 'https://www.last.fm/api/auth/';
 export const DEFAULT_LISTENBRAINZ_API_ROOT = 'https://api.listenbrainz.org/';
+export const DEFAULT_MUSICBRAINZ_API_ROOT = 'https://musicbrainz.org/ws/2/';
 export const DEFAULT_LASTFM_KNOWN_CLIENTS = 'panoScrobbler:panoScrobbler:Pano Scrobbler';
 
 /**
@@ -133,6 +134,8 @@ export interface NodeConfig {
   lastfmApiRoot: string;
   lastfmAuthUrl: string;
   listenbrainzApiRoot: string;
+  musicbrainzApiRoot: string;
+  musicbrainzEnabled: boolean;
   lastfmKnownClients: readonly LastfmKnownClient[];
   oauthTransitionGeneric: boolean;
   /** SQLite busy timeout; production PRODUCTION_BUSY_TIMEOUT_MS. */
@@ -377,6 +380,11 @@ export function parseNodeConfig(env: NodeEnv, opts: ParseNodeConfigOptions = {})
   const lastfmApiRoot = upstream('LASTFM_API_ROOT', DEFAULT_LASTFM_API_ROOT);
   const lastfmAuthUrl = upstream('LASTFM_AUTH_URL', DEFAULT_LASTFM_AUTH_URL);
   const listenbrainzApiRoot = upstream('LISTENBRAINZ_API_ROOT', DEFAULT_LISTENBRAINZ_API_ROOT);
+  const musicbrainzApiRoot = upstream('MUSICBRAINZ_API_ROOT', DEFAULT_MUSICBRAINZ_API_ROOT);
+  const musicbrainzEnabledRaw = env.MUSICBRAINZ_ENABLED ?? 'true';
+  if (musicbrainzEnabledRaw !== 'true' && musicbrainzEnabledRaw !== 'false') {
+    issue('MUSICBRAINZ_ENABLED', 'must be true or false');
+  }
 
   // --- Last.fm known public clients (ADR §7.4) --------------------------------
   const lastfmKnownClients: LastfmKnownClient[] = [];
@@ -417,6 +425,8 @@ export function parseNodeConfig(env: NodeEnv, opts: ParseNodeConfigOptions = {})
     lastfmApiRoot,
     lastfmAuthUrl,
     listenbrainzApiRoot,
+    musicbrainzApiRoot,
+    musicbrainzEnabled: musicbrainzEnabledRaw === 'true',
     lastfmKnownClients,
     oauthTransitionGeneric: genericRaw === '1',
     busyTimeoutMs: PRODUCTION_BUSY_TIMEOUT_MS,

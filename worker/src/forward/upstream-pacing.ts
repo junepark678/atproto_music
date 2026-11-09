@@ -31,6 +31,7 @@ export const LASTFM_MIN_INTERVAL_MS = 1_000;
 export const LISTENBRAINZ_MIN_INTERVAL_MS = 1_000;
 /** The longest X-RateLimit-Reset-In honoured (a larger value is clamped): one hour. */
 export const MAX_RESET_IN_MS = 3_600_000;
+export const MUSICBRAINZ_MIN_INTERVAL_MS = 1_000;
 
 export type LastfmLane = 'forward' | 'import';
 
@@ -56,6 +57,7 @@ export class UpstreamPacing {
   private lastfmNextMs = Number.NEGATIVE_INFINITY;
   private forwardBacklog = false;
   private readonly lbNextMs = new Map<string, number>();
+  private mbNextMs = Number.NEGATIVE_INFINITY;
 
   private readonly clock: Clock;
 
@@ -139,5 +141,18 @@ export class UpstreamPacing {
   /** Forgets `key` (a deleted link). */
   forgetListenbrainz(key: string): void {
     this.lbNextMs.delete(key);
+  }
+
+  musicbrainzAvailableAt(now: number): number {
+    return Math.max(now, this.mbNextMs);
+  }
+  tryMusicbrainz(now: number): boolean {
+    const at = this.instant(now);
+    if (at < this.mbNextMs) return false;
+    this.mbNextMs = at + MUSICBRAINZ_MIN_INTERVAL_MS;
+    return true;
+  }
+  deferMusicbrainz(untilMs: number): void {
+    if (untilMs > this.mbNextMs) this.mbNextMs = untilMs;
   }
 }

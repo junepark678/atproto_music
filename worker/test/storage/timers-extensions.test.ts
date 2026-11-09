@@ -193,6 +193,7 @@ it("TIMER_NAMES is the seven core names, EXTENSION_TIMER_NAMES the six extension
     'oauth-keepalive',
     'expiry-sweep',
     'backup',
+    'musicbrainz',
   ]);
   expect(CORE_LANE.names).toBe(TIMER_NAMES);
   expect(EXTENSION_LANE.names).toBe(EXTENSION_TIMER_NAMES);
@@ -258,6 +259,7 @@ it('runDue with a names subset claims only those timers, and two lanes over two 
       'identity-sweep',
       'import',
       'jetstream-watchdog',
+      'musicbrainz',
       'oauth-keepalive',
       'outbox',
       'snapshot',
@@ -269,7 +271,14 @@ it('runDue with a names subset claims only those timers, and two lanes over two 
     calls.length = 0;
     const coreRun = await runDue(storage, db, NOW, handlers, UNLIMITED);
     expect(coreRun.ran).toEqual(['snapshot', 'jetstream-watchdog', 'status-sweep', 'identity-sweep', 'discovery']);
-    expect(timerRows(db).map((r) => r.name)).toEqual(['backup', 'expiry-sweep', 'import', 'oauth-keepalive', 'outbox']);
+    expect(timerRows(db).map((r) => r.name)).toEqual([
+      'backup',
+      'expiry-sweep',
+      'import',
+      'musicbrainz',
+      'oauth-keepalive',
+      'outbox',
+    ]);
 
     // Two lanes over two storage objects run at the same time.
     const coreAlarm = recordingAlarms();
@@ -281,7 +290,7 @@ it('runDue with a names subset claims only those timers, and two lanes over two 
     await settle();
     expect(calls).toEqual(['snapshot']);
     const extRun = await runDue(extAlarm.storage, db, NOW, extensionHandlers(calls), UNLIMITED, EXTENSION_LANE);
-    expect(extRun.ran).toEqual(['outbox', 'import', 'oauth-keepalive', 'expiry-sweep', 'backup']);
+    expect(extRun.ran).toEqual(['outbox', 'import', 'oauth-keepalive', 'expiry-sweep', 'backup', 'musicbrainz']);
     expect(extRun.recovered).toEqual([]);
     // The core claim is untouched by the extension run.
     expect(timerRows(db)).toEqual([{ name: '~running:snapshot', due_at: NOW - MINUTE }]);
@@ -361,6 +370,7 @@ it('extension handlers run on the extension lane in the order outbox, forward, i
       'expiry-sweep': record('expiry-sweep'),
       forward: record('forward'),
       'oauth-keepalive': record('oauth-keepalive'),
+      musicbrainz: record('musicbrainz'),
     });
     const k = coreKit(db, [a, b]);
     expect(k.core.extensionLane.names).toEqual([...EXTENSION_TIMER_NAMES]);
