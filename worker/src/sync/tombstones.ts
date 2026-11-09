@@ -1,6 +1,23 @@
 import type { Db } from '../do/db';
 import { removalIntentStillHidesProjection } from '../do/read/visibility';
 
+// The common ingestion path has no pull removals for almost every record.
+// Remember negative DID lookups and invalidate them at the sole production
+// insertion point so accepted projections avoid repeated tombstone scans.
+const didsWithoutListenTombstones = new WeakMap<Db, Set<string>>();
+
+export function hasListenRemovalTombstones(db: Db, did: string): boolean {
+  let empty = didsWithoutListenTombstones.get(db);
+  if (empty?.has(did)) return false;
+  if (db.one("SELECT 1 FROM linked_pull_tombstones WHERE did=? AND kind='listen' LIMIT 1", did) !== null) return true;
+  if (empty === undefined) {
+    empty = new Set();
+    didsWithoutListenTombstones.set(db, empty);
+  }
+  empty.add(did);
+  return false;
+}
+
 export function tombstoneListen(
   db: Db,
   args: {
@@ -12,6 +29,7 @@ export function tombstoneListen(
     nowMs: number;
   },
 ): void {
+  didsWithoutListenTombstones.get(db)?.delete(args.did);
   db.run(
     `INSERT INTO linked_pull_tombstones(did,kind,identity_key,listen_second,artist_key,track_key,created_at_ms)
     VALUES(?,'listen',?,?,?,?,?) ON CONFLICT(did,kind,identity_key) DO NOTHING`,

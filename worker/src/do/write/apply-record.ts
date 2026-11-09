@@ -66,7 +66,12 @@ import {
 import { enqueueTrack } from '../../musicbrainz/store';
 import { enqueueForwards } from '../../outbox/forward-enqueue';
 import { pullLoveAdmissionForUri, retirePullLoveAdmissionUri } from '../../sync/pull-love-admissions';
-import { archiveMatchingLiveListenTombstones, tombstoneListen, tombstoneLove } from '../../sync/tombstones';
+import {
+  archiveMatchingLiveListenTombstones,
+  hasListenRemovalTombstones,
+  tombstoneListen,
+  tombstoneLove,
+} from '../../sync/tombstones';
 import type { Db } from '../db';
 import { advanceUser, bumpStatsVersion, isSuppressed, loadUser } from './account-state';
 import {
@@ -1088,6 +1093,7 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
 }
 
 function archiveAcceptedListenTombstones(db: Db, did: string, uri: string, revision: string): void {
+  if (!hasListenRemovalTombstones(db, did)) return;
   const listens = db.all<{
     uri: string;
     record_uri: string | null;
