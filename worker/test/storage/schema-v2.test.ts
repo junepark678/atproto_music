@@ -1589,7 +1589,11 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
   it('migration 2 creates exactly the ADR 0005 §6.4 tables, scrobbles columns and indexes, and TABLES lists every table', async () => {
     const v1Name = 'schema-v2-shape-v1';
     expect(await resetToV1(v1Name)).toEqual({ status: 'ready', version: 1 });
-    const v1 = await inDb(v1Name, (db) => ({ objects: appObjects(db), scrobbles: columnsOf(db, 'scrobbles') }));
+    const v1 = await inDb(v1Name, (db) => ({
+      objects: appObjects(db),
+      scrobbles: columnsOf(db, 'scrobbles'),
+      hints: columnsOf(db, 'hints'),
+    }));
     expect(v1.objects.some((o) => o.name === 'accounts')).toBe(false);
 
     // The constructor of a fresh harness DO applied every migration.
@@ -1635,13 +1639,17 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
     for (const o of v1.objects) {
       const now = v2.objects.find((x) => x.name === o.name);
       expect([o.name, now?.type]).toEqual([o.name, o.type]);
-      if (o.name !== 'scrobbles' && o.name !== 'hints') expect([o.name, now?.sql]).toEqual([o.name, o.sql]);
+      if (o.name !== 'scrobbles')
+        expect([o.name, o.name === 'hints' ? now?.sql?.replace(', evidence_rev TEXT', '') : now?.sql]).toEqual([
+          o.name,
+          o.sql,
+        ]);
     }
 
     // scrobbles: the v1 columns in place, then the §6.2/§8.4 columns.
     expect(v2.scrobbles).toEqual([...v1.scrobbles, ...NEW_SCROBBLE_COLUMNS]);
     expect(v1.scrobbles).not.toContain('album_artist');
-    expect(v2.hints).toContain('evidence_rev');
+    expect(v2.hints).toEqual([...v1.hints, 'evidence_rev']);
 
     // Every new table's columns, primary key and UNIQUE constraints.
     for (const [table, e] of Object.entries(NEW_TABLES)) {
@@ -1655,7 +1663,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
     expect(new Set(TABLES).size).toBe(TABLES.length);
     expect([...TABLES].sort()).toEqual([...v2.allTables].sort());
     expect(v2.allTables).toContain('schema_migrations');
-  }, 15_000);
+  });
 
   it('CHECK constraints accept operation state cancelled and reject an unknown operation kind, operation state, link service, import source and forward kind', async () => {
     // The ADR 0005 value sets, hardcoded; schema.ts exports the same lists.

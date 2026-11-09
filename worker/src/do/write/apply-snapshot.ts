@@ -172,6 +172,7 @@ function reaffirm(
   c: SnapshotChunk,
   target: { uri: string; collection: string; rkey: string; kind: CollectionKind },
   cid: string,
+  canCandidate: boolean,
 ): void {
   const { uri, collection, rkey, kind } = target;
   if (kind === 'scrobble' || kind === 'scrobbleBatch') {
@@ -179,7 +180,10 @@ function reaffirm(
     // writes (projection revisions, membership, statistics), not only the
     // per-URI revision, so a removal cutoff they cross is decided as it would
     // be live and a later hint at this head is truly a no-op.
-    const evidence = readLiveEvidence(db, uri, Number(c.nowNs / 1_000_000n));
+    const observedEvidence = readLiveEvidence(db, uri, Number(c.nowNs / 1_000_000n));
+    // The first admission snapshot represents owned history. Jetstream evidence
+    // that happens to match it cannot grant live forwarding authority.
+    const evidence = canCandidate ? observedEvidence : null;
     reaffirmRecordTarget(db, { did: c.did, kind, collection, rkey, uri, rev: c.headRev }, cid, {
       receiptNs: c.receiptNs,
       prefix: c.prefix,
@@ -265,9 +269,10 @@ export function applySnapshotChunk(db: Db, c: SnapshotChunk): ChunkResult {
     const uri = recordUri(c.did, collection, rkey);
     present.add(uri);
     const kind = collectionKind(c.prefix, collection);
-    const evidence = readLiveEvidence(db, uri, Number(c.nowNs / 1_000_000n));
-    if (isStale(evidence, c.headRev)) {
-      const hintRev = [evidence?.up_rev, evidence?.del_rev]
+    const observedEvidence = readLiveEvidence(db, uri, Number(c.nowNs / 1_000_000n));
+    const evidence = canCandidate ? observedEvidence : null;
+    if (isStale(observedEvidence, c.headRev)) {
+      const hintRev = [observedEvidence?.up_rev, observedEvidence?.del_rev]
         .filter((rev): rev is string => rev !== null && rev !== undefined)
         .sort()
         .at(-1)!;
@@ -287,7 +292,29 @@ export function applySnapshotChunk(db: Db, c: SnapshotChunk): ChunkResult {
       continue;
     }
     const guard = guardRevision(db, uri);
-    if (kind === null || (guard !== null && guard >= c.headRev)) {
+    if (kind === null) {
+      res.unchanged++;
+      continue;
+    }
+    if (guard !== null && guard >= c.headRev) {
+      if (
+        canCandidate &&
+        c.random &&
+        evidence?.up_rev !== null &&
+        evidence?.up_rev !== undefined &&
+        evidence.up_rev <= c.headRev
+      )
+        lateAccept(db, {
+          uri,
+          did: c.did,
+          collection,
+          rkey,
+          evidence,
+          nowMs: Number(c.nowNs / 1_000_000n),
+          random: c.random,
+        });
+      if (evidence && c.headRev >= (evidence.up_rev ?? '') && c.headRev >= (evidence.del_rev ?? ''))
+        db.run('DELETE FROM live_record_evidence WHERE uri=? AND conflict_rev IS NULL', uri);
       res.unchanged++;
       continue;
     }
@@ -296,7 +323,7 @@ export function applySnapshotChunk(db: Db, c: SnapshotChunk): ChunkResult {
       throw new Error(`snapshot entry ${e.key} has no record body and an unknown CID`);
     }
     if (stored === e.cid) {
-      reaffirm(db, c, { uri, collection, rkey, kind }, e.cid);
+      reaffirm(db, c, { uri, collection, rkey, kind }, e.cid, canCandidate);
       if (c.random)
         lateAccept(db, {
           uri,
@@ -308,7 +335,7 @@ export function applySnapshotChunk(db: Db, c: SnapshotChunk): ChunkResult {
           random: c.random,
         });
       if (evidence && c.headRev >= (evidence.up_rev ?? '') && c.headRev >= (evidence.del_rev ?? ''))
-        db.run('DELETE FROM live_record_evidence WHERE uri=?', uri);
+        db.run('DELETE FROM live_record_evidence WHERE uri=? AND conflict_rev IS NULL', uri);
       res.unchanged++;
       continue;
     }
@@ -340,7 +367,7 @@ export function applySnapshotChunk(db: Db, c: SnapshotChunk): ChunkResult {
           random: c.random,
         });
       if (evidence && c.headRev >= (evidence.up_rev ?? '') && c.headRev >= (evidence.del_rev ?? ''))
-        db.run('DELETE FROM live_record_evidence WHERE uri=?', uri);
+        db.run('DELETE FROM live_record_evidence WHERE uri=? AND conflict_rev IS NULL', uri);
     }
     res.written++;
   }
@@ -370,9 +397,10 @@ export function applySnapshotChunk(db: Db, c: SnapshotChunk): ChunkResult {
     const collection = uriCollection(c.did, uri);
     const kind = collectionKind(c.prefix, collection);
     const rkey = uri.slice(`at://${c.did}/${collection}/`.length);
-    const evidence = readLiveEvidence(db, uri, Number(c.nowNs / 1_000_000n));
-    if (isStale(evidence, c.headRev)) {
-      const hintRev = [evidence?.up_rev, evidence?.del_rev]
+    const observedEvidence = readLiveEvidence(db, uri, Number(c.nowNs / 1_000_000n));
+    const evidence = canCandidate ? observedEvidence : null;
+    if (isStale(observedEvidence, c.headRev)) {
+      const hintRev = [observedEvidence?.up_rev, observedEvidence?.del_rev]
         .filter((rev): rev is string => rev !== null && rev !== undefined)
         .sort()
         .at(-1)!;
@@ -413,7 +441,7 @@ export function applySnapshotChunk(db: Db, c: SnapshotChunk): ChunkResult {
           random: c.random,
         });
       if (evidence && c.headRev >= (evidence.up_rev ?? '') && c.headRev >= (evidence.del_rev ?? ''))
-        db.run('DELETE FROM live_record_evidence WHERE uri=?', uri);
+        db.run('DELETE FROM live_record_evidence WHERE uri=? AND conflict_rev IS NULL', uri);
     } else {
       // A settings record (or a row of a collection no longer configured):
       // proven absent at headRev. An absent settings record of an

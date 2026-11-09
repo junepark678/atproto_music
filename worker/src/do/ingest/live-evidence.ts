@@ -101,7 +101,7 @@ export function recordLiveCandidate(
   db.run(
     `INSERT INTO live_acceptance_candidates(uri,identity_key,kind,member_uri,cid,created_at_ms,expires_at_ms)
      VALUES(?,?,?,?,?,?,?) ON CONFLICT(uri,identity_key) DO UPDATE SET kind=excluded.kind,member_uri=excluded.member_uri,
-       cid=excluded.cid,created_at_ms=excluded.created_at_ms,expires_at_ms=excluded.expires_at_ms`,
+       cid=excluded.cid`,
     input.uri,
     input.identityKey,
     input.kind,

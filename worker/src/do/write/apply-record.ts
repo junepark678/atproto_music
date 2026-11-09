@@ -439,6 +439,12 @@ function scrobbleVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, 
         t.rkey,
       );
       const knownListen = db.one('SELECT 1 AS hit FROM listen_keys WHERE did=? AND dedupe_key=?', t.did, identityKey);
+      const ownedCandidate = db.one(
+        'SELECT 1 AS hit FROM live_acceptance_candidates WHERE uri=? AND identity_key=? AND expires_at_ms>? ',
+        t.recordUri ?? t.uri,
+        identityKey,
+        now,
+      );
       if (
         firstAdmission &&
         !legacyPresent &&
@@ -470,11 +476,11 @@ function scrobbleVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, 
         });
       }
       if (
-        firstAdmission &&
+        (ownedCandidate !== null || firstAdmission) &&
         !legacyPresent &&
         knownListen === null &&
         localOperation?.origin !== 'import' &&
-        !additionAuthority(o.live, t.rev, cid) &&
+        (ownedCandidate !== null || !additionAuthority(o.live, t.rev, cid)) &&
         o.liveCandidates
       ) {
         recordLiveCandidate(db, {
@@ -485,6 +491,19 @@ function scrobbleVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, 
           cid,
           nowMs: now,
         });
+      }
+      // A candidate owns this canonical identity across metadata-only record
+      // revisions. Track the CID of the currently projected version while
+      // retaining its original admission and expiry window.
+      if (ownedCandidate !== null && !legacyPresent) {
+        db.run(
+          'UPDATE live_acceptance_candidates SET cid=?,member_uri=? WHERE uri=? AND identity_key=? AND expires_at_ms>?',
+          cid,
+          t.uri,
+          t.recordUri ?? t.uri,
+          identityKey,
+          now,
+        );
       }
       return before === null || before.cid !== cid;
     },
@@ -1365,6 +1384,33 @@ export function applyRecordProof(db: Db, proof: RecordProof, o: ApplyOptions): A
     },
     o,
   );
+  if (
+    proof.state === 'present' &&
+    o.liveCandidates &&
+    (kind === 'scrobble' || kind === 'scrobbleBatch') &&
+    applied.outcome === 'applied'
+  ) {
+    // A newer metadata CID can retain a previously owned canonical listen.
+    // Refresh only candidates whose identity is still projected by this record;
+    // keep their original creation and expiry timestamps.
+    const identityKeys = new Set(
+      projectedListensOfRecord(db, did, uri).map((row) =>
+        projectionListenKey(did, row.listened_at, row.artist_key, row.track_key),
+      ),
+    );
+    for (const candidate of db.all<{ identity_key: string }>(
+      'SELECT identity_key FROM live_acceptance_candidates WHERE uri=?',
+      uri,
+    )) {
+      if (!identityKeys.has(candidate.identity_key)) continue;
+      db.run(
+        'UPDATE live_acceptance_candidates SET cid=? WHERE uri=? AND identity_key=?',
+        proof.cid,
+        uri,
+        candidate.identity_key,
+      );
+    }
+  }
   advanceUser(db, did, rev, o.nowNs);
   return result(applied.outcome, applied.reason === undefined ? {} : { reason: applied.reason });
 }

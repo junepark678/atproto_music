@@ -172,4 +172,70 @@ describe('live evidence authority', () => {
       expect(db.all('SELECT kind FROM forward_outbox')).toHaveLength(1);
     });
   });
+
+  it('refreshes an owned candidate CID across metadata updates without extending its TTL', async () => {
+    const repo = await repoFor('alice');
+    const first = await putProof(repo, SCROBBLE, 'candidate-metadata', fixtureScrobble('r02'));
+    const next = await putProof(repo, SCROBBLE, 'candidate-metadata', {
+      ...fixtureScrobble('r02'),
+      album: 'updated album',
+    });
+    if (first.state !== 'present' || next.state !== 'present') throw new Error('expected signed present proofs');
+    const candidateUri = `at://${ALICE}/${SCROBBLE}/candidate-metadata`;
+    const random = seededRandom(0xc1d);
+    await withMigratedDb((db) => {
+      seedUser(db, ALICE);
+      db.run(
+        `INSERT INTO linked_accounts(id,did,service,remote_user,credential_ciphertext,key_id,created_at_ms,updated_at_ms)
+         VALUES('candidate-metadata-link',?,'lastfm','remote',X'00','fixture',?,?)`,
+        ALICE,
+        NOW_MS,
+        NOW_MS,
+      );
+      db.tx(() =>
+        applyRecordProof(db, first, {
+          ...OPTS,
+          live: { random, evidence: null, legacyRev: null },
+          liveCandidates: true,
+        }),
+      );
+      const original = db.one<{ created_at_ms: number; expires_at_ms: number }>(
+        'SELECT created_at_ms,expires_at_ms FROM live_acceptance_candidates WHERE uri=?',
+        candidateUri,
+      );
+      expect(original).not.toBeNull();
+      db.tx(() =>
+        applyRecordProof(db, next, {
+          ...OPTS,
+          live: { random, evidence: null, legacyRev: null },
+          liveCandidates: true,
+        }),
+      );
+      expect(db.one<{ cid: string }>('SELECT cid FROM live_acceptance_candidates WHERE uri=?', candidateUri)?.cid).toBe(
+        next.cid,
+      );
+      expect(
+        db.one('SELECT created_at_ms,expires_at_ms FROM live_acceptance_candidates WHERE uri=?', candidateUri),
+      ).toEqual(original);
+      const evidence = {
+        up_rev: next.commit.rev,
+        up_action: 'update' as const,
+        up_cid: next.cid,
+        del_rev: null,
+        conflict_rev: null,
+      };
+      expect(
+        lateAccept(db, {
+          uri: candidateUri,
+          did: ALICE,
+          collection: SCROBBLE,
+          rkey: 'candidate-metadata',
+          evidence,
+          nowMs: NOW_MS,
+          random,
+        }),
+      ).toBe(1);
+      expect(db.all('SELECT kind FROM forward_outbox')).toEqual([{ kind: 'scrobble' }]);
+    });
+  });
 });
