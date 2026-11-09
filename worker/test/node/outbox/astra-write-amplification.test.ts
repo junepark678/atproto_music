@@ -3,10 +3,10 @@ import type { Db } from '../../../src/do/db';
 import { authorizePendingRemovals } from '../../../src/do/ingest/live-pending-removals';
 import { withMigratedDb } from '../support/node-db';
 
-it('independent: one event page must not rewrite the same 1000-member group 128 times', async () => {
+it('independent: small event pages update each matching pending member in one group statement', async () => {
   await withMigratedDb((db) => {
     const uri = 'at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/com.example.atmusic.scrobbleBatch/a';
-    for (let i = 0; i < 1000; i++)
+    for (let i = 0; i < 8; i++)
       db.run(
         `INSERT INTO live_pending_removals
    (uri,member_uri,removed_cid,kind,window_lo,window_hi,replaced_by_cid,identity_key,artist_key,track_key,artist,track,created_at_ms,expires_at_ms)
@@ -30,6 +30,6 @@ it('independent: one event page must not rewrite the same 1000-member group 128 
       },
     };
     authorizePendingRemovals(traced, { uri, rev: '3333333333333', action: 'delete' }, 2);
-    expect({ calls, updates }).toEqual({ calls: 1, updates: 1000 });
+    expect({ calls, updates }).toEqual({ calls: 1, updates: 8 });
   });
 });

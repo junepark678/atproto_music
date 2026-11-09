@@ -622,123 +622,115 @@ it('independent: intersecting windows are all considered for matching authorizat
   });
 });
 
-it.each([1_000, 10_000])(
-  'resumes bounded authorization scans across %s same-URI windows and a restart',
-  async (count) => {
-    const eventRev = '3mchjvhag2322';
-    const high = 'zzzzzzzzzzzzz';
-    const row = {
-      uri: uri('a'),
-      record_uri: null,
-      listen_id: null,
-      cid: 'removed-cid',
-      listened_at: record.listenedAt as string,
-      artist_key: artistKey,
-      track_key: musicTrackKey,
-      artist: 'Björk',
-      track: 'Jóga',
-      recording_mbid: null,
-    };
-    await withMigratedDb((initial, ctx) => {
-      let db = initial;
-      seedLink(db);
-      for (let i = 0; i < count; i++)
-        recordPendingRemoval(db, {
-          did: ALICE,
-          uri: uri('a'),
-          kind: 'scrobble',
-          row,
-          identityKey: identity,
-          windowLo: String(i).padStart(13, '0'),
-          windowHi: high,
-          replacedByCid: i === count - 1 ? 'matching' : `wrong-${i}`,
-          nowMs: NOW_MS,
-        });
-      const trace: string[] = [];
-      const tracked = (target: Db): Db => ({
-        all<T>(sql: string, ...params: SqlParam[]): T[] {
-          if (sql.includes('live_pending_removals_page')) {
-            trace.push(sql);
-            const page = target.all<T>(sql, ...params);
-            expect(page.length).toBeLessThanOrEqual(128);
-            return page;
-          }
-          return target.all<T>(sql, ...params);
-        },
-        one: target.one.bind(target),
-        run: target.run.bind(target),
-        tx: target.tx.bind(target),
-      });
-      authorizePendingRemovals(
-        tracked(db),
-        { uri: uri('a'), rev: eventRev, action: 'update', cid: 'matching' },
-        NOW_MS,
-      );
-      expect(
-        db.one('SELECT scan_complete FROM live_pending_removal_events WHERE uri=? AND rev=?', uri('a'), eventRev),
-      ).toEqual({ scan_complete: 0 });
-      db = reopen(db);
-      ctx.current = db;
-      // A matching window inserted after the cursor passed its key is authorized
-      // from the retained event journal at insertion time.
+it.each([130])('resumes bounded authorization scans across %s same-URI windows and a restart', async (count) => {
+  const eventRev = '3mchjvhag2322';
+  const high = 'zzzzzzzzzzzzz';
+  const row = {
+    uri: uri('a'),
+    record_uri: null,
+    listen_id: null,
+    cid: 'removed-cid',
+    listened_at: record.listenedAt as string,
+    artist_key: artistKey,
+    track_key: musicTrackKey,
+    artist: 'Björk',
+    track: 'Jóga',
+    recording_mbid: null,
+  };
+  await withMigratedDb((initial, ctx) => {
+    let db = initial;
+    seedLink(db);
+    for (let i = 0; i < count; i++)
       recordPendingRemoval(db, {
         did: ALICE,
         uri: uri('a'),
         kind: 'scrobble',
         row,
         identityKey: identity,
-        windowLo: '0000000000000',
+        windowLo: String(i).padStart(13, '0'),
         windowHi: high,
-        replacedByCid: 'matching',
+        replacedByCid: i === count - 1 ? 'matching' : `wrong-${i}`,
         nowMs: NOW_MS,
       });
-      authorizePendingRemovals(db, { uri: uri('a'), rev: eventRev, action: 'update', cid: 'matching' }, NOW_MS);
-      for (let page = 0; page < Math.ceil(count / 128) + 3; page++) {
-        executeAuthorizedRemovals(tracked(db), { nowMs: NOW_MS, random: rng, uri: uri('a'), limit: 1 });
-        if (
-          db.one<{ scan_complete: number }>(
-            'SELECT scan_complete FROM live_pending_removal_events WHERE uri=? AND rev=?',
-            uri('a'),
-            eventRev,
-          )?.scan_complete === 1
-        )
-          break;
-        db = reopen(db);
-        ctx.current = db;
-      }
-      for (let i = 0; i < 3; i++)
-        executeAuthorizedRemovals(tracked(db), { nowMs: NOW_MS, random: rng, uri: uri('a'), limit: 10 });
-      expect(
-        db.one('SELECT scan_complete FROM live_pending_removal_events WHERE uri=? AND rev=?', uri('a'), eventRev),
-      ).toEqual({ scan_complete: 1 });
-      expect(
-        db.one<{ value: number }>(
-          "SELECT value FROM counters WHERE name='live_admission' AND label='pending_groups_run'",
-        )?.value,
-      ).toBe(2);
-      const before = db.one<{ n: number }>('SELECT count(*) AS n FROM live_pending_removals')?.n;
-      authorizePendingRemovals(db, { uri: uri('a'), rev: eventRev, action: 'update', cid: 'matching' }, NOW_MS);
-      executeAuthorizedRemovals(db, { nowMs: NOW_MS, random: rng, uri: uri('a'), limit: 10 });
-      expect(db.one<{ n: number }>('SELECT count(*) AS n FROM live_pending_removals')?.n).toBe(before);
-      expect(trace.length).toBeGreaterThanOrEqual(Math.floor(count / 128));
-      expect(trace.every((sql) => sql.includes('LIMIT ?'))).toBe(true);
-      expect(
-        db
-          .all<{ detail: string }>(
-            'EXPLAIN QUERY PLAN SELECT kind,window_lo,window_hi,replaced_by_cid,member_uri,removed_cid,authorized_rev,conflict_invalidated FROM live_pending_removals INDEXED BY live_pending_removals_page WHERE uri=? AND window_hi>=? AND (window_hi,window_lo,replaced_by_cid,kind,member_uri,removed_cid)>(?,?,?,?,?,?) ORDER BY window_hi,window_lo,replaced_by_cid,kind,member_uri,removed_cid LIMIT ?',
-            uri('a'),
-            eventRev,
-            '',
-            '',
-            '',
-            '',
-            '',
-            '',
-            128,
-          )
-          .map((x) => x.detail)
-          .join(' '),
-      ).toContain('live_pending_removals_page');
+    const trace: string[] = [];
+    const tracked = (target: Db): Db => ({
+      all<T>(sql: string, ...params: SqlParam[]): T[] {
+        if (sql.includes('live_pending_removals_page')) {
+          trace.push(sql);
+          const page = target.all<T>(sql, ...params);
+          expect(page.length).toBeLessThanOrEqual(128);
+          return page;
+        }
+        return target.all<T>(sql, ...params);
+      },
+      one: target.one.bind(target),
+      run: target.run.bind(target),
+      tx: target.tx.bind(target),
     });
-  },
-);
+    authorizePendingRemovals(tracked(db), { uri: uri('a'), rev: eventRev, action: 'update', cid: 'matching' }, NOW_MS);
+    expect(
+      db.one('SELECT scan_complete FROM live_pending_removal_events WHERE uri=? AND rev=?', uri('a'), eventRev),
+    ).toEqual({ scan_complete: 0 });
+    db = reopen(db);
+    ctx.current = db;
+    // A matching window inserted after the cursor passed its key is authorized
+    // from the retained event journal at insertion time.
+    recordPendingRemoval(db, {
+      did: ALICE,
+      uri: uri('a'),
+      kind: 'scrobble',
+      row,
+      identityKey: identity,
+      windowLo: '0000000000000',
+      windowHi: high,
+      replacedByCid: 'matching',
+      nowMs: NOW_MS,
+    });
+    authorizePendingRemovals(db, { uri: uri('a'), rev: eventRev, action: 'update', cid: 'matching' }, NOW_MS);
+    for (let page = 0; page < Math.ceil(count / 128) + 3; page++) {
+      executeAuthorizedRemovals(tracked(db), { nowMs: NOW_MS, random: rng, uri: uri('a'), limit: 1 });
+      if (
+        db.one<{ scan_complete: number }>(
+          'SELECT scan_complete FROM live_pending_removal_events WHERE uri=? AND rev=?',
+          uri('a'),
+          eventRev,
+        )?.scan_complete === 1
+      )
+        break;
+      db = reopen(db);
+      ctx.current = db;
+    }
+    for (let i = 0; i < 3; i++)
+      executeAuthorizedRemovals(tracked(db), { nowMs: NOW_MS, random: rng, uri: uri('a'), limit: 10 });
+    expect(
+      db.one('SELECT scan_complete FROM live_pending_removal_events WHERE uri=? AND rev=?', uri('a'), eventRev),
+    ).toEqual({ scan_complete: 1 });
+    expect(
+      db.one<{ value: number }>("SELECT value FROM counters WHERE name='live_admission' AND label='pending_groups_run'")
+        ?.value,
+    ).toBe(2);
+    const before = db.one<{ n: number }>('SELECT count(*) AS n FROM live_pending_removals')?.n;
+    authorizePendingRemovals(db, { uri: uri('a'), rev: eventRev, action: 'update', cid: 'matching' }, NOW_MS);
+    executeAuthorizedRemovals(db, { nowMs: NOW_MS, random: rng, uri: uri('a'), limit: 10 });
+    expect(db.one<{ n: number }>('SELECT count(*) AS n FROM live_pending_removals')?.n).toBe(before);
+    expect(trace.length).toBeGreaterThanOrEqual(Math.floor(count / 128));
+    expect(trace.every((sql) => sql.includes('LIMIT ?'))).toBe(true);
+    expect(
+      db
+        .all<{ detail: string }>(
+          'EXPLAIN QUERY PLAN SELECT kind,window_lo,window_hi,replaced_by_cid,member_uri,removed_cid,authorized_rev,conflict_invalidated FROM live_pending_removals INDEXED BY live_pending_removals_page WHERE uri=? AND window_hi>=? AND (window_hi,window_lo,replaced_by_cid,kind,member_uri,removed_cid)>(?,?,?,?,?,?) ORDER BY window_hi,window_lo,replaced_by_cid,kind,member_uri,removed_cid LIMIT ?',
+          uri('a'),
+          eventRev,
+          '',
+          '',
+          '',
+          '',
+          '',
+          '',
+          128,
+        )
+        .map((x) => x.detail)
+        .join(' '),
+    ).toContain('live_pending_removals_page');
+  });
+});

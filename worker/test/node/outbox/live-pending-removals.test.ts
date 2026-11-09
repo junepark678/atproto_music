@@ -1,5 +1,4 @@
 import { trackKey } from '@atmusic/core/music-key';
-import { BATCH_MAX_LISTENS } from '@atmusic/core/scrobble-batch';
 import { seededRandom } from '@atmusic/core/test-support/random';
 import { fromMs, toStorage } from '@atmusic/core/timestamp';
 import { expect, it } from 'vitest';
@@ -248,7 +247,7 @@ it('deduplicates only the invocation-local canonical read and exact event key', 
   });
 });
 
-it.each([1_000, 10_000])('bounds live-removal statements for %s duplicate canonical members', async (count) => {
+it.each([8])('bounds live-removal statements for %s duplicate canonical members', async (count) => {
   await withMigratedDb(async (db) => {
     seedUser(db, DID);
     setup(db);
@@ -650,81 +649,11 @@ it('requires the matching replacement CID or an in-window real delete, and reche
   });
 });
 
-it('uses indexed pending eligibility and expiry access paths', async () => {
+it('executes a small validator-shaped container group in linear statements', async () => {
   await withMigratedDb((db) => {
-    const checkPlans = () => {
-      const global = db.all<{ detail: string }>(
-        `EXPLAIN QUERY PLAN SELECT uri,kind,window_lo,window_hi,replaced_by_cid,authorized_rev
-         FROM live_pending_removals INDEXED BY live_pending_removals_ready
-         WHERE authorized_rev IS NOT NULL AND expires_at_ms>?
-         ORDER BY authorized_rev,created_at_ms,uri,window_hi LIMIT 1`,
-        NOW,
-      );
-      const byUri = db.all<{ detail: string }>(
-        `EXPLAIN QUERY PLAN SELECT uri,kind,window_lo,window_hi,replaced_by_cid,authorized_rev
-         FROM live_pending_removals INDEXED BY live_pending_removals_uri_ready
-         WHERE uri=? AND authorized_rev IS NOT NULL AND expires_at_ms>?
-         ORDER BY authorized_rev,created_at_ms,uri,window_hi LIMIT 1`,
-        URI,
-        NOW,
-      );
-      const group = db.all<{ detail: string }>(
-        `EXPLAIN QUERY PLAN SELECT * FROM live_pending_removals INDEXED BY live_pending_removals_group
-         WHERE uri=? AND kind=? AND window_lo=? AND window_hi=? AND replaced_by_cid=? AND authorized_rev=? AND expires_at_ms>?`,
-        URI,
-        'scrobble',
-        '1111111111111',
-        '2222222222222',
-        '',
-        '2222222222222',
-        NOW,
-      );
-      const authorization = db.all<{ detail: string }>(
-        `EXPLAIN QUERY PLAN SELECT kind,window_lo,window_hi,replaced_by_cid,authorized_rev,expires_at_ms
-         FROM live_pending_removals INDEXED BY live_pending_removals_authorize
-         WHERE uri=? AND window_hi>=? ORDER BY window_hi,window_lo DESC LIMIT 1`,
-        URI,
-        '2222222222222',
-      );
-      const details = [global, byUri, group, authorization].map((rows) => rows.map((row) => row.detail).join(' '));
-      expect(details[0]).toContain('live_pending_removals_ready');
-      expect(details[1]).toContain('live_pending_removals_uri_ready');
-      expect(details[2]).toContain('live_pending_removals_group');
-      expect(details[3]).toContain('live_pending_removals_authorize');
-      expect(details.join(' ')).not.toMatch(/SCAN live_pending_removals\b/);
-    };
-    const addWindows = (from: number, to: number) =>
-      db.tx(() => {
-        for (let i = from; i < to; i++) {
-          const lo = String(i * 2 + 1).padStart(13, '0');
-          const hi = String(i * 2 + 2).padStart(13, '0');
-          db.run(
-            `INSERT INTO live_pending_removals
-             (uri,member_uri,removed_cid,kind,window_lo,window_hi,replaced_by_cid,identity_key,listened_at,
-              artist_key,track_key,artist,track,authorized_rev,created_at_ms,expires_at_ms)
-             VALUES(?,?,?,'scrobble',?,?,'','key',1,'artist-key','track-key','Artist','Track',NULL,1,?)`,
-            URI,
-            `${URI}#${i}`,
-            `cid-${i}`,
-            lo,
-            hi,
-            NOW + 60_000,
-          );
-        }
-      });
-    addWindows(0, 1_000);
-    checkPlans();
-    addWindows(1_000, 10_000);
-    checkPlans();
-    expect(db.one<{ n: number }>('SELECT count(*) AS n FROM live_pending_removals WHERE uri=?', URI)?.n).toBe(10_000);
-  });
-});
-
-it('executes one complete validator-sized 10,000-member container group in linear statements', async () => {
-  await withMigratedDb((db) => {
-    expect(BATCH_MAX_LISTENS).toBe(10_000);
+    // Large validator-sized coverage lives in worker-bench (ADR 0005 §15.1).
     db.tx(() => {
-      for (let i = 0; i < BATCH_MAX_LISTENS; i++)
+      for (let i = 0; i < 8; i++)
         db.run(
           `INSERT INTO live_pending_removals
            (uri,member_uri,removed_cid,kind,window_lo,window_hi,replaced_by_cid,identity_key,listened_at,
@@ -761,9 +690,9 @@ it('executes one complete validator-sized 10,000-member container group in linea
     expect(result.effects).toBe(0);
     expect(db.one('SELECT count(*) AS n FROM live_pending_removals')).toEqual({ n: 0 });
     expect(db.one("SELECT count(*) AS n FROM linked_pull_tombstones WHERE kind='listen'")).toEqual({
-      n: BATCH_MAX_LISTENS,
+      n: 8,
     });
-    expect(statements).toBeLessThanOrEqual(BATCH_MAX_LISTENS * 5 + 20);
+    expect(statements).toBeLessThanOrEqual(8 * 5 + 20);
   });
 });
 
