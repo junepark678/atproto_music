@@ -3,11 +3,11 @@ import { trackKey } from '@atmusic/core/music-key';
 import type { LinkedAccountRow } from '../app/rows';
 import type { Box } from '../crypto/box';
 import type { Db } from '../do/db';
+import { hasCanonicalListenSurvivor } from './delete-enqueue';
 import { noteLinkError, noteLinkSuccess, openLinkCredential, revokeLink } from './links';
 import type { ListenbrainzClient, ListenWindowEntry } from './listenbrainz-client';
 import type { UpstreamPacing } from './upstream-pacing';
 import { listenbrainzPacingKey } from './upstream-pacing';
-import { hasCanonicalListenSurvivor } from './delete-enqueue';
 
 export const DELETE_MAX_ATTEMPTS = 32;
 export const DELETE_MAX_REQUESTS_PER_RUN = 1;
@@ -203,12 +203,14 @@ export async function runDeleteSlice(
     if (row !== null) break;
   }
   if (!row) return { requests: 0, state: null, nextDueMs: nextCandidateAt ?? nextDeleteWakeAt(deps, now) };
-  if (hasCanonicalListenSurvivor(deps.db, {
-    did: row.did,
-    listenedAt: row.listened_at,
-    artistKey: row.artist_key,
-    trackKey: row.track_key,
-  })) {
+  if (
+    hasCanonicalListenSurvivor(deps.db, {
+      did: row.did,
+      listenedAt: row.listened_at,
+      artistKey: row.artist_key,
+      trackKey: row.track_key,
+    })
+  ) {
     deps.db.run(
       "UPDATE listenbrainz_deletes SET state='ignored',last_error='canonical_survivor',updated_at_ms=? WHERE id=? AND state='queued'",
       now,

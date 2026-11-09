@@ -1,3 +1,4 @@
+import { toStorage } from '@atmusic/core/timestamp';
 import type { Db } from '../do/db';
 import { storedForwardDedupeKey } from '../outbox/forward-key';
 
@@ -10,16 +11,29 @@ export function hasCanonicalListenSurvivor(
   const rows = db.all<{ uri: string }>(
     `SELECT s.uri FROM scrobbles s WHERE s.did=? AND s.artist_key=? AND s.track_key=?
      AND s.listened_at>=? AND s.listened_at<?`,
-    args.did, args.artistKey, args.trackKey, second.toString(), (second + 1_000_000_000n).toString(),
+    args.did,
+    args.artistKey,
+    args.trackKey,
+    toStorage(second),
+    toStorage(second + 1_000_000_000n),
   );
   return rows.some((row) => {
     if (args.excluding?.has(row.uri)) return false;
-    // A local tombstone is durable removal intent even while the projection lags.
-    return db.one(
-      `SELECT 1 FROM linked_pull_tombstones WHERE did=? AND kind='listen' AND
-       (identity_key=? OR identity_key=? OR identity_key LIKE ?) LIMIT 1`,
-      args.did, `uri:${row.uri}`, `live:${row.uri}`, `batch-replaced:${row.uri}:%`,
-    ) === null;
+    // Only tombstones for this exact projected incarnation are removal intent.
+    // In particular, a replacement tombstone for an older CID must not hide a
+    // newly recreated row at the same AT URI.
+    const current = db.one<{ cid: string }>('SELECT cid FROM scrobbles WHERE did=? AND uri=?', args.did, row.uri);
+    if (current === null) return false;
+    return (
+      db.one(
+        `SELECT 1 FROM linked_pull_tombstones WHERE did=? AND kind='listen' AND identity_key IN (?,?,?,?) LIMIT 1`,
+        args.did,
+        `uri:${row.uri}:${current.cid}`,
+        `live:${row.uri}:${current.cid}`,
+        `single-replaced:${row.uri}:${current.cid}`,
+        `batch-replaced:${row.uri}:${current.cid}`,
+      ) === null
+    );
   });
 }
 

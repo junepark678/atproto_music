@@ -222,13 +222,14 @@ function scrobbleVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, 
     ok: true,
     write: () => {
       const before = db.one<{
+        uri: string;
         cid: string;
         listened_at: string;
         artist_key: string;
         track_key: string;
         artist: string;
         track: string;
-      }>('SELECT cid,listened_at,artist_key,track_key,artist,track FROM scrobbles WHERE uri = ?', t.uri);
+      }>('SELECT uri,cid,listened_at,artist_key,track_key,artist,track FROM scrobbles WHERE uri = ?', t.uri);
       enqueueTrack(
         db,
         { artistKey: keys.artist_key, trackKey: keys.track_key, albumKey: keys.album_key },
@@ -856,7 +857,7 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
       for (const listen of listens)
         tombstoneListen(db, {
           did: t.did,
-          identity: `live:${listen.uri}`,
+          identity: `live:${listen.uri}:${listen.cid}`,
           second: Math.floor(Date.parse(listen.listened_at) / 1000),
           artistKey: listen.artist_key,
           trackKey: listen.track_key,
@@ -905,7 +906,7 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
       const key = `${artistKeyValue}\u0000${trackKeyValue}`;
       tombstoneLove(db, {
         did: t.did,
-        identity: `live:${t.uri}`,
+        identity: `live:${t.uri}:${priorLove.cid}`,
         loveKey: key,
         recordingMbid: priorLove.recording_mbid,
         nowMs: Number(o.nowNs / 1_000_000n),

@@ -122,7 +122,7 @@ export function enqueueScrobbleDelete(
     for (const row of rows)
       tombstoneListen(m.db, {
         did: args.did,
-        identity: `uri:${row.uri}`,
+        identity: `uri:${row.uri}:${row.cid}`,
         second: Math.floor(Date.parse(row.listened_at) / 1000),
         artistKey: row.artist_key,
         trackKey: row.track_key,
