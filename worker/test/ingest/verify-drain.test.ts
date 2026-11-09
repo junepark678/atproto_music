@@ -139,7 +139,7 @@ describe('verify drain', () => {
       enqueue(i.db, [
         hint(k, did, collection, 'expires-in-flight', {
           hintRev: next.rev,
-          live: { operation: 'update', cid: next.ops[0]!.cid },
+          live: { operation: 'update', cid: next.ops[0]!.cid! },
         }),
       ]);
       k.pds.Alice.fail(
@@ -300,15 +300,13 @@ describe('verify drain', () => {
         );
       }
       let failCommit = true;
-      const wrapped = {
-        ...i.db,
-        tx: <T>(fn: () => T): T =>
-          i.db.tx(() => {
-            const result = fn();
-            if (failCommit) throw new Error('injected commit failure');
-            return result;
-          }),
-      };
+      const tx = ((fn: () => unknown) =>
+        i.db.tx(() => {
+          const result = fn();
+          if (failCommit) throw new Error('injected commit failure');
+          return result;
+        })) as Db['tx'];
+      const wrapped = { ...i.db, tx } as Db;
       const m = depsFor(wrapped, k);
       const budget = { ...m.config.budget, drainHints: 0 };
       await expect(drain(m, k.clock.nowMs(), budget)).rejects.toThrow('injected commit failure');

@@ -23,7 +23,12 @@ import { withMigratedDb } from '../support/node-db';
 const LOVE = `${PREFIX}.love`;
 const BATCH = `${PREFIX}.scrobbleBatch`;
 const random = seededRandom(901);
-const event = (proof: Awaited<ReturnType<typeof proofAt>>, action: 'create' | 'update') => ({
+type PresentProof = Extract<Awaited<ReturnType<typeof proofAt>>, { state: 'present' }>;
+const present = (proof: Awaited<ReturnType<typeof proofAt>>): PresentProof => {
+  if (proof.state !== 'present') throw new Error('expected present proof');
+  return proof;
+};
+const event = (proof: PresentProof, action: 'create' | 'update') => ({
   up_rev: proof.commit.rev,
   up_action: action,
   up_cid: proof.state === 'present' ? proof.cid : null,
@@ -62,8 +67,8 @@ async function refresh(
         listens: [{ ...(initial as { listens: Array<Record<string, unknown>> }).listens[0], album: 'After' }],
       }
     : { ...initial, album: 'Metadata only' };
-  const first = await putProof(repo, collection, 'candidate-refresh', initial);
-  const second = await putProof(repo, collection, 'candidate-refresh', changed);
+  const first = present(await putProof(repo, collection, 'candidate-refresh', initial));
+  const second = present(await putProof(repo, collection, 'candidate-refresh', changed));
   await withMigratedDb((db) => {
     const generation = seedUser(db, ALICE);
     db.run(
@@ -157,7 +162,7 @@ it.each([
 
 it('keeps first-snapshot history out of candidate ownership and late-accepts a same-revision snapshot noop once', async () => {
   const repo = await repoFor('alice');
-  const proof = await putProof(repo, SCROBBLE, 'snapshot-frontier', fixtureScrobble('r02'));
+  const proof = present(await putProof(repo, SCROBBLE, 'snapshot-frontier', fixtureScrobble('r02')));
   const chunk = (db: Db, generation: number, nowNs: bigint) =>
     applySnapshotChunk(db, {
       did: ALICE,
@@ -214,19 +219,23 @@ it('keeps first-snapshot history out of candidate ownership and late-accepts a s
 
 it('does not refresh an expired candidate or transfer it to a different canonical identity', async () => {
   const repo = await repoFor('alice');
-  const first = await putProof(repo, LOVE, 'candidate-owner', {
-    $type: LOVE,
-    artist: 'Candidate Artist',
-    track: 'Candidate Track',
-    createdAt: '2026-01-15T11:00:00Z',
-  });
-  const changed = await putProof(repo, LOVE, 'candidate-owner', {
-    $type: LOVE,
-    artist: 'Candidate Artist',
-    track: 'Candidate Track',
-    album: 'Changed',
-    createdAt: '2026-01-15T11:00:00Z',
-  });
+  const first = present(
+    await putProof(repo, LOVE, 'candidate-owner', {
+      $type: LOVE,
+      artist: 'Candidate Artist',
+      track: 'Candidate Track',
+      createdAt: '2026-01-15T11:00:00Z',
+    }),
+  );
+  const changed = present(
+    await putProof(repo, LOVE, 'candidate-owner', {
+      $type: LOVE,
+      artist: 'Candidate Artist',
+      track: 'Candidate Track',
+      album: 'Changed',
+      createdAt: '2026-01-15T11:00:00Z',
+    }),
+  );
   await withMigratedDb((db) => {
     seedUser(db, ALICE);
     const apply = (proof: typeof first, nowNs: bigint) =>
@@ -240,7 +249,7 @@ it('does not refresh an expired candidate or transfer it to a different canonica
         }),
       );
     apply(first, NOW_NS);
-    const before = db.one('SELECT * FROM live_acceptance_candidates')!;
+    const before = db.one<{ expires_at_ms: number }>('SELECT * FROM live_acceptance_candidates')!;
     const expires = Number(before.expires_at_ms);
     apply(changed, BigInt(expires + 1) * 1_000_000n);
     expect(db.one('SELECT * FROM live_acceptance_candidates')).toEqual(before);
@@ -250,12 +259,14 @@ it('does not refresh an expired candidate or transfer it to a different canonica
 it('does not transfer a scrobble candidate when an accepted rewrite changes its canonical listen identity', async () => {
   const repo = await repoFor('alice');
   const original = fixtureScrobble('r02');
-  const first = await putProof(repo, SCROBBLE, 'identity-owner', original);
-  const changed = await putProof(repo, SCROBBLE, 'identity-owner', {
-    ...original,
-    artist: 'A different canonical artist',
-    track: 'A different canonical track',
-  });
+  const first = present(await putProof(repo, SCROBBLE, 'identity-owner', original));
+  const changed = present(
+    await putProof(repo, SCROBBLE, 'identity-owner', {
+      ...original,
+      artist: 'A different canonical artist',
+      track: 'A different canonical track',
+    }),
+  );
   await withMigratedDb((db) => {
     seedUser(db, ALICE);
     const apply = (proof: typeof first, nowNs: bigint) =>
