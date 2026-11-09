@@ -55,6 +55,7 @@ it.each(
   const earlierDelete = await deleteProof(repo, SCROBBLE, 'a');
   const middle = await putProof(repo, SCROBBLE, 'a', scrobble({ artist: 'Other', track: 'Middle' }));
   const gone = await deleteProof(repo, SCROBBLE, 'a');
+  if (first.state !== 'present' || middle.state !== 'present') throw new Error('expected present fixture proofs');
   const valid = validRevision === 'earlier' ? earlierDelete : gone;
   await withMigratedDb(async (db) => {
     seedLink(db);
