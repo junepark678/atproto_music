@@ -388,10 +388,11 @@ function loveJob(rt: ForwardRuntime, link: LinkRow, now: number, budget: { remai
         priority: number;
         due_at: number;
         head_created_at_ms: number;
-      }>(LANE_PICK_SQL, link.id, link.generation, priority, now, budget.remaining);
+      }>(LANE_PICK_SQL, link.id, link.generation, priority, now, 1);
       if (lanes.length === 0) break;
+      // Charge fetched rows, including candidates skipped after revalidation.
+      budget.remaining -= lanes.length;
       for (const lane of lanes) {
-        budget.remaining -= 1;
         const head = rt.db.one<QueuedRow>(
           HEAD_SQL,
           link.id,
@@ -424,13 +425,25 @@ function loveJob(rt: ForwardRuntime, link: LinkRow, now: number, budget: { remai
         }
         if (link.service === 'listenbrainz' && entry[1].recordingMbid === undefined) {
           // An unlove names only the track; the MBID its love was sent with is known locally.
-          const mbid = head.kind === 'unlove' ? knownRecordingMbid(rt.db, head, entry[1]) : null;
+          const known =
+            head.kind === 'unlove' ? knownRecordingMbid(rt.db, head, entry[1]) : { mbid: null, pending: false };
           const key = {
             artistKey: artistKey(entry[1].artist),
             trackKey: trackKey(entry[1].artist, entry[1].track)[1],
             albumKey: entry[1].album ? albumKey(entry[1].artist, entry[1].album)?.[1] : '',
           };
-          const local = mbid ?? matchedRecordingMbid(rt.db, key);
+          if (known.pending) {
+            const next = now + FORWARD_IDLE_POLL_MS;
+            rt.db.run(
+              "UPDATE forward_outbox SET due_at=?,updated_at_ms=? WHERE id=? AND state='queued'",
+              next,
+              now,
+              head.id,
+            );
+            rt.db.run('UPDATE forward_love_lanes SET due_at=? WHERE rowid=?', next, lane.rowid);
+            continue;
+          }
+          const local = known.mbid ?? matchedRecordingMbid(rt.db, key);
           if (local === null) {
             const resolved = rt.db.one<{ status: string }>(
               'SELECT status FROM mb_tracks WHERE artist_key=? AND track_key=? AND album_key=?',
@@ -506,9 +519,69 @@ function mbidOfLove(text: string | null, key: string): string | null {
   return loveKeyOf(track.artist, track.track) === key ? track.recordingMbid : null;
 }
 
+/** Incrementally indexes historical love.put rows; never scans an operation backlog in a dispatch transaction. */
+function advanceLoveRecordingHistory(db: Db): void {
+  db.run('INSERT OR IGNORE INTO forward_love_recording_history_state(singleton) VALUES(1)');
+  const state = db.one<{ cursor_rowid: number; complete: number }>(
+    'SELECT cursor_rowid,complete FROM forward_love_recording_history_state WHERE singleton=1',
+  );
+  if (state === null || state.complete) return;
+  db.tx(() => {
+    const rows = db.all<{ rowid: number; did: string; kind: string; record_json: string | null }>(
+      'SELECT rowid,did,kind,record_json FROM operations WHERE rowid>? ORDER BY rowid LIMIT 128',
+      state.cursor_rowid,
+    );
+    for (const row of rows) {
+      if (row.kind !== 'love.put' || row.record_json === null) continue;
+      let record: unknown;
+      try {
+        record = JSON.parse(row.record_json);
+      } catch {
+        continue;
+      }
+      if (typeof record !== 'object' || record === null) continue;
+      const value = record as Record<string, unknown>;
+      if (
+        typeof value.artist !== 'string' ||
+        typeof value.track !== 'string' ||
+        typeof value.recordingMbid !== 'string'
+      )
+        continue;
+      try {
+        const [a, t] = trackKey(value.artist, value.track);
+        db.run(
+          `INSERT OR IGNORE INTO forward_love_recording_history(did,artist_key,track_key,operation_rowid,recording_mbid)
+           VALUES(?,?,?,?,?)`,
+          row.did,
+          a,
+          t,
+          row.rowid,
+          value.recordingMbid,
+        );
+      } catch {
+        /* malformed legacy record: it cannot match a validated unlove */
+      }
+    }
+    const cursor = rows.at(-1)?.rowid ?? state.cursor_rowid;
+    db.run(
+      'UPDATE forward_love_recording_history_state SET cursor_rowid=?,complete=? WHERE singleton=1',
+      cursor,
+      rows.length < 128 ? 1 : 0,
+    );
+  });
+}
+
 /** `json_extract(<column>, '$.recordingMbid')`, NULL for a column that is not valid JSON. */
 const MBID_OF = (column: string): string =>
   `CASE WHEN json_valid(${column}) THEN json_extract(${column}, '$.recordingMbid') END`;
+
+export const FORWARD_LOVE_RECORDING_LOOKUP_SQL = `SELECT payload_json FROM forward_outbox INDEXED BY forward_outbox_love_recording_lookup
+  WHERE link_id=? AND generation=? AND state IN ('queued','sent','ignored','failed') AND kind='love'
+    AND love_artist_key=? AND love_track_key=? AND ${MBID_OF('payload_json')} IS NOT NULL
+    AND (created_at_ms < ? OR (created_at_ms = ? AND rowid < ?))
+  ORDER BY created_at_ms DESC,rowid DESC LIMIT 1`;
+export const LOVE_RECORDING_HISTORY_LOOKUP_SQL = `SELECT recording_mbid FROM forward_love_recording_history INDEXED BY forward_love_recording_history_latest
+  WHERE did=? AND artist_key=? AND track_key=? AND operation_rowid<? ORDER BY operation_rowid DESC LIMIT 1`;
 
 /**
  * The recording MBID an unlove's track was loved with, or null when none is
@@ -521,50 +594,56 @@ const MBID_OF = (column: string): string =>
  *    may already have removed ours from it, hence it comes last.
  * Matching is by the love key (outbox/love-ops.ts loveKeyOf), as unlove matches.
  */
-function knownRecordingMbid(db: Db, unlove: QueuedRow, track: ForwardTrack): string | null {
+function knownRecordingMbid(db: Db, unlove: QueuedRow, track: ForwardTrack): { mbid: string | null; pending: boolean } {
   const key = loveKeyOf(track.artist, track.track);
-  if (key === null) return null;
-  const rows = db.all<{ payload_json: string }>(
-    `SELECT payload_json FROM forward_outbox
-     WHERE link_id = ? AND kind = 'love' AND ${MBID_OF('payload_json')} IS NOT NULL
-       AND (created_at_ms < ? OR (created_at_ms = ? AND rowid < ?))
-     ORDER BY created_at_ms DESC, rowid DESC`,
+  if (key === null) return { mbid: null, pending: false };
+  const [artistKey, trackKeyPart] = key.split('\u0000') as [string, string];
+  const row = db.one<{ payload_json: string }>(
+    FORWARD_LOVE_RECORDING_LOOKUP_SQL,
     unlove.link_id,
+    unlove.generation,
+    artistKey,
+    trackKeyPart,
     unlove.created_at_ms,
     unlove.created_at_ms,
     unlove.seq,
   );
-  for (const row of rows) {
-    const mbid = mbidOfLove(row.payload_json, key);
-    if (mbid !== null) return mbid;
-  }
+  const forwardMbid = row === null ? null : mbidOfLove(row.payload_json, key);
+  if (forwardMbid !== null) return { mbid: forwardMbid, pending: false };
   const operationId = canonicalForwardDedupeKey(unlove.generation, unlove.dedupe_key);
   if (operationId !== null) {
-    const intents = db.all<{ record_json: string | null }>(
-      `SELECT record_json FROM operations
-       WHERE did = ? AND kind = 'love.put' AND ${MBID_OF('record_json')} IS NOT NULL
-         AND rowid < coalesce((SELECT rowid FROM operations WHERE id = ? AND did = ?), 9223372036854775807)
-       ORDER BY created_at_ms DESC, rowid DESC`,
-      unlove.did,
+    const state = db.one<{ complete: number }>(
+      'SELECT complete FROM forward_love_recording_history_state WHERE singleton=1',
+    );
+    const previous = db.one<{ rowid: number }>(
+      'SELECT rowid FROM operations WHERE id=? AND did=?',
       operationId,
       unlove.did,
     );
-    for (const row of intents) {
-      const mbid = mbidOfLove(row.record_json, key);
-      if (mbid !== null) return mbid;
+    if (previous !== null) {
+      const intent = db.one<{ recording_mbid: string }>(
+        LOVE_RECORDING_HISTORY_LOOKUP_SQL,
+        unlove.did,
+        artistKey,
+        trackKeyPart,
+        previous.rowid,
+      );
+      if (intent !== null) return { mbid: intent.recording_mbid, pending: state?.complete !== 1 };
     }
+    if (state?.complete !== 1) return { mbid: null, pending: true };
   }
-  const [artistKey, trackKeyPart] = key.split('\u0000') as [string, string];
-  return (
-    db.one<{ recording_mbid: string }>(
-      `SELECT recording_mbid FROM loves
+  return {
+    mbid:
+      db.one<{ recording_mbid: string }>(
+        `SELECT recording_mbid FROM loves
        WHERE did = ? AND artist_key = ? AND track_key = ? AND recording_mbid IS NOT NULL
        ORDER BY created_at DESC, uri DESC LIMIT 1`,
-      unlove.did,
-      artistKey,
-      trackKeyPart,
-    )?.recording_mbid ?? null
-  );
+        unlove.did,
+        artistKey,
+        trackKeyPart,
+      )?.recording_mbid ?? null,
+    pending: false,
+  };
 }
 
 const seqOf = (job: Job): [number, number, number] => [
@@ -591,13 +670,21 @@ function pickJob(rt: ForwardRuntime, now: number, localWork: Map<string, { remai
   const links = rt.db.all<LinkRow>("SELECT * FROM linked_accounts WHERE status='active' ORDER BY id");
   const candidates: Array<{ link: LinkRow; priority: number; oldest: number }> = [];
   for (const link of links) {
-    const hints: Array<{ priority: number; created_at_ms: number } | null> = [];
+    const hints: Array<{ priority: number; created_at_ms: number | null } | null> = [];
     for (const kind of ['nowplaying', 'scrobble'] as const) {
       hints.push(rt.db.one(KIND_CANDIDATE_SQL, link.id, link.generation, kind, now));
     }
     if (!hasUnkeyedLoves(rt.db, link.id, link.generation)) {
-      for (const priority of [0, 1] as const)
-        hints.push(rt.db.one(LANE_FIRST_DUE_SQL, link.id, link.generation, priority, now));
+      for (const priority of [0, 1] as const) {
+        const hint = rt.db.one<{ priority: number; head_created_at_ms: number }>(
+          LANE_FIRST_DUE_SQL,
+          link.id,
+          link.generation,
+          priority,
+          now,
+        );
+        hints.push(hint === null ? null : { priority: hint.priority, created_at_ms: hint.head_created_at_ms });
+      }
     }
     const due = hints.filter(
       (hint): hint is { priority: number; created_at_ms: number } => hint !== null && hint.created_at_ms !== null,
@@ -906,6 +993,7 @@ export async function runForward(
         nextDueMs: at + LASTFM_MIN_INTERVAL_MS,
       };
     }
+    advanceLoveRecordingHistory(rt.db);
     let framingPending = false;
     for (const link of rt.db.all<LinkRow>("SELECT * FROM linked_accounts WHERE status='active' ORDER BY id")) {
       const framed = frameLoveRows(rt, link, at);

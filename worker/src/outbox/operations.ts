@@ -37,6 +37,7 @@ import type { Operation } from '@atmusic/core/api-types';
 import { canonicalDigest } from '@atmusic/core/canonical';
 import type { Random } from '@atmusic/core/deps';
 import { loveCollection } from '@atmusic/core/love';
+import { trackKey } from '@atmusic/core/music-key';
 import { collectionsFor } from '@atmusic/core/namespace';
 import { scrobbleBatchCollection } from '@atmusic/core/scrobble-batch';
 import { fromMs, toDto } from '@atmusic/core/timestamp';
@@ -209,6 +210,31 @@ export function insertOperation(db: Db, op: NewOperation, now: number): Operatio
       op.collection,
       op.rkey,
     );
+    if (op.kind === 'love.put' && prepared !== null) {
+      const record = prepared.record as Record<string, unknown>;
+      if (
+        typeof record.artist === 'string' &&
+        typeof record.track === 'string' &&
+        typeof record.recordingMbid === 'string'
+      ) {
+        try {
+          const [artistKey, trackKeyValue] = trackKey(record.artist, record.track);
+          const rowid = db.one<{ rowid: number }>('SELECT rowid FROM operations WHERE id=?', op.id)?.rowid;
+          if (rowid !== undefined)
+            db.run(
+              `INSERT OR IGNORE INTO forward_love_recording_history(did,artist_key,track_key,operation_rowid,recording_mbid)
+               VALUES(?,?,?,?,?)`,
+              op.did,
+              artistKey,
+              trackKeyValue,
+              rowid,
+              record.recordingMbid,
+            );
+        } catch {
+          /* invalid legacy-shaped input is rejected by the love route */
+        }
+      }
+    }
     for (const pred of new Set(op.predecessors ?? [])) {
       if (pred === op.id) continue;
       db.run('INSERT OR IGNORE INTO operation_deps(op_id, pred_id) VALUES (?, ?)', op.id, pred);

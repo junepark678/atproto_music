@@ -650,6 +650,14 @@ const NEW_TABLES: Record<string, ExpectedTable> = {
     columns: ['link_id', 'generation', 'love_artist_key', 'love_track_key', 'priority', 'due_at', 'head_created_at_ms'],
     pk: ['link_id', 'generation', 'love_artist_key', 'love_track_key'],
   },
+  forward_love_recording_history: {
+    columns: ['did', 'artist_key', 'track_key', 'operation_rowid', 'recording_mbid'],
+    pk: ['did', 'artist_key', 'track_key', 'operation_rowid'],
+  },
+  forward_love_recording_history_state: {
+    columns: ['singleton', 'cursor_rowid', 'complete'],
+    pk: ['singleton'],
+  },
   import_jobs: {
     columns: cols<ImportJobRow>({
       id: true,
@@ -977,6 +985,29 @@ const NEW_INDEXES: Record<string, [string, number, number, Array<[string, number
       ['link_id', 0],
       ['generation', 0],
       ['state', 0],
+      ['love_artist_key', 0],
+      ['love_track_key', 0],
+      ['created_at_ms', 0],
+    ],
+  ],
+  forward_love_recording_history_latest: [
+    'forward_love_recording_history',
+    0,
+    0,
+    [
+      ['did', 0],
+      ['artist_key', 0],
+      ['track_key', 0],
+      ['operation_rowid', 1],
+    ],
+  ],
+  forward_outbox_love_recording_lookup: [
+    'forward_outbox',
+    0,
+    0,
+    [
+      ['link_id', 0],
+      ['generation', 0],
       ['love_artist_key', 0],
       ['love_track_key', 0],
       ['created_at_ms', 0],
@@ -1863,6 +1894,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       "42|'listenbrainz_delete_lookup_page_boundary'",
       "43|'forward_love_key_heads'",
       "44|'forward_love_lanes'",
+      "45|'forward_love_recording_history'",
     ]);
     // The new scrobble columns exist and are NULL on every migrated row.
     expect(after.newColumns).toHaveLength(expectedScrobbles);
@@ -1914,6 +1946,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       { version: 42, name: 'listenbrainz_delete_lookup_page_boundary' },
       { version: 43, name: 'forward_love_key_heads' },
       { version: 44, name: 'forward_love_lanes' },
+      { version: 45, name: 'forward_love_recording_history' },
     ]);
     expect(after.compat).toEqual([{ singleton: 1, min_compatible_version: 2 }]);
     expect(after.newTablesEmpty).toEqual(['mb_cover_art_usage']);

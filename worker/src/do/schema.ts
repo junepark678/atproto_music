@@ -1421,6 +1421,21 @@ const MIGRATION_S4_FORWARD_LOVE_LANES: Migration = {
   ],
 };
 
+const MIGRATION_FORWARD_LOVE_RECORDING_HISTORY: Migration = {
+  version: 45,
+  name: 'forward_love_recording_history',
+  statements: [
+    `CREATE TABLE forward_love_recording_history (
+      did TEXT NOT NULL, artist_key TEXT NOT NULL, track_key TEXT NOT NULL,
+      operation_rowid INTEGER NOT NULL, recording_mbid TEXT NOT NULL,
+      PRIMARY KEY(did,artist_key,track_key,operation_rowid)
+    )`,
+    'CREATE INDEX forward_love_recording_history_latest ON forward_love_recording_history(did,artist_key,track_key,operation_rowid DESC)',
+    'CREATE INDEX forward_outbox_love_recording_lookup ON forward_outbox(link_id,generation,love_artist_key,love_track_key,created_at_ms)',
+    'CREATE TABLE forward_love_recording_history_state (singleton INTEGER PRIMARY KEY NOT NULL, cursor_rowid INTEGER NOT NULL DEFAULT 0, complete INTEGER NOT NULL DEFAULT 0)',
+  ],
+};
+
 export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_1,
   MIGRATION_2,
@@ -1466,6 +1481,7 @@ export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_S4_DELETE_LOOKUP_PAGE_BOUNDARY,
   MIGRATION_S4_FORWARD_LOVE_HEADS,
   MIGRATION_S4_FORWARD_LOVE_LANES,
+  MIGRATION_FORWARD_LOVE_RECORDING_HISTORY,
 ];
 
 /** The schema version this code expects. */
@@ -1517,6 +1533,8 @@ export const TABLES = [
   'link_states',
   'forward_outbox',
   'forward_love_lanes',
+  'forward_love_recording_history',
+  'forward_love_recording_history_state',
   'listenbrainz_deletes',
   'link_backfill_items',
   'forward_admissions',
@@ -1607,6 +1625,8 @@ export const TABLE_CLASS: Readonly<Record<TableName, TableClass>> = {
   link_states: 'non-derived',
   forward_outbox: 'non-derived',
   forward_love_lanes: 'non-derived',
+  forward_love_recording_history: 'non-derived',
+  forward_love_recording_history_state: 'non-derived',
   listenbrainz_deletes: 'non-derived',
   link_backfill_items: 'non-derived',
   forward_admissions: 'non-derived',
