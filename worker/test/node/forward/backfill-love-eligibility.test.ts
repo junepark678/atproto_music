@@ -399,6 +399,31 @@ describe('backfill love recording eligibility', () => {
     });
   });
 
+  it('documents the alias residual: unlove intent on one title does not suppress a different-title history key', async () => {
+    await withHarness(async (h) => {
+      h.seedUser(h.alice);
+      const link = h.link(h.alice, 'lastfm');
+      const unlove = await enqueueUnlove(h.m, {
+        did: h.alice,
+        artist: TRACK.artist,
+        track: TRACK.track,
+        origin: 'web',
+      });
+      expect(unlove.ok).toBe(true);
+      const alias = { artist: TRACK.artist, track: 'Example Song (Live)', album: TRACK.album };
+      await projectLove(h, 'alias-residual-history', '2026-01-10T00:00:00Z', alias, MBID);
+
+      for (let turn = 0; turn < 3; turn++) await backfill(h);
+
+      expect(
+        h.db.all<{ payload_json: string }>(
+          "SELECT payload_json FROM forward_outbox WHERE link_id=? AND kind='love' AND json_extract(payload_json,'$.origin')='backfill'",
+          link,
+        ),
+      ).toHaveLength(1);
+    });
+  });
+
   it('backfills ListenBrainz loves with the matched primary MBID, falling back only when primary is unmatched', async () => {
     await withHarness(async (h) => {
       h.seedUser(h.alice);

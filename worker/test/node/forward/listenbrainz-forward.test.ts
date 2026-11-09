@@ -9,7 +9,7 @@
 // ListenBrainz is the fake at listenbrainz.test behind the fixture router; it
 // accepts a submission only with a registered `Token`.
 
-import { mkdtempSync, rmSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as sqlite from 'node:sqlite';
@@ -1671,7 +1671,7 @@ describe('ListenBrainz forwarding', () => {
     expect(w.seen).toHaveLength(0);
   });
 
-  it('keeps the original backfill head deadline across repeated pending runs', async () => {
+  it('keeps the original backfill head deadline across restart and repeated pending runs', async () => {
     const w = await world();
     w.link();
     w.enqueue([
@@ -1686,15 +1686,44 @@ describe('ListenBrainz forwarding', () => {
         },
       },
     ]);
-    const original = w.rows()[0]!.created_at_ms;
+    const head = w.rows()[0]!;
+    const original = head.created_at_ms;
     await w.run();
     w.clock.advance(DAY - MINUTE);
-    await w.run();
-    expect(w.rows()[0]).toMatchObject({ state: 'queued', created_at_ms: original });
+    const stateDir = mkdtempSync(join(tmpdir(), 'atmusic-forward-restart-'));
+    copyFileSync(w.app.config.dbPath, join(stateDir, 'atmusic.db'));
+    if (existsSync(`${w.app.config.dbPath}-wal`))
+      copyFileSync(`${w.app.config.dbPath}-wal`, join(stateDir, 'atmusic.db-wal'));
+    const { clock } = w;
+    const { secrets, transport } = w.app;
+    await w.app.close();
+    const restarted = await startApp({
+      clock,
+      secrets,
+      transport,
+      features: [linksFeature({ revocations: new MemoryRevocations(clock) })],
+      env: {
+        STATE_DIRECTORY: stateDir,
+        LASTFM_API_ROOT: 'https://lastfm.test/2.0/',
+        LASTFM_AUTH_URL: 'https://lastfm.test/api/auth/',
+        LISTENBRAINZ_API_ROOT: 'https://listenbrainz.test/',
+      },
+    });
+    const restartedRt = (restarted.composed.app as unknown as { links: LinksService }).links.forwarding;
+    await runForward(restartedRt, clock.nowMs());
+    expect(restarted.db.one('SELECT state,created_at_ms FROM forward_outbox WHERE id=?', head.id)).toEqual({
+      state: 'queued',
+      created_at_ms: original,
+    });
     w.clock.advance(MINUTE);
-    await w.run();
-    expect(w.rows()[0]).toMatchObject({ state: 'ignored', last_error: 'mbid_unresolved', created_at_ms: original });
+    await runForward(restartedRt, clock.nowMs());
+    expect(restarted.db.one('SELECT state,last_error,created_at_ms FROM forward_outbox WHERE id=?', head.id)).toEqual({
+      state: 'ignored',
+      last_error: 'mbid_unresolved',
+      created_at_ms: original,
+    });
     expect(w.seen).toHaveLength(0);
+    rmSync(stateDir, { recursive: true, force: true });
   });
 
   it('bounds love-head row work for a large unresolved backlog and still forwards an unrelated resolved track', async () => {
