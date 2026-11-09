@@ -44,7 +44,8 @@ Owner request:
 - **Egress.**
   - Every new request goes through `policyFetch` and the pinned transport, with its own caps.
   - New roots are validated with `upstream()` and documented in `config/atmusic.env.example`, `docs/operations.md` and ADR 0005 §3.8.
-  - Requests carry no user identity: no DID, handle, token or IP.
+  - Enrichment requests (MusicBrainz, Cover Art Archive) carry no user identity: no DID, handle, token or IP.
+  - Sync requests to a linked service carry only what that service requires: the remote username and the link's own credentials. They never carry the atproto DID, the handle or a viewer's IP.
   - User-Agent text names the repository URL, never a personal email.
 - **UI.** Never render a DID as text; show handles, and DIDs may appear only in hrefs. Use the `web/src/components/format.ts` helpers for local time. Pass server error text through `scrubDids`. No new runtime dependencies.
 - **Contracts.**
@@ -58,6 +59,12 @@ Owner request:
   - Append-only. Never edit an applied migration.
   - Add every new table to `TABLES` and `TABLE_CLASS`.
   - The tracks run in parallel, so the slice that lands second renumbers its migration when it rebases.
+  - **No table rebuilds, and no relaxing of the additive guard** (planner ruling, 2026-11-08). The rule in `worker/test/storage/schema-v2.test.ts` stays as it is: every migration after 2 may only `CREATE TABLE`, `CREATE INDEX` or `ADD COLUMN`. A changed uniqueness rule must be expressed additively. For example, keep `forward_outbox` UNIQUE(`link_id`, `kind`, `dedupe_key`), add `generation INTEGER NOT NULL DEFAULT 1`, and prefix the dedupe key with the generation (`g<n>:`) for generations above 1.
+  - **Squash unmerged migrations** before readiness, down to the fewest that the logical changes need.
+  - **Assigned numbers:**
+    - Tracks N and M hold 15–21: N1 15, M1 16–18, M2 19–20, and M4 21 if it lands.
+    - Track S takes the next free number after the last N/M migration (22 if M4 lands) when it rebases onto them.
+    - The stack merges linearly: #173, #175, #176, #177, #178, #179, M4, then the S slices.
 - **Tests.**
   - Use `fixedClock` and `seededRandom`. Fake upstreams sit on reserved `.test` hosts, wired through `routerTransport` and fakes beside `worker/test/node/support/fake-{lastfm,listenbrainz}.ts`.
   - Extend the features test so each new client provably gets the pinned transport.
@@ -202,7 +209,15 @@ The owner's word is "synced". Our definition: canonical MusicBrainz data is reso
 - **Forwarding.**
   - A ListenBrainz love or unlove with no submitted MBID falls back to the matched recording MBID.
   - If the lookup is still pending, defer the row for up to 24 h. Do not ignore it.
+  - A deferred row must not block loves or unloves for other tracks. Strict ordering only has to hold per link and per love key.
   - Rows are marked `ignored` with `no_recording_mbid` only after the track resolves as unmatched.
+  - **The 24 h deadline** (planner ruling, 2026-11-08): if the track is still `pending` or `failed` after 24 h, the row becomes terminal `ignored` with the distinct reason `mbid_unresolved`.
+    - It is not marked `failed`: the user can do nothing about it, so it must not count as a sync failure.
+    - It does not stay retryable forever, because it would occupy the queue indefinitely.
+  - **A later match retries automatically.** When a track key later becomes `matched` (a 30-day re-lookup or a refresh), enqueue one fresh row per affected link generation. Affected links are those whose latest row for that love key was ignored as `mbid_unresolved` or `no_recording_mbid`.
+    - The fresh row carries the *current* love state, love or unlove. The latest state wins and history is not replayed.
+    - It has its own dedupe key.
+    - The work is bounded per resolver run.
 - **Now playing.** `NowPlaying.musicbrainz`, if M1 didn't already add it.
 
 ### M3 Web display (base: M2)
@@ -249,9 +264,17 @@ The owner's word is "synced". Our definition: canonical MusicBrainz data is reso
   - love creates and deletes;
 
   that arrive from other clients through **live** Jetstream commits. Exclude snapshot, repair and discovery backfill, which belong to S2.
-- **Exactly once.** A record we accepted through our API that echoes back through Jetstream must be forwarded exactly once.
-  - Verify how long `forward_outbox` rows and `listen_keys` persist.
-  - If sent rows are pruned, add a compact `forward_sent(link_id, dedupe_key)` ledger with an age bound.
+- **Exactly once: the replay contract** (planner ruling, 2026-11-08, replacing the earlier "ledger with an age bound" idea).
+  - **Admission marker.** Every listen and love identity gets one durable, compact *admission marker*, attached to its existing durable identity (`listen_keys` / `record_state`). It is written in the same transaction as the first API or compat acceptance, import, or projection. It records:
+    - the acceptance sequence or time;
+    - the path: `api`, `import`, `live` or `snapshot`;
+    - the import source service, if any.
+  - **Admission happens at most once per identity lifetime.** Live forwarding enqueues only on the first admission through the `api` or `live` path, for the links active at that moment. A replay of a known identity, at any lateness, enqueues nothing.
+  - **The marker lives as long as the identity.** It lasts exactly as long as the indexer keeps that record identity or its tombstone. Forwarding suppression therefore matches the indexer's own resurrection suppression. If the indexer would re-project an identity as new, forwarding treats it as new too.
+  - **No cutoff by age.** There is no TTL, no "echo horizon" and no listen-age exclusion used for dedupe. A replay suppressed beyond the identity's lifetime is out of contract and must not be promised. No new ListenBrainz age limit; Last.fm keeps its 13-day limit when sending.
+  - **Link generations.** Each link has a generation that changes when the remote account changes, and forward rows carry it. For each link generation, every indexed identity is forwarded at most once, either by live admission or by S2 backfill, and the admission marker decides which. Backfill covers what live admission did not enqueue for that generation: identities admitted before the generation started, and `snapshot`-path identities admitted after it.
+  - **Outbox cleanup.** Per-link send state stays in `forward_outbox`. Because re-admission is blocked by the marker, not by outbox rows, terminal outbox rows may be removed by a periodic, bounded, indexed sweep after their terminal age. There is never a global scan on each success. This sweep is optional for S1.
+  - **Storage reporting.** Report marker and outbox row counts and bytes in the operator metrics and admin socket. There is no hard quota beyond existing disk checks.
 - **Imported listens.** Still never forwarded to the service they came from.
   - Forward them to other services only where the per-listen import source is known. Otherwise keep today's exclusion.
 - **Love deletes.** Deleting a love from another client forwards an unlove, keeping the love-head ordering.
@@ -287,10 +310,11 @@ The owner's word is "synced". Our definition: canonical MusicBrainz data is reso
   - New links default to on, and existing links switch on at rollout.
 - **Last.fm.**
   - `user.getRecentTracks` from the watermark minus a 1 h overlap, skipping the now-playing item.
-  - `user.getLovedTracks` newest first, stopping at the first known love. Loves are creates only; Last.fm unloves cannot be detected incrementally.
+  - `user.getLovedTracks` newest first, scanning down to the boundary of the last *completed* scan: the upstream timestamp of the newest love that scan saw, ties at that timestamp included. A love we already know locally is not a stopping point, because it may have been created here and forwarded. Loves are creates only; Last.fm unloves cannot be detected incrementally.
 - **ListenBrainz.**
-  - `/1/user/{name}/listens?min_ts=` the watermark minus 3600.
-  - `/1/feedback/user/{name}/get-feedback?score=1`, newest first, stopping at a known love.
+  - `/1/user/{name}/listens?min_ts=` the watermark minus 3600. With `min_ts`, ListenBrainz returns the earliest page first and lists it in descending order, so page forward until caught up.
+  - `/1/feedback/user/{name}/get-feedback?score=1`, using the same completed-scan boundary as Last.fm, with metadata requested. If an item still has no artist and track, resolve it through the MusicBrainz recording seam when M1 or M2 provides one. Otherwise skip it and count it, and never create a love without artist and track.
+- **Tombstones.** A listen or love deleted locally is recorded as a tombstone: the DID, the listen second and keys, or the love key or MBID. A pull never recreates a tombstoned item, including one that Last.fm cannot delete, or that ListenBrainz has not finished deleting.
 - **Echo prevention.**
   - A pulled listen is a duplicate when the DID already has **any** listen at the same `listenedAt` second, whatever its artist and track keys. The listen may be indexed, pending in the outbox or in `listen_keys`. This covers Last.fm corrections.
   - Loves match on the love key or the recording MBID.
@@ -313,8 +337,9 @@ The owner's word is "synced". Our definition: canonical MusicBrainz data is reso
 
 - **What triggers it.** A scrobble or batch listen that is deleted, through our API or a Jetstream delete, and that went to a ListenBrainz link.
 - **Lookup.** Find the `recording_msid` via `/1/user/{name}/listens` within ±1 s of the listen time, matched on the artist and track keys.
-- **Delete.** Send `POST /1/delete-listen {listened_at, recording_msid}`.
-- **Retries.** Back off and retry for up to 7 days. If nothing matches, mark the row `ignored`.
+- **Delete.** Send `POST /1/delete-listen {listened_at, recording_msid}`. ListenBrainz deletes asynchronously: HTTP 200 only means the request was accepted, so mark the row `sent` and don't poll to confirm. S3 tombstones stop the listen from being pulled back meanwhile.
+- **Ambiguity.** If the lookup finds more than one candidate, or none, mark the row `ignored`. Never delete an arbitrary match.
+- **Retries.** Back off on transport failures and retry for up to 7 days.
 - **Last.fm.** Record `unsupported`, since there is no API.
 - **Before implementing.** Check the live ListenBrainz API documentation for `delete-listen` and the listens response shape. If they differ from this description, report back rather than guessing.
 
