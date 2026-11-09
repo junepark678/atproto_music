@@ -8,6 +8,7 @@ import type { LinkedAccountRow } from '../app/rows';
 import type { Db } from '../do/db';
 import { matchedRecordingMbid } from '../musicbrainz/store';
 import { ensureLegacyLoveIncarnation } from './love-incarnation';
+import { latestExplicitLoveIntent } from './love-intent';
 import { enqueueForwards } from '../outbox/forward-enqueue';
 import type { ForwardRuntime } from './forwarder';
 import { projectionListenKey } from './projection';
@@ -177,6 +178,7 @@ function payloadForHistoryRow(
     if (incarnation === null || incarnation.incarnation_key !== identityKey) return null;
     if (incarnation.path === 'import' && sourceService(incarnation.source_service) === null) return null;
     if (incarnation.path === 'import' && sourceService(incarnation.source_service) === link.service) return null;
+    if (latestExplicitLoveIntent(db, link.did, row.artist_key, row.track_key) === 'unlove') return null;
   }
   const marker = db.one<{ path: string; source_service: string | null; admission_seq: number }>(
     'SELECT path,source_service,admission_seq FROM forward_admissions WHERE did=? AND identity_key=?',
