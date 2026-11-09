@@ -63,6 +63,7 @@ import {
   retainedForwardProvenance,
   retainedRecordProvenance,
 } from '../../forward/projection';
+import { ensureLegacyLoveIncarnation } from '../../forward/love-incarnation';
 import { enqueueTrack } from '../../musicbrainz/store';
 import { enqueueForwards } from '../../outbox/forward-enqueue';
 import { pullLoveAdmissionForUri, retirePullLoveAdmissionUri } from '../../sync/pull-love-admissions';
@@ -802,29 +803,15 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
           )
         : null;
     if (t.kind === 'love' && priorLove !== null && loveIncarnation === null) {
-      const acceptance =
-        retainedForwardProvenance(db, t.did, `love-uri:${t.did}:${t.collection}:${t.rkey}`) ??
-        retainedRecordProvenance(db, t.did, t.collection, t.rkey);
-      const path = acceptance?.path ?? 'snapshot';
-      const sourceService = acceptance?.sourceService ?? null;
-      const incarnationKey = `love:${t.uri}:legacy:${priorLove.cid}`;
-      admitForwardIdentity(db, {
+      loveIncarnation = ensureLegacyLoveIncarnation(db, {
         did: t.did,
-        identityKey: incarnationKey,
-        path,
-        sourceService: sourceService ?? undefined,
-        now: Number(o.nowNs / 1_000_000n),
+        uri: t.uri,
+        collection: t.collection,
+        rkey: t.rkey,
+        cid: priorLove.cid,
+        nowMs: Number(o.nowNs / 1_000_000n),
+        admitMarker: true,
       });
-      db.run(
-        `INSERT INTO love_incarnations(uri,incarnation_key,state,path,source_service,updated_at_ms)
-         VALUES (?,?,'present',?,?,?) ON CONFLICT(uri) DO NOTHING`,
-        t.uri,
-        incarnationKey,
-        path,
-        sourceService,
-        Number(o.nowNs / 1_000_000n),
-      );
-      loveIncarnation = { incarnation_key: incarnationKey, state: 'present', path, source_service: sourceService };
     }
     const importLoveBridges =
       t.kind === 'love' && loveIncarnation?.state === 'present'
