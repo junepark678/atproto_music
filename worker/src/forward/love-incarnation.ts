@@ -1,9 +1,5 @@
 import type { Db } from '../do/db';
-import {
-  admitForwardIdentity,
-  retainedForwardProvenance,
-  retainedRecordProvenance,
-} from './projection';
+import { admitForwardIdentity, retainedForwardProvenance, retainedRecordProvenance } from './projection';
 
 /** Reconstruct the durable identity for a legacy projected love. */
 export function ensureLegacyLoveIncarnation(
@@ -41,8 +37,5 @@ export function ensureLegacyLoveIncarnation(
     sourceService,
     args.nowMs,
   );
-  return db.one(
-    'SELECT incarnation_key,state,path,source_service FROM love_incarnations WHERE uri=?',
-    args.uri,
-  );
+  return db.one('SELECT incarnation_key,state,path,source_service FROM love_incarnations WHERE uri=?', args.uri);
 }

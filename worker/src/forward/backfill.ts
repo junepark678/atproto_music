@@ -7,11 +7,11 @@ import type { CoreExtension } from '../app/host';
 import type { LinkedAccountRow } from '../app/rows';
 import type { Db } from '../do/db';
 import { matchedRecordingMbid } from '../musicbrainz/store';
+import { enqueueForwards } from '../outbox/forward-enqueue';
+import type { ForwardRuntime } from './forwarder';
 import { ensureLegacyLoveIncarnation } from './love-incarnation';
 import { latestExplicitLoveIntent } from './love-intent';
 import { resolveLoveRecording } from './love-recording';
-import { enqueueForwards } from '../outbox/forward-enqueue';
-import type { ForwardRuntime } from './forwarder';
 import { projectionListenKey } from './projection';
 
 export const BACKFILL_CHUNK_SIZE = 500;

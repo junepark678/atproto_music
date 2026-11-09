@@ -56,6 +56,7 @@ import { MAX_INGEST_CBOR_BYTES, validateScrobbleBatchRecord } from '@atmusic/cor
 import { isTid } from '@atmusic/core/syntax';
 import { toStorage } from '@atmusic/core/timestamp';
 import { enqueueListenDelete } from '../../forward/delete-enqueue';
+import { ensureLegacyLoveIncarnation } from '../../forward/love-incarnation';
 import {
   admitForwardIdentity,
   admitProjectedIdentity,
@@ -63,7 +64,6 @@ import {
   retainedForwardProvenance,
   retainedRecordProvenance,
 } from '../../forward/projection';
-import { ensureLegacyLoveIncarnation } from '../../forward/love-incarnation';
 import { enqueueTrack } from '../../musicbrainz/store';
 import { enqueueForwards } from '../../outbox/forward-enqueue';
 import { pullLoveAdmissionForUri, retirePullLoveAdmissionUri } from '../../sync/pull-love-admissions';

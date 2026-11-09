@@ -125,8 +125,8 @@ import {
   UNFRAMED_SQL,
   UNKEYED_SQL,
 } from './love-lanes';
-import { indexForwardLoveTarget, indexLoveOperationTarget, normalizeForwardLoveKeys } from './love-recording-targets';
 import { loveFallbackKey, lovePrimaryKey, resolveLoveRecording } from './love-recording';
+import { indexForwardLoveTarget, indexLoveOperationTarget, normalizeForwardLoveKeys } from './love-recording-targets';
 import { refreshForwardStorageStats } from './storage-stats';
 import { LASTFM_MIN_INTERVAL_MS, listenbrainzPacingKey, type UpstreamPacing } from './upstream-pacing';
 
