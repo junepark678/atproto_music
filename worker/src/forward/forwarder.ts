@@ -580,6 +580,7 @@ async function sendLastfm(rt: ForwardRuntime, job: Job, sk: string): Promise<voi
 function metadataOf(t: ForwardTrack): TrackMetadata {
   const info: Record<string, unknown> = {};
   if (t.recordingMbid !== undefined) info.recording_mbid = t.recordingMbid;
+  if (t.albumArtist !== undefined) info.release_artist_name = t.albumArtist;
   if (t.releaseMbid !== undefined) info.release_mbid = t.releaseMbid;
   if (t.releaseGroupMbid !== undefined) info.release_group_mbid = t.releaseGroupMbid;
   if (t.artistMbids !== undefined) info.artist_mbids = t.artistMbids;
