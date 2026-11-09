@@ -17,7 +17,7 @@ import { UpstreamPacing } from '../../src/forward/upstream-pacing';
 import { enqueueBatchListenDelete } from '../../src/outbox/batch-delete-ops';
 import { enqueueScrobbleDelete } from '../../src/outbox/delete-ops';
 import { enqueueForwards } from '../../src/outbox/forward-enqueue';
-import { tombstoneListen } from '../../src/sync/tombstones';
+import { isListenTombstoned, tombstoneListen } from '../../src/sync/tombstones';
 import {
   ALICE,
   deleteProof,
@@ -213,7 +213,10 @@ it('same-byte recreation at same URI is a current survivor', async () => {
     delivered(db);
     expect(db.tx(() => applyRecordProof(db, gone, live)).outcome).toBe('absent');
     expect(db.tx(() => applyRecordProof(db, again, OPTS)).outcome).toBe('applied');
-    expect(db.all('SELECT identity_key FROM linked_pull_tombstones')).toHaveLength(0);
+    const history = db.all<{ identity_key: string }>('SELECT identity_key FROM linked_pull_tombstones');
+    expect(history).toHaveLength(1);
+    expect(history[0]!.identity_key).toMatch(/^history:live:/);
+    expect(isListenTombstoned(db, ALICE, second, artistKey, musicTrackKey)).toBe(true);
     expect(hasCanonicalListenSurvivor(db, deletion)).toBe(true);
     expect(await drain(db)).toEqual({ deletes: 0, lookups: 0 });
   });
