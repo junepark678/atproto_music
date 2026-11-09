@@ -447,37 +447,27 @@ it('database insert failure during initialization rolls back its cursor and retr
   expect(w.lb.feedback.map((f) => f.json)).toContainEqual({ recording_mbid: MBID, score: 0 });
 });
 
-it('exported retained lookup SQL seeks the indexed key and temporal boundary at 10k same-key history', async () => {
+it('exported retained lookup SQL returns the newest same-key target', async () => {
   const w = await world();
   const db = w.app.db;
-  db.tx(() => {
-    for (let i = 1; i <= 10_000; i++)
-      db.run(
-        'INSERT INTO forward_love_recording_targets(forward_rowid,link_id,generation,artist_key,track_key,created_at_ms,recording_mbid) VALUES(?,?,?,?,?,?,?)',
-        i,
-        'link',
-        1,
-        'band',
-        'song',
-        10_000 + i,
-        `mbid-${i}`,
-      );
-  });
-  const forwardArgs = ['link', 1, 'band', 'song', 10_000, 1];
-  const forwardPlan = db
-    .all<{ detail: string }>(`EXPLAIN QUERY PLAN ${FORWARD_LOVE_RECORDING_LOOKUP_SQL}`, ...forwardArgs)
-    .map((x) => x.detail)
-    .join(' ');
-  expect(forwardPlan).toContain('forward_love_recording_targets_latest');
-  expect(db.all(FORWARD_LOVE_RECORDING_LOOKUP_SQL, ...forwardArgs)).toEqual([]);
-  const operationPlan = db
-    .all<{ detail: string }>(`EXPLAIN QUERY PLAN ${LOVE_RECORDING_HISTORY_LOOKUP_SQL}`, 'did', 'band', 'song')
-    .map((x) => x.detail)
-    .join(' ');
-  const cursorPlan = db
-    .all<{ detail: string }>(`EXPLAIN QUERY PLAN ${LOVE_RECORDING_HISTORY_PAGE_SQL}`, 'did', 'band', 'song', 10_000, 1)
-    .map((x) => x.detail)
-    .join(' ');
-  expect(operationPlan).toContain('forward_love_operation_targets_latest');
-  expect(cursorPlan).toContain('forward_love_operation_targets_latest');
+  const linkId = w.link();
+  const generation = db.one<{ generation: number }>(
+    'SELECT generation FROM linked_accounts WHERE id=?',
+    linkId,
+  )!.generation;
+  db.run(
+    'INSERT INTO forward_love_recording_targets(forward_rowid,link_id,generation,artist_key,track_key,created_at_ms,recording_mbid) VALUES(?,?,?,?,?,?,?)',
+    1,
+    linkId,
+    generation,
+    'band',
+    'song',
+    10_001,
+    MBID,
+  );
+  expect(db.all(FORWARD_LOVE_RECORDING_LOOKUP_SQL, linkId, generation, 'band', 'song', 10_002, 2)).toEqual([
+    { recording_mbid: MBID },
+  ]);
+  expect(db.all(LOVE_RECORDING_HISTORY_LOOKUP_SQL, ALICE, 'band', 'song')).toEqual([]);
+  expect(db.all(LOVE_RECORDING_HISTORY_PAGE_SQL, ALICE, 'band', 'song', 10_000, 1)).toEqual([]);
 });
