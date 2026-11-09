@@ -71,7 +71,14 @@ function errorWords(error: string, service: string): string {
             : /^[a-z][a-z0-9]*(?:_[a-z0-9]+)+$/.test(error)
               ? `Syncing with ${service} stopped after an error. Check the connection and try again.`
               : error;
-  const words = scrubDids(advice).replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
+  const words = scrubDids(advice)
+    .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, 'an account')
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/-]+=*/gi, 'saved credentials')
+    .replace(/\b(?:access[_-]?token|refresh[_-]?token|token)\s*[:=]\s*[^\s,;]+/gi, 'saved credentials')
+    .replace(/\b(?:gh[pousr]_|sk-)[A-Za-z0-9_-]{12,}\b/g, 'saved credentials')
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
   return words ? words[0]!.toLocaleUpperCase() + words.slice(1) : '';
 }
 

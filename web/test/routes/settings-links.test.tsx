@@ -168,13 +168,20 @@ it('shows known sync-error advice in plain words for each service', async () => 
     link({ id: 'lb-revoked', service: 'listenbrainz', status: 'revoked', lastError: 'token_revoked' }),
     link({ id: 'credential-error', status: 'error', lastError: 'credential_unreadable' }),
     link({ id: 'lastfm-key-error', service: 'lastfm', status: 'error', lastError: 'lastfm_key_rejected' }),
+    link({
+      id: 'private-error',
+      lastError: 'Unable to sync alice@example.test with token=hidden',
+    }),
   ]);
   const { root, unmount } = mount();
-  await vi.waitFor(() => expect(root.querySelectorAll('.link-card')).toHaveLength(4));
+  await vi.waitFor(() => expect(root.querySelectorAll('.link-card')).toHaveLength(5));
   expect(root.textContent).toContain('Last.fm disconnected this app. Reconnect to resume syncing.');
   expect(root.textContent).toContain('ListenBrainz disconnected this app. Reconnect to resume syncing.');
   expect(root.textContent).toContain("Saved credentials couldn't be read. Reconnect to resume syncing.");
   expect(root.textContent).toContain("Last.fm is rejecting this server's API key. Syncing is paused.");
+  expect(root.textContent).toContain('Unable to sync an account with saved credentials');
+  expect(root.textContent).not.toContain('alice@example.test');
+  expect(root.textContent).not.toContain('hidden');
   expect(root.querySelectorAll('.link-error[role="alert"]')).toHaveLength(0);
   expect(root.textContent).not.toContain('did:');
   unmount();
