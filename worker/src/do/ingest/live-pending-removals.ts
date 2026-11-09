@@ -188,7 +188,11 @@ function reconcilePendingWindowPage(
       db.run(
         `UPDATE live_pending_removals SET authorized_rev=?,conflict_invalidated=0
          WHERE uri=? AND window_lo=? AND window_hi=? AND replaced_by_cid=?
-           AND (authorized_rev IS NULL OR authorized_rev=conflicted_auth_rev)`,
+           AND (authorized_rev IS NULL OR EXISTS (
+             SELECT 1 FROM live_pending_removal_events conflict
+             WHERE conflict.uri=live_pending_removals.uri
+               AND conflict.rev=live_pending_removals.authorized_rev AND conflict.conflicted=1
+           ))`,
         event.rev,
         uri,
         windowLo,
@@ -368,22 +372,27 @@ function processAuthorizationPage(db: Db, event: AuthorizationEvent, nowMs: numb
         event.rev,
       ).rowsWritten;
     } else if (
-      (row.authorized_rev === null && (row.conflicted_auth_rev === null || event.rev > row.conflicted_auth_rev)) ||
-      (row.authorized_rev === row.conflicted_auth_rev && row.authorized_rev !== null && event.rev > row.authorized_rev)
+      row.authorized_rev === null ||
+      db.one(
+        'SELECT 1 FROM live_pending_removal_events WHERE uri=? AND rev=? AND conflicted=1',
+        event.uri,
+        row.authorized_rev,
+      ) !== null
     ) {
       authorized += db.run(
         `UPDATE live_pending_removals SET authorized_rev=?,conflict_invalidated=0
          WHERE uri=? AND kind=? AND window_lo=? AND window_hi=? AND replaced_by_cid=?
-           AND ((authorized_rev IS NULL AND (conflicted_auth_rev IS NULL OR conflicted_auth_rev<?))
-             OR (authorized_rev=conflicted_auth_rev AND authorized_rev<?))`,
+           AND (authorized_rev IS NULL OR EXISTS (
+             SELECT 1 FROM live_pending_removal_events conflict
+             WHERE conflict.uri=live_pending_removals.uri
+               AND conflict.rev=live_pending_removals.authorized_rev AND conflict.conflicted=1
+           ))`,
         event.rev,
         event.uri,
         row.kind,
         row.window_lo,
         row.window_hi,
         row.replaced_by_cid,
-        event.rev,
-        event.rev,
       ).rowsWritten;
     }
   }

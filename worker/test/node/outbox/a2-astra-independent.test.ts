@@ -42,6 +42,63 @@ const second = Date.parse(record.listenedAt as string) / 1000;
 const [artistKey, musicTrackKey] = trackKey('Björk', 'Jóga');
 const identity = projectionListenKey(ALICE, record.listenedAt as string, artistKey, musicTrackKey);
 const live = (db: Db, proof: Awaited<ReturnType<typeof putProof>>) => authorizedLiveOptions(db, proof, rng);
+
+it.each(
+  (['conflict-first', 'valid-first', 'no-conflict'] as const).flatMap((order) =>
+    (['before-window', 'after-window'] as const).flatMap((arrival) =>
+      (['earlier', 'later'] as const).map((validRevision) => ({ order, arrival, validRevision })),
+    ),
+  ),
+)('authorizes an independent $validRevision delete: $order, $arrival', async ({ order, arrival, validRevision }) => {
+  const repo = await repoFor('alice');
+  const first = await putProof(repo, SCROBBLE, 'a', record);
+  const earlierDelete = await deleteProof(repo, SCROBBLE, 'a');
+  const middle = await putProof(repo, SCROBBLE, 'a', scrobble({ artist: 'Other', track: 'Middle' }));
+  const gone = await deleteProof(repo, SCROBBLE, 'a');
+  const valid = validRevision === 'earlier' ? earlierDelete : gone;
+  await withMigratedDb(async (db) => {
+    seedLink(db);
+    expect(db.tx(() => applyRecordProof(db, first, live(db, first))).outcome).toBe('applied');
+    delivered(db);
+    const enqueueValid = () =>
+      enqueueHints(db, [
+        {
+          did: ALICE,
+          collection: SCROBBLE,
+          rkey: 'a',
+          source: 'jetstream',
+          hintRev: valid.commit.rev,
+          live: { operation: 'delete' },
+          receiptMs: NOW_MS,
+        },
+      ]);
+    const enqueueConflict = () => {
+      for (const cid of [middle.cid, first.cid])
+        enqueueHints(db, [
+          {
+            did: ALICE,
+            collection: SCROBBLE,
+            rkey: 'a',
+            source: 'jetstream',
+            hintRev: middle.commit.rev,
+            live: { operation: 'update', cid },
+            receiptMs: NOW_MS,
+          },
+        ]);
+    };
+    const events = () => {
+      if (order === 'valid-first') enqueueValid();
+      if (order !== 'no-conflict') enqueueConflict();
+      if (order !== 'valid-first') enqueueValid();
+    };
+    if (arrival === 'before-window') events();
+    expect(db.tx(() => applyRecordProof(db, gone, OPTS)).outcome).toBe('absent');
+    if (arrival === 'after-window') events();
+    sweep(db);
+    expect((await drain(db)).deletes).toBe(1);
+  });
+});
+
 function seedLink(db: Db) {
   seedUser(db, ALICE);
   const accountDeps: Pick<CredentialDeps, 'db' | 'clock'> = { db, clock: { nowMs: () => NOW_MS } };
