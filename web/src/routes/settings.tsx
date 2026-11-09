@@ -13,6 +13,7 @@
 import type { Did, RecordStatus } from '@atmusic/core/api-types';
 import { collectionsFor } from '@atmusic/core/namespace';
 import { useEffect, useState } from 'preact/hooks';
+import { getAccount, setShareNowPlaying } from '../api/account';
 import { describeFailure, formatLocalTimeMs } from '../components/format';
 import { OperationStatus } from '../components/operation-status';
 import type { OutboxService } from '../components/outbox-service';
@@ -100,7 +101,38 @@ function AccountSection({ did, onSignedOut }: { did: Did; onSignedOut(): void })
   const [expiry, setExpiry] = useState<{ sessionEndsAtMs: number | null } | null | 'loading'>('loading');
   const [signingOut, setSigningOut] = useState(false);
   const [signOutError, setSignOutError] = useState<string | null>(null);
+  const [shareNowPlaying, setShareNowPlayingState] = useState<boolean | null>(null);
+  const [savingShare, setSavingShare] = useState(false);
+  const [shareError, setShareError] = useState<string | null>(null);
   const handle = state.handle.value;
+
+  useEffect(() => {
+    let live = true;
+    getAccount().then(
+      (account) => {
+        if (live) setShareNowPlayingState(account.shareNowPlaying);
+      },
+      () => {
+        if (live) setShareError('Sharing settings could not be loaded.');
+      },
+    );
+    return () => {
+      live = false;
+    };
+  }, [did]);
+
+  const toggleSharing = async (enabled: boolean) => {
+    setSavingShare(true);
+    setShareError(null);
+    try {
+      const result = await setShareNowPlaying(enabled, did);
+      setShareNowPlayingState(result.shareNowPlaying);
+    } catch {
+      setShareError('Your sharing setting could not be saved.');
+    } finally {
+      setSavingShare(false);
+    }
+  };
 
   useEffect(() => {
     let live = true;
@@ -139,6 +171,17 @@ function AccountSection({ did, onSignedOut }: { did: Did; onSignedOut(): void })
     <section aria-labelledby="account-title">
       <h2 id="account-title">Account</h2>
       <p>Signed in as {handle ? <span class="handle">@{handle}</span> : 'your account'}</p>
+      <label class="share-now-playing">
+        <input
+          type="checkbox"
+          checked={shareNowPlaying ?? false}
+          disabled={shareNowPlaying === null || savingShare}
+          onChange={(event) => void toggleSharing((event.currentTarget as HTMLInputElement).checked)}
+        />{' '}
+        Share what I'm playing now
+      </label>
+      <p class="field-hint">Others can see your current track on your profile. Your scrobbles aren't affected.</p>
+      {shareError ? <p role="alert">{shareError}</p> : null}
       <p data-session-expiry>
         {expiry === 'loading'
           ? 'Checking when your session ends…'
