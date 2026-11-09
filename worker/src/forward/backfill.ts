@@ -179,6 +179,20 @@ function payloadForHistoryRow(
     if (incarnation === null || incarnation.incarnation_key !== identityKey) return null;
     if (incarnation.path === 'import' && sourceService(incarnation.source_service) === null) return null;
     if (incarnation.path === 'import' && sourceService(incarnation.source_service) === link.service) return null;
+    const bridges = db.all<{ source_service: string | null }>(
+      `SELECT source_service FROM love_import_bridges INDEXED BY love_import_bridges_incarnation
+       WHERE did=? AND uri=? AND incarnation_key=? AND state='bound'`,
+      link.did,
+      row.uri,
+      incarnation.incarnation_key,
+    );
+    if (
+      bridges.some((bridge) => {
+        const source = sourceService(bridge.source_service);
+        return source === null || source === link.service;
+      })
+    )
+      return null;
     if (latestExplicitLoveIntent(db, link.did, row.artist_key, row.track_key) === 'unlove') return null;
   }
   const marker = db.one<{ path: string; source_service: string | null; admission_seq: number }>(
