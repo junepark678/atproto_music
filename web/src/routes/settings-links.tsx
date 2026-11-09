@@ -8,8 +8,47 @@ const serviceName = (service: Link['service']) => (service === 'lastfm' ? 'Last.
 
 function syncStatus(link: Link) {
   if (link.status === 'revoked' || link.sync?.needsReauth) return { label: 'Needs reconnect', value: 'reconnect' };
-  if (link.status === 'error') return { label: 'Error', value: 'error' };
+  if (link.status === 'error' || terminalSyncError(link)) return { label: 'Error', value: 'error' };
   return { label: 'Active', value: 'active' };
+}
+
+const terminalPullHolds = new Set([
+  'upstream_unauthorized',
+  'retry_exhausted',
+  'remote_user_not_found',
+  'lastfm_key_rejected',
+  'lastfm_error',
+  'listenbrainz_page_saturated',
+]);
+
+function terminalSyncError(link: Link): boolean {
+  return (
+    Boolean(link.sync?.holdReason && terminalPullHolds.has(link.sync.holdReason)) ||
+    link.sync?.backfill.lastError === 'retry_exhausted'
+  );
+}
+
+function holdWords(reason: string, service: string): string | undefined {
+  const copy: Record<string, string> = {
+    upstream_unauthorized: `${service} rejected the saved connection. Reconnect your account to resume importing.`,
+    retry_exhausted: `Repeated attempts to import from ${service} failed. Check the connection and try reconnecting.`,
+    remote_user_not_found: `${service} could not find the connected account. Check the account details and reconnect it.`,
+    lastfm_key_rejected: `Last.fm is rejecting this server's API key. Syncing is paused.`,
+    lastfm_error: `Last.fm stopped responding successfully. Check its service status and try syncing again later.`,
+    listenbrainz_page_saturated: `ListenBrainz returned more history than can be safely imported in one pass. Importing is paused.`,
+    session_missing: `The server session needed to import from ${service} is unavailable. Try again after signing in.`,
+    reauth_required: `Reconnect your ${service} account to resume importing.`,
+    publication_disabled: `Importing from ${service} is disabled in this app's settings.`,
+    scope_insufficient: `The saved ${service} connection lacks permission to import. Reconnect and grant the requested access.`,
+    session_restore_transient: `The server is restoring its session with ${service}. Importing will resume when that finishes.`,
+    legacy_dedupe_coverage: `Importing from ${service} is waiting for older history to be checked for duplicates.`,
+    staging_capacity: `Importing from ${service} is temporarily waiting for queue capacity.`,
+    credential_unavailable: `The saved ${service} connection is temporarily unavailable. Try again later.`,
+    lastfm_not_configured: `Last.fm importing is not configured on this server.`,
+    listenbrainz_not_configured: `ListenBrainz importing is not configured on this server.`,
+    upstream_retry: `${service} could not be reached. Importing will retry later.`,
+  };
+  return copy[reason];
 }
 
 function lastSynced(link: Link): string | undefined {
@@ -27,7 +66,11 @@ function errorWords(error: string, service: string): string {
         ? "Saved credentials couldn't be read. Reconnect to resume syncing."
         : error === 'lastfm_key_rejected'
           ? "Last.fm is rejecting this server's API key. Syncing is paused."
-          : error;
+          : error === 'retry_exhausted'
+            ? `Repeated attempts to sync with ${service} failed. Check the connection and try again.`
+            : /^[a-z][a-z0-9]*(?:_[a-z0-9]+)+$/.test(error)
+              ? `Syncing with ${service} stopped after an error. Check the connection and try again.`
+              : error;
   const words = scrubDids(advice).replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
   return words ? words[0]!.toLocaleUpperCase() + words.slice(1) : '';
 }
@@ -41,27 +84,39 @@ export default function SettingsLinks() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const [message, setMessage] = useState('');
+  const requestGeneration = useRef(0);
+  const mounted = useRef(true);
+  const mutationInFlight = useRef(0);
   const refresh = useCallback(async () => {
+    const generation = ++requestGeneration.current;
     try {
-      setLinks((await listLinks()).items);
-      setError(null);
+      const result = await listLinks();
+      if (mounted.current && mutationInFlight.current === 0 && generation === requestGeneration.current) {
+        setLinks(result.items);
+        setError(null);
+      }
     } catch (e) {
-      setError(e);
+      if (mounted.current && mutationInFlight.current === 0 && generation === requestGeneration.current) setError(e);
     }
   }, []);
 
   useEffect(() => {
     if (!session) return;
+    mounted.current = true;
     void refresh();
     let polling = false;
     const poll = async () => {
-      if (document.visibilityState !== 'visible' || polling) return;
+      if (document.visibilityState !== 'visible' || polling || mutationInFlight.current > 0) return;
       polling = true;
+      const generation = ++requestGeneration.current;
       try {
-        setLinks((await listLinks()).items);
-        setError(null);
+        const result = await listLinks();
+        if (mounted.current && mutationInFlight.current === 0 && generation === requestGeneration.current) {
+          setLinks(result.items);
+          setError(null);
+        }
       } catch (e) {
-        setError(e);
+        if (mounted.current && mutationInFlight.current === 0 && generation === requestGeneration.current) setError(e);
       } finally {
         polling = false;
       }
@@ -72,6 +127,8 @@ export default function SettingsLinks() {
     };
     document.addEventListener('visibilitychange', onVisibilityChange);
     return () => {
+      mounted.current = false;
+      requestGeneration.current++;
       window.clearInterval(timer);
       document.removeEventListener('visibilitychange', onVisibilityChange);
     };
@@ -90,25 +147,31 @@ export default function SettingsLinks() {
     e.preventDefault();
     setBusy(true);
     setError(null);
+    const generation = ++requestGeneration.current;
+    mutationInFlight.current++;
     try {
       await addListenbrainzLink(token, expectedDid);
+      if (!mounted.current || generation !== requestGeneration.current) return;
       setToken('');
       setMessage('ListenBrainz connected.');
-      await refresh();
     } catch (e) {
-      setError(e);
+      if (mounted.current && generation === requestGeneration.current) setError(e);
     } finally {
-      setBusy(false);
+      mutationInFlight.current--;
+      if (mounted.current && generation === requestGeneration.current) setBusy(false);
+      if (mounted.current) void refresh();
     }
   }
   async function lastfm() {
     setBusy(true);
     setError(null);
+    const generation = ++requestGeneration.current;
     try {
       const { authorizeUrl } = await startLastfmLink(expectedDid);
+      if (!mounted.current || generation !== requestGeneration.current) return;
       window.location.assign(authorizeUrl);
     } catch (e) {
-      setError(e);
+      if (mounted.current && generation === requestGeneration.current) setError(e);
       setBusy(false);
     }
   }
@@ -116,17 +179,23 @@ export default function SettingsLinks() {
     if (!window.confirm(`Disconnect ${serviceName(link.service)} account ${scrubDids(link.remoteUser)}?`)) return;
     setBusy(true);
     setError(null);
+    const generation = ++requestGeneration.current;
+    mutationInFlight.current++;
     try {
       await unlink(link.id, expectedDid);
+      if (!mounted.current || generation !== requestGeneration.current) return;
       setMessage(`${serviceName(link.service)} disconnected.`);
-      await refresh();
     } catch (e) {
-      setError(e);
+      if (mounted.current && generation === requestGeneration.current) setError(e);
     } finally {
-      setBusy(false);
+      mutationInFlight.current--;
+      if (mounted.current && generation === requestGeneration.current) setBusy(false);
+      if (mounted.current) void refresh();
     }
   }
   async function changeSetting(link: Link, patch: Parameters<typeof patchLink>[1]) {
+    const generation = ++requestGeneration.current;
+    mutationInFlight.current++;
     setLinks(
       (current) =>
         current?.map((item) =>
@@ -144,15 +213,22 @@ export default function SettingsLinks() {
     );
     setBusy(true);
     setError(null);
+    let actionError: unknown = null;
     try {
       const updated = await patchLink(link.id, patch, expectedDid);
+      if (!mounted.current || generation !== requestGeneration.current) return;
       setLinks((current) => current?.map((item) => (item.id === updated.id ? updated : item)) ?? current);
       setMessage(`${serviceName(link.service)} sync settings updated.`);
     } catch (e) {
-      await refresh();
-      setError(e);
+      if (!mounted.current || generation !== requestGeneration.current) return;
+      actionError = e;
     } finally {
-      setBusy(false);
+      mutationInFlight.current--;
+      if (mounted.current && generation === requestGeneration.current) setBusy(false);
+      if (mounted.current) {
+        await refresh();
+        if (actionError && mounted.current) setError(actionError);
+      }
     }
   }
 
@@ -178,6 +254,8 @@ export default function SettingsLinks() {
             const syncedAt = lastSynced(link);
             const backfill = link.sync?.backfill;
             const lastError = link.sync?.lastError ?? link.lastError;
+            const holdMessage = link.sync?.holdReason ? holdWords(link.sync.holdReason, name) : undefined;
+            const backfillError = backfill?.lastError ? errorWords(backfill.lastError, name) : undefined;
             const pullEnabled = link.sync?.pullEnabled ?? true;
             return (
               <li key={link.id} class="link-card">
@@ -211,6 +289,8 @@ export default function SettingsLinks() {
                   </div>
                 ) : null}
                 {link.sync?.needsReauth ? <p role="status">Reconnect your account to keep importing.</p> : null}
+                {holdMessage ? <p class="link-error">{holdMessage}</p> : null}
+                {backfillError ? <p class="link-error">{backfillError}</p> : null}
                 {lastError ? <p class="link-error">{errorWords(lastError, name)}</p> : null}
                 <fieldset class="link-settings" disabled={!canManage || busy}>
                   <legend>Sync settings</legend>
