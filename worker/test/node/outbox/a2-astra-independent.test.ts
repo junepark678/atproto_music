@@ -5,22 +5,24 @@ import { expect, it } from 'vitest';
 import type { CredentialDeps } from '../../../src/credentials/accounts';
 import { ensureAccount } from '../../../src/credentials/accounts';
 import type { Box } from '../../../src/crypto/box';
-import type { ModuleDeps } from '../../../src/do/contracts';
 import type { Db, SqlParam } from '../../../src/do/db';
-import { visibleScrobblesFrom } from '../../../src/do/read/visibility';
+import { enqueueHints } from '../../../src/do/ingest/hints';
+import { LIVE_EVIDENCE_TTL_MS } from '../../../src/do/ingest/live-evidence';
+import {
+  authorizePendingRemovals,
+  executeAuthorizedRemovals,
+  type PendingListen,
+  recordPendingRemoval,
+} from '../../../src/do/ingest/live-pending-removals';
 import { applyRecordProof } from '../../../src/do/write/apply-record';
-import { applySnapshotChunk } from '../../../src/do/write/apply-snapshot';
-import { enqueueListenDelete, hasCanonicalListenSurvivor } from '../../../src/forward/delete-enqueue';
 import type { DeleteForwardDeps } from '../../../src/forward/delete-forwarder';
 import { runDeleteSlice } from '../../../src/forward/delete-forwarder';
+import { type ForwardRuntime, runForward } from '../../../src/forward/forwarder';
 import type { ListenbrainzClient } from '../../../src/forward/listenbrainz-client';
+import { lateAccept } from '../../../src/forward/live-acceptance';
 import { projectionListenKey } from '../../../src/forward/projection';
 import { UpstreamPacing } from '../../../src/forward/upstream-pacing';
-import { runForward, type ForwardRuntime } from '../../../src/forward/forwarder';
-import { enqueueBatchListenDelete } from '../../../src/outbox/batch-delete-ops';
-import { enqueueScrobbleDelete } from '../../../src/outbox/delete-ops';
 import { enqueueForwards } from '../../../src/outbox/forward-enqueue';
-import { hasListenRemovalTombstones, isListenTombstoned, tombstoneListen } from '../../../src/sync/tombstones';
 import {
   ALICE,
   authorizedLiveOptions,
@@ -31,7 +33,6 @@ import {
   repoFor,
   SCROBBLE,
   scrobble,
-  seedSnapshotJob,
   seedUser,
 } from '../../write/support';
 import { reopen, withMigratedDb } from '../support/node-db';
@@ -66,37 +67,12 @@ function delivered(db: Db) {
   });
   db.run("UPDATE forward_outbox SET state='sent'");
 }
-const deletion = {
-  did: ALICE,
-  identityKey: identity,
-  eventKey: 'same-event',
-  listenedAt: second,
-  artistKey,
-  trackKey: musicTrackKey,
-  artist: 'Björk',
-  track: 'Jóga',
-  sourcePath: 'live',
-  now: NOW_MS,
-};
-
 const BATCH = `${SCROBBLE}Batch`;
 const uri = (key: string, batch = false) => `at://${ALICE}/${batch ? BATCH : SCROBBLE}/${key}`;
 const batchRecord = (ids = ['2222222222222'], track = record.track) => {
   const { $type, ...entry } = record;
   return { $type: BATCH, createdAt: record.createdAt, listens: ids.map((id) => ({ ...entry, id, track })) };
 };
-const opRandom = seededRandom(123);
-const moduleOf = (db: Db) =>
-  ({
-    db,
-    config: { prefix: 'com.example.atmusic' },
-    clock: { nowMs: () => NOW_MS },
-    random: opRandom,
-  }) as unknown as ModuleDeps;
-const apiSingle = (db: Db, key: string) =>
-  enqueueScrobbleDelete(moduleOf(db), { did: ALICE, uri: uri(key), origin: 'web' });
-const apiBatch = (db: Db, key: string, ids: string[]) =>
-  enqueueBatchListenDelete(moduleOf(db), { did: ALICE, uri: uri(key, true), listenIds: ids, origin: 'web' });
 async function drain(db: Db) {
   let now = NOW_MS,
     deletes = 0,
@@ -156,14 +132,8 @@ async function forward(db: Db) {
   return { submissions, feedbacks, report };
 }
 
-import {
-  authorizePendingRemovals,
-  executeAuthorizedRemovals,
-  recordPendingRemoval,
-} from '../../../src/do/ingest/live-pending-removals';
-import { LIVE_EVIDENCE_TTL_MS, readLiveEvidence } from '../../../src/do/ingest/live-evidence';
-import { enqueueHints } from '../../../src/do/ingest/hints';
-import { lateAccept } from '../../../src/forward/live-acceptance';
+import { readLiveEvidence } from '../../../src/do/ingest/live-evidence';
+
 const rng = seededRandom(888);
 const sweep = (db: Db, nowMs = NOW_MS) => db.tx(() => executeAuthorizedRemovals(db, { nowMs, random: rng, limit: 10 }));
 it.each([false, true])('independent: delayed old event protects same-CID recreation=%s', async (recreated) => {
@@ -351,9 +321,11 @@ it('independent: exact stale replay cannot extend pending TTL', async () => {
     seedLink(db);
     db.tx(() => applyRecordProof(db, first, live(db, first)));
     delivered(db);
-    const row = db.one<any>('SELECT * FROM scrobbles WHERE uri=?', uri('a'))!;
+    const row = db.one<PendingListen>('SELECT * FROM scrobbles WHERE uri=?', uri('a'))!;
     db.tx(() => applyRecordProof(db, gone, OPTS));
-    const original = db.one<any>('SELECT expires_at_ms FROM live_pending_removals')!.expires_at_ms;
+    const original = db.one<{ expires_at_ms: number }>(
+      'SELECT expires_at_ms FROM live_pending_removals',
+    )!.expires_at_ms;
     recordPendingRemoval(db, {
       did: ALICE,
       uri: uri('a'),
@@ -365,7 +337,9 @@ it('independent: exact stale replay cannot extend pending TTL', async () => {
       replacedByCid: null,
       nowMs: NOW_MS + LIVE_EVIDENCE_TTL_MS - 1,
     });
-    expect(db.one<any>('SELECT expires_at_ms FROM live_pending_removals')!.expires_at_ms).toBe(original);
+    expect(db.one<{ expires_at_ms: number }>('SELECT expires_at_ms FROM live_pending_removals')!.expires_at_ms).toBe(
+      original,
+    );
   });
 });
 it('independent: conflict remains disqualifying after newer evidence arrives', async () => {
@@ -401,7 +375,6 @@ it('independent: conflict remains disqualifying after newer evidence arrives', a
 it('independent: delayed love removal protects a newer external recreation', async () => {
   const LOVE = 'com.example.atmusic.love';
   const key = '2222222222222';
-  const u = `at://${ALICE}/${LOVE}/${key}`;
   const repo = await repoFor('alice');
   const loved = { $type: LOVE, artist: 'Björk', track: 'Jóga', createdAt: '2026-01-15T11:00:00Z' };
   const first = await putProof(repo, LOVE, key, loved);
@@ -475,7 +448,7 @@ it('independent: group failure rolls back effects and keeps authorization under 
   const repo = await repoFor('alice');
   const first = await putProof(repo, SCROBBLE, 'a', record);
   const gone = await deleteProof(repo, SCROBBLE, 'a');
-  await withMigratedDb((db, ctx) => {
+  await withMigratedDb((db, _ctx) => {
     seedLink(db);
     db.tx(() => applyRecordProof(db, first, live(db, first)));
     delivered(db);
@@ -516,7 +489,7 @@ it('independent: intersecting windows are all considered for matching authorizat
   await withMigratedDb((db) => {
     seedLink(db);
     db.tx(() => applyRecordProof(db, first, live(db, first)));
-    const row = db.one<any>('SELECT * FROM scrobbles')!;
+    const row = db.one<PendingListen>('SELECT * FROM scrobbles')!;
     const common = {
       did: ALICE,
       uri: uri('a'),
@@ -637,7 +610,7 @@ it.each([1_000, 10_000])(
       expect(trace.every((sql) => sql.includes('LIMIT ?'))).toBe(true);
       expect(
         db
-          .all(
+          .all<{ detail: string }>(
             'EXPLAIN QUERY PLAN SELECT kind,window_lo,window_hi,replaced_by_cid,member_uri,removed_cid,authorized_rev,conflict_invalidated FROM live_pending_removals INDEXED BY live_pending_removals_page WHERE uri=? AND window_hi>=? AND (window_hi,window_lo,replaced_by_cid,kind,member_uri,removed_cid)>(?,?,?,?,?,?) ORDER BY window_hi,window_lo,replaced_by_cid,kind,member_uri,removed_cid LIMIT ?',
             uri('a'),
             eventRev,
@@ -649,7 +622,7 @@ it.each([1_000, 10_000])(
             '',
             128,
           )
-          .map((x: any) => x.detail)
+          .map((x) => x.detail)
           .join(' '),
       ).toContain('live_pending_removals_page');
     });
