@@ -641,9 +641,14 @@ const NEW_TABLES: Record<string, ExpectedTable> = {
       love_track_key: true,
       generation: true,
       priority: true,
+      love_lane: true,
     }),
     pk: ['id'],
     unique: [['link_id', 'kind', 'dedupe_key']],
+  },
+  forward_love_lanes: {
+    columns: ['link_id', 'generation', 'love_artist_key', 'love_track_key', 'priority', 'due_at', 'head_created_at_ms'],
+    pk: ['link_id', 'generation', 'love_artist_key', 'love_track_key'],
   },
   import_jobs: {
     columns: cols<ImportJobRow>({
@@ -749,6 +754,71 @@ const NEW_SCROBBLE_COLUMNS = cols<ScrobbleV2Columns>({
 
 /** New named indexes: table, unique, partial, [column, desc] in key order. */
 const NEW_INDEXES: Record<string, [string, number, number, Array<[string, number]>]> = {
+  forward_love_lanes_due: [
+    'forward_love_lanes',
+    0,
+    0,
+    [
+      ['link_id', 0],
+      ['generation', 0],
+      ['priority', 0],
+      ['due_at', 0],
+    ],
+  ],
+  forward_outbox_love_unkeyed: [
+    'forward_outbox',
+    0,
+    1,
+    [
+      ['link_id', 0],
+      ['generation', 0],
+      ['kind', 0],
+      ['created_at_ms', 0],
+    ],
+  ],
+  forward_outbox_love_unframed: [
+    'forward_outbox',
+    0,
+    1,
+    [
+      ['link_id', 0],
+      ['generation', 0],
+      ['kind', 0],
+      ['created_at_ms', 0],
+    ],
+  ],
+  forward_outbox_kind_due: [
+    'forward_outbox',
+    0,
+    0,
+    [
+      ['link_id', 0],
+      ['generation', 0],
+      ['kind', 0],
+      ['state', 0],
+      ['due_at', 0],
+    ],
+  ],
+  forward_outbox_link_expiry: [
+    'forward_outbox',
+    0,
+    0,
+    [
+      ['link_id', 0],
+      ['state', 0],
+      ['kind', 0],
+      ['created_at_ms', 0],
+    ],
+  ],
+  forward_outbox_held_expiry: [
+    'forward_outbox',
+    0,
+    0,
+    [
+      ['state', 0],
+      ['updated_at_ms', 0],
+    ],
+  ],
   listenbrainz_deletes_due: [
     'listenbrainz_deletes',
     0,
@@ -1176,6 +1246,7 @@ const NEW_FOREIGN_KEYS = [
   ['loves', 'did', 'users', 'did', 'CASCADE'],
   ['link_backfill_items', 'link_id', 'linked_accounts', 'id', 'CASCADE'],
   ['forward_outbox', 'link_id', 'linked_accounts', 'id', 'CASCADE'],
+  ['forward_love_lanes', 'link_id', 'linked_accounts', 'id', 'CASCADE'],
 ];
 
 // ---------------------------------------------------------------------------
@@ -1791,6 +1862,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       "41|'listenbrainz_delete_lookup_tie_fence'",
       "42|'listenbrainz_delete_lookup_page_boundary'",
       "43|'forward_love_key_heads'",
+      "44|'forward_love_lanes'",
     ]);
     // The new scrobble columns exist and are NULL on every migrated row.
     expect(after.newColumns).toHaveLength(expectedScrobbles);

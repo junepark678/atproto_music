@@ -424,16 +424,37 @@ export function expireRows(db: Db, now: number): ExpiryReport {
     let held = 0;
     let remaining = MAX_EXPIRY_TRANSITIONS_PER_RUN;
     const links = db.all<{ id: string; service: LinkService }>('SELECT id,service FROM linked_accounts ORDER BY id');
-    const expireSelected = (linkId: string, kind: ForwardKind, cutoff: number, error: string, bucket: 'aged' | 'stale'): number => {
+    const expireSelected = (
+      linkId: string,
+      kind: ForwardKind,
+      cutoff: number,
+      error: string,
+      bucket: 'aged' | 'stale',
+    ): number => {
       if (remaining === 0) return 0;
-      const rows = db.all<{ seq: number; generation: number; love_artist_key: string | null; love_track_key: string | null }>(
-        EXPIRY_SELECT_SQL,
-        linkId, kind, cutoff, remaining,
-      );
+      const rows = db.all<{
+        seq: number;
+        generation: number;
+        love_artist_key: string | null;
+        love_track_key: string | null;
+      }>(EXPIRY_SELECT_SQL, linkId, kind, cutoff, remaining);
       for (const row of rows) {
-        db.run("UPDATE forward_outbox SET state='expired',last_error=?,updated_at_ms=? WHERE rowid=? AND state='queued'", error, now, row.seq);
+        db.run(
+          "UPDATE forward_outbox SET state='expired',last_error=?,updated_at_ms=? WHERE rowid=? AND state='queued'",
+          error,
+          now,
+          row.seq,
+        );
         if ((kind === 'love' || kind === 'unlove') && row.love_artist_key !== null && row.love_track_key !== null) {
-          touchLoveLane(db, { linkId, generation: row.generation, artistKey: row.love_artist_key, trackKey: row.love_track_key, priority: 0, dueAt: now, createdAtMs: now });
+          touchLoveLane(db, {
+            linkId,
+            generation: row.generation,
+            artistKey: row.love_artist_key,
+            trackKey: row.love_track_key,
+            priority: 0,
+            dueAt: now,
+            createdAtMs: now,
+          });
         }
       }
       remaining -= rows.length;
@@ -453,19 +474,23 @@ export function expireRows(db: Db, now: number): ExpiryReport {
       }
     }
     if (remaining > 0) {
-      const rows = db.all<{ seq: number }>(
-        HELD_EXPIRY_SELECT_SQL,
-        now - HELD_RETENTION_MS, remaining,
-      );
-      for (const row of rows) db.run("UPDATE forward_outbox SET state='expired',last_error='held_expired',updated_at_ms=? WHERE rowid=? AND state='held'", now, row.seq);
+      const rows = db.all<{ seq: number }>(HELD_EXPIRY_SELECT_SQL, now - HELD_RETENTION_MS, remaining);
+      for (const row of rows)
+        db.run(
+          "UPDATE forward_outbox SET state='expired',last_error='held_expired',updated_at_ms=? WHERE rowid=? AND state='held'",
+          now,
+          row.seq,
+        );
       held = rows.length;
       remaining -= rows.length;
     }
-    const pending = links.some((link) => {
-      if (db.one(STALE_NOWPLAYING_PROBE_SQL, link.id, now - NOW_PLAYING_MAX_AGE_MS)) return true;
-      return (['scrobble', 'nowplaying', 'love', 'unlove'] as const).some((kind) =>
-        db.one(EXPIRY_PROBE_SQL, link.id, kind, now - EXPIRY_MS[link.service]) !== null);
-    }) || db.one(HELD_EXPIRY_PROBE_SQL, now - HELD_RETENTION_MS) !== null;
+    const pending =
+      links.some((link) => {
+        if (db.one(STALE_NOWPLAYING_PROBE_SQL, link.id, now - NOW_PLAYING_MAX_AGE_MS)) return true;
+        return (['scrobble', 'nowplaying', 'love', 'unlove'] as const).some(
+          (kind) => db.one(EXPIRY_PROBE_SQL, link.id, kind, now - EXPIRY_MS[link.service]) !== null,
+        );
+      }) || db.one(HELD_EXPIRY_PROBE_SQL, now - HELD_RETENTION_MS) !== null;
     return { aged, staleNowPlaying, held, pending };
   });
 }

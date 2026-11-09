@@ -694,6 +694,7 @@ describe('worker/test/harness', () => {
       for (const table of TABLES) {
         if (
           table === 'mb_cover_art_usage' ||
+          table === 'forward_love_lanes' ||
           table === 'linked_pull_receipt_seed' ||
           table === 'linked_pull_projection_scan'
         )

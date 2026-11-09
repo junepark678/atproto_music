@@ -35,7 +35,9 @@ export function deleteQueuedForwardIdentity(
       `SELECT generation,love_artist_key,love_track_key FROM forward_outbox
        WHERE link_id=? AND generation=? AND kind IN ('love','unlove') AND dedupe_key=? AND state='queued'
          AND love_artist_key IS NOT NULL AND love_track_key IS NOT NULL`,
-      link.id, link.generation, storedForwardDedupeKey(link.generation, canonicalKey),
+      link.id,
+      link.generation,
+      storedForwardDedupeKey(link.generation, canonicalKey),
     );
     db.run(
       `DELETE FROM forward_outbox WHERE link_id=? AND generation=? AND kind IN (${kindSlots})
@@ -46,7 +48,15 @@ export function deleteQueuedForwardIdentity(
       storedForwardDedupeKey(link.generation, canonicalKey),
     );
     for (const love of loves) {
-      touchLoveLane(db, { linkId: link.id, generation: love.generation, artistKey: love.love_artist_key, trackKey: love.love_track_key, priority: 0, dueAt: 0, createdAtMs: 0 });
+      touchLoveLane(db, {
+        linkId: link.id,
+        generation: love.generation,
+        artistKey: love.love_artist_key,
+        trackKey: love.love_track_key,
+        priority: 0,
+        dueAt: 0,
+        createdAtMs: 0,
+      });
     }
   }
 }

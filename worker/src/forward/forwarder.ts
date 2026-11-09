@@ -82,21 +82,6 @@ import { canonicalForwardDedupeKey } from '../outbox/forward-key';
 import { loveKeyOf } from '../outbox/love-ops';
 import { nextDeleteWakeAt, runDeleteSlice } from './delete-forwarder';
 import {
-  HEAD_SQL,
-  LANE_PICK_SQL,
-  LOVE_KINDS,
-  MusicKeyError,
-  MAX_LOVE_FRAMING_PER_RUN,
-  MAX_LOVE_LANES_PER_LINK_PER_RUN,
-  UNFRAMED_SQL,
-  UNKEYED_SQL,
-  hasUnkeyedLoves,
-  noteForwardLoveCurrent,
-  refreshLoveLane,
-  touchLoveLane,
-  type QueuedRow as LoveQueuedRow,
-} from './love-lanes';
-import {
   backoffRows,
   clearLastfmKeyRejected,
   dueRows,
@@ -126,6 +111,21 @@ import {
   type ListenType,
   type TrackMetadata,
 } from './listenbrainz-client';
+import {
+  HEAD_SQL,
+  hasUnkeyedLoves,
+  LANE_PICK_SQL,
+  LOVE_KINDS,
+  type QueuedRow as LoveQueuedRow,
+  MAX_LOVE_FRAMING_PER_RUN,
+  MAX_LOVE_LANES_PER_LINK_PER_RUN,
+  MusicKeyError,
+  noteForwardLoveCurrent,
+  refreshLoveLane,
+  touchLoveLane,
+  UNFRAMED_SQL,
+  UNKEYED_SQL,
+} from './love-lanes';
 import { refreshForwardStorageStats } from './storage-stats';
 import { LASTFM_MIN_INTERVAL_MS, listenbrainzPacingKey, type UpstreamPacing } from './upstream-pacing';
 
@@ -178,7 +178,13 @@ type LinkRow = LinkedAccountRow;
 type Job =
   | { link: LinkRow; kind: 'nowplaying'; rows: [QueuedRow]; track: ForwardTrack }
   | { link: LinkRow; kind: 'scrobble'; rows: QueuedRow[]; listens: ForwardListen[] }
-  | { link: LinkRow; kind: 'love' | 'unlove'; rows: [QueuedRow]; track: ForwardTrack; lane: { artistKey: string; trackKey: string } };
+  | {
+      link: LinkRow;
+      kind: 'love' | 'unlove';
+      rows: [QueuedRow];
+      track: ForwardTrack;
+      lane: { artistKey: string; trackKey: string };
+    };
 
 const lbKey = listenbrainzPacingKey;
 
@@ -312,7 +318,11 @@ function frameLoveRows(rt: ForwardRuntime, link: LinkRow, now: number): { pendin
           const track = lovePayload(row);
           let keys: readonly [string, string] | null = null;
           if (track !== null) {
-            try { keys = trackKey(track.artist, track.track); } catch (error) { if (!(error instanceof MusicKeyError)) throw error; }
+            try {
+              keys = trackKey(track.artist, track.track);
+            } catch (error) {
+              if (!(error instanceof MusicKeyError)) throw error;
+            }
           }
           if (track === null || keys === null) {
             noteLinkError(rt.db, link, 'invalid_payload', now, true);
@@ -320,8 +330,21 @@ function frameLoveRows(rt: ForwardRuntime, link: LinkRow, now: number): { pendin
             continue;
           }
           const [artistKeyValue, trackKeyValue] = keys;
-          rt.db.run('UPDATE forward_outbox SET love_artist_key=?,love_track_key=?,love_lane=1 WHERE rowid=? AND state=\'queued\'', artistKeyValue, trackKeyValue, row.seq);
-          touchLoveLane(rt.db, { linkId: link.id, generation: link.generation, artistKey: artistKeyValue, trackKey: trackKeyValue, priority: row.priority as 0 | 1, dueAt: row.due_at, createdAtMs: row.created_at_ms });
+          rt.db.run(
+            "UPDATE forward_outbox SET love_artist_key=?,love_track_key=?,love_lane=1 WHERE rowid=? AND state='queued'",
+            artistKeyValue,
+            trackKeyValue,
+            row.seq,
+          );
+          touchLoveLane(rt.db, {
+            linkId: link.id,
+            generation: link.generation,
+            artistKey: artistKeyValue,
+            trackKey: trackKeyValue,
+            priority: row.priority as 0 | 1,
+            dueAt: row.due_at,
+            createdAtMs: row.created_at_ms,
+          });
           noteForwardLoveCurrent(rt.db, link.id, artistKeyValue, trackKeyValue, row.seq);
         }
       }
@@ -332,14 +355,23 @@ function frameLoveRows(rt: ForwardRuntime, link: LinkRow, now: number): { pendin
         if (rows.length === 0) break;
         for (const row of rows) {
           budget -= 1;
-          rt.db.run('UPDATE forward_outbox SET love_lane=1 WHERE rowid=? AND state=\'queued\'', row.seq);
-          touchLoveLane(rt.db, { linkId: link.id, generation: link.generation, artistKey: row.love_artist_key!, trackKey: row.love_track_key!, priority: row.priority as 0 | 1, dueAt: row.due_at, createdAtMs: row.created_at_ms });
+          rt.db.run("UPDATE forward_outbox SET love_lane=1 WHERE rowid=? AND state='queued'", row.seq);
+          touchLoveLane(rt.db, {
+            linkId: link.id,
+            generation: link.generation,
+            artistKey: row.love_artist_key!,
+            trackKey: row.love_track_key!,
+            priority: row.priority as 0 | 1,
+            dueAt: row.due_at,
+            createdAtMs: row.created_at_ms,
+          });
         }
       }
     }
-    const pending = LOVE_KINDS.some((kind) =>
-      rt.db.all(UNKEYED_SQL, link.id, link.generation, kind, 1).length > 0 ||
-      rt.db.all(UNFRAMED_SQL, link.id, link.generation, kind, 1).length > 0,
+    const pending = LOVE_KINDS.some(
+      (kind) =>
+        rt.db.all(UNKEYED_SQL, link.id, link.generation, kind, 1).length > 0 ||
+        rt.db.all(UNFRAMED_SQL, link.id, link.generation, kind, 1).length > 0,
     );
     return { pending };
   });
@@ -349,64 +381,98 @@ function loveJob(rt: ForwardRuntime, link: LinkRow, now: number, budget: { remai
   if (hasUnkeyedLoves(rt.db, link.id, link.generation)) return null;
   for (const priority of [0, 1] as const) {
     while (budget.remaining > 0) {
-      const lanes = rt.db.all<{ rowid: number; love_artist_key: string; love_track_key: string; priority: number; due_at: number; head_created_at_ms: number }>(
-        LANE_PICK_SQL, link.id, link.generation, priority, now, budget.remaining,
-      );
+      const lanes = rt.db.all<{
+        rowid: number;
+        love_artist_key: string;
+        love_track_key: string;
+        priority: number;
+        due_at: number;
+        head_created_at_ms: number;
+      }>(LANE_PICK_SQL, link.id, link.generation, priority, now, budget.remaining);
       if (lanes.length === 0) break;
       for (const lane of lanes) {
         budget.remaining -= 1;
-        const head = rt.db.one<QueuedRow>(HEAD_SQL, link.id, link.generation, lane.love_artist_key, lane.love_track_key);
+        const head = rt.db.one<QueuedRow>(
+          HEAD_SQL,
+          link.id,
+          link.generation,
+          lane.love_artist_key,
+          lane.love_track_key,
+        );
         if (head === null) {
           rt.db.run('DELETE FROM forward_love_lanes WHERE rowid=?', lane.rowid);
           continue;
         }
-        if (head.priority !== lane.priority || head.due_at !== lane.due_at || head.created_at_ms !== lane.head_created_at_ms) {
-          rt.db.run(`UPDATE forward_love_lanes SET priority=?,due_at=?,head_created_at_ms=? WHERE rowid=?`, head.priority, head.due_at, head.created_at_ms, lane.rowid);
+        if (
+          head.priority !== lane.priority ||
+          head.due_at !== lane.due_at ||
+          head.created_at_ms !== lane.head_created_at_ms
+        ) {
+          rt.db.run(
+            `UPDATE forward_love_lanes SET priority=?,due_at=?,head_created_at_ms=? WHERE rowid=?`,
+            head.priority,
+            head.due_at,
+            head.created_at_ms,
+            lane.rowid,
+          );
           if (head.due_at > now || head.priority !== priority) continue;
         }
-      const [entry] = parsed(rt, link, [head], lovePayload, now);
-      if (entry === undefined) { refreshLoveLane(rt.db, link.id, link.generation, lane.love_artist_key, lane.love_track_key); continue; }
-      if (link.service === 'listenbrainz' && entry[1].recordingMbid === undefined) {
-        // An unlove names only the track; the MBID its love was sent with is known locally.
-        const mbid = head.kind === 'unlove' ? knownRecordingMbid(rt.db, head, entry[1]) : null;
-        const key = {
-          artistKey: artistKey(entry[1].artist),
-          trackKey: trackKey(entry[1].artist, entry[1].track)[1],
-          albumKey: entry[1].album ? albumKey(entry[1].artist, entry[1].album)?.[1] : '',
-        };
-        const local = mbid ?? matchedRecordingMbid(rt.db, key);
-        if (local === null) {
-          const resolved = rt.db.one<{ status: string }>(
-            'SELECT status FROM mb_tracks WHERE artist_key=? AND track_key=? AND album_key=?',
-            key.artistKey,
-            key.trackKey,
-            key.albumKey ?? '',
-          );
-          if (resolved?.status === 'unmatched') {
-            settleRows(rt.db, [head.id], 'ignored', now, 'no_recording_mbid', false);
-            refreshLoveLane(rt.db, link.id, link.generation, lane.love_artist_key, lane.love_track_key);
-            continue;
-          }
-          enqueueTrack(rt.db, key, now);
-          const deadline = head.created_at_ms + 24 * 60 * 60 * 1000;
-          if (now >= deadline) {
-            settleRows(rt.db, [head.id], 'ignored', now, 'mbid_unresolved', false);
-            refreshLoveLane(rt.db, link.id, link.generation, lane.love_artist_key, lane.love_track_key);
-            continue;
-          }
-          rt.db.run(
-            "UPDATE forward_outbox SET due_at=?,updated_at_ms=? WHERE id=? AND state='queued'",
-            Math.min(deadline, now + 60_000),
-            now,
-            head.id,
-          );
-          rt.db.run('UPDATE forward_love_lanes SET due_at=? WHERE rowid=?', Math.min(deadline, now + 60_000), lane.rowid);
+        const [entry] = parsed(rt, link, [head], lovePayload, now);
+        if (entry === undefined) {
+          refreshLoveLane(rt.db, link.id, link.generation, lane.love_artist_key, lane.love_track_key);
           continue;
         }
-        entry[1].recordingMbid = local;
-        withRecordingMbid(rt.db, head, local);
-      }
-      return { link, kind: head.kind as 'love' | 'unlove', rows: [head], track: entry[1], lane: { artistKey: lane.love_artist_key, trackKey: lane.love_track_key } };
+        if (link.service === 'listenbrainz' && entry[1].recordingMbid === undefined) {
+          // An unlove names only the track; the MBID its love was sent with is known locally.
+          const mbid = head.kind === 'unlove' ? knownRecordingMbid(rt.db, head, entry[1]) : null;
+          const key = {
+            artistKey: artistKey(entry[1].artist),
+            trackKey: trackKey(entry[1].artist, entry[1].track)[1],
+            albumKey: entry[1].album ? albumKey(entry[1].artist, entry[1].album)?.[1] : '',
+          };
+          const local = mbid ?? matchedRecordingMbid(rt.db, key);
+          if (local === null) {
+            const resolved = rt.db.one<{ status: string }>(
+              'SELECT status FROM mb_tracks WHERE artist_key=? AND track_key=? AND album_key=?',
+              key.artistKey,
+              key.trackKey,
+              key.albumKey ?? '',
+            );
+            if (resolved?.status === 'unmatched') {
+              settleRows(rt.db, [head.id], 'ignored', now, 'no_recording_mbid', false);
+              refreshLoveLane(rt.db, link.id, link.generation, lane.love_artist_key, lane.love_track_key);
+              continue;
+            }
+            enqueueTrack(rt.db, key, now);
+            const deadline = head.created_at_ms + 24 * 60 * 60 * 1000;
+            if (now >= deadline) {
+              settleRows(rt.db, [head.id], 'ignored', now, 'mbid_unresolved', false);
+              refreshLoveLane(rt.db, link.id, link.generation, lane.love_artist_key, lane.love_track_key);
+              continue;
+            }
+            rt.db.run(
+              "UPDATE forward_outbox SET due_at=?,updated_at_ms=? WHERE id=? AND state='queued'",
+              Math.min(deadline, now + 60_000),
+              now,
+              head.id,
+            );
+            rt.db.run(
+              'UPDATE forward_love_lanes SET due_at=? WHERE rowid=?',
+              Math.min(deadline, now + 60_000),
+              lane.rowid,
+            );
+            continue;
+          }
+          entry[1].recordingMbid = local;
+          withRecordingMbid(rt.db, head, local);
+        }
+        return {
+          link,
+          kind: head.kind as 'love' | 'unlove',
+          rows: [head],
+          track: entry[1],
+          lane: { artistKey: lane.love_artist_key, trackKey: lane.love_track_key },
+        };
       }
     }
   }
@@ -530,9 +596,12 @@ function pickJob(rt: ForwardRuntime, now: number, localWork: Map<string, { remai
       hints.push(rt.db.one(KIND_CANDIDATE_SQL, link.id, link.generation, kind, now));
     }
     if (!hasUnkeyedLoves(rt.db, link.id, link.generation)) {
-      for (const priority of [0, 1] as const) hints.push(rt.db.one(LANE_FIRST_DUE_SQL, link.id, link.generation, priority, now));
+      for (const priority of [0, 1] as const)
+        hints.push(rt.db.one(LANE_FIRST_DUE_SQL, link.id, link.generation, priority, now));
     }
-    const due = hints.filter((hint): hint is { priority: number; created_at_ms: number } => hint !== null && hint.created_at_ms !== null);
+    const due = hints.filter(
+      (hint): hint is { priority: number; created_at_ms: number } => hint !== null && hint.created_at_ms !== null,
+    );
     if (due.length === 0) continue;
     const priority = Math.min(...due.map((hint) => hint.priority));
     const oldest = Math.min(...due.filter((hint) => hint.priority === priority).map((hint) => hint.created_at_ms));
@@ -542,7 +611,10 @@ function pickJob(rt: ForwardRuntime, now: number, localWork: Map<string, { remai
   for (const { link } of candidates) {
     if (!upstreamFree(rt, link, now)) continue;
     let budget = localWork.get(link.id);
-    if (budget === undefined) { budget = { remaining: MAX_LOCAL_WORK_PER_RUN }; localWork.set(link.id, budget); }
+    if (budget === undefined) {
+      budget = { remaining: MAX_LOCAL_WORK_PER_RUN };
+      localWork.set(link.id, budget);
+    }
     const job = rt.db.tx(
       () => nowPlayingJob(rt, link, now) ?? older(scrobbleJob(rt, link, now), loveJob(rt, link, now, budget!)),
     );
@@ -793,7 +865,8 @@ export function nextForwardDue(rt: ForwardRuntime, now: number): number | null {
     }
     if (!hasUnkeyedLoves(rt.db, link.id, link.generation)) {
       for (const priority of [0, 1] as const) {
-        const value = rt.db.one<{ due: number | null }>(LANE_MIN_DUE_SQL, link.id, link.generation, priority)?.due ?? null;
+        const value =
+          rt.db.one<{ due: number | null }>(LANE_MIN_DUE_SQL, link.id, link.generation, priority)?.due ?? null;
         if (value !== null) due = due === null ? value : Math.min(due, value);
       }
     }
@@ -825,7 +898,13 @@ export async function runForward(
     let at = Math.max(now, rt.clock.nowMs());
     const expired = expireRows(rt.db, at);
     if (expired.pending === true) {
-      return { skipped: false, requests: 0, listenbrainzLinkIds: new Set(), expired, nextDueMs: at + LASTFM_MIN_INTERVAL_MS };
+      return {
+        skipped: false,
+        requests: 0,
+        listenbrainzLinkIds: new Set(),
+        expired,
+        nextDueMs: at + LASTFM_MIN_INTERVAL_MS,
+      };
     }
     let framingPending = false;
     for (const link of rt.db.all<LinkRow>("SELECT * FROM linked_accounts WHERE status='active' ORDER BY id")) {

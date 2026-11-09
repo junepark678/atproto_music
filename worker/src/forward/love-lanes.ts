@@ -36,24 +36,66 @@ export interface LoveLaneHint {
 }
 
 export function touchLoveLane(db: Db, lane: LoveLaneHint): void {
-  db.run(TOUCH_SQL, lane.linkId, lane.generation, lane.artistKey, lane.trackKey, lane.priority, lane.dueAt, lane.createdAtMs);
+  db.run(
+    TOUCH_SQL,
+    lane.linkId,
+    lane.generation,
+    lane.artistKey,
+    lane.trackKey,
+    lane.priority,
+    lane.dueAt,
+    lane.createdAtMs,
+  );
 }
 
-export function refreshLoveLane(db: Db, linkId: string, generation: number, artistKey: string, trackKeyValue: string): QueuedRow | null {
+export function refreshLoveLane(
+  db: Db,
+  linkId: string,
+  generation: number,
+  artistKey: string,
+  trackKeyValue: string,
+): QueuedRow | null {
   const head = db.one<QueuedRow>(HEAD_SQL, linkId, generation, artistKey, trackKeyValue);
   if (head === null) {
-    db.run('DELETE FROM forward_love_lanes WHERE link_id=? AND generation=? AND love_artist_key=? AND love_track_key=?', linkId, generation, artistKey, trackKeyValue);
+    db.run(
+      'DELETE FROM forward_love_lanes WHERE link_id=? AND generation=? AND love_artist_key=? AND love_track_key=?',
+      linkId,
+      generation,
+      artistKey,
+      trackKeyValue,
+    );
     return null;
   }
-  db.run(`UPDATE forward_love_lanes SET priority=?,due_at=?,head_created_at_ms=?
-    WHERE link_id=? AND generation=? AND love_artist_key=? AND love_track_key=?`, head.priority, head.due_at, head.created_at_ms, linkId, generation, artistKey, trackKeyValue);
+  db.run(
+    `UPDATE forward_love_lanes SET priority=?,due_at=?,head_created_at_ms=?
+    WHERE link_id=? AND generation=? AND love_artist_key=? AND love_track_key=?`,
+    head.priority,
+    head.due_at,
+    head.created_at_ms,
+    linkId,
+    generation,
+    artistKey,
+    trackKeyValue,
+  );
   return head;
 }
 
-export function noteForwardLoveCurrent(db: Db, linkId: string, artistKey: string, trackKeyValue: string, rowid: number): void {
-  db.run(`INSERT INTO mb_forward_love_current(link_id,love_artist_key,love_track_key,forward_rowid) VALUES(?,?,?,?)
+export function noteForwardLoveCurrent(
+  db: Db,
+  linkId: string,
+  artistKey: string,
+  trackKeyValue: string,
+  rowid: number,
+): void {
+  db.run(
+    `INSERT INTO mb_forward_love_current(link_id,love_artist_key,love_track_key,forward_rowid) VALUES(?,?,?,?)
     ON CONFLICT(link_id,love_artist_key,love_track_key) DO UPDATE SET forward_rowid=excluded.forward_rowid
-    WHERE excluded.forward_rowid>mb_forward_love_current.forward_rowid`, linkId, artistKey, trackKeyValue, rowid);
+    WHERE excluded.forward_rowid>mb_forward_love_current.forward_rowid`,
+    linkId,
+    artistKey,
+    trackKeyValue,
+    rowid,
+  );
 }
 
 export function hasUnkeyedLoves(db: Db, linkId: string, generation: number): boolean {

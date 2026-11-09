@@ -1,7 +1,7 @@
 import { MusicKeyError, trackKey } from '@atmusic/core/music-key';
 import type { Db } from '../do/db';
-import { storedForwardDedupeKey } from '../outbox/forward-key';
 import { noteForwardLoveCurrent, touchLoveLane } from '../forward/love-lanes';
+import { storedForwardDedupeKey } from '../outbox/forward-key';
 
 const MAX_SCAN = 100;
 type Key = { artistKey: string; trackKey: string };
@@ -109,16 +109,37 @@ export function enqueueRevivedLoves(
       const inserted = db.run(
         `INSERT INTO forward_outbox(id,link_id,did,kind,dedupe_key,payload_json,state,attempts,due_at,created_at_ms,updated_at_ms,love_artist_key,love_track_key,generation,love_lane)
          VALUES(?,?,?,?,?,?,'queued',0,?,?,?,?,?,?,1) ON CONFLICT(link_id,kind,dedupe_key) DO NOTHING`,
-        crypto.randomUUID().replaceAll('-', '').slice(0, 32), row.link_id, row.did, kind, dedupe, JSON.stringify(payload),
-        now, now, now, key.artistKey, key.trackKey, row.generation,
+        crypto.randomUUID().replaceAll('-', '').slice(0, 32),
+        row.link_id,
+        row.did,
+        kind,
+        dedupe,
+        JSON.stringify(payload),
+        now,
+        now,
+        now,
+        key.artistKey,
+        key.trackKey,
+        row.generation,
       ).rowsWritten;
       if (inserted === 1) {
         const created = db.one<{ rowid: number }>(
-          'SELECT rowid FROM forward_outbox WHERE link_id=? AND kind=? AND dedupe_key=?', row.link_id, kind, dedupe,
+          'SELECT rowid FROM forward_outbox WHERE link_id=? AND kind=? AND dedupe_key=?',
+          row.link_id,
+          kind,
+          dedupe,
         );
         if (created) {
           noteForwardLoveCurrent(db, row.link_id, key.artistKey, key.trackKey, created.rowid);
-          touchLoveLane(db, { linkId: row.link_id, generation: row.generation, artistKey: key.artistKey, trackKey: key.trackKey, priority: 0, dueAt: now, createdAtMs: now });
+          touchLoveLane(db, {
+            linkId: row.link_id,
+            generation: row.generation,
+            artistKey: key.artistKey,
+            trackKey: key.trackKey,
+            priority: 0,
+            dueAt: now,
+            createdAtMs: now,
+          });
         }
       }
       return inserted;

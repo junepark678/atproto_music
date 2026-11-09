@@ -39,8 +39,8 @@ import type { Random } from '@atmusic/core/deps';
 import { MusicKeyError, trackKey } from '@atmusic/core/music-key';
 import type { ForwardKind } from '../app/rows';
 import type { Db } from '../do/db';
-import { storedForwardDedupeKey } from './forward-key';
 import { noteForwardLoveCurrent, touchLoveLane } from '../forward/love-lanes';
+import { storedForwardDedupeKey } from './forward-key';
 import { newOperationId } from './operations';
 
 export const NOW_PLAYING_KEY_DOMAIN = 'atmusic:nowplaying-key:v1';
@@ -188,8 +188,13 @@ export function enqueueForwards(db: Db, args: EnqueueForwardsArgs): number {
           if (row && (item.kind === 'love' || item.kind === 'unlove')) {
             noteForwardLoveCurrent(db, link.id, loveArtistKey, loveTrackKey, row.rowid);
             touchLoveLane(db, {
-              linkId: link.id, generation: link.generation, artistKey: loveArtistKey, trackKey: loveTrackKey,
-              priority: args.priority ?? 0, dueAt, createdAtMs: args.now,
+              linkId: link.id,
+              generation: link.generation,
+              artistKey: loveArtistKey,
+              trackKey: loveTrackKey,
+              priority: args.priority ?? 0,
+              dueAt,
+              createdAtMs: args.now,
             });
           }
         }
