@@ -87,7 +87,9 @@ describe('migrate over node:sqlite', () => {
     ).toContain('love_boundary_ms');
     expect(TABLE_CLASS.linked_pull_state).toBe('non-derived');
     expect(TABLE_CLASS.linked_pull_items).toBe('non-derived');
-    expect(db.one<{ name: string }>("SELECT name FROM sqlite_master WHERE type='index' AND name='operations_record_target'")).toEqual({
+    expect(
+      db.one<{ name: string }>("SELECT name FROM sqlite_master WHERE type='index' AND name='operations_record_target'"),
+    ).toEqual({
       name: 'operations_record_target',
     });
     expect(TABLE_CLASS.linked_pull_receipt_seed).toBe('non-derived');

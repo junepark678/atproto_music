@@ -3,7 +3,7 @@ import type { RecordProof } from '@atmusic/atproto/verify/types';
 import { seededRandom } from '@atmusic/core/test-support/random';
 import { fromMs, toStorage } from '@atmusic/core/timestamp';
 import { expect, it } from 'vitest';
-import { applyRecordTarget, applyRecordProof, projectedListensOfRecord } from '../../../src/do/write/apply-record';
+import { applyRecordProof, applyRecordTarget, projectedListensOfRecord } from '../../../src/do/write/apply-record';
 import { applySnapshotChunk } from '../../../src/do/write/apply-snapshot';
 import { musicKeyColumns } from '../../../src/do/write/keys';
 import { projectionListenKey, retainedRecordProvenance } from '../../../src/forward/projection';
@@ -38,7 +38,15 @@ function apply(h: Harness, proof: RecordProof, forwarding = true) {
 
 function seedScrobble(
   h: Harness,
-  args: { uri: string; recordUri?: string; rkey: string; artist: string; track: string; listenedAt: string; cid?: string },
+  args: {
+    uri: string;
+    recordUri?: string;
+    rkey: string;
+    artist: string;
+    track: string;
+    listenedAt: string;
+    cid?: string;
+  },
 ) {
   const keys = musicKeyColumns(args.artist, args.track, null);
   h.db.run(
@@ -58,12 +66,7 @@ function seedScrobble(
     keys.artist_key,
     keys.track_key,
   );
-  return projectionListenKey(
-    h.alice,
-    args.listenedAt,
-    keys.artist_key,
-    keys.track_key,
-  );
+  return projectionListenKey(h.alice, args.listenedAt, keys.artist_key, keys.track_key);
 }
 
 function seedImportProvenance(h: Harness, collection: string, rkey: string) {
@@ -207,7 +210,9 @@ it('seeds excluded versions and snapshot-sweep absence, while leaving an existin
       createdAt: '2026-01-14T10:00:00Z',
     });
     expect(apply(h, await proofAt(h, SCROBBLE, excludedRkey)).outcome).toBe('excluded');
-    expect(h.db.one('SELECT path FROM forward_admissions WHERE did=? AND identity_key=?', h.alice, excludedKey)).toEqual({
+    expect(
+      h.db.one('SELECT path FROM forward_admissions WHERE did=? AND identity_key=?', h.alice, excludedKey),
+    ).toEqual({
       path: 'snapshot',
     });
 
@@ -240,7 +245,9 @@ it('seeds excluded versions and snapshot-sweep absence, while leaving an existin
     );
     await h.kit.externalDelete('Alice', SCROBBLE, liveRkey);
     expect(apply(h, await proofAt(h, SCROBBLE, liveRkey)).outcome).toBe('absent');
-    expect(h.db.one('SELECT path,admission_seq FROM forward_admissions WHERE did=? AND identity_key=?', h.alice, liveKey)).toEqual({
+    expect(
+      h.db.one('SELECT path,admission_seq FROM forward_admissions WHERE did=? AND identity_key=?', h.alice, liveKey),
+    ).toEqual({
       path: 'live',
       admission_seq: 77,
     });
@@ -254,8 +261,17 @@ it('seeds excluded versions and snapshot-sweep absence, while leaving an existin
       track: 'Sweep Track',
       listenedAt: '2026-01-14T12:00:00Z',
     });
-    seedRecordState(h, sweepUri, SCROBBLE, '3jzfcijpj2z2a', 'bafyreiaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
-    const generation = h.db.one<{ generation: number }>('SELECT generation FROM users WHERE did=?', h.alice)!.generation;
+    seedRecordState(
+      h,
+      sweepUri,
+      SCROBBLE,
+      '3jzfcijpj2z2a',
+      'bafyreiaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    );
+    const generation = h.db.one<{ generation: number }>(
+      'SELECT generation FROM users WHERE did=?',
+      h.alice,
+    )!.generation;
     h.db.run(
       `INSERT INTO repo_jobs(did,kind,state,generation,reactivate,due_at,updated_at_ms)
        VALUES (?,'snapshot','running',?,0,?,?)`,
@@ -293,7 +309,9 @@ it('seeds a large batch once per key and uses indexed provenance lookups', async
     for (let i = 0; i < 1000; i++) {
       const duplicate = i < 2;
       const artist = duplicate ? 'Duplicate Artist' : `Legacy Artist ${i}`;
-      const listenedAt = duplicate ? '2026-01-14T01:00:00Z' : `2026-01-14T00:${String(i % 60).padStart(2, '0')}:${String(Math.floor(i / 60)).padStart(2, '0')}Z`;
+      const listenedAt = duplicate
+        ? '2026-01-14T01:00:00Z'
+        : `2026-01-14T00:${String(i % 60).padStart(2, '0')}:${String(Math.floor(i / 60)).padStart(2, '0')}Z`;
       const key = seedScrobble(h, {
         uri: `${uri}#member-${i}`,
         recordUri: uri,
@@ -335,7 +353,11 @@ it('seeds a large batch once per key and uses indexed provenance lookups', async
     h.db.one = originalOne;
     expect(provenanceReads).toBe(1);
     expect(
-      h.db.one('SELECT path,admission_seq FROM forward_admissions WHERE did=? AND identity_key=?', h.alice, duplicateKey),
+      h.db.one(
+        'SELECT path,admission_seq FROM forward_admissions WHERE did=? AND identity_key=?',
+        h.alice,
+        duplicateKey,
+      ),
     ).toEqual({ path: 'live', admission_seq: duplicateSeq });
     expect(h.db.all("SELECT path,source_service FROM forward_admissions WHERE path='import'")).toHaveLength(998);
     expect(new Set(keys).size).toBe(999);

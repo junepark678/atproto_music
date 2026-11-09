@@ -59,10 +59,10 @@ import { enqueueListenDelete, hasCanonicalListenSurvivor } from '../../forward/d
 import {
   admitForwardIdentity,
   admitProjectedIdentity,
+  type ForwardProvenance,
   projectionListenKey,
   retainedForwardProvenance,
   retainedRecordProvenance,
-  type ForwardProvenance,
 } from '../../forward/projection';
 import { enqueueTrack } from '../../musicbrainz/store';
 import { enqueueForwards } from '../../outbox/forward-enqueue';
@@ -182,12 +182,7 @@ function seedRemovedListenAdmissions(
   now: number,
 ): void {
   if (listens.length === 0) return;
-  const provenance: ForwardProvenance | null = retainedRecordProvenance(
-    db,
-    target.did,
-    target.collection,
-    target.rkey,
-  );
+  const provenance: ForwardProvenance | null = retainedRecordProvenance(db, target.did, target.collection, target.rkey);
   for (const listen of listens) {
     admitProjectedIdentity(db, {
       did: target.did,
