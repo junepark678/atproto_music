@@ -758,26 +758,36 @@ describe('verify drain', () => {
       const alarm = drain(m, k.clock.nowMs());
       while (k.pds.Alice.faults.pending > 0) await tick();
 
-      // Meanwhile the newer event arrives and another drain runs: the URI is in flight, so it is not fetched twice.
+      // Meanwhile the newer signed event arrives and another drain runs: the URI is in flight, so it is not fetched twice.
       expect(drainState(db, m.config.budget).inFlight.has(uri)).toBe(true);
       k.clock.advance(1_000);
-      enqueue(db, [hint(k, alice, S, 'r1', { hintRev: v2.rev })]);
+      enqueue(db, [
+        hint(k, alice, S, 'r1', {
+          hintRev: v2.rev,
+          live: { operation: 'update', cid: v2.ops[0]!.cid! },
+        }),
+      ]);
       const concurrent = await drain(m, k.clock.nowMs());
       expect(concurrent.claimed).toBe(0);
 
-      // The old proof lands last-but-first: it is applied (it is newer than nothing), and the hint is kept.
+      // The old proof lands after durable evidence: stale proof handling leaves projections untouched.
       open();
-      expect((await alarm).outcomes).toEqual([{ uri, outcome: 'rearmed', detail: 'applied' }]);
-      expect(state(db, uri)).toMatchObject({ revision: v1.rev, state: 'present' });
-      expect(hintRows(db)).toEqual([{ uri, attempts: 0, due_at: T0, last_error: null }]);
+      expect((await alarm).outcomes).toEqual([{ uri, outcome: 'staleProof', detail: 'live_evidence' }]);
+      expect(state(db, uri)).toBeNull();
+      expect(rows(db)).toEqual([]);
+      expect(hintRows(db)).toEqual([{ uri, attempts: 1, due_at: T0 + 1_000, last_error: 'stale_live_evidence' }]);
+      expect(db.all('SELECT uri,up_rev,up_cid FROM live_record_evidence')).toEqual([
+        { uri, up_rev: v2.rev, up_cid: v2.ops[0]!.cid },
+      ]);
 
-      // The kept hint fetches the current head.
+      // The kept hint fetches the current head and consumes the now-matching evidence.
       const next = await drain(m, k.clock.nowMs());
       expect(next.outcomes).toEqual([{ uri, outcome: 'applied' }]);
       expect(rows(db)).toEqual([
         { uri, revision: v2.rev, cid: v2.ops[0]!.cid, artist: 'Kate Bush', track: 'Hyperballad' },
       ]);
       expect(hintRows(db)).toEqual([]);
+      expect(db.all('SELECT * FROM live_record_evidence')).toHaveLength(0);
 
       // The reverse order: the older proof arrives after the newer one was applied (a stale PDS).
       k.pds.Alice.fail({ nsid: GET_RECORD }, { kind: 'respond', respond: () => carResponse(car1) });
