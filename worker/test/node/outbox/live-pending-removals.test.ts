@@ -300,6 +300,55 @@ function setup(db: Db): void {
   db.run("UPDATE forward_outbox SET state='sent' WHERE link_id='pending-link' AND kind='scrobble'");
 }
 
+it('atomically couples a new pending window and its retention epoch', async () => {
+  await withMigratedDb((db) => {
+    setup(db);
+    const faulted: Db = {
+      all: db.all.bind(db),
+      one: db.one.bind(db),
+      tx: db.tx.bind(db),
+      run(sql, ...params) {
+        if (sql.includes('INSERT INTO live_pending_removal_retention_epoch')) throw new Error('injected epoch failure');
+        return db.run(sql, ...params);
+      },
+    };
+    expect(() => recordPendingRemoval(faulted, pending('1111111111111', '2222222222222'))).toThrow(
+      'injected epoch failure',
+    );
+    expect(db.one('SELECT count(*) AS n FROM live_pending_removals')).toEqual({ n: 0 });
+    expect(db.one('SELECT count(*) AS n FROM live_pending_removal_retention_epoch')).toEqual({ n: 0 });
+  });
+});
+
+it('atomically rolls back a cleanup frontier when its durable commit fails', async () => {
+  await withMigratedDb((db) => {
+    setup(db);
+    db.run(
+      `INSERT INTO live_pending_removal_events(uri,rev,action,conflicted,scan_complete,created_at_ms,expires_at_ms,cleanup_due_ms)
+       VALUES(?,?,'delete',1,1,1,?,?)`,
+      URI,
+      '2222222222222',
+      NOW - 1,
+      NOW,
+    );
+    const faulted: Db = {
+      all: db.all.bind(db),
+      one: db.one.bind(db),
+      tx: db.tx.bind(db),
+      run(sql, ...params) {
+        if (sql.includes('SET cleanup_frontier=')) throw new Error('injected frontier failure');
+        return db.run(sql, ...params);
+      },
+    };
+    expect(() => executeAuthorizedRemovals(faulted, { nowMs: NOW, random, limit: 0 })).toThrow(
+      'injected frontier failure',
+    );
+    expect(db.one('SELECT cleanup_frontier FROM live_pending_removal_events WHERE uri=?', URI)).toEqual({
+      cleanup_frontier: '',
+    });
+  });
+});
+
 it('keeps repeated same-CID removal windows distinct and only authorizes the matching delete revision', async () => {
   await withMigratedDb((db) => {
     setup(db);

@@ -65,7 +65,7 @@ import {
   retainedRecordProvenance,
 } from '../../forward/projection';
 import { enqueueTrack } from '../../musicbrainz/store';
-import { enqueueForwards } from '../../outbox/forward-enqueue';
+import { enqueueForwards, enqueueLiveUnlove } from '../../outbox/forward-enqueue';
 import { pullLoveAdmissionForUri, retirePullLoveAdmissionUri } from '../../sync/pull-love-admissions';
 import { archiveMatchingLiveListenTombstones, hasListenRemovalTombstones, tombstoneLove } from '../../sync/tombstones';
 import type { Db } from '../db';
@@ -1197,20 +1197,16 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
         const eligiblePath = loveIncarnation.path === 'live' || loveIncarnation.path === 'api' || importMayForward;
         if (!unknownImportSource && eligiblePath && (local?.origin !== 'import' || importMayForward)) {
           if (authRev !== null)
-            enqueueForwards(db, {
+            enqueueLiveUnlove(db, {
               did: t.did,
-              items: [
-                {
-                  kind: 'unlove',
-                  operationId: `${identityKey}:rev:${authRev}`,
-                  payload: {
-                    artist: priorLove.artist,
-                    track: priorLove.track,
-                    recordingMbid: priorLove.recording_mbid ?? undefined,
-                    origin: 'web',
-                  },
-                },
-              ],
+              operationId: `${identityKey}:rev:${authRev}`,
+              payload: {
+                artist: priorLove.artist,
+                track: priorLove.track,
+                recordingMbid: priorLove.recording_mbid ?? undefined,
+                origin: 'web',
+              },
+              authorization: { uri: t.uri, rev: authRev },
               ...(importSources.size > 0 ? { excludeSourceServices: [...importSources] } : {}),
               now,
               random: o.live!.random,

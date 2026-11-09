@@ -3,7 +3,7 @@ import { trackKey } from '@atmusic/core/music-key';
 import { BATCH_MAX_LISTENS } from '@atmusic/core/scrobble-batch';
 import { executeListenRemovals, type LiveRemovedListen } from '../../forward/live-removal-effects';
 import { projectionListenKey } from '../../forward/projection';
-import { enqueueForwards } from '../../outbox/forward-enqueue';
+import { enqueueLiveUnlove } from '../../outbox/forward-enqueue';
 import { tombstoneLove } from '../../sync/tombstones';
 import type { Db } from '../db';
 import { schedule } from '../timers';
@@ -36,85 +36,102 @@ export function recordPendingRemoval(db: Db, input: PendingRemovalInput): void {
 /** Inserts same-window removal batches with one durable-state lookup and one reconcile page. */
 export function recordPendingRemovals(db: Db, inputs: readonly PendingRemovalInput[]): void {
   if (inputs.length === 0) return;
-  if (db.one('SELECT 1 FROM linked_accounts WHERE did=? LIMIT 1', inputs[0]!.did) === null) return;
-  const groups = new Map<string, PendingRemovalInput[]>();
-  for (const input of inputs) {
-    const key = JSON.stringify([
-      input.did,
-      input.uri,
-      input.kind,
-      input.windowLo,
-      input.windowHi,
-      input.replacedByCid ?? '',
-    ]);
-    const group = groups.get(key);
-    if (group) group.push(input);
-    else groups.set(key, [input]);
-  }
-  for (const group of groups.values()) {
-    const first = group[0]!;
-    const priorGroup = db.one<{
-      authorized_rev: string | null;
-      conflict_invalidated: number;
-      conflicted_auth_rev: string | null;
-    }>(
-      `SELECT authorized_rev,conflict_invalidated,conflicted_auth_rev FROM live_pending_removals
-       WHERE uri=? AND kind=? AND window_lo=? AND window_hi=? AND replaced_by_cid=? LIMIT 1`,
-      first.uri,
-      first.kind,
-      first.windowLo,
-      first.windowHi,
-      first.replacedByCid ?? '',
-    );
-    let insertedCount = 0;
-    for (const input of group) {
-      const second = Math.floor(Date.parse(input.row.listened_at) / 1000);
-      insertedCount += db.run(
-        `INSERT OR IGNORE INTO live_pending_removals
-          (uri,member_uri,removed_cid,kind,window_lo,window_hi,replaced_by_cid,identity_key,listened_at,
-           artist_key,track_key,artist,track,recording_mbid,love_source_service,love_import_sources,
-           authorized_rev,created_at_ms,expires_at_ms,conflict_invalidated,conflicted_auth_rev)
-         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+  db.tx(() => {
+    if (db.one('SELECT 1 FROM linked_accounts WHERE did=? LIMIT 1', inputs[0]!.did) === null) return;
+    const groups = new Map<string, PendingRemovalInput[]>();
+    for (const input of inputs) {
+      const key = JSON.stringify([
+        input.did,
         input.uri,
-        input.row.uri,
-        input.row.cid,
         input.kind,
         input.windowLo,
         input.windowHi,
         input.replacedByCid ?? '',
-        input.identityKey,
-        input.kind === 'love' ? null : second,
-        input.row.artist_key,
-        input.row.track_key,
-        input.row.artist,
-        input.row.track,
-        input.row.recording_mbid,
-        input.loveSourceService ?? null,
-        input.loveImportSources?.length ? JSON.stringify([...new Set(input.loveImportSources)].sort()) : null,
-        priorGroup?.authorized_rev ?? null,
-        input.nowMs,
-        input.nowMs + LIVE_EVIDENCE_TTL_MS,
-        priorGroup?.conflict_invalidated ?? 0,
-        priorGroup?.conflicted_auth_rev ?? null,
-      ).rowsWritten;
+      ]);
+      const group = groups.get(key);
+      if (group) group.push(input);
+      else groups.set(key, [input]);
     }
-    if (insertedCount > 0) {
-      db.run(
-        `INSERT OR IGNORE INTO live_pending_removal_reconcile
-          (uri,window_lo,window_hi,replaced_by_cid,cursor_rev,next_due_ms,created_at_ms)
-         VALUES(?,?,?,?,?,?,?)`,
+    for (const group of groups.values()) {
+      const first = group[0]!;
+      const priorGroup = db.one<{
+        authorized_rev: string | null;
+        conflict_invalidated: number;
+        conflicted_auth_rev: string | null;
+      }>(
+        `SELECT authorized_rev,conflict_invalidated,conflicted_auth_rev FROM live_pending_removals
+       WHERE uri=? AND kind=? AND window_lo=? AND window_hi=? AND replaced_by_cid=? LIMIT 1`,
         first.uri,
+        first.kind,
         first.windowLo,
         first.windowHi,
         first.replacedByCid ?? '',
-        first.windowLo,
-        first.nowMs,
-        first.nowMs,
       );
-      reconcilePendingWindowPage(db, first.uri, first.windowLo, first.windowHi, first.replacedByCid ?? '', first.nowMs);
+      let insertedCount = 0;
+      for (const input of group) {
+        const second = Math.floor(Date.parse(input.row.listened_at) / 1000);
+        insertedCount += db.run(
+          `INSERT OR IGNORE INTO live_pending_removals
+          (uri,member_uri,removed_cid,kind,window_lo,window_hi,replaced_by_cid,identity_key,listened_at,
+           artist_key,track_key,artist,track,recording_mbid,love_source_service,love_import_sources,
+           authorized_rev,created_at_ms,expires_at_ms,conflict_invalidated,conflicted_auth_rev)
+         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          input.uri,
+          input.row.uri,
+          input.row.cid,
+          input.kind,
+          input.windowLo,
+          input.windowHi,
+          input.replacedByCid ?? '',
+          input.identityKey,
+          input.kind === 'love' ? null : second,
+          input.row.artist_key,
+          input.row.track_key,
+          input.row.artist,
+          input.row.track,
+          input.row.recording_mbid,
+          input.loveSourceService ?? null,
+          input.loveImportSources?.length ? JSON.stringify([...new Set(input.loveImportSources)].sort()) : null,
+          priorGroup?.authorized_rev ?? null,
+          input.nowMs,
+          input.nowMs + LIVE_EVIDENCE_TTL_MS,
+          priorGroup?.conflict_invalidated ?? 0,
+          priorGroup?.conflicted_auth_rev ?? null,
+        ).rowsWritten;
+      }
+      if (insertedCount > 0) {
+        db.run(
+          `INSERT OR IGNORE INTO live_pending_removal_reconcile
+          (uri,window_lo,window_hi,replaced_by_cid,cursor_rev,next_due_ms,created_at_ms)
+         VALUES(?,?,?,?,?,?,?)`,
+          first.uri,
+          first.windowLo,
+          first.windowHi,
+          first.replacedByCid ?? '',
+          first.windowLo,
+          first.nowMs,
+          first.nowMs,
+        );
+        reconcilePendingWindowPage(
+          db,
+          first.uri,
+          first.windowLo,
+          first.windowHi,
+          first.replacedByCid ?? '',
+          first.nowMs,
+        );
+        // Any in-flight retention cursor for this URI may have passed the new
+        // window. Advancing the per-URI epoch makes cleanup restart its bounded
+        // scan without updating every retained event row.
+        db.run(
+          `INSERT INTO live_pending_removal_retention_epoch(uri,generation) VALUES(?,1)
+         ON CONFLICT(uri) DO UPDATE SET generation=generation+1`,
+          first.uri,
+        );
+      }
     }
-  }
-  countLiveAdmission(db, 'pending_recorded', inputs.length);
+    countLiveAdmission(db, 'pending_recorded', inputs.length);
+  });
 }
 
 function eventMatchesPending(event: { action: LiveAction; cid: string }, replacedByCid: string): boolean {
@@ -220,25 +237,40 @@ export const AUTHORIZATION_EVENT_HEAD_URI_SQL = `SELECT * FROM live_pending_remo
  WHERE uri=? AND scan_complete=0 ORDER BY created_at_ms,rev LIMIT 1`;
 export const PENDING_EVENT_CLEANUP_PAGE_SQL = `SELECT rowid,uri,rev,conflicted,expires_at_ms FROM live_pending_removal_events INDEXED BY live_pending_removal_events_cleanup
  WHERE cleanup_due_ms<=? ORDER BY cleanup_due_ms,uri,rev LIMIT ?`;
-export const PENDING_EXPIRY_PAGE_SQL = `SELECT rowid FROM live_pending_removals INDEXED BY live_pending_removals_expiry
+export const PENDING_EXPIRY_PAGE_SQL = `SELECT rowid,uri FROM live_pending_removals INDEXED BY live_pending_removals_expiry
  WHERE expires_at_ms<=? ORDER BY expires_at_ms,uri,window_hi LIMIT ?`;
 export const CONFLICT_QUEUED_EFFECT_RETENTION_SQL = `SELECT 1 FROM listenbrainz_deletes INDEXED BY listenbrainz_deletes_authorization
  WHERE authorization_uri=? AND authorization_rev=? AND state='queued' LIMIT 1`;
 export const CONFLICT_QUEUED_UNLOVE_RETENTION_SQL = `SELECT 1 FROM forward_outbox INDEXED BY forward_outbox_authorization
- WHERE authorization_uri=? AND authorization_rev=? AND kind='unlove' AND state='queued' LIMIT 1`;
+ WHERE authorization_uri=? AND authorization_rev=? AND kind='unlove'
+   AND (state IN ('queued','held','retrying') OR (state='ignored' AND last_error IN ('no_recording_mbid','mbid_unresolved'))) LIMIT 1`;
 export const CONFLICT_RETENTION_SCAN_SQL = `SELECT window_hi,window_lo,replaced_by_cid,kind,member_uri,removed_cid
   FROM live_pending_removals INDEXED BY live_pending_removals_page
  WHERE uri=? AND (window_hi,window_lo,replaced_by_cid,kind,member_uri,removed_cid)>(?,?,?,?,?,?)
  ORDER BY window_hi,window_lo,replaced_by_cid,kind,member_uri,removed_cid LIMIT ?`;
+
+function cleanupRetentionEpochIfUnused(db: Db, uri: string): void {
+  // Each NOT EXISTS is constrained to one URI and its primary-key index; this
+  // avoids sweeping URI history while removing an epoch after its dependents.
+  db.run(
+    `DELETE FROM live_pending_removal_retention_epoch WHERE uri=?
+       AND NOT EXISTS(SELECT 1 FROM live_pending_removals WHERE uri=? LIMIT 1)
+       AND NOT EXISTS(SELECT 1 FROM live_pending_removal_events WHERE uri=? LIMIT 1)`,
+    uri,
+    uri,
+    uri,
+  );
+}
 
 type RetentionCursor = [string, string, string, string, string, string];
 interface RetentionFrontier {
   cursor: RetentionCursor;
   complete: boolean;
   hasMatch: boolean;
+  epoch: number;
 }
 function retentionFrontier(encoded: string): RetentionFrontier {
-  if (encoded === '') return { cursor: ['', '', '', '', '', ''], complete: false, hasMatch: false };
+  if (encoded === '') return { cursor: ['', '', '', '', '', ''], complete: false, hasMatch: false, epoch: -1 };
   try {
     const value = JSON.parse(encoded) as Partial<RetentionFrontier>;
     const cursor = value.cursor;
@@ -247,12 +279,18 @@ function retentionFrontier(encoded: string): RetentionFrontier {
       cursor.length === 6 &&
       cursor.every((part) => typeof part === 'string') &&
       typeof value.complete === 'boolean' &&
-      typeof value.hasMatch === 'boolean'
+      typeof value.hasMatch === 'boolean' &&
+      (value.epoch === undefined || Number.isSafeInteger(value.epoch))
     )
-      return { cursor: cursor as RetentionCursor, complete: value.complete, hasMatch: value.hasMatch };
-    return { cursor: ['', '', '', '', '', ''], complete: false, hasMatch: false };
+      return {
+        cursor: cursor as RetentionCursor,
+        complete: value.complete,
+        hasMatch: value.hasMatch,
+        epoch: value.epoch ?? -1,
+      };
+    return { cursor: ['', '', '', '', '', ''], complete: false, hasMatch: false, epoch: -1 };
   } catch {
-    return { cursor: ['', '', '', '', '', ''], complete: false, hasMatch: false };
+    return { cursor: ['', '', '', '', '', ''], complete: false, hasMatch: false, epoch: -1 };
   }
 }
 
@@ -311,7 +349,8 @@ function processAuthorizationPage(db: Db, event: AuthorizationEvent, nowMs: numb
       if (row.conflicted_auth_rev !== null && row.conflicted_auth_rev >= event.rev) continue;
       db.run(
         `UPDATE forward_outbox SET state='ignored',last_error='authorization_conflicted',updated_at_ms=?
-         WHERE authorization_uri=? AND authorization_rev=? AND kind='unlove' AND state='queued'`,
+         WHERE authorization_uri=? AND authorization_rev=? AND kind='unlove'
+           AND (state IN ('queued','held','retrying') OR (state='ignored' AND last_error IN ('no_recording_mbid','mbid_unresolved')))`,
         nowMs,
         event.uri,
         event.rev,
@@ -406,7 +445,8 @@ export function authorizePendingRemovals(
   if (conflict)
     db.run(
       `UPDATE forward_outbox SET state='ignored',last_error='authorization_conflicted',updated_at_ms=?
-       WHERE authorization_uri=? AND authorization_rev=? AND kind='unlove' AND state='queued'`,
+       WHERE authorization_uri=? AND authorization_rev=? AND kind='unlove'
+         AND (state IN ('queued','held','retrying') OR (state='ignored' AND last_error IN ('no_recording_mbid','mbid_unresolved')))`,
       nowMs,
       event.uri,
       event.rev,
@@ -464,6 +504,7 @@ function deleteGroup(db: Db, group: PendingGroup): void {
     group.replaced_by_cid,
     group.authorized_rev,
   );
+  cleanupRetentionEpochIfUnused(db, group.uri);
 }
 
 function processGroup(db: Db, group: PendingGroup, nowMs: number, random: Random): number {
@@ -612,21 +653,16 @@ function processGroup(db: Db, group: PendingGroup, nowMs: number, random: Random
     );
     if (row.love_source_service === 'lastfm' || row.love_source_service === 'listenbrainz')
       sources.add(row.love_source_service);
-    enqueueForwards(db, {
+    enqueueLiveUnlove(db, {
       did,
-      items: [
-        {
-          kind: 'unlove',
-          operationId: `${identity}:rev:${group.authorized_rev}`,
-          payload: {
-            artist: row.artist,
-            track: row.track,
-            recordingMbid: row.recording_mbid ?? undefined,
-            origin: 'web',
-          },
-          authorization: { uri: group.uri, rev: group.authorized_rev },
-        },
-      ],
+      operationId: `${identity}:rev:${group.authorized_rev}`,
+      payload: {
+        artist: row.artist,
+        track: row.track,
+        recordingMbid: row.recording_mbid ?? undefined,
+        origin: 'web',
+      },
+      authorization: { uri: group.uri, rev: group.authorized_rev },
       ...(sources.size ? { excludeSourceServices: [...sources] } : {}),
       now: nowMs,
       random,
@@ -641,14 +677,16 @@ export function executeAuthorizedRemovals(
   db: Db,
   args: { nowMs: number; random: Random; uri?: string; limit: number },
 ): { groups: number; expired: number; effects: number } {
-  const expiredRows = db.all<{ rowid: number }>(PENDING_EXPIRY_PAGE_SQL, args.nowMs, LIVE_SWEEP_LIMIT);
+  const expiredRows = db.all<{ rowid: number; uri: string }>(PENDING_EXPIRY_PAGE_SQL, args.nowMs, LIVE_SWEEP_LIMIT);
   let expired = 0;
-  for (const row of expiredRows)
+  for (const row of expiredRows) {
     expired += db.run(
       'DELETE FROM live_pending_removals WHERE rowid=? AND expires_at_ms<=?',
       row.rowid,
       args.nowMs,
     ).rowsWritten;
+    cleanupRetentionEpochIfUnused(db, row.uri);
+  }
   countLiveAdmission(db, 'pending_expired', expired);
   const cleanupEvents = db.all<{
     rowid: number;
@@ -670,7 +708,14 @@ export function executeAuthorizedRemovals(
     }
     let retainedPending = false;
     const frontier = retentionFrontier(event.cleanup_frontier);
-    if (event.conflicted !== 0 && !frontier.complete) {
+    const epoch =
+      db.one<{ generation: number }>(
+        'SELECT generation FROM live_pending_removal_retention_epoch WHERE uri=?',
+        event.uri,
+      )?.generation ?? 0;
+    const savedEpoch = frontier.epoch;
+    if (event.conflicted !== 0 && (savedEpoch !== epoch || !frontier.complete)) {
+      const cursor = savedEpoch === epoch ? frontier.cursor : ['', '', '', '', '', ''];
       const page = db.all<{
         window_hi: string;
         window_lo: string;
@@ -678,8 +723,10 @@ export function executeAuthorizedRemovals(
         kind: 'scrobble' | 'love';
         member_uri: string;
         removed_cid: string;
-      }>(CONFLICT_RETENTION_SCAN_SQL, event.uri, ...frontier.cursor, EVENT_CLEANUP_PAGE_SIZE);
-      const hasMatch = frontier.hasMatch || page.some((row) => row.window_lo < event.rev && row.window_hi >= event.rev);
+      }>(CONFLICT_RETENTION_SCAN_SQL, event.uri, ...cursor, EVENT_CLEANUP_PAGE_SIZE);
+      const hasMatch =
+        (savedEpoch === epoch && frontier.hasMatch) ||
+        page.some((row) => row.window_lo < event.rev && row.window_hi >= event.rev);
       const last = page.at(-1);
       if (page.length === EVENT_CLEANUP_PAGE_SIZE && last) {
         db.run(
@@ -695,6 +742,7 @@ export function executeAuthorizedRemovals(
             ],
             complete: false,
             hasMatch,
+            epoch,
           }),
           args.nowMs + RETAINED_EVENT_RECHECK_MS,
           event.rowid,
@@ -703,7 +751,7 @@ export function executeAuthorizedRemovals(
       } else if (hasMatch) {
         db.run(
           `UPDATE live_pending_removal_events SET cleanup_frontier=?,cleanup_due_ms=? WHERE rowid=?`,
-          JSON.stringify({ cursor: ['', '', '', '', '', ''], complete: false, hasMatch: false }),
+          JSON.stringify({ cursor: ['', '', '', '', '', ''], complete: false, hasMatch: false, epoch }),
           args.nowMs + RETAINED_EVENT_RECHECK_MS,
           event.rowid,
         );
@@ -711,7 +759,7 @@ export function executeAuthorizedRemovals(
       } else {
         db.run(
           'UPDATE live_pending_removal_events SET cleanup_frontier=? WHERE rowid=?',
-          JSON.stringify({ cursor: ['', '', '', '', '', ''], complete: true, hasMatch: false }),
+          JSON.stringify({ cursor: ['', '', '', '', '', ''], complete: true, hasMatch: false, epoch }),
           event.rowid,
         );
       }
@@ -727,6 +775,7 @@ export function executeAuthorizedRemovals(
       );
     } else {
       expiredEvents += db.run('DELETE FROM live_pending_removal_events WHERE rowid=?', event.rowid).rowsWritten;
+      cleanupRetentionEpochIfUnused(db, event.uri);
     }
   }
   countLiveAdmission(db, 'pending_event_expired', expiredEvents);

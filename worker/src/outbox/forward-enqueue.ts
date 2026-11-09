@@ -105,6 +105,23 @@ export interface EnqueueForwardsArgs {
   random: Random;
 }
 
+/** Queue a live unlove only with the immutable repository event that authorized it. */
+export function enqueueLiveUnlove(
+  db: Db,
+  args: Omit<EnqueueForwardsArgs, 'items'> & {
+    operationId: string;
+    payload: unknown;
+    authorization: { uri: string; rev: string };
+  },
+): number {
+  return enqueueForwards(db, {
+    ...args,
+    items: [
+      { kind: 'unlove', operationId: args.operationId, payload: args.payload, authorization: args.authorization },
+    ],
+  });
+}
+
 /**
  * Queues one row per (item, active link generation with the matching flag); an existing
  * (link, kind, stored generation key) is left alone. Returns the number of rows created.

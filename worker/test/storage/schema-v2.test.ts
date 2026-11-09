@@ -161,6 +161,10 @@ const NEW_TABLES: Record<string, ExpectedTable> = {
     columns: ['uri', 'window_lo', 'window_hi', 'replaced_by_cid', 'cursor_rev', 'next_due_ms', 'created_at_ms'],
     pk: ['uri', 'window_lo', 'window_hi', 'replaced_by_cid'],
   },
+  live_pending_removal_retention_epoch: {
+    columns: ['uri', 'generation'],
+    pk: ['uri'],
+  },
   listenbrainz_deletes: {
     columns: [
       'id',
@@ -1707,12 +1711,6 @@ async function inDb<T>(name: string, fn: (db: Db) => T): Promise<T> {
   return fn(fileIndexes().get(name));
 }
 
-// Build this fresh latest-schema fixture during module setup. The shape test
-// below checks the complete migration output; keeping the historical 1→current
-// bootstrap out of its 5s assertion window avoids making test scheduling part
-// of the schema contract.
-const schemaV2ShapeReady = inDb('schema-v2-shape', () => undefined);
-
 /** Wipe the named database and apply migration 1 only: a database written by version-1 code. */
 async function resetToV1(name: string): Promise<unknown> {
   return migrate(fileIndexes().reset(name), MIGRATIONS.slice(0, 1));
@@ -1846,7 +1844,6 @@ const UNIQUE_FAILED = /UNIQUE constraint failed/;
 
 describe('schema v2 (ADR 0005 §6.4)', () => {
   it('migration 2 creates exactly the ADR 0005 §6.4 tables, scrobbles columns and indexes, and TABLES lists every table', async () => {
-    await schemaV2ShapeReady;
     const v1Name = 'schema-v2-shape-v1';
     expect(await resetToV1(v1Name)).toEqual({ status: 'ready', version: 1 });
     const v1 = await inDb(v1Name, (db) => ({
@@ -2261,6 +2258,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       "50|'live_pending_removal_repair'",
       "51|'live_pending_removal_bounds'",
       "52|'a2_authorization_binding'",
+      "53|'a2_retention_epoch'",
     ]);
     // The new scrobble columns exist and are NULL on every migrated row.
     expect(after.newColumns).toHaveLength(expectedScrobbles);
@@ -2320,6 +2318,7 @@ describe('schema v2 (ADR 0005 §6.4)', () => {
       { version: 50, name: 'live_pending_removal_repair' },
       { version: 51, name: 'live_pending_removal_bounds' },
       { version: 52, name: 'a2_authorization_binding' },
+      { version: 53, name: 'a2_retention_epoch' },
     ]);
     expect(after.compat).toEqual([{ singleton: 1, min_compatible_version: 2 }]);
     expect(after.newTablesEmpty).toEqual(['mb_cover_art_usage']);

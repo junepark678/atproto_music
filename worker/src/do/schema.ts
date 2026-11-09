@@ -1574,6 +1574,17 @@ const MIGRATION_A2_AUTHORIZATION_BINDING: Migration = {
   ],
 };
 
+// A2 repair: cleanup cursors are invalidated by new pending windows per URI.
+const MIGRATION_A2_RETENTION_EPOCH: Migration = {
+  version: 53,
+  name: 'a2_retention_epoch',
+  statements: [
+    `CREATE TABLE live_pending_removal_retention_epoch (
+      uri TEXT PRIMARY KEY, generation INTEGER NOT NULL CHECK(generation>=0)
+    )`,
+  ],
+};
+
 export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_1,
   MIGRATION_2,
@@ -1627,6 +1638,7 @@ export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_LIVE_PENDING_REMOVAL_REPAIR,
   MIGRATION_LIVE_PENDING_REMOVAL_BOUNDS,
   MIGRATION_A2_AUTHORIZATION_BINDING,
+  MIGRATION_A2_RETENTION_EPOCH,
 ];
 
 /** The schema version this code expects. */
@@ -1663,6 +1675,7 @@ export const TABLES = [
   'live_pending_removals',
   'live_pending_removal_events',
   'live_pending_removal_reconcile',
+  'live_pending_removal_retention_epoch',
   // Migration 2.
   'accounts',
   'web_sessions',
@@ -1766,6 +1779,7 @@ export const TABLE_CLASS: Readonly<Record<TableName, TableClass>> = {
   live_pending_removals: 'non-derived',
   live_pending_removal_events: 'non-derived',
   live_pending_removal_reconcile: 'non-derived',
+  live_pending_removal_retention_epoch: 'non-derived',
   accounts: 'non-derived',
   web_sessions: 'non-derived',
   oauth_states: 'non-derived',
