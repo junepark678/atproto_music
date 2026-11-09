@@ -33,10 +33,12 @@ import { globalArtistCounts, globalTrackCounts } from '../do/read/range-stats';
 import { visibleScrobblesFrom } from '../do/read/visibility';
 import {
   matchedArtistKeys,
+  matchedArtistMbids,
   matchedEntityMbid,
   matchedRecordingKeys,
   matchedRecordingMbid,
   matchedReleaseKeys,
+  matchedReleaseMbids,
 } from '../musicbrainz/store';
 import { images, type LfmDocument, type LfmElement, type LfmValue, leaf, lfmOk, list, node } from './encode';
 import { LastfmError } from './errors';
@@ -114,20 +116,23 @@ function forwardTrackMbid(deps: ModuleDeps, display: ScrobbleRowV2): string {
   );
 }
 
-function forwardArtistMbid(deps: ModuleDeps, display: ScrobbleRowV2): string {
-  const db = deps.db;
-  return firstArtistMbid(display.artist_mbids) || matchedEntityMbid(db, 'artist', display.artist_key) || '';
+function forwardArtistMbid(
+  deps: ModuleDeps,
+  display: ScrobbleRowV2,
+  consensus = matchedEntityMbid(deps.db, 'artist', display.artist_key),
+): string {
+  return firstArtistMbid(display.artist_mbids) || consensus || '';
 }
 
-function forwardAlbumMbid(db: ModuleDeps['db'], display: ScrobbleRowV2): string {
-  return (
-    display.release_mbid ||
-    matchedEntityMbid(db, 'release', {
-      artistKey: display.artist_key,
-      albumKey: display.album_key ?? '',
-    }) ||
-    ''
-  );
+function forwardAlbumMbid(
+  db: ModuleDeps['db'],
+  display: ScrobbleRowV2,
+  consensus = matchedEntityMbid(db, 'release', {
+    artistKey: display.artist_key,
+    albumKey: display.album_key ?? '',
+  }),
+): string {
+  return display.release_mbid || consensus || '';
 }
 
 function enrichedTrackWhere(call: LastfmCall, mbid: string): Where | null {
@@ -140,9 +145,13 @@ function enrichedTrackWhere(call: LastfmCall, mbid: string): Where | null {
 }
 
 function enrichedArtistKey(call: LastfmCall, mbid: string): string | null {
-  const rows = matchedArtistKeys(call.deps.db, mbid).map((artistKey) => {
+  const keys = matchedArtistKeys(call.deps.db, mbid);
+  const consensuses = matchedArtistMbids(call.deps.db, keys);
+  const rows = keys.map((artistKey) => {
     const display = newest(call.deps, { sql: 's.artist_key=?', params: [artistKey] });
-    return display && !firstArtistMbid(display.artist_mbids) && forwardArtistMbid(call.deps, display) === mbid
+    return display &&
+      !firstArtistMbid(display.artist_mbids) &&
+      forwardArtistMbid(call.deps, display, consensuses.get(artistKey) ?? null) === mbid
       ? display
       : null;
   });
@@ -170,10 +179,17 @@ function enrichedAlbumWhere(call: LastfmCall, mbid: string): Where | null {
        ) SELECT * FROM ranked WHERE rn=1`,
     JSON.stringify(keys),
   );
+  const consensusKeys = displays.map((row) => ({ artistKey: row.artist_key, albumKey: row.album_key ?? '' }));
+  const consensuses = matchedReleaseMbids(call.deps.db, consensusKeys);
   const display = newestOf(
-    displays.map((row) =>
-      row.album !== null && !row.release_mbid && forwardAlbumMbid(call.deps.db, row) === mbid ? row : null,
-    ),
+    displays.map((row) => {
+      const key = JSON.stringify([row.artist_key, row.album_key ?? '']);
+      return row.album !== null &&
+        !row.release_mbid &&
+        forwardAlbumMbid(call.deps.db, row, consensuses.get(key) ?? null) === mbid
+        ? row
+        : null;
+    }),
   );
   return display?.album_key
     ? { sql: ALBUM_GROUP, params: [display.album_artist_key ?? display.artist_key, display.album_key] }

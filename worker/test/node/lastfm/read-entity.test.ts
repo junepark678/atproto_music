@@ -639,11 +639,60 @@ it('batches candidate albums sharing an artist without rescanning that artist pe
   const spy = vi.spyOn(app.db, 'all');
   const result = await get(app, { method: 'album.getInfo', mbid: M });
   const queries = spy.mock.calls.filter(([sql]) => sql.includes('WITH mk AS'));
+  const consensusQueries = spy.mock.calls.filter(([sql]) =>
+    sql.includes('SELECT artist_key AS artistKey,album_key AS albumKey,release_mbid AS value'),
+  );
   spy.mockRestore();
   expect(result.status).toBe(200);
   expect(result.body.album.playcount).toBe('2');
   expect(queries).toHaveLength(1);
+  expect(consensusQueries).toHaveLength(1);
   const [sql, ...params] = queries[0]!;
   const plan = app.db.all<{ detail: string }>(`EXPLAIN QUERY PLAN ${sql}`, ...params);
   expect(plan.some((row) => row.detail.includes('SEARCH s USING INDEX scrobbles_artist_global'))).toBe(false);
+});
+
+it('batches artist consensus across 1,000 candidate artists with bounded SQL growth', async () => {
+  const app = await entityApp();
+  const base = app.db.one<Record<string, SqlParam>>("SELECT * FROM scrobbles WHERE rkey='r01'")!;
+  const columns = Object.keys(base);
+  const insert = `INSERT INTO scrobbles(${columns.join(',')}) VALUES(${columns.map(() => '?').join(',')})`;
+  app.db.tx(() => {
+    for (let i = 0; i < 1_000; i++) {
+      const key = `candidate-artist-${i}`;
+      const row = {
+        ...base,
+        uri: `at://${ALICE}/${SCROBBLE}/artist${i}`,
+        rkey: `artist${i}`,
+        artist: key,
+        artist_key: key,
+        album_artist: key,
+        album_artist_key: key,
+      };
+      app.db.run(insert, ...columns.map((column) => row[column as keyof typeof row]));
+      app.db.run(
+        "INSERT INTO mb_tracks(artist_key,track_key,album_key,status,artist_mbids,created_at_ms) VALUES(?,?,?,'matched',?,1)",
+        key,
+        base.track_key!,
+        base.album_key!,
+        JSON.stringify([M]),
+      );
+    }
+  });
+  const allSpy = vi.spyOn(app.db, 'all');
+  const oneSpy = vi.spyOn(app.db, 'one');
+  const result = await get(app, { method: 'artist.getInfo', mbid: M });
+  const consensusQueries = allSpy.mock.calls.filter(([sql]) =>
+    sql.includes('SELECT m.artist_key AS artistKey,j.value AS value'),
+  );
+  const [consensusSql, ...consensusParams] = consensusQueries[0]!;
+  const totalStatements = allSpy.mock.calls.length + oneSpy.mock.calls.length;
+  allSpy.mockRestore();
+  oneSpy.mockRestore();
+  expect(result.status).toBe(200);
+  expect(result.body.artist.stats.playcount).toBe('1');
+  expect(consensusQueries).toHaveLength(1);
+  expect(totalStatements).toBeLessThanOrEqual(1_020);
+  const plan = app.db.all<{ detail: string }>(`EXPLAIN QUERY PLAN ${consensusSql}`, ...consensusParams);
+  expect(plan.some((row) => row.detail.includes('SEARCH m'))).toBe(true);
 });

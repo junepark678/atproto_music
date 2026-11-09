@@ -11,9 +11,12 @@ import {
   enqueueTrack,
   loveReviveJobs,
   matchedArtistKeys,
+  matchedArtistMbids,
+  matchedEntityMbid,
   matchedRecordingKeys,
   matchedRecordingMbid,
   matchedReleaseKeys,
+  matchedReleaseMbids,
   recordingByMbid,
   seedHistoricalTracks,
   stageLoveReviveJob,
@@ -66,8 +69,38 @@ describe('MusicBrainz storage', () => {
       ]);
       expect(matchedArtistKeys(db, artist)).toEqual(['a', 'b']);
       expect(matchedReleaseKeys(db, release)).toEqual([{ artistKey: 'a', albumKey: 'x' }]);
+      expect(matchedArtistMbids(db, ['a', 'b', 'missing'])).toEqual(
+        new Map([
+          ['a', artist],
+          ['b', artist],
+          ['missing', null],
+        ]),
+      );
+      expect(
+        matchedReleaseMbids(db, [
+          { artistKey: 'a', albumKey: 'x' },
+          { artistKey: 'missing', albumKey: '' },
+        ]),
+      ).toEqual(
+        new Map([
+          [JSON.stringify(['a', 'x']), release],
+          [JSON.stringify(['missing', '']), null],
+        ]),
+      );
       for (const read of [matchedRecordingKeys, matchedArtistKeys, matchedReleaseKeys])
         expect(read(db, 'bad')).toEqual([]);
+      expect(matchedArtistMbids(db, ['a'])).toEqual(new Map([['a', artist]]));
+      expect(matchedEntityMbid(db, 'artist', 'a')).toBe(artist);
+
+      db.run(
+        "INSERT INTO mb_tracks(artist_key,track_key,album_key,status,artist_mbids,release_mbid,created_at_ms) VALUES('a','other','x','matched',?,?,4)",
+        JSON.stringify([null, 'invalid', release]),
+        'not-a-uuid',
+      );
+      expect(matchedArtistMbids(db, ['a']).get('a')).toBeNull();
+      expect(matchedReleaseMbids(db, [{ artistKey: 'a', albumKey: 'x' }]).get(JSON.stringify(['a', 'x']))).toBe(
+        release,
+      );
     } finally {
       db.close();
     }
