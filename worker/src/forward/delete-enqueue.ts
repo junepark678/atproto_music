@@ -22,8 +22,14 @@ export function hasCanonicalListenSurvivor(
     // Only tombstones for this exact projected incarnation are removal intent.
     // In particular, a replacement tombstone for an older CID must not hide a
     // newly recreated row at the same AT URI.
-    const current = db.one<{ cid: string; listened_at: string; artist_key: string; track_key: string }>(
-      'SELECT cid,listened_at,artist_key,track_key FROM scrobbles WHERE did=? AND uri=?',
+    const current = db.one<{
+      cid: string;
+      listened_at: string;
+      artist_key: string;
+      track_key: string;
+      record_uri: string | null;
+    }>(
+      'SELECT cid,listened_at,artist_key,track_key,record_uri FROM scrobbles WHERE did=? AND uri=?',
       args.did,
       row.uri,
     );
@@ -34,21 +40,21 @@ export function hasCanonicalListenSurvivor(
     // Tombstone identity alone is not enough: replacement tombstones name the
     // new CID but carry the old listen tuple. Only matching removal intent can
     // hide a row, and a later accepted present proof clears that intent.
-    return (
-      db.one(
-        `SELECT 1 FROM linked_pull_tombstones WHERE did=? AND kind='listen'
-       AND identity_key IN (?,?,?,?,?) AND listen_second=? AND artist_key=? AND track_key=? LIMIT 1`,
-        args.did,
-        `uri:${row.uri}:${current.cid}`,
-        `live:${row.uri}`,
-        `live:${row.uri}:${current.cid}`,
-        `single-replaced:${row.uri}:${current.cid}`,
-        `batch-replaced:${row.uri}:${current.cid}`,
-        exactSecond,
-        args.artistKey,
-        args.trackKey,
-      ) === null
+    const removal = db.one<{ identity_key: string }>(
+      `SELECT identity_key FROM linked_pull_tombstones WHERE did=? AND kind='listen'
+       AND identity_key IN (?,?,?,?,?,?) AND listen_second=? AND artist_key=? AND track_key=? LIMIT 1`,
+      args.did,
+      `uri:${row.uri}:${current.cid}`,
+      `uri:${row.uri}`,
+      `live:${row.uri}`,
+      `live:${row.uri}:${current.cid}`,
+      `single-replaced:${row.uri}:${current.cid}`,
+      `batch-replaced:${row.uri}:${current.cid}`,
+      exactSecond,
+      args.artistKey,
+      args.trackKey,
     );
+    return removal === null;
   });
 }
 

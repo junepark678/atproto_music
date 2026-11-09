@@ -66,7 +66,7 @@ import {
 import { enqueueTrack } from '../../musicbrainz/store';
 import { enqueueForwards } from '../../outbox/forward-enqueue';
 import { pullLoveAdmissionForUri, retirePullLoveAdmissionUri } from '../../sync/pull-love-admissions';
-import { tombstoneListen, tombstoneLove } from '../../sync/tombstones';
+import { archiveMatchingLiveListenTombstones, tombstoneListen, tombstoneLove } from '../../sync/tombstones';
 import type { Db } from '../db';
 import { advanceUser, bumpStatsVersion, isSuppressed, loadUser } from './account-state';
 import {
@@ -1221,8 +1221,6 @@ export function applyRecordProof(db: Db, proof: RecordProof, o: ApplyOptions): A
   const guard = guardRevision(db, uri);
   if (guard !== null && guard >= rev) return result('noop_older');
 
-  const priorState = readRecordState(db, uri);
-
   const applied = applyRecordTarget(
     db,
     {
@@ -1236,23 +1234,31 @@ export function applyRecordProof(db: Db, proof: RecordProof, o: ApplyOptions): A
     },
     o,
   );
-  if (
-    proof.state === 'present' &&
-    priorState?.state === 'absent' &&
-    (kind === 'scrobble' || kind === 'scrobbleBatch')
-  ) {
-    // A revision-guarded reappearance is a new current incarnation, even
-    // when the repository reuses the exact same CID. Retire URI-scoped
-    // historical removal intent so it cannot suppress this copy forever.
-    for (const prefix of ['uri:', 'live:', 'single-replaced:', 'batch-replaced:']) {
-      const keyPrefix = `${prefix}${uri}:`;
-      db.run(
-        `DELETE FROM linked_pull_tombstones WHERE did=? AND kind='listen'
-         AND substr(identity_key,1,length(?))=?`,
+  if (proof.state === 'present' && applied.outcome === 'applied' && (kind === 'scrobble' || kind === 'scrobbleBatch')) {
+    // Retire only the live removal intent for a successfully projected
+    // matching incarnation. Keep archived history for pull suppression and
+    // leave API removals active while their operation is outstanding.
+    const projected = db.all<{
+      uri: string;
+      cid: string;
+      listened_at: string;
+      artist_key: string;
+      track_key: string;
+    }>(
+      'SELECT uri,cid,listened_at,artist_key,track_key FROM scrobbles WHERE did=? AND (uri=? OR record_uri=?)',
+      did,
+      uri,
+      uri,
+    );
+    for (const listen of projected) {
+      archiveMatchingLiveListenTombstones(db, {
         did,
-        keyPrefix,
-        keyPrefix,
-      );
+        uri: listen.uri,
+        cid: listen.cid,
+        second: Math.floor(Date.parse(listen.listened_at) / 1000),
+        artistKey: listen.artist_key,
+        trackKey: listen.track_key,
+      });
     }
   }
   advanceUser(db, did, rev, o.nowNs);
