@@ -52,6 +52,7 @@
 import type { Random } from '@atmusic/core/deps';
 import type { ForwardKind, ForwardOutboxRow, LinkService } from '../app/rows';
 import type { Db } from '../do/db';
+import { touchLoveLane } from './love-lanes';
 
 const SECOND = 1_000;
 const MINUTE = 60 * SECOND;
@@ -378,7 +379,8 @@ export function resumeHeldRows(db: Db, linkId: string, now: number, generation?:
     db.one<{ generation: number }>('SELECT generation FROM linked_accounts WHERE id=?', linkId)?.generation;
   if (expected === undefined) return 0;
   return db.run(
-    `UPDATE forward_outbox SET state='queued',due_at=max(due_at,?),updated_at_ms=?
+    `UPDATE forward_outbox SET state='queued',due_at=max(due_at,?),updated_at_ms=?,
+       love_lane=CASE WHEN kind IN ('love','unlove') THEN NULL ELSE love_lane END
      WHERE link_id=? AND generation=? AND state='held'
        AND EXISTS (SELECT 1 FROM linked_accounts AS link WHERE link.id=? AND link.generation=?)`,
     now,

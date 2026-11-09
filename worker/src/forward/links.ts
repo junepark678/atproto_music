@@ -319,6 +319,7 @@ export function saveLink(deps: LinkDeps, input: SaveLinkInput): SaveLinkResult {
         now,
         now,
       );
+      db.run('DELETE FROM forward_love_lanes WHERE link_id=? AND generation=?', existing.id, existing.generation);
       db.run(
         `UPDATE linked_pull_state SET hold_reason=NULL,retry_at_ms=NULL,failures=0,listen_round_saturated=0,
           listen_round_upper_ms=NULL,listen_round_floor_ms=NULL,listen_round_page=NULL,page_cursor=NULL,
