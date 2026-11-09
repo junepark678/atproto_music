@@ -55,7 +55,7 @@ import { reasonText, type ScrobbleRow, validateScrobbleRecord } from '@atmusic/c
 import { MAX_INGEST_CBOR_BYTES, validateScrobbleBatchRecord } from '@atmusic/core/scrobble-batch';
 import { isTid } from '@atmusic/core/syntax';
 import { toStorage } from '@atmusic/core/timestamp';
-import { enqueueListenDelete } from '../../forward/delete-enqueue';
+import { enqueueListenDelete, hasCanonicalListenSurvivor } from '../../forward/delete-enqueue';
 import {
   admitForwardIdentity,
   admitProjectedIdentity,
@@ -266,17 +266,16 @@ function scrobbleVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, 
         priorIdentityKey !== identityKey
       ) {
         const priorSecond = BigInt(Math.floor(Date.parse(before.listened_at) / 1000)) * 1_000_000_000n;
-        const retained = db.one(
-          `SELECT 1 FROM scrobbles WHERE did=? AND artist_key=? AND track_key=?
-           AND listened_at>=? AND listened_at<? AND uri<>? LIMIT 1`,
-          t.did,
-          before.artist_key,
-          before.track_key,
-          toStorage(priorSecond),
-          toStorage(priorSecond + 1_000_000_000n),
-          t.uri,
-        );
-        if (retained === null) {
+        const removalScope = new Set([t.uri]);
+        if (
+          !hasCanonicalListenSurvivor(db, {
+            did: t.did,
+            listenedAt: Number(priorSecond / 1_000_000_000n),
+            artistKey: before.artist_key,
+            trackKey: before.track_key,
+            excluding: removalScope,
+          })
+        ) {
           tombstoneListen(db, {
             did: t.did,
             identity: `single-replaced:${t.uri}:${cid}`,
@@ -288,7 +287,7 @@ function scrobbleVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, 
           enqueueListenDelete(db, {
             did: t.did,
             identityKey: priorIdentityKey,
-            eventKey: `${priorIdentityKey}:${before.cid}`,
+            eventKey: `${priorIdentityKey}:${before.cid}:rev:${t.rev}`,
             listenedAt: Number(priorSecond / 1_000_000_000n),
             artistKey: before.artist_key,
             trackKey: before.track_key,
@@ -296,7 +295,7 @@ function scrobbleVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, 
             track: before.track,
             sourcePath: 'live',
             now,
-            excluding: new Set([before.uri]),
+            excluding: removalScope,
           });
         }
       }
@@ -444,6 +443,7 @@ function batchVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, o: 
       const priorByUri = new Map(prior.map((row) => [row.uri, row]));
       const now = Number(o.nowNs / 1_000_000n);
       if (o.forwarding) {
+        const removalScope = new Set(prior.map((old) => old.uri));
         const retainedIdentities = new Set(
           batch.listens.map((listen) => {
             const keys = musicKeyColumns(listen.row.artist, listen.row.track, listen.row.album);
@@ -457,17 +457,16 @@ function batchVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, o: 
           if (retainedIdentities.has(identityKey) || (old.listen_id !== null && excludedIds.has(old.listen_id)))
             continue;
           const second = BigInt(Math.floor(Date.parse(old.listened_at) / 1000)) * 1_000_000_000n;
-          const retained = db.one(
-            `SELECT 1 FROM scrobbles WHERE did=? AND artist_key=? AND track_key=?
-             AND listened_at>=? AND listened_at<? AND (record_uri IS NULL OR record_uri<>?) LIMIT 1`,
-            t.did,
-            old.artist_key,
-            old.track_key,
-            toStorage(second),
-            toStorage(second + 1_000_000_000n),
-            t.uri,
-          );
-          if (retained !== null) continue;
+          if (
+            hasCanonicalListenSurvivor(db, {
+              did: t.did,
+              listenedAt: Math.floor(Date.parse(old.listened_at) / 1000),
+              artistKey: old.artist_key,
+              trackKey: old.track_key,
+              excluding: removalScope,
+            })
+          )
+            continue;
           tombstoneListen(db, {
             did: t.did,
             identity: `batch-replaced:${old.uri}:${cid}`,
@@ -479,7 +478,7 @@ function batchVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, o: 
           enqueueListenDelete(db, {
             did: t.did,
             identityKey,
-            eventKey: `${identityKey}:${old.cid}`,
+            eventKey: `${identityKey}:${old.cid}:rev:${t.rev}`,
             listenedAt: Math.floor(Date.parse(old.listened_at) / 1000),
             artistKey: old.artist_key,
             trackKey: old.track_key,
@@ -487,7 +486,7 @@ function batchVerdict(db: Db, t: RecordTarget, cid: string, record: unknown, o: 
             track: old.track,
             sourcePath: 'live',
             now,
-            excluding: new Set([old.uri]),
+            excluding: removalScope,
           });
         }
       }
@@ -868,7 +867,7 @@ export function applyRecordTarget(db: Db, t: RecordTarget, o: ApplyOptions): Tar
         enqueueListenDelete(db, {
           did: t.did,
           identityKey,
-          eventKey: `${identityKey}:${listen.cid}`,
+          eventKey: `${identityKey}:${listen.cid}:rev:${t.rev}`,
           listenedAt: Math.floor(Date.parse(listen.listened_at) / 1000),
           artistKey: listen.artist_key,
           trackKey: listen.track_key,
@@ -1223,6 +1222,8 @@ export function applyRecordProof(db: Db, proof: RecordProof, o: ApplyOptions): A
   const guard = guardRevision(db, uri);
   if (guard !== null && guard >= rev) return result('noop_older');
 
+  const priorState = readRecordState(db, uri);
+
   const applied = applyRecordTarget(
     db,
     {
@@ -1236,6 +1237,25 @@ export function applyRecordProof(db: Db, proof: RecordProof, o: ApplyOptions): A
     },
     o,
   );
+  if (
+    proof.state === 'present' &&
+    priorState?.state === 'absent' &&
+    (kind === 'scrobble' || kind === 'scrobbleBatch')
+  ) {
+    // A revision-guarded reappearance is a new current incarnation, even
+    // when the repository reuses the exact same CID. Retire URI-scoped
+    // historical removal intent so it cannot suppress this copy forever.
+    for (const prefix of ['uri:', 'live:', 'single-replaced:', 'batch-replaced:']) {
+      const keyPrefix = `${prefix}${uri}:`;
+      db.run(
+        `DELETE FROM linked_pull_tombstones WHERE did=? AND kind='listen'
+         AND substr(identity_key,1,length(?))=?`,
+        did,
+        keyPrefix,
+        keyPrefix,
+      );
+    }
+  }
   advanceUser(db, did, rev, o.nowNs);
   return result(applied.outcome, applied.reason === undefined ? {} : { reason: applied.reason });
 }
