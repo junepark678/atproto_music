@@ -805,7 +805,7 @@ describe('migrate', () => {
         { version: 40, name: 'listenbrainz_delete_lookup_progress' },
         { version: 41, name: 'listenbrainz_delete_lookup_tie_fence' },
         { version: 42, name: 'listenbrainz_delete_lookup_page_boundary' },
-          { version: 43, name: 'forward_love_key_heads' },
+        { version: 43, name: 'forward_love_key_heads' },
         { version: 44, name: 'forward_love_lanes' },
       ]);
       expect(db.all('SELECT min_compatible_version FROM schema_compat')).toEqual([{ min_compatible_version: 2 }]);
