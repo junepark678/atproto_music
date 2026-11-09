@@ -215,7 +215,8 @@ export function insertOperation(db: Db, op: NewOperation, now: number): Operatio
       if (
         typeof record.artist === 'string' &&
         typeof record.track === 'string' &&
-        typeof record.recordingMbid === 'string'
+        typeof record.recordingMbid === 'string' &&
+        record.recordingMbid.trim() !== ''
       ) {
         try {
           const [artistKey, trackKeyValue] = trackKey(record.artist, record.track);

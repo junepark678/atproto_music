@@ -544,7 +544,8 @@ function advanceLoveRecordingHistory(db: Db): void {
       if (
         typeof value.artist !== 'string' ||
         typeof value.track !== 'string' ||
-        typeof value.recordingMbid !== 'string'
+        typeof value.recordingMbid !== 'string' ||
+        value.recordingMbid.trim() === ''
       )
         continue;
       try {
@@ -576,8 +577,9 @@ const MBID_OF = (column: string): string =>
   `CASE WHEN json_valid(${column}) THEN json_extract(${column}, '$.recordingMbid') END`;
 
 export const FORWARD_LOVE_RECORDING_LOOKUP_SQL = `SELECT payload_json FROM forward_outbox INDEXED BY forward_outbox_love_recording_lookup
-  WHERE link_id=? AND generation=? AND state IN ('queued','sent','ignored','failed') AND kind='love'
+  WHERE link_id=? AND generation=? AND kind='love'
     AND love_artist_key=? AND love_track_key=? AND ${MBID_OF('payload_json')} IS NOT NULL
+    AND json_type(payload_json,'$.recordingMbid')='text' AND trim(json_extract(payload_json,'$.recordingMbid'))<>''
     AND (created_at_ms < ? OR (created_at_ms = ? AND rowid < ?))
   ORDER BY created_at_ms DESC,rowid DESC LIMIT 1`;
 export const LOVE_RECORDING_HISTORY_LOOKUP_SQL = `SELECT recording_mbid FROM forward_love_recording_history INDEXED BY forward_love_recording_history_latest
